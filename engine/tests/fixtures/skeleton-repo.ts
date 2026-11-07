@@ -25,11 +25,11 @@
  *   arm it for attestation (the `declared-artifact-attested` arm).
  *
  * The State File is first proven loadable by the production parser WITHOUT the
- * G2 fields (today's wire passes unknown fields through untouched), then the
- * G2 fields are added as raw JSON: `export_bindings`, and — when a scenario
- * seeds them — `skeletons` records. The tests read every engine output as
- * unknown JSON and narrow it through the CT-1 types here, so they compile and
- * fail by assertion against an engine that does not yet write skeletons.
+ * G2 fields, then the G2 fields are added in their raw wire form:
+ * `export_bindings`, and — when a scenario seeds them — `skeletons` records.
+ * The tests read every engine output as unknown JSON and decode it here into
+ * the CT-1 types, so they depend only on the wire shape, never on engine
+ * internals or the engine's own serializer.
  *
  * Canonical skeleton bytes are rendered here from the CT-1 format (AD-8):
  * the test-side oracle every written skeleton is compared against.
@@ -463,6 +463,10 @@ export type SkeletonRepoOptions = Readonly<{
   tsTypesText?: string;
 }>;
 
+/** The State File as the JSON object on disk: its fields still unknown until
+ *  `decodeStateFile` reads the slices a test asserts on. */
+export type RawStateFile = Record<string, unknown>;
+
 export type SkeletonRepo = Readonly<{
   root: string;
   statePath: string;
@@ -470,10 +474,10 @@ export type SkeletonRepo = Readonly<{
   read: (path: string) => string | null;
   write: (path: string, text: string) => void;
   remove: (path: string) => void;
-  /** The current raw State File, as unknown JSON. */
-  rawState: () => Record<string, unknown>;
+  /** The current raw State File. */
+  rawState: () => RawStateFile;
   /** Replace the State File with an edited copy of its raw JSON. */
-  rewriteState: (edit: (raw: Record<string, unknown>) => Record<string, unknown>) => void;
+  rewriteState: (edit: (raw: RawStateFile) => RawStateFile) => void;
   /** Commit every workspace change, so the next registration's baseline starts clean. */
   commit: (message: string) => void;
   /** Write the contract Tasks' frozen sources, as their agents would in the contract Wave. */
@@ -676,15 +680,15 @@ function initialFiles(stage: SkeletonRepoStage, tsTypesText: string): Readonly<R
   return stage === "contract-wave" ? {} : { ...contractSources(tsTypesText), ...WAVE_START_FILES };
 }
 
-/** The State File of `stage`, proven loadable by today's parser before the G2
- *  fields are added as raw JSON. */
+/** The State File of `stage`, proven loadable by the production parser before
+ *  the G2 fields are added in their raw wire form. */
 function stateFileOf(
   stage: SkeletonRepoStage,
   tsTypesText: string,
   bindings: readonly RawExportBinding[],
-  skeletons: readonly unknown[] | undefined,
-): Record<string, unknown> {
-  const proven = JSON.parse(JSON.stringify({ spec_trace_version: 2, ...graph(stage, tsTypesText) })) as Record<string, unknown>;
+  skeletons: readonly SkeletonRecord[] | undefined,
+): RawStateFile {
+  const proven = parseRawStateFile(JSON.stringify({ spec_trace_version: 2, ...graph(stage, tsTypesText) }));
   protectedGraphFixture(proven);
   return {
     ...proven,
@@ -724,13 +728,13 @@ function initRepository(root: string, stage: SkeletonRepoStage, tsTypesText: str
 
 /** The raw State File at `statePath`: replaced whole on write, read as unknown JSON. */
 const stateFileAt = (statePath: string) => Object.freeze({
-  writeState: (value: Record<string, unknown>): void => {
+  writeState: (value: RawStateFile): void => {
     mkdirSync(dirname(statePath), { recursive: true });
     // StateManager leaves the State File read-only; a fixture rewrite replaces it.
     rmSync(statePath, { force: true });
     writeFileSync(statePath, `${JSON.stringify(value, null, 2)}\n`);
   },
-  readState: (): Record<string, unknown> => JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>,
+  readState: (): RawStateFile => parseRawStateFile(readFileSync(statePath, "utf8")),
 });
 
 /** Point the environment at the fixture repository, saving what it replaces. */
@@ -770,7 +774,7 @@ export function skeletonRepo(options: SkeletonRepoOptions = {}): SkeletonRepo {
     write,
     remove: (path: string) => rmSync(join(root, path), { force: true }),
     rawState: readState,
-    rewriteState: (edit: (value: Record<string, unknown>) => Record<string, unknown>) => writeState(edit(readState())),
+    rewriteState: (edit: (value: RawStateFile) => RawStateFile) => writeState(edit(readState())),
     commit,
     writeContractSources: () => {
       for (const [path, text] of Object.entries(contractSources(tsTypesText))) write(path, text);
@@ -780,9 +784,8 @@ export function skeletonRepo(options: SkeletonRepoOptions = {}): SkeletonRepo {
         if (!existsSync(join(root, path))) write(path, text);
       }
       commit("contract Wave 1 frozen");
-      const stored = readState();
-      const skeletons = Array.isArray(stored.skeletons) ? stored.skeletons : undefined;
-      writeState(stateFileOf("implementation-wave", tsTypesText, bindings, skeletons));
+      const { skeletons } = decodeStateFile(readState());
+      writeState(stateFileOf("implementation-wave", tsTypesText, bindings, skeletons ?? undefined));
     },
   });
 }
@@ -812,7 +815,7 @@ export function seededRecord(
 
 /** The implementation spawn the engine owes `taskId` now: its marker prompt
  *  with the retry or attestation appendix the dispatch derivation adds. */
-export function spawnFor(raw: Record<string, unknown>, taskId: string): TaskExecutionSpawn {
+export function spawnFor(raw: RawStateFile, taskId: string): TaskExecutionSpawn {
   const parsed = protectedGraphFixture(raw);
   const owed = parsed.tasks.find(({ id }) => id === taskId);
   if (owed === undefined) throw new Error(`fixture: no Task ${taskId}`);
@@ -827,7 +830,7 @@ export function spawnFor(raw: Record<string, unknown>, taskId: string): TaskExec
 }
 
 // ---------------------------------------------------------------------------
-// Narrowing engine output (unknown JSON → CT-1 types)
+// Decoding engine output (unknown JSON → CT-1 types)
 // ---------------------------------------------------------------------------
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -873,44 +876,6 @@ function asSkeletonRecord(value: unknown): SkeletonRecord | null {
   return { path, contract, language, origin, engineSha256, typesSha256, stale: parsedStale };
 }
 
-/** Every skeleton record the State File holds, by path. */
-export function recordedSkeletons(raw: Record<string, unknown>): ReadonlyMap<string, SkeletonRecord> {
-  const records = Array.isArray(raw.skeletons) ? raw.skeletons : [];
-  return new Map(records.flatMap((entry) => {
-    const record = asSkeletonRecord(entry);
-    return record === null ? [] : [[record.path, record] as const];
-  }));
-}
-
-/** The skeleton outcomes the State File recorded on `taskId`, by path. */
-export function recordedOutcomes(raw: Record<string, unknown>, taskId: string): ReadonlyMap<string, SkeletonOutcome> {
-  const tasks = Array.isArray(raw.tasks) ? raw.tasks : [];
-  const owner = tasks.find((entry) => isRecord(entry) && entry.id === taskId);
-  const outcomes = isRecord(owner) && Array.isArray(owner.skeleton_outcomes) ? owner.skeleton_outcomes : [];
-  return new Map(outcomes.flatMap((entry) => {
-    if (!isRecord(entry) || typeof entry.path !== "string") return [];
-    const outcome = asSkeletonOutcome(entry.outcome);
-    return outcome === null ? [] : [[entry.path, outcome] as const];
-  }));
-}
-
-/** Every object anywhere inside `value` that `pick` accepts, depth-first. */
-function collect<T>(value: unknown, pick: (candidate: Record<string, unknown>) => T | null): readonly T[] {
-  const found: T[] = [];
-  const visit = (node: unknown): void => {
-    if (Array.isArray(node)) {
-      node.forEach(visit);
-      return;
-    }
-    if (!isRecord(node)) return;
-    const picked = pick(node);
-    if (picked !== null) found.push(picked);
-    Object.values(node).forEach(visit);
-  };
-  visit(value);
-  return found;
-}
-
 const VIOLATION_REASONS: readonly ViolationReason[] = [
   "deleted",
   "renamed",
@@ -937,36 +902,133 @@ function asAliasProblem(value: unknown): Extract<ResolutionProblem, { alias: str
   return { kind: value.kind, alias, path, typesFile };
 }
 
-/** One stored Task of the raw State File. */
-export function storedTask(raw: Record<string, unknown>, taskId: string): Record<string, unknown> {
-  const tasks = Array.isArray(raw.tasks) ? raw.tasks : [];
-  const found = tasks.find((entry) => isRecord(entry) && entry.id === taskId);
-  if (!isRecord(found)) throw new Error(`fixture: the State File holds no Task ${taskId}`);
+/** Every object anywhere inside `value` that `pick` accepts, depth-first. */
+function collect<T>(value: unknown, pick: (candidate: Record<string, unknown>) => T | null): readonly T[] {
+  const found: T[] = [];
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (!isRecord(node)) return;
+    const picked = pick(node);
+    if (picked !== null) found.push(picked);
+    Object.values(node).forEach(visit);
+  };
+  visit(value);
   return found;
 }
 
-/** The kinds of every failure of `taskId`'s stored Proof (empty when it has none). */
-export function proofFailureKinds(raw: Record<string, unknown>, taskId: string): readonly string[] {
-  const proof = storedTask(raw, taskId).proof;
-  const failures = isRecord(proof) && Array.isArray(proof.failures) ? proof.failures : [];
-  return failures.flatMap((failure) => (isRecord(failure) && typeof failure.kind === "string" ? [failure.kind] : []));
+// ---------------------------------------------------------------------------
+// The State File decoder: one boundary for every slice the tests read
+// ---------------------------------------------------------------------------
+
+/** One stored Task, decoded: its fields as written (for field-level
+ *  assertions) and the G2 slices the tests compare. */
+type StoredTaskSlices = Readonly<{
+  fields: RawStateFile;
+  outcomes: ReadonlyMap<string, SkeletonOutcome>;
+  proofFailureKinds: readonly string[];
+  contractViolations: ReadonlyMap<string, readonly ConformanceViolation[]>;
+}>;
+
+/** The State File slices the fixture reads, each in its CT-1 type. */
+type StateFileSlices = Readonly<{
+  /** Null when the State File carries no `skeletons` key. */
+  skeletons: readonly SkeletonRecord[] | null;
+  tasks: ReadonlyMap<string, StoredTaskSlices>;
+}>;
+
+/** A State File that is not the shape its wire defines fails the test loudly:
+ *  a malformed slice is an engine defect, never a slice to skip. */
+const malformed = (what: string, value: unknown): never => {
+  throw new Error(`fixture: the State File's ${what} is malformed: ${JSON.stringify(value)}`);
+};
+
+/** `value` decoded by `decode`, or a refusal naming `what`. */
+const decoded = <T>(decode: (value: unknown) => T | null, value: unknown, what: string): T =>
+  decode(value) ?? malformed(what, value);
+
+/** An optional array field's entries: none when the field is absent. */
+const entriesOf = (value: unknown, what: string): readonly unknown[] =>
+  value === undefined ? [] : Array.isArray(value) ? value : malformed(what, value);
+
+/** The State File's bytes as its JSON object. */
+function parseRawStateFile(text: string): RawStateFile {
+  const parsed: unknown = JSON.parse(text);
+  return isRecord(parsed) ? parsed : malformed("top level", parsed);
 }
+
+/** The failures of a stored Proof: none when the Task carries no Proof. */
+function proofFailuresOf(proof: unknown, taskId: string): readonly Readonly<{ kind: string; failure: RawStateFile }>[] {
+  if (proof === undefined) return [];
+  if (!isRecord(proof)) return malformed(`Task ${taskId} proof`, proof);
+  return entriesOf(proof.failures, `Task ${taskId} proof failures`).map((failure) =>
+    isRecord(failure) && typeof failure.kind === "string"
+      ? { kind: failure.kind, failure }
+      : malformed(`Task ${taskId} proof failure`, failure));
+}
+
+function decodeStoredTask(value: unknown): readonly [string, StoredTaskSlices] {
+  if (!isRecord(value) || typeof value.id !== "string") return malformed("Task", value);
+  const id = value.id;
+  const outcomes = entriesOf(value.skeleton_outcomes, `Task ${id} skeleton_outcomes`).map((entry) =>
+    isRecord(entry) && typeof entry.path === "string"
+      ? [entry.path, decoded(asSkeletonOutcome, entry.outcome, `Task ${id} skeleton outcome at ${entry.path}`)] as const
+      : malformed(`Task ${id} skeleton outcome`, entry));
+  const failures = proofFailuresOf(value.proof, id);
+  const violated = failures.filter(({ kind }) => kind === "declared-artifact-contract-violated").map(({ failure }) =>
+    typeof failure.artifact === "string" && Array.isArray(failure.violations)
+      ? [
+          failure.artifact,
+          failure.violations.map((entry) => decoded(asConformanceViolation, entry, `Task ${id} violation in ${String(failure.artifact)}`)),
+        ] as const
+      : malformed(`Task ${id} contract-violated failure`, failure));
+  return [id, {
+    fields: value,
+    outcomes: new Map(outcomes),
+    proofFailureKinds: failures.map(({ kind }) => kind),
+    contractViolations: new Map(violated),
+  }];
+}
+
+/** Decode the State File slices the fixture reads, refusing any malformed one. */
+function decodeStateFile(raw: RawStateFile): StateFileSlices {
+  return {
+    skeletons: raw.skeletons === undefined
+      ? null
+      : entriesOf(raw.skeletons, "skeletons").map((entry) => decoded(asSkeletonRecord, entry, "skeleton record")),
+    tasks: new Map(entriesOf(raw.tasks, "tasks").map(decodeStoredTask)),
+  };
+}
+
+/** The decoded slices of `taskId`. */
+function taskSlices(raw: RawStateFile, taskId: string): StoredTaskSlices {
+  const found = decodeStateFile(raw).tasks.get(taskId);
+  if (found === undefined) throw new Error(`fixture: the State File holds no Task ${taskId}`);
+  return found;
+}
+
+/** Every skeleton record the State File holds, by path. */
+export function recordedSkeletons(raw: RawStateFile): ReadonlyMap<string, SkeletonRecord> {
+  return new Map((decodeStateFile(raw).skeletons ?? []).map((record) => [record.path, record] as const));
+}
+
+/** The skeleton outcomes the State File recorded on `taskId`, by path. */
+export const recordedOutcomes = (raw: RawStateFile, taskId: string): ReadonlyMap<string, SkeletonOutcome> =>
+  taskSlices(raw, taskId).outcomes;
+
+/** One stored Task of the raw State File, as written. */
+export const storedTask = (raw: RawStateFile, taskId: string): RawStateFile => taskSlices(raw, taskId).fields;
+
+/** The kinds of every failure of `taskId`'s stored Proof (empty when it has none). */
+export const proofFailureKinds = (raw: RawStateFile, taskId: string): readonly string[] =>
+  taskSlices(raw, taskId).proofFailureKinds;
 
 /** Every `declared-artifact-contract-violated` failure of `taskId`'s stored
  *  Proof: its violations, by artifact. */
-export function contractViolations(raw: Record<string, unknown>, taskId: string): ReadonlyMap<string, readonly ConformanceViolation[]> {
-  const proof = storedTask(raw, taskId).proof;
-  const failures = isRecord(proof) && Array.isArray(proof.failures) ? proof.failures : [];
-  return new Map(failures.flatMap((failure) => {
-    if (!isRecord(failure) || failure.kind !== "declared-artifact-contract-violated") return [];
-    if (typeof failure.artifact !== "string" || !Array.isArray(failure.violations)) return [];
-    const violations = failure.violations.flatMap((entry) => {
-      const violation = asConformanceViolation(entry);
-      return violation === null ? [] : [violation];
-    });
-    return [[failure.artifact, violations] as const];
-  }));
-}
+export const contractViolations = (raw: RawStateFile, taskId: string): ReadonlyMap<string, readonly ConformanceViolation[]> =>
+  taskSlices(raw, taskId).contractViolations;
 
 /** A violation's subject and reason, the pair every assertion compares. */
 export const subjectAndReason = ({ subject, reason }: ConformanceViolation): string => `${subject}: ${reason}`;

@@ -98,6 +98,20 @@ every consumer of the decision takes the parsed value.**
   - `.kt`, `.kts` and `.scala` are `jvm-non-java`. Everything else is `other-extension`.
   - Results are frozen. The function is pure and lives under `engine/src/core/skeleton/`, which the purity
     linter lists (INV-2).
+- **Refinements of plan AD-15.** AD-15 named only the TypeScript extensions `.ts`, `.tsx`, `.mts` and `.cts`,
+  a Java target with `package` and `className`, and three unsupported reasons (other extension, Java outside a
+  `src/main/java/` root, Kotlin or Scala). The shipped rule refines AD-15 with five additions. Each one narrows
+  or makes explicit what AD-15 left open, and none widens what is supported:
+  1. `.d.ts`, `.d.mts` and `.d.cts` declaration files are excluded from TypeScript, so they are
+     `other-extension`.
+  2. A fourth reason, `java-invalid-name`, separates a Java path whose package segment or class name cannot be
+     spliced into source from one outside the main root.
+  3. Every Java package segment and the class name are validated as Java identifiers that are not reserved
+     words, contextual `_` or literals (`JAVA_RESERVED` and `isJavaName` in `language.ts`).
+  4. Both target variants and `UnsupportedTarget` carry `kind` (`"supported"` or `"unsupported"`) and `path`
+     fields, so a consumer can discriminate the result and needs no second argument.
+  5. `JavaSkeletonTarget.package` is nullable (`string | null`), and `null` is the default package. AD-15's
+     interface sketch typed it as `string`.
 - **Sites that decide (INV-6 siblings), all calling `skeletonLanguageOf`:**
   - `engine/src/core/skeleton/outcomes.ts`: AD-13 step 4, a bound path that parses as unsupported is
     `unsupported-language` and carries the reason.

@@ -173,18 +173,28 @@ describe("readTsTypesSurface: frozen ADTs", () => {
     ]);
   });
 
-  it("reads the G2 skeleton types file itself: a function alias, a brand and a discriminated union", () => {
+  it("reads the G2 skeleton types file itself: function aliases and a discriminated union", () => {
     const path = "engine/src/core/skeleton/types.ts";
     const surface = typesOf(readFileSync(resolve(REPO_ROOT, path), "utf-8"), path);
     expect(aliasNamed(surface, "ParseIdentifierFn")?.shape).toEqual({ kind: "function", generic: false, parameterCount: 1 });
     expect(aliasNamed(surface, "ResolveBindingsFn")?.shape).toEqual({ kind: "function", generic: false, parameterCount: 2 });
-    expect(aliasNamed(surface, "BoundExport")?.shape).toEqual({ kind: "not-a-function" });
-    expect(surface.adts).toContainEqual({ kind: "brand", name: "Identifier" });
+    expect(aliasNamed(surface, "BindingTaskView")?.shape).toEqual({ kind: "not-a-function" });
     const problems = surface.adts.find((adt): adt is Extract<FrozenAdt, { kind: "discriminated-union" }> =>
       adt.kind === "discriminated-union" && adt.name === "BindingProblem");
     expect(problems?.discriminant).toBe("kind");
     expect(problems?.tags).toContain("unsafe-path");
-    expect(problems?.tags).toHaveLength(12);
+    expect(problems?.tags).toContain("name-collides-with-alias");
+    expect(problems?.tags).toHaveLength(13);
+  });
+
+  it("reads the persisted leaf: the Identifier and ContractId brands and the outcome union", () => {
+    const path = "engine/src/core/skeleton/persisted.ts";
+    const surface = typesOf(readFileSync(resolve(REPO_ROOT, path), "utf-8"), path);
+    expect(surface.adts).toContainEqual({ kind: "brand", name: "Identifier" });
+    expect(surface.adts).toContainEqual({ kind: "brand", name: "ContractId" });
+    const outcomes = surface.adts.find((adt): adt is Extract<FrozenAdt, { kind: "discriminated-union" }> =>
+      adt.kind === "discriminated-union" && adt.name === "SkeletonOutcome");
+    expect(outcomes?.tags).toHaveLength(5);
   });
 });
 

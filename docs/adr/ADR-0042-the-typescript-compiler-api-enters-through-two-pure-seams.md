@@ -5,6 +5,7 @@ Accepted (2026-10-23). Shipped with the G5b owner-enforcement feature
 (`.claude/specs/2026-10-21-g5b-owner-enforcement/spec.md`, NFR-003, FR-011; plan
 `.claude/plans/2026-10-21-g5b-owner-enforcement.md`, AD-12 and INV-1). This decision deviates from
 interview answer Q4d. The deviation is recorded below.
+Amended by ADR-0053 (a third parse-only seam).
 
 ## Context
 G5b owner verification has two jobs that need TypeScript parsing:

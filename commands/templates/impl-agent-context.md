@@ -75,7 +75,7 @@ Regression execution and new-test creation are separate obligations. Follow each
 
 {implementation_retry_context}
 
-When this is an exact `LOOM_IMPLEMENTATION_RETRY_CONTEXT` appendix, it is exact attempt-2 admission evidence and the failure kinds are the previous attempt's deterministic diagnostics. The spawn gate validates these bytes against protected settlement history before minting attempt authority. Address the diagnostics during this attempt. When it says `None — semantic attempt 1.`, no retry admission evidence exists.
+When this is an exact `LOOM_IMPLEMENTATION_RETRY_CONTEXT` appendix, it is exact attempt-2 admission evidence and the failure kinds are the previous attempt's deterministic diagnostics. The spawn gate validates these bytes against protected settlement history before minting attempt authority. Address the diagnostics during this attempt. When the previous attempt was refused for contract conformance, the appendix continues after its `LOOM_IMPLEMENTATION_RETRY_CONTEXT` line with a "Declared-artifact contract violations (declared-artifact-contract-violated)" section. It lists each violated file, then each violation's subject, reason (`deleted`, `renamed`, `retyped`, `still-unimplemented`, `shadows-frozen-adt` or `re-lists-frozen-variants`) and remedy. Fix every listed violation before completing. A line "and N more violations not shown" means the receipt held only the first violations of that file, so re-check the whole file against the Frozen Signatures section below. When it says `None — semantic attempt 1.`, no retry admission evidence exists.
 
 ## Operator Note
 

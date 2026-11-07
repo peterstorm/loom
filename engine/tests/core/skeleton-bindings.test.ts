@@ -1,6 +1,6 @@
 /**
  * Unit and property tests for the `**Export bindings:**` plan grammar (AD-3):
- * `parseIdentifier`, `parseExportBindings`, `validateExportBindings`,
+ * `parseIdentifier`, `parseContractId`, `parseExportBindings`, `validateExportBindings`,
  * `renderExportBinding`, `bindingStampAgreement` and `renderBindingProblem`.
  * Every malformed shape and every graph-shape refusal is decided here; the
  * parse ∘ render round-trip is a property.
@@ -13,6 +13,7 @@ import { parsePlanExportBindings, parsePlanModels } from "../../src/core/parse-p
 import { checkPlanModelBindings, validateModelBindings, type ModelBindingDeps } from "../../src/handlers/helpers/validate-model-bindings";
 import {
   bindingStampAgreement,
+  parseContractId,
   parseExportBindings,
   parseIdentifier,
   renderBindingProblem,
@@ -119,6 +120,24 @@ describe("parseIdentifier", () => {
   });
 });
 
+describe("parseContractId", () => {
+  it("mints CT-<digits> contract ids", () => {
+    for (const raw of ["CT-1", "CT-42", "CT-007"]) expect(parseContractId(raw)).toEqual({ ok: true, value: raw });
+  });
+
+  it("refuses every other token", () => {
+    for (const raw of ["", "CT-", "ct-1", "CT1", "CT-1a", " CT-1", "CT-1 ", "CT--1", "XT-1"]) {
+      expect(parseContractId(raw), raw).toEqual({ ok: false, error: "invalid-contract-id" });
+    }
+  });
+
+  it("is a fixed point over the contract-id shape", () => {
+    fc.assert(fc.property(fc.stringMatching(/^CT-\d{1,4}$/), (raw) => {
+      expect(parseContractId(raw)).toEqual({ ok: true, value: raw });
+    }));
+  });
+});
+
 describe("parseExportBindings — grammar", () => {
   it("AS-001: records parseOrder: ParseOrderFn and priceOrder: PriceOrderFn against the file", () => {
     expect(parse("- `src/order/pricing.ts` — CT-1: parseOrder: ParseOrderFn, priceOrder: PriceOrderFn")).toEqual({
@@ -127,7 +146,7 @@ describe("parseExportBindings — grammar", () => {
     });
   });
 
-  it("reads every label in the section, in plan order, and accepts en dash and hyphen separators", () => {
+  it("reads every Export bindings label in the section, in plan order, and accepts en dash and hyphen separators", () => {
     const text = `## File Structure
 
 \`\`\`
@@ -182,6 +201,22 @@ Prose after the list.
     expect(parse(duplicate)).toEqual({ bindings: [], problems: [{ kind: "duplicate-name", path: "src/order/pricing.ts", name: "priceOrder" }] });
   });
 
+  it("refuses an export name equal to an alias on its line, naming the file and the name", () => {
+    const self = "- `src/a.ts` — CT-1: PriceOrderFn: PriceOrderFn";
+    expect(parse(self)).toEqual({ bindings: [], problems: [{ kind: "name-collides-with-alias", path: "src/a.ts", name: "PriceOrderFn" }] });
+    const crossed = "- `src/a.ts` — CT-1: a: BFn, BFn: CFn, CFn: AFn";
+    expect(parse(crossed)).toEqual({
+      bindings: [],
+      problems: [
+        { kind: "name-collides-with-alias", path: "src/a.ts", name: "BFn" },
+        { kind: "name-collides-with-alias", path: "src/a.ts", name: "CFn" },
+      ],
+    });
+    // Another line's alias is in another file's scope: no collision.
+    expect(parse("- `src/a.ts` — CT-1: a: BFn", "- `src/b.ts` — CT-1: BFn: CFn").problems).toEqual([]);
+    expect(validate(self)).toContainEqual({ kind: "name-collides-with-alias", path: "src/a.ts", name: "PriceOrderFn" });
+  });
+
   it("names every malformed shape with its reason", () => {
     const cases: readonly [string, BindingProblem][] = [
       ["- src/a.ts — CT-1: a: AFn", { kind: "malformed-entry", path: null, line: "- src/a.ts — CT-1: a: AFn", reason: "not-a-binding-line" }],
@@ -190,6 +225,8 @@ Prose after the list.
       ["- `src/a.ts`", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts`", reason: "missing-contract" }],
       ["- `src/a.ts` — a: AFn", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — a: AFn", reason: "missing-contract" }],
       ["- `src/a.ts` — ct-1: a: AFn", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — ct-1: a: AFn", reason: "missing-contract" }],
+      ["- `src/a.ts` — CT-1x: a: AFn", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — CT-1x: a: AFn", reason: "missing-contract" }],
+      ["- `src/a.ts` — CT-1 a: AFn", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — CT-1 a: AFn", reason: "missing-contract" }],
       ["- `src/a.ts` — CT-1", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — CT-1", reason: "empty-exports" }],
       ["- `src/a.ts` — CT-1:", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — CT-1:", reason: "empty-exports" }],
       ["- `src/a.ts` — CT-1: a: AFn,", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — CT-1: a: AFn,", reason: "missing-name" }],
@@ -340,6 +377,7 @@ describe("renderBindingProblem", () => {
     { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — CT-1: : AFn", reason: "missing-name" },
     { kind: "malformed-entry", path: null, line: "- src/a.ts", reason: "not-a-binding-line" },
     { kind: "duplicate-name", path: "src/a.ts", name: "a" },
+    { kind: "name-collides-with-alias", path: "src/a.ts", name: "AFn" },
     { kind: "duplicate-path", path: "src/a.ts", contract: "CT-1" },
     { kind: "multi-contract", path: "src/a.ts", contracts: ["CT-1", "CT-2"] },
     { kind: "unknown-contract", path: "src/a.ts", contract: "CT-9" },
@@ -356,9 +394,10 @@ describe("renderBindingProblem", () => {
     }
     expect(renderBindingProblem(problems[2]!)).toContain("missing its export name");
     expect(renderBindingProblem(problems[3]!)).toContain("'- src/a.ts'");
-    expect(renderBindingProblem(problems[6]!)).toContain("CT-1 and CT-2");
-    expect(renderBindingProblem(problems[11]!)).toContain("T5");
-    expect(renderBindingProblem(problems[11]!)).toContain("T1");
+    expect(renderBindingProblem(problems[5]!)).toContain("'AFn'");
+    expect(renderBindingProblem(problems[7]!)).toContain("CT-1 and CT-2");
+    expect(renderBindingProblem(problems[12]!)).toContain("T5");
+    expect(renderBindingProblem(problems[12]!)).toContain("T1");
     expect(new Set(problems.map(renderBindingProblem)).size).toBe(problems.length);
   });
 });
@@ -377,11 +416,15 @@ const pathArb = fc.tuple(
   fc.constantFrom(".ts", ".tsx", ".java", ".rs"),
 ).map(([segments, ext]) => `${segments.join("/")}${ext}`);
 
+/** One line's exports: distinct names, none equal to an alias of the line. */
+const exportsArb = fc.uniqueArray(fc.record({ name: identifierArb, alias: identifierArb }), { minLength: 1, maxLength: 5, selector: ({ name }) => name })
+  .filter((exports) => !exports.some(({ name }) => exports.some(({ alias }) => alias === name)));
+
 const bindingsArb: fc.Arbitrary<readonly ExportBinding[]> = fc.uniqueArray(
   fc.record({
     path: pathArb,
     contract: fc.integer({ min: 1, max: 99 }).map((n) => `CT-${n}`),
-    exports: fc.uniqueArray(fc.record({ name: identifierArb, alias: identifierArb }), { minLength: 1, maxLength: 5, selector: ({ name }) => name }),
+    exports: exportsArb,
   }),
   { minLength: 1, maxLength: 6, selector: ({ path }) => path },
 ).map((records) => records.map(({ path, contract: ct, exports }) => ({ path, contract: ct, exports: [exports[0]!, ...exports.slice(1)] as const })));
@@ -391,6 +434,18 @@ describe("properties", () => {
     fc.assert(fc.property(bindingsArb, (bindings) => {
       const text = `## File Structure\n\n**Export bindings:**\n${bindings.map(renderExportBinding).join("\n")}\n`;
       expect(parseExportBindings(text)).toEqual({ bindings, problems: [] });
+    }));
+  });
+
+  it("refuses exactly the names a line shares with its aliases", () => {
+    const entriesArb = fc.uniqueArray(fc.record({ name: identifierArb, alias: identifierArb }), { minLength: 1, maxLength: 5, selector: ({ name }) => name });
+    fc.assert(fc.property(entriesArb, (entries) => {
+      const line = `- \`src/a.ts\` — CT-1: ${entries.map(({ name, alias }) => `${name}: ${alias}`).join(", ")}`;
+      const aliases = new Set<string>(entries.map(({ alias }) => alias));
+      const shared = entries.map(({ name }) => name).filter((name) => aliases.has(name));
+      const parsed = parse(line);
+      expect(parsed.problems).toEqual(shared.map((name) => ({ kind: "name-collides-with-alias", path: "src/a.ts", name })));
+      expect(parsed.bindings).toHaveLength(shared.length === 0 ? 1 : 0);
     }));
   });
 

@@ -71,8 +71,10 @@ Concretely:
 - **Skeleton content (FR-008, OOS-003).** `generateSkeleton` (`engine/src/core/skeleton/generate.ts`) emits one
   header comment, the imports of the bound aliases (sorted, without duplicates), and one export for each binding,
   in plan order. Nothing else. TypeScript emits `export const name: Alias = () => { throw new Error("unimplemented: name"); };`.
-  Java emits one `static final Alias name` member per binding, from the frozen holder (plan AD-7). No helper,
-  private member, extra export or module layout is generated.
+  Java emits one `public static final Alias name = (p0, …) -> { throw new UnsupportedOperationException("unimplemented: name"); };`
+  member per binding inside a `public final class` with a private constructor, typed by the frozen holder's
+  alias (plan AD-7). The lambda's arity is the parameter count of the alias's single abstract method, as
+  resolved at stage two. No helper, private member, extra export or module layout is generated.
 - **One signature source (FR-004, OOS-002).** Bindings are parsed from the File Structure `**Export bindings:**`
   grammar (`engine/src/core/skeleton/bindings.ts`, plan AD-3). They hold only `name: Alias` pairs. The
   signature itself is resolved at stage two by `resolveBindings` (`engine/src/core/skeleton/resolve.ts`). It
@@ -110,8 +112,11 @@ Concretely:
 - Binding errors surface after the freeze, not at plan validation. A misspelled alias blocks the next
   implementation spawn instead of the plan (stage two, AS-008, AS-009).
 - Coverage is limited to function-type aliases. Constants, classes and type re-exports are not frozen by a
-  skeleton, and generic function aliases are refused at stage two because the zero-parameter throwing stub
-  cannot satisfy them.
+  skeleton, and generic function aliases are refused at stage two (`generic-alias` in `resolveBindings`). Each
+  stub is typed by the bare alias name, with no type arguments. The TypeScript stub is a zero-parameter throwing
+  arrow, which is assignable to any non-generic function type. The Java stub is a lambda whose arity is taken
+  from the alias, and a lambda cannot implement a generic abstract method. Neither stub can satisfy a
+  type-parameterised alias.
 - The ADT checks are syntactic. A structurally identical copy under a new name, or a string-literal union, is
   not caught. This limit is accepted and stated (plan AD-11).
 - Plan authors must keep their `**Interface:**` prose consistent with the types file by hand. The engine ignores

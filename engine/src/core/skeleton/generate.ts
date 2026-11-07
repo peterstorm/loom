@@ -18,7 +18,10 @@
  *   acceptance tests' style (extensionless when null); then per export
  *   `export const name: Alias = () => { throw … }`. A zero-parameter throwing
  *   arrow is assignable to any non-generic function type, and stage two
- *   refuses generic aliases.
+ *   refuses generic aliases. The imported aliases and the declared names
+ *   never share a name: the binding grammar refuses a name equal to an alias
+ *   of its line (`name-collides-with-alias`), so the import cannot conflict
+ *   with a declaration (TS2440).
  * - Java: one `public final class <FileBasename>` with a private constructor
  *   and per export a `public static final Alias name` lambda whose arity is
  *   the single abstract method's. Each alias is imported as

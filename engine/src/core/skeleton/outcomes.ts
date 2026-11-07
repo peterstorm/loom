@@ -15,16 +15,25 @@
  *   4. bound, but `skeletonLanguageOf` says unsupported → `unsupported-language`;
  *   5. bound and supported → `skeleton-written { origin: "spawn" }` (to write).
  *
- * A path the observations do not mention is absent.
+ * A path the observations do not mention is absent. A Task id the graph does
+ * not hold is `unknown-task`, never an empty outcome list: no Task and a Task
+ * with no production files stay distinguishable.
  */
 
 import { match } from "ts-pattern";
 import { contractRole } from "../acceptance-contract";
 import { samePlanPath } from "../plan-path-match";
-import type { Task } from "../../types";
+import type { Task, TaskGraph } from "../../types";
 import { skeletonLanguageOf } from "./language";
-import { productionFiles, type SkeletonGraph } from "./scope";
-import type { PathObservation, PathSkeletonOutcome, SkeletonOrigin, SkeletonOutcome, SkeletonOutcomesFn, SkeletonRecord } from "./types";
+import { productionFiles, type SkeletonGraph } from "./graph-view";
+import type {
+  PathObservation,
+  PathSkeletonOutcome,
+  SkeletonOrigin,
+  SkeletonOutcome,
+  SkeletonOutcomesOfFn,
+  SkeletonRecord,
+} from "./types";
 
 /**
  * Whether a file's current bytes are the engine's: they equal the digest the
@@ -58,12 +67,30 @@ function outcomeOf(graph: SkeletonGraph, task: Task, path: string, observation: 
   return target.kind === "unsupported" ? Object.freeze({ kind: "unsupported-language", reason: target.reason }) : written("spawn");
 }
 
-export const skeletonOutcomes: SkeletonOutcomesFn = (graph, taskId, observations) => {
+export const skeletonOutcomesOf: SkeletonOutcomesOfFn = (graph, taskId, observations) => {
   const view: SkeletonGraph = graph;
   const task = view.tasks.find(({ id }) => id === taskId);
-  if (task === undefined) return Object.freeze([]);
-  return Object.freeze(productionFiles(view, task).map((path): PathSkeletonOutcome =>
-    Object.freeze({ path, outcome: outcomeOf(view, task, path, observations.get(path) ?? ABSENT) })));
+  if (task === undefined) return { ok: false, error: Object.freeze({ kind: "unknown-task", taskId }) };
+  return {
+    ok: true,
+    value: Object.freeze(productionFiles(view, task).map((path): PathSkeletonOutcome =>
+      Object.freeze({ path, outcome: outcomeOf(view, task, path, observations.get(path) ?? ABSENT) }))),
+  };
+};
+
+/**
+ * `skeletonOutcomesOf` for a caller that holds an id the graph is known to
+ * contain (a registered Task, a Wave's Task): the outcomes, or none for an
+ * unknown id. Kept for the shells that still call it; a caller that cannot
+ * prove its id calls `skeletonOutcomesOf` and handles `unknown-task`.
+ */
+export const skeletonOutcomes = (
+  graph: TaskGraph,
+  taskId: string,
+  observations: ReadonlyMap<string, PathObservation>,
+): readonly PathSkeletonOutcome[] => {
+  const outcomes = skeletonOutcomesOf(graph, taskId, observations);
+  return outcomes.ok ? outcomes.value : Object.freeze([]);
 };
 
 /** The exact operator wording of each outcome (FR-030). */

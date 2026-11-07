@@ -7,7 +7,9 @@
  * `src/main/java/a/b/C.java`, `src/test/java/C.java`, `lib/C.java`, `.kt`,
  * `.scala`, `.rs`) plus the edges the predicate decides (declaration files,
  * the default Java package, a module-prefixed Java root, invalid and reserved
- * Java names, extensionless and dot-file basenames).
+ * Java names, extensionless and dot-file basenames). The owner is also the
+ * only constructor of the type-level `SkeletonTarget` brand: a source scan
+ * fails on a type assertion to a target type anywhere else.
  *
  * Sibling rows (T9): the same table through `outcomes.ts` (AD-13 step 4: a
  * bound absent path is `skeleton-written` exactly when supported, else
@@ -32,8 +34,8 @@
  * exactly when supported, else left byte-identical).
  */
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import { skeletonLanguageOf } from "../../src/core/skeleton/language";
@@ -154,6 +156,25 @@ describe("INV-6 owner: skeletonLanguageOf", () => {
       expect(skeletonLanguageOf(row.path)).toEqual(expected(row));
     });
   }
+});
+
+describe("INV-6 owner: the only constructor of the SkeletonTarget brand", () => {
+  const REPO_ROOT = resolve(__dirname, "../../..");
+  const OWNER = "engine/src/core/skeleton/language.ts";
+  const ASSERTION = /\bas\s+(?:Ts|Java)?SkeletonTarget\b/g;
+
+  /** Every TypeScript source under a repository directory, node_modules excluded. */
+  const sourcesUnder = (directory: string): readonly string[] =>
+    (readdirSync(join(REPO_ROOT, directory), { recursive: true, encoding: "utf8" }))
+      .filter((entry) => /\.(?:m|c)?tsx?$/.test(entry) && !entry.split("/").includes("node_modules"))
+      .map((entry) => `${directory}/${entry}`);
+
+  it("no module but language.ts asserts a value to a target type, and language.ts mints one per language", () => {
+    const assertions = ["engine/src", "engine/tests", "pi"].flatMap(sourcesUnder).flatMap((path) =>
+      [...readFileSync(join(REPO_ROOT, path), "utf8").matchAll(ASSERTION)].map(() => path));
+    expect(assertions.filter((path) => path !== OWNER)).toEqual([]);
+    expect(assertions.filter((path) => path === OWNER)).toHaveLength(2);
+  });
 });
 
 describe("INV-6 sibling: skeletonOutcomes (AD-13 step 4) agrees with the owner", () => {

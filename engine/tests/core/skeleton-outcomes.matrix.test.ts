@@ -1,7 +1,8 @@
 /**
  * INV-4 matrix: each file_list path's skeleton outcome, and whether an
  * existing skeleton is engine-untouched, are decided only by
- * `core/skeleton/outcomes.ts` (`skeletonOutcomes`, `isUntouchedSkeleton`).
+ * `core/skeleton/outcomes.ts` (`skeletonOutcomesOf` and its `skeletonOutcomes`
+ * wrapper, `isUntouchedSkeleton`).
  *
  * Owner rows (T9): one graph and one observation set exercise every step of
  * the AD-13 precedence, and every pair of steps where a lower step would
@@ -14,7 +15,9 @@
  *      `Types file: none` contract, else `no-bound-exports`;
  *   4. bound and unsupported → `unsupported-language` with the reason;
  *   5. bound and supported → `skeleton-written { origin: "spawn" }`.
- * Test files never get an outcome; an unknown Task has none. The five render
+ * Test files never get an outcome; an unknown Task is `unknown-task`, never
+ * an empty list (the wrapper keeps its empty list for known-id callers), while
+ * a Task with no production files has an empty list. The five render
  * strings are exact.
  *
  * Sibling row (T11): the spawn materialization's `planTaskSkeletons`, fed
@@ -41,7 +44,7 @@
 import { describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import { renderFrozenSignatures } from "../../src/core/implementation-brief";
-import { isUntouchedSkeleton, renderSkeletonOutcome, skeletonOutcomes } from "../../src/core/skeleton/outcomes";
+import { isUntouchedSkeleton, renderSkeletonOutcome, skeletonOutcomes, skeletonOutcomesOf } from "../../src/core/skeleton/outcomes";
 import type { SkeletonGraph } from "../../src/core/skeleton/scope";
 import { renderSkeletonStatus, skeletonStatusReport } from "../../src/core/skeleton/status";
 import type {
@@ -220,8 +223,18 @@ describe("INV-4 owner: skeletonOutcomes precedence over one graph and observatio
     expect(skeletonOutcomes(GRAPH, "T1", new Map()).map(({ outcome }) => outcome)).toEqual([NO_BOUND]);
   });
 
-  it("an unknown Task has no outcomes", () => {
+  it("an unknown Task is unknown-task, distinguishable from a Task with no production files", () => {
+    expect(skeletonOutcomesOf(GRAPH, "T9", OBSERVATIONS)).toEqual({ ok: false, error: { kind: "unknown-task", taskId: "T9" } });
+    const testsOnly: SkeletonGraph = { ...GRAPH, tasks: [...GRAPH.tasks, task("T5", ["tests/only.test.ts"])] };
+    expect(skeletonOutcomesOf(testsOnly, "T5", OBSERVATIONS)).toEqual({ ok: true, value: [] });
+    // The known-id wrapper the shells still call keeps its empty list for an unknown id.
     expect(skeletonOutcomes(GRAPH, "T9", OBSERVATIONS)).toEqual([]);
+  });
+
+  it("the wrapper is skeletonOutcomesOf's value for every known Task", () => {
+    for (const id of ["T1", "T2", "T3", "T4"]) {
+      expect(skeletonOutcomesOf(GRAPH, id, OBSERVATIONS)).toEqual({ ok: true, value: skeletonOutcomes(GRAPH, id, OBSERVATIONS) });
+    }
   });
 
   it("a graph without bindings or records: every absent path is unbound, every present one exists", () => {

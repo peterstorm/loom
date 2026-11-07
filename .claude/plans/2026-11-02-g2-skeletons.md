@@ -37,7 +37,7 @@ The step does three things:
 2. **Writes.** It writes each missing skeleton of the spawning Task through the no-clobber writer (AD-12). This covers the first attempt, a retry whose skeleton was deleted (FR-032) and infrastructure respawns alike.
 3. **Records.** It returns the skeleton records and the Task's skeleton outcomes. These are committed in the same locked update as the reservation (`createTaskExecutionAuthorityBatch` / `applyTaskExecutionAuthorityBatch` carry them).
 
-Status and the brief show outcomes that are not yet recorded through the same pure derivation (AD-13), so every path has exactly one outcome before and after its spawn (FR-042).
+Status and the brief show outcomes that are not yet recorded through the same pure derivation (AD-13), so every path has exactly one outcome (FR-030) before and after its spawn, shown in status and the brief (FR-040).
 
 **Why:** It is the only placement with one Wave-start entry point covering both harnesses, retries and respawns. The attempt baselines are captured after the skeleton exists, so FR-012's attempt-scope half holds by construction. It never touches the Wave Gate completion commit (ADR-0044). It ranks best on the user's primary axis, simplicity (Q3a).
 
@@ -320,7 +320,7 @@ When stage-two problems exist, `core/implementation-window.ts` replaces `spawn-w
 
 No logs and no metrics. Expected failures are never crashes (FR-045).
 
-**Why:** FR-030 and FR-042 need exactly one outcome per path, identical wherever it is read. Five readers deriving their own would drift.
+**Why:** FR-030 and FR-040 need exactly one outcome per path, identical wherever it is read. Five readers deriving their own would drift.
 
 **Rejected:**
 - Persisting projected outcomes before the spawn — state written by a read path.

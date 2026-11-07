@@ -120,24 +120,23 @@ observation explicitly, and engine-written bytes are subtracted before the chang
   `CONTRACT_VIOLATED_FAILURE_KIND_PREFIX` (`proof:declared-artifact-contract-violated `) followed by
   canonical JSON `{ artifact, omitted, violations }`, which holds the longest prefix of violations
   that fits the receipt's failure-kind bound plus a count of the rest. The stored Proof keeps all of
-  them. The semantic retry appendix (`core/implementation-retry.ts`) renders every entry as the file,
-  then each violation's subject, reason and remedy. It never drops an entry it cannot parse; it shows
-  that entry verbatim instead (FR-028).
+  them. The semantic retry appendix (`renderImplementationRetryContext` in
+  `core/implementation-retry.ts`) renders the authority line, then a violation section headed
+  "Declared-artifact contract violations (declared-artifact-contract-violated) …; fix every one before
+  completing". Under it each receipt entry is its file, then each encoded violation's subject, reason
+  and remedy, then an "and N more violations not shown" line when the entry omitted any. It never
+  drops an entry it cannot parse; it shows that entry verbatim instead (FR-028).
 - **No drift semantics.** The new kind is not in `ATTESTATION_DRIFT_BASE_KINDS`. A contract violation
   is a semantic failure the next attempt can fix, not terminal attestation drift.
 
-### Deviation from the plan seed
+### Required, as the plan seed specified
 
-The plan's AD-5 seed made `contractConformance` a required field of `ObservedProofEvidence`. As
-shipped it is optional at the type level, on `ObservedProofEvidence`, `IncomingImplementationEvidence`
-and the `reconcileTaskFromStoredEvidence` parameter. Absent judges nothing. The reason is that
-`evaluateTaskProof` is also called with no settlement at all, by test fixtures and pre-G2 callers, and
-a required field would have forced a fabricated `not-owed` into each of them. The guarantee the seed
-wanted is enforced one level up instead. Each of the three settlement paths listed above always
-passes an explicit value (an observed verdict, or the named `not-owed` constant on the Pi stop),
-and the field's doc comments say so. Losing that guarantee would take a code change to a settlement
-shell, which the compiler does not catch. That is the risk Option 3 was rejected for, and it is
-recorded under Consequences.
+As AD-5 specified, `contractConformance` is a required field of `ObservedProofEvidence`, of
+`IncomingImplementationEvidence` and of the `reconcileTaskFromStoredEvidence` parameter. Every
+settlement path must decide it: an observed verdict from `observeContractConformance`, or the named
+`not-owed` constant `LEGACY_STOP_CONFORMANCE` on the Pi untrusted stop. A new settlement path that
+forgets to observe conformance fails to compile, so the risk Option 3 was rejected for cannot arise.
+Callers outside settlement, such as test fixtures, pass `{ kind: "not-owed" }` explicitly.
 
 ## Consequences
 
@@ -152,21 +151,23 @@ recorded under Consequences.
   stubs the engine writes at its stop.
 - A conformance read failure is infrastructure, so a transient filesystem problem never burns a
   semantic attempt and never lets a Task pass.
-- The retry brief lists every violation with its remedy, so attempt 2 can fix all of them in one go.
+- The retry brief lists, for each violated file, every violation that fits the receipt's
+  failure-kind bound with its remedy, plus a count of any it omitted. Attempt 2 can fix all of the
+  listed ones in one go and knows how many more remain.
+- `contractConformance` is required, so the compiler guarantees that every settlement path decides
+  conformance. No path can pass a Task by forgetting it.
 
 **Negative:**
 - The `declared-artifact-changed` arm now checks conformance as well as change. Someone reading only
   the obligation name will undercount what it enforces.
-- `contractConformance` is optional at the type level (see the deviation above). A future settlement
-  path that calls `evaluateTaskProof` without observing conformance would compile and would judge
-  nothing. The mitigation is review, plus the fact that all proof-evaluating settlement goes through
-  the three named shells. The seed's compile-time guarantee was given up.
 - The proof channel duplicates CT-1's violation shapes structurally to avoid an import cycle. The
   compiler keeps them aligned only through the settlement shells' pass-through, not through a shared
   declaration.
-- Receipts truncate the violations they encode to fit the failure-kind bound. The retry appendix
-  shows an `omitted` count rather than every violation when one file has very many. The stored Proof
-  keeps them all.
+- Receipts truncate the violations they encode to fit the failure-kind bound, and the retry appendix
+  is rendered from the receipt. When one file has very many violations, the appendix lists only the
+  encoded prefix and an "and N more violations not shown" line. The stored Proof keeps them all.
+- Callers of `evaluateTaskProof` outside settlement, such as test fixtures, must pass an explicit
+  `not-owed` value.
 - Conformance is checked only on files that are declared artifacts and parse to a supported skeleton
   language. A contract whose types file no skeleton language reads contributes no surface. This is a
   stated limit, not a waiver.

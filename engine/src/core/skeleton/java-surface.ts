@@ -106,8 +106,12 @@ const translateUnicodeEscapes = (source: string): Read<string> => {
 // Stage 2: the lexer
 // ---------------------------------------------------------------------------
 
-/** `value` is a literal's decoded value, and the token's text otherwise. */
-type Token = Readonly<{ kind: "word" | "symbol" | "string" | "char" | "number"; text: string; value: string; line: number }>;
+/** A lexeme as written. A string or char literal (text blocks included) also
+ *  carries its decoded `value`; no other token has one, so a decoded value
+ *  is never read where only source text exists. */
+type Token =
+  | Readonly<{ kind: "word" | "symbol" | "number"; text: string; line: number }>
+  | Readonly<{ kind: "string" | "char"; text: string; value: string; line: number }>;
 
 const SIMPLE_ESCAPES: ReadonlyMap<string, string> = new Map([
   ["b", "\b"], ["t", "\t"], ["n", "\n"], ["f", "\f"], ["r", "\r"], ["s", " "], ['"', '"'], ["'", "'"], ["\\", "\\"],
@@ -264,7 +268,7 @@ const scanWord: Scanner = (text, i, line) => {
   const nonSealed = text.slice(i, j) === "non" && text.startsWith("-sealed", j) && !isIdentifierPart(codePointAt(text, j + 7));
   const end = nonSealed ? j + 7 : j;
   const word = text.slice(i, end);
-  return scanned({ kind: "word", text: word, value: word, line }, end, line);
+  return scanned({ kind: "word", text: word, line }, end, line);
 };
 
 const scanNumber: Scanner = (text, i, line) => {
@@ -272,13 +276,13 @@ const scanNumber: Scanner = (text, i, line) => {
   if (!startsNumber) return null;
   const length = /^.[0-9A-Za-z_.]*/.exec(text.slice(i))?.[0].length ?? 1;
   const number = text.slice(i, i + length);
-  return scanned({ kind: "number", text: number, value: number, line }, i + length, line);
+  return scanned({ kind: "number", text: number, line }, i + length, line);
 };
 
 /** Any other character is a symbol; a few symbols span several characters. */
 const scanSymbol = (text: string, i: number, line: number): Read<Scan> => {
   const symbol = MULTI_CHARACTER_SYMBOLS.find((candidate) => text.startsWith(candidate, i)) ?? codePointAt(text, i);
-  return scanned({ kind: "symbol", text: symbol, value: symbol, line }, i + symbol.length, line);
+  return scanned({ kind: "symbol", text: symbol, line }, i + symbol.length, line);
 };
 
 /** Tried in order: comments before `/`, text blocks before strings. */
@@ -400,7 +404,7 @@ const where = (tokens: Tokens, i: number): string => {
 const unexpected = (tokens: Tokens, i: number, wanted: string): Read<never> => fail(`${where(tokens, i)}: expected ${wanted}`);
 
 const stringsBetween = (tokens: Tokens, start: number, end: number): readonly string[] =>
-  tokens.slice(start, end).filter((token) => token.kind === "string").map((token) => token.value);
+  tokens.slice(start, end).flatMap((token) => (token.kind === "string" ? [token.value] : []));
 
 const expectSymbol = (tokens: Tokens, i: number, text: string): Step<null> =>
   isSymbol(tokens, i, text) ? step(null, i + 1) : unexpected(tokens, i, `'${text}'`);

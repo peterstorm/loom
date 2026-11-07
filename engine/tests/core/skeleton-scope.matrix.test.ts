@@ -3,7 +3,8 @@
  * against which contracts, is decided only by `core/skeleton/scope.ts`'s
  * `conformanceScope`.
  *
- * Owner rows (T9), the plan's named cases first: an attested Task, a
+ * Owner rows (T9), the plan's named cases first: a graph populated before G2
+ * (no `export_bindings` stamp, AD-14: not checked retroactively), an attested Task, a
  * `documentation-only` Task (and `generated-artifact`), a claimant of a
  * contract with `Types file: none`, a test file in `file_list`, a file that
  * existed at Wave start, and a binder whose contract is still
@@ -135,9 +136,32 @@ const graphOf = (tasks: readonly Task[], bindings: readonly ExportBinding[]): Sk
 const scopeOf = (subject: Task, bindings: readonly ExportBinding[] = [], others: readonly Task[] = []) =>
   conformanceScope(graphOf([subject, ...others], bindings), subject);
 
+/** The same graph as populated before G2: no `export_bindings` stamp at all. */
+const preG2GraphOf = (tasks: readonly Task[]): SkeletonGraph => {
+  const { export_bindings: _stamp, ...unstamped } = graphOf(tasks, []);
+  return unstamped;
+};
+
 const target = (path: string) => skeletonLanguageOf(path);
 
 describe("INV-5 owner: the plan's named cases", () => {
+  it("AD-14: a graph populated before G2 owes nothing, even to a claimant with a file of the types file's language", () => {
+    const subject = task("T2", ["src/order/pricing.ts", "src/main/java/com/acme/A.java"], ["FR-001", "FR-002"]);
+    expect(conformanceScope(preG2GraphOf([subject]), subject)).toEqual({ kind: "not-owed", reason: "pre-g2-graph" });
+    // The stamp decides, not what it binds: an empty stamp is a G2 graph, and the claimant owes the ADT check.
+    expect(scopeOf(subject)).toEqual({
+      kind: "owed",
+      contracts: [TS_CONTRACT, JAVA_CONTRACT],
+      bindings: [],
+      files: [target("src/order/pricing.ts"), target("src/main/java/com/acme/A.java")],
+    });
+  });
+
+  it("AD-14: the missing stamp is decided before any Task exemption", () => {
+    const attested = task("T2", ["src/order/pricing.ts"], ["FR-001"], { implementation_attestation: true });
+    expect(conformanceScope(preG2GraphOf([attested]), attested)).toEqual({ kind: "not-owed", reason: "pre-g2-graph" });
+  });
+
   it("an attested Task owes nothing, bound or not", () => {
     const subject = task("T2", ["src/order/pricing.ts"], ["FR-001"], { implementation_attestation: true });
     expect(scopeOf(subject, [bound("src/order/pricing.ts", "CT-1")])).toEqual({ kind: "not-owed", reason: "attested" });
@@ -356,10 +380,26 @@ type MatrixCase = Readonly<{
   subject: Task;
   bindings?: readonly ExportBinding[];
   others?: readonly Task[];
+  /** False for a graph populated before G2: no `export_bindings` stamp. */
+  stamped?: boolean;
   expected: Judgment;
 }>;
 
+const matrixGraph = ({ subject, bindings = [], others = [], stamped = true }: MatrixCase): SkeletonGraph =>
+  stamped ? graphOf([subject, ...others], bindings) : preG2GraphOf([subject, ...others]);
+
 const MATRIX: readonly MatrixCase[] = [
+  {
+    name: "a claimant in a graph populated before G2",
+    subject: task("T2", ["src/order/pricing.ts", "src/main/java/com/acme/A.java"], ["FR-001", "FR-002"]),
+    stamped: false,
+    expected: { kind: "not-owed" },
+  },
+  {
+    name: "the same claimant in a G2 graph whose stamp binds nothing",
+    subject: task("T2", ["src/order/pricing.ts", "src/main/java/com/acme/A.java"], ["FR-001", "FR-002"]),
+    expected: { kind: "judged", files: ["src/order/pricing.ts", "src/main/java/com/acme/A.java"] },
+  },
   {
     name: "an attested Task",
     subject: task("T2", ["src/order/pricing.ts"], ["FR-001"], { implementation_attestation: true }),
@@ -444,8 +484,9 @@ const MATRIX: readonly MatrixCase[] = [
 ];
 
 describe("INV-5 sibling: the settlement observation judges exactly the owner's scope", () => {
-  it.each(MATRIX)("$name", ({ subject, bindings = [], others = [], expected }) => {
-    const graph = graphOf([subject, ...others], bindings);
+  it.each(MATRIX)("$name", (row) => {
+    const { subject, expected } = row;
+    const graph = matrixGraph(row);
     const scope = scopeJudgment(conformanceScope(graph, subject));
     expect(scope).toEqual(expected);
     expect(observedJudgment(graph, subject)).toEqual(scope);
@@ -596,14 +637,15 @@ const scopeDuties = (scope: ConformanceScope): BriefDuties =>
     : { contracts: scope.contracts.map(({ id }) => id), boundPaths: scope.bindings.map(({ path }) => path) };
 
 describe("INV-5 sibling: the brief lists exactly the owner's duties", () => {
-  it.each(MATRIX)("$name", ({ subject, bindings = [], others = [] }) => {
-    const graph = graphOf([subject, ...others], bindings);
-    expect(briefDuties(graph, subject)).toEqual(scopeDuties(conformanceScope(graph, subject)));
+  it.each(MATRIX)("$name", (row) => {
+    const graph = matrixGraph(row);
+    expect(briefDuties(graph, row.subject)).toEqual(scopeDuties(conformanceScope(graph, row.subject)));
   });
 
   it("names the frozen-signature and marker rules exactly when the scope binds an export", () => {
-    for (const { subject, bindings = [], others = [] } of MATRIX) {
-      const graph = graphOf([subject, ...others], bindings);
+    for (const row of MATRIX) {
+      const { subject } = row;
+      const graph = matrixGraph(row);
       const scope = conformanceScope(graph, subject);
       const section = renderFrozenSignatures(subject, { graph, observations: new Map(), surfaces: SURFACES, unresolved: [] });
       const binds = scope.kind === "owed" && scope.bindings.length > 0;

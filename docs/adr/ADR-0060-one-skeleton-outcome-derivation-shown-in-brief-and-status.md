@@ -82,10 +82,11 @@ projects now.**
   exception.
 - **Untouched judgment.** `isUntouchedSkeleton(record, currentSha, canonicalSha)` is true only when the file
   exists and its digest equals the record's `engineSha256` or the canonical digest. Spawn materialization
-  (`engine/src/orchestration/skeleton-materialization.ts`), the contract-stop step
-  (`engine/src/orchestration/contract-stub-materialization.ts`), the revision refresh
-  (`engine/src/handlers/helpers/revise-contract.ts`) and settlement digest subtraction
-  (`engine/src/core/implementation-application.ts`) all call it. None of them compares digests itself.
+  (`engine/src/orchestration/skeleton-materialization.ts`) reaches it through `skeletonOutcomes`, which applies
+  it at precedence step 1. The contract-stop step (`engine/src/orchestration/contract-stub-materialization.ts`),
+  the revision refresh (`engine/src/handlers/helpers/revise-contract.ts`) and settlement digest subtraction
+  (`engine/src/core/implementation-application.ts`) call `isUntouchedSkeleton` directly. None of them compares
+  digests itself.
 - **Exact strings.** `renderSkeletonOutcome` is an exhaustive `ts-pattern` match that returns the five FR-030
   strings. It is the only place those strings are produced.
 - **Recorded and projected.** Registration (`engine/src/core/validate-task-execution.ts`) writes the Task's

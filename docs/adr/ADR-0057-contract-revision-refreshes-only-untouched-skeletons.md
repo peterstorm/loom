@@ -90,8 +90,11 @@ spawn's stage two blocks on it. The writes happen before the locked update.**
    - A `refresh` calls `refreshSkeleton(root, path, expectedSha256, bytes, frozen)`
      (`engine/src/orchestration/skeleton-writer.ts`). It replaces the file only while its bytes still digest
      to `expectedSha256`, by renaming a prepared temp file over the target. Otherwise it refuses with
-     `modified`, `absent` or `not-a-regular-file`, and the refusal becomes a `SkeletonProblem`. Frozen paths
-     and symlinked ancestors are refused as they are for every writer entry point.
+     `modified`, `absent` or `not-a-regular-file`. A `modified` refusal means the file was edited between
+     observation and write, so it is treated like any modified file: its path joins `modified` and its
+     record is flagged `stale: { revision }` in the same commit. Any other refusal becomes a
+     `SkeletonProblem`. Frozen paths and symlinked ancestors are refused as they are for every writer entry
+     point.
    - The function returns a `SkeletonRevision { refreshed: SkeletonRecord[]; modified: string[];
      bindingProblems: SkeletonProblem[] }`. It writes files but commits nothing.
 4. **Commit.** `manager.updateAndReturn` runs `reviseAcceptanceContract(locked, request, observations,
@@ -132,7 +135,8 @@ spawn's stage two blocks on it. The writes happen before the locked update.**
 
 **Positive:**
 - A revision can never destroy implementer work. The guarded replace re-checks the digest when it writes,
-  so even a file edited between observation and write is refused, not overwritten.
+  so even a file edited between observation and write is refused, not overwritten, and its record is flagged
+  stale.
 - Implementers spawned after a revision start from the revised signatures whenever no one has touched the
   file (AS-049). This avoids completion refusals for signatures they never chose.
 - Divergence is recorded per file with the revision number that caused it (AS-050). Operators see in status
@@ -150,8 +154,9 @@ spawn's stage two blocks on it. The writes happen before the locked update.**
   generator staying deterministic (AD-8, ADR-0055).
 - An untouched skeleton whose binding no longer resolves keeps its old bytes until the binding problem is
   fixed, by a further revision or by re-population. Spawns of that Task are blocked in the meantime.
-- If a refresh is refused at write time (a concurrent edit or an I/O failure), the outcome reports a binding
-  problem but the record is not flagged stale. The file shows up as modified on the next observation rather
-  than at once.
+- A refresh refused at write time for any reason other than a concurrent edit (`absent`,
+  `not-a-regular-file`, or an I/O failure) is reported only as a binding problem in the outcome. The record
+  keeps its old digest until the next observation decides it. A concurrent edit (`modified`) is flagged stale
+  at once.
 - A revision of a contract with many bound paths does more I/O than before: one observation and possibly one
   write per recorded skeleton.

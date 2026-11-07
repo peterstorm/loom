@@ -466,10 +466,63 @@ describe("CT-2 frozen ADT conformance", () => {
     expectViolations(judge({ [path]: text }), plain(path, subject, "shadows-frozen-adt"));
   });
 
-  it("FR-017: a frozen ADT binds only files of its types file's language — a TypeScript `Shape` and a Java `OrderEvent` pass", () => {
-    expect(judge()).toEqual(NO_VIOLATION);
-    expect(TS_LEDGER.conforming).toContain("export type Shape");
-    expect(JAVA_GEOMETRY.conforming).toContain("record OrderEvent");
+  /** A TypeScript file declaring every frozen Java ADT name (`Order`, `Price`,
+   *  `Shape` and its variants), each of which would shadow in a Java file. */
+  const TS_DECLARING_JAVA_ADTS = `export type Order = Readonly<{ id: string }>;
+export interface Price {
+  readonly cents: number;
+}
+export class Shape {
+  constructor(readonly sides: number) {}
+}
+export type Circle = Readonly<{ radius: number }>;
+export type Square = Readonly<{ side: number }>;
+export type Triangle = Readonly<{ base: number; height: number }>;
+`;
+
+  /** A Java file declaring every frozen TypeScript ADT name (`OrderId`, and
+   *  `OrderEvent` sealed over its named variants), each of which would shadow
+   *  in a TypeScript file. */
+  const JAVA_DECLARING_TS_ADTS = `package com.acme.order.pricing;
+
+public final class Geometry {
+    private Geometry() {}
+
+    record OrderId(String value) {}
+
+    sealed interface OrderEvent permits OrderPlaced, OrderPaid, OrderShipped {}
+
+    record OrderPlaced(String id) implements OrderEvent {}
+
+    record OrderPaid(String id, long cents) implements OrderEvent {}
+
+    record OrderShipped(String id, String carrier) implements OrderEvent {}
+
+    record PaymentState(String status) {}
+}
+`;
+
+  /** Append declarations to a Java class body, before its closing brace. */
+  const withinJavaClass = (text: string, members: string): string => {
+    const close = text.lastIndexOf("}");
+    return `${text.slice(0, close)}${members}${text.slice(close)}`;
+  };
+
+  it("FR-017: a frozen ADT binds only files of its types file's language — every Java ADT name in TypeScript and every TypeScript ADT name in Java pass", () => {
+    expect(judge({ [TS_LEDGER_PATH]: TS_DECLARING_JAVA_ADTS, [JAVA_GEOMETRY_PATH]: JAVA_DECLARING_TS_ADTS })).toEqual(NO_VIOLATION);
+  });
+
+  it("FR-017: beside the other language's ADT names, only the file's own language's frozen ADTs are refused", () => {
+    const conformance = judge({
+      [TS_LEDGER_PATH]: `${TS_DECLARING_JAVA_ADTS}export type OrderPaid = Readonly<{ kind: "paid"; cents: number }>;\n`,
+      [JAVA_GEOMETRY_PATH]: withinJavaClass(JAVA_DECLARING_TS_ADTS, "\n    record Circle(double radius) {}\n"),
+    });
+
+    expectViolations(
+      conformance,
+      plain(TS_LEDGER_PATH, "OrderPaid", "shadows-frozen-adt"),
+      plain(JAVA_GEOMETRY_PATH, "Circle", "shadows-frozen-adt"),
+    );
   });
 });
 

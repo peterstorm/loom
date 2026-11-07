@@ -73,7 +73,8 @@ project formatter ever runs.**
   Exports appear in plan binding order. Imports are unique and sorted in code-unit order, never by locale. The
   file holds exactly the bound exports and the imports they need (FR-008).
 - **TypeScript.** One `import type { <aliases> } from "<specifier>";`, then for each export
-  `export const <name>: <Alias> = () => { throw new Error("unimplemented: <name>"); };` on four lines. Generic
+  `export const <name>: <Alias> = () => { throw new Error("unimplemented: <name>"); };` on three lines (the
+  declaration, the throw and the closing `};`), preceded by a blank separator line. Generic
   aliases are refused earlier, at stage-two resolution (`resolve.ts`, AS-009). The specifier is relative to
   the skeleton's directory. Its style (`SpecifierStyle = "extensionless" | ".js" | ".ts"`) is the one used by
   the first frozen TypeScript acceptance file, in declaration order, that imports the types file. That file is

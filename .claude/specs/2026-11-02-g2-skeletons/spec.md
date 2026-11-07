@@ -79,7 +79,7 @@ This applies to both TypeScript and Java. Every case where no skeleton is produc
 **Why this priority:** The operator called sealed interfaces in Java essential, and this reverses the brainstorm's plain-stub-only position for Java.
 
 **Acceptance Scenarios:**
-- AS-016: Given a contract whose frozen Java types declare functional interfaces, sealed interfaces and records, and a plan binding `priceOrder: PriceOrderFn` on a not-yet-existing `.java` file, when the Wave starts, then the file exists before the implementer is spawned. It references the frozen types and declares one bound member `priceOrder` whose type is fixed by `PriceOrderFn` and whose body throws an unsupported-operation error carrying the exact marker `unimplemented: priceOrder`. [NEEDS CLARIFICATION: the exact shape of a bound Java member (for example, a method mirroring the functional interface's single abstract method, or a field or constant of the functional-interface type) is a technical choice for architecture; the spec fixes only that the signature comes from the frozen functional interface and survives verbatim.]
+- AS-016: Given a contract whose frozen Java types declare functional interfaces, sealed interfaces and records, and a plan binding `priceOrder: PriceOrderFn` on a not-yet-existing `.java` file, when the Wave starts, then the file exists before the implementer is spawned. It references the frozen types and declares one bound member `priceOrder` whose type is fixed by `PriceOrderFn` and whose body throws an unsupported-operation error carrying the exact marker `unimplemented: priceOrder`. (Resolved by architecture, plan AD-7 and ADR-0054: the bound member is a typed `public static final PriceOrderFn priceOrder` constant of the frozen functional-interface type, initialized by a lambda whose arity is the single abstract method's.)
 - AS-017: Given the same frozen Java types and bindings, when skeleton generation runs 100 times, then all 100 outputs are byte-identical; a re-run over an untouched skeleton changes 0 bytes.
 - AS-018: Given a not-yet-existing Java file with no bindings, when the Wave starts, then no file is written. Status and the brief say "no bound exports, no skeleton".
 - AS-019: Given an existing Java file_list path, when the Wave starts, then the file is not modified, it is reported as "exists, not skeletonized", and the completion checks still apply.
@@ -146,7 +146,7 @@ This applies to both TypeScript and Java. Every case where no skeleton is produc
 **Why this priority:** This is significant value, but implementation-Wave skeletons and their checks work without it.
 
 **Acceptance Scenarios:**
-- AS-043: Given a contract Task whose types file exists and whose plan bindings cover the files the acceptance tests import, when the engine writes the contract stubs, then each stub follows the same skeleton format as US3 and US4 and exists before the acceptance tests run. [NEEDS CLARIFICATION: technical approach TBD. Stubs are needed before the freeze, so their source is the contract Task's not-yet-frozen types file; architecture must define the exact point in the contract Task at which the engine writes them.]
+- AS-043: Given a contract Task whose types file exists and whose plan bindings cover the files the acceptance tests import, when the engine writes the contract stubs, then each stub follows the same skeleton format as US3 and US4 and exists before the acceptance tests run. (Resolved by architecture, plan AD-9 and ADR-0056: the engine writes the stubs at the contract Task's SubagentStop, from its not-yet-frozen types file, before the stop checks run.)
 - AS-044: Given a contract stub the engine wrote, when the Acceptance Freeze runs, then freeze semantics are unchanged. The stub is treated as a skeleton, so the US5 and US6 checks apply to it in the implementation Wave that owns it.
 - AS-045: Given the contract brief and decompose rule 12, when they are read after this change, then they say the engine writes the stubs and the contract Task no longer does.
 
@@ -279,10 +279,10 @@ Explicitly NOT part of this feature:
 
 ## Open Questions
 
-Each of these is marked once, inline, at the scenario it affects:
+None open. Both questions the spec left to architecture are resolved inline at the scenario they affect:
 
-1. Java bound-member shape: see AS-016.
-2. When during the contract Task the engine writes the contract stubs: see AS-043.
+1. Java bound-member shape: see AS-016 (plan AD-7, ADR-0054).
+2. When during the contract Task the engine writes the contract stubs: see AS-043 (plan AD-9, ADR-0056).
 
 Resolved 2026-11-02: re-declaring two or more of a frozen ADT's variants is a violation (AS-036, FR-016). Bound files in other languages get no file (AS-040), and contracts with `Types file: none` are exempt from the signature and ADT checks (AS-039).
 
@@ -332,3 +332,4 @@ Resolved 2026-11-02: re-declaring two or more of a frozen ADT's variants is a vi
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-11-02 | Initial draft from brainstorm and operator interview (Java in scope, ADT enforcement added) | specify agent |
+| 2026-11-07 | Replaced the AS-016 and AS-043 clarification markers with the resolutions architecture shipped (ADR-0054, ADR-0056) | pre-PR cleanup |

@@ -94,11 +94,17 @@ Concretely:
   `ts-surface.ts` seam (ADR-0053, INV-1). No file in the package reads `fs`, `child_process`, `os`,
   `process.*`, the clock or randomness (INV-2).
 - **`DomainResult` end to end.** `DomainResult` from `engine/src/core/orchestration-contract/identity.ts` is
-  the one result type, and the CT-1 function aliases in `types.ts` return it: `ParseIdentifierFn`, the four
-  `Read*SurfaceFn` readers (`SurfaceProblem`), and resolution
-  (`NonEmpty<ResolutionProblem>`, so the batch is refused with every problem named). Conformance violations,
-  unsupported languages and skeleton outcomes are discriminated unions (`ContractConformance`,
-  `SkeletonOutcome`, `ConformanceScope`), not exceptions or nulls.
+  the one result type, and the fallible CT-1 function aliases in `types.ts` return it: `ParseIdentifierFn`
+  (`IdentifierProblem`), the four `Read*SurfaceFn` readers (`SurfaceProblem`), and `ResolveBindingsFn`
+  (`NonEmpty<ResolutionProblem>`, so the batch is refused with every problem named). The other CT-1 aliases
+  are total and return plain values or discriminated unions. `ParseExportBindingsFn` returns an
+  `ExportBindingsDeclaration` that carries its problems, `ValidateExportBindingsFn` returns the list of
+  `BindingProblem`s, `TypesImportSpecifierFn` returns a `SpecifierStyle` or null, `GenerateSkeletonFn`
+  returns a `GeneratedSkeleton`, `JudgeConformanceFn` returns a `ContractConformance`, `SkeletonOutcomesFn`
+  returns one `PathSkeletonOutcome` per path, and `SkeletonLanguageOfFn` returns
+  `SkeletonTarget | UnsupportedTarget`. Conformance violations, unsupported languages and skeleton outcomes
+  are therefore discriminated unions (`ContractConformance`, `UnsupportedTarget`, `SkeletonOutcome`,
+  `ConformanceScope`), not exceptions or nulls.
 - **Shells own every effect.** Repository reads and writes live only in
   `engine/src/orchestration/skeleton-writer.ts` (the one no-clobber writer, INV-3, with results
   `written | exists | refused{reason} | io-failed{message}`), `frozen-surface-observation.ts`,
@@ -109,9 +115,11 @@ Concretely:
   backoff anywhere. Idempotent re-runs and content-addressed adoption (ADR-0051) take that role.
 - **Additive, no flag.** The G2 TaskGraph fields (`export_bindings`, `skeletons`,
   `tasks[].skeleton_outcomes`) are optional and parsed by `engine/src/state-file-wire.ts`, so a graph from
-  before G2 loads unchanged. Materialization, the brief's Frozen signatures section and the status report all
-  check for the missing `export_bindings` stamp and write or show nothing for such a graph. Status reports it
-  as not applicable: "the TaskGraph was populated before export bindings were stamped".
+  before G2 loads unchanged. Materialization, the brief's Frozen signatures section, the status report and
+  `conformanceScope` (`engine/src/core/skeleton/scope.ts`) all check for the missing `export_bindings` stamp.
+  For such a graph they write or show nothing, and `conformanceScope` returns `not-owed`, so a pre-G2 Task
+  owes neither the signature checks nor the frozen-ADT shadowing and re-listing checks at completion. Status
+  reports such a graph as not applicable: "the TaskGraph was populated before export bindings were stamped".
 - **One path for both harnesses.** Materialization runs inside the shared `registerTaskExecutionBatch`
   reservation (ADR-0048). Conformance runs in `settleExactImplementation`, which both harnesses' stops use, and
   in `reconcile-implementation-proof`. Contract stubs come from the shared SubagentStop dispatch, which
@@ -138,10 +146,6 @@ Concretely:
   budgets show this is acceptable at 20 files, but the budgets limit how far the eager approach scales.
 - With no retry, a transient filesystem error during materialization blocks the registration until someone
   re-runs it. Recovery is idempotent, but it is manual.
-- **Known gap, not fully closed by the shipped code.** The intent is that pre-G2 graphs are not checked
-  retroactively for frozen ADTs. Materialization, the brief and status gate on the `export_bindings` stamp,
-  but `conformanceScope` (`engine/src/core/skeleton/scope.ts`) does not. A pre-G2 Task that claims a contract
-  with a frozen types file, and has a production file in that file's language, is still owed the ADT
-  shadowing and re-listing check at completion. Signature checks cannot fire there, because without a stamp
-  there are no bindings. Closing the gap means adding one guard in `conformanceScope`: no stamp gives
-  `not-owed`. That change belongs to the INV-5 owner module and is out of scope for this ADR.
+- A pre-G2 graph that is still running gets no frozen-ADT protection for the rest of its run. A Task in it
+  can shadow or re-list a frozen ADT and still complete, because the stamp guard in `conformanceScope` makes
+  it `not-owed`. Only a re-population, which stamps the bindings, brings the checks in.
