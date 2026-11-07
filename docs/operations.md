@@ -1079,6 +1079,51 @@ On success, one locked write:
 
 The next Wave Gate judges the contract green against the new bytes and re-records its roster, which freezes it again.
 
+Before that locked write, the helper also settles the contract's engine-written **Skeletons** (below). It re-resolves the contract's **Export Bindings** against the revised types file, then, for each recorded skeleton of the contract:
+
+- an untouched one (its bytes still equal the digest the engine wrote, or the canonical bytes) is refreshed in place to the revised signatures, through the writer's digest-guarded replace, and re-recorded with origin `revision` — printed as `skeleton refreshed <path> from the revised types`;
+- a modified one is left exactly as it is and flagged stale — printed as `skeleton <path>: stale against revised contract (modified, left as it is)`. Status and the brief show the flag; completion still enforces the revised aliases on it, so the implementer adapts it;
+- a binding the revised types no longer resolve is printed as `skeleton binding problem: …; the next spawn's stage two blocks on it`.
+
+The refresh writes precede the locked update; if the update is then refused, the refreshed bytes stay and the next spawn adopts them by content.
+
+### Skeletons and contract stubs (G2)
+
+A plan's `## File Structure` can bind each new implementation file to the exports it provides, as `**Export bindings:**` lines (`` - `path` — CT-n: name: Alias, … ``, one contract per file; see `references/executable-models.md`). Population stamps them into the TaskGraph (`export_bindings`), and the engine then writes, records and checks the files itself. Nothing here needs an operator action unless something is refused.
+
+**Contract stubs at the contract Task's stop.** When the contract Task's agent stops, before the stop checks and before settlement, both stop shells (Claude Code's SubagentStop and Pi's) read the contract's not-yet-frozen types file and write a stub at every bound file of that contract, so the acceptance tests compile and fail by assertion. The contract Task never writes them, and validation refuses a bound path in its `file_list`. A binding that does not resolve writes no stub; it is reported as a stop note (`[loom] …`), never a block, and the contract Wave Gate then sees an uncollected acceptance file, which is no behavioral RED — fix the types file through the contract Task. Stubs are not frozen paths; in the Wave that owns their file they are ordinary skeletons with origin `contract-stub`.
+
+**Skeletons at spawn.** When the spawn gate admits an implementation Task (Claude Code's `validate-task-execution`, Pi's spawn lifecycle — the same `registerTaskExecutionBatch`), it runs one step before any attempt baseline is captured:
+
+1. **Stage two.** Every binding of the registering Tasks is resolved against its contract's types file, whose bytes must equal the freeze stamp. A missing alias, a non-function or generic alias, a Java holder of the wrong shape, an unfrozen contract or drifted bytes refuses the whole registration, every problem named, before a byte is written. Status reports the same problems as `skeleton-bindings-unresolved` in place of `spawn-wave-implementation`.
+2. **Write.** Each bound path of the Task that does not exist yet gets its canonical skeleton through the one no-clobber writer: repo-relative only, never a frozen path, no symlinked ancestor, never replacing an existing file. This covers the first attempt, a retry whose skeleton was deleted and an infrastructure respawn alike.
+3. **Record.** The engine-written digest (`engineSha256`) and the types digest are committed with the reservation (`skeletons`), with each path's outcome (`task.skeleton_outcomes`).
+
+Because the bytes exist before the baselines, engine bytes are never the implementer's write. A file whose bytes equal the recorded engine digest never satisfies "changed", and never counts as an out-of-scope change of the contract Task.
+
+**Skeleton outcomes.** Every non-test `file_list` path has exactly one outcome, the same in status and in the brief (`core/skeleton/outcomes.ts`):
+
+| Outcome | Meaning |
+|---|---|
+| `skeleton written` | the engine wrote it (origin `spawn`, `contract-stub` or `revision`) and it is still untouched, or it is about to at spawn |
+| `exists, not skeletonized` | the file already exists and is not an untouched engine skeleton; it is never modified |
+| `contract has no types file, no skeletons` | the Task claims a `**Types file:** none` contract and the path is unbound |
+| `no bound exports, no skeleton` | no binding names the path |
+| `unsupported language, no skeleton` | bound, but neither TypeScript nor Java under a `src/main/java/` root |
+
+**Status.** `helper orchestration status` (and `--json`, field `skeletons`) lists, per current-Wave Task and path, the outcome marked recorded (written at that Task's spawn) or projected (not spawned yet), every skeleton flagged `stale against revised contract`, and every stage-two problem.
+
+**Completion.** For a Task binding or claiming a frozen contract, the `declared-artifact-changed` obligation fails `declared-artifact-contract-violated`, listing every violation, when a bound export is:
+
+- `deleted` — not exported, or the file is missing;
+- `renamed` — missing while another export carries its alias;
+- `retyped` — not `export const name: Alias` (TypeScript) or `static final Alias name` (Java) with the alias imported from the types file;
+- `still unimplemented` — its initializer still holds the exact string `unimplemented: <name>` (any other throw is fine);
+
+or when a production file in the types file's language `shadows frozen ADT` (declares a type named like a **Frozen ADT** or one of its variants) or `re-lists frozen variants` (a local union or sealed hierarchy re-declaring two or more of them; the diagnostic names the `Extract<…>` remedy). The violations go into the semantic retry appendix. A read failure while judging is an `implementation-observation-unavailable` infrastructure failure: it never consumes a semantic attempt and never passes. Attested Tasks, test files, and Tasks waiving regression as `documentation-only` or `generated-artifact` owe nothing. Graphs populated before G2 carry no bindings and run unchanged.
+
+**Recovering.** A stage-two refusal means the plan and the frozen types disagree: add the missing signature to the types file through a Contract Revision (above), or correct the plan's bindings and re-populate. Never write or delete a skeleton by hand to get past it — a deleted skeleton is simply rewritten at the next spawn.
+
 ### Where does each Acceptance Contract stand?
 
 Before revising a contract, or to see which acceptance testcases are still allowed to fail, print the Contract Status:

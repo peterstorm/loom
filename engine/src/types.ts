@@ -29,7 +29,6 @@ import type { SettledFloor, SpecIndexObservation } from "./core/requirement-cove
 import type { ProofBoundaryObservation } from "./core/proof-boundary-observation";
 import type { AcceptanceContract, PlanContract } from "./core/acceptance-contract";
 import type { MutationPolicy, OwnerObligation } from "./core/owner-verification/types";
-import type { OwnerVerificationStatusReport } from "./core/owner-verification/status";
 import type { SiblingEntryPoint } from "./core/sibling-entry-point";
 import type { InvariantId } from "./core/invariant-id";
 import type { TaskId } from "./core/task-id";
@@ -839,6 +838,10 @@ export type StatusReasonKind =
   | "implementation-escalation-required"
   | "wave-gate-not-started"
   | "wave-start-not-ready"
+  /** A frozen types file no longer resolves an export binding of an
+   *  outstanding Task of the Wave (stage two, AS-051): registration refuses
+   *  the spawn until a Contract Revision or a re-planned binding repairs it. */
+  | "skeleton-bindings-unresolved"
   | "run-complete"
   /** The final Wave's gate committed and every Task is completed: the
    *  orchestration is finished and `helper complete-orchestration` retires it. */
@@ -1094,6 +1097,15 @@ export type WaveImplementationRecovery =
       /** Every failed start prerequisite, in gate order — exactly the reasons
        * `start wave-gate` refuses with before claiming a Run Directory. */
       failures: OrchestrationNonEmpty<string>;
+    }>
+  /** Implementation is owed, but stage two refuses it: a frozen types file no
+   *  longer resolves an export binding (AS-051). Registration would refuse
+   *  the spawn with these same problems, so status owes their repair. */
+  | Readonly<{
+      kind: "repair-skeleton-bindings";
+      wave: number;
+      /** One line per stage-two problem, naming the alias, binding file and types file it has. */
+      unresolved: OrchestrationNonEmpty<string>;
     }>;
 
 /** An execute Wave holds no Wave Gate registration between entering the Wave
@@ -1110,7 +1122,22 @@ export type WaveImplementationDiagnostic =
         eligible: true;
         consumesSemanticAttempt: false;
       }>;
-      recovery: Exclude<WaveImplementationRecovery, { kind: "escalate-wave-implementation" | "repair-wave-start-readiness" }>;
+      recovery: Exclude<
+        WaveImplementationRecovery,
+        { kind: "escalate-wave-implementation" | "repair-wave-start-readiness" | "repair-skeleton-bindings" }
+      >;
+    }>
+  | Readonly<{
+      kind: "skeleton-bindings-unresolved";
+      category: "skeleton-bindings-unresolved";
+      runId: OrchestrationRunId;
+      message: string;
+      retry: Readonly<{
+        kind: "advance-wave-lifecycle";
+        eligible: false;
+        consumesSemanticAttempt: false;
+      }>;
+      recovery: Extract<WaveImplementationRecovery, { kind: "repair-skeleton-bindings" }>;
     }>
   | Readonly<{
       kind: "wave-start-not-ready";
@@ -1157,15 +1184,10 @@ export type LoomStatus = Readonly<{
   next: NextActionDecision;
 }>;
 
-/**
- * The document `helper orchestration status` emits, as `--json` serializes
- * it and the human renderer reads it: the canonical `LoomStatus` with the
- * owner-verification report (G5b AD-10) beside it. `ownerVerification` is
- * required: `deriveLoomStatusFromParsedGraph` is the only producer and always
- * reports it (`not-observed` when there is nothing to report), so no renderer
- * handles an absent field. The routed `LoomStatus` stays a separate type.
- */
-export type LoomStatusDocument = LoomStatus & Readonly<{ ownerVerification: OwnerVerificationStatusReport }>;
+// `LoomStatusDocument` — the document `helper orchestration status` emits —
+// is declared beside its one producer in `core/loom-status.ts`, not here: its
+// `skeletons` report (G2 AD-13) is built from `core/skeleton/*`, which imports
+// this file, so naming it here would close an import cycle.
 
 export type WaveSpecCheckSlotAuthority = Readonly<{
   readonly slot_id: string;

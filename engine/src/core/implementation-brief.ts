@@ -37,7 +37,12 @@ import type { RedThenGreenFailureKind, TestFileClassification } from "./red-then
 import { quoteShellArgument } from "./shell-quoting";
 import { classifyTaskFiles } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
-import type { PlanInvariant, Task, WaveImplementationDispatch } from "../types";
+import { samePlanPath } from "./plan-path-match";
+import { renderSkeletonOutcome } from "./skeleton/outcomes";
+import { conformanceScope, type SkeletonGraph } from "./skeleton/scope";
+import { renderStaleSkeleton, staleSkeletons, taskSkeletonOutcomes, type UnresolvedSkeletonBinding } from "./skeleton/status";
+import type { ExportBinding, FrozenAdt, FrozenSurface, PathObservation } from "./skeleton/types";
+import type { PlanInvariant, Task, TaskGraph, WaveImplementationDispatch } from "../types";
 import { extractTaskId } from "../utils/extract-task-id";
 
 /** The binding rule documents an implementation brief can inline. */
@@ -100,6 +105,7 @@ const BRIEF_VARIABLES = [
   "plan_context",
   "invariant_ownership",
   "acceptance_contract",
+  "frozen_signatures",
   "file_list",
   "plan_file_path",
 ] as const;
@@ -134,6 +140,25 @@ export type ImplementationBriefInput = Readonly<{
   repositoryRoot: string;
   /** The operator's notes from the dispatch marker (#119); empty for none. */
   operatorNotes: readonly OperatorNote[];
+  /** What the shell observed for the Frozen Signatures section (G2 AD-13).
+   *  The brief shell always supplies it; a caller that renders a brief
+   *  without observing the paths leaves it out, and the section says so. */
+  frozenSignatures?: FrozenSignaturesInput;
+}>;
+
+/**
+ * The observation the Frozen Signatures section reads: the governing graph
+ * (its export-binding stamp, skeleton records and recorded outcomes), what
+ * is at each of the Task's production paths now with each bound path's
+ * canonical digest, each in-scope contract's frozen surface as its freeze
+ * stamps it — or the line naming why it could not be read — and every
+ * stage-two problem of the Task's own bindings, as registration meets them.
+ */
+export type FrozenSignaturesInput = Readonly<{
+  graph: TaskGraph;
+  observations: ReadonlyMap<string, PathObservation>;
+  surfaces: ReadonlyMap<string, DomainResult<FrozenSurface, string>>;
+  unresolved: readonly UnresolvedSkeletonBinding[];
 }>;
 
 export type ImplementationBrief = Readonly<{
@@ -380,8 +405,10 @@ function ownerDuties(obligation: OwnerObligation, { task, roster, contractTaskId
   return `${coverage}\n\n${mutationDuty}`;
 }
 
-/** The contract Task's instructions: write the frozen surface and stubs, so
- *  that the contract Wave's gate observes every acceptance testcase RED. */
+/** The contract Task's instructions: write the frozen surface, so that the
+ *  contract Wave's gate observes every acceptance testcase RED. With a types
+ *  file the engine writes the bound stubs at its stop (G2 AD-9, FR-041); a
+ *  `Types file: none` contract binds nothing, so its Task still stubs. */
 function contractTaskBlock(contract: AcceptanceContract): string {
   return [
     `**${contract.id}: ${contract.title}** — you are its contract Task.`,
@@ -396,7 +423,13 @@ function contractTaskBlock(contract: AcceptanceContract): string {
     ...(contract.supportedDomain === null
       ? []
       : [`- Supported domain: \`${contract.supportedDomain}\` holds the supported/unsupported table, and the relevant laws, as test cases.`]),
-    "- Stub every function the acceptance tests import, in this Task's other files, so the tests compile and FAIL by assertion or by a thrown \"not implemented\" — never by a missing import or a file that fails to load.",
+    contract.types.kind === "file"
+      ? "- The engine writes the stubs, not you. Every file the plan's `**Export bindings:**` bind to this contract gets its canonical stub " +
+        "when you stop, before the stop checks: generated from your types file, each bound export typed by its frozen alias, with a body " +
+        "that throws its `unimplemented: <name>` marker. The acceptance tests therefore import real modules and FAIL by that throw — never " +
+        "by a missing import. Do not write a bound file: it belongs to the Task that implements it, and the engine never overwrites a file " +
+        "that is already there. Anything else the tests import must exist when they run."
+      : "- Stub every function the acceptance tests import, in this Task's other files, so the tests compile and FAIL by assertion or by a thrown \"not implemented\" — never by a missing import or a file that fails to load.",
     "",
     "Your Wave Gate passes only if every acceptance testcase is collected and fails, and nothing else fails. It then freezes these files: no later Task may change them, and only an operator Contract Revision can. Do not implement the behavior.",
   ].join("\n");
@@ -453,6 +486,92 @@ function acceptanceContractSection(task: Task, contracts: readonly AcceptanceCon
     }
   });
   return blocks.length === 0 ? NO_ACCEPTANCE_CONTRACT : blocks.join("\n\n");
+}
+
+/** Literal substituted for `{frozen_signatures}` when the brief was rendered without a skeleton observation. */
+export const NO_SKELETON_OBSERVATION = "None — this brief was rendered without observing its skeleton paths.";
+/** Literal substituted for `{frozen_signatures}` on a TaskGraph populated before export bindings were stamped. */
+export const NO_EXPORT_BINDING_STAMP =
+  "None — the TaskGraph was populated before export bindings were stamped, so the engine writes no skeletons for this run.";
+/** Literal substituted for `{frozen_signatures}` when the Task owns no production file. */
+export const NO_PRODUCTION_FILES = "None — this Task owns no production file, so it has no skeleton outcome.";
+
+const FROZEN_SIGNATURES_LEAD =
+  "Each production file you own, with its skeleton outcome and the exports bound to it. An outcome not yet recorded is what the " +
+  "engine does when it registers this attempt: it writes each missing bound skeleton before your attempt starts, and never " +
+  "modifies a file that already exists.";
+
+const renderFrozenAdt = (adt: FrozenAdt): string =>
+  match(adt)
+    .with({ kind: "discriminated-union" }, ({ name, discriminant, tags }) =>
+      `${quoted(name)} (discriminated union on ${quoted(discriminant)}: ${tags.map(quoted).join(", ")})`)
+    .with({ kind: "brand" }, ({ name }) => `${quoted(name)} (brand)`)
+    .with({ kind: "sealed-interface" }, ({ name, variants }) => `${quoted(name)} (sealed interface: ${variants.map(quoted).join(", ")})`)
+    .with({ kind: "record" }, ({ name }) => `${quoted(name)} (record)`)
+    .exhaustive();
+
+/** One in-scope contract's frozen ADTs and the import rule (FR-015..FR-017), or why they could not be read. */
+function frozenAdtParagraph(contract: AcceptanceContract, surface: DomainResult<FrozenSurface, string> | undefined): string {
+  const typesFile = contract.types.kind === "file" ? ` (${quoted(contract.types.path)})` : "";
+  const head = `**Frozen ADTs of ${contract.id}**${typesFile}:`;
+  if (surface === undefined) return `${head} its frozen types file was not observed; read its ADTs there before you write any type.`;
+  if (!surface.ok) return `${head} the frozen types file could not be read (${surface.error}); registration refuses the spawn until it is repaired.`;
+  if (surface.value.adts.length === 0) return `${head} none — the types file freezes no algebraic data type.`;
+  return `${head} ${surface.value.adts.map(renderFrozenAdt).join(", ")}. Import each from the types file. Never re-declare one ` +
+    "(no local type, interface, class or record of that name), and never re-list a union's or sealed interface's variants in a " +
+    "local union or sealed type: settlement refuses either (`declared-artifact-contract-violated`).";
+}
+
+/** The frozen-signature and marker rules (FR-024) over the aliases the Task's bound exports are typed by. */
+function frozenSignatureRules(bindings: readonly ExportBinding[]): string {
+  const aliases = [...new Set(bindings.flatMap(({ exports }) => exports.map(({ alias }) => alias)))];
+  return `**Frozen signatures.** The bound exports' signatures are frozen: keep each export's name, typed by its frozen ` +
+    `alias (${aliases.map(quoted).join(", ")}) from its contract's types file; never rename, delete or re-type one. Each skeleton ` +
+    "body throws its `unimplemented: <name>` marker: replace every body, and remove every `unimplemented: <name>` marker — none " +
+    "may remain at completion. Settlement refuses a deleted, renamed, retyped or still-unimplemented bound export " +
+    "(`declared-artifact-contract-violated`).";
+}
+
+/** The stage-two problems of the Task's bindings (AS-051): registration refuses its spawn until each is repaired. */
+const unresolvedBindingsParagraph = (unresolved: readonly UnresolvedSkeletonBinding[]): string =>
+  "**Unresolved export bindings.** Registration refuses this Task's spawn while a frozen types file does not resolve " +
+  `one of its export bindings: ${unresolved.map(({ message }) => message).join("; ")}. Do not work around it: only an ` +
+  "operator Contract Revision (helper revise-contract), or a re-planned binding, repairs it.";
+
+/**
+ * The Frozen Signatures section (G2 FR-024, FR-040; an INV-4 and INV-5
+ * sibling). Per production file, its skeleton outcome — recorded or
+ * projected through `taskSkeletonOutcomes`, the one derivation status shows —
+ * with every stale flag, and the bound exports with their frozen aliases.
+ * Then the duties `conformanceScope` owes: the frozen-signature and marker
+ * rules when the scope binds an export, and each in-scope contract's frozen
+ * ADTs to import. A Task the scope exempts owes no duty, and is shown only
+ * its outcomes. Last, every stage-two problem of the Task's bindings, the
+ * same lines `helper orchestration status` blocks the spawn on.
+ */
+export function renderFrozenSignatures(task: Task, input: FrozenSignaturesInput | undefined): string {
+  if (input === undefined) return NO_SKELETON_OBSERVATION;
+  const { graph, observations, surfaces, unresolved } = input;
+  const view: SkeletonGraph = graph;
+  if (view.export_bindings === undefined) return NO_EXPORT_BINDING_STAMP;
+  const files = taskSkeletonOutcomes(graph, task.id, observations);
+  if (files.length === 0) return NO_PRODUCTION_FILES;
+  const scope = conformanceScope(graph, task);
+  const bindings = scope.kind === "owed" ? scope.bindings : [];
+  const stale = staleSkeletons(graph);
+  const fileLines = files.flatMap(({ path, outcome }) => {
+    const flag = stale.find((entry) => samePlanPath(entry.path, path));
+    const exports = bindings.filter((binding) => samePlanPath(binding.path, path))
+      .flatMap(({ contract, exports: bound }) => bound.map(({ name, alias }) => `  - \`${name}: ${alias}\` (${contract})`));
+    return [`- ${quoted(path)} — ${renderSkeletonOutcome(outcome)}${flag === undefined ? "" : `; ${renderStaleSkeleton(flag)}`}`, ...exports];
+  });
+  return [
+    FROZEN_SIGNATURES_LEAD,
+    fileLines.join("\n"),
+    ...(bindings.length === 0 ? [] : [frozenSignatureRules(bindings)]),
+    ...(scope.kind === "owed" ? scope.contracts.map((contract) => frozenAdtParagraph(contract, surfaces.get(contract.id))) : []),
+    ...(unresolved.length === 0 ? [] : [unresolvedBindingsParagraph(unresolved)]),
+  ].join("\n\n");
 }
 
 /** The I6 failure kinds the retry this dispatch admits inherits, in receipt order. */
@@ -671,6 +790,7 @@ export function renderImplementationBrief(
     plan_context: task.plan_context?.trim() || "None recorded for this Task; read the full plan.",
     invariant_ownership: invariantOwnership(task, input.roster, input.contracts, input.ownership),
     acceptance_contract: acceptanceContractSection(task, input.contracts, input.roster),
+    frozen_signatures: renderFrozenSignatures(task, input.frozenSignatures),
     file_list: bulleted(task.file_list ?? [], "None declared."),
     plan_file_path: input.planFile ?? "none recorded",
   };

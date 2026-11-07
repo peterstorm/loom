@@ -30,14 +30,20 @@
  * refresh; refresh or re-record), flag a record stale exactly when the owner
  * judges its file touched, and agree with the owner's outcome for the path.
  *
- * Later Waves add the status and brief rows, each fed this same graph and
- * observation set.
+ * Sibling rows (T14): `helper orchestration status`'s `skeletonStatusReport`
+ * and the brief's `renderFrozenSignatures`, fed this same graph (Wave 2
+ * current) and observation set, list exactly the owner's outcome per path —
+ * status as `projected` where registration recorded none, and the recorded
+ * one where it did — each rendered with the owner's exact string on the line
+ * naming the path.
  */
 
 import { describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
+import { renderFrozenSignatures } from "../../src/core/implementation-brief";
 import { isUntouchedSkeleton, renderSkeletonOutcome, skeletonOutcomes } from "../../src/core/skeleton/outcomes";
 import type { SkeletonGraph } from "../../src/core/skeleton/scope";
+import { renderSkeletonStatus, skeletonStatusReport } from "../../src/core/skeleton/status";
 import type {
   ExportBinding,
   GeneratedSkeleton,
@@ -394,4 +400,63 @@ describe("INV-4 sibling: planSkeletonRevision (the Contract Revision) agrees wit
       if (stale) expect(T2_OUTCOMES.get(record.path), record.path).toEqual(EXISTS);
     }
   });
+});
+
+/** The matrix graph with Wave 2 current: the Wave its implementation Tasks run in. */
+const WAVE_2: SkeletonGraph = { ...GRAPH, current_wave: 2 };
+const WAVE_2_TASKS = ["T1", "T2", "T3", "T4"] as const;
+
+describe("INV-4 sibling: skeletonStatusReport (helper orchestration status) agrees with the owner", () => {
+  const report = skeletonStatusReport(WAVE_2, OBSERVATIONS, []);
+
+  it("lists exactly the owner's outcome for every path of every current-Wave Task, projected where none is recorded", () => {
+    expect(report.kind).toBe("reported");
+    if (report.kind !== "reported") return;
+    expect(report.tasks.map(({ taskId }) => taskId)).toEqual([...WAVE_2_TASKS]);
+    for (const { taskId, files } of report.tasks) {
+      expect(files.map(({ path, outcome }) => ({ path, outcome })), taskId).toEqual(skeletonOutcomes(WAVE_2, taskId, OBSERVATIONS));
+      expect(files.every(({ basis }) => basis === "projected"), taskId).toBe(true);
+    }
+  });
+
+  it("renders each path with the owner's exact string", () => {
+    const lines = renderSkeletonStatus(report);
+    for (const taskId of WAVE_2_TASKS) {
+      for (const { path, outcome } of skeletonOutcomes(WAVE_2, taskId, OBSERVATIONS)) {
+        expect(lines, path).toContain(`  - ${taskId} ${path}: ${renderSkeletonOutcome(outcome)} (projected)`);
+      }
+    }
+  });
+
+  it("shows a recorded outcome where registration recorded one, and the owner's projection everywhere else", () => {
+    const recorded: SkeletonOutcome = written("contract-stub");
+    const graph: SkeletonGraph = {
+      ...WAVE_2,
+      tasks: WAVE_2.tasks.map((entry) => (entry.id === "T4"
+        ? { ...entry, skeleton_outcomes: [{ path: "src/typed-helper.ts", outcome: recorded }] }
+        : entry)),
+    };
+    const files = (taskId: string) => {
+      const reported = skeletonStatusReport(graph, OBSERVATIONS, []);
+      return reported.kind === "reported" ? reported.tasks.find((entry) => entry.taskId === taskId)?.files : undefined;
+    };
+    expect(files("T4")).toEqual([{ path: "src/typed-helper.ts", outcome: recorded, basis: "recorded" }]);
+    expect(files("T2")?.map(({ path, outcome }) => ({ path, outcome }))).toEqual(skeletonOutcomes(graph, "T2", OBSERVATIONS));
+  });
+});
+
+describe("INV-4 sibling: renderFrozenSignatures (the implementation brief) agrees with the owner", () => {
+  for (const taskId of WAVE_2_TASKS) {
+    it(`${taskId}: states exactly the owner's outcome, with its exact string, on the line naming each path`, () => {
+      const subject = WAVE_2.tasks.find(({ id }) => id === taskId);
+      if (subject === undefined) throw new Error(taskId);
+      const section = renderFrozenSignatures(subject, { graph: WAVE_2, observations: OBSERVATIONS, surfaces: new Map(), unresolved: [] });
+      const outcomes = skeletonOutcomes(WAVE_2, taskId, OBSERVATIONS);
+      for (const { path, outcome } of outcomes) {
+        expect(section.split("\n"), path).toContain(`- \`${path}\` — ${renderSkeletonOutcome(outcome)}`);
+      }
+      const listed = section.split("\n").filter((line) => line.startsWith("- `"));
+      expect(listed).toHaveLength(outcomes.length);
+    });
+  }
 });

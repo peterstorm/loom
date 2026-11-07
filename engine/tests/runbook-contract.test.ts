@@ -8,6 +8,9 @@ import {
   PRIMARY_AXES,
   TESTABILITY_BARS,
 } from "../src/core/panel-contract";
+import { parseExportBindings } from "../src/core/skeleton/bindings";
+import { renderSkeletonOutcome } from "../src/core/skeleton/outcomes";
+import type { SkeletonOutcome } from "../src/core/skeleton/types";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const read = (...parts: string[]) => readFileSync(join(REPO_ROOT, ...parts), "utf-8");
@@ -274,5 +277,124 @@ describe("the smoke scripts this file's own header cites are actually run", () =
         `${script} is named by test:smoke but not on disk`,
       ).toBe(true);
     }
+  });
+});
+
+/**
+ * G2 skeletons: the prose that teaches the plan grammar and the contract
+ * Task's duties is executable for a model, exactly like the runbooks above.
+ * Every pin here is derived from code where code exists: the binding examples
+ * are run through the real `parseExportBindings`, and the outcome wording is
+ * read off `renderSkeletonOutcome`, so a grammar or wording change that the
+ * prose never followed turns red here.
+ */
+describe("G2 skeleton prose ↔ the skeleton engine", () => {
+  const flat = (text: string) => text.replace(/\s+/g, " ");
+  const decompose = read("commands", "templates", "phase-decompose.md");
+  const architecture = read("commands", "templates", "phase-architecture.md");
+  const planTemplate = read("references", "plan-template.md");
+  const executableModels = read("references", "executable-models.md");
+  const context = read("CONTEXT.md");
+  const operations = read("docs", "operations.md");
+  const loomRunbook = read("commands", "loom.md");
+
+  /** Rule 12 of the decompose template, from its heading to the next rule. */
+  const rule12 = (() => {
+    const start = decompose.indexOf("12. **Contract tasks");
+    const end = decompose.indexOf("\n---", start);
+    return start === -1 ? "" : decompose.slice(start, end === -1 ? undefined : end);
+  })();
+
+  /** Every `**Export bindings:**` block the prose shows, as the engine reads it. */
+  const bindingExamples = (prose: string) => {
+    const blocks = [...prose.matchAll(/^\*\*Export bindings:\*\*\n(?:- .*\n?)+/gm)].map((m) => m[0]);
+    return blocks.map((block) => parseExportBindings(block));
+  };
+
+  it("AS-045: decompose rule 12 says the engine writes the contract stubs and the contract Task no longer does", () => {
+    expect(rule12, "rule 12 not found").not.toBe("");
+    const text = flat(rule12);
+    expect(text).toContain("The engine writes the contract stubs");
+    expect(text).toContain("the contract task never writes a stub");
+    // The pre-G2 duty is gone: the contract Task's file_list no longer
+    // carries the stub files the acceptance tests import.
+    expect(text).not.toContain("plus the stub files the acceptance tests import");
+    expect(text).toContain("A bound path never goes in the contract task's `file_list`");
+  });
+
+  it("AS-045: rule 12 tells decompose to copy **Export bindings:** verbatim and to put each bound path on a dependent non-contract task", () => {
+    const text = flat(rule12);
+    expect(text).toContain("**Export bindings:**");
+    expect(text).toContain("verbatim");
+    expect(text).toContain("depends, directly or transitively, on the contract task");
+  });
+
+  it.each([
+    ["commands/templates/phase-decompose.md", decompose],
+    ["commands/templates/phase-architecture.md", architecture],
+  ])("FR-042: %s teaches the binding grammar, one contract per file, and the frozen-ADT rule", (_name, prose) => {
+    const text = flat(prose);
+    expect(text).toContain("**Export bindings:**");
+    // Case-insensitive: the rule may open a sentence or a bold run-in heading.
+    expect(text.toLowerCase()).toContain("one contract per file");
+    expect(text.toLowerCase()).toContain("frozen adt");
+  });
+
+  it("FR-042: the architecture template's binding grammar example parses cleanly through parseExportBindings", () => {
+    const parsed = bindingExamples(architecture);
+    expect(parsed.length, "no **Export bindings:** example in the architecture template").toBeGreaterThan(0);
+    for (const { bindings, problems } of parsed) {
+      expect(problems).toEqual([]);
+      expect(bindings.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("FR-042: the architecture template names the frozen-ADT rule's two refusals and its remedy", () => {
+    const text = flat(architecture);
+    expect(text).toContain("shadows frozen ADT");
+    expect(text).toContain("re-lists frozen variants");
+    expect(text).toContain("Extract<");
+  });
+
+  it("the plan template shows **Export bindings:** under File Structure, and its example parses", () => {
+    const section = planTemplate.indexOf("## File Structure");
+    expect(section).toBeGreaterThan(-1);
+    const parsed = bindingExamples(planTemplate.slice(section));
+    expect(parsed.length).toBeGreaterThan(0);
+    for (const { bindings, problems } of parsed) {
+      expect(problems).toEqual([]);
+      expect(bindings.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("the executable-models reference documents bindings, the Java holder shape and frozen ADTs", () => {
+    const text = flat(executableModels);
+    expect(text).toContain("**Export bindings:**");
+    expect(text).toContain("exactly one top-level `public` interface or `final class`");
+    expect(text).toContain("frozen ADT");
+    expect(text).toContain("unimplemented: <name>");
+  });
+
+  it.each(["Skeleton", "Export Binding", "Frozen ADT"])("FR-044: CONTEXT.md defines the term %s", (term) => {
+    expect(context).toMatch(new RegExp(`^\\*\\*${term}\\*\\*:\\n\\S`, "m"));
+  });
+
+  it("operations documents every skeleton outcome in the engine's exact wording", () => {
+    const outcomes: readonly SkeletonOutcome[] = [
+      { kind: "skeleton-written", origin: "spawn" },
+      { kind: "no-bound-exports" },
+      { kind: "contract-has-no-types-file" },
+      { kind: "unsupported-language", reason: "other-extension" },
+      { kind: "exists-not-skeletonized" },
+    ];
+    const missing = outcomes.map(renderSkeletonOutcome).filter((wording) => !operations.includes(wording));
+    expect(missing, `docs/operations.md never shows: ${missing.join(", ")}`).toEqual([]);
+    expect(operations).toContain("stale against revised contract");
+    expect(operations).toContain("declared-artifact-contract-violated");
+  });
+
+  it("the loom runbook's execute loop names the skeleton outcomes and the skeleton-bindings-unresolved blocker", () => {
+    expect(loomRunbook).toContain("skeleton-bindings-unresolved");
+    expect(loomRunbook).toContain(renderSkeletonOutcome({ kind: "exists-not-skeletonized" }));
   });
 });

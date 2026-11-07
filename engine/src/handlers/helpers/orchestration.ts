@@ -103,14 +103,19 @@ import {
   type ImplementationBrief,
   type OperatorNote,
 } from "../../core/implementation-brief";
-import { renderTaskImplementationBrief } from "../../orchestration/implementation-brief";
+import { observeSkeletons, renderTaskImplementationBrief } from "../../orchestration/implementation-brief";
+import {
+  skeletonReportScope,
+  skeletonStatusReport,
+  skeletonsUnobserved,
+  type SkeletonStatusReport,
+} from "../../core/skeleton/status";
 import { parseTaskGraph, StateManager, type ActiveWaveGateAbandonmentResult } from "../../state-manager";
 import { observeAnyActiveSubagent } from "../../machine";
 import type {
   ActiveWaveGateRegistration,
   HookHandler,
   HookResult,
-  LoomStatusDocument,
   Task,
   WaveCompletionResultObservation,
 } from "../../types";
@@ -123,6 +128,7 @@ import {
   renderLoomStatusJson,
   type ActiveRunDirectoryObservation,
   type AdvisoryApprovalObservation,
+  type LoomStatusDocument,
   type StatusDeps,
 } from "../../core/loom-status";
 import { inspectFilePresence, loadPlanModelsSource } from "./complete-wave-gate";
@@ -566,6 +572,28 @@ function implementationReservationObservation(
     : roster;
 }
 
+/**
+ * The skeleton report (AD-13, FR-040): observe the current Wave's paths and
+ * resolve its outstanding Tasks' bindings against their frozen types files
+ * (`observeSkeletons`, the brief's own observation), then let the pure report
+ * decide every outcome. A graph or path status cannot read is reported
+ * `unobserved`, naming why; registration stays the authority that refuses
+ * a spawn on what it cannot read.
+ */
+function skeletonStatusObservation(
+  parsedGraph: ReturnType<typeof parseStatusGraph>,
+  statePath: string,
+): SkeletonStatusReport {
+  if (!parsedGraph.ok) return skeletonsUnobserved(`protected graph unavailable: ${parsedGraph.error}`);
+  const graph = parsedGraph.value;
+  const scope = skeletonReportScope(graph);
+  if (scope.kind === "not-applicable") return scope;
+  const observed = observeSkeletons(observeTaskGraphProjectBoundary(statePath).root, graph, scope.tasks, scope.outstanding);
+  return observed.ok
+    ? skeletonStatusReport(graph, observed.value.observations, observed.value.unresolved)
+    : skeletonsUnobserved(observed.error);
+}
+
 export async function currentOrchestrationStatus(
   args: readonly string[] = [],
   statePath: string = TASK_GRAPH_PATH,
@@ -591,6 +619,7 @@ async function deriveCurrentOrchestrationStatus(
     currentWaveWorkspace: workspace,
     currentWaveCompletionResult: completionResult,
     implementationReservations: implementationReservationObservation(parsedGraph, statePath),
+    skeletons: skeletonStatusObservation(parsedGraph, statePath),
   });
   const base = binding.observation;
   const observation: ActiveRunDirectoryObservation = binding.kind === "bound"

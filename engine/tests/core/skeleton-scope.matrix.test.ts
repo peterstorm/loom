@@ -17,7 +17,13 @@
  * Sibling rows (T12): the settlement observation `observeContractConformance`
  * runs every case above over files on disk that each break the frozen
  * contract, and judges exactly the scope's files, or reports `not-owed`
- * exactly when the scope does. A later Wave adds the implementation-brief row.
+ * exactly when the scope does.
+ *
+ * Sibling rows (T14): the implementation brief's `renderFrozenSignatures`,
+ * fed every case above, names the frozen ADTs of exactly the scope's
+ * contracts, lists the bound exports of exactly the scope's bindings, and
+ * states the frozen-signature and marker rules exactly when the scope binds
+ * an export — nothing at all when the scope is `not-owed`.
  */
 
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -26,7 +32,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import { skeletonLanguageOf } from "../../src/core/skeleton/language";
 import { conformanceScope, type ConformanceScope, type SkeletonGraph } from "../../src/core/skeleton/scope";
-import type { ExportBinding, Identifier } from "../../src/core/skeleton/types";
+import { renderFrozenSignatures } from "../../src/core/implementation-brief";
+import type { DomainResult } from "../../src/core/orchestration-contract";
+import type { ExportBinding, FrozenSurface, Identifier } from "../../src/core/skeleton/types";
 import { freezeVerificationManifest } from "../../src/core/verification-manifest";
 import type { StoredVerificationPolicy } from "../../src/core/verification-policy";
 import type { Task, TaskCommonMetadata } from "../../src/types";
@@ -549,5 +557,58 @@ describe("the observation inside settleExactImplementation", () => {
     const history = stored.implementation_attempt_history as readonly Record<string, unknown>[];
     expect(history.at(-1)).toMatchObject({ transition: "infrastructure-blocked", consumesSemanticAttempt: false });
     expect(stored.status).toBe("pending");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sibling: the implementation brief's duty section (T14)
+// ---------------------------------------------------------------------------
+
+/** One frozen ADT per types-file contract, named after it, so the brief's
+ *  ADT paragraphs say which contracts it put in scope. */
+const SURFACES: ReadonlyMap<string, DomainResult<FrozenSurface, string>> = new Map(ALL_CONTRACTS.flatMap((entry) => {
+  if (entry.types.kind !== "file") return [];
+  const adts = [{ kind: "brand", name: `${entry.id.replace("-", "")}Id` }] as const;
+  const surface: FrozenSurface = entry.types.path.endsWith(".java")
+    ? { language: "java", path: entry.types.path, package: "com.acme", holder: "OrderContract", aliases: [], adts }
+    : { language: "typescript", path: entry.types.path, aliases: [], adts };
+  return [[entry.id, { ok: true, value: surface }] as const];
+}));
+
+type BriefDuties = Readonly<{ contracts: readonly string[]; boundPaths: readonly string[] }>;
+
+/** What the brief lists as duties: the contracts whose frozen ADTs it names,
+ *  and the files whose bound exports it lists. */
+function briefDuties(graph: SkeletonGraph, subject: Task): BriefDuties {
+  const section = renderFrozenSignatures(subject, { graph, observations: new Map(), surfaces: SURFACES, unresolved: [] });
+  const lines = section.split("\n");
+  const contracts = [...section.matchAll(/\*\*Frozen ADTs of (CT-\d+)\*\*/g)].map((found) => found[1] ?? "");
+  const boundPaths = lines.flatMap((line, index) => {
+    const file = /^- `([^`]+)` — /.exec(line)?.[1];
+    return file !== undefined && (lines[index + 1] ?? "").startsWith("  - `priceOrder: PriceOrderFn`") ? [file] : [];
+  });
+  return { contracts, boundPaths };
+}
+
+const scopeDuties = (scope: ConformanceScope): BriefDuties =>
+  scope.kind === "not-owed"
+    ? { contracts: [], boundPaths: [] }
+    : { contracts: scope.contracts.map(({ id }) => id), boundPaths: scope.bindings.map(({ path }) => path) };
+
+describe("INV-5 sibling: the brief lists exactly the owner's duties", () => {
+  it.each(MATRIX)("$name", ({ subject, bindings = [], others = [] }) => {
+    const graph = graphOf([subject, ...others], bindings);
+    expect(briefDuties(graph, subject)).toEqual(scopeDuties(conformanceScope(graph, subject)));
+  });
+
+  it("names the frozen-signature and marker rules exactly when the scope binds an export", () => {
+    for (const { subject, bindings = [], others = [] } of MATRIX) {
+      const graph = graphOf([subject, ...others], bindings);
+      const scope = conformanceScope(graph, subject);
+      const section = renderFrozenSignatures(subject, { graph, observations: new Map(), surfaces: SURFACES, unresolved: [] });
+      const binds = scope.kind === "owed" && scope.bindings.length > 0;
+      expect(/signatures are frozen/.test(section), subject.id).toBe(binds);
+      expect(section.includes("`unimplemented: <name>`"), subject.id).toBe(binds);
+    }
   });
 });

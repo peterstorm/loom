@@ -1,0 +1,159 @@
+/**
+ * The skeleton report of `helper orchestration status` (AD-13, FR-040; an
+ * INV-4 sibling): for every Task of the current Wave, every non-test
+ * file_list path with exactly one skeleton outcome, every stale skeleton
+ * record (FR-033), and every stage-two problem that keeps the Wave from
+ * spawning (AS-051).
+ *
+ * An outcome is `recorded` when the Task's registration recorded one for the
+ * path (`skeleton_outcomes`, the outcome the engine acted on), else
+ * `projected`: what registration would decide now. Both come from the one
+ * derivation, `skeletonOutcomes` — this module never compares digests and
+ * never orders the outcomes itself. The implementation brief reads each
+ * Task's outcomes through `taskSkeletonOutcomes` too, so status and brief
+ * never disagree on a path.
+ *
+ * Pure: the shell observes the paths and resolves the bindings, and passes
+ * both in. A stage-two problem arrives with its rendered line, because its
+ * renderer is the registration shell's.
+ */
+
+import { match } from "ts-pattern";
+import type { SkeletonProblem } from "../contract-revision";
+import { samePlanPath } from "../plan-path-match";
+import type { Task, TaskGraph } from "../../types";
+import { renderSkeletonOutcome, skeletonOutcomes } from "./outcomes";
+import type { SkeletonGraph } from "./scope";
+import type { PathObservation, PathSkeletonOutcome, SkeletonOutcome } from "./types";
+
+/** Whether an outcome is the one registration recorded, or the one it would decide now. */
+export type SkeletonOutcomeBasis = "recorded" | "projected";
+
+export type FileSkeletonStatus = Readonly<{ path: string; outcome: SkeletonOutcome; basis: SkeletonOutcomeBasis }>;
+
+export type TaskSkeletonStatus = Readonly<{ taskId: string; files: readonly FileSkeletonStatus[] }>;
+
+/** A skeleton a Contract Revision left on disk because it had been modified. */
+export type StaleSkeleton = Readonly<{ path: string; contract: string; stale: Readonly<{ revision: number }> }>;
+
+/** One stage-two problem and the line that names it. */
+export type UnresolvedSkeletonBinding = Readonly<{ problem: SkeletonProblem; message: string }>;
+
+export type SkeletonStatusReport =
+  /** Nothing to report: no execute Wave is current, or the TaskGraph carries no binding stamp. */
+  | Readonly<{ kind: "not-applicable"; reason: string }>
+  /** The shell could not observe the paths or the frozen types files. */
+  | Readonly<{ kind: "unobserved"; reason: string }>
+  | Readonly<{
+      kind: "reported";
+      wave: number;
+      /** Every Task of the Wave, in graph order, each path in file_list order. */
+      tasks: readonly TaskSkeletonStatus[];
+      /** Every stale skeleton record, of any Wave, in record order. */
+      stale: readonly StaleSkeleton[];
+      /** Every stage-two problem of the Wave's outstanding Tasks. */
+      unresolved: readonly UnresolvedSkeletonBinding[];
+    }>;
+
+/** Which Tasks a report covers, and whose bindings must resolve before the Wave spawns. */
+export type SkeletonReportScope =
+  | Readonly<{ kind: "not-applicable"; reason: string }>
+  | Readonly<{
+      kind: "wave";
+      wave: number;
+      /** Every Task of the current Wave: the ones whose paths are observed and reported. */
+      tasks: readonly Task[];
+      /** Those not yet implemented or completed: the ones whose bindings must resolve. */
+      outstanding: readonly Task[];
+    }>;
+
+/** A Task as registration writes it: `skeleton_outcomes` is the G2 field the State File wire proves. */
+type RecordedOutcomeTask = Task & Readonly<{ skeleton_outcomes?: readonly PathSkeletonOutcome[] }>;
+
+const notApplicable = (reason: string): Readonly<{ kind: "not-applicable"; reason: string }> =>
+  Object.freeze({ kind: "not-applicable", reason });
+
+export const skeletonsUnobserved = (reason: string): SkeletonStatusReport => Object.freeze({ kind: "unobserved", reason });
+
+export function skeletonReportScope(graph: TaskGraph): SkeletonReportScope {
+  const view: SkeletonGraph = graph;
+  if (graph.current_phase !== "execute" || graph.current_wave === undefined) return notApplicable("no execute Wave is current");
+  if (view.export_bindings === undefined) {
+    return notApplicable("the TaskGraph was populated before export bindings were stamped, so the engine writes no skeletons");
+  }
+  const wave = graph.current_wave;
+  const tasks = Object.freeze(graph.tasks.filter((task) => task.wave === wave));
+  return Object.freeze({
+    kind: "wave",
+    wave,
+    tasks,
+    outstanding: Object.freeze(tasks.filter(({ status }) => status !== "implemented" && status !== "completed")),
+  });
+}
+
+/**
+ * Exactly one outcome per non-test file_list path of the Task, in file_list
+ * order: the recorded one where registration recorded it, else the one
+ * `skeletonOutcomes` projects from the observations.
+ */
+export function taskSkeletonOutcomes(
+  graph: TaskGraph,
+  taskId: string,
+  observations: ReadonlyMap<string, PathObservation>,
+): readonly FileSkeletonStatus[] {
+  const owner: RecordedOutcomeTask | undefined = graph.tasks.find(({ id }) => id === taskId);
+  const recorded = owner?.skeleton_outcomes ?? [];
+  return Object.freeze(skeletonOutcomes(graph, taskId, observations).map(({ path, outcome }): FileSkeletonStatus => {
+    const kept = recorded.find((entry) => samePlanPath(entry.path, path));
+    return Object.freeze(kept === undefined
+      ? { path, outcome, basis: "projected" }
+      : { path, outcome: kept.outcome, basis: "recorded" });
+  }));
+}
+
+/** Every stale skeleton record of the graph, in record order. */
+export function staleSkeletons(graph: TaskGraph): readonly StaleSkeleton[] {
+  const view: SkeletonGraph = graph;
+  return Object.freeze((view.skeletons ?? []).flatMap(({ path, contract, stale }) =>
+    stale === null ? [] : [Object.freeze({ path, contract, stale })]));
+}
+
+export function skeletonStatusReport(
+  graph: TaskGraph,
+  observations: ReadonlyMap<string, PathObservation>,
+  unresolved: readonly UnresolvedSkeletonBinding[],
+): SkeletonStatusReport {
+  const scope = skeletonReportScope(graph);
+  if (scope.kind === "not-applicable") return scope;
+  return Object.freeze({
+    kind: "reported",
+    wave: scope.wave,
+    tasks: Object.freeze(scope.tasks.map(({ id }) =>
+      Object.freeze({ taskId: id, files: taskSkeletonOutcomes(graph, id, observations) }))),
+    stale: staleSkeletons(graph),
+    unresolved: Object.freeze([...unresolved]),
+  });
+}
+
+/** The lines naming every stage-two problem the report carries: what blocks the spawn. */
+export const unresolvedSkeletonBindings = (report: SkeletonStatusReport): readonly string[] =>
+  report.kind === "reported" ? report.unresolved.map(({ message }) => message) : [];
+
+/** The FR-033 flag, with the contract and revision that left the skeleton stale. */
+export const renderStaleSkeleton = ({ contract, stale }: StaleSkeleton): string =>
+  `stale against revised contract ${contract} (revision ${stale.revision})`;
+
+/** The human status lines: one per path with its exact outcome string and basis, then each stale flag and problem. */
+export function renderSkeletonStatus(report: SkeletonStatusReport): readonly string[] {
+  return match(report)
+    .with({ kind: "not-applicable" }, ({ reason }) => [`- skeletons: not applicable (${reason})`])
+    .with({ kind: "unobserved" }, ({ reason }) => [`- skeletons: unobserved (${reason})`])
+    .with({ kind: "reported" }, ({ wave, tasks, stale, unresolved }) => [
+      `- skeletons: Wave ${wave}`,
+      ...tasks.flatMap(({ taskId, files }) =>
+        files.map(({ path, outcome, basis }) => `  - ${taskId} ${path}: ${renderSkeletonOutcome(outcome)} (${basis})`)),
+      ...stale.map((entry) => `  - ${entry.path}: ${renderStaleSkeleton(entry)}`),
+      ...unresolved.map(({ message }) => `  - unresolved: ${message}`),
+    ])
+    .exhaustive();
+}

@@ -125,6 +125,12 @@ The engine derives this section from the plan's `## Invariants`: a rule the plan
 
 The engine derives this section from the plan's `## Contracts` and the TaskGraph's Acceptance Freeze. A contract's types file and acceptance tests are written once, by its contract Task, and observed failing at that Task's Wave Gate; from then on every Wave Gate proves their bytes unchanged and the testcases of every completed Requirement passing.
 
+## Frozen Signatures — BINDING
+
+{frozen_signatures}
+
+The engine derives this section from the TaskGraph's export-binding stamp, its skeleton records and the frozen types files on disk, through the same derivation `helper orchestration status` shows. A skeleton is yours to fill, never to re-sign: if a frozen signature is wrong, stop and report it, because only an operator Contract Revision changes a types file.
+
 ## Files to Create/Modify
 
 {file_list}
