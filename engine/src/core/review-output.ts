@@ -231,8 +231,19 @@ function parseCurrentReviewerEvidence(
   const payload = parsed.value;
   const subject = authority.subject;
   if (payload.kind !== subject.kind) return protocolFailure("binding-mismatch", "/kind", "payload kind must match issued subject");
-  if (payload.findings.some(({ file }) => file !== null && !scopeCovers(subject.scope, file))) {
-    return protocolFailure("out-of-scope", "/findings", "finding location is outside the frozen scope");
+  // Named, not just counted. `finding location is outside the frozen scope`
+  // told an agent that SOMETHING was out of scope and nothing else, so the one
+  // action that could fix it — move or drop finding N — was invisible; the
+  // historical v1 path has always named `findings[i].file` and the path, and a
+  // reviewer that loses an attempt to a re-derivable defect loses the run.
+  const outside = payload.findings.findIndex(({ file }) => file !== null && !scopeCovers(subject.scope, file));
+  if (outside >= 0) {
+    const file = payload.findings[outside]!.file;
+    return protocolFailure(
+      "out-of-scope",
+      `/findings/${outside}/file`,
+      `findings[${outside}].file is outside the frozen review scope: ${file}`,
+    );
   }
   const drafts = Object.freeze(payload.findings.map((draft): CurrentDraftFinding => Object.freeze({ protocolVersion: 2, ...draft })));
   const counts = reviewFindingCounts(drafts);

@@ -20,6 +20,31 @@ const rejected = (
 }));
 
 /**
+ * The schema violation in words, bounded. A retry preamble that names only
+ * WHERE (`/findings/2/basis/evidence/preconditions`) leaves the agent guessing
+ * WHAT — `expected tuple, received string`, the actual defect, sat one field
+ * away in the zod issue and was discarded. Bounded because a refinement message
+ * may interpolate payload text: the preamble travels to an agent and an
+ * operator, so it must not be able to grow with the input.
+ */
+function violationReason(message: string): string {
+  const flat = message.replace(/[\p{Cc}\p{Cf}\p{Cs}]+/gu, " ").trim();
+  return flat.length > 240 ? `${flat.slice(0, 240)}…` : flat;
+}
+
+/** The ONE wording of a schema refusal: WHERE (pointer) and WHY (the defect). */
+function schemaRefusal(
+  contract: "v2" | "standalone v3",
+  issue: Readonly<{ path: readonly PropertyKey[]; message: string }> | undefined,
+): DomainResult<never, ReviewerProtocolFailure> {
+  return rejected(
+    "invalid-payload",
+    `Reviewer payload does not conform to the issued ${contract} schema: ${violationReason(issue?.message ?? "no violation reported")}`,
+    pointer(issue?.path ?? []),
+  );
+}
+
+/**
  * The characters of `text` that lie OUTSIDE JSON string literals, with their
  * indices. The one place the quote/escape rules live: both scans below consume
  * it, so the depth precheck and candidate extraction cannot disagree about
@@ -202,6 +227,11 @@ export function parseBoundedReviewerJson(rawBytes: Uint8Array, maximumBytes: num
  * parse already knows WHY (code/message/path/byteOffset) and the caller knows
  * HOW BIG the captured bytes were; the attempt-2 preamble must name both so
  * the next emission can self-correct instead of re-emitting the same shape.
+ *
+ * The pointer and the byte offset are INDEPENDENT facts: a schema violation
+ * reports a JSON pointer and no offset, a grammar violation an offset and no
+ * pointer. Rendering the pointer only beside an offset silently dropped it for
+ * every schema failure — the rejection an agent most needs located.
  * Above the model-reliability ceiling the guidance tells the agent to compress
  * (long re-verification reasons are the usual size driver); below it, to
  * validate before finalizing. Pure; the caller hands it the failure and the
@@ -211,9 +241,8 @@ export function renderReviewerPayloadDiagnostic(
   failure: ReviewerProtocolFailure,
   payloadByteLength: number,
 ): string {
-  const located = failure.byteOffset === undefined
-    ? failure.message
-    : `${failure.message}${failure.path === "" ? "" : ` at ${failure.path}`} (byte ${failure.byteOffset})`;
+  const located = `${failure.message}${failure.path === "" ? "" : ` at ${failure.path}`}` +
+    (failure.byteOffset === undefined ? "" : ` (byte ${failure.byteOffset})`);
   const guidance = payloadByteLength > REVIEWER_PAYLOAD_LIMITS.retryGuidanceBytes
     ? `keep the final JSON under ${REVIEWER_PAYLOAD_LIMITS.retryGuidanceBytes} bytes — compress re-verification reasons to one sentence per prior finding and escape every quote inside prose`
     : `validate the emitted JSON with JSON.parse before finalizing`;
@@ -230,8 +259,8 @@ export function parseStandaloneReviewerPayloadV3(rawBytes: Uint8Array): DomainRe
     return rejected("invalid-payload", "Standalone v3 inventory exceeds its pre-copy count budget.");
   }
   const parsed = standaloneReviewerPayloadV3Schema.safeParse(value);
-  return parsed.success ? success(parsed.data)
-    : rejected("invalid-payload", "Reviewer payload does not conform to the issued standalone v3 schema.", pointer(parsed.error.issues[0]?.path ?? []));
+  if (parsed.success) return success(parsed.data);
+  return schemaRefusal("standalone v3", parsed.error.issues[0]);
 }
 
 export function parseReviewerPayloadV2(rawBytes: Uint8Array): DomainResult<ReviewerPayloadV2, ReviewerProtocolFailure> {
@@ -239,9 +268,7 @@ export function parseReviewerPayloadV2(rawBytes: Uint8Array): DomainResult<Revie
   if (!decoded.ok) return decoded;
   try {
     const parsed = reviewerPayloadV2Schema.safeParse(decoded.value);
-    if (!parsed.success) {
-      return rejected("invalid-payload", "Reviewer payload does not conform to the issued v2 schema.", pointer(parsed.error.issues[0]?.path ?? []));
-    }
+    if (!parsed.success) return schemaRefusal("v2", parsed.error.issues[0]);
     return success(parsed.data);
   } catch {
     // Never expose a dependency exception: it can contain the complete input.

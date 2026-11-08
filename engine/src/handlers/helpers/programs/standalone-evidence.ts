@@ -24,6 +24,7 @@ import {
 } from '../../../core/standalone-review';
 import { bindStandaloneCaptureAuthority, captureStandaloneReviewerBytes, completeStandaloneReviewerCapture } from '../../../core/standalone-reviewer-capture';
 import { serializeAdjudicatedStandaloneReview } from '../../../core/standalone-review-records';
+import { renderReviewerPayloadDiagnostic } from '../../../core/reviewer-protocol';
 import { admitStandaloneTranscript, type StandaloneTranscriptAdmission } from '../../../core/standalone-transcript-admission';
 import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion } from '../../../core/standalone-refutation-completion';
 import { buildStandaloneFindingBrief, defaultRefutationThreshold, reviewSignals, selectReviewLenses } from '../../../core/review-panel';
@@ -712,7 +713,13 @@ export function admitCapturedStandaloneTranscript(
   if (!protocol.ok) throw new Error(protocol.error.message);
   if (protocol.value.protocolVersion === 3) {
     const admitted = admitStandaloneSuccessorReviewer(protocol.value, bytes);
-    return admitted.ok ? { ok: true } : { ok: false, problems: [admitted.error.message] };
+    if (admitted.ok) return { ok: true };
+    // Same retry-facing diagnostic as the v1/v2 admission: a rejected payload
+    // must carry WHERE and WHY plus its size, or attempt 2 cannot self-correct.
+    // A lineage/assessment refusal carries its own actionable sentence.
+    return { ok: false, problems: [admitted.error.kind === "reviewer-protocol-failed"
+      ? renderReviewerPayloadDiagnostic(admitted.error, bytes.byteLength)
+      : admitted.error.message] };
   }
   if (protocol.value.subject.kind !== "standalone-review" || !sameAgentRequestAuthority(protocol.value.request, request)) {
     throw new Error("resolved reviewer protocol differs from the exact standalone request");

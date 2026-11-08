@@ -377,6 +377,30 @@ describe("reviewer payload rejection diagnostics", () => {
       "plain (payload 32 bytes; validate the emitted JSON with JSON.parse before finalizing)",
     );
   });
+
+  it("renders a schema pointer even though a schema violation carries no byte offset", () => {
+    // Pointer and offset are independent facts. Rendering the pointer only
+    // beside an offset dropped it for EVERY schema refusal — the retry the agent
+    // most needs located — and the live refusals this engine saw were exactly
+    // that: a schema violation with a pointer and no offset.
+    expect(renderReviewerPayloadDiagnostic(failure({ message: "bad schema", path: "/findings/2/basis/evidence/preconditions" }), 128)).toBe(
+      "bad schema at /findings/2/basis/evidence/preconditions (payload 128 bytes; validate the emitted JSON with JSON.parse before finalizing)",
+    );
+  });
+
+  it("names the schema defect, not just its location, in the refusal itself", () => {
+    const refused = parseReviewerPayloadV2(bytes(JSON.stringify(standalone([{
+      ...critical, basis: { ...basis, evidence: { ...basis.evidence, preconditions: "run the suite" } },
+    }]))));
+    expect(refused.ok).toBe(false);
+    if (refused.ok) throw new Error("expected whole-response refusal");
+    expect(refused.error.path).toBe("/findings/0/basis/evidence/preconditions");
+    expect(refused.error.message).toBe(
+      "Reviewer payload does not conform to the issued v2 schema: Invalid input: expected tuple, received string",
+    );
+    // Bounded: a refinement that interpolates payload text cannot grow the preamble.
+    expect(bytes(refused.error.message).length).toBeLessThanOrEqual(2_048);
+  });
 });
 
 // Compile-time contract: required basis/reason and readonly nested evidence, never optional bags.

@@ -188,12 +188,33 @@ describe("resolveWaveReviewerTranscript — current protocol (v2)", () => {
     expect(reviewerRejectionReason(task, ROLE, legacyLooking, v2)).toBe(message);
   });
 
-  it("fails evidence for a finding located outside the frozen scope", () => {
-    const bytes = currentPayload([{ ...critical, file: "src/outside.ts" }]);
+  it("names the offending finding, its file and its pointer when evidence lies outside the frozen scope", () => {
+    const bytes = currentPayload([critical, { ...critical, file: "src/outside.ts" }]);
+    // A bare `finding location is outside the frozen scope` made the retry
+    // unactionable: it named neither WHICH finding nor WHICH path, so attempt 2
+    // re-emitted the same payload. Index, file and JSON pointer are facts the
+    // parse already held.
     expect(resolveWaveReviewerTranscript(task, ROLE, bytes, v2)).toEqual({
       kind: "evidence-failed", agent: ROLE,
-      message: `finding location is outside the frozen scope (payload ${bytes.byteLength} bytes; validate the emitted JSON with JSON.parse before finalizing)`,
+      message: "findings[1].file is outside the frozen review scope: src/outside.ts at /findings/1/file " +
+        `(payload ${bytes.byteLength} bytes; validate the emitted JSON with JSON.parse before finalizing)`,
     });
+  });
+
+  it("names the JSON pointer and the schema defect for a payload that fails the issued schema", () => {
+    // The live rejection this engine's own review run took: `preconditions` is a
+    // tuple of trace entries, the agent emitted a bare string. The preamble
+    // carried neither the pointer nor the reason, so attempt 2 had nothing to
+    // correct against.
+    const basis = critical.basis;
+    if (basis === undefined) throw new Error("the issued v2 example's critical finding must carry a basis");
+    const bytes = currentPayload([{ ...critical, basis: {
+      ...basis, evidence: { ...basis.evidence, preconditions: "run the suite" },
+    } }]);
+    const resolution = resolveWaveReviewerTranscript(task, ROLE, bytes, v2);
+    expect(resolution).toEqual({ kind: "evidence-failed", agent: ROLE, message: expect.stringMatching(
+      /^Reviewer payload does not conform to the issued v2 schema: .+ at \/findings\/0\/basis\/evidence\/preconditions \(payload \d+ bytes; /) });
+    if (resolution.kind === "evidence-failed") expect(resolution.message).toContain("tuple");
   });
 });
 
