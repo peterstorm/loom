@@ -13,6 +13,7 @@ This directory documents Loom 1.1 and P4 Reviewer Protocol v2 (merged `96153ed`,
 | [Model profiles and calibration](model-profiles-and-calibration.md) | Maintainers | Cross-harness model policy, generated Pi agents, calibration corpus |
 | [Using Loom with Pi](pi-usage.md) | Pi users | Installation, resource rendering, write grants, harness limitations |
 | [Deterministic core](deterministic-core.md) | Architects | Executable-model, evidence, lint, and fail-closed guarantees |
+| [Running a security audit](security-audit.md) | Security auditors | The registered `security-audit` program: operations, run directory, blockers, handoff, calibration |
 | [Guarded skill machines](../machines/README.md) | Engine contributors | Per-agent phase machines and evidence attribution |
 | [Lint-rule authoring](../lint-rules/README.md) | Rule authors | Regex/programmatic rules and project configuration |
 

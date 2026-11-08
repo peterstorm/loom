@@ -145,6 +145,43 @@ Every request binds Run, request, slot, attempt, program, role, model profile, b
 
 Each program's Run Directory stores immutable events and a checkpoint projection (ADR-0029). Event append precedes checkpoint update; dedup keys make the crash window replay-safe. Effects produce typed receipts. Resume reconciles an existing receipt instead of repeating the effect.
 
+### Security audit
+
+`security-audit` is a registered program in the same sense (ADR-0064): ten
+operations over one run directory, with a closed action set and a traits table
+the CLI reads before importing the helper.
+
+What models decide: which attack classes apply, what a hunter observes, whether
+a claim survives a refutation panel.
+What code decides: which coverage cells exist, whether a unit may settle, whether
+a ballot counts, whether a run may publish, and what the report says.
+
+The coverage ledger is a state machine over `(surface, boundary, subsystem,
+attack_class[, lifecycle])` cells. A unit has one owner per wave, evidence whose
+paths are exactly its checks' paths, and one terminal disposition. Reassignment
+archives the prior attempt with a reason, so a second hunter starts fresh by
+construction. Ids are canonical derivations of the cell, sorted and unique, so
+two runs that enumerate the same cells produce the same bytes.
+
+A finding has three verdicts, ported verbatim from the vendored upstream schema:
+`confirmed` (demonstrated, and verified by a ballot from a **different** catalog
+profile), `needs_validation` (a lead, carrying **no severity at all**), and
+`rejected` (retained with its refutation). Severity enters the record only at
+`confirmed`, and the recorded overall severity may not exceed the demonstrated
+impact.
+
+`publish` refuses on any blocker — an unverified confirmed claim, a same-profile
+ballot, an unsettled ledger — rather than publishing a smaller truth than the run
+covered. `disposition` then derives one decision per published record
+(`accepted`/`deferred`/`dismissed`), and `REPORT.md` renders the same set from
+the same function, so prose and file cannot disagree.
+
+Calibration is executable too: a fixture application with one planted defect per
+attack class, held by a test to three claims — the markers are where the file
+says, the enumeration reaches every defect's lens and cell, and a recorded run
+publishes each defect exactly once. See [Running a security
+audit](./security-audit.md).
+
 ### Narrow capabilities
 
 Each effect reaches only the adapter it needs: run-artifact publication through the anchored `RunDirHandle`, protected-state commit through `StateManager`, and Git-index operations through `git-remediation`. Pure validation and routing code receives none of them.
@@ -202,6 +239,7 @@ Model calibration uses deterministic matching over vulnerable/fixed historical c
 | State writes | Agent edits JSON | Guard + StateManager + typed commit effect |
 | Run artifacts | Prompt chooses paths | Anchored fixed-layout RunDirHandle |
 | Git staging | Broad `git add` | Audited temporary index and witness recheck |
+| Security coverage | “We looked at everything” | Enumerated cells, settled ledger, refusals on publish |
 | Invariant | Reviewer remembers | Checkable lint rule or honest advisory prose |
 | Generated pipeline | Hand-wired drift | Fugue stamp + Loom integrity verification |
 

@@ -47,6 +47,20 @@ export const SECURITY_AUDIT_LIMITS = Object.freeze({
 export const SECURITY_PROFILES = ["quick", "standard", "deep"] as const;
 export type SecurityProfile = (typeof SECURITY_PROFILES)[number];
 
+/**
+ * How many lens documents one run of each profile may hold in context.
+ *
+ * A lens is a context cost, and the PROFILE is the operator's declared budget
+ * for that cost — so the cap lives here rather than as a default buried in the
+ * selector, where a `deep` run silently stopping at three lenses would be a
+ * breadth limit nobody chose. A lens trimmed by the cap is always reported in
+ * `excluded` with its reason, never dropped quietly.
+ */
+export const SECURITY_PROFILE_LENSES: Readonly<Record<SecurityProfile, number>> = Object.freeze({
+  quick: 2,
+  standard: 4,
+  deep: 8,
+});
 /** The tokens upstream fixes for a run that could not be completed. Closed on
  *  purpose: an incomplete run that cannot name its reason is a silent one. */
 export const SECURITY_INCOMPLETE_REASONS = [

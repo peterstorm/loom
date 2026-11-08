@@ -35,6 +35,7 @@ import { failure, success, type DomainResult } from "../../core/orchestration-co
 import { compareStrings } from "../../core/ordering";
 import { ensureDirectoryNoFollow, readRunFileNoFollow, writeRunFileExclusiveNoFollow, writeRunFileNoFollow } from "../../orchestration/no-follow-fs";
 import {
+  SECURITY_PROFILE_LENSES,
   admitWave,
   parseSecurityProfile,
   parseSecurityRunMetadata,
@@ -163,6 +164,22 @@ function openStore(out: string): DomainResult<Store, string> {
 }
 
 const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
+
+/** Sort a wire list by fingerprint when it is a list of objects that carry one;
+ *  anything else passes through so the parser names the actual violation
+ *  rather than a comparator returning NaN. */
+function sortByFingerprint(raw: unknown): unknown {
+  if (!Array.isArray(raw)) return raw;
+  const fingerprintOf = (entry: unknown): string | null =>
+    entry !== null && typeof entry === "object" && typeof (entry as { fingerprint?: unknown }).fingerprint === "string"
+      ? (entry as { fingerprint: string }).fingerprint
+      : null;
+  return [...raw].sort((left, right) => {
+    const a = fingerprintOf(left);
+    const b = fingerprintOf(right);
+    return a === null || b === null ? 0 : compareStrings(a, b);
+  });
+}
 
 // --- Document parsers, each owned by the core that defines the document ---
 
@@ -293,7 +310,9 @@ function startMetadata(input: Readonly<{
     baseRef: input.payload.scope?.baseRef ?? null,
     headRef: input.payload.scope?.headRef ?? null,
   };
-  const selection: LensSelection = selectSecurityLenses(input.payload.signals ?? EMPTY_SIGNALS);
+  const selection: LensSelection = selectSecurityLenses(input.payload.signals ?? EMPTY_SIGNALS, {
+    maxLenses: SECURITY_PROFILE_LENSES[input.metadata.profile],
+  });
   return {
     selection,
     metadata: {
@@ -454,7 +473,12 @@ function runSubmit(store: Store, args: readonly string[], stdin: string): Domain
   const record = payload as Record<string, unknown>;
   const results = parseUnitResults(record.units ?? []);
   if (!results.ok) return failure(describeRefusal(results.error));
-  const filed = record.findings === undefined ? success([] as readonly SecurityFinding[]) : parseSecurityFindings(record.findings);
+  // The DOCUMENT is sorted by fingerprint; a hunter's WIRE is its own filing
+  // order. Sort before parsing so a hunter is not refused for formatting, while
+  // duplicates still fail: the parser checks uniqueness after the sort.
+  const filed = record.findings === undefined
+    ? success([] as readonly SecurityFinding[])
+    : parseSecurityFindings(sortByFingerprint(record.findings));
   if (!filed.ok) return failure(describeRefusal(filed.error));
 
   const ledger = readLedger(store);
@@ -472,7 +496,7 @@ function runSubmit(store: Store, args: readonly string[], stdin: string): Domain
   }
   if (settled.length === 0 && filed.value.length === 0) return failure("submit carried neither unit results nor findings");
 
-  const merged = [...existing.value, ...filed.value];
+  const merged = [...existing.value, ...filed.value].sort((left, right) => compareStrings(left.fingerprint, right.fingerprint));
   const consolidated = parseSecurityFindings(merged);
   if (!consolidated.ok) return failure(`filed findings are malformed —\n${describeRefusal(consolidated.error)}`);
 

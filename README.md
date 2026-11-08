@@ -22,6 +22,7 @@ The engine owns deterministic mechanics. Agents do semantic work; users make rea
 - [Operations and development](docs/operations.md)
 - [Using Loom with Pi](docs/pi-usage.md)
 - [Deterministic core](docs/deterministic-core.md)
+- [Running a security audit](docs/security-audit.md)
 - [Model profiles and calibration](docs/model-profiles-and-calibration.md)
 - [Lint-rule authoring](lint-rules/README.md)
 - [Guarded skill machines](machines/README.md)
