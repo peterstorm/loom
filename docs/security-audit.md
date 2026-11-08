@@ -7,7 +7,9 @@ directory holds, what each operation refuses, and what to do with the result.
 
 For the method — lenses, sandbox evidence, the finding trichotomy — read
 `skills/security-audit/SKILL.md`. For why the program is code rather than prose,
-read `docs/deterministic-core.md` §8 and ADR-0064.
+read `docs/deterministic-core.md` §8 and ADR-0064. `/security-audit`
+(`commands/security-audit.md`) is the same workflow expressed as a slash command;
+a test binds its operation table to the traits table the engine routes on.
 
 ## Start here
 
