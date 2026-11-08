@@ -73,8 +73,8 @@ import {
 import { consolidateCandidates, parseSecurityFindings, type SecurityFinding } from "../../core/security-findings";
 import { adjudicateRun, parseVerificationVerdicts, type VerificationVerdict } from "../../core/security-adjudication";
 import { renderLensSelection, selectSecurityLenses, type LensSelection, type StackSignals } from "../../core/security-lens-select";
-import { renderDispositionHandoff, securityDisposition } from "../../core/security-disposition";
-import { parseSandboxReceipt, sandboxWithinLimits, type SandboxReceipt } from "../../core/security-sandbox";
+import { dispositionHandoffPaths, renderDispositionHandoff, securityDisposition, standaloneDispositionStart } from "../../core/security-disposition";
+import { parseSandboxReceipt, sandboxNonce, sandboxWithinLimits, type SandboxReceipt } from "../../core/security-sandbox";
 import { renderRunDocuments } from "../../core/security-reports";
 import { argumentValue, hasFlag, unconsumedValueArguments } from "./cli-args";
 import {
@@ -94,6 +94,9 @@ const FILES = Object.freeze({
   lenses: "lenses.json",
   published: "security-findings.json",
   disposition: "disposition.json",
+  /** The `standalone-disposition` start input: `disposition` writes it, and the
+   *  handoff command in the report reads exactly this file. */
+  dispositionHandoff: "standalone-disposition.json",
   report: "REPORT.md",
   details: "FINDINGS-DETAIL.md",
   needsValidation: "NEEDS-VALIDATION.md",
@@ -590,20 +593,23 @@ const describeUnboundedRun = (receipt: SandboxReceipt): string => {
     ...(receipt.enforced.memory ? [] : ["memory limit not applied"]),
     ...(receipt.enforced.processes ? [] : ["process limit not applied"]),
     ...(receipt.enforced.fileSize ? [] : ["file-size limit not applied"]),
+    ...(receipt.homeReadOnly ? [] : ["home directory not remounted read-only"]),
   ];
   return failed.join("; ") || "unknown";
 };
 
 /** Every `local` check's artifact must be a receipt of a run that stayed inside
  *  its sandbox. The engine reads the receipt file itself; a hunter's prose that
- *  it "ran bounded" is not evidence. */
+ *  it "ran bounded" is not evidence. The receipt must also carry the nonce this
+ *  engine derives from the artifact path, so a receipt line a command printed
+ *  (or a hunter copied from another check) cannot stand in for the script's own. */
 function checkLocalReceipts(store: Store, results: readonly UnitResult[]): DomainResult<void, string> {
   for (const result of results) {
     for (const check of result.checks) {
       if (check.method !== "local" || check.artifact === null) continue;
       const text = store.readText(check.artifact);
       if (!text.ok) return text;
-      const receipt = parseSandboxReceipt(text.value);
+      const receipt = parseSandboxReceipt(text.value, sandboxNonce(check.artifact));
       if (!receipt.ok) {
         return failure(`local check ${check.artifact} is not a sandbox receipt — ${receipt.error.message}`);
       }
@@ -804,8 +810,18 @@ function adjudicate(store: Store): DomainResult<Readonly<{
   const verdicts = readVerdicts(store);
   if (!verdicts.ok) return verdicts;
 
-  const input = { findings: findings.value, verdicts: verdicts.value, huntProfiles: huntingProfiles(ledger.value) };
-  const decision = adjudicateRun({ ...input, ledgerSettled: coverageSettled(ledger.value) });
+  const input = { findings: findings.value, verdicts: verdicts.value };
+  const huntProfiles = huntingProfiles(ledger.value);
+  if (!huntProfiles.ok) {
+    // Fail closed, not empty: an owner the catalog cannot place means the run
+    // cannot say which profile hunted, and an empty set would make every ballot
+    // look like an independent model.
+    return failure(
+      `ledger names hunter ${JSON.stringify(huntProfiles.error.agentId)}, which the Agent Catalog cannot place; ` +
+        "the run cannot prove verifier independence",
+    );
+  }
+  const decision = adjudicateRun({ ...input, huntProfiles: huntProfiles.value, ledgerSettled: coverageSettled(ledger.value) });
   return success({ findings: decision.findings, blockers: decision.blockers });
 }
 
@@ -826,7 +842,7 @@ function runFindings(store: Store, args: readonly string[]): DomainResult<string
     // second is the fact a machine caller most needs.
     return success(json({ findings: adjudicated.value.findings, publicationBlockers: adjudicated.value.blockers }));
   }
-  const documents = renderRunDocuments(input);
+  const documents = renderRunDocuments({ ...input, locator: store.out });
   return success([
     documents["REPORT.md"] ?? "",
     ...(adjudicated.value.blockers.length === 0 ? [] : [
@@ -898,15 +914,23 @@ function runDisposition(store: Store, args: readonly string[]): DomainResult<str
 
   const disposition = securityDisposition({ metadata: run.value, locator: store.out, findings: published.value });
   if (!disposition.ok) return failure(describeRefusal(disposition.error));
+  // The handoff is only a handoff if the next program can load it: the start
+  // input is derived here, written beside the record, and validated against the
+  // loader's own schema before either file is written.
+  const start = standaloneDispositionStart(disposition.value);
+  if (!start.ok) return failure(describeRefusal(start.error));
   const written = store.write(FILES.disposition, json(disposition.value));
   if (!written.ok) return written;
+  const handoff = store.write(FILES.dispositionHandoff, json(start.value));
+  if (!handoff.ok) return handoff;
+  const paths = dispositionHandoffPaths(store.out, run.value.runId);
 
   const count = (decision: string): number => disposition.value.entries.filter((entry) => entry.decision === decision).length;
   return success([
     `disposition set written to ${join(store.out, FILES.disposition)}`,
     `${count("accepted")} accepted; ${count("deferred")} deferred; ${count("dismissed")} dismissed`,
     "",
-    renderDispositionHandoff(disposition.value),
+    renderDispositionHandoff(disposition.value, paths),
   ].join("\n"));
 }
 

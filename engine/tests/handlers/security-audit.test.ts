@@ -19,6 +19,7 @@ import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createSecurityAuditHandler } from "../../src/handlers/helpers/security-audit";
+import { parseStandaloneDispositionStartInput } from "../../src/core/standalone-disposition-machine";
 import { piRuntimeHandshakeRequired, routeConsumesStdin } from "../../src/handler-routes";
 import { SECURITY_AUDIT_OPERATIONS, SECURITY_AUDIT_OPERATION_ORDER, parseSecurityAuditOperation, securityAuditOperationWrites } from "../../src/handlers/helpers/security-audit-operations";
 import {
@@ -381,6 +382,67 @@ describe("the wire", () => {
   });
 });
 
+describe("the run directory reads", () => {
+  // Every read is fail-closed: an absent or degenerate document is a REFUSAL,
+  // never an empty list. Treating absence as `[]` would let a lost or deleted
+  // file read as "the run has no findings", so `publish` would emit an empty
+  // result and the operator would never learn the run directory was damaged.
+  const started = async (run: Run): Promise<void> => {
+    expect((await run.invoke(["start", "--repo", run.out, "--source", "0".repeat(40)], JSON.stringify({ units: [seedFor(0)] }))).error).toBeNull();
+  };
+
+  it("refuses an empty ledger instead of claiming coverage of nothing", async () => {
+    const run = aRun();
+    await started(run);
+    writeFileSync(join(run.out, "ledger.json"), "[]\n");
+    const status = await run.invoke(["status"]);
+    expect(status.ok).toBe(false);
+    expect(status.error).toContain("a run always seeds at least one unit");
+  });
+
+  it("refuses a run directory with no findings document", async () => {
+    const run = aRun();
+    await started(run);
+    rmSync(join(run.out, "findings.json"));
+    const status = await run.invoke(["status"]);
+    expect(status.ok).toBe(false);
+    expect(status.error ?? "").toContain(join(run.out, "findings.json"));
+    expect(status.error ?? "").toContain("is missing");
+  });
+
+  it("refuses a run directory with no verdicts document", async () => {
+    const run = aRun();
+    await started(run);
+    rmSync(join(run.out, "verdicts.json"));
+    const status = await run.invoke(["status"]);
+    expect(status.ok).toBe(false);
+    expect(status.error ?? "").toContain(join(run.out, "verdicts.json"));
+    expect(status.error ?? "").toContain("is missing");
+  });
+
+  it("parses the ballot document rather than trusting it", async () => {
+    const run = aRun();
+    await started(run);
+    // A hand-edited ballot document is the case that matters: the read path
+    // must run the same parser `verify` does, so an invented key is named here
+    // and not discovered by whichever operation reads it first.
+    writeFileSync(join(run.out, "verdicts.json"), `${JSON.stringify([{ ...aVerdict(), voteReason: "because" }], null, 2)}\n`);
+    const status = await run.invoke(["status"]);
+    expect(status.ok).toBe(false);
+    expect(status.error ?? "").toContain("verdicts[0].voteReason");
+  });
+
+  it("parses the findings document rather than trusting it", async () => {
+    const run = aRun();
+    await started(run);
+    writeFileSync(join(run.out, "findings.json"), `${JSON.stringify([{ verdict: "confirmed", fingerprint: "api/login:sqli-email" }], null, 2)}\n`);
+    const status = await run.invoke(["status"]);
+    expect(status.ok).toBe(false);
+    expect(status.error ?? "").toContain("findings.json is malformed");
+    expect(status.error ?? "").toContain("$[0].title");
+  });
+});
+
 describe("budget", () => {
   it("refuses a budget below what the wave needs", async () => {
     const run = aRun();
@@ -465,7 +527,25 @@ describe("the disposition handoff", () => {
     await publishARun(run);
     const report = readFileSync(join(run.out, "REPORT.md"), "utf8");
     expect(report).toContain("## Disposition handoff");
-    expect(report).toContain(`standalone-disposition --run ${run.out}`);
+    expect(report).toContain(`--runs-root ${join(run.out, "disposition-runs")}`);
+    expect(report).toContain(join(run.out, "standalone-disposition.json"));
+  });
+
+  it("writes a handoff the standalone-disposition loader can parse", async () => {
+    const run = aRun();
+    await publishARun(run);
+    const handedOff = await run.invoke(["disposition"]);
+    expect(handedOff.error).toBeNull();
+    // The printed command names this file and the runs root beside it.
+    const report = readFileSync(join(run.out, "REPORT.md"), "utf8");
+    const input = join(run.out, "standalone-disposition.json");
+    expect(run.stdout()).toContain(input);
+    expect(report).toContain(input);
+    const written = JSON.parse(readFileSync(input, "utf8")) as { source: { locator: string }; record: { entries: readonly unknown[] } };
+    const parsed = parseStandaloneDispositionStartInput(written);
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    expect(parsed.value.source.locator).toBe(run.out);
+    expect(parsed.value.record.entries).toHaveLength(1);
   });
 
   it("keeps the decision set stable when re-derived, and moves it when a record changes", async () => {

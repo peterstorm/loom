@@ -46,12 +46,16 @@ starting paths is `blocked` — say so, do not widen scope.
 
    ```
    scripts/security-sandbox.sh --target <repo> --scratch <run>/agents/<your-agent-id>/scratch \
-     --cpu 10 --mem-mb 1024 --procs 128 --file-mb 32 --wall 60 --scratch-mb 64 -- <command>
+     --cpu 10 --mem-mb 1024 --procs 128 --file-mb 32 --wall 60 --scratch-mb 64 \
+     --nonce <the nonce your brief prints> -- <command>
    ```
 
-   No external network, no writable target, an allowlisted environment. If the
-   sandbox cannot start, the finding is `needs_validation` naming the missing
-   capability — never run the command unsandboxed and call it observed.
+   No external network, no writable target and no writable home, an allowlisted
+   environment. The `--nonce` is not optional: the run binds the receipt to the
+   artifact path your ledger entry names, and a receipt without that nonce is
+   refused. If the sandbox cannot start, the finding is `needs_validation`
+   naming the missing capability — never run the command unsandboxed and call it
+   observed.
 4. **Fresh owner, one attempt.** You were assigned this unit now; you have not
    seen its earlier attempt's evidence except what the ledger archived. Do not
    re-report an unresolved item as new.
@@ -101,9 +105,29 @@ the same object, the unit fields the parent needs:
       "unresolved": ["<blocked: the fact you could not produce>"]
     }
   ],
-  "findings": [ /* reviewer payload v2 findings */ ]
+  "findings": [ /* one upstream report record per filed fingerprint */ ]
 }
 ```
+
+Every `findings` entry is the upstream report record for its verdict — the shape
+`engine/tests/fixtures/security/upstream/report-schema.json` defines, which
+`submit` parses in full. It is NOT the reviewer draft shape (`file`/`line`/`claim`/`basis`):
+that is what a code-review panel files, and `submit` refuses it for a security
+claim. The keys per verdict are exact (an invented or missing key is refused):
+
+- `confirmed`: `verdict`, `fingerprint`, `title`, `description`, `root_cause`,
+  `intended_behavior`, `trace`, `evidence`, `conditions`, `execution`,
+  `remediation`, `severity` (`overall_severity` plus its likelihood/impact
+  scores and reasons), `confidence`.
+- `needs_validation`: `verdict`, `fingerprint`, `title`, `description`,
+  `claimed_root_cause`, `trace`, `evidence`, `blockers`, `validation_plan` —
+  and NO severity.
+- `rejected`: `verdict`, `fingerprint`, `title`, `description`,
+  `claimed_root_cause`, `trace`, `evidence`, `reason`.
+
+A `trace` step is `{kind, file, line, scope, description}` and an `evidence`
+entry is `{file, line, description}`; the first `sink` step's `file:line` is what
+the run uses to collapse two reports of one defect into one record.
 
 The field names above are the ones `submit` parses — an invented spelling is
 refused, not coerced. `fingerprints` belongs to `candidate`; `unresolved` belongs
@@ -116,5 +140,8 @@ walked the unit and have nothing to defend; `blocked` means you needed a fact
 your tools and the sandbox could not produce.
 
 Write no files outside your scratch directory. The machine gate denies Edit,
-Write and MultiEdit in every phase, so a write outside scratch is a hard
-failure, not a style note.
+Write and MultiEdit in every phase, so a tool write outside scratch is a hard
+failure. It cannot intercept a shell redirect: a Bash write (`> out.txt`,
+`tee`) is recorded as a shell write — which never advances a phase — and the
+reviewer of your unit sees it. Treat your scratch directory as the only place
+you may write, including from the shell.

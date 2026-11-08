@@ -44,6 +44,7 @@ import {
   isSecurityFingerprint,
   isVisibleText,
   parseCoverageRefs,
+  parsePriorRecordFacts,
   type CoverageRefs,
   type PriorStatus,
   type SecurityIncompleteReason,
@@ -303,8 +304,15 @@ function validateLocalChecks(raw: unknown, path: string, violations: CoverageVio
       return;
     }
     if (!isSecurityAgentId(check.agent_id)) violations.push(violation(`${base}.agent_id`, "expected a canonical lowercase agent ID"));
-    if (check.reviewed_paths.length === 0) violations.push(violation(`${base}.reviewed_paths`, "a check must review at least one path"));
-    for (const reviewed of check.reviewed_paths) {
+    // Totality: `reviewed_paths` arrives as raw JSON, so a missing or
+    // non-array value is a violation — never a `.length` on `undefined`.
+    const reviewedPaths: readonly unknown[] = Array.isArray(check.reviewed_paths) ? check.reviewed_paths : [];
+    if (!Array.isArray(check.reviewed_paths)) {
+      violations.push(violation(`${base}.reviewed_paths`, "expected an array of source paths"));
+    } else if (reviewedPaths.length === 0) {
+      violations.push(violation(`${base}.reviewed_paths`, "a check must review at least one path"));
+    }
+    for (const reviewed of reviewedPaths) {
       if (!isSafeSourcePath(reviewed)) violations.push(violation(`${base}.reviewed_paths`, `unsafe source path ${JSON.stringify(reviewed)}`));
     }
     if (!isVisibleText(check.invariant)) violations.push(violation(`${base}.invariant`, "invalid text"));
@@ -543,7 +551,10 @@ function validateAttempts(unit: CoverageUnit, base: string, violations: Coverage
     } else {
       hasFreshOwner = true;
     }
-    for (const reviewed of attempt.reviewed_paths) {
+    // Totality: these three reads used to run before their array guard, so a
+    // wire attempt with no `reviewed_paths` threw instead of reporting it.
+    const attemptPaths: readonly unknown[] = Array.isArray(attempt.reviewed_paths) ? attempt.reviewed_paths : [];
+    for (const reviewed of attemptPaths) {
       if (!isSafeSourcePath(reviewed)) violations.push(violation(`${path}.reviewed_paths`, `unsafe source path ${JSON.stringify(reviewed)}`));
     }
     checkEntryArray(attempt.reviewed_paths, `${path}.reviewed_paths`, violations, "path", { allowEmpty: true });
@@ -554,14 +565,17 @@ function validateAttempts(unit: CoverageUnit, base: string, violations: Coverage
     if (!isVisibleText(attempt.reassignment_reason)) violations.push(violation(`${path}.reassignment_reason`, "invalid text"));
     validateStateInvariants(attempt, path, violations);
 
-    attempt.local_checks.forEach((check, checkIndex) => {
-      if (priorOwners.has(check.agent_id)) {
+    const attemptChecks: readonly unknown[] = Array.isArray(attempt.local_checks) ? attempt.local_checks : [];
+    attemptChecks.forEach((rawCheck, checkIndex) => {
+      if (!isRecord(rawCheck)) return;
+      const priorOwner = isSecurityAgentId(rawCheck.agent_id) && priorOwners.has(rawCheck.agent_id);
+      if (priorOwner) {
         violations.push(violation(`${path}.local_checks[${checkIndex}].agent_id`, "prior owner evidence belongs in its earlier attempt"));
       }
-      if (check.artifact !== null && priorArtifacts.has(check.artifact)) {
+      if (typeof rawCheck.artifact === "string" && priorArtifacts.has(rawCheck.artifact)) {
         violations.push(violation(`${path}.local_checks[${checkIndex}].artifact`, "an archived artifact cannot be reused"));
       }
-      if (check.method === "local" && check.artifact !== null) priorArtifacts.add(check.artifact);
+      if (rawCheck.method === "local" && typeof rawCheck.artifact === "string") priorArtifacts.add(rawCheck.artifact);
     });
     // The attempt's own owner joins the prior set only AFTER its checks are read:
     // an attempt's evidence is its own, not a prior owner's.
@@ -573,11 +587,12 @@ function validateAttempts(unit: CoverageUnit, base: string, violations: Coverage
     violations.push(violation(`${base}.agent_id`, "the current owner must be fresh after a reassignment"));
   }
   const liveChecks = Array.isArray(unit.local_checks) ? (unit.local_checks as readonly LocalCheck[]) : [];
-  liveChecks.forEach((check, index) => {
-    if (priorOwners.has(check.agent_id)) {
+  liveChecks.forEach((rawCheck, index) => {
+    if (!isRecord(rawCheck)) return;
+    if (isSecurityAgentId(rawCheck.agent_id) && priorOwners.has(rawCheck.agent_id)) {
       violations.push(violation(`${base}.local_checks[${index}].agent_id`, "prior owner evidence must stay archived"));
     }
-    if (check.artifact !== null && priorArtifacts.has(check.artifact)) {
+    if (typeof rawCheck.artifact === "string" && priorArtifacts.has(rawCheck.artifact)) {
       violations.push(violation(`${base}.local_checks[${index}].artifact`, "an archived artifact cannot be reused"));
     }
   });
@@ -952,17 +967,18 @@ export function parseCoverageSeeds(
     if (record.status !== undefined && !isCoverageStatus(record.status)) {
       local.push(violation(`${base}.status`, `invalid value ${JSON.stringify(record.status)}`));
     }
-    if (record.prior !== undefined && record.prior !== null &&
-        (typeof record.prior !== "object" || Array.isArray(record.prior))) {
-      local.push(violation(`${base}.prior`, "expected null or prior-run facts"));
-    }
+    // Parsed, not cast: `derivePriorStatus` matches the verdict exhaustively and
+    // `.exhaustive()` throws on an unknown tag, so an unchecked `prior` aborted
+    // `start` with a pattern-match error instead of a named violation.
+    const prior = parsePriorRecordFacts(record.prior);
+    if (!prior.ok) local.push(violation(`${base}.${prior.error.path}`, prior.error.message));
     const seeded = seedCoverageUnit({
       refs: record.refs as CoverageRefs,
       starting_paths: strings(record.starting_paths, `${base}.starting_paths`),
       ordinary_attack_class_block: typeof ordinaryBlock === "string" ? ordinaryBlock : null,
       selected_companion_blocks: strings(record.selected_companion_blocks, `${base}.selected_companion_blocks`),
       excluded_blocks: blocks(record.excluded_blocks, `${base}.excluded_blocks`),
-      prior: (record.prior ?? null) as Parameters<typeof seedCoverageUnit>[0]["prior"],
+      prior: prior.ok ? prior.value : null,
       unresolved: strings(record.unresolved, `${base}.unresolved`),
       ...(typeof record.lifecycle === "string" ? { lifecycle: record.lifecycle } : {}),
       ...(typeof record.wave === "number" ? { wave: record.wave } : {}),
@@ -1020,18 +1036,34 @@ export function summarizeCoverage(ledger: CoverageLedger): CoverageSummary {
   };
 }
 
+/** A hunter the Agent Catalog cannot place: the run knows the id hunted but
+ *  cannot say which model profile it ran under. */
+export type HuntingProfileError = Readonly<{ kind: "unresolvable-hunter"; agentId: string }>;
+
 /** The catalog profiles that actually hunted, derived from the ledger's owned
- *  units. Adjudication compares a ballot's profile against this set, so
- *  "verified by a different model" is read from the run's own record of who
- *  ran rather than from a second, caller-supplied field. Empty means the
- *  ledger names no hunter — a state adjudication refuses to treat as verified. */
-export function huntingProfiles(ledger: CoverageLedger): readonly LlmProfileId[] {
+ *  and archived units. Adjudication compares a ballot's profile against this
+ *  set, so "verified by a different model" is read from the run's own record of
+ *  who ran rather than from a second, caller-supplied field. Empty means the
+ *  ledger names no hunter — a state adjudication refuses to treat as verified.
+ *
+ *  Fail closed on an owner the catalog cannot place. The ledger admits any id
+ *  matching the agent grammar, and this function used to FILTER unresolvable
+ *  owners out — so a hunter with no catalog row hunted, contributed nothing to
+ *  the independence set, and a verifier on that hunter's own model profile was
+ *  then counted as independent. An unanswerable question is a refusal, not an
+ *  empty answer. Archived attempts count too: their owners hunted in an earlier
+ *  wave of this same run. */
+export function huntingProfiles(ledger: CoverageLedger): DomainResult<readonly LlmProfileId[], HuntingProfileError> {
   const profiles = new Set<LlmProfileId>();
   for (const unit of ledger) {
-    const profile = catalogProfileOfAgent(unit.agent_id);
-    if (profile !== null) profiles.add(profile);
+    for (const agentId of [unit.agent_id, ...unit.attempts.map((attempt) => attempt.agent_id)]) {
+      if (agentId === null) continue;
+      const profile = catalogProfileOfAgent(agentId);
+      if (profile === null) return failure({ kind: "unresolvable-hunter" as const, agentId });
+      profiles.add(profile);
+    }
   }
-  return [...profiles].sort(compareStrings);
+  return success([...profiles].sort(compareStrings));
 }
 
 /** The profile of a run, derived from its ledger in ONE place. `start` and
@@ -1145,12 +1177,17 @@ function parseChecks(raw: unknown, base: string, violations: CoverageViolation[]
  *  spelling (`unitStatus`, `localChecks`) would otherwise be IGNORED while the
  *  required fields happen to be present, and the run would record a status the
  *  hunter never wrote. */
-const UNIT_RESULT_KEYS: readonly string[] = [
+/** The keys a hunter's unit result may carry. Closed on purpose: an invented
+ *  spelling (`unitStatus`, `localChecks`) would otherwise be IGNORED while the
+ *  required fields happen to be present, and the run would record a status the
+ *  hunter never wrote. Exported so the docs test pins the docs to THIS list
+ *  rather than to a hand-copied one. */
+export const UNIT_RESULT_KEYS: readonly string[] = [
   "coverageId", "agentId", "wave", "status", "reviewedPaths", "checks", "fingerprints", "unresolved",
 ];
 
 /** The keys one local check may carry, mirroring the ledger's own shape. */
-const CHECK_KEYS: readonly string[] = ["agent_id", "reviewed_paths", "invariant", "method", "result", "artifact"];
+export const CHECK_KEYS: readonly string[] = ["agent_id", "reviewed_paths", "invariant", "method", "result", "artifact"];
 
 export function parseUnitResults(raw: unknown): DomainResult<readonly UnitResult[], CoverageError> {
   if (!Array.isArray(raw as unknown)) {
@@ -1271,6 +1308,9 @@ function parseProposals(raw: unknown, violations: CoverageViolation[]): readonly
       return;
     }
     const item = entry as Record<string, unknown>;
+    for (const key of Object.keys(item)) {
+      if (!CRITIC_PROPOSAL_KEYS.includes(key)) violations.push(violation(`${base}.${key}`, "unknown field"));
+    }
     proposals.push({
       refs: item.refs as CoverageRefs,
       startingPaths: stringList(item.startingPaths, `${base}.startingPaths`, violations),
@@ -1282,8 +1322,15 @@ function parseProposals(raw: unknown, violations: CoverageViolation[]): readonly
   return proposals;
 }
 
-const CRITIC_KEYS: readonly string[] = ["schemaVersion", "kind", "missingUnits", "reassignIds", "resolvedPriorLeads", "stop"];
+export const CRITIC_KEYS: readonly string[] = ["schemaVersion", "kind", "missingUnits", "reassignIds", "resolvedPriorLeads", "stop"];
 const CRITIC_COLLECTIONS: readonly string[] = ["missingUnits", "reassignIds", "resolvedPriorLeads"];
+
+/** The keys one proposed unit may carry. Exported for the same reason as
+ *  `UNIT_RESULT_KEYS`: a doc that names a key this list omits is an agent whose
+ *  output the engine refuses. */
+export const CRITIC_PROPOSAL_KEYS: readonly string[] = [
+  "refs", "startingPaths", "ordinaryAttackClassBlock", "selectedCompanionBlocks", "excludedBlocks",
+];
 
 /** Exclusions are evidence, so a malformed entry is a violation rather than an
  *  entry that quietly never happened. */

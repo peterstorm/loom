@@ -9,17 +9,43 @@
  */
 
 import { afterAll, describe, expect, it } from "vitest";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { KNOWN_HANDLERS, piRuntimeHandshakeRequired, routeConsumesStdin } from "../../src/handler-routes";
 import { ORCHESTRATION_OPERATIONS } from "../../src/handlers/helpers/orchestration-operations";
 import { SECURITY_AUDIT_OPERATIONS } from "../../src/handlers/helpers/security-audit-operations";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { aSeed } from "../security/fixtures";
 
 const CLI_PATH = join(__dirname, "../../src/cli.ts");
 const root = canonicalTempDir("loom-cli-stdin-");
 afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+/** The real CLI, with `PI_CODING_AGENT` stripped so the runtime handshake gate
+ *  does not answer for the route under test. */
+const spawnCli = (args: readonly string[], stdin: "open" | string): ChildProcess => {
+  const { PI_CODING_AGENT: _pi, ...inherited } = process.env;
+  const child = spawn("bun", [CLI_PATH, ...args], {
+    cwd: root,
+    env: { ...inherited, LOOM_STATE_PATH: join(root, "absent", "active_task_graph.json") },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  if (stdin !== "open") child.stdin?.end(stdin);
+  // `open` deliberately never writes to or closes stdin: that is the parent
+  // shell shape (a terminal, a pipe held by a supervisor) that hangs any route
+  // which reads to EOF.
+  return child;
+};
+
+const waitForExit = async (child: ChildProcess, timeoutMs: number): Promise<"exited" | "hung"> => {
+  const outcome = await new Promise<"exited" | "hung">((resolve) => {
+    const timer = setTimeout(() => resolve("hung"), timeoutMs);
+    child.on("exit", () => { clearTimeout(timer); resolve("exited"); });
+  });
+  if (outcome === "hung") child.kill("SIGKILL");
+  return outcome;
+};
 
 describe("routeConsumesStdin", () => {
   it("reads stdin only for the orchestration operations that take input", () => {
@@ -67,19 +93,30 @@ describe("routeConsumesStdin", () => {
   });
 });
 
-describe("a flags-only orchestration operation with an inherited open stdin", () => {
-  it("completes without waiting for an end of input that never arrives", async () => {
-    const { PI_CODING_AGENT: _pi, ...inherited } = process.env;
-    const env = { ...inherited, LOOM_STATE_PATH: join(root, "absent", "active_task_graph.json") };
-    const child = spawn("bun", [CLI_PATH, "helper", "orchestration", "status", "--json"], {
-      cwd: root, env, stdio: ["pipe", "pipe", "pipe"],
-    });
-    // stdin is deliberately never written to or closed.
-    const outcome = await new Promise<"exited" | "hung">((resolve) => {
-      const timer = setTimeout(() => resolve("hung"), 20_000);
-      child.on("exit", () => { clearTimeout(timer); resolve("exited"); });
-    });
-    if (outcome === "hung") child.kill("SIGKILL");
-    expect(outcome).toBe("exited");
+describe("a flags-only operation with an inherited open stdin", () => {
+  it("completes an orchestration status without waiting for an end of input that never arrives", async () => {
+    const child = spawnCli(["helper", "orchestration", "status", "--json"], "open");
+    expect(await waitForExit(child, 20_000)).toBe("exited");
   }, 30_000);
+
+  it("completes a security-audit status against a real run directory", async () => {
+    // The traits table says `status` reads no stdin; this proves it against the
+    // real CLI rather than against the table that predicts it. Seeding uses
+    // `start`, which DOES read stdin, so the run directory is produced by the
+    // program itself rather than hand-written.
+    const out = join(root, "security-run");
+    const seeding = spawnCli(
+      ["helper", "security-audit", "start", "--out", out, "--repo", root, "--source", "0".repeat(40)],
+      JSON.stringify({ units: [aSeed()] }),
+    );
+    expect(await waitForExit(seeding, 20_000)).toBe("exited");
+    expect(seeding.exitCode, "start must succeed before status proves anything").toBe(0);
+
+    const child = spawnCli(["helper", "security-audit", "status", "--out", out], "open");
+    let printed = "";
+    child.stdout?.on("data", (chunk: Buffer) => { printed += chunk.toString("utf8"); });
+    expect(await waitForExit(child, 20_000)).toBe("exited");
+    expect(child.exitCode).toBe(0);
+    expect(printed).toContain("coverage:");
+  }, 40_000);
 });

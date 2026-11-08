@@ -18,8 +18,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseCriticResult, parseUnitResults } from "../../src/core/security-coverage";
-import { parseVerificationVerdicts } from "../../src/core/security-adjudication";
+import { parseCriticResult, parseUnitResults, CHECK_KEYS, CRITIC_KEYS, CRITIC_PROPOSAL_KEYS, UNIT_RESULT_KEYS } from "../../src/core/security-coverage";
+import { parseVerificationVerdicts, VERDICT_KEYS } from "../../src/core/security-adjudication";
 import { aHunterBallot, aUnitResult, ok } from "./fixtures";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
@@ -55,11 +55,15 @@ describe("the hunter doc documents the wire `submit` parses", () => {
   it("names no key the unit parser refuses", () => {
     const documented = [...keysOf(block.units), ...keysOf((block.units as readonly unknown[])?.[0])];
     const checks = keysOf(((block.units as readonly Record<string, unknown>[])?.[0]?.checks));
-    // The parser's allowlists are the source of truth; a doc-only key is drift.
-    expect(unknownKeys(documented, [
-      "coverageId", "agentId", "wave", "status", "reviewedPaths", "checks", "fingerprints", "unresolved",
-    ])).toEqual([]);
-    expect(unknownKeys(checks, ["agent_id", "reviewed_paths", "invariant", "method", "result", "artifact"])).toEqual([]);
+    // The parser's allowlists are the source of truth — IMPORTED, not re-typed.
+    // A hand-copied list would keep passing after the parser's own list changed,
+    // which is exactly the drift this test exists to catch.
+    expect(unknownKeys(documented, UNIT_RESULT_KEYS)).toEqual([]);
+    expect(unknownKeys(checks, CHECK_KEYS)).toEqual([]);
+    // Guard the import itself: an empty allowlist would make the assertions
+    // above vacuously fail in the right direction but say nothing.
+    expect(UNIT_RESULT_KEYS.length).toBeGreaterThan(0);
+    expect(CHECK_KEYS.length).toBeGreaterThan(0);
   });
 
   it("documents every key the parser requires", () => {
@@ -80,12 +84,26 @@ describe("the critic doc documents the wire `merge-critic` parses", () => {
   const block = wireBlock("security-critic-agent.md");
 
   it("names no key the critic parser refuses", () => {
-    expect(unknownKeys(keysOf(block), [
-      "schemaVersion", "kind", "missingUnits", "reassignIds", "resolvedPriorLeads", "stop",
-    ])).toEqual([]);
-    expect(unknownKeys(keysOf(block.missingUnits), [
-      "refs", "startingPaths", "ordinaryAttackClassBlock", "selectedCompanionBlocks", "excludedBlocks",
-    ])).toEqual([]);
+    expect(unknownKeys(keysOf(block), CRITIC_KEYS)).toEqual([]);
+    expect(unknownKeys(keysOf(block.missingUnits), CRITIC_PROPOSAL_KEYS)).toEqual([]);
+    expect(CRITIC_KEYS.length).toBeGreaterThan(0);
+    expect(CRITIC_PROPOSAL_KEYS.length).toBeGreaterThan(0);
+  });
+
+  it("refuses a proposal carrying a key the doc does not name", () => {
+    // The proposal allowlist is load-bearing, not decoration: before it existed
+    // `parseProposals` cast `refs` and kept everything else on the floor, so a
+    // critic could send `requeue` and the merge silently ignored it.
+    const proposal = ((block.missingUnits as readonly Record<string, unknown>[])[0]) ?? {};
+    const refused = parseCriticResult({
+      ...block,
+      missingUnits: [{ ...proposal, requeue: true }],
+      reassignIds: [],
+      resolvedPriorLeads: [],
+    });
+    expect(refused.ok).toBe(false);
+    expect(refused.ok ? [] : refused.error.violations.map((entry) => entry.path))
+      .toContain("critic.missingUnits[0].requeue");
   });
 
   it("carries the identity the parser requires, and the parser enforces it", () => {
@@ -102,9 +120,8 @@ describe("the verifier doc documents the wire `verify` parses", () => {
   const block = wireBlock("security-verifier-agent.md");
 
   it("names no key the verdict parser refuses", () => {
-    expect(unknownKeys(keysOf(block), [
-      "schemaVersion", "kind", "fingerprint", "vote", "reason", "missingFact", "agent", "profile", "wave",
-    ])).toEqual([]);
+    expect(unknownKeys(keysOf(block), VERDICT_KEYS)).toEqual([]);
+    expect(VERDICT_KEYS.length).toBeGreaterThan(0);
   });
 
   it("carries the ballot identity the parser requires", () => {

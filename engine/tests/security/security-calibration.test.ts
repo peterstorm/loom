@@ -358,7 +358,7 @@ describe("the fixture is not a happy-path prop", () => {
     const ledger = ledgerOf().map((unit) => ({ ...unit, status: "covered" as const, agent_id: "security-hunter-agent", reviewed_paths: unit.starting_paths }));
     const sqli = findings.filter((finding) => finding.fingerprint === "calibration/cal-sqli-01");
     expect(sqli).toHaveLength(1);
-    const report = renderRunDocuments({ metadata, ledger, findings: sqli })["REPORT.md"] ?? "";
+    const report = renderRunDocuments({ metadata, ledger, findings: sqli, locator: "/calibration" })["REPORT.md"] ?? "";
     expect(report).toContain("calibration/cal-sqli-01");
     for (const defect of DEFECTS.defects.slice(1)) {
       expect(report).not.toContain(`calibration/${defect.id.toLowerCase()}`);

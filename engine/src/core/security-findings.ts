@@ -491,6 +491,28 @@ const sinkOf = (finding: SecurityFinding): string | null => {
   return sink === undefined ? null : `${sink.file}:${sink.line}`;
 };
 
+/** How much standing a verdict has when two filings describe ONE defect (same
+ *  sink, same root-cause sentence). A `confirmed` claim outranks a lead, and a
+ *  lead outranks a rejection: the three verdicts are different claims about one
+ *  defect, not versions of one claim — so "keep the longer trace" alone let a
+ *  three-step `rejected` filing replace a confirmed vulnerability and drop its
+ *  severity from the published set. */
+const VERDICT_STRENGTH: Readonly<Record<SecurityFinding["verdict"], number>> = {
+  confirmed: 2,
+  needs_validation: 1,
+  rejected: 0,
+};
+
+/** The keeper between two filings of one defect: the strongest verdict, then the
+ *  most complete trace, then the earlier fingerprint (candidates arrive in
+ *  fingerprint order, so the last tie-break keeps the first one seen). */
+function outranks(candidate: SecurityFinding, existing: SecurityFinding): boolean {
+  const strength = VERDICT_STRENGTH[candidate.verdict] - VERDICT_STRENGTH[existing.verdict];
+  if (strength !== 0) return strength > 0;
+  if (candidate.trace.length !== existing.trace.length) return candidate.trace.length > existing.trace.length;
+  return compareStrings(candidate.fingerprint, existing.fingerprint) < 0;
+}
+
 /** One root cause, one record — where "one root cause" is a fact, not a
  *  sentence. Fingerprints are the identity; the root-cause TEXT catches the case
  *  where two hunters described one defect from different entry points and earned
@@ -498,8 +520,8 @@ const sinkOf = (finding: SecurityFinding): string | null => {
  *  root-cause sentence onto two different defects, and merging those would silently
  *  drop a finding from the published set. So a root-cause merge also requires the
  *  same SINK, and a trace that names no sink is never merged away. The keeper is
- *  the record with the most complete trace, tie-broken by fingerprint so the
- *  choice is deterministic. */
+ *  the record with the strongest verdict, then the most complete trace, tie-broken
+ *  by fingerprint so the choice is deterministic. */
 export function consolidateCandidates<T extends SecurityFinding>(candidates: readonly T[]): readonly T[] {
   const byFingerprint = new Map<string, T>();
   for (const candidate of candidates) {
@@ -515,7 +537,7 @@ export function consolidateCandidates<T extends SecurityFinding>(candidates: rea
     const rootCause = "root_cause" in candidate ? candidate.root_cause : candidate.claimed_root_cause;
     const key = `${sink}\u0000${rootCause}`;
     const existing = byRootCause.get(key);
-    if (existing === undefined || candidate.trace.length > existing.trace.length) byRootCause.set(key, candidate);
+    if (existing === undefined || outranks(candidate, existing)) byRootCause.set(key, candidate);
   }
   return [...byRootCause.values()].sort((left, right) => compareStrings(left.fingerprint, right.fingerprint));
 }

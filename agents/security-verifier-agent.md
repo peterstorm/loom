@@ -71,8 +71,13 @@ adjudicator reads both. `profile` must be the catalog profile YOUR agent sits on
 differ from the profile that hunted the claim: that difference is what makes the
 vote independent.
 
-`critical` means the run must not publish this claim as confirmed; `advisory`
-means the claim stands and your objection is recorded. When you cannot decide
-because one fact is absent, vote `critical` with `voteReason` naming that fact —
-an unproven claim published as confirmed is exactly the failure this seat exists
-to prevent.
+`critical` means the claim **survives** your refutation: it is published as
+confirmed, and the fix will be made. `advisory` means it does not survive — with
+`missingFact` set, the claim is demoted to a lead whose blocker IS that fact;
+without one, the claim is rejected and `reason` is the refutation a later run
+must bring changed evidence against.
+
+There is no `voteReason` field: the two fields that decide a ballot are `reason`
+(what decided it) and `missingFact` (the exact fact you could not establish). A
+ballot carrying an invented key is refused whole by `verify` — including the
+ballots beside it — so send exactly the keys above.

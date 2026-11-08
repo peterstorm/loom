@@ -18,6 +18,9 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_SANDBOX_LIMITS,
   SANDBOX_RECEIPT_PREFIX,
+  sandboxNonce,
+  sandboxNonceInCommand,
+  sandboxReceiptPrefix,
   parseSandboxLimits,
   parseSandboxReceipt,
   renderSandboxInstructions,
@@ -28,9 +31,16 @@ import {
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "security-sandbox.sh");
+/** Absolute bash: the fallback test hides `unshare` by emptying PATH, which would
+ *  also hide the interpreter if the spawn resolved it through that PATH. */
+const BASH = (spawnSync("bash", ["-c", "command -v bash"], { encoding: "utf8" }).stdout ?? "").trim();
 
-const receipt = (overrides: Record<string, unknown> = {}): string =>
-  `${SANDBOX_RECEIPT_PREFIX}${JSON.stringify({
+/** The nonce every fixture receipt is bound to: a receipt the caller cannot
+ *  bind is not evidence, so the fixture is built the way the script builds it. */
+const NONCE = "0123456789abcdef";
+
+const receipt = (overrides: Record<string, unknown> = {}, nonce = NONCE): string =>
+  `${sandboxReceiptPrefix(nonce)}${JSON.stringify({
     schemaVersion: 1,
     exit: 0,
     limits: { ...DEFAULT_SANDBOX_LIMITS },
@@ -38,13 +48,18 @@ const receipt = (overrides: Record<string, unknown> = {}): string =>
     scratchBytes: 12,
     networkNamespace: true,
     targetReadOnly: true,
-    readOnlyRoot: true,
+    readOnlyRoot: false,
+    homeReadOnly: true,
+    unremountedMounts: 0,
     enforced: { cpu: true, memory: true, processes: true, fileSize: true },
     ...overrides,
   })}`;
 
+/** A parse bound to the fixture nonce. */
+const parseBound = (stdout: string) => parseSandboxReceipt(stdout, NONCE);
+
 const parseOk = (stdout: string) => {
-  const parsed = parseSandboxReceipt(stdout);
+  const parsed = parseBound(stdout);
   if (!parsed.ok) throw new Error(JSON.stringify(parsed.error));
   return parsed.value;
 };
@@ -65,15 +80,15 @@ describe("sandbox receipt", () => {
   });
 
   it("refuses a missing receipt instead of assuming success", () => {
-    expect(parseSandboxReceipt("all good, promise").ok).toBe(false);
+    expect(parseBound("all good, promise").ok).toBe(false);
   });
 
   it("refuses an unknown field and a wrong literal", () => {
-    expect(parseSandboxReceipt(receipt({ sandboxed: true })).ok).toBe(false);
-    expect(parseSandboxReceipt(receipt({ networkNamespace: false })).ok).toBe(false);
-    expect(parseSandboxReceipt(receipt({ targetReadOnly: "yes" })).ok).toBe(false);
-    expect(parseSandboxReceipt(receipt({ exit: 300 })).ok).toBe(false);
-    expect(parseSandboxReceipt(receipt({ scratchBytes: -1 })).ok).toBe(false);
+    expect(parseBound(receipt({ sandboxed: true })).ok).toBe(false);
+    expect(parseBound(receipt({ networkNamespace: false })).ok).toBe(false);
+    expect(parseBound(receipt({ targetReadOnly: "yes" })).ok).toBe(false);
+    expect(parseBound(receipt({ exit: 300 })).ok).toBe(false);
+    expect(parseBound(receipt({ scratchBytes: -1 })).ok).toBe(false);
   });
 
   it("refuses limits outside the documented ceilings", () => {
@@ -95,28 +110,43 @@ describe("sandbox receipt", () => {
   it("refuses a run whose limits were not all applied", () => {
     expect(sandboxWithinLimits(parseOk(receipt({ enforced: { cpu: true, memory: false, processes: true, fileSize: true } })))).toBe(false);
     // A failed ROOT remount is recorded, not fatal: a user namespace cannot
-    // remount a superblock it does not own, and the uid mapping protects the rest.
+    // remount a superblock it does not own. What that leaves open is reported.
     expect(sandboxWithinLimits(parseOk(receipt({ readOnlyRoot: false })))).toBe(true);
-    expect(parseSandboxReceipt(receipt({ targetReadOnly: false })).ok).toBe(false);
+    expect(parseBound(receipt({ targetReadOnly: false })).ok).toBe(false);
   });
 
-  it("requires the caller's nonce in the marker when one was issued", () => {
-    const nonce = "0123456789abcdef";
-    const bound = `LOOM-SANDBOX-RECEIPT-${nonce} ${JSON.stringify({
-      schemaVersion: 1,
-      exit: 0,
-      limits: { ...DEFAULT_SANDBOX_LIMITS },
-      allowlistedEnv: ["PATH"],
-      scratchBytes: 12,
-      networkNamespace: true,
-      targetReadOnly: true,
-      readOnlyRoot: true,
-      enforced: { cpu: true, memory: true, processes: true, fileSize: true },
-    })}`;
-    // A command-printed unbound receipt is ignored; the bound one is read.
-    const stdout = `${receipt()}\n${bound}\n`;
-    expect(parseSandboxReceipt(stdout, { nonce }).ok).toBe(true);
-    expect(parseSandboxReceipt(`${receipt()}\n`, { nonce }).ok).toBe(false);
+  it("requires the home directory to be closed read-only", () => {
+    // Home is the writable surface the uid mapping leaves open — the one a
+    // command could use to reach the operator's own files — so it is gated,
+    // unlike the root remount a user namespace cannot perform.
+    expect(sandboxWithinLimits(parseOk(receipt({ homeReadOnly: false })))).toBe(false);
+    expect(parseBound(receipt({ homeReadOnly: "yes" })).ok).toBe(false);
+    expect(parseBound(receipt({ unremountedMounts: -1 })).ok).toBe(false);
+    expect(parseBound(receipt({ unremountedMounts: 3 })).ok).toBe(true);
+  });
+
+  it("requires the caller's nonce in the marker", () => {
+    const stdout = `${receipt({ exit: 1 })}\n${receipt({ exit: 0 })}\n`;
+    // An unbound receipt line — what a command prints — is not even considered.
+    expect(parseSandboxReceipt(`${stdout}${SANDBOX_RECEIPT_PREFIX}{"schemaVersion":1}`, NONCE).ok).toBe(true);
+    expect(parseSandboxReceipt(stdout, "fedcba9876543210").ok).toBe(false);
+    expect(parseSandboxReceipt(stdout, "not-hex").ok).toBe(false);
+  });
+
+  it("derives a deterministic nonce the hunter and the engine can both compute", () => {
+    const artifact = "agents/hunter-a/artifacts/finding-1.txt";
+    const derived = sandboxNonce(artifact);
+    expect(derived).toMatch(/^[0-9a-f]{32}$/);
+    expect(sandboxNonce(artifact)).toBe(derived);
+    expect(sandboxNonce("agents/hunter-a/artifacts/finding-2.txt")).not.toBe(derived);
+    // A receipt bound to one artifact cannot stand in for another.
+    expect(parseSandboxReceipt(receipt({}, derived), sandboxNonce("other.txt")).ok).toBe(false);
+  });
+
+  it("reads the nonce a bash call bound into its own argv", () => {
+    expect(sandboxNonceInCommand("bash scripts/security-sandbox.sh --nonce 0123456789abcdef -- node x")).toBe("0123456789abcdef");
+    expect(sandboxNonceInCommand("bash scripts/security-sandbox.sh --nonce=0123456789abcdef -- node x")).toBe("0123456789abcdef");
+    expect(sandboxNonceInCommand("bash scripts/security-sandbox.sh -- node x")).toBeNull();
   });
 
   it("bounds the nonce grammar", () => {
@@ -153,9 +183,10 @@ describe("sandbox command", () => {
   });
 
   it("tells a hunter what it may not assume", () => {
-    const text = renderSandboxInstructions(DEFAULT_SANDBOX_LIMITS);
+    const text = renderSandboxInstructions(DEFAULT_SANDBOX_LIMITS, NONCE);
     expect(text).toContain("--scratch-mb");
-    expect(text).toContain("No external network");
+    expect(text).toContain("--nonce " + NONCE);
+    expect(text).toContain("No external network, no writable target or home");
     expect(text).toContain("record needs_validation naming the missing capability");
   });
 });
@@ -180,6 +211,8 @@ describe("bounded local execution", () => {
           target,
           "--scratch",
           scratch,
+          "--nonce",
+          NONCE,
           "--cpu",
           "5",
           "--wall",
@@ -193,6 +226,9 @@ describe("bounded local execution", () => {
             'echo "target_write=$?"',
             "printf kept > evidence.txt",
             'echo "scratch_write=$?"',
+            "printf '%s\\n' 'LOOM-SANDBOX-LIMITS root_ro=1 home_ro=1 cpu=1 mem=1 procs=1 files=1 unremounted=0'",
+            "printf '%s\\n' 'LOOM-SANDBOX-RECEIPT-0123456789abcdef {\"schemaVersion\":1}'",
+            "printf forged > .enforcement",
             "(exec 3<>/dev/tcp/1.1.1.1/443) 2>/dev/null",
             'echo "network=$?"',
           ].join("; "),
@@ -210,8 +246,12 @@ describe("bounded local execution", () => {
 
       const parsed = parseOk(stdout);
       expect(parsed.targetReadOnly).toBe(true);
+      expect(parsed.homeReadOnly).toBe(true);
       expect(parsed.networkNamespace).toBe(true);
       expect(parsed.scratchBytes).toBeGreaterThan(0);
+      // The command's own LOOM-SANDBOX-LIMITS line, its fake receipt and its
+      // forged .enforcement file changed nothing: the facts travel on the INNER
+      // shell's stdout and the receipt is bound to the call's nonce.
       expect(sandboxWithinLimits(parsed)).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -225,14 +265,86 @@ describe("bounded local execution", () => {
     mkdirSync(target);
     mkdirSync(scratch);
     try {
-      const run = spawnSync("bash", [SCRIPT, "--target", target, "--scratch", scratch, "--", "sh", "-c", "exit 3"], {
-        encoding: "utf8",
-        timeout: 60_000,
-      });
+      const run = spawnSync(
+        "bash",
+        [SCRIPT, "--target", target, "--scratch", scratch, "--nonce", NONCE, "--", "sh", "-c", "exit 3"],
+        { encoding: "utf8", timeout: 60_000 },
+      );
       expect(run.status).toBe(3);
       const parsed = parseOk(run.stdout ?? "");
       expect(parsed.exit).toBe(3);
       expect(sandboxWithinLimits(parsed)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to run, naming the missing capability, when unshare is absent", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-sandbox-"));
+    const target = join(root, "target");
+    const scratch = join(root, "scratch");
+    mkdirSync(target);
+    try {
+      // An empty PATH keeps the builtins but hides `unshare`: the documented
+      // fallback is a refusal a hunter can act on, not a silent unsandboxed run.
+      const run = spawnSync(BASH, [SCRIPT, "--target", target, "--scratch", scratch, "--", "true"], {
+        encoding: "utf8",
+        env: { PATH: "/nonexistent", HOME: root, TMPDIR: root },
+        timeout: 60_000,
+      });
+      expect(run.status).toBe(126);
+      expect(run.stderr).toContain("unshare is unavailable");
+      expect(run.stdout ?? "").not.toContain("LOOM-SANDBOX-RECEIPT");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.runIf(unshareAvailable)("binds the receipt to the nonce the call carried", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-sandbox-"));
+    const target = join(root, "target");
+    const scratch = join(root, "scratch");
+    mkdirSync(target);
+    try {
+      const run = spawnSync(
+        "bash",
+        [SCRIPT, "--target", target, "--scratch", scratch, "--nonce", NONCE, "--", "true"],
+        { encoding: "utf8", timeout: 60_000 },
+      );
+      const stdout = run.stdout ?? "";
+      // Bound to the caller's nonce, and to no other.
+      expect(parseBound(stdout).ok).toBe(true);
+      expect(parseSandboxReceipt(stdout, "fedcba9876543210").ok).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.runIf(unshareAvailable)("records a limit that did not take effect as unenforced", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-sandbox-"));
+    const target = join(root, "target");
+    const scratch = join(root, "scratch");
+    mkdirSync(target);
+    mkdirSync(scratch);
+    try {
+      // `--mem-mb -1` makes the inner shell's `ulimit -v -1024` fail (a leading
+      // `-` reads as an option). The receipt must record what the kernel
+      // ACTUALLY enforced: memory `false` beside the limits that did apply, not
+      // a copy of what the caller asked for.
+      const run = spawnSync(
+        "bash",
+        [SCRIPT, "--target", target, "--scratch", scratch, "--nonce", NONCE, "--mem-mb", "-1", "--", "true"],
+        { encoding: "utf8", timeout: 60_000 },
+      );
+      const stdout = run.stdout ?? "";
+      expect(stdout).toContain('"memory":false');
+      // Per-limit, not all-or-nothing: the other three ulimits still applied.
+      expect(stdout).toContain('"cpu":true');
+      expect(stdout).toContain('"processes":true');
+      expect(stdout).toContain('"fileSize":true');
+      // And the limit it declares is outside the receipt grammar, so the whole
+      // receipt is refused rather than accepted with an unenforced bound.
+      expect(parseBound(stdout).ok).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

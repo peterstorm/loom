@@ -19,7 +19,7 @@
 
 import { match } from "ts-pattern";
 import { editedFilePath, TEST_COMMAND_PATTERNS } from "../core/tool-vocabulary";
-import { parseSandboxReceipt } from "../core/security-sandbox";
+import { parseSandboxReceipt, sandboxNonceInCommand } from "../core/security-sandbox";
 import type { BashToolOutcome, HarnessToolCall } from "./harness-tool-call-types";
 import {
   hasUnbalancedQuotes,
@@ -275,10 +275,13 @@ function bashEvidence(
   // reproducing a bug is not evidence, so a script call whose output lost the
   // receipt mints nothing and its finding stays a lead. An interrupted call is
   // excluded outright — the harness killed the script, so any receipt in
-  // truncated output describes a run that never finished.
+  // truncated output describes a run that never finished. The nonce bound into
+  // the call's own argv is required too: without it the receipt is a line of
+  // text the call could have printed itself.
   if (!run.interrupted && SANDBOX_SCRIPT_IN_COMMAND.test(command)) {
-    const receipt = parseSandboxReceipt(run.stdout);
-    if (receipt.ok) events.push({ kind: "SandboxRun", receipt: receipt.value });
+    const nonce = sandboxNonceInCommand(command);
+    const receipt = nonce === null ? null : parseSandboxReceipt(run.stdout, nonce);
+    if (receipt !== null && receipt.ok) events.push({ kind: "SandboxRun", receipt: receipt.value });
   }
   const classified = classifyTestCommandDetailed(command);
   if (classified !== null) {

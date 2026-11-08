@@ -310,6 +310,86 @@ describe("exhaustive-discriminant-branching — chain vs standalone guards", () 
 });
 
 /**
+ * Where a totality proof is allowed to sit.
+ *
+ * The proof is CHAIN-scoped, not file-scoped — the file-wide reading was this
+ * rule's first form, and one `match(...).exhaustive()` anywhere silenced every
+ * chain in the file, which is how a year of unproven branches sat under a green
+ * lint. Only the ACCEPT direction was pinned (a proof beside a chain silences
+ * it); the reject direction and the boundary were not, so a `provenNear` that
+ * quietly widened to the whole file would still have passed the suite.
+ */
+describe("exhaustive-discriminant-branching — the proof is chain-scoped", () => {
+  const FILE_UNDER_TEST = "engine/src/core/example.ts";
+
+  it("a proof beside ANOTHER chain does not cover this one", () => {
+    const source = [
+      `function a(e) {`,                        // 1
+      `  if (e.kind === "a") return 1;`,        // 2
+      `  if (e.kind === "b") return 2;`,        // 3
+      `  if (e.kind === "c") return 3;`,        // 4
+      `}`,                                      // 5
+      `const f1 = 1;`,                          // 6
+      `const f2 = 2;`,                          // 7
+      `const f3 = 3;`,                          // 8
+      `const f4 = 4;`,                          // 9
+      `const f5 = 5;`,                          // 10
+      `const f6 = 6;`,                          // 11
+      ``,                                       // 12
+      `const proven = match(other)`,            // 13
+      `  .with({ kind: "x" }, () => 1)`,        // 14
+      `  .exhaustive();`,                       // 15
+    ].join("\n");
+    // The `.exhaustive()` belongs to `other`, not to `e`: the chain at 2-4 is
+    // unproven, and the file containing a proof somewhere is not evidence about
+    // anything but the chain the proof sits beside.
+    const violations = exhaustive(source, FILE_UNDER_TEST);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]!.fixHint).toContain("e.kind");
+    expect(violations[0]!.line).toBe(2);
+  });
+
+  it("a `never` binding in another function does not cover this chain", () => {
+    const source = [
+      `function a(e) {`,                        // 1
+      `  if (e.kind === "a") return 1;`,        // 2
+      `  if (e.kind === "b") return 2;`,        // 3
+      `  if (e.kind === "c") return 3;`,        // 4
+      `}`,                                      // 5
+      ...Array.from({ length: 8 }, (_, i) => `const gap${i} = ${i};`),
+      `function b(f) {`,                        // 14
+      `  const unhandled: never = f;`,          // 15
+      `  return unhandled;`,                    // 16
+      `}`,
+    ].join("\n");
+    expect(exhaustive(source, FILE_UNDER_TEST)).toHaveLength(1);
+  });
+
+  // The boundary itself, pinned from both sides: `MAX_PROOF_DISTANCE` is 6, so
+  // a proof six lines past the last branch still counts and seven does not.
+  // Widening the constant by one now fails a test instead of quietly absorbing
+  // more unrelated proofs.
+  const chainWithProofAtLine = (proofLine: number): string => {
+    const lines = [
+      `if (event.kind === "a") return 1;`,
+      `if (event.kind === "b") return 2;`,
+      `if (event.kind === "c") return 3;`,
+    ];
+    while (lines.length < proofLine - 1) lines.push(`const filler${lines.length} = ${lines.length};`);
+    lines.push(`const proven: never = event;`);
+    return lines.join("\n");
+  };
+
+  it("accepts a proof six lines after the last branch", () => {
+    expect(exhaustive(chainWithProofAtLine(9), FILE_UNDER_TEST)).toEqual([]);
+  });
+
+  it("rejects a proof seven lines after the last branch", () => {
+    expect(exhaustive(chainWithProofAtLine(10), FILE_UNDER_TEST)).toHaveLength(1);
+  });
+});
+
+/**
  * `branchBody`'s condition scan, and the limits of `discriminantOf` around it
  * (round-41 A3).
  *

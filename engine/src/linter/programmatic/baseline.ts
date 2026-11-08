@@ -23,6 +23,13 @@ export type Baseline = readonly string[];
 /** A module scope's first two segments, as a path prefix (`engine/src/core/`). */
 const anchorOf = (module: string): string => `${module.split("/").slice(0, 2).join("/")}/`;
 
+/** Repository trees a baseline key may start with. `anchors` narrow to a module
+ *  scope; these recover the repo-relative form for a tree the anchors do not
+ *  name (`pi/`), which otherwise stayed ABSOLUTE — every baseline key written
+ *  for that tree was therefore dead, and the rule reported the site it was
+ *  supposed to grandfather. */
+const REPO_ROOTS: readonly string[] = ["engine/", "pi/", "tests/", "scripts/"];
+
 /**
  * Normalize a lint target to the repo-relative form baseline keys are written
  * in. `lintFile` hands rules ABSOLUTE paths, so without this a baselined site
@@ -38,7 +45,7 @@ const anchorOf = (module: string): string => `${module.split("/").slice(0, 2).jo
  */
 export const repoRelative = (filePath: string, anchors: readonly string[]): string => {
   const normalized = filePath.replace(/\\/g, "/");
-  for (const anchor of anchors.map(anchorOf)) {
+  for (const anchor of [...anchors.map(anchorOf), ...REPO_ROOTS]) {
     const at = normalized.lastIndexOf(`/${anchor}`);
     if (at !== -1) return normalized.slice(at + 1);
     if (normalized.startsWith(anchor)) return normalized;

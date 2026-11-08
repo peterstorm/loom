@@ -228,13 +228,19 @@ interface BaselineDrift {
 /**
  * Every grandfathered-list rule ships a staleness helper; a list that only ever
  * suppresses violations cannot report its own decay, because a deleted or
- * renamed switch costs nothing. This walks the same files the tier just linted,
- * collects what each rule actually saw, and reports entries nothing consumed.
+ * renamed switch costs nothing.
+ *
+ * The walk is over the BASELINE'S OWN paths, not over the files this invocation
+ * happened to lint. Scoped by the lint scope, a targeted run (`lint-project.ts
+ * engine/src/core/x.ts`) saw one file's keys, called every other entry stale, and
+ * exited 1 — so the staleness pass punished exactly the operator who was being
+ * careful. An entry whose file is gone contributes no keys and is still
+ * reported, which is the drift this pass exists to catch.
  *
  * Run only against loom itself: the baselines are keys into loom's own tree, so
  * linting another project against them would report every entry as stale.
  */
-async function baselineDrift(files: string[]): Promise<BaselineDrift[]> {
+async function baselineDrift(): Promise<BaselineDrift[]> {
   const baselineModule = join(LOOM_ROOT, "engine/src/linter/programmatic/switch-totality-baseline.ts");
   if (!existsSync(baselineModule) || !existsSync(join(PROJECT_ROOT, "engine/src/linter"))) return [];
 
@@ -243,9 +249,11 @@ async function baselineDrift(files: string[]): Promise<BaselineDrift[]> {
     join(LOOM_ROOT, "engine/src/linter/programmatic/switch-totality.ts")
   );
 
-  const detected = files.flatMap((file) =>
-    detectedSwitchKeys(readFileSync(file, "utf-8"), relative(PROJECT_ROOT, file))
-  );
+  const baselinePaths = [...new Set((SWITCH_TOTALITY_BASELINE as readonly string[]).map((key) => key.split("::")[0]!))];
+  const detected = baselinePaths.flatMap((path) => {
+    const absolute = join(PROJECT_ROOT, path);
+    return existsSync(absolute) ? detectedSwitchKeys(readFileSync(absolute, "utf-8"), path) : [];
+  });
   const stale = unusedBaselineEntries(detected, SWITCH_TOTALITY_BASELINE);
   return stale.length === 0 ? [] : [{ rule: "switch-totality", stale }];
 }
@@ -332,7 +340,7 @@ for (const file of files) {
 
 // Drift is independent of violations: a baseline entry can be stale while the
 // tier is clean, which is exactly the case that used to go unnoticed.
-const drift = opts.baselineCheck && opts.tier === "full" ? await baselineDrift(files) : [];
+const drift = opts.baselineCheck && opts.tier === "full" ? await baselineDrift() : [];
 const driftLines = drift.flatMap((entry) =>
   entry.stale.map((key) => `${entry.rule}: ${key} (no such switch any more — delete the baseline entry)`)
 );

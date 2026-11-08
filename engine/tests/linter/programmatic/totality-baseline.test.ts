@@ -81,6 +81,21 @@ describe("exhaustive-discriminant-branching baseline", () => {
     expect(violations).toEqual([]);
   });
 
+  it("normalizes a path OUTSIDE the module anchors, so a pi/ baseline entry is live", () => {
+    // `lintFile` hands rules absolute paths. Anchoring only on `engine/src/*`
+    // left a `pi/…` path absolute, so every key written for that tree was dead
+    // and the rule reported the very site it was supposed to grandfather.
+    const path = "pi/implementation-brief-expansion.ts";
+    const absolute = join(REPO_ROOT, path);
+    const source = readFileSync(absolute, "utf-8");
+    const detected = detectedChainKeys(source, absolute, DEFAULT_MAX_DISCRIMINANT_BRANCHES, DEFAULT_DISCRIMINANT_TAGS);
+    expect(detected.length).toBeGreaterThan(0);
+    const baseline = detected.filter((key) => key.startsWith(`${path}::`));
+    expect(baseline).toEqual([EXHAUSTIVE_BRANCHING_BASELINE.find((entry) => entry.startsWith(`${path}::`))]);
+    expect(unusedBaselineEntriesOf(detected, baseline)).toEqual([]);
+    expect(chainRule(source, absolute, DEFAULT_MAX_DISCRIMINANT_BRANCHES, DEFAULT_DISCRIMINANT_TAGS)).toEqual([]);
+  });
+
   it("never grows by accident: a chain in a file the baseline has not seen is a violation", () => {
     const source = [
       "function pick(event: Event): string {",

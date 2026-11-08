@@ -44,6 +44,20 @@ const upstream = require(join(FIXTURES, "validate-coverage-ledger.cjs")) as Upst
 const upstreamValid = (ledger: unknown): boolean => upstream.validateDocument(ledger).length === 0;
 const oursValid = (ledger: unknown): boolean => validateLedger(ledger as CoverageLedger).length === 0;
 
+/** Mutations of a valid ledger that the vendored validator ACCEPTS and this port
+ *  rejects — the places this port is deliberately stricter. Enumerated by name,
+ *  because the header's claim "stricter in exactly one place" is otherwise only
+ *  prose: an empty list would mean the oracle proves nothing but agreement, and
+ *  a listed name that stops being rejected would mean the check silently
+ *  stopped running. */
+const STRICTER_THAN_UPSTREAM: readonly string[] = [
+  // Upstream never compares the unit's semantic fields against its own
+  // `canonical_refs`, so a unit whose id says one thing and whose `surface`
+  // says another validates there. This port derives the id FROM the refs, so
+  // the disagreement is a defect it names.
+  "semantic fields disagree with refs",
+];
+
 const seed = (overrides: Partial<Parameters<typeof seedCoverageUnit>[0]> = {}) => {
   const seeded = seedCoverageUnit({
     refs: {
@@ -152,17 +166,35 @@ describe("coverage ledger: TS port vs upstream validator", () => {
       { name: "unexpected canonical ref", document: [{ ...base, canonical_refs: { ...base.canonical_refs, extra: "x" } }] },
     ];
 
+    const acceptedByUs: string[] = [];
+    const acceptedByUpstream: string[] = [];
     for (const mutation of mutations) {
       const ourAnswer = oursValid(mutation.document);
       const upstreamAnswer = upstreamValid(mutation.document);
+      // The forward direction, per mutation: a document WE accept that upstream
+      // rejects would let the run publish a ledger Cloudflare's own tooling
+      // calls invalid.
       if (ourAnswer) {
-        expect({ name: mutation.name, valid: upstreamAnswer }).toEqual({ name: mutation.name, valid: true });
+        expect({ name: mutation.name, upstreamAccepted: upstreamAnswer })
+          .toEqual({ name: mutation.name, upstreamAccepted: true });
+        acceptedByUs.push(mutation.name);
       }
-      expect({ name: mutation.name, upstreamAccepted: upstreamAnswer }).toEqual({
-        name: mutation.name,
-        upstreamAccepted: ourAnswer || upstreamAnswer,
-      });
+      if (upstreamAnswer) acceptedByUpstream.push(mutation.name);
     }
+    // Every mutation in the table is a defect `validateLedger` must name. This
+    // is the assertion the previous loop only appeared to make: its second
+    // expectation compared `upstreamAnswer` against `ourAnswer || upstreamAnswer`,
+    // which fails only when `ourAnswer && !upstreamAnswer` — the exact condition
+    // the first expectation already testifies to, so it could never fail on its
+    // own and proved nothing.
+    expect(acceptedByUs).toEqual([]);
+    // And the ones the vendored validator lets through: the extra checks this
+    // port adds on top of upstream, pinned by NAME so a check that stops running
+    // shows up as a diff rather than as a loop that quietly did less.
+    expect(acceptedByUpstream).toEqual(STRICTER_THAN_UPSTREAM);
+    // The comparison is only meaningful if the loop actually reached every
+    // mutation: a table that shrank would otherwise still report agreement.
+    expect(mutations.length).toBeGreaterThanOrEqual(20);
   });
 });
 

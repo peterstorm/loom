@@ -22,10 +22,10 @@ re-walk a unit to "make sure". You read two documents and answer one question:
 
 The brief names the run directory. Read, in this order:
 
-1. `coverage-ledger.json` — every unit with its status, its attempts, and its
+1. `ledger.json` — every unit with its status, its attempts, and its
    archived local checks.
 2. `security-findings.json` — the claims the run intends to publish.
-3. `run-metadata.json` — profile, scope, budget and incomplete reason.
+3. `run.json` — profile, scope, budget and incomplete reason.
 4. The source files the ledger's `reviewed_paths` name, only when a claim
    depends on what one of them contains.
 

@@ -10,7 +10,9 @@
  * enforced — and what it FAILED to enforce, because a refused `ulimit` is
  * reported as unenforced rather than as applied.
  *
- * Pure module: no I/O, no clock, no randomness.
+ * Pure module: no I/O, no clock, no randomness — and no `node:crypto`: it sits
+ * inside the guarded machine's source closure, which must stay free of Node
+ * builtins. The nonce below therefore uses a local deterministic hash.
  */
 
 import { failure, success, type DomainResult } from "./orchestration-contract/identity";
@@ -90,6 +92,44 @@ export const SANDBOX_RECEIPT_PREFIX = "LOOM-SANDBOX-RECEIPT ";
  *  receipt line of its own cannot match it. */
 export const sandboxReceiptPrefix = (nonce: string): string => `LOOM-SANDBOX-RECEIPT-${nonce} `;
 
+const SANDBOX_NONCE = /^[0-9a-f]{16,64}$/;
+
+/** The nonce a receipt is bound to, derived from the things the engine and the
+ *  hunter already agree on (the artifact path the ledger records). Deterministic
+ *  on purpose: a replay re-reads the same artifact and must reach the same
+ *  verdict, so a random nonce would make the gate unrepayable. 32 hex chars is
+ *  inside the script's own grammar.
+ *
+ *  This is a BINDING marker, not a security primitive: the hunter is told the
+ *  value and copies it, so the defence is that a command printing a receipt line
+ *  of its own, or a receipt copied from another check, cannot carry the marker
+ *  this artifact's engine will look for. Four FNV-1a rounds supply the 128 bits
+ *  without pulling `node:crypto` into the machine closure. */
+export function sandboxNonce(...parts: readonly string[]): string {
+  const seed = `sandbox-nonce\u0000${parts.join("\u0000")}`;
+  return ["", "#1", "#2", "#3"]
+    .map((round) => fnv1a32(`${seed}${round}`).toString(16).padStart(8, "0"))
+    .join("");
+}
+
+/** 32-bit FNV-1a: deterministic, dependency-free, and enough to bind a marker. */
+function fnv1a32(text: string): number {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+/** The nonce a bash call bound into its own receipt, read back from its argv: a
+ *  receipt whose marker does not carry the nonce of the call that produced it is
+ *  text, not evidence. */
+export function sandboxNonceInCommand(command: string): string | null {
+  const bound = /--nonce[ =]+["']?([0-9a-f]{16,64})["']?/.exec(command);
+  return bound === null ? null : bound[1];
+}
+
 export type SandboxEnforcement = Readonly<{
   cpu: boolean;
   memory: boolean;
@@ -106,6 +146,14 @@ export type SandboxReceipt = Readonly<{
   networkNamespace: true;
   targetReadOnly: true;
   readOnlyRoot: boolean;
+  /** The operator's home was bind-remounted read-only. Unlike the root remount
+   *  this one SUCCEEDS in a user namespace (we own that superblock), and home is
+   *  the one surface the uid mapping otherwise leaves writable — so it is
+   *  required, not merely recorded. */
+  homeReadOnly: boolean;
+  /** Mountpoints that could not be remounted read-only: the residual exposure a
+   *  report states instead of claiming a closed filesystem. */
+  unremountedMounts: number;
   /** Which limits the kernel really applied. A refused `ulimit` is `false`, so
    *  "within limits" never rests on an unapplied one. */
   enforced: SandboxEnforcement;
@@ -113,7 +161,7 @@ export type SandboxReceipt = Readonly<{
 
 const RECEIPT_KEYS = [
   "schemaVersion", "exit", "limits", "allowlistedEnv", "scratchBytes", "networkNamespace", "targetReadOnly",
-  "readOnlyRoot", "enforced",
+  "readOnlyRoot", "homeReadOnly", "unremountedMounts", "enforced",
 ] as const;
 const ENFORCEMENT_KEYS = ["cpu", "memory", "processes", "fileSize"] as const;
 
@@ -144,6 +192,11 @@ export function parseSandboxReceiptValue(raw: unknown): DomainResult<SandboxRece
   if (record.networkNamespace !== true) return invalid("networkNamespace must be true");
   if (record.targetReadOnly !== true) return invalid("targetReadOnly must be true");
   if (typeof record.readOnlyRoot !== "boolean") return invalid("readOnlyRoot must be a boolean");
+  if (typeof record.homeReadOnly !== "boolean") return invalid("homeReadOnly must be a boolean");
+  const unremountedMounts = record.unremountedMounts;
+  if (typeof unremountedMounts !== "number" || !Number.isInteger(unremountedMounts) || unremountedMounts < 0) {
+    return invalid("unremountedMounts must be a non-negative integer");
+  }
   const enforced = parseEnforcement(record.enforced);
   if ("message" in enforced) return invalid(enforced.message);
   return success(
@@ -156,6 +209,8 @@ export function parseSandboxReceiptValue(raw: unknown): DomainResult<SandboxRece
       networkNamespace: true as const,
       targetReadOnly: true as const,
       readOnlyRoot: record.readOnlyRoot as boolean,
+      homeReadOnly: record.homeReadOnly as boolean,
+      unremountedMounts,
       enforced: Object.freeze(enforced),
     }),
   );
@@ -183,9 +238,14 @@ export type SandboxError = Readonly<{ kind: "invalid-sandbox-receipt" | "invalid
 
 /** The LAST receipt line wins: the script prints the command's output first and
  *  its own receipt last, so a command that prints a receipt line cannot outrank
- *  it. With a nonce, only a line carrying that nonce is even considered. */
-export function parseSandboxReceipt(stdout: string, options: Readonly<{ nonce?: string }> = {}): DomainResult<SandboxReceipt, SandboxError> {
-  const prefix = options.nonce === undefined ? SANDBOX_RECEIPT_PREFIX : sandboxReceiptPrefix(options.nonce);
+ *  it. The nonce is REQUIRED: only a line carrying the caller's nonce is even
+ *  considered, so a caller cannot forget the binding that makes the receipt
+ *  evidence rather than a string that happened to appear in the output. */
+export function parseSandboxReceipt(stdout: string, nonce: string): DomainResult<SandboxReceipt, SandboxError> {
+  if (!SANDBOX_NONCE.test(nonce)) {
+    return failure({ kind: "invalid-sandbox-receipt" as const, message: "nonce must be 16-64 lowercase hex characters" });
+  }
+  const prefix = sandboxReceiptPrefix(nonce);
   const lines = stdout.split("\n").map((line) => line.trim()).filter((line) => line.startsWith(prefix));
   const last = lines.at(-1);
   if (last === undefined) {
@@ -212,8 +272,6 @@ export type SandboxRequest = Readonly<{
    *  fabricated receipt line cannot match. */
   nonce?: string;
 }>;
-
-const SANDBOX_NONCE = /^[0-9a-f]{16,64}$/;
 
 export type SandboxRequestError = Readonly<{ kind: "invalid-sandbox-request"; message: string }>;
 
@@ -275,12 +333,17 @@ export function sandboxCommand(request: SandboxRequest): DomainResult<readonly s
  *     unmeasured footprint is not a passing one);
  *   - the target was really remounted read-only — the script exits 127 when the
  *     bind remount fails, so `targetReadOnly: true` is proven, not asserted;
+ *   - the operator's home was really remounted read-only (`homeReadOnly`) — the
+ *     one surface the uid mapping leaves open, and the one remount a user
+ *     namespace can always perform;
  *   - every ulimit was really applied.
  *
  *  `readOnlyRoot` is recorded but not required: a user namespace cannot remount
- *  a superblock it does not own (`mount -o remount,ro /` is denied on ext4), and
- *  the uid mapping — not that remount — is what protects the rest of the
- *  filesystem. Recording the attempt keeps the report from claiming it.
+ *  a superblock it does not own (`mount -o remount,ro /` is denied on ext4). What
+ *  that leaves open is reported as `unremountedMounts`, so the report can state
+ *  the residual exposure instead of claiming a closed filesystem. Home is the
+ *  exception that matters, because it is the writable surface through which a
+ *  command could reach the operator's own files — and it is gated.
  */
 export function sandboxWithinLimits(receipt: SandboxReceipt): boolean {
   return (
@@ -288,6 +351,7 @@ export function sandboxWithinLimits(receipt: SandboxReceipt): boolean {
     receipt.scratchBytes !== null &&
     receipt.scratchBytes <= receipt.limits.scratchMb * 1024 * 1024 &&
     receipt.targetReadOnly &&
+    receipt.homeReadOnly &&
     receipt.enforced.cpu &&
     receipt.enforced.memory &&
     receipt.enforced.processes &&
@@ -295,14 +359,18 @@ export function sandboxWithinLimits(receipt: SandboxReceipt): boolean {
   );
 }
 
-/** The block a hunter prompt carries verbatim: what it may run and how. */
-export function renderSandboxInstructions(limits: SandboxLimits): string {
+/** The block a hunter prompt carries verbatim: what it may run and how. The
+ *  nonce is supplied by the engine because the receipt is bound to the artifact
+ *  path the hunter itself names, and a receipt without it is refused. */
+export function renderSandboxInstructions(limits: SandboxLimits, nonce: string): string {
   return [
     "Bounded local execution (the only way to claim an observed result):",
     `  scripts/security-sandbox.sh --target <repo> --scratch <run>/agents/<your-agent-id>/scratch \\`,
     `    --cpu ${limits.cpuSeconds} --mem-mb ${limits.addressSpaceMb} --procs ${limits.processes} \\`,
-    `    --file-mb ${limits.fileSizeMb} --wall ${limits.wallClockSeconds} --scratch-mb ${limits.scratchMb} -- <command> [args...]`,
-    "No external network, no writable target, no inherited environment, no dependency installation.",
+    `    --file-mb ${limits.fileSizeMb} --wall ${limits.wallClockSeconds} --scratch-mb ${limits.scratchMb} \\`,
+    `    --nonce ${nonce} -- <command> [args...]`,
+    "No external network, no writable target or home, no inherited environment, no dependency installation.",
+    "A receipt without that --nonce is refused: redirect the script's stdout to the artifact your ledger entry names, and keep the flag exactly as printed.",
     "If the sandbox cannot start, record needs_validation naming the missing capability — do not run the command anyway.",
   ].join("\n");
 }

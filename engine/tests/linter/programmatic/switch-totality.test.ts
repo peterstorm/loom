@@ -134,6 +134,56 @@ describe("switch-totality", () => {
     expect(lint(source)).toHaveLength(1);
   });
 
+  it("does not fold a NESTED switch's never proof into the enclosing switch", () => {
+    // The nested `default` proves the nested switch. Reading it as the outer
+    // switch's proof is the fail-open direction: an unproven union match is
+    // accepted because some inner switch happens to be total.
+    const source = [
+      `function name(x: Event, y: Kind): string {`,
+      `  switch (x.kind) {`,
+      `    case "a":`,
+      `      switch (y) {`,
+      `        case "p": return "p";`,
+      `        case "q": return "q";`,
+      `        default: {`,
+      `          const unreachable: never = y;`,
+      `          return unreachable;`,
+      `        }`,
+      `      }`,
+      `      return "a";`,
+      `    case "b":`,
+      `      return "b";`,
+      `  }`,
+      `  return "?";`,
+      `}`,
+    ].join("\n");
+    const violations = lint(source);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]!.line).toBe(2);
+  });
+
+  it("does not count a NESTED switch's arms toward the enclosing guard", () => {
+    // The outer switch has ONE literal arm — a guard, exempt. Counting the
+    // nested switch's arms made it look like a three-arm union match. The
+    // nested switch itself proves totality, so it is not the site under test.
+    const source = [
+      `function clean(x: Job, y: Kind): void {`,
+      `  switch (x.status) {`,
+      `    case "done":`,
+      `      switch (y) {`,
+      `        case "p": drop(y); break;`,
+      `        case "q": keep(y); break;`,
+      `        default: {`,
+      `          const unreachable: never = y;`,
+      `          drop(unreachable);`,
+      `        }`,
+      `      }`,
+      `  }`,
+      `}`,
+    ].join("\n");
+    expect(lint(source)).toEqual([]);
+  });
+
   it("leaves a one-arm switch alone — that is a guard, not a pattern match", () => {
     const source = [
       `function clean(x: Job): void {`,
@@ -174,9 +224,18 @@ describe("switch-totality", () => {
     // machine/ is not an import boundary, so anchoring on the boundary table
     // left its absolute paths unmatched and the baseline entry silently dead.
     ["engine/src/machine/example.ts"],
+    // pi/ is outside every module scope, so only the repo-root fallback in
+    // `repoRelative` can turn its baseline keys from absolute into relative.
+    ["pi/implementation-brief-expansion.ts"],
   ])("normalizes an absolute path to %s so a baselined site stays baselined", (relative) => {
-    const absolute = `/home/someone/dev/loom/`;
+    // Joining the relative path is the point: the first version built a bare
+    // `/home/someone/dev/loom/`, which contains no anchor at all, so the rule
+    // reported nothing and the case passed with any baseline — pinning nothing.
+    const absolute = `/home/someone/dev/loom/${relative}`;
     expect(lint(UNPROVEN, absolute, [baselineKey(relative, "x.kind")])).toEqual([]);
+    // And the normalization is not vacuous: the same absolute path WITHOUT the
+    // baseline entry is a violation, so a dead key would show up here.
+    expect(lint(UNPROVEN, absolute)).toHaveLength(relative.startsWith("pi/") ? 0 : 1);
   });
 
   it("spends one baseline entry per site, so a second switch on the same scrutinee still fails", () => {

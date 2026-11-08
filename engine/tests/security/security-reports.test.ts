@@ -129,7 +129,7 @@ const ledger = (): CoverageLedger => {
 describe("report derivation", () => {
   it("renders every published record exactly where its verdict says (INV-S6)", () => {
     const findings = parse([CONFIRMED, NEEDS_VALIDATION, REJECTED]);
-    const documents = renderRunDocuments({ metadata, ledger: ledger(), findings });
+    const documents = renderRunDocuments({ metadata, ledger: ledger(), findings, locator: "/out" });
 
     const report = documents["REPORT.md"] ?? "";
     expect(report.match(/authz:1/g)?.length).toBe(1);
@@ -152,7 +152,7 @@ describe("report derivation", () => {
 
   it("gives a needs_validation lead no severity anywhere (INV-S4b)", () => {
     const findings = parse([NEEDS_VALIDATION]);
-    const needsValidation = renderNeedsValidation({ metadata, ledger: ledger(), findings });
+    const needsValidation = renderNeedsValidation({ metadata, ledger: ledger(), findings, locator: "/out" });
     expect(needsValidation).not.toMatch(/\b(critical|high|medium|low)\b/i);
     expect(needsValidation).not.toContain("Severity:");
     expect(needsValidation).toContain("Blockers:");
@@ -160,10 +160,10 @@ describe("report derivation", () => {
 
   it("is byte-identical for identical records (INV-S6b)", () => {
     const findings = parse([CONFIRMED, NEEDS_VALIDATION, REJECTED]);
-    const first = renderRunDocuments({ metadata, ledger: ledger(), findings });
-    const second = renderRunDocuments({ metadata, ledger: ledger(), findings });
+    const first = renderRunDocuments({ metadata, ledger: ledger(), findings, locator: "/out" });
+    const second = renderRunDocuments({ metadata, ledger: ledger(), findings, locator: "/out" });
     expect(first).toEqual(second);
-    expect(renderReport({ metadata, ledger: ledger(), findings })).toBe(renderReport({ metadata, ledger: ledger(), findings }));
+    expect(renderReport({ metadata, ledger: ledger(), findings, locator: "/out" })).toBe(renderReport({ metadata, ledger: ledger(), findings, locator: "/out" }));
   });
 
   it("discloses an incomplete run instead of claiming coverage", () => {
@@ -173,6 +173,7 @@ describe("report derivation", () => {
       metadata: { ...metadata, runStatus: "incomplete", incompleteReason: deferReason },
       ledger: deferred,
       findings: [],
+      locator: "/out",
     });
     expect(report).toContain("Run status: incomplete");
     expect(report).toContain(deferReason);
@@ -181,10 +182,10 @@ describe("report derivation", () => {
 
   it("renders the positive case without inventing findings", () => {
     const settledLedger = ok(deferPlannedUnits(ledger(), "no_remaining_work"));
-    const report = renderReport({ metadata, ledger: settledLedger, findings: [], hardening: ["Parameterized queries are used throughout the export path."] });
+    const report = renderReport({ metadata, ledger: settledLedger, findings: [], locator: "/out", hardening: ["Parameterized queries are used throughout the export path."] });
     expect(report).toContain("0 confirmed, 0 needing validation, 0 rejected");
     expect(report).toContain("Parameterized queries are used throughout the export path.");
-    expect(renderFindingsDetail({ metadata, ledger: settledLedger, findings: [] })).toContain("No medium-or-higher confirmed finding");
-    expect(renderNeedsValidation({ metadata, ledger: settledLedger, findings: [] })).toContain("No unresolved lead");
+    expect(renderFindingsDetail({ metadata, ledger: settledLedger, findings: [], locator: "/out" })).toContain("No medium-or-higher confirmed finding");
+    expect(renderNeedsValidation({ metadata, ledger: settledLedger, findings: [], locator: "/out" })).toContain("No unresolved lead");
   });
 });

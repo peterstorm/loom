@@ -21,7 +21,7 @@
 import { compareStrings } from "./ordering";
 import type { SecurityRunMetadata } from "./security-audit-contract";
 import { summarizeCoverage, type CoverageLedger } from "./security-coverage";
-import { renderDispositionHandoff, securityDisposition } from "./security-disposition";
+import { dispositionHandoffPaths, renderDispositionHandoff, securityDisposition } from "./security-disposition";
 import type { ConfirmedFinding, NeedsValidationFinding, SecurityFinding } from "./security-findings";
 
 export type ReportInput = Readonly<{
@@ -32,10 +32,10 @@ export type ReportInput = Readonly<{
   hardening?: readonly string[];
   /** The final coverage critic's own verdict, quoted as-is. */
   criticStop?: boolean | null;
-  /** Where the published records live, so the handoff names the directory the
-   *  loader reads. Omitted in a pure render, in which case the handoff still
-   *  states the decisions but no path. */
-  locator?: string;
+  /** Where the published records live. REQUIRED: the handoff prints the command
+   *  that loads them, and a report rendered without it would name the working
+   *  directory as the decision set's home. */
+  locator: string;
 }>;
 
 const sortByFingerprint = <T extends SecurityFinding>(findings: readonly T[]): readonly T[] =>
@@ -188,10 +188,16 @@ export function renderReport(input: ReportInput): string {
 function handoffSection(input: ReportInput): string {
   const derived = securityDisposition({
     metadata: input.metadata,
-    locator: input.locator ?? ".",
+    locator: input.locator,
     findings: input.findings,
   });
-  return derived.ok ? renderDispositionHandoff(derived.value) : ["## Disposition handoff", "", derived.error.message].join("\n");
+  if (!derived.ok) return ["## Disposition handoff", "", derived.error.message].join("\n");
+  // A run with nothing to remediate prints no command; a run with decisions
+  // prints the exact one, against the paths the handler writes.
+  const paths = input.findings.length === 0
+    ? null
+    : dispositionHandoffPaths(input.locator, input.metadata.runId);
+  return renderDispositionHandoff(derived.value, paths);
 }
 
 /** `FINDINGS-DETAIL.md` — full traces and reproductions for medium and above. */

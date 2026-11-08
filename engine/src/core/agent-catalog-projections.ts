@@ -305,4 +305,10 @@ export const REVIEW_PANEL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("
 
 /** Security-audit agents (hunters, verifiers, the coverage critic). DERIVED
  *  from the Agent Catalog (kind `security-verdict`): recognized by the audit
- *  program, invisible to every review roster and to phase advancement. */
+ *  program, invisible to every review roster and to phase advancement.
+ *
+ *  This projection is what puts them in `VALIDATED_AGENTS`. Without it a
+ *  canonical `loom:security-*-agent` spawn is refused at PreToolUse as an
+ *  "unknown Loom agent" — the program could not launch a hunter at all — while
+ *  a bare, un-namespaced spawn escaped the skill gate entirely. */
+export const SECURITY_AUDIT_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("security-verdict"));

@@ -139,11 +139,11 @@ const aFindingSet = (): readonly SecurityFinding[] =>
 describe("published documents are order-invariant (INV-S6b)", () => {
   it("renders the same bytes for every permutation of the finding set", () => {
     const ledger = ok(recordUnitResult(anAssignedLedger(), aResult({ status: "covered" })));
-    const baseline = renderRunDocuments({ metadata, ledger, findings: aFindingSet() });
+    const baseline = renderRunDocuments({ metadata, ledger, findings: aFindingSet(), locator: "/out" });
     const set = [...aFindingSet()];
     fc.assert(
       fc.property(fc.shuffledSubarray(set, { minLength: set.length, maxLength: set.length }), (shuffled) => {
-        expect(renderRunDocuments({ metadata, ledger, findings: shuffled })).toEqual(baseline);
+        expect(renderRunDocuments({ metadata, ledger, findings: shuffled, locator: "/out" })).toEqual(baseline);
       }),
       { numRuns: 25 },
     );
@@ -151,7 +151,7 @@ describe("published documents are order-invariant (INV-S6b)", () => {
 
   it("orders each document's entries by fingerprint, not by arrival", () => {
     const ledger = ok(recordUnitResult(anAssignedLedger(), aResult({ status: "covered" })));
-    const documents = renderRunDocuments({ metadata, ledger, findings: aFindingSet() });
+    const documents = renderRunDocuments({ metadata, ledger, findings: aFindingSet(), locator: "/out" });
     // Each document carries the verdicts it is about; within one, order follows
     // the fingerprint, so a reader comparing two runs sees the same sequence.
     const expectations: readonly (readonly [document: string, fingerprints: readonly string[]])[] = [

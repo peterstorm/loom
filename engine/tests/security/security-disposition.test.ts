@@ -12,11 +12,14 @@ import { describe, expect, it } from "vitest";
 import { canonicalDigest } from "../../src/core/digest";
 import {
   decisionForFinding,
+  dispositionHandoffPaths,
   reasonForFinding,
   renderDispositionHandoff,
   securityDisposition,
   securityFindingOrigin,
+  standaloneDispositionStart,
 } from "../../src/core/security-disposition";
+import { parseStandaloneDispositionStartInput } from "../../src/core/standalone-disposition-machine";
 import type { SecurityRunMetadata } from "../../src/core/security-audit-contract";
 import { parseSecurityFindings, type SecurityFinding } from "../../src/core/security-findings";
 import { renderReport } from "../../src/core/security-reports";
@@ -121,10 +124,29 @@ describe("the decision set", () => {
   it("names the handoff command in prose", () => {
     const disposition = securityDisposition({ metadata: METADATA, locator: "/out/audit-1", findings: findings() });
     if (!disposition.ok) throw new Error("expected a disposition set");
-    const text = renderDispositionHandoff(disposition.value);
+    const paths = dispositionHandoffPaths("/out/audit-1", METADATA.runId);
+    const text = renderDispositionHandoff(disposition.value, paths);
     expect(text).toContain("1 accepted, 1 deferred, 1 dismissed");
-    expect(text).toContain("standalone-disposition --run /out/audit-1");
+    // The command carries every flag the program requires and names the exact
+    // file the handler writes. The old spelling (`--run <locator>`, no stdin)
+    // named neither, so no reader could execute it.
+    expect(text).toContain(`--runs-root ${paths.runsRoot}`);
+    expect(text).toContain(`--run run.disposition-${METADATA.runId} < ${paths.inputFile}`);
     expect(text).toContain(disposition.value.source.resultDigest);
+  });
+
+  it("derives a start input the standalone-disposition loader parses", () => {
+    const disposition = securityDisposition({ metadata: METADATA, locator: "/out/audit-1", findings: findings() });
+    if (!disposition.ok) throw new Error("expected a disposition set");
+    const start = standaloneDispositionStart(disposition.value);
+    if (!start.ok) throw new Error(start.error.message);
+    // The loader's OWN parser, not a re-implementation of its grammar.
+    const parsed = parseStandaloneDispositionStartInput(start.value);
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    expect(parsed.value.source.locator).toBe("/out/audit-1");
+    expect(parsed.value.record.entries).toHaveLength(3);
+    expect(parsed.value.record.revision).toEqual({ kind: "initial" });
+    expect(parsed.value.previous).toBeNull();
   });
 });
 
@@ -137,18 +159,21 @@ describe("the report's handoff section", () => {
     if (!disposition.ok) throw new Error("expected a disposition set");
     const report = renderReport({ metadata: METADATA, ledger: ledger.value, findings: published, locator: "/out" });
     expect(report).toContain("## Disposition handoff");
-    expect(report).toContain("standalone-disposition --run /out");
+    const paths = dispositionHandoffPaths("/out", METADATA.runId);
+    expect(report).toContain(`--runs-root ${paths.runsRoot}`);
+    expect(report).toContain(paths.inputFile);
     // The digest in the prose is the digest of the decision set, not a second
     // rendering of the same idea.
     expect(report).toContain(disposition.value.source.resultDigest);
   });
 
-  it("states the handoff without a path when no locator is given", () => {
+  it("names no command for a clean run, because there is nothing to load", () => {
     const ledger = parseCoverageSeeds([aSeed()]);
     if (!ledger.ok) throw new Error("expected a ledger");
-    const report = renderReport({ metadata: METADATA, ledger: ledger.value, findings: findings() });
+    const report = renderReport({ metadata: METADATA, ledger: ledger.value, findings: [], locator: "/out" });
     expect(report).toContain("## Disposition handoff");
-    expect(report).toContain("standalone-disposition --run .");
+    expect(report).toContain("nothing to remediate");
+    expect(report).not.toContain("standalone-disposition --runs-root");
   });
 });
 

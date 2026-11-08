@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createSecurityAuditHandler } from "../../src/handlers/helpers/security-audit";
-import { DEFAULT_SANDBOX_LIMITS, SANDBOX_RECEIPT_PREFIX } from "../../src/core/security-sandbox";
+import { DEFAULT_SANDBOX_LIMITS, sandboxNonce, sandboxReceiptPrefix } from "../../src/core/security-sandbox";
 import { canonicalCoverageId, type CoverageRefs } from "../../src/core/security-audit-contract";
 import { nSeeds } from "../security/fixtures";
 
@@ -59,8 +59,11 @@ const start = async (run: Run, extra: readonly string[] = []): Promise<void> => 
   expect(started.error).toBeNull();
 };
 
-const receipt = (overrides: Record<string, unknown> = {}): string =>
-  `${SANDBOX_RECEIPT_PREFIX}${JSON.stringify({
+/** A receipt is bound to the artifact path the ledger names — the same
+ *  derivation the handler performs, because a receipt the engine cannot bind is
+ *  not evidence. */
+const receiptFor = (artifact: string, overrides: Record<string, unknown> = {}): string =>
+  `${sandboxReceiptPrefix(sandboxNonce(artifact))}${JSON.stringify({
     schemaVersion: 1,
     exit: 0,
     limits: { ...DEFAULT_SANDBOX_LIMITS },
@@ -69,6 +72,8 @@ const receipt = (overrides: Record<string, unknown> = {}): string =>
     networkNamespace: true,
     targetReadOnly: true,
     readOnlyRoot: false,
+    homeReadOnly: true,
+    unremountedMounts: 0,
     enforced: { cpu: true, memory: true, processes: true, fileSize: true },
     ...overrides,
   })}`;
@@ -117,9 +122,26 @@ describe("a local check must name a receipt that proves a bounded run (INV-S1)",
     // mkdirSync via writeFileSync's parent creation is not available, so make it.
     const { mkdirSync } = await import("node:fs");
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(run.out, artifact), `${receipt()}\n`);
+    writeFileSync(join(run.out, artifact), `${receiptFor(artifact)}\n`);
 
     expect((await submitLocal(run, artifact)).error).toBeNull();
+  });
+
+  it("refuses a receipt the artifact path does not bind", async () => {
+    const run = aRun();
+    await start(run);
+    await assignOnly(run);
+    const artifact = "agents/security-hunter-agent/artifacts/elsewhere.json";
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(join(run.out, "agents", "security-hunter-agent", "artifacts"), { recursive: true });
+    // A real receipt, but bound to a DIFFERENT artifact: the command that
+    // produced it was not the command this check names.
+    writeFileSync(join(run.out, artifact), `${receiptFor("agents/security-hunter-agent/artifacts/stolen.json")}\n`);
+
+    const refused = await submitLocal(run, artifact);
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain("is not a sandbox receipt");
+    expect(refused.error).toContain("no sandbox receipt was emitted");
   });
 
   it("refuses a receipt from a run that exited non-zero", async () => {
@@ -129,7 +151,7 @@ describe("a local check must name a receipt that proves a bounded run (INV-S1)",
     const artifact = "agents/security-hunter-agent/artifacts/failed.json";
     const { mkdirSync } = await import("node:fs");
     mkdirSync(join(run.out, "agents", "security-hunter-agent", "artifacts"), { recursive: true });
-    writeFileSync(join(run.out, artifact), `${receipt({ exit: 1 })}\n`);
+    writeFileSync(join(run.out, artifact), `${receiptFor(artifact, { exit: 1 })}\n`);
 
     const refused = await submitLocal(run, artifact);
     expect(refused.ok).toBe(false);
@@ -145,10 +167,17 @@ describe("a local check must name a receipt that proves a bounded run (INV-S1)",
     mkdirSync(join(run.out, "agents", "security-hunter-agent", "artifacts"), { recursive: true });
 
     const unenforced = "agents/security-hunter-agent/artifacts/unenforced.json";
-    writeFileSync(join(run.out, unenforced), `${receipt({ enforced: { cpu: false, memory: true, processes: true, fileSize: true } })}\n`);
+    writeFileSync(join(run.out, unenforced), `${receiptFor(unenforced, { enforced: { cpu: false, memory: true, processes: true, fileSize: true } })}\n`);
     const first = await submitLocal(run, unenforced);
     expect(first.ok).toBe(false);
     expect(first.error).toContain("cpu limit not applied");
+
+    // A receipt whose home directory stayed writable is not a bounded run.
+    const openHome = "agents/security-hunter-agent/artifacts/open-home.json";
+    writeFileSync(join(run.out, openHome), `${receiptFor(openHome, { homeReadOnly: false })}\n`);
+    const openHomeResult = await submitLocal(run, openHome);
+    expect(openHomeResult.ok).toBe(false);
+    expect(openHomeResult.error).toContain("home directory not remounted read-only");
 
     const prose = "agents/security-hunter-agent/artifacts/prose.md";
     writeFileSync(join(run.out, prose), "I ran it locally and it worked.\n");

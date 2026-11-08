@@ -22,6 +22,14 @@
  * stable across a re-publish of unchanged records and different when a record
  * changed — an origin that survived an edit would let a repaired finding keep
  * its old decision, which is precisely the bug a digest chain prevents.
+ *
+ * The handoff is CONSUMABLE, not merely descriptive: `standaloneDispositionStart`
+ * produces the exact bytes `helper orchestration start standalone-disposition`
+ * parses (`{ source, record, previous }`, with the record in the standalone
+ * lineage grammar), and `dispositionHandoffPaths` is the one owner of where
+ * those bytes live and which command reads them. Before that the printed
+ * command named neither the runs root nor the input file, and the record's own
+ * shape carried keys the loader rejects — a handoff nobody could execute.
  */
 
 import { match } from "ts-pattern";
@@ -29,6 +37,7 @@ import { canonicalDigest } from "./digest";
 import { compareStrings } from "./ordering";
 import type { ArtifactDigest } from "./orchestration-contract/identity";
 import { failure, success, type DomainResult } from "./orchestration-contract/identity";
+import { standaloneDispositionSchema } from "./standalone-lineage-contract";
 import type { SecurityRunMetadata } from "./security-audit-contract";
 import type { SecurityFinding } from "./security-findings";
 
@@ -70,6 +79,69 @@ export function securityFindingOrigin(runId: string, finding: SecurityFinding): 
     fingerprint: finding.fingerprint,
     record: finding,
   });
+}
+
+/** Where the consumable handoff lives, and the command that loads it. One
+ *  owner: the handler writes these paths and the report prints them, so the
+ *  prose cannot name a file the handler did not write. */
+export type DispositionHandoffPaths = Readonly<{
+  /** The `standalone-disposition` start input, written beside the record. */
+  inputFile: string;
+  runsRoot: string;
+  /** The direct child of `runsRoot` the remediation run owns. */
+  runDir: string;
+}>;
+
+export function dispositionHandoffPaths(locator: string, runId: string): DispositionHandoffPaths {
+  // Plain joins: this module is pure and may not import `node:path`, and the
+  // locator is already an absolute canonical path (the loader rejects anything
+  // with `.`/`..`/empty segments).
+  const root = locator.replace(/\/$/, "");
+  const runsRoot = `${root}/disposition-runs`;
+  return {
+    inputFile: `${root}/standalone-disposition.json`,
+    runsRoot,
+    runDir: `${runsRoot}/run.disposition-${runId}`,
+  };
+}
+
+/** The bytes `helper orchestration start standalone-disposition` parses. The
+ *  record is validated with the loader's OWN schema before it leaves here: a
+ *  handoff that only looks consumable is the defect this type exists to stop. */
+export type StandaloneDispositionStart = Readonly<{
+  source: SecurityDisposition["source"];
+  record: Readonly<{
+    schemaVersion: 1;
+    source: SecurityDisposition["source"];
+    provenance: "DECLARED";
+    revision: Readonly<{ kind: "initial" }>;
+    entries: readonly Readonly<{ origin: ArtifactDigest; decision: SecurityDispositionDecision; reason: string }>[];
+  }>;
+  previous: null;
+}>;
+
+export function standaloneDispositionStart(
+  disposition: SecurityDisposition,
+): DomainResult<StandaloneDispositionStart, DispositionError> {
+  const record = {
+    schemaVersion: 1 as const,
+    source: disposition.source,
+    provenance: "DECLARED" as const,
+    revision: { kind: "initial" as const },
+    entries: disposition.entries.map((entry) => ({
+      origin: entry.origin,
+      decision: entry.decision,
+      reason: entry.reason,
+    })),
+  };
+  const parsed = standaloneDispositionSchema.safeParse(record);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((issue) => `${issue.path.length === 0 ? "$" : issue.path.join(".")}: ${issue.message}`)
+      .join("; ");
+    return failure(invalid(`the disposition is not one /review-and-fix can consume: ${issues}`));
+  }
+  return success({ source: disposition.source, record, previous: null });
 }
 
 /** The decision the trichotomy forces for a record. */
@@ -145,7 +217,10 @@ export function securityDisposition(input: Readonly<{
 /** The handoff as prose, for the report: what leaves the audit, and the exact
  *  command that consumes it. An operator should not have to read this module to
  *  know what to run next. */
-export function renderDispositionHandoff(disposition: SecurityDisposition): string {
+export function renderDispositionHandoff(
+  disposition: SecurityDisposition,
+  handoff: DispositionHandoffPaths | null = null,
+): string {
   const count = (decision: SecurityDispositionDecision): number =>
     disposition.entries.filter((entry) => entry.decision === decision).length;
   return [
@@ -156,9 +231,13 @@ export function renderDispositionHandoff(disposition: SecurityDisposition): stri
       : [`${count("accepted")} accepted, ${count("deferred")} deferred, ${count("dismissed")} dismissed.`]),
     "The audit never patches: remediation runs under `/review-and-fix`.",
     "",
-    ...(disposition.entries.length === 0
+    ...(disposition.entries.length === 0 || handoff === null
       ? []
-      : [`    helper orchestration start standalone-disposition --run ${disposition.source.locator}`, ""]),
+      : [
+        `    helper orchestration start standalone-disposition --runs-root ${handoff.runsRoot} \\`,
+        `      --run ${handoff.runDir.slice(handoff.runDir.lastIndexOf("/") + 1)} < ${handoff.inputFile}`,
+        "",
+      ]),
     `Decision set: disposition.json (${disposition.source.resultDigest}).`,
   ].join("\n");
 }

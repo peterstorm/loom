@@ -235,7 +235,10 @@ export type VerdictViolation = Readonly<{ path: string; message: string }>;
 
 export type VerdictError = Readonly<{ kind: "invalid-verdicts"; violations: readonly VerdictViolation[] }>;
 
-const VERDICT_KEYS: readonly string[] = [
+/** The keys a ballot may carry. Exported so the agent-doc test pins the verifier
+ *  document to THIS list rather than to a hand-copied one: a doc that names a
+ *  key this list omits describes a ballot the engine refuses wholesale. */
+export const VERDICT_KEYS: readonly string[] = [
   "schemaVersion", "kind", "fingerprint", "vote", "reason", "missingFact", "agent", "profile", "wave",
 ];
 

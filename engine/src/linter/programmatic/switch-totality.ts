@@ -55,8 +55,6 @@ const SWITCH_HEAD = /^\s*switch\s*\(\s*(.+?)\s*\)\s*\{/;
  * the last belongs to the surrounding arm, so the split never loses it — the
  * default arm's body is whatever follows `default:`.
  */
-const ARM_SPLIT = /(?=\bcase\s+["'`])|(?=\bdefault\s*:)/;
-const IS_CASE_ARM = /^\bcase\s+["'`]/;
 const IS_DEFAULT_ARM = /^\bdefault\s*:/;
 /** A proof a switch arm carries: a never binding or an assertNever call. */
 const NEVER_PROOF = /:\s*never\b|\bassertNever\s*\(/;
@@ -83,27 +81,6 @@ function withoutComment(line: string): string {
   return line;
 }
 
-/** Strip quoted text and a trailing line comment before counting braces. */
-function structural(line: string): string {
-  let out = "";
-  let quote: string | null = null;
-  for (let index = 0; index < line.length; index++) {
-    const char = line[index]!;
-    if (quote !== null) {
-      if (char === "\\") index++;
-      else if (char === quote) quote = null;
-      continue;
-    }
-    if (char === '"' || char === "'" || char === "`") {
-      quote = char;
-      continue;
-    }
-    if (char === "/" && line[index + 1] === "/") break;
-    out += char;
-  }
-  return out;
-}
-
 /** How the rule learns which sites are grandfathered: exact `path::scrutinee`
  *  keys, each suppressing one violation. */
 export type SwitchTotalityBaseline = Baseline;
@@ -124,11 +101,23 @@ type SwitchSpan = Readonly<{
  * brace depth — the same granularity as the rest of this linter — and braces
  * inside strings or line comments do not count.
  *
+ * ONLY the enclosing switch's own arms count. The first version counted every
+ * `case`/`default` in the span, so a nested switch's arms inflated the arm
+ * count and — worse — a nested `default:` made the OUTER switch read as having
+ * a default arm, which is the fail-open direction: an outer switch with no
+ * proof was accepted because some inner switch had a default. Arms are therefore
+ * matched only at the switch body's own depth (1) and outside any nested switch
+ * body. The default arm's BODY is still read at any depth, because the proof
+ * this rule accepts is usually written as `default: { const unhandled: never = x; }`.
+ *
  * Arms are counted from the switch BODY, not from the start of each line, so a
  * switch written on one line (`switch (x.kind) { case "a": …; case "b": … }`)
  * is measured like any other. Treating only line-initial `case` as an arm made
  * every one-line switch invisible — the detector saw no arms and skipped it.
  */
+const ARM_TOKEN = /(?:\bcase\s+["'`])|(?:\bdefault\s*:)/g;
+const OPENS_NESTED_SWITCH = /\bswitch\s*\([^{]*\)\s*$/;
+
 function switchSpan(lines: readonly string[], startLine: number): SwitchSpan {
   let depth = 0;
   let arms = 0;
@@ -138,30 +127,50 @@ function switchSpan(lines: readonly string[], startLine: number): SwitchSpan {
   let exhaustiveProof = false;
 
   for (let index = startLine; index < lines.length; index++) {
-    const line = lines[index]!;
-    const raw = withoutComment(line);
-    const structure = structural(line);
-    // The opening line's body starts AFTER its `switch (…) {`; later lines are
-    // body already.
-    const body = index === startLine ? raw.slice(raw.indexOf("{") + 1) : raw;
-    for (const part of body.split(ARM_SPLIT)) {
-      if (part === "") continue;
-      if (IS_DEFAULT_ARM.test(part)) {
+    const raw = withoutComment(lines[index]!);
+    // The depth BEFORE each character, and the depth of every nested switch
+    // body currently open. Quoted text never changes depth.
+    const depthAt: number[] = [];
+    const nestedAt: number[] = [];
+    const nestedBodies: number[] = [];
+    let level = depth;
+    let quote: string | null = null;
+    for (let at = 0; at < raw.length; at++) {
+      const char = raw[at]!;
+      depthAt[at] = level;
+      nestedAt[at] = nestedBodies.length;
+      if (quote !== null) {
+        if (char === "\\") { depthAt[at + 1] = level; nestedAt[at + 1] = nestedBodies.length; at++; }
+        else if (char === quote) quote = null;
+      } else if (char === '"' || char === "'" || char === "`") {
+        quote = char;
+      } else if (char === "{") {
+        // A switch opened INSIDE the enclosing body is nested; the enclosing
+        // switch's own `{` sits at depth 0 and names nothing.
+        if (level >= 1 && OPENS_NESTED_SWITCH.test(raw.slice(0, at))) nestedBodies.push(level + 1);
+        level++;
+      } else if (char === "}") {
+        if (nestedBodies.at(-1) === level) nestedBodies.pop();
+        level--;
+      }
+      // The default arm's own body, at any depth, but never inside a nested
+      // switch: that switch's `never` binding proves the nested switch.
+      if (inDefault && nestedBodies.length === 0 && level >= 1) defaultText += char;
+    }
+
+    ARM_TOKEN.lastIndex = 0;
+    for (let token = ARM_TOKEN.exec(raw); token !== null; token = ARM_TOKEN.exec(raw)) {
+      if (depthAt[token.index] !== 1 || nestedAt[token.index] !== 0) continue;
+      if (IS_DEFAULT_ARM.test(token[0])) {
         hasDefault = true;
         inDefault = true;
-        defaultText += part;
-      } else if (IS_CASE_ARM.test(part)) {
+      } else {
         arms++;
         inDefault = false;
-      } else if (inDefault) {
-        defaultText += part;
       }
     }
-    if (EXHAUSTIVE_PROOF.test(body)) exhaustiveProof = true;
-    for (const char of structure) {
-      if (char === "{") depth++;
-      else if (char === "}") depth--;
-    }
+    if (EXHAUSTIVE_PROOF.test(raw)) exhaustiveProof = true;
+    depth = level;
     if (depth === 0) break;
   }
   // Only the DEFAULT arm may prove never; a `: never` in a case arm is a value

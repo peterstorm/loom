@@ -461,6 +461,46 @@ export type PriorRecordFacts = Readonly<{
   sourceUnchanged: boolean | null;
 }>;
 
+/** The verdict tags of the carry table, as runtime data. */
+export const PRIOR_RECORD_VERDICTS = [
+  "confirmed", "needs_validation", "rejected", "covered", "deferred", "blocked", "out_of_scope",
+] as const;
+const PRIOR_FACTS_KEYS: readonly string[] = ["verdict", "sourceUnchanged"];
+
+/**
+ * Parse prior-run facts from the wire. `derivePriorStatus` matches the verdict
+ * exhaustively — that proves the CLOSED union total, but a wire document can
+ * carry any string and `.exhaustive()` THROWS on an unknown tag. A seed naming
+ * a carry-status token from an earlier ledger row (`prior_confirmed_same_source`)
+ * or a `prior` object with no `verdict` aborted `start` with an unnamed
+ * pattern-match error instead of the violation this returns.
+ *
+ * `undefined`/`null` parses to `null`: "no prior record" is a real seed value.
+ */
+export function parsePriorRecordFacts(
+  raw: unknown,
+): DomainResult<PriorRecordFacts | null, Readonly<{ path: string; message: string }>> {
+  if (raw === undefined || raw === null) return success(null);
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    return failure({ path: "prior", message: "expected null or prior-run facts" });
+  }
+  const record = raw as Record<string, unknown>;
+  const unexpected = Object.keys(record).filter((key) => !PRIOR_FACTS_KEYS.includes(key)).sort(compareStrings);
+  if (unexpected.length > 0) {
+    return failure({ path: "prior", message: `unexpected field(s): ${unexpected.join(", ")}` });
+  }
+  if (!(PRIOR_RECORD_VERDICTS as readonly unknown[]).includes(record.verdict)) {
+    return failure({ path: "prior.verdict", message: `expected one of ${PRIOR_RECORD_VERDICTS.join(", ")}` });
+  }
+  const unchanged = record.sourceUnchanged;
+  if (unchanged !== null && typeof unchanged !== "boolean") {
+    return failure({ path: "prior.sourceUnchanged", message: "expected true, false or null" });
+  }
+  // Membership was just checked, so this is the parser's own proof, not a cast
+  // over unexamined input.
+  return success({ verdict: record.verdict as PriorRecordFacts["verdict"], sourceUnchanged: unchanged });
+}
+
 /**
  * The carry table. `unknown` is not `unchanged`: an unchecked source is current
  * work, because "we did not look" has never meant "nothing changed".
