@@ -11,6 +11,7 @@
 import { match } from "ts-pattern";
 import type { Epoch, Evidence, EvidenceRecord, TestReportSummary } from "./types";
 import { parseReportSummary } from "./test-report";
+import { parseSandboxReceiptValue } from "../core/security-sandbox";
 export { judgeTestRun, type TrustedTestVerdict } from "./test-report";
 
 // --- Branded agent identity ---
@@ -426,6 +427,13 @@ function parseEvent(raw: unknown): Evidence | null {
       const exit = typeof o.exit === "number" ? o.exit : null;
       const report = parseReportField(o.report);
       return { kind: "TestRun", command: o.command, exit, report };
+    }
+    case "SandboxRun": {
+      // Re-minted from the strict receipt grammar, never embedded raw: a
+      // receipt is the only evidence that the sandbox enforced anything, so
+      // an unknown field or a false literal invalidates the whole fact.
+      const receipt = parseSandboxReceiptValue(o.receipt);
+      return receipt.ok ? { kind: "SandboxRun", receipt: receipt.value } : null;
     }
     default:
       return null;

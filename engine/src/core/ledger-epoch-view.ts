@@ -111,6 +111,11 @@ function renderFact(event: Evidence, position: number): readonly string[] {
       `${DETAIL}exit ${exit === null ? "none recorded" : exit}`,
       ...renderReport(report),
     ])
+    .with({ kind: "SandboxRun" }, ({ receipt }) => [
+      `#${position} SandboxRun exit ${receipt.exit === null ? "none recorded" : receipt.exit}`,
+      `${DETAIL}cpu ${receipt.limits.cpuSeconds}s, address space ${receipt.limits.addressSpaceMb}MB, processes ${receipt.limits.processes}, file ${receipt.limits.fileSizeMb}MB, wall ${receipt.limits.wallClockSeconds}s`,
+      `${DETAIL}env ${receipt.allowlistedEnv.join(",")}; scratch ${receipt.scratchBytes === null ? "unmeasured" : `${receipt.scratchBytes}B`}; network namespace; target read-only`,
+    ])
     .exhaustive();
 }
 

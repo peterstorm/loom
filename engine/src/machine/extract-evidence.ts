@@ -19,6 +19,7 @@
 
 import { match } from "ts-pattern";
 import { editedFilePath, TEST_COMMAND_PATTERNS } from "../core/tool-vocabulary";
+import { parseSandboxReceipt } from "../core/security-sandbox";
 import type { BashToolOutcome, HarnessToolCall } from "./harness-tool-call-types";
 import {
   hasUnbalancedQuotes,
@@ -238,6 +239,14 @@ function bashRun(outcome: BashToolOutcome): BashRun {
     .exhaustive();
 }
 
+/**
+ * The one executor (ADR-0064), named anywhere in a command line. Any path
+ * prefix qualifies — `bash scripts/security-sandbox.sh`,
+ * `./scripts/security-sandbox.sh`, an absolute path — but the name must be a
+ * whole path segment, so `my-security-sandbox.sh` mints nothing.
+ */
+const SANDBOX_SCRIPT_IN_COMMAND = /(?:^|[\s;&|(])(?:\S*\/)?security-sandbox\.sh(?:$|[\s;&|)])/;
+
 function bashEvidence(
   input: Readonly<Record<string, unknown>>,
   bashOutcome: BashToolOutcome,
@@ -260,9 +269,20 @@ function bashEvidence(
   for (const path of shellWrites) {
     events.push({ kind: "FileWrite", path, via: "shell" });
   }
+  const run = bashRun(bashOutcome);
+  // A sandboxed execution mints its receipt as a fact of its own. The command
+  // must NAME the script and the receipt must parse: a hunter's prose about
+  // reproducing a bug is not evidence, so a script call whose output lost the
+  // receipt mints nothing and its finding stays a lead. An interrupted call is
+  // excluded outright — the harness killed the script, so any receipt in
+  // truncated output describes a run that never finished.
+  if (!run.interrupted && SANDBOX_SCRIPT_IN_COMMAND.test(command)) {
+    const receipt = parseSandboxReceipt(run.stdout);
+    if (receipt.ok) events.push({ kind: "SandboxRun", receipt: receipt.value });
+  }
   const classified = classifyTestCommandDetailed(command);
   if (classified !== null) {
-    const outcome = bashRun(bashOutcome);
+    const outcome = run;
     const report = findReportForSegment(classified.segment, outcome.stdout, shellWrites);
     // The line's exit is attributed to the test segment only when the
     // composition proves ownership (attributeExit) — `false && npx vitest

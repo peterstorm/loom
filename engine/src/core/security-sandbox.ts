@@ -98,7 +98,7 @@ const RECEIPT_KEYS = ["schemaVersion", "exit", "limits", "allowlistedEnv", "scra
 
 /** Strict receipt parse: unknown keys are a violation, not a shrug, because a
  *  receipt is the only evidence that the sandbox enforced anything. */
-function parseReceipt(raw: unknown): DomainResult<SandboxReceipt, SandboxError> {
+export function parseSandboxReceiptValue(raw: unknown): DomainResult<SandboxReceipt, SandboxError> {
   const invalid = (message: string): DomainResult<SandboxReceipt, SandboxError> =>
     failure({ kind: "invalid-sandbox-receipt" as const, message });
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return invalid("receipt must be an object");
@@ -151,7 +151,7 @@ export function parseSandboxReceipt(stdout: string): DomainResult<SandboxReceipt
   } catch {
     return failure({ kind: "invalid-sandbox-receipt" as const, message: "sandbox receipt is not JSON" });
   }
-  const validated = parseReceipt(parsed);
+  const validated = parseSandboxReceiptValue(parsed);
   return validated.ok
     ? validated
     : failure({ kind: "invalid-sandbox-receipt" as const, message: validated.error.message });

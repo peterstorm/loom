@@ -33,6 +33,11 @@ export function tokensFor(e: Evidence): EventToken[] {
         .with({ verdict: "untrusted" }, (): EventToken[] => ["TestRun"])
         .exhaustive(),
     )
+    // A sandbox receipt records a bounded local execution, not a phase
+    // transition: no guard asks "was something sandboxed", and minting a
+    // token would let a hunter advance a phase with `true`. The fact exists
+    // for adjudication and the published reports.
+    .with({ kind: "SandboxRun" }, (): EventToken[] => [])
     .exhaustive();
 }
 
