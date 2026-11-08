@@ -4,10 +4,12 @@
  * tests (importing cli.ts would run main()): hooks-sync pins that every
  * `cli.ts <hook-type> <handler>` route the hooks/scripts shims invoke is a
  * subset of this table. Per-operation traits of the orchestration helper live
- * beside its operation names in `orchestration-operations.ts`; this module
- * only consumes them.
+ * beside its operation names in `orchestration-operations.ts`, and the
+ * security-audit helper's in `security-audit-operations.ts`; this module only
+ * consumes them.
  */
 import { ORCHESTRATION_OPERATIONS, parseOrchestrationOperation } from "./handlers/helpers/orchestration-operations";
+import { SECURITY_AUDIT_OPERATIONS, parseSecurityAuditOperation } from "./handlers/helpers/security-audit-operations";
 
 export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
   "pre-tool-use": new Set([
@@ -30,6 +32,7 @@ export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
     "reconcile-implementation-proof", "set-phase", "cleanup-state", "complete-orchestration", "lint-wave-gate", "validate-lint-rules",
     "panel-contract", "review-panel", "model-profiles", "review-packet", "reopen-completed-wave",
     "model-calibration", "panel-program", "standalone-review", "orchestration", "family-sites",
+    "security-audit",
   ]),
 };
 
@@ -103,10 +106,19 @@ export const PI_RUNTIME_HANDSHAKE_ROUTES: ReadonlySet<string> = new Set([
   "helper/review-panel",
   "helper/standalone-review",
   "helper/orchestration",
+  // A security-audit run owns a run directory and its coverage ledger; a
+  // Pi-launched process must prove it matches the extension runtime before
+  // moving either. The helper's read-only projections (`status`, `findings`)
+  // are exempted per operation below, so a run stays diagnosable during skew.
+  "helper/security-audit",
 ]);
 
 function isOrchestrationHelper(hookType: string | undefined, handlerName: string | undefined): boolean {
   return hookType === "helper" && handlerName === "orchestration";
+}
+
+function isSecurityAuditHelper(hookType: string | undefined, handlerName: string | undefined): boolean {
+  return hookType === "helper" && handlerName === "security-audit";
 }
 
 /** The traits of the orchestration operation the helper's arguments name, or
@@ -117,8 +129,14 @@ function orchestrationOperationTraits(extraArgs: readonly string[]) {
   return operation === null ? null : ORCHESTRATION_OPERATIONS[operation];
 }
 
+/** The traits of the security-audit operation the helper's arguments name. */
+function securityAuditOperationTraits(extraArgs: readonly string[]) {
+  const operation = parseSecurityAuditOperation(extraArgs[0]);
+  return operation === null ? null : SECURITY_AUDIT_OPERATIONS[operation];
+}
+
 /** Whether a route must prove it matches the Pi extension runtime first. An
- *  orchestration operation declared skew-`available` never does. */
+ *  operation declared skew-`available` (a read-only projection) never does. */
 export function piRuntimeHandshakeRequired(
   hookType: string | undefined,
   handlerName: string | undefined,
@@ -126,14 +144,18 @@ export function piRuntimeHandshakeRequired(
 ): boolean {
   if (hookType === "init-state") return true;
   if (!PI_RUNTIME_HANDSHAKE_ROUTES.has(`${hookType}/${handlerName}`)) return false;
-  if (!isOrchestrationHelper(hookType, handlerName)) return true;
-  return orchestrationOperationTraits(extraArgs)?.runtimeSkew !== "available";
+  if (isOrchestrationHelper(hookType, handlerName)) {
+    return orchestrationOperationTraits(extraArgs)?.runtimeSkew !== "available";
+  }
+  if (isSecurityAuditHelper(hookType, handlerName)) {
+    return securityAuditOperationTraits(extraArgs)?.runtimeSkew !== "available";
+  }
+  return true;
 }
 
 /** Whether a route reads stdin to end-of-input. Hook routes always receive
- *  their event payload on stdin; the orchestration helper reads it only for
- *  an operation declared `stdin` (an unknown operation reads nothing and
- *  prints usage). */
+ *  their event payload on stdin; a helper reads it only for an operation
+ *  declared `stdin` (an unknown operation reads nothing and prints usage). */
 export function routeConsumesStdin(
   hookType: string | undefined,
   handlerName: string | undefined,
@@ -141,6 +163,9 @@ export function routeConsumesStdin(
 ): boolean {
   if (isOrchestrationHelper(hookType, handlerName)) {
     return orchestrationOperationTraits(extraArgs)?.input === "stdin";
+  }
+  if (isSecurityAuditHelper(hookType, handlerName)) {
+    return securityAuditOperationTraits(extraArgs)?.input === "stdin";
   }
   return true;
 }

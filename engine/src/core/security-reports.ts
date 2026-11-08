@@ -11,12 +11,17 @@
  * every published fingerprint appears exactly once, that rejected claims never
  * appear as findings, and that two renders of the same run are byte-identical.
  *
+ * The report also ends on the handoff (ADR-0064): an audit never patches, so the
+ * last section derives the disposition set `/review-and-fix` consumes and names
+ * the exact command that loads it.
+ *
  * Pure module: no I/O, no clock, no randomness.
  */
 
 import { compareStrings } from "./ordering";
 import type { SecurityRunMetadata } from "./security-audit-contract";
 import { summarizeCoverage, type CoverageLedger } from "./security-coverage";
+import { renderDispositionHandoff, securityDisposition } from "./security-disposition";
 import type { ConfirmedFinding, NeedsValidationFinding, SecurityFinding } from "./security-findings";
 
 export type ReportInput = Readonly<{
@@ -27,6 +32,10 @@ export type ReportInput = Readonly<{
   hardening?: readonly string[];
   /** The final coverage critic's own verdict, quoted as-is. */
   criticStop?: boolean | null;
+  /** Where the published records live, so the handoff names the directory the
+   *  loader reads. Omitted in a pure render, in which case the handoff still
+   *  states the decisions but no path. */
+  locator?: string;
 }>;
 
 const sortByFingerprint = <T extends SecurityFinding>(findings: readonly T[]): readonly T[] =>
@@ -169,7 +178,20 @@ export function renderReport(input: ReportInput): string {
       ? ""
       : `Rejected claims (retained so a later run must bring changed evidence): ${rejected.map((finding) => `\`${finding.fingerprint}\``).join(", ")}.`,
     "",
+    handoffSection(input),
   ].join("\n");
+}
+
+/** The handoff is DERIVED like everything else here: the report's decision set
+ *  and `disposition.json` come from one function, so the prose cannot describe
+ *  decisions the loader will not receive (INV-S6). */
+function handoffSection(input: ReportInput): string {
+  const derived = securityDisposition({
+    metadata: input.metadata,
+    locator: input.locator ?? ".",
+    findings: input.findings,
+  });
+  return derived.ok ? renderDispositionHandoff(derived.value) : ["## Disposition handoff", "", derived.error.message].join("\n");
 }
 
 /** `FINDINGS-DETAIL.md` — full traces and reproductions for medium and above. */

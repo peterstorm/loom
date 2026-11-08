@@ -260,6 +260,7 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/security-findings.ts",
   "engine/src/core/security-lens-select.ts",
   "engine/src/core/security-reports.ts",
+  "engine/src/core/security-disposition.ts",
   "engine/src/core/security-sandbox.ts",
   "engine/src/core/security-adjudication.ts",
 ];

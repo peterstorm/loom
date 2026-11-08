@@ -3,7 +3,9 @@
  * operations that take input (start/submit/decide) read stdin to EOF; every
  * flags-only orchestration operation must not, or an inherited stdin that is
  * never closed hangs the command (observed: `orchestration abandon` blocked
- * for ten minutes under a parent shell whose stdin stayed open).
+ * for ten minutes under a parent shell whose stdin stayed open). The
+ * security-audit helper is operation-dependent the same way and is pinned by
+ * its own traits table below.
  */
 
 import { afterAll, describe, expect, it } from "vitest";
@@ -12,6 +14,7 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { KNOWN_HANDLERS, piRuntimeHandshakeRequired, routeConsumesStdin } from "../../src/handler-routes";
 import { ORCHESTRATION_OPERATIONS } from "../../src/handlers/helpers/orchestration-operations";
+import { SECURITY_AUDIT_OPERATIONS } from "../../src/handlers/helpers/security-audit-operations";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 
 const CLI_PATH = join(__dirname, "../../src/cli.ts");
@@ -42,10 +45,22 @@ describe("routeConsumesStdin", () => {
     expect(piRuntimeHandshakeRequired("helper", "orchestration", ["toString"])).toBe(true);
   });
 
+  it("derives the security-audit routes from its own operation traits", () => {
+    for (const [operation, traits] of Object.entries(SECURITY_AUDIT_OPERATIONS)) {
+      expect(routeConsumesStdin("helper", "security-audit", [operation]), operation).toBe(traits.input === "stdin");
+      expect(piRuntimeHandshakeRequired("helper", "security-audit", [operation]), operation)
+        .toBe(traits.runtimeSkew === "handshake-required");
+    }
+    expect(routeConsumesStdin("helper", "security-audit", ["unknown"])).toBe(false);
+    expect(piRuntimeHandshakeRequired("helper", "security-audit", ["unknown"])).toBe(true);
+  });
+
   it("keeps every other known route on stdin", () => {
     for (const [hookType, handlers] of Object.entries(KNOWN_HANDLERS)) {
       for (const handler of handlers) {
-        if (hookType === "helper" && handler === "orchestration") continue;
+        // Both helpers are operation-dependent: stdin and skew follow a traits
+        // table, and the two tests above pin those tables row by row.
+        if (hookType === "helper" && (handler === "orchestration" || handler === "security-audit")) continue;
         expect(routeConsumesStdin(hookType, handler, []), `${hookType}/${handler}`).toBe(true);
       }
     }

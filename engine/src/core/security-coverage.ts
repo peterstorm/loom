@@ -327,7 +327,7 @@ function validateStateInvariants(
   };
 
   if (unit.status !== "candidate" && unit.result_fingerprints.length > 0) {
-    violations.push(violation(`.result_fingerprints`, `status  keeps this empty`));
+    violations.push(violation(`${path}.result_fingerprints`, `status ${unit.status} keeps this empty`));
   }
   // Membership was reported by the caller; an unknown wire value would make the
   // exhaustive match below throw, so the state analysis ends here.
@@ -760,6 +760,117 @@ export function deferPlannedUnits(ledger: CoverageLedger, reason: string): Cover
   );
 }
 
+export type DeferralError =
+  | CoverageError
+  | Readonly<{ kind: "unknown-coverage-id"; coverageId: string }>
+  | Readonly<{ kind: "unit-not-planned"; coverageId: string; status: CoverageStatus }>;
+
+/**
+ * Defer ONE unit — the case where a hunter reports a surface it could not reach.
+ * Same rule as the bulk path: the reason lands in `unresolved`, so neither the
+ * report nor a later run has to guess why the unit was never covered.
+ *
+ * Only a `planned` unit may be deferred. Deferring an in-flight unit would erase
+ * the owner's live attempt without archiving it, and deferring a settled one
+ * would rewrite a record that already has a disposition.
+ */
+export function deferUnit(
+  ledger: CoverageLedger,
+  coverageId: string,
+  reason: string,
+): DomainResult<CoverageLedger, DeferralError> {
+  if (!isVisibleText(reason)) {
+    return failure(invalid([violation("reason", "a deferred unit requires a visible reason")]));
+  }
+  const unit = ledger.find((candidate) => candidate.coverage_id === coverageId);
+  if (unit === undefined) return failure({ kind: "unknown-coverage-id" as const, coverageId });
+  if (unit.status !== "planned") {
+    return failure({ kind: "unit-not-planned" as const, coverageId, status: unit.status });
+  }
+  const next = sortLedger(ledger.map((candidate) => (candidate.coverage_id === coverageId
+    ? { ...candidate, status: "deferred" as const, agent_id: null, unresolved: [reason] }
+    : candidate)));
+  const violations = validateLedger(next);
+  return violations.length === 0 ? success(next) : failure(invalid(violations));
+}
+
+// --- Wire parsing ---
+
+/**
+ * Parse the coverage units a run is seeded with.
+ *
+ * The seeding payload arrives from the parent — a lens pass or an operator —
+ * as JSON, so it is parsed here rather than trusted: every field is checked,
+ * the first violation names its index, and a seed list that names the same
+ * semantic tuple twice is refused instead of silently deduped (a duplicate
+ * seed means the enumeration produced the same cell twice, which is worth
+ * seeing).
+ */
+export function parseCoverageSeeds(
+  raw: unknown,
+): DomainResult<readonly CoverageUnit[], CoverageError> {
+  if (!Array.isArray(raw as unknown)) {
+    return failure(invalid([violation("units", "expected a top-level array")]));
+  }
+  const entries = raw as readonly unknown[];
+  if (entries.length === 0) return failure(invalid([violation("units", "a run must seed at least one unit")]));
+  if (entries.length > SECURITY_AUDIT_LIMITS.units) {
+    return failure(invalid([violation("units", `exceeds ${SECURITY_AUDIT_LIMITS.units} coverage units`)]));
+  }
+
+  const units: CoverageUnit[] = [];
+  const violations: CoverageViolation[] = [];
+  entries.forEach((entry, index) => {
+    const base = `units[${index}]`;
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      violations.push(violation(base, "expected an object"));
+      return;
+    }
+    const record = entry as Record<string, unknown>;
+    const strings = (value: unknown): readonly string[] =>
+      Array.isArray(value as unknown) && (value as readonly unknown[]).every((item) => typeof item === "string")
+        ? value as readonly string[]
+        : [];
+    const blocks = (value: unknown): readonly ExcludedBlock[] =>
+      Array.isArray(value as unknown)
+        ? (value as readonly unknown[]).flatMap((item) =>
+          item !== null && typeof item === "object" && typeof (item as ExcludedBlock).block === "string" &&
+            typeof (item as ExcludedBlock).reason === "string"
+            ? [{ block: (item as ExcludedBlock).block, reason: (item as ExcludedBlock).reason }]
+            : [])
+        : [];
+    const seeded = seedCoverageUnit({
+      refs: record.refs as CoverageRefs,
+      starting_paths: strings(record.starting_paths),
+      ordinary_attack_class_block:
+        typeof record.ordinary_attack_class_block === "string" ? record.ordinary_attack_class_block : null,
+      selected_companion_blocks: strings(record.selected_companion_blocks),
+      excluded_blocks: blocks(record.excluded_blocks),
+      prior: null,
+      ...(typeof record.lifecycle === "string" ? { lifecycle: record.lifecycle } : {}),
+      ...(typeof record.wave === "number" ? { wave: record.wave } : {}),
+      ...(isCoverageStatus(record.status) ? { status: record.status } : {}),
+    });
+    if (seeded.ok) units.push(seeded.value);
+    else violations.push(...seeded.error.violations.map((entry) => violation(`${base}.${entry.path}`, entry.message)));
+  });
+
+  const seen = new Map<string, string>();
+  for (const unit of units) {
+    const key = coverageSemanticKey(unit.canonical_refs);
+    if (seen.has(key)) {
+      violations.push(violation("units", `duplicate coverage cell ${JSON.stringify(unit.coverage_id)}`));
+    } else {
+      seen.set(key, unit.coverage_id);
+    }
+  }
+  if (violations.length > 0) return failure(invalid(violations));
+
+  const ledger = sortLedger(units);
+  const ledgerViolations = validateLedger(ledger);
+  return ledgerViolations.length === 0 ? success(ledger) : failure(invalid(ledgerViolations));
+}
+
 // --- Reporting ---
 
 export type CoverageSummary = Readonly<{
@@ -804,4 +915,169 @@ export function coverageComplete(ledger: CoverageLedger): boolean {
  *  run claims. */
 export function coverageSettled(ledger: CoverageLedger): boolean {
   return ledger.every((unit) => unit.status !== "planned" && unit.status !== "in_progress" && unit.status !== "blocked");
+}
+
+/**
+ * Parse the settlement payload a hunter's parent submits.
+ *
+ * `recordUnitResult` checks the SETTLEMENT (owner, wave, resulting ledger); this
+ * checks the SHAPE, because a missing `checks` array would otherwise throw on
+ * `.map` deep inside the ledger builder rather than naming the field. The two
+ * are deliberately separate: the state machine is about one unit's transition,
+ * this is about the wire.
+ */
+/** One check as it arrives on the wire, validated field by field. Split from
+ *  `parseUnitResults` because a check's fields fail for different reasons than a
+ *  unit's, and a violation naming `units[0].checks[1].artifact` is a shorter
+ *  path to the defect than one naming the unit again. */
+function parseChecks(raw: unknown, base: string, violations: CoverageViolation[]): readonly LocalCheck[] {
+  if (!Array.isArray(raw as unknown)) {
+    violations.push(violation(`${base}.checks`, "expected an array of local checks"));
+    return [];
+  }
+  const checks: LocalCheck[] = [];
+  (raw as readonly unknown[]).forEach((check, checkIndex) => {
+    const path = `${base}.checks[${checkIndex}]`;
+    if (check === null || typeof check !== "object" || Array.isArray(check)) {
+      violations.push(violation(path, "expected an object"));
+      return;
+    }
+    const item = check as Record<string, unknown>;
+    const local: CoverageViolation[] = [];
+    if (!isSecurityAgentId(item.agent_id)) local.push(violation(`${path}.agent_id`, "expected a catalog agent id"));
+    if (!Array.isArray(item.reviewed_paths as unknown) ||
+        !(item.reviewed_paths as readonly unknown[]).every((entry) => typeof entry === "string")) {
+      local.push(violation(`${path}.reviewed_paths`, "expected an array of source paths"));
+    }
+    if (!isVisibleText(item.invariant)) local.push(violation(`${path}.invariant`, "requires visible prose"));
+    if (item.method !== "source" && item.method !== "local") local.push(violation(`${path}.method`, "expected source or local"));
+    if (!isVisibleText(item.result)) local.push(violation(`${path}.result`, "requires visible prose"));
+    if (item.artifact !== null && typeof item.artifact !== "string") {
+      local.push(violation(`${path}.artifact`, "expected null or an artifacts path"));
+    }
+    // A local check is the one that claims something OBSERVED, so it must name
+    // the receipt: `local` with `artifact: null` is a claim with no proof.
+    if (item.method === "local" && typeof item.artifact !== "string") {
+      local.push(violation(`${path}.artifact`, "a local check must name its receipt"));
+    }
+    if (local.length > 0) {
+      violations.push(...local);
+      return;
+    }
+    checks.push({
+      agent_id: item.agent_id as string,
+      reviewed_paths: [...(item.reviewed_paths as readonly string[])],
+      invariant: item.invariant as string,
+      method: item.method as LocalCheck["method"],
+      result: item.result as string,
+      artifact: item.artifact as string | null,
+    });
+  });
+  return checks;
+}
+
+export function parseUnitResults(raw: unknown): DomainResult<readonly UnitResult[], CoverageError> {
+  if (!Array.isArray(raw as unknown)) {
+    return failure(invalid([violation("units", "expected a top-level array")]));
+  }
+  const violations: CoverageViolation[] = [];
+  const results: UnitResult[] = [];
+
+  (raw as readonly unknown[]).forEach((entry, index) => {
+    const base = `units[${index}]`;
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      violations.push(violation(base, "expected an object"));
+      return;
+    }
+    const record = entry as Record<string, unknown>;
+    const local: CoverageViolation[] = [];
+    if (!isVisibleText(record.coverageId)) local.push(violation(`${base}.coverageId`, "expected the canonical coverage ID"));
+    if (!isSecurityAgentId(record.agentId)) local.push(violation(`${base}.agentId`, "expected a catalog agent id"));
+    if (typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1) {
+      local.push(violation(`${base}.wave`, "expected a positive integer"));
+    }
+    if (!(TERMINAL_DISPOSITIONS as readonly string[]).includes(record.status as string)) {
+      local.push(violation(`${base}.status`, "expected covered, candidate or blocked"));
+    }
+    if (!Array.isArray(record.reviewedPaths as unknown) ||
+        !(record.reviewedPaths as readonly unknown[]).every((path) => typeof path === "string")) {
+      local.push(violation(`${base}.reviewedPaths`, "expected an array of source paths"));
+    }
+    const checks = parseChecks(record.checks, base, local);
+    if (local.length > 0) {
+      violations.push(...local);
+      return;
+    }
+    results.push({
+      coverageId: record.coverageId as string,
+      agentId: record.agentId as string,
+      wave: record.wave as number,
+      status: record.status as TerminalDisposition,
+      reviewedPaths: [...(record.reviewedPaths as readonly string[])],
+      checks,
+      ...(Array.isArray(record.fingerprints as unknown) ? { fingerprints: [...(record.fingerprints as readonly string[])] } : {}),
+      ...(Array.isArray(record.unresolved as unknown) ? { unresolved: [...(record.unresolved as readonly string[])] } : {}),
+    });
+  });
+
+  return violations.length === 0 ? success(results) : failure(invalid(violations));
+}
+
+/**
+ * Parse a coverage critic's proposal set. `mergeCritic` decides what each
+ * proposal MEANS; this decides whether the payload is a critic result at all,
+ * so a typo in `missingUnits` is a named violation rather than an empty merge
+ * that looks like "the critic found nothing".
+ */
+export function parseCriticResult(raw: unknown): DomainResult<CoverageCriticResult, CoverageError> {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return failure(invalid([violation("critic", "expected an object")]));
+  }
+  const record = raw as Record<string, unknown>;
+  const violations: CoverageViolation[] = [];
+  const strings = (value: unknown, path: string): readonly string[] => {
+    if (value === undefined) return [];
+    if (!Array.isArray(value as unknown) || !(value as readonly unknown[]).every((item) => typeof item === "string")) {
+      violations.push(violation(path, "expected an array of strings"));
+      return [];
+    }
+    return value as readonly string[];
+  };
+  const missing = record.missingUnits;
+  if (missing !== undefined && !Array.isArray(missing as unknown)) {
+    violations.push(violation("critic.missingUnits", "expected an array of proposals"));
+  }
+  const proposals: CoverageProposal[] = [];
+  (Array.isArray(missing as unknown) ? missing as readonly unknown[] : []).forEach((entry, index) => {
+    const base = `critic.missingUnits[${index}]`;
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      violations.push(violation(base, "expected an object"));
+      return;
+    }
+    const item = entry as Record<string, unknown>;
+    const excluded: readonly ExcludedBlock[] = Array.isArray(item.excludedBlocks as unknown)
+      ? (item.excludedBlocks as readonly unknown[]).flatMap((block) =>
+        block !== null && typeof block === "object" && typeof (block as ExcludedBlock).block === "string" &&
+          typeof (block as ExcludedBlock).reason === "string"
+          ? [{ block: (block as ExcludedBlock).block, reason: (block as ExcludedBlock).reason }]
+          : [])
+      : [];
+    proposals.push({
+      refs: item.refs as CoverageRefs,
+      startingPaths: strings(item.startingPaths, `${base}.startingPaths`),
+      ordinaryAttackClassBlock: typeof item.ordinaryAttackClassBlock === "string" ? item.ordinaryAttackClassBlock : null,
+      selectedCompanionBlocks: strings(item.selectedCompanionBlocks, `${base}.selectedCompanionBlocks`),
+      excludedBlocks: excluded,
+    });
+  });
+  if (record.stop !== undefined && typeof record.stop !== "boolean") {
+    violations.push(violation("critic.stop", "expected a boolean"));
+  }
+  if (violations.length > 0) return failure(invalid(violations));
+  return success({
+    missingUnits: proposals,
+    reassignIds: strings(record.reassignIds, "critic.reassignIds"),
+    resolvedPriorLeads: strings(record.resolvedPriorLeads, "critic.resolvedPriorLeads"),
+    stop: record.stop === true,
+  });
 }

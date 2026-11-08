@@ -53,6 +53,7 @@ start → assign → submit → verify → findings → publish
 | `verify` | Adjudicate candidates: confirmed / needs-verification / rejected |
 | `findings` | Render the report from the validated records |
 | `publish` | Emit `security-findings.json`; confirmed findings hand off to disposition |
+| `disposition` | Derive the decision set (`accepted`/`deferred`/`dismissed`) `/review-and-fix` consumes |
 
 `status` is read-only and answers the only question that matters before
 stopping: **is the ledger settled?**
@@ -99,23 +100,44 @@ records, byte-identically.
 
 ## Handoff
 
-An audit **never patches**. `publish` writes the report and hands confirmed
-findings to `standalone-disposition`; remediation belongs to `/review-and-fix`.
-Keeping the audit read-only is what makes its coverage claims checkable after
-the fact.
+An audit **never patches**. `publish` writes the report; `disposition` derives
+one decision per published record — `confirmed` → `accepted`,
+`needs_validation` → `deferred`, `rejected` → `dismissed` — into
+`disposition.json`, which `/review-and-fix` reads under `standalone-disposition`.
+The decision set is a function of the records, so the report's handoff section
+and the file cannot describe different decisions. Keeping the audit read-only is
+what makes its coverage claims checkable after the fact.
 
 ## Running it
 
-```
-loom helper security-audit start   --out <run-dir>     # enumerate + select lenses
-loom helper security-audit assign  --unit <id> --agent security-hunter-agent
-loom helper security-audit submit  <candidates.json>
-loom helper security-audit verify  <verdicts.json>     # different-profile verdicts
-loom helper security-audit findings                    # render
-loom helper security-audit publish
-loom helper security-audit status                      # settled?
+Every operation takes `--out <run-dir>`; the run directory is the whole record.
+
+```bash
+loom helper security-audit start --out .audit/run-1 --repo . \
+  --profile standard --budget 24 <<'JSON'
+{ "units": [ { "refs": { "surface": "http-ingress", "boundary": "api-edge",
+                          "subsystem": "auth", "attack_class": "injection" },
+               "starting_paths": ["src/api/login.ts"],
+               "ordinary_attack_class_block": "…",
+               "selected_companion_blocks": ["WEB-PROTOCOL-AND-AUTH.md#authentication-and-session-handling"] } ],
+  "signals": { "languages": ["ts"], "servesHttp": true } }
+JSON
+
+loom helper security-audit assign  --out .audit/run-1 --unit <coverage-id> --agent security-hunter-agent --wave 1
+loom helper security-audit submit  --out .audit/run-1 < hunter-result.json
+loom helper security-audit verify  --out .audit/run-1 < verdicts.json   # a different profile's ballots
+loom helper security-audit merge-critic --out .audit/run-1 < critic.json
+loom helper security-audit defer   --out .audit/run-1 --unit <coverage-id> --reason budget_cut
+loom helper security-audit findings --out .audit/run-1 [--json]
+loom helper security-audit publish --out .audit/run-1
+loom helper security-audit disposition --out .audit/run-1
+loom helper security-audit status  --out .audit/run-1 [--json]
 ```
 
-The run directory holds the ledger, the lens selection, each hunter's
-candidates, the sandbox receipts, the verification verdicts, and the rendered
-report. Everything the report says is derivable from those files.
+`status` and `findings` are read-only and stay available while the Pi runtime is
+skewed — they are what you read *while* recovering. Every other operation proves
+the runtime first.
+
+`publish` refuses on any publication blocker (an unverified confirmed claim, a
+ballot cast on the hunt profile, an unsettled ledger) instead of publishing a
+smaller truth than the run covered.

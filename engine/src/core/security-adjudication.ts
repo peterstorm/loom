@@ -20,6 +20,8 @@
  */
 
 import { compareStrings } from "./ordering";
+import { failure, success, type DomainResult } from "./orchestration-contract/identity";
+import { isSecurityAgentId, isSecurityFingerprint, isVisibleText } from "./security-audit-contract";
 import type { SecurityFinding, NeedsValidationFinding, RejectedFinding, ConfirmedFinding } from "./security-findings";
 
 /** One verifier's ballot about one fingerprint. */
@@ -179,4 +181,91 @@ export function publishedFindings(input: AdjudicationInput): readonly SecurityFi
   });
   const passthrough = input.findings.filter((finding) => finding.verdict !== "confirmed");
   return sortByFingerprint([...adjudication.confirmed, ...adjudication.demoted, ...adjudication.rejected, ...passthrough]);
+}
+
+// --- Wire parsing ---
+
+export type VerdictViolation = Readonly<{ path: string; message: string }>;
+
+export type VerdictError = Readonly<{ kind: "invalid-verdicts"; violations: readonly VerdictViolation[] }>;
+
+const VERDICT_KEYS: readonly string[] = [
+  "schemaVersion", "kind", "fingerprint", "vote", "reason", "missingFact", "agent", "profile", "wave",
+];
+
+/**
+ * Parse the ballots a verifier returns.
+ *
+ * Fail-closed and total: an unknown key is a violation (a verifier inventing a
+ * field means the contract drifted), every field is checked, and the result is
+ * sorted by (fingerprint, agent, wave) so two runs casting the same ballots
+ * produce the same bytes.
+ *
+ * `missingFact` is load-bearing: an `advisory` vote WITH one demotes the claim
+ * to a lead, WITHOUT one it is rejected. `null` and `""` both mean "no missing
+ * fact", so a verifier cannot demote by accidentally sending an empty string.
+ */
+export function parseVerificationVerdicts(raw: unknown): DomainResult<readonly VerificationVerdict[], VerdictError> {
+  if (!Array.isArray(raw as unknown)) {
+    return failure({
+      kind: "invalid-verdicts" as const,
+      violations: [{ path: "verdicts", message: "expected a top-level array" }],
+    });
+  }
+  const entries = raw as readonly unknown[];
+  const violations: VerdictViolation[] = [];
+  const verdicts: VerificationVerdict[] = [];
+
+  entries.forEach((entry, index) => {
+    const base = `verdicts[${index}]`;
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      violations.push({ path: base, message: "expected an object" });
+      return;
+    }
+    const local: VerdictViolation[] = [];
+    const record = entry as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      if (!VERDICT_KEYS.includes(key)) local.push({ path: `${base}.${key}`, message: "unknown field" });
+    }
+    if (record.schemaVersion !== 1) local.push({ path: `${base}.schemaVersion`, message: "expected 1" });
+    if (record.kind !== "security-verdict") local.push({ path: `${base}.kind`, message: "expected security-verdict" });
+    if (!isSecurityFingerprint(record.fingerprint)) local.push({ path: `${base}.fingerprint`, message: "invalid fingerprint" });
+    if (record.vote !== "critical" && record.vote !== "advisory") {
+      local.push({ path: `${base}.vote`, message: "expected critical or advisory" });
+    }
+    if (!isVisibleText(record.reason)) local.push({ path: `${base}.reason`, message: "requires visible prose" });
+    if (record.missingFact !== null && !isVisibleText(record.missingFact)) {
+      local.push({ path: `${base}.missingFact`, message: "expected null or visible prose" });
+    }
+    if (!isSecurityAgentId(record.agent)) local.push({ path: `${base}.agent`, message: "expected a catalog agent id" });
+    if (!isVisibleText(record.profile)) local.push({ path: `${base}.profile`, message: "expected a catalog profile" });
+    if (typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1) {
+      local.push({ path: `${base}.wave`, message: "expected a positive integer" });
+    }
+    // Accumulate per entry, so one bad ballot does not pass because another
+    // entry's violation was already recorded.
+    if (local.length > 0) {
+      violations.push(...local);
+      return;
+    }
+
+    const missingFact = record.missingFact;
+    verdicts.push({
+      schemaVersion: 1,
+      kind: "security-verdict",
+      fingerprint: record.fingerprint as string,
+      vote: record.vote as "critical" | "advisory",
+      reason: record.reason as string,
+      missingFact: typeof missingFact === "string" && missingFact.trim() !== "" ? missingFact : null,
+      agent: record.agent as string,
+      profile: record.profile as string,
+      wave: record.wave as number,
+    });
+  });
+
+  if (violations.length > 0) return failure({ kind: "invalid-verdicts" as const, violations });
+  return success([...verdicts].sort((left, right) =>
+    compareStrings(left.fingerprint, right.fingerprint) ||
+    compareStrings(left.agent, right.agent) ||
+    left.wave - right.wave));
 }
