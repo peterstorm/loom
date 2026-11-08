@@ -113,8 +113,18 @@ describe("standaloneRetryTask", () => {
     expect(standaloneEmission).toContain(`calling the exact tool ${REVIEWER_V2.toolName} exactly once`);
     expect(standaloneEmission).toContain("fresh one-call budget");
     expect(standaloneEmission.endsWith(REVIEWER_EXTRACTION_RETRY_INSTRUCTION)).toBe(false);
+    // Scope discipline is stated, not implied: the retry names the rule the
+    // admission enforces AND the escape hatch that avoids re-emitting the same
+    // defect (a real path outside the frozen slice).
+    expect(standaloneEmission).toContain("Every finding's file is either null or a path inside the frozen scope.");
+    expect(standaloneEmission).toContain("or emit an honest null location — never an unfrozen path.");
     expect(standaloneEmission).toBe([emission, "", "Your previous attempt was rejected by the engine's admission check.",
-      JSON.stringify("bad payload"), "", `This is your final attempt. ${FRESH_SPAWN_TOOL_RULE}`].join("\n"));
+      JSON.stringify("bad payload"), "",
+      "Satisfy BOTH admission rules:\n1. Every finding's file is either null or a path inside the frozen scope.\n" +
+        "2. The payload conforms exactly to the issued reviewer-payload-schema and reviewer-impact-rubric.\n" +
+        "When the evidence lies outside the frozen scope, name the frozen file that should have carried\n" +
+        "the assertion, or emit an honest null location — never an unfrozen path.",
+      "", `This is your final attempt. ${FRESH_SPAWN_TOOL_RULE}`].join("\n"));
 
     const extractionTask = issuedTask("code-reviewer", REVIEWER_V2);
     expect(standaloneRetryTask(extractionTask, EXTRACTION_ROUTE, null, { schemaVersion: 2 }))
