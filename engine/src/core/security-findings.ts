@@ -483,11 +483,23 @@ export function parseSecurityFindings(raw: unknown): DomainResult<readonly Secur
 
 // --- Consolidation ---
 
-/** One root cause, one record. Fingerprints are the identity; the root-cause
- *  text catches the case where two hunters described the same defect from
- *  different entry points and earned different fingerprints. The keeper is the
- *  record with the most complete trace, tie-broken by fingerprint so the choice
- *  is deterministic. */
+/** The sink a finding lands on, as `file:line`: the one fact two hunters
+ *  describing the same defect from different entry points cannot disagree about.
+ *  `null` when the trace names no sink. */
+const sinkOf = (finding: SecurityFinding): string | null => {
+  const sink = finding.trace.find((step) => step.kind === "sink");
+  return sink === undefined ? null : `${sink.file}:${sink.line}`;
+};
+
+/** One root cause, one record — where "one root cause" is a fact, not a
+ *  sentence. Fingerprints are the identity; the root-cause TEXT catches the case
+ *  where two hunters described one defect from different entry points and earned
+ *  different fingerprints. Text alone is not enough: a terse hunter can paste one
+ *  root-cause sentence onto two different defects, and merging those would silently
+ *  drop a finding from the published set. So a root-cause merge also requires the
+ *  same SINK, and a trace that names no sink is never merged away. The keeper is
+ *  the record with the most complete trace, tie-broken by fingerprint so the
+ *  choice is deterministic. */
 export function consolidateCandidates<T extends SecurityFinding>(candidates: readonly T[]): readonly T[] {
   const byFingerprint = new Map<string, T>();
   for (const candidate of candidates) {
@@ -495,9 +507,15 @@ export function consolidateCandidates<T extends SecurityFinding>(candidates: rea
   }
   const byRootCause = new Map<string, T>();
   for (const candidate of [...byFingerprint.values()].sort((left, right) => compareStrings(left.fingerprint, right.fingerprint))) {
+    const sink = sinkOf(candidate);
+    if (sink === null) {
+      byRootCause.set(candidate.fingerprint, candidate);
+      continue;
+    }
     const rootCause = "root_cause" in candidate ? candidate.root_cause : candidate.claimed_root_cause;
-    const existing = byRootCause.get(rootCause);
-    if (existing === undefined || candidate.trace.length > existing.trace.length) byRootCause.set(rootCause, candidate);
+    const key = `${sink}\u0000${rootCause}`;
+    const existing = byRootCause.get(key);
+    if (existing === undefined || candidate.trace.length > existing.trace.length) byRootCause.set(key, candidate);
   }
   return [...byRootCause.values()].sort((left, right) => compareStrings(left.fingerprint, right.fingerprint));
 }

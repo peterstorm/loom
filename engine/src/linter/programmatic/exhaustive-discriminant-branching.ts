@@ -30,10 +30,14 @@ import type { Violation } from "../types";
 import { makeViolation } from "../types";
 import { isTestFile } from "./config";
 import { EXHAUSTIVE_BRANCHING_BASELINE } from "./exhaustive-discriminant-branching-baseline";
-import { baselineCounter, baselineKey, type Baseline } from "./baseline";
+import { baselineCounter, repoRelative, baselineKey, type Baseline } from "./baseline";
 
 /** Branches on one tag at or above this count read as a switch, not a guard. */
 export const DEFAULT_MAX_DISCRIMINANT_BRANCHES = 3;
+
+/** The areas this rule keys baselines in — the same scopes `switch-totality`
+ *  scans, so one path form serves both baselines. */
+export const DEFAULT_DISCRIMINANT_ANCHORS: readonly string[] = ["engine/src/core/", "engine/src/machine/"];
 
 /**
  * Lines a chain may span between consecutive branches.
@@ -212,15 +216,6 @@ function branchRuns(lines: readonly string[], tags: readonly string[]): readonly
   return Object.freeze(runs);
 }
 
-/** Repo-relative form for baseline keys, anchored on `engine/src/` — the same
- *  anchor `switch-totality` uses, so an absolute checkout path normalizes
- *  whether or not the directory is also a declared import boundary. */
-const repoRelative = (filePath: string): string => {
-  const normalized = filePath.replace(/\\/g, "/");
-  const at = normalized.lastIndexOf("/engine/src/");
-  return at === -1 ? normalized : normalized.slice(at + 1);
-};
-
 export function handler(
   content: string,
   filePath: string,
@@ -230,7 +225,7 @@ export function handler(
 ): readonly Violation[] {
   if (isTestFile(filePath)) return [];
   const lines = content.split("\n");
-  const relative = repoRelative(filePath);
+  const relative = repoRelative(filePath, DEFAULT_DISCRIMINANT_ANCHORS);
   const entries = baselineCounter(baseline);
 
   const provenNear = (first: number, last: number): boolean => {
@@ -262,7 +257,7 @@ export function detectedChainKeys(
   maxBranches: number = DEFAULT_MAX_DISCRIMINANT_BRANCHES,
   tags: readonly string[] = DEFAULT_DISCRIMINANT_TAGS,
 ): readonly string[] {
-  const relative = repoRelative(filePath);
+  const relative = repoRelative(filePath, DEFAULT_DISCRIMINANT_ANCHORS);
   return branchRuns(content.split("\n"), tags)
     .filter((run) => run.branches >= maxBranches && run.chainEvidence)
     .map((run) => baselineKey(relative, run.discriminant));

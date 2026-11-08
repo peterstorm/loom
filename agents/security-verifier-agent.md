@@ -54,20 +54,22 @@ Return exactly one JSON object and nothing else:
 ```json
 {
   "schemaVersion": 1,
-  "kind": "security-refutation",
+  "kind": "security-verdict",
   "fingerprint": "<the candidate's fingerprint, verbatim>",
   "vote": "critical | advisory",
   "reason": "<the specific fact that decided it, or the exact gap that blocks a decision>",
-  "refutation": {
-    "boundary": "holds | fails | unproven",
-    "reachability": "holds | fails | unproven",
-    "consequence": "holds | fails | unproven",
-    "impact": "supported | overstated | unproven",
-    "receipt": "present | absent | unreadable"
-  },
-  "missingFact": "<one exact fact, when the verdict rests on an absent one; otherwise null>"
+  "missingFact": "<one exact fact, when the verdict rests on an absent one; otherwise null>",
+  "agent": "<your agent id>",
+  "profile": "<the catalog profile your agent sits on>",
+  "wave": 2
 }
 ```
+
+`kind` is `security-verdict` — the same ballot shape a review panel casts, so one
+adjudicator reads both. `profile` must be the catalog profile YOUR agent sits on
+(the parent refuses a ballot whose agent and profile disagree), and it must
+differ from the profile that hunted the claim: that difference is what makes the
+vote independent.
 
 `critical` means the run must not publish this claim as confirmed; `advisory`
 means the claim stands and your objection is recorded. When you cannot decide

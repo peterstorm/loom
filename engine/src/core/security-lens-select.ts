@@ -12,14 +12,17 @@
  * Two rules the selection keeps:
  * - `ATTACK-CLASSES.md` is always included: it is the core class list every
  *   other lens extends, so a target with no specialised lens is still covered.
- * - At most three lenses are handed to one hunter. Upstream's own fleet keeps
+ *   It counts against the run's cap like any other document — the cap is a
+ *   context budget, and the base lens occupies context too.
+ * - How many lenses a hunter holds is the run's PROFILE (`quick` two,
+ *   `standard` four, `deep` eight, base lens included). Upstream's fleet keeps
  *   children under a quarter of the context window; eleven lenses × a verbatim
  *   `architecture.md` does not fit in that budget.
  *
  * Pure module: no I/O, no clock, no randomness.
  */
 
-import { compareStrings } from "./ordering";
+import { match } from "ts-pattern";
 import { SECURITY_AUDIT_LIMITS } from "./security-audit-contract";
 
 /** Lens documents, in their upstream filenames (see ATTRIBUTION.md). */
@@ -72,6 +75,10 @@ export type LensSelectionEntry = Readonly<{
   /** Deterministic rank within this selection; ties break by lens order. */
   score: number;
   reasons: readonly string[];
+  /** The always-included core list. A boolean rather than `score: Infinity`:
+   *  an infinite score does not survive JSON (`JSON.stringify(Infinity)` is
+   *  `null`), and `lenses.json` records this entry. */
+  base: boolean;
 }>;
 
 export type LensSelection = Readonly<{
@@ -83,8 +90,7 @@ export type LensSelection = Readonly<{
  *  a lens with score 0 is excluded with the reason "no matching signal". */
 const LENS_RULES: Readonly<Record<Exclude<SecurityLens, "ATTACK-CLASSES.md">, readonly (readonly [keyof StackSignals, number, string])[]>> = {
   "WEB-PROTOCOL-AND-AUTH.md": [
-    ["servesHttp", 3, "source serves HTTP"],
-    ["servesHttp", 1, "HTTP parsing or routing is in scope"],
+    ["servesHttp", 4, "source serves HTTP and routes untrusted input"],
     ["isolatesTenants", 1, "request identity reaches tenant-scoped state"],
     ["manifests", 1, "an application manifest is present"],
   ],
@@ -152,13 +158,27 @@ const languageSignal = (signals: StackSignals, pool: ReadonlySet<string>): boole
 
 /**
  * Rank the lenses a target earns. Deterministic for equal signals: score
- * descending, then lens declaration order, then the max-lens cap.
+ * descending, then DECLARATION order (`SECURITY_LENSES`), never filename order —
+ * the two disagree, and the docstring a critic reads names declaration order.
+ *
+ * `maxLenses` is the PROFILE's total document budget, base lens included, so the
+ * specialised list is capped at `maxLenses - 1`.
  */
+/** Which language family a lens is about. Most lenses match on any language
+ *  signal; two are specific, so a TypeScript-only repository does not select the
+ *  memory-safety lens merely by declaring languages. */
+const languageMatches = (lens: SecurityLens, signals: StackSignals): boolean =>
+  match(lens)
+    .with("CLIENT-SIDE.md", () => languageSignal(signals, CLIENT_LANGUAGES))
+    .with("MEMORY-SAFETY-AND-BINARY.md", () => languageSignal(signals, SYSTEMS_LANGUAGES))
+    .otherwise(() => hasSignal(signals, "languages"));
+
 export function selectSecurityLenses(
   signals: StackSignals,
-  options: Readonly<{ maxLenses?: number }> = {},
+  options: Readonly<{ maxLenses: number }>,
 ): LensSelection {
-  const maxLenses = Math.max(1, Math.min(options.maxLenses ?? 3, SECURITY_AUDIT_LIMITS.companionBlocks));
+  const maxLenses = Math.max(1, Math.min(options.maxLenses, SECURITY_AUDIT_LIMITS.companionBlocks));
+  const specialisedCap = maxLenses - 1;
   const scored: LensSelectionEntry[] = [];
 
   for (const lens of SECURITY_LENSES) {
@@ -168,13 +188,7 @@ export function selectSecurityLenses(
     const reasons: string[] = [];
     for (const [signal, weight, reason] of rules) {
       if (signal === "languages") {
-        const matched =
-          lens === "CLIENT-SIDE.md"
-            ? languageSignal(signals, CLIENT_LANGUAGES)
-            : lens === "MEMORY-SAFETY-AND-BINARY.md"
-              ? languageSignal(signals, SYSTEMS_LANGUAGES)
-              : hasSignal(signals, signal);
-        if (matched) {
+        if (languageMatches(lens, signals)) {
           score += weight;
           reasons.push(reason);
         }
@@ -185,18 +199,18 @@ export function selectSecurityLenses(
         reasons.push(reason);
       }
     }
-    if (score > 0) scored.push({ lens, score, reasons: [...new Set(reasons)] });
+    if (score > 0) scored.push({ lens, score, reasons: [...new Set(reasons)], base: false });
   }
 
   const ranked = scored.sort((left, right) =>
-    right.score - left.score || compareStrings(left.lens, right.lens),
+    right.score - left.score || SECURITY_LENSES.indexOf(left.lens) - SECURITY_LENSES.indexOf(right.lens),
   );
-  const included = ranked.slice(0, maxLenses);
+  const included = ranked.slice(0, specialisedCap);
   const includedLenses = new Set(included.map((entry) => entry.lens));
 
   return {
     included: [
-      { lens: "ATTACK-CLASSES.md", score: Number.POSITIVE_INFINITY, reasons: ["core class list; always included"] },
+      { lens: "ATTACK-CLASSES.md", score: 0, reasons: ["core class list; always included"], base: true },
       ...included,
     ],
     excluded: SECURITY_LENSES.filter((lens) => lens !== "ATTACK-CLASSES.md" && !includedLenses.has(lens)).map((lens) => ({
@@ -212,7 +226,7 @@ export function selectSecurityLenses(
 /** The selection as the prompt fragment a hunter receives. */
 export function renderLensSelection(selection: LensSelection): string {
   const included = selection.included
-    .map((entry) => `- references/security-lenses/${entry.lens} (score ${entry.score === Number.POSITIVE_INFINITY ? "base" : entry.score}): ${entry.reasons.join("; ")}`)
+    .map((entry) => `- references/security-lenses/${entry.lens} (${entry.base ? "base" : `score ${entry.score}`}): ${entry.reasons.join("; ")}`)
     .join("\n");
   const excluded = selection.excluded
     .map((entry) => `- ${entry.lens}: ${entry.reason}`)

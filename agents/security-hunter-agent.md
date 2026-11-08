@@ -80,16 +80,36 @@ the same object, the unit fields the parent needs:
 {
   "schemaVersion": 2,
   "kind": "standalone-review",
-  "coverageId": "<the unit's coverage_id, verbatim>",
-  "unitStatus": "covered | candidate | blocked",
-  "reviewedPaths": ["<every source path you actually read>"],
-  "localChecks": [
-    { "invariant": "<what must hold>", "method": "source | local", "result": "<what you observed>", "artifact": "<scratch artifact or null>" }
+  "units": [
+    {
+      "coverageId": "<the unit's coverage_id, verbatim>",
+      "agentId": "security-hunter-agent",
+      "wave": 1,
+      "status": "covered | candidate | blocked",
+      "reviewedPaths": ["<every source path you actually read>"],
+      "checks": [
+        {
+          "agent_id": "security-hunter-agent",
+          "reviewed_paths": ["<the paths this check covers>"],
+          "invariant": "<what must hold>",
+          "method": "source | local",
+          "result": "<what you observed>",
+          "artifact": "<agents/<agent>/artifacts/<file>, or null>"
+        }
+      ],
+      "fingerprints": ["<candidate: the fingerprints you filed>"],
+      "unresolved": ["<blocked: the fact you could not produce>"]
+    }
   ],
-  "unresolved": ["<follow-up a later wave must attempt, verbatim>"],
   "findings": [ /* reviewer payload v2 findings */ ]
 }
 ```
+
+The field names above are the ones `submit` parses — an invented spelling is
+refused, not coerced. `fingerprints` belongs to `candidate`; `unresolved` belongs
+to `blocked`; both are empty otherwise. Every `reviewedPaths` entry needs a check
+that owns it, and a `local` check must name a receipt file that holds the
+sandbox's own output — the parent reads and judges that file.
 
 `candidate` means at least one finding you would defend; `covered` means you
 walked the unit and have nothing to defend; `blocked` means you needed a fact

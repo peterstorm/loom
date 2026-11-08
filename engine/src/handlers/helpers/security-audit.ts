@@ -9,25 +9,34 @@
  * traits, and the dispatcher below matches over it exhaustively, so a new
  * operation cannot be added without the routing layer learning what it does.
  *
- * The run directory is the whole record of a run:
+ * The run directory is the whole record of a run. `FILES` below is the ONE
+ * owner of that document set — the `--force` reset, the fresh-run writes and
+ * every reader name files through it, so a document cannot be added to the
+ * directory and forgotten by one of them:
  *
- *   run.json                 run metadata (frozen revision, scope, profile, budget)
+ *   run.json                 run metadata; its `published` flag is the commit point
  *   ledger.json              the coverage ledger
  *   findings.json            candidate findings as filed (trichotomy records)
  *   verdicts.json            verification ballots
  *   lenses.json              the lens selection this run was given
  *   security-findings.json   published records (publish)
+ *   disposition.json         the remediation handoff (disposition)
  *   REPORT.md / FINDINGS-DETAIL.md / NEEDS-VALIDATION.md   derived prose (publish)
  *
  * Every read is fail-closed and parsed by the core that owns the document, so a
  * hand-edited or half-written file stops the run with a named violation instead
  * of flowing into a report. Writes go through the no-follow filesystem helpers:
  * a symlinked run file is refused rather than followed.
+ *
+ * Publication is a transaction with a commit point: prose first, then the
+ * records, then `run.json` with `published: true` LAST. A write that fails
+ * part-way leaves `published: false`, so `disposition` and `status` never treat
+ * a half-written directory as a published run.
  */
 
 import { match } from "ts-pattern";
 import { runGit } from "../../utils/git-execution-policy";
-import { existsSync, lstatSync } from "node:fs";
+import { existsSync, lstatSync, rmSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import type { HookHandler, HookResult } from "../../types";
 import { errorResult, passthroughResult } from "../../types";
@@ -49,19 +58,23 @@ import {
   coverageSettled,
   deferPlannedUnits,
   deferUnit,
+  huntingProfiles,
   mergeCritic,
   parseCoverageSeeds,
   parseCriticResult,
   parseUnitResults,
   recordUnitResult,
+  runStatusOf,
   summarizeCoverage,
   validateLedger,
   type CoverageLedger,
+  type UnitResult,
 } from "../../core/security-coverage";
-import { parseSecurityFindings, type SecurityFinding } from "../../core/security-findings";
-import { parseVerificationVerdicts, publicationBlockers, publishedFindings, type VerificationVerdict } from "../../core/security-adjudication";
+import { consolidateCandidates, parseSecurityFindings, type SecurityFinding } from "../../core/security-findings";
+import { adjudicateRun, parseVerificationVerdicts, type VerificationVerdict } from "../../core/security-adjudication";
 import { renderLensSelection, selectSecurityLenses, type LensSelection, type StackSignals } from "../../core/security-lens-select";
 import { renderDispositionHandoff, securityDisposition } from "../../core/security-disposition";
+import { parseSandboxReceipt, sandboxWithinLimits, type SandboxReceipt } from "../../core/security-sandbox";
 import { renderRunDocuments } from "../../core/security-reports";
 import { argumentValue, hasFlag, unconsumedValueArguments } from "./cli-args";
 import {
@@ -81,7 +94,13 @@ const FILES = Object.freeze({
   lenses: "lenses.json",
   published: "security-findings.json",
   disposition: "disposition.json",
+  report: "REPORT.md",
+  details: "FINDINGS-DETAIL.md",
+  needsValidation: "NEEDS-VALIDATION.md",
 });
+
+/** Every document a run directory may hold, from the single list above. */
+const RUN_DOCUMENTS: readonly string[] = Object.freeze(Object.values(FILES));
 
 const VALUE_FLAGS: ReadonlySet<string> = new Set([
   "--out", "--repo", "--source", "--profile", "--budget", "--run-id", "--unit", "--agent", "--wave", "--reason",
@@ -101,6 +120,14 @@ function describeRefusal(error: unknown): string {
         .join("\n");
     }
     if (typeof record.message === "string") return record.message;
+    // Tagged refusals (`{ kind, …facts }`) read as `kind: fact=value …` rather
+    // than as raw JSON: a refusal is prose the operator has to act on.
+    if (typeof record.kind === "string") {
+      const facts = Object.entries(record)
+        .filter(([key]) => key !== "kind")
+        .map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`);
+      return facts.length === 0 ? record.kind : `${record.kind}: ${facts.join(" ")}`;
+    }
   }
   return JSON.stringify(error);
 }
@@ -110,9 +137,88 @@ function describeRefusal(error: unknown): string {
 type Store = Readonly<{
   out: string;
   has: (file: string) => boolean;
+  /** Read one run-relative text document without following a symlink. */
+  readText: (file: string) => DomainResult<string, string>;
   readJson: <T>(file: string, parse: (raw: unknown) => DomainResult<T, unknown>) => DomainResult<T, string>;
   write: (file: string, value: string, options?: Readonly<{ exclusive?: boolean }>) => DomainResult<void, string>;
+  /** Remove every document this run directory may hold, for `start --force`. A
+   *  new run must not inherit the previous run's records: `findings.json`,
+   *  `security-findings.json` and `disposition.json` from an older run would
+   *  otherwise enter the new run's adjudication as if this run had filed them. */
+  clear: () => DomainResult<readonly string[], string>;
 }>;
+
+/** Read one run document: no-follow, strict JSON, and a parser failure that
+ *  NAMES the file. A parser that throws is a parser that met a shape it did not
+ *  model, so the exception is caught here rather than escaping as an unnamed
+ *  `Hook error:` with no run context. */
+function readJsonAt<T>(
+  root: string,
+  file: string,
+  parse: (raw: unknown) => DomainResult<T, unknown>,
+): DomainResult<T, string> {
+  const path = join(root, file);
+  let text: string;
+  try {
+    text = readRunFileNoFollow(path);
+  } catch (error) {
+    return failure(`cannot read ${path}: ${describe(error)}`);
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    return failure(`${path} is not valid JSON: ${describe(error)}`);
+  }
+  let parsed: DomainResult<unknown, unknown>;
+  try {
+    parsed = parse(raw);
+  } catch (error) {
+    return failure(`${path} is malformed — unexpected ${describe(error)}`);
+  }
+  return parsed.ok
+    ? success(parsed.value as T)
+    : failure(`${path} is malformed —\n${describeRefusal(parsed.error)}`);
+}
+
+/** Write one run document through the no-follow helpers: a symlinked run file is
+ *  refused rather than written through, and an exclusive write fails when the
+ *  file already exists (that is how a fresh run claims its directory). */
+function writeAt(
+  root: string,
+  file: string,
+  value: string,
+  options?: Readonly<{ exclusive?: boolean }>,
+): DomainResult<void, string> {
+  const path = join(root, file);
+  try {
+    ensureDirectoryNoFollow(root);
+    if (existsSync(path) && lstatSync(path).isSymbolicLink()) {
+      return failure(`write target ${path} must not be a symbolic link`);
+    }
+    if (options?.exclusive === true) writeRunFileExclusiveNoFollow(path, value);
+    else writeRunFileNoFollow(path, value);
+    return success(undefined);
+  } catch (error) {
+    return failure(`cannot write ${path}: ${describe(error)}`);
+  }
+}
+
+/** Remove every document of a previous run, naming what went. */
+function clearRunDocuments(root: string): DomainResult<readonly string[], string> {
+  const removed: string[] = [];
+  try {
+    for (const file of RUN_DOCUMENTS) {
+      const path = join(root, file);
+      if (!existsSync(path)) continue;
+      rmSync(path);
+      removed.push(file);
+    }
+    return success(removed);
+  } catch (error) {
+    return failure(`cannot reset ${root}: ${describe(error)}`);
+  }
+}
 
 function openStore(out: string): DomainResult<Store, string> {
   const root = resolve(out);
@@ -127,37 +233,17 @@ function openStore(out: string): DomainResult<Store, string> {
   const store: Store = {
     out: root,
     has: (file) => existsSync(join(root, file)),
-    readJson: (file, parse) => {
+    readText: (file) => {
       const path = join(root, file);
-      let text: string;
       try {
-        text = readRunFileNoFollow(path);
+        return success(readRunFileNoFollow(path));
       } catch (error) {
         return failure(`cannot read ${path}: ${describe(error)}`);
       }
-      let raw: unknown;
-      try {
-        raw = JSON.parse(text);
-      } catch (error) {
-        return failure(`${path} is not valid JSON: ${describe(error)}`);
-      }
-      const parsed = parse(raw);
-      return parsed.ok ? parsed : failure(`${path} is malformed —\n${describeRefusal(parsed.error)}`);
     },
-    write: (file, value, options) => {
-      const path = join(root, file);
-      try {
-        ensureDirectoryNoFollow(root);
-        if (existsSync(path) && lstatSync(path).isSymbolicLink()) {
-          return failure(`write target ${path} must not be a symbolic link`);
-        }
-        if (options?.exclusive === true) writeRunFileExclusiveNoFollow(path, value);
-        else writeRunFileNoFollow(path, value);
-        return success(undefined);
-      } catch (error) {
-        return failure(`cannot write ${path}: ${describe(error)}`);
-      }
-    },
+    readJson: (file, parse) => readJsonAt(root, file, parse),
+    write: (file, value, options) => writeAt(root, file, value, options),
+    clear: () => clearRunDocuments(root),
   };
   const prepared = prepare();
   return prepared.ok ? success(store) : prepared;
@@ -187,7 +273,12 @@ const sortByFingerprint = (raw: unknown): unknown => (Array.isArray(raw) ? [...r
 
 const readLedger = (store: Store): DomainResult<CoverageLedger, string> =>
   store.readJson<CoverageLedger>(FILES.ledger, (raw) => {
-    if (!Array.isArray(raw as unknown)) return failure({ violations: [{ path: "ledger", message: "expected a top-level array" }] });
+    if (!Array.isArray(raw)) return failure({ violations: [{ path: "ledger", message: "expected a top-level array" }] });
+    // An empty ledger would make `every(...)` claim complete coverage of
+    // nothing; the seed path already refuses it, so the read path must too.
+    if (raw.length === 0) {
+      return failure({ violations: [{ path: "ledger", message: "a run always seeds at least one unit" }] });
+    }
     const violations = validateLedger(raw as CoverageLedger);
     return violations.length === 0 ? success(raw as CoverageLedger) : failure({ violations });
   });
@@ -195,13 +286,18 @@ const readLedger = (store: Store): DomainResult<CoverageLedger, string> =>
 const readRun = (store: Store): DomainResult<SecurityRunMetadata, string> =>
   store.readJson<SecurityRunMetadata>(FILES.run, parseSecurityRunMetadata);
 
+/** `start` writes both documents, so an absent one means the file was lost or
+ *  removed — not that the run has no findings. Treating absence as `[]` would
+ *  silently reset the run's candidate set. */
 const readFindings = (store: Store): DomainResult<readonly SecurityFinding[], string> =>
   store.has(FILES.findings)
     ? store.readJson<readonly SecurityFinding[]>(FILES.findings, parseSecurityFindings)
-    : success([]);
+    : failure(`${join(store.out, FILES.findings)} is missing — a run directory always holds it`);
 
 const readVerdicts = (store: Store): DomainResult<readonly VerificationVerdict[], string> =>
-  store.has(FILES.verdicts) ? store.readJson<readonly VerificationVerdict[]>(FILES.verdicts, parseVerificationVerdicts) : success([]);
+  store.has(FILES.verdicts)
+    ? store.readJson<readonly VerificationVerdict[]>(FILES.verdicts, parseVerificationVerdicts)
+    : failure(`${join(store.out, FILES.verdicts)} is missing — a run directory always holds it`);
 
 /** The published records. `publish` is the only operation that creates them, so
  *  their absence is a refusal rather than an empty list. */
@@ -330,8 +426,8 @@ function startMetadata(input: Readonly<{
       executionPolicy: "sandboxed-source-and-local-only",
       selectedCompanions: selection.included.map((entry) => entry.lens),
       priorRuns: [],
-      runStatus: coverageSettled(input.ledger) ? "complete" : "in_progress",
-      incompleteReason: null,
+      ...runStatusOf(input.ledger),
+      published: false,
     },
   };
 }
@@ -361,8 +457,8 @@ function startInputs(store: Store, args: readonly string[], stdin: string): Doma
   return success({ repo, profile: profile.value, budget: budget.value, payload: payload.value, ledger: ledger.value });
 }
 
-/** Write the four documents a fresh run starts with. One place, so a new file
- *  in the run directory is added to exactly one list. */
+/** Write the five documents a fresh run starts with. One place, so a new file
+ *  in the run directory is added to exactly one list (`FILES`). */
 function writeFreshRun(
   store: Store,
   documents: Readonly<{ metadata: SecurityRunMetadata; ledger: CoverageLedger; selection: LensSelection }>,
@@ -371,6 +467,7 @@ function writeFreshRun(
   for (const write of [
     store.write(FILES.run, json(metadata)),
     store.write(FILES.ledger, json(ledger)),
+    store.write(FILES.findings, json([])),
     store.write(FILES.verdicts, json([])),
     store.write(FILES.lenses, json({
       selected: selection.included.map((entry) => ({ lens: entry.lens, score: entry.score, reasons: entry.reasons })),
@@ -390,18 +487,8 @@ function runStart(store: Store, args: readonly string[], stdin: string): DomainR
   if (!inputs.ok) return inputs;
   const { repo, profile, budget, payload, ledger } = inputs.value;
 
-  // Admission before the run exists: a budget that cannot seat the first wave
-  // is refused here rather than discovered after the ledger is on disk.
-  if (budget !== null) {
-    const admission = admitWave({
-      profile,
-      budget,
-      spent: 0,
-      plannedHunters: ledger.filter((unit) => unit.status === "planned").length,
-      expectedCandidates: null,
-    });
-    if (!admission.ok) return failure(`${admission.error.reason}: ${admission.error.message}`);
-  }
+  const admitted = admitStart(profile, budget, ledger);
+  if (!admitted.ok) return admitted;
 
   const revision = readSourceRevision(repo, flags.value["--source"] ?? null);
   if (!revision.ok) return revision;
@@ -417,19 +504,51 @@ function runStart(store: Store, args: readonly string[], stdin: string): DomainR
   const selfCheck = parseSecurityRunMetadata(started.metadata);
   if (!selfCheck.ok) return failure(`run metadata is malformed —\n${describeRefusal(selfCheck.error)}`);
 
+  // `--force` starts a NEW run in the same directory, so every document of the
+  // previous run goes: its candidate findings, published records and prose would
+  // otherwise enter this run's adjudication as if this run had produced them.
+  if (hasFlag(args, "--force")) {
+    const cleared = store.clear();
+    if (!cleared.ok) return cleared;
+  }
+
   const written = writeFreshRun(store, { metadata: started.metadata, ledger, selection: started.selection });
   if (!written.ok) return written;
 
+  return success(startReport(store.out, started, ledger));
+}
+
+/** Admission BEFORE the run exists: a budget that cannot seat the first wave is
+ *  refused here rather than discovered after the ledger is on disk. */
+function admitStart(profile: SecurityProfile, budget: number | null, ledger: CoverageLedger): DomainResult<void, string> {
+  if (budget === null) return success(undefined);
+  const admission = admitWave({
+    profile,
+    budget,
+    spent: 0,
+    plannedHunters: ledger.filter((unit) => unit.status === "planned").length,
+    expectedCandidates: null,
+  });
+  return admission.ok ? success(undefined) : failure(`${admission.error.reason}: ${admission.error.message}`);
+}
+
+/** What a start prints: the frozen facts, the coverage shape, and the lens
+ *  selection with its reasons. */
+function startReport(
+  out: string,
+  started: Readonly<{ metadata: SecurityRunMetadata; selection: LensSelection }>,
+  ledger: CoverageLedger,
+): string {
   const summary = summarizeCoverage(ledger);
-  return success([
-    `run ${started.metadata.runId} started in ${store.out}`,
+  return [
+    `run ${started.metadata.runId} started in ${out}`,
     `source ${started.metadata.sourceRef.commit}${started.metadata.sourceRef.worktreeDirty ? " (worktree dirty)" : ""}`,
     `profile ${started.metadata.profile}; budget ${started.metadata.budget ?? "unset"}`,
     `coverage units: ${summary.total} (planned ${summary.byStatus.planned})`,
     `lenses: ${started.metadata.selectedCompanions.join(", ") || "none"}`,
     "",
     renderLensSelection(started.selection),
-  ].join("\n"));
+  ].join("\n");
 }
 
 // --- assign / submit / defer / merge-critic ---
@@ -444,37 +563,70 @@ function runAssign(store: Store, args: readonly string[]): DomainResult<string, 
   const ledger = readLedger(store);
   if (!ledger.ok) return ledger;
 
-  const target = ledger.value.find((candidate) => candidate.coverage_id === unit.value);
-  if (target === undefined) return failure(`unknown coverage unit ${JSON.stringify(unit.value)}`);
   const wave = integerFlag(flags.value, "--wave");
   if (!wave.ok) return wave;
 
+  // No wave given keeps the unit's own wave; `assignUnits` owns that default.
   const assigned = assignUnits(ledger.value, [{
     coverageId: unit.value,
     agentId: agent.value,
-    wave: wave.value ?? target.wave,
+    ...(wave.value === null ? {} : { wave: wave.value }),
   }]);
   if (!assigned.ok) return failure(describeRefusal(assigned.error));
   const written = store.write(FILES.ledger, json(assigned.value));
   if (!written.ok) return written;
-  return success(`assigned ${unit.value} to ${agent.value} at wave ${wave.value ?? target.wave}`);
+  return success(`assigned ${unit.value} to ${agent.value} at wave ${wave.value ?? "(current)"}`);
+}
+
+/** Why a receipt does not prove a bounded run, in one line the hunter can act on. */
+const describeUnboundedRun = (receipt: SandboxReceipt): string => {
+  const failed = [
+    ...(receipt.exit === 0 ? [] : [`exit ${String(receipt.exit)}`]),
+    ...(receipt.scratchBytes === null ? ["scratch footprint unmeasured"] : []),
+    ...(receipt.scratchBytes !== null && receipt.scratchBytes > receipt.limits.scratchMb * 1024 * 1024
+      ? [`scratch ${receipt.scratchBytes} B over its ${receipt.limits.scratchMb} MB allowance`]
+      : []),
+    ...(receipt.enforced.cpu ? [] : ["cpu limit not applied"]),
+    ...(receipt.enforced.memory ? [] : ["memory limit not applied"]),
+    ...(receipt.enforced.processes ? [] : ["process limit not applied"]),
+    ...(receipt.enforced.fileSize ? [] : ["file-size limit not applied"]),
+  ];
+  return failed.join("; ") || "unknown";
+};
+
+/** Every `local` check's artifact must be a receipt of a run that stayed inside
+ *  its sandbox. The engine reads the receipt file itself; a hunter's prose that
+ *  it "ran bounded" is not evidence. */
+function checkLocalReceipts(store: Store, results: readonly UnitResult[]): DomainResult<void, string> {
+  for (const result of results) {
+    for (const check of result.checks) {
+      if (check.method !== "local" || check.artifact === null) continue;
+      const text = store.readText(check.artifact);
+      if (!text.ok) return text;
+      const receipt = parseSandboxReceipt(text.value);
+      if (!receipt.ok) {
+        return failure(`local check ${check.artifact} is not a sandbox receipt — ${receipt.error.message}`);
+      }
+      if (!sandboxWithinLimits(receipt.value)) {
+        return failure(`local check ${check.artifact} does not prove a bounded run: ${describeUnboundedRun(receipt.value)}`);
+      }
+    }
+  }
+  return success(undefined);
 }
 
 function runSubmit(store: Store, args: readonly string[], stdin: string): DomainResult<string, string> {
   const flags = parseFlags(args, ["--out"]);
   if (!flags.ok) return flags;
-  let payload: unknown;
-  try {
-    payload = JSON.parse(stdin);
-  } catch (error) {
-    return failure(`submit input is not valid JSON: ${describe(error)}`);
-  }
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
-    return failure("submit input must be an object with `units` and optional `findings`");
-  }
-  const record = payload as Record<string, unknown>;
-  const results = parseUnitResults(record.units ?? []);
-  if (!results.ok) return failure(describeRefusal(results.error));
+  const parsed = submitPayload(stdin);
+  if (!parsed.ok) return parsed;
+  const { record, results } = parsed.value;
+  // A `local` check claims something OBSERVED, so its receipt is read and
+  // judged here: a run recorded as observed must rest on a sandbox that
+  // finished zero, stayed inside its scratch allowance, and really applied
+  // every limit (INV-S1). Prose is not evidence.
+  const receipts = checkLocalReceipts(store, results);
+  if (!receipts.ok) return receipts;
   // The DOCUMENT is sorted by fingerprint; a hunter's WIRE is its own filing
   // order. Sort before parsing so a hunter is not refused for formatting, while
   // duplicates still fail: the parser checks uniqueness after the sort.
@@ -488,24 +640,62 @@ function runSubmit(store: Store, args: readonly string[], stdin: string): Domain
   const existing = readFindings(store);
   if (!existing.ok) return existing;
 
-  let next = ledger.value;
-  const settled: string[] = [];
-  for (const result of results.value) {
-    const recorded = recordUnitResult(next, result);
-    if (!recorded.ok) return failure(describeRefusal(recorded.error));
-    next = recorded.value;
-    settled.push(result.coverageId);
-  }
+  const settlement = settleUnits(ledger.value, results);
+  if (!settlement.ok) return settlement;
+  const { ledger: next, settled } = settlement.value;
   if (settled.length === 0 && filed.value.length === 0) return failure("submit carried neither unit results nor findings");
 
   const merged = [...existing.value, ...filed.value].sort(byFingerprint);
-  const consolidated = parseSecurityFindings(merged);
+  // One root cause, one record: two hunters describing one defect from
+  // different entry points earn different fingerprints, and publishing both
+  // would hand remediation two decisions for one defect. Consolidation runs
+  // BEFORE the final parse, so the document that lands is the consolidated one.
+  const consolidated = parseSecurityFindings(consolidateCandidates(merged));
   if (!consolidated.ok) return failure(`filed findings are malformed —\n${describeRefusal(consolidated.error)}`);
 
   for (const write of [store.write(FILES.ledger, json(next)), store.write(FILES.findings, json(consolidated.value))]) {
     if (!write.ok) return write;
   }
   return success(`settled ${settled.length} unit(s); run now holds ${consolidated.value.length} finding record(s)`);
+}
+
+/** The submit wire: an object with `units` and optional `findings`. Parsing is
+ *  separate from settling, so a malformed wire never touches the ledger. */
+function submitPayload(stdin: string): DomainResult<
+  Readonly<{ record: Record<string, unknown>; results: readonly UnitResult[] }>,
+  string
+> {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(stdin);
+  } catch (error) {
+    return failure(`submit input is not valid JSON: ${describe(error)}`);
+  }
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    return failure("submit input must be an object with `units` and optional `findings`");
+  }
+  const record = payload as Record<string, unknown>;
+  const results = parseUnitResults(record.units ?? []);
+  return results.ok
+    ? success({ record, results: results.value })
+    : failure(describeRefusal(results.error));
+}
+
+/** Settle every result against the ledger in memory; the caller persists once.
+ *  A refusal names the unit, so a hunter is not left guessing which one broke. */
+function settleUnits(
+  ledger: CoverageLedger,
+  results: readonly UnitResult[],
+): DomainResult<Readonly<{ ledger: CoverageLedger; settled: readonly string[] }>, string> {
+  let next = ledger;
+  const settled: string[] = [];
+  for (const result of results) {
+    const recorded = recordUnitResult(next, result);
+    if (!recorded.ok) return failure(describeRefusal(recorded.error));
+    next = recorded.value;
+    settled.push(result.coverageId);
+  }
+  return success({ ledger: next, settled });
 }
 
 function runDefer(store: Store, args: readonly string[]): DomainResult<string, string> {
@@ -519,9 +709,10 @@ function runDefer(store: Store, args: readonly string[]): DomainResult<string, s
   const unit = flags.value["--unit"];
   if (unit === null || unit === undefined) {
     const deferred = deferPlannedUnits(ledger.value, reason.value);
-    const written = store.write(FILES.ledger, json(deferred));
+    if (!deferred.ok) return failure(describeRefusal(deferred.error));
+    const written = store.write(FILES.ledger, json(deferred.value));
     if (!written.ok) return written;
-    return success(`deferred ${deferred.filter((entry) => entry.status === "deferred").length} planned unit(s): ${reason.value}`);
+    return success(`deferred ${deferred.value.filter((entry) => entry.status === "deferred").length} planned unit(s): ${reason.value}`);
   }
   const deferred = deferUnit(ledger.value, unit, reason.value);
   if (!deferred.ok) return failure(describeRefusal(deferred.error));
@@ -602,7 +793,7 @@ function runVerify(store: Store, args: readonly string[], stdin: string): Domain
 
 /** Adjudicate the run. One call site, so `findings` and `publish` cannot
  *  disagree about what the ballots mean. */
-function adjudicate(store: Store, run: SecurityRunMetadata): DomainResult<Readonly<{
+function adjudicate(store: Store): DomainResult<Readonly<{
   findings: readonly SecurityFinding[];
   blockers: readonly string[];
 }>, string> {
@@ -613,11 +804,9 @@ function adjudicate(store: Store, run: SecurityRunMetadata): DomainResult<Readon
   const verdicts = readVerdicts(store);
   if (!verdicts.ok) return verdicts;
 
-  const input = { findings: findings.value, verdicts: verdicts.value, huntProfile: run.profile };
-  return success({
-    findings: publishedFindings(input),
-    blockers: publicationBlockers({ ...input, ledgerSettled: coverageSettled(ledger.value) }),
-  });
+  const input = { findings: findings.value, verdicts: verdicts.value, huntProfiles: huntingProfiles(ledger.value) };
+  const decision = adjudicateRun({ ...input, ledgerSettled: coverageSettled(ledger.value) });
+  return success({ findings: decision.findings, blockers: decision.blockers });
 }
 
 function runFindings(store: Store, args: readonly string[]): DomainResult<string, string> {
@@ -627,11 +816,16 @@ function runFindings(store: Store, args: readonly string[]): DomainResult<string
   if (!run.ok) return run;
   const ledger = readLedger(store);
   if (!ledger.ok) return ledger;
-  const adjudicated = adjudicate(store, run.value);
+  const adjudicated = adjudicate(store);
   if (!adjudicated.ok) return adjudicated;
 
   const input = { metadata: run.value, ledger: ledger.value, findings: adjudicated.value.findings };
-  if (hasFlag(args, "--json")) return success(json(adjudicated.value.findings));
+  if (hasFlag(args, "--json")) {
+    // The JSON channel carries the refusal too: a bare array cannot distinguish
+    // "no candidates" from "every confirmed claim is unverified", and the
+    // second is the fact a machine caller most needs.
+    return success(json({ findings: adjudicated.value.findings, publicationBlockers: adjudicated.value.blockers }));
+  }
   const documents = renderRunDocuments(input);
   return success([
     documents["REPORT.md"] ?? "",
@@ -649,32 +843,40 @@ function runPublish(store: Store, args: readonly string[]): DomainResult<string,
   if (!run.ok) return run;
   const ledger = readLedger(store);
   if (!ledger.ok) return ledger;
-  const adjudicated = adjudicate(store, run.value);
+  const adjudicated = adjudicate(store);
   if (!adjudicated.ok) return adjudicated;
   if (adjudicated.value.blockers.length > 0) {
     return failure(["publish refused:", ...adjudicated.value.blockers.map((blocker) => `  - ${blocker}`)].join("\n"));
   }
 
-  const complete = coverageComplete(ledger.value);
-  const metadata: SecurityRunMetadata = {
-    ...run.value,
-    runStatus: complete ? "complete" : "incomplete",
-    incompleteReason: complete ? null : run.value.incompleteReason ?? "critic_budget_exhausted",
-  };
-  const documents = renderRunDocuments({ metadata, ledger: ledger.value, findings: adjudicated.value.findings, locator: store.out });
+  // One derivation from the ledger, and no invented reason: `runStatusOf` owns
+  // both fields (`start` reads the same function).
+  const status = runStatusOf(ledger.value);
+  const metadata: SecurityRunMetadata = { ...run.value, ...status, published: true };
+  // Parse what we are about to write. Every reader parses these records, so a
+  // publish that wrote bytes its own reader refuses would report success a step
+  // before the failure.
+  const records = parseSecurityFindings(adjudicated.value.findings);
+  if (!records.ok) return failure(`adjudicated records are malformed —\n${describeRefusal(records.error)}`);
+
+  const documents = renderRunDocuments({ metadata, ledger: ledger.value, findings: records.value, locator: store.out });
+  const complete = status.runStatus === "complete";
+  // Commit order: prose, then records, then `run.json` LAST. The `published`
+  // flag is the commit point, so a write that fails part-way leaves the run
+  // visibly unpublished rather than half-published.
   for (const write of [
-    store.write(FILES.published, json(adjudicated.value.findings)),
-    store.write(FILES.run, json(metadata)),
     ...Object.entries(documents).map(([name, content]) => store.write(name, content)),
+    store.write(FILES.published, json(records.value)),
+    store.write(FILES.run, json(metadata)),
   ]) {
     if (!write.ok) return write;
   }
-  const confirmed = adjudicated.value.findings.filter((finding) => finding.verdict === "confirmed").length;
-  const leads = adjudicated.value.findings.filter((finding) => finding.verdict === "needs_validation").length;
+  const confirmed = records.value.filter((finding) => finding.verdict === "confirmed").length;
+  const leads = records.value.filter((finding) => finding.verdict === "needs_validation").length;
   return success([
-    `published ${adjudicated.value.findings.length} record(s) to ${store.out}`,
+    `published ${records.value.length} record(s) to ${store.out}`,
     `confirmed ${confirmed}; needs_validation ${leads}`,
-    `coverage ${complete ? "complete" : `incomplete (${metadata.incompleteReason})`}`,
+    `coverage ${complete ? "complete" : `incomplete (${status.incompleteReason})`}`,
     ...(complete ? [] : ["", "An incomplete run reports its gaps; it never claims coverage it did not reach."]),
   ].join("\n"));
 }
@@ -688,7 +890,7 @@ function runDisposition(store: Store, args: readonly string[]): DomainResult<str
   if (!flags.ok) return flags;
   const run = readRun(store);
   if (!run.ok) return run;
-  if (!store.has(FILES.published)) {
+  if (!run.value.published) {
     return failure(`no published records in ${store.out} — run \`publish\` first`);
   }
   const published = readPublished(store);
@@ -757,7 +959,7 @@ function runStatus(store: Store, args: readonly string[]): DomainResult<string, 
   if (!findings.ok) return findings;
   const verdicts = readVerdicts(store);
   if (!verdicts.ok) return verdicts;
-  const adjudicated = adjudicate(store, run.value);
+  const adjudicated = adjudicate(store);
   if (!adjudicated.ok) return adjudicated;
 
   const status = statusDocument({
@@ -766,7 +968,7 @@ function runStatus(store: Store, args: readonly string[]): DomainResult<string, 
     findings: findings.value,
     verdicts: verdicts.value,
     adjudicated: adjudicated.value,
-    published: store.has(FILES.published),
+    published: run.value.published,
   });
   if (hasFlag(args, "--json")) return success(json(status));
   return success([

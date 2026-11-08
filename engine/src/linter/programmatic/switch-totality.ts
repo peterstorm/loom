@@ -32,7 +32,7 @@ import type { Violation } from "../types";
 import { makeViolation } from "../types";
 import { isTestFile } from "./config";
 import { SWITCH_TOTALITY_BASELINE } from "./switch-totality-baseline";
-import { baselineCounter, baselineKey, unusedBaselineEntries, type Baseline } from "./baseline";
+import { baselineCounter, baselineKey, repoRelative, unusedBaselineEntries, type Baseline } from "./baseline";
 
 export { baselineKey, unusedBaselineEntries };
 
@@ -171,27 +171,6 @@ function switchSpan(lines: readonly string[], startLine: number): SwitchSpan {
 
 const inScope = (filePath: string, modules: readonly string[]): boolean =>
   modules.some((module) => filePath.includes(module));
-
-/**
- * Normalize a path to the same repo-relative form the baseline keys use.
- *
- * Anchors on each module scope's first two segments (`engine/src/…`) rather
- * than reusing `toRepositoryRelative`, which anchors on the IMPORT BOUNDARY
- * table — and `engine/src/machine/` is not an import boundary, so an absolute
- * path there stayed absolute and its baseline entry silently stopped matching.
- * A grandfathered list that quietly stops applying is worse than no list: the
- * site looks baselined in review and fails in CI.
- */
-const repoRelative = (filePath: string, modules: readonly string[]): string => {
-  const normalized = filePath.replace(/\\/g, "/");
-  if (!normalized.startsWith("/")) return normalized;
-  for (const module of modules) {
-    const anchor = `${module.split("/").slice(0, 2).join("/")}/`;
-    const at = normalized.lastIndexOf(`/${anchor}`);
-    if (at !== -1) return normalized.slice(at + 1);
-  }
-  return normalized;
-};
 
 export function handler(
   content: string,

@@ -71,6 +71,7 @@ const METADATA: SecurityRunMetadata = {
   priorRuns: [],
   runStatus: "complete",
   incompleteReason: null,
+  published: false,
 };
 
 const refsFor = (defect: PlantedDefect): CoverageRefs => ({
@@ -102,6 +103,7 @@ const findingFor = (defect: PlantedDefect): Record<string, unknown> => aConfirme
     { kind: "sink", file: defect.file, line: defect.line, scope: defect.boundary, description: defect.claim },
   ],
   evidence: [{ file: defect.file, line: defect.line, description: defect.claim }],
+  root_cause: `${defect.id}: ${defect.claim}`,
   severity: {
     likelihood: { score: "high", reason: "The entry point is unauthenticated in the fixture." },
     impact: { score: defect.impact, reason: `${defect.impact} impact is recorded on the planted defect.` },
@@ -168,6 +170,30 @@ describe("the enumeration reaches every planted defect", () => {
     }
   });
 
+  it("reaches every planted defect at the deep profile, and names what standard trims", () => {
+    // The calibration's reach is PROFILE-SCOPED: the cap is a context budget the
+    // operator chooses, so "the enumeration reaches every defect" is only honest
+    // at a cap that holds every lens the defects name. At `standard` one class
+    // (the client-side one) is trimmed, and the trimming is NAMED rather than
+    // silent — the operator raises the profile instead of guessing.
+    const deep = selectSecurityLenses(DEFECTS.signals, { maxLenses: SECURITY_PROFILE_LENSES.deep });
+    const deepIncluded = deep.included.map((entry) => entry.lens);
+    for (const defect of DEFECTS.defects) {
+      expect(deepIncluded as readonly string[], `${defect.id} needs ${defect.lens}`).toContain(defect.lens);
+    }
+
+    const standard = selectSecurityLenses(DEFECTS.signals, { maxLenses: SECURITY_PROFILE_LENSES.standard });
+    const standardIncluded = standard.included.map((entry) => entry.lens);
+    const unreachable = DEFECTS.defects.filter((defect) => !(standardIncluded as readonly string[]).includes(defect.lens));
+    expect(unreachable.map((defect) => defect.id)).toEqual(["CAL-XSS-01"]);
+    // Every lens the trimmed defect needs is named in `excluded` with its reason.
+    for (const defect of unreachable) {
+      const entry = standard.excluded.find((candidate) => candidate.lens === defect.lens);
+      expect(entry, defect.lens).toBeDefined();
+      expect(entry?.reason).toMatch(/beyond the \d+-lens cap|no matching signal/);
+    }
+  });
+
   it("seeds a unit whose starting paths include the defect's file", () => {
     const ledger = ledgerOf();
     expect(ledger).toHaveLength(DEFECTS.defects.length);
@@ -195,7 +221,9 @@ describe("the enumeration reaches every planted defect", () => {
 /** The golden run, built from the same seeds the enumeration produced: each
  *  unit is assigned, settled with the defect's fingerprint, and verified by a
  *  ballot from ANOTHER profile — the shape a real run has, and the only shape
- *  that confirms (INV-S3): the hunt runs deep, so the ballots say standard. */
+ *  that confirms (INV-S3): the hunters sit on `focused-review`, so the ballots
+ *  come from `refutation`. The run's BUDGET profile (`deep`) is not a ballot
+ *  profile at all — conflating the two is what made INV-S3 vacuous. */
 const recordedRun = () => {
     const ledger = ledgerOf();
     // A findings document is sorted by fingerprint, so build it that way
@@ -204,7 +232,7 @@ const recordedRun = () => {
       .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
       .map(findingFor));
     const verdicts = parseVerificationVerdicts(DEFECTS.defects.map((defect) =>
-      aVerdict({ fingerprint: `calibration/${defect.id.toLowerCase()}`, profile: "standard" })));
+      aVerdict({ fingerprint: `calibration/${defect.id.toLowerCase()}` })));
     if (!verdicts.ok) throw new Error(JSON.stringify(verdicts.error));
     return { ledger, findings, verdicts: verdicts.value };
 };
@@ -286,7 +314,7 @@ describe("a recorded run reaches every planted defect", () => {
       expectOk(submitted, "submit");
 
       const verified = await invoke(["verify"], JSON.stringify({
-        verdicts: DEFECTS.defects.map((defect) => aVerdict({ fingerprint: `calibration/${defect.id.toLowerCase()}`, profile: "standard" })),
+        verdicts: DEFECTS.defects.map((defect) => aVerdict({ fingerprint: `calibration/${defect.id.toLowerCase()}` })),
       }));
       expectOk(verified, "verify");
 

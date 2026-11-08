@@ -38,6 +38,7 @@ const METADATA: SecurityRunMetadata = {
   priorRuns: [],
   runStatus: "complete",
   incompleteReason: null,
+  published: false,
 };
 
 const parse = (raw: readonly unknown[]): readonly SecurityFinding[] => {
@@ -110,10 +111,11 @@ describe("the decision set", () => {
     expect(accepted.value.source.resultDigest).not.toBe(dismissed.value.source.resultDigest);
   });
 
-  it("refuses an empty publication rather than emitting an empty decision set", () => {
+  it("emits a zero-entry decision set for a clean run instead of refusing", () => {
     const empty = securityDisposition({ metadata: METADATA, locator: "/out", findings: [] });
-    expect(empty.ok).toBe(false);
-    expect(empty.ok ? "" : empty.error.message).toContain("nothing to disposition");
+    expect(empty.ok).toBe(true);
+    expect(empty.ok ? empty.value.entries : ["unexpected"]).toEqual([]);
+    expect(empty.ok ? renderDispositionHandoff(empty.value) : "").toContain("nothing to remediate");
   });
 
   it("names the handoff command in prose", () => {

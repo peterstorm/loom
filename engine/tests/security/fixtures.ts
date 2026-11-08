@@ -13,10 +13,18 @@
  */
 
 import { canonicalCoverageId, type CoverageRefs } from "../../src/core/security-audit-contract";
+import type { DomainResult } from "../../src/core/orchestration-contract/identity";
 import type { CoverageSeed } from "../../src/core/security-coverage";
 import type { ConfirmedFinding, NeedsValidationFinding, RejectedFinding } from "../../src/core/security-findings";
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
+/** Unwrap a `DomainResult` in a test: a refusal here means the fixture is
+ *  wrong, not that the case under test is interesting. */
+export function ok<T>(result: DomainResult<T, unknown>): T {
+  if (!result.ok) throw new Error(`expected success, got ${JSON.stringify(result.error)}`);
+  return result.value;
+}
 
 // --- Coverage ---
 
@@ -139,9 +147,17 @@ export function aRejectedFinding(overrides: Partial<RejectedFinding> = {}): Reco
 
 // --- Verdicts ---
 
-/** A refutation ballot. The default is a `critical` vote from a profile other
- *  than the hunt profile (`standard`), which is the only shape that confirms a
- *  claim — a test that wants a demotion or a rejection says so. */
+/** The catalog profile a security ballot may carry: `refutation` is where the verifier
+ *  and the critic sit, `focused-review` is where the hunter sits. These are the
+ *  two axes adjudication compares — the run's BUDGET profile (`quick | standard |
+ *  deep`) is a different vocabulary and never a ballot's profile. */
+export const HUNT_PROFILE = "focused-review" as const;
+export const REFUTATION_PROFILE = "refutation" as const;
+
+/** A refutation ballot. The default is a `critical` vote from a catalog profile
+ *  that did not hunt, which is the only shape that confirms a claim — a test
+ *  that wants a demotion, a rejection, or a self-confirming hunter ballot says
+ *  so explicitly. */
 export function aVerdict(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     schemaVersion: 1,
@@ -151,10 +167,16 @@ export function aVerdict(overrides: Record<string, unknown> = {}): Record<string
     reason: "The sandbox payload returned the admin row, so the claim survives.",
     missingFact: null,
     agent: "security-verifier-agent",
-    profile: "deep",
+    profile: REFUTATION_PROFILE,
     wave: 2,
     ...clone(overrides),
   } as Record<string, unknown>;
+}
+
+/** A ballot cast by the hunter that filed the claim: same fingerprint, hunter
+ *  agent, hunter profile. It is the shape INV-S3 exists to refuse. */
+export function aHunterBallot(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return aVerdict({ agent: "security-hunter-agent", profile: HUNT_PROFILE, wave: 1, ...clone(overrides) });
 }
 
 /** A hunter's settlement payload for one unit (what `submit` reads), matching

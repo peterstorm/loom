@@ -11,6 +11,7 @@
 import { describe, expect, it } from "vitest";
 import { parseSecurityFindings, type SecurityFinding } from "../../src/core/security-findings";
 import { assignUnits, coverageSettled, deferPlannedUnits, recordUnitResult, seedCoverageUnit, type CoverageLedger } from "../../src/core/security-coverage";
+import { ok } from "./fixtures";
 import {
   renderFindingsDetail,
   renderNeedsValidation,
@@ -95,6 +96,7 @@ const metadata: SecurityRunMetadata = {
   priorRuns: [],
   runStatus: "complete",
   incompleteReason: null,
+  published: false,
 };
 
 const deferReason = "budget_cannot_reserve_critics_and_validation";
@@ -165,7 +167,7 @@ describe("report derivation", () => {
   });
 
   it("discloses an incomplete run instead of claiming coverage", () => {
-    const deferred = deferPlannedUnits(ledger(), deferReason);
+    const deferred = ok(deferPlannedUnits(ledger(), deferReason));
     expect(coverageSettled(deferred)).toBe(true);
     const report = renderReport({
       metadata: { ...metadata, runStatus: "incomplete", incompleteReason: deferReason },
@@ -178,7 +180,7 @@ describe("report derivation", () => {
   });
 
   it("renders the positive case without inventing findings", () => {
-    const settledLedger = deferPlannedUnits(ledger(), "no_remaining_work");
+    const settledLedger = ok(deferPlannedUnits(ledger(), "no_remaining_work"));
     const report = renderReport({ metadata, ledger: settledLedger, findings: [], hardening: ["Parameterized queries are used throughout the export path."] });
     expect(report).toContain("0 confirmed, 0 needing validation, 0 rejected");
     expect(report).toContain("Parameterized queries are used throughout the export path.");

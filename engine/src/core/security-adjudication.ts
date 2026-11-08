@@ -5,8 +5,12 @@
  * whether the run may publish it as `confirmed`:
  *
  *   1. a verification verdict exists for its fingerprint (INV-S3);
- *   2. that verdict was cast on a profile different from the hunter's — a model
- *      agreeing with itself is not verification;
+ *   2. that verdict was cast on a CATALOG profile different from the one that
+ *      hunted — a model agreeing with itself is not verification. Both sides of
+ *      that comparison are catalog profile ids (`focused-review`, `refutation`),
+ *      never the run's budget profile (`quick | standard | deep`): comparing the
+ *      two vocabularies made the guard vacuous, because a hunter's ballot is
+ *      never literally the string "standard";
  *   3. the verdict is `critical` (loom's ballot: this claim blocks). An
  *      `advisory` vote means the claim does not survive as confirmed: with a
  *      named missing fact it becomes a lead, without one it is rejected.
@@ -19,7 +23,9 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 
+import { match } from "ts-pattern";
 import { compareStrings } from "./ordering";
+import { catalogProfileOfAgent, LLM_PROFILE_IDS } from "./model-profiles";
 import { failure, success, type DomainResult } from "./orchestration-contract/identity";
 import { isSecurityAgentId, isSecurityFingerprint, isVisibleText } from "./security-audit-contract";
 import type { SecurityFinding, NeedsValidationFinding, RejectedFinding, ConfirmedFinding } from "./security-findings";
@@ -36,7 +42,9 @@ export type VerificationVerdict = Readonly<{
   /** The one fact absent when the vote is advisory for lack of proof. */
   missingFact: string | null;
   /** The verifier's agent name and catalog profile, recorded so `publish` can
-   *  prove the vote came from a different profile than the hunt. */
+ *  prove the vote came from a catalog profile that did not hunt. The parser
+ *  requires `profile` to be the catalog profile of `agent`, so a ballot cannot
+ *  claim a profile its own agent does not sit on. */
   agent: string;
   profile: string;
   wave: number;
@@ -44,7 +52,12 @@ export type VerificationVerdict = Readonly<{
 
 export type VerificationGap =
   | Readonly<{ kind: "unverified"; fingerprint: string }>
-  | Readonly<{ kind: "same-profile"; fingerprint: string; profile: string }>;
+  /** Every ballot came from a profile that hunted. */
+  | Readonly<{ kind: "same-profile"; fingerprint: string; profile: string }>
+  /** The ledger records no hunting profile for this claim, so "a different
+   *  profile verified it" cannot be established at all. Fail closed: an
+   *  unattributable claim is not a verified one. */
+  | Readonly<{ kind: "unattributed"; fingerprint: string }>;
 
 export type Adjudication = Readonly<{
   /** Findings that may be published as confirmed, unchanged. */
@@ -80,8 +93,11 @@ const decide = (
 export type AdjudicationInput = Readonly<{
   findings: readonly SecurityFinding[];
   verdicts: readonly VerificationVerdict[];
-  /** The profile the hunters ran on. A vote from this profile verifies nothing. */
-  huntProfile: string;
+  /** Every catalog profile that hunted in this run, derived from the ledger's
+   *  owned units (`huntingProfiles`). A vote cast on one of these profiles
+   *  verifies nothing; an empty list means the run cannot say who hunted, so
+   *  no confirmed claim is publishable. */
+  huntProfiles: readonly string[];
 }>;
 
 /**
@@ -97,16 +113,21 @@ export function adjudicateCandidates(input: AdjudicationInput): Adjudication {
 
   for (const finding of sortByFingerprint(input.findings)) {
     if (finding.verdict !== "confirmed") continue;
+    if (input.huntProfiles.length === 0) {
+      gaps.push({ kind: "unattributed", fingerprint: finding.fingerprint });
+      continue;
+    }
     const verdicts = verdictsFor(input.verdicts, finding.fingerprint);
     if (verdicts.length === 0) {
       gaps.push({ kind: "unverified", fingerprint: finding.fingerprint });
       continue;
     }
-    if (!verdicts.some((verdict) => verdict.profile !== input.huntProfile)) {
-      gaps.push({ kind: "same-profile", fingerprint: finding.fingerprint, profile: input.huntProfile });
+    const independent = verdicts.filter((verdict) => !input.huntProfiles.includes(verdict.profile));
+    if (independent.length === 0) {
+      gaps.push({ kind: "same-profile", fingerprint: finding.fingerprint, profile: verdicts[0]?.profile ?? input.huntProfiles[0] ?? "" });
       continue;
     }
-    const decision = decide(verdicts.filter((verdict) => verdict.profile !== input.huntProfile));
+    const decision = decide(independent);
     if (decision === null) {
       gaps.push({ kind: "unverified", fingerprint: finding.fingerprint });
       continue;
@@ -155,32 +176,57 @@ const toRejected = (finding: ConfirmedFinding, verdict: VerificationVerdict): Re
 
 /** Blocking reasons that prevent publication, most severe first. Empty means
  *  the run may publish what it has. */
+export type RunAdjudication = Readonly<{
+  /** The full decision: one computation, so findings and blockers cannot disagree. */
+  adjudication: Adjudication;
+  /** The document `publish` writes: adjudicated records plus untouched passthroughs. */
+  findings: readonly SecurityFinding[];
+  blockers: readonly string[];
+}>;
+
+/**
+ * Adjudicate a run ONCE and project both answers from that decision.
+ *
+ * `publishedFindings` and `publicationBlockers` each used to call
+ * `adjudicateCandidates` themselves, so every `findings`/`publish`/`status`
+ * invocation adjudicated twice and the two projections could drift apart
+ * without a test failing. This is the single entry point; the two named
+ * projections below delegate to it.
+ */
+/** Why a confirmed claim failed to earn a ballot, in the words the operator reads
+ *  at publish time. Exhaustive over the gap union, so a new gap kind cannot be
+ *  added without deciding what it blocks. */
+const blockerFor = (gap: VerificationGap): string =>
+  match(gap)
+    .with({ kind: "unverified" }, (value) => `confirmed claim ${value.fingerprint} has no verification verdict`)
+    .with({ kind: "same-profile" }, (value) => `confirmed claim ${value.fingerprint} was verified only on the hunt profile ${value.profile}`)
+    .with({ kind: "unattributed" }, (value) => `confirmed claim ${value.fingerprint} has no recorded hunting profile, so no ballot can be shown to come from another one`)
+    .exhaustive();
+
+export function adjudicateRun(input: AdjudicationInput & Readonly<{ ledgerSettled: boolean }>): RunAdjudication {
+  const adjudication = adjudicateCandidates(input);
+  const blockers: string[] = [];
+  for (const gap of adjudication.gaps) blockers.push(blockerFor(gap));
+  if (!input.ledgerSettled) blockers.push("coverage ledger still has planned, in-progress or blocked units");
+  const passthrough = input.findings.filter((finding) => finding.verdict !== "confirmed");
+  return {
+    adjudication,
+    findings: sortByFingerprint([...adjudication.confirmed, ...adjudication.demoted, ...adjudication.rejected, ...passthrough]),
+    blockers,
+  };
+}
+
+/** Blocking reasons that prevent publication, most severe first. */
 export function publicationBlockers(
   input: AdjudicationInput & Readonly<{ ledgerSettled: boolean }>,
 ): readonly string[] {
-  const adjudication = adjudicateCandidates(input);
-  const blockers: string[] = [];
-  for (const gap of adjudication.gaps) {
-    blockers.push(
-      gap.kind === "unverified"
-        ? `confirmed claim ${gap.fingerprint} has no verification verdict`
-        : `confirmed claim ${gap.fingerprint} was verified only on the hunt profile ${gap.profile}`,
-    );
-  }
-  if (!input.ledgerSettled) blockers.push("coverage ledger still has planned, in-progress or blocked units");
-  return blockers;
+  return adjudicateRun(input).blockers;
 }
 
 /** The published findings list: adjudicated confirmed, demoted leads, then the
  *  run's own non-confirmed records (leads and rejections the hunters filed). */
 export function publishedFindings(input: AdjudicationInput): readonly SecurityFinding[] {
-  const adjudication = adjudicateCandidates({
-    ...input,
-    // Only confirmed claims are adjudicated; the rest pass through untouched.
-    findings: input.findings.filter((finding) => finding.verdict === "confirmed"),
-  });
-  const passthrough = input.findings.filter((finding) => finding.verdict !== "confirmed");
-  return sortByFingerprint([...adjudication.confirmed, ...adjudication.demoted, ...adjudication.rejected, ...passthrough]);
+  return adjudicateRun({ ...input, ledgerSettled: true }).findings;
 }
 
 // --- Wire parsing ---
@@ -238,7 +284,18 @@ export function parseVerificationVerdicts(raw: unknown): DomainResult<readonly V
       local.push({ path: `${base}.missingFact`, message: "expected null or visible prose" });
     }
     if (!isSecurityAgentId(record.agent)) local.push({ path: `${base}.agent`, message: "expected a catalog agent id" });
-    if (!isVisibleText(record.profile)) local.push({ path: `${base}.profile`, message: "expected a catalog profile" });
+    // The profile is not free prose: it must be a catalog profile, and it must
+    // be the one this agent's policy assigns it. Otherwise a hunter writes
+    // `profile: "refutation"` on its own ballot and INV-S3 is satisfied by a
+    // capital letter.
+    const catalogProfile = catalogProfileOfAgent(record.agent);
+    if (catalogProfile === null) {
+      local.push({ path: `${base}.agent`, message: "expected an agent in the catalog" });
+    } else if (!(LLM_PROFILE_IDS as readonly string[]).includes(String(record.profile))) {
+      local.push({ path: `${base}.profile`, message: "expected a catalog profile" });
+    } else if (record.profile !== catalogProfile) {
+      local.push({ path: `${base}.profile`, message: `agent ${String(record.agent)} sits on profile ${catalogProfile}` });
+    }
     if (typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1) {
       local.push({ path: `${base}.wave`, message: "expected a positive integer" });
     }

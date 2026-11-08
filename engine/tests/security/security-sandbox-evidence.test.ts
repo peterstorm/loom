@@ -28,6 +28,8 @@ const receiptJson = (overrides: Record<string, unknown> = {}): string =>
     scratchBytes: 42,
     networkNamespace: true,
     targetReadOnly: true,
+    readOnlyRoot: false,
+    enforced: { cpu: true, memory: true, processes: true, fileSize: true },
     ...overrides,
   });
 

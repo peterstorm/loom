@@ -69,19 +69,19 @@ const fingerprintArb = fc.stringMatching(/^[a-z][a-z0-9-]{0,15}$/);
 describe("adjudication", () => {
   it("publishes a claim only on a critical vote from another profile (INV-S3)", () => {
     const claim = findings(["authz:1"]);
-    const unverified = adjudicateCandidates({ findings: claim, verdicts: [], huntProfile: "focused-review" });
+    const unverified = adjudicateCandidates({ findings: claim, verdicts: [], huntProfiles: ["focused-review"] });
     expect(unverified.confirmed).toHaveLength(0);
     expect(unverified.gaps).toEqual([{ kind: "unverified", fingerprint: "authz:1" }]);
 
     const sameProfile = adjudicateCandidates({
       findings: claim,
       verdicts: [verdict("authz:1", { profile: "focused-review" })],
-      huntProfile: "focused-review",
+      huntProfiles: ["focused-review"],
     });
     expect(sameProfile.confirmed).toHaveLength(0);
     expect(sameProfile.gaps).toEqual([{ kind: "same-profile", fingerprint: "authz:1", profile: "focused-review" }]);
 
-    const verified = adjudicateCandidates({ findings: claim, verdicts: [verdict("authz:1")], huntProfile: "focused-review" });
+    const verified = adjudicateCandidates({ findings: claim, verdicts: [verdict("authz:1")], huntProfiles: ["focused-review"] });
     expect(verified.confirmed.map((finding) => finding.fingerprint)).toEqual(["authz:1"]);
     expect(verified.gaps).toEqual([]);
   });
@@ -91,7 +91,7 @@ describe("adjudication", () => {
     const demoted = adjudicateCandidates({
       findings: claim,
       verdicts: [verdict("authz:1", { vote: "advisory", reason: "the route is behind an admin guard", missingFact: "the guard's configuration in production" })],
-      huntProfile: "focused-review",
+      huntProfiles: ["focused-review"],
     });
     expect(demoted.confirmed).toHaveLength(0);
     expect(demoted.demoted).toHaveLength(1);
@@ -103,7 +103,7 @@ describe("adjudication", () => {
     const rejected = adjudicateCandidates({
       findings: findings(["authz:1"]),
       verdicts: [verdict("authz:1", { vote: "advisory", reason: "the predicate is added by a query interceptor" })],
-      huntProfile: "focused-review",
+      huntProfiles: ["focused-review"],
     });
     expect(rejected.rejected.map((finding) => finding.reason)).toEqual(["the predicate is added by a query interceptor"]);
     expect(rejected.demoted).toHaveLength(0);
@@ -113,7 +113,7 @@ describe("adjudication", () => {
     fc.assert(
       fc.property(fc.integer({ min: 1, max: 4 }), (advisories) => {
         const verdicts = [verdict("authz:1"), ...Array.from({ length: advisories }, () => verdict("authz:1", { vote: "advisory", reason: "unsure", missingFact: "one fact" }))];
-        const adjudication = adjudicateCandidates({ findings: findings(["authz:1"]), verdicts, huntProfile: "focused-review" });
+        const adjudication = adjudicateCandidates({ findings: findings(["authz:1"]), verdicts, huntProfiles: ["focused-review"] });
         expect(adjudication.confirmed).toHaveLength(1);
         expect(adjudication.demoted).toHaveLength(0);
       }),
@@ -131,7 +131,7 @@ describe("adjudication", () => {
           const verdicts = sorted.flatMap((fingerprint, index) =>
             votes[index] === undefined ? [] : [verdict(fingerprint, { vote: votes[index], missingFact: "one fact" })],
           );
-          const adjudication = adjudicateCandidates({ findings: claims, verdicts, huntProfile: "focused-review" });
+          const adjudication = adjudicateCandidates({ findings: claims, verdicts, huntProfiles: ["focused-review"] });
           for (const published of adjudication.confirmed) {
             expect(verdicts.some((cast) => cast.fingerprint === published.fingerprint && cast.profile !== "focused-review")).toBe(true);
           }
@@ -144,12 +144,12 @@ describe("adjudication", () => {
   });
 
   it("names every reason a run may not publish", () => {
-    expect(publicationBlockers({ findings: findings(["a:1"]), verdicts: [], huntProfile: "focused-review", ledgerSettled: true })).toEqual([
+    expect(publicationBlockers({ findings: findings(["a:1"]), verdicts: [], huntProfiles: ["focused-review"], ledgerSettled: true })).toEqual([
       "confirmed claim a:1 has no verification verdict",
     ]);
-    expect(publicationBlockers({ findings: findings(["a:1"]), verdicts: [verdict("a:1")], huntProfile: "focused-review", ledgerSettled: false })).toEqual([
+    expect(publicationBlockers({ findings: findings(["a:1"]), verdicts: [verdict("a:1")], huntProfiles: ["focused-review"], ledgerSettled: false })).toEqual([
       "coverage ledger still has planned, in-progress or blocked units",
     ]);
-    expect(publicationBlockers({ findings: findings(["a:1"]), verdicts: [verdict("a:1")], huntProfile: "focused-review", ledgerSettled: true })).toEqual([]);
+    expect(publicationBlockers({ findings: findings(["a:1"]), verdicts: [verdict("a:1")], huntProfiles: ["focused-review"], ledgerSettled: true })).toEqual([]);
   });
 });

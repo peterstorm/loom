@@ -31,6 +31,7 @@ import {
   type CoverageLedger,
   type CoverageUnit,
 } from "../../src/core/security-coverage";
+import { ok } from "./fixtures";
 
 const require = createRequire(import.meta.url);
 const FIXTURES = join(import.meta.dirname, "..", "fixtures", "security", "upstream");
@@ -238,7 +239,7 @@ describe("coverage ledger: state machine", () => {
     const b = seed({ refs: { surface: "s2", boundary: "b", subsystem: "s", attack_class: "a2" } });
     const ledger = sortLedger([a, b]);
     expect(coverageComplete(ledger)).toBe(false);
-    const deferred = deferPlannedUnits(ledger, "budget_cannot_reserve_critics_and_validation");
+    const deferred = ok(deferPlannedUnits(ledger, "budget_cannot_reserve_critics_and_validation"));
     expect(coverageSettled(deferred)).toBe(true);
     expect(coverageComplete(deferred)).toBe(false);
     expect(summarizeCoverage(deferred).deferred).toHaveLength(2);

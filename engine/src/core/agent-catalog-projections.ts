@@ -306,4 +306,3 @@ export const REVIEW_PANEL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("
 /** Security-audit agents (hunters, verifiers, the coverage critic). DERIVED
  *  from the Agent Catalog (kind `security-verdict`): recognized by the audit
  *  program, invisible to every review roster and to phase advancement. */
-export const SECURITY_AUDIT_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("security-verdict"));

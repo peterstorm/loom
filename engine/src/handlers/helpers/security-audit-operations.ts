@@ -22,43 +22,52 @@ export type SecurityAuditOperationTraits = Readonly<{
    */
   input: "stdin" | "flags";
   /**
-   * `available`: a read-only projection (`status`, `findings`) that mutates
+   * `available`: a read-only projection (`status`, `findings`) that writes
    * nothing and must stay usable during Pi runtime skew — it is what an
    * operator reads WHILE recovering, so gating it would make the skew
    * undiagnosable from inside the session that hit it.
    * `handshake-required`: every operation that writes run state.
+   *
+   * This is the ONLY policy field: "writes" and "gated by the handshake" are the
+   * same fact stated twice, and two fields drift. `securityAuditOperationWrites`
+   * derives the answer callers ask for.
    */
   runtimeSkew: "available" | "handshake-required";
-  /** Whether the operation writes anything under the run directory. A writer
-   *  takes a `--out`; a reader may also take `--out` to name what it reads. */
-  mutates: boolean;
+  /** Input shape only; see `input` above. */
 }>;
 
 export const SECURITY_AUDIT_OPERATIONS = Object.freeze({
   /** Freeze the revision, seed the coverage ledger, select lenses. */
-  start: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required", mutates: true }),
+  start: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required" }),
   /** Give a planned unit to a hunter for a wave. */
-  assign: Object.freeze({ input: "flags", runtimeSkew: "handshake-required", mutates: true }),
+  assign: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
   /** Settle units with a hunter's results and record its candidate findings. */
-  submit: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required", mutates: true }),
+  submit: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required" }),
   /** Mark a unit (or every still-planned unit) deferred, with its reason. */
-  defer: Object.freeze({ input: "flags", runtimeSkew: "handshake-required", mutates: true }),
+  defer: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
   /** Fold the coverage critic's proposals, reassignments and resolutions in. */
-  "merge-critic": Object.freeze({ input: "stdin", runtimeSkew: "handshake-required", mutates: true }),
+  "merge-critic": Object.freeze({ input: "stdin", runtimeSkew: "handshake-required" }),
   /** Record verification ballots. Adjudication itself happens at publish. */
-  verify: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required", mutates: true }),
-  /** Render the report from validated records. Writes the documents. */
-  findings: Object.freeze({ input: "flags", runtimeSkew: "available", mutates: false }),
+  verify: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required" }),
+  /** Render the report from validated records, to stdout. Writes nothing. */
+  findings: Object.freeze({ input: "flags", runtimeSkew: "available" }),
   /** Adjudicate and publish `security-findings.json` plus the rendered docs. */
-  publish: Object.freeze({ input: "flags", runtimeSkew: "handshake-required", mutates: true }),
+  publish: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
   /** Turn the published records into the decision set `/review-and-fix`
    *  consumes. Derived from `security-findings.json`, never authored beside it. */
-  disposition: Object.freeze({ input: "flags", runtimeSkew: "handshake-required", mutates: true }),
+  disposition: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
   /** Where is the run: coverage summary, blockers, settled? */
-  status: Object.freeze({ input: "flags", runtimeSkew: "available", mutates: false }),
+  status: Object.freeze({ input: "flags", runtimeSkew: "available" }),
 } as const satisfies Readonly<Record<string, SecurityAuditOperationTraits>>);
 
 export type SecurityAuditOperation = keyof typeof SECURITY_AUDIT_OPERATIONS;
+
+/** Whether the operation writes anything under the run directory. A writer
+ *  takes a `--out`; a reader may also take `--out` to name what it reads. Derived
+ *  from the skew policy, which is the same fact: an operation that writes is the
+ *  one the handshake gates. */
+export const securityAuditOperationWrites = (operation: SecurityAuditOperation): boolean =>
+  SECURITY_AUDIT_OPERATIONS[operation].runtimeSkew === "handshake-required";
 
 /** The operation an argument names, or null when it names none. */
 export function parseSecurityAuditOperation(value: string | undefined): SecurityAuditOperation | null {

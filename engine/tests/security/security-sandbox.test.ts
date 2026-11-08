@@ -38,6 +38,8 @@ const receipt = (overrides: Record<string, unknown> = {}): string =>
     scratchBytes: 12,
     networkNamespace: true,
     targetReadOnly: true,
+    readOnlyRoot: true,
+    enforced: { cpu: true, memory: true, processes: true, fileSize: true },
     ...overrides,
   })}`;
 
@@ -86,7 +88,41 @@ describe("sandbox receipt", () => {
     const parsed = parseOk(receipt({ scratchBytes: 128 * 1024 * 1024 }));
     expect(sandboxWithinLimits(parsed)).toBe(false);
     expect(sandboxWithinLimits(parseOk(receipt({ exit: 1, scratchBytes: 0 })))).toBe(false);
-    expect(sandboxWithinLimits(parseOk(receipt({ scratchBytes: null })))).toBe(true);
+    // An UNMEASURED footprint is not a passing one.
+    expect(sandboxWithinLimits(parseOk(receipt({ scratchBytes: null })))).toBe(false);
+  });
+
+  it("refuses a run whose limits were not all applied", () => {
+    expect(sandboxWithinLimits(parseOk(receipt({ enforced: { cpu: true, memory: false, processes: true, fileSize: true } })))).toBe(false);
+    // A failed ROOT remount is recorded, not fatal: a user namespace cannot
+    // remount a superblock it does not own, and the uid mapping protects the rest.
+    expect(sandboxWithinLimits(parseOk(receipt({ readOnlyRoot: false })))).toBe(true);
+    expect(parseSandboxReceipt(receipt({ targetReadOnly: false })).ok).toBe(false);
+  });
+
+  it("requires the caller's nonce in the marker when one was issued", () => {
+    const nonce = "0123456789abcdef";
+    const bound = `LOOM-SANDBOX-RECEIPT-${nonce} ${JSON.stringify({
+      schemaVersion: 1,
+      exit: 0,
+      limits: { ...DEFAULT_SANDBOX_LIMITS },
+      allowlistedEnv: ["PATH"],
+      scratchBytes: 12,
+      networkNamespace: true,
+      targetReadOnly: true,
+      readOnlyRoot: true,
+      enforced: { cpu: true, memory: true, processes: true, fileSize: true },
+    })}`;
+    // A command-printed unbound receipt is ignored; the bound one is read.
+    const stdout = `${receipt()}\n${bound}\n`;
+    expect(parseSandboxReceipt(stdout, { nonce }).ok).toBe(true);
+    expect(parseSandboxReceipt(`${receipt()}\n`, { nonce }).ok).toBe(false);
+  });
+
+  it("bounds the nonce grammar", () => {
+    expect(sandboxCommand({ target: "/repo", scratch: "/scratch", command: ["true"], limits: limits(), nonce: "0123456789abcdef" }).ok).toBe(true);
+    expect(sandboxCommand({ target: "/repo", scratch: "/scratch", command: ["true"], limits: limits(), nonce: "nothex" }).ok).toBe(false);
+    expect(sandboxCommand({ target: "/repo", scratch: "/scratch", command: ["true"], limits: limits(), nonce: "0123" }).ok).toBe(false);
   });
 });
 

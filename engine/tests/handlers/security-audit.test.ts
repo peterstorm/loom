@@ -20,7 +20,7 @@ import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createSecurityAuditHandler } from "../../src/handlers/helpers/security-audit";
 import { piRuntimeHandshakeRequired, routeConsumesStdin } from "../../src/handler-routes";
-import { SECURITY_AUDIT_OPERATIONS, SECURITY_AUDIT_OPERATION_ORDER, parseSecurityAuditOperation } from "../../src/handlers/helpers/security-audit-operations";
+import { SECURITY_AUDIT_OPERATIONS, SECURITY_AUDIT_OPERATION_ORDER, parseSecurityAuditOperation, securityAuditOperationWrites } from "../../src/handlers/helpers/security-audit-operations";
 import {
   SECURITY_AUDIT_LIMITS,
   canonicalCoverageId,
@@ -29,7 +29,7 @@ import {
 import type { CoverageUnit } from "../../src/core/security-coverage";
 import type { SecurityFinding } from "../../src/core/security-findings";
 import type { VerificationVerdict } from "../../src/core/security-adjudication";
-import { aConfirmedFinding, aNeedsValidationFinding, aSeed, aUnitResult, aVerdict, nSeeds } from "../security/fixtures";
+import { aConfirmedFinding, aHunterBallot, aNeedsValidationFinding, aSeed, aUnitResult, aVerdict, nSeeds } from "../security/fixtures";
 
 type Run = Readonly<{ out: string; stdout: () => string; invoke: (args: readonly string[], stdin?: string) => Promise<{ ok: boolean; error: string | null }> }>;
 
@@ -82,11 +82,13 @@ describe("the operation set", () => {
     expect(parseSecurityAuditOperation("status")).toBe("status");
   });
 
-  it("marks every operation that mutates the run as handshake-required", () => {
-    for (const [operation, traits] of Object.entries(SECURITY_AUDIT_OPERATIONS)) {
-      if (!traits.mutates) continue;
-      expect(traits.runtimeSkew, `${operation} mutates the run`).toBe("handshake-required");
+  it("gates every operation that writes the run behind the handshake", () => {
+    for (const operation of Object.keys(SECURITY_AUDIT_OPERATIONS) as (keyof typeof SECURITY_AUDIT_OPERATIONS)[]) {
+      if (!securityAuditOperationWrites(operation)) continue;
+      expect(SECURITY_AUDIT_OPERATIONS[operation].runtimeSkew, `${operation} writes the run`).toBe("handshake-required");
     }
+    // And the derivation is not vacuous: the writers outnumber the projections.
+    expect(Object.keys(SECURITY_AUDIT_OPERATIONS).filter((operation) => securityAuditOperationWrites(operation as keyof typeof SECURITY_AUDIT_OPERATIONS))).toHaveLength(8);
   });
 
   it("keeps the read-only projections available during a runtime skew", () => {
@@ -137,8 +139,9 @@ describe("a full run", () => {
 
     const findings = await run.invoke(["findings", "--json"]);
     expect(findings.error).toBeNull();
-    const rendered = JSON.parse(run.stdout()) as SecurityFinding[];
-    expect(rendered.map((finding) => finding.verdict)).toEqual(["confirmed"]);
+    const rendered = JSON.parse(run.stdout()) as { findings: SecurityFinding[]; publicationBlockers: string[] };
+    expect(rendered.publicationBlockers).toEqual([]);
+    expect(rendered.findings.map((finding) => finding.verdict)).toEqual(["confirmed"]);
 
     const published = await run.invoke(["publish"]);
     expect(published.error).toBeNull();
@@ -247,13 +250,28 @@ describe("adjudication", () => {
     expect(readJson<SecurityFinding[]>(run.out, "security-findings.json").map((finding) => finding.verdict)).toEqual(["rejected"]);
   });
 
-  it("refuses a ballot from the profile the hunters ran on", async () => {
+  it("refuses a ballot cast by the hunter that filed the claim", async () => {
     const run = aRun();
     await seedAndSubmitClaim(run);
-    await run.invoke(["verify"], JSON.stringify({ verdicts: [aVerdict({ profile: "standard" })] }));
+    // The hunter's own ballot: its agent AND its catalog profile. This is the
+    // shape INV-S3 exists to refuse, and the one the budget-profile comparison
+    // let through.
+    const verified = await run.invoke(["verify"], JSON.stringify({ verdicts: [aHunterBallot()] }));
+    expect(verified.ok).toBe(true);
     const blocked = await run.invoke(["publish"]);
     expect(blocked.ok).toBe(false);
     expect(blocked.error).toContain("verified only on the hunt profile");
+  });
+
+  it("refuses a ballot whose profile is not the one its agent sits on", async () => {
+    const run = aRun();
+    await seedAndSubmitClaim(run);
+    // A hunter cannot borrow the verifier's profile by writing it down.
+    const refused = await run.invoke(["verify"], JSON.stringify({
+      verdicts: [aVerdict({ agent: "security-hunter-agent", profile: "refutation" })],
+    }));
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain("sits on profile focused-review");
   });
 
   it("accumulates ballots across waves instead of replacing them", async () => {
@@ -342,7 +360,9 @@ describe("the wire", () => {
     await run.invoke(["start", "--repo", run.out, "--source", "0".repeat(40)], JSON.stringify({ units: [seedFor(0)] }));
     const elsewhere = join(run.out, "..", `${run.out.split("/").pop()}-elsewhere.json`);
     writeFileSync(elsewhere, "[]");
-    symlinkSync(elsewhere, join(run.out, "findings.json"));
+    // Replace a document the run itself wrote, so the read is the symlinked one.
+    rmSync(join(run.out, "ledger.json"));
+    symlinkSync(elsewhere, join(run.out, "ledger.json"));
     const status = await run.invoke(["status"]);
     expect(status.ok).toBe(false);
     expect((status.error ?? "").toLowerCase()).toMatch(/symlink|symbolic|eloop/);

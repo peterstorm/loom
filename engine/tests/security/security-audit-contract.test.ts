@@ -131,6 +131,7 @@ describe("run metadata", () => {
     priorRuns: [],
     runStatus: "in_progress",
     incompleteReason: null,
+  published: false,
   };
 
   it("accepts a canonical document", () => {

@@ -20,6 +20,32 @@
 
 export type Baseline = readonly string[];
 
+/** A module scope's first two segments, as a path prefix (`engine/src/core/`). */
+const anchorOf = (module: string): string => `${module.split("/").slice(0, 2).join("/")}/`;
+
+/**
+ * Normalize a lint target to the repo-relative form baseline keys are written
+ * in. `lintFile` hands rules ABSOLUTE paths, so without this a baselined site
+ * stops matching wherever the checkout lives — and a grandfathered list that
+ * quietly stops applying is worse than no list: the site looks baselined in
+ * review and fails in CI.
+ *
+ * Anchors on the MODULE SCOPE (`engine/src/<area>/`) rather than reusing
+ * `toRepositoryRelative`, which anchors on the import-boundary table:
+ * `engine/src/machine/` is not an import boundary, so an absolute path there
+ * stayed absolute. One owner, so the two rules that key baselines normalize
+ * identically — the bug this replaces was two copies that disagreed.
+ */
+export const repoRelative = (filePath: string, anchors: readonly string[]): string => {
+  const normalized = filePath.replace(/\\/g, "/");
+  for (const anchor of anchors.map(anchorOf)) {
+    const at = normalized.lastIndexOf(`/${anchor}`);
+    if (at !== -1) return normalized.slice(at + 1);
+    if (normalized.startsWith(anchor)) return normalized;
+  }
+  return normalized;
+};
+
 /** The key form every rule uses: the site's repo-relative path, then the thing
  *  the rule branched on (`x.kind`, `event.status`), so a second branch on the
  *  same tag in the same file is its own entry. */

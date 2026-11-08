@@ -624,6 +624,18 @@ export function resolveAgentProfile(raw: unknown): PolicyResult<LlmProfile> {
   return policy.ok ? resolveModelProfile(policy.value.profile) : policy;
 }
 
+/** The catalog profile an agent id names, or `null` for an id the catalog does
+ *  not hold. Pure and total: a caller holding an untrusted id (a ballot, a
+ *  verdict, a ledger's `agent_id`) needs the profile itself, not an Either —
+ *  and `null` is what makes "this ballot was cast on the profile that filed
+ *  the claim" a comparison rather than a guess. */
+export function catalogProfileOfAgent(raw: unknown): LlmProfileId | null {
+  if (typeof raw !== "string") return null;
+  const bare = raw.startsWith(LOOM_AGENT_PREFIX) ? raw.slice(LOOM_AGENT_PREFIX.length) : raw;
+  const policy = AGENT_POLICIES.find(({ agent }) => agent === bare);
+  return policy === undefined ? null : policy.profile;
+}
+
 export function parseHarness(raw: unknown): PolicyResult<Harness> {
   return raw === "claude-code" || raw === "pi"
     ? success(raw)

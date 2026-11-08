@@ -2,7 +2,7 @@
 name: security-critic-agent
 model-profile: refutation
 model: opus
-description: Coverage critic for the security-audit program. Reads the coverage ledger and the published claims only, names the units a hunter claimed without walking, and returns stop-or-continue with the exact requeue set. Read-only, pure JSON.
+description: Coverage critic for the security-audit program. Reads the coverage ledger and the published claims only, names the units a hunter claimed without walking, and returns stop-or-continue with the exact reassignment set. Read-only, pure JSON.
 color: orange
 tools:
   - Read
@@ -54,19 +54,23 @@ Return exactly one JSON object and nothing else:
 {
   "schemaVersion": 1,
   "kind": "security-coverage-critic",
-  "stop": true,
-  "reason": "<one sentence: why the ledger's claim holds, or the shape of the gap>",
-  "requeue": [
+  "missingUnits": [
     {
-      "coverageId": "<unit to hunt again>",
-      "missing": "<the exact check that is absent, or the boundary never crossed>",
-      "wave": 2
+      "refs": { "surface": "<surface>", "boundary": "<boundary>", "subsystem": "<subsystem>", "attack_class": "<attack class>" },
+      "startingPaths": ["<where a hunter should start>"],
+      "ordinaryAttackClassBlock": "<the ordinary attack-class note for this cell>",
+      "selectedCompanionBlocks": ["<LENS.md#block>"],
+      "excludedBlocks": [{ "block": "<LENS.md#block>", "reason": "<why it does not apply>" }]
     }
   ],
-  "unprovenClaims": ["<fingerprint>: <why the claim's unit does not support it>"]
+  "reassignIds": ["<a coverage_id the ledger already holds, to hunt again>"],
+  "resolvedPriorLeads": ["<fingerprint>: <why the claim's unit does not support it>"],
+  "stop": true
 }
 ```
 
-`stop: true` requires an empty `requeue`. If you name any requeued unit, `stop`
-is `false`. A run may be told to continue more than once; each pass is a fresh
-critic, so state the gap in full rather than referring to an earlier opinion.
+The field names above are the ones `merge-critic` parses; `schemaVersion` and
+`kind` are required, and an invented field is refused by name. `stop: true`
+requires `reassignIds` empty. A run may be told to continue more than once; each
+pass is a fresh critic, so state the gap in full rather than referring to an
+earlier opinion.

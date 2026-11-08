@@ -95,18 +95,17 @@ export function reasonForFinding(finding: SecurityFinding): string {
 /**
  * Build the disposition set for a published run.
  *
- * Refuses rather than guesses: an empty publication has nothing to disposition,
- * and a duplicate fingerprint means the records were concatenated twice — a
- * decision set with two entries for one origin could not be applied.
+ * A clean run is a legitimate outcome: zero published records produce a
+ * zero-entry decision set (nothing to remediate), not a refusal — otherwise the
+ * best possible audit ends with an internal error where the next command
+ * should be. A duplicate fingerprint is still refused: records concatenated
+ * twice give one origin two decisions, which cannot be applied.
  */
 export function securityDisposition(input: Readonly<{
   metadata: SecurityRunMetadata;
   locator: string;
   findings: readonly SecurityFinding[];
 }>): DomainResult<SecurityDisposition, DispositionError> {
-  if (input.findings.length === 0) {
-    return failure(invalid("nothing to disposition: the run published no finding records"));
-  }
   const seen = new Set<string>();
   for (const finding of input.findings) {
     if (seen.has(finding.fingerprint)) {
@@ -152,11 +151,14 @@ export function renderDispositionHandoff(disposition: SecurityDisposition): stri
   return [
     "## Disposition handoff",
     "",
-    `${count("accepted")} accepted, ${count("deferred")} deferred, ${count("dismissed")} dismissed.`,
+    ...(disposition.entries.length === 0
+      ? ["0 findings: nothing to remediate."]
+      : [`${count("accepted")} accepted, ${count("deferred")} deferred, ${count("dismissed")} dismissed.`]),
     "The audit never patches: remediation runs under `/review-and-fix`.",
     "",
-    `    helper orchestration start standalone-disposition --run ${disposition.source.locator}`,
-    "",
+    ...(disposition.entries.length === 0
+      ? []
+      : [`    helper orchestration start standalone-disposition --run ${disposition.source.locator}`, ""]),
     `Decision set: disposition.json (${disposition.source.resultDigest}).`,
   ].join("\n");
 }

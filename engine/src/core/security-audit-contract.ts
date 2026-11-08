@@ -189,7 +189,9 @@ function isCanonicalRef(value: unknown): value is string {
 
 /** RFC 3986 unreserved bytes stay literal; everything else is percent-encoded.
  *  The encoding is injective over valid references, which is what makes a
- *  canonical coverage ID a safe map key. */
+ *  canonical coverage ID a safe map key. Injective *because* `:` is reserved:
+ *  the field separator `::` can never appear inside a field, so two different
+ *  reference tuples cannot encode to one id. */
 export function encodeCanonicalRef(value: string): string {
   if (!isCanonicalRef(value)) throw new TypeError("invalid canonical reference");
   let encoded = "";
@@ -301,6 +303,21 @@ export const securityRunMetadataSchema = z
     priorRuns: z.array(bounded(4_096)).max(SECURITY_AUDIT_LIMITS.collectionItems).readonly(),
     runStatus: z.enum(["in_progress", "complete", "incomplete"]),
     incompleteReason: z.enum(SECURITY_INCOMPLETE_REASONS).nullable(),
+    /** Whether `publish` committed this run's records and prose. The commit
+     *  point is this flag, written LAST, so a half-written run directory cannot
+     *  pass for a published one merely because a file exists. */
+    published: z.boolean(),
+  })
+  /** The closed reason vocabulary is only closed if it is tied to the status: an
+   *  incomplete run that cannot name its reason is a silent one, and a complete
+   *  run carrying a reason describes a state that does not exist. */
+  .superRefine((value, ctx) => {
+    if (value.runStatus === "incomplete" && value.incompleteReason === null) {
+      ctx.addIssue({ code: "custom", path: ["incompleteReason"], message: "an incomplete run must name its reason" });
+    }
+    if (value.runStatus !== "incomplete" && value.incompleteReason !== null) {
+      ctx.addIssue({ code: "custom", path: ["incompleteReason"], message: `a ${value.runStatus} run records no incomplete reason` });
+    }
   })
   .readonly();
 export type SecurityRunMetadata = z.infer<typeof securityRunMetadataSchema>;
