@@ -396,6 +396,13 @@ export type AgentKind =
   | Readonly<{ kind: "reviewer" }>
   | Readonly<{ kind: "spec-check" }>
   | Readonly<{ kind: "review-verifier" }>
+  /** An agent whose final JSON is a security-audit verdict (hunter, verifier or
+   *  coverage critic) rather than review findings. Its own kind so it is
+   *  invisible to the wave review rosters (a security verifier that sat in
+   *  REVIEW_SUB_AGENTS would route its verdict through store-reviewer-findings
+   *  and fail evidence capture), and so the audit program can recognize its own
+   *  agents without matching on names. */
+  | Readonly<{ kind: "security-verdict" }>
   | Readonly<{ kind: "utility" }>;
 
 export type AgentPolicy<Agent extends string = string> = Readonly<{
@@ -454,6 +461,14 @@ export const AGENT_CATALOG = Object.freeze({
   "plan-alignment-agent": traits("focused-review", phaseKind("plan-alignment")),
   "pr-test-analyzer": traits("focused-review", plainKind("reviewer")),
   "review-verifier-agent": traits("refutation", plainKind("review-verifier")),
+  // Security audit (ADR-0064): all three answer with a security verdict, not
+  // review findings (D2 keeps the reviewer payload v2 WIRE for hunters, but
+  // their transcript is parsed by the audit program, not store-reviewer-
+  // findings). The verifier and critic sit on the refutation profile, so no
+  // verification vote ever comes from a hunter instance.
+  "security-hunter-agent": traits("focused-review", plainKind("security-verdict"), "security-audit"),
+  "security-verifier-agent": traits("refutation", plainKind("security-verdict")),
+  "security-critic-agent": traits("refutation", plainKind("security-verdict")),
   "security-agent": traits("focused-review", plainKind("impl"), "security-expert"),
   "silent-failure-hunter": traits("focused-review", plainKind("reviewer")),
   "skill-content-reviewer": traits("focused-review", plainKind("utility")),

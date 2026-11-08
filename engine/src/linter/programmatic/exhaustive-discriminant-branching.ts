@@ -29,6 +29,8 @@
 import type { Violation } from "../types";
 import { makeViolation } from "../types";
 import { isTestFile } from "./config";
+import { EXHAUSTIVE_BRANCHING_BASELINE } from "./exhaustive-discriminant-branching-baseline";
+import { baselineCounter, baselineKey, type Baseline } from "./baseline";
 
 /** Branches on one tag at or above this count read as a switch, not a guard. */
 export const DEFAULT_MAX_DISCRIMINANT_BRANCHES = 3;
@@ -124,15 +126,18 @@ function closesEnclosingBlock(line: string, runIndent: number): boolean {
 }
 
 /**
- * A totality proof anywhere in the file exempts it.
- *
- * This is deliberately file-scoped rather than chain-scoped. A tighter scope
- * would need real scope analysis, and the failure mode of being too lenient
- * (missing a chain in a file that also contains a proven match) is far better
- * than the failure mode of being too strict (flagging code that IS total, which
- * teaches people the rule is wrong).
+ * SCOPED to the chain, not to the file. The file-wide reading was this rule's
+ * first form and it was far too lenient: ONE `match(...).exhaustive()` anywhere
+ * silenced every chain in the file, which is how a year of unproven branches sat
+ * under a green lint. A proof now covers the chain it sits beside — from a few
+ * lines before the first branch to a few lines after the last one. The
+ * switch-statement half of the same problem is `switch-totality`.
  */
 const TOTALITY_PROOF = /\.exhaustive\s*\(\s*\)|:\s*never\b/;
+
+/** How far beyond a chain's first and last branch its proof may sit: a `match`
+ *  assigned just above it, or a `never` binding just below its tail. */
+const MAX_PROOF_DISTANCE = 6;
 
 function discriminantOf(line: string, tags: readonly string[]): string | null {
   for (const tag of tags) {
@@ -142,17 +147,26 @@ function discriminantOf(line: string, tags: readonly string[]): string | null {
   return null;
 }
 
-export function handler(
-  content: string,
-  filePath: string,
-  maxBranches: number = DEFAULT_MAX_DISCRIMINANT_BRANCHES,
-  tags: readonly string[] = DEFAULT_DISCRIMINANT_TAGS,
-): readonly Violation[] {
-  if (isTestFile(filePath)) return [];
-  const lines = content.split("\n");
-  if (lines.some((line) => TOTALITY_PROOF.test(line))) return [];
+/** A run of branches on one discriminant: what the rule measures, before any
+ *  judgement about whether the run counts as a switch. */
+type BranchRun = Readonly<{
+  discriminant: string;
+  branches: number;
+  firstLine: number;
+  lastLine: number;
+  /** Does this run look like a CHAIN rather than a row of standalone guards? */
+  chainEvidence: boolean;
+}>;
 
-  const violations: Violation[] = [];
+/**
+ * Find every run of branches on one discriminant. ONE traversal, two readers:
+ * `handler` turns offending runs into violations, `detectedChainKeys` turns
+ * every run into a baseline key for the staleness pass. Detecting runs twice
+ * is how a rule and its own baseline end up disagreeing about what the rule
+ * even sees.
+ */
+function branchRuns(lines: readonly string[], tags: readonly string[]): readonly BranchRun[] {
+  const runs: BranchRun[] = [];
   let current: string | null = null;
   let count = 0;
   let firstLine = 0;
@@ -160,19 +174,10 @@ export function handler(
   // Indentation of the line that OPENED the run — the depth a closing brace
   // must undercut to prove the enclosing block ended.
   let runIndent = 0;
-  // Does this run look like a CHAIN rather than a row of standalone guards?
   let chainEvidence = false;
 
   const settle = (): void => {
-    if (current !== null && count >= maxBranches && chainEvidence) {
-      violations.push(makeViolation(
-        "exhaustive-discriminant-branching",
-        filePath,
-        firstLine,
-        lines[firstLine - 1]?.trim() ?? "",
-        `${count} branches on \`${current}\` — use match(...).exhaustive() or a \`never\` default so a new variant is a compile error`,
-      ));
-    }
+    if (current !== null) runs.push({ discriminant: current, branches: count, firstLine, lastLine, chainEvidence });
     current = null;
     count = 0;
     chainEvidence = false;
@@ -204,5 +209,61 @@ export function handler(
     chainEvidence = isChainLine;
   }
   settle();
-  return Object.freeze(violations);
+  return Object.freeze(runs);
+}
+
+/** Repo-relative form for baseline keys, anchored on `engine/src/` — the same
+ *  anchor `switch-totality` uses, so an absolute checkout path normalizes
+ *  whether or not the directory is also a declared import boundary. */
+const repoRelative = (filePath: string): string => {
+  const normalized = filePath.replace(/\\/g, "/");
+  const at = normalized.lastIndexOf("/engine/src/");
+  return at === -1 ? normalized : normalized.slice(at + 1);
+};
+
+export function handler(
+  content: string,
+  filePath: string,
+  maxBranches: number = DEFAULT_MAX_DISCRIMINANT_BRANCHES,
+  tags: readonly string[] = DEFAULT_DISCRIMINANT_TAGS,
+  baseline: Baseline = EXHAUSTIVE_BRANCHING_BASELINE,
+): readonly Violation[] {
+  if (isTestFile(filePath)) return [];
+  const lines = content.split("\n");
+  const relative = repoRelative(filePath);
+  const entries = baselineCounter(baseline);
+
+  const provenNear = (first: number, last: number): boolean => {
+    const from = Math.max(0, first - 1 - MAX_PROOF_DISTANCE);
+    const to = Math.min(lines.length, last + MAX_PROOF_DISTANCE);
+    for (let index = from; index < to; index++) {
+      if (TOTALITY_PROOF.test(lines[index]!)) return true;
+    }
+    return false;
+  };
+
+  const offending = branchRuns(lines, tags)
+    .filter((run) => run.branches >= maxBranches && run.chainEvidence && !provenNear(run.firstLine, run.lastLine))
+    .filter((run) => !entries.consume(baselineKey(relative, run.discriminant)));
+
+  return Object.freeze(offending.map((run) => makeViolation(
+    "exhaustive-discriminant-branching",
+    filePath,
+    run.firstLine,
+    lines[run.firstLine - 1]?.trim() ?? "",
+    `${run.branches} branches on \`${run.discriminant}\` — use match(...).exhaustive() or a \`never\` default so a new variant is a compile error`,
+  )));
+}
+
+/** Every chain the rule would judge — the input of the staleness pass. */
+export function detectedChainKeys(
+  content: string,
+  filePath: string,
+  maxBranches: number = DEFAULT_MAX_DISCRIMINANT_BRANCHES,
+  tags: readonly string[] = DEFAULT_DISCRIMINANT_TAGS,
+): readonly string[] {
+  const relative = repoRelative(filePath);
+  return branchRuns(content.split("\n"), tags)
+    .filter((run) => run.branches >= maxBranches && run.chainEvidence)
+    .map((run) => baselineKey(relative, run.discriminant));
 }

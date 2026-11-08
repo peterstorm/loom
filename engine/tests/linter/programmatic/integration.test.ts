@@ -14,7 +14,7 @@ describe("programmatic rules integration", () => {
     const rules = loadRules(realDefaultDir, null, "full");
     const programmatic = rules.filter((r: Rule) => r.kind === "programmatic");
 
-    expect(programmatic.length).toBe(7);
+    expect(programmatic.length).toBe(8);
     const names = programmatic.map((r) => r.name).sort();
     expect(names).toEqual([
       "exhaustive-discriminant-branching",
@@ -24,13 +24,18 @@ describe("programmatic rules integration", () => {
       "no-io-in-pure-modules",
       "no-nested-ternary",
       "prefer-array-methods",
+      "switch-totality",
     ]);
   });
 
   it("immediate tier includes only the programmatic rules whose own tier is immediate", () => {
     const rules = loadRules(realDefaultDir, null, "immediate");
     const programmatic = rules.filter((r: Rule) => r.kind === "programmatic");
-    expect(programmatic.map(({ name }) => name).sort()).toEqual(["no-cross-boundary-imports", "no-io-in-pure-modules"]);
+    expect(programmatic.map(({ name }) => name).sort()).toEqual([
+      "no-cross-boundary-imports",
+      "no-io-in-pure-modules",
+      "switch-totality",
+    ]);
   });
 
   it("includeProgrammatic: false excludes them", () => {

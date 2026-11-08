@@ -1,8 +1,8 @@
 /**
  * Programmatic rule registry — provides built-in programmatic rules. Every
- * rule runs in the "full" tier; the import-boundary rules also run in the
- * "immediate" tier, so a forbidden import is refused when it is written rather
- * than when the Wave Gate starts.
+ * rule runs in the "full" tier; the import-boundary rules AND `switch-totality`
+ * also run in the "immediate" tier, so a forbidden import or an unproven switch
+ * is refused when it is written rather than when the Wave Gate starts.
  *
  * Rules are configured via project-local config (loaded from
  * .claude/linter/config.json or .pi/linter/config.json).
@@ -21,6 +21,12 @@ import {
 } from "./exhaustive-discriminant-branching";
 import { handler as nestedTernaryHandler } from "./no-nested-ternary";
 import { handler as preferArrayMethodsHandler } from "./prefer-array-methods";
+import {
+  handler as switchTotalityHandler,
+  DEFAULT_SWITCH_TOTALITY_MODULES,
+  RULE_NAME as SWITCH_TOTALITY_RULE,
+} from "./switch-totality";
+import { SWITCH_TOTALITY_BASELINE } from "./switch-totality-baseline";
 import { type ProgrammaticConfig, EMPTY_CONFIG } from "./config";
 
 /**
@@ -32,6 +38,8 @@ export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFI
   const pureModules = config.pureModules ?? DEFAULT_PURE_MODULES;
   const maxLines = config.maxFunctionLines ?? DEFAULT_MAX_LINES;
   const excludePatterns = config.excludeFromMaxLines ?? DEFAULT_EXCLUDE_PATTERNS;
+  const switchModules = config.switchTotalityModules ?? DEFAULT_SWITCH_TOTALITY_MODULES;
+  const switchBaseline = config.switchTotalityBaseline ?? SWITCH_TOTALITY_BASELINE;
 
   return [
     {
@@ -75,6 +83,20 @@ export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFI
       handler: (content, filePath) => fugueGeneratedIntegrityHandler(content, filePath),
       tier: "full",
       fixHint: "Do not hand-edit generated code — change the AuthoredDag sidecar and run `fugue new --from` to regenerate",
+      enabled: true,
+      source: "default",
+    },
+    {
+      kind: "programmatic",
+      name: SWITCH_TOTALITY_RULE,
+      description: "A switch over a discriminated union must prove totality — match(...).exhaustive(), or a default arm binding the scrutinee to `never`",
+      extensions: [".ts", ".tsx"],
+      handler: (content, filePath) => switchTotalityHandler(content, filePath, switchModules, switchBaseline),
+      // IMMEDIATE: a switch is written once and read for years. Waiting for the
+      // wave gate means the unproven arm ships first; the baseline keeps every
+      // pre-existing site from blocking an unrelated edit to its file.
+      tier: "immediate",
+      fixHint: "Use match(value).with(...).exhaustive() from ts-pattern, or give the switch a `default` arm that binds the scrutinee to `never`. `default: throw new Error(\"unreachable\")` is not a proof — it compiles after a new variant is added.",
       enabled: true,
       source: "default",
     },

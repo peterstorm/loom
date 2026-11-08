@@ -1,11 +1,11 @@
 {
   "kind": "regex",
   "name": "no-console-log",
-  "description": "Disallow console.log() calls — use structured logging or remove debug statements",
+  "description": "Disallow console.log() calls — use structured logging or remove debug statements. CLI entry points are exempt: for a script whose contract is stdout, console.log IS the interface.",
   "extensions": [".ts", ".tsx"],
   "pattern": "(?<![\"'`])console\\.log\\(",
   "flags": "",
   "fixHint": "Remove console.log() or replace with a structured logger (e.g., logger.info())",
   "enabled": true,
-  "excludePatterns": [".test.ts", ".spec.ts", ".test.tsx"]
+  "excludePatterns": [".test.ts", ".spec.ts", ".test.tsx", "scripts/lint-project.ts"]
 }

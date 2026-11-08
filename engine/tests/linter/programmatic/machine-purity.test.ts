@@ -2,7 +2,7 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import ts from "typescript";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -145,6 +145,7 @@ const FINAL_PAYLOAD = "engine/src/core/harness-capture.ts";
 const EMISSION_SELECTION = "engine/src/core/emission-ingestion.ts";
 const LEGACY_ARCHIVE = "engine/src/core/legacy-archive.ts";
 const LEGACY_PANEL_DECISIONS = "engine/src/core/legacy-panel-decisions.ts";
+const SECURITY_CONTRACT = "engine/src/core/security-audit-contract.ts";
 const REVIEWER_ENTRIES = new Map([
   ["zod/v4", "zod/v4/index.js"], ["jsonc-parser", "jsonc-parser/lib/umd/main.js"],
 ]);
@@ -246,7 +247,7 @@ function auditClosure(roots: readonly string[], overlays: ReadonlyMap<string, st
           ? PURE_FILES.includes(candidate) : runtime.dependencies.includes(specifier) && AUDITED_RUNTIME.has(candidate));
         if (target === undefined) errors.push(`${mod}: ${specifier} leaves the declared pure closure`);
         else queue.push(target);
-      } else if (([CONTRACT, LINEAGE_CONTRACT, PANEL_CONTRACT, PANEL_TALLY, EMISSION_TOOL].includes(mod) && specifier === "zod/v4") || (mod === CODEC && specifier === "jsonc-parser")) {
+      } else if (([CONTRACT, LINEAGE_CONTRACT, PANEL_CONTRACT, PANEL_TALLY, EMISSION_TOOL, SECURITY_CONTRACT].includes(mod) && specifier === "zod/v4") || (mod === CODEC && specifier === "jsonc-parser")) {
         const entry = REVIEWER_ENTRIES.get(specifier);
         if (entry !== undefined) queue.push(entry);
       } else if (TYPESCRIPT_COMPILER_API_SEAMS.includes(mod) && specifier === "typescript") {
@@ -444,7 +445,12 @@ describe("functional core — executable purity closure", () => {
     expect(audit.errors).toEqual([]);
     for (const mod of audit.visited) {
       if (SAX_RUNTIME.has(mod)) continue;
-      expect(dependencies(readSource(mod)).filter(({ specifier }) => specifier?.startsWith("node:")), mod).toEqual([]);
+      // An audited RUNTIME has no source file to read: its bytes live at the
+      // installed path the audit pinned. Reading it as source worked only while
+      // the machine closure stopped short of every granted package.
+      const runtime = AUDITED_RUNTIME.get(mod);
+      const content = runtime === undefined ? readSource(mod) : readFileSync(runtime.path, "utf-8");
+      expect(dependencies(content).filter(({ specifier }) => specifier?.startsWith("node:")), mod).toEqual([]);
     }
     expect(audit.visited).toContain("engine/src/machine/test-report.ts");
     expect(audit.visited).toContain("engine/src/machine/types.ts");
@@ -529,7 +535,11 @@ describe("audited reviewer runtime closure", () => {
     expect(zod.version).toBe("4.3.6");
     expect(zod.exports["./v4"].import).toBe("./v4/index.js");
     expect(zod.dependencies).toBeUndefined();
-    expect(requireFromEngine.resolve("jsonc-parser")).toBe(REVIEWER_RUNTIME.get("jsonc-parser/lib/umd/main.js")?.path);
+    // Real paths on both sides: a checkout may satisfy `engine/node_modules`
+    // through a symlink (a worktree sharing the main clone), and the claim is
+    // about which FILE these two resolve to, not which spelling got there.
+    expect(realpathSync(requireFromEngine.resolve("jsonc-parser")))
+      .toBe(realpathSync(REVIEWER_RUNTIME.get("jsonc-parser/lib/umd/main.js")!.path));
     const audit = auditClosure([CONTRACT, LINEAGE_CONTRACT, CODEC, "engine/src/core/standalone-successor-reviewer.ts", "engine/src/core/context-packets.ts"]);
     expect(audit.errors).toEqual([]);
     for (const mod of REVIEWER_RUNTIME.keys()) expect(audit.visited).toContain(mod);

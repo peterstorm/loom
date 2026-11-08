@@ -31,10 +31,11 @@ function lintCoreFile(content: string): LintResult {
 }
 
 describe("immediate tier programmatic rules", () => {
-  it("are exactly the rules whose own tier is immediate: the two import-boundary rules", () => {
+  it("are exactly the rules whose own tier is immediate: the import-boundary pair, plus switch totality", () => {
     expect(programmaticNames(loadRules(DEFAULT_RULES_DIR, null, "immediate"))).toEqual([
       "no-cross-boundary-imports",
       "no-io-in-pure-modules",
+      "switch-totality",
     ]);
   });
 

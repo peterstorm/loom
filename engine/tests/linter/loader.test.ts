@@ -209,7 +209,12 @@ describe("loadRules", () => {
 
       const rules = loadRules(defaultDir, null, "immediate");
 
-      expect(rules.map(({ name }) => name)).toEqual(["regex-rule", "no-cross-boundary-imports", "no-io-in-pure-modules"]);
+      expect(rules.map(({ name }) => name)).toEqual([
+        "regex-rule",
+        "no-cross-boundary-imports",
+        "no-io-in-pure-modules",
+        "switch-totality",
+      ]);
     });
 
     it("tier 'full' returns all enabled rules", () => {

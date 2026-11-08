@@ -1,0 +1,27 @@
+{
+  "agent": "security-hunter-agent",
+  "enforcedTools": ["Edit", "Write", "MultiEdit"],
+  "phases": [
+    {
+      "id": "read-brief",
+      "allowedTools": [],
+      "advance": { "event": "FileRead", "min": 1 }
+    },
+    {
+      "id": "walk-boundary",
+      "allowedTools": [],
+      "advance": { "event": "FileRead", "min": 3 }
+    },
+    {
+      "id": "demonstrate",
+      "allowedTools": [],
+      "advance": { "event": "FileRead", "min": 5 }
+    },
+    {
+      "id": "done",
+      "terminal": true,
+      "allowedTools": [],
+      "requires": [{ "event": "FileRead", "min": 5 }]
+    }
+  ]
+}

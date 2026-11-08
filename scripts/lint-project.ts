@@ -12,6 +12,7 @@
  *   --init          Create .claude/linter/rules/ with starter config (interactive)
  *   --tier=full     Run full tier (default: full)
  *   --tier=immediate  Run immediate tier only (regex rules and the import-boundary rules, fast)
+ *   --no-baseline-check  Skip the grandfathered-baseline staleness pass
  *   --json          Output raw JSON violations
  *   --summary       Show only summary counts
  *   --fix-hints     Show fix hints (default: true)
@@ -181,6 +182,7 @@ interface CliOpts {
   summary: boolean;
   fixHints: boolean;
   includeTests: boolean;
+  baselineCheck: boolean;
   paths: string[];
 }
 
@@ -192,6 +194,7 @@ function parseArgs(args: string[]): CliOpts {
     summary: false,
     fixHints: true,
     includeTests: false,
+    baselineCheck: true,
     paths: [],
   };
 
@@ -203,6 +206,7 @@ function parseArgs(args: string[]): CliOpts {
     else if (arg === "--summary") opts.summary = true;
     else if (arg === "--no-fix-hints") opts.fixHints = false;
     else if (arg === "--include-tests") opts.includeTests = true;
+    else if (arg === "--no-baseline-check") opts.baselineCheck = false;
     else if (!arg.startsWith("--")) opts.paths.push(arg);
     else {
       console.error(`Unknown option: ${arg}`);
@@ -210,6 +214,40 @@ function parseArgs(args: string[]): CliOpts {
     }
   }
   return opts;
+}
+
+// ---------------------------------------------------------------------------
+// Baseline drift — a grandfathered list nobody re-checks rots silently
+// ---------------------------------------------------------------------------
+
+interface BaselineDrift {
+  rule: string;
+  stale: string[];
+}
+
+/**
+ * Every grandfathered-list rule ships a staleness helper; a list that only ever
+ * suppresses violations cannot report its own decay, because a deleted or
+ * renamed switch costs nothing. This walks the same files the tier just linted,
+ * collects what each rule actually saw, and reports entries nothing consumed.
+ *
+ * Run only against loom itself: the baselines are keys into loom's own tree, so
+ * linting another project against them would report every entry as stale.
+ */
+async function baselineDrift(files: string[]): Promise<BaselineDrift[]> {
+  const baselineModule = join(LOOM_ROOT, "engine/src/linter/programmatic/switch-totality-baseline.ts");
+  if (!existsSync(baselineModule) || !existsSync(join(PROJECT_ROOT, "engine/src/linter"))) return [];
+
+  const { SWITCH_TOTALITY_BASELINE } = await import(baselineModule);
+  const { detectedSwitchKeys, unusedBaselineEntries } = await import(
+    join(LOOM_ROOT, "engine/src/linter/programmatic/switch-totality.ts")
+  );
+
+  const detected = files.flatMap((file) =>
+    detectedSwitchKeys(readFileSync(file, "utf-8"), relative(PROJECT_ROOT, file))
+  );
+  const stale = unusedBaselineEntries(detected, SWITCH_TOTALITY_BASELINE);
+  return stale.length === 0 ? [] : [{ rule: "switch-totality", stale }];
 }
 
 // ---------------------------------------------------------------------------
@@ -292,9 +330,16 @@ for (const file of files) {
 // Output
 // ---------------------------------------------------------------------------
 
+// Drift is independent of violations: a baseline entry can be stale while the
+// tier is clean, which is exactly the case that used to go unnoticed.
+const drift = opts.baselineCheck && opts.tier === "full" ? await baselineDrift(files) : [];
+const driftLines = drift.flatMap((entry) =>
+  entry.stale.map((key) => `${entry.rule}: ${key} (no such switch any more — delete the baseline entry)`)
+);
+
 if (opts.json) {
-  console.log(JSON.stringify({ violations: allViolations, errorCount }, null, 2));
-  process.exit(allViolations.length > 0 ? 1 : 0);
+  console.log(JSON.stringify({ violations: allViolations, errorCount, baselineDrift: driftLines }, null, 2));
+  process.exit(allViolations.length > 0 || driftLines.length > 0 ? 1 : 0);
 }
 
 if (opts.summary) {
@@ -309,6 +354,7 @@ if (opts.summary) {
   console.log(`Files with violations: ${filesWithViolations}`);
   console.log(`Total violations: ${allViolations.length}`);
   if (errorCount > 0) console.log(`Errors: ${errorCount}`);
+  if (driftLines.length > 0) console.log(`Stale baseline entries: ${driftLines.length}`);
   console.log("");
   if (byRule.size > 0) {
     console.log("By rule:");
@@ -316,7 +362,7 @@ if (opts.summary) {
       console.log(`  ${rule}: ${count}`);
     }
   }
-  process.exit(allViolations.length > 0 ? 1 : 0);
+  process.exit(allViolations.length > 0 || driftLines.length > 0 ? 1 : 0);
 }
 
 // Default: full output
@@ -326,17 +372,23 @@ for (const v of allViolations) {
     console.log(`    → ${v.fixHint}\n`);
   }
 }
+for (const line of driftLines) {
+  console.log(`  ${line}`);
+}
 
 const filesWithViolations = new Set(allViolations.map(v => v.file)).size;
 console.log("─".repeat(60));
-if (allViolations.length === 0 && errorCount === 0) {
+if (allViolations.length === 0 && errorCount === 0 && driftLines.length === 0) {
   console.log("✓ No violations found");
 } else {
   if (allViolations.length > 0) {
     console.log(`✗ ${allViolations.length} violation(s) in ${filesWithViolations} file(s)`);
   }
+  if (driftLines.length > 0) {
+    console.log(`✗ ${driftLines.length} stale baseline entr${driftLines.length === 1 ? "y" : "ies"}`);
+  }
   if (errorCount > 0) {
     console.log(`⚠ ${errorCount} file(s) had lint errors`);
   }
 }
-process.exit(allViolations.length > 0 || errorCount > 0 ? 1 : 0);
+process.exit(allViolations.length > 0 || errorCount > 0 || driftLines.length > 0 ? 1 : 0);

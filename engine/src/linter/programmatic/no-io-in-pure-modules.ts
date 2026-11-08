@@ -247,6 +247,21 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // Orchestration Completion: whether a TaskGraph's work is finished, and its
   // archive name; `helper complete-orchestration` applies it under the lock.
   "engine/src/core/orchestration-completion.ts",
+  // Security audit (ADR-0064): the contract (limits, grammars, admission, carry
+  // rules), the coverage ledger, the finding trichotomy, lens selection, the
+  // deterministic renderers, the sandbox receipt parser and the verification
+  // adjudicator. The machine core's closure reaches them — machine/types.ts and
+  // evidence.ts mint the sandbox receipt through security-sandbox — and every
+  // one is a string/record transform with no fs, clock or randomness of its own.
+  // The sandbox SCRIPT is the I/O (scripts/security-sandbox.sh);
+  // security-sandbox.ts only parses its receipt.
+  "engine/src/core/security-audit-contract.ts",
+  "engine/src/core/security-coverage.ts",
+  "engine/src/core/security-findings.ts",
+  "engine/src/core/security-lens-select.ts",
+  "engine/src/core/security-reports.ts",
+  "engine/src/core/security-sandbox.ts",
+  "engine/src/core/security-adjudication.ts",
 ];
 
 /** Import specifiers that indicate I/O capability or ambient non-determinism */
@@ -310,6 +325,9 @@ export const PURE_ALLOW_LIST: readonly string[] = [
   "path",
   "url",
   "ts-pattern",
+  // The security-audit contract parses its run metadata with a schema, and zod
+  // is this repo's derive-types-from-source-of-truth tool: a pure parse.
+  "zod/v4",
 ];
 
 /** Capability-level exceptions, never whole crypto/util modules. Hash instances

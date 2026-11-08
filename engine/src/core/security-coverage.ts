@@ -28,6 +28,7 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 
+import { match } from "ts-pattern";
 import { compareStrings } from "./ordering";
 import { failure, success, type DomainResult } from "./orchestration-contract/identity";
 import {
@@ -58,6 +59,13 @@ export const COVERAGE_STATUSES = [
   "deferred",
 ] as const;
 export type CoverageStatus = (typeof COVERAGE_STATUSES)[number];
+
+/** The runtime membership guard. A wire document can carry any string, and
+ *  `match(...).exhaustive()` THROWS on an unknown tag — so a validator checks
+ *  membership first and ends its state analysis there, rather than crashing on
+ *  the document it was asked to judge. */
+export const isCoverageStatus = (value: unknown): value is CoverageStatus =>
+  typeof value === "string" && (COVERAGE_STATUSES as readonly string[]).includes(value);
 
 /** The three ways an assigned unit can settle with evidence. */
 export const TERMINAL_DISPOSITIONS = ["covered", "candidate", "blocked"] as const;
@@ -319,43 +327,44 @@ function validateStateInvariants(
   };
 
   if (unit.status !== "candidate" && unit.result_fingerprints.length > 0) {
-    violations.push(violation(`${path}.result_fingerprints`, `status ${unit.status} keeps this empty`));
+    violations.push(violation(`.result_fingerprints`, `status  keeps this empty`));
   }
+  // Membership was reported by the caller; an unknown wire value would make the
+  // exhaustive match below throw, so the state analysis ends here.
+  if (!isCoverageStatus(unit.status as unknown)) return;
 
-  switch (unit.status) {
-    case "planned":
+  match(unit.status)
+    .with("planned", () => {
       requireUnassigned();
       requireEmptyEvidence();
       requireUnresolved(false);
-      return;
-    case "not_applicable":
-    case "out_of_scope":
-    case "deferred":
+    })
+    .with("not_applicable", "out_of_scope", "deferred", () => {
       requireUnassigned();
       requireEmptyEvidence();
       requireUnresolved(true);
-      return;
-    case "in_progress":
+    })
+    .with("in_progress", () => {
       requireOwner();
       requireEmptyEvidence();
       requireUnresolved(false);
-      return;
-    case "covered":
+    })
+    .with("covered", () => {
       requireOwner();
       requireEvidence();
       requireUnresolved(false);
-      return;
-    case "candidate":
+    })
+    .with("candidate", () => {
       requireOwner();
       requireEvidence();
       if (unit.result_fingerprints.length === 0) violations.push(violation(`${path}.result_fingerprints`, "candidate requires fingerprints"));
-      return;
-    case "blocked":
+    })
+    .with("blocked", () => {
       requireOwner();
       requireEvidence();
       requireUnresolved(true);
-      return;
-  }
+    })
+    .exhaustive();
 }
 
 /**
@@ -403,7 +412,7 @@ export function validateLedger(ledger: CoverageLedger): readonly CoverageViolati
     if (!(PRIOR_STATUSES as readonly string[]).includes(unit.prior_status)) {
       violations.push(violation(`${base}.prior_status`, `invalid value ${JSON.stringify(unit.prior_status)}`));
     }
-    if (!(COVERAGE_STATUSES as readonly string[]).includes(unit.status)) {
+    if (!isCoverageStatus(unit.status)) {
       violations.push(violation(`${base}.status`, `invalid value ${JSON.stringify(unit.status)}`));
     }
     checkEntryArray(unit.starting_paths, `${base}.starting_paths`, violations, "path");

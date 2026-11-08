@@ -26,6 +26,11 @@ export interface ProgrammaticConfig {
   readonly maxDiscriminantBranches?: number;
   /** Field names that tag a discriminated union (for exhaustive-discriminant-branching) */
   readonly discriminantTags?: readonly string[];
+  /** Modules whose switches must prove totality (for switch-totality) */
+  readonly switchTotalityModules?: readonly string[];
+  /** Grandfathered `path::scrutinee` keys the switch-totality rule excuses,
+   *  each entry consuming one violation. Empty means "no debt". */
+  readonly switchTotalityBaseline?: readonly string[];
 }
 
 /** Default config when no project config exists */
@@ -151,6 +156,23 @@ function parseConfig(obj: Record<string, unknown>, filePath: string): Programmat
 
   const discriminantTags = parseOptionalStringArray(obj.discriminantTags, filePath, "discriminantTags");
   if (discriminantTags !== undefined) config.discriminantTags = discriminantTags;
+
+  // switch-totality's two knobs: the module scopes it governs and the
+  // grandfathered keys it excuses. Both parse here for the same reason the two
+  // above do — a declared-but-unread field is a silent default.
+  const switchTotalityModules = parseOptionalStringArray(
+    obj.switchTotalityModules,
+    filePath,
+    "switchTotalityModules",
+  );
+  if (switchTotalityModules !== undefined) config.switchTotalityModules = switchTotalityModules;
+
+  const switchTotalityBaseline = parseOptionalStringArray(
+    obj.switchTotalityBaseline,
+    filePath,
+    "switchTotalityBaseline",
+  );
+  if (switchTotalityBaseline !== undefined) config.switchTotalityBaseline = switchTotalityBaseline;
 
   return config as ProgrammaticConfig;
 }

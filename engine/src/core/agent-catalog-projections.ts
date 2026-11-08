@@ -101,6 +101,10 @@ export function producerKindsOfAgent(agent: LoomAgentName): readonly PayloadProd
   if (entry.kind.kind === "reviewer" || entry.kind.kind === "review-verifier") {
     kinds.push(producerKind("reviewer-payload"));
   }
+  // `security-verdict` producers emit a payload the audit program parses
+  // itself (kind "security-verdict"), not an emission-tool schema: D2 keeps the
+  // emission registry closed rather than adding a fourth producer kind.
+  // Answers [] here, like every other non-producer.
   if (entry.kind.kind === "review-verifier") {
     kinds.push(producerKind("refutation-verdict"));
   }
@@ -298,3 +302,8 @@ export const REVIEW_AGENTS: ReadonlySet<string> = frozenSet([
  *  ARCH_PANEL_AGENTS is: recognized by phase validation, invisible to the
  *  SubagentStop dispatcher. Frozen, symmetric with ARCH_PANEL_AGENTS. */
 export const REVIEW_PANEL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("review-verifier"));
+
+/** Security-audit agents (hunters, verifiers, the coverage critic). DERIVED
+ *  from the Agent Catalog (kind `security-verdict`): recognized by the audit
+ *  program, invisible to every review roster and to phase advancement. */
+export const SECURITY_AUDIT_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("security-verdict"));

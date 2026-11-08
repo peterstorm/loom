@@ -22,6 +22,7 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 
+import { match } from "ts-pattern";
 import { compareStrings } from "./ordering";
 import { failure, success, type DomainResult } from "./orchestration-contract/identity";
 import { SECURITY_AUDIT_LIMITS, hasVisibleProse, isSafeSourcePath, isSecurityFingerprint } from "./security-audit-contract";
@@ -468,17 +469,11 @@ export function parseSecurityFindings(raw: unknown): DomainResult<readonly Secur
       previousFingerprint = entry.fingerprint;
     }
 
-    switch (entry.verdict) {
-      case "confirmed":
-        checkConfirmed(entry, path, violations);
-        return;
-      case "needs_validation":
-        checkNeedsValidation(entry, path, violations);
-        return;
-      case "rejected":
-        checkRejected(entry, path, violations);
-        return;
-    }
+    match(entry.verdict)
+      .with("confirmed", () => checkConfirmed(entry, path, violations))
+      .with("needs_validation", () => checkNeedsValidation(entry, path, violations))
+      .with("rejected", () => checkRejected(entry, path, violations))
+      .exhaustive();
   });
 
   return violations.length === 0

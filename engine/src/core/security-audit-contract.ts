@@ -437,22 +437,16 @@ export type PriorRecordFacts = Readonly<{
 export function derivePriorStatus(prior: PriorRecordFacts | null): PriorStatus {
   if (prior === null) return "none";
   const unchanged = prior.sourceUnchanged === true;
-  switch (prior.verdict) {
-    case "confirmed":
-      return unchanged ? "prior_confirmed_same_source" : "prior_confirmed_changed_source";
-    case "covered":
-      return unchanged ? "prior_covered_same_source" : "prior_covered_changed_source";
-    case "needs_validation":
-      return "prior_needs_validation";
-    case "deferred":
-      return "prior_deferred";
-    case "blocked":
-      return "prior_blocked";
-    case "out_of_scope":
-      return "prior_out_of_scope";
-    case "rejected":
-      return "prior_rejected_claim_changed";
-  }
+  return match(prior.verdict)
+    .returnType<PriorStatus>()
+    .with("confirmed", () => (unchanged ? "prior_confirmed_same_source" : "prior_confirmed_changed_source"))
+    .with("covered", () => (unchanged ? "prior_covered_same_source" : "prior_covered_changed_source"))
+    .with("needs_validation", () => "prior_needs_validation")
+    .with("deferred", () => "prior_deferred")
+    .with("blocked", () => "prior_blocked")
+    .with("out_of_scope", () => "prior_out_of_scope")
+    .with("rejected", () => "prior_rejected_claim_changed")
+    .exhaustive();
 }
 
 export type CarryAction =
@@ -466,21 +460,24 @@ export type CarryAction =
   | Readonly<{ kind: "current-work" }>;
 
 export function carryAction(priorStatus: PriorStatus): CarryAction {
-  switch (priorStatus) {
-    case "prior_confirmed_same_source":
-      return { kind: "carry-confirmed" };
-    case "prior_confirmed_changed_source":
-    case "prior_covered_changed_source":
-    case "prior_needs_validation":
-      return { kind: "revalidate" };
-    case "prior_rejected_claim_changed":
-      return { kind: "suppress-rejected-claim" };
-    case "prior_covered_same_source":
-    case "prior_deferred":
-    case "prior_blocked":
-    case "prior_out_of_scope":
-    case "new":
-    case "none":
-      return { kind: "current-work" };
-  }
+  return match(priorStatus)
+    .returnType<CarryAction>()
+    .with("prior_confirmed_same_source", (): CarryAction => ({ kind: "carry-confirmed" }))
+    .with(
+      "prior_confirmed_changed_source",
+      "prior_covered_changed_source",
+      "prior_needs_validation",
+      (): CarryAction => ({ kind: "revalidate" }),
+    )
+    .with("prior_rejected_claim_changed", (): CarryAction => ({ kind: "suppress-rejected-claim" }))
+    .with(
+      "prior_covered_same_source",
+      "prior_deferred",
+      "prior_blocked",
+      "prior_out_of_scope",
+      "new",
+      "none",
+      (): CarryAction => ({ kind: "current-work" }),
+    )
+    .exhaustive();
 }
