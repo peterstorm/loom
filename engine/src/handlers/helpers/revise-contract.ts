@@ -26,6 +26,7 @@ import { parseContractRevisionArgs, reviseAcceptanceContract, revisionOutcomeMes
 import { observeFrozenDigests } from "../../orchestration/frozen-path-observation";
 import { refreshRevisedSkeletons } from "../../orchestration/skeleton-revision";
 import { assertQuiescentUnderLock, subagentActiveRefusal, type SubagentActivity } from "./subagent-quiescence";
+import { describeCause } from "../../utils/describe-cause";
 import { resolveCanonicalGitRepositoryRoot } from "../../utils/workspace-digest";
 
 const OPERATION = "Contract Revision";
@@ -69,7 +70,7 @@ export function createReviseContractHandler(subagentActive: SubagentActivity = a
       process.stderr.write(revisionOutcomeMessage(outcome));
       return { kind: "passthrough" };
     } catch (error) {
-      return { kind: "error", message: error instanceof Error ? error.message : String(error) };
+      return { kind: "error", message: describeCause(error) };
     }
   };
 }

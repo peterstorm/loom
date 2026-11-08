@@ -15,22 +15,21 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { registerTaskExecutionBatch } from "../../src/handlers/task-execution";
 import { runDispatch } from "../../src/handlers/subagent-stop/dispatch";
 import { UNKEPT_BLOCK_COUNTERS, type StopCheckShellPorts } from "../../src/handlers/subagent-stop/acceptance-stop-check";
 import { publishImplementationAttemptSidecar } from "../../src/implementation-attempt-sidecar";
-import type { ImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import {
+  authorityOf,
   canonicalSkeletonOf,
   cleanupSkeletonRepos,
   contractViolations,
   PATHS,
   recordedOutcomes,
   recordedSkeletons,
+  registered,
   settleAttempt,
   sha256,
   skeletonRepo,
-  spawnFor,
   subjectAndReason,
   TS_TYPES_TEXT,
   type SkeletonRepo,
@@ -43,14 +42,6 @@ const AGENT = "contract-stub-agent";
 
 /** CT-1's bound files that have a skeleton language. */
 const CT1_STUBS = [PATHS.tsPricing, PATHS.tsQuotes, PATHS.tsLegacy] as const;
-
-async function registered(repo: SkeletonRepo, taskId: string): Promise<ImplementationAttemptAuthority> {
-  const outcome = await registerTaskExecutionBatch([spawnFor(repo.rawState(), taskId)]);
-  if (outcome.kind !== "registered") throw new Error(`registration refused: ${outcome.message}`);
-  const [authority] = outcome.authorities;
-  if (authority === undefined) throw new Error(`no authority for ${taskId}`);
-  return authority;
-}
 
 type StopObservation = { checkReachedRepository: boolean; stubsAtCheck: Readonly<Record<string, boolean>> | null };
 
@@ -77,7 +68,7 @@ function observingPorts(repo: SkeletonRepo, observation: StopObservation): StopC
 /** Register T1 in the contract Wave, let its agent write the contract's
  *  frozen sources, and stop it through the SubagentStop dispatcher. */
 async function stopContractTask(repo: SkeletonRepo): Promise<StopObservation> {
-  const authority = await registered(repo, "T1");
+  const authority = authorityOf(await registered(repo, "T1"), "T1");
   repo.writeContractSources();
   publishImplementationAttemptSidecar({ sessionId: SESSION, agentId: AGENT, taskGraphPath: repo.statePath, authority });
   writeFileSync(join(process.env.LOOM_SUBAGENT_DIR!, `${SESSION}.task_graph`), repo.statePath);
@@ -129,7 +120,7 @@ describe("contract stubs at the contract Task's stop (CT-3)", () => {
     // The contract Wave's gate freezes CT-1 (its frozen paths are unchanged:
     // only the types file and the acceptance test), and Wave 2 starts.
     repo.advanceToImplementationWave();
-    const attempt = await registered(repo, "T4");
+    const attempt = authorityOf(await registered(repo, "T4"), "T4");
 
     const stored = repo.rawState();
     const outcomes = recordedOutcomes(stored, "T4");

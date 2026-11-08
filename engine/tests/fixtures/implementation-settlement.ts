@@ -7,7 +7,7 @@ import {
   type ImplementationAttemptSettlementReceipt,
 } from "../../src/core/implementation-completion";
 import { labelledValue } from "./parse-result";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
+import { observedEvidence } from "./task-lifecycle";
 
 /**
  * The real settlement receipt of one failed semantic implementation attempt
@@ -40,14 +40,13 @@ export function semanticAttemptReceipt(
     schemaVersion: 1,
     kind: "implementation-observed",
     observedAt: `2026-09-01T00:01:0${attemptNumber}.000Z`,
-    evidence: {
-      contractConformance: CONFORMANCE_NOT_OWED,
+    evidence: observedEvidence({
       taskCompleted: false,
       testResult: { verdict: "trusted-pass" },
       filesModified: [],
       newTestsWritten: false,
       newTestEvidence: "waived",
-    },
+    }),
     proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
   }, {
     schemaVersion: 1,

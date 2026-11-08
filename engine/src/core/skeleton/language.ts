@@ -31,8 +31,12 @@ const JVM_NON_JAVA_EXTENSIONS: readonly string[] = [".kt", ".kts", ".scala"];
 const JAVA_ROOT: readonly string[] = ["src", "main", "java"];
 const JAVA_IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
-/** Java's reserved keywords, contextual `_`, and the literals no identifier may spell. */
-const JAVA_RESERVED: ReadonlySet<string> = new Set([
+/**
+ * Java's reserved keywords, contextual `_`, and the literals no identifier
+ * may spell: the one owner of Java's keyword core. The binding grammar's
+ * reserved words (`parseIdentifier`) are built from it.
+ */
+export const JAVA_RESERVED_WORDS: ReadonlySet<string> = new Set([
   "_", "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const",
   "continue", "default", "do", "double", "else", "enum", "extends", "false", "final", "finally",
   "float", "for", "goto", "if", "implements", "import", "instanceof", "int", "interface", "long",
@@ -44,7 +48,7 @@ const JAVA_RESERVED: ReadonlySet<string> = new Set([
 const unsupported = (path: string, reason: UnsupportedReason): UnsupportedTarget =>
   Object.freeze({ kind: "unsupported", path, reason });
 
-const isJavaName = (name: string): boolean => JAVA_IDENTIFIER.test(name) && !JAVA_RESERVED.has(name);
+const isJavaName = (name: string): boolean => JAVA_IDENTIFIER.test(name) && !JAVA_RESERVED_WORDS.has(name);
 
 /** The index of the first `src/main/java` segment run, or -1. */
 const javaRootIndex = (segments: readonly string[]): number =>

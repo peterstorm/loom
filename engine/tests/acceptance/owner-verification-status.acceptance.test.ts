@@ -54,7 +54,7 @@ import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { CLOCK, CLOCK_EXEMPTION, FEES, FEES_CLOCK_PLAN_FILE, FEES_CLOCK_PLAN_TEXT, someParagraph } from "../fixtures/owner-families";
 import { labelledValue, value } from "../fixtures/parse-result";
 import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
+import { trustedPassEvidence } from "../fixtures/task-lifecycle";
 
 const cleanup: string[] = [];
 afterEach(() => {
@@ -161,7 +161,7 @@ const STATUS_TASK_FILES: readonly string[] = [FEES.owner, CLOCK.owner];
 /** A satisfied Proof, so the completion suite is the Wave's only open prerequisite. */
 const proof = evaluateTaskProof(
   { newTestsRequired: false, declaredArtifacts: STATUS_TASK_FILES },
-  { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: STATUS_TASK_FILES, newTestsWritten: false },
+  trustedPassEvidence(STATUS_TASK_FILES, { newTestsWritten: false }),
 );
 if (proof.state !== "satisfied") throw new Error("proof fixture must be satisfied");
 

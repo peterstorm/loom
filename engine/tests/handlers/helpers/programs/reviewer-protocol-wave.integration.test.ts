@@ -30,14 +30,13 @@ import { parseTaskGraph, StateManager } from "../../../../src/state-manager";
 import { disposeFixturePiSessions, withFixturePiSession } from "../../../fixtures/pi-session";
 import type { Finding, TaskGraph } from "../../../../src/types";
 import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../../../src/core/wave-frozen-source";
-import { graphFixture, taskFixture } from "../../../fixtures/task-lifecycle";
+import { graphFixture, taskFixture, trustedPassEvidence } from "../../../fixtures/task-lifecycle";
 import { git as gitWithEnvironment, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository";
 import { facadeParentEnvironment, type FacadeParent } from "../../../fixtures/facade-parent";
 import { expectParentIndependentIssuance, withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
 import { value } from "../../../fixtures/parse-result";
 import { parseSpec } from "../../../../src/core/parse-spec";
 import { recordedAnchorHashes } from "../../../../src/core/requirement-coverage";
-import { CONFORMANCE_NOT_OWED } from "../../../../src/core/skeleton/conformance-verdict";
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const cli = fileURLToPath(new URL("../../../../src/cli.ts", import.meta.url));
@@ -96,7 +95,7 @@ function project(priors: readonly Finding[] = []) {
   git(root, ["add", "src/x.ts", "spec.md", "plan.md"]);
   git(root, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]);
   const proof = evaluateTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
-    { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true });
+    trustedPassEvidence(["src/x.ts"]));
   if (proof.state !== "satisfied") throw new Error("fixture requires actual satisfied proof construction");
   const graph: TaskGraph = { ...graphFixture([taskFixture({ id: "T1", description: "review fixture", agent: "code-implementer-agent", wave: 1,
     depends_on: [], status: "implemented", proof, file_list: ["src/x.ts"], files_modified: ["src/x.ts"],

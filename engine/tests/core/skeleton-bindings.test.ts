@@ -21,6 +21,7 @@ import {
   validateExportBindings,
 } from "../../src/core/skeleton/bindings";
 import type { BindingProblem, BindingTaskView, ExportBinding, Identifier } from "../../src/core/skeleton/types";
+import { binding } from "../fixtures/skeleton-builders";
 
 const TYPES = "src/order/order-contract.ts";
 const ACCEPTANCE = "tests/order.acceptance.test.ts";
@@ -28,17 +29,11 @@ const OTHER_TYPES = "src/billing/billing-contract.ts";
 const OTHER_ACCEPTANCE = "tests/billing.acceptance.test.ts";
 const NO_TYPES_ACCEPTANCE = "tests/cli.acceptance.test.ts";
 
-const id = (raw: string): Identifier => {
-  const parsed = parseIdentifier(raw);
-  if (!parsed.ok) throw new Error(`fixture identifier ${raw}: ${parsed.error}`);
-  return parsed.value;
-};
+type MalformedEntry = Extract<BindingProblem, { kind: "malformed-entry" }>;
 
-const binding = (path: string, contract: string, ...exports: readonly [string, string][]): ExportBinding => {
-  const [first, ...rest] = exports.map(([name, alias]) => ({ name: id(name), alias: id(alias) }));
-  if (first === undefined) throw new Error("fixture binding needs an export");
-  return { path, contract, exports: [first, ...rest] };
-};
+/** The refusal of one malformed binding line, naming its path (null when none can be read) and why. */
+const malformed = (path: string | null, line: string, reason: MalformedEntry["reason"]): MalformedEntry =>
+  ({ kind: "malformed-entry", path, line, reason });
 
 const contract = (contractId: string, typesPath: string | null, acceptancePath: string): PlanContract => ({
   id: contractId,
@@ -192,11 +187,11 @@ Prose after the list.
 
   it("AS-005: a missing name, a missing alias and a repeated export name are refused, naming the file and the entry", () => {
     const line = "- `src/order/pricing.ts` — CT-1: : PriceOrderFn";
-    expect(parse(line)).toEqual({ bindings: [], problems: [{ kind: "malformed-entry", path: "src/order/pricing.ts", line, reason: "missing-name" }] });
+    expect(parse(line)).toEqual({ bindings: [], problems: [malformed("src/order/pricing.ts", line, "missing-name")] });
     const noAlias = "- `src/order/pricing.ts` — CT-1: priceOrder:";
-    expect(parse(noAlias).problems).toEqual([{ kind: "malformed-entry", path: "src/order/pricing.ts", line: noAlias, reason: "missing-alias" }]);
+    expect(parse(noAlias).problems).toEqual([malformed("src/order/pricing.ts", noAlias, "missing-alias")]);
     const bare = "- `src/order/pricing.ts` — CT-1: priceOrder";
-    expect(parse(bare).problems).toEqual([{ kind: "malformed-entry", path: "src/order/pricing.ts", line: bare, reason: "missing-alias" }]);
+    expect(parse(bare).problems).toEqual([malformed("src/order/pricing.ts", bare, "missing-alias")]);
     const duplicate = "- `src/order/pricing.ts` — CT-1: priceOrder: PriceOrderFn, priceOrder: ParseOrderFn";
     expect(parse(duplicate)).toEqual({ bindings: [], problems: [{ kind: "duplicate-name", path: "src/order/pricing.ts", name: "priceOrder" }] });
   });
@@ -248,26 +243,26 @@ Prose after the list.
   });
 
   it("names every malformed shape with its reason", () => {
-    const cases: readonly [string, BindingProblem][] = [
-      ["- src/a.ts — CT-1: a: AFn", { kind: "malformed-entry", path: null, line: "- src/a.ts — CT-1: a: AFn", reason: "not-a-binding-line" }],
-      ["- `` — CT-1: a: AFn", { kind: "malformed-entry", path: null, line: "- `` — CT-1: a: AFn", reason: "not-a-binding-line" }],
-      ["- `src/a.ts` CT-1: a: AFn", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` CT-1: a: AFn", reason: "not-a-binding-line" }],
-      ["- `src/a.ts`", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts`", reason: "missing-contract" }],
-      ["- `src/a.ts` — a: AFn", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — a: AFn", reason: "missing-contract" }],
-      ["- `src/a.ts` — ct-1: a: AFn", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — ct-1: a: AFn", reason: "missing-contract" }],
-      ["- `src/a.ts` — CT-1x: a: AFn", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — CT-1x: a: AFn", reason: "missing-contract" }],
-      ["- `src/a.ts` — CT-1 a: AFn", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — CT-1 a: AFn", reason: "missing-contract" }],
-      ["- `src/a.ts` — CT-1", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — CT-1", reason: "empty-exports" }],
-      ["- `src/a.ts` — CT-1:", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — CT-1:", reason: "empty-exports" }],
-      ["- `src/a.ts` — CT-1: a: AFn,", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — CT-1: a: AFn,", reason: "missing-name" }],
-      ["- `src/a.ts` — CT-1: a-b: AFn", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — CT-1: a-b: AFn", reason: "invalid-identifier" }],
-      ["- `src/a.ts` — CT-1: a: A.Fn", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — CT-1: a: A.Fn", reason: "invalid-identifier" }],
-      ["- `src/a.ts` — CT-1: a: B: C", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — CT-1: a: B: C", reason: "invalid-identifier" }],
-      ["- `src/a.ts` — CT-1: class: AFn", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — CT-1: class: AFn", reason: "reserved-word" }],
-      ["- `src/a.ts` — CT-1: a: interface", { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — CT-1: a: interface", reason: "reserved-word" }],
+    const cases: readonly MalformedEntry[] = [
+      malformed(null, "- src/a.ts — CT-1: a: AFn", "not-a-binding-line"),
+      malformed(null, "- `` — CT-1: a: AFn", "not-a-binding-line"),
+      malformed("src/a.ts", "- `src/a.ts` CT-1: a: AFn", "not-a-binding-line"),
+      malformed("src/a.ts", "- `src/a.ts`", "missing-contract"),
+      malformed("src/a.ts", "- `src/a.ts` — a: AFn", "missing-contract"),
+      malformed("src/a.ts", "- `src/a.ts` — ct-1: a: AFn", "missing-contract"),
+      malformed("src/a.ts", "- `src/a.ts` — CT-1x: a: AFn", "missing-contract"),
+      malformed("src/a.ts", "- `src/a.ts` — CT-1 a: AFn", "missing-contract"),
+      malformed("src/a.ts", "- `src/a.ts` — CT-1", "empty-exports"),
+      malformed("src/a.ts", "- `src/a.ts` — CT-1:", "empty-exports"),
+      malformed("src/a.ts", "- `src/a.ts` — CT-1: a: AFn,", "missing-name"),
+      malformed("src/a.ts", "- `src/a.ts` — CT-1: a-b: AFn", "invalid-identifier"),
+      malformed("src/a.ts", "- `src/a.ts` — CT-1: a: A.Fn", "invalid-identifier"),
+      malformed("src/a.ts", "- `src/a.ts` — CT-1: a: B: C", "invalid-identifier"),
+      malformed("src/a.ts", "- `src/a.ts` — CT-1: class: AFn", "reserved-word"),
+      malformed("src/a.ts", "- `src/a.ts` — CT-1: a: interface", "reserved-word"),
     ];
-    for (const [line, problem] of cases) {
-      expect(parse(line), line).toEqual({ bindings: [], problems: [problem] });
+    for (const problem of cases) {
+      expect(parse(problem.line), problem.line).toEqual({ bindings: [], problems: [problem] });
     }
   });
 
@@ -276,17 +271,17 @@ Prose after the list.
     expect(parse(line, "- `src/b.ts` — CT-1: b: BFn")).toEqual({
       bindings: [binding("src/b.ts", "CT-1", ["b", "BFn"])],
       problems: [
-        { kind: "malformed-entry", path: "src/a.ts", line, reason: "invalid-identifier" },
-        { kind: "malformed-entry", path: "src/a.ts", line, reason: "reserved-word" },
+        malformed("src/a.ts", line, "invalid-identifier"),
+        malformed("src/a.ts", line, "reserved-word"),
       ],
     });
   });
 
   it("refuses a label with no items or a value on the label line", () => {
     expect(parseExportBindings("**Export bindings:**\n\nProse.\n").problems)
-      .toEqual([{ kind: "malformed-entry", path: null, line: "**Export bindings:**", reason: "not-a-binding-line" }]);
+      .toEqual([malformed(null, "**Export bindings:**", "not-a-binding-line")]);
     expect(parseExportBindings("**Export bindings:** - `src/a.ts` — CT-1: a: AFn\n").problems)
-      .toEqual([{ kind: "malformed-entry", path: null, line: "**Export bindings:** - `src/a.ts` — CT-1: a: AFn", reason: "not-a-binding-line" }]);
+      .toEqual([malformed(null, "**Export bindings:** - `src/a.ts` — CT-1: a: AFn", "not-a-binding-line")]);
   });
 
   it("AS-004: a path on lines of two contracts is multi-contract, naming both; on two lines of one contract a duplicate", () => {
@@ -306,7 +301,7 @@ Prose after the list.
 
   it("counts a malformed line's contract toward its path's contracts", () => {
     expect(parse("- `src/a.ts` — CT-1: a: AFn", "- `src/a.ts` — CT-2: b-c: BFn").problems).toEqual([
-      { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — CT-2: b-c: BFn", reason: "invalid-identifier" },
+      malformed("src/a.ts", "- `src/a.ts` — CT-2: b-c: BFn", "invalid-identifier"),
       { kind: "multi-contract", path: "src/a.ts", contracts: ["CT-1", "CT-2"] },
     ]);
   });
@@ -348,7 +343,7 @@ describe("validateExportBindings — FR-002 refusals", () => {
 
   it("AS-005: reports every parse-time problem it receives", () => {
     expect(validate("- `src/order/pricing.ts` — CT-1: : AFn")).toEqual([
-      { kind: "malformed-entry", path: "src/order/pricing.ts", line: "- `src/order/pricing.ts` — CT-1: : AFn", reason: "missing-name" },
+      malformed("src/order/pricing.ts", "- `src/order/pricing.ts` — CT-1: : AFn", "missing-name"),
     ]);
   });
 
@@ -392,7 +387,7 @@ describe("validateExportBindings — FR-002 refusals", () => {
       "- `src/order/docs.ts` — CT-9: b: BFn",
       "- `src/x.ts` — CT-1: c-d: CFn",
     )).toEqual([
-      { kind: "malformed-entry", path: "src/x.ts", line: "- `src/x.ts` — CT-1: c-d: CFn", reason: "invalid-identifier" },
+      malformed("src/x.ts", "- `src/x.ts` — CT-1: c-d: CFn", "invalid-identifier"),
       { kind: "holder-not-after-contract", path: "src/order/early.ts", task: "T5", contractTask: "T1" },
       { kind: "unknown-contract", path: "src/order/docs.ts", contract: "CT-9" },
       { kind: "bound-on-waived-task", path: "src/order/docs.ts", task: "T6", reason: "documentation-only" },
@@ -404,8 +399,8 @@ describe("renderBindingProblem", () => {
   const problems: readonly BindingProblem[] = [
     { kind: "unsafe-path", path: "../x.ts" },
     { kind: "frozen-path", path: TYPES, contract: "CT-1" },
-    { kind: "malformed-entry", path: "src/a.ts", line: "- `src/a.ts` — CT-1: : AFn", reason: "missing-name" },
-    { kind: "malformed-entry", path: null, line: "- src/a.ts", reason: "not-a-binding-line" },
+    malformed("src/a.ts", "- `src/a.ts` — CT-1: : AFn", "missing-name"),
+    malformed(null, "- src/a.ts", "not-a-binding-line"),
     { kind: "duplicate-name", path: "src/a.ts", name: "a" },
     { kind: "name-collides-with-alias", path: "src/a.ts", name: "AFn" },
     { kind: "alias-collides-with-class", path: "src/main/java/com/acme/A.java", alias: "A" },
@@ -581,9 +576,9 @@ ${bindingLine}
 
   it("AS-001: the fail-closed check validates a plan whose only model is its export bindings", () => {
     const plan = "# Plan\n\n## File Structure\n\n**Export bindings:**\n- `src/order/pricing.ts` — CT-1: a: AFn\n";
-    const errors = check(plan);
+    const result = check(plan);
     // CT-1 is undeclared in this plan, so the binding is refused: bindings alone opt the plan in.
-    expect(errors).toMatchObject({ ok: false, kind: "invalid-bindings" });
+    expect(result).toMatchObject({ ok: false, kind: "invalid-bindings" });
     expect(check(PLAN("- `src/order/pricing.ts` — CT-1: parseOrder: ParseOrderFn"))).toMatchObject({ ok: true, kind: "validated" });
   });
 
@@ -592,7 +587,7 @@ ${bindingLine}
     const result = check(`# Plan\n\n## File Structure\n\n**Export bindings:**\n${line}\n`);
     expect(result).toMatchObject({ ok: false, kind: "invalid-bindings" });
     expect(result.ok ? [] : result.errors).toContainEqual(
-      `Export bindings: ${renderBindingProblem({ kind: "malformed-entry", path: "src/order/pricing.ts", line, reason: "missing-alias" })}`);
+      `Export bindings: ${renderBindingProblem(malformed("src/order/pricing.ts", line, "missing-alias"))}`);
   });
 
   it("a plan without export bindings validates exactly as it did before the grammar", () => {
@@ -624,7 +619,7 @@ ${bindingLine}
   it("AS-005: refuses a malformed entry, naming the file and the entry", () => {
     const line = "- `src/order/pricing.ts` — CT-1: priceOrder";
     expect(errorsFor(line)).toContainEqual(
-      `Export bindings: ${renderBindingProblem({ kind: "malformed-entry", path: "src/order/pricing.ts", line, reason: "missing-alias" })}`);
+      `Export bindings: ${renderBindingProblem(malformed("src/order/pricing.ts", line, "missing-alias"))}`);
   });
 
   it("reads the regression waiver through the verification policy", () => {

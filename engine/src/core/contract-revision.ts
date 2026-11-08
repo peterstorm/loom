@@ -40,8 +40,9 @@ import {
 } from "./acceptance-contract";
 import { canonicalStructuralEquals, type DomainResult } from "./orchestration-contract";
 import { normalizePlanPath } from "./plan-path-match";
-import { renderLeftPreparedName, renderSkeletonProblem, type LeftPreparedName, type SkeletonProblem } from "./skeleton/problems";
+import type { LeftPreparedName, SkeletonProblem } from "./skeleton/problems";
 import { installSkeletonRecords } from "./skeleton/records";
+import { renderSkeletonRevisionLines } from "./skeleton/status";
 import type { SkeletonRecord } from "./skeleton/types";
 import { reopenableWave, returnWaveTasksToRevalidation, type WaveReopeningRefusal } from "./task-revalidation";
 import type { TaskGraph } from "../types";
@@ -127,6 +128,14 @@ export type RevisedContract = Readonly<{
 /** The settled paths of one kind, in settlement order. */
 const settledPaths = (skeletons: SkeletonRevision, kind: SkeletonSettlement["kind"]): readonly string[] =>
   Object.freeze([...skeletons.settlements].flatMap(([path, settlement]) => (settlement.kind === kind ? [path] : [])));
+
+/** The stale-settled paths `revisedSkeletonRecords` actually flags, in
+ *  settlement order: only those with a record. A stale settlement with no
+ *  record flags nothing, so it is never reported stale either. */
+const flaggedStalePaths = (current: readonly SkeletonRecord[], skeletons: SkeletonRevision): readonly string[] => {
+  const recorded = new Set(current.map(({ path }) => normalizePlanPath(path)));
+  return Object.freeze(settledPaths(skeletons, "stale").filter((path) => recorded.has(path)));
+};
 
 /** The records after a revision: each stale-settled record flagged with the
  *  revision number, each refreshed one installed with origin `revision`. */
@@ -263,15 +272,16 @@ export function reviseAcceptanceContract(
       contract: contract.id,
       revision,
       refreshed: settledPaths(skeletons, "refreshed"),
-      staleSkeletons: settledPaths(skeletons, "stale"),
+      staleSkeletons: flaggedStalePaths(graph.skeletons ?? [], skeletons),
       bindingProblems: skeletons.bindingProblems,
       leftovers: skeletons.leftovers,
     }),
   });
 }
 
-/** The outcome an operator reads: the revision, then one line per refreshed
- *  skeleton, stale skeleton, binding problem and prepared name left behind. */
+/** The outcome an operator reads: the revision, then the skeleton lines
+ *  `renderSkeletonRevisionLines` owns — one per refreshed skeleton, stale
+ *  skeleton, binding problem and prepared name left behind. */
 export function revisionOutcomeMessage(
   { contract, revision, refreshed, staleSkeletons, bindingProblems, leftovers }:
     Pick<RevisedContract, "contract" | "revision" | "refreshed" | "staleSkeletons" | "bindingProblems" | "leftovers">,
@@ -281,11 +291,7 @@ export function revisionOutcomeMessage(
     : `${revision.revalidatedTaskIds.join(", ")} returned to revalidation`;
   return [
     `${contract} revision ${revision.revision} recorded; ${revalidated}. The next Wave Gate re-records its acceptance roster green.`,
-    ...refreshed.map((path) => `skeleton refreshed ${path} from the revised types`),
-    ...staleSkeletons.map((path) => `skeleton ${path}: stale against revised contract (modified, left as it is)`),
-    ...bindingProblems.map((problem) =>
-      `skeleton binding problem: ${renderSkeletonProblem(problem)}; the next spawn's stage two blocks on it`),
-    ...leftovers.map((leftover) => `skeleton note: ${renderLeftPreparedName(leftover)}`),
+    ...renderSkeletonRevisionLines({ refreshed, stale: staleSkeletons, bindingProblems, leftovers }),
     "",
   ].join("\n");
 }

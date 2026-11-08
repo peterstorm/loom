@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN, type TaskGraph, type WaveSpecCheckDocumentsAuthority } from "../../src/types";
-import { buildTaskLocalByteObservation, settleObservedImplementation } from "../../src/core/implementation-application";
+import { buildTaskLocalByteObservation, NO_ENGINE_SKELETONS, settleObservedImplementation } from "../../src/core/implementation-application";
 import { TRUSTED_LEDGER_ONLY_POLICY } from "../../src/core/proof-obligations";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { parseTaskGraph } from "../../src/state-manager";
@@ -235,6 +235,7 @@ describe("renderExactPiSettlement", () => {
       priorAttributedPaths: [],
       repositoryChangedPaths: [],
       siblingOwnedPaths: [],
+      engineSkeletons: NO_ENGINE_SKELETONS,
     }),
   );
 

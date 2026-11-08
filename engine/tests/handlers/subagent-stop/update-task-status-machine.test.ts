@@ -22,7 +22,7 @@ import type { EvidenceRecord, Requirement } from "../../../src/machine";
 import { reportSummary } from "../../machine/report-summary";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import * as config from "../../../src/config";
-import { CONFORMANCE_NOT_OWED } from "../../../src/core/skeleton/conformance-verdict";
+import { observedEvidence, trustedPassEvidence } from "../../fixtures/task-lifecycle";
 
 const run = `uts-machine-${process.pid}-${Date.now()}`;
 const sid = (name: string) => `${run}-${name}`;
@@ -362,7 +362,7 @@ describe("locked implementation settlement failures", () => {
     };
     const proof = evaluateTaskProof(
       { verificationPolicy, declaredArtifacts: [] },
-      { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, filesModified: [], newTestsWritten: false },
+      observedEvidence({ taskCompleted: true, filesModified: [], newTestsWritten: false }),
     );
     if (proof.state !== "satisfied") throw new Error("waived revalidation fixture must be satisfied");
     const recovered = applyCompletionInfrastructureFailure({
@@ -418,7 +418,7 @@ describe("locked implementation settlement failures", () => {
     const dir = tempDir();
     const proof = evaluateTaskProof(
       { newTestsRequired: false, declaredArtifacts: [] },
-      { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, filesModified: [], newTestsWritten: false },
+      observedEvidence({ taskCompleted: true, filesModified: [], newTestsWritten: false }),
     );
     expect(proof.state).toBe("satisfied");
     const task = {
@@ -495,13 +495,7 @@ describe("locked implementation settlement failures", () => {
     };
     const proof = evaluateTaskProof(
       { verificationPolicy, declaredArtifacts: [artifact] },
-      {
-        contractConformance: CONFORMANCE_NOT_OWED,
-        taskCompleted: true,
-        testResult: { verdict: "trusted-pass" },
-        filesModified: [artifact],
-        newTestsWritten: false,
-      },
+      trustedPassEvidence([artifact], { newTestsWritten: false }),
     );
     expect(proof.state).toBe("satisfied");
 

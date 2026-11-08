@@ -141,9 +141,9 @@ export type ImplementationBriefInput = Readonly<{
   /** The operator's notes from the dispatch marker (#119); empty for none. */
   operatorNotes: readonly OperatorNote[];
   /** What the shell observed for the Frozen Signatures section (G2 AD-13).
-   *  The brief shell always supplies it; a caller that renders a brief
-   *  without observing the paths leaves it out, and the section says so. */
-  frozenSignatures?: FrozenSignaturesInput;
+   *  Its graph's export-binding stamp also decides, per contract, whether the
+   *  engine or the contract Task writes the contract's stubs. */
+  frozenSignatures: FrozenSignaturesInput;
 }>;
 
 /**
@@ -151,15 +151,33 @@ export type ImplementationBriefInput = Readonly<{
  * (its export-binding stamp, skeleton records and recorded outcomes), what
  * is at each of the Task's production paths now with each bound path's
  * canonical digest, each in-scope contract's frozen surface as its freeze
- * stamps it — or the line naming why it could not be read — and every
- * stage-two problem of the Task's own bindings, as registration meets them.
+ * stamps it — or the line naming why it could not be read — every
+ * stage-two problem of the Task's own bindings, as registration meets them,
+ * and whether the recorded plan's export bindings could be checked against
+ * the stamp.
  */
 export type FrozenSignaturesInput = Readonly<{
   graph: TaskGraph;
   observations: ReadonlyMap<string, PathObservation>;
   surfaces: ReadonlyMap<string, DomainResult<FrozenSurface, string>>;
   unresolved: readonly UnresolvedSkeletonBinding[];
+  planBindings: PlanBindingCheck;
 }>;
+
+/**
+ * What the shell learned comparing the recorded plan's export bindings with
+ * the TaskGraph stamp. Drift refuses the brief before it renders, so only two
+ * outcomes reach the renderer: `agrees` (the plan holds the stamped bindings,
+ * or nothing is stamped to drift from), or `unchecked` with the reason no
+ * comparison was possible — a stamped graph that records no plan — which the
+ * Frozen Signatures section states instead of passing over in silence.
+ */
+export type PlanBindingCheck =
+  | Readonly<{ kind: "agrees" }>
+  | Readonly<{ kind: "unchecked"; reason: string }>;
+
+/** The check of a plan that agrees with the stamp, or of a graph with nothing stamped. */
+export const PLAN_BINDINGS_AGREE: PlanBindingCheck = Object.freeze({ kind: "agrees" });
 
 export type ImplementationBrief = Readonly<{
   taskId: string;
@@ -405,11 +423,26 @@ function ownerDuties(obligation: OwnerObligation, { task, roster, contractTaskId
   return `${coverage}\n\n${mutationDuty}`;
 }
 
+/**
+ * Who writes a contract's stubs (G2 AD-9, FR-041, ADR-0056). The engine
+ * writes them at the contract Task's stop exactly when the contract freezes a
+ * types file and the TaskGraph stamps at least one export binding to it — the
+ * rule the stop applies (`stubbedContracts`). A `Types file: none` contract, a
+ * types file nothing is bound to, and a graph populated before export
+ * bindings were stamped all leave the stubs to the contract Task.
+ */
+export type ContractStubAuthor = Readonly<{ kind: "engine" }> | Readonly<{ kind: "contract-task" }>;
+
+export function contractStubAuthor(contract: AcceptanceContract, stamp: readonly ExportBinding[] | undefined): ContractStubAuthor {
+  return contract.types.kind === "file" && (stamp ?? []).some((binding) => binding.contract === contract.id)
+    ? { kind: "engine" }
+    : { kind: "contract-task" };
+}
+
 /** The contract Task's instructions: write the frozen surface, so that the
- *  contract Wave's gate observes every acceptance testcase RED. With a types
- *  file the engine writes the bound stubs at its stop (G2 AD-9, FR-041); a
- *  `Types file: none` contract binds nothing, so its Task still stubs. */
-function contractTaskBlock(contract: AcceptanceContract): string {
+ *  contract Wave's gate observes every acceptance testcase RED, and — unless
+ *  the engine writes them (`contractStubAuthor`) — the stubs its tests import. */
+function contractTaskBlock(contract: AcceptanceContract, stubs: ContractStubAuthor): string {
   return [
     `**${contract.id}: ${contract.title}** — you are its contract Task.`,
     contract.statement,
@@ -423,13 +456,16 @@ function contractTaskBlock(contract: AcceptanceContract): string {
     ...(contract.supportedDomain === null
       ? []
       : [`- Supported domain: \`${contract.supportedDomain}\` holds the supported/unsupported table, and the relevant laws, as test cases.`]),
-    contract.types.kind === "file"
-      ? "- The engine writes the stubs, not you. Every file the plan's `**Export bindings:**` bind to this contract gets its canonical stub " +
+    match(stubs)
+      .with({ kind: "engine" }, () =>
+        "- The engine writes the stubs, not you. Every file the plan's `**Export bindings:**` bind to this contract gets its canonical stub " +
         "when you stop, before the stop checks: generated from your types file, each bound export typed by its frozen alias, with a body " +
         "that throws its `unimplemented: <name>` marker. The acceptance tests therefore import real modules and FAIL by that throw — never " +
-        "by a missing import. Do not write a bound file: it belongs to the Task that implements it, and the engine never overwrites a file " +
-        "that is already there. Anything else the tests import must exist when they run."
-      : "- Stub every function the acceptance tests import, in this Task's other files, so the tests compile and FAIL by assertion or by a thrown \"not implemented\" — never by a missing import or a file that fails to load.",
+        "by a missing import. Do not write a bound file: it belongs to the Task that implements it, and the engine never modifies a file " +
+        "you or anyone else has changed. Anything else the tests import must exist when they run.")
+      .with({ kind: "contract-task" }, () =>
+        "- Stub every function the acceptance tests import, in this Task's other files, so the tests compile and FAIL by assertion or by a thrown \"not implemented\" — never by a missing import or a file that fails to load.")
+      .exhaustive(),
     "",
     "Your Wave Gate passes only if every acceptance testcase is collected and fails, and nothing else fails. It then freezes these files: no later Task may change them, and only an operator Contract Revision can. Do not implement the behavior.",
   ].join("\n");
@@ -472,14 +508,20 @@ function bystanderBlock(contract: AcceptanceContract, task: Task): string {
 /**
  * The Task's role in every Acceptance Contract — its contract Task, a claimant
  * of a Requirement it covers, or a Task inside its red window — read from the
- * one role rule, and the instructions its proof and Wave Gate hold it to.
+ * one role rule, and the instructions its proof and Wave Gate hold it to. A
+ * contract Task's stub duty is decided from the graph's export-binding stamp.
  */
-function acceptanceContractSection(task: Task, contracts: readonly AcceptanceContract[], roster: readonly Task[]): string {
+function acceptanceContractSection(
+  task: Task,
+  contracts: readonly AcceptanceContract[],
+  roster: readonly Task[],
+  stamp: readonly ExportBinding[] | undefined,
+): string {
   const tasks = roster.some(({ id }) => id === task.id) ? roster : [...roster, task];
   const blocks = contracts.flatMap((contract) => {
     const role = contractRole(contract, task, tasks);
     switch (role.kind) {
-      case "contract-task": return [contractTaskBlock(contract)];
+      case "contract-task": return [contractTaskBlock(contract, contractStubAuthor(contract, stamp))];
       case "claimant": return [claimantBlock(contract, role.anchors)];
       case "red-window": return [bystanderBlock(contract, task)];
       case "none": return [];
@@ -488,8 +530,6 @@ function acceptanceContractSection(task: Task, contracts: readonly AcceptanceCon
   return blocks.length === 0 ? NO_ACCEPTANCE_CONTRACT : blocks.join("\n\n");
 }
 
-/** Literal substituted for `{frozen_signatures}` when the brief was rendered without a skeleton observation. */
-export const NO_SKELETON_OBSERVATION = "None — this brief was rendered without observing its skeleton paths.";
 /** Literal substituted for `{frozen_signatures}` on a TaskGraph populated before export bindings were stamped. */
 export const NO_EXPORT_BINDING_STAMP =
   "None — the TaskGraph was populated before export bindings were stamped, so the engine writes no skeletons for this run.";
@@ -500,8 +540,8 @@ export const TASK_NOT_OBSERVED = "None — the TaskGraph its skeletons were obse
 
 const FROZEN_SIGNATURES_LEAD =
   "Each production file you own, with its skeleton outcome and the exports bound to it. An outcome not yet recorded is what the " +
-  "engine does when it registers this attempt: it writes each missing bound skeleton before your attempt starts, and never " +
-  "modifies a file that already exists.";
+  "engine does when it registers this attempt: it writes each missing bound skeleton before your attempt starts, may refresh a " +
+  "skeleton that is still the engine's untouched bytes, and never modifies a file you or anyone else has changed.";
 
 const renderFrozenAdt = (adt: FrozenAdt): string =>
   match(adt)
@@ -548,19 +588,47 @@ const unresolvedBindingsParagraph = (unresolved: readonly UnresolvedSkeletonBind
  * Then the duties `conformanceScope` owes: the frozen-signature and marker
  * rules when the scope binds an export, and each in-scope contract's frozen
  * ADTs to import. A Task the scope exempts owes no duty, and is shown only
- * its outcomes. Last, every stage-two problem of the Task's bindings, the
- * same lines `helper orchestration status` blocks the spawn on.
+ * its outcomes. Then every stage-two problem of the Task's bindings, the
+ * same lines `helper orchestration status` blocks the spawn on. Last, on a
+ * stamped graph whose plan could not be checked against the stamp, that note.
  */
-export function renderFrozenSignatures(task: Task, input: FrozenSignaturesInput | undefined): string {
-  if (input === undefined) return NO_SKELETON_OBSERVATION;
-  const { graph, observations, surfaces, unresolved } = input;
-  if (graph.export_bindings === undefined) return NO_EXPORT_BINDING_STAMP;
+export function renderFrozenSignatures(task: Task, input: FrozenSignaturesInput): string {
+  if (input.graph.export_bindings === undefined) return NO_EXPORT_BINDING_STAMP;
+  const body = stampedFrozenSignatures(task, input);
+  return match(input.planBindings)
+    .with({ kind: "agrees" }, () => body)
+    .with({ kind: "unchecked" }, ({ reason }) => `${body}\n\n${uncheckedPlanBindingsParagraph(reason)}`)
+    .exhaustive();
+}
+
+/** A stamped graph whose plan could not be compared with the stamp (`PlanBindingCheck` `unchecked`). */
+const uncheckedPlanBindingsParagraph = (reason: string): string =>
+  `**Export bindings unchecked.** ${reason}, so the engine could not check that the plan's \`**Export bindings:**\` still ` +
+  "agree with the TaskGraph stamp. Everything above comes from the stamp; if the plan you read binds differently, stop and " +
+  "report it instead of following either.";
+
+/** What `conformanceScope` owes, narrowed once: the Task's bound exports, and the duty paragraphs they and the in-scope contracts carry. */
+type FrozenDuties = Readonly<{ bindings: readonly ExportBinding[]; paragraphs: readonly string[] }>;
+
+const frozenDuties = (graph: TaskGraph, task: Task, surfaces: FrozenSignaturesInput["surfaces"]): FrozenDuties =>
+  match(conformanceScope(graph, task))
+    .with({ kind: "owed" }, ({ bindings, contracts }): FrozenDuties => ({
+      bindings,
+      paragraphs: [
+        ...(bindings.length === 0 ? [] : [frozenSignatureRules(bindings)]),
+        ...contracts.map((contract) => frozenAdtParagraph(contract, surfaces.get(contract.id))),
+      ],
+    }))
+    .with({ kind: "not-owed" }, (): FrozenDuties => ({ bindings: [], paragraphs: [] }))
+    .exhaustive();
+
+/** The section's body over a graph that stamps export bindings. */
+function stampedFrozenSignatures(task: Task, { graph, observations, surfaces, unresolved }: FrozenSignaturesInput): string {
   const outcomes = taskSkeletonOutcomes(graph, task.id, observations);
   if (!outcomes.ok) return TASK_NOT_OBSERVED;
   const files = outcomes.value;
   if (files.length === 0) return NO_PRODUCTION_FILES;
-  const scope = conformanceScope(graph, task);
-  const bindings = scope.kind === "owed" ? scope.bindings : [];
+  const { bindings, paragraphs } = frozenDuties(graph, task, surfaces);
   const stale = staleSkeletons(graph);
   const fileLines = files.flatMap(({ path, outcome }) => {
     const flag = stale.find((entry) => samePlanPath(entry.path, path));
@@ -571,8 +639,7 @@ export function renderFrozenSignatures(task: Task, input: FrozenSignaturesInput 
   return [
     FROZEN_SIGNATURES_LEAD,
     fileLines.join("\n"),
-    ...(bindings.length === 0 ? [] : [frozenSignatureRules(bindings)]),
-    ...(scope.kind === "owed" ? scope.contracts.map((contract) => frozenAdtParagraph(contract, surfaces.get(contract.id))) : []),
+    ...paragraphs,
     ...(unresolved.length === 0 ? [] : [unresolvedBindingsParagraph(unresolved)]),
   ].join("\n\n");
 }
@@ -792,7 +859,7 @@ export function renderImplementationBrief(
     scenario_test_names: scenarioTestNames(task.spec_anchors ?? [], index),
     plan_context: task.plan_context?.trim() || "None recorded for this Task; read the full plan.",
     invariant_ownership: invariantOwnership(task, input.roster, input.contracts, input.ownership),
-    acceptance_contract: acceptanceContractSection(task, input.contracts, input.roster),
+    acceptance_contract: acceptanceContractSection(task, input.contracts, input.roster, input.frozenSignatures.graph.export_bindings),
     frozen_signatures: renderFrozenSignatures(task, input.frozenSignatures),
     file_list: bulleted(task.file_list ?? [], "None declared."),
     plan_file_path: input.planFile ?? "none recorded",

@@ -14,7 +14,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { PlanContract } from "../../src/core/acceptance-contract";
-import { parseExportBindings, parseIdentifier, validateExportBindings } from "../../src/core/skeleton/bindings";
+import { parseExportBindings, validateExportBindings } from "../../src/core/skeleton/bindings";
 import { generateSkeleton } from "../../src/core/skeleton/generate";
 import { readJavaTypesSurface } from "../../src/core/skeleton/java-surface";
 import { skeletonLanguageOf } from "../../src/core/skeleton/language";
@@ -26,7 +26,6 @@ import type {
   ExportBinding,
   FrozenSurface,
   GeneratedSkeleton,
-  Identifier,
   JavaSkeletonTarget,
   JavaSkeletonInput,
   JavaTypesSurface,
@@ -36,7 +35,7 @@ import type {
   TsSkeletonTarget,
   TsTypesSurface,
 } from "../../src/core/skeleton/types";
-import type { DomainResult } from "../../src/core/orchestration-contract";
+import { binding, unwrap } from "../fixtures/skeleton-builders";
 
 // ---------------------------------------------------------------------------
 // Fixtures: one TypeScript contract (CT-1) and one Java contract (CT-2)
@@ -93,21 +92,6 @@ public interface OrderContract {
 `;
 
 const HEADER_TAIL = "Make these signatures work; keep each name and its type.";
-
-const unwrap = <T, E>(result: DomainResult<T, E>, what: string): T => {
-  if (!result.ok) throw new Error(`${what} refused: ${JSON.stringify(result.error)}`);
-  return result.value;
-};
-
-/** Identifiers are minted only by `parseIdentifier`, never cast. */
-const identifier = (raw: string): Identifier => unwrap(parseIdentifier(raw), `parseIdentifier(${raw})`);
-
-/** A binding built as data, its names and aliases parsed through `parseIdentifier`. */
-const binding = (path: string, contract: string, ...exports: readonly [string, string][]): ExportBinding => {
-  const [first, ...rest] = exports.map(([name, alias]) => ({ name: identifier(name), alias: identifier(alias) }));
-  if (first === undefined) throw new Error("fixture binding needs at least one export");
-  return { path, contract, exports: [first, ...rest] };
-};
 
 const tsSurface = (): TsTypesSurface => unwrap(readTsTypesSurface(TS_TYPES, TS_TYPES_TEXT), "readTsTypesSurface");
 const javaSurface = (): JavaTypesSurface => unwrap(readJavaTypesSurface(JAVA_TYPES, JAVA_TYPES_TEXT), "readJavaTypesSurface");
@@ -395,8 +379,9 @@ describe("stage-two resolution", () => {
 // Canonical skeleton bytes
 // ---------------------------------------------------------------------------
 
-/** Bindings are built inside each testcase, never at module load: the stubbed
- *  `parseIdentifier` throws, and a module-load throw would hide every testcase. */
+/** Bindings are built inside each testcase, never at module load: a stubbed
+ *  `parseIdentifier` (behind the fixture's `binding`) throws, and a module-load
+ *  throw would hide every testcase. */
 const tsPricing = (): ExportBinding =>
   binding("src/order/pricing.ts", "CT-1", ["priceOrder", "PriceOrderFn"], ["parseOrder", "ParseOrderFn"]);
 
@@ -505,7 +490,10 @@ export const priceOrder: PriceOrderFn = () => {
       // @ts-expect-error the skeleton's path is the target's; no second path exists
       path: "src/main/java/com/acme/order/Elsewhere.java",
     });
-    expect([javaFromTsSurface, tsFromJavaTarget, secondPath].every((build) => typeof build === "function")).toBe(true);
+    // The laws are the @ts-expect-error lines above; `void` keeps each declaration used.
+    void javaFromTsSurface;
+    void tsFromJavaTarget;
+    void secondPath;
 
     const bound = binding("src/main/java/com/acme/order/shipping/Shipping.java", "CT-2", ["parseOrder", "ParseOrderFn"]);
     expect(generateJava(bound)).toMatchObject({ path: bound.path, language: "java" });

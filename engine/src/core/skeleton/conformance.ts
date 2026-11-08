@@ -7,7 +7,8 @@
  * Per bound export (FR-013, FR-014), judged against its contract's surface:
  * - `deleted` — no export (TypeScript) or field of the file's class (Java)
  *   carries the name, or the file is missing or no longer parses: an
- *   unreadable file proves none of its bound exports.
+ *   unreadable file proves none of its bound exports, and its remedy names
+ *   the reader's problem.
  * - `renamed` — the name is missing, and another export or field that is no
  *   bound name of the binding carries the same frozen alias.
  * - `retyped` — the name is present, but not as `export const name: Alias`
@@ -33,6 +34,7 @@
 
 import { match } from "ts-pattern";
 import type { DomainResult, NonEmpty } from "../orchestration-contract";
+import { samePlanPath } from "../plan-path-match";
 import { readJavaImplementationSurface } from "./java-surface";
 import { readTsImplementationSurface, typesImportSpecifier } from "./ts-surface";
 import type {
@@ -46,6 +48,7 @@ import type {
   JavaImplementationSurface,
   JavaTypesSurface,
   JudgeConformanceFn,
+  SurfaceProblem,
   TsImplementationSurface,
   TsTypesSurface,
   ViolationReason,
@@ -84,9 +87,8 @@ const judgeBoundExport = (bound: BoundExport, members: readonly Member[], boundN
   ];
 };
 
-/** Every signature violation of one binding; `members` null when the file is missing or unreadable. */
-const judgeBinding = (binding: ExportBinding, members: readonly Member[] | null): Violations => {
-  if (members === null) return binding.exports.map(({ name }) => violation(name, "deleted"));
+/** Every signature violation of one binding of a file that was read. */
+const judgeBinding = (binding: ExportBinding, members: readonly Member[]): Violations => {
   const boundNames = new Set<string>(binding.exports.map(({ name }) => name));
   return binding.exports.flatMap((bound) => judgeBoundExport(bound, members, boundNames));
 };
@@ -220,30 +222,40 @@ const javaMembers = (implementation: JavaImplementationSurface, surface: JavaTyp
 // One file, through its language's reading
 // ---------------------------------------------------------------------------
 
-/** What the judge needs of one language: how a file is read (null when it
- *  does not parse), and the views every rule works from. */
+/** What the judge needs of one language: how a file is read (the reader's
+ *  problem when it does not parse), and the views every rule works from. */
 type LanguageReading<I, S> = Readonly<{
-  read: (path: string, text: string) => I | null;
+  read: (path: string, text: string) => DomainResult<I, SurfaceProblem>;
   members: (implementation: I, surface: S | undefined) => readonly Member[];
   localNames: (implementation: I) => readonly string[];
   relisting: (implementation: I, adts: readonly FrozenAdt[]) => Violations;
 }>;
 
-const valueOf = <T, E>(result: DomainResult<T, E>): T | null => (result.ok ? result.value : null);
-
 const TYPESCRIPT: LanguageReading<TsImplementationSurface, TsTypesSurface> = {
-  read: (path, text) => valueOf(readTsImplementationSurface(path, text)),
+  read: readTsImplementationSurface,
   members: tsMembers,
   localNames: ({ localDeclarations }) => localDeclarations.map(({ name }) => name),
   relisting: judgeTsRelisting,
 };
 
 const JAVA: LanguageReading<JavaImplementationSurface, JavaTypesSurface> = {
-  read: (path, text) => valueOf(readJavaImplementationSurface(path, text)),
+  read: readJavaImplementationSurface,
   members: javaMembers,
   localNames: ({ localTypes }) => localTypes.map(({ name }) => name),
   relisting: judgeJavaRelisting,
 };
+
+/** Why a present file proves none of its bound exports: the reader's problem, as a remedy. */
+const unreadableRemedy = (problem: SurfaceProblem): string =>
+  match(problem)
+    .with({ kind: "unparseable" }, ({ path, detail }) => `${path} no longer parses (${detail})`)
+    .with({ kind: "unsupported-holder-shape" }, ({ path, detail }) => `${path} cannot be read (${detail})`)
+    .exhaustive() + ", so none of its bound exports is proven; make it parse";
+
+/** Every bound export of a file that was not read, `deleted`: a missing file
+ *  names no remedy, an unreadable one names its problem. */
+const judgeUnread = (bindings: readonly ExportBinding[], remedy: string | null): Violations =>
+  bindings.flatMap(({ exports }) => exports.map(({ name }) => violation(name, "deleted", remedy)));
 
 /** Every violation of one file: its bindings' signatures, then the frozen ADTs of its language's surfaces. */
 const judgeWith = <I, S extends FrozenSurface>(
@@ -252,14 +264,14 @@ const judgeWith = <I, S extends FrozenSurface>(
   surfaces: readonly Judged<S>[],
   bindings: readonly ExportBinding[],
 ): Violations => {
-  const implementation = file.text === null ? null : reading.read(file.path, file.text);
+  if (file.text === null) return judgeUnread(bindings, null);
+  const read = reading.read(file.path, file.text);
+  if (!read.ok) return judgeUnread(bindings, unreadableRemedy(read.error));
+  const implementation = read.value;
   const signature = bindings.flatMap((binding) => judgeBinding(
     binding,
-    implementation === null
-      ? null
-      : reading.members(implementation, surfaces.find(({ contract }) => contract === binding.contract)?.surface),
+    reading.members(implementation, surfaces.find(({ contract }) => contract === binding.contract)?.surface),
   ));
-  if (implementation === null) return signature;
   const adts = surfaces.flatMap(({ surface }) => surface.adts);
   return [...signature, ...judgeShadowing(reading.localNames(implementation), adts), ...reading.relisting(implementation, adts)];
 };
@@ -275,7 +287,7 @@ const javaSurfaces = (surfaces: readonly ContractSurface[]): readonly Judged<Jav
   surfaces.flatMap(({ contract, surface }) => (surface.language === "java" ? [{ contract, surface }] : []));
 
 const judgeFile = (file: ConformanceFile, surfaces: readonly ContractSurface[], bindings: readonly ExportBinding[]): Violations => {
-  const bound = bindings.filter(({ path }) => path === file.target.path);
+  const bound = bindings.filter(({ path }) => samePlanPath(path, file.target.path));
   return match(file.target)
     .with({ language: "typescript" }, ({ path }) => judgeWith(TYPESCRIPT, { path, text: file.text }, tsSurfaces(surfaces), bound))
     .with({ language: "java" }, ({ path }) => judgeWith(JAVA, { path, text: file.text }, javaSurfaces(surfaces), bound))

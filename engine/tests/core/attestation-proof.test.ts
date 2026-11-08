@@ -29,17 +29,11 @@ import {
   parseReservationId,
   settleImplementationAttempt,
 } from "../../src/core/implementation-completion";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
+import { trustedPassEvidence } from "../fixtures/task-lifecycle";
 
-const observed = (overrides: Partial<ObservedProofEvidence> = {}): ObservedProofEvidence => ({
-  contractConformance: CONFORMANCE_NOT_OWED,
-  taskCompleted: true,
-  testResult: { verdict: "trusted-pass" },
-  filesModified: [],
-  newTestsWritten: false,
-  newTestEvidence: "",
-  ...overrides,
-});
+/** A verify-only child's evidence: trusted pass, nothing written, no new tests. */
+const observed = (overrides: Partial<ObservedProofEvidence> = {}): ObservedProofEvidence =>
+  trustedPassEvidence([], { newTestsWritten: false, newTestEvidence: "", ...overrides });
 
 /** The attestation policy in its in-memory (camelCase) shape. */
 const ATTESTED_POLICY: VerificationPolicy = Object.freeze({

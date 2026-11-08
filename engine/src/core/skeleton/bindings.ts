@@ -32,8 +32,8 @@ import { CONTRACT_ID, contractWriter, frozenPaths } from "../acceptance-contract
 import type { DomainResult, NonEmpty } from "../orchestration-contract";
 import { isRepoRelativePlanPath, normalizePlanPath, samePlanPath } from "../plan-path-match";
 import { dependsOnAny } from "../task-dependencies";
-import type { RegressionWaiverReason } from "../verification-policy";
-import { skeletonLanguageOf } from "./language";
+import type { RegressionWaiverReason, VerificationPolicy } from "../verification-policy";
+import { JAVA_RESERVED_WORDS, skeletonLanguageOf } from "./language";
 import type {
   BindingProblem,
   BindingTaskView,
@@ -55,24 +55,26 @@ import type {
 
 const IDENTIFIER_SHAPE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-/**
- * The one fixed list: reserved words of TypeScript (including strict-mode and
- * unbindable names) and of Java (keywords, literals and restricted
- * identifiers), so an identifier is safe to splice into either language.
- */
-const RESERVED_WORDS: ReadonlySet<string> = new Set([
-  // Shared by TypeScript and Java
-  "break", "case", "catch", "class", "const", "continue", "default", "do", "else", "enum", "extends",
-  "false", "finally", "for", "if", "implements", "import", "instanceof", "interface", "new", "null",
-  "package", "private", "protected", "public", "return", "static", "super", "switch", "this", "throw",
-  "true", "try", "void", "while",
-  // TypeScript / JavaScript
+/** TypeScript / JavaScript reserved words (strict-mode and unbindable names
+ *  included) that Java's keyword core does not already hold. */
+const TYPESCRIPT_RESERVED_WORDS: readonly string[] = [
   "arguments", "await", "debugger", "delete", "eval", "export", "function", "in", "let", "typeof",
   "undefined", "var", "with", "yield",
-  // Java
-  "_", "abstract", "assert", "boolean", "byte", "char", "double", "final", "float", "goto", "int",
-  "long", "native", "permits", "record", "sealed", "short", "strictfp", "synchronized",
-  "throws", "transient", "volatile",
+];
+
+/** Java's restricted identifiers: legal as a Java path segment, never as a
+ *  name a skeleton declares or imports. */
+const JAVA_RESTRICTED_IDENTIFIERS: readonly string[] = ["permits", "record", "sealed", "var", "yield"];
+
+/**
+ * The one fixed list of an identifier safe to splice into either language:
+ * Java's keyword core (`JAVA_RESERVED_WORDS`, owned by the language
+ * predicate), Java's restricted identifiers, and TypeScript's reserved words.
+ */
+const RESERVED_WORDS: ReadonlySet<string> = new Set([
+  ...JAVA_RESERVED_WORDS,
+  ...JAVA_RESTRICTED_IDENTIFIERS,
+  ...TYPESCRIPT_RESERVED_WORDS,
 ]);
 
 export const parseIdentifier: ParseIdentifierFn = (raw) => {
@@ -270,6 +272,26 @@ export function renderExportBinding(binding: ExportBinding): string {
 // ---------------------------------------------------------------------------
 // Validation (FR-002)
 // ---------------------------------------------------------------------------
+
+/** What a plan without `**Export bindings:**` declares. */
+export const NO_EXPORT_BINDINGS: ExportBindingsDeclaration = Object.freeze({ bindings: Object.freeze([]), problems: Object.freeze([]) });
+
+/**
+ * One roster Task as binding validation reads it: its id, file_list and
+ * dependencies, and the regression waiver its authored verification policy
+ * declares — null when regression is required or no policy was read. Plan
+ * validation and population both project their roster through this, so they
+ * judge the same Task the same way.
+ */
+export const bindingTaskView = (
+  task: Readonly<{ id: string; file_list: readonly string[]; depends_on: readonly string[] }>,
+  policy: VerificationPolicy | null,
+): BindingTaskView => ({
+  id: task.id,
+  file_list: task.file_list,
+  depends_on: task.depends_on,
+  regressionWaiver: policy !== null && policy.regression.kind === "waived" ? policy.regression.reason : null,
+});
 
 /** Regression waivers that say the Task changes no production code — a bound
  *  path on such a Task contradicts itself. */

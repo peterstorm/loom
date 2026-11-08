@@ -13,55 +13,41 @@
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { parseIdentifier } from "../../src/core/skeleton/bindings";
 import { judgeConformance, renderConformanceViolations } from "../../src/core/skeleton/conformance";
-import { readJavaTypesSurface } from "../../src/core/skeleton/java-surface";
+import { readJavaImplementationSurface, readJavaTypesSurface } from "../../src/core/skeleton/java-surface";
 import { skeletonLanguageOf } from "../../src/core/skeleton/language";
-import { readTsTypesSurface } from "../../src/core/skeleton/ts-surface";
+import { readTsImplementationSurface, readTsTypesSurface } from "../../src/core/skeleton/ts-surface";
 import type {
   ConformanceViolation,
   ContractConformance,
   ContractSurface,
   ExportBinding,
-  Identifier,
   ViolationReason,
 } from "../../src/core/skeleton/types";
-import type { DomainResult, NonEmpty } from "../../src/core/orchestration-contract";
+import type { NonEmpty } from "../../src/core/orchestration-contract";
 import {
-  JAVA_CONTRACT,
+  SOURCES_JAVA_CONTRACT_ID,
   JAVA_GEOMETRY,
   JAVA_PRICING,
-  JAVA_TYPES_PATH,
-  JAVA_TYPES_TEXT,
-  TS_CONTRACT,
+  SOURCES_JAVA_TYPES_PATH,
+  SOURCES_JAVA_TYPES_TEXT,
+  SOURCES_TS_CONTRACT_ID,
   TS_LEDGER,
   TS_PRICING,
   TS_REPLAY,
-  TS_TYPES_PATH,
-  TS_TYPES_TEXT,
+  SOURCES_TS_TYPES_PATH,
+  SOURCES_TS_TYPES_TEXT,
 } from "../fixtures/skeleton-sources";
+import { binding, unwrap } from "../fixtures/skeleton-builders";
 
 // ---------------------------------------------------------------------------
 // Building inputs
 // ---------------------------------------------------------------------------
 
-const unwrap = <T, E>(result: DomainResult<T, E>): T => {
-  if (!result.ok) throw new Error(`refused: ${JSON.stringify(result.error)}`);
-  return result.value;
-};
-
-const id = (raw: string): Identifier => unwrap(parseIdentifier(raw));
-
-const binding = (path: string, contract: string, ...exports: readonly [string, string][]): ExportBinding => {
-  const [first, ...rest] = exports.map(([name, alias]) => ({ name: id(name), alias: id(alias) }));
-  if (first === undefined) throw new Error("a binding needs an export");
-  return { path, contract, exports: [first, ...rest] };
-};
-
-const TS_SURFACE: ContractSurface = { contract: TS_CONTRACT, surface: unwrap(readTsTypesSurface(TS_TYPES_PATH, TS_TYPES_TEXT)) };
+const TS_SURFACE: ContractSurface = { contract: SOURCES_TS_CONTRACT_ID, surface: unwrap(readTsTypesSurface(SOURCES_TS_TYPES_PATH, SOURCES_TS_TYPES_TEXT)) };
 const JAVA_SURFACE: ContractSurface = {
-  contract: JAVA_CONTRACT,
-  surface: unwrap(readJavaTypesSurface(JAVA_TYPES_PATH, JAVA_TYPES_TEXT)),
+  contract: SOURCES_JAVA_CONTRACT_ID,
+  surface: unwrap(readJavaTypesSurface(SOURCES_JAVA_TYPES_PATH, SOURCES_JAVA_TYPES_TEXT)),
 };
 
 const TS_PATH = "src/order/pricing.ts";
@@ -69,8 +55,8 @@ const TS_UNBOUND = "src/order/ledger.ts";
 const JAVA_PATH = "src/main/java/com/acme/order/pricing/Pricing.java";
 const JAVA_UNBOUND = "src/main/java/com/acme/order/pricing/Geometry.java";
 
-const TS_BINDING = binding(TS_PATH, TS_CONTRACT, ["priceOrder", "PriceOrderFn"], ["parseOrder", "ParseOrderFn"]);
-const JAVA_BINDING = binding(JAVA_PATH, JAVA_CONTRACT, ["priceOrder", "PriceOrderFn"], ["parseOrder", "ParseOrderFn"]);
+const TS_BINDING = binding(TS_PATH, SOURCES_TS_CONTRACT_ID, ["priceOrder", "PriceOrderFn"], ["parseOrder", "ParseOrderFn"]);
+const JAVA_BINDING = binding(JAVA_PATH, SOURCES_JAVA_CONTRACT_ID, ["priceOrder", "PriceOrderFn"], ["parseOrder", "ParseOrderFn"]);
 
 const file = (path: string, text: string | null) => {
   const target = skeletonLanguageOf(path);
@@ -158,7 +144,7 @@ describe("signature conformance — TypeScript", () => {
   });
 
   it("AS-022: another bound export sharing the alias never makes a deleted export `renamed`", () => {
-    const shared = binding(TS_PATH, TS_CONTRACT, ["priceOrder", "PriceOrderFn"], ["priceBulk", "PriceOrderFn"]);
+    const shared = binding(TS_PATH, SOURCES_TS_CONTRACT_ID, ["priceOrder", "PriceOrderFn"], ["priceBulk", "PriceOrderFn"]);
     const text = `${TS_IMPORTS}export const priceBulk: PriceOrderFn = (o, q) => ({ cents: o.unitCents * q });\n`;
     expect(rows(judge({ files: { [TS_PATH]: text }, bindings: [shared] }))).toEqual([
       { file: TS_PATH, subject: "priceOrder", reason: "deleted" },
@@ -236,7 +222,7 @@ describe("signature conformance — TypeScript", () => {
   });
 
   it("FR-013: a binding whose contract surface is of the other language proves no annotation", () => {
-    const crossed = binding(TS_PATH, JAVA_CONTRACT, ["priceOrder", "PriceOrderFn"]);
+    const crossed = binding(TS_PATH, SOURCES_JAVA_CONTRACT_ID, ["priceOrder", "PriceOrderFn"]);
     expect(rows(judge({ files: { [TS_PATH]: TS_PRICING.conforming }, bindings: [crossed] }))).toEqual([
       { file: TS_PATH, subject: "priceOrder", reason: "retyped" },
     ]);
@@ -285,7 +271,7 @@ describe("signature conformance — Java", () => {
     },
   ])("AS-020: a bound member typed through $how conforms", ({ text }) => {
     const path = text.startsWith("package com.acme.order;") ? "src/main/java/com/acme/order/Pricing.java" : JAVA_PATH;
-    const bound = binding(path, JAVA_CONTRACT, ["priceOrder", "PriceOrderFn"], ["parseOrder", "ParseOrderFn"]);
+    const bound = binding(path, SOURCES_JAVA_CONTRACT_ID, ["priceOrder", "PriceOrderFn"], ["parseOrder", "ParseOrderFn"]);
     expect(judge({ files: { [path]: text }, bindings: [bound] })).toEqual(CLEAN);
   });
 
@@ -634,5 +620,45 @@ describe("laws", () => {
     const together = rows(judge({ files }));
     const apart = Object.entries(files).flatMap(([path, text]) => rows(judge({ files: { [path]: text } })));
     expect(together).toEqual(apart);
+  });
+});
+
+describe("an unreadable bound file names why it proves nothing", () => {
+  const remediesAt = (conformance: ContractConformance, path: string) =>
+    violationsAt(conformance, path).map(({ subject, reason, remedy }) => ({ subject, reason, remedy }));
+
+  it("AS-027: a TypeScript file that no longer parses keeps every bound export `deleted`, its remedy carrying the parse problem", () => {
+    const text = `${TS_PRICING.conforming}\nexport const = ;\n`;
+    const problem = readTsImplementationSurface(TS_PATH, text);
+    if (problem.ok) throw new Error("fixture must not parse");
+    const remedy = `${TS_PATH} no longer parses (${problem.error.detail}), so none of its bound exports is proven; make it parse`;
+    expect(remediesAt(judge({ files: { [TS_PATH]: text } }), TS_PATH)).toEqual([
+      { subject: "priceOrder", reason: "deleted", remedy },
+      { subject: "parseOrder", reason: "deleted", remedy },
+    ]);
+  });
+
+  it("AS-027: a Java file that no longer parses keeps every bound member `deleted`, its remedy carrying the parse problem", () => {
+    const text = `${JAVA_PRICING.conforming}\n}}} class {\n`;
+    const problem = readJavaImplementationSurface(JAVA_PATH, text);
+    if (problem.ok) throw new Error("fixture must not parse");
+    const remedy = `${JAVA_PATH} no longer parses (${problem.error.detail}), so none of its bound exports is proven; make it parse`;
+    expect(remediesAt(judge({ files: { [JAVA_PATH]: text } }), JAVA_PATH)).toEqual([
+      { subject: "priceOrder", reason: "deleted", remedy },
+      { subject: "parseOrder", reason: "deleted", remedy },
+    ]);
+  });
+
+  it("AS-027: a missing bound file names no parse problem", () => {
+    expect(remediesAt(judge({ files: { [TS_PATH]: null } }), TS_PATH).map(({ remedy }) => remedy)).toEqual([null, null]);
+  });
+});
+
+describe("bindings are matched to files by plan path", () => {
+  it("FR-013: a binding spelled `./path` judges the file at `path`, as one spelled `path` does", () => {
+    const respelled = binding(`./${TS_PATH}`, SOURCES_TS_CONTRACT_ID, ["priceOrder", "PriceOrderFn"], ["parseOrder", "ParseOrderFn"]);
+    const files = { [TS_PATH]: TS_PRICING.renamed };
+    expect(judge({ files, bindings: [respelled] })).toEqual(judge({ files, bindings: [TS_BINDING] }));
+    expect(rows(judge({ files, bindings: [respelled] }))).not.toEqual([]);
   });
 });

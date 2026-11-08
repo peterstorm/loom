@@ -109,6 +109,10 @@ export type LoomStatusDocument = LoomStatus & Readonly<{
 const SKELETONS_NOT_OBSERVED: SkeletonStatusReport =
   skeletonsUnobserved("status was derived without observing the skeleton paths");
 
+/** The skeleton report status renders and routes on, resolved once at the
+ *  StatusDeps boundary: deps that observed none report `unobserved`. */
+const skeletonReportOf = (deps: StatusDeps): SkeletonStatusReport => deps.skeletons ?? SKELETONS_NOT_OBSERVED;
+
 export type AdvisoryApprovalObservation =
   | Readonly<{ kind: "approved" }>
   | Readonly<{ kind: "not-approved" }>
@@ -566,8 +570,8 @@ function skeletonsUnobservedReason(recovery: WaveImplementationRecovery, skeleto
 function unstartedWaveStatus(
   graph: TaskGraph,
   deps: StatusDeps,
+  skeletons: SkeletonStatusReport,
 ): LoomStatus | null {
-  const skeletons = deps.skeletons ?? SKELETONS_NOT_OBSERVED;
   const window = classifyImplementationWindow(graph, deps.implementationReservations, unresolvedSkeletonBindings(skeletons));
   if (window.kind === "not-in-window") return null;
   if (window.kind === "contradiction") return deriveUnavailableLoomStatus([window.reason]);
@@ -761,11 +765,12 @@ export function deriveLoomStatusFromParsedGraph(
   lifecycleProof: WaveLifecycleProof | null = null,
   runDirectory: ActiveRunDirectoryObservation = canonicalRecord({ kind: "unverified" }),
 ): LoomStatusDocument {
-  const status = withOwnerVerificationRemedies(routeLoomStatus(parsed, deps, lifecycleProof, runDirectory));
+  const skeletons = skeletonReportOf(deps);
+  const status = withOwnerVerificationRemedies(routeLoomStatus(parsed, deps, skeletons, lifecycleProof, runDirectory));
   return canonicalRecord({
     ...status,
     ownerVerification: ownerVerificationReportOf(deps.currentWaveCompletionResult),
-    skeletons: deps.skeletons ?? SKELETONS_NOT_OBSERVED,
+    skeletons,
   });
 }
 
@@ -773,6 +778,7 @@ export function deriveLoomStatusFromParsedGraph(
 function routeLoomStatus(
   parsed: Readonly<{ ok: true; value: TaskGraph }> | Readonly<{ ok: false; error: string }>,
   deps: StatusDeps,
+  skeletons: SkeletonStatusReport,
   lifecycleProof: WaveLifecycleProof | null,
   runDirectory: ActiveRunDirectoryObservation,
 ): LoomStatus {
@@ -803,7 +809,7 @@ function routeLoomStatus(
   if (committed !== null) return committed;
   // Before the readiness path, which requires a live registration: an execute
   // Wave may have no registration or only an abandoned Run tombstone.
-  const unstarted = unstartedWaveStatus(parsed.value, deps);
+  const unstarted = unstartedWaveStatus(parsed.value, deps, skeletons);
   if (unstarted !== null) return unstarted;
   if (lifecycleProof === null) {
     const projected = projectedAdvisoryStatus(parsed.value, deps, runDirectory);

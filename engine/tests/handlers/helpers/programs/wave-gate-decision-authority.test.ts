@@ -52,7 +52,7 @@ import { parseTaskGraph, StateManager } from "../../../../src/state-manager";
 import { capturedSpecCheck } from "../../../../src/core/spec-check";
 import type { TaskGraph } from "../../../../src/types";
 import { findingId } from "../../../fixtures/finding-id";
-import { CONFORMANCE_NOT_OWED } from "../../../../src/core/skeleton/conformance-verdict";
+import { trustedPassEvidence } from "../../../fixtures/task-lifecycle";
 
 const RUN_ID = "run.wave-decision";
 const DIGEST = "a".repeat(64);
@@ -130,7 +130,7 @@ describe("Wave Gate start effect ordering", () => {
     // Run Directory program publication this case refuses.
     const verification_policy = { regression: { kind: "required" }, new_tests: { kind: "waived", reason: "documentation-only" } } as const;
     const proof = evaluateTaskProof({ verificationPolicy: taskVerificationPolicy({ verification_policy }), declaredArtifacts: [] },
-      { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: [], newTestsWritten: false });
+      trustedPassEvidence([], { newTestsWritten: false }));
     if (proof.state !== "satisfied") throw new Error("fixture proof must satisfy");
     const initial = graph({
       active_wave_gate: undefined,

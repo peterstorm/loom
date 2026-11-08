@@ -14,14 +14,10 @@ import { readJavaImplementationSurface, readJavaTypesSurface } from "../../src/c
 import { handler as maxFunctionLines } from "../../src/linter/programmatic/max-function-lines";
 import type { JavaImplementationSurface, JavaTypesSurface, SurfaceProblem } from "../../src/core/skeleton/types";
 import type { DomainResult } from "../../src/core/orchestration-contract";
+import { unwrap } from "../fixtures/skeleton-builders";
 
 const TYPES_PATH = "src/main/java/com/acme/order/OrderContract.java";
 const IMPL_PATH = "src/main/java/com/acme/order/pricing/Pricing.java";
-
-const unwrap = <T>(result: DomainResult<T, SurfaceProblem>): T => {
-  if (!result.ok) throw new Error(`refused: ${JSON.stringify(result.error)}`);
-  return result.value;
-};
 
 const refusal = <T>(result: DomainResult<T, SurfaceProblem>): SurfaceProblem => {
   if (result.ok) throw new Error(`expected a refusal, read ${JSON.stringify(result.value)}`);

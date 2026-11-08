@@ -22,6 +22,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   buildTaskLocalByteObservation,
+  NO_ENGINE_SKELETONS,
   parseNewTestEvidence,
   redThenGreenDuty,
 } from "../../src/core/implementation-application";
@@ -88,6 +89,7 @@ import type { Task, TaskGraph, TaskTestResult } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
 import { briefOwnership } from "../fixtures/owner-obligation";
+import { unobservedSkeletons } from "../fixtures/frozen-signatures";
 import { piGrantedAgentId } from "../../../pi/write-grant";
 import { piImplementationLedger } from "../../../pi/subagent-settlement";
 import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
@@ -293,6 +295,7 @@ function ports(
         priorAttributedPaths: [],
         repositoryChangedPaths: [...fileList],
         siblingOwnedPaths: [],
+        engineSkeletons: NO_ENGINE_SKELETONS,
       }),
     },
     newTests: {
@@ -762,6 +765,7 @@ function briefInput(graph: TaskGraph, task: Task, overrides: Partial<Implementat
     verificationManifest: graph.verification_manifest,
     repositoryRoot: ROOT,
     operatorNotes: [],
+    frozenSignatures: unobservedSkeletons(graph),
     ...overrides,
   };
 }

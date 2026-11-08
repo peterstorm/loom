@@ -11,17 +11,17 @@ import { mkdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } f
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
-import type { ExportBinding, Identifier } from "../../src/core/skeleton/types";
+import type { ExportBinding } from "../../src/core/skeleton/types";
 import { registerTaskExecutionBatch } from "../../src/handlers/task-execution";
 import { createValidateTaskExecutionHandler } from "../../src/handlers/pre-tool-use/validate-task-execution";
 import { materializeTaskSkeletons } from "../../src/orchestration/skeleton-materialization";
-import { StateManager } from "../../src/state-manager";
 import type { TaskGraph } from "../../src/types";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { contentDigest } from "../fixtures/acceptance-fixtures";
 import {
   canonicalSkeletonOf,
   cleanupSkeletonRepos,
+  graphOf,
   JAVA_EXISTING_TEXT,
   PATHS,
   recordedOutcomes,
@@ -34,6 +34,7 @@ import {
   TS_TYPES_TEXT,
   type SkeletonRepo,
 } from "../fixtures/skeleton-repo";
+import { binding } from "../fixtures/skeleton-builders";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 
 const roots: string[] = [];
@@ -160,9 +161,7 @@ describe("refusals are values", () => {
 
   it("a write whose locked record never landed is adopted by content at the next registration", async () => {
     const repo = skeletonRepo();
-    const manager = StateManager.fromPath(repo.statePath);
-    if (manager === null) throw new Error("fixture State File missing");
-    const unrecorded = materializeTaskSkeletons(repo.root, manager.load(), ["T4"]);
+    const unrecorded = materializeTaskSkeletons(repo.root, graphOf(repo), ["T4"]);
     expect(unrecorded.ok).toBe(true);
     expect(recordedSkeletons(repo.rawState()).size).toBe(0);
     const inode = statSync(join(repo.root, PATHS.tsQuotes)).ino;
@@ -218,14 +217,7 @@ describe("NFR-001: a 20-file Wave", () => {
     };
     const taskIds = ["T2", "T3", "T4", "T5"];
     const files = (taskId: string): readonly string[] => Array.from({ length: 5 }, (_, at) => `src/${taskId.toLowerCase()}/module-${at}.ts`);
-    const binding = (path: string): ExportBinding => ({
-      path,
-      contract: "CT-1",
-      exports: [
-        { name: "priceOrder" as Identifier, alias: "PriceOrderFn" as Identifier },
-        { name: "parseOrder" as Identifier, alias: "ParseOrderFn" as Identifier },
-      ],
-    });
+    const bindingOf = (path: string): ExportBinding => binding(path, "CT-1", ["priceOrder", "PriceOrderFn"], ["parseOrder", "ParseOrderFn"]);
     const graph: TaskGraph = {
       ...graphFixture(taskIds.map((id) => taskFixture({
         id,
@@ -239,7 +231,7 @@ describe("NFR-001: a 20-file Wave", () => {
         new_tests_required: false,
       }))),
       acceptance_contracts: [contract],
-      export_bindings: taskIds.flatMap(files).map(binding),
+      export_bindings: taskIds.flatMap(files).map(bindingOf),
     };
 
     const started = performance.now();

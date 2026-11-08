@@ -28,11 +28,10 @@ import {
   settleImplementationAttempt,
   type ImplementationAttemptAuthority,
 } from "../../src/core/implementation-completion";
-import { taskFixture, graphFixture } from "../fixtures/task-lifecycle";
+import { taskFixture, graphFixture, observedEvidence, trustedPassEvidence } from "../fixtures/task-lifecycle";
 import { deriveImplementationRetryDisposition } from "../../src/core/implementation-retry";
 import { capturedSpecCheck } from "../../src/core/spec-check";
 import type { TaskGraph } from "../../src/types";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 const roots: string[] = [];
 const previousState = process.env.LOOM_STATE_PATH;
@@ -356,14 +355,13 @@ describe("modern implementation attempt registration", () => {
         schemaVersion: 1,
         kind: "implementation-observed",
         observedAt: "2026-01-01T00:01:00.000Z",
-        evidence: {
-          contractConformance: CONFORMANCE_NOT_OWED,
+        evidence: observedEvidence({
           taskCompleted: false,
           testResult: { verdict: "trusted-pass" },
           filesModified: [],
           newTestsWritten: false,
           newTestEvidence: "waived",
-        },
+        }),
         proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
       },
       {
@@ -481,14 +479,7 @@ describe("modern implementation attempt registration", () => {
     if (!old.ok) throw new Error(old.error.errors.join("; "));
     const proof = evaluateTaskProof(
       { newTestsRequired: false, declaredArtifacts: ["src/a.ts"] },
-      {
-        contractConformance: CONFORMANCE_NOT_OWED,
-        taskCompleted: true,
-        testResult: { verdict: "trusted-pass" },
-        filesModified: ["src/a.ts"],
-        newTestsWritten: false,
-        newTestEvidence: "verification waived",
-      },
+      trustedPassEvidence(["src/a.ts"], { newTestsWritten: false, newTestEvidence: "verification waived" }),
     );
     if (proof.state !== "satisfied") throw new Error("fixture proof must be satisfied");
     const reviewed = taskFixture({

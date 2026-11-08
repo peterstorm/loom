@@ -34,7 +34,7 @@
 import { isNonEmpty, type DomainResult, type NonEmpty } from "../core/orchestration-contract";
 import { normalizePlanPath, samePlanPath } from "../core/plan-path-match";
 import { productionFiles } from "../core/skeleton/graph-view";
-import { presentSkeletonOf, skeletonOutcomesOf } from "../core/skeleton/outcomes";
+import { ABSENT, presentSkeletonOf, skeletonOutcomesOf } from "../core/skeleton/outcomes";
 import { renderResolutionProblem, renderSkeletonProblem, type LeftPreparedName } from "../core/skeleton/problems";
 import type { SkeletonCandidate } from "../core/skeleton/records";
 import type { AdoptAction, CreateAction, RefreshAction } from "../core/skeleton/refresh-plan";
@@ -60,8 +60,6 @@ export type TaskSkeletonPlan = Readonly<{
   outcomes: readonly PathSkeletonOutcome[];
   actions: readonly SkeletonAction[];
 }>;
-
-const ABSENT: PathObservation = Object.freeze({ kind: "absent" });
 
 /**
  * The outcomes and actions of one Task, given what was observed and the

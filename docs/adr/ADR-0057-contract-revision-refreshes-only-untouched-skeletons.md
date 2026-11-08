@@ -63,7 +63,8 @@ The forces pull in different directions:
 **After a revision is known to be admissible, the handler re-resolves the contract's bindings against the
 revised types file. It regenerates each untouched skeleton through the writer's guarded replace and flags
 each modified one `stale: { revision }`. Every resolution problem is named in the outcome, and the next
-spawn's stage two blocks on it. The writes happen before the locked update.**
+spawn's stage two blocks on it. Every prepared name a write left behind is named as a non-blocking note. The
+writes happen before the locked update.**
 
 ### Shell: `engine/src/handlers/helpers/revise-contract.ts` and `engine/src/orchestration/skeleton-revision.ts`
 
@@ -81,9 +82,9 @@ spawn's stage two blocks on it. The writes happen before the locked update.**
      retyped alias, is collected as a `SkeletonProblem`.
    - `observeSkeletonPaths` (`orchestration/skeleton-observation.ts`) reads each recorded path as a
      `PathObservation` (`absent`, or `present` with the current and canonical digests).
-   - The pure `planSkeletonRefresh("record-driven", records, observations, candidates)`
-     (`core/skeleton/refresh-plan.ts`, the planner the contract stop runs `candidate-driven`) assigns one
-     action per record through `presentSkeletonOf` (INV-4):
+   - The pure `planRecordRefresh(records, observations, candidates)`
+     (`core/skeleton/refresh-plan.ts`, beside the contract stop's `planCandidateRefresh`; both map
+     `presentSkeletonOf` through one shared step) assigns one action per record through `presentSkeletonOf` (INV-4):
      - **absent**: nothing. The next registration regenerates the file (FR-032).
      - **modified** (`touched`): `stale`. The bytes stay as they are.
      - **untouched**, and the bytes already equal the revised canonical bytes (`canonical`): `adopt`.
@@ -99,15 +100,22 @@ spawn's stage two blocks on it. The writes happen before the locked update.**
      `SkeletonProblem`. Frozen paths and symlinked ancestors are refused as they are for every writer entry
      point.
    - The function returns a `SkeletonRevision { settlements: ReadonlyMap<path, SkeletonSettlement>;
-     bindingProblems: SkeletonProblem[] }`, built by `skeletonRevisionOf`. A settlement is `refreshed` (the
-     record's new digests) or `stale`, one per normalized path, so no path can be both. It writes files but
+     bindingProblems: SkeletonProblem[]; leftovers: LeftPreparedName[] }`, built by `skeletonRevisionOf`. A
+     settlement is `refreshed` (the record's new digests) or `stale`, one per normalized path, so no path can
+     be both. `leftovers` lists each prepared name a write left behind (ADR-0059): a non-blocking note,
+     never a refusal, so the path it names is still settled as its write result says. It writes files but
      commits nothing.
 4. **Commit.** `manager.updateAndReturn` runs `reviseAcceptanceContract(locked, request, observations,
    skeletons)`, which decides admissibility again under the lock.
-5. **Report.** `revisionOutcomeMessage` (pure, `core/contract-revision.ts`) writes the revision line to stderr, then one line per item:
+5. **Report.** `revisionOutcomeMessage` (pure, `core/contract-revision.ts`) writes the revision line to stderr, then one line per item, in this order:
    - `skeleton refreshed <path> from the revised types`;
    - `skeleton <path>: stale against revised contract (modified, left as it is)`;
-   - `skeleton binding problem: … ; the next spawn's stage two blocks on it`.
+   - `skeleton binding problem: … ; the next spawn's stage two blocks on it`;
+   - `skeleton note: …`, one per prepared name a write left behind (`renderLeftPreparedName`, ADR-0059).
+
+   The per-skeleton lines have one owner in the skeleton package: `renderSkeletonRevisionLines` in
+   `engine/src/core/skeleton/status.ts`, beside the status renderer of the same stale flag.
+   `revisionOutcomeMessage` adds only the revision line and never words a skeleton line itself.
 
 ### Core: `engine/src/core/contract-revision.ts`
 
@@ -117,7 +125,8 @@ spawn's stage two blocks on it. The writes happen before the locked update.**
 - `revisedSkeletonRecords` sets `stale: { revision }` on the record of each `stale`-settled path.
   `installSkeletonRecords` (`core/skeleton/records.ts`) then installs the `refreshed` ones (`origin: "revision"`, the new `engineSha256`
   and `typesSha256`, `stale: null`), keeping one record per path in path order.
-- The `RevisedContract` outcome gains `refreshed`, `staleSkeletons` and `bindingProblems`.
+- The `RevisedContract` outcome gains `refreshed`, `staleSkeletons`, `bindingProblems` and `leftovers` (the
+  `SkeletonRevision`'s prepared names left behind, carried through unchanged as notes, never refusals).
 - Nothing else about a revision changes (OOS-008).
 
 ### Invariants honored
@@ -147,7 +156,8 @@ spawn's stage two blocks on it. The writes happen before the locked update.**
 - Divergence is recorded per file with the revision number that caused it (AS-050). Operators see in status
   and the brief which modified files must be reconciled, before the Wave Gate.
 - No new rules. Recognition, writing, stage two and status reuse their single owners, and the revision only
-  reuses the one refresh planner (`planSkeletonRefresh`, record-driven) and adds one shell step.
+  reuses the refresh planning module (`planRecordRefresh`, sharing its untouched-file step with the contract stop's
+  `planCandidateRefresh`) and adds one shell step.
 - Re-running a revision is idempotent. An untouched file already holding the revised canonical bytes is only
   adopted (re-recorded), with zero bytes changed.
 
