@@ -2,10 +2,10 @@
 
 **Spec ID:** 2026-11-02-g2-skeletons
 **Created:** 2026-11-02
-**Status:** Draft
+**Status:** Implemented — merged as PR #151 (2026-11-07). The as-built design is recorded in ADR-0048 through ADR-0062.
 **Owner:** Peter Storm (operator)
 
-**Sources:** `brainstorm.md` (approach A: skeletons from the frozen types file at wave start), plus the operator interview of 2026-11-02. Where they conflict, the interview wins. It made two changes. **Java is in this slice** and follows the same model as TypeScript. **Frozen algebraic data types are enforced** at Task completion in both languages: implementers must use the frozen ADTs and must not re-declare them.
+**Sources:** `brainstorm.md` (brainstorm approach A: skeletons from the frozen types file at wave start), plus the operator interview of 2026-11-02. Where they conflict, the interview wins. (Brainstorm approach letters name the brainstorm's options only. They are unrelated to ADR-0048's placement options A, B and C, where placement B, per-Task materialization inside the shared spawn reservation, was chosen.) The interview made two changes. **Java is in this slice** and follows the same model as TypeScript. **Frozen algebraic data types are enforced** at Task completion in both languages: implementers must use the frozen ADTs and must not re-declare them.
 
 ## Summary
 
@@ -264,7 +264,7 @@ This applies to both TypeScript and Java. Every case where no skeleton is produc
 Explicitly NOT part of this feature:
 
 - OOS-001: Skeletons for Rust or any language other than TypeScript and Java. Those files get only the honest "unsupported language, no skeleton" report.
-- OOS-002: Parsing the plan's free-form Component Design `**Interface:**` blocks as a signature source (approach B).
+- OOS-002: Parsing the plan's free-form Component Design `**Interface:**` blocks as a signature source (brainstorm approach B).
 - OOS-003: Skeletonizing internal helpers or non-exported structure.
 - OOS-004: Binding non-function exports as skeleton targets (constants, classes, type re-exports). Frozen ADTs are still enforced by the shadowing and re-listing checks; they are just not skeleton targets.
 - OOS-005: Skeletons for test files.
@@ -332,4 +332,5 @@ Resolved 2026-11-02: re-declaring two or more of a frozen ADT's variants is a vi
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-11-02 | Initial draft from brainstorm and operator interview (Java in scope, ADT enforcement added) | specify agent |
+| 2026-11-08 | Status set to implemented (PR #151, merged 2026-11-07); brainstorm approach letters qualified so they are not read as ADR-0048's placement options | review follow-up |
 | 2026-11-07 | Replaced the AS-016 and AS-043 clarification markers with the resolutions architecture shipped (ADR-0054, ADR-0056) | pre-PR cleanup |

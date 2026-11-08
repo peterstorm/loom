@@ -4,8 +4,9 @@ import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 import { obligationsFromInvariants, renderObligationsError, verifyOwed } from "./owner-verification/obligations";
 import type { ProofBoundaryObservation } from "./proof-boundary-observation";
 import { newWaveGate } from "./wave-gate-model";
-import { renderBindingProblem, validateExportBindings } from "./skeleton/bindings";
-import type { BindingTaskView, ExportBinding, ExportBindingsDeclaration, SkeletonRecord } from "./skeleton/types";
+import type { DomainResult } from "./orchestration-contract";
+import { bindingTaskView, NO_EXPORT_BINDINGS, renderBindingProblem, validateExportBindings } from "./skeleton/bindings";
+import type { ExportBinding, ExportBindingsDeclaration, SkeletonRecord } from "./skeleton/types";
 import { derivePendingTaskProof, redThenGreenScope, taskRedThenGreenEra, type RedThenGreenEra } from "./proof-obligations";
 import {
   ACCEPTANCE_RED_WINDOW,
@@ -165,10 +166,13 @@ export function resolvedSpecFile(
   return existing ?? authored ?? null;
 }
 
+/** A refusal: a failed population result, and a failed `DomainResult` of any step. */
+type PopulationRefusal = Readonly<{ ok: false; error: TaskGraphPopulationError }>;
+
 function reject(
   kind: TaskGraphPopulationError["kind"],
   message: string,
-): TaskGraphPopulationResult {
+): PopulationRefusal {
   return Object.freeze({ ok: false, error: Object.freeze({ kind, message }) });
 }
 
@@ -235,26 +239,6 @@ function ownerRunnerRefusal(
       );
 }
 
-/** What a plan without `**Export bindings:**` declares. */
-const NO_EXPORT_BINDINGS: ExportBindingsDeclaration = Object.freeze({ bindings: Object.freeze([]), problems: Object.freeze([]) });
-
-/** The roster as binding validation reads it: the authored regression waiver,
- *  as plan validation reads it, never the red-window one population adds. */
-const bindingTaskViews = (tasks: readonly AuthoredTask[]): readonly BindingTaskView[] =>
-  tasks.map((task) => {
-    const { regression } = taskVerificationPolicy(task);
-    return {
-      id: task.id,
-      file_list: task.file_list,
-      depends_on: task.depends_on ?? [],
-      regressionWaiver: regression.kind === "waived" ? regression.reason : null,
-    };
-  });
-
-type ExportBindingsStamp =
-  | Readonly<{ ok: true; value: readonly ExportBinding[] }>
-  | Readonly<{ ok: false; error: TaskGraphPopulationResult }>;
-
 /**
  * The `export_bindings` stamp (AD-4): the declaration's bindings in plan
  * order, once `validateExportBindings` refuses nothing against the plan's
@@ -266,17 +250,18 @@ function exportBindingsStamp(
   declaration: ExportBindingsDeclaration,
   contracts: readonly PlanContract[],
   tasks: readonly AuthoredTask[],
-): ExportBindingsStamp {
-  const problems = validateExportBindings(declaration, contracts, bindingTaskViews(tasks));
+): DomainResult<readonly ExportBinding[], TaskGraphPopulationError> {
+  // The roster as plan validation reads it: the authored regression waiver,
+  // never the red-window one population adds.
+  const views = tasks.map((task) =>
+    bindingTaskView({ id: task.id, file_list: task.file_list, depends_on: task.depends_on ?? [] }, taskVerificationPolicy(task)));
+  const problems = validateExportBindings(declaration, contracts, views);
   if (problems.length > 0) {
-    return {
-      ok: false,
-      error: reject(
-        "invalid-export-bindings",
-        `TaskGraph population refused: ${problems.map(renderBindingProblem).join("; ")}; ` +
-          "fix the plan's **Export bindings:**, then re-run populate-task-graph.",
-      ),
-    };
+    return reject(
+      "invalid-export-bindings",
+      `TaskGraph population refused: ${problems.map(renderBindingProblem).join("; ")}; ` +
+        "fix the plan's **Export bindings:**, then re-run populate-task-graph.",
+    );
   }
   return { ok: true, value: Object.freeze(declaration.bindings.map((binding) => Object.freeze({ ...binding }))) };
 }
@@ -414,7 +399,7 @@ export function populateTaskGraph(
   const runnerRefusal = ownerRunnerRefusal(ownerObligations, command.verificationManifest);
   if (runnerRefusal !== null) return runnerRefusal;
   const exportBindings = exportBindingsStamp(command.exportBindings ?? NO_EXPORT_BINDINGS, command.contracts, command.tasks);
-  if (!exportBindings.ok) return exportBindings.error;
+  if (!exportBindings.ok) return exportBindings;
   const skeletons = carriedSkeletons(existing.skeletons ?? [], exportBindings.value);
   const redWindow = redWindowTaskIds(contracts.value, command.tasks);
   const redThenGreen = redThenGreenScope(command.verificationManifest, contracts.value);

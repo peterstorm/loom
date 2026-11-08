@@ -7,18 +7,16 @@
  */
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import type { DomainResult } from "../../src/core/orchestration-contract";
 import { parseIdentifier } from "../../src/core/skeleton/bindings";
 import { readJavaTypesSurface } from "../../src/core/skeleton/java-surface";
 import { resolveBindings } from "../../src/core/skeleton/resolve";
 import { readTsTypesSurface } from "../../src/core/skeleton/ts-surface";
 import type {
-  ExportBinding,
-  Identifier,
   JavaTypesSurface,
   ResolutionProblem,
   TsTypesSurface,
 } from "../../src/core/skeleton/types";
+import { binding, unwrap } from "../fixtures/skeleton-builders";
 
 const TS_TYPES = "src/order/order-contract.ts";
 const JAVA_TYPES = "src/main/java/com/acme/order/OrderContract.java";
@@ -65,19 +63,6 @@ public interface OrderContract {
     record Price(long cents) {}
 }
 `;
-
-const unwrap = <T, E>(result: DomainResult<T, E>): T => {
-  if (!result.ok) throw new Error(`refused: ${JSON.stringify(result.error)}`);
-  return result.value;
-};
-
-const identifier = (raw: string): Identifier => unwrap(parseIdentifier(raw));
-
-const binding = (path: string, contract: string, ...exports: readonly (readonly [string, string])[]): ExportBinding => {
-  const [first, ...rest] = exports.map(([name, alias]) => ({ name: identifier(name), alias: identifier(alias) }));
-  if (first === undefined) throw new Error("fixture binding needs at least one export");
-  return { path, contract, exports: [first, ...rest] };
-};
 
 const tsSurface = (): TsTypesSurface => unwrap(readTsTypesSurface(TS_TYPES, TS_TYPES_TEXT));
 const javaSurface = (): JavaTypesSurface => unwrap(readJavaTypesSurface(JAVA_TYPES, JAVA_TYPES_TEXT));

@@ -14,6 +14,7 @@ import { sha256Bytes } from "../core/digest";
 import { isNonEmpty, type DomainResult } from "../core/orchestration-contract";
 import { normalizePlanPath, samePlanPath } from "../core/plan-path-match";
 import { productionFiles } from "../core/skeleton/graph-view";
+import { ABSENT } from "../core/skeleton/outcomes";
 import { renderResolutionProblem, renderSkeletonProblem, type SkeletonProblem } from "../core/skeleton/problems";
 import type { UnresolvedSkeletonBinding } from "../core/skeleton/status";
 import type { ExportBinding, FrozenSurface, PathObservation } from "../core/skeleton/types";
@@ -22,10 +23,7 @@ import { observeFrozenSurface, typedContract, type TypedContract } from "./froze
 import { resolveBaseDirectory } from "./no-follow-fs";
 import { readRepositoryLeafNoFollow } from "./repository-leaf";
 import { canonicalContractSkeletons } from "./skeleton-refresh";
-
-const ABSENT: PathObservation = Object.freeze({ kind: "absent" });
-
-const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+import { describeCause } from "../utils/describe-cause";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -69,7 +67,7 @@ export function observeSkeletonPaths(
   try {
     realRoot = resolveBaseDirectory(root);
   } catch (error) {
-    return { ok: false, error: `cannot resolve the repository root ${root}: ${errorMessage(error)}` };
+    return { ok: false, error: `cannot resolve the repository root ${root}: ${describeCause(error)}` };
   }
   const observed = [...new Set(paths)].map((path) => [path, observePath(realRoot, path, canonicalSha256(path))] as const);
   return {

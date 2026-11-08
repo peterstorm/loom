@@ -63,7 +63,8 @@ const written = (origin: SkeletonOrigin): SkeletonOutcome => Object.freeze({ kin
 const EXISTS: SkeletonOutcome = Object.freeze({ kind: "exists-not-skeletonized" });
 const NO_BOUND_EXPORTS: SkeletonOutcome = Object.freeze({ kind: "no-bound-exports" });
 const NO_TYPES_FILE: SkeletonOutcome = Object.freeze({ kind: "contract-has-no-types-file" });
-const ABSENT: PathObservation = Object.freeze({ kind: "absent" });
+/** What a path the observations do not mention is: absent. */
+export const ABSENT: PathObservation = Object.freeze({ kind: "absent" });
 
 /** Whether the Task claims a contract that freezes no types file. */
 const claimsTypelessContract = (graph: TaskGraph, task: Task): boolean =>

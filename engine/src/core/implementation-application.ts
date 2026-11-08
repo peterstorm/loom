@@ -83,15 +83,27 @@ export type TaskLocalObservationInput = Readonly<{
   priorAttributedPaths: readonly unknown[];
   repositoryChangedPaths: readonly unknown[];
   siblingOwnedPaths: readonly unknown[];
-  /** Every skeleton the engine recorded writing, with the digest of its
-   *  bytes (FR-012): bytes still equal to it are the engine's, never the
-   *  implementer's. The settlement shell always passes the graph's records;
-   *  absent reads as none recorded, which subtracts nothing. */
-  engineSkeletons?: readonly SkeletonRecord[];
-  /** The raw-bytes digest of each recorded skeleton path as it is now, keyed
-   *  by the record's path; a path holding no regular file has none. */
-  currentSkeletonDigests?: ReadonlyMap<string, string>;
+  /** Every skeleton the engine recorded writing, each beside what its path
+   *  holds now (FR-012): bytes still equal to the record's are the engine's,
+   *  never the implementer's. Required, so no caller can skip the
+   *  subtraction by omission; a caller with nothing recorded passes
+   *  `NO_ENGINE_SKELETONS`. */
+  engineSkeletons: EngineSkeletonObservation;
 }>;
+
+/** One skeleton the engine recorded writing, paired with the raw-bytes digest
+ *  its path holds now — `null` when the path holds no regular file. */
+export type ObservedEngineSkeleton = Readonly<{
+  record: SkeletonRecord;
+  currentDigest: string | null;
+}>;
+
+/** Every engine skeleton record, each with its current digest. The record and
+ *  its digest travel together, so neither can be supplied without the other. */
+export type EngineSkeletonObservation = readonly ObservedEngineSkeleton[];
+
+/** The observation for a graph that records no engine skeleton: it subtracts nothing. */
+export const NO_ENGINE_SKELETONS: EngineSkeletonObservation = Object.freeze([]);
 
 function parsePaths(raw: readonly unknown[], path: string):
   | Readonly<{ ok: true; value: readonly ReviewPath[] }>
@@ -153,9 +165,24 @@ const currentDigestOf = (scope: readonly DeclaredArtifactBaseline[], path: strin
   return snapshot?.kind === "sha256" ? snapshot.digest : null;
 };
 
-/** The engine's record of the skeleton it wrote at `path`, if any. */
-const engineRecordOf = (records: readonly SkeletonRecord[], path: string): SkeletonRecord | undefined =>
-  records.find((recorded) => samePlanPath(recorded.path, path));
+/**
+ * `paths` without those still holding engine-written skeleton bytes (FR-012).
+ * Whether bytes are still the engine's is the one untouched-skeleton judgment
+ * (`isUntouchedSkeleton`, INV-4) against the engine's record, read through the
+ * plan-path rule: a path the engine never wrote, or one with no current
+ * digest, never is. `digestNow` names which observation of the path's current
+ * bytes this subtraction judges.
+ */
+function withoutEngineSkeletonBytes(
+  paths: readonly ReviewPath[],
+  skeletons: EngineSkeletonObservation,
+  digestNow: (observed: ObservedEngineSkeleton, path: ReviewPath) => string | null,
+): readonly ReviewPath[] {
+  return frozenArray(paths.filter((path) => {
+    const observed = skeletons.find(({ record }) => samePlanPath(record.path, path));
+    return observed === undefined || !isUntouchedSkeleton(observed.record, digestNow(observed, path), null);
+  }));
+}
 
 /**
  * Build the one engine-owned Task suite from already-observed snapshots.
@@ -201,18 +228,19 @@ export function buildTaskLocalByteObservation(
   // Engine-written skeleton bytes are subtracted (FR-012): a declared
   // artifact still holding them never counts as the Task's production, and a
   // repository path still holding them (another Task's contract stub) never
-  // counts as an out-of-scope write.
-  // Whether bytes are still the engine's is the one untouched-skeleton
-  // judgment (`isUntouchedSkeleton`, INV-4) against the engine's record: a
-  // path the engine never wrote, or a missing file, never is.
-  const engineSkeletons = input.engineSkeletons ?? [];
-  const currentSkeletons = input.currentSkeletonDigests ?? new Map<string, string>();
-  const proofChanged = frozenArray(proof.changed.filter((path) =>
-    !isUntouchedSkeleton(engineRecordOf(engineSkeletons, path), currentDigestOf(proof.current, path), null)));
-  const repositoryChanged = repositoryPaths.value.filter((path) => {
-    const record = engineRecordOf(engineSkeletons, path);
-    return !isUntouchedSkeleton(record, record === undefined ? null : currentSkeletons.get(record.path) ?? null, null);
-  });
+  // counts as an out-of-scope write. A declared artifact's current bytes are
+  // the proof-scope snapshot's; a repository path's are the skeleton
+  // observation's own read.
+  const proofChanged = withoutEngineSkeletonBytes(
+    proof.changed,
+    input.engineSkeletons,
+    (_observed, path) => currentDigestOf(proof.current, path),
+  );
+  const repositoryChanged = withoutEngineSkeletonBytes(
+    repositoryPaths.value,
+    input.engineSkeletons,
+    ({ currentDigest }) => currentDigest,
+  );
   const allowed = attempt.baseline.map(({ artifact }) => artifact);
   const covered = (artifacts: readonly string[], path: string) =>
     artifacts.some((artifact) => artifactCovers(artifact, path));

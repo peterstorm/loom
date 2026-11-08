@@ -19,7 +19,7 @@ stubs, in the same skeleton format as US3 and US4, and MUST NOT ask the contract
 The spec left open when the engine writes them (AS-043, open question 2).
 
 The timing is the hard part. Implementation-Task skeletons are generated from a *frozen* types file
-when a Task registers (ADR for AD-2). Contract stubs cannot wait for the freeze, because RED is
+when a Task registers (ADR-0048; signatures come only from the frozen types file, ADR-0049). Contract stubs cannot wait for the freeze, because RED is
 observed with them already present: without them the acceptance file fails to collect, which G1
 refuses as a non-behavioral RED. They cannot be written before the contract Task runs either,
 because the types file they are generated from does not exist yet. So the stub point has to be
@@ -87,7 +87,7 @@ it before `runStopChecks` and before settlement.**
   2. *Generate.* Each resolved binding whose path `skeletonLanguageOf` (INV-6) maps to the types
      file's language gets the same canonical bytes registration writes, from `generateSkeleton`. A
      language mismatch is a `language-mismatch` problem. An unsupported path gets nothing.
-  3. *Plan.* The pure `planSkeletonRefresh` (`candidate-driven`, `core/skeleton/refresh-plan.ts`) decides
+  3. *Plan.* The pure `planCandidateRefresh` (`core/skeleton/refresh-plan.ts`, one action per canonical skeleton) decides
      each path's action through `presentSkeletonOf` (INV-4): `create` a missing path; `adopt` a file that already holds the canonical bytes;
      `refresh` an untouched stub whose canonical bytes changed after a stop-check block and further
      types-file edits. A file anyone else wrote gets no action.
@@ -103,17 +103,17 @@ it before `runStopChecks` and before settlement.**
   uncollected acceptance file, which G1 already refuses as a non-behavioral RED. Infrastructure
   failures (unloadable State File, unresolvable root, a records update that fails after the writes)
   are an error string in the same note. Writes come before the locked update, so a refused update
-  leaves canonical bytes that the next stop or registration adopts by content (AD-4).
+  leaves canonical bytes that the next stop or registration adopts by content (ADR-0051).
 - **Plan shape.** Bound paths leave the contract Task's `file_list`. AD-3's `validateExportBindings`
   refuses a bound path listed there, because the engine writes it. The contract brief and decompose
   rule 12 say the engine writes the stubs (FR-041, AS-045).
 - **Freeze and later Waves.** Freeze semantics are unchanged (OOS-008, AS-044). A stub is not a
   frozen path. At its owning implementation Wave it is an ordinary skeleton record: it reports
   "skeleton written (contract stub)", and the US5 and US6 conformance checks apply to it. Engine-byte
-  subtraction (ADR for AD-5) keeps an untouched stub out of the contract Task's out-of-scope set.
+  subtraction (ADR-0052) keeps an untouched stub out of the contract Task's out-of-scope set.
 - **Shared with revision.** `canonicalContractSkeletons`, `writePlanned` and `writeFailure`
   (`orchestration/skeleton-refresh.ts`), `observeSkeletonPaths` (`orchestration/skeleton-observation.ts`)
-  and the planner are also used by the Contract Revision refresh (AD-10, `orchestration/skeleton-revision.ts`),
+  and the planner are also used by the Contract Revision refresh (ADR-0057, `orchestration/skeleton-revision.ts`),
   so both refresh paths generate, observe, decide and write the same way.
 
 ## Consequences

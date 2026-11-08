@@ -11,19 +11,18 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
-import { registerTaskExecutionBatch } from "../../src/handlers/task-execution";
 import { attestOperation } from "../../src/handlers/helpers/attest-implementation";
-import type { ImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import {
+  authorityOf,
   canonicalSkeletonOf,
   cleanupSkeletonRepos,
   contractViolations,
   PATHS,
   proofFailureKinds,
+  registered,
   settleAttempt,
   SHADOWING_VIEW_TEXT,
   skeletonRepo,
-  spawnFor,
   storedTask,
   subjectAndReason,
   TS_LEGACY_TEXT,
@@ -31,18 +30,6 @@ import {
 } from "../fixtures/skeleton-repo";
 
 afterEach(cleanupSkeletonRepos);
-
-async function registered(repo: SkeletonRepo, ...taskIds: readonly string[]): Promise<ReadonlyMap<string, ImplementationAttemptAuthority>> {
-  const outcome = await registerTaskExecutionBatch(taskIds.map((taskId) => spawnFor(repo.rawState(), taskId)));
-  if (outcome.kind !== "registered") throw new Error(`registration refused: ${outcome.message}`);
-  return new Map(outcome.authorities.map((authority) => [authority.taskId, authority]));
-}
-
-const authority = (authorities: ReadonlyMap<string, ImplementationAttemptAuthority>, taskId: string): ImplementationAttemptAuthority => {
-  const found = authorities.get(taskId);
-  if (found === undefined) throw new Error(`no authority for ${taskId}`);
-  return found;
-};
 
 /** `quotes.ts` implemented as the contract requires: the bound name, its alias annotation, no marker. */
 const CONFORMING_QUOTES = `import type { PriceOrderFn } from "./order-contract";
@@ -71,7 +58,7 @@ function writeT4Remainder(repo: SkeletonRepo): readonly string[] {
 /** Register T4, leave `pricing.ts` exactly as the engine wrote it, implement
  *  `quotes.ts`, edit `legacy.ts` without fixing it, and settle. */
 async function settleT4WithUntouchedSkeleton(repo: SkeletonRepo): Promise<void> {
-  const attempt = authority(await registered(repo, "T4"), "T4");
+  const attempt = authorityOf(await registered(repo, "T4"), "T4");
   expect(repo.read(PATHS.tsPricing)).toBe(canonicalSkeletonOf(PATHS.tsPricing));
   repo.write(PATHS.tsQuotes, CONFORMING_QUOTES);
   repo.write(PATHS.tsLegacy, EDITED_LEGACY);
@@ -144,7 +131,7 @@ describe("completion against the frozen contract (CT-3)", () => {
 
   it("FR-012: implementing the skeleton is the implementer's write: once every bound export conforms, the file counts as changed and passes the contract", async () => {
     const repo = skeletonRepo();
-    const attempt = authority(await registered(repo, "T4"), "T4");
+    const attempt = authorityOf(await registered(repo, "T4"), "T4");
     expect(repo.read(PATHS.tsPricing)).toBe(canonicalSkeletonOf(PATHS.tsPricing));
 
     repo.write(PATHS.tsPricing, `import type { ParseOrderFn, PriceOrderFn } from "./order-contract";
@@ -183,9 +170,9 @@ describe("waived and attested Tasks are not judged (CT-3)", () => {
     repo.write(PATHS.tsLegacy, EDITED_LEGACY);
     const stateView = `${SHADOWING_VIEW_TEXT}\nexport const stateViewVersion = 2;\n`;
     repo.write(PATHS.stateView, stateView);
-    await settleAttempt(repo, authority(authorities, "T4"), [PATHS.tsQuotes, PATHS.tsLegacy, ...writeT4Remainder(repo)]);
-    await settleAttempt(repo, authority(authorities, "T7"), [PATHS.stateView]);
-    await settleAttempt(repo, authority(authorities, "T8"), []);
+    await settleAttempt(repo, authorityOf(authorities, "T4"), [PATHS.tsQuotes, PATHS.tsLegacy, ...writeT4Remainder(repo)]);
+    await settleAttempt(repo, authorityOf(authorities, "T7"), [PATHS.stateView]);
+    await settleAttempt(repo, authorityOf(authorities, "T8"), []);
   }
 
   it("FR-019: neither the signature nor the ADT check runs on a documentation-only waived Task or an attested Task, while a judged Task in the same Wave is refused", async () => {

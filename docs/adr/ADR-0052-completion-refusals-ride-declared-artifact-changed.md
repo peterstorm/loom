@@ -4,7 +4,7 @@
 Accepted (2026-11-07). Records AD-5 of the G2 skeletons plan
 (`.claude/plans/2026-11-02-g2-skeletons.md`; spec `.claude/specs/2026-11-02-g2-skeletons/spec.md`,
 FR-012 through FR-021, interview Q10a). Shipped on branch `feat/g2-skeletons` by T12, building on the
-conformance judge of T8 (ADR for AD-11) and the skeleton records of T10 and T11 (AD-4).
+conformance judge of T8 (ADR-0058) and the skeleton records of T10 and T11 (ADR-0051).
 
 ## Context
 
@@ -126,7 +126,7 @@ observation explicitly, and engine-written bytes are subtracted before the chang
   "Declared-artifact contract violations (declared-artifact-contract-violated) …; fix every one before
   completing". Under it each receipt entry is its file, then each encoded violation's subject, reason
   and remedy, then an "and N more violations not shown" line when the entry omitted any. It never
-  drops an entry it cannot parse; it shows that entry verbatim instead (FR-028).
+  drops an entry it cannot parse; it shows that entry verbatim instead (FR-021, AS-028).
 - **No drift semantics.** The new kind is not in `ATTESTATION_DRIFT_BASE_KINDS`. A contract violation
   is a semantic failure the next attempt can fix, not terminal attestation drift.
 
@@ -145,9 +145,12 @@ observation that carries no decision.
 
 **Positive:**
 - One failure variant carries the whole feature through Proof. No new obligation kind, evidence
-  variant or drift matcher was added, and existing consumers that switch on `ProofFailure["kind"]`
-  were made exhaustive by the compiler (status summaries, `failureSummary` in reconcile, and the
-  `proofFailureKind` mapping in `implementation-completion.ts`).
+  variant or drift matcher was added. The receipt encoding is compiler-exhaustive: `proofFailureKind`
+  in `implementation-completion.ts` is a ts-pattern `match` over `ProofFailure` that ends in
+  `.exhaustive()`, so a future `ProofFailure` variant fails to compile there until it is given its
+  receipt failure kind. Display-only summaries, such as `failureSummary` in reconcile, name the
+  artifact for the artifact-keyed kinds and fall back to the bare kind for the rest; they are not
+  exhaustive and need no change for a new variant.
 - An untouched skeleton is refused with an actionable reason (`still-unimplemented`, with the export
   name), not a generic "not changed".
 - Engine bytes can never count as implementer work, and the contract Task is never blamed for the

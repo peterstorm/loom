@@ -14,21 +14,15 @@ import {
 import type {
   DeclaredAlias,
   FrozenAdt,
-  SurfaceProblem,
   TsExportedBinding,
   TsImplementationSurface,
   TsTypesSurface,
 } from "../../src/core/skeleton/types";
-import type { DomainResult } from "../../src/core/orchestration-contract";
+import { unwrap } from "../fixtures/skeleton-builders";
 
 const REPO_ROOT = resolve(__dirname, "../../..");
 const TYPES = "src/order/order-contract.ts";
 const IMPL = "src/order/pricing.ts";
-
-const unwrap = <T>(result: DomainResult<T, SurfaceProblem>): T => {
-  if (!result.ok) throw new Error(`refused: ${JSON.stringify(result.error)}`);
-  return result.value;
-};
 
 const typesOf = (text: string, path = TYPES): TsTypesSurface => unwrap(readTsTypesSurface(path, text));
 const implOf = (text: string, path = IMPL): TsImplementationSurface => unwrap(readTsImplementationSurface(path, text));

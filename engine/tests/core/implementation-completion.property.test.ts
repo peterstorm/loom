@@ -39,7 +39,7 @@ import {
   evaluateProofObligations,
 } from "../../src/core/proof-obligations";
 import { value } from "../fixtures/parse-result";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
+import { observedEvidence, trustedPassEvidence } from "../fixtures/task-lifecycle";
 
 const baseline = (entries: readonly [string, string | null][]) => entries.map(([artifact, digest]) => ({
   artifact,
@@ -103,14 +103,7 @@ function observation(overrides: Record<string, unknown> = {}): Record<string, un
     schemaVersion: 1,
     kind: "implementation-observed",
     observedAt: "2026-08-23T00:01:00.000Z",
-    evidence: {
-      contractConformance: CONFORMANCE_NOT_OWED,
-      taskCompleted: true,
-      testResult: { verdict: "trusted-pass" },
-      filesModified: ["engine/src/a.ts", "engine/tests/a.test.ts"],
-      newTestsWritten: true,
-      newTestEvidence: "vitest: pass",
-    },
+    evidence: trustedPassEvidence(["engine/src/a.ts", "engine/tests/a.test.ts"], { newTestEvidence: "vitest: pass" }),
     proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
     ...overrides,
   };
@@ -502,18 +495,12 @@ describe("Implementation Completion Oracle", () => {
   it("preserves Pi structured provenance under the supplied ProofEvaluationPolicy", () => {
     const attempt = authority();
     const piObservation = observation({
-      evidence: {
-        contractConformance: CONFORMANCE_NOT_OWED,
+      evidence: observedEvidence({
         taskCompleted: true,
-        testResult: {
-          verdict: "untrusted",
-          passed: true,
-          label: "pi-structured: tool-result",
-          provenance: "pi-structured",
-        },
+        testResult: { verdict: "untrusted", passed: true, label: "pi-structured: tool-result", provenance: "pi-structured" },
         filesModified: ["engine/src/a.ts", "engine/tests/a.test.ts"],
         newTestsWritten: true,
-      },
+      }),
       proofEvaluationPolicy: PI_STRUCTURED_EVIDENCE_POLICY,
     });
     const transition = settledValue(settleImplementationAttempt(
@@ -536,13 +523,12 @@ describe("Implementation Completion Oracle", () => {
   it("classifies attempt-1 semantic failure as retry-required", () => {
     const attempt = authority(1);
     const failing = observation({
-      evidence: {
-        contractConformance: CONFORMANCE_NOT_OWED,
+      evidence: observedEvidence({
         taskCompleted: true,
         testResult: { verdict: "trusted-fail" },
         filesModified: [],
         newTestsWritten: false,
-      },
+      }),
     });
     const transition = settledValue(settleImplementationAttempt(
       task(attempt), attempt, attempt, failing, suiteResult(attempt),
@@ -558,20 +544,13 @@ describe("Implementation Completion Oracle", () => {
     fc.assert(fc.property(fc.constantFrom("trusted-fail", "missing-artifacts"), (failureMode) => {
       const attempt = authority(2, `reservation-attempt-2-${failureMode}`);
       const failedObservation = failureMode === "trusted-fail"
-        ? observation({ evidence: {
-            contractConformance: CONFORMANCE_NOT_OWED,
-            taskCompleted: true,
-            testResult: { verdict: "trusted-fail" },
-            filesModified: ["engine/src/a.ts", "engine/tests/a.test.ts"],
-            newTestsWritten: true,
-          } })
-        : observation({ evidence: {
-            contractConformance: CONFORMANCE_NOT_OWED,
-            taskCompleted: true,
-            testResult: { verdict: "trusted-pass" },
-            filesModified: [],
-            newTestsWritten: true,
-          } });
+        ? observation({ evidence: observedEvidence({
+          taskCompleted: true,
+          testResult: { verdict: "trusted-fail" },
+          filesModified: ["engine/src/a.ts", "engine/tests/a.test.ts"],
+          newTestsWritten: true,
+        }) })
+        : observation({ evidence: trustedPassEvidence([]) });
       const transition = settledValue(settleImplementationAttempt(
         task(attempt), attempt, attempt, failedObservation, suiteResult(attempt),
       ));
@@ -629,7 +608,7 @@ describe("Implementation Completion Oracle", () => {
       authoredProof().obligations,
       parsedObservation.kind === "implementation-observed"
         ? parsedObservation.evidence
-        : { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: false, filesModified: [] },
+        : observedEvidence({ taskCompleted: false, filesModified: [] }),
     );
     if (satisfied.state !== "satisfied") throw new Error("fixture must satisfy proof");
     expect(settledValue(settleImplementationAttempt(
@@ -690,13 +669,12 @@ describe("settlement receipt history", () => {
       task(secondAttempt),
       secondAttempt,
       secondAttempt,
-      observation({ evidence: {
-        contractConformance: CONFORMANCE_NOT_OWED,
+      observation({ evidence: observedEvidence({
         taskCompleted: false,
         testResult: { verdict: "trusted-fail" },
         filesModified: [],
         newTestsWritten: false,
-      } }),
+      }) }),
       suiteResult(secondAttempt),
     ));
     if (first.kind !== "implemented" || second.kind !== "escalation-required") {

@@ -26,8 +26,8 @@ import { parsePlanModels, parsePlanExportBindings, hasModels, renderStray, type 
 import { contractBindingErrors, contractWriter, frozenPaths, type ContractBindingTask } from "../../core/acceptance-contract";
 import { firstOwingWave, type ScheduledTask } from "../../core/owner-verification/obligations";
 import { dependsOnAny } from "../../core/task-dependencies";
-import { parseVerificationPolicy, type NewTestWaiverReason, type RegressionWaiverReason } from "../../core/verification-policy";
-import { renderBindingProblem, validateExportBindings } from "../../core/skeleton/bindings";
+import { parseVerificationPolicy, type NewTestWaiverReason, type VerificationPolicy } from "../../core/verification-policy";
+import { bindingTaskView, NO_EXPORT_BINDINGS, renderBindingProblem, validateExportBindings } from "../../core/skeleton/bindings";
 import type { ExportBindingsDeclaration } from "../../core/skeleton/types";
 import type { OwnershipProblem, PlanInvariant } from "../../types";
 import { observePathPresence, type PathPresence } from "../../utils/path-presence";
@@ -99,23 +99,21 @@ type TaskRecord = Readonly<{
   claims: readonly string[];
   /** The `verification_policy.new_tests` waiver reason, when waived. */
   newTestWaiver: NewTestWaiverReason | null;
-  /** The `verification_policy.regression` waiver reason, when waived. */
-  regressionWaiver: RegressionWaiverReason | null;
+  /** The authored `verification_policy`; null when it does not parse (structural validation reports it). */
+  policy: VerificationPolicy | null;
 }>;
 
 const strings = (raw: unknown): readonly string[] =>
   Array.isArray(raw) ? raw.filter((value): value is string => typeof value === "string") : [];
 
-/** The authored waivers, read through the one policy parser; a malformed
- *  policy waives nothing here, and structural validation reports it. */
-function waivers(policy: unknown): Pick<TaskRecord, "newTestWaiver" | "regressionWaiver"> {
-  const parsed = parseVerificationPolicy(policy);
-  if (!parsed.ok) return { newTestWaiver: null, regressionWaiver: null };
-  const { newTests, regression } = parsed.value;
-  return {
-    newTestWaiver: newTests.kind === "waived" ? newTests.reason : null,
-    regressionWaiver: regression.kind === "waived" ? regression.reason : null,
-  };
+/** The authored policy and its new-test waiver, read through the one policy
+ *  parser; a malformed policy waives nothing here, and structural validation
+ *  reports it. */
+function waivers(raw: unknown): Pick<TaskRecord, "newTestWaiver" | "policy"> {
+  const parsed = parseVerificationPolicy(raw);
+  if (!parsed.ok) return { newTestWaiver: null, policy: null };
+  const { newTests } = parsed.value;
+  return { newTestWaiver: newTests.kind === "waived" ? newTests.reason : null, policy: parsed.value };
 }
 
 /** Total over the raw roster: a repair input may carry entries that are not
@@ -282,9 +280,6 @@ function contractBindingTasks(tasks: readonly Record<string, unknown>[]): readon
     ({ id, file_list: files, spec_anchors: claims, depends_on: dependsOn, newTestWaiver: waiver }));
 }
 
-/** What a plan without `**Export bindings:**` declares. */
-const NO_EXPORT_BINDINGS: ExportBindingsDeclaration = { bindings: [], problems: [] };
-
 /**
  * Validate a plan's model bindings against the task roster. `exportBindings`
  * is the plan's `parsePlanExportBindings` result; it is kept apart from
@@ -420,8 +415,8 @@ export function validateModelBindings(
 
   errors.push(...contractBindingErrors(models.contracts, bindingTasks));
 
-  const bindingViews = taskRecords(tasks).map(({ id, files, dependsOn, regressionWaiver }) =>
-    ({ id, file_list: files, depends_on: dependsOn, regressionWaiver }));
+  const bindingViews = taskRecords(tasks).map(({ id, files, dependsOn, policy }) =>
+    bindingTaskView({ id, file_list: files, depends_on: dependsOn }, policy));
   for (const problem of validateExportBindings(exportBindings, models.contracts, bindingViews)) {
     errors.push(`Export bindings: ${renderBindingProblem(problem)}`);
   }

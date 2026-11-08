@@ -26,7 +26,7 @@ import {
 } from "../../../src/handlers/helpers/reconcile-implementation-proof";
 import type { Task } from "../../../src/types";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence } from "../../../src/types";
-import { taskFixture } from "../../fixtures/task-lifecycle";
+import { taskFixture, observedEvidence } from "../../fixtures/task-lifecycle";
 import { CONFORMANCE_NOT_OWED } from "../../../src/core/skeleton/conformance-verdict";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
@@ -45,14 +45,7 @@ const testResult = {
 function failedTask(taskCompleted = true): Task {
   const proof = evaluateTaskProof(
     { newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
-    {
-      taskCompleted,
-      testResult,
-      contractConformance: CONFORMANCE_NOT_OWED,
-      filesModified: [],
-      newTestsWritten: false,
-      newTestEvidence: "",
-    },
+    observedEvidence({ taskCompleted, testResult, filesModified: [], newTestsWritten: false, newTestEvidence: "" }),
     PI_STRUCTURED_EVIDENCE_POLICY,
   );
   if (proof.state !== "failed") throw new Error("failed Task fixture must carry failed Proof");
@@ -422,14 +415,13 @@ describe("reconcileTaskFromStoredEvidence", () => {
   it("reopens an implemented task when deleted tests invalidate a previously satisfied proof", () => {
     const satisfiedProof = evaluateTaskProof(
       { newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
-      {
-        contractConformance: CONFORMANCE_NOT_OWED,
+      observedEvidence({
         taskCompleted: true,
         testResult,
         filesModified: ["src/a.ts"],
         newTestsWritten: true,
         newTestEvidence: "1 new test method, 2 assertions",
-      },
+      }),
       PI_STRUCTURED_EVIDENCE_POLICY,
     );
     if (satisfiedProof.state !== "satisfied") throw new Error("fixture must carry satisfied Proof");

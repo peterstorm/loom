@@ -16,8 +16,8 @@
  * operator types it, over the skeleton fixture repository.
  */
 
-import { chmodSync } from "node:fs";
-import { join } from "node:path";
+import { renameSync, symlinkSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import { classifyImplementationWindow, type ImplementationReservationStatusObservation } from "../../src/core/implementation-window";
@@ -33,9 +33,10 @@ import {
   type SkeletonStatusReport,
   type UnresolvedSkeletonBinding,
 } from "../../src/core/skeleton/status";
-import type { ExportBinding, Identifier, PathObservation, SkeletonOutcome, SkeletonRecord } from "../../src/core/skeleton/types";
+import type { ExportBinding, PathObservation, SkeletonOutcome, SkeletonRecord } from "../../src/core/skeleton/types";
 import type { Task, TaskGraph } from "../../src/types";
 import { digest } from "../fixtures/acceptance-fixtures";
+import { binding } from "../fixtures/skeleton-builders";
 import {
   cleanupSkeletonRepos,
   OUTCOME_TEXT,
@@ -45,7 +46,7 @@ import {
   someLine,
   statusAliasProblems,
   statusDocument,
-  TS_CONTRACT as REPO_TS_CONTRACT,
+  TS_CONTRACT,
   TS_TYPES_TEXT,
 } from "../fixtures/skeleton-repo";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
@@ -87,11 +88,7 @@ const contract = (id: string, types: AcceptanceContract["types"], anchor: string
   revisions: [],
 });
 
-const bound = (path: string): ExportBinding => ({
-  path,
-  contract: "CT-1",
-  exports: [{ name: "priceOrder" as Identifier, alias: "PriceOrderFn" as Identifier }],
-});
+const bound = (path: string): ExportBinding => binding(path, "CT-1", ["priceOrder", "PriceOrderFn"]);
 
 const record = (path: string, stale: SkeletonRecord["stale"] = null): SkeletonRecord => ({
   path,
@@ -320,7 +317,6 @@ describe("classifyImplementationWindow: skeleton-bindings-unresolved", () => {
       kind: "window",
       recovery: { kind: "spawn-wave-implementation" },
     });
-    expect(classifyImplementationWindow(WINDOW_GRAPH, observed)).toMatchObject({ recovery: { kind: "spawn-wave-implementation" } });
   });
 
   it("leaves a Wave with nothing to spawn alone: only a spawn is blocked", () => {
@@ -403,38 +399,39 @@ describe("helper orchestration status --json", () => {
 
   it("a skeleton path status cannot read is reported unobserved under the skeletons-unobserved reason, and the spawn is still owed", () => {
     const repo = skeletonRepo();
+    // A regular file reached through a symlinked parent: lstat sees a file,
+    // and the no-follow read refuses the link. Unlike a mode-000 file, this
+    // stays unreadable when the suite runs as root.
+    const directory = dirname(PATHS.tsPricing);
+    renameSync(join(repo.root, directory), join(repo.root, `${directory}-real`));
+    symlinkSync(`${basename(directory)}-real`, join(repo.root, directory));
     repo.write(PATHS.tsPricing, "export {};\n");
-    chmodSync(join(repo.root, PATHS.tsPricing), 0o000);
-    try {
-      const document = statusDocument(repo) as Readonly<{
-        skeletons: ReportedJson;
-        next: { reasons: readonly { kind: string; message: string }[] };
-      }>;
-      expect(document.skeletons.kind).toBe("unobserved");
-      const reason = document.next.reasons.find(({ kind }) => kind === "skeletons-unobserved");
-      expect(reason?.message).toContain(PATHS.tsPricing);
-      expect(document.next.reasons.map(({ kind }) => kind)).toContain("wave-gate-not-started");
-    } finally {
-      chmodSync(join(repo.root, PATHS.tsPricing), 0o644);
-    }
+    const document = statusDocument(repo) as Readonly<{
+      skeletons: ReportedJson;
+      next: { reasons: readonly { kind: string; message: string }[] };
+    }>;
+    expect(document.skeletons.kind).toBe("unobserved");
+    const reason = document.next.reasons.find(({ kind }) => kind === "skeletons-unobserved");
+    expect(reason?.message).toContain(PATHS.tsPricing);
+    expect(document.next.reasons.map(({ kind }) => kind)).toContain("wave-gate-not-started");
   });
 
   it("AS-051: a frozen types file that drifted from its stamp blocks the spawn, naming the types file", () => {
     const repo = skeletonRepo();
-    repo.write(REPO_TS_CONTRACT.types, `${TS_TYPES_TEXT}export type Drift = string;\n`);
+    repo.write(TS_CONTRACT.types, `${TS_TYPES_TEXT}export type Drift = string;\n`);
     const status = statusDocument(repo);
     const text = JSON.stringify(status);
     expect(text).toContain("skeleton-bindings-unresolved");
     expect(text).toContain("types-drifted");
-    expect(text).toContain(REPO_TS_CONTRACT.types);
+    expect(text).toContain(TS_CONTRACT.types);
     expect(statusAliasProblems(status)).toEqual([]);
-    expect(orchestrationStatus(repo, false).stdout).toContain(`unresolved: the frozen types file ${REPO_TS_CONTRACT.types}`);
+    expect(orchestrationStatus(repo, false).stdout).toContain(`unresolved: the frozen types file ${TS_CONTRACT.types}`);
   });
 
   it("AS-051: a missing alias in the frozen types names the alias, the binding file and the types file", () => {
     const repo = skeletonRepo({ tsTypesText: TS_TYPES_TEXT.replace("export type ParseOrderFn = (raw: string) => Order;\n", "") });
     expect(statusAliasProblems(statusDocument(repo))).toEqual([
-      { kind: "missing-alias", alias: "ParseOrderFn", path: PATHS.tsPricing, typesFile: REPO_TS_CONTRACT.types },
+      { kind: "missing-alias", alias: "ParseOrderFn", path: PATHS.tsPricing, typesFile: TS_CONTRACT.types },
     ]);
   });
 });

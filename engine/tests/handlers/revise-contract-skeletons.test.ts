@@ -20,15 +20,15 @@ import reviseContract from "../../src/handlers/helpers/revise-contract";
 import { observeFrozenDigests } from "../../src/orchestration/frozen-path-observation";
 import { refreshRevisedSkeletons } from "../../src/orchestration/skeleton-revision";
 import type { SkeletonRecord } from "../../src/core/skeleton/types";
-import { StateManager } from "../../src/state-manager";
 import type { TaskGraph } from "../../src/types";
 import { parseCanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import {
   canonicalJavaSkeleton,
   canonicalSkeletonOf,
   cleanupSkeletonRepos,
+  graphOf,
   JAVA_CONTRACT,
-  JAVA_TYPES_TEXT,
+  JAVA_TYPES_WITH_CURRENCY,
   PATHS,
   recordedSkeletons,
   seededRecord,
@@ -38,6 +38,7 @@ import {
   TS_TYPES_TEXT,
   type SkeletonRepo,
 } from "../fixtures/skeleton-repo";
+import { duringPreparedName } from "../fixtures/skeleton-write-race";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -53,10 +54,6 @@ export const parseOrder: ParseOrderFn = (raw) => ({ id: raw, lines: [] });
 
 const TS_TYPES_WITH_REFUND = `${TS_TYPES_TEXT}export type RefundFn = (order: Order) => Price;\n`;
 const TS_TYPES_WITHOUT_PARSE_ORDER = TS_TYPES_TEXT.replace("export type ParseOrderFn = (raw: string) => Order;\n", "");
-const JAVA_TYPES_WITH_CURRENCY = JAVA_TYPES_TEXT.replace(
-  "Price apply(Order order, int quantity);",
-  "Price apply(Order order, int quantity, String currency);",
-);
 const JAVA_PRICING_REVISED = canonicalJavaSkeleton(
   PATHS.javaPricing,
   [{ name: "priceOrder", alias: "PriceOrderFn" }, { name: "parseOrder", alias: "ParseOrderFn" }],
@@ -76,12 +73,6 @@ const frozenObservations = (repo: SkeletonRepo, graph: TaskGraph) => {
   const root = parseCanonicalRepositoryRoot(repo.root);
   if (!root.ok) throw new Error("fixture root is not canonical");
   return observeFrozenDigests(root.value, frozenPathsToObserve(graph.acceptance_contracts ?? []));
-};
-
-const graphOf = (repo: SkeletonRepo): TaskGraph => {
-  const manager = StateManager.fromPath(repo.statePath);
-  if (manager === null) throw new Error("fixture State File missing");
-  return manager.load();
 };
 
 async function revise(contract: string): Promise<{ kind: string; message: string; stderr: string }> {
@@ -190,32 +181,16 @@ describe("the revise-contract handler", () => {
   });
 });
 
-/**
- * Run `edit` once, the first time the skeleton writer draws its prepared
- * name: after the revision observed the file and planned its refresh, and
- * before the writer's own digest guard reads it.
- */
-function editDuringTheWrite(edit: () => void): void {
-  const random = Math.random.bind(Math);
-  let edited = false;
-  vi.spyOn(Math, "random").mockImplementation(() => {
-    if (!edited && (new Error().stack ?? "").includes("preparedName")) {
-      edited = true;
-      edit();
-    }
-    return random();
-  });
-}
-
 describe("a skeleton modified after the revision observed it (ADR-0057)", () => {
   it("is refused by the writer as `modified`, keeps the implementer's bytes, and its record is flagged stale in the same commit", async () => {
     const repo = seededRepo([PATHS.javaPricing]);
     repo.write(JAVA_CONTRACT.types, JAVA_TYPES_WITH_CURRENCY);
     const implemented = "package com.acme.order.pricing;\n\nfinal class Pricing {}\n";
-    editDuringTheWrite(() => writeFileSync(join(repo.root, PATHS.javaPricing), implemented));
+    const race = duringPreparedName(() => writeFileSync(join(repo.root, PATHS.javaPricing), implemented));
 
     const revision = await revise("CT-2");
 
+    expect(race.fired()).toBe(true);
     expect(revision.kind, revision.message).toBe("passthrough");
     expect(repo.read(PATHS.javaPricing)).toBe(implemented);
     const state = repo.rawState();
@@ -230,10 +205,11 @@ describe("a skeleton modified after the revision observed it (ADR-0057)", () => 
   it("settles that path stale, never refreshed, in what the refresh hands the commit", () => {
     const repo = seededRepo([PATHS.javaPricing]);
     repo.write(JAVA_CONTRACT.types, JAVA_TYPES_WITH_CURRENCY);
-    editDuringTheWrite(() => writeFileSync(join(repo.root, PATHS.javaPricing), "edited\n"));
+    const race = duringPreparedName(() => writeFileSync(join(repo.root, PATHS.javaPricing), "edited\n"));
 
     const refreshed = refreshRevisedSkeletons(repo.root, graphOf(repo), "CT-2");
 
+    expect(race.fired()).toBe(true);
     expect(refreshed).toEqual({ ok: true, value: skeletonRevisionOf([[PATHS.javaPricing, { kind: "stale" }]], []) });
   });
 });
@@ -334,6 +310,22 @@ describe("reviseAcceptanceContract commits the skeleton revision (pure)", () => 
 
     expect(revised.ok && revised.value.leftovers).toEqual(leftovers);
     expect(revised.ok && revised.value.graph.skeletons).toEqual(graph.skeletons);
+  });
+
+  it("reports as stale only the paths whose record it flags: a stale settlement with no record is neither flagged nor named", () => {
+    const repo = seededRepo([PATHS.tsQuotes], { [PATHS.tsPricing]: IMPLEMENTED_PRICING });
+    repo.write(TS_CONTRACT.types, TS_TYPES_WITH_REFUND);
+    const graph = graphOf(repo);
+    const skeletons = skeletonRevisionOf([["src/never-recorded.ts", { kind: "stale" }], [PATHS.tsPricing, { kind: "stale" }]], []);
+
+    const revised = reviseAcceptanceContract(graph, { contract: "CT-1", reason: "why" }, frozenObservations(repo, graph), skeletons);
+
+    expect(revised.ok).toBe(true);
+    if (!revised.ok) return;
+    const flagged = (revised.value.graph.skeletons ?? []).filter(({ stale }) => stale !== null).map(({ path }) => path);
+    expect(flagged).toEqual([PATHS.tsPricing]);
+    expect(revised.value.staleSkeletons).toEqual(flagged);
+    expect(revisionOutcomeMessage(revised.value)).not.toContain("never-recorded");
   });
 
   it("leaves the skeletons untouched with no skeleton revision", () => {
