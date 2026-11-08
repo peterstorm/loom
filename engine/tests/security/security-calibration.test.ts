@@ -313,7 +313,9 @@ describe("the fixture is not a happy-path prop", () => {
   it("fails to reach a defect whose attack class no seeded unit covers", () => {
     // Drop the access-control cell: the authorization defect now belongs to no
     // unit, which is exactly the gap the enumeration exists to make visible.
-    const withoutAuthz = seeds().slice(0, -1).filter((_seed, index) => DEFECTS.defects[index].attack_class !== "broken-access-control");
+    const withoutAuthz = DEFECTS.defects
+      .filter((defect) => defect.attack_class !== "broken-access-control")
+      .map((defect) => aSeed({ refs: refsFor(defect), starting_paths: [defect.file] }));
     const parsed = parseCoverageSeeds(withoutAuthz);
     if (!parsed.ok) throw new Error(JSON.stringify(parsed.error));
     const covered = new Set(parsed.value.map((unit) => unit.attack_class));

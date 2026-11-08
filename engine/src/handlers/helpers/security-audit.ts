@@ -165,21 +165,23 @@ function openStore(out: string): DomainResult<Store, string> {
 
 const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 
-/** Sort a wire list by fingerprint when it is a list of objects that carry one;
- *  anything else passes through so the parser names the actual violation
- *  rather than a comparator returning NaN. */
-function sortByFingerprint(raw: unknown): unknown {
-  if (!Array.isArray(raw)) return raw;
+/** The fingerprint order, and the one place it is defined: the published
+ *  document is sorted by it, and a hunter's wire list is sorted into it. Entries
+ *  that carry no fingerprint compare equal, so the parser — not a comparator
+ *  returning NaN — names the actual violation. */
+const byFingerprint = (left: unknown, right: unknown): number => {
   const fingerprintOf = (entry: unknown): string | null =>
     entry !== null && typeof entry === "object" && typeof (entry as { fingerprint?: unknown }).fingerprint === "string"
       ? (entry as { fingerprint: string }).fingerprint
       : null;
-  return [...raw].sort((left, right) => {
-    const a = fingerprintOf(left);
-    const b = fingerprintOf(right);
-    return a === null || b === null ? 0 : compareStrings(a, b);
-  });
-}
+  const a = fingerprintOf(left);
+  const b = fingerprintOf(right);
+  return a === null || b === null ? 0 : compareStrings(a, b);
+};
+
+/** Sort a wire list by fingerprint; a non-list passes through untouched so the
+ *  parser sees the shape it was sent. */
+const sortByFingerprint = (raw: unknown): unknown => (Array.isArray(raw) ? [...raw].sort(byFingerprint) : raw);
 
 // --- Document parsers, each owned by the core that defines the document ---
 
@@ -496,7 +498,7 @@ function runSubmit(store: Store, args: readonly string[], stdin: string): Domain
   }
   if (settled.length === 0 && filed.value.length === 0) return failure("submit carried neither unit results nor findings");
 
-  const merged = [...existing.value, ...filed.value].sort((left, right) => compareStrings(left.fingerprint, right.fingerprint));
+  const merged = [...existing.value, ...filed.value].sort(byFingerprint);
   const consolidated = parseSecurityFindings(merged);
   if (!consolidated.ok) return failure(`filed findings are malformed —\n${describeRefusal(consolidated.error)}`);
 
