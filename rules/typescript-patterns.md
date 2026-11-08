@@ -126,6 +126,12 @@ const getDiscount = (customer: Customer): number =>
     .otherwise(() => 0);
 ```
 
+**`switch` over a union is the un-checked form.** A `switch` with every arm listed and a declared return type *does* fail to compile when a variant is added — but only where every arm returns. A switch that assigns, pushes or falls through, or whose scrutinee is `unknown`/`string` (the wire-parsing case), compiles happily and silently stops covering the new variant. `match(x).exhaustive()` is a compile error either way; when you keep a `switch`, give it a `default` arm that binds the scrutinee to `never` (`const _: never = x`). `default: throw new Error("unreachable")` is NOT a proof — it compiles after the new variant lands.
+
+**`exhaustive()` THROWS at runtime on an unexpected tag.** That is the right behaviour for a value the type system owns, and the wrong behaviour for a wire document: a validator asked to judge `{status: "bogus"}` must report the violation, not crash on it. Guard membership first (`if (!isStatus(raw)) return violations;`), then match — the exhaustive arm stays compile-checked for the values that reach it. For a scrutinee the type system does *not* own (a parsed `o.kind: unknown`), use `.otherwise(() => null)` and let the fallback name the unknown-kind arm explicitly.
+
+**`Array.isArray(x)` narrows to `any[]`, not `unknown[]`.** Every element read after the guard is `any`, which silently erases the element type — and under `noImplicitAny` it surfaces as `TS7006` at the *callback*, not at the guard, so the error points away from the cause. Use a typed predicate (`const isRow = (v: unknown): v is Row => ...`, `z.array(rowSchema)`) or write `Array.isArray(x as unknown)` to keep the narrowing honest.
+
 ## Branded Types for Stringly-Typed Parameters
 Prevent argument-swap bugs by branding primitive types that represent distinct domain concepts.
 

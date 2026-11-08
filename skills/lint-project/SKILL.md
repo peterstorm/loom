@@ -173,6 +173,30 @@ Files scanned: N | Violations: N (boundary: X, purity: Y, quality: Z)
 
 ---
 
+## Editing the linter itself
+
+When the linter is what you are changing, two things behave differently from
+editing ordinary code:
+
+**The edit-time hook reads the INSTALLED plugin's rules, not your checkout.**
+`lintFile` resolves `lint-rules/` and `engine/src/linter/` from the loom
+installation the hook was loaded from, so a rule you just wrote in a worktree —
+or a `perFileExactAllow` grant you just added to a worktree's config — is
+invisible to the hook until it loads your build. A new rule therefore proves
+itself with `bun scripts/lint-project.ts` (which lints the checkout it lives in)
+plus its own test, never with "the hook stayed quiet".
+
+**A rule that only subtracts violations is a rule that silently stops
+applying.** Grandfathered baselines (`switch-totality`, `exhaustive-discriminant-
+branching`) excuse sites that predate the rule, and their failure mode is
+silence: a renamed scrutinee or a deleted switch leaves an entry protecting
+nothing. Both lists are asserted against the live tree by
+`tests/linter/programmatic/totality-baseline.test.ts`, and
+`scripts/lint-project.ts` reports stale entries and exits non-zero on them.
+When you add a baseline-backed rule, add both.
+
+---
+
 ## Troubleshooting
 
 **"Rule file config.json: 'kind' must be a non-empty string"**
