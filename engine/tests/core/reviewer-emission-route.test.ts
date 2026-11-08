@@ -88,7 +88,7 @@ describe("issuedReviewerEmissionRoute", () => {
     "routes a %s reviewer on the qualified Pi route to the mint's own cell",
     (version, protocol, program) => {
       const authority = qualified({ program });
-      const route = issuedReviewerEmissionRoute(protocol, authority, true);
+      const route = issuedReviewerEmissionRoute(protocol, authority, true, null);
       expect(route.kind).toBe("emission");
       if (route.kind !== "emission") return;
       const minted = issueEmissionBinding({ requestId: authority.requestId, kind: "reviewer-payload", version });
@@ -99,7 +99,25 @@ describe("issuedReviewerEmissionRoute", () => {
   );
 
   it("keeps the archived schema-1 contract extraction-only even on the qualified route", () => {
-    expect(issuedReviewerEmissionRoute(V1, qualified(), true).kind).toBe("extraction-only");
+    expect(issuedReviewerEmissionRoute(V1, qualified(), true, null).kind).toBe("extraction-only");
+  });
+
+  it("derives one answer for render and capture when model routing inherits the parent model", () => {
+    const inherited = Object.freeze({ provider: CATALOG_PI.provider, model: "warmind-1017-native" });
+    // Both shells call this one function, so pinning the off-route arm here
+    // pins their agreement: the task carries no descriptor AND capture expects
+    // no emission call.
+    expect(issuedReviewerEmissionRoute(V2, qualified(), true, inherited)).toMatchObject({
+      kind: "extraction-only",
+      reason: expect.stringContaining(`model routing launches this child on ${inherited.provider}/${inherited.model}`),
+    });
+    // Routing that resolves back onto the frozen route, and no routing
+    // observation at all, both keep the emission arm.
+    expect(issuedReviewerEmissionRoute(V2, qualified(), true, Object.freeze({
+      provider: CATALOG_PI.provider,
+      model: CATALOG_PI.model,
+    })).kind).toBe("emission");
+    expect(issuedReviewerEmissionRoute(V2, qualified(), true, null).kind).toBe("emission");
   });
 
   it("never routes to emission without a Pi parent or off the qualified route (a retired binding), for any issued protocol", () => {
@@ -110,7 +128,7 @@ describe("issuedReviewerEmissionRoute", () => {
       fc.constantFrom(...RETIRED_PI),
       (protocol, piParent, onQualifiedRoute, retired) => {
         const authority = onQualifiedRoute ? qualified() : request(retired);
-        const route = issuedReviewerEmissionRoute(protocol, authority, piParent);
+        const route = issuedReviewerEmissionRoute(protocol, authority, piParent, null);
         const emission = route.kind === "emission";
         // Emission requires BOTH a Pi parent and the qualified route, and a
         // current (v2/v3) contract; the route is never refused for a reviewer.

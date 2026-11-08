@@ -27,6 +27,7 @@
 
 import { match } from "ts-pattern";
 import { DESKTOP_VLLM_ROUTE, type LoomAgentName } from "./model-profiles";
+import type { ModelRef } from "./model-routing";
 import { producerKindsOfAgent, type PayloadProducerKindName } from "./agent-catalog-projections";
 import type { PiSpawnItem } from "./pi-spawn-input";
 import {
@@ -658,10 +659,29 @@ export type IssuedRequestPiRoute = Readonly<{
   }>;
 }>;
 
+/**
+ * The routing observation a launch-route qualification consumes: the exact
+ * `provider/model` the child will actually run on once `model-routing.json` is
+ * applied by its launcher, or `null` when the shell observed no routing
+ * decision at all. It enters as data — the pure decision below never reads the
+ * environment, the config file, or the parent session.
+ *
+ * Emission is qualified on the route the child RUNS on, not only on the
+ * frozen issued one: an explicit local `use: parent` rule inherits the parent
+ * model, which is a different provider/model than the one whose serializer
+ * accepted the frozen emission schemas (ADR-0012). Such a child is
+ * extraction-only; it must never be an enabled child on an unqualified route.
+ */
+export type ChildLaunchRoute = ModelRef | null;
+
+const routeName = (route: Readonly<{ provider: string; model: string }>): string =>
+  `${route.provider}/${route.model}`;
+
 function emissionCapabilityForIssuedRoute(
   claim: IssuedProducerClaim,
   request: IssuedRequestPiRoute,
   piParentExists: boolean,
+  childRoute: ChildLaunchRoute,
 ): EmissionToolCapability {
   if (!piParentExists) {
     return notProvidedEmissionCapability(
@@ -674,6 +694,13 @@ function emissionCapabilityForIssuedRoute(
     return notProvidedEmissionCapability(
       `issued Pi route ${provider}/${model} is not the explicitly trusted qualified route ` +
         `${QUALIFIED_EMISSION_ROUTE.provider}/${QUALIFIED_EMISSION_ROUTE.model} for the frozen emission schemas`,
+      "extraction",
+    );
+  }
+  if (childRoute !== null && routeName(childRoute) !== routeName(request.harnessBinding.pi)) {
+    return notProvidedEmissionCapability(
+      `model routing launches this child on ${routeName(childRoute)}, not the issued frozen route ` +
+        `${routeName(request.harnessBinding.pi)} whose provider serializer qualified the frozen emission schemas`,
       "extraction",
     );
   }
@@ -697,20 +724,21 @@ function emissionCapabilityForIssuedRoute(
       );
 }
 
-/** Pure qualification from authenticated, frozen request route data plus the
- * shell-observed existence of a Pi parent — the single entry point from issued
- * request authority to a route decision, shared by the request programs, the
- * capture runtime, and Pi parent admission. The parent's mutable
- * provider/model is intentionally not an input and therefore cannot upgrade
- * cloud issuance. */
+/** Pure qualification from authenticated, frozen request route data, the
+ * shell-observed existence of a Pi parent, and the shell-observed routed child
+ * route — the single entry point from issued request authority to a route
+ * decision, shared by the request programs, the capture runtime, and Pi parent
+ * admission. The parent's mutable provider/model is intentionally not an
+ * input and therefore cannot upgrade cloud issuance. */
 export function qualifyIssuedSpawnEmissionRoute(
   claim: IssuedProducerClaim,
   request: IssuedRequestPiRoute,
   piParentExists: boolean,
+  childRoute: ChildLaunchRoute,
 ): EmissionRouteDecision {
   return decideRequestEmissionRoute(
     claim,
-    emissionCapabilityForIssuedRoute(claim, request, piParentExists),
+    emissionCapabilityForIssuedRoute(claim, request, piParentExists, childRoute),
   );
 }
 
