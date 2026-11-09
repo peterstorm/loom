@@ -25,10 +25,11 @@
  * Either alone is a weaker statement than the audit makes.
  */
 
+import { verifyWith } from "../handlers/security-verification-harness";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   SECURITY_PROFILE_LENSES,
   canonicalCoverageId,
@@ -380,6 +381,9 @@ describe("a recorded run reaches every planted defect", () => {
 
   it("drives the same records through the helper's own operations", async () => {
     const out = mkdtempSync(join(tmpdir(), "loom-calibration-"));
+    // `start` registers the run with the subagent write guard; keep that
+    // registry inside this test's scratch directory.
+    vi.stubEnv("LOOM_SUBAGENT_DIR", join(out, ".subagents"));
     try {
       const printed: string[] = [];
       const handler = createSecurityAuditHandler((text) => { printed.push(text); });
@@ -419,10 +423,18 @@ describe("a recorded run reaches every planted defect", () => {
       const submitted = await invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE, units: results, findings: DEFECTS.defects.map(findingFor) }));
       expectOk(submitted, "submit");
 
-      const verified = await invoke(["verify"], JSON.stringify({
-        verdicts: DEFECTS.defects.map((defect) => aVerdict({ fingerprint: fingerprintOf(defect) })),
-      }));
-      expectOk(verified, "verify");
+      // The ballots come from the real verification program and Claude Code's
+      // native capture path (ADR-0065, amended): a hand-written ballot is
+      // never counted.
+      await verifyWith({
+        out,
+        stdout: () => printed.join("\n"),
+        invoke: async (args, stdin = "") => {
+          printed.length = 0;
+          const result = await invoke(args, stdin);
+          return { ok: result.kind !== "error", error: result.kind === "error" ? String(result.message ?? "") : null };
+        },
+      });
 
       const published = await invoke(["publish"]);
       expectOk(published, "publish");
@@ -438,6 +450,7 @@ describe("a recorded run reaches every planted defect", () => {
       expect(decisions.entries).toHaveLength(DEFECTS.defects.length);
       expect(decisions.entries.every((entry) => entry.decision === "accepted")).toBe(true);
     } finally {
+      vi.unstubAllEnvs();
       rmSync(out, { recursive: true, force: true });
     }
   }, 30_000);

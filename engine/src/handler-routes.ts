@@ -13,7 +13,7 @@ import { SECURITY_AUDIT_OPERATIONS, parseSecurityAuditOperation } from "./handle
 
 export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
   "pre-tool-use": new Set([
-    "block-direct-edits", "guard-state-file", "validate-phase-order",
+    "block-direct-edits", "guard-state-file", "guard-subagent-authority", "validate-phase-order",
     "validate-task-execution", "validate-template-substitution",
     "validate-agent-model", "validate-agent-skill", "enforce-phase-tools", "rules-gate",
   ]),
@@ -46,6 +46,9 @@ export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
 export const FAIL_CLOSED_ROUTES: ReadonlySet<string> = new Set([
   "pre-tool-use/enforce-phase-tools",
   "pre-tool-use/guard-state-file",
+  // Subagent authority guard (ADR-0065 D6): a crash outside the handler would
+  // let a subagent's audit-authority write through.
+  "pre-tool-use/guard-subagent-authority",
   "pre-tool-use/block-direct-edits",
   // Rules gate: exit 1 is non-blocking, so a crash outside the handler would
   // wave an ungated code edit through.

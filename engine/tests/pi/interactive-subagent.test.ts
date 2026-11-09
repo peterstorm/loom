@@ -83,6 +83,7 @@ describe("interactive Pi subagent shell", () => {
     const piAgentDir = prepareAgentDir();
     const relayed: string[] = [];
     let invocation: Readonly<{ command: string; args: readonly string[]; cwd: string }> | undefined;
+    let childEnv: Readonly<Record<string, string | undefined>> | undefined;
     const updates: unknown[] = [];
 
     const result = await runInteractiveSubagent({
@@ -97,8 +98,9 @@ describe("interactive Pi subagent shell", () => {
       },
       onUpdate: (update) => updates.push(update),
     }, {
-      spawnChild: (command, args, cwd) => {
+      spawnChild: (command, args, cwd, env) => {
         invocation = { command, args, cwd };
+        childEnv = env;
         return spawn(process.execPath, ["-e", fakeRpcChildScript], {
           cwd: ROOT,
           shell: false,
@@ -109,6 +111,9 @@ describe("interactive Pi subagent shell", () => {
 
     expect(invocation).toBeDefined();
     expect(invocation?.cwd).toBe(ROOT);
+    // The `--mode rpc` child carries the explicit subagent marker (ADR-0065, amended).
+    expect(childEnv?.["LOOM_PI_SUBAGENT"]).toBe("1");
+    expect(childEnv?.["PATH"]).toBe(process.env["PATH"]);
     expect(invocation?.args).toEqual(expect.arrayContaining([
       "--mode", "rpc",
       "--no-session",

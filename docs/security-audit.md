@@ -49,15 +49,28 @@ so in its report.
 | `ledger.json` | `start`, `assign`, `submit`, `defer`, `merge-critic` | the coverage ledger: one unit per cell, with owners, evidence and dispositions |
 | `lenses.json` | `start` | the selection, with each lens's score and reasons |
 | `findings.json` | `submit` | candidate findings as filed (the trichotomy records) |
-| `verdicts.json` | `verify` | refutation ballots, accumulated across waves |
+| `verdicts.json` | `verify --from` | a CACHE of imported ballots, each bound to the verifier spawn that cast it; re-proven against its run and capture attestation before every adjudication |
+| `verification-runs/` | `start` (the root), `helper orchestration start security-verification` (each run) | the `security-verification` runs that issue verifier spawns and publish their bound ballots |
 | `security-findings.json` | `publish` | the adjudicated records that leave the run |
 | `disposition.json` | `disposition` | one decision per published record, for `/review-and-fix` |
+| `standalone-disposition.json` | `disposition` | the exact start input the handoff command loads |
+| `disposition-runs/` | `helper orchestration start standalone-disposition` | the remediation run the handoff command names |
 | `REPORT.md`, `FINDINGS-DETAIL.md`, `NEEDS-VALIDATION.md` | `publish` | prose derived from the records |
+| `agents/<owner-id>/{scratch,artifacts}/` | the hunter | its sandbox scratch and receipt artifacts — the only part a subagent may write |
 
 Every read is parsed by the module that owns the document, so a hand-edited or
 half-written file stops the next operation with a named violation instead of
 flowing into a report. Writes go through no-follow primitives: a symlinked run
-file is refused rather than followed.
+file is refused rather than followed. The `--out` directory's *parent* is the
+run base and is resolved to its real path once, the way every Loom run base is,
+so a base behind a system symlink works (macOS spells its temp root
+`/var/folders/…`, and `/var` → `/private/var`); the run directory itself and
+everything below it stay no-follow, so a symlinked run directory or a symlink
+planted inside it is still refused. The run is reported and registered under
+that one canonical path, whichever alias `--out` used. Every entry above except `agents/` is an
+**authority entry** (`engine/src/core/audit-run-authority.ts` owns the names for
+the CLI and the subagent guard alike), so a subagent cannot write it — see
+[The subagent authority guard](#the-subagent-authority-guard).
 
 ## Operations
 
@@ -72,7 +85,7 @@ This is the authoritative operations table. Every operation takes `--out
 | `submit` | stdin (`security-hunter-result`: `units`, optional `findings`) | the run is published, the envelope is not `{schemaVersion: 1, kind: "security-hunter-result"}` or carries an unknown key, a unit is not the named owner's or not the current wave, a check is malformed, a `local` check names no receipt or a receipt that does not prove a bounded run, a filed fingerprint the run already holds arrives with different content |
 | `defer` | flags `--reason [--unit]` | the run is published, the reason is missing, the unit is not `planned` |
 | `merge-critic` | stdin (critic result) | the run is published, a proposal is malformed, a reassigned unit has no evidence to archive |
-| `verify` | stdin (`verdicts`) | the run is published, a ballot is malformed, a field is invented |
+| `verify` | flags (`--from <verification-run>`) | stdin ballots; the run is published; the verification run is not a `security-verification` run under this audit, is unfinished, was issued against an older ledger or findings, or its `result.json` differs from the replay of its captured evidence |
 | `findings` | flags `[--json]` | the ledger or records do not parse |
 | `publish` | flags | any publication blocker (see below) |
 | `disposition` | flags | nothing has been published yet |
@@ -84,6 +97,135 @@ is skewed; every other operation proves the runtime first. `verify` only records
 ballots (`critical` or `advisory`); the decision they make — `confirmed`,
 `needs_validation` or `rejected` — is taken by one adjudication at `findings`
 and `publish`.
+
+Every **writing** operation also registers the run directory with the subagent
+guard's registry (under the protected subagent directory) — `start` after its
+fresh documents land, every other writer before it writes. Registration is
+idempotent; if the registry was wiped mid-audit (a `/tmp` cleaner, a reboot),
+the next write rebuilds it, and a write whose run cannot be registered is
+refused rather than left unprotected.
+
+## Verification
+
+A `confirmed` claim publishes only on a ballot cast by an **issued** verifier
+spawn on a profile that did not hunt, and **natively captured by the harness**
+(ADR-0065, amended). There is no way to hand `verify` ballots on stdin, and no
+CLI path writes into a verifier slot: `helper orchestration submit` and
+`correlate` refuse every `security-verification` request. A ballot exists only
+as the harness-captured output of a `security-verifier-agent` spawn of a
+`security-verification` run; its agent and profile are read from the request the
+engine minted, never from the payload.
+
+**The data path carries the proof.** When the harness captures a verifier's
+transcript (Claude Code's SubagentStop hook; the Pi extension's request-bound
+capture), the capturing process also writes a **capture attestation** —
+`{program, runId, runDirectory (realpath), requestId, slotId, attempt, role,
+harness, nativeId, digest, byteLength}` — into a store under the protected
+subagent directory (`security-capture-attestations/`, one immutable entry per
+attempt, exclusive publish, no-follow, never swept). A ballot's
+`binding.captureDigest` must equal its request's attested digest, and the
+transcript in the run must still hash to it.
+
+1. **Let the wave's hunt settle first.** A verification run is issued against
+   the digests of `ledger.json` and `findings.json` as they stand. Any later
+   `assign`, `submit`, `defer` or `merge-critic` moves them, and `verify --from`
+   then refuses the run as stale; `status` names a NEW run (the run name binds
+   both digests). Start verification once no hunter of the wave is in flight
+   and the critic is merged, and import before the next ledger change.
+2. **`status` prints the start command.** When confirmed claims await a bound
+   ballot, `status` (and `status --json`, field `verification`) prints the exact
+   `loom helper orchestration start security-verification --runs-root
+   '<run-dir>/verification-runs' --run 'run.verify-w<wave>-g<generation>-<id>'`
+   command with its input on a here-document, and the import command; every
+   path is one shell-quoted word. Run them as printed. Claims are grouped into
+   briefs of at most four; each brief is one verifier request on the
+   `refutation` profile. When the current generation of a claim set is blocked
+   or unimportable (a refused retry, a capture without its attestation),
+   `status` names the next generation — up to 16.
+3. **Spawn the verifiers it issues.** The start returns a spawn batch; dispatch
+   each request with its task verbatim. The harness captures each verifier's
+   final message into its slot and attests it. A malformed answer gets one
+   retry, told why; a refused retry blocks the run. `helper orchestration
+   resume` drives the run to `done`, publishing `result.json`. Start and resume
+   also re-register the audit with the subagent guard's registry.
+4. **Import it.** `loom helper security-audit verify --out <run-dir> --from
+   <verification-run>` authenticates the run (registered, under this audit,
+   issued against the current ledger and findings), requires `result.json` to
+   be byte-identical to the replay of its captured evidence, and requires every
+   ballot to match its capture attestation — a transcript with no attestation is
+   refused as "not natively captured". It then appends the bound ballots to
+   `verdicts.json`. Re-importing the same run adds nothing; a fingerprint that
+   already carries another verification run's ballot is refused (one
+   fingerprint, one verification run).
+5. **`verdicts.json` is a cache.** `findings`, `status` and `publish` re-prove
+   every cached ballot before counting it: its run must be a registered
+   `security-verification` run of this audit, its evidence must replay to a
+   result holding exactly the cached ballots (the replay checks the audit's
+   identity, not its current digests, so later waves do not unprove earlier
+   ballots), and every ballot must match its attestation. A ballot that fails is
+   not counted and its run is a named publication blocker; a ballot written
+   into `verdicts.json` by hand never reaches a report.
+
+## The subagent authority guard
+
+Hunters have Bash, so the commands that could inject authority are fenced off
+from every subagent (ADR-0065 D6): Claude Code's `guard-subagent-authority`
+PreToolUse hook on `Bash`, and its Pi `tool_call` twin. The caller signal is the
+harness's own — Claude Code sets `agent_id` only on a subagent's call; on Pi
+every child agent carries an explicit environment marker (`LOOM_PI_SUBAGENT=1`
+on the extension's own `--mode rpc` children; `LOOM_PI_PARENT_PID` naming the
+launching session process on every process it spawns) — so the parent session
+is never affected, and a headless parent (`pi --mode json -p --no-session`
+started without the marker) is a parent.
+
+- **Helper operations.** A subagent may run only the read-only operations:
+  `security-audit nonce|status|findings` and the read-only `orchestration`
+  projections. The split is derived from the operation tables' `runtimeSkew`
+  trait, so every writing operation (`start`, `assign`, `submit`, `defer`,
+  `merge-critic`, `verify`, `publish`, `disposition`; `orchestration start`,
+  `resume`, `submit`, `correlate`, `decide`, `abandon`, …) is refused, as is an
+  operation the guard cannot name statically.
+- **Harness entrypoints.** A Loom CLI hook route (`subagent-stop`,
+  `post-tool-use`, …, including running `hooks/scripts/*.sh`) and a nested
+  harness (`claude`, `pi`, `npx`/`bunx`/`pnpm dlx` of either) are refused.
+- **Authority paths.** A write or redirection onto a registered run's authority
+  entries, onto the run directory itself or an ancestor of it, or into a
+  protected Loom directory (the subagent directory — run registry and capture
+  attestation store — and the machine definitions) is refused. Each path is also
+  judged in its canonical spelling (the realpath of its deepest existing
+  ancestor), and each run is registered under both its spelled and real path,
+  so `/tmp` ↔ `/private/tmp` and a symlinked `--out` are covered. Reads, copying
+  authority *out*, and writes under `agents/<owner-id>/{scratch,artifacts}`
+  stay allowed, as does `scripts/security-sandbox.sh`.
+- **Normalisations.** Escaped command words (`\loom`), wrappers (`time`,
+  `command`, `builtin`, `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `env`,
+  `sudo`, …), `coproc` and `!`; programs a shell is fed through a pipe, a
+  here-string, an input redirect, a script file argument, `source`/`.` or an
+  executed `./x.sh` (read at decision time, bounded, regular files only);
+  `find -exec` and `xargs`; and interpreter code (`python -c`, `node -e/-p`,
+  `bun -e`, `perl -e`, `ruby -e`, awk) that invokes a writing helper operation
+  or a hook route, or imports an engine authority module.
+
+A refused subagent is told to return its result to the parent session, which
+runs every write. The guard is **defence in depth, not the proof**: it reads
+shell strings, and it does not see a command or helper name the shell builds
+from pieces (`eval "$a $b"`), a variable holding a whole authority path,
+interpreter code built at runtime, names spelled in `printf` escapes, or a
+script whose text is runtime-built. `engine/tests/core/subagent-authority.test.ts`
+pins each of these as a known gap. None of them can produce an *attested*
+capture.
+
+**Pi's import gate.** On Pi, the parent's `helper security-audit verify --from
+<run>` is checked before it runs. The extension's in-process Trusted Review
+Witness is consulted first; when it cannot prove the run (the run was captured
+before this Pi process restarted, or by another session), the import is proven
+the way `verify --from` proves it — `result.json` replayed byte for byte and
+every ballot matched to its persisted capture attestation. The persisted
+attestation is the authority on both harnesses, so a restart no longer strands a
+correctly captured run. The gate reads the import's `--out` and `--from`
+statically: spell `--out` as the absolute run directory and `--from` as the run
+name (as `status` prints them); a value the shell completes at runtime, or an
+import fed to a shell through a script, pipe or here-string, is blocked.
 
 ### Owners
 
@@ -265,8 +407,20 @@ dishonest hunter is the independent verifier, not the receipt.
   recorded; the report is about the commit, not the bytes on disk.
 - Verification is a panel of model reviewers on a different profile, not a
   proof. INV-S3 makes a same-profile ballot worthless, not a wrong one right.
-- A ballot's `agent` and `profile` are **self-reported**. `verify` parses them
-  for catalog consistency only — the profile must be the one the Agent Catalog
-  assigns that agent — not for proof that a spawn of that agent cast the
-  ballot. Binding a ballot to its spawn identity is deferred; until then INV-S3
-  holds against an honest orchestrator, not against one that mislabels ballots.
+- A ballot is bound to the spawn that cast it (ADR-0065): its agent and profile
+  come from the engine-minted request, its bytes from the harness capture, and
+  its capture digest from the attestation the capturing harness wrote. The
+  **parent session is trusted** — it runs every write and every capture hook,
+  so an operator who forges a capture as the parent is outside this model.
+  Against subagents, the [guard](#the-subagent-authority-guard) is a fence with
+  known bypass classes: a subagent that evades it can still write FILES — a
+  transcript into a verification run, a ballot into `verdicts.json` — but it
+  cannot produce an attested capture, so neither is ever counted.
+- What protects the attestation store: it lives in the protected subagent
+  directory, which `guard-state-file` refuses every Bash and helper write into,
+  `block-direct-edits` refuses for file tools, and the subagent guard refuses
+  for subagents; it is written exclusively (never replaced) and read
+  fail-closed. Its own residual is the fence's: a subagent that evades every
+  Bash guard and writes a canonical attestation into the store by hand, for a
+  forged transcript, would be believed. The guards above are what stand
+  between a subagent and that write.

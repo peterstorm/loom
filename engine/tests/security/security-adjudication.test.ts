@@ -18,8 +18,10 @@ import {
   adjudicateCandidates,
   adjudicateRun,
   huntingProfiles,
+  parseVerificationVerdicts,
   type VerificationVerdict,
 } from "../../src/core/security-adjudication";
+import type { LlmProfileId } from "../../src/core/model-profiles";
 import { assignUnits, recordUnitResult, seedCoverageUnit, type CoverageLedger } from "../../src/core/security-coverage";
 
 const confirmed = (fingerprint: string) => ({
@@ -53,18 +55,25 @@ const findings = (fingerprints: readonly string[]) => {
   return parsed.value;
 };
 
-const verdict = (fingerprint: string, overrides: Partial<VerificationVerdict> = {}): VerificationVerdict => ({
-  schemaVersion: 1,
-  kind: "security-verdict",
-  fingerprint,
-  vote: "critical",
-  reason: "the trace holds in the pinned revision",
-  missingFact: null,
-  agent: "security-verifier-agent",
-  profile: "refutation",
-  wave: 1,
-  ...overrides,
-});
+type VerdictOverrides = Partial<Omit<VerificationVerdict, "binding">> & Readonly<{ profile?: LlmProfileId }>;
+
+let issued = 0;
+
+/** A bound ballot from a fresh verifier request (each call is a distinct
+ *  spawn), minted on `profile` — `refutation` unless a test says otherwise. */
+const verdict = (fingerprint: string, { profile = "refutation", ...overrides }: VerdictOverrides = {}): VerificationVerdict => {
+  const slotId = `security-verification-slot:${String(++issued).padStart(32, "0")}`;
+  return {
+    fingerprint,
+    vote: "critical",
+    reason: "the trace holds in the pinned revision",
+    missingFact: null,
+    wave: 1,
+    binding: { program: "security-verification", runId: "run.verify-w1-000000000000", requestId: `${slotId}:1`, slotId,
+      attempt: 1, role: "security-verifier-agent", profile, captureDigest: "b".repeat(64) },
+    ...overrides,
+  };
+};
 
 const fingerprintArb = fc.stringMatching(/^[a-z][a-z0-9-]{0,15}$/);
 
@@ -135,7 +144,7 @@ describe("adjudication", () => {
           );
           const adjudication = adjudicateCandidates({ findings: claims, verdicts, huntProfiles: ["focused-review"] });
           for (const published of adjudication.confirmed) {
-            expect(verdicts.some((cast) => cast.fingerprint === published.fingerprint && cast.profile !== "focused-review")).toBe(true);
+            expect(verdicts.some((cast) => cast.fingerprint === published.fingerprint && cast.binding.profile !== "focused-review")).toBe(true);
           }
           expect(adjudication.gaps.map((gap) => gap.fingerprint)).toEqual(
             sorted.filter((_fingerprint, index) => votes[index] === undefined),
@@ -218,7 +227,7 @@ describe("adjudicateRun", () => {
     };
     expect(run(ledgerOwnedBy(HUNTER), [])).toEqual(["confirmed claim a:1 has no verification verdict"]);
     expect(run(ledgerOwnedBy(HUNTER, false), [verdict("a:1")])).toEqual(["coverage ledger still has planned, in-progress or blocked units"]);
-    expect(run(ledgerOwnedBy(HUNTER), [verdict("a:1", { agent: HUNTER, profile: "focused-review" })])).toEqual([
+    expect(run(ledgerOwnedBy(HUNTER), [verdict("a:1", { profile: "focused-review" })])).toEqual([
       "confirmed claim a:1 was verified only on the hunt profile focused-review",
     ]);
     expect(run(ledgerOwnedBy(HUNTER), [verdict("a:1")])).toEqual([]);
@@ -228,5 +237,41 @@ describe("adjudicateRun", () => {
     const [unit] = ledgerOwnedBy(HUNTER);
     const decided = adjudicateRun({ ledger: [{ ...unit, agent_id: "hunter-a" }], findings: findings(["a:1"]), verdicts: [verdict("a:1")] });
     expect(decided).toEqual({ ok: false, error: { kind: "unresolvable-hunter", agentId: "hunter-a" } });
+  });
+});
+
+describe("parseVerificationVerdicts (ADR-0065 D3/D5)", () => {
+  it("round-trips bound ballots, sorted by fingerprint, run, request and wave", () => {
+    const ballots = [verdict("b:2"), verdict("a:1"), verdict("a:1", { vote: "advisory", missingFact: "one fact" })];
+    const parsed = parseVerificationVerdicts(JSON.parse(JSON.stringify(ballots)));
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.value.map((ballot) => ballot.fingerprint)).toEqual(["a:1", "a:1", "b:2"]);
+  });
+
+  it("refuses a ballot without a well-formed binding — a parse refusal, not an unverified gap", () => {
+    const { binding: _binding, ...unbound } = verdict("a:1");
+    const refusal = (raw: unknown) => {
+      const parsed = parseVerificationVerdicts([raw]);
+      return parsed.ok ? [] : parsed.error.violations.map((violation) => `${violation.path}: ${violation.message}`);
+    };
+    expect(refusal(unbound)).toContain("verdicts[0].binding: expected the binding a verification run published");
+    const bound = verdict("a:1");
+    expect(refusal({ ...bound, binding: { ...bound.binding, role: "security-hunter-agent" } }))
+      .toContain("verdicts[0].binding.role: expected security-verifier-agent");
+    expect(refusal({ ...bound, binding: { ...bound.binding, program: "refutation-panel" } }))
+      .toContain("verdicts[0].binding.program: expected security-verification");
+    expect(refusal({ ...bound, binding: { ...bound.binding, profile: "standard" } }))
+      .toContain("verdicts[0].binding.profile: expected a catalog profile");
+    expect(refusal({ ...bound, binding: { ...bound.binding, captureDigest: "nope" } }))
+      .toContain("verdicts[0].binding.captureDigest: expected a sha256 capture digest");
+    // Self-reported identity is not a ballot field any more.
+    expect(refusal({ ...bound, agent: "security-verifier-agent", profile: "refutation" }))
+      .toEqual(["verdicts[0].agent: unknown field", "verdicts[0].profile: unknown field"]);
+  });
+
+  it("refuses one request casting two ballots on one fingerprint", () => {
+    const ballot = verdict("a:1");
+    const parsed = parseVerificationVerdicts([ballot, { ...ballot, vote: "advisory" }]);
+    expect(parsed.ok).toBe(false);
   });
 });

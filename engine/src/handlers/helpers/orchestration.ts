@@ -6,7 +6,7 @@
  *   helper orchestration inspect --run <run-directory> --runs-root <root> [--json]
  *   helper orchestration abandon --run <run-directory> --runs-root <root>
  *                                --reason <text> [--superseded-by <run-directory>]
- *   helper orchestration start <architecture|refutation|standalone-review|standalone-disposition|wave-gate|remediation> --run <run-directory>
+ *   helper orchestration start <architecture|refutation|standalone-review|standalone-disposition|wave-gate|remediation|security-verification> --run <run-directory>
  *                              --runs-root <root> < program.json
  *   helper orchestration restart --run <exhausted-wave-run> --new-run <fresh-run-directory>
  *                                --runs-root <root>
@@ -215,6 +215,8 @@ import { STANDALONE_LINEAGE_LIMITS, standalonePublicationReferenceSchema } from 
 import { projectStandaloneLineageSource } from "../../core/standalone-review";
 import { type StandaloneDispositionSelection } from "../../core/standalone-review-model";
 import { readAuthenticatedStandaloneLineageSource } from "./programs/standalone-source";
+import { parseSecurityVerificationStart } from "../../core/security-verification";
+import { prepareSecurityVerificationFacadeStart, resumeSecurityVerificationFacade, startSecurityVerificationFacade } from "./programs";
 import { prepareStandaloneDispositionFacadeStart, startStandaloneDispositionFacade,
   resumeStandaloneDispositionFacade, inspectStandaloneDispositionFacade, readSelectedStandaloneDisposition,
   STANDALONE_DISPOSITION_EVENT_RESOURCE_POLICY } from "./programs/standalone-disposition";
@@ -242,7 +244,7 @@ function usage(): HookResult {
       "          optional exact policy: --disposition <absolute Run directory> --disposition-run <id> --disposition-digest <sha256>",
       "  abandon --runs-root <root> --run <run-directory> --reason <text> [--superseded-by <run-directory>]",
       "          (terminal marker; deletes nothing and refuses every operation that would advance the run)",
-      "  start   <architecture|refutation|standalone-review|standalone-disposition|wave-gate|remediation> --runs-root <root> --run <run-directory> < program.json",
+      "  start   <architecture|refutation|standalone-review|standalone-disposition|wave-gate|remediation|security-verification> --runs-root <root> --run <run-directory> < program.json",
       "  restart --runs-root <root> --run <exhausted-wave-run> --new-run <fresh-run-directory>",
       "  recover-orphan --runs-root <root> --run-id <missing-run-id> --wave <N> --digest <sha256> --new-run <fresh-run-directory>",
       "  resume  --runs-root <root> --run <run-directory>",
@@ -1228,7 +1230,9 @@ export async function emitRunAction(handle: RunDirHandle, action: FacadeAction, 
   return printed(emission.output, reportUnverifiedRoutes(action, verdict.unverified));
 }
 
-const START_PROGRAMS = ["architecture", "refutation", "standalone-review", "wave-gate", "remediation", "standalone-disposition"] as const;
+const START_PROGRAMS = [
+  "architecture", "refutation", "standalone-review", "wave-gate", "remediation", "standalone-disposition", "security-verification",
+] as const;
 type StartProgram = (typeof START_PROGRAMS)[number];
 
 const isStartProgram = (value: string | undefined): value is StartProgram =>
@@ -1252,7 +1256,7 @@ type StartRequest =
   | Readonly<{ kind: "wave-gate"; input: RegisteredWaveGateProgram["input"] }>
   | Readonly<{ kind: "panel"; registration: RegisteredPanelProgram }>;
 
-function parseStartRequest(program: Exclude<StartProgram, "standalone-disposition">, stdin: string): ProgramParse<StartRequest> {
+function parseStartRequest(program: Exclude<StartProgram, "standalone-disposition" | "security-verification">, stdin: string): ProgramParse<StartRequest> {
   let raw: unknown;
   try {
     if (program === "standalone-review") {
@@ -1331,6 +1335,7 @@ async function startOperation(stdin: string, args: readonly string[], emission: 
   }
   const runArgs = args.slice(1);
   if (program === "standalone-disposition") return startDispositionOperation(stdin, runArgs, emission);
+  if (program === "security-verification") return startSecurityVerificationOperation(stdin, runArgs, emission);
   const request = parseStartRequest(program, stdin);
   if (!request.ok) return { kind: "error", message: request.message };
   const startRequest = request.value;
@@ -1372,6 +1377,24 @@ async function startDispositionOperation(stdin: string, args: readonly string[],
   const prepared = await prepareStandaloneDispositionFacadeStart(input.value, location.runsRoot, location.run);
   if (!prepared.ok) return { kind: "error", message: prepared.message };
   return driveCreatedRun(args, emission, (handle) => startStandaloneDispositionFacade(handle, prepared.value));
+}
+
+/** `start security-verification` (ADR-0065): the audit is authenticated and
+ *  the briefs derived BEFORE the run directory is claimed. */
+async function startSecurityVerificationOperation(stdin: string, args: readonly string[], emission: Emission): Promise<HookResult> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(stdin) as unknown;
+  } catch (error) {
+    return { kind: "error", message: `program input is invalid JSON: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  const input = parseSecurityVerificationStart(raw);
+  if (!input.ok) return { kind: "error", message: input.error };
+  const location = startRunLocation(args, "security-verification start requires --runs-root and --run");
+  if (!location.ok) return location.result;
+  const prepared = prepareSecurityVerificationFacadeStart(input.value, location.runsRoot, location.run);
+  if (!prepared.ok) return { kind: "error", message: prepared.message };
+  return driveCreatedRun(args, emission, (handle) => startSecurityVerificationFacade(handle, prepared.value));
 }
 
 async function recoverOrphanOperation(args: readonly string[], emission: Emission): Promise<HookResult> {
@@ -1467,6 +1490,8 @@ async function resumeOperation(args: readonly string[], emission: Emission): Pro
           resumeStandaloneDispositionFacade(bound.value.handle, registration))
         .with({ kind: "wave-gate" }, (registration) =>
           resumeWaveGateFacade(bound.value.handle, registration))
+        .with({ kind: "security-verification" }, (registration) =>
+          resumeSecurityVerificationFacade(bound.value.handle, registration))
         .exhaustive();
       if (!driven.ok) return { kind: "error", message: driven.message };
       return emitRunAction(bound.value.handle, driven.action, emission);
@@ -1542,6 +1567,8 @@ function bindSubmission(args: readonly string[]): SubmissionBindingResult {
   if (reserved.slotId !== slotId || String(reserved.attempt) !== attempt) {
     return { ok: false, result: { kind: "error", message: `request ${requestId} is reserved for slot ${reserved.slotId} attempt ${reserved.attempt}, not ${slotId} attempt ${attempt}` } };
   }
+  const nativeOnly = verifierSlotRefusal(reserved, "submit");
+  if (nativeOnly !== null) return { ok: false, result: nativeOnly };
   const stored = bound.value.handle.readProgramRegistration();
   if (!stored.ok) return { ok: false, result: { kind: "error", message: stored.error.message } };
   if (stored.value === null) {
@@ -1556,6 +1583,7 @@ function bindSubmission(args: readonly string[]): SubmissionBindingResult {
   if (facadeRegistration?.kind === "standalone-disposition") {
     return { ok: false, result: { kind: "error", message: "no-agent standalone disposition publication does not accept submissions" } };
   }
+  if (facadeRegistration?.kind === "security-verification") return { ok: false, result: verifierSlotRefusalFor("submit") };
   const panelRegistration = stored.value === null ? null : parseRegisteredPanelProgram(stored.value);
   if (stored.value !== null && panelRegistration === null && facadeRegistration === null) {
     return { ok: false, result: { kind: "error", message: "registered orchestration program is malformed" } };
@@ -1563,6 +1591,23 @@ function bindSubmission(args: readonly string[]): SubmissionBindingResult {
   return { ok: true, value: { handle: bound.value.handle, requestId, attempt: Number(attempt) as 1 | 2,
     reserved, facadeRegistration, panelRegistration } };
 }
+
+/**
+ * A security verifier slot (ADR-0065) is filled ONLY by native capture: the
+ * harness process that captures the verifier's transcript also writes the
+ * capture attestation `verify --from` requires. `submit` and `correlate` are
+ * the parent's paths for harnesses WITHOUT native capture; into a verifier
+ * slot they would let any caller of this CLI write bytes or a correlator no
+ * harness observed, so both refuse every security-verification request.
+ */
+const verifierSlotRefusalFor = (operation: "submit" | "correlate"): HookResult => ({
+  kind: "error",
+  message: `orchestration ${operation} refused: security-verification verifier output is captured natively only ` +
+    "(Claude Code SubagentStop or the Pi extension), never written through the CLI (ADR-0065)",
+});
+
+const verifierSlotRefusal = (request: AgentRequestAuthority, operation: "submit" | "correlate"): HookResult | null =>
+  request.program === "security-verification" ? verifierSlotRefusalFor(operation) : null;
 
 type CapturedSubmission = Readonly<{ semanticRaw: string; artifact: unknown; alreadyCaptured: boolean }>;
 
@@ -1676,6 +1721,8 @@ async function correlateOperation(args: readonly string[]): Promise<HookResult> 
   if (!issued.ok) return { kind: "error", message: issued.error.message };
   const request = issued.value.find((candidate) => candidate.requestId === requestId);
   if (request === undefined) return { kind: "error", message: `request ${requestId} was never reserved in this run` };
+  const nativeOnly = verifierSlotRefusal(request, "correlate");
+  if (nativeOnly !== null) return nativeOnly;
   const agent = argumentValue(args, "--agent");
   if (agent === null || agent !== request.role) {
     return { kind: "error", message: `--agent must match reserved request role ${request.role}` };

@@ -50,6 +50,8 @@ export type FacadePublishedSpawnBatch = Readonly<Omit<SpawnBatchAction, "request
 export type FacadeBlockedDiagnostic =
   | Readonly<{ kind: "wave-gate-blocked"; message: string }>
   | Readonly<{ kind: "defect-family-accounting-blocked"; message: string }>
+  /** A security-verification run that can never complete: a brief exhausted its retry, or its audit moved. */
+  | Readonly<{ kind: "security-verification-blocked"; message: string }>
   | WaveCompletionSuiteDiagnostic
   | Extract<StandaloneReviewMachineState, Readonly<{ kind: "terminal-blocked" | "recoverable-blocked" }>>
   | PanelBlockedAction;

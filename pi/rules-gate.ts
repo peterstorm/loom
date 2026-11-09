@@ -8,9 +8,11 @@
  *   - decides which Pi processes are gated, and
  *   - turns a `GateDecision` into Pi's `{ block, reason }`.
  *
- * Main orchestrator vs subagents: the subagent extension spawns subagents as
- * SEPARATE pi processes (`pi --mode json -p --no-session`). That signature is
- * exempt; everything else (tui, rpc, print, json with a session) is gated.
+ * Main orchestrator vs subagents: every child agent a Loom Pi session launches
+ * carries the explicit subagent environment marker (`subagent-process.ts`);
+ * a marked process is exempt, every other process is gated — including a
+ * headless parent (`pi --mode json -p --no-session` started without the
+ * marker), which the old launch-flag inference used to exempt.
  *
  * Escape hatches (env): LOOM_GATE=off disables; LOOM_GATE_MODES=tui,rpc gates
  * only the listed modes (overrides the subagent exemption); LOOM_RULES_DIR /
@@ -36,6 +38,7 @@ import {
 } from "../engine/src/core/rules-gate";
 import { filesystemPorts, gateDirs } from "../engine/src/handlers/pre-tool-use/rules-gate";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
+import { currentPiProcessRole, isPiSubagent } from "./subagent-process";
 
 const gateOff = (): boolean => process.env["LOOM_GATE"] === "off" || process.env["LOOM_GATE"] === "0";
 
@@ -118,8 +121,7 @@ const isGated = (ctx: Pick<PiGateContext, "mode" | "sessionManager">): boolean =
   if (gateOff()) return false;
   const override = process.env["LOOM_GATE_MODES"]?.trim();
   if (override) return override.split(",").map((s) => s.trim()).filter(Boolean).includes(ctx.mode);
-  // Subagent signature: `pi --mode json -p --no-session`.
-  return !(ctx.mode === "json" && !ctx.sessionManager.getSessionFile());
+  return !isPiSubagent(currentPiProcessRole());
 };
 
 type GatedCall = Readonly<{ target: string; action: string }>;

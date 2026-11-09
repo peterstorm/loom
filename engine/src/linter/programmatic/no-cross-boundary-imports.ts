@@ -182,6 +182,10 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       // The shared rules gate classifies target files by extension: pure
       // path math (extname/join) over strings, no filesystem.
       "engine/src/core/bash-code-mutation.ts": ["node:path"],
+      // The subagent authority guard resolves command words against the
+      // calling agent's cwd and the registered run directories: pure path math
+      // (isAbsolute/normalize) over strings, never the process cwd or the fs.
+      "engine/src/core/subagent-authority.ts": ["node:path"],
       "engine/src/core/harness-capture.ts": ["node:crypto"],
       "engine/src/core/harness-resources.ts": ["node:crypto", "node:path"],
       "engine/src/core/legacy-archive.ts": ["node:crypto"],

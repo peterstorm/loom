@@ -2,7 +2,7 @@
  * registerRulesGate — the Pi shell around the shared core: which processes and
  * calls are gated, and the shape of the block it returns.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -94,8 +94,24 @@ describe("registerRulesGate", () => {
     expect(await h({ type: "tool_call", toolName: "read", toolCallId: "t", input: { path: target } }, ctx("tui", "/s"))).toBeUndefined();
   });
 
-  it("exempts the subagent process signature (json mode, no session file)", async () => {
-    expect(await handlersFor().get("tool_call")!(editEvent(target), ctx("json", undefined))).toBeUndefined();
+  it("exempts a process carrying the subagent marker, in any mode", async () => {
+    vi.stubEnv("LOOM_PI_SUBAGENT", "1");
+    try {
+      expect(await handlersFor().get("tool_call")!(editEvent(target), ctx("json", undefined))).toBeUndefined();
+      expect(await handlersFor().get("tool_call")!(editEvent(target), ctx("rpc", undefined))).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("gates a headless parent (json mode, no session file, no marker) — launch flags no longer exempt", async () => {
+    vi.stubEnv("LOOM_PI_SUBAGENT", undefined);
+    vi.stubEnv("LOOM_PI_PARENT_PID", undefined);
+    try {
+      expect(await handlersFor().get("tool_call")!(editEvent(target), ctx("json", undefined))).toMatchObject({ block: true });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("gates json mode when it has a session file", async () => {

@@ -8,6 +8,7 @@
  * records it claims to dispose.
  */
 
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { canonicalDigest } from "../../src/core/digest";
 import {
@@ -126,9 +127,22 @@ describe("the decision set", () => {
     // The command carries every flag the program requires and names the exact
     // file the handler writes. The old spelling (`--run <locator>`, no stdin)
     // named neither, so no reader could execute it.
-    expect(text).toContain(`--runs-root ${paths.runsRoot}`);
-    expect(text).toContain(`--run run.disposition-${METADATA.runId} < ${paths.inputFile}`);
+    expect(text).toContain(`--runs-root '${paths.runsRoot}'`);
+    expect(text).toContain(`--run 'run.disposition-${METADATA.runId}' < '${paths.inputFile}'`);
     expect(text).toContain(disposition.value.source.resultDigest);
+  });
+
+  it("quotes every path of the handoff command as one shell word, whatever it holds (H)", () => {
+    const locator = "/out/it's my audit dir";
+    const disposition = securityDisposition({ metadata: METADATA, locator, findings: findings() });
+    if (!disposition.ok) throw new Error("expected a disposition set");
+    const paths = dispositionHandoffPaths(locator, METADATA.runId);
+    const command = renderDispositionHandoff(disposition.value, paths).split("\n")
+      .filter((line) => line.startsWith("    ")).map((line) => line.trim().replace(/ \\$/, "")).join(" ");
+    // A real shell splits it back into exactly the intended words.
+    const echoed = spawnSync("bash", ["-c", `printf '%s\\n' ${command.replace(/ < /, " ")}`], { encoding: "utf8" });
+    expect(echoed.stdout.split("\n")).toEqual(["helper", "orchestration", "start", "standalone-disposition",
+      "--runs-root", paths.runsRoot, "--run", `run.disposition-${METADATA.runId}`, paths.inputFile, ""]);
   });
 
   it("derives a start input the standalone-disposition loader parses", () => {
@@ -156,7 +170,7 @@ describe("the report's handoff section", () => {
     const report = renderReport({ metadata: METADATA, ledger: ledger.value, findings: published, locator: "/out" });
     expect(report).toContain("## Disposition handoff");
     const paths = dispositionHandoffPaths("/out", METADATA.runId);
-    expect(report).toContain(`--runs-root ${paths.runsRoot}`);
+    expect(report).toContain(`--runs-root '${paths.runsRoot}'`);
     expect(report).toContain(paths.inputFile);
     // The digest in the prose is the digest of the decision set, not a second
     // rendering of the same idea.

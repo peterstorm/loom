@@ -140,6 +140,12 @@ export type PiIssuedReviewRequestClass =
   | Readonly<{
       kind: "refutation-panel-extraction";
       claim: ReturnType<typeof issuedReviewerPayloadClaim>;
+    }>
+  /** A `security-verification` verifier request (ADR-0065): extraction-only,
+   *  its result parsed by the program itself, never an emission tool. */
+  | Readonly<{
+      kind: "security-verification-extraction";
+      claim: ReturnType<typeof issuedReviewerPayloadClaim>;
     }>;
 
 /**
@@ -172,6 +178,24 @@ export function classifyPiIssuedReviewRequest(
     });
   }
   return failure({ message: `request ${request.requestId} has no matching registered review program` });
+}
+
+/**
+ * Classify a request of a registered `security-verification` run (ADR-0065):
+ * only that run's own `security-verifier-agent` requests belong to it. Its
+ * claim is the archived no-schema claim, so admission owes no emission tool
+ * and capture keeps final-message extraction — the program admits the bytes.
+ */
+export function classifyPiSecurityVerificationRequest(
+  registeredRunId: string,
+  request: PiIssuedReviewRequest,
+): DomainResult<PiIssuedReviewRequestClass, Readonly<{ message: string }>> {
+  if (request.runId !== registeredRunId) {
+    return failure({ message: `request ${request.requestId} belongs to another orchestration run` });
+  }
+  return request.program === "security-verification" && request.role === "security-verifier-agent"
+    ? success({ kind: "security-verification-extraction", claim: issuedReviewerPayloadClaim({ schemaVersion: 1 }, request) })
+    : failure({ message: `request ${request.requestId} is not a security-verification verifier request` });
 }
 
 type PublishedPiReviewRouteAuthority = Readonly<{
@@ -255,10 +279,13 @@ export function authenticatePiIssuedReviewRequest(
   if (registration.kind === "unclaimed") {
     return Object.freeze({ kind: "unclaimed-program" as const, registration: stored.value });
   }
-  if (registration.program.kind !== "wave-gate" && registration.program.kind !== "standalone-review") {
+  const program = registration.program;
+  if (program.kind !== "wave-gate" && program.kind !== "standalone-review" && program.kind !== "security-verification") {
     return Object.freeze({ kind: "other-program" as const });
   }
-  const classified = classifyPiIssuedReviewRequest(handle.runId, registration.program, request);
+  const classified = program.kind === "security-verification"
+    ? classifyPiSecurityVerificationRequest(handle.runId, request)
+    : classifyPiIssuedReviewRequest(handle.runId, program, request);
   if (!classified.ok) return Object.freeze({ kind: "unclassified" as const, message: classified.error.message });
   // Reservation and registration do not issue a spawn. The exact immutable
   // publication receipt must independently authenticate this same authority.

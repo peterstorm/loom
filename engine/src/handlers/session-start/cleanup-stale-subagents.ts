@@ -29,7 +29,7 @@
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { passthroughResult, type HookHandler } from "../../types";
-import { STALE_SUBAGENT_TTL_MS, SUBAGENT_DIR } from "../../config";
+import { PERSISTENT_SUBAGENT_DIR_ENTRIES, STALE_SUBAGENT_TTL_MS, SUBAGENT_DIR } from "../../config";
 import {
   parseCanonicalTaskGraphPointer,
   parseSessionId,
@@ -44,7 +44,9 @@ import {
  * Pure: which entries are stale, judged per session group. `mtimes` maps
  * each entry to its mtime (ms); entries in the same session group share the
  * group's max mtime, ungrouped entries stand alone. A session in
- * `protectedSessions` (alive, or not observable) is never stale.
+ * `protectedSessions` (alive, or not observable) is never stale, and neither
+ * is a PERSISTENT_SUBAGENT_DIR_ENTRIES entry: the security-audit run registry
+ * outlives every session.
  */
 export function staleEntries(
   mtimes: ReadonlyMap<string, number>,
@@ -59,6 +61,7 @@ export function staleEntries(
   }
   return [...mtimes.entries()]
     .filter(([entry, mtime]) => {
+      if (PERSISTENT_SUBAGENT_DIR_ENTRIES.has(entry)) return false;
       const session = sessionGroupOfTrackingFile(entry);
       if (session !== null && protectedSessions.has(session)) return false;
       const anchor = session === null ? mtime : (groupMax.get(session) ?? mtime);

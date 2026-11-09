@@ -70,12 +70,15 @@ export const archivedReviewerInstructionPaths = (packageRoot: string, role: stri
   });
 
 /**
- * Spec-check consumes its small authority sections whole. Its packet's section
- * bytes live in the run's blob store, so it reads them only through the
- * engine's digest-verifying section decoder, delivered as an exact command.
+ * Spec-check and the security verifier (ADR-0065) consume their small authority
+ * sections whole. A packet's section bytes live in the run's blob store, so they
+ * are read only through the engine's digest-verifying section decoder,
+ * delivered as an exact command.
  */
+const SECTION_READERS: ReadonlySet<string> = new Set(["spec-check-invoker", "security-verifier-agent"]);
+
 function contextSectionDelivery(facts: SpawnTaskFacts): string {
-  if (facts.authority.role !== "spec-check-invoker") return "";
+  if (!SECTION_READERS.has(facts.authority.role)) return "";
   const command = ["bun", join(facts.packageRoot, "scripts", "read-context-section.ts"),
     "--packet", contextPath(facts), "--digest", facts.authority.contextDigest].map(shellQuote).join(" ");
   return `LOOM_CONTEXT_SECTION_COMMAND: ${command}\n`;

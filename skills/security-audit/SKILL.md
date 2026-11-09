@@ -40,16 +40,24 @@ mechanics — the part that is genuinely hard to re-derive per run.
 The program is a closed action set, not prose to follow loosely:
 
 ```
-start → assign → submit → verify → findings → publish
-                                ↘ defer / merge-critic ↗
+start → assign → submit ─┬─ status → orchestration start security-verification
+        ↖ defer / merge-critic ┘        → spawn verifiers → resume → verify --from
+                                                                  → findings → publish → disposition
 ```
 
 In one line: `start` freezes and enumerates, `assign`/`submit` move one unit
 through one hunter (`nonce` binds that hunter's sandbox receipt), `defer` and `merge-critic` settle what hunters did not,
-`verify` records ballots that decide `confirmed`/`needs_validation`/`rejected`
-at `findings` and `publish`, and `disposition` derives the handoff. The
-authoritative operations table — inputs and every refusal — is in
+`status` prints the `security-verification` run the settled wave owes, its
+issued verifier spawns cast the ballots, `verify --from` imports them, they
+decide `confirmed`/`needs_validation`/`rejected` at `findings` and `publish`, and
+`disposition` derives the handoff. The authoritative operations table — inputs
+and every refusal — is in
 [`docs/security-audit.md`](../../docs/security-audit.md#operations).
+
+**Only the parent session runs these operations.** Hunters and verifiers are
+subagents; the subagent authority guard refuses them every writing operation and
+every write onto the run's authority files (ADR-0065 D6). A subagent returns its
+result as its final message, and the parent records it.
 
 `status` is read-only and answers the only question that matters before
 stopping: **is the ledger settled?**
@@ -127,9 +135,19 @@ JSON
 loom helper security-audit assign  --out ../audit-run-1 --unit <coverage-id> --agent security-hunter-agent --wave 1
 loom helper security-audit nonce   --out ../audit-run-1 --artifact agents/<owner-id>/artifacts/<file>
 loom helper security-audit submit  --out ../audit-run-1 < hunter-result.json   # a security-hunter-result
-loom helper security-audit verify  --out ../audit-run-1 < verdicts.json   # a different profile's ballots
 loom helper security-audit merge-critic --out ../audit-run-1 < critic.json
 loom helper security-audit defer   --out ../audit-run-1 --unit <coverage-id> --reason budget_cut
+
+# Verification, once the wave's hunt has settled:
+loom helper security-audit status  --out ../audit-run-1        # prints the start command below, exactly
+loom helper orchestration start security-verification \
+  --runs-root <abs run-dir>/verification-runs --run run.verify-w<wave>-g<generation>-<id> <<'LOOM_VERIFICATION_START'
+{ …the input status printed… }
+LOOM_VERIFICATION_START
+#   → spawn each issued security-verifier-agent request verbatim; the harness captures its answer
+loom helper orchestration resume --runs-root <abs run-dir>/verification-runs --run run.verify-w<wave>-g<generation>-<id>   # until done
+loom helper security-audit verify  --out <abs run-dir> --from run.verify-w<wave>-g<generation>-<id>
+
 loom helper security-audit findings --out ../audit-run-1 [--json]
 loom helper security-audit publish --out ../audit-run-1
 loom helper security-audit disposition --out ../audit-run-1
@@ -149,6 +167,16 @@ The hunter returns its own envelope,
 (`units` required, `findings` optional), and `submit` refuses any other. A
 fingerprint the run already holds, re-filed with different content, is refused
 before anything is written; a verbatim re-file is kept once.
+
+Verification ballots never travel on stdin. A verification run is issued
+against the ledger and findings as they stand, so start it only after the
+wave's hunt has settled (no hunter in flight, critic merged) and import it
+before the next `assign`/`submit`/`defer`/`merge-critic`; a run whose audit
+moved is refused as stale and `status` names its replacement. Each ballot's
+agent and profile come from the minted verifier request, so a hunter cannot
+cast one. On Pi, keep capture → `resume` → `verify --from` in one session: the
+parent's import is checked against that session's in-process witness, with
+`--out` absolute and `--from` the run name, as `status` prints them.
 
 `status`, `findings` and `nonce` are read-only and stay available while the Pi
 runtime is skewed — they are what you read *while* recovering. Every other

@@ -25,9 +25,9 @@
 
 import { match } from "ts-pattern";
 import { compareStrings } from "./ordering";
-import { catalogProfileOfAgent, LLM_PROFILE_IDS, type LlmProfileId } from "./model-profiles";
-import { failure, success, type DomainResult } from "./orchestration-contract/identity";
-import { isSecurityAgentId, isSecurityFingerprint, isVisibleText, isWireRecord, type WireViolation } from "./security-audit-contract";
+import { catalogProfileOfAgent, parseLlmProfileId, type LlmProfileId } from "./model-profiles";
+import { failure, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type DomainResult } from "./orchestration-contract/identity";
+import { isSecurityFingerprint, isVisibleText, isWireRecord, type WireViolation } from "./security-audit-contract";
 import { catalogAgentOfOwner, coverageSettled, type CoverageLedger } from "./security-coverage";
 import {
   sortByFingerprint,
@@ -37,10 +37,35 @@ import {
   type SecurityFinding,
 } from "./security-findings";
 
-/** One verifier's ballot about one fingerprint. */
+/** The program that issues every verifier spawn a ballot may come from. */
+export const SECURITY_VERIFICATION_PROGRAM = "security-verification" as const;
+/** The one catalog role a ballot may be cast by. */
+export const SECURITY_VERIFIER_ROLE = "security-verifier-agent" as const;
+
+/**
+ * Where a ballot came from, taken from AUTHORITY only (ADR-0065 D3): the
+ * minted request the verifier spawn answered and the digest of its captured
+ * transcript. Nothing here is read from the verifier's payload, so a ballot
+ * cannot carry a role or profile its spawn did not have.
+ */
+export type BallotBinding = Readonly<{
+  program: typeof SECURITY_VERIFICATION_PROGRAM;
+  /** The verification run that issued the request. */
+  runId: string;
+  requestId: string;
+  slotId: string;
+  attempt: 1 | 2;
+  role: typeof SECURITY_VERIFIER_ROLE;
+  /** The catalog profile the request was MINTED under. */
+  profile: LlmProfileId;
+  /** SHA-256 of the captured transcript bytes the verdict was admitted from
+   *  (the capture receipt's digest). */
+  captureDigest: string;
+}>;
+
+/** One verifier's ballot about one fingerprint, bound to the spawn that cast it.
+ *  `agent` and `profile` are read from `binding`, never from a payload. */
 export type VerificationVerdict = Readonly<{
-  schemaVersion: 1;
-  kind: "security-verdict";
   fingerprint: string;
   /** loom's refutation ballot: `critical` = the claim blocks; `advisory` = it
    *  does not survive as a confirmed finding. */
@@ -48,13 +73,9 @@ export type VerificationVerdict = Readonly<{
   reason: string;
   /** The one fact absent when the vote is advisory for lack of proof. */
   missingFact: string | null;
-  /** The verifier's agent name and catalog profile, recorded so `publish` can
-   *  prove the vote came from a catalog profile that did not hunt. The parser
-   *  requires `profile` to be the catalog profile of `agent`, so a ballot cannot
-   *  claim a profile its own agent does not sit on. */
-  agent: string;
-  profile: string;
+  /** The audit wave the verification run was issued for. */
   wave: number;
+  binding: BallotBinding;
 }>;
 
 export type VerificationGap =
@@ -77,14 +98,19 @@ export type Adjudication = Readonly<{
   gaps: readonly VerificationGap[];
 }>;
 
-/** Every verdict for one fingerprint, in a deterministic order (agent, then wave). */
+/** The one ballot order: fingerprint, issuing run, request, wave. */
+const compareVerdicts = (left: VerificationVerdict, right: VerificationVerdict): number =>
+  compareStrings(left.fingerprint, right.fingerprint) ||
+  compareStrings(left.binding.runId, right.binding.runId) ||
+  compareStrings(left.binding.requestId, right.binding.requestId) ||
+  left.wave - right.wave;
+
+/** Every verdict for one fingerprint, in the one ballot order. */
 const verdictsFor = (
   verdicts: readonly VerificationVerdict[],
   fingerprint: string,
 ): readonly VerificationVerdict[] =>
-  verdicts
-    .filter((verdict) => verdict.fingerprint === fingerprint)
-    .sort((left, right) => compareStrings(left.agent, right.agent) || left.wave - right.wave);
+  verdicts.filter((verdict) => verdict.fingerprint === fingerprint).sort(compareVerdicts);
 
 /** One verdict decides: a single `critical` survives, and any `advisory`
  *  without a `critical` beside it demotes. Ties break toward the blocking vote
@@ -127,9 +153,10 @@ export function adjudicateCandidates(input: AdjudicationInput): Adjudication {
       gaps.push({ kind: "unverified", fingerprint: finding.fingerprint });
       continue;
     }
-    const [first, ...rest] = verdicts.filter((verdict) => !input.huntProfiles.includes(verdict.profile));
+    // The profile is the MINTED request's (ADR-0065 D5), never a payload field.
+    const [first, ...rest] = verdicts.filter((verdict) => !input.huntProfiles.includes(verdict.binding.profile));
     if (first === undefined) {
-      gaps.push({ kind: "same-profile", fingerprint: finding.fingerprint, profile: verdicts[0].profile });
+      gaps.push({ kind: "same-profile", fingerprint: finding.fingerprint, profile: verdicts[0].binding.profile });
       continue;
     }
     const decision = decide(first, rest);
@@ -257,79 +284,95 @@ export type VerdictViolation = WireViolation;
 
 export type VerdictError = Readonly<{ kind: "invalid-verdicts"; violations: readonly VerdictViolation[] }>;
 
-/** The keys a ballot may carry. Exported so the agent-doc test pins the verifier
- *  document to THIS list rather than to a hand-copied one: a doc that names a
- *  key this list omits describes a ballot the engine refuses wholesale. */
-export const VERDICT_KEYS: readonly string[] = [
-  "schemaVersion", "kind", "fingerprint", "vote", "reason", "missingFact", "agent", "profile", "wave",
+/** The keys a persisted ballot carries in `verdicts.json`. */
+export const VERDICT_KEYS: readonly string[] = ["fingerprint", "vote", "reason", "missingFact", "wave", "binding"];
+
+/** The keys of a ballot's binding: every one read from authority at import. */
+export const BALLOT_BINDING_KEYS: readonly string[] = [
+  "program", "runId", "requestId", "slotId", "attempt", "role", "profile", "captureDigest",
 ];
 
 /**
- * Parse the ballots a verifier returns.
+ * Parse the bound ballots `verdicts.json` holds (ADR-0065 D3/D5).
  *
- * Fail-closed and total: an unknown key is a violation (a verifier inventing a
- * field means the contract drifted), every field is checked, and the result is
- * sorted by (fingerprint, agent, wave) so two runs casting the same ballots
- * produce the same bytes.
- *
- * `missingFact` is load-bearing: an `advisory` vote WITH one demotes the claim
- * to a lead, WITHOUT one it is rejected. `null` and `""` both mean "no missing
- * fact", so a verifier cannot demote by accidentally sending an empty string.
+ * Fail-closed and total: an unknown key is a violation, every field is
+ * checked, and a ballot WITHOUT a well-formed binding is a refusal — not an
+ * unverified gap — because a ballot that cannot name the spawn that cast it is
+ * exactly the self-reported ballot this shape exists to end. One request casts
+ * at most one ballot per fingerprint. The result is sorted by (fingerprint,
+ * run, request, wave) so the same ballots always produce the same bytes.
  */
 export function parseVerificationVerdicts(raw: unknown): DomainResult<readonly VerificationVerdict[], VerdictError> {
-  if (!Array.isArray(raw as unknown)) {
-    return failure({
-      kind: "invalid-verdicts" as const,
-      violations: [{ path: "verdicts", message: "expected a top-level array" }],
-    });
+  if (!Array.isArray(raw)) {
+    return failure({ kind: "invalid-verdicts" as const, violations: [{ path: "verdicts", message: "expected a top-level array" }] });
   }
-  const entries = raw as readonly unknown[];
   const violations: VerdictViolation[] = [];
   const verdicts: VerificationVerdict[] = [];
-
-  entries.forEach((entry, index) => {
-    const base = `verdicts[${index}]`;
-    if (!isWireRecord(entry)) {
-      violations.push({ path: base, message: "expected an object" });
+  const cast = new Set<string>();
+  (raw as readonly unknown[]).forEach((entry, index) => {
+    const parsed = parseVerdict(entry, `verdicts[${index}]`);
+    if (!parsed.ok) {
+      violations.push(...parsed.error);
       return;
     }
-    const local = verdictViolations(entry, base);
-    // Accumulate per entry, so one bad ballot does not pass because another
-    // entry's violation was already recorded.
-    if (local.length > 0) {
-      violations.push(...local);
+    const { fingerprint, binding } = parsed.value;
+    const key = JSON.stringify([fingerprint, binding.runId, binding.requestId]);
+    if (cast.has(key)) {
+      violations.push({ path: `verdicts[${index}]`, message: `request ${binding.requestId} already cast a ballot on ${fingerprint}` });
       return;
     }
-
-    const missingFact = entry.missingFact;
-    verdicts.push({
-      schemaVersion: 1,
-      kind: "security-verdict",
-      fingerprint: entry.fingerprint as string,
-      vote: entry.vote as "critical" | "advisory",
-      reason: entry.reason as string,
-      missingFact: typeof missingFact === "string" && missingFact.trim() !== "" ? missingFact : null,
-      agent: entry.agent as string,
-      profile: entry.profile as string,
-      wave: entry.wave as number,
-    });
+    cast.add(key);
+    verdicts.push(parsed.value);
   });
-
   if (violations.length > 0) return failure({ kind: "invalid-verdicts" as const, violations });
-  return success([...verdicts].sort((left, right) =>
-    compareStrings(left.fingerprint, right.fingerprint) ||
-    compareStrings(left.agent, right.agent) ||
-    left.wave - right.wave));
+  return success([...verdicts].sort(compareVerdicts));
 }
 
-/** Every field violation of one ballot record at `base`, in field order. */
-function verdictViolations(record: Readonly<Record<string, unknown>>, base: string): readonly VerdictViolation[] {
-  const local: VerdictViolation[] = [];
-  for (const key of Object.keys(record)) {
-    if (!VERDICT_KEYS.includes(key)) local.push({ path: `${base}.${key}`, message: "unknown field" });
+/** One persisted ballot, or every violation it carries (accumulated per
+ *  entry, so one bad ballot never hides behind another's). */
+function parseVerdict(entry: unknown, base: string): DomainResult<VerificationVerdict, readonly VerdictViolation[]> {
+  if (!isWireRecord(entry)) return failure([{ path: base, message: "expected an object" }]);
+  const local = [...unknownKeyViolations(entry, VERDICT_KEYS, base), ...voteViolations(entry, base)];
+  if (typeof entry.wave !== "number" || !Number.isInteger(entry.wave) || entry.wave < 1) {
+    local.push({ path: `${base}.wave`, message: "expected a positive integer" });
   }
-  if (record.schemaVersion !== 1) local.push({ path: `${base}.schemaVersion`, message: "expected 1" });
-  if (record.kind !== "security-verdict") local.push({ path: `${base}.kind`, message: "expected security-verdict" });
+  const binding = parseBallotBinding(entry.binding, `${base}.binding`);
+  if (!binding.ok) return failure([...local, ...binding.error]);
+  if (local.length > 0) return failure(local);
+  return success({
+    fingerprint: String(entry.fingerprint),
+    vote: entry.vote === "critical" ? "critical" : "advisory",
+    reason: String(entry.reason),
+    missingFact: normalizedMissingFact(entry.missingFact),
+    wave: Number(entry.wave),
+    binding: binding.value,
+  });
+}
+
+/** `null` and blank both mean "no missing fact", so a verifier cannot demote a
+ *  claim by accidentally sending an empty string. */
+export const normalizedMissingFact = (value: unknown): string | null =>
+  typeof value === "string" && value.trim() !== "" ? value : null;
+
+/** Every key of `record` the shape does not declare, at `base`. */
+export const unknownKeyViolations = (
+  record: Readonly<Record<string, unknown>>,
+  allowed: readonly string[],
+  base: string,
+): VerdictViolation[] =>
+  Object.keys(record).filter((key) => !allowed.includes(key)).map((key) => ({ path: `${base}.${key}`, message: "unknown field" }));
+
+/**
+ * The four fields a verifier itself decides — fingerprint, vote, reason and
+ * missing fact — checked at `base`. Shared by the persisted ballot and the
+ * verifier's own result wire (`core/security-verification`), so the two cannot
+ * disagree about what a well-formed vote is.
+ *
+ * `missingFact` is load-bearing: an `advisory` vote WITH one demotes the claim
+ * to a lead, WITHOUT one it is rejected.
+ */
+export function voteViolations(record: Readonly<Record<string, unknown>>, base: string): VerdictViolation[] {
+  const local: VerdictViolation[] = [];
   if (!isSecurityFingerprint(record.fingerprint)) local.push({ path: `${base}.fingerprint`, message: "invalid fingerprint" });
   if (record.vote !== "critical" && record.vote !== "advisory") {
     local.push({ path: `${base}.vote`, message: "expected critical or advisory" });
@@ -338,21 +381,40 @@ function verdictViolations(record: Readonly<Record<string, unknown>>, base: stri
   if (record.missingFact !== null && !isVisibleText(record.missingFact)) {
     local.push({ path: `${base}.missingFact`, message: "expected null or visible prose" });
   }
-  if (!isSecurityAgentId(record.agent)) local.push({ path: `${base}.agent`, message: "expected a catalog agent id" });
-  // The profile is not free prose: it must be a catalog profile, and it must
-  // be the one this agent's policy assigns it. Otherwise a hunter writes
-  // `profile: "refutation"` on its own ballot and INV-S3 is satisfied by a
-  // capital letter.
-  const catalogProfile = catalogProfileOfAgent(record.agent);
-  if (catalogProfile === null) {
-    local.push({ path: `${base}.agent`, message: "expected an agent in the catalog" });
-  } else if (!(LLM_PROFILE_IDS as readonly string[]).includes(String(record.profile))) {
-    local.push({ path: `${base}.profile`, message: "expected a catalog profile" });
-  } else if (record.profile !== catalogProfile) {
-    local.push({ path: `${base}.profile`, message: `agent ${String(record.agent)} sits on profile ${catalogProfile}` });
-  }
-  if (typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1) {
-    local.push({ path: `${base}.wave`, message: "expected a positive integer" });
-  }
   return local;
+}
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+/** A ballot's binding: every identity in its grammar, the program and role the
+ *  closed verification vocabulary, the profile a catalog profile, the capture
+ *  digest a sha256. A missing or malformed binding is a refusal (D5). */
+export function parseBallotBinding(raw: unknown, base: string): DomainResult<BallotBinding, readonly VerdictViolation[]> {
+  if (!isWireRecord(raw)) return failure([{ path: base, message: "expected the binding a verification run published" }]);
+  const local = unknownKeyViolations(raw, BALLOT_BINDING_KEYS, base);
+  const runId = parseOrchestrationRunId(raw.runId);
+  const requestId = parseRequestId(raw.requestId);
+  const slotId = parseSlotId(raw.slotId);
+  const profile = parseLlmProfileId(raw.profile);
+  if (raw.program !== SECURITY_VERIFICATION_PROGRAM) local.push({ path: `${base}.program`, message: `expected ${SECURITY_VERIFICATION_PROGRAM}` });
+  if (!runId.ok) local.push({ path: `${base}.runId`, message: runId.error.message });
+  if (!requestId.ok) local.push({ path: `${base}.requestId`, message: requestId.error.message });
+  if (!slotId.ok) local.push({ path: `${base}.slotId`, message: slotId.error.message });
+  if (raw.attempt !== 1 && raw.attempt !== 2) local.push({ path: `${base}.attempt`, message: "expected 1 or 2" });
+  if (raw.role !== SECURITY_VERIFIER_ROLE) local.push({ path: `${base}.role`, message: `expected ${SECURITY_VERIFIER_ROLE}` });
+  if (!profile.ok) local.push({ path: `${base}.profile`, message: "expected a catalog profile" });
+  if (typeof raw.captureDigest !== "string" || !SHA256_HEX.test(raw.captureDigest)) {
+    local.push({ path: `${base}.captureDigest`, message: "expected a sha256 capture digest" });
+  }
+  if (local.length > 0 || !runId.ok || !requestId.ok || !slotId.ok || !profile.ok) return failure(local);
+  return success({
+    program: SECURITY_VERIFICATION_PROGRAM,
+    runId: runId.value,
+    requestId: requestId.value,
+    slotId: slotId.value,
+    attempt: raw.attempt === 2 ? 2 : 1,
+    role: SECURITY_VERIFIER_ROLE,
+    profile: profile.value,
+    captureDigest: String(raw.captureDigest),
+  });
 }

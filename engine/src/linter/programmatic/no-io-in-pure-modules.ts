@@ -46,6 +46,23 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/shell-quoting.ts",
   "engine/src/core/shell-substitution.ts",
   "engine/src/core/shell-write-targets.ts",
+  // The shell grammar every Bash guard judges through, extracted from the
+  // state-file guard (whose config-bound policy stays a shell): simple-command
+  // heads and redirects, heredoc bodies, and the matching views.
+  "engine/src/core/shell-command-head.ts",
+  "engine/src/core/shell-heredoc.ts",
+  "engine/src/core/shell-match-views.ts",
+  // ADR-0065 D6: the subagent authority decision, the run-directory authority
+  // entries it protects, and the operation split derived from the authority
+  // helpers' tables (both tables are pure data).
+  "engine/src/core/subagent-authority.ts",
+  "engine/src/core/audit-run-authority.ts",
+  "engine/src/handlers/pre-tool-use/subagent-authority-operations.ts",
+  "engine/src/handlers/helpers/security-audit-operations.ts",
+  // The CLI routing table: the guard derives the hook route families from it
+  // (a subagent may not invoke a hook entrypoint). Pure data over the two
+  // operation tables.
+  "engine/src/handler-routes.ts",
   // Defect-Family Accounting, including source authority, barrel re-exports,
   // and type dependencies. No directory-wide core/ or infrastructure waiver.
   "engine/src/core/defect-family-accounting.ts",
@@ -265,6 +282,13 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/security-disposition.ts",
   "engine/src/core/security-sandbox.ts",
   "engine/src/core/security-adjudication.ts",
+  // ADR-0065: verification briefs, the verifier result wire, per-brief
+  // admission, ballot binding and the published result — the facade driver and
+  // `verify --from` are its shells.
+  "engine/src/core/security-verification.ts",
+  // ADR-0065 (amended): the capture attestation record, its canonical bytes
+  // and the decision whether ballots are attested — the store is its shell.
+  "engine/src/core/capture-attestation.ts",
 ];
 
 /** Import specifiers that indicate I/O capability or ambient non-determinism */

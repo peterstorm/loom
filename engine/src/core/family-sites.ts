@@ -56,6 +56,9 @@ export const FAMILIES: readonly Family[] = Object.freeze([
       "engine/src/core/shell-substitution.ts",
       "engine/src/core/shell-write-targets.ts",
       "engine/src/core/shell-ansi-c.ts",
+      "engine/src/core/shell-command-head.ts",
+      "engine/src/core/shell-heredoc.ts",
+      "engine/src/core/shell-match-views.ts",
     ] as const),
     patterns: Object.freeze([
       // Whitespace-splitting text into words, which ignores quoting.

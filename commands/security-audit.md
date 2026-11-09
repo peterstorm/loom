@@ -32,10 +32,26 @@ In particular:
   receipt the claim is a lead, not a finding.
 - keep `--out` **outside** the audited repository: the sandbox refuses a
   scratch inside its target, and `nonce` refuses to bind a run it would refuse.
-- `verify` with ballots from a **different** catalog profile than the one that
-  hunted. A hunter's own ballot is admitted and then refused at `publish` as
-  `verified only on the hunt profile` — that refusal is the invariant working,
-  not a bug.
+- verify through an **issued** verification run, never stdin ballots
+  (ADR-0065). Once the wave's hunt has settled (no hunter in flight, critic
+  merged), run `status`: it prints the exact `loom helper orchestration start
+  security-verification --runs-root <run-dir>/verification-runs --run …`
+  command. Run it, spawn each `loom:security-verifier-agent` request it issues
+  with its task verbatim, `resume` the run until it is `done`, then `loom
+  helper security-audit verify --out <run-dir> --from <verification-run>`.
+  Each ballot's profile is the minted request's (`refutation`), so a hunter
+  cannot cast one; a run issued before the ledger or findings moved is refused
+  as stale, and `status` names its replacement (also when a run blocked or
+  cannot be imported: the next generation). Only native capture fills a
+  verifier slot — `orchestration submit`/`correlate` refuse one — and every
+  ballot must match the capture attestation its harness wrote; `--out`
+  absolute on Pi.
+- **only this parent session runs audit operations.** Hunters and verifiers are
+  subagents: the subagent authority guard refuses them every writing `helper
+  security-audit`/`helper orchestration` operation and every write onto the
+  run's authority files. They return their result as their final message, and
+  you record it (`submit` the hunter's envelope; the verifier's answer is
+  captured by the harness).
 - drive `merge-critic` when the coverage critic proposes units, and `defer`
   every unit the budget could not reach **with a reason**. A deferred unit is a
   disclosed gap; a silent one is a coverage claim the run cannot support.
@@ -61,7 +77,7 @@ This is a summary; the authoritative table, with every refusal, is in
 | `nonce` | flags | Print the sandbox nonce and filled-in bounded-run instructions for one artifact of a unit in flight (read-only) |
 | `submit` | stdin | Record a hunter's `security-hunter-result` against its unit; a re-filed fingerprint with different content is refused |
 | `merge-critic` | stdin | Fold the critic's proposed units in, deduped by canonical coverage id |
-| `verify` | stdin | Record ballots (`critical`/`advisory`) that decide `confirmed`/`needs_validation`/`rejected` at `findings` and `publish` |
+| `verify` | flags | Import a finished `security-verification` run's bound ballots (`--from <verification-run>`; `status` prints the start command) that decide `confirmed`/`needs_validation`/`rejected` at `findings` and `publish` |
 | `defer` | flags | Mark an unreachable unit with one of the four reason tokens |
 | `findings` | flags | Render the report from the validated records (read-only) |
 | `publish` | flags | Emit `security-findings.json`; refuses on any publication blocker |

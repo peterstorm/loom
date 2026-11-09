@@ -33,7 +33,12 @@ import {
   CRITIC_PROPOSAL_KEYS,
   UNIT_RESULT_KEYS,
 } from "../../src/core/security-coverage";
-import { parseVerificationVerdicts, VERDICT_KEYS } from "../../src/core/security-adjudication";
+import {
+  parseVerificationResultWire,
+  VERIFICATION_RESULT_KEYS,
+  VERIFICATION_RESULT_KIND,
+  VERIFIER_VOTE_KEYS,
+} from "../../src/core/security-verification";
 import { REFUTATION_PROFILE, aRefs, ok } from "./fixtures";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
@@ -222,26 +227,26 @@ describe("the critic doc documents the wire `merge-critic` parses", () => {
   });
 });
 
-describe("the verifier doc documents the wire `verify` parses", () => {
+describe("the verifier doc documents the result wire the verification program admits", () => {
   const block = wireBlock("security-verifier-agent.md");
+  const vote = firstItem(block.verdicts, "verdicts");
 
-  it("names no key the verdict parser refuses", () => {
+  it("names no key the result parser refuses", () => {
     expect(keysOf(block).length).toBeGreaterThan(0);
-    expect(unknownKeys(keysOf(block), VERDICT_KEYS)).toEqual([]);
-    expect(VERDICT_KEYS.length).toBeGreaterThan(0);
+    expect(unknownKeys(keysOf(block), VERIFICATION_RESULT_KEYS)).toEqual([]);
+    expect(unknownKeys(Object.keys(vote), VERIFIER_VOTE_KEYS)).toEqual([]);
   });
 
-  it("carries the ballot identity the parser requires", () => {
-    expect(block.kind).toBe("security-verdict");
-    const documented = keysOf(block);
-    for (const required of ["fingerprint", "vote", "reason", "missingFact", "agent", "profile", "wave"]) {
-      expect(documented, required).toContain(required);
-    }
+  it("documents every key and the result kind, and no self-reported identity (ADR-0065 D2)", () => {
+    expect(block.kind).toBe(VERIFICATION_RESULT_KIND);
+    expect(keysOf(block)).toEqual([...VERIFICATION_RESULT_KEYS]);
+    expect(Object.keys(vote)).toEqual([...VERIFIER_VOTE_KEYS]);
+    for (const identity of ["agent", "profile", "wave"]) expect(Object.keys(vote), identity).not.toContain(identity);
   });
 
   it("parses the doc's own block, placeholders resolved", () => {
-    const ballots = parseVerificationVerdicts([resolvePlaceholders(block)]);
-    expect(ballots.ok ? [] : ballots.error.violations).toEqual([]);
-    expect(ok(ballots)).toHaveLength(1);
+    const votes = parseVerificationResultWire(resolvePlaceholders(block));
+    expect(votes.ok ? [] : votes.error).toEqual([]);
+    expect(ok(votes)).toHaveLength(1);
   });
 });

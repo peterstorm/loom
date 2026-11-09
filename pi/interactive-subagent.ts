@@ -13,6 +13,7 @@ import { Type } from "typebox";
 import { resolveEffectivePiBindingFromParent, type EffectivePiBinding, type RoutedPiThinkingLevel } from "../engine/src/core/model-routing";
 import { lowerModelProfile, resolveAgentProfile } from "../engine/src/core/model-profiles";
 import { buildPiRoutingContext } from "../engine/src/utils/model-routing-context";
+import { childAgentEnvironment } from "./subagent-process";
 import { piAgentDefinitionPath } from "../engine/src/core/pi-agent-directory";
 import { validatePiAgentDefinitionFile, type PiRoutingContext } from "../engine/src/utils/render-pi-agent";
 import {
@@ -78,6 +79,10 @@ type SpawnRpcChild = (
   command: string,
   args: readonly string[],
   cwd: string,
+  /** The child's whole environment: the inherited one plus the explicit
+   *  subagent marker (`childAgentEnvironment`), so the child's Loom extension
+   *  knows it is a subagent whatever its launch flags say. */
+  env: Readonly<Record<string, string | undefined>>,
 ) => ChildProcessWithoutNullStreams;
 
 export type InteractiveSubagentDependencies = Readonly<{
@@ -197,8 +202,9 @@ export async function relayExtensionUiRequest(
   }
 }
 
-const defaultSpawn: SpawnRpcChild = (command, args, cwd) => spawn(command, [...args], {
+const defaultSpawn: SpawnRpcChild = (command, args, cwd, env) => spawn(command, [...args], {
   cwd,
+  env: { ...env },
   shell: false,
   stdio: ["pipe", "pipe", "pipe"],
 });
@@ -310,7 +316,8 @@ export async function runInteractiveSubagent(
   let child: ChildProcessWithoutNullStreams;
   try {
     const invocation = piInvocation(args);
-    child = (dependencies.spawnChild ?? defaultSpawn)(invocation.command, invocation.args, input.cwd);
+    child = (dependencies.spawnChild ?? defaultSpawn)(invocation.command, invocation.args, input.cwd,
+      childAgentEnvironment(process.env, null));
     dependencies.onChildStarted?.(child);
   } catch (error) {
     await rm(promptDir, { recursive: true, force: true });

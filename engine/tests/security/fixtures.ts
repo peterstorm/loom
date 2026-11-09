@@ -212,29 +212,50 @@ export function aRejectedFinding(overrides: Partial<RejectedFinding> = {}): Reco
 export const HUNT_PROFILE = "focused-review" as const;
 export const REFUTATION_PROFILE = "refutation" as const;
 
-/** A refutation ballot. The default is a `critical` vote from a catalog profile
- *  that did not hunt, which is the only shape that confirms a claim — a test
- *  that wants a demotion, a rejection, or a self-confirming hunter ballot says
- *  so explicitly. */
-export function aVerdict(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+/** A ballot's binding as a verification run publishes it (ADR-0065 D3): the
+ *  minted request it answered and its capture digest. The default request is
+ *  a refutation-profile verifier's attempt 1. */
+export function aBallotBinding(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const slotId = `security-verification-slot:${"0".repeat(32)}`;
   return {
-    schemaVersion: 1,
-    kind: "security-verdict",
+    program: "security-verification",
+    runId: "run.verify-w2-000000000000",
+    requestId: `${slotId}:1`,
+    slotId,
+    attempt: 1,
+    role: "security-verifier-agent",
+    profile: REFUTATION_PROFILE,
+    captureDigest: "a".repeat(64),
+    ...clone(overrides),
+  };
+}
+
+/** A bound refutation ballot as `verdicts.json` holds it. The default is a
+ *  `critical` vote from a verifier minted on a catalog profile that did not
+ *  hunt, which is the only shape that confirms a claim — a test that wants a
+ *  demotion, a rejection, or a same-profile ballot says so explicitly.
+ *  `profile` and `requestId` overrides land in the binding. */
+export function aVerdict(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const { profile, requestId, binding, ...rest } = clone(overrides);
+  return {
     fingerprint: "api/login:sqli-email",
     vote: "critical",
     reason: "The sandbox payload returned the admin row, so the claim survives.",
     missingFact: null,
-    agent: "security-verifier-agent",
-    profile: REFUTATION_PROFILE,
     wave: 2,
-    ...clone(overrides),
+    binding: aBallotBinding({
+      ...(profile === undefined ? {} : { profile }),
+      ...(requestId === undefined ? {} : { requestId }),
+      ...(typeof binding === "object" && binding !== null ? binding : {}),
+    }),
+    ...rest,
   } as Record<string, unknown>;
 }
 
-/** A ballot cast by the hunter that filed the claim: same fingerprint, hunter
- *  agent, hunter profile. It is the shape INV-S3 exists to refuse. */
+/** A ballot whose binding names the HUNT profile: the shape INV-S3 refuses to
+ *  count — the vote of a model agreeing with itself. */
 export function aHunterBallot(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return aVerdict({ agent: "security-hunter-agent", profile: HUNT_PROFILE, wave: 1, ...clone(overrides) });
+  return aVerdict({ profile: HUNT_PROFILE, wave: 1, ...clone(overrides) });
 }
 
 /** The identity every hunter result carries — spread into a submit payload. */

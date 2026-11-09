@@ -69,6 +69,12 @@ and D4 are plan decisions this ADR does not restate.)
   downgrade authority (`references/review-lenses.md`). Upstream's five-level
   `overall_severity` is a recorded, refutable field. Invariant: overall severity never exceeds
   demonstrated impact.
+  *Amended 2026-11-09 by ADR-0065 (the verification step only):* a ballot is no longer read
+  from `verify`'s stdin with a self-reported `agent`/`profile`. It is the captured answer of a
+  `security-verifier-agent` spawn issued by the `security-verification` facade program, its
+  identity bound from the minted request; `verify --from <verification-run>` imports a
+  finished run's bound ballots, and subagents are fenced off from every writing audit and
+  orchestration operation. The `critical | advisory` ballot and its adjudication are unchanged.
 - **D5 — The taxonomy is vendored byte-identically.** `references/security-lenses/` keeps
   upstream filenames (uppercase) so intra-taxonomy links stay valid and re-vendoring is a
   plain copy. `MANIFEST.json` pins each file's SHA-256; a test fails on unexplained drift.

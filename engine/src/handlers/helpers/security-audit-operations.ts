@@ -17,7 +17,7 @@
 export type SecurityAuditOperationTraits = Readonly<{
   /**
    * `stdin`: the operation reads its input to end-of-input (units to seed,
-   * candidate findings, critic proposals, verification ballots). `flags`: it
+   * candidate findings, critic proposals). `flags`: it
    * takes only flags, so the CLI must not wait for an end-of-input that an
    * inherited, still-open stdin never delivers.
    */
@@ -51,8 +51,9 @@ export const SECURITY_AUDIT_OPERATIONS = Object.freeze({
   defer: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
   /** Fold the coverage critic's proposals, reassignments and resolutions in. */
   "merge-critic": Object.freeze({ input: "stdin", runtimeSkew: "handshake-required" }),
-  /** Record verification ballots. Adjudication itself happens at publish. */
-  verify: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required" }),
+  /** Import a finished verification run's bound ballots (`--from`, ADR-0065).
+   *  Stdin ballots are refused. Adjudication itself happens at publish. */
+  verify: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
   /** Render the report from validated records, to stdout. Writes nothing. */
   findings: Object.freeze({ input: "flags", runtimeSkew: "available" }),
   /** Adjudicate and publish `security-findings.json` plus the rendered docs. */

@@ -25,6 +25,9 @@
  * - `review-capture` — capture of one request-bound result
  * - `spawn-reservation` — the parent session's reservations and cleanup debt
  * - `cleanup-actions` — best-effort cleanup and startup hygiene
+ * - `subagent-authority-gate` — a subagent's bash may not change audit or
+ *   orchestration authority (ADR-0065 D6), and the parent's
+ *   `security-audit verify --from` must name a witnessed verification run
  *
  * The Pi user agent directory the definition port reads is resolved by the
  * one shared rule in `engine/src/core/pi-agent-directory.ts`.
@@ -111,6 +114,8 @@ import {
   type PiEmissionReadinessRegistration,
 } from "./emission-readiness";
 import { piBashCommand, piWriteTargetPaths, replacePiSpawnTask } from "./tool-input";
+import { piParentVerifyWitnessDecision, piSubagentAuthorityDecision } from "./subagent-authority-gate";
+import { markPiParentEnvironment } from "./subagent-process";
 import {
   registerPiEmissionLaunchBridge,
   type PiSubagentLaunchEventBus,
@@ -290,6 +295,11 @@ export default function (
   // this extension loaded, preventing mutable-checkout split brain.
   process.env[PI_EXTENSION_RUNTIME_ROOT_ENV] = LOADED_RUNTIME_IDENTITY.packageRoot;
   process.env[PI_EXTENSION_RUNTIME_REVISION_ENV] = LOADED_RUNTIME_IDENTITY.revision;
+  // ADR-0065 (amended): every process this session launches — the installed
+  // subagent launcher copies process.env into each child — inherits this
+  // process's pid as its parent marker, so a child's extension knows it is a
+  // subagent. A subagent publishes nothing: its own children stay subagents.
+  markPiParentEnvironment(null);
   pi.on("resources_discover", () => {
     let resources;
     try {
@@ -365,6 +375,15 @@ export default function (
         }
       }
 
+      // Subagent authority (ADR-0065 D6): in a subagent process, bash may not
+      // change audit or orchestration authority. Inert in the parent session.
+      // The Claude Code twin is the guard-subagent-authority hook.
+      if (event.toolName === "bash") {
+        currentGuard = "guard-subagent-authority";
+        const authority = piSubagentAuthorityDecision(event, ctx);
+        if (authority !== undefined) return authority;
+      }
+
       // Guard state file from bash writes
       if (event.toolName === "bash") {
         currentGuard = "guard-state-file";
@@ -397,6 +416,14 @@ export default function (
         if (result.kind === "block") {
           return { block: true, reason: result.message };
         }
+      }
+
+      // ADR-0065: the parent's `security-audit verify --from` imports only a
+      // verification run this session's Trusted Review Witness proves.
+      if (event.toolName === "bash") {
+        currentGuard = "security-verification-witness";
+        const witnessed = await piParentVerifyWitnessDecision(event, ctx, reviewWitnesses);
+        if (witnessed !== undefined) return witnessed;
       }
 
       // Subagent tool → `prepareSpawnBatch` owns the ordered observe → expand →
@@ -508,6 +535,7 @@ export default function (
   // ─── Session Lifecycle ────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
+    markPiParentEnvironment(ctx.sessionManager.getSessionId() ?? null);
     // Cleanup stale subagent tracking files — the ENGINE's sweep, not a
     // per-file twin: staleness is judged per session GROUP (max mtime across
     // the session's files), and the TTL is the shared STALE_SUBAGENT_TTL_MS,

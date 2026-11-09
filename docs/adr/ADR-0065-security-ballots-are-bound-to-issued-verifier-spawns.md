@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-09). Supersedes the "ballot attribution is self-reported" limit recorded in
+Accepted (2026-11-09). Supersedes the "ballot attribution is self-reported" limit recorded in
 `docs/security-audit.md` (Honest limits) and deferred as cores `architecture-tech-lead-4` in
 review campaign 3 (`run.rf3-cores-policy`). Amends ADR-0064 D2/D3, the verification step only.
 
@@ -167,10 +167,15 @@ the skill's running section shows `start security-verification` → spawn → `v
 - INV-S3 holds against a mislabelled ballot and against a hunter filing ballots: a ballot exists
   only as a harness-captured output of a `security-verifier-agent` spawn on the `refutation`
   profile, and the commands that could inject one are fenced off from subagents.
-- **Residual, stated in the docs:** the parent session is trusted (it runs every write); D6 is a
-  shell-string fence with known bypass classes, so on Claude Code a determined subagent that
-  evades it could still write a capture file; on Pi the trusted witness (extended to this program,
-  see below) closes that by refusing any slot it did not witness in-process.
+- **Residual, stated in the docs (amended):** the parent session is trusted (it runs every write
+  and every capture hook). D6 is defence in depth with known bypass classes: a subagent that
+  evades it can still write FILES — a transcript into a verification run, a ballot into
+  `verdicts.json` — but it cannot produce an ATTESTED capture, and nothing unattested is ever
+  imported or counted, on either harness. The attestations live in the protected `subagentDir()`
+  (refused to Bash/helper writes by `guard-state-file`, to file tools by `block-direct-edits`, to
+  subagents by D6; exclusive publish, never replaced, read fail-closed). The store's own residual
+  is the fence's: a subagent that evades every Bash guard and writes a canonical attestation for a
+  forged transcript by hand would be believed.
 - The Pi trusted review witness, which today verifies only `standalone-review`, is generalised to
   `security-verification` (same capture event shape).
 - Verification costs no extra invocations: the same verifier spawns, now issued. Retries consume
@@ -199,3 +204,196 @@ the skill's running section shows `start security-verification` → spawn → `v
    plus refusal tests: stdin ballots, stale findings digest, a hunter-role capture into a verifier
    slot, a subagent `verify`.
 6. **Docs:** D7, the agent docs (verifier JSON block is test-bound), and ADR-0064's D2/D3 note.
+
+## Implementation notes
+
+Steps 1, 2, 3 and 5 landed in `core/security-verification.ts` (pure),
+`handlers/helpers/programs/security-verification.ts` (driver),
+`handlers/helpers/security-audit-run.ts` (the audit read seam shared by the CLI and the
+program) and `handlers/helpers/security-audit.ts` (`verify --from`, `status`, `start`).
+Step 4 landed in `core/subagent-authority.ts` (pure decision),
+`handlers/pre-tool-use/guard-subagent-authority.ts` (Claude Code) and
+`pi/subagent-authority-gate.ts` (Pi, with the parent's witness check below); step 6 in
+`docs/security-audit.md`, the skill, the command and the agent docs.
+Where the code forced a choice the ADR left open, or a deviation, it is recorded here.
+
+- **Eligibility and briefs.** A candidate is eligible when it is `confirmed` in
+  `findings.json` and no ballot in `verdicts.json` names its fingerprint (any wave).
+  Eligible fingerprints are sorted and cut into consecutive briefs of at most
+  `MAX_BRIEF_FINGERPRINTS = 4`: small enough that a verifier reads every trace, a quarter
+  of the spawns one-per-claim would need, and a malformed answer retries only its own
+  brief. The briefs are frozen in the registration at `start`; resume never re-derives
+  them from a `verdicts.json` that may have moved.
+- **Run name (deviation).** The run directory is
+  `<audit>/verification-runs/run.verify-w<wave>-<id>`, not `run.verify-w<wave>`: `<id>` is
+  the first 12 hex of the SHA-256 of the brief slot ids (which bind audit run, wave and
+  fingerprints). A program registration is immutable, so a fixed per-wave name would make
+  a run refused as stale — or a second claim set in the same wave — permanently block its
+  replacement. The program refuses any name other than the derived one, and any runs root
+  other than the audit's own `verification-runs/`. `start` creates that runs root
+  (`orchestration start` never creates one).
+- **Start command.** No new operation: `status` (and `status --json`, field
+  `verification`) prints the exact `helper orchestration start security-verification
+  --runs-root … --run …` command with its D1 input on a here-document, and the follow-up
+  `verify --from`. The operation table is unchanged except `verify`'s input trait, which is
+  now `flags`; a stdin payload is refused with a pointer to the new flow.
+- **Result authentication (stronger than a digest).** `verify --from` does not take a
+  caller-supplied digest. It (1) requires the run to be a registered
+  `security-verification` program under this audit's `verification-runs/`, (2) applies the
+  pure import rule — result describes the registration (run id, registration digest,
+  audit, wave), the audit's current locator/run id/ledger/findings digests equal the
+  issued ones, the ballots cover exactly the registered fingerprints, and a re-import is
+  idempotent while a partial one is refused — and (3) replays the run's outcome from its
+  captured evidence and requires `result.json` to be byte-identical to that replay. A
+  hand-edited `result.json` is refused even when it is internally consistent.
+- **Driver shape.** The program keeps no checkpoint: every drive recomputes each slot's
+  decision (`decideVerificationSlot`) from the durable batch receipt, captures and capture
+  rejections, so `verify --from` replays exactly what the driver decided. A refused
+  attempt 1 gets one attempt-2 retry, published through the Refutation Panel's
+  `recoverOrPublishRefutationRetry` and told the admission diagnostic; a refused attempt 2
+  blocks the run with the new `security-verification-blocked` diagnostic. A run whose
+  audit moved blocks rather than spawning. Slots already on record are read back as
+  history (ADR-0023), never re-minted.
+- **Ballot shape.** `verdicts.json` holds exactly the D3 shape
+  (`fingerprint, vote, reason, missingFact, wave, binding`); `binding.profile` must be a
+  catalog profile, `binding.role` `security-verifier-agent`, `binding.program`
+  `security-verification`, and one request may cast at most one ballot per fingerprint.
+- **Capture routing.** Claude needs no new branch: the request-bound SubagentStop path is
+  generic once the registration parses, and the existing correlator role check refuses a
+  hunter-role spawn answering a verifier request. Pi classifies a verifier request as
+  `security-verification-extraction` (the archived no-schema claim: no emission tool,
+  final-message extraction) in `authenticatePiIssuedReviewRequest`, which spawn admission
+  and capture share. `orchestration submit` into a verification run resumes the program
+  (the parent path for harnesses without native capture; D6 fences it from subagents).
+- **Pi witness.** `createTrustedReviewWitnesses` gains `verifySecurityVerification`,
+  which proves a named run from the session's in-process witnesses (every captured slot
+  witnessed with identical authority and bytes, `result.json` equal to the witnessed
+  replay). `verify --from` is a separate CLI process and cannot consult it, and the
+  review-authority bridge is an in-process publication for harness consumers, not a CLI
+  check — so the Pi `tool_call` chain calls it: `piParentVerifyWitnessDecision`
+  (`pi/subagent-authority-gate.ts`, wired in `pi/extension.ts` beside the D6 gate) reads
+  every `helper security-audit verify` invocation in a PARENT bash call with the guard's
+  own command walker (`securityAuditVerifyInvocations`, `core/subagent-authority.ts`: the
+  same heredoc/substitution/`bash -c`/`eval`/`xargs` traversal and helper recognition),
+  reads `--out`/`--from` with the CLI's own `argumentValue`, places the run with the
+  CLI's own `parseRunDirectoryReference(verificationRunsRoot(out), from)`, and blocks the
+  call when the witness refuses (an unwitnessed slot, a slot of another session, an
+  altered `result.json`). An invocation whose arguments the shell completes at runtime, a
+  relative `--out`, or a relative `--from` path is blocked rather than guessed (the
+  `status`-printed command is absolute). Claude Code is unaffected; its residual stays the
+  D6 fence. Residual on Pi: the witness lives in the extension process, so a session that
+  restarts between the captures and the import cannot prove that run, and since the run
+  name derives from its briefs, `status` names the same run until the ledger or findings
+  change.
+- **Registration (amended).** Every WRITING `helper security-audit` operation registers
+  the audit run with the subagent write guard's registry (`registerSecurityAuditRun`):
+  `start` after its fresh documents land (as before), every other writer BEFORE it writes
+  (`refreshRunRegistration`, `handlers/helpers/security-audit.ts`). Registration is
+  idempotent, so a registry wiped mid-audit (the subagent dir under `/tmp` cleaned) is
+  rebuilt by the next write, and an operation whose run cannot be registered fails without
+  writing. A read-only projection registers nothing.
+- **D6 operation split (amended).** D6 lists specific operations; the implementation
+  derives the split instead, from each helper's operation table
+  (`handlers/pre-tool-use/subagent-authority-operations.ts`): an operation whose
+  `runtimeSkew` trait is `available` is a read-only projection a subagent may run; every
+  other operation writes run state and is refused, as is an operation name the guard
+  cannot resolve statically. A new operation is classified by the trait it must declare,
+  never by a copied list. At this writing the split is — `security-audit` allowed:
+  `findings`, `nonce`, `status`; refused: `assign`, `defer`, `disposition`,
+  `merge-critic`, `publish`, `start`, `submit`, `verify`. `orchestration` allowed:
+  `brief`, `inspect`, `status`; refused: `abandon`, `attest`, `complete`, `correlate`,
+  `decide`, `recover-orphan`, `remediate`, `reopen-task`, `restart`, `resume`, `start`,
+  `submit`. This is a superset of D6's lists (it also refuses `attest`, `complete`,
+  `recover-orphan`, `remediate`, `reopen-task`, `restart`).
+- **Authority entries (amended).** The run directory's entry names have one owner,
+  `core/audit-run-authority.ts`, imported by the CLI, its read seam, the disposition
+  handoff and the guard. The protected set is every run document plus both facade runs
+  roots the audit names: D6's list, the lens selection, the derived prose and
+  `standalone-disposition.json`, `verification-runs/`, and `disposition-runs/` (the
+  `standalone-disposition` runs root the handoff command names — a forged remediation run
+  is forged authority too). A test drives a whole audit through the CLI and checks the
+  guard refuses a write onto every entry it left.
+
+### Implementation notes (amended — second review round)
+
+The adversarial review of the first implementation found that its security rested on
+shell-string matching. This round moves the proof onto the DATA path; the D6 fence stays as
+defence in depth. Where a bullet below contradicts one above, this one wins.
+
+- **A — no CLI write into a verifier slot.** `helper orchestration submit` and `correlate`
+  refuse every request whose program is `security-verification` (`verifierSlotRefusal`,
+  `handlers/helpers/orchestration.ts`): verifier output is captured natively only. The
+  "`orchestration submit` into a verification run resumes the program" note above is withdrawn.
+- **B — persisted capture attestation (the authority on both harnesses).** The native capture
+  pipeline (`persistBoundCapture` → `attestCapture`, `orchestration/harness-capture-runtime.ts`),
+  which both Claude Code's SubagentStop capture and Pi's request-bound capture run, writes —
+  write-ahead, before the transcript lands — one attestation per verifier attempt
+  `{program, runId, runDirectory (realpath), requestId, slotId, attempt, role, harness, nativeId,
+  digest, byteLength}` into `<subagentDir>/security-capture-attestations/`
+  (`orchestration/capture-attestation-store.ts`; record, canonical bytes, entry name and the
+  `ballotsAttested` decision pure in `core/capture-attestation.ts`). Entries are exclusive
+  publishes, idempotent for identical bytes and never replaced; the store is in `protectedDirs()`
+  and in `PERSISTENT_SUBAGENT_DIR_ENTRIES`; a malformed, renamed or non-canonical entry is
+  refused (fail closed). `BallotBinding.captureDigest` is D3's `CaptureReceipt.digest`, and must
+  equal the attested digest. `verify --from` (`proveVerificationSource`,
+  `handlers/helpers/security-verification-proofs.ts`) requires `result.json` to equal the evidence
+  replay AND every ballot to match its attestation — no attestation is refused as "not natively
+  captured". `verdicts.json` is a cache: `findings`, `status` and `publish` re-prove every run a
+  cached ballot names (`proveCachedBallots` → pure `admitCachedBallots`,
+  `core/security-verification.ts`): a registered security-verification run of this audit (locator
+  and run id), whose evidence replays — bound to the audit's identity only (`AuditBinding
+  "issued"`), so later waves moving the ledger do not unprove earlier ballots — to a result holding
+  exactly the cached ballots, each attested. A failing run contributes no ballot and one named
+  publication blocker. The Pi in-process witness gate is now secondary: it is consulted first and,
+  when it cannot prove the run, the gate falls back to the same persisted proof — closing the Pi
+  restart gap recorded above.
+- **C — registry spellings.** A run is registered under both `resolve(out)` as spelled and its
+  realpath; the guard expands every registered directory with its realpath and judges every
+  literal path also in its canonical spelling — the realpath of its deepest existing ancestor
+  (`canonicalizeDeepestAncestor`, through the core's `SubagentFilesystemView` port). A symlink to a
+  run created on the same line with a runtime-built target stays a gap.
+- **D — registry during verification.** `start` and `resume` of the `security-verification`
+  program register (refresh) the audit run before driving, refusing when it cannot be registered.
+- **E — run name and generations.** The start input gains `generation` (1..16). A brief's slot id
+  binds the audit run id, both audit digests, the wave and the generation, so no two
+  verification runs share a slot or request id (a harness resolves a spawn to its run by request
+  id); the run name is `run.verify-w<wave>-g<generation>-<id>`, the id hashing the slot ids, the
+  first 8 hex of the ledger and findings digests, and the generation. `status` names the first
+  generation whose run is absent or live (in flight, or complete and importable); a blocked,
+  malformed or unimportable run (a capture without attestation) is dead and the next generation
+  is named. This supersedes the "Run name (deviation)" note above.
+- **F — fence normalisations (`core/subagent-authority.ts`, `core/shell-command-head.ts`).**
+  Command words are unescaped (`\loom`); `time` is a wrapper beside `command`, `builtin`,
+  `nice`, `nohup`, `timeout`, `stdbuf`, `setsid` (already wrappers); `coproc` and `!` are syntax;
+  `find -exec` runs its command. A shell (`sh|bash|zsh|dash|ksh|…`) fed a program through a pipe,
+  a here-string, an input redirect, a script file argument, `source`/`.`, or an executed script
+  (`#!` shell or `.sh`) has that program judged — files read at decision time through the port
+  (bounded, regular files only); an unreadable script refuses only a line that concerns
+  authority; a script FILE is judged on the paths it names literally (its runtime words and
+  `case` patterns are plumbing, so `scripts/security-sandbox.sh` stays allowed). Interpreter code
+  (`python* -c`, `node -e/-p`, `bun -e/-p`, `perl -e`, `ruby -e`, awk programs, and code fed by a
+  pipe or here-string) is refused when it invokes a writing helper operation, a CLI hook route, or
+  imports an engine authority module. A subagent may not invoke a Loom CLI hook route
+  (`HARNESS_HOOK_ROUTES`, derived from `KNOWN_HANDLERS`) nor launch a nested harness (`claude`,
+  `pi`, `npx|bunx|pnpm dlx` of either). `securityAuditVerifyInvocations` walks the same forms; an
+  invocation found in fed text is unresolved (the shell reads it after the gate). Remaining gaps,
+  pinned as allowed: runtime-built command or helper names, a variable holding a whole path,
+  runtime-built interpreter code, names in `printf` escapes, a runtime-built script then run, a
+  same-line symlink with a runtime-built target, and an interpreter's own script file.
+- **G — Pi subagent detection.** `pi/subagent-process.ts` decides from an explicit environment
+  marker, never launch flags: every Loom Pi session publishes `LOOM_PI_PARENT_PID` (+
+  `LOOM_PI_PARENT_SESSION`) into its own environment at load and session start, which every
+  process it launches inherits (the installed json-mode launcher copies `process.env`); the
+  extension's own `--mode rpc` child (`pi/interactive-subagent.ts`) is spawned with
+  `LOOM_PI_SUBAGENT=1` explicitly. A process is a subagent when it carries `LOOM_PI_SUBAGENT=1`
+  or a parent pid that is not its own; a subagent never re-marks itself a parent. The rules gate
+  uses the same marker — semantics change: a headless parent (`pi --mode json -p --no-session`
+  without the marker) is now GATED (the old inference exempted it); `LOOM_GATE_MODES` still
+  overrides.
+- **H — lows.** One fingerprint, one verification run: an import whose fingerprint already
+  carries another run's ballot is refused, and a cache holding such a pair is a blocker (two
+  finished generations of one claim set must not let the second outvote the first). Every path
+  in a printed command (`status`'s start and import commands, `renderVerificationStart`, the
+  disposition handoff, `assign`'s nonce line) is one `quoteShellArgument` word. The registry cap
+  (4096) counts live runs only: the registrar prunes entries whose directory is gone once at the
+  cap, and the reader fails closed only while live entries still exceed it.

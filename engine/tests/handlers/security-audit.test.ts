@@ -13,11 +13,11 @@
  * would not exercise the thing that breaks in production.
  */
 
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createSecurityAuditHandler } from "../../src/handlers/helpers/security-audit";
 import { parseStandaloneDispositionStartInput } from "../../src/core/standalone-disposition-machine";
 import { piRuntimeHandshakeRequired, routeConsumesStdin } from "../../src/handler-routes";
@@ -25,10 +25,12 @@ import { SECURITY_AUDIT_OPERATIONS, SECURITY_AUDIT_OPERATION_ORDER, parseSecurit
 import { SECURITY_AUDIT_LIMITS, type SecurityRunMetadata } from "../../src/core/security-audit-contract";
 import type { CoverageUnit } from "../../src/core/security-coverage";
 import type { SecurityFinding } from "../../src/core/security-findings";
-import type { VerificationVerdict } from "../../src/core/security-adjudication";
 import { HUNTER_ENVELOPE, aConfirmedFinding, aHunterBallot, aNeedsValidationFinding, aSeed, aUnitResult, aVerdict, nSeeds } from "../security/fixtures";
-import { aRun, readJson, removeRuns, seedFor, unitIdFor, type Run } from "./security-audit-harness";
+import { aRun, handWriteBallots, isolateSubagentDir, readJson, removeRuns, seedFor, unitIdFor, type Run } from "./security-audit-harness";
+import { verifyWith } from "./security-verification-harness";
+import { registeredSecurityAuditRuns } from "../../src/orchestration/security-audit-run-registry";
 
+beforeEach(() => { isolateSubagentDir(); });
 afterEach(removeRuns);
 
 describe("the operation set", () => {
@@ -112,7 +114,7 @@ describe("a full run", () => {
     expect(blocked.ok).toBe(false);
     expect(blocked.error).toContain("no verification verdict");
 
-    expect((await run.invoke(["verify"], JSON.stringify({ verdicts: [aVerdict()] }))).error).toBeNull();
+    await verifyWith(run);
 
     const findings = await run.invoke(["findings", "--json"]);
     expect(findings.error).toBeNull();
@@ -135,6 +137,7 @@ describe("a full run", () => {
       "run.json",
       "security-findings.json",
       "verdicts.json",
+      "verification-runs",
     ]);
     expect(readFileSync(join(run.out, "REPORT.md"), "utf8")).toContain("api/login:sqli-email");
   });
@@ -210,9 +213,7 @@ describe("adjudication", () => {
   it("demotes a claim to a lead when the ballot names a missing fact", async () => {
     const run = aRun();
     await seedAndSubmitClaim(run);
-    await run.invoke(["verify"], JSON.stringify({
-      verdicts: [aVerdict({ vote: "advisory", missingFact: "The deployment may bind the value upstream." })],
-    }));
+    await verifyWith(run, () => ({ vote: "advisory", missingFact: "The deployment may bind the value upstream." }));
     expect((await run.invoke(["publish"])).error).toBeNull();
     const published = readJson<SecurityFinding[]>(run.out, "security-findings.json");
     expect(published.map((finding) => finding.verdict)).toEqual(["needs_validation"]);
@@ -222,42 +223,38 @@ describe("adjudication", () => {
   it("rejects a claim when the ballot refutes it outright", async () => {
     const run = aRun();
     await seedAndSubmitClaim(run);
-    await run.invoke(["verify"], JSON.stringify({ verdicts: [aVerdict({ vote: "advisory", missingFact: null })] }));
+    await verifyWith(run, () => ({ vote: "advisory", missingFact: null }));
     expect((await run.invoke(["publish"])).error).toBeNull();
     expect(readJson<SecurityFinding[]>(run.out, "security-findings.json").map((finding) => finding.verdict)).toEqual(["rejected"]);
   });
 
-  it("refuses a ballot cast by the hunter that filed the claim", async () => {
+  it("never counts a hand-written ballot — not even one whose binding names a verifier — and names its run as a blocker", async () => {
     const run = aRun();
     await seedAndSubmitClaim(run);
-    // The hunter's own ballot: its agent AND its catalog profile. This is the
-    // shape INV-S3 exists to refuse, and the one the budget-profile comparison
-    // let through.
-    const verified = await run.invoke(["verify"], JSON.stringify({ verdicts: [aHunterBallot()] }));
-    expect(verified.ok).toBe(true);
+    // A ballot written into verdicts.json, binding and all: no verification
+    // run under this audit replays it, and no harness attested its capture.
+    // (INV-S3 over a REAL ballot's minted profile is the adjudication core's,
+    // tests/security/security-adjudication.test.ts.)
+    handWriteBallots(run, [aHunterBallot()]);
     const blocked = await run.invoke(["publish"]);
     expect(blocked.ok).toBe(false);
-    expect(blocked.error).toContain("verified only on the hunt profile");
+    expect(blocked.error).toContain("are not counted");
+    expect(blocked.error).toContain("no verification verdict");
+    expect((await run.invoke(["findings", "--json"])).error).toBeNull();
+    expect((JSON.parse(run.stdout()) as { publicationBlockers: string[] }).publicationBlockers.join("\n")).toContain("are not counted");
   });
-
-  it("refuses a ballot whose profile is not the one its agent sits on", async () => {
+  it("refuses a ballot whose binding names no verifier spawn — a refusal, not an unverified gap (ADR-0065 D5)", async () => {
     const run = aRun();
     await seedAndSubmitClaim(run);
-    // A hunter cannot borrow the verifier's profile by writing it down.
-    const refused = await run.invoke(["verify"], JSON.stringify({
-      verdicts: [aVerdict({ agent: "security-hunter-agent", profile: "refutation" })],
-    }));
+    // A hunter cannot cast a ballot by writing its own role into the binding.
+    handWriteBallots(run, [aVerdict({ binding: { role: "security-hunter-agent" } })]);
+    const refused = await run.invoke(["publish"]);
     expect(refused.ok).toBe(false);
-    expect(refused.error).toContain("sits on profile focused-review");
-  });
-
-  it("accumulates ballots across waves instead of replacing them", async () => {
-    const run = aRun();
-    await run.invoke(["start", "--repo", run.out, "--source", "0".repeat(40), "--profile", "standard"], JSON.stringify({ units: nSeeds(2) }));
-    await run.invoke(["verify"], JSON.stringify({ verdicts: [aVerdict({ fingerprint: "a:one" })] }));
-    await run.invoke(["verify"], JSON.stringify({ verdicts: [aVerdict({ fingerprint: "b:two", wave: 3 })] }));
-    const verdicts = readJson<VerificationVerdict[]>(run.out, "verdicts.json");
-    expect(verdicts.map((verdict) => verdict.fingerprint)).toEqual(["a:one", "b:two"]);
+    expect(refused.error).toContain("verdicts.json is malformed");
+    expect(refused.error).toContain("binding.role: expected security-verifier-agent");
+    const { binding: _binding, ...unbound } = aVerdict();
+    writeFileSync(join(run.out, "verdicts.json"), JSON.stringify([unbound]));
+    expect((await run.invoke(["status"])).error).toContain("binding: expected the binding a verification run published");
   });
 
   it("passes a hunter's own lead and rejection through untouched", async () => {
@@ -269,7 +266,7 @@ describe("adjudication", () => {
       findings: [aNeedsValidationFinding(), aConfirmedFinding()],
     }));
     expect(submitted.error).toBeNull();
-    await run.invoke(["verify"], JSON.stringify({ verdicts: [aVerdict()] }));
+    await verifyWith(run);
     expect((await run.invoke(["publish"])).error).toBeNull();
     const published = readJson<SecurityFinding[]>(run.out, "security-findings.json");
     expect(published.map((finding) => finding.verdict).sort()).toEqual(["confirmed", "needs_validation"]);
@@ -320,12 +317,13 @@ describe("the wire", () => {
     expect(malformed.error).toContain("units[0].status");
   });
 
-  it("refuses a verdict with an invented field", async () => {
+  it("refuses a recorded ballot with an invented field", async () => {
     const run = aRun();
     await run.invoke(["start", "--repo", run.out, "--source", "0".repeat(40)], JSON.stringify({ units: [seedFor(0)] }));
-    const invented = await run.invoke(["verify"], JSON.stringify({ verdicts: [aVerdict({ invented: "high" })] }));
+    handWriteBallots(run, [aVerdict({ invented: "high" })]);
+    const invented = await run.invoke(["status"]);
     expect(invented.ok).toBe(false);
-    expect(invented.error).toContain("unknown field");
+    expect(invented.error).toContain("verdicts[0].invented: unknown field");
   });
 
   it("refuses an unknown flag rather than ignoring it", async () => {
@@ -503,7 +501,7 @@ describe("the disposition handoff", () => {
       units: [aUnitResult({ coverageId: unitIdFor(0), status: "candidate", fingerprints: ["api/login:sqli-email"] })],
       findings: [aConfirmedFinding()],
     }));
-    await run.invoke(["verify"], JSON.stringify({ verdicts: [aVerdict()] }));
+    await verifyWith(run);
     expect((await run.invoke(["publish"])).error).toBeNull();
   };
 
@@ -530,7 +528,7 @@ describe("the disposition handoff", () => {
     await publishARun(run);
     const report = readFileSync(join(run.out, "REPORT.md"), "utf8");
     expect(report).toContain("## Disposition handoff");
-    expect(report).toContain(`--runs-root ${join(run.out, "disposition-runs")}`);
+    expect(report).toContain(`--runs-root '${join(run.out, "disposition-runs")}'`);
     expect(report).toContain(join(run.out, "standalone-disposition.json"));
   });
 
@@ -586,9 +584,116 @@ describe("a read-only projection over a run directory that does not exist", () =
       rmSync(parent, { recursive: true, force: true });
     }
   });
+
+  it("errors and creates nothing when even the run directory's base is missing", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "loom-security-audit-missing-"));
+    try {
+      const base = join(parent, "missing-base");
+      const result = await createSecurityAuditHandler(() => undefined)("", ["status", "--out", join(base, "run")]);
+      expect(result?.kind).toBe("error");
+      expect(String(result?.kind === "error" ? result.message : "")).toContain("missing");
+      expect(existsSync(base)).toBe(false);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
 });
 
-const STARTED = ["start", "--source", "0".repeat(40), "--profile", "standard"] as const;
+// --- A run directory under a symlinked base ---
+
+/**
+ * macOS spells its temp root `/var/folders/…/T/…`, and `/var` is a symlink to
+ * `/private/var`. The run's BASE may traverse such a system symlink; the run
+ * directory itself and everything below it may not. `private/var` is the real
+ * directory here and `var` the alias of it, the way macOS lays them out.
+ */
+describe("a run directory under a symlinked base (/var → /private/var)", () => {
+  let scratch: string;
+  let real: string;
+  let alias: string;
+  beforeEach(() => {
+    scratch = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-security-audit-alias-")));
+    real = join(scratch, "private", "var");
+    mkdirSync(real, { recursive: true });
+    alias = join(scratch, "var");
+    symlinkSync(real, alias);
+  });
+  afterEach(() => { rmSync(scratch, { recursive: true, force: true }); });
+
+  const invokeAt = async (out: string, args: readonly string[], stdin = "") => {
+    let printed = "";
+    const result = await createSecurityAuditHandler((text) => { printed += `${text}\n`; })(stdin, [args[0] ?? "", "--out", out, ...args.slice(1)]);
+    return { error: result?.kind === "error" ? String(result.message ?? "") : null, printed };
+  };
+
+  it("start, assign, submit and status succeed through the aliased spelling, under one canonical locator", async () => {
+    // `folders/T` does not exist yet: the base is created, then resolved.
+    const spelled = join(alias, "folders", "T", "run");
+    const canonical = join(real, "folders", "T", "run");
+    const started = await invokeAt(spelled, [...STARTED, "--repo", scratch], JSON.stringify({ units: [seedFor(0)] }));
+    expect(started.error).toBeNull();
+    expect(started.printed).toContain(canonical);
+    expect(started.printed).not.toContain(spelled);
+    expect(existsSync(join(canonical, "run.json"))).toBe(true);
+    // The guard registry carries the one canonical spelling.
+    expect(registeredSecurityAuditRuns()).toEqual([canonical]);
+
+    expect((await invokeAt(spelled, ["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"])).error).toBeNull();
+    expect((await invokeAt(spelled, ["submit"], JSON.stringify({ ...HUNTER_ENVELOPE,
+      units: [aUnitResult({ coverageId: unitIdFor(0), status: "candidate", fingerprints: ["api/login:sqli-email"] })],
+      findings: [aConfirmedFinding()],
+    }))).error).toBeNull();
+    expect(readJson<CoverageUnit[]>(canonical, "ledger.json")[0].status).toBe("candidate");
+
+    const status = await invokeAt(spelled, ["status"]);
+    expect(status.error).toBeNull();
+    // Either spelling names the same run.
+    expect((await invokeAt(canonical, ["status"])).printed).toBe(status.printed);
+  });
+
+  it("still refuses a run document symlinked inside the run directory", async () => {
+    const spelled = join(alias, "run");
+    expect((await invokeAt(spelled, [...STARTED, "--repo", scratch], JSON.stringify({ units: [seedFor(0)] }))).error).toBeNull();
+    const elsewhere = join(scratch, "elsewhere-ledger.json");
+    writeFileSync(elsewhere, "[]");
+    rmSync(join(real, "run", "ledger.json"));
+    symlinkSync(elsewhere, join(real, "run", "ledger.json"));
+
+    const status = await invokeAt(spelled, ["status"]);
+    expect((status.error ?? "").toLowerCase()).toMatch(/symlink|symbolic|eloop/);
+    const assigned = await invokeAt(spelled, ["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"]);
+    expect((assigned.error ?? "").toLowerCase()).toMatch(/symlink|symbolic|eloop/);
+    expect(readFileSync(elsewhere, "utf8")).toBe("[]");
+  });
+
+  it("still refuses a run subdirectory symlinked inside the run directory", async () => {
+    const spelled = join(alias, "run");
+    expect((await invokeAt(spelled, [...STARTED, "--repo", scratch], JSON.stringify({ units: [seedFor(0)] }))).error).toBeNull();
+    const elsewhere = join(scratch, "elsewhere-runs");
+    mkdirSync(elsewhere);
+    rmSync(join(real, "run", "verification-runs"), { recursive: true });
+    symlinkSync(elsewhere, join(real, "run", "verification-runs"));
+
+    // `start --force` re-prepares the verification runs root, no-follow.
+    const restarted = await invokeAt(spelled, [...STARTED, "--repo", scratch, "--force"], JSON.stringify({ units: [seedFor(0)] }));
+    // A no-follow directory open of a symlink: ENOTDIR on Linux, ELOOP on darwin.
+    expect((restarted.error ?? "").toLowerCase()).toMatch(/symlink|symbolic|eloop|enotdir/);
+    expect(readdirSync(elsewhere)).toEqual([]);
+  });
+
+  it("still refuses a run directory that is itself a symlink", async () => {
+    const target = join(real, "target-run");
+    mkdirSync(target);
+    const linked = join(alias, "linked-run");
+    symlinkSync(target, join(real, "linked-run"));
+    const started = await invokeAt(linked, [...STARTED, "--repo", scratch], JSON.stringify({ units: [seedFor(0)] }));
+    // A no-follow directory open of a symlink: ENOTDIR on Linux, ELOOP on darwin.
+    expect((started.error ?? "").toLowerCase()).toMatch(/symlink|symbolic|eloop|enotdir/);
+    expect(readdirSync(target)).toEqual([]);
+  });
+});
+
+const STARTED =["start", "--source", "0".repeat(40), "--profile", "standard"] as const;
 const startOne = async (run: Run): Promise<void> => {
   expect((await run.invoke([...STARTED, "--repo", run.out], JSON.stringify({ units: [seedFor(0)] }))).error).toBeNull();
 };
@@ -601,7 +706,7 @@ describe("a published run is closed", () => {
       units: [aUnitResult({ coverageId: unitIdFor(0), status: "candidate", fingerprints: ["api/login:sqli-email"] })],
       findings: [aConfirmedFinding()],
     }));
-    await run.invoke(["verify"], JSON.stringify({ verdicts: [aVerdict()] }));
+    await verifyWith(run);
     expect((await run.invoke(["publish"])).error).toBeNull();
   };
 
@@ -612,7 +717,7 @@ describe("a published run is closed", () => {
     ["merge-critic", ["merge-critic"], JSON.stringify({
       schemaVersion: 1, kind: "security-coverage-critic", missingUnits: [], reassignIds: [], resolvedPriorLeads: [], stop: true,
     })],
-    ["verify", ["verify"], JSON.stringify({ verdicts: [aVerdict({ wave: 3 })] })],
+    ["verify", ["verify", "--from", "run.verify-w1-000000000000"], ""],
   ] as const)("refuses %s, naming the published run and the way forward", async (_operation, args, stdin) => {
     const run = aRun();
     await publishARun(run);
@@ -825,7 +930,7 @@ describe("a reassigned unit, end to end", () => {
     }));
     expect(settled.error).toBeNull();
 
-    expect((await run.invoke(["verify"], JSON.stringify({ verdicts: [aVerdict({ wave: 3 })] }))).error).toBeNull();
+    await verifyWith(run);
     // The owner `security-hunter-agent--2` resolves to its catalog agent, so the
     // run can prove the ballot came from another profile — no
     // unresolvable-hunter refusal.

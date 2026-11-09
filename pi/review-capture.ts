@@ -254,7 +254,8 @@ export function piIssuedReviewerCaptureObservation(
   classified: PiIssuedReviewRequestClass,
   messages: unknown,
 ): CaptureObservation {
-  if (classified.kind === "refutation-panel-extraction" || classified.claim.version === "v1") {
+  if (classified.kind === "refutation-panel-extraction" || classified.kind === "security-verification-extraction" ||
+      classified.claim.version === "v1") {
     return archivedReviewerCaptureObservation(messages);
   }
   const claim = classified.claim;

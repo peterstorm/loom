@@ -62,6 +62,9 @@ describe("family-site metric (pure core)", () => {
       "engine/src/core/shell-substitution.ts",
       "engine/src/core/shell-write-targets.ts",
       "engine/src/core/shell-ansi-c.ts",
+      "engine/src/core/shell-command-head.ts",
+      "engine/src/core/shell-heredoc.ts",
+      "engine/src/core/shell-match-views.ts",
     ]);
     expect(byId.get("claim-conservation")!.owners).toEqual(["engine/src/core/findings.ts"]);
     for (const family of FAMILIES) {

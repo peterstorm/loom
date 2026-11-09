@@ -39,6 +39,8 @@ import { failure, success, type ArtifactDigest, type DomainResult } from "./orch
 import { standaloneDispositionSchema } from "./standalone-lineage-contract";
 import type { SecurityRunMetadata } from "./security-audit-contract";
 import type { SecurityFinding } from "./security-findings";
+import { SECURITY_AUDIT_DISPOSITION_RUNS_DIR, SECURITY_AUDIT_RUN_FILES } from "./audit-run-authority";
+import { quoteShellArgument } from "./shell-quoting";
 
 export const SECURITY_DISPOSITION_DECISIONS = ["accepted", "deferred", "dismissed"] as const;
 export type SecurityDispositionDecision = (typeof SECURITY_DISPOSITION_DECISIONS)[number];
@@ -96,9 +98,9 @@ export function dispositionHandoffPaths(locator: string, runId: string): Disposi
   // locator is already an absolute canonical path (the loader rejects anything
   // with `.`/`..`/empty segments).
   const root = locator.replace(/\/$/, "");
-  const runsRoot = `${root}/disposition-runs`;
+  const runsRoot = `${root}/${SECURITY_AUDIT_DISPOSITION_RUNS_DIR}`;
   return {
-    inputFile: `${root}/standalone-disposition.json`,
+    inputFile: `${root}/${SECURITY_AUDIT_RUN_FILES.dispositionHandoff}`,
     runsRoot,
     runDir: `${runsRoot}/run.disposition-${runId}`,
   };
@@ -228,8 +230,8 @@ export function renderDispositionHandoff(
     ...(disposition.entries.length === 0 || handoff === null
       ? []
       : [
-        `    helper orchestration start standalone-disposition --runs-root ${handoff.runsRoot} \\`,
-        `      --run ${handoff.runDir.slice(handoff.runDir.lastIndexOf("/") + 1)} < ${handoff.inputFile}`,
+        `    helper orchestration start standalone-disposition --runs-root ${quoteShellArgument(handoff.runsRoot)} \\`,
+        `      --run ${quoteShellArgument(handoff.runDir.slice(handoff.runDir.lastIndexOf("/") + 1))} < ${quoteShellArgument(handoff.inputFile)}`,
         "",
       ]),
     `Decision set: disposition.json (${disposition.source.resultDigest}).`,

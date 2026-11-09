@@ -60,6 +60,9 @@ import { canonicalJson, type JsonValue } from "../core/review-packet";
 import { parseStandaloneReviewerProtocolV3 } from "../core/standalone-lineage-contract";
 import { verifyStandalonePanelView } from "./standalone-panel-context";
 import { openRegisteredRunDirectory, type RunDirHandle } from "./run-directory-handle";
+import { captureAttestationOf } from "../core/capture-attestation";
+import { SECURITY_VERIFICATION_PROGRAM } from "../core/security-adjudication";
+import { canonicalAttestedRunDirectory, recordCaptureAttestation } from "./capture-attestation-store";
 import { CONTEXT_PACKET_MAX_BYTES } from "./stored-context-packets";
 import { recordReadCoverageObservation, registeredReadCoverage } from "./standalone-read-coverage-evidence";
 
@@ -933,7 +936,32 @@ async function persistBoundCapture(
     const published = await publishCaptureSourceRecord(handle, request, receipt.harness, source.provenance, payload);
     if (!published.ok) return retriableFailure("capture-source", published.error);
   }
+  const attested = attestCapture(handle, request, receipt);
+  if (attested !== null) return attested;
   return plan.purpose.write(handle, request, receipt, payload, observation);
+}
+
+/**
+ * The capture attestation write-ahead step (ADR-0065, amended): a security
+ * verifier capture records, in the protected attestation store, that THIS
+ * harness process captured exactly these bytes for exactly this request —
+ * before the bytes land in the run. A ballot is authoritative only when its
+ * capture digest matches this record, so a transcript written into the run by
+ * anything else (a subagent's shell, a forged CLI write) is never ballotable.
+ * Write-ahead, like the native capture observation: a failed transcript write
+ * after it leaves an attestation for bytes the run does not hold, which proves
+ * nothing and blocks nothing a matching re-capture needs. Every other program
+ * records nothing here.
+ */
+function attestCapture(handle: RunDirHandle, request: AgentRequestAuthority, receipt: CaptureReceipt): CaptureOutcome | null {
+  if (request.program !== SECURITY_VERIFICATION_PROGRAM) return null;
+  const directory = canonicalAttestedRunDirectory(handle.runDirectory);
+  if (!directory.ok) return retriableFailure("capture-attestation", directory.error);
+  const attestation = captureAttestationOf(request, receipt, directory.value);
+  if (attestation === null) return null;
+  if (!attestation.ok) return retriableFailure("capture-attestation", attestation.error);
+  const recorded = recordCaptureAttestation(attestation.value);
+  return recorded.ok ? null : retriableFailure("capture-attestation", recorded.error);
 }
 
 /**

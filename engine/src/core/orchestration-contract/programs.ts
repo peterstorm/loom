@@ -11,5 +11,7 @@ export const ORCHESTRATION_PROGRAMS = Object.freeze([
   "refutation-panel",
   "wave-gate",
   "standalone-review",
+  // ADR-0065: the security audit's verifier spawns, issued per verification brief.
+  "security-verification",
 ] as const);
 export type OrchestrationProgram = (typeof ORCHESTRATION_PROGRAMS)[number];

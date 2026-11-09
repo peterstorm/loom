@@ -291,6 +291,42 @@ export const SUBAGENT_DIR = process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subage
 export const subagentDir = (): string => process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subagents";
 
 /**
+ * The security-audit run registry (ADR-0065 D6): one entry file per run
+ * directory `helper security-audit start` registered, inside the protected
+ * subagent dir so a subagent cannot add, rewrite or delete an entry. The
+ * subagent write guard reads it to know which directories are audit runs
+ * without trusting the command line. Owned by
+ * `orchestration/security-audit-run-registry.ts`.
+ */
+export const SECURITY_AUDIT_RUN_REGISTRY_ENTRY = "security-audit-runs";
+
+/** The registry directory, resolved lazily like `subagentDir()`. */
+export const securityAuditRunRegistryDir = (): string => join(subagentDir(), SECURITY_AUDIT_RUN_REGISTRY_ENTRY);
+
+/**
+ * The capture attestation store (ADR-0065, amended): one immutable entry per
+ * security verifier attempt a HARNESS captured natively, written by the
+ * capturing harness process and required by `verify --from` and by the
+ * audit's adjudication before a ballot counts. Inside the protected subagent
+ * dir for the same reasons as the registry. Owned by
+ * `orchestration/capture-attestation-store.ts`.
+ */
+export const CAPTURE_ATTESTATION_ENTRY = "security-capture-attestations";
+
+/** The attestation store directory, resolved lazily like `subagentDir()`. */
+export const captureAttestationDir = (): string => join(subagentDir(), CAPTURE_ATTESTATION_ENTRY);
+
+/**
+ * Subagent-dir entries the SessionStart stale sweep never removes. Every other
+ * entry is per-session tracking that ages out; an audit run outlives sessions,
+ * and a swept registry would silently drop the guard's knowledge of its run
+ * directories — a swept attestation store would make every captured ballot
+ * unprovable.
+ */
+export const PERSISTENT_SUBAGENT_DIR_ENTRIES: ReadonlySet<string> =
+  frozenSet([SECURITY_AUDIT_RUN_REGISTRY_ENTRY, CAPTURE_ATTESTATION_ENTRY]);
+
+/**
  * One TTL for every liveness judgment about subagent tracking files: the
  * SessionStart sweep deletes files whose mtime is older than this, and the
  * machine-binding reader treats bindings whose last activity (bind stamp or
@@ -375,52 +411,10 @@ export const protectedDirPatterns = (): RegExp => new RegExp(
   protectedDirs().map(escapeRegex).join("|"),
 );
 
-/** Commands allowed to touch guarded state paths: deny-by-default allowlist.
- *
- * This replaces a writer denylist because writer vocabulary and composition
- * are unbounded (`bun -e`, substitutions, glob paths, wrappers, and future
- * tools all create new write forms). An allowlist inverts the residual: instead
- * of enumerating writers (unbounded), it
- * enumerates readers (small, stable), so an unknown command on a guarded
- * path blocks instead of slipping through.
- *
- * Membership criterion: the command must be unable to write a file under ANY
- * flag combination. Deliberately excluded, with the flag that disqualifies
- * them: `sort` (-o), `uniq` (second file operand), `less` (-o/-O),
- * `xxd` (-r <outfile>), `base64` (macOS -o), `sed`/`awk` (-i / in-script
- * `w`/`print >`), `find` (-delete/-exec), `git` (checkout/restore rewrite the
- * work tree — a `git checkout -- <state>` is a verdict-restore forgery),
- * `touch` (mtime forgery defeats report freshness),
- * `rg` (--pre <cmd> executes an arbitrary program per input file — a
- * pre-staged script receives the guarded path and can rewrite or delete it;
- * --hostname-bin <cmd> executes one program once to resolve the hostname.
- * Arbitrary program execution under any use disqualifies it),
- * `more` (interactive shell escape via `!cmd`/`v`; non-interactive it acts
- * like cat, but membership requires no write capability under ANY use),
- * `cd` (writes nothing itself, but it RE-SCOPES path resolution:
- * `cd .claude/state && rm *.json` names the guarded dir only in the cd
- * segment while the writer names no guarded literal, so its chain is
- * skipped as out-of-scope — allowlisting cd hands every later segment an
- * unguarded relative namespace. Excluding it costs only fail-closed reads:
- * reads never need to cd INTO a guarded dir, and
- * `cd <unguarded-dir> && jq . <state>` still allows because the cd chain is
- * simply out of scope. Residual, documented: multi-hop
- * `cd .claude; cd state; rm *.json` never names a guarded literal anywhere
- * on the line and stays invisible to any raw-text gate — see
- * machines/README.md known residual limits), and
- * wrapper/executor commands that run OTHER commands (`env`, `xargs`, `sudo`,
- * `timeout`, `nohup`, `nice`, `command`, shells, interpreters) — a wrapper
- * inherits the write capability of whatever it wraps. Heads match exactly
- * (no basename resolution): `./cat` or `/tmp/evil/jq` must not inherit the
- * trust of a PATH-resolved name. */
-export const READ_ONLY_STATE_COMMANDS: ReadonlySet<string> = frozenSet([
-  "jq", "cat", "grep", "egrep", "fgrep",
-  "head", "tail", "wc", "ls", "stat", "file",
-  "diff", "cmp", "md5sum", "sha1sum", "sha256sum",
-  "cut", "tr", "nl", "od", "hexdump", "strings",
-  "echo", "printf", "test", "[", "[[", "true", "false",
-  "pwd", "dirname", "basename", "readlink", "realpath", "du",
-]);
+/** The read-only command allowlist the Bash guards share (defined in
+ *  core/tool-vocabulary so the pure shell grammar can use it — re-exported
+ *  here, config stays the documented home). */
+export { READ_ONLY_STATE_COMMANDS } from "./core/tool-vocabulary";
 
 /** Valid phase transitions: from → allowed targets. Both the record and
  * each member are frozen: a readonly annotation alone would not protect the

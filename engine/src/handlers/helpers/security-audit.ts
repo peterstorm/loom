@@ -9,18 +9,25 @@
  * traits, and the dispatcher below matches over it exhaustively, so a new
  * operation cannot be added without the routing layer learning what it does.
  *
- * The run directory is the whole record of a run. `FILES` below is the ONE
- * owner of that document set — the `--force` reset, the fresh-run writes and
- * every reader name files through it, so a document cannot be added to the
- * directory and forgotten by one of them:
+ * The run directory is the whole record of a run. `FILES` below names its
+ * documents from their ONE owner, `core/audit-run-authority.ts`, which the
+ * subagent write guard protects from — the `--force` reset, the fresh-run
+ * writes and every reader name files through it, so a document cannot be added
+ * to the directory and forgotten by one of them, or left unprotected:
  *
  *   run.json                 run metadata; its `published` flag is the commit point
  *   ledger.json              the coverage ledger
  *   findings.json            candidate findings as filed (trichotomy records)
- *   verdicts.json            verification ballots
+ *   verdicts.json            a CACHE of imported ballots, each bound to the verifier spawn that
+ *                            cast it and re-proven (run replay + capture attestation) before
+ *                            adjudication counts it
+ *   verification-runs/       the `security-verification` runs that issue those spawns (ADR-0065);
+ *                            `verify --from` imports a finished one
  *   lenses.json              the lens selection this run was given
  *   security-findings.json   published records (publish)
  *   disposition.json         the remediation handoff (disposition)
+ *   standalone-disposition.json  the `standalone-disposition` start input (disposition)
+ *   disposition-runs/        the runs root the handoff command names for remediation
  *   REPORT.md / FINDINGS-DETAIL.md / NEEDS-VALIDATION.md   derived prose (publish)
  *
  * Every read is fail-closed and parsed by the core that owns the document, so a
@@ -41,12 +48,19 @@
 import { match } from "ts-pattern";
 import { runGit } from "../../utils/git-execution-policy";
 import { existsSync, lstatSync, rmSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { HookHandler, HookResult } from "../../types";
 import { errorResult, passthroughResult } from "../../types";
 import { failure, success, type DomainResult } from "../../core/orchestration-contract/identity";
 import { compareStrings } from "../../core/ordering";
-import { ensureDirectoryNoFollow, readRunFileNoFollow, writeRunFileExclusiveNoFollow, writeRunFileNoFollow } from "../../orchestration/no-follow-fs";
+import {
+  ensureDirectoryNoFollow,
+  ensureResolvedBaseDirectory,
+  readRunFileNoFollow,
+  resolveBaseDirectory,
+  writeRunFileExclusiveNoFollow,
+  writeRunFileNoFollow,
+} from "../../orchestration/no-follow-fs";
 import {
   admitWave,
   isWireRecord,
@@ -77,7 +91,23 @@ import {
   type UnitResult,
 } from "../../core/security-coverage";
 import { fileCandidates, parseSecurityFindings, type SecurityFinding } from "../../core/security-findings";
-import { adjudicateRun, parseVerificationVerdicts, type VerificationVerdict } from "../../core/security-adjudication";
+import { adjudicateRun } from "../../core/security-adjudication";
+import {
+  importVerificationResult,
+  planVerificationStart,
+  renderVerificationStart,
+  type VerificationStartPlan,
+} from "../../core/security-verification";
+import { quoteShellArgument } from "../../core/shell-quoting";
+import {
+  observeVerificationGenerations,
+  proveCachedBallots,
+  proveVerificationSource,
+  readVerificationSource,
+} from "./security-verification-proofs";
+import { readAuditSnapshot, verificationRunsRoot, type AuditSnapshot } from "./security-audit-run";
+import { SECURITY_AUDIT_RUN_FILES } from "../../core/audit-run-authority";
+import { registerSecurityAuditRun } from "../../orchestration/security-audit-run-registry";
 import { renderLensSelection, type LensSelection } from "../../core/security-lens-select";
 import { dispositionHandoffPaths, renderDispositionHandoff, securityDisposition, standaloneDispositionStart } from "../../core/security-disposition";
 import { DEFAULT_SANDBOX_LIMITS, bindSandboxRun, judgeLocalReceipt, renderSandboxInstructions } from "../../core/security-sandbox";
@@ -92,27 +122,14 @@ import {
 
 const USAGE = `usage: helper security-audit <${SECURITY_AUDIT_OPERATION_ORDER.join("|")}> [flags]`;
 
-const FILES = Object.freeze({
-  run: "run.json",
-  ledger: "ledger.json",
-  findings: "findings.json",
-  verdicts: "verdicts.json",
-  lenses: "lenses.json",
-  published: "security-findings.json",
-  disposition: "disposition.json",
-  /** The `standalone-disposition` start input: `disposition` writes it, and the
-   *  handoff command in the report reads exactly this file. */
-  dispositionHandoff: "standalone-disposition.json",
-  report: "REPORT.md",
-  details: "FINDINGS-DETAIL.md",
-  needsValidation: "NEEDS-VALIDATION.md",
-});
+/** The run directory's document set, from its one owner (`core/audit-run-authority`). */
+const FILES = SECURITY_AUDIT_RUN_FILES;
 
 /** Every document a run directory may hold, from the single list above. */
 const RUN_DOCUMENTS: readonly string[] = Object.freeze(Object.values(FILES));
 
 const VALUE_FLAGS: ReadonlySet<string> = new Set([
-  "--out", "--repo", "--source", "--profile", "--budget", "--run-id", "--unit", "--agent", "--wave", "--reason", "--artifact",
+  "--out", "--repo", "--source", "--profile", "--budget", "--run-id", "--unit", "--agent", "--wave", "--reason", "--artifact", "--from",
 ]);
 
 const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -247,12 +264,43 @@ function clearRunDocuments(root: string): DomainResult<readonly string[], string
   }
 }
 
+/**
+ * The run directory's ONE canonical path. Its parent is the run base, and the
+ * base is resolved to its real path exactly the way every Loom run base is
+ * (`ensureResolvedBaseDirectory` / `resolveBaseDirectory`): on macOS the temp
+ * root `/var/folders/…` sits under the system symlink `/var` → `/private/var`,
+ * so a no-follow walk from `/` would refuse every run there. The run directory
+ * itself and everything below it stay held to the strict no-follow rule — a
+ * symlinked run directory, or a symlink planted inside it, is still refused.
+ *
+ * The canonical path is also the audit's locator: every invocation names the
+ * same run whichever alias the operator typed, so a verification run issued
+ * for `/tmp/audit` is the one `/private/tmp/audit` imports.
+ *
+ * Only a WRITING operation creates a missing base; a read-only projection on a
+ * base that does not exist keeps the spelled path, so its read reports the run
+ * missing rather than creating anything.
+ */
+function canonicalRunDirectory(out: string, writes: boolean): DomainResult<string, string> {
+  const spelled = resolve(out);
+  const base = dirname(spelled);
+  if (base === spelled) return failure(`run directory must not be the filesystem root: ${spelled}`);
+  try {
+    return success(join(writes ? ensureResolvedBaseDirectory(base) : resolveBaseDirectory(base), basename(spelled)));
+  } catch (error) {
+    if (!writes && (error as NodeJS.ErrnoException).code === "ENOENT") return success(spelled);
+    return failure(`cannot resolve the base of run directory ${spelled}: ${describe(error)}`);
+  }
+}
+
 /** Open the run directory. Only an operation that WRITES prepares it: a
  *  read-only projection must never create the directory it was asked to read,
  *  or a mistyped `--out` would leave an empty run directory behind and the
  *  operator would read "missing run.json" as a damaged run rather than a typo. */
 function openStore(out: string, writes: boolean): DomainResult<Store, string> {
-  const root = resolve(out);
+  const canonical = canonicalRunDirectory(out, writes);
+  if (!canonical.ok) return canonical;
+  const root = canonical.value;
   if (writes) {
     try {
       ensureDirectoryNoFollow(root);
@@ -299,37 +347,18 @@ const readFindings = (store: Store): DomainResult<readonly SecurityFinding[], st
     ? store.readJson<readonly SecurityFinding[]>(FILES.findings, parseSecurityFindings)
     : failure(`${join(store.out, FILES.findings)} is missing — a run directory always holds it`);
 
-const readVerdicts = (store: Store): DomainResult<readonly VerificationVerdict[], string> =>
-  store.has(FILES.verdicts)
-    ? store.readJson<readonly VerificationVerdict[]>(FILES.verdicts, parseVerificationVerdicts)
-    : failure(`${join(store.out, FILES.verdicts)} is missing — a run directory always holds it`);
-
 /** The published records. `publish` is the only operation that creates them, so
  *  their absence is a refusal rather than an empty list. */
 const readPublished = (store: Store): DomainResult<readonly SecurityFinding[], string> =>
   store.readJson<readonly SecurityFinding[]>(FILES.published, parseSecurityFindings);
 
-/** The four documents adjudication reads, read ONCE: `findings`, `publish` and
- *  `status` each project this one snapshot, so no projection reads a document
- *  twice or pairs a ledger with ballots from a different moment. */
-type RunSnapshot = Readonly<{
-  run: SecurityRunMetadata;
-  ledger: CoverageLedger;
-  findings: readonly SecurityFinding[];
-  verdicts: readonly VerificationVerdict[];
-}>;
+/** The four documents adjudication reads, read ONCE through the shared seam:
+ *  `findings`, `publish`, `status` and `verify --from` each project this one
+ *  snapshot, so no projection reads a document twice or pairs a ledger with
+ *  ballots from a different moment. */
+type RunSnapshot = AuditSnapshot;
 
-function readSnapshot(store: Store): DomainResult<RunSnapshot, string> {
-  const run = readRun(store);
-  if (!run.ok) return run;
-  const ledger = readLedger(store);
-  if (!ledger.ok) return ledger;
-  const findings = readFindings(store);
-  if (!findings.ok) return findings;
-  const verdicts = readVerdicts(store);
-  if (!verdicts.ok) return verdicts;
-  return success({ run: run.value, ledger: ledger.value, findings: findings.value, verdicts: verdicts.value });
-}
+const readSnapshot = (store: Store): DomainResult<RunSnapshot, string> => readAuditSnapshot(store.out);
 
 /**
  * The run metadata of a run that may still change. A published run is CLOSED:
@@ -482,8 +511,48 @@ function runStart(store: Store, args: readonly string[], stdin: string): DomainR
 
   const written = writeFreshRun(store, { metadata: started.metadata, ledger, selection: started.selection });
   if (!written.ok) return written;
+  const authority = claimRunAuthority(store.out);
+  if (!authority.ok) return authority;
 
   return success(startReport(store.out, started, ledger));
+}
+
+/**
+ * After the fresh documents land (ADR-0065): create the runs root the
+ * audit's verification runs live under — `orchestration start` never creates a
+ * runs root — and register the run directory in the protected registry the
+ * subagent write guard reads. A start whose run the guard cannot know is
+ * refused, not left unprotected.
+ */
+function claimRunAuthority(out: string): DomainResult<void, string> {
+  try {
+    ensureDirectoryNoFollow(verificationRunsRoot(out));
+  } catch (error) {
+    return failure(`cannot prepare ${verificationRunsRoot(out)}: ${describe(error)}`);
+  }
+  return registerWithGuard(out);
+}
+
+/** Register the run directory with the subagent write guard's registry. */
+function registerWithGuard(out: string): DomainResult<void, string> {
+  const registered = registerSecurityAuditRun(out);
+  return registered.ok ? registered : failure(`cannot register audit run ${out} with the subagent write guard: ${registered.error}`);
+}
+
+/**
+ * Every WRITING operation on an existing run re-registers it BEFORE it writes
+ * (ADR-0065 D6). Registration is idempotent, so on a healthy registry this is
+ * a no-op; when the registry under the subagent directory was wiped mid-audit
+ * (a `/tmp` cleaner, a reboot), the next write rebuilds it before mutating the
+ * run, so the guard never stops protecting a run the parent is still writing.
+ * A run the guard cannot know is not written. `start` registers after its
+ * fresh documents land (`claimRunAuthority`); a directory without `run.json`
+ * holds no run, and the operation itself refuses it.
+ */
+function refreshRunRegistration(store: Store, operation: SecurityAuditOperation): DomainResult<void, string> {
+  if (operation === "start" || !securityAuditOperationWrites(operation) || !store.has(FILES.run)) return success(undefined);
+  const registered = registerWithGuard(store.out);
+  return registered.ok ? registered : failure(`${operation} refused: ${registered.error}`);
 }
 
 /** Admission BEFORE the run exists: a budget that cannot seat the first wave is
@@ -551,7 +620,7 @@ function runAssign(store: Store, args: readonly string[]): DomainResult<string, 
   return success(assigned.value.assigned
     .flatMap((entry) => [
       `assigned ${entry.coverageId} to owner ${entry.ownerId} at wave ${entry.wave}`,
-      `nonce: loom helper security-audit nonce --out ${store.out} --artifact agents/${entry.ownerId}/artifacts/<file>`,
+      `nonce: loom helper security-audit nonce --out ${quoteShellArgument(store.out)} --artifact agents/${entry.ownerId}/artifacts/<file>`,
     ])
     .join("\n"));
 }
@@ -749,35 +818,68 @@ function runMergeCritic(store: Store, args: readonly string[], stdin: string): D
 
 // --- verify / findings / publish / status ---
 
-function runVerify(store: Store, args: readonly string[], stdin: string): DomainResult<string, string> {
-  const flags = parseFlags(args, ["--out"]);
+/** Why `verify` reads no ballots from stdin (ADR-0065 D4), and what replaces it. */
+const STDIN_BALLOTS_REFUSED =
+  "verify no longer accepts ballots on stdin: a ballot must come from an issued verifier spawn (ADR-0065). " +
+  "Run `status` for the exact `helper orchestration start security-verification …` command, spawn the verifiers it " +
+  "issues, then import the finished run with `verify --out <run-dir> --from <verification-run>`";
+
+/**
+ * `verify --from <verification-run>` (ADR-0065 D4): import a finished
+ * verification run's published ballots. The run must live under this audit's
+ * `verification-runs/`, be a registered `security-verification` program, and
+ * hold a `result.json` that (1) describes the run as registered, issued for
+ * THIS audit against its current ledger and findings, and (2) is byte-identical
+ * to the result replayed from the run's own captured evidence — a hand-edited
+ * result is refused. Stdin ballots are refused outright.
+ */
+async function runVerify(store: Store, args: readonly string[], stdin: string): Promise<DomainResult<string, string>> {
+  const flags = parseFlags(args, ["--out", "--from"]);
   if (!flags.ok) return flags;
-  const payload = parseJsonInput("verify", stdin);
-  if (!payload.ok) return payload;
-  // Accept both `{ verdicts: [...] }` and a bare ballot list.
-  const raw = isWireRecord(payload.value) && "verdicts" in payload.value ? payload.value.verdicts : payload.value;
-  const verdicts = parseVerificationVerdicts(raw);
-  if (!verdicts.ok) return failure(describeRefusal(verdicts.error));
+  if (stdin.trim() !== "") return failure(STDIN_BALLOTS_REFUSED);
+  const from = flags.value["--from"];
+  if (from === null || from === undefined) return failure(STDIN_BALLOTS_REFUSED);
   const run = openRun(store, "verify");
   if (!run.ok) return run;
-
-  const existing = readVerdicts(store);
-  if (!existing.ok) return existing;
-  // Ballots accumulate: a later wave adds verdicts without discarding an
-  // earlier wave's. Re-parsing the union keeps the accumulation fail-closed.
-  const combined = parseVerificationVerdicts([...existing.value, ...verdicts.value]);
-  if (!combined.ok) return failure(describeRefusal(combined.error));
-  const written = store.write(FILES.verdicts, json(combined.value));
+  const source = readVerificationSource(store.out, from);
+  if (!source.ok) return source;
+  const snapshot = readSnapshot(store);
+  if (!snapshot.ok) return snapshot;
+  // The decision first (authentic audit, current digests, exact coverage),
+  // then the proof that result.json is what the captured evidence replays.
+  const imported = importVerificationResult({ registration: source.value.registration, result: source.value.result,
+    audit: snapshot.value.reference, existing: snapshot.value.verdicts });
+  if (!imported.ok) return failure(`verify --from ${source.value.registration.runId} refused: ${imported.error}`);
+  // The replay hashes every transcript as it lies in the run and must
+  // reproduce result.json byte for byte; each ballot's capture digest must
+  // also be the one its capturing HARNESS attested. A transcript written into
+  // the run by anything else carries no attestation.
+  const proven = await proveVerificationSource(source.value);
+  if (!proven.ok) return failure(`verify --from ${source.value.registration.runId} refused: ${proven.error}`);
+  if (imported.value.added === 0) {
+    return success(`verification run ${source.value.registration.runId} is already imported; run holds ${imported.value.verdicts.length} verdict(s)`);
+  }
+  const written = store.write(FILES.verdicts, json(imported.value.verdicts));
   if (!written.ok) return written;
-  return success(`recorded ${verdicts.value.length} verdict(s); run now holds ${combined.value.length}`);
+  return success(`imported ${imported.value.added} bound verdict(s) from ${source.value.registration.runId}; run now holds ${imported.value.verdicts.length}`);
 }
 
 type Adjudicated = Readonly<{ findings: readonly SecurityFinding[]; blockers: readonly string[] }>;
 
-/** Adjudicate one snapshot. One call site, so `findings`, `publish` and
- *  `status` cannot disagree about what the ballots mean. */
-function adjudicate(snapshot: RunSnapshot): DomainResult<Adjudicated, string> {
-  const decision = adjudicateRun({ ledger: snapshot.ledger, findings: snapshot.findings, verdicts: snapshot.verdicts });
+/**
+ * Adjudicate one snapshot. One call site, so `findings`, `publish` and
+ * `status` cannot disagree about what the ballots mean.
+ *
+ * `verdicts.json` is a CACHE (ADR-0065, amended): before any ballot is
+ * counted, every verification run it names is re-proven — registered under
+ * this audit, its captured evidence replaying to exactly the cached ballots,
+ * each backed by its harness's capture attestation. A ballot that fails is
+ * not counted, and its run becomes a named publication blocker, so a ballot
+ * written into `verdicts.json` by hand never reaches a report.
+ */
+async function adjudicate(snapshot: RunSnapshot): Promise<DomainResult<Adjudicated, string>> {
+  const cache = await proveCachedBallots(snapshot);
+  const decision = adjudicateRun({ ledger: snapshot.ledger, findings: snapshot.findings, verdicts: cache.admitted });
   if (!decision.ok) {
     // Fail closed, not empty: an owner the catalog cannot place means the run
     // cannot say which profile hunted, and an empty set would make every ballot
@@ -787,15 +889,15 @@ function adjudicate(snapshot: RunSnapshot): DomainResult<Adjudicated, string> {
         "the run cannot prove verifier independence",
     );
   }
-  return success({ findings: decision.value.findings, blockers: decision.value.blockers });
+  return success({ findings: decision.value.findings, blockers: [...cache.blockers, ...decision.value.blockers] });
 }
 
-function runFindings(store: Store, args: readonly string[]): DomainResult<string, string> {
+async function runFindings(store: Store, args: readonly string[]): Promise<DomainResult<string, string>> {
   const flags = parseFlags(args, ["--out", "--json"]);
   if (!flags.ok) return flags;
   const snapshot = readSnapshot(store);
   if (!snapshot.ok) return snapshot;
-  const adjudicated = adjudicate(snapshot.value);
+  const adjudicated = await adjudicate(snapshot.value);
   if (!adjudicated.ok) return adjudicated;
 
   if (hasFlag(args, "--json")) {
@@ -819,12 +921,12 @@ function runFindings(store: Store, args: readonly string[]): DomainResult<string
   ].join("\n"));
 }
 
-function runPublish(store: Store, args: readonly string[]): DomainResult<string, string> {
+async function runPublish(store: Store, args: readonly string[]): Promise<DomainResult<string, string>> {
   const flags = parseFlags(args, ["--out"]);
   if (!flags.ok) return flags;
   const snapshot = readSnapshot(store);
   if (!snapshot.ok) return snapshot;
-  const adjudicated = adjudicate(snapshot.value);
+  const adjudicated = await adjudicate(snapshot.value);
   if (!adjudicated.ok) return adjudicated;
   if (adjudicated.value.blockers.length > 0) {
     return failure(["publish refused:", ...adjudicated.value.blockers.map((blocker) => `  - ${blocker}`)].join("\n"));
@@ -899,11 +1001,49 @@ function runDisposition(store: Store, args: readonly string[]): DomainResult<str
   ].join("\n"));
 }
 
+/** The verification run the audit owes now (ADR-0065): its runs root, run name
+ *  and exact start input, issued for the run's latest wave under the first
+ *  generation of its claim set that is not blocked or unimportable — or null
+ *  when no confirmed claim awaits a ballot, or the run is already published. */
+type VerificationStatus = Readonly<{
+  awaitingBallots: number;
+  runsRoot: string;
+  run: string;
+  input: VerificationStartPlan["input"];
+  command: string;
+  importCommand: string;
+}> | null;
+
+async function verificationStatus(snapshot: RunSnapshot): Promise<DomainResult<VerificationStatus, string>> {
+  if (snapshot.run.published) return success(null);
+  const locator = snapshot.reference.locator;
+  const generations = await observeVerificationGenerations(locator);
+  if (!generations.ok) return generations;
+  const plan = planVerificationStart({
+    audit: snapshot.reference,
+    wave: Math.max(1, ...snapshot.ledger.map((unit) => unit.wave)),
+    findings: snapshot.findings,
+    verdicts: snapshot.verdicts,
+    observe: (run) => generations.value.get(run) ?? "absent",
+  });
+  if (!plan.ok) return plan;
+  if (plan.value === null) return success(null);
+  const runsRoot = verificationRunsRoot(locator);
+  return success({
+    awaitingBallots: plan.value.briefs.reduce((count, brief) => count + brief.fingerprints.length, 0),
+    runsRoot,
+    run: plan.value.run,
+    input: plan.value.input,
+    command: renderVerificationStart(plan.value, runsRoot),
+    importCommand: `loom helper security-audit verify --out ${quoteShellArgument(locator)} --from ${quoteShellArgument(plan.value.run)}`,
+  });
+}
+
 /** The status document: one projection of the snapshot and its adjudication, so
  *  the JSON and the prose cannot describe different runs. The run's status is
  *  DERIVED from the ledger (`runStatusOf`), never read back from `run.json`'s
  *  copy, which is only as current as the last `start` or `publish`. */
-function statusDocument(snapshot: RunSnapshot, adjudicated: Adjudicated) {
+function statusDocument(snapshot: RunSnapshot, adjudicated: Adjudicated, verification: VerificationStatus) {
   const { run, ledger } = snapshot;
   const summary = summarizeCoverage(ledger);
   const status = runStatusOf(ledger);
@@ -931,18 +1071,21 @@ function statusDocument(snapshot: RunSnapshot, adjudicated: Adjudicated) {
     },
     publicationBlockers: adjudicated.blockers,
     published: run.published,
+    verification,
   };
 }
 
-function runStatus(store: Store, args: readonly string[]): DomainResult<string, string> {
+async function runStatus(store: Store, args: readonly string[]): Promise<DomainResult<string, string>> {
   const flags = parseFlags(args, ["--out", "--json"]);
   if (!flags.ok) return flags;
   const snapshot = readSnapshot(store);
   if (!snapshot.ok) return snapshot;
-  const adjudicated = adjudicate(snapshot.value);
+  const adjudicated = await adjudicate(snapshot.value);
   if (!adjudicated.ok) return adjudicated;
+  const verification = await verificationStatus(snapshot.value);
+  if (!verification.ok) return verification;
 
-  const status = statusDocument(snapshot.value, adjudicated.value);
+  const status = statusDocument(snapshot.value, adjudicated.value, verification.value);
   if (hasFlag(args, "--json")) return success(json(status));
   return success([
     `run ${status.runId} (${status.profile}) — ${status.runStatus}`,
@@ -956,6 +1099,11 @@ function runStatus(store: Store, args: readonly string[]): DomainResult<string, 
     ...(status.publicationBlockers.length === 0
       ? ["publication: ready"]
       : ["publication: blocked", ...status.publicationBlockers.map((blocker) => `  - ${blocker}`)]),
+    ...(status.verification === null ? [] : [
+      `verification: ${status.verification.awaitingBallots} confirmed claim(s) await a bound ballot; start their verification run with`,
+      status.verification.command,
+      `then spawn the verifiers it issues and import it: ${status.verification.importCommand}`,
+    ]),
   ].join("\n"));
 }
 
@@ -972,9 +1120,11 @@ export function createSecurityAuditHandler(
     if (outFlag === null) return errorResult(`--out <run-dir> is required; ${USAGE}`);
     const store = openStore(outFlag, securityAuditOperationWrites(operation));
     if (!store.ok) return errorResult(store.error);
+    const registered = refreshRunRegistration(store.value, operation);
+    if (!registered.ok) return errorResult(registered.error);
 
     const flags = args.slice(1);
-    const result = matchOperation(operation, store.value, flags, stdin);
+    const result = await matchOperation(operation, store.value, flags, stdin);
     if (!result.ok) return errorResult(result.error);
     writeText(result.value);
     return passthroughResult();
@@ -986,8 +1136,9 @@ const matchOperation = (
   store: Store,
   args: readonly string[],
   stdin: string,
-): DomainResult<string, string> =>
+): DomainResult<string, string> | Promise<DomainResult<string, string>> =>
   match(operation)
+    .returnType<DomainResult<string, string> | Promise<DomainResult<string, string>>>()
     .with("start", () => runStart(store, args, stdin))
     .with("assign", () => runAssign(store, args))
     .with("nonce", () => runNonce(store, args))

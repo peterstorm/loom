@@ -165,3 +165,15 @@ Your scratch directory is the only place you may write, including from the
 shell. The machine gate denies Edit, Write and MultiEdit in every phase; it does
 not intercept a shell redirect (`> out.txt`, `tee`), which is recorded as a
 shell write — never advancing a phase — and seen by the reviewer of your unit.
+
+## You do not record anything yourself
+
+The parent session runs every audit operation. As a subagent you may read
+(`helper security-audit nonce|status|findings`) and run the sandbox script, but
+the subagent authority guard (ADR-0065) refuses you every writing `helper
+security-audit` or `helper orchestration` operation — `submit`, `verify`,
+`defer`, … — and every write onto the run's own files (`ledger.json`,
+`findings.json`, `verdicts.json`, `verification-runs/`, …). Only
+`agents/<your-owner-id>/{scratch,artifacts}` is yours. Do not try to `submit`
+your result or work around a refusal: return the JSON object above as your
+final message, and the parent submits it.

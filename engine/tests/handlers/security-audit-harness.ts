@@ -6,7 +6,7 @@
  * one wrote, so a stubbed store would not exercise what breaks in production.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createSecurityAuditHandler } from "../../src/handlers/helpers/security-audit";
@@ -25,9 +25,14 @@ export type Run = Readonly<{
 const created: string[] = [];
 
 /** A fresh run directory and a handler bound to it. Every directory is removed
- *  by `removeRuns`, which each test file registers in `afterEach`. */
+ *  by `removeRuns`, which each test file registers in `afterEach`.
+ *
+ *  `out` is the directory's real path — the one canonical spelling the helper
+ *  reports a run under — so assertions on printed paths hold where the temp
+ *  root sits behind a symlink (macOS: `/var` → `/private/var`). The aliased
+ *  spelling is exercised on its own by the symlinked-base tests. */
 export function aRun(prefix = "loom-security-audit-"): Run {
-  const out = mkdtempSync(join(tmpdir(), prefix));
+  const out = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
   created.push(out);
   let printed = "";
   const handler = createSecurityAuditHandler((text) => { printed += `${text}\n`; });
@@ -61,4 +66,25 @@ export function writeArtifact(run: Run, relativePath: string, content: string): 
   const path = join(run.out, relativePath);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, content);
+}
+
+/**
+ * Write ballots straight into `verdicts.json`, as a forger (or a stale cache)
+ * would. Such a ballot is NEVER authority (ADR-0065, amended): the audit
+ * re-proves every cached ballot against its verification run and capture
+ * attestation before counting it. Tests use this only to drive refusals —
+ * a countable ballot comes from `verifyWith` (`security-verification-harness`).
+ */
+export function handWriteBallots(run: Run, ballots: readonly unknown[]): void {
+  const existing = JSON.parse(readFileSync(join(run.out, "verdicts.json"), "utf8")) as unknown[];
+  writeFileSync(join(run.out, "verdicts.json"), `${JSON.stringify([...existing, ...ballots], null, 2)}\n`);
+}
+
+/** The run registry `start` writes lives under the protected subagent
+ *  directory: point it at a scratch directory for the whole test file. */
+export function isolateSubagentDir(): string {
+  const directory = mkdtempSync(join(tmpdir(), "loom-security-audit-subagents-"));
+  created.push(directory);
+  process.env.LOOM_SUBAGENT_DIR = directory;
+  return directory;
 }

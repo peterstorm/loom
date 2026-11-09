@@ -19,11 +19,11 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { sandboxNonce, sandboxReceiptPrefix } from "../../src/core/security-sandbox";
 import { HUNTER_ENVELOPE } from "../security/fixtures";
 import { aSandboxReceipt } from "../security/sandbox-fixtures";
-import { aRun, removeRuns, seedFor, unitIdFor, writeArtifact, type Invocation, type Run } from "./security-audit-harness";
+import { aRun, isolateSubagentDir, removeRuns, seedFor, unitIdFor, writeArtifact, type Invocation, type Run } from "./security-audit-harness";
 
 const start = async (run: Run, extra: readonly string[] = []): Promise<void> => {
   const started = await run.invoke(
@@ -67,6 +67,7 @@ const assignOnly = async (run: Run): Promise<void> => {
   expect(assigned.error).toBeNull();
 };
 
+beforeEach(() => { isolateSubagentDir(); });
 afterEach(removeRuns);
 
 describe("a local check must name a receipt that proves a bounded run (INV-S1)", () => {
@@ -177,7 +178,10 @@ describe("--force starts a new run (INV-S2b)", () => {
     // Every document the new run owns is re-created empty; nothing stale survives.
     expect(JSON.parse(readFileSync(join(run.out, "findings.json"), "utf8"))).toEqual([]);
     expect(JSON.parse(readFileSync(join(run.out, "verdicts.json"), "utf8"))).toEqual([]);
-    const fresh = ["run.json", "ledger.json", "findings.json", "verdicts.json", "lenses.json"];
+    // `verification-runs/` is the runs root a run's verification runs live in; an
+    // old run's verification evidence stays, bound to the old run id, so
+    // `verify --from` can never import it into the new run.
+    const fresh = ["run.json", "ledger.json", "findings.json", "verdicts.json", "lenses.json", "verification-runs"];
     expect(readdirSync(run.out).filter((name) => !fresh.includes(name))).toEqual([]);
   });
 
@@ -250,7 +254,7 @@ describe("nonce: the engine hands out the binding a hunter cannot compute", () =
     await start(run);
     await assignOnly(run);
     expect(run.stdout()).toContain(
-      `nonce: loom helper security-audit nonce --out ${run.out} --artifact agents/security-hunter-agent/artifacts/<file>`,
+      `nonce: loom helper security-audit nonce --out '${run.out}' --artifact agents/security-hunter-agent/artifacts/<file>`,
     );
   });
 

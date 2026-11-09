@@ -1,7 +1,7 @@
 /**
  * Facade program registrations: the start inputs and durable registrations of
- * the standalone-review, remediation, wave-gate and standalone-disposition
- * programs, parsed from untrusted stored bytes into frozen typed programs.
+ * the standalone-review, remediation, wave-gate, standalone-disposition and
+ * security-verification programs, parsed from untrusted stored bytes into frozen typed programs.
  * Pure — no Run Directory or Git access; callers read the bytes and hand them
  * here. The Wave Gate program ADT itself lives in core/wave-gate-program.
  */
@@ -24,6 +24,7 @@ import {
   type RemediationStartInputV2,
 } from './remediation-registration';
 import type { ProgramParse } from './program-result';
+import { parseRegisteredSecurityVerificationProgram, type RegisteredSecurityVerificationProgram } from '../../../core/security-verification';
 
 /**
  * A fresh standalone review's read obligation (ADR-0022, "Reviewer Protocol
@@ -41,7 +42,8 @@ export type RegisteredStandaloneProgram = RegisteredStandaloneSuccessorProgram |
   authority: unknown;
 }>);
 
-export type RegisteredFacadeProgram = RegisteredStandaloneProgram | RegisteredRemediationProgram | RegisteredWaveGateProgram | RegisteredStandaloneDispositionProgram;
+export type RegisteredFacadeProgram = RegisteredStandaloneProgram | RegisteredRemediationProgram | RegisteredWaveGateProgram |
+  RegisteredStandaloneDispositionProgram | RegisteredSecurityVerificationProgram;
 
 /**
  * The registered review program whose ISSUED protocol descriptor names a
@@ -239,8 +241,14 @@ function parseFacadeRegistration(raw: unknown): FacadeRegistrationParse {
   const kindDescriptor = record === null ? undefined : Object.getOwnPropertyDescriptor(record, "kind");
   if (kindDescriptor !== undefined && !("value" in kindDescriptor)) return invalidRegistration("program kind must be own data");
   const kind: unknown = kindDescriptor?.value;
-  if (kind !== "standalone-review" && kind !== "remediation" && kind !== "wave-gate" && kind !== "standalone-disposition") {
+  if (kind !== "standalone-review" && kind !== "remediation" && kind !== "wave-gate" && kind !== "standalone-disposition" &&
+      kind !== "security-verification") {
     return Object.freeze({ kind: "unclaimed" });
+  }
+
+  if (kind === "security-verification") {
+    const verification = parseRegisteredSecurityVerificationProgram(raw);
+    return verification.ok ? registeredProgram(verification.value) : invalidRegistration(verification.error);
   }
 
   if (kind === "standalone-disposition") {
