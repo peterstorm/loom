@@ -27,7 +27,8 @@
  * - `cleanup-actions` — best-effort cleanup and startup hygiene
  * - `subagent-authority-gate` — a subagent's bash may not change audit or
  *   orchestration authority (ADR-0067 D6), and the parent's
- *   `security-audit verify --from` must name a witnessed verification run
+ *   `security-audit verify --from` must name a run its persisted capture
+ *   attestations prove
  *
  * The Pi user agent directory the definition port reads is resolved by the
  * one shared rule in `engine/src/core/pi-agent-directory.ts`.
@@ -114,8 +115,8 @@ import {
   type PiEmissionReadinessRegistration,
 } from "./emission-readiness";
 import { piBashCommand, piWriteTargetPaths, replacePiSpawnTask } from "./tool-input";
-import { piParentVerifyWitnessDecision, piSubagentAuthorityDecision } from "./subagent-authority-gate";
-import { markPiParentEnvironment } from "./subagent-process";
+import { piParentVerifyImportDecision, piSubagentAuthorityDecision } from "./subagent-authority-gate";
+import { markPiParentEnvironment, unmarkedSubagentLaunchNotice } from "./subagent-process";
 import {
   registerPiEmissionLaunchBridge,
   type PiSubagentLaunchEventBus,
@@ -300,6 +301,11 @@ export default function (
   // subagent launcher copies process.env into each child — inherits this
   // process's pid as its parent marker, so a child's extension knows it is a
   // subagent. A subagent publishes nothing: its own children stay subagents.
+  // Read the unmarked-launch notice BEFORE marking: a process launched like a
+  // headless child but carrying no marker is a parent by the marker rule, and
+  // a launcher that dropped the environment would leave the D6 gate inert.
+  const unmarkedLaunch = unmarkedSubagentLaunchNotice(process.env, process.argv);
+  if (unmarkedLaunch !== null) process.stderr.write(`loom(pi): ${unmarkedLaunch}\n`);
   markPiParentEnvironment(null);
   pi.on("resources_discover", () => {
     let resources;
@@ -427,11 +433,11 @@ export default function (
       }
 
       // ADR-0067: the parent's `security-audit verify --from` imports only a
-      // verification run this session's Trusted Review Witness proves.
+      // verification run its persisted capture attestations prove.
       if (event.toolName === "bash") {
-        currentGuard = "security-verification-witness";
-        const witnessed = await piParentVerifyWitnessDecision(event, ctx, reviewWitnesses);
-        if (witnessed !== undefined) return witnessed;
+        currentGuard = "security-verification-import";
+        const imported = await piParentVerifyImportDecision(event, ctx);
+        if (imported !== undefined) return imported;
       }
 
       // Subagent tool → `prepareSpawnBatch` owns the ordered observe → expand →

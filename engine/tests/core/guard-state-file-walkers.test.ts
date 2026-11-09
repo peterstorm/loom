@@ -1,11 +1,9 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import {
-  analyzeCommandHead,
-  blankSubstitutions,
-  flattenSubstitutions,
-  splitHeredocs,
-} from "../../src/core/guard-state-file";
+import { flattenSubstitutions } from "../../src/core/guard-state-file";
+import { analyzeCommandHead } from "../../src/core/shell-command-head";
+import { splitHeredocs } from "../../src/core/shell-heredoc";
+import { blankSubstitutions } from "../../src/core/shell-match-views";
 import { scanSubstitutions } from "../../src/core/shell-substitution";
 
 /**

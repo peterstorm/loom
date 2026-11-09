@@ -13,7 +13,7 @@ import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { runGuardSubagentAuthority } from "../../../src/handlers/pre-tool-use/guard-subagent-authority";
 import { registerSecurityAuditRun } from "../../../src/orchestration/security-audit-run-registry";
 import { FAIL_CLOSED_ROUTES, KNOWN_HANDLERS } from "../../../src/handler-routes";
-import { captureAttestationDir } from "../../../src/config";
+import { PERSISTENT_SUBAGENT_STORES } from "../../../src/config";
 
 const ENGINE = join(__dirname, "..", "..", "..");
 const PLUGIN_ROOT = join(ENGINE, "..");
@@ -225,7 +225,7 @@ describe("the real filesystem port (ADR-0067, amended)", () => {
   });
 
   it("protects the capture attestation store like the registry", async () => {
-    expect(await runGuardSubagentAuthority(subagent(`echo {} > ${captureAttestationDir()}/forged.json`))).toMatchObject({ kind: "block" });
+    expect(await runGuardSubagentAuthority(subagent(`echo {} > ${PERSISTENT_SUBAGENT_STORES.captureAttestations.dir()}/forged.json`))).toMatchObject({ kind: "block" });
   });
 
   it("refuses running Loom's own hook shims, which forge harness events", async () => {

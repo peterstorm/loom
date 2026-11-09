@@ -30,32 +30,21 @@ import {
 import { AUTHORITY_HELPER_OPERATIONS, HARNESS_HOOK_ROUTES } from "../../src/handlers/pre-tool-use/subagent-authority-operations";
 import { GUARD_FILESYSTEM } from "../../src/handlers/pre-tool-use/guard-subagent-authority";
 import { registeredSecurityAuditRuns } from "../../src/orchestration/security-audit-run-registry";
-import { securityAuditRunRegistryDir } from "../../src/config";
-import { HUNTER_ENVELOPE, aConfirmedFinding, aUnitResult } from "../security/fixtures";
-import { verifyWith } from "./security-verification-harness";
-import { aRun, isolateSubagentDir, removeRuns, seedFor, unitIdFor, writeArtifact, type Run } from "./security-audit-harness";
+import { PERSISTENT_SUBAGENT_STORES } from "../../src/config";
+import { aRun, isolateSubagentDir, must, publishedRun, removeRuns, startRun, writeArtifact } from "./security-audit-harness";
 
 beforeEach(() => { isolateSubagentDir(); });
 afterEach(removeRuns);
 
-const startRun = async (run: Run): Promise<void> => {
-  const started = await run.invoke(["start", "--repo", run.out, "--source", "0".repeat(40), "--profile", "standard"],
-    JSON.stringify({ units: [seedFor(0)] }));
-  expect(started.error).toBeNull();
-};
+const registryDir = (): string => PERSISTENT_SUBAGENT_STORES.securityAuditRunRegistry.dir();
 
-/** A whole audit through the CLI: start → assign → submit → ballots → publish → disposition. */
-const completeRun = async (run: Run): Promise<void> => {
-  await startRun(run);
-  expect((await run.invoke(["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"])).error).toBeNull();
+/** A whole audit through the CLI: start → assign → submit → ballots → publish →
+ *  disposition, with the hunter's working space written beside it. */
+const completeRun = async (): Promise<string> => {
+  const run = await publishedRun();
   writeArtifact(run, "agents/security-hunter-agent/scratch/notes.txt", "hunter working space");
-  expect((await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE,
-    units: [aUnitResult({ coverageId: unitIdFor(0), status: "candidate", fingerprints: ["api/login:sqli-email"] })],
-    findings: [aConfirmedFinding()],
-  }))).error).toBeNull();
-  await verifyWith(run);
-  expect((await run.invoke(["publish"])).error).toBeNull();
-  expect((await run.invoke(["disposition"])).error).toBeNull();
+  await must(run, ["disposition"]);
+  return run.out;
 };
 
 /** The guard's decision for a subagent writing `entry` under the registered run. */
@@ -89,9 +78,7 @@ describe("one owner of the run directory's entry names", () => {
   });
 
   it("every entry a full audit writes is an authority entry the guard protects", async () => {
-    const run = aRun();
-    await completeRun(run);
-    const out = realpathSync(run.out);
+    const out = realpathSync(await completeRun());
     const written = readdirSync(out).filter((entry) => entry !== "agents").sort();
     // Not vacuous: the lifecycle wrote every document, the handoff and the runs root.
     expect(written).toEqual([...Object.values(SECURITY_AUDIT_RUN_FILES), SECURITY_AUDIT_VERIFICATION_RUNS_DIR].sort());
@@ -107,8 +94,9 @@ describe("one owner of the run directory's entry names", () => {
   });
 });
 
-const WRITERS_AFTER_START: readonly SecurityAuditOperation[] =
-  SECURITY_AUDIT_OPERATION_ORDER.filter((operation) => operation !== "start" && securityAuditOperationWrites(operation));
+/** Every operation that writes the run — derived from the table, asserted once below. */
+const WRITERS: readonly SecurityAuditOperation[] = SECURITY_AUDIT_OPERATION_ORDER.filter(securityAuditOperationWrites);
+const WRITERS_AFTER_START: readonly SecurityAuditOperation[] = WRITERS.filter((operation) => operation !== "start");
 const READERS: readonly SecurityAuditOperation[] =
   SECURITY_AUDIT_OPERATION_ORDER.filter((operation) => !securityAuditOperationWrites(operation));
 
@@ -129,23 +117,25 @@ const ARGS: Readonly<Record<SecurityAuditOperation, readonly string[]>> = {
 };
 
 describe("every writing operation refreshes the run registry (ADR-0067 D6)", () => {
-  it("covers every writer the table declares", () => {
-    expect(WRITERS_AFTER_START).toEqual(["assign", "submit", "defer", "merge-critic", "verify", "publish", "disposition"]);
+  it("covers every writer the table declares — the one explicit writer list", () => {
+    // Every writer is handshake-gated by construction (`securityAuditOperationWrites`
+    // IS the skew trait); this pins WHICH operations write, so a new writer is a
+    // visible, reviewed change here and nowhere else.
+    expect(WRITERS).toEqual(["start", "assign", "submit", "defer", "merge-critic", "verify", "publish", "disposition"]);
+    expect(WRITERS_AFTER_START).toEqual(WRITERS.slice(1));
   });
 
   it.each(WRITERS_AFTER_START)("%s re-registers a run whose registry was wiped mid-audit", async (operation) => {
-    const run = aRun();
-    await startRun(run);
-    rmSync(securityAuditRunRegistryDir(), { recursive: true, force: true });
+    const run = await startRun(aRun());
+    rmSync(registryDir(), { recursive: true, force: true });
     expect(registeredSecurityAuditRuns()).toEqual([]);
     await run.invoke([operation, ...ARGS[operation]], "{}");
     expect(registeredSecurityAuditRuns()).toEqual([realpathSync(run.out)]);
   });
 
   it.each(READERS)("%s (read-only) registers nothing", async (operation) => {
-    const run = aRun();
-    await startRun(run);
-    rmSync(securityAuditRunRegistryDir(), { recursive: true, force: true });
+    const run = await startRun(aRun());
+    rmSync(registryDir(), { recursive: true, force: true });
     await run.invoke([operation, ...ARGS[operation]]);
     expect(registeredSecurityAuditRuns()).toEqual([]);
   });
@@ -158,13 +148,12 @@ describe("every writing operation refreshes the run registry (ADR-0067 D6)", () 
   });
 
   it("refuses the operation, writing nothing, when the run cannot be registered", async () => {
-    const run = aRun();
-    await startRun(run);
+    const run = await startRun(aRun());
     const ledger = readFileSync(join(run.out, SECURITY_AUDIT_RUN_FILES.ledger), "utf8");
     // A plain file where the registry directory must be: registration fails.
-    rmSync(securityAuditRunRegistryDir(), { recursive: true, force: true });
-    mkdirSync(join(securityAuditRunRegistryDir(), ".."), { recursive: true });
-    writeFileSync(securityAuditRunRegistryDir(), "not a directory");
+    rmSync(registryDir(), { recursive: true, force: true });
+    mkdirSync(join(registryDir(), ".."), { recursive: true });
+    writeFileSync(registryDir(), "not a directory");
 
     const refused = await run.invoke(["defer", "--reason", "out of scope"]);
     expect(refused.ok).toBe(false);

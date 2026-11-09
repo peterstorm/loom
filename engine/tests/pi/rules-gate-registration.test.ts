@@ -43,6 +43,7 @@ beforeAll(() => {
 });
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const [k, v] of [
     ["LOOM_GATE", saved.gate], ["LOOM_GATE_MODES", saved.modes],
     ["LOOM_RULES_DIR", saved.rules], ["LOOM_SKILLS_DIR", saved.skills],
@@ -96,22 +97,14 @@ describe("registerRulesGate", () => {
 
   it("exempts a process carrying the subagent marker, in any mode", async () => {
     vi.stubEnv("LOOM_PI_SUBAGENT", "1");
-    try {
-      expect(await handlersFor().get("tool_call")!(editEvent(target), ctx("json", undefined))).toBeUndefined();
-      expect(await handlersFor().get("tool_call")!(editEvent(target), ctx("rpc", undefined))).toBeUndefined();
-    } finally {
-      vi.unstubAllEnvs();
-    }
+    expect(await handlersFor().get("tool_call")!(editEvent(target), ctx("json", undefined))).toBeUndefined();
+    expect(await handlersFor().get("tool_call")!(editEvent(target), ctx("rpc", undefined))).toBeUndefined();
   });
 
   it("gates a headless parent (json mode, no session file, no marker) — launch flags no longer exempt", async () => {
     vi.stubEnv("LOOM_PI_SUBAGENT", undefined);
     vi.stubEnv("LOOM_PI_PARENT_PID", undefined);
-    try {
-      expect(await handlersFor().get("tool_call")!(editEvent(target), ctx("json", undefined))).toMatchObject({ block: true });
-    } finally {
-      vi.unstubAllEnvs();
-    }
+    expect(await handlersFor().get("tool_call")!(editEvent(target), ctx("json", undefined))).toMatchObject({ block: true });
   });
 
   it("gates json mode when it has a session file", async () => {

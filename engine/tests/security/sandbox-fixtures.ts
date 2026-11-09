@@ -16,6 +16,7 @@ export const aSandboxReceipt = (overrides: Record<string, unknown> = {}): string
     allowlistedEnv: [...SANDBOX_ENV_ALLOWLIST],
     scratchBytes: 12,
     networkNamespace: true,
+    loopbackUp: true,
     targetReadOnly: true,
     readOnlyRoot: false,
     homeReadOnly: true,

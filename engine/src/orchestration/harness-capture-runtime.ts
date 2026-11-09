@@ -62,7 +62,7 @@ import { verifyStandalonePanelView } from "./standalone-panel-context";
 import { routedChildLaunchRoute } from "../utils/child-launch-route";
 import { openRegisteredRunDirectory, type RunDirHandle } from "./run-directory-handle";
 import { captureAttestationOf } from "../core/capture-attestation";
-import { SECURITY_VERIFICATION_PROGRAM } from "../core/security-adjudication";
+import { SECURITY_VERIFICATION_PROGRAM } from "../core/orchestration-contract/programs";
 import { canonicalAttestedRunDirectory, recordCaptureAttestation } from "./capture-attestation-store";
 import { CONTEXT_PACKET_MAX_BYTES } from "./stored-context-packets";
 import { recordReadCoverageObservation, registeredReadCoverage } from "./standalone-read-coverage-evidence";

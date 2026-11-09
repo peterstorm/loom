@@ -1,7 +1,7 @@
 {
   "kind": "regex",
   "name": "no-console-log",
-  "description": "Disallow console.log() calls — use structured logging or remove debug statements. CLI entry points are exempt: for a script whose contract is stdout, console.log IS the interface.",
+  "description": "Disallow console.log() calls — use structured logging or remove debug statements. scripts/lint-project.ts is exempt by name (excludePatterns match a path suffix): its contract is stdout, so console.log IS its interface. Another stdout-contract script needs its own entry.",
   "extensions": [".ts", ".tsx"],
   "pattern": "(?<![\"'`])console\\.log\\(",
   "flags": "",

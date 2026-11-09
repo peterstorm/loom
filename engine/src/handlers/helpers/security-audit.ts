@@ -56,7 +56,6 @@ import { compareStrings } from "../../core/ordering";
 import {
   ensureDirectoryNoFollow,
   ensureResolvedBaseDirectory,
-  readRunFileNoFollow,
   resolveBaseDirectory,
   writeRunFileExclusiveNoFollow,
   writeRunFileNoFollow,
@@ -105,7 +104,14 @@ import {
   proveVerificationSource,
   readVerificationSource,
 } from "./security-verification-proofs";
-import { readAuditSnapshot, verificationRunsRoot, type AuditSnapshot } from "./security-audit-run";
+import {
+  describeAuditRefusal,
+  readAuditSnapshot,
+  readRunDocument,
+  readRunText,
+  verificationRunsRoot,
+  type AuditSnapshot,
+} from "./security-audit-run";
 import { SECURITY_AUDIT_RUN_FILES } from "../../core/audit-run-authority";
 import { registerSecurityAuditRun } from "../../orchestration/security-audit-run-registry";
 import { renderLensSelection, type LensSelection } from "../../core/security-lens-select";
@@ -134,34 +140,6 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set([
 
 const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-/** Render any core error as one readable line: a `message`, a list of
- *  `violations`, or the JSON of whatever else the core refused with. */
-function describeRefusal(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (isWireRecord(error)) {
-    if (Array.isArray(error.violations)) {
-      return error.violations
-        .map((violation: unknown) => {
-          const fields = isWireRecord(violation) ? violation : {};
-          const path = typeof fields.path === "string" ? fields.path : "$";
-          const message = typeof fields.message === "string" ? fields.message : "invalid";
-          return `${path}: ${message}`;
-        })
-        .join("\n");
-    }
-    if (typeof error.message === "string") return error.message;
-    // Tagged refusals (`{ kind, …facts }`) read as `kind: fact=value …` rather
-    // than as raw JSON: a refusal is prose the operator has to act on.
-    if (typeof error.kind === "string") {
-      const facts = Object.entries(error)
-        .filter(([key]) => key !== "kind")
-        .map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`);
-      return facts.length === 0 ? error.kind : `${error.kind}: ${facts.join(" ")}`;
-    }
-  }
-  return JSON.stringify(error);
-}
-
 /** Every stdin payload's first step: strict JSON, or a refusal naming the
  *  operation whose input it was. */
 function parseJsonInput(label: SecurityAuditOperation, stdin: string): DomainResult<unknown, string> {
@@ -174,12 +152,13 @@ function parseJsonInput(label: SecurityAuditOperation, stdin: string): DomainRes
 
 // --- The run directory ---
 
+/** The run directory's WRITE side. Reads go through the shared read seam
+ *  (`security-audit-run.ts`: `readRunDocument`, `readRunText`,
+ *  `readAuditSnapshot`), so a document reads the same here as in the
+ *  verification program. */
 type Store = Readonly<{
   out: string;
   has: (file: string) => boolean;
-  /** Read one run-relative text document without following a symlink. */
-  readText: (file: string) => DomainResult<string, string>;
-  readJson: <T>(file: string, parse: (raw: unknown) => DomainResult<T, unknown>) => DomainResult<T, string>;
   write: (file: string, value: string, options?: Readonly<{ exclusive?: boolean }>) => DomainResult<void, string>;
   /** Remove every document this run directory may hold, for `start --force`. A
    *  new run must not inherit the previous run's records: `findings.json`,
@@ -187,43 +166,6 @@ type Store = Readonly<{
    *  otherwise enter the new run's adjudication as if this run had filed them. */
   clear: () => DomainResult<readonly string[], string>;
 }>;
-
-/** Read one run-relative text document without following a symlink. */
-function readTextAt(root: string, file: string): DomainResult<string, string> {
-  const path = join(root, file);
-  try {
-    return success(readRunFileNoFollow(path));
-  } catch (error) {
-    return failure(`cannot read ${path}: ${describe(error)}`);
-  }
-}
-
-/** Read one run document: no-follow, strict JSON, and a parser failure that
- *  NAMES the file. A parser that throws is a parser that met a shape it did not
- *  model, so the exception is caught here rather than escaping as an unnamed
- *  `Hook error:` with no run context. */
-function readJsonAt<T>(
-  root: string,
-  file: string,
-  parse: (raw: unknown) => DomainResult<T, unknown>,
-): DomainResult<T, string> {
-  const path = join(root, file);
-  const text = readTextAt(root, file);
-  if (!text.ok) return text;
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text.value);
-  } catch (error) {
-    return failure(`${path} is not valid JSON: ${describe(error)}`);
-  }
-  let parsed: DomainResult<T, unknown>;
-  try {
-    parsed = parse(raw);
-  } catch (error) {
-    return failure(`${path} is malformed — unexpected ${describe(error)}`);
-  }
-  return parsed.ok ? parsed : failure(`${path} is malformed —\n${describeRefusal(parsed.error)}`);
-}
 
 /** Write one run document through the no-follow helpers: a symlinked run file is
  *  refused rather than written through, and an exclusive write fails when the
@@ -311,8 +253,6 @@ function openStore(out: string, writes: boolean): DomainResult<Store, string> {
   return success({
     out: root,
     has: (file) => existsSync(join(root, file)),
-    readText: (file) => readTextAt(root, file),
-    readJson: (file, parse) => readJsonAt(root, file, parse),
     write: (file, value, options) => writeAt(root, file, value, options),
     clear: () => clearRunDocuments(root),
   });
@@ -334,23 +274,22 @@ function writeInOrder(writes: readonly (() => DomainResult<void, string>)[]): Do
 // --- Document parsers, each owned by the core that defines the document ---
 
 const readLedger = (store: Store): DomainResult<CoverageLedger, string> =>
-  store.readJson<CoverageLedger>(FILES.ledger, parseLedger);
+  readRunDocument<CoverageLedger>(store.out, FILES.ledger, parseLedger);
 
 const readRun = (store: Store): DomainResult<SecurityRunMetadata, string> =>
-  store.readJson<SecurityRunMetadata>(FILES.run, parseSecurityRunMetadata);
+  readRunDocument<SecurityRunMetadata>(store.out, FILES.run, parseSecurityRunMetadata);
 
-/** `start` writes both documents, so an absent one means the file was lost or
- *  removed — not that the run has no findings. Treating absence as `[]` would
- *  silently reset the run's candidate set. */
+/** `start` writes the findings document, so an absent one means the file was
+ *  lost or removed — not that the run has no findings (`readRunDocument`
+ *  refuses it as missing). Treating absence as `[]` would silently reset the
+ *  run's candidate set. */
 const readFindings = (store: Store): DomainResult<readonly SecurityFinding[], string> =>
-  store.has(FILES.findings)
-    ? store.readJson<readonly SecurityFinding[]>(FILES.findings, parseSecurityFindings)
-    : failure(`${join(store.out, FILES.findings)} is missing — a run directory always holds it`);
+  readRunDocument<readonly SecurityFinding[]>(store.out, FILES.findings, parseSecurityFindings);
 
 /** The published records. `publish` is the only operation that creates them, so
  *  their absence is a refusal rather than an empty list. */
 const readPublished = (store: Store): DomainResult<readonly SecurityFinding[], string> =>
-  store.readJson<readonly SecurityFinding[]>(FILES.published, parseSecurityFindings);
+  readRunDocument<readonly SecurityFinding[]>(store.out, FILES.published, parseSecurityFindings);
 
 /** The four documents adjudication reads, read ONCE through the shared seam:
  *  `findings`, `publish`, `status` and `verify --from` each project this one
@@ -451,9 +390,9 @@ function startInputs(store: Store, args: readonly string[], stdin: string): Doma
   const raw = parseJsonInput("start", stdin);
   if (!raw.ok) return raw;
   const payload = parseSecurityAuditStart(raw.value);
-  if (!payload.ok) return failure(`start input is malformed —\n${describeRefusal(payload.error)}`);
+  if (!payload.ok) return failure(`start input is malformed —\n${describeAuditRefusal(payload.error)}`);
   const ledger = parseCoverageSeeds(payload.value.units);
-  if (!ledger.ok) return failure(describeRefusal(ledger.error));
+  if (!ledger.ok) return failure(describeAuditRefusal(ledger.error));
   return success({ repo, profile: profile.value, budget: budget.value, payload: payload.value, ledger: ledger.value });
 }
 
@@ -499,7 +438,7 @@ function runStart(store: Store, args: readonly string[], stdin: string): DomainR
     sourceRef: revision.value,
   }, payload, ledger);
   const selfCheck = parseSecurityRunMetadata(started.metadata);
-  if (!selfCheck.ok) return failure(`run metadata is malformed —\n${describeRefusal(selfCheck.error)}`);
+  if (!selfCheck.ok) return failure(`run metadata is malformed —\n${describeAuditRefusal(selfCheck.error)}`);
 
   // `--force` starts a NEW run in the same directory, so every document of the
   // previous run goes: its candidate findings, published records and prose would
@@ -610,7 +549,7 @@ function runAssign(store: Store, args: readonly string[]): DomainResult<string, 
     agentId: agent.value,
     ...(wave.value === null ? {} : { wave: wave.value }),
   }]);
-  if (!assigned.ok) return failure(describeRefusal(assigned.error));
+  if (!assigned.ok) return failure(describeAuditRefusal(assigned.error));
   const written = store.write(FILES.ledger, json(assigned.value.ledger));
   if (!written.ok) return written;
   // The owner id is minted by the ledger, not echoed from `--agent`: a reassigned
@@ -643,10 +582,10 @@ function runNonce(store: Store, args: readonly string[]): DomainResult<string, s
   if (!ledger.ok) return ledger;
 
   const admitted = admitArtifactNonce(ledger.value, artifact.value);
-  if (!admitted.ok) return failure(`nonce refused: ${describeRefusal(admitted.error)}`);
+  if (!admitted.ok) return failure(`nonce refused: ${describeAuditRefusal(admitted.error)}`);
   const { artifact: owned, coverageIds } = admitted.value;
   const binding = bindSandboxRun({ target: run.value.target, runDir: store.out, owner: owned.owner, artifact: owned.path });
-  if (!binding.ok) return failure(`nonce refused: ${describeRefusal(binding.error)}`);
+  if (!binding.ok) return failure(`nonce refused: ${describeAuditRefusal(binding.error)}`);
   return success([
     `nonce ${binding.value.nonce} for ${owned.path} (owner ${owned.owner}; in flight: ${coverageIds.join(", ")})`,
     "",
@@ -663,7 +602,7 @@ function checkLocalReceipts(store: Store, results: readonly UnitResult[]): Domai
   for (const result of results) {
     for (const check of result.checks) {
       if (check.method !== "local" || check.artifact === null) continue;
-      const text = store.readText(check.artifact);
+      const text = readRunText(store.out, check.artifact);
       if (!text.ok) return text;
       const judged = judgeLocalReceipt(text.value, check.artifact);
       if (!judged.ok) return judged;
@@ -687,7 +626,7 @@ function runSubmit(store: Store, args: readonly string[], stdin: string): Domain
   const payload = parseJsonInput("submit", stdin);
   if (!payload.ok) return payload;
   const parsed = parseHunterResult(payload.value);
-  if (!parsed.ok) return failure(`submit input is not a ${HUNTER_RESULT_KIND} —\n${describeRefusal(parsed.error)}`);
+  if (!parsed.ok) return failure(`submit input is not a ${HUNTER_RESULT_KIND} —\n${describeAuditRefusal(parsed.error)}`);
   const { units: results, findings: filed } = parsed.value;
   const run = openRun(store, "submit");
   if (!run.ok) return run;
@@ -704,7 +643,7 @@ function runSubmit(store: Store, args: readonly string[], stdin: string): Domain
   if (!existing.ok) return existing;
 
   const records = fileCandidates(existing.value, filed);
-  if (!records.ok) return failure(`filed findings refused —\n${describeRefusal(records.error)}`);
+  if (!records.ok) return failure(`filed findings refused —\n${describeAuditRefusal(records.error)}`);
   const settlement = settleUnits(ledger.value, results);
   if (!settlement.ok) return settlement;
   const { ledger: next, settled } = settlement.value;
@@ -729,7 +668,7 @@ function settleUnits(
   const settled: string[] = [];
   for (const result of results) {
     const recorded = recordUnitResult(next, result);
-    if (!recorded.ok) return failure(describeRefusal(recorded.error));
+    if (!recorded.ok) return failure(describeAuditRefusal(recorded.error));
     next = recorded.value;
     settled.push(result.coverageId);
   }
@@ -749,13 +688,13 @@ function runDefer(store: Store, args: readonly string[]): DomainResult<string, s
   const unit = flags.value["--unit"];
   if (unit === null || unit === undefined) {
     const deferred = deferPlannedUnits(ledger.value, reason.value);
-    if (!deferred.ok) return failure(describeRefusal(deferred.error));
+    if (!deferred.ok) return failure(describeAuditRefusal(deferred.error));
     const written = store.write(FILES.ledger, json(deferred.value));
     if (!written.ok) return written;
     return success(`deferred ${deferred.value.filter((entry) => entry.status === "deferred").length} planned unit(s): ${reason.value}`);
   }
   const deferred = deferUnit(ledger.value, unit, reason.value);
-  if (!deferred.ok) return failure(describeRefusal(deferred.error));
+  if (!deferred.ok) return failure(describeAuditRefusal(deferred.error));
   const written = store.write(FILES.ledger, json(deferred.value));
   if (!written.ok) return written;
   return success(`deferred ${unit}: ${reason.value}`);
@@ -789,9 +728,9 @@ function runMergeCritic(store: Store, args: readonly string[], stdin: string): D
   const document = criticPayload(payload.value);
   if (!document.ok) return document;
   const critic = parseCriticResult(document.value.critic);
-  if (!critic.ok) return failure(describeRefusal(critic.error));
+  if (!critic.ok) return failure(describeAuditRefusal(critic.error));
   const maps = parseCriticMergeMaps(document.value.maps);
-  if (!maps.ok) return failure(describeRefusal(maps.error));
+  if (!maps.ok) return failure(describeAuditRefusal(maps.error));
   const wave = integerFlag(flags.value, "--wave");
   if (!wave.ok) return wave;
   const run = openRun(store, "merge-critic");
@@ -804,7 +743,7 @@ function runMergeCritic(store: Store, args: readonly string[], stdin: string): D
     wave: wave.value ?? Math.max(1, ...ledger.value.map((unit) => unit.wave)),
     ...maps.value,
   });
-  if (!merged.ok) return failure(describeRefusal(merged.error));
+  if (!merged.ok) return failure(describeAuditRefusal(merged.error));
   const written = store.write(FILES.ledger, json(merged.value.ledger));
   if (!written.ok) return written;
   return success([
@@ -941,7 +880,7 @@ async function runPublish(store: Store, args: readonly string[]): Promise<Domain
   // publish that wrote bytes its own reader refuses would report success a step
   // before the failure.
   const records = parseSecurityFindings(adjudicated.value.findings);
-  if (!records.ok) return failure(`adjudicated records are malformed —\n${describeRefusal(records.error)}`);
+  if (!records.ok) return failure(`adjudicated records are malformed —\n${describeAuditRefusal(records.error)}`);
 
   const documents = renderRunDocuments({ metadata, ledger, findings: records.value, locator: store.out });
   const complete = status.runStatus === "complete";
@@ -980,12 +919,12 @@ function runDisposition(store: Store, args: readonly string[]): DomainResult<str
   if (!published.ok) return published;
 
   const disposition = securityDisposition({ metadata: run.value, locator: store.out, findings: published.value });
-  if (!disposition.ok) return failure(describeRefusal(disposition.error));
+  if (!disposition.ok) return failure(describeAuditRefusal(disposition.error));
   // The handoff is only a handoff if the next program can load it: the start
   // input is derived here, written beside the record, and validated against the
   // loader's own schema before either file is written.
   const start = standaloneDispositionStart(disposition.value);
-  if (!start.ok) return failure(describeRefusal(start.error));
+  if (!start.ok) return failure(describeAuditRefusal(start.error));
   const written = store.write(FILES.disposition, json(disposition.value));
   if (!written.ok) return written;
   const handoff = store.write(FILES.dispositionHandoff, json(start.value));
@@ -1004,7 +943,10 @@ function runDisposition(store: Store, args: readonly string[]): DomainResult<str
 /** The verification run the audit owes now (ADR-0067): its runs root, run name
  *  and exact start input, issued for the run's latest wave under the first
  *  generation of its claim set that is not blocked or unimportable — or null
- *  when no confirmed claim awaits a ballot, or the run is already published. */
+ *  when no confirmed claim awaits a ballot, or the run is already published.
+ *  `retiredRuns` names every existing run that is dead to the planner, with
+ *  the reason — blocked, unimportable, or unreadable (possibly transient) —
+ *  so a new generation is never proposed without saying why. */
 type VerificationStatus = Readonly<{
   awaitingBallots: number;
   runsRoot: string;
@@ -1012,6 +954,7 @@ type VerificationStatus = Readonly<{
   input: VerificationStartPlan["input"];
   command: string;
   importCommand: string;
+  retiredRuns: readonly Readonly<{ run: string; reason: string }>[];
 }> | null;
 
 async function verificationStatus(snapshot: RunSnapshot): Promise<DomainResult<VerificationStatus, string>> {
@@ -1024,7 +967,7 @@ async function verificationStatus(snapshot: RunSnapshot): Promise<DomainResult<V
     wave: Math.max(1, ...snapshot.ledger.map((unit) => unit.wave)),
     findings: snapshot.findings,
     verdicts: snapshot.verdicts,
-    observe: (run) => generations.value.get(run) ?? "absent",
+    observe: (run) => generations.value.get(run)?.state ?? "absent",
   });
   if (!plan.ok) return plan;
   if (plan.value === null) return success(null);
@@ -1036,6 +979,7 @@ async function verificationStatus(snapshot: RunSnapshot): Promise<DomainResult<V
     input: plan.value.input,
     command: renderVerificationStart(plan.value, runsRoot),
     importCommand: `loom helper security-audit verify --out ${quoteShellArgument(locator)} --from ${quoteShellArgument(plan.value.run)}`,
+    retiredRuns: [...generations.value].flatMap(([run, observed]) => observed.state === "dead" ? [{ run, reason: observed.reason }] : []),
   });
 }
 
@@ -1100,6 +1044,7 @@ async function runStatus(store: Store, args: readonly string[]): Promise<DomainR
       ? ["publication: ready"]
       : ["publication: blocked", ...status.publicationBlockers.map((blocker) => `  - ${blocker}`)]),
     ...(status.verification === null ? [] : [
+      ...status.verification.retiredRuns.map(({ run, reason }) => `verification run ${run} is retired: ${reason}`),
       `verification: ${status.verification.awaitingBallots} confirmed claim(s) await a bound ballot; start their verification run with`,
       status.verification.command,
       `then spawn the verifiers it issues and import it: ${status.verification.importCommand}`,

@@ -26,6 +26,10 @@ import { makeViolation } from "../types";
 export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/linter/types.ts",
   "engine/src/linter/formatter.ts",
+  // `lint-project --write-baseline` as data, and the baseline owner/counter
+  // leaf it types against; scripts/lint-project.ts is their fs shell.
+  "engine/src/linter/programmatic/baseline.ts",
+  "engine/src/linter/programmatic/baseline-config.ts",
   // Guarded-skill-machine pure core: the reducer and everything it may
   // transitively import. The fs shell is ledger.ts / report-discovery.ts /
   // session-registry.ts — deliberately NOT listed here.

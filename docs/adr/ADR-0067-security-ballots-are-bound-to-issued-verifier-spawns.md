@@ -6,6 +6,51 @@ Accepted (2026-11-09). Supersedes the "ballot attribution is self-reported" limi
 `docs/security-audit.md` (Honest limits) and deferred as cores `architecture-tech-lead-4` in
 review campaign 3 (`run.rf3-cores-policy`). Amends ADR-0066 D2/D3, the verification step only.
 
+## Current contract
+
+The decision as it stands after every amendment below. Implement against this
+section; D1–D7 and the implementation notes are kept as history, and each item
+names the note that set it.
+
+- **Verification is a facade program** (D1). `security-verification` issues one
+  `security-verifier-agent` request per brief of at most four fingerprints, frozen at `start`.
+  Verifier output is captured **natively only**: `helper orchestration submit` and `correlate`
+  refuse every request of a `security-verification` run (note A — the "`submit` resumes the
+  program" note is withdrawn).
+- **Ballots carry no identity of their own** (D2, D3). `agent`, `profile` and the binding
+  come from the minted request and the capture receipt, never from the payload.
+- **The persisted capture attestation is the authority, on both harnesses** (note B). Native
+  capture writes one attestation per verifier attempt into the protected
+  `security-capture-attestations/` store. `verify --from` imports a run only when `result.json`
+  equals its evidence replay and every ballot matches its attestation. `verdicts.json` is a
+  **cache**: `findings`, `status` and `publish` re-prove every cached ballot against its run and
+  attestation before adjudication counts it.
+- **Run naming** (note E). Runs live at
+  `<audit>/verification-runs/run.verify-w<wave>-g<generation>-<id>`, where `<id>` hashes the
+  brief slot ids, the first 8 hex of the ledger and findings digests, and the generation.
+  `status` names the first generation whose run is absent or live; a blocked, malformed or
+  unimportable run is dead, and the next generation is named. `status` also names every dead
+  run with the reason it retired (`verification run <run> is retired: <reason>` in prose,
+  `verification.retiredRuns` in `--json`), so a new generation is never proposed silently.
+- **D6 fence, trait-derived** (note "D6 operation split"). A subagent may run exactly the
+  operations whose `runtimeSkew` trait is `available` (read-only projections). It may not write
+  onto a registered run's authority entries (`core/audit-run-authority.ts`), run a CLI hook
+  route, or launch a nested harness. The fence is defence in depth; the attestation is the
+  proof.
+- **The registry is refreshed by every writer** (notes "Registration", D). Every writing
+  `helper security-audit` operation, and `start`/`resume` of the program, registers the audit
+  run before it writes, and refuses to write when it cannot register.
+- **Pi subagent detection is an environment marker** (note G). `LOOM_PI_SUBAGENT=1` is set on
+  Loom's own spawns; `LOOM_PI_PARENT_PID` names another process otherwise. Launch flags never
+  decide the role. The json-mode path depends on the installed launcher copying the parent's
+  environment. An unmarked process launched like a headless child gets a one-time stderr
+  notice.
+- **Pi's parent import gate uses the persisted proof alone** (note I). It runs
+  `proveVerificationSource`, the same proof as `verify --from`. The extension keeps no
+  in-process witness of verification runs; its Trusted Review Witness serves Standalone Review
+  only.
+- **One fingerprint, one verification run** (note H).
+
 ## Context
 
 INV-S3 says a `confirmed` claim is published only on a ballot cast from a catalog profile that
@@ -177,7 +222,8 @@ the skill's running section shows `start security-verification` → spawn → `v
   is the fence's: a subagent that evades every Bash guard and writes a canonical attestation for a
   forged transcript by hand would be believed.
 - The Pi trusted review witness, which today verifies only `standalone-review`, is generalised to
-  `security-verification` (same capture event shape).
+  `security-verification` (same capture event shape). *Superseded by note I: the persisted
+  capture attestation proves verification runs; the witness stays Standalone-Review-only.*
 - Verification costs no extra invocations: the same verifier spawns, now issued. Retries consume
   the existing per-slot budget (attempt 2), matching the Refutation Panel.
 - One more facade program to keep in step with ADR-0005's driver contract; it reuses the
@@ -213,7 +259,7 @@ Steps 1, 2, 3 and 5 landed in `core/security-verification.ts` (pure),
 program) and `handlers/helpers/security-audit.ts` (`verify --from`, `status`, `start`).
 Step 4 landed in `core/subagent-authority.ts` (pure decision),
 `handlers/pre-tool-use/guard-subagent-authority.ts` (Claude Code) and
-`pi/subagent-authority-gate.ts` (Pi, with the parent's witness check below); step 6 in
+`pi/subagent-authority-gate.ts` (Pi, with the parent's import check below); step 6 in
 `docs/security-audit.md`, the skill, the command and the agent docs.
 Where the code forced a choice the ADR left open, or a deviation, it is recorded here.
 
@@ -265,7 +311,8 @@ Where the code forced a choice the ADR left open, or a deviation, it is recorded
   final-message extraction) in `authenticatePiIssuedReviewRequest`, which spawn admission
   and capture share. `orchestration submit` into a verification run resumes the program
   (the parent path for harnesses without native capture; D6 fences it from subagents).
-- **Pi witness.** `createTrustedReviewWitnesses` gains `verifySecurityVerification`,
+- **Pi witness (superseded by note B, then removed by note I).** `createTrustedReviewWitnesses`
+  gained `verifySecurityVerification`,
   which proves a named run from the session's in-process witnesses (every captured slot
   witnessed with identical authority and bytes, `result.json` equal to the witnessed
   replay). `verify --from` is a separate CLI process and cannot consult it, and the
@@ -346,7 +393,8 @@ defence in depth. Where a bullet below contradicts one above, this one wins.
   exactly the cached ballots, each attested. A failing run contributes no ballot and one named
   publication blocker. The Pi in-process witness gate is now secondary: it is consulted first and,
   when it cannot prove the run, the gate falls back to the same persisted proof — closing the Pi
-  restart gap recorded above.
+  restart gap recorded above. (Note I removes the witness from this gate: the persisted proof is
+  its only authority.)
 - **C — registry spellings.** A run is registered under both `resolve(out)` as spelled and its
   realpath; the guard expands every registered directory with its realpath and judges every
   literal path also in its canonical spelling — the realpath of its deepest existing ancestor
@@ -397,3 +445,47 @@ defence in depth. Where a bullet below contradicts one above, this one wins.
   disposition handoff, `assign`'s nonce line) is one `quoteShellArgument` word. The registry cap
   (4096) counts live runs only: the registrar prunes entries whose directory is gone once at the
   cap, and the reader fails closed only while live entries still exceed it.
+
+### Implementation notes (amended — third review round)
+
+The review of the second round found the Pi import gate carrying two proofs where one decides. It
+also found that the Pi role signal rests on one property outside this repository. Where a bullet
+below contradicts one above, this one wins.
+
+- **I — Pi import gate: the persisted proof alone.** `piParentVerifyImportDecision`
+  (`pi/subagent-authority-gate.ts`, formerly `piParentVerifyWitnessDecision`) proves an import
+  only through `readVerificationSource` → `proveVerificationSource`, the proof `verify --from`
+  itself runs. The in-process witness could never change an outcome. The gate blocked only
+  when BOTH proofs failed, and every witnessed run is also persisted-provable, so the witness
+  was a hypothetical seam. It is removed: `TrustedReviewWitnesses` loses
+  `verifySecurityVerification` and `TrustedSecurityVerificationReceipt`, and the gate takes no
+  witness port. The Trusted Review Witness Aggregate is Standalone Review authority again.
+  Result capture still remembers every request-bound capture under its run (one generic path);
+  verification runs are simply never verified from it. Each `verify` invocation is classified
+  as `not-an-import | unplaceable | run` and judged by an exhaustive match. The block text names
+  the import proof, not a witness. Note B's "witness consulted first" and the "Pi witness" note
+  of the first round no longer describe the code.
+- **G, amended — the launcher dependency, stated and surfaced.** Pi's `tool_call` carries no
+  caller marker, so a second per-call signal does not exist; the environment marker stays the
+  one signal. The json-mode path depends on one property outside this repository: the
+  **installed subagent launcher copies `process.env` into each child**. A launcher that scrubs or
+  replaces the environment yields an unmarked child. That child is a parent by the marker rule:
+  the D6 gate is inert in it and the rules gate applies. Loom's own `--mode rpc` spawn does not
+  depend on this, because it sets `LOOM_PI_SUBAGENT=1` explicitly. Launch flags still never decide
+  the role. They do raise an alarm: at load, before the process marks itself, the extension
+  writes one stderr notice (`unmarkedSubagentLaunchNotice`, `pi/subagent-process.ts`) when the
+  process was launched with `--mode json|rpc` or `--no-session` but carries no `LOOM_PI_*`
+  marker. The notice is once per process by construction, because marking makes every later
+  load in the process quiet. A headless parent started without the marker sees the notice and
+  stays a parent. The rules gate and the D6 gate still read the unmarked process the same way
+  (parent: rules-gated, D6-inert). The notice makes that reading visible instead of silent.
+- **J — the verify collector reads fed scripts where the line's `cd` leads.** The refusal walk
+  read a fed script (`bash run.sh`, `source run.sh`, `bash < run.sh`) in every directory a `cd`
+  or `pushd` on the same line may lead to; `securityAuditVerifyInvocations` read it only in the
+  starting cwd, so `cd /b && bash run.sh` missed a verify import inside `/b/run.sh` and the Pi
+  import gate let it through unproven. Both now widen the line's scope through one rule
+  (`lineScopeOf`, `core/subagent-authority.ts`), so the gate and the fence cannot disagree about
+  where a script lives.
+- **`childAgentEnvironment` takes only the environment.** Its session parameter had one caller,
+  which always passed `null`; the launching session is read from the inherited
+  `LOOM_PI_PARENT_SESSION`.

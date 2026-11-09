@@ -23,10 +23,10 @@ const parse = (raw: readonly unknown[]): readonly SecurityFinding[] => ok(parseS
 
 type TraceStep = ConfirmedFinding["trace"][number];
 
-const trace = (sinkLine: number): readonly TraceStep[] => [
-  { kind: "entrypoint", file: "src/api/login.ts", line: 12, scope: "HTTP handler", description: "Reads `email`." },
-  { kind: "sink", file: "src/db/users.ts", line: sinkLine, scope: "SQL builder", description: "Interpolates the value." },
-];
+const ENTRY: TraceStep = { kind: "entrypoint", file: "src/api/login.ts", line: 12, scope: "HTTP handler", description: "Reads `email`." };
+const sinkAt = (line: number): TraceStep => ({ kind: "sink", file: "src/db/users.ts", line, scope: "SQL builder", description: "Interpolates the value." });
+
+const trace = (sinkLine: number): ConfirmedFinding["trace"] => [ENTRY, sinkAt(sinkLine)];
 
 /** A middle step the trace grammar allows (entrypoint → propagation* → sink). */
 const propagation = (line: number): TraceStep => ({
@@ -43,7 +43,7 @@ describe("root-cause consolidation", () => {
     const deep = aConfirmedFinding({
       fingerprint: "b/deep",
       root_cause: "Concatenated query.",
-      trace: [trace(40)[0] as TraceStep, propagation(20), trace(40)[1] as TraceStep],
+      trace: [ENTRY, propagation(20), sinkAt(40)],
     });
     const merged = consolidateCandidates(parse([shallow, deep]));
     expect(merged.map((finding) => finding.fingerprint)).toEqual(["b/deep"]);
@@ -59,7 +59,7 @@ describe("root-cause consolidation", () => {
     const noSink = aConfirmedFinding({
       fingerprint: "a/no-sink",
       root_cause: "Concatenated query.",
-      trace: [trace(40)[0] as TraceStep],
+      trace: [ENTRY],
     });
     const withSink = aConfirmedFinding({ fingerprint: "b/with-sink", root_cause: "Concatenated query.", trace: trace(40) });
     expect(consolidateCandidates(parse([noSink, withSink]))).toHaveLength(2);
@@ -111,6 +111,20 @@ describe("filing a hunter's records into the run (fileCandidates)", () => {
   it("adds a fresh record and returns the document sorted and consolidated", () => {
     const fresh = parse([aNeedsValidationFinding({ fingerprint: "a/earlier", trace: trace(90) })]);
     expect(ok(fileCandidates(held, fresh)).map((finding) => finding.fingerprint)).toEqual(["a/earlier", "api/login:sqli-email"]);
+  });
+
+  it("never displaces a record the run holds with a later filing of the same defect", () => {
+    // The run holds a LEAD; a later hunter files the same sink and root cause as
+    // a CONFIRMED claim under a new fingerprint. Consolidation alone would keep
+    // the stronger verdict and drop the held record — the record a verifier may
+    // have balloted and a unit's `result_fingerprints` may list. Held records
+    // are pinned: the run keeps what it holds, and the re-description yields.
+    const lead = parse([aNeedsValidationFinding({ fingerprint: "b/held-lead", claimed_root_cause: "Concatenated query.", trace: trace(40) })]);
+    const stronger = parse([aConfirmedFinding({ fingerprint: "a/fresh-claim", root_cause: "Concatenated query.", trace: [ENTRY, propagation(20), sinkAt(40)] })]);
+    expect(ok(fileCandidates(lead, stronger)).map((finding) => finding.fingerprint)).toEqual(["b/held-lead"]);
+    // Unpinned, the same pair consolidates to the stronger claim — the rule the pin overrides.
+    expect(consolidateCandidates([...lead, ...stronger]).map((finding) => finding.fingerprint)).toEqual(["a/fresh-claim"]);
+    expect(consolidateCandidates([...lead, ...stronger], new Set(["b/held-lead"])).map((finding) => finding.fingerprint)).toEqual(["b/held-lead"]);
   });
 
   it("refuses a held fingerprint re-filed with different content, naming every conflict", () => {

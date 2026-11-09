@@ -471,26 +471,47 @@ function segmentTouches(segment: string, scope: PathScope, judged: ReadonlySet<s
   return textNamesRoot(collapseVariants(text)?.join("\n") ?? text, scope);
 }
 
+/** One redirect of a segment: the text fused before its operator (an fd
+ *  number, empty, or a word the redirect is glued to), the operator, and its
+ *  operand — the rest of the word, or else the next word (consumed). */
+type RedirectOperand = Readonly<{ fd: string; operator: string; operand: string | undefined }>;
+
+/** Every redirect operator, longest first. */
+const REDIRECT_OPERATOR = /^(?:<<<|<<-|<<|&>>|&>|>>|>\||<>|>&|<&|>|<)/;
+
+/**
+ * Every redirect of one segment, in order, each with its operand. The ONE
+ * walk over a segment's redirect words: output targets, here-strings and
+ * input files are filters over it. An operator with no inline operand takes
+ * the next word whatever the operator is — after a redirect operator bash
+ * reads a word, so a following operator word is a syntax error, never a
+ * redirect of its own.
+ */
+function redirectOperands(segment: string): readonly RedirectOperand[] {
+  const words = shellWords(stripComment(segment).trim());
+  const redirects: RedirectOperand[] = [];
+  for (let index = 0; index < words.length; index++) {
+    const fused = splitFusedRedirect(words[index]!);
+    const operator = fused === null ? undefined : REDIRECT_OPERATOR.exec(fused.rest)?.[0];
+    if (fused === null || operator === undefined) continue;
+    const inline = fused.rest.slice(operator.length);
+    redirects.push({ fd: fused.head, operator, operand: inline !== "" ? inline : words[++index] });
+  }
+  return redirects;
+}
+
+/** Operators that write the file their operand names (`>&` only when the
+ *  operand is not an fd). */
+const OUTPUT_OPERATORS: ReadonlySet<string> = new Set(["&>>", "&>", ">>", ">|", "<>", ">&", ">"]);
+
 /** Output-redirect target words of one segment (`>`, `>>`, `>|`, `&>`, `<>`,
  *  `n>`, `>&file`), fused or separate. fd duplications write no file. */
-function redirectTargets(segment: string): readonly string[] {
-  const words = shellWords(stripComment(segment).trim());
-  const targets: string[] = [];
-  for (let index = 0; index < words.length; index++) {
-    const word = words[index]!;
-    const fused = splitFusedRedirect(word);
-    if (fused === null || !/^(?:[0-9]*|&)$/.test(fused.head)) continue;
-    const operator = fused.rest.match(/^(?:&>>?|>>|>\||<>|>&|>)/)?.[0];
-    if (operator === undefined) continue; // `<`, `<<<`: input only
-    const inline = fused.rest.slice(operator.length);
-    const target = inline !== "" ? inline : words[index + 1];
-    if (inline === "") index++;
-    if (target === undefined) continue;
-    if (operator === ">&" && /^(?:[0-9]+|-)$/.test(target)) continue; // fd dup
-    targets.push(target);
-  }
-  return targets;
-}
+const redirectTargets = (segment: string): readonly string[] =>
+  redirectOperands(segment).flatMap(({ fd, operator, operand }) =>
+    /^(?:[0-9]*|&)$/.test(fd) && OUTPUT_OPERATORS.has(operator) && operand !== undefined &&
+    !(operator === ">&" && /^(?:[0-9]+|-)$/.test(operand)) // fd dup
+      ? [operand]
+      : []);
 
 // ── The judgment ─────────────────────────────────────────────────────────────
 
@@ -525,6 +546,15 @@ function lineDirectories(segments: readonly string[], cwds: readonly string[], u
   return { cwds: [...known], cwdUnresolved };
 }
 
+/** The scope a parsed line's own segments run in: `scope` widened by every
+ *  directory a `cd`/`pushd` on the line may lead to. The ONE directory rule
+ *  both judgments apply — the refusal walk and the verify-invocation collector
+ *  read a fed script (`cd /b && bash run.sh`) in the same places. */
+function lineScopeOf(line: Extract<ParsedLine, { kind: "parsed" }>, scope: PathScope): PathScope {
+  const segments = line.chains.flatMap((chain) => chain.map((site) => site.segment));
+  return { ...scope, ...lineDirectories(segments, scope.cwds, scope.cwdUnresolved, scope.home) };
+}
+
 type Judged = SubagentAuthorityRefusal | null;
 
 const refuseUnparseable = (segment: string): SubagentAuthorityRefusal =>
@@ -540,7 +570,9 @@ const FIND_EXEC_ACTIONS: ReadonlySet<string> = new Set(["-exec", "-execdir", "-o
  *  argument words that text is made of. Those words are judged as the
  *  program, not as the segment's paths; any other argument
  *  (`bash -c '…' _ <path>`) stays a path argument. */
-function executedPrograms(head: string, args: readonly string[]): Readonly<{ programs: readonly string[]; words: ReadonlySet<string> }> {
+type ExecutedPrograms = Readonly<{ programs: readonly string[]; words: ReadonlySet<string> }>;
+
+function executedPrograms(head: string, args: readonly string[]): ExecutedPrograms {
   const none = { programs: [], words: new Set<string>() };
   if (SH_FAMILY_HEADS.has(head)) {
     const program = inlineProgramArg(head, args);
@@ -646,32 +678,14 @@ function shellScriptWord(args: readonly string[]): string | null {
 }
 
 /** The text of every here-string (`<<< word`) of a segment. */
-function hereStrings(segment: string): readonly string[] {
-  const words = shellWords(stripComment(segment).trim());
-  const texts: string[] = [];
-  for (let index = 0; index < words.length; index++) {
-    const fused = splitFusedRedirect(words[index]!);
-    if (fused === null || !fused.rest.startsWith("<<<")) continue;
-    const inline = fused.rest.slice(3);
-    const word = inline !== "" ? inline : words[++index];
-    if (word !== undefined) texts.push(unquote(word));
-  }
-  return texts;
-}
+const hereStrings = (segment: string): readonly string[] =>
+  redirectOperands(segment).flatMap(({ operator, operand }) =>
+    operator === "<<<" && operand !== undefined ? [unquote(operand)] : []);
 
 /** The files a segment's `<` input redirects read (`< f`, `0<f`). */
-function inputRedirectFiles(segment: string): readonly string[] {
-  const words = shellWords(stripComment(segment).trim());
-  const files: string[] = [];
-  for (let index = 0; index < words.length; index++) {
-    const fused = splitFusedRedirect(words[index]!);
-    if (fused === null || !/^(?:0?)$/.test(fused.head) || !fused.rest.startsWith("<") || /^<[<>&]/.test(fused.rest)) continue;
-    const inline = fused.rest.slice(1);
-    const word = inline !== "" ? inline : words[++index];
-    if (word !== undefined) files.push(unquote(word));
-  }
-  return files;
-}
+const inputRedirectFiles = (segment: string): readonly string[] =>
+  redirectOperands(segment).flatMap(({ fd, operator, operand }) =>
+    /^0?$/.test(fd) && operator === "<" && operand !== undefined ? [unquote(operand)] : []);
 
 /** What a pipe-chain's earlier segments write into the segment they feed: a
  *  file reader's files, or every other producer's literal argument text
@@ -813,6 +827,67 @@ function hookRouteOf(context: SubagentAuthorityContext, head: string, args: read
   return wordViews(route)?.find((view) => context.hookRoutes.has(view)) ?? null;
 }
 
+// ── The line walk both authority judgments fold ────────────────────────────
+
+/** One simple command of a parsed line, with what the shell will make of it. */
+type SegmentSite = Readonly<{
+  segment: string;
+  /** The segment's pipe-chain, as texts, and its position there — what a
+   *  pipe-fed program is read from. */
+  chain: readonly string[];
+  index: number;
+  command: SegmentCommand;
+  /** The programs the segment executes as shell text of their own. */
+  executed: ExecutedPrograms;
+}>;
+
+/**
+ * One command line as both authority judgments read it — the refusal walk
+ * (`judgeLine`) and the verify-invocation collector. The traversal is decided
+ * HERE, once: which heredoc and substitution bodies execute as lines of their
+ * own, how the line splits into pipe-chains once each substitution is replaced
+ * by its opaque (runtime) output, the command each segment runs behind its
+ * wrappers, and the programs it executes. The two judgments differ only in
+ * what they conclude from it, so a grammar fix lands in both or in neither.
+ *
+ * Not recursive: each judgment recurses into `nestedBodies` and the executed
+ * programs itself, at `depth + 1`, with its own scope.
+ */
+type ParsedLine =
+  | Readonly<{ kind: "blank" }>
+  /** Nested past MAX_SUBSTITUTION_DEPTH: nobody's legitimate command. */
+  | Readonly<{ kind: "too-deep" }>
+  | Readonly<{
+      kind: "parsed";
+      /** Executed heredoc bodies, then substitution bodies. Inert heredoc
+       *  bodies are data and drop out. */
+      nestedBodies: readonly string[];
+      /** An unclosed span: the line cannot be parsed in full. */
+      unparseable: boolean;
+      /** The line with heredoc bodies stripped but substitutions NOT
+       *  flattened — an unclosed substitution truncates the flattened view. */
+      unflattened: string;
+      chains: readonly (readonly SegmentSite[])[];
+    }>;
+
+function parseLine(command: string, depth: number): ParsedLine {
+  if (command.trim() === "") return { kind: "blank" };
+  if (depth > MAX_SUBSTITUTION_DEPTH) return { kind: "too-deep" };
+  const heredocs = splitHeredocs(command);
+  const substitutions = scanSubstitutions(heredocs.stripped, () => OPAQUE_OUTPUT);
+  return {
+    kind: "parsed",
+    nestedBodies: [...heredocs.bodies, ...substitutions.bodies],
+    unparseable: heredocs.unparseable || substitutions.unclosed,
+    unflattened: heredocs.stripped,
+    chains: pipeChains(substitutions.rebuilt).map((chain) =>
+      chain.map((segment, index): SegmentSite => {
+        const command = segmentCommand(segment);
+        return { segment, chain, index, command, executed: executedPrograms(command.head, command.args) };
+      })),
+  };
+}
+
 type SegmentFacts = Readonly<{
   segment: string;
   readOnly: boolean;
@@ -827,37 +902,30 @@ type SegmentJudgment =
   | Readonly<{ kind: "judged"; facts: SegmentFacts }>;
 
 function judgeLine(command: string, context: SubagentAuthorityContext, scope: PathScope, depth: number): Judged {
-  if (command.trim() === "") return null;
-  if (depth > MAX_SUBSTITUTION_DEPTH) return refuseUnparseable(command);
+  const line = parseLine(command, depth);
+  if (line.kind === "blank") return null;
+  if (line.kind === "too-deep") return refuseUnparseable(command);
 
-  // Executed heredoc bodies and substitution bodies run as lines of their own;
-  // the line itself is then judged with each substitution replaced by its
-  // opaque (runtime) output. Inert heredoc bodies are data and drop out.
-  const heredocs = splitHeredocs(command);
-  const substitutions = scanSubstitutions(heredocs.stripped, () => OPAQUE_OUTPUT);
-  for (const body of [...heredocs.bodies, ...substitutions.bodies]) {
+  for (const body of line.nestedBodies) {
     const judged = judgeLine(body, context, scope, depth + 1);
     if (judged !== null) return judged;
   }
-  const flattened = substitutions.rebuilt;
-  const chains = pipeChains(flattened);
-  const directories = lineDirectories(chains.flat(), scope.cwds, scope.cwdUnresolved, scope.home);
-  const lineScope: PathScope = { ...scope, ...directories };
+  const lineScope = lineScopeOf(line, scope);
 
-  if (heredocs.unparseable || substitutions.unclosed) {
+  if (line.unparseable) {
     // Judged on the UNFLATTENED text: an unclosed substitution truncates the
     // flattened view at its opener, hiding everything after it.
-    const named = pipeChains(heredocs.stripped).flat().find((segment) =>
+    const named = pipeChains(line.unflattened).flat().find((segment) =>
       segmentTouches(segment, lineScope) !== null || /security-audit|orchestration/.test(segment));
     if (named !== undefined) return refuseUnparseable(named);
   }
 
-  for (const chain of chains) {
+  for (const chain of line.chains) {
     const facts: SegmentFacts[] = [];
-    for (const [index, segment] of chain.entries()) {
-      const fed = judgeFedPrograms(command, chain, index, context, lineScope, depth);
+    for (const site of chain) {
+      const fed = judgeFedPrograms(command, site, context, lineScope, depth);
       if (fed !== null) return fed;
-      const judged = judgeSegment(segment, context, lineScope, depth);
+      const judged = judgeSegment(site, context, lineScope, depth);
       if (judged.kind === "refused") return judged.refusal;
       facts.push(judged.facts);
     }
@@ -880,13 +948,11 @@ function judgeLine(command: string, context: SubagentAuthorityContext, scope: Pa
  *  script by whether the LINE may concern authority at all. */
 function judgeFedPrograms(
   line: string,
-  chain: readonly string[],
-  index: number,
+  { segment, chain, index }: SegmentSite,
   context: SubagentAuthorityContext,
   scope: PathScope,
   depth: number,
 ): Judged {
-  const segment = chain[index]!;
   for (const program of fedPrograms(chain, index, scope, context.filesystem)) {
     const judged = match(program)
       .returnType<Judged>()
@@ -905,7 +971,9 @@ function judgeFedPrograms(
 
 /** A segment's command as the shell runs it: its literal head (for `cd` and
  *  executed paths), and the head and arguments behind any wrapper. */
-function segmentCommand(segment: string): Readonly<{ literalHead: string; head: string; args: readonly string[] }> {
+type SegmentCommand = Readonly<{ literalHead: string; head: string; args: readonly string[] }>;
+
+function segmentCommand(segment: string): SegmentCommand {
   const analyzed = analyzeCommandHead(segment);
   const resolved = analyzed === null ? null : resolvedInterpreter(analyzed.head, analyzed.args);
   return {
@@ -916,14 +984,11 @@ function segmentCommand(segment: string): Readonly<{ literalHead: string; head: 
 }
 
 function judgeSegment(
-  segment: string,
+  { segment, command: { literalHead, head, args }, executed }: SegmentSite,
   context: SubagentAuthorityContext,
   scope: PathScope,
   depth: number,
 ): SegmentJudgment {
-  const { literalHead, head, args } = segmentCommand(segment);
-
-  const executed = executedPrograms(head, args);
   for (const program of executed.programs) {
     const judged = judgeLine(program, context, scope, depth + 1);
     if (judged !== null) return { kind: "refused", refusal: judged };
@@ -1025,32 +1090,33 @@ function verifyInvocationOf(segment: string, invocation: HelperInvocation | null
 const asFed = (found: readonly SecurityAuditVerifyInvocation[], source: string): readonly SecurityAuditVerifyInvocation[] =>
   found.map((invocation) => ({ kind: "unresolved", segment: invocation.segment, reason: `the invocation is fed to the shell from ${source} at runtime` }));
 
-/** Walk one line the way `judgeLine` does — executed heredoc and substitution
- *  bodies, every pipe-chain segment, the programs a segment executes
- *  (`bash -c`, `eval`, `xargs`, `find -exec`) and the programs it is FED
- *  (scripts, pipes, here-strings, interpreter code) — collecting verify
- *  invocations. */
+/** Fold one parsed line (parseLine — the same structure `judgeLine` folds):
+ *  executed heredoc and substitution bodies, every pipe-chain segment, the
+ *  programs a segment executes (`bash -c`, `eval`, `xargs`, `find -exec`) and
+ *  the programs it is FED (scripts, pipes, here-strings, interpreter code) —
+ *  collecting verify invocations. */
 function collectVerifyInvocations(
   command: string,
   context: SubagentAuthorityContext,
   scope: PathScope,
   depth: number,
 ): readonly SecurityAuditVerifyInvocation[] {
-  if (command.trim() === "") return [];
-  if (depth > MAX_SUBSTITUTION_DEPTH) return [{ kind: "unresolved", segment: command, reason: "nested too deeply to read" }];
-  const heredocs = splitHeredocs(command);
-  const substitutions = scanSubstitutions(heredocs.stripped, () => OPAQUE_OUTPUT);
-  const found: SecurityAuditVerifyInvocation[] = [...heredocs.bodies, ...substitutions.bodies]
+  const line = parseLine(command, depth);
+  if (line.kind === "blank") return [];
+  if (line.kind === "too-deep") return [{ kind: "unresolved", segment: command, reason: "nested too deeply to read" }];
+  const found: SecurityAuditVerifyInvocation[] = line.nestedBodies
     .flatMap((body) => collectVerifyInvocations(body, context, scope, depth + 1));
-  if ((heredocs.unparseable || substitutions.unclosed) && /security-audit/.test(command)) {
+  if (line.unparseable && /security-audit/.test(command)) {
     found.push({ kind: "unresolved", segment: command, reason: "the command cannot be parsed" });
   }
-  for (const chain of pipeChains(substitutions.rebuilt)) {
-    for (const [index, segment] of chain.entries()) {
-      for (const program of fedPrograms(chain, index, scope, context.filesystem)) {
+  // The line's segments run where its `cd`s lead, exactly as `judgeLine` reads them.
+  const lineScope = lineScopeOf(line, scope);
+  for (const chain of line.chains) {
+    for (const { segment, chain: texts, index, command: { head, args }, executed } of chain) {
+      for (const program of fedPrograms(texts, index, lineScope, context.filesystem)) {
         found.push(...match(program)
           .returnType<readonly SecurityAuditVerifyInvocation[]>()
-          .with({ kind: "shell" }, ({ text, source }) => asFed(collectVerifyInvocations(text, context, scope, depth + 1), source))
+          .with({ kind: "shell" }, ({ text, source }) => asFed(collectVerifyInvocations(text, context, lineScope, depth + 1), source))
           .with({ kind: "code" }, ({ text, source }) => /security-audit/.test(text) && /verify/.test(text)
             ? [{ kind: "unresolved", segment, reason: `${source} may import a verification run` }]
             : [])
@@ -1059,8 +1125,7 @@ function collectVerifyInvocations(
             : [])
           .exhaustive());
       }
-      const { head, args } = segmentCommand(segment);
-      for (const program of executedPrograms(head, args).programs) found.push(...collectVerifyInvocations(program, context, scope, depth + 1));
+      for (const program of executed.programs) found.push(...collectVerifyInvocations(program, context, lineScope, depth + 1));
       const invocation = verifyInvocationOf(segment, helperInvocation(context.helperOperations, head, args));
       if (invocation !== null) found.push(invocation);
     }

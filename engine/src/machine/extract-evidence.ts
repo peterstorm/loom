@@ -19,7 +19,7 @@
 
 import { match } from "ts-pattern";
 import { editedFilePath, TEST_COMMAND_PATTERNS } from "../core/tool-vocabulary";
-import { parseSandboxReceipt, sandboxNonceInCommand } from "../core/security-sandbox";
+import { parseSandboxReceipt } from "../core/security-sandbox";
 import type { BashToolOutcome, HarnessToolCall } from "./harness-tool-call-types";
 import {
   hasUnbalancedQuotes,
@@ -29,6 +29,8 @@ import {
   type SegmentOp,
 } from "../core/shell-command";
 import { scanSubstitutions } from "../core/shell-substitution";
+import { headBase, resolvedInterpreter, shellWords, unquote } from "../core/shell-command-head";
+import { SH_FAMILY_HEADS } from "../core/shell-heredoc";
 import { extractShellWriteTargets } from "../core/shell-write-targets";
 import type { Evidence, TestReportSummary } from "./types";
 
@@ -248,13 +250,72 @@ function bashRun(outcome: BashToolOutcome): BashRun {
     .exhaustive();
 }
 
+/** The one executor (ADR-0066), by file name: any path prefix qualifies
+ *  (`scripts/…`, `./scripts/…`, an absolute path), but the name must be the
+ *  whole last path segment, so `my-security-sandbox.sh` is not it. */
+const SANDBOX_SCRIPT = "security-sandbox.sh";
+
+/** The nonce grammar the script and the receipt share. */
+const SANDBOX_NONCE_WORD = /^[0-9a-f]{16,64}$/;
+
 /**
- * The one executor (ADR-0066), named anywhere in a command line. Any path
- * prefix qualifies — `bash scripts/security-sandbox.sh`,
- * `./scripts/security-sandbox.sh`, an absolute path — but the name must be a
- * whole path segment, so `my-security-sandbox.sh` mints nothing.
+ * One invocation of the sandbox script, parsed from ONE simple command: the
+ * script is the command the segment RUNS (its head, behind any wrapper, or the
+ * script argument of a `bash`/`sh` head), and the nonce is that script's own
+ * `--nonce` option, read from the same segment's words before the `--` that
+ * starts the wrapped command. The pairing is the type: there is no way to hold
+ * a nonce that did not come from the invocation that names the script.
+ *
+ * `echo scripts/security-sandbox.sh --nonce …` runs `echo`, so it is no
+ * invocation; a `--nonce` after `--` belongs to the wrapped command; a
+ * missing, repeated or malformed nonce leaves the invocation unbound.
  */
-const SANDBOX_SCRIPT_IN_COMMAND = /(?:^|[\s;&|(])(?:\S*\/)?security-sandbox\.sh(?:$|[\s;&|)])/;
+type SandboxInvocation =
+  | Readonly<{ kind: "bound"; segment: string; script: string; nonce: string }>
+  | Readonly<{ kind: "unbound"; segment: string; script: string }>;
+
+/** The script word a segment runs, and the words after it — or null when the
+ *  segment runs something else. */
+function sandboxScriptCall(words: readonly string[]): Readonly<{ script: string; args: readonly string[] }> | null {
+  const [head, ...rest] = words;
+  if (head === undefined) return null;
+  const resolved = resolvedInterpreter(head, rest);
+  if (resolved === null) return null;
+  if (resolved.head === SANDBOX_SCRIPT) return { script: head, args: resolved.args };
+  if (!SH_FAMILY_HEADS.has(resolved.head)) return null;
+  // `bash [-x …] scripts/security-sandbox.sh …`: the first operand is the script.
+  const at = resolved.args.findIndex((arg) => !unquote(arg).startsWith("-"));
+  const script = at === -1 ? undefined : resolved.args[at];
+  if (script === undefined || resolved.args.slice(0, at).some((arg) => unquote(arg) === "-c")) return null;
+  return headBase(unquote(script)) === SANDBOX_SCRIPT ? { script, args: resolved.args.slice(at + 1) } : null;
+}
+
+/** The script's own `--nonce`, from its option words (every script option
+ *  takes one value; `--` ends them). Null unless exactly one well-formed nonce. */
+function scriptNonce(args: readonly string[]): string | null {
+  const nonces: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    const word = unquote(args[index]!);
+    if (word === "--") break;
+    if (word.startsWith("--nonce=")) nonces.push(unquote(word.slice("--nonce=".length)));
+    else if (word === "--nonce") nonces.push(unquote(args[++index] ?? ""));
+    else if (word.startsWith("--") && !word.includes("=")) index++; // the option's value
+  }
+  return nonces.length === 1 && SANDBOX_NONCE_WORD.test(nonces[0]!) ? nonces[0]! : null;
+}
+
+/** Every sandbox-script invocation a command line makes, one per segment. */
+function sandboxInvocations(command: string): readonly SandboxInvocation[] {
+  return splitCommandSegmentsWithOps(command).flatMap(({ text }): readonly SandboxInvocation[] => {
+    const segment = stripComment(text).trim();
+    const call = sandboxScriptCall(shellWords(stripEnvPrefix(segment)));
+    if (call === null) return [];
+    const nonce = scriptNonce(call.args);
+    return [nonce === null
+      ? { kind: "unbound", segment, script: call.script }
+      : { kind: "bound", segment, script: call.script, nonce }];
+  });
+}
 
 function bashEvidence(
   input: Readonly<Record<string, unknown>>,
@@ -280,27 +341,28 @@ function bashEvidence(
   }
   const run = bashRun(bashOutcome);
   // A sandboxed execution mints its receipt as a fact of its own. The command
-  // must NAME the script and the receipt must parse: a hunter's prose about
-  // reproducing a bug is not evidence, so a script call whose output lost the
-  // receipt mints nothing and its finding stays a lead. An interrupted call is
-  // excluded outright — the harness killed the script, so any receipt in
-  // truncated output describes a run that never finished. The nonce bound into
-  // the call's own argv is required too: without it the receipt is a line of
-  // text the call could have printed itself.
-  if (!run.interrupted && SANDBOX_SCRIPT_IN_COMMAND.test(command)) {
-    const nonce = sandboxNonceInCommand(command);
-    const receipt = nonce === null ? null : parseSandboxReceipt(run.stdout, nonce);
-    if (receipt !== null && receipt.ok) events.push({ kind: "SandboxRun", receipt: receipt.value });
+  // must RUN the script (sandboxInvocations) and the receipt must parse: a
+  // hunter's prose about reproducing a bug is not evidence, so a script call
+  // whose output lost the receipt mints nothing and its finding stays a lead.
+  // An interrupted call is excluded outright — the harness killed the script,
+  // so any receipt in truncated output describes a run that never finished.
+  // The receipt must carry the nonce THAT invocation passed: without it the
+  // receipt is a line of text the call could have printed itself.
+  if (!run.interrupted) {
+    const nonces = new Set(sandboxInvocations(command).flatMap((call) => (call.kind === "bound" ? [call.nonce] : [])));
+    for (const nonce of nonces) {
+      const receipt = parseSandboxReceipt(run.stdout, nonce);
+      if (receipt.ok) events.push({ kind: "SandboxRun", receipt: receipt.value });
+    }
   }
   const classified = classifyTestCommandDetailed(command);
   if (classified !== null) {
-    const outcome = run;
     // The line's exit is attributed to the test segment only when the
     // composition proves ownership (attributeExit) — `false && npx vitest
     // …; true` exits 0 without vitest running, and must not classify as a
     // passing run.
-    const exit = attributeExit(outcome.exit, classified);
-    const report = findReportForSegment(classified.segment, { output: outcome.stdout, exit }, shellWrites);
+    const exit = attributeExit(run.exit, classified);
+    const report = findReportForSegment(classified.segment, { output: run.stdout, exit }, shellWrites);
     //
     // A BACKGROUNDED test segment (`mvn test &`) drops its report too, not
     // just its exit. `judgeTestRun` treats an unknown exit beside a green
@@ -320,7 +382,7 @@ function bashEvidence(
     // so the classes that finished first left a partial-but-green report —
     // and it too arrives here as `exit: null`. Both unfinished cases drop the
     // report; only a run that actually ended may pair one with an exit.
-    const unfinished = classified.isBackgrounded || outcome.interrupted;
+    const unfinished = classified.isBackgrounded || run.interrupted;
     events.push({
       kind: "TestRun",
       command,

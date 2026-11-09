@@ -19,7 +19,7 @@
  */
 
 import type { SecurityRunMetadata } from "./security-audit-contract";
-import { summarizeCoverage, type CoverageLedger } from "./security-coverage";
+import { incompleteReasonSource, summarizeCoverage, type CoverageLedger } from "./security-coverage";
 import { dispositionHandoffPaths, renderDispositionHandoff, securityDisposition } from "./security-disposition";
 import {
   sortByFingerprint,
@@ -60,9 +60,11 @@ const needsValidationOf = (findings: readonly SecurityFinding[]): readonly Needs
 const rejectedOf = (findings: readonly SecurityFinding[]): readonly SecurityFinding[] =>
   sortByFingerprint(findings.filter((finding) => finding.verdict === "rejected"));
 
+/** A diff scope names both refs by construction (the scope is a union), so the
+ *  line never has a placeholder to print. */
 const scopeLine = (metadata: SecurityRunMetadata): string =>
   metadata.scope.kind === "diff"
-    ? `${metadata.scope.baseRef ?? "?"}..${metadata.scope.headRef ?? "?"}`
+    ? `${metadata.scope.baseRef}..${metadata.scope.headRef}`
     : `${metadata.scopePaths.length} path(s)`;
 
 const coverageTable = (ledger: CoverageLedger): string => {
@@ -79,10 +81,18 @@ const coverageTable = (ledger: CoverageLedger): string => {
   ].join("\n");
 };
 
-const incompleteNotice = (metadata: SecurityRunMetadata): string =>
-  metadata.runStatus === "incomplete" && metadata.incompleteReason !== null
-    ? `\n**Run status: incomplete — \`${metadata.incompleteReason}\`.** This is a partial pass: deferred and out-of-scope units are listed below and are not evidence of coverage.\n`
+/** The incomplete-run notice. The token is upstream's closed vocabulary; when no
+ *  deferred unit recorded one, `runStatusOf` reports the class a deferral
+ *  belongs to, and the notice says that token was INFERRED — the deferrals' own
+ *  recorded reasons, listed under "Deferred and out-of-scope units", stay the
+ *  authority on why. */
+const incompleteNotice = (metadata: SecurityRunMetadata, ledger: CoverageLedger): string => {
+  if (metadata.runStatus !== "incomplete" || metadata.incompleteReason === null) return "";
+  const inferred = incompleteReasonSource(ledger) === "inferred"
+    ? " (inferred: no deferred unit recorded an upstream reason; each deferral's own reason is listed below)"
     : "";
+  return `\n**Run status: incomplete — \`${metadata.incompleteReason}\`${inferred}.** This is a partial pass: deferred and out-of-scope units are listed below and are not evidence of coverage.\n`;
+};
 
 const confirmedTable = (confirmed: readonly ConfirmedFinding[], ledger: CoverageLedger): string =>
   confirmed.length === 0
@@ -134,7 +144,7 @@ const deferredSection = (ledger: CoverageLedger): string => {
 };
 
 /** The run's identifying header lines, ending on the incomplete-run notice. */
-const runHeader = (metadata: SecurityRunMetadata): readonly string[] => [
+const runHeader = (metadata: SecurityRunMetadata, ledger: CoverageLedger): readonly string[] => [
   `# Security audit — ${metadata.repo}`,
   "",
   `- Profile: ${metadata.profile}`,
@@ -144,7 +154,7 @@ const runHeader = (metadata: SecurityRunMetadata): readonly string[] => [
   `- Execution policy: ${metadata.executionPolicy}`,
   `- Prior runs read: ${metadata.priorRuns.length === 0 ? "none" : metadata.priorRuns.join(", ")}`,
   `- Selected lenses: ${metadata.selectedCompanions.join(", ") || "ATTACK-CLASSES.md"}`,
-  incompleteNotice(metadata),
+  incompleteNotice(metadata, ledger),
 ];
 
 const hardeningNotes = (hardening: readonly string[] | undefined): string =>
@@ -173,7 +183,7 @@ export function renderReport(input: ReportInput): string {
   const summary = summarizeCoverage(ledger);
 
   return [
-    ...runHeader(metadata),
+    ...runHeader(metadata, ledger),
     "## Security posture",
     "",
     `${confirmed.length} confirmed, ${needsValidation.length} needing validation, ${rejected.length} rejected. ` +
@@ -218,12 +228,9 @@ function handoffSection(input: ReportInput): string {
     findings: input.findings,
   });
   if (!derived.ok) return ["## Disposition handoff", "", derived.error.message].join("\n");
-  // A run with nothing to remediate prints no command; a run with decisions
-  // prints the exact one, against the paths the handler writes.
-  const paths = input.findings.length === 0
-    ? null
-    : dispositionHandoffPaths(input.locator, input.metadata.runId);
-  return renderDispositionHandoff(derived.value, paths);
+  // The paths are always derived; `renderDispositionHandoff` alone decides that
+  // a run with nothing to remediate prints no command.
+  return renderDispositionHandoff(derived.value, dispositionHandoffPaths(input.locator, input.metadata.runId));
 }
 
 /** A trace as the numbered list both detail documents print. */

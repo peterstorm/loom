@@ -24,6 +24,12 @@ export type OrchestrationOperationTraits = Readonly<{
    * failure undiagnosable from inside the session that hit it.
    * `handshake-required`: every other operation, `abandon` included, since its
    * marker is durable and terminal.
+   *
+   * A second reader: the subagent write guard derives "a subagent may run
+   * this" from `available` (`pre-tool-use/subagent-authority-operations.ts`),
+   * because read-only-under-skew and read-only-for-a-subagent are the same fact
+   * today. An operation that must be one but not the other needs an explicit
+   * authority trait here, not a change to the skew policy.
    */
   runtimeSkew: "available" | "handshake-required";
 }>;

@@ -31,6 +31,16 @@
 
 import { resolve, join, extname, dirname, relative } from "node:path";
 import { readdirSync, statSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+// The engine is loaded at runtime from THIS script's own loom installation, and
+// typed from the same modules: a type-only import erases at runtime, so the
+// shapes the script consumes (the baseline owner, the lint result) are the
+// engine's own, checked by the compiler instead of mirrored by hand.
+import type * as LinterIndex from "../engine/src/linter/index.ts";
+import type * as LinterConfig from "../engine/src/linter/programmatic/config.ts";
+import type * as ProgrammaticRules from "../engine/src/linter/programmatic/index.ts";
+import type * as Baselines from "../engine/src/linter/programmatic/baseline.ts";
+import type * as BaselineConfig from "../engine/src/linter/programmatic/baseline-config.ts";
+import type { BaselineOwner } from "../engine/src/linter/programmatic/baseline.ts";
 
 // ---------------------------------------------------------------------------
 // Resolve loom installation
@@ -46,20 +56,12 @@ if (!existsSync(DEFAULT_RULES_DIR)) {
   process.exit(2);
 }
 
-const { lintFile } = await import(join(LOOM_ROOT, "engine/src/linter/index.ts"));
-const { loadProjectConfig, PROJECT_RULES_LAYOUTS } = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/config.ts"));
-const { baselineOwners } = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/index.ts"));
-const { staleBaselineEntries } = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/baseline.ts"));
-
-/** The slice of a baseline owner this script reads (the engine's `BaselineOwner`). */
-type ScriptBaselineOwner = Readonly<{
-  rule: string;
-  configKey: string;
-  extensions: readonly string[];
-  baseline: readonly string[];
-  site: string;
-  detect: (content: string, filePath: string) => readonly string[];
-}>;
+const { lintFile }: typeof LinterIndex = await import(join(LOOM_ROOT, "engine/src/linter/index.ts"));
+const { loadProjectConfig, PROJECT_RULES_LAYOUTS }: typeof LinterConfig = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/config.ts"));
+const { baselineOwners }: typeof ProgrammaticRules = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/index.ts"));
+const { staleBaselineEntries }: typeof Baselines = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/baseline.ts"));
+const { configWithBaselines, recordedBaselines }: typeof BaselineConfig =
+  await import(join(LOOM_ROOT, "engine/src/linter/programmatic/baseline-config.ts"));
 
 // ---------------------------------------------------------------------------
 // Detect project root and harness type
@@ -270,7 +272,7 @@ function parseArgs(args: string[]): CliOpts {
  * config and keyed relative to its root, so the drift report means the same in
  * a target repository as in loom.
  */
-const owners = (): readonly ScriptBaselineOwner[] =>
+const owners = (): readonly BaselineOwner[] =>
   baselineOwners(loadProjectConfig(existsSync(RULES_DIR) ? RULES_DIR : null), PROJECT_ROOT);
 
 function baselineDrift(): string[] {
@@ -279,7 +281,7 @@ function baselineDrift(): string[] {
     return existsSync(absolute) ? readFileSync(absolute, "utf-8") : null;
   };
   return owners().flatMap((owner) =>
-    (staleBaselineEntries(owner, readSource) as readonly string[]).map((key) =>
+    staleBaselineEntries(owner, readSource).map((key) =>
       `${owner.rule}: ${key} (no ${owner.site} matches it any more — delete the baseline entry)`));
 }
 
@@ -288,8 +290,11 @@ function baselineDrift(): string[] {
  * so a project adopts the totality rules without every pre-existing switch
  * blocking the next edit to its file. Written into `config.json` of EVERY
  * harness rules directory the project has (a project used from both harnesses
- * keeps the two in step), creating the file when absent and keeping every
- * other field. An empty list is removed rather than written: no debt.
+ * keeps the two in step), creating the file when absent. Which sites are
+ * recorded and what the next config holds are the engine's pure decision
+ * (`recordedBaselines`, `configWithBaselines`: every other field kept, an
+ * empty list removed rather than written); this shell only walks, reads and
+ * writes.
  *
  * The detectors ignore the current baseline, so a re-run after converting a
  * site drops its entry — the baseline only ever shrinks under this command
@@ -297,15 +302,13 @@ function baselineDrift(): string[] {
  */
 function writeBaseline(): void {
   const projectOwners = owners();
-  const sources = walkSource(PROJECT_ROOT, { includeTests: false });
-  const lists = projectOwners.map((owner) => {
-    const keys = sources
-      .filter((file) => owner.extensions.includes(extname(file)))
-      .flatMap((file) => owner.detect(readFileSync(file, "utf-8"), relative(PROJECT_ROOT, file)));
-    return [owner.configKey, [...keys].sort()] as const;
-  });
+  const extensions = new Set(projectOwners.flatMap((owner) => owner.extensions));
+  const sources = walkSource(PROJECT_ROOT, { includeTests: false })
+    .filter((file) => extensions.has(extname(file)))
+    .map((file) => ({ path: relative(PROJECT_ROOT, file), content: readFileSync(file, "utf-8") }));
+  const recorded = recordedBaselines(projectOwners, sources);
 
-  const harnessDirs = (PROJECT_RULES_LAYOUTS as readonly string[])
+  const harnessDirs = PROJECT_RULES_LAYOUTS
     .map((layout) => join(PROJECT_ROOT, layout))
     .filter((dir) => existsSync(dir));
   const targets = harnessDirs.length > 0 ? harnessDirs : [RULES_DIR];
@@ -316,13 +319,8 @@ function writeBaseline(): void {
     // exactly as it would fail the hook, instead of being silently rewritten.
     loadProjectConfig(dir);
     const existing: Record<string, unknown> = existsSync(path) ? JSON.parse(readFileSync(path, "utf-8")) : {};
-    const next: Record<string, unknown> = { ...existing };
-    for (const [key, keys] of lists) {
-      if (keys.length === 0) delete next[key];
-      else next[key] = keys;
-    }
-    writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`);
-    console.log(`✓ ${relative(PROJECT_ROOT, path)}: ${lists.map(([key, keys]) => `${key} ${keys.length}`).join(", ")}`);
+    writeFileSync(path, `${JSON.stringify(configWithBaselines(existing, recorded), null, 2)}\n`);
+    console.log(`✓ ${relative(PROJECT_ROOT, path)}: ${recorded.map(({ configKey, keys }) => `${configKey} ${keys.length}`).join(", ")}`);
   }
 }
 

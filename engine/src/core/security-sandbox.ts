@@ -29,6 +29,7 @@
 
 import { failure, success, type DomainResult } from "./orchestration-contract/identity";
 import { SECURITY_AUDIT_LIMITS, isSafeSourcePath, isVisibleText, isWireRecord } from "./security-audit-contract";
+import { quoteShellArgument } from "./shell-quoting";
 
 /** The exact environment names a sandboxed child receives, in the order the
  *  script's `ENV_ASSIGNMENTS` passes them. Everything else is dropped, so an
@@ -83,15 +84,14 @@ export function parseSandboxLimits(raw: unknown): DomainResult<SandboxLimits, Sa
   if (!isWireRecord(raw)) {
     return failure({ kind: "invalid-sandbox-limits" as const, message: "limits must be an object" });
   }
-  const record = raw;
-  const keys = Object.keys(record);
+  const keys = Object.keys(raw);
   const unexpected = keys.filter((key) => !LIMIT_KEYS.includes(key as keyof SandboxLimits));
   if (unexpected.length > 0) {
     return failure({ kind: "invalid-sandbox-limits" as const, message: `unexpected limit(s): ${unexpected.join(", ")}` });
   }
   const limits: Partial<Record<keyof SandboxLimits, number>> = {};
   for (const key of LIMIT_KEYS) {
-    const value = record[key];
+    const value = raw[key];
     if (typeof value !== "number" || !Number.isInteger(value) || value < LIMIT_FLOORS[key] || value > SANDBOX_LIMIT_CEILINGS[key]) {
       return failure({ kind: "invalid-sandbox-limits" as const, message: `${key} must be an integer in [${LIMIT_FLOORS[key]}, ${SANDBOX_LIMIT_CEILINGS[key]}]` });
     }
@@ -138,14 +138,6 @@ function fnv1a32(text: string): number {
   return hash >>> 0;
 }
 
-/** The nonce a bash call bound into its own receipt, read back from its argv: a
- *  receipt whose marker does not carry the nonce of the call that produced it is
- *  text, not evidence. */
-export function sandboxNonceInCommand(command: string): string | null {
-  const bound = /--nonce[ =]+["']?([0-9a-f]{16,64})["']?/.exec(command);
-  return bound === null ? null : bound[1];
-}
-
 export type SandboxEnforcement = Readonly<{
   cpu: boolean;
   memory: boolean;
@@ -162,6 +154,11 @@ export type SandboxReceipt = Readonly<{
   /** Measured AFTER the run; nothing capped the scratch while it ran. */
   scratchBytes: number | null;
   networkNamespace: true;
+  /** Whether loopback came up inside the network namespace — OBSERVED by the
+   *  script before the command starts. Recorded, not gated: no external network
+   *  holds either way, but a dead loopback makes the command's own local-service
+   *  checks fail, and the receipt says why instead of reading as a healthy run. */
+  loopbackUp: boolean;
   /** A write to the target FAILED inside the sandbox — observed by the script,
    *  which reports it only on a facts line printed after that probe; a missing
    *  line reads as `false`. Gated: a writable target is not a bounded run. */
@@ -182,7 +179,7 @@ export type SandboxReceipt = Readonly<{
 }>;
 
 const RECEIPT_KEYS = [
-  "schemaVersion", "exit", "limits", "allowlistedEnv", "scratchBytes", "networkNamespace", "targetReadOnly",
+  "schemaVersion", "exit", "limits", "allowlistedEnv", "scratchBytes", "networkNamespace", "loopbackUp", "targetReadOnly",
   "readOnlyRoot", "homeReadOnly", "unremountedMounts", "enforced",
 ] as const;
 const ENFORCEMENT_KEYS = ["cpu", "memory", "processes", "fileSize"] as const;
@@ -193,17 +190,16 @@ export function parseSandboxReceiptValue(raw: unknown): DomainResult<SandboxRece
   const invalid = (message: string): DomainResult<SandboxReceipt, SandboxError> =>
     failure({ kind: "invalid-sandbox-receipt" as const, message });
   if (!isWireRecord(raw)) return invalid("receipt must be an object");
-  const record = raw;
-  const unexpected = Object.keys(record).filter((key) => !RECEIPT_KEYS.includes(key as (typeof RECEIPT_KEYS)[number]));
+  const unexpected = Object.keys(raw).filter((key) => !RECEIPT_KEYS.includes(key as (typeof RECEIPT_KEYS)[number]));
   if (unexpected.length > 0) return invalid(`unexpected field(s): ${unexpected.join(", ")}`);
-  if (record.schemaVersion !== 1) return invalid("schemaVersion must be 1");
-  const exit = record.exit;
+  if (raw.schemaVersion !== 1) return invalid("schemaVersion must be 1");
+  const exit = raw.exit;
   if (exit !== null && (typeof exit !== "number" || !Number.isInteger(exit) || exit < 0 || exit > 255)) {
     return invalid("exit must be null or an integer in [0, 255]");
   }
-  const limits = parseSandboxLimits(record.limits);
+  const limits = parseSandboxLimits(raw.limits);
   if (!limits.ok) return invalid(limits.error.message);
-  const allowlistedEnv = record.allowlistedEnv;
+  const allowlistedEnv = raw.allowlistedEnv;
   if (
     !Array.isArray(allowlistedEnv) ||
     allowlistedEnv.length !== SANDBOX_ENV_ALLOWLIST.length ||
@@ -211,19 +207,17 @@ export function parseSandboxReceiptValue(raw: unknown): DomainResult<SandboxRece
   ) {
     return invalid(`allowlistedEnv must be exactly [${SANDBOX_ENV_ALLOWLIST.join(", ")}]`);
   }
-  const scratchBytes = record.scratchBytes;
+  const scratchBytes = raw.scratchBytes;
   if (scratchBytes !== null && (typeof scratchBytes !== "number" || !Number.isInteger(scratchBytes) || scratchBytes < 0)) {
     return invalid("scratchBytes must be null or a non-negative integer");
   }
-  if (record.networkNamespace !== true) return invalid("networkNamespace must be true");
-  if (typeof record.targetReadOnly !== "boolean") return invalid("targetReadOnly must be a boolean");
-  if (typeof record.readOnlyRoot !== "boolean") return invalid("readOnlyRoot must be a boolean");
-  if (typeof record.homeReadOnly !== "boolean") return invalid("homeReadOnly must be a boolean");
-  const unremountedMounts = record.unremountedMounts;
+  const isolation = parseIsolationFacts(raw);
+  if ("message" in isolation) return invalid(isolation.message);
+  const unremountedMounts = raw.unremountedMounts;
   if (typeof unremountedMounts !== "number" || !Number.isInteger(unremountedMounts) || unremountedMounts < 0) {
     return invalid("unremountedMounts must be a non-negative integer");
   }
-  const enforced = parseEnforcement(record.enforced);
+  const enforced = parseEnforcement(raw.enforced);
   if ("message" in enforced) return invalid(enforced.message);
   return success(
     Object.freeze({
@@ -233,13 +227,26 @@ export function parseSandboxReceiptValue(raw: unknown): DomainResult<SandboxRece
       allowlistedEnv: SANDBOX_ENV_ALLOWLIST,
       scratchBytes: scratchBytes as number | null,
       networkNamespace: true as const,
-      targetReadOnly: record.targetReadOnly,
-      readOnlyRoot: record.readOnlyRoot,
-      homeReadOnly: record.homeReadOnly,
+      ...isolation,
       unremountedMounts,
       enforced: Object.freeze(enforced),
     }),
   );
+}
+
+/** The isolation facts the script observed: the network namespace (always
+ *  true — a receipt claiming otherwise is refused), whether loopback came up,
+ *  and which surfaces a write to failed. Each is a strict boolean. */
+function parseIsolationFacts(
+  raw: Readonly<Record<string, unknown>>,
+): Pick<SandboxReceipt, "loopbackUp" | "targetReadOnly" | "readOnlyRoot" | "homeReadOnly"> | Readonly<{ message: string }> {
+  const { networkNamespace, loopbackUp, targetReadOnly, readOnlyRoot, homeReadOnly } = raw;
+  if (networkNamespace !== true) return { message: "networkNamespace must be true" };
+  if (typeof loopbackUp !== "boolean") return { message: "loopbackUp must be a boolean" };
+  if (typeof targetReadOnly !== "boolean") return { message: "targetReadOnly must be a boolean" };
+  if (typeof readOnlyRoot !== "boolean") return { message: "readOnlyRoot must be a boolean" };
+  if (typeof homeReadOnly !== "boolean") return { message: "homeReadOnly must be a boolean" };
+  return { loopbackUp, targetReadOnly, readOnlyRoot, homeReadOnly };
 }
 
 /** Which limits the kernel actually applied. Strict like every other block: an
@@ -247,16 +254,15 @@ export function parseSandboxReceiptValue(raw: unknown): DomainResult<SandboxRece
  *  this block is the difference between "bounded" and "claimed bounded". */
 function parseEnforcement(raw: unknown): SandboxEnforcement | Readonly<{ message: string }> {
   if (!isWireRecord(raw)) return { message: "enforced must be an object" };
-  const record = raw;
-  const unexpected = Object.keys(record).filter((key) => !ENFORCEMENT_KEYS.includes(key as (typeof ENFORCEMENT_KEYS)[number]));
+  const unexpected = Object.keys(raw).filter((key) => !ENFORCEMENT_KEYS.includes(key as (typeof ENFORCEMENT_KEYS)[number]));
   if (unexpected.length > 0) return { message: `unexpected enforced field(s): ${unexpected.join(", ")}` };
-  const missing = ENFORCEMENT_KEYS.find((key) => typeof record[key] !== "boolean");
+  const missing = ENFORCEMENT_KEYS.find((key) => typeof raw[key] !== "boolean");
   if (missing !== undefined) return { message: `enforced.${missing} must be a boolean` };
   return {
-    cpu: record.cpu as boolean,
-    memory: record.memory as boolean,
-    processes: record.processes as boolean,
-    fileSize: record.fileSize as boolean,
+    cpu: raw.cpu as boolean,
+    memory: raw.memory as boolean,
+    processes: raw.processes as boolean,
+    fileSize: raw.fileSize as boolean,
   };
 }
 
@@ -303,6 +309,38 @@ export type SandboxRequestError = Readonly<{ kind: "invalid-sandbox-request"; me
 const liesWithin = (path: string, directory: string): boolean =>
   path === directory || path.startsWith(`${directory.replace(/\/$/, "")}/`);
 
+/** The script and every flag of one sandbox run, before `--` and the command:
+ *  the one argv grammar `sandboxCommand` validates and `renderSandboxInstructions`
+ *  prints, so the two cannot name different flags. */
+function sandboxInvocation(
+  run: Readonly<{ target: string; scratch: string; limits: SandboxLimits; nonce?: string }>,
+): readonly string[] {
+  return [
+    "scripts/security-sandbox.sh",
+    "--target", run.target,
+    "--scratch", run.scratch,
+    "--cpu", String(run.limits.cpuSeconds),
+    "--mem-mb", String(run.limits.addressSpaceMb),
+    "--procs", String(run.limits.processes),
+    "--file-mb", String(run.limits.fileSizeMb),
+    "--wall", String(run.limits.wallClockSeconds),
+    "--scratch-mb", String(run.limits.scratchMb),
+    ...(run.nonce === undefined ? [] : ["--nonce", run.nonce]),
+  ];
+}
+
+/** A word sh reads back unchanged without quoting: no whitespace, quote, glob,
+ *  expansion, redirection or control character (shlex's safe set). */
+const BARE_SHELL_WORD = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+/** An argv as one shell line that reads back as exactly that argv: a word in
+ *  the bare-safe set is printed as itself (so the script path and the hex nonce
+ *  stay the literals the evidence extractor recognises), and every other word —
+ *  a path with a space or a metacharacter, an empty word — goes through
+ *  `quoteShellArgument`. The one renderer of a printed sandbox command. */
+export const renderShellWords = (argv: readonly string[]): string =>
+  argv.map((word) => (BARE_SHELL_WORD.test(word) ? word : quoteShellArgument(word))).join(" ");
+
 /**
  * The argv a hunter runs. Scratch must sit outside the target (a scratch inside
  * the target would be remounted read-only with it), and the command may not be
@@ -328,28 +366,7 @@ export function sandboxCommand(request: SandboxRequest): DomainResult<readonly s
     return fail("nonce must be 16-64 lowercase hex characters");
   }
 
-  return success([
-    "scripts/security-sandbox.sh",
-    "--target",
-    request.target,
-    "--scratch",
-    request.scratch,
-    "--cpu",
-    String(request.limits.cpuSeconds),
-    "--mem-mb",
-    String(request.limits.addressSpaceMb),
-    "--procs",
-    String(request.limits.processes),
-    "--file-mb",
-    String(request.limits.fileSizeMb),
-    "--wall",
-    String(request.limits.wallClockSeconds),
-    "--scratch-mb",
-    String(request.limits.scratchMb),
-    ...(request.nonce === undefined ? [] : ["--nonce", request.nonce]),
-    "--",
-    ...request.command,
-  ]);
+  return success([...sandboxInvocation(request), "--", ...request.command]);
 }
 
 /** A receipt proves the sandbox ran; it does not prove the run stayed inside its
@@ -480,16 +497,17 @@ export function bindSandboxRun(placement: SandboxPlacement): DomainResult<Sandbo
 /** The block a hunter is handed verbatim: what it may run and how, bound to one
  *  artifact. The nonce is supplied by the engine because the receipt is bound to
  *  the artifact path, and a receipt in any other file, or without the nonce, is
- *  refused. */
+ *  refused. Every path in the commands is one shell-quoted word
+ *  (`renderShellWords`), and the sandbox line IS `sandboxCommand`'s argv up to
+ *  `--`, so a run directory or target with a space or a metacharacter runs
+ *  exactly as printed and the receipt lands in the bound file. */
 export function renderSandboxInstructions(limits: SandboxLimits, binding: SandboxBinding): string {
   const artifactDirectory = binding.artifactFile.slice(0, binding.artifactFile.lastIndexOf("/"));
+  const invocation = sandboxInvocation({ target: binding.target, scratch: binding.scratch, limits, nonce: binding.nonce });
   return [
     "Bounded local execution (the only way to claim an observed result):",
-    `  mkdir -p ${artifactDirectory}`,
-    `  scripts/security-sandbox.sh --target ${binding.target} --scratch ${binding.scratch} \\`,
-    `    --cpu ${limits.cpuSeconds} --mem-mb ${limits.addressSpaceMb} --procs ${limits.processes} \\`,
-    `    --file-mb ${limits.fileSizeMb} --wall ${limits.wallClockSeconds} --scratch-mb ${limits.scratchMb} \\`,
-    `    --nonce ${binding.nonce} -- <command> [args...] > ${binding.artifactFile}`,
+    `  ${renderShellWords(["mkdir", "-p", artifactDirectory])}`,
+    `  ${renderShellWords(invocation)} -- <command> [args...] > ${renderShellWords([binding.artifactFile])}`,
     "No external network, no writable target or home, no inherited environment, no dependency installation.",
     `Redirect the script's stdout to exactly ${binding.artifactFile} and cite it as the local check's artifact ` +
       `"${binding.artifact}". The receipt is bound to that path: a receipt in any other file, or without that --nonce, is refused.`,

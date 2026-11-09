@@ -84,8 +84,9 @@ describe("lens selection", () => {
       languages: ["ts", "tsx"],
       manifests: ["package.json"],
       servesHttp: true,
-      // Server-rendered: a `tsx` file alone would tie CLIENT-SIDE with AI at 4,
-      // and the declaration order would then pick CLIENT-SIDE.
+      // Server-rendered: with `rendersClientSide` false a `tsx` file scores
+      // CLIENT-SIDE 1, below AI at 4. Were it true (3 + 1) the two would tie at
+      // 4, and declaration order would then pick CLIENT-SIDE.
       rendersClientSide: false,
       drivesModelsOrTools: true,
       isolatesTenants: true,
@@ -106,11 +107,35 @@ describe("lens selection", () => {
   });
 
   it("breaks a score tie by declaration order, never by filename", () => {
-    // Three lenses tie at score 1 from one manifest. Declaration order is
-    // WEB-PROTOCOL (1), SUPPLY-CHAIN (5), DATA-ISOLATION (9); filename order
-    // would pick DATA-ISOLATION first. A one-lens budget shows which rule won.
-    const selection = selectSecurityLenses(aSignals({ manifests: ["package.json"] }), { maxLenses: 2 });
-    expect(selection.included.map((entry) => entry.lens)).toEqual(["ATTACK-CLASSES.md", "WEB-PROTOCOL-AND-AUTH.md"]);
+    // SUPPLY-CHAIN and CLOUD tie at 3. Declaration order puts SUPPLY-CHAIN (5)
+    // before CLOUD (6); filename order would pick CLOUD first. A two-lens budget
+    // (the base lens plus one companion) shows which rule won.
+    const selection = selectSecurityLenses(aSignals({ hasReleasePipelines: true, deploysInfrastructure: true }), { maxLenses: 2 });
+    expect(selection.included.map((entry) => entry.lens)).toEqual(["ATTACK-CLASSES.md", "SUPPLY-CHAIN-AND-RELEASE.md"]);
+  });
+
+  it("credits a manifest only with what it establishes: a dependency manifest raises the supply chain, nothing else", () => {
+    // A bare `package.json` names dependencies — not an HTTP surface, not a
+    // persistence dependency — so neither the web nor the data-isolation lens
+    // may claim it, and the printed reason says exactly what was seen.
+    const manifestOnly = selectSecurityLenses(aSignals({ manifests: ["package.json"] }), STANDARD);
+    expect(manifestOnly.included.map((entry) => [entry.lens, entry.reasons])).toEqual([
+      ["ATTACK-CLASSES.md", ["core class list; always included"]],
+      ["SUPPLY-CHAIN-AND-RELEASE.md", ["a dependency manifest is present"]],
+    ]);
+    // A manifest named by its repository path counts by its basename.
+    expect(selectSecurityLenses(aSignals({ manifests: ["services/api/Cargo.toml"] }), STANDARD).included.map((entry) => entry.lens))
+      .toContain("SUPPLY-CHAIN-AND-RELEASE.md");
+    // A config file that declares no dependencies raises nothing.
+    expect(selectSecurityLenses(aSignals({ manifests: ["Chart.yaml", "tsconfig.json"] }), STANDARD).included.map((entry) => entry.lens))
+      .toEqual(["ATTACK-CLASSES.md"]);
+  });
+
+  it("names, in each exclusion for want of a signal, every signal that WAS present", () => {
+    const selection = selectSecurityLenses(aSignals({ manifests: ["Chart.yaml"], servesHttp: true }), STANDARD);
+    expect(selection.excluded.find((entry) => entry.lens === "AI-AND-LLM.md")?.reason).toBe("no matching signal (manifests, servesHttp)");
+    expect(selectSecurityLenses(aSignals(), STANDARD).excluded.find((entry) => entry.lens === "AI-AND-LLM.md")?.reason)
+      .toBe("no matching signal (none detected)");
   });
 
   it("counts the base lens against the profile's budget", () => {

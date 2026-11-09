@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { expandBraces, guardStateFileDecision } from "../../src/core/guard-state-file";
+import { guardStateFileDecision } from "../../src/core/guard-state-file";
+import { expandBraces } from "../../src/core/shell-match-views";
 import { MODERN_BASH } from "../fixtures/modern-bash";
 
 const guardDecision = (command: string): "allow" | "block" =>

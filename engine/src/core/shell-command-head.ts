@@ -45,19 +45,33 @@ export function unquote(token: string): string {
 }
 
 /**
- * Is the segment's head token a command that cannot write a file? Exact-token
+ * The command NAME one head word resolves to: one layer of surrounding quotes
+ * stripped, then backslash escapes removed. The one word-to-name rule every
+ * head judgment in this module applies (analyzeCommandHead and hasReadOnlyHead).
+ */
+const commandName = (word: string): string => unescapeCommandWord(unquote(word));
+
+/**
+ * Is the segment's head a command that cannot write a file? Exact-name
  * membership (no basename resolution — `./cat` must not inherit `cat`'s
  * trust), after env-prefix stripping so `CI=1 jq …` matches. A pure
  * assignment (`F=active_task_graph.json`) strips to an empty head and
  * therefore fails the check: binding a guarded path to a variable is the
  * seed of every cross-segment indirection, and a read never needs it.
+ *
+ * The head is the segment's LITERAL first shell word, resolved to a name by
+ * the same rule analyzeCommandHead applies (commandName), so an escaped read
+ * (`\cat`) is judged as the command bash runs. It deliberately does NOT walk
+ * past compound syntax the way analyzeCommandHead does: that walker
+ * over-resolves on purpose (finding MORE interpreters is its fail-closed
+ * direction), and an allowlist must under-resolve. Skipping a function-
+ * definition prefix would read `cat() { rm <state>` — a definition whose body
+ * is the write — as a `cat` read; skipping `(`/`{`/`!` would trust what the
+ * compound wraps. Any such head is simply not read-only.
  */
 export function hasReadOnlyHead(segment: string): boolean {
-  const tokens = stripEnvPrefix(segment)
-    .split(/\s+/)
-    .filter((t) => t !== "")
-    .map(unquote);
-  return READ_ONLY_STATE_COMMANDS.has(tokens[0] ?? "");
+  const head = shellWords(stripEnvPrefix(segment))[0];
+  return head !== undefined && READ_ONLY_STATE_COMMANDS.has(commandName(head));
 }
 
 /**
@@ -164,7 +178,9 @@ const WRAPPER_HEADS = new Set([
  *  judged opaque DATA instead of a script — the fail-open direction this
  *  guard exists to close (round-3 reviewer, upheld by the refutation panel).
  *  Boolean flags instead take the plain flag-skip below, leaving the
- *  wrapped command to be resolved as usual. */
+ *  wrapped command to be resolved as usual. A wrapper with no value-taking
+ *  option (`command`, `builtin`, `setsid`, `nohup`) has no row: WRAPPER_HEADS
+ *  is the closed set of wrappers, and a missing row means "consumes nothing". */
 const WRAPPER_FLAG_ARGS: Readonly<Record<string, readonly string[]>> = {
   sudo: ["-u", "-g", "-C", "-p", "-T", "-R", "-r", "-D"],
   timeout: ["-s", "-k", "--signal", "--kill-after"],
@@ -176,10 +192,6 @@ const WRAPPER_FLAG_ARGS: Readonly<Record<string, readonly string[]>> = {
   watch: ["-n"],
   exec: ["-a", "-c"],
   env: ["-u", "--unset", "-C", "--chdir", "--argv0", "-S", "--split-string"],
-  command: [],
-  builtin: [],
-  setsid: [],
-  nohup: [],
   // `time -p cmd` (bash keyword and /usr/bin/time): `-f`/`-o` take a value.
   time: ["-f", "--format", "-o", "--output"],
 };
@@ -218,7 +230,7 @@ function unwrapWrapper(tokens: readonly string[]): readonly string[] | null {
 
 /** Resolve a simple command's head through the wrapper chain to the
  *  interpreter it actually runs, or null when the chain does not land on a
- *  recognized head. Same unwrap used by headExecutesStdinVerdict — exposed
+ *  recognized head. Same unwrap the heredoc stdin verdicts use — exposed
  *  so the inline-program checks (`inlineProgramArg`, variable detection,
  *  stdin-inheritance recursion) apply to the RESOLVED interpreter rather
  *  than the wrapper that merely fronted it (`sudo bash -c 'sh'`,
@@ -281,34 +293,38 @@ export function shellWords(text: string): readonly string[] {
   return words;
 }
 
-/** Quote-aware word split of one simple-command slice; `(`/`)`/`{`/`}` are
- *  standalone tokens so compound syntax never hides a head. */
-function commandWords(text: string): string[] {
+/**
+ * Quote-aware word split of one simple-command slice for HEAD resolution:
+ * unquoted `(`/`)`/`{`/`}` are standalone tokens so compound syntax never
+ * hides a head (`(bash`, `{ sh`). Quoted regions and escape pairs stay inside
+ * their word, verbatim.
+ *
+ * Why two tokenizers on the one quote scan: shellWords models what a word
+ * EXPANDS to, so a `${…}` span with its braces must stay one word
+ * (`${RUN}/ledger.json`); commandWords models which word is a COMMAND, so a
+ * brace or paren must split even when fused (`{bash`), and `${` gets no
+ * special treatment — a head never starts with a parameter span the guard
+ * could model anyway. Same quote alphabet and escape rule (scanUnquoted);
+ * different cut points.
+ */
+export function commandWords(text: string): readonly string[] {
   const words: string[] = [];
-  let current = "";
-  let quote: '"' | "'" | "`" | null = null;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]!;
-    if (quote !== null) {
-      if (quote !== "'" && c === "\\") { current += c + (text[i + 1] ?? ""); i++; continue; }
-      if (c === quote) quote = null;
-      current += c;
-      continue;
+  let start = 0;
+  const cut = (end: number): void => {
+    if (end > start) words.push(text.slice(start, end));
+  };
+  scanUnquoted<never>(text, 0, (char, index) => {
+    if (/\s/.test(char)) {
+      cut(index);
+      start = index + 1;
+    } else if (char === "(" || char === ")" || char === "{" || char === "}") {
+      cut(index);
+      words.push(char);
+      start = index + 1;
     }
-    if (c === "\\") { current += c + (text[i + 1] ?? ""); i++; continue; }
-    if (c === '"' || c === "'" || c === "`") { quote = c; current += c; continue; }
-    if (c === "(" || c === ")" || c === "{" || c === "}") {
-      if (current !== "") { words.push(current); current = ""; }
-      words.push(c);
-      continue;
-    }
-    if (/\s/.test(c)) {
-      if (current !== "") { words.push(current); current = ""; }
-      continue;
-    }
-    current += c;
-  }
-  if (current !== "") words.push(current);
+    return CONTINUE;
+  });
+  cut(text.length);
   return words;
 }
 
@@ -344,22 +360,9 @@ export function splitFusedRedirect(word: string): { readonly head: string; reado
   return null;
 }
 
-/** The head token (and remaining argument tokens) of a simple-command
- *  slice, after comments, env assignments, compound keywords, `case`
- *  words/patterns, and `name()` function-definition prefixes are stripped.
- *  Redirect operators (and their targets/delimiters) are removed from the
- *  args so `<< 'EOF'` never reads as a script-file argument; fused
- *  redirects (`3>file`, `2>&1`, `<<'EOF'`) are dropped whole. A redirect
- *  FUSED INTO the head word (`bash<<'EOF'`) or standing before it
- *  (`2>/dev/null bash<<'EOF'`) is split off so the interpreter resolves
- *  (review finding F1); compound-closing `)`/`}` words are syntax, never
- *  interpreter arguments, and are dropped (F2); `case` patterns — a word
- *  immediately followed by a standalone `)` that has a real word after it —
- *  are skipped with their `)` (F3), while a `)` followed only by redirects
- *  stays a subshell close and does NOT consume its word as a pattern.
- *  `(( … ))` arithmetic is not a command and yields null. Null when
- *  nothing but syntax remains. */
+/** A word that is ONLY a redirect operator; its target/delimiter is the next word. */
 const PURE_REDIRECT = /^(?:[0-9]*[<>]{1,2}|<<<|&>+|<<-|<>)$/;
+/** A word that is a redirect fused with its target (`3>file`, `2>&1`, `<<'EOF'`). */
 const FUSED_REDIRECT = /^(?:[0-9]+[<>]|[<>]|&>)[^\s]*$/;
 
 /** Argument words after the head: redirect operators and their
@@ -378,6 +381,21 @@ function commandArgs(words: readonly string[], from: number): readonly string[] 
   return args;
 }
 
+/** The head token (and remaining argument tokens) of a simple-command
+ *  slice, after comments, env assignments, compound keywords, `case`
+ *  words/patterns, and `name()` function-definition prefixes are stripped.
+ *  Redirect operators (and their targets/delimiters) are removed from the
+ *  args so `<< 'EOF'` never reads as a script-file argument; fused
+ *  redirects (`3>file`, `2>&1`, `<<'EOF'`) are dropped whole. A redirect
+ *  FUSED INTO the head word (`bash<<'EOF'`) or standing before it
+ *  (`2>/dev/null bash<<'EOF'`) is split off so the interpreter resolves
+ *  (review finding F1); compound-closing `)`/`}` words are syntax, never
+ *  interpreter arguments, and are dropped (F2); `case` patterns — a word
+ *  immediately followed by a standalone `)` that has a real word after it —
+ *  are skipped with their `)` (F3), while a `)` followed only by redirects
+ *  stays a subshell close and does NOT consume its word as a pattern.
+ *  `(( … ))` arithmetic is not a command and yields null. Null when
+ *  nothing but syntax remains. */
 export function analyzeCommandHead(segment: string): { head: string; args: readonly string[] } | null {
   const stripped = stripEnvPrefix(stripComment(segment).trim());
   if (stripped === "") return null;
@@ -417,10 +435,10 @@ export function analyzeCommandHead(segment: string): { head: string; args: reado
     const split = splitFusedRedirect(raw);
     if (split !== null) {
       if (split.head === "" || /^[0-9]+$/.test(split.head)) { i++; continue; }
-      return { head: unescapeCommandWord(unquote(split.head)), args: commandArgs(words, i + 1) };
+      return { head: commandName(split.head), args: commandArgs(words, i + 1) };
     }
     break;
   }
   if (i >= words.length) return null;
-  return { head: unescapeCommandWord(unquote(words[i]!)), args: commandArgs(words, i + 1) };
+  return { head: commandName(words[i]!), args: commandArgs(words, i + 1) };
 }

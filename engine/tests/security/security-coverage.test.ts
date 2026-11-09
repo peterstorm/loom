@@ -27,6 +27,7 @@ import {
   coverageComplete,
   coverageSettled,
   deferPlannedUnits,
+  incompleteReasonSource,
   mergeCritic,
   parseCoverageSeeds,
   parseCriticResult,
@@ -34,6 +35,7 @@ import {
   parseOwnedArtifactPath,
   parseUnitResults,
   recordUnitResult,
+  runStatusOf,
   seedCoverageUnit,
   sortLedger,
   summarizeCoverage,
@@ -44,7 +46,7 @@ import {
   type CoverageUnit,
 } from "../../src/core/security-coverage";
 import type { DomainResult } from "../../src/core/orchestration-contract/identity";
-import { HUNTER_ENVELOPE, aConfirmedFinding, aSeed, aUnitResult, ok } from "./fixtures";
+import { HUNTER_ENVELOPE, aConfirmedFinding, aRefs, aSeed, aUnitResult, ok } from "./fixtures";
 
 const require = createRequire(import.meta.url);
 const FIXTURES = join(import.meta.dirname, "..", "fixtures", "security", "upstream");
@@ -71,24 +73,21 @@ const STRICTER_THAN_UPSTREAM: readonly string[] = [
   "semantic fields disagree with refs",
 ];
 
-const seed = (overrides: Partial<Parameters<typeof seedCoverageUnit>[0]> = {}) => {
-  const seeded = seedCoverageUnit({
-    refs: {
+const seed = (overrides: Partial<Parameters<typeof seedCoverageUnit>[0]> = {}) =>
+  ok(seedCoverageUnit({
+    refs: aRefs({
       surface: "http:GET /reports/:id",
       boundary: "tenant isolation",
       subsystem: "reporting",
       attack_class: "cache-key-poisoning",
-    },
+    }),
     starting_paths: ["src/reports/controller.ts"],
     ordinary_attack_class_block: "ATTACK-CLASSES.md#access-control",
     selected_companion_blocks: ["DATA-ISOLATION-AND-LIFECYCLE.md#tenant-and-object-isolation"],
     excluded_blocks: [{ block: "CLIENT-SIDE.md#dom", reason: "no browser surface" }],
     prior: null,
     ...overrides,
-  });
-  if (!seeded.ok) throw new Error(JSON.stringify(seeded.error));
-  return seeded.value;
-};
+  }));
 
 const evidence = (agentId: string, fingerprint: string) => ({
   agentId,
@@ -111,17 +110,11 @@ const evidence = (agentId: string, fingerprint: string) => ({
  *  reassigned one under the owner id the ledger mints from it. */
 const HUNTER = "security-hunter-agent";
 
-const assigned = (ledger: CoverageLedger, coverageId: string, agentId: string, wave = 1): CoverageLedger => {
-  const result = assignUnits(ledger, [{ coverageId, agentId, wave }]);
-  if (!result.ok) throw new Error(JSON.stringify(result.error));
-  return result.value.ledger;
-};
+const assigned = (ledger: CoverageLedger, coverageId: string, agentId: string, wave = 1): CoverageLedger =>
+  ok(assignUnits(ledger, [{ coverageId, agentId, wave }])).ledger;
 
-const settled = (ledger: CoverageLedger, coverageId: string, agentId: string, fingerprint: string, wave = 1): CoverageLedger => {
-  const result = recordUnitResult(ledger, { coverageId, ...evidence(agentId, fingerprint), wave });
-  if (!result.ok) throw new Error(JSON.stringify(result.error));
-  return result.value;
-};
+const settled = (ledger: CoverageLedger, coverageId: string, agentId: string, fingerprint: string, wave = 1): CoverageLedger =>
+  ok(recordUnitResult(ledger, { coverageId, ...evidence(agentId, fingerprint), wave }));
 
 describe("coverage ledger: TS port vs upstream validator", () => {
   it("agrees on constructor-built canonical ledgers", () => {
@@ -138,16 +131,15 @@ describe("coverage ledger: TS port vs upstream validator", () => {
     expect(oursValid(candidate)).toBe(true);
     expect(upstreamValid(candidate)).toBe(true);
 
-    const reassigned = mergeCritic(
+    const reassigned = ok(mergeCritic(
       candidate,
       { missingUnits: [], reassignIds: [unit.coverage_id], resolvedPriorLeads: [], stop: false },
       { wave: 2, reassignmentReasons: { [unit.coverage_id]: "critic: the cache path was not followed" } },
-    );
-    if (!reassigned.ok) throw new Error(JSON.stringify(reassigned.error));
-    expect(oursValid(reassigned.value.ledger)).toBe(true);
-    expect(upstreamValid(reassigned.value.ledger)).toBe(true);
+    ));
+    expect(oursValid(reassigned.ledger)).toBe(true);
+    expect(upstreamValid(reassigned.ledger)).toBe(true);
 
-    const secondPass = settled(assigned(reassigned.value.ledger, unit.coverage_id, HUNTER, 2), unit.coverage_id, `${HUNTER}--2`, "tenant-scope/cache-key", 2);
+    const secondPass = settled(assigned(reassigned.ledger, unit.coverage_id, HUNTER, 2), unit.coverage_id, `${HUNTER}--2`, "tenant-scope/cache-key", 2);
     expect(oursValid(secondPass)).toBe(true);
     expect(upstreamValid(secondPass)).toBe(true);
   });
@@ -159,7 +151,7 @@ describe("coverage ledger: TS port vs upstream validator", () => {
 
     const mutations: readonly { name: string; document: unknown }[] = [
       { name: "not an array", document: {} },
-      { name: "unsorted", document: [seed({ refs: { surface: "z", boundary: "b", subsystem: "s", attack_class: "a" } }), seed()] },
+      { name: "unsorted", document: [seed({ refs: aRefs({ surface: "z", boundary: "b", subsystem: "s", attack_class: "a" }) }), seed()] },
       { name: "duplicate id", document: [base, base] },
       { name: "canonical id mismatch", document: [{ ...base, coverage_id: "wrong::id" }] },
       { name: "unsafe starting path", document: [{ ...base, starting_paths: ["/etc/passwd"] }] },
@@ -247,13 +239,12 @@ describe("coverage ledger: state machine", () => {
   it("archives the prior attempt on reassignment, and re-hunts it under a fresh owner of the same catalog agent", () => {
     const unit = seed();
     const candidate = settled(assigned([unit], unit.coverage_id, HUNTER), unit.coverage_id, HUNTER, "tenant-scope/cache-key");
-    const merged = mergeCritic(
+    const merged = ok(mergeCritic(
       candidate,
       { missingUnits: [], reassignIds: [unit.coverage_id], resolvedPriorLeads: [], stop: false },
       { wave: 2, reassignmentReasons: { [unit.coverage_id]: "critic: sibling path unread" } },
-    );
-    if (!merged.ok) throw new Error(JSON.stringify(merged.error));
-    const [next] = merged.value.ledger;
+    ));
+    const [next] = merged.ledger;
     expect(next.wave).toBe(2);
     expect(next.status).toBe("planned");
     expect(next.agent_id).toBeNull();
@@ -265,16 +256,15 @@ describe("coverage ledger: state machine", () => {
     // The critic-driven reassignment the ledger used to make unsatisfiable: the
     // catalog name was "not fresh", and any other name was "unplaceable" at
     // publish. The ledger now mints the fresh owner from the catalog agent.
-    const reassigned = assignUnits(merged.value.ledger, [{ coverageId: unit.coverage_id, agentId: HUNTER, wave: 2 }]);
-    if (!reassigned.ok) throw new Error(JSON.stringify(reassigned.error));
-    expect(reassigned.value.assigned).toEqual([{ coverageId: unit.coverage_id, ownerId: `${HUNTER}--2`, wave: 2 }]);
-    expect(reassigned.value.ledger[0].agent_id).toBe(`${HUNTER}--2`);
+    const reassigned = ok(assignUnits(merged.ledger, [{ coverageId: unit.coverage_id, agentId: HUNTER, wave: 2 }]));
+    expect(reassigned.assigned).toEqual([{ coverageId: unit.coverage_id, ownerId: `${HUNTER}--2`, wave: 2 }]);
+    expect(reassigned.ledger[0].agent_id).toBe(`${HUNTER}--2`);
     expect(catalogAgentOfOwner(`${HUNTER}--2`)).toBe(HUNTER);
 
     // The prior owner cannot settle the new attempt; the fresh one can.
-    const stale = recordUnitResult(reassigned.value.ledger, { coverageId: unit.coverage_id, ...evidence(HUNTER, "tenant-scope/cache-key"), wave: 2 });
+    const stale = recordUnitResult(reassigned.ledger, { coverageId: unit.coverage_id, ...evidence(HUNTER, "tenant-scope/cache-key"), wave: 2 });
     expect(stale.ok).toBe(false);
-    const rehunted = settled(reassigned.value.ledger, unit.coverage_id, `${HUNTER}--2`, "tenant-scope/cache-key", 2);
+    const rehunted = settled(reassigned.ledger, unit.coverage_id, `${HUNTER}--2`, "tenant-scope/cache-key", 2);
     expect(validateLedger(rehunted)).toEqual([]);
     expect(upstreamValid(rehunted)).toBe(true);
   });
@@ -295,9 +285,8 @@ describe("coverage ledger: state machine", () => {
     // fresh owner is `--4`, never a name an attempt already used.
     const third = { ...unit, wave: 3, attempts: [archived(1, HUNTER), archived(2, `${HUNTER}--3`)] };
     expect(validateLedger([third])).toEqual([]);
-    const result = assignUnits([third], [{ coverageId: unit.coverage_id, agentId: HUNTER }]);
-    if (!result.ok) throw new Error(JSON.stringify(result.error));
-    expect(result.value.assigned[0].ownerId).toBe(`${HUNTER}--4`);
+    const result = ok(assignUnits([third], [{ coverageId: unit.coverage_id, agentId: HUNTER }]));
+    expect(result.assigned[0].ownerId).toBe(`${HUNTER}--4`);
   });
 
   it("reads an owner id back to its catalog agent, and only a well-formed attempt suffix", () => {
@@ -312,7 +301,7 @@ describe("coverage ledger: state machine", () => {
 
   it("dedupes critic proposals by semantics and reports a canonical collision", () => {
     const unit = seed();
-    const same = mergeCritic(
+    const same = ok(mergeCritic(
       [unit],
       {
         missingUnits: [
@@ -329,15 +318,14 @@ describe("coverage ledger: state machine", () => {
         stop: false,
       },
       { wave: 1, reassignmentReasons: {} },
-    );
-    if (!same.ok) throw new Error(JSON.stringify(same.error));
-    expect(same.value.ledger).toHaveLength(1);
-    expect(same.value.accepted).toEqual([]);
+    ));
+    expect(same.ledger).toHaveLength(1);
+    expect(same.accepted).toEqual([]);
   });
 
   it("defers unreachable units with a reason and only then claims completeness", () => {
-    const a = seed({ refs: { surface: "s1", boundary: "b", subsystem: "s", attack_class: "a1" } });
-    const b = seed({ refs: { surface: "s2", boundary: "b", subsystem: "s", attack_class: "a2" } });
+    const a = seed({ refs: aRefs({ surface: "s1", boundary: "b", subsystem: "s", attack_class: "a1" }) });
+    const b = seed({ refs: aRefs({ surface: "s2", boundary: "b", subsystem: "s", attack_class: "a2" }) });
     const ledger = sortLedger([a, b]);
     expect(coverageComplete(ledger)).toBe(false);
     const deferred = ok(deferPlannedUnits(ledger, "budget_cannot_reserve_critics_and_validation"));
@@ -349,8 +337,8 @@ describe("coverage ledger: state machine", () => {
   });
 
   it("keeps ids deterministic and sorted for any seed order", () => {
-    const a = seed({ refs: { surface: "s1", boundary: "b", subsystem: "s", attack_class: "a1" } });
-    const b = seed({ refs: { surface: "s2", boundary: "b", subsystem: "s", attack_class: "a2" } });
+    const a = seed({ refs: aRefs({ surface: "s1", boundary: "b", subsystem: "s", attack_class: "a1" }) });
+    const b = seed({ refs: aRefs({ surface: "s2", boundary: "b", subsystem: "s", attack_class: "a2" }) });
     expect(sortLedger([b, a]).map((unit) => unit.coverage_id)).toEqual(sortLedger([a, b]).map((unit) => unit.coverage_id));
     expect(validateLedger(sortLedger([b, a]))).toEqual([]);
   });
@@ -474,7 +462,7 @@ describe("parseOwnedArtifactPath", () => {
 });
 
 describe("admitArtifactNonce", () => {
-  const other = () => seed({ refs: { surface: "http:GET /admin", boundary: "role check", subsystem: "admin", attack_class: "authz-bypass" } });
+  const other = () => seed({ refs: aRefs({ surface: "http:GET /admin", boundary: "role check", subsystem: "admin", attack_class: "authz-bypass" }) });
   const artifact = `agents/${HUNTER}/artifacts/repro.txt`;
 
   it("admits an artifact of an owner with a unit in flight, naming every unit it holds", () => {
@@ -630,5 +618,114 @@ describe("a defect is reported once, wherever it sits", () => {
     const { [key]: _omitted, ...rest } = CRITIC;
     const refused = parseCriticResult(rest);
     expect(refused.ok ? [] : refused.error.violations).toEqual([{ path: `critic.${key}`, message: "required: expected an array" }]);
+  });
+});
+
+// --- One local-check contract, wherever a check arrives ---
+
+describe("a local check is parsed by one contract, on the hunter wire and in a stored ledger", () => {
+  const check = (overrides: Record<string, unknown> = {}) => ({ ...evidence(HUNTER, "x").checks[0], ...overrides });
+  /** A settled ledger whose one check is `localCheck`, as stored wire data. */
+  const settledWith = (localCheck: Record<string, unknown>): unknown => {
+    const unit = seed();
+    const [settledUnit] = settled(assigned([unit], unit.coverage_id, HUNTER), unit.coverage_id, HUNTER, "tenant-scope/cache-key");
+    return [{ ...settledUnit!, local_checks: [localCheck] }];
+  };
+  const ledgerMessages = (localCheck: Record<string, unknown>) =>
+    validateLedger(settledWith(localCheck) as CoverageLedger).filter((entry) => entry.path.startsWith("$[0].local_checks[0]"));
+  const wireMessages = (localCheck: Record<string, unknown>) => {
+    const parsed = parseUnitResults([aUnitResult({ checks: [localCheck] })]);
+    return parsed.ok ? [] : parsed.error.violations.filter((entry) => entry.path.startsWith("units[0].checks[0]"));
+  };
+
+  it.each([
+    ["a method that is neither source nor local", { method: "manual" }, ".method", "expected source or local"],
+    ["a missing method", { method: undefined }, ".method", "expected source or local"],
+    ["a key the check shape does not name", { severity: "high" }, ".severity", "unknown field"],
+    ["a local check with no receipt", { method: "local", artifact: null }, ".artifact", "a local check must name its receipt"],
+    ["a local check citing another owner's artifact", { method: "local", artifact: "agents/security-critic-agent/artifacts/x.txt" }, ".artifact",
+      "a local check cites an artifact under its own agent's artifacts root"],
+    ["a source check citing an artifact", { artifact: `agents/${HUNTER}/artifacts/x.txt` }, ".artifact", "a source check must use null"],
+  ])("refuses %s with the same violation on both paths", (_case, overrides, field, message) => {
+    const localCheck = check(overrides);
+    expect(ledgerMessages(localCheck)).toContainEqual({ path: `$[0].local_checks[0]${field}`, message });
+    expect(wireMessages(localCheck)).toContainEqual({ path: `units[0].checks[0]${field}`, message });
+  });
+
+  it("admits a well-formed check on both paths", () => {
+    expect(ledgerMessages(check())).toEqual([]);
+    expect(wireMessages(check())).toEqual([]);
+  });
+});
+
+describe("seeds and critic proposals: a malformed optional field is named, never dropped", () => {
+  it("refuses a seed key the seed shape does not name, so a misspelling cannot seed another cell", () => {
+    const misspelled = parseCoverageSeeds([{ ...aSeed(), lifeCycle: "retention" }]);
+    expect(misspelled.ok ? [] : misspelled.error.violations).toContainEqual({ path: "units[0].lifeCycle", message: "unknown field" });
+    const camel = parseCoverageSeeds([{ ...aSeed(), selectedCompanionBlocks: ["X.md#y"] }]);
+    expect(camel.ok ? [] : camel.error.violations).toContainEqual({ path: "units[0].selectedCompanionBlocks", message: "unknown field" });
+  });
+
+  it("refuses a seed lifecycle its canonical refs do not carry", () => {
+    // The refs name no lifecycle: honouring the seed's would seed a different
+    // cell than its refs identify, and dropping it would seed one it never named.
+    expect(refusedPaths(parseCoverageSeeds([{ ...aSeed(), lifecycle: "retention" }]))).toContain("units[0].lifecycle");
+    expect(refusedPaths(parseCoverageSeeds([{ ...aSeed({ refs: aRefs({ lifecycle: "retention" }) }), lifecycle: "deletion" }]))).toContain("units[0].lifecycle");
+    expect(refusedPaths(parseCoverageSeeds([{ ...aSeed({ refs: aRefs({ lifecycle: "retention" }) }), lifecycle: "retention" }]))).toEqual([]);
+  });
+
+  it("refuses a proposal whose ordinary block is not prose, instead of reading it as none", () => {
+    const proposal = (ordinaryAttackClassBlock: unknown) => parseCriticResult({
+      schemaVersion: 1, kind: "security-coverage-critic", reassignIds: [], resolvedPriorLeads: [],
+      missingUnits: [{ refs: aSeed().refs, startingPaths: ["src/a.ts"], ordinaryAttackClassBlock, selectedCompanionBlocks: [], excludedBlocks: [] }],
+    });
+    expect(refusedPaths(proposal(42))).toEqual(["critic.missingUnits[0].ordinaryAttackClassBlock"]);
+    expect(refusedPaths(proposal(" "))).toEqual(["critic.missingUnits[0].ordinaryAttackClassBlock"]);
+    expect(ok(proposal(null)).missingUnits[0]?.ordinaryAttackClassBlock).toBeNull();
+    expect(ok(proposal("ATTACK-CLASSES.md#injection")).missingUnits[0]?.ordinaryAttackClassBlock).toBe("ATTACK-CLASSES.md#injection");
+  });
+});
+
+describe("the coverage lifecycle has one definition", () => {
+  const blockedLedger = (): CoverageLedger => {
+    const unit = seed();
+    return ok(recordUnitResult(assigned([unit], unit.coverage_id, HUNTER), {
+      coverageId: unit.coverage_id, ...evidence(HUNTER, "x"), status: "blocked", fingerprints: [], unresolved: ["the fixture service would not start"], wave: 1,
+    }));
+  };
+
+  it("keeps a run in progress while a blocked unit awaits a critic's decision", () => {
+    const blocked = blockedLedger();
+    expect(coverageSettled(blocked)).toBe(false);
+    expect(coverageComplete(blocked)).toBe(false);
+    expect(runStatusOf(blocked)).toEqual({ runStatus: "in_progress", incompleteReason: null });
+    expect(incompleteReasonSource(blocked)).toBeNull();
+  });
+
+  it("reports an incomplete run's reason as recorded only when a deferral recorded an upstream token", () => {
+    const [unit] = [seed()];
+    const recorded = ok(deferPlannedUnits([unit], "critic_budget_exhausted"));
+    expect(runStatusOf(recorded)).toEqual({ runStatus: "incomplete", incompleteReason: "critic_budget_exhausted" });
+    expect(incompleteReasonSource(recorded)).toBe("recorded");
+    // A hunter's own prose names no upstream token: the class is reported, and
+    // the source says it was INFERRED, so nothing presents it as the cause.
+    const prose = ok(deferPlannedUnits([unit], "the admin surface was unreachable from the sandbox"));
+    expect(runStatusOf(prose)).toEqual({ runStatus: "incomplete", incompleteReason: "validation_budget_exhausted" });
+    expect(incompleteReasonSource(prose)).toBe("inferred");
+    expect(incompleteReasonSource([unit])).toBeNull();
+  });
+});
+
+describe("an archived attempt's local artifacts are spent as they are read", () => {
+  it("names a second check of one archived attempt that cites the artifact its first check spent", () => {
+    const unit = seed();
+    const artifact = `agents/${HUNTER}/artifacts/repro.txt`;
+    const local = { ...evidence(HUNTER, "x").checks[0], method: "local" as const, artifact };
+    const attempt = {
+      wave: 1, status: "covered" as const, agent_id: HUNTER, reviewed_paths: ["src/reports/controller.ts"],
+      local_checks: [local, local], result_fingerprints: [], unresolved: [], reassignment_reason: "critic: again",
+    };
+    const violations = validateLedger([{ ...unit, wave: 2, attempts: [attempt] }]);
+    expect(violations).toContainEqual({ path: "$[0].attempts[0].local_checks[1].artifact", message: "an archived artifact cannot be reused" });
   });
 });

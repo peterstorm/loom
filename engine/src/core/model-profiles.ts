@@ -628,12 +628,12 @@ export function resolveAgentProfile(raw: unknown): PolicyResult<LlmProfile> {
  *  not hold. Pure and total: a caller holding an untrusted id (a ballot, a
  *  verdict, a ledger's `agent_id`) needs the profile itself, not an Either —
  *  and `null` is what makes "this ballot was cast on the profile that filed
- *  the claim" a comparison rather than a guess. */
+ *  the claim" a comparison rather than a guess. A projection of
+ *  `resolveAgentPolicy`, so the id-to-policy lookup (namespace handling
+ *  included) has one implementation. */
 export function catalogProfileOfAgent(raw: unknown): LlmProfileId | null {
-  if (typeof raw !== "string") return null;
-  const bare = raw.startsWith(LOOM_AGENT_PREFIX) ? raw.slice(LOOM_AGENT_PREFIX.length) : raw;
-  const policy = AGENT_POLICIES.find(({ agent }) => agent === bare);
-  return policy === undefined ? null : policy.profile;
+  const policy = resolveAgentPolicy(raw);
+  return policy.ok ? policy.value.profile : null;
 }
 
 export function parseHarness(raw: unknown): PolicyResult<Harness> {

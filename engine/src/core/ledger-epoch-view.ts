@@ -134,7 +134,7 @@ function renderSandboxReceipt(receipt: SandboxReceipt): readonly string[] {
     `${DETAIL}limits cpu ${limits.cpuSeconds}s, address space ${limits.addressSpaceMb}MB, processes ${limits.processes}, file ${limits.fileSizeMb}MB, wall ${limits.wallClockSeconds}s, scratch ${limits.scratchMb}MB`,
     `${DETAIL}enforced cpu ${yesNo(enforced.cpu)}, memory ${yesNo(enforced.memory)}, processes ${yesNo(enforced.processes)}, file size ${yesNo(enforced.fileSize)}`,
     `${DETAIL}scratch ${receipt.scratchBytes === null ? "unmeasured" : `${receipt.scratchBytes}B`} after the run; env ${receipt.allowlistedEnv.join(",")}`,
-    `${DETAIL}network namespace; target read-only ${yesNo(receipt.targetReadOnly)}; home read-only ${yesNo(receipt.homeReadOnly)}; root read-only ${yesNo(receipt.readOnlyRoot)}; unremounted mounts ${receipt.unremountedMounts}`,
+    `${DETAIL}network namespace, loopback up ${yesNo(receipt.loopbackUp)}; target read-only ${yesNo(receipt.targetReadOnly)}; home read-only ${yesNo(receipt.homeReadOnly)}; root read-only ${yesNo(receipt.readOnlyRoot)}; unremounted mounts ${receipt.unremountedMounts}`,
   ];
 }
 

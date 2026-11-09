@@ -1534,12 +1534,77 @@ async function resumeOperation(args: readonly string[], emission: Emission): Pro
  * exit code indistinguishable from a genuine failure.
  */
 type FacadeRegistration = Extract<ReturnType<typeof parseRegisteredFacadeProgram>, { kind: "registered" }>["program"];
+
+/** A facade program a parent's CLI write may bind a request under: never a
+ *  security-verification run (`bindReservedRequest` refused it). */
+type CliBindableFacadeRegistration = Exclude<FacadeRegistration, { kind: "security-verification" }>;
+
+/** The parent's CLI paths that write into a reserved request's slot. */
+type SlotWriteOperation = "submit" | "correlate";
+
+/** A reserved request, resolved from its id, with the run's stored program
+ *  registration read once beside it. */
+type ReservedRequestBinding = Readonly<{
+  issued: readonly AgentRequestAuthority[];
+  reserved: AgentRequestAuthority;
+  /** The raw stored registration, or null for an unregistered run. */
+  stored: unknown | null;
+  /** The stored registration parsed as a facade program — never a
+   *  security-verification one — or null for an unregistered run. */
+  facade: Exclude<ReturnType<typeof parseRegisteredFacadeProgram>, { kind: "registered" }> |
+    Readonly<{ kind: "registered"; program: CliBindableFacadeRegistration }> | null;
+}>;
+
+/**
+ * A security verifier slot (ADR-0067) is filled ONLY by native capture: the
+ * harness process that captures the verifier's transcript also writes the
+ * capture attestation `verify --from` requires. `submit` and `correlate` are
+ * the parent's paths for harnesses WITHOUT native capture; into a verifier
+ * slot they would let any caller of this CLI write bytes or a correlator no
+ * harness observed.
+ */
+const verifierSlotRefusal = (operation: SlotWriteOperation): HookResult => ({
+  kind: "error",
+  message: `orchestration ${operation} refused: security-verification verifier output is captured natively only ` +
+    "(Claude Code SubagentStop or the Pi extension), never written through the CLI (ADR-0067)",
+});
+
+/**
+ * The ONE request-binding step every CLI slot write shares: resolve a request
+ * id to the authority this run reserved for it, and read the run's program
+ * registration. It is also the one enforcement point of "a verifier slot is
+ * native-capture only" — a request issued by the security-verification
+ * program, or any request of a run registered as one, is refused here, so an
+ * operation that binds a request inherits the refusal and the bound
+ * registration's type cannot be a security-verification run.
+ */
+function bindReservedRequest(
+  handle: RunDirHandle,
+  requestId: string,
+  operation: SlotWriteOperation,
+): Readonly<{ ok: true; value: ReservedRequestBinding }> | Readonly<{ ok: false; result: HookResult }> {
+  const issued = handle.readIssuedRequests();
+  if (!issued.ok) return { ok: false, result: { kind: "error", message: issued.error.message } };
+  const reserved = issued.value.find((request) => request.requestId === requestId);
+  if (reserved === undefined) {
+    return { ok: false, result: { kind: "error", message: `request ${requestId} was never reserved in this run` } };
+  }
+  if (reserved.program === "security-verification") return { ok: false, result: verifierSlotRefusal(operation) };
+  const stored = handle.readProgramRegistration();
+  if (!stored.ok) return { ok: false, result: { kind: "error", message: stored.error.message } };
+  const parsed = stored.value === null ? null : parseRegisteredFacadeProgram(stored.value);
+  if (parsed?.kind !== "registered") return { ok: true, value: { issued: issued.value, reserved, stored: stored.value, facade: parsed } };
+  const program = parsed.program;
+  if (program.kind === "security-verification") return { ok: false, result: verifierSlotRefusal(operation) };
+  return { ok: true, value: { issued: issued.value, reserved, stored: stored.value, facade: { kind: "registered", program } } };
+}
+
 type SubmissionBinding = Readonly<{
   handle: RunDirHandle;
   requestId: string;
   attempt: 1 | 2;
   reserved: AgentRequestAuthority;
-  facadeRegistration: FacadeRegistration | null;
+  facadeRegistration: CliBindableFacadeRegistration | null;
   panelRegistration: RegisteredPanelProgram | null;
 }>;
 
@@ -1558,24 +1623,16 @@ function bindSubmission(args: readonly string[]): SubmissionBindingResult {
   }
   const authority = bound.value.handle.readAuthority();
   if (!authority.ok) return { ok: false, result: { kind: "error", message: authority.error.message } };
-  const issued = bound.value.handle.readIssuedRequests();
-  if (!issued.ok) return { ok: false, result: { kind: "error", message: issued.error.message } };
-  const reserved = issued.value.find((request) => request.requestId === requestId);
-  if (reserved === undefined) {
-    return { ok: false, result: { kind: "error", message: `request ${requestId} was never reserved in this run` } };
-  }
+  const request = bindReservedRequest(bound.value.handle, requestId, "submit");
+  if (!request.ok) return request;
+  const { issued, reserved, stored, facade } = request.value;
   if (reserved.slotId !== slotId || String(reserved.attempt) !== attempt) {
     return { ok: false, result: { kind: "error", message: `request ${requestId} is reserved for slot ${reserved.slotId} attempt ${reserved.attempt}, not ${slotId} attempt ${attempt}` } };
   }
-  const nativeOnly = verifierSlotRefusal(reserved, "submit");
-  if (nativeOnly !== null) return { ok: false, result: nativeOnly };
-  const stored = bound.value.handle.readProgramRegistration();
-  if (!stored.ok) return { ok: false, result: { kind: "error", message: stored.error.message } };
-  if (stored.value === null) {
-    const problem = unregisteredReviewerProblem(bound.value.handle, issued.value);
+  if (stored === null) {
+    const problem = unregisteredReviewerProblem(bound.value.handle, issued);
     if (problem !== null) return { ok: false, result: { kind: "error", message: problem } };
   }
-  const facade = stored.value === null ? null : parseRegisteredFacadeProgram(stored.value);
   if (facade?.kind === "invalid") {
     return { ok: false, result: { kind: "error", message: `registered orchestration program is invalid: ${facade.message}` } };
   }
@@ -1583,31 +1640,13 @@ function bindSubmission(args: readonly string[]): SubmissionBindingResult {
   if (facadeRegistration?.kind === "standalone-disposition") {
     return { ok: false, result: { kind: "error", message: "no-agent standalone disposition publication does not accept submissions" } };
   }
-  if (facadeRegistration?.kind === "security-verification") return { ok: false, result: verifierSlotRefusalFor("submit") };
-  const panelRegistration = stored.value === null ? null : parseRegisteredPanelProgram(stored.value);
-  if (stored.value !== null && panelRegistration === null && facadeRegistration === null) {
+  const panelRegistration = stored === null ? null : parseRegisteredPanelProgram(stored);
+  if (stored !== null && panelRegistration === null && facadeRegistration === null) {
     return { ok: false, result: { kind: "error", message: "registered orchestration program is malformed" } };
   }
   return { ok: true, value: { handle: bound.value.handle, requestId, attempt: Number(attempt) as 1 | 2,
     reserved, facadeRegistration, panelRegistration } };
 }
-
-/**
- * A security verifier slot (ADR-0067) is filled ONLY by native capture: the
- * harness process that captures the verifier's transcript also writes the
- * capture attestation `verify --from` requires. `submit` and `correlate` are
- * the parent's paths for harnesses WITHOUT native capture; into a verifier
- * slot they would let any caller of this CLI write bytes or a correlator no
- * harness observed, so both refuse every security-verification request.
- */
-const verifierSlotRefusalFor = (operation: "submit" | "correlate"): HookResult => ({
-  kind: "error",
-  message: `orchestration ${operation} refused: security-verification verifier output is captured natively only ` +
-    "(Claude Code SubagentStop or the Pi extension), never written through the CLI (ADR-0067)",
-});
-
-const verifierSlotRefusal = (request: AgentRequestAuthority, operation: "submit" | "correlate"): HookResult | null =>
-  request.program === "security-verification" ? verifierSlotRefusalFor(operation) : null;
 
 type CapturedSubmission = Readonly<{ semanticRaw: string; artifact: unknown; alreadyCaptured: boolean }>;
 
@@ -1717,12 +1756,9 @@ async function correlateOperation(args: readonly string[]): Promise<HookResult> 
   if (requestId === null || (harness !== "pi" && harness !== "claude") || nativeId === null) {
     return { kind: "error", message: "--request, --harness (pi or claude), and --native-id are required" };
   }
-  const issued = bound.value.handle.readIssuedRequests();
-  if (!issued.ok) return { kind: "error", message: issued.error.message };
-  const request = issued.value.find((candidate) => candidate.requestId === requestId);
-  if (request === undefined) return { kind: "error", message: `request ${requestId} was never reserved in this run` };
-  const nativeOnly = verifierSlotRefusal(request, "correlate");
-  if (nativeOnly !== null) return nativeOnly;
+  const bindingResult = bindReservedRequest(bound.value.handle, requestId, "correlate");
+  if (!bindingResult.ok) return bindingResult.result;
+  const request = bindingResult.value.reserved;
   const agent = argumentValue(args, "--agent");
   if (agent === null || agent !== request.role) {
     return { kind: "error", message: `--agent must match reserved request role ${request.role}` };

@@ -36,19 +36,12 @@ function handlerFiles(hookType: string): readonly string[] {
   return readdirSync(directory)
     .filter((entry) => entry.endsWith(".ts"))
     .map((entry) => entry.slice(0, -3))
-    .filter((name) => hasDefaultExport(join(directory, `${name}.ts`)))
+    .filter((name) => hasDefaultExport(readFileSync(join(directory, `${name}.ts`), "utf-8")))
     .sort();
 }
 
-const defaultExport = new Map<string, boolean>();
-function hasDefaultExport(path: string): boolean {
-  const cached = defaultExport.get(path);
-  if (cached !== undefined) return cached;
-  const content = readFileSync(path, "utf-8");
-  const exported = /^export default\b/m.test(content) || /^export \{[^}]*\bdefault\b[^}]*\}/m.test(content);
-  defaultExport.set(path, exported);
-  return exported;
-}
+const hasDefaultExport = (content: string): boolean =>
+  /^export default\b/m.test(content) || /^export \{[^}]*\bdefault\b[^}]*\}/m.test(content);
 
 describe("every hook-type route set matches the handler files it routes to", () => {
   it("routes exactly the handler modules that exist, for each hook type", () => {

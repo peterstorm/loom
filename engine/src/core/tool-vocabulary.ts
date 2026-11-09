@@ -79,7 +79,9 @@ export const TEST_COMMAND_PATTERNS: readonly string[] = [
  * Membership criterion: the command must be unable to write a file under ANY
  * flag combination. Deliberately excluded, with the flag that disqualifies
  * them: `sort` (-o), `uniq` (second file operand), `less` (-o/-O),
- * `xxd` (-r <outfile>), `base64` (macOS -o), `sed`/`awk` (-i / in-script
+ * `xxd` (-r <outfile>), `base64` (macOS -o), `file` (-C compiles the
+ * magic database and WRITES `<name>.mgc` into the cwd — a guarded cwd makes
+ * that a state-dir write), `sed`/`awk` (-i / in-script
  * `w`/`print >`), `find` (-delete/-exec), `git` (checkout/restore rewrite the
  * work tree — a `git checkout -- <state>` is a verdict-restore forgery),
  * `touch` (mtime forgery defeats report freshness),
@@ -107,7 +109,7 @@ export const TEST_COMMAND_PATTERNS: readonly string[] = [
  * trust of a PATH-resolved name. */
 export const READ_ONLY_STATE_COMMANDS: ReadonlySet<string> = frozenSet([
   "jq", "cat", "grep", "egrep", "fgrep",
-  "head", "tail", "wc", "ls", "stat", "file",
+  "head", "tail", "wc", "ls", "stat",
   "diff", "cmp", "md5sum", "sha1sum", "sha256sum",
   "cut", "tr", "nl", "od", "hexdump", "strings",
   "echo", "printf", "test", "[", "[[", "true", "false",

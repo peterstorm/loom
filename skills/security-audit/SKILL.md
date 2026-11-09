@@ -18,7 +18,8 @@ Three properties separate this from a prompt that says "find vulnerabilities":
 2. **Evidence is machine-checked, not asserted.** The machine gate denies a
    hunter `Edit`, `Write` and `MultiEdit`; a shell write is recorded, not
    prevented. The only way it demonstrates an exploit is a bounded sandbox run —
-   target and home read-only — whose receipt says the limits actually held.
+   target read-only (the run aborts otherwise), home read-only exactly when the
+   receipt attests `homeReadOnly` — whose receipt says the limits actually held.
 3. **Severity is earned.** A finding nobody verified has **no severity at all** —
    it is a `needs_validation` lead. Severity enters the record only at
    verification, by a reviewer from a different catalog profile.
@@ -99,7 +100,9 @@ cannot inflate by adjective.
 ## Invariants
 
 `INV-S1` a hunter's tool writes are denied by machine gate (shell writes are
-recorded, not prevented; sandboxed commands see the target and home read-only) ·
+recorded, not prevented; sandboxed commands see the target read-only — the run
+aborts otherwise — and home read-only exactly when the receipt attests
+`homeReadOnly`) ·
 `INV-S2` one terminal disposition per unit · `INV-S3` confirmed requires a
 verdict from a different catalog profile · `INV-S4` `needs_validation` carries
 no severity · `INV-S5` budget exhaustion ≠ clean coverage · `INV-S6` reports
@@ -174,8 +177,9 @@ wave's hunt has settled (no hunter in flight, critic merged) and import it
 before the next `assign`/`submit`/`defer`/`merge-critic`; a run whose audit
 moved is refused as stale and `status` names its replacement. Each ballot's
 agent and profile come from the minted verifier request, so a hunter cannot
-cast one. On Pi, keep capture → `resume` → `verify --from` in one session: the
-parent's import is checked against that session's in-process witness, with
+cast one. On Pi, the parent's import is checked before it runs against the run's
+persisted capture attestations — the proof `verify --from` itself runs, so a
+restart or another session never strands a correctly captured run — with
 `--out` absolute and `--from` the run name, as `status` prints them.
 
 `status`, `findings` and `nonce` are read-only and stay available while the Pi

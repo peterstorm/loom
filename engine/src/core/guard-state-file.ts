@@ -116,12 +116,6 @@ import {
   type LeadingDotPolicy,
 } from "./shell-match-views";
 
-// The grammar's walkers, re-exported for the walker-divergence net and the
-// coverage sweeps that have always reached them through this module.
-export { analyzeCommandHead } from "./shell-command-head";
-export { splitHeredocs } from "./shell-heredoc";
-export { blankSubstitutions, expandBraces } from "./shell-match-views";
-
 const BLOCK: HookResult = {
   kind: "block",
   message: [
@@ -149,7 +143,6 @@ function blockFor(chain: readonly string[], segment: string): HookResult {
   );
   return { kind: "block", message: lines.join("\n") };
 }
-
 
 /**
  * Does this simple-command segment ACTUALLY invoke a whitelisted helper?
@@ -332,4 +325,3 @@ export function guardStateFile(
   if (!taskGraphExists()) return { kind: "allow" };
   return guardStateFileDecision(command);
 }
-

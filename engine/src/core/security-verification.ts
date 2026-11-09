@@ -26,6 +26,7 @@ import { compareStrings } from "./ordering";
 import { parseLlmProfileId } from "./model-profiles";
 import {
   canonicalStructuralEquals,
+  isNonEmpty,
   failure,
   parseSlotId,
   success,
@@ -41,17 +42,18 @@ import {
   type AgentRosterSlot,
   type AgentRosterSlotIdentities,
 } from "./orchestration-contract/roster";
+import { SECURITY_VERIFICATION_PROGRAM } from "./orchestration-contract/programs";
 import {
-  SECURITY_VERIFICATION_PROGRAM,
   SECURITY_VERIFIER_ROLE,
-  normalizedMissingFact,
+  admittedMissingFact,
+  catalogVerifierProfileProblem,
   parseVerificationVerdicts,
-  unknownKeyViolations,
   voteViolations,
+  type MissingFact,
   type VerdictViolation,
   type VerificationVerdict,
 } from "./security-adjudication";
-import { isWireRecord } from "./security-audit-contract";
+import { isSecurityFingerprint, isWireRecord, unknownFieldViolations } from "./security-audit-contract";
 import type { ConfirmedFinding, SecurityFinding } from "./security-findings";
 import { quoteShellArgument } from "./shell-quoting";
 import { ballotsAttested, type AttestationLookup } from "./capture-attestation";
@@ -78,25 +80,38 @@ export const VERIFIER_VOTE_KEYS: readonly string[] = ["fingerprint", "vote", "re
 
 // --- The audit a verification run is issued against ---
 
-/** The audit run a verification run names (the disposition `source` shape plus
- *  the two digests its briefs were derived from). */
-export type AuditReference = Readonly<{
+declare const parsedAuditReference: unique symbol;
+
+/** An audit reference's fields before the brand: what `isAuditReference` proves. */
+type AuditReferenceFields = Readonly<{
   locator: string;
   runId: string;
   ledgerDigest: string;
   findingsDigest: string;
 }>;
 
+/** The audit run a verification run names (the disposition `source` shape plus
+ *  the two digests its briefs were derived from). Branded: every value went
+ *  through `parseAuditReference`, so its locator is absolute and canonical, its
+ *  run id bounded, and both digests sha256 wherever a pure function reads them
+ *  — the shell's snapshot reader mints through the same parser as the wire. */
+export type AuditReference = AuditReferenceFields & Readonly<{ [parsedAuditReference]: true }>;
+
+declare const parsedStart: unique symbol;
+declare const registered: unique symbol;
+
 /** The `start security-verification` input (D1, amended): `generation` numbers
  *  the attempts at verifying ONE claim set against ONE audit state — a run
  *  that blocked, or whose captures cannot be imported, is replaced by the next
- *  generation instead of colliding with itself. */
+ *  generation instead of colliding with itself. Branded: every value went
+ *  through `verificationStartOf`, so its audit locator, digests, wave and
+ *  generation are in their grammar wherever a pure function reads them. */
 export type SecurityVerificationStart = Readonly<{
   schemaVersion: 1;
   audit: AuditReference;
   wave: number;
   generation: number;
-}>;
+}> & Readonly<{ [parsedStart]: true }>;
 
 /** How many generations one claim set may run through before `status` stops
  *  offering another: a claim set that blocks this often needs a person. */
@@ -119,7 +134,13 @@ const isWave = (value: unknown): value is number =>
 const exactKeys = (record: Readonly<Record<string, unknown>>, keys: readonly string[]): boolean =>
   Object.keys(record).length === keys.length && keys.every((key) => Object.hasOwn(record, key));
 
-/** Parse the audit reference a start input or a registration names. */
+/** The brand's one proof: every field in its grammar. */
+const isAuditReference = (fields: AuditReferenceFields): fields is AuditReference =>
+  isCanonicalLocator(fields.locator) && isAuditRunId(fields.runId) && isSha256(fields.ledgerDigest) && isSha256(fields.findingsDigest);
+
+/** The one constructor of an `AuditReference`: the audit reference a start
+ *  input or a registration names, and the one the shell's snapshot reader
+ *  derives from the run directory it read — each refusal named. */
 export function parseAuditReference(raw: unknown): DomainResult<AuditReference, string> {
   if (!isWireRecord(raw) || !exactKeys(raw, ["locator", "runId", "ledgerDigest", "findingsDigest"])) {
     return failure("audit must contain exactly locator, runId, ledgerDigest and findingsDigest");
@@ -129,23 +150,43 @@ export function parseAuditReference(raw: unknown): DomainResult<AuditReference, 
   if (!isSha256(raw.ledgerDigest) || !isSha256(raw.findingsDigest)) {
     return failure("audit.ledgerDigest and audit.findingsDigest must be sha256 digests");
   }
-  return success({ locator: raw.locator, runId: raw.runId, ledgerDigest: raw.ledgerDigest, findingsDigest: raw.findingsDigest });
+  const fields: AuditReferenceFields = { locator: raw.locator, runId: raw.runId, ledgerDigest: raw.ledgerDigest, findingsDigest: raw.findingsDigest };
+  return isAuditReference(fields) ? success(fields) : failure("audit reference is malformed");
 }
 
 const isGeneration = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= MAX_VERIFICATION_GENERATIONS;
 
+/** A start input's fields before the brand: what `isVerificationStart` proves. */
+type VerificationStartFields = Readonly<{ schemaVersion: 1; audit: AuditReference; wave: number; generation: number }>;
+
+/** The brand's one proof: the audit reference in its grammar, the wave
+ *  positive, the generation inside its bound. */
+const isVerificationStart = (fields: VerificationStartFields): fields is SecurityVerificationStart =>
+  parseAuditReference(fields.audit).ok && isWave(fields.wave) && isGeneration(fields.generation);
+
+/** The one constructor of a `SecurityVerificationStart`: the wire parser and
+ *  `planVerificationStart` both mint through it, each refusal named. */
+export function verificationStartOf(
+  audit: unknown,
+  wave: unknown,
+  generation: unknown,
+): DomainResult<SecurityVerificationStart, string> {
+  const parsedAudit = parseAuditReference(audit);
+  if (!parsedAudit.ok) return parsedAudit;
+  if (!isWave(wave)) return failure("security-verification wave must be a positive integer");
+  if (!isGeneration(generation)) {
+    return failure(`security-verification generation must be an integer in 1..${MAX_VERIFICATION_GENERATIONS}`);
+  }
+  const fields: VerificationStartFields = { schemaVersion: 1, audit: parsedAudit.value, wave, generation };
+  return isVerificationStart(fields) ? success(fields) : failure("security-verification start input is malformed");
+}
+
 export function parseSecurityVerificationStart(raw: unknown): DomainResult<SecurityVerificationStart, string> {
   if (!isWireRecord(raw) || !exactKeys(raw, ["schemaVersion", "audit", "wave", "generation"]) || raw.schemaVersion !== 1) {
     return failure("security-verification input must contain exactly schemaVersion 1, audit, wave and generation");
   }
-  const audit = parseAuditReference(raw.audit);
-  if (!audit.ok) return audit;
-  if (!isWave(raw.wave)) return failure("security-verification wave must be a positive integer");
-  if (!isGeneration(raw.generation)) {
-    return failure(`security-verification generation must be an integer in 1..${MAX_VERIFICATION_GENERATIONS}`);
-  }
-  return success({ schemaVersion: 1, audit: audit.value, wave: raw.wave, generation: raw.generation });
+  return verificationStartOf(raw.audit, raw.wave, raw.generation);
 }
 
 /**
@@ -212,16 +253,30 @@ export function deriveVerificationBriefs(input: Readonly<{
   findings: readonly SecurityFinding[];
   verdicts: readonly VerificationVerdict[];
 }>): readonly VerificationBrief[] {
-  const eligible = eligibleFingerprints(input.findings, input.verdicts);
-  const briefs: VerificationBrief[] = [];
-  for (let start = 0; start < eligible.length; start += MAX_BRIEF_FINGERPRINTS) {
-    const chunk = eligible.slice(start, start + MAX_BRIEF_FINGERPRINTS);
-    const [head, ...rest] = chunk;
-    if (head === undefined) continue;
-    const fingerprints: NonEmpty<string> = [head, ...rest];
-    briefs.push({ slotId: verificationSlotId(input.issue, fingerprints), fingerprints });
+  return chunksOf(eligibleFingerprints(input.findings, input.verdicts), MAX_BRIEF_FINGERPRINTS)
+    .map((fingerprints) => ({ slotId: verificationSlotId(input.issue, fingerprints), fingerprints }));
+}
+
+/** `items` cut into consecutive runs of at most `size` (≥ 1). Each run is
+ *  non-empty by construction, so the type carries it rather than a skip. */
+function chunksOf<T>(items: readonly T[], size: number): readonly NonEmpty<T>[] {
+  const chunks: NonEmpty<T>[] = [];
+  for (let start = 0; start < items.length; start += size) {
+    const chunk = items.slice(start, start + size);
+    if (isNonEmpty(chunk)) chunks.push(chunk);
   }
-  return briefs;
+  return chunks;
+}
+
+/** Why a brief's fingerprints cannot form one, or null: 1..`MAX_BRIEF_FINGERPRINTS`
+ *  distinct security fingerprints. The one brief rule, read by the registered
+ *  brief parser and by `registerSecurityVerification`. */
+function briefFingerprintProblem(fingerprints: readonly unknown[]): string | null {
+  if (fingerprints.length === 0 || fingerprints.length > MAX_BRIEF_FINGERPRINTS) {
+    return `must name 1..${MAX_BRIEF_FINGERPRINTS} fingerprints`;
+  }
+  if (!fingerprints.every(isSecurityFingerprint)) return "names a malformed fingerprint";
+  return new Set(fingerprints).size === fingerprints.length ? null : "names a fingerprint twice";
 }
 
 /** How many hex digits of each audit digest the run name binds. */
@@ -281,7 +336,9 @@ export function planVerificationStart(input: Readonly<{
 }>): DomainResult<VerificationStartPlan | null, string> {
   if (eligibleFingerprints(input.findings, input.verdicts).length === 0) return success(null);
   for (let generation = 1; generation <= MAX_VERIFICATION_GENERATIONS; generation++) {
-    const start: SecurityVerificationStart = { schemaVersion: 1, audit: input.audit, wave: input.wave, generation };
+    const minted = verificationStartOf(input.audit, input.wave, generation);
+    if (!minted.ok) return minted;
+    const start = minted.value;
     const briefs = deriveVerificationBriefs({ issue: start, findings: input.findings, verdicts: input.verdicts });
     const run = verificationRunName(start, briefs);
     if (input.observe(run) !== "dead") return success({ input: start, run, briefs });
@@ -303,6 +360,9 @@ export function renderVerificationStart(plan: VerificationStartPlan, runsRoot: s
 
 // --- Registration ---
 
+/** A registered verification run. Branded: only `registerSecurityVerification`
+ *  builds one, after every brief invariant held, so the pure functions that
+ *  take a registration never re-check it. */
 export type RegisteredSecurityVerificationProgram = Readonly<{
   schemaVersion: 1;
   kind: typeof SECURITY_VERIFICATION_PROGRAM;
@@ -310,38 +370,70 @@ export type RegisteredSecurityVerificationProgram = Readonly<{
   input: SecurityVerificationStart;
   briefs: readonly VerificationBrief[];
   registrationDigest: string;
-}>;
+}> & Readonly<{ [registered]: true }>;
 
-/** Register a verification run: its name must be the one its briefs derive, and
- *  it must have something to verify. */
+/** Why a run cannot be registered under these facts, or null. It must have
+ *  something to verify; each brief names 1..`MAX_BRIEF_FINGERPRINTS` distinct
+ *  security fingerprints and the slot they derive; no fingerprint sits in two
+ *  briefs; and the run's name is the one its briefs derive. */
+function registrationProblem(runId: string, input: SecurityVerificationStart, briefs: readonly VerificationBrief[]): string | null {
+  if (briefs.length === 0) return `audit ${input.audit.runId} has no confirmed candidate without a ballot; there is nothing to verify`;
+  const placed = new Set<string>();
+  for (const brief of briefs) {
+    const problem = briefFingerprintProblem(brief.fingerprints);
+    if (problem !== null) return `brief ${brief.slotId} ${problem}`;
+    if (brief.slotId !== verificationSlotId(input, brief.fingerprints)) return `brief ${brief.slotId} does not derive from its fingerprints`;
+    const shared = brief.fingerprints.find((fingerprint) => placed.has(fingerprint));
+    if (shared !== undefined) return `fingerprint ${shared} sits in more than one brief`;
+    brief.fingerprints.forEach((fingerprint) => placed.add(fingerprint));
+  }
+  const expected = verificationRunName(input, briefs);
+  return runId === expected ? null : `this verification run must be named ${expected}, not ${runId}`;
+}
+
+type RegistrationFields = Omit<RegisteredSecurityVerificationProgram, typeof registered>;
+
+/** The digest a registration carries: of everything it registers. */
+const registrationDigestOf = (fields: Omit<RegistrationFields, "registrationDigest">): string => sha256Hex(JSON.stringify({
+  schemaVersion: fields.schemaVersion, kind: fields.kind, runId: fields.runId, input: fields.input, briefs: fields.briefs,
+}));
+
+/** The brand's one proof: the registration rules hold and the digest is its own. */
+const isRegisteredProgram = (fields: RegistrationFields): fields is RegisteredSecurityVerificationProgram =>
+  registrationProblem(fields.runId, fields.input, fields.briefs) === null && fields.registrationDigest === registrationDigestOf(fields);
+
+/**
+ * Register a verification run — the one constructor of a registration, used
+ * on issue and on every read back. A hand-built or tampered registration that
+ * breaks a rule of `registrationProblem` is refused here, at the boundary,
+ * rather than later as a ballot set that can never cover its briefs.
+ */
 export function registerSecurityVerification(
   runId: string,
   input: SecurityVerificationStart,
   briefs: readonly VerificationBrief[],
 ): DomainResult<RegisteredSecurityVerificationProgram, string> {
-  if (briefs.length === 0) return failure(`audit ${input.audit.runId} has no confirmed candidate without a ballot; there is nothing to verify`);
-  const expected = verificationRunName(input, briefs);
-  if (runId !== expected) return failure(`this verification run must be named ${expected}, not ${runId}`);
-  for (const brief of briefs) {
-    if (brief.slotId !== verificationSlotId(input, brief.fingerprints)) {
-      return failure(`brief ${brief.slotId} does not derive from its fingerprints`);
-    }
-  }
+  const problem = registrationProblem(runId, input, briefs);
+  if (problem !== null) return failure(problem);
   const base = { schemaVersion: 1 as const, kind: SECURITY_VERIFICATION_PROGRAM, runId, input, briefs };
-  return success({ ...base, registrationDigest: sha256Hex(JSON.stringify(base)) });
+  const fields: RegistrationFields = { ...base, registrationDigest: registrationDigestOf(base) };
+  return isRegisteredProgram(fields) ? success(fields) : failure(`verification run ${runId} does not register`);
 }
 
+/** One registered brief read back: exact keys, a slot id in its grammar, and
+ *  fingerprints the brief rule admits. */
 function parseBrief(raw: unknown): DomainResult<VerificationBrief, string> {
-  if (!isWireRecord(raw) || !exactKeys(raw, ["slotId", "fingerprints"]) || !parseSlotId(raw.slotId).ok) {
+  const slotId = isWireRecord(raw) && exactKeys(raw, ["slotId", "fingerprints"]) ? parseSlotId(raw.slotId) : null;
+  if (!isWireRecord(raw) || slotId === null || !slotId.ok) {
     return failure("a registered brief must contain exactly slotId and fingerprints");
   }
-  const fingerprints = raw.fingerprints;
-  if (!Array.isArray(fingerprints) || fingerprints.length === 0 || fingerprints.length > MAX_BRIEF_FINGERPRINTS ||
-      !fingerprints.every((value): value is string => typeof value === "string")) {
-    return failure(`brief ${String(raw.slotId)} must name 1..${MAX_BRIEF_FINGERPRINTS} fingerprints`);
+  const fingerprints: unknown = raw.fingerprints;
+  if (!Array.isArray(fingerprints) || !fingerprints.every((value): value is string => typeof value === "string")) {
+    return failure(`brief ${slotId.value} must name 1..${MAX_BRIEF_FINGERPRINTS} fingerprints`);
   }
-  const [head, ...rest] = fingerprints;
-  return success({ slotId: String(raw.slotId), fingerprints: [head as string, ...rest] });
+  const problem = briefFingerprintProblem(fingerprints);
+  if (problem !== null || !isNonEmpty(fingerprints)) return failure(`brief ${slotId.value} ${problem ?? "must name a fingerprint"}`);
+  return success({ slotId: slotId.value, fingerprints });
 }
 
 /** Read a stored registration back: every field re-derived and the digest
@@ -355,7 +447,8 @@ export function parseRegisteredSecurityVerificationProgram(raw: unknown): Domain
   const input = parseSecurityVerificationStart(raw.input);
   if (!input.ok) return input;
   const briefs: VerificationBrief[] = [];
-  for (const entry of raw.briefs as readonly unknown[]) {
+  const entries: readonly unknown[] = raw.briefs;
+  for (const entry of entries) {
     const brief = parseBrief(entry);
     if (!brief.ok) return brief;
     briefs.push(brief.value);
@@ -456,7 +549,7 @@ export type VerifierVote = Readonly<{
   fingerprint: string;
   vote: "critical" | "advisory";
   reason: string;
-  missingFact: string | null;
+  missingFact: MissingFact | null;
 }>;
 
 const describeViolations = (violations: readonly VerdictViolation[]): string =>
@@ -466,7 +559,7 @@ const describeViolations = (violations: readonly VerdictViolation[]): string =>
  *  fields. Identity keys (`agent`, `profile`, `wave`) are unknown fields. */
 export function parseVerificationResultWire(raw: unknown): DomainResult<readonly VerifierVote[], readonly VerdictViolation[]> {
   if (!isWireRecord(raw)) return failure([{ path: "$", message: "expected one JSON object" }]);
-  const violations = unknownKeyViolations(raw, VERIFICATION_RESULT_KEYS, "$");
+  const violations = unknownFieldViolations(raw, VERIFICATION_RESULT_KEYS, "$");
   if (raw.schemaVersion !== 1) violations.push({ path: "$.schemaVersion", message: "expected 1" });
   if (raw.kind !== VERIFICATION_RESULT_KIND) violations.push({ path: "$.kind", message: `expected ${VERIFICATION_RESULT_KIND}` });
   if (!Array.isArray(raw.verdicts)) {
@@ -474,13 +567,13 @@ export function parseVerificationResultWire(raw: unknown): DomainResult<readonly
     return failure(violations);
   }
   const votes: VerifierVote[] = [];
-  (raw.verdicts as readonly unknown[]).forEach((entry, index) => {
+  raw.verdicts.forEach((entry: unknown, index: number) => {
     const base = `$.verdicts[${index}]`;
     if (!isWireRecord(entry)) {
       violations.push({ path: base, message: "expected an object" });
       return;
     }
-    const local = [...unknownKeyViolations(entry, VERIFIER_VOTE_KEYS, base), ...voteViolations(entry, base)];
+    const local = [...unknownFieldViolations(entry, VERIFIER_VOTE_KEYS, base), ...voteViolations(entry, base)];
     if (!Object.hasOwn(entry, "missingFact")) local.push({ path: `${base}.missingFact`, message: "required (null when none)" });
     if (local.length > 0) {
       violations.push(...local);
@@ -490,7 +583,7 @@ export function parseVerificationResultWire(raw: unknown): DomainResult<readonly
       fingerprint: String(entry.fingerprint),
       vote: entry.vote === "critical" ? "critical" : "advisory",
       reason: String(entry.reason),
-      missingFact: normalizedMissingFact(entry.missingFact),
+      missingFact: admittedMissingFact(entry.missingFact),
     });
   });
   return violations.length > 0 ? failure(violations) : success(votes);
@@ -540,6 +633,8 @@ export function bindBallots(input: Readonly<{
   }
   const profile = parseLlmProfileId(authority.modelProfile);
   if (!profile.ok) return failure(`request ${authority.requestId} was minted under ${authority.modelProfile}, which is no catalog profile`);
+  const profileProblem = catalogVerifierProfileProblem(profile.value);
+  if (profileProblem !== null) return failure(`request ${authority.requestId} cannot cast a ballot: ${profileProblem}`);
   if (!isSha256(input.captureDigest)) return failure("capture digest must be a sha256 digest");
   const binding = {
     program: SECURITY_VERIFICATION_PROGRAM,

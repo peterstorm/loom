@@ -14,6 +14,7 @@
 
 import {
   canonicalCoverageId,
+  parseCoverageRefs,
   parseSecurityRunMetadata,
   type CoverageRefs,
   type SecurityRunMetadata,
@@ -21,7 +22,7 @@ import {
 import type { DomainResult } from "../../src/core/orchestration-contract/identity";
 import type { CoverageSeed } from "../../src/core/security-coverage";
 import type { ConfirmedFinding, NeedsValidationFinding, RejectedFinding } from "../../src/core/security-findings";
-import type { StackSignals } from "../../src/core/security-lens-select";
+import { NO_STACK_SIGNALS, STACK_SIGNAL_NAMES, STACK_SIGNAL_SHAPES, type StackSignals } from "../../src/core/security-lens-select";
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
@@ -65,35 +66,27 @@ export function aRunMetadata(overrides: Partial<SecurityRunMetadata> = {}): Secu
 /** Repository facts with every signal off: a test turns on exactly the ones it
  *  is about. */
 export function aSignals(overrides: Partial<StackSignals> = {}): StackSignals {
-  return {
-    languages: [],
-    manifests: [],
-    servesHttp: false,
-    rendersClientSide: false,
-    drivesModelsOrTools: false,
-    usesQueuesOrRpc: false,
-    isolatesTenants: false,
-    deploysInfrastructure: false,
-    hasNativeMemory: false,
-    hasAppOrLocalIpc: false,
-    hasReleasePipelines: false,
-    hasSharedResourcePressure: false,
-    ...clone(overrides),
-  };
+  return { ...NO_STACK_SIGNALS, ...clone(overrides) };
 }
+
+/** The stack signals that are flags, in declaration order — derived from the
+ *  selector's own signal table, so a signal added there reaches every test that
+ *  enumerates the flags (the start parser's property test, the calibration
+ *  loader) without a hand-copied list to update. */
+export const BOOLEAN_SIGNALS: readonly (keyof StackSignals)[] = STACK_SIGNAL_NAMES.filter((name) => STACK_SIGNAL_SHAPES[name] === "boolean");
 
 // --- Coverage ---
 
 /** A complete canonical-ref tuple. Two calls give the same cell, so a test
  *  that wants a second unit overrides a coordinate. */
-export function aRefs(overrides: Partial<CoverageRefs> = {}): CoverageRefs {
-  return {
+export function aRefs(overrides: Partial<Record<"surface" | "boundary" | "subsystem" | "attack_class" | "lifecycle", string>> = {}): CoverageRefs {
+  return ok(parseCoverageRefs({
     surface: "http-ingress",
     boundary: "api-edge",
     subsystem: "auth",
     attack_class: "injection",
     ...clone(overrides),
-  };
+  }));
 }
 
 /** A seed as it arrives on the wire (`start`'s `units` payload). Typed as the
@@ -152,7 +145,7 @@ const SEVERITY: ConfirmedFinding["severity"] = {
   overall_severity: "high",
 };
 
-export function aConfirmedFinding(overrides: Partial<ConfirmedFinding> = {}): Record<string, unknown> {
+export function aConfirmedFinding(overrides: Partial<ConfirmedFinding> = {}): ConfirmedFinding {
   return {
     verdict: "confirmed",
     fingerprint: "api/login:sqli-email",
@@ -168,10 +161,10 @@ export function aConfirmedFinding(overrides: Partial<ConfirmedFinding> = {}): Re
     severity: clone(SEVERITY),
     confidence: { score: "high", reason: "The trace is two steps and the payload was observed." },
     ...clone(overrides),
-  } as Record<string, unknown>;
+  };
 }
 
-export function aNeedsValidationFinding(overrides: Partial<NeedsValidationFinding> = {}): Record<string, unknown> {
+export function aNeedsValidationFinding(overrides: Partial<NeedsValidationFinding> = {}): NeedsValidationFinding {
   return {
     verdict: "needs_validation",
     fingerprint: "api/export:sqli-filter",
@@ -186,10 +179,10 @@ export function aNeedsValidationFinding(overrides: Partial<NeedsValidationFindin
     blockers: ["The deployment behind the proxy may sanitise the parameter."],
     validation_plan: { local: "Run the harness with the proxy disabled." },
     ...clone(overrides),
-  } as Record<string, unknown>;
+  };
 }
 
-export function aRejectedFinding(overrides: Partial<RejectedFinding> = {}): Record<string, unknown> {
+export function aRejectedFinding(overrides: Partial<RejectedFinding> = {}): RejectedFinding {
   return {
     verdict: "rejected",
     fingerprint: "api/search:sqli-terms",
@@ -200,7 +193,7 @@ export function aRejectedFinding(overrides: Partial<RejectedFinding> = {}): Reco
     evidence: [{ file: "src/db/users.ts", line: 60, description: "`escape(escape(terms))`." }],
     reason: "Double escaping makes the quote inert; the sandbox payload did not change the result set.",
     ...clone(overrides),
-  } as Record<string, unknown>;
+  };
 }
 
 // --- Verdicts ---
@@ -212,12 +205,41 @@ export function aRejectedFinding(overrides: Partial<RejectedFinding> = {}): Reco
 export const HUNT_PROFILE = "focused-review" as const;
 export const REFUTATION_PROFILE = "refutation" as const;
 
+/** A ballot binding as `verdicts.json` holds it: the JSON shape the binding
+ *  parser reads, before it narrows any field. */
+export type BallotBindingWire = Readonly<{
+  program: string;
+  runId: string;
+  requestId: string;
+  slotId: string;
+  attempt: number;
+  role: string;
+  profile: string;
+  captureDigest: string;
+}>;
+
+/** A bound ballot as `verdicts.json` holds it (before `parseVerificationVerdicts`
+ *  brands its missing fact or narrows its binding). */
+export type VerdictWire = Readonly<{
+  fingerprint: string;
+  vote: "critical" | "advisory";
+  reason: string;
+  missingFact: string | null;
+  wave: number;
+  binding: BallotBindingWire;
+}>;
+
+/** Overrides a test may hand a ballot builder: any known field at its wire type
+ *  (so a renamed field is a compile error at the call site), plus any other key
+ *  a test adds on purpose to prove the parser refuses it. */
+type WireOverrides<Shape> = Partial<Shape> & Readonly<Record<string, unknown>>;
+
 /** A ballot's binding as a verification run publishes it (ADR-0067 D3): the
  *  minted request it answered and its capture digest. The default request is
  *  a refutation-profile verifier's attempt 1. */
-export function aBallotBinding(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+export function aBallotBinding(overrides: WireOverrides<BallotBindingWire> = {}): BallotBindingWire {
   const slotId = `security-verification-slot:${"0".repeat(32)}`;
-  return {
+  const binding: BallotBindingWire = {
     program: "security-verification",
     runId: "run.verify-w2-000000000000",
     requestId: `${slotId}:1`,
@@ -226,55 +248,52 @@ export function aBallotBinding(overrides: Record<string, unknown> = {}): Record<
     role: "security-verifier-agent",
     profile: REFUTATION_PROFILE,
     captureDigest: "a".repeat(64),
-    ...clone(overrides),
   };
+  return Object.assign(binding, clone(overrides));
 }
 
 /** A bound refutation ballot as `verdicts.json` holds it. The default is a
  *  `critical` vote from a verifier minted on a catalog profile that did not
  *  hunt, which is the only shape that confirms a claim — a test that wants a
  *  demotion, a rejection, or a same-profile ballot says so explicitly.
- *  `profile` and `requestId` overrides land in the binding. */
-export function aVerdict(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  const { profile, requestId, binding, ...rest } = clone(overrides);
-  return {
+ *  `profile`, `requestId` and `slotId` overrides land in the binding (a fresh
+ *  `slotId` gives each ballot its own request, so several may vote on one
+ *  claim). */
+export function aVerdict(
+  overrides: WireOverrides<Omit<VerdictWire, "binding">> & Readonly<{
+    profile?: string;
+    requestId?: string;
+    slotId?: string;
+    binding?: Partial<BallotBindingWire>;
+  }> = {},
+): VerdictWire {
+  const { profile, requestId, slotId, binding, ...rest } = clone(overrides);
+  const verdict: VerdictWire = {
     fingerprint: "api/login:sqli-email",
     vote: "critical",
     reason: "The sandbox payload returned the admin row, so the claim survives.",
     missingFact: null,
     wave: 2,
     binding: aBallotBinding({
+      ...(slotId === undefined ? {} : { slotId, requestId: `${slotId}:1` }),
       ...(profile === undefined ? {} : { profile }),
       ...(requestId === undefined ? {} : { requestId }),
-      ...(typeof binding === "object" && binding !== null ? binding : {}),
+      ...binding,
     }),
-    ...rest,
-  } as Record<string, unknown>;
+  };
+  return Object.assign(verdict, rest);
 }
 
 /** A ballot whose binding names the HUNT profile: the shape INV-S3 refuses to
  *  count — the vote of a model agreeing with itself. */
-export function aHunterBallot(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+export function aHunterBallot(overrides: Parameters<typeof aVerdict>[0] = {}): VerdictWire {
   return aVerdict({ profile: HUNT_PROFILE, wave: 1, ...clone(overrides) });
 }
 
 /** The identity every hunter result carries — spread into a submit payload. */
 export const HUNTER_ENVELOPE = Object.freeze({ schemaVersion: 1, kind: "security-hunter-result" });
 
-/** The envelope `submit` reads: the hunter's own kind around its unit results
- *  and filed records. `units` is required (empty when only filing findings). */
-export function aHunterResult(
-  units: readonly unknown[],
-  findings?: readonly unknown[],
-): Record<string, unknown> {
-  return {
-    ...HUNTER_ENVELOPE,
-    units: clone(units),
-    ...(findings === undefined ? {} : { findings: clone(findings) }),
-  };
-}
-
-/** A hunter's settlement for one unit (an entry of `aHunterResult`'s `units`),
+/** A hunter's settlement for one unit (an entry of a hunter result's `units`),
  *  matching the default seed from `aSeed()`. */
 export function aUnitResult(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -292,5 +311,5 @@ export function aUnitResult(overrides: Record<string, unknown> = {}): Record<str
       artifact: null,
     }],
     ...clone(overrides),
-  } as Record<string, unknown>;
+  };
 }

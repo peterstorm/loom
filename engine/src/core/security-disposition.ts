@@ -89,7 +89,10 @@ export type DispositionHandoffPaths = Readonly<{
   /** The `standalone-disposition` start input, written beside the record. */
   inputFile: string;
   runsRoot: string;
-  /** The direct child of `runsRoot` the remediation run owns. */
+  /** The name of the remediation run: the direct child of `runsRoot` it owns,
+   *  and the `--run` the handoff command passes. */
+  runName: string;
+  /** `runsRoot/runName`. */
   runDir: string;
 }>;
 
@@ -99,10 +102,12 @@ export function dispositionHandoffPaths(locator: string, runId: string): Disposi
   // with `.`/`..`/empty segments).
   const root = locator.replace(/\/$/, "");
   const runsRoot = `${root}/${SECURITY_AUDIT_DISPOSITION_RUNS_DIR}`;
+  const runName = `run.disposition-${runId}`;
   return {
     inputFile: `${root}/${SECURITY_AUDIT_RUN_FILES.dispositionHandoff}`,
     runsRoot,
-    runDir: `${runsRoot}/run.disposition-${runId}`,
+    runName,
+    runDir: `${runsRoot}/${runName}`,
   };
 }
 
@@ -231,7 +236,7 @@ export function renderDispositionHandoff(
       ? []
       : [
         `    helper orchestration start standalone-disposition --runs-root ${quoteShellArgument(handoff.runsRoot)} \\`,
-        `      --run ${quoteShellArgument(handoff.runDir.slice(handoff.runDir.lastIndexOf("/") + 1))} < ${quoteShellArgument(handoff.inputFile)}`,
+        `      --run ${quoteShellArgument(handoff.runName)} < ${quoteShellArgument(handoff.inputFile)}`,
         "",
       ]),
     `Decision set: disposition.json (${disposition.source.resultDigest}).`,

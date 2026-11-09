@@ -56,7 +56,12 @@ export const RULE_NAME = "switch-totality";
 export const DEFAULT_MIN_SWITCH_ARMS = 2;
 
 /** Which files the rule governs. `everywhere` is the default; `modules` is a
- *  project's own narrowing, and is never empty. */
+ *  project's own narrowing, and is never empty.
+ *
+ *  `prefixes` are path fragments matched by CONTAINMENT, not anchored at the
+ *  start of the project-relative path — the convention the sibling boundary
+ *  rule uses for its module prefixes. `engine/src/core/` therefore also governs
+ *  `vendor/engine/src/core/x.ts`; write a fragment specific enough not to. */
 export type SwitchScope =
   | Readonly<{ kind: "everywhere" }>
   | Readonly<{ kind: "modules"; prefixes: readonly [string, ...string[]] }>;
@@ -95,24 +100,68 @@ const OPENS_NESTED_SWITCH = /\bswitch\s*\([^{]*\)\s*$/;
  *  delegation to an exhaustive ts-pattern match. */
 const DEFAULT_ARM_PROOF = /:\s*never\b|\bassertNever\s*\(|\.exhaustive\s*\(\s*\)/;
 
+
 /** Scrutinees whose domain the language closes, so no union variant can drift. */
 const LANGUAGE_CLOSED = /^typeof\b/;
 
-/** Drop a trailing line comment, KEEPING quoted text: arm detection needs the
- *  case literals, which the brace scanner strips. */
-function withoutComment(line: string): string {
-  let quote: string | null = null;
-  for (let index = 0; index < line.length; index++) {
-    const char = line[index]!;
-    if (quote !== null) {
-      if (char === "\\") index++;
-      else if (char === quote) quote = null;
-      continue;
+/**
+ * One source line as the rule reads it: comments blanked to spaces (so columns
+ * still line up with the raw line) and a per-character flag for quoted text.
+ *
+ * Comments and quoted text are NOT code, and the rule judges only code. A block
+ * comment reading `x: never`, or an `Error("unreachable: never")` message, in a
+ * default arm is no proof; a commented-out `case "x":` or a `"case 'x':"`
+ * string is no arm. Reading raw text accepted all of them — the fail-open
+ * direction this rule exists to close. Quoted text is kept in `text` (an arm
+ * label IS a quoted literal) but flagged, so an arm keyword must start outside
+ * quotes and a proof must be written outside them.
+ */
+type LexedLine = Readonly<{
+  text: string;
+  quoted: readonly boolean[];
+}>;
+
+/**
+ * Lex the file once. A block comment carries across lines; a quote does not —
+ * the per-line quote model the rule always used, which keeps a stray quote in a
+ * regex literal from swallowing the rest of the file.
+ */
+function lexLines(content: string): readonly LexedLine[] {
+  let inBlockComment = false;
+  return content.split("\n").map((line): LexedLine => {
+    let text = "";
+    const quoted: boolean[] = [];
+    const blank = (width: number): void => {
+      text += " ".repeat(width);
+      for (let count = 0; count < width; count++) quoted.push(false);
+    };
+    let quote: string | null = null;
+    for (let at = 0; at < line.length; at++) {
+      const char = line[at]!;
+      const pair = line.slice(at, at + 2);
+      if (inBlockComment) {
+        if (pair === "*/") { inBlockComment = false; blank(2); at++; }
+        else blank(1);
+      } else if (quote !== null) {
+        text += char;
+        quoted.push(true);
+        if (char === "\\" && at + 1 < line.length) { text += line[at + 1]!; quoted.push(true); at++; }
+        else if (char === quote) quote = null;
+      } else if (pair === "//") {
+        blank(line.length - at);
+        break;
+      } else if (pair === "/*") {
+        inBlockComment = true;
+        blank(2);
+        at++;
+      } else {
+        if (char === '"' || char === "'" || char === "`") quote = char;
+        text += char;
+        quoted.push(quote !== null);
+      }
     }
-    if (char === '"' || char === "'" || char === "`") quote = char;
-    else if (char === "/" && line[index + 1] === "/") return line.slice(0, index);
-  }
-  return line;
+    return { text, quoted };
+  });
 }
 
 /** One switch's span: its arm count and whether its default arm proves never. */
@@ -121,55 +170,64 @@ type SwitchSpan = Readonly<{
   proven: boolean;
 }>;
 
-/** One line of a switch body, scanned character by character. */
+/** Brace structure of one switch-body line, scanned character by character. */
 type LineScan = Readonly<{
   /** The depth BEFORE each character. */
   depthAt: readonly number[];
   /** How many nested switch bodies are open before each character. */
   nestedAt: readonly number[];
+  /** Whether each character belongs to the switch's OWN body: inside it, at any
+   *  depth, but never inside a nested switch — that switch's `never` binding
+   *  proves the nested switch, not this one. */
+  ownBody: readonly boolean[];
   /** The depth after the line's last character. */
   endDepth: number;
-  /** Characters belonging to the default arm's own body, when inside it. */
-  defaultText: string;
 }>;
 
-/** Scan one comment-stripped line from `depth`. Quoted text never changes depth. */
-function scanSwitchLine(raw: string, depth: number, inDefault: boolean): LineScan {
+/** Scan one lexed line from `depth`. Quoted text never changes depth. */
+function scanSwitchLine({ text, quoted }: LexedLine, depth: number): LineScan {
   const depthAt: number[] = [];
   const nestedAt: number[] = [];
+  const ownBody: boolean[] = [];
   const nestedBodies: number[] = [];
   let level = depth;
-  let quote: string | null = null;
-  let defaultText = "";
-  for (let at = 0; at < raw.length; at++) {
-    const char = raw[at]!;
+  for (let at = 0; at < text.length; at++) {
+    const char = text[at]!;
     depthAt[at] = level;
     nestedAt[at] = nestedBodies.length;
-    if (quote !== null) {
-      if (char === "\\") { depthAt[at + 1] = level; nestedAt[at + 1] = nestedBodies.length; at++; }
-      else if (char === quote) quote = null;
-    } else if (char === '"' || char === "'" || char === "`") {
-      quote = char;
-    } else if (char === "{") {
+    if (!quoted[at] && char === "{") {
       // A switch opened INSIDE the enclosing body is nested; the enclosing
       // switch's own `{` sits at depth 0 and names nothing.
-      if (level >= 1 && OPENS_NESTED_SWITCH.test(raw.slice(0, at))) nestedBodies.push(level + 1);
+      if (level >= 1 && OPENS_NESTED_SWITCH.test(text.slice(0, at))) nestedBodies.push(level + 1);
       level++;
-    } else if (char === "}") {
+    } else if (!quoted[at] && char === "}") {
       if (nestedBodies.at(-1) === level) nestedBodies.pop();
       level--;
     }
-    // The default arm's own body, at any depth, but never inside a nested
-    // switch: that switch's `never` binding proves the nested switch.
-    if (inDefault && nestedBodies.length === 0 && level >= 1) defaultText += char;
+    ownBody[at] = nestedBodies.length === 0 && level >= 1;
   }
-  return { depthAt, nestedAt, endDepth: level, defaultText };
+  return { depthAt, nestedAt, ownBody, endDepth: level };
+}
+
+/** One arm label of the switch's own body, located on its line. */
+type ArmLabel = Readonly<{ kind: "case" | "default"; start: number; end: number }>;
+
+/** The switch's own arm labels on a line: at body depth 1, outside any nested
+ *  switch, and starting in code — a `case` inside a string is no arm. */
+function ownArmLabels(line: LexedLine, scan: LineScan): readonly ArmLabel[] {
+  return [...line.text.matchAll(ARM_TOKEN)]
+    .filter((token) => scan.depthAt[token.index] === 1 && scan.nestedAt[token.index] === 0 && !line.quoted[token.index])
+    .map((token): ArmLabel => ({
+      kind: IS_DEFAULT_ARM.test(token[0]) ? "default" : "case",
+      start: token.index,
+      end: token.index + token[0].length,
+    }));
 }
 
 /**
  * Read the switch opened on `startLine` to its closing brace. Line-based with
  * brace depth — the same granularity as the rest of this linter — and braces
- * inside strings or line comments do not count.
+ * inside strings or comments do not count.
  *
  * ONLY the enclosing switch's own arms count. The first version counted every
  * `case`/`default` in the span, so a nested switch's arms inflated the arm
@@ -184,8 +242,13 @@ function scanSwitchLine(raw: string, depth: number, inDefault: boolean): LineSca
  * switch written on one line (`switch (x.kind) { case "a": …; case "b": … }`)
  * is measured like any other. Treating only line-initial `case` as an arm made
  * every one-line switch invisible — the detector saw no arms and skipped it.
+ *
+ * The default arm's text starts right AFTER its `default:` label, on the same
+ * line and character by character: `default: return assertNever(x);` is the
+ * commonest one-line proof, and deciding membership from the state at the START
+ * of the line never saw it. Only code is collected — quoted text is blanked.
  */
-function switchSpan(lines: readonly string[], startLine: number): SwitchSpan {
+function switchSpan(lines: readonly LexedLine[], startLine: number): SwitchSpan {
   let depth = 0;
   let arms = 0;
   let hasDefault = false;
@@ -193,22 +256,24 @@ function switchSpan(lines: readonly string[], startLine: number): SwitchSpan {
   let defaultText = "";
 
   for (let index = startLine; index < lines.length; index++) {
-    const raw = withoutComment(lines[index]!);
-    const { depthAt, nestedAt, endDepth, defaultText: lineDefaultText } = scanSwitchLine(raw, depth, inDefault);
-    defaultText += lineDefaultText;
-
-    ARM_TOKEN.lastIndex = 0;
-    for (let token = ARM_TOKEN.exec(raw); token !== null; token = ARM_TOKEN.exec(raw)) {
-      if (depthAt[token.index] !== 1 || nestedAt[token.index] !== 0) continue;
-      if (IS_DEFAULT_ARM.test(token[0])) {
-        hasDefault = true;
-        inDefault = true;
-      } else {
-        arms++;
-        inDefault = false;
+    const line = lines[index]!;
+    const scan = scanSwitchLine(line, depth);
+    const labels = ownArmLabels(line, scan);
+    let next = 0;
+    for (let at = 0; at < line.text.length; at++) {
+      const label = labels[next];
+      if (label !== undefined && at === label.start) {
+        next++;
+        if (label.kind === "default") hasDefault = true;
+        else arms++;
+        inDefault = label.kind === "default";
+        at = label.end - 1;
+      } else if (inDefault && scan.ownBody[at]) {
+        defaultText += line.quoted[at] ? " " : line.text[at]!;
       }
     }
-    depth = endDepth;
+    defaultText += "\n";
+    depth = scan.endDepth;
     if (depth === 0) break;
   }
   // Only the DEFAULT arm may prove the switch: a `: never` or an `.exhaustive()`
@@ -234,6 +299,8 @@ const inScope = (relativePath: string, scope: SwitchScope): boolean => {
 type UnprovenSwitch = Readonly<{
   /** 1-based line of the `switch` head. */
   line: number;
+  /** The head line as written, trimmed — the violation's snippet. */
+  headText: string;
   scrutinee: string;
   arms: number;
   /** `path::scrutinee`, the form a baseline entry is written in. */
@@ -246,6 +313,9 @@ type UnprovenSwitch = Readonly<{
  * the staleness pass. Two traversals were how the detector came to see EVERY
  * switch — proven, one-armed, out of scope — so a baselined switch later made
  * total still "consumed" its entry and the debt never showed as paid.
+ *
+ * A `switch` head inside a block comment is no switch: heads are matched on the
+ * lexed text, where comments are blank.
  */
 function unprovenSwitches(
   content: string,
@@ -255,15 +325,22 @@ function unprovenSwitches(
   const relative = projectRelative(filePath, options.projectRoot);
   if (isTestFile(relative) || !inScope(relative, options.scope)) return [];
 
-  const lines = content.split("\n");
+  const rawLines = content.split("\n");
+  const lines = lexLines(content);
   return Object.freeze(lines.flatMap((line, index): readonly UnprovenSwitch[] => {
-    const head = SWITCH_HEAD.exec(line);
+    const head = SWITCH_HEAD.exec(line.text);
     if (head === null) return [];
     const scrutinee = head[1]!;
     if (LANGUAGE_CLOSED.test(scrutinee)) return [];
     const span = switchSpan(lines, index);
     if (span.arms < options.minArms || span.proven) return [];
-    return [{ line: index + 1, scrutinee, arms: span.arms, key: baselineKey(relative, scrutinee) }];
+    return [{
+      line: index + 1,
+      headText: rawLines[index]!.trim(),
+      scrutinee,
+      arms: span.arms,
+      key: baselineKey(relative, scrutinee),
+    }];
   }));
 }
 
@@ -272,7 +349,6 @@ export function handler(
   filePath: string,
   options: SwitchTotalityOptions = DEFAULT_SWITCH_TOTALITY_OPTIONS,
 ): readonly Violation[] {
-  const lines = content.split("\n");
   const baselineEntries = baselineCounter(options.baseline);
   return Object.freeze(unprovenSwitches(content, filePath, options)
     .filter((site) => !baselineEntries.consume(site.key))
@@ -280,7 +356,7 @@ export function handler(
       RULE_NAME,
       filePath,
       site.line,
-      lines[site.line - 1]!.trim(),
+      site.headText,
       `switch on \`${site.scrutinee}\` has ${site.arms} arms and no totality proof — use match(${site.scrutinee}).with(…).exhaustive() (or .otherwise(…) when the domain is open, like a plain string), or a default arm that binds it to \`never\`, so a new variant is a compile error`,
     )));
 }

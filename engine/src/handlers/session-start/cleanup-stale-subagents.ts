@@ -45,8 +45,9 @@ import {
  * each entry to its mtime (ms); entries in the same session group share the
  * group's max mtime, ungrouped entries stand alone. A session in
  * `protectedSessions` (alive, or not observable) is never stale, and neither
- * is a PERSISTENT_SUBAGENT_DIR_ENTRIES entry: the security-audit run registry
- * outlives every session.
+ * is a PERSISTENT_SUBAGENT_DIR_ENTRIES entry: every store declared in
+ * `config.PERSISTENT_SUBAGENT_STORES` (the run registry, the capture
+ * attestation store) outlives every session.
  */
 export function staleEntries(
   mtimes: ReadonlyMap<string, number>,

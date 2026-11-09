@@ -60,7 +60,7 @@ The proof object is engine-authored. Agent prose is input evidence, not the verd
 
 ## 3. Evidence ledger and guarded skill machines
 
-`engine/src/machine/` records facts—`FileRead`, `FileWrite`, and `TestRun`—under a per-Agent epoch. Reducers derive phase and test judgments from those facts.
+`engine/src/machine/` records facts—`FileRead`, `FileWrite`, `TestRun`, and `SandboxRun` (a security sandbox receipt, minted only from the simple command that ran the sandbox script with its own `--nonce`)—under a per-Agent epoch. Reducers derive phase and test judgments from those facts.
 
 A report-backed test run can produce `trusted-pass` or `trusted-fail`. A transcript-only signal remains explicitly `untrusted`; Pi’s paired structured evidence remains labeled `pi-structured`. Provenance is never upgraded merely because a consumer prefers a boolean.
 
@@ -185,8 +185,8 @@ run and attestation before adjudication counts it (`admitCachedBallots`), so a
 hand-written ballot is a named publication blocker. Subagents are fenced off
 from every writing audit and orchestration operation, from hook entrypoints and
 nested harnesses, and from the run's authority files (`guard-subagent-authority`,
-defence in depth); on Pi the parent's import is also checked against the
-extension's in-process witness, falling back to the persisted attestations.
+defence in depth); on Pi the parent's import is also checked, before it runs,
+against the same persisted attestations `verify --from` proves.
 
 `publish` refuses on any blocker — an unverified confirmed claim, a same-profile
 ballot, an unsettled ledger — rather than publishing a smaller truth than the run
@@ -268,7 +268,7 @@ Determinism is scoped to what Loom can observe and own:
 - semantic design/review correctness still depends on models and user judgment;
 - a tool call with no `agent_id` cannot be attributed in a contended session, so it is neither recorded nor gated; Pi children run without the live phase gate, because Pi cannot name a tool call’s caller;
 - a legacy graph, whose Agents named no Task, may still attribute a result to the one executing Task (`inferSoleExecutingTask`), or on Pi to the first Task id in the parent's spawn prompt; such a guess settles only through the untrusted legacy resolution, which stores its evidence but leaves the Task pending for revalidation and reports the attribution as unproven, and it can never complete a Task, because completion requires engine-minted attempt authority;
-- report artifacts remain in an Agent-writable environment, with documented same-call forgery residuals; likewise a security sandbox receipt's nonce binds it to its artifact path but does not authenticate it against a hunter that writes the artifact itself, and a security ballot is bound to its issued verifier spawn, but against a subagent that evades the shell-string guard on Claude Code a verification run's capture file stays writable (Pi's in-process witness refuses such a slot; see [Running a security audit](./security-audit.md#honest-limits));
+- report artifacts remain in an Agent-writable environment, with documented same-call forgery residuals; likewise a security sandbox receipt's nonce binds it to its artifact path but does not authenticate it against a hunter that writes the artifact itself, and a security ballot is bound to its issued verifier spawn, but against a subagent that evades the shell-string guard (on either harness) a verification run's capture file stays writable (no capture attestation backs it, so neither harness imports or counts such a slot; see [Running a security audit](./security-audit.md#honest-limits));
 - the shell guard judges command text, not an abstract Bash execution graph;
 - Pi's Interactive Phase Transport supports standard relayed dialogs but not `ctx.ui.custom()` components inside RPC children;
 - legacy readers remain for historical evidence but are frozen in `core/legacy-archive.ts`.

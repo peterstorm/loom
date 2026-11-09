@@ -116,26 +116,54 @@ export const PI_RUNTIME_HANDSHAKE_ROUTES: ReadonlySet<string> = new Set([
   "helper/security-audit",
 ]);
 
-function isOrchestrationHelper(hookType: string | undefined, handlerName: string | undefined): boolean {
-  return hookType === "helper" && handlerName === "orchestration";
-}
+/** The two per-operation traits a route predicate consults. Every operation
+ *  helper's table declares them (`orchestration-operations.ts`,
+ *  `security-audit-operations.ts`). */
+type HelperOperationTraits = Readonly<{
+  input: "stdin" | "flags";
+  runtimeSkew: "available" | "handshake-required";
+}>;
 
-function isSecurityAuditHelper(hookType: string | undefined, handlerName: string | undefined): boolean {
-  return hookType === "helper" && handlerName === "security-audit";
-}
+/** The traits of the operation a helper's arguments name, or null when they
+ *  name no known operation. */
+type OperationTraitsLookup = (extraArgs: readonly string[]) => HelperOperationTraits | null;
 
-/** The traits of the orchestration operation the helper's arguments name, or
- *  null when they name no known operation. Callers establish the route is the
- *  orchestration helper. */
-function orchestrationOperationTraits(extraArgs: readonly string[]) {
-  const operation = parseOrchestrationOperation(extraArgs[0]);
-  return operation === null ? null : ORCHESTRATION_OPERATIONS[operation];
-}
+/**
+ * Helpers that dispatch per operation, keyed by helper name: one row each, so
+ * a new operation helper is one entry here and both route predicates below
+ * consult it through the same lookup. A helper absent from this registry is
+ * judged as a whole route.
+ */
+const OPERATION_HELPERS: Readonly<Record<string, OperationTraitsLookup>> = Object.freeze({
+  orchestration: (extraArgs) => {
+    const operation = parseOrchestrationOperation(extraArgs[0]);
+    return operation === null ? null : ORCHESTRATION_OPERATIONS[operation];
+  },
+  "security-audit": (extraArgs) => {
+    const operation = parseSecurityAuditOperation(extraArgs[0]);
+    return operation === null ? null : SECURITY_AUDIT_OPERATIONS[operation];
+  },
+});
 
-/** The traits of the security-audit operation the helper's arguments name. */
-function securityAuditOperationTraits(extraArgs: readonly string[]) {
-  const operation = parseSecurityAuditOperation(extraArgs[0]);
-  return operation === null ? null : SECURITY_AUDIT_OPERATIONS[operation];
+/**
+ * How a route's operation resolves: `whole-route` when the route is not an
+ * operation helper (its traits are the route's own), otherwise the traits of
+ * the named operation — `null` for an unknown one, which needs the runtime
+ * handshake and reads no stdin (it prints usage).
+ */
+type RouteOperation =
+  | Readonly<{ kind: "whole-route" }>
+  | Readonly<{ kind: "operation"; traits: HelperOperationTraits | null }>;
+
+function routeOperation(
+  hookType: string | undefined,
+  handlerName: string | undefined,
+  extraArgs: readonly string[],
+): RouteOperation {
+  const lookup = hookType === "helper" && handlerName !== undefined && Object.hasOwn(OPERATION_HELPERS, handlerName)
+    ? OPERATION_HELPERS[handlerName]!
+    : null;
+  return lookup === null ? { kind: "whole-route" } : { kind: "operation", traits: lookup(extraArgs) };
 }
 
 /** Whether a route must prove it matches the Pi extension runtime first. An
@@ -147,13 +175,8 @@ export function piRuntimeHandshakeRequired(
 ): boolean {
   if (hookType === "init-state") return true;
   if (!PI_RUNTIME_HANDSHAKE_ROUTES.has(`${hookType}/${handlerName}`)) return false;
-  if (isOrchestrationHelper(hookType, handlerName)) {
-    return orchestrationOperationTraits(extraArgs)?.runtimeSkew !== "available";
-  }
-  if (isSecurityAuditHelper(hookType, handlerName)) {
-    return securityAuditOperationTraits(extraArgs)?.runtimeSkew !== "available";
-  }
-  return true;
+  const operation = routeOperation(hookType, handlerName, extraArgs);
+  return operation.kind === "whole-route" || operation.traits?.runtimeSkew !== "available";
 }
 
 /** Whether a route reads stdin to end-of-input. Hook routes always receive
@@ -164,13 +187,8 @@ export function routeConsumesStdin(
   handlerName: string | undefined,
   extraArgs: readonly string[] = [],
 ): boolean {
-  if (isOrchestrationHelper(hookType, handlerName)) {
-    return orchestrationOperationTraits(extraArgs)?.input === "stdin";
-  }
-  if (isSecurityAuditHelper(hookType, handlerName)) {
-    return securityAuditOperationTraits(extraArgs)?.input === "stdin";
-  }
-  return true;
+  const operation = routeOperation(hookType, handlerName, extraArgs);
+  return operation.kind === "whole-route" || operation.traits?.input === "stdin";
 }
 
 /** Exit code for a crash outside the handler, derived from the route. */

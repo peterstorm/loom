@@ -24,12 +24,13 @@
 
 import { match } from "ts-pattern";
 import { compareStrings } from "./ordering";
-import { failure, success, type DomainResult } from "./orchestration-contract/identity";
+import { failure, success, type DomainResult, type NonEmpty } from "./orchestration-contract/identity";
 import {
   SECURITY_AUDIT_LIMITS,
   hasVisibleProse,
   isSafeSourcePath,
   isSecurityFingerprint,
+  isOneOf,
   isWireRecord,
   wireViolation,
   type WireViolation,
@@ -80,8 +81,8 @@ export type Condition = Readonly<{ kind: ConditionKind; description: string }>;
 
 export type Execution = Readonly<{
   attacker_perspective: string;
-  payloads: readonly string[];
-  instructions: readonly string[];
+  payloads: NonEmpty<string>;
+  instructions: NonEmpty<string>;
   observed_result: string;
 }>;
 
@@ -102,8 +103,8 @@ export type ConfirmedFinding = Readonly<{
   description: string;
   root_cause: string;
   intended_behavior: string;
-  trace: readonly TraceStep[];
-  evidence: readonly EvidenceEntry[];
+  trace: NonEmpty<TraceStep>;
+  evidence: NonEmpty<EvidenceEntry>;
   conditions: readonly Condition[];
   execution: Execution;
   remediation: Remediation;
@@ -119,9 +120,9 @@ export type NeedsValidationFinding = Readonly<{
   title: string;
   description: string;
   claimed_root_cause: string;
-  trace: readonly TraceStep[];
-  evidence: readonly EvidenceEntry[];
-  blockers: readonly string[];
+  trace: NonEmpty<TraceStep>;
+  evidence: NonEmpty<EvidenceEntry>;
+  blockers: NonEmpty<string>;
   validation_plan: ValidationPlan;
 }>;
 
@@ -131,8 +132,8 @@ export type RejectedFinding = Readonly<{
   title: string;
   description: string;
   claimed_root_cause: string;
-  trace: readonly TraceStep[];
-  evidence: readonly EvidenceEntry[];
+  trace: NonEmpty<TraceStep>;
+  evidence: NonEmpty<EvidenceEntry>;
   reason: string;
 }>;
 
@@ -168,8 +169,6 @@ const isVisible = (value: unknown): value is string =>
 const isPositiveInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value) && value >= 1;
 
-const isOneOf = <T extends string>(values: readonly T[], value: unknown): value is T =>
-  typeof value === "string" && (values as readonly string[]).includes(value);
 
 function checkKeys(
   record: Readonly<Record<string, unknown>>,
@@ -299,10 +298,6 @@ function checkScoredReason(value: unknown, path: string, scores: readonly string
 }
 
 function checkConfirmed(record: Readonly<Record<string, unknown>>, path: string, violations: FindingViolation[]): void {
-  const forbidden = ["claimed_root_cause", "blockers", "validation_plan", "reason"];
-  for (const key of forbidden) {
-    if (key in record) violations.push(wireViolation(`${path}.${key}`, "confirmed findings must not carry this field"));
-  }
   for (const key of ["title", "description", "root_cause", "intended_behavior"]) {
     checkVisible(record, key, path, violations);
   }
@@ -379,9 +374,6 @@ function checkSeverity(severity: unknown, path: string, violations: FindingViola
 }
 
 function checkNeedsValidation(record: Readonly<Record<string, unknown>>, path: string, violations: FindingViolation[]): void {
-  for (const key of ["severity", "execution", "remediation", "reason", "root_cause"]) {
-    if (key in record) violations.push(wireViolation(`${path}.${key}`, "needs_validation findings must not carry this field"));
-  }
   for (const key of ["title", "description", "claimed_root_cause"]) checkVisible(record, key, path, violations);
   checkTrace(record.trace, `${path}.trace`, violations);
   checkEvidence(record.evidence, `${path}.evidence`, violations);
@@ -404,9 +396,6 @@ function checkNeedsValidation(record: Readonly<Record<string, unknown>>, path: s
 }
 
 function checkRejected(record: Readonly<Record<string, unknown>>, path: string, violations: FindingViolation[]): void {
-  for (const key of ["severity", "execution", "remediation", "blockers", "validation_plan", "root_cause"]) {
-    if (key in record) violations.push(wireViolation(`${path}.${key}`, "rejected findings must not carry this field"));
-  }
   for (const key of ["title", "description", "claimed_root_cause", "reason"]) checkVisible(record, key, path, violations);
   checkTrace(record.trace, `${path}.trace`, violations);
   checkEvidence(record.evidence, `${path}.evidence`, violations);
@@ -422,6 +411,30 @@ const VERDICT_KEYS: Readonly<Record<SecurityFinding["verdict"], readonly string[
   needs_validation: ["verdict", "fingerprint", "title", "description", "claimed_root_cause", "trace", "evidence", "blockers", "validation_plan"],
   rejected: ["verdict", "fingerprint", "title", "description", "claimed_root_cause", "trace", "evidence", "reason"],
 };
+
+/** Every key some verdict carries.
+ *  A stray key found among them belongs to ANOTHER verdict — the more useful diagnostic. */
+const ANY_VERDICT_KEYS: ReadonlySet<string> = new Set(Object.values(VERDICT_KEYS).flat());
+
+/** A finding's keys against its verdict's one closed set (`VERDICT_KEYS`):
+ *  every key required, no other allowed. A stray key that another verdict
+ *  carries (a lead with a `severity`) is named as such — the one source of
+ *  truth for which fields a verdict may carry, and one violation per key. */
+function checkVerdictKeys(
+  record: Readonly<Record<string, unknown>>,
+  verdict: SecurityFinding["verdict"],
+  path: string,
+  violations: FindingViolation[],
+): void {
+  const allowed = VERDICT_KEYS[verdict];
+  for (const key of allowed) {
+    if (!(key in record)) violations.push(wireViolation(`${path}.${key}`, "required"));
+  }
+  for (const key of Object.keys(record)) {
+    if (allowed.includes(key)) continue;
+    violations.push(wireViolation(`${path}.${key}`, ANY_VERDICT_KEYS.has(key) ? `${verdict} findings must not carry this field` : "unexpected property"));
+  }
+}
 
 /** A deep, frozen copy of a validated JSON value. The parser returns THIS, never
  *  the caller's input: handing back `raw` meant a later mutation of the document
@@ -465,8 +478,7 @@ export function parseSecurityFindings(raw: unknown): DomainResult<readonly Secur
       violations.push(wireViolation(`${path}.verdict`, "expected confirmed, needs_validation or rejected"));
       return;
     }
-    const keys = VERDICT_KEYS[entry.verdict];
-    checkKeys(entry, keys, keys, path, violations);
+    checkVerdictKeys(entry, entry.verdict, path, violations);
 
     if (!isSecurityFingerprint(entry.fingerprint)) {
       violations.push(wireViolation(`${path}.fingerprint`, "expected a stable source-derived fingerprint"));
@@ -531,6 +543,16 @@ function outranks(candidate: SecurityFinding, existing: SecurityFinding): boolea
   return compareStrings(candidate.fingerprint, existing.fingerprint) < 0;
 }
 
+/** The defect identity two filings share when they describe one defect from
+ *  different entry points: the sink and the root-cause sentence. `null` when the
+ *  trace names no sink — such a record is never merged away. */
+const causeKey = (finding: SecurityFinding): string | null => {
+  const sink = sinkOf(finding);
+  if (sink === null) return null;
+  const rootCause = "root_cause" in finding ? finding.root_cause : finding.claimed_root_cause;
+  return `${sink}\u0000${rootCause}`;
+};
+
 /** One root cause, one record — where "one root cause" is a fact, not a
  *  sentence. Fingerprints are the identity; the root-cause TEXT catches the case
  *  where two hunters described one defect from different entry points and earned
@@ -539,25 +561,41 @@ function outranks(candidate: SecurityFinding, existing: SecurityFinding): boolea
  *  drop a finding from the published set. So a root-cause merge also requires the
  *  same SINK, and a trace that names no sink is never merged away. The keeper is
  *  the record with the strongest verdict, then the most complete trace, tie-broken
- *  by fingerprint so the choice is deterministic. */
-export function consolidateCandidates<T extends SecurityFinding>(candidates: readonly T[]): readonly T[] {
+ *  by fingerprint so the choice is deterministic.
+ *
+ *  A `pinned` fingerprint is never merged away: it is a record the run already
+ *  holds (and a verifier may already have balloted, a unit may already list), so
+ *  a later filing of the same defect yields to it whatever its verdict or trace. */
+export function consolidateCandidates<T extends SecurityFinding>(
+  candidates: readonly T[],
+  pinned: ReadonlySet<string> = new Set(),
+): readonly T[] {
   const byFingerprint = new Map<string, T>();
   for (const candidate of candidates) {
     if (!byFingerprint.has(candidate.fingerprint)) byFingerprint.set(candidate.fingerprint, candidate);
   }
-  const byRootCause = new Map<string, T>();
+  // Keyed by cause for a mergeable record, by fingerprint for one that is kept
+  // whatever else shares its cause (no sink, or pinned). A cause key carries a
+  // NUL, which no fingerprint can, so the two key spaces never collide.
+  const kept = new Map<string, T>();
+  const pinnedCauses = new Set<string>();
   for (const candidate of [...byFingerprint.values()].sort((left, right) => compareStrings(left.fingerprint, right.fingerprint))) {
-    const sink = sinkOf(candidate);
-    if (sink === null) {
-      byRootCause.set(candidate.fingerprint, candidate);
+    const cause = causeKey(candidate);
+    if (cause === null) {
+      kept.set(candidate.fingerprint, candidate);
       continue;
     }
-    const rootCause = "root_cause" in candidate ? candidate.root_cause : candidate.claimed_root_cause;
-    const key = `${sink}\u0000${rootCause}`;
-    const existing = byRootCause.get(key);
-    if (existing === undefined || outranks(candidate, existing)) byRootCause.set(key, candidate);
+    if (pinned.has(candidate.fingerprint)) {
+      kept.delete(cause);
+      pinnedCauses.add(cause);
+      kept.set(candidate.fingerprint, candidate);
+      continue;
+    }
+    if (pinnedCauses.has(cause)) continue;
+    const existing = kept.get(cause);
+    if (existing === undefined || outranks(candidate, existing)) kept.set(cause, candidate);
   }
-  return [...byRootCause.values()].sort((left, right) => compareStrings(left.fingerprint, right.fingerprint));
+  return [...kept.values()].sort((left, right) => compareStrings(left.fingerprint, right.fingerprint));
 }
 
 // --- Filing ---
@@ -587,7 +625,11 @@ export type FilingRefusal = FindingConflict | FindingsError;
  *   filing rewrite a claim a verifier may already have balloted.
  *
  * One root cause, one record: consolidation runs before the final parse, so the
- * returned document is exactly what the run will hold.
+ * returned document is exactly what the run will hold. The run's existing
+ * records are PINNED in it: a fresh filing of the same defect (same sink, same
+ * root cause) under a new fingerprint yields to the record the run already
+ * holds, so the record verification adjudicates — and that a unit's
+ * `result_fingerprints` may already list — is never displaced.
  */
 export function fileCandidates(
   existing: readonly SecurityFinding[],
@@ -610,7 +652,7 @@ export function fileCandidates(
     });
   }
   const fresh = filed.filter((finding) => !held.has(finding.fingerprint));
-  return parseSecurityFindings(consolidateCandidates(sortByFingerprint([...existing, ...fresh])));
+  return parseSecurityFindings(consolidateCandidates(sortByFingerprint([...existing, ...fresh]), new Set(held.keys())));
 }
 
 /** The adjudication ballot: loom's two levels, with the five-level ladder kept

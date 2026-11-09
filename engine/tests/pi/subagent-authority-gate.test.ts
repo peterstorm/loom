@@ -2,12 +2,19 @@
  * Pi twin of guard-subagent-authority (ADR-0067 D6): active only in a process
  * carrying the explicit subagent environment marker (`pi/subagent-process.ts`),
  * judging bash through the same core and observed context as Claude Code.
+ *
+ * The role decision is tested at its pure interface (`piProcessRole`,
+ * `parentMarkerEntries`, `childAgentEnvironment`,
+ * `unmarkedSubagentLaunchNotice`); ONE subprocess case proves the real
+ * launcher path end to end — a process spawned with the parent's
+ * `process.env` reads itself as a subagent.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
-import { piSubagentAuthorityDecision } from "../../../pi/subagent-authority-gate";
+import { piParentVerifyImportDecision, piSubagentAuthorityDecision } from "../../../pi/subagent-authority-gate";
 import {
   PI_PARENT_PID_ENV,
   PI_PARENT_SESSION_ENV,
@@ -17,31 +24,29 @@ import {
   markPiParentEnvironment,
   parentMarkerEntries,
   piProcessRole,
+  unmarkedSubagentLaunchNotice,
   type PiProcessRole,
 } from "../../../pi/subagent-process";
-import { spawnSync } from "node:child_process";
-
-const AS_SUBAGENT: PiProcessRole = { kind: "subagent", parentSession: "parent-session" };
-const AS_PARENT: PiProcessRole = { kind: "parent" };
 import { runGuardSubagentAuthority } from "../../src/handlers/pre-tool-use/guard-subagent-authority";
 import { registerSecurityAuditRun } from "../../src/orchestration/security-audit-run-registry";
 
+const AS_SUBAGENT: PiProcessRole = { kind: "subagent", parentSession: "parent-session" };
+const AS_PARENT: PiProcessRole = { kind: "parent" };
+const SUBAGENT_PROCESS_MODULE = join(__dirname, "..", "..", "..", "pi", "subagent-process.ts");
+
 let root: string;
 let run: string;
-let saved: string | undefined;
 
 beforeEach(() => {
   root = canonicalTempDir("loom-pi-subagent-authority-");
-  saved = process.env.LOOM_SUBAGENT_DIR;
-  process.env.LOOM_SUBAGENT_DIR = join(root, "subagents");
+  vi.stubEnv("LOOM_SUBAGENT_DIR", join(root, "subagents"));
   run = join(root, "audits", "run-1");
   mkdirSync(join(run, "agents", "h", "scratch"), { recursive: true });
   expect(registerSecurityAuditRun(run).ok).toBe(true);
 });
 
 afterEach(() => {
-  if (saved === undefined) delete process.env.LOOM_SUBAGENT_DIR;
-  else process.env.LOOM_SUBAGENT_DIR = saved;
+  vi.unstubAllEnvs();
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -51,6 +56,15 @@ const ctx = (mode: string, sessionFile: string | undefined, cwd = "/repo") => ({
 }) as never;
 const SUBAGENT = () => ctx("json", undefined);
 const bash = (command: unknown) => ({ toolName: "bash", input: { command } }) as never;
+
+/** The role a fresh `bun` process reads from `env` — the launcher's view. */
+function spawnedRole(env: NodeJS.ProcessEnv): unknown {
+  const child = spawnSync("bun", ["-e",
+    `const m = await import(${JSON.stringify(SUBAGENT_PROCESS_MODULE)}); console.log(JSON.stringify(m.currentPiProcessRole()));`],
+  { encoding: "utf8", env });
+  expect(child.status, child.stderr).toBe(0);
+  return JSON.parse(child.stdout);
+}
 
 describe("which Pi process is a subagent — the explicit environment marker (G)", () => {
   const PID = 4242;
@@ -72,33 +86,44 @@ describe("which Pi process is a subagent — the explicit environment marker (G)
   });
 
   it("a child agent Loom spawns carries the explicit marker and its launching session", () => {
-    const env = childAgentEnvironment({ PATH: "/bin", [PI_PARENT_PID_ENV]: String(PID), [PI_PARENT_SESSION_ENV]: "sess" }, null);
+    const env = childAgentEnvironment({ PATH: "/bin", [PI_PARENT_PID_ENV]: String(PID), [PI_PARENT_SESSION_ENV]: "sess" });
     expect(env).toMatchObject({ PATH: "/bin", [PI_SUBAGENT_ENV]: "1", [PI_PARENT_SESSION_ENV]: "sess" });
     expect(piProcessRole(env, PID)).toEqual({ kind: "subagent", parentSession: "sess" });
+    // A parent that has no session yet: the child is still a subagent.
+    expect(piProcessRole(childAgentEnvironment({ PATH: "/bin" }), PID)).toEqual({ kind: "subagent", parentSession: null });
   });
 
-  it("the json-mode launcher path: a process spawned with the parent's process.env is a subagent, the parent is not", () => {
+  it("the json-mode launcher path: a process spawned with the parent's process.env is a subagent", () => {
     vi.stubEnv(PI_SUBAGENT_ENV, undefined);
     vi.stubEnv(PI_PARENT_PID_ENV, undefined);
     vi.stubEnv(PI_PARENT_SESSION_ENV, undefined);
-    try {
-      markPiParentEnvironment("parent-session");
-      expect(currentPiProcessRole()).toEqual({ kind: "parent" });
-      // The installed launcher spawns `pi --mode json -p --no-session` with { ...process.env }.
-      const module = join(__dirname, "..", "..", "..", "pi", "subagent-process.ts");
-      const child = spawnSync("bun", ["-e",
-        `const m = await import(${JSON.stringify(module)}); console.log(JSON.stringify(m.currentPiProcessRole()));`],
-      { encoding: "utf8", env: { ...process.env } });
-      expect(child.status, child.stderr).toBe(0);
-      expect(JSON.parse(child.stdout)).toEqual({ kind: "subagent", parentSession: "parent-session" });
-      // A headless parent started WITHOUT the marker is a parent.
-      const headless = spawnSync("bun", ["-e",
-        `const m = await import(${JSON.stringify(module)}); console.log(JSON.stringify(m.currentPiProcessRole()));`],
-      { encoding: "utf8", env: { PATH: process.env.PATH } });
-      expect(JSON.parse(headless.stdout)).toEqual({ kind: "parent" });
-    } finally {
-      vi.unstubAllEnvs();
-    }
+    markPiParentEnvironment("parent-session");
+    expect(currentPiProcessRole()).toEqual({ kind: "parent" });
+    // The installed launcher spawns `pi --mode json -p --no-session` with { ...process.env }.
+    expect(spawnedRole({ ...process.env })).toEqual({ kind: "subagent", parentSession: "parent-session" });
+  });
+});
+
+describe("the unmarked-launch notice (a launcher that dropped the environment)", () => {
+  it.each([
+    ["--mode json", ["pi", "--mode", "json", "-p"]],
+    ["--mode rpc", ["pi", "--mode=rpc"]],
+    ["--no-session", ["pi", "--no-session"]],
+  ] as const)("names an unmarked process launched with %s", (flag, argv) => {
+    const notice = unmarkedSubagentLaunchNotice({ PATH: "/bin" }, argv);
+    expect(notice).toContain(flag);
+    expect(notice).toContain("treats it as a PARENT");
+    expect(notice).toContain("did not copy the parent's environment (ADR-0067 G)");
+  });
+
+  it.each([
+    ["an interactive launch", {}, ["pi"]],
+    ["a non-subagent mode", {}, ["pi", "--mode", "text"]],
+    ["the explicit child marker", { [PI_SUBAGENT_ENV]: "1" }, ["pi", "--mode", "rpc", "--no-session"]],
+    ["an inherited parent marker", { [PI_PARENT_PID_ENV]: "77" }, ["pi", "--mode", "json", "--no-session"]],
+    ["its own parent marker (a later load in a marked process)", { [PI_PARENT_PID_ENV]: "4242" }, ["pi", "--no-session"]],
+  ] as const)("stays quiet for %s", (_name, env, argv) => {
+    expect(unmarkedSubagentLaunchNotice(env, argv)).toBeNull();
   });
 });
 
@@ -144,11 +169,49 @@ describe("piSubagentAuthorityDecision", () => {
     expect(piSubagentAuthorityDecision({ toolName: "bash", input: null } as never, SUBAGENT(), AS_SUBAGENT)?.block).toBe(true);
   });
 
-
   it("an unreadable registry fails closed on authority-shaped paths", () => {
     const unreadable = (): readonly string[] => { throw new Error("damaged"); };
     expect(piSubagentAuthorityDecision(bash("echo x > /x/findings.json"), SUBAGENT(), AS_SUBAGENT, unreadable)?.reason)
       .toContain("registry is unreadable");
+  });
+});
+
+describe("piParentVerifyImportDecision — the persisted proof is the one authority", () => {
+  const PARENT = () => ctx("tui", "/s.jsonl");
+  const verify = (from: string) => `loom helper security-audit verify --out ${run} --from ${from}`;
+
+  it("blocks a run its persisted attestations cannot prove — here, a run that does not exist", async () => {
+    const out = await piParentVerifyImportDecision(bash(verify("run.verify-w1-g1-000000000000")), PARENT(), AS_PARENT);
+    expect(out?.block).toBe(true);
+    expect(out?.reason).toContain("security-verification import proof (ADR-0067)");
+    expect(out?.reason).toContain("cannot open verification run");
+    expect(out?.reason).not.toContain("witness");
+  });
+
+  it("blocks an invocation it cannot place without trusting runtime shell state", async () => {
+    for (const [command, reason] of [
+      [`loom helper security-audit verify --out "$OUT" --from run.x`, "completed by the shell at runtime"],
+      ["loom helper security-audit verify --out audits/run-1 --from run.x", "is relative"],
+      [`loom helper security-audit verify --out ${run} --from verification-runs/run.x`, "is a relative path"],
+    ] as const) {
+      expect((await piParentVerifyImportDecision(bash(command), PARENT(), AS_PARENT))?.reason, command).toContain(reason);
+    }
+  });
+
+  it("has no opinion on anything that imports nothing, in a subagent, or on other tools", async () => {
+    for (const command of [
+      `loom helper security-audit status --out ${run}`,
+      `loom helper security-audit verify --out ${run}`,
+      `loom helper security-audit verify --out ${run} --from /elsewhere/run.verify-w1-g1-000000000000`,
+    ]) {
+      expect(await piParentVerifyImportDecision(bash(command), PARENT(), AS_PARENT), command).toBeUndefined();
+    }
+    expect(await piParentVerifyImportDecision(bash(verify("run.x")), PARENT(), AS_SUBAGENT)).toBeUndefined();
+    expect(await piParentVerifyImportDecision({ toolName: "read", input: { path: "x" } } as never, PARENT(), AS_PARENT)).toBeUndefined();
+  });
+
+  it("fails closed on malformed bash input", async () => {
+    expect((await piParentVerifyImportDecision(bash(42), PARENT(), AS_PARENT))?.reason).toContain("malformed Pi bash input");
   });
 });
 
@@ -178,14 +241,10 @@ describe("the Pi extension's tool_call chain", () => {
     const parent = await toolCall(event, piCtx("json", undefined)) as { reason?: string } | undefined;
     expect(parent?.reason ?? "").not.toContain("guard-subagent-authority");
     vi.stubEnv(PI_SUBAGENT_ENV, "1");
-    try {
-      expect(await toolCall(event, piCtx("tui", "/s.jsonl"))).toMatchObject({
-        block: true,
-        reason: expect.stringContaining("guard-subagent-authority (ADR-0067 D6)"),
-      });
-    } finally {
-      vi.unstubAllEnvs();
-    }
+    expect(await toolCall(event, piCtx("tui", "/s.jsonl"))).toMatchObject({
+      block: true,
+      reason: expect.stringContaining("guard-subagent-authority (ADR-0067 D6)"),
+    });
   });
 
   it("a crash inside the gate blocks the call, naming the gate", async () => {
@@ -200,7 +259,6 @@ describe("the Pi extension's tool_call chain", () => {
       expect(out.reason).toContain("boom");
     } finally {
       stderr.mockRestore();
-      vi.unstubAllEnvs();
     }
   });
 });

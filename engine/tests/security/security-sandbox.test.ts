@@ -11,12 +11,14 @@
  *
  * Where `unshare` is unavailable the real-isolation tests are skipped — but not
  * silently: the probe's failure reason is printed once and carried in each
- * skipped test's name. With `LOOM_REQUIRE_SANDBOX=1` (set it in CI) an
+ * skipped test's name. With `LOOM_REQUIRE_SANDBOX=1` (CI sets it on the Linux leg,
+ * after lifting Ubuntu's AppArmor user-namespace restriction) an
  * unavailable sandbox FAILS the suite instead of skipping. The script's own
  * documented fallback — a refusal naming the missing capability — is checked
  * unconditionally.
  */
 
+import fc from "fast-check";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -30,11 +32,11 @@ import {
   describeUnboundedRun,
   judgeLocalReceipt,
   sandboxNonce,
-  sandboxNonceInCommand,
   sandboxReceiptPrefix,
   parseSandboxLimits,
   parseSandboxReceipt,
   renderSandboxInstructions,
+  renderShellWords,
   sandboxCommand,
   sandboxWithinLimits,
   type SandboxLimits,
@@ -43,8 +45,8 @@ import { aSandboxReceipt } from "./sandbox-fixtures";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "security-sandbox.sh");
-/** Absolute bash: the fallback test hides `unshare` by emptying PATH, which would
- *  also hide the interpreter if the spawn resolved it through that PATH. */
+/** Absolute bash: the fallback test hides `unshare` with a PATH that resolves nothing,
+ *  which would also hide the interpreter if the spawn resolved it through that PATH. */
 const BASH = (spawnSync("bash", ["-c", "command -v bash"], { encoding: "utf8" }).stdout ?? "").trim();
 
 /** The nonce every fixture receipt is bound to: a receipt the caller cannot
@@ -88,6 +90,20 @@ describe("sandbox receipt", () => {
     expect(parseBound(receipt({ targetReadOnly: "yes" })).ok).toBe(false);
     expect(parseBound(receipt({ exit: 300 })).ok).toBe(false);
     expect(parseBound(receipt({ scratchBytes: -1 })).ok).toBe(false);
+  });
+
+  it("records loopback as an observed fact that is reported, not gated", () => {
+    // A dead loopback leaves the isolation intact, so it does not fail the
+    // bounded-run gate — but the receipt names it instead of reading healthy.
+    const down = parseOk(receipt({ loopbackUp: false }));
+    expect(down.loopbackUp).toBe(false);
+    expect(sandboxWithinLimits(down)).toBe(true);
+    expect(parseBound(receipt({ loopbackUp: "up" }))).toEqual({
+      ok: false,
+      error: { kind: "invalid-sandbox-receipt", message: "loopbackUp must be a boolean" },
+    });
+    const { loopbackUp: _omitted, ...withoutLoopback } = JSON.parse(aSandboxReceipt()) as Record<string, unknown>;
+    expect(parseBound(`${sandboxReceiptPrefix(NONCE)}${JSON.stringify(withoutLoopback)}`).ok).toBe(false);
   });
 
   it("hands the value parser's refusal through unchanged", () => {
@@ -180,12 +196,6 @@ describe("sandbox receipt", () => {
     expect(sandboxNonce("agents/hunter-a/artifacts/finding-2.txt")).not.toBe(derived);
     // A receipt bound to one artifact cannot stand in for another.
     expect(parseSandboxReceipt(receipt({}, derived), sandboxNonce("other.txt")).ok).toBe(false);
-  });
-
-  it("reads the nonce a bash call bound into its own argv", () => {
-    expect(sandboxNonceInCommand("bash scripts/security-sandbox.sh --nonce 0123456789abcdef -- node x")).toBe("0123456789abcdef");
-    expect(sandboxNonceInCommand("bash scripts/security-sandbox.sh --nonce=0123456789abcdef -- node x")).toBe("0123456789abcdef");
-    expect(sandboxNonceInCommand("bash scripts/security-sandbox.sh -- node x")).toBeNull();
   });
 
   it("bounds the nonce grammar", () => {
@@ -357,6 +367,42 @@ describe("sandbox command", () => {
   });
 });
 
+describe("the printed sandbox command reads back as exactly its argv", () => {
+  /** What a real shell makes of `line`: each word, NUL-separated. */
+  const shellWords = (line: string): readonly string[] => {
+    const echoed = spawnSync(BASH, ["-c", `printf '%s\\0' ${line}`], { encoding: "utf8" });
+    return (echoed.stdout ?? "").split("\0").slice(0, -1);
+  };
+  const awkward = fc.string({ unit: fc.oneof(fc.constantFrom(" ", "'", "\"", "$", "`", "\\", "\n", "*", ";", "&", "|", "~", "(", "#"), fc.string({ minLength: 1, maxLength: 1 })) });
+
+  it("round-trips any argv through one shell line (property, real bash)", () => {
+    fc.assert(fc.property(fc.array(awkward.filter((word) => !word.includes("\0")), { minLength: 1, maxLength: 4 }), (argv) => {
+      expect(shellWords(renderShellWords(argv))).toEqual(argv);
+    }), { numRuns: 40 });
+  });
+
+  it("prints a run directory with a space or a metacharacter as the words the binding names", () => {
+    const binding = {
+      nonce: NONCE, target: "/srv/my repo", scratch: "/runs/it's here/agents/a/scratch",
+      artifact: "agents/a/artifacts/x $y.txt", artifactFile: "/runs/it's here/agents/a/artifacts/x $y.txt",
+    };
+    const lines = renderSandboxInstructions(DEFAULT_SANDBOX_LIMITS, binding).split("\n");
+    const mkdir = lines.find((line) => line.trimStart().startsWith("mkdir"))!;
+    expect(shellWords(mkdir.trim())).toEqual(["mkdir", "-p", "/runs/it's here/agents/a/artifacts"]);
+    const sandbox = lines.find((line) => line.includes("security-sandbox.sh"))!;
+    const [invocation, redirect] = sandbox.trim().split(" -- <command> [args...] > ");
+    const argv = sandboxCommand({ target: binding.target, scratch: binding.scratch, command: ["true"], limits: DEFAULT_SANDBOX_LIMITS, nonce: NONCE });
+    const flags = (argv.ok ? argv.value : []).slice(0, (argv.ok ? argv.value : []).indexOf("--"));
+    expect(shellWords(invocation!)).toEqual(flags);
+    expect(shellWords(redirect!)).toEqual([binding.artifactFile]);
+    // The script path and the hex nonce stay bare words. That the evidence
+    // extractor recognises this printed line as an invocation bound to the
+    // binding's nonce is pinned in tests/machine/sandbox-invocation.test.ts.
+    expect(invocation).toMatch(/^scripts\/security-sandbox\.sh /);
+    expect(invocation).toMatch(new RegExp(` --nonce ${NONCE}$`));
+  });
+});
+
 // --- Real bounded execution ---
 
 /** Why the sandbox cannot run here, or null when it can. The probe's own error
@@ -375,7 +421,7 @@ if (unshareFailure !== null && !REQUIRE_SANDBOX) {
 
 /** A real-isolation test's name, carrying the skip reason when it will skip. */
 const isolated = (name: string): string =>
-  unshareFailure === null ? name : `${name} [skipped: unshare unavailable — ${unshareFailure}]`;
+  unshareAvailable ? name : `${name} [skipped: unshare unavailable — ${String(unshareFailure)}]`;
 
 /** Where target and scratch sit relative to the run's (temporary) HOME. */
 type HomeLayout = "separate" | "scratch-in-home" | "target-in-home";
@@ -436,7 +482,7 @@ describe("bounded local execution", () => {
           'echo "target_write=$?"',
           "printf kept > evidence.txt",
           'echo "scratch_write=$?"',
-          "printf '%s\\n' 'LOOM-SANDBOX-LIMITS target_ro=1 root_ro=1 home_ro=1 cpu=1 mem=1 procs=1 files=1 unremounted=0'",
+          "printf '%s\\n' 'LOOM-SANDBOX-LIMITS target_ro=1 root_ro=1 home_ro=1 cpu=1 mem=1 procs=1 files=1 lo=1 unremounted=0'",
           "printf '%s\\n' 'LOOM-SANDBOX-RECEIPT-0123456789abcdef {\"schemaVersion\":1}'",
           "printf forged > .enforcement",
           "(exec 3<>/dev/tcp/1.1.1.1/443) 2>/dev/null",
@@ -456,6 +502,8 @@ describe("bounded local execution", () => {
       expect(parsed.targetReadOnly).toBe(true);
       expect(parsed.homeReadOnly).toBe(true);
       expect(parsed.networkNamespace).toBe(true);
+      // Observed before the command ran: up exactly when the namespace could run `ip`.
+      expect(parsed.loopbackUp).toBe(spawnSync(BASH, ["-c", "command -v ip"], { env: runEnv(dirs) }).status === 0);
       expect(parsed.allowlistedEnv).toEqual(["PATH", "HOME", "TMPDIR", "LANG", "TERM"]);
       expect(parsed.scratchBytes).toBeGreaterThan(0);
       // The command's own LOOM-SANDBOX-LIMITS line, its fake receipt and its
@@ -465,9 +513,11 @@ describe("bounded local execution", () => {
     });
   });
 
-  // The regression this guards: home used to be skipped — and still reported
-  // `homeReadOnly: true` — whenever the target or the scratch lay under it, so a
-  // command could write the operator's own files from inside a "bounded" run.
+  // Invariant: home is closed whatever the layout. With the target or the
+  // scratch under it, a write to home still fails inside the sandbox and
+  // `homeReadOnly` reports exactly that — a "bounded" run cannot edit the
+  // operator's own files (a layout that once skipped home while reporting it
+  // closed is the regression pinned here).
   describe.each(["scratch-in-home", "target-in-home"] as const)("with the %s layout", (layout) => {
     it.runIf(unshareAvailable)(isolated("closes home: a write to it fails, while the scratch stays writable"), () => {
       withSandboxDirs(layout, (dirs) => {
@@ -521,12 +571,13 @@ describe("bounded local execution", () => {
     });
   });
 
-  // The regression this guards: the inner shell is PID 1 of the sandbox's pid
-  // namespace, and its stdout USED to stay the capture pipe the facts line is
-  // read from while the command ran — so `> /proc/1/fd/1` let the command append
-  // a facts line of its own and forge every enforcement fact in the receipt.
+  // Invariant: the inner shell is PID 1 of the sandbox's pid namespace and
+  // releases the capture pipe before the command starts, so no fd the command
+  // can reach — `/proc/1/fd/1` included — carries a facts line into the
+  // receipt. A forged line on any of them changes no enforcement fact.
   it.runIf(unshareAvailable)(isolated("ignores a facts line the command writes through any fd it can reach"), () => {
-    const FORGED = "LOOM-SANDBOX-LIMITS target_ro=1 root_ro=1 home_ro=1 cpu=1 mem=1 procs=1 files=1 unremounted=0";
+    const FORGED = "LOOM-SANDBOX-LIMITS target_ro=1 root_ro=1 home_ro=1 cpu=1 mem=1 procs=1 files=1 lo=1 unremounted=0";
+    const PREVIOUS_FORGED = "LOOM-SANDBOX-LIMITS target_ro=1 root_ro=1 home_ro=1 cpu=1 mem=1 procs=1 files=1 unremounted=0";
     const LEGACY_FORGED = "LOOM-SANDBOX-LIMITS root_ro=1 home_ro=1 cpu=1 mem=1 procs=1 files=1 unremounted=0";
     const forge = (line: string): string =>
       [
@@ -540,7 +591,7 @@ describe("bounded local execution", () => {
     withSandboxDirs("separate", (dirs) => {
       const genuine = parseOk(runSandbox(dirs, ["--", "sh", "-c", "exit 0"]).stdout ?? "");
       const forged = parseOk(
-        runSandbox(dirs, ["--", "sh", "-c", `${forge(FORGED)}; ${forge(LEGACY_FORGED)}; exit 0`]).stdout ?? "",
+        runSandbox(dirs, ["--", "sh", "-c", `${forge(FORGED)}; ${forge(PREVIOUS_FORGED)}; ${forge(LEGACY_FORGED)}; exit 0`]).stdout ?? "",
       );
       // The footprint differs with what the command left behind; every
       // ENFORCEMENT fact must be the one the identical honest run reports.
@@ -563,7 +614,7 @@ describe("bounded local execution", () => {
 
   it("refuses to run, naming the missing capability, when unshare is absent", () => {
     withSandboxDirs("separate", (dirs) => {
-      // An empty PATH keeps the builtins but hides `unshare`: the documented
+      // A PATH that resolves nothing keeps the builtins but hides `unshare`: the documented
       // fallback is a refusal a hunter can act on, not a silent unsandboxed run.
       const run = runSandbox(dirs, ["--", "true"], { PATH: "/nonexistent", HOME: dirs.home, TMPDIR: dirs.root });
       expect(run.status).toBe(126);

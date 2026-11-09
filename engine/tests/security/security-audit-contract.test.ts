@@ -23,14 +23,20 @@ import {
   carryAction,
   derivePriorStatus,
   encodeCanonicalRef,
+  isCanonicalCoverageRefs,
+  isOneOf,
   isWireRecord,
+  parseCoverageRefs,
+  parsePriorRecordFacts,
+  parseSecurityProfile,
   parseSecurityRunMetadata,
+  unknownFieldViolations,
   wireStringList,
   wireViolation,
   type PriorRecordFacts,
   type WireViolation,
 } from "../../src/core/security-audit-contract";
-import { aRunMetadata } from "./fixtures";
+import { aRefs, aRunMetadata, ok } from "./fixtures";
 
 const profiles = fc.constantFrom(...SECURITY_PROFILES);
 
@@ -155,14 +161,14 @@ describe("run metadata", () => {
 });
 
 describe("coverage identity", () => {
-  const refs = { surface: "http:GET /reports/:id", boundary: "tenant isolation", subsystem: "reporting", attack_class: "cache-key-poisoning" };
+  const refs = aRefs({ surface: "http:GET /reports/:id", boundary: "tenant isolation", subsystem: "reporting", attack_class: "cache-key-poisoning" });
 
   it("percent-encodes every reserved byte, so `::` can only be the field separator", () => {
     expect(encodeCanonicalRef("http:GET /reports/:id")).toBe("http%3AGET%20%2Freports%2F%3Aid");
     expect(encodeCanonicalRef("a-b_c.d~e")).toBe("a-b_c.d~e");
     expect(canonicalCoverageId(refs)).toBe("http%3AGET%20%2Freports%2F%3Aid::tenant%20isolation::reporting::cache-key-poisoning");
-    expect(canonicalCoverageId({ ...refs, lifecycle: "retention" })).toBe(`${canonicalCoverageId(refs)}::retention`);
-    expect(canonicalCoverageId({ ...refs, boundary: "another boundary" })).not.toBe(canonicalCoverageId(refs));
+    expect(canonicalCoverageId(aRefs({ ...refs, lifecycle: "retention" }))).toBe(`${canonicalCoverageId(refs)}::retention`);
+    expect(canonicalCoverageId(aRefs({ ...refs, boundary: "another boundary" }))).not.toBe(canonicalCoverageId(refs));
   });
 
   it("refuses a reference that is not canonical rather than encoding it", () => {
@@ -175,7 +181,7 @@ describe("coverage identity", () => {
     const field = fc.stringMatching(/^[A-Za-z0-9 :/_.~%-]{1,24}$/).filter((value) => value.trim() === value && /\S/.test(value));
     fc.assert(
       fc.property(field, field, field, field, (surface, boundary, subsystem, attack_class) => {
-        const id = canonicalCoverageId({ surface, boundary, subsystem, attack_class });
+        const id = canonicalCoverageId(aRefs({ surface, boundary, subsystem, attack_class }));
         expect(id.split("::").map((encoded) => decodeURIComponent(encoded))).toEqual([surface, boundary, subsystem, attack_class]);
       }),
     );
@@ -205,5 +211,101 @@ describe("the wire parsing kit", () => {
     expect(isWireRecord({})).toBe(true);
     expect(isWireRecord({ a: 1 })).toBe(true);
     for (const value of [null, [], "x", 1, undefined]) expect(isWireRecord(value), String(value)).toBe(false);
+  });
+});
+
+describe("the shared wire guards", () => {
+  it("reports unknown keys in document order, or sorted when the caller asks", () => {
+    const record = { zeta: 1, kept: 2, alpha: 3 };
+    expect(unknownFieldViolations(record, ["kept"], "$")).toEqual([
+      wireViolation("$.zeta", "unknown field"),
+      wireViolation("$.alpha", "unknown field"),
+    ]);
+    expect(unknownFieldViolations(record, ["kept"], "$", "sorted").map((violation) => violation.path)).toEqual(["$.alpha", "$.zeta"]);
+    expect(unknownFieldViolations({ kept: 1 }, ["kept"], "$")).toEqual([]);
+  });
+
+  it("admits exactly the members of a closed vocabulary", () => {
+    fc.assert(fc.property(fc.anything(), (value) => {
+      expect(isOneOf(SECURITY_PROFILES, value)).toBe(typeof value === "string" && (SECURITY_PROFILES as readonly string[]).includes(value));
+    }));
+  });
+});
+
+describe("parsePriorRecordFacts: a wire seed's prior facts, refused rather than thrown", () => {
+  it("reads absent and null as no prior record, and a well-formed record as itself", () => {
+    expect(parsePriorRecordFacts(undefined)).toEqual({ ok: true, value: null });
+    expect(parsePriorRecordFacts(null)).toEqual({ ok: true, value: null });
+    expect(parsePriorRecordFacts({ verdict: "confirmed", sourceUnchanged: null })).toEqual({ ok: true, value: { verdict: "confirmed", sourceUnchanged: null } });
+  });
+
+  it.each([
+    ["a carry-status token in place of a verdict", { verdict: "prior_confirmed_same_source", sourceUnchanged: true }, "prior.verdict"],
+    ["a missing verdict", { sourceUnchanged: true }, "prior.verdict"],
+    ["an unexpected field", { verdict: "covered", sourceUnchanged: true, status: "covered" }, "prior"],
+    ["a non-boolean sourceUnchanged", { verdict: "covered", sourceUnchanged: "yes" }, "prior.sourceUnchanged"],
+    ["a scalar", "confirmed", "prior"],
+  ])("refuses %s with a named violation, never a pattern-match throw", (_case, raw, path) => {
+    const parsed = parsePriorRecordFacts(raw);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.ok ? null : parsed.error.path).toBe(path);
+  });
+});
+
+describe("run metadata: the illegal combinations do not parse", () => {
+  const base = aRunMetadata();
+  const issues = (raw: unknown): readonly string[] => {
+    const parsed = parseSecurityRunMetadata(raw);
+    return parsed.ok ? [] : parsed.error.issues;
+  };
+
+  it("names the incomplete-reason rule in both directions", () => {
+    expect(issues({ ...base, runStatus: "incomplete", incompleteReason: null })).toContain("incompleteReason: an incomplete run must name its reason");
+    expect(issues({ ...base, runStatus: "complete", incompleteReason: "critic_budget_exhausted" }))
+      .toContain("incompleteReason: a complete run records no incomplete reason");
+  });
+
+  it("refuses a published run that is still in progress", () => {
+    expect(issues({ ...base, runStatus: "in_progress", published: true })).toContain("published: an in_progress run cannot be published");
+    expect(issues({ ...base, runStatus: "complete", published: true })).toEqual([]);
+  });
+
+  it("ties a scope's refs to its kind: a diff names both commits, a tree names none", () => {
+    const commit = "a".repeat(40);
+    const scope = (value: Record<string, unknown>) => ({ ...base, scope: { paths: ["src/api/login.ts"], ...value } });
+    expect(issues(scope({ kind: "diff", baseRef: commit, headRef: "b".repeat(64) }))).toEqual([]);
+    expect(issues(scope({ kind: "tree", baseRef: null, headRef: null }))).toEqual([]);
+    expect(issues(scope({ kind: "diff", baseRef: null, headRef: commit }))).not.toEqual([]);
+    expect(issues(scope({ kind: "diff", baseRef: commit, headRef: null }))).not.toEqual([]);
+    expect(issues(scope({ kind: "tree", baseRef: commit, headRef: null }))).not.toEqual([]);
+    expect(issues(scope({ kind: "diff", baseRef: "main", headRef: commit }))).not.toEqual([]);
+  });
+});
+
+describe("parseSecurityProfile", () => {
+  it("admits exactly the budget profiles", () => {
+    for (const profile of SECURITY_PROFILES) expect(parseSecurityProfile(profile)).toEqual({ ok: true, value: profile });
+    for (const bad of ["thorough", "", null, 2]) expect(parseSecurityProfile(bad).ok, String(bad)).toBe(false);
+  });
+});
+
+describe("coverage refs are parsed once, and only parsed refs are encoded", () => {
+  it("guards exactly the tuples the parser admits", () => {
+    const valid = { surface: "s", boundary: "b", subsystem: "x", attack_class: "a" };
+    expect(isCanonicalCoverageRefs(valid)).toBe(true);
+    expect(isCanonicalCoverageRefs({ ...valid, lifecycle: "retention" })).toBe(true);
+    expect(isCanonicalCoverageRefs({ ...valid, extra: "x" })).toBe(false);
+    expect(isCanonicalCoverageRefs({ ...valid, surface: " padded" })).toBe(false);
+    expect(isCanonicalCoverageRefs({ surface: "s", boundary: "b", subsystem: "x" })).toBe(false);
+    fc.assert(fc.property(fc.dictionary(fc.constantFrom("surface", "boundary", "subsystem", "attack_class", "lifecycle", "x"), fc.string()), (raw) => {
+      expect(isCanonicalCoverageRefs(raw)).toBe(parseCoverageRefs(raw).ok);
+    }));
+  });
+
+  it("returns a fresh record in the fixed field order, never the caller's document", () => {
+    const raw = { lifecycle: "retention", attack_class: "a", subsystem: "x", boundary: "b", surface: "s" };
+    const refs = ok(parseCoverageRefs(raw));
+    expect(refs).not.toBe(raw);
+    expect(Object.keys(refs)).toEqual(["surface", "boundary", "subsystem", "attack_class", "lifecycle"]);
   });
 });

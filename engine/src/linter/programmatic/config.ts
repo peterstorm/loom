@@ -28,9 +28,10 @@ export interface ProgrammaticConfig {
   readonly maxDiscriminantBranches?: number;
   /** Field names that tag a discriminated union (for exhaustive-discriminant-branching) */
   readonly discriminantTags?: readonly string[];
-  /** Narrows switch-totality to these path prefixes (project-relative). Absent
-   *  means every non-test TypeScript file; never empty — disable the rule by
-   *  name instead of giving it a scope that matches nothing. */
+  /** Narrows switch-totality to files whose project-relative path CONTAINS one
+   *  of these fragments (containment, not an anchored prefix). Absent means
+   *  every non-test TypeScript file; never empty — disable the rule by name
+   *  instead of giving it a scope that matches nothing. */
   readonly switchTotalityModules?: readonly [string, ...string[]];
   /** Grandfathered `path::scrutinee` keys the switch-totality rule excuses,
    *  each entry consuming one violation. Empty means "no debt". */

@@ -28,6 +28,7 @@ import {
   eligibleFingerprints,
   foldVerificationProgress,
   importVerificationResult,
+  parseAuditReference,
   parseRegisteredSecurityVerificationProgram,
   parseSecurityVerificationStart,
   parseVerificationResult,
@@ -36,6 +37,7 @@ import {
   registerSecurityVerification,
   serializeVerificationResult,
   verificationRunName,
+  verificationSlotId,
   verifierSlotIdentities,
   MAX_VERIFICATION_GENERATIONS,
   admitCachedBallots,
@@ -44,6 +46,7 @@ import {
   type GenerationState,
   type VerificationRunProof,
   type SecurityVerificationStart,
+  verificationStartOf,
   type VerificationBrief,
 } from "../../src/core/security-verification";
 import { aConfirmedFinding, aNeedsValidationFinding, aVerdict, ok } from "./fixtures";
@@ -54,19 +57,26 @@ import {
   parseCaptureAttestation,
   renderCaptureAttestation,
   type AttestationLookup,
-  type CaptureAttestation,
+  mintCaptureAttestation,
+  type CaptureAttestationFields,
 } from "../../src/core/capture-attestation";
 import { CAPTURE_SCHEMA_VERSION, type CaptureReceipt } from "../../src/core/harness-capture";
 
-const AUDIT: AuditReference = {
+const AUDIT_FIELDS = {
   locator: "/audits/run-1",
   runId: "run-1",
   ledgerDigest: "1".repeat(64),
   findingsDigest: "2".repeat(64),
-};
+} as const;
 
-const issueOf = (overrides: Partial<SecurityVerificationStart> = {}): SecurityVerificationStart =>
-  ({ schemaVersion: 1, audit: AUDIT, wave: 1, generation: 1, ...overrides });
+/** An audit reference minted through its one constructor, with the named fields changed. */
+const auditOf = (overrides: Partial<Record<keyof typeof AUDIT_FIELDS, string>> = {}): AuditReference =>
+  ok(parseAuditReference({ ...AUDIT_FIELDS, ...overrides }));
+
+const AUDIT: AuditReference = auditOf();
+
+const issueOf = (overrides: Partial<Pick<SecurityVerificationStart, "audit" | "wave" | "generation">> = {}): SecurityVerificationStart =>
+  ok(verificationStartOf(overrides.audit ?? AUDIT, overrides.wave ?? 1, overrides.generation ?? 1));
 
 const fingerprintArb = fc.stringMatching(/^[a-z]{1,6}\/[a-z]{1,6}:[a-z0-9-]{1,8}$/);
 
@@ -124,7 +134,7 @@ describe("brief derivation (INV-V3)", () => {
   it("binds a slot to the audit run, wave and fingerprints", () => {
     const brief = briefOf(["a/b:one"]);
     const otherWave = deriveVerificationBriefs({ issue: issueOf({ wave: 2 }), findings: findingsOf(["a/b:one"]), verdicts: [] })[0]!;
-    const otherRun = deriveVerificationBriefs({ issue: issueOf({ audit: { ...AUDIT, runId: "run-2" } }), findings: findingsOf(["a/b:one"]), verdicts: [] })[0]!;
+    const otherRun = deriveVerificationBriefs({ issue: issueOf({ audit: auditOf({ runId: "run-2" }) }), findings: findingsOf(["a/b:one"]), verdicts: [] })[0]!;
     expect(brief.slotId).toMatch(/^security-verification-slot:[0-9a-f]{32}$/);
     expect(new Set([brief.slotId, otherWave.slotId, otherRun.slotId]).size).toBe(3);
   });
@@ -194,6 +204,10 @@ describe("ballot binding (INV-V2)", () => {
     const votes = ok(admitVerificationResult(brief, wire([voteOn("a/b:one")])));
     expect(bindBallots({ votes, authority: { ...authority, program: "refutation-panel" }, captureDigest: "e".repeat(64), wave: 1 }).ok).toBe(false);
     expect(bindBallots({ votes, authority, captureDigest: "nope", wave: 1 }).ok).toBe(false);
+    // A verifier request recorded under a profile the catalog never gives the
+    // verifier role binds nothing: the ballot parser would refuse it anyway.
+    const offProfile = bindBallots({ votes, authority: { ...authority, modelProfile: "focused-review" }, captureDigest: "e".repeat(64), wave: 1 });
+    expect(offProfile.ok ? "" : offProfile.error).toContain("profile focused-review is not refutation");
   });
 
   it("reads a recorded slot back as history, refusing one that differs from the brief's request", () => {
@@ -271,11 +285,32 @@ describe("registration and the published result", () => {
     expect(planOf(["a/b:one"], [ballotOn("a/b:one")])).toBeNull();
   });
 
+  it("refuses a registration whose briefs break the brief rule, however it was built (INV-V3)", () => {
+    const input = issueOf();
+    const briefFor = (...fingerprints: string[]) => {
+      const [head, ...rest] = fingerprints;
+      return { slotId: verificationSlotId(input, fingerprints), fingerprints: [head!, ...rest] as const };
+    };
+    const refusal = (...briefs: ReturnType<typeof briefFor>[]) => {
+      const registered = registerSecurityVerification("run.verify-w1-g1-000000000000", input, briefs);
+      return registered.ok ? "" : registered.error;
+    };
+    expect(refusal(briefFor("a/b:one", "a/b:one"))).toContain("names a fingerprint twice");
+    expect(refusal(briefFor("a/b:one", "a/b:two"), briefFor("a/b:two"))).toContain("fingerprint a/b:two sits in more than one brief");
+    expect(refusal(briefFor(" a/b:one"))).toContain("names a malformed fingerprint");
+    expect(refusal(briefFor("a/b:1", "a/b:2", "a/b:3", "a/b:4", "a/b:5"))).toContain(`must name 1..${MAX_BRIEF_FINGERPRINTS} fingerprints`);
+    // The same rules hold on read back: a stored registration whose brief repeats a fingerprint does not parse.
+    const plan = planOf(["a/b:one"])!;
+    const registration = ok(registerSecurityVerification(plan.run, plan.input, plan.briefs));
+    const doubled = { ...registration, briefs: [{ ...registration.briefs[0]!, fingerprints: ["a/b:one", "a/b:one"] }] };
+    expect(parseRegisteredSecurityVerificationProgram(JSON.parse(JSON.stringify(doubled))).ok).toBe(false);
+  });
+
   it("names a new run when the ledger or findings move, even over the same claim set (E)", () => {
     const base = planOf(["a/b:one"])!;
     expect(base.run).toMatch(/^run\.verify-w1-g1-[0-9a-f]{12}$/);
-    const ledgerMoved = planOf(["a/b:one"], [], { ...AUDIT, ledgerDigest: "4".repeat(64) })!;
-    const findingsMoved = planOf(["a/b:one"], [], { ...AUDIT, findingsDigest: "5".repeat(64) })!;
+    const ledgerMoved = planOf(["a/b:one"], [], auditOf({ ledgerDigest: "4".repeat(64) }))!;
+    const findingsMoved = planOf(["a/b:one"], [], auditOf({ findingsDigest: "5".repeat(64) }))!;
     expect(ledgerMoved.briefs.map((brief) => brief.fingerprints)).toEqual(base.briefs.map((brief) => brief.fingerprints));
     expect(new Set([base.run, ledgerMoved.run, findingsMoved.run]).size).toBe(3);
     // No two issuances share a slot (a harness resolves a spawn to its run by request id).
@@ -307,14 +342,28 @@ describe("registration and the published result", () => {
     const input = { schemaVersion: 1, audit: AUDIT, wave: 1, generation: 1 };
     expect(ok(parseSecurityVerificationStart(input))).toEqual(input);
     expect(parseSecurityVerificationStart({ ...input, extra: true }).ok).toBe(false);
-    expect(parseSecurityVerificationStart({ ...input, audit: { ...AUDIT, locator: "relative/run" } }).ok).toBe(false);
-    expect(parseSecurityVerificationStart({ ...input, audit: { ...AUDIT, locator: "/a/../b" } }).ok).toBe(false);
-    expect(parseSecurityVerificationStart({ ...input, audit: { ...AUDIT, ledgerDigest: "x" } }).ok).toBe(false);
+    expect(parseSecurityVerificationStart({ ...input, audit: { ...AUDIT_FIELDS, locator: "relative/run" } }).ok).toBe(false);
+    expect(parseSecurityVerificationStart({ ...input, audit: { ...AUDIT_FIELDS, locator: "/a/../b" } }).ok).toBe(false);
+    expect(parseSecurityVerificationStart({ ...input, audit: { ...AUDIT_FIELDS, ledgerDigest: "x" } }).ok).toBe(false);
     expect(parseSecurityVerificationStart({ ...input, wave: 0 }).ok).toBe(false);
     expect(parseSecurityVerificationStart({ ...input, generation: 0 }).ok).toBe(false);
     expect(parseSecurityVerificationStart({ ...input, generation: MAX_VERIFICATION_GENERATIONS + 1 }).ok).toBe(false);
     const { generation: _omitted, ...withoutGeneration } = input;
     expect(parseSecurityVerificationStart(withoutGeneration).ok).toBe(false);
+  });
+
+  it("mints an audit reference only through its one constructor, naming each refusal", () => {
+    expect(ok(parseAuditReference(AUDIT_FIELDS))).toEqual(AUDIT_FIELDS);
+    const refusal = (raw: unknown): string => {
+      const parsed = parseAuditReference(raw);
+      return parsed.ok ? "" : parsed.error;
+    };
+    expect(refusal({ ...AUDIT_FIELDS, extra: 1 })).toBe("audit must contain exactly locator, runId, ledgerDigest and findingsDigest");
+    expect(refusal({ ...AUDIT_FIELDS, locator: "/a/./b" })).toBe("audit.locator must be an absolute canonical path");
+    expect(refusal({ ...AUDIT_FIELDS, locator: "/a/b/" })).toBe("audit.locator must be an absolute canonical path");
+    expect(refusal({ ...AUDIT_FIELDS, runId: "" })).toBe("audit.runId must be the audit's run id");
+    expect(refusal({ ...AUDIT_FIELDS, runId: "run\n1" })).toBe("audit.runId must be the audit's run id");
+    expect(refusal({ ...AUDIT_FIELDS, findingsDigest: "F".repeat(64) })).toBe("audit.ledgerDigest and audit.findingsDigest must be sha256 digests");
   });
 });
 
@@ -335,10 +384,10 @@ describe("import (D4)", () => {
       const outcome = importVerificationResult({ registration, result: published, audit, existing });
       return outcome.ok ? "" : outcome.error;
     };
-    expect(refused({ ...AUDIT, findingsDigest: "3".repeat(64) })).toContain("audit findings changed");
-    expect(refused({ ...AUDIT, ledgerDigest: "3".repeat(64) })).toContain("audit ledger changed");
-    expect(refused({ ...AUDIT, runId: "run-2" })).toContain("was issued for audit run-1");
-    expect(refused({ ...AUDIT, locator: "/audits/other" })).toContain("was issued for audit run-1");
+    expect(refused(auditOf({ findingsDigest: "3".repeat(64) }))).toContain("audit findings changed");
+    expect(refused(auditOf({ ledgerDigest: "3".repeat(64) }))).toContain("audit ledger changed");
+    expect(refused(auditOf({ runId: "run-2" }))).toContain("was issued for audit run-1");
+    expect(refused(auditOf({ locator: "/audits/other" }))).toContain("was issued for audit run-1");
     const altered = { ...result.ballots[0]!, vote: "advisory" as const };
     expect(refused(AUDIT, [altered])).toContain("already holds a different ballot set");
     expect(refused(AUDIT, [], { ...result, wave: 2 })).toContain("does not describe verification run");
@@ -364,14 +413,13 @@ describe("one fingerprint, one verification run (H)", () => {
 
 describe("verdicts.json is a cache (B)", () => {
   const RUN_DIRECTORY = "/audits/run-1/verification-runs/run";
-  const attestationOf = (ballot: VerificationVerdict, overrides: Partial<CaptureAttestation> = {}): AttestationLookup => ({
+  const attestationOf = (ballot: VerificationVerdict, overrides: Partial<CaptureAttestationFields> = {}): AttestationLookup => ({
     kind: "attested",
-    attestation: {
-      schemaVersion: 1, kind: "security-capture-attestation", program: "security-verification",
+    attestation: ok(mintCaptureAttestation({
       runId: ballot.binding.runId, runDirectory: RUN_DIRECTORY, requestId: ballot.binding.requestId,
-      slotId: ballot.binding.slotId, attempt: ballot.binding.attempt, role: "security-verifier-agent",
-      harness: "claude", nativeId: "agent-1", digest: ballot.binding.captureDigest, byteLength: 10, ...overrides,
-    },
+      slotId: ballot.binding.slotId, attempt: ballot.binding.attempt, harness: "claude", nativeId: "agent-1",
+      digest: ballot.binding.captureDigest, byteLength: 10, ...overrides,
+    })),
   });
   const proofOf = (run: ReturnType<typeof publishedRun>, lookup: (requestId: string) => AttestationLookup): VerificationRunProof =>
     ({ kind: "proven", registration: run.registration, replayed: run.result, runDirectory: RUN_DIRECTORY, attestations: lookup });
@@ -389,6 +437,8 @@ describe("verdicts.json is a cache (B)", () => {
       [proofOf(run, () => attestationOf(ballot!, { digest: "f".repeat(64) })), "(capture digest)"],
       [proofOf(run, () => attestationOf(ballot!, { attempt: 2 })), "(attempt)"],
       [proofOf(run, () => attestationOf(ballot!, { runDirectory: "/elsewhere" })), "(run directory)"],
+      // The pure check does not trust the lookup to answer only for the request it was asked about.
+      [proofOf(run, () => attestationOf(ballot!, { requestId: `${ballot!.binding.slotId}:2` })), "(request)"],
       [{ kind: "unprovable", reason: "its evidence cannot be replayed: boom" }, "boom"],
     ];
     for (const [proof, reason] of refusals) {
@@ -397,10 +447,10 @@ describe("verdicts.json is a cache (B)", () => {
       expect(decided.blockers.join("\n"), reason).toContain(reason);
     }
     // A ballot written into verdicts.json by hand: not what the run replays.
-    const forged = { ...ballot!, vote: "advisory" as const, missingFact: "forged" };
+    const forged = ok(parseVerificationVerdicts([{ ...ballot!, vote: "advisory", missingFact: "forged" }]))[0]!;
     expect(decide([forged], proofOf(run, () => attestationOf(forged))).blockers.join()).toContain("does not hold exactly the ballots");
     // A run issued for another audit proves nothing here.
-    const foreign = admitCachedBallots({ audit: { ...AUDIT, runId: "run-9" }, verdicts: run.result.ballots,
+    const foreign = admitCachedBallots({ audit: auditOf({ runId: "run-9" }), verdicts: run.result.ballots,
       proofs: new Map([[run.registration.runId, proofOf(run, () => attestationOf(ballot!))]]) });
     expect(foreign.blockers.join()).toContain("not this audit");
     // No proof read at all.
@@ -426,6 +476,18 @@ describe("capture attestations (B)", () => {
     expect(ballotsAttested([ballot], "/runs/r", () => ({ kind: "attested", attestation })).ok).toBe(true);
     expect(captureAttestationOf({ ...authority, program: "refutation-panel" } as never, receipt, "/runs/r")).toBeNull();
     expect(captureAttestationOf({ ...authority, role: "security-hunter-agent" } as never, receipt, "/runs/r")?.ok).toBe(false);
+  });
+
+  it("mints a fresh capture's attestation with the store's own field bounds", () => {
+    // One constructor: a harness-supplied native id outside the stored grammar
+    // is refused at capture, not written and then refused on every read.
+    const unbounded = captureAttestationOf(authority, { ...receipt, nativeId: "x".repeat(1_025) }, "/runs/r");
+    expect(unbounded?.ok ? "" : unbounded?.error).toContain("names a malformed run, request, slot or native id");
+    expect(captureAttestationOf(authority, receipt, "relative/run")?.ok).toBe(false);
+    expect(mintCaptureAttestation({
+      runId: "r", runDirectory: "/runs/r", requestId: "q", slotId: "s", attempt: 3, harness: "claude",
+      nativeId: "n", digest: "c".repeat(64), byteLength: 1,
+    }).ok).toBe(false);
   });
 
   it("fails closed on a malformed, renamed or non-canonical record", () => {

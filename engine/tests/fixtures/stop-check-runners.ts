@@ -95,17 +95,24 @@ export type ObservedRunOptions = Readonly<{
   digestOf?: Uint8Array;
 }>;
 
+/** The report a run leaves, as the production parser reads it: none owed,
+ *  owed but missing, or produced with a digest of the bytes it left. */
+type ObservedReport =
+  | Readonly<{ kind: "not-required" }>
+  | Readonly<{ kind: "missing"; path: string }>
+  | Readonly<{ kind: "produced"; path: string; digest: string; byteLength: number }>;
+
+/** The report a run leaves under `policy`, with `digested`'s digest when produced. */
+function observedReport(policy: StopCheckCommand["reportPolicy"], digested: Uint8Array | null): ObservedReport {
+  if (policy.kind === "not-required") return { kind: "not-required" };
+  if (digested === null) return { kind: "missing", path: policy.path };
+  return { kind: "produced", path: policy.path, digest: sha256Bytes(digested), byteLength: digested.byteLength };
+}
+
 /** `command` having run, leaving `bytes` as its report, or no report when null. */
 export function observedRun(command: StopCheckCommand, bytes: Uint8Array | null, options: ObservedRunOptions = {}): CompletionCheckRunnerResult {
   const report = observedReport(command.reportPolicy, options.digestOf ?? bytes);
   return parsedRun({ checkId: command.checkId, scope: "wave", outcome: { kind: "observed", ...(options.ending ?? CLEAN_EXIT), report } }, options.stdoutTail);
-}
-
-/** The report a run leaves under `policy`: none owed, owed but missing, or produced with `digested`'s digest. */
-function observedReport(policy: StopCheckCommand["reportPolicy"], digested: Uint8Array | null): Readonly<Record<string, unknown>> {
-  if (policy.kind === "not-required") return { kind: "not-required" };
-  if (digested === null) return { kind: "missing", path: policy.path };
-  return { kind: "produced", path: policy.path, digest: sha256Bytes(digested), byteLength: digested.byteLength };
 }
 
 export type RecordingStopCheckPortsOptions = Readonly<{

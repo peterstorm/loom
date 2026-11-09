@@ -279,6 +279,43 @@ export const EFFECT_RECEIPT_FIELDS = Object.freeze([
 type BaseEffect = Readonly<{ effectId: EffectId; runId: OrchestrationRunId }>;
 type EnvelopeRecord = Readonly<Record<string, unknown>>;
 
+/** A protected wave-state revision: a non-negative safe integer. `name` is the
+ *  field's own name, `field` its reported path. */
+function parseRevision(raw: unknown, field: string, name: string): DomainResult<number, ReconciliationParseError> {
+  return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0
+    ? success(raw)
+    : reconciliationFailure(field, `${name} must be a non-negative safe integer`);
+}
+
+/** How one identity list is parsed and reported: each entry's parser, the
+ *  identity entries must not share, and the messages for an empty list and a
+ *  duplicate identity. */
+type UniqueListRule<T> = Readonly<{
+  field: string;
+  emptyMessage: string;
+  parseEntry: (entry: unknown, index: number) => DomainResult<T, ReconciliationParseError>;
+  identity: (value: T) => string;
+  duplicateField: string;
+  duplicateMessage: string;
+}>;
+
+/** A dense, non-empty list whose entries all parse and whose identities are
+ *  unique — the shape of every request-identity list an effect carries. */
+function parseUniqueNonEmptyList<T>(raw: unknown, rule: UniqueListRule<T>): DomainResult<NonEmpty<T>, ReconciliationParseError> {
+  const entries = readDenseDataArray(raw, rule.field);
+  if (!entries.ok || entries.value.length === 0) {
+    return reconciliationFailure(rule.field, entries.ok ? rule.emptyMessage : entries.error.message);
+  }
+  const values: T[] = [];
+  for (let index = 0; index < entries.value.length; index++) {
+    const parsed = rule.parseEntry(entries.value[index], index);
+    if (!parsed.ok) return parsed;
+    values.push(parsed.value);
+  }
+  if (new Set(values.map(rule.identity)).size !== values.length) return reconciliationFailure(rule.duplicateField, rule.duplicateMessage);
+  return success(Object.freeze(values) as NonEmpty<T>);
+}
+
 function parsePublishArtifactSetIntent(envelope: EnvelopeRecord, base: BaseEffect): DomainResult<EffectIntent, ReconciliationParseError> {
   const intent = reconciliationRecord(envelope, ["kind", "effectId", "runId", "artifacts"], "intent");
   if (!intent.ok) return intent;
@@ -292,31 +329,31 @@ function parsePublishArtifactSetIntent(envelope: EnvelopeRecord, base: BaseEffec
 function parseCommitProtectedWaveStateIntent(envelope: EnvelopeRecord, base: BaseEffect): DomainResult<EffectIntent, ReconciliationParseError> {
   const intent = reconciliationRecord(envelope, ["kind", "effectId", "runId", "expectedRevision", "stateDigest"], "intent");
   if (!intent.ok) return intent;
-  const revision = intent.value.expectedRevision;
-  if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
-    return reconciliationFailure("intent.expectedRevision", "expectedRevision must be a non-negative safe integer");
-  }
+  const revision = parseRevision(intent.value.expectedRevision, "intent.expectedRevision", "expectedRevision");
+  if (!revision.ok) return revision;
   const stateDigest = parseArtifactDigest(intent.value.stateDigest);
   if (!stateDigest.ok) return reconciliationFailure("intent.stateDigest", stateDigest.error.message);
-  return success(canonicalRecord({ kind: "commit-protected-wave-state", ...base, expectedRevision: revision, stateDigest: stateDigest.value }));
+  return success(canonicalRecord({ kind: "commit-protected-wave-state", ...base, expectedRevision: revision.value, stateDigest: stateDigest.value }));
 }
 
 function parseReserveAgentRequestsIntent(envelope: EnvelopeRecord, base: BaseEffect): DomainResult<EffectIntent, ReconciliationParseError> {
   const intent = reconciliationRecord(envelope, ["kind", "effectId", "runId", "requests"], "intent");
   if (!intent.ok) return intent;
-  const entries = readDenseDataArray(intent.value.requests, "intent.requests");
-  if (!entries.ok || entries.value.length === 0) {
-    return reconciliationFailure("intent.requests", entries.ok ? "requests must be non-empty" : entries.error.message);
-  }
-  const requests: AgentRequestAuthority[] = [];
-  for (let index = 0; index < entries.value.length; index++) {
-    const parsed = parseStoredAgentRequestAuthority(entries.value[index]);
-    if (!parsed.ok) return reconciliationFailure(`intent.requests[${index}]`, parsed.error.violations.map(({ message }) => message).join("; "));
-    if (parsed.value.runId !== base.runId) return reconciliationFailure(`intent.requests[${index}].runId`, "request belongs to another run");
-    requests.push(parsed.value);
-  }
-  if (new Set(requests.map(({ requestId }) => requestId)).size !== requests.length) return reconciliationFailure("intent.requests.requestId", "request IDs must be unique");
-  return success(canonicalRecord({ kind: "reserve-agent-requests", ...base, requests: Object.freeze(requests) as NonEmpty<AgentRequestAuthority> }));
+  const requests = parseUniqueNonEmptyList<AgentRequestAuthority>(intent.value.requests, {
+    field: "intent.requests",
+    emptyMessage: "requests must be non-empty",
+    parseEntry: (entry, index) => {
+      const parsed = parseStoredAgentRequestAuthority(entry);
+      if (!parsed.ok) return reconciliationFailure(`intent.requests[${index}]`, parsed.error.violations.map(({ message }) => message).join("; "));
+      if (parsed.value.runId !== base.runId) return reconciliationFailure(`intent.requests[${index}].runId`, "request belongs to another run");
+      return success(parsed.value);
+    },
+    identity: ({ requestId }) => requestId,
+    duplicateField: "intent.requests.requestId",
+    duplicateMessage: "request IDs must be unique",
+  });
+  if (!requests.ok) return requests;
+  return success(canonicalRecord({ kind: "reserve-agent-requests", ...base, requests: requests.value }));
 }
 
 export function parseEffectIntent(raw: unknown): DomainResult<EffectIntent, ReconciliationParseError> {
@@ -365,30 +402,29 @@ export function parseEffectIntent(raw: unknown): DomainResult<EffectIntent, Reco
 function parseProtectedWaveStateCommittedReceipt(envelope: EnvelopeRecord, base: BaseEffect): DomainResult<EffectReceipt, ReconciliationParseError> {
   const receipt = reconciliationRecord(envelope, ["kind", "effectId", "runId", "committedRevision", "stateDigest"], "receipt");
   if (!receipt.ok) return receipt;
-  const revision = receipt.value.committedRevision;
-  if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
-    return reconciliationFailure("receipt.committedRevision", "committedRevision must be a non-negative safe integer");
-  }
+  const revision = parseRevision(receipt.value.committedRevision, "receipt.committedRevision", "committedRevision");
+  if (!revision.ok) return revision;
   const stateDigest = parseArtifactDigest(receipt.value.stateDigest);
   if (!stateDigest.ok) return reconciliationFailure("receipt.stateDigest", stateDigest.error.message);
-  return success(canonicalRecord({ kind: "protected-wave-state-committed", ...base, committedRevision: revision, stateDigest: stateDigest.value }));
+  return success(canonicalRecord({ kind: "protected-wave-state-committed", ...base, committedRevision: revision.value, stateDigest: stateDigest.value }));
 }
 
 function parseAgentRequestsReservedReceipt(envelope: EnvelopeRecord, base: BaseEffect): DomainResult<EffectReceipt, ReconciliationParseError> {
   const receipt = reconciliationRecord(envelope, ["kind", "effectId", "runId", "requestIds"], "receipt");
   if (!receipt.ok) return receipt;
-  const entries = readDenseDataArray(receipt.value.requestIds, "receipt.requestIds");
-  if (!entries.ok || entries.value.length === 0) {
-    return reconciliationFailure("receipt.requestIds", entries.ok ? "requestIds must be non-empty" : entries.error.message);
-  }
-  const requestIds: RequestId[] = [];
-  for (let index = 0; index < entries.value.length; index++) {
-    const parsed = parseRequestId(entries.value[index]);
-    if (!parsed.ok) return reconciliationFailure(`receipt.requestIds[${index}]`, parsed.error.message);
-    requestIds.push(parsed.value);
-  }
-  if (new Set(requestIds).size !== requestIds.length) return reconciliationFailure("receipt.requestIds", "requestIds must be unique");
-  return success(canonicalRecord({ kind: "agent-requests-reserved", ...base, requestIds: Object.freeze(requestIds) as NonEmpty<RequestId> }));
+  const requestIds = parseUniqueNonEmptyList<RequestId>(receipt.value.requestIds, {
+    field: "receipt.requestIds",
+    emptyMessage: "requestIds must be non-empty",
+    parseEntry: (entry, index) => {
+      const parsed = parseRequestId(entry);
+      return parsed.ok ? success(parsed.value) : reconciliationFailure(`receipt.requestIds[${index}]`, parsed.error.message);
+    },
+    identity: (requestId) => requestId,
+    duplicateField: "receipt.requestIds",
+    duplicateMessage: "requestIds must be unique",
+  });
+  if (!requestIds.ok) return requestIds;
+  return success(canonicalRecord({ kind: "agent-requests-reserved", ...base, requestIds: requestIds.value }));
 }
 
 export function parseEffectReceipt(raw: unknown): DomainResult<EffectReceipt, ReconciliationParseError> {
@@ -469,6 +505,38 @@ function capturedTranscriptMismatch(intent: CaptureRawTranscript, receipt: Effec
   return null;
 }
 
+function committedStateMismatch(intent: CommitProtectedWaveState, receipt: EffectReceipt): ReconciliationParseError | null {
+  if (receipt.kind !== "protected-wave-state-committed") return { field: "receipt.kind", message: `expected protected-wave-state-committed, received ${receipt.kind}` };
+  if (receipt.committedRevision !== intent.expectedRevision + 1) return { field: "receipt.committedRevision", message: "committed revision does not advance expected revision" };
+  if (receipt.stateDigest !== intent.stateDigest) return { field: "receipt.stateDigest", message: "state digest mismatch" };
+  return null;
+}
+
+function reservedRequestsMismatch(intent: ReserveAgentRequests, receipt: EffectReceipt): ReconciliationParseError | null {
+  if (receipt.kind !== "agent-requests-reserved") return { field: "receipt.kind", message: `expected agent-requests-reserved, received ${receipt.kind}` };
+  if (receipt.requestIds.length !== intent.requests.length) return { field: "receipt.requestIds", message: "reserved request count mismatch" };
+  for (let index = 0; index < intent.requests.length; index++) {
+    if (receipt.requestIds[index] !== intent.requests[index]!.requestId) return { field: `receipt.requestIds[${index}]`, message: "reserved request identity or order mismatch" };
+  }
+  return null;
+}
+
+function inspectedPathsMismatch(intent: InspectGitRemediation, receipt: EffectReceipt): ReconciliationParseError | null {
+  if (receipt.kind !== "git-remediation-inspected") return { field: "receipt.kind", message: `expected git-remediation-inspected, received ${receipt.kind}` };
+  if (receipt.paths.length !== intent.paths.length) return { field: "receipt.paths", message: "inspected path count mismatch" };
+  for (let index = 0; index < intent.paths.length; index++) {
+    if (!samePath(intent.paths[index]!, receipt.paths[index]!)) return { field: `receipt.paths[${index}]`, message: "inspected path identity or order mismatch" };
+  }
+  return null;
+}
+
+function installedIndexMismatch(intent: InstallVerifiedIndex, receipt: EffectReceipt): ReconciliationParseError | null {
+  if (receipt.kind !== "verified-index-installed") return { field: "receipt.kind", message: `expected verified-index-installed, received ${receipt.kind}` };
+  if (receipt.indexDigest !== intent.indexDigest) return { field: "receipt.indexDigest", message: "installed index digest mismatch" };
+  if (receipt.witnessDigest !== intent.witnessDigest) return { field: "receipt.witnessDigest", message: "installed witness digest mismatch" };
+  return null;
+}
+
 /**
  * Does `receipt` fail to answer `intent`? `null` means it answers exactly.
  *
@@ -488,31 +556,15 @@ export function receiptPayloadMismatch(intent: EffectIntent, receipt: EffectRece
     case "publish-artifact-set":
       return publishedArtifactsMismatch(intent, receipt);
     case "commit-protected-wave-state":
-      if (receipt.kind !== "protected-wave-state-committed") return { field: "receipt.kind", message: `expected protected-wave-state-committed, received ${receipt.kind}` };
-      if (receipt.committedRevision !== intent.expectedRevision + 1) return { field: "receipt.committedRevision", message: "committed revision does not advance expected revision" };
-      if (receipt.stateDigest !== intent.stateDigest) return { field: "receipt.stateDigest", message: "state digest mismatch" };
-      return null;
+      return committedStateMismatch(intent, receipt);
     case "reserve-agent-requests":
-      if (receipt.kind !== "agent-requests-reserved") return { field: "receipt.kind", message: `expected agent-requests-reserved, received ${receipt.kind}` };
-      if (receipt.requestIds.length !== intent.requests.length) return { field: "receipt.requestIds", message: "reserved request count mismatch" };
-      for (let index = 0; index < intent.requests.length; index++) {
-        if (receipt.requestIds[index] !== intent.requests[index]!.requestId) return { field: `receipt.requestIds[${index}]`, message: "reserved request identity or order mismatch" };
-      }
-      return null;
+      return reservedRequestsMismatch(intent, receipt);
     case "capture-raw-transcript":
       return capturedTranscriptMismatch(intent, receipt);
     case "inspect-git-remediation":
-      if (receipt.kind !== "git-remediation-inspected") return { field: "receipt.kind", message: `expected git-remediation-inspected, received ${receipt.kind}` };
-      if (receipt.paths.length !== intent.paths.length) return { field: "receipt.paths", message: "inspected path count mismatch" };
-      for (let index = 0; index < intent.paths.length; index++) {
-        if (!samePath(intent.paths[index]!, receipt.paths[index]!)) return { field: `receipt.paths[${index}]`, message: "inspected path identity or order mismatch" };
-      }
-      return null;
+      return inspectedPathsMismatch(intent, receipt);
     case "install-verified-index":
-      if (receipt.kind !== "verified-index-installed") return { field: "receipt.kind", message: `expected verified-index-installed, received ${receipt.kind}` };
-      if (receipt.indexDigest !== intent.indexDigest) return { field: "receipt.indexDigest", message: "installed index digest mismatch" };
-      if (receipt.witnessDigest !== intent.witnessDigest) return { field: "receipt.witnessDigest", message: "installed witness digest mismatch" };
-      return null;
+      return installedIndexMismatch(intent, receipt);
     default: {
       const unhandled: never = intent;
       return {

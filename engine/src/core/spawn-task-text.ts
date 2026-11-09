@@ -69,14 +69,15 @@ export const archivedReviewerInstructionPaths = (packageRoot: string, role: stri
     wirePath: join(packageRoot, "references", "reviewer-protocol-v1", "agents", "_shared", "wire-contract.md"),
   });
 
-/**
- * Spec-check and the security verifier (ADR-0067) consume their small authority
- * sections whole. A packet's section bytes live in the run's blob store, so they
- * are read only through the engine's digest-verifying section decoder,
- * delivered as an exact command.
- */
+/** Roles that read their small authority sections whole: spec-check and the security verifier (ADR-0067). */
 const SECTION_READERS: ReadonlySet<string> = new Set(["spec-check-invoker", "security-verifier-agent"]);
 
+/**
+ * The section-reader command line for a role that consumes its authority
+ * sections whole, or the empty string for every other role. A packet's section
+ * bytes live in the run's blob store, so they are read only through the engine's
+ * digest-verifying section decoder, delivered as an exact command.
+ */
 function contextSectionDelivery(facts: SpawnTaskFacts): string {
   if (!SECTION_READERS.has(facts.authority.role)) return "";
   const command = ["bun", join(facts.packageRoot, "scripts", "read-context-section.ts"),

@@ -141,7 +141,13 @@ transcript in the run must still hash to it.
    briefs of at most four; each brief is one verifier request on the
    `refutation` profile. When the current generation of a claim set is blocked
    or unimportable (a refused retry, a capture without its attestation),
-   `status` names the next generation — up to 16.
+   `status` names the next generation — up to 16 — and says why it retired
+   each earlier one: the prose prints one `verification run <run> is retired:
+   <reason>` line per dead run (it cannot be opened, its evidence cannot be
+   read — possibly transient —, it is blocked, or its result is unimportable)
+   before the start command, and `status --json` carries the same list as
+   `verification.retiredRuns` (`[{ "run", "reason" }]`, empty when no run is
+   retired). Read it before spending verifier spawns on a new generation.
 3. **Spawn the verifiers it issues.** The start returns a spawn batch; dispatch
    each request with its task verbatim. The harness captures each verifier's
    final message into its slot and attests it. A malformed answer gets one
@@ -176,7 +182,12 @@ every child agent carries an explicit environment marker (`LOOM_PI_SUBAGENT=1`
 on the extension's own `--mode rpc` children; `LOOM_PI_PARENT_PID` naming the
 launching session process on every process it spawns) — so the parent session
 is never affected, and a headless parent (`pi --mode json -p --no-session`
-started without the marker) is a parent.
+started without the marker) is a parent. The `LOOM_PI_PARENT_PID` path rests on
+the installed subagent launcher copying the parent's environment into each
+child; a launcher that drops it yields an unmarked child, which is a parent and
+runs ungated. The extension cannot decide the role from launch flags, but it
+writes a one-time stderr notice when it loads in a process launched like a
+headless child (`--mode json|rpc`, `--no-session`) that carries no marker.
 
 - **Helper operations.** A subagent may run only the read-only operations:
   `security-audit nonce|status|findings` and the read-only `orchestration`
@@ -201,7 +212,9 @@ started without the marker) is a parent.
   `command`, `builtin`, `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `env`,
   `sudo`, …), `coproc` and `!`; programs a shell is fed through a pipe, a
   here-string, an input redirect, a script file argument, `source`/`.` or an
-  executed `./x.sh` (read at decision time, bounded, regular files only);
+  executed `./x.sh` (read at decision time, bounded, regular files only, in
+  every directory a `cd`/`pushd` on the same line may lead to — the Pi import
+  gate below reads them in the same places);
   `find -exec` and `xargs`; and interpreter code (`python -c`, `node -e/-p`,
   `bun -e`, `perl -e`, `ruby -e`, awk) that invokes a writing helper operation
   or a hook route, or imports an engine authority module.
@@ -216,13 +229,13 @@ pins each of these as a known gap. None of them can produce an *attested*
 capture.
 
 **Pi's import gate.** On Pi, the parent's `helper security-audit verify --from
-<run>` is checked before it runs. The extension's in-process Trusted Review
-Witness is consulted first; when it cannot prove the run (the run was captured
-before this Pi process restarted, or by another session), the import is proven
-the way `verify --from` proves it — `result.json` replayed byte for byte and
-every ballot matched to its persisted capture attestation. The persisted
-attestation is the authority on both harnesses, so a restart no longer strands a
-correctly captured run. The gate reads the import's `--out` and `--from`
+<run>` is checked before it runs, by the same proof `verify --from` itself runs
+(`proveVerificationSource`): `result.json` replayed byte for byte from the run's
+evidence and every ballot matched to its persisted capture attestation. The
+persisted attestation is the one authority on both harnesses — the extension
+keeps no in-process witness of verification runs — so a restart or another
+session never strands a correctly captured run, and the gate and the CLI cannot
+disagree about one. The gate reads the import's `--out` and `--from`
 statically: spell `--out` as the absolute run directory and `--from` as the run
 name (as `status` prints them); a value the shell completes at runtime, or an
 import fed to a shell through a script, pipe or here-string, is blocked.
@@ -375,8 +388,26 @@ observed only when its receipt says:
 gates: a user namespace cannot remount a superblock it does not own, so gating
 on them would refuse every run. They are reported rather than claimed closed.
 
+`loopbackUp` is **recorded, not gated**: whether `ip link set lo up` succeeded
+inside the network namespace, observed before the command starts. No external
+network exists either way, so a dead loopback leaves the isolation intact and
+the run can still count — but a command that probes a local service then fails
+for a reason the receipt names, instead of reading as a healthy run. The ledger
+epoch view prints it on the SandboxRun detail line (`network namespace,
+loopback up yes|no; …`).
+
 Every enforcement fact comes from one line the sandbox's inner shell prints
-before the command starts. That shell is PID 1 of the sandbox's pid namespace,
+before the command starts:
+
+```
+LOOM-SANDBOX-LIMITS target_ro=<0|1> root_ro=<0|1> home_ro=<0|1> cpu=<0|1> mem=<0|1> procs=<0|1> files=<0|1> lo=<0|1> unremounted=<n>
+```
+
+`lo=` is the loopback fact (`loopbackUp`); the others map to `targetReadOnly`,
+`readOnlyRoot`, `homeReadOnly`, the four `enforced` limits and
+`unremountedMounts`. A missing or malformed line reads every fact as `0` —
+nothing enforced, nothing closed, loopback down — so a sandbox that died early
+never reads as bounded. That shell is PID 1 of the sandbox's pid namespace,
 so it points its own stdout and stderr at `/dev/null` right after printing the
 line: once the command runs, no process inside the sandbox holds the stream the
 facts are read from, and a write to `/proc/1/fd/1` cannot append a forged line.

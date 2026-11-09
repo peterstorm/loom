@@ -43,10 +43,12 @@ import {
   isSafeSourcePath,
   isSecurityAgentId,
   isSecurityFingerprint,
+  isOneOf,
   isVisibleText,
   isWireRecord,
   parseCoverageRefs,
   parsePriorRecordFacts,
+  unknownFieldViolations,
   wireStringList,
   wireViolation,
   type CoverageRefs,
@@ -73,15 +75,47 @@ export type CoverageStatus = (typeof COVERAGE_STATUSES)[number];
  *  `match(...).exhaustive()` THROWS on an unknown tag — so a validator checks
  *  membership first and ends its state analysis there, rather than crashing on
  *  the document it was asked to judge. */
-export const isCoverageStatus = (value: unknown): value is CoverageStatus =>
-  typeof value === "string" && (COVERAGE_STATUSES as readonly string[]).includes(value);
+export const isCoverageStatus = (value: unknown): value is CoverageStatus => isOneOf(COVERAGE_STATUSES, value);
 
-/** The three ways an assigned unit can settle with evidence. */
+/** The three dispositions a hunter may settle an assigned unit with — the end
+ *  of a HUNT, each with evidence. Not the end of a unit's lifecycle: a
+ *  `blocked` unit still awaits a decision (see `COVERAGE_PHASES`). */
 export const TERMINAL_DISPOSITIONS = ["covered", "candidate", "blocked"] as const;
 export type TerminalDisposition = (typeof TERMINAL_DISPOSITIONS)[number];
 
-const isTerminalDisposition = (value: unknown): value is TerminalDisposition =>
-  typeof value === "string" && (TERMINAL_DISPOSITIONS as readonly string[]).includes(value);
+const isTerminalDisposition = (value: unknown): value is TerminalDisposition => isOneOf(TERMINAL_DISPOSITIONS, value);
+
+/** Where a unit stands in the run's completeness claim. */
+type CoveragePhase =
+  /** Planned, not yet assigned. */
+  | "awaiting-hunt"
+  /** Assigned, the hunt not yet settled. */
+  | "hunting"
+  /** The hunt ended `blocked`: only a critic's reassignment (then a new hunt,
+   *  or a deferral) moves it on. */
+  | "awaiting-decision"
+  /** Nothing left to do: hunted with evidence, or settled without a hunt
+   *  (`not_applicable`, `out_of_scope`). */
+  | "settled"
+  /** Settled as a gap with a reason: the run reports it, never claims it. */
+  | "disclosed-gap";
+
+/** The one statement of the coverage lifecycle: every status's phase. Total
+ *  over `CoverageStatus` by type, and `coverageSettled`, `coverageComplete`
+ *  and `runStatusOf` are all read from it, so the completeness claim the report
+ *  rests on has one definition. */
+const COVERAGE_PHASES: Readonly<Record<CoverageStatus, CoveragePhase>> = {
+  planned: "awaiting-hunt",
+  in_progress: "hunting",
+  blocked: "awaiting-decision",
+  covered: "settled",
+  candidate: "settled",
+  not_applicable: "settled",
+  out_of_scope: "settled",
+  deferred: "disclosed-gap",
+};
+
+const phaseOf = (unit: CoverageUnit): CoveragePhase => COVERAGE_PHASES[unit.status];
 
 export type LocalCheck = Readonly<{
   agent_id: string;
@@ -186,7 +220,9 @@ export function seedCoverageUnit(seed: CoverageSeed): DomainResult<CoverageUnit,
     return failure(invalid(violations));
   }
   const value = refs.value;
-  if (value.lifecycle !== undefined && seed.lifecycle !== undefined && value.lifecycle !== seed.lifecycle) {
+  // A seed that names a lifecycle its refs do not carry (or carry differently)
+  // would seed the lifecycle-less cell — a different cell than it named.
+  if (seed.lifecycle !== undefined && value.lifecycle !== seed.lifecycle) {
     violations.push(wireViolation("lifecycle", "lifecycle and canonical_refs.lifecycle disagree"));
   }
   checkSeedEvidence(seed, violations);
@@ -330,42 +366,80 @@ function checkEntryArray(
   }
 }
 
-function validateLocalChecks(raw: unknown, path: string, violations: CoverageViolation[]): void {
+/** The keys one local check may carry: the ledger's own shape, which the
+ *  hunter's unit result uses verbatim. */
+export const CHECK_KEYS: readonly string[] = ["agent_id", "reviewed_paths", "invariant", "method", "result", "artifact"];
+
+/**
+ * THE local-check parser: one check, wherever it arrives — a hunter's unit
+ * result (`submit`) or a stored ledger (`parseLedger`/`validateLedger`) — read
+ * against one contract, so a malformed check is refused at the wire with the
+ * message the ledger would give. Every violation is recorded at `path`; the
+ * check comes back only when it holds none:
+ *
+ * - exactly `CHECK_KEYS`; a canonical owner id; at least one safe reviewed path;
+ *   visible invariant and result;
+ * - `method` is `source` or `local` — a check that claims neither source review
+ *   nor a receipt is not evidence;
+ * - a `source` check cites no artifact; a `local` check claims something
+ *   OBSERVED, so it names its receipt, under that check owner's own
+ *   `agents/<agent_id>/artifacts/` root.
+ */
+function parseLocalCheck(raw: unknown, path: string, violations: CoverageViolation[]): LocalCheck | null {
+  if (!isWireRecord(raw)) {
+    violations.push(wireViolation(path, "expected an object"));
+    return null;
+  }
+  const local: CoverageViolation[] = unknownFieldViolations(raw, CHECK_KEYS, path);
+  const owner = isSecurityAgentId(raw.agent_id) ? raw.agent_id : null;
+  if (owner === null) local.push(wireViolation(`${path}.agent_id`, "expected a canonical lowercase agent ID"));
+  const reviewedPaths = parseStringArray(raw.reviewed_paths);
+  if (!Array.isArray(raw.reviewed_paths)) {
+    local.push(wireViolation(`${path}.reviewed_paths`, "expected an array of source paths"));
+  } else if (raw.reviewed_paths.length === 0) {
+    local.push(wireViolation(`${path}.reviewed_paths`, "a check must review at least one path"));
+  }
+  const entries: readonly unknown[] = Array.isArray(raw.reviewed_paths) ? raw.reviewed_paths : [];
+  for (const reviewed of entries) {
+    if (!isSafeSourcePath(reviewed)) local.push(wireViolation(`${path}.reviewed_paths`, `unsafe source path ${JSON.stringify(reviewed)}`));
+  }
+  const invariant = visibleText(raw.invariant);
+  if (invariant === null) local.push(wireViolation(`${path}.invariant`, "invalid text"));
+  const result = visibleText(raw.result);
+  if (result === null) local.push(wireViolation(`${path}.result`, "invalid text"));
+  const method = parseCheckMethod(raw.method);
+  if (method === null) local.push(wireViolation(`${path}.method`, "expected source or local"));
+  const artifact = nullableString(raw.artifact);
+  if (artifact === undefined) local.push(wireViolation(`${path}.artifact`, "expected null or an artifacts path"));
+  if (method === "source" && raw.artifact !== null) local.push(wireViolation(`${path}.artifact`, "a source check must use null"));
+  if (method === "local" && typeof raw.artifact !== "string") {
+    local.push(wireViolation(`${path}.artifact`, "a local check must name its receipt"));
+  } else if (method === "local" && !isSafeOwnedArtifactPath(raw.artifact, raw.agent_id)) {
+    local.push(wireViolation(`${path}.artifact`, "a local check cites an artifact under its own agent's artifacts root"));
+  }
+  violations.push(...local);
+  if (local.length > 0 || owner === null || reviewedPaths === null || invariant === null || method === null ||
+      result === null || artifact === undefined) {
+    return null;
+  }
+  return { agent_id: owner, reviewed_paths: reviewedPaths, invariant, method, result, artifact };
+}
+
+/** A list of checks at `path`: an array within the collection limit, each
+ *  read by `parseLocalCheck`. The ledger's and the hunter wire's one reader. */
+function parseLocalChecks(raw: unknown, path: string, violations: CoverageViolation[]): readonly LocalCheck[] {
   if (!Array.isArray(raw)) {
     violations.push(wireViolation(path, "expected an array of checks"));
-    return;
+    return [];
   }
   const checks: readonly unknown[] = raw;
   if (checks.length > SECURITY_AUDIT_LIMITS.collectionItems) {
     violations.push(wireViolation(path, "too many checks"));
-    return;
+    return [];
   }
-  checks.forEach((check, index) => {
-    const base = `${path}[${index}]`;
-    if (!isWireRecord(check)) {
-      violations.push(wireViolation(base, "expected an object"));
-      return;
-    }
-    if (!isSecurityAgentId(check.agent_id)) violations.push(wireViolation(`${base}.agent_id`, "expected a canonical lowercase agent ID"));
-    // Totality: `reviewed_paths` arrives as raw JSON, so a missing or
-    // non-array value is a violation — never a `.length` on `undefined`.
-    const reviewedPaths: readonly unknown[] = Array.isArray(check.reviewed_paths) ? check.reviewed_paths : [];
-    if (!Array.isArray(check.reviewed_paths)) {
-      violations.push(wireViolation(`${base}.reviewed_paths`, "expected an array of source paths"));
-    } else if (reviewedPaths.length === 0) {
-      violations.push(wireViolation(`${base}.reviewed_paths`, "a check must review at least one path"));
-    }
-    for (const reviewed of reviewedPaths) {
-      if (!isSafeSourcePath(reviewed)) violations.push(wireViolation(`${base}.reviewed_paths`, `unsafe source path ${JSON.stringify(reviewed)}`));
-    }
-    if (!isVisibleText(check.invariant)) violations.push(wireViolation(`${base}.invariant`, "invalid text"));
-    if (!isVisibleText(check.result)) violations.push(wireViolation(`${base}.result`, "invalid text"));
-    if (check.method === "source" && check.artifact !== null) {
-      violations.push(wireViolation(`${base}.artifact`, "a source check must use null"));
-    }
-    if (check.method === "local" && !isSafeOwnedArtifactPath(check.artifact, check.agent_id)) {
-      violations.push(wireViolation(`${base}.artifact`, "a local check cites an artifact under its own agent's artifacts root"));
-    }
+  return checks.flatMap((check, index) => {
+    const parsed = parseLocalCheck(check, `${path}[${index}]`, violations);
+    return parsed === null ? [] : [parsed];
   });
 }
 
@@ -478,7 +552,7 @@ export function validateLedger(ledger: CoverageLedger): readonly CoverageViolati
     }
     const semanticKey = checkUnitIdentity(unit, base, violations);
     checkUnitFields(unit, base, violations);
-    validateLocalChecks(unit.local_checks, `${base}.local_checks`, violations);
+    parseLocalChecks(unit.local_checks, `${base}.local_checks`, violations);
     validatePathOwnership(unit, base, violations);
     validateStateInvariants(unit, base, violations);
     validateAttempts(unit, base, violations);
@@ -649,7 +723,7 @@ function checkArchivedAttempt(
   }
   const freshOwner = checkAttemptOwner(attempt.agent_id, path, history, violations);
   checkAttemptEvidence(attempt, path, violations);
-  checkSpentArtifacts(attempt.local_checks, path, history, violations);
+  checkEvidenceIsFresh(attempt.local_checks, { path, priorOwnerMessage: "prior owner evidence belongs in its earlier attempt", spend: true }, history, violations);
   // The attempt's own owner joins the prior set only AFTER its checks are read:
   // an attempt's evidence is its own, not a prior owner's.
   if (freshOwner !== null) history.owners.add(freshOwner);
@@ -679,7 +753,7 @@ function checkAttemptEvidence(attempt: Readonly<Record<string, unknown>>, path: 
   // One rule per collection, exactly as a live unit's: `checkEntryArray` reports
   // a non-array, an unsafe path and a duplicate once each.
   checkEntryArray(attempt.reviewed_paths, `${path}.reviewed_paths`, violations, "path", { allowEmpty: true });
-  validateLocalChecks(attempt.local_checks, `${path}.local_checks`, violations);
+  parseLocalChecks(attempt.local_checks, `${path}.local_checks`, violations);
   validatePathOwnership(attempt, path, violations);
   checkEntryArray(attempt.result_fingerprints, `${path}.result_fingerprints`, violations, "fingerprint", { allowEmpty: true });
   checkEntryArray(attempt.unresolved, `${path}.unresolved`, violations, "text", { allowEmpty: true });
@@ -687,24 +761,30 @@ function checkAttemptEvidence(attempt: Readonly<Record<string, unknown>>, path: 
   validateStateInvariants(attempt, path, violations);
 }
 
-/** An archived attempt's checks cite no earlier owner and no artifact an earlier
- *  attempt already spent; its own local artifacts join the spent set. */
-function checkSpentArtifacts(
+/**
+ * The one freshness rule for a list of checks against what earlier attempts
+ * spent: no check cites a prior owner, and none cites an artifact a prior
+ * attempt (or, for an archived attempt, an earlier check of its own) already
+ * spent. `spend` is the archived side's extra step — its local artifacts join
+ * the spent set as they are read, so a later attempt cannot cite them; the live
+ * attempt spends nothing.
+ */
+function checkEvidenceIsFresh(
   checks: unknown,
-  path: string,
+  at: Readonly<{ path: string; priorOwnerMessage: string; spend: boolean }>,
   history: AttemptHistory,
   violations: CoverageViolation[],
 ): void {
-  const attemptChecks: readonly unknown[] = Array.isArray(checks) ? checks : [];
-  attemptChecks.forEach((rawCheck, checkIndex) => {
+  const entries: readonly unknown[] = Array.isArray(checks) ? checks : [];
+  entries.forEach((rawCheck, index) => {
     if (!isWireRecord(rawCheck)) return;
     if (isSecurityAgentId(rawCheck.agent_id) && history.owners.has(rawCheck.agent_id)) {
-      violations.push(wireViolation(`${path}.local_checks[${checkIndex}].agent_id`, "prior owner evidence belongs in its earlier attempt"));
+      violations.push(wireViolation(`${at.path}.local_checks[${index}].agent_id`, at.priorOwnerMessage));
     }
     if (typeof rawCheck.artifact === "string" && history.artifacts.has(rawCheck.artifact)) {
-      violations.push(wireViolation(`${path}.local_checks[${checkIndex}].artifact`, "an archived artifact cannot be reused"));
+      violations.push(wireViolation(`${at.path}.local_checks[${index}].artifact`, "an archived artifact cannot be reused"));
     }
-    if (rawCheck.method === "local" && typeof rawCheck.artifact === "string") history.artifacts.add(rawCheck.artifact);
+    if (at.spend && rawCheck.method === "local" && typeof rawCheck.artifact === "string") history.artifacts.add(rawCheck.artifact);
   });
 }
 
@@ -719,16 +799,7 @@ function checkLiveEvidenceIsFresh(
   if (isSecurityAgentId(unit.agent_id) && history.owners.has(unit.agent_id)) {
     violations.push(wireViolation(`${base}.agent_id`, "the current owner must be fresh after a reassignment"));
   }
-  const liveChecks: readonly unknown[] = Array.isArray(unit.local_checks) ? unit.local_checks : [];
-  liveChecks.forEach((rawCheck, index) => {
-    if (!isWireRecord(rawCheck)) return;
-    if (isSecurityAgentId(rawCheck.agent_id) && history.owners.has(rawCheck.agent_id)) {
-      violations.push(wireViolation(`${base}.local_checks[${index}].agent_id`, "prior owner evidence must stay archived"));
-    }
-    if (typeof rawCheck.artifact === "string" && history.artifacts.has(rawCheck.artifact)) {
-      violations.push(wireViolation(`${base}.local_checks[${index}].artifact`, "an archived artifact cannot be reused"));
-    }
-  });
+  checkEvidenceIsFresh(unit.local_checks, { path: base, priorOwnerMessage: "prior owner evidence must stay archived", spend: false }, history, violations);
 }
 
 // --- Owner identity ---
@@ -919,29 +990,52 @@ export type CriticError =
   | Readonly<{ kind: "unplaceable-resolution"; fingerprint: string; reason: string }>;
 
 /**
- * Merge a coverage critic's proposals. Three effects, each mechanical:
+ * Merge a coverage critic's proposals. Three effects, each mechanical and each
+ * its own phase, applied in this order to the ledger the previous one left:
  *
- * - a proposal enters as `planned` unless its semantic tuple is already present
- *   (dedupe) — an existing canonical ID with *different* semantics is a
- *   collision the run reports rather than merges;
- * - a reassigned unit archives its live evidence into `attempts` with the
- *   critic's reason, increments its wave, and clears the live evidence, so the
- *   next hunter starts fresh by construction;
- * - a resolved prior lead is recorded on the unit that owns it.
+ * - `acceptProposals`: a proposal enters as `planned` unless its semantic tuple
+ *   is already present (dedupe) — an existing canonical ID with *different*
+ *   semantics is a collision the run reports rather than merges;
+ * - `reassignUnits`: a reassigned unit archives its live evidence into
+ *   `attempts` with the critic's reason, increments its wave, and clears the
+ *   live evidence, so the next hunter starts fresh by construction;
+ * - `resolveLeads`: a resolved prior lead is recorded on the unit that owns it.
  */
 export function mergeCritic(
   ledger: CoverageLedger,
   critic: CoverageCriticResult,
   options: Readonly<{ wave: number; reassignmentReasons: Readonly<Record<string, string>>; priorLeadOwners?: Readonly<Record<string, string>> }>,
 ): DomainResult<CriticMerge, CriticError> {
+  const proposals = acceptProposals(ledger, critic.missingUnits, options.wave);
+  if (!proposals.ok) return proposals;
+  const reassignment = reassignUnits(proposals.value.ledger, critic.reassignIds, options);
+  if (!reassignment.ok) return reassignment;
+  const resolution = resolveLeads(reassignment.value.ledger, critic.resolvedPriorLeads, options.priorLeadOwners ?? {});
+  if (!resolution.ok) return resolution;
+  const next = resolution.value.ledger;
+  const violations = validateLedger(next);
+  if (violations.length > 0) return failure(invalid(violations));
+  return success({
+    ledger: next,
+    accepted: proposals.value.accepted,
+    reassigned: reassignment.value.reassigned,
+    resolved: resolution.value.resolved,
+    collisions: proposals.value.collisions,
+  });
+}
+
+/** Phase 1: each missing unit the critic proposes, seeded `planned` at `wave`
+ *  unless its cell is already in the ledger. */
+function acceptProposals(
+  ledger: CoverageLedger,
+  proposals: readonly CoverageProposal[],
+  wave: number,
+): DomainResult<Readonly<{ ledger: CoverageLedger; accepted: readonly string[]; collisions: readonly string[] }>, CriticError> {
   let next = ledger;
   const accepted: string[] = [];
-  const reassigned: string[] = [];
-  const resolved: string[] = [];
   const collisions: string[] = [];
   const bySemantics = new Map(ledger.map((unit) => [coverageSemanticKey(unit.canonical_refs), unit.coverage_id]));
-
-  for (const proposal of critic.missingUnits) {
+  for (const proposal of proposals) {
     const refs = parseCoverageRefs(proposal.refs);
     if (!refs.ok) return failure(invalid([wireViolation("missingUnits", refs.error.message)]));
     const id = canonicalCoverageId(refs.value);
@@ -957,18 +1051,29 @@ export function mergeCritic(
       selected_companion_blocks: proposal.selectedCompanionBlocks,
       excluded_blocks: proposal.excludedBlocks,
       prior: null,
-      wave: options.wave,
+      wave,
     });
     if (!seeded.ok) return failure(invalid(seeded.error.violations));
     next = sortLedger([...next, seeded.value]);
     bySemantics.set(coverageSemanticKey(refs.value), id);
     accepted.push(id);
   }
+  return success({ ledger: next, accepted, collisions });
+}
 
-  for (const coverageId of critic.reassignIds) {
+/** Phase 2: each unit the critic reassigns, its settled attempt archived with
+ *  the critic's reason and the unit planned again one wave on. */
+function reassignUnits(
+  ledger: CoverageLedger,
+  coverageIds: readonly string[],
+  options: Readonly<{ wave: number; reassignmentReasons: Readonly<Record<string, string>> }>,
+): DomainResult<Readonly<{ ledger: CoverageLedger; reassigned: readonly string[] }>, CriticError> {
+  let next = ledger;
+  const reassigned: string[] = [];
+  for (const coverageId of coverageIds) {
     const unit = next.find((candidate) => candidate.coverage_id === coverageId);
     if (unit === undefined) return failure(invalid([wireViolation("reassignIds", `unknown coverage ID ${coverageId}`)]));
-    if (unit.status !== "covered" && unit.status !== "candidate" && unit.status !== "blocked") {
+    if (!isTerminalDisposition(unit.status)) {
       return failure({ kind: "reassign-unit-has-no-evidence" as const, coverageId, status: unit.status });
     }
     const reason = options.reassignmentReasons[coverageId];
@@ -995,9 +1100,20 @@ export function mergeCritic(
     });
     reassigned.push(coverageId);
   }
+  return success({ ledger: next, reassigned });
+}
 
-  for (const fingerprint of critic.resolvedPriorLeads) {
-    const ownerId = options.priorLeadOwners?.[fingerprint];
+/** Phase 3: each prior lead the critic resolved, removed from the unit that
+ *  carries it. A resolution the engine cannot place is a refusal. */
+function resolveLeads(
+  ledger: CoverageLedger,
+  fingerprints: readonly string[],
+  owners: Readonly<Record<string, string>>,
+): DomainResult<Readonly<{ ledger: CoverageLedger; resolved: readonly string[] }>, CriticError> {
+  let next = ledger;
+  const resolved: string[] = [];
+  for (const fingerprint of fingerprints) {
+    const ownerId = owners[fingerprint];
     if (ownerId === undefined) {
       return failure({ kind: "unplaceable-resolution" as const, fingerprint, reason: "no owning unit recorded" });
     }
@@ -1011,10 +1127,7 @@ export function mergeCritic(
     next = replaceUnit(next, { ...unit, unresolved: unit.unresolved.filter((entry) => entry !== fingerprint) });
     resolved.push(fingerprint);
   }
-
-  const violations = validateLedger(next);
-  if (violations.length > 0) return failure(invalid(violations));
-  return success({ ledger: next, accepted, reassigned, resolved, collisions });
+  return success({ ledger: next, resolved });
 }
 
 /** A ledger a transition produced, returned only once `validateLedger` holds
@@ -1073,6 +1186,23 @@ export function deferUnit(
 
 // --- Wire parsing ---
 
+/** The keys a seed may carry: exactly `CoverageSeed`'s fields. Keyed by the
+ *  type, so a seed field added there is a compile error here until the wire
+ *  admits it — and a key the type does not name is an "unknown field". */
+const SEED_FIELDS: Readonly<Record<keyof CoverageSeed, true>> = {
+  refs: true,
+  starting_paths: true,
+  ordinary_attack_class_block: true,
+  selected_companion_blocks: true,
+  excluded_blocks: true,
+  prior: true,
+  lifecycle: true,
+  wave: true,
+  status: true,
+  unresolved: true,
+};
+const SEED_KEYS: readonly string[] = Object.keys(SEED_FIELDS);
+
 /**
  * Parse the coverage units a run is seeded with.
  *
@@ -1103,10 +1233,12 @@ export function parseCoverageSeeds(
       violations.push(wireViolation(base, "expected an object"));
       return;
     }
-    const record = entry;
+    // Closed on purpose: a misspelled optional field (`lifeCycle`) would be
+    // dropped while the seed still parsed, seeding a different cell.
+    violations.push(...unknownFieldViolations(entry, SEED_KEYS, base));
     // Parsed, not cast: a seed whose refs are not a canonical tuple has no
     // identity, so nothing else about it can be checked against a cell.
-    const refs = parseCoverageRefs(record.refs);
+    const refs = parseCoverageRefs(entry.refs);
     if (!refs.ok) {
       violations.push(wireViolation(`${base}.canonical_refs`, refs.error.message));
       return;
@@ -1115,35 +1247,35 @@ export function parseCoverageSeeds(
     // a dropped `wave` or `lifecycle` would seed a different cell than the one
     // the enumeration wrote, and the document would still parse.
     const local: CoverageViolation[] = [];
-    const ordinaryBlock = record.ordinary_attack_class_block;
-    if (ordinaryBlock !== undefined && ordinaryBlock !== null && !isVisibleText(ordinaryBlock)) {
+    const ordinaryBlock = optionalVisibleText(entry.ordinary_attack_class_block);
+    if (ordinaryBlock === undefined) {
       local.push(wireViolation(`${base}.ordinary_attack_class_block`, "expected null or visible text"));
     }
-    if (record.status !== undefined && !isCoverageStatus(record.status)) {
-      local.push(wireViolation(`${base}.status`, `invalid value ${JSON.stringify(record.status)}`));
+    if (entry.status !== undefined && !isCoverageStatus(entry.status)) {
+      local.push(wireViolation(`${base}.status`, `invalid value ${JSON.stringify(entry.status)}`));
     }
-    if (record.lifecycle !== undefined && typeof record.lifecycle !== "string") {
+    if (entry.lifecycle !== undefined && typeof entry.lifecycle !== "string") {
       local.push(wireViolation(`${base}.lifecycle`, "expected a string"));
     }
-    if (record.wave !== undefined && typeof record.wave !== "number") {
+    if (entry.wave !== undefined && typeof entry.wave !== "number") {
       local.push(wireViolation(`${base}.wave`, "expected a positive integer"));
     }
     // Parsed, not cast: `derivePriorStatus` matches the verdict exhaustively and
     // `.exhaustive()` throws on an unknown tag, so an unchecked `prior` aborted
     // `start` with a pattern-match error instead of a named violation.
-    const prior = parsePriorRecordFacts(record.prior);
+    const prior = parsePriorRecordFacts(entry.prior);
     if (!prior.ok) local.push(wireViolation(`${base}.${prior.error.path}`, prior.error.message));
     const seeded = seedCoverageUnit({
       refs: refs.value,
-      starting_paths: wireStringList(record.starting_paths, `${base}.starting_paths`, local),
-      ordinary_attack_class_block: typeof ordinaryBlock === "string" ? ordinaryBlock : null,
-      selected_companion_blocks: wireStringList(record.selected_companion_blocks, `${base}.selected_companion_blocks`, local),
-      excluded_blocks: parseExcludedBlocks(record.excluded_blocks, `${base}.excluded_blocks`, local),
+      starting_paths: wireStringList(entry.starting_paths, `${base}.starting_paths`, local),
+      ordinary_attack_class_block: ordinaryBlock ?? null,
+      selected_companion_blocks: wireStringList(entry.selected_companion_blocks, `${base}.selected_companion_blocks`, local),
+      excluded_blocks: parseExcludedBlocks(entry.excluded_blocks, `${base}.excluded_blocks`, local),
       prior: prior.ok ? prior.value : null,
-      unresolved: wireStringList(record.unresolved, `${base}.unresolved`, local),
-      ...(typeof record.lifecycle === "string" ? { lifecycle: record.lifecycle } : {}),
-      ...(typeof record.wave === "number" ? { wave: record.wave } : {}),
-      ...(isCoverageStatus(record.status) ? { status: record.status } : {}),
+      unresolved: wireStringList(entry.unresolved, `${base}.unresolved`, local),
+      ...(typeof entry.lifecycle === "string" ? { lifecycle: entry.lifecycle } : {}),
+      ...(typeof entry.wave === "number" ? { wave: entry.wave } : {}),
+      ...(isCoverageStatus(entry.status) ? { status: entry.status } : {}),
     });
     violations.push(...local);
     if (seeded.ok) units.push(seeded.value);
@@ -1203,41 +1335,56 @@ export type RunStatusProjection = Readonly<{
   incompleteReason: SecurityIncompleteReason | null;
 }>;
 
+/** Where an incomplete run's reason token came from: a deferred unit RECORDED
+ *  it, or no deferred unit named an upstream token and the run reports the
+ *  class a deferral belongs to — `inferred`, so the report says so rather than
+ *  attributing a cause the ledger never wrote. */
+export type IncompleteReasonSource = "recorded" | "inferred";
+
+/** The upstream token a deferred unit recorded as its reason, if any. */
+const recordedIncompleteReason = (ledger: CoverageLedger): SecurityIncompleteReason | undefined =>
+  ledger
+    .flatMap((unit) => (unit.status === "deferred" ? unit.unresolved : []))
+    .find((reason): reason is SecurityIncompleteReason => isOneOf(SECURITY_INCOMPLETE_REASONS, reason));
+
 /**
- * A run is `in_progress` until every unit is terminal, `complete` only when no
- * unit is a disclosed gap, and `incomplete` when settled coverage still holds
- * deferred units.
+ * A run is `in_progress` while any unit awaits a hunt, is being hunted, or
+ * ended its hunt `blocked` and awaits a critic's decision (`COVERAGE_PHASES`);
+ * `complete` once every unit is settled and none is a disclosed gap; and
+ * `incomplete` when settled coverage still holds deferred units.
  *
  * The reason comes from the deferred units' own recorded reason when it names an
  * upstream token; otherwise it is the class a deferral belongs to — coverage
- * stopped before the remaining units were verified. Nothing here invents a
- * cause: the ledger's prose stays authoritative and the report prints it beside
- * the token.
+ * stopped before the remaining units were verified — and
+ * `incompleteReasonSource` reports it as INFERRED, so the report never presents
+ * it as a cause the ledger recorded. The ledger's prose stays authoritative and
+ * the report prints it beside the token.
  */
 export function runStatusOf(ledger: CoverageLedger): RunStatusProjection {
   if (!coverageSettled(ledger)) return { runStatus: "in_progress", incompleteReason: null };
   if (coverageComplete(ledger)) return { runStatus: "complete", incompleteReason: null };
-  const recorded = ledger
-    .flatMap((unit) => (unit.status === "deferred" ? unit.unresolved : []))
-    .find((reason): reason is SecurityIncompleteReason =>
-      (SECURITY_INCOMPLETE_REASONS as readonly string[]).includes(reason));
-  return { runStatus: "incomplete", incompleteReason: recorded ?? "validation_budget_exhausted" };
+  return { runStatus: "incomplete", incompleteReason: recordedIncompleteReason(ledger) ?? "validation_budget_exhausted" };
 }
 
-/** A run may claim COMPLETE coverage only when nothing is planned, in progress,
- *  blocked or deferred. `not_applicable` and `out_of_scope` are settled.
- *  An empty ledger claims nothing: `every` over `[]` would call it complete. */
+/** Whether an incomplete run's reason was recorded by a deferred unit or
+ *  inferred by `runStatusOf`. `null` for a run that is not incomplete. */
+export function incompleteReasonSource(ledger: CoverageLedger): IncompleteReasonSource | null {
+  if (runStatusOf(ledger).runStatus !== "incomplete") return null;
+  return recordedIncompleteReason(ledger) === undefined ? "inferred" : "recorded";
+}
+
+/** A run may claim COMPLETE coverage only when every unit is `settled` — not
+ *  awaiting a hunt or a decision, not in flight, not a disclosed gap. An empty
+ *  ledger claims nothing: `every` over `[]` would call it complete. */
 export function coverageComplete(ledger: CoverageLedger): boolean {
-  return ledger.length > 0 && ledger.every((unit) =>
-    unit.status === "covered" || unit.status === "candidate" || unit.status === "not_applicable" || unit.status === "out_of_scope",
-  );
+  return ledger.length > 0 && ledger.every((unit) => phaseOf(unit) === "settled");
 }
 
-/** SETTLED coverage allows disclosed deferrals: every unit reached a terminal
- *  state, but some are gaps with a reason. A settled run reports; a complete
- *  run claims. An empty ledger is not settled coverage of anything. */
+/** SETTLED coverage allows disclosed deferrals: every unit reached `settled` or
+ *  `disclosed-gap`, so some may be gaps with a reason. A settled run reports; a
+ *  complete run claims. An empty ledger is not settled coverage of anything. */
 export function coverageSettled(ledger: CoverageLedger): boolean {
-  return ledger.length > 0 && ledger.every((unit) => unit.status !== "planned" && unit.status !== "in_progress" && unit.status !== "blocked");
+  return ledger.length > 0 && ledger.every((unit) => phaseOf(unit) === "settled" || phaseOf(unit) === "disclosed-gap");
 }
 
 // --- Field parsers: each one narrows, so a parsed record holds no cast ---
@@ -1263,60 +1410,15 @@ function nullableString(value: unknown): string | null | undefined {
 /** Visible prose, or null. */
 const visibleText = (value: unknown): string | null => (isVisibleText(value) ? value : null);
 
+/** An optional prose field: absent or `null` is `null`, visible prose is
+ *  itself, and anything else is `undefined` — malformed, for the caller to name. */
+function optionalVisibleText(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return null;
+  return isVisibleText(value) ? value : undefined;
+}
+
 /** A canonical agent id, or null. */
 const agentId = (value: unknown): string | null => (isSecurityAgentId(value) ? value : null);
-
-/** Every key a record carries that the allowlist does not name. */
-const unknownFields = (record: Readonly<Record<string, unknown>>, allowed: readonly string[], base: string): readonly CoverageViolation[] =>
-  Object.keys(record).filter((key) => !allowed.includes(key)).map((key) => wireViolation(`${base}.${key}`, "unknown field"));
-
-/** One check as it arrives on the wire, validated field by field. Split from
- *  `parseUnitResults` because a check's fields fail for different reasons than a
- *  unit's, and a violation naming `units[0].checks[1].artifact` is a shorter
- *  path to the defect than one naming the unit again. */
-function parseCheck(item: Readonly<Record<string, unknown>>, path: string, violations: CoverageViolation[]): LocalCheck | null {
-  const local: CoverageViolation[] = [...unknownFields(item, CHECK_KEYS, path)];
-  const owner = agentId(item.agent_id);
-  if (owner === null) local.push(wireViolation(`${path}.agent_id`, "expected a catalog agent id"));
-  const reviewedPaths = parseStringArray(item.reviewed_paths);
-  if (reviewedPaths === null) local.push(wireViolation(`${path}.reviewed_paths`, "expected an array of source paths"));
-  const invariant = visibleText(item.invariant);
-  if (invariant === null) local.push(wireViolation(`${path}.invariant`, "requires visible prose"));
-  const method = parseCheckMethod(item.method);
-  if (method === null) local.push(wireViolation(`${path}.method`, "expected source or local"));
-  const result = visibleText(item.result);
-  if (result === null) local.push(wireViolation(`${path}.result`, "requires visible prose"));
-  const artifact = nullableString(item.artifact);
-  if (artifact === undefined) local.push(wireViolation(`${path}.artifact`, "expected null or an artifacts path"));
-  // A local check is the one that claims something OBSERVED, so it must name
-  // the receipt: `local` with `artifact: null` is a claim with no proof.
-  if (item.method === "local" && typeof item.artifact !== "string") {
-    local.push(wireViolation(`${path}.artifact`, "a local check must name its receipt"));
-  }
-  violations.push(...local);
-  if (local.length > 0 || owner === null || reviewedPaths === null || invariant === null || method === null ||
-      result === null || artifact === undefined) {
-    return null;
-  }
-  return { agent_id: owner, reviewed_paths: reviewedPaths, invariant, method, result, artifact };
-}
-
-/** A unit result's checks: an array of check objects, each parsed in place. */
-function parseChecks(raw: unknown, base: string, violations: CoverageViolation[]): readonly LocalCheck[] {
-  if (!Array.isArray(raw)) {
-    violations.push(wireViolation(`${base}.checks`, "expected an array of local checks"));
-    return [];
-  }
-  return raw.flatMap((check: unknown, checkIndex) => {
-    const path = `${base}.checks[${checkIndex}]`;
-    if (!isWireRecord(check)) {
-      violations.push(wireViolation(path, "expected an object"));
-      return [];
-    }
-    const parsed = parseCheck(check, path, violations);
-    return parsed === null ? [] : [parsed];
-  });
-}
 
 /** The keys a hunter's unit result may carry. Closed on purpose: an invented
  *  spelling (`unitStatus`, `localChecks`) would otherwise be IGNORED while the
@@ -1327,12 +1429,9 @@ export const UNIT_RESULT_KEYS: readonly string[] = [
   "coverageId", "agentId", "wave", "status", "reviewedPaths", "checks", "fingerprints", "unresolved",
 ];
 
-/** The keys one local check may carry, mirroring the ledger's own shape. */
-export const CHECK_KEYS: readonly string[] = ["agent_id", "reviewed_paths", "invariant", "method", "result", "artifact"];
-
 /** One unit result, every field produced by a parser that narrows. */
 function parseUnitResult(record: Readonly<Record<string, unknown>>, base: string, violations: CoverageViolation[]): UnitResult | null {
-  const local: CoverageViolation[] = [...unknownFields(record, UNIT_RESULT_KEYS, base)];
+  const local: CoverageViolation[] = [...unknownFieldViolations(record, UNIT_RESULT_KEYS, base)];
   const coverageId = visibleText(record.coverageId);
   if (coverageId === null) local.push(wireViolation(`${base}.coverageId`, "expected the canonical coverage ID"));
   const owner = agentId(record.agentId);
@@ -1343,7 +1442,7 @@ function parseUnitResult(record: Readonly<Record<string, unknown>>, base: string
   if (status === null) local.push(wireViolation(`${base}.status`, "expected covered, candidate or blocked"));
   const reviewedPaths = parseStringArray(record.reviewedPaths);
   if (reviewedPaths === null) local.push(wireViolation(`${base}.reviewedPaths`, "expected an array of source paths"));
-  const checks = parseChecks(record.checks, base, local);
+  const checks = parseLocalChecks(record.checks, `${base}.checks`, local);
   const fingerprints = wireStringList(record.fingerprints, `${base}.fingerprints`, local);
   const unresolved = wireStringList(record.unresolved, `${base}.unresolved`, local);
   violations.push(...local);
@@ -1428,7 +1527,7 @@ function sortWireByFingerprint(raw: unknown): unknown {
  *  document that is not a hunter result is refused for being the wrong document,
  *  naming the kind the run expects. */
 function hunterEnvelopeViolations(record: Readonly<Record<string, unknown>>): readonly WireViolation[] {
-  const violations = [...unknownFields(record, HUNTER_RESULT_KEYS, "$")];
+  const violations = [...unknownFieldViolations(record, HUNTER_RESULT_KEYS, "$")];
   if (record.schemaVersion !== HUNTER_RESULT_SCHEMA_VERSION) {
     violations.push(wireViolation("schemaVersion", `expected ${HUNTER_RESULT_SCHEMA_VERSION}`));
   }
@@ -1537,35 +1636,31 @@ export function parseCriticResult(raw: unknown): DomainResult<CoverageCriticResu
   if (!isWireRecord(raw)) {
     return failure(invalid([wireViolation("critic", "expected an object")]));
   }
-  const record = raw;
-  const violations: CoverageViolation[] = [];
-  for (const key of Object.keys(record)) {
-    if (!CRITIC_KEYS.includes(key)) violations.push(wireViolation(`critic.${key}`, "unknown field"));
-  }
+  const violations: CoverageViolation[] = unknownFieldViolations(raw, CRITIC_KEYS, "critic");
   // Identity first: a document with no `kind` is a document the run cannot
   // prove came from the critic, and the critic's verdict is what licenses
   // `publish` to call a run complete.
-  if (record.schemaVersion !== 1) violations.push(wireViolation("critic.schemaVersion", "expected 1"));
-  if (record.kind !== "security-coverage-critic") {
+  if (raw.schemaVersion !== 1) violations.push(wireViolation("critic.schemaVersion", "expected 1"));
+  if (raw.kind !== "security-coverage-critic") {
     violations.push(wireViolation("critic.kind", "expected security-coverage-critic"));
   }
   // Required here; SHAPED by each collection's own parser below. A present
   // non-array is that parser's to report, so it is reported once.
   for (const key of CRITIC_COLLECTIONS) {
-    if (record[key] === undefined) violations.push(wireViolation(`critic.${key}`, "required: expected an array"));
+    if (raw[key] === undefined) violations.push(wireViolation(`critic.${key}`, "required: expected an array"));
   }
-  const proposals = parseProposals(record.missingUnits, violations);
-  if (record.stop !== undefined && typeof record.stop !== "boolean") {
+  const proposals = parseProposals(raw.missingUnits, violations);
+  if (raw.stop !== undefined && typeof raw.stop !== "boolean") {
     violations.push(wireViolation("critic.stop", "expected a boolean"));
   }
-  const reassignIds = wireStringList(record.reassignIds, "critic.reassignIds", violations);
-  const resolvedPriorLeads = wireStringList(record.resolvedPriorLeads, "critic.resolvedPriorLeads", violations);
+  const reassignIds = wireStringList(raw.reassignIds, "critic.reassignIds", violations);
+  const resolvedPriorLeads = wireStringList(raw.resolvedPriorLeads, "critic.resolvedPriorLeads", violations);
   if (violations.length > 0) return failure(invalid(violations));
   return success({
     missingUnits: proposals,
     reassignIds,
     resolvedPriorLeads,
-    stop: record.stop === true,
+    stop: raw.stop === true,
   });
 }
 
@@ -1583,7 +1678,7 @@ function parseProposals(raw: unknown, violations: CoverageViolation[]): readonly
       violations.push(wireViolation(base, "expected an object"));
       return [];
     }
-    violations.push(...unknownFields(entry, CRITIC_PROPOSAL_KEYS, base));
+    violations.push(...unknownFieldViolations(entry, CRITIC_PROPOSAL_KEYS, base));
     // Parsed, not cast: a proposal whose refs are not a canonical tuple names no
     // cell, so it is refused here with its own path rather than at the merge.
     const refs = parseCoverageRefs(entry.refs);
@@ -1591,8 +1686,13 @@ function parseProposals(raw: unknown, violations: CoverageViolation[]): readonly
     const startingPaths = wireStringList(entry.startingPaths, `${base}.startingPaths`, violations);
     const selectedCompanionBlocks = wireStringList(entry.selectedCompanionBlocks, `${base}.selectedCompanionBlocks`, violations);
     const excludedBlocks = parseExcludedBlocks(entry.excludedBlocks, `${base}.excludedBlocks`, violations);
-    if (!refs.ok) return [];
-    const ordinaryAttackClassBlock = typeof entry.ordinaryAttackClassBlock === "string" ? entry.ordinaryAttackClassBlock : null;
+    // A present-but-malformed block is a violation, never a silent `null`: a
+    // dropped block would seed the cell with no ordinary class behind it.
+    const ordinaryAttackClassBlock = optionalVisibleText(entry.ordinaryAttackClassBlock);
+    if (ordinaryAttackClassBlock === undefined) {
+      violations.push(wireViolation(`${base}.ordinaryAttackClassBlock`, "expected null or visible text"));
+    }
+    if (!refs.ok || ordinaryAttackClassBlock === undefined) return [];
     return [{ refs: refs.value, startingPaths, ordinaryAttackClassBlock, selectedCompanionBlocks, excludedBlocks }];
   });
 }

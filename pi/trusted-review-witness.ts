@@ -18,13 +18,6 @@
  * Verification considers only the current run for the root; rejection or a
  * missing capture never falls back to an older run; exact acceptance is
  * idempotent and retires the root's older witnesses.
- *
- * ADR-0067 generalises the witness to `security-verification` runs: result
- * capture records their witnesses the same way (any request-bound capture is
- * remembered under its run), and `verifySecurityVerification` proves a named
- * run — every captured verifier slot witnessed in-process with identical
- * authority and bytes, `result.json` equal to the replay of that evidence — so
- * a slot filled by anything but a witnessed spawn is refused.
  */
 
 import { createHash } from "node:crypto";
@@ -34,7 +27,6 @@ import { openRegisteredRunDirectory, type RunDirHandle } from "../engine/src/orc
 import {
   parseRegisteredFacadeProgram,
   readStandaloneReviewedSource,
-  replayVerificationResult,
   replayStandaloneCapturedEvidence,
   replayStandaloneResultFromEvidence,
 } from "../engine/src/handlers/helpers/programs";
@@ -77,23 +69,8 @@ export type TrustedReviewWitnesses = Readonly<{
   /** Replay the current run for `<cwd>/.claude/reviews/review-and-fix-runs`
    *  and return its receipt, or throw the refusal. */
   verify: (input: Readonly<{ cwd: string; sessionId: string }>) => Promise<LoomReviewAuthorityReceipt>;
-  /** Prove a finished security-verification run (ADR-0067) from this
-   *  session's witnesses: every captured slot was witnessed in-process with
-   *  identical authority and bytes, and `result.json` is exactly the result
-   *  that evidence replays. Throws the refusal. */
-  verifySecurityVerification: (input: Readonly<{ sessionId: string; runsRoot: string; runDirectory: string }>) =>
-    Promise<TrustedSecurityVerificationReceipt>;
   /** Session shutdown retires every witness the session accumulated. */
   forget: (sessionId: string) => void;
-}>;
-
-/** What a witnessed security-verification run proves: its result digest. */
-export type TrustedSecurityVerificationReceipt = Readonly<{
-  sessionId: string;
-  runId: string;
-  runDirectory: string;
-  requestIds: readonly string[];
-  resultDigest: string;
 }>;
 
 type TrustedReviewCapture = Readonly<{
@@ -158,44 +135,6 @@ function trustedCaptureProblem(handle: RunDirHandle, run: TrustedReviewRun): str
   return run.captures.size === 0 ? "no transcript capture was witnessed" : null;
 }
 
-/**
- * The security-verification replay under witnesses: the registration must be a
- * `security-verification` program, every captured slot witnessed, and
- * `result.json` byte-identical to the replay of that witnessed evidence.
- */
-async function verifyTrustedSecurityVerificationRun(
-  sessionId: string,
-  run: TrustedReviewRun,
-): Promise<TrustedSecurityVerificationReceipt> {
-  const refuse = (message: string): never => { throw new Error(`${run.binding.runId}: ${message}`); };
-  const opened = openRegisteredRunDirectory(run.binding.runsRoot, run.binding.runDirectory);
-  if (!opened.ok) return refuse(opened.error.message);
-  const programRaw = opened.value.readProgramRegistration();
-  if (!programRaw.ok || programRaw.value === null) return refuse(programRaw.ok ? "registered program is missing" : programRaw.error.message);
-  const program = parseRegisteredFacadeProgram(programRaw.value);
-  if (program.kind !== "registered" || program.program.kind !== "security-verification") {
-    return refuse("registered program is not a valid security-verification run");
-  }
-  const captureProblem = trustedCaptureProblem(opened.value, run);
-  if (captureProblem !== null) return refuse(captureProblem);
-  const replayed = await replayVerificationResult(opened.value, program.program);
-  if (!replayed.ok) return refuse(`engine evidence replay did not prove completion: ${replayed.message}`);
-  let resultBytes: Buffer;
-  try {
-    resultBytes = readRunBytesNoFollow(join(opened.value.runDirectory, "result.json"));
-  } catch (error) {
-    return refuse(`cannot read canonical result artifact: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  if (!resultBytes.equals(Buffer.from(replayed.value, "utf8"))) return refuse("result.json does not match the witnessed evidence replay");
-  return Object.freeze({
-    sessionId,
-    runId: run.binding.runId,
-    runDirectory: run.binding.runDirectory,
-    requestIds: Object.freeze([...new Set([...run.captures.values()].map(({ requestId }) => requestId))].sort()),
-    resultDigest: createHash("sha256").update(resultBytes).digest("hex"),
-  });
-}
-
 async function verifyTrustedReviewRun(
   input: Readonly<{ sessionId: string }>,
   run: TrustedReviewRun,
@@ -255,7 +194,7 @@ async function verifyTrustedReviewRun(
  *  derived in this one place. */
 type TrustedRunLocation = Readonly<{ rootIdentity: string; runIdentity: string }>;
 
-const trustedRunLocation = ({ runsRoot, runDirectory }: Pick<SessionRunBinding, "runsRoot" | "runDirectory">): TrustedRunLocation =>
+const trustedRunLocation = ({ runsRoot, runDirectory }: SessionRunBinding): TrustedRunLocation =>
   Object.freeze({ rootIdentity: resolve(runsRoot), runIdentity: `${runsRoot}\0${runDirectory}` });
 
 const EMPTY_TRUSTED_ROOT: TrustedReviewRoot = Object.freeze({ nextTouch: 1, runs: new Map<string, TrustedReviewRun>() });
@@ -358,19 +297,6 @@ function trustedWitnessStore() {
   });
 }
 
-/** Prove the named security-verification run from the session's witnesses. */
-function verifyWitnessedSecurityVerification(
-  store: ReturnType<typeof trustedWitnessStore>,
-  input: Readonly<{ sessionId: string; runsRoot: string; runDirectory: string }>,
-): Promise<TrustedSecurityVerificationReceipt> {
-  const { rootIdentity, runIdentity } = trustedRunLocation(input);
-  const run = store.rootOf(input.sessionId, rootIdentity)?.runs.get(runIdentity);
-  if (run === undefined) {
-    return Promise.reject(new Error(`no capture of security-verification run ${input.runDirectory} was witnessed in Pi session ${input.sessionId}`));
-  }
-  return verifyTrustedSecurityVerificationRun(input.sessionId, run);
-}
-
 /** Prove the session's current Standalone Review run for `cwd`. An exact
  *  acceptance is idempotent and retires the root's older witnesses so they can
  *  never make a later verification ambiguous or become fallback authority
@@ -423,7 +349,6 @@ export function createTrustedReviewWitnesses(): TrustedReviewWitnesses {
       });
     },
     verify: (input) => verifyWitnessedStandaloneReview(store, input),
-    verifySecurityVerification: (input) => verifyWitnessedSecurityVerification(store, input),
     forget: store.forget,
   });
 }

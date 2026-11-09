@@ -38,6 +38,36 @@ const UNPROVEN = [
   `}`,
 ].join("\n");
 
+/** A two-arm switch made total by a default arm that binds it to `never`. */
+const NEVER_DEFAULT = [
+  `function name(x: Event): string {`,
+  `  switch (x.kind) {`,
+  `    case "a":`,
+  `      return "a";`,
+  `    case "b":`,
+  `      return "b";`,
+  `    default: {`,
+  `      const unreachable: never = x;`,
+  `      return unreachable;`,
+  `    }`,
+  `  }`,
+  `}`,
+].join("\n");
+
+/** A two-arm switch made total by a default arm delegating to an exhaustive match. */
+const MATCH_DEFAULT = [
+  `function name(x: Event): string {`,
+  `  switch (x.kind) {`,
+  `    case "a":`,
+  `      return "a";`,
+  `    case "b":`,
+  `      return "b";`,
+  `    default:`,
+  `      return match(x).with({ kind: "c" }, () => "c").exhaustive();`,
+  `  }`,
+  `}`,
+].join("\n");
+
 /** Run the rule with the repo baseline out of the way — these tests are about
  *  the rule's judgement, not about which files happen to be grandfathered. */
 const lint = (
@@ -62,21 +92,7 @@ describe("switch-totality", () => {
   });
 
   it("accepts a default arm that binds the scrutinee to `never`", () => {
-    const source = [
-      `function name(x: Event): string {`,
-      `  switch (x.kind) {`,
-      `    case "a":`,
-      `      return "a";`,
-      `    case "b":`,
-      `      return "b";`,
-      `    default: {`,
-      `      const unreachable: never = x;`,
-      `      return unreachable;`,
-      `    }`,
-      `  }`,
-      `}`,
-    ].join("\n");
-    expect(lint(source)).toEqual([]);
+    expect(lint(NEVER_DEFAULT)).toEqual([]);
   });
 
   it("accepts assertNever in the default arm", () => {
@@ -96,19 +112,7 @@ describe("switch-totality", () => {
   });
 
   it("accepts a default arm that delegates the remaining variants to match(...).exhaustive()", () => {
-    const source = [
-      `function name(x: Event): string {`,
-      `  switch (x.kind) {`,
-      `    case "a":`,
-      `      return "a";`,
-      `    case "b":`,
-      `      return "b";`,
-      `    default:`,
-      `      return match(x).with({ kind: "c" }, () => "c").exhaustive();`,
-      `  }`,
-      `}`,
-    ].join("\n");
-    expect(lint(source)).toEqual([]);
+    expect(lint(MATCH_DEFAULT)).toEqual([]);
   });
 
   it("does NOT accept a match(...).exhaustive() inside a CASE arm — it proves that match, not the switch", () => {
@@ -309,6 +313,114 @@ describe("switch-totality", () => {
     expect(lint(`switch (x.kind) { case "a": go(); case "b": stop(); }`)).toHaveLength(1);
   });
 
+  /** A two-arm switch whose default arm is the given single line. */
+  const withDefaultLine = (defaultLine: string): string => [
+    `function name(x: Event): string {`,
+    `  switch (x.kind) {`,
+    `    case "a":`,
+    `      return "a";`,
+    `    case "b":`,
+    `      return "b";`,
+    `    ${defaultLine}`,
+    `  }`,
+    `}`,
+  ].join("\n");
+
+  it.each([
+    ["assertNever", `default: return assertNever(x);`],
+    ["a braced never binding", `default: { const unreachable: never = x; return unreachable; }`],
+    ["a match delegation", `default: return match(x).with({ kind: "c" }, () => "c").exhaustive();`],
+  ])("accepts a proof written on the SAME line as `default:` (%s)", (_shape, defaultLine) => {
+    // Membership in the default arm used to be decided from the state at the
+    // START of the line, so the commonest one-line proof was never read.
+    expect(lint(withDefaultLine(defaultLine))).toEqual([]);
+  });
+
+  it("accepts a one-line switch whose default carries the proof", () => {
+    expect(lint(`switch (x.kind) { case "a": go(); break; case "b": stop(); break; default: assertNever(x); }`))
+      .toEqual([]);
+  });
+
+  it.each([
+    ["a block comment", `/* x: never */ return "?";`],
+    ["a block comment naming assertNever", `/* assertNever(x) */ return "?";`],
+    ["a block comment naming exhaustive()", `/* .exhaustive() */ return "?";`],
+    ["an error message", `throw new Error("unreachable: never");`],
+    ["an error message naming assertNever", `throw new Error('call assertNever(x) here');`],
+    ["a template literal", "throw new Error(`x: never ${x}`);"],
+    ["a line comment", `return "?"; // x: never`],
+  ])("does NOT accept a proof that lives only in %s", (_where, body) => {
+    // Comments and strings are not code: they still compile after a new
+    // variant is added, which is exactly the drift being prevented. Both
+    // placements — on the `default:` line and on the line after it.
+    expect(lint(withDefaultLine(`default: ${body}`))).toHaveLength(1);
+    expect(lint(withDefaultLine(`default:\n      ${body}`))).toHaveLength(1);
+  });
+
+  it("does NOT accept a proof inside a block comment that spans lines", () => {
+    const source = [
+      `function name(x: Event): string {`,
+      `  switch (x.kind) {`,
+      `    case "a":`,
+      `      return "a";`,
+      `    case "b":`,
+      `      return "b";`,
+      `    default:`,
+      `      /*`,
+      `       const unreachable: never = x;`,
+      `      */`,
+      `      return "?";`,
+      `  }`,
+      `}`,
+    ].join("\n");
+    expect(lint(source)).toHaveLength(1);
+  });
+
+  it("does not count `case` labels inside comments or strings as arms", () => {
+    // One real arm — a guard, exempt. A commented-out or quoted `case` must not
+    // inflate it into a union match (nor hide a real one behind it).
+    const source = [
+      `function clean(x: Job): void {`,
+      `  switch (x.status) {`,
+      `    case "done": drop(x); /* case "x": */ log("case 'y': skipped");`,
+      `    /*`,
+      `    case "z":`,
+      `    */`,
+      `    // case "w":`,
+      `  }`,
+      `}`,
+    ].join("\n");
+    expect(lint(source)).toEqual([]);
+  });
+
+  it("does not count braces inside a block comment toward the switch's depth", () => {
+    // A `}` in a comment would close the span early and hide the second arm.
+    const source = [
+      `function name(x: Event): string {`,
+      `  switch (x.kind) {`,
+      `    case "a": /* } */`,
+      `      return "a";`,
+      `    case "b":`,
+      `      return "b";`,
+      `  }`,
+      `  return "?";`,
+      `}`,
+    ].join("\n");
+    const violations = lint(source);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]!.fixHint).toContain("2 arms");
+  });
+
+  it("does not read a switch head inside a block comment as a switch", () => {
+    const source = [`/*`, UNPROVEN, `*/`, `export const x = 1;`].join("\n");
+    expect(lint(source)).toEqual([]);
+  });
+
+  it("reports the head line as written, comments and all", () => {
+    const source = UNPROVEN.replace(`switch (x.kind) {`, `switch (x.kind) { // tagged`);
+    expect(lint(source)[0]!.text).toBe(`switch (x.kind) { // tagged`);
+  });
+
   it("reports nothing for text with no switch at all", () => {
     expect(lint("export const x = 1;\n")).toEqual([]);
   });
@@ -351,32 +463,8 @@ describe("switch-totality baseline staleness", () => {
   });
 
   it.each([
-    ["a `never` default", [
-      `function name(x: Event): string {`,
-      `  switch (x.kind) {`,
-      `    case "a":`,
-      `      return "a";`,
-      `    case "b":`,
-      `      return "b";`,
-      `    default: {`,
-      `      const unreachable: never = x;`,
-      `      return unreachable;`,
-      `    }`,
-      `  }`,
-      `}`,
-    ].join("\n")],
-    ["a default delegating to match(...).exhaustive()", [
-      `function name(x: Event): string {`,
-      `  switch (x.kind) {`,
-      `    case "a":`,
-      `      return "a";`,
-      `    case "b":`,
-      `      return "b";`,
-      `    default:`,
-      `      return match(x).with({ kind: "c" }, () => "c").exhaustive();`,
-      `  }`,
-      `}`,
-    ].join("\n")],
+    ["a `never` default", NEVER_DEFAULT],
+    ["a default delegating to match(...).exhaustive()", MATCH_DEFAULT],
     ["a whole match(...).exhaustive()", [
       `function name(x: Event): string {`,
       `  return match(x.kind)`,

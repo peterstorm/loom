@@ -24,15 +24,11 @@ import { parseStandaloneDispositionStartInput } from "../../src/core/standalone-
 import { parseSecurityFindings, type SecurityFinding } from "../../src/core/security-findings";
 import { renderReport } from "../../src/core/security-reports";
 import { parseCoverageSeeds } from "../../src/core/security-coverage";
-import { aConfirmedFinding, aNeedsValidationFinding, aRejectedFinding, aRunMetadata, aSeed } from "../security/fixtures";
+import { aConfirmedFinding, aNeedsValidationFinding, aRejectedFinding, aRunMetadata, aSeed, ok } from "./fixtures";
 
 const METADATA = aRunMetadata({ budget: 12, selectedCompanions: ["WEB-PROTOCOL-AND-AUTH.md"] });
 
-const parse = (raw: readonly unknown[]): readonly SecurityFinding[] => {
-  const parsed = parseSecurityFindings(raw);
-  if (!parsed.ok) throw new Error(JSON.stringify(parsed.error));
-  return parsed.value;
-};
+const parse = (raw: readonly unknown[]): readonly SecurityFinding[] => ok(parseSecurityFindings(raw));
 
 const findings = (): readonly SecurityFinding[] =>
   // The document contract requires fingerprints in sorted order: parse one
@@ -122,6 +118,9 @@ describe("the decision set", () => {
     const disposition = securityDisposition({ metadata: METADATA, locator: "/out/audit-1", findings: findings() });
     if (!disposition.ok) throw new Error("expected a disposition set");
     const paths = dispositionHandoffPaths("/out/audit-1", METADATA.runId);
+    // The run name is carried, not re-derived by slicing the run directory apart.
+    expect(paths.runName).toBe(`run.disposition-${METADATA.runId}`);
+    expect(paths.runDir).toBe(`${paths.runsRoot}/${paths.runName}`);
     const text = renderDispositionHandoff(disposition.value, paths);
     expect(text).toContain("1 accepted, 1 deferred, 1 dismissed");
     // The command carries every flag the program requires and names the exact

@@ -23,14 +23,18 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { sandboxNonce, sandboxReceiptPrefix } from "../../src/core/security-sandbox";
 import { HUNTER_ENVELOPE } from "../security/fixtures";
 import { aSandboxReceipt } from "../security/sandbox-fixtures";
-import { aRun, isolateSubagentDir, removeRuns, seedFor, unitIdFor, writeArtifact, type Invocation, type Run } from "./security-audit-harness";
+import { aRun, assignUnit, isolateSubagentDir, removeRuns, startInvocation, startRun, unitIdFor, writeArtifact, type Invocation, type Run } from "./security-audit-harness";
 
-const start = async (run: Run, extra: readonly string[] = []): Promise<void> => {
-  const started = await run.invoke(
-    ["start", "--repo", run.out, "--source", "0".repeat(40), "--profile", "standard", "--budget", "12", ...extra],
-    JSON.stringify({ units: [seedFor(0)], signals: { languages: ["typescript"], servesHttp: true } }),
-  );
-  expect(started.error).toBeNull();
+/** The start every evidence test begins with: one unit, a budget, typed signals, `--repo` the run itself. */
+const EVIDENCE_START = { flags: ["--budget", "12"], signals: { languages: ["typescript"], servesHttp: true } } as const;
+
+const start = (run: Run): Promise<Run> => startRun(run, EVIDENCE_START);
+
+/** A started run whose unit 0 is in flight under the catalog hunter: where every receipt and nonce test begins. */
+const assignedRun = async (): Promise<Run> => {
+  const run = await start(aRun());
+  await assignUnit(run, 0);
+  return run;
 };
 
 /** A receipt is bound to the artifact path the ledger names — the same
@@ -62,19 +66,12 @@ const submitLocal = async (run: Run, artifact: string): Promise<Invocation> =>
     findings: [],
   }));
 
-const assignOnly = async (run: Run): Promise<void> => {
-  const assigned = await run.invoke(["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"]);
-  expect(assigned.error).toBeNull();
-};
-
 beforeEach(() => { isolateSubagentDir(); });
 afterEach(removeRuns);
 
 describe("a local check must name a receipt that proves a bounded run (INV-S1)", () => {
   it("accepts a check whose receipt is in limits", async () => {
-    const run = aRun();
-    await start(run);
-    await assignOnly(run);
+    const run = await assignedRun();
     const artifact = "agents/security-hunter-agent/artifacts/sqli.json";
     writeArtifact(run, artifact, receiptFor(artifact));
 
@@ -82,9 +79,7 @@ describe("a local check must name a receipt that proves a bounded run (INV-S1)",
   });
 
   it("refuses a receipt the artifact path does not bind", async () => {
-    const run = aRun();
-    await start(run);
-    await assignOnly(run);
+    const run = await assignedRun();
     const artifact = "agents/security-hunter-agent/artifacts/elsewhere.json";
     // A real receipt, but bound to a DIFFERENT artifact: the command that
     // produced it was not the command this check names.
@@ -97,9 +92,7 @@ describe("a local check must name a receipt that proves a bounded run (INV-S1)",
   });
 
   it("refuses a receipt from a run that exited non-zero", async () => {
-    const run = aRun();
-    await start(run);
-    await assignOnly(run);
+    const run = await assignedRun();
     const artifact = "agents/security-hunter-agent/artifacts/failed.json";
     writeArtifact(run, artifact, receiptFor(artifact, { exit: 1 }));
 
@@ -110,9 +103,7 @@ describe("a local check must name a receipt that proves a bounded run (INV-S1)",
   });
 
   it("refuses a receipt whose limits were not applied, and prose that is not a receipt", async () => {
-    const run = aRun();
-    await start(run);
-    await assignOnly(run);
+    const run = await assignedRun();
 
     const unenforced = "agents/security-hunter-agent/artifacts/unenforced.json";
     writeArtifact(run, unenforced, receiptFor(unenforced, { enforced: { cpu: false, memory: true, processes: true, fileSize: true } }));
@@ -147,9 +138,7 @@ describe("a local check must name a receipt that proves a bounded run (INV-S1)",
   });
 
   it("refuses a receipt whose environment is not exactly the script's allowlist", async () => {
-    const run = aRun();
-    await start(run);
-    await assignOnly(run);
+    const run = await assignedRun();
     // `LC_ALL` is not in what `env -i` hands the child, so a receipt naming it
     // was not written by the script.
     const artifact = "agents/security-hunter-agent/artifacts/lc-all.json";
@@ -162,17 +151,14 @@ describe("a local check must name a receipt that proves a bounded run (INV-S1)",
 
 describe("--force starts a new run (INV-S2b)", () => {
   it("drops every document of the previous run, including published records", async () => {
-    const run = aRun();
-    await start(run);
+    const run = await start(aRun());
     writeFileSync(join(run.out, "findings.json"), JSON.stringify([{ verdict: "rejected", fingerprint: "stale/one" }]));
     writeFileSync(join(run.out, "disposition.json"), JSON.stringify({ entries: [] }));
     writeFileSync(join(run.out, "REPORT.md"), "# stale report\n");
     writeFileSync(join(run.out, "verdicts.json"), JSON.stringify([{ fingerprint: "stale/one", vote: "critical" }]));
 
-    const restarted = await run.invoke(
-      ["start", "--repo", run.out, "--source", "0".repeat(40), "--profile", "standard", "--force"],
-      JSON.stringify({ units: [seedFor(0)], signals: { languages: ["typescript"] } }),
-    );
+    const { args, stdin } = startInvocation(run, { signals: { languages: ["typescript"] }, flags: ["--force"] });
+    const restarted = await run.invoke(args, stdin);
     expect(restarted.error).toBeNull();
 
     // Every document the new run owns is re-created empty; nothing stale survives.
@@ -186,12 +172,9 @@ describe("--force starts a new run (INV-S2b)", () => {
   });
 
   it("refuses to reuse a directory without --force", async () => {
-    const run = aRun();
-    await start(run);
-    const again = await run.invoke(
-      ["start", "--repo", run.out, "--source", "0".repeat(40), "--profile", "standard"],
-      JSON.stringify({ units: [seedFor(0)], signals: { languages: ["typescript"] } }),
-    );
+    const run = await start(aRun());
+    const { args, stdin } = startInvocation(run, { signals: { languages: ["typescript"] } });
+    const again = await run.invoke(args, stdin);
     expect(again.ok).toBe(false);
     expect(again.error).toContain("--force");
   });
@@ -199,8 +182,7 @@ describe("--force starts a new run (INV-S2b)", () => {
 
 describe("findings reports the blockers alongside the findings (INV-S6c)", () => {
   it("names what still blocks publication instead of printing an empty list", async () => {
-    const run = aRun();
-    await start(run);
+    const run = await start(aRun());
 
     const projected = await run.invoke(["findings", "--json"]);
     expect(projected.error).toBeNull();
@@ -220,23 +202,22 @@ describe("findings reports the blockers alongside the findings (INV-S6c)", () =>
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
 const ARTIFACT = "agents/security-hunter-agent/artifacts/repro.txt";
 
-/** A target directory OUTSIDE the run directory: the sandbox refuses a scratch
- *  inside the target, so a run that wants bounded checks lives elsewhere. */
-const withTarget = async (body: (target: string) => Promise<void>): Promise<void> => {
+/** A run started over a target directory OUTSIDE the run directory (the
+ *  sandbox refuses a scratch inside the target, so a run that wants bounded
+ *  checks lives elsewhere), its unit in flight unless `assigned: false`. The
+ *  target is removed after `body`. */
+const withTargetRun = async (
+  body: (run: Run, target: string) => Promise<void>,
+  options: Readonly<{ assigned?: boolean }> = {},
+): Promise<void> => {
   const target = mkdtempSync(join(tmpdir(), "loom-security-target-"));
   try {
-    await body(target);
+    const run = await startRun(aRun(), { repo: target });
+    if (options.assigned ?? true) await assignUnit(run, 0);
+    await body(run, target);
   } finally {
     rmSync(target, { recursive: true, force: true });
   }
-};
-
-const startAt = async (run: Run, target: string): Promise<void> => {
-  const started = await run.invoke(
-    ["start", "--repo", target, "--source", "0".repeat(40), "--profile", "standard"],
-    JSON.stringify({ units: [seedFor(0)] }),
-  );
-  expect(started.error).toBeNull();
 };
 
 /** The nonce `nonce` printed on its first line. */
@@ -250,19 +231,14 @@ const unshareAvailable = spawnSync("unshare", ["--map-root-user", "--mount", "--
 
 describe("nonce: the engine hands out the binding a hunter cannot compute", () => {
   it("assign tells the parent how to obtain one, for the owner it minted", async () => {
-    const run = aRun();
-    await start(run);
-    await assignOnly(run);
+    const run = await assignedRun();
     expect(run.stdout()).toContain(
       `nonce: loom helper security-audit nonce --out '${run.out}' --artifact agents/security-hunter-agent/artifacts/<file>`,
     );
   });
 
   it("prints the artifact's nonce and a run filled in for this owner, writing nothing", async () => {
-    await withTarget(async (target) => {
-      const run = aRun();
-      await startAt(run, target);
-      await assignOnly(run);
+    await withTargetRun(async (run, target) => {
       const before = readdirSync(run.out).sort();
 
       const printed = await run.invoke(["nonce", "--artifact", ARTIFACT]);
@@ -278,10 +254,7 @@ describe("nonce: the engine hands out the binding a hunter cannot compute", () =
   });
 
   it("binds a receipt submit accepts: assign → nonce → receipt under the printed nonce → submit", async () => {
-    await withTarget(async (target) => {
-      const run = aRun();
-      await startAt(run, target);
-      await assignOnly(run);
+    await withTargetRun(async (run) => {
       expect((await run.invoke(["nonce", "--artifact", ARTIFACT])).error).toBeNull();
       const nonce = printedNonce(run.stdout());
       writeArtifact(run, ARTIFACT, `${sandboxReceiptPrefix(nonce)}${aSandboxReceipt()}\n`);
@@ -291,10 +264,7 @@ describe("nonce: the engine hands out the binding a hunter cannot compute", () =
   });
 
   it.runIf(unshareAvailable)("binds a REAL sandbox run made exactly as printed, and submit accepts its receipt", async () => {
-    await withTarget(async (target) => {
-      const run = aRun();
-      await startAt(run, target);
-      await assignOnly(run);
+    await withTargetRun(async (run) => {
       expect((await run.invoke(["nonce", "--artifact", ARTIFACT])).error).toBeNull();
       const lines = run.stdout().split("\n");
       const first = lines.findIndex((line) => line.trim().startsWith("mkdir -p "));
@@ -326,10 +296,7 @@ describe("nonce: the engine hands out the binding a hunter cannot compute", () =
     ["a traversal", "agents/security-hunter-agent/artifacts/../../../etc/passwd", "is not an owned artifact path"],
     ["an owner with no unit in flight", "agents/security-critic-agent/artifacts/repro.txt", "no in_progress unit is owned by security-critic-agent"],
   ])("refuses %s", async (_case, artifact, expected) => {
-    await withTarget(async (target) => {
-      const run = aRun();
-      await startAt(run, target);
-      await assignOnly(run);
+    await withTargetRun(async (run) => {
       const refused = await run.invoke(["nonce", "--artifact", artifact]);
       expect(refused.ok).toBe(false);
       expect(refused.error).toContain("nonce refused");
@@ -338,20 +305,16 @@ describe("nonce: the engine hands out the binding a hunter cannot compute", () =
   });
 
   it("refuses before the unit is assigned, and requires --artifact", async () => {
-    await withTarget(async (target) => {
-      const run = aRun();
-      await startAt(run, target);
+    await withTargetRun(async (run) => {
       const unassigned = await run.invoke(["nonce", "--artifact", ARTIFACT]);
       expect(unassigned.error).toContain("no in_progress unit is owned by security-hunter-agent");
       const missing = await run.invoke(["nonce"]);
       expect(missing.error).toContain("--artifact is required");
-    });
+    }, { assigned: false });
   });
 
   it("refuses a run directory inside the target, whose scratch the sandbox would refuse", async () => {
-    const run = aRun();
-    await start(run); // --repo is the run directory itself
-    await assignOnly(run);
+    const run = await assignedRun(); // --repo is the run directory itself
     const refused = await run.invoke(["nonce", "--artifact", ARTIFACT]);
     expect(refused.ok).toBe(false);
     expect(refused.error).toContain("lies inside the target");

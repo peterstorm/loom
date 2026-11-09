@@ -21,11 +21,13 @@ import {
   coverageSemanticKey,
   encodeCanonicalRef,
   isSecurityFingerprint,
+  parseCoverageRefs,
   type CoverageRefs,
 } from "../../src/core/security-audit-contract";
 import { parseSecurityFindings, SEVERITY_SCORES, type SeverityScore } from "../../src/core/security-findings";
 import { parseVerificationVerdicts } from "../../src/core/security-adjudication";
-import { aConfirmedFinding, aNeedsValidationFinding, aVerdict, ok } from "./fixtures";
+import { assignUnits, recordUnitResult, seedCoverageUnit } from "../../src/core/security-coverage";
+import { aConfirmedFinding, aNeedsValidationFinding, aSeed, aVerdict, HUNTER_AGENT, ok } from "./fixtures";
 
 const rejectedFingerprints = ["", "-a", " a", "a b", "a\nb", "a\tz", "a b c", "🙂"];
 
@@ -38,11 +40,26 @@ describe("fingerprint grammar (INV-S3d)", () => {
   });
 
   it("refuses a finding, a ballot, and a ledger that carry a bad fingerprint", () => {
+    // The ledger's place for a fingerprint is a candidate unit's
+    // `result_fingerprints`: a settlement naming a bad one is refused, so the
+    // coverage record can never point at a finding no grammar admits.
+    const unit = ok(seedCoverageUnit(aSeed()));
+    const inFlight = ok(assignUnits([unit], [{ coverageId: unit.coverage_id, agentId: HUNTER_AGENT }])).ledger;
+    const settle = (fingerprint: string) => recordUnitResult(inFlight, {
+      coverageId: unit.coverage_id, agentId: HUNTER_AGENT, wave: 1, status: "candidate", reviewedPaths: ["src/api/login.ts"],
+      checks: [{ agent_id: HUNTER_AGENT, reviewed_paths: ["src/api/login.ts"], invariant: "the query binds its values", method: "source", result: "it interpolates", artifact: null }],
+      fingerprints: [fingerprint],
+    });
+    expect(settle("api/login:sqli-email").ok).toBe(true);
     for (const fingerprint of rejectedFingerprints) {
       const finding = parseSecurityFindings([aConfirmedFinding({ fingerprint })]);
       expect(finding.ok, `finding ${JSON.stringify(fingerprint)}`).toBe(false);
       const ballot = parseVerificationVerdicts([aVerdict({ fingerprint })]);
       expect(ballot.ok, `ballot ${JSON.stringify(fingerprint)}`).toBe(false);
+      expect(settle(fingerprint), `ledger ${JSON.stringify(fingerprint)}`).toMatchObject({
+        ok: false,
+        error: { kind: "settlement-invalid", violations: expect.arrayContaining([{ path: "$[0].result_fingerprints", message: "invalid fingerprint" }]) },
+      });
     }
   });
 
@@ -63,7 +80,7 @@ const refTupleArb: fc.Arbitrary<CoverageRefs> = fc.record({
   boundary: fc.constantFrom("api-edge", "b", "b::c", "b%3A%3Ac"),
   subsystem: fc.constantFrom("auth", "c", "c::d"),
   attack_class: fc.constantFrom("injection", "d"),
-});
+}).map((raw) => ok(parseCoverageRefs(raw)));
 
 describe("canonical coverage id (INV-L5)", () => {
   it("is injective over the reference tuple", () => {
@@ -80,8 +97,8 @@ describe("canonical coverage id (INV-L5)", () => {
   it("separates two tuples that differ only in where the separator falls", () => {
     // The exact collision the review found reachable: joining fields with `::`
     // is injective only because `:` is reserved, i.e. percent-encoded.
-    const left: CoverageRefs = { surface: "a", boundary: "b::c", subsystem: "s", attack_class: "x" };
-    const right: CoverageRefs = { surface: "a::b", boundary: "c", subsystem: "s", attack_class: "x" };
+    const left = ok(parseCoverageRefs({ surface: "a", boundary: "b::c", subsystem: "s", attack_class: "x" }));
+    const right = ok(parseCoverageRefs({ surface: "a::b", boundary: "c", subsystem: "s", attack_class: "x" }));
     expect(canonicalCoverageId(left)).not.toBe(canonicalCoverageId(right));
     expect(encodeCanonicalRef("b::c")).toBe("b%3A%3Ac");
     expect(encodeCanonicalRef("b::c")).not.toContain("::");
@@ -100,7 +117,7 @@ describe("canonical coverage id (INV-L5)", () => {
 
 describe("a parsed findings document is the parser's own value", () => {
   it("never aliases the caller's input, and cannot be mutated through it", () => {
-    const confirmed = aConfirmedFinding();
+    const confirmed: Record<string, unknown> = structuredClone(aConfirmedFinding());
     const raw = [confirmed, aNeedsValidationFinding({ fingerprint: "b/lead" })];
     const parsed = ok(parseSecurityFindings(raw));
     expect(parsed).not.toBe(raw);

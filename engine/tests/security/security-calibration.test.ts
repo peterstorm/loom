@@ -35,6 +35,7 @@ import {
   canonicalCoverageId,
   isSafeSourcePath,
   isVisibleText,
+  isOneOf,
   isWireRecord,
   parseSecurityRunMetadata,
   type CoverageRefs,
@@ -53,7 +54,7 @@ import { parseVerificationVerdicts } from "../../src/core/security-adjudication"
 import { SECURITY_LENSES, selectSecurityLenses, type SecurityLens, type StackSignals } from "../../src/core/security-lens-select";
 import { securityDisposition } from "../../src/core/security-disposition";
 import { renderRunDocuments } from "../../src/core/security-reports";
-import { HUNTER_AGENT, HUNTER_ENVELOPE, aConfirmedFinding, aRunMetadata, aSeed, aSignals, aUnitResult, aVerdict, ok } from "./fixtures";
+import { BOOLEAN_SIGNALS, HUNTER_AGENT, HUNTER_ENVELOPE, aConfirmedFinding, aRefs, aRunMetadata, aSeed, aSignals, aUnitResult, aVerdict, ok } from "./fixtures";
 import { createSecurityAuditHandler } from "../../src/handlers/helpers/security-audit";
 
 const CALIBRATION_ROOT = resolve(__dirname, "../fixtures/security/calibration");
@@ -75,14 +76,6 @@ type DefectSet = Readonly<{ schemaVersion: 1; kind: string; signals: StackSignal
 
 // --- Load boundary ---
 
-const isOneOf = <T extends string>(values: readonly T[], value: unknown): value is T =>
-  typeof value === "string" && (values as readonly string[]).includes(value);
-
-const SIGNAL_FLAGS = [
-  "servesHttp", "rendersClientSide", "drivesModelsOrTools", "usesQueuesOrRpc", "isolatesTenants",
-  "deploysInfrastructure", "hasNativeMemory", "hasAppOrLocalIpc", "hasReleasePipelines", "hasSharedResourcePressure",
-] as const;
-
 const stringList = (value: unknown, path: string): readonly string[] => {
   if (!Array.isArray(value) || !value.every((entry): entry is string => typeof entry === "string")) {
     throw new Error(`DEFECTS.json ${path}: expected an array of strings`);
@@ -92,7 +85,7 @@ const stringList = (value: unknown, path: string): readonly string[] => {
 
 const parseSignals = (raw: unknown): StackSignals => {
   if (!isWireRecord(raw)) throw new Error("DEFECTS.json signals: expected an object");
-  const flags = Object.fromEntries(SIGNAL_FLAGS.map((flag) => {
+  const flags = Object.fromEntries(BOOLEAN_SIGNALS.map((flag) => {
     const value = raw[flag];
     if (typeof value !== "boolean") throw new Error(`DEFECTS.json signals.${flag}: expected a boolean`);
     return [flag, value];
@@ -158,12 +151,8 @@ const METADATA = aRunMetadata({
   budget: 24,
 });
 
-const refsFor = (defect: PlantedDefect): CoverageRefs => ({
-  surface: defect.surface,
-  boundary: defect.boundary,
-  subsystem: defect.subsystem,
-  attack_class: defect.attack_class,
-});
+const refsFor = (defect: PlantedDefect): CoverageRefs =>
+  aRefs({ surface: defect.surface, boundary: defect.boundary, subsystem: defect.subsystem, attack_class: defect.attack_class });
 
 const seedFor = (defect: PlantedDefect): CoverageSeed => aSeed({
   refs: refsFor(defect),
@@ -435,7 +424,7 @@ describe("a recorded run reaches every planted defect", () => {
         invoke: async (args, stdin = "") => {
           printed.length = 0;
           const result = await invoke(args, stdin);
-          return { ok: result.kind !== "error", error: result.kind === "error" ? String(result.message ?? "") : null };
+          return result.kind === "error" ? { ok: false as const, error: String(result.message ?? "") } : { ok: true as const, error: null };
         },
       });
 

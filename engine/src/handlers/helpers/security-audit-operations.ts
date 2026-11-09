@@ -32,11 +32,19 @@ export type SecurityAuditOperationTraits = Readonly<{
    * This is the ONLY policy field: "writes" and "gated by the handshake" are the
    * same fact stated twice, and two fields drift. `securityAuditOperationWrites`
    * derives the answer callers ask for.
+   *
+   * A third reader depends on it too: the subagent write guard derives "a
+   * subagent may run this" from `available`
+   * (`pre-tool-use/subagent-authority-operations.ts`) — a new writing
+   * operation therefore defaults to parent-only, failing closed. If an
+   * operation must ever be read-only yet handshake-gated (or the reverse), give
+   * this table an explicit authority trait rather than bending the skew policy.
    */
   runtimeSkew: "available" | "handshake-required";
-  /** Input shape only; see `input` above. */
 }>;
 
+/** Declared in the order a run performs them: `SECURITY_AUDIT_OPERATION_ORDER`
+ *  (and so the usage line) is this table's key order. */
 export const SECURITY_AUDIT_OPERATIONS = Object.freeze({
   /** Freeze the revision, seed the coverage ledger, select lenses. */
   start: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required" }),
@@ -83,17 +91,7 @@ export function parseSecurityAuditOperation(value: string | undefined): Security
 }
 
 /** The action set, in the order a run performs it — the order the helper's
- *  usage line lists them in. */
-export const SECURITY_AUDIT_OPERATION_ORDER: readonly SecurityAuditOperation[] = Object.freeze([
-  "start",
-  "assign",
-  "nonce",
-  "submit",
-  "defer",
-  "merge-critic",
-  "verify",
-  "findings",
-  "publish",
-  "disposition",
-  "status",
-]);
+ *  usage line lists them in. Derived from the table, which declares the
+ *  operations in exactly that order, so no second list can omit one. */
+export const SECURITY_AUDIT_OPERATION_ORDER: readonly SecurityAuditOperation[] =
+  Object.freeze(Object.keys(SECURITY_AUDIT_OPERATIONS) as SecurityAuditOperation[]);

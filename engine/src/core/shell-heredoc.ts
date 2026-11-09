@@ -18,7 +18,7 @@
  */
 
 import { findClosingBacktick, findClosingParen } from "./shell-substitution";
-import { splitCommandSegmentsWithOps } from "./shell-command";
+import { shellOperatorAt, splitCommandSegmentsWithOps, type ShellOperator } from "./shell-command";
 import { analyzeCommandHead, headBase, resolvedInterpreter, unquote } from "./shell-command-head";
 
 /** Substitution nesting deeper than this on a guarded line is nobody's
@@ -194,9 +194,12 @@ function interpreterExecutesStdin(head: string, args: readonly string[]): boolea
  *  arguments); "data": stdin is input data; null: not an interpreter. */
 type StdinVerdict = "script" | "data" | null;
 
-function headExecutesStdinVerdict(head: string, args: readonly string[]): StdinVerdict {
-  const resolved = resolvedInterpreter(head, args);
-  if (resolved === null) return null;
+/** A command resolved through its wrapper chain (resolvedInterpreter). */
+type ResolvedCommand = Readonly<{ head: string; args: readonly string[] }>;
+
+/** The stdin verdict of an ALREADY-RESOLVED command — callers unwrap the
+ *  wrapper chain once and judge the command it lands on. */
+function stdinVerdict(resolved: ResolvedCommand): StdinVerdict {
   if (resolved.head === "xargs") return "script";
   if (!HEREDOC_SCRIPT_HEADS.has(resolved.head)) return null;
   return interpreterExecutesStdin(resolved.head, resolved.args) ? "script" : "data";
@@ -209,7 +212,7 @@ function headExecutesStdinVerdict(head: string, args: readonly string[]): StdinV
  *  guards treat as an executed program of their own. */
 export const readsProgramFromStdin = (head: string, args: readonly string[]): boolean => {
   const resolved = resolvedInterpreter(head, args);
-  return resolved !== null && resolved.head !== "xargs" && headExecutesStdinVerdict(head, args) === "script";
+  return resolved !== null && resolved.head !== "xargs" && stdinVerdict(resolved) === "script";
 };
 
 /** The token right after an interpreter's inline-program flag (`-c`, `-e`,
@@ -329,13 +332,13 @@ function openerLineGroups(line: string): readonly OpenerGroup[] {
     if (pastSpan !== null) { i = pastSpan; continue; }
     const pastCompound = pastCompoundSyntax(line, i, compound);
     if (pastCompound !== null) { i = pastCompound; continue; }
-    const separator = groupSeparatorAt(line, i);
-    if (separator !== null) {
-      if (separator.cuts && compound.length === 0) {
+    const operator = shellOperatorAt(line, i);
+    if (operator !== null) {
+      if (cutsGroup(operator) && compound.length === 0) {
         groups.push({ start: groupStart, end: i });
-        groupStart = i + separator.width;
+        groupStart = i + operator.width;
       }
-      i += separator.width;
+      i += operator.width;
       continue;
     }
     i++;
@@ -398,28 +401,13 @@ function pastCompoundSyntax(line: string, i: number, compound: string[]): number
   return i + (m?.[0].length ?? 1);
 }
 
-/** The operator at `i` that a group walk must step over: `width` characters,
- *  and whether it `cuts` the group at depth 0 (`;` `;;` `&` `&&` newline
- *  `||`) or binds within it (`|`, `|&`, and the `&` of a redirect or fd dup).
- *  Null when `i` holds no operator. */
-function groupSeparatorAt(line: string, i: number): Readonly<{ width: number; cuts: boolean }> | null {
-  const c = line[i];
-  const next = line[i + 1];
-  if (c === ";" || c === "&" || c === "\n") {
-    // `&>`/`&>>` redirects and `2>&1`-style fd dups are NOT separators
-    // (mirroring splitCommandSegmentsWithOps): the `&` binds to the
-    // redirect/dup syntax around it.
-    if (c === "&" && next === ">") return { width: 2, cuts: false };
-    if (c === "&" && line[i - 1] === ">") return { width: 1, cuts: false };
-    const doubled = (c === "&" || c === ";") && next === c;
-    return { width: doubled ? 2 : 1, cuts: true };
-  }
-  if (c === "|") {
-    if (next === "|") return { width: 2, cuts: true };
-    return { width: next === "&" ? 2 : 1, cuts: false }; // `|&` = one pipe operator
-  }
-  return null;
-}
+/** Does this operator cut an opener-line group at depth 0? Every separator
+ *  does (`;` `&` `&&` `||` newline) EXCEPT a pipe: `|`/`|&` link members of
+ *  one group, which share the body's fate. A binding `&` (redirect, fd dup)
+ *  cuts nothing. The operator table itself is shellOperatorAt's, shared with
+ *  the segment splitter so the two cannot disagree on what separates. */
+const cutsGroup = (operator: ShellOperator): boolean =>
+  operator.separator !== null && operator.separator !== "|";
 
 /** Does any `$(…)`/backtick substitution in `text` start with a command
  *  that READS stdin? `eval "$(cat)" << 'EOF'` executes the body through the
@@ -491,14 +479,15 @@ function commandsExecuteStdin(text: string, depth: number): boolean {
       }
       executesVar = true; continue;
     }
-    const verdict = headExecutesStdinVerdict(head, args);
+    // The wrapper chain is unwrapped ONCE: the verdict and the INLINE program
+    // checks both bind to the RESOLVED interpreter — a wrapper front
+    // (`sudo bash -c 'sh'`, `env -S 'bash -c "sh"'`) must not hide the
+    // interpreter the stdin actually reaches.
+    const resolved = resolvedInterpreter(head, args);
+    if (resolved === null) continue;
+    const verdict = stdinVerdict(resolved);
     if (verdict === "script") return true;
     if (verdict === "data") {
-      // The INLINE program checks bind to the RESOLVED interpreter — a
-      // wrapper front (`sudo bash -c 'sh'`, `env -S 'bash -c "sh"'`) must
-      // not hide the interpreter the stdin actually reaches.
-      const resolved = resolvedInterpreter(head, args);
-      if (resolved === null) continue;
       // A variable-fed inline program participates in the reader+executor
       // compound (`while read l; do sh -c "$l"; done`).
       if (inlineProgramIsVariable(resolved.head, resolved.args)) { executesVar = true; continue; }

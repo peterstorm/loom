@@ -1,22 +1,22 @@
 /**
  * The security-audit run registry (ADR-0067 D6): which directories are audit
- * runs, recorded by every writing `helper security-audit` operation and read by the subagent
- * write guard, so the guard never has to trust a command line to learn where a
+ * runs, recorded by every writing `helper security-audit` operation (and by
+ * `security-verification` start and resume) and read by the subagent write
+ * guard, so the guard never has to trust a command line to learn where a
  * run's authority files live.
  *
- * Layout: one entry file per run under `securityAuditRunRegistryDir()` (inside
- * the protected `subagentDir()`), named by the SHA-256 of the canonical run
- * directory and holding exactly that directory (a run is registered under
- * every spelling it has — as spelled and its realpath). One file per entry, rather than
- * one shared list, makes registration a single exclusive publish: two runs
- * started at once can never lose each other's entry to a read-modify-write
- * race, and the synchronous API needs no lock. Registering the same directory
- * again finds its own entry and succeeds (idempotent).
+ * Layout: one entry file per run in the protected entry store
+ * `PERSISTENT_SUBAGENT_STORES.securityAuditRunRegistry` (inside the protected
+ * `subagentDir()`), named by the SHA-256 of the canonical run directory and
+ * holding exactly that directory (a run is registered under every spelling it
+ * has — as spelled and its realpath). One file per entry, rather than one
+ * shared list, makes registration a single exclusive publish: two runs started
+ * at once can never lose each other's entry to a read-modify-write race, and
+ * the synchronous API needs no lock. Registering the same directory again
+ * finds its own entry and succeeds (idempotent).
  *
- * Every path is handled no-follow: the configured base is resolved once (the
- * documented `/tmp` → `/private/tmp` tolerance), and every component below it
- * is held to the strict no-symlink rule, so a planted symlink cannot redirect
- * an entry or substitute a forged one.
+ * The no-follow, exclusive-publication and fail-closed plumbing is the shared
+ * `protected-entry-store.ts`; this module owns only the registration grammar.
  *
  * Reading fails CLOSED: a registry that exists but cannot be read, or holds an
  * entry that is not a well-formed registration bound to its own name, THROWS.
@@ -27,23 +27,23 @@
 
 import { isAbsolute, resolve } from "node:path";
 import { realpathSync, statSync } from "node:fs";
-import { securityAuditRunRegistryDir, subagentDir, SECURITY_AUDIT_RUN_REGISTRY_ENTRY } from "../config";
+import { PERSISTENT_SUBAGENT_STORES } from "../config";
 import { sha256Hex } from "../core/digest";
 import { observePathPresence } from "../utils/path-presence";
 import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
+import type { AnchoredDirectory } from "./no-follow-fs";
 import {
-  closeAnchoredDirectory,
-  ensureDirectoryNoFollow,
-  ensureResolvedBaseDirectory,
-  listDirectoryNamesNoFollow,
-  openChildDirectoryNoFollow,
-  openDirectoryNoFollow,
-  publishDirectoryFileExclusiveNoFollow,
-  readDirectoryFileNoFollow,
-  removeDirectoryFileNoFollow,
-  resolveBaseDirectory,
-  type AnchoredDirectory,
-} from "./no-follow-fs";
+  describeStoreError,
+  isEntryName,
+  listEntryNames,
+  publishEntryOnce,
+  readEntry,
+  removeEntry,
+  withExistingEntryStore,
+  withWritableEntryStore,
+} from "./protected-entry-store";
+
+const STORE = PERSISTENT_SUBAGENT_STORES.securityAuditRunRegistry;
 
 type Registration = Readonly<{
   schemaVersion: 1;
@@ -51,22 +51,13 @@ type Registration = Readonly<{
   runDirectory: string;
 }>;
 
-/** An entry is bounded: a registration is one short path. */
-const MAXIMUM_ENTRY_BYTES = 16 * 1024;
 /** A registry is bounded too: past this many LIVE runs (entries whose
  *  directory still exists) the read fails closed. Exported for its test. */
 export const MAXIMUM_ENTRIES = 4_096;
 /** The hard bound on names one listing reads, live or vanished. */
 const MAXIMUM_LISTED_NAMES = 4 * MAXIMUM_ENTRIES;
 
-const ENTRY_NAME = /^[0-9a-f]{64}\.json$/;
-/** What an interrupted exclusive publish leaves behind (`<entry>.claim-…`):
- *  never an entry, never authority, so a reader skips it. */
-const CLAIM_LEFTOVER = /^[0-9a-f]{64}\.json\.claim-[A-Za-z0-9.-]+$/;
-
 const entryName = (runDirectory: string): string => `${sha256Hex(runDirectory)}.json`;
-
-const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 const render = (runDirectory: string): string =>
   `${JSON.stringify({ schemaVersion: 1, kind: "security-audit-run-registration", runDirectory } satisfies Registration)}\n`;
@@ -79,7 +70,7 @@ function parseEntry(name: string, bytes: string): DomainResult<string, string> {
   try {
     raw = JSON.parse(bytes);
   } catch (error) {
-    return failure(`registry entry ${name} is not JSON: ${describe(error)}`);
+    return failure(`registry entry ${name} is not JSON: ${describeStoreError(error)}`);
   }
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return failure(`registry entry ${name} is not an object`);
@@ -120,7 +111,7 @@ function runDirectorySpellings(runDirectory: string): DomainResult<readonly stri
     if (!statSync(canonical).isDirectory()) return failure(`security-audit run directory is not a directory: ${canonical}`);
     return success(canonical === spelled ? [canonical] : [spelled, canonical]);
   } catch (error) {
-    return failure(`cannot resolve security-audit run directory ${runDirectory}: ${describe(error)}`);
+    return failure(`cannot resolve security-audit run directory ${runDirectory}: ${describeStoreError(error)}`);
   }
 }
 
@@ -128,53 +119,38 @@ function runDirectorySpellings(runDirectory: string): DomainResult<readonly stri
  *  as existing: pruning or skipping it would protect less, never more. */
 const runDirectoryGone = (runDirectory: string): boolean => observePathPresence(runDirectory).kind === "absent";
 
-function withRegistryDirectory<T>(open: () => AnchoredDirectory, use: (registry: AnchoredDirectory) => T): T {
-  const registry = open();
-  try {
-    return use(registry);
-  } finally {
-    closeAnchoredDirectory(registry);
-  }
-}
-
 /**
  * Record `runDirectory` as a security-audit run. The directory must be
- * absolute and exist; it is stored realpath-normalised. Idempotent: an entry
- * already holding the same directory is success; an entry under the same name
- * holding anything else is a refusal (a damaged registry is reported, never
- * overwritten).
+ * absolute and exist; it is stored under every spelling it has. Idempotent: an
+ * entry already holding the same directory is success; an entry under the
+ * same name holding anything else is a refusal (a damaged registry is
+ * reported, never overwritten).
  */
 export function registerSecurityAuditRun(runDirectory: string): DomainResult<void, string> {
   const spellings = runDirectorySpellings(runDirectory);
   if (!spellings.ok) return spellings;
   try {
-    const base = ensureResolvedBaseDirectory(subagentDir());
-    const registryPath = `${base}/${SECURITY_AUDIT_RUN_REGISTRY_ENTRY}`;
-    ensureDirectoryNoFollow(registryPath);
-    return withRegistryDirectory(() => openDirectoryNoFollow(registryPath), (registry) => {
+    return withWritableEntryStore(STORE, (registry) => {
       pruneVanishedRuns(registry);
       for (const spelling of spellings.value) {
-        const registered = publishEntry(registry, spelling);
+        const registered = publishRegistration(registry, spelling);
         if (!registered.ok) return registered;
       }
       return success(undefined);
     });
   } catch (error) {
-    return failure(`cannot register security-audit run ${spellings.value.join(" / ")} in ${securityAuditRunRegistryDir()}: ${describe(error)}`);
+    return failure(`cannot register security-audit run ${spellings.value.join(" / ")} in ${STORE.dir()}: ${describeStoreError(error)}`);
   }
 }
 
 /** Publish one spelling's entry, idempotently: an existing entry under the
- *  same name must hold exactly this directory. */
-function publishEntry(registry: AnchoredDirectory, runDirectory: string): DomainResult<void, string> {
+ *  same name must be a well-formed registration, which binds it to exactly
+ *  this directory. */
+function publishRegistration(registry: AnchoredDirectory, runDirectory: string): DomainResult<void, string> {
   const name = entryName(runDirectory);
-  try {
-    publishDirectoryFileExclusiveNoFollow(registry, name, render(runDirectory));
-    return success(undefined);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-  }
-  const existing = parseEntry(name, readDirectoryFileNoFollow(registry, name, MAXIMUM_ENTRY_BYTES).toString("utf-8"));
+  const published = publishEntryOnce(registry, name, render(runDirectory));
+  if (published.kind === "published") return success(undefined);
+  const existing = parseEntry(name, published.text);
   return existing.ok ? success(undefined) : failure(`security-audit run registry is damaged: ${existing.error}`);
 }
 
@@ -186,11 +162,11 @@ function publishEntry(registry: AnchoredDirectory, runDirectory: string): Domain
  * entry is never pruned: it stays, and the reader keeps failing closed on it.
  */
 function pruneVanishedRuns(registry: AnchoredDirectory): void {
-  const names = listDirectoryNamesNoFollow(registry, MAXIMUM_LISTED_NAMES).filter((name) => ENTRY_NAME.test(name));
+  const names = listEntryNames(registry, MAXIMUM_LISTED_NAMES).filter(isEntryName);
   if (names.length < MAXIMUM_ENTRIES) return;
   for (const name of names) {
-    const parsed = parseEntry(name, readDirectoryFileNoFollow(registry, name, MAXIMUM_ENTRY_BYTES).toString("utf-8"));
-    if (parsed.ok && runDirectoryGone(parsed.value)) removeDirectoryFileNoFollow(registry, name);
+    const parsed = parseEntry(name, readEntry(registry, name));
+    if (parsed.ok && runDirectoryGone(parsed.value)) removeEntry(registry, name);
   }
 }
 
@@ -201,27 +177,11 @@ function pruneVanishedRuns(registry: AnchoredDirectory): void {
  * on a throw, never treat it as "no runs".
  */
 export function registeredSecurityAuditRuns(): readonly string[] {
-  const presence = observePathPresence(subagentDir());
-  if (presence.kind === "absent") return Object.freeze([]);
-  if (presence.kind === "unknown") throw new Error(`cannot observe ${subagentDir()}: ${presence.cause}`);
-  // Absence of the registry is read from the anchored parent's own listing:
-  // any entry under that name — a symlink, dangling or not, included — is
-  // opened no-follow below, and a symlink is refused rather than treated as
-  // "no runs".
-  const parent = openDirectoryNoFollow(resolveBaseDirectory(subagentDir()));
-  let registry: AnchoredDirectory;
-  try {
-    if (!listDirectoryNamesNoFollow(parent).includes(SECURITY_AUDIT_RUN_REGISTRY_ENTRY)) return Object.freeze([]);
-    registry = openChildDirectoryNoFollow(parent, SECURITY_AUDIT_RUN_REGISTRY_ENTRY);
-  } finally {
-    closeAnchoredDirectory(parent);
-  }
-  return withRegistryDirectory(() => registry, (anchored) => {
+  return withExistingEntryStore(STORE, (registry) => {
     const runs: string[] = [];
-    for (const name of listDirectoryNamesNoFollow(anchored, MAXIMUM_LISTED_NAMES)) {
-      if (CLAIM_LEFTOVER.test(name)) continue;
-      if (!ENTRY_NAME.test(name)) throw new Error(`security-audit run registry holds an unexpected entry ${JSON.stringify(name)}`);
-      const parsed = parseEntry(name, readDirectoryFileNoFollow(anchored, name, MAXIMUM_ENTRY_BYTES).toString("utf-8"));
+    for (const name of listEntryNames(registry, MAXIMUM_LISTED_NAMES)) {
+      if (!isEntryName(name)) throw new Error(`security-audit run registry holds an unexpected entry ${JSON.stringify(name)}`);
+      const parsed = parseEntry(name, readEntry(registry, name));
       if (!parsed.ok) throw new Error(`security-audit run registry is damaged: ${parsed.error}`);
       // A run directory that no longer exists protects nothing; it does not
       // count toward the cap (the registrar prunes it on its next write).
@@ -231,5 +191,5 @@ export function registeredSecurityAuditRuns(): readonly string[] {
       throw new Error(`security-audit run registry holds ${runs.length} live runs, more than ${MAXIMUM_ENTRIES}`);
     }
     return Object.freeze(runs.sort());
-  });
+  }, () => Object.freeze([]));
 }

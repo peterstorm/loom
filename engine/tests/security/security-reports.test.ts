@@ -10,8 +10,8 @@
 
 import { describe, expect, it } from "vitest";
 import { parseSecurityFindings, type SecurityFinding } from "../../src/core/security-findings";
-import { assignUnits, coverageSettled, deferPlannedUnits, recordUnitResult, seedCoverageUnit, type CoverageLedger } from "../../src/core/security-coverage";
-import { HUNTER_AGENT as HUNTER, aRunMetadata, ok } from "./fixtures";
+import { assignUnits, coverageSettled, deferPlannedUnits, recordUnitResult, runStatusOf, seedCoverageUnit, type CoverageLedger } from "../../src/core/security-coverage";
+import { HUNTER_AGENT as HUNTER, aRefs, aRunMetadata, ok } from "./fixtures";
 import {
   renderFindingsDetail,
   renderNeedsValidation,
@@ -74,11 +74,7 @@ const REJECTED = {
   evidence: [{ file: "src/reports/view.tsx", line: 9, description: "escaped by the template" }],
 } as const;
 
-const parse = (document: unknown): readonly SecurityFinding[] => {
-  const parsed = parseSecurityFindings(document);
-  if (!parsed.ok) throw new Error(JSON.stringify(parsed.error));
-  return parsed.value;
-};
+const parse = (document: unknown): readonly SecurityFinding[] => ok(parseSecurityFindings(document));
 
 const metadata = aRunMetadata({
   runId: "audit-2026-11-07",
@@ -93,29 +89,28 @@ const metadata = aRunMetadata({
 
 const deferReason = "budget_cannot_reserve_critics_and_validation";
 
+/** One unit, planned until a test settles it. */
+const planned = (): CoverageLedger => [ok(seedCoverageUnit({
+  refs: aRefs({ surface: "http:GET /reports/:id/export", boundary: "tenant isolation", subsystem: "reporting", attack_class: "authorization-gap" }),
+  starting_paths: ["src/reports/export.ts"],
+  ordinary_attack_class_block: "ATTACK-CLASSES.md#access-control",
+  selected_companion_blocks: ["DATA-ISOLATION-AND-LIFECYCLE.md#tenant-and-object-isolation"],
+  excluded_blocks: [],
+  prior: null,
+}))];
+
 const ledger = (): CoverageLedger => {
-  const seeded = seedCoverageUnit({
-    refs: { surface: "http:GET /reports/:id/export", boundary: "tenant isolation", subsystem: "reporting", attack_class: "authorization-gap" },
-    starting_paths: ["src/reports/export.ts"],
-    ordinary_attack_class_block: "ATTACK-CLASSES.md#access-control",
-    selected_companion_blocks: ["DATA-ISOLATION-AND-LIFECYCLE.md#tenant-and-object-isolation"],
-    excluded_blocks: [],
-    prior: null,
-  });
-  if (!seeded.ok) throw new Error(JSON.stringify(seeded.error));
-  const assigned = assignUnits([seeded.value], [{ coverageId: seeded.value.coverage_id, agentId: HUNTER, wave: 1 }]);
-  if (!assigned.ok) throw new Error(JSON.stringify(assigned.error));
-  const result = recordUnitResult(assigned.value.ledger, {
-    coverageId: seeded.value.coverage_id,
+  const [unit] = planned();
+  const assigned = ok(assignUnits([unit!], [{ coverageId: unit!.coverage_id, agentId: HUNTER, wave: 1 }]));
+  return ok(recordUnitResult(assigned.ledger, {
+    coverageId: unit!.coverage_id,
     wave: 1,
     agentId: HUNTER,
     status: "candidate",
     reviewedPaths: ["src/reports/export.ts"],
     checks: [{ agent_id: HUNTER, reviewed_paths: ["src/reports/export.ts"], invariant: "tenant predicate present", method: "source", result: "absent", artifact: null }],
     fingerprints: ["authz:1"],
-  });
-  if (!result.ok) throw new Error(JSON.stringify(result.error));
-  return result.value;
+  }));
 };
 
 describe("report derivation", () => {
@@ -170,6 +165,23 @@ describe("report derivation", () => {
     expect(report).toContain("Run status: incomplete");
     expect(report).toContain(deferReason);
     expect(report).toContain("deferred");
+  });
+
+  it("marks an incomplete reason no deferral recorded as inferred, and a recorded one as itself", () => {
+    const render = (deferred: CoverageLedger) =>
+      renderReport({ metadata: { ...metadata, ...runStatusOf(deferred) }, ledger: deferred, findings: [], locator: "/out" });
+    const prose = ok(deferPlannedUnits(planned(), "the export endpoint was unreachable from the sandbox"));
+    const inferred = render(prose);
+    expect(inferred).toContain("`validation_budget_exhausted` (inferred: no deferred unit recorded an upstream reason");
+    // The deferral's own reason stays the authority, listed beside the token.
+    expect(inferred).toContain("the export endpoint was unreachable from the sandbox");
+    const recorded = render(ok(deferPlannedUnits(planned(), deferReason)));
+    expect(recorded).toContain(`\`${deferReason}\`.**`);
+    expect(recorded).not.toContain("inferred");
+  });
+
+  it("prints a diff scope by its two commits", () => {
+    expect(renderReport({ metadata, ledger: ledger(), findings: [], locator: "/out" })).toContain(`- Scope: ${"0".repeat(40)}..${"1".repeat(40)}`);
   });
 
   it("renders the positive case without inventing findings", () => {

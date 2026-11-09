@@ -325,13 +325,25 @@ function changedStandaloneRepository(label: string): Readonly<{ cwd: string; cha
   return { cwd, changedPath };
 }
 
+/** The one fixture every Standalone Review smoke shares: the repository it
+ *  reviews, and the runs root and run directory its evidence lives in. Every
+ *  later step takes the fixture its predecessor returned, so the order the
+ *  steps must run in is carried by their types. */
+type ReviewRunFixture = Readonly<{ cwd: string; runsRoot: string; reviewRun: string }>;
+
+/** A fresh runs root removed at exit. It lives outside every repository, so
+ *  remediation's dirty-set audit observes only product changes, exactly as a
+ *  real review-and-fix run does. */
+function freshRunsRoot(prefix: string): string {
+  const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
+  temporaryRoots.push(runsRoot);
+  return runsRoot;
+}
+
 function standaloneAndRemediationSmoke(): void {
   const { cwd, changedPath } = changedStandaloneRepository("standalone");
 
-  // Run evidence lives outside the repository so remediation's dirty-set audit
-  // observes only product changes, exactly as a real review-and-fix run does.
-  const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-facade-smoke-runs-")));
-  temporaryRoots.push(runsRoot);
+  const runsRoot = freshRunsRoot("loom-facade-smoke-runs-");
   const reviewRun = join(runsRoot, "run.standalone-critical");
   mkdirSync(reviewRun, { recursive: true });
   const initial = asSpawnBatch(run(cwd, [
@@ -413,10 +425,18 @@ function criticalRemediationRepository(): string {
   return cwd;
 }
 
+/** The critical-remediation fixture once its source is reviewed: the one
+ *  critical the refutation panel upheld. Only `reviewedCriticalSource`
+ *  produces it, so the repair cannot be written before the review ran. */
+type ReviewedCriticalSource = ReviewRunFixture & Readonly<{ findingId: string }>;
+
 /** Review the vulnerable source with one critical the refutation panel
- *  upholds, and return that surviving critical's finding id. */
-function survivingCriticalFindingId(cwd: string, runsRoot: string, reviewRun: string): string {
+ *  upholds, and return the fixture with that surviving critical's id. */
+function reviewedCriticalSource(): ReviewedCriticalSource {
   const { changedPath } = CRITICAL_REPAIR;
+  const cwd = criticalRemediationRepository();
+  const runsRoot = freshRunsRoot("loom-facade-smoke-critical-runs-");
+  const reviewRun = join(runsRoot, "run.critical-source");
   const initial = asSpawnBatch(run(cwd, [
     "start", "standalone-review", "--runs-root", runsRoot, "--run", reviewRun,
   ], JSON.stringify({ kind: "code", files: [changedPath], dryRun: false })), "critical source start");
@@ -436,12 +456,12 @@ function survivingCriticalFindingId(cwd: string, runsRoot: string, reviewRun: st
     "critical source must retain exactly one surviving critical");
   const finding = record(result.surviving_critical_findings[0], "critical source surviving finding");
   check(typeof finding.id === "string", "critical source finding id is missing");
-  return finding.id;
+  return { cwd, runsRoot, reviewRun, findingId: finding.id };
 }
 
-/** Repair the source, add its regression test, and leave a stale failing
- *  report that the enrolled command must replace with fresh evidence. */
-function writeCriticalRepair(cwd: string): void {
+/** Repair the reviewed source, add its regression test, and leave a stale
+ *  failing report that the enrolled command must replace with fresh evidence. */
+function writeCriticalRepair({ cwd }: ReviewedCriticalSource): void {
   const { changedPath, testPath, reportPath } = CRITICAL_REPAIR;
   writeFileSync(join(cwd, changedPath), "export const repaired = () => true;\n");
   mkdirSync(join(cwd, "tests"), { recursive: true });
@@ -457,9 +477,9 @@ function writeCriticalRepair(cwd: string): void {
   writeFileSync(join(cwd, reportPath), '<testsuite tests="1" failures="1"/>');
 }
 
-/** The declared defect-family accounting that repairs `findingId` in one
- *  group checked by the enrolled regression check. */
-function declaredRepairAccounting(findingId: string): Record<string, unknown> {
+/** The declared defect-family accounting that repairs the reviewed critical in
+ *  one group checked by the enrolled regression check. */
+function declaredRepairAccounting({ findingId }: ReviewedCriticalSource): Record<string, unknown> {
   return {
     kind: "declared-defect-family-accounting",
     provenance: "DECLARED",
@@ -507,12 +527,9 @@ function assertRepairCheckedInstallation(remediated: Done): void {
  * skips both defect-family checks and completion-check execution. */
 function criticalRemediationSmoke(): void {
   const { changedPath, testPath } = CRITICAL_REPAIR;
-  const cwd = criticalRemediationRepository();
-  const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-facade-smoke-critical-runs-")));
-  temporaryRoots.push(runsRoot);
-  const reviewRun = join(runsRoot, "run.critical-source");
-  const findingId = survivingCriticalFindingId(cwd, runsRoot, reviewRun);
-  writeCriticalRepair(cwd);
+  const source = reviewedCriticalSource();
+  const { cwd, runsRoot, reviewRun } = source;
+  writeCriticalRepair(source);
 
   const remediationRun = join(runsRoot, "run.critical-remediation");
   const remediated = asDone(run(cwd, [
@@ -521,7 +538,7 @@ function criticalRemediationSmoke(): void {
     sourceRunsRoot: runsRoot,
     sourceRun: reviewRun,
     supportPaths: [testPath],
-    defectFamily: declaredRepairAccounting(findingId),
+    defectFamily: declaredRepairAccounting(source),
   })), "critical remediation start");
   assertRepairCheckedInstallation(remediated);
   asDone(run(cwd, ["resume", "--runs-root", runsRoot, "--run", remediationRun]),
@@ -533,19 +550,15 @@ function criticalRemediationSmoke(): void {
 
 /** A started `kind: "all"` Standalone Review over a fresh changed repository,
  *  with its run evidence in its own runs root. */
-type StartedStandaloneReview = Readonly<{
-  cwd: string;
+type StartedStandaloneReview = ReviewRunFixture & Readonly<{
   changedPath: string;
-  runsRoot: string;
-  reviewRun: string;
   initial: SpawnBatch;
 }>;
 
 function startedStandaloneReview(label: string, startLabel: string): StartedStandaloneReview {
   const { cwd, changedPath } = changedStandaloneRepository(label);
 
-  const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-facade-smoke-runs-")));
-  temporaryRoots.push(runsRoot);
+  const runsRoot = freshRunsRoot("loom-facade-smoke-runs-");
   const reviewRun = join(runsRoot, `run.${label}`);
   mkdirSync(reviewRun, { recursive: true });
   const initial = asSpawnBatch(run(cwd, [

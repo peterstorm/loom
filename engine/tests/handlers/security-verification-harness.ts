@@ -12,7 +12,7 @@
  * harness instead of placing ballots by hand.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { subagentDir } from "../../src/config";
 import { orchestrationHandler, type Emission } from "../../src/handlers/helpers/orchestration";
@@ -21,17 +21,23 @@ import { recordClaudeSpawnCorrelation } from "../../src/handlers/post-tool-use/r
 import { captureClaudeResult } from "../../src/handlers/subagent-stop/capture-orchestration-result";
 import { parseRegisteredSecurityVerificationProgram, type SecurityVerificationStart } from "../../src/core/security-verification";
 import { parentAnnouncement, FIXTURE_CLAUDE_CODE_SESSION_ID } from "../fixtures/facade-parent";
+import { deliverClaudeSubagentStop } from "../fixtures/claude-native-capture";
+import type { FacadeAction } from "../../src/handlers/helpers/programs/program-result";
 import type { Run } from "./security-audit-harness";
 
 export type Plan = Readonly<{
   runsRoot: string; run: string; input: SecurityVerificationStart; command: string; importCommand: string; awaitingBallots: number;
+  retiredRuns: readonly Readonly<{ run: string; reason: string }>[];
 }>;
 
 export type SpawnTask = Readonly<{
   authority: { requestId: string; slotId: string; attempt: 1 | 2; role: string; program: string; modelProfile: string };
   task: string;
 }>;
-export type Action = Readonly<{ kind: string; requests?: readonly SpawnTask[]; outcome?: unknown; diagnostic?: { kind: string; message: string } }>;
+/** The action a façade invocation printed, read loosely — but its `kind` is
+ *  the real façade action vocabulary, so a comparison against a kind the
+ *  program cannot emit does not compile. */
+export type Action = Readonly<{ kind: FacadeAction["kind"]; requests?: readonly SpawnTask[]; outcome?: unknown; diagnostic?: { kind: string; message: string } }>;
 
 /** The verification run `status --json` names, or null when none is owed. */
 export async function verificationPlan(run: Run): Promise<Plan | null> {
@@ -84,12 +90,9 @@ export async function deliver(
     tool_response: { agent_id: agentId },
   }, subagentDir());
   if (correlated.kind === "error") return { ok: false, message: String(correlated.message) };
-  const transcripts = join(subagentDir(), "test-transcripts");
-  mkdirSync(transcripts, { recursive: true });
-  const transcript = join(transcripts, `${agentId}.jsonl`);
-  writeFileSync(transcript, `${JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: finalText }] } })}\n`);
-  const outcome = await captureClaudeResult({ session_id: FIXTURE_CLAUDE_CODE_SESSION_ID, agent_id: agentId, agent_type: role, agent_transcript_path: transcript },
-    plan.runsRoot, join(plan.runsRoot, plan.run));
+  const outcome = await deliverClaudeSubagentStop({ sessionId: FIXTURE_CLAUDE_CODE_SESSION_ID, agentId, agentType: role,
+    transcriptDirectory: join(subagentDir(), "test-transcripts"), finalTexts: [finalText] },
+  (stop) => captureClaudeResult(stop, plan.runsRoot, join(plan.runsRoot, plan.run)));
   return outcome.kind === "captured" ? { ok: true, message: "captured" } : { ok: false, message: JSON.stringify(outcome) };
 }
 

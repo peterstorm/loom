@@ -15,12 +15,8 @@ import { describe, expect, it } from "vitest";
 import { parseSecurityAuditStart, startMetadata } from "../../src/core/security-audit-start";
 import { parseCoverageSeeds } from "../../src/core/security-coverage";
 import { parseSecurityRunMetadata } from "../../src/core/security-audit-contract";
-import { aSeed, aSignals, ok } from "./fixtures";
+import { aSeed, aSignals, BOOLEAN_SIGNALS, ok } from "./fixtures";
 
-const BOOLEAN_SIGNALS = [
-  "servesHttp", "rendersClientSide", "drivesModelsOrTools", "usesQueuesOrRpc", "isolatesTenants",
-  "deploysInfrastructure", "hasNativeMemory", "hasAppOrLocalIpc", "hasReleasePipelines", "hasSharedResourcePressure",
-] as const;
 
 describe("parseSecurityAuditStart", () => {
   it("defaults an absent scope to a tree and absent signals to none", () => {
@@ -76,6 +72,28 @@ describe("parseSecurityAuditStart", () => {
     });
   });
 
+  it("pairs a scope's refs with its kind: a diff names both commits, a tree names neither", () => {
+    const commit = "a".repeat(40);
+    const violations = (scope: unknown) => {
+      const parsed = parseSecurityAuditStart({ units: [], scope });
+      return parsed.ok ? [] : parsed.error.violations;
+    };
+    expect(ok(parseSecurityAuditStart({ units: [], scope: { kind: "diff", baseRef: commit, headRef: commit } })).scope)
+      .toEqual({ kind: "diff", baseRef: commit, headRef: commit });
+    expect(violations({ kind: "diff" })).toEqual([
+      { path: "scope.baseRef", message: "a diff scope names both refs" },
+      { path: "scope.headRef", message: "a diff scope names both refs" },
+    ]);
+    expect(violations({ kind: "diff", baseRef: commit, headRef: null })).toEqual([{ path: "scope.headRef", message: "a diff scope names both refs" }]);
+    expect(violations({ kind: "diff", baseRef: "main", headRef: commit })).toEqual([{ path: "scope.baseRef", message: "expected a 40- or 64-hex commit id" }]);
+    expect(violations({ kind: "tree", baseRef: commit, headRef: commit })).toEqual([
+      { path: "scope.baseRef", message: "a tree scope names no refs" },
+      { path: "scope.headRef", message: "a tree scope names no refs" },
+    ]);
+    // A mistyped ref is named once, by its type, not again as missing.
+    expect(violations({ kind: "diff", baseRef: 7, headRef: commit })).toEqual([{ path: "scope.baseRef", message: "expected a string or null" }]);
+  });
+
   it("refuses a null scope or null signals rather than reading them as absent", () => {
     expect(parseSecurityAuditStart({ units: [], scope: null }).ok).toBe(false);
     expect(parseSecurityAuditStart({ units: [], signals: null }).ok).toBe(false);
@@ -94,11 +112,11 @@ describe("startMetadata", () => {
   const ledger = ok(parseCoverageSeeds([aSeed()]));
 
   it("derives a run the metadata schema accepts, with the default id, the seeds' paths and the payload's scope", () => {
-    const payload = ok(parseSecurityAuditStart({ units: [], scope: { kind: "diff", baseRef: "b".repeat(40), headRef: null } }));
+    const payload = ok(parseSecurityAuditStart({ units: [], scope: { kind: "diff", baseRef: "b".repeat(40), headRef: "c".repeat(64) } }));
     const { metadata } = startMetadata(facts, payload, ledger);
     expect(parseSecurityRunMetadata(metadata).ok).toBe(true);
     expect(metadata.runId).toBe(`audit-dir-${"a".repeat(12)}`);
-    expect(metadata.scope).toEqual({ paths: ["src/api/login.ts"], kind: "diff", baseRef: "b".repeat(40), headRef: null });
+    expect(metadata.scope).toEqual({ paths: ["src/api/login.ts"], kind: "diff", baseRef: "b".repeat(40), headRef: "c".repeat(64) });
     expect(metadata.runStatus).toBe("in_progress");
     expect(metadata.published).toBe(false);
   });

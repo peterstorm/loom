@@ -228,7 +228,7 @@ describe("renderEpoch: SandboxRun", () => {
       "    limits cpu 10s, address space 1024MB, processes 128, file 32MB, wall 60s, scratch 64MB",
       "    enforced cpu yes, memory yes, processes yes, file size yes",
       "    scratch 12B after the run; env PATH,HOME,TMPDIR,LANG,TERM",
-      "    network namespace; target read-only yes; home read-only yes; root read-only no; unremounted mounts 0",
+      "    network namespace, loopback up yes; target read-only yes; home read-only yes; root read-only no; unremounted mounts 0",
     ]);
   });
 
@@ -239,7 +239,7 @@ describe("renderEpoch: SandboxRun", () => {
       "    limits cpu 10s, address space 1024MB, processes 128, file 32MB, wall 60s, scratch 64MB",
       "    enforced cpu yes, memory yes, processes yes, file size yes",
       "    scratch unmeasured after the run; env PATH,HOME,TMPDIR,LANG,TERM",
-      "    network namespace; target read-only yes; home read-only yes; root read-only no; unremounted mounts 0",
+      "    network namespace, loopback up yes; target read-only yes; home read-only yes; root read-only no; unremounted mounts 0",
     ]);
   });
 
@@ -260,17 +260,22 @@ describe("renderEpoch: SandboxRun", () => {
       "    limits cpu 10s, address space 1024MB, processes 128, file 32MB, wall 60s, scratch 64MB",
       "    enforced cpu yes, memory no, processes yes, file size no",
       "    scratch 12B after the run; env PATH,HOME,TMPDIR,LANG,TERM",
-      "    network namespace; target read-only no; home read-only no; root read-only yes; unremounted mounts 4",
+      "    network namespace, loopback up yes; target read-only no; home read-only no; root read-only yes; unremounted mounts 4",
     ]);
   });
 
   it("residual exposure is reported but does not unbound a run", () => {
     const lines = renderEpoch([sandboxRun(IMPL, { readOnlyRoot: false, unremountedMounts: 9 })], IMPL);
     expect(lines[2]).toBe("    within limits");
-    expect(lines.at(-1)).toBe("    network namespace; target read-only yes; home read-only yes; root read-only no; unremounted mounts 9");
+    expect(lines.at(-1)).toBe("    network namespace, loopback up yes; target read-only yes; home read-only yes; root read-only no; unremounted mounts 9");
+  });
+
+  it("a dead loopback is recorded on the detail line but does not unbound a run", () => {
+    const lines = renderEpoch([sandboxRun(IMPL, { loopbackUp: false })], IMPL);
+    expect(lines[2]).toBe("    within limits");
+    expect(lines.at(-1)).toBe("    network namespace, loopback up no; target read-only yes; home read-only yes; root read-only no; unremounted mounts 0");
   });
 });
-
 
 // --- Settlement agreement (AS-001, SC-002) ---
 
@@ -402,6 +407,7 @@ const rawRecordArb = fc.record({
       receipt: fc.record({
         exit: fc.option(fc.integer({ min: 0, max: 255 }), { nil: null }),
         scratchBytes: fc.option(fc.nat(), { nil: null }),
+        loopbackUp: fc.boolean(),
         targetReadOnly: fc.boolean(),
         homeReadOnly: fc.boolean(),
         readOnlyRoot: fc.boolean(),
@@ -438,6 +444,17 @@ describe("properties over admitted records", () => {
         const factLines = renderEpoch(records, epoch).filter((line) => FACT_LINE.test(line));
         expect(factLines).toHaveLength(eventsForEpoch(records, epoch).length);
         factLines.forEach((line, k) => expect(line.startsWith(`#${k} `)).toBe(true));
+      }),
+    );
+  });
+
+  it("every SandboxRun's detail line records its own loopback fact", () => {
+    fc.assert(
+      fc.property(admittedRecordsArb, fc.constantFrom(...EPOCH_POOL), (records, epoch) => {
+        const runs = eventsForEpoch(records, epoch).flatMap((event) => (event.kind === "SandboxRun" ? [event.receipt] : []));
+        const isolation = renderEpoch(records, epoch).filter((line) => line.startsWith("    network namespace"));
+        expect(isolation).toEqual(runs.map((receipt) => expect.stringMatching(
+          new RegExp(`^    network namespace, loopback up ${receipt.loopbackUp ? "yes" : "no"}; `))));
       }),
     );
   });

@@ -8,39 +8,14 @@ import { fixtureSession } from "./pi-session";
 import { value } from "./parse-result";
 import { runReadCoverage } from "../../src/orchestration/standalone-read-coverage-evidence";
 import { claudeReadLines, frozenDiffReaderPages, piReadMessages } from "./read-coverage";
+import { deliverClaudeSubagentStop } from "./claude-native-capture";
 import { advertiseInstalledLaunchPort, SynchronousEventBus } from "./emission-launch-port";
 
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown;
 type Emit = (event: string, payload: Record<string, unknown>) => Promise<unknown[]>;
 const packageRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
-type Dispatch = typeof import("../../src/handlers/subagent-stop/dispatch");
 type CaptureRequest = { authority: AgentRequestAuthority; task: string };
-type ReaderPages = ReturnType<typeof frozenDiffReaderPages>;
-type Delivery = (observed: readonly string[]) => Promise<unknown>;
-
-/** One Claude SubagentStop delivery per request: each records its harness correlator and, when delivered, writes its transcript and dispatches it. */
-async function claudeDeliveries(handle: RunDirHandle, requests: readonly CaptureRequest[], reads: readonly ReaderPages[],
-  session: ReturnType<typeof fixtureSession>, dispatch: Dispatch, toolCallId: string): Promise<readonly Delivery[]> {
-  const deliveries: Delivery[] = [];
-  for (const [index, { authority }] of requests.entries()) {
-    const nativeId = `${toolCallId}-${index}`;
-    value(await handle.recordHarnessCorrelator({ schemaVersion: 1, harness: "claude", nativeId, requestId: authority.requestId,
-      role: authority.role, attempt: authority.attempt }));
-    const transcript = join(session.directory, `${nativeId}.jsonl`);
-    deliveries.push(async observed => {
-      writeFileSync(transcript, [
-        ...claudeReadLines(reads[index]!),
-        JSON.stringify({ message: { role: "assistant", content: observed.map(text => ({ type: "text", text })) } }),
-      ].join("\n") + "\n");
-      process.env.LOOM_ORCHESTRATION_RUNS_ROOT = handle.identity.runsRoot;
-      process.env.LOOM_ORCHESTRATION_RUN_DIR = handle.runDirectory;
-      return dispatch.runDispatch(JSON.stringify({ session_id: session.sessionId, agent_id: nativeId,
-        agent_type: authority.role, agent_transcript_path: transcript }), []);
-    });
-  }
-  return deliveries;
-}
 
 async function nativeBatchCapturer(root: string, harness: "claude" | "pi", session: ReturnType<typeof fixtureSession>, emit: Emit) {
   const bindings = await import("../../src/orchestration/session-run-bindings");
@@ -68,10 +43,22 @@ async function nativeBatchCapturer(root: string, harness: "claude" | "pi", sessi
           messages: [...piReadMessages(reads[index]!), { role: "assistant", content: observed[index]!.map(text => ({ type: "text", text })) }] })) } });
       return redeliver();
     }
-    const deliveries = await claudeDeliveries(handle, requests, reads, session, dispatch, toolCallId);
+    // Claude: each request's harness correlator is recorded once; every
+    // (re)delivery then writes its transcript and dispatches its SubagentStop.
+    const nativeIds = requests.map((_, index) => `${toolCallId}-${index}`);
+    for (const [index, { authority }] of requests.entries()) {
+      value(await handle.recordHarnessCorrelator({ schemaVersion: 1, harness: "claude", nativeId: nativeIds[index]!,
+        requestId: authority.requestId, role: authority.role, attempt: authority.attempt }));
+    }
     redeliver = async (observed = texts) => {
       const responses: unknown[] = [];
-      for (const [index, deliver] of deliveries.entries()) responses.push(await deliver(observed[index]!));
+      for (const [index, { authority }] of requests.entries()) {
+        process.env.LOOM_ORCHESTRATION_RUNS_ROOT = handle.identity.runsRoot;
+        process.env.LOOM_ORCHESTRATION_RUN_DIR = handle.runDirectory;
+        responses.push(await deliverClaudeSubagentStop({ sessionId: session.sessionId, agentId: nativeIds[index]!,
+          agentType: authority.role, transcriptDirectory: session.directory, finalTexts: observed[index]!,
+          leadingRecords: claudeReadLines(reads[index]!) }, (stop) => dispatch.runDispatch(JSON.stringify(stop), [])));
+      }
       return responses;
     };
     return redeliver();

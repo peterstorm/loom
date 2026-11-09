@@ -317,7 +317,7 @@ export async function runInteractiveSubagent(
   try {
     const invocation = piInvocation(args);
     child = (dependencies.spawnChild ?? defaultSpawn)(invocation.command, invocation.args, input.cwd,
-      childAgentEnvironment(process.env, null));
+      childAgentEnvironment(process.env));
     dependencies.onChildStarted?.(child);
   } catch (error) {
     await rm(promptDir, { recursive: true, force: true });

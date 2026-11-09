@@ -27,7 +27,6 @@ import {
   parseVerificationResult,
   type SecurityVerificationResult,
   type CachedBallotAdmission,
-  type GenerationState,
   type RegisteredSecurityVerificationProgram,
   type VerificationRunProof,
 } from "../../core/security-verification";
@@ -36,10 +35,7 @@ import { canonicalAttestedRunDirectory, captureAttestationLookup } from "../../o
 import { openRegisteredRunDirectory, parseRunDirectoryReference, type RunDirHandle } from "../../orchestration/run-directory-handle";
 import { closeAnchoredDirectory, listDirectoryNamesNoFollow, openDirectoryNoFollow, readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
 import { parseRegisteredFacadeProgram, replayVerificationOutcome, replayVerificationResult } from "./programs";
-import { verificationRunsRoot, type AuditSnapshot } from "./security-audit-run";
-
-/** The file a finished verification run publishes. */
-const VERIFICATION_RESULT_FILE = "result.json";
+import { SECURITY_VERIFICATION_RESULT_FILE, verificationRunsRoot, type AuditSnapshot } from "./security-audit-run";
 
 const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
@@ -109,24 +105,39 @@ export async function proveCachedBallots(snapshot: AuditSnapshot): Promise<Cache
   return admitCachedBallots({ audit: snapshot.reference, verdicts: snapshot.verdicts, proofs });
 }
 
-/** What one existing run directory is, as a generation of its claim set. */
-async function generationState(locator: string, run: string): Promise<GenerationState> {
+/**
+ * What one existing run directory is, as a generation of its claim set — and,
+ * when it is dead, WHY. A blocked run and one whose evidence could not be read
+ * (possibly a transient fault) are both dead to the planner (fail closed: a
+ * later drive recomputes from durable evidence), but the reason travels to
+ * `status`, so an operator steered to a new generation sees what retired the
+ * old one instead of spending verifier spawns blind.
+ */
+export type GenerationObservation =
+  | Readonly<{ state: "live" }>
+  | Readonly<{ state: "dead"; reason: string }>;
+
+const LIVE: GenerationObservation = Object.freeze({ state: "live" });
+const dead = (reason: string): GenerationObservation => Object.freeze({ state: "dead", reason });
+
+async function observeGeneration(locator: string, run: string): Promise<GenerationObservation> {
   const opened = openVerificationRun(locator, run);
-  if (!opened.ok) return "dead";
+  if (!opened.ok) return dead(`it cannot be opened: ${opened.error}`);
   const replayed = await replayVerificationOutcome(opened.value.handle, opened.value.registration);
-  if (!replayed.ok) return "dead";
-  if (replayed.value.kind === "in-flight") return "live";
-  if (replayed.value.kind === "blocked") return "dead";
-  return requireAttestedBallots(opened.value.handle, replayed.value.result.ballots).ok ? "live" : "dead";
+  if (!replayed.ok) return dead(`its evidence cannot be read: ${replayed.message}`);
+  if (replayed.value.kind === "in-flight") return LIVE;
+  if (replayed.value.kind === "blocked") return dead(`it is blocked: ${replayed.value.message}`);
+  const attested = requireAttestedBallots(opened.value.handle, replayed.value.result.ballots);
+  return attested.ok ? LIVE : dead(`its result is unimportable: ${attested.error}`);
 }
 
 /**
- * The state of every run directory under the audit's `verification-runs/`
- * that `planVerificationStart` may name; a name absent from the map is
- * absent from disk. An unreadable runs root fails closed: every name it
- * could hold is reported unknown by the caller's refusal.
+ * What every run directory under the audit's `verification-runs/` that
+ * `planVerificationStart` may name is; a name absent from the map is absent
+ * from disk. An unreadable runs root fails closed: every name it could hold
+ * is reported unknown by the caller's refusal.
  */
-export async function observeVerificationGenerations(locator: string): Promise<DomainResult<ReadonlyMap<string, GenerationState>, string>> {
+export async function observeVerificationGenerations(locator: string): Promise<DomainResult<ReadonlyMap<string, GenerationObservation>, string>> {
   const root = verificationRunsRoot(locator);
   if (!existsSync(root)) return success(new Map());
   let names: readonly string[];
@@ -140,9 +151,9 @@ export async function observeVerificationGenerations(locator: string): Promise<D
   } catch (error) {
     return failure(`cannot list ${root}: ${describe(error)}`);
   }
-  const states = new Map<string, GenerationState>();
+  const states = new Map<string, GenerationObservation>();
   for (const name of names.filter((entry) => entry.startsWith("run.verify-"))) {
-    states.set(name, await generationState(locator, name));
+    states.set(name, await observeGeneration(locator, name));
   }
   return success(states);
 }
@@ -157,7 +168,7 @@ export function readVerificationSource(locator: string, from: string): DomainRes
   const { handle } = opened.value;
   let bytes: Buffer;
   try {
-    bytes = readRunBytesNoFollow(join(handle.runDirectory, VERIFICATION_RESULT_FILE));
+    bytes = readRunBytesNoFollow(join(handle.runDirectory, SECURITY_VERIFICATION_RESULT_FILE));
   } catch (error) {
     return failure(`verification run ${handle.runId} has published no result.json (${describe(error)}); resume it until it is done`);
   }

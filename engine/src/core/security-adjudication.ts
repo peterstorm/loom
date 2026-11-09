@@ -26,8 +26,9 @@
 import { match } from "ts-pattern";
 import { compareStrings } from "./ordering";
 import { catalogProfileOfAgent, parseLlmProfileId, type LlmProfileId } from "./model-profiles";
-import { failure, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type DomainResult } from "./orchestration-contract/identity";
-import { isSecurityFingerprint, isVisibleText, isWireRecord, type WireViolation } from "./security-audit-contract";
+import { failure, isNonEmpty, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type DomainResult } from "./orchestration-contract/identity";
+import { SECURITY_VERIFICATION_PROGRAM } from "./orchestration-contract/programs";
+import { isSecurityFingerprint, isVisibleText, isWireRecord, unknownFieldViolations, type WireViolation } from "./security-audit-contract";
 import { catalogAgentOfOwner, coverageSettled, type CoverageLedger } from "./security-coverage";
 import {
   sortByFingerprint,
@@ -37,10 +38,31 @@ import {
   type SecurityFinding,
 } from "./security-findings";
 
-/** The program that issues every verifier spawn a ballot may come from. */
-export const SECURITY_VERIFICATION_PROGRAM = "security-verification" as const;
 /** The one catalog role a ballot may be cast by. */
 export const SECURITY_VERIFIER_ROLE = "security-verifier-agent" as const;
+/** The catalog profile every ballot is cast on: the one the Agent Catalog
+ *  assigns `SECURITY_VERIFIER_ROLE`. A binding naming any other profile names a
+ *  spawn the verifier role never ran under. */
+const SECURITY_VERIFIER_PROFILE = catalogProfileOfAgent(SECURITY_VERIFIER_ROLE);
+
+/** Why `profile` cannot be the profile a ballot was cast on, or null when it is
+ *  the one the catalog assigns the verifier role. Read by the binding parser and
+ *  by the verifier-side binder, so the two refuse the same profiles. */
+export const catalogVerifierProfileProblem = (profile: LlmProfileId): string | null =>
+  profile === SECURITY_VERIFIER_PROFILE
+    ? null
+    : `profile ${profile} is not ${String(SECURITY_VERIFIER_PROFILE)}, the profile the catalog assigns ${SECURITY_VERIFIER_ROLE}`;
+
+declare const missingFactBrand: unique symbol;
+/** The one fact a demoting vote names: visible prose, never blank. Only
+ *  `isMissingFact` produces it, so adjudication reads a field that cannot be
+ *  blank by type instead of re-checking it. */
+export type MissingFact = string & Readonly<{ [missingFactBrand]: true }>;
+
+/** The vote grammar's one rule for a missing fact: visible prose. A blank
+ *  string is refused by `voteViolations` (it is not "no missing fact" — that is
+ *  `null`), so nothing downstream normalizes it. */
+export const isMissingFact = (value: unknown): value is MissingFact => isVisibleText(value);
 
 /**
  * Where a ballot came from, taken from AUTHORITY only (ADR-0067 D3): the
@@ -49,6 +71,8 @@ export const SECURITY_VERIFIER_ROLE = "security-verifier-agent" as const;
  * cannot carry a role or profile its spawn did not have.
  */
 export type BallotBinding = Readonly<{
+  /** The program that issues every verifier spawn a ballot may come from
+   *  (owned by the orchestration contract's program vocabulary). */
   program: typeof SECURITY_VERIFICATION_PROGRAM;
   /** The verification run that issued the request. */
   runId: string;
@@ -72,7 +96,7 @@ export type VerificationVerdict = Readonly<{
   vote: "critical" | "advisory";
   reason: string;
   /** The one fact absent when the vote is advisory for lack of proof. */
-  missingFact: string | null;
+  missingFact: MissingFact | null;
   /** The audit wave the verification run was issued for. */
   wave: number;
   binding: BallotBinding;
@@ -112,31 +136,26 @@ const verdictsFor = (
 ): readonly VerificationVerdict[] =>
   verdicts.filter((verdict) => verdict.fingerprint === fingerprint).sort(compareVerdicts);
 
-/** One verdict decides: a single `critical` survives, and any `advisory`
- *  without a `critical` beside it demotes. Ties break toward the blocking vote
- *  ONLY when a critical exists — a panel that splits is a panel that could not
- *  refute, and the claim stands as confirmed. */
-const decide = (
-  first: VerificationVerdict,
-  rest: readonly VerificationVerdict[],
-): VerificationVerdict => [first, ...rest].find((verdict) => verdict.vote === "critical") ?? first;
-
-export type AdjudicationInput = Readonly<{
+type AdjudicationInput = Readonly<{
   findings: readonly SecurityFinding[];
   verdicts: readonly VerificationVerdict[];
-  /** Every catalog profile that hunted in this run, derived from the ledger's
-   *  owned units (`huntingProfiles`). A vote cast on one of these profiles
+  /** Every catalog profile that hunted in this run, derived from the ledger by
+   *  `huntingProfiles` — never caller-supplied, which is why this step is
+   *  reached only through `adjudicateRun`. A vote cast on one of these profiles
    *  verifies nothing; an empty list means the run cannot say who hunted, so
    *  no confirmed claim is publishable. */
-  huntProfiles: readonly string[];
+  huntProfiles: readonly LlmProfileId[];
 }>;
 
 /**
  * Apply every verdict. `gaps` are not failures of the audit — they are the
  * findings the run must not publish as confirmed; `publish` refuses on a
  * non-empty `gaps` so an unverified claim cannot slip out as a result.
+ *
+ * The deciding ballot among the independent ones: the first `critical` if any
+ * (a panel that splits could not refute, so the claim stands), else the first.
  */
-export function adjudicateCandidates(input: AdjudicationInput): Adjudication {
+function adjudicateCandidates(input: AdjudicationInput): Adjudication {
   const confirmed: ConfirmedFinding[] = [];
   const demoted: NeedsValidationFinding[] = [];
   const rejected: RejectedFinding[] = [];
@@ -154,18 +173,18 @@ export function adjudicateCandidates(input: AdjudicationInput): Adjudication {
       continue;
     }
     // The profile is the MINTED request's (ADR-0067 D5), never a payload field.
-    const [first, ...rest] = verdicts.filter((verdict) => !input.huntProfiles.includes(verdict.binding.profile));
-    if (first === undefined) {
+    const independent = verdicts.filter((verdict) => !input.huntProfiles.includes(verdict.binding.profile));
+    if (!isNonEmpty(independent)) {
       gaps.push({ kind: "same-profile", fingerprint: finding.fingerprint, profile: verdicts[0].binding.profile });
       continue;
     }
-    const decision = decide(first, rest);
+    const decision = independent.find((verdict) => verdict.vote === "critical") ?? independent[0];
     if (decision.vote === "critical") {
       confirmed.push(finding);
       continue;
     }
-    if (decision.missingFact !== null && decision.missingFact.trim() !== "") {
-      demoted.push(toLead(finding, decision));
+    if (decision.missingFact !== null) {
+      demoted.push(toLead(finding, decision.missingFact));
       continue;
     }
     rejected.push(toRejected(finding, decision));
@@ -179,7 +198,7 @@ export function adjudicateCandidates(input: AdjudicationInput): Adjudication {
   };
 }
 
-const toLead = (finding: ConfirmedFinding, verdict: VerificationVerdict): NeedsValidationFinding => ({
+const toLead = (finding: ConfirmedFinding, missingFact: MissingFact): NeedsValidationFinding => ({
   verdict: "needs_validation",
   fingerprint: finding.fingerprint,
   title: finding.title,
@@ -187,7 +206,7 @@ const toLead = (finding: ConfirmedFinding, verdict: VerificationVerdict): NeedsV
   claimed_root_cause: finding.root_cause,
   trace: finding.trace,
   evidence: finding.evidence,
-  blockers: [verdict.missingFact ?? verdict.reason],
+  blockers: [missingFact],
   validation_plan: { local: finding.execution.instructions.join("; ") },
 });
 
@@ -309,7 +328,7 @@ export function parseVerificationVerdicts(raw: unknown): DomainResult<readonly V
   const violations: VerdictViolation[] = [];
   const verdicts: VerificationVerdict[] = [];
   const cast = new Set<string>();
-  (raw as readonly unknown[]).forEach((entry, index) => {
+  raw.forEach((entry: unknown, index: number) => {
     const parsed = parseVerdict(entry, `verdicts[${index}]`);
     if (!parsed.ok) {
       violations.push(...parsed.error);
@@ -332,7 +351,7 @@ export function parseVerificationVerdicts(raw: unknown): DomainResult<readonly V
  *  entry, so one bad ballot never hides behind another's). */
 function parseVerdict(entry: unknown, base: string): DomainResult<VerificationVerdict, readonly VerdictViolation[]> {
   if (!isWireRecord(entry)) return failure([{ path: base, message: "expected an object" }]);
-  const local = [...unknownKeyViolations(entry, VERDICT_KEYS, base), ...voteViolations(entry, base)];
+  const local = [...unknownFieldViolations(entry, VERDICT_KEYS, base), ...voteViolations(entry, base)];
   if (typeof entry.wave !== "number" || !Number.isInteger(entry.wave) || entry.wave < 1) {
     local.push({ path: `${base}.wave`, message: "expected a positive integer" });
   }
@@ -343,24 +362,16 @@ function parseVerdict(entry: unknown, base: string): DomainResult<VerificationVe
     fingerprint: String(entry.fingerprint),
     vote: entry.vote === "critical" ? "critical" : "advisory",
     reason: String(entry.reason),
-    missingFact: normalizedMissingFact(entry.missingFact),
+    missingFact: admittedMissingFact(entry.missingFact),
     wave: Number(entry.wave),
     binding: binding.value,
   });
 }
 
-/** `null` and blank both mean "no missing fact", so a verifier cannot demote a
- *  claim by accidentally sending an empty string. */
-export const normalizedMissingFact = (value: unknown): string | null =>
-  typeof value === "string" && value.trim() !== "" ? value : null;
-
-/** Every key of `record` the shape does not declare, at `base`. */
-export const unknownKeyViolations = (
-  record: Readonly<Record<string, unknown>>,
-  allowed: readonly string[],
-  base: string,
-): VerdictViolation[] =>
-  Object.keys(record).filter((key) => !allowed.includes(key)).map((key) => ({ path: `${base}.${key}`, message: "unknown field" }));
+/** The missing fact of a vote `voteViolations` already admitted: `null`, or
+ *  visible prose (a blank string is a violation there, never "no fact"). Shared
+ *  with the verifier result wire so both read the field one way. */
+export const admittedMissingFact = (value: unknown): MissingFact | null => (isMissingFact(value) ? value : null);
 
 /**
  * The four fields a verifier itself decides — fingerprint, vote, reason and
@@ -378,7 +389,7 @@ export function voteViolations(record: Readonly<Record<string, unknown>>, base: 
     local.push({ path: `${base}.vote`, message: "expected critical or advisory" });
   }
   if (!isVisibleText(record.reason)) local.push({ path: `${base}.reason`, message: "requires visible prose" });
-  if (record.missingFact !== null && !isVisibleText(record.missingFact)) {
+  if (record.missingFact !== null && !isMissingFact(record.missingFact)) {
     local.push({ path: `${base}.missingFact`, message: "expected null or visible prose" });
   }
   return local;
@@ -387,11 +398,15 @@ export function voteViolations(record: Readonly<Record<string, unknown>>, base: 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 /** A ballot's binding: every identity in its grammar, the program and role the
- *  closed verification vocabulary, the profile a catalog profile, the capture
- *  digest a sha256. A missing or malformed binding is a refusal (D5). */
+ *  closed verification vocabulary, the profile the one the catalog assigns the
+ *  verifier role (a binding naming another profile names a spawn that role never
+ *  ran under — a tampered `verdicts.json`), the capture digest a sha256. A
+ *  missing or malformed binding is a refusal (D5). If the catalog ever re-profiles
+ *  the verifier, ballots cast under the old profile are refused, never
+ *  counted under a profile the catalog no longer gives that role. */
 export function parseBallotBinding(raw: unknown, base: string): DomainResult<BallotBinding, readonly VerdictViolation[]> {
   if (!isWireRecord(raw)) return failure([{ path: base, message: "expected the binding a verification run published" }]);
-  const local = unknownKeyViolations(raw, BALLOT_BINDING_KEYS, base);
+  const local = unknownFieldViolations(raw, BALLOT_BINDING_KEYS, base);
   const runId = parseOrchestrationRunId(raw.runId);
   const requestId = parseRequestId(raw.requestId);
   const slotId = parseSlotId(raw.slotId);
@@ -403,6 +418,10 @@ export function parseBallotBinding(raw: unknown, base: string): DomainResult<Bal
   if (raw.attempt !== 1 && raw.attempt !== 2) local.push({ path: `${base}.attempt`, message: "expected 1 or 2" });
   if (raw.role !== SECURITY_VERIFIER_ROLE) local.push({ path: `${base}.role`, message: `expected ${SECURITY_VERIFIER_ROLE}` });
   if (!profile.ok) local.push({ path: `${base}.profile`, message: "expected a catalog profile" });
+  else {
+    const problem = catalogVerifierProfileProblem(profile.value);
+    if (problem !== null) local.push({ path: `${base}.profile`, message: problem });
+  }
   if (typeof raw.captureDigest !== "string" || !SHA256_HEX.test(raw.captureDigest)) {
     local.push({ path: `${base}.captureDigest`, message: "expected a sha256 capture digest" });
   }

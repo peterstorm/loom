@@ -12,11 +12,11 @@
  * from durable evidence, so `verify --from` can replay a finished run from the
  * same evidence and refuse a `result.json` that differs.
  */
-import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { match } from "ts-pattern";
 import { buildContextPacket, encodeByteSection, type ContextPacket } from "../../../core/context-packets";
 import { captureKey } from "../../../core/harness-capture";
+import { sha256Bytes } from "../../../core/digest";
 import {
   mintAgentRosterSlot,
   parseArtifactRef,
@@ -51,7 +51,7 @@ import {
 import { SECURITY_VERIFIER_ROLE, type VerificationVerdict } from "../../../core/security-adjudication";
 import { readRunBytesNoFollow, writeRunBytesExclusiveNoFollow } from "../../../orchestration/no-follow-fs";
 import { parseRunDirectoryReference, type RunDirHandle } from "../../../orchestration/run-directory-handle";
-import { readAuditSnapshot, verificationRunsRoot, type AuditSnapshot } from "../security-audit-run";
+import { readAuditSnapshot, SECURITY_VERIFICATION_RESULT_FILE, verificationRunsRoot, type AuditSnapshot } from "../security-audit-run";
 import { registerSecurityAuditRun } from "../../../orchestration/security-audit-run-registry";
 import { durableCaptureRejection, durablePublishedReceipt, durableRefutationRequests, publicationResolver, refutationBatchEffectId } from "./durable-requests";
 import { recoverOrPublishRefutationRetry } from "./refutation-requests";
@@ -61,9 +61,6 @@ import { failed, type FacadeDriveResult, type FacadeSpawnRequest, type ProgramPa
 
 /** The durable effect label every verification batch is published under. */
 const LABEL = "security-verification";
-
-/** The result file a finished run publishes; the session completion binding reads exactly this path. */
-const RESULT_FILE = "result.json";
 
 const OUTPUT_CONTRACT =
   `Try to refute every candidate in the ${VERIFICATION_BRIEF_SECTION} section and return exactly one ` +
@@ -263,7 +260,7 @@ async function attemptEvidence(
   if (captured.has(captureKey(authority.slotId, authority.attempt))) {
     const bytes = handle.readTranscriptBytes(authority);
     if (!bytes.ok) return { ok: false, message: bytes.error.message };
-    const digest = createHash("sha256").update(bytes.value).digest("hex");
+    const digest = sha256Bytes(bytes.value);
     return { ok: true, value: { kind: "captured", text: Buffer.from(bytes.value).toString("utf8"), digest } };
   }
   const rejection = await durableCaptureRejection(handle, authority);
@@ -393,7 +390,7 @@ const blocked = (handle: RunDirHandle, messages: readonly string[]): FacadeDrive
 /** Write `result.json` exactly once: a repeat with identical bytes converges, different bytes are a collision. */
 function publishResult(handle: RunDirHandle, result: SecurityVerificationResult): FacadeDriveResult {
   const bytes = Buffer.from(serializeVerificationResult(result), "utf8");
-  const path = join(handle.runDirectory, RESULT_FILE);
+  const path = join(handle.runDirectory, SECURITY_VERIFICATION_RESULT_FILE);
   try {
     writeRunBytesExclusiveNoFollow(path, bytes);
   } catch (error) {
@@ -402,8 +399,8 @@ function publishResult(handle: RunDirHandle, result: SecurityVerificationResult)
     try { existing = readRunBytesNoFollow(path); } catch (cause) { return failed(describe(cause)); }
     if (!existing.equals(bytes)) return failed(`${path} already holds a different verification result`);
   }
-  const artifact = parseArtifactRef({ runId: handle.runId, slot: { kind: "fixed-artifact-slot", path: RESULT_FILE },
-    digest: createHash("sha256").update(bytes).digest("hex"), byteLength: bytes.byteLength });
+  const artifact = parseArtifactRef({ runId: handle.runId, slot: { kind: "fixed-artifact-slot", path: SECURITY_VERIFICATION_RESULT_FILE },
+    digest: sha256Bytes(bytes), byteLength: bytes.byteLength });
   return artifact.ok
     ? { ok: true, action: { kind: "done", runId: handle.runId, outcome: artifact.value } }
     : failed(artifact.error.message);

@@ -664,22 +664,67 @@ describe("securityAuditVerifyInvocations — fed forms are never static (F)", ()
   it.each([
     ["a here-string", `bash <<< 'loom helper security-audit verify --out ${R} --from run.verify-w1-g1-a'`],
     ["a pipe", `echo 'loom helper security-audit verify --out ${R} --from run.verify-w1-g1-a' | bash`],
-    ["an escaped head", `\\loom helper security-audit verify --out ${R} --from run.verify-w1-g1-a`],
     ["interpreter code", `python3 -c "import os; os.system('loom helper security-audit verify --out ${R}')"`],
-    ["find -exec", `find . -maxdepth 0 -exec loom helper security-audit verify --out ${R} --from run.verify-w1-g1-a \;`],
-  ])("%s", (name, command) => {
+  ])("%s: every invocation found is unresolved", (_name, command) => {
     const found = invocations(command);
-    expect(found.length, name).toBeGreaterThan(0);
-    if (name === "an escaped head" || name === "find -exec") {
-      expect(found.map((invocation) => invocation.kind)).toEqual(["static"]);
-    } else {
-      expect(found.every((invocation) => invocation.kind === "unresolved"), name).toBe(true);
-    }
+    expect(found.length).toBeGreaterThan(0);
+    expect(found.every((invocation) => invocation.kind === "unresolved")).toBe(true);
+  });
+
+  it.each([
+    // Not fed: the shell reads these words itself — an escaped head resolves
+    // to `loom`, and `find -exec` runs its command words verbatim.
+    ["an escaped head", `\\loom helper security-audit verify --out ${R} --from run.verify-w1-g1-a`],
+    ["find -exec", `find . -maxdepth 0 -exec loom helper security-audit verify --out ${R} --from run.verify-w1-g1-a \;`],
+  ])("%s: one static invocation", (_name, command) => {
+    expect(invocations(command).map((invocation) => invocation.kind)).toEqual(["static"]);
   });
 
   it("reads a script that would import, as unresolved", () => {
     const withScript: SubagentAuthorityContext = context({ filesystem: { ...FAKE_FILESYSTEM,
       readScript: () => ({ kind: "text", text: `loom helper security-audit verify --out ${R} --from run.verify-w1-g1-a` }) } });
     expect(securityAuditVerifyInvocations("bash import.sh", withScript).map((invocation) => invocation.kind)).toEqual(["unresolved"]);
+  });
+});
+
+/**
+ * A fed script is read where the line's `cd` leads, by BOTH judgments: the
+ * collector tracks the line's directories exactly as `judgeLine` does (one
+ * shared rule), so `cd /b && bash run.sh` reads `/b/run.sh`, never only the
+ * starting cwd's `run.sh` — a verify import hidden there is found.
+ */
+describe("fed scripts are read in the directories a `cd` on the line leads to", () => {
+  const IMPORT = `loom helper security-audit verify --out ${R} --from run.verify-w1-g1-a\n`;
+  const SUBMIT = `loom helper security-audit submit --out ${R}\n`;
+  /** Scripts only in directories other than the starting cwd `/repo`. */
+  const scripts = (text: string): SubagentAuthorityContext => context({ filesystem: { ...FAKE_FILESYSTEM,
+    readScript: (path) => ["/b/run.sh", "/repo/sub/run.sh"].includes(path)
+      ? { kind: "text", text }
+      : { kind: "unreadable", reason: "ENOENT" } } });
+  const kinds = (command: string): readonly string[] =>
+    securityAuditVerifyInvocations(command, scripts(IMPORT)).map((invocation) => invocation.kind);
+
+  it.each([
+    ["an absolute cd", "cd /b && bash run.sh"],
+    ["an absolute cd, ; separated", "cd /b; bash ./run.sh"],
+    ["a relative cd", "cd sub && bash run.sh"],
+    ["pushd", "pushd /b >/dev/null && source run.sh"],
+    ["an input redirect after cd", "cd /b && bash < run.sh"],
+  ])("the collector finds the import in the cd'd script: %s", (_name, command) => {
+    expect(kinds(command)).toEqual(["unresolved"]);
+  });
+
+  it("finds nothing when no directory the line may be in holds the script", () => {
+    expect(kinds("cd /elsewhere && bash run.sh")).toEqual([]);
+    expect(kinds("bash run.sh")).toEqual([]);
+  });
+
+  it.each([
+    ["an absolute cd", "cd /b && bash run.sh"],
+    ["a relative cd", "cd sub && bash run.sh"],
+    ["pushd", "pushd /b >/dev/null && source run.sh"],
+  ])("judgeLine reads the same script, unchanged: %s", (_name, command) => {
+    expect(verdict(command, scripts(SUBMIT))).toBe("authority-helper-operation");
+    expect(verdict(command, scripts("npm test\n"))).toBe("allow");
   });
 });

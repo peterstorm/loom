@@ -26,6 +26,7 @@ import { serializeHistoricalAdjudicatedStandaloneReview, serializeStandaloneAggr
 import type { StandaloneReviewAggregate, StandaloneReviewState } from "../../core/standalone-review-model";
 import { aggregateLegacyStandaloneReview, parseHistoricalStandaloneAggregate } from "../../core/legacy-archive";
 import { parseArtifactRef, type ArtifactRef } from "../../core/orchestration-contract";
+import { failure, success, type DomainResult } from "../../core/orchestration-contract/identity";
 import { resolveReviewFindings, reviewResolutionLog } from "../../core/review-output";
 import {
   argumentValue,
@@ -252,10 +253,6 @@ type LoadedTranscript = Readonly<{
   artifact: ArtifactRef;
 }>;
 
-/** One slot's outcome: its value, or the single error that refused it. */
-type SlotResult<T> = Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: string }>;
-const refuseSlot = (error: string): SlotResult<never> => ({ ok: false, error });
-
 /** Files already bound to a reviewer, by realpath and by device:inode. */
 type SeenTranscriptFiles = Readonly<{ realpaths: Set<string>; files: Set<string> }>;
 
@@ -274,41 +271,41 @@ function frozenSlotDirectoryErrors(expectedParent: string, reviews: readonly Rev
 
 /** Read the inspected file through a no-follow descriptor, refusing any
  * identity or size change between inspection, open, and read. */
-function readStableTranscriptBytes(path: string, stat: Stats, transcript: string): SlotResult<Buffer> {
+function readStableTranscriptBytes(path: string, stat: Stats, transcript: string): DomainResult<Buffer, string> {
   let transcriptFd: number | null = null;
   try {
     transcriptFd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     const openedStat = fstatSync(transcriptFd);
     if (!openedStat.isFile() || openedStat.size === 0 ||
         openedStat.dev !== stat.dev || openedStat.ino !== stat.ino) {
-      return refuseSlot(`review transcript changed between inspection and open: ${transcript}`);
+      return failure(`review transcript changed between inspection and open: ${transcript}`);
     }
     const bytes = readFileSync(transcriptFd);
     const afterRead = fstatSync(transcriptFd);
     if (afterRead.dev !== openedStat.dev || afterRead.ino !== openedStat.ino ||
         afterRead.size !== openedStat.size || bytes.byteLength !== openedStat.size) {
-      return refuseSlot(`review transcript changed while being read: ${transcript}`);
+      return failure(`review transcript changed while being read: ${transcript}`);
     }
-    return { ok: true, value: bytes };
+    return success(bytes);
   } finally {
     if (transcriptFd !== null) closeSync(transcriptFd);
   }
 }
 
 /** Prove the bytes match the declared digest/length and bind them to their slot artifact. */
-function bindTranscriptBytes(runDir: string, review: ReviewInputEntry, index: number, bytes: Buffer): SlotResult<LoadedTranscript> {
+function bindTranscriptBytes(runDir: string, review: ReviewInputEntry, index: number, bytes: Buffer): DomainResult<LoadedTranscript, string> {
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   if (review.expectedByteLength !== null && review.expectedByteLength !== bytes.byteLength) {
-    return refuseSlot(`review transcript byte_length is stale for ${review.agent}`);
+    return failure(`review transcript byte_length is stale for ${review.agent}`);
   }
   if (review.expectedSha256 !== null && review.expectedSha256 !== sha256) {
-    return refuseSlot(`review transcript sha256 is stale for ${review.agent}`);
+    return failure(`review transcript sha256 is stale for ${review.agent}`);
   }
   let output: string;
   try {
     output = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
-    return refuseSlot(`review transcript must contain exact valid UTF-8 Agent output: ${review.transcript}`);
+    return failure(`review transcript must contain exact valid UTF-8 Agent output: ${review.transcript}`);
   }
   const artifact = parseArtifactRef({
     runId: basename(runDir),
@@ -316,8 +313,8 @@ function bindTranscriptBytes(runDir: string, review: ReviewInputEntry, index: nu
     digest: sha256,
     byteLength: bytes.byteLength,
   });
-  if (!artifact.ok) return refuseSlot(`cannot bind review transcript artifact: ${artifact.error.message}`);
-  return { ok: true, value: { agent: review.agent, output, artifact: artifact.value } };
+  if (!artifact.ok) return failure(`cannot bind review transcript artifact: ${artifact.error.message}`);
+  return success({ agent: review.agent, output, artifact: artifact.value });
 }
 
 function loadTranscriptSlot(
@@ -326,23 +323,23 @@ function loadTranscriptSlot(
   review: ReviewInputEntry,
   index: number,
   seen: SeenTranscriptFiles,
-): SlotResult<LoadedTranscript> {
+): DomainResult<LoadedTranscript, string> {
   const path = resolve(review.transcript);
   const expectedPath = resolve(join(runDir, "reviewers", `${index + 1}-${review.agent}.md`));
   if (path !== expectedPath) {
-    return refuseSlot(`review transcript slot ${index + 1} for ${review.agent} must be exactly ${expectedPath}: ${review.transcript}`);
+    return failure(`review transcript slot ${index + 1} for ${review.agent} must be exactly ${expectedPath}: ${review.transcript}`);
   }
-  if (dirname(path) !== expectedParent) return refuseSlot(`review transcript must be directly inside ${expectedParent}: ${review.transcript}`);
+  if (dirname(path) !== expectedParent) return failure(`review transcript must be directly inside ${expectedParent}: ${review.transcript}`);
   try {
     const stat = lstatSync(path);
     if (stat.isSymbolicLink() || !stat.isFile() || stat.size === 0) {
-      return refuseSlot(`review transcript must be a non-empty regular non-symlink file: ${review.transcript}`);
+      return failure(`review transcript must be a non-empty regular non-symlink file: ${review.transcript}`);
     }
     const real = realpathSync(path);
     const fileIdentity = `${stat.dev}:${stat.ino}`;
-    if (real !== path) return refuseSlot(`review transcript must resolve to itself: ${review.transcript}`);
+    if (real !== path) return failure(`review transcript must resolve to itself: ${review.transcript}`);
     if (seen.realpaths.has(real) || seen.files.has(fileIdentity)) {
-      return refuseSlot(`review transcript file is assigned to more than one reviewer: ${review.transcript}`);
+      return failure(`review transcript file is assigned to more than one reviewer: ${review.transcript}`);
     }
     const bytes = readStableTranscriptBytes(path, stat, review.transcript);
     if (!bytes.ok) return bytes;
@@ -350,7 +347,7 @@ function loadTranscriptSlot(
     seen.files.add(fileIdentity);
     return bindTranscriptBytes(runDir, review, index, bytes.value);
   } catch (error) {
-    return refuseSlot(`cannot read review transcript ${review.transcript}: ${error instanceof Error ? error.message : String(error)}`);
+    return failure(`cannot read review transcript ${review.transcript}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

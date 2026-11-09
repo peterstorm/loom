@@ -2,7 +2,8 @@
 # Bounded local execution for a security audit (ADR-0066, P4).
 #
 # One target-controlled command, inside an OS-enforced sandbox:
-#   * no external network — a private network namespace with only loopback;
+#   * no external network — a private network namespace with only loopback
+#     (whether loopback came up is OBSERVED and reported as `loopbackUp`);
 #   * an empty environment, repopulated from an explicit allowlist;
 #   * the target and the operator's home read-only (each OBSERVED: a write to
 #     it must have failed), every other mountpoint
@@ -20,16 +21,10 @@
 #     command that prints a receipt line cannot outrank the script's own;
 #   * with `--nonce`, the receipt prefix carries a value the caller generated,
 #     so a command that prints a receipt line cannot match it;
-#   * the enforcement facts travel on the INNER shell's stdout, which the command
-#     cannot write to: its own stdout goes to a file, and the inner shell points
-#     its OWN stdout and stderr at /dev/null right after printing the facts line,
-#     before the command starts. That shell is PID 1 of the pid namespace, so
-#     while it held the capture pipe the command could reopen it as
-#     `/proc/1/fd/1` and append a forged facts line; now no process inside the
-#     sandbox holds the pipe, and the outer capture takes the FIRST facts line —
-#     the one printed before the command existed. The facts used to round-trip
-#     through `$scratch/.enforcement` — a file inside the one directory the
-#     command can write — so a refused ulimit could be reported as applied.
+#   * the enforcement facts travel on the inner shell's stdout, never through a
+#     file in the writable scratch (the command can write the scratch), and no
+#     process inside the sandbox holds that stream once the command starts —
+#     see the `exec 1>/dev/null` site below for why.
 # The nonce BINDS a receipt to the artifact path it was produced for; it does
 # not authenticate it. A hunter that writes the artifact itself could still
 # forge one — the receipt defeats an accidental or command-printed receipt, not
@@ -38,14 +33,12 @@
 # The receipt records what the kernel ACTUALLY enforced (`enforced`), whether the
 # target, home and root remounts took (`targetReadOnly`, `homeReadOnly`,
 # `readOnlyRoot`), and how many OTHER mountpoints could not be closed
-# (`unremountedMounts`). `targetReadOnly` is a fact like the rest — the inner
-# shell reports it only after a write to the target actually failed, and a
-# missing facts line reads it as `false` — not a literal. A limit that could not be applied is reported as
-# unenforced, never as applied. Home is bind-remounted read-only because it is
-# the one writable surface a user namespace can still close: the uid mapping
-# makes the caller the owner inside, so a command that ignored its scratch could
-# otherwise edit the operator's own files. `homeReadOnly` is OBSERVED — a write
-# to home must have failed — so a remount that silently missed reads as open.
+# (`unremountedMounts`). Every fact defaults to its unenforced value when the
+# facts line is missing, so a limit that could not be applied, or a sandbox that
+# died early, never reads as enforced. Home is bind-remounted read-only because
+# it is the one writable surface a user namespace can still close: the uid
+# mapping makes the caller the owner inside, so a command that ignored its
+# scratch could otherwise edit the operator's own files.
 #
 # usage: security-sandbox.sh --target DIR --scratch DIR
 #          [--cpu SECONDS] [--mem-mb MB] [--procs N] [--file-mb MB] [--wall SECONDS]
@@ -162,12 +155,12 @@ INNER_REPORT="$(unshare --map-root-user --mount --net --pid --fork --mount-proc 
     done < /proc/mounts
     # Home is closed FIRST: the target and the scratch usually live under it, so
     # their binds must land on top of a read-only home rather than be hidden by a
-    # later home bind (which is why home used to be skipped, and reported closed,
-    # whenever the target or the scratch sat inside it). `--rbind` keeps the
-    # mounts nested in home: a non-recursive bind of a mount with locked children
-    # is refused. Home inside the target is closed by the target remount; home
-    # that IS the scratch or lies inside it is writable by design, so it reads
-    # as open. An unknown home cannot be attested closed, so it reads as open.
+    # later home bind — home is closed whether or not the target or the scratch
+    # sits inside it. `--rbind` keeps the mounts nested in home: a non-recursive
+    # bind of a mount with locked children is refused. Home inside the target is
+    # closed by the target remount; home that IS the scratch or lies inside it is
+    # writable by design, so it reads as open. An unknown home cannot be attested
+    # closed, so it reads as open.
     home_ro=0
     if [ -n "$home" ]; then
       home_ro=1
@@ -208,22 +201,28 @@ INNER_REPORT="$(unshare --map-root-user --mount --net --pid --fork --mount-proc 
     fi
     target_ro=1
     cd "$scratch" || exit 127
+    # Loopback only: the network namespace has no route off this machine.
+    # Brought up BEFORE the facts line, so whether it came up is reported
+    # (`loopbackUp`) rather than swallowed: a dead loopback leaves isolation
+    # intact, but local-service checks the command makes then fail for a reason the
+    # receipt names.
+    lo_ok=1; ip link set lo up 2>/dev/null || lo_ok=0
     # A limit the kernel refused is recorded as unenforced, never as applied.
     cpu_ok=1; ulimit -t "$cpu" 2>/dev/null || cpu_ok=0
     mem_ok=1; ulimit -v "$((memmb * 1024))" 2>/dev/null || mem_ok=0
     procs_ok=1; ulimit -u "$procs" 2>/dev/null || procs_ok=0
     file_ok=1; ulimit -f "$((filemb * 1024))" 2>/dev/null || file_ok=0
-    printf "LOOM-SANDBOX-LIMITS target_ro=%s root_ro=%s home_ro=%s cpu=%s mem=%s procs=%s files=%s unremounted=%s\n" \
-      "$target_ro" "$root_ro" "$home_ro" "$cpu_ok" "$mem_ok" "$procs_ok" "$file_ok" "$unremounted"
+    printf "LOOM-SANDBOX-LIMITS target_ro=%s root_ro=%s home_ro=%s cpu=%s mem=%s procs=%s files=%s lo=%s unremounted=%s\n" \
+      "$target_ro" "$root_ro" "$home_ro" "$cpu_ok" "$mem_ok" "$procs_ok" "$file_ok" "$lo_ok" "$unremounted"
     # The facts are out: let go of the capture pipe before the command exists.
     # This shell is PID 1 of the pid namespace, so while its stdout stayed the
     # pipe the command could reopen it as /proc/1/fd/1 and append a facts line
-    # of its own. stderr (the script stderr) goes too, so no process inside the
+    # of its own — which is why the outer capture takes the FIRST facts line, the
+    # one printed before the command existed, and treats any later one as a
+    # forgery. stderr (the script stderr) goes too, so no process inside the
     # sandbox holds any stream of the script once the command starts. fd 0, the
     # only other descriptor this shell holds, is the caller stdin.
     exec 1>/dev/null 2>/dev/null
-    # Loopback only: the network namespace has no route off this machine.
-    ip link set lo up 2>/dev/null || true
     # The command stdout is captured, not streamed: the script must print the
     # receipt LAST, and a command that prints a receipt line must not outrank it.
     timeout --signal=KILL "$wall" env -i "${env_assignments[@]}" "$@" > "$scratch/.command-stdout" 2>&1
@@ -234,15 +233,12 @@ INNER_STATUS=$?
 
 [ -f "$COMMAND_STDOUT" ] && cat "$COMMAND_STDOUT"
 
-# The facts line, from the inner shell's stdout only — and the FIRST match. The
-# genuine line is printed before the command starts and the inner shell drops
-# the pipe right after it, so any later match could only be a forgery that
-# reached the pipe some way the redirect did not foresee; taking the last would
-# hand it the receipt. Nothing the command does can come first: it has not
-# started yet. Every value defaults to "unenforced" when the line is missing, so
-# a sandbox that died early can never read as bounded.
-LIMITS_LINE="$(printf '%s\n' "$INNER_REPORT" | sed -n 's/^LOOM-SANDBOX-LIMITS target_ro=\([01]\) root_ro=\([01]\) home_ro=\([01]\) cpu=\([01]\) mem=\([01]\) procs=\([01]\) files=\([01]\) unremounted=\([0-9]\{1,\}\)$/\1 \2 \3 \4 \5 \6 \7 \8/p' | head -n1)"
-read -r TARGET_RO ROOT_RO HOME_RO CPU_OK MEM_OK PROCS_OK FILE_OK UNREMOUNTED <<< "${LIMITS_LINE:-0 0 0 0 0 0 0 0}"
+# The facts line, from the inner shell's stdout only — the FIRST match, the one
+# printed before the command existed (why that is the genuine one: see the
+# `exec 1>/dev/null` site). Every value defaults to "unenforced" when the line
+# is missing, so a sandbox that died early can never read as bounded.
+LIMITS_LINE="$(printf '%s\n' "$INNER_REPORT" | sed -n 's/^LOOM-SANDBOX-LIMITS target_ro=\([01]\) root_ro=\([01]\) home_ro=\([01]\) cpu=\([01]\) mem=\([01]\) procs=\([01]\) files=\([01]\) lo=\([01]\) unremounted=\([0-9]\{1,\}\)$/\1 \2 \3 \4 \5 \6 \7 \8 \9/p' | head -n1)"
+read -r TARGET_RO ROOT_RO HOME_RO CPU_OK MEM_OK PROCS_OK FILE_OK LO_UP UNREMOUNTED <<< "${LIMITS_LINE:-0 0 0 0 0 0 0 0 0}"
 
 SCRATCH_BYTES=null
 if du -sb "$SCRATCH" >/dev/null 2>&1; then
@@ -252,8 +248,8 @@ fi
 bool() { [ "$1" = "1" ] && printf 'true' || printf 'false'; }
 
 ALLOWED_JSON="$(printf '%s\n' "${ENV_ASSIGNMENTS[@]}" | sed 's/=.*//; s/.*/"&"/' | paste -sd, -)"
-printf '%s{"schemaVersion":1,"exit":%d,"limits":{"cpuSeconds":%d,"addressSpaceMb":%d,"processes":%d,"fileSizeMb":%d,"wallClockSeconds":%d,"scratchMb":%d},"allowlistedEnv":[%s],"scratchBytes":%s,"networkNamespace":true,"targetReadOnly":%s,"readOnlyRoot":%s,"homeReadOnly":%s,"unremountedMounts":%d,"enforced":{"cpu":%s,"memory":%s,"processes":%s,"fileSize":%s}}\n' \
+printf '%s{"schemaVersion":1,"exit":%d,"limits":{"cpuSeconds":%d,"addressSpaceMb":%d,"processes":%d,"fileSizeMb":%d,"wallClockSeconds":%d,"scratchMb":%d},"allowlistedEnv":[%s],"scratchBytes":%s,"networkNamespace":true,"loopbackUp":%s,"targetReadOnly":%s,"readOnlyRoot":%s,"homeReadOnly":%s,"unremountedMounts":%d,"enforced":{"cpu":%s,"memory":%s,"processes":%s,"fileSize":%s}}\n' \
   "$RECEIPT_PREFIX" "$INNER_STATUS" "$CPU_SECONDS" "$MEM_MB" "$PROCS" "$FILE_MB" "$WALL_SECONDS" "$SCRATCH_MB" "$ALLOWED_JSON" "$SCRATCH_BYTES" \
-  "$(bool "$TARGET_RO")" "$(bool "$ROOT_RO")" "$(bool "$HOME_RO")" "${UNREMOUNTED:-0}" "$(bool "$CPU_OK")" "$(bool "$MEM_OK")" "$(bool "$PROCS_OK")" "$(bool "$FILE_OK")"
+  "$(bool "$LO_UP")" "$(bool "$TARGET_RO")" "$(bool "$ROOT_RO")" "$(bool "$HOME_RO")" "${UNREMOUNTED:-0}" "$(bool "$CPU_OK")" "$(bool "$MEM_OK")" "$(bool "$PROCS_OK")" "$(bool "$FILE_OK")"
 
 exit "$INNER_STATUS"

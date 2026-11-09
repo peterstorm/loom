@@ -5,6 +5,13 @@
  * state and is the parent's alone. Derived, never copied, so an operation added
  * to either table is classified by the trait it is forced to declare.
  *
+ * The derivation reads the Pi runtime-skew trait as subagent authority on
+ * purpose: both mean "writes nothing" today, and a new writing operation
+ * defaults to handshake-required and so to parent-only (fail closed). Both
+ * tables document this dependency on the trait itself; if the two policies
+ * ever diverge, the tables gain an explicit authority trait and this split
+ * reads that instead.
+ *
  * Lives beside the guard rather than in core because core may not import the
  * handler operation tables; both harness adapters pass this to
  * `decideSubagentAuthority`. Pure data.

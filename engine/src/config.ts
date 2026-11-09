@@ -292,40 +292,49 @@ export const SUBAGENT_DIR = process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subage
 export const subagentDir = (): string => process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subagents";
 
 /**
- * The security-audit run registry (ADR-0067 D6): one entry file per run
- * directory `helper security-audit start` registered, inside the protected
- * subagent dir so a subagent cannot add, rewrite or delete an entry. The
- * subagent write guard reads it to know which directories are audit runs
- * without trusting the command line. Owned by
- * `orchestration/security-audit-run-registry.ts`.
+ * A store that lives in the protected subagent dir and outlives every
+ * session: its entry name there, and its directory, resolved lazily like
+ * `subagentDir()`. Built only by `persistentStore` below, so a store cannot
+ * name its directory without being in `PERSISTENT_SUBAGENT_STORES`.
  */
-export const SECURITY_AUDIT_RUN_REGISTRY_ENTRY = "security-audit-runs";
+export type PersistentSubagentStore = Readonly<{ entry: string; dir: () => string }>;
 
-/** The registry directory, resolved lazily like `subagentDir()`. */
-export const securityAuditRunRegistryDir = (): string => join(subagentDir(), SECURITY_AUDIT_RUN_REGISTRY_ENTRY);
+const persistentStore = (entry: string): PersistentSubagentStore =>
+  Object.freeze({ entry, dir: () => join(subagentDir(), entry) });
 
 /**
- * The capture attestation store (ADR-0067, amended): one immutable entry per
- * security verifier attempt a HARNESS captured natively, written by the
- * capturing harness process and required by `verify --from` and by the
- * audit's adjudication before a ballot counts. Inside the protected subagent
- * dir for the same reasons as the registry. Owned by
- * `orchestration/capture-attestation-store.ts`.
+ * Every persistent store of the subagent dir, declared ONCE. The SessionStart
+ * stale sweep's exemption set is derived from this table, so a store added
+ * here survives the sweep by construction: every other subagent-dir entry is
+ * per-session tracking that ages out, while an audit run outlives sessions.
  */
-export const CAPTURE_ATTESTATION_ENTRY = "security-capture-attestations";
+export const PERSISTENT_SUBAGENT_STORES = Object.freeze({
+  /**
+   * The security-audit run registry (ADR-0067 D6): one entry file per audit
+   * run directory, registered by every writing `helper security-audit`
+   * operation and by `security-verification` start and resume (idempotently,
+   * so the next write rebuilds a wiped registry). Inside the protected subagent
+   * dir so a subagent cannot add, rewrite or delete an entry; the subagent
+   * write guard reads it to know which directories are audit runs without
+   * trusting the command line. A swept registry would silently drop that
+   * knowledge. Owned by `orchestration/security-audit-run-registry.ts`.
+   */
+  securityAuditRunRegistry: persistentStore("security-audit-runs"),
+  /**
+   * The capture attestation store (ADR-0067, amended): one immutable entry per
+   * security verifier attempt a HARNESS captured natively, written by the
+   * capturing harness process and required by `verify --from` and by the
+   * audit's adjudication before a ballot counts. A swept store would make
+   * every captured ballot unprovable. Owned by
+   * `orchestration/capture-attestation-store.ts`.
+   */
+  captureAttestations: persistentStore("security-capture-attestations"),
+} satisfies Readonly<Record<string, PersistentSubagentStore>>);
 
-/** The attestation store directory, resolved lazily like `subagentDir()`. */
-export const captureAttestationDir = (): string => join(subagentDir(), CAPTURE_ATTESTATION_ENTRY);
-
-/**
- * Subagent-dir entries the SessionStart stale sweep never removes. Every other
- * entry is per-session tracking that ages out; an audit run outlives sessions,
- * and a swept registry would silently drop the guard's knowledge of its run
- * directories — a swept attestation store would make every captured ballot
- * unprovable.
- */
+/** Subagent-dir entries the SessionStart stale sweep never removes: exactly
+ *  the entries of `PERSISTENT_SUBAGENT_STORES`, derived, never restated. */
 export const PERSISTENT_SUBAGENT_DIR_ENTRIES: ReadonlySet<string> =
-  frozenSet([SECURITY_AUDIT_RUN_REGISTRY_ENTRY, CAPTURE_ATTESTATION_ENTRY]);
+  frozenSet(Object.values(PERSISTENT_SUBAGENT_STORES).map((store) => store.entry));
 
 /**
  * One TTL for every liveness judgment about subagent tracking files: the
@@ -411,11 +420,6 @@ export const stateFilePatterns = (): RegExp => new RegExp(
 export const protectedDirPatterns = (): RegExp => new RegExp(
   protectedDirs().map(escapeRegex).join("|"),
 );
-
-/** The read-only command allowlist the Bash guards share (defined in
- *  core/tool-vocabulary so the pure shell grammar can use it — re-exported
- *  here, config stays the documented home). */
-export { READ_ONLY_STATE_COMMANDS } from "./core/tool-vocabulary";
 
 /** Valid phase transitions: from → allowed targets. Both the record and
  * each member are frozen: a readonly annotation alone would not protect the

@@ -38,6 +38,28 @@ export const wireViolation = (path: string, message: string): WireViolation => (
  *  a property read on a primitive. */
 export const isWireRecord = (value: unknown): value is Readonly<Record<string, unknown>> => isRecord(value);
 
+/** Membership in a closed string vocabulary, as a type guard: the one spelling
+ *  every security volume uses before matching on a wire tag (an exhaustive
+ *  match THROWS on an unknown one). */
+export const isOneOf = <T extends string>(values: readonly T[], value: unknown): value is T =>
+  typeof value === "string" && (values as readonly string[]).includes(value);
+
+/**
+ * Every key `record` carries that `allowed` does not name, as an "unknown
+ * field" violation at `base.<key>`. `order` keeps each caller's observable
+ * diagnostics: `as-written` reports in the document's key order, `sorted` in
+ * code-point order. The one unknown-key reporter of the security volumes.
+ */
+export const unknownFieldViolations = (
+  record: Readonly<Record<string, unknown>>,
+  allowed: readonly string[],
+  base: string,
+  order: "as-written" | "sorted" = "as-written",
+): WireViolation[] => {
+  const unknown = Object.keys(record).filter((key) => !allowed.includes(key));
+  return (order === "sorted" ? unknown.sort(compareStrings) : unknown).map((key) => wireViolation(`${base}.${key}`, "unknown field"));
+};
+
 /**
  * An optional list of strings. Absent is an empty list; present-but-malformed
  * (`"a"`, `[1]`, `{}`) is a named violation and an empty list — never a silent
@@ -103,19 +125,13 @@ export type SecurityIncompleteReason = (typeof SECURITY_INCOMPLETE_REASONS)[numb
 
 export type SecurityProfileError = Readonly<{ kind: "invalid-security-profile"; message: string }>;
 
+const isSecurityProfile = (value: unknown): value is SecurityProfile =>
+  typeof value === "string" && (SECURITY_PROFILES as readonly string[]).includes(value);
+
 export const parseSecurityProfile = (raw: unknown): DomainResult<SecurityProfile, SecurityProfileError> =>
-  match(raw)
-    .when(
-      (value): value is SecurityProfile =>
-        typeof value === "string" && (SECURITY_PROFILES as readonly string[]).includes(value),
-      (value) => success(value),
-    )
-    .otherwise(() =>
-      failure({
-        kind: "invalid-security-profile" as const,
-        message: `profile must be one of ${SECURITY_PROFILES.join(", ")}`,
-      }),
-    );
+  isSecurityProfile(raw)
+    ? success(raw)
+    : failure({ kind: "invalid-security-profile" as const, message: `profile must be one of ${SECURITY_PROFILES.join(", ")}` });
 
 // --- Identity grammar ---
 
@@ -197,15 +213,20 @@ export function isSafeSourcePath(value: unknown): value is string {
 
 // --- Coverage identity ---
 
+declare const canonicalRefs: unique symbol;
+
 /** The four semantic coordinates of a coverage unit. `lifecycle` is optional;
- *  when present it must be present in both the unit and its canonical refs. */
+ *  when present it must be present in both the unit and its canonical refs.
+ *  Branded: only `isCanonicalCoverageRefs` (and so `parseCoverageRefs`)
+ *  produces one, so `canonicalCoverageId` and `coverageSemanticKey` read
+ *  coordinates that are already canonical references — parse, don't validate. */
 export type CoverageRefs = Readonly<{
   surface: string;
   boundary: string;
   subsystem: string;
   attack_class: string;
   lifecycle?: string;
-}>;
+}> & Readonly<{ [canonicalRefs]: true }>;
 
 const REF_FIELDS = ["surface", "boundary", "subsystem", "attack_class"] as const;
 
@@ -215,6 +236,20 @@ function isCanonicalRef(value: unknown): value is string {
     !PATH_FORBIDDEN_CHARACTER.test(value) &&
     value.normalize("NFC") === value
   );
+}
+
+/** The fields a refs record must hold: the four coordinates, plus `lifecycle`
+ *  when the record carries one. */
+const expectedRefFields = (record: Readonly<Record<string, unknown>>): readonly string[] =>
+  record.lifecycle === undefined ? REF_FIELDS : [...REF_FIELDS, "lifecycle"];
+
+/** The one proof of a `CoverageRefs`: exactly the expected fields, each a
+ *  canonical reference. A type guard rather than a cast, so the brand is earned
+ *  by the check that names it. */
+export function isCanonicalCoverageRefs(value: unknown): value is CoverageRefs {
+  if (!isWireRecord(value)) return false;
+  const expected = expectedRefFields(value);
+  return Object.keys(value).length === expected.length && expected.every((field) => Object.hasOwn(value, field) && isCanonicalRef(value[field]));
 }
 
 /** RFC 3986 unreserved bytes stay literal; everything else is percent-encoded.
@@ -239,13 +274,15 @@ export function encodeCanonicalRef(value: string): string {
   return encoded;
 }
 
-/** The unit's identity: the encoded coordinates joined in a fixed field order. */
+/** The coordinates in their one fixed field order, `lifecycle` last when present. */
+const refCoordinates = (refs: CoverageRefs): readonly string[] =>
+  [refs.surface, refs.boundary, refs.subsystem, refs.attack_class, ...(refs.lifecycle === undefined ? [] : [refs.lifecycle])];
+
+/** The unit's identity: the encoded coordinates joined in a fixed field order.
+ *  Total over `CoverageRefs`: the brand proves every coordinate canonical, so
+ *  `encodeCanonicalRef` cannot refuse one. */
 export function canonicalCoverageId(refs: CoverageRefs): string {
-  const fields: readonly string[] =
-    refs.lifecycle === undefined ? REF_FIELDS : [...REF_FIELDS, "lifecycle"];
-  return fields
-    .map((field) => encodeCanonicalRef(refs[field as keyof CoverageRefs] as string))
-    .join("::");
+  return refCoordinates(refs).map(encodeCanonicalRef).join("::");
 }
 
 export type CoverageRefError = Readonly<{
@@ -254,30 +291,18 @@ export type CoverageRefError = Readonly<{
 }>;
 
 export const parseCoverageRefs = (raw: unknown): DomainResult<CoverageRefs, CoverageRefError> => {
-  if (!isWireRecord(raw)) {
-    return failure({ kind: "invalid-coverage-refs" as const, message: "canonical_refs must be an object" });
+  const refuse = (message: string) => failure({ kind: "invalid-coverage-refs" as const, message });
+  if (!isWireRecord(raw)) return refuse("canonical_refs must be an object");
+  const expected = expectedRefFields(raw);
+  if (Object.keys(raw).length !== expected.length || expected.some((field) => !Object.hasOwn(raw, field))) {
+    return refuse(`canonical_refs must hold exactly ${expected.join(", ")}`);
   }
-  const record = raw;
-  const keys = Object.keys(record).sort(compareStrings);
-  const expected = record.lifecycle === undefined ? [...REF_FIELDS] : [...REF_FIELDS, "lifecycle"];
-  if (keys.length !== expected.length || expected.some((field) => !(field in record))) {
-    return failure({
-      kind: "invalid-coverage-refs" as const,
-      message: `canonical_refs must hold exactly ${expected.join(", ")}`,
-    });
-  }
-  for (const field of expected) {
-    if (!isCanonicalRef(record[field])) {
-      return failure({ kind: "invalid-coverage-refs" as const, message: `canonical_refs.${field} is not a canonical reference` });
-    }
-  }
-  return success({
-    surface: record.surface as string,
-    boundary: record.boundary as string,
-    subsystem: record.subsystem as string,
-    attack_class: record.attack_class as string,
-    ...(record.lifecycle === undefined ? {} : { lifecycle: record.lifecycle as string }),
-  });
+  const malformed = expected.find((field) => !isCanonicalRef(raw[field]));
+  if (malformed !== undefined) return refuse(`canonical_refs.${malformed} is not a canonical reference`);
+  // A fresh record in the fixed field order, so the caller never holds the
+  // document it passed in; the guard re-proves it rather than a cast asserting it.
+  const refs: unknown = Object.fromEntries(expected.map((field) => [field, raw[field]]));
+  return isCanonicalCoverageRefs(refs) ? success(refs) : refuse("canonical_refs is not a canonical tuple");
 };
 
 /** The tuple that must be unique across a ledger: two units with different IDs
@@ -291,16 +316,22 @@ export function coverageSemanticKey(refs: CoverageRefs): string {
 
 const bounded = (max: number) => z.string().min(1).max(max);
 const safePathSchema = bounded(4_096).refine(isSafeSourcePath, "expected a repository-relative source path");
-const digestSchema = z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/);
+/** A commit a diff scope names: a 40- (SHA-1) or 64-hex (SHA-256) object id. */
+export const SCOPE_REF_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
+const digestSchema = z.string().regex(SCOPE_REF_PATTERN);
 
+const scopePathsSchema = z.array(safePathSchema).min(1).max(SECURITY_AUDIT_LIMITS.units).readonly();
+
+/** What a run audits — a discriminated union, so a scope's refs are exactly the
+ *  ones its kind means: a `tree` scope names no refs (both `null`), and a
+ *  `diff` scope audits the difference between two refs and names BOTH. A diff
+ *  with a missing ref identifies no diff, and a tree carrying refs would keep
+ *  facts nothing reads; neither parses. */
 export const securityScopeSchema = z
-  .strictObject({
-    paths: z.array(safePathSchema).min(1).max(SECURITY_AUDIT_LIMITS.units).readonly(),
-    /** `diff` scopes audit the difference between two refs, not a tree. */
-    kind: z.enum(["tree", "diff"]).readonly(),
-    baseRef: digestSchema.nullable(),
-    headRef: digestSchema.nullable(),
-  })
+  .discriminatedUnion("kind", [
+    z.strictObject({ paths: scopePathsSchema, kind: z.literal("tree"), baseRef: z.null(), headRef: z.null() }),
+    z.strictObject({ paths: scopePathsSchema, kind: z.literal("diff"), baseRef: digestSchema, headRef: digestSchema }),
+  ])
   .readonly();
 export type SecurityScope = z.infer<typeof securityScopeSchema>;
 
@@ -333,13 +364,18 @@ export const securityRunMetadataSchema = z
   })
   /** The closed reason vocabulary is only closed if it is tied to the status: an
    *  incomplete run that cannot name its reason is a silent one, and a complete
-   *  run carrying a reason describes a state that does not exist. */
+   *  run carrying a reason describes a state that does not exist. Publication is
+   *  tied to it too: `publish` refuses a run whose coverage has not settled, so
+   *  a published run that is still in progress is a document no writer made. */
   .superRefine((value, ctx) => {
     if (value.runStatus === "incomplete" && value.incompleteReason === null) {
       ctx.addIssue({ code: "custom", path: ["incompleteReason"], message: "an incomplete run must name its reason" });
     }
     if (value.runStatus !== "incomplete" && value.incompleteReason !== null) {
       ctx.addIssue({ code: "custom", path: ["incompleteReason"], message: `a ${value.runStatus} run records no incomplete reason` });
+    }
+    if (value.published && value.runStatus === "in_progress") {
+      ctx.addIssue({ code: "custom", path: ["published"], message: "an in_progress run cannot be published" });
     }
   })
   .readonly();
@@ -436,7 +472,7 @@ export function admitWave(
   if (remaining - reserved <= 0) {
     return failure({
       kind: "budget-refusal" as const,
-      reason: (plannedHunters > 0 ? "critic_budget_exhausted" : "budget_cannot_reserve_critics_and_validation") as SecurityIncompleteReason,
+      reason: plannedHunters > 0 ? "critic_budget_exhausted" as const : "budget_cannot_reserve_critics_and_validation" as const,
       required: reserved + 1,
       available: remaining,
       message: `wave needs ${reserved} reserved invocations (critics + validation) and has ${remaining} left`,
@@ -560,14 +596,14 @@ export type CarryAction =
 export function carryAction(priorStatus: PriorStatus): CarryAction {
   return match(priorStatus)
     .returnType<CarryAction>()
-    .with("prior_confirmed_same_source", (): CarryAction => ({ kind: "carry-confirmed" }))
+    .with("prior_confirmed_same_source", () => ({ kind: "carry-confirmed" }))
     .with(
       "prior_confirmed_changed_source",
       "prior_covered_changed_source",
       "prior_needs_validation",
-      (): CarryAction => ({ kind: "revalidate" }),
+      () => ({ kind: "revalidate" }),
     )
-    .with("prior_rejected_claim_changed", (): CarryAction => ({ kind: "suppress-rejected-claim" }))
+    .with("prior_rejected_claim_changed", () => ({ kind: "suppress-rejected-claim" }))
     .with(
       "prior_covered_same_source",
       "prior_deferred",
@@ -575,7 +611,7 @@ export function carryAction(priorStatus: PriorStatus): CarryAction {
       "prior_out_of_scope",
       "new",
       "none",
-      (): CarryAction => ({ kind: "current-work" }),
+      () => ({ kind: "current-work" }),
     )
     .exhaustive();
 }

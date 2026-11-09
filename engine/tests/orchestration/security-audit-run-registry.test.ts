@@ -14,11 +14,9 @@ import {
   MAXIMUM_ENTRIES,
 } from "../../src/orchestration/security-audit-run-registry";
 import {
-  CAPTURE_ATTESTATION_ENTRY,
   PERSISTENT_SUBAGENT_DIR_ENTRIES,
+  PERSISTENT_SUBAGENT_STORES,
   protectedDirs,
-  SECURITY_AUDIT_RUN_REGISTRY_ENTRY,
-  securityAuditRunRegistryDir,
   subagentDir,
 } from "../../src/config";
 import { staleEntries } from "../../src/handlers/session-start/cleanup-stale-subagents";
@@ -46,6 +44,32 @@ const runDir = (name: string): string => {
 };
 
 const entryName = (dir: string): string => `${createHash("sha256").update(dir).digest("hex")}.json`;
+
+const REGISTRY = PERSISTENT_SUBAGENT_STORES.securityAuditRunRegistry;
+const securityAuditRunRegistryDir = (): string => REGISTRY.dir();
+
+/** The exact bytes a registration entry holds for `dir`, the one wire literal
+ *  every arranged entry below is built from. */
+const registration = (dir: string): string =>
+  `${JSON.stringify({ schemaVersion: 1, kind: "security-audit-run-registration", runDirectory: dir })}\n`;
+
+/** Write a registration entry straight into the registry, as an arranged state. */
+const seedRegistration = (dir: string): void => {
+  mkdirSync(securityAuditRunRegistryDir(), { recursive: true });
+  writeFileSync(join(securityAuditRunRegistryDir(), entryName(dir)), registration(dir));
+};
+
+/** A run directory that never existed: its entry is a vanished run. */
+const vanishedRun = (index: number): string => join(root, "gone", `run-${index}`);
+
+/** Register `count` run directories that exist, by writing their entries. */
+const seedLiveRuns = (count: number): readonly string[] =>
+  Array.from({ length: count }, (_, index) => {
+    const dir = join(root, "many", `run-${index}`);
+    mkdirSync(dir, { recursive: true });
+    seedRegistration(dir);
+    return dir;
+  });
 
 describe("registerSecurityAuditRun", () => {
   it("records the run and reads it back", () => {
@@ -96,32 +120,43 @@ describe("registerSecurityAuditRun", () => {
 
   it("prunes vanished runs once at the cap, and fails closed only while still over it (H)", () => {
     const live = runDir("live");
-    const registry = securityAuditRunRegistryDir();
-    mkdirSync(registry, { recursive: true });
-    const vanished = (index: number) => join(root, "gone", `run-${index}`);
-    for (let index = 0; index < MAXIMUM_ENTRIES; index++) {
-      const dir = vanished(index);
-      writeFileSync(join(registry, entryName(dir)),
-        `${JSON.stringify({ schemaVersion: 1, kind: "security-audit-run-registration", runDirectory: dir })}\n`);
-    }
+    for (let index = 0; index < MAXIMUM_ENTRIES; index++) seedRegistration(vanishedRun(index));
     // Vanished directories do not count toward the cap when read…
     expect(registeredSecurityAuditRuns()).toEqual([]);
     // …and the registrar prunes them before it adds a live run.
     expect(registerSecurityAuditRun(live).ok).toBe(true);
-    expect(readdirSync(registry)).toEqual([entryName(live)]);
+    expect(readdirSync(securityAuditRunRegistryDir())).toEqual([entryName(live)]);
     expect(registeredSecurityAuditRuns()).toEqual([live]);
   });
 
   it("fails closed when more live runs than the cap are registered", () => {
-    const registry = securityAuditRunRegistryDir();
-    mkdirSync(registry, { recursive: true });
-    for (let index = 0; index <= MAXIMUM_ENTRIES; index++) {
-      const dir = join(root, "many", `run-${index}`);
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(join(registry, entryName(dir)),
-        `${JSON.stringify({ schemaVersion: 1, kind: "security-audit-run-registration", runDirectory: dir })}\n`);
-    }
+    seedLiveRuns(MAXIMUM_ENTRIES + 1);
     expect(() => registeredSecurityAuditRuns()).toThrow(`more than ${MAXIMUM_ENTRIES}`);
+  });
+
+  it("does not fail closed when vanished entries are what put the registry over the cap", () => {
+    // cap + 1 entries, of which two are vanished: the LIVE count is under the cap.
+    const lives = seedLiveRuns(MAXIMUM_ENTRIES - 1);
+    seedRegistration(vanishedRun(0));
+    seedRegistration(vanishedRun(1));
+    expect(readdirSync(securityAuditRunRegistryDir())).toHaveLength(MAXIMUM_ENTRIES + 1);
+    expect(registeredSecurityAuditRuns()).toHaveLength(MAXIMUM_ENTRIES - 1);
+    // The registrar prunes exactly the vanished entries, and a run landing
+    // EXACTLY at the cap is still read: only more than the cap fails closed.
+    const newcomer = runDir("newcomer");
+    expect(registerSecurityAuditRun(newcomer).ok).toBe(true);
+    expect(readdirSync(securityAuditRunRegistryDir()).sort()).toEqual([...lives, newcomer].map(entryName).sort());
+    expect(registeredSecurityAuditRuns()).toHaveLength(MAXIMUM_ENTRIES);
+  });
+
+  it("keeps failing closed when the live entries alone exceed the cap, vanished ones pruned or not", () => {
+    seedLiveRuns(MAXIMUM_ENTRIES + 1);
+    for (let index = 0; index < 3; index++) seedRegistration(vanishedRun(index));
+    expect(() => registeredSecurityAuditRuns()).toThrow(`holds ${MAXIMUM_ENTRIES + 1} live runs`);
+    // Pruning the vanished entries cannot bring the live set under the cap.
+    expect(registerSecurityAuditRun(runDir("one-more")).ok).toBe(true);
+    expect(readdirSync(securityAuditRunRegistryDir())).toHaveLength(MAXIMUM_ENTRIES + 2);
+    expect(() => registeredSecurityAuditRuns()).toThrow(`holds ${MAXIMUM_ENTRIES + 2} live runs`);
   });
 
   it("keeps every run, sorted", () => {
@@ -185,15 +220,16 @@ describe("registeredSecurityAuditRuns", () => {
       mkdirSync(securityAuditRunRegistryDir(), { recursive: true });
       writeFileSync(join(securityAuditRunRegistryDir(), name), content);
     };
-    const valid = (dir: string) => JSON.stringify({ schemaVersion: 1, kind: "security-audit-run-registration", runDirectory: dir });
+    /** `registration(dir)` with its fields edited — the malformations below. */
+    const edited = (dir: string, edit: Record<string, unknown>): string => JSON.stringify({ ...JSON.parse(registration(dir)), ...edit });
 
     it.each([
       ["not JSON", () => seed(entryName("/a"), "{"), "not JSON"],
       ["not an object", () => seed(entryName("/a"), "[]"), "not an object"],
-      ["extra keys", () => seed(entryName("/a"), JSON.stringify({ schemaVersion: 1, kind: "security-audit-run-registration", runDirectory: "/a", x: 1 })), "exactly"],
-      ["wrong kind", () => seed(entryName("/a"), JSON.stringify({ schemaVersion: 1, kind: "other", runDirectory: "/a" })), "security-audit-run-registration"],
-      ["relative directory", () => seed(entryName("a"), valid("a")), "absolute"],
-      ["name not bound to its directory", () => seed(entryName("/a"), valid("/b")), "does not match"],
+      ["extra keys", () => seed(entryName("/a"), edited("/a", { x: 1 })), "exactly"],
+      ["wrong kind", () => seed(entryName("/a"), edited("/a", { kind: "other" })), "security-audit-run-registration"],
+      ["relative directory", () => seed(entryName("a"), registration("a")), "absolute"],
+      ["name not bound to its directory", () => seed(entryName("/a"), registration("/b")), "does not match"],
       ["unexpected file name", () => seed("notes.txt", "x"), "unexpected entry"],
     ])("%s", (_name, arrange, message) => {
       arrange();
@@ -225,7 +261,7 @@ describe("registeredSecurityAuditRuns", () => {
 
 describe("the registry is protected", () => {
   it("lives inside the subagent dir, which is a protected Loom directory", () => {
-    expect(securityAuditRunRegistryDir()).toBe(join(subagentDir(), SECURITY_AUDIT_RUN_REGISTRY_ENTRY));
+    expect(securityAuditRunRegistryDir()).toBe(join(subagentDir(), REGISTRY.entry));
     expect(protectedDirs()).toContain(subagentDir());
   });
 
@@ -245,15 +281,17 @@ describe("the registry is protected", () => {
     expect(subagentAuthorityBlock(`ls ${registry}`, context)).toBeNull();
   });
 
-  it("the SessionStart sweep never removes it, however old", () => {
-    const mtimes = new Map<string, number>([
-      [SECURITY_AUDIT_RUN_REGISTRY_ENTRY, 0],
-      ["some-stray-file", 0],
-    ]);
-    expect(PERSISTENT_SUBAGENT_DIR_ENTRIES.has(SECURITY_AUDIT_RUN_REGISTRY_ENTRY)).toBe(true);
+  it("the SessionStart sweep never removes any persistent store, however old — by construction", () => {
+    const stores = Object.values(PERSISTENT_SUBAGENT_STORES);
+    // Not vacuous: the registry and the capture attestation store beside it (ADR-0067, amended).
+    expect(stores.map((store) => store.entry).sort()).toEqual(["security-audit-runs", "security-capture-attestations"]);
+    // The exemption set is exactly the declared stores, nothing hand-listed beside them.
+    expect([...PERSISTENT_SUBAGENT_DIR_ENTRIES].sort()).toEqual(stores.map((store) => store.entry).sort());
+    const mtimes = new Map<string, number>([...stores.map((store) => [store.entry, 0] as const), ["some-stray-file", 0]]);
     expect(staleEntries(mtimes, Number.MAX_SAFE_INTEGER)).toEqual(["some-stray-file"]);
-    // Nor the capture attestation store beside it (ADR-0067, amended).
-    expect(staleEntries(new Map([[CAPTURE_ATTESTATION_ENTRY, 0]]), Number.MAX_SAFE_INTEGER)).toEqual([]);
+    for (const store of stores) {
+      expect(store.dir(), store.entry).toBe(join(subagentDir(), store.entry));
+    }
     expect(protectedDirs()).toContain(subagentDir());
   });
 

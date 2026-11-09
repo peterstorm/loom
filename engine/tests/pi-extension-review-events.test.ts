@@ -6559,18 +6559,58 @@ describe("Pi extension tool_call fail-closed backstops", () => {
     }
   });
 
-  it("BLOCKS the parent's security-audit verify --from of a run this session never witnessed (ADR-0067)", async () => {
+  it("BLOCKS the parent's security-audit verify --from of a run its persisted attestations do not prove (ADR-0067)", async () => {
     const pi = await extension();
     const command = "loom helper security-audit verify --out /audits/run-1 --from run.verify-w1-000000000000";
-    const results = await pi.emit("tool_call", { toolName: "bash", toolCallId: "call-verify-unwitnessed", input: { command } },
+    const results = await pi.emit("tool_call", { toolName: "bash", toolCallId: "call-verify-unproven", input: { command } },
       { cwd: ROOT, sessionManager: { getSessionId: () => SESSION } });
     expect(results).toContainEqual(expect.objectContaining({
       block: true,
-      reason: expect.stringContaining("security-verification witness (ADR-0067)"),
+      reason: expect.stringContaining("security-verification import proof (ADR-0067)"),
     }));
     const unrelated = await pi.emit("tool_call", { toolName: "bash", toolCallId: "call-status", input: { command: "loom helper security-audit status --out /audits/run-1" } },
       { cwd: ROOT, sessionManager: { getSessionId: () => SESSION } });
     expect(unrelated.filter((result) => result !== undefined)).toEqual([]);
+  });
+
+  it("lets the parent's verify --from of a natively captured, attested run through, and blocks it once result.json is altered (ADR-0067)", async () => {
+    const { aRun, removeRuns, seedFor, unitIdFor } = await import("./handlers/security-audit-harness");
+    const { verifiedRun } = await import("./handlers/security-verification-harness");
+    const { HUNTER_ENVELOPE, aConfirmedFinding, aUnitResult } = await import("./security/fixtures");
+    const audit = aRun();
+    try {
+      // The audit's hunt files one confirmed claim; its verifier is then
+      // issued, captured natively (which writes the capture attestation) and
+      // finished — but never witnessed by THIS extension process.
+      for (const [args, stdin] of [
+        [["start", "--repo", audit.out, "--source", "0".repeat(40), "--profile", "standard"],
+          JSON.stringify({ units: [seedFor(0)], signals: { languages: ["typescript"], servesHttp: true } })],
+        [["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"], ""],
+        [["submit"], JSON.stringify({ ...HUNTER_ENVELOPE,
+          units: [aUnitResult({ coverageId: unitIdFor(0), status: "candidate", fingerprints: ["api/login:sqli-email"] })],
+          findings: [aConfirmedFinding()] })],
+      ] as const) {
+        const invoked = await audit.invoke(args, stdin);
+        expect(invoked.error, args[0]).toBeNull();
+      }
+      const plan = await verifiedRun(audit);
+      const pi = await extension();
+      const command = `loom helper security-audit verify --out ${audit.out} --from ${plan.run}`;
+      const allowed = await pi.emit("tool_call", { toolName: "bash", toolCallId: "call-verify-attested", input: { command } },
+        { cwd: ROOT, sessionManager: { getSessionId: () => SESSION } });
+      expect(allowed.filter((result) => result !== undefined)).toEqual([]);
+
+      const resultPath = join(plan.runsRoot, plan.run, "result.json");
+      writeFileSync(resultPath, readFileSync(resultPath, "utf8").replace("\"critical\"", "\"advisory\""));
+      const blocked = await pi.emit("tool_call", { toolName: "bash", toolCallId: "call-verify-altered", input: { command } },
+        { cwd: ROOT, sessionManager: { getSessionId: () => SESSION } });
+      expect(blocked).toContainEqual(expect.objectContaining({
+        block: true,
+        reason: expect.stringContaining("altered after publication"),
+      }));
+    } finally {
+      removeRuns();
+    }
   });
 
   it("keeps the direct-edit guard armed when the global TaskGraph is unreadable", async () => {

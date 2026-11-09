@@ -412,10 +412,11 @@ function parseEvent(raw: unknown): Evidence | null {
   // be proven here. `.otherwise` names the unknown-kind arm explicitly rather
   // than hiding it in a `default`; every known arm re-mints its payload.
   return match(o.kind)
-    .with("FileRead", (): Evidence | null =>
+    .returnType<Evidence | null>()
+    .with("FileRead", () =>
       typeof o.path === "string" && o.path !== "" ? { kind: "FileRead", path: o.path } : null,
     )
-    .with("FileWrite", (): Evidence | null => {
+    .with("FileWrite", () => {
       if (typeof o.path !== "string" || o.path === "") return null;
       // Absent via = "tool" (old records — only tool writes were minted
       // historically); the parse boundary makes the default explicit so the
@@ -426,13 +427,13 @@ function parseEvent(raw: unknown): Evidence | null {
       const via: FileWriteVia = o.via === "tool" ? "tool" : "shell";
       return { kind: "FileWrite", path: o.path, via };
     })
-    .with("TestRun", (): Evidence | null => {
+    .with("TestRun", () => {
       if (typeof o.command !== "string") return null;
       const exit = typeof o.exit === "number" ? o.exit : null;
       const report = parseReportField(o.report);
       return { kind: "TestRun", command: o.command, exit, report };
     })
-    .with("SandboxRun", (): Evidence | null => {
+    .with("SandboxRun", () => {
       // Re-minted from the strict receipt grammar, never embedded raw: a
       // receipt is the only evidence that the sandbox enforced anything, so
       // an unknown field or a false literal invalidates the whole fact.
