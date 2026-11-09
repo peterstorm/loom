@@ -16,26 +16,11 @@ import { parseEvidenceLine } from "../../src/machine/evidence";
 import { tokensFor } from "../../src/machine/advance";
 import type { HarnessToolCall } from "../../src/machine/harness-tool-call-types";
 import type { SandboxReceipt } from "../../src/core/security-sandbox";
+import { aSandboxReceipt } from "./sandbox-fixtures";
 
 const noReport = () => null;
 
 const nonce = () => "0123456789abcdef";
-
-const receiptJson = (overrides: Record<string, unknown> = {}): string =>
-  JSON.stringify({
-    schemaVersion: 1,
-    exit: 0,
-    limits: { ...DEFAULT_SANDBOX_LIMITS },
-    allowlistedEnv: ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TERM"],
-    scratchBytes: 42,
-    networkNamespace: true,
-    targetReadOnly: true,
-    readOnlyRoot: false,
-    homeReadOnly: true,
-    unremountedMounts: 0,
-    enforced: { cpu: true, memory: true, processes: true, fileSize: true },
-    ...overrides,
-  });
 
 const bash = (command: string, stdout: string, exit = 0): HarnessToolCall => ({
   tool: "Bash",
@@ -50,7 +35,7 @@ const sandboxed = (stdout: string, command = "scripts/security-sandbox.sh --nonc
 
 /** A receipt bound to the nonce the command carries. */
 const bound = (overrides: Record<string, unknown> = {}): string =>
-  `${sandboxReceiptPrefix(nonce())}${receiptJson(overrides)}`;
+  `${sandboxReceiptPrefix(nonce())}${aSandboxReceipt(overrides)}`;
 
 const sandboxRuns = (call: HarnessToolCall): readonly SandboxReceipt[] =>
   extractEvidence(call, noReport).flatMap((event) => (event.kind === "SandboxRun" ? [event.receipt] : []));
@@ -71,7 +56,7 @@ describe("SandboxRun evidence", () => {
   it("mints nothing when the receipt is not bound to the call's own nonce", () => {
     // A receipt line the call printed itself, or one copied from another
     // artifact: the marker must carry the nonce this very command passed.
-    const unbound = `scripts/security-sandbox.sh --target . -- repro`;
+    const unbound = "scripts/security-sandbox.sh --target . -- repro";
     expect(sandboxRuns(bash(unbound, bound()))).toEqual([]);
     expect(sandboxRuns(bash(`${unbound} --nonce fedcba9876543210`, bound()))).toEqual([]);
   });
@@ -106,12 +91,14 @@ describe("SandboxRun evidence", () => {
     const line = (receipt: unknown): string =>
       JSON.stringify({ epoch: "hunter-a:security-hunter-agent", event: { kind: "SandboxRun", receipt } });
 
-    const parsed = parseEvidenceLine(line(JSON.parse(receiptJson())));
+    const parsed = parseEvidenceLine(line(JSON.parse(aSandboxReceipt())));
     expect(parsed.ok).toBe(true);
     if (parsed.ok) expect(parsed.value.event.kind).toBe("SandboxRun");
 
-    expect(parseEvidenceLine(line(JSON.parse(receiptJson({ networkNamespace: false })))).ok).toBe(false);
-    expect(parseEvidenceLine(line(JSON.parse(receiptJson({ unexpected: 1 })))).ok).toBe(false);
+    expect(parseEvidenceLine(line(JSON.parse(aSandboxReceipt({ networkNamespace: false })))).ok).toBe(false);
+    expect(parseEvidenceLine(line(JSON.parse(aSandboxReceipt({ unexpected: 1 })))).ok).toBe(false);
+    // An environment the script never passes is a false claim, not a detail.
+    expect(parseEvidenceLine(line(JSON.parse(aSandboxReceipt({ allowlistedEnv: ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TERM"] })))).ok).toBe(false);
     expect(parseEvidenceLine(line("not a receipt")).ok).toBe(false);
     expect(parseEvidenceLine(JSON.stringify({ epoch: "hunter-a:security-hunter-agent", event: { kind: "SandboxRun" } })).ok).toBe(false);
   });

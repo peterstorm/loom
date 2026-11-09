@@ -10,8 +10,12 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { consolidateCandidates } from "../../src/core/security-findings";
-import { parseSecurityFindings, type ConfirmedFinding, type SecurityFinding } from "../../src/core/security-findings";
+import {
+  consolidateCandidates,
+  parseSecurityFindings,
+  type ConfirmedFinding,
+  type SecurityFinding,
+} from "../../src/core/security-findings";
 import { aConfirmedFinding, aNeedsValidationFinding, ok } from "./fixtures";
 
 const parse = (raw: readonly unknown[]): readonly SecurityFinding[] => ok(parseSecurityFindings(raw));

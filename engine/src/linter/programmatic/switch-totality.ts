@@ -32,9 +32,7 @@ import type { Violation } from "../types";
 import { makeViolation } from "../types";
 import { isTestFile } from "./config";
 import { SWITCH_TOTALITY_BASELINE } from "./switch-totality-baseline";
-import { baselineCounter, baselineKey, repoRelative, unusedBaselineEntries, type Baseline } from "./baseline";
-
-export { baselineKey, unusedBaselineEntries };
+import { baselineCounter, baselineKey, repoRelative, type Baseline } from "./baseline";
 
 export const RULE_NAME = "switch-totality";
 
@@ -50,12 +48,12 @@ export const DEFAULT_SWITCH_TOTALITY_MODULES: readonly string[] = [
 ];
 
 const SWITCH_HEAD = /^\s*switch\s*\(\s*(.+?)\s*\)\s*\{/;
-/**
- * Split a switch body into its arms. Text BEFORE the first arm (`{`) and after
- * the last belongs to the surrounding arm, so the split never loses it — the
- * default arm's body is whatever follows `default:`.
- */
+/** One arm label: a literal `case` or `default:`, matched anywhere in a line so
+ *  a one-line switch is measured like any other. */
+const ARM_TOKEN = /(?:\bcase\s+["'`])|(?:\bdefault\s*:)/g;
 const IS_DEFAULT_ARM = /^\bdefault\s*:/;
+/** The text before a `{` that makes it the body of a NESTED switch. */
+const OPENS_NESTED_SWITCH = /\bswitch\s*\([^{]*\)\s*$/;
 /** A proof a switch arm carries: a never binding or an assertNever call. */
 const NEVER_PROOF = /:\s*never\b|\bassertNever\s*\(/;
 /** A nested ts-pattern match proves that match, not the surrounding switch. */
@@ -80,10 +78,6 @@ function withoutComment(line: string): string {
   }
   return line;
 }
-
-/** How the rule learns which sites are grandfathered: exact `path::scrutinee`
- *  keys, each suppressing one violation. */
-export type SwitchTotalityBaseline = Baseline;
 
 /**
  * One switch's span: the case count, whether a default arm exists, whether the
@@ -115,9 +109,6 @@ type SwitchSpan = Readonly<{
  * is measured like any other. Treating only line-initial `case` as an arm made
  * every one-line switch invisible — the detector saw no arms and skipped it.
  */
-const ARM_TOKEN = /(?:\bcase\s+["'`])|(?:\bdefault\s*:)/g;
-const OPENS_NESTED_SWITCH = /\bswitch\s*\([^{]*\)\s*$/;
-
 function switchSpan(lines: readonly string[], startLine: number): SwitchSpan {
   let depth = 0;
   let arms = 0;
@@ -181,62 +172,81 @@ function switchSpan(lines: readonly string[], startLine: number): SwitchSpan {
 const inScope = (filePath: string, modules: readonly string[]): boolean =>
   modules.some((module) => filePath.includes(module));
 
-export function handler(
+/** A switch this rule flags absent a baseline: in scope, with enough literal
+ *  arms to be a union match, and no totality proof. */
+type UnprovenSwitch = Readonly<{
+  /** 1-based line of the `switch` head. */
+  line: number;
+  scrutinee: string;
+  arms: number;
+  /** `path::scrutinee`, the form a baseline entry is written in. */
+  key: string;
+}>;
+
+/**
+ * The rule's ONE analysis of a file. `handler` spends baseline entries against
+ * these sites and reports the rest; `detectedSwitchKeys` hands the same sites to
+ * the staleness pass. Two traversals were how the detector came to see EVERY
+ * switch — proven, one-armed, out of scope — so a baselined switch later made
+ * total still "consumed" its entry and the debt never showed as paid.
+ */
+function unprovenSwitches(
   content: string,
   filePath: string,
-  modules: readonly string[] = DEFAULT_SWITCH_TOTALITY_MODULES,
-  baseline: SwitchTotalityBaseline = SWITCH_TOTALITY_BASELINE,
-  minArms: number = DEFAULT_MIN_SWITCH_ARMS,
-): readonly Violation[] {
+  modules: readonly string[],
+  minArms: number,
+): readonly UnprovenSwitch[] {
   // lintFile hands rules an ABSOLUTE path; baseline keys and module prefixes are
   // repo-relative. Normalize once so a baselined site stays baselined wherever
   // the checkout lives.
   const relative = repoRelative(filePath, modules);
-  if (isTestFile(relative)) return [];
-  if (!inScope(relative, modules)) return [];
+  if (isTestFile(relative) || !inScope(relative, modules)) return [];
 
   const lines = content.split("\n");
-  const baselineEntries = baselineCounter(baseline);
-
-  const violations: Violation[] = [];
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index]!;
+  return Object.freeze(lines.flatMap((line, index): readonly UnprovenSwitch[] => {
     const head = SWITCH_HEAD.exec(line);
-    if (head === null) continue;
+    if (head === null) return [];
     const scrutinee = head[1]!;
-    if (LANGUAGE_CLOSED.test(scrutinee)) continue;
+    if (LANGUAGE_CLOSED.test(scrutinee)) return [];
     const span = switchSpan(lines, index);
-    if (span.arms < minArms) continue;
+    if (span.arms < minArms) return [];
     // A nested match's `.exhaustive()` proves the match, not the switch: only an
     // arm-level never proof or a total match over the SAME scrutinee would, and
     // line-based analysis cannot see the receiver. Accept it file-locally as the
     // companion if-chain rule does, and say so.
-    if (span.neverProof || span.exhaustiveProof) continue;
-
-    const key = baselineKey(relative, scrutinee);
-    if (baselineEntries.consume(key)) continue;
-    violations.push(
-      makeViolation(
-        RULE_NAME,
-        filePath,
-        index + 1,
-        line.trim(),
-        `switch on \`${scrutinee}\` has ${span.arms} literal arms and no totality proof — use match(${scrutinee}).with(…).exhaustive(), or a default arm that binds it to \`never\`, so a new variant is a compile error`,
-      ),
-    );
-  }
-  return Object.freeze(violations);
+    if (span.neverProof || span.exhaustiveProof) return [];
+    return [{ line: index + 1, scrutinee, arms: span.arms, key: baselineKey(relative, scrutinee) }];
+  }));
 }
 
-/** Every switch key in a file that the rule would consider — the input of the
- *  staleness pass. */
-export function detectedSwitchKeys(content: string, filePath: string): readonly string[] {
+export function handler(
+  content: string,
+  filePath: string,
+  modules: readonly string[] = DEFAULT_SWITCH_TOTALITY_MODULES,
+  baseline: Baseline = SWITCH_TOTALITY_BASELINE,
+  minArms: number = DEFAULT_MIN_SWITCH_ARMS,
+): readonly Violation[] {
   const lines = content.split("\n");
-  const keys: string[] = [];
-  for (const line of lines) {
-    const head = SWITCH_HEAD.exec(line);
-    if (head === null || LANGUAGE_CLOSED.test(head[1]!)) continue;
-    keys.push(baselineKey(filePath.replace(/\\/g, "/"), head[1]!));
-  }
-  return keys;
+  const baselineEntries = baselineCounter(baseline);
+  return Object.freeze(unprovenSwitches(content, filePath, modules, minArms)
+    .filter((site) => !baselineEntries.consume(site.key))
+    .map((site) => makeViolation(
+      RULE_NAME,
+      filePath,
+      site.line,
+      lines[site.line - 1]!.trim(),
+      `switch on \`${site.scrutinee}\` has ${site.arms} literal arms and no totality proof — use match(${site.scrutinee}).with(…).exhaustive(), or a default arm that binds it to \`never\`, so a new variant is a compile error`,
+    )));
+}
+
+/** The baseline keys of every switch the rule would flag absent its baseline —
+ *  the input of the staleness pass. A baselined switch converted to a proof
+ *  drops out of this list, so its entry is reported unused. */
+export function detectedSwitchKeys(
+  content: string,
+  filePath: string,
+  modules: readonly string[] = DEFAULT_SWITCH_TOTALITY_MODULES,
+  minArms: number = DEFAULT_MIN_SWITCH_ARMS,
+): readonly string[] {
+  return unprovenSwitches(content, filePath, modules, minArms).map((site) => site.key);
 }

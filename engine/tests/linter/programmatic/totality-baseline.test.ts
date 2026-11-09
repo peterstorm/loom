@@ -4,10 +4,12 @@
  * reports stale entries, but a script nobody runs is how the lists decayed to
  * begin with — so the assertion lives here, against the live repository.
  *
- * It is also the only test that proves the two rules and their baselines agree
- * about WHAT they measure: `detected*Keys` runs the same traversal the handler
- * runs, so a key the rule stops producing (or a switch no rule ever sees at the
- * key's path) fails here rather than silently excusing nothing.
+ * It is also the only test that proves the rules and their baselines agree
+ * about WHAT they measure: each owner's detector runs the same analysis its
+ * handler runs, so a key the rule stops producing — the site was deleted,
+ * renamed, or since PROVEN total — fails here rather than silently excusing
+ * nothing. Both the script and this test iterate `BASELINE_OWNERS`, so a
+ * baselined rule cannot be left out of either.
  */
 import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -15,12 +17,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SWITCH_TOTALITY_BASELINE } from "../../../src/linter/programmatic/switch-totality-baseline";
 import { EXHAUSTIVE_BRANCHING_BASELINE } from "../../../src/linter/programmatic/exhaustive-discriminant-branching-baseline";
-import { unusedBaselineEntries as unusedBaselineEntriesOf } from "../../../src/linter/programmatic/baseline";
+import { baselineKey, staleBaselineEntries, unusedBaselineEntries } from "../../../src/linter/programmatic/baseline";
+import { BASELINE_OWNERS } from "../../../src/linter/programmatic/index";
 import {
   DEFAULT_SWITCH_TOTALITY_MODULES,
-  detectedSwitchKeys,
   handler as switchTotality,
-  unusedBaselineEntries as unusedSwitchEntries,
 } from "../../../src/linter/programmatic/switch-totality";
 import {
   DEFAULT_MAX_DISCRIMINANT_BRANCHES,
@@ -44,14 +45,51 @@ function sourceFiles(dir: string): readonly string[] {
 const RELATIVE = sourceFiles(REPO_ROOT).map((full) => full.slice(REPO_ROOT.length + 1).replace(/\\/g, "/"));
 const PRODUCTION = RELATIVE.filter((path) => !path.includes(".test.") && !path.includes(".spec."));
 
-describe("switch-totality baseline", () => {
-  it("names a site for every grandfathered switch it still excuses", () => {
-    const detected = PRODUCTION.flatMap((path) =>
-      detectedSwitchKeys(readFileSync(join(REPO_ROOT, path), "utf-8"), path));
-    expect(unusedSwitchEntries(detected, SWITCH_TOTALITY_BASELINE)).toEqual([]);
+const readRepoSource = (path: string): string | null => {
+  try {
+    return readFileSync(join(REPO_ROOT, path), "utf-8");
+  } catch {
+    return null;
+  }
+};
+
+describe("the baseline owner registry", () => {
+  it("registers both baselined rules, each with its own list", () => {
+    expect(BASELINE_OWNERS.map((owner) => [owner.rule, owner.baseline])).toEqual([
+      ["switch-totality", SWITCH_TOTALITY_BASELINE],
+      ["exhaustive-discriminant-branching", EXHAUSTIVE_BRANCHING_BASELINE],
+    ]);
+    // The drift message is rule-aware: a chain entry never reads as a switch.
+    expect(BASELINE_OWNERS.map((owner) => owner.site)).toEqual(["unproven switch", "unproven if-chain"]);
   });
 
-  it("excuses every one of those sites in the live tree, so the list is not just well-formed", () => {
+  it.each(BASELINE_OWNERS.map((owner) => [owner.rule, owner] as const))(
+    "%s: every grandfathered entry still names a live unproven site",
+    (_rule, owner) => {
+      expect(staleBaselineEntries(owner, readRepoSource)).toEqual([]);
+    },
+  );
+
+  it("reports an entry whose file is gone, and one whose site was proven, as stale", () => {
+    const [switchOwner] = BASELINE_OWNERS;
+    const path = "engine/src/core/converted.ts";
+    const owner = { ...switchOwner!, baseline: [baselineKey(path, "x.kind"), baselineKey("engine/src/core/deleted.ts", "y.kind")] };
+    const proven = [
+      `switch (x.kind) {`,
+      `  case "a": return 1;`,
+      `  case "b": return 2;`,
+      `  default: {`,
+      `    const unreachable: never = x;`,
+      `    return unreachable;`,
+      `  }`,
+      `}`,
+    ].join("\n");
+    expect(staleBaselineEntries(owner, (file) => (file === path ? proven : null))).toEqual(owner.baseline);
+  });
+});
+
+describe("switch-totality baseline", () => {
+  it("excuses every one of its sites in the live tree, so the list is not just well-formed", () => {
     const violations = PRODUCTION
       .filter((path) => DEFAULT_SWITCH_TOTALITY_MODULES.some((module) => path.includes(module)))
       .flatMap((path) => switchTotality(readFileSync(join(REPO_ROOT, path), "utf-8"), path));
@@ -67,12 +105,14 @@ describe("switch-totality baseline", () => {
 });
 
 describe("exhaustive-discriminant-branching baseline", () => {
-  it("names a chain for every grandfathered entry it still excuses", () => {
-    const detected = PRODUCTION.flatMap((path) =>
-      detectedChainKeys(readFileSync(join(REPO_ROOT, path), "utf-8"), path,
-        DEFAULT_MAX_DISCRIMINANT_BRANCHES, DEFAULT_DISCRIMINANT_TAGS));
-    expect(unusedBaselineEntriesOf(detected, EXHAUSTIVE_BRANCHING_BASELINE)).toEqual([]);
-  });
+  const CHAIN = [
+    "function pick(event: Event): string {",
+    '  if (event.kind === "a") return "a";',
+    '  if (event.kind === "b") return "b";',
+    '  if (event.kind === "c") return "c";',
+    '  return "?";',
+    "}",
+  ].join("\n");
 
   it("excuses every chain in the live tree", () => {
     const violations = PRODUCTION.flatMap((path) =>
@@ -92,20 +132,27 @@ describe("exhaustive-discriminant-branching baseline", () => {
     expect(detected.length).toBeGreaterThan(0);
     const baseline = detected.filter((key) => key.startsWith(`${path}::`));
     expect(baseline).toEqual([EXHAUSTIVE_BRANCHING_BASELINE.find((entry) => entry.startsWith(`${path}::`))]);
-    expect(unusedBaselineEntriesOf(detected, baseline)).toEqual([]);
+    expect(unusedBaselineEntries(detected, baseline)).toEqual([]);
     expect(chainRule(source, absolute, DEFAULT_MAX_DISCRIMINANT_BRANCHES, DEFAULT_DISCRIMINANT_TAGS)).toEqual([]);
   });
 
   it("never grows by accident: a chain in a file the baseline has not seen is a violation", () => {
-    const source = [
-      "function pick(event: Event): string {",
-      '  if (event.kind === "a") return "a";',
-      '  if (event.kind === "b") return "b";',
-      '  if (event.kind === "c") return "c";',
-      '  return "?";',
-      "}",
-    ].join("\n");
-    expect(chainRule(source, "engine/src/core/brand-new.ts", 3, DEFAULT_DISCRIMINANT_TAGS, [])).toHaveLength(1);
+    expect(chainRule(CHAIN, "engine/src/core/brand-new.ts", 3, DEFAULT_DISCRIMINANT_TAGS, [])).toHaveLength(1);
+  });
+
+  it("reports a baselined chain's entry unused once a totality proof sits beside it", () => {
+    const path = "engine/src/core/brand-new.ts";
+    const baseline = [baselineKey(path, "event.kind")];
+    expect(unusedBaselineEntries(detectedChainKeys(CHAIN, path), baseline)).toEqual([]);
+    // The chain is now proven by the `never` binding below its tail: the rule
+    // no longer flags it, so nothing may keep consuming its entry.
+    const proven = CHAIN.replace('  return "?";', "  const unreachable: never = event;\n  return unreachable;");
+    expect(chainRule(proven, path, 3, DEFAULT_DISCRIMINANT_TAGS, [])).toEqual([]);
+    expect(unusedBaselineEntries(detectedChainKeys(proven, path), baseline)).toEqual(baseline);
+  });
+
+  it("detects no chain in a test file, matching the handler", () => {
+    expect(detectedChainKeys(CHAIN, "engine/src/core/brand-new.test.ts")).toEqual([]);
+    expect(chainRule(CHAIN, "engine/src/core/brand-new.test.ts", 3, DEFAULT_DISCRIMINANT_TAGS, [])).toEqual([]);
   });
 });
-

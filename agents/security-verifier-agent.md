@@ -69,7 +69,9 @@ Return exactly one JSON object and nothing else:
 adjudicator reads both. `profile` must be the catalog profile YOUR agent sits on
 (the parent refuses a ballot whose agent and profile disagree), and it must
 differ from the profile that hunted the claim: that difference is what makes the
-vote independent.
+vote independent. `agent` and `profile` are self-reported: `verify` checks them
+against the Agent Catalog, not against the spawn that produced the ballot, so
+name your own agent and profile exactly.
 
 `critical` means the claim **survives** your refutation: it is published as
 confirmed, and the fix will be made. `advisory` means it does not survive — with

@@ -16,18 +16,46 @@ import { handler as maxFunctionLinesHandler, DEFAULT_MAX_LINES, DEFAULT_EXCLUDE_
 import { handler as fugueGeneratedIntegrityHandler } from "./fugue-generated-integrity";
 import {
   handler as exhaustiveDiscriminantHandler,
+  detectedChainKeys,
   DEFAULT_MAX_DISCRIMINANT_BRANCHES,
   DEFAULT_DISCRIMINANT_TAGS,
 } from "./exhaustive-discriminant-branching";
+import { EXHAUSTIVE_BRANCHING_BASELINE } from "./exhaustive-discriminant-branching-baseline";
 import { handler as nestedTernaryHandler } from "./no-nested-ternary";
 import { handler as preferArrayMethodsHandler } from "./prefer-array-methods";
 import {
   handler as switchTotalityHandler,
+  detectedSwitchKeys,
   DEFAULT_SWITCH_TOTALITY_MODULES,
   RULE_NAME as SWITCH_TOTALITY_RULE,
 } from "./switch-totality";
 import { SWITCH_TOTALITY_BASELINE } from "./switch-totality-baseline";
+import type { BaselineOwner } from "./baseline";
 import { type ProgrammaticConfig, EMPTY_CONFIG } from "./config";
+
+const EXHAUSTIVE_BRANCHING_RULE = "exhaustive-discriminant-branching";
+
+/**
+ * Every rule that keeps a grandfathered list. `scripts/lint-project.ts` reports
+ * the stale entries of each, and the baseline test asserts each against the
+ * live tree — both iterate THIS list, so a baselined rule cannot be left out of
+ * the drift report. Each owner detects with its rule's defaults: the baselines
+ * are keys into loom's own tree, which the defaults describe.
+ */
+export const BASELINE_OWNERS: readonly BaselineOwner[] = Object.freeze([
+  {
+    rule: SWITCH_TOTALITY_RULE,
+    baseline: SWITCH_TOTALITY_BASELINE,
+    site: "unproven switch",
+    detect: (content: string, filePath: string) => detectedSwitchKeys(content, filePath),
+  },
+  {
+    rule: EXHAUSTIVE_BRANCHING_RULE,
+    baseline: EXHAUSTIVE_BRANCHING_BASELINE,
+    site: "unproven if-chain",
+    detect: (content: string, filePath: string) => detectedChainKeys(content, filePath),
+  },
+]);
 
 /**
  * Creates the programmatic rule set, optionally configured by project-local config.
@@ -102,7 +130,7 @@ export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFI
     },
     {
       kind: "programmatic",
-      name: "exhaustive-discriminant-branching",
+      name: EXHAUSTIVE_BRANCHING_RULE,
       description: `Branching ${DEFAULT_MAX_DISCRIMINANT_BRANCHES}+ times on one discriminant is a switch the compiler cannot check`,
       extensions: [".ts", ".tsx"],
       handler: (content, filePath) => exhaustiveDiscriminantHandler(

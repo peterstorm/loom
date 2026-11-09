@@ -25,7 +25,7 @@ import {
 } from "../../src/core/security-audit-contract";
 import { parseSecurityFindings, SEVERITY_SCORES, type SeverityScore } from "../../src/core/security-findings";
 import { parseVerificationVerdicts } from "../../src/core/security-adjudication";
-import { aConfirmedFinding, aVerdict } from "./fixtures";
+import { aConfirmedFinding, aNeedsValidationFinding, aVerdict, ok } from "./fixtures";
 
 const rejectedFingerprints = ["", "-a", " a", "a b", "a\nb", "a\tz", "a b c", "🙂"];
 
@@ -95,6 +95,31 @@ describe("canonical coverage id (INV-L5)", () => {
         }
       }),
     );
+  });
+});
+
+describe("a parsed findings document is the parser's own value", () => {
+  it("never aliases the caller's input, and cannot be mutated through it", () => {
+    const confirmed = aConfirmedFinding();
+    const raw = [confirmed, aNeedsValidationFinding({ fingerprint: "b/lead" })];
+    const parsed = ok(parseSecurityFindings(raw));
+    expect(parsed).not.toBe(raw);
+    expect(parsed).toEqual(raw);
+    // A later edit of the document the caller still holds must not rewrite the
+    // findings a decision was already made on.
+    confirmed.title = "rewritten after parsing";
+    const trace = confirmed.trace;
+    if (Array.isArray(trace)) trace.splice(0);
+    expect(parsed[0]?.title).toBe("SQL injection through the login `email` field");
+    expect(parsed[0]?.trace).toHaveLength(2);
+  });
+
+  it("is deeply frozen", () => {
+    const [finding] = ok(parseSecurityFindings([aConfirmedFinding()]));
+    expect(Object.isFrozen(finding)).toBe(true);
+    expect(Object.isFrozen(finding?.trace)).toBe(true);
+    expect(Object.isFrozen(finding?.trace[0])).toBe(true);
+    expect(finding?.verdict === "confirmed" && Object.isFrozen(finding.severity.impact)).toBe(true);
   });
 });
 

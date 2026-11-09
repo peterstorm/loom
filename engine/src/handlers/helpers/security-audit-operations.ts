@@ -62,10 +62,11 @@ export const SECURITY_AUDIT_OPERATIONS = Object.freeze({
 
 export type SecurityAuditOperation = keyof typeof SECURITY_AUDIT_OPERATIONS;
 
-/** Whether the operation writes anything under the run directory. A writer
- *  takes a `--out`; a reader may also take `--out` to name what it reads. Derived
- *  from the skew policy, which is the same fact: an operation that writes is the
- *  one the handshake gates. */
+/** Whether the operation writes anything under the run directory — the helper
+ *  prepares (creates) the directory only for these, so a read-only projection
+ *  never creates the run it was asked to read. Derived from the skew policy,
+ *  which is the same fact: an operation that writes is the one the handshake
+ *  gates. */
 export const securityAuditOperationWrites = (operation: SecurityAuditOperation): boolean =>
   SECURITY_AUDIT_OPERATIONS[operation].runtimeSkew === "handshake-required";
 
@@ -76,7 +77,8 @@ export function parseSecurityAuditOperation(value: string | undefined): Security
     : null;
 }
 
-/** The action set, in the order a run performs it. */
+/** The action set, in the order a run performs it — the order the helper's
+ *  usage line lists them in. */
 export const SECURITY_AUDIT_OPERATION_ORDER: readonly SecurityAuditOperation[] = Object.freeze([
   "start",
   "assign",

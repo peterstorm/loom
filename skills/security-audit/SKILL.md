@@ -15,9 +15,10 @@ Three properties separate this from a prompt that says "find vulnerabilities":
    Every entrypoint × attack class is a unit with an owner, a status and a
    terminal disposition. A budget timeout is *not* cleanliness — an unsettled
    unit leaves the run incomplete with its reason recorded.
-2. **Evidence is machine-checked, not asserted.** A hunter is read-only by
-   machine gate; the only way it demonstrates an exploit is a bounded sandbox
-   run whose receipt proves the limits actually held.
+2. **Evidence is machine-checked, not asserted.** The machine gate denies a
+   hunter `Edit`, `Write` and `MultiEdit`; a shell write is recorded, not
+   prevented. The only way it demonstrates an exploit is a bounded sandbox run —
+   target and home read-only — whose receipt says the limits actually held.
 3. **Severity is earned.** A finding nobody verified has **no severity at all** —
    it is a `needs_validation` lead. Severity enters the record only at
    verification, by a reviewer from a different catalog profile.
@@ -43,17 +44,12 @@ start → assign → submit → verify → findings → publish
                                 ↘ defer / merge-critic ↗
 ```
 
-| Action | What it does |
-|--------|--------------|
-| `start` | Freeze the source revision, enumerate coverage units, select lenses, write run metadata |
-| `assign` | Give a planned unit to a hunter (reassignment archives the prior attempt) |
-| `submit` | Record a hunter's candidates against its unit |
-| `defer` | Mark an unreachable unit with one of the four reason tokens |
-| `merge-critic` | Fold the critic's added units in, deduped by canonical coverage id |
-| `verify` | Adjudicate candidates: confirmed / needs-verification / rejected |
-| `findings` | Render the report from the validated records |
-| `publish` | Emit `security-findings.json`; confirmed findings hand off to disposition |
-| `disposition` | Derive the decision set (`accepted`/`deferred`/`dismissed`) `/review-and-fix` consumes |
+In one line: `start` freezes and enumerates, `assign`/`submit` move one unit
+through one hunter, `defer` and `merge-critic` settle what hunters did not,
+`verify` records ballots that decide `confirmed`/`needs_validation`/`rejected`
+at `findings` and `publish`, and `disposition` derives the handoff. The
+authoritative operations table — inputs and every refusal — is in
+[`docs/security-audit.md`](../../docs/security-audit.md#operations).
 
 `status` is read-only and answers the only question that matters before
 stopping: **is the ledger settled?**
@@ -86,17 +82,20 @@ vendored validator):
 | `needs_validation` | **none** | Plausible, unverified — stays in the report as a lead |
 | `rejected` | n/a | Retained with its refutation; never silently dropped |
 
-Confirmed findings are the only ones that reach disposition. Upstream's
-`overall_severity` is kept as a *recorded opinion* that may not exceed the
-demonstrated impact (INV-S3), so a hunter cannot inflate by adjective.
+Every published record reaches disposition: `confirmed` is accepted for
+remediation, `needs_validation` is deferred on its named blocker, `rejected` is
+dismissed with its refutation. Upstream's `overall_severity` is kept as a
+*recorded opinion* that may not exceed the demonstrated impact, so a hunter
+cannot inflate by adjective.
 
 ## Invariants
 
-`INV-S1` hunter cannot write outside its scratch dir · `INV-S2` one terminal
-disposition per unit · `INV-S3` confirmed requires a verdict from a different
-catalog profile · `INV-S4` `needs_validation` carries no severity · `INV-S5`
-budget exhaustion ≠ clean coverage · `INV-S6` reports derive from validated
-records, byte-identically.
+`INV-S1` a hunter's tool writes are denied by machine gate (shell writes are
+recorded, not prevented; sandboxed commands see the target and home read-only) ·
+`INV-S2` one terminal disposition per unit · `INV-S3` confirmed requires a
+verdict from a different catalog profile · `INV-S4` `needs_validation` carries
+no severity · `INV-S5` budget exhaustion ≠ clean coverage · `INV-S6` reports
+derive from validated records, byte-identically.
 
 ## Handoff
 
@@ -133,6 +132,10 @@ loom helper security-audit publish --out .audit/run-1
 loom helper security-audit disposition --out .audit/run-1
 loom helper security-audit status  --out .audit/run-1 [--json]
 ```
+
+`assign --agent` names a catalog agent; it prints `assigned <coverage-id> to
+owner <owner-id> at wave <n>`, and the hunter settles under exactly that owner id
+(`security-hunter-agent`, or `security-hunter-agent--2` after a reassignment).
 
 `status` and `findings` are read-only and stay available while the Pi runtime is
 skewed — they are what you read *while* recovering. Every other operation proves

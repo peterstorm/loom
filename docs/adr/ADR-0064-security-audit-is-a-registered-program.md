@@ -49,7 +49,8 @@ ledger state machine, no sandbox, and no bounded-execution evidence event.
 ## Decision
 
 Option 2. `security-audit` is a registered program (P5 of the plan), with four
-non-negotiables:
+non-negotiables. (The D-numbers follow the originating plan's decision list; D1
+and D4 are plan decisions this ADR does not restate.)
 
 - **D2 — Reuse reviewer payload v2 for hunter candidates.** A Loom Finding already carries
   preconditions, violated contract, consequence and evidence limits. The vulnerability
@@ -70,13 +71,17 @@ non-negotiables:
 New pure cores: `security-audit-contract` (grammar, limits, budget admission),
 `security-coverage` (ledger state machine), `security-findings` (trichotomy, consolidation),
 `security-reports` (derived prose), `security-sandbox` (limits policy), `security-lens-select`
-(stack → 2–3 lenses). New machine evidence kind `SandboxRun` so a bounded local check is a
-fact, not a claim.
+(stack → the lenses the run's profile cap admits; *amended 2026-11-09*, was a fixed
+"2–3 lenses" — the cap is the profile's, see `docs/security-audit.md`). New machine evidence kind `SandboxRun` so
+a bounded local check is a fact, not a claim.
 
 ## Consequences
 
 - Hunters become structurally unable to edit source: the agent machine denies `Edit`/`Write`/
   `MultiEdit` for the whole phase order.
+  *Amended 2026-11-09:* "structurally unable" overstated it. Tool-level edits are denied; a
+  shell write (a Bash redirect) is detected and recorded as a shell write, not prevented.
+  Inside the sandbox the target and the operator's home are read-only.
 - A run that exhausts budget is unrepresentable as clean coverage: it ends `incomplete` with a
   reason token, or every planned unit has a terminal state.
 - The published prose is derived from validated records by code, so a divergent `REPORT.md`

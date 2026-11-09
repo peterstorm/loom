@@ -3,18 +3,22 @@
 `references/security-lenses/*.md` (except this file, `LOOM-DELTAS.md` and `MANIFEST.json`)
 are copied byte-identically from Cloudflare's security-audit skill.
 
+`MANIFEST.json` is the machine source of truth: it pins the SHA-256 of each of
+the eleven vendored files and records the upstream repository, commit, source
+directory, license and retrieval date. The table below is a human-readable
+summary of it; where the two disagree, the manifest wins.
+
 | | |
 |---|---|
 | Upstream | <https://github.com/cloudflare/security-audit-skill> |
-| Commit | `c1c8a8c1471069fb0e188eeaff69b8e8db6564a8` |
-| Path | `skills/security-audit/` |
+| Commit, path, retrieved | see `MANIFEST.json` → `upstream` |
 | License | MIT — see upstream `LICENSE` |
-| Retrieved | 2026-11-07 |
 | Design rationale | <https://blog.cloudflare.com/build-your-own-vulnerability-harness/> |
 
-Vendored files, with the SHA-256 each must retain: `MANIFEST.json`. The
-`security-lens-manifest` test fails when a vendored file changes without the
-manifest, so drift is a decision rather than an accident.
+The `security-lens-manifest` test re-digests every vendored file against
+`MANIFEST.json` and fails when one changes without the manifest, so drift is a
+decision rather than an accident. Loom-specific guidance about these lenses
+lives in `LOOM-DELTAS.md`, never inside a vendored file.
 
 Why these eleven and nothing else: they are the reconnaissance and attack-class
 taxonomy — the part of upstream that is pure domain knowledge and therefore both

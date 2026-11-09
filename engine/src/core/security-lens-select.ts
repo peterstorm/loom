@@ -132,20 +132,23 @@ const LENS_RULES: Readonly<Record<Exclude<SecurityLens, "ATTACK-CLASSES.md">, re
 const CLIENT_LANGUAGES = new Set(["tsx", "jsx", "vue", "svelte", "html", "css"]);
 const SYSTEMS_LANGUAGES = new Set(["c", "cc", "cpp", "h", "hpp", "rs", "zig", "asm"]);
 
-const signalNames: Readonly<Record<keyof StackSignals, string>> = {
-  languages: "languages",
-  manifests: "manifests",
-  servesHttp: "an HTTP surface",
-  rendersClientSide: "client-side rendering",
-  drivesModelsOrTools: "model or tool driving",
-  usesQueuesOrRpc: "RPC or messaging",
-  isolatesTenants: "tenant-scoped state",
-  deploysInfrastructure: "deployment declarations",
-  hasNativeMemory: "native memory handling",
-  hasAppOrLocalIpc: "app or local IPC",
-  hasReleasePipelines: "release pipelines",
-  hasSharedResourcePressure: "shared resource pressure",
-};
+/** Every signal the selector reads, in declaration order: an exclusion reason
+ *  names the ones that WERE present, so an operator can see what the lens
+ *  lacked. */
+const SIGNAL_NAMES: readonly (keyof StackSignals)[] = Object.freeze([
+  "languages",
+  "manifests",
+  "servesHttp",
+  "rendersClientSide",
+  "drivesModelsOrTools",
+  "usesQueuesOrRpc",
+  "isolatesTenants",
+  "deploysInfrastructure",
+  "hasNativeMemory",
+  "hasAppOrLocalIpc",
+  "hasReleasePipelines",
+  "hasSharedResourcePressure",
+]);
 
 const hasSignal = (signals: StackSignals, signal: keyof StackSignals): boolean => {
   const value = signals[signal];
@@ -156,14 +159,6 @@ const hasSignal = (signals: StackSignals, signal: keyof StackSignals): boolean =
 const languageSignal = (signals: StackSignals, pool: ReadonlySet<string>): boolean =>
   signals.languages.some((language) => pool.has(language.toLowerCase()));
 
-/**
- * Rank the lenses a target earns. Deterministic for equal signals: score
- * descending, then DECLARATION order (`SECURITY_LENSES`), never filename order —
- * the two disagree, and the docstring a critic reads names declaration order.
- *
- * `maxLenses` is the PROFILE's total document budget, base lens included, so the
- * specialised list is capped at `maxLenses - 1`.
- */
 /** Which language family a lens is about. Most lenses match on any language
  *  signal; two are specific, so a TypeScript-only repository does not select the
  *  memory-safety lens merely by declaring languages. */
@@ -173,6 +168,14 @@ const languageMatches = (lens: SecurityLens, signals: StackSignals): boolean =>
     .with("MEMORY-SAFETY-AND-BINARY.md", () => languageSignal(signals, SYSTEMS_LANGUAGES))
     .otherwise(() => hasSignal(signals, "languages"));
 
+/**
+ * Rank the lenses a target earns. Deterministic for equal signals: score
+ * descending, then DECLARATION order (`SECURITY_LENSES`), never filename order —
+ * the two disagree, and the docstring a critic reads names declaration order.
+ *
+ * `maxLenses` is the PROFILE's total document budget, base lens included, so the
+ * specialised list is capped at `maxLenses - 1`.
+ */
 export function selectSecurityLenses(
   signals: StackSignals,
   options: Readonly<{ maxLenses: number }>,
@@ -218,7 +221,7 @@ export function selectSecurityLenses(
       reason:
         scored.some((entry) => entry.lens === lens)
           ? `ranked ${scored.findIndex((entry) => entry.lens === lens) + 1} of ${scored.length}; beyond the ${maxLenses}-lens cap`
-          : `no matching signal (${Object.keys(signalNames).filter((name) => hasSignal(signals, name as keyof StackSignals)).join(", ") || "none detected"})`,
+          : `no matching signal (${SIGNAL_NAMES.filter((name) => hasSignal(signals, name)).join(", ") || "none detected"})`,
     })),
   };
 }

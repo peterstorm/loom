@@ -25,7 +25,15 @@
 import { match } from "ts-pattern";
 import { compareStrings } from "./ordering";
 import { failure, success, type DomainResult } from "./orchestration-contract/identity";
-import { SECURITY_AUDIT_LIMITS, hasVisibleProse, isSafeSourcePath, isSecurityFingerprint } from "./security-audit-contract";
+import {
+  SECURITY_AUDIT_LIMITS,
+  hasVisibleProse,
+  isSafeSourcePath,
+  isSecurityFingerprint,
+  isWireRecord,
+  wireViolation,
+  type WireViolation,
+} from "./security-audit-contract";
 
 // --- Vocabulary ---
 
@@ -130,10 +138,10 @@ export type RejectedFinding = Readonly<{
 
 export type SecurityFinding = ConfirmedFinding | NeedsValidationFinding | RejectedFinding;
 
-export type FindingViolation = Readonly<{ path: string; message: string }>;
+/** The findings volume's name for the shared wire diagnostic. */
+export type FindingViolation = WireViolation;
 export type FindingsError = Readonly<{ kind: "invalid-security-findings"; violations: readonly FindingViolation[] }>;
 
-const violation = (path: string, message: string): FindingViolation => ({ path, message });
 const invalid = (violations: readonly FindingViolation[]): FindingsError => ({
   kind: "invalid-security-findings",
   violations,
@@ -153,9 +161,6 @@ function canonicalKey(value: unknown): string {
   return JSON.stringify(value);
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === "object" && !Array.isArray(value);
-
 /** Upstream's `visibleContent`: at least one character a reader can see. */
 const isVisible = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && hasVisibleProse(value);
@@ -164,35 +169,35 @@ const isOneOf = <T extends string>(values: readonly T[], value: unknown): value 
   typeof value === "string" && (values as readonly string[]).includes(value);
 
 function checkKeys(
-  record: Record<string, unknown>,
+  record: Readonly<Record<string, unknown>>,
   allowed: readonly string[],
   required: readonly string[],
   path: string,
   violations: FindingViolation[],
 ): void {
   for (const key of required) {
-    if (!(key in record)) violations.push(violation(`${path}.${key}`, "required"));
+    if (!(key in record)) violations.push(wireViolation(`${path}.${key}`, "required"));
   }
   for (const key of Object.keys(record)) {
-    if (!allowed.includes(key)) violations.push(violation(`${path}.${key}`, "unexpected property"));
+    if (!allowed.includes(key)) violations.push(wireViolation(`${path}.${key}`, "unexpected property"));
   }
 }
 
-function checkVisible(record: Record<string, unknown>, key: string, path: string, violations: FindingViolation[]): void {
-  if (key in record && !isVisible(record[key])) violations.push(violation(`${path}.${key}`, "expected visible prose"));
+function checkVisible(record: Readonly<Record<string, unknown>>, key: string, path: string, violations: FindingViolation[]): void {
+  if (key in record && !isVisible(record[key])) violations.push(wireViolation(`${path}.${key}`, "expected visible prose"));
 }
 
 function checkUniqueArray(value: unknown, path: string, violations: FindingViolation[], minimum = 0): void {
   if (!Array.isArray(value)) {
-    violations.push(violation(path, "expected an array"));
+    violations.push(wireViolation(path, "expected an array"));
     return;
   }
-  if (value.length > SECURITY_AUDIT_LIMITS.collectionItems) violations.push(violation(path, "too many entries"));
-  if (value.length < minimum) violations.push(violation(path, `expected at least ${minimum} entry(ies)`));
+  if (value.length > SECURITY_AUDIT_LIMITS.collectionItems) violations.push(wireViolation(path, "too many entries"));
+  if (value.length < minimum) violations.push(wireViolation(path, `expected at least ${minimum} entry(ies)`));
   const seen = new Set<string>();
   for (const entry of value) {
     const key = canonicalKey(entry);
-    if (seen.has(key)) violations.push(violation(path, "duplicate entry"));
+    if (seen.has(key)) violations.push(wireViolation(path, "duplicate entry"));
     seen.add(key);
   }
 }
@@ -202,33 +207,33 @@ function checkTrace(value: unknown, path: string, violations: FindingViolation[]
   if (!Array.isArray(value)) return;
   value.forEach((entry, index) => {
     const base = `${path}[${index}]`;
-    if (!isRecord(entry)) {
-      violations.push(violation(base, "expected an object"));
+    if (!isWireRecord(entry)) {
+      violations.push(wireViolation(base, "expected an object"));
       return;
     }
     checkKeys(entry, ["kind", "file", "line", "scope", "description"], ["kind", "file", "line", "scope", "description"], base, violations);
-    if (!isOneOf(TRACE_KINDS, entry.kind)) violations.push(violation(`${base}.kind`, "expected entrypoint, propagation or sink"));
-    if (!isSafeSourcePath(entry.file)) violations.push(violation(`${base}.file`, "expected a repository-relative source path"));
-    if (!Number.isInteger(entry.line) || (entry.line as number) < 1) violations.push(violation(`${base}.line`, "expected a positive integer"));
+    if (!isOneOf(TRACE_KINDS, entry.kind)) violations.push(wireViolation(`${base}.kind`, "expected entrypoint, propagation or sink"));
+    if (!isSafeSourcePath(entry.file)) violations.push(wireViolation(`${base}.file`, "expected a repository-relative source path"));
+    if (!Number.isInteger(entry.line) || (entry.line as number) < 1) violations.push(wireViolation(`${base}.line`, "expected a positive integer"));
     checkVisible(entry, "scope", base, violations);
     checkVisible(entry, "description", base, violations);
   });
 
-  const steps = value.filter(isRecord);
+  const steps = value.filter(isWireRecord);
   if (steps.length === 1) {
     const only = steps[0].kind;
     if (only !== "entrypoint" && only !== "sink") {
-      violations.push(violation(`${path}[0].kind`, "a one-step trace must be entrypoint or sink"));
+      violations.push(wireViolation(`${path}[0].kind`, "a one-step trace must be entrypoint or sink"));
     }
     return;
   }
   if (steps.length > 1) {
-    if (steps[0].kind !== "entrypoint") violations.push(violation(`${path}[0].kind`, "must be entrypoint"));
+    if (steps[0].kind !== "entrypoint") violations.push(wireViolation(`${path}[0].kind`, "must be entrypoint"));
     steps.slice(1).forEach((step, offset) => {
       if (offset === steps.length - 2) {
-        if (step.kind !== "sink") violations.push(violation(`${path}[${offset + 1}].kind`, "must be sink"));
+        if (step.kind !== "sink") violations.push(wireViolation(`${path}[${offset + 1}].kind`, "must be sink"));
       } else if (step.kind !== "propagation") {
-        violations.push(violation(`${path}[${offset + 1}].kind`, "must be propagation"));
+        violations.push(wireViolation(`${path}[${offset + 1}].kind`, "must be propagation"));
       }
     });
   }
@@ -239,13 +244,13 @@ function checkEvidence(value: unknown, path: string, violations: FindingViolatio
   if (!Array.isArray(value)) return;
   value.forEach((entry, index) => {
     const base = `${path}[${index}]`;
-    if (!isRecord(entry)) {
-      violations.push(violation(base, "expected an object"));
+    if (!isWireRecord(entry)) {
+      violations.push(wireViolation(base, "expected an object"));
       return;
     }
     checkKeys(entry, ["file", "line", "description"], ["file", "line", "description"], base, violations);
-    if (!isSafeSourcePath(entry.file)) violations.push(violation(`${base}.file`, "expected a repository-relative source path"));
-    if (!Number.isInteger(entry.line) || (entry.line as number) < 1) violations.push(violation(`${base}.line`, "expected a positive integer"));
+    if (!isSafeSourcePath(entry.file)) violations.push(wireViolation(`${base}.file`, "expected a repository-relative source path"));
+    if (!Number.isInteger(entry.line) || (entry.line as number) < 1) violations.push(wireViolation(`${base}.line`, "expected a positive integer"));
     checkVisible(entry, "description", base, violations);
   });
 }
@@ -255,30 +260,30 @@ function checkConditions(value: unknown, path: string, violations: FindingViolat
   if (!Array.isArray(value)) return;
   value.forEach((entry, index) => {
     const base = `${path}[${index}]`;
-    if (!isRecord(entry)) {
-      violations.push(violation(base, "expected an object"));
+    if (!isWireRecord(entry)) {
+      violations.push(wireViolation(base, "expected an object"));
       return;
     }
     checkKeys(entry, ["kind", "description"], ["kind", "description"], base, violations);
-    if (!isOneOf(CONDITION_KINDS, entry.kind)) violations.push(violation(`${base}.kind`, "unknown condition kind"));
+    if (!isOneOf(CONDITION_KINDS, entry.kind)) violations.push(wireViolation(`${base}.kind`, "unknown condition kind"));
     checkVisible(entry, "description", base, violations);
   });
 }
 
 function checkScoredReason(value: unknown, path: string, scores: readonly string[], violations: FindingViolation[]): void {
-  if (!isRecord(value)) {
-    violations.push(violation(path, "expected an object"));
+  if (!isWireRecord(value)) {
+    violations.push(wireViolation(path, "expected an object"));
     return;
   }
   checkKeys(value, ["score", "reason"], ["score", "reason"], path, violations);
-  if (!isOneOf(scores, value.score)) violations.push(violation(`${path}.score`, `expected one of ${scores.join(", ")}`));
+  if (!isOneOf(scores, value.score)) violations.push(wireViolation(`${path}.score`, `expected one of ${scores.join(", ")}`));
   checkVisible(value, "reason", path, violations);
 }
 
-function checkConfirmed(record: Record<string, unknown>, path: string, violations: FindingViolation[]): void {
+function checkConfirmed(record: Readonly<Record<string, unknown>>, path: string, violations: FindingViolation[]): void {
   const forbidden = ["claimed_root_cause", "blockers", "validation_plan", "reason"];
   for (const key of forbidden) {
-    if (key in record) violations.push(violation(`${path}.${key}`, "confirmed findings must not carry this field"));
+    if (key in record) violations.push(wireViolation(`${path}.${key}`, "confirmed findings must not carry this field"));
   }
   for (const key of ["title", "description", "root_cause", "intended_behavior"]) {
     checkVisible(record, key, path, violations);
@@ -288,8 +293,8 @@ function checkConfirmed(record: Record<string, unknown>, path: string, violation
   checkConditions(record.conditions, `${path}.conditions`, violations);
 
   const execution = record.execution;
-  if (!isRecord(execution)) {
-    violations.push(violation(`${path}.execution`, "expected an object"));
+  if (!isWireRecord(execution)) {
+    violations.push(wireViolation(`${path}.execution`, "expected an object"));
   } else {
     checkKeys(
       execution,
@@ -303,70 +308,70 @@ function checkConfirmed(record: Record<string, unknown>, path: string, violation
     checkUniqueArray(execution.payloads, `${path}.execution.payloads`, violations, 1);
     if (Array.isArray(execution.payloads)) {
       execution.payloads.forEach((payload, index) => {
-        if (typeof payload !== "string") violations.push(violation(`${path}.execution.payloads[${index}]`, "expected a string"));
+        if (typeof payload !== "string") violations.push(wireViolation(`${path}.execution.payloads[${index}]`, "expected a string"));
       });
     }
     checkUniqueArray(execution.instructions, `${path}.execution.instructions`, violations, 1);
     if (Array.isArray(execution.instructions)) {
       execution.instructions.forEach((instruction, index) => {
-        if (!isVisible(instruction)) violations.push(violation(`${path}.execution.instructions[${index}]`, "expected visible prose"));
+        if (!isVisible(instruction)) violations.push(wireViolation(`${path}.execution.instructions[${index}]`, "expected visible prose"));
       });
     }
   }
 
   const remediation = record.remediation;
-  if (!isRecord(remediation)) {
-    violations.push(violation(`${path}.remediation`, "expected an object"));
+  if (!isWireRecord(remediation)) {
+    violations.push(wireViolation(`${path}.remediation`, "expected an object"));
   } else {
     checkKeys(remediation, ["strategy", "code_changes"], ["strategy"], `${path}.remediation`, violations);
     checkVisible(remediation, "strategy", `${path}.remediation`, violations);
     if ("code_changes" in remediation) {
       const changes = remediation.code_changes;
       if (!Array.isArray(changes)) {
-        violations.push(violation(`${path}.remediation.code_changes`, "expected an array"));
+        violations.push(wireViolation(`${path}.remediation.code_changes`, "expected an array"));
       } else {
         changes.forEach((change, index) => {
           const base = `${path}.remediation.code_changes[${index}]`;
-          if (!isRecord(change)) {
-            violations.push(violation(base, "expected an object"));
+          if (!isWireRecord(change)) {
+            violations.push(wireViolation(base, "expected an object"));
             return;
           }
           checkKeys(change, ["file_name", "fixed_code"], ["file_name", "fixed_code"], base, violations);
-          if (!isSafeSourcePath(change.file_name)) violations.push(violation(`${base}.file_name`, "expected a repository-relative source path"));
-          if (typeof change.fixed_code !== "string") violations.push(violation(`${base}.fixed_code`, "expected a string"));
+          if (!isSafeSourcePath(change.file_name)) violations.push(wireViolation(`${base}.file_name`, "expected a repository-relative source path"));
+          if (typeof change.fixed_code !== "string") violations.push(wireViolation(`${base}.fixed_code`, "expected a string"));
         });
       }
     }
   }
 
   const severity = record.severity;
-  if (!isRecord(severity)) {
-    violations.push(violation(`${path}.severity`, "expected an object"));
+  if (!isWireRecord(severity)) {
+    violations.push(wireViolation(`${path}.severity`, "expected an object"));
   } else {
     checkKeys(severity, ["likelihood", "impact", "overall_severity"], ["likelihood", "impact", "overall_severity"], `${path}.severity`, violations);
     checkScoredReason(severity.likelihood, `${path}.severity.likelihood`, SEVERITY_SCORES, violations);
     checkScoredReason(severity.impact, `${path}.severity.impact`, SEVERITY_SCORES, violations);
     if (!isOneOf(SEVERITY_SCORES, severity.overall_severity)) {
-      violations.push(violation(`${path}.severity.overall_severity`, `expected one of ${SEVERITY_SCORES.join(", ")}`));
+      violations.push(wireViolation(`${path}.severity.overall_severity`, `expected one of ${SEVERITY_SCORES.join(", ")}`));
     } else {
-      const impact = isRecord(severity.impact) && isOneOf(SEVERITY_SCORES, severity.impact.score) ? severity.impact.score : null;
+      const impact = isWireRecord(severity.impact) && isOneOf(SEVERITY_SCORES, severity.impact.score) ? severity.impact.score : null;
       if (impact !== null && SEVERITY_RANK[severity.overall_severity] > SEVERITY_RANK[impact]) {
-        violations.push(violation(`${path}.severity.overall_severity`, `cannot exceed demonstrated impact ${impact}`));
+        violations.push(wireViolation(`${path}.severity.overall_severity`, `cannot exceed demonstrated impact ${impact}`));
       }
     }
   }
 
   const confidence = record.confidence;
-  if (!isRecord(confidence)) {
-    violations.push(violation(`${path}.confidence`, "expected an object"));
+  if (!isWireRecord(confidence)) {
+    violations.push(wireViolation(`${path}.confidence`, "expected an object"));
   } else {
     checkScoredReason(confidence, `${path}.confidence`, CONFIDENCE_SCORES, violations);
   }
 }
 
-function checkNeedsValidation(record: Record<string, unknown>, path: string, violations: FindingViolation[]): void {
+function checkNeedsValidation(record: Readonly<Record<string, unknown>>, path: string, violations: FindingViolation[]): void {
   for (const key of ["severity", "execution", "remediation", "reason", "root_cause"]) {
-    if (key in record) violations.push(violation(`${path}.${key}`, "needs_validation findings must not carry this field"));
+    if (key in record) violations.push(wireViolation(`${path}.${key}`, "needs_validation findings must not carry this field"));
   }
   for (const key of ["title", "description", "claimed_root_cause"]) checkVisible(record, key, path, violations);
   checkTrace(record.trace, `${path}.trace`, violations);
@@ -374,54 +379,55 @@ function checkNeedsValidation(record: Record<string, unknown>, path: string, vio
   checkUniqueArray(record.blockers, `${path}.blockers`, violations, 1);
   if (Array.isArray(record.blockers)) {
     record.blockers.forEach((blocker, index) => {
-      if (!isVisible(blocker)) violations.push(violation(`${path}.blockers[${index}]`, "expected visible prose"));
+      if (!isVisible(blocker)) violations.push(wireViolation(`${path}.blockers[${index}]`, "expected visible prose"));
     });
   }
   const plan = record.validation_plan;
-  if (!isRecord(plan)) {
-    violations.push(violation(`${path}.validation_plan`, "expected an object"));
+  if (!isWireRecord(plan)) {
+    violations.push(wireViolation(`${path}.validation_plan`, "expected an object"));
     return;
   }
   checkKeys(plan, ["local", "deployment"], [], `${path}.validation_plan`, violations);
   const hasLocal = isVisible(plan.local);
   const hasDeployment = isVisible(plan.deployment);
   for (const key of ["local", "deployment"]) {
-    if (key in plan && !isVisible(plan[key])) violations.push(violation(`${path}.validation_plan.${key}`, "expected visible prose"));
+    if (key in plan && !isVisible(plan[key])) violations.push(wireViolation(`${path}.validation_plan.${key}`, "expected visible prose"));
   }
   if (!hasLocal && !hasDeployment) {
-    violations.push(violation(`${path}.validation_plan`, "requires at least one local or deployment plan"));
+    violations.push(wireViolation(`${path}.validation_plan`, "requires at least one local or deployment plan"));
   }
 }
 
-function checkRejected(record: Record<string, unknown>, path: string, violations: FindingViolation[]): void {
+function checkRejected(record: Readonly<Record<string, unknown>>, path: string, violations: FindingViolation[]): void {
   for (const key of ["severity", "execution", "remediation", "blockers", "validation_plan", "root_cause"]) {
-    if (key in record) violations.push(violation(`${path}.${key}`, "rejected findings must not carry this field"));
+    if (key in record) violations.push(wireViolation(`${path}.${key}`, "rejected findings must not carry this field"));
   }
   for (const key of ["title", "description", "claimed_root_cause", "reason"]) checkVisible(record, key, path, violations);
   checkTrace(record.trace, `${path}.trace`, violations);
   checkEvidence(record.evidence, `${path}.evidence`, violations);
 }
 
-const VERDICT_KEYS: Readonly<Record<SecurityFinding["verdict"], { allowed: readonly string[]; required: readonly string[] }>> = {
-  confirmed: {
-    allowed: [
-      "verdict", "fingerprint", "title", "description", "root_cause", "intended_behavior", "trace", "evidence",
-      "conditions", "execution", "remediation", "severity", "confidence",
-    ],
-    required: [
-      "verdict", "fingerprint", "title", "description", "root_cause", "intended_behavior", "trace", "evidence",
-      "conditions", "execution", "remediation", "severity", "confidence",
-    ],
-  },
-  needs_validation: {
-    allowed: ["verdict", "fingerprint", "title", "description", "claimed_root_cause", "trace", "evidence", "blockers", "validation_plan"],
-    required: ["verdict", "fingerprint", "title", "description", "claimed_root_cause", "trace", "evidence", "blockers", "validation_plan"],
-  },
-  rejected: {
-    allowed: ["verdict", "fingerprint", "title", "description", "claimed_root_cause", "trace", "evidence", "reason"],
-    required: ["verdict", "fingerprint", "title", "description", "claimed_root_cause", "trace", "evidence", "reason"],
-  },
+/** Each verdict's exact key set: every key is required and no other is allowed,
+ *  so one list serves as both. */
+const VERDICT_KEYS: Readonly<Record<SecurityFinding["verdict"], readonly string[]>> = {
+  confirmed: [
+    "verdict", "fingerprint", "title", "description", "root_cause", "intended_behavior", "trace", "evidence",
+    "conditions", "execution", "remediation", "severity", "confidence",
+  ],
+  needs_validation: ["verdict", "fingerprint", "title", "description", "claimed_root_cause", "trace", "evidence", "blockers", "validation_plan"],
+  rejected: ["verdict", "fingerprint", "title", "description", "claimed_root_cause", "trace", "evidence", "reason"],
 };
+
+/** A deep, frozen copy of a validated JSON value. The parser returns THIS, never
+ *  the caller's input: handing back `raw` meant a later mutation of the document
+ *  the caller still holds silently rewrote the "parsed" findings. */
+function frozenCopy(value: unknown): unknown {
+  if (Array.isArray(value)) return Object.freeze(value.map(frozenCopy));
+  if (isWireRecord(value)) {
+    return Object.freeze(Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, frozenCopy(entry)])));
+  }
+  return value;
+}
 
 /**
  * Parse and fully validate a `security-findings.json` document. Validity here
@@ -433,11 +439,11 @@ const VERDICT_KEYS: Readonly<Record<SecurityFinding["verdict"], { allowed: reado
 export function parseSecurityFindings(raw: unknown): DomainResult<readonly SecurityFinding[], FindingsError> {
   const violations: FindingViolation[] = [];
   if (!Array.isArray(raw)) {
-    violations.push(violation("$", "expected a top-level array"));
+    violations.push(wireViolation("$", "expected a top-level array"));
     return failure(invalid(violations));
   }
   if (raw.length > SECURITY_AUDIT_LIMITS.findings) {
-    violations.push(violation("$", `exceeds ${SECURITY_AUDIT_LIMITS.findings} findings`));
+    violations.push(wireViolation("$", `exceeds ${SECURITY_AUDIT_LIMITS.findings} findings`));
     return failure(invalid(violations));
   }
 
@@ -446,25 +452,25 @@ export function parseSecurityFindings(raw: unknown): DomainResult<readonly Secur
 
   raw.forEach((entry, index) => {
     const path = `$[${index}]`;
-    if (!isRecord(entry)) {
-      violations.push(violation(path, "expected an object"));
+    if (!isWireRecord(entry)) {
+      violations.push(wireViolation(path, "expected an object"));
       return;
     }
     if (!isOneOf(["confirmed", "needs_validation", "rejected"] as const, entry.verdict)) {
-      violations.push(violation(`${path}.verdict`, "expected confirmed, needs_validation or rejected"));
+      violations.push(wireViolation(`${path}.verdict`, "expected confirmed, needs_validation or rejected"));
       return;
     }
     const keys = VERDICT_KEYS[entry.verdict];
-    checkKeys(entry, keys.allowed, keys.required, path, violations);
+    checkKeys(entry, keys, keys, path, violations);
 
     if (!isSecurityFingerprint(entry.fingerprint)) {
-      violations.push(violation(`${path}.fingerprint`, "expected a stable source-derived fingerprint"));
+      violations.push(wireViolation(`${path}.fingerprint`, "expected a stable source-derived fingerprint"));
     } else {
       const previous = fingerprints.get(entry.fingerprint);
-      if (previous !== undefined) violations.push(violation(`${path}.fingerprint`, `duplicate of $[${previous}].fingerprint`));
+      if (previous !== undefined) violations.push(wireViolation(`${path}.fingerprint`, `duplicate of $[${previous}].fingerprint`));
       else fingerprints.set(entry.fingerprint, index);
       if (previousFingerprint !== null && compareStrings(previousFingerprint, entry.fingerprint) > 0) {
-        violations.push(violation(`${path}.fingerprint`, "findings must be sorted lexicographically"));
+        violations.push(wireViolation(`${path}.fingerprint`, "findings must be sorted lexicographically"));
       }
       previousFingerprint = entry.fingerprint;
     }
@@ -476,10 +482,17 @@ export function parseSecurityFindings(raw: unknown): DomainResult<readonly Secur
       .exhaustive();
   });
 
+  // Every key, field and ordering rule of the union was checked above, so the
+  // copy IS a `SecurityFinding[]` — the validator is the proof the cast names.
   return violations.length === 0
-    ? success(raw as readonly SecurityFinding[])
+    ? success(frozenCopy(raw) as readonly SecurityFinding[])
     : failure(invalid(violations));
 }
+
+/** Records in canonical order: lexicographic by fingerprint. The one ordering
+ *  every published document and adjudication result uses. */
+export const sortByFingerprint = <T extends Readonly<{ fingerprint: string }>>(items: readonly T[]): readonly T[] =>
+  [...items].sort((left, right) => compareStrings(left.fingerprint, right.fingerprint));
 
 // --- Consolidation ---
 

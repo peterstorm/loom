@@ -8,8 +8,9 @@ directory holds, what each operation refuses, and what to do with the result.
 For the method — lenses, sandbox evidence, the finding trichotomy — read
 `skills/security-audit/SKILL.md`. For why the program is code rather than prose,
 read `docs/deterministic-core.md` §8 and ADR-0064. `/security-audit`
-(`commands/security-audit.md`) is the same workflow expressed as a slash command;
-a test binds its operation table to the traits table the engine routes on.
+(`commands/security-audit.md`) is the same workflow expressed as a slash command.
+The operations table below is the authoritative one; the command keeps a short
+copy, and a test binds both to the traits table the engine routes on.
 
 ## Start here
 
@@ -55,21 +56,45 @@ file is refused rather than followed.
 
 ## Operations
 
+This is the authoritative operations table. Every operation takes `--out
+<run-dir>`.
+
 | Operation | Input | Refuses when |
 |---|---|---|
-| `start` | stdin (`units`, optional `signals`, optional `scope`) | a run already exists (unless `--force`), a seed is malformed or duplicated, the budget cannot seat the first wave |
-| `assign` | flags `--unit --agent [--wave]` | the unit is not `planned`, the agent is not a catalog id, the agent already owned an archived attempt |
-| `submit` | stdin (`units`, optional `findings`) | a unit is not the agent's or not the current wave, a check is malformed, a `local` check names no receipt |
-| `defer` | flags `--reason [--unit]` | the reason is missing, the unit is not `planned` |
-| `merge-critic` | stdin (critic result) | a proposal is malformed, a reassigned unit has no evidence to archive |
-| `verify` | stdin (`verdicts`) | a ballot is malformed, a field is invented |
+| `start` | stdin (`units`, optional `signals`, optional `scope`) | a run already exists (unless `--force`), a seed is malformed or duplicated, `scope.kind` is not `tree` or `diff`, `signals` is malformed, the budget cannot seat the first wave |
+| `assign` | flags `--unit --agent [--wave]` | the run is published, the unit is not `planned`, the Agent Catalog cannot place `--agent` |
+| `submit` | stdin (`units`, optional `findings`) | the run is published, a unit is not the named owner's or not the current wave, a check is malformed, a `local` check names no receipt |
+| `defer` | flags `--reason [--unit]` | the run is published, the reason is missing, the unit is not `planned` |
+| `merge-critic` | stdin (critic result) | the run is published, a proposal is malformed, a reassigned unit has no evidence to archive |
+| `verify` | stdin (`verdicts`) | the run is published, a ballot is malformed, a field is invented |
 | `findings` | flags `[--json]` | the ledger or records do not parse |
 | `publish` | flags | any publication blocker (see below) |
 | `disposition` | flags | nothing has been published yet |
 | `status` | flags `[--json]` | the run does not parse |
 
-`status` and `findings` are read-only and stay available while the Pi runtime is
-skewed; every other operation proves the runtime first.
+`status` and `findings` are read-only: they write nothing — they do not even
+create the `--out` directory — and stay available while the Pi runtime is
+skewed; every other operation proves the runtime first. `verify` only records
+ballots (`critical` or `advisory`); the decision they make — `confirmed`,
+`needs_validation` or `rejected` — is taken by one adjudication at `findings`
+and `publish`.
+
+### Owners
+
+`assign --agent` names a **catalog agent** (`security-hunter-agent`), not an
+attempt. The ledger mints the unit's owner id from it: the bare catalog name for
+the unit's first attempt, `<agent>--<n>` (`security-hunter-agent--2`) once a
+critic reassignment has archived an earlier one. `assign` prints the minted id:
+
+```
+assigned <coverage-id> to owner <owner-id> at wave <n>
+```
+
+The hunter settles under exactly that id — `agentId` and every check's
+`agent_id` in its `submit` payload, and its scratch and artifact paths
+(`agents/<owner-id>/scratch`, `agents/<owner-id>/artifacts/...`). Freshness
+after reassignment holds by construction, and the catalog agent the owner id
+carries is what `publish` reads to learn which model profile hunted.
 
 ## Publication blockers
 
@@ -100,9 +125,10 @@ and budgets are.
 
 ## Profiles and lens breadth
 
-The profile also caps how many **companion lens documents** one run holds in
-context (`quick` 2, `standard` 4, `deep` 8; ATTACK-CLASSES.md is always
-included on top). A lens trimmed by the cap is listed in `excluded` with its
+The profile also caps how many **lens documents** one run holds in context:
+`quick` 2, `standard` 4, `deep` 8 in total. `ATTACK-CLASSES.md` is always one of
+them — it occupies context like any other — so a profile leaves room for 1, 3 or
+7 companion lenses (`selectSecurityLenses`). A lens trimmed by the cap is listed in `excluded` with its
 rank, so a missing lens is a visible choice rather than a silent omission. If a
 defect sits in a trimmed lens, run again with a wider profile — or add its
 coverage cell, which is the cheaper fix.
@@ -150,14 +176,54 @@ Read `REPORT.md` top-down:
 A rejected claim stays in the record (with its refutation) so a later run must
 bring changed evidence rather than rediscover it.
 
+## The sandbox
+
+`scripts/security-sandbox.sh` is the only way a hunter demonstrates a result. It
+runs one command under `unshare` with only loopback networking, the target
+bind-remounted read-only, `ulimit` CPU, address-space, process and file-size
+limits, and a wall clock. The child's environment is emptied and repopulated
+with exactly `PATH HOME TMPDIR LANG TERM` (`HOME` and `TMPDIR` point at the
+scratch). The last stdout line is the receipt, and a `local` check counts as
+observed only when its receipt says:
+
+- the command exited zero and every ulimit was really applied;
+- the target was read-only (the script exits 127 when that remount fails);
+- `homeReadOnly` — **observed**, not inferred. Home is closed first, so binds of
+  a target or scratch that live inside it land on top of a read-only home; then
+  a write to home must actually fail. An unknown home, or a remount that
+  silently missed, reads as open, and the receipt does not count;
+- the measured scratch footprint is within `--scratch-mb`. That is a **post-run**
+  footprint check: nothing caps the scratch while the command runs.
+
+`readOnlyRoot` and `unremountedMounts` are recorded residual exposure, not
+gates: a user namespace cannot remount a superblock it does not own, so gating
+on them would refuse every run. They are reported rather than claimed closed.
+
+The receipt is marked with a nonce derived from the artifact path the ledger
+names, so a receipt is **bound** to that artifact: a receipt line the command
+printed itself, or a receipt copied from another check, does not carry the
+marker the engine looks for. The nonce does not **authenticate** the receipt: a
+hunter that writes the artifact file itself can forge one. The defence against a
+dishonest hunter is the independent verifier, not the receipt.
+
 ## Honest limits
 
 - Coverage is only as good as the seeded cells: an attack class nobody seeded is
   not audited, and the report says so by omission from the table.
 - A hunter demonstrates impact only through a bounded sandbox run whose receipt
-  proves the limits held; a receipt is evidence that the run happened under
-  those limits, not that the exploit is exploitable in production.
+  says the limits held; a receipt is evidence that the run happened under those
+  limits — bound to its artifact, not authenticated (see the nonce above) — not
+  that the exploit is exploitable in production.
+- Hunters cannot edit through tools (the machine gate denies `Edit`, `Write` and
+  `MultiEdit`), but a shell write outside the sandbox is **recorded, not
+  prevented**: it is visible to the reviewer of the unit. Inside the sandbox the
+  target and home are read-only.
 - The audit proves an exploit for the *frozen revision*. A dirty worktree is
   recorded; the report is about the commit, not the bytes on disk.
 - Verification is a panel of model reviewers on a different profile, not a
   proof. INV-S3 makes a same-profile ballot worthless, not a wrong one right.
+- A ballot's `agent` and `profile` are **self-reported**. `verify` parses them
+  for catalog consistency only — the profile must be the one the Agent Catalog
+  assigns that agent — not for proof that a spawn of that agent cast the
+  ballot. Binding a ballot to its spawn identity is deferred; until then INV-S3
+  holds against an honest orchestrator, not against one that mislabels ballots.

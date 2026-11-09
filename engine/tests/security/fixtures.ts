@@ -12,10 +12,16 @@
  * is given without disturbing a sibling.
  */
 
-import { canonicalCoverageId, type CoverageRefs } from "../../src/core/security-audit-contract";
+import {
+  canonicalCoverageId,
+  parseSecurityRunMetadata,
+  type CoverageRefs,
+  type SecurityRunMetadata,
+} from "../../src/core/security-audit-contract";
 import type { DomainResult } from "../../src/core/orchestration-contract/identity";
 import type { CoverageSeed } from "../../src/core/security-coverage";
 import type { ConfirmedFinding, NeedsValidationFinding, RejectedFinding } from "../../src/core/security-findings";
+import type { StackSignals } from "../../src/core/security-lens-select";
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
@@ -24,6 +30,56 @@ const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 export function ok<T>(result: DomainResult<T, unknown>): T {
   if (!result.ok) throw new Error(`expected success, got ${JSON.stringify(result.error)}`);
   return result.value;
+}
+
+/** The catalog hunter. `assignUnits` refuses an agent the Agent Catalog cannot
+ *  place, so a placeholder id cannot stand in for it. */
+export const HUNTER_AGENT = "security-hunter-agent";
+
+// --- Run ---
+
+/** Run metadata the strict schema accepts. Parsed, not cast: an override that
+ *  produces an illegal document (a complete run with a reason) fails HERE, in
+ *  the fixture, rather than in whichever assertion happens to read it. */
+export function aRunMetadata(overrides: Partial<SecurityRunMetadata> = {}): SecurityRunMetadata {
+  return ok(parseSecurityRunMetadata({
+    schemaVersion: 1,
+    runId: "audit-1",
+    repo: "/repo",
+    target: "/repo",
+    profile: "standard",
+    scope: { paths: ["src/api/login.ts"], kind: "tree", baseRef: null, headRef: null },
+    scopePaths: ["src/api/login.ts"],
+    sourceRef: { commit: "0".repeat(40), worktreeDirty: false },
+    budget: null,
+    executionPolicy: "sandboxed-source-and-local-only",
+    selectedCompanions: [],
+    priorRuns: [],
+    runStatus: "complete",
+    incompleteReason: null,
+    published: false,
+    ...clone(overrides),
+  }));
+}
+
+/** Repository facts with every signal off: a test turns on exactly the ones it
+ *  is about. */
+export function aSignals(overrides: Partial<StackSignals> = {}): StackSignals {
+  return {
+    languages: [],
+    manifests: [],
+    servesHttp: false,
+    rendersClientSide: false,
+    drivesModelsOrTools: false,
+    usesQueuesOrRpc: false,
+    isolatesTenants: false,
+    deploysInfrastructure: false,
+    hasNativeMemory: false,
+    hasAppOrLocalIpc: false,
+    hasReleasePipelines: false,
+    hasSharedResourcePressure: false,
+    ...clone(overrides),
+  };
 }
 
 // --- Coverage ---
@@ -40,8 +96,10 @@ export function aRefs(overrides: Partial<CoverageRefs> = {}): CoverageRefs {
   };
 }
 
-/** A seed as it arrives on the wire (`start`'s `units` payload). */
-export function aSeed(overrides: Partial<CoverageSeed> = {}): Record<string, unknown> {
+/** A seed as it arrives on the wire (`start`'s `units` payload). Typed as the
+ *  seed it is, so a test hands it to `seedCoverageUnit` without a cast and to
+ *  `parseCoverageSeeds` as the JSON it serialises to. */
+export function aSeed(overrides: Partial<CoverageSeed> = {}): CoverageSeed {
   return {
     refs: aRefs(),
     starting_paths: ["src/api/login.ts"],
@@ -52,12 +110,12 @@ export function aSeed(overrides: Partial<CoverageSeed> = {}): Record<string, unk
     excluded_blocks: [],
     prior: null,
     ...clone(overrides),
-  } as Record<string, unknown>;
+  };
 }
 
 /** `count` seeds in distinct cells, so a test can seed a multi-unit run without
  *  colliding on the canonical coverage identity. */
-export function nSeeds(count: number): readonly Record<string, unknown>[] {
+export function nSeeds(count: number): readonly CoverageSeed[] {
   return Array.from({ length: count }, (_unused, index) =>
     aSeed({
       refs: aRefs({ subsystem: `subsystem-${index}` }),

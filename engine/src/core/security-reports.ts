@@ -18,11 +18,10 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 
-import { compareStrings } from "./ordering";
 import type { SecurityRunMetadata } from "./security-audit-contract";
 import { summarizeCoverage, type CoverageLedger } from "./security-coverage";
 import { dispositionHandoffPaths, renderDispositionHandoff, securityDisposition } from "./security-disposition";
-import type { ConfirmedFinding, NeedsValidationFinding, SecurityFinding } from "./security-findings";
+import { sortByFingerprint, type ConfirmedFinding, type NeedsValidationFinding, type SecurityFinding } from "./security-findings";
 
 export type ReportInput = Readonly<{
   metadata: SecurityRunMetadata;
@@ -38,8 +37,10 @@ export type ReportInput = Readonly<{
   locator: string;
 }>;
 
-const sortByFingerprint = <T extends SecurityFinding>(findings: readonly T[]): readonly T[] =>
-  [...findings].sort((left, right) => compareStrings(left.fingerprint, right.fingerprint));
+/** The boundary of the unit that filed a fingerprint, or `unmapped` when no
+ *  settled unit carries it. */
+const boundaryOf = (ledger: CoverageLedger, fingerprint: string): string =>
+  ledger.find((unit) => unit.result_fingerprints.includes(fingerprint))?.boundary ?? "unmapped";
 
 const cell = (text: string): string => text.replace(/\|/g, "\\|").replace(/\s+/g, " ").trim();
 
@@ -92,7 +93,7 @@ export function renderReport(input: ReportInput): string {
           "|---|---|---|---|",
           ...confirmed.map(
             (finding) =>
-              `| ${finding.severity.overall_severity} | ${cell(finding.title)} | ${cell(ledger.find((unit) => unit.result_fingerprints.includes(finding.fingerprint))?.boundary ?? "unmapped")} | ${cell(finding.execution.observed_result)} |`,
+              `| ${finding.severity.overall_severity} | ${cell(finding.title)} | ${cell(boundaryOf(ledger, finding.fingerprint))} | ${cell(finding.execution.observed_result)} |`,
           ),
         ].join("\n");
 
@@ -111,7 +112,7 @@ export function renderReport(input: ReportInput): string {
       `- Smallest effective fix: ${finding.remediation.strategy}`,
       "",
       "Trace:",
-      ...[...finding.trace].map((step) => `- ${step.kind} ${step.file}:${step.line} (${step.scope}) — ${step.description}`),
+      ...finding.trace.map((step) => `- ${step.kind} ${step.file}:${step.line} (${step.scope}) — ${step.description}`),
     ].join("\n"),
   );
 
@@ -123,7 +124,7 @@ export function renderReport(input: ReportInput): string {
           "|---|---|---|",
           ...needsValidation.map(
             (finding) =>
-              `| ${cell(finding.title)} | ${cell(ledger.find((unit) => unit.result_fingerprints.includes(finding.fingerprint))?.boundary ?? "unmapped")} | ${cell(finding.blockers.join("; "))} |`,
+              `| ${cell(finding.title)} | ${cell(boundaryOf(ledger, finding.fingerprint))} | ${cell(finding.blockers.join("; "))} |`,
           ),
         ].join("\n");
 
@@ -219,11 +220,11 @@ export function renderFindingsDetail(input: ReportInput): string {
       "",
       "### Trace",
       "",
-      ...[...finding.trace].map((step) => `1. \`${step.kind}\` ${step.file}:${step.line} — ${step.scope}: ${step.description}`),
+      ...finding.trace.map((step) => `1. \`${step.kind}\` ${step.file}:${step.line} — ${step.scope}: ${step.description}`),
       "",
       "### Evidence",
       "",
-      ...[...finding.evidence].map((entry) => `- ${entry.file}:${entry.line} — ${entry.description}`),
+      ...finding.evidence.map((entry) => `- ${entry.file}:${entry.line} — ${entry.description}`),
       "",
       "### Reproduction",
       "",
@@ -284,11 +285,11 @@ export function renderNeedsValidation(input: ReportInput): string {
       "",
       "Trace:",
       "",
-      ...[...finding.trace].map((step) => `1. \`${step.kind}\` ${step.file}:${step.line} — ${step.scope}: ${step.description}`),
+      ...finding.trace.map((step) => `1. \`${step.kind}\` ${step.file}:${step.line} — ${step.scope}: ${step.description}`),
       "",
       "Evidence:",
       "",
-      ...[...finding.evidence].map((entry) => `- ${entry.file}:${entry.line} — ${entry.description}`),
+      ...finding.evidence.map((entry) => `- ${entry.file}:${entry.line} — ${entry.description}`),
       "",
       "Blockers:",
       "",
@@ -303,7 +304,7 @@ export function renderNeedsValidation(input: ReportInput): string {
   ].join("\n");
 }
 
-/** The four published documents, keyed by their fixed filenames. */
+/** The three derived prose documents, keyed by their fixed filenames. */
 export function renderRunDocuments(input: ReportInput): Readonly<Record<string, string>> {
   return {
     "REPORT.md": renderReport(input),

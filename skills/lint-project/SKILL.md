@@ -187,10 +187,10 @@ itself with `bun scripts/lint-project.ts` (which lints the checkout it lives in)
 plus its own test, never with "the hook stayed quiet".
 
 **A rule that only subtracts violations is a rule that silently stops
-applying.** Grandfathered baselines (`switch-totality`, `exhaustive-discriminant-
-branching`) excuse sites that predate the rule, and their failure mode is
-silence: a renamed scrutinee or a deleted switch leaves an entry protecting
-nothing. Both lists are asserted against the live tree by
+applying.** Grandfathered baselines (`switch-totality`,
+`exhaustive-discriminant-branching`) excuse sites that predate the rule, and
+their failure mode is silence: a renamed scrutinee or a deleted switch leaves an
+entry protecting nothing. Both lists are asserted against the live tree by
 `tests/linter/programmatic/totality-baseline.test.ts`, and
 `scripts/lint-project.ts` reports stale entries and exits non-zero on them.
 When you add a baseline-backed rule, add both.

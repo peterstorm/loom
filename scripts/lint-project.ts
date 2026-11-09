@@ -220,42 +220,32 @@ function parseArgs(args: string[]): CliOpts {
 // Baseline drift — a grandfathered list nobody re-checks rots silently
 // ---------------------------------------------------------------------------
 
-interface BaselineDrift {
-  rule: string;
-  stale: string[];
-}
-
 /**
- * Every grandfathered-list rule ships a staleness helper; a list that only ever
- * suppresses violations cannot report its own decay, because a deleted or
- * renamed switch costs nothing.
+ * A list that only ever suppresses violations cannot report its own decay: a
+ * deleted, renamed or since-proven site costs nothing. So every rule that keeps
+ * a grandfathered list registers as a baseline owner (`BASELINE_OWNERS` in the
+ * programmatic rule registry), and this pass asks each owner which entries no
+ * live site consumes. `staleBaselineEntries` walks the BASELINE'S OWN paths, so a
+ * targeted run does not call every other entry stale.
  *
- * The walk is over the BASELINE'S OWN paths, not over the files this invocation
- * happened to lint. Scoped by the lint scope, a targeted run (`lint-project.ts
- * engine/src/core/x.ts`) saw one file's keys, called every other entry stale, and
- * exited 1 — so the staleness pass punished exactly the operator who was being
- * careful. An entry whose file is gone contributes no keys and is still
- * reported, which is the drift this pass exists to catch.
+ * Each line names the rule and what its entries excuse, so a stale chain entry
+ * does not read as a missing switch.
  *
  * Run only against loom itself: the baselines are keys into loom's own tree, so
  * linting another project against them would report every entry as stale.
  */
-async function baselineDrift(): Promise<BaselineDrift[]> {
-  const baselineModule = join(LOOM_ROOT, "engine/src/linter/programmatic/switch-totality-baseline.ts");
-  if (!existsSync(baselineModule) || !existsSync(join(PROJECT_ROOT, "engine/src/linter"))) return [];
+async function baselineDrift(): Promise<string[]> {
+  if (!existsSync(join(PROJECT_ROOT, "engine/src/linter"))) return [];
+  const { BASELINE_OWNERS } = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/index.ts"));
+  const { staleBaselineEntries } = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/baseline.ts"));
 
-  const { SWITCH_TOTALITY_BASELINE } = await import(baselineModule);
-  const { detectedSwitchKeys, unusedBaselineEntries } = await import(
-    join(LOOM_ROOT, "engine/src/linter/programmatic/switch-totality.ts")
-  );
-
-  const baselinePaths = [...new Set((SWITCH_TOTALITY_BASELINE as readonly string[]).map((key) => key.split("::")[0]!))];
-  const detected = baselinePaths.flatMap((path) => {
+  const readSource = (path: string): string | null => {
     const absolute = join(PROJECT_ROOT, path);
-    return existsSync(absolute) ? detectedSwitchKeys(readFileSync(absolute, "utf-8"), path) : [];
-  });
-  const stale = unusedBaselineEntries(detected, SWITCH_TOTALITY_BASELINE);
-  return stale.length === 0 ? [] : [{ rule: "switch-totality", stale }];
+    return existsSync(absolute) ? readFileSync(absolute, "utf-8") : null;
+  };
+  return (BASELINE_OWNERS as readonly { rule: string; site: string }[]).flatMap((owner) =>
+    (staleBaselineEntries(owner, readSource) as readonly string[]).map((key) =>
+      `${owner.rule}: ${key} (no ${owner.site} matches it any more — delete the baseline entry)`));
 }
 
 // ---------------------------------------------------------------------------
@@ -340,14 +330,17 @@ for (const file of files) {
 
 // Drift is independent of violations: a baseline entry can be stale while the
 // tier is clean, which is exactly the case that used to go unnoticed.
-const drift = opts.baselineCheck && opts.tier === "full" ? await baselineDrift() : [];
-const driftLines = drift.flatMap((entry) =>
-  entry.stale.map((key) => `${entry.rule}: ${key} (no such switch any more — delete the baseline entry)`)
-);
+const driftLines = opts.baselineCheck && opts.tier === "full" ? await baselineDrift() : [];
+
+// ONE failure predicate for every output mode. A file the linter could not read
+// fails the run in each of them: the JSON and summary modes used to exit 0 on a
+// lint error, so a machine caller read an unlinted file as a clean one.
+const failed = allViolations.length > 0 || errorCount > 0 || driftLines.length > 0;
+const exitCode = failed ? 1 : 0;
 
 if (opts.json) {
   console.log(JSON.stringify({ violations: allViolations, errorCount, baselineDrift: driftLines }, null, 2));
-  process.exit(allViolations.length > 0 || driftLines.length > 0 ? 1 : 0);
+  process.exit(exitCode);
 }
 
 if (opts.summary) {
@@ -370,7 +363,7 @@ if (opts.summary) {
       console.log(`  ${rule}: ${count}`);
     }
   }
-  process.exit(allViolations.length > 0 || driftLines.length > 0 ? 1 : 0);
+  process.exit(exitCode);
 }
 
 // Default: full output
@@ -386,7 +379,7 @@ for (const line of driftLines) {
 
 const filesWithViolations = new Set(allViolations.map(v => v.file)).size;
 console.log("─".repeat(60));
-if (allViolations.length === 0 && errorCount === 0 && driftLines.length === 0) {
+if (!failed) {
   console.log("✓ No violations found");
 } else {
   if (allViolations.length > 0) {
@@ -399,4 +392,4 @@ if (allViolations.length === 0 && errorCount === 0 && driftLines.length === 0) {
     console.log(`⚠ ${errorCount} file(s) had lint errors`);
   }
 }
-process.exit(allViolations.length > 0 || errorCount > 0 || driftLines.length > 0 ? 1 : 0);
+process.exit(exitCode);

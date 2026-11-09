@@ -21,8 +21,10 @@ In particular:
   `references/security-lenses/`) before spawning a hunter; they carry the
   per-class attack mechanics and are the only part of the run that must not be
   re-derived.
-- one hunter, one coverage unit, one boundary. `assign` it, spawn
-  `loom:security-hunter-agent`, and `submit` its bytes. A hunter's confirmed
+- one hunter, one coverage unit, one boundary. `assign` it with `--agent
+  security-hunter-agent` (a catalog agent), spawn `loom:security-hunter-agent`
+  with the owner id `assign` printed, and `submit` its bytes — the hunter
+  settles under exactly that owner id. A hunter's confirmed
   claim must carry a sandbox receipt whose `--nonce` is the one its brief
   printed; without a receipt the claim is a lead, not a finding.
 - `verify` with ballots from a **different** catalog profile than the one that
@@ -44,14 +46,16 @@ it. Hand confirmed findings to `/review-and-fix` from there.
 ## Operations
 
 Every operation takes `--out <run-dir>`; the run directory is the whole record.
+This is a summary; the authoritative table, with every refusal, is in
+`docs/security-audit.md` (Operations).
 
 | Operation | Input | What it does |
 |-----------|-------|--------------|
 | `start` | stdin | Freeze the revision, enumerate units, select lenses, write run metadata |
-| `assign` | flags | Give a planned unit to a hunter (reassignment archives the prior attempt) |
+| `assign` | flags | Give a planned unit to a catalog agent; prints the owner id the hunter settles under |
 | `submit` | stdin | Record a hunter's candidates against its unit |
 | `merge-critic` | stdin | Fold the critic's proposed units in, deduped by canonical coverage id |
-| `verify` | stdin | Record verification ballots |
+| `verify` | stdin | Record ballots (`critical`/`advisory`) that decide `confirmed`/`needs_validation`/`rejected` at `findings` and `publish` |
 | `defer` | flags | Mark an unreachable unit with one of the four reason tokens |
 | `findings` | flags | Render the report from the validated records (read-only) |
 | `publish` | flags | Emit `security-findings.json`; refuses on any publication blocker |

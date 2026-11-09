@@ -11,72 +11,26 @@
  *           because a projection that drops the blockers reads as a green run.
  */
 
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createSecurityAuditHandler } from "../../src/handlers/helpers/security-audit";
-import { DEFAULT_SANDBOX_LIMITS, sandboxNonce, sandboxReceiptPrefix } from "../../src/core/security-sandbox";
-import { canonicalCoverageId, type CoverageRefs } from "../../src/core/security-audit-contract";
-import { nSeeds } from "../security/fixtures";
-
-type Run = Readonly<{
-  out: string;
-  stdout: () => string;
-  invoke: (args: readonly string[], stdin?: string) => Promise<{ ok: boolean; error: string | null }>;
-}>;
-
-let dirs: string[] = [];
-
-function aRun(): Run {
-  const out = mkdtempSync(join(tmpdir(), "loom-security-audit-evidence-"));
-  dirs.push(out);
-  let printed = "";
-  const handler = createSecurityAuditHandler((text) => { printed += `${text}\n`; });
-  return {
-    out,
-    stdout: () => printed,
-    invoke: async (args, stdin = "") => {
-      printed = "";
-      const result = await handler(stdin, [args[0] ?? "", "--out", out, ...args.slice(1)]);
-      return { ok: result?.kind !== "error", error: result?.kind === "error" ? String(result.message ?? "") : null };
-    },
-  };
-}
-
-const unitIdFor = (index: number): string =>
-  canonicalCoverageId(nSeeds(index + 1)[index].refs as unknown as CoverageRefs);
-
-
-/** The seed the run is started with, so a unit id and its cell cannot drift. */
-const seed = (): Record<string, unknown> => nSeeds(1)[0];
+import { afterEach, describe, expect, it } from "vitest";
+import { sandboxNonce, sandboxReceiptPrefix } from "../../src/core/security-sandbox";
+import { aSandboxReceipt } from "../security/sandbox-fixtures";
+import { aRun, removeRuns, seedFor, unitIdFor, writeArtifact, type Invocation, type Run } from "./security-audit-harness";
 
 const start = async (run: Run, extra: readonly string[] = []): Promise<void> => {
   const started = await run.invoke(
     ["start", "--repo", run.out, "--source", "0".repeat(40), "--profile", "standard", "--budget", "12", ...extra],
-    JSON.stringify({ units: [seed()], signals: { languages: ["typescript"], servesHttp: true } }),
+    JSON.stringify({ units: [seedFor(0)], signals: { languages: ["typescript"], servesHttp: true } }),
   );
   expect(started.error).toBeNull();
 };
 
 /** A receipt is bound to the artifact path the ledger names — the same
  *  derivation the handler performs, because a receipt the engine cannot bind is
- *  not evidence. */
+ *  not evidence. The body is the script's own shape (`aSandboxReceipt`). */
 const receiptFor = (artifact: string, overrides: Record<string, unknown> = {}): string =>
-  `${sandboxReceiptPrefix(sandboxNonce(artifact))}${JSON.stringify({
-    schemaVersion: 1,
-    exit: 0,
-    limits: { ...DEFAULT_SANDBOX_LIMITS },
-    allowlistedEnv: ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TERM"],
-    scratchBytes: 512,
-    networkNamespace: true,
-    targetReadOnly: true,
-    readOnlyRoot: false,
-    homeReadOnly: true,
-    unremountedMounts: 0,
-    enforced: { cpu: true, memory: true, processes: true, fileSize: true },
-    ...overrides,
-  })}`;
+  `${sandboxReceiptPrefix(sandboxNonce(artifact))}${aSandboxReceipt(overrides)}\n`;
 
 const aLocalCheck = (artifact: string): Record<string, unknown> => ({
   agent_id: "security-hunter-agent",
@@ -87,7 +41,7 @@ const aLocalCheck = (artifact: string): Record<string, unknown> => ({
   artifact,
 });
 
-const submitLocal = async (run: Run, artifact: string): Promise<{ ok: boolean; error: string | null }> =>
+const submitLocal = async (run: Run, artifact: string): Promise<Invocation> =>
   run.invoke(["submit"], JSON.stringify({
     units: [{
       coverageId: unitIdFor(0),
@@ -106,11 +60,7 @@ const assignOnly = async (run: Run): Promise<void> => {
   expect(assigned.error).toBeNull();
 };
 
-beforeEach(() => { dirs = []; });
-afterEach(() => {
-  for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
-  dirs = [];
-});
+afterEach(removeRuns);
 
 describe("a local check must name a receipt that proves a bounded run (INV-S1)", () => {
   it("accepts a check whose receipt is in limits", async () => {
@@ -118,11 +68,7 @@ describe("a local check must name a receipt that proves a bounded run (INV-S1)",
     await start(run);
     await assignOnly(run);
     const artifact = "agents/security-hunter-agent/artifacts/sqli.json";
-    const dir = join(run.out, "agents", "security-hunter-agent", "artifacts");
-    // mkdirSync via writeFileSync's parent creation is not available, so make it.
-    const { mkdirSync } = await import("node:fs");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(run.out, artifact), `${receiptFor(artifact)}\n`);
+    writeArtifact(run, artifact, receiptFor(artifact));
 
     expect((await submitLocal(run, artifact)).error).toBeNull();
   });
@@ -132,11 +78,9 @@ describe("a local check must name a receipt that proves a bounded run (INV-S1)",
     await start(run);
     await assignOnly(run);
     const artifact = "agents/security-hunter-agent/artifacts/elsewhere.json";
-    const { mkdirSync } = await import("node:fs");
-    mkdirSync(join(run.out, "agents", "security-hunter-agent", "artifacts"), { recursive: true });
     // A real receipt, but bound to a DIFFERENT artifact: the command that
     // produced it was not the command this check names.
-    writeFileSync(join(run.out, artifact), `${receiptFor("agents/security-hunter-agent/artifacts/stolen.json")}\n`);
+    writeArtifact(run, artifact, receiptFor("agents/security-hunter-agent/artifacts/stolen.json"));
 
     const refused = await submitLocal(run, artifact);
     expect(refused.ok).toBe(false);
@@ -149,9 +93,7 @@ describe("a local check must name a receipt that proves a bounded run (INV-S1)",
     await start(run);
     await assignOnly(run);
     const artifact = "agents/security-hunter-agent/artifacts/failed.json";
-    const { mkdirSync } = await import("node:fs");
-    mkdirSync(join(run.out, "agents", "security-hunter-agent", "artifacts"), { recursive: true });
-    writeFileSync(join(run.out, artifact), `${receiptFor(artifact, { exit: 1 })}\n`);
+    writeArtifact(run, artifact, receiptFor(artifact, { exit: 1 }));
 
     const refused = await submitLocal(run, artifact);
     expect(refused.ok).toBe(false);
@@ -163,24 +105,22 @@ describe("a local check must name a receipt that proves a bounded run (INV-S1)",
     const run = aRun();
     await start(run);
     await assignOnly(run);
-    const { mkdirSync } = await import("node:fs");
-    mkdirSync(join(run.out, "agents", "security-hunter-agent", "artifacts"), { recursive: true });
 
     const unenforced = "agents/security-hunter-agent/artifacts/unenforced.json";
-    writeFileSync(join(run.out, unenforced), `${receiptFor(unenforced, { enforced: { cpu: false, memory: true, processes: true, fileSize: true } })}\n`);
+    writeArtifact(run, unenforced, receiptFor(unenforced, { enforced: { cpu: false, memory: true, processes: true, fileSize: true } }));
     const first = await submitLocal(run, unenforced);
     expect(first.ok).toBe(false);
     expect(first.error).toContain("cpu limit not applied");
 
     // A receipt whose home directory stayed writable is not a bounded run.
     const openHome = "agents/security-hunter-agent/artifacts/open-home.json";
-    writeFileSync(join(run.out, openHome), `${receiptFor(openHome, { homeReadOnly: false })}\n`);
+    writeArtifact(run, openHome, receiptFor(openHome, { homeReadOnly: false }));
     const openHomeResult = await submitLocal(run, openHome);
     expect(openHomeResult.ok).toBe(false);
     expect(openHomeResult.error).toContain("home directory not remounted read-only");
 
     const prose = "agents/security-hunter-agent/artifacts/prose.md";
-    writeFileSync(join(run.out, prose), "I ran it locally and it worked.\n");
+    writeArtifact(run, prose, "I ran it locally and it worked.\n");
     const second = await submitLocal(run, prose);
     expect(second.ok).toBe(false);
     expect(second.error).toContain("is not a sandbox receipt");
@@ -188,6 +128,19 @@ describe("a local check must name a receipt that proves a bounded run (INV-S1)",
     // A missing receipt file is a refusal, not a pass.
     const missing = await submitLocal(run, "agents/security-hunter-agent/artifacts/absent.json");
     expect(missing.ok).toBe(false);
+  });
+
+  it("refuses a receipt whose environment is not exactly the script's allowlist", async () => {
+    const run = aRun();
+    await start(run);
+    await assignOnly(run);
+    // `LC_ALL` is not in what `env -i` hands the child, so a receipt naming it
+    // was not written by the script.
+    const artifact = "agents/security-hunter-agent/artifacts/lc-all.json";
+    writeArtifact(run, artifact, receiptFor(artifact, { allowlistedEnv: ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TERM"] }));
+    const refused = await submitLocal(run, artifact);
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain("allowlistedEnv must be exactly");
   });
 });
 
@@ -202,7 +155,7 @@ describe("--force starts a new run (INV-S2b)", () => {
 
     const restarted = await run.invoke(
       ["start", "--repo", run.out, "--source", "0".repeat(40), "--profile", "standard", "--force"],
-      JSON.stringify({ units: [seed()], signals: { languages: ["typescript"] } }),
+      JSON.stringify({ units: [seedFor(0)], signals: { languages: ["typescript"] } }),
     );
     expect(restarted.error).toBeNull();
 
@@ -218,7 +171,7 @@ describe("--force starts a new run (INV-S2b)", () => {
     await start(run);
     const again = await run.invoke(
       ["start", "--repo", run.out, "--source", "0".repeat(40), "--profile", "standard"],
-      JSON.stringify({ units: [seed()], signals: { languages: ["typescript"] } }),
+      JSON.stringify({ units: [seedFor(0)], signals: { languages: ["typescript"] } }),
     );
     expect(again.ok).toBe(false);
     expect(again.error).toContain("--force");

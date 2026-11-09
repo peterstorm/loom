@@ -13,62 +13,23 @@
  * would not exercise the thing that breaks in production.
  */
 
-import { mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createSecurityAuditHandler } from "../../src/handlers/helpers/security-audit";
 import { parseStandaloneDispositionStartInput } from "../../src/core/standalone-disposition-machine";
 import { piRuntimeHandshakeRequired, routeConsumesStdin } from "../../src/handler-routes";
 import { SECURITY_AUDIT_OPERATIONS, SECURITY_AUDIT_OPERATION_ORDER, parseSecurityAuditOperation, securityAuditOperationWrites } from "../../src/handlers/helpers/security-audit-operations";
-import {
-  SECURITY_AUDIT_LIMITS,
-  canonicalCoverageId,
-  type SecurityRunMetadata,
-} from "../../src/core/security-audit-contract";
+import { SECURITY_AUDIT_LIMITS, type SecurityRunMetadata } from "../../src/core/security-audit-contract";
 import type { CoverageUnit } from "../../src/core/security-coverage";
 import type { SecurityFinding } from "../../src/core/security-findings";
 import type { VerificationVerdict } from "../../src/core/security-adjudication";
 import { aConfirmedFinding, aHunterBallot, aNeedsValidationFinding, aSeed, aUnitResult, aVerdict, nSeeds } from "../security/fixtures";
+import { aRun, readJson, removeRuns, seedFor, unitIdFor, type Run } from "./security-audit-harness";
 
-type Run = Readonly<{ out: string; stdout: () => string; invoke: (args: readonly string[], stdin?: string) => Promise<{ ok: boolean; error: string | null }> }>;
-
-let dirs: string[] = [];
-
-function aRun(): Run {
-  const out = mkdtempSync(join(tmpdir(), "loom-security-audit-"));
-  dirs.push(out);
-  let printed = "";
-  const handler = createSecurityAuditHandler((text) => { printed += `${text}\n`; });
-  return {
-    out,
-    stdout: () => printed,
-    invoke: async (args, stdin = "") => {
-      // Each invocation starts a fresh buffer: these tests assert on ONE
-      // command's output, never on the accumulated transcript.
-      printed = "";
-      const result = await handler(stdin, [args[0] ?? "", "--out", out, ...args.slice(1)]);
-      return { ok: result?.kind !== "error", error: result?.kind === "error" ? String(result.message ?? "") : null };
-    },
-  };
-}
-
-const readJson = <T>(out: string, file: string): T => JSON.parse(readFileSync(join(out, file), "utf8")) as T;
-
-/** The unit ids and their canonical refs are derived from the same seed list a
- *  `start` call receives, so a test names a unit by its coordinate tuple. */
-const seedFor = (index: number) => nSeeds(index + 1)[index];
-const unitIdFor = (index: number): string => {
-  const seed = seedFor(index);
-  return canonicalCoverageId(seed.refs as Parameters<typeof canonicalCoverageId>[0]);
-};
-
-beforeEach(() => { dirs = []; });
-afterEach(() => {
-  for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
-  dirs = [];
-});
+afterEach(removeRuns);
 
 describe("the operation set", () => {
   it("declares every operation exactly once, in order", () => {
@@ -81,6 +42,12 @@ describe("the operation set", () => {
     expect(parseSecurityAuditOperation("publish-all")).toBeNull();
     expect(parseSecurityAuditOperation(undefined)).toBeNull();
     expect(parseSecurityAuditOperation("status")).toBe("status");
+  });
+
+  it("prints its usage from the declared order, so the help and the table cannot drift", async () => {
+    const refused = await aRun().invoke(["publish-all"]);
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain(`<${SECURITY_AUDIT_OPERATION_ORDER.join("|")}>`);
   });
 
   it("gates every operation that writes the run behind the handshake", () => {
@@ -561,5 +528,324 @@ describe("the disposition handoff", () => {
     await run.invoke(["publish"]);
     await run.invoke(["disposition"]);
     expect((JSON.parse(readFileSync(join(run.out, "disposition.json"), "utf8")) as { source: { resultDigest: string } }).source.resultDigest).toBe(digest);
+  });
+});
+
+// --- Reads never create, and a published run is closed ---
+
+describe("a read-only projection over a run directory that does not exist", () => {
+  it.each(["status", "findings"] as const)("%s errors and creates nothing", async (operation) => {
+    const parent = mkdtempSync(join(tmpdir(), "loom-security-audit-missing-"));
+    try {
+      const out = join(parent, "mistyped-run");
+      const handler = createSecurityAuditHandler(() => undefined);
+      const result = await handler("", [operation, "--out", out]);
+      expect(result?.kind).toBe("error");
+      expect(existsSync(out)).toBe(false);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+});
+
+const STARTED = ["start", "--source", "0".repeat(40), "--profile", "standard"] as const;
+const startOne = async (run: Run): Promise<void> => {
+  expect((await run.invoke([...STARTED, "--repo", run.out], JSON.stringify({ units: [seedFor(0)] }))).error).toBeNull();
+};
+
+describe("a published run is closed", () => {
+  const publishARun = async (run: Run): Promise<void> => {
+    await startOne(run);
+    await run.invoke(["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"]);
+    await run.invoke(["submit"], JSON.stringify({
+      units: [aUnitResult({ coverageId: unitIdFor(0), status: "candidate", fingerprints: ["api/login:sqli-email"] })],
+      findings: [aConfirmedFinding()],
+    }));
+    await run.invoke(["verify"], JSON.stringify({ verdicts: [aVerdict()] }));
+    expect((await run.invoke(["publish"])).error).toBeNull();
+  };
+
+  it.each([
+    ["assign", ["assign", "--unit", "any", "--agent", "security-hunter-agent"], ""],
+    ["submit", ["submit"], JSON.stringify({ findings: [aNeedsValidationFinding()] })],
+    ["defer", ["defer", "--reason", "late cut"], ""],
+    ["merge-critic", ["merge-critic"], JSON.stringify({
+      schemaVersion: 1, kind: "security-coverage-critic", missingUnits: [], reassignIds: [], resolvedPriorLeads: [], stop: true,
+    })],
+    ["verify", ["verify"], JSON.stringify({ verdicts: [aVerdict({ wave: 3 })] })],
+  ] as const)("refuses %s, naming the published run and the way forward", async (_operation, args, stdin) => {
+    const run = aRun();
+    await publishARun(run);
+    const before = ["ledger.json", "findings.json", "verdicts.json"].map((file) => readFileSync(join(run.out, file), "utf8"));
+    const refused = await run.invoke([...args], stdin);
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain("is published");
+    expect(refused.error).toContain("start --force");
+    // Nothing moved: the committed records still describe the run beside them.
+    expect(["ledger.json", "findings.json", "verdicts.json"].map((file) => readFileSync(join(run.out, file), "utf8"))).toEqual(before);
+  });
+
+  it("still re-derives its own projections and disposition", async () => {
+    const run = aRun();
+    await publishARun(run);
+    expect((await run.invoke(["status"])).error).toBeNull();
+    expect((await run.invoke(["findings"])).error).toBeNull();
+    expect((await run.invoke(["disposition"])).error).toBeNull();
+  });
+});
+
+describe("status derives the run's status from the ledger", () => {
+  it("reports a settled, deferred run as incomplete although run.json still says in_progress", async () => {
+    const run = aRun();
+    await startOne(run);
+    expect((await run.invoke(["defer", "--reason", "critic_budget_exhausted"])).error).toBeNull();
+    // `run.json` is only rewritten by start and publish, so its copy is stale.
+    expect(readJson<SecurityRunMetadata>(run.out, "run.json").runStatus).toBe("in_progress");
+
+    expect((await run.invoke(["status", "--json"])).error).toBeNull();
+    const report = JSON.parse(run.stdout()) as { runStatus: string; incompleteReason: string | null };
+    expect(report.runStatus).toBe("incomplete");
+    expect(report.incompleteReason).toBe("critic_budget_exhausted");
+  });
+});
+
+// --- The start payload is parsed, not coerced ---
+
+describe("start payload", () => {
+  const startWith = (run: Run, payload: Record<string, unknown>) =>
+    run.invoke([...STARTED, "--repo", run.out], JSON.stringify(payload));
+
+  it.each([
+    ["no units", { signals: {} }, "units: start input requires a `units` array"],
+    ["an unknown top-level key", { units: [seedFor(0)], scopes: { kind: "tree" } }, "$.scopes: unknown field"],
+    ["an unknown scope kind", { units: [seedFor(0)], scope: { kind: "branch" } }, "scope.kind: expected tree or diff"],
+    ["a scope that is not an object", { units: [seedFor(0)], scope: "diff" }, "scope: expected an object"],
+    ["an unknown scope key", { units: [seedFor(0)], scope: { kind: "diff", base: "x" } }, "scope.base: unknown field"],
+    ["a mistyped ref", { units: [seedFor(0)], scope: { kind: "diff", baseRef: 7 } }, "scope.baseRef: expected a string or null"],
+    ["signals that are not an object", { units: [seedFor(0)], signals: ["ts"] }, "signals: expected an object of stack signals"],
+    ["an unknown signal", { units: [seedFor(0)], signals: { servesHTTP: true } }, "signals.servesHTTP: unknown field"],
+    ["a mistyped boolean signal", { units: [seedFor(0)], signals: { servesHttp: "yes" } }, "signals.servesHttp: expected a boolean"],
+    ["a mistyped list signal", { units: [seedFor(0)], signals: { languages: "ts" } }, "signals.languages: expected an array of strings"],
+  ])("refuses %s, naming the field", async (_case, payload, expected) => {
+    const run = aRun();
+    const refused = await startWith(run, payload);
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain(expected);
+    // A refused start leaves no run behind.
+    expect(existsSync(join(run.out, "run.json"))).toBe(false);
+  });
+
+  it("refuses a payload that is not JSON or not an object", async () => {
+    const run = aRun();
+    expect((await run.invoke([...STARTED, "--repo", run.out], "{nope")).error).toContain("start input is not valid JSON");
+    expect((await run.invoke([...STARTED, "--repo", run.out], "[]")).error).toContain("start input must be an object");
+  });
+
+  it("records an explicit diff scope and defaults absent signals to none", async () => {
+    const run = aRun();
+    const base = "a".repeat(40);
+    const head = "b".repeat(40);
+    expect((await startWith(run, { units: [seedFor(0)], scope: { kind: "diff", baseRef: base, headRef: head } })).error).toBeNull();
+    const metadata = readJson<SecurityRunMetadata>(run.out, "run.json");
+    expect(metadata.scope).toEqual({ paths: ["src/subsystem-0/entry.ts"], kind: "diff", baseRef: base, headRef: head });
+    // No signals: only the always-included base lens.
+    expect(metadata.selectedCompanions).toEqual(["ATTACK-CLASSES.md"]);
+  });
+});
+
+// --- merge-critic ---
+
+const aCritic = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+  schemaVersion: 1,
+  kind: "security-coverage-critic",
+  missingUnits: [],
+  reassignIds: [],
+  resolvedPriorLeads: [],
+  stop: false,
+  ...overrides,
+});
+
+/** The critic's proposal for the cell `seedFor(index)` describes. */
+const aProposal = (index: number): Record<string, unknown> => {
+  const seed = seedFor(index);
+  return {
+    refs: seed.refs,
+    startingPaths: seed.starting_paths,
+    ordinaryAttackClassBlock: seed.ordinary_attack_class_block,
+    selectedCompanionBlocks: seed.selected_companion_blocks,
+    excludedBlocks: [],
+  };
+};
+
+/** A one-unit run whose unit has settled, so the critic may reassign it. */
+const settledRun = async (unit: Record<string, unknown> = {}): Promise<Run> => {
+  const run = aRun();
+  await startOne(run);
+  expect((await run.invoke(["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent"])).error).toBeNull();
+  expect((await run.invoke(["submit"], JSON.stringify({ units: [aUnitResult({ coverageId: unitIdFor(0), ...unit })] }))).error).toBeNull();
+  return run;
+};
+
+describe("merge-critic", () => {
+  it("accepts a bare critic document and seeds its proposals at the run's latest wave", async () => {
+    const run = await settledRun();
+    const merged = await run.invoke(["merge-critic"], JSON.stringify(aCritic({ missingUnits: [aProposal(1)] })));
+    expect(merged.error).toBeNull();
+    expect(run.stdout()).toContain("accepted 1 unit(s)");
+    expect(run.stdout()).toContain("reassigned 0");
+    expect(run.stdout()).toContain("resolved 0 prior lead(s)");
+    expect(run.stdout()).toContain("critic stop: false");
+    const added = readJson<CoverageUnit[]>(run.out, "ledger.json").find((unit) => unit.coverage_id === unitIdFor(1));
+    expect(added?.status).toBe("planned");
+    expect(added?.wave).toBe(1);
+  });
+
+  it("accepts a wrapped critic and archives the reassigned attempt under the critic's reason", async () => {
+    const run = await settledRun();
+    const reason = "The first pass never read the admin route.";
+    const merged = await run.invoke(["merge-critic", "--wave", "1"], JSON.stringify({
+      critic: aCritic({ reassignIds: [unitIdFor(0)] }),
+      reassignmentReasons: { [unitIdFor(0)]: reason },
+    }));
+    expect(merged.error).toBeNull();
+    expect(run.stdout()).toContain("reassigned 1");
+    const [unit] = readJson<CoverageUnit[]>(run.out, "ledger.json");
+    expect(unit!.status).toBe("planned");
+    expect(unit!.wave).toBe(2);
+    expect(unit!.attempts).toHaveLength(1);
+    expect(unit!.attempts[0]!.reassignment_reason).toBe(reason);
+    expect(unit!.attempts[0]!.agent_id).toBe("security-hunter-agent");
+  });
+
+  it("resolves a prior lead on the unit that carries it", async () => {
+    const run = await settledRun({ status: "candidate", fingerprints: ["api/login:sqli-email"], unresolved: ["lead:admin-export"] });
+    const merged = await run.invoke(["merge-critic"], JSON.stringify({
+      critic: aCritic({ resolvedPriorLeads: ["lead:admin-export"] }),
+      priorLeadOwners: { "lead:admin-export": unitIdFor(0) },
+    }));
+    expect(merged.error).toBeNull();
+    expect(run.stdout()).toContain("resolved 1 prior lead(s)");
+    expect(readJson<CoverageUnit[]>(run.out, "ledger.json")[0]!.unresolved).toEqual([]);
+  });
+
+  it("refuses a malformed critic document, naming the field", async () => {
+    const run = await settledRun();
+    const refused = await run.invoke(["merge-critic"], JSON.stringify({ critic: aCritic({ missingUnit: [] }) }));
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain("critic.missingUnit: unknown field");
+  });
+
+  it.each([
+    ["reasons that are not an object", { reassignmentReasons: ["why"] }, "reassignmentReasons: expected an object of string values"],
+    ["a reason that is not a string", { reassignmentReasons: { [unitIdFor(0)]: 7 } }, `reassignmentReasons.${unitIdFor(0)}: expected a string`],
+    ["owners that are not an object", { priorLeadOwners: "unit" }, "priorLeadOwners: expected an object of string values"],
+    ["a wrapper key the merge does not read", { reasons: {} }, "reasons: unknown field"],
+  ])("refuses %s instead of dropping it", async (_case, extra, expected) => {
+    const run = await settledRun();
+    const before = readFileSync(join(run.out, "ledger.json"), "utf8");
+    const refused = await run.invoke(["merge-critic"], JSON.stringify({ critic: aCritic({ reassignIds: [unitIdFor(0)] }), ...extra }));
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain(expected);
+    expect(readFileSync(join(run.out, "ledger.json"), "utf8")).toBe(before);
+  });
+});
+
+// --- A reassigned unit is re-hunted under a fresh owner and still publishes ---
+
+describe("a reassigned unit, end to end", () => {
+  it("re-hunts under the minted owner and publishes with an independent ballot", async () => {
+    const run = await settledRun();
+    expect((await run.invoke(["merge-critic"], JSON.stringify({
+      critic: aCritic({ reassignIds: [unitIdFor(0)] }),
+      reassignmentReasons: { [unitIdFor(0)]: "The first pass never read the admin route." },
+    }))).error).toBeNull();
+
+    // The catalog agent is named again; the ledger mints the fresh owner.
+    expect((await run.invoke(["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent"])).error).toBeNull();
+    expect(run.stdout()).toContain(`assigned ${unitIdFor(0)} to owner security-hunter-agent--2 at wave 2`);
+
+    const owner = "security-hunter-agent--2";
+    const settled = await run.invoke(["submit"], JSON.stringify({
+      units: [aUnitResult({
+        coverageId: unitIdFor(0),
+        agentId: owner,
+        wave: 2,
+        status: "candidate",
+        fingerprints: ["api/login:sqli-email"],
+        checks: [{
+          agent_id: owner,
+          reviewed_paths: ["src/api/login.ts"],
+          invariant: "Every request field reaches the query as a bound parameter.",
+          method: "source",
+          result: "The `email` field is interpolated into the query string.",
+          artifact: null,
+        }],
+      })],
+      findings: [aConfirmedFinding()],
+    }));
+    expect(settled.error).toBeNull();
+
+    expect((await run.invoke(["verify"], JSON.stringify({ verdicts: [aVerdict({ wave: 3 })] }))).error).toBeNull();
+    // The owner `security-hunter-agent--2` resolves to its catalog agent, so the
+    // run can prove the ballot came from another profile — no
+    // unresolvable-hunter refusal.
+    const published = await run.invoke(["publish"]);
+    expect(published.error).toBeNull();
+    expect(readJson<SecurityFinding[]>(run.out, "security-findings.json").map((finding) => finding.verdict)).toEqual(["confirmed"]);
+  });
+});
+
+// --- A submit retried after a failed ledger write converges ---
+
+describe("a submit whose ledger write fails", () => {
+  const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+
+  it.skipIf(isRoot)("keeps the findings, leaves the units in flight, and a retry converges", async () => {
+    const run = aRun();
+    await startOne(run);
+    await run.invoke(["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"]);
+    const payload = JSON.stringify({
+      units: [aUnitResult({ coverageId: unitIdFor(0), status: "candidate", fingerprints: ["api/login:sqli-email"] })],
+      findings: [aConfirmedFinding()],
+    });
+
+    // The ledger stays readable but refuses the write: the second of the two
+    // writes fails after the first landed.
+    const ledger = join(run.out, "ledger.json");
+    chmodSync(ledger, 0o444);
+    try {
+      const failed = await run.invoke(["submit"], payload);
+      expect(failed.ok).toBe(false);
+      expect(failed.error).toContain(`cannot write ${ledger}`);
+    } finally {
+      chmodSync(ledger, 0o644);
+    }
+    // Findings were written FIRST, so nothing filed was lost; the unit is still
+    // in flight, so the retry can still settle it.
+    expect(readJson<SecurityFinding[]>(run.out, "findings.json").map((finding) => finding.fingerprint)).toEqual(["api/login:sqli-email"]);
+    expect(readJson<CoverageUnit[]>(run.out, "ledger.json")[0]!.status).toBe("in_progress");
+
+    const retried = await run.invoke(["submit"], payload);
+    expect(retried.error).toBeNull();
+    expect(run.stdout()).toContain("run now holds 1 finding record(s)");
+    expect(run.stdout()).not.toContain("not merged");
+    expect(readJson<SecurityFinding[]>(run.out, "findings.json")).toHaveLength(1);
+    expect(readJson<CoverageUnit[]>(run.out, "ledger.json")[0]!.status).toBe("candidate");
+  });
+
+  it("names a re-filed fingerprint whose record differs, instead of dropping it silently", async () => {
+    const run = aRun();
+    await run.invoke([...STARTED, "--repo", run.out], JSON.stringify({ units: nSeeds(2) }));
+    await run.invoke(["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"]);
+    await run.invoke(["submit"], JSON.stringify({
+      units: [aUnitResult({ coverageId: unitIdFor(0), status: "candidate", fingerprints: ["api/login:sqli-email"] })],
+      findings: [aConfirmedFinding()],
+    }));
+    const refiled = await run.invoke(["submit"], JSON.stringify({ findings: [aConfirmedFinding({ title: "A different title for the same defect" })] }));
+    expect(refiled.error).toBeNull();
+    expect(run.stdout()).toContain("kept the record already filed for api/login:sqli-email");
+    expect(readJson<SecurityFinding[]>(run.out, "findings.json").map((finding) => finding.title)).toEqual([
+      "SQL injection through the login `email` field",
+    ]);
   });
 });

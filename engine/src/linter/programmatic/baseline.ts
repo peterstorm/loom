@@ -93,3 +93,37 @@ export function baselineCounter(baseline: Baseline = []): BaselineCounter {
 export function unusedBaselineEntries(detected: readonly string[], baseline: Baseline = []): readonly string[] {
   return baselineCounter(baseline).unused(detected);
 }
+
+/**
+ * A rule that keeps a grandfathered list, as the staleness pass sees it: the
+ * list, what one entry excuses, and the rule's own detector — the sites the
+ * rule would flag absent the list. `index.ts` registers every owner, so a new
+ * baselined rule joins the drift report by being registered, not by someone
+ * remembering to extend a script.
+ */
+export type BaselineOwner = Readonly<{
+  rule: string;
+  baseline: Baseline;
+  /** What one entry excuses, in the rule's own words (`unproven switch`). */
+  site: string;
+  detect: (content: string, filePath: string) => readonly string[];
+}>;
+
+/**
+ * The entries of one owner's baseline that no live site consumes. The walk is
+ * over the BASELINE'S OWN paths, not over whatever a lint invocation scanned: a
+ * targeted run must not call every other entry stale. An entry whose file is
+ * gone (`readSource` answers null) contributes no sites and is reported, which
+ * is the drift this pass exists to catch.
+ */
+export function staleBaselineEntries(
+  owner: BaselineOwner,
+  readSource: (repoRelativePath: string) => string | null,
+): readonly string[] {
+  const paths = [...new Set(owner.baseline.map((key) => key.slice(0, key.indexOf("::"))))];
+  const detected = paths.flatMap((path) => {
+    const content = readSource(path);
+    return content === null ? [] : owner.detect(content, path);
+  });
+  return unusedBaselineEntries(detected, owner.baseline);
+}

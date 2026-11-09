@@ -22,6 +22,36 @@ import { z } from "zod/v4";
 import { match } from "ts-pattern";
 import { compareStrings } from "./ordering";
 import { failure, success, type DomainResult } from "./orchestration-contract/identity";
+import { isRecord } from "./plain-record";
+
+// --- Wire parsing kit ---
+
+/** One named defect in a wire document: where it is, and what is wrong there.
+ *  The ledger, findings and critic parsers all report in this shape, so a
+ *  diagnostic reads the same whichever volume refused the document. */
+export type WireViolation = Readonly<{ path: string; message: string }>;
+
+export const wireViolation = (path: string, message: string): WireViolation => ({ path, message });
+
+/** A JSON object — not `null`, not an array. Every wire parser asks this before
+ *  reading a field, so a scalar where a record belongs is a violation rather than
+ *  a property read on a primitive. */
+export const isWireRecord = (value: unknown): value is Readonly<Record<string, unknown>> => isRecord(value);
+
+/**
+ * An optional list of strings. Absent is an empty list; present-but-malformed
+ * (`"a"`, `[1]`, `{}`) is a named violation and an empty list — never a silent
+ * empty list, because a dropped exclusion or fingerprint shrinks the truth the
+ * record claims while the document still parses.
+ */
+export function wireStringList(value: unknown, path: string, violations: WireViolation[]): readonly string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.every((item): item is string => typeof item === "string")) {
+    violations.push(wireViolation(path, "expected an array of strings"));
+    return [];
+  }
+  return [...value];
+}
 
 // --- Limits ---
 
@@ -346,7 +376,10 @@ const RECONNAISSANCE_CALLS = 4;
 export type WaveAdmission = Readonly<{
   /** How many hunters this wave may launch. */
   hunterAssignments: number;
-  /** Invocations left after the wave, its critic and the validation reserve. */
+  /** Invocations left after this wave's hunters, measured from the unspent
+   *  budget. The critic and validation `reserved` invocations are still INSIDE
+   *  this number — admission guarantees `remaining >= reserved`, it does not
+   *  spend the reserve. */
   remaining: number;
   /** Invocations the profile requires beyond the hunters. */
   reserved: number;
@@ -454,17 +487,18 @@ export const PRIOR_STATUSES = [
 ] as const;
 export type PriorStatus = (typeof PRIOR_STATUSES)[number];
 
-/** What a prior record was, and whether its relevant source is still current. */
-export type PriorRecordFacts = Readonly<{
-  verdict: "confirmed" | "needs_validation" | "rejected" | "covered" | "deferred" | "blocked" | "out_of_scope";
-  /** `true`/`false` when the current source was compared; `unknown` when it was not. */
-  sourceUnchanged: boolean | null;
-}>;
-
 /** The verdict tags of the carry table, as runtime data. */
 export const PRIOR_RECORD_VERDICTS = [
   "confirmed", "needs_validation", "rejected", "covered", "deferred", "blocked", "out_of_scope",
 ] as const;
+export type PriorRecordVerdict = (typeof PRIOR_RECORD_VERDICTS)[number];
+
+/** What a prior record was, and whether its relevant source is still current. */
+export type PriorRecordFacts = Readonly<{
+  verdict: PriorRecordVerdict;
+  /** `true`/`false` when the current source was compared; `unknown` when it was not. */
+  sourceUnchanged: boolean | null;
+}>;
 const PRIOR_FACTS_KEYS: readonly string[] = ["verdict", "sourceUnchanged"];
 
 /**

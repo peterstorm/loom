@@ -20,29 +20,12 @@ import {
   standaloneDispositionStart,
 } from "../../src/core/security-disposition";
 import { parseStandaloneDispositionStartInput } from "../../src/core/standalone-disposition-machine";
-import type { SecurityRunMetadata } from "../../src/core/security-audit-contract";
 import { parseSecurityFindings, type SecurityFinding } from "../../src/core/security-findings";
 import { renderReport } from "../../src/core/security-reports";
 import { parseCoverageSeeds } from "../../src/core/security-coverage";
-import { aConfirmedFinding, aNeedsValidationFinding, aRejectedFinding, aSeed } from "../security/fixtures";
+import { aConfirmedFinding, aNeedsValidationFinding, aRejectedFinding, aRunMetadata, aSeed } from "../security/fixtures";
 
-const METADATA: SecurityRunMetadata = {
-  schemaVersion: 1,
-  runId: "audit-1",
-  repo: "/repo",
-  target: "/repo",
-  profile: "standard",
-  scope: { paths: ["src/api/login.ts"], kind: "tree", baseRef: null, headRef: null },
-  scopePaths: ["src/api/login.ts"],
-  sourceRef: { commit: "0".repeat(40), worktreeDirty: false },
-  budget: 12,
-  executionPolicy: "sandboxed-source-and-local-only",
-  selectedCompanions: ["WEB-PROTOCOL-AND-AUTH.md"],
-  priorRuns: [],
-  runStatus: "complete",
-  incompleteReason: null,
-  published: false,
-};
+const METADATA = aRunMetadata({ budget: 12, selectedCompanions: ["WEB-PROTOCOL-AND-AUTH.md"] });
 
 const parse = (raw: readonly unknown[]): readonly SecurityFinding[] => {
   const parsed = parseSecurityFindings(raw);
@@ -105,6 +88,19 @@ describe("the decision set", () => {
     expect(securityFindingOrigin("audit-1", before)).not.toBe(securityFindingOrigin("audit-1", after));
     // …and a different origin when the same record belongs to another run.
     expect(securityFindingOrigin("audit-1", before)).not.toBe(securityFindingOrigin("audit-2", before));
+  });
+
+  it("digests exactly the four fields of each entry, in fingerprint order", () => {
+    const disposition = securityDisposition({ metadata: METADATA, locator: "/out", findings: findings() });
+    if (!disposition.ok) throw new Error("expected a disposition set");
+    // The digest is over the entries as published — the same bytes a field-by-
+    // field projection of them gives, so a re-derivation by a consumer agrees.
+    expect(disposition.value.source.resultDigest).toBe(canonicalDigest(disposition.value.entries.map((entry) => ({
+      origin: entry.origin,
+      fingerprint: entry.fingerprint,
+      decision: entry.decision,
+      reason: entry.reason,
+    }))));
   });
 
   it("changes the result digest when a decision changes", () => {

@@ -522,7 +522,9 @@ function standaloneReviewerRetrySmoke(): void {
   check(retry.authority.attempt === 2, "rejected reviewer slot did not advance to attempt 2");
   check(retry.task.includes("rejected by the engine's admission check"),
     "retry task lacks the rejection diagnostic");
-  check(retry.task.includes("finding location is outside the frozen scope"),
+  // The engine names the offending finding and its path (review-output.ts), so
+  // the retry quotes exactly that — the reviewer can see which finding to move.
+  check(retry.task.includes("findings[0].file is outside the frozen review scope: src/outside.ts"),
     "retry task must quote the engine's own diagnostic, not a generic reminder");
 
   // Regression: the diagnostic used to live only in the pass-local rejected set,

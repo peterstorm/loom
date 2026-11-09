@@ -248,7 +248,8 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // archive name; `helper complete-orchestration` applies it under the lock.
   "engine/src/core/orchestration-completion.ts",
   // Security audit (ADR-0064): the contract (limits, grammars, admission, carry
-  // rules), the coverage ledger, the finding trichotomy, lens selection, the
+  // rules), the start-payload parser and run derivation, the coverage ledger,
+  // the finding trichotomy, lens selection, the
   // deterministic renderers, the sandbox receipt parser and the verification
   // adjudicator. The machine core's closure reaches them — machine/types.ts and
   // evidence.ts mint the sandbox receipt through security-sandbox — and every
@@ -256,6 +257,7 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // The sandbox SCRIPT is the I/O (scripts/security-sandbox.sh);
   // security-sandbox.ts only parses its receipt.
   "engine/src/core/security-audit-contract.ts",
+  "engine/src/core/security-audit-start.ts",
   "engine/src/core/security-coverage.ts",
   "engine/src/core/security-findings.ts",
   "engine/src/core/security-lens-select.ts",

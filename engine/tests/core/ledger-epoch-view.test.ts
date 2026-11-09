@@ -19,6 +19,7 @@ import { judgeRedThenGreen } from "../../src/core/red-then-green";
 import { epochOf, eventsForEpoch, parseEvidenceLine } from "../../src/machine/evidence";
 import type { Epoch, EvidenceRecord } from "../../src/machine/types";
 import { agentIdOf, agentTypeOf, sessionIdOf } from "../fixtures/machine-identities";
+import { aSandboxReceipt } from "../security/sandbox-fixtures";
 
 // --- Fixtures, through the production parsers ---
 
@@ -43,6 +44,9 @@ const testRun = (epoch: Epoch, command: string, exit: number | null, report: unk
     event: { kind: "TestRun", command, ...(exit === null ? {} : { exit }), ...(report === null ? {} : { report }) },
     ...(callId === undefined ? {} : { callId }),
   });
+/** A SandboxRun fact holding the script's receipt shape, with the named facts changed. */
+const sandboxRun = (epoch: Epoch, overrides: Record<string, unknown> = {}) =>
+  record({ epoch, event: { kind: "SandboxRun", receipt: JSON.parse(aSandboxReceipt(overrides)) } });
 
 type FileFixture = Readonly<{ file: string; executed: number; failed: number; skipped: number; collectionError: boolean }>;
 const recordedReport = (source: "junit-xml" | "vitest-json", results: readonly FileFixture[]) => ({
@@ -214,6 +218,58 @@ describe("renderEpoch", () => {
   });
 });
 
+// --- SandboxRun facts ---
+
+describe("renderEpoch: SandboxRun", () => {
+  it("a bounded run states the gate's verdict and every receipt fact", () => {
+    expect(renderEpoch([sandboxRun(IMPL)], IMPL).slice(1)).toEqual([
+      "#0 SandboxRun exit 0",
+      "    within limits",
+      "    limits cpu 10s, address space 1024MB, processes 128, file 32MB, wall 60s, scratch 64MB",
+      "    enforced cpu yes, memory yes, processes yes, file size yes",
+      "    scratch 12B after the run; env PATH,HOME,TMPDIR,LANG,TERM",
+      "    network namespace; target read-only; home read-only yes; root read-only no; unremounted mounts 0",
+    ]);
+  });
+
+  it("a run with no exit and an unmeasured scratch says both, and is not within limits", () => {
+    expect(renderEpoch([sandboxRun(IMPL, { exit: null, scratchBytes: null })], IMPL).slice(1)).toEqual([
+      "#0 SandboxRun exit none recorded",
+      "    NOT within limits: exit null; scratch footprint unmeasured",
+      "    limits cpu 10s, address space 1024MB, processes 128, file 32MB, wall 60s, scratch 64MB",
+      "    enforced cpu yes, memory yes, processes yes, file size yes",
+      "    scratch unmeasured after the run; env PATH,HOME,TMPDIR,LANG,TERM",
+      "    network namespace; target read-only; home read-only yes; root read-only no; unremounted mounts 0",
+    ]);
+  });
+
+  it("a claimed-but-unbounded run names what was not enforced and the open home", () => {
+    const lines = renderEpoch([
+      sandboxRun(IMPL, {
+        homeReadOnly: false,
+        readOnlyRoot: true,
+        unremountedMounts: 4,
+        enforced: { cpu: true, memory: false, processes: true, fileSize: false },
+      }),
+    ], IMPL);
+    expect(lines.slice(1)).toEqual([
+      "#0 SandboxRun exit 0",
+      "    NOT within limits: memory limit not applied; file-size limit not applied; home directory not remounted read-only",
+      "    limits cpu 10s, address space 1024MB, processes 128, file 32MB, wall 60s, scratch 64MB",
+      "    enforced cpu yes, memory no, processes yes, file size no",
+      "    scratch 12B after the run; env PATH,HOME,TMPDIR,LANG,TERM",
+      "    network namespace; target read-only; home read-only no; root read-only yes; unremounted mounts 4",
+    ]);
+  });
+
+  it("residual exposure is reported but does not unbound a run", () => {
+    const lines = renderEpoch([sandboxRun(IMPL, { readOnlyRoot: false, unremountedMounts: 9 })], IMPL);
+    expect(lines[2]).toBe("    within limits");
+    expect(lines.at(-1)).toBe("    network namespace; target read-only; home read-only yes; root read-only no; unremounted mounts 9");
+  });
+});
+
+
 // --- Settlement agreement (AS-001, SC-002) ---
 
 describe("positions agree with I6 settlement", () => {
@@ -339,6 +395,17 @@ const rawRecordArb = fc.record({
     fc.record({ kind: fc.constant("FileRead"), path: fc.string({ minLength: 1 }) }),
     fc.record({ kind: fc.constant("FileWrite"), path: fc.string({ minLength: 1 }), via: fc.constantFrom("tool", "shell", "other") }),
     fc.record({ kind: fc.constant("TestRun"), command: fc.string(), exit: fc.option(fc.integer(), { nil: undefined }), report: reportArb }),
+    fc.record({
+      kind: fc.constant("SandboxRun"),
+      receipt: fc.record({
+        exit: fc.option(fc.integer({ min: 0, max: 255 }), { nil: null }),
+        scratchBytes: fc.option(fc.nat(), { nil: null }),
+        homeReadOnly: fc.boolean(),
+        readOnlyRoot: fc.boolean(),
+        unremountedMounts: fc.nat(20),
+        enforced: fc.record({ cpu: fc.boolean(), memory: fc.boolean(), processes: fc.boolean(), fileSize: fc.boolean() }),
+      }).map((overrides) => JSON.parse(aSandboxReceipt(overrides)) as unknown),
+    }),
   ),
 });
 

@@ -22,11 +22,15 @@ import {
   canonicalCoverageId,
   carryAction,
   derivePriorStatus,
+  encodeCanonicalRef,
+  isWireRecord,
   parseSecurityRunMetadata,
+  wireStringList,
+  wireViolation,
   type PriorRecordFacts,
-  type SecurityProfile,
+  type WireViolation,
 } from "../../src/core/security-audit-contract";
-import type { StackSignals } from "../../src/core/security-lens-select";
+import { aRunMetadata } from "./fixtures";
 
 const profiles = fc.constantFrom(...SECURITY_PROFILES);
 
@@ -50,6 +54,9 @@ describe("wave budget admission", () => {
           expect(hunterAssignments + reserved).toBeLessThanOrEqual(Math.max(0, budget - spent));
           expect(remaining).toBe(Math.max(0, budget - spent) - hunterAssignments);
           expect(remaining).toBeGreaterThanOrEqual(0);
+          // `remaining` still CONTAINS the reserve: admission keeps it, it does
+          // not spend it — which is what `WaveAdmission.remaining` documents.
+          expect(remaining).toBeGreaterThanOrEqual(reserved);
         },
       ),
     );
@@ -116,27 +123,25 @@ describe("prior-run carry", () => {
 });
 
 describe("run metadata", () => {
-  const valid = {
-    schemaVersion: 1,
-    runId: "audit-1",
+  const valid = aRunMetadata({
     repo: "example/app",
     target: "/tmp/example",
-    profile: "standard" as SecurityProfile,
     scope: { paths: ["src/app.ts"], kind: "tree", baseRef: null, headRef: null },
     scopePaths: ["src/app.ts"],
-    sourceRef: { commit: "0".repeat(40), worktreeDirty: false },
     budget: 20,
-    executionPolicy: "sandboxed-source-and-local-only",
     selectedCompanions: ["ATTACK-CLASSES.md"],
-    priorRuns: [],
     runStatus: "in_progress",
-    incompleteReason: null,
-  published: false,
-  };
+  });
 
-  it("accepts a canonical document", () => {
-    const parsed = parseSecurityRunMetadata(valid);
-    expect(parsed.ok).toBe(true);
+  it("accepts a canonical document, and its JSON form", () => {
+    expect(parseSecurityRunMetadata(valid).ok).toBe(true);
+    expect(parseSecurityRunMetadata(JSON.parse(JSON.stringify(valid))).ok).toBe(true);
+  });
+
+  it("ties the incomplete reason to the run status", () => {
+    expect(parseSecurityRunMetadata({ ...valid, runStatus: "incomplete" }).ok).toBe(false);
+    expect(parseSecurityRunMetadata({ ...valid, incompleteReason: "critic_budget_exhausted" }).ok).toBe(false);
+    expect(parseSecurityRunMetadata({ ...valid, runStatus: "incomplete", incompleteReason: "critic_budget_exhausted" }).ok).toBe(true);
   });
 
   it("refuses an unknown profile, policy, reason or extra field (INV-R1)", () => {
@@ -150,32 +155,55 @@ describe("run metadata", () => {
 });
 
 describe("coverage identity", () => {
-  it("encodes a canonical id that round-trips through the ledger grammar", () => {
-    const { canonicalCoverageId: id, encodeCanonicalRef } = { canonicalCoverageId, encodeCanonicalRef: (value: string) => value };
-    const coverageId = id({ surface: "http:GET /reports/:id", boundary: "tenant isolation", subsystem: "reporting", attack_class: "cache-key-poisoning" });
-    expect(coverageId).toContain("::");
-    expect(coverageId).not.toMatch(/\s/);
-    expect(id({ surface: "http:GET /reports/:id", boundary: "tenant isolation", subsystem: "reporting", attack_class: "cache-key-poisoning" })).toBe(coverageId);
-    expect(id({ surface: "http:GET /reports/:id", boundary: "another boundary", subsystem: "reporting", attack_class: "cache-key-poisoning" })).not.toBe(coverageId);
-    expect(encodeCanonicalRef("a::b")).toBe("a::b");
+  const refs = { surface: "http:GET /reports/:id", boundary: "tenant isolation", subsystem: "reporting", attack_class: "cache-key-poisoning" };
+
+  it("percent-encodes every reserved byte, so `::` can only be the field separator", () => {
+    expect(encodeCanonicalRef("http:GET /reports/:id")).toBe("http%3AGET%20%2Freports%2F%3Aid");
+    expect(encodeCanonicalRef("a-b_c.d~e")).toBe("a-b_c.d~e");
+    expect(canonicalCoverageId(refs)).toBe("http%3AGET%20%2Freports%2F%3Aid::tenant%20isolation::reporting::cache-key-poisoning");
+    expect(canonicalCoverageId({ ...refs, lifecycle: "retention" })).toBe(`${canonicalCoverageId(refs)}::retention`);
+    expect(canonicalCoverageId({ ...refs, boundary: "another boundary" })).not.toBe(canonicalCoverageId(refs));
   });
 
-  it("is insensitive to stack signals it never reads", () => {
-    const signals = (overrides: Partial<StackSignals>): StackSignals => ({
-      languages: [],
-      manifests: [],
-      servesHttp: false,
-      rendersClientSide: false,
-      drivesModelsOrTools: false,
-      usesQueuesOrRpc: false,
-      isolatesTenants: false,
-      deploysInfrastructure: false,
-      hasNativeMemory: false,
-      hasAppOrLocalIpc: false,
-      hasReleasePipelines: false,
-      hasSharedResourcePressure: false,
-      ...overrides,
-    });
-    expect(signals({}).languages).toEqual([]);
+  it("refuses a reference that is not canonical rather than encoding it", () => {
+    for (const bad of ["", " padded", "zero​width", "é"]) {
+      expect(() => encodeCanonicalRef(bad), JSON.stringify(bad)).toThrow(TypeError);
+    }
+  });
+
+  it("round-trips: splitting an id on `::` and decoding each field recovers the refs", () => {
+    const field = fc.stringMatching(/^[A-Za-z0-9 :/_.~%-]{1,24}$/).filter((value) => value.trim() === value && /\S/.test(value));
+    fc.assert(
+      fc.property(field, field, field, field, (surface, boundary, subsystem, attack_class) => {
+        const id = canonicalCoverageId({ surface, boundary, subsystem, attack_class });
+        expect(id.split("::").map((encoded) => decodeURIComponent(encoded))).toEqual([surface, boundary, subsystem, attack_class]);
+      }),
+    );
+  });
+});
+
+describe("the wire parsing kit", () => {
+  it("reads an absent string list as empty and a well-formed one as a fresh copy", () => {
+    const violations: WireViolation[] = [];
+    const source = ["a", "b"];
+    const parsed = wireStringList(source, "units[0].unresolved", violations);
+    expect(wireStringList(undefined, "units[0].unresolved", violations)).toEqual([]);
+    expect(parsed).toEqual(["a", "b"]);
+    expect(parsed).not.toBe(source);
+    expect(violations).toEqual([]);
+  });
+
+  it("names a present-but-malformed list instead of reading it as empty", () => {
+    for (const malformed of ["a", 1, null, {}, [1], ["a", null]]) {
+      const violations: WireViolation[] = [];
+      expect(wireStringList(malformed, "units[0].fingerprints", violations), JSON.stringify(malformed)).toEqual([]);
+      expect(violations).toEqual([wireViolation("units[0].fingerprints", "expected an array of strings")]);
+    }
+  });
+
+  it("calls only a JSON object a record", () => {
+    expect(isWireRecord({})).toBe(true);
+    expect(isWireRecord({ a: 1 })).toBe(true);
+    for (const value of [null, [], "x", 1, undefined]) expect(isWireRecord(value), String(value)).toBe(false);
   });
 });

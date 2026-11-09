@@ -11,14 +11,13 @@
 import { describe, expect, it } from "vitest";
 import { parseSecurityFindings, type SecurityFinding } from "../../src/core/security-findings";
 import { assignUnits, coverageSettled, deferPlannedUnits, recordUnitResult, seedCoverageUnit, type CoverageLedger } from "../../src/core/security-coverage";
-import { ok } from "./fixtures";
+import { HUNTER_AGENT as HUNTER, aRunMetadata, ok } from "./fixtures";
 import {
   renderFindingsDetail,
   renderNeedsValidation,
   renderReport,
   renderRunDocuments,
 } from "../../src/core/security-reports";
-import type { SecurityRunMetadata } from "../../src/core/security-audit-contract";
 
 const CONFIRMED = {
   verdict: "confirmed",
@@ -81,23 +80,16 @@ const parse = (document: unknown): readonly SecurityFinding[] => {
   return parsed.value;
 };
 
-const metadata: SecurityRunMetadata = {
-  schemaVersion: 1,
+const metadata = aRunMetadata({
   runId: "audit-2026-11-07",
   target: "example/app",
   repo: "example/app",
-  profile: "standard",
   scope: { kind: "diff", paths: ["src/reports/export.ts", "src/reports/query.ts", "src/webhooks/send.ts"], baseRef: "0".repeat(40), headRef: "1".repeat(40) },
   scopePaths: ["src/reports/export.ts", "src/reports/query.ts", "src/webhooks/send.ts"],
   sourceRef: { commit: "1".repeat(40), worktreeDirty: false },
   budget: 24,
-  executionPolicy: "sandboxed-source-and-local-only",
   selectedCompanions: ["ATTACK-CLASSES.md", "DATA-ISOLATION-AND-LIFECYCLE.md"],
-  priorRuns: [],
-  runStatus: "complete",
-  incompleteReason: null,
-  published: false,
-};
+});
 
 const deferReason = "budget_cannot_reserve_critics_and_validation";
 
@@ -111,15 +103,15 @@ const ledger = (): CoverageLedger => {
     prior: null,
   });
   if (!seeded.ok) throw new Error(JSON.stringify(seeded.error));
-  const assigned = assignUnits([seeded.value], [{ coverageId: seeded.value.coverage_id, agentId: "hunter-a", wave: 1 }]);
+  const assigned = assignUnits([seeded.value], [{ coverageId: seeded.value.coverage_id, agentId: HUNTER, wave: 1 }]);
   if (!assigned.ok) throw new Error(JSON.stringify(assigned.error));
-  const result = recordUnitResult(assigned.value, {
+  const result = recordUnitResult(assigned.value.ledger, {
     coverageId: seeded.value.coverage_id,
     wave: 1,
-    agentId: "hunter-a",
+    agentId: HUNTER,
     status: "candidate",
     reviewedPaths: ["src/reports/export.ts"],
-    checks: [{ agent_id: "hunter-a", reviewed_paths: ["src/reports/export.ts"], invariant: "tenant predicate present", method: "source", result: "absent", artifact: null }],
+    checks: [{ agent_id: HUNTER, reviewed_paths: ["src/reports/export.ts"], invariant: "tenant predicate present", method: "source", result: "absent", artifact: null }],
     fingerprints: ["authz:1"],
   });
   if (!result.ok) throw new Error(JSON.stringify(result.error));

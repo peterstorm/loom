@@ -9,6 +9,7 @@ import validateAgentSkill, {
   VALIDATED_AGENTS,
 } from "../../../src/handlers/pre-tool-use/validate-agent-skill";
 import { TASK_GRAPH_PATH } from "../../../src/config";
+import { AGENT_POLICIES } from "../../../src/core/model-profiles";
 
 const TMP = "/tmp/loom-skill-test-" + process.pid;
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
@@ -383,5 +384,29 @@ describe("validate-agent-skill — integration scenarios", () => {
   it("security-agent prompt with security-expert → pass", () => {
     const prompt = "Follow the guidance from the preloaded security-expert skill.";
     expect(promptReferencesSkill(prompt, "security-expert")).toBe(true);
+  });
+});
+
+describe("the Agent Catalog against the skill gate", () => {
+  /** Every spawnable security agent: the three that answer with a security
+   *  verdict, and the implementation-side `security-agent`. */
+  const SECURITY_AGENTS = AGENT_POLICIES
+    .filter((policy) => policy.kind.kind === "security-verdict" || policy.agent.startsWith("security-"))
+    .map((policy) => policy.agent);
+
+  it("validates every spawnable security agent the catalog declares", () => {
+    // Non-vacuous: the hunter, verifier, critic and implementation agent.
+    expect(SECURITY_AGENTS).toEqual(expect.arrayContaining([
+      "security-hunter-agent", "security-verifier-agent", "security-critic-agent", "security-agent",
+    ]));
+    // A security agent the gate does not know is spawned with its skill
+    // preload unproven — the gate passes unknown non-namespaced names through.
+    expect(SECURITY_AGENTS.filter((agent) => !VALIDATED_AGENTS.has(agent))).toEqual([]);
+  });
+
+  it("names no catalog agent with the ledger's owner-id separator", () => {
+    // A ledger owner id is `<catalog-agent>` or `<catalog-agent>--<n>`; an agent
+    // whose own name held `--` could not be read back unambiguously.
+    expect(AGENT_POLICIES.map((policy) => policy.agent).filter((agent) => agent.includes("--"))).toEqual([]);
   });
 });

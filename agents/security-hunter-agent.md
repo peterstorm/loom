@@ -2,7 +2,7 @@
 name: security-hunter-agent
 model-profile: focused-review
 model: sonnet
-description: One security-audit hunter for one coverage unit. Reads the pinned source revision, walks one boundary from entrypoint to sink, and returns candidate findings as reviewer payload v2. Read-only by machine gate; the only way it claims an observed result is a bounded sandbox receipt.
+description: One security-audit hunter for one coverage unit. Reads the pinned source revision, walks one boundary from entrypoint to sink, and returns candidate findings in a security-hunter result envelope. The machine gate denies it Edit/Write/MultiEdit (shell writes are recorded, not prevented); the only way it claims an observed result is a bounded sandbox receipt.
 color: red
 skills:
   - security-audit
@@ -45,20 +45,26 @@ starting paths is `blocked` — say so, do not widen scope.
    result is:
 
    ```
-   scripts/security-sandbox.sh --target <repo> --scratch <run>/agents/<your-agent-id>/scratch \
+   scripts/security-sandbox.sh --target <repo> --scratch <run>/agents/<your-owner-id>/scratch \
      --cpu 10 --mem-mb 1024 --procs 128 --file-mb 32 --wall 60 --scratch-mb 64 \
      --nonce <the nonce your brief prints> -- <command>
    ```
 
    No external network, no writable target and no writable home, an allowlisted
-   environment. The `--nonce` is not optional: the run binds the receipt to the
-   artifact path your ledger entry names, and a receipt without that nonce is
-   refused. If the sandbox cannot start, the finding is `needs_validation`
-   naming the missing capability — never run the command unsandboxed and call it
-   observed.
-4. **Fresh owner, one attempt.** You were assigned this unit now; you have not
-   seen its earlier attempt's evidence except what the ledger archived. Do not
-   re-report an unresolved item as new.
+   environment (`PATH HOME TMPDIR LANG TERM`). The nonce binds the receipt to
+   the artifact path your ledger entry names. `--scratch-mb` is checked after
+   the run, against the measured footprint. If the sandbox cannot start, the
+   finding is `needs_validation` naming the missing capability — never run the
+   command unsandboxed and call it observed.
+4. **Fresh owner, one attempt.** Your owner id is the one `assign` printed in
+   your brief (`assigned <coverage-id> to owner <owner-id> at wave <n>`): the
+   bare catalog name `security-hunter-agent` for a unit's first attempt,
+   `security-hunter-agent--2` (and so on) after a critic reassignment. Use
+   exactly that id for `agentId`, every check's `agent_id`, and your paths
+   (`agents/<owner-id>/scratch`, `agents/<owner-id>/artifacts/...`); a result
+   under any other id is refused. You have not seen the unit's earlier attempt's
+   evidence except what the ledger archived. Do not re-report an unresolved item
+   as new.
 5. **One root cause, one fingerprint.** The fingerprint is source-derived and
    stable across waves, severities and edits of the same defect. Do not fold two
    independent defects into one claim, and do not split one defect per call site.
@@ -76,9 +82,12 @@ project's own authority map, not a paraphrase of them.
 
 ## Output
 
-Return exactly one JSON object conforming to **reviewer payload v2**
-(`schemaVersion: 2`, `kind: "standalone-review"`), and nothing else — plus, in
-the same object, the unit fields the parent needs:
+Return exactly one JSON object, and nothing else: the **security-hunter result
+envelope** that `submit` parses. It borrows the `kind: "standalone-review"` label
+and `schemaVersion: 2` from the reviewer payload, but it is NOT a reviewer
+payload and is not valid against `reviewer-payload-schema` — it carries `units`
+and upstream `findings` records instead. The example uses the first-attempt
+owner id; write the one your brief printed.
 
 ```json
 {
@@ -98,7 +107,7 @@ the same object, the unit fields the parent needs:
           "invariant": "<what must hold>",
           "method": "source | local",
           "result": "<what you observed>",
-          "artifact": "<agents/<agent>/artifacts/<file>, or null>"
+          "artifact": "<agents/<owner-id>/artifacts/<file>, or null>"
         }
       ],
       "fingerprints": ["<candidate: the fingerprints you filed>"],
@@ -139,9 +148,7 @@ sandbox's own output — the parent reads and judges that file.
 walked the unit and have nothing to defend; `blocked` means you needed a fact
 your tools and the sandbox could not produce.
 
-Write no files outside your scratch directory. The machine gate denies Edit,
-Write and MultiEdit in every phase, so a tool write outside scratch is a hard
-failure. It cannot intercept a shell redirect: a Bash write (`> out.txt`,
-`tee`) is recorded as a shell write — which never advances a phase — and the
-reviewer of your unit sees it. Treat your scratch directory as the only place
-you may write, including from the shell.
+Your scratch directory is the only place you may write, including from the
+shell. The machine gate denies Edit, Write and MultiEdit in every phase; it does
+not intercept a shell redirect (`> out.txt`, `tee`), which is recorded as a
+shell write — never advancing a phase — and seen by the reviewer of your unit.

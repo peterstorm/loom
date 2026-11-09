@@ -9,9 +9,13 @@
  *
  *   1. the fixture is honest — every marker is on the line `DEFECTS.json` names,
  *      and every planted file is reachable from the repository root;
- *   2. the ENUMERATION reaches every defect — the selected lenses include the one
- *      each defect names, and the seeded ledger produces a coverage unit whose
- *      starting paths include the defect's file;
+ *   2. the ENUMERATION reaches every defect, in the two senses this suite can
+ *      prove: lens selection over the fixture's recorded signals includes the
+ *      lens each defect names (at the `deep` cap), and the seeded ledger holds a
+ *      unit whose attack class and starting paths cover each planted file. The
+ *      signals themselves are operator input recorded in `DEFECTS.json` — there
+ *      is no production signal detector, so this does NOT prove a repository
+ *      scan would have produced them;
  *   3. the REPORT reaches every defect — one recorded run through the helper
  *      publishes each planted defect exactly once, with complete coverage.
  *
@@ -21,21 +25,35 @@
  * Either alone is a weaker statement than the audit makes.
  */
 
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { canonicalCoverageId, type CoverageRefs, type SecurityRunMetadata } from "../../src/core/security-audit-contract";
-import { parseCoverageSeeds, type CoverageLedger } from "../../src/core/security-coverage";
-import { parseSecurityFindings, type SecurityFinding, type SeverityScore } from "../../src/core/security-findings";
+import {
+  SECURITY_PROFILE_LENSES,
+  canonicalCoverageId,
+  isSafeSourcePath,
+  isVisibleText,
+  isWireRecord,
+  parseSecurityRunMetadata,
+  type CoverageRefs,
+} from "../../src/core/security-audit-contract";
+import {
+  assignUnits,
+  parseCoverageSeeds,
+  recordUnitResult,
+  validateLedger,
+  type CoverageLedger,
+  type CoverageSeed,
+  type TerminalDisposition,
+} from "../../src/core/security-coverage";
+import { SEVERITY_SCORES, parseSecurityFindings, type SecurityFinding, type SeverityScore } from "../../src/core/security-findings";
 import { parseVerificationVerdicts } from "../../src/core/security-adjudication";
-import { SECURITY_LENSES, selectSecurityLenses, type StackSignals } from "../../src/core/security-lens-select";
-import { SECURITY_PROFILE_LENSES, parseSecurityRunMetadata } from "../../src/core/security-audit-contract";
+import { SECURITY_LENSES, selectSecurityLenses, type SecurityLens, type StackSignals } from "../../src/core/security-lens-select";
 import { securityDisposition } from "../../src/core/security-disposition";
 import { renderRunDocuments } from "../../src/core/security-reports";
-import { aConfirmedFinding, aSeed, aUnitResult, aVerdict } from "./fixtures";
+import { HUNTER_AGENT, aConfirmedFinding, aRunMetadata, aSeed, aSignals, aUnitResult, aVerdict, ok } from "./fixtures";
 import { createSecurityAuditHandler } from "../../src/handlers/helpers/security-audit";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 
 const CALIBRATION_ROOT = resolve(__dirname, "../fixtures/security/calibration");
 
@@ -47,32 +65,97 @@ type PlantedDefect = Readonly<{
   surface: string;
   boundary: string;
   subsystem: string;
-  lens: string;
+  lens: SecurityLens;
   impact: SeverityScore;
   claim: string;
 }>;
 
 type DefectSet = Readonly<{ schemaVersion: 1; kind: string; signals: StackSignals; defects: readonly PlantedDefect[] }>;
 
-const DEFECTS = JSON.parse(readFileSync(join(CALIBRATION_ROOT, "DEFECTS.json"), "utf-8")) as DefectSet;
+// --- Load boundary ---
 
-const METADATA: SecurityRunMetadata = {
-  schemaVersion: 1,
+const isOneOf = <T extends string>(values: readonly T[], value: unknown): value is T =>
+  typeof value === "string" && (values as readonly string[]).includes(value);
+
+const SIGNAL_FLAGS = [
+  "servesHttp", "rendersClientSide", "drivesModelsOrTools", "usesQueuesOrRpc", "isolatesTenants",
+  "deploysInfrastructure", "hasNativeMemory", "hasAppOrLocalIpc", "hasReleasePipelines", "hasSharedResourcePressure",
+] as const;
+
+const stringList = (value: unknown, path: string): readonly string[] => {
+  if (!Array.isArray(value) || !value.every((entry): entry is string => typeof entry === "string")) {
+    throw new Error(`DEFECTS.json ${path}: expected an array of strings`);
+  }
+  return value;
+};
+
+const parseSignals = (raw: unknown): StackSignals => {
+  if (!isWireRecord(raw)) throw new Error("DEFECTS.json signals: expected an object");
+  const flags = Object.fromEntries(SIGNAL_FLAGS.map((flag) => {
+    const value = raw[flag];
+    if (typeof value !== "boolean") throw new Error(`DEFECTS.json signals.${flag}: expected a boolean`);
+    return [flag, value];
+  }));
+  return aSignals({ ...flags, languages: stringList(raw.languages, "signals.languages"), manifests: stringList(raw.manifests, "signals.manifests") });
+};
+
+const parseDefect = (raw: unknown, index: number): PlantedDefect => {
+  const path = `defects[${index}]`;
+  if (!isWireRecord(raw)) throw new Error(`DEFECTS.json ${path}: expected an object`);
+  const text = (key: string): string => {
+    const value = raw[key];
+    if (!isVisibleText(value)) throw new Error(`DEFECTS.json ${path}.${key}: expected visible text`);
+    return value;
+  };
+  const { file, line, lens, impact } = raw;
+  if (!isSafeSourcePath(file)) throw new Error(`DEFECTS.json ${path}.file: expected a repository-relative path`);
+  if (typeof line !== "number" || !Number.isInteger(line) || line < 1) throw new Error(`DEFECTS.json ${path}.line: expected a positive integer`);
+  if (!isOneOf(SECURITY_LENSES, lens)) throw new Error(`DEFECTS.json ${path}.lens: expected a vendored lens`);
+  if (!isOneOf(SEVERITY_SCORES, impact)) throw new Error(`DEFECTS.json ${path}.impact: expected a severity score`);
+  return {
+    id: text("id"),
+    file,
+    line,
+    attack_class: text("attack_class"),
+    surface: text("surface"),
+    boundary: text("boundary"),
+    subsystem: text("subsystem"),
+    lens,
+    impact,
+    claim: text("claim"),
+  };
+};
+
+/** The fixture is parsed where it is loaded: a malformed `DEFECTS.json` fails
+ *  here with the field it got wrong, rather than as an `undefined` deep inside
+ *  whichever assertion first reads it. */
+const parseDefectSet = (raw: unknown): DefectSet => {
+  if (!isWireRecord(raw)) throw new Error("DEFECTS.json: expected an object");
+  if (raw.schemaVersion !== 1) throw new Error("DEFECTS.json schemaVersion: expected 1");
+  if (typeof raw.kind !== "string") throw new Error("DEFECTS.json kind: expected a string");
+  if (!Array.isArray(raw.defects)) throw new Error("DEFECTS.json defects: expected an array");
+  return {
+    schemaVersion: 1,
+    kind: raw.kind,
+    signals: parseSignals(raw.signals),
+    defects: raw.defects.map(parseDefect),
+  };
+};
+
+const DEFECTS = parseDefectSet(JSON.parse(readFileSync(join(CALIBRATION_ROOT, "DEFECTS.json"), "utf-8")));
+
+// --- Run builders ---
+
+const fingerprintOf = (defect: PlantedDefect): string => `calibration/${defect.id.toLowerCase()}`;
+
+const METADATA = aRunMetadata({
   runId: "calibration-run",
   repo: CALIBRATION_ROOT,
   target: CALIBRATION_ROOT,
-  profile: "standard",
   scope: { paths: DEFECTS.defects.map((defect) => defect.file).sort(), kind: "tree", baseRef: null, headRef: null },
   scopePaths: [...new Set(DEFECTS.defects.map((defect) => defect.file))].sort(),
-  sourceRef: { commit: "0".repeat(40), worktreeDirty: false },
   budget: 24,
-  executionPolicy: "sandboxed-source-and-local-only",
-  selectedCompanions: [],
-  priorRuns: [],
-  runStatus: "complete",
-  incompleteReason: null,
-  published: false,
-};
+});
 
 const refsFor = (defect: PlantedDefect): CoverageRefs => ({
   surface: defect.surface,
@@ -81,21 +164,55 @@ const refsFor = (defect: PlantedDefect): CoverageRefs => ({
   attack_class: defect.attack_class,
 });
 
-const seeds = (): readonly Record<string, unknown>[] => DEFECTS.defects.map((defect) => aSeed({
+const seedFor = (defect: PlantedDefect): CoverageSeed => aSeed({
   refs: refsFor(defect),
   starting_paths: [defect.file],
   ordinary_attack_class_block: `Ordinary ${defect.attack_class} block for ${defect.subsystem}.`,
   selected_companion_blocks: [`${defect.lens}#${defect.attack_class}`],
-}));
+});
 
-const ledgerOf = (): CoverageLedger => {
-  const parsed = parseCoverageSeeds(seeds());
-  if (!parsed.ok) throw new Error(JSON.stringify(parsed.error));
-  return parsed.value;
+const seeds = (): readonly CoverageSeed[] => DEFECTS.defects.map(seedFor);
+
+const ledgerOf = (): CoverageLedger => ok(parseCoverageSeeds(seeds()));
+
+/** The planted defects no ledger unit would point a hunter at: no unit hunts the
+ *  defect's attack class from a starting path that includes its file. Computed
+ *  from the LEDGER the program built, not from the seeds handed to it. */
+const unreachedDefects = (ledger: CoverageLedger): readonly string[] =>
+  DEFECTS.defects
+    .filter((defect) => !ledger.some((unit) => unit.attack_class === defect.attack_class && unit.starting_paths.includes(defect.file)))
+    .map((defect) => defect.id);
+
+/** Drive every seeded unit through the ledger's own transitions — assigned to
+ *  the catalog hunter, then settled with one source check over the defect's
+ *  file — so the settled ledger is one `validateLedger` accepts, not a forged
+ *  spread of planned units. `candidate` files the defect's fingerprint. */
+const settledLedger = (status: Extract<TerminalDisposition, "covered" | "candidate">): CoverageLedger => {
+  const planned = ledgerOf();
+  let ledger = ok(assignUnits(planned, planned.map((unit) => ({ coverageId: unit.coverage_id, agentId: HUNTER_AGENT, wave: 1 })))).ledger;
+  for (const defect of DEFECTS.defects) {
+    ledger = ok(recordUnitResult(ledger, {
+      coverageId: canonicalCoverageId(refsFor(defect)),
+      agentId: HUNTER_AGENT,
+      wave: 1,
+      status,
+      reviewedPaths: [defect.file],
+      checks: [{
+        agent_id: HUNTER_AGENT,
+        reviewed_paths: [defect.file],
+        invariant: `No untrusted input reaches the sink in ${defect.subsystem}.`,
+        method: "source",
+        result: defect.claim,
+        artifact: null,
+      }],
+      fingerprints: status === "candidate" ? [fingerprintOf(defect)] : [],
+    }));
+  }
+  return ledger;
 };
 
 const findingFor = (defect: PlantedDefect): Record<string, unknown> => aConfirmedFinding({
-  fingerprint: `calibration/${defect.id.toLowerCase()}`,
+  fingerprint: fingerprintOf(defect),
   title: `${defect.id}: ${defect.claim}`,
   description: defect.claim,
   trace: [
@@ -111,12 +228,6 @@ const findingFor = (defect: PlantedDefect): Record<string, unknown> => aConfirme
   },
 });
 
-const parseFindings = (raw: readonly unknown[]): readonly SecurityFinding[] => {
-  const parsed = parseSecurityFindings(raw);
-  if (!parsed.ok) throw new Error(JSON.stringify(parsed.error));
-  return parsed.value;
-};
-
 describe("the calibration fixture is honest", () => {
   it("plants at least one defect per attack class it claims", () => {
     expect(DEFECTS.kind).toBe("security-audit-calibration-target");
@@ -131,10 +242,14 @@ describe("the calibration fixture is honest", () => {
     }
   });
 
-  it("names a vendored lens for every defect", () => {
-    for (const defect of DEFECTS.defects) {
-      expect(SECURITY_LENSES as readonly string[], defect.id).toContain(defect.lens);
-    }
+  it("refuses a malformed fixture at the load boundary", () => {
+    const raw: unknown = JSON.parse(readFileSync(join(CALIBRATION_ROOT, "DEFECTS.json"), "utf-8"));
+    if (!isWireRecord(raw)) throw new Error("DEFECTS.json is not an object");
+    const [first] = DEFECTS.defects;
+    expect(() => parseDefectSet({ ...raw, defects: [{ ...first, lens: "NOT-A-LENS.md" }] })).toThrow(/defects\[0\]\.lens/);
+    expect(() => parseDefectSet({ ...raw, defects: [{ ...first, line: 0 }] })).toThrow(/defects\[0\]\.line/);
+    expect(() => parseDefectSet({ ...raw, signals: { ...DEFECTS.signals, servesHttp: "yes" } })).toThrow(/signals\.servesHttp/);
+    expect(() => parseDefectSet({ ...raw, schemaVersion: 2 })).toThrow(/schemaVersion/);
   });
 });
 
@@ -155,8 +270,7 @@ describe("the enumeration reaches every planted defect", () => {
     const excluded = selection.excluded.map((entry) => entry.lens);
     // A capped lens is named with its rank, so an operator can raise the
     // profile rather than guess why a lens is missing.
-    // ATTACK-CLASSES.md is added on top of the cap, which counts companions.
-    expect(included.length).toBeLessThanOrEqual(SECURITY_PROFILE_LENSES.standard + 1);
+    expect(included.length).toBeLessThanOrEqual(SECURITY_PROFILE_LENSES.standard);
     expect(excluded.length).toBeGreaterThan(0);
     // Two kinds of exclusion, both named: a lens with matching signals that the
     // cap trimmed (with its rank), and a lens with no signal at all.
@@ -170,46 +284,45 @@ describe("the enumeration reaches every planted defect", () => {
     }
   });
 
-  it("reaches every planted defect at the deep profile, and names what standard trims", () => {
-    // The calibration's reach is PROFILE-SCOPED: the cap is a context budget the
-    // operator chooses, so "the enumeration reaches every defect" is only honest
-    // at a cap that holds every lens the defects name. At `standard` one class
-    // (the client-side one) is trimmed, and the trimming is NAMED rather than
-    // silent — the operator raises the profile instead of guessing.
-    const deep = selectSecurityLenses(DEFECTS.signals, { maxLenses: SECURITY_PROFILE_LENSES.deep });
-    const deepIncluded = deep.included.map((entry) => entry.lens);
-    for (const defect of DEFECTS.defects) {
-      expect(deepIncluded as readonly string[], `${defect.id} needs ${defect.lens}`).toContain(defect.lens);
-    }
-
+  it("trims exactly the client-side defect at the standard profile", () => {
+    // A deliberate TRIPWIRE, not a derived fact: the calibration's reach is
+    // profile-scoped, and at `standard` exactly one class is trimmed. A change to
+    // the ranking rules or the fixture's signals that moves this set must be
+    // looked at by a person, so the expected set is written out by hand.
     const standard = selectSecurityLenses(DEFECTS.signals, { maxLenses: SECURITY_PROFILE_LENSES.standard });
-    const standardIncluded = standard.included.map((entry) => entry.lens);
-    const unreachable = DEFECTS.defects.filter((defect) => !(standardIncluded as readonly string[]).includes(defect.lens));
+    const standardIncluded: readonly string[] = standard.included.map((entry) => entry.lens);
+    const unreachable = DEFECTS.defects.filter((defect) => !standardIncluded.includes(defect.lens));
     expect(unreachable.map((defect) => defect.id)).toEqual(["CAL-XSS-01"]);
-    // Every lens the trimmed defect needs is named in `excluded` with its reason.
-    for (const defect of unreachable) {
-      const entry = standard.excluded.find((candidate) => candidate.lens === defect.lens);
-      expect(entry, defect.lens).toBeDefined();
-      expect(entry?.reason).toMatch(/beyond the \d+-lens cap|no matching signal/);
+  });
+
+  it("names every lens a capped profile trims from a defect, with its reason", () => {
+    // Independent of the tripwire above: whatever set a profile trims, each
+    // trimmed defect's lens is accounted for in `excluded`, never dropped.
+    for (const profile of ["quick", "standard"] as const) {
+      const selection = selectSecurityLenses(DEFECTS.signals, { maxLenses: SECURITY_PROFILE_LENSES[profile] });
+      const included: readonly string[] = selection.included.map((entry) => entry.lens);
+      for (const defect of DEFECTS.defects.filter((candidate) => !included.includes(candidate.lens))) {
+        const entry = selection.excluded.find((candidate) => candidate.lens === defect.lens);
+        expect(entry, `${profile}: ${defect.id} needs ${defect.lens}`).toBeDefined();
+        expect(entry?.reason).toMatch(/beyond the \d+-lens cap|no matching signal/);
+      }
     }
   });
 
-  it("seeds a unit whose starting paths include the defect's file", () => {
+  it("seeds a unit whose attack class and starting paths cover each defect's file", () => {
     const ledger = ledgerOf();
     expect(ledger).toHaveLength(DEFECTS.defects.length);
+    expect(unreachedDefects(ledger)).toEqual([]);
     for (const defect of DEFECTS.defects) {
-      const id = canonicalCoverageId(refsFor(defect));
-      const unit = ledger.find((candidate) => candidate.coverage_id === id);
-      expect(unit, defect.id).toBeDefined();
-      expect(unit?.starting_paths).toContain(defect.file);
-      expect(unit?.status).toBe("planned");
+      const unit = ledger.find((candidate) => candidate.coverage_id === canonicalCoverageId(refsFor(defect)));
+      expect(unit?.status, defect.id).toBe("planned");
     }
   });
 
   it("keeps ATTACK-CLASSES in a quick run, whatever else the cap trims", () => {
     const selection = selectSecurityLenses(DEFECTS.signals, { maxLenses: SECURITY_PROFILE_LENSES.quick });
     expect(selection.included.map((entry) => entry.lens)).toContain("ATTACK-CLASSES.md");
-    expect(selection.included.length).toBeLessThanOrEqual(SECURITY_PROFILE_LENSES.quick + 1);
+    expect(selection.included.length).toBeLessThanOrEqual(SECURITY_PROFILE_LENSES.quick);
   });
 
   it("gives every unit a distinct canonical id", () => {
@@ -225,40 +338,33 @@ describe("the enumeration reaches every planted defect", () => {
  *  come from `refutation`. The run's BUDGET profile (`deep`) is not a ballot
  *  profile at all — conflating the two is what made INV-S3 vacuous. */
 const recordedRun = () => {
-    const ledger = ledgerOf();
-    // A findings document is sorted by fingerprint, so build it that way
-    // rather than relying on the fixture's declaration order.
-    const findings = parseFindings([...DEFECTS.defects]
-      .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
-      .map(findingFor));
-    const verdicts = parseVerificationVerdicts(DEFECTS.defects.map((defect) =>
-      aVerdict({ fingerprint: `calibration/${defect.id.toLowerCase()}` })));
-    if (!verdicts.ok) throw new Error(JSON.stringify(verdicts.error));
-    return { ledger, findings, verdicts: verdicts.value };
+  // A findings document is sorted by fingerprint, so build it that way rather
+  // than relying on the fixture's declaration order.
+  const findings: readonly SecurityFinding[] = ok(parseSecurityFindings([...DEFECTS.defects]
+    .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
+    .map(findingFor)));
+  const verdicts = ok(parseVerificationVerdicts(DEFECTS.defects.map((defect) => aVerdict({ fingerprint: fingerprintOf(defect) }))));
+  return { ledger: settledLedger("candidate"), findings, verdicts };
 };
 
 describe("a recorded run reaches every planted defect", () => {
+  it("settles a ledger the state machine itself accepts", () => {
+    const { ledger } = recordedRun();
+    expect(validateLedger(ledger)).toEqual([]);
+    expect(ledger.every((unit) => unit.status === "candidate")).toBe(true);
+  });
 
   it("publishes each planted defect exactly once", () => {
     const { ledger, findings } = recordedRun();
-    const metadata: SecurityRunMetadata = {
+    const metadata = ok(parseSecurityRunMetadata({
       ...METADATA,
       selectedCompanions: selectSecurityLenses(DEFECTS.signals, { maxLenses: SECURITY_PROFILE_LENSES.deep }).included.map((entry) => entry.lens),
-    };
-    const parsed = parseSecurityRunMetadata(metadata);
-    if (!parsed.ok) throw new Error(JSON.stringify(parsed.error));
-
-    const settled = ledger.map((unit) => {
-      const defect = DEFECTS.defects.find((candidate) => canonicalCoverageId(refsFor(candidate)) === unit.coverage_id);
-      if (defect === undefined) throw new Error(`unmapped unit ${unit.coverage_id}`);
-      return { ...unit, status: "candidate" as const, agent_id: "security-hunter-agent", reviewed_paths: [defect.file] };
-    });
-    const documents = renderRunDocuments({ metadata: parsed.value, ledger: settled, findings, locator: "/calibration" });
+    }));
+    const documents = renderRunDocuments({ metadata, ledger, findings, locator: "/calibration" });
     const report = documents["REPORT.md"] ?? "";
 
     for (const defect of DEFECTS.defects) {
-      const fingerprint = `calibration/${defect.id.toLowerCase()}`;
-      expect(report.split(fingerprint)).toHaveLength(2);
+      expect(report.split(fingerprintOf(defect))).toHaveLength(2);
     }
     expect(report).toContain(`${DEFECTS.defects.length} confirmed, 0 needing validation, 0 rejected`);
     expect(report).toContain("## Disposition handoff");
@@ -294,9 +400,9 @@ describe("a recorded run reaches every planted defect", () => {
         coverageId: canonicalCoverageId(refsFor(defect)),
         status: "candidate",
         reviewedPaths: [defect.file],
-        fingerprints: [`calibration/${defect.id.toLowerCase()}`],
+        fingerprints: [fingerprintOf(defect)],
         checks: [{
-          agent_id: "security-hunter-agent",
+          agent_id: HUNTER_AGENT,
           reviewed_paths: [defect.file],
           invariant: `No untrusted input reaches the sink in ${defect.subsystem}.`,
           method: "source",
@@ -306,7 +412,7 @@ describe("a recorded run reaches every planted defect", () => {
       }));
 
       for (const defect of DEFECTS.defects) {
-        const assigned = await invoke(["assign", "--unit", canonicalCoverageId(refsFor(defect)), "--agent", "security-hunter-agent", "--wave", "1"]);
+        const assigned = await invoke(["assign", "--unit", canonicalCoverageId(refsFor(defect)), "--agent", HUNTER_AGENT, "--wave", "1"]);
         expectOk(assigned, `assign ${defect.id}`);
       }
 
@@ -314,7 +420,7 @@ describe("a recorded run reaches every planted defect", () => {
       expectOk(submitted, "submit");
 
       const verified = await invoke(["verify"], JSON.stringify({
-        verdicts: DEFECTS.defects.map((defect) => aVerdict({ fingerprint: `calibration/${defect.id.toLowerCase()}` })),
+        verdicts: DEFECTS.defects.map((defect) => aVerdict({ fingerprint: fingerprintOf(defect) })),
       }));
       expectOk(verified, "verify");
 
@@ -322,7 +428,7 @@ describe("a recorded run reaches every planted defect", () => {
       expectOk(published, "publish");
       const publishedFindings = JSON.parse(readFileSync(join(out, "security-findings.json"), "utf-8")) as readonly { fingerprint: string }[];
       expect(publishedFindings.map((finding) => finding.fingerprint).sort()).toEqual(
-        DEFECTS.defects.map((defect) => `calibration/${defect.id.toLowerCase()}`).sort(),
+        DEFECTS.defects.map(fingerprintOf).sort(),
       );
       expect(readFileSync(join(out, "REPORT.md"), "utf-8")).toContain("coverage");
 
@@ -338,30 +444,28 @@ describe("a recorded run reaches every planted defect", () => {
 });
 
 describe("the fixture is not a happy-path prop", () => {
-  it("fails to reach a defect whose attack class no seeded unit covers", () => {
-    // Drop the access-control cell: the authorization defect now belongs to no
-    // unit, which is exactly the gap the enumeration exists to make visible.
-    const withoutAuthz = DEFECTS.defects
-      .filter((defect) => defect.attack_class !== "broken-access-control")
-      .map((defect) => aSeed({ refs: refsFor(defect), starting_paths: [defect.file] }));
-    const parsed = parseCoverageSeeds(withoutAuthz);
-    if (!parsed.ok) throw new Error(JSON.stringify(parsed.error));
-    const covered = new Set(parsed.value.map((unit) => unit.attack_class));
+  it("reports exactly the defect whose cell the seeds dropped as unreached", () => {
+    // Drop the access-control cell, then ask the LEDGER the program built — not
+    // the reduced seed list — which planted defects no unit would hunt. The
+    // answer must be the dropped one and only it: the gap the enumeration exists
+    // to make visible.
     const authz = DEFECTS.defects.find((defect) => defect.attack_class === "broken-access-control");
-    expect(authz).toBeDefined();
-    expect(covered.has(authz?.attack_class ?? "")).toBe(false);
+    if (authz === undefined) throw new Error("the fixture plants no broken-access-control defect");
+    const reduced = ok(parseCoverageSeeds(DEFECTS.defects.filter((defect) => defect !== authz).map(seedFor)));
+    expect(unreachedDefects(reduced)).toEqual([authz.id]);
   });
 
   it("does not report a defect the run never settled", () => {
     const { findings } = recordedRun();
-    const metadata: SecurityRunMetadata = { ...METADATA, selectedCompanions: ["ATTACK-CLASSES.md"] };
-    const ledger = ledgerOf().map((unit) => ({ ...unit, status: "covered" as const, agent_id: "security-hunter-agent", reviewed_paths: unit.starting_paths }));
+    const metadata = aRunMetadata({ ...METADATA, selectedCompanions: ["ATTACK-CLASSES.md"] });
+    const ledger = settledLedger("covered");
+    expect(validateLedger(ledger)).toEqual([]);
     const sqli = findings.filter((finding) => finding.fingerprint === "calibration/cal-sqli-01");
     expect(sqli).toHaveLength(1);
     const report = renderRunDocuments({ metadata, ledger, findings: sqli, locator: "/calibration" })["REPORT.md"] ?? "";
     expect(report).toContain("calibration/cal-sqli-01");
     for (const defect of DEFECTS.defects.slice(1)) {
-      expect(report).not.toContain(`calibration/${defect.id.toLowerCase()}`);
+      expect(report).not.toContain(fingerprintOf(defect));
     }
   });
 });

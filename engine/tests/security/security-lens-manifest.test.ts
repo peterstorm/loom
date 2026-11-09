@@ -24,6 +24,10 @@ type Manifest = Readonly<{
 
 const manifest = (): Manifest => JSON.parse(readFileSync(join(LENS_DIR, "MANIFEST.json"), "utf8")) as Manifest;
 
+/** Loom-authored documents in the lens directory: provenance and Loom-specific
+ *  guidance, never upstream bytes, so they carry no digest. */
+const LOOM_NOTES: readonly string[] = ["ATTRIBUTION.md", "LOOM-DELTAS.md"];
+
 const digest = (path: string): string => createHash("sha256").update(readFileSync(join(LENS_DIR, path))).digest("hex");
 
 describe("vendored lens taxonomy", () => {
@@ -44,7 +48,9 @@ describe("vendored lens taxonomy", () => {
   });
 
   it("keeps the directory free of unlisted files of its own", () => {
-    const onDisk = readdirSync(LENS_DIR).filter((name) => name.endsWith(".md") && name !== "ATTRIBUTION.md").sort();
+    // Loom's own notes sit beside the vendored files by design (ATTRIBUTION.md
+    // says where Loom guidance lives); every OTHER `.md` must be digest-pinned.
+    const onDisk = readdirSync(LENS_DIR).filter((name) => name.endsWith(".md") && !LOOM_NOTES.includes(name)).sort();
     const listed = Object.keys(manifest().files).sort();
     expect(onDisk).toEqual(listed);
   });

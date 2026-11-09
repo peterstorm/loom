@@ -11,34 +11,30 @@
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { canonicalCoverageId, type CoverageRefs } from "../../src/core/security-audit-contract";
+import { canonicalCoverageId } from "../../src/core/security-audit-contract";
 import {
   assignUnits,
   recordUnitResult,
   seedCoverageUnit,
   validateLedger,
   type CoverageLedger,
-  type CoverageSeed,
   type UnitResult,
 } from "../../src/core/security-coverage";
 import { parseSecurityFindings, type SecurityFinding } from "../../src/core/security-findings";
 import { renderRunDocuments } from "../../src/core/security-reports";
-import type { SecurityRunMetadata } from "../../src/core/security-audit-contract";
 import {
+  HUNTER_AGENT as HUNTER,
   aConfirmedFinding,
   aNeedsValidationFinding,
   aRejectedFinding,
+  aRunMetadata,
   aSeed,
   ok,
 } from "./fixtures";
 
-const HUNTER = "security-hunter-agent";
-
-const aCell = (): CoverageRefs => aSeed().refs as CoverageRefs;
-
 const anAssignedLedger = (): CoverageLedger => {
-  const seeded = ok(seedCoverageUnit(aSeed() as unknown as CoverageSeed));
-  return ok(assignUnits([seeded], [{ coverageId: seeded.coverage_id, agentId: HUNTER, wave: 1 }]));
+  const seeded = ok(seedCoverageUnit(aSeed()));
+  return ok(assignUnits([seeded], [{ coverageId: seeded.coverage_id, agentId: HUNTER, wave: 1 }])).ledger;
 };
 
 /** A settlement the ledger accepts for any terminal status: one source check
@@ -46,7 +42,7 @@ const anAssignedLedger = (): CoverageLedger => {
 const aResult = (overrides: Partial<UnitResult> = {}): UnitResult => {
   const status = overrides.status ?? "covered";
   return {
-    coverageId: canonicalCoverageId(aCell()),
+    coverageId: canonicalCoverageId(aSeed().refs),
     agentId: HUNTER,
     wave: 1,
     reviewedPaths: ["src/api/login.ts"],
@@ -82,19 +78,16 @@ describe("a unit settles once per wave (INV-S2)", () => {
       fc.property(fc.array(fc.constantFrom(...statuses), { minLength: 1, maxLength: 5 }), (attempts) => {
         let ledger = anAssignedLedger();
         let accepted = 0;
-        let lastAccepted = attempts[0];
         for (const status of attempts) {
           const next = recordUnitResult(ledger, aResult({ status }));
           if (next.ok) {
             ledger = next.value;
             accepted += 1;
-            lastAccepted = status;
           }
         }
         // Exactly one settlement lands, and it is the first one: a later
         // disposition never overwrites an earlier one.
         expect(accepted).toBe(1);
-        expect(ledger[0]?.status).toBe(lastAccepted);
         expect(ledger[0]?.status).toBe(attempts[0]);
       }),
       { numRuns: 40 },
@@ -108,23 +101,7 @@ describe("a unit settles once per wave (INV-S2)", () => {
   });
 });
 
-const metadata: SecurityRunMetadata = {
-  schemaVersion: 1,
-  runId: "audit-1",
-  repo: "/repo",
-  target: "/repo",
-  profile: "standard",
-  scope: { paths: ["src/api/login.ts"], kind: "tree", baseRef: null, headRef: null },
-  scopePaths: ["src/api/login.ts"],
-  sourceRef: { commit: "a".repeat(40), worktreeDirty: false },
-  budget: null,
-  executionPolicy: "sandboxed-source-and-local-only",
-  selectedCompanions: [],
-  priorRuns: [],
-  runStatus: "complete",
-  incompleteReason: null,
-  published: true,
-};
+const metadata = aRunMetadata({ sourceRef: { commit: "a".repeat(40), worktreeDirty: false }, published: true });
 
 /** A sorted set: the PARSER requires order, so order-invariance is a property of
  *  the RENDERER and is asserted by handing it the same set shuffled. */

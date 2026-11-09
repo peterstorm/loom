@@ -202,12 +202,7 @@ export function securityDisposition(input: Readonly<{
     source: {
       locator: input.locator,
       runId: input.metadata.runId,
-      resultDigest: canonicalDigest(entries.map((entry) => ({
-        origin: entry.origin,
-        fingerprint: entry.fingerprint,
-        decision: entry.decision,
-        reason: entry.reason,
-      }))),
+      resultDigest: canonicalDigest(entries),
     },
     profile: input.metadata.profile,
     entries,

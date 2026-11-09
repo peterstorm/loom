@@ -1,6 +1,7 @@
 /**
- * Binds `commands/security-audit.md` to the operation table it describes, on the
- * model of `spec-check-command-contract.test.ts`.
+ * Binds `commands/security-audit.md` — and the authoritative operations table in
+ * `docs/security-audit.md` — to the operation table they describe, on the model
+ * of `spec-check-command-contract.test.ts`.
  *
  * The command file is a hand-written mirror of a typed table `tsc` cannot see
  * and no other test reads. Every drift it can carry is a real defect an operator
@@ -21,22 +22,41 @@ import {
 } from "../../src/handlers/helpers/security-audit-operations";
 
 const command = readFileSync(new URL("../../../commands/security-audit.md", import.meta.url), "utf8");
+const operatorGuide = readFileSync(new URL("../../../docs/security-audit.md", import.meta.url), "utf8");
 
-/** One row of the command's operation table: `| `op` | input | … |`. */
+/** One row of an operation table: `| `op` | input … | … |`. The input cell
+ *  starts with `stdin` or `flags`; the operator guide follows it with the
+ *  payload keys or flag names, which this binding does not read. */
 type Row = Readonly<{ operation: string; input: string }>;
 
-const tableRows = (): readonly Row[] =>
-  command
+const tableRows = (document: string): readonly Row[] =>
+  document
     .split("\n")
     .flatMap((line) => {
-      const match = /^\|\s*`([a-z-]+)`\s*\|\s*([a-z]+)\s*\|/.exec(line);
+      const match = /^\|\s*`([a-z-]+)`\s*\|\s*([a-z]+)\b[^|]*\|/.exec(line);
       return match === null ? [] : [{ operation: match[1] ?? "", input: match[2] ?? "" }];
     });
 
+describe("docs/security-audit.md, the authoritative operations table", () => {
+  it("names every operation the program declares, exactly once, with its declared input", () => {
+    // The operator guide is where an operator reads what each operation refuses;
+    // an operation missing from it is a refusal set nobody documented, and a row
+    // naming an undeclared operation is a command that exits "unknown operation".
+    const rows = tableRows(operatorGuide);
+    const named = rows.map((row) => row.operation);
+    expect(new Set(named).size).toBe(named.length);
+    expect([...named].sort()).toEqual(Object.keys(SECURITY_AUDIT_OPERATIONS).sort());
+    for (const row of rows) {
+      expect(parseSecurityAuditOperation(row.operation), row.operation).toBe(row.operation);
+      expect(row.input, row.operation).toBe(SECURITY_AUDIT_OPERATIONS[row.operation as keyof typeof SECURITY_AUDIT_OPERATIONS].input);
+    }
+  });
+});
+
 describe("commands/security-audit.md", () => {
   it("names only operations the program declares", () => {
-    expect(tableRows().length).toBeGreaterThan(0);
-    for (const row of tableRows()) {
+    expect(tableRows(command).length).toBeGreaterThan(0);
+    for (const row of tableRows(command)) {
       // The operation set is CLOSED: an undeclared name is not a typo in the
       // docs, it is a command that exits with "unknown operation".
       expect(parseSecurityAuditOperation(row.operation), row.operation).toBe(row.operation);
@@ -44,13 +64,13 @@ describe("commands/security-audit.md", () => {
   });
 
   it("names every operation the program declares, exactly once", () => {
-    const named = tableRows().map((row) => row.operation);
+    const named = tableRows(command).map((row) => row.operation);
     expect(new Set(named).size).toBe(named.length);
     expect(named.sort()).toEqual(Object.keys(SECURITY_AUDIT_OPERATIONS).sort());
   });
 
   it("declares, for each operation, the input the traits table declares", () => {
-    for (const row of tableRows()) {
+    for (const row of tableRows(command)) {
       expect(row.input, row.operation).toBe(SECURITY_AUDIT_OPERATIONS[row.operation as keyof typeof SECURITY_AUDIT_OPERATIONS].input);
       expect(["stdin", "flags"]).toContain(row.input);
     }

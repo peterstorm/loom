@@ -25,10 +25,17 @@
 
 import { match } from "ts-pattern";
 import { compareStrings } from "./ordering";
-import { catalogProfileOfAgent, LLM_PROFILE_IDS } from "./model-profiles";
+import { catalogProfileOfAgent, LLM_PROFILE_IDS, type LlmProfileId } from "./model-profiles";
 import { failure, success, type DomainResult } from "./orchestration-contract/identity";
-import { isSecurityAgentId, isSecurityFingerprint, isVisibleText } from "./security-audit-contract";
-import type { SecurityFinding, NeedsValidationFinding, RejectedFinding, ConfirmedFinding } from "./security-findings";
+import { isSecurityAgentId, isSecurityFingerprint, isVisibleText, isWireRecord, type WireViolation } from "./security-audit-contract";
+import { catalogAgentOfOwner, coverageSettled, type CoverageLedger } from "./security-coverage";
+import {
+  sortByFingerprint,
+  type ConfirmedFinding,
+  type NeedsValidationFinding,
+  type RejectedFinding,
+  type SecurityFinding,
+} from "./security-findings";
 
 /** One verifier's ballot about one fingerprint. */
 export type VerificationVerdict = Readonly<{
@@ -42,9 +49,9 @@ export type VerificationVerdict = Readonly<{
   /** The one fact absent when the vote is advisory for lack of proof. */
   missingFact: string | null;
   /** The verifier's agent name and catalog profile, recorded so `publish` can
- *  prove the vote came from a catalog profile that did not hunt. The parser
- *  requires `profile` to be the catalog profile of `agent`, so a ballot cannot
- *  claim a profile its own agent does not sit on. */
+   *  prove the vote came from a catalog profile that did not hunt. The parser
+   *  requires `profile` to be the catalog profile of `agent`, so a ballot cannot
+   *  claim a profile its own agent does not sit on. */
   agent: string;
   profile: string;
   wave: number;
@@ -70,9 +77,6 @@ export type Adjudication = Readonly<{
   gaps: readonly VerificationGap[];
 }>;
 
-const sortByFingerprint = <T extends { readonly fingerprint: string }>(items: readonly T[]): readonly T[] =>
-  [...items].sort((left, right) => compareStrings(left.fingerprint, right.fingerprint));
-
 /** Every verdict for one fingerprint, in a deterministic order (agent, then wave). */
 const verdictsFor = (
   verdicts: readonly VerificationVerdict[],
@@ -87,8 +91,9 @@ const verdictsFor = (
  *  ONLY when a critical exists — a panel that splits is a panel that could not
  *  refute, and the claim stands as confirmed. */
 const decide = (
-  verdicts: readonly VerificationVerdict[],
-): VerificationVerdict | null => verdicts.find((verdict) => verdict.vote === "critical") ?? verdicts[0] ?? null;
+  first: VerificationVerdict,
+  rest: readonly VerificationVerdict[],
+): VerificationVerdict => [first, ...rest].find((verdict) => verdict.vote === "critical") ?? first;
 
 export type AdjudicationInput = Readonly<{
   findings: readonly SecurityFinding[];
@@ -122,16 +127,12 @@ export function adjudicateCandidates(input: AdjudicationInput): Adjudication {
       gaps.push({ kind: "unverified", fingerprint: finding.fingerprint });
       continue;
     }
-    const independent = verdicts.filter((verdict) => !input.huntProfiles.includes(verdict.profile));
-    if (independent.length === 0) {
-      gaps.push({ kind: "same-profile", fingerprint: finding.fingerprint, profile: verdicts[0]?.profile ?? input.huntProfiles[0] ?? "" });
+    const [first, ...rest] = verdicts.filter((verdict) => !input.huntProfiles.includes(verdict.profile));
+    if (first === undefined) {
+      gaps.push({ kind: "same-profile", fingerprint: finding.fingerprint, profile: verdicts[0].profile });
       continue;
     }
-    const decision = decide(independent);
-    if (decision === null) {
-      gaps.push({ kind: "unverified", fingerprint: finding.fingerprint });
-      continue;
-    }
+    const decision = decide(first, rest);
     if (decision.vote === "critical") {
       confirmed.push(finding);
       continue;
@@ -174,25 +175,17 @@ const toRejected = (finding: ConfirmedFinding, verdict: VerificationVerdict): Re
   reason: verdict.reason,
 });
 
-/** Blocking reasons that prevent publication, most severe first. Empty means
- *  the run may publish what it has. */
+/** The full decision about a run: findings and blockers come from ONE
+ *  computation, so they cannot disagree. */
 export type RunAdjudication = Readonly<{
-  /** The full decision: one computation, so findings and blockers cannot disagree. */
   adjudication: Adjudication;
   /** The document `publish` writes: adjudicated records plus untouched passthroughs. */
   findings: readonly SecurityFinding[];
+  /** Blocking reasons that prevent publication. Empty means the run may publish
+   *  what it has. */
   blockers: readonly string[];
 }>;
 
-/**
- * Adjudicate a run ONCE and project both answers from that decision.
- *
- * `publishedFindings` and `publicationBlockers` each used to call
- * `adjudicateCandidates` themselves, so every `findings`/`publish`/`status`
- * invocation adjudicated twice and the two projections could drift apart
- * without a test failing. This is the single entry point; the two named
- * projections below delegate to it.
- */
 /** Why a confirmed claim failed to earn a ballot, in the words the operator reads
  *  at publish time. Exhaustive over the gap union, so a new gap kind cannot be
  *  added without deciding what it blocks. */
@@ -203,35 +196,64 @@ const blockerFor = (gap: VerificationGap): string =>
     .with({ kind: "unattributed" }, (value) => `confirmed claim ${value.fingerprint} has no recorded hunting profile, so no ballot can be shown to come from another one`)
     .exhaustive();
 
-export function adjudicateRun(input: AdjudicationInput & Readonly<{ ledgerSettled: boolean }>): RunAdjudication {
-  const adjudication = adjudicateCandidates(input);
-  const blockers: string[] = [];
-  for (const gap of adjudication.gaps) blockers.push(blockerFor(gap));
-  if (!input.ledgerSettled) blockers.push("coverage ledger still has planned, in-progress or blocked units");
+/** A hunter the Agent Catalog cannot place: the run knows the owner that hunted
+ *  but cannot say which model profile it ran under. */
+export type HuntingProfileError = Readonly<{ kind: "unresolvable-hunter"; agentId: string }>;
+
+/** The catalog profiles that actually hunted, derived from the ledger's owned
+ *  and archived units. Adjudication compares a ballot's profile against this
+ *  set, so "verified by a different model" is read from the run's own record of
+ *  who ran rather than from a second, caller-supplied field. Empty means the
+ *  ledger names no hunter — a state adjudication refuses to treat as verified.
+ *
+ *  An owner id is an attempt identity (`security-hunter-agent--2`); its catalog
+ *  agent is read back with `catalogAgentOfOwner`, the ledger's own grammar.
+ *
+ *  Fail closed on an owner the catalog cannot place. This function used to
+ *  FILTER unresolvable owners out — so a hunter with no catalog row hunted,
+ *  contributed nothing to the independence set, and a verifier on that hunter's
+ *  own model profile was then counted as independent. An unanswerable question
+ *  is a refusal, not an empty answer. Archived attempts count too: their owners
+ *  hunted in an earlier wave of this same run. */
+export function huntingProfiles(ledger: CoverageLedger): DomainResult<readonly LlmProfileId[], HuntingProfileError> {
+  const profiles = new Set<LlmProfileId>();
+  for (const unit of ledger) {
+    for (const agentId of [unit.agent_id, ...unit.attempts.map((attempt) => attempt.agent_id)]) {
+      if (agentId === null) continue;
+      const profile = catalogProfileOfAgent(catalogAgentOfOwner(agentId));
+      if (profile === null) return failure({ kind: "unresolvable-hunter" as const, agentId });
+      profiles.add(profile);
+    }
+  }
+  return success([...profiles].sort(compareStrings));
+}
+
+/**
+ * Adjudicate a run ONCE, from its own records. The two facts INV-S3 rests on —
+ * which profiles hunted and whether coverage settled — are derived HERE from the
+ * ledger, not handed in by a caller, so the independence rule and its
+ * fail-closed refusal live in one tested place.
+ */
+export function adjudicateRun(
+  input: Readonly<{ ledger: CoverageLedger; findings: readonly SecurityFinding[]; verdicts: readonly VerificationVerdict[] }>,
+): DomainResult<RunAdjudication, HuntingProfileError> {
+  const huntProfiles = huntingProfiles(input.ledger);
+  if (!huntProfiles.ok) return huntProfiles;
+  const adjudication = adjudicateCandidates({ findings: input.findings, verdicts: input.verdicts, huntProfiles: huntProfiles.value });
+  const blockers = adjudication.gaps.map(blockerFor);
+  if (!coverageSettled(input.ledger)) blockers.push("coverage ledger still has planned, in-progress or blocked units");
   const passthrough = input.findings.filter((finding) => finding.verdict !== "confirmed");
-  return {
+  return success({
     adjudication,
     findings: sortByFingerprint([...adjudication.confirmed, ...adjudication.demoted, ...adjudication.rejected, ...passthrough]),
     blockers,
-  };
-}
-
-/** Blocking reasons that prevent publication, most severe first. */
-export function publicationBlockers(
-  input: AdjudicationInput & Readonly<{ ledgerSettled: boolean }>,
-): readonly string[] {
-  return adjudicateRun(input).blockers;
-}
-
-/** The published findings list: adjudicated confirmed, demoted leads, then the
- *  run's own non-confirmed records (leads and rejections the hunters filed). */
-export function publishedFindings(input: AdjudicationInput): readonly SecurityFinding[] {
-  return adjudicateRun({ ...input, ledgerSettled: true }).findings;
+  });
 }
 
 // --- Wire parsing ---
 
-export type VerdictViolation = Readonly<{ path: string; message: string }>;
+/** The adjudication volume's name for the shared wire diagnostic. */
+export type VerdictViolation = WireViolation;
 
 export type VerdictError = Readonly<{ kind: "invalid-verdicts"; violations: readonly VerdictViolation[] }>;
 
@@ -267,12 +289,12 @@ export function parseVerificationVerdicts(raw: unknown): DomainResult<readonly V
 
   entries.forEach((entry, index) => {
     const base = `verdicts[${index}]`;
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+    if (!isWireRecord(entry)) {
       violations.push({ path: base, message: "expected an object" });
       return;
     }
     const local: VerdictViolation[] = [];
-    const record = entry as Record<string, unknown>;
+    const record = entry;
     for (const key of Object.keys(record)) {
       if (!VERDICT_KEYS.includes(key)) local.push({ path: `${base}.${key}`, message: "unknown field" });
     }

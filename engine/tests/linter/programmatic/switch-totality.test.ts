@@ -13,11 +13,10 @@ import fc from "fast-check";
 import {
   DEFAULT_SWITCH_TOTALITY_MODULES,
   RULE_NAME,
-  baselineKey,
   detectedSwitchKeys,
   handler as switchTotality,
-  unusedBaselineEntries,
 } from "../../../src/linter/programmatic/switch-totality";
+import { baselineKey, unusedBaselineEntries } from "../../../src/linter/programmatic/baseline";
 
 const FILE = "engine/src/core/example.ts";
 const NO_BASELINE: readonly string[] = [];
@@ -272,6 +271,54 @@ describe("switch-totality baseline staleness", () => {
       `switch (typeof raw) { case "string": break; case "number": break; }`,
     ].join("\n");
     expect(detectedSwitchKeys(source, FILE)).toEqual([baselineKey(FILE, "x.kind")]);
+  });
+
+  it("detects exactly the sites the rule would flag: guards, proven switches, out-of-scope and test files are not sites", () => {
+    const guard = [`switch (x.status) {`, `  case "done": drop(x);`, `}`].join("\n");
+    expect(detectedSwitchKeys(guard, FILE)).toEqual([]);
+    expect(detectedSwitchKeys(UNPROVEN, "engine/src/handlers/cli.ts")).toEqual([]);
+    expect(detectedSwitchKeys(UNPROVEN, "engine/src/core/example.test.ts")).toEqual([]);
+    // And the detector agrees with the handler site for site.
+    expect(detectedSwitchKeys(`${UNPROVEN}\n${UNPROVEN}`, FILE)).toHaveLength(lint(`${UNPROVEN}\n${UNPROVEN}`).length);
+  });
+
+  it("normalizes an absolute path to the repo-relative key form, like the handler", () => {
+    expect(detectedSwitchKeys(UNPROVEN, `/home/someone/dev/loom/${FILE}`)).toEqual([baselineKey(FILE, "x.kind")]);
+  });
+
+  it.each([
+    ["a `never` default", [
+      `function name(x: Event): string {`,
+      `  switch (x.kind) {`,
+      `    case "a":`,
+      `      return "a";`,
+      `    case "b":`,
+      `      return "b";`,
+      `    default: {`,
+      `      const unreachable: never = x;`,
+      `      return unreachable;`,
+      `    }`,
+      `  }`,
+      `}`,
+    ].join("\n")],
+    ["match(...).exhaustive()", [
+      `function name(x: Event): string {`,
+      `  switch (x.kind) {`,
+      `    case "a":`,
+      `      return match(x).with({ kind: "a" }, () => "a").exhaustive();`,
+      `    case "b":`,
+      `      return "b";`,
+      `  }`,
+      `  return "?";`,
+      `}`,
+    ].join("\n")],
+  ])("reports a baselined switch's entry unused once the switch is converted to %s", (_proof, converted) => {
+    const baseline = [baselineKey(FILE, "x.kind")];
+    // Before the conversion the entry is live: it excuses the one unproven site.
+    expect(unusedBaselineEntries(detectedSwitchKeys(UNPROVEN, FILE), baseline)).toEqual([]);
+    // After it, nothing consumes the entry — the paid debt shows up as stale.
+    expect(lint(converted, FILE, baseline)).toEqual([]);
+    expect(unusedBaselineEntries(detectedSwitchKeys(converted, FILE), baseline)).toEqual(baseline);
   });
 });
 

@@ -16,9 +16,11 @@ import { describe, expect, it } from "vitest";
 import { parseSecurityFindings } from "../../src/core/security-findings";
 import {
   adjudicateCandidates,
-  publicationBlockers,
+  adjudicateRun,
+  huntingProfiles,
   type VerificationVerdict,
 } from "../../src/core/security-adjudication";
+import { assignUnits, recordUnitResult, seedCoverageUnit, type CoverageLedger } from "../../src/core/security-coverage";
 
 const confirmed = (fingerprint: string) => ({
   verdict: "confirmed" as const,
@@ -143,13 +145,88 @@ describe("adjudication", () => {
     );
   });
 
-  it("names every reason a run may not publish", () => {
-    expect(publicationBlockers({ findings: findings(["a:1"]), verdicts: [], huntProfiles: ["focused-review"], ledgerSettled: true })).toEqual([
-      "confirmed claim a:1 has no verification verdict",
+  it("refuses a claim when the ledger records no hunting profile (unattributed)", () => {
+    const unattributed = adjudicateCandidates({ findings: findings(["authz:1"]), verdicts: [verdict("authz:1")], huntProfiles: [] });
+    expect(unattributed.confirmed).toEqual([]);
+    expect(unattributed.gaps).toEqual([{ kind: "unattributed", fingerprint: "authz:1" }]);
+  });
+});
+
+const HUNTER = "security-hunter-agent";
+
+/** One unit, assigned to `agentId` and — unless `settle` is false — settled
+ *  covered by it: the ledger shape `adjudicateRun` derives its INV-S3 facts from. */
+const ledgerOwnedBy = (agentId: string, settle = true): CoverageLedger => {
+  const seeded = seedCoverageUnit({
+    refs: { surface: "http:GET /export", boundary: "tenant", subsystem: "reports", attack_class: "idor" },
+    starting_paths: ["src/export.ts"],
+    ordinary_attack_class_block: null,
+    selected_companion_blocks: [],
+    excluded_blocks: [],
+    prior: null,
+  });
+  if (!seeded.ok) throw new Error(JSON.stringify(seeded.error));
+  const assigned = assignUnits([seeded.value], [{ coverageId: seeded.value.coverage_id, agentId }]);
+  if (!assigned.ok) throw new Error(JSON.stringify(assigned.error));
+  if (!settle) return assigned.value.ledger;
+  const owner = assigned.value.assigned[0].ownerId;
+  const result = recordUnitResult(assigned.value.ledger, {
+    coverageId: seeded.value.coverage_id,
+    agentId: owner,
+    wave: 1,
+    status: "covered",
+    reviewedPaths: ["src/export.ts"],
+    checks: [{ agent_id: owner, reviewed_paths: ["src/export.ts"], invariant: "reads are tenant-scoped", method: "source", result: "the predicate holds", artifact: null }],
+  });
+  if (!result.ok) throw new Error(JSON.stringify(result.error));
+  return result.value;
+};
+
+describe("huntingProfiles", () => {
+  it("derives the hunt profile from owners and archived attempts, through the owner grammar", () => {
+    expect(huntingProfiles(ledgerOwnedBy(HUNTER))).toEqual({ ok: true, value: ["focused-review"] });
+    const [unit] = ledgerOwnedBy(HUNTER);
+    const reassigned = [{ ...unit, agent_id: `${HUNTER}--2`, wave: 2, attempts: [{
+      wave: 1, status: "covered" as const, agent_id: HUNTER, reviewed_paths: unit.reviewed_paths,
+      local_checks: unit.local_checks, result_fingerprints: [], unresolved: [], reassignment_reason: "critic: again",
+    }] }];
+    expect(huntingProfiles(reassigned)).toEqual({ ok: true, value: ["focused-review"] });
+  });
+
+  it("fails closed on an owner — live or archived — the catalog cannot place", () => {
+    const [unit] = ledgerOwnedBy(HUNTER);
+    expect(huntingProfiles([{ ...unit, agent_id: "hunter-a" }])).toEqual({ ok: false, error: { kind: "unresolvable-hunter", agentId: "hunter-a" } });
+    const archived = [{ ...unit, agent_id: `${HUNTER}--2`, wave: 2, attempts: [{
+      wave: 1, status: "covered" as const, agent_id: "ghost-hunter", reviewed_paths: unit.reviewed_paths,
+      local_checks: unit.local_checks, result_fingerprints: [], unresolved: [], reassignment_reason: "critic: again",
+    }] }];
+    expect(huntingProfiles(archived)).toEqual({ ok: false, error: { kind: "unresolvable-hunter", agentId: "ghost-hunter" } });
+  });
+
+  it("is empty for a ledger that names no hunter", () => {
+    const [unit] = ledgerOwnedBy(HUNTER);
+    expect(huntingProfiles([{ ...unit, status: "planned", agent_id: null, reviewed_paths: [], local_checks: [] }])).toEqual({ ok: true, value: [] });
+  });
+});
+
+describe("adjudicateRun", () => {
+  it("names every reason a run may not publish, deriving hunt profile and settlement from the ledger", () => {
+    const run = (ledger: CoverageLedger, verdicts: readonly VerificationVerdict[]) => {
+      const decided = adjudicateRun({ ledger, findings: findings(["a:1"]), verdicts });
+      if (!decided.ok) throw new Error(JSON.stringify(decided.error));
+      return decided.value.blockers;
+    };
+    expect(run(ledgerOwnedBy(HUNTER), [])).toEqual(["confirmed claim a:1 has no verification verdict"]);
+    expect(run(ledgerOwnedBy(HUNTER, false), [verdict("a:1")])).toEqual(["coverage ledger still has planned, in-progress or blocked units"]);
+    expect(run(ledgerOwnedBy(HUNTER), [verdict("a:1", { agent: HUNTER, profile: "focused-review" })])).toEqual([
+      "confirmed claim a:1 was verified only on the hunt profile focused-review",
     ]);
-    expect(publicationBlockers({ findings: findings(["a:1"]), verdicts: [verdict("a:1")], huntProfiles: ["focused-review"], ledgerSettled: false })).toEqual([
-      "coverage ledger still has planned, in-progress or blocked units",
-    ]);
-    expect(publicationBlockers({ findings: findings(["a:1"]), verdicts: [verdict("a:1")], huntProfiles: ["focused-review"], ledgerSettled: true })).toEqual([]);
+    expect(run(ledgerOwnedBy(HUNTER), [verdict("a:1")])).toEqual([]);
+  });
+
+  it("refuses rather than adjudicates when an owner cannot be placed", () => {
+    const [unit] = ledgerOwnedBy(HUNTER);
+    const decided = adjudicateRun({ ledger: [{ ...unit, agent_id: "hunter-a" }], findings: findings(["a:1"]), verdicts: [verdict("a:1")] });
+    expect(decided).toEqual({ ok: false, error: { kind: "unresolvable-hunter", agentId: "hunter-a" } });
   });
 });

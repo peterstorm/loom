@@ -159,8 +159,10 @@ a ballot counts, whether a run may publish, and what the report says.
 The coverage ledger is a state machine over `(surface, boundary, subsystem,
 attack_class[, lifecycle])` cells. A unit has one owner per wave, evidence whose
 paths are exactly its checks' paths, and one terminal disposition. Reassignment
-archives the prior attempt with a reason, so a second hunter starts fresh by
-construction. Ids are canonical derivations of the cell, sorted and unique, so
+archives the prior attempt with a reason, and the ledger — not the caller — mints
+each attempt's owner id from the catalog agent (`security-hunter-agent`, then
+`security-hunter-agent--2`), so a second hunter starts fresh by construction and
+still names the catalog profile it ran on. Ids are canonical derivations of the cell, sorted and unique, so
 two runs that enumerate the same cells produce the same bytes.
 
 A finding has three verdicts, ported verbatim from the vendored upstream schema:
@@ -250,7 +252,7 @@ Determinism is scoped to what Loom can observe and own:
 - semantic design/review correctness still depends on models and user judgment;
 - a tool call with no `agent_id` cannot be attributed in a contended session, so it is neither recorded nor gated; Pi children run without the live phase gate, because Pi cannot name a tool call’s caller;
 - a legacy graph, whose Agents named no Task, may still attribute a result to the one executing Task (`inferSoleExecutingTask`), or on Pi to the first Task id in the parent's spawn prompt; such a guess settles only through the untrusted legacy resolution, which stores its evidence but leaves the Task pending for revalidation and reports the attribution as unproven, and it can never complete a Task, because completion requires engine-minted attempt authority;
-- report artifacts remain in an Agent-writable environment, with documented same-call forgery residuals;
+- report artifacts remain in an Agent-writable environment, with documented same-call forgery residuals; likewise a security sandbox receipt's nonce binds it to its artifact path but does not authenticate it against a hunter that writes the artifact itself, and a security verifier's `agent`/`profile` are self-reported and checked for catalog consistency only (see [Running a security audit](./security-audit.md#honest-limits));
 - the shell guard judges command text, not an abstract Bash execution graph;
 - Pi's Interactive Phase Transport supports standard relayed dialogs but not `ctx.ui.custom()` components inside RPC children;
 - legacy readers remain for historical evidence but are frozen in `core/legacy-archive.ts`.

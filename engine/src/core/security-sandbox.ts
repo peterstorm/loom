@@ -10,6 +10,18 @@
  * enforced — and what it FAILED to enforce, because a refused `ulimit` is
  * reported as unenforced rather than as applied.
  *
+ * What a receipt does and does not prove. `sandboxNonce` BINDS a receipt to the
+ * artifact path it was produced for; it does not AUTHENTICATE it. The nonce is
+ * derived from a path the hunter knows and is printed into the hunter's own
+ * prompt, so a hunter that writes the artifact itself can forge a receipt the
+ * engine will accept. A `SandboxRun` fact is therefore evidence against an
+ * accidental receipt, a receipt line the command printed, or one copied from
+ * another check — not against a dishonest hunter.
+ *
+ * The judgement — "does this artifact prove a bounded run, and if not, why" —
+ * lives here (`judgeLocalReceipt`), beside the gate it applies, so a shell
+ * reads the artifact and nothing else.
+ *
  * Pure module: no I/O, no clock, no randomness — and no `node:crypto`: it sits
  * inside the guarded machine's source closure, which must stay free of Node
  * builtins. The nonce below therefore uses a local deterministic hash.
@@ -18,9 +30,13 @@
 import { failure, success, type DomainResult } from "./orchestration-contract/identity";
 import { SECURITY_AUDIT_LIMITS, isSafeSourcePath, isVisibleText } from "./security-audit-contract";
 
-/** The exact environment names a sandboxed child receives. Everything else is
- *  dropped, so an ambient credential cannot ride along. */
-export const SANDBOX_ENV_ALLOWLIST = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TERM"] as const;
+/** The exact environment names a sandboxed child receives, in the order the
+ *  script's `ENV_ASSIGNMENTS` passes them. Everything else is dropped, so an
+ *  ambient credential cannot ride along. A receipt must report exactly this
+ *  list, so the receipt's fact and the enforced fact are one fact. */
+export const SANDBOX_ENV_ALLOWLIST = Object.freeze(["PATH", "HOME", "TMPDIR", "LANG", "TERM"] as const);
+
+export type SandboxEnvAllowlist = typeof SANDBOX_ENV_ALLOWLIST;
 
 export const SANDBOX_LIMIT_CEILINGS = Object.freeze({
   cpuSeconds: 3_600,
@@ -141,15 +157,18 @@ export type SandboxReceipt = Readonly<{
   schemaVersion: 1;
   exit: number | null;
   limits: SandboxLimits;
-  allowlistedEnv: readonly string[];
+  /** Always `SANDBOX_ENV_ALLOWLIST`: a receipt naming any other list is refused. */
+  allowlistedEnv: SandboxEnvAllowlist;
+  /** Measured AFTER the run; nothing capped the scratch while it ran. */
   scratchBytes: number | null;
   networkNamespace: true;
   targetReadOnly: true;
   readOnlyRoot: boolean;
-  /** The operator's home was bind-remounted read-only. Unlike the root remount
-   *  this one SUCCEEDS in a user namespace (we own that superblock), and home is
-   *  the one surface the uid mapping otherwise leaves writable — so it is
-   *  required, not merely recorded. */
+  /** A write to the operator's home FAILED inside the sandbox — observed by the
+   *  script's probe, not inferred from a remount that returned zero; an unknown
+   *  home reads as `false`. Unlike the root remount, the home bind-remount
+   *  succeeds in a user namespace, and home is the one surface the uid mapping
+   *  otherwise leaves writable — so it is required, not merely recorded. */
   homeReadOnly: boolean;
   /** Mountpoints that could not be remounted read-only: the residual exposure a
    *  report states instead of claiming a closed filesystem. */
@@ -182,8 +201,12 @@ export function parseSandboxReceiptValue(raw: unknown): DomainResult<SandboxRece
   const limits = parseSandboxLimits(record.limits);
   if (!limits.ok) return invalid(limits.error.message);
   const allowlistedEnv = record.allowlistedEnv;
-  if (!Array.isArray(allowlistedEnv) || allowlistedEnv.length > 32 || allowlistedEnv.some((name) => typeof name !== "string" || name.length === 0 || name.length > 64)) {
-    return invalid("allowlistedEnv must be a list of at most 32 non-empty names");
+  if (
+    !Array.isArray(allowlistedEnv) ||
+    allowlistedEnv.length !== SANDBOX_ENV_ALLOWLIST.length ||
+    allowlistedEnv.some((name, index) => name !== SANDBOX_ENV_ALLOWLIST[index])
+  ) {
+    return invalid(`allowlistedEnv must be exactly [${SANDBOX_ENV_ALLOWLIST.join(", ")}]`);
   }
   const scratchBytes = record.scratchBytes;
   if (scratchBytes !== null && (typeof scratchBytes !== "number" || !Number.isInteger(scratchBytes) || scratchBytes < 0)) {
@@ -204,7 +227,7 @@ export function parseSandboxReceiptValue(raw: unknown): DomainResult<SandboxRece
       schemaVersion: 1 as const,
       exit: exit as number | null,
       limits: limits.value,
-      allowlistedEnv: Object.freeze([...allowlistedEnv] as string[]),
+      allowlistedEnv: SANDBOX_ENV_ALLOWLIST,
       scratchBytes: scratchBytes as number | null,
       networkNamespace: true as const,
       targetReadOnly: true as const,
@@ -257,10 +280,7 @@ export function parseSandboxReceipt(stdout: string, nonce: string): DomainResult
   } catch {
     return failure({ kind: "invalid-sandbox-receipt" as const, message: "sandbox receipt is not JSON" });
   }
-  const validated = parseSandboxReceiptValue(parsed);
-  return validated.ok
-    ? validated
-    : failure({ kind: "invalid-sandbox-receipt" as const, message: validated.error.message });
+  return parseSandboxReceiptValue(parsed);
 }
 
 export type SandboxRequest = Readonly<{
@@ -329,21 +349,23 @@ export function sandboxCommand(request: SandboxRequest): DomainResult<readonly s
  *  as observed:
  *
  *   - the command exited zero;
- *   - the scratch footprint was MEASURED and is within `scratchMb` (an
- *     unmeasured footprint is not a passing one);
+ *   - the scratch footprint was MEASURED and is within `scratchMb`. This is a
+ *     POST-RUN footprint check: nothing caps the scratch while the command runs
+ *     (`--file-mb` bounds each single file, not the directory), so it proves
+ *     what was left behind, not the peak. An unmeasured footprint is not a
+ *     passing one;
  *   - the target was really remounted read-only — the script exits 127 when the
  *     bind remount fails, so `targetReadOnly: true` is proven, not asserted;
- *   - the operator's home was really remounted read-only (`homeReadOnly`) — the
- *     one surface the uid mapping leaves open, and the one remount a user
- *     namespace can always perform;
+ *   - home is closed (`homeReadOnly`): the script sets it only after a write to
+ *     home actually FAILED inside the sandbox, so a remount that silently
+ *     missed, or an unknown home, reads as open;
  *   - every ulimit was really applied.
  *
- *  `readOnlyRoot` is recorded but not required: a user namespace cannot remount
- *  a superblock it does not own (`mount -o remount,ro /` is denied on ext4). What
- *  that leaves open is reported as `unremountedMounts`, so the report can state
- *  the residual exposure instead of claiming a closed filesystem. Home is the
- *  exception that matters, because it is the writable surface through which a
- *  command could reach the operator's own files — and it is gated.
+ *  `readOnlyRoot` and `unremountedMounts` are RECORDED residual exposure, not
+ *  gated: a user namespace cannot remount a superblock it does not own
+ *  (`mount -o remount,ro /` is denied on ext4), so gating on them would refuse
+ *  every run. A report states that exposure instead of claiming a closed
+ *  filesystem. `describeUnboundedRun` names which gated condition failed.
  */
 export function sandboxWithinLimits(receipt: SandboxReceipt): boolean {
   return (
@@ -357,6 +379,38 @@ export function sandboxWithinLimits(receipt: SandboxReceipt): boolean {
     receipt.enforced.processes &&
     receipt.enforced.fileSize
   );
+}
+
+/** Why a receipt does not prove a bounded run, in one line a hunter can act
+ *  on: one reason per gated condition of `sandboxWithinLimits` that failed. */
+export function describeUnboundedRun(receipt: SandboxReceipt): string {
+  const failed = [
+    ...(receipt.exit === 0 ? [] : [`exit ${String(receipt.exit)}`]),
+    ...(receipt.scratchBytes === null ? ["scratch footprint unmeasured"] : []),
+    ...(receipt.scratchBytes !== null && receipt.scratchBytes > receipt.limits.scratchMb * 1024 * 1024
+      ? [`scratch ${receipt.scratchBytes} B over its ${receipt.limits.scratchMb} MB allowance`]
+      : []),
+    ...(receipt.enforced.cpu ? [] : ["cpu limit not applied"]),
+    ...(receipt.enforced.memory ? [] : ["memory limit not applied"]),
+    ...(receipt.enforced.processes ? [] : ["process limit not applied"]),
+    ...(receipt.enforced.fileSize ? [] : ["file-size limit not applied"]),
+    ...(receipt.homeReadOnly ? [] : ["home directory not remounted read-only"]),
+  ];
+  return failed.join("; ") || "unknown";
+}
+
+/** The judgement on one `local` check: the artifact's text must hold a receipt
+ *  bound to the nonce derived from the artifact path, and that receipt must
+ *  prove a bounded run. The failure is the one line the hunter is shown. The
+ *  binding defeats a command-printed or copied receipt, not a hunter that
+ *  writes the artifact itself (see the module doc). */
+export function judgeLocalReceipt(text: string, artifact: string): DomainResult<SandboxReceipt, string> {
+  const receipt = parseSandboxReceipt(text, sandboxNonce(artifact));
+  if (!receipt.ok) return failure(`local check ${artifact} is not a sandbox receipt — ${receipt.error.message}`);
+  if (!sandboxWithinLimits(receipt.value)) {
+    return failure(`local check ${artifact} does not prove a bounded run: ${describeUnboundedRun(receipt.value)}`);
+  }
+  return success(receipt.value);
 }
 
 /** The block a hunter prompt carries verbatim: what it may run and how. The
