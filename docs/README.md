@@ -120,6 +120,7 @@ Architecture Decision Records preserve why the system has its current shape:
 - [ADR-0062: Pure core, DomainResult end to end, simplicity axis](adr/ADR-0062-pure-core-domainresult-end-to-end-simplicity-axis.md)
 - [ADR-0063: Owner verification follows the family schedule](adr/ADR-0063-owner-verification-follows-the-family-schedule.md)
 - [ADR-0064: Security audit is a registered program, not a skill-side workflow](adr/ADR-0064-security-audit-is-a-registered-program.md)
+- [ADR-0065: Security ballots are bound to issued verifier spawns](adr/ADR-0065-security-ballots-are-bound-to-issued-verifier-spawns.md)
 
 ## Harness and migration notes
 
