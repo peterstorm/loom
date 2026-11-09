@@ -14,8 +14,17 @@
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
+import { match } from "ts-pattern";
 import type { TestReportSummary } from "./types";
-import { mergeSummaries, parseJunitXml, parseVitestJson, readJunitReport } from "./test-report";
+import type { TestRunOutput } from "./extract-evidence";
+import {
+  bunRunSummary,
+  mergeSummaries,
+  parseBunConsoleCollectionErrors,
+  parseJunitXml,
+  parseVitestJson,
+  readJunitReport,
+} from "./test-report";
 
 /** Extract an explicit report path from the command itself (vitest/jest --outputFile). */
 export function outputFileFromCommand(command: string): string | null {
@@ -208,18 +217,26 @@ export const CALL_START_SLACK_MS = 2000;
 
 const errMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-function explicitReportExists(path: string, label: string): boolean {
+/** Whether an explicitly named report is there: `absent` only for ENOENT, so a
+ *  path that exists but cannot be inspected is never mistaken for one the
+ *  runner did not write. The caller says what absence means and logs it. */
+type ExplicitReportPresence = "present" | "absent" | "uninspectable";
+
+function inspectExplicitReport(path: string, label: string): ExplicitReportPresence {
   try {
     statSync(path);
-    return true;
+    return "present";
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      process.stderr.write(`findReport: ${label} '${path}' does not exist\n`);
-    } else {
-      process.stderr.write(`findReport: cannot inspect ${label} '${path}': ${errMessage(error)}\n`);
-    }
-    return false;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "absent";
+    process.stderr.write(`findReport: cannot inspect ${label} '${path}': ${errMessage(error)}\n`);
+    return "uninspectable";
   }
+}
+
+function explicitReportExists(path: string, label: string): boolean {
+  const presence = inspectExplicitReport(path, label);
+  if (presence === "absent") process.stderr.write(`findReport: ${label} '${path}' does not exist\n`);
+  return presence === "present";
 }
 
 /**
@@ -287,27 +304,26 @@ function readJunitDir(dir: string, nowMs: number, callStartMs: number): DirRepor
       .map((f) => join(dir, f))
       .filter((p) => isFresh(p, nowMs, callStartMs));
     for (const path of fresh) {
-      const read = readJunitReport(readFileSync(path, "utf-8"));
-      switch (read.kind) {
-        case "parsed":
-          summaries.push(read.summary);
-          break;
-        case "not-junit":
+      // Exhaustive: a new read kind must decide here whether the dir can still vouch.
+      const refused = match(readJunitReport(readFileSync(path, "utf-8")))
+        .with({ kind: "parsed" }, ({ summary }) => {
+          summaries.push(summary);
+          return false;
+        })
+        .with({ kind: "not-junit" }, () => {
           // Named, so a skipped sibling is visible rather than silently absent.
           process.stderr.write(`findReport: skipping '${path}' — not a JUnit report (no testsuite/testcase element)\n`);
-          break;
-        case "refused":
+          return false;
+        })
+        .with({ kind: "refused" }, () => {
           // Named, so the operator can tell a refused report from no report.
           process.stderr.write(
             `findReport: malformed JUnit report '${path}', or its per-file results disagree with its counts — the run's reports cannot vouch\n`,
           );
-          return VOID_DIR_REPORTS;
-        default: {
-          // A new read kind must decide here whether the dir can still vouch.
-          const unhandled: never = read;
-          throw new Error(`readJunitDir: unhandled JUnit read ${JSON.stringify(unhandled)}`);
-        }
-      }
+          return true;
+        })
+        .exhaustive();
+      if (refused) return VOID_DIR_REPORTS;
     }
     return Object.freeze({ kind: "reports", summaries: Object.freeze(summaries) });
   } catch (e) {
@@ -349,7 +365,15 @@ const JVM_RUNNER_PREFIXES = ["mvn", "mvnw", "./mvnw", "gradle", "./gradlew"];
  * SEGMENT (the head-matched simple command from classifyTestCommand — never
  * the whole prose command line). Sources, scoped to the runner family so an
  * artifact can't vouch for an unrelated command:
- * 1. Explicit Bun `--reporter=junit --reporter-outfile=<path>` JUnit XML
+ * 1. Explicit Bun `--reporter=junit --reporter-outfile=<path>` JUnit XML,
+ *    joined with the collection errors Bun's console reported
+ *    (`bunRunSummary`) — Bun's JUnit omits a test file that fails to load,
+ *    and Bun writes no report at all when every file fails to load, so the
+ *    console is where that fact lives. The console vouches only beside the
+ *    JUnit report it completes, or in place of one Bun did not write, and
+ *    only for a run whose non-zero exit Loom attributes to this segment
+ *    (`run.exit`): a vetoed, stale or malformed report leaves the run
+ *    untrusted, console and all (INV-8).
  * 2. Explicit `--outputFile` path on the segment (vitest/jest JSON) —
  *    explicit paths are rejected when `vetoExplicitPath` says the agent wrote
  *    them earlier this epoch (an agent-authored artifact must not mint a pass)
@@ -374,15 +398,19 @@ const JVM_RUNNER_PREFIXES = ["mvn", "mvnw", "./mvnw", "gradle", "./gradlew"];
  * closed, matching the trust-minting doctrine. Source 3 (stdout JSON) is
  * inherently call-scoped (the command printed it during THIS call) and
  * stays allowed without a stamp.
+ *
+ * `run` is the finished run: its captured output (the stdout JSON of source
+ * 3, Bun's console for source 1) and the exit attributed to the segment.
  */
 export function findReport(
   segment: string,
   cwd: string,
-  stdout: string,
+  run: TestRunOutput,
   times: { readonly nowMs: number; readonly callStartMs: number | null },
   vetoExplicitPath: (absolutePath: string) => boolean = () => false,
 ): TestReportSummary | null {
   const { nowMs, callStartMs } = times;
+  const stdout = run.output;
   const noStamp = (source: string): void => {
     process.stderr.write(
       `findReport: no call-start stamp for this tool call — ${source} cannot vouch (disk artifacts require proof they postdate the call; failing closed)\n`,
@@ -392,21 +420,29 @@ export function findReport(
   const bunJunit = bunJunitOutputFileFromCommand(segment);
   if (bunJunit) {
     const path = isAbsolute(bunJunit) ? bunJunit : resolve(cwd, bunJunit);
+    const collectionErrors = run.exit !== null && run.exit !== 0 ? parseBunConsoleCollectionErrors(stdout) : [];
     if (vetoExplicitPath(path)) {
       process.stderr.write(
         `findReport: rejecting --reporter-outfile '${path}' — the path was written by the agent this epoch; an agent-authored artifact cannot vouch as a report\n`,
       );
     } else if (callStartMs === null) {
       noStamp(`--reporter-outfile '${path}'`);
-    } else if (explicitReportExists(path, "Bun JUnit report") && isFresh(path, nowMs, callStartMs)) {
-      try {
-        const parsed = parseJunitXml(readFileSync(path, "utf-8"));
-        if (parsed) return parsed;
-        process.stderr.write(`findReport: malformed Bun JUnit report '${path}'\n`);
-      } catch (e) {
-        process.stderr.write(
-          `findReport: cannot read Bun JUnit report '${path}': ${errMessage(e)}\n`,
-        );
+    } else {
+      const presence = inspectExplicitReport(path, "Bun JUnit report");
+      if (presence === "absent") {
+        const consoleOnly = bunRunSummary(null, collectionErrors);
+        if (consoleOnly) return consoleOnly;
+        process.stderr.write(`findReport: Bun JUnit report '${path}' does not exist\n`);
+      } else if (presence === "present" && isFresh(path, nowMs, callStartMs)) {
+        try {
+          const parsed = parseJunitXml(readFileSync(path, "utf-8"));
+          if (parsed) return bunRunSummary(parsed, collectionErrors);
+          process.stderr.write(`findReport: malformed Bun JUnit report '${path}'\n`);
+        } catch (e) {
+          process.stderr.write(
+            `findReport: cannot read Bun JUnit report '${path}': ${errMessage(e)}\n`,
+          );
+        }
       }
     }
   }

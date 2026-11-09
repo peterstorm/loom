@@ -104,7 +104,7 @@ describe("a documented form fed a fresh runner-written report judges trusted-pas
       const callStartMs = Date.now() - 1000;
       writeFileSync(reportPath, body); // the runner's write, during the call
       const classified = classifyTestCommandDetailed(cmd)!;
-      const report = findReport(classified.segment, "/elsewhere", "", { nowMs: Date.now(), callStartMs });
+      const report = findReport(classified.segment, "/elsewhere", { output: "", exit: null }, { nowMs: Date.now(), callStartMs });
       expect(judgeTestRun(attributeExit(0, classified), report)).toEqual({ verdict: "trusted-pass" });
     });
   }

@@ -400,36 +400,32 @@ export function isBindingFresh(args: {
 function parseReportField(v: unknown): TestReportSummary | null {
   if (typeof v !== "object" || v === null) return null;
   const o = v as Record<string, unknown>;
-  if (o.source !== "vitest-json" && o.source !== "junit-xml") return null;
+  if (o.source !== "vitest-json" && o.source !== "junit-xml" && o.source !== "bun-console") return null;
   return parseReportSummary(o.total, o.failed, o.source, o.files);
 }
 
 function parseEvent(raw: unknown): Evidence | null {
   if (typeof raw !== "object" || raw === null) return null;
   const o = raw as Record<string, unknown>;
-  switch (o.kind) {
-    case "FileRead":
-      return typeof o.path === "string" && o.path !== "" ? { kind: o.kind, path: o.path } : null;
-    case "FileWrite": {
+  return match(o.kind)
+    .returnType<Evidence | null>()
+    .with("FileRead", () => typeof o.path === "string" && o.path !== "" ? { kind: "FileRead", path: o.path } : null)
+    .with("FileWrite", () => {
       if (typeof o.path !== "string" || o.path === "") return null;
       // Absent via = "tool" (old records — only tool writes were minted
       // historically); the parse boundary makes the default explicit so the
       // domain type carries `via` unconditionally. An UNRECOGNIZED via fails
       // closed to "shell": the write still vetoes/demotes but never advances
       // a guard — the fail-closed direction for both consumers.
-      if (o.via === undefined) return { kind: o.kind, path: o.path, via: "tool" };
-      const via = o.via === "tool" ? "tool" : "shell";
-      return { kind: o.kind, path: o.path, via };
-    }
-    case "TestRun": {
+      if (o.via === undefined) return { kind: "FileWrite", path: o.path, via: "tool" };
+      return { kind: "FileWrite", path: o.path, via: o.via === "tool" ? "tool" : "shell" };
+    })
+    .with("TestRun", () => {
       if (typeof o.command !== "string") return null;
       const exit = typeof o.exit === "number" ? o.exit : null;
-      const report = parseReportField(o.report);
-      return { kind: "TestRun", command: o.command, exit, report };
-    }
-    default:
-      return null;
-  }
+      return { kind: "TestRun", command: o.command, exit, report: parseReportField(o.report) };
+    })
+    .otherwise(() => null);
 }
 
 export type EvidenceLineParse =

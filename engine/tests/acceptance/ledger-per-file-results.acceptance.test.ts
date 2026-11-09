@@ -212,7 +212,7 @@ describe("TestRun per-file results at capture (CT-1)", () => {
     const dir = projectDir();
     writeReport(dir, ".loom/completion-reports/verify.junit.xml", VITEST_JUNIT);
 
-    const summary = findReport("npx vitest run --reporter=junit", dir, "", times());
+    const summary = findReport("npx vitest run --reporter=junit", dir, { output: "", exit: null }, times());
 
     expect(summary).toMatchObject({ total: 5, failed: 2, source: "junit-xml" });
     expect(perFile(summary)).toEqual(recorded([
@@ -226,7 +226,7 @@ describe("TestRun per-file results at capture (CT-1)", () => {
     const dir = projectDir();
     const report = writeReport(dir, "reports/vitest.json", vitestJson(dir));
 
-    const summary = findReport(`npx vitest run --reporter=json --outputFile=${report}`, dir, "", times());
+    const summary = findReport(`npx vitest run --reporter=json --outputFile=${report}`, dir, { output: "", exit: null }, times());
 
     expect(summary).toMatchObject({ total: 4, failed: 1, source: "vitest-json" });
     expect(perFile(summary)).toEqual(recorded([
@@ -247,7 +247,7 @@ describe("TestRun per-file results at capture (CT-1)", () => {
       [{ name: "replayChangesNothing" }],
     ));
 
-    const summary = findReport("mvn test", dir, "", times());
+    const summary = findReport("mvn test", dir, { output: "", exit: null }, times());
 
     expect(summary).toMatchObject({ total: 3, failed: 1, source: "junit-xml" });
     expect(perFile(summary)).toEqual(recorded([
@@ -259,11 +259,11 @@ describe("TestRun per-file results at capture (CT-1)", () => {
   it("FR-001: a file whose only failure is a collection error is distinguishable from a file with a failing testcase", () => {
     const dir = projectDir();
     writeReport(dir, ".loom/completion-reports/verify.junit.xml", VITEST_JUNIT);
-    const junit = perFile(findReport("npx vitest run --reporter=junit", dir, "", times()));
+    const junit = perFile(findReport("npx vitest run --reporter=junit", dir, { output: "", exit: null }, times()));
     const json = perFile(findReport(
       `npx vitest run --reporter=json --outputFile=${writeReport(dir, "reports/vitest.json", vitestJson(dir))}`,
       dir,
-      "",
+      { output: "", exit: null },
       times(),
     ));
 
@@ -281,7 +281,7 @@ describe("TestRun per-file results at capture (CT-1)", () => {
   it("AS-001: the recorded per-file results survive the ledger round trip alongside command, exit and counts", () => {
     const dir = projectDir();
     writeReport(dir, ".loom/completion-reports/verify.junit.xml", VITEST_JUNIT);
-    const summary = findReport("npx vitest run --reporter=junit", dir, "", times());
+    const summary = findReport("npx vitest run --reporter=junit", dir, { output: "", exit: null }, times());
 
     const run = readBack(testRunLine(summary, 1));
 
@@ -300,7 +300,7 @@ describe("TestRun per-file results at capture (CT-1)", () => {
     const summary = findReport(
       `npx vitest run tests/green.test.ts tests/never-reported.test.ts --reporter=json --outputFile=${report}`,
       dir,
-      "",
+      { output: "", exit: null },
       times(),
     );
 
@@ -321,8 +321,8 @@ describe("TestRun per-file results at capture (CT-1)", () => {
     const command = `npx vitest run tests/green.test.ts --reporter=json --outputFile=${report}`;
     mkdirSync(join(dir, "engine"), { recursive: true });
 
-    const fromRoot = perFile(findReport(command, dir, "", times()));
-    const fromSubdirectory = perFile(findReport(command, join(dir, "engine"), "", times()));
+    const fromRoot = perFile(findReport(command, dir, { output: "", exit: null }, times()));
+    const fromSubdirectory = perFile(findReport(command, join(dir, "engine"), { output: "", exit: null }, times()));
 
     expect(isRecorded(fromRoot)).toBe(true);
     expect(fromSubdirectory).toEqual(fromRoot);

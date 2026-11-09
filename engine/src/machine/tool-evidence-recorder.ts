@@ -27,7 +27,7 @@ import { findReport } from "./report-discovery";
 import type { Evidence } from "./types";
 
 export const recordToolEvidence: RecordToolEvidenceFn = (target, call, { registry, nowMs }) => {
-  const minted = extractEvidence(call, (segment, stdout, currentCallWrites) => {
+  const minted = extractEvidence(call, (segment, run, currentCallWrites) => {
     // Computed lazily: discovery runs only for classified test commands. The
     // read-time resolve is a no-op for records minted absolute and covers
     // old relative-path records.
@@ -40,7 +40,7 @@ export const recordToolEvidence: RecordToolEvidenceFn = (target, call, { registr
     // No call id or no stamp → null, and findReport fails closed on the
     // artifact-backed sources.
     const callStartMs = call.callId === null ? null : registry.callStartFor(target.stamps, call.callId);
-    return findReport(segment, call.cwd, stdout, { nowMs: nowMs(), callStartMs }, (path) => vetoed.has(path));
+    return findReport(segment, call.cwd, run, { nowMs: nowMs(), callStartMs }, (path) => vetoed.has(path));
   });
   const events: readonly Evidence[] = minted.map((event) =>
     event.kind === "FileWrite" ? { ...event, path: resolve(call.cwd, event.path) } : event,

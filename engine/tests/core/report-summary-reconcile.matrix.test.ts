@@ -153,10 +153,10 @@ function captured(fixture: Fixture): TestReportSummary | null {
   const dir = projectDir();
   if (fixture.source === "vitest-json") {
     const report = write(dir, "reports/vitest.json", vitestJson(fixture));
-    return findReport(`npx vitest run --reporter=json --outputFile=${report}`, dir, "", times());
+    return findReport(`npx vitest run --reporter=json --outputFile=${report}`, dir, { output: "", exit: null }, times());
   }
   write(dir, ".loom/completion-reports/verify.junit.xml", junitXml(fixture));
-  return findReport("npm run test:unit", dir, "", times());
+  return findReport("npm run test:unit", dir, { output: "", exit: null }, times());
 }
 
 /** Surefire writes one report per class; findReport merges them. The claim
@@ -175,14 +175,14 @@ function capturedSurefire(fixture: Fixture): TestReportSummary | null {
   };
   write(dir, "target/surefire-reports/TEST-0.xml", junitXml(firstClaim));
   rest.forEach((entry, index) => write(dir, `target/surefire-reports/TEST-${index + 1}.xml`, junitSuite(entry)));
-  return findReport("mvn test", dir, "", times());
+  return findReport("mvn test", dir, { output: "", exit: null }, times());
 }
 
 /** Bun writes one JUnit report, named by `--reporter-outfile`. */
 function capturedBun(fixture: Fixture): TestReportSummary | null {
   const dir = projectDir();
   const report = write(dir, "reports/bun.xml", junitXml(fixture));
-  return findReport(`bun test --reporter=junit --reporter-outfile=${report}`, dir, "", times());
+  return findReport(`bun test --reporter=junit --reporter-outfile=${report}`, dir, { output: "", exit: null }, times());
 }
 
 type EntryPoint = Readonly<{
@@ -239,7 +239,7 @@ describe("INV-8 at capture: a run's reports vouch together or not at all", () =>
     write(dir, ".loom/completion-reports/a.junit.xml", junitXml(consistent));
     write(dir, ".loom/completion-reports/b.junit.xml", '<testsuite tests="1" failures="2"/>');
 
-    expect(findReport("npm run test:unit", dir, "", times())).toBeNull();
+    expect(findReport("npm run test:unit", dir, { output: "", exit: null }, times())).toBeNull();
   });
 
   it("AS-002: one unreconciled Surefire report in one module makes the whole multi-module capture untrusted", () => {
@@ -250,7 +250,7 @@ describe("INV-8 at capture: a run's reports vouch together or not at all", () =>
     write(dir, "api/target/surefire-reports/TEST-B.xml",
       `<testsuite tests="1" failures="2">${junitSuite(red).replace(/^<testsuite[^>]*>|<\/testsuite>$/g, "")}</testsuite>`);
 
-    expect(findReport("mvn test", dir, "", times())).toBeNull();
+    expect(findReport("mvn test", dir, { output: "", exit: null }, times())).toBeNull();
   });
 
   it("AS-002: Maven failsafe's failsafe-summary.xml beside a valid TEST-*.xml is not a report, so the capture stays trusted", () => {
@@ -265,7 +265,7 @@ describe("INV-8 at capture: a run's reports vouch together or not at all", () =>
     <failureMessage xsi:nil="true" />
 </failsafe-summary>`);
 
-    const summary = findReport("mvn verify", dir, "", times());
+    const summary = findReport("mvn verify", dir, { output: "", exit: null }, times());
 
     expect(summary).toMatchObject({ total: 2, failed: 1, source: "junit-xml" });
     expect(summary?.files).toEqual(recorded([result("com.example.ItA", 2, 1)]));
@@ -277,14 +277,14 @@ describe("INV-8 at capture: a run's reports vouch together or not at all", () =>
     write(dir, "target/failsafe-reports/TEST-com.example.ItB.xml", '<testsuite tests="1" failures="2"/>');
     write(dir, "target/failsafe-reports/failsafe-summary.xml", '<failsafe-summary result="255" timeout="false"><completed>3</completed></failsafe-summary>');
 
-    expect(findReport("mvn verify", dir, "", times())).toBeNull();
+    expect(findReport("mvn verify", dir, { output: "", exit: null }, times())).toBeNull();
   });
 
   it("AS-002: a dir holding only non-report XML yields no report, not a vouching one", () => {
     const dir = projectDir();
     write(dir, "target/failsafe-reports/failsafe-summary.xml", '<failsafe-summary timeout="false"><completed>0</completed></failsafe-summary>');
 
-    expect(findReport("mvn verify", dir, "", times())).toBeNull();
+    expect(findReport("mvn verify", dir, { output: "", exit: null }, times())).toBeNull();
   });
 
   it("AS-001: every trusted report of a run merges into one summary carrying all its files", () => {
@@ -292,7 +292,7 @@ describe("INV-8 at capture: a run's reports vouch together or not at all", () =>
     write(dir, "core/target/surefire-reports/TEST-A.xml", junitSuite(result("com.example.A", 2, 0)));
     write(dir, "api/target/surefire-reports/TEST-B.xml", junitSuite(result("com.example.B", 1, 1)));
 
-    const summary = findReport("mvn test", dir, "", times());
+    const summary = findReport("mvn test", dir, { output: "", exit: null }, times());
 
     expect(summary).toMatchObject({ total: 3, failed: 1, source: "junit-xml" });
     expect(summary?.files?.kind === "recorded" ? [...summary.files.results].sort(byFile) : summary?.files)

@@ -68,7 +68,7 @@ function contract(freeze: AcceptanceContract["freeze"] = { state: "awaiting-red"
 }
 
 const testcase = (name: string, outcome: ReportTestcase["outcome"], failureType: string | null = outcome === "failed" ? "AssertionError" : null, classname = "tests/acceptance/payload.acceptance.test.ts"): ReportTestcase =>
-  ({ classname, name, outcome, failureType });
+  ({ file: classname, classname, name, outcome, failureType });
 
 const RED_REPORT: readonly ReportTestcase[] = [
   testcase("plain", "passed", null, "tests/core/other.test.ts"),

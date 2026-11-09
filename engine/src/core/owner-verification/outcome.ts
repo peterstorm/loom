@@ -67,7 +67,7 @@ function readReport(bytes: Uint8Array, exitCode: number | null, signal: string |
   const parsed = parseJunitTestcases(bytes);
   if (!parsed.ok) return infrastructure("report-unreadable", `the report does not parse: ${parsed.error.message}`);
   const executed = parsed.value.filter((testcase) =>
-    testcase.outcome !== "skipped" && attributeReportedFile([matrixTest], testcase.classname, null) === matrixTest);
+    testcase.outcome !== "skipped" && attributeReportedFile([matrixTest], testcase.file, null) === matrixTest);
   if (executed.length === 0) {
     return infrastructure("matrix-test-not-collected", `the report holds no executed testcase of ${matrixTest}`);
   }

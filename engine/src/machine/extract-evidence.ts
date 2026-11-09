@@ -190,6 +190,15 @@ export function attributeExit(exit: number | null, classified: ClassifiedTestCom
 }
 
 /**
+ * One finished test run as the shell observed it: the output the harness
+ * captured, and the exit Loom attributes to the classified test segment
+ * (`attributeExit`: null when unknown, or when the line's exit is not the
+ * segment's). Report discovery reads console facts (Bun's collection errors)
+ * only from a run whose non-zero exit is the segment's own.
+ */
+export type TestRunOutput = Readonly<{ output: string; exit: number | null }>;
+
+/**
  * Report discovery for one classified test segment, supplied by the shell.
  * `currentCallWrites` are the write targets of THIS command line (raw,
  * unresolved): the lookup must veto them too, because a one-call
@@ -198,7 +207,7 @@ export function attributeExit(exit: number | null, classified: ClassifiedTestCom
  */
 export type FindReportForSegment = (
   segment: string,
-  stdout: string,
+  run: TestRunOutput,
   currentCallWrites: readonly string[],
 ) => TestReportSummary | null;
 
@@ -263,11 +272,12 @@ function bashEvidence(
   const classified = classifyTestCommandDetailed(command);
   if (classified !== null) {
     const outcome = bashRun(bashOutcome);
-    const report = findReportForSegment(classified.segment, outcome.stdout, shellWrites);
     // The line's exit is attributed to the test segment only when the
     // composition proves ownership (attributeExit) — `false && npx vitest
     // …; true` exits 0 without vitest running, and must not classify as a
     // passing run.
+    const exit = attributeExit(outcome.exit, classified);
+    const report = findReportForSegment(classified.segment, { output: outcome.stdout, exit }, shellWrites);
     //
     // A BACKGROUNDED test segment (`mvn test &`) drops its report too, not
     // just its exit. `judgeTestRun` treats an unknown exit beside a green
@@ -291,7 +301,7 @@ function bashEvidence(
     events.push({
       kind: "TestRun",
       command,
-      exit: attributeExit(outcome.exit, classified),
+      exit,
       report: unfinished ? null : report,
     });
   }
