@@ -5,8 +5,7 @@ import {
 } from "../../src/core/wave-gate-checks";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import type { Task } from "../../src/types";
-import { pendingTaskProof } from "../fixtures/task-lifecycle";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
+import { pendingTaskProof, observedEvidence, trustedPassEvidence } from "../fixtures/task-lifecycle";
 
 const task = (verification_policy: Task["verification_policy"]): Task => ({
   id: "T1",
@@ -38,13 +37,7 @@ describe("VerificationPolicy Wave Gate parity", () => {
         newTests: { kind: "waived", reason: "existing-tests-sufficient" },
       },
       declaredArtifacts: [],
-    }, {
-      contractConformance: CONFORMANCE_NOT_OWED,
-      taskCompleted: true,
-      testResult: { verdict: "trusted-pass" },
-      filesModified: [],
-      newTestsWritten: false,
-    });
+    }, trustedPassEvidence([], { newTestsWritten: false }));
     expect(proof.state).toBe("satisfied");
   });
 
@@ -65,13 +58,7 @@ describe("VerificationPolicy Wave Gate parity", () => {
         newTests: { kind: "required" },
       },
       declaredArtifacts: [],
-    }, {
-      contractConformance: CONFORMANCE_NOT_OWED,
-      taskCompleted: true,
-      filesModified: [],
-      newTestsWritten: true,
-      newTestEvidence: "one property",
-    });
+    }, observedEvidence({ taskCompleted: true, filesModified: [], newTestsWritten: true, newTestEvidence: "one property" }));
     expect(proof.state).toBe("satisfied");
   });
 });

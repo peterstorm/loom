@@ -6,12 +6,12 @@
  * present file is `presentSkeletonOf`'s (INV-4 owner); this module only maps
  * it to an action. Pure.
  *
- * Two callers iterate differently over the same decision:
- * - `candidate-driven` (the contract Task's stop): one action per canonical
- *   skeleton, in candidate order. A missing file is created; a file anyone
- *   else wrote is left alone, unrecorded.
- * - `record-driven` (the Contract Revision): one action per skeleton record,
- *   in record order. A deleted file needs nothing (the next registration
+ * Two planners iterate differently over the same decision:
+ * - `planCandidateRefresh` (the contract Task's stop): one action per
+ *   canonical skeleton, in candidate order. A missing file is created; a file
+ *   anyone else wrote is left alone, unrecorded.
+ * - `planRecordRefresh` (the Contract Revision): one action per skeleton
+ *   record, in record order. A deleted file needs nothing (the next registration
  *   regenerates it); a modified one is flagged stale; an untouched one whose
  *   binding no longer resolves has no canonical bytes and is left as it is.
  *
@@ -20,7 +20,7 @@
  */
 
 import { normalizePlanPath, samePlanPath } from "../plan-path-match";
-import { presentSkeletonOf } from "./outcomes";
+import { ABSENT, presentSkeletonOf } from "./outcomes";
 import type { SkeletonCandidate } from "./records";
 import type { PathObservation, SkeletonRecord } from "./types";
 
@@ -37,10 +37,6 @@ export type StaleAction = Readonly<{ kind: "stale"; record: SkeletonRecord }>;
 export type CandidateRefreshAction = CreateAction | AdoptAction | RefreshAction;
 /** What a Contract Revision does to one recorded skeleton. */
 export type RecordRefreshAction = AdoptAction | RefreshAction | StaleAction;
-
-type SkeletonRefreshIteration = "candidate-driven" | "record-driven";
-
-const ABSENT: PathObservation = Object.freeze({ kind: "absent" });
 
 /** What was observed at a path, looked up by normalized path; absent when nothing was. */
 type ObservationAt = (path: string) => PathObservation;
@@ -62,26 +58,36 @@ function untouchedAction(
   return present === "canonical" ? { kind: "adopt", candidate } : { kind: "refresh", candidate, expectedSha256: sha256 };
 }
 
-function candidateDriven(
+/**
+ * The action each canonical skeleton needs, in candidate order, given what is
+ * on disk and the canonical skeletons of the contract's current types.
+ */
+export function planCandidateRefresh(
   records: readonly SkeletonRecord[],
-  observed: ObservationAt,
+  observations: ReadonlyMap<string, PathObservation>,
   candidates: readonly SkeletonCandidate[],
 ): readonly CandidateRefreshAction[] {
-  return candidates.flatMap((candidate): readonly CandidateRefreshAction[] => {
+  const observed = observationAt(observations);
+  return Object.freeze(candidates.flatMap((candidate): readonly CandidateRefreshAction[] => {
     const observation = observed(candidate.skeleton.path);
     if (observation.kind === "absent") return [{ kind: "create", candidate }];
     const record = records.find((recorded) => samePlanPath(recorded.path, candidate.skeleton.path));
     const action = untouchedAction(record, observation.sha256, candidate);
     return action === null ? [] : [action];
-  });
+  }));
 }
 
-function recordDriven(
+/**
+ * The action each skeleton record needs, in record order, given what is on
+ * disk and the canonical skeletons of the contract's current types.
+ */
+export function planRecordRefresh(
   records: readonly SkeletonRecord[],
-  observed: ObservationAt,
+  observations: ReadonlyMap<string, PathObservation>,
   candidates: readonly SkeletonCandidate[],
 ): readonly RecordRefreshAction[] {
-  return records.flatMap((record): readonly RecordRefreshAction[] => {
+  const observed = observationAt(observations);
+  return Object.freeze(records.flatMap((record): readonly RecordRefreshAction[] => {
     const observation = observed(record.path);
     if (observation.kind === "absent") return [];
     const candidate = candidates.find(({ skeleton }) => samePlanPath(skeleton.path, record.path));
@@ -90,34 +96,5 @@ function recordDriven(
     }
     const action = untouchedAction(record, observation.sha256, candidate);
     return [action ?? { kind: "stale", record }];
-  });
-}
-
-/**
- * The action each canonical skeleton (`candidate-driven`) or each record
- * (`record-driven`) needs, given what is on disk and the canonical skeletons
- * of the contract's current types.
- */
-export function planSkeletonRefresh(
-  iteration: "candidate-driven",
-  records: readonly SkeletonRecord[],
-  observations: ReadonlyMap<string, PathObservation>,
-  candidates: readonly SkeletonCandidate[],
-): readonly CandidateRefreshAction[];
-export function planSkeletonRefresh(
-  iteration: "record-driven",
-  records: readonly SkeletonRecord[],
-  observations: ReadonlyMap<string, PathObservation>,
-  candidates: readonly SkeletonCandidate[],
-): readonly RecordRefreshAction[];
-export function planSkeletonRefresh(
-  iteration: SkeletonRefreshIteration,
-  records: readonly SkeletonRecord[],
-  observations: ReadonlyMap<string, PathObservation>,
-  candidates: readonly SkeletonCandidate[],
-): readonly (CandidateRefreshAction | RecordRefreshAction)[] {
-  const observed = observationAt(observations);
-  return Object.freeze(iteration === "candidate-driven"
-    ? candidateDriven(records, observed, candidates)
-    : recordDriven(records, observed, candidates));
+  }));
 }

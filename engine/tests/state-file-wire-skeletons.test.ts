@@ -166,12 +166,9 @@ function refusal(raw: Record<string, unknown>): string {
   return parsed.error;
 }
 
-const withBinding = (index: number, patch: Readonly<Record<string, unknown>>) =>
-  BINDINGS.map((binding, at) => (at === index ? { ...binding, ...patch } : binding));
-const withRecord = (index: number, patch: Readonly<Record<string, unknown>>) =>
-  RECORDS.map((entry, at) => (at === index ? { ...entry, ...patch } : entry));
-const withOutcome = (index: number, outcome: unknown) =>
-  OUTCOMES.map((entry, at) => (at === index ? { ...entry, outcome } : entry));
+/** `list` with the entry at `index` patched: a field set to `undefined` drops off the wire. */
+const patchAt = <T extends object>(list: readonly T[], index: number, patch: Readonly<Record<string, unknown>>): readonly T[] =>
+  list.map((entry, at) => (at === index ? { ...entry, ...patch } : entry));
 
 describe("a graph populated before G2 on the State File wire", () => {
   it("loads unchanged: no export_bindings, no skeletons, no Task skeleton_outcomes", () => {
@@ -217,21 +214,21 @@ describe("an export name that is also an alias of its binding", () => {
   const selfAliased = [{ name: "PriceOrderFn", alias: "PriceOrderFn" }];
 
   it("loads on a Java binding: a Java field and a type never share a namespace", () => {
-    const graph = loaded(g2Graph({ bindings: withBinding(3, { exports: selfAliased }) }));
+    const graph = loaded(g2Graph({ bindings: patchAt(BINDINGS, 3, { exports: selfAliased }) }));
     expect(viaDisk(graph.export_bindings?.find(({ path }) => path === JAVA_PRICING))).toEqual({
       path: JAVA_PRICING, contract: "CT-1", exports: selfAliased,
     });
   });
 
   it("loads on a binding no skeleton is generated for", () => {
-    const graph = loaded(g2Graph({ bindings: withBinding(2, { exports: selfAliased }) }));
+    const graph = loaded(g2Graph({ bindings: patchAt(BINDINGS, 2, { exports: selfAliased }) }));
     expect(viaDisk(graph.export_bindings?.find(({ path }) => path === RATES))).toEqual({
       path: RATES, contract: "CT-1", exports: selfAliased,
     });
   });
 
   it("is refused on a TypeScript binding", () => {
-    expect(refusal(g2Graph({ bindings: withBinding(1, { exports: selfAliased }) })))
+    expect(refusal(g2Graph({ bindings: patchAt(BINDINGS, 1, { exports: selfAliased }) })))
       .toMatch(/export_bindings\[1\] binds the export name 'PriceOrderFn', which is also an alias of the binding \(name-collides-with-alias\)/);
   });
 });
@@ -240,29 +237,29 @@ describe("export_bindings refusals", () => {
   it.each([
     ["a non-array stamp", { bindings: { path: PRICING } }, /export_bindings must be an array/],
     ["a non-record entry", { bindings: ["src/order/pricing.ts"] }, /export_bindings\[0\]/],
-    ["an extra field", { bindings: withBinding(0, { origin: "plan" }) }, /export_bindings\[0\].*origin/],
-    ["a missing contract", { bindings: withBinding(0, { contract: undefined }) }, /export_bindings\[0\] is missing field\(s\): contract/],
-    ["an unsafe path", { bindings: withBinding(0, { path: "../escape.ts" }) }, /export_bindings\[0\]\.path/],
-    ["an absolute path", { bindings: withBinding(0, { path: "/etc/pricing.ts" }) }, /export_bindings\[0\]\.path/],
-    ["an unnormalized path", { bindings: withBinding(0, { path: "./src/order/pricing.ts" }) }, /export_bindings\[0\]\.path/],
+    ["an extra field", { bindings: patchAt(BINDINGS, 0, { origin: "plan" }) }, /export_bindings\[0\].*origin/],
+    ["a missing contract", { bindings: patchAt(BINDINGS, 0, { contract: undefined }) }, /export_bindings\[0\] is missing field\(s\): contract/],
+    ["an unsafe path", { bindings: patchAt(BINDINGS, 0, { path: "../escape.ts" }) }, /export_bindings\[0\]\.path/],
+    ["an absolute path", { bindings: patchAt(BINDINGS, 0, { path: "/etc/pricing.ts" }) }, /export_bindings\[0\]\.path/],
+    ["an unnormalized path", { bindings: patchAt(BINDINGS, 0, { path: "./src/order/pricing.ts" }) }, /export_bindings\[0\]\.path/],
     ["a path bound twice", { bindings: [...BINDINGS, BINDINGS[0]] }, /export_bindings.*src\/order\/pricing\.ts.*more than once/],
-    ["an empty export list", { bindings: withBinding(0, { exports: [] }) }, /export_bindings\[0\]\.exports/],
-    ["an export that is no identifier", { bindings: withBinding(1, { exports: [{ name: "quote-it", alias: "PriceOrderFn" }] }) }, /export_bindings\[1\]\.exports\[0\]\.name/],
-    ["a reserved-word alias", { bindings: withBinding(1, { exports: [{ name: "quote", alias: "class" }] }) }, /export_bindings\[1\]\.exports\[0\]\.alias/],
-    ["an extra export field", { bindings: withBinding(1, { exports: [{ name: "quote", alias: "PriceOrderFn", kind: "fn" }] }) }, /export_bindings\[1\]\.exports\[0\]/],
-    ["an export name bound twice", { bindings: withBinding(1, { exports: [{ name: "quote", alias: "PriceOrderFn" }, { name: "quote", alias: "ParseOrderFn" }] }) }, /export_bindings\[1\].*quote.*more than once/],
-    ["an unstamped contract", { bindings: withBinding(0, { contract: "CT-9" }) }, /export_bindings\[0\].*CT-9/],
-    ["a typeless contract", { bindings: withBinding(0, { contract: "CT-2" }) }, /export_bindings\[0\].*CT-2.*types file/],
-    ["a contract that is no contract id", { bindings: withBinding(0, { contract: "ct-1" }) }, /export_bindings\[0\]\.contract 'ct-1' is no contract id CT-<n> \(invalid-contract-id\)/],
+    ["an empty export list", { bindings: patchAt(BINDINGS, 0, { exports: [] }) }, /export_bindings\[0\]\.exports/],
+    ["an export that is no identifier", { bindings: patchAt(BINDINGS, 1, { exports: [{ name: "quote-it", alias: "PriceOrderFn" }] }) }, /export_bindings\[1\]\.exports\[0\]\.name/],
+    ["a reserved-word alias", { bindings: patchAt(BINDINGS, 1, { exports: [{ name: "quote", alias: "class" }] }) }, /export_bindings\[1\]\.exports\[0\]\.alias/],
+    ["an extra export field", { bindings: patchAt(BINDINGS, 1, { exports: [{ name: "quote", alias: "PriceOrderFn", kind: "fn" }] }) }, /export_bindings\[1\]\.exports\[0\]/],
+    ["an export name bound twice", { bindings: patchAt(BINDINGS, 1, { exports: [{ name: "quote", alias: "PriceOrderFn" }, { name: "quote", alias: "ParseOrderFn" }] }) }, /export_bindings\[1\].*quote.*more than once/],
+    ["an unstamped contract", { bindings: patchAt(BINDINGS, 0, { contract: "CT-9" }) }, /export_bindings\[0\].*CT-9/],
+    ["a typeless contract", { bindings: patchAt(BINDINGS, 0, { contract: "CT-2" }) }, /export_bindings\[0\].*CT-2.*types file/],
+    ["a contract that is no contract id", { bindings: patchAt(BINDINGS, 0, { contract: "ct-1" }) }, /export_bindings\[0\]\.contract 'ct-1' is no contract id CT-<n> \(invalid-contract-id\)/],
     [
       "an export name that is also an alias of the binding",
-      { bindings: withBinding(0, { exports: [{ name: "priceOrder", alias: "PriceOrderFn" }, { name: "PriceOrderFn", alias: "ParseOrderFn" }] }) },
+      { bindings: patchAt(BINDINGS, 0, { exports: [{ name: "priceOrder", alias: "PriceOrderFn" }, { name: "PriceOrderFn", alias: "ParseOrderFn" }] }) },
       /export_bindings\[0\] binds the export name 'PriceOrderFn', which is also an alias of the binding \(name-collides-with-alias\)/,
     ],
-    ["an export whose name is its own alias", { bindings: withBinding(1, { exports: [{ name: "PriceOrderFn", alias: "PriceOrderFn" }] }) }, /export_bindings\[1\].*'PriceOrderFn'.*name-collides-with-alias/],
+    ["an export whose name is its own alias", { bindings: patchAt(BINDINGS, 1, { exports: [{ name: "PriceOrderFn", alias: "PriceOrderFn" }] }) }, /export_bindings\[1\].*'PriceOrderFn'.*name-collides-with-alias/],
     [
       "a Java alias that is the file's own class name",
-      { bindings: withBinding(3, { exports: [{ name: "priceOrder", alias: "Pricing" }] }) },
+      { bindings: patchAt(BINDINGS, 3, { exports: [{ name: "priceOrder", alias: "Pricing" }] }) },
       /export_bindings\[3\] binds the alias 'Pricing', the Java file's own class name \(alias-collides-with-class\)/,
     ],
   ])("refuses %s", (_label, fields, message) => {
@@ -275,18 +272,18 @@ describe("skeletons refusals", () => {
     ["a non-array field", { bindings: BINDINGS, skeletons: {} }, /skeletons must be an array/],
     ["a record out of path order", { bindings: BINDINGS, skeletons: [RECORDS[1], RECORDS[0], RECORDS[2]] }, /skeletons.*sorted by path/],
     ["a path recorded twice", { bindings: BINDINGS, skeletons: [RECORDS[0], RECORDS[1], RECORDS[1]] }, /skeletons.*sorted by path/],
-    ["an extra field", { bindings: BINDINGS, skeletons: withRecord(0, { bytes: "x" }) }, /skeletons\[0\].*bytes/],
-    ["a missing stale flag", { bindings: BINDINGS, skeletons: withRecord(0, { stale: undefined }) }, /skeletons\[0\] is missing field\(s\): stale/],
-    ["an uppercase engine digest", { bindings: BINDINGS, skeletons: withRecord(0, { engineSha256: "A".repeat(64) }) }, /skeletons\[0\]\.engineSha256/],
-    ["a short types digest", { bindings: BINDINGS, skeletons: withRecord(0, { typesSha256: "b".repeat(63) }) }, /skeletons\[0\]\.typesSha256/],
-    ["an unknown origin", { bindings: BINDINGS, skeletons: withRecord(0, { origin: "manual" }) }, /skeletons\[0\]\.origin/],
-    ["an unknown language", { bindings: BINDINGS, skeletons: withRecord(0, { language: "kotlin" }) }, /skeletons\[0\]\.language/],
-    ["a language its path does not have", { bindings: BINDINGS, skeletons: withRecord(1, { language: "java" }) }, /skeletons\[1\].*typescript/],
-    ["a stale revision that is no positive integer", { bindings: BINDINGS, skeletons: withRecord(1, { stale: { revision: 0 } }) }, /skeletons\[1\]\.stale/],
-    ["a stale flag with an extra field", { bindings: BINDINGS, skeletons: withRecord(1, { stale: { revision: 1, at: "now" } }) }, /skeletons\[1\]\.stale/],
+    ["an extra field", { bindings: BINDINGS, skeletons: patchAt(RECORDS, 0, { bytes: "x" }) }, /skeletons\[0\].*bytes/],
+    ["a missing stale flag", { bindings: BINDINGS, skeletons: patchAt(RECORDS, 0, { stale: undefined }) }, /skeletons\[0\] is missing field\(s\): stale/],
+    ["an uppercase engine digest", { bindings: BINDINGS, skeletons: patchAt(RECORDS, 0, { engineSha256: "A".repeat(64) }) }, /skeletons\[0\]\.engineSha256/],
+    ["a short types digest", { bindings: BINDINGS, skeletons: patchAt(RECORDS, 0, { typesSha256: "b".repeat(63) }) }, /skeletons\[0\]\.typesSha256/],
+    ["an unknown origin", { bindings: BINDINGS, skeletons: patchAt(RECORDS, 0, { origin: "manual" }) }, /skeletons\[0\]\.origin/],
+    ["an unknown language", { bindings: BINDINGS, skeletons: patchAt(RECORDS, 0, { language: "kotlin" }) }, /skeletons\[0\]\.language/],
+    ["a language its path does not have", { bindings: BINDINGS, skeletons: patchAt(RECORDS, 1, { language: "java" }) }, /skeletons\[1\].*typescript/],
+    ["a stale revision that is no positive integer", { bindings: BINDINGS, skeletons: patchAt(RECORDS, 1, { stale: { revision: 0 } }) }, /skeletons\[1\]\.stale/],
+    ["a stale flag with an extra field", { bindings: BINDINGS, skeletons: patchAt(RECORDS, 1, { stale: { revision: 1, at: "now" } }) }, /skeletons\[1\]\.stale/],
     ["a record of an unbound path", { bindings: BINDINGS.slice(1), skeletons: RECORDS }, /skeletons\[1\].*src\/order\/pricing\.ts.*not bound/],
     ["a record without any stamp", { skeletons: RECORDS }, /skeletons\[0\].*not bound/],
-    ["a contract other than its binding's", { bindings: BINDINGS, skeletons: withRecord(2, { contract: "CT-2" }) }, /skeletons\[2\].*CT-2.*CT-1/],
+    ["a contract other than its binding's", { bindings: BINDINGS, skeletons: patchAt(RECORDS, 2, { contract: "CT-2" }) }, /skeletons\[2\].*CT-2.*CT-1/],
     ["a record of an unsupported path", { bindings: BINDINGS, skeletons: [...RECORDS, record(RATES)] }, /skeletons\[3\].*rates\.py/],
   ])("refuses %s", (_label, fields, message) => {
     expect(refusal(g2Graph(fields))).toMatch(message);
@@ -297,11 +294,11 @@ describe("tasks[].skeleton_outcomes refusals", () => {
   it.each([
     ["a non-array field", { outcomes: { path: PRICING } }, /skeleton_outcomes must be an array/],
     ["an extra entry field", { outcomes: [{ ...OUTCOMES[0], note: "x" }] }, /skeleton_outcomes\[0\].*note/],
-    ["an unknown outcome kind", { outcomes: withOutcome(0, { kind: "skipped" }) }, /skeleton_outcomes\[0\]\.outcome/],
-    ["a written outcome without an origin", { outcomes: withOutcome(0, { kind: "skeleton-written" }) }, /skeleton_outcomes\[0\]\.outcome/],
-    ["a written outcome with an unknown origin", { outcomes: withOutcome(0, { kind: "skeleton-written", origin: "manual" }) }, /skeleton_outcomes\[0\]\.outcome/],
-    ["an unsupported outcome with an unknown reason", { outcomes: withOutcome(3, { kind: "unsupported-language", reason: "cobol" }) }, /skeleton_outcomes\[3\]\.outcome/],
-    ["an outcome carrying a field its kind has not", { outcomes: withOutcome(2, { kind: "no-bound-exports", origin: "spawn" }) }, /skeleton_outcomes\[2\]\.outcome/],
+    ["an unknown outcome kind", { outcomes: patchAt(OUTCOMES, 0, { outcome: { kind: "skipped" } }) }, /skeleton_outcomes\[0\]\.outcome/],
+    ["a written outcome without an origin", { outcomes: patchAt(OUTCOMES, 0, { outcome: { kind: "skeleton-written" } }) }, /skeleton_outcomes\[0\]\.outcome/],
+    ["a written outcome with an unknown origin", { outcomes: patchAt(OUTCOMES, 0, { outcome: { kind: "skeleton-written", origin: "manual" } }) }, /skeleton_outcomes\[0\]\.outcome/],
+    ["an unsupported outcome with an unknown reason", { outcomes: patchAt(OUTCOMES, 3, { outcome: { kind: "unsupported-language", reason: "cobol" } }) }, /skeleton_outcomes\[3\]\.outcome/],
+    ["an outcome carrying a field its kind has not", { outcomes: patchAt(OUTCOMES, 2, { outcome: { kind: "no-bound-exports", origin: "spawn" } }) }, /skeleton_outcomes\[2\]\.outcome/],
     ["a path with two outcomes", { outcomes: [...OUTCOMES, OUTCOMES[0]] }, /skeleton_outcomes.*src\/order\/pricing\.ts.*more than once/],
     ["a path outside the Task's file_list", { outcomes: [...OUTCOMES, { path: "src/other.ts", outcome: { kind: "no-bound-exports" } }] }, /skeleton_outcomes\[5\].*src\/other\.ts.*file_list/],
   ])("refuses %s", (_label, fields, message) => {
@@ -338,17 +335,17 @@ describe("tasks[].skeleton_outcomes against the stamp and the records", () => {
     ],
     [
       "an unsupported-language outcome with another reason than the path's",
-      { bindings: BINDINGS, skeletons: RECORDS, outcomes: withOutcome(3, { kind: "unsupported-language", reason: "jvm-non-java" }) },
+      { bindings: BINDINGS, skeletons: RECORDS, outcomes: patchAt(OUTCOMES, 3, { outcome: { kind: "unsupported-language", reason: "jvm-non-java" } }) },
       /skeleton_outcomes\[3\] records 'src\/order\/rates\.py' as unsupported-language \(jvm-non-java\), but the path is unsupported as other-extension/,
     ],
     [
       "a no-bound-exports outcome on a bound path",
-      { bindings: BINDINGS, skeletons: RECORDS, outcomes: withOutcome(1, { kind: "no-bound-exports" }) },
+      { bindings: BINDINGS, skeletons: RECORDS, outcomes: patchAt(OUTCOMES, 1, { outcome: { kind: "no-bound-exports" } }) },
       /skeleton_outcomes\[1\] records 'src\/order\/quotes\.ts' as no-bound-exports, but export_bindings binds it to CT-1/,
     ],
     [
       "a contract-has-no-types-file outcome on a bound path",
-      { bindings: BINDINGS, skeletons: RECORDS, outcomes: withOutcome(4, { kind: "contract-has-no-types-file" }) },
+      { bindings: BINDINGS, skeletons: RECORDS, outcomes: patchAt(OUTCOMES, 4, { outcome: { kind: "contract-has-no-types-file" } }) },
       /skeleton_outcomes\[4\] records 'src\/main\/java\/com\/acme\/order\/Pricing\.java' as contract-has-no-types-file, but export_bindings binds it to CT-1/,
     ],
   ])("refuses %s", (_label, fields, message) => {
@@ -356,7 +353,7 @@ describe("tasks[].skeleton_outcomes against the stamp and the records", () => {
   });
 
   it("loads a written outcome whose record a Contract Revision has since given another origin", () => {
-    const outcomes = withOutcome(0, { kind: "skeleton-written", origin: "contract-stub" });
+    const outcomes = patchAt(OUTCOMES, 0, { outcome: { kind: "skeleton-written", origin: "contract-stub" } });
     const graph = loaded(g2Graph({ bindings: BINDINGS, skeletons: RECORDS, outcomes }));
     expect(viaDisk(graph.tasks.find(({ id }) => id === "T2")?.skeleton_outcomes)).toEqual(outcomes);
   });

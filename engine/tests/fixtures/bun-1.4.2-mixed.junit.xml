@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="bun test" tests="4" assertions="4" failures="1" skipped="0" time="0.035815">
+  <testsuite name="src/b.test.ts" file="src/b.test.ts" tests="1" assertions="1" failures="0" skipped="0" time="0.005701">
+    <testsuite name="ok" file="src/b.test.ts" line="2" tests="1" assertions="1" failures="0" skipped="0" time="0">
+      <testcase name="passes" classname="ok" time="0.00005" file="src/b.test.ts" line="2" assertions="1" />
+    </testsuite>
+  </testsuite>
+  <testsuite name="src/c.test.ts" file="src/c.test.ts" tests="3" assertions="3" failures="1" skipped="0" time="0.008218">
+    <testsuite name="outer" file="src/c.test.ts" line="2" tests="2" assertions="2" failures="1" skipped="0" time="0.007">
+      <testsuite name="inner" file="src/c.test.ts" line="3" tests="1" assertions="1" failures="0" skipped="0" time="0">
+        <testcase name="nested passes" classname="inner &gt; outer" time="0.000007" file="src/c.test.ts" line="3" assertions="1" />
+      </testsuite>
+      <testcase name="fails" classname="outer" time="0.007719" file="src/c.test.ts" line="4" assertions="1">
+        <failure type="AssertionError" message="expect(received).toBe(expected)&#10;&#10;Expected: 2&#10;Received: 1&#10;">AssertionError: expect(received).toBe(expected)&#10;&#10;Expected: 2&#10;Received: 1&#10;&#10;      at src/c.test.ts:4:35&#10;</failure>
+      </testcase>
+    </testsuite>
+    <testcase name="top level" classname="" time="0.00005" file="src/c.test.ts" line="6" assertions="1" />
+  </testsuite>
+</testsuites>

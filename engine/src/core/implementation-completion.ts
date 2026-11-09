@@ -8,6 +8,7 @@
  * This module performs no filesystem, process, clock, random, or network I/O.
  */
 
+import { match, P } from "ts-pattern";
 import {
   parseCompletionCheckId,
   parseWaveNumber,
@@ -1330,15 +1331,30 @@ export function createEscalationRemediationReceipt(raw: unknown): Parsed<Escalat
  *  unmet step, so each gap is a distinct kind (FR-009). A contract-violated
  *  failure carries its artifact and every violation that fits the receipt's
  *  reason bound (FR-021), which the semantic retry appendix renders. */
-function proofFailureKind(failure: ProofFailure): string {
-  switch (failure.kind) {
-    case "red-then-green-unproven":
-      return redThenGreenFailureKind(failure.gap);
-    case "declared-artifact-contract-violated":
-      return contractViolatedFailureKind(failure, MAX_REASON_LENGTH);
-    default:
-      return `proof:${failure.kind}`;
-  }
+export function proofFailureKind(failure: ProofFailure): string {
+  return match(failure)
+    .with({ kind: "red-then-green-unproven" }, ({ gap }) => redThenGreenFailureKind(gap))
+    .with({ kind: "declared-artifact-contract-violated" }, (violated) =>
+      contractViolatedFailureKind(violated, MAX_REASON_LENGTH))
+    // Every other failure names only its kind. Listing each one makes a new
+    // ProofFailure a compile error here instead of a silent `proof:` label.
+    .with(
+      {
+        kind: P.union(
+          "task-not-completed",
+          "test-result-missing",
+          "regression-tests-failed",
+          "untrusted-regression-tests-failed",
+          "untrusted-regression-pass",
+          "new-tests-not-observed",
+          "attempt-scope-drifted",
+          "declared-artifact-not-changed",
+          "declared-artifact-drifted",
+        ),
+      },
+      ({ kind }) => `proof:${kind}`,
+    )
+    .exhaustive();
 }
 
 function semanticTransition(

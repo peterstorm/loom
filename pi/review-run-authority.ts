@@ -48,6 +48,7 @@ import type {
   RequestId,
 } from "../engine/src/core/orchestration-contract";
 import { piSpawnRosterId, replacePiSpawnTask } from "./tool-input";
+import { routedChildLaunchRoute } from "../engine/src/utils/child-launch-route";
 
 export type PiOrchestrationMarkers = Readonly<{
   requestId: string;
@@ -207,16 +208,22 @@ type PublishedPiReviewRouteAuthority = Readonly<{
 
 /**
  * Qualify one classified request from its exact authenticated publication.
- * The request's frozen Pi provider/model binding is the only route input:
- * task text, role eligibility, and the parent's mutable model cannot upgrade
- * extraction-only authority. A hard qualification refusal remains a typed
- * authority failure for the spawn gate rather than a silent degradation.
+ * The request's frozen Pi provider/model binding and the shell-observed routed
+ * child route are the only route inputs: task text, role eligibility, and the
+ * parent's mutable model cannot upgrade extraction-only authority. A hard
+ * qualification refusal remains a typed authority failure for the spawn gate
+ * rather than a silent degradation.
  */
 export function qualifyPiIssuedReviewRequest(
   classified: PiIssuedReviewRequestClass,
   published: PublishedPiReviewRouteAuthority,
 ): DomainResult<IssuedSpawnEmissionAuthority, Readonly<{ message: string }>> {
-  const route = qualifyIssuedSpawnEmissionRoute(classified.claim, published, true);
+  const route = qualifyIssuedSpawnEmissionRoute(
+    classified.claim,
+    published,
+    true,
+    routedChildLaunchRoute(published.role),
+  );
   if (route.kind === "refused") {
     return failure({
       message: `emission route qualification refused for request ${classified.claim.requestId}: ${route.reason}`,

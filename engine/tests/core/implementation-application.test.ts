@@ -4,10 +4,13 @@ import {
   applyImplementationCompletionTransition,
   buildTaskLocalByteObservation,
   describeSettlement,
+  INFRASTRUCTURE_REASON_LIMIT,
   NAMED_SCOPE_VIOLATION_PATHS,
+  NO_ENGINE_SKELETONS,
   normalizeImplementationEvidence,
   settleObservedImplementation,
   settleUnavailableImplementation,
+  type EngineSkeletonObservation,
   type TaskLocalByteObservation,
 } from "../../src/core/implementation-application";
 import {
@@ -67,8 +70,7 @@ function observedBytes(
     priorAttributedPaths: [],
     repositoryChangedPaths: [],
     siblingOwnedPaths: [],
-    engineSkeletons: [],
-    currentSkeletonDigests: new Map(),
+    engineSkeletons: NO_ENGINE_SKELETONS,
     ...overrides,
   });
 }
@@ -117,7 +119,6 @@ function graph(task: Task): TaskGraph {
     }),
   };
 }
-
 
 const completedEvidence = {
   taskCompleted: true,
@@ -685,6 +686,39 @@ describe("exact transition application", () => {
     expect(result.state.tasks[0]?.failure_reason).toBe(describeSettlement(result.transition));
   });
 
+  it("names each infrastructure failure's own reason, so a blocked settlement explains itself", () => {
+    const attempt = authority(1, "infrastructure-distinct-reasons");
+    const result = expectApplied(settleUnavailableImplementation(
+      graph(pendingTask(attempt)),
+      attempt,
+      "2026-08-24T00:03:59.000Z" as never,
+      "Claude JSONL transcript record 16.message.role must be user or assistant",
+      observedBytes(attempt, { currentAttemptScope: [] }),
+    ));
+    const description = describeSettlement(result.transition);
+    expect(description).toMatch(
+      /^infrastructure-blocked: implementation-observation-unavailable \(Claude JSONL transcript record 16\.message\.role must be user or assistant\), task-byte-scope-unavailable \(.+\)$/,
+    );
+    expect(result.state.tasks[0]?.failure_reason).toBe(description);
+  });
+
+  it("property: an infrastructure description bounds every reason it names", () => {
+    fc.assert(fc.property(fc.string({ minLength: 1, maxLength: 5_000 }).filter((reason) => reason.trim() !== ""), (reason) => {
+      const attempt = authority(1, "infrastructure-bounded-reason");
+      const result = expectApplied(settleUnavailableImplementation(
+        graph(pendingTask(attempt)),
+        attempt,
+        "2026-08-24T00:03:59.500Z" as never,
+        reason,
+      ));
+      const description = describeSettlement(result.transition);
+      expect(description.startsWith("infrastructure-blocked: implementation-observation-unavailable (")).toBe(true);
+      expect(description.length).toBeLessThanOrEqual(
+        "infrastructure-blocked: ".length + 2 * (INFRASTRUCTURE_REASON_LIMIT + 64),
+      );
+    }), { numRuns: 50 });
+  });
+
   it("describes implemented and infrastructure settlements by kind, the latter with its failure kinds", () => {
     const attempt = authority(1, "kind-description");
     const implemented = expectApplied(settleObservedImplementation(
@@ -704,8 +738,9 @@ describe("exact transition application", () => {
       "2026-08-24T00:03:58.000Z" as never,
       "transcript unreadable",
     ));
+    // The default byte-scope reason repeats the observation's, so it is named once.
     expect(describeSettlement(infrastructure.transition))
-      .toBe("infrastructure-blocked: implementation-observation-unavailable, task-byte-scope-unavailable");
+      .toBe("infrastructure-blocked: implementation-observation-unavailable (transcript unreadable), task-byte-scope-unavailable");
     expect(infrastructure.state.tasks[0]?.failure_reason).toBe(describeSettlement(infrastructure.transition));
   });
 
@@ -738,8 +773,10 @@ describe("engine skeleton bytes are no implementer write (FR-012)", () => {
     typesSha256: digest("t"),
     stale: null,
   });
-  const engineAt = (...paths: readonly string[]) => paths.map(record);
-  const currentAt = (digestValue: string, ...paths: readonly string[]) => new Map(paths.map((path) => [path, digestValue] as const));
+  /** The engine's records at `paths`, each observed holding `currentDigest`
+   *  (`null`: no regular file there now). */
+  const engineAt = (currentDigest: string | null, ...paths: readonly string[]): EngineSkeletonObservation =>
+    paths.map((path) => ({ record: record(path), currentDigest }));
   /** The engine wrote `src/a.ts` before the attempt baselines; the first Task
    *  baseline still predates it. */
   const skeletonBytes = (attempt: ImplementationAttemptAuthority, current: string | null, overrides: Partial<Parameters<typeof buildTaskLocalByteObservation>[0]> = {}) =>
@@ -749,8 +786,7 @@ describe("engine skeleton bytes are no implementer write (FR-012)", () => {
       proofBaseline: baseline("src/a.ts", null),
       currentProofScope: baseline("src/a.ts", current),
       parserModifiedPaths: [],
-      engineSkeletons: engineAt("src/a.ts"),
-      currentSkeletonDigests: current === null ? new Map() : currentAt(current, "src/a.ts"),
+      engineSkeletons: engineAt(current, "src/a.ts"),
       ...overrides,
     });
 
@@ -763,7 +799,7 @@ describe("engine skeleton bytes are no implementer write (FR-012)", () => {
   });
 
   it("AS-015: without the recorded engine digest the same bytes are the Task's own production", () => {
-    const bytes = skeletonBytes(authority(), ENGINE, { engineSkeletons: [] });
+    const bytes = skeletonBytes(authority(), ENGINE, { engineSkeletons: NO_ENGINE_SKELETONS });
     expect(bytes.cumulativeProofArtifactChanges).toEqual(["src/a.ts"]);
     expect(bytes.cumulativeModifiedPaths).toEqual(["src/a.ts"]);
   });
@@ -784,39 +820,34 @@ describe("engine skeleton bytes are no implementer write (FR-012)", () => {
     const attempt = authority();
     const stub = observedBytes(attempt, {
       repositoryChangedPaths: ["src/stub.ts"],
-      engineSkeletons: engineAt("src/stub.ts"),
-      currentSkeletonDigests: currentAt(ENGINE, "src/stub.ts"),
+      engineSkeletons: engineAt(ENGINE, "src/stub.ts"),
     });
     expect(stub.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: ["src/a.ts"] });
     expect(stub.unresolvedRepositoryPaths).toEqual([]);
 
     const edited = observedBytes(attempt, {
       repositoryChangedPaths: ["src/stub.ts"],
-      engineSkeletons: engineAt("src/stub.ts"),
-      currentSkeletonDigests: currentAt(digest("f"), "src/stub.ts"),
+      engineSkeletons: engineAt(digest("f"), "src/stub.ts"),
     });
     expect(edited.suite.checks[0]?.outcome).toEqual({ kind: "out-of-scope-writes", paths: ["src/stub.ts"] });
     expect(edited.unresolvedRepositoryPaths).toEqual(["src/stub.ts"]);
 
     const removed = observedBytes(attempt, {
       repositoryChangedPaths: ["src/stub.ts"],
-      engineSkeletons: engineAt("src/stub.ts"),
-      currentSkeletonDigests: new Map(),
+      engineSkeletons: engineAt(null, "src/stub.ts"),
     });
     expect(removed.unresolvedRepositoryPaths).toEqual(["src/stub.ts"]);
 
     const unrecorded = observedBytes(attempt, {
       repositoryChangedPaths: ["src/stub.ts"],
-      engineSkeletons: [],
-      currentSkeletonDigests: currentAt(ENGINE, "src/stub.ts"),
+      engineSkeletons: NO_ENGINE_SKELETONS,
     });
     expect(unrecorded.unresolvedRepositoryPaths).toEqual(["src/stub.ts"]);
   });
 
   it("matches recorded engine paths through the plan-path rule", () => {
     const bytes = skeletonBytes(authority(), ENGINE, {
-      engineSkeletons: engineAt("./src/a.ts", "./src/stub.ts"),
-      currentSkeletonDigests: currentAt(ENGINE, "./src/stub.ts", "./src/a.ts"),
+      engineSkeletons: engineAt(ENGINE, "./src/a.ts", "./src/stub.ts"),
       repositoryChangedPaths: ["src/stub.ts"],
     });
     expect(bytes.cumulativeProofArtifactChanges).toEqual([]);

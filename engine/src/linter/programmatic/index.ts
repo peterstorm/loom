@@ -4,8 +4,8 @@
  * also run in the "immediate" tier, so a forbidden import or an unproven switch
  * is refused when it is written rather than when the Wave Gate starts.
  *
- * Rules are configured via project-local config (loaded from
- * .claude/linter/config.json or .pi/linter/config.json).
+ * Rules are configured via project-local config (`config.json` inside the
+ * project rules directory: `.claude/linter/rules/` or `.pi/linter/rules/`).
  * If no project config exists, rules use their built-in defaults.
  */
 
@@ -17,45 +17,85 @@ import { handler as fugueGeneratedIntegrityHandler } from "./fugue-generated-int
 import {
   handler as exhaustiveDiscriminantHandler,
   detectedChainKeys,
-  DEFAULT_MAX_DISCRIMINANT_BRANCHES,
-  DEFAULT_DISCRIMINANT_TAGS,
+  DEFAULT_DISCRIMINANT_BRANCHING_OPTIONS,
+  RULE_NAME as EXHAUSTIVE_BRANCHING_RULE,
+  type DiscriminantBranchingOptions,
 } from "./exhaustive-discriminant-branching";
-import { EXHAUSTIVE_BRANCHING_BASELINE } from "./exhaustive-discriminant-branching-baseline";
 import { handler as nestedTernaryHandler } from "./no-nested-ternary";
 import { handler as preferArrayMethodsHandler } from "./prefer-array-methods";
 import {
   handler as switchTotalityHandler,
   detectedSwitchKeys,
-  DEFAULT_SWITCH_TOTALITY_MODULES,
+  DEFAULT_SWITCH_TOTALITY_OPTIONS,
   RULE_NAME as SWITCH_TOTALITY_RULE,
+  type SwitchTotalityOptions,
 } from "./switch-totality";
-import { SWITCH_TOTALITY_BASELINE } from "./switch-totality-baseline";
 import type { BaselineOwner } from "./baseline";
 import { type ProgrammaticConfig, EMPTY_CONFIG } from "./config";
 
-const EXHAUSTIVE_BRANCHING_RULE = "exhaustive-discriminant-branching";
+/** The files both totality rules read, owned once for the rules and their
+ *  baseline owners. */
+const TOTALITY_EXTENSIONS: readonly string[] = Object.freeze([".ts", ".tsx"]);
+
+/** switch-totality's options for one project — the ONE mapping from config,
+ *  shared by the live rule and its staleness detector so the two can never
+ *  measure different things. */
+export function switchTotalityOptions(config: ProgrammaticConfig, projectRoot: string | null): SwitchTotalityOptions {
+  return Object.freeze({
+    ...DEFAULT_SWITCH_TOTALITY_OPTIONS,
+    ...(config.switchTotalityModules === undefined
+      ? {}
+      : { scope: Object.freeze({ kind: "modules", prefixes: config.switchTotalityModules }) }),
+    ...(config.switchTotalityBaseline === undefined ? {} : { baseline: config.switchTotalityBaseline }),
+    projectRoot,
+  });
+}
+
+/** exhaustive-discriminant-branching's options for one project — shared by
+ *  the live rule and its staleness detector, like the switch half above. */
+export function discriminantBranchingOptions(
+  config: ProgrammaticConfig,
+  projectRoot: string | null,
+): DiscriminantBranchingOptions {
+  const defaults = DEFAULT_DISCRIMINANT_BRANCHING_OPTIONS;
+  return Object.freeze({
+    maxBranches: config.maxDiscriminantBranches ?? defaults.maxBranches,
+    tags: config.discriminantTags ?? defaults.tags,
+    baseline: config.discriminantBranchingBaseline ?? defaults.baseline,
+    projectRoot,
+  });
+}
 
 /**
- * Every rule that keeps a grandfathered list. `scripts/lint-project.ts` reports
- * the stale entries of each, and the baseline test asserts each against the
- * live tree — both iterate THIS list, so a baselined rule cannot be left out of
- * the drift report. Each owner detects with its rule's defaults: the baselines
- * are keys into loom's own tree, which the defaults describe.
+ * Every rule that keeps a grandfathered list, for one project's config.
+ * `scripts/lint-project.ts` reports the stale entries of each and writes them
+ * with `--write-baseline`, and Loom's baseline test asserts each against the
+ * live tree — all iterate THIS list, so a baselined rule cannot be left out of
+ * the drift report. Each owner detects with exactly the options its live rule
+ * runs with.
  */
-export const BASELINE_OWNERS: readonly BaselineOwner[] = Object.freeze([
-  {
-    rule: SWITCH_TOTALITY_RULE,
-    baseline: SWITCH_TOTALITY_BASELINE,
-    site: "unproven switch",
-    detect: (content: string, filePath: string) => detectedSwitchKeys(content, filePath),
-  },
-  {
-    rule: EXHAUSTIVE_BRANCHING_RULE,
-    baseline: EXHAUSTIVE_BRANCHING_BASELINE,
-    site: "unproven if-chain",
-    detect: (content: string, filePath: string) => detectedChainKeys(content, filePath),
-  },
-]);
+export function baselineOwners(config: ProgrammaticConfig, projectRoot: string | null): readonly BaselineOwner[] {
+  const switchOptions = switchTotalityOptions(config, projectRoot);
+  const chainOptions = discriminantBranchingOptions(config, projectRoot);
+  return Object.freeze([
+    {
+      rule: SWITCH_TOTALITY_RULE,
+      configKey: "switchTotalityBaseline",
+      extensions: TOTALITY_EXTENSIONS,
+      baseline: switchOptions.baseline,
+      site: "unproven switch",
+      detect: (content: string, filePath: string) => detectedSwitchKeys(content, filePath, switchOptions),
+    },
+    {
+      rule: EXHAUSTIVE_BRANCHING_RULE,
+      configKey: "discriminantBranchingBaseline",
+      extensions: TOTALITY_EXTENSIONS,
+      baseline: chainOptions.baseline,
+      site: "unproven if-chain",
+      detect: (content: string, filePath: string) => detectedChainKeys(content, filePath, chainOptions),
+    },
+  ]);
+}
 
 /**
  * The two import-boundary rules. Both run in the "immediate" tier: a forbidden
@@ -120,35 +160,30 @@ function fugueGeneratedIntegrityRule(): ProgrammaticRule {
 }
 
 /** The two rules that demand a branch over a discriminated union prove it is total. */
-function totalityRules(config: ProgrammaticConfig): readonly ProgrammaticRule[] {
-  const switchModules = config.switchTotalityModules ?? DEFAULT_SWITCH_TOTALITY_MODULES;
-  const switchBaseline = config.switchTotalityBaseline ?? SWITCH_TOTALITY_BASELINE;
+function totalityRules(config: ProgrammaticConfig, projectRoot: string | null): readonly ProgrammaticRule[] {
+  const switchOptions = switchTotalityOptions(config, projectRoot);
+  const chainOptions = discriminantBranchingOptions(config, projectRoot);
   return [
     {
       kind: "programmatic",
       name: SWITCH_TOTALITY_RULE,
       description: "A switch over a discriminated union must prove totality — match(...).exhaustive(), or a default arm binding the scrutinee to `never`",
-      extensions: [".ts", ".tsx"],
-      handler: (content, filePath) => switchTotalityHandler(content, filePath, switchModules, switchBaseline),
+      extensions: TOTALITY_EXTENSIONS,
+      handler: (content, filePath) => switchTotalityHandler(content, filePath, switchOptions),
       // IMMEDIATE: a switch is written once and read for years. Waiting for the
-      // wave gate means the unproven arm ships first; the baseline keeps every
-      // pre-existing site from blocking an unrelated edit to its file.
+      // wave gate means the unproven arm ships first; the project's baseline
+      // keeps every pre-existing site from blocking an unrelated edit to its file.
       tier: "immediate",
-      fixHint: "Use match(value).with(...).exhaustive() from ts-pattern, or give the switch a `default` arm that binds the scrutinee to `never`. `default: throw new Error(\"unreachable\")` is not a proof — it compiles after a new variant is added.",
+      fixHint: "Use match(value).with(...).exhaustive() from ts-pattern — or .otherwise(...) when the domain is open, like a plain string — or give the switch a `default` arm that binds the scrutinee to `never`. `default: throw new Error(\"unreachable\")` is not a proof — it compiles after a new variant is added. Pre-existing sites: `lint-project --write-baseline`.",
       enabled: true,
       source: "default",
     },
     {
       kind: "programmatic",
       name: EXHAUSTIVE_BRANCHING_RULE,
-      description: `Branching ${DEFAULT_MAX_DISCRIMINANT_BRANCHES}+ times on one discriminant is a switch the compiler cannot check`,
-      extensions: [".ts", ".tsx"],
-      handler: (content, filePath) => exhaustiveDiscriminantHandler(
-        content,
-        filePath,
-        config.maxDiscriminantBranches ?? DEFAULT_MAX_DISCRIMINANT_BRANCHES,
-        config.discriminantTags ?? DEFAULT_DISCRIMINANT_TAGS,
-      ),
+      description: `Branching ${chainOptions.maxBranches}+ times on one discriminant is a switch the compiler cannot check`,
+      extensions: TOTALITY_EXTENSIONS,
+      handler: (content, filePath) => exhaustiveDiscriminantHandler(content, filePath, chainOptions),
       tier: "full",
       fixHint: "Use match(value).with(...).exhaustive() from ts-pattern, or a switch whose default binds the scrutinee to `never` — either makes a new union variant a compile error",
       enabled: true,
@@ -187,9 +222,14 @@ function expressionShapeRules(): readonly ProgrammaticRule[] {
 
 /**
  * Creates the programmatic rule set, optionally configured by project-local config.
- * Config allows projects to define their own boundaries, pure modules, and limits.
+ * Config allows projects to define their own boundaries, pure modules, limits
+ * and baselines; `projectRoot` is the root of the project that config belongs
+ * to — the frame its paths and baseline keys are written in.
  */
-export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFIG): readonly ProgrammaticRule[] {
+export function createProgrammaticRules(
+  config: ProgrammaticConfig = EMPTY_CONFIG,
+  projectRoot: string | null = null,
+): readonly ProgrammaticRule[] {
   return [
     ...importBoundaryRules(config.boundaries ?? DEFAULT_BOUNDARIES, config.pureModules ?? DEFAULT_PURE_MODULES),
     maxFunctionLinesRule(
@@ -197,7 +237,7 @@ export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFI
       config.excludeFromMaxLines ?? DEFAULT_EXCLUDE_PATTERNS,
     ),
     fugueGeneratedIntegrityRule(),
-    ...totalityRules(config),
+    ...totalityRules(config, projectRoot),
     ...expressionShapeRules(),
   ];
 }

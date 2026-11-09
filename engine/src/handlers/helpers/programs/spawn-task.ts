@@ -8,6 +8,7 @@
  * `renderSpawnTaskText` (core/spawn-task-text).
  */
 import { LOOM_PACKAGE_ROOT } from "../../../utils/loom-package-root";
+import { routedChildLaunchRoute } from "../../../utils/child-launch-route";
 import { verifyStandalonePanelView } from '../../../orchestration/standalone-panel-context';
 import { canonicalRecord, canonicalStructuralEquals, type AgentRequestAuthority } from '../../../core/orchestration-contract';
 import { STANDALONE_REVIEWER_PROTOCOL_V3 } from '../../../core/standalone-lineage-contract';
@@ -141,7 +142,12 @@ function observeReviewerDelivery(
     }
   }
   const delivery = observeDeliveryInputs(handle, authority, program);
-  const route = issuedReviewerEmissionRoute(emissionAuthority ?? program, authority, piParentExists());
+  const route = issuedReviewerEmissionRoute(
+    emissionAuthority ?? program,
+    authority,
+    piParentExists(),
+    routedChildLaunchRoute(authority.role),
+  );
   if (route.kind === "refused") {
     throw new Error(`emission route refused for request ${authority.requestId}: ${route.reason}`);
   }

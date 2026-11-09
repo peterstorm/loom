@@ -78,7 +78,7 @@ const contracts: readonly AcceptanceContract[] = (() => {
 const RED_EXPECTATION = acceptanceExpectation(contracts, TASKS, 1);
 
 const testcase = (name: string, outcome: ReportTestcase["outcome"], classname = "tests/acceptance/payload.acceptance.test.ts"): ReportTestcase =>
-  ({ classname, name, outcome, failureType: outcome === "failed" ? "AssertionError" : null });
+  ({ file: classname, classname, name, outcome, failureType: outcome === "failed" ? "AssertionError" : null });
 
 function result(
   exitCode: number,

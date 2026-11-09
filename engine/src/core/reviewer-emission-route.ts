@@ -27,6 +27,7 @@ import type { IssuedEmissionBindingOf } from "./emission-tool";
 import {
   issuedReviewerPayloadClaim,
   qualifyIssuedSpawnEmissionRoute,
+  type ChildLaunchRoute,
 } from "./issued-emission-capability";
 
 /** The registered review program's protocol projection the claim mint reads:
@@ -90,16 +91,23 @@ export type ReviewerEmissionRoute =
  * The issued route of one eligible reviewer request: the claim minted from
  * the registered protocol and the issued request authority (never from
  * prompt markers, harness claims or model arguments — FR-001), qualified
- * against the request's frozen Pi route and the observed Pi parent, then
- * decided. A non-Pi parent and a non-qualified route are extraction-only by
- * construction; no capture-side or render-side input can upgrade them.
+ * against the request's frozen Pi route, the observed Pi parent, and the
+ * routed child launch route, then decided. A non-Pi parent, a non-qualified
+ * frozen route, and a routed child off that frozen route are extraction-only
+ * by construction; no capture-side or render-side input can upgrade them.
  */
 export function issuedReviewerEmissionRoute(
   protocol: IssuedReviewerProtocol,
   request: AgentRequestAuthority,
   piParentExists: boolean,
+  childRoute: ChildLaunchRoute,
 ): ReviewerEmissionRoute {
-  const route = qualifyIssuedSpawnEmissionRoute(issuedReviewerPayloadClaim(protocol, request), request, piParentExists);
+  const route = qualifyIssuedSpawnEmissionRoute(
+    issuedReviewerPayloadClaim(protocol, request),
+    request,
+    piParentExists,
+    childRoute,
+  );
   // The claim's producer kind is `reviewer-payload` by construction (the
   // claim mint takes only the reviewer protocol projection), so the minted
   // binding's path refinement is a fact of this composition — the one place

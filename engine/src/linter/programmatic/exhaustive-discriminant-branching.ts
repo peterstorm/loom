@@ -24,21 +24,21 @@
  * Detection is line-based (no AST, consistent with the rest of this linter), so
  * it recognises the SHAPE of a chain: consecutive branch lines comparing the
  * same `receiver.tag` against string literals.
+ *
+ * Pre-existing chains are grandfathered per project in
+ * `discriminantBranchingBaseline`, keyed `path::discriminant` relative to the
+ * project root — the same key form and staleness pass as `switch-totality`.
  */
 
 import type { Violation } from "../types";
 import { makeViolation } from "../types";
 import { isTestFile } from "./config";
-import { EXHAUSTIVE_BRANCHING_BASELINE } from "./exhaustive-discriminant-branching-baseline";
-import { baselineCounter, repoRelative, baselineKey, type Baseline } from "./baseline";
-import { DEFAULT_SWITCH_TOTALITY_MODULES } from "./switch-totality";
+import { baselineCounter, projectRelative, baselineKey, type Baseline } from "./baseline";
+
+export const RULE_NAME = "exhaustive-discriminant-branching";
 
 /** Branches on one tag at or above this count read as a switch, not a guard. */
 export const DEFAULT_MAX_DISCRIMINANT_BRANCHES = 3;
-
-/** The areas this rule keys baselines in — the same scopes `switch-totality`
- *  scans (by reference, not by copy), so one path form serves both baselines. */
-export const DEFAULT_DISCRIMINANT_ANCHORS: readonly string[] = DEFAULT_SWITCH_TOTALITY_MODULES;
 
 /**
  * Lines a chain may span between consecutive branches.
@@ -59,6 +59,22 @@ export const DEFAULT_DISCRIMINANT_TAGS: readonly string[] = [
   "severity",
   "type",
 ];
+
+export type DiscriminantBranchingOptions = Readonly<{
+  maxBranches: number;
+  tags: readonly string[];
+  baseline: Baseline;
+  /** The root of the project whose config supplied `baseline` — the frame its
+   *  keys are written in. Null when no project config is in play. */
+  projectRoot: string | null;
+}>;
+
+export const DEFAULT_DISCRIMINANT_BRANCHING_OPTIONS: DiscriminantBranchingOptions = Object.freeze({
+  maxBranches: DEFAULT_MAX_DISCRIMINANT_BRANCHES,
+  tags: DEFAULT_DISCRIMINANT_TAGS,
+  baseline: Object.freeze([]),
+  projectRoot: null,
+});
 
 /** `if (` / `} else if (` — the line shapes that open a branch. */
 const BRANCH_LINE = /^\s*(?:\}\s*)?(?:else\s+)?if\s*\(/;
@@ -229,10 +245,9 @@ type CandidateChain = BranchRun & Readonly<{ key: string }>;
 function candidateChains(
   content: string,
   filePath: string,
-  maxBranches: number,
-  tags: readonly string[],
+  { maxBranches, tags, projectRoot }: DiscriminantBranchingOptions,
 ): readonly CandidateChain[] {
-  const relative = repoRelative(filePath, DEFAULT_DISCRIMINANT_ANCHORS);
+  const relative = projectRelative(filePath, projectRoot);
   if (isTestFile(relative)) return [];
   const lines = content.split("\n");
 
@@ -250,16 +265,14 @@ function candidateChains(
 export function handler(
   content: string,
   filePath: string,
-  maxBranches: number = DEFAULT_MAX_DISCRIMINANT_BRANCHES,
-  tags: readonly string[] = DEFAULT_DISCRIMINANT_TAGS,
-  baseline: Baseline = EXHAUSTIVE_BRANCHING_BASELINE,
+  options: DiscriminantBranchingOptions = DEFAULT_DISCRIMINANT_BRANCHING_OPTIONS,
 ): readonly Violation[] {
   const lines = content.split("\n");
-  const entries = baselineCounter(baseline);
-  return Object.freeze(candidateChains(content, filePath, maxBranches, tags)
+  const entries = baselineCounter(options.baseline);
+  return Object.freeze(candidateChains(content, filePath, options)
     .filter((chain) => !entries.consume(chain.key))
     .map((chain) => makeViolation(
-      "exhaustive-discriminant-branching",
+      RULE_NAME,
       filePath,
       chain.firstLine,
       lines[chain.firstLine - 1]?.trim() ?? "",
@@ -268,12 +281,11 @@ export function handler(
 }
 
 /** The baseline keys of every chain the rule would flag absent its baseline —
- *  the input of the staleness pass. */
+ *  the input of the staleness pass and of `lint-project --write-baseline`. */
 export function detectedChainKeys(
   content: string,
   filePath: string,
-  maxBranches: number = DEFAULT_MAX_DISCRIMINANT_BRANCHES,
-  tags: readonly string[] = DEFAULT_DISCRIMINANT_TAGS,
+  options: DiscriminantBranchingOptions = DEFAULT_DISCRIMINANT_BRANCHING_OPTIONS,
 ): readonly string[] {
-  return candidateChains(content, filePath, maxBranches, tags).map((chain) => chain.key);
+  return candidateChains(content, filePath, options).map((chain) => chain.key);
 }

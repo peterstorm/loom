@@ -59,6 +59,7 @@ import { sha256Hex } from "../core/digest";
 import { canonicalJson, type JsonValue } from "../core/review-packet";
 import { parseStandaloneReviewerProtocolV3 } from "../core/standalone-lineage-contract";
 import { verifyStandalonePanelView } from "./standalone-panel-context";
+import { routedChildLaunchRoute } from "../utils/child-launch-route";
 import { openRegisteredRunDirectory, type RunDirHandle } from "./run-directory-handle";
 import { captureAttestationOf } from "../core/capture-attestation";
 import { SECURITY_VERIFICATION_PROGRAM } from "../core/security-adjudication";
@@ -181,7 +182,10 @@ export type ReviewerCaptureEmissionAuthority =
  * The issued reviewer emission authority for one correlated request, from the
  * reviewer protocol the Run's capture plan projected out of its durable
  * registration (read once per capture). Pure: the decision is
- * `core/reviewer-emission-route`'s.
+ * `core/reviewer-emission-route`'s, with the routed child route observed here
+ * exactly as the render path observes it, so a child the launcher routes off
+ * its frozen route captures under the extraction-only authority it was
+ * spawned with.
  */
 export function reviewerCaptureEmissionAuthority(
   projected: DomainResult<IssuedReviewerProtocol | null, string>,
@@ -193,7 +197,12 @@ export function reviewerCaptureEmissionAuthority(
     return Object.freeze({ kind: "unavailable" as const, message: projected.error });
   }
   if (projected.value === null) return Object.freeze({ kind: "ineligible" as const });
-  const route = issuedReviewerEmissionRoute(projected.value, request, harness === "pi");
+  const route = issuedReviewerEmissionRoute(
+    projected.value,
+    request,
+    harness === "pi",
+    harness === "pi" ? routedChildLaunchRoute(request.role) : null,
+  );
   switch (route.kind) {
     case "emission":
       return Object.freeze({ kind: "emission" as const, binding: route.binding, contextDigest: route.contextDigest });

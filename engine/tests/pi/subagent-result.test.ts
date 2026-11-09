@@ -15,7 +15,7 @@ import type { TaskGraphProjectBoundary } from "../../src/config";
 import { parseTaskGraph, type ParsedTaskGraph } from "../../src/state-manager";
 import { derivePendingTaskProof, evaluateTaskProof } from "../../src/core/proof-obligations";
 import { applyCompletionInfrastructureFailure } from "../../src/core/implementation-application";
-import { taskFixture } from "../fixtures/task-lifecycle";
+import { taskFixture, observedEvidence, trustedPassEvidence } from "../fixtures/task-lifecycle";
 import { createImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import { taskVerificationPolicy } from "../../src/core/verification-policy";
 import {
@@ -43,7 +43,6 @@ import {
 } from "../../../pi/reserved-slot";
 import { slot } from "../fixtures/pi-reserved-slot";
 import type { LedgerObservation } from "../../src/core/red-then-green-types";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 /** A read child epoch with no events: these results exercise settlement paths
  *  that owe no red-then-green, so the epoch's content is never judged. */
@@ -1473,7 +1472,7 @@ describe("applyImplementationPiResult", () => {
     };
     const proof = evaluateTaskProof(
       { verificationPolicy, declaredArtifacts: [] },
-      { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, filesModified: [], newTestsWritten: false },
+      observedEvidence({ taskCompleted: true, filesModified: [], newTestsWritten: false }),
     );
     if (proof.state !== "satisfied") throw new Error("waived recovery fixture must be satisfied");
     const stale = implementationGraph({
@@ -1584,7 +1583,7 @@ describe("applyImplementationPiResult", () => {
     };
     const proof = evaluateTaskProof(
       { verificationPolicy, declaredArtifacts: [] },
-      { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, filesModified: [], newTestsWritten: false },
+      observedEvidence({ taskCompleted: true, filesModified: [], newTestsWritten: false }),
     );
     if (proof.state !== "satisfied") throw new Error("completed cleanup fixture must be satisfied");
     const modern = modernize(implementationGraph({
@@ -1803,7 +1802,7 @@ describe("applyImplementationPiResult", () => {
   it("invalidates stale authority and reports unsafe modified-path evidence", async () => {
     const proof = evaluateTaskProof(
       { newTestsRequired: false, declaredArtifacts: [] },
-      { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, filesModified: [], newTestsWritten: false },
+      observedEvidence({ taskCompleted: true, filesModified: [], newTestsWritten: false }),
     );
     expect(proof.state).toBe("satisfied");
     const initial = implementationGraph({
@@ -1858,13 +1857,7 @@ describe("applyImplementationPiResult", () => {
     };
     const staleProof = evaluateTaskProof(
       { verificationPolicy, declaredArtifacts: ["engine/src/x.ts"] },
-      {
-        contractConformance: CONFORMANCE_NOT_OWED,
-        taskCompleted: true,
-        testResult: { verdict: "trusted-pass" },
-        filesModified: ["engine/src/x.ts"],
-        newTestsWritten: false,
-      },
+      trustedPassEvidence(["engine/src/x.ts"], { newTestsWritten: false }),
     );
     expect(staleProof.state).toBe("satisfied");
     const initial = implementationGraph({

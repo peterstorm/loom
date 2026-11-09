@@ -32,6 +32,7 @@ import {
   CLAUDE_CONTENT_BLOCK_TYPES,
   parseCompleteClaudeJsonl,
 } from "../../src/core/claude-transcript-integrity";
+import { CLAUDE_CONVERSATION_RECORD_TYPES } from "../../src/core/claude-record-kind";
 import {
   PI_STRUCTURED_EVIDENCE_POLICY,
   TRUSTED_LEDGER_ONLY_POLICY,
@@ -39,7 +40,7 @@ import {
   evaluateProofObligations,
 } from "../../src/core/proof-obligations";
 import { value } from "../fixtures/parse-result";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
+import { observedEvidence, trustedPassEvidence } from "../fixtures/task-lifecycle";
 
 const baseline = (entries: readonly [string, string | null][]) => entries.map(([artifact, digest]) => ({
   artifact,
@@ -103,14 +104,7 @@ function observation(overrides: Record<string, unknown> = {}): Record<string, un
     schemaVersion: 1,
     kind: "implementation-observed",
     observedAt: "2026-08-23T00:01:00.000Z",
-    evidence: {
-      contractConformance: CONFORMANCE_NOT_OWED,
-      taskCompleted: true,
-      testResult: { verdict: "trusted-pass" },
-      filesModified: ["engine/src/a.ts", "engine/tests/a.test.ts"],
-      newTestsWritten: true,
-      newTestEvidence: "vitest: pass",
-    },
+    evidence: trustedPassEvidence(["engine/src/a.ts", "engine/tests/a.test.ts"], { newTestEvidence: "vitest: pass" }),
     proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
     ...overrides,
   };
@@ -179,13 +173,17 @@ describe("implementation completion exact parsers", () => {
     expect(complete.transcript).toBe(valid);
     expect(complete.records).toHaveLength(7);
     expect(complete.records[0]).toMatchObject({
-      type: "system",
-      forward_compatible: { protocol: 2 },
+      kind: "harness",
+      record: { type: "system", forward_compatible: { protocol: 2 } },
     });
-    expect(complete.records[2]).toMatchObject({ type: "assistant" });
-    const message = complete.records[2]?.message as { content?: readonly unknown[] } | undefined;
+    expect(complete.records[2]).toMatchObject({ kind: "conversation", record: { type: "assistant" } });
+    const conversationMessage = (index: number) => {
+      const entry = complete.records[index];
+      return entry?.kind === "conversation" ? entry.record.message : undefined;
+    };
+    const message = conversationMessage(2) as { content?: readonly unknown[] } | undefined;
     expect(message?.content?.[0]).toMatchObject({ future_block_field: 1 });
-    const nestedResult = complete.records[4]?.message as { content?: readonly { content?: readonly unknown[] }[] } | undefined;
+    const nestedResult = conversationMessage(4) as { content?: readonly { content?: readonly unknown[] }[] } | undefined;
     expect(nestedResult?.content?.[0]?.content?.[0]).toMatchObject({
       type: "tool_reference",
       tool_name: "Bash",
@@ -200,6 +198,44 @@ describe("implementation completion exact parsers", () => {
       },
       future_image_field: "retained",
     });
+  });
+
+  it("accepts Claude Code harness records whose message is a request copy, not conversation", () => {
+    const valid = readFileSync(new URL("../fixtures/claude-harness-records-transcript.jsonl", import.meta.url), "utf8");
+    const complete = parseCompleteClaudeJsonl(valid);
+    expect(complete).toMatchObject({ kind: "complete", transcript: valid });
+    if (complete.kind !== "complete") return;
+    expect(complete.records.map((entry) => [entry.kind, entry.record.type])).toEqual([
+      ["conversation", "user"], ["harness", "api-request-shape"], ["harness", "api-request-blob"],
+      ["harness", "api-request"], ["conversation", "assistant"], ["conversation", "user"],
+      ["conversation", "assistant"], ["conversation", "user"], ["harness", "api-request-blob"],
+      ["harness", "api-request-blob"], ["conversation", "assistant"], ["harness", "attachment"],
+    ]);
+  });
+
+  it("property: a harness record's message is never schema-validated, whatever it holds", () => {
+    fc.assert(fc.property(
+      fc.string({ minLength: 1, maxLength: 30 })
+        .filter((type) => type.trim() !== "" && !(CLAUDE_CONVERSATION_RECORD_TYPES as readonly string[]).includes(type)),
+      fc.anything({ maxDepth: 3 }),
+      (type, message) => {
+        expect(parseCompleteClaudeJsonl(`${JSON.stringify({ type, message })}\n`)).toMatchObject({
+          kind: "complete",
+          records: [{ kind: "harness", record: { type } }],
+        });
+      },
+    ), { numRuns: 300 });
+  });
+
+  it("property: a conversation record's message stays strictly validated", () => {
+    fc.assert(fc.property(
+      fc.constantFrom(...CLAUDE_CONVERSATION_RECORD_TYPES),
+      fc.constantFrom("system", "developer", "tool", ""),
+      (type, role) => {
+        const parsed = parseCompleteClaudeJsonl(`${JSON.stringify({ type, message: { role, content: "x" } })}\n`);
+        expect(parsed).toMatchObject({ kind: "malformed", line: 1, reason: expect.stringContaining("role") });
+      },
+    ), { numRuns: 50 });
   });
 
   it.each([
@@ -502,18 +538,12 @@ describe("Implementation Completion Oracle", () => {
   it("preserves Pi structured provenance under the supplied ProofEvaluationPolicy", () => {
     const attempt = authority();
     const piObservation = observation({
-      evidence: {
-        contractConformance: CONFORMANCE_NOT_OWED,
+      evidence: observedEvidence({
         taskCompleted: true,
-        testResult: {
-          verdict: "untrusted",
-          passed: true,
-          label: "pi-structured: tool-result",
-          provenance: "pi-structured",
-        },
+        testResult: { verdict: "untrusted", passed: true, label: "pi-structured: tool-result", provenance: "pi-structured" },
         filesModified: ["engine/src/a.ts", "engine/tests/a.test.ts"],
         newTestsWritten: true,
-      },
+      }),
       proofEvaluationPolicy: PI_STRUCTURED_EVIDENCE_POLICY,
     });
     const transition = settledValue(settleImplementationAttempt(
@@ -536,13 +566,12 @@ describe("Implementation Completion Oracle", () => {
   it("classifies attempt-1 semantic failure as retry-required", () => {
     const attempt = authority(1);
     const failing = observation({
-      evidence: {
-        contractConformance: CONFORMANCE_NOT_OWED,
+      evidence: observedEvidence({
         taskCompleted: true,
         testResult: { verdict: "trusted-fail" },
         filesModified: [],
         newTestsWritten: false,
-      },
+      }),
     });
     const transition = settledValue(settleImplementationAttempt(
       task(attempt), attempt, attempt, failing, suiteResult(attempt),
@@ -558,20 +587,13 @@ describe("Implementation Completion Oracle", () => {
     fc.assert(fc.property(fc.constantFrom("trusted-fail", "missing-artifacts"), (failureMode) => {
       const attempt = authority(2, `reservation-attempt-2-${failureMode}`);
       const failedObservation = failureMode === "trusted-fail"
-        ? observation({ evidence: {
-            contractConformance: CONFORMANCE_NOT_OWED,
-            taskCompleted: true,
-            testResult: { verdict: "trusted-fail" },
-            filesModified: ["engine/src/a.ts", "engine/tests/a.test.ts"],
-            newTestsWritten: true,
-          } })
-        : observation({ evidence: {
-            contractConformance: CONFORMANCE_NOT_OWED,
-            taskCompleted: true,
-            testResult: { verdict: "trusted-pass" },
-            filesModified: [],
-            newTestsWritten: true,
-          } });
+        ? observation({ evidence: observedEvidence({
+          taskCompleted: true,
+          testResult: { verdict: "trusted-fail" },
+          filesModified: ["engine/src/a.ts", "engine/tests/a.test.ts"],
+          newTestsWritten: true,
+        }) })
+        : observation({ evidence: trustedPassEvidence([]) });
       const transition = settledValue(settleImplementationAttempt(
         task(attempt), attempt, attempt, failedObservation, suiteResult(attempt),
       ));
@@ -629,7 +651,7 @@ describe("Implementation Completion Oracle", () => {
       authoredProof().obligations,
       parsedObservation.kind === "implementation-observed"
         ? parsedObservation.evidence
-        : { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: false, filesModified: [] },
+        : observedEvidence({ taskCompleted: false, filesModified: [] }),
     );
     if (satisfied.state !== "satisfied") throw new Error("fixture must satisfy proof");
     expect(settledValue(settleImplementationAttempt(
@@ -690,13 +712,12 @@ describe("settlement receipt history", () => {
       task(secondAttempt),
       secondAttempt,
       secondAttempt,
-      observation({ evidence: {
-        contractConformance: CONFORMANCE_NOT_OWED,
+      observation({ evidence: observedEvidence({
         taskCompleted: false,
         testResult: { verdict: "trusted-fail" },
         filesModified: [],
         newTestsWritten: false,
-      } }),
+      }) }),
       suiteResult(secondAttempt),
     ));
     if (first.kind !== "implemented" || second.kind !== "escalation-required") {

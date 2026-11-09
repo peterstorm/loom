@@ -85,9 +85,9 @@ projects now.**
   (`engine/src/orchestration/skeleton-materialization.ts`) reaches it through `skeletonOutcomesOf`, which
   applies it at precedence step 1, and `presentSkeletonOf`, which says whether an untouched file is already
   canonical or engine bytes to refresh. The contract-stop step (`engine/src/orchestration/contract-stub-materialization.ts`)
-  and the revision refresh (`engine/src/orchestration/skeleton-revision.ts`) share one pure planner,
-  `planSkeletonRefresh` (`engine/src/core/skeleton/refresh-plan.ts`, candidate-driven and record-driven),
-  which acts on `presentSkeletonOf`; settlement digest subtraction (`engine/src/core/implementation-application.ts`)
+  and the revision refresh (`engine/src/orchestration/skeleton-revision.ts`) share one pure planning module,
+  `engine/src/core/skeleton/refresh-plan.ts` (`planCandidateRefresh` for the stop, `planRecordRefresh` for the revision),
+  whose planners both act on `presentSkeletonOf`; settlement digest subtraction (`engine/src/core/implementation-application.ts`)
   calls `isUntouchedSkeleton` directly. None of them compares digests itself.
 - **Exact strings.** `renderSkeletonOutcome` is an exhaustive `ts-pattern` match that returns the five FR-030
   strings. It is the only place those strings are produced.

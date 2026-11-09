@@ -85,6 +85,7 @@ describe("Task-local completion observation shell", () => {
       parserModifiedPaths: [join(fixture.root, "src/a.ts")],
       parserPathLabel: "test transcript paths",
       siblingOwnedPaths: [],
+      engineSkeletons: [],
     });
     expect(observed.suite.checks[0]?.outcome).toEqual({
       kind: "accepted",
@@ -109,6 +110,7 @@ describe("Task-local completion observation shell", () => {
       parserModifiedPaths: [join(fixture.root, "src/a.ts"), join(scratch, "tsconfig.json")],
       parserPathLabel: "test transcript paths",
       siblingOwnedPaths: [],
+      engineSkeletons: [],
     });
     expect(observed.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: ["src/a.ts"] });
   });
@@ -122,6 +124,7 @@ describe("Task-local completion observation shell", () => {
       parserModifiedPaths: ["sibling.ts"],
       parserPathLabel: "test transcript paths",
       siblingOwnedPaths: [],
+      engineSkeletons: [],
     });
     expect(observed.suite.checks[0]?.outcome).toEqual({
       kind: "out-of-scope-writes",
@@ -139,6 +142,7 @@ describe("Task-local completion observation shell", () => {
       parserModifiedPaths: [],
       parserPathLabel: "test transcript paths",
       siblingOwnedPaths: ["sibling.ts"],
+      engineSkeletons: [],
     });
     expect(observed.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
     expect(observed.cumulativeProofArtifactChanges).toEqual([]);
@@ -159,6 +163,7 @@ describe("Task-local completion observation shell", () => {
       parserModifiedPaths: [],
       parserPathLabel: "test transcript paths",
       siblingOwnedPaths: [],
+      engineSkeletons: [],
       authoritativeStatePath: statePath,
     });
 
@@ -177,6 +182,7 @@ describe("Task-local completion observation shell", () => {
       parserModifiedPaths: [],
       parserPathLabel: "test transcript paths",
       siblingOwnedPaths: [],
+      engineSkeletons: [],
       authoritativeStatePath: join(fixture.root, ".claude", "state", "active_task_graph.json"),
     });
 
@@ -197,6 +203,7 @@ describe("Task-local completion observation shell", () => {
       parserModifiedPaths: [],
       parserPathLabel: "retry transcript paths",
       siblingOwnedPaths: [],
+      engineSkeletons: [],
     });
     expect(persistent.suite.checks[0]?.outcome).toEqual({
       kind: "out-of-scope-writes",
@@ -211,6 +218,7 @@ describe("Task-local completion observation shell", () => {
       parserModifiedPaths: [],
       parserPathLabel: "retry transcript paths",
       siblingOwnedPaths: [],
+      engineSkeletons: [],
     });
     expect(repaired.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
     expect(repaired.unresolvedRepositoryPaths).toEqual([]);
@@ -229,6 +237,7 @@ describe("Task-local completion observation shell", () => {
       parserModifiedPaths: [],
       parserPathLabel: "test transcript paths",
       siblingOwnedPaths: [],
+      engineSkeletons: [],
     });
 
     expect(observed.suite.checks[0]?.outcome).toMatchObject({
@@ -253,6 +262,7 @@ describe("Task-local completion observation shell", () => {
       parserModifiedPaths: [],
       parserPathLabel: "test transcript paths",
       siblingOwnedPaths: [],
+      engineSkeletons: [],
     }, {
       ...REAL_TASK_LOCAL_PORTS,
       observeHead: () => observedHeads.shift() ?? { ok: false, error: "unexpected extra HEAD read" },
@@ -272,6 +282,7 @@ describe("Task-local completion observation shell", () => {
       parserModifiedPaths: [],
       parserPathLabel: "test transcript paths",
       siblingOwnedPaths: [],
+      engineSkeletons: [],
     }, { ...REAL_TASK_LOCAL_PORTS, observeHead: () => ({ ok: false, error: "git object database unreadable" }) });
     expect(observed.suite.checks[0]?.outcome).toMatchObject({
       kind: "observation-unavailable",
@@ -341,6 +352,7 @@ describe("Task-local completion observation shell", () => {
       ],
       parserPathLabel: "test transcript paths",
       siblingOwnedPaths: [],
+      engineSkeletons: [],
     });
 
     expect(observed.suite.checks[0]?.outcome).toEqual({
@@ -365,13 +377,14 @@ describe("Task-local completion observation shell", () => {
       parserModifiedPaths: mutation === null ? ["../escape.ts"] : [],
       parserPathLabel: "test transcript paths",
       siblingOwnedPaths: [],
+      engineSkeletons: [],
     });
     expect(observed.suite.checks[0]?.outcome).toMatchObject({ kind: "observation-unavailable" });
     expect(observed.taskBytesChangedOrUnobservable).toBe(true);
   });
 });
 
-describe("current skeleton digests at the Task-local observation seam (FR-012)", () => {
+describe("engine skeleton observation at the Task-local observation seam (FR-012)", () => {
   // Another Task's engine-written contract stub, outside this Task's scope:
   // only bytes still equal to the engine's record are subtracted from the
   // repository changes, so the digest observation decides out-of-scope.
@@ -446,24 +459,29 @@ describe("current skeleton digests at the Task-local observation seam (FR-012)",
     expect(observed.suite.checks[0]?.outcome).toEqual({ kind: "out-of-scope-writes", paths: [STUB] });
   });
 
-  const ioError = (operation: string) => Object.assign(new Error(`EIO: i/o error, ${operation}`), { code: "EIO" });
-
+  // The leaf reader's own failure arms (an lstat or no-follow read failing
+  // with anything but ENOENT/ENOTDIR), reported through the seam.
   it.each([
-    ["the lstat fails", { lstat: () => { throw ioError("lstat"); } }, "EIO: i/o error, lstat"],
-    ["the no-follow read fails", { readNoFollow: () => { throw ioError("read"); } }, "EIO: i/o error, read"],
-  ])("makes the observation unavailable when %s with any error but ENOENT or ENOTDIR", (_name, failing, reason) => {
+    ["the lstat fails", "cannot observe it (EIO: i/o error, lstat)"],
+    ["the no-follow read fails", "cannot read it without following a link (EIO: i/o error, read)"],
+  ])("makes the observation unavailable when %s with any error but ENOENT or ENOTDIR", (_name, error) => {
     const fixture = repository();
     mkdirSync(join(fixture.root, "contracts"));
     writeFileSync(join(fixture.root, STUB), ENGINE_BYTES);
+    const readPaths: string[] = [];
 
     const observed = observeWith(fixture, [engineRecord(STUB)], {
       ...REAL_TASK_LOCAL_PORTS,
-      skeletonFiles: { ...REAL_TASK_LOCAL_PORTS.skeletonFiles, ...failing },
+      readSkeletonLeaf: (_realRoot, path) => {
+        readPaths.push(path);
+        return { ok: false, error };
+      },
     });
 
+    expect(readPaths).toEqual([STUB]);
     expect(observed.suite.checks[0]?.outcome).toMatchObject({
       kind: "observation-unavailable",
-      reason: expect.stringContaining(reason),
+      reason: expect.stringContaining(`engine skeleton ${STUB}: ${error}`),
     });
     expect(observed.taskBytesChangedOrUnobservable).toBe(true);
   });

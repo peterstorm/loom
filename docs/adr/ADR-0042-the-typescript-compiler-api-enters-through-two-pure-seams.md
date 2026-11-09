@@ -5,7 +5,15 @@ Accepted (2026-10-23). Shipped with the G5b owner-enforcement feature
 (`.claude/specs/2026-10-21-g5b-owner-enforcement/spec.md`, NFR-003, FR-011; plan
 `.claude/plans/2026-10-21-g5b-owner-enforcement.md`, AD-12 and INV-1). This decision deviates from
 interview answer Q4d. The deviation is recorded below.
-Amended by ADR-0053 (a third parse-only seam).
+
+**Amended by ADR-0053 (2026-11-07): there are now three seams, not two.** G2 added a third parse-only seam,
+`engine/src/core/skeleton/ts-surface.ts`, which reads the declaration surfaces of frozen types files and
+implementation files. `TYPESCRIPT_COMPILER_API_SEAMS`, both INV-1 rule copies and the purity audit list all
+three. The "two" in this ADR's title and body is historical: it records the decision as G5b made it, and the
+filename is kept so existing links resolve. Everything else here still holds for all three seams: the
+parse-only contract, one seam list with three enforcement points, the exact-specifier grant, the test
+exemption and the `^5.9.0` runtime dependency. Read "the two seams" below as "the seams of
+`TYPESCRIPT_COMPILER_API_SEAMS`" and see ADR-0053 for the third.
 
 ## Context
 G5b owner verification has two jobs that need TypeScript parsing:
@@ -75,6 +83,8 @@ imports.
 **INV-1 confines the TypeScript compiler API to exactly two pure seams:
 `engine/src/core/owner-verification/mutation-plan.ts` and
 `engine/src/core/owner-verification/import-graph.ts`. Each one parses only text it has been given.**
+(Historical: ADR-0053 added `engine/src/core/skeleton/ts-surface.ts` as a third seam under the same rules, so
+INV-1 now names exactly three.)
 
 - **Seams and their interfaces.**
   - `import-graph.ts` exports `moduleEdges(path, text): ModuleEdges`, a list of `Edge`
@@ -96,11 +106,11 @@ imports.
   - `.claude/linter/rules/inv-1-typescript-compiler-api-seam.json`, mirrored byte for byte at
     `.pi/linter/rules/inv-1-typescript-compiler-api-seam.json`. This is a checkable regex rule. It refuses
     `from "typescript…"`, `require("typescript…")`, `import("typescript…")` and the bare side-effect
-    `import "typescript…"` everywhere except the two seams and `.test.ts` files. Its `excludePatterns` are
+    `import "typescript…"` everywhere except the seams (two at G5b, three since ADR-0053) and `.test.ts` files. Its `excludePatterns` are
     `.test.ts` plus exactly `TYPESCRIPT_COMPILER_API_SEAMS`: `engine/tests/linter/project-lint-rules.test.ts`
     reads both copies and fails when they drift from the constant, and runs every refused spelling through
-    the production loader and executor. Its fix hint sends authors to `mutationPlan` or `moduleEdges`, or tells them
-    to extend one of the seams.
+    the production loader and executor. Its fix hint sends authors to `mutationPlan` or `moduleEdges` (and,
+    since ADR-0053, the surface readers of `ts-surface.ts`), or tells them to extend one of the seams.
   - The core boundary in `no-cross-boundary-imports.ts` grants `["typescript"]` in `perFileExactAllow` to
     each path of `TYPESCRIPT_COMPILER_API_SEAMS`. These are exact-specifier grants, never a prefix. A
     `typescript/…` subpath therefore fails until it is re-audited.
@@ -108,8 +118,9 @@ imports.
     `auditClosure` treats `typescript` as a granted capability only for those modules. It
     reports a `typescript` import from any other pure file, and any widened specifier such as
     `typescript/lib/tsserverlibrary` from a seam, as `unaudited package`. The test
-    "expands the owner-verification package entry to every file and grants typescript only to its two
-    seams" proves both refusals.
+    "expands the owner-verification package entry to every file and grants typescript only to the compiler
+    API seams" proves both refusals, and "G2 INV-2: lists the skeleton core as pure and grants typescript to
+    its ts-surface seam alone" proves them for the third seam (ADR-0053).
 - **Test exemption.** Test files may import `typescript`. `machine-purity.test.ts` does so to parse the
   dependencies it audits.
 - **Dependency status (NFR-003).** `typescript` is declared an engine runtime dependency: `engine/package.json`
@@ -132,7 +143,8 @@ imports.
   `engine/tests/core/owner-verification-mutation-plan.test.ts`). They need no fixture repository or
   compiler host.
 - The capability stays narrow and visible. The project rule, the programmatic linter and the purity audit
-  each list the same two files, so widening the grant requires deliberate edits in three places.
+  each list the same files (two at G5b, three since ADR-0053), so widening the grant requires deliberate edits
+  in three places. ADR-0053's third seam was added exactly that way.
 - No new package (`typescript` was already installed; it is now declared where it runs), and the pure-core
   and FC/IS boundaries are unchanged. All I/O stays in `owner-verification-runner.ts` and the coverage shell
   input.
@@ -140,7 +152,8 @@ imports.
 **Negative:**
 - This deviates from interview answer Q4d. Two files hold the compiler-API grant instead of one, and a
   reader has to come to this ADR to learn why.
-- The regex rule cannot import the seam constant, so its JSON (with its `.pi` copy) restates the pair.
+- The regex rule cannot import the seam constant, so its JSON (with its `.pi` copy) restates the seam list
+  (the pair at G5b, three paths since ADR-0053).
   Moving or renaming a seam is one edit to `TYPESCRIPT_COMPILER_API_SEAMS` plus the two rule copies, and the
   mirror test fails until the copies follow.
 - `typescript` is now a runtime requirement of the Wave Gate, and the engine's runtime dependency set grows by

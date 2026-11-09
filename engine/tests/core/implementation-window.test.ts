@@ -13,8 +13,7 @@ import { deriveLoomStatusFromParsedGraph } from "../../src/core/loom-status";
 import { implementationEscalatedLineage } from "../fixtures/implementation-escalation";
 import { parseNewTestEvidence, type Task, type TaskGraph } from "../../src/types";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
-import { activeWaveGateFixture, completedWaveGateFixture, graphFixture, taskFixture } from "../fixtures/task-lifecycle";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
+import { activeWaveGateFixture, completedWaveGateFixture, graphFixture, taskFixture, trustedPassEvidence } from "../fixtures/task-lifecycle";
 
 const abandoned = (supersededBy: string | null) => ({ kind: "terminal-abandoned", reason: "exhausted", supersededBy });
 const gate = (terminalOutcome: unknown) =>
@@ -41,12 +40,12 @@ describe("classifyImplementationWindow", () => {
         { ...graphFixture([task("T1")]), active_wave_gate: activeWaveGateFixture({
           runId: "run.old", wave: 2, authorityDigest: "d".repeat(64), terminalOutcome: abandoned(null) }) }],
     ])("is not in the window with %s", (_name, graph) => {
-      expect(classifyImplementationWindow(graph, observed(false))).toEqual({ kind: "not-in-window" });
+      expect(classifyImplementationWindow(graph, observed(false), [])).toEqual({ kind: "not-in-window" });
     });
   });
 
   it("dispatches a pending Task and names it pending", () => {
-    const window = classifyImplementationWindow(graphFixture([task("T1")]), observed(false));
+    const window = classifyImplementationWindow(graphFixture([task("T1")]), observed(false), []);
     expect(window).toMatchObject({
       kind: "window", wave: 1, pendingTaskIds: ["T1"], activeTaskIds: [], escalated: [],
       recovery: { kind: "spawn-wave-implementation", wave: 1, dispatches: [{ taskId: "T1" }] },
@@ -55,7 +54,7 @@ describe("classifyImplementationWindow", () => {
 
   it.each([null, "run.next"])("stays inside the window under an abandoned registration with successor %s", (successor) => {
     const graph: TaskGraph = { ...graphFixture([task("T1")]), active_wave_gate: gate(abandoned(successor)) };
-    expect(classifyImplementationWindow(graph, observed(false)).kind).toBe("window");
+    expect(classifyImplementationWindow(graph, observed(false), []).kind).toBe("window");
   });
 
   // Only the named successor may register the Wave, so the
@@ -69,19 +68,19 @@ describe("classifyImplementationWindow", () => {
       file_list: [],
       proof: evaluateTaskProof(
         { newTestsRequired: true, declaredArtifacts: [] },
-        { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: [], newTestsWritten: true },
+        trustedPassEvidence([]),
       ),
       test_result: { verdict: "trusted-pass" },
       test_evidence: "1 passed",
       new_test_observation: parseNewTestEvidence(true, "1 new test"),
     });
     const graph: TaskGraph = { ...graphFixture([startReady]), active_wave_gate: gate(abandoned(successor)) };
-    expect(classifyImplementationWindow(graph, observed(false))).toMatchObject({ kind: "window", recovery });
+    expect(classifyImplementationWindow(graph, observed(false), [])).toMatchObject({ kind: "window", recovery });
   });
 
   it("awaits a live reservation and never dispatches it", () => {
     const graph = executing(graphFixture([task("T1", { reserved_at: new Date(NOW).toISOString() })]), ["T1"]);
-    expect(classifyImplementationWindow(graph, observed(true))).toMatchObject({
+    expect(classifyImplementationWindow(graph, observed(true), [])).toMatchObject({
       kind: "window", activeTaskIds: ["T1"],
       recovery: { kind: "await-wave-implementation", wave: 1, activeTaskIds: ["T1"] },
     });
@@ -89,7 +88,7 @@ describe("classifyImplementationWindow", () => {
 
   it("reclaims a policy-expired reservation and dispatches it again", () => {
     const graph = executing(graphFixture([task("T1", { reserved_at: "2000-01-01T00:00:00.000Z" })]), ["T1"]);
-    expect(classifyImplementationWindow(graph, observed(false))).toMatchObject({
+    expect(classifyImplementationWindow(graph, observed(false), [])).toMatchObject({
       kind: "window", activeTaskIds: [],
       recovery: { kind: "spawn-wave-implementation", dispatches: [{ taskId: "T1" }] },
     });
@@ -97,14 +96,14 @@ describe("classifyImplementationWindow", () => {
 
   it("keeps a reservation active, fail-closed, when liveness was never observed", () => {
     const graph = executing(graphFixture([task("T1", { reserved_at: "2000-01-01T00:00:00.000Z" })]), ["T1"]);
-    expect(classifyImplementationWindow(graph, undefined)).toMatchObject({
+    expect(classifyImplementationWindow(graph, undefined, [])).toMatchObject({
       kind: "window", recovery: { kind: "await-wave-implementation" },
     });
   });
 
   it("is unavailable when a reservation exists but liveness is unavailable", () => {
     const graph = executing(graphFixture([task("T1", { reserved_at: new Date(NOW).toISOString() })]), ["T1"]);
-    expect(classifyImplementationWindow(graph, { kind: "unavailable", reason: "registry unreadable" })).toEqual({
+    expect(classifyImplementationWindow(graph, { kind: "unavailable", reason: "registry unreadable" }, [])).toEqual({
       kind: "unavailable",
       message: "cannot determine implementation reservation liveness: registry unreadable",
     });
@@ -118,7 +117,7 @@ describe("classifyImplementationWindow", () => {
       executing(graphFixture([task("T1")]), ["T1"]),
       "T1 has timestamp-less legacy implementation authority that canonical status cannot reclaim; repair or migrate the Task Graph"],
   ])("reports %s as a Task-scoped contradiction", (_name, graph, message) => {
-    expect(classifyImplementationWindow(graph, observed(false))).toEqual({
+    expect(classifyImplementationWindow(graph, observed(false), [])).toEqual({
       kind: "contradiction",
       reason: { kind: "authority-contradiction", message, taskId: "T1" },
     });
@@ -142,7 +141,7 @@ describe("classifyImplementationWindow", () => {
     });
 
     it("names the remediate recovery in the window message", () => {
-      const window = classifyImplementationWindow(escalatedGraph, observed(false));
+      const window = classifyImplementationWindow(escalatedGraph, observed(false), []);
       expect(window).toMatchObject({ kind: "window", recovery: { kind: "escalate-wave-implementation" } });
       if (window.kind !== "window") return;
       expect(window.message).toBe(
@@ -167,7 +166,7 @@ describe("classifyImplementationWindow", () => {
   });
 
   it("asks for the Wave Gate, or its start repair, once nothing is outstanding", () => {
-    const window = classifyImplementationWindow(graphFixture([task("T1", { status: "implemented" })]), observed(false));
+    const window = classifyImplementationWindow(graphFixture([task("T1", { status: "implemented" })]), observed(false), []);
     expect(window.kind).toBe("window");
     if (window.kind !== "window") return;
     expect(["start-wave-gate", "repair-wave-start-readiness"]).toContain(window.recovery.kind);

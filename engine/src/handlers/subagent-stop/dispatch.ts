@@ -32,6 +32,7 @@ import { runStoreSpecCheckFindings } from "./store-spec-check-findings";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import { PRODUCTION_STOP_CHECK_PORTS, type StopCheckShellPorts } from "./acceptance-stop-check";
 import { epochChangedFiles, runStopChecks } from "./stop-checks";
+import type { StopChecksOutcome } from "../../core/affected-stop-check-types";
 import { claudeEpochLedger } from "./update-task-status";
 import { publishStopCheckNote } from "../../stop-check-note-sidecar";
 import { contractStubStopNote } from "../../orchestration/contract-stub-materialization";
@@ -70,6 +71,36 @@ import {
   snapshotImplementationAttemptSidecar,
   type ImplementationAuthorityObservation,
 } from "../../implementation-attempt-sidecar";
+
+/** What a stop does once its checks ran: block (the same agent keeps
+ *  working), or settle with the note it reports, if any. */
+export type StopCheckDecision =
+  | Readonly<{ kind: "block"; message: string }>
+  | Readonly<{ kind: "settle"; note: string | null }>;
+
+/**
+ * The stop's decision from the contract stub note and the stop checks'
+ * outcome. The checks' own message comes first: a note, a block, or — when
+ * `handedBack` says the agent already ended its turn with SubagentHandback,
+ * read only for a block — the handed-back block note the stop settles with.
+ * The stub note is prefixed once, here, to whichever message the stop reports.
+ */
+export async function stopCheckDecision(
+  stubNote: string | null,
+  outcome: StopChecksOutcome,
+  handedBack: () => Promise<boolean>,
+): Promise<StopCheckDecision> {
+  const checked: StopCheckDecision = outcome.kind === "block"
+    ? await handedBack()
+      ? { kind: "settle", note: handedBackBlockNote(outcome.message) }
+      : { kind: "block", message: outcome.message }
+    : { kind: "settle", note: outcome.kind === "note" ? outcome.message : null };
+  const prefixed = (message: string): string => (stubNote === null ? message : `${stubNote}\n${message}`);
+  return match(checked)
+    .with({ kind: "block" }, ({ message }): StopCheckDecision => ({ kind: "block", message: prefixed(message) }))
+    .with({ kind: "settle" }, ({ note }): StopCheckDecision => ({ kind: "settle", note: note === null ? stubNote : prefixed(note) }))
+    .exhaustive();
+}
 
 type AgentCategory = "phase" | "impl" | "review" | "spec-check" | "unknown";
 
@@ -401,20 +432,13 @@ export const runDispatch = async (
       changedFiles: epochChangedFiles(epoch, stopCheckPorts.pathExists),
       hookStartedAtMs,
     }, stopCheckPorts);
-    const afterStubNote = (message: string): string => (stubNote === null ? message : `${stubNote}\n${message}`);
     // A block keeps the agent working only if the harness can hold it open. An
     // agent that already delivered its SubagentHandback has ended: blocking it
     // would drop this stop's settlement and strand the Task's authority, so the
     // block becomes a note and the stop settles (the Wave Gate still judges).
-    const handedBackNote = outcome.kind === "block" && await stopFinality(input)
-      ? handedBackBlockNote(outcome.message)
-      : null;
-    if (outcome.kind === "block" && handedBackNote === null) {
-      return { kind: "block", message: afterStubNote(outcome.message) };
-    }
-    const note = outcome.kind === "note"
-      ? afterStubNote(outcome.message)
-      : handedBackNote !== null ? afterStubNote(handedBackNote) : stubNote;
+    const decision = await stopCheckDecision(stubNote, outcome, () => stopFinality(input));
+    if (decision.kind === "block") return { kind: "block", message: decision.message };
+    const { note } = decision;
     if (note !== null) {
       // The systemMessage reaches only the operator. The sidecar carries the
       // note to the orchestrating model (#121), and is written before

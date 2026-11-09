@@ -23,7 +23,7 @@ import type { DomainResult } from "../orchestration-contract";
 import { samePlanPath } from "../plan-path-match";
 import type { Task, TaskGraph } from "../../types";
 import { renderSkeletonOutcome, skeletonOutcomesOf } from "./outcomes";
-import type { SkeletonProblem } from "./problems";
+import { renderLeftPreparedName, renderSkeletonProblem, type LeftPreparedName, type SkeletonProblem } from "./problems";
 import type { PathObservation, SkeletonOutcome, UnknownTask } from "./types";
 
 /** Whether an outcome is the one registration recorded, or the one it would decide now. */
@@ -149,9 +149,35 @@ export function skeletonStatusReport(
 export const unresolvedSkeletonBindings = (report: SkeletonStatusReport): readonly string[] =>
   report.kind === "reported" ? report.unresolved.map(({ message }) => message) : [];
 
+/** The FR-033 flag's one wording, wherever a stale skeleton is named. */
+const STALE_AGAINST_REVISED = "stale against revised contract";
+
 /** The FR-033 flag, with the contract and revision that left the skeleton stale. */
 export const renderStaleSkeleton = ({ contract, stale }: StaleSkeleton): string =>
-  `stale against revised contract ${contract} (revision ${stale.revision})`;
+  `${STALE_AGAINST_REVISED} ${contract} (revision ${stale.revision})`;
+
+/** What a Contract Revision did to the contract's skeletons, as the operator reads it. */
+export type SkeletonRevisionOutcome = Readonly<{
+  refreshed: readonly string[];
+  stale: readonly string[];
+  bindingProblems: readonly SkeletonProblem[];
+  leftovers: readonly LeftPreparedName[];
+}>;
+
+/**
+ * The skeleton part of a Contract Revision's outcome: one line per refreshed
+ * skeleton, stale skeleton, binding problem and prepared name left behind,
+ * in that order.
+ */
+export const renderSkeletonRevisionLines = (
+  { refreshed, stale, bindingProblems, leftovers }: SkeletonRevisionOutcome,
+): readonly string[] => [
+  ...refreshed.map((path) => `skeleton refreshed ${path} from the revised types`),
+  ...stale.map((path) => `skeleton ${path}: ${STALE_AGAINST_REVISED} (modified, left as it is)`),
+  ...bindingProblems.map((problem) =>
+    `skeleton binding problem: ${renderSkeletonProblem(problem)}; the next spawn's stage two blocks on it`),
+  ...leftovers.map((leftover) => `skeleton note: ${renderLeftPreparedName(leftover)}`),
+];
 
 /** The human status lines: one per path with its exact outcome string and basis, then each stale flag and problem. */
 export function renderSkeletonStatus(report: SkeletonStatusReport): readonly string[] {

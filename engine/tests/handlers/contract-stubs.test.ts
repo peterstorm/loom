@@ -18,10 +18,8 @@ import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { reportContractStubs } from "../../../pi/subagent-stop";
-import type { ImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import { UNKEPT_BLOCK_COUNTERS, type StopCheckShellPorts } from "../../src/handlers/subagent-stop/acceptance-stop-check";
-import { runDispatch } from "../../src/handlers/subagent-stop/dispatch";
-import { registerTaskExecutionBatch } from "../../src/handlers/task-execution";
+import { handedBackBlockNote, runDispatch, stopCheckDecision } from "../../src/handlers/subagent-stop/dispatch";
 import { publishImplementationAttemptSidecar } from "../../src/implementation-attempt-sidecar";
 import {
   contractStubStopNote,
@@ -29,19 +27,20 @@ import {
   renderContractStubs,
   stubbedContracts,
 } from "../../src/orchestration/contract-stub-materialization";
-import { StateManager } from "../../src/state-manager";
 import type { HookResult } from "../../src/types";
 import {
+  authorityOf,
   canonicalSkeletonOf,
   canonicalTsSkeleton,
   cleanupSkeletonRepos,
   JAVA_CONTRACT,
   JAVA_TYPES_TEXT,
+  managerOf,
   PATHS,
   recordedSkeletons,
+  registered,
   sha256,
   skeletonRepo,
-  spawnFor,
   TS_CONTRACT,
   TS_TYPES_TEXT,
   type SkeletonRepo,
@@ -58,12 +57,6 @@ const CT1_STUBS = [PATHS.tsPricing, PATHS.tsQuotes, PATHS.tsLegacy] as const;
 const CT2_STUBS = [PATHS.javaPricing, PATHS.javaExisting] as const;
 const TS_TYPES_WITHOUT_PARSE_ORDER = TS_TYPES_TEXT.replace("export type ParseOrderFn = (raw: string) => Order;\n", "");
 
-const managerOf = (repo: SkeletonRepo): StateManager => {
-  const manager = StateManager.fromPath(repo.statePath);
-  if (manager === null) throw new Error("fixture State File missing");
-  return manager;
-};
-
 /** A contract-Wave repository whose contract Task agents have written their sources. */
 function contractWave(): SkeletonRepo {
   const repo = skeletonRepo({ stage: "contract-wave" });
@@ -77,14 +70,6 @@ const importJsStyle = (repo: SkeletonRepo): void =>
     '"../src/order/order-contract"',
     '"../src/order/order-contract.js"',
   ));
-
-async function registered(repo: SkeletonRepo, taskId: string): Promise<ImplementationAttemptAuthority> {
-  const outcome = await registerTaskExecutionBatch([spawnFor(repo.rawState(), taskId)]);
-  if (outcome.kind !== "registered") throw new Error(`registration refused: ${outcome.message}`);
-  const [authority] = outcome.authorities;
-  if (authority === undefined) throw new Error(`no authority for ${taskId}`);
-  return authority;
-}
 
 type Seen = { atCheck: Readonly<Record<string, boolean>> | null };
 
@@ -107,7 +92,7 @@ function observingPorts(repo: SkeletonRepo, seen: Seen): StopCheckShellPorts {
 
 /** Register T1, let `writeSources` stand in for its agent, and stop it through the Claude dispatcher. */
 async function claudeStop(repo: SkeletonRepo, writeSources: () => void): Promise<{ result: HookResult; seen: Seen }> {
-  const authority = await registered(repo, "T1");
+  const authority = authorityOf(await registered(repo, "T1"), "T1");
   writeSources();
   publishImplementationAttemptSidecar({ sessionId: SESSION, agentId: AGENT, taskGraphPath: repo.statePath, authority });
   writeFileSync(join(process.env.LOOM_SUBAGENT_DIR!, `${SESSION}.task_graph`), repo.statePath);
@@ -147,6 +132,43 @@ describe("the Claude Code stop shell (dispatch.ts)", () => {
     expect(printed).toContain(PATHS.tsPricing);
     const said = JSON.stringify(result);
     expect(said).toContain("ParseOrderFn");
+  });
+});
+
+describe("stopCheckDecision: the contract stub note joined with the stop checks' outcome", () => {
+  const STUB_NOTE = "contract stubs of T1: not every stub could be written; its acceptance tests cannot import what is missing";
+  const CHECK = "acceptance stop check: AS-001 still fails";
+  /** A finality read that counts how often the decision asked. */
+  const finality = (handedBack: boolean) => {
+    const asked = { count: 0 };
+    return { asked, read: async () => { asked.count += 1; return handedBack; } };
+  };
+
+  it("FR-023: a blocking stop check blocks with the stub note, then the check's message", async () => {
+    const { asked, read } = finality(false);
+    expect(await stopCheckDecision(STUB_NOTE, { kind: "block", message: CHECK }, read))
+      .toEqual({ kind: "block", message: `${STUB_NOTE}\n${CHECK}` });
+    expect(asked.count).toBe(1);
+  });
+
+  it("FR-023: a handed-back agent settles with a note carrying the stub note, then the handed-back block note", async () => {
+    const { read } = finality(true);
+    expect(await stopCheckDecision(STUB_NOTE, { kind: "block", message: CHECK }, read))
+      .toEqual({ kind: "settle", note: `${STUB_NOTE}\n${handedBackBlockNote(CHECK)}` });
+  });
+
+  it("a block with no stub note is the check's message alone", async () => {
+    expect(await stopCheckDecision(null, { kind: "block", message: CHECK }, finality(false).read))
+      .toEqual({ kind: "block", message: CHECK });
+  });
+
+  it("a noting check settles with the stub note, then its note; finality is read only for a block", async () => {
+    const { asked, read } = finality(true);
+    expect(await stopCheckDecision(STUB_NOTE, { kind: "note", message: CHECK }, read))
+      .toEqual({ kind: "settle", note: `${STUB_NOTE}\n${CHECK}` });
+    expect(await stopCheckDecision(STUB_NOTE, { kind: "passed" }, read)).toEqual({ kind: "settle", note: STUB_NOTE });
+    expect(await stopCheckDecision(null, { kind: "skip" }, read)).toEqual({ kind: "settle", note: null });
+    expect(asked.count).toBe(0);
   });
 });
 

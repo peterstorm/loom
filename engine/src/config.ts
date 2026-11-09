@@ -28,6 +28,7 @@ import {
 } from "./core/agent-catalog-projections";
 import { frozenSet } from "./core/frozen";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
+import { CLAUDE_PROJECT_RULES_DIR, PI_PROJECT_RULES_DIR } from "./linter/programmatic/config";
 import { projectRootForStateFile } from "./core/phase-artifact-paths";
 import { observeGitProbe, type GitProbeStep } from "./utils/git-probe";
 import { observePathPresence } from "./utils/path-presence";
@@ -710,7 +711,7 @@ export const typeDiagnosticsCacheDir = (env: Readonly<Record<string, string | un
   env.LOOM_TYPE_DIAGNOSTICS_CACHE ??
   join(env.XDG_CACHE_HOME ?? join(env.HOME ?? tmpdir(), ".cache"), "loom", "type-diagnostics");
 
-/** Project-local rules directory — resolved relative to repo root */
-export const PROJECT_RULES_DIR = HARNESS === "pi"
-  ? ".pi/linter/rules"
-  : ".claude/linter/rules";
+/** Project-local rules directory — resolved relative to repo root. The two
+ *  layouts are the linter's (`linter/programmatic/config.ts`), which also
+ *  derives a project's root from them. */
+export const PROJECT_RULES_DIR = HARNESS === "pi" ? PI_PROJECT_RULES_DIR : CLAUDE_PROJECT_RULES_DIR;

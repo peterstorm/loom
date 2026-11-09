@@ -23,7 +23,7 @@ import { fixturePiAgentDirectory } from "./fixtures/fixture-pi-agent-directory";
 import { advertiseInstalledLaunchPort, SynchronousEventBus } from "./fixtures/emission-launch-port";
 import { parseTaskGraph } from "../src/state-manager";
 import { observeTaskGraphProjectBoundary } from "../src/config";
-import { graphFixture, taskFixture } from "./fixtures/task-lifecycle";
+import { graphFixture, taskFixture, observedEvidence } from "./fixtures/task-lifecycle";
 import { publishLegacyInitialBatch } from "../src/handlers/helpers/programs/request-publication";
 import { readLoomReviewAuthorityBridge } from "../src/handlers/helpers/programs/review-authority-bridge";
 import { waveGateAuthorityDigest } from "../src/core/wave-review-authority";
@@ -38,7 +38,6 @@ import {
   PI_EXTENSION_RUNTIME_REVISION_ENV,
   PI_EXTENSION_RUNTIME_ROOT_ENV,
 } from "../src/runtime-compatibility";
-import { CONFORMANCE_NOT_OWED } from "../src/core/skeleton/conformance-verdict";
 
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown;
 
@@ -4361,7 +4360,7 @@ describe("Pi extension review tool_result integration", () => {
     const task = spawned.tasks[0];
     const proof = evaluateTaskProof(
       { newTestsRequired: false, declaredArtifacts: task.file_list ?? [] },
-      { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, filesModified: task.file_list ?? [] },
+      observedEvidence({ taskCompleted: true, filesModified: task.file_list ?? [] }),
     );
     if (proof.state !== "satisfied") throw new Error("completed missing-result proof fixture failed");
     writeState({
@@ -5386,7 +5385,7 @@ describe("Pi extension review tool_result integration", () => {
       writeFileSync(artifactPath, "export const value = 1;\n");
       const greenProof = evaluateTaskProof(
         { newTestsRequired: false, declaredArtifacts: [artifactRelative] },
-        { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, filesModified: [artifactRelative] },
+        observedEvidence({ taskCompleted: true, filesModified: [artifactRelative] }),
       );
       writeState({
         ...initialGraph(),
@@ -5473,7 +5472,7 @@ describe("Pi extension review tool_result integration", () => {
       writeFileSync(artifactPath, "export const value = 1;\n");
       const greenProof = evaluateTaskProof(
         { newTestsRequired: false, declaredArtifacts: [artifactRelative] },
-        { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, filesModified: [artifactRelative] },
+        observedEvidence({ taskCompleted: true, filesModified: [artifactRelative] }),
       );
       expect(greenProof.state).toBe("satisfied");
       writeState({
@@ -5572,7 +5571,7 @@ describe("Pi extension review tool_result integration", () => {
       writeFileSync(declaredPath, "export const declared = true;\n");
       const greenProof = evaluateTaskProof(
         { newTestsRequired: false, declaredArtifacts: [declaredRelative] },
-        { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, filesModified: [declaredRelative] },
+        observedEvidence({ taskCompleted: true, filesModified: [declaredRelative] }),
       );
       writeState({
         ...initialGraph(),

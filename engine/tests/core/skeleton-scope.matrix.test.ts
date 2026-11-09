@@ -33,29 +33,26 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import { skeletonLanguageOf } from "../../src/core/skeleton/language";
 import { conformanceScope, type ConformanceScope } from "../../src/core/skeleton/scope";
-import { renderFrozenSignatures } from "../../src/core/implementation-brief";
+import { PLAN_BINDINGS_AGREE, renderFrozenSignatures } from "../../src/core/implementation-brief";
 import type { DomainResult } from "../../src/core/orchestration-contract";
-import type { ExportBinding, FrozenSurface, Identifier } from "../../src/core/skeleton/types";
-import { freezeVerificationManifest } from "../../src/core/verification-manifest";
+import type { ExportBinding, FrozenSurface } from "../../src/core/skeleton/types";
 import type { StoredVerificationPolicy } from "../../src/core/verification-policy";
 import type { Task, TaskCommonMetadata, TaskGraph } from "../../src/types";
 import { observeContractConformance } from "../../src/orchestration/contract-conformance-observation";
 import { digest } from "../fixtures/acceptance-fixtures";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { binding, frozenManifestWith } from "../fixtures/skeleton-builders";
 import {
+  authorityOf,
   cleanupSkeletonRepos,
   JAVA_TYPES_TEXT,
+  registered,
+  settleAttempt,
   skeletonRepo,
-  spawnFor,
   storedTask,
-  TS_CONTRACT as REPO_TS_CONTRACT,
+  TS_CONTRACT,
   TS_TYPES_TEXT,
 } from "../fixtures/skeleton-repo";
-import { parseIsoInstant } from "../../src/core/implementation-completion";
-import { TRUSTED_LEDGER_ONLY_POLICY } from "../../src/core/proof-obligations";
-import { productionExactSettlementPorts, settleExactImplementation } from "../../src/handlers/helpers/exact-implementation-settlement";
-import { registerTaskExecutionBatch } from "../../src/handlers/task-execution";
-import { StateManager } from "../../src/state-manager";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 
 const TS_TYPES = "src/order/types.ts";
@@ -88,8 +85,8 @@ const contract = (
   };
 };
 
-const TS_CONTRACT = contract("CT-1", { kind: "file", path: TS_TYPES }, "FR-001");
-const JAVA_CONTRACT = contract("CT-2", { kind: "file", path: JAVA_TYPES }, "FR-002");
+const TS_TYPED_CONTRACT = contract("CT-1", { kind: "file", path: TS_TYPES }, "FR-001");
+const JAVA_TYPED_CONTRACT = contract("CT-2", { kind: "file", path: JAVA_TYPES }, "FR-002");
 const TYPELESS = contract("CT-3", { kind: "none", reason: "a pure CLI slice" }, "FR-003");
 const AWAITING = contract("CT-4", { kind: "file", path: "src/later/types.ts" }, "FR-004", "awaiting-red", "T0");
 const REVISED = contract("CT-5", { kind: "file", path: "src/revised/types.ts" }, "FR-005", "revised");
@@ -119,13 +116,9 @@ const task = (
     ...extra,
   });
 
-const bound = (path: string, contractId: string): ExportBinding => ({
-  path,
-  contract: contractId,
-  exports: [{ name: "priceOrder" as Identifier, alias: "PriceOrderFn" as Identifier }],
-});
+const bound = (path: string, contractId: string): ExportBinding => binding(path, contractId, ["priceOrder", "PriceOrderFn"]);
 
-const ALL_CONTRACTS = [TS_CONTRACT, JAVA_CONTRACT, TYPELESS, AWAITING, REVISED, UNSUPPORTED_TYPES];
+const ALL_CONTRACTS = [TS_TYPED_CONTRACT, JAVA_TYPED_CONTRACT, TYPELESS, AWAITING, REVISED, UNSUPPORTED_TYPES];
 
 const graphOf = (tasks: readonly Task[], bindings: readonly ExportBinding[]): TaskGraph => ({
   ...graphFixture([task("T1", [TS_TYPES, JAVA_TYPES, "tests/CT-1.acceptance.test.ts"]), ...tasks]),
@@ -151,7 +144,7 @@ describe("INV-5 owner: the plan's named cases", () => {
     // The stamp decides, not what it binds: an empty stamp is a G2 graph, and the claimant owes the ADT check.
     expect(scopeOf(subject)).toEqual({
       kind: "owed",
-      contracts: [TS_CONTRACT, JAVA_CONTRACT],
+      contracts: [TS_TYPED_CONTRACT, JAVA_TYPED_CONTRACT],
       bindings: [],
       files: [target("src/order/pricing.ts"), target("src/main/java/com/acme/A.java")],
     });
@@ -184,20 +177,16 @@ describe("INV-5 owner: the plan's named cases", () => {
 
   it("a test file in file_list is never in scope", () => {
     const subject = task("T2", ["src/order/pricing.ts", "src/order/pricing.test.ts"], ["FR-001"]);
-    expect(scopeOf(subject)).toEqual({ kind: "owed", contracts: [TS_CONTRACT], bindings: [], files: [target("src/order/pricing.ts")] });
+    expect(scopeOf(subject)).toEqual({ kind: "owed", contracts: [TS_TYPED_CONTRACT], bindings: [], files: [target("src/order/pricing.ts")] });
     expect(scopeOf(task("T2", ["src/order/pricing.test.ts"], ["FR-001"]))).toEqual({ kind: "not-owed", reason: "no-file-in-scope" });
   });
 
   it("the graph's frozen test-file classification, not the engine default, decides which files are tests", () => {
-    const frozen = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
-      kind: "loom-verification-manifest", checks: [], schemaVersion: 2, testFileSuffixes: ["Test.java"],
-    })));
-    if (!frozen.ok) throw new Error(frozen.error.errors.join("; "));
     const subject = task("T2", ["src/main/java/com/acme/PricingTest.java", "src/order/pricing.test.ts"], ["FR-002", "FR-001"]);
-    const graph: TaskGraph = { ...graphOf([subject], []), verification_manifest: frozen.value };
+    const graph: TaskGraph = { ...graphOf([subject], []), verification_manifest: frozenManifestWith(["Test.java"]) };
     expect(conformanceScope(graph, subject)).toEqual({
       kind: "owed",
-      contracts: [TS_CONTRACT, JAVA_CONTRACT],
+      contracts: [TS_TYPED_CONTRACT, JAVA_TYPED_CONTRACT],
       bindings: [],
       files: [target("src/order/pricing.test.ts")],
     });
@@ -207,7 +196,7 @@ describe("INV-5 owner: the plan's named cases", () => {
     const subject = task("T2", ["src/order/legacy.ts"], ["FR-001"], {
       artifact_baseline: [{ artifact: "src/order/legacy.ts", snapshot: { kind: "sha256", digest: "b".repeat(64) } }],
     });
-    expect(scopeOf(subject)).toEqual({ kind: "owed", contracts: [TS_CONTRACT], bindings: [], files: [target("src/order/legacy.ts")] });
+    expect(scopeOf(subject)).toEqual({ kind: "owed", contracts: [TS_TYPED_CONTRACT], bindings: [], files: [target("src/order/legacy.ts")] });
   });
 
   it("a binder whose contract is still awaiting-red owes nothing", () => {
@@ -222,7 +211,7 @@ describe("INV-5 owner: the rest of AD-11", () => {
       const subject = task("T2", ["src/order/pricing.ts"], [], { verification_policy: policy(reason) });
       expect(scopeOf(subject, [bound("src/order/pricing.ts", "CT-1")])).toEqual({
         kind: "owed",
-        contracts: [TS_CONTRACT],
+        contracts: [TS_TYPED_CONTRACT],
         bindings: [bound("src/order/pricing.ts", "CT-1")],
         files: [target("src/order/pricing.ts")],
       });
@@ -238,14 +227,14 @@ describe("INV-5 owner: the rest of AD-11", () => {
     const subject = task("T2", ["src/order/a.ts", "src/main/java/com/acme/A.java", "src/order/b.tsx"], ["FR-001"]);
     expect(scopeOf(subject)).toEqual({
       kind: "owed",
-      contracts: [TS_CONTRACT],
+      contracts: [TS_TYPED_CONTRACT],
       bindings: [],
       files: [target("src/order/a.ts"), target("src/order/b.tsx")],
     });
     const javaClaimant = task("T2", ["src/order/a.ts", "src/main/java/com/acme/A.java"], ["FR-002"]);
     expect(scopeOf(javaClaimant)).toEqual({
       kind: "owed",
-      contracts: [JAVA_CONTRACT],
+      contracts: [JAVA_TYPED_CONTRACT],
       bindings: [],
       files: [target("src/main/java/com/acme/A.java")],
     });
@@ -255,7 +244,7 @@ describe("INV-5 owner: the rest of AD-11", () => {
     const subject = task("T2", ["src/main/java/com/acme/A.java", "src/order/a.ts"], ["FR-002", "FR-001"]);
     expect(scopeOf(subject)).toEqual({
       kind: "owed",
-      contracts: [TS_CONTRACT, JAVA_CONTRACT],
+      contracts: [TS_TYPED_CONTRACT, JAVA_TYPED_CONTRACT],
       bindings: [],
       files: [target("src/main/java/com/acme/A.java"), target("src/order/a.ts")],
     });
@@ -265,7 +254,7 @@ describe("INV-5 owner: the rest of AD-11", () => {
     const subject = task("T2", ["src/main/java/com/acme/Bound.java", "src/main/java/com/acme/Free.java", "src/order/free.ts"]);
     expect(scopeOf(subject, [bound("src/main/java/com/acme/Bound.java", "CT-1")])).toEqual({
       kind: "owed",
-      contracts: [TS_CONTRACT],
+      contracts: [TS_TYPED_CONTRACT],
       bindings: [bound("src/main/java/com/acme/Bound.java", "CT-1")],
       files: [target("src/main/java/com/acme/Bound.java"), target("src/order/free.ts")],
     });
@@ -280,7 +269,7 @@ describe("INV-5 owner: the rest of AD-11", () => {
       bound("src/later/impl.ts", "CT-4"),
     ], [other])).toEqual({
       kind: "owed",
-      contracts: [TS_CONTRACT],
+      contracts: [TS_TYPED_CONTRACT],
       bindings: [bound("src/order/pricing.ts", "CT-1")],
       // The CT-4 file stays in scope, unbound: CT-1's TypeScript ADT check covers it.
       files: [target("src/order/pricing.ts"), target("src/later/impl.ts")],
@@ -296,7 +285,7 @@ describe("INV-5 owner: the rest of AD-11", () => {
   it("frozen paths are never conformance subjects", () => {
     // T0 writes CT-4's frozen surface and claims CT-1.
     const subject = task("T0", ["src/later/types.ts", "src/order/a.ts", "tests/CT-4.acceptance.test.ts"], ["FR-001"]);
-    expect(scopeOf(subject)).toEqual({ kind: "owed", contracts: [TS_CONTRACT], bindings: [], files: [target("src/order/a.ts")] });
+    expect(scopeOf(subject)).toEqual({ kind: "owed", contracts: [TS_TYPED_CONTRACT], bindings: [], files: [target("src/order/a.ts")] });
     const onlyFrozen = task("T0", ["src/later/types.ts"], ["FR-001"]);
     expect(scopeOf(onlyFrozen)).toEqual({ kind: "not-owed", reason: "no-file-in-scope" });
   });
@@ -315,7 +304,7 @@ describe("INV-5 owner: the rest of AD-11", () => {
     const subject = task("T2", ["./src/main/java/com/acme/Bound.java"]);
     expect(scopeOf(subject, [bound("src/main/java/com/acme/Bound.java", "CT-1")])).toEqual({
       kind: "owed",
-      contracts: [TS_CONTRACT],
+      contracts: [TS_TYPED_CONTRACT],
       bindings: [bound("src/main/java/com/acme/Bound.java", "CT-1")],
       files: [target("./src/main/java/com/acme/Bound.java")],
     });
@@ -493,12 +482,8 @@ describe("INV-5 sibling: the settlement observation judges exactly the owner's s
   });
 
   it("the graph's frozen test-file classification decides which files settlement judges", () => {
-    const frozen = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
-      kind: "loom-verification-manifest", checks: [], schemaVersion: 2, testFileSuffixes: ["Test.java"],
-    })));
-    if (!frozen.ok) throw new Error(frozen.error.errors.join("; "));
     const subject = task("T2", ["src/main/java/com/acme/PricingTest.java", "src/order/pricing.test.ts"], ["FR-002", "FR-001"]);
-    const graph: TaskGraph = { ...graphOf([subject], []), verification_manifest: frozen.value };
+    const graph: TaskGraph = { ...graphOf([subject], []), verification_manifest: frozenManifestWith(["Test.java"]) };
     expect(observedJudgment(graph, subject)).toEqual(scopeJudgment(conformanceScope(graph, subject)));
     expect(observedJudgment(graph, subject)).toEqual({ kind: "judged", files: ["src/order/pricing.test.ts"] });
   });
@@ -564,36 +549,13 @@ describe("the settlement observation shell", () => {
 describe("the observation inside settleExactImplementation", () => {
   it("a conformance read failure blocks settlement as infrastructure, consuming no semantic attempt", async () => {
     const repo = skeletonRepo();
-    const registration = await registerTaskExecutionBatch([spawnFor(repo.rawState(), "T4")]);
-    if (registration.kind !== "registered") throw new Error(`registration refused: ${registration.message}`);
-    const [authority] = registration.authorities;
-    if (authority === undefined) throw new Error("no T4 authority");
+    const authority = authorityOf(await registered(repo, "T4"), "T4");
     // The frozen types file can no longer be read as a file.
-    rmSync(join(repo.root, REPO_TS_CONTRACT.types));
-    mkdirSync(join(repo.root, REPO_TS_CONTRACT.types));
-    const observedAt = parseIsoInstant(new Date().toISOString(), "settlement instant");
-    if (!observedAt.ok) throw new Error(observedAt.error.errors.join("; "));
-    const manager = StateManager.fromPath(repo.statePath);
-    if (manager === null) throw new Error("no State File");
-    let reason: string | undefined;
-    await manager.update((state) => {
-      const settled = settleExactImplementation(state, {
-        transport: "Claude",
-        authority,
-        observedAt: observedAt.value,
-        parserModifiedPaths: [],
-        parserPathLabel: "INV-5 matrix result paths",
-        taskCompleted: true,
-        testResult: { verdict: "trusted-pass" },
-        testEvidence: "INV-5 matrix pass",
-        proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
-        ledger: { kind: "read", events: [] },
-      }, productionExactSettlementPorts(repo.root, repo.statePath));
-      reason = settled.infrastructureReason;
-      return settled.application.state;
-    });
+    rmSync(join(repo.root, TS_CONTRACT.types));
+    mkdirSync(join(repo.root, TS_CONTRACT.types));
+    const { infrastructureReason: reason } = await settleAttempt(repo, authority, []);
     expect(reason).toContain("contract conformance");
-    expect(reason).toContain(REPO_TS_CONTRACT.types);
+    expect(reason).toContain(TS_CONTRACT.types);
     const stored = storedTask(repo.rawState(), "T4");
     const history = stored.implementation_attempt_history as readonly Record<string, unknown>[];
     expect(history.at(-1)).toMatchObject({ transition: "infrastructure-blocked", consumesSemanticAttempt: false });
@@ -621,7 +583,7 @@ type BriefDuties = Readonly<{ contracts: readonly string[]; boundPaths: readonly
 /** What the brief lists as duties: the contracts whose frozen ADTs it names,
  *  and the files whose bound exports it lists. */
 function briefDuties(graph: TaskGraph, subject: Task): BriefDuties {
-  const section = renderFrozenSignatures(subject, { graph, observations: new Map(), surfaces: SURFACES, unresolved: [] });
+  const section = renderFrozenSignatures(subject, { graph, observations: new Map(), surfaces: SURFACES, unresolved: [], planBindings: PLAN_BINDINGS_AGREE });
   const lines = section.split("\n");
   const contracts = [...section.matchAll(/\*\*Frozen ADTs of (CT-\d+)\*\*/g)].map((found) => found[1] ?? "");
   const boundPaths = lines.flatMap((line, index) => {
@@ -647,7 +609,7 @@ describe("INV-5 sibling: the brief lists exactly the owner's duties", () => {
       const { subject } = row;
       const graph = matrixGraph(row);
       const scope = conformanceScope(graph, subject);
-      const section = renderFrozenSignatures(subject, { graph, observations: new Map(), surfaces: SURFACES, unresolved: [] });
+      const section = renderFrozenSignatures(subject, { graph, observations: new Map(), surfaces: SURFACES, unresolved: [], planBindings: PLAN_BINDINGS_AGREE });
       const binds = scope.kind === "owed" && scope.bindings.length > 0;
       expect(/signatures are frozen/.test(section), subject.id).toBe(binds);
       expect(section.includes("`unimplemented: <name>`"), subject.id).toBe(binds);

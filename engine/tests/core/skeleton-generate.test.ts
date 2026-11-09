@@ -8,7 +8,7 @@
 import { createHash } from "node:crypto";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import type { DomainResult, NonEmpty } from "../../src/core/orchestration-contract";
+import type { NonEmpty } from "../../src/core/orchestration-contract";
 import { parseIdentifier } from "../../src/core/skeleton/bindings";
 import { generateSkeleton } from "../../src/core/skeleton/generate";
 import { readJavaImplementationSurface, readJavaTypesSurface } from "../../src/core/skeleton/java-surface";
@@ -23,6 +23,7 @@ import type {
   TsSkeletonTarget,
   TsTypesSurface,
 } from "../../src/core/skeleton/types";
+import { identifier, unwrap } from "../fixtures/skeleton-builders";
 
 const TS_TYPES = "src/order/order-contract.ts";
 const JAVA_TYPES = "src/main/java/com/acme/order/OrderContract.java";
@@ -44,17 +45,12 @@ public interface OrderContract {
 }
 `;
 
-const unwrap = <T, E>(result: DomainResult<T, E>): T => {
-  if (!result.ok) throw new Error(`refused: ${JSON.stringify(result.error)}`);
-  return result.value;
-};
-
 const ARITY: Readonly<Record<string, number>> = { ParseOrderFn: 1, PriceOrderFn: 2, NowFn: 0 };
 
 const exportsOf = (...pairs: readonly (readonly [string, string])[]): NonEmpty<ResolvedExport> => {
   const [first, ...rest] = pairs.map(([name, alias]): ResolvedExport => ({
-    name: unwrap(parseIdentifier(name)),
-    alias: unwrap(parseIdentifier(alias)),
+    name: identifier(name),
+    alias: identifier(alias),
     parameterCount: ARITY[alias] ?? 0,
   }));
   if (first === undefined) throw new Error("fixture needs at least one export");

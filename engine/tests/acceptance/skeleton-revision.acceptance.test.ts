@@ -19,7 +19,7 @@ import {
   canonicalSkeletonOf,
   cleanupSkeletonRepos,
   JAVA_CONTRACT,
-  JAVA_TYPES_TEXT,
+  JAVA_TYPES_WITH_CURRENCY,
   OUTCOME_TEXT,
   orchestrationStatus,
   PATHS,
@@ -55,12 +55,6 @@ const TS_TYPES_WITH_REFUND = `${TS_TYPES_TEXT}export type RefundFn = (order: Ord
 
 /** CT-1 revised: `ParseOrderFn`, which `pricing.ts` binds, is gone. */
 const TS_TYPES_WITHOUT_PARSE_ORDER = TS_TYPES_TEXT.replace("export type ParseOrderFn = (raw: string) => Order;\n", "");
-
-/** CT-2 revised: `PriceOrderFn`'s single abstract method gains a parameter. */
-const JAVA_TYPES_WITH_CURRENCY = JAVA_TYPES_TEXT.replace(
-  "Price apply(Order order, int quantity);",
-  "Price apply(Order order, int quantity, String currency);",
-);
 
 /** A Wave 2 repository whose engine-written skeletons are seeded: `untouched`
  *  paths hold the canonical bytes, `modified` paths the implementer's edit;

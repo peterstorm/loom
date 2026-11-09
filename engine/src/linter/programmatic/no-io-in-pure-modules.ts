@@ -99,8 +99,11 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/emission-observation.ts",
   "engine/src/core/harness-capture.ts",
   // The one parse and walk of a Claude transcript into final-payload
-  // candidates, emission frames and tool outputs.
+  // candidates, emission frames and tool outputs, and the one conversation /
+  // harness record classification it shares with the integrity boundary and
+  // the parsers.
   "engine/src/core/claude-transcript-projection.ts",
+  "engine/src/core/claude-record-kind.ts",
   "engine/src/core/emission-ingestion.ts",
   "engine/src/core/legacy-archive.ts",
   "engine/src/core/legacy-panel-decisions.ts",

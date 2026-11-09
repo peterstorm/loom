@@ -67,7 +67,7 @@ function gateAttribution(reported: string): string | null {
   };
   const facts = observeAcceptanceFacts(expectation, "project:verify", digest(), {
     ok: true,
-    value: [{ classname: reported, name: "AS-001: decides", outcome: "passed", failureType: null }],
+    value: [{ file: reported, classname: reported, name: "AS-001: decides", outcome: "passed", failureType: null }],
   });
   if (facts.kind !== "projected") throw new Error(`unprojectable: ${facts.reason}`);
   return facts.testcases[0]?.file ?? null;

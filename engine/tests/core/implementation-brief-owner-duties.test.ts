@@ -30,7 +30,8 @@ import { deriveTaskImplementationDispatch } from "../../src/core/task-implementa
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
 import type { PlanInvariant, Task } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
-import { taskFixture } from "../fixtures/task-lifecycle";
+import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
+import { unobservedSkeletons } from "../fixtures/frozen-signatures";
 import { briefOwnership, ownerObligation } from "../fixtures/owner-obligation";
 import {
   ADMISSION,
@@ -79,6 +80,7 @@ function ownership(fileList: readonly string[], stamp: readonly OwnerObligation[
     repositoryRoot: "/repo",
     operatorNotes: [],
     ownership: briefOwnership(stamp, INVARIANTS, value.file_list ?? []),
+    frozenSignatures: unobservedSkeletons(graphFixture(graph.roster)),
   };
   const rendered = renderImplementationBrief(input);
   if (!rendered.ok) throw new Error(rendered.error.message);

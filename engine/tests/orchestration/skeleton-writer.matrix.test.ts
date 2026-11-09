@@ -45,15 +45,16 @@ import {
   withPreparedNameLeft,
   type SkeletonWriteResult,
 } from "../../src/orchestration/skeleton-writer";
-import { StateManager } from "../../src/state-manager";
 import type { TaskGraph } from "../../src/types";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import {
   canonicalSkeletonOf,
   cleanupSkeletonRepos,
+  graphOf,
   JAVA_CONTRACT,
   JAVA_EXISTING_TEXT,
-  JAVA_TYPES_TEXT,
+  JAVA_TYPES_WITH_CURRENCY,
+  managerOf,
   PATHS,
   seededRecord,
   skeletonRepo,
@@ -62,6 +63,7 @@ import {
   TS_LEGACY_TEXT,
   type SkeletonRepo,
 } from "../fixtures/skeleton-repo";
+import { duringPreparedName } from "../fixtures/skeleton-write-race";
 
 /** Fault injection: while `failure` is set, every prepared-name cleanup throws
  *  it. Only the writer's prepared names fail: the State File and its sidecars
@@ -139,6 +141,14 @@ describe("INV-3 owner: the rules every writer entry point shares", () => {
         const result = writer.write(root, "src/contract.ts", new Set(["./src/contract.ts"]));
         expect(result).toEqual({ kind: "refused", reason: "frozen-path" });
         expect(read(root, "src/contract.ts")).toBe(ENGINE);
+      });
+
+      it("refuses a frozen path that does not exist, whether the frozen set names it bare or `./`-prefixed, and creates nothing", () => {
+        const root = tempRepo();
+        const frozen = new Set(["src/contract.ts", "./tests/a.test.ts"]);
+        expect(writer.write(root, "src/contract.ts", frozen)).toEqual({ kind: "refused", reason: "frozen-path" });
+        expect(writer.write(root, "tests/a.test.ts", frozen)).toEqual({ kind: "refused", reason: "frozen-path" });
+        expect(names(root, ".")).toEqual([]);
       });
 
       it("refuses a path under a symlinked parent as a value and writes nothing through it", () => {
@@ -236,6 +246,7 @@ describe("INV-3 owner: createSkeleton", () => {
     const root = tempRepo();
     mkdirSync(join(root, "src/a.ts"), { recursive: true });
     expect(createSkeleton(root, "src/a.ts", NEXT, NONE)).toEqual({ kind: "exists" });
+    expect(statSync(join(root, "src/a.ts")).isDirectory()).toBe(true);
   });
 
   it("refuses a symlinked top-level directory", () => {
@@ -309,16 +320,9 @@ describe("INV-3 owner: a file that appears at the target after the walk", () => 
     mkdirSync(join(root, "src"));
     // The prepared name is drawn after the no-follow walk found the target
     // absent and before the publishing link: a concurrent writer lands here.
-    const race = vi.spyOn(Math, "random").mockImplementationOnce(() => {
-      writeFileSync(join(root, "src/a.ts"), OTHER);
-      return 0.5;
-    });
-    try {
-      expect(createSkeleton(root, "src/a.ts", NEXT, NONE)).toEqual({ kind: "exists" });
-      expect(race).toHaveBeenCalled();
-    } finally {
-      race.mockRestore();
-    }
+    const race = duringPreparedName(() => writeFileSync(join(root, "src/a.ts"), OTHER));
+    expect(createSkeleton(root, "src/a.ts", NEXT, NONE)).toEqual({ kind: "exists" });
+    expect(race.fired()).toBe(true);
     expect(read(root, "src/a.ts")).toBe(OTHER);
     expect(names(root, "src")).toEqual(["a.ts"]);
   });
@@ -360,6 +364,24 @@ describe("INV-3 owner: refreshSkeleton", () => {
     expect(names(root, "src")).toEqual(["a.ts"]);
   });
 
+  it("replaces whatever bytes the expected digest names, not only the shared engine bytes", () => {
+    const root = tempRepo();
+    put(root, "src/a.ts", OTHER);
+    expect(refreshSkeleton(root, "src/a.ts", sha256Hex(OTHER), ENGINE, NONE)).toEqual({ kind: "written", sha256: sha256Hex(ENGINE), leftover: null });
+    expect(read(root, "src/a.ts")).toBe(ENGINE);
+    expect(statSync(join(root, "src/a.ts")).mode & 0o777).toBe(0o644);
+    expect(names(root, "src")).toEqual(["a.ts"]);
+  });
+
+  it("refuses a path under a symlinked top-level directory and leaves the bytes behind it", () => {
+    const root = tempRepo();
+    put(root, "outside/a.ts", OTHER);
+    symlinkSync(join(root, "outside"), join(root, "src"));
+    expect(refreshSkeleton(root, "src/a.ts", sha256Hex(OTHER), NEXT, NONE)).toEqual({ kind: "refused", reason: "symlinked-ancestor" });
+    expect(read(root, "outside/a.ts")).toBe(OTHER);
+    expect(names(root, "outside")).toEqual(["a.ts"]);
+  });
+
   it("refuses an absent file and creates nothing", () => {
     const root = tempRepo();
     expect(refreshSkeleton(root, "src/a.ts", sha256Hex(ENGINE), NEXT, NONE)).toEqual({ kind: "refused", reason: "absent" });
@@ -386,25 +408,13 @@ describe("INV-3 owner: refreshSkeleton", () => {
   });
 });
 
-/**
- * Run `during` at the writer's first draw of randomness: the prepared name,
- * drawn once the walk and the directory opens are done and before the
- * replacement is written, the target's digest is read and the bytes are
- * published.
- */
-const duringPreparation = (during: () => void): void => {
-  vi.spyOn(Math, "random").mockImplementationOnce(() => {
-    during();
-    return 0.5;
-  });
-};
-
 describe("INV-3 owner: a target that changes while refreshSkeleton prepares its replacement", () => {
   it("is refused as `modified` when it is written in place, keeping the other writer's bytes and leaving no prepared file", () => {
     const root = tempRepo();
     put(root, "src/a.ts", ENGINE);
-    duringPreparation(() => writeFileSync(join(root, "src/a.ts"), OTHER));
+    const race = duringPreparedName(() => writeFileSync(join(root, "src/a.ts"), OTHER));
     expect(refreshSkeleton(root, "src/a.ts", sha256Hex(ENGINE), NEXT, NONE)).toEqual({ kind: "refused", reason: "modified", leftover: null });
+    expect(race.fired()).toBe(true);
     expect(read(root, "src/a.ts")).toBe(OTHER);
     expect(names(root, "src")).toEqual(["a.ts"]);
   });
@@ -413,8 +423,9 @@ describe("INV-3 owner: a target that changes while refreshSkeleton prepares its 
     const root = tempRepo();
     put(root, "src/a.ts", ENGINE);
     put(root, "elsewhere/b.ts", OTHER);
-    duringPreparation(() => renameSync(join(root, "elsewhere/b.ts"), join(root, "src/a.ts")));
+    const race = duringPreparedName(() => renameSync(join(root, "elsewhere/b.ts"), join(root, "src/a.ts")));
     expect(refreshSkeleton(root, "src/a.ts", sha256Hex(ENGINE), NEXT, NONE)).toEqual({ kind: "refused", reason: "modified", leftover: null });
+    expect(race.fired()).toBe(true);
     expect(read(root, "src/a.ts")).toBe(OTHER);
     expect(names(root, "src")).toEqual(["a.ts"]);
   });
@@ -422,8 +433,9 @@ describe("INV-3 owner: a target that changes while refreshSkeleton prepares its 
   it("still replaces it when the change leaves the engine's bytes", () => {
     const root = tempRepo();
     put(root, "src/a.ts", ENGINE);
-    duringPreparation(() => writeFileSync(join(root, "src/a.ts"), ENGINE));
+    const race = duringPreparedName(() => writeFileSync(join(root, "src/a.ts"), ENGINE));
     expect(refreshSkeleton(root, "src/a.ts", sha256Hex(ENGINE), NEXT, NONE)).toEqual({ kind: "written", sha256: sha256Hex(NEXT), leftover: null });
+    expect(race.fired()).toBe(true);
     expect(read(root, "src/a.ts")).toBe(NEXT);
     expect(names(root, "src")).toEqual(["a.ts"]);
   });
@@ -452,9 +464,10 @@ describe("INV-3 owner: a prepared name that cannot be removed", () => {
     const root = tempRepo();
     put(root, "src/a.ts", ENGINE);
     cleanup.failure = failure;
-    duringPreparation(() => writeFileSync(join(root, "src/a.ts"), OTHER));
+    const race = duringPreparedName(() => writeFileSync(join(root, "src/a.ts"), OTHER));
     const result = refreshSkeleton(root, "src/a.ts", sha256Hex(ENGINE), NEXT, NONE);
     cleanup.failure = null;
+    expect(race.fired()).toBe(true);
     const left = names(root, "src").filter((name) => name !== "a.ts");
     expect(left).toHaveLength(1);
     expect(left[0]).toMatch(/^\.a\.ts\.loom-skeleton-\S+$/);
@@ -470,9 +483,10 @@ describe("INV-3 owner: a prepared name that cannot be removed", () => {
     const root = tempRepo();
     mkdirSync(join(root, "src"));
     cleanup.failure = failure;
-    duringPreparation(() => writeFileSync(join(root, "src/a.ts"), OTHER));
+    const race = duringPreparedName(() => writeFileSync(join(root, "src/a.ts"), OTHER));
     const result = createSkeleton(root, "src/a.ts", NEXT, NONE);
     cleanup.failure = null;
+    expect(race.fired()).toBe(true);
     expect(result.kind).toBe("io-failed");
     if (result.kind === "io-failed") {
       expect(result.message).toMatch(/^a file appeared at the target meanwhile, and the prepared name \.a\.ts\.loom-skeleton-\S+ was left behind \(EBUSY: resource busy or locked, unlink\)$/);
@@ -521,16 +535,19 @@ describe("INV-3 owner: a prepared name that cannot be removed", () => {
 // Sibling: spawn materialization
 // ---------------------------------------------------------------------------
 
-const loaded = (repo: SkeletonRepo): TaskGraph => {
-  const manager = StateManager.fromPath(repo.statePath);
-  if (manager === null) throw new Error("fixture State File missing");
-  return manager.load();
-};
+/** `graph` with `Pricing.java` also listed as a CT-2 acceptance path, so an
+ *  Acceptance Freeze covers that bound path. */
+const frozenJavaPricing = (graph: TaskGraph): TaskGraph => ({
+  ...graph,
+  acceptance_contracts: (graph.acceptance_contracts ?? []).map((contract) => contract.id === "CT-2"
+    ? { ...contract, acceptance: [...contract.acceptance, { path: PATHS.javaPricing, anchors: ["AS-102"] }] }
+    : contract),
+});
 
 describe("INV-3 sibling: materializeTaskSkeletons writes only through the writer", () => {
   it("leaves a pre-existing bound file byte-identical", () => {
     const repo = skeletonRepo();
-    const result = materializeTaskSkeletons(repo.root, loaded(repo), ["T4", "T5"]);
+    const result = materializeTaskSkeletons(repo.root, graphOf(repo), ["T4", "T5"]);
     expect(result.ok).toBe(true);
     expect(repo.read(PATHS.tsLegacy)).toBe(TS_LEGACY_TEXT);
     expect(repo.read(PATHS.javaExisting)).toBe(JAVA_EXISTING_TEXT);
@@ -539,13 +556,7 @@ describe("INV-3 sibling: materializeTaskSkeletons writes only through the writer
 
   it("refuses, as a value, to write a bound path an Acceptance Freeze covers", () => {
     const repo = skeletonRepo();
-    const graph = loaded(repo);
-    const frozenPricing: TaskGraph = {
-      ...graph,
-      acceptance_contracts: (graph.acceptance_contracts ?? []).map((contract) => contract.id === "CT-2"
-        ? { ...contract, acceptance: [...contract.acceptance, { path: PATHS.javaPricing, anchors: ["AS-102"] }] }
-        : contract),
-    };
+    const frozenPricing = frozenJavaPricing(graphOf(repo));
     const result = materializeTaskSkeletons(repo.root, frozenPricing, ["T5"]);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.join("\n")).toContain(`${PATHS.javaPricing}: refused (frozen-path)`);
@@ -559,7 +570,7 @@ describe("INV-3 sibling: materializeTaskSkeletons writes only through the writer
     rmSync(join(repo.root, PATHS.javaExisting));
     renameSync(join(repo.root, directory), outside);
     symlinkSync(outside, join(repo.root, directory));
-    const result = materializeTaskSkeletons(repo.root, loaded(repo), ["T5"]);
+    const result = materializeTaskSkeletons(repo.root, graphOf(repo), ["T5"]);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.join("\n")).toContain(`${PATHS.javaPricing}: refused (symlinked-ancestor)`);
     expect(readdirSync(outside)).toEqual([]);
@@ -567,11 +578,11 @@ describe("INV-3 sibling: materializeTaskSkeletons writes only through the writer
 
   it("never rewrites a modified skeleton", () => {
     const repo = skeletonRepo();
-    const first = materializeTaskSkeletons(repo.root, loaded(repo), ["T4"]);
+    const first = materializeTaskSkeletons(repo.root, graphOf(repo), ["T4"]);
     expect(first.ok).toBe(true);
     expect(repo.read(PATHS.tsPricing)).toBe(canonicalSkeletonOf(PATHS.tsPricing));
     repo.write(PATHS.tsPricing, OTHER);
-    const again = materializeTaskSkeletons(repo.root, loaded(repo), ["T4"]);
+    const again = materializeTaskSkeletons(repo.root, graphOf(repo), ["T4"]);
     expect(again.ok).toBe(true);
     expect(repo.read(PATHS.tsPricing)).toBe(OTHER);
     if (again.ok) {
@@ -584,12 +595,6 @@ describe("INV-3 sibling: materializeTaskSkeletons writes only through the writer
 // ---------------------------------------------------------------------------
 // Sibling: contract stubs at the contract Task's stop (AD-9)
 // ---------------------------------------------------------------------------
-
-const managerOf = (repo: SkeletonRepo): StateManager => {
-  const manager = StateManager.fromPath(repo.statePath);
-  if (manager === null) throw new Error("fixture State File missing");
-  return manager;
-};
 
 /** The contract Wave with every contract Task's sources written. */
 const contractWave = (): SkeletonRepo => {
@@ -611,13 +616,7 @@ describe("INV-3 sibling: materializeContractStubs writes only through the writer
   it("refuses, as a value, to write a stub an Acceptance Freeze covers", async () => {
     const repo = contractWave();
     // The State File refuses a frozen path two Tasks write, so this graph lives only in memory.
-    const graph = loaded(repo);
-    let current: TaskGraph = {
-      ...graph,
-      acceptance_contracts: (graph.acceptance_contracts ?? []).map((contract) => contract.id === "CT-2"
-        ? { ...contract, acceptance: [...contract.acceptance, { path: PATHS.javaPricing, anchors: ["AS-102"] }] }
-        : contract),
-    };
+    let current = frozenJavaPricing(graphOf(repo));
     const store = {
       load: () => current,
       updateAndReturn: async <T,>(fn: (state: TaskGraph) => Readonly<{ state: TaskGraph; value: T }>): Promise<T> => {
@@ -663,11 +662,6 @@ describe("INV-3 sibling: materializeContractStubs writes only through the writer
 // Sibling: the Contract Revision refresh (AD-10)
 // ---------------------------------------------------------------------------
 
-const JAVA_TYPES_WITH_CURRENCY = JAVA_TYPES_TEXT.replace(
-  "Price apply(Order order, int quantity);",
-  "Price apply(Order order, int quantity, String currency);",
-);
-
 /** Wave 2 with an engine-written `Pricing.java` recorded and on disk, and CT-2's types revised. */
 const revisedJavaRepo = (): SkeletonRepo => {
   const repo = skeletonRepo({ skeletons: [seededRecord(PATHS.javaPricing, canonicalSkeletonOf(PATHS.javaPricing))] });
@@ -680,20 +674,14 @@ describe("INV-3 sibling: refreshRevisedSkeletons writes only through the writer"
   it("leaves a modified skeleton byte-identical, settling it stale", () => {
     const repo = revisedJavaRepo();
     repo.write(PATHS.javaPricing, OTHER);
-    const result = refreshRevisedSkeletons(repo.root, loaded(repo), "CT-2");
+    const result = refreshRevisedSkeletons(repo.root, graphOf(repo), "CT-2");
     expect(result.ok && [...result.value.settlements]).toEqual([[PATHS.javaPricing, { kind: "stale" }]]);
     expect(repo.read(PATHS.javaPricing)).toBe(OTHER);
   });
 
   it("refuses, as a value, to refresh a skeleton an Acceptance Freeze covers", () => {
     const repo = revisedJavaRepo();
-    const graph = loaded(repo);
-    const frozenPricing: TaskGraph = {
-      ...graph,
-      acceptance_contracts: (graph.acceptance_contracts ?? []).map((contract) => contract.id === "CT-2"
-        ? { ...contract, acceptance: [...contract.acceptance, { path: PATHS.javaPricing, anchors: ["AS-102"] }] }
-        : contract),
-    };
+    const frozenPricing = frozenJavaPricing(graphOf(repo));
     const result = refreshRevisedSkeletons(repo.root, frozenPricing, "CT-2");
     expect(result.ok && result.value.bindingProblems).toEqual([
       { kind: "write-failed", path: PATHS.javaPricing, detail: "refused (frozen-path)" },
@@ -708,7 +696,7 @@ describe("INV-3 sibling: refreshRevisedSkeletons writes only through the writer"
     const outside = join(repo.root, "outside");
     renameSync(join(repo.root, directory), outside);
     symlinkSync(outside, join(repo.root, directory));
-    const result = refreshRevisedSkeletons(repo.root, loaded(repo), "CT-2");
+    const result = refreshRevisedSkeletons(repo.root, graphOf(repo), "CT-2");
     expect(result.ok && result.value.settlements.size).toBe(0);
     expect(result.ok && result.value.bindingProblems.map(({ kind }) => kind)).toEqual(["write-failed"]);
     expect(readFileSync(join(outside, "Pricing.java"), "utf8")).toBe(canonicalSkeletonOf(PATHS.javaPricing));
@@ -741,7 +729,7 @@ describe("INV-3 siblings: a prepared name a published write left behind", () => 
   it("materializeTaskSkeletons names every leftover beside the record it wrote", () => {
     const repo = skeletonRepo();
     cleanup.failure = failure;
-    const result = materializeTaskSkeletons(repo.root, loaded(repo), ["T4"]);
+    const result = materializeTaskSkeletons(repo.root, graphOf(repo), ["T4"]);
     cleanup.failure = null;
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -774,7 +762,7 @@ describe("INV-3 siblings: a prepared name a published write left behind", () => 
   it("the revision refreshes the skeleton and carries the cleanup failure the writer reported", () => {
     const repo = revisedJavaRepo();
     cleanup.failure = failure;
-    const result = refreshRevisedSkeletons(repo.root, loaded(repo), "CT-2");
+    const result = refreshRevisedSkeletons(repo.root, graphOf(repo), "CT-2");
     cleanup.failure = null;
     expect(result.ok && [...result.value.settlements].map(([path, { kind }]) => [path, kind])).toEqual([[PATHS.javaPricing, "refreshed"]]);
     expect(result.ok && result.value.bindingProblems).toEqual([]);
@@ -788,9 +776,10 @@ describe("INV-3 siblings: a prepared name a published write left behind", () => 
   it("the revision still settles a skeleton modified during its write stale, never write-failed, naming the leftover", () => {
     const repo = revisedJavaRepo();
     cleanup.failure = failure;
-    duringPreparation(() => writeFileSync(join(repo.root, PATHS.javaPricing), OTHER));
-    const result = refreshRevisedSkeletons(repo.root, loaded(repo), "CT-2");
+    const race = duringPreparedName(() => writeFileSync(join(repo.root, PATHS.javaPricing), OTHER));
+    const result = refreshRevisedSkeletons(repo.root, graphOf(repo), "CT-2");
     cleanup.failure = null;
+    expect(race.fired()).toBe(true);
     expect(repo.read(PATHS.javaPricing)).toBe(OTHER);
     expect(result.ok && [...result.value.settlements]).toEqual([[PATHS.javaPricing, { kind: "stale" }]]);
     expect(result.ok && result.value.bindingProblems).toEqual([]);

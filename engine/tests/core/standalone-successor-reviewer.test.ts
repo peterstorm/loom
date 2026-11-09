@@ -58,7 +58,7 @@ function fixture(role = "code-reviewer", attempt: 1 | 2 = 1) {
 function successorBinding(authority: AgentRequestAuthority): IssuedEmissionBindingOf<"reviewer-payload"> {
   const protocol = value(projectRegisteredReviewerProtocol({ schemaVersion: 3, kind: "standalone-review", reviewerProtocol: STANDALONE_REVIEWER_PROTOCOL_V3 }));
   if (protocol === null) throw new Error("fixture registration must project a reviewer protocol");
-  const route = issuedReviewerEmissionRoute(protocol, authority, true);
+  const route = issuedReviewerEmissionRoute(protocol, authority, true, null);
   if (route.kind !== "emission") throw new Error(`fixture successor route must be emission, got ${route.kind}`);
   return route.binding;
 }
