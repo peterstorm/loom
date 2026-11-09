@@ -10,54 +10,90 @@
  *
  * The companion rule `exhaustive-discriminant-branching` catches the same
  * omission written as an if/else chain. This rule is its switch-statement half,
- * and it is deliberately strict about what counts as proof:
+ * and it is deliberately strict about what counts as proof — and WHERE:
  *
- *   match(x).with(…).exhaustive()        — proof
- *   switch with `default:` binding never  — proof (`const _: never = x`)
- *   switch with assertNever(x)            — proof
+ *   default arm binding never            — proof (`const _: never = x`)
+ *   default arm calling assertNever(x)   — proof
+ *   default arm delegating to a match    — proof (`default: return match(x)…exhaustive()`)
+ *
+ * Only the DEFAULT arm can prove the switch total: it is the arm a new variant
+ * would land in. A `.exhaustive()` inside a `case` arm proves that nested
+ * match, never the switch around it — accepting it anywhere in the span was the
+ * fail-open hole this rule's first version shipped with.
  *
  * A `default: throw new Error("unreachable")` is NOT proof: it compiles after a
  * new variant is added, which is exactly the drift being prevented.
  *
+ * An OPEN domain — a `string` command name, a status code — has no `never` to
+ * bind. Its shape is `match(raw).with("a", …).with("b", …).otherwise(…)`: the
+ * fallback is then a visible decision in ts-pattern rather than a `default:`
+ * that reads the same whether or not a union grew under it. That is
+ * `rules/typescript-patterns.md`'s "use ts-pattern instead of switch", made a
+ * check instead of a sentence.
+ *
  * `switch (typeof raw)` is exempt — its domain is closed by the language, not
  * by a union type we own, so no variant can be added to it.
  *
- * Grandfathered sites live in `switch-totality-baseline.ts`, keyed by
- * `path::scrutinee` with multiplicity. A baselined switch costs nothing until
- * it is edited, a new switch must prove totality, and a baseline entry that no
- * longer matches is reported so the list shrinks instead of rotting.
+ * SCOPE: every non-test TypeScript file, by default, in every project — this is
+ * a rule about TypeScript, not about one repository's layout. A project may
+ * narrow it with `switchTotalityModules`; it may not empty it (disable the rule
+ * by name instead, which is visible as a disabled rule rather than as a scope
+ * that matches nothing). Pre-existing sites are grandfathered per project in
+ * `switchTotalityBaseline`, keyed by `path::scrutinee` with multiplicity: a
+ * baselined switch costs nothing until it is edited, a new switch must prove
+ * totality, and an entry that no longer matches is reported so the list
+ * shrinks instead of rotting.
  */
 
 import type { Violation } from "../types";
 import { makeViolation } from "../types";
 import { isTestFile } from "./config";
-import { SWITCH_TOTALITY_BASELINE } from "./switch-totality-baseline";
-import { baselineCounter, baselineKey, repoRelative, type Baseline } from "./baseline";
+import { baselineCounter, baselineKey, projectRelative, type Baseline } from "./baseline";
 
 export const RULE_NAME = "switch-totality";
 
 /** Branches below this read as a local guard, not a union pattern-match. */
 export const DEFAULT_MIN_SWITCH_ARMS = 2;
 
-/** Modules whose switches must prove totality. The pure core and the machine
- *  core hold the closed unions; the shell's CLI switches are ordinary control
- *  flow over flags and would be noise. */
-export const DEFAULT_SWITCH_TOTALITY_MODULES: readonly string[] = [
-  "engine/src/core/",
-  "engine/src/machine/",
-];
+/** Which files the rule governs. `everywhere` is the default; `modules` is a
+ *  project's own narrowing, and is never empty. */
+export type SwitchScope =
+  | Readonly<{ kind: "everywhere" }>
+  | Readonly<{ kind: "modules"; prefixes: readonly [string, ...string[]] }>;
+
+export const EVERYWHERE: SwitchScope = Object.freeze({ kind: "everywhere" });
+
+export type SwitchTotalityOptions = Readonly<{
+  scope: SwitchScope;
+  baseline: Baseline;
+  minArms: number;
+  /** The root of the project whose config supplied `scope` and `baseline` —
+   *  the frame both are written in. Null when no project config is in play. */
+  projectRoot: string | null;
+}>;
+
+export const DEFAULT_SWITCH_TOTALITY_OPTIONS: SwitchTotalityOptions = Object.freeze({
+  scope: EVERYWHERE,
+  baseline: Object.freeze([]),
+  minArms: DEFAULT_MIN_SWITCH_ARMS,
+  projectRoot: null,
+});
 
 const SWITCH_HEAD = /^\s*switch\s*\(\s*(.+?)\s*\)\s*\{/;
-/** One arm label: a literal `case` or `default:`, matched anywhere in a line so
- *  a one-line switch is measured like any other. */
-const ARM_TOKEN = /(?:\bcase\s+["'`])|(?:\bdefault\s*:)/g;
+/**
+ * One arm label, matched anywhere in a line so a one-line switch is measured
+ * like any other: a quoted literal (`case "a":`), a qualified enum member
+ * (`case Kind.Draft:`), or `default:`. A qualified member is a union variant
+ * exactly like a string literal is — reading only quoted literals let every
+ * `enum` switch through unmeasured.
+ */
+const ARM_TOKEN = /(?:\bcase\s+(?:["'`]|[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\s*:))|(?:\bdefault\s*:)/g;
 const IS_DEFAULT_ARM = /^\bdefault\s*:/;
 /** The text before a `{` that makes it the body of a NESTED switch. */
 const OPENS_NESTED_SWITCH = /\bswitch\s*\([^{]*\)\s*$/;
-/** A proof a switch arm carries: a never binding or an assertNever call. */
-const NEVER_PROOF = /:\s*never\b|\bassertNever\s*\(/;
-/** A nested ts-pattern match proves that match, not the surrounding switch. */
-const EXHAUSTIVE_PROOF = /\.exhaustive\s*\(\s*\)/;
+/** A proof the default arm carries: a never binding, an assertNever call, or a
+ *  delegation to an exhaustive ts-pattern match. */
+const DEFAULT_ARM_PROOF = /:\s*never\b|\bassertNever\s*\(|\.exhaustive\s*\(\s*\)/;
 
 /** Scrutinees whose domain the language closes, so no union variant can drift. */
 const LANGUAGE_CLOSED = /^typeof\b/;
@@ -79,15 +115,10 @@ function withoutComment(line: string): string {
   return line;
 }
 
-/**
- * One switch's span: the case count, whether a default arm exists, whether the
- * default arm's body proves never, and whether a nested match is exhaustive.
- */
+/** One switch's span: its arm count and whether its default arm proves never. */
 type SwitchSpan = Readonly<{
   arms: number;
-  hasDefault: boolean;
-  neverProof: boolean;
-  exhaustiveProof: boolean;
+  proven: boolean;
 }>;
 
 /** One line of a switch body, scanned character by character. */
@@ -160,7 +191,6 @@ function switchSpan(lines: readonly string[], startLine: number): SwitchSpan {
   let hasDefault = false;
   let inDefault = false;
   let defaultText = "";
-  let exhaustiveProof = false;
 
   for (let index = startLine; index < lines.length; index++) {
     const raw = withoutComment(lines[index]!);
@@ -178,20 +208,29 @@ function switchSpan(lines: readonly string[], startLine: number): SwitchSpan {
         inDefault = false;
       }
     }
-    if (EXHAUSTIVE_PROOF.test(raw)) exhaustiveProof = true;
     depth = endDepth;
     if (depth === 0) break;
   }
-  // Only the DEFAULT arm may prove never; a `: never` in a case arm is a value
-  // annotation that says nothing about the union's coverage.
-  return { arms, hasDefault, neverProof: hasDefault && NEVER_PROOF.test(defaultText), exhaustiveProof };
+  // Only the DEFAULT arm may prove the switch: a `: never` or an `.exhaustive()`
+  // in a case arm is about that arm's own value, not about the union's coverage.
+  return { arms, proven: hasDefault && DEFAULT_ARM_PROOF.test(defaultText) };
 }
 
-const inScope = (filePath: string, modules: readonly string[]): boolean =>
-  modules.some((module) => filePath.includes(module));
+const inScope = (relativePath: string, scope: SwitchScope): boolean => {
+  switch (scope.kind) {
+    case "everywhere":
+      return true;
+    case "modules":
+      return scope.prefixes.some((prefix) => relativePath.includes(prefix));
+    default: {
+      const unreachable: never = scope;
+      return unreachable;
+    }
+  }
+};
 
-/** A switch this rule flags absent a baseline: in scope, with enough literal
- *  arms to be a union match, and no totality proof. */
+/** A switch this rule flags absent a baseline: in scope, with enough arms to be
+ *  a union match, and no totality proof. */
 type UnprovenSwitch = Readonly<{
   /** 1-based line of the `switch` head. */
   line: number;
@@ -211,14 +250,10 @@ type UnprovenSwitch = Readonly<{
 function unprovenSwitches(
   content: string,
   filePath: string,
-  modules: readonly string[],
-  minArms: number,
+  options: SwitchTotalityOptions,
 ): readonly UnprovenSwitch[] {
-  // lintFile hands rules an ABSOLUTE path; baseline keys and module prefixes are
-  // repo-relative. Normalize once so a baselined site stays baselined wherever
-  // the checkout lives.
-  const relative = repoRelative(filePath, modules);
-  if (isTestFile(relative) || !inScope(relative, modules)) return [];
+  const relative = projectRelative(filePath, options.projectRoot);
+  if (isTestFile(relative) || !inScope(relative, options.scope)) return [];
 
   const lines = content.split("\n");
   return Object.freeze(lines.flatMap((line, index): readonly UnprovenSwitch[] => {
@@ -227,12 +262,7 @@ function unprovenSwitches(
     const scrutinee = head[1]!;
     if (LANGUAGE_CLOSED.test(scrutinee)) return [];
     const span = switchSpan(lines, index);
-    if (span.arms < minArms) return [];
-    // A nested match's `.exhaustive()` proves the match, not the switch: only an
-    // arm-level never proof or a total match over the SAME scrutinee would, and
-    // line-based analysis cannot see the receiver. Accept it file-locally as the
-    // companion if-chain rule does, and say so.
-    if (span.neverProof || span.exhaustiveProof) return [];
+    if (span.arms < options.minArms || span.proven) return [];
     return [{ line: index + 1, scrutinee, arms: span.arms, key: baselineKey(relative, scrutinee) }];
   }));
 }
@@ -240,31 +270,29 @@ function unprovenSwitches(
 export function handler(
   content: string,
   filePath: string,
-  modules: readonly string[] = DEFAULT_SWITCH_TOTALITY_MODULES,
-  baseline: Baseline = SWITCH_TOTALITY_BASELINE,
-  minArms: number = DEFAULT_MIN_SWITCH_ARMS,
+  options: SwitchTotalityOptions = DEFAULT_SWITCH_TOTALITY_OPTIONS,
 ): readonly Violation[] {
   const lines = content.split("\n");
-  const baselineEntries = baselineCounter(baseline);
-  return Object.freeze(unprovenSwitches(content, filePath, modules, minArms)
+  const baselineEntries = baselineCounter(options.baseline);
+  return Object.freeze(unprovenSwitches(content, filePath, options)
     .filter((site) => !baselineEntries.consume(site.key))
     .map((site) => makeViolation(
       RULE_NAME,
       filePath,
       site.line,
       lines[site.line - 1]!.trim(),
-      `switch on \`${site.scrutinee}\` has ${site.arms} literal arms and no totality proof — use match(${site.scrutinee}).with(…).exhaustive(), or a default arm that binds it to \`never\`, so a new variant is a compile error`,
+      `switch on \`${site.scrutinee}\` has ${site.arms} arms and no totality proof — use match(${site.scrutinee}).with(…).exhaustive() (or .otherwise(…) when the domain is open, like a plain string), or a default arm that binds it to \`never\`, so a new variant is a compile error`,
     )));
 }
 
 /** The baseline keys of every switch the rule would flag absent its baseline —
- *  the input of the staleness pass. A baselined switch converted to a proof
- *  drops out of this list, so its entry is reported unused. */
+ *  the input of the staleness pass and of `lint-project --write-baseline`. A
+ *  baselined switch converted to a proof drops out of this list, so its entry
+ *  is reported unused. */
 export function detectedSwitchKeys(
   content: string,
   filePath: string,
-  modules: readonly string[] = DEFAULT_SWITCH_TOTALITY_MODULES,
-  minArms: number = DEFAULT_MIN_SWITCH_ARMS,
+  options: SwitchTotalityOptions = DEFAULT_SWITCH_TOTALITY_OPTIONS,
 ): readonly string[] {
-  return unprovenSwitches(content, filePath, modules, minArms).map((site) => site.key);
+  return unprovenSwitches(content, filePath, options).map((site) => site.key);
 }

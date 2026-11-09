@@ -11,8 +11,11 @@
  * Options:
  *   --init          Create .claude/linter/rules/ with starter config (interactive)
  *   --tier=full     Run full tier (default: full)
- *   --tier=immediate  Run immediate tier only (regex rules and the import-boundary rules, fast)
+ *   --tier=immediate  Run immediate tier only (regex rules, the import-boundary rules and switch-totality, fast)
  *   --no-baseline-check  Skip the grandfathered-baseline staleness pass
+ *   --write-baseline  Record every pre-existing totality site in the project's
+ *                   config.json (switchTotalityBaseline, discriminantBranchingBaseline),
+ *                   in every harness rules directory present, then exit
  *   --json          Output raw JSON violations
  *   --summary       Show only summary counts
  *   --fix-hints     Show fix hints (default: true)
@@ -22,6 +25,7 @@
  *   bun lint-project.ts                    # Lint all source files
  *   bun lint-project.ts packages/core/     # Lint specific directory
  *   bun lint-project.ts --init             # Setup linter config
+ *   bun lint-project.ts --write-baseline   # Grandfather existing unproven switches/chains
  *   bun lint-project.ts --summary          # Just counts
  */
 
@@ -43,6 +47,19 @@ if (!existsSync(DEFAULT_RULES_DIR)) {
 }
 
 const { lintFile } = await import(join(LOOM_ROOT, "engine/src/linter/index.ts"));
+const { loadProjectConfig, PROJECT_RULES_LAYOUTS } = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/config.ts"));
+const { baselineOwners } = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/index.ts"));
+const { staleBaselineEntries } = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/baseline.ts"));
+
+/** The slice of a baseline owner this script reads (the engine's `BaselineOwner`). */
+type ScriptBaselineOwner = Readonly<{
+  rule: string;
+  configKey: string;
+  extensions: readonly string[];
+  baseline: readonly string[];
+  site: string;
+  detect: (content: string, filePath: string) => readonly string[];
+}>;
 
 // ---------------------------------------------------------------------------
 // Detect project root and harness type
@@ -126,9 +143,12 @@ function starterLinterConfig(hasTs: boolean, hasJava: boolean): Record<string, u
     config.excludeFromMaxLines = [".test.ts", ".spec.ts"];
   }
   if (hasJava) {
+    // Directory patterns match at any path boundary (`isPureModule`), so these
+    // cover every package's domain model and services. Glob segments (`**`)
+    // are not supported — a starter written with them matched nothing.
     config.pureModules = [
-      "src/main/java/**/domain/model/",
-      "src/main/java/**/domain/service/",
+      "domain/model/",
+      "domain/service/",
     ];
     config.boundaries = [];
     config.maxFunctionLines = 40;
@@ -142,12 +162,17 @@ const INIT_NEXT_STEPS: readonly string[] = [
   "Next steps:",
   "  1. Edit config.json to define your architectural boundaries",
   "  2. Add regex rule overrides as .json files in rules/",
-  "  3. Run this script again to lint your codebase",
+  "  3. Run with --write-baseline to grandfather pre-existing unproven",
+  "     switches and if-chains (switch-totality applies to every TypeScript",
+  "     file by default; new sites must prove totality)",
+  "  4. Run this script again to lint your codebase",
   "",
-  "Available boundary config fields:",
+  "Available config fields:",
   "  boundaries    — import direction rules per module",
   "  pureModules   — paths that must be side-effect free",
   "  maxFunctionLines — max function body length (default: 50)",
+  "  switchTotalityModules — narrow switch-totality to these path prefixes",
+  "  switchTotalityBaseline / discriminantBranchingBaseline — grandfathered sites",
   "",
   "See: lint-rules/README.md for full documentation",
 ];
@@ -184,6 +209,7 @@ function initLinterConfig(): void {
 
 interface CliOpts {
   init: boolean;
+  writeBaseline: boolean;
   tier: "immediate" | "full";
   json: boolean;
   summary: boolean;
@@ -196,6 +222,7 @@ interface CliOpts {
 function parseArgs(args: string[]): CliOpts {
   const opts: CliOpts = {
     init: false,
+    writeBaseline: false,
     tier: "full",
     json: false,
     summary: false,
@@ -207,6 +234,7 @@ function parseArgs(args: string[]): CliOpts {
 
   for (const arg of args) {
     if (arg === "--init") opts.init = true;
+    else if (arg === "--write-baseline") opts.writeBaseline = true;
     else if (arg === "--tier=full") opts.tier = "full";
     else if (arg === "--tier=immediate") opts.tier = "immediate";
     else if (arg === "--json") opts.json = true;
@@ -238,21 +266,64 @@ function parseArgs(args: string[]): CliOpts {
  * Each line names the rule and what its entries excuse, so a stale chain entry
  * does not read as a missing switch.
  *
- * Run only against loom itself: the baselines are keys into loom's own tree, so
- * linting another project against them would report every entry as stale.
+ * Runs against ANY project: the baselines are the project's own, read from its
+ * config and keyed relative to its root, so the drift report means the same in
+ * a target repository as in loom.
  */
-async function baselineDrift(): Promise<string[]> {
-  if (!existsSync(join(PROJECT_ROOT, "engine/src/linter"))) return [];
-  const { BASELINE_OWNERS } = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/index.ts"));
-  const { staleBaselineEntries } = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/baseline.ts"));
+const owners = (): readonly ScriptBaselineOwner[] =>
+  baselineOwners(loadProjectConfig(existsSync(RULES_DIR) ? RULES_DIR : null), PROJECT_ROOT);
 
+function baselineDrift(): string[] {
   const readSource = (path: string): string | null => {
     const absolute = join(PROJECT_ROOT, path);
     return existsSync(absolute) ? readFileSync(absolute, "utf-8") : null;
   };
-  return (BASELINE_OWNERS as readonly { rule: string; site: string }[]).flatMap((owner) =>
+  return owners().flatMap((owner) =>
     (staleBaselineEntries(owner, readSource) as readonly string[]).map((key) =>
       `${owner.rule}: ${key} (no ${owner.site} matches it any more — delete the baseline entry)`));
+}
+
+/**
+ * Record every site each baselined rule flags today as that rule's baseline,
+ * so a project adopts the totality rules without every pre-existing switch
+ * blocking the next edit to its file. Written into `config.json` of EVERY
+ * harness rules directory the project has (a project used from both harnesses
+ * keeps the two in step), creating the file when absent and keeping every
+ * other field. An empty list is removed rather than written: no debt.
+ *
+ * The detectors ignore the current baseline, so a re-run after converting a
+ * site drops its entry — the baseline only ever shrinks under this command
+ * unless new unproven code was added, which the diff makes visible.
+ */
+function writeBaseline(): void {
+  const projectOwners = owners();
+  const sources = walkSource(PROJECT_ROOT, { includeTests: false });
+  const lists = projectOwners.map((owner) => {
+    const keys = sources
+      .filter((file) => owner.extensions.includes(extname(file)))
+      .flatMap((file) => owner.detect(readFileSync(file, "utf-8"), relative(PROJECT_ROOT, file)));
+    return [owner.configKey, [...keys].sort()] as const;
+  });
+
+  const harnessDirs = (PROJECT_RULES_LAYOUTS as readonly string[])
+    .map((layout) => join(PROJECT_ROOT, layout))
+    .filter((dir) => existsSync(dir));
+  const targets = harnessDirs.length > 0 ? harnessDirs : [RULES_DIR];
+  for (const dir of targets) {
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, "config.json");
+    // Parse through the engine's loader first, so a malformed config fails here
+    // exactly as it would fail the hook, instead of being silently rewritten.
+    loadProjectConfig(dir);
+    const existing: Record<string, unknown> = existsSync(path) ? JSON.parse(readFileSync(path, "utf-8")) : {};
+    const next: Record<string, unknown> = { ...existing };
+    for (const [key, keys] of lists) {
+      if (keys.length === 0) delete next[key];
+      else next[key] = keys;
+    }
+    writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`);
+    console.log(`✓ ${relative(PROJECT_ROOT, path)}: ${lists.map(([key, keys]) => `${key} ${keys.length}`).join(", ")}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +334,11 @@ const opts = parseArgs(process.argv.slice(2));
 
 if (opts.init) {
   initLinterConfig();
+  process.exit(0);
+}
+
+if (opts.writeBaseline) {
+  writeBaseline();
   process.exit(0);
 }
 
@@ -337,7 +413,7 @@ for (const file of files) {
 
 // Drift is independent of violations: a baseline entry can be stale while the
 // tier is clean, which is exactly the case that used to go unnoticed.
-const driftLines = opts.baselineCheck && opts.tier === "full" ? await baselineDrift() : [];
+const driftLines = opts.baselineCheck && opts.tier === "full" ? baselineDrift() : [];
 
 // ONE failure predicate for every output mode. A file the linter could not read
 // fails the run in each of them: the JSON and summary modes used to exit 0 on a

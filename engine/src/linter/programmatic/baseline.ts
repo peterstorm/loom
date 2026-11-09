@@ -16,41 +16,38 @@
  * `scripts/lint-project.ts` runs the staleness pass and each rule's test
  * asserts its own baseline against the live repository, so drift fails a test
  * rather than waiting for someone to remember to run the script.
+ *
+ * A baseline is PROJECT data, not linter data: every project keeps its own in
+ * its linter `config.json` (`switchTotalityBaseline`,
+ * `discriminantBranchingBaseline`), written by `lint-project --write-baseline`.
+ * Loom's own debt lives in Loom's `config.json` like any other project's — the
+ * linter ships no list keyed to one repository's tree.
  */
 
 export type Baseline = readonly string[];
 
-/** A module scope's first two segments, as a path prefix (`engine/src/core/`). */
-const anchorOf = (module: string): string => `${module.split("/").slice(0, 2).join("/")}/`;
-
-/** Repository trees a baseline key may start with. `anchors` narrow to a module
- *  scope; these recover the repo-relative form for a tree the anchors do not
- *  name (`pi/`), which otherwise stayed ABSOLUTE — every baseline key written
- *  for that tree was therefore dead, and the rule reported the site it was
- *  supposed to grandfather. */
-const REPO_ROOTS: readonly string[] = ["engine/", "pi/", "tests/", "scripts/"];
+const isAbsolutePath = (path: string): boolean => path.startsWith("/") || /^[A-Za-z]:\//.test(path);
 
 /**
- * Normalize a lint target to the repo-relative form baseline keys are written
- * in. `lintFile` hands rules ABSOLUTE paths, so without this a baselined site
- * stops matching wherever the checkout lives — and a grandfathered list that
- * quietly stops applying is worse than no list: the site looks baselined in
- * review and fails in CI.
+ * Normalize a lint target to the project-relative form baseline keys and module
+ * scopes are written in. `lintFile` hands rules ABSOLUTE paths, so without this
+ * a baselined site stops matching wherever the checkout lives — and a
+ * grandfathered list that quietly stops applying is worse than no list: the
+ * site looks baselined in review and fails in CI.
  *
- * Anchors on the MODULE SCOPE (`engine/src/<area>/`) rather than reusing
- * `toRepositoryRelative`, which anchors on the import-boundary table:
- * `engine/src/machine/` is not an import boundary, so an absolute path there
- * stayed absolute. One owner, so the two rules that key baselines normalize
- * identically — the bug this replaces was two copies that disagreed.
+ * The frame is the root of the project that owns the config (`projectRoot`),
+ * never a list of one repository's directory names. That list was how the
+ * rules came to work only inside Loom: a target project's paths matched no
+ * anchor and stayed absolute, so no baseline could ever describe them. A path
+ * already relative is taken as project-relative; a path outside the root, or a
+ * run with no project root, stays as given — and a key that cannot match fails
+ * toward reporting the site, never toward excusing it.
  */
-export const repoRelative = (filePath: string, anchors: readonly string[]): string => {
+export const projectRelative = (filePath: string, projectRoot: string | null): string => {
   const normalized = filePath.replace(/\\/g, "/");
-  for (const anchor of [...anchors.map(anchorOf), ...REPO_ROOTS]) {
-    const at = normalized.lastIndexOf(`/${anchor}`);
-    if (at !== -1) return normalized.slice(at + 1);
-    if (normalized.startsWith(anchor)) return normalized;
-  }
-  return normalized;
+  if (projectRoot === null || !isAbsolutePath(normalized)) return normalized;
+  const root = projectRoot.replace(/\\/g, "/").replace(/\/+$/, "");
+  return normalized.startsWith(`${root}/`) ? normalized.slice(root.length + 1) : normalized;
 };
 
 /** The key form every rule uses: the site's repo-relative path, then the thing
@@ -94,15 +91,22 @@ export function unusedBaselineEntries(detected: readonly string[], baseline: Bas
   return baselineCounter(baseline).unused(detected);
 }
 
+/** The `config.json` field each baselined rule keeps its list in. */
+export type BaselineConfigKey = "switchTotalityBaseline" | "discriminantBranchingBaseline";
+
 /**
  * A rule that keeps a grandfathered list, as the staleness pass sees it: the
- * list, what one entry excuses, and the rule's own detector — the sites the
- * rule would flag absent the list. `index.ts` registers every owner, so a new
- * baselined rule joins the drift report by being registered, not by someone
- * remembering to extend a script.
+ * list, the config field it lives in, what one entry excuses, and the rule's
+ * own detector — the sites the rule would flag absent the list. `index.ts`
+ * registers every owner, so a new baselined rule joins the drift report and
+ * `--write-baseline` by being registered, not by someone remembering to extend
+ * a script.
  */
 export type BaselineOwner = Readonly<{
   rule: string;
+  configKey: BaselineConfigKey;
+  /** The file extensions the rule reads — the files `--write-baseline` scans. */
+  extensions: readonly string[];
   baseline: Baseline;
   /** What one entry excuses, in the rule's own words (`unproven switch`). */
   site: string;
