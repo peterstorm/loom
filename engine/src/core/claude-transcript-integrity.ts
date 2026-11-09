@@ -1,11 +1,18 @@
 /**
  * Pure anti-corruption boundary for modern Claude Code JSONL transcripts.
  *
- * Every nonblank line and every message content block must parse before the
- * original bytes can become completion evidence authority. Supported block
- * arms accept surplus fields for forward compatibility; unknown discriminants
- * fail closed.
+ * Every nonblank line must parse as a typed record before the original bytes
+ * can become completion evidence authority. Each record is classified once
+ * (`claudeRecordKind`): a conversation record's message and every content
+ * block must parse — supported block arms accept surplus fields for forward
+ * compatibility; unknown discriminants fail closed. A harness record
+ * (`api-request-blob`, `attachment`, …) is accepted without reading its
+ * message: it is Claude Code's own bookkeeping, never evidence, so its shape
+ * can neither grant nor withhold completion authority.
  */
+
+import { match } from "ts-pattern";
+import { claudeRecordKind, type ClaudeConversationRecordType } from "./claude-record-kind";
 
 const MAX_REASON_LENGTH = 4_096;
 const MAX_CONTENT_DEPTH = 8;
@@ -105,10 +112,19 @@ export type ClaudeTranscriptMessage = SurplusFields & Readonly<{
   content: ClaudeMessageContent;
 }>;
 
-export type ClaudeTranscriptRecord = SurplusFields & Readonly<{
-  type: string;
+/** A `user` or `assistant` record: the subagent's conversation, fully parsed. */
+export type ClaudeConversationRecord = SurplusFields & Readonly<{
+  type: ClaudeConversationRecordType;
   message?: ClaudeTranscriptMessage;
 }>;
+
+/** Any other typed record: harness metadata whose payload is never read. */
+export type ClaudeHarnessRecord = SurplusFields & Readonly<{ type: string }>;
+
+/** One transcript record with its classification; the record keeps every original field. */
+export type ClaudeTranscriptEntry =
+  | Readonly<{ kind: "conversation"; record: ClaudeConversationRecord }>
+  | Readonly<{ kind: "harness"; record: ClaudeHarnessRecord }>;
 
 declare const COMPLETE_CLAUDE_JSONL: unique symbol;
 export type CompleteClaudeJsonl = string & { readonly [COMPLETE_CLAUDE_JSONL]: true };
@@ -118,7 +134,7 @@ export type ClaudeJsonlIntegrity =
   | Readonly<{
       kind: "complete";
       transcript: CompleteClaudeJsonl;
-      records: readonly ClaudeTranscriptRecord[];
+      records: readonly ClaudeTranscriptEntry[];
     }>
   | Readonly<{
       kind: "malformed";
@@ -180,45 +196,39 @@ function supportedBlockType(raw: unknown): raw is ClaudeContentBlockType {
     (CLAUDE_CONTENT_BLOCK_TYPES as readonly string[]).includes(raw);
 }
 
+function toolUseBlockError(block: UnknownRecord, path: string): string | null {
+  return nonEmptyStringField(block, "id", path) ??
+    nonEmptyStringField(block, "name", path) ??
+    (isRecord(block.input) ? null : `${path}.input must be a plain object for a tool-use block`);
+}
+
+function toolResultBlockError(block: UnknownRecord, path: string, depth: number): string | null {
+  const idError = nonEmptyStringField(block, "tool_use_id", path);
+  if (idError !== null) return idError;
+  if (!owns(block, "content")) return `${path}.content is required for a tool-result block`;
+  if (owns(block, "is_error") && typeof block.is_error !== "boolean") {
+    return `${path}.is_error must be a boolean when present`;
+  }
+  return claudeContentError(block.content, `${path}.content`, depth + 1);
+}
+
 function contentBlockError(block: UnknownRecord, path: string, depth: number): string | null {
-  if (!supportedBlockType(block.type)) {
+  const type = block.type;
+  if (!supportedBlockType(type)) {
     return `${path}.type must be one of ${CLAUDE_CONTENT_BLOCK_TYPES.join(", ")}`;
   }
-  switch (block.type) {
-    case "text":
-      return typeof block.text === "string" ? null : `${path}.text must be a string for a text block`;
-    case "thinking": {
-      if (typeof block.thinking !== "string") return `${path}.thinking must be a string for a thinking block`;
-      return optionalStringField(block, "signature", path);
-    }
-    case "redacted_thinking":
-      return nonEmptyStringField(block, "data", path);
-    case "tool_use":
-    case "server_tool_use": {
-      const idError = nonEmptyStringField(block, "id", path);
-      if (idError !== null) return idError;
-      const nameError = nonEmptyStringField(block, "name", path);
-      if (nameError !== null) return nameError;
-      return isRecord(block.input) ? null : `${path}.input must be a plain object for a tool-use block`;
-    }
-    case "tool_result": {
-      const idError = nonEmptyStringField(block, "tool_use_id", path);
-      if (idError !== null) return idError;
-      if (!owns(block, "content")) return `${path}.content is required for a tool-result block`;
-      if (owns(block, "is_error") && typeof block.is_error !== "boolean") {
-        return `${path}.is_error must be a boolean when present`;
-      }
-      return claudeContentError(block.content, `${path}.content`, depth + 1);
-    }
-    case "tool_reference":
-      return nonEmptyStringField(block, "tool_name", path);
-    case "image":
-      return imageSourceError(block.source, `${path}.source`);
-    case "fallback": {
-      const fromError = modelEndpointError(block.from, `${path}.from`);
-      return fromError ?? modelEndpointError(block.to, `${path}.to`);
-    }
-  }
+  return match(type)
+    .with("text", () => typeof block.text === "string" ? null : `${path}.text must be a string for a text block`)
+    .with("thinking", () => typeof block.thinking === "string"
+      ? optionalStringField(block, "signature", path)
+      : `${path}.thinking must be a string for a thinking block`)
+    .with("redacted_thinking", () => nonEmptyStringField(block, "data", path))
+    .with("tool_use", "server_tool_use", () => toolUseBlockError(block, path))
+    .with("tool_result", () => toolResultBlockError(block, path, depth))
+    .with("tool_reference", () => nonEmptyStringField(block, "tool_name", path))
+    .with("image", () => imageSourceError(block.source, `${path}.source`))
+    .with("fallback", () => modelEndpointError(block.from, `${path}.from`) ?? modelEndpointError(block.to, `${path}.to`))
+    .exhaustive();
 }
 
 function claudeContentError(raw: unknown, path: string, depth: number): string | null {
@@ -240,7 +250,7 @@ function claudeRecordError(raw: unknown, path: string): string | null {
   if (!isRecord(raw)) return `${path} must be a plain object`;
   const typeError = nonEmptyStringField(raw, "type", path);
   if (typeError !== null) return typeError;
-  if (!owns(raw, "message")) return null;
+  if (claudeRecordKind(raw) === "harness" || !owns(raw, "message")) return null;
   if (!isRecord(raw.message)) return `${path}.message must be a plain object when present`;
   if (raw.message.role !== "user" && raw.message.role !== "assistant") {
     return `${path}.message.role must be user or assistant`;
@@ -257,7 +267,7 @@ export function parseCompleteClaudeJsonl(raw: unknown): ClaudeJsonlIntegrity {
   if (typeof raw !== "string") {
     return freeze({ kind: "malformed", line: null, reason: "Claude JSONL transcript must be a string" });
   }
-  const records: ClaudeTranscriptRecord[] = [];
+  const records: ClaudeTranscriptEntry[] = [];
   const lines = raw.split(/\r?\n/u);
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
@@ -281,7 +291,10 @@ export function parseCompleteClaudeJsonl(raw: unknown): ClaudeJsonlIntegrity {
         reason: (schemaError ?? `Claude JSONL transcript record ${index + 1} is invalid`).slice(0, MAX_REASON_LENGTH),
       });
     }
-    records.push(Object.freeze(parsed) as ClaudeTranscriptRecord);
+    const record = Object.freeze(parsed);
+    records.push(claudeRecordKind(record) === "conversation"
+      ? freeze({ kind: "conversation", record: record as ClaudeConversationRecord })
+      : freeze({ kind: "harness", record: record as ClaudeHarnessRecord }));
   }
   if (records.length === 0) {
     return freeze({

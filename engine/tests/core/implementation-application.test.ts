@@ -4,6 +4,7 @@ import {
   applyImplementationCompletionTransition,
   buildTaskLocalByteObservation,
   describeSettlement,
+  INFRASTRUCTURE_REASON_LIMIT,
   NAMED_SCOPE_VIOLATION_PATHS,
   NO_ENGINE_SKELETONS,
   normalizeImplementationEvidence,
@@ -685,6 +686,39 @@ describe("exact transition application", () => {
     expect(result.state.tasks[0]?.failure_reason).toBe(describeSettlement(result.transition));
   });
 
+  it("names each infrastructure failure's own reason, so a blocked settlement explains itself", () => {
+    const attempt = authority(1, "infrastructure-distinct-reasons");
+    const result = expectApplied(settleUnavailableImplementation(
+      graph(pendingTask(attempt)),
+      attempt,
+      "2026-08-24T00:03:59.000Z" as never,
+      "Claude JSONL transcript record 16.message.role must be user or assistant",
+      observedBytes(attempt, { currentAttemptScope: [] }),
+    ));
+    const description = describeSettlement(result.transition);
+    expect(description).toMatch(
+      /^infrastructure-blocked: implementation-observation-unavailable \(Claude JSONL transcript record 16\.message\.role must be user or assistant\), task-byte-scope-unavailable \(.+\)$/,
+    );
+    expect(result.state.tasks[0]?.failure_reason).toBe(description);
+  });
+
+  it("property: an infrastructure description bounds every reason it names", () => {
+    fc.assert(fc.property(fc.string({ minLength: 1, maxLength: 5_000 }).filter((reason) => reason.trim() !== ""), (reason) => {
+      const attempt = authority(1, "infrastructure-bounded-reason");
+      const result = expectApplied(settleUnavailableImplementation(
+        graph(pendingTask(attempt)),
+        attempt,
+        "2026-08-24T00:03:59.500Z" as never,
+        reason,
+      ));
+      const description = describeSettlement(result.transition);
+      expect(description.startsWith("infrastructure-blocked: implementation-observation-unavailable (")).toBe(true);
+      expect(description.length).toBeLessThanOrEqual(
+        "infrastructure-blocked: ".length + 2 * (INFRASTRUCTURE_REASON_LIMIT + 64),
+      );
+    }), { numRuns: 50 });
+  });
+
   it("describes implemented and infrastructure settlements by kind, the latter with its failure kinds", () => {
     const attempt = authority(1, "kind-description");
     const implemented = expectApplied(settleObservedImplementation(
@@ -704,8 +738,9 @@ describe("exact transition application", () => {
       "2026-08-24T00:03:58.000Z" as never,
       "transcript unreadable",
     ));
+    // The default byte-scope reason repeats the observation's, so it is named once.
     expect(describeSettlement(infrastructure.transition))
-      .toBe("infrastructure-blocked: implementation-observation-unavailable, task-byte-scope-unavailable");
+      .toBe("infrastructure-blocked: implementation-observation-unavailable (transcript unreadable), task-byte-scope-unavailable");
     expect(infrastructure.state.tasks[0]?.failure_reason).toBe(describeSettlement(infrastructure.transition));
   });
 

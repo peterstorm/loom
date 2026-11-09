@@ -24,6 +24,7 @@ import type { FinalPayloadCandidate } from "./harness-capture";
 import type { EmissionCallFrame } from "./emission-observation";
 import type { PayloadProducerKindName } from "./agent-catalog-projections";
 import { isRecord } from "./plain-record";
+import { claudeRecordKind } from "./claude-record-kind";
 
 type Block = Readonly<Record<string, unknown>>;
 
@@ -69,7 +70,9 @@ function parseLine(line: string, index: number): ParsedLine {
 }
 
 /** The tolerant view of one parsed line: a message with a content array, a
- *  line that is not a JSON object at all, or neither (omitted). */
+ *  line that is not a JSON object at all, or neither (omitted). A harness
+ *  record is classifiable but never a message: its `api-request-blob` copy of
+ *  an earlier turn would otherwise double-count tool results. */
 type TolerantLine =
   | Readonly<{ kind: "message"; index: number; role: unknown; content: readonly unknown[] }>
   | Readonly<{ kind: "unclassifiable"; index: number }>
@@ -82,6 +85,7 @@ function tolerantLineOf(line: ParsedLine): TolerantLine {
   if (line.kind === "json-error" || typeof line.value !== "object" || line.value === null) {
     return { kind: "unclassifiable", index: line.index };
   }
+  if (claudeRecordKind(line.value) === "harness") return null;
   const message = (line.value as Record<string, unknown>)["message"];
   if (!isRecord(message)) return null;
   return Array.isArray(message["content"])
@@ -172,10 +176,11 @@ function strictMessageOf(line: ParsedLine, position: string): ClaudeTranscriptRe
 /** One conversation line of the transcript, by role. */
 type ConversationLine = Readonly<{ index: number; role: "assistant" | "user"; messageId: string | null; content: readonly Block[] }>;
 
-/** A line as a conversation entry, or `null` for anything else (attachments, system lines, …). */
+/** A line as a conversation entry, or `null` for anything else (attachments, system lines, harness request copies, …). */
 function conversationLineOf(line: ParsedLine): ClaudeTranscriptRead<ConversationLine | null> {
   const message = strictMessageOf(line, "final");
   if (!message.ok) return message;
+  if (line.kind === "json" && claudeRecordKind(line.value) === "harness") return { ok: true, value: null };
   if (message.value === null || !Array.isArray(message.value["content"])) return { ok: true, value: null };
   const role = message.value["role"];
   if (role !== "assistant" && role !== "user") return { ok: true, value: null };

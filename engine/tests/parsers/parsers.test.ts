@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 
 import { parseFirstUserPrompt, parseTranscript } from "../../src/parsers/parse-transcript";
@@ -6,6 +7,38 @@ import { parseBashTestOutput } from "../../src/parsers/parse-bash-test-output";
 import { parsePhaseArtifacts } from "../../src/parsers/parse-phase-artifacts";
 import { parseSubagentStartInput, parseSubagentStartStdin } from "../../src/parsers/parse-subagent-start-input";
 import { parseSubagentStopInput, parseSubagentStopStdin } from "../../src/parsers/parse-subagent-stop-input";
+
+describe("Claude Code harness records", () => {
+  // Claude Code writes request telemetry beside the conversation. Its
+  // api-request-blob records carry copies of earlier turns (including a user
+  // role and a stale test result) that are never the agent's activity.
+  const fixture = readFileSync(new URL("../fixtures/claude-harness-records-transcript.jsonl", import.meta.url), "utf8");
+
+  it("contribute no modified files", () => {
+    expect(parseFilesModified(fixture)).toEqual(["/repo/src/real.ts"]);
+  });
+
+  it("contribute no test output", () => {
+    const output = parseBashTestOutput(fixture);
+    expect(output).toContain("Tests: 3 passed");
+    expect(output).not.toContain("1 failed");
+  });
+
+  it("contribute no transcript text", () => {
+    const text = parseTranscript(fixture, "claude");
+    expect(text).toContain("Done.");
+    expect(text).not.toContain("1 failed");
+    expect(text).not.toContain("tools just became available");
+  });
+
+  it("are skipped before the first user-authored prompt", () => {
+    const content = [
+      JSON.stringify({ type: "api-request-blob", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "x", content: "stale" }] } }),
+      JSON.stringify({ type: "user", message: { role: "user", content: "Task ID: T1" } }),
+    ].join("\n");
+    expect(parseFirstUserPrompt(content)).toEqual({ ok: true, prompt: "Task ID: T1" });
+  });
+});
 
 describe("Subagent lifecycle input parsers", () => {
   const valid = {

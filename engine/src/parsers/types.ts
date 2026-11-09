@@ -3,6 +3,8 @@
  * Supports both Claude Code and pi formats.
  */
 
+import { claudeRecordKind } from "../core/claude-record-kind";
+
 export type TranscriptFormat = "claude" | "pi";
 
 // --- Claude Code types ---
@@ -63,15 +65,21 @@ export interface PiContentBlock {
 
 // --- Shared parsers ---
 
-/** Read and parse JSONL file line by line (Claude Code format) */
+/**
+ * The conversation lines of a Claude Code JSONL transcript. Harness records
+ * (`api-request-blob` copies of earlier turns, attachments, …) are skipped:
+ * they are never the agent's activity (see core/claude-record-kind).
+ */
 export function* parseJsonl(content: string): Generator<TranscriptLine> {
   for (const line of content.split("\n")) {
     if (!line.trim()) continue;
+    let parsed: unknown;
     try {
-      yield JSON.parse(line) as TranscriptLine;
+      parsed = JSON.parse(line);
     } catch {
-      // Skip invalid JSON lines
+      continue; // Skip invalid JSON lines
     }
+    if (claudeRecordKind(parsed) === "conversation") yield parsed as TranscriptLine;
   }
 }
 
