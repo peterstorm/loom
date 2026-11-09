@@ -223,7 +223,9 @@ export function settleExactImplementation(
       parserPathLabel: facts.parserPathLabel,
       siblingOwnedPaths,
       authoritativeStatePath: ports.repository.authoritativeStatePath,
-      // The engine-written skeleton records (AD-4).
+      // The engine-written skeleton records (AD-4). A graph with no
+      // `skeletons` field recorded none; this is the one place that absence
+      // is read — every layer below takes the records as required.
       engineSkeletons: state.skeletons ?? [],
     });
   } catch (error) {

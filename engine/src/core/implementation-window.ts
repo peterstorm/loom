@@ -85,11 +85,15 @@ const contradiction = (message: string, taskId: string | null = null): Implement
  * contradictory authority (absent `current_wave`, a Wave with no Tasks,
  * terminal history that disagrees with the graph) falls through and fails
  * closed elsewhere.
+ *
+ * `unresolvedSkeletonBindings` (the skeleton report's stage-two problems) is
+ * required: a caller that observed none passes `[]`, so no caller can drop
+ * the AS-051 repair by omission.
  */
 export function classifyImplementationWindow(
   graph: TaskGraph,
   observation: ImplementationReservationStatusObservation | undefined,
-  unresolvedSkeletonBindings: readonly string[] = [],
+  unresolvedSkeletonBindings: readonly string[],
 ): ImplementationWindow {
   if (graph.current_wave === undefined) return notInWindow;
   const registration = graph.active_wave_gate;

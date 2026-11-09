@@ -3,6 +3,26 @@
 **Spec:** .claude/specs/2026-11-02-g2-skeletons/spec.md
 **Created:** 2026-11-02
 
+## As-built record (2026-11-08)
+
+This plan is the pre-implementation design. G2 shipped in PR #151 (merged 2026-11-07), and ADR-0048 through ADR-0062 are the current record of what was built; where this plan and an ADR differ, the ADR wins. The plan is kept as the design history and is not updated to track the code.
+
+**Shipped modules missing from File Structure below.** The implementation split several concerns into modules the plan did not name:
+
+- `engine/src/core/skeleton/refresh-plan.ts` — the pure refresh planners, split by caller: `planCandidateRefresh` for the contract stop (one action per canonical skeleton: create, adopt or refresh) and `planRecordRefresh` for the Contract Revision (one action per record: adopt, refresh or stale), sharing one untouched-file step over `presentSkeletonOf` (an INV-4 sibling; ADR-0056, ADR-0057). The single `planSkeletonRefresh` with candidate-driven and record-driven modes sketched below was split this way after review.
+- `engine/src/core/skeleton/records.ts` — `skeletonRecordOf` and `installSkeletonRecords`, the one way every writer step builds and installs `SkeletonRecord`s.
+- `engine/src/core/skeleton/problems.ts` — `SkeletonProblem` (a resolution problem, `language-mismatch` or `write-failed`), the prepared-name leftover and their renderers, so one problem reads the same wherever it surfaces.
+- `engine/src/core/skeleton/persisted.ts` — the persisted G2 values (`Identifier`, `ContractId`, `ExportBinding`, `SkeletonOutcome`, `SkeletonRecord`, …) as a leaf, so the canonical `TaskGraph` and `Task` can declare the G2 fields without an import cycle.
+- `engine/src/core/skeleton/conformance-verdict.ts` — `ViolationReason`, `ConformanceViolation` and `ContractConformance` as a leaf both the proof channel and the TaskGraph import.
+- `engine/src/core/skeleton/graph-view.ts` — `productionFiles`, the one read of a Task's production files that `outcomes.ts` (INV-4) and `scope.ts` (INV-5) share without depending on each other.
+- `engine/src/orchestration/skeleton-refresh.ts` — the shell steps every writer shares: `generatedSkeleton` (INV-6 sibling), `canonicalContractSkeletons`, `frozenSkeletonPaths` and `writePlanned`, the one step through which all three writer siblings call the writer (INV-3).
+- `engine/src/orchestration/skeleton-revision.ts` — `refreshRevisedSkeletons`, the Contract Revision's skeleton refresh run by `revise-contract.ts` (AD-10, ADR-0057).
+- `engine/src/orchestration/skeleton-observation.ts` — `observeSkeletonPaths` and `observeSkeletons`, the one read of what is on disk at skeleton paths for registration, the stub step, the revision, the brief and status.
+
+`engine/src/core/skeleton/types.ts` re-exports the leaf modules' names, so consumers keep importing from it.
+
+**The shipped `BindingProblem` union** (`engine/src/core/skeleton/types.ts`) has fourteen kinds, not the eleven sketched under Component Design: `unsafe-path`, `frozen-path`, `malformed-entry`, `duplicate-name`, `name-collides-with-alias` (an export name equal to an alias on the same line, TS2440), `alias-collides-with-class` (an alias equal to the Java file's own class name, JLS 7.5.1), `duplicate-path`, `multi-contract`, `unknown-contract`, `contract-without-types`, `bound-on-contract-task`, `unheld-path`, `holder-not-after-contract` and `bound-on-waived-task`. The parse-time kinds (`malformed-entry`, `duplicate-name`, `name-collides-with-alias`, `alias-collides-with-class`, `duplicate-path`, `multi-contract`) come from `parseExportBindings`; the graph-shape kinds from `validateExportBindings`, which also reports every parse-time problem it receives.
+
 ## Summary
 
 The plan's File Structure binds each new implementation file to the exports it provides. Each binding is qualified by its contract and typed by a function-type alias that the contract's frozen types file declares (`**Export bindings:**`, AD-3). Population stamps those bindings into the TaskGraph.
@@ -120,7 +140,7 @@ A bound path in a language other than TypeScript or Java is accepted. It reports
 - **New failure variant.** `ProofFailure` gains `declared-artifact-contract-violated { artifact, violations: NonEmpty<ConformanceViolation> }`. `ConformanceViolation = { subject, reason }`, where `reason` is one of `deleted`, `renamed`, `retyped`, `still unimplemented`, `shadows frozen ADT`, `re-lists frozen variants` (FR-021).
 - **Required conformance field.** `ObservedProofEvidence` gains `contractConformance`, which is required: `{ kind: "not-owed" } | { kind: "judged"; violations: ReadonlyMap<artifact, NonEmpty<ConformanceViolation>> }`. Every caller must decide it, so no settlement path can omit it silently. The callers are `implementation-completion.ts` through `exact-implementation-settlement.ts`, the Pi stop resolution in `implementation-application.ts`, and `reconcile-implementation-proof.ts`.
 - **Evaluation.** In `evaluateOne`, the `declared-artifact-changed` arm reports violations ahead of the changed test, so an untouched skeleton is refused as `still unimplemented` (AS-024) rather than as `not-changed`.
-- **Failure handling.** One shell, `observeContractConformance` (`engine/src/orchestration/contract-conformance-observation.ts`), reads texts and calls the pure judge. A read failure is an `implementation-observation-unavailable` infrastructure failure: it never consumes a semantic attempt and never passes. The new kind joins the semantic retry appendix, which lists every violation (FR-028).
+- **Failure handling.** One shell, `observeContractConformance` (`engine/src/orchestration/contract-conformance-observation.ts`), reads texts and calls the pure judge. A read failure is an `implementation-observation-unavailable` infrastructure failure: it never consumes a semantic attempt and never passes. The new kind joins the semantic retry appendix, which lists every violation (FR-021, AS-028).
 - **Engine bytes subtracted (FR-012).**
   - `buildTaskLocalByteObservation` takes the recorded `engineSha256` per path. It drops a proof-scope change whose current digest equals it, so engine bytes never satisfy "changed".
   - It also drops a repository-changed path whose current digest equals a recorded engine digest. That keeps contract stubs out of the contract Task's out-of-scope set.
@@ -265,7 +285,7 @@ Per frozen ADT, where a frozen ADT is a TypeScript discriminated union or brande
 - **`shadows frozen ADT`** — any local declaration named as an ADT or one of its named variants.
 - **`re-lists frozen variants`** — a local union whose object-shaped members carry the frozen discriminant key with two or more frozen tags, or a local sealed hierarchy whose permitted simple names include two or more frozen variants (FR-016, AS-036). The diagnostic names the remedy: `Extract<FrozenUnion, …>`, or the frozen types directly.
 
-A union of imported frozen variant types is "using the frozen types directly" and passes. Every violation is listed (FR-028). The checks stay syntactic, with no assignability or structural typing (Q16a).
+A union of imported frozen variant types is "using the frozen types directly" and passes. Every violation is listed (FR-021, AS-028). The checks stay syntactic, with no assignability or structural typing (Q16a).
 
 **Scope** (`engine/src/core/skeleton/scope.ts`, INV-5):
 - **Which files.** A Task's production files, classified by the existing `classifyTaskFiles` (INV-2 of G5b/I6), that `skeletonLanguageOf` (AD-15) parses to a supported target. The judge receives each file with its target and never classifies paths itself.

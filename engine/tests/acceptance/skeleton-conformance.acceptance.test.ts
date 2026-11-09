@@ -17,7 +17,6 @@
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { parseIdentifier } from "../../src/core/skeleton/bindings";
 import { judgeConformance, renderConformanceViolations } from "../../src/core/skeleton/conformance";
 import { readJavaTypesSurface } from "../../src/core/skeleton/java-surface";
 import { skeletonLanguageOf } from "../../src/core/skeleton/language";
@@ -28,57 +27,43 @@ import type {
   ContractConformance,
   ContractSurface,
   ExportBinding,
-  Identifier,
   SkeletonTarget,
   ViolationReason,
 } from "../../src/core/skeleton/types";
-import type { DomainResult, NonEmpty } from "../../src/core/orchestration-contract";
+import type { NonEmpty } from "../../src/core/orchestration-contract";
 import {
-  JAVA_CONTRACT,
+  SOURCES_JAVA_CONTRACT_ID,
   JAVA_GEOMETRY,
   JAVA_GEOMETRY_PATH,
   JAVA_PRICING,
   JAVA_PRICING_PATH,
-  JAVA_TYPES_PATH,
-  JAVA_TYPES_TEXT,
-  TS_CONTRACT,
+  SOURCES_JAVA_TYPES_PATH,
+  SOURCES_JAVA_TYPES_TEXT,
+  SOURCES_TS_CONTRACT_ID,
   TS_LEDGER,
   TS_LEDGER_PATH,
   TS_PRICING,
   TS_PRICING_PATH,
   TS_REPLAY,
   TS_REPLAY_PATH,
-  TS_TYPES_PATH,
-  TS_TYPES_TEXT,
+  SOURCES_TS_TYPES_PATH,
+  SOURCES_TS_TYPES_TEXT,
 } from "../fixtures/skeleton-sources";
+import { binding, unwrap } from "../fixtures/skeleton-builders";
 
 // ---------------------------------------------------------------------------
 // The world
 // ---------------------------------------------------------------------------
 
-const unwrap = <T, E>(result: DomainResult<T, E>, what: string): T => {
-  if (!result.ok) throw new Error(`${what} refused: ${JSON.stringify(result.error)}`);
-  return result.value;
-};
-
-/** Identifiers are minted only by `parseIdentifier`, never cast. */
-const identifier = (raw: string): Identifier => unwrap(parseIdentifier(raw), `parseIdentifier(${raw})`);
-
-const binding = (path: string, contract: string, ...exports: readonly [string, string][]): ExportBinding => {
-  const [first, ...rest] = exports.map(([name, alias]) => ({ name: identifier(name), alias: identifier(alias) }));
-  if (first === undefined) throw new Error("fixture binding needs at least one export");
-  return { path, contract, exports: [first, ...rest] };
-};
-
 const surfaces = (): readonly ContractSurface[] => [
-  { contract: TS_CONTRACT, surface: unwrap(readTsTypesSurface(TS_TYPES_PATH, TS_TYPES_TEXT), "readTsTypesSurface") },
-  { contract: JAVA_CONTRACT, surface: unwrap(readJavaTypesSurface(JAVA_TYPES_PATH, JAVA_TYPES_TEXT), "readJavaTypesSurface") },
+  { contract: SOURCES_TS_CONTRACT_ID, surface: unwrap(readTsTypesSurface(SOURCES_TS_TYPES_PATH, SOURCES_TS_TYPES_TEXT), "readTsTypesSurface") },
+  { contract: SOURCES_JAVA_CONTRACT_ID, surface: unwrap(readJavaTypesSurface(SOURCES_JAVA_TYPES_PATH, SOURCES_JAVA_TYPES_TEXT), "readJavaTypesSurface") },
 ];
 
 const bindings = (): readonly ExportBinding[] => [
-  binding(TS_PRICING_PATH, TS_CONTRACT, ["priceOrder", "PriceOrderFn"], ["parseOrder", "ParseOrderFn"]),
-  binding(TS_REPLAY_PATH, TS_CONTRACT, ["replayEvents", "ReplayEventsFn"]),
-  binding(JAVA_PRICING_PATH, JAVA_CONTRACT, ["priceOrder", "PriceOrderFn"], ["parseOrder", "ParseOrderFn"]),
+  binding(TS_PRICING_PATH, SOURCES_TS_CONTRACT_ID, ["priceOrder", "PriceOrderFn"], ["parseOrder", "ParseOrderFn"]),
+  binding(TS_REPLAY_PATH, SOURCES_TS_CONTRACT_ID, ["replayEvents", "ReplayEventsFn"]),
+  binding(JAVA_PRICING_PATH, SOURCES_JAVA_CONTRACT_ID, ["priceOrder", "PriceOrderFn"], ["parseOrder", "ParseOrderFn"]),
 ];
 
 const target = (path: string): SkeletonTarget => {
@@ -96,6 +81,12 @@ const CONFORMING_WORLD: World = {
   [TS_LEDGER_PATH]: TS_LEDGER.conforming,
   [JAVA_PRICING_PATH]: JAVA_PRICING.conforming,
   [JAVA_GEOMETRY_PATH]: JAVA_GEOMETRY.conforming,
+};
+
+/** Append declarations to a Java class body, before its closing brace. */
+const withinJavaClass = (text: string, members: string): string => {
+  const close = text.lastIndexOf("}");
+  return `${text.slice(0, close)}${members}${text.slice(close)}`;
 };
 
 /** Judge the whole world, every file conforming except `seeded`. */
@@ -502,12 +493,6 @@ public final class Geometry {
 }
 `;
 
-  /** Append declarations to a Java class body, before its closing brace. */
-  const withinJavaClass = (text: string, members: string): string => {
-    const close = text.lastIndexOf("}");
-    return `${text.slice(0, close)}${members}${text.slice(close)}`;
-  };
-
   it("FR-017: a frozen ADT binds only files of its types file's language — every Java ADT name in TypeScript and every TypeScript ADT name in Java pass", () => {
     expect(judge({ [TS_LEDGER_PATH]: TS_DECLARING_JAVA_ADTS, [JAVA_GEOMETRY_PATH]: JAVA_DECLARING_TS_ADTS })).toEqual(NO_VIOLATION);
   });
@@ -589,10 +574,12 @@ export type ${name.charAt(0).toUpperCase()}${name.slice(1)}View = Readonly<{ val
       text,
     );
 
-  const withJavaAdditions = (text: string, names: readonly string[]): string => {
-    const members = names
-      .map(
-        (name) => `
+  const withJavaAdditions = (text: string, names: readonly string[]): string =>
+    withinJavaClass(
+      text,
+      names
+        .map(
+          (name) => `
     public static final int ${name} = 0;
 
     private static int ${name}Helper(int value) {
@@ -601,11 +588,9 @@ export type ${name.charAt(0).toUpperCase()}${name.slice(1)}View = Readonly<{ val
 
     record ${name.charAt(0).toUpperCase()}${name.slice(1)}Row(int value) {}
 `,
-      )
-      .join("");
-    const close = text.lastIndexOf("}");
-    return `${text.slice(0, close)}${members}${text.slice(close)}`;
-  };
+        )
+        .join(""),
+    );
 
   it("FR-022: extra exports and internal helpers added to conforming files never add a violation, in either language", () => {
     fc.assert(

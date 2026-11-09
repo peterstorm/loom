@@ -20,22 +20,21 @@ export type SkeletonProblem =
 
 /** One diagnostic line per stage-two problem, naming the alias, the binding
  *  file and the types file where the problem has them. */
-export function renderResolutionProblem(problem: ResolutionProblem): string {
-  switch (problem.kind) {
-    case "missing-alias":
-      return `${problem.path} binds ${problem.alias}, but the frozen types file ${problem.typesFile} declares no ${problem.alias}`;
-    case "not-a-function":
-      return `${problem.path} binds ${problem.alias}, but ${problem.alias} in the frozen types file ${problem.typesFile} is not a function type`;
-    case "generic-alias":
-      return `${problem.path} binds ${problem.alias}, but ${problem.alias} in the frozen types file ${problem.typesFile} is a generic function type, which no skeleton can bind`;
-    case "unsupported-holder-shape":
-      return `the frozen types file ${problem.typesFile} has an unsupported holder shape (${problem.detail})`;
-    case "types-unparseable":
-      return `the frozen types file ${problem.typesFile} cannot be read as a types surface (${problem.detail})`;
-    case "types-drifted":
-      return `the frozen types file ${problem.typesFile} no longer matches its Acceptance Freeze stamp`;
-  }
-}
+export const renderResolutionProblem = (problem: ResolutionProblem): string =>
+  match(problem)
+    .with({ kind: "missing-alias" }, ({ path, alias, typesFile }) =>
+      `${path} binds ${alias}, but the frozen types file ${typesFile} declares no ${alias}`)
+    .with({ kind: "not-a-function" }, ({ path, alias, typesFile }) =>
+      `${path} binds ${alias}, but ${alias} in the frozen types file ${typesFile} is not a function type`)
+    .with({ kind: "generic-alias" }, ({ path, alias, typesFile }) =>
+      `${path} binds ${alias}, but ${alias} in the frozen types file ${typesFile} is a generic function type, which no skeleton can bind`)
+    .with({ kind: "unsupported-holder-shape" }, ({ typesFile, detail }) =>
+      `the frozen types file ${typesFile} has an unsupported holder shape (${detail})`)
+    .with({ kind: "types-unparseable" }, ({ typesFile, detail }) =>
+      `the frozen types file ${typesFile} cannot be read as a types surface (${detail})`)
+    .with({ kind: "types-drifted" }, ({ typesFile }) =>
+      `the frozen types file ${typesFile} no longer matches its Acceptance Freeze stamp`)
+    .exhaustive();
 
 /**
  * A prepared name the writer could not remove beside a skeleton `path` after

@@ -13,6 +13,7 @@ import {
   type TranscriptFormat,
   type TranscriptLine,
 } from "./types";
+import { claudeRecordKind } from "../core/claude-record-kind";
 
 function textContent(content: unknown): string[] {
   if (typeof content === "string") return [content];
@@ -118,6 +119,7 @@ export function parseFirstUserPrompt(
         : { ok: true, prompt };
     }
 
+    if (claudeRecordKind(parsed) === "harness") continue;
     const line = parsed as TranscriptLine;
     if (line.message?.role !== "user") continue;
     const body = line.message.content;

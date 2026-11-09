@@ -26,6 +26,7 @@ import {
   type ProofObligationInput,
 } from "../../src/core/proof-obligations";
 import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
+import { observedEvidence, trustedPassEvidence } from "../fixtures/task-lifecycle";
 import type { ConformanceViolation, ContractConformance } from "../../src/core/skeleton/types";
 
 const UNIMPLEMENTED: ConformanceViolation = { subject: "priceOrder", reason: "still-unimplemented", remedy: null };
@@ -35,13 +36,18 @@ const input: ProofObligationInput = {
   declaredArtifacts: ["engine/src/core/proof-obligations.ts", "engine/tests/core/proof-obligations.test.ts"],
 };
 
-const completeEvidence: ObservedProofEvidence = {
-  taskCompleted: true,
-  testResult: { verdict: "trusted-pass" },
-  filesModified: [...input.declaredArtifacts],
-  newTestsWritten: true,
+const completeEvidence: ObservedProofEvidence = trustedPassEvidence([...input.declaredArtifacts], {
   newTestEvidence: "vitest: 12 tests passed",
-  contractConformance: CONFORMANCE_NOT_OWED,
+});
+
+/** The observation of an attempt that did nothing: not completed, no test run, no writes. */
+const NOTHING_DONE: ObservedProofEvidence = observedEvidence({ taskCompleted: false, filesModified: [] });
+
+const ARTIFACT = "src/order/pricing.ts";
+const RELISTED: ConformanceViolation = {
+  subject: "OrderState",
+  reason: "re-lists-frozen-variants",
+  remedy: "LocalState re-lists the variants of the frozen union OrderState",
 };
 
 describe("proof obligation derivation", () => {
@@ -237,7 +243,7 @@ describe("proof evaluation", () => {
 
   it("evaluates every obligation exactly once even when several fail", () => {
     const obligations = deriveProofObligations(input);
-    const proof = evaluateProofObligations(obligations, { taskCompleted: false, filesModified: [], contractConformance: CONFORMANCE_NOT_OWED });
+    const proof = evaluateProofObligations(obligations, NOTHING_DONE);
 
     expect(proof.state).toBe("failed");
     expect(proof.results).toHaveLength(obligations.length);
@@ -306,7 +312,7 @@ describe("unknown-input parsers", () => {
   it("round-trips every authored proof state and rejects result coverage drift", () => {
     const proofs = [
       derivePendingTaskProof(input),
-      evaluateTaskProof(input, { taskCompleted: false, filesModified: [], contractConformance: CONFORMANCE_NOT_OWED }),
+      evaluateTaskProof(input, NOTHING_DONE),
       evaluateTaskProof(input, completeEvidence),
     ];
     for (const proof of proofs) {
@@ -324,7 +330,7 @@ describe("unknown-input parsers", () => {
   });
 
   it("rejects state/result disagreement and forged aggregate evidence", () => {
-    const failed = evaluateTaskProof(input, { taskCompleted: false, filesModified: [], contractConformance: CONFORMANCE_NOT_OWED });
+    const failed = evaluateTaskProof(input, NOTHING_DONE);
     const wrongState = { ...JSON.parse(JSON.stringify(failed)), state: "satisfied", evidence: [] };
     expect(parseTaskProof(wrongState).ok).toBe(false);
 
@@ -431,13 +437,12 @@ describe("proof properties", () => {
         fc.boolean(),
         (artifacts, newTestsRequired, testsPass, newTestsWritten) => {
           const source = { newTestsRequired, declaredArtifacts: artifacts };
-          const evidence: ObservedProofEvidence = {
+          const evidence: ObservedProofEvidence = observedEvidence({
             taskCompleted: true,
             testResult: testsPass ? { verdict: "trusted-pass" } : { verdict: "trusted-fail" },
             filesModified: artifacts.filter((_, index) => index % 2 === 0),
             newTestsWritten,
-            contractConformance: CONFORMANCE_NOT_OWED,
-          };
+          });
           const obligations = deriveProofObligations(source);
           const once = evaluateProofObligations(obligations, evidence);
           const twice = reevaluateTaskProof(once, evidence);
@@ -460,13 +465,7 @@ describe("proof properties", () => {
         fc.integer({ min: 0, max: 8 }),
         (artifacts, removalIndex) => {
           const source = { newTestsRequired: true, declaredArtifacts: artifacts };
-          const full: ObservedProofEvidence = {
-            taskCompleted: true,
-            testResult: { verdict: "trusted-pass" },
-            filesModified: artifacts,
-            newTestsWritten: true,
-            contractConformance: CONFORMANCE_NOT_OWED,
-          };
+          const full: ObservedProofEvidence = trustedPassEvidence(artifacts);
           const variants: ObservedProofEvidence[] = [
             { ...full, testResult: undefined },
             { ...full, newTestsWritten: false },
@@ -485,7 +484,7 @@ describe("proof properties", () => {
 
   it("PROPERTY: every proof/test ADT arm rejects surplus fields", () => {
     const pending = derivePendingTaskProof(input);
-    const failed = evaluateTaskProof(input, { taskCompleted: false, filesModified: [], contractConformance: CONFORMANCE_NOT_OWED });
+    const failed = evaluateTaskProof(input, NOTHING_DONE);
     const satisfied = evaluateTaskProof(input, completeEvidence);
     const cases: readonly Readonly<{
       parser: (raw: unknown) => Readonly<{ ok: boolean }>;
@@ -567,15 +566,9 @@ describe("proof properties", () => {
 });
 
 describe("declared-artifact contract conformance (AD-5, FR-021)", () => {
-  const ARTIFACT = "src/order/pricing.ts";
   const OTHER = "src/order/quotes.ts";
   const contractInput: ProofObligationInput = { newTestsRequired: false, declaredArtifacts: [ARTIFACT, OTHER] };
   const RENAMED: ConformanceViolation = { subject: "parseOrder", reason: "renamed", remedy: null };
-  const RELISTED: ConformanceViolation = {
-    subject: "OrderState",
-    reason: "re-lists-frozen-variants",
-    remedy: "LocalState re-lists the variants of the frozen union OrderState",
-  };
   const judged = (entries: readonly (readonly [string, readonly [ConformanceViolation, ...ConformanceViolation[]]])[]): ContractConformance =>
     ({ kind: "judged", violations: new Map(entries) });
   const observed = (filesModified: readonly string[], contractConformance: ContractConformance): ObservedProofEvidence => ({
@@ -736,12 +729,6 @@ describe("declared-artifact contract conformance (AD-5, FR-021)", () => {
 });
 
 describe("contract-violated receipt failure kind (FR-021)", () => {
-  const ARTIFACT = "src/order/pricing.ts";
-  const RELISTED: ConformanceViolation = {
-    subject: "OrderState",
-    reason: "re-lists-frozen-variants",
-    remedy: "LocalState re-lists the variants of the frozen union OrderState",
-  };
   type Violations = readonly [ConformanceViolation, ...ConformanceViolation[]];
   const failureOf = (violations: Violations) =>
     ({ kind: "declared-artifact-contract-violated" as const, artifact: ARTIFACT, violations });

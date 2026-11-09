@@ -18,6 +18,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { TestFileResult, TestReportFiles } from "../../src/core/red-then-green-types";
 import { parseEvidenceLine } from "../../src/machine/evidence";
 import { findReport } from "../../src/machine/report-discovery";
+
+/** A finished run with no output and no attributed exit: no console fact can vouch. */
+const NO_RUN = { output: "", exit: null } as const;
 import type { Evidence, TestReportSummary } from "../../src/machine/types";
 
 const EPOCH = "agent-7:code-implementer-agent";
@@ -212,7 +215,7 @@ describe("TestRun per-file results at capture (CT-1)", () => {
     const dir = projectDir();
     writeReport(dir, ".loom/completion-reports/verify.junit.xml", VITEST_JUNIT);
 
-    const summary = findReport("npx vitest run --reporter=junit", dir, "", times());
+    const summary = findReport("npx vitest run --reporter=junit", dir, NO_RUN, times());
 
     expect(summary).toMatchObject({ total: 5, failed: 2, source: "junit-xml" });
     expect(perFile(summary)).toEqual(recorded([
@@ -226,7 +229,7 @@ describe("TestRun per-file results at capture (CT-1)", () => {
     const dir = projectDir();
     const report = writeReport(dir, "reports/vitest.json", vitestJson(dir));
 
-    const summary = findReport(`npx vitest run --reporter=json --outputFile=${report}`, dir, "", times());
+    const summary = findReport(`npx vitest run --reporter=json --outputFile=${report}`, dir, NO_RUN, times());
 
     expect(summary).toMatchObject({ total: 4, failed: 1, source: "vitest-json" });
     expect(perFile(summary)).toEqual(recorded([
@@ -247,7 +250,7 @@ describe("TestRun per-file results at capture (CT-1)", () => {
       [{ name: "replayChangesNothing" }],
     ));
 
-    const summary = findReport("mvn test", dir, "", times());
+    const summary = findReport("mvn test", dir, NO_RUN, times());
 
     expect(summary).toMatchObject({ total: 3, failed: 1, source: "junit-xml" });
     expect(perFile(summary)).toEqual(recorded([
@@ -259,11 +262,11 @@ describe("TestRun per-file results at capture (CT-1)", () => {
   it("FR-001: a file whose only failure is a collection error is distinguishable from a file with a failing testcase", () => {
     const dir = projectDir();
     writeReport(dir, ".loom/completion-reports/verify.junit.xml", VITEST_JUNIT);
-    const junit = perFile(findReport("npx vitest run --reporter=junit", dir, "", times()));
+    const junit = perFile(findReport("npx vitest run --reporter=junit", dir, NO_RUN, times()));
     const json = perFile(findReport(
       `npx vitest run --reporter=json --outputFile=${writeReport(dir, "reports/vitest.json", vitestJson(dir))}`,
       dir,
-      "",
+      NO_RUN,
       times(),
     ));
 
@@ -281,7 +284,7 @@ describe("TestRun per-file results at capture (CT-1)", () => {
   it("AS-001: the recorded per-file results survive the ledger round trip alongside command, exit and counts", () => {
     const dir = projectDir();
     writeReport(dir, ".loom/completion-reports/verify.junit.xml", VITEST_JUNIT);
-    const summary = findReport("npx vitest run --reporter=junit", dir, "", times());
+    const summary = findReport("npx vitest run --reporter=junit", dir, NO_RUN, times());
 
     const run = readBack(testRunLine(summary, 1));
 
@@ -300,7 +303,7 @@ describe("TestRun per-file results at capture (CT-1)", () => {
     const summary = findReport(
       `npx vitest run tests/green.test.ts tests/never-reported.test.ts --reporter=json --outputFile=${report}`,
       dir,
-      "",
+      NO_RUN,
       times(),
     );
 
@@ -321,8 +324,8 @@ describe("TestRun per-file results at capture (CT-1)", () => {
     const command = `npx vitest run tests/green.test.ts --reporter=json --outputFile=${report}`;
     mkdirSync(join(dir, "engine"), { recursive: true });
 
-    const fromRoot = perFile(findReport(command, dir, "", times()));
-    const fromSubdirectory = perFile(findReport(command, join(dir, "engine"), "", times()));
+    const fromRoot = perFile(findReport(command, dir, NO_RUN, times()));
+    const fromSubdirectory = perFile(findReport(command, join(dir, "engine"), NO_RUN, times()));
 
     expect(isRecorded(fromRoot)).toBe(true);
     expect(fromSubdirectory).toEqual(fromRoot);
@@ -388,6 +391,18 @@ describe("TestRun per-file results at ledger read-back (CT-1)", () => {
       expect(run.command, JSON.stringify(files)).toBe("npm --prefix engine run test:unit");
       expect(run.report, JSON.stringify(files)).toBeNull();
     }
+  });
+
+  it("ADR-0064: a bun-console summary reads back with its collection errors, and an unknown source is untrusted", () => {
+    const bunConsole = readBack(testRunLine({
+      total: 1,
+      failed: 1,
+      source: "bun-console",
+      files: { kind: "recorded", results: [result("src/a.test.ts", 1, 1, true)] },
+    }));
+    expect(bunConsole.report).toMatchObject({ total: 1, failed: 1, source: "bun-console" });
+    expect(perFile(bunConsole.report)).toEqual(recorded([result("src/a.test.ts", 1, 1, true)]));
+    expect(readBack(testRunLine({ total: 1, failed: 1, source: "bun-junit" })).report).toBeNull();
   });
 
   it("AS-003: a TestRun fact written before per-file results existed reads without error as unrecorded", () => {

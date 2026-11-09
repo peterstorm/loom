@@ -41,7 +41,8 @@ import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { withoutRedThenGreen, withRedThenGreen } from "../fixtures/red-then-green-proof";
 import { indexedSpec } from "../fixtures/spec-index-fixture";
 import { briefOwnership } from "../fixtures/owner-obligation";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
+import { unobservedSkeletons } from "../fixtures/frozen-signatures";
+import { trustedPassEvidence } from "../fixtures/task-lifecycle";
 
 // --- Fixtures ---
 
@@ -269,6 +270,7 @@ describe("the brief states no I6 duty to a contract writer", () => {
       rules: RULES,
       roster: graph.tasks,
       ownership: briefOwnership(graph.owner_obligations, [], target.file_list ?? []),
+      frozenSignatures: unobservedSkeletons(graph),
       contracts: graph.acceptance_contracts ?? [],
       repositoryRoot: "/repo",
       operatorNotes: [],
@@ -314,16 +316,11 @@ describe("settlement implements a test-only contract writer with no implementati
       schemaVersion: 1,
       kind: "implementation-observed",
       observedAt: "2026-10-21T00:01:00.000Z",
-      evidence: {
-        contractConformance: CONFORMANCE_NOT_OWED,
-        taskCompleted: true,
-        testResult: { verdict: "trusted-pass" },
-        filesModified: [ACCEPTANCE],
-        newTestsWritten: true,
+      evidence: trustedPassEvidence([ACCEPTANCE], {
         newTestEvidence: "wrote the acceptance tests, all failing",
         // What the ledger judges for a test-only writer: G5b T2's attempt-1 gap.
         redThenGreen: { kind: "unproven", gap: { kind: "implementation-write-missing" } },
-      },
+      }),
       proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
     }, {
       schemaVersion: 1,

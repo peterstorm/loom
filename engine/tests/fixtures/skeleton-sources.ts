@@ -14,8 +14,8 @@
 // The frozen TypeScript contract (CT-1)
 // ---------------------------------------------------------------------------
 
-export const TS_CONTRACT = "CT-1";
-export const TS_TYPES_PATH = "src/order/order-contract.ts";
+export const SOURCES_TS_CONTRACT_ID = "CT-1";
+export const SOURCES_TS_TYPES_PATH = "src/order/order-contract.ts";
 
 /**
  * Frozen ADTs: the brand `OrderId`; the discriminated union `OrderEvent`
@@ -24,7 +24,7 @@ export const TS_TYPES_PATH = "src/order/order-contract.ts";
  * `status`, tags `pending | settled`). `Order` and `Price` are plain object
  * types, no ADT. The three `…Fn` aliases are the bindable function types.
  */
-export const TS_TYPES_TEXT = `export type OrderId = string & { readonly __brand: "OrderId" };
+export const SOURCES_TS_TYPES_TEXT = `export type OrderId = string & { readonly __brand: "OrderId" };
 
 export type Order = Readonly<{ id: OrderId; unitCents: number }>;
 export type Price = Readonly<{ cents: number }>;
@@ -295,8 +295,8 @@ export type SettledEntry =
 // The frozen Java contract (CT-2)
 // ---------------------------------------------------------------------------
 
-export const JAVA_CONTRACT = "CT-2";
-export const JAVA_TYPES_PATH = "src/main/java/com/acme/order/OrderContract.java";
+export const SOURCES_JAVA_CONTRACT_ID = "CT-2";
+export const SOURCES_JAVA_TYPES_PATH = "src/main/java/com/acme/order/OrderContract.java";
 
 /**
  * One top-level holder, `OrderContract`. Frozen ADTs: the records `Order`
@@ -304,7 +304,7 @@ export const JAVA_TYPES_PATH = "src/main/java/com/acme/order/OrderContract.java"
  * `Triangle`, each itself a record. `PriceOrderFn` and `ParseOrderFn` are
  * the bindable functional interfaces.
  */
-export const JAVA_TYPES_TEXT = `package com.acme.order;
+export const SOURCES_JAVA_TYPES_TEXT = `package com.acme.order;
 
 /** Frozen CT-2 surface. */
 public interface OrderContract {

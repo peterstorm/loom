@@ -118,7 +118,14 @@ Concretely:
   from the alias, and a lambda cannot implement a generic abstract method. Neither stub can satisfy a
   type-parameterised alias.
 - The ADT checks are syntactic. A structurally identical copy under a new name, or a string-literal union, is
-  not caught. This limit is accepted and stated (plan AD-11).
+  not caught. This limit is accepted and stated (plan AD-11, ADR-0058).
+- **Limit: a frozen union with an imported member is no frozen ADT.** The frozen surface is read from the types
+  file's text alone (`readTsTypesSurface`, ADR-0053). A union member is object-shaped only when it is a type
+  literal, `Readonly<…>` of one, an intersection with an object-shaped part, or a reference to an object-shaped
+  type declared in the same file. A reference to an imported type is never object-shaped, because its shape is
+  not in that text. So a union whose members include an imported type reference is not recognised as a
+  discriminated union, gets no `FrozenAdt` entry, and has no shadowing or re-listing protection. Contract
+  authors who want a union protected declare all its variants in the types file itself.
 - Plan authors must keep their `**Interface:**` prose consistent with the types file by hand. The engine ignores
   that prose, so any disagreement is a documentation defect, not a refusal.
 - Freezing only what consumers need means that internal shape is not checked across Tasks. Two Tasks can

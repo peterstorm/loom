@@ -123,6 +123,7 @@ import {
 import { createTrustedReviewWitnesses } from "./trusted-review-witness";
 import { runPiStartupSweeps, type PiStartupSweepSource } from "./cleanup-actions";
 import { createPiParentSessions } from "./spawn-reservation";
+import { projectSessionModelIntoEnv } from "./session-model-env";
 import { piAgentDefinitionPath, resolvePiAgentDirectory } from "../engine/src/core/pi-agent-directory";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -319,6 +320,13 @@ export default function (
     // crash in e.g. guardStateFile silently waves state-file writes through.
     let currentGuard = "session-id";
     try {
+      // Before ANY guard reads the parent's route: Pi exports its model once at
+      // process start, so a session that switched model mid-run must reproject
+      // it here or the definition check, the spawn render, and admission would
+      // reason about the model this process launched with instead of the one
+      // the operator is running.
+      projectSessionModelIntoEnv(ctx.model);
+
       // Re-hash only before a spawn, where stale parser/policy code matters.
       // Ordinary read/edit tools stay cheap. A future source update is caught
       // here even before the agent asks a fresh CLI mutator to run.
@@ -508,6 +516,10 @@ export default function (
   // ─── Session Lifecycle ────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
+    // The session's model is the routing input every Loom spawn reads; project
+    // it before the first tool call so the environment never describes a
+    // previous session.
+    projectSessionModelIntoEnv(ctx.model);
     // Cleanup stale subagent tracking files — the ENGINE's sweep, not a
     // per-file twin: staleness is judged per session GROUP (max mtime across
     // the session's files), and the TTL is the shared STALE_SUBAGENT_TTL_MS,
@@ -631,6 +643,10 @@ export default function (
 
   pi.on("tool_result", async (event, ctx) => {
     if (!isPiSpawnTool(event.toolName)) return;
+    // Capture qualifies the SAME route admission did; reproject before it runs
+    // so a model switch between dispatch and settlement cannot make capture
+    // expect an emission tool the child was never given.
+    projectSessionModelIntoEnv(ctx.model);
     return dispatchPiSubagentStop(event, ctx, {
       parentSessions,
       emissionLaunchBridge,

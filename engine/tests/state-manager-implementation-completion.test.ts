@@ -20,7 +20,7 @@ import {
   deriveImplementationRetryDisposition,
 } from "../src/core/implementation-retry";
 import { value } from "./fixtures/parse-result";
-import { CONFORMANCE_NOT_OWED } from "../src/core/skeleton/conformance-verdict";
+import { observedEvidence } from "./fixtures/task-lifecycle";
 
 const attemptBaseline = [{
   artifact: "engine/src/a.ts",
@@ -93,11 +93,7 @@ function receiptFor(attempt: ImplementationAttemptAuthority, taskCompleted = tru
     schemaVersion: 1,
     kind: "implementation-observed",
     observedAt: "2026-08-23T00:01:00.000Z",
-    evidence: {
-      taskCompleted,
-      contractConformance: CONFORMANCE_NOT_OWED,
-      filesModified: ["engine/src/a.ts"],
-    },
+    evidence: observedEvidence({ taskCompleted, filesModified: ["engine/src/a.ts"] }),
     proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
   }));
   const settled = settleImplementationAttempt(
@@ -185,17 +181,12 @@ describe("Task lifecycle migration", () => {
 
   it("rejects every illegal modern status/Proof/revalidation combination", () => {
     const pending = pendingProof();
-    const satisfied = evaluateProofObligations(pending.obligations, {
-      contractConformance: CONFORMANCE_NOT_OWED,
+    const satisfied = evaluateProofObligations(pending.obligations, observedEvidence({
       taskCompleted: true,
       filesModified: ["engine/src/a.ts"],
-    });
+    }));
     if (satisfied.state !== "satisfied") throw new Error("fixture must satisfy");
-    const failed = evaluateProofObligations(pending.obligations, {
-      contractConformance: CONFORMANCE_NOT_OWED,
-      taskCompleted: false,
-      filesModified: [],
-    });
+    const failed = evaluateProofObligations(pending.obligations, observedEvidence({ taskCompleted: false, filesModified: [] }));
     if (failed.state !== "failed") throw new Error("fixture must fail");
 
     const invalid = [

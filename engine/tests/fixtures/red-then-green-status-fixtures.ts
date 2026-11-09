@@ -17,8 +17,7 @@ import { defaultVerificationManifest, type FrozenVerificationManifest } from "..
 import type { NewTestWaiverReason } from "../../src/core/verification-policy";
 import type { Evidence } from "../../src/machine/types";
 import type { Task } from "../../src/types";
-import { taskFixture } from "./task-lifecycle";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
+import { taskFixture, trustedPassEvidence } from "./task-lifecycle";
 
 // --- File vocabulary ---
 
@@ -71,14 +70,7 @@ export const waivedTask = (id: string, reason: NewTestWaiverReason): Task => {
 export const failedProof = (gap: RedThenGreenGap | "no-ledger"): FailedTaskProof => {
   const evaluated = evaluateTaskProof(
     { newTestsRequired: true, declaredArtifacts: FILES, redThenGreen: OWED_ERA },
-    {
-      contractConformance: CONFORMANCE_NOT_OWED,
-      taskCompleted: true,
-      testResult: { verdict: "trusted-pass" },
-      filesModified: FILES,
-      newTestsWritten: true,
-      ...(gap === "no-ledger" ? {} : { redThenGreen: { kind: "unproven" as const, gap } }),
-    },
+    trustedPassEvidence(FILES, gap === "no-ledger" ? {} : { redThenGreen: { kind: "unproven", gap } }),
   );
   if (evaluated.state !== "failed") throw new Error("failed proof fixture must fail");
   return evaluated;

@@ -18,7 +18,8 @@ wrote lived under `.loom/` or `.claude/`. Three entry points now write into the 
 
 Every one of these writes must obey the same safety promises:
 
-- The engine never modifies a file that already exists (FR-011).
+- The engine writes missing skeletons, may refresh a skeleton that is still the engine's untouched bytes, and
+  never modifies a file anyone has changed (FR-011).
 - It never writes outside the repository root or to an unsafe path (NFR-010).
 - It never writes a frozen path, meaning a types file or an acceptance test (NFR-011).
 - A failure part-way through never leaves a partially written file (NFR-021).
@@ -39,7 +40,7 @@ in exactly one place.
 1. **One writer module with two operations, `createSkeleton` and `refreshSkeleton`, and the rules inside it (chosen)**
    - Pros:
      - The safety rules are written, tested and mutation-verified once, in
-       `engine/tests/orchestration/skeleton-writer.matrix.test.ts` and `skeleton-writer.test.ts`.
+       `engine/tests/orchestration/skeleton-writer.matrix.test.ts`.
      - All three callers get the same refusals and the same atomicity for free.
      - Results are a closed union, so each caller has to handle `exists`, `refused` and `io-failed`
        explicitly.

@@ -98,10 +98,13 @@ Concretely:
 - `engine/tests/linter/programmatic/machine-purity.test.ts` expands each trailing-slash entry to every `.ts`
   file beneath it, nested subdirectories included (`PURE_FILES`). It requires every one of those files to pass the shipped default
   rule, and it audits each file's import closure. The test named "expands the owner-verification package
-  entry to every file and grants typescript only to its two seams" pins the directory entry. It also checks
-  that the `typescript` compiler API is granted only to `import-graph.ts` and `mutation-plan.ts` (ADR-0042,
-  INV-1): `typescript` added to `verdict.ts` is rejected, and so is `typescript/lib/tsserverlibrary` added
-  to a seam.
+  entry to every file and grants typescript only to the compiler API seams" pins the directory entry. It also
+  checks that the `typescript` compiler API is granted only to the paths of `TYPESCRIPT_COMPILER_API_SEAMS`
+  (INV-1): `import-graph.ts` and `mutation-plan.ts` (ADR-0042), and since G2 the third seam
+  `engine/src/core/skeleton/ts-surface.ts` (ADR-0053). `typescript` added to `verdict.ts` is rejected, and so
+  is `typescript/lib/tsserverlibrary` added to a seam. The test "G2 INV-2: lists the skeleton core as pure and
+  grants typescript to its ts-surface seam alone" pins the `engine/src/core/skeleton/` entry and the same two
+  refusals for the third seam.
 - `engine/tests/core/orchestration-contract-acyclic.test.ts` ("keeps top-level source domains acyclic
   across runtime and type-only imports") keeps the shared leaves honest. If `sibling-entry-point.ts` or
   `owner-check-authority.ts` were folded back into either side, the resulting cycle between

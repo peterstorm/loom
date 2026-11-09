@@ -63,6 +63,7 @@ import {
   writeDirectoryFileAtomicModeNoFollow,
   type AnchoredDirectory,
 } from "./no-follow-fs";
+import { describeCause } from "../utils/describe-cause";
 
 /** Why the writer refused a path, before or instead of touching it. */
 export type SkeletonWriteRefusal =
@@ -95,8 +96,7 @@ const DIRECTORY_MODE = 0o755;
 const refused = (reason: Exclude<SkeletonWriteRefusal, "modified">): SkeletonWriteResult => Object.freeze({ kind: "refused", reason });
 const MODIFIED: SkeletonWriteResult = Object.freeze({ kind: "refused", reason: "modified", leftover: null });
 const EXISTS: SkeletonWriteResult = Object.freeze({ kind: "exists" });
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-const ioFailed = (error: unknown): SkeletonWriteResult => Object.freeze({ kind: "io-failed", message: messageOf(error) });
+const ioFailed = (error: unknown): SkeletonWriteResult => Object.freeze({ kind: "io-failed", message: describeCause(error) });
 
 const errnoOf = (error: unknown): string | undefined => (error as NodeJS.ErrnoException | null)?.code;
 
@@ -233,7 +233,7 @@ const written = (bytes: string): SkeletonWriteResult => Object.freeze({ kind: "w
  * happened and the name left behind.
  */
 export function withPreparedNameLeft(result: SkeletonWriteResult, prepared: string, error: unknown): SkeletonWriteResult {
-  const leftover: PreparedNameLeftover = Object.freeze({ name: prepared, message: messageOf(error) });
+  const leftover: PreparedNameLeftover = Object.freeze({ name: prepared, message: describeCause(error) });
   switch (result.kind) {
     case "written":
       return Object.freeze({ ...result, leftover });
