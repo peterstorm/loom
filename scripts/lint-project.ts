@@ -258,7 +258,7 @@ function parseArgs(args: string[]): CliOpts {
 /**
  * A list that only ever suppresses violations cannot report its own decay: a
  * deleted, renamed or since-proven site costs nothing. So every rule that keeps
- * a grandfathered list registers as a baseline owner (`BASELINE_OWNERS` in the
+ * a grandfathered list registers as a baseline owner (`baselineOwners` in the
  * programmatic rule registry), and this pass asks each owner which entries no
  * live site consumes. `staleBaselineEntries` walks the BASELINE'S OWN paths, so a
  * targeted run does not call every other entry stale.

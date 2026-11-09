@@ -115,6 +115,17 @@ Generate additional `.json` rule files in the same `rules/` directory for projec
 }
 ```
 
+**Grandfather pre-existing totality sites.** `switch-totality` applies to every
+TypeScript file without configuration, so an existing codebase's unproven
+switches would block the next agent edit to each file. Record them once, after
+`config.json` exists:
+
+```bash
+bun ${CLAUDE_PLUGIN_ROOT}/scripts/lint-project.ts --write-baseline
+```
+
+Show the user the counts it prints; the lists are debt that only shrinks.
+
 ### Step 4: Run the Linter
 
 Read `references/runner.md` for the inline script. Write it to a temp file and execute:
@@ -190,10 +201,14 @@ plus its own test, never with "the hook stayed quiet".
 applying.** Grandfathered baselines (`switch-totality`,
 `exhaustive-discriminant-branching`) excuse sites that predate the rule, and
 their failure mode is silence: a renamed scrutinee or a deleted switch leaves an
-entry protecting nothing. Both lists are asserted against the live tree by
-`tests/linter/programmatic/totality-baseline.test.ts`, and
-`scripts/lint-project.ts` reports stale entries and exits non-zero on them.
-When you add a baseline-backed rule, add both.
+entry protecting nothing. The lists are project data in `config.json`
+(`switchTotalityBaseline`, `discriminantBranchingBaseline`), keyed relative to
+the project root and written by `scripts/lint-project.ts --write-baseline`.
+`scripts/lint-project.ts` reports stale entries in any project and exits
+non-zero on them; loom asserts its own lists against its live tree in
+`tests/linter/programmatic/totality-baseline.test.ts`. A baseline-backed rule
+registers in `baselineOwners` (`engine/src/linter/programmatic/index.ts`) and
+joins both the drift report and `--write-baseline`.
 
 ---
 

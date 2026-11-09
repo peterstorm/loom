@@ -17,8 +17,7 @@ import { handler as fugueGeneratedIntegrityHandler } from "./fugue-generated-int
 import {
   handler as exhaustiveDiscriminantHandler,
   detectedChainKeys,
-  DEFAULT_MAX_DISCRIMINANT_BRANCHES,
-  DEFAULT_DISCRIMINANT_TAGS,
+  DEFAULT_DISCRIMINANT_BRANCHING_OPTIONS,
   RULE_NAME as EXHAUSTIVE_BRANCHING_RULE,
   type DiscriminantBranchingOptions,
 } from "./exhaustive-discriminant-branching";
@@ -27,8 +26,7 @@ import { handler as preferArrayMethodsHandler } from "./prefer-array-methods";
 import {
   handler as switchTotalityHandler,
   detectedSwitchKeys,
-  DEFAULT_MIN_SWITCH_ARMS,
-  EVERYWHERE,
+  DEFAULT_SWITCH_TOTALITY_OPTIONS,
   RULE_NAME as SWITCH_TOTALITY_RULE,
   type SwitchTotalityOptions,
 } from "./switch-totality";
@@ -44,11 +42,11 @@ const TOTALITY_EXTENSIONS: readonly string[] = Object.freeze([".ts", ".tsx"]);
  *  measure different things. */
 export function switchTotalityOptions(config: ProgrammaticConfig, projectRoot: string | null): SwitchTotalityOptions {
   return Object.freeze({
-    scope: config.switchTotalityModules === undefined
-      ? EVERYWHERE
-      : Object.freeze({ kind: "modules", prefixes: config.switchTotalityModules }),
-    baseline: config.switchTotalityBaseline ?? [],
-    minArms: DEFAULT_MIN_SWITCH_ARMS,
+    ...DEFAULT_SWITCH_TOTALITY_OPTIONS,
+    ...(config.switchTotalityModules === undefined
+      ? {}
+      : { scope: Object.freeze({ kind: "modules", prefixes: config.switchTotalityModules }) }),
+    ...(config.switchTotalityBaseline === undefined ? {} : { baseline: config.switchTotalityBaseline }),
     projectRoot,
   });
 }
@@ -59,10 +57,11 @@ export function discriminantBranchingOptions(
   config: ProgrammaticConfig,
   projectRoot: string | null,
 ): DiscriminantBranchingOptions {
+  const defaults = DEFAULT_DISCRIMINANT_BRANCHING_OPTIONS;
   return Object.freeze({
-    maxBranches: config.maxDiscriminantBranches ?? DEFAULT_MAX_DISCRIMINANT_BRANCHES,
-    tags: config.discriminantTags ?? DEFAULT_DISCRIMINANT_TAGS,
-    baseline: config.discriminantBranchingBaseline ?? [],
+    maxBranches: config.maxDiscriminantBranches ?? defaults.maxBranches,
+    tags: config.discriminantTags ?? defaults.tags,
+    baseline: config.discriminantBranchingBaseline ?? defaults.baseline,
     projectRoot,
   });
 }

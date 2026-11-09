@@ -193,7 +193,7 @@ Harness selection chooses:
 |---|---|---|
 | TaskGraph | `.claude/state/active_task_graph.json` | `.pi/state/active_task_graph.json` |
 | Project regex rules | `.claude/linter/rules/` | `.pi/linter/rules/` |
-| Programmatic config | `.claude/linter/config.json` | `.pi/linter/config.json` |
+| Programmatic config | `.claude/linter/rules/config.json` | `.pi/linter/rules/config.json` |
 
 The same `StateManager`, rule loader, linter core, and programmatic rules are reused. `PI_CODING_AGENT` or explicit `PI_CODING_AGENT_DIR` identifies Pi operation.
 
