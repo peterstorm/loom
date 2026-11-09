@@ -7,10 +7,15 @@
  * law that an unrecorded summary keeps the exact pre-feature keys and bytes.
  */
 
+import { readFileSync } from "node:fs";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
+  bunRunSummary,
   mergeSummaries,
+  parseBunConsoleCollectionErrors,
+  parseReportSource,
+  REPORT_SOURCES,
   parseJunitXml,
   parseReportCounts,
   parseReportSummary,
@@ -39,6 +44,9 @@ const mint = (
 ): TestReportSummary | null => parseReportSummary(sum(results, "executed"), sum(results, "failed"), source, recorded(results));
 
 const bytes = (content: string): Uint8Array => new TextEncoder().encode(content);
+
+/** Real Bun 1.4.2 output, captured from a probe project (see the fixture files). */
+const fixture = (name: string): string => readFileSync(new URL(`../fixtures/${name}`, import.meta.url), "utf8");
 
 // --- Generators ---
 
@@ -311,9 +319,110 @@ describe("JUnit per-file projection", () => {
     expect(read.kind === "parsed" ? read.summary.files : null).toEqual(recorded([result("a", 2, 1)]));
   });
 
-  it("AS-004: per-file identity is the classname exactly as written, never derived from anything else", () => {
-    const summary = parseJunitXml('<testsuite name="ignored-suite-name" file="ignored/file.ts" tests="1"><testcase classname="./weird path/x.test.ts" name="t" file="other.ts"/></testsuite>');
-    expect(summary?.files).toEqual(recorded([result("./weird path/x.test.ts", 1, 0)]));
+  it("AS-004: per-file identity is the testcase's own file attribute when written, else its classname — never a suite's", () => {
+    const withFile = parseJunitXml('<testsuite name="ignored-suite-name" file="ignored/file.ts" tests="1"><testcase classname="./weird path/x.test.ts" name="t" file="other.ts"/></testsuite>');
+    expect(withFile?.files).toEqual(recorded([result("other.ts", 1, 0)]));
+    const classnameOnly = parseJunitXml('<testsuite name="ignored-suite-name" file="ignored/file.ts" tests="1"><testcase classname="./weird path/x.test.ts" name="t"/></testsuite>');
+    expect(classnameOnly?.files).toEqual(recorded([result("./weird path/x.test.ts", 1, 0)]));
+  });
+
+  it("AS-004: a real Bun report groups by the file attribute: describe titles and top-level tests' empty classname are not files", () => {
+    // Bun writes the describe chain (or "" at top level) as classname and the
+    // test file as the testcase's file attribute.
+    const summary = parseJunitXml(fixture("bun-1.4.2-mixed.junit.xml"));
+    expect(summary).toMatchObject({ total: 4, failed: 1, source: "junit-xml" });
+    expect(summary?.files).toEqual(recorded([result("src/b.test.ts", 1, 0), result("src/c.test.ts", 3, 1)]));
+  });
+});
+
+describe("Bun console collection errors", () => {
+  it("names exactly the files whose section reports an unhandled error between tests", () => {
+    // c.test.ts fails behaviorally (with a code frame), b.test.ts passes and
+    // prints no section, a.test.ts never loads.
+    expect(parseBunConsoleCollectionErrors(fixture("bun-1.4.2-mixed.console.txt"))).toEqual(["src/a.test.ts"]);
+    expect(parseBunConsoleCollectionErrors(fixture("bun-1.4.2-load-failure-only.console.txt"))).toEqual(["src/a.test.ts"]);
+  });
+
+  it("reads through ANSI colour and CRLF, and lists a file once", () => {
+    const output = [
+      "\u001b[1msrc/x.test.ts:\u001b[0m",
+      "# Unhandled error between tests",
+      "error: boom",
+      "# Unhandled error between tests",
+      "error: again",
+      "",
+    ].join("\r\n");
+    expect(parseBunConsoleCollectionErrors(output)).toEqual(["src/x.test.ts"]);
+  });
+
+  it("never reads a code-frame line, an error before any file section, or prose as a file", () => {
+    const output = [
+      "# Unhandled error between tests",
+      "4 |   it('x.test.ts:', () => {});",
+      "note: see src/y.test.ts:",
+      "src/z.ts:",
+      "# Unhandled error between tests",
+    ].join("\n");
+    expect(parseBunConsoleCollectionErrors(output)).toEqual([]);
+  });
+
+  it("property: is total and lists each file at most once", () => {
+    fc.assert(fc.property(fc.string({ maxLength: 400 }), (output) => {
+      const files = parseBunConsoleCollectionErrors(output);
+      expect(new Set(files).size).toBe(files.length);
+    }));
+  });
+});
+
+describe("bunRunSummary — Bun's JUnit report with its console collection errors", () => {
+  const junit = (): TestReportSummary => parseJunitXml(fixture("bun-1.4.2-mixed.junit.xml"))!;
+
+  it("adds a file that never loaded as Bun counts it: one failing testcase that is a collection error", () => {
+    // Bun's own summary for this run: "Ran 5 tests across 3 files", "2 fail".
+    const summary = bunRunSummary(junit(), ["src/a.test.ts"]);
+    expect(summary).toMatchObject({ total: 5, failed: 2, source: "junit-xml" });
+    expect(summary?.files).toEqual(recorded([
+      result("src/b.test.ts", 1, 0),
+      result("src/c.test.ts", 3, 1),
+      result("src/a.test.ts", 1, 1, true),
+    ]));
+  });
+
+  it("gives a reported file that also errored between tests one more failing testcase, never a collection error", () => {
+    // It loaded, so its genuine failures stay behavioral: an error between
+    // tests must not hide an assertion failure behind a collection error.
+    const summary = bunRunSummary(junit(), ["src/b.test.ts", "src/c.test.ts"]);
+    expect(summary).toMatchObject({ total: 6, failed: 3 });
+    expect(summary?.files).toEqual(recorded([result("src/b.test.ts", 2, 1), result("src/c.test.ts", 4, 2)]));
+  });
+
+  it("names one closed source vocabulary and parses nothing outside it", () => {
+    expect(REPORT_SOURCES).toEqual(["vitest-json", "junit-xml", "bun-console"]);
+    for (const source of REPORT_SOURCES) expect(parseReportSource(source)).toBe(source);
+    for (const raw of ["bun", "JUNIT-XML", "", null, undefined, 1, {}]) expect(parseReportSource(raw)).toBeNull();
+  });
+
+  it("keeps the JUnit summary unchanged when the console reports no collection error", () => {
+    expect(bunRunSummary(junit(), [])).toEqual(junit());
+  });
+
+  it("mints a bun-console summary when every file failed to load and Bun wrote no JUnit report", () => {
+    const summary = bunRunSummary(null, ["src/a.test.ts"]);
+    expect(summary).toMatchObject({ total: 1, failed: 1, source: "bun-console" });
+    expect(summary?.files).toEqual(recorded([result("src/a.test.ts", 1, 1, true)]));
+    expect(judgeTestRun(1, summary)).toEqual({ verdict: "trusted-fail" });
+    expect(bunRunSummary(null, [])).toBeNull();
+  });
+
+  it("cannot attribute collection errors to a JUnit summary whose testcases were unrecorded, so it stays as it was", () => {
+    const unrecorded = parseJunitXml('<testsuite tests="3" failures="1"/>')!;
+    expect(bunRunSummary(unrecorded, ["src/a.test.ts"])).toEqual(unrecorded);
+  });
+
+  it("a bun-console summary carries only collection errors, one failing testcase each", () => {
+    expect(reconcileFileResults("bun-console", 1, 1, recorded([result("src/a.test.ts", 1, 1, true)])).ok).toBe(true);
+    expect(reconcileFileResults("bun-console", 1, 0, recorded([result("src/a.test.ts", 1, 0, false)])).ok).toBe(false);
+    expect(reconcileFileResults("bun-console", 2, 2, recorded([result("src/a.test.ts", 2, 2, true)])).ok).toBe(false);
   });
 });
 

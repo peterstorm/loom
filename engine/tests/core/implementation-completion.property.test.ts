@@ -32,6 +32,7 @@ import {
   CLAUDE_CONTENT_BLOCK_TYPES,
   parseCompleteClaudeJsonl,
 } from "../../src/core/claude-transcript-integrity";
+import { CLAUDE_CONVERSATION_RECORD_TYPES } from "../../src/core/claude-record-kind";
 import {
   PI_STRUCTURED_EVIDENCE_POLICY,
   TRUSTED_LEDGER_ONLY_POLICY,
@@ -172,13 +173,17 @@ describe("implementation completion exact parsers", () => {
     expect(complete.transcript).toBe(valid);
     expect(complete.records).toHaveLength(7);
     expect(complete.records[0]).toMatchObject({
-      type: "system",
-      forward_compatible: { protocol: 2 },
+      kind: "harness",
+      record: { type: "system", forward_compatible: { protocol: 2 } },
     });
-    expect(complete.records[2]).toMatchObject({ type: "assistant" });
-    const message = complete.records[2]?.message as { content?: readonly unknown[] } | undefined;
+    expect(complete.records[2]).toMatchObject({ kind: "conversation", record: { type: "assistant" } });
+    const conversationMessage = (index: number) => {
+      const entry = complete.records[index];
+      return entry?.kind === "conversation" ? entry.record.message : undefined;
+    };
+    const message = conversationMessage(2) as { content?: readonly unknown[] } | undefined;
     expect(message?.content?.[0]).toMatchObject({ future_block_field: 1 });
-    const nestedResult = complete.records[4]?.message as { content?: readonly { content?: readonly unknown[] }[] } | undefined;
+    const nestedResult = conversationMessage(4) as { content?: readonly { content?: readonly unknown[] }[] } | undefined;
     expect(nestedResult?.content?.[0]?.content?.[0]).toMatchObject({
       type: "tool_reference",
       tool_name: "Bash",
@@ -193,6 +198,44 @@ describe("implementation completion exact parsers", () => {
       },
       future_image_field: "retained",
     });
+  });
+
+  it("accepts Claude Code harness records whose message is a request copy, not conversation", () => {
+    const valid = readFileSync(new URL("../fixtures/claude-harness-records-transcript.jsonl", import.meta.url), "utf8");
+    const complete = parseCompleteClaudeJsonl(valid);
+    expect(complete).toMatchObject({ kind: "complete", transcript: valid });
+    if (complete.kind !== "complete") return;
+    expect(complete.records.map((entry) => [entry.kind, entry.record.type])).toEqual([
+      ["conversation", "user"], ["harness", "api-request-shape"], ["harness", "api-request-blob"],
+      ["harness", "api-request"], ["conversation", "assistant"], ["conversation", "user"],
+      ["conversation", "assistant"], ["conversation", "user"], ["harness", "api-request-blob"],
+      ["harness", "api-request-blob"], ["conversation", "assistant"], ["harness", "attachment"],
+    ]);
+  });
+
+  it("property: a harness record's message is never schema-validated, whatever it holds", () => {
+    fc.assert(fc.property(
+      fc.string({ minLength: 1, maxLength: 30 })
+        .filter((type) => type.trim() !== "" && !(CLAUDE_CONVERSATION_RECORD_TYPES as readonly string[]).includes(type)),
+      fc.anything({ maxDepth: 3 }),
+      (type, message) => {
+        expect(parseCompleteClaudeJsonl(`${JSON.stringify({ type, message })}\n`)).toMatchObject({
+          kind: "complete",
+          records: [{ kind: "harness", record: { type } }],
+        });
+      },
+    ), { numRuns: 300 });
+  });
+
+  it("property: a conversation record's message stays strictly validated", () => {
+    fc.assert(fc.property(
+      fc.constantFrom(...CLAUDE_CONVERSATION_RECORD_TYPES),
+      fc.constantFrom("system", "developer", "tool", ""),
+      (type, role) => {
+        const parsed = parseCompleteClaudeJsonl(`${JSON.stringify({ type, message: { role, content: "x" } })}\n`);
+        expect(parsed).toMatchObject({ kind: "malformed", line: 1, reason: expect.stringContaining("role") });
+      },
+    ), { numRuns: 50 });
   });
 
   it.each([

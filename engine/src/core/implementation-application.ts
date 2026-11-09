@@ -1,3 +1,4 @@
+import { match } from "ts-pattern";
 import {
   NEW_TEST_EVIDENCE_NOT_WRITTEN,
   storedNewTestEvidence,
@@ -23,6 +24,7 @@ import {
   type ImplementationCompletionError,
   type ImplementationCompletionFailure,
   type ImplementationCompletionTransition,
+  type ImplementationInfrastructureFailure,
   type IsoInstant,
   type TaskCompletionSuiteResult,
 } from "./implementation-completion";
@@ -621,31 +623,53 @@ export const NAMED_SCOPE_VIOLATION_PATHS = 10;
  *  the paths written outside the Task's declared files, so the cause can be
  *  fixed without re-deriving it from the attempt's byte observation. */
 function describeCompletionFailure(failure: ImplementationCompletionFailure): string {
-  switch (failure.kind) {
-    case "proof-obligation-failure":
-      return failure.failure.kind;
-    case "task-byte-scope-violation": {
-      const named = failure.paths.slice(0, NAMED_SCOPE_VIOLATION_PATHS).join(", ");
-      const unnamed = failure.paths.length - NAMED_SCOPE_VIOLATION_PATHS;
-      return `${failure.kind} (outside the declared files: ${named}${unnamed > 0 ? ` and ${unnamed} more` : ""})`;
-    }
-  }
+  return match(failure)
+    .with({ kind: "proof-obligation-failure" }, ({ failure: obligation }) => obligation.kind)
+    .with({ kind: "task-byte-scope-violation" }, ({ kind, paths }) => {
+      const named = paths.slice(0, NAMED_SCOPE_VIOLATION_PATHS).join(", ");
+      const unnamed = paths.length - NAMED_SCOPE_VIOLATION_PATHS;
+      return `${kind} (outside the declared files: ${named}${unnamed > 0 ? ` and ${unnamed} more` : ""})`;
+    })
+    .exhaustive();
+}
+
+/** How many characters of one infrastructure failure's reason a description names. */
+export const INFRASTRUCTURE_REASON_LIMIT = 1_000;
+
+const infrastructureReasonOf = (failure: ImplementationInfrastructureFailure): string =>
+  match(failure)
+    .with({ kind: "implementation-observation-unavailable" }, ({ message }) => message)
+    .with({ kind: "task-byte-scope-unavailable" }, ({ reason }) => reason)
+    .exhaustive();
+
+const boundedReason = (reason: string): string =>
+  reason.length <= INFRASTRUCTURE_REASON_LIMIT ? reason : `${reason.slice(0, INFRASTRUCTURE_REASON_LIMIT)}…`;
+
+/** Infrastructure failures as an operator reads them: each kind with its own
+ *  reason, so a blocked settlement says why without a debugger. A reason that
+ *  repeats an earlier one (the default byte-scope observation restates the
+ *  observation failure) is named once. */
+function describeInfrastructureFailures(failures: readonly ImplementationInfrastructureFailure[]): string {
+  const named = new Set<string>();
+  return failures.map((failure) => {
+    const reason = infrastructureReasonOf(failure).trim();
+    if (reason === "" || named.has(reason)) return failure.kind;
+    named.add(reason);
+    return `${failure.kind} (${boundedReason(reason)})`;
+  }).join(", ");
 }
 
 /** A settled transition as an operator reads it: its kind and, for a failed
- *  attempt, each failure's kind; a byte-scope violation also names the
- *  offending paths. Both harnesses print it and the Task's `failure_reason`
- *  stores it. */
+ *  or blocked attempt, each failure; a byte-scope violation names the
+ *  offending paths and an infrastructure failure its reason. Both harnesses
+ *  print it and the Task's `failure_reason` stores it. */
 export function describeSettlement(transition: Exclude<ImplementationCompletionTransition, { kind: "ignored" }>): string {
-  switch (transition.kind) {
-    case "implemented":
-      return transition.kind;
-    case "infrastructure-blocked":
-      return `${transition.kind}: ${transition.failures.map((failure) => failure.kind).join(", ")}`;
-    case "retry-required":
-    case "escalation-required":
-      return `${transition.kind}: ${transition.failures.map(describeCompletionFailure).join(", ")}`;
-  }
+  return match(transition)
+    .with({ kind: "implemented" }, ({ kind }) => kind)
+    .with({ kind: "infrastructure-blocked" }, ({ kind, failures }) => `${kind}: ${describeInfrastructureFailures(failures)}`)
+    .with({ kind: "retry-required" }, { kind: "escalation-required" }, ({ kind, failures }) =>
+      `${kind}: ${failures.map(describeCompletionFailure).join(", ")}`)
+    .exhaustive();
 }
 
 function clearAttempt(task: Task): Task {

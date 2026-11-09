@@ -250,9 +250,15 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       // The single source of truth for harness tool names. Both
       // parse-bash-test-output and parse-files-modified must classify spans
       // using the SAME vocabulary the gates are wired for; a parser-local copy
-      // is exactly the drift GATE_WIRED_TOOLS exists to prevent. Nothing else
-      // in core/ is reachable — this allowlist stays fail-closed.
+      // is exactly the drift GATE_WIRED_TOOLS exists to prevent.
       "engine/src/core/tool-vocabulary",
+      // The one classification of a Claude transcript record (conversation or
+      // harness). The parsers, the integrity boundary and the transcript
+      // projection must skip the SAME harness records; a parser-local copy
+      // would let a replayed api-request-blob count as activity in one reader
+      // and not another. A dependency-free pure leaf. Nothing else in core/ is
+      // reachable — this allowlist stays fail-closed.
+      "engine/src/core/claude-record-kind",
       "ts-pattern",
     ],
     deny: [
@@ -260,10 +266,10 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/handlers/",
       // `engine/src/core/` is NOT denied here, and the omission is deliberate.
       // Deny is evaluated before allow, so a blanket core deny would override
-      // the one core module parsers must share (tool-vocabulary). The allow
-      // list is fail-closed — every other core module is refused by not
-      // appearing in it — so the protection is unchanged and the single
-      // sanctioned exception becomes expressible.
+      // the core modules parsers must share (tool-vocabulary,
+      // claude-record-kind). The allow list is fail-closed — every other core
+      // module is refused by not appearing in it — so the protection is
+      // unchanged and the sanctioned exceptions become expressible.
       "engine/src/state-manager",
     ],
   },

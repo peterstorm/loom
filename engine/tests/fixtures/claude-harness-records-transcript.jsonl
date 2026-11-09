@@ -1,0 +1,12 @@
+{"type":"user","uuid":"user-1","message":{"role":"user","content":"Task ID: T1"},"agentId":"agent-1","sessionId":"session-1"}
+{"type":"api-request-shape","agentId":"agent-1","sessionId":"session-1","shape":{"tools":["Write","Bash"]},"shapeHash":"shape-1","timestamp":"2026-11-09T09:32:40.000Z","version":"2.9.0"}
+{"type":"api-request-blob","agentId":"agent-1","sessionId":"session-1","hash":"blob-system","message":{"role":"system","content":[{"type":"text","text":"The following tools just became available"}],"output_config":null}}
+{"type":"api-request","agentId":"agent-1","sessionId":"session-1","id":"request-1","base":null,"tail":["blob-system"],"cacheControl":null,"keep":1,"params":{},"querySource":"agent","requestDigest":"digest-1","shapeHash":"shape-1","timestamp":"2026-11-09T09:32:41.000Z","version":"2.9.0"}
+{"type":"assistant","uuid":"assistant-1","message":{"id":"msg-1","role":"assistant","content":[{"type":"tool_use","id":"tool-write","name":"Write","input":{"file_path":"/repo/src/real.ts","content":"export {};"}}]}}
+{"type":"user","uuid":"user-2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-write","content":"File created"}]}}
+{"type":"assistant","uuid":"assistant-2","message":{"id":"msg-2","role":"assistant","content":[{"type":"tool_use","id":"tool-test","name":"Bash","input":{"command":"npm test"}}]}}
+{"type":"user","uuid":"user-3","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-test","content":"Tests: 3 passed"}]}}
+{"type":"api-request-blob","agentId":"agent-1","sessionId":"session-1","hash":"blob-assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-write","name":"Write","input":{"file_path":"/repo/src/replayed.ts","content":"export {};"}}]}}
+{"type":"api-request-blob","agentId":"agent-1","sessionId":"session-1","hash":"blob-user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-test","content":"Tests: 1 failed"},{"type":"future_request_block","opaque":true}]}}
+{"type":"assistant","uuid":"assistant-3","message":{"id":"msg-3","role":"assistant","content":[{"type":"text","text":"Done."}]}}
+{"type":"attachment","uuid":"attachment-1","attachment":{"type":"hook_success"}}
