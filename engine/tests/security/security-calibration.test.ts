@@ -26,7 +26,7 @@
  */
 
 import { verifyWith } from "../handlers/security-verification-harness";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -380,7 +380,10 @@ describe("a recorded run reaches every planted defect", () => {
   });
 
   it("drives the same records through the helper's own operations", async () => {
-    const out = mkdtempSync(join(tmpdir(), "loom-calibration-"));
+    // The real path: verifier transcripts land under the subagent dir below and
+    // the capture path reads them without following symlinks, so an aliased
+    // temp root (macOS `/var` → `/private/var`) would refuse the capture.
+    const out = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-calibration-")));
     // `start` registers the run with the subagent write guard; keep that
     // registry inside this test's scratch directory.
     vi.stubEnv("LOOM_SUBAGENT_DIR", join(out, ".subagents"));

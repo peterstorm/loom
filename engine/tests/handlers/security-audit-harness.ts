@@ -81,9 +81,12 @@ export function handWriteBallots(run: Run, ballots: readonly unknown[]): void {
 }
 
 /** The run registry `start` writes lives under the protected subagent
- *  directory: point it at a scratch directory for the whole test file. */
+ *  directory: point it at a scratch directory for the whole test file. Its
+ *  real path, like `aRun`'s: verifier transcripts land beneath it and the
+ *  capture path reads them without following symlinks, so an aliased temp root
+ *  (macOS `/var` → `/private/var`) would refuse every capture with ELOOP. */
 export function isolateSubagentDir(): string {
-  const directory = mkdtempSync(join(tmpdir(), "loom-security-audit-subagents-"));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-security-audit-subagents-")));
   created.push(directory);
   process.env.LOOM_SUBAGENT_DIR = directory;
   return directory;

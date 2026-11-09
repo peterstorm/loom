@@ -49,7 +49,10 @@ const SECOND = "api/login:sqli-name";
 let scratch: string;
 
 beforeEach(() => {
-  scratch = mkdtempSync(join(tmpdir(), "loom-security-verification-"));
+  // The real path: the capture path reads transcripts under LOOM_SUBAGENT_DIR
+  // without following symlinks, so an aliased temp root (macOS `/var` →
+  // `/private/var`) would refuse every capture with ELOOP.
+  scratch = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-security-verification-")));
   vi.stubEnv("LOOM_SUBAGENT_DIR", join(scratch, "bindings"));
   // Explicit run authority belongs to the CLI child of a supervisor; the
   // Claude path under test resolves its run from the session binding.
