@@ -14,6 +14,8 @@ import {
   bunRunSummary,
   mergeSummaries,
   parseBunConsoleCollectionErrors,
+  parseReportSource,
+  REPORT_SOURCES,
   parseJunitXml,
   parseReportCounts,
   parseReportSummary,
@@ -386,10 +388,18 @@ describe("bunRunSummary — Bun's JUnit report with its console collection error
     ]));
   });
 
-  it("marks a reported file whose section also errored between tests as a collection error", () => {
-    const summary = bunRunSummary(junit(), ["src/b.test.ts"]);
-    expect(summary).toMatchObject({ total: 5, failed: 2 });
-    expect(summary?.files).toEqual(recorded([result("src/b.test.ts", 2, 1, true), result("src/c.test.ts", 3, 1)]));
+  it("gives a reported file that also errored between tests one more failing testcase, never a collection error", () => {
+    // It loaded, so its genuine failures stay behavioral: an error between
+    // tests must not hide an assertion failure behind a collection error.
+    const summary = bunRunSummary(junit(), ["src/b.test.ts", "src/c.test.ts"]);
+    expect(summary).toMatchObject({ total: 6, failed: 3 });
+    expect(summary?.files).toEqual(recorded([result("src/b.test.ts", 2, 1), result("src/c.test.ts", 4, 2)]));
+  });
+
+  it("names one closed source vocabulary and parses nothing outside it", () => {
+    expect(REPORT_SOURCES).toEqual(["vitest-json", "junit-xml", "bun-console"]);
+    for (const source of REPORT_SOURCES) expect(parseReportSource(source)).toBe(source);
+    for (const raw of ["bun", "JUNIT-XML", "", null, undefined, 1, {}]) expect(parseReportSource(raw)).toBeNull();
   });
 
   it("keeps the JUnit summary unchanged when the console reports no collection error", () => {

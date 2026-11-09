@@ -12,7 +12,7 @@
  */
 
 import { match } from "ts-pattern";
-import { claudeRecordKind, type ClaudeConversationRecordType } from "./claude-record-kind";
+import { claudeRecordKind, type ClaudeConversationRecordType, type ClaudeRecordKind } from "./claude-record-kind";
 
 const MAX_REASON_LENGTH = 4_096;
 const MAX_CONTENT_DEPTH = 8;
@@ -246,11 +246,11 @@ function claudeContentError(raw: unknown, path: string, depth: number): string |
   return null;
 }
 
-function claudeRecordError(raw: unknown, path: string): string | null {
+function claudeRecordError(raw: unknown, kind: ClaudeRecordKind, path: string): string | null {
   if (!isRecord(raw)) return `${path} must be a plain object`;
   const typeError = nonEmptyStringField(raw, "type", path);
   if (typeError !== null) return typeError;
-  if (claudeRecordKind(raw) === "harness" || !owns(raw, "message")) return null;
+  if (kind === "harness" || !owns(raw, "message")) return null;
   if (!isRecord(raw.message)) return `${path}.message must be a plain object when present`;
   if (raw.message.role !== "user" && raw.message.role !== "assistant") {
     return `${path}.message.role must be user or assistant`;
@@ -283,7 +283,9 @@ export function parseCompleteClaudeJsonl(raw: unknown): ClaudeJsonlIntegrity {
         reason: `Claude JSONL transcript record ${index + 1} is malformed or truncated: ${detail}`.slice(0, MAX_REASON_LENGTH),
       });
     }
-    const schemaError = claudeRecordError(parsed, `Claude JSONL transcript record ${index + 1}`);
+    // Classified once: the kind decides both what is validated and the entry it becomes.
+    const kind = claudeRecordKind(parsed);
+    const schemaError = claudeRecordError(parsed, kind, `Claude JSONL transcript record ${index + 1}`);
     if (schemaError !== null || !isRecord(parsed)) {
       return freeze({
         kind: "malformed",
@@ -292,7 +294,7 @@ export function parseCompleteClaudeJsonl(raw: unknown): ClaudeJsonlIntegrity {
       });
     }
     const record = Object.freeze(parsed);
-    records.push(claudeRecordKind(record) === "conversation"
+    records.push(kind === "conversation"
       ? freeze({ kind: "conversation", record: record as ClaudeConversationRecord })
       : freeze({ kind: "harness", record: record as ClaudeHarnessRecord }));
   }

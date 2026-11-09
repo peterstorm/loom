@@ -10,7 +10,7 @@
 
 import { match } from "ts-pattern";
 import type { Epoch, Evidence, EvidenceRecord, TestReportSummary } from "./types";
-import { parseReportSummary } from "./test-report";
+import { parseReportSource, parseReportSummary } from "./test-report";
 export { judgeTestRun, type TrustedTestVerdict } from "./test-report";
 
 // --- Branded agent identity ---
@@ -400,8 +400,8 @@ export function isBindingFresh(args: {
 function parseReportField(v: unknown): TestReportSummary | null {
   if (typeof v !== "object" || v === null) return null;
   const o = v as Record<string, unknown>;
-  if (o.source !== "vitest-json" && o.source !== "junit-xml" && o.source !== "bun-console") return null;
-  return parseReportSummary(o.total, o.failed, o.source, o.files);
+  const source = parseReportSource(o.source);
+  return source === null ? null : parseReportSummary(o.total, o.failed, source, o.files);
 }
 
 function parseEvent(raw: unknown): Evidence | null {

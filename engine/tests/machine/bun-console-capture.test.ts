@@ -90,6 +90,33 @@ describe("findReport — Bun console collection errors", () => {
     expect(quietly(() => findReport(command, dir, run, times()))).toBeNull();
   });
 
+  it("never lets the console vouch beside an outfile path that exists but cannot be inspected", () => {
+    // ENOTDIR, not ENOENT: the path runs through a regular file, so absence is
+    // unproven and the run stays untrusted, console and all.
+    writeFileSync(join(dir, "plain-file"), "not a directory");
+    const blocked = `bun test --reporter=junit --reporter-outfile=${join(dir, "plain-file", "bun.junit.xml")} src/a.test.ts`;
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(findReport(blocked, dir, { output: LOAD_FAILURE_CONSOLE, exit: 1 }, times())).toBeNull();
+      expect(spy.mock.calls.map((call) => String(call[0])).join("")).toContain("cannot inspect Bun JUnit report");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("says on stderr when collection errors cannot join a JUnit report without per-file results", () => {
+    writeFileSync(report, '<testsuite tests="3" failures="1"/>');
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const summary = findReport(command, dir, { output: LOAD_FAILURE_CONSOLE, exit: 1 }, times());
+      expect(summary).toMatchObject({ total: 3, failed: 1, source: "junit-xml", files: { kind: "unrecorded" } });
+      expect(spy.mock.calls.map((call) => String(call[0])).join(""))
+        .toContain("console's collection errors (src/a.test.ts) cannot join it");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("reads no console for a Bun run that names no JUnit reporter", () => {
     expect(findReport("bun test src/a.test.ts", dir, { output: LOAD_FAILURE_CONSOLE, exit: 1 }, times())).toBeNull();
   });

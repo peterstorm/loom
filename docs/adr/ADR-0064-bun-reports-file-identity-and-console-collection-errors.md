@@ -58,10 +58,13 @@ unchanged.
   and CRLF are tolerated, and an error before any header belongs to no file.
 - `bunRunSummary(junit, collectionErrors)` joins them to the run's JUnit summary through
   `parseReportSummary`. Each collection error is one failing testcase, as Bun counts it: a file the report
-  omitted is added as `{executed: 1, failed: 1, collectionError: true}`, and a listed file gains it and
-  becomes a collection error. With no JUnit report the summary's source is the new `bun-console`, whose
-  entries the reconcile rule allows only as exactly that shape. A JUnit summary with unrecorded per-file
-  results is returned unchanged, never half-merged.
+  omitted is added as `{executed: 1, failed: 1, collectionError: true}`. A listed file did load, so it
+  gains the failing testcase but keeps its own collection-error flag: an error printed between tests
+  never hides a genuine assertion failure (which I6 counts as red) behind a collection error (which I6
+  counts as red only for a Task that creates implementation files). With no JUnit report the summary's
+  source is the new `bun-console`, whose entries the reconcile rule allows only as exactly that shape. A
+  JUnit summary with unrecorded per-file results is returned unchanged, never half-merged, and capture
+  says so on stderr.
 
 **Capture** (`machine/report-discovery.ts`). `findReport` takes the finished run (`TestRunOutput`: its output
 and the exit `attributeExit` gives the segment) in place of bare stdout, and `FindReportForSegment` carries

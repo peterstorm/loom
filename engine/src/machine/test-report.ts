@@ -7,6 +7,7 @@ export {
   mergeSummaries,
   parseBunConsoleCollectionErrors,
   parseJunitXml,
+  parseReportSource,
   parseReportCounts,
   parseReportSummary,
   parseStructuredTestReportBytes,

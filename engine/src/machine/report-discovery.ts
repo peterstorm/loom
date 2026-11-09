@@ -420,7 +420,10 @@ export function findReport(
   const bunJunit = bunJunitOutputFileFromCommand(segment);
   if (bunJunit) {
     const path = isAbsolute(bunJunit) ? bunJunit : resolve(cwd, bunJunit);
-    const collectionErrors = run.exit !== null && run.exit !== 0 ? parseBunConsoleCollectionErrors(stdout) : [];
+    // Read only where a report can vouch, and only for a run whose non-zero
+    // exit is the segment's own.
+    const collectionErrors = (): readonly string[] =>
+      run.exit !== null && run.exit !== 0 ? parseBunConsoleCollectionErrors(stdout) : [];
     if (vetoExplicitPath(path)) {
       process.stderr.write(
         `findReport: rejecting --reporter-outfile '${path}' — the path was written by the agent this epoch; an agent-authored artifact cannot vouch as a report\n`,
@@ -430,13 +433,23 @@ export function findReport(
     } else {
       const presence = inspectExplicitReport(path, "Bun JUnit report");
       if (presence === "absent") {
-        const consoleOnly = bunRunSummary(null, collectionErrors);
+        const consoleOnly = bunRunSummary(null, collectionErrors());
         if (consoleOnly) return consoleOnly;
         process.stderr.write(`findReport: Bun JUnit report '${path}' does not exist\n`);
       } else if (presence === "present" && isFresh(path, nowMs, callStartMs)) {
         try {
           const parsed = parseJunitXml(readFileSync(path, "utf-8"));
-          if (parsed) return bunRunSummary(parsed, collectionErrors);
+          if (parsed) {
+            const errors = collectionErrors();
+            if (errors.length > 0 && parsed.files.kind !== "recorded") {
+              // Named, so a withheld red is explainable: a report without
+              // per-file results has no file to attribute the errors to.
+              process.stderr.write(
+                `findReport: Bun JUnit report '${path}' records no per-file results, so the console's collection errors (${errors.join(", ")}) cannot join it\n`,
+              );
+            }
+            return bunRunSummary(parsed, errors);
+          }
           process.stderr.write(`findReport: malformed Bun JUnit report '${path}'\n`);
         } catch (e) {
           process.stderr.write(

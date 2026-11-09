@@ -178,9 +178,10 @@ type ConversationLine = Readonly<{ index: number; role: "assistant" | "user"; me
 
 /** A line as a conversation entry, or `null` for anything else (attachments, system lines, harness request copies, …). */
 function conversationLineOf(line: ParsedLine): ClaudeTranscriptRead<ConversationLine | null> {
+  // Harness records are skipped before any message is read, as in the tolerant walk.
+  if (line.kind === "json" && claudeRecordKind(line.value) === "harness") return { ok: true, value: null };
   const message = strictMessageOf(line, "final");
   if (!message.ok) return message;
-  if (line.kind === "json" && claudeRecordKind(line.value) === "harness") return { ok: true, value: null };
   if (message.value === null || !Array.isArray(message.value["content"])) return { ok: true, value: null };
   const role = message.value["role"];
   if (role !== "assistant" && role !== "user") return { ok: true, value: null };

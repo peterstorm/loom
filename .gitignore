@@ -1,5 +1,6 @@
 .memory/
 .claude/cortex-memory.local.md
+.claude/settings.local.json
 .pi/cortex-memory.local.md
 .claude/reviews/review-and-fix-runs/
 

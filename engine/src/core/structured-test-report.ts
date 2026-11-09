@@ -53,11 +53,22 @@ export type TestReportFiles =
 declare const REPORT_COUNTS_PARSED: unique symbol;
 declare const REPORT_SUMMARY_PARSED: unique symbol;
 /**
- * Where a summary's facts come from. `bun-console` is a Bun run that wrote no
- * JUnit report because every test file failed to load: its only facts are the
- * collection errors Bun printed (`bunRunSummary`).
+ * Where a summary's facts come from: the one closed vocabulary every reader
+ * parses with `parseReportSource`. `bun-console` is a Bun run that wrote no
+ * JUnit report (Bun writes none when every test file fails to load) and whose
+ * console reported collection errors: those errors are its only facts
+ * (`bunRunSummary`). The completion-check reader in `defect-family-accounting`
+ * deliberately accepts a narrower set — only the formats the strict byte
+ * parser (`parseStructuredTestReportBytes`) yields, which never includes
+ * `bun-console`.
  */
-type ReportSource = "vitest-json" | "junit-xml" | "bun-console";
+export const REPORT_SOURCES = Object.freeze(["vitest-json", "junit-xml", "bun-console"] as const);
+
+type ReportSource = typeof REPORT_SOURCES[number];
+
+/** The report source a wire value names, or null for anything else. */
+export const parseReportSource = (raw: unknown): ReportSource | null =>
+  (REPORT_SOURCES as readonly unknown[]).includes(raw) ? raw as ReportSource : null;
 type CountFields = Readonly<{ total: number; failed: number; source: ReportSource }>;
 
 /**
@@ -798,8 +809,10 @@ const bunCollectionError = (file: string): TestFileResult =>
  * - No JUnit summary (Bun writes none when every file failed to load): a
  *   `bun-console` summary of the collection errors alone.
  * - Both: each collection error is one more failing testcase, as Bun counts
- *   it. A file the report lists gains it and becomes a collection error; a
- *   file the report omitted (it never loaded) is added.
+ *   it. A file the report omitted (it never loaded) is added as a collection
+ *   error. A file the report lists did load, so it gains the failing testcase
+ *   but keeps its own collection-error flag: an error between tests never
+ *   hides a genuine assertion failure behind a collection error.
  * - A JUnit summary whose per-file results are unrecorded cannot have files
  *   attributed to it, so it is returned unchanged rather than half-merged.
  */
@@ -817,7 +830,7 @@ export function bunRunSummary(
   }
   if (junit.files.kind !== "recorded") return junit;
   const reported = junit.files.results.map((entry) => errors.includes(entry.file)
-    ? { ...entry, executed: entry.executed + 1, failed: entry.failed + 1, collectionError: true }
+    ? { ...entry, executed: entry.executed + 1, failed: entry.failed + 1 }
     : entry);
   const omitted = errors.filter((file) => !reported.some((entry) => entry.file === file));
   return parseReportSummary(junit.total + errors.length, junit.failed + errors.length, junit.source, {

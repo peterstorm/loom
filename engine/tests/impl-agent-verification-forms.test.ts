@@ -15,6 +15,9 @@ import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { attributeExit, classifyTestCommandDetailed } from "../src/machine/extract-evidence";
 import { bunJunitOutputFileFromCommand, findReport, outputFileFromCommand } from "../src/machine/report-discovery";
+
+/** A finished run with no output and no attributed exit: no console fact can vouch. */
+const NO_RUN = { output: "", exit: null } as const;
 import { judgeTestRun } from "../src/machine/test-report";
 import { guardStateFileDecision } from "../src/core/guard-state-file";
 
@@ -104,7 +107,7 @@ describe("a documented form fed a fresh runner-written report judges trusted-pas
       const callStartMs = Date.now() - 1000;
       writeFileSync(reportPath, body); // the runner's write, during the call
       const classified = classifyTestCommandDetailed(cmd)!;
-      const report = findReport(classified.segment, "/elsewhere", { output: "", exit: null }, { nowMs: Date.now(), callStartMs });
+      const report = findReport(classified.segment, "/elsewhere", NO_RUN, { nowMs: Date.now(), callStartMs });
       expect(judgeTestRun(attributeExit(0, classified), report)).toEqual({ verdict: "trusted-pass" });
     });
   }
