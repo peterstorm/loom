@@ -21,7 +21,18 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { canonicalCoverageId, isWireRecord } from "../../src/core/security-audit-contract";
-import { parseCriticResult, parseUnitResults, CHECK_KEYS, CRITIC_KEYS, CRITIC_PROPOSAL_KEYS, UNIT_RESULT_KEYS } from "../../src/core/security-coverage";
+import {
+  HUNTER_RESULT_KEYS,
+  HUNTER_RESULT_KIND,
+  HUNTER_RESULT_SCHEMA_VERSION,
+  parseCriticResult,
+  parseHunterResult,
+  parseUnitResults,
+  CHECK_KEYS,
+  CRITIC_KEYS,
+  CRITIC_PROPOSAL_KEYS,
+  UNIT_RESULT_KEYS,
+} from "../../src/core/security-coverage";
 import { parseVerificationVerdicts, VERDICT_KEYS } from "../../src/core/security-adjudication";
 import { REFUTATION_PROFILE, aRefs, ok } from "./fixtures";
 
@@ -144,6 +155,26 @@ describe("the hunter doc documents the wire `submit` parses", () => {
     const units = parseUnitResults(resolvePlaceholders(block.units, "units"));
     expect(units.ok ? [] : units.error.violations).toEqual([]);
     expect(ok(units)).toHaveLength(1);
+  });
+
+  it("documents the hunter's OWN envelope, which the submit parser accepts whole", () => {
+    // The hunter used to borrow `kind: "standalone-review"`/`schemaVersion: 2`
+    // from the reviewer payload, claiming a conformance it never had. The doc's
+    // identity is now the parser's, imported rather than re-typed.
+    expect(block.kind).toBe(HUNTER_RESULT_KIND);
+    expect(block.schemaVersion).toBe(HUNTER_RESULT_SCHEMA_VERSION);
+    expect(unknownKeys(keysOf(block), HUNTER_RESULT_KEYS)).toEqual([]);
+    const parsed = parseHunterResult(resolvePlaceholders(block));
+    expect(parsed.ok ? [] : parsed.error.violations).toEqual([]);
+    expect(ok(parsed).units).toHaveLength(1);
+  });
+
+  it("refuses the borrowed reviewer label the doc used to teach", () => {
+    const resolved = resolvePlaceholders(block);
+    if (!isWireRecord(resolved)) throw new Error("the hunter doc's block is not an object");
+    const refused = parseHunterResult({ ...resolved, schemaVersion: 2, kind: "standalone-review" });
+    expect(refused.ok).toBe(false);
+    expect(refused.ok ? [] : refused.error.violations.map((entry) => entry.path).sort()).toEqual(["kind", "schemaVersion"]);
   });
 });
 

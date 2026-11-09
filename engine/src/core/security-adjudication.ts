@@ -293,37 +293,7 @@ export function parseVerificationVerdicts(raw: unknown): DomainResult<readonly V
       violations.push({ path: base, message: "expected an object" });
       return;
     }
-    const local: VerdictViolation[] = [];
-    const record = entry;
-    for (const key of Object.keys(record)) {
-      if (!VERDICT_KEYS.includes(key)) local.push({ path: `${base}.${key}`, message: "unknown field" });
-    }
-    if (record.schemaVersion !== 1) local.push({ path: `${base}.schemaVersion`, message: "expected 1" });
-    if (record.kind !== "security-verdict") local.push({ path: `${base}.kind`, message: "expected security-verdict" });
-    if (!isSecurityFingerprint(record.fingerprint)) local.push({ path: `${base}.fingerprint`, message: "invalid fingerprint" });
-    if (record.vote !== "critical" && record.vote !== "advisory") {
-      local.push({ path: `${base}.vote`, message: "expected critical or advisory" });
-    }
-    if (!isVisibleText(record.reason)) local.push({ path: `${base}.reason`, message: "requires visible prose" });
-    if (record.missingFact !== null && !isVisibleText(record.missingFact)) {
-      local.push({ path: `${base}.missingFact`, message: "expected null or visible prose" });
-    }
-    if (!isSecurityAgentId(record.agent)) local.push({ path: `${base}.agent`, message: "expected a catalog agent id" });
-    // The profile is not free prose: it must be a catalog profile, and it must
-    // be the one this agent's policy assigns it. Otherwise a hunter writes
-    // `profile: "refutation"` on its own ballot and INV-S3 is satisfied by a
-    // capital letter.
-    const catalogProfile = catalogProfileOfAgent(record.agent);
-    if (catalogProfile === null) {
-      local.push({ path: `${base}.agent`, message: "expected an agent in the catalog" });
-    } else if (!(LLM_PROFILE_IDS as readonly string[]).includes(String(record.profile))) {
-      local.push({ path: `${base}.profile`, message: "expected a catalog profile" });
-    } else if (record.profile !== catalogProfile) {
-      local.push({ path: `${base}.profile`, message: `agent ${String(record.agent)} sits on profile ${catalogProfile}` });
-    }
-    if (typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1) {
-      local.push({ path: `${base}.wave`, message: "expected a positive integer" });
-    }
+    const local = verdictViolations(entry, base);
     // Accumulate per entry, so one bad ballot does not pass because another
     // entry's violation was already recorded.
     if (local.length > 0) {
@@ -331,17 +301,17 @@ export function parseVerificationVerdicts(raw: unknown): DomainResult<readonly V
       return;
     }
 
-    const missingFact = record.missingFact;
+    const missingFact = entry.missingFact;
     verdicts.push({
       schemaVersion: 1,
       kind: "security-verdict",
-      fingerprint: record.fingerprint as string,
-      vote: record.vote as "critical" | "advisory",
-      reason: record.reason as string,
+      fingerprint: entry.fingerprint as string,
+      vote: entry.vote as "critical" | "advisory",
+      reason: entry.reason as string,
       missingFact: typeof missingFact === "string" && missingFact.trim() !== "" ? missingFact : null,
-      agent: record.agent as string,
-      profile: record.profile as string,
-      wave: record.wave as number,
+      agent: entry.agent as string,
+      profile: entry.profile as string,
+      wave: entry.wave as number,
     });
   });
 
@@ -350,4 +320,39 @@ export function parseVerificationVerdicts(raw: unknown): DomainResult<readonly V
     compareStrings(left.fingerprint, right.fingerprint) ||
     compareStrings(left.agent, right.agent) ||
     left.wave - right.wave));
+}
+
+/** Every field violation of one ballot record at `base`, in field order. */
+function verdictViolations(record: Readonly<Record<string, unknown>>, base: string): readonly VerdictViolation[] {
+  const local: VerdictViolation[] = [];
+  for (const key of Object.keys(record)) {
+    if (!VERDICT_KEYS.includes(key)) local.push({ path: `${base}.${key}`, message: "unknown field" });
+  }
+  if (record.schemaVersion !== 1) local.push({ path: `${base}.schemaVersion`, message: "expected 1" });
+  if (record.kind !== "security-verdict") local.push({ path: `${base}.kind`, message: "expected security-verdict" });
+  if (!isSecurityFingerprint(record.fingerprint)) local.push({ path: `${base}.fingerprint`, message: "invalid fingerprint" });
+  if (record.vote !== "critical" && record.vote !== "advisory") {
+    local.push({ path: `${base}.vote`, message: "expected critical or advisory" });
+  }
+  if (!isVisibleText(record.reason)) local.push({ path: `${base}.reason`, message: "requires visible prose" });
+  if (record.missingFact !== null && !isVisibleText(record.missingFact)) {
+    local.push({ path: `${base}.missingFact`, message: "expected null or visible prose" });
+  }
+  if (!isSecurityAgentId(record.agent)) local.push({ path: `${base}.agent`, message: "expected a catalog agent id" });
+  // The profile is not free prose: it must be a catalog profile, and it must
+  // be the one this agent's policy assigns it. Otherwise a hunter writes
+  // `profile: "refutation"` on its own ballot and INV-S3 is satisfied by a
+  // capital letter.
+  const catalogProfile = catalogProfileOfAgent(record.agent);
+  if (catalogProfile === null) {
+    local.push({ path: `${base}.agent`, message: "expected an agent in the catalog" });
+  } else if (!(LLM_PROFILE_IDS as readonly string[]).includes(String(record.profile))) {
+    local.push({ path: `${base}.profile`, message: "expected a catalog profile" });
+  } else if (record.profile !== catalogProfile) {
+    local.push({ path: `${base}.profile`, message: `agent ${String(record.agent)} sits on profile ${catalogProfile}` });
+  }
+  if (typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1) {
+    local.push({ path: `${base}.wave`, message: "expected a positive integer" });
+  }
+  return local;
 }

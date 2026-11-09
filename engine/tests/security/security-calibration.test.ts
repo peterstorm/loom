@@ -52,7 +52,7 @@ import { parseVerificationVerdicts } from "../../src/core/security-adjudication"
 import { SECURITY_LENSES, selectSecurityLenses, type SecurityLens, type StackSignals } from "../../src/core/security-lens-select";
 import { securityDisposition } from "../../src/core/security-disposition";
 import { renderRunDocuments } from "../../src/core/security-reports";
-import { HUNTER_AGENT, aConfirmedFinding, aRunMetadata, aSeed, aSignals, aUnitResult, aVerdict, ok } from "./fixtures";
+import { HUNTER_AGENT, HUNTER_ENVELOPE, aConfirmedFinding, aRunMetadata, aSeed, aSignals, aUnitResult, aVerdict, ok } from "./fixtures";
 import { createSecurityAuditHandler } from "../../src/handlers/helpers/security-audit";
 
 const CALIBRATION_ROOT = resolve(__dirname, "../fixtures/security/calibration");
@@ -416,7 +416,7 @@ describe("a recorded run reaches every planted defect", () => {
         expectOk(assigned, `assign ${defect.id}`);
       }
 
-      const submitted = await invoke(["submit"], JSON.stringify({ units: results, findings: DEFECTS.defects.map(findingFor) }));
+      const submitted = await invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE, units: results, findings: DEFECTS.defects.map(findingFor) }));
       expectOk(submitted, "submit");
 
       const verified = await invoke(["verify"], JSON.stringify({

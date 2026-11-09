@@ -58,17 +58,13 @@ export const BASELINE_OWNERS: readonly BaselineOwner[] = Object.freeze([
 ]);
 
 /**
- * Creates the programmatic rule set, optionally configured by project-local config.
- * Config allows projects to define their own boundaries, pure modules, and limits.
+ * The two import-boundary rules. Both run in the "immediate" tier: a forbidden
+ * import is refused when it is written.
  */
-export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFIG): readonly ProgrammaticRule[] {
-  const boundaries = config.boundaries ?? DEFAULT_BOUNDARIES;
-  const pureModules = config.pureModules ?? DEFAULT_PURE_MODULES;
-  const maxLines = config.maxFunctionLines ?? DEFAULT_MAX_LINES;
-  const excludePatterns = config.excludeFromMaxLines ?? DEFAULT_EXCLUDE_PATTERNS;
-  const switchModules = config.switchTotalityModules ?? DEFAULT_SWITCH_TOTALITY_MODULES;
-  const switchBaseline = config.switchTotalityBaseline ?? SWITCH_TOTALITY_BASELINE;
-
+function importBoundaryRules(
+  boundaries: NonNullable<ProgrammaticConfig["boundaries"]>,
+  pureModules: NonNullable<ProgrammaticConfig["pureModules"]>,
+): readonly ProgrammaticRule[] {
   return [
     {
       kind: "programmatic",
@@ -92,28 +88,42 @@ export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFI
       enabled: true,
       source: "default",
     },
-    {
-      kind: "programmatic",
-      name: "max-function-lines",
-      description: `Enforce maximum function body length (configured: ${maxLines} lines)`,
-      extensions: [".ts", ".tsx", ".java"],
-      handler: (content, filePath) => maxFunctionLinesHandler(content, filePath, maxLines, excludePatterns),
-      tier: "full",
-      fixHint: "Decompose into smaller functions with single responsibilities",
-      enabled: true,
-      source: "default",
-    },
-    {
-      kind: "programmatic",
-      name: "fugue-generated-integrity",
-      description: "Verify `fugue new --from` generated files against their @fugue-integrity hash — hand-edits are tamper-evident",
-      extensions: [".ts"],
-      handler: (content, filePath) => fugueGeneratedIntegrityHandler(content, filePath),
-      tier: "full",
-      fixHint: "Do not hand-edit generated code — change the AuthoredDag sidecar and run `fugue new --from` to regenerate",
-      enabled: true,
-      source: "default",
-    },
+  ];
+}
+
+function maxFunctionLinesRule(maxLines: number, excludePatterns: readonly string[]): ProgrammaticRule {
+  return {
+    kind: "programmatic",
+    name: "max-function-lines",
+    description: `Enforce maximum function body length (configured: ${maxLines} lines)`,
+    extensions: [".ts", ".tsx", ".java"],
+    handler: (content, filePath) => maxFunctionLinesHandler(content, filePath, maxLines, excludePatterns),
+    tier: "full",
+    fixHint: "Decompose into smaller functions with single responsibilities",
+    enabled: true,
+    source: "default",
+  };
+}
+
+function fugueGeneratedIntegrityRule(): ProgrammaticRule {
+  return {
+    kind: "programmatic",
+    name: "fugue-generated-integrity",
+    description: "Verify `fugue new --from` generated files against their @fugue-integrity hash — hand-edits are tamper-evident",
+    extensions: [".ts"],
+    handler: (content, filePath) => fugueGeneratedIntegrityHandler(content, filePath),
+    tier: "full",
+    fixHint: "Do not hand-edit generated code — change the AuthoredDag sidecar and run `fugue new --from` to regenerate",
+    enabled: true,
+    source: "default",
+  };
+}
+
+/** The two rules that demand a branch over a discriminated union prove it is total. */
+function totalityRules(config: ProgrammaticConfig): readonly ProgrammaticRule[] {
+  const switchModules = config.switchTotalityModules ?? DEFAULT_SWITCH_TOTALITY_MODULES;
+  const switchBaseline = config.switchTotalityBaseline ?? SWITCH_TOTALITY_BASELINE;
+  return [
     {
       kind: "programmatic",
       name: SWITCH_TOTALITY_RULE,
@@ -144,6 +154,12 @@ export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFI
       enabled: true,
       source: "default",
     },
+  ];
+}
+
+/** The two expression-shape rules: no nested ternaries, no push-only accumulators. */
+function expressionShapeRules(): readonly ProgrammaticRule[] {
+  return [
     {
       kind: "programmatic",
       name: "no-nested-ternary",
@@ -166,5 +182,22 @@ export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFI
       enabled: true,
       source: "default",
     },
+  ];
+}
+
+/**
+ * Creates the programmatic rule set, optionally configured by project-local config.
+ * Config allows projects to define their own boundaries, pure modules, and limits.
+ */
+export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFIG): readonly ProgrammaticRule[] {
+  return [
+    ...importBoundaryRules(config.boundaries ?? DEFAULT_BOUNDARIES, config.pureModules ?? DEFAULT_PURE_MODULES),
+    maxFunctionLinesRule(
+      config.maxFunctionLines ?? DEFAULT_MAX_LINES,
+      config.excludeFromMaxLines ?? DEFAULT_EXCLUDE_PATTERNS,
+    ),
+    fugueGeneratedIntegrityRule(),
+    ...totalityRules(config),
+    ...expressionShapeRules(),
   ];
 }

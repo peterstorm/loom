@@ -190,14 +190,8 @@ export function selectSecurityLenses(
     let score = 0;
     const reasons: string[] = [];
     for (const [signal, weight, reason] of rules) {
-      if (signal === "languages") {
-        if (languageMatches(lens, signals)) {
-          score += weight;
-          reasons.push(reason);
-        }
-        continue;
-      }
-      if (hasSignal(signals, signal)) {
+      const present = signal === "languages" ? languageMatches(lens, signals) : hasSignal(signals, signal);
+      if (present) {
         score += weight;
         reasons.push(reason);
       }
@@ -205,7 +199,7 @@ export function selectSecurityLenses(
     if (score > 0) scored.push({ lens, score, reasons: [...new Set(reasons)], base: false });
   }
 
-  const ranked = scored.sort((left, right) =>
+  const ranked = [...scored].sort((left, right) =>
     right.score - left.score || SECURITY_LENSES.indexOf(left.lens) - SECURITY_LENSES.indexOf(right.lens),
   );
   const included = ranked.slice(0, specialisedCap);
@@ -219,8 +213,8 @@ export function selectSecurityLenses(
     excluded: SECURITY_LENSES.filter((lens) => lens !== "ATTACK-CLASSES.md" && !includedLenses.has(lens)).map((lens) => ({
       lens,
       reason:
-        scored.some((entry) => entry.lens === lens)
-          ? `ranked ${scored.findIndex((entry) => entry.lens === lens) + 1} of ${scored.length}; beyond the ${maxLenses}-lens cap`
+        ranked.some((entry) => entry.lens === lens)
+          ? `ranked ${ranked.findIndex((entry) => entry.lens === lens) + 1} of ${ranked.length}; beyond the ${maxLenses}-lens cap`
           : `no matching signal (${SIGNAL_NAMES.filter((name) => hasSignal(signals, name)).join(", ") || "none detected"})`,
     })),
   };

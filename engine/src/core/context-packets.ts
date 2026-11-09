@@ -308,28 +308,9 @@ export function buildContextPacket(input: ContextPacketInput): DomainResult<Lega
       return failure(`${field}.label`, `a context section label must be unique: ${section.label}`);
     }
     labels.add(section.label);
-    if (sealedSections.has(section)) { canonicalSections.push(section as ByteSection); continue; }
-    // The byte grammar lives in `boundedByteIterable`: iterability, the 0–255
-    // integer test, and the bound (the section's own declared byteLength —
-    // over-length bytes fail here exactly as the length equality below would).
-    const materialized = boundedByteIterable(section.bytes, section.byteLength);
-    if (!materialized.ok) {
-      return failure(field, "a context section must contain only bytes whose digest and length cover the exact content");
-    }
-    const bytes = materialized.value;
-    // boundedByteIterable already bounds bytes.length ≤ the declared section
-    // byteLength (an ArtifactByteLength), so the length arm needs no second
-    // range parse (cs-6): the exactness predicate is the equality plus digest.
-    const verified = bytes.length === section.byteLength && digestBytes(bytes) === section.digest;
-    if (!verified) {
-      return failure(field, "a context section must contain only bytes whose digest and length cover the exact content");
-    }
-    canonicalSections.push(canonicalRecord({
-      label: section.label,
-      byteLength: section.byteLength,
-      digest: section.digest,
-      bytes: immutableBytes(bytes),
-    }));
+    const canonical = canonicalInputSection(section, field);
+    if (!canonical.ok) return canonical;
+    canonicalSections.push(canonical.value);
   }
   const fixedContext = canonicalSections.slice(0, input.fixedContext.length);
   const variableContext = canonicalSections.slice(input.fixedContext.length);
@@ -345,6 +326,33 @@ export function buildContextPacket(input: ContextPacketInput): DomainResult<Lega
   } as const;
 
   return success(canonicalRecord({ ...withoutDigest, digest: contextPacketDigest(withoutDigest) }));
+}
+
+/** A label-checked input section as a sealed ByteSection whose digest and
+ *  length are proven against its exact bytes; a sealed section passes as-is. */
+function canonicalInputSection(section: ByteSectionInput, field: string): DomainResult<ByteSection, ContextPacketError> {
+  if (sealedSections.has(section)) return success(section as ByteSection);
+  // The byte grammar lives in `boundedByteIterable`: iterability, the 0–255
+  // integer test, and the bound (the section's own declared byteLength —
+  // over-length bytes fail here exactly as the length equality below would).
+  const materialized = boundedByteIterable(section.bytes, section.byteLength);
+  if (!materialized.ok) {
+    return failure(field, "a context section must contain only bytes whose digest and length cover the exact content");
+  }
+  const bytes = materialized.value;
+  // boundedByteIterable already bounds bytes.length ≤ the declared section
+  // byteLength (an ArtifactByteLength), so the length arm needs no second
+  // range parse (cs-6): the exactness predicate is the equality plus digest.
+  const verified = bytes.length === section.byteLength && digestBytes(bytes) === section.digest;
+  if (!verified) {
+    return failure(field, "a context section must contain only bytes whose digest and length cover the exact content");
+  }
+  return success(canonicalRecord({
+    label: section.label,
+    byteLength: section.byteLength,
+    digest: section.digest,
+    bytes: immutableBytes(bytes),
+  }));
 }
 
 const reservedLabel = (label: string): boolean => REVIEWER_FIXED_SECTIONS.some((section) => section.label === label);

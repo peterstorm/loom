@@ -64,15 +64,60 @@ import type { CompletedWaveGateRegistration, Finding, RefutedFinding, TaskGraph 
 // historical run directory still needs the legacy helper path.
 // ─────────────────────────────────────────────────────────────────────────
 
+type LegacyTranscriptInput = Readonly<{
+  agent: StandaloneReviewerRole;
+  output: string;
+  artifact?: ArtifactRef;
+}>;
+
+type LegacyTranscript = Readonly<{
+  agent: StandaloneReviewerRole;
+  output: string;
+  evidence: StandaloneReviewerEvidence;
+}>;
+
+/** One historical transcript → its slot-bound evidence and decoded output, or
+ * the single agent-prefixed error that refused it. */
+function admitLegacyTranscript(
+  runId: string,
+  transcript: LegacyTranscriptInput,
+  index: number,
+): Readonly<{ ok: true; value: LegacyTranscript }> | Readonly<{ ok: false; error: string }> {
+  const bytes = Buffer.from(transcript.output, "utf-8");
+  const fallbackArtifact = parseArtifactRef({
+    runId,
+    slot: `reviewers/${index + 1}-${transcript.agent}.md`,
+    digest: createHash("sha256").update(bytes).digest("hex"),
+    byteLength: bytes.byteLength,
+  });
+  if (!fallbackArtifact.ok) return { ok: false, error: `${transcript.agent}: ${fallbackArtifact.error.message}` };
+  const captured = capturedReviewerResultFromText(transcript.artifact ?? fallbackArtifact.value, transcript.output);
+  if (!captured.ok) return { ok: false, error: `${transcript.agent}: ${captured.error.message}` };
+  // Minted through the same parsers the load boundary uses, so this archived
+  // producer cannot introduce an identity the reader would refuse.
+  const slotId = parseSlotId(`legacy-slot:${index + 1}`);
+  const requestId = parseRequestId(`legacy-request:${index + 1}`);
+  if (!slotId.ok || !requestId.ok) return { ok: false, error: `${transcript.agent}: internal legacy slot identity is invalid` };
+  const evidence: StandaloneReviewerEvidence = Object.freeze({
+    authorityKind: "legacy-slot-bound",
+    agent: transcript.agent,
+    slotId: slotId.value,
+    requestId: requestId.value,
+    attempt: 1,
+    modelProfile: null,
+    contextDigest: null,
+    artifact: captured.value.artifact,
+  });
+  const output = decodeCapturedReviewerText(captured.value);
+  if (!output.ok) return { ok: false, error: `${transcript.agent}: ${output.error.message}` };
+  return { ok: true, value: { agent: transcript.agent, output: output.value, evidence } };
+}
+
 /** Historical CLI adapter only. New orchestration must use aggregateStandaloneReview. */
 export function aggregateLegacyStandaloneReview(input: {
   readonly runId: string;
   readonly scope: readonly string[];
-  readonly transcripts: readonly Readonly<{
-    agent: StandaloneReviewerRole;
-    output: string;
-    artifact?: ArtifactRef;
-  }>[];
+  readonly transcripts: readonly LegacyTranscriptInput[];
 }): ParseResult<StandaloneReviewState> {
   const runId = input.runId.trim();
   const scope = parseStandaloneReviewScope(input.scope);
@@ -84,46 +129,10 @@ export function aggregateLegacyStandaloneReview(input: {
   const parsedRun = parseOrchestrationRunId(runId);
   if (!parsedRun.ok) errors.push(parsedRun.error.message);
   const transcripts = input.transcripts.flatMap((transcript, index) => {
-    const bytes = Buffer.from(transcript.output, "utf-8");
-    const fallbackArtifact = parseArtifactRef({
-      runId,
-      slot: `reviewers/${index + 1}-${transcript.agent}.md`,
-      digest: createHash("sha256").update(bytes).digest("hex"),
-      byteLength: bytes.byteLength,
-    });
-    if (!fallbackArtifact.ok) {
-      errors.push(`${transcript.agent}: ${fallbackArtifact.error.message}`);
-      return [];
-    }
-    const captured = capturedReviewerResultFromText(transcript.artifact ?? fallbackArtifact.value, transcript.output);
-    if (!captured.ok) {
-      errors.push(`${transcript.agent}: ${captured.error.message}`);
-      return [];
-    }
-    // Minted through the same parsers the load boundary uses, so this archived
-    // producer cannot introduce an identity the reader would refuse.
-    const slotId = parseSlotId(`legacy-slot:${index + 1}`);
-    const requestId = parseRequestId(`legacy-request:${index + 1}`);
-    if (!slotId.ok || !requestId.ok) {
-      errors.push(`${transcript.agent}: internal legacy slot identity is invalid`);
-      return [];
-    }
-    const evidence: StandaloneReviewerEvidence = Object.freeze({
-      authorityKind: "legacy-slot-bound",
-      agent: transcript.agent,
-      slotId: slotId.value,
-      requestId: requestId.value,
-      attempt: 1,
-      modelProfile: null,
-      contextDigest: null,
-      artifact: captured.value.artifact,
-    });
-    const output = decodeCapturedReviewerText(captured.value);
-    if (!output.ok) {
-      errors.push(`${transcript.agent}: ${output.error.message}`);
-      return [];
-    }
-    return [{ agent: transcript.agent, output: output.value, evidence }];
+    const admitted = admitLegacyTranscript(runId, transcript, index);
+    if (admitted.ok) return [admitted.value];
+    errors.push(admitted.error);
+    return [];
   });
   if (errors.length > 0 || !scope.ok) return fail(errors);
   return aggregateCanonicalTranscripts(runId, scope.value, transcripts);

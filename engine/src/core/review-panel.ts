@@ -463,6 +463,35 @@ function parseBriefFindingEntry(
   };
 }
 
+/** `undefined` for a wave brief (the absent or explicit `wave` kind), null for
+ *  an unknown kind. */
+function parseBriefSourceKind(raw: unknown): "standalone" | undefined | null {
+  if (raw === undefined || raw === "wave") return undefined;
+  return raw === "standalone" ? "standalone" : null;
+}
+
+/** A standalone brief is always wave 1 over the single standalone subject. */
+function standaloneBriefErrors(wave: unknown, taskIds: readonly string[] | null): readonly string[] {
+  const errors: string[] = [];
+  if (wave !== 1) errors.push("standalone brief.wave must be 1");
+  if (taskIds === null || taskIds.length !== 1 || taskIds[0] !== STANDALONE_REVIEW_SUBJECT) {
+    errors.push(`standalone brief.task_ids must be exactly ['${STANDALONE_REVIEW_SUBJECT}']`);
+  }
+  return errors;
+}
+
+/** Finding ids must be unique, and stay unique once mapped to artifact filenames. */
+function briefFindingIdErrors(findings: readonly BriefFinding[]): readonly string[] {
+  const errors: string[] = [];
+  const ids = findings.map((finding) => finding.id);
+  if (new Set(ids).size !== ids.length) errors.push("brief finding ids must be unique");
+  const filenames = ids.map(briefFindingFilename);
+  if (new Set(filenames).size !== filenames.length) {
+    errors.push("brief finding ids must remain unique once mapped to filenames");
+  }
+  return errors;
+}
+
 /**
  * Re-parse the canonical brief rather than trusting the write that produced it,
  * the same discipline parseInterviewDigestJson applies: everything downstream
@@ -481,9 +510,7 @@ export function parseFindingBriefJson(raw: unknown): ParseResult<FindingBrief> {
   if (severity === null) {
     errors.push("brief.severity must be 'critical' or 'advisory'");
   }
-  const source = raw.source_kind === undefined || raw.source_kind === "wave"
-    ? undefined
-    : raw.source_kind === "standalone" ? "standalone" as const : null;
+  const source = parseBriefSourceKind(raw.source_kind);
   if (source === null) errors.push("brief.source_kind must be 'wave' or 'standalone' when present");
 
   const taskIds = Array.isArray(raw.task_ids) && raw.task_ids.every((id) => typeof id === "string" && id.trim() !== "")
@@ -502,19 +529,8 @@ export function parseFindingBriefJson(raw: unknown): ParseResult<FindingBrief> {
     if (parsed.finding) findings.push(parsed.finding);
   }
 
-  if (source === "standalone") {
-    if (wave !== 1) errors.push("standalone brief.wave must be 1");
-    if (taskIds === null || taskIds.length !== 1 || taskIds[0] !== STANDALONE_REVIEW_SUBJECT) {
-      errors.push(`standalone brief.task_ids must be exactly ['${STANDALONE_REVIEW_SUBJECT}']`);
-    }
-  }
-
-  const ids = findings.map((finding) => finding.id);
-  if (new Set(ids).size !== ids.length) errors.push("brief finding ids must be unique");
-  const filenames = ids.map(briefFindingFilename);
-  if (new Set(filenames).size !== filenames.length) {
-    errors.push("brief finding ids must remain unique once mapped to filenames");
-  }
+  if (source === "standalone") errors.push(...standaloneBriefErrors(wave, taskIds));
+  errors.push(...briefFindingIdErrors(findings));
 
   if (errors.length > 0) return fail(errors);
   return source === "standalone"

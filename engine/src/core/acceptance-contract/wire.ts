@@ -193,17 +193,46 @@ function parseContract(raw: unknown, path: string): Parsed<AcceptanceContract> {
   if (!acceptance.ok) return acceptance;
   const files = acceptance.value;
   const paths = frozenPaths({ types: types.value, acceptance: files });
-  if (new Set(paths.map(normalizePlanPath)).size !== paths.length) return err(`${path} freezes one path twice`);
-  const unsafe = paths.find((frozen) => !isRepoRelativePlanPath(frozen));
-  if (unsafe !== undefined) return err(`${path} freezes '${unsafe}', which is not a repository-relative path`);
+  const unfreezable = frozenPathsError(paths, path);
+  if (unfreezable !== null) return err(unfreezable);
   if (fields.supportedDomain !== null && !files.some(({ path: file }) => file === fields.supportedDomain)) {
     return err(`${path}.supportedDomain must be null or one of the acceptance files`);
   }
   const frozen = parseFreeze(fields.freeze, `${path}.freeze`, { types: types.value, acceptance: files });
   if (!frozen.ok) return frozen;
-  if (!Array.isArray(fields.revisions)) return err(`${path}.revisions must be an array`);
+  const revisions = parseRevisionHistory(fields.revisions, path, paths, frozen.value);
+  if (!revisions.ok) return revisions;
+  return ok(freeze({
+    schemaVersion: 1,
+    id: fields.id,
+    title: title.value,
+    statement: statement.value,
+    contractTask: contractTask.value,
+    types: types.value,
+    acceptance: files,
+    supportedDomain: fields.supportedDomain as string | null,
+    freeze: frozen.value,
+    revisions: revisions.value,
+  }));
+}
+
+/** Why a contract's frozen paths cannot be frozen as declared, or null when they can. */
+function frozenPathsError(paths: readonly string[], path: string): string | null {
+  if (new Set(paths.map(normalizePlanPath)).size !== paths.length) return `${path} freezes one path twice`;
+  const unsafe = paths.find((frozen) => !isRepoRelativePlanPath(frozen));
+  return unsafe === undefined ? null : `${path} freezes '${unsafe}', which is not a repository-relative path`;
+}
+
+/** A contract's revision history, parsed and checked against its freeze. */
+function parseRevisionHistory(
+  raw: unknown,
+  path: string,
+  paths: readonly string[],
+  frozen: AcceptanceFreeze,
+): Parsed<readonly ContractRevision[]> {
+  if (!Array.isArray(raw)) return err(`${path}.revisions must be an array`);
   const revisions: ContractRevision[] = [];
-  for (const [index, value] of fields.revisions.entries()) {
+  for (const [index, value] of raw.entries()) {
     const revision = parseRevision(value, `${path}.revisions[${index}]`, index, paths);
     if (!revision.ok) return revision;
     revisions.push(revision.value);
@@ -215,23 +244,12 @@ function parseContract(raw: unknown, path: string): Parsed<AcceptanceContract> {
     index > 0 && !canonicalStructuralEquals(revision.previous, revisions[index - 1]!.paths));
   if (broken !== -1) return err(`${path}.revisions[${broken}].previous must equal revision ${broken}'s paths`);
   const last = revisions.at(-1);
-  if (last === undefined && frozen.value.state === "revised") return err(`${path}.freeze is revised but records no revision`);
-  if (last !== undefined && frozen.value.state === "awaiting-red") return err(`${path}.revisions precede the freeze`);
-  if (last !== undefined && frozen.value.state !== "awaiting-red" && !canonicalStructuralEquals(frozen.value.paths, last.paths)) {
+  if (last === undefined && frozen.state === "revised") return err(`${path}.freeze is revised but records no revision`);
+  if (last !== undefined && frozen.state === "awaiting-red") return err(`${path}.revisions precede the freeze`);
+  if (last !== undefined && frozen.state !== "awaiting-red" && !canonicalStructuralEquals(frozen.paths, last.paths)) {
     return err(`${path}.freeze.paths must equal the last revision's paths`);
   }
-  return ok(freeze({
-    schemaVersion: 1,
-    id: fields.id,
-    title: title.value,
-    statement: statement.value,
-    contractTask: contractTask.value,
-    types: types.value,
-    acceptance: files,
-    supportedDomain: fields.supportedDomain as string | null,
-    freeze: frozen.value,
-    revisions: Object.freeze(revisions),
-  }));
+  return ok(Object.freeze(revisions));
 }
 
 /** Parse the persisted `acceptance_contracts`: exact records, unique ids, and

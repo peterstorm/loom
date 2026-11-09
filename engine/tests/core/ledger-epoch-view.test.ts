@@ -228,7 +228,7 @@ describe("renderEpoch: SandboxRun", () => {
       "    limits cpu 10s, address space 1024MB, processes 128, file 32MB, wall 60s, scratch 64MB",
       "    enforced cpu yes, memory yes, processes yes, file size yes",
       "    scratch 12B after the run; env PATH,HOME,TMPDIR,LANG,TERM",
-      "    network namespace; target read-only; home read-only yes; root read-only no; unremounted mounts 0",
+      "    network namespace; target read-only yes; home read-only yes; root read-only no; unremounted mounts 0",
     ]);
   });
 
@@ -239,13 +239,14 @@ describe("renderEpoch: SandboxRun", () => {
       "    limits cpu 10s, address space 1024MB, processes 128, file 32MB, wall 60s, scratch 64MB",
       "    enforced cpu yes, memory yes, processes yes, file size yes",
       "    scratch unmeasured after the run; env PATH,HOME,TMPDIR,LANG,TERM",
-      "    network namespace; target read-only; home read-only yes; root read-only no; unremounted mounts 0",
+      "    network namespace; target read-only yes; home read-only yes; root read-only no; unremounted mounts 0",
     ]);
   });
 
-  it("a claimed-but-unbounded run names what was not enforced and the open home", () => {
+  it("a claimed-but-unbounded run names what was not enforced, the open target and the open home", () => {
     const lines = renderEpoch([
       sandboxRun(IMPL, {
+        targetReadOnly: false,
         homeReadOnly: false,
         readOnlyRoot: true,
         unremountedMounts: 4,
@@ -254,18 +255,19 @@ describe("renderEpoch: SandboxRun", () => {
     ], IMPL);
     expect(lines.slice(1)).toEqual([
       "#0 SandboxRun exit 0",
-      "    NOT within limits: memory limit not applied; file-size limit not applied; home directory not remounted read-only",
+      "    NOT within limits: memory limit not applied; file-size limit not applied; target not remounted read-only; " +
+        "home directory not remounted read-only",
       "    limits cpu 10s, address space 1024MB, processes 128, file 32MB, wall 60s, scratch 64MB",
       "    enforced cpu yes, memory no, processes yes, file size no",
       "    scratch 12B after the run; env PATH,HOME,TMPDIR,LANG,TERM",
-      "    network namespace; target read-only; home read-only no; root read-only yes; unremounted mounts 4",
+      "    network namespace; target read-only no; home read-only no; root read-only yes; unremounted mounts 4",
     ]);
   });
 
   it("residual exposure is reported but does not unbound a run", () => {
     const lines = renderEpoch([sandboxRun(IMPL, { readOnlyRoot: false, unremountedMounts: 9 })], IMPL);
     expect(lines[2]).toBe("    within limits");
-    expect(lines.at(-1)).toBe("    network namespace; target read-only; home read-only yes; root read-only no; unremounted mounts 9");
+    expect(lines.at(-1)).toBe("    network namespace; target read-only yes; home read-only yes; root read-only no; unremounted mounts 9");
   });
 });
 
@@ -400,6 +402,7 @@ const rawRecordArb = fc.record({
       receipt: fc.record({
         exit: fc.option(fc.integer({ min: 0, max: 255 }), { nil: null }),
         scratchBytes: fc.option(fc.nat(), { nil: null }),
+        targetReadOnly: fc.boolean(),
         homeReadOnly: fc.boolean(),
         readOnlyRoot: fc.boolean(),
         unremountedMounts: fc.nat(20),

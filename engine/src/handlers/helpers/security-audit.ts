@@ -39,7 +39,6 @@
  */
 
 import { match } from "ts-pattern";
-import { isDeepStrictEqual } from "node:util";
 import { runGit } from "../../utils/git-execution-policy";
 import { existsSync, lstatSync, rmSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
@@ -58,6 +57,8 @@ import {
 } from "../../core/security-audit-contract";
 import { parseSecurityAuditStart, startMetadata, type SecurityAuditStart } from "../../core/security-audit-start";
 import {
+  HUNTER_RESULT_KIND,
+  admitArtifactNonce,
   assignUnits,
   coverageComplete,
   coverageSettled,
@@ -67,19 +68,19 @@ import {
   parseCoverageSeeds,
   parseCriticMergeMaps,
   parseCriticResult,
+  parseHunterResult,
   parseLedger,
-  parseUnitResults,
   recordUnitResult,
   runStatusOf,
   summarizeCoverage,
   type CoverageLedger,
   type UnitResult,
 } from "../../core/security-coverage";
-import { consolidateCandidates, parseSecurityFindings, sortByFingerprint, type SecurityFinding } from "../../core/security-findings";
+import { fileCandidates, parseSecurityFindings, type SecurityFinding } from "../../core/security-findings";
 import { adjudicateRun, parseVerificationVerdicts, type VerificationVerdict } from "../../core/security-adjudication";
 import { renderLensSelection, type LensSelection } from "../../core/security-lens-select";
 import { dispositionHandoffPaths, renderDispositionHandoff, securityDisposition, standaloneDispositionStart } from "../../core/security-disposition";
-import { judgeLocalReceipt } from "../../core/security-sandbox";
+import { DEFAULT_SANDBOX_LIMITS, bindSandboxRun, judgeLocalReceipt, renderSandboxInstructions } from "../../core/security-sandbox";
 import { renderRunDocuments } from "../../core/security-reports";
 import { argumentValue, hasFlag, unconsumedValueArguments } from "./cli-args";
 import {
@@ -111,7 +112,7 @@ const FILES = Object.freeze({
 const RUN_DOCUMENTS: readonly string[] = Object.freeze(Object.values(FILES));
 
 const VALUE_FLAGS: ReadonlySet<string> = new Set([
-  "--out", "--repo", "--source", "--profile", "--budget", "--run-id", "--unit", "--agent", "--wave", "--reason",
+  "--out", "--repo", "--source", "--profile", "--budget", "--run-id", "--unit", "--agent", "--wave", "--reason", "--artifact",
 ]);
 
 const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -170,6 +171,16 @@ type Store = Readonly<{
   clear: () => DomainResult<readonly string[], string>;
 }>;
 
+/** Read one run-relative text document without following a symlink. */
+function readTextAt(root: string, file: string): DomainResult<string, string> {
+  const path = join(root, file);
+  try {
+    return success(readRunFileNoFollow(path));
+  } catch (error) {
+    return failure(`cannot read ${path}: ${describe(error)}`);
+  }
+}
+
 /** Read one run document: no-follow, strict JSON, and a parser failure that
  *  NAMES the file. A parser that throws is a parser that met a shape it did not
  *  model, so the exception is caught here rather than escaping as an unnamed
@@ -180,15 +191,11 @@ function readJsonAt<T>(
   parse: (raw: unknown) => DomainResult<T, unknown>,
 ): DomainResult<T, string> {
   const path = join(root, file);
-  let text: string;
-  try {
-    text = readRunFileNoFollow(path);
-  } catch (error) {
-    return failure(`cannot read ${path}: ${describe(error)}`);
-  }
+  const text = readTextAt(root, file);
+  if (!text.ok) return text;
   let raw: unknown;
   try {
-    raw = JSON.parse(text);
+    raw = JSON.parse(text.value);
   } catch (error) {
     return failure(`${path} is not valid JSON: ${describe(error)}`);
   }
@@ -256,14 +263,7 @@ function openStore(out: string, writes: boolean): DomainResult<Store, string> {
   return success({
     out: root,
     has: (file) => existsSync(join(root, file)),
-    readText: (file) => {
-      const path = join(root, file);
-      try {
-        return success(readRunFileNoFollow(path));
-      } catch (error) {
-        return failure(`cannot read ${path}: ${describe(error)}`);
-      }
-    },
+    readText: (file) => readTextAt(root, file),
     readJson: (file, parse) => readJsonAt(root, file, parse),
     write: (file, value, options) => writeAt(root, file, value, options),
     clear: () => clearRunDocuments(root),
@@ -272,21 +272,15 @@ function openStore(out: string, writes: boolean): DomainResult<Store, string> {
 
 const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 
-/** Sort a hunter's RAW wire list into fingerprint order before it is parsed, so
- *  a hunter is not refused for its filing order. Same order as the core's typed
- *  `sortByFingerprint` (`compareStrings` on the fingerprint); entries with no
- *  fingerprint compare equal, so the parser — not a comparator returning NaN —
- *  names the actual violation. A non-list passes through untouched so the parser
- *  sees the shape it was sent. */
-function sortWireByFingerprint(raw: unknown): unknown {
-  if (!Array.isArray(raw)) return raw;
-  const fingerprintOf = (entry: unknown): string | null =>
-    isWireRecord(entry) && typeof entry.fingerprint === "string" ? entry.fingerprint : null;
-  return [...raw].sort((left: unknown, right: unknown) => {
-    const a = fingerprintOf(left);
-    const b = fingerprintOf(right);
-    return a === null || b === null ? 0 : compareStrings(a, b);
-  });
+/** Run writes in the order given, stopping at the first refusal: every
+ *  multi-document write here has a commit order, and a later document must not
+ *  land after an earlier one failed. */
+function writeInOrder(writes: readonly (() => DomainResult<void, string>)[]): DomainResult<void, string> {
+  for (const write of writes) {
+    const written = write();
+    if (!written.ok) return written;
+  }
+  return success(undefined);
 }
 
 // --- Document parsers, each owned by the core that defines the document ---
@@ -441,7 +435,7 @@ function writeFreshRun(
   documents: Readonly<{ metadata: SecurityRunMetadata; ledger: CoverageLedger; selection: LensSelection }>,
 ): DomainResult<void, string> {
   const { metadata, ledger, selection } = documents;
-  for (const write of [
+  return writeInOrder([
     () => store.write(FILES.run, json(metadata)),
     () => store.write(FILES.ledger, json(ledger)),
     () => store.write(FILES.findings, json([])),
@@ -451,11 +445,7 @@ function writeFreshRun(
       excluded: selection.excluded,
       rendered: renderLensSelection(selection),
     })),
-  ]) {
-    const written = write();
-    if (!written.ok) return written;
-  }
-  return success(undefined);
+  ]);
 }
 
 function runStart(store: Store, args: readonly string[], stdin: string): DomainResult<string, string> {
@@ -529,7 +519,7 @@ function startReport(
   ].join("\n");
 }
 
-// --- assign / submit / defer / merge-critic ---
+// --- assign / nonce / submit / defer / merge-critic ---
 
 function runAssign(store: Store, args: readonly string[]): DomainResult<string, string> {
   const flags = parseFlags(args, ["--out", "--unit", "--agent", "--wave"]);
@@ -556,9 +546,43 @@ function runAssign(store: Store, args: readonly string[]): DomainResult<string, 
   if (!written.ok) return written;
   // The owner id is minted by the ledger, not echoed from `--agent`: a reassigned
   // unit runs under `<agent>--<n>`, and the hunter must settle under exactly it.
+  // The nonce line is how the parent obtains a receipt binding for that owner: a
+  // hunter cannot derive the nonce itself.
   return success(assigned.value.assigned
-    .map((entry) => `assigned ${entry.coverageId} to owner ${entry.ownerId} at wave ${entry.wave}`)
+    .flatMap((entry) => [
+      `assigned ${entry.coverageId} to owner ${entry.ownerId} at wave ${entry.wave}`,
+      `nonce: loom helper security-audit nonce --out ${store.out} --artifact agents/${entry.ownerId}/artifacts/<file>`,
+    ])
     .join("\n"));
+}
+
+/**
+ * The sandbox binding for one artifact of a unit in flight: the nonce the
+ * receipt must carry and the exact run the hunter is told to make. Whether the
+ * artifact may be bound at all — an owned path whose owner is hunting right now,
+ * not one an archived attempt already cited — is the coverage core's decision;
+ * this reads the ledger and the frozen target, and writes nothing.
+ */
+function runNonce(store: Store, args: readonly string[]): DomainResult<string, string> {
+  const flags = parseFlags(args, ["--out", "--artifact"]);
+  if (!flags.ok) return flags;
+  const artifact = required(flags.value, "--artifact");
+  if (!artifact.ok) return artifact;
+  const run = readRun(store);
+  if (!run.ok) return run;
+  const ledger = readLedger(store);
+  if (!ledger.ok) return ledger;
+
+  const admitted = admitArtifactNonce(ledger.value, artifact.value);
+  if (!admitted.ok) return failure(`nonce refused: ${describeRefusal(admitted.error)}`);
+  const { artifact: owned, coverageIds } = admitted.value;
+  const binding = bindSandboxRun({ target: run.value.target, runDir: store.out, owner: owned.owner, artifact: owned.path });
+  if (!binding.ok) return failure(`nonce refused: ${describeRefusal(binding.error)}`);
+  return success([
+    `nonce ${binding.value.nonce} for ${owned.path} (owner ${owned.owner}; in flight: ${coverageIds.join(", ")})`,
+    "",
+    renderSandboxInstructions(DEFAULT_SANDBOX_LIMITS, binding.value),
+  ].join("\n"));
 }
 
 /** Every `local` check's artifact must be a receipt of a run that stayed inside
@@ -580,45 +604,22 @@ function checkLocalReceipts(store: Store, results: readonly UnitResult[]): Domai
 }
 
 /**
- * Fold a hunter's filed findings into the run's, IDEMPOTENTLY, and consolidate.
+ * Settle a hunter's units and file its candidates.
  *
- * A filed record the run already holds verbatim (same fields, whatever their key
- * order) is kept once: a submit retried after a failed ledger write re-files
- * exactly the records the first attempt already wrote, and must converge rather
- * than be refused for a duplicate. A filed record whose fingerprint the run
- * already holds with DIFFERENT content is not merged either — consolidation
- * keeps the first record of a fingerprint — but it is NAMED in `superseded`, so
- * the hunter's later filing is reported rather than dropped without a word.
- *
- * One root cause, one record: two hunters describing one defect from different
- * entry points earn different fingerprints, and publishing both would hand
- * remediation two decisions for one defect. Consolidation runs BEFORE the final
- * parse, so the document that lands is the consolidated one.
+ * Every decision is a core's: the envelope is `parseHunterResult`'s, the receipt
+ * judgement the sandbox core's, the merge of filed records `fileCandidates`'s
+ * (a verbatim re-file converges; a re-filed fingerprint with different content
+ * is REFUSED), and each unit's settlement `recordUnitResult`'s. All of them run
+ * before the first write, so a refused submit leaves the run exactly as it was.
  */
-function fileFindings(
-  existing: readonly SecurityFinding[],
-  filed: readonly SecurityFinding[],
-): DomainResult<Readonly<{ records: readonly SecurityFinding[]; superseded: readonly string[] }>, string> {
-  const held = new Map(existing.map((finding) => [finding.fingerprint, finding]));
-  const fresh = filed.filter((finding) => !held.has(finding.fingerprint));
-  const superseded = filed
-    .filter((finding) => {
-      const prior = held.get(finding.fingerprint);
-      return prior !== undefined && !isDeepStrictEqual(prior, finding);
-    })
-    .map((finding) => finding.fingerprint);
-  const records = parseSecurityFindings(consolidateCandidates(sortByFingerprint([...existing, ...fresh])));
-  return records.ok
-    ? success({ records: records.value, superseded })
-    : failure(`filed findings are malformed —\n${describeRefusal(records.error)}`);
-}
-
 function runSubmit(store: Store, args: readonly string[], stdin: string): DomainResult<string, string> {
   const flags = parseFlags(args, ["--out"]);
   if (!flags.ok) return flags;
-  const parsed = submitPayload(stdin);
-  if (!parsed.ok) return parsed;
-  const { filed, results } = parsed.value;
+  const payload = parseJsonInput("submit", stdin);
+  if (!payload.ok) return payload;
+  const parsed = parseHunterResult(payload.value);
+  if (!parsed.ok) return failure(`submit input is not a ${HUNTER_RESULT_KIND} —\n${describeRefusal(parsed.error)}`);
+  const { units: results, findings: filed } = parsed.value;
   const run = openRun(store, "submit");
   if (!run.ok) return run;
   // A `local` check claims something OBSERVED, so its receipt is read and
@@ -633,54 +634,20 @@ function runSubmit(store: Store, args: readonly string[], stdin: string): Domain
   const existing = readFindings(store);
   if (!existing.ok) return existing;
 
+  const records = fileCandidates(existing.value, filed);
+  if (!records.ok) return failure(`filed findings refused —\n${describeRefusal(records.error)}`);
   const settlement = settleUnits(ledger.value, results);
   if (!settlement.ok) return settlement;
   const { ledger: next, settled } = settlement.value;
-  if (settled.length === 0 && filed.length === 0) return failure("submit carried neither unit results nor findings");
-  const findings = fileFindings(existing.value, filed);
-  if (!findings.ok) return findings;
-  const { records, superseded } = findings.value;
 
   // Findings FIRST, the ledger LAST. If the ledger write fails, the units are
   // still in flight and the findings are already on disk; the retried submit
   // settles them and re-files records the merge recognises, so it converges.
   // The other order lost the findings: the units were settled, and the retry
   // was refused because nothing was in flight any more.
-  for (const write of [() => store.write(FILES.findings, json(records)), () => store.write(FILES.ledger, json(next))]) {
-    const written = write();
-    if (!written.ok) return written;
-  }
-  return success([
-    `settled ${settled.length} unit(s); run now holds ${records.length} finding record(s)`,
-    ...superseded.map((fingerprint) =>
-      `kept the record already filed for ${fingerprint}; this submit's differing record for it was not merged`),
-  ].join("\n"));
-}
-
-/** The submit wire: an object with `units` and optional `findings`. Parsing is
- *  separate from settling, so a malformed wire never touches the ledger.
- *
- *  The findings DOCUMENT is sorted by fingerprint; a hunter's WIRE is its own
- *  filing order. The wire is sorted before parsing so a hunter is not refused
- *  for formatting, while duplicates still fail: the parser checks uniqueness
- *  after the sort. */
-function submitPayload(stdin: string): DomainResult<
-  Readonly<{ filed: readonly SecurityFinding[]; results: readonly UnitResult[] }>,
-  string
-> {
-  const payload = parseJsonInput("submit", stdin);
-  if (!payload.ok) return payload;
-  if (!isWireRecord(payload.value)) {
-    return failure("submit input must be an object with `units` and optional `findings`");
-  }
-  const results = parseUnitResults(payload.value.units ?? []);
-  if (!results.ok) return failure(describeRefusal(results.error));
-  const filed = payload.value.findings === undefined
-    ? success([])
-    : parseSecurityFindings(sortWireByFingerprint(payload.value.findings));
-  return filed.ok
-    ? success({ filed: filed.value, results: results.value })
-    : failure(describeRefusal(filed.error));
+  const written = writeInOrder([() => store.write(FILES.findings, json(records.value)), () => store.write(FILES.ledger, json(next))]);
+  if (!written.ok) return written;
+  return success(`settled ${settled.length} unit(s); run now holds ${records.value.length} finding record(s)`);
 }
 
 /** Settle every result against the ledger in memory; the caller persists once.
@@ -879,14 +846,12 @@ function runPublish(store: Store, args: readonly string[]): DomainResult<string,
   // Commit order: prose, then records, then `run.json` LAST. The `published`
   // flag is the commit point, so a write that fails part-way leaves the run
   // visibly unpublished rather than half-published.
-  for (const write of [
+  const written = writeInOrder([
     ...Object.entries(documents).map(([name, content]) => () => store.write(name, content)),
     () => store.write(FILES.published, json(records.value)),
     () => store.write(FILES.run, json(metadata)),
-  ]) {
-    const written = write();
-    if (!written.ok) return written;
-  }
+  ]);
+  if (!written.ok) return written;
   const confirmed = records.value.filter((finding) => finding.verdict === "confirmed").length;
   const leads = records.value.filter((finding) => finding.verdict === "needs_validation").length;
   return success([
@@ -1025,6 +990,7 @@ const matchOperation = (
   match(operation)
     .with("start", () => runStart(store, args, stdin))
     .with("assign", () => runAssign(store, args))
+    .with("nonce", () => runNonce(store, args))
     .with("submit", () => runSubmit(store, args, stdin))
     .with("defer", () => runDefer(store, args))
     .with("merge-critic", () => runMergeCritic(store, args, stdin))

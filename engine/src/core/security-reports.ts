@@ -21,7 +21,14 @@
 import type { SecurityRunMetadata } from "./security-audit-contract";
 import { summarizeCoverage, type CoverageLedger } from "./security-coverage";
 import { dispositionHandoffPaths, renderDispositionHandoff, securityDisposition } from "./security-disposition";
-import { sortByFingerprint, type ConfirmedFinding, type NeedsValidationFinding, type SecurityFinding } from "./security-findings";
+import {
+  sortByFingerprint,
+  type ConfirmedFinding,
+  type EvidenceEntry,
+  type NeedsValidationFinding,
+  type SecurityFinding,
+  type TraceStep,
+} from "./security-findings";
 
 export type ReportInput = Readonly<{
   metadata: SecurityRunMetadata;
@@ -77,6 +84,86 @@ const incompleteNotice = (metadata: SecurityRunMetadata): string =>
     ? `\n**Run status: incomplete — \`${metadata.incompleteReason}\`.** This is a partial pass: deferred and out-of-scope units are listed below and are not evidence of coverage.\n`
     : "";
 
+const confirmedTable = (confirmed: readonly ConfirmedFinding[], ledger: CoverageLedger): string =>
+  confirmed.length === 0
+    ? "_No confirmed findings._"
+    : [
+        "| Severity | Title | Boundary | Observed result |",
+        "|---|---|---|---|",
+        ...confirmed.map(
+          (finding) =>
+            `| ${finding.severity.overall_severity} | ${cell(finding.title)} | ${cell(boundaryOf(ledger, finding.fingerprint))} | ${cell(finding.execution.observed_result)} |`,
+        ),
+      ].join("\n");
+
+const confirmedSection = (finding: ConfirmedFinding, index: number): string =>
+  [
+    `### ${index + 1}. ${finding.title} (${finding.severity.overall_severity})`,
+    "",
+    `- Fingerprint: \`${finding.fingerprint}\``,
+    `- Confirmed by bounded local result; confidence ${finding.confidence.score} — ${finding.confidence.reason}`,
+    `- Root cause: ${finding.root_cause}`,
+    `- Intended behavior: ${finding.intended_behavior}`,
+    `- Attacker: ${finding.execution.attacker_perspective}`,
+    `- Observed result: ${finding.execution.observed_result}`,
+    `- Likelihood: ${finding.severity.likelihood.score} — ${finding.severity.likelihood.reason}`,
+    `- Impact: ${finding.severity.impact.score} — ${finding.severity.impact.reason}`,
+    `- Smallest effective fix: ${finding.remediation.strategy}`,
+    "",
+    "Trace:",
+    ...finding.trace.map((step) => `- ${step.kind} ${step.file}:${step.line} (${step.scope}) — ${step.description}`),
+  ].join("\n");
+
+const needsValidationTable = (needsValidation: readonly NeedsValidationFinding[], ledger: CoverageLedger): string =>
+  needsValidation.length === 0
+    ? "_No unresolved leads._"
+    : [
+        "| Lead | Boundary | Exact blocker |",
+        "|---|---|---|",
+        ...needsValidation.map(
+          (finding) =>
+            `| ${cell(finding.title)} | ${cell(boundaryOf(ledger, finding.fingerprint))} | ${cell(finding.blockers.join("; "))} |`,
+        ),
+      ].join("\n");
+
+const deferredSection = (ledger: CoverageLedger): string => {
+  const deferred = ledger.filter((unit) => unit.status === "deferred" || unit.status === "out_of_scope");
+  return deferred.length === 0
+    ? "_No deferred or out-of-scope units._"
+    : deferred.map((unit) => `- \`${unit.coverage_id}\` (${unit.status}): ${unit.unresolved.join("; ")}`).join("\n");
+};
+
+/** The run's identifying header lines, ending on the incomplete-run notice. */
+const runHeader = (metadata: SecurityRunMetadata): readonly string[] => [
+  `# Security audit — ${metadata.repo}`,
+  "",
+  `- Profile: ${metadata.profile}`,
+  `- Scope: ${scopeLine(metadata)}`,
+  `- Source ref: ${metadata.sourceRef.commit}${metadata.sourceRef.worktreeDirty ? " (dirty worktree — generated or modified files are not part of the reviewed revision)" : ""}`,
+  `- Budget: ${metadata.budget === null ? "unset" : `${metadata.budget} agent invocations`}`,
+  `- Execution policy: ${metadata.executionPolicy}`,
+  `- Prior runs read: ${metadata.priorRuns.length === 0 ? "none" : metadata.priorRuns.join(", ")}`,
+  `- Selected lenses: ${metadata.selectedCompanions.join(", ") || "ATTACK-CLASSES.md"}`,
+  incompleteNotice(metadata),
+];
+
+const hardeningNotes = (hardening: readonly string[] | undefined): string =>
+  hardening === undefined || hardening.length === 0
+    ? "_None recorded._"
+    : hardening.map((note) => `- ${note}`).join("\n");
+
+/** The final coverage critic's verdict, quoted as-is. */
+const criticVerdict = (criticStop: boolean | null | undefined): string => {
+  if (criticStop === true) return "reported no remaining work";
+  if (criticStop === false) return "reported remaining work";
+  return "not run";
+};
+
+const rejectedNote = (rejected: readonly SecurityFinding[]): string =>
+  rejected.length === 0
+    ? ""
+    : `Rejected claims (retained so a later run must bring changed evidence): ${rejected.map((finding) => `\`${finding.fingerprint}\``).join(", ")}.`;
+
 /** `REPORT.md` — the reader-facing summary. */
 export function renderReport(input: ReportInput): string {
   const { metadata, ledger, findings } = input;
@@ -85,66 +172,8 @@ export function renderReport(input: ReportInput): string {
   const rejected = rejectedOf(findings);
   const summary = summarizeCoverage(ledger);
 
-  const confirmedTable =
-    confirmed.length === 0
-      ? "_No confirmed findings._"
-      : [
-          "| Severity | Title | Boundary | Observed result |",
-          "|---|---|---|---|",
-          ...confirmed.map(
-            (finding) =>
-              `| ${finding.severity.overall_severity} | ${cell(finding.title)} | ${cell(boundaryOf(ledger, finding.fingerprint))} | ${cell(finding.execution.observed_result)} |`,
-          ),
-        ].join("\n");
-
-  const findingSections = confirmed.map((finding, index) =>
-    [
-      `### ${index + 1}. ${finding.title} (${finding.severity.overall_severity})`,
-      "",
-      `- Fingerprint: \`${finding.fingerprint}\``,
-      `- Confirmed by bounded local result; confidence ${finding.confidence.score} — ${finding.confidence.reason}`,
-      `- Root cause: ${finding.root_cause}`,
-      `- Intended behavior: ${finding.intended_behavior}`,
-      `- Attacker: ${finding.execution.attacker_perspective}`,
-      `- Observed result: ${finding.execution.observed_result}`,
-      `- Likelihood: ${finding.severity.likelihood.score} — ${finding.severity.likelihood.reason}`,
-      `- Impact: ${finding.severity.impact.score} — ${finding.severity.impact.reason}`,
-      `- Smallest effective fix: ${finding.remediation.strategy}`,
-      "",
-      "Trace:",
-      ...finding.trace.map((step) => `- ${step.kind} ${step.file}:${step.line} (${step.scope}) — ${step.description}`),
-    ].join("\n"),
-  );
-
-  const needsValidationTable =
-    needsValidation.length === 0
-      ? "_No unresolved leads._"
-      : [
-          "| Lead | Boundary | Exact blocker |",
-          "|---|---|---|",
-          ...needsValidation.map(
-            (finding) =>
-              `| ${cell(finding.title)} | ${cell(boundaryOf(ledger, finding.fingerprint))} | ${cell(finding.blockers.join("; "))} |`,
-          ),
-        ].join("\n");
-
-  const deferred = ledger.filter((unit) => unit.status === "deferred" || unit.status === "out_of_scope");
-  const deferredSection =
-    deferred.length === 0
-      ? "_No deferred or out-of-scope units._"
-      : deferred.map((unit) => `- \`${unit.coverage_id}\` (${unit.status}): ${unit.unresolved.join("; ")}`).join("\n");
-
   return [
-    `# Security audit — ${metadata.repo}`,
-    "",
-    `- Profile: ${metadata.profile}`,
-    `- Scope: ${scopeLine(metadata)}`,
-    `- Source ref: ${metadata.sourceRef.commit}${metadata.sourceRef.worktreeDirty ? " (dirty worktree — generated or modified files are not part of the reviewed revision)" : ""}`,
-    `- Budget: ${metadata.budget === null ? "unset" : `${metadata.budget} agent invocations`}`,
-    `- Execution policy: ${metadata.executionPolicy}`,
-    `- Prior runs read: ${metadata.priorRuns.length === 0 ? "none" : metadata.priorRuns.join(", ")}`,
-    `- Selected lenses: ${metadata.selectedCompanions.join(", ") || "ATTACK-CLASSES.md"}`,
-    incompleteNotice(metadata),
+    ...runHeader(metadata),
     "## Security posture",
     "",
     `${confirmed.length} confirmed, ${needsValidation.length} needing validation, ${rejected.length} rejected. ` +
@@ -152,32 +181,28 @@ export function renderReport(input: ReportInput): string {
     "",
     "## Confirmed findings",
     "",
-    confirmedTable,
+    confirmedTable(confirmed, ledger),
     "",
-    ...findingSections.flatMap((section) => [section, ""]),
+    ...confirmed.map(confirmedSection).flatMap((section) => [section, ""]),
     "## Needs validation",
     "",
-    needsValidationTable,
+    needsValidationTable(needsValidation, ledger),
     "",
     "## Hardening notes and positive patterns",
     "",
-    input.hardening === undefined || input.hardening.length === 0
-      ? "_None recorded._"
-      : input.hardening.map((note) => `- ${note}`).join("\n"),
+    hardeningNotes(input.hardening),
     "",
     "## Coverage",
     "",
     coverageTable(ledger),
     "",
-    `Final coverage critic: ${input.criticStop === true ? "reported no remaining work" : input.criticStop === false ? "reported remaining work" : "not run"}.`,
+    `Final coverage critic: ${criticVerdict(input.criticStop)}.`,
     "",
     "Deferred and out-of-scope units:",
     "",
-    deferredSection,
+    deferredSection(ledger),
     "",
-    rejected.length === 0
-      ? ""
-      : `Rejected claims (retained so a later run must bring changed evidence): ${rejected.map((finding) => `\`${finding.fingerprint}\``).join(", ")}.`,
+    rejectedNote(rejected),
     "",
     handoffSection(input),
   ].join("\n");
@@ -201,6 +226,73 @@ function handoffSection(input: ReportInput): string {
   return renderDispositionHandoff(derived.value, paths);
 }
 
+/** A trace as the numbered list both detail documents print. */
+const traceLines = (trace: readonly TraceStep[]): readonly string[] =>
+  trace.map((step) => `1. \`${step.kind}\` ${step.file}:${step.line} — ${step.scope}: ${step.description}`);
+
+/** Evidence as the bullet list both detail documents print. */
+const evidenceLines = (evidence: readonly EvidenceEntry[]): readonly string[] =>
+  evidence.map((entry) => `- ${entry.file}:${entry.line} — ${entry.description}`);
+
+const reproductionLines = (finding: ConfirmedFinding): readonly string[] => [
+  "### Reproduction",
+  "",
+  `Attacker: ${finding.execution.attacker_perspective}`,
+  "",
+  "Input:",
+  "",
+  ...finding.execution.payloads.map((payload) => `    ${payload}`),
+  "",
+  "Steps:",
+  "",
+  ...finding.execution.instructions.map((instruction) => `1. ${instruction}`),
+  "",
+  `Observed result: ${finding.execution.observed_result}`,
+];
+
+const fixLines = (finding: ConfirmedFinding): readonly string[] => [
+  "### Fix",
+  "",
+  finding.remediation.strategy,
+  "",
+  ...(finding.remediation.code_changes === undefined
+    ? []
+    : [
+        "Changed files:",
+        "",
+        ...finding.remediation.code_changes.map(
+          (change) => `- \`${change.file_name}\`\n\n\`\`\`\n${change.fixed_code}\n\`\`\``,
+        ),
+        "",
+      ]),
+];
+
+const findingDetail = (finding: ConfirmedFinding, index: number): readonly string[] => [
+  `## ${index + 1}. ${finding.title}`,
+  "",
+  `Fingerprint: \`${finding.fingerprint}\` — severity ${finding.severity.overall_severity}.`,
+  "",
+  finding.description,
+  "",
+  "### Trace",
+  "",
+  ...traceLines(finding.trace),
+  "",
+  "### Evidence",
+  "",
+  ...evidenceLines(finding.evidence),
+  "",
+  ...reproductionLines(finding),
+  "",
+  "### Conditions",
+  "",
+  finding.conditions.length === 0
+    ? "_None beyond the demonstrated path._"
+    : finding.conditions.map((condition) => `- ${condition.kind}: ${condition.description}`).join("\n"),
+  "",
+  ...fixLines(finding),
+];
+
 /** `FINDINGS-DETAIL.md` — full traces and reproductions for medium and above. */
 export function renderFindingsDetail(input: ReportInput): string {
   const detail = confirmedOf(input.findings).filter(
@@ -211,56 +303,7 @@ export function renderFindingsDetail(input: ReportInput): string {
   return [
     `# Findings detail — ${input.metadata.repo}`,
     "",
-    ...detail.flatMap((finding, index) => [
-      `## ${index + 1}. ${finding.title}`,
-      "",
-      `Fingerprint: \`${finding.fingerprint}\` — severity ${finding.severity.overall_severity}.`,
-      "",
-      finding.description,
-      "",
-      "### Trace",
-      "",
-      ...finding.trace.map((step) => `1. \`${step.kind}\` ${step.file}:${step.line} — ${step.scope}: ${step.description}`),
-      "",
-      "### Evidence",
-      "",
-      ...finding.evidence.map((entry) => `- ${entry.file}:${entry.line} — ${entry.description}`),
-      "",
-      "### Reproduction",
-      "",
-      `Attacker: ${finding.execution.attacker_perspective}`,
-      "",
-      "Input:",
-      "",
-      ...finding.execution.payloads.map((payload) => `    ${payload}`),
-      "",
-      "Steps:",
-      "",
-      ...finding.execution.instructions.map((instruction) => `1. ${instruction}`),
-      "",
-      `Observed result: ${finding.execution.observed_result}`,
-      "",
-      "### Conditions",
-      "",
-      finding.conditions.length === 0
-        ? "_None beyond the demonstrated path._"
-        : finding.conditions.map((condition) => `- ${condition.kind}: ${condition.description}`).join("\n"),
-      "",
-      "### Fix",
-      "",
-      finding.remediation.strategy,
-      "",
-      ...(finding.remediation.code_changes === undefined
-        ? []
-        : [
-            "Changed files:",
-            "",
-            ...finding.remediation.code_changes.map(
-              (change) => `- \`${change.file_name}\`\n\n\`\`\`\n${change.fixed_code}\n\`\`\``,
-            ),
-            "",
-          ]),
-    ]),
+    ...detail.flatMap(findingDetail),
   ].join("\n");
 }
 
@@ -285,11 +328,11 @@ export function renderNeedsValidation(input: ReportInput): string {
       "",
       "Trace:",
       "",
-      ...finding.trace.map((step) => `1. \`${step.kind}\` ${step.file}:${step.line} — ${step.scope}: ${step.description}`),
+      ...traceLines(finding.trace),
       "",
       "Evidence:",
       "",
-      ...finding.evidence.map((entry) => `- ${entry.file}:${entry.line} — ${entry.description}`),
+      ...evidenceLines(finding.evidence),
       "",
       "Blockers:",
       "",

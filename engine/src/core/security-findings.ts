@@ -165,6 +165,9 @@ function canonicalKey(value: unknown): string {
 const isVisible = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && hasVisibleProse(value);
 
+const isPositiveInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value >= 1;
+
 const isOneOf = <T extends string>(values: readonly T[], value: unknown): value is T =>
   typeof value === "string" && (values as readonly string[]).includes(value);
 
@@ -202,6 +205,21 @@ function checkUniqueArray(value: unknown, path: string, violations: FindingViola
   }
 }
 
+/** A unique array whose every entry must also pass `valid`: the array rule
+ *  first, then one violation per failing entry, at its own index. */
+function checkUniqueEntries(
+  value: unknown,
+  path: string,
+  violations: FindingViolation[],
+  entry: Readonly<{ minimum: number; valid: (item: unknown) => boolean; message: string }>,
+): void {
+  checkUniqueArray(value, path, violations, entry.minimum);
+  if (!Array.isArray(value)) return;
+  value.forEach((item, index) => {
+    if (!entry.valid(item)) violations.push(wireViolation(`${path}[${index}]`, entry.message));
+  });
+}
+
 function checkTrace(value: unknown, path: string, violations: FindingViolation[]): void {
   checkUniqueArray(value, path, violations, 1);
   if (!Array.isArray(value)) return;
@@ -214,7 +232,7 @@ function checkTrace(value: unknown, path: string, violations: FindingViolation[]
     checkKeys(entry, ["kind", "file", "line", "scope", "description"], ["kind", "file", "line", "scope", "description"], base, violations);
     if (!isOneOf(TRACE_KINDS, entry.kind)) violations.push(wireViolation(`${base}.kind`, "expected entrypoint, propagation or sink"));
     if (!isSafeSourcePath(entry.file)) violations.push(wireViolation(`${base}.file`, "expected a repository-relative source path"));
-    if (!Number.isInteger(entry.line) || (entry.line as number) < 1) violations.push(wireViolation(`${base}.line`, "expected a positive integer"));
+    if (!isPositiveInteger(entry.line)) violations.push(wireViolation(`${base}.line`, "expected a positive integer"));
     checkVisible(entry, "scope", base, violations);
     checkVisible(entry, "description", base, violations);
   });
@@ -250,7 +268,7 @@ function checkEvidence(value: unknown, path: string, violations: FindingViolatio
     }
     checkKeys(entry, ["file", "line", "description"], ["file", "line", "description"], base, violations);
     if (!isSafeSourcePath(entry.file)) violations.push(wireViolation(`${base}.file`, "expected a repository-relative source path"));
-    if (!Number.isInteger(entry.line) || (entry.line as number) < 1) violations.push(wireViolation(`${base}.line`, "expected a positive integer"));
+    if (!isPositiveInteger(entry.line)) violations.push(wireViolation(`${base}.line`, "expected a positive integer"));
     checkVisible(entry, "description", base, violations);
   });
 }
@@ -291,81 +309,72 @@ function checkConfirmed(record: Readonly<Record<string, unknown>>, path: string,
   checkTrace(record.trace, `${path}.trace`, violations);
   checkEvidence(record.evidence, `${path}.evidence`, violations);
   checkConditions(record.conditions, `${path}.conditions`, violations);
+  checkExecution(record.execution, `${path}.execution`, violations);
+  checkRemediation(record.remediation, `${path}.remediation`, violations);
+  checkSeverity(record.severity, `${path}.severity`, violations);
+  checkScoredReason(record.confidence, `${path}.confidence`, CONFIDENCE_SCORES, violations);
+}
 
-  const execution = record.execution;
+/** The bounded run that demonstrated the result: who attacked, with what, how,
+ *  and what was observed. */
+function checkExecution(execution: unknown, path: string, violations: FindingViolation[]): void {
   if (!isWireRecord(execution)) {
-    violations.push(wireViolation(`${path}.execution`, "expected an object"));
-  } else {
-    checkKeys(
-      execution,
-      ["attacker_perspective", "payloads", "instructions", "observed_result"],
-      ["attacker_perspective", "payloads", "instructions", "observed_result"],
-      `${path}.execution`,
-      violations,
-    );
-    checkVisible(execution, "attacker_perspective", `${path}.execution`, violations);
-    checkVisible(execution, "observed_result", `${path}.execution`, violations);
-    checkUniqueArray(execution.payloads, `${path}.execution.payloads`, violations, 1);
-    if (Array.isArray(execution.payloads)) {
-      execution.payloads.forEach((payload, index) => {
-        if (typeof payload !== "string") violations.push(wireViolation(`${path}.execution.payloads[${index}]`, "expected a string"));
-      });
-    }
-    checkUniqueArray(execution.instructions, `${path}.execution.instructions`, violations, 1);
-    if (Array.isArray(execution.instructions)) {
-      execution.instructions.forEach((instruction, index) => {
-        if (!isVisible(instruction)) violations.push(wireViolation(`${path}.execution.instructions[${index}]`, "expected visible prose"));
-      });
-    }
+    violations.push(wireViolation(path, "expected an object"));
+    return;
   }
+  const keys = ["attacker_perspective", "payloads", "instructions", "observed_result"];
+  checkKeys(execution, keys, keys, path, violations);
+  checkVisible(execution, "attacker_perspective", path, violations);
+  checkVisible(execution, "observed_result", path, violations);
+  checkUniqueEntries(execution.payloads, `${path}.payloads`, violations,
+    { minimum: 1, valid: (payload) => typeof payload === "string", message: "expected a string" });
+  checkUniqueEntries(execution.instructions, `${path}.instructions`, violations,
+    { minimum: 1, valid: isVisible, message: "expected visible prose" });
+}
 
-  const remediation = record.remediation;
+/** The fix strategy, with optional code changes that each name a safe file. */
+function checkRemediation(remediation: unknown, path: string, violations: FindingViolation[]): void {
   if (!isWireRecord(remediation)) {
-    violations.push(wireViolation(`${path}.remediation`, "expected an object"));
-  } else {
-    checkKeys(remediation, ["strategy", "code_changes"], ["strategy"], `${path}.remediation`, violations);
-    checkVisible(remediation, "strategy", `${path}.remediation`, violations);
-    if ("code_changes" in remediation) {
-      const changes = remediation.code_changes;
-      if (!Array.isArray(changes)) {
-        violations.push(wireViolation(`${path}.remediation.code_changes`, "expected an array"));
-      } else {
-        changes.forEach((change, index) => {
-          const base = `${path}.remediation.code_changes[${index}]`;
-          if (!isWireRecord(change)) {
-            violations.push(wireViolation(base, "expected an object"));
-            return;
-          }
-          checkKeys(change, ["file_name", "fixed_code"], ["file_name", "fixed_code"], base, violations);
-          if (!isSafeSourcePath(change.file_name)) violations.push(wireViolation(`${base}.file_name`, "expected a repository-relative source path"));
-          if (typeof change.fixed_code !== "string") violations.push(wireViolation(`${base}.fixed_code`, "expected a string"));
-        });
-      }
-    }
+    violations.push(wireViolation(path, "expected an object"));
+    return;
   }
+  checkKeys(remediation, ["strategy", "code_changes"], ["strategy"], path, violations);
+  checkVisible(remediation, "strategy", path, violations);
+  if (!("code_changes" in remediation)) return;
+  const changes = remediation.code_changes;
+  if (!Array.isArray(changes)) {
+    violations.push(wireViolation(`${path}.code_changes`, "expected an array"));
+    return;
+  }
+  changes.forEach((change, index) => {
+    const base = `${path}.code_changes[${index}]`;
+    if (!isWireRecord(change)) {
+      violations.push(wireViolation(base, "expected an object"));
+      return;
+    }
+    checkKeys(change, ["file_name", "fixed_code"], ["file_name", "fixed_code"], base, violations);
+    if (!isSafeSourcePath(change.file_name)) violations.push(wireViolation(`${base}.file_name`, "expected a repository-relative source path"));
+    if (typeof change.fixed_code !== "string") violations.push(wireViolation(`${base}.fixed_code`, "expected a string"));
+  });
+}
 
-  const severity = record.severity;
+/** Likelihood and impact with reasons, and an overall severity that never
+ *  exceeds the demonstrated impact. */
+function checkSeverity(severity: unknown, path: string, violations: FindingViolation[]): void {
   if (!isWireRecord(severity)) {
-    violations.push(wireViolation(`${path}.severity`, "expected an object"));
-  } else {
-    checkKeys(severity, ["likelihood", "impact", "overall_severity"], ["likelihood", "impact", "overall_severity"], `${path}.severity`, violations);
-    checkScoredReason(severity.likelihood, `${path}.severity.likelihood`, SEVERITY_SCORES, violations);
-    checkScoredReason(severity.impact, `${path}.severity.impact`, SEVERITY_SCORES, violations);
-    if (!isOneOf(SEVERITY_SCORES, severity.overall_severity)) {
-      violations.push(wireViolation(`${path}.severity.overall_severity`, `expected one of ${SEVERITY_SCORES.join(", ")}`));
-    } else {
-      const impact = isWireRecord(severity.impact) && isOneOf(SEVERITY_SCORES, severity.impact.score) ? severity.impact.score : null;
-      if (impact !== null && SEVERITY_RANK[severity.overall_severity] > SEVERITY_RANK[impact]) {
-        violations.push(wireViolation(`${path}.severity.overall_severity`, `cannot exceed demonstrated impact ${impact}`));
-      }
-    }
+    violations.push(wireViolation(path, "expected an object"));
+    return;
   }
-
-  const confidence = record.confidence;
-  if (!isWireRecord(confidence)) {
-    violations.push(wireViolation(`${path}.confidence`, "expected an object"));
-  } else {
-    checkScoredReason(confidence, `${path}.confidence`, CONFIDENCE_SCORES, violations);
+  checkKeys(severity, ["likelihood", "impact", "overall_severity"], ["likelihood", "impact", "overall_severity"], path, violations);
+  checkScoredReason(severity.likelihood, `${path}.likelihood`, SEVERITY_SCORES, violations);
+  checkScoredReason(severity.impact, `${path}.impact`, SEVERITY_SCORES, violations);
+  if (!isOneOf(SEVERITY_SCORES, severity.overall_severity)) {
+    violations.push(wireViolation(`${path}.overall_severity`, `expected one of ${SEVERITY_SCORES.join(", ")}`));
+    return;
+  }
+  const impact = isWireRecord(severity.impact) && isOneOf(SEVERITY_SCORES, severity.impact.score) ? severity.impact.score : null;
+  if (impact !== null && SEVERITY_RANK[severity.overall_severity] > SEVERITY_RANK[impact]) {
+    violations.push(wireViolation(`${path}.overall_severity`, `cannot exceed demonstrated impact ${impact}`));
   }
 }
 
@@ -376,12 +385,8 @@ function checkNeedsValidation(record: Readonly<Record<string, unknown>>, path: s
   for (const key of ["title", "description", "claimed_root_cause"]) checkVisible(record, key, path, violations);
   checkTrace(record.trace, `${path}.trace`, violations);
   checkEvidence(record.evidence, `${path}.evidence`, violations);
-  checkUniqueArray(record.blockers, `${path}.blockers`, violations, 1);
-  if (Array.isArray(record.blockers)) {
-    record.blockers.forEach((blocker, index) => {
-      if (!isVisible(blocker)) violations.push(wireViolation(`${path}.blockers[${index}]`, "expected visible prose"));
-    });
-  }
+  checkUniqueEntries(record.blockers, `${path}.blockers`, violations,
+    { minimum: 1, valid: isVisible, message: "expected visible prose" });
   const plan = record.validation_plan;
   if (!isWireRecord(plan)) {
     violations.push(wireViolation(`${path}.validation_plan`, "expected an object"));
@@ -553,6 +558,59 @@ export function consolidateCandidates<T extends SecurityFinding>(candidates: rea
     if (existing === undefined || outranks(candidate, existing)) byRootCause.set(key, candidate);
   }
   return [...byRootCause.values()].sort((left, right) => compareStrings(left.fingerprint, right.fingerprint));
+}
+
+// --- Filing ---
+
+/** A submit re-filed fingerprints the run already holds, with different
+ *  content. Every conflicting fingerprint is named, so one correction fixes the
+ *  whole submit. */
+export type FindingConflict = Readonly<{
+  kind: "conflicting-refiling";
+  fingerprints: readonly string[];
+  message: string;
+}>;
+
+export type FilingRefusal = FindingConflict | FindingsError;
+
+/**
+ * Fold a hunter's filed records into the run's candidates, then consolidate.
+ *
+ * - A filed record the run already holds VERBATIM (same fields, whatever their
+ *   key order) is kept once: a submit retried after a failed ledger write
+ *   re-files exactly what the first attempt wrote, and must converge rather than
+ *   be refused for a duplicate.
+ * - A filed record whose fingerprint the run already holds with DIFFERENT
+ *   content is REFUSED, naming every such fingerprint. The run's record is the
+ *   one verification adjudicates; keeping it while dropping the new one would
+ *   lose a hunter's claim without a word, and replacing it would let a later
+ *   filing rewrite a claim a verifier may already have balloted.
+ *
+ * One root cause, one record: consolidation runs before the final parse, so the
+ * returned document is exactly what the run will hold.
+ */
+export function fileCandidates(
+  existing: readonly SecurityFinding[],
+  filed: readonly SecurityFinding[],
+): DomainResult<readonly SecurityFinding[], FilingRefusal> {
+  const held = new Map(existing.map((finding) => [finding.fingerprint, canonicalKey(finding)]));
+  const conflicts = filed
+    .filter((finding) => {
+      const prior = held.get(finding.fingerprint);
+      return prior !== undefined && prior !== canonicalKey(finding);
+    })
+    .map((finding) => finding.fingerprint);
+  if (conflicts.length > 0) {
+    return failure({
+      kind: "conflicting-refiling" as const,
+      fingerprints: conflicts,
+      message:
+        `the run already holds a different record for ${conflicts.join(", ")} — omit ${conflicts.length === 1 ? "it" : "them"} ` +
+        "from this submit, or re-file byte-identical; verification adjudicates the record the run already holds",
+    });
+  }
+  const fresh = filed.filter((finding) => !held.has(finding.fingerprint));
+  return parseSecurityFindings(consolidateCandidates(sortByFingerprint([...existing, ...fresh])));
 }
 
 /** The adjudication ballot: loom's two levels, with the five-level ladder kept

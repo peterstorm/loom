@@ -46,39 +46,40 @@ export function splitCommandSegmentsWithOps(command: string): readonly CommandSe
       current += char;
       continue;
     }
-    if (char === "&") {
-      if (command[index + 1] === "&") {
-        push("&&");
-        index++;
-        continue;
-      }
-      if (command[index + 1] === ">" || command[index - 1] === ">") {
-        current += char;
-        continue;
-      }
-      push("&");
-      continue;
-    }
-    if (char === "|") {
-      if (command[index + 1] === "|") {
-        push("||");
-        index++;
-      } else if (command[index + 1] === "&") {
-        push("|");
-        index++;
-      } else {
-        push("|");
-      }
-      continue;
-    }
-    if (char === ";" || char === "\n") {
-      push(";");
+    const separator = separatorAt(command, index);
+    if (separator !== null) {
+      push(separator.op);
+      index += separator.width - 1;
       continue;
     }
     current += char;
   }
   segments.push({ text: current, opBefore: pendingOp });
   return segments;
+}
+
+/** An unquoted separator and how many characters it spans. */
+type Separator = Readonly<{ op: SegmentOp; width: number }>;
+
+/**
+ * The separator starting at `index` of unquoted command text, or null when the
+ * character is ordinary — including an `&` that belongs to a `&>`/`>&` redirect.
+ * `|&` pipes stderr too, so it separates as `|` spanning two characters.
+ */
+function separatorAt(command: string, index: number): Separator | null {
+  const char = command[index];
+  const next = command[index + 1];
+  if (char === "&") {
+    if (next === "&") return { op: "&&", width: 2 };
+    if (next === ">" || command[index - 1] === ">") return null;
+    return { op: "&", width: 1 };
+  }
+  if (char === "|") {
+    if (next === "|") return { op: "||", width: 2 };
+    return { op: "|", width: next === "&" ? 2 : 1 };
+  }
+  if (char === ";" || char === "\n") return { op: ";", width: 1 };
+  return null;
 }
 
 /** Segment texts only, for callers that do not need exit-status ownership. */

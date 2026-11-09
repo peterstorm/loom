@@ -303,14 +303,45 @@ export type RpcBus = Readonly<{
   snapshot: () => readonly RpcEvent[];
 }>;
 
+type RpcWaiter = {
+  predicate: (event: RpcEvent) => boolean;
+  resolve: (event: RpcEvent) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout | null;
+};
+
+/** One non-blank stdout line: a JSON record the bus can match waiters
+ *  against, or a non-JSON line it only collects. */
+type ParsedRpcLine = Readonly<{ kind: "record" | "non-json"; event: RpcEvent }>;
+
+const parseRpcLine = (line: string): ParsedRpcLine => {
+  const nonJson = (): ParsedRpcLine => ({ kind: "non-json", event: { type: "__non_json__", line: line.slice(0, 160), receivedAt: Date.now() } });
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return nonJson();
+  }
+  const record = recordOf(parsed);
+  if (record === null) return nonJson();
+  return { kind: "record", event: { ...record, type: typeof record["type"] === "string" ? record["type"] : "__untyped__", receivedAt: Date.now() } };
+};
+
+/** Resolve (and drop) every pending waiter `event` satisfies, newest first. */
+const resolveMatchingWaiters = (waiters: RpcWaiter[], event: RpcEvent): void => {
+  for (let position = waiters.length - 1; position >= 0; position--) {
+    const waiter = waiters[position];
+    if (waiter !== undefined && waiter.predicate(event)) {
+      waiters.splice(position, 1);
+      if (waiter.timer !== null) clearTimeout(waiter.timer);
+      waiter.resolve(event);
+    }
+  }
+};
+
 const makeRpcBus = (stdout: NodeJS.ReadableStream): RpcBus => {
   const events: RpcEvent[] = [];
-  const waiters: {
-    predicate: (event: RpcEvent) => boolean;
-    resolve: (event: RpcEvent) => void;
-    reject: (error: Error) => void;
-    timer: NodeJS.Timeout | null;
-  }[] = [];
+  const waiters: RpcWaiter[] = [];
   let buffer = "";
   stdout.on("data", (chunk: Buffer) => {
     buffer += chunk.toString();
@@ -320,28 +351,9 @@ const makeRpcBus = (stdout: NodeJS.ReadableStream): RpcBus => {
       buffer = buffer.slice(index + 1);
       index = buffer.indexOf("\n");
       if (line.trim().length === 0) continue;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        events.push({ type: "__non_json__", line: line.slice(0, 160), receivedAt: Date.now() });
-        continue;
-      }
-      const record = recordOf(parsed);
-      if (record === null) {
-        events.push({ type: "__non_json__", line: line.slice(0, 160), receivedAt: Date.now() });
-        continue;
-      }
-      const event: RpcEvent = { ...record, type: typeof record["type"] === "string" ? record["type"] : "__untyped__", receivedAt: Date.now() };
-      events.push(event);
-      for (let position = waiters.length - 1; position >= 0; position--) {
-        const waiter = waiters[position];
-        if (waiter !== undefined && waiter.predicate(event)) {
-          waiters.splice(position, 1);
-          if (waiter.timer !== null) clearTimeout(waiter.timer);
-          waiter.resolve(event);
-        }
-      }
+      const parsed = parseRpcLine(line);
+      events.push(parsed.event);
+      if (parsed.kind === "record") resolveMatchingWaiters(waiters, parsed.event);
     }
   });
   return {
@@ -500,6 +512,39 @@ export type PiRpcChild = Readonly<{
   dispose: () => Promise<void>;
 }>;
 
+/** The child's request framing: each request gets the next `<idPrefix>-<n>` id
+ *  and waits, bounded, for its correlated response — the very first
+ *  `get_state` (the channel check) on CHANNEL_STARTUP_TIMEOUT_MS, every other
+ *  request on the runner's own budget. */
+const piRpcRequester = (
+  child: ChildProcess,
+  bus: RpcBus,
+  options: PiRpcChildOptions,
+  spawnError: () => Error | null,
+): PiRpcChild["rpcRequest"] => {
+  let rpcCallCounter = 0;
+  return async (message, label) => {
+    const stdin = child.stdin;
+    if (stdin === null || !stdin.writable) {
+      const cause = spawnError();
+      throw new Error(`the ${options.role}'s stdin is not writable for ${label}${cause === null ? "" : ` (spawn error: ${cause.message})`}`);
+    }
+    const id = `${options.idPrefix}-${++rpcCallCounter}`;
+    stdin.write(`${JSON.stringify({ ...message, id })}\n`);
+    return bus.waitFor((event) => event.type === "response" && event["id"] === id,
+      message["type"] === "get_state" && rpcCallCounter === 1 ? CHANNEL_STARTUP_TIMEOUT_MS : options.responseTimeoutMs, label);
+  };
+};
+
+/** Capture the child's stderr; the returned reader renders it bounded. */
+const capturedStderr = (child: ChildProcess): (() => string) => {
+  const stderrChunks: string[] = [];
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderrChunks.push(chunk.toString());
+  });
+  return () => boundDiagnosticMessage(stderrChunks.join("").trim());
+};
+
 /**
  * Spawn ONE real headless `pi --mode rpc` child and wire the launcher's view
  * of it: the strict JSONL bus over stdout, stderr capture, and the request
@@ -530,22 +575,8 @@ export const openPiRpcChild = (options: PiRpcChildOptions): PiRpcChild => {
     childExited = true;
     bus.failAll(`the ${options.role} exited (code ${code === null ? "none" : code}, signal ${signal === null ? "none" : signal}) while the launcher was observing it`);
   });
-  const stderrChunks: string[] = [];
-  child.stderr?.on("data", (chunk: Buffer) => {
-    stderrChunks.push(chunk.toString());
-  });
-  let rpcCallCounter = 0;
-  const rpcRequest = async (message: Record<string, unknown>, label: string): Promise<RpcEvent> => {
-    const stdin = child.stdin;
-    if (stdin === null || !stdin.writable) {
-      const cause: Error | null = spawnError;
-      throw new Error(`the ${options.role}'s stdin is not writable for ${label}${cause === null ? "" : ` (spawn error: ${cause.message})`}`);
-    }
-    const id = `${options.idPrefix}-${++rpcCallCounter}`;
-    stdin.write(`${JSON.stringify({ ...message, id })}\n`);
-    return bus.waitFor((event) => event.type === "response" && event["id"] === id,
-      message["type"] === "get_state" && rpcCallCounter === 1 ? CHANNEL_STARTUP_TIMEOUT_MS : options.responseTimeoutMs, label);
-  };
+  const stderr = capturedStderr(child);
+  const rpcRequest = piRpcRequester(child, bus, options, () => spawnError);
   const gone = (): boolean => spawnError !== null || childExited;
   const release = (): void => {
     if (releasedAt !== null) return;
@@ -560,7 +591,7 @@ export const openPiRpcChild = (options: PiRpcChildOptions): PiRpcChild => {
     assertAliveAfterWait: (error: unknown): void => {
       if (gone()) throw new Error(`the ${options.role} died during a bounded wait: ${boundedDiagnostic(error)}`);
     },
-    stderr: (): string => boundDiagnosticMessage(stderrChunks.join("").trim()),
+    stderr,
     release,
     releasedAt: (): number | null => releasedAt,
     dispose: async (): Promise<void> => {

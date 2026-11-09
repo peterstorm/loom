@@ -12,6 +12,7 @@
 import { describe, expect, it } from "vitest";
 import {
   consolidateCandidates,
+  fileCandidates,
   parseSecurityFindings,
   type ConfirmedFinding,
   type SecurityFinding,
@@ -91,5 +92,39 @@ describe("root-cause consolidation", () => {
     ]);
     const once = consolidateCandidates(set);
     expect(consolidateCandidates(once)).toEqual(once);
+  });
+});
+
+describe("filing a hunter's records into the run (fileCandidates)", () => {
+  const held = parse([aConfirmedFinding()]);
+
+  it("keeps one copy of a record re-filed verbatim, whatever its key order", () => {
+    const reordered = parse([Object.fromEntries(Object.entries(aConfirmedFinding()).reverse())]);
+    expect(ok(fileCandidates(held, reordered))).toEqual(held);
+  });
+
+  it("is idempotent: filing what the run holds converges on what it holds", () => {
+    const once = ok(fileCandidates([], held));
+    expect(ok(fileCandidates(once, held))).toEqual(once);
+  });
+
+  it("adds a fresh record and returns the document sorted and consolidated", () => {
+    const fresh = parse([aNeedsValidationFinding({ fingerprint: "a/earlier", trace: trace(90) })]);
+    expect(ok(fileCandidates(held, fresh)).map((finding) => finding.fingerprint)).toEqual(["a/earlier", "api/login:sqli-email"]);
+  });
+
+  it("refuses a held fingerprint re-filed with different content, naming every conflict", () => {
+    const heldTwo = parse([aConfirmedFinding(), aConfirmedFinding({ fingerprint: "z/other", trace: trace(77), root_cause: "Unescaped HTML." })]);
+    const refiled = parse([
+      aConfirmedFinding({ title: "A different title for the same defect" }),
+      aNeedsValidationFinding({ fingerprint: "m/fresh", trace: trace(91) }),
+      aConfirmedFinding({ fingerprint: "z/other", trace: trace(77), root_cause: "Unescaped HTML.", title: "Retitled" }),
+    ]);
+    const refused = fileCandidates(heldTwo, refiled);
+    expect(refused.ok).toBe(false);
+    if (refused.ok || refused.error.kind !== "conflicting-refiling") throw new Error("expected a re-filing conflict");
+    expect(refused.error.fingerprints).toEqual(["api/login:sqli-email", "z/other"]);
+    expect(refused.error.message).toContain("the run already holds a different record for api/login:sqli-email, z/other");
+    expect(refused.error.message).toContain("verification adjudicates the record the run already holds");
   });
 });

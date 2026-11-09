@@ -122,16 +122,20 @@ function parseOptionalPositiveInt(
   return raw;
 }
 
+function parseOptionalBoundaries(raw: unknown, filePath: string): BoundaryRule[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    throw new Error(`${filePath}: 'boundaries' must be an array`);
+  }
+  return raw.map((b, i) => parseBoundary(b, filePath, i));
+}
+
 function parseConfig(obj: Record<string, unknown>, filePath: string): ProgrammaticConfig {
   // Mutable while assembling; returned as the readonly ProgrammaticConfig
   const config: { -readonly [K in keyof ProgrammaticConfig]?: ProgrammaticConfig[K] } = {};
 
-  if (obj.boundaries !== undefined) {
-    if (!Array.isArray(obj.boundaries)) {
-      throw new Error(`${filePath}: 'boundaries' must be an array`);
-    }
-    config.boundaries = obj.boundaries.map((b, i) => parseBoundary(b, filePath, i));
-  }
+  const boundaries = parseOptionalBoundaries(obj.boundaries, filePath);
+  if (boundaries !== undefined) config.boundaries = boundaries;
 
   const pureModules = parseOptionalStringArray(obj.pureModules, filePath, "pureModules");
   if (pureModules !== undefined) config.pureModules = pureModules;

@@ -26,7 +26,7 @@ import { SECURITY_AUDIT_LIMITS, type SecurityRunMetadata } from "../../src/core/
 import type { CoverageUnit } from "../../src/core/security-coverage";
 import type { SecurityFinding } from "../../src/core/security-findings";
 import type { VerificationVerdict } from "../../src/core/security-adjudication";
-import { aConfirmedFinding, aHunterBallot, aNeedsValidationFinding, aSeed, aUnitResult, aVerdict, nSeeds } from "../security/fixtures";
+import { HUNTER_ENVELOPE, aConfirmedFinding, aHunterBallot, aNeedsValidationFinding, aSeed, aUnitResult, aVerdict, nSeeds } from "../security/fixtures";
 import { aRun, readJson, removeRuns, seedFor, unitIdFor, type Run } from "./security-audit-harness";
 
 afterEach(removeRuns);
@@ -64,7 +64,16 @@ describe("the operation set", () => {
       .filter(([, traits]) => traits.runtimeSkew === "available")
       .map(([operation]) => operation)
       .sort();
-    expect(available).toEqual(["findings", "status"]);
+    expect(available).toEqual(["findings", "nonce", "status"]);
+  });
+
+  it("declares nonce read-only and flags-only: it prints a binding, it never moves the run", () => {
+    expect(SECURITY_AUDIT_OPERATIONS.nonce).toEqual({ input: "flags", runtimeSkew: "available" });
+    expect(securityAuditOperationWrites("nonce")).toBe(false);
+    expect(routeConsumesStdin("helper", "security-audit", ["nonce"])).toBe(false);
+    expect(piRuntimeHandshakeRequired("helper", "security-audit", ["nonce"])).toBe(false);
+    // In the order a run performs it: after the unit is assigned, before it settles.
+    expect(SECURITY_AUDIT_OPERATION_ORDER.indexOf("nonce")).toBe(SECURITY_AUDIT_OPERATION_ORDER.indexOf("assign") + 1);
   });
 });
 
@@ -90,7 +99,7 @@ describe("a full run", () => {
     expect(assigned.status).toBe("in_progress");
     expect(assigned.agent_id).toBe("security-hunter-agent");
 
-    const submitted = await run.invoke(["submit"], JSON.stringify({
+    const submitted = await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE,
       units: [aUnitResult({ coverageId: unitIdFor(0), status: "candidate", fingerprints: ["api/login:sqli-email"] })],
       findings: [aConfirmedFinding()],
     }));
@@ -172,7 +181,7 @@ describe("coverage settlement", () => {
     const run = aRun();
     await run.invoke(["start", "--repo", run.out, "--source", "0".repeat(40)], JSON.stringify({ units: [seedFor(0)] }));
     await run.invoke(["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"]);
-    const wrong = await run.invoke(["submit"], JSON.stringify({
+    const wrong = await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE,
       units: [aUnitResult({ coverageId: unitIdFor(0), agentId: "security-critic-agent" })],
     }));
     expect(wrong.ok).toBe(false);
@@ -192,7 +201,7 @@ describe("adjudication", () => {
   const seedAndSubmitClaim = async (run: Run) => {
     await run.invoke(["start", "--repo", run.out, "--source", "0".repeat(40), "--profile", "standard"], JSON.stringify({ units: [seedFor(0)] }));
     await run.invoke(["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"]);
-    await run.invoke(["submit"], JSON.stringify({
+    await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE,
       units: [aUnitResult({ coverageId: unitIdFor(0), status: "candidate", fingerprints: ["api/login:sqli-email"] })],
       findings: [aConfirmedFinding()],
     }));
@@ -255,7 +264,7 @@ describe("adjudication", () => {
     const run = aRun();
     await run.invoke(["start", "--repo", run.out, "--source", "0".repeat(40), "--profile", "standard"], JSON.stringify({ units: [seedFor(0)] }));
     await run.invoke(["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"]);
-    const submitted = await run.invoke(["submit"], JSON.stringify({
+    const submitted = await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE,
       units: [aUnitResult({ coverageId: unitIdFor(0), status: "covered" })],
       findings: [aNeedsValidationFinding(), aConfirmedFinding()],
     }));
@@ -271,15 +280,42 @@ describe("the wire", () => {
   it("refuses a submit payload with no units and no findings", async () => {
     const run = aRun();
     await run.invoke(["start", "--repo", run.out, "--source", "0".repeat(40)], JSON.stringify({ units: [seedFor(0)] }));
-    const empty = await run.invoke(["submit"], JSON.stringify({}));
+    const empty = await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE, units: [] }));
     expect(empty.ok).toBe(false);
     expect(empty.error).toContain("neither unit results nor findings");
+  });
+
+  it.each([
+    ["the reviewer-payload label the hunter used to borrow", { schemaVersion: 2, kind: "standalone-review", units: [aUnitResult()] },
+      ['kind: expected "security-hunter-result", got "standalone-review"', "schemaVersion: expected 1"]],
+    ["a bare object with no envelope", {}, ["kind: expected \"security-hunter-result\"", "units: required"]],
+    ["an unknown top-level key", { ...HUNTER_ENVELOPE, units: [aUnitResult()], verdicts: [] }, ["$.verdicts: unknown field"]],
+    ["units that are not an array", { ...HUNTER_ENVELOPE, units: { coverageId: "x" } }, ["units: required"]],
+    ["a payload that is not an object", [aUnitResult()], ["$: expected a security-hunter-result object"]],
+  ])("refuses %s, naming the envelope it expects, and writes nothing", async (_case, payload, expected) => {
+    const run = aRun();
+    await run.invoke(["start", "--repo", run.out, "--source", "0".repeat(40)], JSON.stringify({ units: [seedFor(0)] }));
+    await run.invoke(["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"]);
+    const before = ["ledger.json", "findings.json"].map((file) => readFileSync(join(run.out, file), "utf8"));
+    const refused = await run.invoke(["submit"], JSON.stringify(payload));
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain("submit input is not a security-hunter-result");
+    for (const fragment of expected) expect(refused.error).toContain(fragment);
+    expect(["ledger.json", "findings.json"].map((file) => readFileSync(join(run.out, file), "utf8"))).toEqual(before);
+  });
+
+  it("accepts a findings-only result with an empty units list", async () => {
+    const run = aRun();
+    await run.invoke(["start", "--repo", run.out, "--source", "0".repeat(40)], JSON.stringify({ units: [seedFor(0)] }));
+    const filed = await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE, units: [], findings: [aNeedsValidationFinding()] }));
+    expect(filed.error).toBeNull();
+    expect(run.stdout()).toContain("settled 0 unit(s); run now holds 1 finding record(s)");
   });
 
   it("names the offending field when a unit result is malformed", async () => {
     const run = aRun();
     await run.invoke(["start", "--repo", run.out, "--source", "0".repeat(40)], JSON.stringify({ units: [seedFor(0)] }));
-    const malformed = await run.invoke(["submit"], JSON.stringify({ units: [aUnitResult({ status: "maybe" })] }));
+    const malformed = await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE, units: [aUnitResult({ status: "maybe" })] }));
     expect(malformed.ok).toBe(false);
     expect(malformed.error).toContain("units[0].status");
   });
@@ -463,7 +499,7 @@ describe("the disposition handoff", () => {
   const publishARun = async (run: Run) => {
     await run.invoke(["start", "--repo", run.out, "--source", "0".repeat(40), "--profile", "standard"], JSON.stringify({ units: [seedFor(0)] }));
     await run.invoke(["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"]);
-    await run.invoke(["submit"], JSON.stringify({
+    await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE,
       units: [aUnitResult({ coverageId: unitIdFor(0), status: "candidate", fingerprints: ["api/login:sqli-email"] })],
       findings: [aConfirmedFinding()],
     }));
@@ -534,12 +570,16 @@ describe("the disposition handoff", () => {
 // --- Reads never create, and a published run is closed ---
 
 describe("a read-only projection over a run directory that does not exist", () => {
-  it.each(["status", "findings"] as const)("%s errors and creates nothing", async (operation) => {
+  it.each([
+    ["status", []],
+    ["findings", []],
+    ["nonce", ["--artifact", "agents/security-hunter-agent/artifacts/repro.txt"]],
+  ] as const)("%s errors and creates nothing", async (operation, extra) => {
     const parent = mkdtempSync(join(tmpdir(), "loom-security-audit-missing-"));
     try {
       const out = join(parent, "mistyped-run");
       const handler = createSecurityAuditHandler(() => undefined);
-      const result = await handler("", [operation, "--out", out]);
+      const result = await handler("", [operation, "--out", out, ...extra]);
       expect(result?.kind).toBe("error");
       expect(existsSync(out)).toBe(false);
     } finally {
@@ -557,7 +597,7 @@ describe("a published run is closed", () => {
   const publishARun = async (run: Run): Promise<void> => {
     await startOne(run);
     await run.invoke(["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"]);
-    await run.invoke(["submit"], JSON.stringify({
+    await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE,
       units: [aUnitResult({ coverageId: unitIdFor(0), status: "candidate", fingerprints: ["api/login:sqli-email"] })],
       findings: [aConfirmedFinding()],
     }));
@@ -567,7 +607,7 @@ describe("a published run is closed", () => {
 
   it.each([
     ["assign", ["assign", "--unit", "any", "--agent", "security-hunter-agent"], ""],
-    ["submit", ["submit"], JSON.stringify({ findings: [aNeedsValidationFinding()] })],
+    ["submit", ["submit"], JSON.stringify({ ...HUNTER_ENVELOPE, units: [], findings: [aNeedsValidationFinding()] })],
     ["defer", ["defer", "--reason", "late cut"], ""],
     ["merge-critic", ["merge-critic"], JSON.stringify({
       schemaVersion: 1, kind: "security-coverage-critic", missingUnits: [], reassignIds: [], resolvedPriorLeads: [], stop: true,
@@ -682,7 +722,7 @@ const settledRun = async (unit: Record<string, unknown> = {}): Promise<Run> => {
   const run = aRun();
   await startOne(run);
   expect((await run.invoke(["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent"])).error).toBeNull();
-  expect((await run.invoke(["submit"], JSON.stringify({ units: [aUnitResult({ coverageId: unitIdFor(0), ...unit })] }))).error).toBeNull();
+  expect((await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE, units: [aUnitResult({ coverageId: unitIdFor(0), ...unit })] }))).error).toBeNull();
   return run;
 };
 
@@ -765,7 +805,7 @@ describe("a reassigned unit, end to end", () => {
     expect(run.stdout()).toContain(`assigned ${unitIdFor(0)} to owner security-hunter-agent--2 at wave 2`);
 
     const owner = "security-hunter-agent--2";
-    const settled = await run.invoke(["submit"], JSON.stringify({
+    const settled = await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE,
       units: [aUnitResult({
         coverageId: unitIdFor(0),
         agentId: owner,
@@ -804,7 +844,7 @@ describe("a submit whose ledger write fails", () => {
     const run = aRun();
     await startOne(run);
     await run.invoke(["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"]);
-    const payload = JSON.stringify({
+    const payload = JSON.stringify({ ...HUNTER_ENVELOPE,
       units: [aUnitResult({ coverageId: unitIdFor(0), status: "candidate", fingerprints: ["api/login:sqli-email"] })],
       findings: [aConfirmedFinding()],
     });
@@ -833,19 +873,39 @@ describe("a submit whose ledger write fails", () => {
     expect(readJson<CoverageUnit[]>(run.out, "ledger.json")[0]!.status).toBe("candidate");
   });
 
-  it("names a re-filed fingerprint whose record differs, instead of dropping it silently", async () => {
+  it("refuses a re-filed fingerprint whose record differs, before writing anything", async () => {
     const run = aRun();
     await run.invoke([...STARTED, "--repo", run.out], JSON.stringify({ units: nSeeds(2) }));
     await run.invoke(["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"]);
-    await run.invoke(["submit"], JSON.stringify({
+    await run.invoke(["assign", "--unit", unitIdFor(1), "--agent", "security-hunter-agent", "--wave", "1"]);
+    await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE,
       units: [aUnitResult({ coverageId: unitIdFor(0), status: "candidate", fingerprints: ["api/login:sqli-email"] })],
       findings: [aConfirmedFinding()],
     }));
-    const refiled = await run.invoke(["submit"], JSON.stringify({ findings: [aConfirmedFinding({ title: "A different title for the same defect" })] }));
-    expect(refiled.error).toBeNull();
-    expect(run.stdout()).toContain("kept the record already filed for api/login:sqli-email");
-    expect(readJson<SecurityFinding[]>(run.out, "findings.json").map((finding) => finding.title)).toEqual([
-      "SQL injection through the login `email` field",
-    ]);
+    const before = ["ledger.json", "findings.json"].map((file) => readFileSync(join(run.out, file), "utf8"));
+
+    // The conflicting submit ALSO carries a unit that would settle cleanly: the
+    // refusal must come before the ledger write, not after it.
+    const refiled = await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE,
+      units: [aUnitResult({ coverageId: unitIdFor(1), reviewedPaths: ["src/api/login.ts"] })],
+      findings: [aConfirmedFinding({ title: "A different title for the same defect" })],
+    }));
+    expect(refiled.ok).toBe(false);
+    expect(refiled.error).toContain("filed findings refused");
+    expect(refiled.error).toContain("the run already holds a different record for api/login:sqli-email");
+    expect(refiled.error).toContain("re-file byte-identical");
+    expect(["ledger.json", "findings.json"].map((file) => readFileSync(join(run.out, file), "utf8"))).toEqual(before);
+    expect(readJson<CoverageUnit[]>(run.out, "ledger.json").find((unit) => unit.coverage_id === unitIdFor(1))?.status).toBe("in_progress");
+  });
+
+  it("keeps one copy of a verbatim re-file, whatever its key order", async () => {
+    const run = aRun();
+    await startOne(run);
+    await run.invoke(["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"]);
+    expect((await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE, units: [], findings: [aConfirmedFinding()] }))).error).toBeNull();
+    const reordered = Object.fromEntries(Object.entries(aConfirmedFinding()).reverse());
+    const again = await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE, units: [], findings: [reordered] }));
+    expect(again.error).toBeNull();
+    expect(readJson<SecurityFinding[]>(run.out, "findings.json")).toHaveLength(1);
   });
 });

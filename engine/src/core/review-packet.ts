@@ -619,6 +619,71 @@ function recoveryProjection(packet: ReviewPacket): VerifiedReviewPacketRecovery 
   });
 }
 
+type LegacyArtifact = Readonly<{
+  path: ReviewPath;
+  diff: HashedReviewArtifactContent;
+  // v1 stored postimages as UTF-8 text only, so its digest covers exactly the
+  // bytes of `content` — the same domain `PostimageDigest` brands in v2.
+  postimage: Readonly<{ content: string; sha256: PostimageDigest }> | null;
+}>;
+
+/** One v1 artifact with its hashes reverified, or null after recording why it is
+ *  refused. A parsed path joins `paths` even when the artifact is then refused. */
+function parseLegacyArtifact(
+  raw: unknown,
+  index: number,
+  paths: Set<ReviewPath>,
+  errors: string[],
+): LegacyArtifact | null {
+  if (!isRecord(raw) || !isRecord(raw.diff)) {
+    errors.push(`artifacts[${index}] must contain a hashed diff object`);
+    return null;
+  }
+  const path = parseReviewPath(raw.path, `artifacts[${index}].path`);
+  if (!path.ok) { errors.push(...path.errors); return null; }
+  if (paths.has(path.value)) errors.push(`artifacts repeats path '${path.value}'`);
+  paths.add(path.value);
+  if (typeof raw.diff.content !== "string" || typeof raw.diff.sha256 !== "string" ||
+      !SHA256_HEX.test(raw.diff.sha256) || raw.diff.sha256 !== sha256Hex(raw.diff.content)) {
+    errors.push(`artifacts[${index}].diff must contain UTF-8 content and its lowercase SHA-256 digest`);
+    return null;
+  }
+  let postimage: LegacyArtifact["postimage"] = null;
+  if (raw.postimage !== null) {
+    if (!isRecord(raw.postimage) || typeof raw.postimage.content !== "string" ||
+        typeof raw.postimage.sha256 !== "string" || !SHA256_HEX.test(raw.postimage.sha256) ||
+        raw.postimage.sha256 !== sha256Hex(raw.postimage.content)) {
+      errors.push(`artifacts[${index}].postimage must contain UTF-8 content and its lowercase SHA-256 digest`);
+      return null;
+    }
+    postimage = { content: raw.postimage.content, sha256: raw.postimage.sha256 as PostimageDigest };
+  }
+  return {
+    path: path.value,
+    diff: { content: raw.diff.content, sha256: raw.diff.sha256 as DiffDigest },
+    postimage,
+  };
+}
+
+/** The canonical v1 body the legacy packet id was hashed over. */
+function legacyPacketBodyJson(envelope: ParsedPacketEnvelope, sortedArtifacts: readonly LegacyArtifact[]): JsonObject {
+  return {
+    schemaVersion: 1,
+    task: envelope.task,
+    baseSha: envelope.baseSha,
+    headSha: envelope.headSha,
+    declaredPaths: envelope.declaredPaths,
+    modifiedPaths: envelope.modifiedPaths,
+    artifacts: sortedArtifacts.map((artifact): JsonObject => ({
+      path: artifact.path,
+      diff: hashedContentJson(artifact.diff),
+      postimage: artifact.postimage === null ? null : hashedContentJson(artifact.postimage),
+    })),
+    planContext: envelope.planContext,
+    proofObligations: envelope.proofObligations,
+  };
+}
+
 function parseLegacyRecoveryPacket(value: Record<string, unknown>): ParseResult<VerifiedReviewPacketRecovery> {
   const envelope = parsePacketEnvelope({
     task: value.task,
@@ -631,44 +696,12 @@ function parseLegacyRecoveryPacket(value: Record<string, unknown>): ParseResult<
   });
   const errors = envelope.ok ? [] : [...envelope.errors];
 
-  const artifacts: Array<{
-    path: ReviewPath;
-    diff: HashedReviewArtifactContent;
-    // v1 stored postimages as UTF-8 text only, so its digest covers exactly the
-    // bytes of `content` — the same domain `PostimageDigest` brands in v2.
-    postimage: Readonly<{ content: string; sha256: PostimageDigest }> | null;
-  }> = [];
+  const artifacts: LegacyArtifact[] = [];
   const artifactPaths = new Set<ReviewPath>();
   if (!Array.isArray(value.artifacts)) errors.push("artifacts must be an array");
   else value.artifacts.forEach((raw, index) => {
-    if (!isRecord(raw) || !isRecord(raw.diff)) {
-      errors.push(`artifacts[${index}] must contain a hashed diff object`);
-      return;
-    }
-    const path = parseReviewPath(raw.path, `artifacts[${index}].path`);
-    if (!path.ok) { errors.push(...path.errors); return; }
-    if (artifactPaths.has(path.value)) errors.push(`artifacts repeats path '${path.value}'`);
-    artifactPaths.add(path.value);
-    if (typeof raw.diff.content !== "string" || typeof raw.diff.sha256 !== "string" ||
-        !SHA256_HEX.test(raw.diff.sha256) || raw.diff.sha256 !== sha256Hex(raw.diff.content)) {
-      errors.push(`artifacts[${index}].diff must contain UTF-8 content and its lowercase SHA-256 digest`);
-      return;
-    }
-    let postimage: Readonly<{ content: string; sha256: PostimageDigest }> | null = null;
-    if (raw.postimage !== null) {
-      if (!isRecord(raw.postimage) || typeof raw.postimage.content !== "string" ||
-          typeof raw.postimage.sha256 !== "string" || !SHA256_HEX.test(raw.postimage.sha256) ||
-          raw.postimage.sha256 !== sha256Hex(raw.postimage.content)) {
-        errors.push(`artifacts[${index}].postimage must contain UTF-8 content and its lowercase SHA-256 digest`);
-        return;
-      }
-      postimage = { content: raw.postimage.content, sha256: raw.postimage.sha256 as PostimageDigest };
-    }
-    artifacts.push({
-      path: path.value,
-      diff: { content: raw.diff.content, sha256: raw.diff.sha256 as DiffDigest },
-      postimage,
-    });
+    const artifact = parseLegacyArtifact(raw, index, artifactPaths, errors);
+    if (artifact !== null) artifacts.push(artifact);
   });
 
   if (envelope.ok) {
@@ -677,21 +710,7 @@ function parseLegacyRecoveryPacket(value: Record<string, unknown>): ParseResult<
   if (errors.length > 0 || !envelope.ok) return fail(errors);
 
   const sortedArtifacts = [...artifacts].sort((left, right) => compareStrings(left.path, right.path));
-  const body: JsonObject = {
-    schemaVersion: 1,
-    task: envelope.value.task,
-    baseSha: envelope.value.baseSha,
-    headSha: envelope.value.headSha,
-    declaredPaths: envelope.value.declaredPaths,
-    modifiedPaths: envelope.value.modifiedPaths,
-    artifacts: sortedArtifacts.map((artifact): JsonObject => ({
-      path: artifact.path,
-      diff: hashedContentJson(artifact.diff),
-      postimage: artifact.postimage === null ? null : hashedContentJson(artifact.postimage),
-    })),
-    planContext: envelope.value.planContext,
-    proofObligations: envelope.value.proofObligations,
-  };
+  const body = legacyPacketBodyJson(envelope.value, sortedArtifacts);
   const packetId = parsePacketId(value.packetId);
   if (packetId === null) {
     return fail(["packetId must be a lowercase SHA-256 digest"]);

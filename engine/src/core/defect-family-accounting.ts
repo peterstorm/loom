@@ -6,6 +6,7 @@
  * This module performs no I/O and never upgrades a declaration into semantic proof.
  */
 
+import { match } from "ts-pattern";
 import { compareStrings } from "./ordering";
 import {
   canonicalRecord,
@@ -210,12 +211,23 @@ function denseArrayProblem(path: string, error: DataBoundaryError): DefectFamily
     const at = `${path}[${error.index ?? 0}]`;
     return problem("invalid-declaration", at, `${at} must be own data`);
   }
-  const message = error.reason === "not-array" ? `${path} must be a plain array`
-    : error.reason === "invalid-array-length" ? `${path} has an invalid or excessive length`
-    : error.reason === "symbol-field" || error.reason === "sparse-array"
-      ? `${path} must be dense and contain no extra fields`
-    : `${path} could not be safely inspected`;
-  return problem("invalid-declaration", path, message);
+  return problem("invalid-declaration", path, wholeArrayMessage(path, error.reason));
+}
+
+/** The message for a boundary failure reported against the whole array. Total
+ *  over the reason union, so a new reason fails to compile here instead of
+ *  silently taking the inspection fallback. */
+function wholeArrayMessage(path: string, reason: DataBoundaryError["reason"]): string {
+  return match(reason)
+    .with("not-array", () => `${path} must be a plain array`)
+    .with("invalid-array-length", () => `${path} has an invalid or excessive length`)
+    .with("symbol-field", "sparse-array", () => `${path} must be dense and contain no extra fields`)
+    .with(
+      "not-object", "wrong-prototype", "unknown-field", "accessor-field", "non-enumerable-field",
+      "mutated-during-read", "unsafe-inspection",
+      () => `${path} could not be safely inspected`,
+    )
+    .exhaustive();
 }
 
 function declaredText(raw: unknown, path: string): InternalParse<DeclaredText> {

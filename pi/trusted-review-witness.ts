@@ -225,8 +225,43 @@ function rootWithoutRun(root: TrustedReviewRoot, runIdentity: string): TrustedRe
   return runs.size === 0 ? null : Object.freeze({ nextTouch: root.nextTouch, runs });
 }
 
-/** One isolated witness aggregate; the extension factory creates exactly one. */
-export function createTrustedReviewWitnesses(): TrustedReviewWitnesses {
+/** The capture a task's exact authority markers and its receipt witness.
+ *  Throws when the markers or the receipt digest cannot be trusted. */
+function witnessedCapture(
+  role: string,
+  task: string,
+  outcome: Extract<CaptureOutcome, { kind: "captured" }>,
+): TrustedReviewCapture {
+  const markers = orchestrationMarkers(task, `captured ${outcome.receipt.requestId}`);
+  if (markers === null || markers.requestId !== outcome.receipt.requestId) {
+    throw new Error(`captured request ${outcome.receipt.requestId} is missing its exact task authority markers`);
+  }
+  const contextDigest = parseContextDigest(markers.contextDigest);
+  if (!contextDigest.ok) {
+    throw new Error(`captured request ${outcome.receipt.requestId} carries an invalid context marker: ${contextDigest.error.message}`);
+  }
+  const digest = parseArtifactDigest(outcome.receipt.digest);
+  if (!digest.ok) {
+    throw new Error(`captured request ${outcome.receipt.requestId} carries an invalid receipt digest: ${digest.error.message}`);
+  }
+  return Object.freeze({
+    requestId: outcome.receipt.requestId,
+    slotId: outcome.receipt.slotId,
+    attempt: outcome.receipt.attempt,
+    role,
+    contextDigest: contextDigest.value,
+    digest: digest.value,
+    byteLength: outcome.receipt.byteLength,
+  });
+}
+
+/** The root's current run: the one touched last. */
+const currentRunOf = (root: TrustedReviewRoot): readonly [string, TrustedReviewRun] =>
+  [...root.runs.entries()].reduce((latest, candidate) =>
+    candidate[1].touchedAt > latest[1].touchedAt ? candidate : latest);
+
+/** The session → root → run storage behind the aggregate. */
+function trustedWitnessStore() {
   const sessions = new Map<string, Map<string, TrustedReviewRoot>>();
 
   /** Store a session's root, or drop it (`null`): the one rule by which an
@@ -252,58 +287,48 @@ export function createTrustedReviewWitnesses(): TrustedReviewWitnesses {
   };
 
   return Object.freeze({
+    hasSession: (sessionId: string): boolean => sessions.has(sessionId),
+    rootOf: (sessionId: string, rootIdentity: string): TrustedReviewRoot | undefined => sessions.get(sessionId)?.get(rootIdentity),
+    storeRoot,
+    updateRun,
+    forget: (sessionId: string): void => {
+      sessions.delete(sessionId);
+    },
+  });
+}
+
+/** One isolated witness aggregate; the extension factory creates exactly one. */
+export function createTrustedReviewWitnesses(): TrustedReviewWitnesses {
+  const store = trustedWitnessStore();
+  return Object.freeze({
     touch: (sessionId: string, binding: SessionRunBinding): TrustedReviewRunTouch =>
-      updateRun(sessionId, binding, (captures) => captures),
+      store.updateRun(sessionId, binding, (captures) => captures),
     retract: (sessionId: string, binding: SessionRunBinding): void => {
       const { rootIdentity, runIdentity } = trustedRunLocation(binding);
-      const root = sessions.get(sessionId)?.get(rootIdentity);
+      const root = store.rootOf(sessionId, rootIdentity);
       const run = root?.runs.get(runIdentity);
       // Only an unwitnessed run is dropped: a witnessed one is authority.
       if (root === undefined || run === undefined || run.captures.size > 0) return;
-      storeRoot(sessionId, rootIdentity, rootWithoutRun(root, runIdentity));
+      store.storeRoot(sessionId, rootIdentity, rootWithoutRun(root, runIdentity));
     },
     remember: (sessionId, binding, role, task, outcome): void => {
-      const markers = orchestrationMarkers(task, `captured ${outcome.receipt.requestId}`);
-      if (markers === null || markers.requestId !== outcome.receipt.requestId) {
-        throw new Error(`captured request ${outcome.receipt.requestId} is missing its exact task authority markers`);
-      }
-      const contextDigest = parseContextDigest(markers.contextDigest);
-      if (!contextDigest.ok) {
-        throw new Error(`captured request ${outcome.receipt.requestId} carries an invalid context marker: ${contextDigest.error.message}`);
-      }
-      const digest = parseArtifactDigest(outcome.receipt.digest);
-      if (!digest.ok) {
-        throw new Error(`captured request ${outcome.receipt.requestId} carries an invalid receipt digest: ${digest.error.message}`);
-      }
-      updateRun(sessionId, binding, (previous) => {
+      const capture = witnessedCapture(role, task, outcome);
+      store.updateRun(sessionId, binding, (previous) => {
         const captures = new Map(previous);
-        captures.set(
-          captureKey(outcome.receipt.slotId, outcome.receipt.attempt),
-          Object.freeze({
-            requestId: outcome.receipt.requestId,
-            slotId: outcome.receipt.slotId,
-            attempt: outcome.receipt.attempt,
-            role,
-            contextDigest: contextDigest.value,
-            digest: digest.value,
-            byteLength: outcome.receipt.byteLength,
-          }),
-        );
+        captures.set(captureKey(capture.slotId, capture.attempt), capture);
         return captures;
       });
     },
     verify: async (input): Promise<LoomReviewAuthorityReceipt> => {
-      const sessionRoots = sessions.get(input.sessionId);
-      if (sessionRoots === undefined) throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId}`);
+      if (!store.hasSession(input.sessionId)) throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId}`);
       const expectedRoot = standaloneReviewRoot(input.cwd);
-      const root = sessionRoots.get(expectedRoot);
+      const root = store.rootOf(input.sessionId, expectedRoot);
       if (root === undefined || root.runs.size === 0) {
         throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId} and root ${expectedRoot}`);
       }
-      const current = [...root.runs.entries()].reduce((latest, candidate) =>
-        candidate[1].touchedAt > latest[1].touchedAt ? candidate : latest);
+      const current = currentRunOf(root);
       const outcome = await verifyTrustedReviewRun(input, current[1]);
-      if (sessions.get(input.sessionId)?.get(expectedRoot) !== root) {
+      if (store.rootOf(input.sessionId, expectedRoot) !== root) {
         throw new Error("current witnessed Standalone Review changed during verification; no older authority accepted");
       }
       if (outcome.kind === "rejected") {
@@ -312,14 +337,12 @@ export function createTrustedReviewWitnesses(): TrustedReviewWitnesses {
       // Exact accepted replay is idempotent. Once accepted, older witnesses for
       // this root are retired so they can never make a later verification
       // ambiguous or become fallback authority after a new run is touched.
-      storeRoot(input.sessionId, expectedRoot, Object.freeze({
+      store.storeRoot(input.sessionId, expectedRoot, Object.freeze({
         nextTouch: root.nextTouch,
         runs: new Map([[current[0], current[1]]]),
       }));
       return outcome.receipt;
     },
-    forget: (sessionId: string): void => {
-      sessions.delete(sessionId);
-    },
+    forget: store.forget,
   });
 }

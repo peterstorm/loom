@@ -14,7 +14,12 @@
 
 import type { ArtifactDigest, NonEmpty } from "../orchestration-contract";
 import type { JunitTestcasesResult } from "../structured-test-report";
-import { acceptanceExpectation, observeAcceptanceFacts, type AcceptanceExpectation } from "./gate";
+import {
+  acceptanceExpectation,
+  observeAcceptanceFacts,
+  type AcceptanceExpectation,
+  type ObservedAcceptanceTestcase,
+} from "./gate";
 import { freeze, nonEmpty } from "./kernel";
 import type { AcceptanceContract, AcceptanceTestcase, ContractTaskView } from "./model";
 import { claims, dueWaves } from "./tasks";
@@ -109,14 +114,16 @@ export function judgeStopCheck(
   const failing = nonEmpty(check.owed.flatMap(({ contractId, testcases }) => testcases.flatMap((entry): FailingAcceptanceTestcase[] => {
     const observed = ran.find(({ file, name }) => file === entry.file && name === entry.name);
     if (observed !== undefined && !observed.collectionError && observed.outcome === "passed") return [];
-    const outcome: FailingAcceptanceTestcase["outcome"] = observed === undefined || observed.collectionError
-      ? freeze({ kind: "did-not-run" })
-      : observed.outcome === "skipped"
-        ? freeze({ kind: "skipped" })
-        : freeze({ kind: "failed", failureType: observed.failureType });
-    return [freeze({ contractId, file: entry.file, name: entry.name, outcome })];
+    return [freeze({ contractId, file: entry.file, name: entry.name, outcome: unpassedOutcome(observed) })];
   })));
   return failing === null ? freeze({ kind: "passed" }) : freeze({ kind: "failing", testcases: failing });
+}
+
+/** Why an owed testcase the report does not show passing counts against the stop. */
+function unpassedOutcome(observed: ObservedAcceptanceTestcase | undefined): FailingAcceptanceTestcase["outcome"] {
+  if (observed === undefined || observed.collectionError) return freeze({ kind: "did-not-run" });
+  if (observed.outcome === "skipped") return freeze({ kind: "skipped" });
+  return freeze({ kind: "failed", failureType: observed.failureType });
 }
 
 function describeOutcome(outcome: FailingAcceptanceTestcase["outcome"]): string {

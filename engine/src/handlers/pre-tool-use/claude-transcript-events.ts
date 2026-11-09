@@ -44,17 +44,17 @@ const toolUseEvent = (block: Record<string, unknown>, messageId: string): Transc
   }
 };
 
+const assistantBlockEvents = (block: Record<string, unknown>, messageId: string): readonly TranscriptEvent[] => {
+  if (block["type"] === "tool_use") return [toolUseEvent(block, messageId)];
+  if (block["type"] === "text" && typeof block["text"] === "string") return [{ kind: "text", messageId, text: block["text"] }];
+  return [];
+};
+
 const assistantEvents = (entry: Record<string, unknown>): readonly TranscriptEvent[] => {
   const message = isRecord(entry["message"]) ? entry["message"] : {};
   const content = Array.isArray(message["content"]) ? message["content"] : [];
   const messageId = asString(message["id"]) || asString(entry["uuid"]);
-  return content.filter(isRecord).flatMap((block): readonly TranscriptEvent[] =>
-    block["type"] === "tool_use"
-      ? [toolUseEvent(block, messageId)]
-      : block["type"] === "text" && typeof block["text"] === "string"
-        ? [{ kind: "text", messageId, text: block["text"] }]
-        : [],
-  );
+  return content.filter(isRecord).flatMap((block) => assistantBlockEvents(block, messageId));
 };
 
 const userEvents = (entry: Record<string, unknown>): readonly TranscriptEvent[] => {
@@ -74,8 +74,16 @@ const userEvents = (entry: Record<string, unknown>): readonly TranscriptEvent[] 
 const isCompactBoundary = (entry: Record<string, unknown>): boolean =>
   entry["type"] === "system" && entry["subtype"] === "compact_boundary";
 
-const entryEvents = (entry: Record<string, unknown>): readonly TranscriptEvent[] =>
-  entry["type"] === "assistant" ? assistantEvents(entry) : entry["type"] === "user" ? userEvents(entry) : [];
+const entryEvents = (entry: Record<string, unknown>): readonly TranscriptEvent[] => {
+  switch (entry["type"]) {
+    case "assistant":
+      return assistantEvents(entry);
+    case "user":
+      return userEvents(entry);
+    default:
+      return [];
+  }
+};
 
 const parseLine = (line: string): Record<string, unknown> | undefined => {
   try {

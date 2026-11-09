@@ -164,28 +164,43 @@ function firstStrictJsonGrammarError(text: string): Readonly<{ code: number; off
   return first;
 }
 
-/** Shared strict byte grammar; callers select a schema explicitly after this parse. */
-export function parseBoundedReviewerJson(rawBytes: Uint8Array, maximumBytes: number): DomainResult<unknown, ReviewerProtocolFailure> {
+/** The payload bytes as text: within the byte budget, BOM-free, valid UTF-8. */
+function decodeBoundedUtf8(rawBytes: Uint8Array, maximumBytes: number): DomainResult<string, ReviewerProtocolFailure> {
   if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1 || rawBytes.byteLength > maximumBytes) {
     return rejected("payload-too-large", `Reviewer payload exceeds ${maximumBytes} UTF-8 bytes.`);
   }
   if (rawBytes[0] === 0xef && rawBytes[1] === 0xbb && rawBytes[2] === 0xbf) {
     return rejected("invalid-utf8", "Reviewer payload must not start with a UTF-8 BOM.", "", 0);
   }
-  let text: string;
   try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(rawBytes);
+    return success(new TextDecoder("utf-8", { fatal: true }).decode(rawBytes));
   } catch {
     return rejected("invalid-utf8", "Reviewer payload must contain valid UTF-8.");
   }
-  const depthOffset = excessiveDepthOffset(text);
-  if (depthOffset !== null) {
-    return rejected("depth-exceeded", "Reviewer payload exceeds 32 nested containers.", "", encoder.encode(text.slice(0, depthOffset)).byteLength);
+}
+
+/** The no-candidate refusal, naming the strict scanner's first grammar error when it has one. */
+function strictGrammarRefusal(text: string): DomainResult<never, ReviewerProtocolFailure> {
+  const grammar = firstStrictJsonGrammarError(text);
+  if (grammar === null) {
+    return rejected("invalid-json", "Reviewer payload must be exactly one strict JSON object.");
   }
-  let payloadText = text;
-  let parsedValue: unknown;
+  const prefix = text.slice(0, grammar.offset);
+  const line = (prefix.match(/\n/g)?.length ?? 0) + 1;
+  const column = grammar.offset - prefix.lastIndexOf("\n");
+  return rejected(
+    "invalid-json",
+    `Reviewer payload must be exactly one strict JSON object. Parse error: ${printParseErrorCode(grammar.code)} at position ${grammar.offset} (line ${line}, column ${column})`,
+    "",
+    encoder.encode(prefix).byteLength,
+  );
+}
+
+/** The decoded payload and the exact bytes it was decoded from: the whole
+ *  text when it is strict JSON, else the one extractable object. */
+function strictPayload(text: string): DomainResult<{ value: unknown; text: string }, ReviewerProtocolFailure> {
   try {
-    parsedValue = JSON.parse(text);
+    return success({ value: JSON.parse(text), text });
   } catch {
     // A prose-wrapped payload still carries the reviewer's own final message;
     // deterministic extraction admits it without hand-editing the original
@@ -195,28 +210,25 @@ export function parseBoundedReviewerJson(rawBytes: Uint8Array, maximumBytes: num
     // strict scanner reports the exact offending position, which is exactly
     // what an agent needs to find the unescaped quote or unbalanced bracket.
     const extracted = extractStrictObject(text);
-    if (extracted === null) {
-      const grammar = firstStrictJsonGrammarError(text);
-      if (grammar === null) {
-        return rejected("invalid-json", "Reviewer payload must be exactly one strict JSON object.");
-      }
-      const prefix = text.slice(0, grammar.offset);
-      const line = (prefix.match(/\n/g)?.length ?? 0) + 1;
-      const column = grammar.offset - prefix.lastIndexOf("\n");
-      return rejected(
-        "invalid-json",
-        `Reviewer payload must be exactly one strict JSON object. Parse error: ${printParseErrorCode(grammar.code)} at position ${grammar.offset} (line ${line}, column ${column})`,
-        "",
-        encoder.encode(prefix).byteLength,
-      );
-    }
-    parsedValue = extracted.value;
-    payloadText = extracted.text;
+    return extracted === null ? strictGrammarRefusal(text) : success(extracted);
   }
+}
+
+/** Shared strict byte grammar; callers select a schema explicitly after this parse. */
+export function parseBoundedReviewerJson(rawBytes: Uint8Array, maximumBytes: number): DomainResult<unknown, ReviewerProtocolFailure> {
+  const decoded = decodeBoundedUtf8(rawBytes, maximumBytes);
+  if (!decoded.ok) return decoded;
+  const text = decoded.value;
+  const depthOffset = excessiveDepthOffset(text);
+  if (depthOffset !== null) {
+    return rejected("depth-exceeded", "Reviewer payload exceeds 32 nested containers.", "", encoder.encode(text.slice(0, depthOffset)).byteLength);
+  }
+  const payload = strictPayload(text);
+  if (!payload.ok) return payload;
   try {
-    const unique = uniqueMembers(payloadText);
+    const unique = uniqueMembers(payload.value.text);
     if (!unique.ok) return unique;
-    return success(parsedValue);
+    return success(payload.value.value);
   } catch {
     return rejected("invalid-payload", "Reviewer payload could not be inspected safely.");
   }

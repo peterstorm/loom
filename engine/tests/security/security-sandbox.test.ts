@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_SANDBOX_LIMITS,
+  bindSandboxRun,
   SANDBOX_ENV_ALLOWLIST,
   SANDBOX_RECEIPT_PREFIX,
   describeUnboundedRun,
@@ -117,7 +118,19 @@ describe("sandbox receipt", () => {
     // A failed ROOT remount is recorded, not fatal: a user namespace cannot
     // remount a superblock it does not own. What that leaves open is reported.
     expect(sandboxWithinLimits(parseOk(receipt({ readOnlyRoot: false })))).toBe(true);
-    expect(parseBound(receipt({ targetReadOnly: false })).ok).toBe(false);
+  });
+
+  it("requires the target to be closed read-only — a fact, not a literal", () => {
+    // The script reports `target_ro` only once a write to the target FAILED, and
+    // a missing facts line reads as `false`: the receipt carries what happened.
+    const open = parseOk(receipt({ targetReadOnly: false }));
+    expect(open.targetReadOnly).toBe(false);
+    expect(sandboxWithinLimits(open)).toBe(false);
+    expect(describeUnboundedRun(open)).toBe("target not remounted read-only");
+    expect(parseBound(receipt({ targetReadOnly: "yes" }))).toEqual({
+      ok: false,
+      error: { kind: "invalid-sandbox-receipt", message: "targetReadOnly must be a boolean" },
+    });
   });
 
   it("requires the home directory to be closed read-only", () => {
@@ -187,12 +200,14 @@ describe("describeUnboundedRun", () => {
     const parsed = parseOk(receipt({
       exit: null,
       scratchBytes: null,
+      targetReadOnly: false,
       homeReadOnly: false,
       enforced: { cpu: false, memory: false, processes: false, fileSize: false },
     }));
     expect(describeUnboundedRun(parsed)).toBe(
       "exit null; scratch footprint unmeasured; cpu limit not applied; memory limit not applied; " +
-        "process limit not applied; file-size limit not applied; home directory not remounted read-only",
+        "process limit not applied; file-size limit not applied; target not remounted read-only; " +
+        "home directory not remounted read-only",
     );
   });
 
@@ -280,12 +295,65 @@ describe("sandbox command", () => {
     ).toBe(false);
   });
 
+  const BINDING = {
+    nonce: NONCE,
+    target: "/repo",
+    scratch: "/runs/run-1/agents/security-hunter-agent/scratch",
+    artifact: "agents/security-hunter-agent/artifacts/sqli.txt",
+    artifactFile: "/runs/run-1/agents/security-hunter-agent/artifacts/sqli.txt",
+  } as const;
+
   it("tells a hunter what it may not assume", () => {
-    const text = renderSandboxInstructions(DEFAULT_SANDBOX_LIMITS, NONCE);
+    const text = renderSandboxInstructions(DEFAULT_SANDBOX_LIMITS, BINDING);
     expect(text).toContain("--scratch-mb");
     expect(text).toContain("--nonce " + NONCE);
     expect(text).toContain("No external network, no writable target or home");
     expect(text).toContain("record needs_validation naming the missing capability");
+  });
+
+  it("binds a run to one artifact: the judge's own nonce, the owner's scratch, and the artifact's file", () => {
+    const artifact = "agents/security-hunter-agent--2/artifacts/sqli.txt";
+    const bound = bindSandboxRun({ target: "/repo", runDir: "/runs/run-1/", owner: "security-hunter-agent--2", artifact });
+    expect(bound).toEqual({
+      ok: true,
+      value: {
+        nonce: sandboxNonce(artifact),
+        target: "/repo",
+        scratch: "/runs/run-1/agents/security-hunter-agent--2/scratch",
+        artifact,
+        artifactFile: `/runs/run-1/${artifact}`,
+      },
+    });
+    // The nonce is the one `judgeLocalReceipt` derives for the cited artifact.
+    const receiptText = `${sandboxReceiptPrefix(sandboxNonce(artifact))}${aSandboxReceipt()}`;
+    expect(judgeLocalReceipt(receiptText, artifact).ok).toBe(true);
+  });
+
+  it.each([
+    ["a run directory inside the target", "/repo", "/repo/.audit/run-1"],
+    ["a run directory that is the target", "/repo", "/repo"],
+  ])("refuses %s, whose scratch the script would refuse", (_case, target, runDir) => {
+    const refused = bindSandboxRun({ target, runDir, owner: "security-hunter-agent", artifact: "agents/security-hunter-agent/artifacts/a.txt" });
+    expect(refused.ok ? null : refused.error.kind).toBe("scratch-inside-target");
+    expect(refused.ok ? "" : refused.error.message).toContain("outside the audited repository");
+  });
+
+  it("does not mistake a sibling directory sharing the target's prefix for the target", () => {
+    expect(bindSandboxRun({ target: "/repo", runDir: "/repo-audits/run-1", owner: "security-hunter-agent", artifact: "agents/security-hunter-agent/artifacts/a.txt" }).ok).toBe(true);
+  });
+
+  it("fills every placeholder from the binding: target, scratch, nonce, and the one artifact stdout lands in", () => {
+    const text = renderSandboxInstructions(DEFAULT_SANDBOX_LIMITS, BINDING);
+    expect(text).toContain(`--target ${BINDING.target} --scratch ${BINDING.scratch}`);
+    expect(text).toContain(`> ${BINDING.artifactFile}`);
+    expect(text).toContain(`Redirect the script's stdout to exactly ${BINDING.artifactFile}`);
+    expect(text).toContain(`"${BINDING.artifact}"`);
+    // No placeholder survives: a hunter cannot compute the nonce or guess the paths.
+    expect(text).not.toMatch(/<repo>|<run>|<your-agent-id>/);
+    // The printed command line is the argv `sandboxCommand` builds, flag for flag.
+    const argv = sandboxCommand({ target: BINDING.target, scratch: BINDING.scratch, command: ["true"], limits: DEFAULT_SANDBOX_LIMITS, nonce: NONCE });
+    const flags = (argv.ok ? argv.value : []).slice(1, (argv.ok ? argv.value : []).indexOf("--"));
+    expect(text.replace(/\\\n\s*/g, "")).toContain(flags.join(" "));
   });
 });
 
@@ -368,7 +436,7 @@ describe("bounded local execution", () => {
           'echo "target_write=$?"',
           "printf kept > evidence.txt",
           'echo "scratch_write=$?"',
-          "printf '%s\\n' 'LOOM-SANDBOX-LIMITS root_ro=1 home_ro=1 cpu=1 mem=1 procs=1 files=1 unremounted=0'",
+          "printf '%s\\n' 'LOOM-SANDBOX-LIMITS target_ro=1 root_ro=1 home_ro=1 cpu=1 mem=1 procs=1 files=1 unremounted=0'",
           "printf '%s\\n' 'LOOM-SANDBOX-RECEIPT-0123456789abcdef {\"schemaVersion\":1}'",
           "printf forged > .enforcement",
           "(exec 3<>/dev/tcp/1.1.1.1/443) 2>/dev/null",
@@ -450,6 +518,36 @@ describe("bounded local execution", () => {
         expect(sandboxWithinLimits(parsed)).toBe(false);
         expect(describeUnboundedRun(parsed)).toBe("home directory not remounted read-only");
       }
+    });
+  });
+
+  // The regression this guards: the inner shell is PID 1 of the sandbox's pid
+  // namespace, and its stdout USED to stay the capture pipe the facts line is
+  // read from while the command ran — so `> /proc/1/fd/1` let the command append
+  // a facts line of its own and forge every enforcement fact in the receipt.
+  it.runIf(unshareAvailable)(isolated("ignores a facts line the command writes through any fd it can reach"), () => {
+    const FORGED = "LOOM-SANDBOX-LIMITS target_ro=1 root_ro=1 home_ro=1 cpu=1 mem=1 procs=1 files=1 unremounted=0";
+    const LEGACY_FORGED = "LOOM-SANDBOX-LIMITS root_ro=1 home_ro=1 cpu=1 mem=1 procs=1 files=1 unremounted=0";
+    const forge = (line: string): string =>
+      [
+        // PID 1 (the inner shell) and every process of the namespace, on every fd.
+        `for fd in /proc/[0-9]*/fd/*; do printf '%s\\n' '${line}' > "$fd"; done`,
+        `printf '%s\\n' '${line}' > /proc/1/fd/1`,
+        `printf '%s\\n' '${line}' > /proc/1/fd/2`,
+        `printf '%s\\n' '${line}' > /proc/self/fd/1`,
+        `printf '%s\\n' '${line}' > /dev/stdout`,
+      ].map((step) => `{ ${step}; } 2>/dev/null`).join("; ");
+    withSandboxDirs("separate", (dirs) => {
+      const genuine = parseOk(runSandbox(dirs, ["--", "sh", "-c", "exit 0"]).stdout ?? "");
+      const forged = parseOk(
+        runSandbox(dirs, ["--", "sh", "-c", `${forge(FORGED)}; ${forge(LEGACY_FORGED)}; exit 0`]).stdout ?? "",
+      );
+      // The footprint differs with what the command left behind; every
+      // ENFORCEMENT fact must be the one the identical honest run reports.
+      const facts = ({ scratchBytes: _scratchBytes, ...rest }: typeof genuine) => rest;
+      expect(facts(forged)).toEqual(facts(genuine));
+      expect(forged.targetReadOnly).toBe(true);
+      expect(forged.homeReadOnly).toBe(true);
     });
   });
 

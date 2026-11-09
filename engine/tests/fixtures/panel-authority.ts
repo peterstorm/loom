@@ -35,6 +35,7 @@ import {
   spawnBatchAction,
   type AgentRequestAuthority,
   type AgentRosterSlot,
+  type EffectId,
   type NonEmpty,
   type OrchestrationRunId,
   type PublicationAuthorityResolver,
@@ -172,6 +173,54 @@ export type PanelPublications = Readonly<{
   ) => RefutationPanelFixture;
 }>;
 
+/** Publish one batch of `requests` under `effectId` through the real initial
+ *  publication reconciler, returning the issued spawn requests and the exact
+ *  receipt the prepared intent expects. */
+function publishPanelBatch(
+  effectId: EffectId,
+  requests: readonly AgentRequestAuthority[],
+) {
+  const rawRequests = requests.map((authority) => ({
+    authority,
+    context: { digest: authority.contextDigest, slot: `contexts/${authority.contextDigest}.json` },
+  }));
+  const intent = value(prepareInitialBatchPublicationIntent(requests[0]!.runId, effectId, rawRequests));
+  const receipt = {
+    schemaVersion: 1,
+    kind: "batch-published",
+    effectId: intent.identity.effectId,
+    runId: intent.identity.runId,
+    requestIds: intent.requestIds,
+    contextDigests: intent.contextDigests,
+    issuedRequests: intent.issuedRequests,
+    publicationDigest: intent.identity.publicationDigest,
+  };
+  const reconcile = createInitialBatchPublicationReconciler(
+    createInitialPublicationEffectPort(() => ({ ok: true, value: bytes(receipt) })),
+    createAtomicInitialPublicationClaimPort((request) => ({
+      ok: true,
+      value: { schemaVersion: 1, kind: "initial-publication-claimed", key: request.key, identity: request.identity },
+    })),
+  );
+  return { receipt, requests: value(spawnBatchAction(value(reconcile(intent)), rawRequests)).requests };
+}
+
+/** The `refutationPanelFixture` of a store that issues through `issuePanelRequests`. */
+const refutationPanelIssuer = (
+  issuePanelRequests: PanelPublications["issuePanelRequests"],
+): PanelPublications["refutationPanelFixture"] => (runId, lenses, findings = PANEL_FIXTURE_FINDINGS) => {
+  const run = value(parseOrchestrationRunId(runId));
+  const findingIds = findings.map(({ id }) => id) as unknown as NonEmpty<WaveFindingId>;
+  const slots = semanticVerifierSlots(run, lenses, findingIds);
+  const authority = value(parseRefutationPanelAuthority({
+    runId: run,
+    findings,
+    lenses,
+    verifierSlots: slots,
+  }));
+  return { authority, requests: issuePanelRequests(slots.map(({ attempts }) => attempts[0])) };
+};
+
 /** A fresh publication store with its own registrations and effect-id
  *  sequence — one per suite (or per test that needs isolation). */
 export function createPanelPublications(): PanelPublications {
@@ -187,32 +236,9 @@ export function createPanelPublications(): PanelPublications {
   const issuePanelRequests = (requests: readonly AgentRequestAuthority[]): readonly SpawnRequest[] => {
     publicationSequence += 1;
     const effectId = value(parseEffectId(`effect:panel-fixture:${publicationSequence}`));
-    const runId = requests[0]!.runId;
-    const rawRequests = requests.map((authority) => ({
-      authority,
-      context: { digest: authority.contextDigest, slot: `contexts/${authority.contextDigest}.json` },
-    }));
-    const intent = value(prepareInitialBatchPublicationIntent(runId, effectId, rawRequests));
-    const receipt = {
-      schemaVersion: 1,
-      kind: "batch-published",
-      effectId: intent.identity.effectId,
-      runId: intent.identity.runId,
-      requestIds: intent.requestIds,
-      contextDigests: intent.contextDigests,
-      issuedRequests: intent.issuedRequests,
-      publicationDigest: intent.identity.publicationDigest,
-    };
-    const reconcile = createInitialBatchPublicationReconciler(
-      createInitialPublicationEffectPort(() => ({ ok: true, value: bytes(receipt) })),
-      createAtomicInitialPublicationClaimPort((request) => ({
-        ok: true,
-        value: { schemaVersion: 1, kind: "initial-publication-claimed", key: request.key, identity: request.identity },
-      })),
-    );
-    const action = value(spawnBatchAction(value(reconcile(intent)), rawRequests));
-    registrations.set(registrationKey(receipt), bytes(receipt));
-    return action.requests;
+    const published = publishPanelBatch(effectId, requests);
+    registrations.set(registrationKey(published.receipt), bytes(published.receipt));
+    return published.requests;
   };
 
   const withRewrittenPanelRegistration = <T>(
@@ -231,27 +257,10 @@ export function createPanelPublications(): PanelPublications {
     }
   };
 
-  const refutationPanelFixture = (
-    runId: string,
-    lenses: readonly ReviewLens[],
-    findings: readonly [BriefFinding, ...BriefFinding[]] = PANEL_FIXTURE_FINDINGS,
-  ): RefutationPanelFixture => {
-    const run = value(parseOrchestrationRunId(runId));
-    const findingIds = findings.map(({ id }) => id) as unknown as NonEmpty<WaveFindingId>;
-    const slots = semanticVerifierSlots(run, lenses, findingIds);
-    const authority = value(parseRefutationPanelAuthority({
-      runId: run,
-      findings,
-      lenses,
-      verifierSlots: slots,
-    }));
-    return { authority, requests: issuePanelRequests(slots.map(({ attempts }) => attempts[0])) };
-  };
-
   return Object.freeze({
     resolver: createPublicationAuthorityResolver(registrationLoader),
     issuePanelRequests,
     withRewrittenPanelRegistration,
-    refutationPanelFixture,
+    refutationPanelFixture: refutationPanelIssuer(issuePanelRequests),
   });
 }

@@ -14,12 +14,40 @@ type Handler = (event: Record<string, unknown>, context: Record<string, unknown>
 type Emit = (event: string, payload: Record<string, unknown>) => Promise<unknown[]>;
 const packageRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
+type Dispatch = typeof import("../../src/handlers/subagent-stop/dispatch");
+type CaptureRequest = { authority: AgentRequestAuthority; task: string };
+type ReaderPages = ReturnType<typeof frozenDiffReaderPages>;
+type Delivery = (observed: readonly string[]) => Promise<unknown>;
+
+/** One Claude SubagentStop delivery per request: each records its harness correlator and, when delivered, writes its transcript and dispatches it. */
+async function claudeDeliveries(handle: RunDirHandle, requests: readonly CaptureRequest[], reads: readonly ReaderPages[],
+  session: ReturnType<typeof fixtureSession>, dispatch: Dispatch, toolCallId: string): Promise<readonly Delivery[]> {
+  const deliveries: Delivery[] = [];
+  for (const [index, { authority }] of requests.entries()) {
+    const nativeId = `${toolCallId}-${index}`;
+    value(await handle.recordHarnessCorrelator({ schemaVersion: 1, harness: "claude", nativeId, requestId: authority.requestId,
+      role: authority.role, attempt: authority.attempt }));
+    const transcript = join(session.directory, `${nativeId}.jsonl`);
+    deliveries.push(async observed => {
+      writeFileSync(transcript, [
+        ...claudeReadLines(reads[index]!),
+        JSON.stringify({ message: { role: "assistant", content: observed.map(text => ({ type: "text", text })) } }),
+      ].join("\n") + "\n");
+      process.env.LOOM_ORCHESTRATION_RUNS_ROOT = handle.identity.runsRoot;
+      process.env.LOOM_ORCHESTRATION_RUN_DIR = handle.runDirectory;
+      return dispatch.runDispatch(JSON.stringify({ session_id: session.sessionId, agent_id: nativeId,
+        agent_type: authority.role, agent_transcript_path: transcript }), []);
+    });
+  }
+  return deliveries;
+}
+
 async function nativeBatchCapturer(root: string, harness: "claude" | "pi", session: ReturnType<typeof fixtureSession>, emit: Emit) {
   const bindings = await import("../../src/orchestration/session-run-bindings");
   const dispatch = await import("../../src/handlers/subagent-stop/dispatch");
   let ordinal = 0;
   let redeliver: ((texts?: readonly (readonly string[])[]) => Promise<unknown[]>) | undefined;
-  const capture = async (handle: RunDirHandle, requests: readonly { authority: AgentRequestAuthority; task: string }[], texts: readonly (readonly string[])[]) => {
+  const capture = async (handle: RunDirHandle, requests: readonly CaptureRequest[], texts: readonly (readonly string[])[]) => {
     const toolCallId = `owned-native-${++ordinal}`;
     // Each scripted reviewer read its whole frozen diff (ADR-0022); empty for runs without a read
     // obligation. A Run whose registration a test deliberately made unreadable gives the reviewer
@@ -40,23 +68,7 @@ async function nativeBatchCapturer(root: string, harness: "claude" | "pi", sessi
           messages: [...piReadMessages(reads[index]!), { role: "assistant", content: observed[index]!.map(text => ({ type: "text", text })) }] })) } });
       return redeliver();
     }
-    const deliveries: ((observed: readonly string[]) => Promise<unknown>)[] = [];
-    for (const [index, { authority }] of requests.entries()) {
-      const nativeId = `${toolCallId}-${index}`;
-      value(await handle.recordHarnessCorrelator({ schemaVersion: 1, harness, nativeId, requestId: authority.requestId,
-        role: authority.role, attempt: authority.attempt }));
-      const transcript = join(session.directory, `${nativeId}.jsonl`);
-      deliveries.push(async observed => {
-        writeFileSync(transcript, [
-          ...claudeReadLines(reads[index]!),
-          JSON.stringify({ message: { role: "assistant", content: observed.map(text => ({ type: "text", text })) } }),
-        ].join("\n") + "\n");
-        process.env.LOOM_ORCHESTRATION_RUNS_ROOT = handle.identity.runsRoot;
-        process.env.LOOM_ORCHESTRATION_RUN_DIR = handle.runDirectory;
-        return dispatch.runDispatch(JSON.stringify({ session_id: session.sessionId, agent_id: nativeId,
-          agent_type: authority.role, agent_transcript_path: transcript }), []);
-      });
-    }
+    const deliveries = await claudeDeliveries(handle, requests, reads, session, dispatch, toolCallId);
     redeliver = async (observed = texts) => {
       const responses: unknown[] = [];
       for (const [index, deliver] of deliveries.entries()) responses.push(await deliver(observed[index]!));
@@ -70,18 +82,44 @@ async function nativeBatchCapturer(root: string, harness: "claude" | "pi", sessi
   } };
 }
 
-/** Caller owns the ENTIRE session operation. No nested session scope, no ambient cleanup. */
-export async function nativeSuccessorCapture(root: string, harness: "claude" | "pi") {
-  const session = fixtureSession(root);
-  const keys = ["PI_CODING_AGENT_DIR", "LOOM_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "LOOM_PI_EXTENSION_RUNTIME_ROOT", "LOOM_PI_EXTENSION_RUNTIME_REVISION",
-    "LOOM_ORCHESTRATION_RUNS_ROOT", "LOOM_ORCHESTRATION_RUN_DIR"];
-  const previous = keys.map(key => [key, process.env[key]] as const);
+const AMBIENT_ENV_KEYS = ["PI_CODING_AGENT_DIR", "LOOM_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "LOOM_PI_EXTENSION_RUNTIME_ROOT", "LOOM_PI_EXTENSION_RUNTIME_REVISION",
+  "LOOM_ORCHESTRATION_RUNS_ROOT", "LOOM_ORCHESTRATION_RUN_DIR"];
+
+/** Snapshot the env keys and authority bridge a capture session touches; the returned thunk puts them back exactly. */
+function snapshotAmbient(): () => void {
+  const previous = AMBIENT_ENV_KEYS.map(key => [key, process.env[key]] as const);
   const globals = globalThis as unknown as Record<PropertyKey, unknown>;
   const oldBridge = globals[LOOM_REVIEW_AUTHORITY_BRIDGE];
-  const restore = () => {
+  return () => {
     for (const [key, prior] of previous) { if (prior === undefined) delete process.env[key]; else process.env[key] = prior; }
     if (oldBridge === undefined) delete globals[LOOM_REVIEW_AUTHORITY_BRIDGE]; else globals[LOOM_REVIEW_AUTHORITY_BRIDGE] = oldBridge;
   };
+}
+
+/** Load the real Pi extension against `handlers`, with every catalog reviewer's agent definition rendered under `agentDir`. */
+async function installPiExtension(handlers: Map<string, Handler[]>, agentDir: string): Promise<void> {
+  const extension = await import("../../../pi/extension");
+  const render = await import("../../src/utils/render-pi-agent");
+  const { STANDALONE_REVIEWER_ROLES } = await import("../../src/core/standalone-review-scope");
+  for (const role of [...STANDALONE_REVIEWER_ROLES, "review-verifier-agent"]) {
+    writeFileSync(join(agentDir, "agents", `${role}.md`), render.expectedPiAgentDefinition(role, packageRoot));
+  }
+  // Every catalog reviewer is issued on the emission-qualified local route,
+  // so a Pi parent's reviewer spawn is emission-enabled and needs the
+  // installed launcher's v2 capability on the extension event bus. The
+  // scripted children never call the tool: each final falls back to
+  // extraction, the path these suites drive.
+  const events = new SynchronousEventBus();
+  advertiseInstalledLaunchPort(events);
+  const api = { on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
+    registerTool: () => undefined, registerCommand: () => undefined, events };
+  extension.default(api as never, () => []);
+}
+
+/** Caller owns the ENTIRE session operation. No nested session scope, no ambient cleanup. */
+export async function nativeSuccessorCapture(root: string, harness: "claude" | "pi") {
+  const session = fixtureSession(root);
+  const restore = snapshotAmbient();
   try {
     // Shadow only this test worker's inherited transport locators; durable parent bindings and PI admission stay untouched.
     delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
@@ -89,24 +127,7 @@ export async function nativeSuccessorCapture(root: string, harness: "claude" | "
     process.env.PI_CODING_AGENT_DIR = join(session.directory, "pi-agent");
     mkdirSync(join(process.env.PI_CODING_AGENT_DIR, "agents"), { recursive: true });
     const handlers = new Map<string, Handler[]>();
-    if (harness === "pi") {
-      const extension = await import("../../../pi/extension");
-      const render = await import("../../src/utils/render-pi-agent");
-      const { STANDALONE_REVIEWER_ROLES } = await import("../../src/core/standalone-review-scope");
-      for (const role of [...STANDALONE_REVIEWER_ROLES, "review-verifier-agent"]) {
-        writeFileSync(join(process.env.PI_CODING_AGENT_DIR, "agents", `${role}.md`), render.expectedPiAgentDefinition(role, packageRoot));
-      }
-      // Every catalog reviewer is issued on the emission-qualified local route,
-      // so a Pi parent's reviewer spawn is emission-enabled and needs the
-      // installed launcher's v2 capability on the extension event bus. The
-      // scripted children never call the tool: each final falls back to
-      // extraction, the path these suites drive.
-      const events = new SynchronousEventBus();
-      advertiseInstalledLaunchPort(events);
-      const api = { on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
-        registerTool: () => undefined, registerCommand: () => undefined, events };
-      extension.default(api as never, () => []);
-    }
+    if (harness === "pi") await installPiExtension(handlers, process.env.PI_CODING_AGENT_DIR);
     const context = { cwd: root, hasUI: false, sessionManager: { getSessionId: () => session.sessionId, getSessionFile: () => session.sessionFile } };
     const emit: Emit = async (event, payload) => {
       const responses: unknown[] = [];

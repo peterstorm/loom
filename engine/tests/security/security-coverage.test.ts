@@ -20,6 +20,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   COVERAGE_STATUSES,
+  HUNTER_RESULT_KIND,
+  admitArtifactNonce,
   assignUnits,
   catalogAgentOfOwner,
   coverageComplete,
@@ -28,6 +30,8 @@ import {
   mergeCritic,
   parseCoverageSeeds,
   parseCriticResult,
+  parseHunterResult,
+  parseOwnedArtifactPath,
   parseUnitResults,
   recordUnitResult,
   seedCoverageUnit,
@@ -40,7 +44,7 @@ import {
   type CoverageUnit,
 } from "../../src/core/security-coverage";
 import type { DomainResult } from "../../src/core/orchestration-contract/identity";
-import { aSeed, aUnitResult, ok } from "./fixtures";
+import { HUNTER_ENVELOPE, aConfirmedFinding, aSeed, aUnitResult, ok } from "./fixtures";
 
 const require = createRequire(import.meta.url);
 const FIXTURES = join(import.meta.dirname, "..", "fixtures", "security", "upstream");
@@ -446,5 +450,185 @@ describe("coverage ledger: present-but-malformed wire fields are named, never dr
     }));
     expect(fromSeed).toContain("units[0].excluded_blocks[0]");
     expect(fromCritic).toContain("critic.missingUnits[0].excludedBlocks[0]");
+  });
+});
+
+// --- Owned artifact paths and the nonce they may be bound to ---
+
+describe("parseOwnedArtifactPath", () => {
+  it("reads the owner out of agents/<owner>/artifacts/<file…>", () => {
+    expect(parseOwnedArtifactPath(`agents/${HUNTER}/artifacts/repro.txt`)).toEqual({ path: `agents/${HUNTER}/artifacts/repro.txt`, owner: HUNTER });
+    expect(parseOwnedArtifactPath(`agents/${HUNTER}--2/artifacts/deep/repro.txt`)?.owner).toBe(`${HUNTER}--2`);
+  });
+
+  it.each([
+    ["the artifacts root itself", `agents/${HUNTER}/artifacts`],
+    ["a scratch path", `agents/${HUNTER}/scratch/repro.txt`],
+    ["a non-canonical owner", "agents/Hunter/artifacts/repro.txt"],
+    ["a traversal", `agents/${HUNTER}/artifacts/../../x`],
+    ["an absolute path", `/agents/${HUNTER}/artifacts/repro.txt`],
+    ["a non-string", 7],
+  ])("refuses %s", (_case, value) => {
+    expect(parseOwnedArtifactPath(value)).toBeNull();
+  });
+});
+
+describe("admitArtifactNonce", () => {
+  const other = () => seed({ refs: { surface: "http:GET /admin", boundary: "role check", subsystem: "admin", attack_class: "authz-bypass" } });
+  const artifact = `agents/${HUNTER}/artifacts/repro.txt`;
+
+  it("admits an artifact of an owner with a unit in flight, naming every unit it holds", () => {
+    const [first, second] = [seed(), other()];
+    const ledger = assigned(assigned(sortLedger([first, second]), first.coverage_id, HUNTER), second.coverage_id, HUNTER);
+    const admitted = ok(admitArtifactNonce(ledger, artifact));
+    expect(admitted.artifact).toEqual({ path: artifact, owner: HUNTER });
+    expect([...admitted.coverageIds].sort()).toEqual([first.coverage_id, second.coverage_id].sort());
+  });
+
+  it("refuses a malformed artifact path", () => {
+    const refused = admitArtifactNonce(assigned([seed()], seed().coverage_id, HUNTER), `agents/${HUNTER}/scratch/repro.txt`);
+    expect(refused.ok ? null : refused.error.kind).toBe("malformed-artifact-path");
+  });
+
+  it("refuses an owner with no unit in flight: planned, settled, or another owner's", () => {
+    const unit = seed();
+    expect(admitArtifactNonce([unit], artifact).ok ? null : "refused").toBe("refused");
+    const done = settled(assigned([unit], unit.coverage_id, HUNTER), unit.coverage_id, HUNTER, "tenant-scope/cache-key");
+    const afterSettle = admitArtifactNonce(done, artifact);
+    expect(afterSettle.ok ? null : afterSettle.error).toMatchObject({ kind: "no-in-flight-unit", owner: HUNTER });
+    const someoneElse = admitArtifactNonce(assigned([unit], unit.coverage_id, HUNTER), "agents/security-critic-agent/artifacts/repro.txt");
+    expect(someoneElse.ok ? null : someoneElse.error.kind).toBe("no-in-flight-unit");
+  });
+
+  it("refuses an artifact an archived attempt already cited, even for a live owner", () => {
+    const [first, second] = [seed(), other()];
+    const localCheck = {
+      agent_id: HUNTER,
+      reviewed_paths: ["src/reports/controller.ts"],
+      invariant: "the cache key includes the tenant",
+      method: "local" as const,
+      result: "the second tenant read the first tenant's report",
+      artifact,
+    };
+    const inFlight = assigned(assigned(sortLedger([first, second]), first.coverage_id, HUNTER), second.coverage_id, HUNTER);
+    const settledLocal = ok(recordUnitResult(inFlight, {
+      coverageId: first.coverage_id, agentId: HUNTER, wave: 1, status: "covered", reviewedPaths: ["src/reports/controller.ts"], checks: [localCheck],
+    }));
+    const reassigned = ok(mergeCritic(
+      settledLocal,
+      { missingUnits: [], reassignIds: [first.coverage_id], resolvedPriorLeads: [], stop: false },
+      { wave: 2, reassignmentReasons: {} },
+    )).ledger;
+    // HUNTER is still in flight on the second unit, so only the archive refuses.
+    const refused = admitArtifactNonce(reassigned, artifact);
+    expect(refused.ok ? null : refused.error).toMatchObject({ kind: "archived-artifact", coverageId: first.coverage_id });
+    expect(ok(admitArtifactNonce(reassigned, `agents/${HUNTER}/artifacts/fresh.txt`)).coverageIds).toEqual([second.coverage_id]);
+  });
+});
+
+// --- The hunter's own envelope ---
+
+describe("parseHunterResult", () => {
+  const unit = () => aUnitResult();
+
+  it("parses the envelope, its unit results and its records (sorted before the parse)", () => {
+    const parsed = ok(parseHunterResult({
+      ...HUNTER_ENVELOPE,
+      units: [unit()],
+      findings: [aConfirmedFinding({ fingerprint: "z/late" }), aConfirmedFinding({ fingerprint: "a/early", root_cause: "Another cause." })],
+    }));
+    expect(parsed.units).toHaveLength(1);
+    expect(parsed.findings.map((finding) => finding.fingerprint)).toEqual(["a/early", "z/late"]);
+    expect(ok(parseHunterResult({ ...HUNTER_ENVELOPE, units: [unit()] })).findings).toEqual([]);
+  });
+
+  it("names its own kind", () => {
+    expect(HUNTER_RESULT_KIND).toBe("security-hunter-result");
+    expect(HUNTER_ENVELOPE.kind).toBe(HUNTER_RESULT_KIND);
+  });
+
+  it.each([
+    ["the borrowed reviewer label", { schemaVersion: 2, kind: "standalone-review", units: [aUnitResult()] }, ["kind", "schemaVersion"]],
+    ["an unknown top-level key", { ...HUNTER_ENVELOPE, units: [aUnitResult()], extra: true }, ["$.extra"]],
+    ["a missing units list", { ...HUNTER_ENVELOPE, findings: [] }, ["units"]],
+    ["units that are not a list", { ...HUNTER_ENVELOPE, units: "all" }, ["units"]],
+    ["a non-object", "units", ["$"]],
+    ["an empty result", { ...HUNTER_ENVELOPE, units: [], findings: [] }, ["$"]],
+  ])("refuses %s, naming the path", (_case, raw, paths) => {
+    const refused = parseHunterResult(raw);
+    expect(refused.ok).toBe(false);
+    expect(refused.ok ? [] : refused.error.violations.map((entry) => entry.path).sort()).toEqual(paths);
+  });
+
+  it("reports a malformed unit and a malformed record together, each under its own list", () => {
+    const refused = parseHunterResult({ ...HUNTER_ENVELOPE, units: [aUnitResult({ status: "maybe" })], findings: [{ verdict: "maybe" }] });
+    const paths = refused.ok ? [] : refused.error.violations.map((entry) => entry.path);
+    expect(paths).toContain("units[0].status");
+    expect(paths).toContain("findings[0].verdict");
+  });
+});
+
+describe("parseCriticResult parses each proposal's refs", () => {
+  it("refuses a proposal whose refs are not a canonical tuple, at the proposal's own path", () => {
+    const refused = parseCriticResult({
+      schemaVersion: 1,
+      kind: "security-coverage-critic",
+      missingUnits: [{ refs: { surface: "x" }, startingPaths: ["src/a.ts"], ordinaryAttackClassBlock: null, selectedCompanionBlocks: [], excludedBlocks: [] }],
+      reassignIds: [],
+      resolvedPriorLeads: [],
+    });
+    expect(refused.ok).toBe(false);
+    expect(refused.ok ? [] : refused.error.violations.map((entry) => entry.path)).toEqual(["critic.missingUnits[0].refs"]);
+  });
+});
+
+// --- Each defect is reported once ---
+
+describe("a defect is reported once, wherever it sits", () => {
+  const UNSAFE = "../etc/passwd";
+  const unsafeEvidence = (agent_id: string) => ({
+    reviewed_paths: [UNSAFE],
+    local_checks: [{ ...evidence(agent_id, "x").checks[0], reviewed_paths: [UNSAFE] }],
+  });
+  const violationsAt = (violations: readonly { path: string; message: string }[], path: string) =>
+    violations.filter((entry) => entry.path === path);
+
+  it("names an archived attempt's unsafe reviewed path once, exactly as a live unit's", () => {
+    const unit = seed();
+    const live = { ...unit, status: "covered" as const, agent_id: HUNTER, ...unsafeEvidence(HUNTER) };
+    const archived = {
+      ...unit,
+      wave: 2,
+      attempts: [{
+        wave: 1,
+        status: "covered" as const,
+        agent_id: HUNTER,
+        ...unsafeEvidence(HUNTER),
+        result_fingerprints: [],
+        unresolved: [],
+        reassignment_reason: "critic: walk it again",
+      }],
+    };
+    const liveViolations = violationsAt(validateLedger([live]), "$[0].reviewed_paths");
+    const archivedViolations = violationsAt(validateLedger([archived]), "$[0].attempts[0].reviewed_paths");
+    expect(liveViolations).toEqual([{ path: "$[0].reviewed_paths", message: "unsafe source path" }]);
+    expect(archivedViolations).toEqual([{ path: "$[0].attempts[0].reviewed_paths", message: "unsafe source path" }]);
+  });
+
+  const CRITIC: Readonly<Record<string, unknown>> = { schemaVersion: 1, kind: "security-coverage-critic", missingUnits: [], reassignIds: [], resolvedPriorLeads: [] };
+
+  it.each([
+    ["missingUnits", "expected an array of proposals"],
+    ["reassignIds", "expected an array of strings"],
+    ["resolvedPriorLeads", "expected an array of strings"],
+  ])("names a present but non-array critic %s once", (key, message) => {
+    const refused = parseCriticResult({ ...CRITIC, [key]: "not-a-list" });
+    expect(refused.ok ? [] : refused.error.violations).toEqual([{ path: `critic.${key}`, message }]);
+  });
+
+  it.each(["missingUnits", "reassignIds", "resolvedPriorLeads"])("names a missing critic %s once, as required", (key) => {
+    const { [key]: _omitted, ...rest } = CRITIC;
+    const refused = parseCriticResult(rest);
+    expect(refused.ok ? [] : refused.error.violations).toEqual([{ path: `critic.${key}`, message: "required: expected an array" }]);
   });
 });

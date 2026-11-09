@@ -134,8 +134,12 @@ function enumError(label: string, value: string, allowed: readonly string[]): st
   return `${label} must be one of: ${allowed.join(", ")}; received: ${value || "<empty>"}`;
 }
 
-/** Parse the interviewer markdown boundary into a complete, typed digest. */
-export function parseInterviewDigest(markdown: string): ParseResult<InterviewDigest> {
+/** Each labeled field's value; a label not present exactly once at column 0,
+ *  or present with an empty value, records its error instead. */
+function readInterviewFields(markdown: string): {
+  values: Partial<Record<InterviewField, string>>;
+  errors: string[];
+} {
   const lines = markdown.split(/\r?\n/);
   const values: Partial<Record<InterviewField, string>> = {};
   const errors: string[] = [];
@@ -153,21 +157,29 @@ export function parseInterviewDigest(markdown: string): ParseResult<InterviewDig
     }
     values[key] = value;
   }
+  return { values, errors };
+}
 
-  const primaryAxis = values.primaryAxis?.toLowerCase();
-  if (primaryAxis && !(PRIMARY_AXES as readonly string[]).includes(primaryAxis)) {
-    errors.push(enumError("Primary axis", values.primaryAxis!, PRIMARY_AXES));
-  }
+/** A closed-vocabulary field's value, lower-cased; a value outside `allowed`
+ *  records its error. */
+function closedVocabularyValue(
+  label: string,
+  raw: string | undefined,
+  allowed: readonly string[],
+  errors: string[],
+): string | undefined {
+  const value = raw?.toLowerCase();
+  if (value && !allowed.includes(value)) errors.push(enumError(label, raw!, allowed));
+  return value;
+}
 
-  const testabilityBar = values.testabilityBar?.toLowerCase();
-  if (testabilityBar && !(TESTABILITY_BARS as readonly string[]).includes(testabilityBar)) {
-    errors.push(enumError("Testability bar", values.testabilityBar!, TESTABILITY_BARS));
-  }
+/** Parse the interviewer markdown boundary into a complete, typed digest. */
+export function parseInterviewDigest(markdown: string): ParseResult<InterviewDigest> {
+  const { values, errors } = readInterviewFields(markdown);
 
-  const codebaseMaturity = values.codebaseMaturity?.toLowerCase();
-  if (codebaseMaturity && !(CODEBASE_MATURITIES as readonly string[]).includes(codebaseMaturity)) {
-    errors.push(enumError("Codebase maturity", values.codebaseMaturity!, CODEBASE_MATURITIES));
-  }
+  const primaryAxis = closedVocabularyValue("Primary axis", values.primaryAxis, PRIMARY_AXES, errors);
+  const testabilityBar = closedVocabularyValue("Testability bar", values.testabilityBar, TESTABILITY_BARS, errors);
+  const codebaseMaturity = closedVocabularyValue("Codebase maturity", values.codebaseMaturity, CODEBASE_MATURITIES, errors);
 
   const sensitiveBoundaries = values.sensitiveBoundaries;
   const sensitiveStatus = sensitiveBoundaries?.match(SENSITIVE_BOUNDARY_PREFIX)?.[1]?.toLowerCase();

@@ -147,7 +147,7 @@ Each program's Run Directory stores immutable events and a checkpoint projection
 
 ### Security audit
 
-`security-audit` is a registered program in the same sense (ADR-0064): ten
+`security-audit` is a registered program in the same sense (ADR-0064): eleven
 operations over one run directory, with a closed action set and a traits table
 the CLI reads before importing the helper.
 

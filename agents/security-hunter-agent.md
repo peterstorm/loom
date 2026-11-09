@@ -23,8 +23,10 @@ attack class.
 
 The brief names: the surface, the boundary, the subsystem, the attack class, the
 starting paths, the ordinary attack-class block, the selected companion blocks,
-and the excluded blocks with their reasons. A unit you cannot start from its
-starting paths is `blocked` — say so, do not widen scope.
+and the excluded blocks with their reasons. When a bounded local run is
+wanted, it also carries what `loom helper security-audit nonce` printed for one
+artifact of yours: the nonce and the exact sandbox command, filled in. A unit you
+cannot start from its starting paths is `blocked` — say so, do not widen scope.
 
 ## Rules that decide the verdict
 
@@ -42,20 +44,27 @@ starting paths is `blocked` — say so, do not widen scope.
    - `rejected` — the claim does not hold. Keep it: a later run must bring
      changed evidence, not re-report it.
 3. **A claim of "reproduced" needs a receipt.** The only way to demonstrate a
-   result is:
+   result is the sandbox command your brief prints — the output of
+   `loom helper security-audit nonce --out <run> --artifact agents/<your-owner-id>/artifacts/<file>`,
+   which you cannot compute yourself. It has this shape, every value filled in:
 
    ```
+   mkdir -p <run>/agents/<your-owner-id>/artifacts
    scripts/security-sandbox.sh --target <repo> --scratch <run>/agents/<your-owner-id>/scratch \
      --cpu 10 --mem-mb 1024 --procs 128 --file-mb 32 --wall 60 --scratch-mb 64 \
-     --nonce <the nonce your brief prints> -- <command>
+     --nonce <the printed nonce> -- <command> > <run>/agents/<your-owner-id>/artifacts/<file>
    ```
 
-   No external network, no writable target and no writable home, an allowlisted
-   environment (`PATH HOME TMPDIR LANG TERM`). The nonce binds the receipt to
-   the artifact path your ledger entry names. `--scratch-mb` is checked after
-   the run, against the measured footprint. If the sandbox cannot start, the
-   finding is `needs_validation` naming the missing capability — never run the
-   command unsandboxed and call it observed.
+   Replace only `<command>`; keep every flag and the redirect exactly as
+   printed, and cite `agents/<your-owner-id>/artifacts/<file>` as the check's
+   `artifact`. The nonce binds the receipt to that one artifact path: a receipt
+   in another file, or under another nonce, is refused. No external network, no
+   writable target and no writable home, an allowlisted environment
+   (`PATH HOME TMPDIR LANG TERM`). `--scratch-mb` is checked after the run,
+   against the measured footprint. If the sandbox cannot start — or your brief
+   carries no nonce for the artifact you need — the finding is
+   `needs_validation` naming the missing capability; never run the command
+   unsandboxed and call it observed.
 4. **Fresh owner, one attempt.** Your owner id is the one `assign` printed in
    your brief (`assigned <coverage-id> to owner <owner-id> at wave <n>`): the
    bare catalog name `security-hunter-agent` for a unit's first attempt,
@@ -68,6 +77,9 @@ starting paths is `blocked` — say so, do not widen scope.
 5. **One root cause, one fingerprint.** The fingerprint is source-derived and
    stable across waves, severities and edits of the same defect. Do not fold two
    independent defects into one claim, and do not split one defect per call site.
+   A fingerprint the run already holds is not yours to rewrite: `submit` refuses
+   a record for it whose content differs from the one on file. Omit it, or file
+   it byte-identical — verification adjudicates the record the run already has.
 
 ## Lenses
 
@@ -82,17 +94,18 @@ project's own authority map, not a paraphrase of them.
 
 ## Output
 
-Return exactly one JSON object, and nothing else: the **security-hunter result
-envelope** that `submit` parses. It borrows the `kind: "standalone-review"` label
-and `schemaVersion: 2` from the reviewer payload, but it is NOT a reviewer
-payload and is not valid against `reviewer-payload-schema` — it carries `units`
-and upstream `findings` records instead. The example uses the first-attempt
-owner id; write the one your brief printed.
+Return exactly one JSON object, and nothing else: the **security-hunter result**
+that `submit` parses, under its own kind. It is not a reviewer payload — it
+carries `units` and upstream `findings` records — and `submit` refuses any
+other `kind` or `schemaVersion`, and any top-level key besides these four.
+`units` is required (an empty list when you only file records); `findings` is
+optional. The example uses the first-attempt owner id; write the one your brief
+printed.
 
 ```json
 {
-  "schemaVersion": 2,
-  "kind": "standalone-review",
+  "schemaVersion": 1,
+  "kind": "security-hunter-result",
   "units": [
     {
       "coverageId": "<the unit's coverage_id, verbatim>",

@@ -79,19 +79,19 @@ const skillCommands = (content: unknown): readonly TranscriptEvent[] => {
   return [...text.matchAll(SKILL_BLOCK_RE)].map((m): TranscriptEvent => ({ kind: "skill-command", name: stripNamespace(m[1] ?? "") }));
 };
 
+const assistantPartEvents = (part: Record<string, unknown>, messageId: string): readonly TranscriptEvent[] => {
+  if (part["type"] === "toolCall") return [toolCallEvent(part, messageId)];
+  if (part["type"] === "text" && typeof part["text"] === "string") return [{ kind: "text", messageId, text: part["text"] }];
+  return [];
+};
+
 const messageEvents = (message: Record<string, unknown>, messageId: string): readonly TranscriptEvent[] => {
   if (message["role"] === "toolResult") {
     return [{ kind: "result", callId: asString(message["toolCallId"]), ok: message["isError"] !== true }];
   }
   if (message["role"] === "user") return skillCommands(message["content"]);
   if (message["role"] !== "assistant" || !Array.isArray(message["content"])) return [];
-  return message["content"].filter(isRecord).flatMap((part): readonly TranscriptEvent[] =>
-    part["type"] === "toolCall"
-      ? [toolCallEvent(part, messageId)]
-      : part["type"] === "text" && typeof part["text"] === "string"
-        ? [{ kind: "text", messageId, text: part["text"] }]
-        : [],
-  );
+  return message["content"].filter(isRecord).flatMap((part) => assistantPartEvents(part, messageId));
 };
 
 /**

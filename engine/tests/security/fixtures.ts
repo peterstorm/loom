@@ -237,8 +237,24 @@ export function aHunterBallot(overrides: Record<string, unknown> = {}): Record<s
   return aVerdict({ agent: "security-hunter-agent", profile: HUNT_PROFILE, wave: 1, ...clone(overrides) });
 }
 
-/** A hunter's settlement payload for one unit (what `submit` reads), matching
- *  the default seed from `aSeed()`. */
+/** The identity every hunter result carries — spread into a submit payload. */
+export const HUNTER_ENVELOPE = Object.freeze({ schemaVersion: 1, kind: "security-hunter-result" });
+
+/** The envelope `submit` reads: the hunter's own kind around its unit results
+ *  and filed records. `units` is required (empty when only filing findings). */
+export function aHunterResult(
+  units: readonly unknown[],
+  findings?: readonly unknown[],
+): Record<string, unknown> {
+  return {
+    ...HUNTER_ENVELOPE,
+    units: clone(units),
+    ...(findings === undefined ? {} : { findings: clone(findings) }),
+  };
+}
+
+/** A hunter's settlement for one unit (an entry of `aHunterResult`'s `units`),
+ *  matching the default seed from `aSeed()`. */
 export function aUnitResult(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     coverageId: canonicalCoverageId(aRefs()),

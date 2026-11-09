@@ -108,7 +108,7 @@ export const PI_RUNTIME_HANDSHAKE_ROUTES: ReadonlySet<string> = new Set([
   "helper/orchestration",
   // A security-audit run owns a run directory and its coverage ledger; a
   // Pi-launched process must prove it matches the extension runtime before
-  // moving either. The helper's read-only projections (`status`, `findings`)
+  // moving either. The helper's read-only operations (`status`, `findings`, `nonce`)
   // are exempted per operation below, so a run stays diagnosable during skew.
   "helper/security-audit",
 ]);

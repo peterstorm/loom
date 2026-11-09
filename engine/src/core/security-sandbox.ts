@@ -28,7 +28,7 @@
  */
 
 import { failure, success, type DomainResult } from "./orchestration-contract/identity";
-import { SECURITY_AUDIT_LIMITS, isSafeSourcePath, isVisibleText } from "./security-audit-contract";
+import { SECURITY_AUDIT_LIMITS, isSafeSourcePath, isVisibleText, isWireRecord } from "./security-audit-contract";
 
 /** The exact environment names a sandboxed child receives, in the order the
  *  script's `ENV_ASSIGNMENTS` passes them. Everything else is dropped, so an
@@ -80,10 +80,10 @@ const LIMIT_KEYS = Object.keys(LIMIT_FLOORS) as readonly (keyof SandboxLimits)[]
  *  [floor, ceiling]. Hand-rolled rather than schema-generated so the receipt
  *  grammar and the receipt parser sit in one readable file. */
 export function parseSandboxLimits(raw: unknown): DomainResult<SandboxLimits, SandboxError> {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isWireRecord(raw)) {
     return failure({ kind: "invalid-sandbox-limits" as const, message: "limits must be an object" });
   }
-  const record = raw as Record<string, unknown>;
+  const record = raw;
   const keys = Object.keys(record);
   const unexpected = keys.filter((key) => !LIMIT_KEYS.includes(key as keyof SandboxLimits));
   if (unexpected.length > 0) {
@@ -162,7 +162,10 @@ export type SandboxReceipt = Readonly<{
   /** Measured AFTER the run; nothing capped the scratch while it ran. */
   scratchBytes: number | null;
   networkNamespace: true;
-  targetReadOnly: true;
+  /** A write to the target FAILED inside the sandbox — observed by the script,
+   *  which reports it only on a facts line printed after that probe; a missing
+   *  line reads as `false`. Gated: a writable target is not a bounded run. */
+  targetReadOnly: boolean;
   readOnlyRoot: boolean;
   /** A write to the operator's home FAILED inside the sandbox — observed by the
    *  script's probe, not inferred from a remount that returned zero; an unknown
@@ -189,8 +192,8 @@ const ENFORCEMENT_KEYS = ["cpu", "memory", "processes", "fileSize"] as const;
 export function parseSandboxReceiptValue(raw: unknown): DomainResult<SandboxReceipt, SandboxError> {
   const invalid = (message: string): DomainResult<SandboxReceipt, SandboxError> =>
     failure({ kind: "invalid-sandbox-receipt" as const, message });
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return invalid("receipt must be an object");
-  const record = raw as Record<string, unknown>;
+  if (!isWireRecord(raw)) return invalid("receipt must be an object");
+  const record = raw;
   const unexpected = Object.keys(record).filter((key) => !RECEIPT_KEYS.includes(key as (typeof RECEIPT_KEYS)[number]));
   if (unexpected.length > 0) return invalid(`unexpected field(s): ${unexpected.join(", ")}`);
   if (record.schemaVersion !== 1) return invalid("schemaVersion must be 1");
@@ -213,7 +216,7 @@ export function parseSandboxReceiptValue(raw: unknown): DomainResult<SandboxRece
     return invalid("scratchBytes must be null or a non-negative integer");
   }
   if (record.networkNamespace !== true) return invalid("networkNamespace must be true");
-  if (record.targetReadOnly !== true) return invalid("targetReadOnly must be true");
+  if (typeof record.targetReadOnly !== "boolean") return invalid("targetReadOnly must be a boolean");
   if (typeof record.readOnlyRoot !== "boolean") return invalid("readOnlyRoot must be a boolean");
   if (typeof record.homeReadOnly !== "boolean") return invalid("homeReadOnly must be a boolean");
   const unremountedMounts = record.unremountedMounts;
@@ -230,9 +233,9 @@ export function parseSandboxReceiptValue(raw: unknown): DomainResult<SandboxRece
       allowlistedEnv: SANDBOX_ENV_ALLOWLIST,
       scratchBytes: scratchBytes as number | null,
       networkNamespace: true as const,
-      targetReadOnly: true as const,
-      readOnlyRoot: record.readOnlyRoot as boolean,
-      homeReadOnly: record.homeReadOnly as boolean,
+      targetReadOnly: record.targetReadOnly,
+      readOnlyRoot: record.readOnlyRoot,
+      homeReadOnly: record.homeReadOnly,
       unremountedMounts,
       enforced: Object.freeze(enforced),
     }),
@@ -243,8 +246,8 @@ export function parseSandboxReceiptValue(raw: unknown): DomainResult<SandboxRece
  *  unknown key or a non-boolean means the receipt is not trustworthy, because
  *  this block is the difference between "bounded" and "claimed bounded". */
 function parseEnforcement(raw: unknown): SandboxEnforcement | Readonly<{ message: string }> {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { message: "enforced must be an object" };
-  const record = raw as Record<string, unknown>;
+  if (!isWireRecord(raw)) return { message: "enforced must be an object" };
+  const record = raw;
   const unexpected = Object.keys(record).filter((key) => !ENFORCEMENT_KEYS.includes(key as (typeof ENFORCEMENT_KEYS)[number]));
   if (unexpected.length > 0) return { message: `unexpected enforced field(s): ${unexpected.join(", ")}` };
   const missing = ENFORCEMENT_KEYS.find((key) => typeof record[key] !== "boolean");
@@ -295,6 +298,11 @@ export type SandboxRequest = Readonly<{
 
 export type SandboxRequestError = Readonly<{ kind: "invalid-sandbox-request"; message: string }>;
 
+/** Whether `path` is `directory` or lies below it — the script's own
+ *  scratch-outside-target rule, compared on the paths as given. */
+const liesWithin = (path: string, directory: string): boolean =>
+  path === directory || path.startsWith(`${directory.replace(/\/$/, "")}/`);
+
 /**
  * The argv a hunter runs. Scratch must sit outside the target (a scratch inside
  * the target would be remounted read-only with it), and the command may not be
@@ -311,7 +319,7 @@ export function sandboxCommand(request: SandboxRequest): DomainResult<readonly s
   if (request.command.some((part) => part.includes("\u0000") || !isVisibleText(part, SECURITY_AUDIT_LIMITS.proseLength))) {
     return fail("command arguments must be visible text");
   }
-  if (request.scratch === request.target || request.scratch.startsWith(`${request.target.replace(/\/$/, "")}/`)) {
+  if (liesWithin(request.scratch, request.target)) {
     return fail("scratch must live outside the target");
   }
   const validated = parseSandboxLimits(request.limits);
@@ -354,8 +362,9 @@ export function sandboxCommand(request: SandboxRequest): DomainResult<readonly s
  *     (`--file-mb` bounds each single file, not the directory), so it proves
  *     what was left behind, not the peak. An unmeasured footprint is not a
  *     passing one;
- *   - the target was really remounted read-only — the script exits 127 when the
- *     bind remount fails, so `targetReadOnly: true` is proven, not asserted;
+ *   - the target is closed (`targetReadOnly`): the script reports it only after
+ *     a write to the target actually FAILED, and stops before the command when
+ *     it did not, so a missing facts line reads as open;
  *   - home is closed (`homeReadOnly`): the script sets it only after a write to
  *     home actually FAILED inside the sandbox, so a remount that silently
  *     missed, or an unknown home, reads as open;
@@ -368,23 +377,20 @@ export function sandboxCommand(request: SandboxRequest): DomainResult<readonly s
  *  filesystem. `describeUnboundedRun` names which gated condition failed.
  */
 export function sandboxWithinLimits(receipt: SandboxReceipt): boolean {
-  return (
-    receipt.exit === 0 &&
-    receipt.scratchBytes !== null &&
-    receipt.scratchBytes <= receipt.limits.scratchMb * 1024 * 1024 &&
-    receipt.targetReadOnly &&
-    receipt.homeReadOnly &&
-    receipt.enforced.cpu &&
-    receipt.enforced.memory &&
-    receipt.enforced.processes &&
-    receipt.enforced.fileSize
-  );
+  return unboundedRunReasons(receipt).length === 0;
 }
 
 /** Why a receipt does not prove a bounded run, in one line a hunter can act
  *  on: one reason per gated condition of `sandboxWithinLimits` that failed. */
 export function describeUnboundedRun(receipt: SandboxReceipt): string {
-  const failed = [
+  return unboundedRunReasons(receipt).join("; ") || "unknown";
+}
+
+/** The gate itself: one reason per failed condition. `sandboxWithinLimits` and
+ *  `describeUnboundedRun` both read THIS list, so the verdict and its
+ *  explanation cannot name different conditions. */
+function unboundedRunReasons(receipt: SandboxReceipt): readonly string[] {
+  return [
     ...(receipt.exit === 0 ? [] : [`exit ${String(receipt.exit)}`]),
     ...(receipt.scratchBytes === null ? ["scratch footprint unmeasured"] : []),
     ...(receipt.scratchBytes !== null && receipt.scratchBytes > receipt.limits.scratchMb * 1024 * 1024
@@ -394,9 +400,9 @@ export function describeUnboundedRun(receipt: SandboxReceipt): string {
     ...(receipt.enforced.memory ? [] : ["memory limit not applied"]),
     ...(receipt.enforced.processes ? [] : ["process limit not applied"]),
     ...(receipt.enforced.fileSize ? [] : ["file-size limit not applied"]),
+    ...(receipt.targetReadOnly ? [] : ["target not remounted read-only"]),
     ...(receipt.homeReadOnly ? [] : ["home directory not remounted read-only"]),
   ];
-  return failed.join("; ") || "unknown";
 }
 
 /** The judgement on one `local` check: the artifact's text must hold a receipt
@@ -413,18 +419,80 @@ export function judgeLocalReceipt(text: string, artifact: string): DomainResult<
   return success(receipt.value);
 }
 
-/** The block a hunter prompt carries verbatim: what it may run and how. The
- *  nonce is supplied by the engine because the receipt is bound to the artifact
- *  path the hunter itself names, and a receipt without it is refused. */
-export function renderSandboxInstructions(limits: SandboxLimits, nonce: string): string {
+/** Everything one sandbox run is bound to: the nonce derived from the artifact
+ *  the receipt will be cited as, where the run reads and writes, and the file its
+ *  stdout must land in. */
+export type SandboxBinding = Readonly<{
+  nonce: string;
+  /** The frozen target the run audits. */
+  target: string;
+  /** The owner's scratch directory, `<run>/agents/<owner-id>/scratch`. */
+  scratch: string;
+  /** The run-relative path the local check cites (`agents/<owner-id>/artifacts/<file>`). */
+  artifact: string;
+  /** Where that artifact lives on disk: the file stdout is redirected into. */
+  artifactFile: string;
+}>;
+
+export type SandboxPlacement = Readonly<{
+  /** The run's frozen target directory. */
+  target: string;
+  /** The run directory, absolute. */
+  runDir: string;
+  /** The owner whose scratch the run uses. */
+  owner: string;
+  /** The run-relative artifact the receipt will be cited as. */
+  artifact: string;
+}>;
+
+export type SandboxBindingRefusal = Readonly<{ kind: "scratch-inside-target"; scratch: string; target: string; message: string }>;
+
+/**
+ * Bind one sandbox run to one artifact of a run directory: the nonce derived
+ * from the artifact path (the same derivation `judgeLocalReceipt` checks), the
+ * owner's scratch `<run>/agents/<owner>/scratch`, and the file stdout lands in.
+ *
+ * Refused when that scratch lies inside the target: the script refuses such a
+ * scratch, so a binding for it would hand the hunter a run that cannot start —
+ * the run directory has to live outside the audited repository.
+ */
+export function bindSandboxRun(placement: SandboxPlacement): DomainResult<SandboxBinding, SandboxBindingRefusal> {
+  const runDir = placement.runDir.replace(/\/+$/, "");
+  const scratch = `${runDir}/agents/${placement.owner}/scratch`;
+  if (liesWithin(scratch, placement.target)) {
+    return failure({
+      kind: "scratch-inside-target" as const,
+      scratch,
+      target: placement.target,
+      message: `the scratch ${scratch} lies inside the target ${placement.target}, and the sandbox refuses a scratch inside ` +
+        "the target — start the run with an --out directory outside the audited repository",
+    });
+  }
+  return success({
+    nonce: sandboxNonce(placement.artifact),
+    target: placement.target,
+    scratch,
+    artifact: placement.artifact,
+    artifactFile: `${runDir}/${placement.artifact}`,
+  });
+}
+
+/** The block a hunter is handed verbatim: what it may run and how, bound to one
+ *  artifact. The nonce is supplied by the engine because the receipt is bound to
+ *  the artifact path, and a receipt in any other file, or without the nonce, is
+ *  refused. */
+export function renderSandboxInstructions(limits: SandboxLimits, binding: SandboxBinding): string {
+  const artifactDirectory = binding.artifactFile.slice(0, binding.artifactFile.lastIndexOf("/"));
   return [
     "Bounded local execution (the only way to claim an observed result):",
-    `  scripts/security-sandbox.sh --target <repo> --scratch <run>/agents/<your-agent-id>/scratch \\`,
+    `  mkdir -p ${artifactDirectory}`,
+    `  scripts/security-sandbox.sh --target ${binding.target} --scratch ${binding.scratch} \\`,
     `    --cpu ${limits.cpuSeconds} --mem-mb ${limits.addressSpaceMb} --procs ${limits.processes} \\`,
     `    --file-mb ${limits.fileSizeMb} --wall ${limits.wallClockSeconds} --scratch-mb ${limits.scratchMb} \\`,
-    `    --nonce ${nonce} -- <command> [args...]`,
+    `    --nonce ${binding.nonce} -- <command> [args...] > ${binding.artifactFile}`,
     "No external network, no writable target or home, no inherited environment, no dependency installation.",
-    "A receipt without that --nonce is refused: redirect the script's stdout to the artifact your ledger entry names, and keep the flag exactly as printed.",
+    `Redirect the script's stdout to exactly ${binding.artifactFile} and cite it as the local check's artifact ` +
+      `"${binding.artifact}". The receipt is bound to that path: a receipt in any other file, or without that --nonce, is refused.`,
     "If the sandbox cannot start, record needs_validation naming the missing capability — do not run the command anyway.",
   ].join("\n");
 }

@@ -216,30 +216,7 @@ function latestMavenVerdict(input: string): RunnerVerdict | null {
       summary: match[0],
     }));
   const tallyMatches = allMatches(stripped, /Tests run: (\d+), Failures: (\d+), Errors: (\d+)/);
-  const tallies = tallyMatches.map((match): RunnerVerdict => {
-    const executed = tallyCount(match);
-    const failed = match[2] !== "0" || match[3] !== "0";
-    const terminal = terminals.find(({ position }) => position > match.index);
-    const supersedingStart = starts.find(({ index }) =>
-      index > match.index && (terminal === undefined || index < terminal.position));
-    if (failed) {
-      return Object.freeze({ label: "maven", position: match.index, kind: "failed", summary: match[0] });
-    }
-    if (terminal?.kind !== "success" || supersedingStart !== undefined) {
-      return Object.freeze({
-        label: "maven",
-        position: match.index,
-        kind: "failed",
-        summary: `incomplete run: ${match[0]}`,
-      });
-    }
-    return Object.freeze({
-      label: "maven",
-      position: match.index,
-      kind: executed === 0 ? "zero" : "passed",
-      summary: executed === 0 ? "0 tests executed" : match[0],
-    });
-  });
+  const tallies = tallyMatches.map((match) => mavenTallyVerdict(match, starts, terminals));
   const buildFailures = terminals
     .filter(({ kind }) => kind === "failure")
     .map((terminal): RunnerVerdict => Object.freeze({
@@ -248,28 +225,67 @@ function latestMavenVerdict(input: string): RunnerVerdict | null {
       kind: "failed",
       summary: terminal.summary,
     }));
-  const emptyOrIncompleteRuns = starts.flatMap((start): readonly RunnerVerdict[] => {
-    const terminal = terminals.find(({ position }) => position > start.index);
-    const nextStart = starts.find(({ index }) => index > start.index);
-    if (terminal === undefined || (nextStart !== undefined && nextStart.index < terminal.position)) {
-      return [Object.freeze({
-        label: "maven",
-        position: start.index,
-        kind: "failed" as const,
-        summary: `incomplete run: ${start[0].trim()}`,
-      })];
-    }
-    const hasTally = tallyMatches.some(({ index }) => index > start.index && index < terminal.position);
-    return terminal.kind === "success" && !hasTally
-      ? [Object.freeze({
-          label: "maven",
-          position: terminal.position,
-          kind: "zero" as const,
-          summary: "0 tests executed",
-        })]
-      : [];
-  });
+  const emptyOrIncompleteRuns = starts.flatMap((start) =>
+    mavenRunVerdicts(start, starts, terminals, tallyMatches));
   return latestPositionVerdict([...tallies, ...buildFailures, ...emptyOrIncompleteRuns]);
+}
+
+/** One `Tests run:` tally, judged against the build that terminates it. */
+function mavenTallyVerdict(
+  match: MatchWithIndex,
+  starts: readonly MatchWithIndex[],
+  terminals: readonly MavenTerminal[],
+): RunnerVerdict {
+  const executed = tallyCount(match);
+  const failed = match[2] !== "0" || match[3] !== "0";
+  const terminal = terminals.find(({ position }) => position > match.index);
+  const supersedingStart = starts.find(({ index }) =>
+    index > match.index && (terminal === undefined || index < terminal.position));
+  if (failed) {
+    return Object.freeze({ label: "maven", position: match.index, kind: "failed", summary: match[0] });
+  }
+  if (terminal?.kind !== "success" || supersedingStart !== undefined) {
+    return Object.freeze({
+      label: "maven",
+      position: match.index,
+      kind: "failed",
+      summary: `incomplete run: ${match[0]}`,
+    });
+  }
+  return Object.freeze({
+    label: "maven",
+    position: match.index,
+    kind: executed === 0 ? "zero" : "passed",
+    summary: executed === 0 ? "0 tests executed" : match[0],
+  });
+}
+
+/** A Maven run start that never terminated, or that succeeded without a tally. */
+function mavenRunVerdicts(
+  start: MatchWithIndex,
+  starts: readonly MatchWithIndex[],
+  terminals: readonly MavenTerminal[],
+  tallyMatches: readonly MatchWithIndex[],
+): readonly RunnerVerdict[] {
+  const terminal = terminals.find(({ position }) => position > start.index);
+  const nextStart = starts.find(({ index }) => index > start.index);
+  if (terminal === undefined || (nextStart !== undefined && nextStart.index < terminal.position)) {
+    return [Object.freeze({
+      label: "maven",
+      position: start.index,
+      kind: "failed" as const,
+      summary: `incomplete run: ${start[0].trim()}`,
+    })];
+  }
+  const hasTally = tallyMatches.some(({ index }) => index > start.index && index < terminal.position);
+  return terminal.kind === "success" && !hasTally
+    ? [Object.freeze({
+        label: "maven",
+        position: terminal.position,
+        kind: "zero" as const,
+        summary: "0 tests executed",
+      })]
+    : [];
 }
 
 export function extractTestEvidence(bashOutput: string): TestEvidence {

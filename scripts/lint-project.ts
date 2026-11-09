@@ -111,25 +111,10 @@ function walkSource(dir: string, opts: { includeTests: boolean }): string[] {
 // Init command — scaffold linter config
 // ---------------------------------------------------------------------------
 
-function initLinterConfig(): void {
-  if (existsSync(RULES_DIR)) {
-    console.log(`Linter rules directory already exists: ${relative(PROJECT_ROOT, RULES_DIR)}`);
-    console.log("To add rules, create .json files there. See loom lint-rules/README.md.");
-    return;
-  }
-
-  mkdirSync(RULES_DIR, { recursive: true });
-
-  // Detect project language
-  const hasTs = existsSync(join(PROJECT_ROOT, "tsconfig.json")) ||
-    existsSync(join(PROJECT_ROOT, "tsconfig.base.json"));
-  const hasJava = existsSync(join(PROJECT_ROOT, "pom.xml")) ||
-    existsSync(join(PROJECT_ROOT, "build.gradle")) ||
-    existsSync(join(PROJECT_ROOT, "build.gradle.kts"));
-
-  // Create starter config.json
+/** The starter programmatic config for a project's detected languages; Java's
+ *  settings win where both are present. */
+function starterLinterConfig(hasTs: boolean, hasJava: boolean): Record<string, unknown> {
   const config: Record<string, unknown> = {};
-
   if (hasTs) {
     config.pureModules = [
       "src/domain/",
@@ -149,26 +134,48 @@ function initLinterConfig(): void {
     config.maxFunctionLines = 40;
     config.excludeFromMaxLines = [".test.java", "Test.java"];
   }
+  return config;
+}
+
+const INIT_NEXT_STEPS: readonly string[] = [
+  "",
+  "Next steps:",
+  "  1. Edit config.json to define your architectural boundaries",
+  "  2. Add regex rule overrides as .json files in rules/",
+  "  3. Run this script again to lint your codebase",
+  "",
+  "Available boundary config fields:",
+  "  boundaries    — import direction rules per module",
+  "  pureModules   — paths that must be side-effect free",
+  "  maxFunctionLines — max function body length (default: 50)",
+  "",
+  "See: lint-rules/README.md for full documentation",
+];
+
+function initLinterConfig(): void {
+  if (existsSync(RULES_DIR)) {
+    console.log(`Linter rules directory already exists: ${relative(PROJECT_ROOT, RULES_DIR)}`);
+    console.log("To add rules, create .json files there. See loom lint-rules/README.md.");
+    return;
+  }
+
+  mkdirSync(RULES_DIR, { recursive: true });
+
+  // Detect project language
+  const hasTs = existsSync(join(PROJECT_ROOT, "tsconfig.json")) ||
+    existsSync(join(PROJECT_ROOT, "tsconfig.base.json"));
+  const hasJava = existsSync(join(PROJECT_ROOT, "pom.xml")) ||
+    existsSync(join(PROJECT_ROOT, "build.gradle")) ||
+    existsSync(join(PROJECT_ROOT, "build.gradle.kts"));
 
   writeFileSync(
     join(RULES_DIR, "config.json"),
-    JSON.stringify(config, null, 2) + "\n",
+    JSON.stringify(starterLinterConfig(hasTs, hasJava), null, 2) + "\n",
   );
 
   console.log(`✓ Created ${relative(PROJECT_ROOT, RULES_DIR)}/`);
   console.log(`  └── config.json (starter programmatic config)`);
-  console.log("");
-  console.log("Next steps:");
-  console.log("  1. Edit config.json to define your architectural boundaries");
-  console.log("  2. Add regex rule overrides as .json files in rules/");
-  console.log("  3. Run this script again to lint your codebase");
-  console.log("");
-  console.log("Available boundary config fields:");
-  console.log("  boundaries    — import direction rules per module");
-  console.log("  pureModules   — paths that must be side-effect free");
-  console.log("  maxFunctionLines — max function body length (default: 50)");
-  console.log("");
-  console.log("See: lint-rules/README.md for full documentation");
+  for (const line of INIT_NEXT_STEPS) console.log(line);
 }
 
 // ---------------------------------------------------------------------------

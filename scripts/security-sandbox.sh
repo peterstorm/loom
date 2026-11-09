@@ -4,7 +4,8 @@
 # One target-controlled command, inside an OS-enforced sandbox:
 #   * no external network — a private network namespace with only loopback;
 #   * an empty environment, repopulated from an explicit allowlist;
-#   * the target and the operator's home read-only, every other mountpoint
+#   * the target and the operator's home read-only (each OBSERVED: a write to
+#     it must have failed), every other mountpoint
 #     remounted read-only where the namespace allows it, and the scratch
 #     directory writable — measured and reported after the run;
 #   * explicit CPU, address-space, process, file-size and wall-clock limits.
@@ -20,7 +21,13 @@
 #   * with `--nonce`, the receipt prefix carries a value the caller generated,
 #     so a command that prints a receipt line cannot match it;
 #   * the enforcement facts travel on the INNER shell's stdout, which the command
-#     cannot write to (its own stdout goes to a file). They used to round-trip
+#     cannot write to: its own stdout goes to a file, and the inner shell points
+#     its OWN stdout and stderr at /dev/null right after printing the facts line,
+#     before the command starts. That shell is PID 1 of the pid namespace, so
+#     while it held the capture pipe the command could reopen it as
+#     `/proc/1/fd/1` and append a forged facts line; now no process inside the
+#     sandbox holds the pipe, and the outer capture takes the FIRST facts line —
+#     the one printed before the command existed. The facts used to round-trip
 #     through `$scratch/.enforcement` — a file inside the one directory the
 #     command can write — so a refused ulimit could be reported as applied.
 # The nonce BINDS a receipt to the artifact path it was produced for; it does
@@ -31,7 +38,9 @@
 # The receipt records what the kernel ACTUALLY enforced (`enforced`), whether the
 # target, home and root remounts took (`targetReadOnly`, `homeReadOnly`,
 # `readOnlyRoot`), and how many OTHER mountpoints could not be closed
-# (`unremountedMounts`). A limit that could not be applied is reported as
+# (`unremountedMounts`). `targetReadOnly` is a fact like the rest — the inner
+# shell reports it only after a write to the target actually failed, and a
+# missing facts line reads it as `false` — not a literal. A limit that could not be applied is reported as
 # unenforced, never as applied. Home is bind-remounted read-only because it is
 # the one writable surface a user namespace can still close: the uid mapping
 # makes the caller the owner inside, so a command that ignored its scratch could
@@ -173,6 +182,8 @@ INNER_REPORT="$(unshare --map-root-user --mount --net --pid --fork --mount-proc 
     fi
     # The target is mounted to itself and remounted read-only, so a write from
     # inside the sandbox fails at the filesystem, not at a language-level check.
+    # A target that cannot be closed ends the run here, before the command and
+    # before any facts line — so the receipt reads `targetReadOnly: false`.
     mount --bind "$target" "$target" || exit 127
     mount -o remount,ro,bind "$target" || exit 127
     mount --bind "$scratch" "$scratch" || exit 127
@@ -187,14 +198,30 @@ INNER_REPORT="$(unshare --map-root-user --mount --net --pid --fork --mount-proc 
         home_ro=0
       fi
     fi
+    # The target is observed the same way, and it is not merely recorded: a
+    # remount that returned zero but left the target writable stops the run
+    # before the command starts. Only then is `target_ro` a fact.
+    probe="$target/.loom-sandbox-target-probe.$$"
+    if ( : > "$probe" ) 2>/dev/null; then
+      rm -f "$probe"
+      exit 127
+    fi
+    target_ro=1
     cd "$scratch" || exit 127
     # A limit the kernel refused is recorded as unenforced, never as applied.
     cpu_ok=1; ulimit -t "$cpu" 2>/dev/null || cpu_ok=0
     mem_ok=1; ulimit -v "$((memmb * 1024))" 2>/dev/null || mem_ok=0
     procs_ok=1; ulimit -u "$procs" 2>/dev/null || procs_ok=0
     file_ok=1; ulimit -f "$((filemb * 1024))" 2>/dev/null || file_ok=0
-    printf "LOOM-SANDBOX-LIMITS root_ro=%s home_ro=%s cpu=%s mem=%s procs=%s files=%s unremounted=%s\n" \
-      "$root_ro" "$home_ro" "$cpu_ok" "$mem_ok" "$procs_ok" "$file_ok" "$unremounted"
+    printf "LOOM-SANDBOX-LIMITS target_ro=%s root_ro=%s home_ro=%s cpu=%s mem=%s procs=%s files=%s unremounted=%s\n" \
+      "$target_ro" "$root_ro" "$home_ro" "$cpu_ok" "$mem_ok" "$procs_ok" "$file_ok" "$unremounted"
+    # The facts are out: let go of the capture pipe before the command exists.
+    # This shell is PID 1 of the pid namespace, so while its stdout stayed the
+    # pipe the command could reopen it as /proc/1/fd/1 and append a facts line
+    # of its own. stderr (the script stderr) goes too, so no process inside the
+    # sandbox holds any stream of the script once the command starts. fd 0, the
+    # only other descriptor this shell holds, is the caller stdin.
+    exec 1>/dev/null 2>/dev/null
     # Loopback only: the network namespace has no route off this machine.
     ip link set lo up 2>/dev/null || true
     # The command stdout is captured, not streamed: the script must print the
@@ -207,12 +234,15 @@ INNER_STATUS=$?
 
 [ -f "$COMMAND_STDOUT" ] && cat "$COMMAND_STDOUT"
 
-# The facts line, from the inner shell's stdout only. `tail -n1` takes the LAST
-# match, so nothing the inner script prints before it can shadow it; every value
-# defaults to "unenforced" when the line is missing, so a sandbox that died
-# early can never read as bounded.
-LIMITS_LINE="$(printf '%s\n' "$INNER_REPORT" | sed -n 's/^LOOM-SANDBOX-LIMITS root_ro=\([01]\) home_ro=\([01]\) cpu=\([01]\) mem=\([01]\) procs=\([01]\) files=\([01]\) unremounted=\([0-9]\{1,\}\)$/\1 \2 \3 \4 \5 \6 \7/p' | tail -n1)"
-read -r ROOT_RO HOME_RO CPU_OK MEM_OK PROCS_OK FILE_OK UNREMOUNTED <<< "${LIMITS_LINE:-0 0 0 0 0 0 0}"
+# The facts line, from the inner shell's stdout only — and the FIRST match. The
+# genuine line is printed before the command starts and the inner shell drops
+# the pipe right after it, so any later match could only be a forgery that
+# reached the pipe some way the redirect did not foresee; taking the last would
+# hand it the receipt. Nothing the command does can come first: it has not
+# started yet. Every value defaults to "unenforced" when the line is missing, so
+# a sandbox that died early can never read as bounded.
+LIMITS_LINE="$(printf '%s\n' "$INNER_REPORT" | sed -n 's/^LOOM-SANDBOX-LIMITS target_ro=\([01]\) root_ro=\([01]\) home_ro=\([01]\) cpu=\([01]\) mem=\([01]\) procs=\([01]\) files=\([01]\) unremounted=\([0-9]\{1,\}\)$/\1 \2 \3 \4 \5 \6 \7 \8/p' | head -n1)"
+read -r TARGET_RO ROOT_RO HOME_RO CPU_OK MEM_OK PROCS_OK FILE_OK UNREMOUNTED <<< "${LIMITS_LINE:-0 0 0 0 0 0 0 0}"
 
 SCRATCH_BYTES=null
 if du -sb "$SCRATCH" >/dev/null 2>&1; then
@@ -222,8 +252,8 @@ fi
 bool() { [ "$1" = "1" ] && printf 'true' || printf 'false'; }
 
 ALLOWED_JSON="$(printf '%s\n' "${ENV_ASSIGNMENTS[@]}" | sed 's/=.*//; s/.*/"&"/' | paste -sd, -)"
-printf '%s{"schemaVersion":1,"exit":%d,"limits":{"cpuSeconds":%d,"addressSpaceMb":%d,"processes":%d,"fileSizeMb":%d,"wallClockSeconds":%d,"scratchMb":%d},"allowlistedEnv":[%s],"scratchBytes":%s,"networkNamespace":true,"targetReadOnly":true,"readOnlyRoot":%s,"homeReadOnly":%s,"unremountedMounts":%d,"enforced":{"cpu":%s,"memory":%s,"processes":%s,"fileSize":%s}}\n' \
+printf '%s{"schemaVersion":1,"exit":%d,"limits":{"cpuSeconds":%d,"addressSpaceMb":%d,"processes":%d,"fileSizeMb":%d,"wallClockSeconds":%d,"scratchMb":%d},"allowlistedEnv":[%s],"scratchBytes":%s,"networkNamespace":true,"targetReadOnly":%s,"readOnlyRoot":%s,"homeReadOnly":%s,"unremountedMounts":%d,"enforced":{"cpu":%s,"memory":%s,"processes":%s,"fileSize":%s}}\n' \
   "$RECEIPT_PREFIX" "$INNER_STATUS" "$CPU_SECONDS" "$MEM_MB" "$PROCS" "$FILE_MB" "$WALL_SECONDS" "$SCRATCH_MB" "$ALLOWED_JSON" "$SCRATCH_BYTES" \
-  "$(bool "$ROOT_RO")" "$(bool "$HOME_RO")" "${UNREMOUNTED:-0}" "$(bool "$CPU_OK")" "$(bool "$MEM_OK")" "$(bool "$PROCS_OK")" "$(bool "$FILE_OK")"
+  "$(bool "$TARGET_RO")" "$(bool "$ROOT_RO")" "$(bool "$HOME_RO")" "${UNREMOUNTED:-0}" "$(bool "$CPU_OK")" "$(bool "$MEM_OK")" "$(bool "$PROCS_OK")" "$(bool "$FILE_OK")"
 
 exit "$INNER_STATUS"

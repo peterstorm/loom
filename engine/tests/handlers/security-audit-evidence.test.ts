@@ -9,12 +9,19 @@
  *           survive into the new directory;
  *   INV-S6c `findings` reports what blocks publication alongside the findings,
  *           because a projection that drops the blockers reads as a green run.
+ *
+ * And the binding a local check rests on: a hunter cannot compute its sandbox
+ * nonce, so `nonce` prints it — for an artifact of an owner hunting right now —
+ * and a receipt made with what it printed is one `submit` accepts.
  */
 
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { sandboxNonce, sandboxReceiptPrefix } from "../../src/core/security-sandbox";
+import { HUNTER_ENVELOPE } from "../security/fixtures";
 import { aSandboxReceipt } from "../security/sandbox-fixtures";
 import { aRun, removeRuns, seedFor, unitIdFor, writeArtifact, type Invocation, type Run } from "./security-audit-harness";
 
@@ -42,7 +49,7 @@ const aLocalCheck = (artifact: string): Record<string, unknown> => ({
 });
 
 const submitLocal = async (run: Run, artifact: string): Promise<Invocation> =>
-  run.invoke(["submit"], JSON.stringify({
+  run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE,
     units: [{
       coverageId: unitIdFor(0),
       agentId: "security-hunter-agent",
@@ -119,6 +126,14 @@ describe("a local check must name a receipt that proves a bounded run (INV-S1)",
     expect(openHomeResult.ok).toBe(false);
     expect(openHomeResult.error).toContain("home directory not remounted read-only");
 
+    // Nor is one whose target stayed writable: the script reports the target
+    // closed only after a write to it failed, never as a literal.
+    const openTarget = "agents/security-hunter-agent/artifacts/open-target.json";
+    writeArtifact(run, openTarget, receiptFor(openTarget, { targetReadOnly: false }));
+    const openTargetResult = await submitLocal(run, openTarget);
+    expect(openTargetResult.ok).toBe(false);
+    expect(openTargetResult.error).toContain("target not remounted read-only");
+
     const prose = "agents/security-hunter-agent/artifacts/prose.md";
     writeArtifact(run, prose, "I ran it locally and it worked.\n");
     const second = await submitLocal(run, prose);
@@ -193,5 +208,149 @@ describe("findings reports the blockers alongside the findings (INV-S6c)", () =>
     // A planned unit that was never hunted blocks publication, and the
     // projection says so rather than reporting a clean, empty run.
     expect(body.publicationBlockers.length).toBeGreaterThan(0);
+  });
+});
+
+// --- The nonce a local check is bound to ---
+
+const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
+const ARTIFACT = "agents/security-hunter-agent/artifacts/repro.txt";
+
+/** A target directory OUTSIDE the run directory: the sandbox refuses a scratch
+ *  inside the target, so a run that wants bounded checks lives elsewhere. */
+const withTarget = async (body: (target: string) => Promise<void>): Promise<void> => {
+  const target = mkdtempSync(join(tmpdir(), "loom-security-target-"));
+  try {
+    await body(target);
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+  }
+};
+
+const startAt = async (run: Run, target: string): Promise<void> => {
+  const started = await run.invoke(
+    ["start", "--repo", target, "--source", "0".repeat(40), "--profile", "standard"],
+    JSON.stringify({ units: [seedFor(0)] }),
+  );
+  expect(started.error).toBeNull();
+};
+
+/** The nonce `nonce` printed on its first line. */
+const printedNonce = (stdout: string): string => {
+  const found = /^nonce ([0-9a-f]{32}) for /m.exec(stdout);
+  if (found === null) throw new Error(`no nonce line in:\n${stdout}`);
+  return found[1]!;
+};
+
+const unshareAvailable = spawnSync("unshare", ["--map-root-user", "--mount", "--net", "true"]).status === 0;
+
+describe("nonce: the engine hands out the binding a hunter cannot compute", () => {
+  it("assign tells the parent how to obtain one, for the owner it minted", async () => {
+    const run = aRun();
+    await start(run);
+    await assignOnly(run);
+    expect(run.stdout()).toContain(
+      `nonce: loom helper security-audit nonce --out ${run.out} --artifact agents/security-hunter-agent/artifacts/<file>`,
+    );
+  });
+
+  it("prints the artifact's nonce and a run filled in for this owner, writing nothing", async () => {
+    await withTarget(async (target) => {
+      const run = aRun();
+      await startAt(run, target);
+      await assignOnly(run);
+      const before = readdirSync(run.out).sort();
+
+      const printed = await run.invoke(["nonce", "--artifact", ARTIFACT]);
+      expect(printed.error).toBeNull();
+      const stdout = run.stdout();
+      expect(printedNonce(stdout)).toBe(sandboxNonce(ARTIFACT));
+      expect(stdout).toContain(`owner security-hunter-agent; in flight: ${unitIdFor(0)}`);
+      expect(stdout).toContain(`--target ${target} --scratch ${join(run.out, "agents", "security-hunter-agent", "scratch")}`);
+      expect(stdout).toContain(`--nonce ${sandboxNonce(ARTIFACT)} -- <command> [args...] > ${join(run.out, ARTIFACT)}`);
+      expect(stdout).toContain(`Redirect the script's stdout to exactly ${join(run.out, ARTIFACT)}`);
+      expect(readdirSync(run.out).sort()).toEqual(before);
+    });
+  });
+
+  it("binds a receipt submit accepts: assign → nonce → receipt under the printed nonce → submit", async () => {
+    await withTarget(async (target) => {
+      const run = aRun();
+      await startAt(run, target);
+      await assignOnly(run);
+      expect((await run.invoke(["nonce", "--artifact", ARTIFACT])).error).toBeNull();
+      const nonce = printedNonce(run.stdout());
+      writeArtifact(run, ARTIFACT, `${sandboxReceiptPrefix(nonce)}${aSandboxReceipt()}\n`);
+
+      expect((await submitLocal(run, ARTIFACT)).error).toBeNull();
+    });
+  });
+
+  it.runIf(unshareAvailable)("binds a REAL sandbox run made exactly as printed, and submit accepts its receipt", async () => {
+    await withTarget(async (target) => {
+      const run = aRun();
+      await startAt(run, target);
+      await assignOnly(run);
+      expect((await run.invoke(["nonce", "--artifact", ARTIFACT])).error).toBeNull();
+      const lines = run.stdout().split("\n");
+      const first = lines.findIndex((line) => line.trim().startsWith("mkdir -p "));
+      const last = lines.findIndex((line) => line.includes("--nonce "));
+      expect(first).toBeGreaterThanOrEqual(0);
+      expect(last).toBeGreaterThan(first);
+      const command = lines.slice(first, last + 1).join("\n").replace("<command> [args...]", "sh -c 'echo reproduced'");
+
+      const home = mkdtempSync(join(tmpdir(), "loom-security-home-"));
+      try {
+        const ran = spawnSync("bash", ["-c", command], {
+          cwd: REPO_ROOT,
+          encoding: "utf8",
+          env: { PATH: process.env["PATH"] ?? "", HOME: home },
+          timeout: 60_000,
+        });
+        expect(ran.status, ran.stderr).toBe(0);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+      expect(readFileSync(join(run.out, ARTIFACT), "utf8")).toContain("reproduced");
+
+      expect((await submitLocal(run, ARTIFACT)).error).toBeNull();
+    });
+  }, 90_000);
+
+  it.each([
+    ["a path outside any owner's artifacts root", "agents/security-hunter-agent/scratch/repro.txt", "is not an owned artifact path"],
+    ["a traversal", "agents/security-hunter-agent/artifacts/../../../etc/passwd", "is not an owned artifact path"],
+    ["an owner with no unit in flight", "agents/security-critic-agent/artifacts/repro.txt", "no in_progress unit is owned by security-critic-agent"],
+  ])("refuses %s", async (_case, artifact, expected) => {
+    await withTarget(async (target) => {
+      const run = aRun();
+      await startAt(run, target);
+      await assignOnly(run);
+      const refused = await run.invoke(["nonce", "--artifact", artifact]);
+      expect(refused.ok).toBe(false);
+      expect(refused.error).toContain("nonce refused");
+      expect(refused.error).toContain(expected);
+    });
+  });
+
+  it("refuses before the unit is assigned, and requires --artifact", async () => {
+    await withTarget(async (target) => {
+      const run = aRun();
+      await startAt(run, target);
+      const unassigned = await run.invoke(["nonce", "--artifact", ARTIFACT]);
+      expect(unassigned.error).toContain("no in_progress unit is owned by security-hunter-agent");
+      const missing = await run.invoke(["nonce"]);
+      expect(missing.error).toContain("--artifact is required");
+    });
+  });
+
+  it("refuses a run directory inside the target, whose scratch the sandbox would refuse", async () => {
+    const run = aRun();
+    await start(run); // --repo is the run directory itself
+    await assignOnly(run);
+    const refused = await run.invoke(["nonce", "--artifact", ARTIFACT]);
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain("lies inside the target");
+    expect(refused.error).toContain("outside the audited repository");
   });
 });

@@ -146,6 +146,33 @@ function sameRetirementProof(left: RetirementProof, right: RetirementProof): boo
     left.abandonment.supersededBy === right.abandonment.supersededBy;
 }
 
+/**
+ * The transition applied under the state lock. Plain upgrades go straight to
+ * the migration; a retirement re-proves the abandoned Wave Gate under the lock
+ * and refuses unless it is identical to the pre-lock proof. Throws to abort.
+ */
+function upgradeLockedGraph(
+  locked: TaskGraph,
+  input: unknown,
+  retireAbandonedRun: boolean,
+  preProof: RetirementProof | null,
+) {
+  if (!retireAbandonedRun || locked.active_wave_gate === undefined) {
+    const prepared = prepareSpecTraceUpgrade(locked, input);
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    return { state: prepared.value.graph, value: prepared.value.kind };
+  }
+
+  const lockedProof = proveAbandonedActiveWaveGate(locked);
+  if (!lockedProof.ok) throw new Error(lockedProof.message);
+  if (preProof === null || !sameRetirementProof(preProof, lockedProof.value)) {
+    throw new Error("Protected Wave Gate authority or abandonment supersession changed before locked retirement proof");
+  }
+  const prepared = prepareAbandonedWaveGateSpecTraceUpgrade(locked, input, lockedProof.value.abandonment);
+  if (!prepared.ok) throw new Error(prepared.error.message);
+  return { state: prepared.value.graph, value: prepared.value.kind };
+}
+
 export function createUpgradeSpecTraceHandler(subagentActive: SubagentActivity = anyActiveSubagent): HookHandler {
   return async (stdin, args) => {
     if (args.length > 1 || (args[0] !== undefined && args[0] !== RETIRE_FLAG)) {
@@ -178,20 +205,7 @@ export function createUpgradeSpecTraceHandler(subagentActive: SubagentActivity =
 
       const outcome = await manager.updateAndReturn((locked) => {
         assertQuiescentUnderLock(subagentActive, statePath, "spec trace upgrade");
-        if (!retireAbandonedRun || locked.active_wave_gate === undefined) {
-          const prepared = prepareSpecTraceUpgrade(locked, input);
-          if (!prepared.ok) throw new Error(prepared.error.message);
-          return { state: prepared.value.graph, value: prepared.value.kind };
-        }
-
-        const lockedProof = proveAbandonedActiveWaveGate(locked);
-        if (!lockedProof.ok) throw new Error(lockedProof.message);
-        if (preProof === null || !sameRetirementProof(preProof.value, lockedProof.value)) {
-          throw new Error("Protected Wave Gate authority or abandonment supersession changed before locked retirement proof");
-        }
-        const prepared = prepareAbandonedWaveGateSpecTraceUpgrade(locked, input, lockedProof.value.abandonment);
-        if (!prepared.ok) throw new Error(prepared.error.message);
-        return { state: prepared.value.graph, value: prepared.value.kind };
+        return upgradeLockedGraph(locked, input, retireAbandonedRun, preProof === null ? null : preProof.value);
       });
       process.stderr.write(outcome === "already-v2"
         ? "Spec trace graph already uses the exact requested v2 ownership\n"

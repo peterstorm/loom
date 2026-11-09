@@ -56,6 +56,15 @@ and D4 are plan decisions this ADR does not restate.)
   preconditions, violated contract, consequence and evidence limits. The vulnerability
   trichotomy lives in the coverage ledger and the published `security-findings.json`, never on
   the wire. A fourth producer kind is deferred until a real sampling failure demands it.
+  *Amended 2026-11-09:* the hunter's submit envelope no longer borrows the reviewer label.
+  It used to travel as `{schemaVersion: 2, kind: "standalone-review", units, findings}`, which
+  falsely claimed conformance to `reviewer-payload-schema` — the payload was never valid
+  against it, since it carries unit settlements and upstream report records rather than
+  reviewer Findings. It is now its own document, `{schemaVersion: 1, kind:
+  "security-hunter-result", units, findings?}`, parsed strictly by `parseHunterResult`
+  (`core/security-coverage`); `submit` refuses the old envelope by its kind. This is a wire
+  label, not a fourth producer kind: no emission schema, wire stamp or route qualification
+  changes, so the deferral above stands.
 - **D3 — Severity stays loom's ballot.** Adjudication remains `critical | advisory` with no
   downgrade authority (`references/review-lenses.md`). Upstream's five-level
   `overall_severity` is a recorded, refutable field. Invariant: overall severity never exceeds

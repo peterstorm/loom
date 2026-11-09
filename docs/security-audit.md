@@ -15,7 +15,7 @@ copy, and a test binds both to the traits table the engine routes on.
 ## Start here
 
 ```bash
-loom helper security-audit start --out .audit/run-1 --repo . --profile standard --budget 24 <<'JSON'
+loom helper security-audit start --out ../audit-run-1 --repo . --profile standard --budget 24 <<'JSON'
 { "units": [
     { "refs": { "surface": "http-ingress", "boundary": "api-edge",
                 "subsystem": "auth", "attack_class": "injection" },
@@ -25,6 +25,11 @@ loom helper security-audit start --out .audit/run-1 --repo . --profile standard 
   "signals": { "languages": ["ts"], "manifests": ["package.json"], "servesHttp": true } }
 JSON
 ```
+
+Keep `--out` **outside** the audited repository. A bounded local check runs in
+`<run-dir>/agents/<owner-id>/scratch`, the sandbox refuses a scratch inside its
+target, and `nonce` refuses to bind a run the sandbox would refuse — a run
+directory inside the repository can only ever hold source checks.
 
 `start` writes the run directory and prints the lens selection it chose. The
 seed list is the enumeration: one entry per `(surface, boundary, subsystem,
@@ -63,7 +68,8 @@ This is the authoritative operations table. Every operation takes `--out
 |---|---|---|
 | `start` | stdin (`units`, optional `signals`, optional `scope`) | a run already exists (unless `--force`), a seed is malformed or duplicated, `scope.kind` is not `tree` or `diff`, `signals` is malformed, the budget cannot seat the first wave |
 | `assign` | flags `--unit --agent [--wave]` | the run is published, the unit is not `planned`, the Agent Catalog cannot place `--agent` |
-| `submit` | stdin (`units`, optional `findings`) | the run is published, a unit is not the named owner's or not the current wave, a check is malformed, a `local` check names no receipt |
+| `nonce` | flags `--artifact` | the path is not `agents/<owner-id>/artifacts/<file>`, no `in_progress` unit is owned by that owner, an archived attempt already cited the artifact, the run directory lies inside the target |
+| `submit` | stdin (`security-hunter-result`: `units`, optional `findings`) | the run is published, the envelope is not `{schemaVersion: 1, kind: "security-hunter-result"}` or carries an unknown key, a unit is not the named owner's or not the current wave, a check is malformed, a `local` check names no receipt or a receipt that does not prove a bounded run, a filed fingerprint the run already holds arrives with different content |
 | `defer` | flags `--reason [--unit]` | the run is published, the reason is missing, the unit is not `planned` |
 | `merge-critic` | stdin (critic result) | the run is published, a proposal is malformed, a reassigned unit has no evidence to archive |
 | `verify` | stdin (`verdicts`) | the run is published, a ballot is malformed, a field is invented |
@@ -72,9 +78,9 @@ This is the authoritative operations table. Every operation takes `--out
 | `disposition` | flags | nothing has been published yet |
 | `status` | flags `[--json]` | the run does not parse |
 
-`status` and `findings` are read-only: they write nothing — they do not even
-create the `--out` directory — and stay available while the Pi runtime is
-skewed; every other operation proves the runtime first. `verify` only records
+`status`, `findings` and `nonce` are read-only: they write nothing — they do
+not even create the `--out` directory — and stay available while the Pi runtime
+is skewed; every other operation proves the runtime first. `verify` only records
 ballots (`critical` or `advisory`); the decision they make — `confirmed`,
 `needs_validation` or `rejected` — is taken by one adjudication at `findings`
 and `publish`.
@@ -88,6 +94,7 @@ critic reassignment has archived an earlier one. `assign` prints the minted id:
 
 ```
 assigned <coverage-id> to owner <owner-id> at wave <n>
+nonce: loom helper security-audit nonce --out <run-dir> --artifact agents/<owner-id>/artifacts/<file>
 ```
 
 The hunter settles under exactly that id — `agentId` and every check's
@@ -95,6 +102,31 @@ The hunter settles under exactly that id — `agentId` and every check's
 (`agents/<owner-id>/scratch`, `agents/<owner-id>/artifacts/...`). Freshness
 after reassignment holds by construction, and the catalog agent the owner id
 carries is what `publish` reads to learn which model profile hunted.
+
+### Filing
+
+`submit` reads the hunter's own envelope,
+`{ "schemaVersion": 1, "kind": "security-hunter-result", "units": [...], "findings": [...] }`
+— not a reviewer payload. `units` is required (empty when a submit only files
+records); `findings` is optional. A record the run already holds verbatim is
+kept once, so a retried submit converges. A fingerprint the run already holds
+with **different** content is refused, naming every such fingerprint, before
+anything is written: omit it, or re-file it byte-identical — verification
+adjudicates the record the run already holds.
+
+### Receipt nonces
+
+A hunter cannot compute the nonce its receipt is bound to. The parent runs
+
+```bash
+loom helper security-audit nonce --out ../audit-run-1 --artifact agents/<owner-id>/artifacts/<file>
+```
+
+and hands the output to the hunter: the nonce, and the exact sandbox command —
+target, the owner's scratch, every limit, `--nonce`, and the redirect into that
+artifact — with nothing left to fill in but the command under test. The local
+check then cites exactly `agents/<owner-id>/artifacts/<file>` as its
+`artifact`.
 
 ## Publication blockers
 
@@ -187,7 +219,9 @@ scratch). The last stdout line is the receipt, and a `local` check counts as
 observed only when its receipt says:
 
 - the command exited zero and every ulimit was really applied;
-- the target was read-only (the script exits 127 when that remount fails);
+- `targetReadOnly` — **observed**, like home: the inner shell reports the
+  target closed only after a write to it failed, and stops before the command
+  when the remount fails or silently misses. A missing facts line reads as open;
 - `homeReadOnly` — **observed**, not inferred. Home is closed first, so binds of
   a target or scratch that live inside it land on top of a read-only home; then
   a write to home must actually fail. An unknown home, or a remount that
@@ -199,8 +233,17 @@ observed only when its receipt says:
 gates: a user namespace cannot remount a superblock it does not own, so gating
 on them would refuse every run. They are reported rather than claimed closed.
 
+Every enforcement fact comes from one line the sandbox's inner shell prints
+before the command starts. That shell is PID 1 of the sandbox's pid namespace,
+so it points its own stdout and stderr at `/dev/null` right after printing the
+line: once the command runs, no process inside the sandbox holds the stream the
+facts are read from, and a write to `/proc/1/fd/1` cannot append a forged line.
+The script also reads the **first** facts line, the only one that can predate
+the command.
+
 The receipt is marked with a nonce derived from the artifact path the ledger
-names, so a receipt is **bound** to that artifact: a receipt line the command
+names — `nonce` prints it (see [Receipt nonces](#receipt-nonces)) — so a receipt
+is **bound** to that artifact: a receipt line the command
 printed itself, or a receipt copied from another check, does not carry the
 marker the engine looks for. The nonce does not **authenticate** the receipt: a
 hunter that writes the artifact file itself can forge one. The defence against a

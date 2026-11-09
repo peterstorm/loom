@@ -1,6 +1,6 @@
 ---
 description: "Run a coverage-accounted, evidence-backed security audit over a repository"
-argument-hint: "[--out .audit/run-1] [--repo .] [--profile quick|standard|deep] [--budget N] [--resume <run-dir>]"
+argument-hint: "[--out ../audit-run-1] [--repo .] [--profile quick|standard|deep] [--budget N] [--resume <run-dir>]"
 allowed-tools: ["Bash", "Glob", "Grep", "Read", "Write", "Edit", "Task", "Agent"]
 ---
 
@@ -24,9 +24,14 @@ In particular:
 - one hunter, one coverage unit, one boundary. `assign` it with `--agent
   security-hunter-agent` (a catalog agent), spawn `loom:security-hunter-agent`
   with the owner id `assign` printed, and `submit` its bytes — the hunter
-  settles under exactly that owner id. A hunter's confirmed
-  claim must carry a sandbox receipt whose `--nonce` is the one its brief
-  printed; without a receipt the claim is a lead, not a finding.
+  settles under exactly that owner id, in its own `security-hunter-result`
+  envelope. A hunter's confirmed claim must carry a sandbox receipt bound to its
+  artifact: run `loom helper security-audit nonce --out <run-dir> --artifact
+  agents/<owner-id>/artifacts/<file>` (the line `assign` printed) and put its
+  output in the brief — a hunter cannot compute the nonce itself. Without a
+  receipt the claim is a lead, not a finding.
+- keep `--out` **outside** the audited repository: the sandbox refuses a
+  scratch inside its target, and `nonce` refuses to bind a run it would refuse.
 - `verify` with ballots from a **different** catalog profile than the one that
   hunted. A hunter's own ballot is admitted and then refused at `publish` as
   `verified only on the hunt profile` — that refusal is the invariant working,
@@ -52,8 +57,9 @@ This is a summary; the authoritative table, with every refusal, is in
 | Operation | Input | What it does |
 |-----------|-------|--------------|
 | `start` | stdin | Freeze the revision, enumerate units, select lenses, write run metadata |
-| `assign` | flags | Give a planned unit to a catalog agent; prints the owner id the hunter settles under |
-| `submit` | stdin | Record a hunter's candidates against its unit |
+| `assign` | flags | Give a planned unit to a catalog agent; prints the owner id the hunter settles under and the `nonce` command for it |
+| `nonce` | flags | Print the sandbox nonce and filled-in bounded-run instructions for one artifact of a unit in flight (read-only) |
+| `submit` | stdin | Record a hunter's `security-hunter-result` against its unit; a re-filed fingerprint with different content is refused |
 | `merge-critic` | stdin | Fold the critic's proposed units in, deduped by canonical coverage id |
 | `verify` | stdin | Record ballots (`critical`/`advisory`) that decide `confirmed`/`needs_validation`/`rejected` at `findings` and `publish` |
 | `defer` | flags | Mark an unreachable unit with one of the four reason tokens |
@@ -62,5 +68,6 @@ This is a summary; the authoritative table, with every refusal, is in
 | `disposition` | flags | Derive the decision set `/review-and-fix` consumes |
 | `status` | flags | Is the ledger settled? (read-only) |
 
-`status` and `findings` stay available while the Pi runtime is skewed — they are
-what you read *while* recovering. Every other operation proves the runtime first.
+`status`, `findings` and `nonce` stay available while the Pi runtime is skewed —
+they write nothing, and are what you read *while* recovering. Every other
+operation proves the runtime first.

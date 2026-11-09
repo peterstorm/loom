@@ -118,5 +118,18 @@ describe("a flags-only operation with an inherited open stdin", () => {
     expect(await waitForExit(child, 20_000)).toBe("exited");
     expect(child.exitCode).toBe(0);
     expect(printed).toContain("coverage:");
-  }, 40_000);
+
+    // `nonce` is flags-only too: with nothing in flight it refuses — and it
+    // must REACH that refusal rather than wait on the open stdin.
+    const nonce = spawnCli(
+      ["helper", "security-audit", "nonce", "--out", out, "--artifact", "agents/security-hunter-agent/artifacts/repro.txt"],
+      "open",
+    );
+    let refusal = "";
+    nonce.stderr?.on("data", (chunk: Buffer) => { refusal += chunk.toString("utf8"); });
+    nonce.stdout?.on("data", (chunk: Buffer) => { refusal += chunk.toString("utf8"); });
+    expect(await waitForExit(nonce, 20_000)).toBe("exited");
+    expect(nonce.exitCode).not.toBe(0);
+    expect(refusal).toContain("no in_progress unit is owned by security-hunter-agent");
+  }, 60_000);
 });

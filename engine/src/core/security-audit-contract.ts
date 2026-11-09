@@ -254,10 +254,10 @@ export type CoverageRefError = Readonly<{
 }>;
 
 export const parseCoverageRefs = (raw: unknown): DomainResult<CoverageRefs, CoverageRefError> => {
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+  if (!isWireRecord(raw)) {
     return failure({ kind: "invalid-coverage-refs" as const, message: "canonical_refs must be an object" });
   }
-  const record = raw as Record<string, unknown>;
+  const record = raw;
   const keys = Object.keys(record).sort(compareStrings);
   const expected = record.lifecycle === undefined ? [...REF_FIELDS] : [...REF_FIELDS, "lifecycle"];
   if (keys.length !== expected.length || expected.some((field) => !(field in record))) {
@@ -271,20 +271,13 @@ export const parseCoverageRefs = (raw: unknown): DomainResult<CoverageRefs, Cove
       return failure({ kind: "invalid-coverage-refs" as const, message: `canonical_refs.${field} is not a canonical reference` });
     }
   }
-  return record.lifecycle === undefined
-    ? success({
-        surface: record.surface as string,
-        boundary: record.boundary as string,
-        subsystem: record.subsystem as string,
-        attack_class: record.attack_class as string,
-      })
-    : success({
-        surface: record.surface as string,
-        boundary: record.boundary as string,
-        subsystem: record.subsystem as string,
-        attack_class: record.attack_class as string,
-        lifecycle: record.lifecycle as string,
-      });
+  return success({
+    surface: record.surface as string,
+    boundary: record.boundary as string,
+    subsystem: record.subsystem as string,
+    attack_class: record.attack_class as string,
+    ...(record.lifecycle === undefined ? {} : { lifecycle: record.lifecycle as string }),
+  });
 };
 
 /** The tuple that must be unique across a ledger: two units with different IDs
@@ -515,10 +508,10 @@ export function parsePriorRecordFacts(
   raw: unknown,
 ): DomainResult<PriorRecordFacts | null, Readonly<{ path: string; message: string }>> {
   if (raw === undefined || raw === null) return success(null);
-  if (typeof raw !== "object" || Array.isArray(raw)) {
+  if (!isWireRecord(raw)) {
     return failure({ path: "prior", message: "expected null or prior-run facts" });
   }
-  const record = raw as Record<string, unknown>;
+  const record = raw;
   const unexpected = Object.keys(record).filter((key) => !PRIOR_FACTS_KEYS.includes(key)).sort(compareStrings);
   if (unexpected.length > 0) {
     return failure({ path: "prior", message: `unexpected field(s): ${unexpected.join(", ")}` });

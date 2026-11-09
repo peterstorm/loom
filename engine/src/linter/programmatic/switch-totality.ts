@@ -90,6 +90,51 @@ type SwitchSpan = Readonly<{
   exhaustiveProof: boolean;
 }>;
 
+/** One line of a switch body, scanned character by character. */
+type LineScan = Readonly<{
+  /** The depth BEFORE each character. */
+  depthAt: readonly number[];
+  /** How many nested switch bodies are open before each character. */
+  nestedAt: readonly number[];
+  /** The depth after the line's last character. */
+  endDepth: number;
+  /** Characters belonging to the default arm's own body, when inside it. */
+  defaultText: string;
+}>;
+
+/** Scan one comment-stripped line from `depth`. Quoted text never changes depth. */
+function scanSwitchLine(raw: string, depth: number, inDefault: boolean): LineScan {
+  const depthAt: number[] = [];
+  const nestedAt: number[] = [];
+  const nestedBodies: number[] = [];
+  let level = depth;
+  let quote: string | null = null;
+  let defaultText = "";
+  for (let at = 0; at < raw.length; at++) {
+    const char = raw[at]!;
+    depthAt[at] = level;
+    nestedAt[at] = nestedBodies.length;
+    if (quote !== null) {
+      if (char === "\\") { depthAt[at + 1] = level; nestedAt[at + 1] = nestedBodies.length; at++; }
+      else if (char === quote) quote = null;
+    } else if (char === '"' || char === "'" || char === "`") {
+      quote = char;
+    } else if (char === "{") {
+      // A switch opened INSIDE the enclosing body is nested; the enclosing
+      // switch's own `{` sits at depth 0 and names nothing.
+      if (level >= 1 && OPENS_NESTED_SWITCH.test(raw.slice(0, at))) nestedBodies.push(level + 1);
+      level++;
+    } else if (char === "}") {
+      if (nestedBodies.at(-1) === level) nestedBodies.pop();
+      level--;
+    }
+    // The default arm's own body, at any depth, but never inside a nested
+    // switch: that switch's `never` binding proves the nested switch.
+    if (inDefault && nestedBodies.length === 0 && level >= 1) defaultText += char;
+  }
+  return { depthAt, nestedAt, endDepth: level, defaultText };
+}
+
 /**
  * Read the switch opened on `startLine` to its closing brace. Line-based with
  * brace depth — the same granularity as the rest of this linter — and braces
@@ -119,35 +164,8 @@ function switchSpan(lines: readonly string[], startLine: number): SwitchSpan {
 
   for (let index = startLine; index < lines.length; index++) {
     const raw = withoutComment(lines[index]!);
-    // The depth BEFORE each character, and the depth of every nested switch
-    // body currently open. Quoted text never changes depth.
-    const depthAt: number[] = [];
-    const nestedAt: number[] = [];
-    const nestedBodies: number[] = [];
-    let level = depth;
-    let quote: string | null = null;
-    for (let at = 0; at < raw.length; at++) {
-      const char = raw[at]!;
-      depthAt[at] = level;
-      nestedAt[at] = nestedBodies.length;
-      if (quote !== null) {
-        if (char === "\\") { depthAt[at + 1] = level; nestedAt[at + 1] = nestedBodies.length; at++; }
-        else if (char === quote) quote = null;
-      } else if (char === '"' || char === "'" || char === "`") {
-        quote = char;
-      } else if (char === "{") {
-        // A switch opened INSIDE the enclosing body is nested; the enclosing
-        // switch's own `{` sits at depth 0 and names nothing.
-        if (level >= 1 && OPENS_NESTED_SWITCH.test(raw.slice(0, at))) nestedBodies.push(level + 1);
-        level++;
-      } else if (char === "}") {
-        if (nestedBodies.at(-1) === level) nestedBodies.pop();
-        level--;
-      }
-      // The default arm's own body, at any depth, but never inside a nested
-      // switch: that switch's `never` binding proves the nested switch.
-      if (inDefault && nestedBodies.length === 0 && level >= 1) defaultText += char;
-    }
+    const { depthAt, nestedAt, endDepth, defaultText: lineDefaultText } = scanSwitchLine(raw, depth, inDefault);
+    defaultText += lineDefaultText;
 
     ARM_TOKEN.lastIndex = 0;
     for (let token = ARM_TOKEN.exec(raw); token !== null; token = ARM_TOKEN.exec(raw)) {
@@ -161,7 +179,7 @@ function switchSpan(lines: readonly string[], startLine: number): SwitchSpan {
       }
     }
     if (EXHAUSTIVE_PROOF.test(raw)) exhaustiveProof = true;
-    depth = level;
+    depth = endDepth;
     if (depth === 0) break;
   }
   // Only the DEFAULT arm may prove never; a `: never` in a case arm is a value

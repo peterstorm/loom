@@ -45,7 +45,7 @@ start → assign → submit → verify → findings → publish
 ```
 
 In one line: `start` freezes and enumerates, `assign`/`submit` move one unit
-through one hunter, `defer` and `merge-critic` settle what hunters did not,
+through one hunter (`nonce` binds that hunter's sandbox receipt), `defer` and `merge-critic` settle what hunters did not,
 `verify` records ballots that decide `confirmed`/`needs_validation`/`rejected`
 at `findings` and `publish`, and `disposition` derives the handoff. The
 authoritative operations table — inputs and every refusal — is in
@@ -110,9 +110,11 @@ what makes its coverage claims checkable after the fact.
 ## Running it
 
 Every operation takes `--out <run-dir>`; the run directory is the whole record.
+Keep it **outside** the audited repository: bounded local checks run in its
+`agents/<owner-id>/scratch`, and the sandbox refuses a scratch inside its target.
 
 ```bash
-loom helper security-audit start --out .audit/run-1 --repo . \
+loom helper security-audit start --out ../audit-run-1 --repo . \
   --profile standard --budget 24 <<'JSON'
 { "units": [ { "refs": { "surface": "http-ingress", "boundary": "api-edge",
                           "subsystem": "auth", "attack_class": "injection" },
@@ -122,24 +124,35 @@ loom helper security-audit start --out .audit/run-1 --repo . \
   "signals": { "languages": ["ts"], "servesHttp": true } }
 JSON
 
-loom helper security-audit assign  --out .audit/run-1 --unit <coverage-id> --agent security-hunter-agent --wave 1
-loom helper security-audit submit  --out .audit/run-1 < hunter-result.json
-loom helper security-audit verify  --out .audit/run-1 < verdicts.json   # a different profile's ballots
-loom helper security-audit merge-critic --out .audit/run-1 < critic.json
-loom helper security-audit defer   --out .audit/run-1 --unit <coverage-id> --reason budget_cut
-loom helper security-audit findings --out .audit/run-1 [--json]
-loom helper security-audit publish --out .audit/run-1
-loom helper security-audit disposition --out .audit/run-1
-loom helper security-audit status  --out .audit/run-1 [--json]
+loom helper security-audit assign  --out ../audit-run-1 --unit <coverage-id> --agent security-hunter-agent --wave 1
+loom helper security-audit nonce   --out ../audit-run-1 --artifact agents/<owner-id>/artifacts/<file>
+loom helper security-audit submit  --out ../audit-run-1 < hunter-result.json   # a security-hunter-result
+loom helper security-audit verify  --out ../audit-run-1 < verdicts.json   # a different profile's ballots
+loom helper security-audit merge-critic --out ../audit-run-1 < critic.json
+loom helper security-audit defer   --out ../audit-run-1 --unit <coverage-id> --reason budget_cut
+loom helper security-audit findings --out ../audit-run-1 [--json]
+loom helper security-audit publish --out ../audit-run-1
+loom helper security-audit disposition --out ../audit-run-1
+loom helper security-audit status  --out ../audit-run-1 [--json]
 ```
 
 `assign --agent` names a catalog agent; it prints `assigned <coverage-id> to
 owner <owner-id> at wave <n>`, and the hunter settles under exactly that owner id
 (`security-hunter-agent`, or `security-hunter-agent--2` after a reassignment).
+It also prints the `nonce` command for that owner. A hunter cannot compute its
+receipt's nonce: when it needs a bounded local run, run `nonce` for the artifact
+it will cite and put the output — the nonce and the filled-in sandbox command —
+in its brief.
 
-`status` and `findings` are read-only and stay available while the Pi runtime is
-skewed — they are what you read *while* recovering. Every other operation proves
-the runtime first.
+The hunter returns its own envelope,
+`{ "schemaVersion": 1, "kind": "security-hunter-result", "units": [...], "findings": [...] }`
+(`units` required, `findings` optional), and `submit` refuses any other. A
+fingerprint the run already holds, re-filed with different content, is refused
+before anything is written; a verbatim re-file is kept once.
+
+`status`, `findings` and `nonce` are read-only and stay available while the Pi
+runtime is skewed — they are what you read *while* recovering. Every other
+operation proves the runtime first.
 
 `publish` refuses on any publication blocker (an unverified confirmed claim, a
 ballot cast on the hunt profile, an unsettled ledger) instead of publishing a

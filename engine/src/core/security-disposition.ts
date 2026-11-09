@@ -35,8 +35,7 @@
 import { match } from "ts-pattern";
 import { canonicalDigest } from "./digest";
 import { compareStrings } from "./ordering";
-import type { ArtifactDigest } from "./orchestration-contract/identity";
-import { failure, success, type DomainResult } from "./orchestration-contract/identity";
+import { failure, success, type ArtifactDigest, type DomainResult } from "./orchestration-contract/identity";
 import { standaloneDispositionSchema } from "./standalone-lineage-contract";
 import type { SecurityRunMetadata } from "./security-audit-contract";
 import type { SecurityFinding } from "./security-findings";

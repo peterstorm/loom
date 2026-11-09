@@ -1222,13 +1222,6 @@ function openerLineGroups(line: string): readonly OpenerGroup[] {
   let quote: '"' | "'" | null = null;
   let i = 0;
   const n = line.length;
-  const boundaryChar = (pos: number): boolean =>
-    pos < 0 || pos >= n || /\s/.test(line[pos]!) || ";&|(){}".includes(line[pos]!);
-  const popUntil = (kind: string): void => {
-    for (let k = compound.length - 1; k >= 0; k--) {
-      if (compound[k] === kind) { compound.length = k; return; }
-    }
-  };
   while (i < n) {
     const c = line[i]!;
     if (quote === "'") { if (c === "'") quote = null; i++; continue; }
@@ -1240,91 +1233,101 @@ function openerLineGroups(line: string): readonly OpenerGroup[] {
     }
     if (c === "\\") { i += 2; continue; }
     if (c === "'" || c === '"') { quote = c; i++; continue; }
-    if (c === "$" && line[i + 1] === "{") {
-      const close = findClosingBrace(line, i + 2);
-      if (close === -1) return [{ start: groupStart, end: n }]; // fail closed: one group
-      i = close + 1;
-      continue;
-    }
-    if (c === "$" && line[i + 1] === "(") {
-      const close = findClosingParen(line, i + 2);
-      if (close === -1) return [{ start: groupStart, end: n }];
-      i = close + 1;
-      continue;
-    }
-    if ((c === "<" || c === ">") && line[i + 1] === "(") {
-      const close = findClosingParen(line, i + 2);
-      if (close === -1) return [{ start: groupStart, end: n }];
-      i = close + 1;
-      continue;
-    }
-    if (c === "`") {
-      const close = findClosingBacktick(line, i + 1);
-      if (close === -1) return [{ start: groupStart, end: n }];
-      i = close + 1;
-      continue;
-    }
-    if (c === "{") { compound.push("{"); i++; continue; }
-    if (c === "}") { if (compound.length > 0 && compound[compound.length - 1] === "{") compound.pop(); i++; continue; }
-    if (c === "(") { compound.push("("); i++; continue; }
-    // A `)` closes a subshell ONLY when a `(` is open; in `case x in a)` it
-    // terminates a PATTERN and must not uncut the case compound.
-    if (c === ")") { if (compound.length > 0 && compound[compound.length - 1] === "(") compound.pop(); i++; continue; }
-    // `[[ … ]]` test brackets: `&&` inside is a test operator, not a chain cut.
-    if (c === "[" && line[i + 1] === "[") { compound.push("[["); i += 2; continue; }
-    if (c === "]" && line[i + 1] === "]") {
-      for (let k = compound.length - 1; k >= 0; k--) {
-        if (compound[k] === "[[") { compound.length = k; break; }
-      }
-      i += 2;
-      continue;
-    }
-    if (/[A-Za-z]/.test(c)) {
-      const m = line.slice(i).match(/^[A-Za-z][A-Za-z0-9_-]*/);
-      if (m !== null && boundaryChar(i - 1) && boundaryChar(i + m[0].length)) {
-        const word = m[0];
-        if (word === "if") compound.push("if");
-        else if (word === "while" || word === "until" || word === "for") compound.push("loop");
-        else if (word === "case") compound.push("case");
-        else if (word === "fi") popUntil("if");
-        else if (word === "done") popUntil("loop");
-        else if (word === "esac") popUntil("case");
-      }
-      i += m?.[0].length ?? 1;
-      continue;
-    }
-    if (c === ";" || c === "&" || c === "\n") {
-      // `&>`/`&>>` redirects and `2>&1`-style fd dups are NOT separators
-      // (mirroring splitCommandSegmentsWithOps): the `&` binds to the
-      // redirect/dup syntax around it.
-      if (c === "&") {
-        if (line[i + 1] === ">") { i += 2; continue; }
-        if (line[i - 1] === ">") { i++; continue; }
-      }
-      const skip = c === "&" && line[i + 1] === "&" ? 2 : c === ";" && line[i + 1] === ";" ? 2 : 1;
-      if (compound.length === 0) {
+    const pastSpan = pastSubstitutionSpan(line, i);
+    if (pastSpan === -1) return [{ start: groupStart, end: n }]; // fail closed: one group
+    if (pastSpan !== null) { i = pastSpan; continue; }
+    const pastCompound = pastCompoundSyntax(line, i, compound);
+    if (pastCompound !== null) { i = pastCompound; continue; }
+    const separator = groupSeparatorAt(line, i);
+    if (separator !== null) {
+      if (separator.cuts && compound.length === 0) {
         groups.push({ start: groupStart, end: i });
-        groupStart = i + skip;
+        groupStart = i + separator.width;
       }
-      i += skip;
-      continue;
-    }
-    if (c === "|") {
-      if (line[i + 1] === "|") {
-        if (compound.length === 0) {
-          groups.push({ start: groupStart, end: i });
-          groupStart = i + 2;
-        }
-        i += 2;
-      } else {
-        i += line[i + 1] === "&" ? 2 : 1; // `|&` = one pipe operator
-      }
+      i += separator.width;
       continue;
     }
     i++;
   }
   groups.push({ start: groupStart, end: n });
   return groups;
+}
+
+/** Past a `${…}`, `$(…)`, `<(…)`/`>(…)` or backtick span opening at `i`: the
+ *  index just after its close, -1 when it never closes, or null when no such
+ *  span opens at `i`. */
+function pastSubstitutionSpan(line: string, i: number): number | null {
+  const c = line[i];
+  const next = line[i + 1];
+  let close: number;
+  if (c === "$" && next === "{") close = findClosingBrace(line, i + 2);
+  else if ((c === "$" || c === "<" || c === ">") && next === "(") close = findClosingParen(line, i + 2);
+  else if (c === "`") close = findClosingBacktick(line, i + 1);
+  else return null;
+  return close === -1 ? -1 : close + 1;
+}
+
+/** Is `pos` outside the line or a word-boundary character? */
+const isWordBoundary = (line: string, pos: number): boolean =>
+  pos < 0 || pos >= line.length || /\s/.test(line[pos]!) || ";&|(){}".includes(line[pos]!);
+
+/** Close the innermost open compound of `kind` and everything nested in it. */
+function popCompoundUntil(compound: string[], kind: string): void {
+  for (let k = compound.length - 1; k >= 0; k--) {
+    if (compound[k] === kind) { compound.length = k; return; }
+  }
+}
+
+/** Past the compound syntax at `i` — braces, parens, `[[ ]]`, or a word that
+ *  opens/closes `if`/loop/`case` — pushing or popping `compound` (the
+ *  caller's open-compound stack); null when `i` starts none of them. */
+function pastCompoundSyntax(line: string, i: number, compound: string[]): number | null {
+  const c = line[i]!;
+  const top = compound[compound.length - 1];
+  if (c === "{") { compound.push("{"); return i + 1; }
+  if (c === "}") { if (top === "{") compound.pop(); return i + 1; }
+  if (c === "(") { compound.push("("); return i + 1; }
+  // A `)` closes a subshell ONLY when a `(` is open; in `case x in a)` it
+  // terminates a PATTERN and must not uncut the case compound.
+  if (c === ")") { if (top === "(") compound.pop(); return i + 1; }
+  // `[[ … ]]` test brackets: `&&` inside is a test operator, not a chain cut.
+  if (c === "[" && line[i + 1] === "[") { compound.push("[["); return i + 2; }
+  if (c === "]" && line[i + 1] === "]") { popCompoundUntil(compound, "[["); return i + 2; }
+  if (!/[A-Za-z]/.test(c)) return null;
+  const m = line.slice(i).match(/^[A-Za-z][A-Za-z0-9_-]*/);
+  if (m !== null && isWordBoundary(line, i - 1) && isWordBoundary(line, i + m[0].length)) {
+    const word = m[0];
+    if (word === "if") compound.push("if");
+    else if (word === "while" || word === "until" || word === "for") compound.push("loop");
+    else if (word === "case") compound.push("case");
+    else if (word === "fi") popCompoundUntil(compound, "if");
+    else if (word === "done") popCompoundUntil(compound, "loop");
+    else if (word === "esac") popCompoundUntil(compound, "case");
+  }
+  return i + (m?.[0].length ?? 1);
+}
+
+/** The operator at `i` that a group walk must step over: `width` characters,
+ *  and whether it `cuts` the group at depth 0 (`;` `;;` `&` `&&` newline
+ *  `||`) or binds within it (`|`, `|&`, and the `&` of a redirect or fd dup).
+ *  Null when `i` holds no operator. */
+function groupSeparatorAt(line: string, i: number): Readonly<{ width: number; cuts: boolean }> | null {
+  const c = line[i];
+  const next = line[i + 1];
+  if (c === ";" || c === "&" || c === "\n") {
+    // `&>`/`&>>` redirects and `2>&1`-style fd dups are NOT separators
+    // (mirroring splitCommandSegmentsWithOps): the `&` binds to the
+    // redirect/dup syntax around it.
+    if (c === "&" && next === ">") return { width: 2, cuts: false };
+    if (c === "&" && line[i - 1] === ">") return { width: 1, cuts: false };
+    const doubled = (c === "&" || c === ";") && next === c;
+    return { width: doubled ? 2 : 1, cuts: true };
+  }
+  if (c === "|") {
+    if (next === "|") return { width: 2, cuts: true };
+    return { width: next === "&" ? 2 : 1, cuts: false }; // `|&` = one pipe operator
+  }
+  return null;
 }
 
 /** Does any `$(…)`/backtick substitution in `text` start with a command
@@ -1462,25 +1465,17 @@ function heredocBodyIsScript(line: string, openerPos: number): boolean {
  * `$(…)`/backtick, or an unclosed substitution inside an unquoted body) —
  * the caller fails closed on those exactly as flattenSubstitutions does.
  */
-export function splitHeredocs(text: string): {
-  readonly stripped: string;
-  readonly bodies: readonly string[];
-  readonly unparseable: boolean;
-} {
+export function splitHeredocs(text: string): HeredocSplit {
   const n = text.length;
   const bodies: string[] = [];
   let stripped = "";
   let unparseable = false;
   let pos = 0;
 
-  outer: while (pos < n) {
+  while (pos < n) {
     const scan = scanPastHeredocSpans(text, pos, n);
-    if (scan.unparseable) {
-      unparseable = true;
-      stripped += text.slice(pos);
-      break;
-    }
-    if (scan.next >= n) {
+    if (scan.unparseable || scan.next >= n) {
+      if (scan.unparseable) unparseable = true;
       stripped += text.slice(pos);
       break;
     }
@@ -1488,104 +1483,168 @@ export function splitHeredocs(text: string): {
     const lineStart = text.lastIndexOf("\n", openerPos - 1) + 1;
     const lineEnd = text.indexOf("\n", openerPos);
     const lineEndAt = lineEnd === -1 ? n : lineEnd;
-    const openerLine = text.slice(lineStart, lineEndAt);
+    const bodyStart = lineEndAt < n ? lineEndAt + 1 : n;
 
-    // Collect EVERY heredoc opener on this line: bodies attach in order to
-    // the lines that follow, so they must all be known before consumption.
-    const openers: HeredocOpener[] = [];
-    let cur = openerPos;
-    let dangling = false;
-    while (cur < lineEndAt) {
-      const word = parseHeredocDelimiter(text, cur, lineEndAt);
-      if (word === null) { dangling = true; break; }
-      openers.push({
-        start: cur,
-        end: word.end,
-        delimiter: word.delimiter,
-        quoted: word.quoted,
-        minus: word.minus,
-        script: heredocBodyIsScript(openerLine, cur - lineStart),
-      });
-      const more = scanPastHeredocSpans(text, word.end, lineEndAt);
-      if (more.unparseable) {
-        unparseable = true;
-        stripped += text.slice(pos, lineEndAt) + (lineEndAt < n ? "\n" : "");
-        stripped += text.slice(lineEndAt < n ? lineEndAt + 1 : n);
-        break outer;
-      }
-      if (more.next >= lineEndAt) break;
-      cur = more.next;
-    }
-
-    // The opener line stays in the judged text, minus the heredoc constructs.
-    stripped += text.slice(pos, openerPos);
-    let last = openerPos;
-    for (const g of openers) {
-      stripped += text.slice(last, g.start);
-      last = g.end;
-    }
-    stripped += text.slice(last, lineEndAt);
-    if (lineEndAt < n) stripped += "\n";
-
-    if (dangling) {
-      // `<<` with no delimiter word on its line: bash would read the
-      // delimiter from the next line; we cannot know it, so fail closed —
-      // judge the remainder as one body (full command text when the line
-      // feeds an interpreter, substitutions only otherwise).
-      const rest = text.slice(lineEndAt < n ? lineEndAt + 1 : n);
-      if (rest !== "") {
-        if (heredocBodyIsScript(openerLine, cur - lineStart)) {
-          bodies.push(rest);
-        } else {
-          const bodyScan = scanHeredocBodySubstitutions(rest);
-          if (bodyScan.unclosed) unparseable = true;
-          bodies.push(...bodyScan.bodies);
-        }
-      }
+    const collected = collectLineOpeners(text, openerPos, lineStart, lineEndAt);
+    if (collected.kind === "unparseable") {
+      unparseable = true;
+      stripped += text.slice(pos, lineEndAt) + (lineEndAt < n ? "\n" : "");
+      stripped += text.slice(bodyStart);
       break;
     }
 
-    // Consume bodies in opener order, one terminator line each.
-    let bodyPos = lineEndAt < n ? lineEndAt + 1 : n;
-    for (const g of openers) {
-      if (bodyPos >= n) break;
-      let search = bodyPos;
-      let terminatorAt = -1;
-      let nextBodyPos = n;
-      while (search < n) {
-        const nl = text.indexOf("\n", search);
-        const end = nl === -1 ? n : nl;
-        let line = text.slice(search, end);
-        if (g.minus) line = line.replace(/^\t+/, "");
-        if (line === g.delimiter) {
-          terminatorAt = search;
-          nextBodyPos = nl === -1 ? n : nl + 1;
-          break;
-        }
-        search = nl === -1 ? n : nl + 1;
-      }
-      // The body is data — BUT a SCRIPT body (heredoc fed to an
-      // interpreter) is full command text and gets judged wholesale, and an
-      // UNQUOTED data body still runs its substitutions (live commands).
-      // Quoted data bodies are opaque. Unterminated heredocs consume to end
-      // of input.
-      const body = text.slice(bodyPos, terminatorAt === -1 ? n : terminatorAt);
-      if (body !== "") {
-        if (g.script) {
-          bodies.push(body);
-        } else if (!g.quoted) {
-          const bodyScan = scanHeredocBodySubstitutions(body);
-          if (bodyScan.unclosed) unparseable = true;
-          bodies.push(...bodyScan.bodies);
-        }
-      }
-      bodyPos = terminatorAt === -1 ? n : nextBodyPos;
-      if (terminatorAt === -1) break;
+    // The opener line stays in the judged text, minus the heredoc constructs.
+    stripped += openerLineWithoutHeredocs(text, pos, openerPos, collected.openers, lineEndAt);
+    if (lineEndAt < n) stripped += "\n";
+
+    if (collected.dangling) {
+      const harvest = danglingHeredocRemainder(text, bodyStart, lineStart, lineEndAt, collected.cursor);
+      if (harvest.unclosed) unparseable = true;
+      bodies.push(...harvest.bodies);
+      break;
     }
-    pos = bodyPos;
+
+    const consumed = consumeHeredocBodies(text, collected.openers, bodyStart);
+    if (consumed.unparseable) unparseable = true;
+    bodies.push(...consumed.bodies);
+    pos = consumed.next;
   }
 
   return Object.freeze({ stripped, bodies: Object.freeze(bodies), unparseable });
+}
+
+interface HeredocSplit {
+  /** The command text with every heredoc body and `<<` construct removed. */
+  readonly stripped: string;
+  /** Body text still judged as command text: script bodies and live substitutions. */
+  readonly bodies: readonly string[];
+  /** An unclosed span was met — the caller fails closed. */
+  readonly unparseable: boolean;
+}
+
+/** `<<` with no delimiter word on its line: bash would read the delimiter
+ *  from the next line; we cannot know it, so fail closed — judge the
+ *  remainder as one body (full command text when the line feeds an
+ *  interpreter, substitutions only otherwise). */
+function danglingHeredocRemainder(
+  text: string,
+  bodyStart: number,
+  lineStart: number,
+  lineEndAt: number,
+  cursor: number,
+): BodyHarvest {
+  const rest = text.slice(bodyStart);
+  if (rest === "") return { bodies: [], unclosed: false };
+  const script = heredocBodyIsScript(text.slice(lineStart, lineEndAt), cursor - lineStart);
+  return heredocBodyContribution(rest, { script, quoted: false });
+}
+
+/** Every heredoc opener on one opener line, or `unparseable` when a span
+ *  after one of them never closes. `dangling` marks a `<<` with no delimiter
+ *  word on its line; `cursor` is then that opener's position. */
+type LineOpeners =
+  | Readonly<{ kind: "parsed"; openers: readonly HeredocOpener[]; dangling: boolean; cursor: number }>
+  | Readonly<{ kind: "unparseable" }>;
+
+/** Collect EVERY heredoc opener on this line: bodies attach in order to the
+ *  lines that follow, so they must all be known before consumption. */
+function collectLineOpeners(text: string, firstOpener: number, lineStart: number, lineEndAt: number): LineOpeners {
+  const openerLine = text.slice(lineStart, lineEndAt);
+  const openers: HeredocOpener[] = [];
+  let cur = firstOpener;
+  while (cur < lineEndAt) {
+    const word = parseHeredocDelimiter(text, cur, lineEndAt);
+    if (word === null) return { kind: "parsed", openers, dangling: true, cursor: cur };
+    openers.push({
+      start: cur,
+      end: word.end,
+      delimiter: word.delimiter,
+      quoted: word.quoted,
+      minus: word.minus,
+      script: heredocBodyIsScript(openerLine, cur - lineStart),
+    });
+    const more = scanPastHeredocSpans(text, word.end, lineEndAt);
+    if (more.unparseable) return { kind: "unparseable" };
+    if (more.next >= lineEndAt) break;
+    cur = more.next;
+  }
+  return { kind: "parsed", openers, dangling: false, cursor: cur };
+}
+
+/** The opener line's text from `from` to its end with every `<<` construct cut out. */
+function openerLineWithoutHeredocs(
+  text: string,
+  from: number,
+  openerPos: number,
+  openers: readonly HeredocOpener[],
+  lineEndAt: number,
+): string {
+  let kept = text.slice(from, openerPos);
+  let last = openerPos;
+  for (const g of openers) {
+    kept += text.slice(last, g.start);
+    last = g.end;
+  }
+  return kept + text.slice(last, lineEndAt);
+}
+
+type BodyHarvest = Readonly<{ bodies: readonly string[]; unclosed: boolean }>;
+
+/** What one heredoc body contributes to judging. The body is data — BUT a
+ *  SCRIPT body (heredoc fed to an interpreter) is full command text and gets
+ *  judged wholesale, and an UNQUOTED data body still runs its substitutions
+ *  (live commands). Quoted data bodies are opaque. */
+function heredocBodyContribution(
+  body: string,
+  feed: Readonly<{ script: boolean; quoted: boolean }>,
+): BodyHarvest {
+  if (body === "") return { bodies: [], unclosed: false };
+  if (feed.script) return { bodies: [body], unclosed: false };
+  if (!feed.quoted) return scanHeredocBodySubstitutions(body);
+  return { bodies: [], unclosed: false };
+}
+
+/** The line at or after `from` that terminates `opener`'s body (`-1` when
+ *  none does) and the position just past it. */
+function findHeredocTerminator(
+  text: string,
+  from: number,
+  opener: HeredocOpener,
+): Readonly<{ terminatorAt: number; nextBodyPos: number }> {
+  const n = text.length;
+  let search = from;
+  while (search < n) {
+    const nl = text.indexOf("\n", search);
+    const end = nl === -1 ? n : nl;
+    let line = text.slice(search, end);
+    if (opener.minus) line = line.replace(/^\t+/, "");
+    if (line === opener.delimiter) return { terminatorAt: search, nextBodyPos: nl === -1 ? n : nl + 1 };
+    search = nl === -1 ? n : nl + 1;
+  }
+  return { terminatorAt: -1, nextBodyPos: n };
+}
+
+/** Consume bodies in opener order, one terminator line each. Unterminated
+ *  heredocs consume to end of input. */
+function consumeHeredocBodies(
+  text: string,
+  openers: readonly HeredocOpener[],
+  from: number,
+): Readonly<{ bodies: readonly string[]; unparseable: boolean; next: number }> {
+  const n = text.length;
+  const bodies: string[] = [];
+  let unparseable = false;
+  let bodyPos = from;
+  for (const g of openers) {
+    if (bodyPos >= n) break;
+    const { terminatorAt, nextBodyPos } = findHeredocTerminator(text, bodyPos, g);
+    const harvest = heredocBodyContribution(text.slice(bodyPos, terminatorAt === -1 ? n : terminatorAt), g);
+    if (harvest.unclosed) unparseable = true;
+    bodies.push(...harvest.bodies);
+    bodyPos = nextBodyPos;
+    if (terminatorAt === -1) break;
+  }
+  return { bodies, unparseable, next: bodyPos };
 }
 
 /** Parse the delimiter word after a `<<`/`<<-` at `pos` (text[pos] is the
@@ -1796,7 +1855,13 @@ function decide(command: string, depth: number, scope: GuardScope): HookResult {
     if (decide(body, depth + 1, scope).kind === "block") return BLOCK;
   }
 
-  for (const chain of pipeChains(flat.flattened)) {
+  return judgePipeChains(flat.flattened, scope);
+}
+
+/** Judge every pipe-chain of a flattened guarded line: each segment of an
+ *  in-scope chain must be a whitelisted helper or a redirect-free read. */
+function judgePipeChains(flattened: string, scope: GuardScope): HookResult {
+  for (const chain of pipeChains(flattened)) {
     // A chain none of whose segments touch a guarded path is out of scope —
     // `npm install && jq . <state>` must not block on the npm segment.
     // (Tested quote-collapsed, like every pattern site.)

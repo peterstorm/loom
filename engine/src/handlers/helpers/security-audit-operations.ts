@@ -9,8 +9,9 @@
  * table is not a route the CLI will accept.
  *
  * The action set is CLOSED on purpose (ADR-0064). Every state change a run can
- * make is one of these ten; a caller cannot invent an eleventh way to move the
- * ledger, which is what keeps `status` a complete answer to "where is this run".
+ * make is one of these operations; a caller cannot invent another way to move
+ * the ledger, which is what keeps `status` a complete answer to "where is this
+ * run".
  */
 
 export type SecurityAuditOperationTraits = Readonly<{
@@ -22,7 +23,7 @@ export type SecurityAuditOperationTraits = Readonly<{
    */
   input: "stdin" | "flags";
   /**
-   * `available`: a read-only projection (`status`, `findings`) that writes
+   * `available`: a read-only projection (`status`, `findings`, `nonce`) that writes
    * nothing and must stay usable during Pi runtime skew — it is what an
    * operator reads WHILE recovering, so gating it would make the skew
    * undiagnosable from inside the session that hit it.
@@ -41,6 +42,9 @@ export const SECURITY_AUDIT_OPERATIONS = Object.freeze({
   start: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required" }),
   /** Give a planned unit to a hunter for a wave. */
   assign: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
+  /** Print the sandbox nonce and bounded-run instructions for one artifact of a
+   *  unit in flight. Derived from the ledger; writes nothing. */
+  nonce: Object.freeze({ input: "flags", runtimeSkew: "available" }),
   /** Settle units with a hunter's results and record its candidate findings. */
   submit: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required" }),
   /** Mark a unit (or every still-planned unit) deferred, with its reason. */
@@ -82,6 +86,7 @@ export function parseSecurityAuditOperation(value: string | undefined): Security
 export const SECURITY_AUDIT_OPERATION_ORDER: readonly SecurityAuditOperation[] = Object.freeze([
   "start",
   "assign",
+  "nonce",
   "submit",
   "defer",
   "merge-critic",

@@ -81,10 +81,10 @@ describe("commands/security-audit.md", () => {
       .filter(([, traits]) => traits.runtimeSkew === "available")
       .map(([operation]) => operation)
       .sort();
-    // The command says "`status` and `findings` stay available while the Pi
-    // runtime is skewed". If the traits change, that sentence is wrong, and an
-    // operator recovering from a skew is exactly who reads it.
-    expect(available).toEqual(["findings", "status"]);
+    // The command says "`status`, `findings` and `nonce` stay available while
+    // the Pi runtime is skewed". If the traits change, that sentence is wrong,
+    // and an operator recovering from a skew is exactly who reads it.
+    expect(available).toEqual(["findings", "nonce", "status"]);
     for (const operation of available) {
       expect(command, operation).toContain(`\`${operation}\``);
     }
@@ -108,5 +108,13 @@ describe("commands/security-audit.md", () => {
     expect(securityAuditOperationWrites("disposition")).toBe(true);
     expect(securityAuditOperationWrites("status")).toBe(false);
     expect(securityAuditOperationWrites("findings")).toBe(false);
+    expect(securityAuditOperationWrites("nonce")).toBe(false);
+  });
+
+  it("tells the parent how a hunter's receipt gets its nonce", () => {
+    // A hunter cannot compute the nonce its receipt is bound to; the command is
+    // the parent's runbook, so it must name the operation that prints it.
+    expect(command).toContain("security-audit nonce --out");
+    expect(operatorGuide).toContain("security-audit nonce --out");
   });
 });

@@ -99,6 +99,10 @@ describe("SandboxRun evidence", () => {
     expect(parseEvidenceLine(line(JSON.parse(aSandboxReceipt({ unexpected: 1 })))).ok).toBe(false);
     // An environment the script never passes is a false claim, not a detail.
     expect(parseEvidenceLine(line(JSON.parse(aSandboxReceipt({ allowlistedEnv: ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TERM"] })))).ok).toBe(false);
+    // An open target is a recorded fact, kept as reported — never coerced to closed.
+    const openTarget = parseEvidenceLine(line(JSON.parse(aSandboxReceipt({ targetReadOnly: false }))));
+    expect(openTarget.ok && openTarget.value.event.kind === "SandboxRun" ? openTarget.value.event.receipt.targetReadOnly : null).toBe(false);
+    expect(parseEvidenceLine(line(JSON.parse(aSandboxReceipt({ targetReadOnly: "yes" })))).ok).toBe(false);
     expect(parseEvidenceLine(line("not a receipt")).ok).toBe(false);
     expect(parseEvidenceLine(JSON.stringify({ epoch: "hunter-a:security-hunter-agent", event: { kind: "SandboxRun" } })).ok).toBe(false);
   });

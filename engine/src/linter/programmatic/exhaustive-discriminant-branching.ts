@@ -31,13 +31,14 @@ import { makeViolation } from "../types";
 import { isTestFile } from "./config";
 import { EXHAUSTIVE_BRANCHING_BASELINE } from "./exhaustive-discriminant-branching-baseline";
 import { baselineCounter, repoRelative, baselineKey, type Baseline } from "./baseline";
+import { DEFAULT_SWITCH_TOTALITY_MODULES } from "./switch-totality";
 
 /** Branches on one tag at or above this count read as a switch, not a guard. */
 export const DEFAULT_MAX_DISCRIMINANT_BRANCHES = 3;
 
 /** The areas this rule keys baselines in — the same scopes `switch-totality`
- *  scans, so one path form serves both baselines. */
-export const DEFAULT_DISCRIMINANT_ANCHORS: readonly string[] = ["engine/src/core/", "engine/src/machine/"];
+ *  scans (by reference, not by copy), so one path form serves both baselines. */
+export const DEFAULT_DISCRIMINANT_ANCHORS: readonly string[] = DEFAULT_SWITCH_TOTALITY_MODULES;
 
 /**
  * Lines a chain may span between consecutive branches.

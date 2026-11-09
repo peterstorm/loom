@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -206,7 +206,7 @@ function frozenDiffReads(cwd: string, request: SpawnRequest): readonly string[] 
   for (const [, path] of request.task.matchAll(/^- (.+): \d+ units, \d+ page\(s\)$/gm)) {
     let offset: number | null = 0;
     while (offset !== null) {
-      const read = spawnSync("bash", ["-c", `${command} --diff '${path}' --offset ${offset}`], { cwd, encoding: "utf8" });
+      const read: SpawnSyncReturns<string> = spawnSync("bash", ["-c", `${command} --diff '${path}' --offset ${offset}`], { cwd, encoding: "utf8" });
       check(read.status === 0, `frozen diff read failed for ${path}: ${read.stderr}`);
       outputs.push(read.stdout);
       offset = (JSON.parse(read.stdout) as { nextOffset: number | null }).nextOffset;
@@ -371,14 +371,20 @@ function standaloneAndRemediationSmoke(): void {
   process.stdout.write("  ✓ remediation authoritative result → verified real Git index installation\n");
 }
 
-/** Drive the non-zero-critical remediation path through a fresh report and
- * the real Git index adapter; the zero-critical smoke above intentionally
- * skips both defect-family checks and completion-check execution. */
-function criticalRemediationSmoke(): void {
+/** The critical-remediation fixture's paths: the reviewed source, the
+ *  regression test the repair adds, and the enrolled check's report. */
+const CRITICAL_REPAIR = {
+  changedPath: "src/repair.mjs",
+  testPath: "tests/repair.test.mjs",
+  reportPath: ".loom/completion-reports/smoke-repair.junit.xml",
+} as const;
+
+/** A repository whose manifest enrolls the repair's regression test as a
+ *  wave check, committed at a baseline and then edited into the reviewed
+ *  vulnerable state. */
+function criticalRemediationRepository(): string {
+  const { changedPath, testPath, reportPath } = CRITICAL_REPAIR;
   const cwd = repository("critical-remediation");
-  const changedPath = "src/repair.mjs";
-  const testPath = "tests/repair.test.mjs";
-  const reportPath = ".loom/completion-reports/smoke-repair.junit.xml";
   mkdirSync(join(cwd, "src"), { recursive: true });
   mkdirSync(join(cwd, ".loom", "completion-reports"), { recursive: true });
   writeFileSync(join(cwd, changedPath), "export const repaired = () => false;\n");
@@ -404,10 +410,13 @@ function criticalRemediationSmoke(): void {
   git(cwd, ["add", ".gitignore", ".loom/verification-manifest.json", changedPath]);
   git(cwd, ["commit", "-qm", "vulnerable baseline"]);
   writeFileSync(join(cwd, changedPath), "export const repaired = () => false; // reviewed vulnerable state\n");
+  return cwd;
+}
 
-  const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-facade-smoke-critical-runs-")));
-  temporaryRoots.push(runsRoot);
-  const reviewRun = join(runsRoot, "run.critical-source");
+/** Review the vulnerable source with one critical the refutation panel
+ *  upholds, and return that surviving critical's finding id. */
+function survivingCriticalFindingId(cwd: string, runsRoot: string, reviewRun: string): string {
+  const { changedPath } = CRITICAL_REPAIR;
   const initial = asSpawnBatch(run(cwd, [
     "start", "standalone-review", "--runs-root", runsRoot, "--run", reviewRun,
   ], JSON.stringify({ kind: "code", files: [changedPath], dryRun: false })), "critical source start");
@@ -427,7 +436,13 @@ function criticalRemediationSmoke(): void {
     "critical source must retain exactly one surviving critical");
   const finding = record(result.surviving_critical_findings[0], "critical source surviving finding");
   check(typeof finding.id === "string", "critical source finding id is missing");
+  return finding.id;
+}
 
+/** Repair the source, add its regression test, and leave a stale failing
+ *  report that the enrolled command must replace with fresh evidence. */
+function writeCriticalRepair(cwd: string): void {
+  const { changedPath, testPath, reportPath } = CRITICAL_REPAIR;
   writeFileSync(join(cwd, changedPath), "export const repaired = () => true;\n");
   mkdirSync(join(cwd, "tests"), { recursive: true });
   writeFileSync(join(cwd, testPath), [
@@ -440,38 +455,39 @@ function criticalRemediationSmoke(): void {
   // A stale failing report must be removed before the enrolled command creates
   // fresh evidence; merely touching or reusing these bytes cannot pass.
   writeFileSync(join(cwd, reportPath), '<testsuite tests="1" failures="1"/>');
+}
 
-  const remediationRun = join(runsRoot, "run.critical-remediation");
-  const remediated = asDone(run(cwd, [
-    "start", "remediation", "--runs-root", runsRoot, "--run", remediationRun,
-  ], JSON.stringify({
-    sourceRunsRoot: runsRoot,
-    sourceRun: reviewRun,
-    supportPaths: [testPath],
-    defectFamily: {
-      kind: "declared-defect-family-accounting",
+/** The declared defect-family accounting that repairs `findingId` in one
+ *  group checked by the enrolled regression check. */
+function declaredRepairAccounting(findingId: string): Record<string, unknown> {
+  return {
+    kind: "declared-defect-family-accounting",
+    provenance: "DECLARED",
+    dispositions: [{ findingId, status: "repaired", repairGroupId: "group.smoke-repair" }],
+    groups: [{
+      kind: "declared-repair-group",
       provenance: "DECLARED",
-      dispositions: [{ findingId: finding.id, status: "repaired", repairGroupId: "group.smoke-repair" }],
-      groups: [{
-        kind: "declared-repair-group",
-        provenance: "DECLARED",
-        repairGroupId: "group.smoke-repair",
-        findingIds: [finding.id],
-        rootCause: { provenance: "DECLARED", statement: "The reviewed predicate returned the vulnerable value." },
-        invariant: { provenance: "DECLARED", statement: "The repaired predicate returns the accepted value." },
-        siblings: { kind: "none-declared", provenance: "DECLARED", reason: "The fixture has no sibling implementation paths." },
-        checks: [{
-          checkId: "smoke:critical-remediation",
-          historicalRed: {
-            kind: "historical-red",
-            provenance: "DECLARED",
-            statement: "The regression assertion fails against the reviewed vulnerable predicate.",
-            reference: null,
-          },
-        }],
+      repairGroupId: "group.smoke-repair",
+      findingIds: [findingId],
+      rootCause: { provenance: "DECLARED", statement: "The reviewed predicate returned the vulnerable value." },
+      invariant: { provenance: "DECLARED", statement: "The repaired predicate returns the accepted value." },
+      siblings: { kind: "none-declared", provenance: "DECLARED", reason: "The fixture has no sibling implementation paths." },
+      checks: [{
+        checkId: "smoke:critical-remediation",
+        historicalRed: {
+          kind: "historical-red",
+          provenance: "DECLARED",
+          statement: "The regression assertion fails against the reviewed vulnerable predicate.",
+          reference: null,
+        },
       }],
-    },
-  })), "critical remediation start");
+    }],
+  };
+}
+
+/** The remediation outcome installed the verified index after exactly one
+ *  engine-observed, freshly passing one-test check. */
+function assertRepairCheckedInstallation(remediated: Done): void {
   const outcome = record(remediated.outcome, "critical remediation outcome");
   check(outcome.kind === "remediation-installed", "critical remediation did not install the verified index");
   const assessment = record(outcome.defectFamilyAssessment, "critical remediation assessment");
@@ -484,11 +500,78 @@ function criticalRemediationSmoke(): void {
   check(summary.total === 1 && summary.failed === 0, "critical remediation report was not a fresh passing one-test report");
   check(record(outcome.installation, "critical remediation installation").kind === "verified-index-installed",
     "critical remediation lacks an actual installation receipt");
+}
+
+/** Drive the non-zero-critical remediation path through a fresh report and
+ * the real Git index adapter; the zero-critical smoke above intentionally
+ * skips both defect-family checks and completion-check execution. */
+function criticalRemediationSmoke(): void {
+  const { changedPath, testPath } = CRITICAL_REPAIR;
+  const cwd = criticalRemediationRepository();
+  const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-facade-smoke-critical-runs-")));
+  temporaryRoots.push(runsRoot);
+  const reviewRun = join(runsRoot, "run.critical-source");
+  const findingId = survivingCriticalFindingId(cwd, runsRoot, reviewRun);
+  writeCriticalRepair(cwd);
+
+  const remediationRun = join(runsRoot, "run.critical-remediation");
+  const remediated = asDone(run(cwd, [
+    "start", "remediation", "--runs-root", runsRoot, "--run", remediationRun,
+  ], JSON.stringify({
+    sourceRunsRoot: runsRoot,
+    sourceRun: reviewRun,
+    supportPaths: [testPath],
+    defectFamily: declaredRepairAccounting(findingId),
+  })), "critical remediation start");
+  assertRepairCheckedInstallation(remediated);
   asDone(run(cwd, ["resume", "--runs-root", runsRoot, "--run", remediationRun]),
     "critical remediation terminal replay");
   check(git(cwd, ["diff", "--cached", "--name-only"]) === [changedPath, testPath].sort().join("\n"),
     "critical remediation installed a non-authoritative staged set");
   process.stdout.write("  ✓ surviving critical → fresh required report → repair-checked exact index installation\n");
+}
+
+/** A started `kind: "all"` Standalone Review over a fresh changed repository,
+ *  with its run evidence in its own runs root. */
+type StartedStandaloneReview = Readonly<{
+  cwd: string;
+  changedPath: string;
+  runsRoot: string;
+  reviewRun: string;
+  initial: SpawnBatch;
+}>;
+
+function startedStandaloneReview(label: string, startLabel: string): StartedStandaloneReview {
+  const { cwd, changedPath } = changedStandaloneRepository(label);
+
+  const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-facade-smoke-runs-")));
+  temporaryRoots.push(runsRoot);
+  const reviewRun = join(runsRoot, `run.${label}`);
+  mkdirSync(reviewRun, { recursive: true });
+  const initial = asSpawnBatch(run(cwd, [
+    "start", "standalone-review", "--runs-root", runsRoot, "--run", reviewRun,
+  ], JSON.stringify({ kind: "all", files: [changedPath], dryRun: false })), startLabel);
+  return { cwd, changedPath, runsRoot, reviewRun, initial };
+}
+
+/** Submit `request` with an advisory finding outside the frozen review scope. */
+function submitOutOfScope(review: StartedStandaloneReview, request: SpawnRequest): unknown {
+  return submit(review.cwd, review.runsRoot, review.reviewRun, request,
+    reviewerOutput(review.reviewRun, request, "advisory", "src/outside.ts"));
+}
+
+/** Regression: the diagnostic used to live only in the pass-local rejected set,
+ *  so a LATER resume re-issued this same retry with a generic message that
+ *  named the wrong admission rule. It must be durable across resumes. */
+function assertDurableRetryDiagnostic(review: StartedStandaloneReview, retry: SpawnRequest): void {
+  const replayedRetry = asSpawnBatch(
+    run(review.cwd, ["resume", "--runs-root", review.runsRoot, "--run", review.reviewRun]),
+    "standalone retry resume replay",
+  ).requests.find(({ authority }) => authority.slotId === retry.authority.slotId);
+  check(replayedRetry !== undefined && replayedRetry.authority.attempt === 2,
+    "resume replay dropped the retried reviewer slot");
+  check(replayedRetry.task === retry.task,
+    "resume replay lost the durable rejection diagnostic from the attempt-2 task");
 }
 
 /**
@@ -497,15 +580,8 @@ function criticalRemediationSmoke(): void {
  * dead-end the whole run at aggregation (the pre-retry engine behavior).
  */
 function standaloneReviewerRetrySmoke(): void {
-  const { cwd, changedPath } = changedStandaloneRepository("standalone-retry");
-
-  const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-facade-smoke-runs-")));
-  temporaryRoots.push(runsRoot);
-  const reviewRun = join(runsRoot, "run.standalone-retry");
-  mkdirSync(reviewRun, { recursive: true });
-  const initial = asSpawnBatch(run(cwd, [
-    "start", "standalone-review", "--runs-root", runsRoot, "--run", reviewRun,
-  ], JSON.stringify({ kind: "all", files: [changedPath], dryRun: false })), "standalone retry start");
+  const review = startedStandaloneReview("standalone-retry", "standalone retry start");
+  const { cwd, changedPath, runsRoot, reviewRun, initial } = review;
   check(initial.requests.length >= 2, "standalone retry start must spawn at least two reviewers");
 
   // The first reviewer strays outside the frozen scope: its finding file is
@@ -514,7 +590,7 @@ function standaloneReviewerRetrySmoke(): void {
   // the run at aggregation with no recovery path.
   const first = initial.requests[0]!;
   const retryBatch = asSpawnBatch(
-    submit(cwd, runsRoot, reviewRun, first, reviewerOutput(reviewRun, first, "advisory", "src/outside.ts")),
+    submitOutOfScope(review, first),
     "standalone retry batch after out-of-scope finding",
   );
   const retry = retryBatch.requests.find(({ authority }) => authority.slotId === first.authority.slotId);
@@ -526,18 +602,7 @@ function standaloneReviewerRetrySmoke(): void {
   // the retry quotes exactly that — the reviewer can see which finding to move.
   check(retry.task.includes("findings[0].file is outside the frozen review scope: src/outside.ts"),
     "retry task must quote the engine's own diagnostic, not a generic reminder");
-
-  // Regression: the diagnostic used to live only in the pass-local rejected set,
-  // so a LATER resume re-issued this same retry with a generic message that
-  // named the wrong admission rule. It must be durable across resumes.
-  const replayedRetry = asSpawnBatch(
-    run(cwd, ["resume", "--runs-root", runsRoot, "--run", reviewRun]),
-    "standalone retry resume replay",
-  ).requests.find(({ authority }) => authority.slotId === first.authority.slotId);
-  check(replayedRetry !== undefined && replayedRetry.authority.attempt === 2,
-    "resume replay dropped the retried reviewer slot");
-  check(replayedRetry.task === retry.task,
-    "resume replay lost the durable rejection diagnostic from the attempt-2 task");
+  assertDurableRetryDiagnostic(review, retry);
   check(retryBatch.requests.some(({ authority }) =>
     authority.slotId !== first.authority.slotId && authority.attempt === 1),
   "retry batch must also carry the still-pending sibling attempt-1 requests");
@@ -563,30 +628,17 @@ function standaloneReviewerRetrySmoke(): void {
  * blocked action — never loop or silently accept.
  */
 function standaloneRetryTerminalBlockSmoke(): void {
-  const { cwd, changedPath } = changedStandaloneRepository("standalone-retry-block");
-
-  const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-facade-smoke-runs-")));
-  temporaryRoots.push(runsRoot);
-  const reviewRun = join(runsRoot, "run.standalone-retry-block");
-  mkdirSync(reviewRun, { recursive: true });
-  const initial = asSpawnBatch(run(cwd, [
-    "start", "standalone-review", "--runs-root", runsRoot, "--run", reviewRun,
-  ], JSON.stringify({ kind: "all", files: [changedPath], dryRun: false })), "standalone retry-block start");
+  const review = startedStandaloneReview("standalone-retry-block", "standalone retry-block start");
+  const { cwd, runsRoot, reviewRun, initial } = review;
 
   const first = initial.requests[0]!;
-  const retryBatch = asSpawnBatch(
-    submit(cwd, runsRoot, reviewRun, first, reviewerOutput(reviewRun, first, "advisory", "src/outside.ts")),
-    "retry-block attempt-1 rejection",
-  );
+  const retryBatch = asSpawnBatch(submitOutOfScope(review, first), "retry-block attempt-1 rejection");
   const retry = retryBatch.requests.find(({ authority }) => authority.slotId === first.authority.slotId);
   check(retry !== undefined && retry!.authority.attempt === 2, "retry-block slot did not advance to attempt 2");
 
   // The retry repeats the same scope violation: the second and final attempt
   // must terminal-block the run.
-  const blocked = record(
-    submit(cwd, runsRoot, reviewRun, retry!, reviewerOutput(reviewRun, retry!, "advisory", "src/outside.ts")),
-    "retry-block final outcome",
-  );
+  const blocked = record(submitOutOfScope(review, retry!), "retry-block final outcome");
   check(blocked.kind === "blocked", `retry-block must block, got ${blocked.kind}`);
   const replay = record(
     run(cwd, ["resume", "--runs-root", runsRoot, "--run", reviewRun]),
@@ -717,6 +769,42 @@ function waveGateCriticalRefutationSmoke(): void {
   process.stdout.write("  ✓ Wave Gate criticals → canonical refutation authority → atomic completion\n");
 }
 
+/** The registered Wave state bound its task to a review run with a packet id
+ *  and a generation. */
+function assertRegisteredWaveReviewRun(statePath: string): void {
+  const registeredState = record(JSON.parse(readFileSync(statePath, "utf8")) as unknown, "registered Wave state");
+  check(Array.isArray(registeredState.tasks), "registered Wave state has no tasks");
+  const registeredTask = record(registeredState.tasks[0], "registered Wave task");
+  const reviewRun = record(registeredTask.review_run, "registered Wave review run");
+  check(typeof reviewRun.packet_id === "string", "registered Wave packet id is missing");
+  check(typeof reviewRun.generation === "number", "registered Wave generation is missing");
+}
+
+/** The suspension's context reference and every advisory artifact were
+ *  published into the run directory at their declared byte lengths. */
+function assertAdvisoryArtifactsPublished(runDir: string, suspended: AwaitUser): void {
+  check(existsSync(join(runDir, suspended.request.context.slot.path)),
+    "Wave Gate advisory context reference was not published");
+  for (const advisory of suspended.request.advisories) {
+    const path = join(runDir, advisory.slot.path);
+    check(existsSync(path), `Wave Gate advisory artifact was not published: ${advisory.slot.path}`);
+    check(readFileSync(path).byteLength === advisory.byteLength,
+      `Wave Gate advisory artifact byte length drifted: ${advisory.slot.path}`);
+  }
+}
+
+/** A decision naming a stale request, or carrying a malformed disposition, is refused. */
+function assertInvalidAdvisoryDecisionsRefused(cwd: string, runsRoot: string, runDir: string, requestId: string): void {
+  const staleDecision = runFailure(cwd, [
+    "decide", "--runs-root", runsRoot, "--run", runDir, "--request", `wave-advisory:${runDir}:stale`,
+  ], JSON.stringify({ kind: "approve" }));
+  check(staleDecision.stderr.includes("not the exact pending advisory request"), "Wave Gate accepted stale advisory authority");
+  const malformedDecision = runFailure(cwd, [
+    "decide", "--runs-root", runsRoot, "--run", runDir, "--request", requestId,
+  ], JSON.stringify({ kind: "approve", extra: true }));
+  check(malformedDecision.stderr.includes("must be exactly"), "Wave Gate accepted malformed advisory disposition");
+}
+
 function waveGateSmoke(): void {
   const { cwd, statePath } = registeredWaveRepository("wave");
 
@@ -728,13 +816,7 @@ function waveGateSmoke(): void {
   ], JSON.stringify({ wave: 1 })), "Wave Gate start");
   check(initial.requests.some(({ authority }) => authority.role === "spec-check-invoker"), "Wave Gate omitted spec-check authority");
   assertBatchReplay(cwd, runsRoot, runDir, initial, "Wave Gate initial batch");
-
-  const registeredState = record(JSON.parse(readFileSync(statePath, "utf8")) as unknown, "registered Wave state");
-  check(Array.isArray(registeredState.tasks), "registered Wave state has no tasks");
-  const registeredTask = record(registeredState.tasks[0], "registered Wave task");
-  const reviewRun = record(registeredTask.review_run, "registered Wave review run");
-  check(typeof reviewRun.packet_id === "string", "registered Wave packet id is missing");
-  check(typeof reviewRun.generation === "number", "registered Wave generation is missing");
+  assertRegisteredWaveReviewRun(statePath);
 
   let next: unknown = initial;
   for (const request of initial.requests) {
@@ -745,24 +827,10 @@ function waveGateSmoke(): void {
   }
 
   const suspended = asAwaitUser(next, "Wave Gate advisory suspension");
-  check(existsSync(join(runDir, suspended.request.context.slot.path)),
-    "Wave Gate advisory context reference was not published");
-  for (const advisory of suspended.request.advisories) {
-    const path = join(runDir, advisory.slot.path);
-    check(existsSync(path), `Wave Gate advisory artifact was not published: ${advisory.slot.path}`);
-    check(readFileSync(path).byteLength === advisory.byteLength,
-      `Wave Gate advisory artifact byte length drifted: ${advisory.slot.path}`);
-  }
+  assertAdvisoryArtifactsPublished(runDir, suspended);
   const resumedSuspension = asAwaitUser(run(cwd, ["resume", "--runs-root", runsRoot, "--run", runDir]), "Wave Gate suspended replay");
   check(resumedSuspension.request.requestId === suspended.request.requestId, "Wave Gate resume changed advisory decision authority");
-  const staleDecision = runFailure(cwd, [
-    "decide", "--runs-root", runsRoot, "--run", runDir, "--request", `wave-advisory:${runDir}:stale`,
-  ], JSON.stringify({ kind: "approve" }));
-  check(staleDecision.stderr.includes("not the exact pending advisory request"), "Wave Gate accepted stale advisory authority");
-  const malformedDecision = runFailure(cwd, [
-    "decide", "--runs-root", runsRoot, "--run", runDir, "--request", suspended.request.requestId,
-  ], JSON.stringify({ kind: "approve", extra: true }));
-  check(malformedDecision.stderr.includes("must be exactly"), "Wave Gate accepted malformed advisory disposition");
+  assertInvalidAdvisoryDecisionsRefused(cwd, runsRoot, runDir, suspended.request.requestId);
   run(cwd, [
     "decide", "--runs-root", runsRoot, "--run", runDir, "--request", suspended.request.requestId,
   ], JSON.stringify({ kind: "approve" }));
