@@ -1,13 +1,15 @@
 /**
  * Project-local configuration for programmatic lint rules.
  *
- * Loaded from `.claude/linter/config.json` or `.pi/linter/config.json`.
- * Allows projects to define their own architectural boundaries and pure modules
- * without modifying the loom source.
+ * Loaded from `config.json` INSIDE the project rules directory —
+ * `.claude/linter/rules/config.json` (Claude Code) or
+ * `.pi/linter/rules/config.json` (Pi), beside the project's rule files. Allows
+ * projects to define their own architectural boundaries, pure modules and
+ * grandfathered baselines without modifying the loom source.
  */
 
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { DEFAULT_TEST_FILE_SUFFIXES, isTestFileBySuffixes } from "../../core/test-file-classification";
 import type { BoundaryRule } from "./no-cross-boundary-imports";
 
@@ -26,15 +28,43 @@ export interface ProgrammaticConfig {
   readonly maxDiscriminantBranches?: number;
   /** Field names that tag a discriminated union (for exhaustive-discriminant-branching) */
   readonly discriminantTags?: readonly string[];
-  /** Modules whose switches must prove totality (for switch-totality) */
-  readonly switchTotalityModules?: readonly string[];
+  /** Narrows switch-totality to these path prefixes (project-relative). Absent
+   *  means every non-test TypeScript file; never empty — disable the rule by
+   *  name instead of giving it a scope that matches nothing. */
+  readonly switchTotalityModules?: readonly [string, ...string[]];
   /** Grandfathered `path::scrutinee` keys the switch-totality rule excuses,
    *  each entry consuming one violation. Empty means "no debt". */
   readonly switchTotalityBaseline?: readonly string[];
+  /** Grandfathered `path::discriminant` keys the
+   *  exhaustive-discriminant-branching rule excuses, one violation each. */
+  readonly discriminantBranchingBaseline?: readonly string[];
 }
 
 /** Default config when no project config exists */
 export const EMPTY_CONFIG: ProgrammaticConfig = {};
+
+/**
+ * The project rules directory layouts, relative to the project root: Claude
+ * Code reads `.claude/linter/rules`, Pi reads `.pi/linter/rules`. Owned here;
+ * `PROJECT_RULES_DIR` in `engine/src/config.ts` picks one per harness.
+ */
+export const CLAUDE_PROJECT_RULES_DIR = ".claude/linter/rules";
+export const PI_PROJECT_RULES_DIR = ".pi/linter/rules";
+export const PROJECT_RULES_LAYOUTS: readonly string[] = Object.freeze([CLAUDE_PROJECT_RULES_DIR, PI_PROJECT_RULES_DIR]);
+
+/**
+ * The root of the project a rules directory belongs to — the frame its
+ * `config.json` writes baseline keys and module scopes in. Null for a directory
+ * in neither layout: with no known root a key cannot be made relative, so it
+ * stays absolute and matches nothing, which reports a site rather than excusing
+ * one.
+ */
+export function projectRootOf(rulesDir: string | null): string | null {
+  if (rulesDir === null) return null;
+  const absolute = resolve(rulesDir).replace(/\\/g, "/");
+  const layout = PROJECT_RULES_LAYOUTS.find((suffix) => absolute.endsWith(`/${suffix}`));
+  return layout === undefined ? null : absolute.slice(0, absolute.length - layout.length - 1);
+}
 
 /**
  * Is this a test file, and therefore out of scope for the style rules?
@@ -110,6 +140,22 @@ function parseOptionalStringArray(
   return raw as string[];
 }
 
+/** An optional list that, when present, must also be non-empty: a scope whose
+ *  empty form would silently match nothing. */
+function parseOptionalNonEmptyStringArray(
+  raw: unknown,
+  filePath: string,
+  key: string,
+): [string, ...string[]] | undefined {
+  const list = parseOptionalStringArray(raw, filePath, key);
+  if (list === undefined) return undefined;
+  const [first, ...rest] = list;
+  if (first === undefined) {
+    throw new Error(`${filePath}: '${key}' must not be empty — omit it for the default scope, or disable the rule by name`);
+  }
+  return [first, ...rest];
+}
+
 function parseOptionalPositiveInt(
   raw: unknown,
   filePath: string,
@@ -146,11 +192,29 @@ function parseConfig(obj: Record<string, unknown>, filePath: string): Programmat
   const excludeFromMaxLines = parseOptionalStringArray(obj.excludeFromMaxLines, filePath, "excludeFromMaxLines");
   if (excludeFromMaxLines !== undefined) config.excludeFromMaxLines = excludeFromMaxLines;
 
+  return { ...config, ...parseTotalityConfig(obj, filePath) } as ProgrammaticConfig;
+}
+
+type TotalityConfigKey =
+  | "maxDiscriminantBranches"
+  | "discriminantTags"
+  | "switchTotalityModules"
+  | "switchTotalityBaseline"
+  | "discriminantBranchingBaseline";
+
+/** The two totality rules' knobs: the if-chain threshold and tags,
+ *  switch-totality's scope, and the grandfathered keys each rule excuses. */
+function parseTotalityConfig(
+  obj: Record<string, unknown>,
+  filePath: string,
+): Pick<ProgrammaticConfig, TotalityConfigKey> {
+  const config: { -readonly [K in TotalityConfigKey]?: ProgrammaticConfig[K] } = {};
+
   // These two were DECLARED on ProgrammaticConfig and READ by
   // `createProgrammaticRules`, but never parsed here — so a project that set
   // either one got the built-in default with no throw and no log, the one
   // failure mode this loader's "fail-closed" contract is supposed to exclude.
-  // Every field above rejects a bad value loudly; these now do too.
+  // Every field rejects a bad value loudly; these now do too.
   const maxDiscriminantBranches = parseOptionalPositiveInt(
     obj.maxDiscriminantBranches,
     filePath,
@@ -161,10 +225,9 @@ function parseConfig(obj: Record<string, unknown>, filePath: string): Programmat
   const discriminantTags = parseOptionalStringArray(obj.discriminantTags, filePath, "discriminantTags");
   if (discriminantTags !== undefined) config.discriminantTags = discriminantTags;
 
-  // switch-totality's two knobs: the module scopes it governs and the
-  // grandfathered keys it excuses. Both parse here for the same reason the two
-  // above do — a declared-but-unread field is a silent default.
-  const switchTotalityModules = parseOptionalStringArray(
+  // switch-totality's scope and the grandfathered keys each rule excuses parse
+  // here for the same reason — a declared-but-unread field is a silent default.
+  const switchTotalityModules = parseOptionalNonEmptyStringArray(
     obj.switchTotalityModules,
     filePath,
     "switchTotalityModules",
@@ -178,7 +241,14 @@ function parseConfig(obj: Record<string, unknown>, filePath: string): Programmat
   );
   if (switchTotalityBaseline !== undefined) config.switchTotalityBaseline = switchTotalityBaseline;
 
-  return config as ProgrammaticConfig;
+  const discriminantBranchingBaseline = parseOptionalStringArray(
+    obj.discriminantBranchingBaseline,
+    filePath,
+    "discriminantBranchingBaseline",
+  );
+  if (discriminantBranchingBaseline !== undefined) config.discriminantBranchingBaseline = discriminantBranchingBaseline;
+
+  return config;
 }
 
 function parseBoundary(raw: unknown, filePath: string, index: number): BoundaryRule {

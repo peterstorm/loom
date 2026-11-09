@@ -3,7 +3,7 @@
 ## Status
 Accepted (2026-11-07). Records AD-11 of the G2 skeletons plan
 (`.claude/plans/2026-11-02-g2-skeletons.md`; spec `.claude/specs/2026-11-02-g2-skeletons/spec.md`,
-FR-013 through FR-020, FR-022 and FR-028, interview Q15a and Q16a). Shipped on branch
+FR-013 through FR-022 and AS-028, interview Q15a and Q16a). Shipped on branch
 `feat/g2-skeletons`. The CT-2 contract Task (T2) wrote the acceptance matrix, T8 the judge and T9 the
 scope. ADR-0052 (AD-5) covers how the judge's verdicts reach Proof.
 
@@ -28,7 +28,7 @@ negative only lets a parallel hierarchy or a hollow export through to the accept
 remain the behavioural bar. So the rules should catch deliberate shapes and leave ordinary code
 alone: view-models, local helper types, and throws that are reached on legitimate paths (AS-025).
 Additions must never count as violations (FR-022). A semantic retry is expensive, so one refusal
-should give the next attempt everything it needs to fix (FR-028).
+should give the next attempt everything it needs to fix (FR-021, AS-028).
 
 Scope has its own pressures. Tests may define fixtures that look like frozen types (OOS-005).
 Attested Tasks and documentation-only Tasks produce no code to check (FR-019). Files that already
@@ -62,7 +62,7 @@ section.
 3. **Fail fast on the first violation**
    - Pros: Simpler judge and shorter diagnostics.
    - Cons: Each semantic attempt would see only one problem. A file with three hollow exports and a
-     shadowed ADT would use up the retry budget one violation at a time. This contradicts FR-028.
+     shadowed ADT would use up the retry budget one violation at a time. This contradicts FR-021 and AS-028.
 
 4. **Check every file the Task touches, tests included**
    - Pros: No classification step; a parallel hierarchy anywhere gets caught.
@@ -115,7 +115,7 @@ A union of *imported* frozen variant types counts as using the frozen types dire
 Those members are type references, not object-shaped members carrying the discriminant. A local type
 that shares only one variant name is caught only by the shadowing rule.
 
-**Every violation is listed** (FR-028). Within each file the order is: signature violations in
+**Every violation is listed** (FR-021, AS-028). Within each file the order is: signature violations in
 binding order, then shadowing, then re-listing. `renderConformanceViolations` produces one diagnostic
 per artifact: the path, then each violation's subject, its reason in words and its remedy where it has
 one. **Only syntactic checks are made** (Q16a): name lookup, annotation text and its import source,

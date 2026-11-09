@@ -10,7 +10,8 @@
  * `helper orchestration status` reads too, so the two observe a path the same
  * way. A brief is refused while the plan's export bindings have drifted from
  * the TaskGraph stamp, because its frozen duties would then come from
- * bindings the plan no longer holds.
+ * bindings the plan no longer holds; a stamped graph that records no plan
+ * renders, and its brief says the agreement could not be checked.
  */
 
 import { readFileSync } from "node:fs";
@@ -18,9 +19,11 @@ import { isAbsolute, join, resolve } from "node:path";
 import { observeTaskGraphProjectBoundary } from "../config";
 import {
   invariantOwnershipSourceOf,
+  PLAN_BINDINGS_AGREE,
   renderImplementationBrief,
   ruleDocumentsFor,
   type FrozenSignaturesInput,
+  type PlanBindingCheck,
   type ImplementationBrief,
   type ImplementationBriefRequest,
   type RuleDocument,
@@ -35,29 +38,39 @@ import type { PlanInvariant, Task, TaskGraph } from "../types";
 import { observeSkeletons } from "./skeleton-observation";
 import { observeSpecIndex } from "./spec-index-observation";
 
+/** The check a stamped graph that records no plan gets: nothing to compare the stamp with, said aloud. */
+export const NO_PLAN_TO_CHECK: PlanBindingCheck = Object.freeze({
+  kind: "unchecked",
+  reason: "The TaskGraph stamps export bindings but records no plan_file",
+});
+
 /**
  * Whether the recorded plan's export bindings still agree with the TaskGraph
- * stamp (`bindingStampAgreement`). A graph with no stamp, or no recorded
- * plan, has nothing to drift from; a plan that cannot be read refuses.
+ * stamp (`bindingStampAgreement`). A graph with no stamp has nothing to drift
+ * from; a stamped graph with no recorded plan cannot be checked, which the
+ * brief states (`NO_PLAN_TO_CHECK`); a plan that cannot be read, or that
+ * drifted, refuses.
  */
-function bindingStampDrift(graph: TaskGraph, planFile: string | null): DomainResult<null, string> {
-  if (graph.export_bindings === undefined || planFile === null) return { ok: true, value: null };
+function planBindingCheck(graph: TaskGraph, planFile: string | null): DomainResult<PlanBindingCheck, string> {
+  if (graph.export_bindings === undefined) return { ok: true, value: PLAN_BINDINGS_AGREE };
+  if (planFile === null) return { ok: true, value: NO_PLAN_TO_CHECK };
   let text: string;
   try {
     text = readFileSync(planFile, "utf8");
   } catch (error) {
     return { ok: false, error: `cannot read the plan ${planFile} for its export bindings: ${error instanceof Error ? error.message : String(error)}` };
   }
-  return bindingStampAgreement(parsePlanExportBindings(text).bindings, graph.export_bindings);
+  const agreement = bindingStampAgreement(parsePlanExportBindings(text).bindings, graph.export_bindings);
+  return agreement.ok ? { ok: true, value: PLAN_BINDINGS_AGREE } : agreement;
 }
 
 /** The brief's Frozen Signatures observation of one Task, or why it cannot be made. */
 function frozenSignaturesOf(projectRoot: string, graph: TaskGraph, task: Task, planFile: string | null): DomainResult<FrozenSignaturesInput, string> {
-  const drift = bindingStampDrift(graph, planFile);
-  if (!drift.ok) return drift;
+  const planBindings = planBindingCheck(graph, planFile);
+  if (!planBindings.ok) return planBindings;
   const observed = observeSkeletons(projectRoot, graph, [task], [task]);
   if (!observed.ok) return { ok: false, error: `cannot observe its skeleton paths: ${observed.error}` };
-  return { ok: true, value: Object.freeze({ graph, ...observed.value }) };
+  return { ok: true, value: Object.freeze({ graph, ...observed.value, planBindings: planBindings.value }) };
 }
 
 /** The brief template, relative to the active Loom package root. */

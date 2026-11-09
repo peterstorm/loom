@@ -27,12 +27,12 @@
  * bytes with no record, refresh only `engine-bytes`, nothing for any other
  * outcome.
  *
- * Sibling rows (T13): `planSkeletonRefresh`, the one planner of the contract
- * stop (`candidate-driven`) and the revision (`record-driven`), fed this
+ * Sibling rows (T13): the refresh planners — `planCandidateRefresh` for
+ * the contract stop and `planRecordRefresh` for the revision — fed this
  * same graph's records and observation set with a canonical skeleton per
- * writable bound path, acts on a present file exactly when the owner judges
- * it untouched (adopt when `canonical`, else refresh), flags a record stale
- * exactly when the owner judges its file touched, and agrees with the
+ * writable bound path, each act on a present file exactly when the owner
+ * judges it untouched (adopt when `canonical`, else refresh), flag a record
+ * stale exactly when the owner judges its file touched, and agree with the
  * owner's outcome for the path.
  *
  * Sibling rows (T14): `helper orchestration status`'s `skeletonStatusReport`
@@ -45,14 +45,20 @@
 
 import { describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
-import { renderFrozenSignatures, TASK_NOT_OBSERVED } from "../../src/core/implementation-brief";
+import { PLAN_BINDINGS_AGREE, renderFrozenSignatures, TASK_NOT_OBSERVED } from "../../src/core/implementation-brief";
 import { isUntouchedSkeleton, presentSkeletonOf, renderSkeletonOutcome, skeletonOutcomesOf } from "../../src/core/skeleton/outcomes";
 import type { SkeletonCandidate } from "../../src/core/skeleton/records";
-import { planSkeletonRefresh } from "../../src/core/skeleton/refresh-plan";
+import {
+  planCandidateRefresh,
+  planRecordRefresh,
+  type AdoptAction,
+  type CreateAction,
+  type RefreshAction,
+  type StaleAction,
+} from "../../src/core/skeleton/refresh-plan";
 import { renderSkeletonStatus, skeletonStatusReport } from "../../src/core/skeleton/status";
 import type {
   ExportBinding,
-  Identifier,
   PathObservation,
   SkeletonOutcome,
   SkeletonRecord,
@@ -61,6 +67,7 @@ import { planTaskSkeletons } from "../../src/orchestration/skeleton-materializat
 import type { Task, TaskGraph } from "../../src/types";
 import { digest } from "../fixtures/acceptance-fixtures";
 import { knownSkeletonOutcomes } from "../fixtures/known-skeleton-outcomes";
+import { binding } from "../fixtures/skeleton-builders";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 
 const ENGINE = "e".repeat(64);
@@ -102,11 +109,7 @@ const contract = (id: string, types: AcceptanceContract["types"], anchors: reado
 const TYPED = contract("CT-1", { kind: "file", path: "src/contract/types.ts" }, ["FR-001"]);
 const TYPELESS = contract("CT-2", { kind: "none", reason: "a pure CLI slice" }, ["FR-002"]);
 
-const bound = (path: string, contractId = "CT-1"): ExportBinding => ({
-  path,
-  contract: contractId,
-  exports: [{ name: "priceOrder" as Identifier, alias: "PriceOrderFn" as Identifier }],
-});
+const bound = (path: string, contractId = "CT-1"): ExportBinding => binding(path, contractId, ["priceOrder", "PriceOrderFn"]);
 
 const record = (path: string, origin: SkeletonRecord["origin"]): SkeletonRecord => ({
   path,
@@ -314,6 +317,10 @@ const candidate = (path: string): SkeletonCandidate => ({
   typesSha256: "f".repeat(64),
 });
 
+/** Any planner's action as `[kind, path]`: the candidate's path, or a stale record's. */
+const describeAction = (action: CreateAction | AdoptAction | RefreshAction | StaleAction): readonly [string, string] =>
+  action.kind === "stale" ? [action.kind, action.record.path] : [action.kind, action.candidate.skeleton.path];
+
 describe("INV-4 sibling: planTaskSkeletons (spawn materialization) agrees with the owner", () => {
   /** A canonical skeleton for every bound supported path, as stage two generates them. */
   const CANDIDATES: ReadonlyMap<string, SkeletonCandidate> = new Map([
@@ -343,13 +350,13 @@ describe("INV-4 sibling: planTaskSkeletons (spawn materialization) agrees with t
 
   it("writes only where the owner says skeleton-written: create absent paths, adopt unrecorded canonical bytes", () => {
     const plan = planTaskSkeletons(GRAPH, "T2", OBSERVATIONS, CANDIDATES);
-    expect(plan.ok && plan.value.actions.map((action) => [action.kind, action.candidate.skeleton.path])).toEqual([
+    expect(plan.ok && plan.value.actions.map(describeAction)).toEqual([
       ["adopt", "src/adopted.ts"],
       ["create", "src/main/java/a/b/C.java"],
       ["create", "src/pricing.ts"],
     ]);
     const claimant = planTaskSkeletons(GRAPH, "T3", OBSERVATIONS, CANDIDATES);
-    expect(claimant.ok && claimant.value.actions.map((action) => [action.kind, action.candidate.skeleton.path])).toEqual([
+    expect(claimant.ok && claimant.value.actions.map(describeAction)).toEqual([
       ["create", "src/cli-bound.ts"],
     ]);
   });
@@ -390,11 +397,11 @@ const currentSha = (path: string): string | null => {
   return observation?.kind === "present" ? observation.sha256 : null;
 };
 
-describe("INV-4 sibling: planSkeletonRefresh candidate-driven (the contract Task's stop) agrees with the owner", () => {
-  const actions = planSkeletonRefresh("candidate-driven", GRAPH.skeletons ?? [], OBSERVATIONS, CANDIDATE_LIST);
+describe("INV-4 sibling: planCandidateRefresh (the contract Task's stop) agrees with the owner", () => {
+  const actions = planCandidateRefresh(GRAPH.skeletons ?? [], OBSERVATIONS, CANDIDATE_LIST);
 
   it("creates absent stubs, adopts canonical bytes, refreshes untouched engine bytes, and never touches the rest", () => {
-    expect(actions.map((action) => [action.kind, action.candidate.skeleton.path])).toEqual([
+    expect(actions.map(describeAction)).toEqual([
       ["create", "src/main/java/a/b/C.java"],
       ["create", "src/pricing.ts"],
       ["refresh", "src/stub.ts"],
@@ -423,11 +430,11 @@ describe("INV-4 sibling: planSkeletonRefresh candidate-driven (the contract Task
   });
 });
 
-describe("INV-4 sibling: planSkeletonRefresh record-driven (the Contract Revision) agrees with the owner", () => {
-  const actions = planSkeletonRefresh("record-driven", GRAPH.skeletons ?? [], OBSERVATIONS, CANDIDATE_LIST);
+describe("INV-4 sibling: planRecordRefresh (the Contract Revision) agrees with the owner", () => {
+  const actions = planRecordRefresh(GRAPH.skeletons ?? [], OBSERVATIONS, CANDIDATE_LIST);
 
   it("refreshes untouched engine bytes, adopts canonical ones, flags modified ones stale, and skips unresolved untouched ones", () => {
-    expect(actions.map((action) => [action.kind, action.kind === "stale" ? action.record.path : action.candidate.skeleton.path])).toEqual([
+    expect(actions.map(describeAction)).toEqual([
       ["stale", "src/edited.ts"],
       ["adopt", "src/refreshed.ts"],
       ["refresh", "src/stub.ts"],
@@ -447,8 +454,8 @@ describe("INV-4 sibling: planSkeletonRefresh record-driven (the Contract Revisio
 
   it("flags a modified record stale even when its binding no longer resolves, and needs nothing for a deleted file", () => {
     const observations = new Map(OBSERVATIONS).set("src/unbound-skeleton.ts", present(EDITED)).set("src/stub.ts", ABSENT);
-    expect(planSkeletonRefresh("record-driven", GRAPH.skeletons ?? [], observations, CANDIDATE_LIST)
-      .map((action) => [action.kind, action.kind === "stale" ? action.record.path : action.candidate.skeleton.path])).toEqual([
+    expect(planRecordRefresh(GRAPH.skeletons ?? [], observations, CANDIDATE_LIST)
+      .map(describeAction)).toEqual([
       ["stale", "src/edited.ts"],
       ["adopt", "src/refreshed.ts"],
       ["stale", "src/unbound-skeleton.ts"],
@@ -456,7 +463,7 @@ describe("INV-4 sibling: planSkeletonRefresh record-driven (the Contract Revisio
   });
 });
 
-describe("INV-4 sibling: planSkeletonRefresh reads an observation by normalized path, as it matches records and candidates", () => {
+describe("INV-4 sibling: both refresh planners read an observation by normalized path, as it matches records and candidates", () => {
   /** The matrix observations with every key spelled `./path`, or with backslashes. */
   const respelled = (spell: (path: string) => string): ReadonlyMap<string, PathObservation> =>
     new Map([...OBSERVATIONS].map(([path, observation]) => [spell(path), observation] as const));
@@ -464,27 +471,25 @@ describe("INV-4 sibling: planSkeletonRefresh reads an observation by normalized 
     ["./-prefixed", (path) => `./${path}`],
     ["backslashed", (path) => path.replaceAll("/", "\\")],
   ];
-  const kinds = (actions: readonly ({ kind: string; candidate?: SkeletonCandidate; record?: SkeletonRecord })[]) =>
-    actions.map((action) => [action.kind, action.candidate?.skeleton.path ?? action.record?.path]);
 
   for (const [name, spell] of SPELLINGS) {
-    it(`record-driven keeps every stale flag over ${name} observation keys`, () => {
-      const actions = planSkeletonRefresh("record-driven", GRAPH.skeletons ?? [], respelled(spell), CANDIDATE_LIST);
-      expect(actions).toEqual(planSkeletonRefresh("record-driven", GRAPH.skeletons ?? [], OBSERVATIONS, CANDIDATE_LIST));
-      expect(kinds(actions)).toContainEqual(["stale", "src/edited.ts"]);
+    it(`planRecordRefresh keeps every stale flag over ${name} observation keys`, () => {
+      const actions = planRecordRefresh(GRAPH.skeletons ?? [], respelled(spell), CANDIDATE_LIST);
+      expect(actions).toEqual(planRecordRefresh(GRAPH.skeletons ?? [], OBSERVATIONS, CANDIDATE_LIST));
+      expect(actions.map(describeAction)).toContainEqual(["stale", "src/edited.ts"]);
     });
 
-    it(`candidate-driven creates nothing over a present file behind ${name} observation keys`, () => {
-      const actions = planSkeletonRefresh("candidate-driven", GRAPH.skeletons ?? [], respelled(spell), CANDIDATE_LIST);
-      expect(actions).toEqual(planSkeletonRefresh("candidate-driven", GRAPH.skeletons ?? [], OBSERVATIONS, CANDIDATE_LIST));
-      expect(kinds(actions)).not.toContainEqual(["create", "src/refreshed.ts"]);
+    it(`planCandidateRefresh creates nothing over a present file behind ${name} observation keys`, () => {
+      const actions = planCandidateRefresh(GRAPH.skeletons ?? [], respelled(spell), CANDIDATE_LIST);
+      expect(actions).toEqual(planCandidateRefresh(GRAPH.skeletons ?? [], OBSERVATIONS, CANDIDATE_LIST));
+      expect(actions.map(describeAction)).not.toContainEqual(["create", "src/refreshed.ts"]);
     });
   }
 
   it("matches a non-normalized record path against a normalized observation key", () => {
     const records = (GRAPH.skeletons ?? []).map((recorded) =>
       (recorded.path === "src/edited.ts" ? { ...recorded, path: "./src/edited.ts" } : recorded));
-    expect(kinds(planSkeletonRefresh("record-driven", records, OBSERVATIONS, CANDIDATE_LIST)))
+    expect(planRecordRefresh(records, OBSERVATIONS, CANDIDATE_LIST).map(describeAction))
       .toContainEqual(["stale", "./src/edited.ts"]);
   });
 });
@@ -537,7 +542,7 @@ describe("INV-4 sibling: renderFrozenSignatures (the implementation brief) agree
     it(`${taskId}: states exactly the owner's outcome, with its exact string, on the line naming each path`, () => {
       const subject = WAVE_2.tasks.find(({ id }) => id === taskId);
       if (subject === undefined) throw new Error(taskId);
-      const section = renderFrozenSignatures(subject, { graph: WAVE_2, observations: OBSERVATIONS, surfaces: new Map(), unresolved: [] });
+      const section = renderFrozenSignatures(subject, { graph: WAVE_2, observations: OBSERVATIONS, surfaces: new Map(), unresolved: [], planBindings: PLAN_BINDINGS_AGREE });
       const outcomes = knownSkeletonOutcomes(WAVE_2, taskId, OBSERVATIONS);
       for (const { path, outcome } of outcomes) {
         expect(section.split("\n"), path).toContain(`- \`${path}\` — ${renderSkeletonOutcome(outcome)}`);
@@ -550,7 +555,7 @@ describe("INV-4 sibling: renderFrozenSignatures (the implementation brief) agree
   it("states no outcome for a Task the owner calls unknown-task, saying the observed graph does not hold it", () => {
     const stranger = task("T9", ["src/pricing.ts"]);
     expect(skeletonOutcomesOf(WAVE_2, "T9", OBSERVATIONS).ok).toBe(false);
-    expect(renderFrozenSignatures(stranger, { graph: WAVE_2, observations: OBSERVATIONS, surfaces: new Map(), unresolved: [] }))
+    expect(renderFrozenSignatures(stranger, { graph: WAVE_2, observations: OBSERVATIONS, surfaces: new Map(), unresolved: [], planBindings: PLAN_BINDINGS_AGREE }))
       .toBe(TASK_NOT_OBSERVED);
   });
 });

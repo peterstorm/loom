@@ -17,9 +17,9 @@ import {
   rollbackTaskExecutionRegistration,
   type TaskExecutionRegistrationOutcome,
 } from "../../src/handlers/task-execution";
-import type { ImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import type { SkeletonOutcome } from "../../src/core/skeleton/types";
 import {
+  authorityOf,
   canonicalJavaSkeleton,
   canonicalSkeletonOf,
   canonicalTsSkeleton,
@@ -29,6 +29,7 @@ import {
   PATHS,
   recordedOutcomes,
   recordedSkeletons,
+  registered,
   settleAttempt,
   sha256,
   SHADOWING_VIEW_TEXT,
@@ -46,18 +47,6 @@ afterEach(cleanupSkeletonRepos);
 /** Register the owed spawns of `taskIds` as one parallel batch. */
 const register = (repo: SkeletonRepo, ...taskIds: readonly string[]): Promise<TaskExecutionRegistrationOutcome> =>
   registerTaskExecutionBatch(taskIds.map((taskId) => spawnFor(repo.rawState(), taskId)));
-
-async function registered(repo: SkeletonRepo, ...taskIds: readonly string[]): Promise<readonly ImplementationAttemptAuthority[]> {
-  const outcome = await register(repo, ...taskIds);
-  if (outcome.kind !== "registered") throw new Error(`registration refused: ${outcome.message}`);
-  return outcome.authorities;
-}
-
-const authorityOf = (authorities: readonly ImplementationAttemptAuthority[], taskId: string): ImplementationAttemptAuthority => {
-  const found = authorities.find((authority) => authority.taskId === taskId);
-  if (found === undefined) throw new Error(`no authority for ${taskId}`);
-  return found;
-};
 
 const written = (origin: "spawn" | "contract-stub" | "revision" = "spawn"): SkeletonOutcome => ({ kind: "skeleton-written", origin });
 

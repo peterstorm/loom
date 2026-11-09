@@ -15,7 +15,7 @@
  * 2. **Generate.** Each resolved binding whose path `skeletonLanguageOf`
  *    (INV-6) parses to a target of the types file's language gets its
  *    canonical skeleton bytes, the same bytes registration writes (US3, US4).
- * 3. **Plan.** `planSkeletonRefresh` (`candidate-driven`) decides, through
+ * 3. **Plan.** `planCandidateRefresh` decides, through
  *    `presentSkeletonOf` (INV-4), what each path needs: create a missing
  *    stub, adopt canonical bytes already there, or refresh an untouched stub
  *    whose canonical bytes changed after a stop-check block and further
@@ -34,15 +34,17 @@
 
 import { observeTaskGraphProjectBoundary } from "../config";
 import { contractRole } from "../core/acceptance-contract";
+import { contractStubAuthor } from "../core/implementation-brief";
 import { canonicalStructuralEquals, type DomainResult } from "../core/orchestration-contract";
 import { renderLeftPreparedName, renderSkeletonProblem, type LeftPreparedName, type SkeletonProblem } from "../core/skeleton/problems";
 import { installSkeletonRecords } from "../core/skeleton/records";
-import { planSkeletonRefresh } from "../core/skeleton/refresh-plan";
+import { planCandidateRefresh } from "../core/skeleton/refresh-plan";
 import type { SkeletonRecord } from "../core/skeleton/types";
 import type { TaskGraph } from "../types";
 import { typedContract, type TypedContract } from "./frozen-surface-observation";
 import { observeSkeletonPaths } from "./skeleton-observation";
 import { canonicalContractSkeletons, frozenSkeletonPaths, writeFailure, writePlanned } from "./skeleton-refresh";
+import { describeCause } from "../utils/describe-cause";
 
 // ---------------------------------------------------------------------------
 // Ports and results
@@ -67,22 +69,21 @@ export type ContractStubs = Readonly<{
 
 const NOTHING: ContractStubs = Object.freeze({ written: Object.freeze([]), problems: Object.freeze([]), leftovers: Object.freeze([]) });
 
-const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-
 // ---------------------------------------------------------------------------
 // Pure core
 // ---------------------------------------------------------------------------
 
-/** The typed contracts with bindings whose contract Task is `taskId`: the ones its stop stubs. */
+/** The typed contracts whose contract Task is `taskId` and whose stubs the
+ *  engine writes (`contractStubAuthor`, the one owner of that rule): the ones
+ *  its stop stubs. */
 export function stubbedContracts(graph: TaskGraph, taskId: string): readonly TypedContract[] {
   const task = graph.tasks.find(({ id }) => id === taskId);
   if (task === undefined) return Object.freeze([]);
-  const bindings = graph.export_bindings ?? [];
   return Object.freeze((graph.acceptance_contracts ?? []).flatMap((contract) => {
     const typed = typedContract(contract);
     return typed !== null &&
-      contractRole(contract, task, graph.tasks).kind === "contract-task" &&
-      bindings.some((binding) => binding.contract === contract.id)
+      contractStubAuthor(contract, graph.export_bindings).kind === "engine" &&
+      contractRole(contract, task, graph.tasks).kind === "contract-task"
       ? [typed]
       : [];
   }));
@@ -123,7 +124,7 @@ function stubContract(
   if (!observed.ok) return observed;
   // A path that could not be read is already a problem: nothing is planned for it.
   const observable = candidates.filter(({ skeleton }) => observed.value.observations.has(skeleton.path));
-  const performed = planSkeletonRefresh("candidate-driven", graph.skeletons ?? [], observed.value.observations, observable)
+  const performed = planCandidateRefresh(graph.skeletons ?? [], observed.value.observations, observable)
     .map((action) => ({ path: action.candidate.skeleton.path, written: writePlanned(root, action, "contract-stub", frozen) }));
   return {
     ok: true,
@@ -154,7 +155,7 @@ export async function materializeContractStubs(
   try {
     graph = store.load();
   } catch (error) {
-    return { ok: false, error: errorMessage(error) };
+    return { ok: false, error: describeCause(error) };
   }
   const contracts = stubbedContracts(graph, taskId);
   if (contracts.length === 0) return { ok: true, value: NOTHING };
@@ -174,7 +175,7 @@ export async function materializeContractStubs(
         value: null,
       }));
     } catch (error) {
-      return { ok: false, error: `the stubs were written, but their records were not: ${errorMessage(error)}` };
+      return { ok: false, error: `the stubs were written, but their records were not: ${describeCause(error)}` };
     }
   }
   return {
@@ -195,6 +196,6 @@ export async function contractStubStopNote(store: ContractStubStore, taskId: str
     const { root } = observeTaskGraphProjectBoundary(store.getPath());
     return renderContractStubs(taskId, await materializeContractStubs(root, store, taskId));
   } catch (error) {
-    return renderContractStubs(taskId, { ok: false, error: errorMessage(error) });
+    return renderContractStubs(taskId, { ok: false, error: describeCause(error) });
   }
 }

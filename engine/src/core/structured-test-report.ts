@@ -13,10 +13,12 @@ import type { DomainResult } from "./orchestration-contract/identity";
 /**
  * One test file as its structured report lists it.
  *
- * `file` is the report's identity exactly as written: a JUnit testcase's
- * `classname` (a runner-relative path under Vitest, a JVM class under
- * Surefire), or a Vitest JSON `testResults[].name` (an absolute path). The
- * capture cwd and the command string never rewrite or contribute to it.
+ * `file` is the report's identity exactly as written: a JUnit testcase's own
+ * `file` attribute when it writes one (Bun, whose `classname` is the describe
+ * chain), else its `classname` (a runner-relative path under Vitest, a JVM
+ * class under Surefire); a Vitest JSON `testResults[].name` (an absolute
+ * path); or the file header of a Bun console section. The capture cwd and the
+ * command string never rewrite or contribute to it.
  *
  * `executed` and `failed` count this file's testcases under the report
  * format's own counting rule, so the results of one report reconcile with its
@@ -24,9 +26,11 @@ import type { DomainResult } from "./orchestration-contract/identity";
  * names how many of `executed` never ran (skipped, pending, todo, disabled);
  * `failed + skipped <= executed`, and `executed - skipped` is how many actually
  * ran. `collectionError` is true when the file failed to collect or import:
- * Vitest JUnit's synthetic testcase whose `name` equals its `classname`, or a
- * failed Vitest JSON entry with no `assertionResults`. A file whose only
- * failure is a collection error is never a behavioral red.
+ * Vitest JUnit's synthetic testcase whose `name` equals its `classname`, a
+ * failed Vitest JSON entry with no `assertionResults`, or a Bun console
+ * section reporting an unhandled error between tests (one failing testcase,
+ * as Bun's own summary counts it). A file whose only failure is a collection
+ * error is never a behavioral red.
  */
 export type TestFileResult = Readonly<{
   file: string;
@@ -48,7 +52,23 @@ export type TestReportFiles =
 
 declare const REPORT_COUNTS_PARSED: unique symbol;
 declare const REPORT_SUMMARY_PARSED: unique symbol;
-type ReportSource = "vitest-json" | "junit-xml";
+/**
+ * Where a summary's facts come from: the one closed vocabulary every reader
+ * parses with `parseReportSource`. `bun-console` is a Bun run that wrote no
+ * JUnit report (Bun writes none when every test file fails to load) and whose
+ * console reported collection errors: those errors are its only facts
+ * (`bunRunSummary`). The completion-check reader in `defect-family-accounting`
+ * deliberately accepts a narrower set — only the formats the strict byte
+ * parser (`parseStructuredTestReportBytes`) yields, which never includes
+ * `bun-console`.
+ */
+export const REPORT_SOURCES = Object.freeze(["vitest-json", "junit-xml", "bun-console"] as const);
+
+type ReportSource = typeof REPORT_SOURCES[number];
+
+/** The report source a wire value names, or null for anything else. */
+export const parseReportSource = (raw: unknown): ReportSource | null =>
+  (REPORT_SOURCES as readonly unknown[]).includes(raw) ? raw as ReportSource : null;
 type CountFields = Readonly<{ total: number; failed: number; source: ReportSource }>;
 
 /**
@@ -114,6 +134,9 @@ function parseFileResult(source: ReportSource, raw: unknown): TestFileResult | s
   }
   if (collectionError && source === "vitest-json" && executed !== 0) {
     return `${file} reports a Vitest JSON collection error yet executed testcases`;
+  }
+  if (source === "bun-console" && !(collectionError && executed === 1 && failed === 1 && skipped === 0)) {
+    return `${file} in a Bun console summary must be exactly one failing collection-error testcase`;
   }
   return Object.freeze({ file, executed, failed, skipped, collectionError });
 }
@@ -594,13 +617,19 @@ export function parseStructuredTestReportBytes(bytes: Uint8Array): StructuredRep
 export type ReportTestcaseOutcome = "passed" | "failed" | "skipped";
 
 /**
- * One JUnit testcase: what it belongs to (`classname` — the test file under
- * Vitest, the test class under Surefire), its name (Vitest prefixes the
- * enclosing `describe` titles, joined by ` > `), how it ended, and the type of
- * its first `<failure>`/`<error>` (`AssertionError` for a behavioral failure,
- * `Error` for a thrown stub or a file that never loaded).
+ * One JUnit testcase: the file it belongs to, its `classname` exactly as
+ * written, its name (Vitest prefixes the enclosing `describe` titles, joined
+ * by ` > `), how it ended, and the type of its first `<failure>`/`<error>`
+ * (`AssertionError` for a behavioral failure, `Error` for a thrown stub or a
+ * file that never loaded).
+ *
+ * `file` is the testcase's own `file` attribute when it writes one, else its
+ * `classname`: Vitest's classname is the test file, Surefire's the test class,
+ * while Bun writes the describe chain (empty at top level) as classname and
+ * the test file as `file`. It is the identity every attribution reads.
  */
 export type ReportTestcase = Readonly<{
+  file: string;
   classname: string;
   name: string;
   outcome: ReportTestcaseOutcome;
@@ -619,15 +648,21 @@ function testcaseElements(element: ReportElement): readonly ReportElement[] {
   return element.name === "testcase" ? [element] : reportChildren(element).flatMap(testcaseElements);
 }
 
+const nonBlank = (value: string | undefined): string | null =>
+  value === undefined || value.trim() === "" ? null : value;
+
 /** A skipped case is skipped even when it also carries a failure: Node's
- *  failing TODO case, which the count parser reads the same way. */
+ *  failing TODO case, which the count parser reads the same way. A testcase
+ *  with no name, or naming no file through either attribute, is null. */
 function projectTestcase(element: ReportElement): ReportTestcase | null {
-  const name = element.attributes.name;
-  const classname = element.attributes.classname;
-  if (name === undefined || name.trim() === "" || classname === undefined || classname.trim() === "") return null;
+  const name = nonBlank(element.attributes.name);
+  const classname = element.attributes.classname ?? "";
+  const file = nonBlank(element.attributes.file) ?? nonBlank(classname);
+  if (name === null || file === null) return null;
   const skipped = element.children.some((child) => child.name === "skipped");
   const failure = element.children.find((child) => child.name === "failure" || child.name === "error");
   return Object.freeze({
+    file,
     classname,
     name,
     outcome: skipped ? "skipped" : failure === undefined ? "passed" : "failed",
@@ -636,15 +671,16 @@ function projectTestcase(element: ReportElement): ReportTestcase | null {
 }
 
 /**
- * Per-file results of a JUnit report: its testcases grouped by `classname`, in
- * first-appearance order, the classname kept exactly as written. `executed`
- * counts every testcase (the legacy declared-count rule the summary uses),
- * `failed` the failing ones and `skipped` the skipped ones (a skipped case
- * that also carries a failure, Node's failing TODO, is skipped, as
- * `projectTestcase` reads it); a failing testcase whose `name` equals its
- * `classname` is Vitest's synthetic collection-error case. `undefined` (the
- * summary stays, per-file results unrecorded) when the report has no
- * testcases, as in a summary-only report, or a testcase that names no file.
+ * Per-file results of a JUnit report: its testcases grouped by their file
+ * identity (`ReportTestcase.file`), in first-appearance order, kept exactly as
+ * written. `executed` counts every testcase (the legacy declared-count rule
+ * the summary uses), `failed` the failing ones and `skipped` the skipped ones
+ * (a skipped case that also carries a failure, Node's failing TODO, is
+ * skipped, as `projectTestcase` reads it); a failing testcase whose `name`
+ * equals its `classname` is Vitest's synthetic collection-error case.
+ * `undefined` (the summary stays, per-file results unrecorded) when the
+ * report has no testcases, as in a summary-only report, or a testcase that
+ * names no file.
  */
 function junitFileResults(root: ReportElement): TestReportFiles | undefined {
   const testcases = testcaseElements(root).map(projectTestcase);
@@ -652,9 +688,9 @@ function junitFileResults(root: ReportElement): TestReportFiles | undefined {
   const byFile = new Map<string, TestFileResult>();
   for (const testcase of testcases as readonly ReportTestcase[]) {
     const failed = testcase.outcome === "failed";
-    const prior = byFile.get(testcase.classname);
-    byFile.set(testcase.classname, {
-      file: testcase.classname,
+    const prior = byFile.get(testcase.file);
+    byFile.set(testcase.file, {
+      file: testcase.file,
       executed: (prior?.executed ?? 0) + 1,
       failed: (prior?.failed ?? 0) + (failed ? 1 : 0),
       skipped: (prior?.skipped ?? 0) + (testcase.outcome === "skipped" ? 1 : 0),
@@ -693,7 +729,7 @@ export function parseJunitTestcases(bytes: Uint8Array): JunitTestcasesResult {
         error: Object.freeze({
           kind: "invalid-structured-test-report",
           reason: "malformed-testcase",
-          message: `${unnamed} JUnit testcase(s) lack a name or classname`,
+          message: `${unnamed} JUnit testcase(s) lack a name, or name no file (neither a file attribute nor a classname)`,
         }),
       })
     : Object.freeze({ ok: true, value: Object.freeze(projected as ReportTestcase[]) });
@@ -718,6 +754,89 @@ function mergeFileResults(parts: readonly TestReportFiles[]): TestReportFiles {
     }
   }
   return { kind: "recorded", results: [...byFile.values()] };
+}
+
+// --- Bun console collection errors ---
+//
+// Bun's JUnit reporter omits a test file that fails to load, and writes no
+// report at all when every file of the run fails to load. Its console output
+// is where the fact lives: each file's results follow a `<path>:` header, and
+// a file that throws while loading (or between tests) prints
+// `# Unhandled error between tests`, which Bun's own summary counts as one
+// failing test. These functions read that fact and join it to the run's JUnit
+// summary, so a Bun run records the same collection errors a Vitest run does.
+
+/** ANSI SGR colour sequences, which a TTY-attached Bun run prints. */
+const ANSI_SGR = /\u001b\[[0-9;]*m/g;
+
+/** A Bun file-section header: a bare test file path (Bun's `*.test|spec` and
+ *  `*_test|spec` script names) alone on its line, ending in `:`. Bun prints
+ *  headers without whitespace, so a code-frame line (`4 | …`) or prose
+ *  (`note: see x.test.ts:`) never matches; a path containing whitespace is
+ *  not recognized, which only withholds a collection error (fail closed). */
+const BUN_FILE_HEADER = /^([^\s|]+?[._](?:test|spec)\.[cm]?[jt]sx?):$/;
+
+const BUN_UNHANDLED_ERROR = "# Unhandled error between tests";
+
+/**
+ * The test files Bun's console output reports a collection error for, in
+ * first-appearance order, each once and named exactly as Bun's file header
+ * writes it (relative to Bun's cwd, the form its JUnit `file` attribute uses).
+ * An error printed before any file header belongs to no file and is ignored.
+ * Total over any string.
+ */
+export function parseBunConsoleCollectionErrors(output: string): readonly string[] {
+  const files: string[] = [];
+  let current: string | null = null;
+  for (const raw of output.replace(ANSI_SGR, "").split(/\r?\n/u)) {
+    const line = raw.trimEnd();
+    const header = BUN_FILE_HEADER.exec(line);
+    if (header !== null) current = header[1]!;
+    else if (line.trim() === BUN_UNHANDLED_ERROR && current !== null && !files.includes(current)) files.push(current);
+  }
+  return Object.freeze(files);
+}
+
+/** One collection error as Bun counts it: a single failing testcase. */
+const bunCollectionError = (file: string): TestFileResult =>
+  Object.freeze({ file, executed: 1, failed: 1, skipped: 0, collectionError: true });
+
+/**
+ * A Bun run's summary: its JUnit summary joined with the collection errors its
+ * console reported (`parseBunConsoleCollectionErrors`), minted through
+ * `parseReportSummary` like every other summary.
+ * - No collection error: the JUnit summary unchanged (or null without one).
+ * - No JUnit summary (Bun writes none when every file failed to load): a
+ *   `bun-console` summary of the collection errors alone.
+ * - Both: each collection error is one more failing testcase, as Bun counts
+ *   it. A file the report omitted (it never loaded) is added as a collection
+ *   error. A file the report lists did load, so it gains the failing testcase
+ *   but keeps its own collection-error flag: an error between tests never
+ *   hides a genuine assertion failure behind a collection error.
+ * - A JUnit summary whose per-file results are unrecorded cannot have files
+ *   attributed to it, so it is returned unchanged rather than half-merged.
+ */
+export function bunRunSummary(
+  junit: TestReportSummary | null,
+  collectionErrors: readonly string[],
+): TestReportSummary | null {
+  const errors = [...new Set(collectionErrors)];
+  if (errors.length === 0) return junit;
+  if (junit === null) {
+    return parseReportSummary(errors.length, errors.length, "bun-console", {
+      kind: "recorded",
+      results: errors.map(bunCollectionError),
+    });
+  }
+  if (junit.files.kind !== "recorded") return junit;
+  const reported = junit.files.results.map((entry) => errors.includes(entry.file)
+    ? { ...entry, executed: entry.executed + 1, failed: entry.failed + 1 }
+    : entry);
+  const omitted = errors.filter((file) => !reported.some((entry) => entry.file === file));
+  return parseReportSummary(junit.total + errors.length, junit.failed + errors.length, junit.source, {
+    kind: "recorded",
+    results: [...reported, ...omitted.map(bunCollectionError)],
+  });
 }
 
 /** Merge summaries from multiple report files of one run. The inputs must

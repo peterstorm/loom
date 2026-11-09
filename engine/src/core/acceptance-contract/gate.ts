@@ -5,6 +5,7 @@
  * yields, and the RED/GREEN judgment over them.
  */
 
+import { match } from "ts-pattern";
 import type { ArtifactDigest, NonEmpty } from "../orchestration-contract";
 import { attributeReportedFile } from "../report-file-attribution";
 import {
@@ -19,13 +20,14 @@ import { contractWave, dueWaves } from "./tasks";
 
 /**
  * The declared acceptance file a JUnit testcase belongs to, or null: the
- * testcase's `classname` attributed through the one reported-file rule
- * (INV-5, `report-file-attribution.ts`). JUnit classnames are
- * runner-cwd-relative or JVM classes, so no repository root is passed; an
- * absolute classname would be left unattributed (fail closed).
+ * testcase's reported file identity (`ReportTestcase.file`: its `file`
+ * attribute, else its `classname`) attributed through the one reported-file
+ * rule (INV-5, `report-file-attribution.ts`). Those identities are
+ * runner-cwd-relative paths or JVM classes, so no repository root is passed;
+ * an absolute identity would be left unattributed (fail closed).
  */
-export const testcaseAcceptanceFile = (files: readonly string[], classname: string): string | null =>
-  attributeReportedFile(files, classname, null);
+export const testcaseAcceptanceFile = (files: readonly string[], reportedFile: string): string | null =>
+  attributeReportedFile(files, reportedFile, null);
 
 const ANCHOR_MENTION = /\b((?:FR|AS)-\d+):/g;
 
@@ -84,22 +86,22 @@ export function acceptanceExpectation(
       owed.push(freeze({ ...base, phase: "red" }));
       continue;
     }
-    switch (contract.freeze.state) {
-      case "awaiting-red":
+    match(contract.freeze)
+      .with({ state: "awaiting-red" }, () => {
         unobservable.push(freeze({
           contract: contract.id,
           reason: `Wave ${writtenIn} gated without observing ${contract.id}'s acceptance RED, so nothing is frozen to turn green`,
         }));
-        break;
-      case "frozen":
-        // The gate that recorded the roster keeps recording it, so its own
-        // receipt still evaluates against the same expectation once stamped.
-        owed.push(freeze({ ...base, phase: "green", roster: contract.freeze.wave === wave ? null : contract.freeze.roster }));
-        break;
-      case "revised":
+      })
+      // The gate that recorded the roster keeps recording it, so its own
+      // receipt still evaluates against the same expectation once stamped.
+      .with({ state: "frozen" }, (frozen) => {
+        owed.push(freeze({ ...base, phase: "green", roster: frozen.wave === wave ? null : frozen.roster }));
+      })
+      .with({ state: "revised" }, () => {
         owed.push(freeze({ ...base, phase: "green", roster: null }));
-        break;
-    }
+      })
+      .exhaustive();
   }
   return freeze({ wave, contracts: Object.freeze(owed), unobservable: Object.freeze(unobservable) });
 }
@@ -163,7 +165,7 @@ const owedAcceptancePaths = (expectation: AcceptanceExpectation): readonly strin
  * `classifyFailedTestcase` are both built here.
  */
 function observeTestcase(files: readonly string[], testcase: ReportTestcase): ObservedAcceptanceTestcase | null {
-  const file = testcaseAcceptanceFile(files, testcase.classname);
+  const file = testcaseAcceptanceFile(files, testcase.file);
   return file === null ? null : freeze({
     file,
     name: testcase.name,
@@ -312,7 +314,7 @@ export const isFailedReportTestcase = (testcase: ReportTestcase): testcase is Fa
 /**
  * What one failed testcase is to the gate. `file` is the one rendered identity:
  * the declared acceptance path when the testcase is attributed to one,
- * otherwise the reported classname.
+ * otherwise the reported file identity.
  */
 export type FailedTestcaseClass =
   | Readonly<{ kind: "expected-red"; file: string; name: string }>
@@ -327,7 +329,7 @@ export type FailedTestcaseClass =
 export function classifyFailedTestcase(expectation: AcceptanceExpectation, testcase: FailedReportTestcase): FailedTestcaseClass {
   const observed = observeTestcase(owedAcceptancePaths(expectation), testcase);
   if (observed === null) {
-    return freeze({ kind: "blocking", file: testcase.classname, name: testcase.name, collectionError: isCollectionErrorTestcase(testcase) });
+    return freeze({ kind: "blocking", file: testcase.file, name: testcase.name, collectionError: isCollectionErrorTestcase(testcase) });
   }
   return isExpectedRedAcceptanceFailure(expectation, observed)
     ? freeze({ kind: "expected-red", file: observed.file, name: observed.name })
@@ -407,22 +409,21 @@ export function recordedAcceptanceVerdict(acceptance: AcceptanceObservation | un
 export function renderAcceptanceFailure(failure: AcceptanceFailure): string {
   const names = (testcases: readonly TestcaseRef[]): string =>
     testcases.map(({ file, name }) => `'${name}' (${file})`).join(", ");
-  switch (failure.kind) {
-    case "acceptance-unobservable":
-      return `${failure.contract}: ${failure.reason}`;
-    case "acceptance-not-observed":
-      return `${failure.contract}: no report ran an acceptance testcase${failure.reasons.length === 0 ? "" : ` (${failure.reasons.join("; ")})`}`;
-    case "acceptance-file-not-collected":
-      return `${failure.contract}: ${failure.file} yielded no collected testcase — a file that never loads is not a behavioral RED`;
-    case "acceptance-testcase-unanchored":
-      return `${failure.contract}: testcase '${failure.name}' in ${failure.file} names none of the file's Requirements ('AS-003: …')`;
-    case "acceptance-anchor-untested":
-      return `${failure.contract}: ${failure.anchor} is declared for ${failure.file} but no testcase there names it`;
-    case "acceptance-not-red":
-      return `${failure.contract}: acceptance testcases pass before any claimant implemented them: ${names(failure.testcases)}`;
-    case "acceptance-not-green":
-      return `${failure.contract}: due acceptance testcases are not passing: ${names(failure.testcases)}`;
-    case "acceptance-testcase-missing":
-      return `${failure.contract}: frozen acceptance testcases no longer run: ${names(failure.testcases)}`;
-  }
+  return match(failure)
+    .with({ kind: "acceptance-unobservable" }, ({ contract, reason }) => `${contract}: ${reason}`)
+    .with({ kind: "acceptance-not-observed" }, ({ contract, reasons }) =>
+      `${contract}: no report ran an acceptance testcase${reasons.length === 0 ? "" : ` (${reasons.join("; ")})`}`)
+    .with({ kind: "acceptance-file-not-collected" }, ({ contract, file }) =>
+      `${contract}: ${file} yielded no collected testcase — a file that never loads is not a behavioral RED`)
+    .with({ kind: "acceptance-testcase-unanchored" }, ({ contract, file, name }) =>
+      `${contract}: testcase '${name}' in ${file} names none of the file's Requirements ('AS-003: …')`)
+    .with({ kind: "acceptance-anchor-untested" }, ({ contract, file, anchor }) =>
+      `${contract}: ${anchor} is declared for ${file} but no testcase there names it`)
+    .with({ kind: "acceptance-not-red" }, ({ contract, testcases }) =>
+      `${contract}: acceptance testcases pass before any claimant implemented them: ${names(testcases)}`)
+    .with({ kind: "acceptance-not-green" }, ({ contract, testcases }) =>
+      `${contract}: due acceptance testcases are not passing: ${names(testcases)}`)
+    .with({ kind: "acceptance-testcase-missing" }, ({ contract, testcases }) =>
+      `${contract}: frozen acceptance testcases no longer run: ${names(testcases)}`)
+    .exhaustive();
 }

@@ -7,6 +7,9 @@
  * loop and resolver pins are emission-tool-runtime.test.ts.
  */
 import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { issueEmissionBinding } from "../../src/core/emission-tool";
 import { parseContextDigest } from "../../src/core/orchestration-contract/identity";
 import { sha256Hex } from "../../src/core/digest";
@@ -26,6 +29,7 @@ import {
 } from "../../src/core/issued-emission-capability";
 import { planPiWriteGrants } from "../../src/core/pi-write-grant-plan";
 import { cellSchemaDigest, mintedBindingFor, OBSERVED_REQUEST_ID, REVIEWER_V2_CELL, REVIEWER_V3_CELL } from "../fixtures/emission-registry-cells";
+import { withEnvOverlaySync } from "../fixtures/env-overlay";
 
 const issuedLookupContext = (() => {
   const parsed = parseContextDigest(sha256Hex("t5-issued-refutation-lookup"));
@@ -439,6 +443,52 @@ describe("qualified published Pi request routes bind descriptor admission indepe
     if (!forgedUpgrade.ok) {
       expect(forgedUpgrade.refusal).toMatchObject({ code: "extraction-upgrade", basis: { kind: "extraction-only-route" } });
       expect(spawnEmissionRefusalMessage(forgedUpgrade.refusal)).toContain("independently issued route is extraction-only");
+    }
+  });
+
+  it("degrades a qualified frozen route to extraction when model routing inherits a local parent model", () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "loom-pi-routing-"));
+    writeFileSync(join(agentDir, "model-routing.json"), JSON.stringify({
+      schemaVersion: 1,
+      defaultClass: "cloud",
+      modelClasses: { local: ["desktop-vllm/*"] },
+      targets: {},
+      rules: [{ id: "local-children-inherit-parent", when: { parentClass: "local" }, use: { kind: "parent" } }],
+    }));
+    try {
+      const program = reviewPrograms[0]!.program;
+      const request = {
+        runId: "run.t5-inherited-parent",
+        requestId: mintedBindingFor(REVIEWER_V2_CELL, "req-t5-inherited-parent").requestId,
+        contextDigest: issuedLookupContext,
+        program: program.kind,
+        role: "code-reviewer",
+      } as const;
+      const classified = classifyPiIssuedReviewRequest(request.runId, program, request);
+      if (!classified.ok) throw new Error(classified.error.message);
+
+      // The child runs on the inherited parent model, NOT the frozen qualified
+      // route, so its launch is extraction-only: no descriptor, no tool.
+      const inherited = withEnvOverlaySync({
+        PI_CODING_AGENT_DIR: agentDir,
+        PI_PROVIDER: "desktop-vllm",
+        PI_MODEL: "warmind-1017-native",
+      }, () => qualifiedAuthority(classified.value, request.role, "desktop-vllm", "glm-5.3-flash-spark-tp2-v14"));
+      expect(inherited.route).toMatchObject({
+        kind: "extraction-only",
+        reason: expect.stringContaining("model routing launches this child on desktop-vllm/warmind-1017-native"),
+      });
+      expect(admissionFor(inherited, request.role)).toEqual({ ok: true, expectation: { kind: "no-emission-tool" } });
+
+      // With no parent model observed, the same frozen route still qualifies.
+      const declaredRoute = withEnvOverlaySync({
+        PI_CODING_AGENT_DIR: agentDir,
+        PI_PROVIDER: undefined,
+        PI_MODEL: undefined,
+      }, () => qualifiedAuthority(classified.value, request.role, "desktop-vllm", "glm-5.3-flash-spark-tp2-v14"));
+      expect(declaredRoute.route).toMatchObject({ kind: "emission" });
+    } finally {
+      rmSync(agentDir, { recursive: true, force: true });
     }
   });
 });

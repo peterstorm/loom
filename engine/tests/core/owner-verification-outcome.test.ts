@@ -71,6 +71,28 @@ describe("classifyMutantRun", () => {
     expect(classifyBaseline(exited([skipped]), MATRIX)).toEqual(infrastructure("matrix-test-not-collected"));
   });
 
+  it("attributes a Bun report by each testcase's file attribute, whatever its describe-chain classname", () => {
+    // Bun writes `classname` as the describe chain (empty at top level) and the
+    // test file as `file`: attribution by classname would find no matrix testcase.
+    const bun = (body: string, failures: number): MatrixTestRun => ({
+      kind: "exited",
+      exitCode: failures > 0 ? 1 : 0,
+      signal: null,
+      report: {
+        kind: "produced",
+        bytes: new TextEncoder().encode(
+          `<testsuites name="bun test" tests="2" failures="${failures}">` +
+          `<testsuite name="${REPORTED}" file="${REPORTED}" tests="2" failures="${failures}">${body}</testsuite></testsuites>`,
+        ),
+      },
+    });
+    const passing = `<testcase name="a" classname="matrix" file="${REPORTED}"/><testcase name="b" classname="" file="${REPORTED}"/>`;
+    const killing = `<testcase name="a" classname="matrix" file="${REPORTED}"/>` +
+      `<testcase name="b" classname="" file="${REPORTED}"><failure type="AssertionError"/></testcase>`;
+    expect(classifyMutantRun(bun(passing, 0), MATRIX)).toEqual({ kind: "survived" });
+    expect(classifyMutantRun(bun(killing, 1), MATRIX)).toEqual({ kind: "killed" });
+  });
+
   it("FR-016: the spawn failure's message rides in the detail", () => {
     expect(classifyMutantRun({ kind: "spawn-failed", message: "ENOENT: bun" }, MATRIX))
       .toEqual({ kind: "infrastructure", failure: { kind: "spawn-failed", detail: expect.stringContaining("ENOENT: bun") } });

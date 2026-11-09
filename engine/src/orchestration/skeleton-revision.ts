@@ -3,7 +3,7 @@
  * `revise-contract` handler once the revision is known to be admissible and
  * before its locked update. Every binding of the revised contract is
  * re-resolved against its types file as it is on disk now, and each skeleton
- * record of the contract is planned `record-driven` by `planSkeletonRefresh`
+ * record of the contract is planned by `planRecordRefresh`
  * (INV-4, through `presentSkeletonOf`):
  * - untouched → regenerated from the revised types through the writer's
  *   guarded refresh (INV-3), or adopted when its bytes already are the
@@ -25,7 +25,7 @@ import { NO_SKELETON_REVISION, skeletonRevisionOf, type SkeletonRevision, type S
 import type { DomainResult } from "../core/orchestration-contract";
 import { samePlanPath } from "../core/plan-path-match";
 import type { LeftPreparedName, SkeletonProblem } from "../core/skeleton/problems";
-import { planSkeletonRefresh, type RecordRefreshAction } from "../core/skeleton/refresh-plan";
+import { planRecordRefresh, type RecordRefreshAction } from "../core/skeleton/refresh-plan";
 import type { TaskGraph } from "../types";
 import { typedContract } from "./frozen-surface-observation";
 import { observeSkeletonPaths } from "./skeleton-observation";
@@ -76,7 +76,7 @@ export function refreshRevisedSkeletons(root: string, graph: TaskGraph, contract
   const observed = observeSkeletonPaths(root, records.map(({ path }) => path), canonicalSha256);
   if (!observed.ok) return observed;
   const frozen = frozenSkeletonPaths(graph);
-  const settled = planSkeletonRefresh("record-driven", records, observed.value.observations, candidates)
+  const settled = planRecordRefresh(records, observed.value.observations, candidates)
     .map((action) => settle(root, action, frozen));
   return {
     ok: true,

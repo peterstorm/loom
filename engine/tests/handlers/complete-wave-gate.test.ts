@@ -59,7 +59,13 @@ import {
   createImplementationAttemptAuthority,
   type ImplementationAttemptSettlementReceipt,
 } from "../../src/core/implementation-completion";
-import { satisfiedProof as eraSatisfiedProof, taskFixture, type TaskFixtureInput } from "../fixtures/task-lifecycle";
+import {
+  observedEvidence,
+  satisfiedProof as eraSatisfiedProof,
+  taskFixture,
+  trustedPassEvidence,
+  type TaskFixtureInput,
+} from "../fixtures/task-lifecycle";
 import { semanticAttemptReceipt } from "../fixtures/implementation-settlement";
 import { defaultVerificationManifest } from "../../src/core/verification-manifest";
 import { capturedSpecCheck } from "../../src/core/spec-check";
@@ -106,17 +112,10 @@ import {
 } from "../../src/state-manager";
 import { findingId } from "../fixtures/finding-id";
 import { value } from "../fixtures/parse-result";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 const satisfiedProof = evaluateTaskProof(
   { newTestsRequired: true, declaredArtifacts: [] },
-  {
-    contractConformance: CONFORMANCE_NOT_OWED,
-    taskCompleted: true,
-    testResult: { verdict: "trusted-pass" },
-    filesModified: [],
-    newTestsWritten: true,
-  },
+  trustedPassEvidence([]),
 );
 if (satisfiedProof.state !== "satisfied") throw new Error("test fixture proof must be satisfied");
 
@@ -267,7 +266,7 @@ describe("checkImplementationProof (pure)", () => {
   it("requires both an implementation-bearing status and satisfied proof", () => {
     const failedProof = evaluateTaskProof(
       { newTestsRequired: false, declaredArtifacts: ["missing.ts"] },
-      { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, filesModified: [] },
+      observedEvidence({ taskCompleted: true, filesModified: [] }),
     );
     expect(checkImplementationProof([baseTask]).passed).toBe(true);
     for (const task of [
@@ -902,7 +901,7 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
   it("a failed proof can never be force-completed into an unloadable graph", () => {
     const failedProof = evaluateTaskProof(
       { newTestsRequired: false, declaredArtifacts: ["missing.ts"] },
-      { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, filesModified: [] },
+      observedEvidence({ taskCompleted: true, filesModified: [] }),
     );
     const state = mkGraph({
       tasks: [taskState({ status: "pending", proof: failedProof, new_tests_required: false })],
@@ -2640,13 +2639,7 @@ describe("protected active Wave Gate registration", () => {
     writeFileSync(artifact, "export {};\n");
     const artifactProof = evaluateTaskProof(
       { newTestsRequired: true, declaredArtifacts: [relativeArtifact] },
-      {
-        contractConformance: CONFORMANCE_NOT_OWED,
-        taskCompleted: true,
-        testResult: { verdict: "trusted-pass" },
-        filesModified: [relativeArtifact],
-        newTestsWritten: true,
-      },
+      trustedPassEvidence([relativeArtifact]),
     );
     if (artifactProof.state !== "satisfied") throw new Error("artifact fixture proof must be satisfied");
     writeFileSync(path, JSON.stringify(registeredGraph({

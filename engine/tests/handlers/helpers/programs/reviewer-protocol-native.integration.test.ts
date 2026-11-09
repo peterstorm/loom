@@ -10,7 +10,7 @@ import { captureClaudeResult, claudeFinalPayloadCandidates } from "../../../../s
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import { captureKey } from "../../../../src/core/harness-capture";
 import { STANDALONE_REVIEWER_ROLES } from "../../../../src/core/standalone-review-scope";
-import { graphFixture, taskFixture } from "../../../fixtures/task-lifecycle";
+import { graphFixture, taskFixture, trustedPassEvidence } from "../../../fixtures/task-lifecycle";
 import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
 import { parseTaskGraph } from "../../../../src/state-manager";
 import { readWaveReviewContext } from "../../../../src/core/wave-review-authority";
@@ -19,7 +19,6 @@ import { startStandaloneFacade, resumeStandaloneFacade, replayStandaloneResultFr
 import { createRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession as inDirectory } from "../../../fixtures/pi-session";
 import { value } from "../../../fixtures/parse-result";
-import { CONFORMANCE_NOT_OWED } from "../../../../src/core/skeleton/conformance-verdict";
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const roots: string[] = [];
@@ -224,7 +223,7 @@ async function waveFixture() {
 | Fixture | Scripted test data |
 `);
   const proof = evaluateTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
-    { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/a.ts"], newTestsWritten: true });
+    trustedPassEvidence(["src/a.ts"]));
   if (proof.state !== "satisfied") throw new Error("fixture proof construction failed");
   const graph = value(parseTaskGraph({ ...graphFixture([taskFixture({ id: "T1", description: "scripted native fixture",
     agent: "code-implementer-agent", wave: 1, depends_on: [], status: "implemented", proof,

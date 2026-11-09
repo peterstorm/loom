@@ -653,15 +653,39 @@ describe("request emission routes", () => {
   it("qualifies emission only from the frozen issued Pi binding and actual Pi-parent existence", () => {
     const claim = claimOf(REVIEWER_V2);
     const qualified = qualifiedRoute;
-    expect(qualifyIssuedSpawnEmissionRoute(claim, qualified, true)).toMatchObject({
+    expect(qualifyIssuedSpawnEmissionRoute(claim, qualified, true, null)).toMatchObject({
       kind: "emission",
       binding: REVIEWER_V2,
       contextDigest: CONTEXT_DIGEST,
     });
-    expect(qualifyIssuedSpawnEmissionRoute(claim, qualified, false)).toMatchObject({
+    expect(qualifyIssuedSpawnEmissionRoute(claim, qualified, false, null)).toMatchObject({
       kind: "extraction-only",
       reason: expect.stringContaining("parent harness is not Pi"),
     });
+  });
+
+  it("degrades to extraction when model routing launches the child off its frozen route (ADR-0012)", () => {
+    const claim = claimOf(REVIEWER_V2);
+    // An explicit local `use: parent` rule inherits a model that is NOT the
+    // route whose serializer qualified the frozen emission schemas, so the
+    // child must be extraction-only rather than an enabled child on an
+    // unqualified route.
+    const inheritedParent = Object.freeze({
+      provider: DESKTOP_VLLM_ROUTE.provider,
+      model: "warmind-1017-native",
+    });
+    expect(qualifyIssuedSpawnEmissionRoute(claim, qualifiedRoute, true, inheritedParent)).toMatchObject({
+      kind: "extraction-only",
+      reason: expect.stringContaining(
+        `model routing launches this child on ${inheritedParent.provider}/${inheritedParent.model}`,
+      ),
+    });
+    // Routing that resolves back onto the frozen route, and no routing
+    // observation at all, both leave the emission arm unchanged.
+    expect(qualifyIssuedSpawnEmissionRoute(claim, qualifiedRoute, true, Object.freeze({ ...DESKTOP_VLLM_ROUTE })))
+      .toMatchObject({ kind: "emission", binding: REVIEWER_V2 });
+    expect(qualifyIssuedSpawnEmissionRoute(claim, qualifiedRoute, true, null))
+      .toMatchObject({ kind: "emission", binding: REVIEWER_V2 });
   });
 
   it.each([
@@ -677,10 +701,10 @@ describe("request emission routes", () => {
     for (const agent of emittingAgents) {
       const pi = lowerModelProfile(value(resolveAgentProfile(agent)), "pi");
       expect({ provider: pi.provider, model: pi.model }, agent).toEqual(DESKTOP_VLLM_ROUTE);
-      expect(qualifyIssuedSpawnEmissionRoute(claimOf(binding), issuedPiRoute(pi.provider, pi.model), true), agent)
+      expect(qualifyIssuedSpawnEmissionRoute(claimOf(binding), issuedPiRoute(pi.provider, pi.model), true, null), agent)
         .toMatchObject({ kind: "emission" });
     }
-    expect(qualifyIssuedSpawnEmissionRoute(claimOf(binding), issuedPiRoute(DESKTOP_VLLM_ROUTE.provider, "some-other-local-model"), true))
+    expect(qualifyIssuedSpawnEmissionRoute(claimOf(binding), issuedPiRoute(DESKTOP_VLLM_ROUTE.provider, "some-other-local-model"), true, null))
       .toMatchObject({ kind: "extraction-only" });
   });
 
@@ -703,7 +727,7 @@ describe("request emission routes", () => {
       claimOf(REVIEWER_V2),
       qualifiedRoute,
       true,
-    );
+     null);
     expect(qualified.kind).toBe("emission");
     if (qualified.kind !== "emission") throw new Error("qualified fixture must enable emission");
     const enabledAdmission = renderedEmissionAdmission(
@@ -727,7 +751,7 @@ describe("request emission routes", () => {
       ["unqualified", "openai-codex", "gpt-5.6-sol"],
     ] as const;
     for (const [label, provider, model] of extractionOnlyRequests) {
-      const route = qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V2), issuedPiRoute(provider, model), true);
+      const route = qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V2), issuedPiRoute(provider, model), true, null);
       expect(route.kind, label).toBe("extraction-only");
       if (route.kind !== "extraction-only") throw new Error(`${label} fixture must remain extraction-only`);
       const admission = renderedEmissionAdmission(
@@ -744,7 +768,7 @@ describe("request emission routes", () => {
       claimOf(REVIEWER_V2),
       issuedPiRoute("openai-codex", "gpt-5.6-sol"),
       true,
-    );
+     null);
     expect(route).toMatchObject({
       kind: "extraction-only",
       reason: expect.stringContaining("issued Pi route openai-codex/gpt-5.6-sol"),
@@ -757,7 +781,7 @@ describe("request emission routes", () => {
         claimOf(REVIEWER_V2),
         issuedPiRoute("openai-codex", "gpt-5.6-sol"),
         true,
-      );
+       null);
       if (route.kind !== "extraction-only") throw new Error("cloud-issued fixture must remain extraction-only");
       expect(renderedEmissionAdmission(
         spawnItem("code-reviewer", issuedTask("code-reviewer", REVIEWER_V2)),
@@ -916,7 +940,7 @@ describe("request emission routes", () => {
 describe("one closed emission-route vocabulary (T6)", () => {
   it("issues the request programs' own decision as spawn authority and projection input, with no translation", () => {
     for (const binding of [REVIEWER_V2, REVIEWER_V3]) {
-      const route = qualifyIssuedSpawnEmissionRoute(claimOf(binding), qualifiedRoute, true);
+      const route = qualifyIssuedSpawnEmissionRoute(claimOf(binding), qualifiedRoute, true, null);
       expect(route).toEqual({ kind: "emission", binding, contextDigest: CONTEXT_DIGEST });
       expect(route).toEqual(decideRequestEmissionRoute(claimOf(binding), providedEmissionCapability(binding.schemaDigest)));
       if (route.kind !== "emission") throw new Error("qualified fixture route must emit");
@@ -952,8 +976,8 @@ describe("successor v3 route parity across every degraded arm (T9)", () => {
   it("routes the successor v3 claim to extraction-only on every degraded route, with unchanged extraction semantics (FR-010/AD-7)", () => {
     const v3Claim = claimOf(REVIEWER_V3);
     const degraded = [
-      ["Claude Code: no Pi parent", qualifyIssuedSpawnEmissionRoute(v3Claim, qualifiedRoute, false)],
-      ["schema-incompatible route", qualifyIssuedSpawnEmissionRoute(v3Claim, issuedPiRoute("openai-codex", "gpt-5.6-sol"), true)],
+      ["Claude Code: no Pi parent", qualifyIssuedSpawnEmissionRoute(v3Claim, qualifiedRoute, false, null)],
+      ["schema-incompatible route", qualifyIssuedSpawnEmissionRoute(v3Claim, issuedPiRoute("openai-codex", "gpt-5.6-sol"), true, null)],
       ["unprovidable child surface", decideRequestEmissionRoute(v3Claim, extraction)],
     ] as const;
     for (const [label, route] of degraded) {
@@ -976,7 +1000,7 @@ describe("successor v3 route parity across every degraded arm (T9)", () => {
   });
 
   it("keeps an explicitly extraction-only successor v3 spawn on the no-tool baseline and refuses a descriptor upgrade (AS-010)", () => {
-    const route = qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V3), issuedPiRoute("openai-codex", "gpt-5.6-sol"), true);
+    const route = qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V3), issuedPiRoute("openai-codex", "gpt-5.6-sol"), true, null);
     if (route.kind !== "extraction-only") throw new Error("fixture route must be extraction-only");
     const issued: IssuedSpawnRequestReader = (requestId, digest, role) =>
       requestId === REVIEWER_V3.requestId && digest === CONTEXT_DIGEST && role === "code-reviewer"
@@ -994,7 +1018,7 @@ describe("successor v3 route parity across every degraded arm (T9)", () => {
   });
 
   it("admits the successor v3 route exactly like v2: qualified route, exact binding, and the qualified child route carried (T9 v3 parity)", () => {
-    const qualified = qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V3), qualifiedRoute, true);
+    const qualified = qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V3), qualifiedRoute, true, null);
     expect(qualified).toMatchObject({ kind: "emission", binding: REVIEWER_V3, contextDigest: CONTEXT_DIGEST });
     if (qualified.kind !== "emission") throw new Error("qualified fixture must enable emission");
     const admission = renderedEmissionAdmission(
@@ -1017,7 +1041,7 @@ describe("successor v3 route parity across every degraded arm (T9)", () => {
       claimOf(REVIEWER_V3),
       issuedPiRoute("openai-codex", "gpt-5.6-sol"),
       true,
-    );
+     null);
     expect(extractionProfileRoute.kind).toBe("extraction-only");
     if (extractionProfileRoute.kind !== "extraction-only") throw new Error("fixture must be extraction-only");
     const ambientQualifiedParent = renderedEmissionAdmission(

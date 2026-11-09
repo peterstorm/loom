@@ -29,7 +29,7 @@ const frozen = (): AcceptanceContract => contract({
 const contractTask = task("T1", 1, [SURFACE.types, SURFACE.acceptance]);
 const report = (cases: readonly ReportTestcase[]) => ({ ok: true as const, value: cases });
 const testcase = (name: string, outcome: ReportTestcase["outcome"]): ReportTestcase =>
-  ({ classname: SURFACE.acceptance, name, outcome, failureType: outcome === "failed" ? "AssertionError" : null });
+  ({ file: SURFACE.acceptance, classname: SURFACE.acceptance, name, outcome, failureType: outcome === "failed" ? "AssertionError" : null });
 const REPORT_DIGEST = digest("e");
 
 describe("stopCheckExpectation", () => {
@@ -89,7 +89,7 @@ describe("judgeStopCheck", () => {
   });
 
   it("is unobservable when the report ran none of the files, or could not be projected", () => {
-    const elsewhere: ReportTestcase = { classname: "tests/other.test.ts", name: "x", outcome: "failed", failureType: "Error" };
+    const elsewhere: ReportTestcase = { file: "tests/other.test.ts", classname: "tests/other.test.ts", name: "x", outcome: "failed", failureType: "Error" };
     expect(judgeStopCheck(check, REPORT_DIGEST, report([elsewhere]))).toMatchObject({ kind: "unobservable" });
     expect(judgeStopCheck(check, REPORT_DIGEST, { ok: false, error: { kind: "malformed-report", message: "bad xml" } } as never))
       .toMatchObject({ kind: "unobservable", reason: expect.stringContaining("bad xml") });

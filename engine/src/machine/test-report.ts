@@ -3,8 +3,11 @@
 import type { TestReportSummary } from "../core/structured-test-report";
 
 export {
+  bunRunSummary,
   mergeSummaries,
+  parseBunConsoleCollectionErrors,
   parseJunitXml,
+  parseReportSource,
   parseReportCounts,
   parseReportSummary,
   parseStructuredTestReportBytes,

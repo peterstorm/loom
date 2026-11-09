@@ -34,8 +34,7 @@ import { observeFrozenSurface, typedContract } from "./frozen-surface-observatio
 import { resolveBaseDirectory } from "./no-follow-fs";
 import { readRepositoryLeafNoFollow } from "./repository-leaf";
 import { renderResolutionProblem } from "../core/skeleton/problems";
-
-const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+import { describeCause } from "../utils/describe-cause";
 
 /** Every value, or the first failure. */
 function allOf<T>(results: readonly DomainResult<T, string>[]): DomainResult<readonly T[], string> {
@@ -72,7 +71,7 @@ export function observeContractConformance(
   try {
     realRoot = resolveBaseDirectory(root);
   } catch (error) {
-    return { ok: false, error: `cannot resolve the repository root ${root}: ${errorMessage(error)}` };
+    return { ok: false, error: `cannot resolve the repository root ${root}: ${describeCause(error)}` };
   }
   const surfaces = allOf(scope.contracts.map((contract) => observeSurface(realRoot, contract)));
   if (!surfaces.ok) return surfaces;

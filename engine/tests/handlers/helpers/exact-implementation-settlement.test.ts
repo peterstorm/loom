@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildTaskLocalByteObservation,
+  NO_ENGINE_SKELETONS,
   parseNewTestEvidence,
   unavailableTaskLocalByteObservation,
 } from "../../../src/core/implementation-application";
@@ -106,6 +107,7 @@ function ports(
         priorAttributedPaths: [],
         repositoryChangedPaths: [],
         siblingOwnedPaths: [],
+        engineSkeletons: NO_ENGINE_SKELETONS,
       }),
     },
     newTests: { collect: () => ({ ok: true, value: newTests }) },
@@ -146,6 +148,7 @@ describe("shared exact implementation settlement shell", () => {
             priorAttributedPaths: [],
             repositoryChangedPaths: ["sibling.ts", "other.ts"],
             siblingOwnedPaths: args.siblingOwnedPaths,
+            engineSkeletons: NO_ENGINE_SKELETONS,
           });
         },
       },

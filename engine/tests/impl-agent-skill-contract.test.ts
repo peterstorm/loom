@@ -6,7 +6,8 @@ import { checkAgentSkillPrompt, parseDeclaredSkills } from "../src/core/agent-sk
 import { IMPL_AGENTS } from "../src/core/agent-catalog-projections";
 import { renderImplementationBrief, RULE_DOCUMENTS, type RuleDocument } from "../src/core/implementation-brief";
 import { deriveTaskImplementationDispatch } from "../src/core/task-implementation-dispatch";
-import { taskFixture } from "./fixtures/task-lifecycle";
+import { graphFixture, taskFixture } from "./fixtures/task-lifecycle";
+import { unobservedSkeletons } from "./fixtures/frozen-signatures";
 import { planOwnership } from "./fixtures/owner-obligation";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -41,7 +42,7 @@ describe("implementation prompt required-skill contract", () => {
       const rendered = renderImplementationBrief({
         template, task, dispatch: derivation.dispatch, planFile: "plan.md",
         spec: { kind: "unavailable", reason: { kind: "no-spec-file" } }, rules, roster: [task], ownership: planOwnership(), contracts: [],
-        verificationManifest: undefined, repositoryRoot: "/repo", operatorNotes: [],
+        verificationManifest: undefined, repositoryRoot: "/repo", operatorNotes: [], frozenSignatures: unobservedSkeletons(graphFixture([task])),
       });
       if (!rendered.ok) throw new Error(rendered.error.message);
       expect(checkAgentSkillPrompt(source, rendered.value.prompt)).toEqual({ ok: true });

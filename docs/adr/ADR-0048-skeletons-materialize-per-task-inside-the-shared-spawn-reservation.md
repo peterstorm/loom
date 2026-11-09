@@ -34,8 +34,9 @@ placement matters because of what sits around it:
    - Pros: `registerTaskExecutionBatch` is already the one registration shell that both harnesses call, so one
      call site covers Claude Code, Pi, first attempts, retries and respawns. Skeletons are written before any
      baseline is captured, so FR-012's attempt-scope half holds by construction and needs no subtraction there.
-     The completion commit (ADR-0044) is never touched. No new status variant and no new runbook step are
-     needed. It is the simplest of the three.
+     The completion commit (ADR-0044) is never touched. No new recovery variant and no new runbook step are
+     needed (status gains only two reasons and a report field; see Consequences). It is the simplest of the
+     three.
    - Cons: registration, which used to make no repository writes, now does I/O and can be refused for
      skeleton reasons. The bytes are written before the locked State File update, so a refused registration can
      leave canonical skeleton files on disk with no record. Only implementation Tasks registered through this
@@ -115,8 +116,13 @@ Invariants:
   never attributed to the implementer.
 - The Wave Gate completion commit (ADR-0044) stays unchanged. No crash window opens between it and a file
   write.
-- No new status variant, orchestrator runbook step or skeleton command (OOS-009). The only addition to status
-  is a blocker reason that comes from the same derivation.
+- No new recovery variant, orchestrator runbook step or skeleton command (OOS-009). Status gains exactly three
+  things, all built from the same pure skeleton status report (`core/skeleton/status.ts` over the outcome
+  derivation in `outcomes.ts`): one blocker reason, `skeleton-bindings-unresolved`, which replaces
+  `spawn-wave-implementation`; one non-blocking reason, `skeletons-unobserved`, shown beside an owed
+  `spawn-wave-implementation` when status could not read a skeleton path or types file (registration reads them
+  again and refuses on anything it cannot read); and one never-absent report field, `skeletons`, on
+  `LoomStatusDocument`. The execute loop in `commands/loom.md` names both reasons.
 - Graphs populated before G2 behave exactly as they did before.
 
 **Negative:**

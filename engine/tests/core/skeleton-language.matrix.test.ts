@@ -41,13 +41,14 @@ import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import { skeletonLanguageOf } from "../../src/core/skeleton/language";
 import { knownSkeletonOutcomes } from "../fixtures/known-skeleton-outcomes";
 import { conformanceScope } from "../../src/core/skeleton/scope";
-import type { ExportBinding, Identifier, UnsupportedReason } from "../../src/core/skeleton/types";
+import type { ExportBinding, UnsupportedReason } from "../../src/core/skeleton/types";
 import type { Task, TaskGraph } from "../../src/types";
 import { refreshRevisedSkeletons } from "../../src/orchestration/skeleton-revision";
 import { materializeContractStubs } from "../../src/orchestration/contract-stub-materialization";
 import { observeFrozenSurface } from "../../src/orchestration/frozen-surface-observation";
 import { materializeTaskSkeletons } from "../../src/orchestration/skeleton-materialization";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { binding } from "../fixtures/skeleton-builders";
 import { contentDigest, digest } from "../fixtures/acceptance-fixtures";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 
@@ -137,12 +138,8 @@ const holder = (path: string): Task =>
     new_tests_required: false,
   });
 
-/** Names and aliases do not matter to the language decision; bindings.ts mints them in production. */
-const bound = (path: string): ExportBinding => ({
-  path,
-  contract: "CT-1",
-  exports: [{ name: "priceOrder" as Identifier, alias: "PriceOrderFn" as Identifier }],
-});
+/** Names and aliases do not matter to the language decision. */
+const bound = (path: string): ExportBinding => binding(path, "CT-1", ["priceOrder", "PriceOrderFn"]);
 
 const graphBinding = (path: string): TaskGraph => ({
   ...graphFixture([holder(path)]),
@@ -257,12 +254,31 @@ const stampedContract = (id: string, typesPath: string, typesText: string): Acce
   },
 });
 
+/** The contract of the row's own language: CT-2 for Java, else CT-1 (TypeScript for unsupported rows). */
+const contractOf = (row: Row): "CT-1" | "CT-2" => (row.verdict === "java" ? "CT-2" : "CT-1");
+
 /** The row's path bound to the contract of its own language (TypeScript for unsupported rows). */
 const materializationGraph = (row: Row): TaskGraph => ({
   ...graphFixture([holder(row.path)]),
   acceptance_contracts: [stampedContract("CT-1", TYPES, TS_TYPES_TEXT), stampedContract("CT-2", JAVA_TYPES, JAVA_TYPES_TEXT)],
-  export_bindings: [{ ...bound(row.path), contract: row.verdict === "java" ? "CT-2" : "CT-1" }],
+  export_bindings: [{ ...bound(row.path), contract: contractOf(row) }],
 });
+
+/** What a written skeleton at the row's path must say, per the owner's verdict. */
+function expectOwnersTarget(row: Row, bytes: string | null): void {
+  switch (row.verdict) {
+    case "typescript":
+      expect(bytes).toContain("export const priceOrder: PriceOrderFn = () => {");
+      break;
+    case "java":
+      expect(bytes).toContain(`public final class ${row.className} {`);
+      if (row.package === null) expect(bytes).not.toContain("package ");
+      else expect(bytes).toContain(`package ${row.package};\n`);
+      break;
+    case "unsupported":
+      throw new Error(`${row.path} is no skeleton target`);
+  }
+}
 
 describe("INV-6 sibling: materializeTaskSkeletons agrees with the owner", () => {
   for (const row of TABLE) {
@@ -275,16 +291,10 @@ describe("INV-6 sibling: materializeTaskSkeletons agrees with the owner", () => 
       const outcomes = result.value.outcomes.get("T2");
       switch (row.verdict) {
         case "typescript":
-          expect(outcomes).toEqual([{ path: row.path, outcome: { kind: "skeleton-written", origin: "spawn" } }]);
-          expect(bytes).toContain("export const priceOrder: PriceOrderFn = () => {");
-          expect(result.value.records.map(({ path, language }) => [path, language])).toEqual([[row.path, "typescript"]]);
-          break;
         case "java":
           expect(outcomes).toEqual([{ path: row.path, outcome: { kind: "skeleton-written", origin: "spawn" } }]);
-          expect(bytes).toContain(`public final class ${row.className} {`);
-          if (row.package === null) expect(bytes).not.toContain("package ");
-          else expect(bytes).toContain(`package ${row.package};\n`);
-          expect(result.value.records.map(({ path, language }) => [path, language])).toEqual([[row.path, "java"]]);
+          expectOwnersTarget(row, bytes);
+          expect(result.value.records.map(({ path, language }) => [path, language])).toEqual([[row.path, row.verdict]]);
           break;
         case "unsupported":
           expect(outcomes).toEqual([{ path: row.path, outcome: { kind: "unsupported-language", reason: row.reason } }]);
@@ -321,22 +331,6 @@ describe("INV-6 sibling: observeFrozenSurface picks the reader the owner names",
     });
   }
 });
-
-/** What a written skeleton at the row's path must say, per the owner's verdict. */
-function expectOwnersTarget(row: Row, bytes: string | null): void {
-  switch (row.verdict) {
-    case "typescript":
-      expect(bytes).toContain("export const priceOrder: PriceOrderFn = () => {");
-      break;
-    case "java":
-      expect(bytes).toContain(`public final class ${row.className} {`);
-      if (row.package === null) expect(bytes).not.toContain("package ");
-      else expect(bytes).toContain(`package ${row.package};\n`);
-      break;
-    case "unsupported":
-      throw new Error(`${row.path} is no skeleton target`);
-  }
-}
 
 /** A State File store over one in-memory graph: the stub step's port, faked. */
 function storeOver(graph: TaskGraph) {
@@ -402,7 +396,7 @@ const revisionGraph = (row: Row): TaskGraph => ({
   ...materializationGraph(row),
   skeletons: [{
     path: row.path,
-    contract: row.verdict === "java" ? "CT-2" : "CT-1",
+    contract: contractOf(row),
     language: row.verdict === "java" ? "java" : "typescript",
     origin: "spawn",
     engineSha256: contentDigest(OLD_SKELETON),
@@ -415,7 +409,7 @@ describe("INV-6 sibling: refreshRevisedSkeletons agrees with the owner", () => {
   for (const row of TABLE) {
     it(`${row.path}, an untouched skeleton of a revised contract`, () => {
       const root = tempRepo({ [TYPES]: TS_TYPES_TEXT, [JAVA_TYPES]: JAVA_TYPES_TEXT, [ACCEPTANCE]: ACCEPTANCE_TEXT, [row.path]: OLD_SKELETON });
-      const result = refreshRevisedSkeletons(root, revisionGraph(row), row.verdict === "java" ? "CT-2" : "CT-1");
+      const result = refreshRevisedSkeletons(root, revisionGraph(row), contractOf(row));
       expect(result.ok && result.value.bindingProblems).toEqual([]);
       const settled = result.ok
         ? [...result.value.settlements].map(([path, settlement]) =>

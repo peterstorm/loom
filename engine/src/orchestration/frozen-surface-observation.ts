@@ -24,6 +24,7 @@ import { skeletonLanguageOf } from "../core/skeleton/language";
 import { readTsTypesSurface, typesImportSpecifier } from "../core/skeleton/ts-surface";
 import type { FrozenSurface, ResolutionProblem, SpecifierStyle, SurfaceProblem } from "../core/skeleton/types";
 import { readRunBytesNoFollow, resolveBaseDirectory } from "./no-follow-fs";
+import { describeCause } from "../utils/describe-cause";
 
 export type FrozenSurfaceMode = "stamped" | "current";
 
@@ -36,8 +37,6 @@ export type TypedContract = AcceptanceContract & Readonly<{ types: Extract<Contr
 /** The contract as a `TypedContract`, or null when it freezes no types file. */
 export const typedContract = (contract: AcceptanceContract): TypedContract | null =>
   contract.types.kind === "file" ? Object.freeze({ ...contract, types: contract.types }) : null;
-
-const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /** The repository bytes of `path`, read without following any component. */
 const readNoFollow = (root: string, path: string): Buffer => readRunBytesNoFollow(join(resolveBaseDirectory(root), path));
@@ -73,7 +72,7 @@ export function observeFrozenSurface(
   try {
     bytes = readNoFollow(root, typesFile);
   } catch (error) {
-    return { ok: false, error: Object.freeze({ kind: "types-unparseable", typesFile, detail: `unreadable: ${errorMessage(error)}` }) };
+    return { ok: false, error: Object.freeze({ kind: "types-unparseable", typesFile, detail: `unreadable: ${describeCause(error)}` }) };
   }
   const typesSha256 = sha256Bytes(bytes);
   if (mode === "stamped" && stampedDigest(contract) !== typesSha256) {
@@ -96,7 +95,7 @@ export function observeSpecifierStyle(root: string, contract: TypedContract): Do
     try {
       text = readNoFollow(root, path).toString("utf-8");
     } catch (error) {
-      return { ok: false, error: `cannot read ${contract.id}'s acceptance file ${path}: ${errorMessage(error)}` };
+      return { ok: false, error: `cannot read ${contract.id}'s acceptance file ${path}: ${describeCause(error)}` };
     }
     const style = typesImportSpecifier(path, text, contract.types.path);
     if (style !== null) return { ok: true, value: style };

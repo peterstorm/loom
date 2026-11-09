@@ -176,22 +176,26 @@ These fire automatically from loom's default rules — no project config needed:
 | `no-console-log` | `console.log(` | Console.log calls |
 | `no-todo-fixme` | `// TODO\|FIXME` | Unresolved TODOs |
 
-### Rules to consider enabling
+### Totality: ts-pattern instead of switch (already active)
 
-**prefer-ts-pattern** (disabled by default) — flags `switch()` statements. Enable for projects using ts-pattern for discriminated union matching:
-```json
-{
-  "kind": "regex",
-  "name": "prefer-ts-pattern",
-  "description": "Prefer ts-pattern match().exhaustive() over switch for discriminated unions",
-  "extensions": [".ts", ".tsx"],
-  "pattern": "switch\\s*\\(",
-  "flags": "",
-  "fixHint": "Use match(value).with(...).exhaustive() from ts-pattern instead of switch",
-  "enabled": true,
-  "excludePatterns": [".test.ts"]
-}
+`switch-totality` runs after every edit on every non-test TypeScript file — no
+config needed. A switch with two or more arms must prove it is total:
+`match(x).with(…).exhaustive()`, or a `default` arm that binds the scrutinee
+to `never` (`const _: never = x`, `assertNever(x)`). For an open domain such as
+a plain `string`, use `match(raw).with("a", …).otherwise(…)`.
+`exhaustive-discriminant-branching` catches the same omission written as a 3+
+branch if/else chain, at the Wave Gate.
+
+On an existing codebase, grandfather the switches and chains that predate the
+rule before the first agent edits them:
+
+```bash
+bun ${CLAUDE_PLUGIN_ROOT}/scripts/lint-project.ts --write-baseline
 ```
+
+To narrow the rule to the modules that own your unions, set
+`switchTotalityModules` (non-empty) in `config.json`. The old opt-in
+`prefer-ts-pattern` regex rule is gone; delete a project copy of it.
 
 ## Function Length
 

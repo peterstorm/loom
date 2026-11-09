@@ -73,11 +73,11 @@ equal that digest or the canonical bytes for the current surface.**
     validated plan. It re-runs `validateExportBindings` so that no graph is ever stamped with a binding that
     plan validation would refuse.
   - Before each spawn, the brief shell (`engine/src/orchestration/implementation-brief.ts`,
-    `bindingStampDrift`) re-reads the recorded plan and calls the pure
+    `planBindingCheck`) re-reads the recorded plan and calls the pure
     `bindingStampAgreement(plan, stamp)` (`engine/src/core/skeleton/bindings.ts`). If the bindings differ in
     content or order, it refuses the brief, names each added and dropped binding line, and directs the
-    operator to re-populate. A graph with no stamp, or with no recorded plan, has nothing to drift from. A
-    plan that cannot be read refuses.
+    operator to re-populate. A graph with no stamp has nothing to drift from. A stamped graph with no
+    recorded plan cannot be checked, and the brief says so (`NO_PLAN_TO_CHECK`). A plan that cannot be read refuses.
 - **`skeletons: readonly SkeletonRecord[]`**, sorted by path, no path twice. Each record holds:
   - `path`, `contract`, `language` (`typescript` | `java`);
   - `origin` (`spawn` | `contract-stub` | `revision`);

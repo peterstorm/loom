@@ -21,11 +21,14 @@ import {
 import { canonicalJson, type JsonValue } from "../../src/core/review-packet";
 import { sha256Hex } from "../../src/core/digest";
 import {
+  CONTRACT_VIOLATED_FAILURE_KIND_PREFIX,
   TRUSTED_LEDGER_ONLY_POLICY,
+  contractViolatedFailureKind,
   derivePendingTaskProof,
 } from "../../src/core/proof-obligations";
+import { compareStrings } from "../../src/core/ordering";
 import { value } from "../fixtures/parse-result";
-import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
+import { observedEvidence, trustedPassEvidence } from "../fixtures/task-lifecycle";
 
 function authority(
   semanticAttempt: 1 | 2,
@@ -70,14 +73,13 @@ function observation(observedAt: string, taskCompleted: boolean) {
     schemaVersion: 1,
     kind: "implementation-observed",
     observedAt,
-    evidence: {
+    evidence: observedEvidence({
       taskCompleted,
-      contractConformance: CONFORMANCE_NOT_OWED,
       testResult: { verdict: "trusted-pass" },
       filesModified: [],
       newTestsWritten: false,
       newTestEvidence: "waived",
-    },
+    }),
     proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
   };
 }
@@ -316,13 +318,7 @@ describe("bounded implementation retry admission", () => {
       implementation_attempt_history: [],
     }, attempt, attempt, {
       ...observation("2026-09-01T00:12:00.000Z", true),
-      evidence: {
-        contractConformance: CONFORMANCE_NOT_OWED,
-        taskCompleted: true,
-        testResult: { verdict: "trusted-pass" },
-        filesModified: ["src/extra.ts"],
-        newTestsWritten: false,
-      },
+      evidence: trustedPassEvidence(["src/extra.ts"], { newTestsWritten: false }),
     }, suite(attempt));
     if (!result.ok || result.value.kind !== "retry-required") throw new Error("attestation drift fixture failed");
     const terminalTask = {
@@ -524,6 +520,90 @@ describe("bounded implementation retry admission", () => {
         });
       },
     ));
+  });
+});
+
+describe("the retry appendix carries the predecessor's contract violations (FR-021)", () => {
+  const VIOLATED = contractViolatedFailureKind({
+    kind: "declared-artifact-contract-violated",
+    artifact: "src/order/pricing.ts",
+    violations: [
+      { subject: "priceOrder", reason: "still-unimplemented", remedy: "replace the body that throws unimplemented: priceOrder" },
+      { subject: "OrderState", reason: "re-lists-frozen-variants", remedy: null },
+    ],
+  }, 4_096);
+  const UNPARSEABLE = `${CONTRACT_VIOLATED_FAILURE_KIND_PREFIX}{"artifact": "src/order/legacy.ts", truncated`;
+
+  /** An attempt-1 retry receipt whose failure kinds are exactly `kinds`, with its canonical id. */
+  function retryReceiptWith(kinds: readonly string[]): ImplementationAttemptSettlementReceipt {
+    const { receiptId: _receiptId, ...body } = retryReceipt();
+    const rewritten = { ...body, failureKinds: [...new Set(kinds)].sort(compareStrings) };
+    const parsed = parseImplementationAttemptSettlementReceipt({
+      ...rewritten,
+      receiptId: sha256Hex(canonicalJson(rewritten as unknown as JsonValue)),
+    });
+    if (!parsed.ok) throw new Error(parsed.error.errors.join("; "));
+    return parsed.value;
+  }
+
+  function retryOf(kinds: readonly string[]) {
+    const receipt = retryReceiptWith(kinds);
+    const task = retryTask([receipt]);
+    const disposition = deriveImplementationRetryDisposition(task);
+    if (disposition.kind !== "retry") throw new Error(`retry fixture failed: ${disposition.kind}`);
+    return { receipt, task, disposition };
+  }
+
+  it("refuses a prompt with the exact authority line but a missing or edited violation section", () => {
+    const { receipt, task, disposition } = retryOf(["proof:task-completed", VIOLATED]);
+    const [authorityLine, ...violationLines] = disposition.promptAppendix.split("\n");
+    expect(violationLines).toContain("src/order/pricing.ts:");
+    expect(violationLines).toContain("  - priceOrder: still-unimplemented — replace the body that throws unimplemented: priceOrder");
+    expect(violationLines).toContain("  - OrderState: re-lists-frozen-variants");
+
+    const refusal = {
+      ok: false,
+      error: `Task T1 retry appendix must carry the exact contract violations of receipt ${receipt.receiptId}`,
+    };
+    // Omitted: the authority line alone.
+    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${authorityLine}`)).toEqual(refusal);
+    // Edited: one violation's remedy reworded below the (untouched) authority line.
+    const edited = [authorityLine, ...violationLines.map((line) => line.replace("replace the body", "rewrite the body"))].join("\n");
+    expect(edited).not.toBe(disposition.promptAppendix);
+    expect(edited.startsWith(`${authorityLine}\n`)).toBe(true);
+    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${edited}`)).toEqual(refusal);
+    // Dropped: one violation line removed.
+    const dropped = [authorityLine, ...violationLines.filter((line) => !line.includes("OrderState"))].join("\n");
+    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${dropped}`)).toEqual(refusal);
+    // Control: the exact appendix is admitted.
+    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${disposition.promptAppendix}`)).toMatchObject({ ok: true, kind: "retry" });
+  });
+
+  it("renders an unparseable contract-violated kind verbatim as an unreadable receipt entry, and never drops it", () => {
+    const { task, disposition } = retryOf([VIOLATED, UNPARSEABLE]);
+    const lines = disposition.promptAppendix.split("\n");
+    expect(lines).toContain(`unreadable receipt entry: ${JSON.stringify(UNPARSEABLE)}`);
+    // The readable entry beside it still renders whole.
+    expect(lines).toContain("src/order/pricing.ts:");
+    expect(lines.filter((line) => line.startsWith("Declared-artifact contract violations"))).toHaveLength(1);
+    expect(renderImplementationRetryContext(disposition.context)).toBe(disposition.promptAppendix);
+    // And the gate holds a prompt to it: dropping the unreadable entry is refused.
+    const withoutUnreadable = lines.filter((line) => !line.startsWith("unreadable receipt entry:")).join("\n");
+    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${withoutUnreadable}`)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("retry appendix must carry the exact contract violations"),
+    });
+
+    const alone = retryOf([UNPARSEABLE]).disposition.promptAppendix.split("\n");
+    expect(alone.slice(1)).toEqual([
+      expect.stringMatching(/^Declared-artifact contract violations/),
+      `unreadable receipt entry: ${JSON.stringify(UNPARSEABLE)}`,
+    ]);
+  });
+
+  it("adds no violation section to a retry whose predecessor violated no contract", () => {
+    const { disposition } = retryOf(["proof:task-completed"]);
+    expect(disposition.promptAppendix.split("\n")).toHaveLength(1);
   });
 });
 

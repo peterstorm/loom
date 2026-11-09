@@ -1,73 +1,50 @@
-# PR remediation — 2026-11-09 (review campaign 3)
+# PR #154 remediation — review-and-fix
 
-- **Branch:** `feat/security-audit-program` (base `main` @ `0e8df9a5`)
-- **Scope:** the whole branch diff (109 files), reviewed as four `--files` slices because
-  the frozen diff exceeds one reviewer's read budget:
-  `run.rf3-cores` (16), `run.rf3-handler` (38), `run.rf3-tests` (26), `run.rf3-docs` (29).
-- **Review Run Directories:** `.claude/reviews/review-and-fix-runs/run.rf3-{cores,handler,tests,docs}`
-- **Counts (inspection renderer):** cores 4 critical / 29 advisory → 4 surviving, 0 refuted;
-  handler 0 / 28; tests 0 / 31; docs 0 / 17.
+- **Branch:** `fix/claude-harness-transcript-records` (PR peterstorm/loom#154)
+- **Scope:** `origin/main...HEAD` plus the working tree (39 files, frozen by the review run)
+- **Review Run:** `.claude/reviews/review-and-fix-runs/run.pr154-review-1`
+  (result digest `8662c53221600dd2d25567d2b72d4e38b1ae273645efec5ba409055e5c3be385`)
+- **Advisory policy publication:** `.claude/reviews/review-and-fix-runs/run.pr154-policy-1`
+  (revision `initial`, disposition digest `2c5a7d1fc3b3c08575a266b6ac3407e87f43e017a6e823863d2821593b78a04a`)
 
-## Surviving criticals (all in `run.rf3-cores`)
+## Critical findings
 
-| Finding ID | Disposition | Repair group |
+Emitted/admitted: 0 critical; 18 advisory. After refutation: 0 surviving critical, 0 refuted critical.
+No Declared Repair Group, sibling accounting, selected check or Historical RED applies:
+remediation runs with `defectFamily: {"kind": "not-required"}`.
+
+## Refuted findings
+
+None.
+
+## Advisory dispositions (DECLARED)
+
+| Finding | Decision | Reason |
 |---|---|---|
-| `code-reviewer-1` | repaired | `group.sandbox-home-attestation` |
-| `silent-failure-hunter-1` | repaired | `group.sandbox-home-attestation` |
-| `code-simplifier-1` | repaired | `group.sandbox-home-attestation` |
-| `type-design-analyzer-1` | repaired | `group.owner-identity` |
+| code-reviewer-1, type-design-analyzer-1, architecture-tech-lead-5, code-simplifier-4 | accepted | `.claude/settings.local.json` is not committed: it is untracked and matched only by the author's global gitignore, which the review engine does not read. Fix: add it to the repository `.gitignore`. |
+| silent-failure-hunter-1 | accepted | Log one stderr line when Bun console collection errors cannot join a JUnit summary whose per-file results are unrecorded. |
+| pr-test-analyzer-1 | accepted | Test the uninspectable (ENOTDIR) Bun outfile arm: no console-only summary may vouch. |
+| type-design-analyzer-2 | accepted | Regression tests with Bun-shaped testcases (`file` ≠ `classname`, empty classname) for Wave Gate and owner-verification attribution. |
+| type-design-analyzer-3 | deferred | Pre-existing tolerant-reader behavior; the strict boundary already refuses untyped records. A third arm changes every tolerant reader and belongs in its own change. |
+| comment-analyzer-1 | accepted | Reword the `bun-console` source doc. |
+| comment-analyzer-2 | accepted | Reword the 1,000-character note in `docs/operations.md`. |
+| architecture-tech-lead-1 | accepted | A reported file that also errored between tests gains a failing testcase but keeps `collectionError: false`; only an omitted file is a collection error. ADR-0064 updated. |
+| architecture-tech-lead-2 | accepted | One exported `REPORT_SOURCES` vocabulary and `parseReportSource`, used by the ledger read-back. The completion-check reader in `defect-family-accounting.ts` stays deliberately narrower (only formats the strict byte parser yields); that is documented beside `REPORT_SOURCES`. |
+| architecture-tech-lead-3 | deferred | A behavior-neutral relocation of the Bun logic into its own module, chosen by ADR-0064; do it with the next Bun format change. |
+| architecture-tech-lead-4 | dismissed | The readers have different error semantics; the single classification already fixes the rule, and code-simplifier-5 aligns the ordering. |
+| code-simplifier-1 | accepted | `NO_RUN` constant per test file. |
+| code-simplifier-2 | accepted | Read Bun console errors only where a report can vouch. |
+| code-simplifier-3 | accepted | Classify each record once in the integrity parser. |
+| code-simplifier-5 | accepted | Skip harness records before reading the message in `conversationLineOf`. |
 
-### `group.sandbox-home-attestation` (DECLARED)
+## Paths outside the frozen review scope (support paths)
 
-- **Root cause:** the inner shell bound target and scratch first and then skipped the home
-  remount whenever either lay under home (a later home bind would have hidden them), while
-  `home_ro` stayed `1` — so `homeReadOnly:true` was printed for a home that stayed writable.
-- **Invariant:** `homeReadOnly` is true only when a write to the operator's home outside the
-  scratch was attempted inside the sandbox and failed.
-- **Fix:** home is closed first (`--rbind` + `remount,ro,bind`), target and scratch are bound on
-  top, and the flag is set from an observed write probe; an unknown home reads as open.
-- **Siblings:** `targetReadOnly` (proven: the script exits 127 when that remount fails),
-  `readOnlyRoot`/`unremountedMounts` (recorded, not gated — comment corrected to say so).
-- **Check:** `project:verify`. **Historical RED (DECLARED):** reproduced on this host before the
-  fix — a command run with scratch under `$HOME` wrote `$HOME/.sbx-probe-file-*` and the receipt
-  read `homeReadOnly:true`; the new `security-sandbox.test.ts` case asserts the write fails.
-
-### `group.owner-identity` (DECLARED)
-
-- **Root cause:** one ledger field (`agent_id`) had to be both a fresh per-attempt identity and an
-  exact catalog agent name; a critic-reassigned unit could be neither re-hunted under the catalog
-  name (not fresh) nor published under another (unplaceable).
-- **Invariant:** an owner id is minted by the ledger from a catalog agent — the bare name for the
-  first attempt, `<agent>--<n>` after — so it is fresh by construction and always resolves through
-  `catalogAgentOfOwner` to a catalog profile; assignment refuses an unplaceable agent up front.
-- **Siblings:** `huntingProfiles` (now reads owners through `catalogAgentOfOwner`, moved beside
-  adjudication behind `adjudicateRun(ledger, findings, verdicts)`); ballot `agent` ids stay exact
-  catalog names (verifiers are not ledger owners).
-- **Check:** `project:verify`. **Historical RED (DECLARED):** the reassignment test in
-  `security-coverage.test.ts` fails against the pre-fix `assignUnits` (owner-not-fresh).
-
-## Refuted criticals
-
-None — the panel upheld all four (security, reproduction and intent lenses; one `uncertain` from
-the security lens on `type-design-analyzer-1`, which the other two upheld).
-
-## Advisory dispositions — published (P5)
-
-Published through `standalone-disposition`, `revision: initial`, provenance DECLARED:
-
-| Source run | Policy run | Disposition digest |
-|---|---|---|
-| `run.rf3-cores` | `run.rf3-cores-policy` | `87fceb3eebe206ebc263c443fcf19368a0de132cc43929ddb02762738abce7d0` |
-| `run.rf3-handler` | `run.rf3-handler-policy` | `36cc7a8555cfc582e32abb59b1193295df660ec67ccd7a43f076953defa374c0` |
-| `run.rf3-tests` | `run.rf3-tests-policy` | `48f885d15c0a997aad9fc9346bd3005b943e73d4852a48498a66b767af3e2f0f` |
-| `run.rf3-docs` | `run.rf3-docs-policy` | `0145b20060dc3cd6ff6693eff7fd4e5bf52181cc33b7595f05611841dbaea2f9` |
-
-102 accepted, 2 deferred, 1 dismissed. Every entry's reason is in the published record.
-Deferred: cores `architecture-tech-lead-4` (ballot attribution needs a harness-captured verifier
-seam), docs `architecture-tech-lead-4` (dedicated hunter kind deferred by ADR-0064 D2).
-Dismissed: docs `code-simplifier-5` (terminal `requires` is what `missingRequirements` reads).
+- `.gitignore`
+- `.claude/plans/2026-11-09-pr-remediation.md`
+- `engine/tests/core/owner-verification-outcome.test.ts`
 
 ## Validation
 
-- `npm run verify` (root) — typecheck, full Vitest suite (report `.loom/completion-reports/verify.junit.xml`), six smokes.
-- Registered remediation run `run.rf3-remediation` executes `project:verify` freshly.
+- `bun engine/scripts/typecheck.ts`
+- Targeted: `npx vitest run` over the structured-report, report-discovery, bun-console-capture, acceptance-contract, owner-verification, ledger, transcript and parser suites
+- Full: `npm run test` in `engine/` (the 16 `verification-command` / `surface-stop-check-notes` failures are environmental on this machine and fail identically on `main`; CI runs them green)

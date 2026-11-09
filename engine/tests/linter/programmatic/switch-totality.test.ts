@@ -11,10 +11,12 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
-  DEFAULT_SWITCH_TOTALITY_MODULES,
+  DEFAULT_SWITCH_TOTALITY_OPTIONS,
+  EVERYWHERE,
   RULE_NAME,
   detectedSwitchKeys,
   handler as switchTotality,
+  type SwitchScope,
 } from "../../../src/linter/programmatic/switch-totality";
 import { baselineKey, unusedBaselineEntries } from "../../../src/linter/programmatic/baseline";
 
@@ -38,8 +40,16 @@ const UNPROVEN = [
 
 /** Run the rule with the repo baseline out of the way — these tests are about
  *  the rule's judgement, not about which files happen to be grandfathered. */
-const lint = (source: string, filePath: string = FILE, baseline: readonly string[] = NO_BASELINE) =>
-  switchTotality(source, filePath, DEFAULT_SWITCH_TOTALITY_MODULES, baseline);
+const lint = (
+  source: string,
+  filePath: string = FILE,
+  baseline: readonly string[] = NO_BASELINE,
+  scope: SwitchScope = EVERYWHERE,
+  projectRoot: string | null = null,
+) => switchTotality(source, filePath, { ...DEFAULT_SWITCH_TOTALITY_OPTIONS, baseline, scope, projectRoot });
+
+/** A project narrowing the rule to its pure core and machine core. */
+const CORE_ONLY: SwitchScope = { kind: "modules", prefixes: ["engine/src/core/", "engine/src/machine/"] };
 
 describe("switch-totality", () => {
   it("flags a switch with literal arms and no totality proof", () => {
@@ -85,7 +95,26 @@ describe("switch-totality", () => {
     expect(lint(source)).toEqual([]);
   });
 
-  it("accepts a switch that delegates to match(...).exhaustive()", () => {
+  it("accepts a default arm that delegates the remaining variants to match(...).exhaustive()", () => {
+    const source = [
+      `function name(x: Event): string {`,
+      `  switch (x.kind) {`,
+      `    case "a":`,
+      `      return "a";`,
+      `    case "b":`,
+      `      return "b";`,
+      `    default:`,
+      `      return match(x).with({ kind: "c" }, () => "c").exhaustive();`,
+      `  }`,
+      `}`,
+    ].join("\n");
+    expect(lint(source)).toEqual([]);
+  });
+
+  it("does NOT accept a match(...).exhaustive() inside a CASE arm — it proves that match, not the switch", () => {
+    // The rule's first version accepted `.exhaustive()` anywhere in the span,
+    // so a nested match in one arm silenced a switch that a new variant would
+    // fall straight through.
     const source = [
       `function name(x: Event): string {`,
       `  switch (x.kind) {`,
@@ -97,7 +126,24 @@ describe("switch-totality", () => {
       `  return "?";`,
       `}`,
     ].join("\n");
-    expect(lint(source)).toEqual([]);
+    expect(lint(source)).toHaveLength(1);
+  });
+
+  it("measures qualified enum-member arms like literal arms", () => {
+    const source = [
+      `function name(status: Status): string {`,
+      `  switch (status) {`,
+      `    case Status.Draft:`,
+      `      return "draft";`,
+      `    case Status.Paid:`,
+      `      return "paid";`,
+      `  }`,
+      `  return "?";`,
+      `}`,
+    ].join("\n");
+    const violations = lint(source);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]!.fixHint).toContain("2 arms");
   });
 
   it("does NOT accept `default: throw` — it compiles after a new variant is added", () => {
@@ -210,31 +256,47 @@ describe("switch-totality", () => {
     expect(lint(source)).toEqual([]);
   });
 
-  it("ignores switches outside the pure-core and machine scopes", () => {
-    expect(lint(UNPROVEN, "engine/src/handlers/cli.ts")).toEqual([]);
+  it("applies to every TypeScript file by default — any project, any layout", () => {
+    // The rule used to default to loom's own `engine/src/core/` and
+    // `engine/src/machine/`, so in every other repository it matched nothing.
+    expect(lint(UNPROVEN, "engine/src/handlers/cli.ts")).toHaveLength(1);
+    expect(lint(UNPROVEN, "src/domain/order.ts")).toHaveLength(1);
+    expect(lint(UNPROVEN, "app/api/orders/route.tsx")).toHaveLength(1);
   });
 
-  it("ignores test files even inside the scope", () => {
+  it("a project may narrow the scope to its own module prefixes", () => {
+    expect(lint(UNPROVEN, "engine/src/handlers/cli.ts", NO_BASELINE, CORE_ONLY)).toEqual([]);
+    expect(lint(UNPROVEN, "engine/src/core/example.ts", NO_BASELINE, CORE_ONLY)).toHaveLength(1);
+  });
+
+  it("ignores test files", () => {
     expect(lint(UNPROVEN, "engine/src/core/example.test.ts")).toEqual([]);
+    expect(lint(UNPROVEN, "src/domain/order.spec.ts")).toEqual([]);
   });
 
   it.each([
-    ["engine/src/core/example.ts"],
-    // machine/ is not an import boundary, so anchoring on the boundary table
-    // left its absolute paths unmatched and the baseline entry silently dead.
-    ["engine/src/machine/example.ts"],
-    // pi/ is outside every module scope, so only the repo-root fallback in
-    // `repoRelative` can turn its baseline keys from absolute into relative.
-    ["pi/implementation-brief-expansion.ts"],
-  ])("normalizes an absolute path to %s so a baselined site stays baselined", (relative) => {
-    // Joining the relative path is the point: the first version built a bare
-    // `/home/someone/dev/loom/`, which contains no anchor at all, so the rule
-    // reported nothing and the case passed with any baseline — pinning nothing.
-    const absolute = `/home/someone/dev/loom/${relative}`;
-    expect(lint(UNPROVEN, absolute, [baselineKey(relative, "x.kind")])).toEqual([]);
-    // And the normalization is not vacuous: the same absolute path WITHOUT the
-    // baseline entry is a violation, so a dead key would show up here.
-    expect(lint(UNPROVEN, absolute)).toHaveLength(relative.startsWith("pi/") ? 0 : 1);
+    ["/home/someone/dev/loom", "engine/src/core/example.ts"],
+    ["/home/someone/dev/loom", "pi/implementation-brief-expansion.ts"],
+    // A target project's tree shares no directory name with loom's — the case
+    // the old anchor list could never key, so no baseline could describe it.
+    ["/work/shop", "src/domain/order.ts"],
+  ])("keys an absolute path under %s relative to that project root, so a baselined %s stays baselined", (root, relative) => {
+    // Joining the relative path is the point: an absolute path that does not
+    // sit under the root would stay absolute and match no key — the case below
+    // shows the key is live by failing without it.
+    const absolute = `${root}/${relative}`;
+    expect(lint(UNPROVEN, absolute, [baselineKey(relative, "x.kind")], EVERYWHERE, root)).toEqual([]);
+    expect(lint(UNPROVEN, absolute, NO_BASELINE, EVERYWHERE, root)).toHaveLength(1);
+  });
+
+  it("never excuses a site through a key it could not make relative", () => {
+    // No project root (no project config in play), or a file outside the root:
+    // the path stays absolute, so the relative key does not match and the site
+    // is reported — the fail-closed direction.
+    const relative = "src/domain/order.ts";
+    expect(lint(UNPROVEN, `/work/shop/${relative}`, [baselineKey(relative, "x.kind")])).toHaveLength(1);
+    expect(lint(UNPROVEN, `/elsewhere/${relative}`, [baselineKey(relative, "x.kind")], EVERYWHERE, "/work/shop"))
+      .toHaveLength(1);
   });
 
   it("spends one baseline entry per site, so a second switch on the same scrutinee still fails", () => {
@@ -274,16 +336,18 @@ describe("switch-totality baseline staleness", () => {
   });
 
   it("detects exactly the sites the rule would flag: guards, proven switches, out-of-scope and test files are not sites", () => {
+    const narrowed = { ...DEFAULT_SWITCH_TOTALITY_OPTIONS, scope: CORE_ONLY };
     const guard = [`switch (x.status) {`, `  case "done": drop(x);`, `}`].join("\n");
     expect(detectedSwitchKeys(guard, FILE)).toEqual([]);
-    expect(detectedSwitchKeys(UNPROVEN, "engine/src/handlers/cli.ts")).toEqual([]);
+    expect(detectedSwitchKeys(UNPROVEN, "engine/src/handlers/cli.ts", narrowed)).toEqual([]);
     expect(detectedSwitchKeys(UNPROVEN, "engine/src/core/example.test.ts")).toEqual([]);
     // And the detector agrees with the handler site for site.
     expect(detectedSwitchKeys(`${UNPROVEN}\n${UNPROVEN}`, FILE)).toHaveLength(lint(`${UNPROVEN}\n${UNPROVEN}`).length);
   });
 
-  it("normalizes an absolute path to the repo-relative key form, like the handler", () => {
-    expect(detectedSwitchKeys(UNPROVEN, `/home/someone/dev/loom/${FILE}`)).toEqual([baselineKey(FILE, "x.kind")]);
+  it("keys an absolute path relative to the project root, like the handler", () => {
+    const options = { ...DEFAULT_SWITCH_TOTALITY_OPTIONS, projectRoot: "/home/someone/dev/loom" };
+    expect(detectedSwitchKeys(UNPROVEN, `/home/someone/dev/loom/${FILE}`, options)).toEqual([baselineKey(FILE, "x.kind")]);
   });
 
   it.each([
@@ -301,15 +365,25 @@ describe("switch-totality baseline staleness", () => {
       `  }`,
       `}`,
     ].join("\n")],
-    ["match(...).exhaustive()", [
+    ["a default delegating to match(...).exhaustive()", [
       `function name(x: Event): string {`,
       `  switch (x.kind) {`,
       `    case "a":`,
-      `      return match(x).with({ kind: "a" }, () => "a").exhaustive();`,
+      `      return "a";`,
       `    case "b":`,
       `      return "b";`,
+      `    default:`,
+      `      return match(x).with({ kind: "c" }, () => "c").exhaustive();`,
       `  }`,
-      `  return "?";`,
+      `}`,
+    ].join("\n")],
+    ["a whole match(...).exhaustive()", [
+      `function name(x: Event): string {`,
+      `  return match(x.kind)`,
+      `    .with("a", () => "a")`,
+      `    .with("b", () => "b")`,
+      `    .with("c", () => "c")`,
+      `    .exhaustive();`,
       `}`,
     ].join("\n")],
   ])("reports a baselined switch's entry unused once the switch is converted to %s", (_proof, converted) => {

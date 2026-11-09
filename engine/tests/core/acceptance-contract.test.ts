@@ -68,7 +68,7 @@ function contract(freeze: AcceptanceContract["freeze"] = { state: "awaiting-red"
 }
 
 const testcase = (name: string, outcome: ReportTestcase["outcome"], failureType: string | null = outcome === "failed" ? "AssertionError" : null, classname = "tests/acceptance/payload.acceptance.test.ts"): ReportTestcase =>
-  ({ classname, name, outcome, failureType });
+  ({ file: classname, classname, name, outcome, failureType });
 
 const RED_REPORT: readonly ReportTestcase[] = [
   testcase("plain", "passed", null, "tests/core/other.test.ts"),
@@ -420,6 +420,33 @@ describe("classifyFailedTestcase — the one classification the gate and I7 shar
         expect(classified.kind === "expected-red").toBe(judgeAcceptance(expectation, [fact]).excusedCheckIds.length > 0);
       },
     ));
+  });
+});
+
+describe("Bun-shaped testcases — the gate attributes by file, never by the describe chain", () => {
+  // Bun writes the describe chain (empty at top level) as classname and the
+  // test file as `file`; reading classname would attribute nothing.
+  const bun = (name: string, classname: string, file = "tests/acceptance/payload.acceptance.test.ts"): ReportTestcase =>
+    ({ file, classname, name, outcome: "failed", failureType: "AssertionError" });
+  const failedOf = (testcase: ReportTestcase): FailedReportTestcase => {
+    if (!isFailedReportTestcase(testcase)) throw new Error("fixture is not failed");
+    return testcase;
+  };
+
+  it("observes, judges and classifies a describe-titled and a top-level testcase by their file", () => {
+    const expectation = acceptanceExpectation([contract()], TASKS, 1);
+    const cases = [bun(ROSTER[0].name, "payload"), bun(ROSTER[1].name, "")];
+    const fact = facts(expectation, cases);
+    expect(fact.kind === "projected" ? fact.testcases.map(({ file }) => file) : []).toEqual([ACCEPTANCE, ACCEPTANCE]);
+    expect(judgeAcceptance(expectation, [fact])).toEqual({ failures: [], excusedCheckIds: ["verify"] });
+    expect(classifyFailedTestcase(expectation, failedOf(cases[1]!)))
+      .toEqual({ kind: "expected-red", file: ACCEPTANCE, name: ROSTER[1].name });
+  });
+
+  it("renders an unattributed Bun testcase by its reported file, not its describe title", () => {
+    const expectation = acceptanceExpectation([contract()], TASKS, 1);
+    expect(classifyFailedTestcase(expectation, failedOf(bun("breaks", "other", "tests/core/other.test.ts"))))
+      .toEqual({ kind: "blocking", file: "tests/core/other.test.ts", name: "breaks", collectionError: false });
   });
 });
 

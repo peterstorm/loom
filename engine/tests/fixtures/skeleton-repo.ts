@@ -38,12 +38,17 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import type { AcceptanceContract, AcceptanceTestcase, FrozenPathDigest } from "../../src/core/acceptance-contract";
 import { parseIsoInstant, type ImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import type { NonEmpty } from "../../src/core/orchestration-contract";
 import { TRUSTED_LEDGER_ONLY_POLICY } from "../../src/core/proof-obligations";
-import { productionExactSettlementPorts, settleExactImplementation } from "../../src/handlers/helpers/exact-implementation-settlement";
+import {
+  productionExactSettlementPorts,
+  settleExactImplementation,
+  type ExactImplementationSettlement,
+} from "../../src/handlers/helpers/exact-implementation-settlement";
+import { registerTaskExecutionBatch } from "../../src/handlers/task-execution";
 import { renderTaskImplementationBrief } from "../../src/orchestration/implementation-brief";
 import { StateManager } from "../../src/state-manager";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
@@ -185,6 +190,12 @@ public interface OrderContract {
     record Price(long cents) {}
 }
 `;
+
+/** CT-2 revised: `PriceOrderFn` gains a currency parameter (arity 3). */
+export const JAVA_TYPES_WITH_CURRENCY = JAVA_TYPES_TEXT.replace(
+  "Price apply(Order order, int quantity);",
+  "Price apply(Order order, int quantity, String currency);",
+);
 
 const JAVA_ACCEPTANCE_TEXT = `package com.acme.order;
 
@@ -369,13 +380,8 @@ export const sha256 = (text: string): string => createHash("sha256").update(Buff
 /** The canonical TypeScript skeleton of `path`, bound to CT-1, importing the
  *  types file extensionless (the fixture's acceptance file imports it so). */
 export function canonicalTsSkeleton(path: string, exports: readonly Readonly<{ name: string; alias: string }>[]): string {
-  const fromDir = dirname(path).split("/");
-  const toParts = TS_CONTRACT.types.replace(/\.ts$/, "").split("/");
-  let common = 0;
-  while (common < fromDir.length && common < toParts.length - 1 && fromDir[common] === toParts[common]) common += 1;
-  const ups = fromDir.length - common;
-  const rest = toParts.slice(common).join("/");
-  const specifier = ups === 0 ? `./${rest}` : `${"../".repeat(ups)}${rest}`;
+  const toward = relative(dirname(path), TS_CONTRACT.types.replace(/\.ts$/, ""));
+  const specifier = toward.startsWith("../") ? toward : `./${toward}`;
   const aliases = [...new Set(exports.map(({ alias }) => alias))].sort();
   return [
     `// Skeleton written by Loom from ${TS_CONTRACT.types} (${TS_CONTRACT.id}). ${HEADER_TAIL}`,
@@ -398,8 +404,8 @@ export function canonicalJavaSkeleton(
   arity: Readonly<Record<string, number>>,
   typesPath: string = JAVA_CONTRACT.types,
 ): string {
-  const relative = path.slice(path.indexOf("src/main/java/") + "src/main/java/".length);
-  const segments = relative.split("/");
+  const underMainRoot = path.slice(path.indexOf("src/main/java/") + "src/main/java/".length);
+  const segments = underMainRoot.split("/");
   const className = segments.pop()!.replace(/\.java$/, "");
   const javaPackage = segments.join(".");
   const aliases = [...new Set(exports.map(({ alias }) => alias))].sort();
@@ -829,6 +835,31 @@ export function spawnFor(raw: RawStateFile, taskId: string): TaskExecutionSpawn 
   };
 }
 
+/** Register the owed spawns of `taskIds` as one parallel batch through
+ *  `registerTaskExecutionBatch`; a refused registration fails the test. */
+export async function registered(repo: SkeletonRepo, ...taskIds: readonly string[]): Promise<readonly ImplementationAttemptAuthority[]> {
+  const outcome = await registerTaskExecutionBatch(taskIds.map((taskId) => spawnFor(repo.rawState(), taskId)));
+  if (outcome.kind !== "registered") throw new Error(`registration refused: ${outcome.message}`);
+  return outcome.authorities;
+}
+
+/** The attempt authority registration issued `taskId`. */
+export const authorityOf = (authorities: readonly ImplementationAttemptAuthority[], taskId: string): ImplementationAttemptAuthority => {
+  const found = authorities.find((authority) => authority.taskId === taskId);
+  if (found === undefined) throw new Error(`fixture: no authority for ${taskId}`);
+  return found;
+};
+
+/** The State File's manager; a missing State File fails the test. */
+export const managerOf = (repo: SkeletonRepo): StateManager => {
+  const manager = StateManager.fromPath(repo.statePath);
+  if (manager === null) throw new Error(`fixture: no State File at ${repo.statePath}`);
+  return manager;
+};
+
+/** The State File's Task graph, loaded through the production parser. */
+export const graphOf = (repo: SkeletonRepo): TaskGraph => managerOf(repo).load();
+
 // ---------------------------------------------------------------------------
 // Decoding engine output (unknown JSON → CT-1 types)
 // ---------------------------------------------------------------------------
@@ -1039,29 +1070,31 @@ export const subjectAndReason = ({ subject, reason }: ConformanceViolation): str
 
 /** Settle one registered attempt through `settleExactImplementation`, as the
  *  Claude stop shell does: the agent changed `modified`, reported a trusted
- *  pass, and the ledger read no red-then-green events. */
+ *  pass, and the ledger read no red-then-green events. Returns the settlement,
+ *  whose `infrastructureReason` names a settlement blocked as infrastructure. */
 export async function settleAttempt(
   repo: SkeletonRepo,
   authority: ImplementationAttemptAuthority,
   modified: readonly string[],
   taskCompleted = true,
-): Promise<void> {
+): Promise<ExactImplementationSettlement> {
   const observedAt = parseIsoInstant(new Date().toISOString(), "fixture settlement instant");
   if (!observedAt.ok) throw new Error(observedAt.error.errors.join("; "));
-  const manager = StateManager.fromPath(repo.statePath);
-  if (manager === null) throw new Error(`fixture: no State File at ${repo.statePath}`);
-  await manager.update((state) => settleExactImplementation(state, {
-    transport: "Claude",
-    authority,
-    observedAt: observedAt.value,
-    parserModifiedPaths: modified,
-    parserPathLabel: "skeleton fixture result paths",
-    taskCompleted,
-    testResult: { verdict: "trusted-pass" },
-    testEvidence: "skeleton fixture pass",
-    proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
-    ledger: { kind: "read", events: [] },
-  }, productionExactSettlementPorts(repo.root, repo.statePath)).application.state);
+  return managerOf(repo).updateAndReturn((state) => {
+    const settlement = settleExactImplementation(state, {
+      transport: "Claude",
+      authority,
+      observedAt: observedAt.value,
+      parserModifiedPaths: modified,
+      parserPathLabel: "skeleton fixture result paths",
+      taskCompleted,
+      testResult: { verdict: "trusted-pass" },
+      testEvidence: "skeleton fixture pass",
+      proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
+      ledger: { kind: "read", events: [] },
+    }, productionExactSettlementPorts(repo.root, repo.statePath));
+    return { state: settlement.application.state, value: settlement };
+  });
 }
 
 export type CliRun = Readonly<{ stdout: string; stderr: string; status: number | null }>;

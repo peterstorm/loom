@@ -3,7 +3,7 @@
  * bindings, records and observations — exactly one outcome per non-test
  * file_list path, in file_list order, never one for a test file; the
  * derivation is deterministic; and each outcome agrees with the precedence
- * step its inputs select.
+ * step its inputs select. Hand-written rows pin that precedence order.
  */
 
 import fc from "fast-check";
@@ -12,18 +12,15 @@ import { isTestFileBySuffixes, DEFAULT_TEST_FILE_SUFFIXES } from "../../src/core
 import { skeletonLanguageOf } from "../../src/core/skeleton/language";
 import { isUntouchedSkeleton, renderSkeletonOutcome } from "../../src/core/skeleton/outcomes";
 import { knownSkeletonOutcomes } from "../fixtures/known-skeleton-outcomes";
-import type { ExportBinding, Identifier, PathObservation, SkeletonRecord } from "../../src/core/skeleton/types";
-import { freezeVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
+import { binding, frozenManifestWith } from "../fixtures/skeleton-builders";
+import { OUTCOME_TEXT } from "../fixtures/skeleton-repo";
+import type { ExportBinding, PathObservation, SkeletonRecord } from "../../src/core/skeleton/types";
 import type { TaskGraph } from "../../src/types";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 
-const RENDERED = new Set([
-  "skeleton written",
-  "no bound exports, no skeleton",
-  "contract has no types file, no skeletons",
-  "unsupported language, no skeleton",
-  "exists, not skeletonized",
-]);
+/** Every outcome's rendered wording: the fixture's outcome strings, less the stale flag. */
+const { stale: _staleFlag, ...OUTCOME_WORDING } = OUTCOME_TEXT;
+const RENDERED: ReadonlySet<string> = new Set(Object.values(OUTCOME_WORDING));
 
 const SHAS = ["a", "b", "c"].map((fill) => fill.repeat(64));
 
@@ -60,11 +57,7 @@ type Scenario = Readonly<{
 type RawScenario = typeof scenarioArb extends fc.Arbitrary<infer T> ? T : never;
 
 const build = ({ files, boundMask, recordMask, observed }: RawScenario): Scenario => {
-  const bindings: ExportBinding[] = files.filter((_, i) => boundMask[i]).map((path) => ({
-    path,
-    contract: "CT-1",
-    exports: [{ name: "run" as Identifier, alias: "RunFn" as Identifier }],
-  }));
+  const bindings: ExportBinding[] = files.filter((_, i) => boundMask[i]).map((path) => binding(path, "CT-1", ["run", "RunFn"]));
   const records = new Map(files.flatMap((path, i): [string, SkeletonRecord][] => {
     const engineSha256 = recordMask[i];
     return engineSha256 === null || engineSha256 === undefined ? [] : [[path, {
@@ -127,14 +120,49 @@ describe("skeletonOutcomesOf: properties", () => {
   });
 });
 
-/** The `.loom/verification-manifest.json` bytes, frozen as population freezes them. */
-function manifestWithSuffixes(testFileSuffixes: readonly string[]): FrozenVerificationManifest {
-  const frozen = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
-    kind: "loom-verification-manifest", checks: [], schemaVersion: 2, testFileSuffixes,
-  })));
-  if (!frozen.ok) throw new Error(frozen.error.errors.join("; "));
-  return frozen.value;
-}
+/** One path's outcome, its inputs named: bound or not, the engine digest its
+ *  record holds (if recorded), and what is on disk (absent when omitted). */
+const outcomeAt = (
+  path: string,
+  inputs: Readonly<{ bound: boolean; recorded: string | null; observation?: PathObservation }>,
+) => {
+  const { graph, observations } = build({ files: [path], boundMask: [inputs.bound], recordMask: [inputs.recorded], observed: [inputs.observation] });
+  const [only] = knownSkeletonOutcomes(graph, "T2", observations);
+  return only?.outcome;
+};
+
+const [ENGINE_SHA, EDITED_SHA, CANONICAL_SHA] = SHAS as [string, string, string];
+const onDisk = (sha256: string, canonicalSha256: string | null = null): PathObservation => ({ kind: "present", sha256, canonicalSha256 });
+
+describe("skeletonOutcomesOf: precedence, by example (present, then untouched, then bound, then language)", () => {
+  it("an untouched skeleton is written with its record's origin, even unbound and in an unsupported language", () => {
+    expect(outcomeAt("src/A.kt", { bound: false, recorded: ENGINE_SHA, observation: onDisk(ENGINE_SHA) }))
+      .toEqual({ kind: "skeleton-written", origin: "revision" });
+  });
+
+  it("canonical bytes with no record are adopted as a spawn skeleton", () => {
+    expect(outcomeAt("src/A.ts", { bound: true, recorded: null, observation: onDisk(CANONICAL_SHA, CANONICAL_SHA) }))
+      .toEqual({ kind: "skeleton-written", origin: "spawn" });
+  });
+
+  it("any other present file exists, even bound in a supported language", () => {
+    expect(outcomeAt("src/A.ts", { bound: true, recorded: ENGINE_SHA, observation: onDisk(EDITED_SHA, CANONICAL_SHA) }))
+      .toEqual({ kind: "exists-not-skeletonized" });
+  });
+
+  it("an absent unbound file has no bound exports, whatever its language", () => {
+    expect(outcomeAt("src/A.ts", { bound: false, recorded: null })).toEqual({ kind: "no-bound-exports" });
+    expect(outcomeAt("src/A.rs", { bound: false, recorded: null })).toEqual({ kind: "no-bound-exports" });
+  });
+
+  it("an absent bound file is unsupported only after the binding is found", () => {
+    expect(outcomeAt("src/A.rs", { bound: true, recorded: null })).toEqual({ kind: "unsupported-language", reason: "other-extension" });
+  });
+
+  it("an absent bound file in a supported language is a skeleton to write, whatever its record holds", () => {
+    expect(outcomeAt("src/A.ts", { bound: true, recorded: ENGINE_SHA })).toEqual({ kind: "skeleton-written", origin: "spawn" });
+  });
+});
 
 describe("skeletonOutcomesOf: the frozen test-file classification decides test paths", () => {
   it("a manifest's suffixes, not the engine default, exclude test files", () => {
@@ -144,7 +172,7 @@ describe("skeletonOutcomesOf: the frozen test-file classification decides test p
     });
     const graph: TaskGraph = {
       ...graphFixture([task]),
-      verification_manifest: manifestWithSuffixes(["Test.java"]),
+      verification_manifest: frozenManifestWith(["Test.java"]),
     };
     expect(knownSkeletonOutcomes(graph, "T2", new Map()).map(({ path }) => path)).toEqual(["src/a.test.ts"]);
   });

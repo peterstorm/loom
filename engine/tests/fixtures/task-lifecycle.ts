@@ -2,6 +2,7 @@ import {
   derivePendingTaskProof,
   evaluateProofObligations,
   evaluateTaskProof,
+  type ObservedProofEvidence,
   type RedThenGreenEra,
   type SatisfiedTaskProof,
   type TaskProof,
@@ -96,20 +97,40 @@ export function shownRedThenGreen(implementationWrite = "src/fixture.ts"): RedTh
   };
 }
 
+/** Observed Proof evidence whose completion conformance defaults to
+ *  `not-owed` — the judgment every Task outside a skeleton contract settles
+ *  with. Pass `contractConformance` to state a different judgment. */
+export function observedEvidence(
+  evidence: Omit<ObservedProofEvidence, "contractConformance"> & Partial<Pick<ObservedProofEvidence, "contractConformance">>,
+): ObservedProofEvidence {
+  return { contractConformance: CONFORMANCE_NOT_OWED, ...evidence };
+}
+
+/** Observed evidence for a completed Task that changed exactly `files`, with a
+ *  ledger-trusted pass and new tests written; `overrides` replace any field. */
+export function trustedPassEvidence(
+  files: readonly string[],
+  overrides: Partial<ObservedProofEvidence> = {},
+): ObservedProofEvidence {
+  return observedEvidence({
+    taskCompleted: true,
+    testResult: { verdict: "trusted-pass" },
+    filesModified: files,
+    newTestsWritten: true,
+    ...overrides,
+  });
+}
+
 /** A satisfied Proof for a Task that changed exactly its declared files, with
  *  trusted test evidence and new tests written. A Task in an I6-era graph
  *  (`redThenGreenEra(manifest)`) also owes red-then-green, shown here. */
 export function satisfiedProof(files: readonly string[], era: RedThenGreenEra = "not-owed"): SatisfiedTaskProof {
   const evaluated = evaluateTaskProof(
     { newTestsRequired: true, declaredArtifacts: files, redThenGreen: era },
-    {
-      contractConformance: CONFORMANCE_NOT_OWED,
-      taskCompleted: true,
-      testResult: { verdict: "trusted-pass" },
-      filesModified: files,
-      newTestsWritten: true,
-      ...(era === "owed-if-new-tests" ? { redThenGreen: shownRedThenGreen(files[0]) } : {}),
-    },
+    trustedPassEvidence(
+      files,
+      era === "owed-if-new-tests" ? { redThenGreen: shownRedThenGreen(files[0]) } : {},
+    ),
   );
   if (evaluated.state !== "satisfied") throw new Error("satisfied proof fixture must be satisfied");
   return evaluated;
@@ -187,7 +208,7 @@ export function taskFixture(input: TaskFixtureInput): Task {
   }
   const evaluated = suppliedProof?.state === "failed"
     ? suppliedProof
-    : evaluateProofObligations(pending.obligations, { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: false, filesModified: [] });
+    : evaluateProofObligations(pending.obligations, observedEvidence({ taskCompleted: false, filesModified: [] }));
   if (evaluated.state !== "failed") {
     return { ...metadata, status: "pending", proof: pending };
   }

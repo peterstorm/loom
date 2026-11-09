@@ -131,14 +131,22 @@ Same mechanism — create a JSON override by name:
 
 ## Project Configuration
 
-Programmatic rules (boundary checking, I/O detection, function length) use project-local configuration to adapt to your codebase structure.
+Programmatic rules (boundary checking, I/O detection, function length, totality) use project-local configuration to adapt to your codebase structure.
 
 ### Config File Location
 
+`config.json` lives **inside** the project rules directory, beside the rule files:
+
 ```
-.claude/linter/config.json     (Claude Code projects)
-.pi/linter/config.json         (Pi projects)
+.claude/linter/rules/config.json     (Claude Code projects)
+.pi/linter/rules/config.json         (Pi projects)
 ```
+
+A file at `.claude/linter/config.json` (one level up) is never read. A project
+used from both harnesses keeps the two copies identical —
+`lint-project --write-baseline` writes both. The project root is the directory
+above `.claude/linter/rules` (or `.pi/linter/rules`), and every path in the
+config — module prefixes, baseline keys — is relative to it.
 
 ### Config Schema
 
@@ -173,6 +181,28 @@ Programmatic rules (boundary checking, I/O detection, function length) use proje
 | `pureModules` | `string[]` | Loom's core modules | File path patterns that must be side-effect free |
 | `maxFunctionLines` | `number` | `50` | Max lines per function body for `max-function-lines` |
 | `excludeFromMaxLines` | `string[]` | Test file patterns | File suffixes to exclude from line-length checking |
+| `switchTotalityModules` | non-empty `string[]` | every non-test TS file | Narrows `switch-totality` to these path prefixes. An empty list is refused — disable the rule by name instead |
+| `switchTotalityBaseline` | `string[]` | `[]` | Grandfathered `path::scrutinee` sites `switch-totality` excuses, one entry per site |
+| `maxDiscriminantBranches` | `number` | `3` | Branches on one tag at which `exhaustive-discriminant-branching` reads an if-chain as a switch |
+| `discriminantTags` | `string[]` | `kind`, `status`, `verdict`, `stage`, `severity`, `type` | Field names that tag a discriminated union |
+| `discriminantBranchingBaseline` | `string[]` | `[]` | Grandfathered `path::discriminant` chains `exhaustive-discriminant-branching` excuses |
+
+### Baselines: adopting the totality rules on an existing codebase
+
+`switch-totality` applies to every TypeScript file in every project, so a
+codebase with switches that predate it would block the next edit to each of
+those files. Record them once:
+
+```bash
+bun <loom-plugin-dir>/scripts/lint-project.ts --write-baseline
+```
+
+This writes every unproven switch and if-chain into `switchTotalityBaseline` /
+`discriminantBranchingBaseline`, keyed relative to the project root. A
+baselined site costs nothing until it is converted; a new site must prove
+totality. The list is debt, and it only shrinks: `lint-project` (full tier)
+fails on any entry no live site consumes, so a converted switch's entry must
+be deleted — re-running `--write-baseline` does it.
 
 ### BoundaryRule Structure
 
@@ -184,9 +214,14 @@ Programmatic rules (boundary checking, I/O detection, function length) use proje
 }
 ```
 
-### No Config = Loom Defaults
+### No Config = Built-in Defaults
 
-If no `config.json` exists, the programmatic rules use Loom's built-in defaults (targeting `engine/src/linter/`, `engine/src/core/`, `engine/src/parsers/`). These only produce violations in the Loom codebase itself — other repos won't see false positives.
+If no `config.json` exists, every rule uses its built-in default.
+`switch-totality`, `exhaustive-discriminant-branching`, `max-function-lines`
+and the expression-shape rules apply to any project as-is. The boundary and
+purity rules' defaults (`boundaries`, `pureModules`) still describe Loom's own
+tree (`engine/src/linter/`, `engine/src/core/`, `engine/src/parsers/`), so in
+another repository they do nothing until the project configures its own.
 
 ---
 
@@ -200,13 +235,14 @@ If no `config.json` exists, the programmatic rules use Loom's built-in defaults 
 | `no-console-log` | `console\.log\(` | ✅ | `console.log()` calls |
 | `no-todo-fixme` | `//\s*(TODO\|FIXME)` | ✅ | `// TODO` and `// FIXME` comments |
 | `no-alias-export` | `^export (const\|let) X = Y;` | ✅ | An export that only renames another symbol |
-| `prefer-ts-pattern` | `switch\s*\(` | ❌ | `switch()` statements (opt-in) |
 
-`prefer-ts-pattern` stays **off**, and superseded rather than deleted. It matches
-only `switch (`, so it misses the if-chain form entirely, and it fires on
-exhaustive switches whose `default` binds the scrutinee to `never` — a totality
-proof, not a defect. `exhaustive-discriminant-branching` below covers both forms
-and accepts either proof.
+**"Use ts-pattern instead of switch" is `switch-totality`**, a programmatic rule
+that also runs in this tier (below). The old regex rule `prefer-ts-pattern` is
+deleted: it matched only `switch (`, so it missed the if-chain form, and it
+fired on exhaustive switches whose `default` binds the scrutinee to `never` — a
+totality proof, not a defect. A project that still carries its own
+`prefer-ts-pattern.json` override keeps that regex as a project rule; delete it
+in favour of `switch-totality`.
 
 `no-alias-export` is the pattern that produced twelve dead aliases on one branch
 (`parseCorpus = parseCalibrationCorpus` and siblings). It matters because `tsc`
@@ -225,22 +261,33 @@ callers all moved to the real name lives forever. Derived values like
 | `no-mutable-entity-fields` | Non-final instance fields | ❌ | Mutable fields (opt-in) |
 | `no-star-import` | `import\s+[\w.]+\.\*\s*;` | ✅ | Wildcard imports |
 
-### Programmatic Rules (Full Tier — Wave-Gate Only)
+### Programmatic Rules
 
-| Rule | Languages | What it enforces |
-|------|-----------|-----------------|
-| `no-cross-boundary-imports` | TS, Java | Import direction between bounded contexts |
-| `no-io-in-pure-modules` | TS, Java | No filesystem/network/console/non-determinism in pure modules |
-| `max-function-lines` | TS, Java | Function bodies ≤ configured max (default: 50 lines) |
-| `fugue-generated-integrity` | TS | Structural projection of Fugue-generated files matches the stamped SHA-256 |
-| `exhaustive-discriminant-branching` | TS | 3+ branches on one discriminant without a totality proof |
-| `no-nested-ternary` | TS | A ternary whose else-branch opens another ternary |
-| `prefer-array-methods` | TS | A mutable accumulator whose loop only pushes into it |
+| Rule | Tier | Languages | What it enforces |
+|------|------|-----------|-----------------|
+| `no-cross-boundary-imports` | immediate + full | TS, Java | Import direction between bounded contexts |
+| `no-io-in-pure-modules` | immediate + full | TS, Java | No filesystem/network/console/non-determinism in pure modules |
+| `switch-totality` | immediate + full | TS | A switch with 2+ arms proves totality — `match(…).exhaustive()`, or a `default` arm binding the scrutinee to `never` |
+| `max-function-lines` | full | TS, Java | Function bodies ≤ configured max (default: 50 lines) |
+| `fugue-generated-integrity` | full | TS | Structural projection of Fugue-generated files matches the stamped SHA-256 |
+| `exhaustive-discriminant-branching` | full | TS | 3+ branches on one discriminant without a totality proof |
+| `no-nested-ternary` | full | TS | A ternary whose else-branch opens another ternary |
+| `prefer-array-methods` | full | TS | A mutable accumulator whose loop only pushes into it |
 
-**These three encode judgement, so read what they deliberately do NOT flag.**
+**These encode judgement, so read what they deliberately do NOT flag.**
 A rule that fires on correct code teaches people the rule is wrong, and then it
 gets disabled — which is worse than not having it.
 
+- `switch-totality` applies to **every non-test TypeScript file** by default.
+  Only the `default` arm can prove a switch — a `never` binding,
+  `assertNever(x)`, or `default: return match(x)…exhaustive()`; an
+  `.exhaustive()` inside a `case` arm proves that nested match, not the switch.
+  `default: throw new Error("unreachable")` is **not** a proof: it compiles
+  after a variant is added. Quoted literals (`case "a":`) and qualified members
+  (`case Kind.Draft:`) are arms; one-arm switches are guards and exempt, as is
+  `switch (typeof raw)`. An open domain (a plain `string`) has no `never` to
+  bind — write `match(raw).with("a", …).otherwise(…)`, which makes the fallback
+  a visible decision.
 - `exhaustive-discriminant-branching` ignores one- and two-branch guard clauses.
   Guards are the *preferred* shape; only at three does an if-chain stop reading
   as a guard and start reading as a switch. It accepts either
@@ -335,7 +382,7 @@ The `fixHint` is shown to the AI agent (or developer) when a violation fires. Ma
 
 ## Programmatic Rules
 
-Programmatic rules run TypeScript handler functions that can perform deeper structural analysis than regex allows. They run only in the `"full"` tier (wave-gate boundaries).
+Programmatic rules run TypeScript handler functions that can perform deeper structural analysis than regex allows. Each declares its tier: the import-boundary rules and `switch-totality` run after every edit (`"immediate"`) and at the Wave Gate; the rest only at the Wave Gate (`"full"`).
 
 ### How They Work
 
@@ -435,7 +482,7 @@ Regex rules are evaluated **line-by-line** against file content:
 
 | Tier | When | Rules | Budget |
 |------|------|-------|--------|
-| `immediate` | After every edit (PostToolUse/tool_result) | Regex rules only | 50ms cooperative per-file deadline |
+| `immediate` | After every edit (PostToolUse/tool_result) | Regex rules, plus the programmatic rules whose tier is `immediate` | 50ms cooperative per-file deadline |
 | `full` | At Wave Gate boundaries or explicit scans | All rules (regex + programmatic) | Same checker; programmatic handlers are not preemptible |
 
 The immediate tier runs after every file write to catch surface-level issues instantly. The full tier runs at natural pause points where deeper structural analysis is acceptable.
@@ -454,18 +501,18 @@ Any linter error (malformed rule, timeout, crash) **blocks the edit**. The linte
 
 ```
 .claude/linter/
-├── rules/
-│   └── (override files if needed)
-└── config.json     ← optional, for boundary/purity config
+└── rules/
+    ├── (override files if needed)
+    └── config.json     ← optional: boundaries, purity, totality baselines
 ```
 
 ### Java/Spring Boot project
 
 ```
 .claude/linter/
-├── rules/
-│   └── no-mutable-entity-fields.json  ← enable opt-in rule
-└── config.json
+└── rules/
+    ├── no-mutable-entity-fields.json  ← enable opt-in rule
+    └── config.json
 ```
 
 **`config.json`:**

@@ -1,0 +1,14 @@
+bun test v1.4.2 (0000000)
+
+src/a.test.ts:
+
+# Unhandled error between tests
+-------------------------------
+error: Cannot find module './missing' from '/repo/pkg/src/a.test.ts'
+-------------------------------
+
+
+ 0 pass
+ 1 fail
+ 1 error
+Ran 1 test across 1 file. [25.00ms]

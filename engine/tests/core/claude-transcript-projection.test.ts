@@ -4,6 +4,7 @@
  * outputs, and a corrupt final turn is a typed failure, never a throw. The
  * file-reading shell is covered by subagent-stop/claude-final-payload.test.ts.
  */
+import { readFileSync } from "node:fs";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
@@ -104,6 +105,55 @@ describe("the one forward walk", () => {
   it("refuses a prefix-reserved tool the registry does not freeze as an incomplete frame", () => {
     const transcript = parseClaudeTranscript([prompt, toolUse("u1", "loom_emit_future_kind", {}), toolResult("u1", "ok")]);
     expect(claudeEmissionScan(transcript, attributed).frames).toMatchObject([{ kind: "incomplete", toolCallId: "u1" }]);
+  });
+
+  it("never reads a Claude Code harness record's request copy as conversation", () => {
+    const fixture = readFileSync(new URL("../fixtures/claude-harness-records-transcript.jsonl", import.meta.url), "utf8");
+    const transcript = parseClaudeTranscript(fixture.split("\n"));
+    expect(claudeToolOutputs(transcript)).toEqual(["File created", "Tests: 3 passed"]);
+    expect(claudeEmissionScan(transcript, attributed).walkIncompleteness).toBeNull();
+    expect(claudeTranscriptCandidates(transcript)).toEqual({
+      ok: true,
+      value: [{ origin: "transcript.line[10].block[0]", text: "Done." }],
+    });
+  });
+
+  it("keeps an emission call complete when a harness record replays its tool result", () => {
+    const replay = (record: string) => line({ type: "api-request-blob", hash: "h", message: JSON.parse(record).message });
+    const emitted = toolUse("e1", "loom_emit_reviewer_payload", { findings: [] });
+    const answered = toolResult("e1", "accepted");
+    const transcript = parseClaudeTranscript([prompt, emitted, answered, replay(emitted), replay(answered)]);
+    expect(claudeEmissionScan(transcript, attributed).frames).toEqual([{
+      kind: "complete",
+      call: { requestId: attributed.requestId, toolCallId: "e1", kind: { kind: "reviewer-payload" }, version: "v2", arguments: { findings: [] } },
+    }]);
+    expect(claudeToolOutputs(transcript)).toEqual(["accepted"]);
+  });
+
+  it("property: interleaved harness records never change any projection", () => {
+    const lines = [prompt, toolUse("r1", "Read", {}), toolResult("r1", "page"), assistantText("done")];
+    const harness = [
+      line({ type: "api-request", id: "request-1", tail: ["h"] }),
+      line({ type: "api-request-blob", hash: "h", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "r1", content: "stale" }] } }),
+      line({ type: "api-request-blob", hash: "h2", message: { role: "assistant", content: [{ type: "text", text: "replayed" }] } }),
+      line({ type: "api-request-blob", hash: "h3", message: { role: "system", content: [{ type: "text", text: "tools" }] } }),
+      line({ type: "attachment", attachment: { type: "hook_success" } }),
+    ];
+    fc.assert(fc.property(
+      fc.array(fc.tuple(fc.nat({ max: lines.length }), fc.constantFrom(...harness)), { maxLength: 6 }),
+      (insertions) => {
+        const mixed = [...lines];
+        for (const [position, record] of [...insertions].sort(([left], [right]) => right - left)) {
+          mixed.splice(Math.max(1, position), 0, record);
+        }
+        const plain = parseClaudeTranscript(lines);
+        const interleaved = parseClaudeTranscript(mixed);
+        expect(claudeToolOutputs(interleaved)).toEqual(claudeToolOutputs(plain));
+        expect(claudeEmissionScan(interleaved, attributed)).toEqual(claudeEmissionScan(plain, attributed));
+        const candidates = claudeTranscriptCandidates(interleaved);
+        expect(candidates.ok && candidates.value.map(({ text }) => text)).toEqual(["done"]);
+      },
+    ), { numRuns: 200 });
   });
 
   it("property: blank lines never change any projection", () => {

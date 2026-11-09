@@ -23,7 +23,7 @@ import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import { parseTaskGraph, StateManager } from "../../../src/state-manager";
 import type { Task } from "../../../src/types";
 import { implementationEscalatedTaskFields } from "../../fixtures/implementation-escalation";
-import { CONFORMANCE_NOT_OWED } from "../../../src/core/skeleton/conformance-verdict";
+import { trustedPassEvidence } from "../../fixtures/task-lifecycle";
 
 const cleanup: string[] = [];
 let previousLoomStatePath: string | undefined;
@@ -204,7 +204,7 @@ describe("orchestration attest arms implementation re-attestation", () => {
       .toMatchObject({ ok: false, error: { kind: "live-attempt", operation: "attestation" } });
     const satisfiedProof = evaluateTaskProof(
       { newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
-      { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/a.ts"], newTestsWritten: true, newTestEvidence: "one focused regression" },
+      trustedPassEvidence(["src/a.ts"], { newTestEvidence: "one focused regression" }),
     );
     expect(satisfiedProof.state).toBe("satisfied");
     expect(armImplementationAttestation(variant({ proof: satisfiedProof, revalidation_required: true }), { executing: false }))

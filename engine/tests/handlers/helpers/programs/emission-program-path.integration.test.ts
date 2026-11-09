@@ -21,7 +21,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { git } from "../../../fixtures/git-repository";
 import { facadeParentEnvironment, type FacadeParent } from "../../../fixtures/facade-parent";
-import { graphFixture, taskFixture } from "../../../fixtures/task-lifecycle";
+import { graphFixture, taskFixture, trustedPassEvidence } from "../../../fixtures/task-lifecycle";
 import { OTHER_CONTEXT_DIGEST, REVIEWER_V2 } from "../../../fixtures/issued-emission";
 import { withEnvOverlay } from "../../../fixtures/env-overlay";
 import { LOCAL_PI_BINDING } from "../../../fixtures/local-pi-binding";
@@ -46,7 +46,6 @@ import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../.
 import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../../../src/orchestration/harness-capture-runtime";
 import { parseTaskGraph } from "../../../../src/state-manager";
 import type { TaskGraph } from "../../../../src/types";
-import { CONFORMANCE_NOT_OWED } from "../../../../src/core/skeleton/conformance-verdict";
 
 const successorSource = value(encodeByteSection(
   "standalone-frozen-source",
@@ -131,7 +130,7 @@ function waveEmissionProject(): { root: string; runsRoot: string } {
   git(root, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]);
   const proof = evaluateTaskProof(
     { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
-    { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    trustedPassEvidence(["src/x.ts"]),
   );
   if (proof.state !== "satisfied") throw new Error("fixture requires actual satisfied proof construction");
   const graph: TaskGraph = {

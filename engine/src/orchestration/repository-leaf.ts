@@ -9,8 +9,7 @@ import { lstatSync } from "node:fs";
 import { join } from "node:path";
 import type { DomainResult } from "../core/orchestration-contract";
 import { readRunBytesNoFollow } from "./no-follow-fs";
-
-const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+import { describeCause } from "../utils/describe-cause";
 
 /** What one repository path holds, read without following any link. */
 export type RepositoryLeaf =
@@ -35,12 +34,12 @@ export function readRepositoryLeafNoFollow(realRoot: string, path: string): Doma
     const code = (error as NodeJS.ErrnoException | null)?.code;
     return code === "ENOENT" || code === "ENOTDIR"
       ? { ok: true, value: ABSENT_LEAF }
-      : { ok: false, error: `cannot observe it (${errorMessage(error)})` };
+      : { ok: false, error: `cannot observe it (${describeCause(error)})` };
   }
   try {
     return { ok: true, value: Object.freeze({ kind: "file", bytes: readRunBytesNoFollow(absolute) }) };
   } catch (error) {
-    return { ok: false, error: `cannot read it without following a link (${errorMessage(error)})` };
+    return { ok: false, error: `cannot read it without following a link (${describeCause(error)})` };
   }
 }
 

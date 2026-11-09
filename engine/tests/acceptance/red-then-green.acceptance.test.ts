@@ -22,6 +22,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildTaskLocalByteObservation,
+  NO_ENGINE_SKELETONS,
   parseNewTestEvidence,
 } from "../../src/core/implementation-application";
 import {
@@ -279,6 +280,7 @@ function ports(attempt: ImplementationAttemptAuthority, fileList: readonly strin
         priorAttributedPaths: [],
         repositoryChangedPaths: [...fileList],
         siblingOwnedPaths: [],
+        engineSkeletons: NO_ENGINE_SKELETONS,
       }),
     },
     newTests: { collect: () => ({ ok: true, value: parseNewTestEvidence(true, `new tests in ${fileList.join(", ")}`) }) },

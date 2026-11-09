@@ -107,6 +107,7 @@ import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
 import { parseAuthoredTaskRoster, populateTaskGraph } from "../../src/core/task-graph-population";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { briefOwnership, ownerObligation } from "../fixtures/owner-obligation";
+import { unobservedSkeletons } from "../fixtures/frozen-signatures";
 
 const ADMISSION: OwnerObligation = ownerObligation({
   invariant: "INV-1",
@@ -273,7 +274,7 @@ describe("INV-3 sibling rows — review-packet owner map and brief duties follow
     const rendered = renderImplementationBrief({
       template: TEMPLATE, task: value, dispatch: derivation.dispatch, verificationManifest: undefined,
       planFile: PLAN_FILE, spec: { kind: "unavailable", reason: { kind: "no-spec-file" } }, rules: RULES,
-      roster: [], contracts: [], repositoryRoot: "/repo", operatorNotes: [],
+      roster: [], contracts: [], repositoryRoot: "/repo", operatorNotes: [], frozenSignatures: unobservedSkeletons(graphFixture([value])),
       ownership: briefOwnership(stamp, OWNED_PLAN_MODELS.invariants, files),
     });
     if (!rendered.ok) throw new Error(rendered.error.message);

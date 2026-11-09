@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { type RegexRule, type Rule, type Tier, type RuleSource, isRegexRule } from "./types";
 import { analyzeRegex } from "./safety";
 import { createProgrammaticRules } from "./programmatic/index";
-import { loadProjectConfig } from "./programmatic/config";
+import { loadProjectConfig, projectRootOf } from "./programmatic/config";
 import { isDeclarativeRuleFile } from "./rule-sources";
 
 // --- Public API ---
@@ -64,10 +64,11 @@ export function loadRules(
   // Programmatic rules (also subject to project overrides) run in a tier at
   // or after their own: an immediate rule runs in both tiers.
   if (options?.includeProgrammatic !== false) {
-    // Load project-local config for programmatic rules
+    // Load project-local config for programmatic rules, and the root of the
+    // project it belongs to — the frame its paths and baseline keys are in.
     const projectConfig = loadProjectConfig(projectDir);
     // Always create with config — createProgrammaticRules handles defaults via ??
-    const programmaticRules = createProgrammaticRules(projectConfig);
+    const programmaticRules = createProgrammaticRules(projectConfig, projectRootOf(projectDir));
 
     const programmaticEnabled = programmaticRules.filter((rule) => {
       // Check if a project rule disabled this programmatic rule by name
