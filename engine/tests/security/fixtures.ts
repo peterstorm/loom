@@ -212,7 +212,7 @@ export function aRejectedFinding(overrides: Partial<RejectedFinding> = {}): Reco
 export const HUNT_PROFILE = "focused-review" as const;
 export const REFUTATION_PROFILE = "refutation" as const;
 
-/** A ballot's binding as a verification run publishes it (ADR-0065 D3): the
+/** A ballot's binding as a verification run publishes it (ADR-0067 D3): the
  *  minted request it answered and its capture digest. The default request is
  *  a refutation-profile verifier's attempt 1. */
 export function aBallotBinding(overrides: Record<string, unknown> = {}): Record<string, unknown> {

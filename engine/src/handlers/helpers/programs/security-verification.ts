@@ -1,5 +1,5 @@
 /**
- * The `security-verification` facade program (ADR-0065): the security audit's
+ * The `security-verification` facade program (ADR-0067): the security audit's
  * verifier spawns, issued per brief, captured through the native capture path,
  * admitted, retried once, and published as a digest-bound ballot set.
  *
@@ -130,7 +130,7 @@ function authenticatedAudit(input: SecurityVerificationStart, binding: AuditBind
 
 /**
  * Register (or refresh) the audit run with the subagent write guard's
- * registry before the program writes anything (ADR-0065, amended). While a
+ * registry before the program writes anything (ADR-0067, amended). While a
  * verification run is live its verifier spawns run beside the audit, so the
  * guard must know the audit's directory even when its registry was wiped
  * since the audit's last write. Idempotent; a run the guard cannot know is

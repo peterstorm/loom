@@ -424,7 +424,7 @@ describe("a recorded run reaches every planted defect", () => {
       expectOk(submitted, "submit");
 
       // The ballots come from the real verification program and Claude Code's
-      // native capture path (ADR-0065, amended): a hand-written ballot is
+      // native capture path (ADR-0067, amended): a hand-written ballot is
       // never counted.
       await verifyWith({
         out,

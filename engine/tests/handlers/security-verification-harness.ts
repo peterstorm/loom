@@ -1,5 +1,5 @@
 /**
- * The one way a handler test obtains a ballot (ADR-0065, amended): through the
+ * The one way a handler test obtains a ballot (ADR-0067, amended): through the
  * real verification program and Claude Code's native capture path. `status`
  * names the run, `helper orchestration start security-verification` issues
  * its verifier spawns, the PostToolUse correlator and the SubagentStop capture

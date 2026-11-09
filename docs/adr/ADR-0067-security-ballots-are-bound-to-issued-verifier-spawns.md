@@ -1,10 +1,10 @@
-# ADR-0065: Security ballots are bound to issued verifier spawns
+# ADR-0067: Security ballots are bound to issued verifier spawns
 
 ## Status
 
 Accepted (2026-11-09). Supersedes the "ballot attribution is self-reported" limit recorded in
 `docs/security-audit.md` (Honest limits) and deferred as cores `architecture-tech-lead-4` in
-review campaign 3 (`run.rf3-cores-policy`). Amends ADR-0064 D2/D3, the verification step only.
+review campaign 3 (`run.rf3-cores-policy`). Amends ADR-0066 D2/D3, the verification step only.
 
 ## Context
 
@@ -203,7 +203,7 @@ the skill's running section shows `start security-verification` → spawn → `v
    fixture (`tests/fixtures/standalone-native-capture.ts` pattern) → `verify --from` → publish;
    plus refusal tests: stdin ballots, stale findings digest, a hunter-role capture into a verifier
    slot, a subagent `verify`.
-6. **Docs:** D7, the agent docs (verifier JSON block is test-bound), and ADR-0064's D2/D3 note.
+6. **Docs:** D7, the agent docs (verifier JSON block is test-bound), and ADR-0066's D2/D3 note.
 
 ## Implementation notes
 

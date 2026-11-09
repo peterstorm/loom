@@ -1,13 +1,13 @@
 # Running a security audit
 
-`security-audit` is a registered Loom program (ADR-0064), not a prompt. It
+`security-audit` is a registered Loom program (ADR-0066), not a prompt. It
 enumerates what it will cover, records what it proved, and reports the
 difference. This is the operator's page: how to start a run, what the run
 directory holds, what each operation refuses, and what to do with the result.
 
 For the method — lenses, sandbox evidence, the finding trichotomy — read
 `skills/security-audit/SKILL.md`. For why the program is code rather than prose,
-read `docs/deterministic-core.md` §8 and ADR-0064. `/security-audit`
+read `docs/deterministic-core.md` §8 and ADR-0066. `/security-audit`
 (`commands/security-audit.md`) is the same workflow expressed as a slash command.
 The operations table below is the authoritative one; the command keeps a short
 copy, and a test binds both to the traits table the engine routes on.
@@ -109,7 +109,7 @@ refused rather than left unprotected.
 
 A `confirmed` claim publishes only on a ballot cast by an **issued** verifier
 spawn on a profile that did not hunt, and **natively captured by the harness**
-(ADR-0065, amended). There is no way to hand `verify` ballots on stdin, and no
+(ADR-0067, amended). There is no way to hand `verify` ballots on stdin, and no
 CLI path writes into a verifier slot: `helper orchestration submit` and
 `correlate` refuse every `security-verification` request. A ballot exists only
 as the harness-captured output of a `security-verifier-agent` spawn of a
@@ -169,7 +169,7 @@ transcript in the run must still hash to it.
 ## The subagent authority guard
 
 Hunters have Bash, so the commands that could inject authority are fenced off
-from every subagent (ADR-0065 D6): Claude Code's `guard-subagent-authority`
+from every subagent (ADR-0067 D6): Claude Code's `guard-subagent-authority`
 PreToolUse hook on `Bash`, and its Pi `tool_call` twin. The caller signal is the
 harness's own — Claude Code sets `agent_id` only on a subagent's call; on Pi
 every child agent carries an explicit environment marker (`LOOM_PI_SUBAGENT=1`
@@ -407,7 +407,7 @@ dishonest hunter is the independent verifier, not the receipt.
   recorded; the report is about the commit, not the bytes on disk.
 - Verification is a panel of model reviewers on a different profile, not a
   proof. INV-S3 makes a same-profile ballot worthless, not a wrong one right.
-- A ballot is bound to the spawn that cast it (ADR-0065): its agent and profile
+- A ballot is bound to the spawn that cast it (ADR-0067): its agent and profile
   come from the engine-minted request, its bytes from the harness capture, and
   its capture digest from the attestation the capturing harness wrote. The
   **parent session is trusted** — it runs every write and every capture hook,

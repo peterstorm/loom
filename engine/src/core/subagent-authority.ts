@@ -1,5 +1,5 @@
 /**
- * Subagent authority (ADR-0065 D6, amended): which Bash commands a SUBAGENT may
+ * Subagent authority (ADR-0067 D6, amended): which Bash commands a SUBAGENT may
  * not run because they mutate audit or orchestration authority. The harness
  * adapters (Claude Code `guard-subagent-authority`, Pi's `tool_call` twin) call
  * this only for calls the harness itself attributes to a subagent; parent
@@ -986,7 +986,7 @@ function pathScope(command: string, context: SubagentAuthorityContext): PathScop
 
 /**
  * One `helper security-audit verify` invocation a command line may make. The
- * Pi parent's import gate (ADR-0065) proves the run each one imports, so it
+ * Pi parent's import gate (ADR-0067) proves the run each one imports, so it
  * needs the invocation's arguments exactly: `static` when every word after the
  * operation has one spelling the shell cannot change, `unresolved` otherwise
  * (an expansion, a substitution, a brace or quote set with several views, a
@@ -1104,7 +1104,7 @@ export function renderSubagentAuthorityRefusal(
     .map((helper) => `${helper} ${[...context.helperOperations[helper].readOnly].sort().join("|")}`)
     .join("; ");
   const lines = [
-    "BLOCKED by loom guard-subagent-authority (ADR-0065 D6): subagents may not change audit or orchestration authority.",
+    "BLOCKED by loom guard-subagent-authority (ADR-0067 D6): subagents may not change audit or orchestration authority.",
     reason,
     `Offending segment: ${JSON.stringify(refusal.segment)}`,
   ];

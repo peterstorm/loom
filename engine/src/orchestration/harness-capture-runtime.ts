@@ -951,7 +951,7 @@ async function persistBoundCapture(
 }
 
 /**
- * The capture attestation write-ahead step (ADR-0065, amended): a security
+ * The capture attestation write-ahead step (ADR-0067, amended): a security
  * verifier capture records, in the protected attestation store, that THIS
  * harness process captured exactly these bytes for exactly this request —
  * before the bytes land in the run. A ballot is authoritative only when its

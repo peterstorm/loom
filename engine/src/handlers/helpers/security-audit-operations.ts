@@ -8,7 +8,7 @@
  * be added without declaring both traits here — and a route that is not in this
  * table is not a route the CLI will accept.
  *
- * The action set is CLOSED on purpose (ADR-0064). Every state change a run can
+ * The action set is CLOSED on purpose (ADR-0066). Every state change a run can
  * make is one of these operations; a caller cannot invent another way to move
  * the ledger, which is what keeps `status` a complete answer to "where is this
  * run".
@@ -51,7 +51,7 @@ export const SECURITY_AUDIT_OPERATIONS = Object.freeze({
   defer: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
   /** Fold the coverage critic's proposals, reassignments and resolutions in. */
   "merge-critic": Object.freeze({ input: "stdin", runtimeSkew: "handshake-required" }),
-  /** Import a finished verification run's bound ballots (`--from`, ADR-0065).
+  /** Import a finished verification run's bound ballots (`--from`, ADR-0067).
    *  Stdin ballots are refused. Adjudication itself happens at publish. */
   verify: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
   /** Render the report from validated records, to stdout. Writes nothing. */

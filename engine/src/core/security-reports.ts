@@ -11,7 +11,7 @@
  * every published fingerprint appears exactly once, that rejected claims never
  * appear as findings, and that two renders of the same run are byte-identical.
  *
- * The report also ends on the handoff (ADR-0064): an audit never patches, so the
+ * The report also ends on the handoff (ADR-0066): an audit never patches, so the
  * last section derives the disposition set `/review-and-fix` consumes and names
  * the exact command that loads it.
  *

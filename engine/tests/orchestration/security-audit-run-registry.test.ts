@@ -1,5 +1,5 @@
 /**
- * The security-audit run registry (ADR-0065 D6): every writing `helper security-audit` operation registers a run
+ * The security-audit run registry (ADR-0067 D6): every writing `helper security-audit` operation registers a run
  * directory in the protected subagent dir; the subagent write guard reads the
  * set. Real filesystem, under a re-pointed LOOM_SUBAGENT_DIR.
  */
@@ -252,7 +252,7 @@ describe("the registry is protected", () => {
     ]);
     expect(PERSISTENT_SUBAGENT_DIR_ENTRIES.has(SECURITY_AUDIT_RUN_REGISTRY_ENTRY)).toBe(true);
     expect(staleEntries(mtimes, Number.MAX_SAFE_INTEGER)).toEqual(["some-stray-file"]);
-    // Nor the capture attestation store beside it (ADR-0065, amended).
+    // Nor the capture attestation store beside it (ADR-0067, amended).
     expect(staleEntries(new Map([[CAPTURE_ATTESTATION_ENTRY, 0]]), Number.MAX_SAFE_INTEGER)).toEqual([]);
     expect(protectedDirs()).toContain(subagentDir());
   });

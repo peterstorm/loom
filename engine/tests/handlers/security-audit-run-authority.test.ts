@@ -1,6 +1,6 @@
 /**
  * The security-audit run directory as the subagent write guard sees it
- * (ADR-0065 D6), driven through the real CLI handler:
+ * (ADR-0067 D6), driven through the real CLI handler:
  *
  *  - ONE owner of the run's entry names (`core/audit-run-authority.ts`): every
  *    entry a full audit run writes, and every runs root it names, is an
@@ -128,7 +128,7 @@ const ARGS: Readonly<Record<SecurityAuditOperation, readonly string[]>> = {
   status: [],
 };
 
-describe("every writing operation refreshes the run registry (ADR-0065 D6)", () => {
+describe("every writing operation refreshes the run registry (ADR-0067 D6)", () => {
   it("covers every writer the table declares", () => {
     expect(WRITERS_AFTER_START).toEqual(["assign", "submit", "defer", "merge-critic", "verify", "publish", "disposition"]);
   });

@@ -1,4 +1,4 @@
-# ADR-0064: Security audit is a registered program, not a skill-side workflow
+# ADR-0066: Security audit is a registered program, not a skill-side workflow
 
 ## Status
 
@@ -69,7 +69,7 @@ and D4 are plan decisions this ADR does not restate.)
   downgrade authority (`references/review-lenses.md`). Upstream's five-level
   `overall_severity` is a recorded, refutable field. Invariant: overall severity never exceeds
   demonstrated impact.
-  *Amended 2026-11-09 by ADR-0065 (the verification step only):* a ballot is no longer read
+  *Amended 2026-11-09 by ADR-0067 (the verification step only):* a ballot is no longer read
   from `verify`'s stdin with a self-reported `agent`/`profile`. It is the captured answer of a
   `security-verifier-agent` spawn issued by the `security-verification` facade program, its
   identity bound from the minted request; `verify --from <verification-run>` imports a

@@ -1379,7 +1379,7 @@ async function startDispositionOperation(stdin: string, args: readonly string[],
   return driveCreatedRun(args, emission, (handle) => startStandaloneDispositionFacade(handle, prepared.value));
 }
 
-/** `start security-verification` (ADR-0065): the audit is authenticated and
+/** `start security-verification` (ADR-0067): the audit is authenticated and
  *  the briefs derived BEFORE the run directory is claimed. */
 async function startSecurityVerificationOperation(stdin: string, args: readonly string[], emission: Emission): Promise<HookResult> {
   let raw: unknown;
@@ -1593,7 +1593,7 @@ function bindSubmission(args: readonly string[]): SubmissionBindingResult {
 }
 
 /**
- * A security verifier slot (ADR-0065) is filled ONLY by native capture: the
+ * A security verifier slot (ADR-0067) is filled ONLY by native capture: the
  * harness process that captures the verifier's transcript also writes the
  * capture attestation `verify --from` requires. `submit` and `correlate` are
  * the parent's paths for harnesses WITHOUT native capture; into a verifier
@@ -1603,7 +1603,7 @@ function bindSubmission(args: readonly string[]): SubmissionBindingResult {
 const verifierSlotRefusalFor = (operation: "submit" | "correlate"): HookResult => ({
   kind: "error",
   message: `orchestration ${operation} refused: security-verification verifier output is captured natively only ` +
-    "(Claude Code SubagentStop or the Pi extension), never written through the CLI (ADR-0065)",
+    "(Claude Code SubagentStop or the Pi extension), never written through the CLI (ADR-0067)",
 });
 
 const verifierSlotRefusal = (request: AgentRequestAuthority, operation: "submit" | "correlate"): HookResult | null =>

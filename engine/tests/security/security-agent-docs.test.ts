@@ -237,7 +237,7 @@ describe("the verifier doc documents the result wire the verification program ad
     expect(unknownKeys(Object.keys(vote), VERIFIER_VOTE_KEYS)).toEqual([]);
   });
 
-  it("documents every key and the result kind, and no self-reported identity (ADR-0065 D2)", () => {
+  it("documents every key and the result kind, and no self-reported identity (ADR-0067 D2)", () => {
     expect(block.kind).toBe(VERIFICATION_RESULT_KIND);
     expect(keysOf(block)).toEqual([...VERIFICATION_RESULT_KEYS]);
     expect(Object.keys(vote)).toEqual([...VERIFIER_VOTE_KEYS]);

@@ -46,7 +46,7 @@ export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
 export const FAIL_CLOSED_ROUTES: ReadonlySet<string> = new Set([
   "pre-tool-use/enforce-phase-tools",
   "pre-tool-use/guard-state-file",
-  // Subagent authority guard (ADR-0065 D6): a crash outside the handler would
+  // Subagent authority guard (ADR-0067 D6): a crash outside the handler would
   // let a subagent's audit-authority write through.
   "pre-tool-use/guard-subagent-authority",
   "pre-tool-use/block-direct-edits",

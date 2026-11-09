@@ -1,5 +1,5 @@
 /**
- * Security verification (ADR-0065): the security audit's verifier spawns as an
+ * Security verification (ADR-0067): the security audit's verifier spawns as an
  * issued, captured, bound program instead of ballots read from stdin.
  *
  * This module is the program's functional core. It decides
@@ -738,7 +738,7 @@ export function importVerificationResult(input: Readonly<{
 }
 
 /**
- * One fingerprint, one verification run (ADR-0065, amended). Eligibility
+ * One fingerprint, one verification run (ADR-0067, amended). Eligibility
  * already hands a fingerprint to a run only while no ballot names it, so two
  * runs voting on one claim means two generations of one claim set were both
  * finished; importing the second would let a re-run outvote the first. The
@@ -757,7 +757,7 @@ function crossRunConflict(ballots: readonly VerificationVerdict[]): string | nul
   return null;
 }
 
-// --- verdicts.json as a cache (ADR-0065, amended) ---
+// --- verdicts.json as a cache (ADR-0067, amended) ---
 
 /** What the shell proved about one verification run a cached ballot names. */
 export type VerificationRunProof =

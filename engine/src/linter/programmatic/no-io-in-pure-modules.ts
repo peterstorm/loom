@@ -52,7 +52,7 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/shell-command-head.ts",
   "engine/src/core/shell-heredoc.ts",
   "engine/src/core/shell-match-views.ts",
-  // ADR-0065 D6: the subagent authority decision, the run-directory authority
+  // ADR-0067 D6: the subagent authority decision, the run-directory authority
   // entries it protects, and the operation split derived from the authority
   // helpers' tables (both tables are pure data).
   "engine/src/core/subagent-authority.ts",
@@ -267,7 +267,7 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // Orchestration Completion: whether a TaskGraph's work is finished, and its
   // archive name; `helper complete-orchestration` applies it under the lock.
   "engine/src/core/orchestration-completion.ts",
-  // Security audit (ADR-0064): the contract (limits, grammars, admission, carry
+  // Security audit (ADR-0066): the contract (limits, grammars, admission, carry
   // rules), the start-payload parser and run derivation, the coverage ledger,
   // the finding trichotomy, lens selection, the
   // deterministic renderers, the sandbox receipt parser and the verification
@@ -285,11 +285,11 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/security-disposition.ts",
   "engine/src/core/security-sandbox.ts",
   "engine/src/core/security-adjudication.ts",
-  // ADR-0065: verification briefs, the verifier result wire, per-brief
+  // ADR-0067: verification briefs, the verifier result wire, per-brief
   // admission, ballot binding and the published result — the facade driver and
   // `verify --from` are its shells.
   "engine/src/core/security-verification.ts",
-  // ADR-0065 (amended): the capture attestation record, its canonical bytes
+  // ADR-0067 (amended): the capture attestation record, its canonical bytes
   // and the decision whether ballots are attested — the store is its shell.
   "engine/src/core/capture-attestation.ts",
 ];

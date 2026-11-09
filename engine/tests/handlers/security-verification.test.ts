@@ -1,5 +1,5 @@
 /**
- * ADR-0065 end to end: a security ballot exists only as the harness-captured
+ * ADR-0067 end to end: a security ballot exists only as the harness-captured
  * output of an issued `security-verifier-agent` spawn — and stays authority
  * only while its run and its capture attestation still prove it.
  *
@@ -99,7 +99,7 @@ const owedPlan = async (run: Run): Promise<Plan> => {
 const transcriptPath = (plan: Plan, request: SpawnTask) =>
   join(plan.runsRoot, plan.run, "transcripts", request.authority.slotId, `attempt-${request.authority.attempt}.raw`);
 
-describe("security verification, end to end (ADR-0065)", () => {
+describe("security verification, end to end (ADR-0067)", () => {
   it("hunt → status → start security-verification → native capture → verify --from → publish", async () => {
     const run = await huntedAudit(1);
     const plan = await owedPlan(run);
@@ -204,7 +204,7 @@ describe("security verification, end to end (ADR-0065)", () => {
   });
 });
 
-describe("what a ballot cannot be (ADR-0065 refusals)", () => {
+describe("what a ballot cannot be (ADR-0067 refusals)", () => {
   it("refuses stdin ballots, pointing at the new flow", async () => {
     const run = await huntedAudit();
     const piped = await run.invoke(["verify"], JSON.stringify({ verdicts: [vote(SQLI)] }));
@@ -421,7 +421,7 @@ describe("printed commands survive any path (H)", () => {
   });
 });
 
-describe("Pi capture routing and the parent's import gate (ADR-0065)", () => {
+describe("Pi capture routing and the parent's import gate (ADR-0067)", () => {
   const PI_SESSION = "pi-session";
 
   /** A verifier request captured through the Pi path, the run left at
@@ -530,7 +530,7 @@ describe("Pi capture routing and the parent's import gate (ADR-0065)", () => {
     for (const wrapped of [command, `echo start && ${command}`, `bash -c '${command}'`, `eval '${command}'`]) {
       const blocked = await piParentVerifyWitnessDecision(bash(wrapped), parentCtx(), pi.witnesses);
       expect(blocked?.block, wrapped).toBe(true);
-      expect(blocked?.reason).toContain("security-verification witness (ADR-0065)");
+      expect(blocked?.reason).toContain("security-verification witness (ADR-0067)");
       expect(blocked?.reason).toContain("(capture digest)");
     }
   });

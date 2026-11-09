@@ -1,5 +1,5 @@
 #!/bin/bash
-# PreToolUse Bash guard (ADR-0065 D6): a SUBAGENT may not change audit or
+# PreToolUse Bash guard (ADR-0067 D6): a SUBAGENT may not change audit or
 # orchestration authority — no `helper security-audit|orchestration` write
 # operations, no writes onto a registered audit run's authority files.
 #

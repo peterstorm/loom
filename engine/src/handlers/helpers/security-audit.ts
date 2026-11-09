@@ -1,6 +1,6 @@
 /**
  * `helper security-audit <operation> …` — the registered security-audit
- * program's CLI (ADR-0064).
+ * program's CLI (ADR-0066).
  *
  * This file is a SHELL. It reads the run directory, calls one pure core, and
  * writes back; every semantic decision (what a unit may settle as, whether a
@@ -21,7 +21,7 @@
  *   verdicts.json            a CACHE of imported ballots, each bound to the verifier spawn that
  *                            cast it and re-proven (run replay + capture attestation) before
  *                            adjudication counts it
- *   verification-runs/       the `security-verification` runs that issue those spawns (ADR-0065);
+ *   verification-runs/       the `security-verification` runs that issue those spawns (ADR-0067);
  *                            `verify --from` imports a finished one
  *   lenses.json              the lens selection this run was given
  *   security-findings.json   published records (publish)
@@ -518,7 +518,7 @@ function runStart(store: Store, args: readonly string[], stdin: string): DomainR
 }
 
 /**
- * After the fresh documents land (ADR-0065): create the runs root the
+ * After the fresh documents land (ADR-0067): create the runs root the
  * audit's verification runs live under — `orchestration start` never creates a
  * runs root — and register the run directory in the protected registry the
  * subagent write guard reads. A start whose run the guard cannot know is
@@ -541,7 +541,7 @@ function registerWithGuard(out: string): DomainResult<void, string> {
 
 /**
  * Every WRITING operation on an existing run re-registers it BEFORE it writes
- * (ADR-0065 D6). Registration is idempotent, so on a healthy registry this is
+ * (ADR-0067 D6). Registration is idempotent, so on a healthy registry this is
  * a no-op; when the registry under the subagent directory was wiped mid-audit
  * (a `/tmp` cleaner, a reboot), the next write rebuilds it before mutating the
  * run, so the guard never stops protecting a run the parent is still writing.
@@ -818,14 +818,14 @@ function runMergeCritic(store: Store, args: readonly string[], stdin: string): D
 
 // --- verify / findings / publish / status ---
 
-/** Why `verify` reads no ballots from stdin (ADR-0065 D4), and what replaces it. */
+/** Why `verify` reads no ballots from stdin (ADR-0067 D4), and what replaces it. */
 const STDIN_BALLOTS_REFUSED =
-  "verify no longer accepts ballots on stdin: a ballot must come from an issued verifier spawn (ADR-0065). " +
+  "verify no longer accepts ballots on stdin: a ballot must come from an issued verifier spawn (ADR-0067). " +
   "Run `status` for the exact `helper orchestration start security-verification …` command, spawn the verifiers it " +
   "issues, then import the finished run with `verify --out <run-dir> --from <verification-run>`";
 
 /**
- * `verify --from <verification-run>` (ADR-0065 D4): import a finished
+ * `verify --from <verification-run>` (ADR-0067 D4): import a finished
  * verification run's published ballots. The run must live under this audit's
  * `verification-runs/`, be a registered `security-verification` program, and
  * hold a `result.json` that (1) describes the run as registered, issued for
@@ -870,7 +870,7 @@ type Adjudicated = Readonly<{ findings: readonly SecurityFinding[]; blockers: re
  * Adjudicate one snapshot. One call site, so `findings`, `publish` and
  * `status` cannot disagree about what the ballots mean.
  *
- * `verdicts.json` is a CACHE (ADR-0065, amended): before any ballot is
+ * `verdicts.json` is a CACHE (ADR-0067, amended): before any ballot is
  * counted, every verification run it names is re-proven — registered under
  * this audit, its captured evidence replaying to exactly the cached ballots,
  * each backed by its harness's capture attestation. A ballot that fails is
@@ -1001,7 +1001,7 @@ function runDisposition(store: Store, args: readonly string[]): DomainResult<str
   ].join("\n"));
 }
 
-/** The verification run the audit owes now (ADR-0065): its runs root, run name
+/** The verification run the audit owes now (ADR-0067): its runs root, run name
  *  and exact start input, issued for the run's latest wave under the first
  *  generation of its claim set that is not blocked or unimportable — or null
  *  when no confirmed claim awaits a ballot, or the run is already published. */

@@ -1,6 +1,6 @@
 /**
  * PreToolUse `Bash` guard: subagents may not change audit or orchestration
- * authority (ADR-0065 D6).
+ * authority (ADR-0067 D6).
  *
  * Claude Code wrapper around `core/subagent-authority`. The signal is the
  * harness's own: Claude Code sets `agent_id` on PreToolUse ONLY for a call

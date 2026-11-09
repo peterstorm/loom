@@ -1,5 +1,5 @@
 /**
- * core/subagent-authority (ADR-0065 D6) — the pure decision both harness
+ * core/subagent-authority (ADR-0067 D6) — the pure decision both harness
  * adapters apply to a SUBAGENT's Bash command. Table-driven: helper operations
  * (derived from the operation tables' traits), every recognised invocation
  * form, authority-path writes vs the hunter's scratch/artifacts space,
@@ -83,7 +83,7 @@ describe("helper operations — the split is derived from each table's runtimeSk
       .toBe(traits.runtimeSkew === "available" ? "allow" : "authority-helper-operation");
   });
 
-  it("refuses exactly the ADR-0065 D6 lists (and allows its read-only list)", () => {
+  it("refuses exactly the ADR-0067 D6 lists (and allows its read-only list)", () => {
     for (const operation of ["start", "assign", "submit", "defer", "merge-critic", "verify", "publish", "disposition"]) {
       expect(verdict(`loom helper security-audit ${operation} --out ${R}`), operation).toBe("authority-helper-operation");
     }
@@ -442,7 +442,7 @@ describe("refusal text", () => {
 
   it("names the rule, the segment, and tells the agent to return to the parent", () => {
     const text = render(`loom helper security-audit verify --out ${R}`);
-    expect(text).toContain("guard-subagent-authority (ADR-0065 D6)");
+    expect(text).toContain("guard-subagent-authority (ADR-0067 D6)");
     expect(text).toContain("`helper security-audit verify` is not a read-only operation");
     expect(text).toContain(`Offending segment: "loom helper security-audit verify --out ${R}"`);
     expect(text).toContain("Return your result to the parent session");
@@ -466,7 +466,7 @@ describe("every authority entry is protected", () => {
 
 /**
  * KNOWN GAPS — allowed, and pinned as allowed so a change in coverage is a
- * visible decision. ADR-0065 Option B: shell-string matching is a fence, not a
+ * visible decision. ADR-0067 Option B: shell-string matching is a fence, not a
  * proof; the capture binding (D1–D4) is what makes a ballot authoritative.
  * These mirror guard-state-file's documented residuals (constructed command
  * names, variable indirection).
@@ -487,7 +487,7 @@ describe("known gaps (documented bypass classes, allowed by design)", () => {
   });
 });
 
-/** ADR-0065 (amended), F: the normalisations the fence applies. Every form
+/** ADR-0067 (amended), F: the normalisations the fence applies. Every form
  *  is refused; each benign look-alike is allowed. */
 describe("fence normalisations (F)", () => {
   it.each([

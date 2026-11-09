@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bounded local execution for a security audit (ADR-0064, P4).
+# Bounded local execution for a security audit (ADR-0066, P4).
 #
 # One target-controlled command, inside an OS-enforced sandbox:
 #   * no external network — a private network namespace with only loopback;

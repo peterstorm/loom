@@ -1,7 +1,7 @@
 /**
  * The security-audit run directory's entry names, and which of them are
  * AUTHORITY: the entries a run's verdict is read from, which only the parent
- * session's writes may change (ADR-0064, ADR-0065 D6).
+ * session's writes may change (ADR-0066, ADR-0067 D6).
  *
  * The ONE owner of these names. Every consumer imports them from here:
  *
@@ -40,7 +40,7 @@ export const SECURITY_AUDIT_RUN_FILES = Object.freeze({
 } as const);
 
 /** The directory inside an audit run that holds its `security-verification`
- *  facade runs (`<audit>/verification-runs/run.verify-w<wave>-<id>`, ADR-0065
+ *  facade runs (`<audit>/verification-runs/run.verify-w<wave>-<id>`, ADR-0067
  *  D1). `start` creates it. */
 export const SECURITY_AUDIT_VERIFICATION_RUNS_DIR = "verification-runs";
 

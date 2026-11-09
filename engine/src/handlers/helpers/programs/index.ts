@@ -47,7 +47,7 @@ export {
   startRemediationFacade,
   type PreparedRemediationFacadeStart,
 } from './remediation';
-// ADR-0065: the security audit's verification program — its façade driver,
+// ADR-0067: the security audit's verification program — its façade driver,
 // and the evidence replay `verify --from` and the Pi witness prove result.json by.
 export {
   prepareSecurityVerificationFacadeStart,

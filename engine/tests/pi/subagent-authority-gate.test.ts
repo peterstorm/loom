@@ -1,5 +1,5 @@
 /**
- * Pi twin of guard-subagent-authority (ADR-0065 D6): active only in a process
+ * Pi twin of guard-subagent-authority (ADR-0067 D6): active only in a process
  * carrying the explicit subagent environment marker (`pi/subagent-process.ts`),
  * judging bash through the same core and observed context as Claude Code.
  */
@@ -106,7 +106,7 @@ describe("piSubagentAuthorityDecision", () => {
   it("blocks a subagent's authority write operation", () => {
     const out = piSubagentAuthorityDecision(bash(`loom helper security-audit submit --out ${run}`), SUBAGENT(), AS_SUBAGENT);
     expect(out?.block).toBe(true);
-    expect(out?.reason).toContain("guard-subagent-authority (ADR-0065 D6)");
+    expect(out?.reason).toContain("guard-subagent-authority (ADR-0067 D6)");
   });
 
   it("blocks a subagent's write onto a registered run's authority file", () => {
@@ -181,7 +181,7 @@ describe("the Pi extension's tool_call chain", () => {
     try {
       expect(await toolCall(event, piCtx("tui", "/s.jsonl"))).toMatchObject({
         block: true,
-        reason: expect.stringContaining("guard-subagent-authority (ADR-0065 D6)"),
+        reason: expect.stringContaining("guard-subagent-authority (ADR-0067 D6)"),
       });
     } finally {
       vi.unstubAllEnvs();

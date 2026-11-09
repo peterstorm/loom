@@ -1,7 +1,7 @@
 # Loom deltas — guidance the vendored lenses must not carry
 
 The other lens files in this directory are byte-identical to upstream and pinned
-by `MANIFEST.json` (ADR-0064 D5). Anything Loom needs a hunter to know that
+by `MANIFEST.json` (ADR-0066 D5). Anything Loom needs a hunter to know that
 upstream does not say goes **here**, never into a vendored file. Keep it short:
 each entry names the fact and the code that owns it, so this file never becomes a
 second authority.

@@ -1,5 +1,5 @@
 /**
- * Capture attestations (ADR-0065, amended): the persisted proof that a
+ * Capture attestations (ADR-0067, amended): the persisted proof that a
  * security verifier's transcript was captured by a HARNESS, not written by
  * whoever can reach the run directory.
  *

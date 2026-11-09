@@ -1,6 +1,6 @@
 /**
  * The authority helpers' operations, split by the trait each operation table
- * already declares (ADR-0065 D6): a `runtimeSkew: "available"` operation is a
+ * already declares (ADR-0067 D6): a `runtimeSkew: "available"` operation is a
  * read-only projection a subagent may run; every other operation writes run
  * state and is the parent's alone. Derived, never copied, so an operation added
  * to either table is classified by the trait it is forced to declare.

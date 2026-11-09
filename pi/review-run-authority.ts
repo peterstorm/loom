@@ -142,7 +142,7 @@ export type PiIssuedReviewRequestClass =
       kind: "refutation-panel-extraction";
       claim: ReturnType<typeof issuedReviewerPayloadClaim>;
     }>
-  /** A `security-verification` verifier request (ADR-0065): extraction-only,
+  /** A `security-verification` verifier request (ADR-0067): extraction-only,
    *  its result parsed by the program itself, never an emission tool. */
   | Readonly<{
       kind: "security-verification-extraction";
@@ -182,7 +182,7 @@ export function classifyPiIssuedReviewRequest(
 }
 
 /**
- * Classify a request of a registered `security-verification` run (ADR-0065):
+ * Classify a request of a registered `security-verification` run (ADR-0067):
  * only that run's own `security-verifier-agent` requests belong to it. Its
  * claim is the archived no-schema claim, so admission owes no emission tool
  * and capture keeps final-message extraction — the program admits the bytes.

@@ -26,7 +26,7 @@
  * - `spawn-reservation` — the parent session's reservations and cleanup debt
  * - `cleanup-actions` — best-effort cleanup and startup hygiene
  * - `subagent-authority-gate` — a subagent's bash may not change audit or
- *   orchestration authority (ADR-0065 D6), and the parent's
+ *   orchestration authority (ADR-0067 D6), and the parent's
  *   `security-audit verify --from` must name a witnessed verification run
  *
  * The Pi user agent directory the definition port reads is resolved by the
@@ -296,7 +296,7 @@ export default function (
   // this extension loaded, preventing mutable-checkout split brain.
   process.env[PI_EXTENSION_RUNTIME_ROOT_ENV] = LOADED_RUNTIME_IDENTITY.packageRoot;
   process.env[PI_EXTENSION_RUNTIME_REVISION_ENV] = LOADED_RUNTIME_IDENTITY.revision;
-  // ADR-0065 (amended): every process this session launches — the installed
+  // ADR-0067 (amended): every process this session launches — the installed
   // subagent launcher copies process.env into each child — inherits this
   // process's pid as its parent marker, so a child's extension knows it is a
   // subagent. A subagent publishes nothing: its own children stay subagents.
@@ -383,7 +383,7 @@ export default function (
         }
       }
 
-      // Subagent authority (ADR-0065 D6): in a subagent process, bash may not
+      // Subagent authority (ADR-0067 D6): in a subagent process, bash may not
       // change audit or orchestration authority. Inert in the parent session.
       // The Claude Code twin is the guard-subagent-authority hook.
       if (event.toolName === "bash") {
@@ -426,7 +426,7 @@ export default function (
         }
       }
 
-      // ADR-0065: the parent's `security-audit verify --from` imports only a
+      // ADR-0067: the parent's `security-audit verify --from` imports only a
       // verification run this session's Trusted Review Witness proves.
       if (event.toolName === "bash") {
         currentGuard = "security-verification-witness";
@@ -543,7 +543,7 @@ export default function (
   // ─── Session Lifecycle ────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
-    // ADR-0065: republish the parent marker with this session's id, so every
+    // ADR-0067: republish the parent marker with this session's id, so every
     // child launched from it names the session it belongs to.
     markPiParentEnvironment(ctx.sessionManager.getSessionId() ?? null);
     // The session's model is the routing input every Loom spawn reads; project

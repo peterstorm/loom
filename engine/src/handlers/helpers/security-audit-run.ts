@@ -1,7 +1,7 @@
 /**
  * The security-audit run directory as a READ seam shared by its two shells:
  * the `helper security-audit` CLI and the `security-verification` facade
- * program (ADR-0065), which authenticates the audit it verifies.
+ * program (ADR-0067), which authenticates the audit it verifies.
  *
  * Document names come from their one owner, `core/audit-run-authority.ts`
  * (shared with the subagent write guard). `readAuditSnapshot` reads the four documents adjudication and

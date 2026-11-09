@@ -243,7 +243,7 @@ describe("adjudication", () => {
     expect((await run.invoke(["findings", "--json"])).error).toBeNull();
     expect((JSON.parse(run.stdout()) as { publicationBlockers: string[] }).publicationBlockers.join("\n")).toContain("are not counted");
   });
-  it("refuses a ballot whose binding names no verifier spawn — a refusal, not an unverified gap (ADR-0065 D5)", async () => {
+  it("refuses a ballot whose binding names no verifier spawn — a refusal, not an unverified gap (ADR-0067 D5)", async () => {
     const run = aRun();
     await seedAndSubmitClaim(run);
     // A hunter cannot cast a ballot by writing its own role into the binding.

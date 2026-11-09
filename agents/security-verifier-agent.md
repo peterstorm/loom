@@ -49,7 +49,7 @@ For every candidate in your brief, in this order:
 
 ## Output
 
-You are spawned by the `security-verification` program (ADR-0065) with one
+You are spawned by the `security-verification` program (ADR-0067) with one
 verification brief: up to four candidates in the Context Packet at
 `LOOM_CONTEXT_PATH`. Read it whole with the command your task names:
 `LOOM_CONTEXT_SECTION_COMMAND --section security-verification-brief`. Return exactly one

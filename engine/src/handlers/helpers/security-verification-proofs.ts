@@ -1,6 +1,6 @@
 /**
  * The shell half of "a ballot is authoritative only while its run proves it"
- * (ADR-0065, amended). The audit CLI (`verify --from`, `findings`, `publish`,
+ * (ADR-0067, amended). The audit CLI (`verify --from`, `findings`, `publish`,
  * `status`) reads verification runs through this one module:
  *
  *  - `openVerificationRun` places a run under the audit's own

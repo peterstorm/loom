@@ -161,7 +161,7 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/core/panel-contract.ts": ["zod/v4"],
       "engine/src/core/review-panel.ts": ["zod/v4"],
       "engine/src/core/emission-tool.ts": ["zod/v4"],
-      // The security-audit run-metadata grammar (ADR-0064): run-metadata.json is
+      // The security-audit run-metadata grammar (ADR-0066): run-metadata.json is
       // an external document the program reads, so this contract volume parses it
       // with one strict schema, exactly as the standalone lineage contract does.
       "engine/src/core/security-audit-contract.ts": ["zod/v4"],

@@ -292,7 +292,7 @@ export const SUBAGENT_DIR = process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subage
 export const subagentDir = (): string => process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subagents";
 
 /**
- * The security-audit run registry (ADR-0065 D6): one entry file per run
+ * The security-audit run registry (ADR-0067 D6): one entry file per run
  * directory `helper security-audit start` registered, inside the protected
  * subagent dir so a subagent cannot add, rewrite or delete an entry. The
  * subagent write guard reads it to know which directories are audit runs
@@ -305,7 +305,7 @@ export const SECURITY_AUDIT_RUN_REGISTRY_ENTRY = "security-audit-runs";
 export const securityAuditRunRegistryDir = (): string => join(subagentDir(), SECURITY_AUDIT_RUN_REGISTRY_ENTRY);
 
 /**
- * The capture attestation store (ADR-0065, amended): one immutable entry per
+ * The capture attestation store (ADR-0067, amended): one immutable entry per
  * security verifier attempt a HARNESS captured natively, written by the
  * capturing harness process and required by `verify --from` and by the
  * audit's adjudication before a ballot counts. Inside the protected subagent

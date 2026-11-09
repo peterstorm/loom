@@ -170,7 +170,7 @@ shell write — never advancing a phase — and seen by the reviewer of your uni
 
 The parent session runs every audit operation. As a subagent you may read
 (`helper security-audit nonce|status|findings`) and run the sandbox script, but
-the subagent authority guard (ADR-0065) refuses you every writing `helper
+the subagent authority guard (ADR-0067) refuses you every writing `helper
 security-audit` or `helper orchestration` operation — `submit`, `verify`,
 `defer`, … — and every write onto the run's own files (`ledger.json`,
 `findings.json`, `verdicts.json`, `verification-runs/`, …). Only

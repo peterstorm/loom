@@ -33,7 +33,7 @@ In particular:
 - keep `--out` **outside** the audited repository: the sandbox refuses a
   scratch inside its target, and `nonce` refuses to bind a run it would refuse.
 - verify through an **issued** verification run, never stdin ballots
-  (ADR-0065). Once the wave's hunt has settled (no hunter in flight, critic
+  (ADR-0067). Once the wave's hunt has settled (no hunter in flight, critic
   merged), run `status`: it prints the exact `loom helper orchestration start
   security-verification --runs-root <run-dir>/verification-runs --run …`
   command. Run it, spawn each `loom:security-verifier-agent` request it issues

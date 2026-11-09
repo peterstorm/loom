@@ -147,7 +147,7 @@ Each program's Run Directory stores immutable events and a checkpoint projection
 
 ### Security audit
 
-`security-audit` is a registered program in the same sense (ADR-0064): eleven
+`security-audit` is a registered program in the same sense (ADR-0066): eleven
 operations over one run directory, with a closed action set and a traits table
 the CLI reads before importing the helper.
 
@@ -172,14 +172,14 @@ profile), `needs_validation` (a lead, carrying **no severity at all**), and
 `confirmed`, and the recorded overall severity may not exceed the demonstrated
 impact.
 
-A ballot is not a payload (ADR-0065). It exists only as the harness-captured
+A ballot is not a payload (ADR-0067). It exists only as the harness-captured
 answer of a `security-verifier-agent` spawn issued by the `security-verification`
 facade program; its agent and profile are read from the request the engine
 minted, and `verify --from` imports a finished run only when its `result.json`
 is byte-identical to the replay of its captured evidence, issued against the
 audit's current ledger and findings, and every ballot's capture digest equals
 the capture attestation the capturing harness wrote into the protected store
-(`core/capture-attestation.ts` decides; ADR-0065, amended). `verdicts.json` is a
+(`core/capture-attestation.ts` decides; ADR-0067, amended). `verdicts.json` is a
 cache: `findings`, `status` and `publish` re-prove each cached ballot against its
 run and attestation before adjudication counts it (`admitCachedBallots`), so a
 hand-written ballot is a named publication blocker. Subagents are fenced off

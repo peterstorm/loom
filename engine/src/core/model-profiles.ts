@@ -461,7 +461,7 @@ export const AGENT_CATALOG = Object.freeze({
   "plan-alignment-agent": traits("focused-review", phaseKind("plan-alignment")),
   "pr-test-analyzer": traits("focused-review", plainKind("reviewer")),
   "review-verifier-agent": traits("refutation", plainKind("review-verifier")),
-  // Security audit (ADR-0064): all three answer with a security verdict, not
+  // Security audit (ADR-0066): all three answer with a security verdict, not
   // review findings (D2 keeps the reviewer payload v2 WIRE for hunters, but
   // their transcript is parsed by the audit program, not store-reviewer-
   // findings). The verifier and critic sit on the refutation profile, so no

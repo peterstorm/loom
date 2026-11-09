@@ -240,7 +240,7 @@ describe("adjudicateRun", () => {
   });
 });
 
-describe("parseVerificationVerdicts (ADR-0065 D3/D5)", () => {
+describe("parseVerificationVerdicts (ADR-0067 D3/D5)", () => {
   it("round-trips bound ballots, sorted by fingerprint, run, request and wave", () => {
     const ballots = [verdict("b:2"), verdict("a:1"), verdict("a:1", { vote: "advisory", missingFact: "one fact" })];
     const parsed = parseVerificationVerdicts(JSON.parse(JSON.stringify(ballots)));

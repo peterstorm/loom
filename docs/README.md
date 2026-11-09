@@ -119,8 +119,9 @@ Architecture Decision Records preserve why the system has its current shape:
 - [ADR-0061: One supported-language predicate, parsed once into a SkeletonTarget](adr/ADR-0061-one-supported-language-predicate-parsed-into-skeleton-target.md)
 - [ADR-0062: Pure core, DomainResult end to end, simplicity axis](adr/ADR-0062-pure-core-domainresult-end-to-end-simplicity-axis.md)
 - [ADR-0063: Owner verification follows the family schedule](adr/ADR-0063-owner-verification-follows-the-family-schedule.md)
-- [ADR-0064: Security audit is a registered program, not a skill-side workflow](adr/ADR-0064-security-audit-is-a-registered-program.md)
-- [ADR-0065: Security ballots are bound to issued verifier spawns](adr/ADR-0065-security-ballots-are-bound-to-issued-verifier-spawns.md)
+- [ADR-0064: Bun reports — file identity from the `file` attribute, collection errors from the console](adr/ADR-0064-bun-reports-file-identity-and-console-collection-errors.md)
+- [ADR-0066: Security audit is a registered program, not a skill-side workflow](adr/ADR-0066-security-audit-is-a-registered-program.md)
+- [ADR-0067: Security ballots are bound to issued verifier spawns](adr/ADR-0067-security-ballots-are-bound-to-issued-verifier-spawns.md)
 
 ## Harness and migration notes
 

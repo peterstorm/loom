@@ -1,5 +1,5 @@
 /**
- * guard-subagent-authority (ADR-0065 D6) — the Claude Code PreToolUse Bash
+ * guard-subagent-authority (ADR-0067 D6) — the Claude Code PreToolUse Bash
  * shell around core/subagent-authority: active only for calls Claude Code
  * attributes to a subagent (`agent_id`), fail-closed on malformed input, and
  * wired end to end (route table, hooks.json, the shim's fast path and its
@@ -63,7 +63,7 @@ describe("caller identification", () => {
     const result = await runGuardSubagentAuthority(subagent(`loom helper security-audit verify --out ${run}`));
     expect(result.kind).toBe("block");
     if (result.kind === "block") {
-      expect(result.message).toContain("guard-subagent-authority (ADR-0065 D6)");
+      expect(result.message).toContain("guard-subagent-authority (ADR-0067 D6)");
       expect(result.message).toContain("Return your result to the parent session");
     }
   });
@@ -204,7 +204,7 @@ describe("wiring", () => {
   });
 });
 
-describe("the real filesystem port (ADR-0065, amended)", () => {
+describe("the real filesystem port (ADR-0067, amended)", () => {
   it("reads a script a subagent runs, refusing one that writes authority and allowing the sandbox", async () => {
     const forge = join(root, "forge.sh");
     writeFileSync(forge, `#!/usr/bin/env bash\necho forged > ${run}/verdicts.json\n`);

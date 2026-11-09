@@ -70,7 +70,7 @@ export function writeArtifact(run: Run, relativePath: string, content: string): 
 
 /**
  * Write ballots straight into `verdicts.json`, as a forger (or a stale cache)
- * would. Such a ballot is NEVER authority (ADR-0065, amended): the audit
+ * would. Such a ballot is NEVER authority (ADR-0067, amended): the audit
  * re-proves every cached ballot against its verification run and capture
  * attestation before counting it. Tests use this only to drive refusals —
  * a countable ballot comes from `verifyWith` (`security-verification-harness`).

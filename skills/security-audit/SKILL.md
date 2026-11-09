@@ -56,7 +56,7 @@ and every refusal — is in
 
 **Only the parent session runs these operations.** Hunters and verifiers are
 subagents; the subagent authority guard refuses them every writing operation and
-every write onto the run's authority files (ADR-0065 D6). A subagent returns its
+every write onto the run's authority files (ADR-0067 D6). A subagent returns its
 result as its final message, and the parent records it.
 
 `status` is read-only and answers the only question that matters before

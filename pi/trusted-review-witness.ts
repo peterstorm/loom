@@ -19,7 +19,7 @@
  * missing capture never falls back to an older run; exact acceptance is
  * idempotent and retires the root's older witnesses.
  *
- * ADR-0065 generalises the witness to `security-verification` runs: result
+ * ADR-0067 generalises the witness to `security-verification` runs: result
  * capture records their witnesses the same way (any request-bound capture is
  * remembered under its run), and `verifySecurityVerification` proves a named
  * run — every captured verifier slot witnessed in-process with identical
@@ -77,7 +77,7 @@ export type TrustedReviewWitnesses = Readonly<{
   /** Replay the current run for `<cwd>/.claude/reviews/review-and-fix-runs`
    *  and return its receipt, or throw the refusal. */
   verify: (input: Readonly<{ cwd: string; sessionId: string }>) => Promise<LoomReviewAuthorityReceipt>;
-  /** Prove a finished security-verification run (ADR-0065) from this
+  /** Prove a finished security-verification run (ADR-0067) from this
    *  session's witnesses: every captured slot was witnessed in-process with
    *  identical authority and bytes, and `result.json` is exactly the result
    *  that evidence replays. Throws the refusal. */

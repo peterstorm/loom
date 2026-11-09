@@ -1,5 +1,5 @@
 /**
- * The functional core of ADR-0065's security-verification program.
+ * The functional core of ADR-0067's security-verification program.
  *
  *   INV-V1  no verdict outside its brief is ever admitted — nor a brief with a
  *           fingerprint missing or voted twice;

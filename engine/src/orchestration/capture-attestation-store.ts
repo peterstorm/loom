@@ -1,5 +1,5 @@
 /**
- * The capture attestation store (ADR-0065, amended): one immutable entry per
+ * The capture attestation store (ADR-0067, amended): one immutable entry per
  * natively captured security verifier attempt, under the protected
  * `subagentDir()` (`config.captureAttestationDir()`), written by the harness
  * process that captured the transcript and read by `verify --from` and by the

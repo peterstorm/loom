@@ -64,7 +64,7 @@ Published through `standalone-disposition`, `revision: initial`, provenance DECL
 
 102 accepted, 2 deferred, 1 dismissed. Every entry's reason is in the published record.
 Deferred: cores `architecture-tech-lead-4` (ballot attribution needs a harness-captured verifier
-seam), docs `architecture-tech-lead-4` (dedicated hunter kind deferred by ADR-0064 D2).
+seam), docs `architecture-tech-lead-4` (dedicated hunter kind deferred by ADR-0066 D2).
 Dismissed: docs `code-simplifier-5` (terminal `requires` is what `missingRequirements` reads).
 
 ## Validation

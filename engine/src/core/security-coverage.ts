@@ -1396,7 +1396,7 @@ export function parseUnitResults(raw: unknown): DomainResult<readonly UnitResult
 
 /** The hunter result's own identity. It is NOT a reviewer payload: it carries
  *  unit settlements and upstream report records, and a label borrowed from the
- *  reviewer wire claimed a conformance it never had (ADR-0064 D2, amended). */
+ *  reviewer wire claimed a conformance it never had (ADR-0066 D2, amended). */
 export const HUNTER_RESULT_KIND = "security-hunter-result";
 export const HUNTER_RESULT_SCHEMA_VERSION = 1;
 

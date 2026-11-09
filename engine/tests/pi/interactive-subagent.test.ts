@@ -111,7 +111,7 @@ describe("interactive Pi subagent shell", () => {
 
     expect(invocation).toBeDefined();
     expect(invocation?.cwd).toBe(ROOT);
-    // The `--mode rpc` child carries the explicit subagent marker (ADR-0065, amended).
+    // The `--mode rpc` child carries the explicit subagent marker (ADR-0067, amended).
     expect(childEnv?.["LOOM_PI_SUBAGENT"]).toBe("1");
     expect(childEnv?.["PATH"]).toBe(process.env["PATH"]);
     expect(invocation?.args).toEqual(expect.arrayContaining([

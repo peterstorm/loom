@@ -1,5 +1,5 @@
 /**
- * The security-audit run registry (ADR-0065 D6): which directories are audit
+ * The security-audit run registry (ADR-0067 D6): which directories are audit
  * runs, recorded by every writing `helper security-audit` operation and read by the subagent
  * write guard, so the guard never has to trust a command line to learn where a
  * run's authority files live.

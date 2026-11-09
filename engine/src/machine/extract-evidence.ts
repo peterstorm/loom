@@ -249,7 +249,7 @@ function bashRun(outcome: BashToolOutcome): BashRun {
 }
 
 /**
- * The one executor (ADR-0064), named anywhere in a command line. Any path
+ * The one executor (ADR-0066), named anywhere in a command line. Any path
  * prefix qualifies — `bash scripts/security-sandbox.sh`,
  * `./scripts/security-sandbox.sh`, an absolute path — but the name must be a
  * whole path segment, so `my-security-sandbox.sh` mints nothing.

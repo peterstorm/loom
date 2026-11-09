@@ -1,5 +1,5 @@
 /**
- * The taxonomy is VENDORED, not paraphrased (ADR-0064 D5): every lens is
+ * The taxonomy is VENDORED, not paraphrased (ADR-0066 D5): every lens is
  * byte-identical to `cloudflare/security-audit-skill@c1c8a8c`, and `MANIFEST.json`
  * records the SHA-256 each file must retain.
  *

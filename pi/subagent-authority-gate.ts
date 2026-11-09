@@ -1,5 +1,5 @@
 /**
- * Pi `tool_call` gates over audit authority (ADR-0065), both reading bash
+ * Pi `tool_call` gates over audit authority (ADR-0067), both reading bash
  * through the shared core (`core/subagent-authority`):
  *
  *  1. `piSubagentAuthorityDecision` — the Pi twin of the Claude Code
@@ -18,7 +18,7 @@
  *     `result.json` the replay of that evidence); when it cannot prove the run
  *     — a run captured before this process restarted, or by another session —
  *     the import is proven from the PERSISTED capture attestations exactly as
- *     `verify --from` proves it (ADR-0065, amended: the attestation is the
+ *     `verify --from` proves it (ADR-0067, amended: the attestation is the
  *     authority on both harnesses). Only a run neither proof accepts — a
  *     forged or rewritten transcript, an altered `result.json` — is blocked.
  *
@@ -89,7 +89,7 @@ function importedRun(invocation: SecurityAuditVerifyInvocation):
 const witnessBlock = (segment: string, reason: string): PiBlock => ({
   block: true,
   reason: [
-    "BLOCKED by loom security-verification witness (ADR-0065): this Pi session cannot prove the ballots this command imports.",
+    "BLOCKED by loom security-verification witness (ADR-0067): this Pi session cannot prove the ballots this command imports.",
     reason,
     `Offending segment: ${JSON.stringify(segment)}`,
     "On Pi, `security-audit verify --from` imports only a verification run whose every verifier capture this session witnessed in-process.",
@@ -99,7 +99,7 @@ const witnessBlock = (segment: string, reason: string): PiBlock => ({
 
 /**
  * Why an import may not run, or null. The PERSISTED capture attestation is the
- * authority on both harnesses (ADR-0065, amended): the witness this session
+ * authority on both harnesses (ADR-0067, amended): the witness this session
  * holds is consulted first, and when it cannot prove the run — a run captured
  * before this Pi process restarted, or by another session — the import is
  * proven the way `verify --from` itself proves it: `result.json` replayed

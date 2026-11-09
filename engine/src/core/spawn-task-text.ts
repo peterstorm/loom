@@ -70,7 +70,7 @@ export const archivedReviewerInstructionPaths = (packageRoot: string, role: stri
   });
 
 /**
- * Spec-check and the security verifier (ADR-0065) consume their small authority
+ * Spec-check and the security verifier (ADR-0067) consume their small authority
  * sections whole. A packet's section bytes live in the run's blob store, so they
  * are read only through the engine's digest-verifying section decoder,
  * delivered as an exact command.

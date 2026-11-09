@@ -6559,14 +6559,14 @@ describe("Pi extension tool_call fail-closed backstops", () => {
     }
   });
 
-  it("BLOCKS the parent's security-audit verify --from of a run this session never witnessed (ADR-0065)", async () => {
+  it("BLOCKS the parent's security-audit verify --from of a run this session never witnessed (ADR-0067)", async () => {
     const pi = await extension();
     const command = "loom helper security-audit verify --out /audits/run-1 --from run.verify-w1-000000000000";
     const results = await pi.emit("tool_call", { toolName: "bash", toolCallId: "call-verify-unwitnessed", input: { command } },
       { cwd: ROOT, sessionManager: { getSessionId: () => SESSION } });
     expect(results).toContainEqual(expect.objectContaining({
       block: true,
-      reason: expect.stringContaining("security-verification witness (ADR-0065)"),
+      reason: expect.stringContaining("security-verification witness (ADR-0067)"),
     }));
     const unrelated = await pi.emit("tool_call", { toolName: "bash", toolCallId: "call-status", input: { command: "loom helper security-audit status --out /audits/run-1" } },
       { cwd: ROOT, sessionManager: { getSessionId: () => SESSION } });

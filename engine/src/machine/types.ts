@@ -49,7 +49,7 @@ export type Evidence =
     }
   /**
    * One bounded local execution, minted by parsing the receipt line
-   * `scripts/security-sandbox.sh` prints last (ADR-0064). The receipt IS the
+   * `scripts/security-sandbox.sh` prints last (ADR-0066). The receipt IS the
    * fact: the exit it observed, the limits the script enforced, the
    * allowlisted environment, and the scratch footprint. A hunter's prose
    * saying "reproduced" mints nothing, so "reproduced locally" stays a

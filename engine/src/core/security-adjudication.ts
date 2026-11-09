@@ -15,7 +15,7 @@
  *      `advisory` vote means the claim does not survive as confirmed: with a
  *      named missing fact it becomes a lead, without one it is rejected.
  *
- * Severity ownership (ADR-0064 D3): the hunt records a five-level
+ * Severity ownership (ADR-0066 D3): the hunt records a five-level
  * `overall_severity`, but loom's `critical|advisory` ballot is the decision.
  * Demotion never silently rewrites severity — a demoted claim becomes
  * `needs_validation`, which by grammar carries no severity at all.
@@ -43,7 +43,7 @@ export const SECURITY_VERIFICATION_PROGRAM = "security-verification" as const;
 export const SECURITY_VERIFIER_ROLE = "security-verifier-agent" as const;
 
 /**
- * Where a ballot came from, taken from AUTHORITY only (ADR-0065 D3): the
+ * Where a ballot came from, taken from AUTHORITY only (ADR-0067 D3): the
  * minted request the verifier spawn answered and the digest of its captured
  * transcript. Nothing here is read from the verifier's payload, so a ballot
  * cannot carry a role or profile its spawn did not have.
@@ -153,7 +153,7 @@ export function adjudicateCandidates(input: AdjudicationInput): Adjudication {
       gaps.push({ kind: "unverified", fingerprint: finding.fingerprint });
       continue;
     }
-    // The profile is the MINTED request's (ADR-0065 D5), never a payload field.
+    // The profile is the MINTED request's (ADR-0067 D5), never a payload field.
     const [first, ...rest] = verdicts.filter((verdict) => !input.huntProfiles.includes(verdict.binding.profile));
     if (first === undefined) {
       gaps.push({ kind: "same-profile", fingerprint: finding.fingerprint, profile: verdicts[0].binding.profile });
@@ -293,7 +293,7 @@ export const BALLOT_BINDING_KEYS: readonly string[] = [
 ];
 
 /**
- * Parse the bound ballots `verdicts.json` holds (ADR-0065 D3/D5).
+ * Parse the bound ballots `verdicts.json` holds (ADR-0067 D3/D5).
  *
  * Fail-closed and total: an unknown key is a violation, every field is
  * checked, and a ballot WITHOUT a well-formed binding is a refusal — not an
