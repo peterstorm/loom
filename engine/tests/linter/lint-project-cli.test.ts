@@ -1,9 +1,9 @@
 /**
  * `scripts/lint-project.ts`, spawned for real over a temporary project with
- * BOTH harness rules directories: the shell around the engine's pure baseline
+ * its one rules directory: the shell around the engine's pure baseline
  * decisions (`baseline-config.ts`, unit-tested on its own).
  *
- * - `--write-baseline` records every unproven site into each harness's
+ * - `--write-baseline` records every unproven site into the project's
  *   `config.json`, keeps the other fields, and a re-run changes nothing;
  * - a stale baseline entry fails the run (exit 1) and is reported in the JSON
  *   output's `staleEntries`;
@@ -13,7 +13,8 @@
  *   reasoned `exclude` list, which applies to explicit paths too, and whose
  *   stale entries fail the run;
  * - the project root is found from a subdirectory with its own package.json,
- *   an unknown config key and diverging harness copies refuse to run (exit 2).
+ *   an unknown config key and a project carrying both rules layouts refuse to
+ *   run (exit 2), and a Pi-only project is read from its `.pi` layout.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
@@ -22,7 +23,8 @@ import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 
 const SCRIPT = join(__dirname, "..", "..", "..", "scripts", "lint-project.ts");
-const HARNESS_DIRS = [".claude/linter/rules", ".pi/linter/rules"] as const;
+const RULES_DIR = ".claude/linter/rules";
+const PI_RULES_DIR = ".pi/linter/rules";
 
 /** A two-arm switch over a union with no totality proof: one `switch-totality` site. */
 const UNPROVEN_SWITCH = [
@@ -48,10 +50,8 @@ beforeEach(() => {
   writeFileSync(join(project, "package.json"), "{}\n");
   mkdirSync(join(project, "src"));
   writeFileSync(join(project, "src", "shape.ts"), UNPROVEN_SWITCH);
-  for (const dir of HARNESS_DIRS) {
-    mkdirSync(join(project, dir), { recursive: true });
-    writeFileSync(join(project, dir, "config.json"), `${JSON.stringify({ maxFunctionLines: 60 }, null, 2)}\n`);
-  }
+  mkdirSync(join(project, RULES_DIR), { recursive: true });
+  writeFileSync(join(project, RULES_DIR, "config.json"), `${JSON.stringify({ maxFunctionLines: 60 }, null, 2)}\n`);
 });
 
 afterEach(() => rmSync(project, { recursive: true, force: true }));
@@ -62,7 +62,7 @@ function lintProject(...args: string[]): Readonly<{ status: number | null; stdou
   return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
-const configBytes = (dir: string): string => readFileSync(join(project, dir, "config.json"), "utf8");
+const configBytes = (dir: string = RULES_DIR): string => readFileSync(join(project, dir, "config.json"), "utf8");
 
 type JsonReport = Readonly<{
   violations: readonly Readonly<{ file: string; rule: string }>[];
@@ -73,17 +73,15 @@ type JsonReport = Readonly<{
 const jsonReport = (stdout: string): JsonReport => JSON.parse(stdout) as JsonReport;
 
 describe("lint-project.ts, spawned over a temporary project", () => {
-  it("--write-baseline records the site in every harness config, keeps other fields, and is idempotent", () => {
+  it("--write-baseline records the site in the project config, keeps other fields, and is idempotent", () => {
     const written = lintProject("--write-baseline");
     expect(written.status, written.stderr).toBe(0);
-    for (const dir of HARNESS_DIRS) {
-      expect(JSON.parse(configBytes(dir))).toEqual({ maxFunctionLines: 60, switchTotalityBaseline: [SITE] });
-    }
-    const first = HARNESS_DIRS.map(configBytes);
+    expect(JSON.parse(configBytes())).toEqual({ maxFunctionLines: 60, switchTotalityBaseline: [SITE] });
+    const first = configBytes();
 
     const rerun = lintProject("--write-baseline");
     expect(rerun.status, rerun.stderr).toBe(0);
-    expect(HARNESS_DIRS.map(configBytes)).toEqual(first);
+    expect(configBytes()).toEqual(first);
 
     // The baselined site is excused and nothing in the baseline is stale.
     const linted = lintProject("--json");
@@ -93,13 +91,9 @@ describe("lint-project.ts, spawned over a temporary project", () => {
 
   it("a stale baseline entry exits 1 and is reported in the JSON output's staleEntries", () => {
     expect(lintProject("--write-baseline").status).toBe(0);
-    // Both harness configs move together, as --write-baseline keeps them
-    // (each harness's hook reads its own copy, so the script refuses a divergence).
-    for (const dir of HARNESS_DIRS) {
-      const config = JSON.parse(configBytes(dir));
-      writeFileSync(join(project, dir, "config.json"),
-        JSON.stringify({ ...config, switchTotalityBaseline: [...config.switchTotalityBaseline, "src/gone.ts::x.kind"] }));
-    }
+    const config = JSON.parse(configBytes());
+    writeFileSync(join(project, RULES_DIR, "config.json"),
+      JSON.stringify({ ...config, switchTotalityBaseline: [...config.switchTotalityBaseline, "src/gone.ts::x.kind"] }));
 
     const linted = lintProject("--json");
     expect(linted.status).toBe(1);
@@ -120,7 +114,7 @@ describe("lint-project.ts, spawned over a temporary project", () => {
 
   it("a lint error (rules that cannot load) exits 1 under --json and under --summary", () => {
     expect(lintProject("--write-baseline").status).toBe(0);
-    for (const dir of HARNESS_DIRS) writeFileSync(join(project, dir, "broken.json"), "{ not json");
+    writeFileSync(join(project, RULES_DIR, "broken.json"), "{ not json");
 
     const linted = lintProject("--json");
     expect(linted.status).toBe(1);
@@ -130,11 +124,9 @@ describe("lint-project.ts, spawned over a temporary project", () => {
     expect(lintProject("--summary").status).toBe(1);
   });
 
-  /** Rewrites both harness copies of config.json with extra fields. */
+  /** Rewrites the project's config.json with extra fields. */
   function configure(fields: Record<string, unknown>): void {
-    for (const dir of HARNESS_DIRS) {
-      writeFileSync(join(project, dir, "config.json"), `${JSON.stringify({ ...JSON.parse(configBytes(dir)), ...fields }, null, 2)}\n`);
-    }
+    writeFileSync(join(project, RULES_DIR, "config.json"), `${JSON.stringify({ ...JSON.parse(configBytes()), ...fields }, null, 2)}\n`);
   }
 
   it("lints test files by default — a rule that skips tests says so itself", () => {
@@ -192,10 +184,21 @@ describe("lint-project.ts, spawned over a temporary project", () => {
     expect(linted.stderr).toContain("unknown key 'exlude'");
   });
 
-  it("refuses to run when the two harness copies diverge (exit 2)", () => {
-    writeFileSync(join(project, ".pi/linter/rules", "config.json"), `${JSON.stringify({ maxFunctionLines: 61 }, null, 2)}\n`);
+  it("refuses to run when the project carries both rules layouts (exit 2): the hooks read only one", () => {
+    mkdirSync(join(project, PI_RULES_DIR), { recursive: true });
+    writeFileSync(join(project, PI_RULES_DIR, "config.json"), configBytes());
     const linted = lintProject("--json");
     expect(linted.status).toBe(2);
-    expect(linted.stderr).toContain("differ in: config.json");
+    expect(linted.stderr).toContain(`the project carries ${RULES_DIR} and ${PI_RULES_DIR}`);
+  });
+
+  it("reads a Pi-only project from its .pi layout, and --write-baseline writes there", () => {
+    mkdirSync(join(project, PI_RULES_DIR), { recursive: true });
+    writeFileSync(join(project, PI_RULES_DIR, "config.json"), configBytes());
+    rmSync(join(project, ".claude"), { recursive: true, force: true });
+    expect(lintProject("--json").status).toBe(1);
+    expect(lintProject("--write-baseline").status).toBe(0);
+    expect(JSON.parse(configBytes(PI_RULES_DIR))).toEqual({ maxFunctionLines: 60, switchTotalityBaseline: [SITE] });
+    expect(lintProject("--json").status).toBe(0);
   });
 });

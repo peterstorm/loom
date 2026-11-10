@@ -56,13 +56,13 @@ The linter loads rules from two directories, merged at runtime:
 
 1. **Default rules** — Bundled with loom in the `lint-rules/` directory. Ship with every installation.
 
-2. **Project-local rules** — Defined in `.claude/linter/rules/*.json` (or `.pi/linter/rules/*.json` for Pi projects).
+2. **Project-local rules** — Defined in the project's one rules directory, `.claude/linter/rules/*.json`, which both Claude Code and Pi read (`.pi/linter/rules/*.json` only in a Pi-only project that has no `.claude/linter/rules/`).
 
 ### Load Order
 
 ```
 lint-rules/*.json                → tagged source: "default"
-.claude/linter/rules/*.json      → tagged source: "project"  (or .pi/linter/rules/ for Pi)
+.claude/linter/rules/*.json      → tagged source: "project"  (or .pi/linter/rules/ in a Pi-only project)
 ```
 
 The `source` field is set automatically by the loader — do **not** include it in your JSON files.
@@ -151,8 +151,8 @@ the run, like a stale baseline entry.
 
 The generic defaults stay inert for other projects: with no config, the
 boundary rule governs nothing and the purity rule holds nothing pure. Loom's own
-roots, shells, boundaries and exclusions are in its `.claude/linter/rules/config.json`
-(with a byte-identical `.pi` twin).
+roots, shells, boundaries and exclusions are in its `.claude/linter/rules/config.json`,
+which both harnesses read.
 
 ## Project Configuration
 
@@ -163,16 +163,19 @@ Programmatic rules (boundary checking, I/O detection, function length, totality)
 `config.json` lives **inside** the project rules directory, beside the rule files:
 
 ```
-.claude/linter/rules/config.json     (Claude Code projects)
-.pi/linter/rules/config.json         (Pi projects)
+.claude/linter/rules/config.json     (every project; read by Claude Code and Pi)
+.pi/linter/rules/config.json         (only a Pi-only project with no .claude/linter/rules)
 ```
 
 A file at `.claude/linter/config.json` (one level up) is never read. A project
-used from both harnesses keeps the two copies identical —
-`lint-project --write-baseline` writes both, and `lint-project` refuses to run
-(exit 2) when the two hold different rule files: each harness's hook reads its
-own copy, and `lint-project` reads the `.claude` one when both exist. The
-project root is the directory above `.claude/linter/rules` (or
+has ONE rules directory, and the lookup does not depend on the harness: the
+first present of `.claude/linter/rules`, then `.pi/linter/rules`. Both
+harnesses' edit hooks, the Wave Gate lint, `helper validate-lint-rules` with no
+argument and `lint-project` read that one directory, and
+`lint-project --write-baseline` writes only it. A project carrying both layouts
+is refused by `lint-project` (exit 2, "keep one rules directory"): the hooks
+read only `.claude/linter/rules`, so a `.pi` twin would look enforced while
+nothing reads it. The project root is the directory above `.claude/linter/rules` (or
 `.pi/linter/rules`) — `lint-project` finds it from any subdirectory — and
 every path in the config — module prefixes, baseline keys, exclusions — is
 relative to it.
@@ -394,7 +397,7 @@ The `fixHint` is shown to the AI agent (or developer) when a violation fires. Ma
 ### Step 4: Place the File
 
 - For rules that should ship with loom: add to `lint-rules/`
-- For project-specific rules: add to `.claude/linter/rules/` (or `.pi/linter/rules/`)
+- For project-specific rules: add to the project's rules directory, `.claude/linter/rules/` (`.pi/linter/rules/` only in a Pi-only project)
 
 ### Examples
 

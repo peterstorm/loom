@@ -39,6 +39,8 @@ Check if the project already has linter rules:
 ls .claude/linter/rules/ 2>/dev/null || ls .pi/linter/rules/ 2>/dev/null || echo "NO_RULES"
 ```
 
+The first directory found is the project's one rules directory — both Claude Code and Pi read it. `.pi/linter/rules/` is used only by a Pi-only project that has no `.claude/linter/rules/`; a project carrying both is refused by `lint-project` (delete one).
+
 - If rules exist → skip to **Step 4** (Run Linter)
 - If no rules → proceed to **Step 2** (Setup)
 
@@ -205,7 +207,7 @@ Files scanned: N | Violations: N (boundary: X, purity: Y, quality: Z)
 - MUST place `config.json` inside the `rules/` directory (same dir as rule JSONs)
 - MUST validate JSON syntax before writing rule files
 - MUST NOT generate boundaries that conflict with the project's actual import graph
-- Config location: `.claude/linter/rules/config.json` (Claude Code) or `.pi/linter/rules/config.json` (Pi)
+- Config location: `.claude/linter/rules/config.json`, read by both harnesses (`.pi/linter/rules/config.json` only in a Pi-only project without `.claude/linter/rules/`; never both)
 - When running the linter, use `${CLAUDE_PLUGIN_ROOT}/lint-rules` as the default rules directory
 - When running the linter, use `${CLAUDE_PLUGIN_ROOT}/engine/src/linter/index.ts` as the linter entry
 

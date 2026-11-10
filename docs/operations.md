@@ -1392,12 +1392,11 @@ Regex rules run on every edit (the `immediate` tier, `lint-file` PostToolUse) an
 ### Validate rule files
 
 ```bash
-bun engine/src/cli.ts helper validate-lint-rules .claude/linter/rules
-# Pi project:
-bun engine/src/cli.ts helper validate-lint-rules .pi/linter/rules
+bun engine/src/cli.ts helper validate-lint-rules                         # the project's rules directory
+bun engine/src/cli.ts helper validate-lint-rules .claude/linter/rules    # or name one explicitly
 ```
 
-A nonexistent directory is an error for explicit validation. Runtime loading, by contrast, treats an absent project rules directory as “no project overrides.”
+With no argument the helper validates the project's one rules directory — the first present of `.claude/linter/rules`, then `.pi/linter/rules` (a Pi-only project) — the same directory Claude Code's edit hook, Pi's post-edit lint, the Wave Gate lint and `lint-project` read; the lookup does not depend on the harness. With none present it validates the bundled defaults and says 0 project rules were checked. A nonexistent directory is an error for explicit validation. Runtime loading, by contrast, treats an absent project rules directory as “no project overrides.”
 
 See [Lint Rules](../lint-rules/README.md) for configuration and tiers.
 

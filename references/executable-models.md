@@ -130,9 +130,9 @@ order-domain paths below are illustrative):
 
 - `checkable` invariants require a `**Rule file:**`. The **architecture phase
   itself writes the rule JSON** (regex rule format, see `lint-rules/README.md`)
-  into the project rules dir — `.claude/linter/rules/`, or `.pi/linter/rules/`
-  under the pi harness; the linter loads only from the harness-appropriate
-  dir — so it is enforced fail-closed from the very first edit of wave 1,
+  into the project's one rules dir — `.claude/linter/rules/`, which both
+  harnesses read (`.pi/linter/rules/` only in a Pi-only project that has no
+  `.claude/linter/rules/`; never both) — so it is enforced fail-closed from the very first edit of wave 1,
   before any implementation agent runs. Filename and JSON `name` field share
   the same `inv-<n>-<slug>`. After writing rules, the architecture phase
   proves they load (`LOOM_DIR` = the loom plugin directory, resolved as
@@ -140,7 +140,8 @@ order-domain paths below are illustrative):
 
   ```bash
   bun "$LOOM_DIR"/engine/src/cli.ts helper validate-lint-rules .claude/linter/rules
-  # (.pi/linter/rules under the pi harness)
+  # (.pi/linter/rules only in a Pi-only project; no argument validates
+  #  whichever of the two the project uses)
   ```
 
   Passing a nonexistent directory is an error — the proof step never treats a

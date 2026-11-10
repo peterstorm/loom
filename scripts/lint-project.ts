@@ -19,7 +19,7 @@
  *                   that no longer name anything)
  *   --write-baseline  Record every pre-existing totality site in the project's
  *                   config.json (switchTotalityBaseline, discriminantBranchingBaseline),
- *                   in every harness rules directory present, then exit
+ *                   then exit
  *   --json          Output raw JSON violations
  *   --summary       Show only summary counts
  *   --fix-hints     Show fix hints (default: true)
@@ -64,7 +64,7 @@ if (!existsSync(DEFAULT_RULES_DIR)) {
 }
 
 const { lintFiles }: typeof LinterIndex = await import(join(LOOM_ROOT, "engine/src/linter/index.ts"));
-const { CLAUDE_PROJECT_RULES_DIR, PI_PROJECT_RULES_DIR, PROJECT_RULES_LAYOUTS }: typeof LinterConfig =
+const { CLAUDE_PROJECT_RULES_DIR, PI_PROJECT_RULES_DIR, PROJECT_RULES_LAYOUTS, projectRulesLayout }: typeof LinterConfig =
   await import(join(LOOM_ROOT, "engine/src/linter/programmatic/config.ts"));
 const { loadProjectConfig }: typeof LinterLoader = await import(join(LOOM_ROOT, "engine/src/linter/loader.ts"));
 const { isLintableName, isNeverSourceDirectory, scopeOf, scopeDrift }: typeof ProjectScope =
@@ -95,34 +95,24 @@ function findProjectRoot(startDir: string): string {
 }
 
 const PROJECT_ROOT = findProjectRoot(process.cwd());
-const CLAUDE_RULES_DIR = join(PROJECT_ROOT, CLAUDE_PROJECT_RULES_DIR);
-const PI_RULES_DIR = join(PROJECT_ROOT, PI_PROJECT_RULES_DIR);
+const presentLayouts = PROJECT_RULES_LAYOUTS.filter((layout) => existsSync(join(PROJECT_ROOT, layout)));
 
 /**
- * The rules directory this run reads: the Claude Code layout when present (it
- * is canonical), else the Pi layout, else the layout `--init` creates — the
- * Pi one only in a project that has a `.pi` directory and no `.claude` one.
- * Each harness's hook reads its own layout, so where BOTH exist they must hold
- * the same rule files byte for byte (`harnessDivergence`): otherwise this run
- * and one of the hooks would enforce different policies.
+ * The project's ONE rules directory — the same one both harnesses' edit hooks
+ * read (`projectRulesLayout`): the first layout present, else the layout
+ * `--init` creates, the Pi one only in a project that has a `.pi` directory and
+ * no `.claude` one. A project carrying more than one layout is refused before
+ * anything runs: the hooks read only the first, so a second is a stale twin
+ * that looks enforced and is not.
  */
 function selectRulesDir(): string {
-  if (existsSync(CLAUDE_RULES_DIR)) return CLAUDE_RULES_DIR;
-  if (existsSync(PI_RULES_DIR)) return PI_RULES_DIR;
-  return existsSync(join(PROJECT_ROOT, ".pi")) && !existsSync(join(PROJECT_ROOT, ".claude")) ? PI_RULES_DIR : CLAUDE_RULES_DIR;
+  const present = projectRulesLayout((layout) => presentLayouts.includes(layout));
+  if (present !== null) return join(PROJECT_ROOT, present);
+  const piOnly = existsSync(join(PROJECT_ROOT, ".pi")) && !existsSync(join(PROJECT_ROOT, ".claude"));
+  return join(PROJECT_ROOT, piOnly ? PI_PROJECT_RULES_DIR : CLAUDE_PROJECT_RULES_DIR);
 }
 
 const RULES_DIR = selectRulesDir();
-
-/** The rule files (and config.json) that differ between the two harness copies, or none. */
-function harnessDivergence(): string[] {
-  if (!existsSync(CLAUDE_RULES_DIR) || !existsSync(PI_RULES_DIR)) return [];
-  const jsonFiles = (dir: string): string[] => readdirSync(dir).filter((name) => name.endsWith(".json")).sort();
-  const names = [...new Set([...jsonFiles(CLAUDE_RULES_DIR), ...jsonFiles(PI_RULES_DIR)])].sort();
-  const bytes = (dir: string, name: string): string | null =>
-    existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf-8") : null;
-  return names.filter((name) => bytes(CLAUDE_RULES_DIR, name) !== bytes(PI_RULES_DIR, name));
-}
 
 // ---------------------------------------------------------------------------
 // File walker — everything lintable, minus the project's explicit exclusions
@@ -330,9 +320,8 @@ function baselineDrift(config: LinterConfig.ProgrammaticConfig): string[] {
 /**
  * Record every site each baselined rule flags today as that rule's baseline,
  * so a project adopts the totality rules without every pre-existing switch
- * blocking the next edit to its file. Written into `config.json` of EVERY
- * harness rules directory the project has (a project used from both harnesses
- * keeps the two in step), creating the file when absent. Which sites are
+ * blocking the next edit to its file. Written into the project's one
+ * `config.json`, creating it when absent. Which sites are
  * recorded and what the next config holds are the engine's pure decision
  * (`recordedBaselines`, `configWithBaselines`: every other field kept, an
  * empty list removed rather than written); this shell only walks, reads and
@@ -351,20 +340,13 @@ function writeBaseline(config: LinterConfig.ProgrammaticConfig): void {
     .map((file) => ({ path: projectPath(file), content: readFileSync(file, "utf-8") }));
   const recorded = recordedBaselines(projectOwners, sources);
 
-  const harnessDirs = PROJECT_RULES_LAYOUTS
-    .map((layout) => join(PROJECT_ROOT, layout))
-    .filter((dir) => existsSync(dir));
-  const targets = harnessDirs.length > 0 ? harnessDirs : [RULES_DIR];
-  for (const dir of targets) {
-    mkdirSync(dir, { recursive: true });
-    const path = join(dir, "config.json");
-    // Parse through the engine's loader first, so a malformed config fails here
-    // exactly as it would fail the hook, instead of being silently rewritten.
-    loadProjectConfig(dir);
-    const existing: Record<string, unknown> = existsSync(path) ? JSON.parse(readFileSync(path, "utf-8")) : {};
-    writeFileSync(path, `${JSON.stringify(configWithBaselines(existing, recorded), null, 2)}\n`);
-    console.log(`✓ ${relative(PROJECT_ROOT, path)}: ${recorded.map(({ configKey, keys }) => `${configKey} ${keys.length}`).join(", ")}`);
-  }
+  mkdirSync(RULES_DIR, { recursive: true });
+  const path = join(RULES_DIR, "config.json");
+  // The config was already parsed through the engine's loader (`projectConfig`),
+  // so a malformed one failed the run instead of being silently rewritten.
+  const existing: Record<string, unknown> = existsSync(path) ? JSON.parse(readFileSync(path, "utf-8")) : {};
+  writeFileSync(path, `${JSON.stringify(configWithBaselines(existing, recorded), null, 2)}\n`);
+  console.log(`✓ ${relative(PROJECT_ROOT, path)}: ${recorded.map(({ configKey, keys }) => `${configKey} ${keys.length}`).join(", ")}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -378,11 +360,8 @@ if (opts.init) {
   process.exit(0);
 }
 
-// The two harness copies must agree before either is trusted: each hook reads
-// its own, so a divergence means this run and one hook enforce different rules.
-const diverged = harnessDivergence();
-if (diverged.length > 0) {
-  console.error(`ERROR: ${CLAUDE_PROJECT_RULES_DIR} and ${PI_PROJECT_RULES_DIR} differ in: ${diverged.join(", ")} — each harness's hook reads its own copy, so they must be byte-identical`);
+if (presentLayouts.length > 1) {
+  console.error(`ERROR: the project carries ${presentLayouts.join(" and ")} — keep one rules directory (both harnesses read ${presentLayouts[0]}); delete the other`);
   process.exit(2);
 }
 

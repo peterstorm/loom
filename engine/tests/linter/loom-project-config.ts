@@ -31,8 +31,8 @@ export const LOOM_BOUNDARY_OPTIONS: BoundaryOptions = boundaryOptions(LOOM_CONFI
  * ADR-0042 (G5b INV-1, amended by G2 AD-6): the only modules through which the
  * TypeScript compiler API enters engine code. The one list is the boundary
  * grants in config.json — every file granted the exact `typescript`
- * specifier. machine-purity's closure audit and the INV-1 regex rule's
- * `excludePatterns` mirror both derive from or are checked against this.
+ * specifier, enforced by the import-boundary rule. machine-purity's closure
+ * audit derives from this.
  */
 export const TYPESCRIPT_COMPILER_API_SEAMS: readonly string[] = Object.freeze(
   LOOM_BOUNDARIES.flatMap((boundary) => Object.entries(boundary.perFileExactAllow ?? {}))

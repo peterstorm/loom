@@ -283,9 +283,9 @@ Per component, not global.
   (uppercase, numeric, colon); labels like `**Machine file:**` at column 0,
   colon inside the bold, never as bullets. Machine-file paths repo-relative.
   Close every code fence — an unterminated fence hides everything after it.
-- Rule files go in the project rules dir: `.claude/linter/rules/` (or
-  `.pi/linter/rules/` under the pi harness) — the linter loads only from the
-  harness-appropriate dir.
+- Rule files go in the project's one rules dir: `.claude/linter/rules/`, which
+  both harnesses read (`.pi/linter/rules/` only in a Pi-only project that has
+  no `.claude/linter/rules/`; never both).
 - **Invariant ownership** — every `INV-N` declares `**Owner module:**`. Owned:
   `**Sibling entry points:**` (`- path — note` lines, or `none`) and
   `**Matrix test:**`. Unowned: `**Owner module:** none` plus

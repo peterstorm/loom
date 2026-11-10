@@ -3,8 +3,8 @@
  * rules.
  *
  * Read from `config.json` INSIDE the project rules directory —
- * `.claude/linter/rules/config.json` (Claude Code) or
- * `.pi/linter/rules/config.json` (Pi), beside the project's rule files — by
+ * `.claude/linter/rules/config.json`, or `.pi/linter/rules/config.json` in a
+ * project without it (`projectRulesLayout`), beside the project's rule files — by
  * the loader shell (`loadProjectConfig` in `../loader.ts`). This module is the
  * pure half: the schema, and the one parse from JSON to a config value.
  *
@@ -94,16 +94,22 @@ export type ConfigParse =
   | Readonly<{ ok: false; error: string }>;
 
 /**
- * The project rules directory layouts, relative to the project root: Claude
- * Code reads `.claude/linter/rules`, Pi reads `.pi/linter/rules`. Owned here;
- * `PROJECT_RULES_DIR` in `engine/src/config.ts` picks one per harness.
- * Claude Code's layout is listed first: where a project carries both, it is
- * the canonical copy (`scripts/lint-project.ts` reads it and refuses a Pi twin
- * whose config differs).
+ * The project rules directory layouts, relative to the project root, in the
+ * order a project's ONE rules directory is looked up. The lookup is the same
+ * under every harness: Claude Code and Pi both read `.claude/linter/rules`
+ * when a project has it, so a project used from both keeps a single copy.
+ * `.pi/linter/rules` is read only in a project without the Claude Code layout.
+ * A project carrying both is ambiguous: `scripts/lint-project.ts` refuses it
+ * rather than silently ignoring the second.
  */
 export const CLAUDE_PROJECT_RULES_DIR = ".claude/linter/rules";
 export const PI_PROJECT_RULES_DIR = ".pi/linter/rules";
 export const PROJECT_RULES_LAYOUTS: readonly string[] = Object.freeze([CLAUDE_PROJECT_RULES_DIR, PI_PROJECT_RULES_DIR]);
+
+/** The layout a project's rules are read from: the first one present, or null
+ *  when the project has none. Pure — the caller owns the presence probe. */
+export const projectRulesLayout = (isPresent: (layout: string) => boolean): string | null =>
+  PROJECT_RULES_LAYOUTS.find(isPresent) ?? null;
 
 /**
  * The root of the project a rules directory belongs to — the frame its

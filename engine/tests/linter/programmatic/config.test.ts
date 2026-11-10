@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   parseProjectConfig,
   projectRootOf,
+  projectRulesLayout,
   EMPTY_CONFIG,
   PROGRAMMATIC_CONFIG_KEYS,
   type ProgrammaticConfig,
@@ -234,13 +235,11 @@ describe("scoping config: exclusions, purity roots and shells, governance", () =
       .toMatchObject({ ok: false, error: expect.stringContaining("outside 'src/a/'") });
   });
 
-  it("Loom's own config parses under the strict loader, in both harness copies", () => {
+  it("Loom's own config parses under the strict loader", () => {
     const repo = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
-    for (const layout of [".claude/linter/rules", ".pi/linter/rules"]) {
-      const config = loadProjectConfig(join(repo, layout));
-      expect(config.requireGovernance, layout).toEqual(["engine/src/"]);
-      expect(config.exclude?.length, layout).toBeGreaterThan(0);
-    }
+    const config = loadProjectConfig(join(repo, ".claude/linter/rules"));
+    expect(config.requireGovernance).toEqual(["engine/src/"]);
+    expect(config.exclude?.length).toBeGreaterThan(0);
   });
 
   // Both fields were declared on ProgrammaticConfig and read by
@@ -365,6 +364,15 @@ describe("totality config: scope, baselines and the project root they are writte
     expect(projectRootOf(`/work/shop/${layout}`)).toBe("/work/shop");
     expect(projectRootOf("/work/shop/lint")).toBeNull();
     expect(projectRootOf(null)).toBeNull();
+  });
+
+  it.each([
+    [[], null],
+    [[".pi/linter/rules"], ".pi/linter/rules"],
+    [[".claude/linter/rules"], ".claude/linter/rules"],
+    [[".claude/linter/rules", ".pi/linter/rules"], ".claude/linter/rules"],
+  ] as const)("reads ONE rules directory, the same under every harness: present %j → %s", (present, expected) => {
+    expect(projectRulesLayout((layout) => (present as readonly string[]).includes(layout))).toBe(expected);
   });
 
   it("excuses a target project's baselined switch through the production loader, and only that one", () => {

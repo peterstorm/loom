@@ -165,3 +165,27 @@ INV-1 now names exactly three.)
 - Parse-only means no type information. Mutation operators and edge extraction are syntactic. If a future
   need arises for type-aware mutation or `tsconfig`-driven resolution beyond `baseUrl`/`paths`, it must be
   solved in the shell or by a new ADR. Reaching for a Program inside the seams is not allowed.
+
+## Amendment (2026-11-10): the boundary grants are the one seam declaration; the regex rule is gone
+`.claude/linter/rules/inv-1-typescript-compiler-api-seam.json` and its `.pi` mirror were deleted. The rule
+restated the seam list that the `perFileExactAllow: {"typescript"}` grants in
+`.claude/linter/rules/config.json` already declare, and a mirror test existed only to pin the two together.
+The project also no longer keeps a `.pi/linter/rules` twin: both harnesses read one rules directory, so there
+is no second copy to mirror. What changes in the decision above:
+- **One seam declaration, one enforcement point in the linter.** The boundary grants in
+  `.claude/linter/rules/config.json` are the seam list. `no-cross-boundary-imports` enforces it under
+  `requireGovernance: ["engine/src/"]`: every file under `engine/src/` must belong to a boundary, no
+  boundary's `allow` admits `typescript`, and each seam (`import-graph.ts`, `mutation-plan.ts`,
+  `ts-surface.ts`) holds an exact-specifier grant, so a `typescript/…` subpath is refused even there. The
+  machine-purity closure audit remains the second enforcement point. Read "three enforcement points" above as
+  these two.
+- **`TYPESCRIPT_COMPILER_API_SEAMS` is derived, not declared.** It now lives in
+  `engine/tests/linter/loom-project-config.ts` and is computed from those grants, so it cannot drift from
+  them. `machine-purity.test.ts` still reads it.
+- **Tests moved.** `engine/tests/linter/project-lint-rules.test.ts` ("the TypeScript compiler API enters only
+  through its seams") runs the boundary rule against every refused spelling (`from`, `require`, `import()`,
+  bare side-effect import, subpath) in a non-seam file and in each seam. The mirror test is gone with the
+  mirror.
+- **Scope.** The regex rule also matched files outside `engine/src/` (`pi/`, `scripts/`). The invariant this
+  ADR states is about engine code, which the governed boundaries cover in full. The negative consequence
+  about multi-line imports slipping past the regex no longer applies: the boundary rule parses imports.

@@ -328,7 +328,7 @@ Loom’s linter is automatic and fail-closed.
 | Immediate | after Edit/Write | project/default regex rules; per-file deadline |
 | Full | Wave Gate or explicit scan | regex plus programmatic structural rules |
 
-Bundled programmatic rules enforce bounded-context imports, I/O-free pure modules, maximum function length, and Fugue generated-structure integrity. Project configuration lives under `.claude/linter/` or `.pi/linter/`. The project scan lints everything — tests included — minus an explicit, reasoned `exclude` list, and runs inside `npm run verify`.
+Bundled programmatic rules enforce bounded-context imports, I/O-free pure modules, maximum function length, and Fugue generated-structure integrity. Project configuration lives in one rules directory, `.claude/linter/rules/`, which both Claude Code and Pi read (`.pi/linter/rules/` only in a Pi-only project without it). The project scan lints everything — tests included — minus an explicit, reasoned `exclude` list, and runs inside `npm run verify`.
 
 ```bash
 bun scripts/lint-project.ts [path]

@@ -52,7 +52,7 @@ for every rule at once.
 | `--no-fix-hints` | Hide fix hints |
 | `--no-baseline-check` | Skip the staleness pass |
 | `--write-baseline` | Record pre-existing totality sites in `config.json`, then exit |
-| `--init` | Scaffold `.claude/linter/rules/config.json` |
+| `--init` | Scaffold `.claude/linter/rules/config.json` (`.pi/linter/rules/` in a project with `.pi` and no `.claude`) |
 
 ## What fails the run
 
@@ -64,17 +64,24 @@ pure root, or a per-file capability grant for a file that no longer exists.
 Every list that subtracts from the linter's reach is checked for decay.
 
 Exit 2 when the run cannot be trusted at all: a `config.json` the strict parser
-refuses (an unknown key is refused by name), or `.claude/linter/rules` and
-`.pi/linter/rules` that hold different rule files.
+refuses (an unknown key is refused by name), or a project that carries both
+`.claude/linter/rules` and `.pi/linter/rules` ("keep one rules directory").
 
 ## Project root and rules directory
 
 The project root is the nearest ancestor holding `.claude/linter/rules` or
 `.pi/linter/rules`, else the nearest holding `.git` — so running from a
 subdirectory with its own `package.json` (such as `engine/`) still lints the
-whole repository under its rules. The runner reads `.claude/linter/rules` when
-present (the canonical copy), else `.pi/linter/rules`. Each harness's edit hook
-reads its own copy, which is why the two must be byte-identical.
+whole repository under its rules. A project has ONE rules directory, and the
+lookup does not depend on the harness: `.claude/linter/rules` when present,
+else `.pi/linter/rules` (a Pi-only project). Claude Code's edit hook, Pi's
+post-edit lint, the Wave Gate lint, `helper validate-lint-rules` with no
+argument and this runner all read that same directory, so there is no second
+copy to keep in step. A project carrying both layouts is refused (exit 2): the
+hooks read only `.claude/linter/rules`, so the `.pi` twin would look enforced
+while nothing reads it. `--write-baseline` writes only the one directory;
+`--init` creates `.claude/linter/rules` unless the project has a `.pi`
+directory and no `.claude` one.
 
 ## Important Notes
 

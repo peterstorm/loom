@@ -53,8 +53,8 @@ describe("Pi harness detection", () => {
         writeFileSync(join(root, presentGraph), JSON.stringify(resolveInitialState({}, root)));
       }
       const run = spawnSync(BUN, ["-e", [
-        `import { HARNESS, TASK_GRAPH_PATH, PROJECT_RULES_DIR } from ${JSON.stringify(CONFIG_URL)};`,
-        "console.log(JSON.stringify({ HARNESS, TASK_GRAPH_PATH, PROJECT_RULES_DIR }));",
+        `import { HARNESS, TASK_GRAPH_PATH } from ${JSON.stringify(CONFIG_URL)};`,
+        "console.log(JSON.stringify({ HARNESS, TASK_GRAPH_PATH }));",
       ].join(" ")], {
         cwd: root,
         env: { ...discoveryEnv(), PI_CODING_AGENT: "true" },
@@ -65,7 +65,6 @@ describe("Pi harness detection", () => {
       expect(JSON.parse(run.stdout)).toEqual({
         HARNESS: "pi",
         TASK_GRAPH_PATH: expectedPath,
-        PROJECT_RULES_DIR: ".pi/linter/rules",
       });
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -118,6 +117,36 @@ describe("Pi harness detection", () => {
     }
   });
 });
+
+describe("project rules directory", () => {
+  const HARNESS_ENVS: readonly (readonly [string, NodeJS.ProcessEnv])[] = [
+    ["Claude Code", {}],
+    ["Pi", { PI_CODING_AGENT: "true" }],
+  ];
+  const rulesDirIn = (root: string, harnessEnv: NodeJS.ProcessEnv): unknown => {
+    const run = spawnSync(BUN, ["-e", [
+      `import { projectRulesDir } from ${JSON.stringify(CONFIG_URL)};`,
+      "console.log(JSON.stringify(projectRulesDir()));",
+    ].join(" ")], { cwd: root, env: { ...discoveryEnv(), ...harnessEnv }, encoding: "utf-8" });
+    expect(run.status, run.stderr).toBe(0);
+    return JSON.parse(run.stdout);
+  };
+
+  it.each(HARNESS_ENVS)("is the same directory under %s: the Claude Code layout first, else the Pi one, else none", (_harness, harnessEnv) => {
+    const root = canonicalTempDir("loom-project-rules-");
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: root });
+      expect(rulesDirIn(root, harnessEnv)).toBeNull();
+      mkdirSync(join(root, ".pi", "linter", "rules"), { recursive: true });
+      expect(rulesDirIn(root, harnessEnv)).toBe(join(root, ".pi/linter/rules"));
+      mkdirSync(join(root, ".claude", "linter", "rules"), { recursive: true });
+      expect(rulesDirIn(root, harnessEnv)).toBe(join(root, ".claude/linter/rules"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 
 describe("TaskGraph repository-root discovery", () => {
   const configScript = `import { TASK_GRAPH_PATH } from ${JSON.stringify(CONFIG_URL)}; console.log(TASK_GRAPH_PATH);`;

@@ -69,7 +69,7 @@ import { realPhaseOrderDeps } from "../engine/src/handlers/pre-tool-use/validate
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 import { admitPiSpawnBatch } from "../engine/src/core/spawn-admission";
 
-import { taskGraphPath, subagentDir, guardedLocations, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
+import { taskGraphPath, subagentDir, guardedLocations, projectRulesDir, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
 import { currentOrchestrationStatus } from "../engine/src/handlers/helpers/orchestration";
@@ -652,10 +652,7 @@ export default function (
       const loomDefaultRulesDir = join(PACKAGE_ROOT, "lint-rules");
       const composed = await piPostEdit(event, {
         projectRoot,
-        lint: (filePath) => {
-          const projectRulesPath = join(projectRoot, PROJECT_RULES_DIR);
-          return lintFile(filePath, "immediate", loomDefaultRulesDir, pathExistsFailClosed(projectRulesPath) ? projectRulesPath : null);
-        },
+        lint: (filePath) => lintFile(filePath, "immediate", loomDefaultRulesDir, projectRulesDir(projectRoot)),
         advise: (file) => typeDiagnosticsAdvisory(file),
         notifyOperator: piOperatorNoteSink(ctx, writeStderrLine),
       });

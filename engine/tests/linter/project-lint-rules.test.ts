@@ -1,56 +1,33 @@
-import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { executeRules } from "../../src/linter/executor";
 import { loadRules } from "../../src/linter/loader";
-import { TYPESCRIPT_COMPILER_API_SEAMS } from "./loom-project-config";
+import { handler as boundaryRule, underPrefix } from "../../src/linter/programmatic/no-cross-boundary-imports";
+import { LOOM_BOUNDARIES, LOOM_BOUNDARY_OPTIONS, TYPESCRIPT_COMPILER_API_SEAMS } from "./loom-project-config";
 
 /**
  * This repository's own project lint rules (INV-1: strict sampling is only ever preferred, never required;
- * INV-2/4/6/8: G4 slice 2's single-owner rules).
- * Each harness loads exactly ONE project rules directory (`PROJECT_RULES_DIR`
- * in engine/src/config.ts: `.pi/linter/rules` under Pi,
- * `.claude/linter/rules` under Claude Code), so each invariant must be present
- * in both — with one owner. `.claude/linter/rules` holds the canonical rule
- * files; every `.pi/linter/rules` entry is a byte-identical regular-file copy
- * of its canonical twin, and this suite fails the moment the two diverge. A
- * symlink would be the tighter tie, but registered remediation refuses to
- * install symlinked paths, so the copy plus this parity check is the owner.
+ * INV-2/4/6/8: G4 slice 2's single-owner rules), read from its ONE rules
+ * directory: both harnesses' edit hooks look the directory up the same way
+ * (`projectRulesLayout`), so Claude Code and Pi enforce the same files.
  */
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const DEFAULT_RULES_DIR = join(REPO_ROOT, "lint-rules");
 const CANONICAL = join(REPO_ROOT, ".claude/linter/rules");
-const PI = join(REPO_ROOT, ".pi/linter/rules");
 
-const ruleFiles = (dir: string): readonly string[] => readdirSync(dir).filter((name) => name.endsWith(".json")).sort();
-
-describe("project lint rules: one source for both harnesses", () => {
-  it("both harness directories carry the same rule set", () => {
-    expect(ruleFiles(CANONICAL)).toContain("inv-1-no-strict-require-constraint.json");
-    expect(ruleFiles(PI)).toEqual(ruleFiles(CANONICAL));
-  });
-
-  it("every Pi rule is a regular-file, byte-identical copy of its canonical Claude Code rule", () => {
-    for (const name of ruleFiles(PI)) {
-      expect(lstatSync(join(PI, name)).isFile(), name).toBe(true);
-      expect(readFileSync(join(PI, name)), name).toEqual(readFileSync(join(CANONICAL, name)));
-    }
-  });
-
-  it("loads the identical INV-1 rule under either harness", () => {
-    const inv1 = (projectDir: string) => loadRules(DEFAULT_RULES_DIR, projectDir, "full", { includeProgrammatic: false })
-      .find((rule) => rule.name === "inv-1-no-strict-require-constraint");
-    const claude = inv1(CANONICAL);
-    expect(claude).toMatchObject({ kind: "regex", enabled: true });
-    expect(inv1(PI)).toEqual(claude);
+describe("project lint rules: one directory for both harnesses", () => {
+  it("the repository carries its rules once, in the Claude Code layout both harnesses read first", () => {
+    expect(existsSync(CANONICAL)).toBe(true);
+    expect(existsSync(join(REPO_ROOT, ".pi/linter/rules"))).toBe(false);
   });
 });
 
 /**
  * The G4 slice 2 ownership rules (INV-2, INV-4, INV-6, INV-8), each run
- * through the production loader and executor under both harness directories:
+ * through the production loader and executor:
  * the line it exists to refuse is refused outside its owner, the owner and
  * test files are exempt, and the owner's own sanctioned spelling passes.
  */
@@ -96,80 +73,81 @@ const OWNERSHIP_RULES: readonly OwnershipRow[] = [
     allowed: "return parseReportSummary(total, failed, source, files);\nreturn parseReportCounts(total, failed, source);",
     owners: ["engine/src/core/structured-test-report.ts"],
   },
-  {
-    // G5b INV-1 (ADR-0042): a prohibition with exempt seams rather than an owner;
-    // the seams play the owner's part here. Every spelling of the edge is refused,
-    // the bare side-effect import included, and a package merely prefixed
-    // `typescript` is not.
-    rule: "inv-1-typescript-compiler-api-seam",
-    refused: [
-      "import ts from \"typescript\";",
-      "import type { SourceFile } from 'typescript';",
-      "export * from \"typescript/lib/tsserverlibrary\";",
-      "import \"typescript\";",
-      "import 'typescript/lib/tsserverlibrary';",
-      "const ts = require(\"typescript\");",
-      "const ts = await import(\"typescript\");",
-    ].join("\n"),
-    allowed: "import { mutationPlan } from \"../core/owner-verification/mutation-plan\";\nimport \"typescript-eslint\";",
-    owners: TYPESCRIPT_COMPILER_API_SEAMS,
-  },
 ];
 
 const noDeadline = (): void => undefined;
 
 describe("project lint rules: the G4 slice 2 ownership rules refuse a second owner", () => {
   it.each(OWNERSHIP_RULES)("$rule refuses each line outside its owners, and spares its owners, test files and the sanctioned call", (row) => {
-    for (const projectDir of [CANONICAL, PI]) {
-      const rule = loadRules(DEFAULT_RULES_DIR, projectDir, "full", { includeProgrammatic: false })
-        .find(({ name }) => name === row.rule);
-      expect(rule, `${row.rule} under ${projectDir}`).toMatchObject({ kind: "regex", enabled: true });
-      if (rule === undefined) return;
-      const lint = (path: string, content: string): readonly number[] =>
-        executeRules([rule], join(REPO_ROOT, path), content, noDeadline).map(({ line }) => line);
+    const rule = loadRules(DEFAULT_RULES_DIR, CANONICAL, "full", { includeProgrammatic: false })
+      .find(({ name }) => name === row.rule);
+    expect(rule, row.rule).toMatchObject({ kind: "regex", enabled: true });
+    if (rule === undefined) return;
+    const lint = (path: string, content: string): readonly number[] =>
+      executeRules([rule], join(REPO_ROOT, path), content, noDeadline).map(({ line }) => line);
 
-      const refusedLines = row.refused.split("\n").map((_line, index) => index + 1);
-      expect(lint("engine/src/handlers/elsewhere.ts", row.refused)).toEqual(refusedLines);
-      expect(lint("engine/src/handlers/elsewhere.ts", row.allowed)).toEqual([]);
-      expect(lint("engine/tests/handlers/elsewhere.test.ts", row.refused)).toEqual([]);
-      for (const owner of row.owners) expect(lint(owner, row.refused), owner).toEqual([]);
-    }
+    const refusedLines = row.refused.split("\n").map((_line, index) => index + 1);
+    expect(lint("engine/src/handlers/elsewhere.ts", row.refused)).toEqual(refusedLines);
+    expect(lint("engine/src/handlers/elsewhere.ts", row.allowed)).toEqual([]);
+    expect(lint("engine/tests/handlers/elsewhere.test.ts", row.refused)).toEqual([]);
+    for (const owner of row.owners) expect(lint(owner, row.refused), owner).toEqual([]);
   });
 });
 
-describe("project lint rules: the INV-1 TypeScript seam rule mirrors the one seam list", () => {
-  it("each harness copy exempts exactly TYPESCRIPT_COMPILER_API_SEAMS, plus test files", () => {
-    for (const dir of [CANONICAL, PI]) {
-      const rule = JSON.parse(readFileSync(join(dir, "inv-1-typescript-compiler-api-seam.json"), "utf-8")) as { excludePatterns: readonly string[] };
-      const seams = rule.excludePatterns.filter((pattern) => pattern !== ".test.ts");
-      expect(rule.excludePatterns, dir).toContain(".test.ts");
-      expect([...seams].sort(), dir).toEqual([...TYPESCRIPT_COMPILER_API_SEAMS].sort());
-    }
-  });
+/**
+ * G5b INV-1 (ADR-0042, amended by ADR-0053): the TypeScript compiler API
+ * enters engine code through exactly the seams granted the `typescript`
+ * specifier in config.json's boundaries — the one declaration. The import
+ * boundary rule enforces it: every file under `engine/src/` is governed
+ * (`requireGovernance`), no boundary allows `typescript`, and a seam's grant is
+ * exact, so a `typescript/...` subpath is refused even there.
+ */
+describe("project lint rules: the TypeScript compiler API enters only through its seams", () => {
+  const SPELLINGS: readonly string[] = [
+    "import ts from \"typescript\";",
+    "import type { SourceFile } from 'typescript';",
+    "import \"typescript\";",
+    "const ts = require(\"typescript\");",
+    "const ts = await import(\"typescript\");",
+  ];
+  const SUBPATHS: readonly string[] = [
+    "export * from \"typescript/lib/tsserverlibrary\";",
+    "import 'typescript/lib/tsserverlibrary';",
+  ];
+  const refusedLines = (file: string, content: string): readonly number[] =>
+    boundaryRule(content, file, LOOM_BOUNDARIES, LOOM_BOUNDARY_OPTIONS).map(({ line }) => line);
 
-  it("G2 AD-6: the seams are exactly mutation-plan, import-graph and the skeleton ts-surface, in both copies", () => {
-    const THREE_SEAMS = [
+  it("G2 AD-6: the seams are exactly mutation-plan, import-graph and the skeleton ts-surface", () => {
+    expect([...TYPESCRIPT_COMPILER_API_SEAMS].sort()).toEqual([
       "engine/src/core/owner-verification/import-graph.ts",
       "engine/src/core/owner-verification/mutation-plan.ts",
       "engine/src/core/skeleton/ts-surface.ts",
-    ];
-    expect([...TYPESCRIPT_COMPILER_API_SEAMS].sort()).toEqual(THREE_SEAMS);
-    for (const dir of [CANONICAL, PI]) {
-      const rule = JSON.parse(readFileSync(join(dir, "inv-1-typescript-compiler-api-seam.json"), "utf-8")) as { excludePatterns: readonly string[] };
-      expect([...rule.excludePatterns].sort(), dir).toEqual([".test.ts", ...THREE_SEAMS].sort());
+    ]);
+  });
+
+  it("no boundary allows typescript to every file it governs", () => {
+    for (const boundary of LOOM_BOUNDARIES) {
+      expect(boundary.allow.filter((prefix) => underPrefix("typescript", prefix) || underPrefix("typescript/lib/typescript", prefix)), boundary.module).toEqual([]);
     }
   });
 
-  it("G2 AD-6: the skeleton seam may import typescript, and its sibling skeleton modules may not", () => {
-    for (const projectDir of [CANONICAL, PI]) {
-      const rule = loadRules(DEFAULT_RULES_DIR, projectDir, "full", { includeProgrammatic: false })
-        .find(({ name }) => name === "inv-1-typescript-compiler-api-seam");
-      if (rule === undefined) throw new Error(`inv-1-typescript-compiler-api-seam missing under ${projectDir}`);
-      const lint = (path: string): readonly number[] =>
-        executeRules([rule], join(REPO_ROOT, path), "import ts from \"typescript\";", noDeadline).map(({ line }) => line);
-      expect(lint("engine/src/core/skeleton/ts-surface.ts"), projectDir).toEqual([]);
-      expect(lint("engine/src/core/skeleton/java-surface.ts"), projectDir).toEqual([1]);
-      expect(lint("engine/src/core/skeleton/generate.ts"), projectDir).toEqual([1]);
-    }
+  it.each([
+    "engine/src/handlers/elsewhere.ts",
+    "engine/src/orchestration/elsewhere.ts",
+    "engine/src/linter/elsewhere.ts",
+    "engine/src/core/skeleton/java-surface.ts",
+    "engine/src/core/owner-verification/elsewhere.ts",
+  ])("refuses every spelling of the edge, subpaths included, from %s", (file) => {
+    const content = [...SPELLINGS, ...SUBPATHS].join("\n");
+    expect(refusedLines(file, content)).toEqual(content.split("\n").map((_line, index) => index + 1));
+  });
+
+  it("refuses a new engine module no boundary governs, whatever it imports", () => {
+    expect(refusedLines("engine/src/new-root-module.ts", SPELLINGS[0] ?? "")).toEqual([1]);
+  });
+
+  it.each([...TYPESCRIPT_COMPILER_API_SEAMS])("admits the exact specifier, in every spelling, in the seam %s — and no subpath", (seam) => {
+    expect(refusedLines(seam, SPELLINGS.join("\n"))).toEqual([]);
+    expect(refusedLines(seam, SUBPATHS.join("\n"))).toEqual([1, 2]);
   });
 });

@@ -14,7 +14,7 @@
 import { lstatSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { HookHandler, HookResult, Task } from "../../types";
-import { TASK_GRAPH_PATH, DEFAULT_RULES_DIR, PROJECT_RULES_DIR } from "../../config";
+import { TASK_GRAPH_PATH, DEFAULT_RULES_DIR, projectRulesDir } from "../../config";
 import { StateManager } from "../../state-manager";
 import { lintFiles as lintFilesBatch, formatOutput, formatBlockMessage } from "../../linter/index";
 import type { LintResult, LintOutput } from "../../linter/index";
@@ -202,7 +202,7 @@ export function runFullTierWaveLint(tasks: readonly Task[], runtimeRoot: string 
     const root = repositoryRoot() ?? process.cwd();
     const existingFiles = resolveLintTargets(root, collectModifiedFiles(tasks));
     if (existingFiles.length === 0) return { kind: "allow" };
-    return withRuntimeSkewNote(aggregateResults(lintFiles(existingFiles, DEFAULT_RULES_DIR, PROJECT_RULES_DIR)), root, runtimeRoot);
+    return withRuntimeSkewNote(aggregateResults(lintFiles(existingFiles, DEFAULT_RULES_DIR, projectRulesDir(root))), root, runtimeRoot);
   } catch (error) {
     return engineError(error);
   }

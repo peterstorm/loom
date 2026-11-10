@@ -38,7 +38,7 @@ function makeStdin(overrides: Record<string, unknown> = {}): string {
 
 /**
  * We test the handler by importing it directly.
- * The handler uses config.ts for DEFAULT_RULES_DIR/PROJECT_RULES_DIR,
+ * The handler uses config.ts for DEFAULT_RULES_DIR/projectRulesDir,
  * so we test behavior that doesn't depend on actual rule files existing
  * (passthrough, tool filtering, error handling) plus integration with
  * the actual linter for files that exist.

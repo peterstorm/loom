@@ -30,7 +30,7 @@ import { frozenSet } from "./core/frozen";
 import { UTILITY_AGENTS } from "./core/phase-policy";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
 import { guardedDirsOf, protectedDirsOf, type GuardedLocations } from "./core/guarded-locations";
-import { CLAUDE_PROJECT_RULES_DIR, PI_PROJECT_RULES_DIR } from "./linter/programmatic/config";
+import { projectRulesLayout } from "./linter/programmatic/config";
 import { projectRootForStateFile } from "./core/phase-artifact-paths";
 import { observeGitProbe, type GitProbeStep } from "./utils/git-probe";
 import { observePathPresence } from "./utils/path-presence";
@@ -620,7 +620,10 @@ export const typeDiagnosticsCacheDir = (env: Readonly<Record<string, string | un
   env.LOOM_TYPE_DIAGNOSTICS_CACHE ??
   join(env.XDG_CACHE_HOME ?? join(env.HOME ?? tmpdir(), ".cache"), "loom", "type-diagnostics");
 
-/** Project-local rules directory — resolved relative to repo root. The two
- *  layouts are the linter's (`linter/programmatic/config.ts`), which also
- *  derives a project's root from them. */
-export const PROJECT_RULES_DIR = HARNESS === "pi" ? PI_PROJECT_RULES_DIR : CLAUDE_PROJECT_RULES_DIR;
+/** The project's rules directory under `root` (default: cwd), or null when it
+ *  has none. Harness-independent: the lookup order is the linter's
+ *  (`projectRulesLayout`), so Claude Code and Pi read the same directory. */
+export const projectRulesDir = (root: string = process.cwd()): string | null => {
+  const layout = projectRulesLayout((candidate) => pathExistsFailClosed(join(root, candidate)));
+  return layout === null ? null : join(root, layout);
+};

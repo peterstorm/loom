@@ -16,7 +16,7 @@
 import type { HookHandler } from "../../types";
 import { allowResult, blockResult, passthroughResult } from "../../types";
 import { lintFile, formatOutput, formatBlockMessage } from "../../linter/index";
-import { DEFAULT_RULES_DIR, PROJECT_RULES_DIR } from "../../config";
+import { DEFAULT_RULES_DIR, projectRulesDir } from "../../config";
 import { editedFilePath } from "../../core/tool-vocabulary";
 import { match } from "ts-pattern";
 
@@ -52,11 +52,9 @@ const handler: HookHandler = async (stdin) => {
       return blockResult("Lint hook error: Could not extract file_path from tool_input");
     }
 
-    // Resolve project rules dir (may not exist — lintFile handles gracefully)
-    const projectRulesDir = PROJECT_RULES_DIR;
-
-    // Invoke linter with immediate tier (fast, PostEdit rules only)
-    const result = lintFile(filePath, "immediate", DEFAULT_RULES_DIR, projectRulesDir);
+    // Invoke linter with immediate tier (fast, PostEdit rules only), against
+    // the project's one rules directory when it has one
+    const result = lintFile(filePath, "immediate", DEFAULT_RULES_DIR, projectRulesDir());
 
     // Map LintResult to HookResult
     return match(result)

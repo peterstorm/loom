@@ -56,8 +56,8 @@ const PLAN_ARTIFACT_ROOT = ".claude/plans";
  *  non-writer (decompose is read-only and receives no grant even when its
  *  prompt names artifact paths). Architecture writes the plan, may write under
  *  the spec tree (`{slug}/`, and panel-run dirs in finalize), and writes
- *  checkable-invariant lint rules into the harness's rules dir
- *  (`.claude/linter/rules/`, or `.pi/linter/rules/` under Pi). Every other
+ *  checkable-invariant lint rules into the project's one rules dir
+ *  (`.claude/linter/rules/`, or `.pi/linter/rules/` in a Pi-only project). Every other
  *  writing phase writes only into the spec tree — plan-alignment's report goes
  *  to `{spec_dir}`. */
 const PHASE_ARTIFACT_ROOTS: Readonly<Partial<Record<Phase, readonly string[]>>> = Object.freeze({
