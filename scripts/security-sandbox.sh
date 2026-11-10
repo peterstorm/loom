@@ -24,7 +24,9 @@
 #   * the enforcement facts travel on the inner shell's stdout, never through a
 #     file in the writable scratch (the command can write the scratch), and no
 #     process inside the sandbox holds that stream once the command starts —
-#     see the `exec 1>/dev/null` site below for why.
+#     see the `exec 1>/dev/null` site below for why;
+#   * no descriptor the caller opened reaches the command: every inherited fd
+#     above 2 is closed before it starts.
 # The nonce BINDS a receipt to the artifact path it was produced for; it does
 # not authenticate it. A hunter that writes the artifact itself could still
 # forge one — the receipt defeats an accidental or command-printed receipt, not
@@ -219,10 +221,20 @@ INNER_REPORT="$(unshare --map-root-user --mount --net --pid --fork --mount-proc 
     # pipe the command could reopen it as /proc/1/fd/1 and append a facts line
     # of its own — which is why the outer capture takes the FIRST facts line, the
     # one printed before the command existed, and treats any later one as a
-    # forgery. stderr (the script stderr) goes too, so no process inside the
-    # sandbox holds any stream of the script once the command starts. fd 0, the
-    # only other descriptor this shell holds, is the caller stdin.
-    exec 1>/dev/null 2>/dev/null
+    # forgery. stderr (the script stderr) goes too, and stdin is the null device.
+    #
+    # Every OTHER descriptor is closed as well. A child inherits every fd its
+    # ancestors did not mark close-on-exec, so this shell can hold descriptors
+    # the caller never meant to share — a CI runner control pipe, an open file
+    # outside the sandbox. Left open, the command writes through them past every
+    # read-only mount (and a runner whose pipe receives garbage dies). Nothing
+    # the caller opened reaches the command.
+    exec 0</dev/null 1>/dev/null 2>/dev/null
+    for fd_path in /proc/$$/fd/*; do
+      fd="${fd_path##*/}"
+      case "$fd" in 0|1|2|*[!0-9]*) continue ;; esac
+      eval "exec $fd>&-" 2>/dev/null
+    done
     # The command stdout is captured, not streamed: the script must print the
     # receipt LAST, and a command that prints a receipt line must not outrank it.
     timeout --signal=KILL "$wall" env -i "${env_assignments[@]}" "$@" > "$scratch/.command-stdout" 2>&1

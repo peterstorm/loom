@@ -20,7 +20,7 @@
 
 import fc from "fast-check";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -599,6 +599,36 @@ describe("bounded local execution", () => {
       expect(facts(forged)).toEqual(facts(genuine));
       expect(forged.targetReadOnly).toBe(true);
       expect(forged.homeReadOnly).toBe(true);
+    });
+  });
+
+  // Invariant: no descriptor the caller holds reaches the command. A child
+  // inherits every fd not marked close-on-exec, so an open file outside the
+  // sandbox (or a CI runner's control pipe) would otherwise be writable past
+  // every read-only mount — the CI regression this pins wrote garbage into the
+  // runner's own pipe through exactly such an fd.
+  it.runIf(unshareAvailable)(isolated("closes every descriptor the caller passed down before the command starts"), () => {
+    withSandboxDirs("separate", (dirs) => {
+      const outside = join(dirs.root, "inherited.txt");
+      const handle = openSync(outside, "w");
+      try {
+        const run = spawnSync(
+          BASH,
+          [SCRIPT, "--target", dirs.target, "--scratch", dirs.scratch, "--nonce", NONCE, "--", "sh", "-c",
+            // The descriptor list goes to a file first: a `$(…)` around `ls`
+            // would itself hold a pipe in this shell while listing it.
+            'echo leaked >&3 && echo "inherited_write=0" || echo "inherited_write=1"; ls /proc/$$/fd > fds.txt; echo "fds=$(tr "\\n" " " < fds.txt)"'],
+          { encoding: "utf8", env: runEnv(dirs), timeout: 60_000, stdio: ["pipe", "pipe", "pipe", handle] },
+        );
+        const stdout = run.stdout ?? "";
+        expect(stdout).toContain("inherited_write=1");
+        // The command's own shell holds stdin, stdout and stderr — nothing else.
+        expect(stdout).toMatch(/fds=0 1 2 \n/);
+        expect(parseOk(stdout).exit).toBe(0);
+      } finally {
+        closeSync(handle);
+      }
+      expect(readFileSync(outside, "utf8")).toBe("");
     });
   });
 

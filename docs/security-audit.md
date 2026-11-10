@@ -370,7 +370,10 @@ runs one command under `unshare` with only loopback networking, the target
 bind-remounted read-only, `ulimit` CPU, address-space, process and file-size
 limits, and a wall clock. The child's environment is emptied and repopulated
 with exactly `PATH HOME TMPDIR LANG TERM` (`HOME` and `TMPDIR` point at the
-scratch). The last stdout line is the receipt, and a `local` check counts as
+scratch), and its descriptors likewise: stdin is the null device and every
+descriptor the caller held above stderr is closed before the command starts, so
+an open file or pipe the caller inherited (a CI runner's control pipe, say)
+cannot be written through past the read-only mounts. The last stdout line is the receipt, and a `local` check counts as
 observed only when its receipt says:
 
 - the command exited zero and every ulimit was really applied;
