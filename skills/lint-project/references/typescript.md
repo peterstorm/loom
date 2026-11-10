@@ -81,7 +81,16 @@ TypeScript projects use relative imports (`./`, `../`) and package imports. The 
 
 ## Pure Modules
 
-Paths that must be side-effect free. The checker detects:
+The functional core is **pure by default inside its roots**: list the core's
+directories (and any single pure files elsewhere) in `pureModules`; every
+non-test file beneath a root is then held to purity — including files added
+later. The imperative shells that genuinely live inside a root are declared in
+`impureModules`, each with the I/O it does. A shell named there is a design
+decision on the record; I/O that crept into a core module is a defect to move
+out, not an entry to add. The shipped default holds nothing pure: a project
+with no `pureModules` gets no purity checking at all.
+
+The checker detects:
 
 | Banned Import | Why |
 |---------------|-----|
@@ -102,7 +111,7 @@ Paths that must be side-effect free. The checker detects:
 
 **Allowed even in pure modules:** `node:path`, `node:url` (side-effect free)
 
-### Example pureModules config
+### Example purity config
 
 ```json
 {
@@ -110,17 +119,28 @@ Paths that must be side-effect free. The checker detects:
     "src/domain/",
     "src/types/",
     "packages/framework/src/types/",
-    "packages/framework/src/shared/validate.ts",
-    "packages/framework/src/shared/topo.ts"
+    "packages/framework/src/shared/validate.ts"
+  ],
+  "impureModules": [
+    { "path": "src/domain/order-repository.ts", "reason": "reads and writes orders through the database pool" }
   ]
 }
 ```
 
-Use directory paths (trailing `/`) for entire directories, or exact file paths for individual files.
+Use directory paths (trailing `/`) for entire directories, or exact file paths for individual files. Globs are refused.
+A banned global named inside a quoted string or a trailing `//` comment is not flagged; code inside a template literal is.
 
 ## Regex Rules — TypeScript
 
-### Recommended project rules
+### Shipped as defaults
+
+`no-unsafe-as-any`, `no-non-null-assertion` and `no-catch-ignore` ship in loom's
+`lint-rules/` and fire in every project — no project file needed (disable one by
+name if a project must). The versions below are the original templates; the
+shipped rules widen them: `no-non-null-assertion` matches `x!.`, `x![`, `f()!.`,
+`a[0]!`, `x!)` and `let x!:` (production code only — test files are exempt),
+`no-unsafe-as-any` applies to tests too, and `no-catch-ignore` also matches the
+binding-less `catch {}` in TypeScript and JavaScript.
 
 **no-unsafe-as-any.json** — Block `as any` type escape hatches:
 ```json
@@ -173,25 +193,32 @@ These fire automatically from loom's default rules — no project config needed:
 | Rule | Pattern | What it catches |
 |------|---------|-----------------|
 | `no-any-type` | `: any` | Explicit any type annotations |
+| `no-unsafe-as-any` | `as any` | Casts that switch the checker off |
+| `no-non-null-assertion` | `x!` | Non-null assertions in production code |
+| `no-catch-ignore` | `catch {}` | Empty catch blocks |
 | `no-console-log` | `console.log(` | Console.log calls |
 | `no-todo-fixme` | `// TODO\|FIXME` | Unresolved TODOs |
 
-### Rules to consider enabling
+### Totality: ts-pattern instead of switch (already active)
 
-**prefer-ts-pattern** (disabled by default) — flags `switch()` statements. Enable for projects using ts-pattern for discriminated union matching:
-```json
-{
-  "kind": "regex",
-  "name": "prefer-ts-pattern",
-  "description": "Prefer ts-pattern match().exhaustive() over switch for discriminated unions",
-  "extensions": [".ts", ".tsx"],
-  "pattern": "switch\\s*\\(",
-  "flags": "",
-  "fixHint": "Use match(value).with(...).exhaustive() from ts-pattern instead of switch",
-  "enabled": true,
-  "excludePatterns": [".test.ts"]
-}
+`switch-totality` runs after every edit on every non-test TypeScript file — no
+config needed. A switch with two or more arms must prove it is total:
+`match(x).with(…).exhaustive()`, or a `default` arm that binds the scrutinee
+to `never` (`const _: never = x`, `assertNever(x)`). For an open domain such as
+a plain `string`, use `match(raw).with("a", …).otherwise(…)`.
+`exhaustive-discriminant-branching` catches the same omission written as a 3+
+branch if/else chain, at the Wave Gate.
+
+On an existing codebase, grandfather the switches and chains that predate the
+rule before the first agent edits them:
+
+```bash
+bun ${CLAUDE_PLUGIN_ROOT}/scripts/lint-project.ts --write-baseline
 ```
+
+To narrow the rule to the modules that own your unions, set
+`switchTotalityModules` (non-empty) in `config.json`. The old opt-in
+`prefer-ts-pattern` regex rule is gone; delete a project copy of it.
 
 ## Function Length
 

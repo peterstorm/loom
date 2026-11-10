@@ -1,0 +1,6 @@
+{
+  "name": "loom-security-calibration-target",
+  "private": true,
+  "type": "module",
+  "dependencies": { "express": "^4.19.2" }
+}

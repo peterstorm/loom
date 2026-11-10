@@ -252,7 +252,7 @@ export function claudeTranscriptCandidates(transcript: ClaudeTranscript): Claude
   let cursor = lines.length;
   const previousConversationLine = (): ClaudeTranscriptRead<ConversationLine | null> => {
     while (--cursor >= 0) {
-      const line = conversationLineOf(lines[cursor]!);
+      const line = conversationLineOf(lines[cursor]);
       if (!line.ok || line.value !== null) return line;
     }
     return { ok: true, value: null };

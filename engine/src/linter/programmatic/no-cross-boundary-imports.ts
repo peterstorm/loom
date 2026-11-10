@@ -11,8 +11,19 @@
 import { dirname, join, sep } from "node:path";
 import type { Violation } from "../types";
 import { makeViolation } from "../types";
+import { isAbsolutePath, projectRelative } from "./baseline";
 
 // --- Boundary Configuration ---
+
+/**
+ * One file's capability beyond its boundary's allowlist, and why it was
+ * granted. A grant is an exception, so it carries its justification as data:
+ * the boundaries live in a project's `config.json`, which cannot hold comments.
+ */
+export type CapabilityGrant = Readonly<{
+  allow: readonly string[];
+  reason: string;
+}>;
 
 export interface BoundaryRule {
   /**
@@ -23,297 +34,46 @@ export interface BoundaryRule {
    * `engine/src/state-managerX/`.
    */
   readonly module: string;
+  /** What this module is and which way its dependencies point. */
+  readonly description?: string;
   /** Allowed import prefixes — imports must match at least one (allowlist) */
   readonly allow: readonly string[];
   /** Denied import prefixes — checked first, overrides allow */
   readonly deny: readonly string[];
   /**
    * Per-FILE capability allowlist, keyed by repo-relative module path. When a
-   * file is listed here, an import matching one of its allowed prefixes is
+   * file is listed here, an import matching one of its granted prefixes is
    * admitted even though the blanket `allow` would refuse it. This is the
    * mechanism that makes I/O capability per-module rather than per-directory:
-   * `engine/src/core/` deliberately has NO blanket `node:` allowance, so every
-   * filesystem/byte import in the functional core is an explicit, reviewed
-   * exception named here — a future I/O import in an unlisted core module
-   * fails the lint gate until it earns an entry.
+   * a boundary with NO blanket `node:` allowance refuses every node builtin in
+   * a file it does not name here, so each one is an explicit, reviewed
+   * exception.
    */
-  readonly perFileAllow?: Readonly<Record<string, readonly string[]>>;
+  readonly perFileAllow?: Readonly<Record<string, CapabilityGrant>>;
   /** Audited package entrypoints: exact specifier equality, never a prefix grant. */
-  readonly perFileExactAllow?: Readonly<Record<string, readonly string[]>>;
+  readonly perFileExactAllow?: Readonly<Record<string, CapabilityGrant>>;
 }
 
 /**
- * ADR-0042 (G5b INV-1, amended by G2 AD-6): the only modules through which the
- * TypeScript compiler API enters engine code — module edges, mutation sites,
- * and the declaration surfaces skeletons and conformance read. Each parses
- * text it is given and never touches `ts.sys`, a Program or a language
- * service. This is the one list: the core boundary's per-file `typescript`
- * grant below and machine-purity's closure audit both read it. The INV-1 regex
- * rule (`{.claude,.pi}/linter/rules/inv-1-typescript-compiler-api-seam.json`)
- * cannot import code, so its `excludePatterns` mirror this list and a linter
- * test fails when the mirror drifts.
+ * The shipped default governs nothing: which way a project's dependency
+ * arrows point is the project's architecture, so its boundaries live in its own
+ * `config.json` (Loom's are in `.claude/linter/rules/config.json`).
  */
-export const TYPESCRIPT_COMPILER_API_SEAMS: readonly string[] = Object.freeze([
-  "engine/src/core/owner-verification/import-graph.ts",
-  "engine/src/core/owner-verification/mutation-plan.ts",
-  "engine/src/core/skeleton/ts-surface.ts",
-]);
+export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = Object.freeze([]);
 
 /**
- * Default boundary rules for the loom engine.
- * These encode the architectural constraint: dependency arrows point inward.
+ * How strictly the boundary rule reads a file no boundary names.
+ * `requireGovernance` lists the path prefixes inside which every file must be
+ * governed: there an ungoverned file is a violation ("ungoverned module"),
+ * where elsewhere it may import anything. `projectRoot` is the root the
+ * boundary prefixes are written against, used to relativize absolute paths.
  */
-export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
-  {
-    module: "engine/src/linter/",
-    allow: [
-      "./",
-      "engine/src/linter/",
-      "node:",
-      // The one test-file classification (INV-2): the linter's isTestFile and
-      // the I6/I7 core must split files by the same rule, so the linter imports
-      // the pure owner instead of keeping a copy. Every other core module stays
-      // refused by omission from this fail-closed allowlist.
-      "engine/src/core/test-file-classification",
-      "ts-pattern",
-    ],
-    deny: [
-      // `engine/src/core/` is NOT denied here, deliberately: deny is evaluated
-      // before allow, so a blanket core deny would override the single shared
-      // core module above. See the parsers boundary for the same pattern.
-      "engine/src/handlers/",
-      "engine/src/parsers/",
-      "engine/src/state-manager",
-      "engine/src/cli",
-    ],
-  },
-  {
-    module: "engine/src/core/",
-    allow: [
-      "./",
-      "engine/src/core/",
-      // NO blanket `node:` here — I/O capability in the functional core is
-      // per-module, an explicit reviewed exception for every byte/fs import
-      // (see perFileAllow below). The only core modules that may touch node
-      // builtins are exactly the ones enumerated there.
-      "engine/src/types",
-      "engine/src/config",
-      // Pure machine-core modules only: identity brands (parseSessionId in
-      // block-direct-edits) and the gate-wired tool vocabulary source
-      // (tool-vocabulary derives FILE_MODIFYING_TOOLS from GATE_WIRED_TOOLS).
-      // The machine's fs shell (ledger/report-discovery) stays denied by
-      // omission — this allowlist is fail-closed.
-      "engine/src/machine/evidence",
-      "engine/src/machine/types",
-      // extract-evidence is the same pure family: it folds transcript spans
-      // using core's own tool vocabulary and shell normalizer and touches no
-      // filesystem. Listed individually rather than opening `machine/`, which
-      // would also admit the ledger and report-discovery shells.
-      "engine/src/machine/extract-evidence",
-      // The frozen CT-3 declarations the harness tool-call adapters produce:
-      // types only, importing nothing but the pure machine evidence/types pair.
-      "engine/src/machine/harness-tool-call-types",
-      // Narrow pure helpers: extract-task-id uses core/task-id for canonical
-      // Task identity; the other two have no imports. These explicit entries
-      // admit no shell/I/O dependency. The rest of utils stays denied rather
-      // than granting access to its filesystem and locking helpers.
-      "engine/src/utils/extract-task-id",
-      "engine/src/utils/no-finding-sentinel",
-      "engine/src/utils/strip-namespace",
-      // find-file imports only `node:fs` and `node:path`. The core boundary's
-      // formerly blanket `node:` allowance is now per-module, and this
-      // narrow wrapper over the same calls is enumerated below — the
-      // capability policed is protected-state WRITING: `engine/src/state-manager`
-      // stays unlisted, and `validate-phase-order` takes its state read as an
-      // injected dependency instead.
-      // NOTE: unlike the per-file grant below, this is a LIVE import grant —
-      // no deny matches and no per-file lookup is needed, so any governed
-      // core file may import `engine/src/utils/find-file` through it today.
-      // It is live-but-unused: no current core file has exercised it. It is
-      // permission to read the filesystem walk, never to write protected
-      // state. Should find-file move under core/, imports would resolve to
-      // the new core path (already covered by this boundary's `./`), and this
-      // line would go dead rather than gate-breaking.
-      "engine/src/utils/find-file",
-      "ts-pattern",
-    ],
-    // Every core module that touches a node builtin, and exactly the subpaths
-    // it uses. `node:crypto` is digest-only (pure hashing); `node:path` is
-    // pure path math; `node:fs` is the deliberately-sanctioned gate I/O;
-    // `node:util` is isDeepStrictEqual. A future I/O import in a module that
-    // is not listed here — or a listed module reaching a new subpath — fails
-    // the lint gate until it is reviewed and named.
-    //
-    // The map grants; it does not certify. An entry for a module that has since
-    // dropped the import is stale permission, not a lint failure — this list is
-    // fail-closed on ADDING capability, so nothing catches a grant going unused.
-    // `identity.ts` sat here for `node:crypto`/`node:path` after it had lost
-    // every import statement; it is now off the list.
-    perFileExactAllow: {
-      "engine/src/core/reviewer-contract.ts": ["zod/v4"],
-      "engine/src/core/standalone-lineage-contract.ts": ["zod/v4"],
-      "engine/src/core/reviewer-protocol.ts": ["jsonc-parser"],
-      // Grammar-constrained verdict grammars: the panel contract and the panel
-      // tally define their judge/refutation verdict schemas with zod, and the
-      // emission tool's verdict-args parser types its admission seam with the
-      // same package. Exact-specifier grants — never a prefix — so a new zod
-      // subpath fails the gate until it is re-audited by machine-purity.
-      "engine/src/core/panel-contract.ts": ["zod/v4"],
-      "engine/src/core/review-panel.ts": ["zod/v4"],
-      "engine/src/core/emission-tool.ts": ["zod/v4"],
-      // ADR-0042 (G5b INV-1): the TypeScript compiler API enters the pure core
-      // through exactly the seams TYPESCRIPT_COMPILER_API_SEAMS names; no
-      // other core module may import it.
-      ...Object.fromEntries(TYPESCRIPT_COMPILER_API_SEAMS.map((seam) => [seam, ["typescript"]])),
-    },
-    perFileAllow: {
-      // The direct-edit guard normalizes panel/spec-artifact targets with pure
-      // path math (posix.normalize) before the prefix test — no filesystem I/O.
-      "engine/src/core/block-direct-edits.ts": ["node:path"],
-      // The emission ingestion folds a digest over captured payload bytes —
-      // digest-only hashing, mirroring review-packet.
-      "engine/src/core/emission-ingestion.ts": ["node:crypto"],
-      // The shared deterministic SHA-256 leaf (sha256Bytes/sha256Hex).
-      "engine/src/core/digest.ts": ["node:crypto"],
-      // The shared rules gate classifies target files by extension: pure
-      // path math (extname/join) over strings, no filesystem.
-      "engine/src/core/bash-code-mutation.ts": ["node:path"],
-      "engine/src/core/harness-capture.ts": ["node:crypto"],
-      "engine/src/core/harness-resources.ts": ["node:crypto", "node:path"],
-      "engine/src/core/legacy-archive.ts": ["node:crypto"],
-      "engine/src/core/orchestration-contract/bytes.ts": ["node:crypto"],
-      "engine/src/core/orchestration-contract/effects.ts": ["node:path"],
-      "engine/src/core/orchestration-contract/publication.ts": ["node:crypto"],
-      // The Spec Index: a total pure grammar whose only node use is a content
-      // digest. It lives in core/ rather than parsers/ because the Requirement
-      // Coverage Projection joins against it, and core may not import parsers.
-      // The rule that move established: a DOMAIN grammar whose output is a
-      // value object carrying invariants belongs in core/; a harness or tool
-      // OUTPUT scraper (transcripts, bash output, changed-file lists) belongs
-      // in parsers/.
-      "engine/src/core/parse-spec.ts": ["node:crypto"],
-      "engine/src/core/panel-kernel.ts": ["node:path"],
-      "engine/src/core/phase-artifact-paths.ts": ["node:path"],
-      // The one Pi agent-directory rule: `~` expansion and the agents/<name>.md
-      // join are pure path math, and a `file://` selection is read as its path
-      // with fileURLToPath — string conversion, no filesystem.
-      "engine/src/core/pi-agent-directory.ts": ["node:path", "node:url"],
-      // The retained predecessor-archive codec inflates an inline gzip archive
-      // in memory under an explicit output bound — pure decompression, no I/O.
-      "engine/src/core/predecessor-archive.ts": ["node:zlib"],
-      "engine/src/core/remediation-machine.ts": ["node:crypto"],
-      "engine/src/core/repository-path.ts": ["node:path"],
-      "engine/src/core/review-packet.ts": ["node:crypto"],
-      "engine/src/core/review-panel.ts": ["node:path"],
-      "engine/src/core/rules-gate.ts": ["node:path"],
-      // Standalone scope classification reads each scope path's extension:
-      // pure path math (posix.extname) over strings, no filesystem.
-      "engine/src/core/scope-classification.ts": ["node:path"],
-      // Spawn task text joins the run directory, packet and reader paths:
-      // pure path math (join) over shell-gathered strings, no filesystem.
-      "engine/src/core/spawn-task-text.ts": ["node:path"],
-      // Advisory type diagnostics resolve tsc's project-relative paths and
-      // display them relative again: pure path math (resolve/relative/
-      // isAbsolute) over strings, no filesystem.
-      "engine/src/core/type-diagnostics.ts": ["node:path"],
-      "engine/src/core/standalone-review.ts": ["node:util"],
-      // Exact runtime entry and transitive implementation bytes are gated by machine-purity.
-      "engine/src/core/structured-test-report.ts": ["saxes"],
-      // Cross-branch pre-provisioning, deliberate. TODAY this per-file grant
-      // is INERT with zero granted capability: `find-file` sits in utils/,
-      // which NO boundary rule governs, so the per-file lookup only runs for
-      // files the core boundary actually governs, and this entry never
-      // matches. (The core `allow` line naming the module is a different
-      // case — a live, unused IMPORT grant; see its comment above.) The entry
-      // is kept, not pruned: it is the reviewed node:-capability grant for
-      // the day a boundary comes to govern utils/, where dropping it now
-      // would indeed fail that future gate until re-reviewed. A move of
-      // find-file under core/ would NOT be rescued by this entry — the moved
-      // file's `node:` imports would need a fresh capability entry at the new
-      // path, re-reviewed at that move — and the stale utils-path entry would
-      // simply go dead.
-      "engine/src/utils/find-file.ts": ["node:fs", "node:path"],
-    },
-    deny: [
-      "engine/src/linter/",
-      "engine/src/handlers/",
-      "engine/src/parsers/",
-    ],
-  },
-  {
-    module: "engine/src/parsers/",
-    allow: [
-      "./",
-      "engine/src/parsers/",
-      "node:",
-      "engine/src/types",
-      // The single source of truth for harness tool names. Both
-      // parse-bash-test-output and parse-files-modified must classify spans
-      // using the SAME vocabulary the gates are wired for; a parser-local copy
-      // is exactly the drift GATE_WIRED_TOOLS exists to prevent.
-      "engine/src/core/tool-vocabulary",
-      // The one classification of a Claude transcript record (conversation or
-      // harness). The parsers, the integrity boundary and the transcript
-      // projection must skip the SAME harness records; a parser-local copy
-      // would let a replayed api-request-blob count as activity in one reader
-      // and not another. A dependency-free pure leaf. Nothing else in core/ is
-      // reachable — this allowlist stays fail-closed.
-      "engine/src/core/claude-record-kind",
-      "ts-pattern",
-    ],
-    deny: [
-      "engine/src/linter/",
-      "engine/src/handlers/",
-      // `engine/src/core/` is NOT denied here, and the omission is deliberate.
-      // Deny is evaluated before allow, so a blanket core deny would override
-      // the core modules parsers must share (tool-vocabulary,
-      // claude-record-kind). The allow list is fail-closed — every other core
-      // module is refused by not appearing in it — so the protection is
-      // unchanged and the sanctioned exceptions become expressible.
-      "engine/src/state-manager",
-    ],
-  },
-  {
-    // The orchestration shell drives the pure core and owns the
-    // filesystem/protected-state/Git effects. Arrows point inward: it may
-    // import the core, but the core's own allowlist already refuses to import
-    // it back, so the functional core can never acquire a runtime dependency.
-    module: "engine/src/orchestration/",
-    allow: [
-      "./",
-      "engine/src/orchestration/",
-      "engine/src/core/",
-      "engine/src/utils/",
-      "engine/src/types",
-      "engine/src/config",
-      "engine/src/state-manager",
-      // The same pure identity-brand module `core/` is allowed. What it
-      // actually supplies here is `SessionId`/`parseSessionId` and the
-      // run-directory suffix vocabulary (`ORCHESTRATION_RUNS_SUFFIX`) — see
-      // `orchestration/session-run-bindings`, the sole consumer. `RequestId`
-      // is NOT among them; it arrives from `core/orchestration-contract`,
-      // allowed separately above. The machine's fs shell (`machine/ledger`,
-      // `machine/report-discovery`) stays denied by omission — this allowlist
-      // is fail-closed, so naming the pure module individually cannot open a
-      // path into the shell.
-      "engine/src/machine/evidence",
-      "node:",
-      "zod",
-      "ts-pattern",
-    ],
-    // G5b AD-8: the owner-verification runner reads the matrix test's tsconfig
-    // `paths`, which is JSONC; it parses it with the same audited package the
-    // reviewer codec uses rather than a second tokenizer. Exact specifier only.
-    perFileExactAllow: {
-      "engine/src/orchestration/owner-verification-runner.ts": ["jsonc-parser"],
-    },
-    deny: [
-      "engine/src/linter/",
-      "engine/src/handlers/",
-      "engine/src/parsers/",
-    ],
-  },
-];
+export type BoundaryOptions = Readonly<{
+  requireGovernance: readonly string[];
+  projectRoot: string | null;
+}>;
+
+export const DEFAULT_BOUNDARY_OPTIONS: BoundaryOptions = Object.freeze({ requireGovernance: Object.freeze([]), projectRoot: null });
 
 // --- Import extraction ---
 
@@ -455,8 +215,8 @@ export function checkBoundaryViolation(
   // Additive per-file capability allowlist, checked before the directory allow.
   // This is how `node:` hardware is granted to named core modules without
   // removing their ordinary directory-level imports.
-  if (boundary.perFileExactAllow?.[normalizedFile]?.includes(resolvedImport)) return null;
-  const perFile = boundary.perFileAllow?.[normalizedFile];
+  if (boundary.perFileExactAllow?.[normalizedFile]?.allow.includes(resolvedImport)) return null;
+  const perFile = boundary.perFileAllow?.[normalizedFile]?.allow;
   if (perFile !== undefined) {
     if (perFile.some((allowed) => underPrefix(resolvedImport, allowed))) {
       return null;
@@ -482,7 +242,7 @@ export function checkBoundaryViolation(
 
 /**
  * Reduce an absolute path to the repository-relative form the boundary rules
- * are written in.
+ * are written in, when the project root is not known.
  *
  * Boundary `module` prefixes are repo-relative (`engine/src/core/`), but
  * `lintFile` resolves every path to absolute before handing it to a rule. An
@@ -515,24 +275,61 @@ export function toRepositoryRelative(
   return bestIndex === -1 ? normalized : normalized.slice(bestIndex + 1);
 }
 
+/**
+ * The project-relative path of the file being linted: exact against the
+ * project root when it is known and contains the file (the one relativization
+ * the baselined rules share, `projectRelative`), otherwise — an absolute path
+ * outside the root, or no root at all — recovered from the boundary prefixes
+ * (`toRepositoryRelative`).
+ */
+function relativeToProjectOrBoundaries(filePath: string, boundaries: readonly BoundaryRule[], projectRoot: string | null): string {
+  const fromRoot = projectRelative(filePath, projectRoot);
+  return isAbsolutePath(fromRoot) ? toRepositoryRelative(filePath, boundaries) : fromRoot;
+}
+
+/**
+ * The governance root a file lies under while no boundary names it, or null.
+ * Such a file is an ungoverned module: its dependencies point wherever they
+ * please, so a project that requires governance refuses it outright.
+ */
+export function ungovernedRoot(
+  relativeFile: string,
+  boundaries: readonly BoundaryRule[],
+  requireGovernance: readonly string[],
+): string | null {
+  if (boundaries.some((b) => underPrefix(relativeFile, b.module))) return null;
+  return requireGovernance.find((root) => underPrefix(relativeFile, root)) ?? null;
+}
+
 // --- Rule handler ---
 
 /**
  * Programmatic rule handler for no-cross-boundary-imports.
- * Scans imports and checks each against boundary rules.
+ * Scans imports and checks each against boundary rules; under
+ * `requireGovernance`, a file no boundary names is itself a violation.
  */
 export function handler(
   content: string,
   filePath: string,
-  boundaries: readonly BoundaryRule[] = DEFAULT_BOUNDARIES
+  boundaries: readonly BoundaryRule[] = DEFAULT_BOUNDARIES,
+  options: BoundaryOptions = DEFAULT_BOUNDARY_OPTIONS,
 ): Violation[] {
-  const imports = extractImports(content);
-  const violations: Violation[] = [];
   // Normalize ONCE at entry: `resolveImportPath` joins against this path, so a
   // relative file path yields relative resolved imports for free.
-  const relativeFile = toRepositoryRelative(filePath, boundaries);
+  const relativeFile = relativeToProjectOrBoundaries(filePath, boundaries, options.projectRoot);
+  const ungoverned = ungovernedRoot(relativeFile, boundaries, options.requireGovernance);
+  if (ungoverned !== null) {
+    return [makeViolation(
+      "no-cross-boundary-imports",
+      filePath,
+      1,
+      content.split("\n")[0] ?? "",
+      `Ungoverned module: "${relativeFile}" lies under "${ungoverned}", where every file must belong to a boundary rule — add the boundary its directory (or file) needs to config.json, stating which way its imports point.`,
+    )];
+  }
+  const violations: Violation[] = [];
 
-  for (const imp of imports) {
+  for (const imp of extractImports(content)) {
     const resolved = resolveImportPath(relativeFile, imp.specifier);
     const violation = checkBoundaryViolation(relativeFile, resolved, boundaries);
 

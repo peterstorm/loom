@@ -53,6 +53,17 @@ describe("durable standalone disposition lifecycle and nominal policy", () => {
     expect(prepareStandaloneDisposition(mixed, bytes({ ...record, entries: [{ ...record.entries[0], origin: standaloneOriginReference(critical.origin) }] })).ok).toBe(false);
     expect(prepareStandaloneDisposition(mixed, bytes({ ...record, entries: [...record.entries, { ...record.entries[0], origin: standaloneOriginReference(critical.origin) }] })).ok).toBe(false);
   });
+  it("refuses to publish a structurally identical declaration this process never prepared, before reading any evidence", () => {
+    const f = fixture();
+    const publication = dispositionPublicationFixture(f.prepared);
+    const copied = { ...f.prepared } as PreparedStandaloneDisposition;
+    let reads = 0;
+    expect(readPublishedStandaloneDisposition(copied, publication.reference, (lookup) => {
+      reads++;
+      return publication.reader(lookup);
+    })).toEqual({ ok: false, error: { kind: "standalone-lineage-rejected", code: "invalid-disposition", message: "Publication requires a prepared declaration." } });
+    expect(reads).toBe(0);
+  });
   it("requires exact actual reader evidence, not internally consistent changed bytes, Run, effect or receipt", () => {
     const f = fixture();
     const publication = dispositionPublicationFixture(f.prepared);

@@ -25,6 +25,10 @@
  * - `review-capture` — capture of one request-bound result
  * - `spawn-reservation` — the parent session's reservations and cleanup debt
  * - `cleanup-actions` — best-effort cleanup and startup hygiene
+ * - `subagent-authority-gate` — a subagent's bash may not change audit or
+ *   orchestration authority (ADR-0067 D6), and the parent's
+ *   `security-audit verify --from` must name a run its persisted capture
+ *   attestations prove
  *
  * The Pi user agent directory the definition port reads is resolved by the
  * one shared rule in `engine/src/core/pi-agent-directory.ts`.
@@ -65,7 +69,7 @@ import { realPhaseOrderDeps } from "../engine/src/handlers/pre-tool-use/validate
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 import { admitPiSpawnBatch } from "../engine/src/core/spawn-admission";
 
-import { taskGraphPath, subagentDir, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
+import { taskGraphPath, subagentDir, guardedLocations, projectRulesDir, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
 import { currentOrchestrationStatus } from "../engine/src/handlers/helpers/orchestration";
@@ -77,7 +81,7 @@ import { piOperatorNoteSink, piPostEdit } from "../engine/src/handlers/pi-adapte
 import { lintFile } from "../engine/src/linter/index";
 import { typeDiagnosticsAdvisory } from "../engine/src/handlers/type-diagnostics-runner";
 import { publishLoomReviewAuthorityBridge } from "../engine/src/handlers/helpers/programs/review-authority-bridge";
-import { assertAnchoredFilesystemPlatformSupported } from "../engine/src/orchestration/no-follow-fs";
+import { assertAnchoredFilesystemPlatformSupported } from "../engine/src/utils/no-follow-fs";
 import { materializePiResources } from "./resources";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
 import { buildPiRoutingContext } from "../engine/src/utils/model-routing-context";
@@ -111,6 +115,8 @@ import {
   type PiEmissionReadinessRegistration,
 } from "./emission-readiness";
 import { piBashCommand, piWriteTargetPaths, replacePiSpawnTask } from "./tool-input";
+import { piBashAuthorityDecision } from "./subagent-authority-gate";
+import { currentPiProcessMarker, markPiParentEnvironment, unmarkedSubagentLaunchNotice } from "./subagent-process";
 import {
   registerPiEmissionLaunchBridge,
   type PiSubagentLaunchEventBus,
@@ -291,6 +297,16 @@ export default function (
   // this extension loaded, preventing mutable-checkout split brain.
   process.env[PI_EXTENSION_RUNTIME_ROOT_ENV] = LOADED_RUNTIME_IDENTITY.packageRoot;
   process.env[PI_EXTENSION_RUNTIME_REVISION_ENV] = LOADED_RUNTIME_IDENTITY.revision;
+  // ADR-0067 (amended): every process this session launches — the installed
+  // subagent launcher copies process.env into each child — inherits this
+  // process's pid as its parent marker, so a child's extension knows it is a
+  // subagent. A subagent publishes nothing: its own children stay subagents.
+  // Read the unmarked-launch notice BEFORE marking: a process launched like a
+  // headless child but carrying no marker is a parent by the marker rule, and
+  // a launcher that dropped the environment would leave the D6 gate inert.
+  const unmarkedLaunch = unmarkedSubagentLaunchNotice(currentPiProcessMarker(), process.argv);
+  if (unmarkedLaunch !== null) process.stderr.write(`loom(pi): ${unmarkedLaunch}\n`);
+  markPiParentEnvironment(null);
   pi.on("resources_discover", () => {
     let resources;
     try {
@@ -317,7 +333,7 @@ export default function (
     // Fail CLOSED on a crashed guard: an uncaught throw in this chain has
     // undefined polarity in pi (whether the tool proceeds is the harness's
     // choice) — a guard that dies must block, loudly naming itself, or a
-    // crash in e.g. guardStateFile silently waves state-file writes through.
+    // crash in e.g. guardStateFileDecision silently waves state-file writes through.
     let currentGuard = "session-id";
     try {
       // Before ANY guard reads the parent's route: Pi exports its model once at
@@ -381,7 +397,7 @@ export default function (
         if (command === null) {
           result = { kind: "block", message: "BLOCKED: malformed Pi bash input while the Loom state-file guard is active." };
         } else if (graphIsActive) {
-          result = guardStateFileDecision(command);
+          result = guardStateFileDecision(command, guardedLocations());
         }
         // Call-start stamp, under THIS (child) session: the evidence
         // recorder's report discovery reads it there to prove an artifact
@@ -405,6 +421,17 @@ export default function (
         if (result.kind === "block") {
           return { block: true, reason: result.message };
         }
+      }
+
+      // Bash authority (ADR-0067), one decision dispatching on this process's
+      // role: a subagent may not change audit or orchestration authority (D6,
+      // the Claude Code twin is the guard-subagent-authority hook); a parent's
+      // `security-audit verify --from` imports only a run its persisted
+      // capture attestations prove.
+      if (event.toolName === "bash") {
+        currentGuard = "bash-authority";
+        const authority = await piBashAuthorityDecision(event, ctx);
+        if (authority !== undefined) return authority;
       }
 
       // Subagent tool → `prepareSpawnBatch` owns the ordered observe → expand →
@@ -516,6 +543,9 @@ export default function (
   // ─── Session Lifecycle ────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
+    // ADR-0067: republish the parent marker with this session's id, so every
+    // child launched from it names the session it belongs to.
+    markPiParentEnvironment(ctx.sessionManager.getSessionId() ?? null);
     // The session's model is the routing input every Loom spawn reads; project
     // it before the first tool call so the environment never describes a
     // previous session.
@@ -616,10 +646,7 @@ export default function (
       const loomDefaultRulesDir = join(PACKAGE_ROOT, "lint-rules");
       const composed = await piPostEdit(event, {
         projectRoot,
-        lint: (filePath) => {
-          const projectRulesPath = join(projectRoot, PROJECT_RULES_DIR);
-          return lintFile(filePath, "immediate", loomDefaultRulesDir, pathExistsFailClosed(projectRulesPath) ? projectRulesPath : null);
-        },
+        lint: (filePath) => lintFile(filePath, "immediate", loomDefaultRulesDir, projectRulesDir(projectRoot)),
         advise: (file) => typeDiagnosticsAdvisory(file),
         notifyOperator: piOperatorNoteSink(ctx, writeStderrLine),
       });

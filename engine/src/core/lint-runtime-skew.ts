@@ -12,6 +12,8 @@
  * Pure module: the shell observes both rule trees as digests and hands them in.
  */
 
+import { nonEmptyOf } from "./orchestration-contract";
+
 /** Every lint-rule file of one tree, as root-relative POSIX path → content sha256. */
 export type LintRuleDigests = ReadonlyMap<string, string>;
 
@@ -39,7 +41,7 @@ export function lintRuntimeSkew(
   const [first, ...rest] = differing;
   return first === undefined
     ? Object.freeze({ kind: "no-skew" as const })
-    : Object.freeze({ kind: "skewed" as const, runtimeRoot, differing: Object.freeze([first, ...rest]) as readonly [string, ...string[]] });
+    : Object.freeze({ kind: "skewed" as const, runtimeRoot, differing: nonEmptyOf(first, ...rest) });
 }
 
 /** How many differing paths a note names before summarising the rest. */

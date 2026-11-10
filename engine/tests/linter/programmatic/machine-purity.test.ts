@@ -1,21 +1,31 @@
-/** Executable FC/IS closure for the Guarded Skill Machine, Defect-Family Accounting, and the emission kernel with the legacy panel decisions. */
+/**
+ * Executable FC/IS closure over Loom's whole declared functional core: every
+ * file its purity scope (config.json `pureModules` minus `impureModules`)
+ * holds pure must have a transitive closure that stays pure — a file inside a
+ * root that imports a declared shell is impure too, and must be declared as
+ * one. The Guarded Skill Machine, Defect-Family Accounting, and the emission
+ * kernel with the legacy panel decisions are probed in depth below.
+ */
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import ts from "typescript";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 import { join, resolve, posix } from "node:path";
 import {
+  classifyPurity,
   handler as noIoHandler,
   isPureModule,
-  DEFAULT_PURE_MODULES,
+  type PurityScope,
 } from "../../../src/linter/programmatic/no-io-in-pure-modules";
-import { TYPESCRIPT_COMPILER_API_SEAMS } from "../../../src/linter/programmatic/no-cross-boundary-imports";
+import { grantedPackages, LOOM_PURITY_SCOPE, REPO_ROOT, TYPESCRIPT_COMPILER_API_SEAMS } from "../loom-project-config";
 
-const REPO_ROOT = resolve(__dirname, "../../../..");
+/** The rule run against exactly one file, for bytes that are not Loom source (audited package runtimes, probes). */
+const only = (mod: string): PurityScope => ({ pureModules: [mod], impureModules: [] });
+const isLoomPure = (mod: string): boolean => isPureModule(mod, LOOM_PURITY_SCOPE);
 const requireFromEngine = createRequire(resolve(REPO_ROOT, "engine/package.json"));
 const ACCOUNTING = "engine/src/core/defect-family-accounting.ts";
 const MACHINE_ROOT = "engine/src/machine/advance.ts";
@@ -137,8 +147,6 @@ const AUDITED_RUNTIME = new Map([...SAX_RUNTIME, ...REVIEWER_RUNTIME]);
 const CONTRACT = "engine/src/core/reviewer-contract.ts";
 const LINEAGE_CONTRACT = "engine/src/core/standalone-lineage-contract.ts";
 const CODEC = "engine/src/core/reviewer-protocol.ts";
-const PANEL_CONTRACT = "engine/src/core/panel-contract.ts";
-const PANEL_TALLY = "engine/src/core/review-panel.ts";
 const EMISSION_TOOL = "engine/src/core/emission-tool.ts";
 const EMISSION_OBSERVATION = "engine/src/core/emission-observation.ts";
 const FINAL_PAYLOAD = "engine/src/core/harness-capture.ts";
@@ -160,15 +168,17 @@ function filesBeneath(root: string, entry: string): readonly string[] {
 }
 
 /**
- * Every pure source file a pure-module list declares: a directory entry
- * (`isPureModule` treats a trailing `/` as a package prefix, so it covers
- * every depth) expands to every `.ts` file beneath it, subfolders included,
- * so the audit reads files, never directories, and misses none of a package.
+ * Every pure source file a purity scope declares: a root entry (`isPureModule`
+ * treats a trailing `/` as a package prefix, so it covers every depth) expands
+ * to every `.ts` file beneath it, subfolders included, minus the declared
+ * shells and test files — so the audit reads files, never directories, and
+ * misses none of a package.
  */
-const pureFilesOf = (root: string, entries: readonly string[]): readonly string[] =>
-  [...new Set(entries.flatMap((entry) => entry.endsWith("/") ? filesBeneath(root, entry) : [entry]))];
+const pureFilesOf = (root: string, scope: PurityScope): readonly string[] =>
+  [...new Set(scope.pureModules.flatMap((entry) => entry.endsWith("/") ? filesBeneath(root, entry) : [entry]))]
+    .filter((file) => classifyPurity(file, scope).kind === "pure");
 
-const PURE_FILES: readonly string[] = pureFilesOf(REPO_ROOT, DEFAULT_PURE_MODULES);
+const PURE_FILES: readonly string[] = pureFilesOf(REPO_ROOT, LOOM_PURITY_SCOPE);
 
 /** Include type edges, re-exports, side effects, CJS and dynamic imports. No regex over prose. */
 function dependencies(content: string): readonly Readonly<{ specifier: string | null; text: string }>[] {
@@ -226,7 +236,7 @@ function auditClosure(roots: readonly string[], overlays: ReadonlyMap<string, st
     // This exact source line is not a grant: changed bytes lose the allowance, calls
     // are independently excluded below, and import + actual codec execution run with sentinels.
     const dormantExport = mod === "zod/v4/core/util.js" && digest === runtime?.digest;
-    errors.push(...noIoHandler(content, mod, [mod]).filter((v) => !(dormantExport && v.line === 131 &&
+    errors.push(...noIoHandler(content, mod, only(mod)).filter((v) => !(dormantExport && v.line === 131 &&
       v.text === "str += chars[Math.floor(Math.random() * chars.length)];"))
       .map((v) => `${mod}:${v.line}: ${v.fixHint}`));
     const imports = dependencies(content);
@@ -246,18 +256,23 @@ function auditClosure(roots: readonly string[], overlays: ReadonlyMap<string, st
           ? PURE_FILES.includes(candidate) : runtime.dependencies.includes(specifier) && AUDITED_RUNTIME.has(candidate));
         if (target === undefined) errors.push(`${mod}: ${specifier} leaves the declared pure closure`);
         else queue.push(target);
-      } else if (([CONTRACT, LINEAGE_CONTRACT, PANEL_CONTRACT, PANEL_TALLY, EMISSION_TOOL].includes(mod) && specifier === "zod/v4") || (mod === CODEC && specifier === "jsonc-parser")) {
+      } else if (runtime === undefined && REVIEWER_ENTRIES.has(specifier) && grantedPackages(mod).includes(specifier)) {
+        // An exact package grant from the boundary config (zod/v4, jsonc-parser):
+        // walked into its audited runtime closure, never trusted as a prefix.
         const entry = REVIEWER_ENTRIES.get(specifier);
         if (entry !== undefined) queue.push(entry);
       } else if (TYPESCRIPT_COMPILER_API_SEAMS.includes(mod) && specifier === "typescript") {
         // The granted compiler API (ADR-0042), per seam like the zod/jsonc grants: a capability, not a walked closure.
-      } else if ((mod === PARSER && specifier === "saxes") || runtime?.dependencies.includes(specifier)) {
+      } else if ((runtime === undefined && specifier === "saxes" && grantedPackages(mod).includes("saxes")) || runtime?.dependencies.includes(specifier)) {
         queue.push(specifier);
       } else if (runtime !== undefined) {
         errors.push(`${mod}: unaudited runtime package ${specifier}`);
+      } else if (specifier === "node:zlib" && grantedPackages(mod).includes("node:zlib")) {
+        // In-memory inflation under an explicit output bound, granted per file by the
+        // core boundary (predecessor-archive): deterministic bytes in, bytes out.
       } else if (["node:crypto", "crypto", "node:util", "util"].includes(specifier)) {
         // The same shipped rule must prove the narrow named capability, not a module waiver.
-        errors.push(...noIoHandler(text, mod, [mod]).map((v) => `${mod}: ${v.fixHint}`));
+        errors.push(...noIoHandler(text, mod, only(mod)).map((v) => `${mod}: ${v.fixHint}`));
       } else if (!["ts-pattern", "node:path", "path", "node:url", "url"].includes(specifier)) {
         errors.push(`${mod}: unaudited package ${specifier}`);
       }
@@ -298,8 +313,8 @@ const IMPURE_PROBES = [
 
 // The modules granted named deterministic hashing. standalone-review.ts (the
 // source authority) and panel-program.ts left this list when their hashing moved
-// into digest.ts; both stay in DEFAULT_PURE_MODULES, so the shipped-default-rule
-// case still audits them.
+// into digest.ts; both stay pure under Loom's purity scope, so the
+// Loom-scope rule case still audits them.
 const HASH_MODULES = [
   "engine/src/core/review-packet.ts",
   "engine/src/core/digest.ts",
@@ -310,8 +325,7 @@ const HASH_MODULES = [
 
 describe("functional core — executable purity closure", () => {
   it("ships accounting and every transitive source dependency as declared pure", () => {
-    expect(DEFAULT_PURE_MODULES).toContain(ACCOUNTING);
-    expect(isPureModule(ACCOUNTING)).toBe(true);
+    expect(isLoomPure(ACCOUNTING)).toBe(true);
     expect(auditClosure(PURE_FILES).errors).toEqual([]);
     const audit = auditClosure([ACCOUNTING]);
     expect(audit.errors).toEqual([]);
@@ -322,8 +336,21 @@ describe("functional core — executable purity closure", () => {
     }
   });
 
-  it.each(PURE_FILES)("%s passes the shipped default rule", (mod) => {
-    expect(noIoHandler(readSource(mod), mod)).toEqual([]);
+  it.each(PURE_FILES)("%s passes the rule under Loom's purity scope", (mod) => {
+    expect(noIoHandler(readSource(mod), mod, LOOM_PURITY_SCOPE)).toEqual([]);
+  });
+
+  it("audits a substantial core: every root of Loom's scope contributes pure files", () => {
+    for (const root of LOOM_PURITY_SCOPE.pureModules.filter((entry) => entry.endsWith("/"))) {
+      expect(PURE_FILES.some((file) => file.startsWith(root)), root).toBe(true);
+    }
+  });
+
+  it("every declared shell inside a root names its I/O and is excluded from the closure", () => {
+    for (const { path, reason } of LOOM_PURITY_SCOPE.impureModules) {
+      expect(reason.trim().length, path).toBeGreaterThan(0);
+      expect(PURE_FILES, path).not.toContain(path);
+    }
   });
 
   it("expands a package entry recursively, so a future subfolder of a pure package is audited too", () => {
@@ -331,15 +358,17 @@ describe("functional core — executable purity closure", () => {
     try {
       mkdirSync(join(root, "pkg", "nested", "deeper"), { recursive: true });
       for (const path of ["pkg/a.ts", "pkg/notes.md", "pkg/nested/b.ts", "pkg/nested/deeper/c.ts"]) writeFileSync(join(root, path), "");
-      expect(pureFilesOf(root, ["pkg/", "single.ts"])).toEqual(["pkg/a.ts", "pkg/nested/b.ts", "pkg/nested/deeper/c.ts", "single.ts"]);
-      expect(isPureModule("pkg/nested/deeper/c.ts", ["pkg/"])).toBe(true);
+      expect(pureFilesOf(root, only("pkg/"))).toEqual(["pkg/a.ts", "pkg/nested/b.ts", "pkg/nested/deeper/c.ts"]);
+      expect(pureFilesOf(root, { pureModules: ["pkg/", "single.ts"], impureModules: [{ path: "pkg/nested/b.ts", reason: "a shell" }] }))
+        .toEqual(["pkg/a.ts", "pkg/nested/deeper/c.ts", "single.ts"]);
+      expect(isPureModule("pkg/nested/deeper/c.ts", only("pkg/"))).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
   it("expands the owner-verification package entry to every file and grants typescript only to the compiler API seams", () => {
-    expect(DEFAULT_PURE_MODULES).toContain("engine/src/core/owner-verification/");
+    expect(isLoomPure("engine/src/core/owner-verification/verdict.ts")).toBe(true);
     for (const seam of TYPESCRIPT_COMPILER_API_SEAMS) {
       expect(PURE_FILES).toContain(seam);
       expect(auditClosure([seam]).errors, seam).toEqual([]);
@@ -354,9 +383,9 @@ describe("functional core — executable purity closure", () => {
 
   it("G2 INV-2: lists the skeleton core as pure and grants typescript to its ts-surface seam alone", () => {
     const SKELETON_SEAM = "engine/src/core/skeleton/ts-surface.ts";
-    expect(DEFAULT_PURE_MODULES).toContain("engine/src/core/skeleton/");
+    expect(isLoomPure("engine/src/core/skeleton/types.ts")).toBe(true);
     expect(TYPESCRIPT_COMPILER_API_SEAMS).toContain(SKELETON_SEAM);
-    expect(isPureModule(SKELETON_SEAM)).toBe(true);
+    expect(isLoomPure(SKELETON_SEAM)).toBe(true);
     expect(PURE_FILES).toContain("engine/src/core/skeleton/types.ts");
     expect(auditClosure([SKELETON_SEAM]).errors).toEqual([]);
     expect(auditClosure([SKELETON_SEAM]).visited).toContain("engine/src/core/owner-verification/import-graph.ts");
@@ -373,11 +402,11 @@ describe("functional core — executable purity closure", () => {
     "engine/src/orchestration/completion-check-runner.ts", "engine/src/orchestration/git-remediation.ts",
     "engine/src/handlers/helpers/programs/remediation.ts",
   ])("%s stays in the imperative shell", (mod) => {
-    expect(isPureModule(mod)).toBe(false);
+    expect(isLoomPure(mod)).toBe(false);
   });
 
   it.each(IMPURE_PROBES)("rejects direct impurity: %s", (probe) => {
-    expect(noIoHandler(probe, ACCOUNTING).length).toBeGreaterThan(0);
+    expect(noIoHandler(probe, ACCOUNTING, LOOM_PURITY_SCOPE).length).toBeGreaterThan(0);
   });
 
   it.each(IMPURE_PROBES)("rejects source-authority transitive impurity: %s", (probe) => {
@@ -387,28 +416,29 @@ describe("functional core — executable purity closure", () => {
 
   it("declares each hashing module once and keeps the former hashers on the pure list", () => {
     expect(new Set(HASH_MODULES).size).toBe(HASH_MODULES.length);
-    expect(DEFAULT_PURE_MODULES).toEqual(expect.arrayContaining([SOURCE_AUTHORITY, "engine/src/core/panel-program.ts"]));
+    expect(isLoomPure(SOURCE_AUTHORITY)).toBe(true);
+    expect(isLoomPure("engine/src/core/panel-program.ts")).toBe(true);
   });
 
   it.each([ACCOUNTING, ...HASH_MODULES])("%s allows only named deterministic hashing", (mod) => {
-    expect(isPureModule(mod)).toBe(true);
+    expect(isLoomPure(mod)).toBe(true);
     for (const specifier of ["node:crypto", "crypto"]) {
-      expect(noIoHandler(`import { createHash } from "${specifier}";\nconst digest = createHash("sha256").update("bytes").digest("hex");`, mod)).toEqual([]);
-      expect(noIoHandler(`import {\n createHash as hash,\n} from "${specifier}";`, mod)).toEqual([]);
-      expect(noIoHandler(`import { createHash, randomBytes } from "${specifier}";`, mod).length).toBeGreaterThan(0);
+      expect(noIoHandler(`import { createHash } from "${specifier}";\nconst digest = createHash("sha256").update("bytes").digest("hex");`, mod, LOOM_PURITY_SCOPE)).toEqual([]);
+      expect(noIoHandler(`import {\n createHash as hash,\n} from "${specifier}";`, mod, LOOM_PURITY_SCOPE)).toEqual([]);
+      expect(noIoHandler(`import { createHash, randomBytes } from "${specifier}";`, mod, LOOM_PURITY_SCOPE).length).toBeGreaterThan(0);
     }
   });
 
   it("allows dates computed from supplied data without granting ambient clock access", () => {
-    expect(noIoHandler('const canonical = new Date(epoch).toISOString();', ACCOUNTING)).toEqual([]);
-    expect(noIoHandler('const canonical = new Date(\n epoch\n).toISOString();', ACCOUNTING)).toEqual([]);
-    expect(noIoHandler('const now = new Date();', ACCOUNTING).length).toBeGreaterThan(0);
+    expect(noIoHandler('const canonical = new Date(epoch).toISOString();', ACCOUNTING, LOOM_PURITY_SCOPE)).toEqual([]);
+    expect(noIoHandler('const canonical = new Date(\n epoch\n).toISOString();', ACCOUNTING, LOOM_PURITY_SCOPE)).toEqual([]);
+    expect(noIoHandler('const now = new Date();', ACCOUNTING, LOOM_PURITY_SCOPE).length).toBeGreaterThan(0);
   });
 
   it("never lets a createHash alias hide an entropy import", () => {
     fc.assert(fc.property(fc.stringMatching(/^[a-z][a-zA-Z0-9]{0,20}$/), (alias) => {
       const source = `import { randomBytes as ${alias} } from "node:crypto";`;
-      expect(noIoHandler(source, ACCOUNTING).length).toBeGreaterThan(0);
+      expect(noIoHandler(source, ACCOUNTING, LOOM_PURITY_SCOPE).length).toBeGreaterThan(0);
     }), { numRuns: 100 });
   });
 
@@ -444,7 +474,12 @@ describe("functional core — executable purity closure", () => {
     expect(audit.errors).toEqual([]);
     for (const mod of audit.visited) {
       if (SAX_RUNTIME.has(mod)) continue;
-      expect(dependencies(readSource(mod)).filter(({ specifier }) => specifier?.startsWith("node:")), mod).toEqual([]);
+      // An audited RUNTIME has no source file to read: its bytes live at the
+      // installed path the audit pinned. Reading it as source worked only while
+      // the machine closure stopped short of every granted package.
+      const runtime = AUDITED_RUNTIME.get(mod);
+      const content = runtime === undefined ? readSource(mod) : readFileSync(runtime.path, "utf-8");
+      expect(dependencies(content).filter(({ specifier }) => specifier?.startsWith("node:")), mod).toEqual([]);
     }
     expect(audit.visited).toContain("engine/src/machine/test-report.ts");
     expect(audit.visited).toContain("engine/src/machine/types.ts");
@@ -463,7 +498,7 @@ describe("emission kernel and legacy panel decisions — executable purity closu
   const ENROLLED = [EMISSION_TOOL, EMISSION_OBSERVATION, FINAL_PAYLOAD, EMISSION_SELECTION, LEGACY_ARCHIVE, LEGACY_PANEL_DECISIONS] as const;
 
   it("enrolls the emission kernel and the legacy panel decisions with a pure transitive closure", () => {
-    for (const mod of ENROLLED) expect(isPureModule(mod), mod).toBe(true);
+    for (const mod of ENROLLED) expect(isLoomPure(mod), mod).toBe(true);
     const audit = auditClosure([LEGACY_PANEL_DECISIONS]);
     expect(audit.errors).toEqual([]);
     for (const required of [...ENROLLED, "engine/src/core/panel-verdict-source.ts", "zod/v4/index.js"]) {
@@ -529,7 +564,11 @@ describe("audited reviewer runtime closure", () => {
     expect(zod.version).toBe("4.3.6");
     expect(zod.exports["./v4"].import).toBe("./v4/index.js");
     expect(zod.dependencies).toBeUndefined();
-    expect(requireFromEngine.resolve("jsonc-parser")).toBe(REVIEWER_RUNTIME.get("jsonc-parser/lib/umd/main.js")?.path);
+    // Real paths on both sides: a checkout may satisfy `engine/node_modules`
+    // through a symlink (a worktree sharing the main clone), and the claim is
+    // about which FILE these two resolve to, not which spelling got there.
+    expect(realpathSync(requireFromEngine.resolve("jsonc-parser")))
+      .toBe(realpathSync(REVIEWER_RUNTIME.get("jsonc-parser/lib/umd/main.js")!.path));
     const audit = auditClosure([CONTRACT, LINEAGE_CONTRACT, CODEC, "engine/src/core/standalone-successor-reviewer.ts", "engine/src/core/context-packets.ts"]);
     expect(audit.errors).toEqual([]);
     for (const mod of REVIEWER_RUNTIME.keys()) expect(audit.visited).toContain(mod);
@@ -555,7 +594,7 @@ describe("audited reviewer runtime closure", () => {
       visit(source);
     }
     expect(mentions).toEqual(["zod/v4/core/util.js:randomString"]);
-    expect(noIoHandler(readFileSync(REVIEWER_RUNTIME.get("zod/v4/core/util.js")!.path, "utf-8"), "zod/v4/core/util.js", ["zod/v4/core/util.js"]))
+    expect(noIoHandler(readFileSync(REVIEWER_RUNTIME.get("zod/v4/core/util.js")!.path, "utf-8"), "zod/v4/core/util.js", only("zod/v4/core/util.js")))
       .toMatchObject([{ line: 131, text: "str += chars[Math.floor(Math.random() * chars.length)];" }]);
   });
 
@@ -572,7 +611,7 @@ describe("audited reviewer runtime closure", () => {
     const runtime = REVIEWER_RUNTIME.get(mod)!;
     const content = readFileSync(runtime.path, "utf-8");
     for (const probe of IMPURE_PROBES) {
-      const violations = noIoHandler(`${content}\n${probe}`, mod, [mod]);
+      const violations = noIoHandler(`${content}\n${probe}`, mod, only(mod));
       expect(violations.some((v) => v.line > content.split("\n").length), probe).toBe(true);
     }
     expect(auditClosure([mod], new Map([[mod, `${content}\nconst changed = 1;`]])).errors).toContain(`${mod}: runtime bytes differ from the audit`);
@@ -699,7 +738,7 @@ describe("audited in-process SAX runtime closure", () => {
   it.each([...SAX_RUNTIME])("%s has exactly its audited imports and no ambient I/O", (mod, runtime) => {
     const content = readFileSync(runtime.path, "utf-8");
     expect(dependencies(content).map(({ specifier }) => specifier)).toEqual(runtime.dependencies);
-    expect(noIoHandler(content, mod, [mod])).toEqual([]);
+    expect(noIoHandler(content, mod, only(mod))).toEqual([]);
     // Changed implementation (not just changed imports) requires a fresh audit.
     expect(createHash("sha256").update(content).digest("hex")).toBe(runtime.digest);
   });

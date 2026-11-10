@@ -4,7 +4,7 @@
  * kernel and exports its internals so sibling volumes can import them.
  * Pure module: no I/O, no clock, no randomness.
  */
-import { canonicalRecord, parseEffectId, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type DomainResult, type NonEmpty, type OrchestrationRunId, type RequestId, type SlotId } from './identity';
+import { canonicalRecord, nonEmpty, parseEffectId, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type DomainResult, type NonEmpty, type OrchestrationRunId, type RequestId, type SlotId } from './identity';
 import { includes, readDenseDataArray, readExactDataRecord } from './bytes';
 import { actionFailure, type ExternalActionError } from './errors';
 import { parseArtifactRef, type ArtifactRef } from './roster';
@@ -80,7 +80,7 @@ export function issueInitialSpawnRequestsFromReceipt(
     }
     const published = parsePublishedSpawnRequest(envelope.value, `requests[${index}]`);
     if (!published.ok) return published;
-    const expected = expectedRequests[index]!;
+    const expected = expectedRequests[index];
     if (!samePublishedRequest(published.value, expected)) {
       return actionFailure(
         "initial spawn request does not match published run/request/context/order/output/model/Skill authority",
@@ -89,7 +89,8 @@ export function issueInitialSpawnRequestsFromReceipt(
     }
     requests.push(issuedSpawnRequest(expected, publicationSnapshot, index));
   }
-  return success(Object.freeze(requests) as NonEmpty<SpawnRequest>);
+  const spawnRequests = nonEmpty(requests);
+  return spawnRequests === null ? actionFailure("spawn batch must be a non-empty array", "requests") : success(spawnRequests);
 }
 
 /** Initial publication-time issuance accepts only bare request/context envelopes. */
@@ -146,7 +147,10 @@ export function rehydrateIssuedSpawnRequests(
     }
     requests.push(issued.value);
   }
-  return success(Object.freeze(requests) as NonEmpty<SpawnRequest>);
+  const durableRequests = nonEmpty(requests);
+  return durableRequests === null
+    ? actionFailure("durable issued requests must be a non-empty array", "requests")
+    : success(durableRequests);
 }
 
 export function spawnBatchAction(
@@ -196,12 +200,14 @@ export function awaitUserAction(rawRequest: unknown): DomainResult<AwaitUserActi
     advisorySlots.add(parsed.value.slot.path);
     advisories.push(parsed.value);
   }
+  const triagedAdvisories = nonEmpty(advisories);
+  if (triagedAdvisories === null) return actionFailure("advisories must be a non-empty array", "request.advisories");
   const request: UserDecisionRequest = canonicalRecord({
     kind: "advisory-triage",
     requestId: requestId.value,
     runId: runId.value,
     context: context.value,
-    advisories: Object.freeze(advisories) as NonEmpty<ArtifactRef>,
+    advisories: triagedAdvisories,
   });
   return success(canonicalRecord({ kind: "await-user", runId: runId.value, request }));
 }

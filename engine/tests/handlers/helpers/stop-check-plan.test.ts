@@ -5,11 +5,11 @@ import stopCheckPlan, { createStopCheckPlanHandler } from "../../../src/handlers
 import { renderStopChecksPlan } from "../../../src/core/acceptance-contract/stop-check-plan";
 import { NO_CHANGED_FILES } from "../../../src/core/changed-files";
 import { UNKNOWN_TASK_PREFIX, type RenderStopCheckPlanFn } from "../../../src/core/stop-check-plan-types";
-import { WHITELISTED_HELPERS } from "../../../src/config";
 import { KNOWN_HANDLERS, PI_RUNTIME_HANDSHAKE_ROUTES, piRuntimeHandshakeRequired } from "../../../src/handler-routes";
 import { StateManager } from "../../../src/state-manager";
 import type { HookResult, TaskGraph } from "../../../src/types";
 import { gitProject, statePathIn, task, writeStateFile } from "../../fixtures/contract-status-fixtures";
+import { WHITELISTED_HELPERS } from "../../../src/core/guard-state-file";
 import { frozenContract, frozenRunnerManifest, runStopCheckPlanCli, stopCheckGraph } from "../../fixtures/stop-check-plan-fixtures";
 
 const LEDGER_TYPES = "engine/src/core/ledger-types.ts";

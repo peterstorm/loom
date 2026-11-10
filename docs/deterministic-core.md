@@ -60,7 +60,7 @@ The proof object is engine-authored. Agent prose is input evidence, not the verd
 
 ## 3. Evidence ledger and guarded skill machines
 
-`engine/src/machine/` records facts—`FileRead`, `FileWrite`, and `TestRun`—under a per-Agent epoch. Reducers derive phase and test judgments from those facts.
+`engine/src/machine/` records facts—`FileRead`, `FileWrite`, `TestRun`, and `SandboxRun` (a security sandbox receipt, minted only from the simple command that ran the sandbox script with its own `--nonce`)—under a per-Agent epoch. Reducers derive phase and test judgments from those facts.
 
 A report-backed test run can produce `trusted-pass` or `trusted-fail`. A transcript-only signal remains explicitly `untrusted`; Pi’s paired structured evidence remains labeled `pi-structured`. Provenance is never upgraded merely because a consumer prefers a boolean.
 
@@ -145,6 +145,62 @@ Every request binds Run, request, slot, attempt, program, role, model profile, b
 
 Each program's Run Directory stores immutable events and a checkpoint projection (ADR-0029). Event append precedes checkpoint update; dedup keys make the crash window replay-safe. Effects produce typed receipts. Resume reconciles an existing receipt instead of repeating the effect.
 
+### Security audit
+
+`security-audit` is a registered program in the same sense (ADR-0066): eleven
+operations over one run directory, with a closed action set and a traits table
+the CLI reads before importing the helper.
+
+What models decide: which attack classes apply, what a hunter observes, whether
+a claim survives a refutation panel.
+What code decides: which coverage cells exist, whether a unit may settle, whether
+a ballot counts, whether a run may publish, and what the report says.
+
+The coverage ledger is a state machine over `(surface, boundary, subsystem,
+attack_class[, lifecycle])` cells. A unit has one owner per wave, evidence whose
+paths are exactly its checks' paths, and one terminal disposition. Reassignment
+archives the prior attempt with a reason, and the ledger — not the caller — mints
+each attempt's owner id from the catalog agent (`security-hunter-agent`, then
+`security-hunter-agent--2`), so a second hunter starts fresh by construction and
+still names the catalog profile it ran on. Ids are canonical derivations of the cell, sorted and unique, so
+two runs that enumerate the same cells produce the same bytes.
+
+A finding has three verdicts, ported verbatim from the vendored upstream schema:
+`confirmed` (demonstrated, and verified by a ballot from a **different** catalog
+profile), `needs_validation` (a lead, carrying **no severity at all**), and
+`rejected` (retained with its refutation). Severity enters the record only at
+`confirmed`, and the recorded overall severity may not exceed the demonstrated
+impact.
+
+A ballot is not a payload (ADR-0067). It exists only as the harness-captured
+answer of a `security-verifier-agent` spawn issued by the `security-verification`
+facade program; its agent and profile are read from the request the engine
+minted, and `verify --from` imports a finished run only when its `result.json`
+is byte-identical to the replay of its captured evidence, issued against the
+audit's current ledger and findings, and every ballot's capture digest equals
+the capture attestation the capturing harness wrote into the protected store
+(`core/capture-attestation.ts` decides; ADR-0067, amended). `verdicts.json` is a
+cache: `findings`, `status` and `publish` re-prove each cached ballot against its
+run and attestation before adjudication counts it (`admitCachedBallots`), so a
+hand-written ballot is a named publication blocker. The deterministic core
+relies on one invariant of the subagent fence (`guard-subagent-authority`): it is
+defence in depth, never the proof — the persisted capture attestation is the one
+authority a ballot answers to, on both harnesses. The fence's contract and the
+Pi import gate are stated once, in
+[the subagent authority guard](security-audit.md#the-subagent-authority-guard).
+
+`publish` refuses on any blocker — an unverified confirmed claim, a same-profile
+ballot, an unsettled ledger — rather than publishing a smaller truth than the run
+covered. `disposition` then derives one decision per published record
+(`accepted`/`deferred`/`dismissed`), and `REPORT.md` renders the same set from
+the same function, so prose and file cannot disagree.
+
+Calibration is executable too: a fixture application with one planted defect per
+attack class, held by a test to three claims — the markers are where the file
+says, the enumeration reaches every defect's lens and cell, and a recorded run
+publishes each defect exactly once. See [Running a security
+audit](./security-audit.md).
+
 ### Narrow capabilities
 
 Each effect reaches only the adapter it needs: run-artifact publication through the anchored `RunDirHandle`, protected-state commit through `StateManager`, and Git-index operations through `git-remediation`. Pure validation and routing code receives none of them.
@@ -202,6 +258,7 @@ Model calibration uses deterministic matching over vulnerable/fixed historical c
 | State writes | Agent edits JSON | Guard + StateManager + typed commit effect |
 | Run artifacts | Prompt chooses paths | Anchored fixed-layout RunDirHandle |
 | Git staging | Broad `git add` | Audited temporary index and witness recheck |
+| Security coverage | “We looked at everything” | Enumerated cells, settled ledger, refusals on publish |
 | Invariant | Reviewer remembers | Checkable lint rule or honest advisory prose |
 | Generated pipeline | Hand-wired drift | Fugue stamp + Loom integrity verification |
 
@@ -212,7 +269,7 @@ Determinism is scoped to what Loom can observe and own:
 - semantic design/review correctness still depends on models and user judgment;
 - a tool call with no `agent_id` cannot be attributed in a contended session, so it is neither recorded nor gated; Pi children run without the live phase gate, because Pi cannot name a tool call’s caller;
 - a legacy graph, whose Agents named no Task, may still attribute a result to the one executing Task (`inferSoleExecutingTask`), or on Pi to the first Task id in the parent's spawn prompt; such a guess settles only through the untrusted legacy resolution, which stores its evidence but leaves the Task pending for revalidation and reports the attribution as unproven, and it can never complete a Task, because completion requires engine-minted attempt authority;
-- report artifacts remain in an Agent-writable environment, with documented same-call forgery residuals;
+- report artifacts remain in an Agent-writable environment, with documented same-call forgery residuals; likewise a security sandbox receipt's nonce binds it to its artifact path but does not authenticate it against a hunter that writes the artifact itself, and a security ballot is bound to its issued verifier spawn, but against a subagent that evades the shell-string guard (on either harness) a verification run's capture file stays writable (no capture attestation backs it, so neither harness imports or counts such a slot; see [Running a security audit](./security-audit.md#honest-limits));
 - the shell guard judges command text, not an abstract Bash execution graph;
 - Pi's Interactive Phase Transport supports standard relayed dialogs but not `ctx.ui.custom()` components inside RPC children;
 - legacy readers remain for historical evidence but are frozen in `core/legacy-archive.ts`.

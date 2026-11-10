@@ -406,7 +406,9 @@ export function canonicalJavaSkeleton(
 ): string {
   const underMainRoot = path.slice(path.indexOf("src/main/java/") + "src/main/java/".length);
   const segments = underMainRoot.split("/");
-  const className = segments.pop()!.replace(/\.java$/, "");
+  const fileName = segments.pop();
+  if (fileName === undefined) throw new Error(`${path} names no Java file`);
+  const className = fileName.replace(/\.java$/, "");
   const javaPackage = segments.join(".");
   const aliases = [...new Set(exports.map(({ alias }) => alias))].sort();
   const lambda = (count: number) => `(${Array.from({ length: count }, (_, index) => `p${index}`).join(", ")})`;

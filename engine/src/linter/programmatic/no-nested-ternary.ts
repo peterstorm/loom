@@ -50,8 +50,8 @@ export function handler(content: string, filePath: string): readonly Violation[]
   const violations: Violation[] = [];
 
   for (let index = 1; index < lines.length; index++) {
-    const previous = lines[index - 1]!;
-    const line = lines[index]!;
+    const previous = lines[index - 1];
+    const line = lines[index];
     if (!ELSE_BRANCH.test(previous) || !THEN_BRANCH.test(line)) continue;
     if (TYPE_LEVEL.test(previous) || TYPE_LEVEL.test(line)) continue;
     violations.push(makeViolation(

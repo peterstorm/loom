@@ -278,10 +278,11 @@ export function persistedWaveAttemptTwoCompatibilityProblem(
   }
 
   const unchangedLegacyContext = sameContextSections(second.variableContext, first.variableContext);
+  const appended = second.variableContext.at(-1);
   const diagnostic = second.variableContext.length === first.variableContext.length + 1 &&
     sameContextSections(second.variableContext.slice(0, -1), first.variableContext) &&
-    second.variableContext.at(-1)?.label === "wave-review-attempt-1-rejection"
-    ? parseWaveRetryDiagnosticSection(second.variableContext.at(-1)!.bytes, first.schemaVersion)
+    appended?.label === "wave-review-attempt-1-rejection"
+    ? parseWaveRetryDiagnosticSection(appended.bytes, first.schemaVersion)
     : ({ ok: false as const, message: "attempt-2 context carries no wave-review-attempt-1-rejection section" });
   if (first.schemaVersion === 2 || !unchangedLegacyContext) {
     if (!diagnostic.ok) {

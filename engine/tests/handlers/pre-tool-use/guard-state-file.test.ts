@@ -1,20 +1,21 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import fc from "fast-check";
-import { WHITELISTED_HELPERS, SUBAGENT_DIR, MACHINES_DIR } from "../../../src/config";
-import { guardStateFileDecision } from "../../../src/core/guard-state-file";
+import { SUBAGENT_DIR, MACHINES_DIR, guardedLocations } from "../../../src/config";
+import { guardStateFileDecision, WHITELISTED_HELPERS } from "../../../src/core/guard-state-file";
 import { runGuardStateFile, stampCallStart } from "../../../src/handlers/pre-tool-use/guard-state-file";
 import { type SessionRegistry } from "../../../src/machine/evidence";
 import { inMemorySessionRegistry } from "../../machine/fake-session-registry";
 import type { HookResult } from "../../../src/types";
 import { sessionIdOf } from "../../fixtures/machine-identities";
+import { guardDecision } from "../../fixtures/guard-decision";
 
 /**
  * Test the REAL pure guard decision (guardStateFileDecision) — the handler
- * only wraps the task-graph-exists FS check around it.
+ * only wraps the task-graph-exists FS check around it. `decide` is the full
+ * decision under the production guarded locations; `guardDecision` (shared
+ * fixture) is its verdict.
  */
-function guardDecision(command: string): "allow" | "block" {
-  return guardStateFileDecision(command).kind === "block" ? "block" : "allow";
-}
+const decide = (command: string): HookResult => guardStateFileDecision(command, guardedLocations());
 
 describe("guard-state-file — property tests", () => {
   it("write operations on state files → block (deny-by-default head check)", () => {
@@ -1049,12 +1050,12 @@ describe("guard-state-file — heredoc bodies are data, not command text (issue-
   });
 
   it("block messages name the offending segment and its pipe-chain (issue-20 addendum)", () => {
-    const result = guardStateFileDecision("npm install && rm .claude/state/active_task_graph.json");
+    const result = decide("npm install && rm .claude/state/active_task_graph.json");
     expect(result.kind).toBe("block");
     if (result.kind === "block") {
       expect(result.message).toContain("Offending segment: \"rm .claude/state/active_task_graph.json\"");
     }
-    const piped = guardStateFileDecision("echo x | rm .claude/state/active_task_graph.json");
+    const piped = decide("echo x | rm .claude/state/active_task_graph.json");
     expect(piped.kind).toBe("block");
     if (piped.kind === "block") {
       expect(piped.message).toContain("In chain:");

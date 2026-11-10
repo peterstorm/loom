@@ -26,7 +26,7 @@ import {
 import { sha256Hex } from "../../core/digest";
 import { subagentDir } from "../../config";
 import { runCompletionCheck, type CompletionCheckRunnerResult } from "../../orchestration/completion-check-runner";
-import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
+import { readRunBytesNoFollow } from "../../utils/no-follow-fs";
 import { resolveCanonicalGitRepositoryRoot, type CanonicalRepositoryRoot } from "../../utils/workspace-digest";
 
 /** At most this many acceptance-check blocks per spawned agent; then that check fails open. */

@@ -193,7 +193,7 @@ export function parsePredecessorArchiveArguments(args: readonly string[]):
   const regular: string[] = [];
   const archive = new Map<string, string>();
   for (let index = 0; index < args.length; index += 2) {
-    const key = args[index]!, value = args[index + 1];
+    const key = args[index], value = args[index + 1];
     if (value === undefined) return { ok: false, error: "missing reader argument" };
     if (key === "--archive" || key === "--archive-purpose") {
       if (archive.has(key)) return { ok: false, error: "duplicate archive selection" };

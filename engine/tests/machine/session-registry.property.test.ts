@@ -27,7 +27,7 @@
 
 import { describe, it, expect, afterAll } from "vitest";
 import fc from "fast-check";
-import { unlinkSync } from "node:fs";
+import { rmSync } from "node:fs";
 import type { Evidence } from "../../src/machine/types";
 import {
   epochOf,
@@ -196,9 +196,7 @@ const fsSessions: SessionId[] = [];
 afterAll(() => {
   for (const s of fsSessions) {
     for (const path of [ledgerPath(s), machineBindingPath(s), `${SUBAGENT_DIR}/${s}.active`]) {
-      try {
-        unlinkSync(path);
-      } catch {}
+      rmSync(path, { force: true });
     }
   }
 });

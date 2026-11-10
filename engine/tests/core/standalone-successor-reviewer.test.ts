@@ -20,6 +20,7 @@ import { issuedReviewerEmissionRoute, projectRegisteredReviewerProtocol } from "
 import { selectCanonicalPayload } from "../../src/core/emission-ingestion";
 import { observeEmissionCalls } from "../../src/core/emission-observation";
 import { emissionCallFrame } from "../fixtures/emission-call-frame";
+import { admitCapturedStandaloneTranscript } from "../../src/handlers/helpers/programs/standalone-evidence";
 
 const bytes = (raw: unknown) => new TextEncoder().encode(JSON.stringify(raw));
 const prior = value(prepareStandaloneLineageSource(standaloneFixture(undefined, true).input.standaloneResult, "/owned/predecessor"));
@@ -164,6 +165,35 @@ describe("publication-bound successor admission at actual core seams", () => {
       transcriptDigest: sha256Hex(new TextDecoder().decode(raw)), ordinal: 2 }, finding: { id: "code-reviewer-2", protocolVersion: 2 } });
     expect(accepted.newFindings[0]?.origin).not.toHaveProperty("publication");
     expect(accepted.payload.findings[0]?.relation.kind).toBe("distinct-related");
+  });
+});
+
+describe("the successor's retry-facing refusal at the captured-transcript admission", () => {
+  /** Admit through the standalone shell's own seam, resolving to the issued v3
+   *  authority the way the program's resolver does for a successor request. */
+  const admit = (raw: Uint8Array) => {
+    const f = fixture();
+    return admitCapturedStandaloneTranscript(() => ({ ok: true, value: f.issued }), f.request.authority, raw);
+  };
+
+  it("renders a v3 schema violation with its JSON pointer and the payload's byte count", () => {
+    const raw = bytes({ ...payload(), priorAssessments: payload().priorAssessments.map(row => ({ ...row, verdict: "maybe" })) });
+    const refused = admit(raw);
+    if (refused.ok) throw new Error("a schema-violating v3 payload must be refused");
+    expect(refused.problems).toHaveLength(1);
+    expect(refused.problems[0]).toMatch(/ at \/priorAssessments\/0\/verdict/);
+    expect(refused.problems[0]).toContain(`(payload ${raw.byteLength} bytes;`);
+  });
+
+  it("keeps a lineage refusal's own sentence rather than dressing it as a payload diagnostic", () => {
+    const f = fixture();
+    const raw = bytes({ ...payload(), lineageDigest: "f".repeat(64) });
+    const direct = admitStandaloneSuccessorReviewer(f.issued, raw);
+    if (direct.ok || direct.error.kind === "reviewer-protocol-failed") throw new Error("a foreign lineage must be a lineage refusal");
+    const refused = admitCapturedStandaloneTranscript(() => ({ ok: true, value: f.issued }), f.request.authority, raw);
+    if (refused.ok) throw new Error("a foreign lineage must be refused");
+    expect(refused.problems).toEqual([direct.error.message]);
+    expect(refused.problems[0]).not.toContain("payload ");
   });
 });
 

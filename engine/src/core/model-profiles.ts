@@ -23,6 +23,7 @@
  */
 
 import type { Phase } from "./phases";
+import { mapNonEmpty } from "./orchestration-contract/identity";
 
 export const LLM_PROFILE_IDS = [
   "implementation",
@@ -371,7 +372,7 @@ export function recordedProfileBindings(profileId: RecordedLlmProfileId): Record
     const row = RETIRED_PROFILE_BINDINGS[profileId];
     return Object.freeze({
       claude: Object.freeze({ harness: "claude-code", model: row.claudeCode }),
-      pi: Object.freeze(row.pi.map(lowerPiTarget) as [PiBinding, ...PiBinding[]]),
+      pi: mapNonEmpty(row.pi, lowerPiTarget),
     });
   }
   const [current, ...history] = issuedPiTargets(profileId);
@@ -396,6 +397,13 @@ export type AgentKind =
   | Readonly<{ kind: "reviewer" }>
   | Readonly<{ kind: "spec-check" }>
   | Readonly<{ kind: "review-verifier" }>
+  /** An agent whose final JSON is a security-audit verdict (hunter, verifier or
+   *  coverage critic) rather than review findings. Its own kind so it is
+   *  invisible to the wave review rosters (a security verifier that sat in
+   *  REVIEW_SUB_AGENTS would route its verdict through store-reviewer-findings
+   *  and fail evidence capture), and so the audit program can recognize its own
+   *  agents without matching on names. */
+  | Readonly<{ kind: "security-verdict" }>
   | Readonly<{ kind: "utility" }>;
 
 export type AgentPolicy<Agent extends string = string> = Readonly<{
@@ -454,6 +462,14 @@ export const AGENT_CATALOG = Object.freeze({
   "plan-alignment-agent": traits("focused-review", phaseKind("plan-alignment")),
   "pr-test-analyzer": traits("focused-review", plainKind("reviewer")),
   "review-verifier-agent": traits("refutation", plainKind("review-verifier")),
+  // Security audit (ADR-0066): all three answer with a security verdict, not
+  // review findings (D2 keeps the reviewer payload v2 WIRE for hunters, but
+  // their transcript is parsed by the audit program, not store-reviewer-
+  // findings). The verifier and critic sit on the refutation profile, so no
+  // verification vote ever comes from a hunter instance.
+  "security-hunter-agent": traits("focused-review", plainKind("security-verdict"), "security-audit"),
+  "security-verifier-agent": traits("refutation", plainKind("security-verdict")),
+  "security-critic-agent": traits("refutation", plainKind("security-verdict")),
   "security-agent": traits("focused-review", plainKind("impl"), "security-expert"),
   "silent-failure-hunter": traits("focused-review", plainKind("reviewer")),
   "skill-content-reviewer": traits("focused-review", plainKind("utility")),
@@ -607,6 +623,18 @@ export function resolveAgentPolicy(raw: unknown): PolicyResult<AgentPolicy<LoomA
 export function resolveAgentProfile(raw: unknown): PolicyResult<LlmProfile> {
   const policy = resolveAgentPolicy(raw);
   return policy.ok ? resolveModelProfile(policy.value.profile) : policy;
+}
+
+/** The catalog profile an agent id names, or `null` for an id the catalog does
+ *  not hold. Pure and total: a caller holding an untrusted id (a ballot, a
+ *  verdict, a ledger's `agent_id`) needs the profile itself, not an Either —
+ *  and `null` is what makes "this ballot was cast on the profile that filed
+ *  the claim" a comparison rather than a guess. A projection of
+ *  `resolveAgentPolicy`, so the id-to-policy lookup (namespace handling
+ *  included) has one implementation. */
+export function catalogProfileOfAgent(raw: unknown): LlmProfileId | null {
+  const policy = resolveAgentPolicy(raw);
+  return policy.ok ? policy.value.profile : null;
 }
 
 export function parseHarness(raw: unknown): PolicyResult<Harness> {

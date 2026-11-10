@@ -79,7 +79,7 @@ import {
   writeRunBytesExclusiveNoFollow,
   writeRunFileExclusiveNoFollow,
   writeRunFileNoFollow,
-} from "./no-follow-fs";
+} from "../utils/no-follow-fs";
 import { parseProgramEventRecord, type ProgramEventRecord } from "./program-journal";
 
 export const RUN_DIRECTORY_SCHEMA_VERSION = 1;
@@ -598,7 +598,7 @@ function readEventRecords(events: AnchoredDirectory, policy?: RunEventResourcePo
     const match = EVENT_FILE.exec(name);
     if (match === null) throw new Error(`Corrupt program event filename ${name}`);
     const filenameSequence = Number(match[1]);
-    const filenameDedup = match[2]!;
+    const filenameDedup = match[2];
     if (!Number.isSafeInteger(filenameSequence) || filenameSequence !== index) {
       throw new Error(`Corrupt program event ${name}: sequence prefix is not contiguous from zero`);
     }
@@ -1586,7 +1586,7 @@ function isPristineOperation(directory: string): RunDirHandle["isPristine"] {
         () => openDirectoryNoFollow(directory),
         "pristine-run inspection",
         (root) => {
-          const allowedRoot = new Set([AUTHORITY_FILE, PROGRAM_FILE, ...FIXED_SUBDIRECTORIES.map((path) => path.split("/")[0]!) ]);
+          const allowedRoot = new Set([AUTHORITY_FILE, PROGRAM_FILE, ...FIXED_SUBDIRECTORIES.map((path) => path.split("/")[0]) ]);
           const rootEntries = listDirectoryNamesNoFollow(root);
           if (rootEntries.some((entry) => !allowedRoot.has(entry))) return success(false);
           for (const relative of FIXED_SUBDIRECTORIES) {

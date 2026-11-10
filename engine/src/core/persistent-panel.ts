@@ -107,6 +107,9 @@ import {
   type SlotId,
   type SpawnRequest as IssuedSpawnRequest,
   type TerminalBlockedDiagnostic,
+  mapNonEmpty,
+  nonEmpty,
+  nonEmptyOf,
 } from "./orchestration-contract";
 
 export type PanelRequestIdentity = Readonly<{
@@ -238,12 +241,12 @@ function requireRosterAttempt(roster: ExactRoster, slotId: SlotId, attempt: numb
 // ---------------------------------------------------------------------------
 
 function initialSlots<Result>(roster: ExactRoster): NonEmpty<OpenSlot<Result>> {
-  return Object.freeze(roster.orderedSlots.map(({ slotId }) => Object.freeze({ slotId, status: "pending" as const, nextAttempt: 1 as const }))) as unknown as NonEmpty<OpenSlot<Result>>;
+  return mapNonEmpty(roster.orderedSlots, ({ slotId }): OpenSlot<Result> => Object.freeze({ slotId, status: "pending" as const, nextAttempt: 1 as const }));
 }
 
 function pendingAuthorities<Result>(roster: ExactRoster, slots: NonEmpty<OpenSlot<Result>>): NonEmpty<AgentRequestAuthority> | null {
   const requests = slots.flatMap((progress) => progress.status === "accepted" ? [] : [requireRosterAttempt(roster, progress.slotId, progress.nextAttempt)]);
-  return requests.length === 0 ? null : Object.freeze(requests) as unknown as NonEmpty<AgentRequestAuthority>;
+  return nonEmpty(requests);
 }
 
 type LocatedProgress<Result> = Readonly<{ index: number; slot: OpenSlot<Result>; expected: AgentRequestAuthority }>;
@@ -259,7 +262,7 @@ function locateProgress<Result>(
   if (authority === null) return persistentFailure(panelError("unknown-request", `request ${requestId} is not in the active canonical roster`, { requestId }));
   const index = slots.findIndex(({ slotId }) => slotId === authority.slotId);
   if (index < 0) return persistentFailure(panelError("unknown-request", `request ${requestId} does not belong to the active panel stage`, { requestId, slotId: authority.slotId }));
-  const progress = slots[index]!;
+  const progress = slots[index];
   if (progress.status === "accepted") return persistentFailure(panelError("duplicate-result", `slot ${progress.slotId} already has an accepted result`, { requestId, slotId: progress.slotId }));
   const expected = requireRosterAttempt(roster, progress.slotId, progress.nextAttempt);
   if (expected.requestId !== requestId) return persistentFailure(panelError("stale-request", `slot ${progress.slotId} expects attempt ${progress.nextAttempt}, not request ${requestId}`, { requestId, slotId: progress.slotId }));
@@ -280,7 +283,7 @@ function completeSlotProgress<Result>(slots: NonEmpty<OpenSlot<Result>>): Comple
 }
 
 function replaceSlot<Result>(slots: NonEmpty<OpenSlot<Result>>, index: number, replacement: OpenSlot<Result>): NonEmpty<OpenSlot<Result>> {
-  return Object.freeze(slots.map((slot, candidateIndex) => candidateIndex === index ? replacement : slot)) as unknown as NonEmpty<OpenSlot<Result>>;
+  return mapNonEmpty(slots, (slot, candidateIndex) => candidateIndex === index ? replacement : slot);
 }
 
 function durableAccepted<T>(request: PanelRequestIdentity, value: T): DurableAcceptedPanelResult<T> {
@@ -376,7 +379,7 @@ function reduceRejectedSlot<Result, State, Action, Event>(
   if (outcome.kind === "terminal") return persistentSuccess(stage.terminal(outcome.diagnostic));
   return persistentSuccess(Object.freeze({
     state: stage.waiting(outcome.slots),
-    action: stage.spawn(Object.freeze([outcome.retry]) as NonEmpty<AgentRequestAuthority>),
+    action: stage.spawn(nonEmptyOf(outcome.retry)),
   }));
 }
 
@@ -937,7 +940,7 @@ function tallyRefutationPanel(authority: RefutationPanelAuthority, complete: Com
     return persistentSuccess(Object.freeze({ threshold: strictMajority, lenses: authority.lenses, verdicts: Object.freeze(verdicts), outcomes, retained: Object.freeze(outcomes.filter(({ survives }) => survives)), refuted: Object.freeze(outcomes.filter(({ survives }) => !survives)) }));
   } catch (error) {
     // The message is KEPT, for the reason the kernel's `reducePanelProgram`
-    // documents: a bare `catch {}` makes a code regression indistinguishable
+    // documents: a bare empty catch block makes a code regression indistinguishable
     // from bad input. Fail-closed is unchanged; only the diagnostic survives.
     return persistentFailure(panelError("invalid-aggregate", `verifier roster could not be safely tallied: ${error instanceof Error ? error.message : String(error)}`));
   }

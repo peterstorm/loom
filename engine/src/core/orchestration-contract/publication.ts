@@ -5,7 +5,7 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 import { createHash } from 'node:crypto';
-import { canonicalRecord, failure, parseArtifactDigest, parseContextDigest, parseEffectId, parseOrchestrationRunId, parseRequestId, success, type ArtifactDigest, type ContextDigest, type DomainResult, type EffectId, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
+import { canonicalRecord, failure, mapNonEmpty, nonEmpty, parseArtifactDigest, parseContextDigest, parseEffectId, parseOrchestrationRunId, parseRequestId, success, type ArtifactDigest, type ContextDigest, type DomainResult, type EffectId, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
 import { causedMessage, readDenseDataArray, readExactDataRecord, type DataBoundaryError } from './bytes';
 import { parseFixedArtifactSlot, type FixedArtifactSlot } from './artifacts';
 import { AtomicInitialPublicationClaimPortMembership, InitialBatchPublicationIntentMembership, InitialPublicationEffectPortMembership, InitialPublicationIssuanceMembership, parseStoredAgentRequestAuthority, sameHarnessBinding, type AgentRequestAuthority } from './roster';
@@ -192,7 +192,8 @@ export function parseNonEmptyAuthorityList<T>(
     if (!entry.ok) return actionFailure(entry.error.message, `${field}[${index}]`);
     parsed.push(entry.value);
   }
-  return success(Object.freeze(parsed) as NonEmpty<T>);
+  const values = nonEmpty(parsed);
+  return values === null ? actionFailure(`${field} must be a non-empty array`, field) : success(values);
 }
 
 export function samePublishedRequest(
@@ -322,7 +323,7 @@ export function parseBatchPublishedReceipt(
     return actionFailure("receipt contextDigests must be unique", "receipt.contextDigests");
   }
   for (let index = 0; index < issuedRequests.length; index++) {
-    const issued = issuedRequests[index]!;
+    const issued = issuedRequests[index];
     if (requestIds.value[index] !== issued.authority.requestId) {
       return actionFailure("receipt request order or identity does not match issued authority", `receipt.requestIds[${index}]`);
     }
@@ -331,7 +332,10 @@ export function parseBatchPublishedReceipt(
     }
   }
 
-  const canonicalIssuedRequests = Object.freeze(issuedRequests) as NonEmpty<PublishedSpawnRequestAuthority>;
+  const canonicalIssuedRequests = nonEmpty(issuedRequests);
+  if (canonicalIssuedRequests === null) {
+    return actionFailure("receipt.issuedRequests must be a non-empty array", "receipt.issuedRequests");
+  }
   const derivedPublicationDigest = digestCanonicalBatchPublicationContent({
     schemaVersion: 1,
     kind: "batch-published",
@@ -547,9 +551,12 @@ export function prepareInitialBatchPublicationIntent(
     if (!published.ok) return published;
     issuedRequests.push(published.value);
   }
-  const canonicalIssued = Object.freeze(issuedRequests) as NonEmpty<PublishedSpawnRequestAuthority>;
-  const requestIds = Object.freeze(canonicalIssued.map(({ authority }) => authority.requestId)) as NonEmpty<RequestId>;
-  const contextDigests = Object.freeze(canonicalIssued.map(({ context }) => context.digest)) as NonEmpty<ContextDigest>;
+  const canonicalIssued = nonEmpty(issuedRequests);
+  if (canonicalIssued === null) {
+    return actionFailure("initial publication intent requires a non-empty request array", "intent.requests");
+  }
+  const requestIds = mapNonEmpty(canonicalIssued, ({ authority }) => authority.requestId);
+  const contextDigests = mapNonEmpty(canonicalIssued, ({ context }) => context.digest);
   const content = canonicalRecord({
     schemaVersion: 1 as const,
     kind: "batch-published" as const,
@@ -702,7 +709,7 @@ export function verifyInitialPublicationReceipt(
     if (actual.contextDigests[index] !== expected.contextDigests[index]) {
       return actionFailure("published receipt context identity or order does not match the expected intent", `publicationEffect.receipt.contextDigests[${index}]`);
     }
-    if (!samePublishedRequest(actual.issuedRequests[index]!, expected.issuedRequests[index]!)) {
+    if (!samePublishedRequest(actual.issuedRequests[index], expected.issuedRequests[index])) {
       return actionFailure(
         "published receipt does not match expected run/effect/request/context/order/output/model/Skill bindings",
         `publicationEffect.receipt.issuedRequests[${index}]`,

@@ -62,7 +62,7 @@ export const LEDGER_PLAN_TEXT = [
   "**Tier:** advisory",
   `**Owner module:** \`${LEDGER.owner}\``,
   "**Sibling entry points:**",
-  `- \`${LEDGER.siblings[0]!.path}\``,
+  `- \`${LEDGER.siblings[0].path}\``,
   `**Matrix test:** \`${LEDGER.matrixTest}\``, "",
 ].join("\n");
 

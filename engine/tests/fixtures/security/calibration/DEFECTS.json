@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "kind": "security-audit-calibration-target",
+  "description": "A deliberately vulnerable application, one planted defect per attack class the audit must enumerate. Each defect names the exact marker line in its file; `security-calibration.test.ts` refuses a marker that moved, so the fixture cannot drift away from the claims made about it.",
+  "signals": {
+    "languages": ["ts"],
+    "manifests": ["package.json"],
+    "servesHttp": true,
+    "rendersClientSide": true,
+    "drivesModelsOrTools": false,
+    "usesQueuesOrRpc": true,
+    "isolatesTenants": true,
+    "deploysInfrastructure": false,
+    "hasNativeMemory": false,
+    "hasAppOrLocalIpc": false,
+    "hasReleasePipelines": false,
+    "hasSharedResourcePressure": true
+  },
+  "defects": [
+    {
+      "id": "CAL-SQLI-01",
+      "file": "src/api/login.ts",
+      "line": 3,
+      "attack_class": "injection",
+      "surface": "http-ingress",
+      "boundary": "api-edge",
+      "subsystem": "auth",
+      "lens": "WEB-PROTOCOL-AND-AUTH.md",
+      "impact": "high",
+      "claim": "An unvalidated `email` is interpolated into a SQL statement."
+    },
+    {
+      "id": "CAL-XSS-01",
+      "file": "src/api/render.ts",
+      "line": 1,
+      "attack_class": "cross-site-scripting",
+      "surface": "http-ingress",
+      "boundary": "client-render",
+      "subsystem": "comments",
+      "lens": "CLIENT-SIDE.md",
+      "impact": "medium",
+      "claim": "A stored comment is assigned to `innerHTML`."
+    },
+    {
+      "id": "CAL-TRAVERSAL-01",
+      "file": "src/api/files.ts",
+      "line": 4,
+      "attack_class": "path-traversal",
+      "surface": "http-ingress",
+      "boundary": "filesystem",
+      "subsystem": "attachments",
+      "lens": "WEB-PROTOCOL-AND-AUTH.md",
+      "impact": "high",
+      "claim": "A caller-supplied name is joined onto an attachment root."
+    },
+    {
+      "id": "CAL-SSRF-01",
+      "file": "src/api/preview.ts",
+      "line": 1,
+      "attack_class": "server-side-request-forgery",
+      "surface": "http-ingress",
+      "boundary": "outbound-http",
+      "subsystem": "preview",
+      "lens": "WEB-PROTOCOL-AND-AUTH.md",
+      "impact": "high",
+      "claim": "The preview fetches an arbitrary caller-supplied URL."
+    },
+    {
+      "id": "CAL-AUTHZ-01",
+      "file": "src/api/admin.ts",
+      "line": 3,
+      "attack_class": "broken-access-control",
+      "surface": "http-ingress",
+      "boundary": "api-edge",
+      "subsystem": "admin",
+      "lens": "WEB-PROTOCOL-AND-AUTH.md",
+      "impact": "high",
+      "claim": "The delete route performs no authorization check."
+    },
+    {
+      "id": "CAL-EXHAUST-01",
+      "file": "src/jobs/queue.ts",
+      "line": 1,
+      "attack_class": "resource-exhaustion",
+      "surface": "background-worker",
+      "boundary": "upstream-api",
+      "subsystem": "queue-drain",
+      "lens": "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md",
+      "impact": "medium",
+      "claim": "Every queued id is fetched concurrently with no bound."
+    }
+  ]
+}

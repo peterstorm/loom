@@ -40,7 +40,7 @@ export function authorizedRemediationCheck(
   { name, runIdPrefix, reportPath, args, executable = "node", timeoutMs = 2_000 }: RemediationCheckSpec,
 ): AuthorizedRemediationCheck {
   const source = standaloneFixture(["src/main.ts"], true).input.standaloneResult;
-  const findingId = source.survivingCriticals[0]!.id;
+  const findingId = source.survivingCriticals[0].id;
   const accounting = value(prepareDefectFamilyAccounting(source, {
     kind: "declared-defect-family-accounting",
     provenance: "DECLARED",

@@ -88,7 +88,7 @@ export const runCleanupSubagentFlag = async (
         const matchingBindings = authority.bindings
           .filter((binding) => binding.agentId === boundAgentId);
         if (matchingBindings.length === 1) {
-          boundAgentType = matchingBindings[0]!.agentType;
+          boundAgentType = matchingBindings[0].agentType;
           if (reportedAgentType !== null && reportedAgentType !== boundAgentType) {
             failures.push(
               `reported agent_type ${reportedAgentType} disagrees with persisted binding ${boundAgentType} for ${agent_id}/${sessionId}`,

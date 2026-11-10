@@ -22,7 +22,7 @@ import type {
   Task,
   TaskGraph,
 } from "../types";
-import type { NonEmpty } from "./orchestration-contract";
+import { mapNonEmpty, nonEmpty } from "./orchestration-contract";
 import {
   recordedAnchorHashes,
   renderRequirementTraceEdges,
@@ -34,13 +34,14 @@ import {
   type SpecIndexAvailability,
 } from "./requirement-coverage";
 import {
+  matchRoster,
   parseOwnershipInput,
   parseSpecTraceContract,
-  rosterError,
   sameRequirementTrace,
   SPEC_TRACE_VERSION,
   specTraceDiagnosticMessages,
   traceOf,
+  type RosterTrace,
 } from "./spec-trace";
 import { retireWaveReviewAuthority } from "./wave-gate-registration";
 
@@ -95,13 +96,9 @@ function repeatedIdError(ownership: ReadonlyMap<string, SpecTraceOwnership>): st
 type AmendedTrace = Readonly<{ task: Task; change: SpecTraceAmendmentChange }>;
 
 /** Every Task whose submitted trace differs, as a set, from its protected one — in roster order. */
-function changesOf(
-  graph: TaskGraph,
-  ownership: ReadonlyMap<string, SpecTraceOwnership>,
-): readonly AmendedTrace[] {
-  return graph.tasks.flatMap((task) => {
+function changesOf(roster: readonly RosterTrace<Task>[]): readonly AmendedTrace[] {
+  return roster.flatMap(({ task, trace: after }) => {
     const before = traceOf(task);
-    const after = ownership.get(task.id)!;
     return sameRequirementTrace(before, after)
       ? []
       : [Object.freeze({ task, change: Object.freeze({ taskId: task.id, before, after }) })];
@@ -202,11 +199,14 @@ export function amendSpecTrace(
   }
   const parsed = parseOwnershipInput(raw, LABEL);
   if (!parsed.ok) return refuse("invalid-input", parsed.message);
-  const inputProblem = rosterError(graph, parsed.value, LABEL) ?? repeatedIdError(parsed.value);
-  if (inputProblem !== null) return refuse("invalid-input", inputProblem);
+  const roster = matchRoster(graph.tasks, parsed.value, LABEL);
+  if (!roster.ok) return refuse("invalid-input", roster.message);
+  const repeated = repeatedIdError(parsed.value);
+  if (repeated !== null) return refuse("invalid-input", repeated);
 
-  const amendedTraces = changesOf(graph, parsed.value);
-  if (amendedTraces.length === 0) return Object.freeze({ ok: true, value: Object.freeze({ kind: "unchanged", graph }) });
+  const amendedTraces = changesOf(roster.value);
+  const amendedChanges = nonEmpty(amendedTraces);
+  if (amendedChanges === null) return Object.freeze({ ok: true, value: Object.freeze({ kind: "unchanged", graph }) });
 
   const wave = graph.current_wave;
   if (graph.current_phase !== "execute" || wave === undefined) {
@@ -246,8 +246,7 @@ export function amendSpecTrace(
     kind: "spec-trace-amendment",
     wave,
     retiredRunId: graph.active_wave_gate?.runId ?? null,
-    // Non-empty: the unchanged replay returned above.
-    changes: Object.freeze(amendedTraces.map(({ change }) => change)) as NonEmpty<SpecTraceAmendmentChange>,
+    changes: mapNonEmpty(amendedChanges, ({ change }) => change),
     specIndexObservation: specIndexObservationOf(specIndex),
   });
   // A live gate was refused above, so only a tombstone or residue is retired.

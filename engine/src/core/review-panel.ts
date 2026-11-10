@@ -65,7 +65,7 @@ import {
 } from "./panel-kernel";
 import { STANDALONE_REVIEW_SUBJECT } from "./reviewer-contract";
 import { sha256Hex } from "./digest";
-import { type ArtifactDigest } from "./orchestration-contract/identity";
+import { nonEmpty, type ArtifactDigest } from "./orchestration-contract/identity";
 
 // ---------------------------------------------------------------------------
 // Lenses
@@ -463,6 +463,35 @@ function parseBriefFindingEntry(
   };
 }
 
+/** `undefined` for a wave brief (the absent or explicit `wave` kind), null for
+ *  an unknown kind. */
+function parseBriefSourceKind(raw: unknown): "standalone" | undefined | null {
+  if (raw === undefined || raw === "wave") return undefined;
+  return raw === "standalone" ? "standalone" : null;
+}
+
+/** A standalone brief is always wave 1 over the single standalone subject. */
+function standaloneBriefErrors(wave: unknown, taskIds: readonly string[] | null): readonly string[] {
+  const errors: string[] = [];
+  if (wave !== 1) errors.push("standalone brief.wave must be 1");
+  if (taskIds === null || taskIds.length !== 1 || taskIds[0] !== STANDALONE_REVIEW_SUBJECT) {
+    errors.push(`standalone brief.task_ids must be exactly ['${STANDALONE_REVIEW_SUBJECT}']`);
+  }
+  return errors;
+}
+
+/** Finding ids must be unique, and stay unique once mapped to artifact filenames. */
+function briefFindingIdErrors(findings: readonly BriefFinding[]): readonly string[] {
+  const errors: string[] = [];
+  const ids = findings.map((finding) => finding.id);
+  if (new Set(ids).size !== ids.length) errors.push("brief finding ids must be unique");
+  const filenames = ids.map(briefFindingFilename);
+  if (new Set(filenames).size !== filenames.length) {
+    errors.push("brief finding ids must remain unique once mapped to filenames");
+  }
+  return errors;
+}
+
 /**
  * Re-parse the canonical brief rather than trusting the write that produced it,
  * the same discipline parseInterviewDigestJson applies: everything downstream
@@ -481,9 +510,7 @@ export function parseFindingBriefJson(raw: unknown): ParseResult<FindingBrief> {
   if (severity === null) {
     errors.push("brief.severity must be 'critical' or 'advisory'");
   }
-  const source = raw.source_kind === undefined || raw.source_kind === "wave"
-    ? undefined
-    : raw.source_kind === "standalone" ? "standalone" as const : null;
+  const source = parseBriefSourceKind(raw.source_kind);
   if (source === null) errors.push("brief.source_kind must be 'wave' or 'standalone' when present");
 
   const taskIds = Array.isArray(raw.task_ids) && raw.task_ids.every((id) => typeof id === "string" && id.trim() !== "")
@@ -502,19 +529,8 @@ export function parseFindingBriefJson(raw: unknown): ParseResult<FindingBrief> {
     if (parsed.finding) findings.push(parsed.finding);
   }
 
-  if (source === "standalone") {
-    if (wave !== 1) errors.push("standalone brief.wave must be 1");
-    if (taskIds === null || taskIds.length !== 1 || taskIds[0] !== STANDALONE_REVIEW_SUBJECT) {
-      errors.push(`standalone brief.task_ids must be exactly ['${STANDALONE_REVIEW_SUBJECT}']`);
-    }
-  }
-
-  const ids = findings.map((finding) => finding.id);
-  if (new Set(ids).size !== ids.length) errors.push("brief finding ids must be unique");
-  const filenames = ids.map(briefFindingFilename);
-  if (new Set(filenames).size !== filenames.length) {
-    errors.push("brief finding ids must remain unique once mapped to filenames");
-  }
+  if (source === "standalone") errors.push(...standaloneBriefErrors(wave, taskIds));
+  errors.push(...briefFindingIdErrors(findings));
 
   if (errors.length > 0) return fail(errors);
   return source === "standalone"
@@ -838,7 +854,7 @@ function findTopLevelVerdictObjects(text: string): readonly VerdictObjectSpan[] 
     let quote: '"' | "'" | null = null;
     let escaped = false;
     for (let index = start; index < text.length; index += 1) {
-      const char = text[index]!;
+      const char = text[index];
       if (quote !== null) {
         if (escaped) escaped = false;
         else if (char === "\\") escaped = true;
@@ -895,11 +911,11 @@ export function refutationVerdictJson(raw: string): ParseResult<string> {
           ? "refutation verdict is not valid JSON and contains no single json fence"
           : "refutation verdict contains competing JSON-looking payloads and no json fence"]);
       }
-      const only = candidates[0]!;
+      const only = candidates[0];
       return ok(trimmed.slice(only.start, only.end));
     }
-    const candidate = fenced[0]![1]!.trim();
-    const outside = `${trimmed.slice(0, fenced[0]!.index)}\n${trimmed.slice(fenced[0]!.index! + fenced[0]![0].length)}`;
+    const candidate = fenced[0][1].trim();
+    const outside = `${trimmed.slice(0, fenced[0].index)}\n${trimmed.slice(fenced[0].index + fenced[0][0].length)}`;
     // Ordinary analysis/code prose (including `{ strict: true }`) is tolerated.
     // A structurally valid outside JSON object claiming decoded `criterion` or
     // `verdicts` authority is a competing payload, including Unicode-escaped
@@ -1309,9 +1325,9 @@ export function countRefutationVotes(
     upheldBy: Object.freeze(upheldBy),
     uncertainFrom: Object.freeze(uncertainFrom),
   });
-  const [head, ...tail] = refutations;
-  return head !== undefined && refutations.length >= threshold
-    ? Object.freeze({ survives: false as const, votes, refutations: [head, ...tail] as NonEmptyRefutations })
+  const refuted = nonEmpty(refutations);
+  return refuted !== null && refuted.length >= threshold
+    ? Object.freeze({ survives: false as const, votes, refutations: refuted })
     : Object.freeze({ survives: true as const, votes, refutations: Object.freeze(refutations) });
 }
 

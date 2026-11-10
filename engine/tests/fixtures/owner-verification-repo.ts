@@ -139,7 +139,7 @@ const created: string[] = [];
 
 /** Remove every fixture repository and launch log built so far. */
 export function cleanupOwnerVerificationRepos(): void {
-  while (created.length > 0) rmSync(created.pop()!, { recursive: true, force: true });
+  for (let dir = created.pop(); dir !== undefined; dir = created.pop()) rmSync(dir, { recursive: true, force: true });
 }
 
 const sha256 = (bytes: string | Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
@@ -473,9 +473,12 @@ function installGraph(root: string, graph: StampedGraph, layout: Layout): Readon
   const statePath = join(root, stateFile(layout));
   write(root, stateFile(layout), JSON.stringify(graph, null, 2));
   chmodSync(statePath, 0o444);
-  const active = graph.active_wave_gate!;
-  mkdirSync(active.runsRoot!, { recursive: true });
-  const run = createRunDirectory(active.runsRoot!, active.runId);
+  const active = graph.active_wave_gate;
+  if (active === undefined) throw new Error("fixture graph has no active Wave Gate");
+  const { runsRoot } = active;
+  if (runsRoot === undefined) throw new Error("fixture Wave Gate records no runs root");
+  mkdirSync(runsRoot, { recursive: true });
+  const run = createRunDirectory(runsRoot, active.runId);
   if (!run.ok) throw new Error(run.error.message);
   return { manager: new StateManager(statePath), handle: run.value };
 }

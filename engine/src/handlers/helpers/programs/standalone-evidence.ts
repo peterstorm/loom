@@ -24,6 +24,7 @@ import {
 } from '../../../core/standalone-review';
 import { bindStandaloneCaptureAuthority, captureStandaloneReviewerBytes, completeStandaloneReviewerCapture } from '../../../core/standalone-reviewer-capture';
 import { serializeAdjudicatedStandaloneReview } from '../../../core/standalone-review-records';
+import { renderReviewerPayloadDiagnostic } from '../../../core/reviewer-protocol';
 import { admitStandaloneTranscript, type StandaloneTranscriptAdmission } from '../../../core/standalone-transcript-admission';
 import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion } from '../../../core/standalone-refutation-completion';
 import { buildStandaloneFindingBrief, defaultRefutationThreshold, reviewSignals, selectReviewLenses } from '../../../core/review-panel';
@@ -258,7 +259,7 @@ function scopePacketProblem(
   if (sections.length !== 1) {
     return `context ${request.contextDigest} must contain exactly one standalone-review-authority section`;
   }
-  const parsed = parseScopePacketAuthority(sections[0]!.bytes);
+  const parsed = parseScopePacketAuthority(sections[0].bytes);
   if (!parsed.ok) return parsed.message;
   const witnessed = parsed.value;
   if (witnessed.runId !== authority.runId || witnessed.role !== request.role ||
@@ -293,13 +294,13 @@ export function readStandaloneReviewedSource(
         message: `context ${request.contextDigest} must contain exactly one standalone-frozen-source section`,
       });
     }
-    if (sectionDigest !== null && sections[0]!.digest !== sectionDigest) {
+    if (sectionDigest !== null && sections[0].digest !== sectionDigest) {
       return Object.freeze({ ok: false, message: "standalone reviewer contexts attest different frozen source snapshots" });
     }
     if (reviewed !== null) continue; // Equal authenticated section digest: one immutable source parse per roster.
-    const parsed = parseReviewedSource(sections[0]!.bytes, authority.scope, registration.schemaVersion === 3 ? 2 : 1);
+    const parsed = parseReviewedSource(sections[0].bytes, authority.scope, registration.schemaVersion === 3 ? 2 : 1);
     if (!parsed.ok) return parsed;
-    sectionDigest = sections[0]!.digest;
+    sectionDigest = sections[0].digest;
     reviewed = parsed.value;
   }
   return reviewed === null
@@ -579,7 +580,7 @@ export function replayStandaloneResultFromEvidence(
               ? `refutation retry publication is absent for ${retryAuthority.slotId}`
               : retry.message);
           }
-          const retryRequest = retry.requests[0]!;
+          const retryRequest = retry.requests[0];
           if (!captured.value.has(captureKey(retryAuthority.slotId, 2))) {
             return failed(`checkpoint-independent replay is missing refutation retry ${retryAuthority.requestId}`);
           }
@@ -712,7 +713,13 @@ export function admitCapturedStandaloneTranscript(
   if (!protocol.ok) throw new Error(protocol.error.message);
   if (protocol.value.protocolVersion === 3) {
     const admitted = admitStandaloneSuccessorReviewer(protocol.value, bytes);
-    return admitted.ok ? { ok: true } : { ok: false, problems: [admitted.error.message] };
+    if (admitted.ok) return { ok: true };
+    // Same retry-facing diagnostic as the v1/v2 admission: a rejected payload
+    // must carry WHERE and WHY plus its size, or attempt 2 cannot self-correct.
+    // A lineage/assessment refusal carries its own actionable sentence.
+    return { ok: false, problems: [admitted.error.kind === "reviewer-protocol-failed"
+      ? renderReviewerPayloadDiagnostic(admitted.error, bytes.byteLength)
+      : admitted.error.message] };
   }
   if (protocol.value.subject.kind !== "standalone-review" || !sameAgentRequestAuthority(protocol.value.request, request)) {
     throw new Error("resolved reviewer protocol differs from the exact standalone request");

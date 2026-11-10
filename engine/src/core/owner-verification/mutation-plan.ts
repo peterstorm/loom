@@ -176,7 +176,7 @@ const byPosition = (left: Candidate, right: Candidate): number =>
  */
 function selectedPlan(ownerPath: string, candidates: readonly Candidate[], cap: MutantCap): MutationPlan {
   const n = candidates.length;
-  const chosen = n <= cap ? candidates : Array.from({ length: cap }, (_, i) => candidates[Math.floor((i * n) / cap)]!);
+  const chosen = n <= cap ? candidates : Array.from({ length: cap }, (_, i) => candidates[Math.floor((i * n) / cap)]);
   const mutants = chosen.map((candidate): Mutant => Object.freeze({
     id: sha256Hex(JSON.stringify([ownerPath, candidate.start, candidate.end, candidate.operator])),
     ...candidate,

@@ -57,7 +57,7 @@ export function specCheckTranscriptDelivery(transcript: ClaudeTranscript, legacy
   const candidates = claudeTranscriptCandidates(transcript);
   if (!candidates.ok) return Object.freeze({ kind: "corrupt-final-turn", error: candidates.error, legacyText });
   const handbacks = candidates.value.filter(({ origin }) => origin.endsWith(".handback"));
-  return Object.freeze({ kind: "delivered", text: handbacks.length === 1 ? handbacks[0]!.text : legacyText });
+  return Object.freeze({ kind: "delivered", text: handbacks.length === 1 ? handbacks[0].text : legacyText });
 }
 
 /**

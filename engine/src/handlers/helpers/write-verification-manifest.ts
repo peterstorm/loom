@@ -14,7 +14,7 @@ import {
   readRunFileNoFollow,
   removeRunFileNoFollow,
   writeRunFileExclusiveNoFollow,
-} from "../../orchestration/no-follow-fs";
+} from "../../utils/no-follow-fs";
 import { StateManager } from "../../state-manager";
 import type { HookHandler, HookResult } from "../../types";
 

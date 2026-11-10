@@ -33,7 +33,7 @@ const ANCHOR_MENTION = /\b((?:FR|AS)-\d+):/g;
 
 /** The declared anchors a testcase name decides (`AS-003: …`), in name order. */
 function testcaseAnchors(name: string, fileAnchors: readonly string[]): readonly string[] {
-  return [...new Set([...name.matchAll(ANCHOR_MENTION)].map((match) => match[1]!))]
+  return [...new Set([...name.matchAll(ANCHOR_MENTION)].map((match) => match[1]))]
     .filter((anchor) => fileAnchors.includes(anchor));
 }
 

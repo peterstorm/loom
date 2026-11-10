@@ -12,7 +12,7 @@ import {
   readDirectoryFileNoFollow,
   withAnchoredDirectoryLock,
   writeDirectoryFileExclusiveNoFollow,
-} from "./no-follow-fs";
+} from "../utils/no-follow-fs";
 import { parseRunDirectoryReference, type RunDirectoryReference } from "./run-directory-handle";
 
 export { ORCHESTRATION_RUNS_SUFFIX } from "../machine/evidence";

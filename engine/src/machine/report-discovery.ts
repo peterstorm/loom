@@ -83,7 +83,7 @@ const pushWord = (state: LiteralWordState): void => {
  *  index, or -1 to refuse (a `$`/backtick inside double quotes, or a trailing
  *  backslash). */
 function consumeDoubleQuotedChar(state: LiteralWordState, command: string, index: number): number {
-  const char = command[index]!;
+  const char = command[index];
   if (char === '"') {
     state.quote = null;
   } else if (char === "\\") {
@@ -107,7 +107,7 @@ function consumeDoubleQuotedChar(state: LiteralWordState, command: string, index
 /** Consume one character outside any quote. Returns the next index, or -1 to
  *  refuse (a dynamic expansion, or a trailing backslash). */
 function consumeUnquotedChar(state: LiteralWordState, command: string, index: number): number {
-  const char = command[index]!;
+  const char = command[index];
   if (char === "'" || char === '"') {
     startWord(state, false);
     state.quote = char;
@@ -134,7 +134,7 @@ export function literalShellWords(command: string): readonly LiteralShellWord[] 
   const state: LiteralWordState = { words: [], word: "", wordStarted: false, optionEligible: false, quote: null };
   for (let i = 0; i < command.length;) {
     if (state.quote === "'") {
-      const char = command[i]!;
+      const char = command[i];
       if (char === "'") state.quote = null;
       else state.word += char;
       startWord(state, false);

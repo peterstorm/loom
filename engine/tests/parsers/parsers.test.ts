@@ -4,6 +4,10 @@ import { describe, it, expect } from "vitest";
 import { parseFirstUserPrompt, parseTranscript } from "../../src/parsers/parse-transcript";
 import { parseFilesModified } from "../../src/parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../src/parsers/parse-bash-test-output";
+import { readPersistedOutput } from "../../src/utils/persisted-output";
+
+/** The production persisted-output reader, bound once: no test here is about it. */
+const parseBashOutput = (jsonl: string): string => parseBashTestOutput(jsonl, readPersistedOutput);
 import { parsePhaseArtifacts } from "../../src/parsers/parse-phase-artifacts";
 import { parseSubagentStartInput, parseSubagentStartStdin } from "../../src/parsers/parse-subagent-start-input";
 import { parseSubagentStopInput, parseSubagentStopStdin } from "../../src/parsers/parse-subagent-stop-input";
@@ -19,7 +23,7 @@ describe("Claude Code harness records", () => {
   });
 
   it("contribute no test output", () => {
-    const output = parseBashTestOutput(fixture);
+    const output = parseBashOutput(fixture);
     expect(output).toContain("Tests: 3 passed");
     expect(output).not.toContain("1 failed");
   });
@@ -294,7 +298,7 @@ describe("parseBashTestOutput", () => {
       '{"message":{"content":[{"type":"tool_use","name":"Bash","id":"t1","input":{"command":"npm test"}}]}}',
       '{"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Tests passed"}]}}',
     ].join("\n");
-    const result = parseBashTestOutput(content);
+    const result = parseBashOutput(content);
     expect(result).toContain("Tests passed");
   });
 
@@ -303,7 +307,7 @@ describe("parseBashTestOutput", () => {
       '{"message":{"content":[{"type":"tool_use","name":"Bash","id":"t1","input":{"command":"ls -la"}}]}}',
       '{"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"file.txt"}]}}',
     ].join("\n");
-    const result = parseBashTestOutput(content);
+    const result = parseBashOutput(content);
     expect(result).toBe("");
   });
 
@@ -322,7 +326,7 @@ describe("parseBashTestOutput", () => {
         `{"message":{"content":[{"type":"tool_use","name":"Bash","id":"t1","input":{"command":"${cmd}"}}]}}`,
         '{"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"OK"}]}}',
       ].join("\n");
-      const result = parseBashTestOutput(content);
+      const result = parseBashOutput(content);
       expect(result).toContain("OK");
     }
   });
@@ -478,7 +482,7 @@ describe("parseBashTestOutput — persisted output resolution", () => {
 
     const truncatedPreview = `bun test v1.3.9\n\nsrc/config.test.ts:\n...(truncated)...\n\nFull output saved to: ${filePath}`;
     const content = makeJsonl("bun test", truncatedPreview);
-    const result = parseBashTestOutput(content);
+    const result = parseBashOutput(content);
 
     expect(result).toContain("484 pass");
     expect(result).toContain("0 fail");
@@ -490,7 +494,7 @@ describe("parseBashTestOutput — persisted output resolution", () => {
   it("falls back to original text when persisted file does not exist", () => {
     const truncatedPreview = "bun test v1.3.9\n...(truncated)...\n\nFull output saved to: /tmp/nonexistent-loom-test-file.txt";
     const content = makeJsonl("bun test", truncatedPreview);
-    const result = parseBashTestOutput(content);
+    const result = parseBashOutput(content);
 
     expect(result).toContain("truncated");
     expect(result).toContain("Full output saved to");
@@ -508,7 +512,7 @@ describe("parseBashTestOutput — persisted output resolution", () => {
       '{"message":{"content":[{"type":"tool_use","name":"Bash","id":"t1","input":{"command":"bun test"}}]}}',
       `{"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":${toolResult}}]}}`,
     ].join("\n");
-    const result = parseBashTestOutput(content);
+    const result = parseBashOutput(content);
 
     expect(result).toContain("317 pass");
     expect(result).not.toContain("Preview");
@@ -518,7 +522,7 @@ describe("parseBashTestOutput — persisted output resolution", () => {
 
   it("handles normal output without persisted-output marker", () => {
     const content = makeJsonl("bun test", "42 pass\n0 fail");
-    const result = parseBashTestOutput(content);
+    const result = parseBashOutput(content);
 
     expect(result).toContain("42 pass");
     expect(result).toContain("0 fail");
@@ -532,13 +536,13 @@ describe("parseBashTestOutput — malformed inputs", () => {
       '{"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"OK"',  // truncated
       '{"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Real result"}]}}',
     ].join("\n");
-    const result = parseBashTestOutput(content);
+    const result = parseBashOutput(content);
     expect(result).toContain("Real result");
   });
 
   it("JSONL with no tool_use blocks → empty", () => {
     const content = '{"message":{"content":"just plain text"}}';
-    const result = parseBashTestOutput(content);
+    const result = parseBashOutput(content);
     expect(result).toBe("");
   });
 
@@ -547,12 +551,12 @@ describe("parseBashTestOutput — malformed inputs", () => {
       '{"message":{"content":[{"type":"tool_use","name":"Bash","id":"t1","input":{"command":""}}]}}',
       '{"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"output"}]}}',
     ].join("\n");
-    const result = parseBashTestOutput(content);
+    const result = parseBashOutput(content);
     expect(result).toBe("");
   });
 
   it("empty string → empty", () => {
-    expect(parseBashTestOutput("")).toBe("");
+    expect(parseBashOutput("")).toBe("");
   });
 
   it("Unicode in test output → parsed correctly", () => {
@@ -560,7 +564,7 @@ describe("parseBashTestOutput — malformed inputs", () => {
       '{"message":{"content":[{"type":"tool_use","name":"Bash","id":"t1","input":{"command":"bun test"}}]}}',
       '{"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"✓ test passed — 日本語 output"}]}}',
     ].join("\n");
-    const result = parseBashTestOutput(content);
+    const result = parseBashOutput(content);
     expect(result).toContain("✓ test passed");
     expect(result).toContain("日本語");
   });
@@ -570,7 +574,7 @@ describe("parseBashTestOutput — malformed inputs", () => {
       '{"message":{"content":[{"type":"tool_use","name":"Bash","id":"t1","input":{"command":"mvn test"}}]}}',
       '{"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"**BUILD SUCCESS**\\n**Tests run: 5, Failures: 0, Errors: 0**"}]}}',
     ].join("\n");
-    const result = parseBashTestOutput(content);
+    const result = parseBashOutput(content);
     expect(result).toContain("BUILD SUCCESS");
   });
 
@@ -579,7 +583,7 @@ describe("parseBashTestOutput — malformed inputs", () => {
       '{"message":{"content":[{"type":"tool_use","name":"Bash","id":"t1","input":{"command":"pytest"}}]}}',
       '{"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"3 passed in 0.2s"}]}]}}',
     ].join("\n");
-    const result = parseBashTestOutput(content);
+    const result = parseBashOutput(content);
     expect(result).toContain("3 passed");
   });
 
@@ -590,7 +594,7 @@ describe("parseBashTestOutput — malformed inputs", () => {
       '{"message":{"content":[{"type":"tool_use","name":"Bash","id":"t2","input":{"command":"pytest"}}]}}',
       '{"message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"3 passed"}]}}',
     ].join("\n");
-    const result = parseBashTestOutput(content);
+    const result = parseBashOutput(content);
     expect(result).toContain("5 passing");
     expect(result).toContain("3 passed");
   });
@@ -602,7 +606,7 @@ describe("parseBashTestOutput — malformed inputs", () => {
       '{"message":{"content":[{"type":"tool_use","name":"Bash","id":"t2","input":{"command":"mvn test"}}]}}',
       '{"message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"BUILD SUCCESS"}]}}',
     ].join("\n");
-    const result = parseBashTestOutput(content);
+    const result = parseBashOutput(content);
     expect(result).not.toContain("file.txt");
     expect(result).toContain("BUILD SUCCESS");
   });

@@ -139,11 +139,23 @@ function denseArrayProblem(label: string, error: DataBoundaryError): string {
   if (error.reason === "accessor-field" || error.reason === "non-enumerable-field") {
     return `${label}[${error.index ?? 0}] must be an enumerable own data field`;
   }
-  return error.reason === "not-array" ? `${label} must be a plain array`
-    : error.reason === "invalid-array-length" ? `${label} has an invalid or excessive length`
-    : error.reason === "symbol-field" || error.reason === "sparse-array"
-      ? `${label} must be a dense array without extra fields`
-    : `${label} could not be safely inspected`;
+  return wholeArrayProblem(label, error.reason);
+}
+
+/** The message for a boundary failure reported against the whole array. Total
+ *  over the reason union, so a new reason fails to compile here instead of
+ *  silently taking the inspection fallback. */
+function wholeArrayProblem(label: string, reason: DataBoundaryError["reason"]): string {
+  return match(reason)
+    .with("not-array", () => `${label} must be a plain array`)
+    .with("invalid-array-length", () => `${label} has an invalid or excessive length`)
+    .with("symbol-field", "sparse-array", () => `${label} must be a dense array without extra fields`)
+    .with(
+      "not-object", "wrong-prototype", "unknown-field", "accessor-field", "non-enumerable-field",
+      "mutated-during-read", "unsafe-inspection",
+      () => `${label} could not be safely inspected`,
+    )
+    .exhaustive();
 }
 
 function sameArray<T>(left: readonly T[], right: readonly T[]): boolean {
@@ -684,7 +696,7 @@ function parsedCanonicalStandaloneResult(
     return fail(canonicalRecord({
       kind: "invalid-path-authority",
       field: "standaloneResult.scope",
-      path: excluded[0]!,
+      path: excluded[0],
       message: `standalone result scope contains excluded Loom evidence path(s): ${excluded.join(", ")}`,
     }));
   }
@@ -849,7 +861,7 @@ export function parseRemediationPathAuthority(
     return invalid("sourceResultJson", "path authority does not match its standalone result run and exact scope");
   }
   const excluded = [...reviewed.value.paths, ...support.value.paths].filter(isExcludedRemediationPath);
-  if (excluded.length > 0) return invalid("authorizedPaths", "path authority contains excluded Loom evidence", excluded[0]!);
+  if (excluded.length > 0) return invalid("authorizedPaths", "path authority contains excluded Loom evidence", excluded[0]);
   const combined = combineDistinctPathSets(reviewed.value, support.value);
   if (!combined.ok || !sameArray(combined.value.paths, authorized.value.paths)) {
     return invalid("authorizedPaths", combined.ok
@@ -2709,10 +2721,14 @@ function parseActiveState(
   }
   const state = discriminant.value.state;
   const common = ["state", "authority", "recoveryAttemptIds", "consumedRecoveryReceiptIds"];
-  const fields = state === "audited" ? [...common, "audited"]
-    : state === "staged-temporary-index" ? [...common, "audited", "staged"]
-    : state === "verified" ? [...common, "audited", "staged", "verified"]
-    : common;
+  // An open domain: every other discriminant (including the non-active and
+  // malformed ones) is held to the common fields, and the active-state check
+  // below rejects it.
+  const fields = match(state)
+    .with("audited", () => [...common, "audited"])
+    .with("staged-temporary-index", () => [...common, "audited", "staged"])
+    .with("verified", () => [...common, "audited", "staged", "verified"])
+    .otherwise(() => common);
   const record = exactRecord(raw, fields, "remediationState");
   if (!record.ok) return activeStateParseFailure("state", record.error);
   if (!["authority-frozen", "paths-registered", "audited", "staged-temporary-index", "verified"].includes(String(state))) {

@@ -17,7 +17,7 @@ jobs:
       # diagnosis.
       fail-fast: false
       # macOS exists for a reason the Linux job can never cover: the
-      # anchored no-follow filesystem layer (engine/src/orchestration/
+      # anchored no-follow filesystem layer (engine/src/utils/
       # no-follow-fs.ts) takes a darwin branch (O_NOFOLLOW_ANY-proven real
       # path) that Linux CI never executes. Pin the newest standard macOS
       # runner; it is free on public repositories.
@@ -83,6 +83,21 @@ jobs:
           printf '%s\n' "$GITHUB_WORKSPACE/node_modules/.bin" >> "$GITHUB_PATH"
           node -p 'require("./engine/node_modules/typescript/package.json").version'
           node -p 'require("./node_modules/@earendil-works/pi-coding-agent/package.json").version'
+      # The security-audit sandbox's real-isolation tests prove its claims
+      # (read-only target and home, no network, forged facts ignored) only
+      # where `unshare` can make an unprivileged user namespace. Ubuntu 24.04
+      # restricts that through AppArmor by default, which would turn those
+      # tests into a console warning. Lift the restriction on the Linux leg and
+      # make an unavailable sandbox FAIL the suite there (LOOM_REQUIRE_SANDBOX).
+      # macOS has no `unshare`: its leg keeps the skip and never sets the flag.
+      - name: Enable unprivileged user namespaces for the sandbox tests
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          unshare --map-root-user --mount --net true
+          echo "LOOM_REQUIRE_SANDBOX=1" >> "$GITHUB_ENV"
       - name: Verify
         shell: bash
         run: |

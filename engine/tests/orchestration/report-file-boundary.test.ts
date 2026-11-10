@@ -8,7 +8,7 @@ import {
   readRunBytesNoFollow,
   removeDirectoryRegularFileNoFollow,
   removeRunRegularFileNoFollow,
-} from "../../src/orchestration/no-follow-fs";
+} from "../../src/utils/no-follow-fs";
 
 const roots: string[] = [];
 const fixture = () => {

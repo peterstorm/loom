@@ -4,15 +4,16 @@
  * legacy archive's canonical-transcript aggregation share the same scoped legacy parse.
  */
 import { attributeFindings, type Finding } from "./findings";
-import type { NonEmpty } from "./orchestration-contract";
 import { fail, ok, type ParseResult } from "./panel-kernel";
 import {
   parseReviewerEvidence as parseIssuedReviewerEvidence, resolveReviewFindings,
   type IssuedStandaloneReviewerProtocol, type ParsedFindings,
 } from "./review-output";
+import { renderReviewerPayloadDiagnostic } from "./reviewer-protocol";
 import { STANDALONE_REVIEW_SUBJECT } from "./reviewer-contract";
 import type { StandaloneReviewAggregate, StandaloneReviewerEvidence, StandaloneReviewState } from "./standalone-review-model";
 import { findingScopeErrors, type StandaloneReviewerRole } from "./standalone-review-scope";
+import { nonEmptyOf } from "./orchestration-contract";
 
 export type StandaloneTranscriptAdmission =
   | Readonly<{ ok: true; findings: ParsedFindings }>
@@ -46,7 +47,13 @@ export function admitStandaloneTranscript(
     }
   }
   if (parsed.ok && parsed.value.kind === "standalone-review") return Object.freeze({ ok: true, findings: parsed.value.findings });
-  return Object.freeze({ ok: false, problems: Object.freeze([parsed.ok ? "standalone reviewer authority required" : parsed.error.message]) });
+  // The retry preamble is the ONLY feedback a rejected reviewer gets. The Wave
+  // path renders it from the same helper; this one surfaced `error.message`
+  // alone, which drops the JSON pointer, the byte offset and the size guidance
+  // the parse already computed — so the next attempt re-emitted the defect.
+  return Object.freeze({ ok: false, problems: Object.freeze([parsed.ok
+    ? "standalone reviewer authority required"
+    : renderReviewerPayloadDiagnostic(parsed.error, rawBytes.byteLength)]) });
 }
 
 /** Historical archive only; registered completion always consumes issued protocol authority. */
@@ -98,6 +105,6 @@ export function aggregateCanonicalTranscripts(
     : ok(Object.freeze({
         kind: "requires-refutation",
         aggregate,
-        criticals: Object.freeze([head, ...tail]) as NonEmpty<Finding>,
+        criticals: nonEmptyOf(head, ...tail),
       }));
 }

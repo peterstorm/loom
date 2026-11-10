@@ -38,7 +38,7 @@ function makeStdin(overrides: Record<string, unknown> = {}): string {
 
 /**
  * We test the handler by importing it directly.
- * The handler uses config.ts for DEFAULT_RULES_DIR/PROJECT_RULES_DIR,
+ * The handler uses config.ts for DEFAULT_RULES_DIR/projectRulesDir,
  * so we test behavior that doesn't depend on actual rule files existing
  * (passthrough, tool filtering, error handling) plus integration with
  * the actual linter for files that exist.
@@ -266,7 +266,8 @@ describe("editedFilePath", () => {
   });
 
   it("returns null for non-object input", () => {
-    expect(editedFilePath("string" as any)).toBeNull();
+    // Deliberately ill-typed input: the guard must hold for a caller that lies about the type.
+    expect(editedFilePath("string" as unknown as Record<string, unknown>)).toBeNull();
   });
 
   it("returns null when no file_path or path field", () => {

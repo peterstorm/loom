@@ -6,7 +6,7 @@
  * registration. The shell re-derives the transition under the state lock and
  * compares registrations with the matching `same…Registration` predicate.
  */
-import type { TaskGraph } from "../types";
+import type { ReviewRunSlotAuthority, Task, TaskGraph } from "../types";
 import { captureKey } from "./harness-capture";
 import { canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId } from "./orchestration-contract";
 import { CURRENT_REVIEWER_PROTOCOL } from "./reviewer-contract";
@@ -89,20 +89,20 @@ export function prepareExhaustedWaveGateRestart(
   if (waveTasks.length !== previous.taskIds.length) {
     return { ok: false, message: "the previous Wave Gate task authority no longer matches the protected graph" };
   }
+  // Each bound run with the slot authority it carries: a run without one is
+  // refused here, never read as "no outstanding reviewers".
+  const outstanding: Readonly<{ task: Task; slot: ReviewRunSlotAuthority }>[] = [];
   for (const task of waveTasks) {
     const run = task.review_run;
     if (run === undefined) continue;
-    if (run.head_sha !== epoch.batchEpoch || waveRunRosterProblem(graph, previous.schemaVersion, task, run) !== null) {
+    if (run.head_sha !== epoch.batchEpoch || waveRunRosterProblem(graph, previous.schemaVersion, task, run) !== null ||
+        run.slot_authority === undefined) {
       return { ok: false, message: `task ${task.id} Review Packet is not bound to the active epoch and exact reviewer roster` };
     }
+    outstanding.push(...run.slot_authority
+      .filter((slot) => !run.evidence.some(({ agent }) => agent === slot.agent))
+      .map((slot) => ({ task, slot })));
   }
-  const outstanding = waveTasks.flatMap((task) => {
-    const run = task.review_run;
-    if (run === undefined) return [];
-    return run.slot_authority!.filter((slot) =>
-      !run.evidence.some(({ agent }) => agent === slot.agent),
-    ).map((slot) => ({ task, slot }));
-  });
   if (outstanding.length === 0) {
     return { ok: false, message: "the active Wave Gate has no outstanding reviewer slots to restart" };
   }

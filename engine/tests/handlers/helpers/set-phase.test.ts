@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, chmodSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, chmodSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
@@ -45,7 +45,7 @@ describe("set-phase helper", () => {
   });
 
   afterEach(() => {
-    try { chmodSync(statePath, 0o644); } catch {}
+    if (existsSync(statePath)) chmodSync(statePath, 0o644);
     rmSync(tmpDir, { recursive: true, force: true });
   });
 

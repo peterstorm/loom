@@ -42,7 +42,7 @@ describe("cleanup-state helper", () => {
   });
 
   afterEach(() => {
-    try { chmodSync(statePath, 0o644); } catch {}
+    if (existsSync(statePath)) chmodSync(statePath, 0o644);
     rmSync(tmpDir, { recursive: true, force: true });
   });
 

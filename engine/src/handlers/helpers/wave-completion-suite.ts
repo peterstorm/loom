@@ -28,7 +28,7 @@ import {
 import { parseJunitTestcases } from "../../core/structured-test-report";
 import { sha256Bytes } from "../../core/digest";
 import type { ArtifactDigest, DomainResult } from "../../core/orchestration-contract";
-import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
+import { readRunBytesNoFollow } from "../../utils/no-follow-fs";
 import { observeFrozenDigests } from "../../orchestration/frozen-path-observation";
 import {
   FULL_TIER_LINT_CHECK_ID_TEXT,
@@ -849,8 +849,10 @@ export async function ensureWaveCompletionSuite(
     return blocked(before, ["workspace"], [], `current Wave workspace unavailable: ${before.reason}`);
   }
   // `exactActiveAuthorityProblem` proved the registration names this Wave.
+  const wave = registration.input.wave;
+  if (wave === null) return blocked(before, ["authority"], [], "Wave Gate registration names no Wave");
   const contracts = graph.acceptance_contracts ?? [];
-  const expectation = graphAcceptanceExpectation(graph, registration.input.wave!);
+  const expectation = graphAcceptanceExpectation(graph, wave);
   const drift = frozenPathDrift(contracts, observeFrozenDigests(repositoryRoot, frozenPathsToObserve(contracts)));
   if (drift.length > 0) return blocked(before, ["artifact"], [], renderFrozenPathDrift(drift));
   if (reusableReceipt(graph, before, expectation) !== null) return accepted("reused", before);

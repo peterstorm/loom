@@ -1,0 +1,704 @@
+{
+  "exclude": [
+    {
+      "path": "engine/tests/fixtures/security/upstream/",
+      "reason": "vendored upstream security-audit validators, byte-pinned by MANIFEST.json and run as-is — rewriting them to loom's rules would break the pin"
+    }
+  ],
+  "requireGovernance": [
+    "engine/src/"
+  ],
+  "boundaries": [
+    {
+      "module": "engine/src/linter/",
+      "description": "The linter bounded context. Imports itself, node builtins, ts-pattern and the one shared test-file classifier (INV-2); never the hook shells, the parsers or protected state.",
+      "allow": [
+        "./",
+        "engine/src/linter/",
+        "node:",
+        "engine/src/core/test-file-classification",
+        "ts-pattern"
+      ],
+      "deny": [
+        "engine/src/handlers/",
+        "engine/src/parsers/",
+        "engine/src/state-manager",
+        "engine/src/cli"
+      ]
+    },
+    {
+      "module": "engine/src/core/",
+      "description": "The functional core. Imports itself, the type barrel, ts-pattern and the named pure machine/utils leaves only — never config.ts (env-derived facts are injected by the shells); node builtins and other packages are per-file grants (perFileAllow / perFileExactAllow), never blanket.",
+      "allow": [
+        "./",
+        "engine/src/core/",
+        "engine/src/types",
+        "engine/src/machine/evidence",
+        "engine/src/machine/types",
+        "engine/src/machine/extract-evidence",
+        "engine/src/machine/harness-tool-call-types",
+        "engine/src/utils/extract-task-id",
+        "engine/src/utils/no-finding-sentinel",
+        "engine/src/utils/strip-namespace",
+        "ts-pattern"
+      ],
+      "deny": [
+        "engine/src/linter/",
+        "engine/src/handlers/",
+        "engine/src/parsers/"
+      ],
+      "perFileAllow": {
+        "engine/src/core/block-direct-edits.ts": {
+          "allow": [
+            "node:path"
+          ],
+          "reason": "normalizes panel/spec-artifact targets with pure path math (posix.normalize) before the prefix test"
+        },
+        "engine/src/core/emission-ingestion.ts": {
+          "allow": [
+            "node:crypto"
+          ],
+          "reason": "folds a digest over captured payload bytes — digest-only hashing, mirroring review-packet"
+        },
+        "engine/src/core/digest.ts": {
+          "allow": [
+            "node:crypto"
+          ],
+          "reason": "the shared deterministic SHA-256 leaf (sha256Bytes/sha256Hex)"
+        },
+        "engine/src/core/bash-code-mutation.ts": {
+          "allow": [
+            "node:path"
+          ],
+          "reason": "the shared rules gate classifies target files by extension — pure path math (extname/join) over strings"
+        },
+        "engine/src/core/subagent-authority.ts": {
+          "allow": [
+            "node:path"
+          ],
+          "reason": "resolves command words against the caller's cwd and the registered run directories — pure path math (isAbsolute/normalize), never the process cwd"
+        },
+        "engine/src/core/harness-capture.ts": {
+          "allow": [
+            "node:crypto"
+          ],
+          "reason": "digest-only hashing of captured harness payload bytes"
+        },
+        "engine/src/core/harness-resources.ts": {
+          "allow": [
+            "node:crypto",
+            "node:path"
+          ],
+          "reason": "digest-only hashing and path math over the resource inventory it is given"
+        },
+        "engine/src/core/legacy-archive.ts": {
+          "allow": [
+            "node:crypto"
+          ],
+          "reason": "digest-only hashing of the legacy journal archive bytes"
+        },
+        "engine/src/core/orchestration-contract/bytes.ts": {
+          "allow": [
+            "node:crypto"
+          ],
+          "reason": "digest-only hashing of canonical contract bytes"
+        },
+        "engine/src/core/orchestration-contract/effects.ts": {
+          "allow": [
+            "node:path"
+          ],
+          "reason": "pure path math over effect targets"
+        },
+        "engine/src/core/orchestration-contract/publication.ts": {
+          "allow": [
+            "node:crypto"
+          ],
+          "reason": "digest-only hashing of published artifact bytes"
+        },
+        "engine/src/core/parse-spec.ts": {
+          "allow": [
+            "node:crypto"
+          ],
+          "reason": "the Spec Index is a total pure grammar whose only node use is a content digest (a domain grammar lives in core/, a tool-output scraper in parsers/)"
+        },
+        "engine/src/core/panel-kernel.ts": {
+          "allow": [
+            "node:path"
+          ],
+          "reason": "pure path math over panel artifact paths"
+        },
+        "engine/src/core/phase-artifact-paths.ts": {
+          "allow": [
+            "node:path"
+          ],
+          "reason": "pure path math over phase artifact paths"
+        },
+        "engine/src/core/pi-agent-directory.ts": {
+          "allow": [
+            "node:path",
+            "node:url"
+          ],
+          "reason": "'~' expansion, the agents/<name>.md join and fileURLToPath of a file:// selection — string conversion, no filesystem"
+        },
+        "engine/src/core/predecessor-archive.ts": {
+          "allow": [
+            "node:zlib"
+          ],
+          "reason": "inflates an inline gzip archive in memory under an explicit output bound — pure decompression"
+        },
+        "engine/src/core/remediation-machine.ts": {
+          "allow": [
+            "node:crypto"
+          ],
+          "reason": "digest-only hashing of remediation candidate bytes"
+        },
+        "engine/src/core/repository-path.ts": {
+          "allow": [
+            "node:path"
+          ],
+          "reason": "pure path math over repository-relative paths"
+        },
+        "engine/src/core/review-packet.ts": {
+          "allow": [
+            "node:crypto"
+          ],
+          "reason": "digest-only hashing of review packet bytes"
+        },
+        "engine/src/core/review-panel.ts": {
+          "allow": [
+            "node:path"
+          ],
+          "reason": "pure path math over panel artifact paths"
+        },
+        "engine/src/core/rules-gate.ts": {
+          "allow": [
+            "node:path"
+          ],
+          "reason": "pure path math over the gated target path"
+        },
+        "engine/src/core/scope-classification.ts": {
+          "allow": [
+            "node:path"
+          ],
+          "reason": "reads each scope path's extension — pure path math (posix.extname)"
+        },
+        "engine/src/core/spawn-task-text.ts": {
+          "allow": [
+            "node:path"
+          ],
+          "reason": "joins the run directory, packet and reader paths — pure path math over shell-gathered strings"
+        },
+        "engine/src/core/type-diagnostics.ts": {
+          "allow": [
+            "node:path"
+          ],
+          "reason": "resolves tsc's project-relative paths and displays them relative again — pure path math"
+        },
+        "engine/src/core/standalone-review.ts": {
+          "allow": [
+            "node:util"
+          ],
+          "reason": "isDeepStrictEqual — structural equality, no I/O"
+        },
+        "engine/src/core/structured-test-report.ts": {
+          "allow": [
+            "saxes"
+          ],
+          "reason": "the in-process SAX parser; exact runtime bytes are pinned by machine-purity.test.ts"
+        }
+      },
+      "perFileExactAllow": {
+        "engine/src/core/reviewer-contract.ts": {
+          "allow": [
+            "zod/v4"
+          ],
+          "reason": "the reviewer wire contract parses its payload with one strict zod schema (runtime closure pinned by machine-purity)"
+        },
+        "engine/src/core/standalone-lineage-contract.ts": {
+          "allow": [
+            "zod/v4"
+          ],
+          "reason": "the standalone lineage contract parses its record with one strict zod schema"
+        },
+        "engine/src/core/reviewer-protocol.ts": {
+          "allow": [
+            "jsonc-parser"
+          ],
+          "reason": "the reviewer codec tokenizes JSONC with the audited jsonc-parser rather than a second tokenizer"
+        },
+        "engine/src/core/panel-contract.ts": {
+          "allow": [
+            "zod/v4"
+          ],
+          "reason": "grammar-constrained judge verdict schema, defined with zod"
+        },
+        "engine/src/core/review-panel.ts": {
+          "allow": [
+            "zod/v4"
+          ],
+          "reason": "grammar-constrained refutation verdict schema, defined with zod"
+        },
+        "engine/src/core/emission-tool.ts": {
+          "allow": [
+            "zod/v4"
+          ],
+          "reason": "the emission tool's verdict-args parser types its admission seam with zod"
+        },
+        "engine/src/core/security-audit-contract.ts": {
+          "allow": [
+            "zod/v4"
+          ],
+          "reason": "run-metadata.json is an external document the program reads; parsed with one strict zod schema (ADR-0066)"
+        },
+        "engine/src/core/owner-verification/import-graph.ts": {
+          "allow": [
+            "typescript"
+          ],
+          "reason": "ADR-0042 compiler-API seam: reads a module's import and re-export specifiers from text with ts.createSourceFile, never ts.sys"
+        },
+        "engine/src/core/owner-verification/mutation-plan.ts": {
+          "allow": [
+            "typescript"
+          ],
+          "reason": "ADR-0042 compiler-API seam: locates mutation sites from text with ts.createSourceFile, never ts.sys"
+        },
+        "engine/src/core/skeleton/ts-surface.ts": {
+          "allow": [
+            "typescript"
+          ],
+          "reason": "ADR-0053 compiler-API seam: reads declaration surfaces from text with ts.createSourceFile, never ts.sys"
+        }
+      }
+    },
+    {
+      "module": "engine/src/parsers/",
+      "description": "Harness and tool OUTPUT scrapers (transcripts, bash output). Import themselves, node builtins, the type barrel, ts-pattern and the two shared core vocabularies (tool-vocabulary, claude-record-kind) only.",
+      "allow": [
+        "./",
+        "engine/src/parsers/",
+        "node:",
+        "engine/src/types",
+        "engine/src/core/tool-vocabulary",
+        "engine/src/core/claude-record-kind",
+        "ts-pattern"
+      ],
+      "deny": [
+        "engine/src/linter/",
+        "engine/src/handlers/",
+        "engine/src/state-manager"
+      ]
+    },
+    {
+      "module": "engine/src/orchestration/",
+      "description": "The orchestration shell: drives the pure core and owns filesystem, protected-state and Git effects. Imports inward — the core, utils, the type barrel, config, the state manager and the pure machine evidence — plus node builtins, zod and ts-pattern; never the hook handlers, the linter or the parsers.",
+      "allow": [
+        "./",
+        "engine/src/orchestration/",
+        "engine/src/core/",
+        "engine/src/utils/",
+        "engine/src/types",
+        "engine/src/config",
+        "engine/src/state-manager",
+        "engine/src/machine/evidence",
+        "node:",
+        "zod",
+        "ts-pattern"
+      ],
+      "deny": [
+        "engine/src/linter/",
+        "engine/src/handlers/",
+        "engine/src/parsers/"
+      ],
+      "perFileExactAllow": {
+        "engine/src/orchestration/owner-verification-runner.ts": {
+          "allow": [
+            "jsonc-parser"
+          ],
+          "reason": "G5b AD-8: reads the matrix test's tsconfig paths (JSONC) with the audited jsonc-parser"
+        }
+      }
+    },
+    {
+      "module": "engine/src/handlers/",
+      "description": "The hook and helper entry points — the outermost shell. May import every inner layer (the core, orchestration, utils, machine, parsers, the linter's index/loader/rule-sources, the type barrel, config, the state manager, the routing table and the two sidecars) plus node builtins, zod and ts-pattern; only the CLI and the routing table may import a handler, never the reverse of that.",
+      "allow": [
+        "./",
+        "engine/src/handlers/",
+        "engine/src/core/",
+        "engine/src/orchestration/",
+        "engine/src/utils/",
+        "engine/src/machine",
+        "engine/src/parsers/",
+        "engine/src/linter/index",
+        "engine/src/linter/loader",
+        "engine/src/linter/rule-sources",
+        "engine/src/types",
+        "engine/src/config",
+        "engine/src/state-manager",
+        "engine/src/handler-routes",
+        "engine/src/implementation-attempt-sidecar",
+        "engine/src/stop-check-note-sidecar",
+        "node:",
+        "zod",
+        "ts-pattern"
+      ],
+      "deny": [
+        "engine/src/cli"
+      ]
+    },
+    {
+      "module": "engine/src/machine/",
+      "description": "The Guarded Skill Machine: a pure reducer core (types, advance, evidence, extraction) and its ledger/report-discovery/task-graph-pointer shell. Imports itself, the core, the type barrel, config, ts-pattern and the lock and no-follow filesystem primitives; node builtins only in the shell files granted below.",
+      "allow": [
+        "./",
+        "engine/src/machine/",
+        "engine/src/core/",
+        "engine/src/types",
+        "engine/src/config",
+        "engine/src/utils/lock",
+        "engine/src/utils/no-follow-fs",
+        "ts-pattern"
+      ],
+      "deny": [
+        "engine/src/handlers/",
+        "engine/src/linter/",
+        "engine/src/parsers/",
+        "engine/src/cli"
+      ],
+      "perFileAllow": {
+        "engine/src/machine/ledger.ts": {
+          "allow": [
+            "node:crypto",
+            "node:fs",
+            "node:path"
+          ],
+          "reason": "the append-only evidence ledger: reads and writes the ledger files under a lock"
+        },
+        "engine/src/machine/report-discovery.ts": {
+          "allow": [
+            "node:fs",
+            "node:path"
+          ],
+          "reason": "discovers structured test reports on disk"
+        },
+        "engine/src/machine/task-graph-pointer.ts": {
+          "allow": [
+            "node:crypto",
+            "node:fs",
+            "node:path"
+          ],
+          "reason": "reads and writes the task-graph pointer file through the no-follow filesystem layer"
+        },
+        "engine/src/machine/tool-evidence-recorder.ts": {
+          "allow": [
+            "node:path"
+          ],
+          "reason": "joins report paths for the recorder shell that wires extraction to the ledger"
+        }
+      }
+    },
+    {
+      "module": "engine/src/utils/",
+      "description": "Shell utilities: filesystem (including the anchored no-follow primitives every shell layer shares), Git, locking and transcript helpers. Import themselves, the core, the type barrel, the pure machine evidence, the transcript and bash-output parsers, runtime compatibility, node builtins, zod and ts-pattern; never the hook handlers, orchestration or the CLI.",
+      "allow": [
+        "./",
+        "engine/src/utils/",
+        "engine/src/core/",
+        "engine/src/machine/evidence",
+        "engine/src/parsers/parse-transcript",
+        "engine/src/parsers/parse-bash-test-output",
+        "engine/src/runtime-compatibility",
+        "engine/src/types",
+        "node:",
+        "zod",
+        "ts-pattern"
+      ],
+      "deny": [
+        "engine/src/handlers/",
+        "engine/src/orchestration/",
+        "engine/src/linter/",
+        "engine/src/cli"
+      ]
+    },
+    {
+      "module": "engine/src/cli.ts",
+      "description": "The process entry point: routes argv to a handler through the routing table. Imports the routing table, phase init, runtime compatibility, the type barrel, the no-follow filesystem primitives, node builtins and ts-pattern.",
+      "allow": [
+        "engine/src/handler-routes",
+        "engine/src/phase-init",
+        "engine/src/runtime-compatibility",
+        "engine/src/types",
+        "engine/src/utils/no-follow-fs",
+        "node:",
+        "ts-pattern"
+      ],
+      "deny": []
+    },
+    {
+      "module": "engine/src/config.ts",
+      "description": "Process configuration: harness detection, protected paths and the task-graph location. Reads env and probes Git; imports the core, the type barrel, the linter's rules-directory layouts, the Git/path utilities it probes with, node builtins and ts-pattern.",
+      "allow": [
+        "engine/src/core/",
+        "engine/src/linter/programmatic/config",
+        "engine/src/types",
+        "engine/src/utils/git-execution-policy",
+        "engine/src/utils/git-probe",
+        "engine/src/utils/git-spawn-outcome",
+        "engine/src/utils/path-presence",
+        "node:",
+        "ts-pattern"
+      ],
+      "deny": []
+    },
+    {
+      "module": "engine/src/handler-routes.ts",
+      "description": "The CLI routing table: pure data over the two helper operation tables (its only imports).",
+      "allow": [
+        "engine/src/handlers/helpers/orchestration-operations",
+        "engine/src/handlers/helpers/security-audit-operations"
+      ],
+      "deny": []
+    },
+    {
+      "module": "engine/src/implementation-attempt-sidecar.ts",
+      "description": "The implementation-attempt sidecar file shell. Imports config, the core, the machine, the no-follow filesystem primitives and node builtins.",
+      "allow": [
+        "engine/src/config",
+        "engine/src/core/",
+        "engine/src/machine",
+        "engine/src/utils/no-follow-fs",
+        "node:"
+      ],
+      "deny": []
+    },
+    {
+      "module": "engine/src/phase-init.ts",
+      "description": "Phase initialization from the artifacts found on disk. Imports the type barrel and the file finder only.",
+      "allow": [
+        "engine/src/types",
+        "engine/src/utils/find-file"
+      ],
+      "deny": []
+    },
+    {
+      "module": "engine/src/runtime-compatibility.ts",
+      "description": "The runtime compatibility probe (installed runtime vs checkout). Imports the core and node builtins only.",
+      "allow": [
+        "engine/src/core/",
+        "node:"
+      ],
+      "deny": []
+    },
+    {
+      "module": "engine/src/state-file-wire.ts",
+      "description": "The protected state file's wire codec. Imports config, the core, the machine, the type barrel and node builtins.",
+      "allow": [
+        "engine/src/config",
+        "engine/src/core/",
+        "engine/src/machine",
+        "engine/src/types",
+        "node:"
+      ],
+      "deny": []
+    },
+    {
+      "module": "engine/src/state-manager.ts",
+      "description": "The protected state writer: the one module that writes task-graph state. Imports config, the core, the machine, runtime compatibility, the wire codec, the type barrel, the no-follow filesystem primitives and node builtins.",
+      "allow": [
+        "engine/src/config",
+        "engine/src/core/",
+        "engine/src/machine",
+        "engine/src/runtime-compatibility",
+        "engine/src/state-file-wire",
+        "engine/src/types",
+        "engine/src/utils/no-follow-fs",
+        "node:"
+      ],
+      "deny": []
+    },
+    {
+      "module": "engine/src/stop-check-note-sidecar.ts",
+      "description": "The stop-check note sidecar file shell. Imports config, the core, the pure machine evidence and node builtins.",
+      "allow": [
+        "engine/src/config",
+        "engine/src/core/",
+        "engine/src/machine/evidence",
+        "node:"
+      ],
+      "deny": []
+    },
+    {
+      "module": "engine/src/types.ts",
+      "description": "The shared type barrel: re-exports core types and nothing else.",
+      "allow": [
+        "engine/src/core/"
+      ],
+      "deny": []
+    }
+  ],
+  "pureModules": [
+    "engine/src/core/",
+    "engine/src/machine/",
+    "engine/src/linter/",
+    "engine/src/parsers/",
+    "engine/src/types.ts",
+    "engine/src/handler-routes.ts",
+    "engine/src/utils/no-finding-sentinel.ts",
+    "engine/src/utils/extract-task-id.ts",
+    "engine/src/utils/strip-namespace.ts",
+    "engine/src/handlers/pre-tool-use/subagent-authority-operations.ts",
+    "engine/src/handlers/helpers/security-audit-operations.ts",
+    "engine/src/handlers/helpers/orchestration-operations.ts"
+  ],
+  "impureModules": [
+    {
+      "path": "engine/src/linter/index.ts",
+      "reason": "lintFile's shell: reads the file being linted from disk"
+    },
+    {
+      "path": "engine/src/linter/loader.ts",
+      "reason": "reads the declarative rule JSON files and config.json from the rules directories"
+    },
+    {
+      "path": "engine/src/linter/rule-sources.ts",
+      "reason": "enumerates the rule files on disk for the Wave Gate's runtime-skew check (issue #57 D6)"
+    },
+    {
+      "path": "engine/src/machine/index.ts",
+      "reason": "the machine's public barrel: re-exports the ledger, report-discovery and task-graph-pointer shells beside the pure core"
+    },
+    {
+      "path": "engine/src/machine/ledger.ts",
+      "reason": "the append-only evidence ledger: reads and writes ledger files under a lock, stamps entries with the clock"
+    },
+    {
+      "path": "engine/src/machine/report-discovery.ts",
+      "reason": "discovers structured test reports on disk"
+    },
+    {
+      "path": "engine/src/machine/session-registry.ts",
+      "reason": "the production SessionRegistry adapter: implements the port with the ledger's filesystem reads and writes"
+    },
+    {
+      "path": "engine/src/machine/task-graph-pointer.ts",
+      "reason": "reads and writes the task-graph pointer file"
+    },
+    {
+      "path": "engine/src/machine/tool-evidence-recorder.ts",
+      "reason": "the evidence-minting shell (INV-4): discovers test reports on disk and appends the minted facts to the ledger"
+    }
+  ],
+  "switchTotalityBaseline": [
+    "calibration/grammar-constrained-decoding/pilot-test-fixtures.ts::cell",
+    "engine/scripts/bun-version-pin.ts::refusal.kind",
+    "engine/src/core/acceptance-contract/stop-check.ts::outcome.kind",
+    "engine/src/core/context-packet-projection.ts::selection.kind",
+    "engine/src/core/context-packets.ts::violation.rule",
+    "engine/src/core/emission-ingestion.ts::decision.kind",
+    "engine/src/core/emission-ingestion.ts::decision.kind",
+    "engine/src/core/emission-ingestion.ts::observation.kind",
+    "engine/src/core/emission-ingestion.ts::observation.kind",
+    "engine/src/core/emission-tool.ts::type",
+    "engine/src/core/family-sites.ts::entry.kind",
+    "engine/src/core/harness-tool-call.ts::tool",
+    "engine/src/core/implementation-brief.ts::duty.kind",
+    "engine/src/core/implementation-brief.ts::role.kind",
+    "engine/src/core/implementation-retry.ts::disposition.kind",
+    "engine/src/core/orchestration-contract/effects.ts::envelope.value.kind",
+    "engine/src/core/orchestration-contract/effects.ts::envelope.value.kind",
+    "engine/src/core/orchestration-contract/roster.ts::entry.kind",
+    "engine/src/core/panel-program.ts::state.stage",
+    "engine/src/core/panel-program.ts::state.stage",
+    "engine/src/core/panel-verdict-source.ts::accepted.kind",
+    "engine/src/core/persistent-panel.ts::envelope.type",
+    "engine/src/core/persistent-panel.ts::event.type",
+    "engine/src/core/persistent-panel.ts::state.stage",
+    "engine/src/core/proof-obligations.ts::obligation.kind",
+    "engine/src/core/proof-obligations.ts::raw.kind",
+    "engine/src/core/proof-obligations.ts::raw.kind",
+    "engine/src/core/proof-obligations.ts::result.obligation.kind",
+    "engine/src/core/refutation-verifiers.ts::record.kind",
+    "engine/src/core/remediation-machine.ts::state.state",
+    "engine/src/core/remediation-machine.ts::state.state",
+    "engine/src/core/rules-gate.ts::r.kind",
+    "engine/src/core/runtime-baseline-restore.ts::refusal.kind",
+    "engine/src/core/standalone-review.ts::event.kind",
+    "engine/src/core/standalone-review.ts::state.kind",
+    "engine/src/core/task-attribution.ts::attribution",
+    "engine/src/core/wave-gate-checks.ts::failure.kind",
+    "engine/src/core/wave-gate-machine.ts::event.kind",
+    "engine/src/core/wave-gate-machine.ts::state.kind",
+    "engine/src/core/wave-gate-registration.ts::admitted.kind",
+    "engine/src/handlers/helpers/exact-implementation-settlement.ts::duty.kind",
+    "engine/src/handlers/helpers/orchestration.ts::operation",
+    "engine/src/handlers/helpers/panel-contract.ts::operation.kind",
+    "engine/src/handlers/helpers/reconcile-implementation-proof.ts::duty.kind",
+    "engine/src/handlers/helpers/reviewed-workspace.ts::leaf.kind",
+    "engine/src/handlers/helpers/wave-completion-suite.ts::error.kind",
+    "engine/src/handlers/helpers/wave-completion-suite.ts::failure.kind",
+    "engine/src/handlers/pre-tool-use/claude-transcript-events.ts::block[\"name\"]",
+    "engine/src/handlers/pre-tool-use/claude-transcript-events.ts::entry[\"type\"]",
+    "engine/src/handlers/pre-tool-use/implementation-brief-marker.ts::expansion.kind",
+    "engine/src/handlers/pre-tool-use/implementation-brief-marker.ts::triage.kind",
+    "engine/src/handlers/subagent-stop/stop-checks.ts::outcome.kind",
+    "engine/src/handlers/subagent-stop/stop-checks.ts::verdict.kind",
+    "engine/src/machine/ledger.ts::read.kind",
+    "engine/src/orchestration/completion-check-runner.ts::decision.kind",
+    "engine/src/orchestration/completion-check-runner.ts::decision.kind",
+    "engine/src/orchestration/completion-check-runner.ts::leader.kind",
+    "engine/src/orchestration/completion-check-runner.ts::phase.kind",
+    "engine/src/orchestration/completion-check-runner.ts::settled.kind",
+    "engine/src/orchestration/effect-runner.ts::intent.kind",
+    "engine/src/orchestration/harness-capture-runtime.ts::route.kind",
+    "engine/src/orchestration/harness-capture-runtime.ts::selection.kind",
+    "engine/src/orchestration/run-directory-handle.ts::found.kind",
+    "engine/src/orchestration/skeleton-writer.ts::result.kind",
+    "engine/src/orchestration/skeleton-writer.ts::result.kind",
+    "engine/src/state-file-wire.ts::outcome.kind",
+    "engine/src/state-file-wire.ts::problem.kind",
+    "engine/src/state-file-wire.ts::raw.kind",
+    "engine/src/state-file-wire.ts::rejection.kind",
+    "engine/src/types.ts::result.kind",
+    "engine/src/utils/declared-artifact-snapshot.ts::leaf.kind",
+    "engine/src/utils/git.ts::source",
+    "engine/tests/fixtures/emission-arguments.ts::kind",
+    "engine/tests/fixtures/emission-child-harness.ts::decision.kind",
+    "engine/tests/fixtures/emission-registry-cells.ts::cell.kind",
+    "engine/tests/fixtures/owner-verification-repo.ts::options.waveChanges",
+    "engine/tests/fixtures/skeleton-repo.ts::value.kind",
+    "engine/tests/fixtures/skeleton-sources.ts::event.kind",
+    "pi/emission-readiness-gate.ts::facts.readiness.kind",
+    "pi/emission-readiness-gate.ts::observation.kind",
+    "pi/interactive-subagent.ts::request.kind",
+    "pi/review-capture.ts::authenticated.kind",
+    "pi/review-capture.ts::selection.kind",
+    "pi/review-run-authority.ts::refusal.kind",
+    "pi/review-run-authority.ts::unresolved.reason",
+    "pi/spawn-claims.ts::claim.kind",
+    "pi/spawn-claims.ts::claim.kind",
+    "pi/spawn-claims.ts::claim.kind",
+    "pi/spawn-claims.ts::step.kind",
+    "pi/spawn-claims.ts::step.kind",
+    "pi/spawn-claims.ts::step.kind",
+    "pi/spawn-claims.ts::step.kind",
+    "pi/spawn-reservation.ts::shape.kind",
+    "pi/subagent-result-route.ts::outcome.kind",
+    "pi/subagent-settlement.ts::application.kind",
+    "pi/subagent-settlement.ts::application.kind",
+    "pi/subagent-stop.ts::route.applier.kind",
+    "pi/transcript-adapter.ts::role",
+    "scripts/ledger-epoch.ts::read.kind"
+  ],
+  "discriminantBranchingBaseline": [
+    "engine/src/core/loom-status.ts::runDirectory.kind",
+    "engine/src/core/loom-status.ts::window.kind",
+    "engine/src/core/proof-obligations.ts::raw.kind",
+    "engine/src/core/standalone-review.ts::event.kind",
+    "engine/src/core/wave-gate-machine.ts::action.kind",
+    "engine/src/handlers/helpers/orchestration.ts::observation.kind",
+    "engine/src/handlers/helpers/orchestration.ts::parsed.kind",
+    "engine/src/handlers/pre-tool-use/enforce-phase-tools.ts::target.kind",
+    "engine/src/handlers/type-diagnostics-runner.ts::ended.kind",
+    "pi/implementation-brief-expansion.ts::triage.kind"
+  ]
+}

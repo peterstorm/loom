@@ -24,11 +24,18 @@
  * Detection is line-based (no AST, consistent with the rest of this linter), so
  * it recognises the SHAPE of a chain: consecutive branch lines comparing the
  * same `receiver.tag` against string literals.
+ *
+ * Pre-existing chains are grandfathered per project in
+ * `discriminantBranchingBaseline`, keyed `path::discriminant` relative to the
+ * project root — the same key form and staleness pass as `switch-totality`.
  */
 
 import type { Violation } from "../types";
 import { makeViolation } from "../types";
 import { isTestFile } from "./config";
+import { baselineCounter, projectRelative, baselineKey, type Baseline, type BaselineKey } from "./baseline";
+
+export const RULE_NAME = "exhaustive-discriminant-branching";
 
 /** Branches on one tag at or above this count read as a switch, not a guard. */
 export const DEFAULT_MAX_DISCRIMINANT_BRANCHES = 3;
@@ -52,6 +59,22 @@ export const DEFAULT_DISCRIMINANT_TAGS: readonly string[] = [
   "severity",
   "type",
 ];
+
+export type DiscriminantBranchingOptions = Readonly<{
+  maxBranches: number;
+  tags: readonly string[];
+  baseline: Baseline;
+  /** The root of the project whose config supplied `baseline` — the frame its
+   *  keys are written in. Null when no project config is in play. */
+  projectRoot: string | null;
+}>;
+
+export const DEFAULT_DISCRIMINANT_BRANCHING_OPTIONS: DiscriminantBranchingOptions = Object.freeze({
+  maxBranches: DEFAULT_MAX_DISCRIMINANT_BRANCHES,
+  tags: DEFAULT_DISCRIMINANT_TAGS,
+  baseline: Object.freeze([]),
+  projectRoot: null,
+});
 
 /** `if (` / `} else if (` — the line shapes that open a branch. */
 const BRANCH_LINE = /^\s*(?:\}\s*)?(?:else\s+)?if\s*\(/;
@@ -84,7 +107,7 @@ function branchBody(line: string): string {
   let depth = 0;
   let quote: string | null = null;
   for (let index = open; index < line.length; index++) {
-    const char = line[index]!;
+    const char = line[index];
     if (quote !== null) {
       if (char === "\\") index++;
       else if (char === quote) quote = null;
@@ -124,15 +147,18 @@ function closesEnclosingBlock(line: string, runIndent: number): boolean {
 }
 
 /**
- * A totality proof anywhere in the file exempts it.
- *
- * This is deliberately file-scoped rather than chain-scoped. A tighter scope
- * would need real scope analysis, and the failure mode of being too lenient
- * (missing a chain in a file that also contains a proven match) is far better
- * than the failure mode of being too strict (flagging code that IS total, which
- * teaches people the rule is wrong).
+ * SCOPED to the chain, not to the file. The file-wide reading was this rule's
+ * first form and it was far too lenient: ONE `match(...).exhaustive()` anywhere
+ * silenced every chain in the file, which is how a year of unproven branches sat
+ * under a green lint. A proof now covers the chain it sits beside — from a few
+ * lines before the first branch to a few lines after the last one. The
+ * switch-statement half of the same problem is `switch-totality`.
  */
 const TOTALITY_PROOF = /\.exhaustive\s*\(\s*\)|:\s*never\b/;
+
+/** How far beyond a chain's first and last branch its proof may sit: a `match`
+ *  assigned just above it, or a `never` binding just below its tail. */
+const MAX_PROOF_DISTANCE = 6;
 
 function discriminantOf(line: string, tags: readonly string[]): string | null {
   for (const tag of tags) {
@@ -142,17 +168,23 @@ function discriminantOf(line: string, tags: readonly string[]): string | null {
   return null;
 }
 
-export function handler(
-  content: string,
-  filePath: string,
-  maxBranches: number = DEFAULT_MAX_DISCRIMINANT_BRANCHES,
-  tags: readonly string[] = DEFAULT_DISCRIMINANT_TAGS,
-): readonly Violation[] {
-  if (isTestFile(filePath)) return [];
-  const lines = content.split("\n");
-  if (lines.some((line) => TOTALITY_PROOF.test(line))) return [];
+/** A run of branches on one discriminant: what the rule measures, before any
+ *  judgement about whether the run counts as a switch. */
+type BranchRun = Readonly<{
+  discriminant: string;
+  branches: number;
+  firstLine: number;
+  lastLine: number;
+  /** Does this run look like a CHAIN rather than a row of standalone guards? */
+  chainEvidence: boolean;
+}>;
 
-  const violations: Violation[] = [];
+/**
+ * Find every run of branches on one discriminant — the measurement under
+ * `candidateChains`, which is where the rule's judgement of a run lives.
+ */
+function branchRuns(lines: readonly string[], tags: readonly string[]): readonly BranchRun[] {
+  const runs: BranchRun[] = [];
   let current: string | null = null;
   let count = 0;
   let firstLine = 0;
@@ -160,26 +192,17 @@ export function handler(
   // Indentation of the line that OPENED the run — the depth a closing brace
   // must undercut to prove the enclosing block ended.
   let runIndent = 0;
-  // Does this run look like a CHAIN rather than a row of standalone guards?
   let chainEvidence = false;
 
   const settle = (): void => {
-    if (current !== null && count >= maxBranches && chainEvidence) {
-      violations.push(makeViolation(
-        "exhaustive-discriminant-branching",
-        filePath,
-        firstLine,
-        lines[firstLine - 1]?.trim() ?? "",
-        `${count} branches on \`${current}\` — use match(...).exhaustive() or a \`never\` default so a new variant is a compile error`,
-      ));
-    }
+    if (current !== null) runs.push({ discriminant: current, branches: count, firstLine, lastLine, chainEvidence });
     current = null;
     count = 0;
     chainEvidence = false;
   };
 
   for (let index = 0; index < lines.length; index++) {
-    const line = lines[index]!;
+    const line = lines[index];
     // Scope end BEFORE branch matching: the run is over whether or not this
     // line also opens a branch, and a `} else if` never undercuts runIndent.
     if (current !== null && closesEnclosingBlock(line, runIndent)) settle();
@@ -204,5 +227,64 @@ export function handler(
     chainEvidence = isChainLine;
   }
   settle();
-  return Object.freeze(violations);
+  return Object.freeze(runs);
+}
+
+/** A chain this rule flags absent a baseline, with the key a baseline entry
+ *  for it is written under and the text of its first branch line. */
+type CandidateChain = BranchRun & Readonly<{ key: BaselineKey; snippet: string }>;
+
+/**
+ * The chains the rule flags absent its baseline: enough branches, chain-shaped,
+ * outside a test file, and no totality proof near them. The ONE judgement both
+ * readers share — `handler` spends baseline entries against these, and
+ * `detectedChainKeys` hands them to the staleness pass. The detector used to
+ * skip the proof check, so a baselined chain later proven by a nearby
+ * `.exhaustive()` kept consuming its entry and the paid debt never surfaced.
+ */
+function candidateChains(
+  content: string,
+  filePath: string,
+  { maxBranches, tags, projectRoot }: DiscriminantBranchingOptions,
+): readonly CandidateChain[] {
+  const relative = projectRelative(filePath, projectRoot);
+  if (isTestFile(relative)) return [];
+  const lines = content.split("\n");
+
+  const provenNear = (first: number, last: number): boolean => {
+    const from = Math.max(0, first - 1 - MAX_PROOF_DISTANCE);
+    const to = Math.min(lines.length, last + MAX_PROOF_DISTANCE);
+    return lines.slice(from, to).some((line) => TOTALITY_PROOF.test(line));
+  };
+
+  return Object.freeze(branchRuns(lines, tags)
+    .filter((run) => run.branches >= maxBranches && run.chainEvidence && !provenNear(run.firstLine, run.lastLine))
+    .map((run) => ({ ...run, key: baselineKey(relative, run.discriminant), snippet: lines[run.firstLine - 1]?.trim() ?? "" })));
+}
+
+export function handler(
+  content: string,
+  filePath: string,
+  options: DiscriminantBranchingOptions = DEFAULT_DISCRIMINANT_BRANCHING_OPTIONS,
+): readonly Violation[] {
+  const entries = baselineCounter(options.baseline);
+  return Object.freeze(candidateChains(content, filePath, options)
+    .filter((chain) => !entries.consume(chain.key))
+    .map((chain) => makeViolation(
+      RULE_NAME,
+      filePath,
+      chain.firstLine,
+      chain.snippet,
+      `${chain.branches} branches on \`${chain.discriminant}\` — use match(...).exhaustive() or a \`never\` default so a new variant is a compile error`,
+    )));
+}
+
+/** The baseline keys of every chain the rule would flag absent its baseline —
+ *  the input of the staleness pass and of `lint-project --write-baseline`. */
+export function detectedChainKeys(
+  content: string,
+  filePath: string,
+  options: DiscriminantBranchingOptions = DEFAULT_DISCRIMINANT_BRANCHING_OPTIONS,
+): readonly BaselineKey[] {
+  return candidateChains(content, filePath, options).map((chain) => chain.key);
 }

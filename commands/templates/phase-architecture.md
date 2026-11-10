@@ -143,10 +143,10 @@ A model either executes or it doesn't exist. Never describe a lifecycle, pipelin
 - **Real lifecycle found** → declare it as `### LC-N` in a `## Lifecycles` section with a `**Machine file:**` path. The implementation will import that machine; decompose creates a dedicated task for it.
 - **Real pipeline + fugue in project + user opted in** (interview topic 13) → author the `AuthoredDag` sidecar JSON yourself (Write tool) next to the plan, declare it under `## Pipeline` with an `**AuthoredDag:**` line. Graph code is later generated via `fugue new --from` — never hand-written. One pipeline per plan.
 - **Invariants** → declare as `### INV-N` in `## Invariants`, tiered honestly:
-  - `checkable` → write the lint rule JSON yourself into the project rules dir — `.claude/linter/rules/inv-<n>-<slug>.json` (or `.pi/linter/rules/` when the project runs the pi harness; the linter only loads from the harness-appropriate dir). Use the regex rule format per loom's `lint-rules/README.md`, set the JSON `name` field to the same `inv-<n>-<slug>` as the filename, then prove all rules load:
+  - `checkable` → write the lint rule JSON yourself into the project rules dir — `.claude/linter/rules/inv-<n>-<slug>.json`, which both harnesses read (use `.pi/linter/rules/` only when a Pi-only project already keeps its rules there and has no `.claude/linter/rules/`; never create a second rules dir). Use the regex rule format per loom's `lint-rules/README.md`, set the JSON `name` field to the same `inv-<n>-<slug>` as the filename, then prove all rules load:
     ```bash
-    bun "$LOOM_DIR"/engine/src/cli.ts helper validate-lint-rules .claude/linter/rules
-    # (pass .pi/linter/rules instead under the pi harness)
+    bun "$LOOM_DIR"/engine/src/cli.ts helper validate-lint-rules
+    # (no argument: the project's one rules dir, whichever of the two it uses)
     ```
     A failing load means fix the rule now — it would otherwise block every edit in wave 1.
   - `advisory` → prose only, never pretended to be enforced.

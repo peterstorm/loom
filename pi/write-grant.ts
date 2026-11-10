@@ -276,7 +276,7 @@ export function consumePiWriteGrant(
   const matches = [...prompt.matchAll(MARKER)];
   if (matches.length === 0) return null;
   if (matches.length !== 1) throw new Error("prompt contains multiple Loom Pi write-grant markers");
-  const token = matches[0]![1]!;
+  const token = matches[0][1];
   const path = grantPath(token);
   const claimedPath = `${path}.${process.pid}.${randomBytes(8).toString("hex")}.claim`;
   // rename(2) is the one-time-capability linearization point: only one child

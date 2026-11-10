@@ -9,11 +9,14 @@
 import type { CurrentReviewRunSlotAuthority, LegacyReviewRunSlotAuthority, TaskGraph } from "../types";
 import type { ContextPacket } from "./context-packets";
 import {
+  allOk,
   canonicalStructuralEquals,
+  mapNonEmpty,
   parseStoredAgentRequestAuthority,
   type AgentRequestAuthority,
   type DomainResult,
   type InitialSpawnRequestInput,
+  type NonEmpty,
 } from "./orchestration-contract";
 import type { IssuedWaveReviewerProtocol } from "./review-output";
 import type { ReviewedWorkspaceObservation } from "./reviewed-workspace";
@@ -48,20 +51,26 @@ export type WaveReviewInstallObservation = Readonly<{
   specCheckObservation: WaveSpecCheckObservation;
 }>;
 
+/** One roster slot in both recorded forms, built from the one request that
+ *  fills it — so a current slot always carries its request by construction. */
+type ReviewSlot = Readonly<{ legacy: LegacyReviewRunSlotAuthority; current: CurrentReviewRunSlotAuthority }>;
+
+/** Each roster agent's slot, from exactly one matching request; the first
+ *  agent (in roster order) without exactly one is refused. */
 function reviewSlotAuthorityRoster(
   roster: WaveReviewRoster,
   authorities: readonly AgentRequestAuthority[],
-): DomainResult<readonly [LegacyReviewRunSlotAuthority, ...LegacyReviewRunSlotAuthority[]], IssuanceRefusal> {
-  const slots: LegacyReviewRunSlotAuthority[] = [];
-  for (const agent of roster) {
-    const matches = authorities.filter((authority) => authority.role === agent);
-    if (matches.length !== 1) {
-      return refuse(`current Review Packet requires exactly one ${agent} slot, got ${matches.length}`);
+): DomainResult<NonEmpty<ReviewSlot>, IssuanceRefusal> {
+  const slots = allOk(mapNonEmpty(roster, (agent): DomainResult<ReviewSlot, IssuanceRefusal> => {
+    const [request, ...others] = authorities.filter((authority) => authority.role === agent);
+    if (request === undefined || others.length > 0) {
+      return refuse(`current Review Packet requires exactly one ${agent} slot, got ${request === undefined ? 0 : others.length + 1}`);
     }
-    slots.push(Object.freeze({ agent, slot_id: matches[0]!.slotId, attempted: 1 as const }));
-  }
-  const [first, ...rest] = slots;
-  return { ok: true, value: Object.freeze([first!, ...rest]) };
+    const legacy = Object.freeze({ agent, slot_id: request.slotId, attempted: 1 as const });
+    const current = Object.freeze({ ...legacy, request_id: request.requestId, context_digest: request.contextDigest });
+    return { ok: true, value: Object.freeze({ legacy, current }) };
+  }));
+  return slots.ok ? slots : { ok: false, error: slots.error[0] };
 }
 
 /** The batch's spec-check attempt-1 authority: every Wave review batch opens with exactly one. */
@@ -155,14 +164,8 @@ export function installWaveReviewRunsTransition(
     }
     const roster = reviewSlotAuthorityRoster(expectedAgents, authorities);
     if (!roster.ok) return roster;
-    const slotAuthority = roster.value;
-    const currentSlot = (slot: LegacyReviewRunSlotAuthority): CurrentReviewRunSlotAuthority => {
-      const request = authorities.find(({ role }) => role === slot.agent)!;
-      return Object.freeze({ ...slot, request_id: request.requestId, context_digest: request.contextDigest });
-    };
-    const [firstSlot, ...remainingSlots] = slotAuthority;
-    const currentSlots: readonly [CurrentReviewRunSlotAuthority, ...CurrentReviewRunSlotAuthority[]] =
-      Object.freeze([currentSlot(firstSlot), ...remainingSlots.map(currentSlot)]);
+    const slotAuthority = mapNonEmpty(roster.value, ({ legacy }) => legacy);
+    const currentSlots = mapNonEmpty(roster.value, ({ current }) => current);
     if (task.review_run !== undefined) {
       const run = task.review_run;
       const sameProtocol = registration.schemaVersion === 2

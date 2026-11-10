@@ -8,7 +8,7 @@
 import { lstatSync } from "node:fs";
 import { join } from "node:path";
 import type { DomainResult } from "../core/orchestration-contract";
-import { readRunBytesNoFollow } from "./no-follow-fs";
+import { readRunBytesNoFollow } from "../utils/no-follow-fs";
 import { describeCause } from "../utils/describe-cause";
 
 /** What one repository path holds, read without following any link. */

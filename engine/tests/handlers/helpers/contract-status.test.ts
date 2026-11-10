@@ -4,9 +4,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import contractStatus, { createContractStatusHandler } from "../../../src/handlers/helpers/contract-status";
 import type { AcceptanceContract } from "../../../src/core/acceptance-contract";
 import { NO_ACCEPTANCE_CONTRACTS } from "../../../src/core/contract-status-types";
-import { WHITELISTED_HELPERS } from "../../../src/config";
 import { KNOWN_HANDLERS, PI_RUNTIME_HANDSHAKE_ROUTES, piRuntimeHandshakeRequired } from "../../../src/handler-routes";
 import type { Task } from "../../../src/types";
+import { WHITELISTED_HELPERS } from "../../../src/core/guard-state-file";
 import {
   contract as contractFixture,
   frozenPaths,

@@ -9,6 +9,8 @@ import validateAgentSkill, {
   VALIDATED_AGENTS,
 } from "../../../src/handlers/pre-tool-use/validate-agent-skill";
 import { TASK_GRAPH_PATH } from "../../../src/config";
+import { AGENT_POLICIES } from "../../../src/core/model-profiles";
+import { SECURITY_AUDIT_AGENTS } from "../../../src/core/agent-catalog-projections";
 
 const TMP = "/tmp/loom-skill-test-" + process.pid;
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
@@ -383,5 +385,64 @@ describe("validate-agent-skill — integration scenarios", () => {
   it("security-agent prompt with security-expert → pass", () => {
     const prompt = "Follow the guidance from the preloaded security-expert skill.";
     expect(promptReferencesSkill(prompt, "security-expert")).toBe(true);
+  });
+});
+
+describe("the Agent Catalog against the skill gate", () => {
+  /** Every spawnable security agent: the three that answer with a security
+   *  verdict, and the implementation-side `security-agent`. */
+  const SECURITY_AGENTS = AGENT_POLICIES
+    .filter((policy) => policy.kind.kind === "security-verdict" || policy.agent.startsWith("security-"))
+    .map((policy) => policy.agent);
+
+  it("validates every spawnable security agent the catalog declares", () => {
+    // Non-vacuous: the hunter, verifier, critic and implementation agent.
+    expect(SECURITY_AGENTS).toEqual(expect.arrayContaining([
+      "security-hunter-agent", "security-verifier-agent", "security-critic-agent", "security-agent",
+    ]));
+    // A security agent the gate does not know is spawned with its skill
+    // preload unproven — the gate passes unknown non-namespaced names through.
+    expect(SECURITY_AGENTS.filter((agent) => !VALIDATED_AGENTS.has(agent))).toEqual([]);
+  });
+
+  it("validates every security-audit agent the catalog projection names, so none is an unspawnable kind", () => {
+    // Derived from the same projection the gate spreads into VALIDATED_AGENTS:
+    // a new security-verdict kind lands here with no list to update.
+    expect([...SECURITY_AUDIT_AGENTS].sort()).toEqual(["security-critic-agent", "security-hunter-agent", "security-verifier-agent"]);
+    expect([...SECURITY_AUDIT_AGENTS].filter((agent) => !VALIDATED_AGENTS.has(agent))).toEqual([]);
+  });
+
+  it.each([...SECURITY_AUDIT_AGENTS])("admits a namespaced %s spawn — gated on exactly the skills its definition declares", async (agent) => {
+    const declared = parseSkillsFromFrontmatter(join(REPO_ROOT, "agents", `${agent}.md`));
+    expect(declared.kind).not.toBe("unreadable");
+    const skills = declared.kind === "skills" ? declared.names : [];
+    const createdGraph = !existsSync(TASK_GRAPH_PATH);
+    const previousRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    if (createdGraph) {
+      mkdirSync(dirname(TASK_GRAPH_PATH), { recursive: true });
+      writeFileSync(TASK_GRAPH_PATH, "{}");
+    }
+    process.env.CLAUDE_PLUGIN_ROOT = REPO_ROOT;
+    const spawn = (prompt: string) => validateAgentSkill(JSON.stringify({
+      tool_name: "Task",
+      tool_input: { subagent_type: `loom:${agent}`, prompt },
+    }), []);
+    try {
+      // Known to the gate: never the "unknown namespaced agent" block.
+      expect((await spawn(`Apply ${skills.map((skill) => `the ${skill} skill`).join(" and ") || "your brief"} to this unit.`)).kind).not.toBe("block");
+      const omitted = await spawn("Look at this unit.");
+      expect(omitted.kind).toBe(skills.length === 0 ? "allow" : "block");
+      if (omitted.kind === "block") expect(omitted.message).toContain(skills[0]);
+    } finally {
+      if (previousRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = previousRoot;
+      if (createdGraph) rmSync(TASK_GRAPH_PATH, { force: true });
+    }
+  });
+
+  it("names no catalog agent with the ledger's owner-id separator", () => {
+    // A ledger owner id is `<catalog-agent>` or `<catalog-agent>--<n>`; an agent
+    // whose own name held `--` could not be read back unambiguously.
+    expect(AGENT_POLICIES.map((policy) => policy.agent).filter((agent) => agent.includes("--"))).toEqual([]);
   });
 });

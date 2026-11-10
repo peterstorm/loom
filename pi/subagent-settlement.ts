@@ -13,6 +13,7 @@
  */
 
 import { parseBashTestOutput } from "../engine/src/parsers/parse-bash-test-output";
+import { readPersistedOutput } from "../engine/src/utils/persisted-output";
 import { extractTestEvidence, testEvidenceOf, type TestEvidence } from "../engine/src/core/test-evidence";
 import { match } from "ts-pattern";
 import {
@@ -462,7 +463,7 @@ export function observeImplementationTranscript(messages: unknown, taskId: strin
     };
   }
 
-  const transcriptEvidence = extractTestEvidence(parseBashTestOutput(adaptedTranscript.value));
+  const transcriptEvidence = extractTestEvidence(parseBashTestOutput(adaptedTranscript.value, readPersistedOutput));
   const test: ImplementationTestObservation = structuredEvidence.value === null
     ? { kind: "fallback", evidence: transcriptEvidence }
     : {

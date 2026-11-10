@@ -93,7 +93,7 @@ function middleSnake(a: Int32Array, aLo: number, aHi: number, b: Int32Array, bLo
   for (let d = 0; d < maxD; d += 1) {
     for (let k1 = -d + k1start; k1 <= d - k1end; k1 += 2) {
       const k1Offset = offset + k1;
-      let x1 = k1 === -d || (k1 !== d && forward[k1Offset - 1]! < forward[k1Offset + 1]!) ? forward[k1Offset + 1]! : forward[k1Offset - 1]! + 1;
+      let x1 = k1 === -d || (k1 !== d && forward[k1Offset - 1] < forward[k1Offset + 1]) ? forward[k1Offset + 1] : forward[k1Offset - 1] + 1;
       let y1 = x1 - k1;
       while (x1 < n && y1 < m && a[aLo + x1] === b[bLo + y1]) { x1 += 1; y1 += 1; }
       forward[k1Offset] = x1;
@@ -101,12 +101,12 @@ function middleSnake(a: Int32Array, aLo: number, aHi: number, b: Int32Array, bLo
       else if (y1 > m) k1start += 2;
       else if (front) {
         const k2Offset = offset + delta - k1;
-        if (k2Offset >= 0 && k2Offset < length && reverse[k2Offset] !== -1 && x1 >= n - reverse[k2Offset]!) return [aLo + x1, bLo + y1];
+        if (k2Offset >= 0 && k2Offset < length && reverse[k2Offset] !== -1 && x1 >= n - reverse[k2Offset]) return [aLo + x1, bLo + y1];
       }
     }
     for (let k2 = -d + k2start; k2 <= d - k2end; k2 += 2) {
       const k2Offset = offset + k2;
-      let x2 = k2 === -d || (k2 !== d && reverse[k2Offset - 1]! < reverse[k2Offset + 1]!) ? reverse[k2Offset + 1]! : reverse[k2Offset - 1]! + 1;
+      let x2 = k2 === -d || (k2 !== d && reverse[k2Offset - 1] < reverse[k2Offset + 1]) ? reverse[k2Offset + 1] : reverse[k2Offset - 1] + 1;
       let y2 = x2 - k2;
       while (x2 < n && y2 < m && a[aHi - 1 - x2] === b[bHi - 1 - y2]) { x2 += 1; y2 += 1; }
       reverse[k2Offset] = x2;
@@ -115,7 +115,7 @@ function middleSnake(a: Int32Array, aLo: number, aHi: number, b: Int32Array, bLo
       else if (!front) {
         const k1Offset = offset + delta - k2;
         if (k1Offset >= 0 && k1Offset < length && forward[k1Offset] !== -1) {
-          const x1 = forward[k1Offset]!;
+          const x1 = forward[k1Offset];
           const y1 = offset + x1 - k1Offset;
           if (x1 >= n - x2) return [aLo + x1, bLo + y1];
         }
@@ -144,14 +144,14 @@ export function unifiedDiff(path: string, base: string | null, head: string | nu
   const edits = editScript(comparableLines(left), comparableLines(right));
   const out: string[] = [`--- ${base === null ? "/dev/null" : `a/${path}`}`, `+++ ${head === null ? "/dev/null" : `b/${path}`}`];
   const lineText = (side: Lines, index: number): string[] => {
-    const text = side.lines[index]!;
+    const text = side.lines[index];
     return !side.finalNewline && index === side.lines.length - 1 ? [text, NO_NEWLINE_MARKER] : [text];
   };
   for (const { start, stop } of hunkRanges(edits)) {
     const body: string[] = [];
     let baseStart = -1, headStart = -1, baseCount = 0, headCount = 0;
     for (let i = start; i < stop; i += 1) {
-      const edit = edits[i]!;
+      const edit = edits[i];
       if (edit.kind !== "insert" && baseStart < 0) baseStart = edit.base;
       if (edit.kind !== "delete" && headStart < 0) headStart = edit.head;
       if (edit.kind === "equal") {
@@ -228,14 +228,14 @@ export function applyUnifiedDiff(base: string | null, diff: string): string | nu
   let cursor = 0;
   let i = 2;
   while (i < lines.length) {
-    const header = /^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@$/.exec(lines[i]!);
+    const header = /^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@$/.exec(lines[i]);
     if (header === null) throw new Error(`malformed hunk header: ${lines[i]}`);
     const count = header[2] === undefined ? 1 : Number(header[2]);
     const first = count === 0 ? Number(header[1]) : Number(header[1]) - 1;
-    while (cursor < first) result.push(source.lines[cursor++]!);
+    while (cursor < first) result.push(source.lines[cursor++]);
     i += 1;
-    while (i < lines.length && !lines[i]!.startsWith("@@ ")) {
-      const line = lines[i]!;
+    while (i < lines.length && !lines[i].startsWith("@@ ")) {
+      const line = lines[i];
       const noNewline = lines[i + 1] === NO_NEWLINE_MARKER;
       if (line.startsWith(" ")) { result.push(line.slice(1)); cursor += 1; if (noNewline) resultFinalNewline = false; }
       else if (line.startsWith("-")) cursor += 1;
@@ -244,7 +244,7 @@ export function applyUnifiedDiff(base: string | null, diff: string): string | nu
     }
   }
   while (cursor < source.lines.length) {
-    result.push(source.lines[cursor]!);
+    result.push(source.lines[cursor]);
     if (cursor === source.lines.length - 1 && !source.finalNewline) resultFinalNewline = false;
     cursor += 1;
   }

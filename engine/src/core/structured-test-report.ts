@@ -493,7 +493,7 @@ function testcaseCounts(element: ReportElement): JunitCounts | null {
   const skipped = element.children.filter((child) => child.name === "skipped");
   const failed = element.children.filter((child) => child.name === "failure" || child.name === "error");
   // Node emits both skipped(type=todo) and failure for a failing TODO case.
-  if (skipped.length > 1 || (skipped.length > 0 && failed.length > 0 && skipped[0]!.attributes.type !== "todo")) return null;
+  if (skipped.length > 1 || (skipped.length > 0 && failed.length > 0 && skipped[0].attributes.type !== "todo")) return null;
   return { total: 1, failed: skipped.length === 0 && failed.length > 0 ? 1 : 0, skipped: skipped.length };
 }
 
@@ -543,7 +543,7 @@ function parseNodeJunitSummary(root: ReportElement): ReportCounts | null {
   for (const comment of root.comments) {
     const match = /^\s*(tests|pass|fail|cancelled|skipped|todo)\s+(\d+)\s*$/u.exec(comment);
     if (match === null) continue;
-    const name = match[1]!;
+    const name = match[1];
     const value = safeCount(Number(match[2]));
     if (counts.has(name) || value === null) return null;
     counts.set(name, value);
@@ -606,7 +606,7 @@ export function parseStructuredTestReportBytes(bytes: Uint8Array): StructuredRep
   if (recognized.length > 1) {
     return reportFailure("ambiguous-format", "structured test report matches more than one supported format");
   }
-  const summary = recognized[0]!.summary;
+  const summary = recognized[0].summary;
   return summary === null
     ? reportFailure("malformed-counts", "structured test report has missing, inconsistent, or unsafe counts")
     : reportSuccess(summary);
@@ -791,7 +791,7 @@ export function parseBunConsoleCollectionErrors(output: string): readonly string
   for (const raw of output.replace(ANSI_SGR, "").split(/\r?\n/u)) {
     const line = raw.trimEnd();
     const header = BUN_FILE_HEADER.exec(line);
-    if (header !== null) current = header[1]!;
+    if (header !== null) current = header[1];
     else if (line.trim() === BUN_UNHANDLED_ERROR && current !== null && !files.includes(current)) files.push(current);
   }
   return Object.freeze(files);

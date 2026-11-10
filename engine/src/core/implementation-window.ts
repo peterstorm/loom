@@ -20,7 +20,7 @@
  * shell supplies the reservation-liveness observation.
  */
 import type { StatusReason, TaskGraph, WaveImplementationDispatch, WaveImplementationRecovery } from "../types";
-import { canonicalRecord, type NonEmpty } from "./orchestration-contract";
+import { canonicalRecord, nonEmpty, type NonEmpty } from "./orchestration-contract";
 import { quoteShellArgument } from "./shell-quoting";
 import { deriveTaskImplementationDispatch } from "./task-implementation-dispatch";
 import { staleReservationsForRosterObservation } from "./validate-task-execution";
@@ -204,12 +204,13 @@ export function classifyImplementationWindow(
             `successor ${successor.runId}; start the Wave Gate with run id ${successor.runId}`,
         );
   }
-  if (escalated.length > 0) {
+  const escalatedTasks = nonEmpty(escalated);
+  if (escalatedTasks !== null) {
     return window(
       canonicalRecord({
         kind: "escalate-wave-implementation",
         wave,
-        tasks: Object.freeze(escalated) as NonEmpty<EscalatedImplementation>,
+        tasks: escalatedTasks,
       }),
       `Wave ${wave} requires implementation escalation; ${escalated.length} task(s) reached a terminal implementation failure. ` +
         "Fix the cause, then remediate each Task with the helper orchestration remediate command on its status reason",
@@ -225,23 +226,25 @@ export function classifyImplementationWindow(
         "(helper revise-contract), or re-plan the binding and re-populate the TaskGraph",
     );
   }
-  if (dispatches.length > 0) {
+  const readyDispatches = nonEmpty(dispatches);
+  if (readyDispatches !== null) {
     return window(
       canonicalRecord({
         kind: "spawn-wave-implementation",
         wave,
-        dispatches: Object.freeze(dispatches) as NonEmpty<WaveImplementationDispatch>,
+        dispatches: readyDispatches,
       }),
       `Wave ${wave} implementation is in progress; ${dispatches.length} task(s) are ready to dispatch` +
         (active.length === 0 ? "" : ` and ${active.length} task(s) remain active`),
     );
   }
-  if (active.length > 0) {
+  const awaitedTaskIds = nonEmpty(activeIds);
+  if (awaitedTaskIds !== null) {
     return window(
       canonicalRecord({
         kind: "await-wave-implementation",
         wave,
-        activeTaskIds: activeIds as NonEmpty<string>,
+        activeTaskIds: awaitedTaskIds,
       }),
       `Wave ${wave} implementation is in progress; wait for ${active.length} active task(s)`,
     );

@@ -13,6 +13,7 @@ import type { AgentType } from "./evidence";
 
 import type { TestReportSummary } from "../core/structured-test-report";
 export type { TestReportSummary } from "../core/structured-test-report";
+import type { SandboxReceipt } from "../core/security-sandbox";
 
 /**
  * Provenance of a FileWrite: "tool" = the harness's own file-modifying tools
@@ -45,7 +46,16 @@ export type Evidence =
       /** Real exit status captured at execution time; null when the harness didn't expose one. */
       readonly exit: number | null;
       readonly report: TestReportSummary | null;
-    };
+    }
+  /**
+   * One bounded local execution, minted by parsing the receipt line
+   * `scripts/security-sandbox.sh` prints last (ADR-0066). The receipt IS the
+   * fact: the exit it observed, the limits the script enforced, the
+   * allowlisted environment, and the scratch footprint. A hunter's prose
+   * saying "reproduced" mints nothing, so "reproduced locally" stays a
+   * `needs_validation` blocker until a receipt exists.
+   */
+  | { readonly kind: "SandboxRun"; readonly receipt: SandboxReceipt };
 
 /**
  * Branded attribution key (`<agent_id>:<agent_type>`, minted at

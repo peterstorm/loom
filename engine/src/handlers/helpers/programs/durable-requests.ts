@@ -20,7 +20,7 @@ import {
   type PublicationAuthorityResolver,
   type SpawnRequest,
 } from '../../../core/orchestration-contract';
-import { readRunBytesNoFollow, openDirectoryNoFollow, closeAnchoredDirectory, listDirectoryNamesNoFollow, readDirectoryFileNoFollow } from '../../../orchestration/no-follow-fs';
+import { readRunBytesNoFollow, openDirectoryNoFollow, closeAnchoredDirectory, listDirectoryNamesNoFollow, readDirectoryFileNoFollow } from '../../../utils/no-follow-fs';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import type { ProgramParse } from './program-result';
 
@@ -48,7 +48,7 @@ export function publishedReviewerRequest(handle: RunDirHandle, request: AgentReq
   const reserved = handle.readIssuedRequests();
   if (!reserved.ok) return { ok: false, message: "reviewer request reservations are unavailable" };
   const matching = reserved.value.filter((entry) => entry.requestId === request.requestId);
-  if (matching.length !== 1 || !sameAgentRequestAuthority(matching[0]!, request)) {
+  if (matching.length !== 1 || !sameAgentRequestAuthority(matching[0], request)) {
     return { ok: false, message: "reviewer request does not match its exact durable reservation" };
   }
   const directory = openDirectoryNoFollow(join(handle.runDirectory, "artifacts", "publications"));
@@ -63,7 +63,7 @@ export function publishedReviewerRequest(handle: RunDirHandle, request: AgentReq
       }
       const batchIndex = receipt.value.issuedRequests.findIndex((entry) => entry.authority.requestId === request.requestId);
       if (batchIndex < 0) continue;
-      const entry = receipt.value.issuedRequests[batchIndex]!;
+      const entry = receipt.value.issuedRequests[batchIndex];
       if (!sameAgentRequestAuthority(entry.authority, request)) {
         return { ok: false, message: "reviewer publication differs from the exact requested authority" };
       }
@@ -75,7 +75,7 @@ export function publishedReviewerRequest(handle: RunDirHandle, request: AgentReq
       candidates.push(issued.value);
     }
     return candidates.length === 1
-      ? { ok: true, value: candidates[0]! }
+      ? { ok: true, value: candidates[0] }
       : { ok: false, message: "reviewer request must have exactly one durable publication" };
   } finally {
     closeAnchoredDirectory(directory);

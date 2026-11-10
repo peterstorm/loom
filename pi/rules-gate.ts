@@ -8,9 +8,17 @@
  *   - decides which Pi processes are gated, and
  *   - turns a `GateDecision` into Pi's `{ block, reason }`.
  *
- * Main orchestrator vs subagents: the subagent extension spawns subagents as
- * SEPARATE pi processes (`pi --mode json -p --no-session`). That signature is
- * exempt; everything else (tui, rpc, print, json with a session) is gated.
+ * Main orchestrator vs subagents: a child agent is recognised by the Loom
+ * environment marker (`subagent-process.ts`), which it carries when it was
+ * launched by a Loom-owned spawn path (`LOOM_PI_SUBAGENT=1`) or by a launcher
+ * that copies the parent's environment (an inherited `LOOM_PI_PARENT_PID`).
+ * Only a PROVABLE child is exempt (`piRulesGateExemption`): the explicit
+ * marker, or a headless launch carrying a parent marker that names another
+ * pid. Every other process is gated — a headless parent started without the
+ * marker, an interactive `pi` that merely inherited a parent marker from a
+ * Loom session's shell (session start writes `interactiveSubagentNotice` to
+ * stderr for it), a malformed marker, and a child whose launcher scrubbed the
+ * environment (`unmarkedSubagentLaunchNotice` names that case at load).
  *
  * Escape hatches (env): LOOM_GATE=off disables; LOOM_GATE_MODES=tui,rpc gates
  * only the listed modes (overrides the subagent exemption); LOOM_RULES_DIR /
@@ -36,6 +44,7 @@ import {
 } from "../engine/src/core/rules-gate";
 import { filesystemPorts, gateDirs } from "../engine/src/handlers/pre-tool-use/rules-gate";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
+import { currentPiProcessMarker, interactiveSubagentNotice, piRulesGateExemption } from "./subagent-process";
 
 const gateOff = (): boolean => process.env["LOOM_GATE"] === "off" || process.env["LOOM_GATE"] === "0";
 
@@ -79,19 +88,19 @@ const skillCommands = (content: unknown): readonly TranscriptEvent[] => {
   return [...text.matchAll(SKILL_BLOCK_RE)].map((m): TranscriptEvent => ({ kind: "skill-command", name: stripNamespace(m[1] ?? "") }));
 };
 
+const assistantPartEvents = (part: Record<string, unknown>, messageId: string): readonly TranscriptEvent[] => {
+  if (part["type"] === "toolCall") return [toolCallEvent(part, messageId)];
+  if (part["type"] === "text" && typeof part["text"] === "string") return [{ kind: "text", messageId, text: part["text"] }];
+  return [];
+};
+
 const messageEvents = (message: Record<string, unknown>, messageId: string): readonly TranscriptEvent[] => {
   if (message["role"] === "toolResult") {
     return [{ kind: "result", callId: asString(message["toolCallId"]), ok: message["isError"] !== true }];
   }
   if (message["role"] === "user") return skillCommands(message["content"]);
   if (message["role"] !== "assistant" || !Array.isArray(message["content"])) return [];
-  return message["content"].filter(isRecord).flatMap((part): readonly TranscriptEvent[] =>
-    part["type"] === "toolCall"
-      ? [toolCallEvent(part, messageId)]
-      : part["type"] === "text" && typeof part["text"] === "string"
-        ? [{ kind: "text", messageId, text: part["text"] }]
-        : [],
-  );
+  return message["content"].filter(isRecord).flatMap((part) => assistantPartEvents(part, messageId));
 };
 
 /**
@@ -118,8 +127,7 @@ const isGated = (ctx: Pick<PiGateContext, "mode" | "sessionManager">): boolean =
   if (gateOff()) return false;
   const override = process.env["LOOM_GATE_MODES"]?.trim();
   if (override) return override.split(",").map((s) => s.trim()).filter(Boolean).includes(ctx.mode);
-  // Subagent signature: `pi --mode json -p --no-session`.
-  return !(ctx.mode === "json" && !ctx.sessionManager.getSessionFile());
+  return piRulesGateExemption(currentPiProcessMarker(), process.pid, ctx.mode) === "gated";
 };
 
 type GatedCall = Readonly<{ target: string; action: string }>;
@@ -147,6 +155,10 @@ const gatedCall = (event: ToolCallEvent): GatedCall | undefined => {
 
 export function registerRulesGate(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
+    // An interactive process the authority gate treats as a subagent is told
+    // so (stderr, once per session start), whichever way the rules gate went.
+    const interactiveSubagent = interactiveSubagentNotice(currentPiProcessMarker(), process.pid, ctx.mode);
+    if (interactiveSubagent !== null) process.stderr.write(`loom(pi): ${interactiveSubagent}\n`);
     if (!ctx.hasUI) return;
     if (gateOff()) {
       ctx.ui.notify("loom-rules-gate: DISABLED (LOOM_GATE=off)", "warning");

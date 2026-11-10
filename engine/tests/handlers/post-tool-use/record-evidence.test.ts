@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, afterAll, vi } from "vitest";
-import { existsSync, mkdtempSync, rmSync, unlinkSync, utimesSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import recordEvidence from "../../../src/handlers/post-tool-use/record-evidence";
@@ -47,9 +47,7 @@ const sid = (name: string): SessionId => {
 afterAll(() => {
   for (const s of sessions) {
     for (const path of [ledgerPath(s), machineBindingPath(s), `${SUBAGENT_DIR}/${s}.active`, `${SUBAGENT_DIR}/${s}${CALL_START_SUFFIX}`]) {
-      try {
-        unlinkSync(path);
-      } catch {}
+      rmSync(path, { force: true });
     }
   }
 });

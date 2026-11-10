@@ -1,0 +1,702 @@
+/**
+ * The vulnerability verdict vocabulary: `confirmed`, `needs_validation`,
+ * `rejected` — and the consolidation rules that keep one root cause to one
+ * record.
+ *
+ * The three verdicts have deliberately asymmetric contracts, and the
+ * asymmetry is enforced here rather than described:
+ *
+ * - `confirmed` needs a bounded observed result, a demonstrated impact and a
+ *   severity whose overall score never exceeds that impact;
+ * - `needs_validation` is a source-grounded hypothesis blocked on an exact
+ *   fact. It carries NO severity and no remediation: a lead with a severity is
+ *   a finding wearing a disclaimer;
+ * - `rejected` is retained with its reason so a later run must bring changed
+ *   evidence rather than re-report a disproved claim.
+ *
+ * Provenance: this is a port of `report-schema.json` and
+ * `validate-findings.cjs` from `cloudflare/security-audit-skill@c1c8a8c`.
+ * `engine/tests/security/security-oracle.test.ts` runs both parsers over one
+ * corpus and fails when they disagree about a document's validity.
+ *
+ * Pure module: no I/O, no clock, no randomness.
+ */
+
+import { match } from "ts-pattern";
+import { compareStrings } from "./ordering";
+import { failure, success, type DomainResult, type NonEmpty } from "./orchestration-contract/identity";
+import {
+  SECURITY_AUDIT_LIMITS,
+  deepFrozenCopy,
+  hasVisibleProse,
+  isSafeSourcePath,
+  isSecurityFingerprint,
+  isOneOf,
+  isPositiveInteger,
+  isWireRecord,
+  wireViolation,
+  type WireViolation,
+} from "./security-audit-contract";
+
+// --- Vocabulary ---
+
+export const SEVERITY_SCORES = ["informational", "low", "medium", "high", "critical"] as const;
+export type SeverityScore = (typeof SEVERITY_SCORES)[number];
+
+const SEVERITY_RANK: Readonly<Record<SeverityScore, number>> = {
+  informational: 0,
+  low: 1,
+  medium: 2,
+  high: 3,
+  critical: 4,
+};
+
+export const CONFIDENCE_SCORES = ["low", "medium", "high"] as const;
+export type ConfidenceScore = (typeof CONFIDENCE_SCORES)[number];
+
+export const CONDITION_KINDS = [
+  "authentication_level",
+  "authorization_role",
+  "user_interaction",
+  "system_configuration",
+  "network_routing",
+  "environmental_dependency",
+  "data_state",
+  "timing_dependency",
+  "third_party_dependency",
+] as const;
+export type ConditionKind = (typeof CONDITION_KINDS)[number];
+
+export const TRACE_KINDS = ["entrypoint", "propagation", "sink"] as const;
+export type TraceKind = (typeof TRACE_KINDS)[number];
+
+export type TraceStep = Readonly<{
+  kind: TraceKind;
+  file: string;
+  line: number;
+  scope: string;
+  description: string;
+}>;
+
+export type EvidenceEntry = Readonly<{ file: string; line: number; description: string }>;
+export type Condition = Readonly<{ kind: ConditionKind; description: string }>;
+
+export type Execution = Readonly<{
+  attacker_perspective: string;
+  payloads: NonEmpty<string>;
+  instructions: NonEmpty<string>;
+  observed_result: string;
+}>;
+
+export type CodeChange = Readonly<{ file_name: string; fixed_code: string }>;
+export type Remediation = Readonly<{ strategy: string; code_changes?: readonly CodeChange[] }>;
+export type ScoredReason = Readonly<{ score: SeverityScore; reason: string }>;
+export type Severity = Readonly<{
+  likelihood: ScoredReason;
+  impact: ScoredReason;
+  overall_severity: SeverityScore;
+}>;
+export type Confidence = Readonly<{ score: ConfidenceScore; reason: string }>;
+
+export type ConfirmedFinding = Readonly<{
+  verdict: "confirmed";
+  fingerprint: string;
+  title: string;
+  description: string;
+  root_cause: string;
+  intended_behavior: string;
+  trace: NonEmpty<TraceStep>;
+  evidence: NonEmpty<EvidenceEntry>;
+  conditions: readonly Condition[];
+  execution: Execution;
+  remediation: Remediation;
+  severity: Severity;
+  confidence: Confidence;
+}>;
+
+export type ValidationPlan = Readonly<{ local?: string; deployment?: string }>;
+
+export type NeedsValidationFinding = Readonly<{
+  verdict: "needs_validation";
+  fingerprint: string;
+  title: string;
+  description: string;
+  claimed_root_cause: string;
+  trace: NonEmpty<TraceStep>;
+  evidence: NonEmpty<EvidenceEntry>;
+  blockers: NonEmpty<string>;
+  validation_plan: ValidationPlan;
+}>;
+
+export type RejectedFinding = Readonly<{
+  verdict: "rejected";
+  fingerprint: string;
+  title: string;
+  description: string;
+  claimed_root_cause: string;
+  trace: NonEmpty<TraceStep>;
+  evidence: NonEmpty<EvidenceEntry>;
+  reason: string;
+}>;
+
+export type SecurityFinding = ConfirmedFinding | NeedsValidationFinding | RejectedFinding;
+
+/** The findings volume's name for the shared wire diagnostic. */
+export type FindingViolation = WireViolation;
+export type FindingsError = Readonly<{ kind: "invalid-security-findings"; violations: readonly FindingViolation[] }>;
+
+const invalid = (violations: readonly FindingViolation[]): FindingsError => ({
+  kind: "invalid-security-findings",
+  violations,
+});
+
+/** Stable canonical key for structural uniqueness: sorted keys, typed leaves. */
+function canonicalKey(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return `[${value.map(canonicalKey).join(",")}]`;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort(compareStrings)
+      .map((key) => `${JSON.stringify(key)}:${canonicalKey(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** Upstream's `visibleContent`: at least one character a reader can see. */
+const isVisible = (value: unknown): value is string =>
+  typeof value === "string" && value.length > 0 && hasVisibleProse(value);
+
+
+function checkKeys(
+  record: Readonly<Record<string, unknown>>,
+  allowed: readonly string[],
+  required: readonly string[],
+  path: string,
+  violations: FindingViolation[],
+): void {
+  for (const key of required) {
+    if (!(key in record)) violations.push(wireViolation(`${path}.${key}`, "required"));
+  }
+  for (const key of Object.keys(record)) {
+    if (!allowed.includes(key)) violations.push(wireViolation(`${path}.${key}`, "unexpected property"));
+  }
+}
+
+function checkVisible(record: Readonly<Record<string, unknown>>, key: string, path: string, violations: FindingViolation[]): void {
+  if (key in record && !isVisible(record[key])) violations.push(wireViolation(`${path}.${key}`, "expected visible prose"));
+}
+
+function checkUniqueArray(value: unknown, path: string, violations: FindingViolation[], minimum = 0): void {
+  if (!Array.isArray(value)) {
+    violations.push(wireViolation(path, "expected an array"));
+    return;
+  }
+  if (value.length > SECURITY_AUDIT_LIMITS.collectionItems) violations.push(wireViolation(path, "too many entries"));
+  if (value.length < minimum) violations.push(wireViolation(path, `expected at least ${minimum} entry(ies)`));
+  const seen = new Set<string>();
+  for (const entry of value) {
+    const key = canonicalKey(entry);
+    if (seen.has(key)) violations.push(wireViolation(path, "duplicate entry"));
+    seen.add(key);
+  }
+}
+
+/** A unique array whose every entry must also pass `valid`: the array rule
+ *  first, then one violation per failing entry, at its own index. */
+function checkUniqueEntries(
+  value: unknown,
+  path: string,
+  violations: FindingViolation[],
+  entry: Readonly<{ minimum: number; valid: (item: unknown) => boolean; message: string }>,
+): void {
+  checkUniqueArray(value, path, violations, entry.minimum);
+  if (!Array.isArray(value)) return;
+  value.forEach((item, index) => {
+    if (!entry.valid(item)) violations.push(wireViolation(`${path}[${index}]`, entry.message));
+  });
+}
+
+function checkTrace(value: unknown, path: string, violations: FindingViolation[]): void {
+  checkUniqueArray(value, path, violations, 1);
+  if (!Array.isArray(value)) return;
+  value.forEach((entry, index) => {
+    const base = `${path}[${index}]`;
+    if (!isWireRecord(entry)) {
+      violations.push(wireViolation(base, "expected an object"));
+      return;
+    }
+    checkKeys(entry, ["kind", "file", "line", "scope", "description"], ["kind", "file", "line", "scope", "description"], base, violations);
+    if (!isOneOf(TRACE_KINDS, entry.kind)) violations.push(wireViolation(`${base}.kind`, "expected entrypoint, propagation or sink"));
+    if (!isSafeSourcePath(entry.file)) violations.push(wireViolation(`${base}.file`, "expected a repository-relative source path"));
+    if (!isPositiveInteger(entry.line)) violations.push(wireViolation(`${base}.line`, "expected a positive integer"));
+    checkVisible(entry, "scope", base, violations);
+    checkVisible(entry, "description", base, violations);
+  });
+
+  const steps = value.filter(isWireRecord);
+  if (steps.length === 1) {
+    const only = steps[0].kind;
+    if (only !== "entrypoint" && only !== "sink") {
+      violations.push(wireViolation(`${path}[0].kind`, "a one-step trace must be entrypoint or sink"));
+    }
+    return;
+  }
+  if (steps.length > 1) {
+    if (steps[0].kind !== "entrypoint") violations.push(wireViolation(`${path}[0].kind`, "must be entrypoint"));
+    steps.slice(1).forEach((step, offset) => {
+      if (offset === steps.length - 2) {
+        if (step.kind !== "sink") violations.push(wireViolation(`${path}[${offset + 1}].kind`, "must be sink"));
+      } else if (step.kind !== "propagation") {
+        violations.push(wireViolation(`${path}[${offset + 1}].kind`, "must be propagation"));
+      }
+    });
+  }
+}
+
+function checkEvidence(value: unknown, path: string, violations: FindingViolation[]): void {
+  checkUniqueArray(value, path, violations, 1);
+  if (!Array.isArray(value)) return;
+  value.forEach((entry, index) => {
+    const base = `${path}[${index}]`;
+    if (!isWireRecord(entry)) {
+      violations.push(wireViolation(base, "expected an object"));
+      return;
+    }
+    checkKeys(entry, ["file", "line", "description"], ["file", "line", "description"], base, violations);
+    if (!isSafeSourcePath(entry.file)) violations.push(wireViolation(`${base}.file`, "expected a repository-relative source path"));
+    if (!isPositiveInteger(entry.line)) violations.push(wireViolation(`${base}.line`, "expected a positive integer"));
+    checkVisible(entry, "description", base, violations);
+  });
+}
+
+function checkConditions(value: unknown, path: string, violations: FindingViolation[]): void {
+  checkUniqueArray(value, path, violations);
+  if (!Array.isArray(value)) return;
+  value.forEach((entry, index) => {
+    const base = `${path}[${index}]`;
+    if (!isWireRecord(entry)) {
+      violations.push(wireViolation(base, "expected an object"));
+      return;
+    }
+    checkKeys(entry, ["kind", "description"], ["kind", "description"], base, violations);
+    if (!isOneOf(CONDITION_KINDS, entry.kind)) violations.push(wireViolation(`${base}.kind`, "unknown condition kind"));
+    checkVisible(entry, "description", base, violations);
+  });
+}
+
+function checkScoredReason(value: unknown, path: string, scores: readonly string[], violations: FindingViolation[]): void {
+  if (!isWireRecord(value)) {
+    violations.push(wireViolation(path, "expected an object"));
+    return;
+  }
+  checkKeys(value, ["score", "reason"], ["score", "reason"], path, violations);
+  if (!isOneOf(scores, value.score)) violations.push(wireViolation(`${path}.score`, `expected one of ${scores.join(", ")}`));
+  checkVisible(value, "reason", path, violations);
+}
+
+function checkConfirmed(record: Readonly<Record<string, unknown>>, path: string, violations: FindingViolation[]): void {
+  for (const key of ["title", "description", "root_cause", "intended_behavior"]) {
+    checkVisible(record, key, path, violations);
+  }
+  checkTrace(record.trace, `${path}.trace`, violations);
+  checkEvidence(record.evidence, `${path}.evidence`, violations);
+  checkConditions(record.conditions, `${path}.conditions`, violations);
+  checkExecution(record.execution, `${path}.execution`, violations);
+  checkRemediation(record.remediation, `${path}.remediation`, violations);
+  checkSeverity(record.severity, `${path}.severity`, violations);
+  checkScoredReason(record.confidence, `${path}.confidence`, CONFIDENCE_SCORES, violations);
+}
+
+/** The bounded run that demonstrated the result: who attacked, with what, how,
+ *  and what was observed. */
+function checkExecution(execution: unknown, path: string, violations: FindingViolation[]): void {
+  if (!isWireRecord(execution)) {
+    violations.push(wireViolation(path, "expected an object"));
+    return;
+  }
+  const keys = ["attacker_perspective", "payloads", "instructions", "observed_result"];
+  checkKeys(execution, keys, keys, path, violations);
+  checkVisible(execution, "attacker_perspective", path, violations);
+  checkVisible(execution, "observed_result", path, violations);
+  checkUniqueEntries(execution.payloads, `${path}.payloads`, violations,
+    { minimum: 1, valid: (payload) => typeof payload === "string", message: "expected a string" });
+  checkUniqueEntries(execution.instructions, `${path}.instructions`, violations,
+    { minimum: 1, valid: isVisible, message: "expected visible prose" });
+}
+
+/** The fix strategy, with optional code changes that each name a safe file. */
+function checkRemediation(remediation: unknown, path: string, violations: FindingViolation[]): void {
+  if (!isWireRecord(remediation)) {
+    violations.push(wireViolation(path, "expected an object"));
+    return;
+  }
+  checkKeys(remediation, ["strategy", "code_changes"], ["strategy"], path, violations);
+  checkVisible(remediation, "strategy", path, violations);
+  if (!("code_changes" in remediation)) return;
+  const changes = remediation.code_changes;
+  if (!Array.isArray(changes)) {
+    violations.push(wireViolation(`${path}.code_changes`, "expected an array"));
+    return;
+  }
+  changes.forEach((change, index) => {
+    const base = `${path}.code_changes[${index}]`;
+    if (!isWireRecord(change)) {
+      violations.push(wireViolation(base, "expected an object"));
+      return;
+    }
+    checkKeys(change, ["file_name", "fixed_code"], ["file_name", "fixed_code"], base, violations);
+    if (!isSafeSourcePath(change.file_name)) violations.push(wireViolation(`${base}.file_name`, "expected a repository-relative source path"));
+    if (typeof change.fixed_code !== "string") violations.push(wireViolation(`${base}.fixed_code`, "expected a string"));
+  });
+}
+
+/** Likelihood and impact with reasons, and an overall severity that never
+ *  exceeds the demonstrated impact. */
+function checkSeverity(severity: unknown, path: string, violations: FindingViolation[]): void {
+  if (!isWireRecord(severity)) {
+    violations.push(wireViolation(path, "expected an object"));
+    return;
+  }
+  checkKeys(severity, ["likelihood", "impact", "overall_severity"], ["likelihood", "impact", "overall_severity"], path, violations);
+  checkScoredReason(severity.likelihood, `${path}.likelihood`, SEVERITY_SCORES, violations);
+  checkScoredReason(severity.impact, `${path}.impact`, SEVERITY_SCORES, violations);
+  if (!isOneOf(SEVERITY_SCORES, severity.overall_severity)) {
+    violations.push(wireViolation(`${path}.overall_severity`, `expected one of ${SEVERITY_SCORES.join(", ")}`));
+    return;
+  }
+  const impact = isWireRecord(severity.impact) && isOneOf(SEVERITY_SCORES, severity.impact.score) ? severity.impact.score : null;
+  if (impact !== null && SEVERITY_RANK[severity.overall_severity] > SEVERITY_RANK[impact]) {
+    violations.push(wireViolation(`${path}.overall_severity`, `cannot exceed demonstrated impact ${impact}`));
+  }
+}
+
+function checkNeedsValidation(record: Readonly<Record<string, unknown>>, path: string, violations: FindingViolation[]): void {
+  for (const key of ["title", "description", "claimed_root_cause"]) checkVisible(record, key, path, violations);
+  checkTrace(record.trace, `${path}.trace`, violations);
+  checkEvidence(record.evidence, `${path}.evidence`, violations);
+  checkUniqueEntries(record.blockers, `${path}.blockers`, violations,
+    { minimum: 1, valid: isVisible, message: "expected visible prose" });
+  const plan = record.validation_plan;
+  if (!isWireRecord(plan)) {
+    violations.push(wireViolation(`${path}.validation_plan`, "expected an object"));
+    return;
+  }
+  checkKeys(plan, ["local", "deployment"], [], `${path}.validation_plan`, violations);
+  const hasLocal = isVisible(plan.local);
+  const hasDeployment = isVisible(plan.deployment);
+  for (const key of ["local", "deployment"]) {
+    if (key in plan && !isVisible(plan[key])) violations.push(wireViolation(`${path}.validation_plan.${key}`, "expected visible prose"));
+  }
+  if (!hasLocal && !hasDeployment) {
+    violations.push(wireViolation(`${path}.validation_plan`, "requires at least one local or deployment plan"));
+  }
+}
+
+function checkRejected(record: Readonly<Record<string, unknown>>, path: string, violations: FindingViolation[]): void {
+  for (const key of ["title", "description", "claimed_root_cause", "reason"]) checkVisible(record, key, path, violations);
+  checkTrace(record.trace, `${path}.trace`, violations);
+  checkEvidence(record.evidence, `${path}.evidence`, violations);
+}
+
+/** Each verdict's exact key set: every key is required and no other is allowed,
+ *  so one list serves as both. */
+const VERDICT_KEYS: Readonly<Record<SecurityFinding["verdict"], readonly string[]>> = {
+  confirmed: [
+    "verdict", "fingerprint", "title", "description", "root_cause", "intended_behavior", "trace", "evidence",
+    "conditions", "execution", "remediation", "severity", "confidence",
+  ],
+  needs_validation: ["verdict", "fingerprint", "title", "description", "claimed_root_cause", "trace", "evidence", "blockers", "validation_plan"],
+  rejected: ["verdict", "fingerprint", "title", "description", "claimed_root_cause", "trace", "evidence", "reason"],
+};
+
+/** Membership in the verdict vocabulary, read from `VERDICT_KEYS` — the one
+ *  owner of which verdicts exist, so a verdict cannot be added to the key table
+ *  and missed by the guard. */
+const isVerdict = (value: unknown): value is SecurityFinding["verdict"] =>
+  typeof value === "string" && Object.hasOwn(VERDICT_KEYS, value);
+
+/** Every key some verdict carries.
+ *  A stray key found among them belongs to ANOTHER verdict — the more useful diagnostic. */
+const ANY_VERDICT_KEYS: ReadonlySet<string> = new Set(Object.values(VERDICT_KEYS).flat());
+
+/** A finding's keys against its verdict's one closed set (`VERDICT_KEYS`):
+ *  every key required, no other allowed. A stray key that another verdict
+ *  carries (a lead with a `severity`) is named as such — the one source of
+ *  truth for which fields a verdict may carry, and one violation per key. */
+function checkVerdictKeys(
+  record: Readonly<Record<string, unknown>>,
+  verdict: SecurityFinding["verdict"],
+  path: string,
+  violations: FindingViolation[],
+): void {
+  const allowed = VERDICT_KEYS[verdict];
+  for (const key of allowed) {
+    if (!(key in record)) violations.push(wireViolation(`${path}.${key}`, "required"));
+  }
+  for (const key of Object.keys(record)) {
+    if (allowed.includes(key)) continue;
+    violations.push(wireViolation(`${path}.${key}`, ANY_VERDICT_KEYS.has(key) ? `${verdict} findings must not carry this field` : "unexpected property"));
+  }
+}
+
+/**
+ * Parse and fully validate a `security-findings.json` document. Validity here
+ * is exactly the document contract: shape, field semantics, trace ordering,
+ * severity-vs-impact, per-verdict exclusion, sort and uniqueness. It says
+ * nothing about whether the claims are true — that is what the refutation panel
+ * is for.
+ */
+export function parseSecurityFindings(raw: unknown): DomainResult<readonly SecurityFinding[], FindingsError> {
+  const violations: FindingViolation[] = [];
+  if (!Array.isArray(raw)) {
+    violations.push(wireViolation("$", "expected a top-level array"));
+    return failure(invalid(violations));
+  }
+  if (raw.length > SECURITY_AUDIT_LIMITS.findings) {
+    violations.push(wireViolation("$", `exceeds ${SECURITY_AUDIT_LIMITS.findings} findings`));
+    return failure(invalid(violations));
+  }
+
+  const fingerprints = new Map<string, number>();
+  let previousFingerprint: string | null = null;
+
+  raw.forEach((entry, index) => {
+    const path = `$[${index}]`;
+    if (!isWireRecord(entry)) {
+      violations.push(wireViolation(path, "expected an object"));
+      return;
+    }
+    if (!isVerdict(entry.verdict)) {
+      violations.push(wireViolation(`${path}.verdict`, `expected one of ${Object.keys(VERDICT_KEYS).join(", ")}`));
+      return;
+    }
+    checkVerdictKeys(entry, entry.verdict, path, violations);
+
+    if (!isSecurityFingerprint(entry.fingerprint)) {
+      violations.push(wireViolation(`${path}.fingerprint`, "expected a stable source-derived fingerprint"));
+    } else {
+      const previous = fingerprints.get(entry.fingerprint);
+      if (previous !== undefined) violations.push(wireViolation(`${path}.fingerprint`, `duplicate of $[${previous}].fingerprint`));
+      else fingerprints.set(entry.fingerprint, index);
+      if (previousFingerprint !== null && compareStrings(previousFingerprint, entry.fingerprint) > 0) {
+        violations.push(wireViolation(`${path}.fingerprint`, "findings must be sorted lexicographically"));
+      }
+      previousFingerprint = entry.fingerprint;
+    }
+
+    match(entry.verdict)
+      .with("confirmed", () => checkConfirmed(entry, path, violations))
+      .with("needs_validation", () => checkNeedsValidation(entry, path, violations))
+      .with("rejected", () => checkRejected(entry, path, violations))
+      .exhaustive();
+  });
+
+  // Every key, field and ordering rule of the union was checked above, so the
+  // copy IS a `SecurityFinding[]` — the validator is the proof the cast names.
+  return violations.length === 0
+    ? success(deepFrozenCopy(raw) as readonly SecurityFinding[])
+    : failure(invalid(violations));
+}
+
+/** Records in canonical order: lexicographic by fingerprint. The one ordering
+ *  every published document and adjudication result uses. */
+export const sortByFingerprint = <T extends Readonly<{ fingerprint: string }>>(items: readonly T[]): readonly T[] =>
+  [...items].sort((left, right) => compareStrings(left.fingerprint, right.fingerprint));
+
+// --- Consolidation ---
+
+/** The sink a finding lands on, as `file:line`: the one fact two hunters
+ *  describing the same defect from different entry points cannot disagree about.
+ *  `null` when the trace names no sink. */
+const sinkOf = (finding: SecurityFinding): string | null => {
+  const sink = finding.trace.find((step) => step.kind === "sink");
+  return sink === undefined ? null : `${sink.file}:${sink.line}`;
+};
+
+/** How much standing a verdict has when two filings describe ONE defect (same
+ *  sink, same root-cause sentence). A `confirmed` claim outranks a lead, and a
+ *  lead outranks a rejection: the three verdicts are different claims about one
+ *  defect, not versions of one claim — so "keep the longer trace" alone let a
+ *  three-step `rejected` filing replace a confirmed vulnerability and drop its
+ *  severity from the published set. */
+const VERDICT_STRENGTH: Readonly<Record<SecurityFinding["verdict"], number>> = {
+  confirmed: 2,
+  needs_validation: 1,
+  rejected: 0,
+};
+
+/** The keeper between two filings of one defect: the strongest verdict, then the
+ *  most complete trace, then the earlier fingerprint (candidates arrive in
+ *  fingerprint order, so the last tie-break keeps the first one seen). */
+function outranks(candidate: SecurityFinding, existing: SecurityFinding): boolean {
+  const strength = VERDICT_STRENGTH[candidate.verdict] - VERDICT_STRENGTH[existing.verdict];
+  if (strength !== 0) return strength > 0;
+  if (candidate.trace.length !== existing.trace.length) return candidate.trace.length > existing.trace.length;
+  return compareStrings(candidate.fingerprint, existing.fingerprint) < 0;
+}
+
+/** The defect identity two filings share when they describe one defect from
+ *  different entry points: the sink and the root-cause sentence. `null` when the
+ *  trace names no sink — such a record is never merged away. */
+const causeKey = (finding: SecurityFinding): string | null => {
+  const sink = sinkOf(finding);
+  if (sink === null) return null;
+  const rootCause = "root_cause" in finding ? finding.root_cause : finding.claimed_root_cause;
+  return `${sink}\u0000${rootCause}`;
+};
+
+/** A filing consolidation dropped because another record describes the same
+ *  defect: the absorbed fingerprint and the fingerprint of the record that was
+ *  kept in its place. */
+export type Absorption = Readonly<{ fingerprint: string; keptAs: string }>;
+
+/** What consolidation keeps, and every filing it absorbed into a kept record —
+ *  so no caller can lose a claim without being able to say where it went. */
+export type Consolidation<T> = Readonly<{ kept: readonly T[]; absorbed: readonly Absorption[] }>;
+
+/** One root cause, one record — where "one root cause" is a fact, not a
+ *  sentence. Fingerprints are the identity; the root-cause TEXT catches the case
+ *  where two hunters described one defect from different entry points and earned
+ *  different fingerprints. Text alone is not enough: a terse hunter can paste one
+ *  root-cause sentence onto two different defects, and merging those would silently
+ *  drop a finding from the published set. So a root-cause merge also requires the
+ *  same SINK, and a trace that names no sink is never merged away. The keeper is
+ *  the record with the strongest verdict, then the most complete trace, tie-broken
+ *  by fingerprint so the choice is deterministic.
+ *
+ *  A `pinned` fingerprint is never merged away: it is a record the run already
+ *  holds (and a verifier may already have balloted, a unit may already list), so
+ *  a later filing of the same defect yields to it whatever its verdict or trace.
+ *
+ *  Every record merged away is reported in `absorbed` with the fingerprint that
+ *  was kept for its defect (followed to the FINAL keeper when a later record
+ *  displaced an earlier one), sorted by fingerprint. */
+export function consolidateCandidates<T extends SecurityFinding>(
+  candidates: readonly T[],
+  pinned: ReadonlySet<string> = new Set(),
+): Consolidation<T> {
+  const byFingerprint = new Map<string, T>();
+  for (const candidate of candidates) {
+    if (!byFingerprint.has(candidate.fingerprint)) byFingerprint.set(candidate.fingerprint, candidate);
+  }
+  // Keyed by cause for a mergeable record, by fingerprint for one that is kept
+  // whatever else shares its cause (no sink, or pinned). A cause key carries a
+  // NUL, which no fingerprint can, so the two key spaces never collide.
+  const kept = new Map<string, T>();
+  const pinnedKeeper = new Map<string, string>();
+  const absorbedInto = new Map<string, string>();
+  for (const candidate of [...byFingerprint.values()].sort((left, right) => compareStrings(left.fingerprint, right.fingerprint))) {
+    const cause = causeKey(candidate);
+    if (cause === null) {
+      kept.set(candidate.fingerprint, candidate);
+      continue;
+    }
+    if (pinned.has(candidate.fingerprint)) {
+      const displaced = kept.get(cause);
+      if (displaced !== undefined) absorbedInto.set(displaced.fingerprint, candidate.fingerprint);
+      kept.delete(cause);
+      pinnedKeeper.set(cause, candidate.fingerprint);
+      kept.set(candidate.fingerprint, candidate);
+      continue;
+    }
+    const keeper = pinnedKeeper.get(cause);
+    if (keeper !== undefined) {
+      absorbedInto.set(candidate.fingerprint, keeper);
+      continue;
+    }
+    const existing = kept.get(cause);
+    if (existing === undefined) {
+      kept.set(cause, candidate);
+    } else if (outranks(candidate, existing)) {
+      absorbedInto.set(existing.fingerprint, candidate.fingerprint);
+      kept.set(cause, candidate);
+    } else {
+      absorbedInto.set(candidate.fingerprint, existing.fingerprint);
+    }
+  }
+  const finalKeeper = (fingerprint: string): string => {
+    const next = absorbedInto.get(fingerprint);
+    return next === undefined ? fingerprint : finalKeeper(next);
+  };
+  return {
+    kept: [...kept.values()].sort((left, right) => compareStrings(left.fingerprint, right.fingerprint)),
+    absorbed: [...absorbedInto.keys()].sort(compareStrings).map((fingerprint) => ({ fingerprint, keptAs: finalKeeper(fingerprint) })),
+  };
+}
+
+// --- Filing ---
+
+/** A submit re-filed fingerprints the run already holds, with different
+ *  content. Every conflicting fingerprint is named, so one correction fixes the
+ *  whole submit. */
+export type FindingConflict = Readonly<{
+  kind: "conflicting-refiling";
+  fingerprints: readonly string[];
+  message: string;
+}>;
+
+export type FilingRefusal = FindingConflict | FindingsError;
+
+/** The document a submit leaves the run holding, and every filed record that
+ *  consolidation absorbed into a record the run already held (or into another
+ *  filing) — reported, so a hunter learns its claim was absorbed, not recorded. */
+export type FilingOutcome = Readonly<{ findings: readonly SecurityFinding[]; absorbed: readonly Absorption[] }>;
+
+/**
+ * Fold a hunter's filed records into the run's candidates, then consolidate.
+ *
+ * - A filed record the run already holds VERBATIM (same fields, whatever their
+ *   key order) is kept once: a submit retried after a failed ledger write
+ *   re-files exactly what the first attempt wrote, and must converge rather than
+ *   be refused for a duplicate.
+ * - A filed record whose fingerprint the run already holds with DIFFERENT
+ *   content is REFUSED, naming every such fingerprint. The run's record is the
+ *   one verification adjudicates; keeping it while dropping the new one would
+ *   lose a hunter's claim without a word, and replacing it would let a later
+ *   filing rewrite a claim a verifier may already have balloted.
+ *
+ * One root cause, one record: consolidation runs before the final parse, so the
+ * returned document is exactly what the run will hold. The run's existing
+ * records are PINNED in it: a fresh filing of the same defect (same sink, same
+ * root cause) under a new fingerprint yields to the record the run already
+ * holds, so the record verification adjudicates — and that a unit's
+ * `result_fingerprints` may already list — is never displaced. Each such
+ * filing comes back in `absorbed`, naming the record kept in its place.
+ */
+export function fileCandidates(
+  existing: readonly SecurityFinding[],
+  filed: readonly SecurityFinding[],
+): DomainResult<FilingOutcome, FilingRefusal> {
+  const held = new Map(existing.map((finding) => [finding.fingerprint, canonicalKey(finding)]));
+  const conflicts = filed
+    .filter((finding) => {
+      const prior = held.get(finding.fingerprint);
+      return prior !== undefined && prior !== canonicalKey(finding);
+    })
+    .map((finding) => finding.fingerprint);
+  if (conflicts.length > 0) {
+    return failure({
+      kind: "conflicting-refiling" as const,
+      fingerprints: conflicts,
+      message:
+        `the run already holds a different record for ${conflicts.join(", ")} — omit ${conflicts.length === 1 ? "it" : "them"} ` +
+        "from this submit, or re-file byte-identical; verification adjudicates the record the run already holds",
+    });
+  }
+  const fresh = filed.filter((finding) => !held.has(finding.fingerprint));
+  const consolidated = consolidateCandidates(sortByFingerprint([...existing, ...fresh]), new Set(held.keys()));
+  const findings = parseSecurityFindings(consolidated.kept);
+  return findings.ok ? success({ findings: findings.value, absorbed: consolidated.absorbed }) : findings;
+}
+
+/** The adjudication ballot: loom's two levels, with the five-level ladder kept
+ *  as recorded context. `null` means "no severity recorded" (needs_validation). */
+export function overallSeverity(finding: SecurityFinding): SeverityScore | null {
+  return finding.verdict === "confirmed" ? finding.severity.overall_severity : null;
+}
+
+export function severityAtLeast(score: SeverityScore, floor: SeverityScore): boolean {
+  return SEVERITY_RANK[score] >= SEVERITY_RANK[floor];
+}

@@ -51,8 +51,8 @@ const ARGS = ["--wave", "1", "--task", "T1", "--reason", "fix the advisory"] as 
 const quiet = () => false;
 
 describe("reopen-task route traits", () => {
-  it("takes only flags and requires the Pi runtime handshake, like every mutating operation", () => {
-    expect(ORCHESTRATION_OPERATIONS["reopen-task"]).toEqual({ input: "flags", runtimeSkew: "handshake-required" });
+  it("takes only flags, requires the Pi runtime handshake and is parent-only, like every mutating operation", () => {
+    expect(ORCHESTRATION_OPERATIONS["reopen-task"]).toEqual({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" });
     expect(routeConsumesStdin("helper", "orchestration", ["reopen-task", ...ARGS])).toBe(false);
     expect(piRuntimeHandshakeRequired("helper", "orchestration", ["reopen-task", ...ARGS])).toBe(true);
   });

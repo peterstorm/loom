@@ -30,7 +30,7 @@ import {
 import type { ProofFailure } from "./proof-obligations";
 import { renderProjectVerificationCoverage } from "./verification-manifest";
 import { deriveWaveCompletionSuiteReadiness } from "./wave-completion-suite-readiness";
-import { canonicalRecord, type NonEmpty } from "./orchestration-contract";
+import { canonicalRecord, type NonEmpty, nonEmptyOf } from "./orchestration-contract";
 import type { FrozenPathObservations } from "./acceptance-contract";
 
 export type GateCheck =
@@ -399,7 +399,7 @@ export function deriveWaveStartReadiness(state: TaskGraph, waveTasks: readonly T
   const [first, ...rest] = failures;
   return first === undefined
     ? canonicalRecord({ kind: "ready" as const })
-    : canonicalRecord({ kind: "not-ready" as const, failures: Object.freeze([first, ...rest]) as NonEmpty<string> });
+    : canonicalRecord({ kind: "not-ready" as const, failures: nonEmptyOf(first, ...rest) });
 }
 
 function waveGateChecks(state: TaskGraph, wave: number, waveTasks: readonly Task[], deps: GateDeps): readonly GateCheck[] {

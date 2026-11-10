@@ -31,7 +31,7 @@ import {
   replayStandaloneResultFromEvidence,
 } from "../engine/src/handlers/helpers/programs";
 import type { LoomReviewAuthorityReceipt } from "../engine/src/core/review-authority-receipt";
-import { readRunBytesNoFollow } from "../engine/src/orchestration/no-follow-fs";
+import { readRunBytesNoFollow } from "../engine/src/utils/no-follow-fs";
 import type { SessionRunBinding } from "../engine/src/orchestration/session-run-bindings";
 import { captureKey, type CaptureKey } from "../engine/src/core/harness-capture";
 import { reduceStandaloneReviewMachine } from "../engine/src/core/standalone-review";
@@ -100,6 +100,9 @@ type TrustedReviewRoot = Readonly<{
   nextTouch: number;
   runs: ReadonlyMap<string, TrustedReviewRun>;
 }>;
+
+/** A rewrite of one run's witnessed captures. */
+type CaptureUpdate = (captures: ReadonlyMap<CaptureKey, TrustedReviewCapture>) => ReadonlyMap<CaptureKey, TrustedReviewCapture>;
 
 /** The Standalone Review root a session's verification reads. */
 const standaloneReviewRoot = (cwd: string): string => resolve(cwd, ".claude/reviews/review-and-fix-runs");
@@ -205,7 +208,7 @@ function rootWithRunTouched(
   root: TrustedReviewRoot,
   runIdentity: string,
   binding: SessionRunBinding,
-  updateCaptures: (captures: ReadonlyMap<CaptureKey, TrustedReviewCapture>) => ReadonlyMap<CaptureKey, TrustedReviewCapture>,
+  updateCaptures: CaptureUpdate,
 ): TrustedReviewRoot {
   const previous = root.runs.get(runIdentity);
   const runs = new Map(root.runs);
@@ -225,101 +228,176 @@ function rootWithoutRun(root: TrustedReviewRoot, runIdentity: string): TrustedRe
   return runs.size === 0 ? null : Object.freeze({ nextTouch: root.nextTouch, runs });
 }
 
-/** One isolated witness aggregate; the extension factory creates exactly one. */
-export function createTrustedReviewWitnesses(): TrustedReviewWitnesses {
-  const sessions = new Map<string, Map<string, TrustedReviewRoot>>();
-
-  /** Store a session's root, or drop it (`null`): the one rule by which an
-   *  emptied root and an emptied session are collapsed rather than kept. */
-  const storeRoot = (sessionId: string, rootIdentity: string, root: TrustedReviewRoot | null): void => {
-    const sessionRoots = sessions.get(sessionId) ?? new Map<string, TrustedReviewRoot>();
-    if (root === null) sessionRoots.delete(rootIdentity);
-    else sessionRoots.set(rootIdentity, root);
-    if (sessionRoots.size === 0) sessions.delete(sessionId);
-    else sessions.set(sessionId, sessionRoots);
-  };
-
-  const updateRun = (
-    sessionId: string,
-    binding: SessionRunBinding,
-    updateCaptures: (captures: ReadonlyMap<CaptureKey, TrustedReviewCapture>) => ReadonlyMap<CaptureKey, TrustedReviewCapture>,
-  ): TrustedReviewRunTouch => {
-    const { rootIdentity, runIdentity } = trustedRunLocation(binding);
-    const root = sessions.get(sessionId)?.get(rootIdentity) ?? EMPTY_TRUSTED_ROOT;
-    const touch = root.runs.has(runIdentity) ? "already-bound" : "bound";
-    storeRoot(sessionId, rootIdentity, rootWithRunTouched(root, runIdentity, binding, updateCaptures));
-    return touch;
-  };
-
+/** The capture a task's exact authority markers and its receipt witness.
+ *  Throws when the markers or the receipt digest cannot be trusted. */
+function witnessedCapture(
+  role: string,
+  task: string,
+  outcome: Extract<CaptureOutcome, { kind: "captured" }>,
+): TrustedReviewCapture {
+  const markers = orchestrationMarkers(task, `captured ${outcome.receipt.requestId}`);
+  if (markers === null || markers.requestId !== outcome.receipt.requestId) {
+    throw new Error(`captured request ${outcome.receipt.requestId} is missing its exact task authority markers`);
+  }
+  const contextDigest = parseContextDigest(markers.contextDigest);
+  if (!contextDigest.ok) {
+    throw new Error(`captured request ${outcome.receipt.requestId} carries an invalid context marker: ${contextDigest.error.message}`);
+  }
+  const digest = parseArtifactDigest(outcome.receipt.digest);
+  if (!digest.ok) {
+    throw new Error(`captured request ${outcome.receipt.requestId} carries an invalid receipt digest: ${digest.error.message}`);
+  }
   return Object.freeze({
-    touch: (sessionId: string, binding: SessionRunBinding): TrustedReviewRunTouch =>
-      updateRun(sessionId, binding, (captures) => captures),
-    retract: (sessionId: string, binding: SessionRunBinding): void => {
-      const { rootIdentity, runIdentity } = trustedRunLocation(binding);
-      const root = sessions.get(sessionId)?.get(rootIdentity);
-      const run = root?.runs.get(runIdentity);
-      // Only an unwitnessed run is dropped: a witnessed one is authority.
-      if (root === undefined || run === undefined || run.captures.size > 0) return;
-      storeRoot(sessionId, rootIdentity, rootWithoutRun(root, runIdentity));
-    },
-    remember: (sessionId, binding, role, task, outcome): void => {
-      const markers = orchestrationMarkers(task, `captured ${outcome.receipt.requestId}`);
-      if (markers === null || markers.requestId !== outcome.receipt.requestId) {
-        throw new Error(`captured request ${outcome.receipt.requestId} is missing its exact task authority markers`);
-      }
-      const contextDigest = parseContextDigest(markers.contextDigest);
-      if (!contextDigest.ok) {
-        throw new Error(`captured request ${outcome.receipt.requestId} carries an invalid context marker: ${contextDigest.error.message}`);
-      }
-      const digest = parseArtifactDigest(outcome.receipt.digest);
-      if (!digest.ok) {
-        throw new Error(`captured request ${outcome.receipt.requestId} carries an invalid receipt digest: ${digest.error.message}`);
-      }
-      updateRun(sessionId, binding, (previous) => {
-        const captures = new Map(previous);
-        captures.set(
-          captureKey(outcome.receipt.slotId, outcome.receipt.attempt),
-          Object.freeze({
-            requestId: outcome.receipt.requestId,
-            slotId: outcome.receipt.slotId,
-            attempt: outcome.receipt.attempt,
-            role,
-            contextDigest: contextDigest.value,
-            digest: digest.value,
-            byteLength: outcome.receipt.byteLength,
-          }),
-        );
-        return captures;
-      });
-    },
-    verify: async (input): Promise<LoomReviewAuthorityReceipt> => {
-      const sessionRoots = sessions.get(input.sessionId);
-      if (sessionRoots === undefined) throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId}`);
-      const expectedRoot = standaloneReviewRoot(input.cwd);
-      const root = sessionRoots.get(expectedRoot);
-      if (root === undefined || root.runs.size === 0) {
-        throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId} and root ${expectedRoot}`);
-      }
-      const current = [...root.runs.entries()].reduce((latest, candidate) =>
-        candidate[1].touchedAt > latest[1].touchedAt ? candidate : latest);
-      const outcome = await verifyTrustedReviewRun(input, current[1]);
-      if (sessions.get(input.sessionId)?.get(expectedRoot) !== root) {
-        throw new Error("current witnessed Standalone Review changed during verification; no older authority accepted");
-      }
-      if (outcome.kind === "rejected") {
-        throw new Error(`current witnessed Standalone Review rejected: ${outcome.message}`);
-      }
-      // Exact accepted replay is idempotent. Once accepted, older witnesses for
-      // this root are retired so they can never make a later verification
-      // ambiguous or become fallback authority after a new run is touched.
-      storeRoot(input.sessionId, expectedRoot, Object.freeze({
-        nextTouch: root.nextTouch,
-        runs: new Map([[current[0], current[1]]]),
-      }));
-      return outcome.receipt;
-    },
+    requestId: outcome.receipt.requestId,
+    slotId: outcome.receipt.slotId,
+    attempt: outcome.receipt.attempt,
+    role,
+    contextDigest: contextDigest.value,
+    digest: digest.value,
+    byteLength: outcome.receipt.byteLength,
+  });
+}
+
+/** The root's current run: the one touched last. */
+const currentRunOf = (root: TrustedReviewRoot): readonly [string, TrustedReviewRun] =>
+  [...root.runs.entries()].reduce((latest, candidate) =>
+    candidate[1].touchedAt > latest[1].touchedAt ? candidate : latest);
+
+/** A session root's current run as the store saw it. `root` is the version
+ *  the lookup observed: settling compares it against the stored root, so a
+ *  touch, retraction or forget in between is detected, never overwritten. */
+type ObservedCurrentRun = Readonly<{
+  sessionId: string;
+  rootIdentity: string;
+  root: TrustedReviewRoot;
+  runIdentity: string;
+  run: TrustedReviewRun;
+}>;
+
+type CurrentRunLookup =
+  | Readonly<{ kind: "no-session" }>
+  | Readonly<{ kind: "no-root" }>
+  | Readonly<{ kind: "current"; current: ObservedCurrentRun }>;
+
+/** The session → root → run storage behind the aggregate. */
+type WitnessSessions = Map<string, Map<string, TrustedReviewRoot>>;
+
+const rootOf = (sessions: WitnessSessions, sessionId: string, rootIdentity: string): TrustedReviewRoot | undefined =>
+  sessions.get(sessionId)?.get(rootIdentity);
+
+/** Store a session's root, or drop it (`null`): the one rule by which an
+ *  emptied root and an emptied session are collapsed rather than kept. */
+function storeRoot(sessions: WitnessSessions, sessionId: string, rootIdentity: string, root: TrustedReviewRoot | null): void {
+  const sessionRoots = sessions.get(sessionId) ?? new Map<string, TrustedReviewRoot>();
+  if (root === null) sessionRoots.delete(rootIdentity);
+  else sessionRoots.set(rootIdentity, root);
+  if (sessionRoots.size === 0) sessions.delete(sessionId);
+  else sessions.set(sessionId, sessionRoots);
+}
+
+/** Bind (or enrich) a binding's run; a new run becomes current. */
+function updateRun(sessions: WitnessSessions, sessionId: string, binding: SessionRunBinding, updateCaptures: CaptureUpdate): TrustedReviewRunTouch {
+  const { rootIdentity, runIdentity } = trustedRunLocation(binding);
+  const root = rootOf(sessions, sessionId, rootIdentity) ?? EMPTY_TRUSTED_ROOT;
+  const touch = root.runs.has(runIdentity) ? "already-bound" : "bound";
+  storeRoot(sessions, sessionId, rootIdentity, rootWithRunTouched(root, runIdentity, binding, updateCaptures));
+  return touch;
+}
+
+/** Drop a binding's run while it holds no witnessed capture: a witnessed run
+ *  is authority and is kept. */
+function retractUnwitnessed(sessions: WitnessSessions, sessionId: string, binding: SessionRunBinding): void {
+  const { rootIdentity, runIdentity } = trustedRunLocation(binding);
+  const root = rootOf(sessions, sessionId, rootIdentity);
+  const run = root?.runs.get(runIdentity);
+  if (root === undefined || run === undefined || run.captures.size > 0) return;
+  storeRoot(sessions, sessionId, rootIdentity, rootWithoutRun(root, runIdentity));
+}
+
+/** The session root's current run, with the root version it was read from. */
+function currentRun(sessions: WitnessSessions, sessionId: string, rootIdentity: string): CurrentRunLookup {
+  if (!sessions.has(sessionId)) return { kind: "no-session" };
+  const root = rootOf(sessions, sessionId, rootIdentity);
+  if (root === undefined || root.runs.size === 0) return { kind: "no-root" };
+  const [runIdentity, run] = currentRunOf(root);
+  return { kind: "current", current: Object.freeze({ sessionId, rootIdentity, root, runIdentity, run }) };
+}
+
+/** Whether the root still is the version `current` observed. */
+const stillCurrent = (sessions: WitnessSessions, current: ObservedCurrentRun): boolean =>
+  rootOf(sessions, current.sessionId, current.rootIdentity) === current.root;
+
+/** Compare-and-swap the observed root to hold only its current run, so the
+ *  older witnesses can never become fallback authority. False, and nothing
+ *  written, when the root changed since it was observed. Idempotent. */
+function retireOtherRuns(sessions: WitnessSessions, current: ObservedCurrentRun): boolean {
+  if (!stillCurrent(sessions, current)) return false;
+  storeRoot(sessions, current.sessionId, current.rootIdentity, Object.freeze({
+    nextTouch: current.root.nextTouch,
+    runs: new Map([[current.runIdentity, current.run]]),
+  }));
+  return true;
+}
+
+/** The store: every invariant of the keying lives in the operations above —
+ *  an emptied root or session is collapsed, a run is never reordered, and
+ *  settling a verification is a compare-and-swap on the observed root. */
+function trustedWitnessStore() {
+  const sessions: WitnessSessions = new Map();
+  return Object.freeze({
+    updateRun: (sessionId: string, binding: SessionRunBinding, updateCaptures: CaptureUpdate): TrustedReviewRunTouch =>
+      updateRun(sessions, sessionId, binding, updateCaptures),
+    retractUnwitnessed: (sessionId: string, binding: SessionRunBinding): void => retractUnwitnessed(sessions, sessionId, binding),
+    currentRun: (sessionId: string, rootIdentity: string): CurrentRunLookup => currentRun(sessions, sessionId, rootIdentity),
+    /** Settle a REJECTED verification: true while the root is unchanged;
+     *  nothing is retired or promoted. */
+    stillCurrent: (current: ObservedCurrentRun): boolean => stillCurrent(sessions, current),
+    /** Settle an ACCEPTED verification (compare-and-swap). */
+    retireOtherRuns: (current: ObservedCurrentRun): boolean => retireOtherRuns(sessions, current),
     forget: (sessionId: string): void => {
       sessions.delete(sessionId);
     },
+  });
+}
+
+/** Prove the session's current Standalone Review run for `cwd`. An exact
+ *  acceptance is idempotent and retires the root's older witnesses so they can
+ *  never make a later verification ambiguous or become fallback authority
+ *  after a new run is touched. A root that changed while verification was in
+ *  flight is refused whatever the verdict: no older authority is accepted. */
+async function verifyWitnessedStandaloneReview(
+  store: ReturnType<typeof trustedWitnessStore>,
+  input: Readonly<{ cwd: string; sessionId: string }>,
+): Promise<LoomReviewAuthorityReceipt> {
+  const expectedRoot = standaloneReviewRoot(input.cwd);
+  const lookup = store.currentRun(input.sessionId, expectedRoot);
+  if (lookup.kind === "no-session") throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId}`);
+  if (lookup.kind === "no-root") {
+    throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId} and root ${expectedRoot}`);
+  }
+  const outcome = await verifyTrustedReviewRun(input, lookup.current.run);
+  const settled = outcome.kind === "accepted" ? store.retireOtherRuns(lookup.current) : store.stillCurrent(lookup.current);
+  if (!settled) throw new Error("current witnessed Standalone Review changed during verification; no older authority accepted");
+  if (outcome.kind === "rejected") throw new Error(`current witnessed Standalone Review rejected: ${outcome.message}`);
+  return outcome.receipt;
+}
+
+/** One isolated witness aggregate; the extension factory creates exactly one. */
+export function createTrustedReviewWitnesses(): TrustedReviewWitnesses {
+  const store = trustedWitnessStore();
+  return Object.freeze({
+    touch: (sessionId: string, binding: SessionRunBinding): TrustedReviewRunTouch =>
+      store.updateRun(sessionId, binding, (captures) => captures),
+    retract: store.retractUnwitnessed,
+    remember: (sessionId, binding, role, task, outcome): void => {
+      const capture = witnessedCapture(role, task, outcome);
+      store.updateRun(sessionId, binding, (previous) => {
+        const captures = new Map(previous);
+        captures.set(captureKey(capture.slotId, capture.attempt), capture);
+        return captures;
+      });
+    },
+    verify: (input) => verifyWitnessedStandaloneReview(store, input),
+    forget: store.forget,
   });
 }

@@ -33,7 +33,7 @@ import {
   type AcceptanceObservation,
   type AcceptanceReportFacts,
 } from "./acceptance-contract";
-import { canonicalStructuralEquals, isNonEmpty } from "./orchestration-contract";
+import { canonicalStructuralEquals, concatNonEmpty, isNonEmpty, mapNonEmpty, nonEmpty, nonEmptyOf } from "./orchestration-contract";
 import {
   collectDenseArray,
   exactRecordErrors,
@@ -381,7 +381,7 @@ const failure = <T>(errors: readonly string[]): Parsed<T> => freeze({
   ok: false,
   error: freeze({
     kind: "invalid-completion-suite",
-    errors: freezeArray(errors.length === 0 ? ["completion suite is invalid"] : errors) as NonEmpty<string>,
+    errors: nonEmpty(errors) ?? nonEmptyOf("completion suite is invalid"),
   }),
 });
 
@@ -736,7 +736,8 @@ function canonicalAuthorizedChecks(
   if (!counts.has(FULL_TIER_LINT_CHECK_ID_TEXT)) {
     return failure([`${path} must contain the reserved ${FULL_TIER_LINT_CHECK_ID_TEXT} check`]);
   }
-  return success(freezeArray([...parsed.value].sort((left, right) => compareStrings(left.checkId, right.checkId))) as NonEmpty<AuthorizedWaveCompletionCheck>);
+  const sorted = nonEmpty([...parsed.value].sort((left, right) => compareStrings(left.checkId, right.checkId)));
+  return sorted === null ? failure([`${path} must be non-empty`]) : success(sorted);
 }
 
 function suiteDigestOf(checks: NonEmpty<AuthorizedWaveCompletionCheck>): ArtifactDigest {
@@ -1032,9 +1033,8 @@ function parseAcceptedChecks(
   if (!counts.has(FULL_TIER_LINT_CHECK_ID_TEXT)) {
     errors.push(`${path} must contain the reserved ${FULL_TIER_LINT_CHECK_ID_TEXT} check`);
   }
-  return errors.length === 0
-    ? success(parsed.value as NonEmpty<CompletionCheckResult>)
-    : failure(errors);
+  const checks = nonEmpty(parsed.value);
+  return errors.length === 0 && checks !== null ? success(checks) : failure(errors);
 }
 
 type WaveCompletionEnvelope<Checks extends readonly CompletionCheckResult[], Extra extends object> =
@@ -1241,10 +1241,6 @@ function processRejection(
   return ownerUndecided === null ? null : freeze({ kind: "rejected", cause: "owner-undecided", ownerUndecided });
 }
 
-function asNonEmpty<T>(values: readonly T[]): NonEmpty<T> {
-  return values as NonEmpty<T>;
-}
-
 function staleFields(
   authority: AuthorizedWaveCompletionSuite,
   result: WaveCompletionSuiteResult,
@@ -1258,6 +1254,7 @@ function staleFields(
 function acceptedReceipt(
   authority: AuthorizedWaveCompletionSuite,
   result: WaveCompletionSuiteResult,
+  checks: NonEmpty<CompletionCheckResult>,
 ): AcceptedWaveCompletionReceipt {
   const body = freeze({
     kind: "accepted-wave-completion-suite" as const,
@@ -1268,7 +1265,7 @@ function acceptedReceipt(
     manifestDigest: authority.manifestDigest,
     suiteDigest: authority.suiteDigest,
     workspaceDigest: authority.workspaceDigest,
-    checks: asNonEmpty(result.checks),
+    checks,
     ...optionalObservations(result.acceptance, result.ownerVerification),
   });
   return freeze({ ...body, resultDigest: digest(body) });
@@ -1342,12 +1339,14 @@ function ownerVerificationProcessFailures(
   const findings = ownerVerificationFailures(observation);
   const undecided = findings.filter((finding): finding is OwnerInfrastructureFinding => finding.kind === "infrastructure");
   const decided = findings.filter((finding): finding is OwnerSemanticFinding => finding.kind !== "infrastructure");
+  const undecidedFailures = nonEmpty(undecided);
+  const decidedFailures = nonEmpty(decided);
   return {
-    infrastructure: undecided.length === 0 ? [] : [freeze({
-      kind: "owner-verification-infrastructure", checkId: check.checkId, failures: asNonEmpty(freezeArray(undecided)),
+    infrastructure: undecidedFailures === null ? [] : [freeze({
+      kind: "owner-verification-infrastructure", checkId: check.checkId, failures: undecidedFailures,
     })],
-    semantic: decided.length === 0 ? [] : [freeze({
-      kind: "owner-verification-rejected", checkId: check.checkId, failures: asNonEmpty(freezeArray(decided)),
+    semantic: decidedFailures === null ? [] : [freeze({
+      kind: "owner-verification-rejected", checkId: check.checkId, failures: decidedFailures,
     })],
   };
 }
@@ -1391,41 +1390,67 @@ export function evaluateWaveCompletionSuite(
   const stale = staleFields(authority.value, result.value);
   if (isNonEmpty(stale)) return authorityRejection([freeze({ kind: "stale-result", mismatchedFields: freeze(stale) })]);
 
-  const authorityFailures = [
-    ...rosterAuthorityFailures(authority.value, result.value),
-    ...observationAuthorityFailures(authority.value, result.value, expectation),
-  ];
-  if (isNonEmpty(authorityFailures)) return authorityRejection(authorityFailures);
+  const roster = judgeRoster(authority.value, result.value);
+  const observationFailures = observationAuthorityFailures(authority.value, result.value, expectation);
+  if (roster.kind === "rejected") return authorityRejection(concatNonEmpty([], roster.failures, observationFailures));
+  if (isNonEmpty(observationFailures)) return authorityRejection(observationFailures);
 
   const verdict = recordedAcceptanceVerdict(result.value.acceptance);
   const checks = checkProcessFailures(authority.value, result.value, verdict.excused);
   const owner = ownerVerificationProcessFailures(ownerCheckOf(authority.value), result.value.ownerVerification);
-  const acceptance: readonly CompletionSemanticFailure[] = verdict.failures.length === 0 ? [] : [freeze({
+  const acceptanceFailures = nonEmpty(verdict.failures);
+  const acceptance: readonly CompletionSemanticFailure[] = acceptanceFailures === null ? [] : [freeze({
     kind: "acceptance-rejected",
     checkId: acceptanceCheckId(authority.value, result.value.acceptance?.facts ?? []),
-    failures: asNonEmpty(freezeArray(verdict.failures)),
+    failures: acceptanceFailures,
   })];
   const rejection = processRejection([...checks.infrastructure, ...owner.infrastructure], [...checks.semantic, ...acceptance, ...owner.semantic]);
   if (rejection !== null) return rejection;
-  return freeze({ kind: "accepted", receipt: acceptedReceipt(authority.value, result.value) });
+  return freeze({ kind: "accepted", receipt: acceptedReceipt(authority.value, result.value, roster.checks) });
 }
 
-/** The result's roster against the authorized roster: missing, surplus, duplicate, wrong-scope or mispoliced checks. */
-function rosterAuthorityFailures(
+/** The roster judgement: a matched roster carries the result's checks as
+ *  the non-empty list it then provably is, so acceptance needs no re-narrowing. */
+type RosterJudgement =
+  | Readonly<{ kind: "matched"; checks: NonEmpty<CompletionCheckResult> }>
+  | Readonly<{ kind: "rejected"; failures: NonEmpty<CompletionAuthorityFailure> }>;
+
+/** The result's roster against the authorized roster: missing, surplus,
+ *  duplicate, wrong-scope or mispoliced checks. The authorized roster is
+ *  non-empty, so a result with no checks is missing every one of them. */
+function judgeRoster(
   authority: AuthorizedWaveCompletionSuite,
   result: WaveCompletionSuiteResult,
+): RosterJudgement {
+  const checks = nonEmpty(result.checks);
+  if (checks === null) {
+    return freeze({
+      kind: "rejected",
+      failures: nonEmptyOf(freeze({ kind: "missing-check-results", checkIds: mapNonEmpty(authority.checks, ({ checkId }) => checkId) })),
+    });
+  }
+  const failures = rosterAuthorityFailures(authority, checks);
+  return isNonEmpty(failures) ? freeze({ kind: "rejected", failures }) : freeze({ kind: "matched", checks });
+}
+
+function rosterAuthorityFailures(
+  authority: AuthorizedWaveCompletionSuite,
+  checks: NonEmpty<CompletionCheckResult>,
 ): readonly CompletionAuthorityFailure[] {
   const expectedById = new Map(authority.checks.map((check) => [check.checkId, check]));
   const resultCounts = new Map<CompletionCheckId, number>();
-  for (const check of result.checks) resultCounts.set(check.checkId, (resultCounts.get(check.checkId) ?? 0) + 1);
+  for (const check of checks) resultCounts.set(check.checkId, (resultCounts.get(check.checkId) ?? 0) + 1);
   const missing = authority.checks.filter((check) => !resultCounts.has(check.checkId)).map((check) => check.checkId);
   const surplus = [...resultCounts.keys()].filter((checkId) => !expectedById.has(checkId)).sort(compareStrings);
   const duplicates = [...resultCounts.entries()].filter(([, count]) => count > 1).map(([checkId]) => checkId).sort(compareStrings);
   const failures: CompletionAuthorityFailure[] = [];
-  if (missing.length > 0) failures.push(freeze({ kind: "missing-check-results", checkIds: asNonEmpty(freezeArray(missing)) }));
-  if (surplus.length > 0) failures.push(freeze({ kind: "surplus-check-results", checkIds: asNonEmpty(freezeArray(surplus)) }));
-  if (duplicates.length > 0) failures.push(freeze({ kind: "duplicate-check-results", checkIds: asNonEmpty(freezeArray(duplicates)) }));
-  for (const check of result.checks) {
+  const missingIds = nonEmpty(missing);
+  const surplusIds = nonEmpty(surplus);
+  const duplicateIds = nonEmpty(duplicates);
+  if (missingIds !== null) failures.push(freeze({ kind: "missing-check-results", checkIds: missingIds }));
+  if (surplusIds !== null) failures.push(freeze({ kind: "surplus-check-results", checkIds: surplusIds }));
+  if (duplicateIds !== null) failures.push(freeze({ kind: "duplicate-check-results", checkIds: duplicateIds }));
+  for (const check of checks) {
     const expected = expectedById.get(check.checkId);
     if (expected === undefined) continue;
     if (check.scope !== "wave") failures.push(freeze({ kind: "wrong-check-scope", checkId: check.checkId, actualScope: check.scope }));
@@ -1454,7 +1479,8 @@ function observationAuthorityFailures(
     failures.push(freeze({ kind: "acceptance-expectation-mismatch" }));
   }
   const unbound = unboundFactChecks(result.checks, recorded?.facts ?? []);
-  if (unbound.length > 0) failures.push(freeze({ kind: "unbound-acceptance-facts", checkIds: asNonEmpty(freezeArray(unbound)) }));
+  const unboundIds = nonEmpty(unbound);
+  if (unboundIds !== null) failures.push(freeze({ kind: "unbound-acceptance-facts", checkIds: unboundIds }));
   const mismatch = ownerVerificationMismatch(ownerCheckOf(authority), result);
   if (mismatch !== null) failures.push(freeze({ kind: "owner-verification-mismatch", checkId: OWNER_VERIFICATION_CHECK_ID, reason: mismatch }));
   return failures;
@@ -1475,11 +1501,14 @@ function checkProcessFailures(
   const infrastructure: CompletionInfrastructureFailure[] = [];
   const semantic: CompletionSemanticFailure[] = [];
   for (const { checkId, outcome } of result.checks) {
-    const expected = expectedById.get(checkId)!;
+    const expected = expectedById.get(checkId);
     if (outcome.kind === "spawn-failed") {
       infrastructure.push(freeze({ kind: "spawn-failed", checkId, message: outcome.message }));
       continue;
     }
+    // A result the authority never issued is a surplus-check-results failure
+    // (rosterAuthorityFailures); it has no expected policy to judge here.
+    if (expected === undefined) continue;
     const exitExplained = excused.has(checkId) || expected.kind === "engine-owner-verification";
     if (outcome.timedOut) semantic.push(freeze({ kind: "timed-out", checkId }));
     if (outcome.signal !== null) semantic.push(freeze({ kind: "signal-termination", checkId, signal: outcome.signal }));

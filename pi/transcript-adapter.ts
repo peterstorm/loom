@@ -588,8 +588,8 @@ function successorTranscriptBudgetProblem(raw: unknown): string | null {
   const pending: { value: unknown; depth: number }[] = [{ value: raw, depth: 0 }];
   let remainingValues = 65_536;
   let remainingText = 16_777_216;
-  while (pending.length > 0) {
-    const { value, depth } = pending.pop()!;
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    const { value, depth } = next;
     if (--remainingValues < 0 || depth > 32) return "successor native transcript exceeds decoded work/depth budget";
     if (typeof value === "string") remainingText -= Buffer.byteLength(value, "utf8");
     if (remainingText < 0) return "successor native transcript exceeds 16777216 text-byte budget";

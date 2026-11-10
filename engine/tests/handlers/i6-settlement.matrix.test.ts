@@ -84,7 +84,7 @@ import {
 } from "../../src/machine";
 import { parseEvidenceLine } from "../../src/machine/evidence";
 import { extractShellWriteTargets } from "../../src/core/shell-write-targets";
-import { guardStateFileDecision } from "../../src/core/guard-state-file";
+import { guardDecision } from "../fixtures/guard-decision";
 import type { Task, TaskGraph, TaskTestResult } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
@@ -867,15 +867,15 @@ describe("the implementation brief states I6 up front and names the repair on re
     expect(prompt).toMatch(/one exception to the Constraints' never-`git restore` rule/);
     expect(authorizeImplementationSpawn(task, prompt)).toMatchObject({ ok: true, kind: "retry" });
     // #118: the command the brief renders must pass the agent's own state-file guard.
-    expect(guardStateFileDecision(command).kind).toBe("allow");
+    expect(guardDecision(command)).toBe("allow");
   });
 
   it("#118: the restore command passes the state-file guard for any repository root, and the old substitution form does not", () => {
     for (const root of [ROOT, "/home/dev/my repo", "/srv/project's work"]) {
-      expect(guardStateFileDecision(baselineRestoreCommand("d".repeat(40), [LEDGER_TYPES, LEDGER_IMPL], root)).kind).toBe("allow");
+      expect(guardDecision(baselineRestoreCommand("d".repeat(40), [LEDGER_TYPES, LEDGER_IMPL], root))).toBe("allow");
     }
     // The pilot's form: an opaque `$(…)` the guard must assume could name guarded state.
-    expect(guardStateFileDecision(`(cd "$(git rev-parse --show-toplevel)" && git rev-parse --verify --quiet ${"d".repeat(40)}^0)`).kind).toBe("block");
+    expect(guardDecision(`(cd "$(git rev-parse --show-toplevel)" && git rev-parse --verify --quiet ${"d".repeat(40)}^0)`)).toBe("block");
   });
 
   describe("the retry's restore command, run by real bash against a real repository", () => {

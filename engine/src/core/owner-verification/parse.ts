@@ -14,7 +14,7 @@
 import { match } from "ts-pattern";
 
 import { parseInvariantId, type InvariantId } from "../invariant-id";
-import { parseArtifactDigest, type ArtifactDigest, type DomainResult, type NonEmpty } from "../orchestration-contract/identity";
+import { nonEmpty, nonEmptyOf, parseArtifactDigest, type ArtifactDigest, type DomainResult, type NonEmpty } from "../orchestration-contract/identity";
 import { collectDenseArray, exactRecordErrors, isPlainRecord, parseExactRecord, toElementResult, type UnknownRecord } from "../plain-record";
 import { verifiedMutationOf } from "./outcome";
 import type {
@@ -40,7 +40,7 @@ const parsed = <T>(value: T): Parsed<T> => freeze({ ok: true, value });
 /** A refusal carrying every diagnostic, frozen; never empty. */
 const refused = <T>(errors: readonly string[]): Parsed<T> => freeze({
   ok: false,
-  error: freeze({ errors: freezeArray(errors.length === 0 ? ["owner verification is invalid"] : errors) as NonEmpty<string> }),
+  error: freeze({ errors: nonEmpty(errors) ?? nonEmptyOf("owner verification is invalid") }),
 });
 const errorsOf = (results: readonly Parsed<unknown>[]): string[] => results.flatMap((result) => result.ok ? [] : result.error.errors);
 
@@ -99,9 +99,11 @@ export function parseOwedInvariantIds(raw: unknown, path: string): Parsed<readon
 }
 
 function parseTexts(raw: unknown, path: string): Parsed<NonEmpty<string>> {
-  if (!Array.isArray(raw) || raw.length === 0) return refused([`${path} must be a non-empty array`]);
+  if (!Array.isArray(raw)) return refused([`${path} must be a non-empty array`]);
   const texts = collect(raw.map((entry, index) => parseText(entry, `${path}[${index}]`)));
-  return texts.ok ? parsed(texts.value as NonEmpty<string>) : texts;
+  if (!texts.ok) return texts;
+  const nonEmptyTexts = nonEmpty(texts.value);
+  return nonEmptyTexts === null ? refused([`${path} must be a non-empty array`]) : parsed(nonEmptyTexts);
 }
 
 function parseCount(raw: unknown, path: string): Parsed<number> {
@@ -182,8 +184,8 @@ function parseVerifiedMutation(raw: unknown, path: string): Parsed<MutationVerdi
   if (errors.length > 0 || !counts.ok || survivors.kind === "not-array") return refused(errors);
   const [generated, killed, timedOut, invalid, unmutated] = counts.value as readonly number[];
   const built = verifiedMutationOf({
-    killed: killed!, timedOut: timedOut!, invalid: invalid!, survivors: freezeArray(survivors.values),
-    unmutated: unmutated!, ownerChangedInWave: record.value.ownerChangedInWave as boolean,
+    killed, timedOut, invalid, survivors: freezeArray(survivors.values),
+    unmutated, ownerChangedInWave: record.value.ownerChangedInWave as boolean,
   });
   if (!built.ok) return refused([`${path} is not a verified mutation run: ${built.error.kind}`]);
   return built.value.generated === generated ? parsed(built.value) : refused([`${path}.generated must equal the mutants its tallies count`]);

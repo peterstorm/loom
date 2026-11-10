@@ -19,12 +19,8 @@
 import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import {
-  handler,
-  DEFAULT_BOUNDARIES,
-} from "../../../src/linter/programmatic/no-cross-boundary-imports";
-
-const REPO_ROOT = join(import.meta.dirname, "..", "..", "..", "..");
+import { handler } from "../../../src/linter/programmatic/no-cross-boundary-imports";
+import { LOOM_BOUNDARIES, LOOM_BOUNDARY_OPTIONS, REPO_ROOT } from "../loom-project-config";
 const ENGINE_SRC = join(REPO_ROOT, "engine", "src");
 
 /** Every non-test TypeScript module under a directory, repo-relative. */
@@ -38,7 +34,7 @@ function sourceFiles(dir: string): readonly string[] {
     }
     // The rule excludes nothing itself; test files are skipped here because the
     // boundaries describe production dependency arrows, not fixture imports.
-    if (/\.tsx?$/.test(entry.name) && !/\.(test|spec)\.tsx?$/.test(entry.name)) {
+    if (/\.[cm]?tsx?$/.test(entry.name) && !/\.(test|spec)\.[cm]?tsx?$/.test(entry.name)) {
       found.push(relative(REPO_ROOT, full).split("\\").join("/"));
     }
   }
@@ -54,9 +50,13 @@ describe("no-cross-boundary-imports — against the real engine/src tree", () =>
     expect(files.length).toBeGreaterThan(100);
   });
 
+  it("governs every module under Loom's requireGovernance roots (an ungoverned file is a violation)", () => {
+    expect(LOOM_BOUNDARY_OPTIONS.requireGovernance).toContain("engine/src/");
+  });
+
   it("reports zero boundary violations across every module", () => {
     const violations = files.flatMap((file) =>
-      handler(readFileSync(join(REPO_ROOT, file), "utf-8"), file, DEFAULT_BOUNDARIES),
+      handler(readFileSync(join(REPO_ROOT, file), "utf-8"), file, LOOM_BOUNDARIES, LOOM_BOUNDARY_OPTIONS),
     );
     // Name every offender: a bare count tells whoever broke it nothing.
     expect(violations.map((v) => `${v.file}:${v.line} ${v.fixHint}`)).toEqual([]);
@@ -66,7 +66,7 @@ describe("no-cross-boundary-imports — against the real engine/src tree", () =>
     // Pins the detection itself, so the green assertion above cannot be green
     // because the walk or the rule quietly stopped working.
     const planted = `import { readActiveAgentRoles } from "../machine/ledger";\n`;
-    const violations = handler(planted, "engine/src/core/block-direct-edits.ts", DEFAULT_BOUNDARIES);
+    const violations = handler(planted, "engine/src/core/block-direct-edits.ts", LOOM_BOUNDARIES, LOOM_BOUNDARY_OPTIONS);
     expect(violations).toHaveLength(1);
     expect(violations[0]!.fixHint).toContain("engine/src/machine/ledger");
   });

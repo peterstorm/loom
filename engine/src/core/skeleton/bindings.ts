@@ -198,11 +198,11 @@ function readItem(line: string): ItemReading {
   const rawPath = item?.[1]?.trim() ?? "";
   if (item === null || rawPath === "") return { kind: "unreadable", problems: [malformed(null, "not-a-binding-line")] };
   const path = normalizePlanPath(rawPath);
-  const tail = item[2]!.trim();
+  const tail = item[2].trim();
   if (tail === "") return { kind: "unreadable", problems: [malformed(path, "missing-contract")] };
   const separated = SEPARATOR.exec(tail);
   if (separated === null) return { kind: "unreadable", problems: [malformed(path, "not-a-binding-line")] };
-  const qualified = QUALIFIED.exec(separated[1]!.trim());
+  const qualified = QUALIFIED.exec(separated[1].trim());
   const contractId = parseContractId(qualified?.[1] ?? "");
   if (qualified === null || !contractId.ok) return { kind: "unreadable", problems: [malformed(path, "missing-contract")] };
   const contract = contractId.value;
@@ -235,7 +235,7 @@ function pathProblems(readings: readonly Extract<ItemReading, { kind: "read" }>[
     const [first, second, ...others] = [...new Set(contracts)];
     const duplicated = [...new Set(contracts.filter((contract, index) => contracts.indexOf(contract) !== index))];
     const problems: readonly BindingProblem[] = [
-      ...(second === undefined ? [] : [{ kind: "multi-contract", path, contracts: [first!, second, ...others] } as const]),
+      ...(second === undefined ? [] : [{ kind: "multi-contract", path, contracts: [first, second, ...others] } as const]),
       ...duplicated.map((contract): BindingProblem => ({ kind: "duplicate-path", path, contract })),
     ];
     return [path, problems] as const;

@@ -95,7 +95,7 @@ function snapshotArtifactAtRevision(
 ): ArtifactSnapshot {
   const leaves = revisionTreeLeaves(root, revision, artifact);
   if (leaves.length === 0) return Object.freeze({ kind: "missing" });
-  if (leaves.length === 1 && leaves[0]!.path === artifact) {
+  if (leaves.length === 1 && leaves[0].path === artifact) {
     const bytes = readArtifactObject(root, revision, artifact, ["show", `${revision}:${artifact}`]);
     return Object.freeze({ kind: "sha256", digest: sha256Bytes(bytes) });
   }

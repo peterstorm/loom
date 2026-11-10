@@ -9,8 +9,9 @@
  */
 
 import { match } from "ts-pattern";
-import type { Epoch, Evidence, EvidenceRecord, TestReportSummary } from "./types";
+import type { Epoch, Evidence, EvidenceRecord, FileWriteVia, TestReportSummary } from "./types";
 import { parseReportSource, parseReportSummary } from "./test-report";
+import { parseSandboxReceiptValue } from "../core/security-sandbox";
 export { judgeTestRun, type TrustedTestVerdict } from "./test-report";
 
 // --- Branded agent identity ---
@@ -407,9 +408,14 @@ function parseReportField(v: unknown): TestReportSummary | null {
 function parseEvent(raw: unknown): Evidence | null {
   if (typeof raw !== "object" || raw === null) return null;
   const o = raw as Record<string, unknown>;
+  // `o.kind` is `unknown` — a wire field, not a union type — so totality cannot
+  // be proven here. `.otherwise` names the unknown-kind arm explicitly rather
+  // than hiding it in a `default`; every known arm re-mints its payload.
   return match(o.kind)
     .returnType<Evidence | null>()
-    .with("FileRead", () => typeof o.path === "string" && o.path !== "" ? { kind: "FileRead", path: o.path } : null)
+    .with("FileRead", () =>
+      typeof o.path === "string" && o.path !== "" ? { kind: "FileRead", path: o.path } : null,
+    )
     .with("FileWrite", () => {
       if (typeof o.path !== "string" || o.path === "") return null;
       // Absent via = "tool" (old records — only tool writes were minted
@@ -418,12 +424,21 @@ function parseEvent(raw: unknown): Evidence | null {
       // closed to "shell": the write still vetoes/demotes but never advances
       // a guard — the fail-closed direction for both consumers.
       if (o.via === undefined) return { kind: "FileWrite", path: o.path, via: "tool" };
-      return { kind: "FileWrite", path: o.path, via: o.via === "tool" ? "tool" : "shell" };
+      const via: FileWriteVia = o.via === "tool" ? "tool" : "shell";
+      return { kind: "FileWrite", path: o.path, via };
     })
     .with("TestRun", () => {
       if (typeof o.command !== "string") return null;
       const exit = typeof o.exit === "number" ? o.exit : null;
-      return { kind: "TestRun", command: o.command, exit, report: parseReportField(o.report) };
+      const report = parseReportField(o.report);
+      return { kind: "TestRun", command: o.command, exit, report };
+    })
+    .with("SandboxRun", () => {
+      // Re-minted from the strict receipt grammar, never embedded raw: a
+      // receipt is the only evidence that the sandbox enforced anything, so
+      // an unknown field or a false literal invalidates the whole fact.
+      const receipt = parseSandboxReceiptValue(o.receipt);
+      return receipt.ok ? { kind: "SandboxRun", receipt: receipt.value } : null;
     })
     .otherwise(() => null);
 }

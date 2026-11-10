@@ -175,7 +175,7 @@ export function serializeHistoricalAdjudicatedStandaloneReview(result: Extract<A
 
 function summaryData(value: unknown): string {
   return JSON.stringify(value).replace(/[&<>|`]/g, (character) => `&#${character.codePointAt(0)};`)
-    .replace(/[\p{Cc}\p{Cf}]/gu, (character) => `\\u{${character.codePointAt(0)!.toString(16)}}`)
+    .replace(/[\p{Cc}\p{Cf}]/gu, (character) => `\\u{${character.codePointAt(0)?.toString(16) ?? ""}}`)
     .replace(/([*_\[\]\\])/g, "\\$1");
 }
 
@@ -193,7 +193,7 @@ function renderStandaloneSuccessorSummary(result: Extract<AdjudicatedStandaloneR
       const finding = findingOf(row);
       const origin = standaloneOriginReference(row.origin);
       const decision = policy.kind === "selected-record" ? policy.disposition.record.entries.find(entry => entry.origin === origin) : undefined;
-      return `| ${dispositions[index]!.state} | ${dispositions[index]!.provenance} | ${summaryData(finding.id)} | ${origin} | ${summaryData(row.origin.runId)} | ${finding.severity} | ${summaryData({ file: finding.file, line: finding.line })} | ${summaryData(finding.claim)} | ${summaryData(decision ?? policy.kind)} |`;
+      return `| ${dispositions[index].state} | ${dispositions[index].provenance} | ${summaryData(finding.id)} | ${origin} | ${summaryData(row.origin.runId)} | ${finding.severity} | ${summaryData({ file: finding.file, line: finding.line })} | ${summaryData(finding.claim)} | ${summaryData(decision ?? policy.kind)} |`;
     }), "",
     ...inventory.map(row => `${summaryData(row.finding.id)} retained detail: ${summaryData({ origin: row.origin,
       finding: row.finding, history: row.history, assessment: result.lineage.assessments.find(entry => entry.origin === standaloneOriginReference(row.origin)) ?? null })}`),

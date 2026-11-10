@@ -7,6 +7,7 @@ import {
   type TaskGraph,
   type TaskTestResult,
 } from "../types";
+import { nonEmptyOf } from "./orchestration-contract";
 export { parseNewTestEvidence, type NewTestEvidence } from "../types";
 import {
   DECLARED_ARTIFACT_BASELINE,
@@ -821,7 +822,7 @@ function invalidObservationResult(
     state,
     error: freeze({
       kind: "invalid-task",
-      errors: Object.freeze([head, ...tail]) as readonly [string, ...string[]],
+      errors: nonEmptyOf(head, ...tail),
     }),
   });
 }

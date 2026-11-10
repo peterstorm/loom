@@ -13,9 +13,10 @@ import {
   type SourceFile,
 } from "../../src/core/family-sites";
 import {
-  DEFAULT_PURE_MODULES,
+  isPureModule,
   handler as noIoInPureModules,
 } from "../../src/linter/programmatic/no-io-in-pure-modules";
+import { LOOM_PURITY_SCOPE } from "../linter/loom-project-config";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -62,6 +63,9 @@ describe("family-site metric (pure core)", () => {
       "engine/src/core/shell-substitution.ts",
       "engine/src/core/shell-write-targets.ts",
       "engine/src/core/shell-ansi-c.ts",
+      "engine/src/core/shell-command-head.ts",
+      "engine/src/core/shell-heredoc.ts",
+      "engine/src/core/shell-match-views.ts",
     ]);
     expect(byId.get("claim-conservation")!.owners).toEqual(["engine/src/core/findings.ts"]);
     for (const family of FAMILIES) {
@@ -280,8 +284,8 @@ describe("family-site metric (pure core)", () => {
   });
 
   it("is listed as a pure module, and its own source passes the purity rule", () => {
-    expect(DEFAULT_PURE_MODULES).toContain("engine/src/core/family-sites.ts");
+    expect(isPureModule("engine/src/core/family-sites.ts", LOOM_PURITY_SCOPE)).toBe(true);
     const source = readFileSync(resolve(__dirname, "../../src/core/family-sites.ts"), "utf-8");
-    expect(noIoInPureModules(source, "engine/src/core/family-sites.ts")).toEqual([]);
+    expect(noIoInPureModules(source, "engine/src/core/family-sites.ts", LOOM_PURITY_SCOPE)).toEqual([]);
   });
 });

@@ -31,11 +31,25 @@ import type { Epoch, Evidence, EvidenceRecord } from "../../src/machine/types";
 export function inMemorySessionRegistry(): SessionRegistry {
   const bindings = new Map<string, MachineBinding[]>();
   const active = new Map<string, AgentId[]>();
-  const ledger = new Map<string, EvidenceRecord[]>();
-  // Recency-ordered array (oldest first), mirroring the fs adapter's wire
-  // format exactly: remove-then-append on stamp, prune by slicing.
-  const callStarts = new Map<string, readonly CallStartEntry[]>();
+  return {
+    ...bindingOperations(bindings),
+    ...activeRosterOperations(active),
+    soleActiveBinding: (sessionId: string): MachineBinding | null =>
+      resolveSoleActiveBinding(bindings.get(sessionId) ?? [], active.get(sessionId) ?? []),
+    ...evidenceLedgerOperations(),
+    ...callStartOperations(),
+  };
+}
 
+type BindingOperations = Pick<
+  SessionRegistry,
+  "bind" | "unbind" | "refreshBindingActivity" | "readBindings" | "readBindingAuthority"
+>;
+
+function bindingOperations(bindings: Map<string, MachineBinding[]>): BindingOperations {
+  const frozenBindings = (sessionId: string): readonly MachineBinding[] => Object.freeze(
+    (bindings.get(sessionId) ?? []).map((binding) => Object.freeze({ ...binding })),
+  );
   return {
     bind: async (sessionId: string, agentType: AgentType, agentId: AgentId): Promise<void> => {
       const current = bindings.get(sessionId) ?? [];
@@ -62,6 +76,26 @@ export function inMemorySessionRegistry(): SessionRegistry {
       return released ? "released" as const : "not-owned" as const;
     },
 
+    // The fake models live sessions with no TTL, so refreshing the activity
+    // anchor is a no-op — liveness is an fs-layer concern (binding-liveness).
+    refreshBindingActivity: async (): Promise<void> => {},
+
+    readBindings: frozenBindings,
+
+    readBindingAuthority: (sessionId: string) => Object.freeze({
+      kind: "parsed" as const,
+      bindings: frozenBindings(sessionId),
+    }),
+  };
+}
+
+type ActiveRosterOperations = Pick<
+  SessionRegistry,
+  "markActive" | "removeActive" | "countActiveAgents" | "readActiveRoster"
+>;
+
+function activeRosterOperations(active: Map<string, AgentId[]>): ActiveRosterOperations {
+  return {
     markActive: async (sessionId: string, agentId: AgentId): Promise<void> => {
       const roster = active.get(sessionId) ?? [];
       // Set semantics keyed by agentId, mirroring markAgentActive.
@@ -76,25 +110,12 @@ export function inMemorySessionRegistry(): SessionRegistry {
     countActiveAgents: (sessionId: string): number => (active.get(sessionId) ?? []).length,
 
     readActiveRoster: (sessionId: string): readonly AgentId[] => Object.freeze([...(active.get(sessionId) ?? [])]),
+  };
+}
 
-    soleActiveBinding: (sessionId: string): MachineBinding | null =>
-      resolveSoleActiveBinding(bindings.get(sessionId) ?? [], active.get(sessionId) ?? []),
-
-    // The fake models live sessions with no TTL, so refreshing the activity
-    // anchor is a no-op — liveness is an fs-layer concern (binding-liveness).
-    refreshBindingActivity: async (): Promise<void> => {},
-
-    readBindings: (sessionId: string): readonly MachineBinding[] => Object.freeze(
-      (bindings.get(sessionId) ?? []).map((binding) => Object.freeze({ ...binding })),
-    ),
-
-    readBindingAuthority: (sessionId: string) => Object.freeze({
-      kind: "parsed" as const,
-      bindings: Object.freeze(
-        (bindings.get(sessionId) ?? []).map((binding) => Object.freeze({ ...binding })),
-      ),
-    }),
-
+function evidenceLedgerOperations(): Pick<SessionRegistry, "appendEvidence" | "readEvidence"> {
+  const ledger = new Map<string, EvidenceRecord[]>();
+  return {
     appendEvidence: (
       sessionId: string,
       epoch: Epoch,
@@ -109,7 +130,14 @@ export function inMemorySessionRegistry(): SessionRegistry {
     },
 
     readEvidence: (sessionId: string): readonly EvidenceRecord[] => [...(ledger.get(sessionId) ?? [])],
+  };
+}
 
+function callStartOperations(): Pick<SessionRegistry, "recordCallStart" | "callStartFor"> {
+  // Recency-ordered array (oldest first), mirroring the fs adapter's wire
+  // format exactly: remove-then-append on stamp, prune by slicing.
+  const callStarts = new Map<string, readonly CallStartEntry[]>();
+  return {
     recordCallStart: async (sessionId: string, toolUseId: string, startMs: number): Promise<void> => {
       const current = callStarts.get(sessionId) ?? [];
       const reinserted: CallStartEntry[] = [

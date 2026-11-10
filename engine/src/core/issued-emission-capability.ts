@@ -170,7 +170,7 @@ export function parseEmissionDescriptor(task: string): EmissionDescriptorParse {
       reason: `the task text carries ${lines.length} ${EMISSION_DESCRIPTOR_MARKER} lines; exactly one descriptor is representable`,
     });
   }
-  const fields = lines[0]!.slice(prefix.length).split(" ");
+  const fields = lines[0].slice(prefix.length).split(" ");
   if (fields.length !== EMISSION_DESCRIPTOR_FIELDS || fields.some((field) => field.length === 0)) {
     return canonicalRecord({
       kind: "malformed" as const,
@@ -227,7 +227,7 @@ function taskMarker(task: string, marker: string): TaskMarker {
   const distinct = new Set(values);
   if (distinct.size === 0) return canonicalRecord({ kind: "absent" as const });
   return distinct.size === 1
-    ? canonicalRecord({ kind: "bound" as const, value: values[0]! })
+    ? canonicalRecord({ kind: "bound" as const, value: values[0] })
     : canonicalRecord({ kind: "contradictory" as const });
 }
 

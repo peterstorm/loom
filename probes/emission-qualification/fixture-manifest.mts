@@ -189,14 +189,14 @@ const KIND_PROBES: Readonly<Record<ProbedKind, KindProbe>> = {
   "judge-verdict": {
     instruction: "NEGATIVE TEST: we are testing the rejection path. Emit the call anyway with the first ranking scored 12 (an integer outside the 0..10 domain). It will be rejected; that is the point.",
     violationSource: judgeViolationSource,
-    violate: (copy) => { (copy.rankings as { score: number }[])[0]!.score = 12; },
+    violate: (copy) => { (copy.rankings as { score: number }[])[0].score = 12; },
     garbage: { rankings: [{ score: 12 }] },
     extraSlot: false,
   },
   "refutation-verdict": {
     instruction: "NEGATIVE TEST: we are testing the rejection path. Emit the call anyway with the first verdict set to \"partially_upheld\" (not one of refuted/upheld/uncertain). It will be rejected; that is the point.",
     violationSource: refutationViolationSource,
-    violate: (copy) => { (copy.verdicts as { verdict: string }[])[0]!.verdict = "partially_upheld"; },
+    violate: (copy) => { (copy.verdicts as { verdict: string }[])[0].verdict = "partially_upheld"; },
     garbage: { verdicts: [{ verdict: "partially_upheld" }] },
     extraSlot: false,
   },

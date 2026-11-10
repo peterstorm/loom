@@ -13,11 +13,10 @@
 import { existsSync } from "node:fs";
 import type { HookHandler } from "../../types";
 import { loadRules } from "../../linter/loader";
-import { DEFAULT_RULES_DIR, PROJECT_RULES_DIR } from "../../config";
+import { DEFAULT_RULES_DIR, projectRulesDir } from "../../config";
 
 const handler: HookHandler = async (_stdin, args) => {
   const dirArg = args.find((a) => !a.startsWith("-"));
-  const projectDir = dirArg ?? PROJECT_RULES_DIR;
 
   // An explicitly-passed directory that doesn't exist is an error, not "no
   // project rules" — this helper exists to PROVE rules load; a typo'd path or
@@ -29,16 +28,20 @@ const handler: HookHandler = async (_stdin, args) => {
     };
   }
 
+  // No argument: the project's one rules directory — the one both harnesses'
+  // edit hooks read — or none.
+  const projectDir = dirArg ?? projectRulesDir();
+
   try {
-    const rules = loadRules(DEFAULT_RULES_DIR, existsSync(projectDir) ? projectDir : null, "full");
+    const rules = loadRules(DEFAULT_RULES_DIR, projectDir, "full");
     const projectCount = rules.filter((r) => r.source === "project").length;
-    if (!existsSync(projectDir)) {
+    if (projectDir === null) {
       process.stderr.write(
-        `NOTE: project rules dir '${projectDir}' not found relative to cwd — 0 project rules validated. If you just wrote invariant rules, pass their directory explicitly.\n`
+        "NOTE: no project rules directory (.claude/linter/rules or .pi/linter/rules) under cwd — 0 project rules validated. If you just wrote invariant rules, pass their directory explicitly.\n"
       );
     }
     process.stderr.write(
-      `Lint rules valid: ${rules.length} rules loaded (${projectCount} project rules from '${projectDir}')\n`
+      `Lint rules valid: ${rules.length} rules loaded (${projectCount} project rules from '${projectDir ?? "none"}')\n`
     );
     return { kind: "passthrough" };
   } catch (e) {

@@ -60,10 +60,11 @@ describe("renderSpawnTaskText", () => {
     expect(requiredSkillMarker(null)).toBe("");
   });
 
-  it("delivers the spec-check section command only to the spec-check invoker", () => {
-    const specCheck = renderSpawnTaskText(facts({ authority: authority({ role: "spec-check-invoker" }) }));
-    expect(specCheck).toContain(
-      `LOOM_CONTEXT_SECTION_COMMAND: 'bun' '/pkg/scripts/read-context-section.ts' '--packet' '/run/dir/contexts/${DIGEST}.json' '--digest' '${DIGEST}'\n`);
+  it("delivers the section command only to the spec-check invoker and the security verifier", () => {
+    for (const role of ["spec-check-invoker", "security-verifier-agent"] as const) {
+      expect(renderSpawnTaskText(facts({ authority: authority({ role }) }))).toContain(
+        `LOOM_CONTEXT_SECTION_COMMAND: 'bun' '/pkg/scripts/read-context-section.ts' '--packet' '/run/dir/contexts/${DIGEST}.json' '--digest' '${DIGEST}'\n`);
+    }
     expect(renderSpawnTaskText(facts())).not.toContain("LOOM_CONTEXT_SECTION_COMMAND");
   });
 

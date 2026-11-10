@@ -246,7 +246,8 @@ export function recoverPiSpawnReservation(
       continue;
     }
     if (byIndex.size === 0) continue;
-    const indexes = [...byIndex.keys()].sort((left, right) => left - right);
+    const ordered = [...byIndex.entries()].sort(([left], [right]) => left - right);
+    const indexes = ordered.map(([index]) => index);
     if (indexes.some((index, ordinal) => index !== ordinal)) {
       throw new Error(`Pi tool call ${toolCallId} durable correlators do not form a contiguous result roster`);
     }
@@ -263,8 +264,7 @@ export function recoverPiSpawnReservation(
       pointerBinding: null,
       // The Run Directory records request identity, not Task identity or
       // lifecycle kind: a recovered item is a standalone legacy slot.
-      items: Object.freeze(indexes.map((index) => {
-        const item = byIndex.get(index)!;
+      items: Object.freeze(ordered.map(([, item]) => {
         return legacyReservationItem(
           { rosterId: item.rosterId, emissionLaunch: null, kind: "standalone" },
           item.agentType,

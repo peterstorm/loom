@@ -9,6 +9,7 @@ import type { Finding } from "./findings";
 import {
   canonicalRecord, canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId,
   type ArtifactDigest, type DomainResult, type NonEmpty, type OrchestrationRunId,
+  nonEmptyOf,
 } from "./orchestration-contract";
 import { failure, success } from "./orchestration-contract/identity";
 import { fail, isRecord, ok, sanitizeProse, type ParseResult } from "./panel-kernel";
@@ -16,7 +17,7 @@ import { defaultRefutationThreshold, projectFindingForPanel, type BriefFinding }
 import { STANDALONE_REVIEW_SUBJECT } from "./reviewer-contract";
 import { findingOf } from "./standalone-finding-origin";
 import type {
-  AdmittedStandaloneSuccessorEvidence, PanelRefutation, ParsedPanelOutcome, ParsedPanelOutcomes, StandaloneReviewAggregate,
+  AdmittedStandaloneSuccessorEvidence, ParsedPanelOutcome, ParsedPanelOutcomes, StandaloneReviewAggregate,
 } from "./standalone-review-model";
 import { exactKeys } from "./standalone-review-scope";
 
@@ -43,7 +44,7 @@ export function canonicalStandalonePanelOutcomes(panel: ParsedPanelOutcomes): Pa
     return [Object.freeze({
       ...base,
       survives: false as const,
-      refutations: Object.freeze([head, ...tail]) as NonEmpty<PanelRefutation>,
+      refutations: nonEmptyOf(head, ...tail),
     })];
   });
   return errors.length > 0
@@ -196,9 +197,9 @@ export function freezeStandalonePanelAuthority(
     kind: "frozen-standalone-panel-authority" as const,
     standaloneRunId: standaloneRunId.value,
     panelRunId: panelRunId.value,
-    findings: Object.freeze([firstFinding, ...otherFindings]) as NonEmpty<StandalonePanelFindingAuthority>,
+    findings: nonEmptyOf(firstFinding, ...otherFindings),
     findingBriefDigest: canonicalDigest(expectedFindings),
-    lenses: Object.freeze([firstLens, ...otherLenses]) as NonEmpty<string>,
+    lenses: nonEmptyOf(firstLens, ...otherLenses),
     manifestDigest: manifestDigest.value,
     threshold: input.threshold as number,
   });
@@ -316,7 +317,7 @@ export function parseStandalonePanelOutcomes(
 /** Only new criticals and evidence-bound reopening proposals belong to the current panel. */
 export function standaloneCurrentPanelCriticals(aggregate: StandaloneReviewAggregate): readonly Finding[] {
   if (aggregate.schemaVersion !== 3) return aggregate.findings.filter(finding => finding.severity === "critical");
-  return aggregate.lineage.inventory.flatMap((row, index) => aggregate.lineage.dispositions[index]!.state === "pending-panel" ? [findingOf(row)] : []);
+  return aggregate.lineage.inventory.flatMap((row, index) => aggregate.lineage.dispositions[index].state === "pending-panel" ? [findingOf(row)] : []);
 }
 
 /** The digest preimage of proven panel outcomes, shared by completion receipts and finalization. */

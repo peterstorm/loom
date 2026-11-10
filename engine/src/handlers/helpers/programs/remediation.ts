@@ -60,7 +60,7 @@ import {
   stageAuditedPaths,
   type GitRepository,
 } from "../../../orchestration/git-remediation";
-import { readRunBytesNoFollow } from "../../../orchestration/no-follow-fs";
+import { readRunBytesNoFollow } from "../../../utils/no-follow-fs";
 import {
   parseRunDirectoryReference,
   type RunDirHandle,

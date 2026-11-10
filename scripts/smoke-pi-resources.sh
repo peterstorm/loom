@@ -62,6 +62,15 @@ if (rootResponse.data.output !== loomDir) {
 }
 NODE
 
-test ! -s "$TMP/commands.stderr" || { cat "$TMP/commands.stderr" >&2; exit 1; }
-test ! -s "$TMP/root.stderr" || { cat "$TMP/root.stderr" >&2; exit 1; }
+# Both launches are unmarked headless PARENTS (`--mode rpc --no-session`, no
+# LOOM_PI_* marker), so the extension's one-time unmarked-launch notice
+# (ADR-0067 G, `unmarkedSubagentLaunchNotice`) is their expected stderr: it
+# must appear exactly once, and nothing else may.
+UNMARKED_NOTICE='^loom\(pi\): this process was launched like a headless subagent \(--mode rpc, --no-session\) but carries no LOOM_PI_SUBAGENT/LOOM_PI_PARENT_PID marker, so Loom treats it as a PARENT'
+for stderr in "$TMP/commands.stderr" "$TMP/root.stderr"; do
+  notices="$(grep -cE "$UNMARKED_NOTICE" "$stderr" || true)"
+  [ "$notices" = "1" ] || { echo "FATAL: expected exactly one unmarked-launch notice in $(basename "$stderr"), found $notices" >&2; cat "$stderr" >&2; exit 1; }
+  others="$(grep -vE "$UNMARKED_NOTICE" "$stderr" || true)"
+  [ -z "$others" ] || { printf '%s\n' "$others" >&2; exit 1; }
+done
 printf 'Pi resource discovery smoke test passed.\n'

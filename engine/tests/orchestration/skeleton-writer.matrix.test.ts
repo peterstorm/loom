@@ -69,8 +69,8 @@ import { duringPreparedName } from "../fixtures/skeleton-write-race";
  *  it. Only the writer's prepared names fail: the State File and its sidecars
  *  remove their own files as ever. */
 const cleanup = vi.hoisted(() => ({ failure: null as Error | null }));
-vi.mock("../../src/orchestration/no-follow-fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/orchestration/no-follow-fs")>();
+vi.mock("../../src/utils/no-follow-fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/utils/no-follow-fs")>();
   return {
     ...actual,
     removeDirectoryFileNoFollow: (...args: Parameters<typeof actual.removeDirectoryFileNoFollow>): void => {

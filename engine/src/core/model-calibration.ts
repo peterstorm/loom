@@ -420,11 +420,11 @@ export function matchCalibrationFindings(
   );
   const expectationOrder = orderedExpectations
     .map((_, index) => index)
-    .sort((left, right) => candidates[left]!.length - candidates[right]!.length || compareStrings(orderedExpectations[left]!.id, orderedExpectations[right]!.id));
+    .sort((left, right) => candidates[left].length - candidates[right].length || compareStrings(orderedExpectations[left].id, orderedExpectations[right].id));
   const predictionOwner = new Map<number, number>();
 
   const assign = (expectationIndex: number, visited: Set<number>): boolean => {
-    for (const edge of candidates[expectationIndex]!) {
+    for (const edge of candidates[expectationIndex]) {
       if (visited.has(edge.index)) continue;
       visited.add(edge.index);
       const owner = predictionOwner.get(edge.index);
@@ -445,7 +445,7 @@ export function matchCalibrationFindings(
     const predictionIndex = predictionByExpectation.get(expectationIndex);
     return predictionIndex === undefined
       ? []
-      : [{ expectation, prediction: orderedPredictions[predictionIndex]! }];
+      : [{ expectation, prediction: orderedPredictions[predictionIndex] }];
   });
   const matchedExpectationIds = new Set(matches.map((match) => match.expectation.id));
   const matchedPredictions = new Set(predictionOwner.keys());
@@ -468,15 +468,24 @@ export function scoreCalibration(
   const expectedIds = corpus.cases.map((entry) => entry.id);
   const actualIds = predictions.cases.map((entry) => entry.caseId);
   const errors: string[] = [];
-  for (const id of expectedIds) if (!actualIds.includes(id)) errors.push(`predictions are missing corpus case '${id}'`);
+  // Pairing IS the missing-case check: a corpus case without a prediction is
+  // reported here and never reaches scoring, so the scored set cannot shrink
+  // silently.
+  const predictionByCase = new Map(predictions.cases.map((entry) => [entry.caseId, entry]));
+  const paired = corpus.cases.flatMap((corpusCase) => {
+    const predictionCase = predictionByCase.get(corpusCase.id);
+    if (predictionCase === undefined) {
+      errors.push(`predictions are missing corpus case '${corpusCase.id}'`);
+      return [];
+    }
+    return [{ corpusCase, predictionCase }];
+  });
   for (const id of actualIds) if (!expectedIds.includes(id)) errors.push(`predictions contain foreign case '${id}'`);
   if (new Set(expectedIds).size !== expectedIds.length) errors.push("corpus case ids must be distinct");
   if (new Set(actualIds).size !== actualIds.length) errors.push("prediction case ids must be distinct");
   if (errors.length > 0) return fail(errors);
 
-  const predictionByCase = new Map(predictions.cases.map((entry) => [entry.caseId, entry]));
-  const cases: CalibrationCaseScore[] = corpus.cases.map((corpusCase): CalibrationCaseScore => {
-    const predictionCase = predictionByCase.get(corpusCase.id)!;
+  const cases: CalibrationCaseScore[] = paired.map(({ corpusCase, predictionCase }): CalibrationCaseScore => {
     if (predictionCase.status === "not-executed") {
       return { caseId: corpusCase.id, state: corpusCase.state, execution: "not-executed", reason: predictionCase.reason };
     }

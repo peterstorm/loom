@@ -29,7 +29,7 @@ A feature is not migrated when two prose implementations merely look alike. Shar
 | in-process child | separate Pi process | Pi write grants and native correlators |
 | `AskUserQuestion` in child | `loom_interactive_subagent` RPC relay | Interactive Phase Transport + exact UI request ids |
 | `.claude/state/` | `.pi/state/` | `StateManager`, harness-aware config |
-| `.claude/linter/` | `.pi/linter/` | same loader and rule types |
+| `.claude/linter/rules/` | the same `.claude/linter/rules/` (`.pi/linter/rules/` only in a project without it) | one harness-independent rules directory (`projectRulesLayout`) |
 
 ## Package layout
 
@@ -187,15 +187,15 @@ That tool runs one validated Agent in RPC mode, relays standard UI requests to t
 
 ## State and linter paths
 
-Harness selection chooses:
+Harness selection chooses the state path; the linter rules directory does not depend on the harness:
 
 | Concern | Claude | Pi |
 |---|---|---|
 | TaskGraph | `.claude/state/active_task_graph.json` | `.pi/state/active_task_graph.json` |
-| Project regex rules | `.claude/linter/rules/` | `.pi/linter/rules/` |
-| Programmatic config | `.claude/linter/config.json` | `.pi/linter/config.json` |
+| Project regex rules | `.claude/linter/rules/` | the same `.claude/linter/rules/` |
+| Programmatic config | `.claude/linter/rules/config.json` | the same `.claude/linter/rules/config.json` |
 
-The same `StateManager`, rule loader, linter core, and programmatic rules are reused. `PI_CODING_AGENT` or explicit `PI_CODING_AGENT_DIR` identifies Pi operation.
+A project has one rules directory, read by both harnesses: the first present of `.claude/linter/rules/`, then `.pi/linter/rules/`. `.pi/linter/rules/` is used only by a project that has no `.claude/linter/rules/` (a Pi-only project); `lint-project` refuses a project that carries both. The same `StateManager`, rule loader, linter core, and programmatic rules are reused. `PI_CODING_AGENT` or explicit `PI_CODING_AGENT_DIR` identifies Pi operation.
 
 ## Adding shared functionality
 

@@ -72,7 +72,7 @@ export function rejectedChildWriteGrantBlock(rejected: boolean): Readonly<{ bloc
 export function piChildAgentIdentity(systemPrompt: string): string | null {
   PI_AGENT_ID_MARKER.lastIndex = 0;
   const matches = [...systemPrompt.matchAll(PI_AGENT_ID_MARKER)];
-  return matches.length === 1 ? matches[0]![1]! : null;
+  return matches.length === 1 ? matches[0][1] : null;
 }
 
 function piSystemAgentIdentity(systemPrompt: string): string {

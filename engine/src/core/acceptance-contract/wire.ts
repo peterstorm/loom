@@ -58,9 +58,10 @@ function list<T>(raw: unknown, path: string, item: (value: unknown, path: string
 }
 
 function nonEmptyList<T>(raw: unknown, path: string, item: (value: unknown, path: string) => Parsed<T>): Parsed<NonEmpty<T>> {
-  if (Array.isArray(raw) && raw.length === 0) return err(`${path} must be non-empty`);
   const values = list(raw, path, item);
-  return values.ok ? ok(nonEmpty(values.value)!) : values;
+  if (!values.ok) return values;
+  const present = nonEmpty(values.value);
+  return present === null ? err(`${path} must be non-empty`) : ok(present);
 }
 
 /** A non-empty anchor list naming each anchor once, as the plan grammar does. */
@@ -193,33 +194,15 @@ function parseContract(raw: unknown, path: string): Parsed<AcceptanceContract> {
   if (!acceptance.ok) return acceptance;
   const files = acceptance.value;
   const paths = frozenPaths({ types: types.value, acceptance: files });
-  if (new Set(paths.map(normalizePlanPath)).size !== paths.length) return err(`${path} freezes one path twice`);
-  const unsafe = paths.find((frozen) => !isRepoRelativePlanPath(frozen));
-  if (unsafe !== undefined) return err(`${path} freezes '${unsafe}', which is not a repository-relative path`);
+  const unfreezable = frozenPathsError(paths, path);
+  if (unfreezable !== null) return err(unfreezable);
   if (fields.supportedDomain !== null && !files.some(({ path: file }) => file === fields.supportedDomain)) {
     return err(`${path}.supportedDomain must be null or one of the acceptance files`);
   }
   const frozen = parseFreeze(fields.freeze, `${path}.freeze`, { types: types.value, acceptance: files });
   if (!frozen.ok) return frozen;
-  if (!Array.isArray(fields.revisions)) return err(`${path}.revisions must be an array`);
-  const revisions: ContractRevision[] = [];
-  for (const [index, value] of fields.revisions.entries()) {
-    const revision = parseRevision(value, `${path}.revisions[${index}]`, index, paths);
-    if (!revision.ok) return revision;
-    revisions.push(revision.value);
-  }
-  // The freeze and its revision history must tell one story: a revision is
-  // recorded only after the freeze, each revision starts from the bytes the
-  // one before it stamped, and the bytes frozen now are the last revision's.
-  const broken = revisions.findIndex((revision, index) =>
-    index > 0 && !canonicalStructuralEquals(revision.previous, revisions[index - 1]!.paths));
-  if (broken !== -1) return err(`${path}.revisions[${broken}].previous must equal revision ${broken}'s paths`);
-  const last = revisions.at(-1);
-  if (last === undefined && frozen.value.state === "revised") return err(`${path}.freeze is revised but records no revision`);
-  if (last !== undefined && frozen.value.state === "awaiting-red") return err(`${path}.revisions precede the freeze`);
-  if (last !== undefined && frozen.value.state !== "awaiting-red" && !canonicalStructuralEquals(frozen.value.paths, last.paths)) {
-    return err(`${path}.freeze.paths must equal the last revision's paths`);
-  }
+  const revisions = parseRevisionHistory(fields.revisions, path, paths, frozen.value);
+  if (!revisions.ok) return revisions;
   return ok(freeze({
     schemaVersion: 1,
     id: fields.id,
@@ -230,8 +213,44 @@ function parseContract(raw: unknown, path: string): Parsed<AcceptanceContract> {
     acceptance: files,
     supportedDomain: fields.supportedDomain as string | null,
     freeze: frozen.value,
-    revisions: Object.freeze(revisions),
+    revisions: revisions.value,
   }));
+}
+
+/** Why a contract's frozen paths cannot be frozen as declared, or null when they can. */
+function frozenPathsError(paths: readonly string[], path: string): string | null {
+  if (new Set(paths.map(normalizePlanPath)).size !== paths.length) return `${path} freezes one path twice`;
+  const unsafe = paths.find((frozen) => !isRepoRelativePlanPath(frozen));
+  return unsafe === undefined ? null : `${path} freezes '${unsafe}', which is not a repository-relative path`;
+}
+
+/** A contract's revision history, parsed and checked against its freeze. */
+function parseRevisionHistory(
+  raw: unknown,
+  path: string,
+  paths: readonly string[],
+  frozen: AcceptanceFreeze,
+): Parsed<readonly ContractRevision[]> {
+  if (!Array.isArray(raw)) return err(`${path}.revisions must be an array`);
+  const revisions: ContractRevision[] = [];
+  for (const [index, value] of raw.entries()) {
+    const revision = parseRevision(value, `${path}.revisions[${index}]`, index, paths);
+    if (!revision.ok) return revision;
+    revisions.push(revision.value);
+  }
+  // The freeze and its revision history must tell one story: a revision is
+  // recorded only after the freeze, each revision starts from the bytes the
+  // one before it stamped, and the bytes frozen now are the last revision's.
+  const broken = revisions.findIndex((revision, index) =>
+    index > 0 && !canonicalStructuralEquals(revision.previous, revisions[index - 1].paths));
+  if (broken !== -1) return err(`${path}.revisions[${broken}].previous must equal revision ${broken}'s paths`);
+  const last = revisions.at(-1);
+  if (last === undefined && frozen.state === "revised") return err(`${path}.freeze is revised but records no revision`);
+  if (last !== undefined && frozen.state === "awaiting-red") return err(`${path}.revisions precede the freeze`);
+  if (last !== undefined && frozen.state !== "awaiting-red" && !canonicalStructuralEquals(frozen.paths, last.paths)) {
+    return err(`${path}.freeze.paths must equal the last revision's paths`);
+  }
+  return ok(Object.freeze(revisions));
 }
 
 /** Parse the persisted `acceptance_contracts`: exact records, unique ids, and

@@ -76,24 +76,26 @@ const structuralProjection = (body: string): string =>
     FUGUE_BODY_START,
   );
 
+/** No well-formed marker. If the marker PREFIX is present the stamp is
+ *  corrupted (not absent) — fail closed instead of silently N/A. */
+function corruptedStampViolations(content: string, filePath: string): Violation[] {
+  const probe = INTEGRITY_MARKER_PREFIX_RE.exec(content);
+  if (probe === null) return []; // genuinely not a stamped generated file — rule N/A
+  const idx = probe.index;
+  return [
+    makeViolation(
+      "fugue-generated-integrity",
+      filePath,
+      content.slice(0, idx).split("\n").length,
+      content.slice(idx).split("\n", 1)[0] ?? INTEGRITY_MARKER_PREFIX,
+      "Malformed @fugue-integrity stamp (hash must be exactly 64 lowercase hex chars on its own `// @fugue-integrity sha256:<hex>` line) — the banner has been altered; regenerate with `fugue new --from`.",
+    ),
+  ];
+}
+
 export function handler(content: string, filePath: string): Violation[] {
   const m = INTEGRITY_RE.exec(content);
-  if (m === null) {
-    // No well-formed marker. If the marker PREFIX is present the stamp is
-    // corrupted (not absent) — fail closed instead of silently N/A.
-    const probe = INTEGRITY_MARKER_PREFIX_RE.exec(content);
-    if (probe === null) return []; // genuinely not a stamped generated file — rule N/A
-    const idx = probe.index;
-    return [
-      makeViolation(
-        "fugue-generated-integrity",
-        filePath,
-        content.slice(0, idx).split("\n").length,
-        content.slice(idx).split("\n", 1)[0] ?? INTEGRITY_MARKER_PREFIX,
-        "Malformed @fugue-integrity stamp (hash must be exactly 64 lowercase hex chars on its own `// @fugue-integrity sha256:<hex>` line) — the banner has been altered; regenerate with `fugue new --from`.",
-      ),
-    ];
-  }
+  if (m === null) return corruptedStampViolations(content, filePath);
 
   const declared = m[1];
   const markerStart = content.indexOf(m[0]);

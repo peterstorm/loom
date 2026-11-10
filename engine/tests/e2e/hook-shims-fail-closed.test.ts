@@ -13,11 +13,18 @@
  * mark-subagent-active.sh (fail-CLOSED authority binder):
  *   - runtime unavailable → exit 2 because only the engine may prove graph absence
  *   - ENOENT graph → engine passthrough; EACCES/ELOOP/ENOTDIR → engine block
+ *
+ * guard-subagent-authority.sh (fail-CLOSED subagent fence, ADR-0067 D6):
+ *   - no "agent_id" in the payload → exit 0 fast path, no runtime needed
+ *   - "agent_id" present + CLAUDE_PLUGIN_ROOT unset / bun off PATH → exit 2
+ *   - with the runtime: a subagent's authority write → engine block (exit 2);
+ *     a payload that merely mentions "agent_id" below the top level → engine
+ *     passthrough (exit 0), proving the shim spawned rather than guessed
  */
 
 import { describe, it, expect, afterAll } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ORCHESTRATION_RUNS_SUFFIX } from "../../src/machine/evidence";
@@ -29,6 +36,7 @@ const GUARD = join(SCRIPTS, "guard-state-file.sh");
 const DISPATCH = join(SCRIPTS, "dispatch.sh");
 const MARK = join(SCRIPTS, "mark-subagent-active.sh");
 const CLEANUP = join(SCRIPTS, "cleanup-stale-subagents.sh");
+const AUTHORITY = join(SCRIPTS, "guard-subagent-authority.sh");
 const PLUGIN_ROOT = join(SCRIPTS, "..", "..");
 
 // chmod 000 does not bar root — these tests are meaningless under uid 0.
@@ -43,9 +51,7 @@ function tempDir(): string {
 
 afterAll(() => {
   for (const dir of dirs) {
-    try {
-      chmodSync(dir, 0o700);
-    } catch {}
+    if (existsSync(dir)) chmodSync(dir, 0o700);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -404,5 +410,51 @@ describe("dispatch.sh — runs on binding-without-graph, fails OPEN loudly on ru
     });
     expect(stderr).toContain("bindings may leak");
     expect(status).toBe(0);
+  });
+});
+
+describe("guard-subagent-authority.sh — parent fast path, fails CLOSED for a subagent on runtime drift", () => {
+  const bashCall = (command: string, extra: Record<string, unknown> = {}): string =>
+    JSON.stringify({ session_id: "shim-test", tool_name: "Bash", tool_input: { command }, cwd: "/repo", ...extra });
+  const SUBAGENT_SUBMIT = bashCall("loom helper orchestration submit", { agent_id: "agent-1" });
+
+  it("no agent_id (the parent's call) → exit 0 fast path, quiet, no runtime needed at all", () => {
+    const { status, stderr } = runShim(AUTHORITY, { LOOM_SUBAGENT_DIR: tempDir() }, bashCall("loom helper orchestration submit"));
+    expect(stderr).toBe("");
+    expect(status).toBe(0);
+  });
+
+  it("agent_id present + CLAUDE_PLUGIN_ROOT unset → exit 2 (runtime gone ≠ fence off)", () => {
+    const { status, stderr } = runShim(AUTHORITY, { LOOM_SUBAGENT_DIR: tempDir() }, SUBAGENT_SUBMIT);
+    expect(stderr).toContain("guard-subagent-authority cannot run (CLAUDE_PLUGIN_ROOT unset)");
+    expect(status).toBe(2);
+  });
+
+  it("agent_id present + bun not found on PATH → exit 2", () => {
+    const { status, stderr } = runShim(AUTHORITY, {
+      LOOM_SUBAGENT_DIR: tempDir(),
+      CLAUDE_PLUGIN_ROOT: "/tmp/fake-plugin-root", // set, so only the bun check can fail
+      PATH: bunlessPath(),
+    }, SUBAGENT_SUBMIT);
+    expect(stderr).toContain("guard-subagent-authority cannot run (bun not found)");
+    expect(status).toBe(2);
+  });
+
+  it("a payload that merely mentions agent_id still reaches the engine — and fails closed without a runtime", () => {
+    const nested = bashCall("ls", { tool_input: { command: "ls", agent_id: "not-the-caller" } });
+    expect(runShim(AUTHORITY, { LOOM_SUBAGENT_DIR: tempDir() }, nested).status).toBe(2);
+    const { status, stderr } = runShim(AUTHORITY, { CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, LOOM_SUBAGENT_DIR: tempDir() }, nested);
+    expect(stderr).toBe("");
+    expect(status).toBe(0); // the engine decides on the parsed top-level field: a parent's call
+  });
+
+  it("with the runtime: a subagent's authority write is blocked by the engine (exit 2); its reads pass", () => {
+    const blocked = runShim(AUTHORITY, { CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, LOOM_SUBAGENT_DIR: tempDir() }, SUBAGENT_SUBMIT);
+    expect(blocked.stderr).toContain("BLOCKED by loom guard-subagent-authority (ADR-0067 D6)");
+    expect(blocked.status).toBe(2);
+    const allowed = runShim(AUTHORITY, { CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, LOOM_SUBAGENT_DIR: tempDir() },
+      bashCall("ls", { agent_id: "agent-1" }));
+    expect(allowed.stderr).toBe("");
+    expect(allowed.status).toBe(0);
   });
 });

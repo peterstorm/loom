@@ -199,7 +199,7 @@ function relationalDiagnostics(tasks: readonly RequirementTraceTask[]): readonly
         continue;
       }
       if (waves.size !== 1) continue;
-      const completionWave = [...waves][0]!;
+      const completionWave = [...waves][0];
       if (task.wave > completionWave) {
         diagnostics.push(diagnostic(
           "contribution-after-completion",
@@ -312,19 +312,22 @@ export function amendmentHistoryError(
   tasks: readonly (TraceFields & Readonly<{ id: string }>)[],
 ): string | null {
   const byId = new Map(tasks.map((task) => [task.id, task] as const));
-  const latest = new Map<string, SpecTraceAmendmentChange>();
+  // Each Task's latest change, held WITH the Task it was resolved against, so
+  // the final comparison needs no second lookup.
+  const latest = new Map<string, Readonly<{ task: TraceFields; change: SpecTraceAmendmentChange }>>();
   for (const change of (amendments ?? []).flatMap(({ changes }) => changes)) {
-    if (!byId.has(change.taskId)) {
+    const task = byId.get(change.taskId);
+    if (task === undefined) {
       return `spec_trace_amendments names Task ${change.taskId}, which is not in the protected roster`;
     }
     const previous = latest.get(change.taskId);
-    if (previous !== undefined && !sameRequirementTrace(previous.after, change.before)) {
+    if (previous !== undefined && !sameRequirementTrace(previous.change.after, change.before)) {
       return `Task ${change.taskId} spec_trace_amendments change does not start where its previous change ended`;
     }
-    latest.set(change.taskId, change);
+    latest.set(change.taskId, Object.freeze({ task, change }));
   }
-  for (const [taskId, change] of latest) {
-    if (!sameRequirementTrace(traceOf(byId.get(taskId)!), change.after)) {
+  for (const [taskId, { task, change }] of latest) {
+    if (!sameRequirementTrace(traceOf(task), change.after)) {
       return `Task ${taskId} Requirement trace contradicts its latest spec_trace_amendments change`;
     }
   }
@@ -379,26 +382,49 @@ export function parseOwnershipInput(raw: unknown, label: string): OwnershipParse
   return Object.freeze({ ok: true, value: ownership });
 }
 
-/** Why a submitted roster is not exactly the protected Task roster, in order; null when it is. */
-export function rosterError(
-  graph: Readonly<{ tasks: readonly Readonly<{ id: string }>[] }>,
+/** One protected Task paired with the trace the submitted roster gives it. */
+export type RosterTrace<T> = Readonly<{ task: T; trace: SpecTraceOwnership }>;
+
+/** A submitted roster matched to the protected one: every Task with its trace,
+ *  in roster order — or why the roster is not exactly the protected one. */
+export type RosterMatch<T> =
+  | Readonly<{ ok: true; value: readonly RosterTrace<T>[] }>
+  | Readonly<{ ok: false; message: string }>;
+
+/**
+ * Match a submitted roster to the protected Task roster, exactly and in order.
+ * Pairing IS the missing-Task check: a Task without a submitted trace is
+ * reported here, so a matched roster carries every Task's trace by
+ * construction and no caller looks one up again.
+ */
+export function matchRoster<T extends Readonly<{ id: string }>>(
+  tasks: readonly T[],
   ownership: ReadonlyMap<string, SpecTraceOwnership>,
   label: string,
-): string | null {
-  const currentIds = graph.tasks.map(({ id }) => id);
+): RosterMatch<T> {
+  const refuse = (message: string): RosterMatch<T> => Object.freeze({ ok: false, message });
+  const currentIds = tasks.map(({ id }) => id);
   const submittedIds = [...ownership.keys()];
-  const missing = currentIds.filter((id) => !ownership.has(id));
+  const missing: string[] = [];
+  const paired = tasks.flatMap((task): RosterTrace<T>[] => {
+    const trace = ownership.get(task.id);
+    if (trace === undefined) {
+      missing.push(task.id);
+      return [];
+    }
+    return [Object.freeze({ task, trace })];
+  });
   const foreign = submittedIds.filter((id) => !currentIds.includes(id));
   if (missing.length > 0 || foreign.length > 0 || submittedIds.length !== currentIds.length) {
-    return [
+    return refuse([
       `${label} roster is stale or partial`,
       ...(missing.length === 0 ? [] : [`missing existing Tasks: ${missing.join(", ")}`]),
       ...(foreign.length === 0 ? [] : [`foreign Tasks: ${foreign.join(", ")}`]),
-    ].join("; ");
+    ].join("; "));
   }
   return submittedIds.some((id, index) => id !== currentIds[index])
-    ? `${label} roster order must exactly match the protected Task roster`
-    : null;
+    ? refuse(`${label} roster order must exactly match the protected Task roster`)
+    : Object.freeze({ ok: true, value: Object.freeze(paired) });
 }
 
 const sameSet = (left: readonly string[], right: readonly string[]): boolean => {

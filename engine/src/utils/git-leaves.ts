@@ -136,7 +136,7 @@ export function revisionTreeLeaves(root: string, revision: string, path: string)
     if (match === null) {
       throw new Error(`Unparseable git ls-tree record for ${path} at ${revision}: ${JSON.stringify(record)}`);
     }
-    return Object.freeze({ mode: match[1]!, sha: match[2]!, path: match[3]! });
+    return Object.freeze({ mode: match[1], sha: match[2], path: match[3] });
   });
 }
 

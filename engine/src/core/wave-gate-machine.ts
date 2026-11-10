@@ -47,6 +47,7 @@ import {
   type NonEmpty,
   type OrchestrationRunId,
   type ProtectedWaveStateCommitted,
+  nonEmptyOf,
 } from "./orchestration-contract";
 import { applyGateDecision, evaluateWaveGate, type GateDecision, type GateDeps } from "./wave-gate-checks";
 import { deriveWaveCompletionSuiteReadiness } from "./wave-completion-suite-readiness";
@@ -715,10 +716,10 @@ export function deriveWaveReadiness(
         ok: false,
         error: canonicalRecord({
           kind: "wave-readiness-unavailable",
-          reasons: Object.freeze([statusReason(
+          reasons: nonEmptyOf(statusReason(
             "authority-contradiction",
             "Wave next action proof does not match the exact run/revision/authority/readiness/lifecycle checkpoint",
-          )]) as NonEmpty<StatusReason>,
+          )),
         }),
       });
     }
@@ -727,10 +728,10 @@ export function deriveWaveReadiness(
         ok: false,
         error: canonicalRecord({
           kind: "wave-readiness-unavailable",
-          reasons: Object.freeze([statusReason(
+          reasons: nonEmptyOf(statusReason(
             "authority-contradiction",
             "Wave done status requires a committed terminal wave_gate_history receipt",
-          )]) as NonEmpty<StatusReason>,
+          )),
         }),
       });
     }

@@ -9,6 +9,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  type Stats,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { isReviewAgent } from "../../core/agent-catalog-projections";
@@ -22,9 +23,11 @@ import {
 import { finalizeStandaloneReview } from "../../core/standalone-review";
 import { parseStandaloneReviewScope, type StandaloneReviewerRole } from "../../core/standalone-review-scope";
 import { serializeHistoricalAdjudicatedStandaloneReview, serializeStandaloneAggregate } from "../../core/standalone-review-records";
-import type { StandaloneReviewAggregate } from "../../core/standalone-review-model";
+import type { StandaloneReviewAggregate, StandaloneReviewState } from "../../core/standalone-review-model";
 import { aggregateLegacyStandaloneReview, parseHistoricalStandaloneAggregate } from "../../core/legacy-archive";
 import { parseArtifactRef, type ArtifactRef } from "../../core/orchestration-contract";
+import { failure, success, type DomainResult } from "../../core/orchestration-contract/identity";
+import { describeCause } from "../../utils/describe-cause";
 import { resolveReviewFindings, reviewResolutionLog } from "../../core/review-output";
 import {
   argumentValue,
@@ -251,94 +254,113 @@ type LoadedTranscript = Readonly<{
   artifact: ArtifactRef;
 }>;
 
-function loadTranscripts(runDir: string, reviews: readonly ReviewInputEntry[]): Parse<readonly LoadedTranscript[]> {
-  const expectedParent = resolve(join(runDir, "reviewers"));
-  const errors: string[] = [];
-  const transcripts: LoadedTranscript[] = [];
-  const seenRealpaths = new Set<string>();
-  const seenFiles = new Set<string>();
+/** Files already bound to a reviewer, by realpath and by device:inode. */
+type SeenTranscriptFiles = Readonly<{ realpaths: Set<string>; files: Set<string> }>;
+
+function frozenSlotDirectoryErrors(expectedParent: string, reviews: readonly ReviewInputEntry[]): readonly string[] {
   try {
     const expectedNames = reviews.map((review, index) => `${index + 1}-${review.agent}.md`).sort();
     const observedNames = readdirSync(expectedParent).sort();
     if (observedNames.length !== expectedNames.length || observedNames.some((name, index) => name !== expectedNames[index])) {
-      errors.push("reviewers directory must contain exactly the frozen transcript slots; missing or surplus evidence is forbidden");
+      return ["reviewers directory must contain exactly the frozen transcript slots; missing or surplus evidence is forbidden"];
     }
+    return [];
   } catch (error) {
-    errors.push(`cannot enumerate frozen reviewer slots: ${error instanceof Error ? error.message : String(error)}`);
+    return [`cannot enumerate frozen reviewer slots: ${error instanceof Error ? error.message : String(error)}`];
   }
+}
+
+/** Read the inspected file through a no-follow descriptor, refusing any
+ * identity or size change between inspection, open, and read. */
+function readStableTranscriptBytes(path: string, stat: Stats, transcript: string): DomainResult<Buffer, string> {
+  let transcriptFd: number | null = null;
+  try {
+    transcriptFd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const openedStat = fstatSync(transcriptFd);
+    if (!openedStat.isFile() || openedStat.size === 0 ||
+        openedStat.dev !== stat.dev || openedStat.ino !== stat.ino) {
+      return failure(`review transcript changed between inspection and open: ${transcript}`);
+    }
+    const bytes = readFileSync(transcriptFd);
+    const afterRead = fstatSync(transcriptFd);
+    if (afterRead.dev !== openedStat.dev || afterRead.ino !== openedStat.ino ||
+        afterRead.size !== openedStat.size || bytes.byteLength !== openedStat.size) {
+      return failure(`review transcript changed while being read: ${transcript}`);
+    }
+    return success(bytes);
+  } finally {
+    if (transcriptFd !== null) closeSync(transcriptFd);
+  }
+}
+
+/** Prove the bytes match the declared digest/length and bind them to their slot artifact. */
+function bindTranscriptBytes(runDir: string, review: ReviewInputEntry, index: number, bytes: Buffer): DomainResult<LoadedTranscript, string> {
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  if (review.expectedByteLength !== null && review.expectedByteLength !== bytes.byteLength) {
+    return failure(`review transcript byte_length is stale for ${review.agent}`);
+  }
+  if (review.expectedSha256 !== null && review.expectedSha256 !== sha256) {
+    return failure(`review transcript sha256 is stale for ${review.agent}`);
+  }
+  let output: string;
+  try {
+    output = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return failure(`review transcript must contain exact valid UTF-8 Agent output: ${review.transcript}`);
+  }
+  const artifact = parseArtifactRef({
+    runId: basename(runDir),
+    slot: `reviewers/${index + 1}-${review.agent}.md`,
+    digest: sha256,
+    byteLength: bytes.byteLength,
+  });
+  if (!artifact.ok) return failure(`cannot bind review transcript artifact: ${artifact.error.message}`);
+  return success({ agent: review.agent, output, artifact: artifact.value });
+}
+
+function loadTranscriptSlot(
+  runDir: string,
+  expectedParent: string,
+  review: ReviewInputEntry,
+  index: number,
+  seen: SeenTranscriptFiles,
+): DomainResult<LoadedTranscript, string> {
+  const path = resolve(review.transcript);
+  const expectedPath = resolve(join(runDir, "reviewers", `${index + 1}-${review.agent}.md`));
+  if (path !== expectedPath) {
+    return failure(`review transcript slot ${index + 1} for ${review.agent} must be exactly ${expectedPath}: ${review.transcript}`);
+  }
+  if (dirname(path) !== expectedParent) return failure(`review transcript must be directly inside ${expectedParent}: ${review.transcript}`);
+  try {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.size === 0) {
+      return failure(`review transcript must be a non-empty regular non-symlink file: ${review.transcript}`);
+    }
+    const real = realpathSync(path);
+    const fileIdentity = `${stat.dev}:${stat.ino}`;
+    if (real !== path) return failure(`review transcript must resolve to itself: ${review.transcript}`);
+    if (seen.realpaths.has(real) || seen.files.has(fileIdentity)) {
+      return failure(`review transcript file is assigned to more than one reviewer: ${review.transcript}`);
+    }
+    const bytes = readStableTranscriptBytes(path, stat, review.transcript);
+    if (!bytes.ok) return bytes;
+    seen.realpaths.add(real);
+    seen.files.add(fileIdentity);
+    return bindTranscriptBytes(runDir, review, index, bytes.value);
+  } catch (error) {
+    return failure(`cannot read review transcript ${review.transcript}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function loadTranscripts(runDir: string, reviews: readonly ReviewInputEntry[]): Parse<readonly LoadedTranscript[]> {
+  const expectedParent = resolve(join(runDir, "reviewers"));
+  const errors: string[] = [...frozenSlotDirectoryErrors(expectedParent, reviews)];
+  const transcripts: LoadedTranscript[] = [];
+  const seen: SeenTranscriptFiles = { realpaths: new Set<string>(), files: new Set<string>() };
   for (const [index, review] of reviews.entries()) {
-    const path = resolve(review.transcript);
-    const expectedPath = resolve(join(runDir, "reviewers", `${index + 1}-${review.agent}.md`));
-    if (path !== expectedPath) {
-      errors.push(`review transcript slot ${index + 1} for ${review.agent} must be exactly ${expectedPath}: ${review.transcript}`);
-      continue;
-    }
-    if (dirname(path) !== expectedParent) { errors.push(`review transcript must be directly inside ${expectedParent}: ${review.transcript}`); continue; }
-    try {
-      const stat = lstatSync(path);
-      if (stat.isSymbolicLink() || !stat.isFile() || stat.size === 0) {
-        errors.push(`review transcript must be a non-empty regular non-symlink file: ${review.transcript}`);
-        continue;
-      }
-      const real = realpathSync(path);
-      const fileIdentity = `${stat.dev}:${stat.ino}`;
-      if (real !== path) { errors.push(`review transcript must resolve to itself: ${review.transcript}`); continue; }
-      if (seenRealpaths.has(real) || seenFiles.has(fileIdentity)) {
-        errors.push(`review transcript file is assigned to more than one reviewer: ${review.transcript}`);
-        continue;
-      }
-      let transcriptFd: number | null = null;
-      let bytes: Buffer;
-      try {
-        transcriptFd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-        const openedStat = fstatSync(transcriptFd);
-        if (!openedStat.isFile() || openedStat.size === 0 ||
-            openedStat.dev !== stat.dev || openedStat.ino !== stat.ino) {
-          errors.push(`review transcript changed between inspection and open: ${review.transcript}`);
-          continue;
-        }
-        bytes = readFileSync(transcriptFd);
-        const afterRead = fstatSync(transcriptFd);
-        if (afterRead.dev !== openedStat.dev || afterRead.ino !== openedStat.ino ||
-            afterRead.size !== openedStat.size || bytes.byteLength !== openedStat.size) {
-          errors.push(`review transcript changed while being read: ${review.transcript}`);
-          continue;
-        }
-      } finally {
-        if (transcriptFd !== null) closeSync(transcriptFd);
-      }
-      seenRealpaths.add(real);
-      seenFiles.add(fileIdentity);
-      const sha256 = createHash("sha256").update(bytes).digest("hex");
-      if (review.expectedByteLength !== null && review.expectedByteLength !== bytes.byteLength) {
-        errors.push(`review transcript byte_length is stale for ${review.agent}`);
-        continue;
-      }
-      if (review.expectedSha256 !== null && review.expectedSha256 !== sha256) {
-        errors.push(`review transcript sha256 is stale for ${review.agent}`);
-        continue;
-      }
-      let output: string;
-      try {
-        output = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      } catch {
-        errors.push(`review transcript must contain exact valid UTF-8 Agent output: ${review.transcript}`);
-        continue;
-      }
-      const artifact = parseArtifactRef({
-        runId: basename(runDir),
-        slot: `reviewers/${index + 1}-${review.agent}.md`,
-        digest: sha256,
-        byteLength: bytes.byteLength,
-      });
-      if (!artifact.ok) {
-        errors.push(`cannot bind review transcript artifact: ${artifact.error.message}`);
-        continue;
-      }
-      transcripts.push({ agent: review.agent, output, artifact: artifact.value });
-    } catch (error) {
-      errors.push(`cannot read review transcript ${review.transcript}: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    const slot = loadTranscriptSlot(runDir, expectedParent, review, index, seen);
+    if (slot.ok) transcripts.push(slot.value);
+    else errors.push(slot.error);
   }
   return errors.length > 0 ? { ok: false, errors } : { ok: true, value: transcripts };
 }
@@ -361,30 +383,81 @@ function init(runDir: string, inputPath: string): HookResult {
   return writeCanonicalOutput(json);
 }
 
-function aggregate(runDir: string, inputPath: string): HookResult {
-  const aggregatePath = join(runDir, "aggregate.json");
-  const pendingPath = join(runDir, ".aggregate.pending.json");
+/** Why aggregation stopped: the contract named in the error (`contractError`)
+ *  and its reasons, rendered once by `aggregate`. */
+type AggregationRefusal = Readonly<{ context: "standalone review" | "standalone review boundary"; errors: readonly string[] }>;
+
+const refused = (context: AggregationRefusal["context"], errors: readonly string[]): DomainResult<void, AggregationRefusal> =>
+  failure({ context, errors });
+
+/** A prior pending or published aggregate forbids re-aggregation; success when the run is fresh. */
+function priorAggregationRefusal(runDir: string, aggregatePath: string, pendingPath: string): DomainResult<void, AggregationRefusal> {
   if (existsSync(pendingPath)) {
-    return contractError("standalone review", [
+    return refused("standalone review", [
       "this run has an incomplete prior aggregation — start a new run directory",
     ]);
   }
-  if (existsSync(aggregatePath)) {
-    const existing = readJson(aggregatePath, "standalone aggregate", runDir);
-    if (!existing.ok) {
-      return contractError("standalone review", [
-        "this run has a corrupt prior aggregate and cannot be resumed",
-        ...existing.errors,
-      ]);
-    }
-    const parsed = parseHistoricalStandaloneAggregate(existing.value);
-    return parsed.ok
-      ? contractError("standalone review", ["this run has already been aggregated"])
-      : contractError("standalone review", [
-          "this run has a corrupt prior aggregate and cannot be resumed",
-          ...parsed.errors,
-        ]);
+  if (!existsSync(aggregatePath)) return success(undefined);
+  const existing = readJson(aggregatePath, "standalone aggregate", runDir);
+  if (!existing.ok) {
+    return refused("standalone review", [
+      "this run has a corrupt prior aggregate and cannot be resumed",
+      ...existing.errors,
+    ]);
   }
+  const parsed = parseHistoricalStandaloneAggregate(existing.value);
+  return parsed.ok
+    ? refused("standalone review", ["this run has already been aggregated"])
+    : refused("standalone review", [
+        "this run has a corrupt prior aggregate and cannot be resumed",
+        ...parsed.errors,
+      ]);
+}
+
+/** Stage, re-validate, and atomically publish aggregate.json. */
+function publishAggregate(runDir: string, pendingPath: string, aggregatePath: string, json: string): DomainResult<void, AggregationRefusal> {
+  const target = prepareWriteTargets(runDir, [], ["aggregate.json", ".aggregate.pending.json"]);
+  if (!target.ok) return refused("standalone review boundary", target.errors);
+  let stagedCreated = false;
+  try {
+    writeRunFileExclusiveNoFollow(pendingPath, json);
+    stagedCreated = true;
+    const staged = parseHistoricalStandaloneAggregate(JSON.parse(readRunFileNoFollow(pendingPath)));
+    if (!staged.ok) throw new Error(`staged aggregate failed validation: ${staged.errors.join("; ")}`);
+    publishStagedRunFile(pendingPath, aggregatePath);
+    return success(undefined);
+  } catch (error) {
+    let cleanupError: string | null = null;
+    try { if (stagedCreated) removeRunFileNoFollow(pendingPath); }
+    catch (cleanup) { cleanupError = describeCause(cleanup); }
+    return refused("standalone review", [
+      `cannot atomically publish aggregate: ${describeCause(error)}`,
+      ...(cleanupError === null ? [] : [`also failed to remove pending aggregate: ${cleanupError}`]),
+    ]);
+  }
+}
+
+function reportAggregation(transcripts: readonly LoadedTranscript[], result: StandaloneReviewState): void {
+  for (const transcript of transcripts) {
+    const resolution = resolveReviewFindings(transcript.output, transcript.agent);
+    if (
+      resolution.kind === "findings" &&
+      resolution.findings.blockStatus.kind !== "absent" &&
+      resolution.findings.blockStatus.kind !== "used"
+    ) {
+      process.stderr.write(reviewResolutionLog(`standalone:${transcript.agent}`, resolution) + "\n");
+    }
+  }
+  process.stderr.write(result.kind === "clean"
+    ? `Standalone review: 0 critical, ${result.aggregate.findings.filter((f) => f.severity === "advisory").length} advisory; skip refutation panel\n`
+    : `Standalone review: ${result.criticals.length} critical; refutation panel required\n`);
+}
+
+function aggregate(runDir: string, inputPath: string): HookResult {
+  const aggregatePath = join(runDir, "aggregate.json");
+  const pendingPath = join(runDir, ".aggregate.pending.json");
+  const prior = priorAggregationRefusal(runDir, aggregatePath, pendingPath);
+  if (!prior.ok) return contractError(prior.error.context, prior.error.errors);
   if (resolve(inputPath) !== resolve(join(runDir, "review-input.json"))) {
     return contractError("standalone review boundary", [`--input must be ${join(runDir, "review-input.json")}`]);
   }
@@ -399,37 +472,9 @@ function aggregate(runDir: string, inputPath: string): HookResult {
   const result = aggregateLegacyStandaloneReview({ runId: session.value.runId, scope: session.value.scope, transcripts: loaded.value });
   if (!result.ok) return contractError("standalone review", result.errors);
   const json = serializeStandaloneAggregate(result.value.aggregate) + "\n";
-  const target = prepareWriteTargets(runDir, [], ["aggregate.json", ".aggregate.pending.json"]);
-  if (!target.ok) return contractError("standalone review boundary", target.errors);
-  let stagedCreated = false;
-  try {
-    writeRunFileExclusiveNoFollow(pendingPath, json);
-    stagedCreated = true;
-    const staged = parseHistoricalStandaloneAggregate(JSON.parse(readRunFileNoFollow(pendingPath)));
-    if (!staged.ok) throw new Error(`staged aggregate failed validation: ${staged.errors.join("; ")}`);
-    publishStagedRunFile(pendingPath, aggregatePath);
-  } catch (error) {
-    let cleanupError: string | null = null;
-    try { if (stagedCreated) removeRunFileNoFollow(pendingPath); }
-    catch (cleanup) { cleanupError = cleanup instanceof Error ? cleanup.message : String(cleanup); }
-    return contractError("standalone review", [
-      `cannot atomically publish aggregate: ${error instanceof Error ? error.message : String(error)}`,
-      ...(cleanupError === null ? [] : [`also failed to remove pending aggregate: ${cleanupError}`]),
-    ]);
-  }
-  for (const transcript of loaded.value) {
-    const resolution = resolveReviewFindings(transcript.output, transcript.agent);
-    if (
-      resolution.kind === "findings" &&
-      resolution.findings.blockStatus.kind !== "absent" &&
-      resolution.findings.blockStatus.kind !== "used"
-    ) {
-      process.stderr.write(reviewResolutionLog(`standalone:${transcript.agent}`, resolution) + "\n");
-    }
-  }
-  process.stderr.write(result.value.kind === "clean"
-    ? `Standalone review: 0 critical, ${result.value.aggregate.findings.filter((f) => f.severity === "advisory").length} advisory; skip refutation panel\n`
-    : `Standalone review: ${result.value.criticals.length} critical; refutation panel required\n`);
+  const published = publishAggregate(runDir, pendingPath, aggregatePath, json);
+  if (!published.ok) return contractError(published.error.context, published.error.errors);
+  reportAggregation(loaded.value, result.value);
   return writeCanonicalOutput(json);
 }
 

@@ -316,7 +316,7 @@ describe("the catalog mints a request from its identity alone", () => {
     if (!replayed.ok || !today.ok) throw new Error("mint failed");
     const rebound = today.value.attempts.map((authority) => ({ ...authority, harnessBinding: { ...authority.harnessBinding, pi: RETIRED_CLOUD_PI_BINDING } }));
     expect(replayed.value.attempts).toEqual(rebound);
-    // History parses back unchanged, as any recorded slot does.
+    // History parses back unchanged, like every recorded slot does.
     expect(parseAgentRosterSlot(replayed.value.attempts[0], replayed.value.attempts[1])).toEqual(replayed);
     // A role whose profile the replay leaves alone mints exactly today's slot.
     const untouched = <Attempt extends 1 | 2>(attempt: Attempt) =>

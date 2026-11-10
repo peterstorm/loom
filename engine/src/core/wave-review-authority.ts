@@ -870,15 +870,20 @@ export function prepareWaveReviewBatch(
     }
     observationsByTask.set(observation.taskId, observation);
   }
-  if (observationsByTask.size !== tasks.length || tasks.some(({ id }) => !observationsByTask.has(id))) {
+  // Pairing IS the roster check: a Task without an observation is refused
+  // here, so every admitted Task below carries its workspace by construction.
+  const observed = tasks.flatMap((task) => {
+    const observation = observationsByTask.get(task.id);
+    return observation === undefined ? [] : [Object.freeze({ task, observation })];
+  });
+  if (observationsByTask.size !== tasks.length || observed.length !== tasks.length) {
     return failure("current Wave workspace observations differ from the exact registered Task roster");
   }
-  const workspaceByTask = new Map<string, ReviewedWorkspaceObservation>();
-  for (const task of tasks) {
-    const observation = observationsByTask.get(task.id)!;
+  const admitted: Readonly<{ task: Task; workspace: ReviewedWorkspaceObservation }>[] = [];
+  for (const { task, observation } of observed) {
     const snapshot = admitReviewedWorkspace(task.id, taskReviewScope(task), observation);
     if (!snapshot.ok) return failure(snapshot.error);
-    workspaceByTask.set(task.id, snapshot.value);
+    admitted.push(Object.freeze({ task, workspace: snapshot.value }));
   }
   if (specCheckDocuments.spec.path !== (graph.spec_file ?? null) ||
       specCheckDocuments.plan.path !== (graph.plan_file ?? null)) {
@@ -907,7 +912,7 @@ export function prepareWaveReviewBatch(
     runId,
     wave: registration.input.wave,
     authorityDigest: registration.authorityDigest,
-    tasks: tasks.map((task) => ({
+    tasks: admitted.map(({ task, workspace }) => ({
       id: task.id,
       generation: task.review_generation ?? 0,
       files: task.file_list ?? [],
@@ -915,7 +920,7 @@ export function prepareWaveReviewBatch(
       completionAnchors: task.spec_anchors ?? [],
       contributions: task.spec_contributions ?? [],
       priorFindingIds: task.review_run?.prior_finding_ids ?? (task.findings ?? []).map(({ id }) => id),
-      reviewedHeadSha: workspaceByTask.get(task.id)?.headSha ?? null,
+      reviewedHeadSha: workspace.headSha,
     })),
     specFile: graph.spec_file ?? null,
     planFile: graph.plan_file ?? null,
@@ -924,11 +929,9 @@ export function prepareWaveReviewBatch(
   if (!batchEpoch.ok) return failure(batchEpoch.error.message);
 
   const taskRuns: WaveTaskRunAuthority[] = [];
-  for (const task of tasks) {
-    const observation = workspaceByTask.get(task.id);
-    if (observation === undefined) return failure(`Task ${task.id} workspace snapshot is missing`);
+  for (const { task, workspace } of admitted) {
     const packetId = parseArtifactDigest(sha256Hex(`${batchEpoch.value}|packet|${task.id}`));
-    const workspaceHeadSha = parseArtifactDigest(observation.headSha);
+    const workspaceHeadSha = parseArtifactDigest(workspace.headSha);
     if (!packetId.ok) return failure(packetId.error.message);
     if (!workspaceHeadSha.ok) return failure(workspaceHeadSha.error.message);
     taskRuns.push(Object.freeze({
@@ -942,9 +945,8 @@ export function prepareWaveReviewBatch(
 
   const frozenSourceByTask = new Map<string, ByteSection>();
   if (registration.schemaVersion === 2) {
-    for (const task of tasks) {
-      const snapshot = workspaceByTask.get(task.id)!;
-      const source = encodeByteSection(WAVE_FROZEN_SOURCE_SECTION, JSON.stringify(waveFrozenSource(snapshot)));
+    for (const { task, workspace } of admitted) {
+      const source = encodeByteSection(WAVE_FROZEN_SOURCE_SECTION, JSON.stringify(waveFrozenSource(workspace)));
       if (!source.ok) return failure(source.error.message);
       frozenSourceByTask.set(task.id, source.value);
     }

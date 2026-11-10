@@ -24,6 +24,9 @@ import {
   type ContextDigest,
   type DomainResult,
   type NonEmpty,
+  allOk,
+  mapNonEmpty,
+  nonEmpty,
   type OrchestrationRunId,
   type RequestId,
 } from "./orchestration-contract";
@@ -67,12 +70,9 @@ export function deriveWaveRefutationPlan(
   snapshot: WaveReadinessSnapshot,
 ): DomainResult<WaveRefutationPlan, WavePreparationError> {
   if (!isCanonicalWaveReadiness(snapshot)) return preparationFailure("refutation preparation requires canonical readiness");
-  const collecting = snapshot.waveTasks.filter(({ review_run }) => review_run !== undefined);
+  const collecting = snapshot.waveTasks.flatMap(({ id, review_run }) => review_run === undefined ? [] : [`${id}/${review_run.packet_id}`]);
   if (collecting.length > 0) {
-    return preparationFailure(
-      `current Review Packet evidence must complete before refutation: ${collecting.map(({ id, review_run }) =>
-        `${id}/${review_run!.packet_id}`).join(", ")}`,
-    );
+    return preparationFailure(`current Review Packet evidence must complete before refutation: ${collecting.join(", ")}`);
   }
   const unreviewed = snapshot.waveTasks.filter(({ review_status }) =>
     review_status !== "passed" && review_status !== "blocked");
@@ -82,9 +82,12 @@ export function deriveWaveRefutationPlan(
     );
   }
   const brief = buildFindingBrief(snapshot.wave, snapshot.graph.tasks);
-  if (brief.findings.length === 0) return preparationFailure("an empty critical Finding set cannot start a Refutation Panel");
+  const findings = nonEmpty(brief.findings);
+  if (findings === null) return preparationFailure("an empty critical Finding set cannot start a Refutation Panel");
   const lenses = selectReviewLenses(reviewSignals(brief.findings), 3);
-  if (!lenses.ok || lenses.value.length === 0) return preparationFailure(lenses.ok ? "no review lenses were derived" : lenses.errors.join("; "));
+  if (!lenses.ok) return preparationFailure(lenses.errors.join("; "));
+  const panelLenses = nonEmpty(lenses.value);
+  if (panelLenses === null) return preparationFailure("no review lenses were derived");
   const digest = sha256Hex(
     `${snapshot.registration.runId}|${snapshot.readinessDigest}|${brief.findings.map(({ id }) => id).join("|")}|${lenses.value.join("|")}`,
   );
@@ -92,8 +95,8 @@ export function deriveWaveRefutationPlan(
   if (!panelRun.ok) return preparationFailure(panelRun.error.message);
   return canonicalRecord({ ok: true, value: canonicalRecord({
     runId: panelRun.value,
-    findings: Object.freeze(brief.findings) as NonEmpty<BriefFinding>,
-    lenses: Object.freeze(lenses.value) as NonEmpty<ReviewLens>,
+    findings,
+    lenses: panelLenses,
   }) });
 }
 
@@ -136,7 +139,7 @@ export function waveAdvisoryDecisionActionRequest(
     requestId: material.requestId,
     runId: material.advisories[0].reference.runId,
     context: canonicalRecord({ digest: material.context.digest, slot: material.context.slot }),
-    advisories: Object.freeze(material.advisories.map(({ reference }) => reference)) as NonEmpty<ArtifactRef>,
+    advisories: mapNonEmpty(material.advisories, ({ reference }) => reference),
   }) });
 }
 
@@ -159,10 +162,13 @@ export function deriveWaveAdvisoryDecisionRequest(
       bytes: Object.freeze([...new TextEncoder().encode(JSON.stringify({ taskId: task.id, claim }))]),
     }));
   });
-  if (canonicalAdvisories.length === 0) return preparationFailure("no canonical advisories require user triage");
+  const triaged = nonEmpty(canonicalAdvisories);
+  if (triaged === null) return preparationFailure("no canonical advisories require user triage");
 
-  const advisories: WaveAdvisoryArtifactMaterial[] = [];
-  for (const { identity, bytes } of canonicalAdvisories) {
+  // One artifact per canonical advisory, so the non-empty triage list proves
+  // the material list non-empty; the first advisory that cannot be referenced
+  // refuses the request.
+  const built = allOk(mapNonEmpty(triaged, ({ identity, bytes }): DomainResult<WaveAdvisoryArtifactMaterial, WavePreparationError> => {
     const byteLength = parseArtifactByteLength(bytes.length);
     const digest = parseArtifactDigest(sha256Bytes(Uint8Array.from(bytes)));
     if (!byteLength.ok) return preparationFailure(byteLength.error.message);
@@ -177,8 +183,10 @@ export function deriveWaveAdvisoryDecisionRequest(
       byteLength: byteLength.value,
     });
     if (!reference.ok) return preparationFailure(reference.error.message);
-    advisories.push(canonicalRecord({ reference: reference.value, bytes }));
-  }
+    return canonicalRecord({ ok: true, value: canonicalRecord({ reference: reference.value, bytes }) });
+  }));
+  if (!built.ok) return canonicalRecord({ ok: false, error: built.error[0] });
+  const advisories = built.value;
 
   const contextBytes = Object.freeze([...new TextEncoder().encode(JSON.stringify(canonicalRecord({
     schemaVersion: 1,
@@ -198,7 +206,7 @@ export function deriveWaveAdvisoryDecisionRequest(
       slot: canonicalRecord({ kind: "fixed-artifact-slot" as const, path: `contexts/${contextDigest.value}.json` }),
       bytes: contextBytes,
     }),
-    advisories: Object.freeze(advisories) as NonEmpty<WaveAdvisoryArtifactMaterial>,
+    advisories,
   });
   waveAdvisoryDecisionMaterialProofs.add(material);
   return canonicalRecord({ ok: true, value: material });

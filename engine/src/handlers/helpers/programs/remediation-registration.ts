@@ -175,9 +175,6 @@ export type CreateRemediationRegistrationInput = Readonly<{
 export function createRegisteredRemediationProgramV2(
   input: CreateRemediationRegistrationInput,
 ): DomainResult<RegisteredRemediationProgramV2, RemediationRegistrationError> {
-  if (input.verification.kind === "selected-operator-checks" && input.manifest === null) {
-    return failure("selected remediation verification requires its frozen manifest");
-  }
   if (input.verification.kind === "not-required" && input.manifest !== null) {
     return failure("not-required remediation must not retain manifest authority");
   }
@@ -197,6 +194,11 @@ export function createRegisteredRemediationProgramV2(
   if (input.verification.kind === "not-required") {
     registeredVerification = Object.freeze({ kind: "not-required", reason: "no-surviving-critical-findings" });
   } else {
+    // The one manifest guard for selected checks, placed where the branch narrows
+    // `manifest` for the registration below. It precedes every other refusal of
+    // this branch, and the digest above cannot fail, so it is the first refusal a
+    // selected request without its manifest meets.
+    if (input.manifest === null) return failure("selected remediation verification requires its frozen manifest");
     const scope = createRemediationCheckScope(input.verification.source, input.candidateBaseline, {
       kind: "standalone-remediation",
       remediationRunId: input.remediationRunId,
@@ -209,7 +211,7 @@ export function createRegisteredRemediationProgramV2(
     if (!checks.ok) return failure(checks.error.failures.map(({ message }) => message).join("; "));
     registeredVerification = Object.freeze({
       kind: "selected-operator-checks",
-      manifest: input.manifest!,
+      manifest: input.manifest,
       checks: checks.value,
     });
   }

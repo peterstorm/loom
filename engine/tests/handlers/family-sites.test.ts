@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import familySites, { createFamilySitesHandler } from "../../src/handlers/helpers/family-sites";
 import { FAMILIES } from "../../src/core/family-sites";
-import { WHITELISTED_HELPERS } from "../../src/config";
+import { WHITELISTED_HELPERS } from "../../src/core/guard-state-file";
 import { KNOWN_HANDLERS, PI_RUNTIME_HANDSHAKE_ROUTES, piRuntimeHandshakeRequired } from "../../src/handler-routes";
 
 const ENGINE_ROOT = resolve(__dirname, "../..");

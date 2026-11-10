@@ -209,7 +209,12 @@ describe("loadRules", () => {
 
       const rules = loadRules(defaultDir, null, "immediate");
 
-      expect(rules.map(({ name }) => name)).toEqual(["regex-rule", "no-cross-boundary-imports", "no-io-in-pure-modules"]);
+      expect(rules.map(({ name }) => name)).toEqual([
+        "regex-rule",
+        "no-cross-boundary-imports",
+        "no-io-in-pure-modules",
+        "switch-totality",
+      ]);
     });
 
     it("tier 'full' returns all enabled rules", () => {
@@ -426,7 +431,7 @@ describe("loadRules", () => {
 
     it("defaults flags to empty string when not provided", () => {
       const ruleData = makeValidRule({ name: "no-flags" });
-      delete (ruleData as any).flags;
+      delete ruleData.flags;
       writeRule(defaultDir, "noflag.json", ruleData);
 
       const rules = loadRules(defaultDir, null, "full", { includeProgrammatic: false }) as RegexRule[];
@@ -471,7 +476,7 @@ describe("loadRules", () => {
 
     it("absent/undefined flags defaults to empty string", () => {
       const ruleData = makeValidRule({ name: "no-flags-rule" });
-      delete (ruleData as any).flags;
+      delete ruleData.flags;
       writeRule(defaultDir, "noflag.json", ruleData);
 
       const rules = loadRules(defaultDir, null, "full", { includeProgrammatic: false }) as RegexRule[];

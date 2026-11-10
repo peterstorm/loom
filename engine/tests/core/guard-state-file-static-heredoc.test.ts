@@ -10,10 +10,11 @@
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { guardStateFileDecision } from "../../src/core/guard-state-file";
+import { guardedLocations } from "../../src/config";
 import { findClosingParen, scanSubstitutions, staticHeredocCat } from "../../src/core/shell-substitution";
 import { MODERN_BASH } from "../fixtures/modern-bash";
 
-const decision = (command: string) => guardStateFileDecision(command).kind;
+const decision = (command: string) => guardStateFileDecision(command, guardedLocations()).kind;
 
 describe("staticHeredocCat (pure)", () => {
   it("reads the literal and the exact closing paren of a quoted cat heredoc", () => {

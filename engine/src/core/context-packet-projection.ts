@@ -25,7 +25,7 @@ export function parseContextProjectionArguments(args: readonly string[]): Domain
   const fields = new Map<string, string>();
   const allowed = ["--packet", "--request", "--digest", "--role", "--skill", "--section", "--file", "--diff", "--offset", "--limit", "--purpose"];
   for (let i = 0; i < args.length; i += 2) {
-    const key = args[i]!;
+    const key = args[i];
     const value = args[i + 1];
     if (!allowed.includes(key) || fields.has(key) || value === undefined || value.length === 0) return failed("invalid or duplicate reader argument");
     // A mis-sequenced invocation is refused here with its actual cause instead
@@ -107,7 +107,7 @@ function fileText(packet: ProjectedPacket, path: string): DomainResult<string, s
     label === "standalone-frozen-source" || label === WAVE_FROZEN_SOURCE_SECTION);
   if (sections.length === 0) return failed("packet has no frozen source; use the section index for its supplied context");
   if (sections.length !== 1) return failed("packet has ambiguous frozen source sections");
-  const section = sections[0]!;
+  const section = sections[0];
   const text = attributed("frozen source index UTF-8", "frozen source index could not be decoded as UTF-8",
     () => decode(section.bytes));
   const source: unknown = attributed("frozen source index JSON", "frozen source index could not be parsed from the section bytes",
@@ -117,8 +117,8 @@ function fileText(packet: ProjectedPacket, path: string): DomainResult<string, s
     if (!parsed.ok) return failed(parsed.error);
     const files = parsed.value.files.filter((file) => file.path === path);
     if (files.length !== 1) return failed("source file is absent or ambiguous in this packet");
-    return files[0]!.kind === "text"
-      ? { ok: true, value: files[0]!.content }
+    return files[0].kind === "text"
+      ? { ok: true, value: files[0].content }
       : failed("source file is binary or absent; no text projection available");
   }
   if (!record(source) || !Array.isArray(source.files)) return failed("frozen source file index is invalid");
@@ -164,7 +164,7 @@ function diffPage(packet: ProjectedPacket, path: string, offset: number, limit: 
   const sections = [...packet.fixedContext, ...packet.variableContext].filter(({ label }) => label === STANDALONE_FROZEN_DIFF_SECTION);
   if (sections.length !== 1) return failed("packet has no single standalone-frozen-diff section; this request carries no read-coverage obligation");
   const raw: unknown = attributed("frozen diff JSON", "frozen diff could not be parsed from the section bytes",
-    () => JSON.parse(decode(sections[0]!.bytes)));
+    () => JSON.parse(decode(sections[0].bytes)));
   const diff = parseFrozenDiff(raw);
   if (!diff.ok) return failed(diff.error);
   const page = frozenDiffPage(diff.value, path, offset, limit);

@@ -14,6 +14,8 @@
 import { join } from "node:path";
 import { match } from "ts-pattern";
 import type { AgentRequestAuthority } from "./orchestration-contract";
+import type { LoomAgentName } from "./model-profiles";
+import { SECURITY_VERIFIER_ROLE } from "./security-adjudication";
 import { FROZEN_DIFF_PAGE_UNITS, type FrozenDiff } from "./standalone-read-coverage";
 
 /** The issued reviewer delivery of one emission-eligible request, by registered schema version. */
@@ -69,13 +71,20 @@ export const archivedReviewerInstructionPaths = (packageRoot: string, role: stri
     wirePath: join(packageRoot, "references", "reviewer-protocol-v1", "agents", "_shared", "wire-contract.md"),
   });
 
+/** Roles that read their small authority sections whole: spec-check and the security verifier (ADR-0067).
+ *  Typed by the Agent Catalog's role names, and the verifier read from its one
+ *  owner (`SECURITY_VERIFIER_ROLE`): a renamed role is a compile error here,
+ *  never a role that silently stops receiving its section command. */
+const SECTION_READERS: ReadonlySet<LoomAgentName> = new Set<LoomAgentName>(["spec-check-invoker", SECURITY_VERIFIER_ROLE]);
+
 /**
- * Spec-check consumes its small authority sections whole. Its packet's section
- * bytes live in the run's blob store, so it reads them only through the
- * engine's digest-verifying section decoder, delivered as an exact command.
+ * The section-reader command line for a role that consumes its authority
+ * sections whole, or the empty string for every other role. A packet's section
+ * bytes live in the run's blob store, so they are read only through the engine's
+ * digest-verifying section decoder, delivered as an exact command.
  */
 function contextSectionDelivery(facts: SpawnTaskFacts): string {
-  if (facts.authority.role !== "spec-check-invoker") return "";
+  if (!SECTION_READERS.has(facts.authority.role)) return "";
   const command = ["bun", join(facts.packageRoot, "scripts", "read-context-section.ts"),
     "--packet", contextPath(facts), "--digest", facts.authority.contextDigest].map(shellQuote).join(" ");
   return `LOOM_CONTEXT_SECTION_COMMAND: ${command}\n`;

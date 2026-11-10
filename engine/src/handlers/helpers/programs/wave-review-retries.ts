@@ -114,9 +114,10 @@ export async function currentWaveTaskReviewRetries(
     const diagnostic = (found.event as Record<string, unknown>).diagnostic;
     return typeof diagnostic === "string" && diagnostic.trim() !== "" ? diagnostic : "capture was rejected without a diagnostic";
   };
-  return graph.tasks.filter((task) => registration.taskIds.includes(task.id) && task.review_run !== undefined)
+  return graph.tasks
     .flatMap((task) => {
-      const run = task.review_run!;
+      const run = task.review_run;
+      if (!registration.taskIds.includes(task.id) || run === undefined) return [];
       // A current-protocol run must carry the Task's derived roster; a legacy run keeps its structural check.
       const inexactSlots = run.reviewer_protocol === undefined
         ? run.slot_authority === undefined || run.slot_authority.length !== run.expected_agents.length
@@ -126,7 +127,7 @@ export async function currentWaveTaskReviewRetries(
       }
       return run.expected_agents.flatMap((agent, index) => {
         if (run.evidence.some((entry) => entry.agent === agent)) return [];
-        const slot = run.slot_authority![index];
+        const slot = run.slot_authority?.[index];
         if (slot === undefined || slot.agent !== agent) {
           throw new Error(`Task ${task.id}/${agent} active Review Run slot authority drifted`);
         }
@@ -255,7 +256,7 @@ export async function driveWaveReviewRetries(
     // reviewer generation rather than a mixed exhausted/pending state.
     if (pendingRetries.length > 0) return settled(spawnRetries(pendingRetries));
     if (captureRejected.length > 0) {
-      return settled(waveBlocked(handle, `Wave reviewer attempt 2 exhausted after capture rejection: ${captureRejected[0]!.rejection}`));
+      return settled(waveBlocked(handle, `Wave reviewer attempt 2 exhausted after capture rejection: ${captureRejected[0].rejection}`));
     }
     if (packetRejected.length > 0) {
       return settled(waveBlocked(handle, `Wave reviewer attempt 2 exhausted without accepted packet evidence: ${packetRejected.map(({ authority }) => authority.role).join(", ")}`));
@@ -321,14 +322,14 @@ export async function driveWaveSpecCheckRetry(
     );
     if (recovered.kind === "corrupt") return settled(waveBlocked(handle, recovered.message));
     let durable: SpawnRequest;
-    if (recovered.kind === "found") durable = recovered.requests[0]!;
+    if (recovered.kind === "found") durable = recovered.requests[0];
     else {
       // The spec-check slot is an explicit extraction-only request (FR-001):
       // it publishes with no emission authority, so its retry task advertises
       // no emission tool regardless of the parent route.
       const published = await publishLegacyInitialBatch(handle, [retry.request], [retry.packet], "wave-gate-spec-retry");
       if (!published.ok) return settled(failed(published.message));
-      durable = published.requests[0]!;
+      durable = published.requests[0];
     }
     await markWaveSpecCheckRetryIssued(manager, durable.authority, epoch.batchEpoch);
     const captureRejection = await durableCaptureRejection(handle, durable.authority);

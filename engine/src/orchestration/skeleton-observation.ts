@@ -20,7 +20,7 @@ import type { UnresolvedSkeletonBinding } from "../core/skeleton/status";
 import type { ExportBinding, FrozenSurface, PathObservation } from "../core/skeleton/types";
 import type { Task, TaskGraph } from "../types";
 import { observeFrozenSurface, typedContract, type TypedContract } from "./frozen-surface-observation";
-import { resolveBaseDirectory } from "./no-follow-fs";
+import { resolveBaseDirectory } from "../utils/no-follow-fs";
 import { readRepositoryLeafNoFollow } from "./repository-leaf";
 import { canonicalContractSkeletons } from "./skeleton-refresh";
 import { describeCause } from "../utils/describe-cause";

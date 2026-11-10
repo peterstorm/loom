@@ -115,24 +115,24 @@ export function parseTscOutput(output: string, projectDir: string): Parsed {
       const columnNumber = Number(column);
       if (lineNumber < 1 || columnNumber < 1) { last = null; continue; }
       located.push({
-        file: isAbsolute(file!) ? resolve(file!) : resolve(projectDir, file!),
+        file: isAbsolute(file) ? resolve(file) : resolve(projectDir, file),
         line: lineNumber,
         column: columnNumber,
         code: Number(code),
-        message: message!,
+        message,
       });
       last = { list: "located", index: located.length - 1 };
       continue;
     }
     const projectLevel = GLOBAL.exec(line);
     if (projectLevel) {
-      global.push({ code: Number(projectLevel[1]), message: projectLevel[2]! });
+      global.push({ code: Number(projectLevel[1]), message: projectLevel[2] });
       last = { list: "global", index: global.length - 1 };
       continue;
     }
     if (last && CONTINUATION.test(line)) {
       const list: { message: string }[] = last.list === "located" ? located : global;
-      const previous = list[last.index]!;
+      const previous = list[last.index];
       list[last.index] = { ...previous, message: `${previous.message}\n${line}` };
       continue;
     }

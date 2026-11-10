@@ -6,6 +6,7 @@
  * This module performs no I/O and never upgrades a declaration into semantic proof.
  */
 
+import { match } from "ts-pattern";
 import { compareStrings } from "./ordering";
 import {
   canonicalRecord,
@@ -15,6 +16,8 @@ import {
   type DomainResult,
   type NonEmpty,
   type OrchestrationRunId,
+  mapNonEmpty,
+  nonEmptyOf,
 } from "./orchestration-contract";
 import { readDenseDataArray, type DataBoundaryError } from "./orchestration-contract/bytes";
 import {
@@ -107,7 +110,7 @@ function accountingFailure<T>(failures: readonly DefectFamilyFailure[]): DomainR
     : [problem("invalid-declaration", "defectFamily", "Defect-Family Accounting is invalid")];
   return failure(canonicalRecord({
     kind: "invalid-defect-family-accounting" as const,
-    failures: Object.freeze([head!, ...tail]) as NonEmpty<DefectFamilyFailure>,
+    failures: nonEmptyOf(head, ...tail),
   }));
 }
 
@@ -210,12 +213,23 @@ function denseArrayProblem(path: string, error: DataBoundaryError): DefectFamily
     const at = `${path}[${error.index ?? 0}]`;
     return problem("invalid-declaration", at, `${at} must be own data`);
   }
-  const message = error.reason === "not-array" ? `${path} must be a plain array`
-    : error.reason === "invalid-array-length" ? `${path} has an invalid or excessive length`
-    : error.reason === "symbol-field" || error.reason === "sparse-array"
-      ? `${path} must be dense and contain no extra fields`
-    : `${path} could not be safely inspected`;
-  return problem("invalid-declaration", path, message);
+  return problem("invalid-declaration", path, wholeArrayMessage(path, error.reason));
+}
+
+/** The message for a boundary failure reported against the whole array. Total
+ *  over the reason union, so a new reason fails to compile here instead of
+ *  silently taking the inspection fallback. */
+function wholeArrayMessage(path: string, reason: DataBoundaryError["reason"]): string {
+  return match(reason)
+    .with("not-array", () => `${path} must be a plain array`)
+    .with("invalid-array-length", () => `${path} has an invalid or excessive length`)
+    .with("symbol-field", "sparse-array", () => `${path} must be dense and contain no extra fields`)
+    .with(
+      "not-object", "wrong-prototype", "unknown-field", "accessor-field", "non-enumerable-field",
+      "mutated-during-read", "unsafe-inspection",
+      () => `${path} could not be safely inspected`,
+    )
+    .exhaustive();
 }
 
 function declaredText(raw: unknown, path: string): InternalParse<DeclaredText> {
@@ -569,7 +583,7 @@ function parseSiblingAccounting(raw: unknown, path: string): InternalParse<Decla
     ? parsed(canonicalRecord({
         kind: "declared-siblings" as const,
         provenance: "DECLARED" as const,
-        entries: Object.freeze([head, ...tail]) as NonEmpty<SiblingDisposition>,
+        entries: nonEmptyOf(head, ...tail),
       }))
     : failure(immutableArray(failures));
 }
@@ -628,7 +642,7 @@ function parseStringIds(raw: unknown, path: string): InternalParse<NonEmpty<Find
   ));
   const [head, ...tail] = [...ids].sort(compareStrings);
   return failures.length === 0 && head !== undefined
-    ? parsed(Object.freeze([head, ...tail]) as NonEmpty<FindingId>)
+    ? parsed(nonEmptyOf(head, ...tail))
     : failure(immutableArray(failures));
 }
 
@@ -679,7 +693,7 @@ function parseRepairGroup(raw: unknown, path: string): InternalParse<DeclaredRep
         rootCause: rootCause.value,
         invariant: invariant.value,
         siblings: siblings.value,
-        checks: Object.freeze([firstCheck, ...otherChecks]) as NonEmpty<DeclaredRepairCheck>,
+        checks: nonEmptyOf(firstCheck, ...otherChecks),
       }))
     : failure(immutableArray(failures));
 }
@@ -855,7 +869,7 @@ function parseDefectFamilyDeclaration(
   const declaration = canonicalRecord({
     kind: "declared-defect-family-accounting" as const,
     provenance: "DECLARED" as const,
-    dispositions: Object.freeze([firstDisposition, ...otherDispositions]) as NonEmpty<CriticalFindingDisposition>,
+    dispositions: nonEmptyOf(firstDisposition, ...otherDispositions),
     groups: immutableArray(groups),
   });
   return success(declaration);
@@ -979,7 +993,7 @@ export function prepareDefectFamilyVerification(
       kind: "blocked-declaration" as const,
       source: inventory,
       declaration,
-      failures: Object.freeze([head!, ...tail]) as NonEmpty<DefectFamilyFailure>,
+      failures: nonEmptyOf(head, ...tail),
     });
     verificationPlanCache.add(plan);
     return success(plan);
@@ -1034,7 +1048,7 @@ export function prepareDefectFamilyVerification(
     source: inventory,
     declaration,
     manifestDigest: manifest.value.manifestDigest,
-    commands: Object.freeze([firstCommand, ...otherCommands]) as NonEmpty<ProjectCommandAuthority>,
+    commands: nonEmptyOf(firstCommand, ...otherCommands),
   });
   verificationPlanCache.add(plan);
   return success(plan);
@@ -1353,7 +1367,7 @@ export function authorizeRemediationChecks(
       "candidate report exclusions must exactly equal selected frozen report paths",
     )]);
   }
-  const checks = plan.commands.map((command) => {
+  return success(mapNonEmpty(plan.commands, (command) => {
     const fields = {
       kind: "authorized-remediation-check" as const,
       scope,
@@ -1363,9 +1377,7 @@ export function authorizeRemediationChecks(
     const check = canonicalRecord({ ...fields, authorityDigest: digestJson(fields) });
     authorizedCheckBindings.set(check, canonicalRecord({ plan, candidate: binding.candidate }));
     return check;
-  });
-  const [head, ...tail] = checks;
-  return success(Object.freeze([head, ...tail]) as NonEmpty<AuthorizedRemediationCheck>);
+  }));
 }
 
 type RemediationProcessObservation = Readonly<{
@@ -1571,7 +1583,7 @@ function blockedAssessment(
     status: "blocked" as const,
     source: plan.source,
     declaration: plan.declaration,
-    failures: Object.freeze([head!, ...tail]) as NonEmpty<DefectFamilyFailure>,
+    failures: nonEmptyOf(head, ...tail),
   };
   const assessment = canonicalRecord({ ...fields, digest: digestJson(fields) });
   assessmentCache.add(assessment);
@@ -1666,7 +1678,7 @@ function evaluateDefectFamilyAccounting(
     declaration: plan.declaration,
     candidateWitnessDigest: candidate.digest,
     candidatePaths: evidence.candidatePaths,
-    repairedChecks: Object.freeze([firstCheck, ...otherChecks]) as NonEmpty<EngineObservedRepairedCheck>,
+    repairedChecks: nonEmptyOf(firstCheck, ...otherChecks),
     provenance: canonicalRecord({
       grouping: "DECLARED" as const,
       rootCause: "DECLARED" as const,

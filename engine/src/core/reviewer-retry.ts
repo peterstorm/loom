@@ -31,6 +31,22 @@ export function reviewerRetryInstruction(route: IssuedSpawnEmissionRoute): strin
     : REVIEWER_EXTRACTION_RETRY_INSTRUCTION;
 }
 
+/** The two admission rules a current standalone retry must satisfy, and the
+ *  escape hatch that keeps a reviewer from inventing an unfrozen path.
+ *
+ *  `pr-test-analyzer` is the role whose remit pushes it toward test files that
+ *  are frequently NOT in the frozen slice, and it was the role behind both live
+ *  rejections of the six-slice campaign. The scope rule alone told it only that
+ *  a location was refused; the frozen file that should have carried the
+ *  assertion — or an honest null — is what it needed to hear. */
+const CURRENT_STANDALONE_RETRY_RULES = [
+  "Satisfy BOTH admission rules:",
+  "1. Every finding's file is either null or a path inside the frozen scope.",
+  "2. The payload conforms exactly to the issued reviewer-payload-schema and reviewer-impact-rubric.",
+  "When the evidence lies outside the frozen scope, name the frozen file that should have carried",
+  "the assertion, or emit an honest null location — never an unfrozen path.",
+].join("\n");
+
 /**
  * The admission diagnostic, surfaced on the retry spawn task.
  *
@@ -51,6 +67,7 @@ export function standaloneRetryTask(
   if (authority.schemaVersion !== 1) {
     return [task, "", "Your previous attempt was rejected by the engine's admission check.",
       ...(diagnostic === null ? [] : [JSON.stringify(diagnostic)]), "",
+      CURRENT_STANDALONE_RETRY_RULES, "",
       `This is your final attempt. ${reviewerRetryInstruction(route)}`].join("\n");
   }
   const marker = diagnostic === null

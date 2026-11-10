@@ -19,6 +19,7 @@
 
 import { match } from "ts-pattern";
 import { editedFilePath, TEST_COMMAND_PATTERNS } from "../core/tool-vocabulary";
+import { parseSandboxReceipt } from "../core/security-sandbox";
 import type { BashToolOutcome, HarnessToolCall } from "./harness-tool-call-types";
 import {
   hasUnbalancedQuotes,
@@ -28,6 +29,8 @@ import {
   type SegmentOp,
 } from "../core/shell-command";
 import { scanSubstitutions } from "../core/shell-substitution";
+import { headBase, resolvedInterpreter, shellWords, unquote } from "../core/shell-command-head";
+import { SH_FAMILY_HEADS } from "../core/shell-heredoc";
 import { extractShellWriteTargets } from "../core/shell-write-targets";
 import type { Evidence, TestReportSummary } from "./types";
 
@@ -247,6 +250,64 @@ function bashRun(outcome: BashToolOutcome): BashRun {
     .exhaustive();
 }
 
+/** The one executor (ADR-0066), by file name: any path prefix qualifies
+ *  (`scripts/…`, `./scripts/…`, an absolute path), but the name must be the
+ *  whole last path segment, so `my-security-sandbox.sh` is not it. */
+const SANDBOX_SCRIPT = "security-sandbox.sh";
+
+/** The nonce grammar the script and the receipt share. */
+const SANDBOX_NONCE_WORD = /^[0-9a-f]{16,64}$/;
+
+/**
+ * The option words of the sandbox script a segment RUNS — its head, behind any
+ * wrapper, or the script argument of a `bash`/`sh` head — or null when the
+ * segment runs something else. `echo scripts/security-sandbox.sh --nonce …`
+ * runs `echo`, so it is no invocation.
+ */
+function sandboxScriptArgs(words: readonly string[]): readonly string[] | null {
+  const [head, ...rest] = words;
+  if (head === undefined) return null;
+  const resolved = resolvedInterpreter(head, rest);
+  if (resolved === null) return null;
+  if (resolved.head === SANDBOX_SCRIPT) return resolved.args;
+  if (!SH_FAMILY_HEADS.has(resolved.head)) return null;
+  // `bash [-x …] scripts/security-sandbox.sh …`: the first operand is the script.
+  const at = resolved.args.findIndex((arg) => !unquote(arg).startsWith("-"));
+  const script = at === -1 ? undefined : resolved.args[at];
+  if (script === undefined || resolved.args.slice(0, at).some((arg) => unquote(arg) === "-c")) return null;
+  return headBase(unquote(script)) === SANDBOX_SCRIPT ? resolved.args.slice(at + 1) : null;
+}
+
+/**
+ * The script's own `--nonce`, from the option words of ONE invocation (every
+ * script option takes one value; `--` ends them and starts the wrapped
+ * command, so a `--nonce` after it belongs to that command). Null unless
+ * exactly one well-formed nonce: a missing, repeated or malformed nonce leaves
+ * the invocation unbound. Read from the same segment that runs the script, so
+ * a nonce cannot come from anywhere but the invocation that names it.
+ */
+function scriptNonce(args: readonly string[]): string | null {
+  const nonces: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    const word = unquote(args[index]);
+    if (word === "--") break;
+    if (word.startsWith("--nonce=")) nonces.push(unquote(word.slice("--nonce=".length)));
+    else if (word === "--nonce") nonces.push(unquote(args[++index] ?? ""));
+    else if (word.startsWith("--") && !word.includes("=")) index++; // the option's value
+  }
+  return nonces.length === 1 && SANDBOX_NONCE_WORD.test(nonces[0]) ? nonces[0] : null;
+}
+
+/** The nonce of every bound sandbox-script invocation a command line makes,
+ *  one per segment that runs the script with exactly one well-formed nonce. */
+function sandboxNonces(command: string): readonly string[] {
+  return splitCommandSegmentsWithOps(command).flatMap(({ text }): readonly string[] => {
+    const args = sandboxScriptArgs(shellWords(stripEnvPrefix(stripComment(text).trim())));
+    const nonce = args === null ? null : scriptNonce(args);
+    return nonce === null ? [] : [nonce];
+  });
+}
+
 function bashEvidence(
   input: Readonly<Record<string, unknown>>,
   bashOutcome: BashToolOutcome,
@@ -269,15 +330,30 @@ function bashEvidence(
   for (const path of shellWrites) {
     events.push({ kind: "FileWrite", path, via: "shell" });
   }
+  const run = bashRun(bashOutcome);
+  // A sandboxed execution mints its receipt as a fact of its own. The command
+  // must RUN the script (sandboxNonces) and the receipt must parse: a
+  // hunter's prose about reproducing a bug is not evidence, so a script call
+  // whose output lost the receipt mints nothing and its finding stays a lead.
+  // An interrupted call is excluded outright — the harness killed the script,
+  // so any receipt in truncated output describes a run that never finished.
+  // The receipt must carry the nonce THAT invocation passed: without it the
+  // receipt is a line of text the call could have printed itself.
+  if (!run.interrupted) {
+    const nonces = new Set(sandboxNonces(command));
+    for (const nonce of nonces) {
+      const receipt = parseSandboxReceipt(run.stdout, nonce);
+      if (receipt.ok) events.push({ kind: "SandboxRun", receipt: receipt.value });
+    }
+  }
   const classified = classifyTestCommandDetailed(command);
   if (classified !== null) {
-    const outcome = bashRun(bashOutcome);
     // The line's exit is attributed to the test segment only when the
     // composition proves ownership (attributeExit) — `false && npx vitest
     // …; true` exits 0 without vitest running, and must not classify as a
     // passing run.
-    const exit = attributeExit(outcome.exit, classified);
-    const report = findReportForSegment(classified.segment, { output: outcome.stdout, exit }, shellWrites);
+    const exit = attributeExit(run.exit, classified);
+    const report = findReportForSegment(classified.segment, { output: run.stdout, exit }, shellWrites);
     //
     // A BACKGROUNDED test segment (`mvn test &`) drops its report too, not
     // just its exit. `judgeTestRun` treats an unknown exit beside a green
@@ -297,7 +373,7 @@ function bashEvidence(
     // so the classes that finished first left a partial-but-green report —
     // and it too arrives here as `exit: null`. Both unfinished cases drop the
     // report; only a run that actually ended may pair one with an exit.
-    const unfinished = classified.isBackgrounded || outcome.interrupted;
+    const unfinished = classified.isBackgrounded || run.interrupted;
     events.push({
       kind: "TestRun",
       command,

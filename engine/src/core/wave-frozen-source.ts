@@ -77,34 +77,10 @@ export function parseWaveFrozenSource(raw: unknown): DomainResult<WaveFrozenSour
       return failed(`wave frozen source file ${index} has an invalid or duplicate path`);
     }
     paths.add(entry.path);
-    if (entry.kind === "absent") {
-      if (!hasExactPlainKeys(entry, ["path", "kind", "digest", "byteLength"]) || entry.digest !== null || entry.byteLength !== 0) {
-        return failed(`wave frozen source absent file ${index} is malformed`);
-      }
-      files.push(Object.freeze({ path: entry.path, kind: "absent", digest: null, byteLength: 0 }));
-      artifacts.push(Object.freeze({ path: entry.path, bytes: null }));
-      continue;
-    }
-    const contentKey = entry.kind === "text" ? "content" : entry.kind === "binary" ? "contentBase64" : null;
-    if (contentKey === null || !hasExactPlainKeys(entry, ["path", "kind", "digest", "byteLength", contentKey]) ||
-        typeof entry.digest !== "string" || !/^[0-9a-f]{64}$/.test(entry.digest) ||
-        !Number.isSafeInteger(entry.byteLength) || (entry.byteLength as number) < 0 || typeof entry[contentKey] !== "string") {
-      return failed(`wave frozen source file ${index} is malformed`);
-    }
-    const content = entry[contentKey] as string;
-    const bytes = entry.kind === "text" ? Buffer.from(content, "utf8") : Buffer.from(content, "base64");
-    if ((entry.kind === "binary" && bytes.toString("base64") !== content) || bytes.byteLength !== entry.byteLength ||
-        sha256Bytes(bytes) !== entry.digest) {
-      return failed(`wave frozen source file ${index} content differs from its digest or length`);
-    }
-    if (entry.kind === "text") {
-      files.push(Object.freeze({ path: entry.path, kind: "text", digest: entry.digest,
-        byteLength: entry.byteLength as number, content }));
-    } else {
-      files.push(Object.freeze({ path: entry.path, kind: "binary", digest: entry.digest,
-        byteLength: entry.byteLength as number, contentBase64: content }));
-    }
-    artifacts.push(Object.freeze({ path: entry.path, bytes }));
+    const parsed = parseFrozenSourceFile(entry, entry.path, index);
+    if (!parsed.ok) return parsed;
+    files.push(parsed.value.file);
+    artifacts.push(parsed.value.artifact);
   }
   const scope = files.map(({ path }) => path);
   const canonical = [...scope].sort();
@@ -119,4 +95,40 @@ export function parseWaveFrozenSource(raw: unknown): DomainResult<WaveFrozenSour
     workspaceHeadSha: raw.workspaceHeadSha,
     files: Object.freeze(files),
   }) };
+}
+
+type ParsedFrozenSourceFile = Readonly<{ file: WaveFrozenSourceFile; artifact: ObservedArtifact }>;
+
+/** Decode one path-checked file entry and re-prove its bytes against its digest and length. */
+function parseFrozenSourceFile(
+  entry: Readonly<Record<string, unknown>>,
+  path: string,
+  index: number,
+): DomainResult<ParsedFrozenSourceFile, string> {
+  if (entry.kind === "absent") {
+    if (!hasExactPlainKeys(entry, ["path", "kind", "digest", "byteLength"]) || entry.digest !== null || entry.byteLength !== 0) {
+      return failed(`wave frozen source absent file ${index} is malformed`);
+    }
+    return { ok: true, value: {
+      file: Object.freeze({ path, kind: "absent", digest: null, byteLength: 0 }),
+      artifact: Object.freeze({ path, bytes: null }),
+    } };
+  }
+  const contentKey = entry.kind === "text" ? "content" : entry.kind === "binary" ? "contentBase64" : null;
+  if (contentKey === null || !hasExactPlainKeys(entry, ["path", "kind", "digest", "byteLength", contentKey]) ||
+      typeof entry.digest !== "string" || !/^[0-9a-f]{64}$/.test(entry.digest) ||
+      !Number.isSafeInteger(entry.byteLength) || (entry.byteLength as number) < 0 || typeof entry[contentKey] !== "string") {
+    return failed(`wave frozen source file ${index} is malformed`);
+  }
+  const content = entry[contentKey] as string;
+  const bytes = entry.kind === "text" ? Buffer.from(content, "utf8") : Buffer.from(content, "base64");
+  if ((entry.kind === "binary" && bytes.toString("base64") !== content) || bytes.byteLength !== entry.byteLength ||
+      sha256Bytes(bytes) !== entry.digest) {
+    return failed(`wave frozen source file ${index} content differs from its digest or length`);
+  }
+  const file: WaveFrozenSourceFile = entry.kind === "text"
+    ? Object.freeze({ path, kind: "text", digest: entry.digest, byteLength: entry.byteLength as number, content })
+    : Object.freeze({ path, kind: "binary", digest: entry.digest, byteLength: entry.byteLength as number,
+      contentBase64: content });
+  return { ok: true, value: { file, artifact: Object.freeze({ path, bytes }) } };
 }

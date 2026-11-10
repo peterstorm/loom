@@ -572,11 +572,12 @@ Do not write `active_task_graph.json`, machine bindings, or evidence ledgers dir
 Protection is layered:
 
 1. TaskGraph mode is `0444` at rest.
-2. `guard-state-file` denies Bash segments that may write guarded paths.
-3. Under Pi, a content-addressed Runtime Revision handshake rejects stale-extension/fresh-CLI mutations before dynamic import; `StateManager` repeats the check before chmod or lock creation.
-4. `StateManager` serializes writes with a lock and atomic rename.
-5. Only hooks and narrowly allowlisted helpers receive write authority.
-6. Run-scoped programs publish immutable evidence outside the protected graph and commit protected state only through typed effects.
+2. `guard-state-file` denies Bash segments that may write guarded paths. The decision is pure (`core/guard-state-file.ts`); the hook (and Pi's `tool_call` twin) arms it only while a task graph exists and resolves the guarded directories — every task-graph state directory, the verification-manifest directory, `LOOM_SUBAGENT_DIR` and `LOOM_MACHINES_DIR` — at decision time, so a re-pointed directory is guarded without a restart.
+3. `guard-subagent-authority` (ADR-0067 D6, amended; Claude Code `Bash` hook, Pi `bash` `tool_call` twin) fences every subagent off from the writing `helper security-audit|orchestration` operations (every operation whose table entry declares the `subagent: "parent-only"` trait), Loom hook entrypoints, nested harnesses and a registered audit run's authority files. The invariant this list relies on: the guard is a shell-string fence with documented gaps, not the proof — a ballot counts only when it matches the capture attestation the capturing harness persisted, and on Pi the parent's `helper security-audit verify --from <run>` is checked against those persisted attestations by the same proof `verify --from` runs, so a Pi restart does not strand a captured run. The full contract — the caller signal on each harness, what is refused and normalised, the run registry and the Pi import gate — is stated once, in [the subagent authority guard](security-audit.md#the-subagent-authority-guard).
+4. Under Pi, a content-addressed Runtime Revision handshake rejects stale-extension/fresh-CLI mutations before dynamic import; `StateManager` repeats the check before chmod or lock creation.
+5. `StateManager` serializes writes with a lock and atomic rename.
+6. Only hooks and narrowly allowlisted helpers receive write authority.
+7. Run-scoped programs publish immutable evidence outside the protected graph and commit protected state only through typed effects.
 
 If a helper says a direct write is blocked, use the named canonical operation; do not use `chmod`, output redirection, an interpreter, or path obfuscation to bypass it.
 
@@ -1353,7 +1354,7 @@ The gate blocks a code mutation until the Loom rules and skills are in the main 
 
 Evidence is read from the session transcript (`transcript_path`) and resets at the last compaction boundary, so after `/compact` the rules must be read and stated again. Non-code targets (`.md`, `.json`, …) are not gated. Bash is gated only through a path heuristic (redirects, `tee`, `cp`, `mv`, `sed -i`, `patch`, `rsync`, `install` onto a code file); an interpreter opening a file for write is not recognized.
 
-Subagents are exempt — the orchestrator owns their compliance (Claude Code: `agent_id` present in the hook input; Pi: the `--mode json --no-session` process signature, or `LOOM_GATE_MODES` to choose modes explicitly). The Claude Code hook fails **closed**: an unreadable transcript or a missing runtime blocks the call.
+Subagents are exempt — the orchestrator owns their compliance (Claude Code: `agent_id` present in the hook input; Pi: only a provable child agent — the explicit `LOOM_PI_SUBAGENT=1` marker, or a headless launch (`json`/`rpc`/`print` mode) whose inherited `LOOM_PI_PARENT_PID` names another process — or `LOOM_GATE_MODES` to choose modes explicitly. A headless parent started without the marker, an interactive `pi` that merely inherited a parent marker, and any malformed marker are gated; an interactive process the subagent authority guard treats as a subagent gets a stderr notice saying so). The Claude Code hook fails **closed**: an unreadable transcript or a missing runtime blocks the call.
 
 | Env | Effect |
 |---|---|
@@ -1366,11 +1367,23 @@ The gate proves context and articulation, never genuine adherence; the substance
 
 ## Linter operations
 
-### Scan a path
+### Scan the project
 
 ```bash
-bun scripts/lint-project.ts engine/src
+bun scripts/lint-project.ts            # the whole repository, from any directory in it
+bun scripts/lint-project.ts engine/src # one directory (exclusions still apply)
 ```
+
+Everything is linted; exclusions are explicit and reasoned. The scan reads every
+lintable file — tests, `.mts`/`.cts`/`.mjs`/`.cjs` and declaration files
+included — minus the `exclude` entries in `.claude/linter/rules/config.json`,
+each with its reason. The full scan runs inside `npm run verify` (the engine's
+`lint` script, between the compiler and the suite), so a violation or a stale
+baseline, exclusion, purity shell, boundary or grant fails verification locally
+and in CI. Loom's purity roots (`engine/src/core`, `machine`, `linter`,
+`parsers`), its declared shells and its boundaries for every `engine/src`
+directory and top-level file live in that config, not in the rule code. See
+[the runner reference](../skills/lint-project/references/runner.md).
 
 ### Rule tiers
 
@@ -1379,12 +1392,11 @@ Regex rules run on every edit (the `immediate` tier, `lint-file` PostToolUse) an
 ### Validate rule files
 
 ```bash
-bun engine/src/cli.ts helper validate-lint-rules .claude/linter/rules
-# Pi project:
-bun engine/src/cli.ts helper validate-lint-rules .pi/linter/rules
+bun engine/src/cli.ts helper validate-lint-rules                         # the project's rules directory
+bun engine/src/cli.ts helper validate-lint-rules .claude/linter/rules    # or name one explicitly
 ```
 
-A nonexistent directory is an error for explicit validation. Runtime loading, by contrast, treats an absent project rules directory as “no project overrides.”
+With no argument the helper validates the project's one rules directory — the first present of `.claude/linter/rules`, then `.pi/linter/rules` (a Pi-only project) — the same directory Claude Code's edit hook, Pi's post-edit lint, the Wave Gate lint and `lint-project` read; the lookup does not depend on the harness. With none present it validates the bundled defaults and says 0 project rules were checked. A nonexistent directory is an error for explicit validation. Runtime loading, by contrast, treats an absent project rules directory as “no project overrides.”
 
 See [Lint Rules](../lint-rules/README.md) for configuration and tiers.
 

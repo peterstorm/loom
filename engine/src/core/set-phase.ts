@@ -30,8 +30,8 @@ export function parseSetPhaseArgs(args: readonly string[]): DomainResult<SetPhas
   let phase: string | null = null;
   let clearArtifact: string | null = null;
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--phase" && args[i + 1]) phase = args[++i]!;
-    else if (args[i] === "--clear-artifact" && args[i + 1]) clearArtifact = args[++i]!;
+    if (args[i] === "--phase" && args[i + 1]) phase = args[++i];
+    else if (args[i] === "--clear-artifact" && args[i + 1]) clearArtifact = args[++i];
   }
   if (phase === null || !isPhase(phase)) {
     return failure(`Invalid or missing --phase. Valid: ${PHASES.join(", ")}`);

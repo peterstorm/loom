@@ -144,7 +144,7 @@ describe("the wave review roster is a selection from the catalog", () => {
 describe("catalog totality", () => {
   it("every agent has exactly one kind and the kinds partition the catalog", () => {
     const kinds: readonly AgentKind["kind"][] =
-      ["phase", "arch-panel", "impl", "reviewer", "spec-check", "review-verifier", "utility"];
+      ["phase", "arch-panel", "impl", "reviewer", "spec-check", "review-verifier", "security-verdict", "utility"];
     const total = kinds.reduce((sum, k) => sum + agentsOfKind(k).length, 0);
     expect(total).toBe(AGENT_POLICIES.length);
   });

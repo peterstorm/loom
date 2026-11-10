@@ -11,6 +11,7 @@ import { isExactGitSha } from "./git-sha";
 import { compareStrings } from "./ordering";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import { parseReviewPath, type ReviewPath } from "./review-packet";
+import { nonEmptyOf } from "./orchestration-contract";
 
 export const STANDALONE_REVIEWER_ROLES = Object.freeze([
   "code-reviewer",
@@ -211,7 +212,7 @@ export function parseReviewMetadata(raw: unknown): ParseResult<StandaloneReviewM
   if (firstKind === undefined) errors.push("review_metadata.requested_kinds must be non-empty");
   const nonEmptyKinds = firstKind === undefined
     ? null
-    : Object.freeze([firstKind, ...otherKinds]) as NonEmpty<StandaloneReviewKind>;
+    : nonEmptyOf(firstKind, ...otherKinds);
   return errors.length > 0 || nonEmptyKinds === null
     ? fail(errors)
     : ok(Object.freeze({
@@ -231,7 +232,8 @@ export function parseReviewMetadata(raw: unknown): ParseResult<StandaloneReviewM
 export function selectStandaloneReviewers(metadata: StandaloneReviewMetadata): NonEmpty<StandaloneReviewerRole> {
   const kinds = new Set(metadata.requestedKinds);
   const all = kinds.has("all");
-  const selected: StandaloneReviewerRole[] = ["code-reviewer"];
+  // code-reviewer always leads the roster; the rest join by scope.
+  const selected: StandaloneReviewerRole[] = [];
   if (!metadata.docsOnly && (all || kinds.has("code") || kinds.has("errors"))) selected.push("silent-failure-hunter");
   if (metadata.sourceOrTestChanged && (all || kinds.has("code") || kinds.has("tests") || kinds.has("errors"))) {
     selected.push("pr-test-analyzer");
@@ -245,7 +247,7 @@ export function selectStandaloneReviewers(metadata: StandaloneReviewMetadata): N
   // roster only when source or tests actually changed — a docs-only or
   // metadata-only scope has nothing for the distill catalog to act on.
   if (kinds.has("simplify") || (all && metadata.sourceOrTestChanged)) selected.push("code-simplifier");
-  return Object.freeze(selected) as NonEmpty<StandaloneReviewerRole>;
+  return nonEmptyOf<StandaloneReviewerRole>("code-reviewer", ...selected);
 }
 
 export function parseScopeSafety(raw: unknown, scope: readonly string[]): ParseResult<NonEmpty<StandaloneScopeSafety>> {

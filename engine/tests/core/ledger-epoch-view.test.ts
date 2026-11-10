@@ -19,6 +19,7 @@ import { judgeRedThenGreen } from "../../src/core/red-then-green";
 import { epochOf, eventsForEpoch, parseEvidenceLine } from "../../src/machine/evidence";
 import type { Epoch, EvidenceRecord } from "../../src/machine/types";
 import { agentIdOf, agentTypeOf, sessionIdOf } from "../fixtures/machine-identities";
+import { aSandboxReceipt } from "../security/sandbox-fixtures";
 
 // --- Fixtures, through the production parsers ---
 
@@ -43,6 +44,9 @@ const testRun = (epoch: Epoch, command: string, exit: number | null, report: unk
     event: { kind: "TestRun", command, ...(exit === null ? {} : { exit }), ...(report === null ? {} : { report }) },
     ...(callId === undefined ? {} : { callId }),
   });
+/** A SandboxRun fact holding the script's receipt shape, with the named facts changed. */
+const sandboxRun = (epoch: Epoch, overrides: Record<string, unknown> = {}) =>
+  record({ epoch, event: { kind: "SandboxRun", receipt: JSON.parse(aSandboxReceipt(overrides)) } });
 
 type FileFixture = Readonly<{ file: string; executed: number; failed: number; skipped: number; collectionError: boolean }>;
 const recordedReport = (source: "junit-xml" | "vitest-json", results: readonly FileFixture[]) => ({
@@ -214,6 +218,73 @@ describe("renderEpoch", () => {
   });
 });
 
+// --- SandboxRun facts ---
+
+describe("renderEpoch: SandboxRun", () => {
+  // The fixture receipt's unchanging lines: each case below pins only the facts it changes.
+  const LIMITS_LINE = "    limits cpu 10s, address space 1024MB, processes 128, file 32MB, wall 60s, scratch 64MB";
+  const ALL_ENFORCED_LINE = "    enforced cpu yes, memory yes, processes yes, file size yes";
+  const SCRATCH_LINE = "    scratch 12B after the run; env PATH,HOME,TMPDIR,LANG,TERM";
+  /** The isolation detail line, with the fixture's facts unless a case changes them. */
+  const isolationLine = ({ loopback = "yes", target = "yes", home = "yes", root = "no", unremounted = 0 } = {}): string =>
+    `    network namespace, loopback up ${loopback}; target read-only ${target}; home read-only ${home}; root read-only ${root}; unremounted mounts ${unremounted}`;
+
+  it("a bounded run states the gate's verdict and every receipt fact", () => {
+    expect(renderEpoch([sandboxRun(IMPL)], IMPL).slice(1)).toEqual([
+      "#0 SandboxRun exit 0",
+      "    within limits",
+      LIMITS_LINE,
+      ALL_ENFORCED_LINE,
+      SCRATCH_LINE,
+      isolationLine(),
+    ]);
+  });
+
+  it("a run with no exit and an unmeasured scratch says both, and is not within limits", () => {
+    expect(renderEpoch([sandboxRun(IMPL, { exit: null, scratchBytes: null })], IMPL).slice(1)).toEqual([
+      "#0 SandboxRun exit none recorded",
+      "    NOT within limits: exit null; scratch footprint unmeasured",
+      LIMITS_LINE,
+      ALL_ENFORCED_LINE,
+      "    scratch unmeasured after the run; env PATH,HOME,TMPDIR,LANG,TERM",
+      isolationLine(),
+    ]);
+  });
+
+  it("a claimed-but-unbounded run names what was not enforced, the open target and the open home", () => {
+    const lines = renderEpoch([
+      sandboxRun(IMPL, {
+        targetReadOnly: false,
+        homeReadOnly: false,
+        readOnlyRoot: true,
+        unremountedMounts: 4,
+        enforced: { cpu: true, memory: false, processes: true, fileSize: false },
+      }),
+    ], IMPL);
+    expect(lines.slice(1)).toEqual([
+      "#0 SandboxRun exit 0",
+      "    NOT within limits: memory limit not applied; file-size limit not applied; target not remounted read-only; " +
+        "home directory not remounted read-only",
+      LIMITS_LINE,
+      "    enforced cpu yes, memory no, processes yes, file size no",
+      SCRATCH_LINE,
+      isolationLine({ target: "no", home: "no", root: "yes", unremounted: 4 }),
+    ]);
+  });
+
+  it("residual exposure is reported but does not unbound a run", () => {
+    const lines = renderEpoch([sandboxRun(IMPL, { readOnlyRoot: false, unremountedMounts: 9 })], IMPL);
+    expect(lines[2]).toBe("    within limits");
+    expect(lines.at(-1)).toBe(isolationLine({ unremounted: 9 }));
+  });
+
+  it("a dead loopback is recorded on the detail line but does not unbound a run", () => {
+    const lines = renderEpoch([sandboxRun(IMPL, { loopbackUp: false })], IMPL);
+    expect(lines[2]).toBe("    within limits");
+    expect(lines.at(-1)).toBe(isolationLine({ loopback: "no" }));
+  });
+});
+
 // --- Settlement agreement (AS-001, SC-002) ---
 
 describe("positions agree with I6 settlement", () => {
@@ -339,6 +410,19 @@ const rawRecordArb = fc.record({
     fc.record({ kind: fc.constant("FileRead"), path: fc.string({ minLength: 1 }) }),
     fc.record({ kind: fc.constant("FileWrite"), path: fc.string({ minLength: 1 }), via: fc.constantFrom("tool", "shell", "other") }),
     fc.record({ kind: fc.constant("TestRun"), command: fc.string(), exit: fc.option(fc.integer(), { nil: undefined }), report: reportArb }),
+    fc.record({
+      kind: fc.constant("SandboxRun"),
+      receipt: fc.record({
+        exit: fc.option(fc.integer({ min: 0, max: 255 }), { nil: null }),
+        scratchBytes: fc.option(fc.nat(), { nil: null }),
+        loopbackUp: fc.boolean(),
+        targetReadOnly: fc.boolean(),
+        homeReadOnly: fc.boolean(),
+        readOnlyRoot: fc.boolean(),
+        unremountedMounts: fc.nat(20),
+        enforced: fc.record({ cpu: fc.boolean(), memory: fc.boolean(), processes: fc.boolean(), fileSize: fc.boolean() }),
+      }).map((overrides) => JSON.parse(aSandboxReceipt(overrides)) as unknown),
+    }),
   ),
 });
 
@@ -368,6 +452,17 @@ describe("properties over admitted records", () => {
         const factLines = renderEpoch(records, epoch).filter((line) => FACT_LINE.test(line));
         expect(factLines).toHaveLength(eventsForEpoch(records, epoch).length);
         factLines.forEach((line, k) => expect(line.startsWith(`#${k} `)).toBe(true));
+      }),
+    );
+  });
+
+  it("every SandboxRun's detail line records its own loopback fact", () => {
+    fc.assert(
+      fc.property(admittedRecordsArb, fc.constantFrom(...EPOCH_POOL), (records, epoch) => {
+        const runs = eventsForEpoch(records, epoch).flatMap((event) => (event.kind === "SandboxRun" ? [event.receipt] : []));
+        const isolation = renderEpoch(records, epoch).filter((line) => line.startsWith("    network namespace"));
+        expect(isolation).toEqual(runs.map((receipt) => expect.stringMatching(
+          new RegExp(`^    network namespace, loopback up ${receipt.loopbackUp ? "yes" : "no"}; `))));
       }),
     );
   });

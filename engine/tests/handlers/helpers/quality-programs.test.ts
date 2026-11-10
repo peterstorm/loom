@@ -192,11 +192,13 @@ describe("quality-program helper boundaries", () => {
       "applyWaveFacadeSubmission",
       "inspectRemediationFacade",
       "inspectStandaloneFacade",
+      "parseCliBindableFacadeProgram",
       "parseRegisteredFacadeProgram",
       "parseRemediationStartInput",
       "parseStandaloneStartInput",
       "parseWaveGateStartInput",
       "prepareRemediationFacadeStart",
+      "prepareSecurityVerificationFacadeStart",
       "prepareStandaloneSuccessorFacadeStart",
       "prepareWaveGateFacadeStart",
       "publishedReviewerRequest",
@@ -205,13 +207,17 @@ describe("quality-program helper boundaries", () => {
       "renderSpawnTask",
       "replayStandaloneCapturedEvidence",
       "replayStandaloneResultFromEvidence",
+      "replayVerificationOutcome",
+      "replayVerificationResult",
       "restartWaveGateFacade",
       "resumeRemediationFacade",
+      "resumeSecurityVerificationFacade",
       "resumeStandaloneFacade",
       "resumeWaveGateFacade",
       "reviewerProtocolResolver",
       "startPreparedStandaloneSuccessor",
       "startRemediationFacade",
+      "startSecurityVerificationFacade",
       "startStandaloneFacade",
       "startWaveGateFacade",
       "waveAdvisoryDecisionRequestId",
@@ -259,8 +265,12 @@ describe("quality-program helper boundaries", () => {
   });
 
   it("validates source profiles and renders every Pi agent onto the exact local route", () => {
+    // The count is the agents directory's own fact, not a literal every added
+    // agent must chase: the helper validates each `.md` except the README.
+    const agentFiles = readdirSync(join(ROOT, "agents"))
+      .filter((name) => name.endsWith(".md") && name !== "README.md");
     expect(cli(["helper", "model-profiles", "validate", "--agents-dir", "agents"]))
-      .toContain("Validated 28");
+      .toContain(`Validated ${agentFiles.length} Loom agent model profiles.`);
     const output = canonicalTempDir("loom-pi-agents-");
     cleanup.push(output);
     const symlinkTarget = join(output, "source-agent.md");

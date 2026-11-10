@@ -6,7 +6,7 @@
  *   helper orchestration inspect --run <run-directory> --runs-root <root> [--json]
  *   helper orchestration abandon --run <run-directory> --runs-root <root>
  *                                --reason <text> [--superseded-by <run-directory>]
- *   helper orchestration start <architecture|refutation|standalone-review|standalone-disposition|wave-gate|remediation> --run <run-directory>
+ *   helper orchestration start <architecture|refutation|standalone-review|standalone-disposition|wave-gate|remediation|security-verification> --run <run-directory>
  *                              --runs-root <root> < program.json
  *   helper orchestration restart --run <exhausted-wave-run> --new-run <fresh-run-directory>
  *                                --runs-root <root>
@@ -75,11 +75,12 @@ import { match, P } from "ts-pattern";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { recordReadCoverageObservation, runReadCoverage } from "../../orchestration/standalone-read-coverage-evidence";
-import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
+import { readRunBytesNoFollow } from "../../utils/no-follow-fs";
 import { dirname, join, resolve } from "node:path";
 import { observeTaskGraphProjectBoundary, SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
 import { isReviewAgent } from "../../core/agent-catalog-projections";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
+import { describeCause } from "../../utils/describe-cause";
 import { homedir } from "node:os";
 import { readPiRouteGateFacts, resolveEmissionEnvironment } from "../../utils/emission-environment";
 import { httpRouteProbe, observeRouteReachability, type RouteProbePort } from "../../utils/route-endpoint";
@@ -175,6 +176,7 @@ import {
   applyWaveFacadeSubmission,
   inspectRemediationFacade,
   inspectStandaloneFacade,
+  parseCliBindableFacadeProgram,
   parseRegisteredFacadeProgram,
   parseRemediationStartInput,
   prepareRemediationFacadeStart,
@@ -193,13 +195,13 @@ import {
   prepareWaveGateFacadeStart,
   startWaveGateFacade,
   waveAdvisoryDecisionRequestId,
+  type CliBindableFacadeProgram,
+  type CliBindableRegistrationParse,
   type FacadeAction,
   type FacadeDriveResult,
   type ProgramParse,
-  type RemediationStartInputV2,
   type RegisteredStandaloneProgram,
 } from "./programs";
-import type { RegisteredWaveGateProgram } from "../../core/wave-gate-program";
 import { advisoryDecisionApproved, waveGateDecisionMismatch } from "../../core/wave-gate-membership";
 import { parseBoundedReviewerJson } from '../../core/reviewer-protocol';
 import { parseOrchestrationOperation } from "./orchestration-operations";
@@ -215,6 +217,8 @@ import { STANDALONE_LINEAGE_LIMITS, standalonePublicationReferenceSchema } from 
 import { projectStandaloneLineageSource } from "../../core/standalone-review";
 import { type StandaloneDispositionSelection } from "../../core/standalone-review-model";
 import { readAuthenticatedStandaloneLineageSource } from "./programs/standalone-source";
+import { parseSecurityVerificationStart } from "../../core/security-verification";
+import { prepareSecurityVerificationFacadeStart, resumeSecurityVerificationFacade, startSecurityVerificationFacade } from "./programs";
 import { prepareStandaloneDispositionFacadeStart, startStandaloneDispositionFacade,
   resumeStandaloneDispositionFacade, inspectStandaloneDispositionFacade, readSelectedStandaloneDisposition,
   STANDALONE_DISPOSITION_EVENT_RESOURCE_POLICY } from "./programs/standalone-disposition";
@@ -242,7 +246,7 @@ function usage(): HookResult {
       "          optional exact policy: --disposition <absolute Run directory> --disposition-run <id> --disposition-digest <sha256>",
       "  abandon --runs-root <root> --run <run-directory> --reason <text> [--superseded-by <run-directory>]",
       "          (terminal marker; deletes nothing and refuses every operation that would advance the run)",
-      "  start   <architecture|refutation|standalone-review|standalone-disposition|wave-gate|remediation> --runs-root <root> --run <run-directory> < program.json",
+      "  start   <architecture|refutation|standalone-review|standalone-disposition|wave-gate|remediation|security-verification> --runs-root <root> --run <run-directory> < program.json",
       "  restart --runs-root <root> --run <exhausted-wave-run> --new-run <fresh-run-directory>",
       "  recover-orphan --runs-root <root> --run-id <missing-run-id> --wave <N> --digest <sha256> --new-run <fresh-run-directory>",
       "  resume  --runs-root <root> --run <run-directory>",
@@ -1228,75 +1232,6 @@ export async function emitRunAction(handle: RunDirHandle, action: FacadeAction, 
   return printed(emission.output, reportUnverifiedRoutes(action, verdict.unverified));
 }
 
-const START_PROGRAMS = ["architecture", "refutation", "standalone-review", "wave-gate", "remediation", "standalone-disposition"] as const;
-type StartProgram = (typeof START_PROGRAMS)[number];
-
-const isStartProgram = (value: string | undefined): value is StartProgram =>
-  value !== undefined && (START_PROGRAMS as readonly string[]).includes(value);
-
-/**
- * One fully-parsed start request, ready to drive against a Run Directory.
- *
- * Producing this BEFORE the run is bound is what keeps `start` from claiming a
- * Run Directory it then refuses to use. Binding writes the fixed layout and an
- * exclusive `authority.json`, so a payload rejected after that point left a
- * claimed directory behind with no façade action to release it — and, because
- * `registerProgram` admits only a byte-identical re-registration, the operator
- * could not simply correct the payload and retry the same name. The ordering is
- * now structural rather than remembered: the drive needs this value, and this
- * value cannot be built by touching the filesystem.
- */
-type StartRequest =
-  | Readonly<{ kind: "standalone-review"; input: RegisteredStandaloneProgram["input"] }>
-  | Readonly<{ kind: "remediation"; input: RemediationStartInputV2 }>
-  | Readonly<{ kind: "wave-gate"; input: RegisteredWaveGateProgram["input"] }>
-  | Readonly<{ kind: "panel"; registration: RegisteredPanelProgram }>;
-
-function parseStartRequest(program: Exclude<StartProgram, "standalone-disposition">, stdin: string): ProgramParse<StartRequest> {
-  let raw: unknown;
-  try {
-    if (program === "standalone-review") {
-      const decoded = parseBoundedReviewerJson(Buffer.from(stdin), STANDALONE_LINEAGE_LIMITS.retainedBytes);
-      if (!decoded.ok) return { ok: false, message: decoded.error.message };
-      raw = decoded.value;
-    } else raw = JSON.parse(stdin) as unknown;
-  } catch (error) {
-    return { ok: false, message: `program input is invalid JSON: ${error instanceof Error ? error.message : String(error)}` };
-  }
-  if (program === "standalone-review") {
-    const parsed = parseStandaloneStartInput(raw);
-    return parsed.ok ? { ok: true, value: Object.freeze({ kind: program, input: parsed.value }) } : parsed;
-  }
-  if (program === "remediation") {
-    const parsed = parseRemediationStartInput(raw);
-    return parsed.ok ? { ok: true, value: Object.freeze({ kind: program, input: parsed.value }) } : parsed;
-  }
-  if (program === "wave-gate") {
-    const parsed = parseWaveGateStartInput(raw);
-    return parsed.ok ? { ok: true, value: Object.freeze({ kind: program, input: parsed.value }) } : parsed;
-  }
-  const translated = translateLegacyPanelJournal(program, raw);
-  if (!translated.ok) return { ok: false, message: translated.error };
-  if (translated.value.events.length !== 0) {
-    return { ok: false, message: "a fresh orchestration start cannot import pre-existing events" };
-  }
-  const registration = registeredPanelProgram(translated.value, raw);
-  return { ok: true, value: Object.freeze({ kind: "panel", registration }) };
-}
-
-type DirectStartRequest = Exclude<StartRequest, { kind: "remediation" | "wave-gate" }>;
-
-const driveStart = (handle: RunDirHandle, request: DirectStartRequest): Promise<FacadeDriveResult> =>
-  match(request)
-    .with({ kind: "standalone-review" }, ({ input }) => startStandaloneFacade(handle, input))
-    .with({ kind: "panel" }, async ({ registration }) => {
-      const registered = await handle.registerProgram(registration);
-      return registered.ok
-        ? driveRegisteredPanel(handle, registration)
-        : { ok: false as const, message: registered.error.message };
-    })
-    .exhaustive();
-
 /** The Run Directory a start names: both `--runs-root` and `--run`, or the
  *  program's exact usage refusal. */
 function startRunLocation(
@@ -1324,46 +1259,100 @@ async function driveCreatedRun(
   return driven.ok ? emitRunAction(bound.value.handle, driven.action, emission) : { kind: "error", message: driven.message };
 }
 
-async function startOperation(stdin: string, args: readonly string[], emission: Emission): Promise<HookResult> {
-  const program = args[0];
-  if (!isStartProgram(program)) {
-    return { kind: "error", message: `start requires ${START_PROGRAMS.join(", ")}` };
+/** The one parse boundary for a start's program input: a decoder that throws
+ *  is reported as invalid JSON, in one wording for every program. */
+function decodeProgramInput(decode: () => ProgramParse<unknown>): ProgramParse<unknown> {
+  try {
+    return decode();
+  } catch (error) {
+    return { ok: false, message: `program input is invalid JSON: ${describeCause(error)}` };
   }
-  const runArgs = args.slice(1);
-  if (program === "standalone-disposition") return startDispositionOperation(stdin, runArgs, emission);
-  const request = parseStartRequest(program, stdin);
-  if (!request.ok) return { kind: "error", message: request.message };
-  const startRequest = request.value;
-  if (startRequest.kind === "standalone-review" && "schemaVersion" in startRequest.input) {
-    const location = startRunLocation(runArgs, "successor start requires --runs-root and --run");
-    if (!location.ok) return location.result;
-    const prepared = await prepareStandaloneSuccessorFacadeStart(location.runsRoot, location.run, startRequest.input);
-    if (!prepared.ok) return { kind: "error", message: prepared.message };
-    return driveCreatedRun(runArgs, emission, (handle) => startPreparedStandaloneSuccessor(handle, prepared.value));
-  }
-  if (startRequest.kind === "remediation") {
-    const location = startRunLocation(runArgs, "remediation start requires --runs-root and --run");
-    if (!location.ok) return location.result;
-    const prepared = await prepareRemediationFacadeStart({
-      input: startRequest.input,
-      repositoryStartPath: process.cwd(),
-      remediationRunsRoot: location.runsRoot,
-      remediationRun: location.run,
-    });
-    if (!prepared.ok) return { kind: "error", message: prepared.message };
-    return driveCreatedRun(runArgs, emission, (handle) => startRemediationFacade(handle, prepared.value.registration));
-  }
-  if (startRequest.kind === "wave-gate") {
-    const location = startRunLocation(runArgs, "wave-gate start requires --runs-root and --run");
-    if (!location.ok) return location.result;
-    const prepared = prepareWaveGateFacadeStart(startRequest.input, location.runsRoot, location.run);
-    if (!prepared.ok) return { kind: "error", message: prepared.message };
-    return driveCreatedRun(runArgs, emission, (handle) => startWaveGateFacade(handle, prepared.value));
-  }
-  return driveCreatedRun(runArgs, emission, (handle) => driveStart(handle, startRequest));
 }
 
-async function startDispositionOperation(stdin: string, args: readonly string[], emission: Emission): Promise<HookResult> {
+const parseProgramJson = (stdin: string): ProgramParse<unknown> =>
+  decodeProgramInput(() => ({ ok: true, value: JSON.parse(stdin) as unknown }));
+
+/**
+ * How one program starts: parse its input from stdin, prepare it, and only
+ * then claim the Run Directory (`driveCreatedRun`).
+ *
+ * Parsing and preparing BEFORE the run is bound is what keeps `start` from
+ * claiming a Run Directory it then refuses to use. Binding writes the fixed
+ * layout and an exclusive `authority.json`, so a payload rejected after that
+ * point left a claimed directory behind with no façade action to release it —
+ * and, because `registerProgram` admits only a byte-identical re-registration,
+ * the operator could not simply correct the payload and retry the same name.
+ * Every start below reaches `driveCreatedRun` only with a parsed, prepared
+ * program.
+ */
+type ProgramStart = (stdin: string, args: readonly string[], emission: Emission) => Promise<HookResult>;
+
+async function startStandaloneReview(stdin: string, args: readonly string[], emission: Emission): Promise<HookResult> {
+  const raw = decodeProgramInput(() => {
+    const decoded = parseBoundedReviewerJson(Buffer.from(stdin), STANDALONE_LINEAGE_LIMITS.retainedBytes);
+    return decoded.ok ? { ok: true, value: decoded.value } : { ok: false, message: decoded.error.message };
+  });
+  if (!raw.ok) return { kind: "error", message: raw.message };
+  const input = parseStandaloneStartInput(raw.value);
+  if (!input.ok) return { kind: "error", message: input.message };
+  const startInput = input.value;
+  if (!("schemaVersion" in startInput)) return driveCreatedRun(args, emission, (handle) => startStandaloneFacade(handle, startInput));
+  const location = startRunLocation(args, "successor start requires --runs-root and --run");
+  if (!location.ok) return location.result;
+  const prepared = await prepareStandaloneSuccessorFacadeStart(location.runsRoot, location.run, startInput);
+  if (!prepared.ok) return { kind: "error", message: prepared.message };
+  return driveCreatedRun(args, emission, (handle) => startPreparedStandaloneSuccessor(handle, prepared.value));
+}
+
+async function startRemediation(stdin: string, args: readonly string[], emission: Emission): Promise<HookResult> {
+  const raw = parseProgramJson(stdin);
+  if (!raw.ok) return { kind: "error", message: raw.message };
+  const input = parseRemediationStartInput(raw.value);
+  if (!input.ok) return { kind: "error", message: input.message };
+  const location = startRunLocation(args, "remediation start requires --runs-root and --run");
+  if (!location.ok) return location.result;
+  const prepared = await prepareRemediationFacadeStart({
+    input: input.value,
+    repositoryStartPath: process.cwd(),
+    remediationRunsRoot: location.runsRoot,
+    remediationRun: location.run,
+  });
+  if (!prepared.ok) return { kind: "error", message: prepared.message };
+  return driveCreatedRun(args, emission, (handle) => startRemediationFacade(handle, prepared.value.registration));
+}
+
+async function startWaveGate(stdin: string, args: readonly string[], emission: Emission): Promise<HookResult> {
+  const raw = parseProgramJson(stdin);
+  if (!raw.ok) return { kind: "error", message: raw.message };
+  const input = parseWaveGateStartInput(raw.value);
+  if (!input.ok) return { kind: "error", message: input.message };
+  const location = startRunLocation(args, "wave-gate start requires --runs-root and --run");
+  if (!location.ok) return location.result;
+  const prepared = prepareWaveGateFacadeStart(input.value, location.runsRoot, location.run);
+  if (!prepared.ok) return { kind: "error", message: prepared.message };
+  return driveCreatedRun(args, emission, (handle) => startWaveGateFacade(handle, prepared.value));
+}
+
+/** A legacy panel (`architecture` or `refutation`): the journal is translated
+ *  and registered as the run's program before it is driven. */
+const startPanel = (panel: "architecture" | "refutation"): ProgramStart => async (stdin, args, emission) => {
+  const raw = parseProgramJson(stdin);
+  if (!raw.ok) return { kind: "error", message: raw.message };
+  const translated = translateLegacyPanelJournal(panel, raw.value);
+  if (!translated.ok) return { kind: "error", message: translated.error };
+  if (translated.value.events.length !== 0) {
+    return { kind: "error", message: "a fresh orchestration start cannot import pre-existing events" };
+  }
+  const registration = registeredPanelProgram(translated.value, raw.value);
+  return driveCreatedRun(args, emission, async (handle) => {
+    const registered = await handle.registerProgram(registration);
+    return registered.ok
+      ? driveRegisteredPanel(handle, registration)
+      : { ok: false as const, message: registered.error.message };
+  });
+};
+
+async function startStandaloneDisposition(stdin: string, args: readonly string[], emission: Emission): Promise<HookResult> {
   if (Buffer.byteLength(stdin) > STANDALONE_LINEAGE_LIMITS.retainedBytes) return { kind: "error", message: "disposition input exceeds byte budget" };
   const input = parseStandaloneDispositionStartBytes(Buffer.from(stdin));
   if (!input.ok) return { kind: "error", message: input.error.message };
@@ -1372,6 +1361,41 @@ async function startDispositionOperation(stdin: string, args: readonly string[],
   const prepared = await prepareStandaloneDispositionFacadeStart(input.value, location.runsRoot, location.run);
   if (!prepared.ok) return { kind: "error", message: prepared.message };
   return driveCreatedRun(args, emission, (handle) => startStandaloneDispositionFacade(handle, prepared.value));
+}
+
+/** `start security-verification` (ADR-0067): the audit is authenticated and
+ *  the briefs derived BEFORE the run directory is claimed. */
+async function startSecurityVerification(stdin: string, args: readonly string[], emission: Emission): Promise<HookResult> {
+  const raw = parseProgramJson(stdin);
+  if (!raw.ok) return { kind: "error", message: raw.message };
+  const input = parseSecurityVerificationStart(raw.value);
+  if (!input.ok) return { kind: "error", message: input.error };
+  const location = startRunLocation(args, "security-verification start requires --runs-root and --run");
+  if (!location.ok) return location.result;
+  const prepared = prepareSecurityVerificationFacadeStart(input.value, location.runsRoot, location.run);
+  if (!prepared.ok) return { kind: "error", message: prepared.message };
+  return driveCreatedRun(args, emission, (handle) => startSecurityVerificationFacade(handle, prepared.value));
+}
+
+/** Every program `start` accepts, one row each, in the order the usage line
+ *  names them: a new program is one row here, not an edit across a name list,
+ *  an `Exclude` and an if-chain. */
+const START_PROGRAMS: ReadonlyMap<string, ProgramStart> = new Map<string, ProgramStart>([
+  ["architecture", startPanel("architecture")],
+  ["refutation", startPanel("refutation")],
+  ["standalone-review", startStandaloneReview],
+  ["wave-gate", startWaveGate],
+  ["remediation", startRemediation],
+  ["standalone-disposition", startStandaloneDisposition],
+  ["security-verification", startSecurityVerification],
+]);
+
+async function startOperation(stdin: string, args: readonly string[], emission: Emission): Promise<HookResult> {
+  const program = args[0];
+  const start = program === undefined ? undefined : START_PROGRAMS.get(program);
+  return start === undefined
+    ? { kind: "error", message: `start requires ${[...START_PROGRAMS.keys()].join(", ")}` }
+    : start(stdin, args.slice(1), emission);
 }
 
 async function recoverOrphanOperation(args: readonly string[], emission: Emission): Promise<HookResult> {
@@ -1467,6 +1491,8 @@ async function resumeOperation(args: readonly string[], emission: Emission): Pro
           resumeStandaloneDispositionFacade(bound.value.handle, registration))
         .with({ kind: "wave-gate" }, (registration) =>
           resumeWaveGateFacade(bound.value.handle, registration))
+        .with({ kind: "security-verification" }, (registration) =>
+          resumeSecurityVerificationFacade(bound.value.handle, registration))
         .exhaustive();
       if (!driven.ok) return { kind: "error", message: driven.message };
       return emitRunAction(bound.value.handle, driven.action, emission);
@@ -1504,17 +1530,87 @@ async function resumeOperation(args: readonly string[], emission: Emission): Pro
  * is the expected outcome on a harness that captures transcripts itself, where
  * the parent's follow-up submit confirms what the extension already stored. The
  * stored bytes stay authoritative and the run's current action is emitted, the
- * same as any other submit — so an auto-capturing harness walks the one façade
+ * same as every other submit — so an auto-capturing harness walks the one façade
  * path whose happy-path output used to be a bare sentence on stderr and an
  * exit code indistinguishable from a genuine failure.
  */
 type FacadeRegistration = Extract<ReturnType<typeof parseRegisteredFacadeProgram>, { kind: "registered" }>["program"];
+
+/** The parent's CLI paths that write into a reserved request's slot. */
+type SlotWriteOperation = "submit" | "correlate";
+
+/**
+ * The run's program registration as a CLI slot write sees it: none at all, or
+ * the stored record WITH its CLI-bindable facade parse. The pairing is the
+ * type — a stored record without a parse, or a parse without a record, cannot
+ * be written — and the parse can never be a security-verification program.
+ */
+type SlotWriteRegistration =
+  | Readonly<{ kind: "unregistered" }>
+  | Readonly<{ kind: "stored"; stored: unknown; facade: Exclude<CliBindableRegistrationParse, Readonly<{ kind: "native-capture-only" }>> }>;
+
+const UNREGISTERED: SlotWriteRegistration = Object.freeze({ kind: "unregistered" });
+
+/** A reserved request, resolved from its id, with the run's stored program
+ *  registration read once beside it. */
+type ReservedRequestBinding = Readonly<{
+  issued: readonly AgentRequestAuthority[];
+  reserved: AgentRequestAuthority;
+  registration: SlotWriteRegistration;
+}>;
+
+/**
+ * A security verifier slot (ADR-0067) is filled ONLY by native capture: the
+ * harness process that captures the verifier's transcript also writes the
+ * capture attestation `verify --from` requires. `submit` and `correlate` are
+ * the parent's paths for harnesses WITHOUT native capture; into a verifier
+ * slot they would let any caller of this CLI write bytes or a correlator no
+ * harness observed.
+ */
+const verifierSlotRefusal = (operation: SlotWriteOperation): HookResult => ({
+  kind: "error",
+  message: `orchestration ${operation} refused: security-verification verifier output is captured natively only ` +
+    "(Claude Code SubagentStop or the Pi extension), never written through the CLI (ADR-0067)",
+});
+
+/**
+ * The ONE request-binding step every CLI slot write shares: resolve a request
+ * id to the authority this run reserved for it, and read the run's program
+ * registration. It is also the one enforcement point of "a verifier slot is
+ * native-capture only" — a request issued by the security-verification
+ * program, or any request of a run registered as one
+ * (`parseCliBindableFacadeProgram`'s `native-capture-only`), is refused here,
+ * so an operation that binds a request inherits the refusal and the bound
+ * registration's type cannot be a security-verification run.
+ */
+function bindReservedRequest(
+  handle: RunDirHandle,
+  requestId: string,
+  operation: SlotWriteOperation,
+): Readonly<{ ok: true; value: ReservedRequestBinding }> | Readonly<{ ok: false; result: HookResult }> {
+  const issued = handle.readIssuedRequests();
+  if (!issued.ok) return { ok: false, result: { kind: "error", message: issued.error.message } };
+  const reserved = issued.value.find((request) => request.requestId === requestId);
+  if (reserved === undefined) {
+    return { ok: false, result: { kind: "error", message: `request ${requestId} was never reserved in this run` } };
+  }
+  if (reserved.program === "security-verification") return { ok: false, result: verifierSlotRefusal(operation) };
+  const stored = handle.readProgramRegistration();
+  if (!stored.ok) return { ok: false, result: { kind: "error", message: stored.error.message } };
+  const facade = stored.value === null ? null : parseCliBindableFacadeProgram(stored.value);
+  if (facade?.kind === "native-capture-only") return { ok: false, result: verifierSlotRefusal(operation) };
+  const registration: SlotWriteRegistration = facade === null
+    ? UNREGISTERED
+    : Object.freeze({ kind: "stored", stored: stored.value, facade });
+  return { ok: true, value: { issued: issued.value, reserved, registration } };
+}
+
 type SubmissionBinding = Readonly<{
   handle: RunDirHandle;
   requestId: string;
   attempt: 1 | 2;
   reserved: AgentRequestAuthority;
-  facadeRegistration: FacadeRegistration | null;
+  facadeRegistration: CliBindableFacadeProgram | null;
   panelRegistration: RegisteredPanelProgram | null;
 }>;
 
@@ -1533,35 +1629,31 @@ function bindSubmission(args: readonly string[]): SubmissionBindingResult {
   }
   const authority = bound.value.handle.readAuthority();
   if (!authority.ok) return { ok: false, result: { kind: "error", message: authority.error.message } };
-  const issued = bound.value.handle.readIssuedRequests();
-  if (!issued.ok) return { ok: false, result: { kind: "error", message: issued.error.message } };
-  const reserved = issued.value.find((request) => request.requestId === requestId);
-  if (reserved === undefined) {
-    return { ok: false, result: { kind: "error", message: `request ${requestId} was never reserved in this run` } };
-  }
+  const request = bindReservedRequest(bound.value.handle, requestId, "submit");
+  if (!request.ok) return request;
+  const { issued, reserved, registration } = request.value;
   if (reserved.slotId !== slotId || String(reserved.attempt) !== attempt) {
     return { ok: false, result: { kind: "error", message: `request ${requestId} is reserved for slot ${reserved.slotId} attempt ${reserved.attempt}, not ${slotId} attempt ${attempt}` } };
   }
-  const stored = bound.value.handle.readProgramRegistration();
-  if (!stored.ok) return { ok: false, result: { kind: "error", message: stored.error.message } };
-  if (stored.value === null) {
-    const problem = unregisteredReviewerProblem(bound.value.handle, issued.value);
-    if (problem !== null) return { ok: false, result: { kind: "error", message: problem } };
+  const bindTo = (facadeRegistration: CliBindableFacadeProgram | null, panelRegistration: RegisteredPanelProgram | null): SubmissionBindingResult =>
+    ({ ok: true, value: { handle: bound.value.handle, requestId, attempt: Number(attempt) as 1 | 2, reserved, facadeRegistration, panelRegistration } });
+  if (registration.kind === "unregistered") {
+    const problem = unregisteredReviewerProblem(bound.value.handle, issued);
+    return problem === null ? bindTo(null, null) : { ok: false, result: { kind: "error", message: problem } };
   }
-  const facade = stored.value === null ? null : parseRegisteredFacadeProgram(stored.value);
-  if (facade?.kind === "invalid") {
+  const { facade, stored } = registration;
+  if (facade.kind === "invalid") {
     return { ok: false, result: { kind: "error", message: `registered orchestration program is invalid: ${facade.message}` } };
   }
-  const facadeRegistration = facade?.kind === "registered" ? facade.program : null;
+  const facadeRegistration = facade.kind === "registered" ? facade.program : null;
   if (facadeRegistration?.kind === "standalone-disposition") {
     return { ok: false, result: { kind: "error", message: "no-agent standalone disposition publication does not accept submissions" } };
   }
-  const panelRegistration = stored.value === null ? null : parseRegisteredPanelProgram(stored.value);
-  if (stored.value !== null && panelRegistration === null && facadeRegistration === null) {
+  const panelRegistration = parseRegisteredPanelProgram(stored);
+  if (panelRegistration === null && facadeRegistration === null) {
     return { ok: false, result: { kind: "error", message: "registered orchestration program is malformed" } };
   }
-  return { ok: true, value: { handle: bound.value.handle, requestId, attempt: Number(attempt) as 1 | 2,
-    reserved, facadeRegistration, panelRegistration } };
+  return bindTo(facadeRegistration, panelRegistration);
 }
 
 type CapturedSubmission = Readonly<{ semanticRaw: string; artifact: unknown; alreadyCaptured: boolean }>;
@@ -1672,10 +1764,9 @@ async function correlateOperation(args: readonly string[]): Promise<HookResult> 
   if (requestId === null || (harness !== "pi" && harness !== "claude") || nativeId === null) {
     return { kind: "error", message: "--request, --harness (pi or claude), and --native-id are required" };
   }
-  const issued = bound.value.handle.readIssuedRequests();
-  if (!issued.ok) return { kind: "error", message: issued.error.message };
-  const request = issued.value.find((candidate) => candidate.requestId === requestId);
-  if (request === undefined) return { kind: "error", message: `request ${requestId} was never reserved in this run` };
+  const bindingResult = bindReservedRequest(bound.value.handle, requestId, "correlate");
+  if (!bindingResult.ok) return bindingResult.result;
+  const request = bindingResult.value.reserved;
   const agent = argumentValue(args, "--agent");
   if (agent === null || agent !== request.role) {
     return { kind: "error", message: `--agent must match reserved request role ${request.role}` };

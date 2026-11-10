@@ -48,7 +48,7 @@ import {
   writeDirectoryFileAtomicModeNoFollow,
   type AnchoredDirectory,
   type AnchoredDirectoryIdentity,
-} from "./orchestration/no-follow-fs";
+} from "./utils/no-follow-fs";
 import {
   findLegacyWaveGateCompletionReplay,
   deriveLegacyWaveGateCompatibilityAuthority,

@@ -63,7 +63,7 @@ function walkQuotedText<T>(
   let quote: ShellQuoteChar | null = null;
   let halted: T | null = null;
   for (let i = start; i < text.length; i++) {
-    const char = text[i]!;
+    const char = text[i];
     if (quote !== null) {
       if (quote !== "'" && char === "\\") {
         i++;

@@ -46,39 +46,56 @@ export function splitCommandSegmentsWithOps(command: string): readonly CommandSe
       current += char;
       continue;
     }
-    if (char === "&") {
-      if (command[index + 1] === "&") {
-        push("&&");
-        index++;
-        continue;
-      }
-      if (command[index + 1] === ">" || command[index - 1] === ">") {
-        current += char;
-        continue;
-      }
-      push("&");
-      continue;
-    }
-    if (char === "|") {
-      if (command[index + 1] === "|") {
-        push("||");
-        index++;
-      } else if (command[index + 1] === "&") {
-        push("|");
-        index++;
-      } else {
-        push("|");
-      }
-      continue;
-    }
-    if (char === ";" || char === "\n") {
-      push(";");
+    const operator = shellOperatorAt(command, index);
+    if (operator !== null) {
+      if (operator.separator !== null) push(operator.separator);
+      else current += command.slice(index, index + operator.width);
+      index += operator.width - 1;
       continue;
     }
     current += char;
   }
   segments.push({ text: current, opBefore: pendingOp });
   return segments;
+}
+
+/**
+ * An unquoted shell control-operator character run and how many characters it
+ * spans. `separator` is the segment operator it ends a simple command with, or
+ * null when the run BINDS to the redirect around it (the `&` of `&>`/`&>>` or
+ * of a `>&` fd dup) and separates nothing.
+ */
+export type ShellOperator = Readonly<{ separator: SegmentOp | null; width: number }>;
+
+/**
+ * The ONE classification of the unquoted operators that cut a command line,
+ * shared by every walker that cuts one — the segment splitter above and the
+ * heredoc opener-line group walk (core/shell-heredoc). Null when the character
+ * at `index` starts no operator.
+ *
+ *  - `&&` / `||` — two-character separators;
+ *  - `&>` / `&>>` — a redirect: binds, spanning the `&>`;
+ *  - `>&` — an fd dup: its `&` binds;
+ *  - `&` — background: separates;
+ *  - `|&` — pipes stderr too: separates as `|` spanning two characters;
+ *  - `|` — a pipe: separates as `|` (a group walk keeps pipe members together);
+ *  - `;` and newline — separate as `;`, one character each (`;;` is two).
+ */
+export function shellOperatorAt(text: string, index: number): ShellOperator | null {
+  const char = text[index];
+  const next = text[index + 1];
+  if (char === "&") {
+    if (next === "&") return { separator: "&&", width: 2 };
+    if (next === ">") return { separator: null, width: 2 };
+    if (text[index - 1] === ">") return { separator: null, width: 1 };
+    return { separator: "&", width: 1 };
+  }
+  if (char === "|") {
+    if (next === "|") return { separator: "||", width: 2 };
+    return { separator: "|", width: next === "&" ? 2 : 1 };
+  }
+  if (char === ";" || char === "\n") return { separator: ";", width: 1 };
+  return null;
 }
 
 /** Segment texts only, for callers that do not need exit-status ownership. */
@@ -101,7 +118,7 @@ export function hasUnbalancedQuotes(segment: string): boolean {
 /** Strip a trailing unquoted shell comment. */
 export function stripComment(segment: string): string {
   return scanUnquoted<string>(segment, 0, (char, index) =>
-    char === "#" && (index === 0 || /\s/.test(segment[index - 1]!))
+    char === "#" && (index === 0 || /\s/.test(segment[index - 1]))
       ? halt(segment.slice(0, index))
       : CONTINUE) ?? segment;
 }

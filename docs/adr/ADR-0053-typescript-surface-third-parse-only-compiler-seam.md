@@ -160,3 +160,15 @@ such as an unparseable file, come back as values and are never thrown.
 - The seam reuses `import-graph.ts` from the owner-verification package, so skeleton core depends on that
   package's exports. Changing the signature of `parseModule`, `syntaxErrorsOf` or `moduleEdges` now affects
   three seams, not two.
+
+## Amendment (2026-11-10): the regex rule and its `.pi` mirror were removed
+`.claude/linter/rules/inv-1-typescript-compiler-api-seam.json` and its `.pi/linter/rules` mirror were deleted
+(see ADR-0042's amendment of the same date). The boundary grants in `.claude/linter/rules/config.json` —
+`perFileExactAllow` of exactly `typescript` for `import-graph.ts`, `mutation-plan.ts` and `ts-surface.ts` —
+are now the one seam declaration. `no-cross-boundary-imports` enforces them under
+`requireGovernance: ["engine/src/"]`, and no boundary's `allow` admits `typescript`. `TYPESCRIPT_COMPILER_API_SEAMS`
+is derived from those grants in `engine/tests/linter/loom-project-config.ts`, and the machine-purity closure
+audit still reads it. The lockstep tests moved to `engine/tests/linter/project-lint-rules.test.ts` ("the
+TypeScript compiler API enters only through its seams"), which runs the boundary rule against every spelling.
+The cost recorded above, coordinated edits to the constant and both rule copies, is now one edit to the
+grants in `config.json`.

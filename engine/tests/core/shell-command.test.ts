@@ -6,6 +6,7 @@ import {
   stripEnvPrefix,
   classifyFdDupWord,
   hasUnbalancedQuotes,
+  shellOperatorAt,
 } from "../../src/core/shell-command";
 
 /**
@@ -210,5 +211,40 @@ describe("hasUnbalancedQuotes", () => {
 
   it("accepts a quote-free command", () => {
     expect(hasUnbalancedQuotes("npm test --json")).toBe(false);
+  });
+});
+
+/**
+ * shellOperatorAt is the ONE operator table: the segment splitter and the
+ * heredoc opener-line group walk both consume it, so this pins what each
+ * operator does in both (the group walk cuts on every separator but `|`).
+ */
+describe("shellOperatorAt", () => {
+  it.each([
+    ["&&", "a && b", 2, { separator: "&&", width: 2 }],
+    ["||", "a || b", 2, { separator: "||", width: 2 }],
+    ["background &", "a & b", 2, { separator: "&", width: 1 }],
+    ["&> redirect binds", "a &>f", 2, { separator: null, width: 2 }],
+    ["&>> redirect binds over its &>", "a &>>f", 2, { separator: null, width: 2 }],
+    [">& fd dup binds its &", "a 2>&1", 4, { separator: null, width: 1 }],
+    ["pipe", "a | b", 2, { separator: "|", width: 1 }],
+    ["|& pipes stderr too", "a |& b", 2, { separator: "|", width: 2 }],
+    [";", "a; b", 1, { separator: ";", width: 1 }],
+    ["each ; of ;; is its own separator", "a;; b", 2, { separator: ";", width: 1 }],
+    ["newline", "a\nb", 1, { separator: ";", width: 1 }],
+  ] as const)("%s", (_name, text, index, operator) => {
+    expect(shellOperatorAt(text, index)).toEqual(operator);
+  });
+
+  it.each([
+    ["an ordinary character", "abc", 1],
+    ["a redirect", "a > f", 2],
+    ["past the end", "a", 5],
+  ])("is null at %s", (_name, text, index) => {
+    expect(shellOperatorAt(text, index)).toBeNull();
+  });
+
+  it("keeps a binding operator's characters in the segment it belongs to", () => {
+    expect(splitCommandSegments("cat a &>log; b 2>&1")).toEqual(["cat a &>log", " b 2>&1"]);
   });
 });

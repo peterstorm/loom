@@ -383,7 +383,7 @@ export function parseFindingsBlockResult(output: string): FindingsBlockParseResu
   FINDINGS_BLOCK.lastIndex = 0;
   let body: string | null = null;
   for (let match = FINDINGS_BLOCK.exec(output); match !== null; match = FINDINGS_BLOCK.exec(output)) {
-    body = match[1]!;
+    body = match[1];
   }
   if (body === null) return Object.freeze({ kind: "absent" });
 
@@ -1312,10 +1312,10 @@ export function deduplicateFindingIds(
     // Advancing past every id already taken is what makes the repair actually
     // clear the rejection, in one pass, for any input.
     let ordinal = nextOrdinal(kept, refuted, finding.agent, resolved);
-    let reminted = attributeFindings([finding], finding.agent, ordinal)[0]!;
+    let reminted = attributeFindings([finding], finding.agent, ordinal)[0];
     while (taken.has(reminted.id)) {
       ordinal += 1;
-      reminted = attributeFindings([finding], finding.agent, ordinal)[0]!;
+      reminted = attributeFindings([finding], finding.agent, ordinal)[0];
     }
     taken.add(reminted.id);
     kept.push(reminted);
@@ -1541,12 +1541,15 @@ function retiredPriorFindings(
   return run.prior_finding_ids.flatMap((id) => {
     const finding = prior.get(id);
     if (finding === undefined || !resolvedIds.has(id)) return [];
-    const assessments = run.expected_agents.map((agent) => {
-      const evidence = run.evidence.find((candidate) => candidate.agent === agent)!;
-      return { ...evidence.prior_assessments.find((assessment) => assessment.finding_id === id)!, agent };
+    // resolvedIds holds only findings every reviewer assessed (retirementVotes),
+    // so each expected agent has its assessment; a gap retires nothing.
+    const assessments = run.expected_agents.flatMap((agent) => {
+      const assessment = run.evidence.find((candidate) => candidate.agent === agent)
+        ?.prior_assessments.find((candidate) => candidate.finding_id === id);
+      return assessment === undefined ? [] : [{ ...assessment, agent }];
     });
     const [firstAssessment, ...remainingAssessments] = assessments;
-    return firstAssessment === undefined ? [] : [{
+    return firstAssessment === undefined || assessments.length !== run.expected_agents.length ? [] : [{
       finding,
       resolution: {
         kind: "resolved_by_remediation" as const,
@@ -1586,7 +1589,7 @@ function finalizeReviewRun(task: Task, run: ReviewRun): Task {
       accepted_review_authority: {
         generation: run.generation,
         packet_id: run.packet_id,
-        head_sha: run.workspace_head_sha!,
+        head_sha: run.workspace_head_sha,
         scope: run.workspace_scope,
         run_id: run.wave_gate_run_id,
         authority_digest: run.wave_gate_authority_digest,

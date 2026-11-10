@@ -1,0 +1,11 @@
+{
+  "kind": "regex",
+  "name": "no-non-null-assertion",
+  "description": "Disallow the non-null assertion `x!` in production code — it tells the compiler a value exists without proving it, so the proof the compiler would have demanded never gets written. Test files are exempt: there a failed assumption throws and fails the test, which is the assertion's purpose.",
+  "extensions": [".ts", ".tsx", ".mts", ".cts"],
+  "pattern": "[\\w$)\\]]!(?=[.\\[),;:\\]}])",
+  "flags": "",
+  "excludePatterns": [".test.ts", ".test.tsx", ".test.mts", ".test.cts", ".spec.ts", ".spec.tsx", ".spec.mts", ".spec.cts"],
+  "fixHint": "Prove the value exists: destructure with a guard (`const [first] = xs; if (first === undefined) return …`), use `.at()`/`.find()` and narrow, or restructure so the type already excludes null/undefined.",
+  "enabled": true
+}

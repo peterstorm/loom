@@ -56,6 +56,47 @@ function upstreamKey() {
   throw new Error("no upstream API key found in ~/.config candidates");
 }
 
+/** Forward one captured request to the real upstream, streaming the response
+ *  back to the child and teeing a chat completion's body into `record`. */
+function forwardToUpstream({ req, res, body, record, isChat, key }) {
+  const headers = { ...req.headers, host: `${UPSTREAM_HOST}:${UPSTREAM_PORT}`, authorization: `Bearer ${key}` };
+  delete headers["content-length"];
+  if (body.length > 0) headers["content-length"] = String(body.length);
+  const upstream = httpRequest(
+    { host: UPSTREAM_HOST, port: UPSTREAM_PORT, path: req.url, method: req.method, headers },
+    (upRes) => {
+      const responseChunks = [];
+      res.writeHead(upRes.statusCode ?? 502, upRes.headers);
+      upRes.on("data", (c) => {
+        responseChunks.push(c);
+        res.write(c);
+      });
+      upRes.on("end", () => {
+        res.end();
+        if (isChat) {
+          record.response = {
+            status: upRes.statusCode,
+            raw: Buffer.concat(responseChunks).toString("utf8"),
+          };
+        }
+      });
+      upRes.on("error", () => res.end());
+    },
+  );
+  upstream.on("error", (error) => {
+    // Mark the record: infrastructure unavailability must be REPORTABLE as
+    // such, never re-read later as a route rejection — the classifier
+    // checks this flag before any verdict vocabulary.
+    record.upstreamError = error.message;
+    if (!res.headersSent) {
+      res.writeHead(502, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: `proxy upstream error: ${error.message}` } }));
+    } else res.end();
+  });
+  if (body.length > 0) upstream.write(body);
+  upstream.end();
+}
+
 /** Recording proxy: forwards to the real server, captures request + response. */
 function startRecordingProxy(key) {
   const records = [];
@@ -70,43 +111,7 @@ function startRecordingProxy(key) {
         ? { id: ++seq, at: Date.now(), url: req.url, request: JSON.parse(body.toString("utf8")), response: undefined }
         : { id: ++seq, at: Date.now(), url: req.url, passthrough: true };
       records.push(record);
-
-      const headers = { ...req.headers, host: `${UPSTREAM_HOST}:${UPSTREAM_PORT}`, authorization: `Bearer ${key}` };
-      delete headers["content-length"];
-      if (body.length > 0) headers["content-length"] = String(body.length);
-      const upstream = httpRequest(
-        { host: UPSTREAM_HOST, port: UPSTREAM_PORT, path: req.url, method: req.method, headers },
-        (upRes) => {
-          const responseChunks = [];
-          res.writeHead(upRes.statusCode ?? 502, upRes.headers);
-          upRes.on("data", (c) => {
-            responseChunks.push(c);
-            res.write(c);
-          });
-          upRes.on("end", () => {
-            res.end();
-            if (isChat) {
-              record.response = {
-                status: upRes.statusCode,
-                raw: Buffer.concat(responseChunks).toString("utf8"),
-              };
-            }
-          });
-          upRes.on("error", () => res.end());
-        },
-      );
-      upstream.on("error", (error) => {
-        // Mark the record: infrastructure unavailability must be REPORTABLE as
-        // such, never re-read later as a route rejection — the classifier
-        // checks this flag before any verdict vocabulary.
-        record.upstreamError = error.message;
-        if (!res.headersSent) {
-          res.writeHead(502, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: { message: `proxy upstream error: ${error.message}` } }));
-        } else res.end();
-      });
-      if (body.length > 0) upstream.write(body);
-      upstream.end();
+      forwardToUpstream({ req, res, body, record, isChat, key });
     });
   });
   return new Promise((resolve) => {
@@ -196,13 +201,115 @@ async function directEnforcement(proxyPort, spec, wireToolDef, model) {
   return result;
 }
 
-async function main() {
-  const args = process.argv.slice(2);
+/** `--model <id>` and `--only <tool>` from the command line. */
+function probeArgs(args) {
   const modelIndex = args.indexOf("--model");
-  const model = modelIndex !== -1 ? args[modelIndex + 1] : "glm-5.3-flash-spark-tp2-v14";
   const onlyIndex = args.indexOf("--only");
-  const only = onlyIndex !== -1 ? args[onlyIndex + 1] : undefined;
+  return {
+    model: modelIndex !== -1 ? args[modelIndex + 1] : "glm-5.3-flash-spark-tp2-v14",
+    only: onlyIndex !== -1 ? args[onlyIndex + 1] : undefined,
+  };
+}
 
+/** Track execute-arg records as they arrive, from the child's first event on.
+ *  Identical payloads are recorded once (by fingerprint). Returns the unsubscribe. */
+function watchExecuteArgs(bus, argsEntries) {
+  return bus.onEvent((event) => {
+    if (event.type !== "entry_appended" || event.entry?.customType !== "loom-emission-qual-args") return;
+    const fingerprint = JSON.stringify(event.entry.data);
+    if (!argsEntries.some((e) => e.fingerprint === fingerprint)) {
+      argsEntries.push({ ...event.entry.data, fingerprint, at: Date.now() });
+    }
+  });
+}
+
+/** One phase's closed window bounds: what the final re-analysis re-reads. */
+const phaseBoundsOf = (phase, recordEnd) =>
+  ({ recordStart: phase.recordStart, recordEnd, argsStart: phase.argsStart, argsEnd: phase.argsEnd, promptRejected: phase.promptRejected });
+
+/** One schema's acceptance and violation phases, the direct stage, and its classification. */
+async function qualifyTool({ rpc, records, argsEntries, port, model }, spec) {
+  const toolReport = { schemaDigest: spec.schemaDigest, schemaKB: +(spec.schemaBytes.length / 1024).toFixed(1), acceptance: undefined, violation: undefined, classification: undefined };
+  const fixtureInstruction =
+    `Call the ${spec.registeredToolName} tool exactly once, with arguments EXACTLY this JSON object (no extra or missing fields):\n${spec.fixtureJson}\nDo not call any other tool.`;
+  const acceptancePhase = await runPhase(rpc, records, argsEntries, fixtureInstruction, `acc-${spec.version}`);
+  const acceptanceEnd = records.length;
+  toolReport.acceptance = analyzePhase(spec, acceptancePhase);
+
+  const violationInstruction =
+    `Call the ${spec.registeredToolName} tool exactly once. ${spec.violationInstruction}. Everything else stays exactly as in this JSON:\n${spec.fixtureJson}`;
+  const violationPhase = await runPhase(rpc, records, argsEntries, violationInstruction, `vio-${spec.version}`);
+  const violationEnd = records.length;
+  toolReport.violation = analyzePhase(spec, violationPhase);
+
+  // The direct stage only runs when the child phase produced a wire tool
+  // def to reuse (the enforced-vs-ignored discriminator).
+  const wireDef = toolReport.acceptance.wireToolDef;
+  if (wireDef) {
+    toolReport.directEnforcement = await directEnforcement(port, spec, wireDef, model);
+  }
+
+  toolReport.classification = classifyOutcome(toolReport.acceptance, toolReport.violation, toolReport.directEnforcement);
+  return {
+    toolReport,
+    bounds: { acceptance: phaseBoundsOf(acceptancePhase, acceptanceEnd), violation: phaseBoundsOf(violationPhase, violationEnd) },
+  };
+}
+
+/**
+ * Final re-analysis over the completed record set: a response stream that
+ * finished after its phase was first analyzed mutates the SAME record object
+ * in place, so re-reading the identical [start, end) windows now yields the
+ * final observations — and the classification is recomputed from them, never
+ * from a stale mid-run snapshot.
+ */
+function reanalyze(report, specs, phaseBounds, records, argsEntries) {
+  const phaseWindow = ({ recordStart, recordEnd, argsStart, argsEnd, promptRejected }) => ({
+    phaseRecords: records.slice(recordStart, recordEnd).filter((r) => r.request),
+    phaseArgs: argsEntries.slice(argsStart, argsEnd),
+    promptRejected,
+  });
+  for (const spec of specs) {
+    const toolReport = report.tools[spec.registeredToolName];
+    const bounds = phaseBounds.get(spec.registeredToolName);
+    if (toolReport === undefined || bounds === undefined) continue;
+    toolReport.acceptance = analyzePhase(spec, phaseWindow(bounds.acceptance));
+    toolReport.violation = analyzePhase(spec, phaseWindow(bounds.violation));
+    toolReport.classification = classifyOutcome(toolReport.acceptance, toolReport.violation, toolReport.directEnforcement);
+  }
+}
+
+/** The report and every recorded request/response pair, under recordings/. */
+function writeRecordings(report, records) {
+  writeFileSync(path.join(recordingsDir, "probe-report.json"), JSON.stringify(report, null, 2));
+  for (const record of records) {
+    if (record.request) {
+      writeFileSync(path.join(recordingsDir, `${String(record.id).padStart(3, "0")}-request.json`), JSON.stringify(record.request, null, 2));
+      writeFileSync(path.join(recordingsDir, `${String(record.id).padStart(3, "0")}-response.sse`), record.response?.raw ?? "");
+    }
+  }
+}
+
+/** Qualify every spec over one live child, recording each tool's report and phase bounds; a failure is a report error. */
+async function qualifyAll(context, specs, report, phaseBounds) {
+  const { rpc } = context;
+  try {
+    await rpc.request({ id: "gs1", type: "get_state" }, responseTo.command("get_state"), STATE_TIMEOUT_MS, "get_state");
+    const thinking = await rpc.request({ type: "set_thinking_level", level: "low" }, responseTo.command("set_thinking_level"), STATE_TIMEOUT_MS, "set_thinking_level");
+    if (!thinking.success) report.errors.push(`set_thinking_level rejected: ${JSON.stringify(thinking).slice(0, 200)}`);
+
+    for (const spec of specs) {
+      const { toolReport, bounds } = await qualifyTool(context, spec);
+      report.tools[spec.registeredToolName] = toolReport;
+      phaseBounds.set(spec.registeredToolName, bounds);
+    }
+  } catch (error) {
+    report.errors.push(String(error?.message ?? error));
+  }
+}
+
+async function main() {
+  const { model, only } = probeArgs(process.argv.slice(2));
   const manifest = JSON.parse(readFileSync(path.join(here, "fixtures", "manifest.json"), "utf8"));
   const specs = only ? manifest.filter((s) => s.version === only || s.registeredToolName.includes(only)) : manifest;
   const key = upstreamKey();
@@ -218,15 +325,7 @@ async function main() {
     },
   );
   const argsEntries = [];
-  // Track execute-arg records as they arrive, from the child's first event
-  // on. Identical payloads are recorded once (by fingerprint).
-  const stopArgsWatch = rpc.bus.onEvent((event) => {
-    if (event.type !== "entry_appended" || event.entry?.customType !== "loom-emission-qual-args") return;
-    const fingerprint = JSON.stringify(event.entry.data);
-    if (!argsEntries.some((e) => e.fingerprint === fingerprint)) {
-      argsEntries.push({ ...event.entry.data, fingerprint, at: Date.now() });
-    }
-  });
+  const stopArgsWatch = watchExecuteArgs(rpc.bus, argsEntries);
   // Same-window bounds per phase: the re-analysis before the report is written
   // re-reads EXACTLY these [start, end) windows over the final record objects.
   const phaseBounds = new Map();
@@ -234,40 +333,7 @@ async function main() {
   const report = { model, provider: "desktop-vllm", upstream: UPSTREAM_BASE_URL, startedAt: new Date().toISOString(), tools: {}, errors: [] };
 
   try {
-    await rpc.request({ id: "gs1", type: "get_state" }, responseTo.command("get_state"), STATE_TIMEOUT_MS, "get_state");
-    const thinking = await rpc.request({ type: "set_thinking_level", level: "low" }, responseTo.command("set_thinking_level"), STATE_TIMEOUT_MS, "set_thinking_level");
-    if (!thinking.success) report.errors.push(`set_thinking_level rejected: ${JSON.stringify(thinking).slice(0, 200)}`);
-
-    for (const spec of specs) {
-      const toolReport = { schemaDigest: spec.schemaDigest, schemaKB: +(spec.schemaBytes.length / 1024).toFixed(1), acceptance: undefined, violation: undefined, classification: undefined };
-      const fixtureInstruction =
-        `Call the ${spec.registeredToolName} tool exactly once, with arguments EXACTLY this JSON object (no extra or missing fields):\n${spec.fixtureJson}\nDo not call any other tool.`;
-      const acceptancePhase = await runPhase(rpc, records, argsEntries, fixtureInstruction, `acc-${spec.version}`);
-      const acceptanceEnd = records.length;
-      toolReport.acceptance = analyzePhase(spec, acceptancePhase);
-
-      const violationInstruction =
-        `Call the ${spec.registeredToolName} tool exactly once. ${spec.violationInstruction}. Everything else stays exactly as in this JSON:\n${spec.fixtureJson}`;
-      const violationPhase = await runPhase(rpc, records, argsEntries, violationInstruction, `vio-${spec.version}`);
-      const violationEnd = records.length;
-      toolReport.violation = analyzePhase(spec, violationPhase);
-
-      // The direct stage only runs when the child phase produced a wire tool
-      // def to reuse (the enforced-vs-ignored discriminator).
-      const wireDef = toolReport.acceptance.wireToolDef;
-      if (wireDef) {
-        toolReport.directEnforcement = await directEnforcement(port, spec, wireDef, model);
-      }
-
-      toolReport.classification = classifyOutcome(toolReport.acceptance, toolReport.violation, toolReport.directEnforcement);
-      report.tools[spec.registeredToolName] = toolReport;
-      phaseBounds.set(spec.registeredToolName, {
-        acceptance: { recordStart: acceptancePhase.recordStart, recordEnd: acceptanceEnd, argsStart: acceptancePhase.argsStart, argsEnd: acceptancePhase.argsEnd, promptRejected: acceptancePhase.promptRejected },
-        violation: { recordStart: violationPhase.recordStart, recordEnd: violationEnd, argsStart: violationPhase.argsStart, argsEnd: violationPhase.argsEnd, promptRejected: violationPhase.promptRejected },
-      });
-    }
-  } catch (error) {
-    report.errors.push(String(error?.message ?? error));
+    await qualifyAll({ rpc, records, argsEntries, port, model }, specs, report, phaseBounds);
   } finally {
     stopArgsWatch();
   }
@@ -275,35 +341,12 @@ async function main() {
   await rpc.kill(200);
   server.close();
 
-  // Final re-analysis over the completed record set: a response stream that
-  // finished after its phase was first analyzed mutates the SAME record
-  // object in place, so re-reading the identical [start, end) windows now
-  // yields the final observations — and the classification is recomputed from
-  // them, never from a stale mid-run snapshot.
-  for (const spec of specs) {
-    const toolReport = report.tools[spec.registeredToolName];
-    const bounds = phaseBounds.get(spec.registeredToolName);
-    if (toolReport === undefined || bounds === undefined) continue;
-    const phaseWindow = ({ recordStart, recordEnd, argsStart, argsEnd, promptRejected }) => ({
-      phaseRecords: records.slice(recordStart, recordEnd).filter((r) => r.request),
-      phaseArgs: argsEntries.slice(argsStart, argsEnd),
-      promptRejected,
-    });
-    toolReport.acceptance = analyzePhase(spec, phaseWindow(bounds.acceptance));
-    toolReport.violation = analyzePhase(spec, phaseWindow(bounds.violation));
-    toolReport.classification = classifyOutcome(toolReport.acceptance, toolReport.violation, toolReport.directEnforcement);
-  }
+  reanalyze(report, specs, phaseBounds, records, argsEntries);
   // A malformed chunk in a recorded stream may have dropped an argument
   // fragment: it is an error of the run, never a silently skipped line.
   report.errors.push(...streamErrors(report));
 
-  writeFileSync(path.join(recordingsDir, "probe-report.json"), JSON.stringify(report, null, 2));
-  for (const record of records) {
-    if (record.request) {
-      writeFileSync(path.join(recordingsDir, `${String(record.id).padStart(3, "0")}-request.json`), JSON.stringify(record.request, null, 2));
-      writeFileSync(path.join(recordingsDir, `${String(record.id).padStart(3, "0")}-response.sse`), record.response?.raw ?? "");
-    }
-  }
+  writeRecordings(report, records);
   const stderrText = rpc.stderr();
   if (stderrText) report.stderr = stderrText.slice(0, 800);
 

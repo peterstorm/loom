@@ -22,7 +22,7 @@ import { runGit, type GitOutput, type GitOutputValue, type GitRun } from "./git-
  * undefined (caller falls back to cwd).
  *
  * The shared resolver for callers that need a repository ROOT. It was
- * previously duplicated in `utils/agent-definition.ts` with a bare `catch {}`, so
+ * previously duplicated in `utils/agent-definition.ts` with a bare empty catch, so
  * the same failure was loud here and invisible there — and an unresolved root
  * there silently drops repository-relative agent-definition candidates. One
  * implementation, one diagnostic.
@@ -625,7 +625,7 @@ function decodeGitQuotedPath(token: string): string | null {
   const bytes: number[] = [];
   const encoder = new TextEncoder();
   for (let index = 1; index < token.length - 1; index += 1) {
-    const char = token[index]!;
+    const char = token[index];
     if (char !== "\\") {
       const point = token.codePointAt(index);
       if (point === undefined) return null;
@@ -783,14 +783,14 @@ const isEscapedAt = (line: string, index: number): boolean => {
 
 const nonWhitespaceBefore = (line: string, index: number): string | null => {
   for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-    if (!/\s/.test(line[cursor]!)) return line[cursor]!;
+    if (!/\s/.test(line[cursor])) return line[cursor];
   }
   return null;
 };
 
 const nonWhitespaceAfter = (line: string, index: number): string | null => {
   for (let cursor = index + 1; cursor < line.length; cursor += 1) {
-    if (!/\s/.test(line[cursor]!)) return line[cursor]!;
+    if (!/\s/.test(line[cursor])) return line[cursor];
   }
   return null;
 };
@@ -801,7 +801,7 @@ const matchingGenericClose = (line: string, index: number): number | null => {
   let quote: "'" | '"' | "`" | null = null;
   let escaped = false;
   for (let cursor = index + 1; cursor < line.length; cursor += 1) {
-    const char = line[cursor]!;
+    const char = line[cursor];
     if (quote !== null) {
       if (escaped) escaped = false;
       else if (char === "\\") escaped = true;
@@ -843,7 +843,7 @@ const followsControlFlowCondition = (code: string): boolean => {
   if (!trimmed.endsWith(")")) return false;
   let depth = 0;
   for (let cursor = trimmed.length - 1; cursor >= 0; cursor -= 1) {
-    const char = trimmed[cursor]!;
+    const char = trimmed[cursor];
     if (char === ")") depth += 1;
     else if (char === "(") {
       depth -= 1;
@@ -863,9 +863,9 @@ const canBeginRegexLiteral = (code: string): boolean => {
 };
 
 const beginsRustRawString = (line: string, index: number): Readonly<{ length: number; hashes: number }> | null => {
-  if (index > 0 && /[A-Za-z0-9_]/.test(line[index - 1]!)) return null;
+  if (index > 0 && /[A-Za-z0-9_]/.test(line[index - 1])) return null;
   const match = /^(?:br|rb|r)(#*)"/.exec(line.slice(index));
-  return match === null ? null : Object.freeze({ length: match[0].length, hashes: match[1]!.length });
+  return match === null ? null : Object.freeze({ length: match[0].length, hashes: match[1].length });
 };
 
 /** Project executable code while retaining language lexical and TSX structure across lines. */
@@ -891,7 +891,7 @@ function assertionCodeLine(
   const language = languageOfTestSource(path);
 
   for (let index = 0; index < line.length; index += 1) {
-    const char = line[index]!;
+    const char = line[index];
     const next = line[index + 1];
     const inJsxStructure = isTsx && jsxDepth > 0 &&
       (jsxExpressionDepth === 0 || jsxDepth > jsxExpressionOwnerDepth);
@@ -1131,7 +1131,7 @@ export function countAssertions(diffContent: string): number {
     if (language === "java" && /(assertThat|assertEquals|assertNotNull|assertThrows|verify)\s*\(/.test(code)) { count++; continue; }
     if (language === "ts" && /(expect\s*\(|\.should\.)/.test(code)) { count++; continue; }
     if (language === "python" && /(assert\w*\(|assert [^=]|self\.assert|pytest\.raises)/.test(code)) { count++; continue; }
-    if (language === "rust" && /(assert(_eq)?!|assert_ne!)/.test(code)) { count++; continue; }
+    if (language === "rust" && /(?:assert(?:_eq|_ne)?)!/.test(code)) { count++; continue; }
   }
 
   return count;

@@ -6,8 +6,9 @@
 
 import { readFileSync } from "node:fs";
 import type { HookHandler, PreToolUseInput } from "../../types";
-import { TASK_GRAPH_PATH, UTILITY_AGENTS, pathExistsFailClosed } from "../../config";
-import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS, REVIEW_PANEL_AGENTS, ARCH_PANEL_AGENTS } from "../../core/agent-catalog-projections";
+import { TASK_GRAPH_PATH, pathExistsFailClosed } from "../../config";
+import { UTILITY_AGENTS } from "../../core/phase-policy";
+import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS, REVIEW_PANEL_AGENTS, ARCH_PANEL_AGENTS, SECURITY_AUDIT_AGENTS } from "../../core/agent-catalog-projections";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { resolveClaudeAgentDefinitionPath } from "../../utils/agent-definition";
@@ -22,11 +23,14 @@ import { withBriefMarkerExpanded } from "./implementation-brief-marker";
 export { promptReferencesSkill } from "../../core/agent-skills";
 export type { DeclaredSkills } from "../../core/agent-skills";
 
-/** All agents whose skill we validate */
+/** All agents whose skill we validate. A Loom-namespaced agent absent from
+ *  this set is BLOCKED, so every catalog kind that can be spawned belongs here:
+ *  a missing kind is not a laxer gate, it is a refused spawn. */
 export const VALIDATED_AGENTS: ReadonlySet<string> = new Set([
   ...Object.keys(PHASE_AGENT_MAP),
   ...ARCH_PANEL_AGENTS,
   ...REVIEW_PANEL_AGENTS,
+  ...SECURITY_AUDIT_AGENTS,
   ...IMPL_AGENTS,
   ...REVIEW_AGENTS,
 ]);

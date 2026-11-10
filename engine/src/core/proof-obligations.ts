@@ -1,4 +1,4 @@
-import { canonicalStructuralEquals } from "./orchestration-contract";
+import { canonicalStructuralEquals, mapNonEmpty, nonEmpty, nonEmptyOf, type NonEmpty } from "./orchestration-contract";
 import type { RedThenGreenGap, RedThenGreenObservation, RunRef } from "./red-then-green-types";
 import {
   isViolationReason,
@@ -37,18 +37,6 @@ function parseExactRecordArm<T>(
     ? parse()
     : fail([`${path} contains unexpected field(s): ${surplus.join(", ")}`]);
 }
-
-export type NonEmpty<T> = readonly [T, ...T[]];
-
-const nonEmpty = <T>(head: T, tail: readonly T[]): NonEmpty<T> => {
-  const values: [T, ...T[]] = [head, ...tail];
-  return Object.freeze(values);
-};
-
-const mapNonEmpty = <A, B>(values: NonEmpty<A>, f: (value: A, index: number) => B): NonEmpty<B> => {
-  const [head, ...tail] = values;
-  return nonEmpty(f(head, 0), tail.map((value, index) => f(value, index + 1)));
-};
 
 /** The engine-authored requirements for one implementation task. */
 export type ProofObligation =
@@ -291,9 +279,10 @@ export type AttestationDriftFailureKind = Extract<
   `proof:${(typeof ATTESTATION_DRIFT_BASE_KINDS)[number]}`
 >;
 
-const ATTESTATION_DRIFT_FAILURE_KINDS = Object.freeze(
-  ATTESTATION_DRIFT_BASE_KINDS.map((kind) => `proof:${kind}` as AttestationDriftFailureKind),
-) as readonly [AttestationDriftFailureKind, ...AttestationDriftFailureKind[]];
+const ATTESTATION_DRIFT_FAILURE_KINDS: NonEmpty<AttestationDriftFailureKind> = mapNonEmpty(
+  ATTESTATION_DRIFT_BASE_KINDS,
+  (kind) => `proof:${kind}` as AttestationDriftFailureKind,
+);
 
 export const isAttestationDriftFailureKind = (kind: string): kind is AttestationDriftFailureKind =>
   (ATTESTATION_DRIFT_FAILURE_KINDS as readonly string[]).includes(kind);
@@ -476,7 +465,7 @@ export function deriveProofObligations(input: ProofObligationInput): NonEmpty<Pr
       ? { kind: "declared-artifact-attested" as const, artifact }
       : { kind: "declared-artifact-changed" as const, artifact })),
   ];
-  return nonEmpty(Object.freeze({ kind: "task-completed" }), tail);
+  return nonEmptyOf(Object.freeze({ kind: "task-completed" }), ...tail);
 }
 
 /** Derive the initial aggregate; no observation has been interpreted yet. */
@@ -692,7 +681,7 @@ function requireResultState<T extends ProofObligationResult>(
 ): NonEmpty<T> {
   const [head, ...tail] = results;
   if (!predicate(head) || !tail.every(predicate)) throw new Error(invariantMessage);
-  return nonEmpty(head, tail);
+  return nonEmptyOf(head, ...tail);
 }
 
 const isPendingResult = (result: ProofObligationResult): result is PendingProofResult =>
@@ -736,7 +725,7 @@ export function evaluateProofObligations(
       state: "failed",
       obligations: authoredObligations,
       results,
-      failures: nonEmpty(head, tail),
+      failures: nonEmptyOf(head, ...tail),
     });
   }
 
@@ -1007,8 +996,8 @@ function parseViolations(raw: unknown, path: string): ProofParseResult<NonEmpty<
   if (!Array.isArray(raw) || raw.length === 0) return fail([`${path} must be a non-empty array`]);
   const parsed = raw.map((value: unknown, index) => parseConformanceViolation(value, `${path}[${index}]`));
   const errors = parsed.flatMap((result) => (result.ok ? [] : result.errors));
-  const [head, ...tail] = parsed.flatMap((result) => (result.ok ? [result.value] : []));
-  return errors.length > 0 || head === undefined ? fail(errors) : ok(nonEmpty(head, tail));
+  const violations = nonEmpty(parsed.flatMap((result) => (result.ok ? [result.value] : [])));
+  return errors.length > 0 || violations === null ? fail(errors) : ok(violations);
 }
 
 /** The in-memory observation the settlement shell decided: `not-owed`, or a
@@ -1297,8 +1286,8 @@ const parseNonEmptyArray = <T>(
     else errors.push(...parsed.errors);
   });
   if (errors.length > 0) return fail(errors);
-  const [head, ...tail] = values;
-  return head === undefined ? fail([`${path} must be a non-empty array`]) : ok(nonEmpty(head, tail));
+  const proven = nonEmpty(values);
+  return proven === null ? fail([`${path} must be a non-empty array`]) : ok(proven);
 };
 
 type ParsedProofParts = {

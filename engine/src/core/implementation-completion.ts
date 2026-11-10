@@ -445,7 +445,7 @@ function parseTaskRoster(raw: unknown, path: string): Parsed<readonly [Authorize
   if (counts.get(TASK_BYTE_SCOPE_CHECK_ID_TEXT) !== 1 || counts.size !== 1) {
     return failure([`${path} must contain exactly one engine-owned ${TASK_BYTE_SCOPE_CHECK_ID_TEXT} check`]);
   }
-  return success(Object.freeze([checks.value[0]!]));
+  return success(Object.freeze([checks.value[0]]));
 }
 
 /** Initial Task-local suite: one non-empty engine-owned byte-scope roster. */

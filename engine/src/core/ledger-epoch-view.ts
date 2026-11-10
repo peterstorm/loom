@@ -14,6 +14,7 @@
 
 import { match } from "ts-pattern";
 import type { DomainResult } from "./orchestration-contract/identity";
+import { describeUnboundedRun, sandboxWithinLimits, type SandboxReceipt } from "./security-sandbox";
 import type { TestFileResult, TestReportSummary } from "./structured-test-report";
 import {
   epochOf,
@@ -111,7 +112,30 @@ function renderFact(event: Evidence, position: number): readonly string[] {
       `${DETAIL}exit ${exit === null ? "none recorded" : exit}`,
       ...renderReport(report),
     ])
+    .with({ kind: "SandboxRun" }, ({ receipt }) => [
+      `#${position} SandboxRun exit ${receipt.exit === null ? "none recorded" : receipt.exit}`,
+      ...renderSandboxReceipt(receipt),
+    ])
     .exhaustive();
+}
+
+const yesNo = (fact: boolean): string => (fact ? "yes" : "no");
+
+/** Every fact the receipt carries, and the verdict of the same gate the audit
+ *  applies to a `local` check: a receipt proves the sandbox RAN, and only
+ *  `sandboxWithinLimits` says whether it stayed bounded. The ledger holds the
+ *  whole re-minted receipt, so nothing here is inferred. */
+function renderSandboxReceipt(receipt: SandboxReceipt): readonly string[] {
+  const { limits, enforced } = receipt;
+  return [
+    sandboxWithinLimits(receipt)
+      ? `${DETAIL}within limits`
+      : `${DETAIL}NOT within limits: ${describeUnboundedRun(receipt)}`,
+    `${DETAIL}limits cpu ${limits.cpuSeconds}s, address space ${limits.addressSpaceMb}MB, processes ${limits.processes}, file ${limits.fileSizeMb}MB, wall ${limits.wallClockSeconds}s, scratch ${limits.scratchMb}MB`,
+    `${DETAIL}enforced cpu ${yesNo(enforced.cpu)}, memory ${yesNo(enforced.memory)}, processes ${yesNo(enforced.processes)}, file size ${yesNo(enforced.fileSize)}`,
+    `${DETAIL}scratch ${receipt.scratchBytes === null ? "unmeasured" : `${receipt.scratchBytes}B`} after the run; env ${receipt.allowlistedEnv.join(",")}`,
+    `${DETAIL}network namespace, loopback up ${yesNo(receipt.loopbackUp)}; target read-only ${yesNo(receipt.targetReadOnly)}; home read-only ${yesNo(receipt.homeReadOnly)}; root read-only ${yesNo(receipt.readOnlyRoot)}; unremounted mounts ${receipt.unremountedMounts}`,
+  ];
 }
 
 /** One epoch's facts, numbered by their position in `eventsForEpoch`; an empty epoch is stated. */

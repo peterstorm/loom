@@ -249,11 +249,14 @@ describe("profile scoring", () => {
     const corpus = parseCalibrationCorpus(corpusJson());
     const predictions = parseCalibrationPredictions(predictionsJson());
     if (!corpus.ok || !predictions.ok) throw new Error("fixture did not parse");
-    expect(scoreCalibration(corpus.value, { ...predictions.value, cases: predictions.value.cases.slice(1) }).ok).toBe(false);
+    expect(scoreCalibration(corpus.value, { ...predictions.value, cases: predictions.value.cases.slice(1) })).toEqual({
+      ok: false,
+      errors: ["predictions are missing corpus case 'fixed-race'"],
+    });
     expect(scoreCalibration(corpus.value, {
       ...predictions.value,
       cases: [...predictions.value.cases, { caseId: "foreign", status: "executed", predictions: [] }],
-    }).ok).toBe(false);
+    })).toEqual({ ok: false, errors: ["predictions contain foreign case 'foreign'"] });
     const score = scoreCalibration(corpus.value, predictions.value);
     if (!score.ok) throw new Error("fixture did not score");
     expect(serializeCalibrationScore(score.value)).toBe(serializeCalibrationScore(score.value));

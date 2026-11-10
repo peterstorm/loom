@@ -30,7 +30,7 @@ export function deriveTaskImplementationDispatch(task: Task): TaskImplementation
     return canonicalRecord({
       kind: "escalated" as const,
       receiptId: disposition.receiptId,
-      failureKinds: disposition.failureKinds as NonEmpty<string>,
+      failureKinds: disposition.failureKinds,
     });
   }
   let attestationLine: string | null = null;

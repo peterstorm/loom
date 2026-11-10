@@ -127,11 +127,12 @@ export function parseReviewedArtifacts(
     byPath.set(path.value, Object.freeze({ path: path.value, contentBase64: content.value }));
   }
   const paths = [...byPath.keys()];
+  const ordered = [...byPath.entries()].sort(([left], [right]) => compareStrings(left, right)).map(([, artifact]) => artifact);
   const missing = scope.value.find((scoped) => !paths.some((path) => artifactCovers(scoped, path)));
   if (missing !== undefined) return failed(`reviewed workspace snapshot omitted declared artifact ${missing}`);
   return {
     ok: true,
-    value: Object.freeze({ scope: scope.value, artifacts: Object.freeze(paths.sort(compareStrings).map((path) => byPath.get(path)!)) }),
+    value: Object.freeze({ scope: scope.value, artifacts: Object.freeze(ordered) }),
   };
 }
 

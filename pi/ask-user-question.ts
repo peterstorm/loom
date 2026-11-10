@@ -90,7 +90,7 @@ async function askSingle(parsed: UnambiguousQuestion, ctx: ToolContext): Promise
   const index = rendered.indexOf(selected);
   return index < 0
     ? questionAnswer(question, [], true)
-    : questionAnswer(question, [question.options[index]!.label], false);
+    : questionAnswer(question, [question.options[index].label], false);
 }
 
 async function askMultiple(parsed: UnambiguousQuestion, ctx: ToolContext): Promise<QuestionAnswer> {
@@ -103,14 +103,14 @@ async function askMultiple(parsed: UnambiguousQuestion, ctx: ToolContext): Promi
     if (choice === DONE) {
       return questionAnswer(
         question,
-        [...selected].sort((left, right) => left - right).map((index) => question.options[index]!.label),
+        [...selected].sort((left, right) => left - right).map((index) => question.options[index].label),
         false,
       );
     }
     if (choice === OTHER) {
       const custom = await ctx.ui.input(`${question.header}: ${question.question}`, "Type an additional answer");
       if (custom === undefined) return questionAnswer(question, [], true);
-      const chosen = [...selected].sort((left, right) => left - right).map((index) => question.options[index]!.label);
+      const chosen = [...selected].sort((left, right) => left - right).map((index) => question.options[index].label);
       return questionAnswer(question, [...chosen, custom], false);
     }
     const index = options.indexOf(choice);

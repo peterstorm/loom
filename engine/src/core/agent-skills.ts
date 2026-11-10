@@ -13,19 +13,19 @@ export function parseDeclaredSkills(content: string): DeclaredSkills {
   const fm = normalized.match(/^---\n([\s\S]*?)\n---/);
   if (!fm) return { kind: "unreadable", reason: "agent definition has no YAML frontmatter block" };
 
-  const flow = fm[1]!.match(/^skills:[ \t]*\[([^\]]*)\][ \t]*$/m);
+  const flow = fm[1].match(/^skills:[ \t]*\[([^\]]*)\][ \t]*$/m);
   if (flow) {
-    const names = flow[1]!
+    const names = flow[1]
       .split(",")
       .map((name) => name.trim().replace(/^["']|["']$/g, ""))
       .filter((name) => name !== "");
     return names.length === 0 ? { kind: "none" } : { kind: "skills", names };
   }
 
-  const block = fm[1]!.match(/^skills:[ \t]*\n((?:[ \t]+-[ \t]+.+\n?)*)/m);
+  const block = fm[1].match(/^skills:[ \t]*\n((?:[ \t]+-[ \t]+.+\n?)*)/m);
   if (!block) return { kind: "none" };
-  const names = [...block[1]!.matchAll(/^[ \t]+-[ \t]+(.+)$/gm)]
-    .map((match) => match[1]!.trim())
+  const names = [...block[1].matchAll(/^[ \t]+-[ \t]+(.+)$/gm)]
+    .map((match) => match[1].trim())
     .filter((name) => name !== "");
   return names.length === 0 ? { kind: "none" } : { kind: "skills", names };
 }

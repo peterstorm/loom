@@ -68,7 +68,7 @@ export function predecessorAttemptRoster<R extends PredecessorIssuedRequest>(req
     const candidates = requests.filter(request => request.program === "standalone-review" && request.role === role)
       .sort((left, right) => left.attempt - right.attempt);
     const [first, ...rest] = candidates;
-    if (first === undefined || first.attempt !== 1 || rest.length > 1 || (rest.length === 1 && rest[0]!.attempt !== 2)) {
+    if (first === undefined || first.attempt !== 1 || rest.length > 1 || (rest.length === 1 && rest[0].attempt !== 2)) {
       return { ok: false, error: "predecessor context requires exact issued attempt roster" };
     }
     const attempts: NonEmpty<R> = Object.freeze([first, ...rest] as const);
@@ -91,7 +91,7 @@ export function predecessorContextLabel(role: string, attempt: number): string {
 export function predecessorFrozenSourceText(record: PredecessorArchiveRecord, frozenSources: readonly Uint8Array[],
   snapshot: StandalonePreviousSnapshot, label: string, purpose: PredecessorArchivePurpose): string {
   if (record.encoding === "gzip-base64") {
-    return frozenSources.length === 1 ? Buffer.from(frozenSources[0]!).toString("utf8")
+    return frozenSources.length === 1 ? Buffer.from(frozenSources[0]).toString("utf8")
       : JSON.stringify({ kind: "historical-unknown", snapshot });
   }
   return JSON.stringify({ kind: "published-source-reference", snapshot, archive: label, purpose,

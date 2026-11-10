@@ -374,17 +374,28 @@ export function foldVerdictSubmission<Verdict>(input: VerdictSubmissionFoldInput
   if (!parsed.ok) {
     const errorKind = input.classifyRaw(parseTarget);
     const base = errorKind === "request-binding-mismatch" ? input.foreignAuthorityMessage : parsed.errors.join("; ");
-    const message = accepted?.kind === "emission-tool-arguments"
-      ? describePanelVerdictEmissionParseFailure(accepted.call.toolCallId, input.label, base)
-      : accepted?.kind === "extraction-over-refused-call"
-        ? describePanelRefusalPair(accepted.emissionRefusal, base)
-        : base;
+    const message = describeRefusedVerdictParse(accepted, input.label, base);
     return canonicalRecord({ kind: "rejected" as const, errorKind, message });
   }
   const source = selected.kind === "live"
     ? panelVerdictSourceProvenance(selected.binding, selected.selection)
     : EXTRACTION_VERDICT_SOURCE;
   return canonicalRecord({ kind: "accepted" as const, value: parsed.value, source });
+}
+
+/** A refused parse's diagnostic, naming the accepted selection that chose its
+ *  bytes: the accepted call, the retained refusal beside it, or — for the
+ *  baseline and plain extraction — the parse diagnostic alone. */
+function describeRefusedVerdictParse(
+  accepted: AcceptedVerdictSelection | null,
+  label: VerdictSubmissionFoldInput<unknown>["label"],
+  base: string,
+): string {
+  if (accepted?.kind === "emission-tool-arguments") {
+    return describePanelVerdictEmissionParseFailure(accepted.call.toolCallId, label, base);
+  }
+  if (accepted?.kind === "extraction-over-refused-call") return describePanelRefusalPair(accepted.emissionRefusal, base);
+  return base;
 }
 
 /** The identity and payload fields every panel verdict source record carries. */

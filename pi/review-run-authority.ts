@@ -56,13 +56,13 @@ export type PiOrchestrationMarkers = Readonly<{
 }>;
 
 export function orchestrationMarkers(task: string, item: string): PiOrchestrationMarkers | null {
-  const requestIds = [...task.matchAll(/^LOOM_REQUEST_ID:[ \t]*(\S+)[ \t]*$/gm)].map((match) => match[1]!);
-  const contextDigests = [...task.matchAll(/^LOOM_CONTEXT_DIGEST:[ \t]*(\S+)[ \t]*$/gm)].map((match) => match[1]!);
+  const requestIds = [...task.matchAll(/^LOOM_REQUEST_ID:[ \t]*(\S+)[ \t]*$/gm)].map((match) => match[1]);
+  const contextDigests = [...task.matchAll(/^LOOM_CONTEXT_DIGEST:[ \t]*(\S+)[ \t]*$/gm)].map((match) => match[1]);
   if (requestIds.length === 0 && contextDigests.length === 0) return null;
   if (requestIds.length !== 1 || contextDigests.length !== 1) {
     throw new Error(`${item} must carry exactly one LOOM_REQUEST_ID and one LOOM_CONTEXT_DIGEST authority marker`);
   }
-  return Object.freeze({ requestId: requestIds[0]!, contextDigest: contextDigests[0]! });
+  return Object.freeze({ requestId: requestIds[0], contextDigest: contextDigests[0] });
 }
 
 function environmentRunBinding(): SessionRunBinding | null {
@@ -109,7 +109,7 @@ export function sessionRunBinding(
         : `multiple Pi session run bindings contain issued request/context authority ${identities}`,
     );
   }
-  return matches[0]!;
+  return matches[0];
 }
 
 type PiRegisteredReviewProgram =
@@ -140,6 +140,12 @@ export type PiIssuedReviewRequestClass =
     }>
   | Readonly<{
       kind: "refutation-panel-extraction";
+      claim: ReturnType<typeof issuedReviewerPayloadClaim>;
+    }>
+  /** A `security-verification` verifier request (ADR-0067): extraction-only,
+   *  its result parsed by the program itself, never an emission tool. */
+  | Readonly<{
+      kind: "security-verification-extraction";
       claim: ReturnType<typeof issuedReviewerPayloadClaim>;
     }>;
 
@@ -173,6 +179,24 @@ export function classifyPiIssuedReviewRequest(
     });
   }
   return failure({ message: `request ${request.requestId} has no matching registered review program` });
+}
+
+/**
+ * Classify a request of a registered `security-verification` run (ADR-0067):
+ * only that run's own `security-verifier-agent` requests belong to it. Its
+ * claim is the archived no-schema claim, so admission owes no emission tool
+ * and capture keeps final-message extraction — the program admits the bytes.
+ */
+export function classifyPiSecurityVerificationRequest(
+  registeredRunId: string,
+  request: PiIssuedReviewRequest,
+): DomainResult<PiIssuedReviewRequestClass, Readonly<{ message: string }>> {
+  if (request.runId !== registeredRunId) {
+    return failure({ message: `request ${request.requestId} belongs to another orchestration run` });
+  }
+  return request.program === "security-verification" && request.role === "security-verifier-agent"
+    ? success({ kind: "security-verification-extraction", claim: issuedReviewerPayloadClaim({ schemaVersion: 1 }, request) })
+    : failure({ message: `request ${request.requestId} is not a security-verification verifier request` });
 }
 
 type PublishedPiReviewRouteAuthority = Readonly<{
@@ -262,10 +286,13 @@ export function authenticatePiIssuedReviewRequest(
   if (registration.kind === "unclaimed") {
     return Object.freeze({ kind: "unclaimed-program" as const, registration: stored.value });
   }
-  if (registration.program.kind !== "wave-gate" && registration.program.kind !== "standalone-review") {
+  const program = registration.program;
+  if (program.kind !== "wave-gate" && program.kind !== "standalone-review" && program.kind !== "security-verification") {
     return Object.freeze({ kind: "other-program" as const });
   }
-  const classified = classifyPiIssuedReviewRequest(handle.runId, registration.program, request);
+  const classified = program.kind === "security-verification"
+    ? classifyPiSecurityVerificationRequest(handle.runId, request)
+    : classifyPiIssuedReviewRequest(handle.runId, program, request);
   if (!classified.ok) return Object.freeze({ kind: "unclassified" as const, message: classified.error.message });
   // Reservation and registration do not issue a spawn. The exact immutable
   // publication receipt must independently authenticate this same authority.
@@ -291,10 +318,10 @@ export function readPiIssuedSpawnRequest(
     const issued = opened.value.readIssuedRequests();
     if (!issued.ok) return failure({ message: issued.error.message });
     const matches = issued.value.filter((candidate) => candidate.requestId === requestId);
-    if (matches.length !== 1 || matches[0]!.contextDigest !== contextDigest || matches[0]!.role !== agent) {
+    if (matches.length !== 1 || matches[0].contextDigest !== contextDigest || matches[0].role !== agent) {
       return failure({ message: `no unique reserved ${agent} request ${requestId} binds context ${contextDigest}` });
     }
-    const authenticated = authenticatePiIssuedReviewRequest(opened.value, matches[0]!);
+    const authenticated = authenticatePiIssuedReviewRequest(opened.value, matches[0]);
     return authenticated.kind === "authenticated"
       ? qualifyRoute(authenticated.classified, authenticated.published.authority)
       : failure({ message: piIssuedSpawnRequestRefusal(requestId, authenticated) });
@@ -379,7 +406,7 @@ export async function recordPiSpawnCorrelators(
 
   for (const [index, admission] of itemAdmissions.entries()) {
     const { item } = admission;
-    const markers = parsedMarkers[index]!;
+    const markers = parsedMarkers[index];
     if (markers === null) throw new Error("Pi orchestration marker completeness invariant failed");
     const exactRequestId = markers.requestId;
     const request = available.find((candidate) => candidate.requestId === exactRequestId);

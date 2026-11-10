@@ -93,7 +93,7 @@ const edgeOf = (node: ts.Node): Edge | null => {
     return { kind: "import", specifier: node.moduleReference.expression.text, typeOnly: node.isTypeOnly };
   }
   if (ts.isCallExpression(node) && node.arguments.length >= 1) {
-    const first = node.arguments[0]!;
+    const first = node.arguments[0];
     const isModuleCall = node.expression.kind === ts.SyntaxKind.ImportKeyword
       || (ts.isIdentifier(node.expression) && node.expression.text === "require");
     if (isModuleCall && ts.isStringLiteralLike(first)) return { kind: "import", specifier: first.text, typeOnly: false };

@@ -63,8 +63,8 @@ function exactCompletionSuiteError(
     return "accepted suite does not match the exact protected completion roster";
   }
   for (let index = 0; index < authorized.value.checks.length; index += 1) {
-    const expected = authorized.value.checks[index]!;
-    const actual = parsed.value.checks[index]!;
+    const expected = authorized.value.checks[index];
+    const actual = parsed.value.checks[index];
     if (actual.checkId !== expected.checkId || actual.scope !== expected.scope) {
       return "accepted suite does not match the exact protected completion roster";
     }

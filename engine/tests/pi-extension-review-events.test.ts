@@ -6521,6 +6521,8 @@ describe("Pi extension review tool_result integration", () => {
  */
 describe("Pi extension tool_call fail-closed backstops", () => {
   const SESSION = "019fca39-f989-7510-8e62-50dadbcad4a1";
+  // Every call below runs in the same parent session; the tool and input are what vary.
+  const PARENT_CONTEXT = { cwd: ROOT, sessionManager: { getSessionId: () => SESSION } };
 
   it("BLOCKS the call when a guard throws, naming the guard", async () => {
     const pi = await extension();
@@ -6540,7 +6542,7 @@ describe("Pi extension tool_call fail-closed backstops", () => {
             return undefined;
           },
         }),
-      }, { cwd: ROOT, sessionManager: { getSessionId: () => SESSION } });
+      }, PARENT_CONTEXT);
 
       expect(results).toContainEqual(expect.objectContaining({
         block: true,
@@ -6559,6 +6561,45 @@ describe("Pi extension tool_call fail-closed backstops", () => {
     }
   });
 
+  it("BLOCKS the parent's security-audit verify --from of a run its persisted attestations do not prove (ADR-0067)", async () => {
+    const pi = await extension();
+    const command = "loom helper security-audit verify --out /audits/run-1 --from run.verify-w1-000000000000";
+    const results = await pi.emit("tool_call", { toolName: "bash", toolCallId: "call-verify-unproven", input: { command } }, PARENT_CONTEXT);
+    expect(results).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("security-verification import proof (ADR-0067)"),
+    }));
+    const unrelated = await pi.emit("tool_call", { toolName: "bash", toolCallId: "call-status", input: { command: "loom helper security-audit status --out /audits/run-1" } }, PARENT_CONTEXT);
+    expect(unrelated.filter((result) => result !== undefined)).toEqual([]);
+  });
+
+  it("lets the parent's verify --from of a natively captured, attested run through, and blocks it once result.json is altered (ADR-0067)", async () => {
+    const { aRun, huntedRun, removeRuns } = await import("./handlers/security-audit-harness");
+    const { verifiedRun } = await import("./handlers/security-verification-harness");
+    const audit = aRun();
+    try {
+      // The audit's hunt files one confirmed claim; its verifier is then
+      // issued, captured natively (which writes the capture attestation) and
+      // finished — but never witnessed by THIS extension process.
+      await huntedRun({ run: audit, signals: { languages: ["typescript"], servesHttp: true } });
+      const plan = await verifiedRun(audit);
+      const pi = await extension();
+      const command = `loom helper security-audit verify --out ${audit.out} --from ${plan.run}`;
+      const allowed = await pi.emit("tool_call", { toolName: "bash", toolCallId: "call-verify-attested", input: { command } }, PARENT_CONTEXT);
+      expect(allowed.filter((result) => result !== undefined)).toEqual([]);
+
+      const resultPath = join(plan.runsRoot, plan.run, "result.json");
+      writeFileSync(resultPath, readFileSync(resultPath, "utf8").replace("\"critical\"", "\"advisory\""));
+      const blocked = await pi.emit("tool_call", { toolName: "bash", toolCallId: "call-verify-altered", input: { command } }, PARENT_CONTEXT);
+      expect(blocked).toContainEqual(expect.objectContaining({
+        block: true,
+        reason: expect.stringContaining("altered after publication"),
+      }));
+    } finally {
+      removeRuns();
+    }
+  });
+
   it("keeps the direct-edit guard armed when the global TaskGraph is unreadable", async () => {
     const pi = await extension();
     rmSync(statePath, { force: true });
@@ -6569,7 +6610,7 @@ describe("Pi extension tool_call fail-closed backstops", () => {
         toolName: "edit",
         toolCallId: "call-unreadable-global-graph",
         input: { path: "README.md", edits: [] },
-      }, { cwd: ROOT, sessionManager: { getSessionId: () => SESSION } });
+      }, PARENT_CONTEXT);
 
       expect(results).toContainEqual(expect.objectContaining({
         block: true,
@@ -6593,7 +6634,7 @@ describe("Pi extension tool_call fail-closed backstops", () => {
       toolName: "bash",
       toolCallId: "call-malformed-bash",
       input,
-    }, { cwd: ROOT, sessionManager: { getSessionId: () => SESSION } });
+    }, PARENT_CONTEXT);
 
     expect(results).toContainEqual(expect.objectContaining({
       block: true,
@@ -6628,7 +6669,6 @@ describe("Pi extension tool_call fail-closed backstops", () => {
 
   it("REFUSES a second spawn that reuses a live toolCallId in the same session", async () => {
     const pi = await extension();
-    const context = { cwd: ROOT, sessionManager: { getSessionId: () => SESSION } };
     const input = {
       agent: "code-reviewer",
       task: "LOOM_REVIEW_CONTEXT: standalone\nReview the exact frozen scope.",
@@ -6638,7 +6678,7 @@ describe("Pi extension tool_call fail-closed backstops", () => {
     // The first spawn reserves lifecycle identity under this toolCallId.
     expect(await pi.emit("tool_call", {
       toolName: "subagent", toolCallId: "call-duplicate", input,
-    }, context)).toEqual([undefined]);
+    }, PARENT_CONTEXT)).toEqual([undefined]);
 
     // The second must be refused: cleanup and result correlation are keyed by
     // toolCallId, so two live spawns sharing one would have their reservations
@@ -6646,7 +6686,7 @@ describe("Pi extension tool_call fail-closed backstops", () => {
     // the first's bindings.
     const repeated = await pi.emit("tool_call", {
       toolName: "subagent", toolCallId: "call-duplicate", input,
-    }, context);
+    }, PARENT_CONTEXT);
 
     expect(repeated).toContainEqual(expect.objectContaining({
       block: true,
@@ -6663,7 +6703,7 @@ describe("Pi extension tool_call fail-closed backstops", () => {
         task: "LOOM_REVIEW_CONTEXT: standalone\nReview the exact frozen scope.",
         agentScope: "user",
       },
-    }, { cwd: ROOT, sessionManager: { getSessionId: () => SESSION } });
+    }, PARENT_CONTEXT);
 
     expect(results).toContainEqual(expect.objectContaining({
       block: true,

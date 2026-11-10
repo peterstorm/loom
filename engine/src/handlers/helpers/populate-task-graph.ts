@@ -23,7 +23,7 @@ import {
   renderProjectVerificationCoverage,
   type FrozenVerificationManifest,
 } from "../../core/verification-manifest";
-import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
+import { readRunBytesNoFollow } from "../../utils/no-follow-fs";
 import { observeSpecIndex } from "../../orchestration/spec-index-observation";
 import { specIndexUnavailableMessage } from "../../core/requirement-coverage";
 import { captureDeclaredArtifactBaselineAtRevision } from "../../utils/declared-artifact-snapshot";

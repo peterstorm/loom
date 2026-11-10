@@ -20,7 +20,7 @@ import {
   recoverStaleDirectoryLock,
   writeDirectoryFileExclusiveNoFollow,
   withAnchoredDirectoryHandleLock,
-} from "../../src/orchestration/no-follow-fs";
+} from "../../src/utils/no-follow-fs";
 
 /** A pid the kernel reports gone, so liveness is decided and not assumed. */
 function deadPid(): number {

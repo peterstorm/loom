@@ -98,6 +98,52 @@ function parsePhase(v: unknown, index: number, isLast: boolean): ParseResult<Raw
   return parseOk({ terminal: false, id, allowedTools, advance: advance.value });
 }
 
+function parseEnforcedTools(raw: unknown): ParseResult<readonly string[]> {
+  if (!isStringArray(raw) || raw.length === 0) {
+    return parseErr("machine: enforcedTools must be a non-empty array of tool names");
+  }
+  // Every enforced tool must be one the PreToolUse hook actually intercepts —
+  // enforcing a tool the gate never sees is a guarantee that cannot be kept.
+  for (const tool of raw) {
+    if (!(GATE_WIRED_TOOLS as readonly string[]).includes(tool)) {
+      return parseErr(
+        `machine: enforcedTools contains "${tool}" — the PreToolUse gate is only wired for ${GATE_WIRED_TOOLS.join(", ")} (hooks/hooks.json)`,
+      );
+    }
+  }
+  return parseOk(raw);
+}
+
+function parsePhases(raw: unknown): ParseResult<readonly RawPhaseDef[]> {
+  if (!Array.isArray(raw) || raw.length < 2) {
+    return parseErr("machine: phases must be an array with at least 2 phases (one working, one terminal)");
+  }
+  const phases: RawPhaseDef[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < raw.length; i++) {
+    const parsed = parsePhase(raw[i], i, i === raw.length - 1);
+    if (!parsed.ok) return parsed;
+    if (seen.has(parsed.value.id)) return parseErr(`phases[${i}]: duplicate phase id "${parsed.value.id}"`);
+    seen.add(parsed.value.id);
+    phases.push(parsed.value);
+  }
+  return parseOk(phases);
+}
+
+/** Every allowedTool must be within the machine's jurisdiction — a tool
+ *  listed but not enforced is a config lie the gate would silently ignore. */
+function unenforcedAllowedToolError(phases: readonly RawPhaseDef[], enforcedTools: readonly string[]): string | null {
+  const enforced = new Set(enforcedTools);
+  for (const phase of phases) {
+    for (const tool of phase.allowedTools) {
+      if (!enforced.has(tool)) {
+        return `phase "${phase.id}": allowedTools contains "${tool}" which is not in enforcedTools`;
+      }
+    }
+  }
+  return null;
+}
+
 export function parseMachine(raw: unknown): ParseResult<MachineDef> {
   if (!isRecord(raw)) return parseErr("machine: must be a JSON object");
 
@@ -115,52 +161,21 @@ export function parseMachine(raw: unknown): ParseResult<MachineDef> {
     );
   }
 
-  const enforcedTools = raw.enforcedTools;
-  if (!isStringArray(enforcedTools) || enforcedTools.length === 0) {
-    return parseErr("machine: enforcedTools must be a non-empty array of tool names");
-  }
-  // Every enforced tool must be one the PreToolUse hook actually intercepts —
-  // enforcing a tool the gate never sees is a guarantee that cannot be kept.
-  for (const tool of enforcedTools) {
-    if (!(GATE_WIRED_TOOLS as readonly string[]).includes(tool)) {
-      return parseErr(
-        `machine: enforcedTools contains "${tool}" — the PreToolUse gate is only wired for ${GATE_WIRED_TOOLS.join(", ")} (hooks/hooks.json)`,
-      );
-    }
-  }
+  const enforcedTools = parseEnforcedTools(raw.enforcedTools);
+  if (!enforcedTools.ok) return enforcedTools;
 
-  const phasesRaw = raw.phases;
-  if (!Array.isArray(phasesRaw) || phasesRaw.length < 2) {
-    return parseErr("machine: phases must be an array with at least 2 phases (one working, one terminal)");
-  }
+  const phases = parsePhases(raw.phases);
+  if (!phases.ok) return phases;
 
-  const phases: RawPhaseDef[] = [];
-  const seen = new Set<string>();
-  for (let i = 0; i < phasesRaw.length; i++) {
-    const parsed = parsePhase(phasesRaw[i], i, i === phasesRaw.length - 1);
-    if (!parsed.ok) return parsed;
-    if (seen.has(parsed.value.id)) return parseErr(`phases[${i}]: duplicate phase id "${parsed.value.id}"`);
-    seen.add(parsed.value.id);
-    phases.push(parsed.value);
-  }
-
-  // Every allowedTool must be within the machine's jurisdiction — a tool
-  // listed but not enforced is a config lie the gate would silently ignore.
-  const enforced = new Set(enforcedTools);
-  for (const phase of phases) {
-    for (const tool of phase.allowedTools) {
-      if (!enforced.has(tool)) {
-        return parseErr(`phase "${phase.id}": allowedTools contains "${tool}" which is not in enforcedTools`);
-      }
-    }
-  }
+  const unenforced = unenforcedAllowedToolError(phases.value, enforcedTools.value);
+  if (unenforced !== null) return parseErr(unenforced);
 
   // Proof-site narrowing: the loops above rejected any enforced tool outside
   // GATE_WIRED_TOOLS and any allowed tool outside enforcedTools, so every
   // tool name is transitively gate-wired — these filters drop nothing, they
   // only restate the proof in the type system.
-  const wiredEnforced: GateWiredTool[] = enforcedTools.filter(isGateWired);
-  const wiredPhases: PhaseDef[] = phases.map((p) =>
+  const wiredEnforced: GateWiredTool[] = enforcedTools.value.filter(isGateWired);
+  const wiredPhases: PhaseDef[] = phases.value.map((p) =>
     p.terminal
       ? { terminal: true, id: p.id, allowedTools: p.allowedTools.filter(isGateWired), requires: p.requires }
       : { terminal: false, id: p.id, allowedTools: p.allowedTools.filter(isGateWired), advance: p.advance },

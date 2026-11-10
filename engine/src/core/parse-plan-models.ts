@@ -63,6 +63,7 @@ import type {
 import { parseInvariantId } from "./invariant-id";
 import { isRepoRelativePlanPath, normalizePlanPath } from "./plan-path-match";
 import { COVERABLE_ANCHOR } from "./acceptance-contract";
+import { concatNonEmpty, nonEmpty, nonEmptyOf, type NonEmpty } from "./orchestration-contract";
 import { parseExportBindings } from "./skeleton/bindings";
 import type { ExportBindingsDeclaration } from "./skeleton/types";
 
@@ -175,7 +176,7 @@ function idBlocks(body: string, prefix: string): { id: string; title: string; bl
   const matches = [...body.matchAll(headingRe)];
   return matches.map((m, i) => {
     const start = (m.index ?? 0) + m[0].length;
-    const end = i + 1 < matches.length ? matches[i + 1].index! : body.length;
+    const end = i + 1 < matches.length ? matches[i + 1].index : body.length;
     return { id: m[1], title: m[2].trim(), block: body.slice(start, end) };
   });
 }
@@ -243,7 +244,7 @@ function labelledList(block: string, label: RegExp): LabelledList {
   const lines = block.split("\n").map((line) => line.replace(/\r$/, ""));
   const at = lines.findIndex((line) => label.test(line));
   if (at === -1) return { kind: "absent" };
-  const inline = lines[at]!.replace(label, "").trim();
+  const inline = lines[at].replace(label, "").trim();
   if (inline !== "") return { kind: "inline", value: inline };
   const after = lines.slice(at + 1);
   const firstItem = after.findIndex((line) => line.trim() !== "");
@@ -276,8 +277,8 @@ function siblingDeclaration(block: string): SiblingDeclaration {
   const entries: SiblingEntryPoint[] = [];
   for (const line of list.items) {
     const item = SIBLING_ITEM.exec(line);
-    if (item === null || item[1]!.toLowerCase() === "none") return { status: "malformed", line };
-    entries.push({ path: item[1]!, note: item[2]?.trim() ?? null });
+    if (item === null || item[1].toLowerCase() === "none") return { status: "malformed", line };
+    entries.push({ path: item[1], note: item[2]?.trim() ?? null });
   }
   return entries.length === 0 ? { status: "empty" } : { status: "declared", entries };
 }
@@ -363,32 +364,47 @@ function parseOwnership(block: string): InvariantOwnership {
     ...(matrixTest === null ? [{ kind: "missing-matrix-test" } as const] : []),
     ...(mutation.kind === "refused" ? [mutation.problem] : []),
   ];
-  return { kind: "malformed", problems: [first!, ...rest] };
+  return { kind: "malformed", problems: [first, ...rest] };
 }
 
-/** The types surface, three states plus the problems decidable from the text. */
-function contractTypes(block: string): Readonly<{ types: ContractTypes | null; problems: readonly ContractProblem[] }> {
+/** One part of a contract declaration: its parsed value, or the non-empty
+ *  problems that stopped it — never both, never neither. */
+type ContractPart<T> =
+  | Readonly<{ kind: "parsed"; value: T }>
+  | Readonly<{ kind: "refused"; problems: NonEmpty<ContractProblem> }>;
+
+const parsedPart = <T>(value: T): ContractPart<T> => ({ kind: "parsed", value });
+const refusedPart = <T>(problem: ContractProblem, ...more: readonly ContractProblem[]): ContractPart<T> =>
+  ({ kind: "refused", problems: nonEmptyOf(problem, ...more) });
+const partProblems = (part: ContractPart<unknown>): readonly ContractProblem[] =>
+  part.kind === "refused" ? part.problems : [];
+
+/** The types surface: one of its two declared states, or the problem decidable from the text. */
+function contractTypes(block: string): ContractPart<ContractTypes> {
   const file = fieldValue(block, "Types file");
   const reason = fieldValue(block, "No types reason");
-  if (file === null) return { types: null, problems: [{ kind: "missing-types" }] };
+  if (file === null) return refusedPart({ kind: "missing-types" });
   if (file.toLowerCase() === "none") {
-    return reason === null
-      ? { types: null, problems: [{ kind: "none-without-reason" }] }
-      : { types: { kind: "none", reason }, problems: [] };
+    return reason === null ? refusedPart({ kind: "none-without-reason" }) : parsedPart({ kind: "none", reason });
   }
   return reason === null
-    ? { types: { kind: "file", path: normalizePlanPath(file) }, problems: [] }
-    : { types: null, problems: [{ kind: "reason-with-types-file" }] };
+    ? parsedPart({ kind: "file", path: normalizePlanPath(file) })
+    : refusedPart({ kind: "reason-with-types-file" });
 }
 
 const ACCEPTANCE_LABEL = /^\*\*Acceptance tests:\*\*/i;
 const ACCEPTANCE_ITEM = /^-\s+`?([^`\s]+)`?\s+[—–-]\s+(.+?)\s*$/;
 
-/** The `- path — FR-n, AS-n` items, every problem in them, and no file twice. */
-function contractAcceptance(block: string): Readonly<{ files: readonly ContractAcceptanceFile[]; problems: readonly ContractProblem[] }> {
+/** The `- path — FR-n, AS-n` items, every problem in them, and no file twice:
+ *  every well-formed file (the cross-part checks read them even when a sibling
+ *  line is malformed) and the part as the declaration takes it. */
+function contractAcceptance(block: string): Readonly<{
+  files: readonly ContractAcceptanceFile[];
+  part: ContractPart<NonEmpty<ContractAcceptanceFile>>;
+}> {
   const list = labelledList(block, ACCEPTANCE_LABEL);
-  if (list.kind === "absent") return { files: [], problems: [{ kind: "missing-acceptance" }] };
-  if (list.kind === "inline") return { files: [], problems: [{ kind: "malformed-acceptance", line: list.value }] };
+  if (list.kind === "absent") return { files: [], part: refusedPart({ kind: "missing-acceptance" }) };
+  if (list.kind === "inline") return { files: [], part: refusedPart({ kind: "malformed-acceptance", line: list.value }) };
   const files: ContractAcceptanceFile[] = [];
   const problems: ContractProblem[] = [];
   const seen = new Set<string>();
@@ -398,8 +414,8 @@ function contractAcceptance(block: string): Readonly<{ files: readonly ContractA
       problems.push({ kind: "malformed-acceptance", line });
       continue;
     }
-    const path = normalizePlanPath(item[1]!);
-    const anchors = item[2]!.split(",").map((anchor) => anchor.trim()).filter((anchor) => anchor !== "");
+    const path = normalizePlanPath(item[1]);
+    const anchors = item[2].split(",").map((anchor) => anchor.trim()).filter((anchor) => anchor !== "");
     problems.push(...anchors.filter((anchor) => !COVERABLE_ANCHOR.test(anchor))
       .map((anchor): ContractProblem => ({ kind: "invalid-anchor", path, anchor })));
     problems.push(...[...new Set(anchors.filter((anchor, index) => anchors.indexOf(anchor) !== index))]
@@ -409,9 +425,10 @@ function contractAcceptance(block: string): Readonly<{ files: readonly ContractA
     const [first, ...rest] = anchors.filter((anchor) => COVERABLE_ANCHOR.test(anchor));
     if (first !== undefined) files.push({ path, anchors: [first, ...rest] });
   }
-  return files.length === 0 && problems.length === 0
-    ? { files, problems: [{ kind: "missing-acceptance" }] }
-    : { files, problems };
+  const [problem, ...more] = problems;
+  if (problem !== undefined) return { files, part: refusedPart(problem, ...more) };
+  const listed = nonEmpty(files);
+  return { files, part: listed === null ? refusedPart({ kind: "missing-acceptance" }) : parsedPart(listed) };
 }
 
 /**
@@ -420,12 +437,14 @@ function contractAcceptance(block: string): Readonly<{ files: readonly ContractA
  * exists only when the declaration is complete and consistent.
  */
 function parseContract(block: string): ContractDeclaration {
-  const { types, problems: typeProblems } = contractTypes(block);
-  const { files, problems: acceptanceProblems } = contractAcceptance(block);
+  const types = contractTypes(block);
+  const { files, part: acceptance } = contractAcceptance(block);
   const supportedDomain = fieldValue(block, "Supported domain");
   const rawEntryPoint = fieldValue(block, "Entry point");
   const entryPoint = rawEntryPoint === null ? null : normalizePlanPath(rawEntryPoint);
-  const statement = fieldValue(block, "Statement");
+  const statementLine = fieldValue(block, "Statement");
+  const statement: ContractPart<string> =
+    statementLine === null ? refusedPart({ kind: "missing-statement" }) : parsedPart(statementLine);
   const domainProblems: readonly ContractProblem[] =
     supportedDomain !== null && files.length > 0 &&
     !files.some(({ path }) => path === normalizePlanPath(supportedDomain))
@@ -433,7 +452,10 @@ function parseContract(block: string): ContractDeclaration {
       : [];
   // Frozen paths are hashed through `join(root, path)`: only a path that stays
   // inside the repository may be frozen.
-  const declaredPaths = [...(types?.kind === "file" ? [types.path] : []), ...files.map(({ path }) => path)];
+  const declaredPaths = [
+    ...(types.kind === "parsed" && types.value.kind === "file" ? [types.value.path] : []),
+    ...files.map(({ path }) => path),
+  ];
   const unsafeProblems = [...declaredPaths, ...(entryPoint === null ? [] : [entryPoint])]
     .filter((path) => !isRepoRelativePlanPath(path))
     .map((path): ContractProblem => ({ kind: "unsafe-path", path }));
@@ -442,27 +464,29 @@ function parseContract(block: string): ContractDeclaration {
   const entryProblems: readonly ContractProblem[] = entryPoint !== null && declaredPaths.includes(entryPoint)
     ? [{ kind: "entry-point-frozen", path: entryPoint }]
     : [];
-  const [first, ...rest]: readonly ContractProblem[] = [
-    ...typeProblems,
-    ...acceptanceProblems,
-    ...domainProblems,
-    ...unsafeProblems,
-    ...entryProblems,
-    ...(statement === null ? [{ kind: "missing-statement" } as const] : []),
-  ];
-  if (first !== undefined) return { kind: "malformed", problems: [first, ...rest] };
-  // No problem means every part parsed: types and statement are present and
-  // at least one acceptance file was listed.
-  const [head, ...tail] = files;
+  // Every problem, in one order: types, acceptance, the cross-part checks,
+  // statement. A refused part carries the proof that the list is non-empty.
+  const crossProblems = [...domainProblems, ...unsafeProblems, ...entryProblems];
+  if (types.kind === "refused") {
+    return malformedContract(concatNonEmpty([], types.problems, [...partProblems(acceptance), ...crossProblems, ...partProblems(statement)]));
+  }
+  if (acceptance.kind === "refused") {
+    return malformedContract(concatNonEmpty([], acceptance.problems, [...crossProblems, ...partProblems(statement)]));
+  }
+  if (statement.kind === "refused") return malformedContract(concatNonEmpty(crossProblems, statement.problems));
+  const [problem, ...more] = crossProblems;
+  if (problem !== undefined) return malformedContract(nonEmptyOf(problem, ...more));
   return {
     kind: "declared",
-    types: types!,
-    acceptance: [head!, ...tail],
+    types: types.value,
+    acceptance: acceptance.value,
     supportedDomain: supportedDomain === null ? null : normalizePlanPath(supportedDomain),
     entryPoint,
-    statement: statement!,
+    statement: statement.value,
   };
 }
+
+const malformedContract = (problems: NonEmpty<ContractProblem>): ContractDeclaration => ({ kind: "malformed", problems });
 
 const CANONICAL_SECTIONS = ["Lifecycles", "Pipeline", "Invariants", "Contracts"] as const;
 
@@ -510,12 +534,15 @@ function collectStrays(
   }
 
   // LC/INV/CT-shaped headings outside their sections.
-  for (const m of text.matchAll(/^###\s+((?:LC|INV|CT)[-\s][^\n]*)$/gim)) {
-    const idx = m.index ?? 0;
-    const home = blockGrammar.find(({ prefix }) => new RegExp(`^${prefix}[-\\s]`, "i").test(m[1]))!;
-    if (!inRange(idx, home.s)) {
-      strays.push({ kind: "misplaced-heading", heading: m[1].trim(), home: home.section });
-    }
+  // Scanned per grammar entry, so the entry IS the heading's home: no prefix
+  // can be matched that the grammar does not declare. The prefixes are
+  // disjoint, so sorting by position restores document order.
+  const misplaced = blockGrammar.flatMap(({ s, prefix, section: home }) =>
+    [...text.matchAll(new RegExp(`^###\\s+(${prefix}[-\\s][^\\n]*)$`, "gim"))]
+      .map((m) => ({ index: m.index ?? 0, heading: m[1].trim(), home }))
+      .filter(({ index }) => !inRange(index, s)));
+  for (const { heading, home } of misplaced.sort((left, right) => left.index - right.index)) {
+    strays.push({ kind: "misplaced-heading", heading, home });
   }
 
   // Model field labels outside their sections.

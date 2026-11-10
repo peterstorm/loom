@@ -70,7 +70,7 @@ export async function driveWaveRefutation(
   current: WaveReadiness,
   catalog: PiCatalog,
 ): Promise<WavePhase> {
-  const { handle, manager, registration } = context;
+  const { handle, manager, registration, wave } = context;
   if (!(current.facts.findingCounts.kind === "known" && current.facts.findingCounts.value.activeCritical > 0)) {
     return proceed();
   }
@@ -191,7 +191,7 @@ export async function driveWaveRefutation(
       return {
         ...locked,
         tasks,
-        wave_gates: reconcileWaveBlock(locked.wave_gates, tasks, locked.spec_check, registration.input.wave!),
+        wave_gates: reconcileWaveBlock(locked.wave_gates, tasks, locked.spec_check, wave),
       };
     });
     // The tally retired at least one finding, so the derived snapshot

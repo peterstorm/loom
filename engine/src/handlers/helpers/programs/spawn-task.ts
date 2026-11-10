@@ -12,7 +12,7 @@ import { routedChildLaunchRoute } from "../../../utils/child-launch-route";
 import { verifyStandalonePanelView } from '../../../orchestration/standalone-panel-context';
 import { canonicalRecord, canonicalStructuralEquals, type AgentRequestAuthority } from '../../../core/orchestration-contract';
 import { STANDALONE_REVIEWER_PROTOCOL_V3 } from '../../../core/standalone-lineage-contract';
-import { readRunBytesNoFollow } from '../../../orchestration/no-follow-fs';
+import { readRunBytesNoFollow } from '../../../utils/no-follow-fs';
 import { CONTEXT_PACKET_MAX_BYTES } from '../../../orchestration/stored-context-packets';
 import type { ReviewerProtocolDescriptor } from '../../../core/reviewer-contract';
 import { projectEmissionTaskText, type IssuedSpawnEmissionRoute } from '../../../core/issued-emission-capability';

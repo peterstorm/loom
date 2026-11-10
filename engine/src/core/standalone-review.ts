@@ -45,10 +45,11 @@ import {
   type SemanticPayloadParseError,
   type SlotId,
   type SpawnRequest,
+  nonEmptyOf,
 } from "./orchestration-contract";
 import { readExactDataRecord } from "./orchestration-contract/bytes";
 import { parseEffectReceipt } from "./orchestration-contract/effects";
-import { failure, success } from "./orchestration-contract/identity";
+import { failure, mapNonEmpty, nonEmpty, success } from "./orchestration-contract/identity";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import type { RefutationPanelAuthority } from "./panel-authority";
 import type { IssuedStandaloneReviewerProtocol, ParsedFindings, ReviewerProtocolAuthorityResolver } from "./review-output";
@@ -175,10 +176,10 @@ export function proveStandaloneRosterCompletion(
     attempt: result.authority.attempt,
     payloadFingerprint: fingerprintCapturedReviewerResult(result.value),
   });
-  const accepted = Object.freeze([
+  const accepted = nonEmptyOf(
     toEntry(firstResult),
     ...otherResults.map(toEntry),
-  ]) as NonEmpty<ProvenStandaloneRosterEntry>;
+  );
   const rosterDigest = canonicalDigest(accepted);
   const proof = canonicalRecord({
     schemaVersion: 1 as const,
@@ -186,7 +187,7 @@ export function proveStandaloneRosterCompletion(
     runId: authority.runId,
     rosterDigest,
     accepted,
-    results: Object.freeze([firstResult, ...otherResults]) as NonEmpty<AcceptedAgentResult<CapturedReviewerResult>>,
+    results: nonEmptyOf(firstResult, ...otherResults),
   }) as StandaloneRosterCompletionProof;
   standaloneRosterCompletionCache.set(proof, canonicalRecord({
     authority,
@@ -329,7 +330,7 @@ export function aggregateStandaloneReview(input: {
       findings: Object.freeze(lineage.value.inventory.map(findingOf)) });
     return ok(standaloneAggregateRoute(aggregate));
   }
-  const findings = Object.freeze(transcripts.flatMap(({ agent }, index) => attributeFindings(resolved.value.findings[index]!.drafts, agent)));
+  const findings = Object.freeze(transcripts.flatMap(({ agent }, index) => attributeFindings(resolved.value.findings[index].drafts, agent)));
   if (new Set(findings.map(({ id }) => id)).size !== findings.length) return fail(["attributed standalone finding ids must be distinct across review agents"]);
   const aggregate: StandaloneReviewAggregate = Object.freeze({
     ...standaloneProtocol(authority), runId: authority.runId, subjectId: STANDALONE_REVIEW_SUBJECT,
@@ -341,7 +342,7 @@ export function aggregateStandaloneReview(input: {
 function standaloneAggregateRoute(aggregate: StandaloneReviewAggregate): StandaloneReviewState {
   const [head, ...tail] = standaloneCurrentPanelCriticals(aggregate);
   return head === undefined ? Object.freeze({ kind: "clean", aggregate })
-    : Object.freeze({ kind: "requires-refutation", aggregate, criticals: Object.freeze([head, ...tail]) as NonEmpty<Finding> });
+    : Object.freeze({ kind: "requires-refutation", aggregate, criticals: nonEmptyOf(head, ...tail) });
 }
 
 function standaloneProtocol(value: Exclude<StandaloneReviewProtocol, { schemaVersion: 3 }>): Exclude<StandaloneReviewProtocol, { schemaVersion: 3 }> {
@@ -412,13 +413,14 @@ function finalizeStandaloneSuccessor(aggregate: Extract<StandaloneReviewAggregat
   const advisories: Finding[] = [];
   for (const [index, row] of lineage.value.inventory.entries()) {
     const finding = findingOf(row);
-    const state = lineage.value.dispositions[index]!.state;
+    const state = lineage.value.dispositions[index].state;
     if (finding.severity === "advisory") advisories.push(finding);
     else if (state === "active") survivingCriticals.push(finding);
     else if (state === "refuted") {
       const decision = row.history.at(-1);
-      if (decision?.kind !== "adjudication" || decision.refutations.length === 0) return fail(["refuted history lacks its original votes"]);
-      refutedCriticals.push(Object.freeze({ finding, refutations: decision.refutations as NonEmpty<PanelRefutation> }));
+      const votes = decision?.kind === "adjudication" ? nonEmpty(decision.refutations) : null;
+      if (votes === null) return fail(["refuted history lacks its original votes"]);
+      refutedCriticals.push(Object.freeze({ finding, refutations: votes }));
     }
   }
   return ok(Object.freeze({ schemaVersion: 3, reviewerProtocol: aggregate.reviewerProtocol,
@@ -458,10 +460,14 @@ export function finalizeStandaloneReview(
   for (const finding of criticals) {
     const outcome = byId.get(`${STANDALONE_REVIEW_SUBJECT}:${finding.id}`);
     if (!outcome) return fail([`missing adjudication for critical finding ${finding.id}`]);
-    if (outcome.survives) survivingCriticals.push(finding);
-    else refutedCriticals.push(Object.freeze({
+    if (outcome.survives) {
+      survivingCriticals.push(finding);
+      continue;
+    }
+    // A refuted outcome carries its non-empty refutations by type.
+    refutedCriticals.push(Object.freeze({
       finding,
-      refutations: Object.freeze(outcome.refutations.map(({ lens, reason }) => Object.freeze({ lens, reason }))) as NonEmpty<PanelRefutation>,
+      refutations: mapNonEmpty(outcome.refutations, ({ lens, reason }): PanelRefutation => Object.freeze({ lens, reason })),
     }));
   }
   return ok(Object.freeze({
@@ -593,7 +599,8 @@ export type StandaloneDispositionPublicationReader = (reference: StandaloneDispo
 export function readPublishedStandaloneDisposition(prepared: PreparedStandaloneDisposition,
   reference: StandaloneDispositionPublicationReference, read: StandaloneDispositionPublicationReader,
 ): DomainResult<PublishedStandaloneDisposition, StandaloneLineageError> {
-  if (!dispositions.has(prepared)) return rejectLineage("invalid-disposition", "Publication requires a prepared declaration.");
+  const history = dispositions.get(prepared);
+  if (history === undefined) return rejectLineage("invalid-disposition", "Publication requires a prepared declaration.");
   const referenceFields = readExactDataRecord(reference, ["locator", "runId", "dispositionDigest"], "disposition publication reference");
   if (!referenceFields.ok) return rejectLineage("invalid-disposition", "Publication reference must contain only own data fields.");
   const parsedReference = standalonePublicationReferenceSchema.safeParse({ locator: referenceFields.value.locator, runId: referenceFields.value.runId, resultDigest: referenceFields.value.dispositionDigest });
@@ -610,7 +617,7 @@ export function readPublishedStandaloneDisposition(prepared: PreparedStandaloneD
   const artifact = receipt.value.artifacts[0];
   if (artifact.runId !== lookup.runId || artifact.slot.path !== "artifacts/disposition.json" || artifact.digest !== prepared.digest || artifact.byteLength !== expected.length) return rejectLineage("invalid-disposition", "Disposition receipt differs from exact published bytes.");
   const published = canonicalRecord({ record: prepared.record, digest: prepared.digest,
-    publication: lookup, history: dispositions.get(prepared)! }) as PublishedStandaloneDisposition;
+    publication: lookup, history }) as PublishedStandaloneDisposition;
   publishedDispositions.add(published);
   return success(published);
 }
@@ -771,7 +778,7 @@ export function aggregateStandaloneAssessments(prepared: PreparedStandaloneSucce
     if (!assessed.ok) return assessed;
   }
   return success(freeze(prepared.inventory.map((row, index): StandaloneAssessmentProjection => {
-    const assessments = freeze(reports.map(report => report.payload.priorAssessments[index]!));
+    const assessments = freeze(reports.map(report => report.payload.priorAssessments[index]));
     const state = match(assessments)
       .when(values => values.some(value => value.verdict === "not-assessable"), () => "coverage-limited" as const)
       .when(values => values.some(value => value.verdict === "reopen"), () => "reopening-required" as const)
@@ -891,7 +898,7 @@ export function aggregateIssuedStandaloneSuccessorEvidence(prepared: PreparedSta
     return rejected("Whole-roster aggregation requires exact admitted evidence membership.");
   }
   if (reports.some((report, index) => report.lineageDigest !== prepared.lineageDigest ||
-      !sameAgentRequestAuthority(report.request, requests[index]!))) return rejected("Current evidence does not match the exact expected request/attempt roster.");
+      !sameAgentRequestAuthority(report.request, requests[index]))) return rejected("Current evidence does not match the exact expected request/attempt roster.");
   return aggregateStandaloneAssessments(prepared, reports.map(report => ({ role: report.request.role, payload: report.payload })));
 }
 
@@ -930,16 +937,16 @@ function deriveStandaloneSuccessorLineage(prepared: PreparedStandaloneSuccessor,
   const projected = aggregateIssuedStandaloneSuccessorEvidence(prepared, requests, reports);
   if (!projected.ok) return projected;
   const inherited = prepared.inventory.map((row, index): StandaloneLineageRow => {
-    const assessment = projected.value[index]!;
+    const assessment = projected.value[index];
     if (assessment.state !== "resolved") return row;
     const assessments = reports.flatMap((report, reportIndex) => {
-      const value = report.payload.priorAssessments[index]!;
+      const value = report.payload.priorAssessments[index];
       if (value.verdict !== "repaired") return [];
       const changedInput = changedStandaloneInput(prepared, value.change.path);
       if (changedInput === "unchanged") return [];
       return [canonicalRecord({ runId: prepared.runId, requestId: report.request.requestId,
         transcriptDigest: report.transcriptDigest, contextDigest: report.request.contextDigest,
-        role: prepared.reviewers[reportIndex]!,
+        role: prepared.reviewers[reportIndex],
         reason: value.reason, change: value.change, changedInput })];
     });
     return canonicalRecord({ ...row, history: Object.freeze([...row.history, canonicalRecord({
@@ -957,7 +964,7 @@ function deriveStandaloneSuccessorLineage(prepared: PreparedStandaloneSuccessor,
     });
   });
   const inventory = all.map((row, index): StandaloneLineageRow => {
-    if (panel === null || !(dispositions[index]!.provenance === "new" ||
+    if (panel === null || !(dispositions[index].provenance === "new" ||
         reports.some(report => report.payload.priorAssessments[index]?.verdict === "reopen"))) return row;
     const outcome = panel.outcomes.find(value => value.findingId === `standalone-review:${row.finding.id}`);
     return outcome === undefined ? row : canonicalRecord({ ...row, history: Object.freeze([...row.history, canonicalRecord({
@@ -970,9 +977,9 @@ function deriveStandaloneSuccessorLineage(prepared: PreparedStandaloneSuccessor,
     return rejected("Successor inventory/history exceeds its retained budget.");
   }
   const limited = projected.value.filter((value, index) => value.state === "coverage-limited" &&
-    findingOf(prepared.inventory[index]!).severity === "critical").map(value => value.origin);
+    findingOf(prepared.inventory[index]).severity === "critical").map(value => value.origin);
   const count = (state: StandaloneSuccessorLineage["dispositions"][number]["state"], critical = false) =>
-    dispositions.filter((value, index) => value.state === state && (!critical || findingOf(inventory[index]!).severity === "critical")).length;
+    dispositions.filter((value, index) => value.state === state && (!critical || findingOf(inventory[index]).severity === "critical")).length;
   const [firstLimited, ...remainingLimited] = limited;
   const coverage: StandaloneSuccessorLineage["currentCriticalCoverage"] = firstLimited === undefined
     ? canonicalRecord({ kind: "complete", origins: Object.freeze([]) })
@@ -1127,22 +1134,42 @@ function prepareResultPublicationIntent(
   });
 }
 
+/**
+ * A finalization with the digest of the panel outcome it proves: the clean
+ * outcome when no panel was given, else the panel the finalization carries.
+ * The one seam that holds "a given panel is a returned panel" — both the
+ * ready-state construction and the publication re-verification read the
+ * digest from here, so neither re-derives it or re-guards the null panel.
+ */
+function finalizeProvenOutcome(
+  aggregate: StandaloneReviewAggregate,
+  panel: ParsedPanelOutcomes | null,
+): ParseResult<Readonly<{ result: AdjudicatedStandaloneReview; provenOutcomeDigest: string }>> {
+  const finalized = finalizeStandaloneReview(aggregate, panel);
+  if (!finalized.ok) return finalized;
+  const result = finalized.value;
+  if (panel === null) return ok(Object.freeze({ result, provenOutcomeDigest: canonicalDigest({ kind: "clean" }) }));
+  if (result.panel === null) return fail(["finalization dropped the proven panel outcome"]);
+  return ok(Object.freeze({ result, provenOutcomeDigest: canonicalDigest(panelOutcomeValue(result.panel)) }));
+}
+
 function readyToFinalize(
   state: StandaloneAggregatingState | StandaloneAwaitingRefutationState,
   event: Extract<StandaloneReviewMachineEvent, { kind: "aggregate-clean" | "refutation-completed" }>,
   aggregate: StandaloneReviewAggregate,
   panel: ParsedPanelOutcomes | null,
 ): StandaloneMachineResult {
-  const finalized = finalizeStandaloneReview(aggregate, panel);
-  if (!finalized.ok) {
-    return rejectTransition(state, event, "aggregate-route-mismatch", finalized.errors.join("; "));
+  const proven = finalizeProvenOutcome(aggregate, panel);
+  if (!proven.ok) {
+    return rejectTransition(state, event, "aggregate-route-mismatch", proven.errors.join("; "));
   }
-  if (finalized.value.reviewerEvidence.length === 0 ||
-      finalized.value.reviewerEvidence.some(({ authorityKind }) => authorityKind !== "request-bound")) {
+  const finalized = proven.value.result;
+  if (finalized.reviewerEvidence.length === 0 ||
+      finalized.reviewerEvidence.some(({ authorityKind }) => authorityKind !== "request-bound")) {
     return rejectTransition(state, event, "aggregate-route-mismatch",
       `schema-v${aggregate.schemaVersion} finalization requires exact non-empty request-bound reviewer evidence`);
   }
-  const publication = prepareResultPublicationIntent(finalized.value);
+  const publication = prepareResultPublicationIntent(finalized);
   if (!publication.ok) {
     return rejectTransition(state, event, "publication-receipt-mismatch", publication.error.message);
   }
@@ -1150,14 +1177,14 @@ function readyToFinalize(
     ...state,
     kind: "ready-to-finalize" as const,
     aggregate,
-    panel: finalized.value.panel,
+    panel: finalized.panel,
     refutationCompletion: event.kind === "refutation-completed" ? event.completion : null,
     rosterDigest: state.completion.rosterDigest,
-    reviewerEvidenceDigest: canonicalDigest(finalized.value.reviewerEvidence),
+    reviewerEvidenceDigest: canonicalDigest(finalized.reviewerEvidence),
     aggregateDigest: canonicalDigest(serializeStandaloneAggregate(aggregate)),
-    provenOutcomeDigest: canonicalDigest(panel === null ? { kind: "clean" } : panelOutcomeValue(finalized.value.panel!)),
-    finalizationDigest: canonicalDigest(serializeAdjudicatedStandaloneReview(finalized.value)),
-    result: finalized.value,
+    provenOutcomeDigest: proven.value.provenOutcomeDigest,
+    finalizationDigest: canonicalDigest(serializeAdjudicatedStandaloneReview(finalized)),
+    result: finalized,
     publicationIntent: publication.value,
   });
   readyFinalizationCache.add(ready);
@@ -1186,16 +1213,17 @@ export function parseAuthoritativeStandaloneReviewResult(
       ready.completion.rosterDigest !== ready.rosterDigest) {
     return authoritativeResultFailure("frozen roster proof or aggregate digest changed before result publication");
   }
-  const finalized = finalizeStandaloneReview(ready.aggregate, ready.panel);
-  if (!finalized.ok || finalized.value.reviewerEvidence.length === 0 ||
-      canonicalDigest(finalized.value.reviewerEvidence) !== ready.reviewerEvidenceDigest ||
-      canonicalDigest(ready.panel === null ? { kind: "clean" } : panelOutcomeValue(finalized.value.panel!)) !== ready.provenOutcomeDigest ||
-      canonicalDigest(serializeAdjudicatedStandaloneReview(finalized.value)) !== ready.finalizationDigest) {
+  const proven = finalizeProvenOutcome(ready.aggregate, ready.panel);
+  if (!proven.ok || proven.value.result.reviewerEvidence.length === 0 ||
+      canonicalDigest(proven.value.result.reviewerEvidence) !== ready.reviewerEvidenceDigest ||
+      proven.value.provenOutcomeDigest !== ready.provenOutcomeDigest ||
+      canonicalDigest(serializeAdjudicatedStandaloneReview(proven.value.result)) !== ready.finalizationDigest) {
     return authoritativeResultFailure("proven panel outcome, reviewer evidence, aggregate, or finalization changed before publication");
   }
+  const finalized = proven.value.result;
   let expectedRaw: unknown;
   try {
-    expectedRaw = JSON.parse(serializeAdjudicatedStandaloneReview(finalized.value));
+    expectedRaw = JSON.parse(serializeAdjudicatedStandaloneReview(finalized));
   } catch {
     return authoritativeResultFailure(`engine-authored schema-v${ready.authority.schemaVersion} finalization is not canonical JSON`);
   }
@@ -1208,10 +1236,10 @@ export function parseAuthoritativeStandaloneReviewResult(
       ? "result publication receipt has the wrong effect kind"
       : reconciled.error.message);
   }
-  const authoritative = finalized.value as AuthoritativeStandaloneReviewResult;
+  const authoritative = finalized as AuthoritativeStandaloneReviewResult;
   authoritativeStandaloneResultCache.add(authoritative);
   standaloneResultPublications.set(authoritative, canonicalRecord({ artifact: ready.publicationIntent.artifacts[0],
-    serialization: serializeAdjudicatedStandaloneReview(finalized.value) }));
+    serialization: serializeAdjudicatedStandaloneReview(finalized) }));
   return canonicalRecord({ ok: true, value: authoritative, receipt: reconciled.value });
 }
 
@@ -1387,7 +1415,7 @@ function withAccepted(
     return rejectTransition(state, { kind: "result-accepted", result }, duplicate ? "duplicate-result" : "unknown-slot",
       duplicate ? `slot ${authority.slotId} already has an accepted result` : `slot ${authority.slotId} is not in the frozen roster`);
   }
-  const pending = state.pending[pendingIndex]!;
+  const pending = state.pending[pendingIndex];
   if (pending.expectedAttempt !== authority.attempt) {
     return rejectTransition(state, { kind: "result-accepted", result }, "stale-attempt",
       `slot ${authority.slotId} expects attempt ${pending.expectedAttempt}, received ${authority.attempt}`);
@@ -1425,7 +1453,7 @@ function withRejected(
     return rejectTransition(state, event, duplicate ? "duplicate-result" : "unknown-slot",
       duplicate ? "an accepted slot cannot later be rejected" : "rejected result slot is not pending");
   }
-  const pending = state.pending[pendingIndex]!;
+  const pending = state.pending[pendingIndex];
   if (pending.expectedAttempt !== event.request.attempt) {
     return rejectTransition(state, event, "stale-attempt",
       `slot ${event.request.slotId} expects attempt ${pending.expectedAttempt}, received ${event.request.attempt}`);
@@ -1480,8 +1508,8 @@ function withCompleteRoster(
   }
   const acceptedBySlot = new Map(state.accepted.map((entry) => [entry.slotId, entry] as const));
   for (let index = 0; index < expectedSlots.length; index++) {
-    const expectedSlot = expectedSlots[index]!;
-    const result = proven[index]!;
+    const expectedSlot = expectedSlots[index];
+    const result = proven[index];
     const expectedAttempt = state.pending.find(({ slotId }) => slotId === expectedSlot.slotId)?.expectedAttempt;
     const accepted = acceptedBySlot.get(expectedSlot.slotId);
     if (result.slotId !== expectedSlot.slotId) {

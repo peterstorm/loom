@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "preverify": "bash scripts/verify-prerequisites.sh",
-    "verify": "npm run typecheck && npm run test",
+    "verify": "npm run typecheck && npm run lint && npm run test",
+    "lint": "env -u PI_CODING_AGENT bun ../scripts/lint-project.ts",
     "test": "npm run test:unit && env -u PI_CODING_AGENT npm run test:smoke",
     "test:unit": "env -u PI_CODING_AGENT vitest run --reporter=default --reporter=junit --outputFile=../.loom/completion-reports/verify.junit.xml",
     "test:acceptance": "env -u PI_CODING_AGENT vitest run --reporter=junit --outputFile=../.loom/completion-reports/acceptance.junit.xml",

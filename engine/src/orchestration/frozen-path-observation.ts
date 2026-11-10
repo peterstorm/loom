@@ -9,7 +9,7 @@ import { sha256Bytes } from "../core/digest";
 import { parseArtifactDigest } from "../core/orchestration-contract";
 import type { FrozenPathObservation, FrozenPathObservations } from "../core/acceptance-contract";
 import type { CanonicalRepositoryRoot } from "../utils/workspace-digest";
-import { readRunBytesNoFollow } from "./no-follow-fs";
+import { readRunBytesNoFollow } from "../utils/no-follow-fs";
 
 /** Each path's current repository bytes as a digest, or why they could not
  *  be read without following a link (absent, a link, a directory, denied). */

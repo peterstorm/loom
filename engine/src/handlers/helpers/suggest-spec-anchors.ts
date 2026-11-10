@@ -34,21 +34,31 @@ function score(text: string, keywords: string[]): number {
   return Number((matches / keywords.length).toFixed(2));
 }
 
-function findLatestSpec(): string | null {
-  const specsDir = ".claude/specs";
+/** The modification time of one spec directory; the seam a test uses to
+ *  stage a directory vanishing between the listing and its stat. */
+export type SpecDirectoryMtime = (path: string) => number;
+
+const statMtime: SpecDirectoryMtime = (path) => statSync(path).mtimeMs;
+
+/** The newest spec directory's `spec.md` under `specsDir`, or null when there
+ *  is none. A directory removed between the listing and its stat (ENOENT)
+ *  reads as "no latest spec"; any other failure (permissions, I/O) throws. */
+export function findLatestSpec(specsDir = ".claude/specs", mtimeOf: SpecDirectoryMtime = statMtime): string | null {
   if (!existsSync(specsDir)) return null;
 
   try {
     const entries = readdirSync(specsDir, { withFileTypes: true })
       .filter((e) => e.isDirectory())
-      .map((e) => ({ name: e.name, mtime: statSync(join(specsDir, e.name)).mtimeMs }))
+      .map((e) => ({ name: e.name, mtime: mtimeOf(join(specsDir, e.name)) }))
       .sort((a, b) => b.mtime - a.mtime);
 
     for (const dir of entries) {
       const specPath = join(specsDir, dir.name, "spec.md");
       if (existsSync(specPath)) return specPath;
     }
-  } catch {}
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
   return null;
 }
 

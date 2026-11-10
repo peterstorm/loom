@@ -27,7 +27,11 @@ import {
   REVIEW_PANEL_AGENTS,
 } from "./core/agent-catalog-projections";
 import { frozenSet } from "./core/frozen";
+import { UTILITY_AGENTS } from "./core/phase-policy";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
+import { guardedDirsOf, protectedDirsOf, type GuardedLocations } from "./core/guarded-locations";
+import { nonEmptyOf, type NonEmpty } from "./core/orchestration-contract/identity";
+import { projectRulesLayout } from "./linter/programmatic/config";
 import { projectRootForStateFile } from "./core/phase-artifact-paths";
 import { observeGitProbe, type GitProbeStep } from "./utils/git-probe";
 import { observePathPresence } from "./utils/path-presence";
@@ -43,29 +47,8 @@ import {
   type GitSpawnOutcome,
 } from "./utils/git-spawn-outcome";
 
-/** Markers above this trigger mandatory clarify phase */
-export const CLARIFY_THRESHOLD = 3;
-
 /** Valid phase ordering — re-exported from the single source tuple in types. */
 export const PHASE_ORDER: readonly Phase[] = PHASES;
-
-/**
- * The phase every panel agent is classified as for phase-order validation.
- *
- * ONE constant rather than a per-agent field, because the panel is a stage
- * WITHIN a phase: an interviewer, N designers and K judges all run inside
- * `architecture` and none of them may advance out of it. `AgentKind`'s panel
- * branch therefore carries no `phase` to disagree with this, which is what
- * retired `derivePanelPhase` — a function that collected the distinct declared
- * phases and threw unless there was exactly one, policing at load time a state
- * the type now cannot express.
- *
- * detectPhase (validate-phase-order.ts) routes panel agents here via this
- * constant instead of a bare `"architecture"` literal. Must stay a phase panel
- * agents are allowed to run in, and one whose SubagentStop does NOT advance
- * (panel agents are absent from PHASE_AGENT_MAP).
- */
-export const ARCH_PANEL_PHASE: Phase = "architecture";
 
 /** Every PHASE_AGENT_MAP key `detectPhase` (validate-phase-order.ts) could probe
  *  when routing this panel agent, invoked either bare or `-agent`-suffixed.
@@ -170,11 +153,6 @@ export const PANEL_JUDGES_DEFAULT = 3;
 // the enforced rule with no runtime consequence and no failing test. The two
 // constants above are the shared policy; `selectLenses` is the enforcement.
 
-/** Utility agents allowed through phase validation — HARNESS-level names
- *  (Claude Code built-ins), not catalog identities, so they stay here rather
- *  than in the catalog-derived agent-catalog-projections leaf. */
-export const UTILITY_AGENTS: ReadonlySet<string> = frozenSet(["Explore", "Plan", "haiku"]);
-
 /** Review-panel agents that would be MISROUTED by colliding with a phase,
  *  architecture-panel, impl, review, or utility agent — validatePhaseOrder
  *  passes utility agents through before detectPhase; detectPhase probes bare
@@ -260,25 +238,6 @@ assertPanelExecuteDisjoint();
 /** Tool vocabulary (defined in core/tool-vocabulary — re-exported here, config stays the documented home) */
 export { FILE_MODIFYING_TOOLS, SUBAGENT_SPAWN_TOOLS, TEST_COMMAND_PATTERNS } from "./core/tool-vocabulary";
 
-/** Whitelisted helper scripts in guard-state-file */
-export const WHITELISTED_HELPERS: readonly string[] = [
-  "complete-wave-gate",
-  "mark-tests-passed",
-  "store-review-findings",
-  "store-spec-check",
-  "populate-task-graph",
-  "write-verification-manifest",
-  "upgrade-spec-trace",
-  "amend-spec-trace",
-  "revise-contract",
-  "repair-task-graph",
-  "review-packet",
-  "store-test-evidence",
-  "reconcile-implementation-proof",
-  "set-phase",
-  "cleanup-state",
-];
-
 /** Subagent tracking directory — resolved once at import (consumers that
  *  never re-point LOOM_SUBAGENT_DIR at runtime). */
 export const SUBAGENT_DIR = process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subagents";
@@ -290,6 +249,57 @@ export const SUBAGENT_DIR = process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subage
  *  identical to SUBAGENT_DIR (the env never changes mid-process there). */
 export const subagentDir = (): string => process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subagents";
 
+declare const PERSISTENT_SUBAGENT_STORE: unique symbol;
+
+/**
+ * A store that lives in the protected subagent dir and outlives every
+ * session: its entry name there, and its directory, resolved lazily like
+ * `subagentDir()`. Branded and minted only by the module-private
+ * `persistentStore` below, so a structurally identical `{ entry, dir }`
+ * literal does not type-check: a store cannot name its directory without
+ * being in `PERSISTENT_SUBAGENT_STORES`, and the stale sweep exempts it.
+ */
+export type PersistentSubagentStore = Readonly<{ entry: string; dir: () => string }> &
+  { readonly [PERSISTENT_SUBAGENT_STORE]: true };
+
+// The one mint of the brand.
+const persistentStore = (entry: string): PersistentSubagentStore =>
+  Object.freeze({ entry, dir: () => join(subagentDir(), entry) }) as PersistentSubagentStore;
+
+/**
+ * Every persistent store of the subagent dir, declared ONCE. The SessionStart
+ * stale sweep's exemption set is derived from this table, so a store added
+ * here survives the sweep by construction: every other subagent-dir entry is
+ * per-session tracking that ages out, while an audit run outlives sessions.
+ */
+export const PERSISTENT_SUBAGENT_STORES = Object.freeze({
+  /**
+   * The security-audit run registry (ADR-0067 D6): one entry file per audit
+   * run directory, registered by every writing `helper security-audit`
+   * operation and by `security-verification` start and resume (idempotently,
+   * so the next write rebuilds a wiped registry). Inside the protected subagent
+   * dir so a subagent cannot add, rewrite or delete an entry; the subagent
+   * write guard reads it to know which directories are audit runs without
+   * trusting the command line. A swept registry would silently drop that
+   * knowledge. Owned by `orchestration/security-audit-run-registry.ts`.
+   */
+  securityAuditRunRegistry: persistentStore("security-audit-runs"),
+  /**
+   * The capture attestation store (ADR-0067, amended): one immutable entry per
+   * security verifier attempt a HARNESS captured natively, written by the
+   * capturing harness process and required by `verify --from` and by the
+   * audit's adjudication before a ballot counts. A swept store would make
+   * every captured ballot unprovable. Owned by
+   * `orchestration/capture-attestation-store.ts`.
+   */
+  captureAttestations: persistentStore("security-capture-attestations"),
+} satisfies Readonly<Record<string, PersistentSubagentStore>>);
+
+/** Subagent-dir entries the SessionStart stale sweep never removes: exactly
+ *  the entries of `PERSISTENT_SUBAGENT_STORES`, derived, never restated. */
+export const PERSISTENT_SUBAGENT_DIR_ENTRIES: ReadonlySet<string> =
+  frozenSet(Object.values(PERSISTENT_SUBAGENT_STORES).map((store) => store.entry));
+
 /**
  * One TTL for every liveness judgment about subagent tracking files: the
  * SessionStart sweep deletes files whose mtime is older than this, and the
@@ -298,8 +308,6 @@ export const subagentDir = (): string => process.env.LOOM_SUBAGENT_DIR ?? "/tmp/
  * constant keeps the two mechanisms from drifting apart.
  */
 export const STALE_SUBAGENT_TTL_MS = 60 * 60_000;
-
-const escapeRegex = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const DEFAULT_MACHINES_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "machines");
 
@@ -313,130 +321,32 @@ export const machinesDir = (): string => process.env.LOOM_MACHINES_DIR ?? DEFAUL
 /** Machines directory — resolved once at import (consumers that never re-point) */
 export const MACHINES_DIR = machinesDir();
 
-/** Guarded directories, single source of truth, resolved lazily (LOOM_*
- * re-point without a module reload). The state DIR (dirname of the task-graph
- * path) is guarded so a glob/brace write that names the dir but not the file
- * literal is still caught; the subagent and machine-definition dirs are
- * additionally PROTECTED (never helper-writable — see protectedDirs). */
-export const guardedDirs = (): readonly string[] => [
-  ...new Set([
-    ...taskGraphRelatives().map((path) => dirname(path)),
-    dirname(VERIFICATION_MANIFEST_SOURCE_PATH),
+/** The guarded directories, resolved LAZILY from configuration (LOOM_STATE_PATH,
+ * LOOM_SUBAGENT_DIR and LOOM_MACHINES_DIR are read at call time, so a re-pointed
+ * directory is guarded without a module reload). The state DIRECTORY of every
+ * task-graph candidate — derived from `taskGraphRelatives()`, not just the
+ * first and not hardcoded — is guarded so a glob/brace write that names the dir
+ * but not the file literal is still caught. Shells resolve this once per
+ * decision and pass it to the pure guards (`core/guarded-locations`). */
+export const guardedLocations = (): GuardedLocations => Object.freeze({
+  stateDirs: Object.freeze([
+    ...new Set([
+      ...taskGraphRelatives().map((path) => dirname(path)),
+      dirname(VERIFICATION_MANIFEST_SOURCE_PATH),
+    ]),
   ]),
-  subagentDir(),
-  machinesDir(),
-];
+  subagentDir: subagentDir(),
+  machinesDir: machinesDir(),
+});
+
+/** Every guarded directory, single source of truth (see `guardedDirsOf`). */
+export const guardedDirs = (): readonly string[] => guardedDirsOf(guardedLocations());
 
 /** The subset of guardedDirs whose writes are NEVER whitelisted, even for a
- * helper invocation: a write into the subagent dir forges trusted evidence
- * (`.evidence.jsonl`), fakes attribution (`.active`), or disarms the gate
- * (`.machine`), and a write into the machine-definitions dir deletes/rewrites
- * the gate's rules. guard-state-file checks these BEFORE the helper allow, and
- * block-direct-edits guards them for file tools wherever they lie (ADR-0046). */
-export const protectedDirs = (): readonly [string, ...string[]] => [subagentDir(), machinesDir()];
-
-const toSegments = (dir: string): string[] => dir.split("/").filter((s) => s !== "");
-
-/** guardedDirs / protectedDirs as `/`-split segment lists (empty segments
- * dropped) for the guard's glob-intersection scope test: a glob path reaching
- * AT or INTO one of these dirs could name a guarded file even when no literal
- * survives quote-collapse, so it must enter scope. */
-export const guardedDirSegments = (): readonly (readonly string[])[] =>
-  guardedDirs().map(toSegments);
-export const protectedDirSegments = (): readonly (readonly string[])[] =>
-  protectedDirs().map(toSegments);
-
-/** State file patterns to guard — built lazily so the machine-definitions
- * dir resolves machinesDir() at decision time (a re-pointed
- * LOOM_MACHINES_DIR is guarded without a module reload, mirroring
- * mark-subagent-active / update-task-status).
- * Includes the guarded-machine subagent dir (derived from the lazy
- * `subagentDir()`, not the import-frozen SUBAGENT_DIR and not hardcoded — that
- * is what makes the re-pointing above work): an agent writing the evidence
- * ledger or binding files via Bash would forge trusted test evidence,
- * appending to `.active` would fake attribution, and `rm` of the directory
- * itself would silently disarm the gate — so any reference to the dir in a
- * segment that is not an allowlisted read-only command or whitelisted helper
- * blocks.
- * The machine-definitions dir is guarded for the same reason: `rm` of a
- * machine file via Bash would make the gate see "no machine" for a BOUND
- * agent (which now fails closed — but deleting definitions must be blocked
- * at the source too). The state DIRECTORY (dirname of the task-graph path,
- * derived from `taskGraphRelatives()` — every candidate, not just the first —
- * and not hardcoded) is guarded for the same dir-guard reason: a glob
- * (`active_task*.json`, `.claude/state/*.json`) or brace
- * (`active_task_{graph,x}.json`) write names the directory but never the file
- * literal, so only a dir match can catch the forgery. */
-export const stateFilePatterns = (): RegExp => new RegExp(
-  ["active_task_graph", "review-invocations", ...guardedDirs()].map(escapeRegex).join("|"),
-);
-
-export const protectedDirPatterns = (): RegExp => new RegExp(
-  protectedDirs().map(escapeRegex).join("|"),
-);
-
-/** Commands allowed to touch guarded state paths: deny-by-default allowlist.
- *
- * This replaces a writer denylist because writer vocabulary and composition
- * are unbounded (`bun -e`, substitutions, glob paths, wrappers, and future
- * tools all create new write forms). An allowlist inverts the residual: instead
- * of enumerating writers (unbounded), it
- * enumerates readers (small, stable), so an unknown command on a guarded
- * path blocks instead of slipping through.
- *
- * Membership criterion: the command must be unable to write a file under ANY
- * flag combination. Deliberately excluded, with the flag that disqualifies
- * them: `sort` (-o), `uniq` (second file operand), `less` (-o/-O),
- * `xxd` (-r <outfile>), `base64` (macOS -o), `sed`/`awk` (-i / in-script
- * `w`/`print >`), `find` (-delete/-exec), `git` (checkout/restore rewrite the
- * work tree — a `git checkout -- <state>` is a verdict-restore forgery),
- * `touch` (mtime forgery defeats report freshness),
- * `rg` (--pre <cmd> executes an arbitrary program per input file — a
- * pre-staged script receives the guarded path and can rewrite or delete it;
- * --hostname-bin <cmd> executes one program once to resolve the hostname.
- * Arbitrary program execution under any use disqualifies it),
- * `more` (interactive shell escape via `!cmd`/`v`; non-interactive it acts
- * like cat, but membership requires no write capability under ANY use),
- * `cd` (writes nothing itself, but it RE-SCOPES path resolution:
- * `cd .claude/state && rm *.json` names the guarded dir only in the cd
- * segment while the writer names no guarded literal, so its chain is
- * skipped as out-of-scope — allowlisting cd hands every later segment an
- * unguarded relative namespace. Excluding it costs only fail-closed reads:
- * reads never need to cd INTO a guarded dir, and
- * `cd <unguarded-dir> && jq . <state>` still allows because the cd chain is
- * simply out of scope. Residual, documented: multi-hop
- * `cd .claude; cd state; rm *.json` never names a guarded literal anywhere
- * on the line and stays invisible to any raw-text gate — see
- * machines/README.md known residual limits), and
- * wrapper/executor commands that run OTHER commands (`env`, `xargs`, `sudo`,
- * `timeout`, `nohup`, `nice`, `command`, shells, interpreters) — a wrapper
- * inherits the write capability of whatever it wraps. Heads match exactly
- * (no basename resolution): `./cat` or `/tmp/evil/jq` must not inherit the
- * trust of a PATH-resolved name. */
-export const READ_ONLY_STATE_COMMANDS: ReadonlySet<string> = frozenSet([
-  "jq", "cat", "grep", "egrep", "fgrep",
-  "head", "tail", "wc", "ls", "stat", "file",
-  "diff", "cmp", "md5sum", "sha1sum", "sha256sum",
-  "cut", "tr", "nl", "od", "hexdump", "strings",
-  "echo", "printf", "test", "[", "[[", "true", "false",
-  "pwd", "dirname", "basename", "readlink", "realpath", "du",
-]);
-
-/** Valid phase transitions: from → allowed targets. Both the record and
- * each member are frozen: a readonly annotation alone would not protect the
- * runtime state-machine policy from ordinary consumer mutation. */
-const frozenPhases = (...phases: Phase[]): readonly Phase[] => Object.freeze(phases);
-
-export const VALID_TRANSITIONS: Readonly<Record<Phase, readonly Phase[]>> = Object.freeze({
-  "init":            frozenPhases("brainstorm", "specify", "architecture"),
-  "brainstorm":      frozenPhases("brainstorm", "specify"),
-  "specify":         frozenPhases("specify", "clarify", "architecture"),
-  "clarify":         frozenPhases("clarify", "architecture"),
-  "architecture":    frozenPhases("architecture", "plan-alignment", "decompose"),
-  "plan-alignment":  frozenPhases("plan-alignment", "architecture", "decompose"),
-  "decompose":       frozenPhases("decompose", "execute"),
-  "execute":         frozenPhases("execute"),
-});
+ * helper invocation (see `protectedDirsOf`). guard-state-file checks these
+ * BEFORE the helper allow, and block-direct-edits guards them for file tools
+ * wherever they lie (ADR-0046). */
+export const protectedDirs = (): readonly [string, ...string[]] => protectedDirsOf(guardedLocations());
 
 /** Detect which harness is running */
 function detectHarness(): "claude" | "pi" {
@@ -456,16 +366,17 @@ const CLAUDE_TASK_GRAPH_PATH = ".claude/state/active_task_graph.json";
 /** Ordered task-graph locations. An explicit override is authoritative. Pi
  * otherwise prefers its native state directory but can resume Loom sessions
  * created before the Pi state split from the legacy Claude-compatible path. */
-function taskGraphRelatives(): readonly string[] {
-  if (process.env.LOOM_STATE_PATH) return [process.env.LOOM_STATE_PATH];
+function taskGraphRelatives(): NonEmpty<string> {
+  if (process.env.LOOM_STATE_PATH) return nonEmptyOf(process.env.LOOM_STATE_PATH);
   return detectHarness() === "pi"
-    ? [PI_TASK_GRAPH_PATH, CLAUDE_TASK_GRAPH_PATH]
-    : [CLAUDE_TASK_GRAPH_PATH];
+    ? nonEmptyOf(PI_TASK_GRAPH_PATH, CLAUDE_TASK_GRAPH_PATH)
+    : nonEmptyOf(CLAUDE_TASK_GRAPH_PATH);
 }
 
 /** Primary relative path used when no existing graph can be found. */
 function taskGraphRelative(): string {
-  return taskGraphRelatives()[0]!;
+  const [primary] = taskGraphRelatives();
+  return primary;
 }
 
 /**
@@ -694,9 +605,10 @@ export const TASK_GRAPH_PATH = findTaskGraphPath();
 
 /**
  * The ONE default task-graph existence probe: the fail-closed probe on the
- * import-time-resolved graph path. Core guards (`block-direct-edits`,
- * `guard-state-file`) inject it instead of declaring byte-identical twins;
- * Pi passes its own override built on the same `probePathFailClosed` core.
+ * import-time-resolved graph path. The `block-direct-edits` core guard and the
+ * `guard-state-file` hook shell inject it instead of declaring byte-identical
+ * twins; Pi passes its own override built on the same `probePathFailClosed`
+ * core.
  */
 export const defaultTaskGraphExists = (): boolean => pathExistsFailClosed(TASK_GRAPH_PATH);
 
@@ -716,7 +628,14 @@ export const typeDiagnosticsCacheDir = (env: Readonly<Record<string, string | un
   env.LOOM_TYPE_DIAGNOSTICS_CACHE ??
   join(env.XDG_CACHE_HOME ?? join(env.HOME ?? tmpdir(), ".cache"), "loom", "type-diagnostics");
 
-/** Project-local rules directory — resolved relative to repo root */
-export const PROJECT_RULES_DIR = HARNESS === "pi"
-  ? ".pi/linter/rules"
-  : ".claude/linter/rules";
+/** The project's rules directory under `root` (default: cwd), or null when it
+ *  has none. Harness-independent: the lookup order is the linter's
+ *  (`projectRulesLayout`), so Claude Code and Pi read the same directory.
+ *  Null means "no project rules": every caller hands it to `loadRules`, which
+ *  then loads the shipped defaults only — no other directory is consulted.
+ *  `helper validate-lint-rules` is where a misplaced directory surfaces: it
+ *  names both layouts it looked for and reports 0 project rules. */
+export const projectRulesDir = (root: string = process.cwd()): string | null => {
+  const layout = projectRulesLayout((candidate) => pathExistsFailClosed(join(root, candidate)));
+  return layout === null ? null : join(root, layout);
+};

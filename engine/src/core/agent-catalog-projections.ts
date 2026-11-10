@@ -107,6 +107,12 @@ export function producerKindsOfAgent(agent: LoomAgentName): readonly PayloadProd
   if (entry.kind.kind === "arch-panel" && entry.profile === "panel-judge") {
     kinds.push(producerKind("judge-verdict"));
   }
+  // No branch for catalog kind `security-verdict` (hunter, verifier, critic):
+  // those Agents emit payloads the audit program parses itself —
+  // `security-hunter-result`, `security-verification-result` and
+  // `security-coverage-critic` — not an emission-tool schema. D2 keeps the
+  // emission registry closed rather than adding a fourth producer kind, so they
+  // answer [] like every other non-producer.
   return Object.freeze(kinds);
 }
 
@@ -298,3 +304,13 @@ export const REVIEW_AGENTS: ReadonlySet<string> = frozenSet([
  *  ARCH_PANEL_AGENTS is: recognized by phase validation, invisible to the
  *  SubagentStop dispatcher. Frozen, symmetric with ARCH_PANEL_AGENTS. */
 export const REVIEW_PANEL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("review-verifier"));
+
+/** Security-audit agents (hunters, verifiers, the coverage critic). DERIVED
+ *  from the Agent Catalog (kind `security-verdict`): recognized by the audit
+ *  program, invisible to every review roster and to phase advancement.
+ *
+ *  This projection is what puts them in `VALIDATED_AGENTS`. Without it a
+ *  canonical `loom:security-*-agent` spawn is refused at PreToolUse as an
+ *  "unknown Loom agent" — the program could not launch a hunter at all — while
+ *  a bare, un-namespaced spawn escaped the skill gate entirely. */
+export const SECURITY_AUDIT_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("security-verdict"));

@@ -1,8 +1,9 @@
 /**
  * Core: Guard state files from direct modification via Bash.
- * Harness-agnostic — no stdin parsing. Not pure: guardStateFile reads the
- * filesystem (a fail-closed existence probe); the decision core
- * (guardStateFileDecision) is pure.
+ * Harness-agnostic — no stdin parsing — and pure: the guarded directories
+ * arrive as a `GuardedLocations` value the shell resolves from configuration
+ * at decision time, and the task-graph existence gate lives in the shells
+ * (the `pre-tool-use/guard-state-file` hook, the Pi extension).
  *
  * DENY-BY-DEFAULT (round 14, replacing the WRITE_PATTERNS denylist): a line
  * that never references a guarded path (state files, state dir, subagent dir,
@@ -47,7 +48,15 @@
  * line fails closed.
  *
  * ── Walker map ──────────────────────────────────────────────────────────────
- * This module is a de-facto POSIX grammar, implemented as several \"walkers\"
+ * The shell grammar this guard judges through lives in three pure modules
+ * shared with every other Bash guard (the subagent authority guard included):
+ * core/shell-command-head (simple commands, wrappers, read-only heads,
+ * redirects, pipe-chains), core/shell-heredoc (heredoc bodies) and
+ * core/shell-match-views (matching views and glob intersection). This module
+ * keeps only the state-file POLICY: what is guarded, which helpers vouch, and
+ * the decision. The names below are those modules' walkers.
+ *
+ * The grammar is a de-facto POSIX grammar, implemented as several \"walkers\"
  * that each reimplement quote/escape state with slightly different semantics.
  * Their history is a series of divergence bugs (rounds 15–18 twin-scanner
  * drift; the round-20 double-quoted-apostrophe regression; the heredoc
@@ -87,30 +96,38 @@
  */
 
 import type { HookResult } from "../types";
-import { normalizeShellVariants } from "./shell-normalize";
-import { CONTINUE, halt, scanUnquoted, skip } from "./shell-quoting";
+import { scanSubstitutions, type SubstitutionContext } from "./shell-substitution";
+import { guardedDirsOf, protectedDirsOf, type GuardedLocations } from "./guarded-locations";
+import { stripComment, stripEnvPrefix } from "./shell-command";
+import { hasOutputRedirect, hasReadOnlyHead, pipeChains, unquote } from "./shell-command-head";
+import { MAX_SUBSTITUTION_DEPTH, splitHeredocs } from "./shell-heredoc";
 import {
-  findClosingBacktick,
-  findClosingParen,
-  scanSubstitutions,
-  type SubstitutionContext,
-} from "./shell-substitution";
-import {
-  WHITELISTED_HELPERS,
-  stateFilePatterns,
-  READ_ONLY_STATE_COMMANDS,
-  protectedDirPatterns,
-  protectedDirSegments,
-  guardedDirSegments,
-  SUBAGENT_DIR,
-  defaultTaskGraphExists,
-} from "../config";
-import {
-  classifyFdDupWord,
-  splitCommandSegmentsWithOps,
-  stripComment,
-  stripEnvPrefix,
-} from "./shell-command";
+  knownWordOutput,
+  leadingDotPolicyOf,
+  OPAQUE_OUTPUT,
+  referencesPattern,
+  type LeadingDotPolicy,
+} from "./shell-match-views";
+
+/** The helpers whose own segment may write guarded state (never a protected
+ *  directory) — matched by `segmentInvokesHelper` below. */
+export const WHITELISTED_HELPERS: readonly string[] = [
+  "complete-wave-gate",
+  "mark-tests-passed",
+  "store-review-findings",
+  "store-spec-check",
+  "populate-task-graph",
+  "write-verification-manifest",
+  "upgrade-spec-trace",
+  "amend-spec-trace",
+  "revise-contract",
+  "repair-task-graph",
+  "review-packet",
+  "store-test-evidence",
+  "reconcile-implementation-proof",
+  "set-phase",
+  "cleanup-state",
+];
 
 const BLOCK: HookResult = {
   kind: "block",
@@ -140,19 +157,6 @@ function blockFor(chain: readonly string[], segment: string): HookResult {
   return { kind: "block", message: lines.join("\n") };
 }
 
-/** Substitution nesting deeper than this on a guarded line is nobody's
- *  legitimate command — fail closed rather than recurse further. */
-const MAX_SUBSTITUTION_DEPTH = 5;
-
-/** Strip one layer of surrounding quotes from a token (`"…"` / `'…'`). */
-function unquote(token: string): string {
-  const first = token[0];
-  if ((first === '"' || first === "'") && token.endsWith(first) && token.length >= 2) {
-    return token.slice(1, -1);
-  }
-  return token;
-}
-
 /**
  * Does this simple-command segment ACTUALLY invoke a whitelisted helper?
  * The only documented invocation shape is `bun <path>/cli.ts helper <name>`
@@ -174,449 +178,54 @@ function segmentInvokesHelper(segment: string): boolean {
   return WHITELISTED_HELPERS.includes(tokens[3] ?? "");
 }
 
-/** Maximum per-expansion parameter-state views before the guard fails closed. */
-const MAX_PARAMETER_VIEWS = 256;
-
-/**
- * Every bounded reveal/empty cross-product for optional parameter words.
- *
- * Choices are per syntax occurrence, not global axes: separate colonless
- * defaults and alternate forms can occupy different states in one real shell
- * invocation. Repeated references to one variable are deliberately allowed to
- * vary independently here; those extra views over-approximate bash and can only
- * arm the guard. `null` means the cross-product exceeded the bound, which the
- * caller treats as a guarded reference rather than silently truncating it.
- */
-function collapseVariants(text: string): readonly string[] | null {
-  return normalizeShellVariants(text, 0, MAX_PARAMETER_VIEWS);
-}
-
-/** Product of brace-group sizes above which a braced line is deemed
- *  unparseable (fail closed). 8 two-option groups = 256 views. */
-const MAX_BRACE_VIEWS = 256;
-
-/** Options of a `{…}` sequence body (`a..c`, `1..3`, `3..1`, `a..y..4`,
- *  `10..1..-3`), or null when the body is not a sequence. Covers the forms
- *  bash expands: alpha and signed-integer endpoints, optionally stepped
- *  (`{x..y..s}`). Direction is taken from the ENDPOINTS (bash ignores the
- *  step's sign — `{1..5..-1}` ascends, `{10..1..3}` descends); the step's
- *  MAGNITUDE is used, and a zero step means a full step-1 enumeration
- *  (verified against real bash). A body whose endpoints mix alpha and
- *  numeric types, or carry any other shape, is literal in bash and returns
- *  null. Numeric step-1 ranges whose enumeration would exceed
- *  MAX_BRACE_VIEWS return null so the caller's bound (expandBraces → null →
- *  fail closed) still engages instead of materializing unbounded views. */
-function sequenceOptions(content: string): string[] | null {
-  const seq = content.match(/^([A-Za-z]|[+-]?\d+)\.\.([A-Za-z]|[+-]?\d+)(?:\.\.([+-]?\d+))?$/);
-  if (seq === null) return null;
-  const first = seq[1]!, second = seq[2]!, stepText = seq[3];
-  const firstIsAlpha = /^[A-Za-z]$/.test(first);
-  const secondIsAlpha = /^[A-Za-z]$/.test(second);
-  if (firstIsAlpha !== secondIsAlpha) return null; // `{a..10..2}` stays literal in bash
-  const magnitude = Math.max(1, Math.abs(parseInt(stepText ?? "1", 10)));
-  const out: string[] = [];
-  if (firstIsAlpha) {
-    const a = first.charCodeAt(0), b = second.charCodeAt(0);
-    const direction = a <= b ? 1 : -1;
-    for (let c = a; direction > 0 ? c <= b : c >= b; c += direction * magnitude) {
-      out.push(String.fromCharCode(c));
-    }
-    return out;
-  }
-  const a = parseInt(first, 10), b = parseInt(second, 10);
-  const direction = a <= b ? 1 : -1;
-  // Zero-padding fidelity (verified against real bash): when either
-  // endpoint's digits start with `0`, every produced integer is rendered
-  // left-padded so its TOTAL length (sign included) equals the longer RAW
-  // endpoint string, exactly as bash does (`{01..100}` → `001 … 100`;
-  // `{-5..-01}` → `-05 … -01`). `{0..0}` stays unpadded: a lone `0`
-  // endpoint is not a padded form.
-  const digits = (s: string): string => s.replace(/^[+-]/, "");
-  const padWidth = Math.max(first.length, second.length);
-  // An endpoint is a PADDED form only when its own digit run is longer than one
-  // AND starts with `0`. Testing `startsWith("0")` alone made a lone `0`
-  // endpoint padded whenever its partner was wider: `{0..10}` rendered
-  // `00 01 … 10` where bash renders `0 1 … 10`. (`{0..0}` was right by accident
-  // — `padWidth > 1` alone caught it — which is why the existing single
-  // padded fixture, asserted as `allow`, could never fail.) Pinned by the
-  // differential sweep against real bash in
-  // `tests/core/guard-state-file-coverage.test.ts`.
-  const padded = [first, second].some((s) => digits(s).length > 1 && digits(s).startsWith("0"));
-  const render = (c: number): string => {
-    if (!padded) return String(c);
-    const negative = c < 0;
-    const body = String(Math.abs(c)).padStart(padWidth - (negative ? 1 : 0), "0");
-    return (negative ? "-" : "") + body;
-  };
-  for (let c = a; direction > 0 ? c <= b : c >= b; c += direction * magnitude) {
-    out.push(render(c));
-    if (out.length > MAX_BRACE_VIEWS) return null;
-  }
-  return out;
-}
-
-interface BraceGroup { readonly start: number; readonly end: number; readonly options: readonly string[]; }
-
-/** First EXPANDABLE `{…}` group in text (has a top-level comma, or is a
- *  sequence), depth-aware so nested braces don't split early. A brace with no
- *  matching close, or a `{…}` with neither comma nor sequence, is literal in
- *  bash and skipped. */
-function firstBraceGroup(text: string): BraceGroup | null {
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] !== "{") continue;
-    let depth = 1, j = i + 1;
-    const commas: number[] = [];
-    for (; j < text.length; j++) {
-      const c = text[j];
-      if (c === "{") depth++;
-      else if (c === "}") { if (--depth === 0) break; }
-      else if (c === "," && depth === 1) commas.push(j);
-    }
-    if (depth !== 0) continue; // unbalanced from here: this `{` is literal
-    const end = j;
-    if (commas.length > 0) {
-      const options: string[] = [];
-      let prev = i + 1;
-      for (const cpos of commas) { options.push(text.slice(prev, cpos)); prev = cpos + 1; }
-      options.push(text.slice(prev, end));
-      return { start: i, end, options };
-    }
-    const seq = sequenceOptions(text.slice(i + 1, end));
-    if (seq) return { start: i, end, options: seq };
-    i = end; // non-expandable group: resume scanning after its close
-  }
-  return null;
-}
-
-/**
- * Bounded bash brace expansion of a matching view — expands comma groups
- * (`st{a,a}te` → [`state`]) and sequences (`{a..c}`) into every alternative so
- * a guarded literal fragmented across brace syntax reassembles in at least one
- * view. Reveal-monotonic: every produced string is one bash could form.
- * Returns null when the view count would exceed MAX_BRACE_VIEWS — an unbounded
- * expansion on a guarded-shaped line is nobody's real command; the caller
- * fails closed.
- */
-export function expandBraces(text: string): string[] | null {
-  const results: string[] = [];
-  const stack: string[] = [text];
-  while (stack.length > 0) {
-    if (results.length + stack.length > MAX_BRACE_VIEWS) return null;
-    const cur = stack.pop()!;
-    const group = firstBraceGroup(cur);
-    if (group === null) { results.push(cur); continue; }
-    for (const opt of group.options) {
-      stack.push(cur.slice(0, group.start) + opt + cur.slice(group.end + 1));
-    }
-  }
-  return results;
-}
-
-/** `[c]` matches exactly `c`; reveal it in the matching view. Multi-char
- *  (`[ab]`), negated (`[!a]`), and range (`[a-z]`) classes stay for the
- *  glob-intersection test. `/` never appears in a bash glob class operand. */
-function collapseSingleCharClass(text: string): string {
-  return text.replace(/\[([^!^/\]])\]/g, "$1");
-}
-
-/**
- * The matching view's model of a substitution's statically-unknowable OUTPUT
- * (placeholderFor, wildcardSubstitutions). It is deliberately NOT the glob `*`:
- * an unquoted `*` written by the agent obeys bash's leading-dot rule, but
- * `$(printf .lo)om` really can produce `.loom`, so this wildcard must keep
- * matching a leading `.`. A character outside every shell syntax class, so —
- * like the literal placeholder parts — it can never form a redirect,
- * separator, quote, or expansion. Rendered as `∗` (U+2217) in block messages.
- */
-const OPAQUE_OUTPUT = "\u2217";
-
-/** A character that makes a token a glob for the guarded-dir intersection. */
-const GLOB_CHAR = new RegExp(`[*?[${OPAQUE_OUTPUT}]`);
-
-/**
- * May a wildcard (`*`, `?`, `[…]`) match a path segment's LEADING `.`? Bash's
- * default (no `dotglob`) — and zsh's (no `GLOB_DOTS`) — is no: the dot must be
- * written explicitly (`.l*`, `.loo?`, `.[l]oom`, `.*`). A command line that so
- * much as names a switch able to flip that (`shopt -s dotglob`, `GLOBIGNORE=`,
- * `BASHOPTS=…`, zsh `setopt globdots`) is judged with wildcards matching dots
- * — fail closed: the guard cannot tell which segment the switch precedes.
- */
-type LeadingDotPolicy = "explicit-only" | "wildcards-match";
-
-const DOT_GLOB_ENABLERS = /dotglob|glob_?dots|GLOBIGNORE|BASHOPTS/i;
-
-const leadingDotPolicyOf = (command: string): LeadingDotPolicy =>
-  DOT_GLOB_ENABLERS.test(command) ? "wildcards-match" : "explicit-only";
-
-/** Under the default policy, can this glob segment's first character match a
- *  literal leading `.`? Only an explicit `.`, a substitution's opaque output,
- *  or a non-negated bracket expression listing `.` (POSIX leaves that case
- *  unspecified — fail closed). `*`, `?`, ranges, and negated classes cannot. */
-function leadingDotReachable(glob: string): boolean {
-  const first = glob[0];
-  if (first === "." || first === OPAQUE_OUTPUT) return true;
-  if (first !== "[") return false;
-  const close = glob.indexOf("]", 1);
-  if (close === -1) return false; // a lone `[` is the literal `[`, never `.`
-  const body = glob.slice(1, close);
-  return !body.startsWith("!") && !body.startsWith("^") && body.includes(".");
-}
-
-/** fnmatch one path segment: does the glob segment (bash `*`/`?`/`[…]`, none
- *  crossing `/`, plus the substitution wildcard OPAQUE_OUTPUT) match the
- *  literal segment exactly? Bash's leading-dot rule applies unless `policy`
- *  says a dotglob switch may be on. A malformed class fails closed (matches). */
-function segmentGlobMatches(glob: string, literal: string, policy: LeadingDotPolicy): boolean {
-  if (policy === "explicit-only" && literal.startsWith(".") && !leadingDotReachable(glob)) return false;
-  let re = "^";
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob[i];
-    if (c === "*" || c === OPAQUE_OUTPUT) re += "[^/]*";
-    else if (c === "?") re += "[^/]";
-    else if (c === "[") {
-      const close = glob.indexOf("]", i + 1);
-      if (close === -1) { re += "\\["; continue; }
-      const body = glob.slice(i + 1, close);
-      re += "[" + (body.startsWith("!") ? "^" + body.slice(1) : body).replace(/\\/g, "\\\\") + "]";
-      i = close;
-    } else {
-      re += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    }
-  }
-  re += "$";
-  try { return new RegExp(re).test(literal); } catch { return true; }
-}
-
-/** Could this token — an unquoted glob (star/question/`[…]`) — expand to a
- *  path that reaches AT or INTO one of the given guarded dirs? True when the
- *  dir's segments are a leading fnmatch of the token's, so a globbed state-dir
- *  prefix or a `rm /tmp/<star>` both enter scope even though no literal
- *  survives collapse. `.` segments are dropped first — `./.l*` names exactly
- *  what `.l*` names, so a leading `./` cannot shift the alignment past the
- *  guarded dir. */
-function tokenGlobHitsGuardedDir(
-  token: string,
-  dirs: readonly (readonly string[])[],
-  policy: LeadingDotPolicy,
-): boolean {
-  if (!GLOB_CHAR.test(token)) return false;
-  const tok = token.split("/").filter((s) => s !== "" && s !== ".");
-  return dirs.some(
-    (dir) => tok.length >= dir.length && dir.every((seg, k) => segmentGlobMatches(tok[k], seg, policy)),
-  );
-}
-
-/**
- * A matching view where command/process substitutions and backticks are
- * collapsed to EMPTY — one output a substitution can produce (`$(:)` → "",
- * `` `false` `` → ""). bash reassembles a guarded literal fragmented across
- * such a substitution (`.claude/stat$(:)e` → `.claude/state`), which the
- * substitutions-LITERAL view conceals; testing BOTH views (see
- * referencesPattern) closes that fragmentation channel while the literal view
- * still surfaces a guarded token sitting INSIDE a body, so flattenSubstitutions
- * + recursive judging still engages for a write hidden in a substitution.
- * Reveal-monotonic: emptying a span only JOINS the literal fragments around it,
- * exactly as an empty-output substitution does. Quote-awareness is delegated to
- * scanSubstitutions (single quotes suppress substitution; a `'` inside double
- * quotes stays literal); an unclosed opener blanks to end (maximal reveal —
- * decide() fails such unbalanced lines closed anyway).
- *
- * EXPORTED for the walker-divergence property net. */
-export function blankSubstitutions(text: string): string {
-  return scanSubstitutions(text, () => "").rebuilt;
-}
-
-/**
- * A matching view where command/process substitutions and backticks are
- * replaced by the substitution WILDCARD (OPAQUE_OUTPUT, matched like `*` but
- * exempt from the leading-dot rule) — modeling the THIRD output channel the
- * empty and literal views miss: a substitution whose runtime output is a
- * NONEMPTY fragment that COMPLETES a guarded literal when concatenated with the
- * literal text around it. `rm -rf .claude/stat$(printf e)` reassembles to
- * `.claude/state` bash-side (verified against real bash), but the empty view
- * DROPS the completing `e` (`.claude/stat` → no match) and the literal view
- * keeps `$(printf e)` inline (no `.claude/state`) — neither models output that
- * ADDS characters joining two literal fragments into a guarded token. Since a
- * substitution's output is not statically knowable, `*` is the fail-closed
- * model: referencesPattern's existing per-segment glob / guarded-dir
- * intersection test then fires whenever the surrounding literal plus the
- * wildcard can reach a guarded path (`.claude/stat*` fnmatches the
- * `.claude/state` dir; `.claude/*` reaches it too). Reveal-monotonic and
- * strictly ADDITIVE — this base is tested ALONGSIDE the empty and literal bases
- * (see referencesPattern), never instead of them, so it can only surface MORE
- * references, never hide one. Quote-awareness and the opener set are delegated
- * to the shared scanSubstitutions, so the completion view cannot diverge from
- * the empty view on quoting. Nested forms (`${x:-$(printf e)}` default,
- * `${PWD:+$(printf e)}` alternate) are covered because the wildcard is left in
- * the default/alternate word for collapseVariants to reveal (`${x:-*}` → `*`).
- */
-function wildcardSubstitutions(text: string): string {
-  return scanSubstitutions(text, (_body, context) => knownWordOutput(context) ?? OPAQUE_OUTPUT).rebuilt;
-}
-
-/**
- * The one substitution whose output the guard can know: a `cat` quoted
- * heredoc (`staticHeredocCat`) standing as an entire double-quoted word —
- * `gh pr create --body "$(cat <<'EOF' … EOF)"`. Its output is the literal body,
- * one word that joins no adjacent text, so it cannot COMPLETE a guarded
- * literal the way an opaque output can; it stands as KNOWN_TEXT, a neutral
- * token of letters and `_` that matches no guarded pattern and can form no
- * redirect, separator, quote or glob. Whether the literal itself names
- * guarded state is still judged: the substitutions-LITERAL view keeps the body
- * text inline, and placeholderFor classifies the body before reaching this.
- * Every other substitution — an unquoted delimiter, any other command,
- * unquoted or adjacent placement — keeps the opaque-output wildcard.
- * bash 3.2 (macOS `/bin/bash`) mis-parses this form, closing `$(` by quote-
- * tracked paren scanning; an apostrophe in the body is then a syntax error and
- * nothing runs. Any shorter span it could pick still lies inside the body,
- * whose text is judged for guarded references either way.
- */
-const KNOWN_TEXT = "known_heredoc_text";
-
-function knownWordOutput(context: SubstitutionContext): string | null {
-  return context.kind === "known-word" ? KNOWN_TEXT : null;
-}
-
-/**
- * Does the text reference a guarded path under EVERY bash word-expansion that
- * can reassemble a guarded literal (quote collapse, substitution-to-empty,
- * brace expansion, single-char class reveal) or reach a guarded directory via a
- * residual glob? Reveal-monotonic and fail-closed: an unbounded brace expansion
- * counts as a reference. This is the front gate and chain/segment scope
- * predicate. THREE substitution base views are tested — substitutions LITERAL
- * (surfaces a guarded token inside a body), substitutions EMPTY (surfaces a
- * literal fragmented across an empty-output `$(…)`/backtick, which joins the
- * fragments bash-side), and substitutions WILDCARD (surfaces a literal
- * COMPLETED by a nonempty substitution output — `.claude/stat$(printf e)` →
- * `.claude/state`, caught as the glob `.claude/stat*` reaching the guarded
- * dir). All three are additive: a reference under any one blocks.
- */
-function referencesPattern(
-  text: string,
-  pattern: () => RegExp,
-  dirs: () => readonly (readonly string[])[],
-  policy: LeadingDotPolicy,
-): boolean {
-  const exemplars = dirs();
-  const blanked = blankSubstitutions(text);
-  const completed = wildcardSubstitutions(text);
-  // Reveal-monotonic bases, deduped: substitutions LITERAL vs EMPTY vs WILDCARD,
-  // each under every bounded per-expansion parameter-state cross-product. An
-  // unbounded parameter view set fails closed, exactly like brace expansion.
-  const variantGroups = [
-    collapseVariants(text),
-    collapseVariants(blanked),
-    collapseVariants(completed),
-  ];
-  if (variantGroups.some((group) => group === null)) return true;
-  const bases = [...new Set(variantGroups.flatMap((group) => group ?? []))];
-  for (const base of bases) {
-    const views = expandBraces(base);
-    if (views === null) return true;
-    for (const raw of views) {
-      // Bash collapses a run of `/` in a path to one (`/tmp//claude-subagents`
-      // → `/tmp/claude-subagents`); reveal it so a doubled slash can't hide the
-      // guarded dir literal. Reveal-monotonic — only ever joins path parts.
-      const view = collapseSingleCharClass(raw).replace(/\/{2,}/g, "/");
-      if (pattern().test(view)) return true;
-      for (const token of view.split(/\s+/)) {
-        if (tokenGlobHitsGuardedDir(token, exemplars, policy)) return true;
-      }
-    }
-  }
-  return false;
-}
-
-/** The two scope predicates of ONE decision, fixed to the whole command
- *  line's leading-dot policy — a segment judged alone must not lose a
- *  `shopt -s dotglob` that an earlier segment of the same line ran. */
-interface GuardScope {
+/** The scope of ONE decision: its two predicates, fixed to the guarded
+ *  locations and to the whole command line's leading-dot policy (a segment
+ *  judged alone must not lose a `shopt -s dotglob` that an earlier segment of
+ *  the same line ran), and the placeholder a protected-dir substitution body
+ *  flattens to. */
+export interface GuardScope {
   readonly guardedState: (text: string) => boolean;
   readonly protectedDir: (text: string) => boolean;
+  /** A path inside the subagent dir — itself a protected-dir reference. */
+  readonly protectedPlaceholder: string;
 }
 
-const scopeFor = (policy: LeadingDotPolicy): GuardScope => ({
-  guardedState: (text) => referencesPattern(text, stateFilePatterns, guardedDirSegments, policy),
-  protectedDir: (text) => referencesPattern(text, protectedDirPatterns, protectedDirSegments, policy),
-});
+const escapeRegex = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** Fail-closed scope for callers that judge a fragment without its line. */
-const FAIL_CLOSED_SCOPE = scopeFor("wildcards-match");
-
-/**
- * Is the segment's head token a command that cannot write a file? Exact-token
- * membership (no basename resolution — `./cat` must not inherit `cat`'s
- * trust), after env-prefix stripping so `CI=1 jq …` matches. A pure
- * assignment (`F=active_task_graph.json`) strips to an empty head and
- * therefore fails the check: binding a guarded path to a variable is the
- * seed of every cross-segment indirection, and a read never needs it.
- */
-function hasReadOnlyHead(segment: string): boolean {
-  const tokens = stripEnvPrefix(segment)
-    .split(/\s+/)
-    .filter((t) => t !== "")
-    .map(unquote);
-  return READ_ONLY_STATE_COMMANDS.has(tokens[0] ?? "");
-}
+/** A directory as `/`-split segments (empty segments dropped) for the glob-
+ *  intersection scope test: a glob path reaching AT or INTO a guarded dir
+ *  could name a guarded file even when no literal survives quote-collapse. */
+const toSegments = (dir: string): readonly string[] => dir.split("/").filter((s) => s !== "");
 
 /**
- * Remove the one output redirect that cannot mutate guarded authority:
- * discarding stderr to the literal `/dev/null`. This is intentionally narrow
- * (`2>` only, no append/clobber variants, expansions, or lookalike paths).
- * Read-only probes routinely use this form for optional guarded directories;
- * treating it as a state write made `ls .loom 2>/dev/null` impossible.
+ * The scope one decision judges with. Guarded state is the task-graph and
+ * review-invocations names plus every guarded directory: an agent writing the
+ * evidence ledger or binding files in the subagent dir would forge trusted
+ * test evidence or fake attribution, `rm` of a machine definition makes the
+ * gate see "no machine" for a bound agent, and a glob (`active_task*.json`,
+ * `.claude/state/*.json`) or brace (`active_task_{graph,x}.json`) write names
+ * a state directory but never the file literal — so only a dir match catches
+ * it. The protected dirs (subagent, machine definitions) are additionally
+ * never helper-writable. `policy` defaults to the fail-closed leading-dot
+ * policy for callers judging a fragment without its line.
  */
-function withoutSafeStderrDiscard(segment: string): string {
-  const ranges: Array<Readonly<{ start: number; end: number }>> = [];
-  const isBoundary = (char: string | undefined): boolean =>
-    char === undefined || /\s/.test(char) || ";&|(){}".includes(char);
-  scanUnquoted<never>(segment, 0, (char, index) => {
-    if (char !== "2" || !isBoundary(segment[index - 1]) || segment[index + 1] !== ">") {
-      return CONTINUE;
-    }
-    let cursor = index + 2;
-    if (segment[cursor] === ">" || segment[cursor] === "&" || segment[cursor] === "|") {
-      return CONTINUE;
-    }
-    while (segment[cursor] === " " || segment[cursor] === "\t") cursor += 1;
-    const target = "/dev/null";
-    if (!segment.startsWith(target, cursor) || !isBoundary(segment[cursor + target.length])) {
-      return CONTINUE;
-    }
-    const end = cursor + target.length;
-    ranges.push(Object.freeze({ start: index, end }));
-    return skip(end);
-  });
-  if (ranges.length === 0) return segment;
-  let result = "";
-  let cursor = 0;
-  for (const range of ranges) {
-    result += segment.slice(cursor, range.start) + " ";
-    cursor = range.end;
-  }
-  return result + segment.slice(cursor);
-}
-
-/**
- * Quote-aware output-redirect detection after removing exact safe stderr
- * discards. Every remaining unquoted `>` counts as a write channel UNLESS it
- * is an fd dup — `>&` followed by a word that is ENTIRELY digits or exactly
- * `-` (`2>&1`, `>&2`, `>&-`), classified by the shared
- * classifyFdDupWord. A `>&` whose word merely starts with a digit but
- * continues into a path (`>&2/../file` — the round-16 bypass) or is any other
- * word (`>&file`, the round-15 bypass) redirects to a file and counts as a
- * write. Quoted `>` characters remain ordinary argument text.
- */
-function hasOutputRedirect(segment: string): boolean {
-  const inspected = withoutSafeStderrDiscard(segment);
-  return scanUnquoted<true>(inspected, 0, (c, i) => {
-    if (c !== ">") return CONTINUE;
-    if (inspected[i + 1] !== "&") return halt(true);
-    const dup = classifyFdDupWord(inspected, i + 2);
-    return dup.isFdDup
-      ? skip(dup.end) // digits/`-`: nothing special inside the dup word
-      : halt(true); // `>&word` writes the FILE `word`
-  }) ?? false;
+export function guardScope(
+  locations: GuardedLocations,
+  policy: LeadingDotPolicy = "wildcards-match",
+): GuardScope {
+  const guardedDirs = guardedDirsOf(locations);
+  const protectedDirs = protectedDirsOf(locations);
+  const statePattern = new RegExp(
+    ["active_task_graph", "review-invocations", ...guardedDirs].map(escapeRegex).join("|"),
+  );
+  const protectedPattern = new RegExp(protectedDirs.map(escapeRegex).join("|"));
+  const guardedSegments = guardedDirs.map(toSegments);
+  const protectedSegments = protectedDirs.map(toSegments);
+  return {
+    guardedState: (text) => referencesPattern(text, statePattern, guardedSegments, policy),
+    protectedDir: (text) => referencesPattern(text, protectedPattern, protectedSegments, policy),
+    protectedPlaceholder: `${locations.subagentDir}/__subst__`,
+  };
 }
 
 interface FlattenedCommand {
@@ -648,11 +257,11 @@ interface FlattenedCommand {
  *  surface more references. The load-bearing property of the non-empty
  *  placeholder texts is that they cannot form a redirect or separator:
  *  OPAQUE_OUTPUT and the literal parts contain only [A-Za-z_/] plus U+2217,
- *  and the `${SUBAGENT_DIR}` prefix is redirect/separator-free as shipped
- *  (`/tmp/claude-subagents`) — this is contingent on an operator-set
- *  LOOM_SUBAGENT_DIR staying free of shell-special characters. */
+ *  and the subagent-dir prefix of `protectedPlaceholder` is redirect/
+ *  separator-free as shipped (`/tmp/claude-subagents`) — this is contingent on
+ *  an operator-set LOOM_SUBAGENT_DIR staying free of shell-special characters. */
 function placeholderFor(body: string, scope: GuardScope, context: SubstitutionContext): string {
-  if (scope.protectedDir(body)) return `${SUBAGENT_DIR}/__subst__`;
+  if (scope.protectedDir(body)) return scope.protectedPlaceholder;
   if (scope.guardedState(body)) return "active_task_graph__subst__";
   return knownWordOutput(context) ?? OPAQUE_OUTPUT;
 }
@@ -665,1099 +274,26 @@ function placeholderFor(body: string, scope: GuardScope, context: SubstitutionCo
  * literal, and `$(…)`/backticks stay live in double quotes while `<(…)`/`>(…)`
  * do not. Returns null when an opener has no closer — unbalanced substitution
  * syntax on a guarded line is judged unparseable, and unparseable fails closed
- * at the caller. `scope` classifies each body for its placeholder; it
- * defaults to the fail-closed scope for callers judging text out of context.
+ * at the caller. `scope` classifies each body for its placeholder (a caller
+ * judging text out of context passes `guardScope(locations)`, whose default
+ * leading-dot policy is the fail-closed one).
  */
 export function flattenSubstitutions(
   command: string,
-  scope: GuardScope = FAIL_CLOSED_SCOPE,
+  scope: GuardScope,
 ): FlattenedCommand | null {
   const scan = scanSubstitutions(command, (body, context) => placeholderFor(body, scope, context));
   if (scan.unclosed) return null;
   return { bodies: scan.bodies, flattened: scan.rebuilt };
 }
 
-/** Segments grouped into pipe-chains: `|` links segments into one chain
- *  (data flows through it), every other separator starts a new chain. */
-function pipeChains(command: string): string[][] {
-  const chains: string[][] = [];
-  for (const seg of splitCommandSegmentsWithOps(command)) {
-    const text = stripComment(seg.text).trim();
-    if (seg.opBefore === "|" && chains.length > 0) {
-      chains[chains.length - 1].push(text);
-    } else {
-      chains.push([text]);
-    }
-  }
-  return chains.map((chain) => chain.filter((t) => t !== "")).filter((c) => c.length > 0);
-}
-
 /**
- * One here-document construct found in a command: the `<<`/`<<-` operator
- * through the end of its delimiter word (the body lives on later lines).
+ * The pure guard decision over the guarded locations the shell resolved for
+ * this call. The shells (the `pre-tool-use/guard-state-file` hook, the Pi
+ * extension) gate it on the task graph existing.
  */
-interface HeredocOpener {
-  /** Position of the first `<` of the `<<` operator. */
-  readonly start: number;
-  /** Position just past the delimiter word. */
-  readonly end: number;
-  /** The delimiter word, quote-stripped (`'EOF'`, `"EOF"`, `\EOF` → `EOF`). */
-  readonly delimiter: string;
-  /** True when any character of the delimiter word was quoted: the body is
-   *  opaque literal data — no substitutions, no quoting, no chains. */
-  readonly quoted: boolean;
-  /** `<<-`: leading tabs are stripped from body and terminator lines. */
-  readonly minus: boolean;
-  /** True when the body is fed to a code interpreter (see
-   *  HEREDOC_SCRIPT_HEADS): the body is then a SCRIPT, not data, and must be
-   *  judged as full command text — including inside a QUOTED delimiter. */
-  readonly script: boolean;
-}
-
-/** Command heads whose heredoc stdin CAN be EXECUTED as a script (shell
- *  interpreters and language runtimes that read their program from stdin
- *  when no file/program argument is given). For these, a quoted delimiter
- *  does NOT make the body inert — the inner interpreter still runs it — so
- *  the body must be judged as command text, exactly like the
- *  pre-heredoc-aware guard did. Whether a particular invocation actually
- *  reads stdin as its PROGRAM is decided by interpreterExecutesStdin (a
- *  file argument or `-c`/`-e` program makes stdin DATA: `bash script.sh <<
- *  'EOF'` feeds the script's stdin, not bash's program source). `awk`/
- *  `sed`/`jq` are intentionally absent: their stdin is DATA (scripts come
- *  from `-f`/`-e`).
- */
-const HEREDOC_SCRIPT_HEADS = new Set([
-  "bash", "sh", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh",
-  "python", "python3", "node", "bun", "deno", "perl", "ruby", "php",
-  "lua", "luajit", "pwsh", "powershell", "tclsh", "groovy", "R",
-  "Rscript", "octave", "busybox",
-]);
-
-/** Shell-family interpreters share the same program-source flags. */
-const SH_FAMILY_HEADS = new Set(["bash", "sh", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh"]);
-
-const headBase = (token: string): string => {
-  const base = token.slice(token.lastIndexOf("/") + 1);
-  return base.length > 0 && base !== "." && base !== ".." ? base : token;
-};
-
-/** Prefix wrappers that merely adjust the environment/priority of the command
- *  they launch. Unwrapped so `sudo bash << EOF`, `timeout 5 bash << EOF`, and
- *  `env -u FOO bash << EOF` are judged by the interpreter they actually run
- *  — a quoted body fed to any of those is still a script. The set is CLOSED
- *  and modest; an unknown wrapper is treated as not-an-interpreter
- *  (documented residual, same class as the multi-hop `cd` residual in
- *  config). `xargs` is deliberately NOT here: xargs turns stdin lines into
- *  command ARGUMENTS (an executed side of the body), and the group scan
- *  treats it as a script feed directly. */
-const WRAPPER_HEADS = new Set([
-  "sudo", "command", "builtin", "exec", "timeout", "nice", "nohup",
-  "setsid", "stdbuf", "taskset", "ionice", "chrt", "watch", "env",
-]);
-
-/** Wrapper options that CONSUME the next token, so it must not be mistaken
- *  for the wrapped command (`sudo -u root bash`, `timeout -s KILL 5 bash`).
- *  BOOLEAN flags are deliberately ABSENT from this table: `sudo -S` (read
- *  password from stdin), `env -0`/`--null`, `env -v`/`--debug`, and
- *  `watch -d`/`--differences` take no value. Listing one here makes
- *  `unwrapWrapper` swallow the wrapped interpreter (`env -0 bash` → `[]`),
- *  resolution lands off the interpreter set, and a quoted heredoc body is
- *  judged opaque DATA instead of a script — the fail-open direction this
- *  guard exists to close (round-3 reviewer, upheld by the refutation panel).
- *  Boolean flags instead take the plain flag-skip below, leaving the
- *  wrapped command to be resolved as usual. */
-const WRAPPER_FLAG_ARGS: Readonly<Record<string, readonly string[]>> = {
-  sudo: ["-u", "-g", "-C", "-p", "-T", "-R", "-r", "-D"],
-  timeout: ["-s", "-k", "--signal", "--kill-after"],
-  nice: ["-n"],
-  stdbuf: ["-i", "-o", "-e"],
-  taskset: ["-c", "-p"],
-  ionice: ["-c", "-n", "-p"],
-  chrt: ["-p"],
-  watch: ["-n"],
-  exec: ["-a", "-c"],
-  env: ["-u", "--unset", "-C", "--chdir", "--argv0", "-S", "--split-string"],
-  command: [],
-  builtin: [],
-  setsid: [],
-  nohup: [],
-};
-
-/** Interpreter flags that take the PROGRAM INLINE (`bash -c '…'`) — stdin
- *  is then DATA, not the program source. */
-const INLINE_PROGRAM_FLAGS: Readonly<Record<string, readonly string[]>> = {
-  python: ["-c"], python3: ["-c"],
-  node: ["-e", "--eval"], bun: ["-e", "--eval"],
-  perl: ["-e"], ruby: ["-e"], php: ["-r"],
-  lua: ["-e"], luajit: ["-e"],
-  R: ["-e"], Rscript: ["-e"],
-  octave: ["--eval", "-e", "--exec"],
-  groovy: ["-e"],
-  pwsh: ["-Command", "-c", "-EncodedCommand", "-e"], powershell: ["-Command", "-c", "-EncodedCommand", "-e"],
-};
-
-/** Interpreter flags that take the PROGRAM FROM A FILE (`php -f`, `pwsh
- *  -File`) — stdin is then DATA. */
-const FILE_PROGRAM_FLAGS: Readonly<Record<string, readonly string[]>> = {
-  php: ["-f"], R: ["-f"], Rscript: ["-f"],
-  pwsh: ["-File", "-f"], powershell: ["-File", "-f"],
-};
-
-/** Interpreter flags that consume the next token as a MODULE/preload, then
- *  still read the program from stdin (`perl -Mstrict`, `node -r ./pre.js`). */
-const MODULE_CONTINUE_FLAGS: Readonly<Record<string, readonly string[]>> = {
-  perl: ["-M", "-m"],
-  lua: ["-l"], luajit: ["-l"],
-  node: ["-r", "--require", "--import"], bun: ["-r", "--preload"],
-  tclsh: ["-encoding"],
-};
-
-/** Interpreter flags that consume the next token as the ENTIRE program
- *  (`python -m json.tool`) — stdin is then DATA for that program. */
-const MODULE_PROGRAM_FLAGS: Readonly<Record<string, readonly string[]>> = {
-  python: ["-m"], python3: ["-m"], ruby: ["-S"],
-};
-
-/** Paths that resolve to an inherited file descriptor. A heredoc (like any
- *  redirect) binds a descriptor, so an interpreter reading its PROGRAM from
- *  one of these — or `source`/`.` reading commands from one — executes the
- *  redirected body even though the argument LOOKS like a named file.
- *  `/dev/stdin` and fd 0 are the default heredoc channel; `/dev/fd/N` and
- *  `/proc/{self,thread-self,<pid>}/fd/N` cover an explicitly numbered heredoc
- *  (`bash 3<<'EOF' … ` then `source /dev/fd/3`). Matching any descriptor path
- *  (not only fd 0) only ever errs fail-closed: a rare legitimate
- *  `python3 /dev/fd/5` reading real data is judged a script and blocked, which
- *  is the safe direction for a read-only guard. */
-const FD_DEVICE_PATH =
-  /^\/dev\/stdin$|^\/dev\/fd\/\d+$|^\/proc\/(?:self|thread-self|\d+)\/fd\/\d+$/;
-
-const isFdDevicePath = (word: string): boolean => FD_DEVICE_PATH.test(unquote(word));
-
-/** Shell-family program-source scan: `-c` takes the program inline (stdin
- *  = data), `-s` forces stdin as the program, a bare word is a script FILE
- *  (stdin = data) UNLESS that word is a bound descriptor (`bash /dev/stdin`),
- *  in which case the descriptor's content — the heredoc body — is the program.
- *  With no program source the shell reads its commands from stdin — the
- *  heredoc body is the script. */
-function shFamilyExecutesStdin(args: readonly string[]): boolean {
-  for (let i = 0; i < args.length; i++) {
-    const a = unquote(args[i]!);
-    if (a === "-s") return true;
-    if (a === "-c") return false;
-    if (a === "--") {
-      // `bash -- file` = file; `bash -- /dev/stdin` = the bound body; `bash --` = stdin.
-      if (i === args.length - 1) return true;
-      return isFdDevicePath(args[i + 1]!);
-    }
-    if (a === "-") return true;
-    if (a.startsWith("-")) continue;
-    return isFdDevicePath(a); // script-file word — unless it is a bound descriptor
-  }
-  return true;
-}
-
-/** busybox applets: only the sh-family applets read stdin as a program;
- *  `busybox` alone is an interactive shell reading stdin; every other
- *  applet (`busybox cat`, `busybox awk`) treats stdin as data. */
-function busyboxExecutesStdin(args: readonly string[]): boolean {
-  for (let i = 0; i < args.length; i++) {
-    const a = unquote(args[i]!);
-    if (a === "--") break;
-    if (a.startsWith("-")) continue;
-    const applet = headBase(a);
-    if (SH_FAMILY_HEADS.has(applet)) return shFamilyExecutesStdin(args.slice(i + 1));
-    return false;
-  }
-  return true;
-}
-
-/** Does this interpreter read its PROGRAM from stdin (so a heredoc body is
- *  a script), or from an inline/file/module argument (so the body is input
- *  DATA)? Argless invocations default to stdin: that is the interpreter
- *  contract that makes `bash << 'EOF'` a script. */
-function interpreterExecutesStdin(head: string, args: readonly string[]): boolean {
-  if (head === "busybox") return busyboxExecutesStdin(args);
-  if (SH_FAMILY_HEADS.has(head)) return shFamilyExecutesStdin(args);
-  const inline = INLINE_PROGRAM_FLAGS[head] ?? [];
-  const file = FILE_PROGRAM_FLAGS[head] ?? [];
-  const continueFlags = MODULE_CONTINUE_FLAGS[head] ?? [];
-  const programFlags = MODULE_PROGRAM_FLAGS[head] ?? [];
-  for (let i = 0; i < args.length; i++) {
-    const a = unquote(args[i]!);
-    if (a === "-") return true;
-    if (inline.includes(a)) return false;
-    // A file program supplied via a bound descriptor — `php -f /dev/stdin`,
-    // `pwsh -File /dev/stdin` — reads the heredoc body as its program. Only the
-    // heads in FILE_PROGRAM_FLAGS reach this branch; anything else takes the
-    // generic fallback below.
-    if (file.includes(a)) return isFdDevicePath(args[i + 1] ?? "");
-    if (programFlags.includes(a)) {
-      if (isFdDevicePath(args[i + 1] ?? "")) return true;
-      i++; return false;
-    }
-    if (continueFlags.includes(a)) { i++; continue; }
-    if (a.startsWith("-")) continue;
-    return isFdDevicePath(a); // bare script-file word — unless a bound descriptor
-  }
-  return true;
-}
-
-/** Unwrap one leading wrapper: skip its options (and option arguments) and
- *  return the wrapped command's tokens, or null when `tokens` does not
- *  START with a recognized wrapper. `env -S 'cmd…'` re-splits the option
- *  value as a command line. */
-function unwrapWrapper(tokens: readonly string[]): readonly string[] | null {
-  const head = headBase(unquote(tokens[0] ?? ""));
-  if (!WRAPPER_HEADS.has(head)) return null;
-  const consume = WRAPPER_FLAG_ARGS[head] ?? [];
-  let i = 1;
-  while (i < tokens.length) {
-    const t = tokens[i]!;
-    if (t === "--") { i++; break; }
-    if (head === "env" && (t === "-S" || t === "--split-string")) {
-      // `env -S 'bash -c …'` / `env --split-string '…'`: the option VALUE is
-      // the whole command line, so it must be re-split. Split-string is an
-      // ENV semantic — `sudo -S` (read password from stdin) is a BOOLEAN
-      // flag: it is not in WRAPPER_FLAG_ARGS above, so it takes the flag-skip
-      // and the following token is the wrapped command, not its value.
-      return tokens.slice(i + 1).join(" ").split(/\s+/).filter((w) => w !== "");
-    }
-    if (t.startsWith("-") && consume.includes(t)) { i += 2; continue; }
-    if (t.startsWith("-")) { i++; continue; }
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) { i++; continue; } // `sudo VAR=1 bash`
-    // Positional (non-option) arguments of specific wrappers: `timeout 5
-    // cmd` and `nice 5 cmd` take the value BEFORE the wrapped command.
-    if (head === "timeout" && /^\d+(?:\.\d+)?[smhd]?$/.test(t)) { i++; continue; }
-    if (head === "nice" && /^-?\d+$/.test(t)) { i++; continue; }
-    break;
-  }
-  return tokens.slice(i);
-}
-
-/** Does this simple command's head turn stdin into executed content?
- *  "script": stdin is a program/commands (an interpreter without its own
- *  program source, or xargs, which turns stdin lines into command
- *  arguments); "data": stdin is input data; null: not an interpreter. */
-type StdinVerdict = "script" | "data" | null;
-
-/** Resolve a simple command's head through the wrapper chain to the
- *  interpreter it actually runs, or null when the chain does not land on a
- *  recognized head. Same unwrap used by headExecutesStdinVerdict — exposed
- *  so the inline-program checks (`inlineProgramArg`, variable detection,
- *  stdin-inheritance recursion) apply to the RESOLVED interpreter rather
- *  than the wrapper that merely fronted it (`sudo bash -c 'sh'`,
- *  `env -S 'bash -c "sh"'`). */
-function resolvedInterpreter(
-  head: string,
-  args: readonly string[],
-): { head: string; args: readonly string[] } | null {
-  let tokens: readonly string[] = [head, ...args];
-  for (let guard = 0; guard < 8 && tokens.length > 0; guard++) {
-    const unwrapped = unwrapWrapper(tokens);
-    if (unwrapped === null || unwrapped.length === 0) break;
-    tokens = unwrapped;
-  }
-  if (tokens.length === 0) return null;
-  // The head may carry a fused redirect when it reached the wrapper chain as
-  // an ARG (the analyzeCommandHead head position splits its own word):
-  // `sudo bash<<'EOF'` unwraps to head `bash<<EOF`. Split it so the
-  // interpreter resolves. (This runs on the unquoted token; a word QUOTED
-  // around its operator — a command literally named `bash<<x` — mis-splits
-  // to `bash`, which only errs fail-closed: the body is judged as a script.)
-  const rawHead = unquote(tokens[0]!);
-  const split = splitFusedRedirect(rawHead);
-  return { head: headBase(split?.head ?? rawHead), args: tokens.slice(1) };
-}
-
-function headExecutesStdinVerdict(head: string, args: readonly string[]): StdinVerdict {
-  const resolved = resolvedInterpreter(head, args);
-  if (resolved === null) return null;
-  if (resolved.head === "xargs") return "script";
-  if (!HEREDOC_SCRIPT_HEADS.has(resolved.head)) return null;
-  return interpreterExecutesStdin(resolved.head, resolved.args) ? "script" : "data";
-}
-
-/** The token right after an interpreter's inline-program flag (`-c`, `-e`,
- *  `-r`, …), or null when the invocation has none. */
-function inlineProgramArg(head: string, args: readonly string[]): string | null {
-  const inline = SH_FAMILY_HEADS.has(head) ? ["-c"] : INLINE_PROGRAM_FLAGS[head] ?? [];
-  for (let i = 0; i < args.length; i++) {
-    const a = unquote(args[i]!);
-    if (inline.includes(a)) return i + 1 < args.length ? unquote(args[i + 1]!) : null;
-    if (!a.startsWith("-") && a !== "-") return null;
-  }
-  return null;
-}
-
-/** Is the inline program a VARIABLE reference (`bash -c "$l"`)? In a
- *  reader+executor compound, a variable-fed inline program executes the very
- *  lines a preceding `read` pulled from the heredoc body — the inner
- *  interpreter runs the body even though its own stdin is not the program.
- *
- *  A variable-fed program is only ONE way an inline program can execute the
- *  body. A LITERAL inline program inherits the command's stdin and may read
- *  it as ITS OWN program source (`bash -c 'sh'`, `bash -c 'python3'`) or
- *  read+exec it (`bash -c 'eval "$(cat)"'`) — commandsExecuteStdin recurses
- *  into the inline program text for those cases, so `bash -c 'echo hi'`
- *  stays data while `bash -c 'sh'` is a script. */
-const inlineProgramIsVariable = (head: string, args: readonly string[]): boolean =>
-  inlineProgramArg(head, args)?.startsWith("$") ?? false;
-
-/** Command heads that pull stdin into a variable (the body lines become
- *  data a LATER command can execute). */
-const READER_HEADS = new Set(["read", "mapfile", "readarray"]);
-
-/** Command heads whose stdin, when read inside a $() substitution, becomes
- *  the substitution's OUTPUT — which an executor (`eval "$(cat)"`) then
- *  runs. The same class as READER_HEADS, but reached through a command
- *  substitution instead of a variable. */
-const SUBSTITUTION_READER_HEADS = new Set([
-  "cat", "head", "tail", "sed", "awk", "tee", "tr", "read", "mapfile", "readarray",
-]);
-
-/** Command heads that execute their ARGUMENT as shell code (the body lines,
- *  once read). `sh -c "$l"` is caught by the inlineProgramIsVariable rule and
- *  `bash -c 'eval "$(cat)"'` by the inline-program recursion in
- *  commandsExecuteStdin. */
-const EXECUTOR_HEADS = new Set(["eval", "source", "."]);
-
-/** Leading words that are compound syntax, never a command head. */
-const HEAD_KEYWORDS = new Set([
-  "if", "then", "else", "elif", "while", "until", "for", "do", "done",
-  "case", "esac", "in", "{", "}", "(", ")", "!", "[[", "((", "function",
-]);
-
-/** Quote-aware word split of one simple-command slice; `(`/`)`/`{`/`}` are
- *  standalone tokens so compound syntax never hides a head. */
-function commandWords(text: string): string[] {
-  const words: string[] = [];
-  let current = "";
-  let quote: '"' | "'" | "`" | null = null;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]!;
-    if (quote !== null) {
-      if (quote !== "'" && c === "\\") { current += c + (text[i + 1] ?? ""); i++; continue; }
-      if (c === quote) quote = null;
-      current += c;
-      continue;
-    }
-    if (c === "\\") { current += c + (text[i + 1] ?? ""); i++; continue; }
-    if (c === '"' || c === "'" || c === "`") { quote = c; current += c; continue; }
-    if (c === "(" || c === ")" || c === "{" || c === "}") {
-      if (current !== "") { words.push(current); current = ""; }
-      words.push(c);
-      continue;
-    }
-    if (/\s/.test(c)) {
-      if (current !== "") { words.push(current); current = ""; }
-      continue;
-    }
-    current += c;
-  }
-  if (current !== "") words.push(current);
-  return words;
-}
-
-/** Redirect operators, longest-first, for fused-redirect splitting. The
- *  `&>`-on-`&` form is checked separately (it can only start at the `&`). */
-const REDIRECT_OPS = ["<<<", "<<-", "<<", ">>", "<>", ">&", ">", "<"] as const;
-
-/** First UNQUOTED redirect operator inside a raw word, split off from its
- *  prefix: `bash<<'EOF'` → head `bash` + rest `<<'EOF'`; `2>/dev/null` →
- *  head `2` + rest `>/dev/null`; `2>&1` → head `2` + rest `>&1`. A quoted
- *  operator (`'a<<b'`) is literal word text and never splits. Returns null
- *  when the word contains no unquoted redirect. */
-function splitFusedRedirect(word: string): { readonly head: string; readonly rest: string } | null {
-  let quote: '"' | "'" | "`" | null = null;
-  for (let i = 0; i < word.length; i++) {
-    const c = word[i]!;
-    if (quote !== null) {
-      if (quote !== "'" && c === "\\") { i++; continue; }
-      if (c === quote) quote = null;
-      continue;
-    }
-    if (c === "\\") { i++; continue; }
-    if (c === '"' || c === "'" || c === "`") { quote = c; continue; }
-    if (c === "&" && word[i + 1] === ">") {
-      return { head: word.slice(0, i), rest: word.slice(i) }; // `&>`, `&>>`
-    }
-    for (const op of REDIRECT_OPS) {
-      if (word.startsWith(op, i)) {
-        return { head: word.slice(0, i), rest: word.slice(i) };
-      }
-    }
-  }
-  return null;
-}
-
-/** The head token (and remaining argument tokens) of a simple-command
- *  slice, after comments, env assignments, compound keywords, `case`
- *  words/patterns, and `name()` function-definition prefixes are stripped.
- *  Redirect operators (and their targets/delimiters) are removed from the
- *  args so `<< 'EOF'` never reads as a script-file argument; fused
- *  redirects (`3>file`, `2>&1`, `<<'EOF'`) are dropped whole. A redirect
- *  FUSED INTO the head word (`bash<<'EOF'`) or standing before it
- *  (`2>/dev/null bash<<'EOF'`) is split off so the interpreter resolves
- *  (review finding F1); compound-closing `)`/`}` words are syntax, never
- *  interpreter arguments, and are dropped (F2); `case` patterns — a word
- *  immediately followed by a standalone `)` that has a real word after it —
- *  are skipped with their `)` (F3), while a `)` followed only by redirects
- *  stays a subshell close and does NOT consume its word as a pattern.
- *  `(( … ))` arithmetic is not a command and yields null. Null when
- *  nothing but syntax remains. */
-const PURE_REDIRECT = /^(?:[0-9]*[<>]{1,2}|<<<|&>+|<<-|<>)$/;
-const FUSED_REDIRECT = /^(?:[0-9]+[<>]|[<>]|&>)[^\s]*$/;
-
-/** Argument words after the head: redirect operators and their
- *  targets/delimiters are consumed (`<< 'EOF'`, `3>file`, `2>&1`),
- *  compound-closing `)`/`}` words are syntax junk (never script-file
- *  arguments). */
-function commandArgs(words: readonly string[], from: number): readonly string[] {
-  const args: string[] = [];
-  for (let k = from; k < words.length; k++) {
-    const w = words[k]!;
-    if (w === ")" || w === "}") continue; // compound closes are syntax, never args
-    if (PURE_REDIRECT.test(w)) { k++; continue; } // operator + target/delimiter
-    if (FUSED_REDIRECT.test(w)) continue; // `3>file`, `2>&1`, `<<'EOF'`
-    args.push(unquote(w));
-  }
-  return args;
-}
-
-export function analyzeCommandHead(segment: string): { head: string; args: readonly string[] } | null {
-  const stripped = stripEnvPrefix(stripComment(segment).trim());
-  if (stripped === "") return null;
-  // `(( … ))` is arithmetic/`((`-test syntax, never a command; its internals
-  // must not read as a head (`(( bash )) << 'EOF'` stdin is unused).
-  if (stripped.replace(/^!\s*/, "").startsWith("((")) return null;
-  const words = commandWords(stripped);
-  let i = 0;
-  let inCase = false;
-  for (let guard = 0; guard < 8 && i < words.length; guard++) {
-    const raw = words[i]!;
-    const w = unquote(raw);
-    if (w === "case") { inCase = true; i++; continue; }
-    if (inCase) {
-      if (w === "in") inCase = false; // `case … in` — patterns follow
-      i++;
-      continue;
-    }
-    // `case` PATTERN: a word immediately followed by a standalone `)` with
-    // a real word after it. A `)` followed only by redirects is a subshell
-    // close (`( x ) << 'EOF'`), not a pattern terminator.
-    if (words[i + 1] === ")" && i + 2 < words.length && words[i + 2] !== ")" &&
-        !PURE_REDIRECT.test(words[i + 2]!) && !FUSED_REDIRECT.test(words[i + 2]!)) {
-      i += 2;
-      continue;
-    }
-    if (HEAD_KEYWORDS.has(w) || /^[A-Za-z_][A-Za-z0-9_]*\(\)$/.test(w)) { i++; continue; }
-    // A fused redirect on the head word: `bash<<'EOF'` → head `bash`, the
-    // remainder is redirect syntax and is discarded. A leading pure-`N>` word
-    // (`2>/dev/null`, `>log`, `&>x`) is also redirect syntax — skip it.
-    const split = splitFusedRedirect(raw);
-    if (split !== null) {
-      if (split.head === "" || /^[0-9]+$/.test(split.head)) { i++; continue; }
-      return { head: unquote(split.head), args: commandArgs(words, i + 1) };
-    }
-    break;
-  }
-  if (i >= words.length) return null;
-  return { head: unquote(words[i]!), args: commandArgs(words, i + 1) };
-}
-
-/** Index of the `}` closing a `${` opened before `start`; -1 when unclosed.
- *  Skips quoted spans, `$(…)`/backticks, `$((…))` arithmetic, and nested
- *  `${…}`. */
-function findClosingBrace(text: string, start: number): number {
-  let depth = 1;
-  let quote: '"' | "'" | null = null;
-  for (let i = start; i < text.length; i++) {
-    const c = text[i]!;
-    if (quote !== null) {
-      if (quote !== "'" && c === "\\") { i++; continue; }
-      if (c === quote) quote = null;
-      continue;
-    }
-    if (c === "\\") { i++; continue; }
-    if (c === '"' || c === "'") { quote = c; continue; }
-    if (c === "$" && text[i + 1] === "(") {
-      const close = findClosingParen(text, i + 2);
-      if (close === -1) return -1;
-      i = close;
-      continue;
-    }
-    if (c === "`") {
-      const close = findClosingBacktick(text, i + 1);
-      if (close === -1) return -1;
-      i = close;
-      continue;
-    }
-    if (c === "$" && text[i + 1] === "{") { depth++; i++; continue; }
-    if (c === "}") {
-      depth--;
-      if (depth === 0) return i;
-    }
-  }
-  return -1;
-}
-
-/** One pipe-chain of an opener line: text between depth-0 separators
- *  (`;` `&&` `||` `&` newline). `|` links members WITHIN one group — the
- *  shell evaluates the group as one trust unit. */
-interface OpenerGroup { readonly start: number; readonly end: number; }
-
-/** Quote/substitution/compound-aware walk of an opener line, yielding the
- *  pipe-chain groups that own heredoc positions. Compound internals
- *  (`{ …; }`, `( …; )`, `if …; then …; fi`, `while …; do …; done`,
- *  `case …;; esac`) never cut a group: their `;`/`&&` bind inside the
- *  compound, so a heredoc inside one can still feed a LATER pipeline member
- *  (`{ cat << 'EOF'; } | bash` executes the body). Unparseable spans
- *  (unclosed `$(…)`, backticks, `${…}`) fail closed: the opener line is
- *  judged as one group (conservative — script bodies block on guarded
- *  mentions, data bodies are still judged by the normal machinery). */
-function openerLineGroups(line: string): readonly OpenerGroup[] {
-  const groups: OpenerGroup[] = [];
-  let groupStart = 0;
-  const compound: string[] = [];
-  let quote: '"' | "'" | null = null;
-  let i = 0;
-  const n = line.length;
-  const boundaryChar = (pos: number): boolean =>
-    pos < 0 || pos >= n || /\s/.test(line[pos]!) || ";&|(){}".includes(line[pos]!);
-  const popUntil = (kind: string): void => {
-    for (let k = compound.length - 1; k >= 0; k--) {
-      if (compound[k] === kind) { compound.length = k; return; }
-    }
-  };
-  while (i < n) {
-    const c = line[i]!;
-    if (quote === "'") { if (c === "'") quote = null; i++; continue; }
-    if (quote === '"') {
-      if (c === "\\") { i += 2; continue; }
-      if (c === '"') quote = null;
-      i++;
-      continue;
-    }
-    if (c === "\\") { i += 2; continue; }
-    if (c === "'" || c === '"') { quote = c; i++; continue; }
-    if (c === "$" && line[i + 1] === "{") {
-      const close = findClosingBrace(line, i + 2);
-      if (close === -1) return [{ start: groupStart, end: n }]; // fail closed: one group
-      i = close + 1;
-      continue;
-    }
-    if (c === "$" && line[i + 1] === "(") {
-      const close = findClosingParen(line, i + 2);
-      if (close === -1) return [{ start: groupStart, end: n }];
-      i = close + 1;
-      continue;
-    }
-    if ((c === "<" || c === ">") && line[i + 1] === "(") {
-      const close = findClosingParen(line, i + 2);
-      if (close === -1) return [{ start: groupStart, end: n }];
-      i = close + 1;
-      continue;
-    }
-    if (c === "`") {
-      const close = findClosingBacktick(line, i + 1);
-      if (close === -1) return [{ start: groupStart, end: n }];
-      i = close + 1;
-      continue;
-    }
-    if (c === "{") { compound.push("{"); i++; continue; }
-    if (c === "}") { if (compound.length > 0 && compound[compound.length - 1] === "{") compound.pop(); i++; continue; }
-    if (c === "(") { compound.push("("); i++; continue; }
-    // A `)` closes a subshell ONLY when a `(` is open; in `case x in a)` it
-    // terminates a PATTERN and must not uncut the case compound.
-    if (c === ")") { if (compound.length > 0 && compound[compound.length - 1] === "(") compound.pop(); i++; continue; }
-    // `[[ … ]]` test brackets: `&&` inside is a test operator, not a chain cut.
-    if (c === "[" && line[i + 1] === "[") { compound.push("[["); i += 2; continue; }
-    if (c === "]" && line[i + 1] === "]") {
-      for (let k = compound.length - 1; k >= 0; k--) {
-        if (compound[k] === "[[") { compound.length = k; break; }
-      }
-      i += 2;
-      continue;
-    }
-    if (/[A-Za-z]/.test(c)) {
-      const m = line.slice(i).match(/^[A-Za-z][A-Za-z0-9_-]*/);
-      if (m !== null && boundaryChar(i - 1) && boundaryChar(i + m[0].length)) {
-        const word = m[0];
-        if (word === "if") compound.push("if");
-        else if (word === "while" || word === "until" || word === "for") compound.push("loop");
-        else if (word === "case") compound.push("case");
-        else if (word === "fi") popUntil("if");
-        else if (word === "done") popUntil("loop");
-        else if (word === "esac") popUntil("case");
-      }
-      i += m?.[0].length ?? 1;
-      continue;
-    }
-    if (c === ";" || c === "&" || c === "\n") {
-      // `&>`/`&>>` redirects and `2>&1`-style fd dups are NOT separators
-      // (mirroring splitCommandSegmentsWithOps): the `&` binds to the
-      // redirect/dup syntax around it.
-      if (c === "&") {
-        if (line[i + 1] === ">") { i += 2; continue; }
-        if (line[i - 1] === ">") { i++; continue; }
-      }
-      const skip = c === "&" && line[i + 1] === "&" ? 2 : c === ";" && line[i + 1] === ";" ? 2 : 1;
-      if (compound.length === 0) {
-        groups.push({ start: groupStart, end: i });
-        groupStart = i + skip;
-      }
-      i += skip;
-      continue;
-    }
-    if (c === "|") {
-      if (line[i + 1] === "|") {
-        if (compound.length === 0) {
-          groups.push({ start: groupStart, end: i });
-          groupStart = i + 2;
-        }
-        i += 2;
-      } else {
-        i += line[i + 1] === "&" ? 2 : 1; // `|&` = one pipe operator
-      }
-      continue;
-    }
-    i++;
-  }
-  groups.push({ start: groupStart, end: n });
-  return groups;
-}
-
-/** Does any `$(…)`/backtick substitution in `text` start with a command
- *  that READS stdin? `eval "$(cat)" << 'EOF'` executes the body through the
- *  substitution's stdin channel, so the executor pair must see it as a
- *  reader. One nesting level — recursion re-enters for deeper spans. */
-function textReadsStdinViaSubstitution(text: string): boolean {
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]!;
-    if (c === "\\") { i++; continue; }
-    if (c === "$" && text[i + 1] === "(") {
-      const close = findClosingParen(text, i + 2);
-      if (close === -1) return false;
-      const body = text.slice(i + 2, close);
-      const analyzed = analyzeCommandHead(body);
-      if (analyzed !== null && SUBSTITUTION_READER_HEADS.has(analyzed.head)) return true;
-      if (textReadsStdinViaSubstitution(body)) return true;
-      i = close;
-      continue;
-    }
-    if (c === "`") {
-      const close = findClosingBacktick(text, i + 1);
-      if (close === -1) return false;
-      const body = text.slice(i + 1, close);
-      const analyzed = analyzeCommandHead(body);
-      if (analyzed !== null && SUBSTITUTION_READER_HEADS.has(analyzed.head)) return true;
-      if (textReadsStdinViaSubstitution(body)) return true;
-      i = close;
-      continue;
-    }
-  }
-  return false;
-}
-
-/** Does the pipe-chain group that owns a heredoc opener execute the body?
- *  Any of: an interpreter head consuming stdin as its program; xargs (body
- *  lines become command arguments); or a compound that reads stdin into a
- *  variable — or through a substitution — and then executes it
- *  (`while read l; do eval "$l"; done`, `read x; sh -c "$x"`,
- *  `eval "$(cat)"`). Every simple command in the group is examined —
- *  including INSIDE braces/parens/loops, because a `;` there is a compound
- *  internal, not a group cut.
- *
- *  Documented residual: a reader on the OPENER line whose executor appears
- *  AFTER the terminator on a later line (`read x << 'EOF' … EOF` then
- *  `eval "$x"`) — the executor is not on the opener line the group scan
- *  sees, and tracking variable flow across the body is out of scope.
- */
-function commandsExecuteStdin(text: string, depth: number): boolean {
-  if (depth > MAX_SUBSTITUTION_DEPTH) return true; // recursion bound: fail closed
-  const commands = splitCommandSegmentsWithOps(text)
-    .map((s) => s.text)
-    .filter((t) => t.trim() !== "");
-  let readsStdin = false;
-  let executesVar = false;
-  for (const raw of commands) {
-    if (textReadsStdinViaSubstitution(raw)) readsStdin = true;
-    const analyzed = analyzeCommandHead(raw);
-    if (analyzed === null) continue;
-    const { head, args } = analyzed;
-    if (READER_HEADS.has(head)) { readsStdin = true; continue; }
-    if (EXECUTOR_HEADS.has(head)) {
-      // `source`/`.` reading commands from a bound descriptor (`source
-      // /dev/stdin` under a heredoc) read AND execute the body in one command,
-      // so the pair's readsStdin/executesVar handshake never applies — it is a
-      // script feed on its own. (`eval` takes a string argument, not a file,
-      // and reaches stdin only through the substitution path handled above.)
-      if ((head === "source" || head === ".") && args.some((a) => isFdDevicePath(a))) {
-        return true;
-      }
-      executesVar = true; continue;
-    }
-    const verdict = headExecutesStdinVerdict(head, args);
-    if (verdict === "script") return true;
-    if (verdict === "data") {
-      // The INLINE program checks bind to the RESOLVED interpreter — a
-      // wrapper front (`sudo bash -c 'sh'`, `env -S 'bash -c "sh"'`) must
-      // not hide the interpreter the stdin actually reaches.
-      const resolved = resolvedInterpreter(head, args);
-      if (resolved === null) continue;
-      // A variable-fed inline program participates in the reader+executor
-      // compound (`while read l; do sh -c "$l"; done`).
-      if (inlineProgramIsVariable(resolved.head, resolved.args)) { executesVar = true; continue; }
-      // A LITERAL inline program inherits this command's stdin. Recurse into
-      // it: if the program is itself a stdin-reading interpreter
-      // (`bash -c 'sh'`, `bash -c 'python3'`) or a reader+executor pair
-      // (`bash -c 'eval "$(cat)"'`), the heredoc body is a script even
-      // though the OUTER interpreter's own stdin is data (`bash -c 'sh
-      // file.sh'` feeds the script's stdin and stays data). Verified against
-      // real bash: each recurrence below executes the body.
-      const program = inlineProgramArg(resolved.head, resolved.args);
-      if (program !== null && commandsExecuteStdin(program, depth + 1)) return true;
-    }
-  }
-  return readsStdin && executesVar;
-}
-
-/** Is the heredoc opener at `openerPos` inside a pipe-chain group that
- *  executes the body as a script? Pipe-linked members share the body's fate
- *  (`cat << 'X' | bash` really runs the body under bash); `&&`/`;`/`&` at
- *  depth 0 cut the group (`cat << 'A' && bash << 'B'` — A is data, B is a
- *  script), but compound internals never do (`{ cat << 'X'; } | bash` and
- *  `while read l; do eval \"$l\"; done << 'X'` still execute).
- *  Quote/substitution-aware so `echo "a|bash"` never classifies. */
-function heredocBodyIsScript(line: string, openerPos: number): boolean {
-  for (const group of openerLineGroups(line)) {
-    if (openerPos < group.start || openerPos > group.end) continue;
-    // Depth 0: the group slice is the TOP of the stdin-execution check —
-    // pipe members share the body's fate, and recursion into inline `-c`
-    // programs starts from here (see commandsExecuteStdin).
-    return commandsExecuteStdin(line.slice(group.start, group.end), 0);
-  }
-  return false;
-}
-
-/**
- * Heredoc-aware pre-pass: strips every here-document BODY (and the `<<`
- * constructs themselves) out of the command text before any other parsing,
- * so inert prose inside a heredoc can never look like live command text.
- *
- * Why this is sound: a heredoc body is STDIN DATA. For a quoted delimiter
- * (`<< 'EOF'`) bash performs NO expansion in the body at all, so the body is
- * opaque and contributes nothing to the judgment. For an unquoted delimiter
- * (`<< EOF`) substitutions (`$(…)`, backticks) DO execute — judged via
- * `bodies` — but quote characters are literal data (verified against bash:
- * `'$(x)'` still expands, `\$(x)` does not) and no line inside the body is a
- * command. The only file-write a heredoc performs is its own stdin redirect,
- * which lives on the OPENER line (`cat > /tmp/x << 'EOF'`) and stays in
- * `stripped` for normal judging.
- *
- * The returned `stripped` text keeps the opener line (minus the heredoc
- * constructs) and every newline outside bodies, so later chain/segment
- * splitting sees the command as bash would after consuming the heredocs.
- * `unparseable` marks spans the scanner could not parse (unclosed
- * `$(…)`/backtick, or an unclosed substitution inside an unquoted body) —
- * the caller fails closed on those exactly as flattenSubstitutions does.
- */
-export function splitHeredocs(text: string): {
-  readonly stripped: string;
-  readonly bodies: readonly string[];
-  readonly unparseable: boolean;
-} {
-  const n = text.length;
-  const bodies: string[] = [];
-  let stripped = "";
-  let unparseable = false;
-  let pos = 0;
-
-  outer: while (pos < n) {
-    const scan = scanPastHeredocSpans(text, pos, n);
-    if (scan.unparseable) {
-      unparseable = true;
-      stripped += text.slice(pos);
-      break;
-    }
-    if (scan.next >= n) {
-      stripped += text.slice(pos);
-      break;
-    }
-    const openerPos = scan.next;
-    const lineStart = text.lastIndexOf("\n", openerPos - 1) + 1;
-    const lineEnd = text.indexOf("\n", openerPos);
-    const lineEndAt = lineEnd === -1 ? n : lineEnd;
-    const openerLine = text.slice(lineStart, lineEndAt);
-
-    // Collect EVERY heredoc opener on this line: bodies attach in order to
-    // the lines that follow, so they must all be known before consumption.
-    const openers: HeredocOpener[] = [];
-    let cur = openerPos;
-    let dangling = false;
-    while (cur < lineEndAt) {
-      const word = parseHeredocDelimiter(text, cur, lineEndAt);
-      if (word === null) { dangling = true; break; }
-      openers.push({
-        start: cur,
-        end: word.end,
-        delimiter: word.delimiter,
-        quoted: word.quoted,
-        minus: word.minus,
-        script: heredocBodyIsScript(openerLine, cur - lineStart),
-      });
-      const more = scanPastHeredocSpans(text, word.end, lineEndAt);
-      if (more.unparseable) {
-        unparseable = true;
-        stripped += text.slice(pos, lineEndAt) + (lineEndAt < n ? "\n" : "");
-        stripped += text.slice(lineEndAt < n ? lineEndAt + 1 : n);
-        break outer;
-      }
-      if (more.next >= lineEndAt) break;
-      cur = more.next;
-    }
-
-    // The opener line stays in the judged text, minus the heredoc constructs.
-    stripped += text.slice(pos, openerPos);
-    let last = openerPos;
-    for (const g of openers) {
-      stripped += text.slice(last, g.start);
-      last = g.end;
-    }
-    stripped += text.slice(last, lineEndAt);
-    if (lineEndAt < n) stripped += "\n";
-
-    if (dangling) {
-      // `<<` with no delimiter word on its line: bash would read the
-      // delimiter from the next line; we cannot know it, so fail closed —
-      // judge the remainder as one body (full command text when the line
-      // feeds an interpreter, substitutions only otherwise).
-      const rest = text.slice(lineEndAt < n ? lineEndAt + 1 : n);
-      if (rest !== "") {
-        if (heredocBodyIsScript(openerLine, cur - lineStart)) {
-          bodies.push(rest);
-        } else {
-          const bodyScan = scanHeredocBodySubstitutions(rest);
-          if (bodyScan.unclosed) unparseable = true;
-          bodies.push(...bodyScan.bodies);
-        }
-      }
-      break;
-    }
-
-    // Consume bodies in opener order, one terminator line each.
-    let bodyPos = lineEndAt < n ? lineEndAt + 1 : n;
-    for (const g of openers) {
-      if (bodyPos >= n) break;
-      let search = bodyPos;
-      let terminatorAt = -1;
-      let nextBodyPos = n;
-      while (search < n) {
-        const nl = text.indexOf("\n", search);
-        const end = nl === -1 ? n : nl;
-        let line = text.slice(search, end);
-        if (g.minus) line = line.replace(/^\t+/, "");
-        if (line === g.delimiter) {
-          terminatorAt = search;
-          nextBodyPos = nl === -1 ? n : nl + 1;
-          break;
-        }
-        search = nl === -1 ? n : nl + 1;
-      }
-      // The body is data — BUT a SCRIPT body (heredoc fed to an
-      // interpreter) is full command text and gets judged wholesale, and an
-      // UNQUOTED data body still runs its substitutions (live commands).
-      // Quoted data bodies are opaque. Unterminated heredocs consume to end
-      // of input.
-      const body = text.slice(bodyPos, terminatorAt === -1 ? n : terminatorAt);
-      if (body !== "") {
-        if (g.script) {
-          bodies.push(body);
-        } else if (!g.quoted) {
-          const bodyScan = scanHeredocBodySubstitutions(body);
-          if (bodyScan.unclosed) unparseable = true;
-          bodies.push(...bodyScan.bodies);
-        }
-      }
-      bodyPos = terminatorAt === -1 ? n : nextBodyPos;
-      if (terminatorAt === -1) break;
-    }
-    pos = bodyPos;
-  }
-
-  return Object.freeze({ stripped, bodies: Object.freeze(bodies), unparseable });
-}
-
-/** Parse the delimiter word after a `<<`/`<<-` at `pos` (text[pos] is the
- *  first `<`). Returns null when no delimiter word exists before `limit` —
- *  bash would continue the line (or error); the caller treats that as an
- *  unparseable opener. Any quoted character marks the body quoted. */
-function parseHeredocDelimiter(
-  text: string,
-  pos: number,
-  limit: number,
-): { delimiter: string; quoted: boolean; minus: boolean; end: number } | null {
-  let i = pos + 2; // past `<<`
-  let minus = false;
-  if (i < limit && text[i] === "-") { minus = true; i++; }
-  while (i < limit && (text[i] === " " || text[i] === "\t")) i++;
-  if (i >= limit) return null;
-  let delimiter = "";
-  let quoted = false;
-  while (i < limit) {
-    const c = text[i];
-    if (c === "\\") {
-      if (i + 1 >= limit || text[i + 1] === "\n") return null; // continuation / EOL
-      quoted = true; // `\EOF` quotes E
-      delimiter += text[i + 1];
-      i += 2;
-      continue;
-    }
-    if (c === "'" || c === "\"") {
-      const q = c;
-      quoted = true;
-      i++;
-      let closed = false;
-      while (i < limit) {
-        if (text[i] === q) { i++; closed = true; break; }
-        if (q === "\"" && text[i] === "\\" && i + 1 < limit && text[i + 1] !== "\n") {
-          delimiter += text[i + 1]; // `\"` inside a double-quoted word
-          i += 2;
-          continue;
-        }
-        delimiter += text[i]; // quoted word content is part of the delimiter
-        i++;
-      }
-      if (!closed) return null; // unclosed quote: no delimiter on this line
-      continue;
-    }
-    if (c === " " || c === "\t") break;
-    delimiter += c;
-    i++;
-  }
-  if (delimiter === "") return null;
-  return { delimiter, quoted, minus, end: i };
-}
-
-/** Scan from `from` to `limit`, skipping quoted spans, `$(…)`/backticks, and
- *  process substitutions (their contents are judged by recursion), and stop
- *  at the FIRST unquoted `<<`/`<<-` that is not a `<<<` here-string. Returns
- *  the opener position, or `limit` when none exists before the bound.
- *  `unparseable` marks an unclosed span — the caller fails closed. */
-function scanPastHeredocSpans(
-  text: string,
-  from: number,
-  limit: number,
-): { next: number; unparseable: boolean } {
-  let i = from;
-  let quote: '"' | "'" | null = null;
-  while (i < limit) {
-    const c = text[i];
-    if (quote === "'") {
-      if (c === "'") quote = null;
-      i++;
-      continue;
-    }
-    if (quote === '"') {
-      if (c === "\\") { i += Math.min(2, limit - i); continue; }
-      if (c === '"') { quote = null; i++; continue; }
-      if (c === "$" && text[i + 1] === "{") {
-        const close = findClosingBrace(text, i + 2);
-        if (close === -1) return { next: limit, unparseable: true };
-        i = close + 1;
-        continue;
-      }
-      if (c === "$" && text[i + 1] === "(") {
-        const close = findClosingParen(text, i + 2);
-        if (close === -1) return { next: limit, unparseable: true };
-        i = close + 1;
-        continue;
-      }
-      if (c === "`") {
-        const close = findClosingBacktick(text, i + 1);
-        if (close === -1) return { next: limit, unparseable: true };
-        i = close + 1;
-        continue;
-      }
-      i++;
-      continue;
-    }
-    if (c === "\\") { i += Math.min(2, limit - i); continue; }
-    if (c === "'" || c === '"') { quote = c; i++; continue; }
-    if (c === "$" && text[i + 1] === "{") {
-      // A `<<` inside ${…} is parameter-expansion WORD text, never a
-      // heredoc opener (${x:-<<'EOF'}); skipping the whole span stops it
-      // from swallowing the real command text that follows as a fake body.
-      const close = findClosingBrace(text, i + 2);
-      if (close === -1) return { next: limit, unparseable: true };
-      i = close + 1;
-      continue;
-    }
-    if (c === "$" && text[i + 1] === "(") {
-      const close = findClosingParen(text, i + 2);
-      if (close === -1) return { next: limit, unparseable: true };
-      i = close + 1;
-      continue;
-    }
-    if ((c === "<" || c === ">") && text[i + 1] === "(") {
-      const close = findClosingParen(text, i + 2);
-      if (close === -1) return { next: limit, unparseable: true };
-      i = close + 1;
-      continue;
-    }
-    if (c === "`") {
-      const close = findClosingBacktick(text, i + 1);
-      if (close === -1) return { next: limit, unparseable: true };
-      i = close + 1;
-      continue;
-    }
-    if (c === "<" && text[i + 1] === "<") {
-      if (text[i + 2] === "<") { i += 3; continue; } // `<<<` here-string: no body
-      return { next: i, unparseable: false };
-    }
-    i++;
-  }
-  return { next: limit, unparseable: false };
-}
-
-/** Substitution bodies inside an UNQUOTED heredoc body. Quote characters are
- *  literal data there, so openers are found quote-INSENSITIVELY (only `\`
- *  escapes `$` and `` ` `` — verified against bash); the closing `)`/backtick
- *  is still found with the quote-aware closers because the inside of a
- *  substitution is a real command context again. */
-function scanHeredocBodySubstitutions(body: string): {
-  readonly bodies: readonly string[];
-  readonly unclosed: boolean;
-} {
-  const found: string[] = [];
-  for (let i = 0; i < body.length; i++) {
-    const c = body[i];
-    if (c === "\\") { i++; continue; }
-    if (c === "$" && body[i + 1] === "(") {
-      const close = findClosingParen(body, i + 2);
-      if (close === -1) return { bodies: found, unclosed: true };
-      found.push(body.slice(i + 2, close));
-      i = close;
-      continue;
-    }
-    if (c === "`") {
-      const close = findClosingBacktick(body, i + 1);
-      if (close === -1) return { bodies: found, unclosed: true };
-      found.push(body.slice(i + 1, close));
-      i = close;
-      continue;
-    }
-  }
-  return { bodies: found, unclosed: false };
-}
-
-/**
- * The pure guard decision (no fs) — exported so tests exercise the REAL
- * logic instead of a simulation. guardStateFile wraps it with the
- * task-graph-exists check.
- */
-export function guardStateFileDecision(command: string): HookResult {
-  return decide(command, 0, scopeFor(leadingDotPolicyOf(command)));
+export function guardStateFileDecision(command: string, locations: GuardedLocations): HookResult {
+  return decide(command, 0, guardScope(locations, leadingDotPolicyOf(command)));
 }
 
 function decide(command: string, depth: number, scope: GuardScope): HookResult {
@@ -1796,7 +332,13 @@ function decide(command: string, depth: number, scope: GuardScope): HookResult {
     if (decide(body, depth + 1, scope).kind === "block") return BLOCK;
   }
 
-  for (const chain of pipeChains(flat.flattened)) {
+  return judgePipeChains(flat.flattened, scope);
+}
+
+/** Judge every pipe-chain of a flattened guarded line: each segment of an
+ *  in-scope chain must be a whitelisted helper or a redirect-free read. */
+function judgePipeChains(flattened: string, scope: GuardScope): HookResult {
+  for (const chain of pipeChains(flattened)) {
     // A chain none of whose segments touch a guarded path is out of scope —
     // `npm install && jq . <state>` must not block on the npm segment.
     // (Tested quote-collapsed, like every pattern site.)
@@ -1818,16 +360,4 @@ function decide(command: string, depth: number, scope: GuardScope): HookResult {
   }
 
   return { kind: "allow" };
-}
-
-// Default task-graph existence probe: the shared fail-closed probe in config
-// (`defaultTaskGraphExists` — ENOENT is the only absent answer). Historically
-// a byte-identical twin of the block-direct-edits default; one home now.
-
-export function guardStateFile(
-  command: string,
-  taskGraphExists: () => boolean = defaultTaskGraphExists,
-): HookResult {
-  if (!taskGraphExists()) return { kind: "allow" };
-  return guardStateFileDecision(command);
 }

@@ -6,10 +6,13 @@
  */
 
 export {
+  parseCliBindableFacadeProgram,
   parseRegisteredFacadeProgram,
   parseRemediationStartInput,
   parseStandaloneStartInput,
   parseWaveGateStartInput,
+  type CliBindableFacadeProgram,
+  type CliBindableRegistrationParse,
   type RegisteredStandaloneProgram,
 } from './registration';
 export type { RegisteredRemediationProgram, RemediationStartInputV2 } from './remediation-registration';
@@ -47,3 +50,14 @@ export {
   startRemediationFacade,
   type PreparedRemediationFacadeStart,
 } from './remediation';
+// ADR-0067: the security audit's verification program — its façade driver,
+// and the evidence replay `verify --from` and the Pi witness prove result.json by.
+export {
+  prepareSecurityVerificationFacadeStart,
+  replayVerificationOutcome,
+  replayVerificationResult,
+  resumeSecurityVerificationFacade,
+  startSecurityVerificationFacade,
+  type AuditBinding,
+  type VerificationReplay,
+} from './security-verification';

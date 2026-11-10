@@ -28,6 +28,7 @@
  * operation's capture lookup.
  */
 import { createHash } from "node:crypto";
+import { nonEmpty } from "../../../core/orchestration-contract/identity";
 import {
   AGENT_REQUIRED_SKILLS,
   mintAgentRequestAuthority,
@@ -316,11 +317,13 @@ async function materializePanelAction(
     materialized.map(({ authority }) => authority.requestId),
   )).digest("hex")}`);
   if (!effectId.ok) return { ok: false, message: effectId.error.message };
+  const reservedRequests = nonEmpty(materialized.map(({ authority }): MintedAgentRequestAuthority => authority));
+  if (reservedRequests === null) return { ok: false, message: "panel action named no agent requests to reserve" };
   const reserved = await runDirectoryEffectRunner(handle)({
     kind: "reserve-agent-requests",
     effectId: effectId.value,
     runId: handle.runId,
-    requests: materialized.map(({ authority }) => authority) as [MintedAgentRequestAuthority, ...MintedAgentRequestAuthority[]],
+    requests: reservedRequests,
   });
   if (!reserved.ok) return { ok: false, message: reserved.error.message };
 

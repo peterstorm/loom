@@ -20,7 +20,7 @@ import {
   resolveBaseDirectory,
   writeDirectoryFileExclusiveNoFollow,
   type AnchoredDirectory,
-} from "./orchestration/no-follow-fs";
+} from "./utils/no-follow-fs";
 import {
   parseImplementationAttemptAuthority,
   type ImplementationAttemptAuthority,

@@ -4,14 +4,16 @@
  * tests (importing cli.ts would run main()): hooks-sync pins that every
  * `cli.ts <hook-type> <handler>` route the hooks/scripts shims invoke is a
  * subset of this table. Per-operation traits of the orchestration helper live
- * beside its operation names in `orchestration-operations.ts`; this module
- * only consumes them.
+ * beside its operation names in `orchestration-operations.ts`, and the
+ * security-audit helper's in `security-audit-operations.ts`; this module only
+ * consumes them.
  */
 import { ORCHESTRATION_OPERATIONS, parseOrchestrationOperation } from "./handlers/helpers/orchestration-operations";
+import { SECURITY_AUDIT_OPERATIONS, parseSecurityAuditOperation } from "./handlers/helpers/security-audit-operations";
 
 export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
   "pre-tool-use": new Set([
-    "block-direct-edits", "guard-state-file", "validate-phase-order",
+    "block-direct-edits", "guard-state-file", "guard-subagent-authority", "validate-phase-order",
     "validate-task-execution", "validate-template-substitution",
     "validate-agent-model", "validate-agent-skill", "enforce-phase-tools", "rules-gate",
   ]),
@@ -30,6 +32,7 @@ export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
     "reconcile-implementation-proof", "set-phase", "cleanup-state", "complete-orchestration", "lint-wave-gate", "validate-lint-rules",
     "panel-contract", "review-panel", "model-profiles", "review-packet", "reopen-completed-wave",
     "model-calibration", "panel-program", "standalone-review", "orchestration", "family-sites",
+    "security-audit",
   ]),
 };
 
@@ -43,6 +46,9 @@ export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
 export const FAIL_CLOSED_ROUTES: ReadonlySet<string> = new Set([
   "pre-tool-use/enforce-phase-tools",
   "pre-tool-use/guard-state-file",
+  // Subagent authority guard (ADR-0067 D6): a crash outside the handler would
+  // let a subagent's audit-authority write through.
+  "pre-tool-use/guard-subagent-authority",
   "pre-tool-use/block-direct-edits",
   // Rules gate: exit 1 is non-blocking, so a crash outside the handler would
   // wave an ungated code edit through.
@@ -103,22 +109,65 @@ export const PI_RUNTIME_HANDSHAKE_ROUTES: ReadonlySet<string> = new Set([
   "helper/review-panel",
   "helper/standalone-review",
   "helper/orchestration",
+  // A security-audit run owns a run directory and its coverage ledger; a
+  // Pi-launched process must prove it matches the extension runtime before
+  // moving either. The helper's read-only operations (`status`, `findings`, `nonce`)
+  // are exempted per operation below, so a run stays diagnosable during skew.
+  "helper/security-audit",
 ]);
 
-function isOrchestrationHelper(hookType: string | undefined, handlerName: string | undefined): boolean {
-  return hookType === "helper" && handlerName === "orchestration";
-}
+/** The two per-operation traits the route predicates consult: `input` for
+ *  stdin, `runtimeSkew` for the Pi handshake. Every operation helper's table
+ *  declares them (`orchestration-operations.ts`, `security-audit-operations.ts`);
+ *  the tables' other traits belong to other readers. */
+type HelperOperationTraits = Readonly<{
+  input: "stdin" | "flags";
+  runtimeSkew: "available" | "handshake-required";
+}>;
 
-/** The traits of the orchestration operation the helper's arguments name, or
- *  null when they name no known operation. Callers establish the route is the
- *  orchestration helper. */
-function orchestrationOperationTraits(extraArgs: readonly string[]) {
-  const operation = parseOrchestrationOperation(extraArgs[0]);
-  return operation === null ? null : ORCHESTRATION_OPERATIONS[operation];
+/** The traits of the operation a helper's arguments name, or null when they
+ *  name no known operation. */
+type OperationTraitsLookup = (extraArgs: readonly string[]) => HelperOperationTraits | null;
+
+/**
+ * Helpers that dispatch per operation, keyed by helper name: one row each, so
+ * a new operation helper is one entry here and both route predicates below
+ * consult it through the same lookup. A helper absent from this registry is
+ * judged as a whole route. A Map, so an inherited property name (`constructor`)
+ * is never a row and a lookup's absence is in its type.
+ */
+const OPERATION_HELPERS: ReadonlyMap<string, OperationTraitsLookup> = new Map<string, OperationTraitsLookup>([
+  ["orchestration", (extraArgs) => {
+    const operation = parseOrchestrationOperation(extraArgs[0]);
+    return operation === null ? null : ORCHESTRATION_OPERATIONS[operation];
+  }],
+  ["security-audit", (extraArgs) => {
+    const operation = parseSecurityAuditOperation(extraArgs[0]);
+    return operation === null ? null : SECURITY_AUDIT_OPERATIONS[operation];
+  }],
+]);
+
+/**
+ * How a route's operation resolves: `whole-route` when the route is not an
+ * operation helper (its traits are the route's own), otherwise the traits of
+ * the named operation — `null` for an unknown one, which needs the runtime
+ * handshake and reads no stdin (it prints usage).
+ */
+type RouteOperation =
+  | Readonly<{ kind: "whole-route" }>
+  | Readonly<{ kind: "operation"; traits: HelperOperationTraits | null }>;
+
+function routeOperation(
+  hookType: string | undefined,
+  handlerName: string | undefined,
+  extraArgs: readonly string[],
+): RouteOperation {
+  const lookup = hookType === "helper" && handlerName !== undefined ? OPERATION_HELPERS.get(handlerName) : undefined;
+  return lookup === undefined ? { kind: "whole-route" } : { kind: "operation", traits: lookup(extraArgs) };
 }
 
 /** Whether a route must prove it matches the Pi extension runtime first. An
- *  orchestration operation declared skew-`available` never does. */
+ *  operation declared skew-`available` (a read-only projection) never does. */
 export function piRuntimeHandshakeRequired(
   hookType: string | undefined,
   handlerName: string | undefined,
@@ -126,23 +175,20 @@ export function piRuntimeHandshakeRequired(
 ): boolean {
   if (hookType === "init-state") return true;
   if (!PI_RUNTIME_HANDSHAKE_ROUTES.has(`${hookType}/${handlerName}`)) return false;
-  if (!isOrchestrationHelper(hookType, handlerName)) return true;
-  return orchestrationOperationTraits(extraArgs)?.runtimeSkew !== "available";
+  const operation = routeOperation(hookType, handlerName, extraArgs);
+  return operation.kind === "whole-route" || operation.traits?.runtimeSkew !== "available";
 }
 
 /** Whether a route reads stdin to end-of-input. Hook routes always receive
- *  their event payload on stdin; the orchestration helper reads it only for
- *  an operation declared `stdin` (an unknown operation reads nothing and
- *  prints usage). */
+ *  their event payload on stdin; a helper reads it only for an operation
+ *  declared `stdin` (an unknown operation reads nothing and prints usage). */
 export function routeConsumesStdin(
   hookType: string | undefined,
   handlerName: string | undefined,
   extraArgs: readonly string[] = [],
 ): boolean {
-  if (isOrchestrationHelper(hookType, handlerName)) {
-    return orchestrationOperationTraits(extraArgs)?.input === "stdin";
-  }
-  return true;
+  const operation = routeOperation(hookType, handlerName, extraArgs);
+  return operation.kind === "whole-route" || operation.traits?.input === "stdin";
 }
 
 /** Exit code for a crash outside the handler, derived from the route. */
