@@ -48,6 +48,11 @@ const SCRIPT = join(REPO_ROOT, "scripts", "security-sandbox.sh");
 /** Absolute bash: the fallback test hides `unshare` with a PATH that resolves nothing,
  *  which would also hide the interpreter if the spawn resolved it through that PATH. */
 const BASH = (spawnSync("bash", ["-c", "command -v bash"], { encoding: "utf8" }).stdout ?? "").trim();
+/** The shell a sandboxed probe runs in when its assertions read bash semantics: a
+ *  failed redirection exits 1 and `/dev/tcp` opens a socket. `sh` is dash on
+ *  Ubuntu, which exits 2 and has no `/dev/tcp` — there a network probe would only
+ *  ever measure a missing file. Absolute, so the probe never depends on PATH. */
+const PROBE_SHELL = BASH;
 
 /** The nonce every fixture receipt is bound to: a receipt the caller cannot
  *  bind is not evidence, so the fixture is built the way the script builds it. */
@@ -474,7 +479,7 @@ describe("bounded local execution", () => {
         "--wall",
         "20",
         "--",
-        "sh",
+        PROBE_SHELL,
         "-c",
         [
           "cat " + join(dirs.target, "answer.txt"),
@@ -524,7 +529,7 @@ describe("bounded local execution", () => {
         const escaped = join(dirs.home, "escaped.txt");
         const run = runSandbox(dirs, [
           "--",
-          "sh",
+          PROBE_SHELL,
           "-c",
           `printf leaked > '${escaped}'; echo "home_write=$?"; printf kept > evidence.txt; echo "scratch_write=$?"`,
         ]);
@@ -614,7 +619,7 @@ describe("bounded local execution", () => {
       try {
         const run = spawnSync(
           BASH,
-          [SCRIPT, "--target", dirs.target, "--scratch", dirs.scratch, "--nonce", NONCE, "--", "sh", "-c",
+          [SCRIPT, "--target", dirs.target, "--scratch", dirs.scratch, "--nonce", NONCE, "--", PROBE_SHELL, "-c",
             // The descriptor list goes to a file first: a `$(…)` around `ls`
             // would itself hold a pipe in this shell while listing it.
             'echo leaked >&3 && echo "inherited_write=0" || echo "inherited_write=1"; ls /proc/$$/fd > fds.txt; echo "fds=$(tr "\\n" " " < fds.txt)"'],
