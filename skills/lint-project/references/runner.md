@@ -52,7 +52,7 @@ for every rule at once.
 | `--no-fix-hints` | Hide fix hints |
 | `--no-baseline-check` | Skip the staleness pass |
 | `--write-baseline` | Record pre-existing totality sites in `config.json`, then exit |
-| `--init` | Scaffold `.claude/linter/rules/config.json` (`.pi/linter/rules/` in a project with `.pi` and no `.claude`) |
+| `--init` | Scaffold `.claude/linter/rules/config.json` (`.pi/linter/rules/` in a project with `.pi` and no `.claude`); its starter `pureModules` keeps only the roots the project already has, so the first run is not stale |
 
 ## What fails the run
 
@@ -64,8 +64,12 @@ pure root, or a per-file capability grant for a file that no longer exists.
 Every list that subtracts from the linter's reach is checked for decay.
 
 Exit 2 when the run cannot be trusted at all: a `config.json` the strict parser
-refuses (an unknown key is refused by name), or a project that carries both
-`.claude/linter/rules` and `.pi/linter/rules` ("keep one rules directory").
+refuses (an unknown key is refused by name), a project that carries both
+`.claude/linter/rules` and `.pi/linter/rules` ("keep one rules directory"), a
+path argument that does not exist, or path arguments that yield no file to lint
+(every one excluded, or a directory with no lintable file). A run that checked
+nothing never reads as a pass; only a project with no lintable file at all, run
+with no path arguments, exits 0 with "No source files found to lint."
 
 ## Project root and rules directory
 

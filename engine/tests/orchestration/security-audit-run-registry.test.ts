@@ -6,11 +6,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import {
   registerSecurityAuditRun,
   registeredSecurityAuditRuns,
+  registrationEntryName,
+  renderRegistration,
   MAXIMUM_ENTRIES,
 } from "../../src/orchestration/security-audit-run-registry";
 import {
@@ -43,20 +44,15 @@ const runDir = (name: string): string => {
   return dir;
 };
 
-const entryName = (dir: string): string => `${createHash("sha256").update(dir).digest("hex")}.json`;
-
+/** The registry's declared store: its directory is read from here at every use,
+ *  the one source of truth the final describe block is about. Arranged entries
+ *  are built with the registry's own name rule and encoder (imported above). */
 const REGISTRY = PERSISTENT_SUBAGENT_STORES.securityAuditRunRegistry;
-const securityAuditRunRegistryDir = (): string => REGISTRY.dir();
-
-/** The exact bytes a registration entry holds for `dir`, the one wire literal
- *  every arranged entry below is built from. */
-const registration = (dir: string): string =>
-  `${JSON.stringify({ schemaVersion: 1, kind: "security-audit-run-registration", runDirectory: dir })}\n`;
 
 /** Write a registration entry straight into the registry, as an arranged state. */
 const seedRegistration = (dir: string): void => {
-  mkdirSync(securityAuditRunRegistryDir(), { recursive: true });
-  writeFileSync(join(securityAuditRunRegistryDir(), entryName(dir)), registration(dir));
+  mkdirSync(REGISTRY.dir(), { recursive: true });
+  writeFileSync(join(REGISTRY.dir(), registrationEntryName(dir)), renderRegistration(dir));
 };
 
 /** A run directory that never existed: its entry is a vanished run. */
@@ -84,10 +80,10 @@ describe("registerSecurityAuditRun", () => {
     expect(registerSecurityAuditRun(run).ok).toBe(true);
     expect(registerSecurityAuditRun(`${run}/`).ok).toBe(true);
     expect(registeredSecurityAuditRuns()).toEqual([run]);
-    expect(readdirSync(securityAuditRunRegistryDir())).toHaveLength(1);
+    expect(readdirSync(REGISTRY.dir())).toHaveLength(1);
   });
 
-  it("registers a symlinked run directory under BOTH spellings — as spelled and its realpath (C)", () => {
+  it("registers a symlinked run directory under BOTH spellings — as spelled and its realpath", () => {
     const run = runDir("run-1");
     const alias = join(root, "alias");
     symlinkSync(run, alias);
@@ -97,7 +93,7 @@ describe("registerSecurityAuditRun", () => {
     expect(registeredSecurityAuditRuns()).toEqual([alias, run].sort());
   });
 
-  it("guards a /tmp ↔ /private/tmp-style alias and a symlinked --out, whichever spelling a write uses (C)", () => {
+  it("guards a /tmp ↔ /private/tmp-style alias and a symlinked --out, whichever spelling a write uses", () => {
     // `private/tmp` is the real directory; `tmp` an alias of it, the way macOS spells /tmp.
     const real = join(root, "private", "tmp");
     mkdirSync(join(real, "audit", "agents", "h", "scratch"), { recursive: true });
@@ -118,14 +114,14 @@ describe("registerSecurityAuditRun", () => {
     expect(subagentAuthorityBlock(`echo x > ${join(root, "later-link", "agents", "h", "scratch", "n.md")}`, context)).toBeNull();
   });
 
-  it("prunes vanished runs once at the cap, and fails closed only while still over it (H)", () => {
+  it("prunes vanished runs once at the cap, and fails closed only while still over it", () => {
     const live = runDir("live");
     for (let index = 0; index < MAXIMUM_ENTRIES; index++) seedRegistration(vanishedRun(index));
     // Vanished directories do not count toward the cap when read…
     expect(registeredSecurityAuditRuns()).toEqual([]);
     // …and the registrar prunes them before it adds a live run.
     expect(registerSecurityAuditRun(live).ok).toBe(true);
-    expect(readdirSync(securityAuditRunRegistryDir())).toEqual([entryName(live)]);
+    expect(readdirSync(REGISTRY.dir())).toEqual([registrationEntryName(live)]);
     expect(registeredSecurityAuditRuns()).toEqual([live]);
   });
 
@@ -139,13 +135,13 @@ describe("registerSecurityAuditRun", () => {
     const lives = seedLiveRuns(MAXIMUM_ENTRIES - 1);
     seedRegistration(vanishedRun(0));
     seedRegistration(vanishedRun(1));
-    expect(readdirSync(securityAuditRunRegistryDir())).toHaveLength(MAXIMUM_ENTRIES + 1);
+    expect(readdirSync(REGISTRY.dir())).toHaveLength(MAXIMUM_ENTRIES + 1);
     expect(registeredSecurityAuditRuns()).toHaveLength(MAXIMUM_ENTRIES - 1);
     // The registrar prunes exactly the vanished entries, and a run landing
     // EXACTLY at the cap is still read: only more than the cap fails closed.
     const newcomer = runDir("newcomer");
     expect(registerSecurityAuditRun(newcomer).ok).toBe(true);
-    expect(readdirSync(securityAuditRunRegistryDir()).sort()).toEqual([...lives, newcomer].map(entryName).sort());
+    expect(readdirSync(REGISTRY.dir()).sort()).toEqual([...lives, newcomer].map(registrationEntryName).sort());
     expect(registeredSecurityAuditRuns()).toHaveLength(MAXIMUM_ENTRIES);
   });
 
@@ -155,7 +151,7 @@ describe("registerSecurityAuditRun", () => {
     expect(() => registeredSecurityAuditRuns()).toThrow(`holds ${MAXIMUM_ENTRIES + 1} live runs`);
     // Pruning the vanished entries cannot bring the live set under the cap.
     expect(registerSecurityAuditRun(runDir("one-more")).ok).toBe(true);
-    expect(readdirSync(securityAuditRunRegistryDir())).toHaveLength(MAXIMUM_ENTRIES + 2);
+    expect(readdirSync(REGISTRY.dir())).toHaveLength(MAXIMUM_ENTRIES + 2);
     expect(() => registeredSecurityAuditRuns()).toThrow(`holds ${MAXIMUM_ENTRIES + 2} live runs`);
   });
 
@@ -180,8 +176,8 @@ describe("registerSecurityAuditRun", () => {
 
   it("refuses to overwrite a damaged entry under its own name", () => {
     const run = runDir("run-1");
-    mkdirSync(securityAuditRunRegistryDir(), { recursive: true });
-    writeFileSync(join(securityAuditRunRegistryDir(), entryName(run)), "{not json");
+    mkdirSync(REGISTRY.dir(), { recursive: true });
+    writeFileSync(join(REGISTRY.dir(), registrationEntryName(run)), "{not json");
     const result = registerSecurityAuditRun(run);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toContain("damaged");
@@ -192,7 +188,7 @@ describe("registerSecurityAuditRun", () => {
     const elsewhere = join(root, "elsewhere");
     mkdirSync(elsewhere);
     mkdirSync(subagentDir(), { recursive: true });
-    symlinkSync(elsewhere, securityAuditRunRegistryDir());
+    symlinkSync(elsewhere, REGISTRY.dir());
     expect(registerSecurityAuditRun(run).ok).toBe(false);
     expect(readdirSync(elsewhere)).toEqual([]);
   });
@@ -211,25 +207,25 @@ describe("registeredSecurityAuditRuns", () => {
   it("skips what an interrupted exclusive publish leaves behind", () => {
     const run = runDir("run-1");
     expect(registerSecurityAuditRun(run).ok).toBe(true);
-    writeFileSync(join(securityAuditRunRegistryDir(), `${entryName(run)}.claim-123-456-abc`), "partial");
+    writeFileSync(join(REGISTRY.dir(), `${registrationEntryName(run)}.claim-123-456-abc`), "partial");
     expect(registeredSecurityAuditRuns()).toEqual([run]);
   });
 
   describe("fails CLOSED (throws) on a malformed registry", () => {
     const seed = (name: string, content: string): void => {
-      mkdirSync(securityAuditRunRegistryDir(), { recursive: true });
-      writeFileSync(join(securityAuditRunRegistryDir(), name), content);
+      mkdirSync(REGISTRY.dir(), { recursive: true });
+      writeFileSync(join(REGISTRY.dir(), name), content);
     };
-    /** `registration(dir)` with its fields edited — the malformations below. */
-    const edited = (dir: string, edit: Record<string, unknown>): string => JSON.stringify({ ...JSON.parse(registration(dir)), ...edit });
+    /** `renderRegistration(dir)` with its fields edited — the malformations below. */
+    const edited = (dir: string, edit: Record<string, unknown>): string => JSON.stringify({ ...JSON.parse(renderRegistration(dir)), ...edit });
 
     it.each([
-      ["not JSON", () => seed(entryName("/a"), "{"), "not JSON"],
-      ["not an object", () => seed(entryName("/a"), "[]"), "not an object"],
-      ["extra keys", () => seed(entryName("/a"), edited("/a", { x: 1 })), "exactly"],
-      ["wrong kind", () => seed(entryName("/a"), edited("/a", { kind: "other" })), "security-audit-run-registration"],
-      ["relative directory", () => seed(entryName("a"), registration("a")), "absolute"],
-      ["name not bound to its directory", () => seed(entryName("/a"), registration("/b")), "does not match"],
+      ["not JSON", () => seed(registrationEntryName("/a"), "{"), "not JSON"],
+      ["not an object", () => seed(registrationEntryName("/a"), "[]"), "not an object"],
+      ["extra keys", () => seed(registrationEntryName("/a"), edited("/a", { x: 1 })), "exactly"],
+      ["wrong kind", () => seed(registrationEntryName("/a"), edited("/a", { kind: "other" })), "security-audit-run-registration"],
+      ["relative directory", () => seed(registrationEntryName("a"), renderRegistration("a")), "absolute"],
+      ["name not bound to its directory", () => seed(registrationEntryName("/a"), renderRegistration("/b")), "does not match"],
       ["unexpected file name", () => seed("notes.txt", "x"), "unexpected entry"],
     ])("%s", (_name, arrange, message) => {
       arrange();
@@ -240,13 +236,13 @@ describe("registeredSecurityAuditRuns", () => {
       const elsewhere = join(root, "elsewhere");
       mkdirSync(elsewhere);
       mkdirSync(subagentDir(), { recursive: true });
-      symlinkSync(elsewhere, securityAuditRunRegistryDir());
+      symlinkSync(elsewhere, REGISTRY.dir());
       expect(() => registeredSecurityAuditRuns()).toThrow();
     });
 
     it("a DANGLING symlink in the registry's place (never read as 'no runs')", () => {
       mkdirSync(subagentDir(), { recursive: true });
-      symlinkSync(join(root, "missing-target"), securityAuditRunRegistryDir());
+      symlinkSync(join(root, "missing-target"), REGISTRY.dir());
       expect(() => registeredSecurityAuditRuns()).toThrow();
     });
 
@@ -261,7 +257,7 @@ describe("registeredSecurityAuditRuns", () => {
 
 describe("the registry is protected", () => {
   it("lives inside the subagent dir, which is a protected Loom directory", () => {
-    expect(securityAuditRunRegistryDir()).toBe(join(subagentDir(), REGISTRY.entry));
+    expect(REGISTRY.dir()).toBe(join(subagentDir(), REGISTRY.entry));
     expect(protectedDirs()).toContain(subagentDir());
   });
 
@@ -269,10 +265,10 @@ describe("the registry is protected", () => {
     const run = runDir("run-1");
     expect(registerSecurityAuditRun(run).ok).toBe(true);
     const context = observeSubagentAuthorityContext("/repo");
-    const registry = securityAuditRunRegistryDir();
+    const registry = REGISTRY.dir();
     for (const command of [
       `rm -rf ${registry}`,
-      `rm ${registry}/${entryName(run)}`,
+      `rm ${registry}/${registrationEntryName(run)}`,
       `echo '{}' > ${registry}/forged.json`,
       `mv ${registry} /tmp/x`,
     ]) {

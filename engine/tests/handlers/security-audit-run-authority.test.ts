@@ -27,8 +27,7 @@ import {
   securityAuditOperationWrites,
   type SecurityAuditOperation,
 } from "../../src/handlers/helpers/security-audit-operations";
-import { AUTHORITY_HELPER_OPERATIONS, HARNESS_HOOK_ROUTES } from "../../src/handlers/pre-tool-use/subagent-authority-operations";
-import { GUARD_FILESYSTEM } from "../../src/handlers/pre-tool-use/guard-subagent-authority";
+import { observeSubagentAuthorityContext } from "../../src/handlers/pre-tool-use/guard-subagent-authority";
 import { registeredSecurityAuditRuns } from "../../src/orchestration/security-audit-run-registry";
 import { PERSISTENT_SUBAGENT_STORES } from "../../src/config";
 import { aRun, isolateSubagentDir, must, publishedRun, removeRuns, startRun, writeArtifact } from "./security-audit-harness";
@@ -47,17 +46,11 @@ const completeRun = async (): Promise<string> => {
   return run.out;
 };
 
-/** The guard's decision for a subagent writing `entry` under the registered run. */
+/** The guard's decision for a subagent writing `entry` under the registered
+ *  run, in the context the production guard shell observes — its one wiring
+ *  site, so a context field the shell gains is the one this test decides with. */
 const subagentWrite = (runDirectory: string, entry: string): string => {
-  const decision = decideSubagentAuthority(`echo forged > ${join(runDirectory, entry)}`, {
-    cwd: "/repo",
-    home: "/home/u",
-    runs: { kind: "known", directories: registeredSecurityAuditRuns() },
-    protectedDirectories: [],
-    helperOperations: AUTHORITY_HELPER_OPERATIONS,
-    hookRoutes: HARNESS_HOOK_ROUTES,
-    filesystem: GUARD_FILESYSTEM,
-  });
+  const decision = decideSubagentAuthority(`echo forged > ${join(runDirectory, entry)}`, observeSubagentAuthorityContext("/"));
   return decision.kind === "allow" ? "allow" : decision.refusal.rule;
 };
 

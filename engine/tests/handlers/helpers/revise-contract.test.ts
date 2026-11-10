@@ -7,8 +7,8 @@ import type { AcceptanceContract } from "../../../src/core/acceptance-contract";
 import { contentDigest } from "../../fixtures/acceptance-fixtures";
 import { newWaveGate } from "../../../src/core/wave-gate-model";
 import { StateManager, parseTaskGraph } from "../../../src/state-manager";
-import { guardStateFileDecision, WHITELISTED_HELPERS } from "../../../src/core/guard-state-file";
-import { guardedLocations } from "../../../src/config";
+import { WHITELISTED_HELPERS } from "../../../src/core/guard-state-file";
+import { guardDecision } from "../../fixtures/guard-decision";
 import { KNOWN_HANDLERS, piRuntimeHandshakeRequired } from "../../../src/handler-routes";
 import type { Task } from "../../../src/types";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
@@ -106,10 +106,7 @@ describe("revise-contract registration", () => {
     expect(KNOWN_HANDLERS.helper?.has("revise-contract")).toBe(true);
     expect(WHITELISTED_HELPERS).toContain("revise-contract");
     expect(piRuntimeHandshakeRequired("helper", "revise-contract")).toBe(true);
-    expect(guardStateFileDecision(
-      'bun "$LOOM_DIR/engine/src/cli.ts" helper revise-contract --contract CT-1 --reason "wrong variant"',
-      guardedLocations(),
-    ).kind).toBe("allow");
+    expect(guardDecision('bun "$LOOM_DIR/engine/src/cli.ts" helper revise-contract --contract CT-1 --reason "wrong variant"')).toBe("allow");
   });
 });
 

@@ -33,9 +33,9 @@ import {
 import { registeredSecurityAuditRuns } from "../../orchestration/security-audit-run-registry";
 import { AUTHORITY_HELPER_OPERATIONS, HARNESS_HOOK_ROUTES } from "./subagent-authority-operations";
 import { readRunBytesNoFollow } from "../../utils/no-follow-fs";
+import { describeCause } from "../../utils/describe-cause";
 import { parsePreToolUseInput } from "./pre-tool-use-input";
 
-const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /** A path and its realpath, when the two differ and the path exists. */
 const spellings = (path: string): readonly string[] => {
@@ -54,7 +54,7 @@ function observeRegisteredRuns(read: () => readonly string[] = registeredSecurit
   try {
     return { kind: "known", directories: [...new Set(read().flatMap(spellings))] };
   } catch (error) {
-    return { kind: "unreadable", reason: describe(error) };
+    return { kind: "unreadable", reason: describeCause(error) };
   }
 }
 
@@ -93,7 +93,7 @@ export function readScriptForGuard(absolutePath: string): ScriptRead {
     if (stat.size > MAXIMUM_SCRIPT_BYTES) return { kind: "unreadable", reason: `larger than ${MAXIMUM_SCRIPT_BYTES} bytes` };
     return { kind: "text", text: readRunBytesNoFollow(canonical, MAXIMUM_SCRIPT_BYTES).toString("utf8") };
   } catch (error) {
-    return { kind: "unreadable", reason: describe(error) };
+    return { kind: "unreadable", reason: describeCause(error) };
   }
 }
 

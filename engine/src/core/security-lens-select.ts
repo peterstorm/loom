@@ -244,13 +244,15 @@ export function selectSecurityLenses(
       { lens: "ATTACK-CLASSES.md", score: 0, reasons: ["core class list; always included"], base: true },
       ...included,
     ],
-    excluded: SECURITY_LENSES.filter((lens) => lens !== "ATTACK-CLASSES.md" && !includedLenses.has(lens)).map((lens) => ({
-      lens,
-      reason:
-        ranked.some((entry) => entry.lens === lens)
-          ? `ranked ${ranked.findIndex((entry) => entry.lens === lens) + 1} of ${ranked.length}; beyond the ${maxLenses}-lens cap`
+    excluded: SECURITY_LENSES.filter((lens) => lens !== "ATTACK-CLASSES.md" && !includedLenses.has(lens)).map((lens) => {
+      const rank = ranked.findIndex((entry) => entry.lens === lens);
+      return {
+        lens,
+        reason: rank >= 0
+          ? `ranked ${rank + 1} of ${ranked.length}; beyond the ${maxLenses}-lens cap`
           : `no matching signal (${STACK_SIGNAL_NAMES.filter((name) => hasSignal(signals, name)).join(", ") || "none detected"})`,
-    })),
+      };
+    }),
   };
 }
 

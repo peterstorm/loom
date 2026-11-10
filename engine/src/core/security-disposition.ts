@@ -23,6 +23,17 @@
  * changed — an origin that survived an edit would let a repaired finding keep
  * its old decision, which is precisely the bug a digest chain prevents.
  *
+ * `source.resultDigest` is the digest of the DECISION SET — the sorted entries
+ * (origin, fingerprint, decision, reason) — not of any file's bytes. That is
+ * what the field means wherever a standalone disposition is referenced: the
+ * lineage loader takes a disposition reference's `resultDigest` as the
+ * disposition's own digest (`--disposition-digest`), so the name is the
+ * loader's contract, not this module's to rename. The published records are
+ * still bound: every entry's origin digests its full record, so a changed
+ * record changes the set's digest. Run metadata that changes no decision (the
+ * profile, `run.json` fields) is deliberately outside it — a decision set is
+ * the same decision set whatever the run printed beside it.
+ *
  * The handoff is CONSUMABLE, not merely descriptive: `standaloneDispositionStart`
  * produces the exact bytes `helper orchestration start standalone-disposition`
  * parses (`{ source, record, previous }`, with the record in the standalone
@@ -58,7 +69,9 @@ export type SecurityDisposition = Readonly<{
   kind: "security-audit-disposition";
   provenance: "DECLARED";
   /** The publication this decision set disposes: the run that holds the
-   *  records, and the digest of the exact published bytes. */
+   *  records, and the digest of this decision set — `canonicalDigest(entries)`.
+   *  Each entry's origin digests its full record, so the digest moves when any
+   *  published record does; it is not a digest of a file's bytes. */
   source: Readonly<{ locator: string; runId: string; resultDigest: ArtifactDigest }>;
   profile: string;
   entries: readonly SecurityDispositionEntry[];
@@ -215,13 +228,12 @@ export function securityDisposition(input: Readonly<{
   });
 }
 
-/** The handoff as prose, for the report: what leaves the audit, and the exact
- *  command that consumes it. An operator should not have to read this module to
- *  know what to run next. */
-export function renderDispositionHandoff(
-  disposition: SecurityDisposition,
-  handoff: DispositionHandoffPaths | null = null,
-): string {
+/** The handoff as prose, for the report and the `disposition` operation: what
+ *  leaves the audit, and the exact command that consumes it, at the paths the
+ *  disposition's own source derives. An operator should not have to read this
+ *  module to know what to run next. */
+export function renderDispositionHandoff(disposition: SecurityDisposition): string {
+  const handoff = dispositionHandoffPaths(disposition.source.locator, disposition.source.runId);
   const count = (decision: SecurityDispositionDecision): number =>
     disposition.entries.filter((entry) => entry.decision === decision).length;
   return [
@@ -232,7 +244,7 @@ export function renderDispositionHandoff(
       : [`${count("accepted")} accepted, ${count("deferred")} deferred, ${count("dismissed")} dismissed.`]),
     "The audit never patches: remediation runs under `/review-and-fix`.",
     "",
-    ...(disposition.entries.length === 0 || handoff === null
+    ...(disposition.entries.length === 0
       ? []
       : [
         `    helper orchestration start standalone-disposition --runs-root ${quoteShellArgument(handoff.runsRoot)} \\`,

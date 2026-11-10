@@ -31,14 +31,13 @@ import { PERSISTENT_SUBAGENT_STORES } from "../config";
 import { sha256Hex } from "../core/digest";
 import { observePathPresence } from "../utils/path-presence";
 import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
-import type { AnchoredDirectory } from "../utils/no-follow-fs";
+import { describeCause } from "../utils/describe-cause";
+import { removeDirectoryFileNoFollow, type AnchoredDirectory } from "../utils/no-follow-fs";
 import {
-  describeStoreError,
   isEntryName,
   listEntryNames,
   publishEntryOnce,
   readEntry,
-  removeEntry,
   withExistingEntryStore,
   withWritableEntryStore,
 } from "./protected-entry-store";
@@ -57,9 +56,14 @@ export const MAXIMUM_ENTRIES = 4_096;
 /** The hard bound on names one listing reads, live or vanished. */
 const MAXIMUM_LISTED_NAMES = 4 * MAXIMUM_ENTRIES;
 
-const entryName = (runDirectory: string): string => `${sha256Hex(runDirectory)}.json`;
+/** The store entry name of one run directory's registration: the digest of the
+ *  directory, so an entry cannot be renamed to shadow another run's. Pure, and
+ *  exported so tests arrange registry state with the real naming rule. */
+export const registrationEntryName = (runDirectory: string): string => `${sha256Hex(runDirectory)}.json`;
 
-const render = (runDirectory: string): string =>
+/** The exact bytes one run directory's registration entry holds. Pure, and
+ *  exported so tests arrange registry state with the real encoder. */
+export const renderRegistration = (runDirectory: string): string =>
   `${JSON.stringify({ schemaVersion: 1, kind: "security-audit-run-registration", runDirectory } satisfies Registration)}\n`;
 
 /** The registration an entry's bytes hold, or the reason they are not one.
@@ -70,7 +74,7 @@ function parseEntry(name: string, bytes: string): DomainResult<string, string> {
   try {
     raw = JSON.parse(bytes);
   } catch (error) {
-    return failure(`registry entry ${name} is not JSON: ${describeStoreError(error)}`);
+    return failure(`registry entry ${name} is not JSON: ${describeCause(error)}`);
   }
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return failure(`registry entry ${name} is not an object`);
@@ -87,7 +91,7 @@ function parseEntry(name: string, bytes: string): DomainResult<string, string> {
   if (typeof runDirectory !== "string" || !isAbsolute(runDirectory) || runDirectory.includes("\0")) {
     return failure(`registry entry ${name} must name an absolute run directory`);
   }
-  if (entryName(runDirectory) !== name) {
+  if (registrationEntryName(runDirectory) !== name) {
     return failure(`registry entry ${name} does not match the run directory it names`);
   }
   return success(runDirectory);
@@ -111,7 +115,7 @@ function runDirectorySpellings(runDirectory: string): DomainResult<readonly stri
     if (!statSync(canonical).isDirectory()) return failure(`security-audit run directory is not a directory: ${canonical}`);
     return success(canonical === spelled ? [canonical] : [spelled, canonical]);
   } catch (error) {
-    return failure(`cannot resolve security-audit run directory ${runDirectory}: ${describeStoreError(error)}`);
+    return failure(`cannot resolve security-audit run directory ${runDirectory}: ${describeCause(error)}`);
   }
 }
 
@@ -139,7 +143,7 @@ export function registerSecurityAuditRun(runDirectory: string): DomainResult<voi
       return success(undefined);
     });
   } catch (error) {
-    return failure(`cannot register security-audit run ${spellings.value.join(" / ")} in ${STORE.dir()}: ${describeStoreError(error)}`);
+    return failure(`cannot register security-audit run ${spellings.value.join(" / ")} in ${STORE.dir()}: ${describeCause(error)}`);
   }
 }
 
@@ -147,8 +151,8 @@ export function registerSecurityAuditRun(runDirectory: string): DomainResult<voi
  *  same name must be a well-formed registration, which binds it to exactly
  *  this directory. */
 function publishRegistration(registry: AnchoredDirectory, runDirectory: string): DomainResult<void, string> {
-  const name = entryName(runDirectory);
-  const published = publishEntryOnce(registry, name, render(runDirectory));
+  const name = registrationEntryName(runDirectory);
+  const published = publishEntryOnce(registry, name, renderRegistration(runDirectory));
   if (published.kind === "published") return success(undefined);
   const existing = parseEntry(name, published.text);
   return existing.ok ? success(undefined) : failure(`security-audit run registry is damaged: ${existing.error}`);
@@ -166,7 +170,7 @@ function pruneVanishedRuns(registry: AnchoredDirectory): void {
   if (names.length < MAXIMUM_ENTRIES) return;
   for (const name of names) {
     const parsed = parseEntry(name, readEntry(registry, name));
-    if (parsed.ok && runDirectoryGone(parsed.value)) removeEntry(registry, name);
+    if (parsed.ok && runDirectoryGone(parsed.value)) removeDirectoryFileNoFollow(registry, name);
   }
 }
 

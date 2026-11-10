@@ -1,4 +1,4 @@
-import { canonicalStructuralEquals, mapNonEmpty, nonEmptyOf } from "./orchestration-contract";
+import { canonicalStructuralEquals, mapNonEmpty, nonEmpty, nonEmptyOf, type NonEmpty } from "./orchestration-contract";
 import type { RedThenGreenGap, RedThenGreenObservation, RunRef } from "./red-then-green-types";
 import {
   isViolationReason,
@@ -37,8 +37,6 @@ function parseExactRecordArm<T>(
     ? parse()
     : fail([`${path} contains unexpected field(s): ${surplus.join(", ")}`]);
 }
-
-export type NonEmpty<T> = readonly [T, ...T[]];
 
 /** The engine-authored requirements for one implementation task. */
 export type ProofObligation =
@@ -998,8 +996,8 @@ function parseViolations(raw: unknown, path: string): ProofParseResult<NonEmpty<
   if (!Array.isArray(raw) || raw.length === 0) return fail([`${path} must be a non-empty array`]);
   const parsed = raw.map((value: unknown, index) => parseConformanceViolation(value, `${path}[${index}]`));
   const errors = parsed.flatMap((result) => (result.ok ? [] : result.errors));
-  const [head, ...tail] = parsed.flatMap((result) => (result.ok ? [result.value] : []));
-  return errors.length > 0 || head === undefined ? fail(errors) : ok(nonEmptyOf(head, ...tail));
+  const violations = nonEmpty(parsed.flatMap((result) => (result.ok ? [result.value] : [])));
+  return errors.length > 0 || violations === null ? fail(errors) : ok(violations);
 }
 
 /** The in-memory observation the settlement shell decided: `not-owed`, or a
@@ -1288,8 +1286,8 @@ const parseNonEmptyArray = <T>(
     else errors.push(...parsed.errors);
   });
   if (errors.length > 0) return fail(errors);
-  const [head, ...tail] = values;
-  return head === undefined ? fail([`${path} must be a non-empty array`]) : ok(nonEmptyOf(head, ...tail));
+  const proven = nonEmpty(values);
+  return proven === null ? fail([`${path} must be a non-empty array`]) : ok(proven);
 };
 
 type ParsedProofParts = {

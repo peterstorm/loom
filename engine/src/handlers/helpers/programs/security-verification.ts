@@ -43,6 +43,7 @@ import {
   VERIFICATION_BRIEF_SECTION,
   VERIFICATION_RESULT_KIND,
   type AttemptEvidence,
+  type AuditBinding,
   type RegisteredSecurityVerificationProgram,
   type SecurityVerificationResult,
   type SecurityVerificationStart,
@@ -53,6 +54,7 @@ import { readRunBytesNoFollow, writeRunBytesExclusiveNoFollow } from "../../../u
 import { parseRunDirectoryReference, type RunDirHandle } from "../../../orchestration/run-directory-handle";
 import { readAuditSnapshot, SECURITY_VERIFICATION_RESULT_FILE, verificationRunsRoot, type AuditSnapshot } from "../security-audit-run";
 import { registerSecurityAuditRun } from "../../../orchestration/security-audit-run-registry";
+import { describeCause } from "../../../utils/describe-cause";
 import { durableCaptureRejection, durablePublishedReceipt, durableRefutationRequests, publicationResolver, refutationBatchEffectId } from "./durable-requests";
 import { recoverOrPublishRefutationRetry } from "./refutation-requests";
 import { publishLegacyInitialBatch } from "./request-publication";
@@ -71,7 +73,6 @@ const VERIFIER_INSTRUCTION =
   `Read your brief with LOOM_CONTEXT_SECTION_COMMAND --section ${VERIFICATION_BRIEF_SECTION}, try to refute ` +
   `every candidate in it, and make your FINAL message exactly one ${VERIFICATION_RESULT_KIND} JSON object.`;
 
-const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 // --- Start ---
 
@@ -80,6 +81,11 @@ const describe = (error: unknown): string => (error instanceof Error ? error.mes
  * `verification-runs` root, the audit as it stands must be the one the input
  * names (locator, run id, ledger and findings digests), an unpublished audit,
  * and the run name the one its briefs derive.
+ *
+ * Its ONE write: the audit run is registered (idempotently) with the subagent
+ * write guard's registry (`guardAuditRun`). It happens here, before the caller
+ * claims the run directory, so a run the guard cannot know is refused with
+ * nothing on disk, rather than leaving a claimed run directory behind.
  */
 export function prepareSecurityVerificationFacadeStart(
   input: SecurityVerificationStart,
@@ -103,25 +109,16 @@ export function prepareSecurityVerificationFacadeStart(
   return registration.ok ? { ok: true, value: registration.value } : { ok: false, message: registration.error };
 }
 
-/**
- * How a drive or a replay holds the audit to the run's issuance:
- * - `current`: the audit's ledger and findings must still be the ones the run
- *   was issued against (driving, starting, importing — a moved audit stops);
- * - `issued`: only the audit's identity (locator, run id) must match. This is
- *   the replay of an ALREADY-IMPORTED run whose ballots `verdicts.json` caches:
- *   later waves move the ledger and findings, and that must not unprove the
- *   ballots this run cast over its frozen briefs.
- */
-export type AuditBinding = "current" | "issued";
+/** How a drive or a replay holds the audit to the run's issuance: the core's
+ *  policy (`core/security-verification`), re-exported for the program's callers. */
+export type { AuditBinding };
 
-/** The audit as it stands, proven to be the audit `input` names. */
+/** The audit as it stands, proven to be the audit `input` names under
+ *  `binding` — the rule is the core's `authenticateAudit`; this only reads. */
 function authenticatedAudit(input: SecurityVerificationStart, binding: AuditBinding = "current"): ProgramParse<AuditSnapshot> {
   const snapshot = readAuditSnapshot(input.audit.locator);
   if (!snapshot.ok) return { ok: false, message: snapshot.error };
-  const authentic = binding === "current"
-    ? authenticateAudit(input.audit, snapshot.value.reference)
-    : authenticateAudit(input.audit, { ...snapshot.value.reference,
-      ledgerDigest: input.audit.ledgerDigest, findingsDigest: input.audit.findingsDigest });
+  const authentic = authenticateAudit(input.audit, snapshot.value.reference, binding);
   return authentic.ok ? { ok: true, value: snapshot.value } : { ok: false, message: authentic.error };
 }
 
@@ -394,9 +391,9 @@ function publishResult(handle: RunDirHandle, result: SecurityVerificationResult)
   try {
     writeRunBytesExclusiveNoFollow(path, bytes);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") return failed(describe(error));
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") return failed(describeCause(error));
     let existing: Buffer;
-    try { existing = readRunBytesNoFollow(path); } catch (cause) { return failed(describe(cause)); }
+    try { existing = readRunBytesNoFollow(path); } catch (cause) { return failed(describeCause(cause)); }
     if (!existing.equals(bytes)) return failed(`${path} already holds a different verification result`);
   }
   const artifact = parseArtifactRef({ runId: handle.runId, slot: { kind: "fixed-artifact-slot", path: SECURITY_VERIFICATION_RESULT_FILE },
@@ -423,7 +420,7 @@ export async function resumeSecurityVerificationFacade(
       .with({ kind: "complete" }, ({ result }) => publishResult(handle, result))
       .exhaustive();
   } catch (error) {
-    return failed(describe(error));
+    return failed(describeCause(error));
   }
 }
 
@@ -456,7 +453,7 @@ export async function replayVerificationOutcome(
         .exhaustive(),
     };
   } catch (error) {
-    return { ok: false, message: describe(error) };
+    return { ok: false, message: describeCause(error) };
   }
 }
 

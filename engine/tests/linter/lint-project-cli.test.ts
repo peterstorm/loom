@@ -14,7 +14,11 @@
  *   stale entries fail the run;
  * - the project root is found from a subdirectory with its own package.json,
  *   an unknown config key and a project carrying both rules layouts refuse to
- *   run (exit 2), and a Pi-only project is read from its `.pi` layout.
+ *   run (exit 2), and a Pi-only project is read from its `.pi` layout;
+ * - explicit paths that yield nothing to lint — missing, excluded, or holding
+ *   no lintable file — fail the run (exit 2) instead of passing unlinted;
+ * - `--init` writes a starter config the strict loader accepts, in the TS,
+ *   Java and Pi-only layouts, and the very next lint run under it is clean.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
@@ -72,6 +76,17 @@ type JsonReport = Readonly<{
 }>;
 const jsonReport = (stdout: string): JsonReport => JSON.parse(stdout) as JsonReport;
 
+/** Rewrites the project's config.json with extra fields. */
+function configure(fields: Record<string, unknown>): void {
+  writeFileSync(join(project, RULES_DIR, "config.json"), `${JSON.stringify({ ...JSON.parse(configBytes()), ...fields }, null, 2)}\n`);
+}
+
+/** Grandfathers the fixture's one unproven switch, so a test starts from a clean run. */
+function baselined(): void {
+  const written = lintProject("--write-baseline");
+  expect(written.status, written.stderr).toBe(0);
+}
+
 describe("lint-project.ts, spawned over a temporary project", () => {
   it("--write-baseline records the site in the project config, keeps other fields, and is idempotent", () => {
     const written = lintProject("--write-baseline");
@@ -90,10 +105,8 @@ describe("lint-project.ts, spawned over a temporary project", () => {
   });
 
   it("a stale baseline entry exits 1 and is reported in the JSON output's staleEntries", () => {
-    expect(lintProject("--write-baseline").status).toBe(0);
-    const config = JSON.parse(configBytes());
-    writeFileSync(join(project, RULES_DIR, "config.json"),
-      JSON.stringify({ ...config, switchTotalityBaseline: [...config.switchTotalityBaseline, "src/gone.ts::x.kind"] }));
+    baselined();
+    configure({ switchTotalityBaseline: [SITE, "src/gone.ts::x.kind"] });
 
     const linted = lintProject("--json");
     expect(linted.status).toBe(1);
@@ -113,7 +126,7 @@ describe("lint-project.ts, spawned over a temporary project", () => {
   });
 
   it("a lint error (rules that cannot load) exits 1 under --json and under --summary", () => {
-    expect(lintProject("--write-baseline").status).toBe(0);
+    baselined();
     writeFileSync(join(project, RULES_DIR, "broken.json"), "{ not json");
 
     const linted = lintProject("--json");
@@ -124,13 +137,8 @@ describe("lint-project.ts, spawned over a temporary project", () => {
     expect(lintProject("--summary").status).toBe(1);
   });
 
-  /** Rewrites the project's config.json with extra fields. */
-  function configure(fields: Record<string, unknown>): void {
-    writeFileSync(join(project, RULES_DIR, "config.json"), `${JSON.stringify({ ...JSON.parse(configBytes()), ...fields }, null, 2)}\n`);
-  }
-
   it("lints test files by default — a rule that skips tests says so itself", () => {
-    expect(lintProject("--write-baseline").status).toBe(0);
+    baselined();
     writeFileSync(join(project, "src", "shape.test.ts"), ANY_ANNOTATED("x"));
     const linted = lintProject("--json");
     expect(linted.status).toBe(1);
@@ -138,7 +146,7 @@ describe("lint-project.ts, spawned over a temporary project", () => {
   });
 
   it("lints the TypeScript module spellings (.mts, .cts) the walker used to skip", () => {
-    expect(lintProject("--write-baseline").status).toBe(0);
+    baselined();
     writeFileSync(join(project, "src", "esm.mts"), ANY_ANNOTATED("x"));
     writeFileSync(join(project, "src", "cjs.cts"), ANY_ANNOTATED("y"));
     const files = jsonReport(lintProject("--json").stdout).violations.map(({ file }) => file);
@@ -146,7 +154,7 @@ describe("lint-project.ts, spawned over a temporary project", () => {
   });
 
   it("an excluded path is never linted, is listed with its reason, and stays excluded when named explicitly", () => {
-    expect(lintProject("--write-baseline").status).toBe(0);
+    baselined();
     mkdirSync(join(project, "third_party"));
     writeFileSync(join(project, "third_party", "lib.ts"), ANY_ANNOTATED("x"));
     configure({ exclude: [{ path: "third_party/", reason: "vendored upstream, byte-pinned" }] });
@@ -158,10 +166,39 @@ describe("lint-project.ts, spawned over a temporary project", () => {
     const explicit = lintProject("third_party/lib.ts");
     expect(explicit.stdout).toContain("excluded: third_party/lib.ts (third_party/ — vendored upstream, byte-pinned)");
     expect(explicit.stdout).not.toContain("no-any-type");
+    // Naming only excluded files lints nothing: a failure, never a pass.
+    expect(explicit.status).toBe(2);
+    expect(explicit.stderr).toContain("third_party/lib.ts yielded no file to lint (1 excluded by config)");
+  });
+
+  it("a path argument that does not exist ends the run (exit 2) before anything is linted", () => {
+    baselined();
+    for (const args of [["src/shpae.ts"], ["src/shape.ts", "src/missing/"], ["--json", "nowhere.ts"]]) {
+      const linted = lintProject(...args);
+      expect(linted.status, args.join(" ")).toBe(2);
+      expect(linted.stderr).toMatch(/not exist — nothing was linted/);
+      expect(linted.stdout).not.toContain("No violations found");
+    }
+  });
+
+  it("a directory argument with no lintable file is a run that checked nothing: exit 2", () => {
+    baselined();
+    mkdirSync(join(project, "docs"));
+    writeFileSync(join(project, "docs", "notes.md"), "# notes\n");
+    const linted = lintProject("docs");
+    expect(linted.status).toBe(2);
+    expect(linted.stderr).toContain("docs yielded no file to lint (0 excluded by config)");
+  });
+
+  it("an empty project, named by nothing, has nothing to lint and passes", () => {
+    rmSync(join(project, "src"), { recursive: true, force: true });
+    const linted = lintProject();
+    expect(linted.status, linted.stderr).toBe(0);
+    expect(linted.stdout).toContain("No source files found to lint.");
   });
 
   it("an exclusion that matches no file is stale: exit 1", () => {
-    expect(lintProject("--write-baseline").status).toBe(0);
+    baselined();
     configure({ exclude: [{ path: "gone/", reason: "was vendored" }] });
     const linted = lintProject("--json");
     expect(linted.status).toBe(1);
@@ -169,7 +206,7 @@ describe("lint-project.ts, spawned over a temporary project", () => {
   });
 
   it("finds the project root from a subdirectory that has its own package.json", () => {
-    expect(lintProject("--write-baseline").status).toBe(0);
+    baselined();
     mkdirSync(join(project, "engine"));
     writeFileSync(join(project, "engine", "package.json"), "{}\n");
     const result = spawnSync("bun", [SCRIPT, "--json"], { cwd: join(project, "engine"), encoding: "utf8", timeout: 60_000 });
@@ -197,8 +234,90 @@ describe("lint-project.ts, spawned over a temporary project", () => {
     writeFileSync(join(project, PI_RULES_DIR, "config.json"), configBytes());
     rmSync(join(project, ".claude"), { recursive: true, force: true });
     expect(lintProject("--json").status).toBe(1);
-    expect(lintProject("--write-baseline").status).toBe(0);
+    baselined();
     expect(JSON.parse(configBytes(PI_RULES_DIR))).toEqual({ maxFunctionLines: 60, switchTotalityBaseline: [SITE] });
     expect(lintProject("--json").status).toBe(0);
+  });
+});
+
+describe("lint-project.ts --init, then a lint run under the generated config", () => {
+  beforeEach(() => {
+    // A project with no linter config at all — what --init is for.
+    rmSync(join(project, ".claude"), { recursive: true, force: true });
+    rmSync(join(project, "src"), { recursive: true, force: true });
+  });
+
+  /** Writes `files` (project-relative path → content) into the project. */
+  function withFiles(files: Readonly<Record<string, string>>): void {
+    for (const [path, content] of Object.entries(files)) {
+      mkdirSync(join(project, path, ".."), { recursive: true });
+      writeFileSync(join(project, path), content);
+    }
+  }
+
+  function init(): void {
+    const initialized = lintProject("--init");
+    expect(initialized.status, initialized.stderr).toBe(0);
+  }
+
+  it("a TypeScript project gets the TS starter, its present pure roots only, and lints clean", () => {
+    withFiles({ "tsconfig.json": "{}\n", "src/domain/order.ts": "export const total = (a: number, b: number): number => a + b;\n" });
+    init();
+    expect(JSON.parse(configBytes())).toEqual({
+      pureModules: ["src/domain/"],
+      boundaries: [],
+      maxFunctionLines: 50,
+      excludeFromMaxLines: [".test.ts", ".spec.ts"],
+    });
+    const linted = lintProject("--json");
+    expect(linted.status, linted.stdout + linted.stderr).toBe(0);
+    expect(jsonReport(linted.stdout).staleEntries).toEqual([]);
+  });
+
+  it("the generated config holds the pure roots to purity", () => {
+    withFiles({ "tsconfig.json": "{}\n", "src/domain/clock.ts": "export const now = (): number => Date.now();\n" });
+    init();
+    const linted = lintProject("--json");
+    expect(linted.status).toBe(1);
+    expect(jsonReport(linted.stdout).violations).toContainEqual(expect.objectContaining({ file: "src/domain/clock.ts", rule: "no-io-in-pure-modules" }));
+  });
+
+  it("a starter root the project does not have is left out, so the first run is not stale", () => {
+    withFiles({ "tsconfig.json": "{}\n", "lib/index.ts": "export const one = 1;\n" });
+    init();
+    expect(JSON.parse(configBytes()).pureModules).toEqual([]);
+    expect(lintProject("--json").status).toBe(0);
+  });
+
+  it("a Java project gets directory roots that match every package's domain model, and lints clean", () => {
+    withFiles({
+      "pom.xml": "<project/>\n",
+      "src/main/java/com/shop/domain/model/Order.java": "package com.shop.domain.model;\n\npublic record Order(String id) {}\n",
+      "src/main/java/com/shop/domain/service/Pricing.java": "package com.shop.domain.service;\n\npublic final class Pricing {\n  private Pricing() {}\n}\n",
+    });
+    init();
+    expect(JSON.parse(configBytes())).toEqual({
+      pureModules: ["domain/model/", "domain/service/"],
+      boundaries: [],
+      maxFunctionLines: 40,
+      excludeFromMaxLines: [".test.java", "Test.java"],
+    });
+    const linted = lintProject("--json");
+    expect(linted.status, linted.stdout + linted.stderr).toBe(0);
+  });
+
+  it("a Pi-only project gets its config in the .pi layout, and the lint run reads it there", () => {
+    mkdirSync(join(project, ".pi"));
+    withFiles({ "tsconfig.json": "{}\n", "src/domain/order.ts": "export const one = 1;\n" });
+    init();
+    expect(JSON.parse(configBytes(PI_RULES_DIR)).pureModules).toEqual(["src/domain/"]);
+    const linted = lintProject("--json");
+    expect(linted.status, linted.stdout + linted.stderr).toBe(0);
+  });
+
+  it("leaves an existing rules directory untouched", () => {
+    withFiles({ "tsconfig.json": "{}\n", [`${RULES_DIR}/config.json`]: "{ \"maxFunctionLines\": 70 }\n" });
+    init();
+    expect(configBytes()).toBe("{ \"maxFunctionLines\": 70 }\n");
   });
 });

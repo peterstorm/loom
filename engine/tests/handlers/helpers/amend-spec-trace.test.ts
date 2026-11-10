@@ -12,8 +12,8 @@ import { AMENDMENT_SPEC } from "../../fixtures/amendment-spec";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { appearsUnderTheLock } from "../../fixtures/subagent-activity";
 import { activeWaveGateFixture, completedWaveGateFixture, taskFixture } from "../../fixtures/task-lifecycle";
-import { guardStateFileDecision, WHITELISTED_HELPERS } from "../../../src/core/guard-state-file";
-import { guardedLocations } from "../../../src/config";
+import { WHITELISTED_HELPERS } from "../../../src/core/guard-state-file";
+import { guardDecision } from "../../fixtures/guard-decision";
 import { KNOWN_HANDLERS, piRuntimeHandshakeRequired } from "../../../src/handler-routes";
 
 const parsedSpec = parseSpec(AMENDMENT_SPEC);
@@ -95,10 +95,7 @@ describe("amend-spec-trace registration", () => {
     expect(KNOWN_HANDLERS.helper?.has("amend-spec-trace")).toBe(true);
     expect(WHITELISTED_HELPERS).toContain("amend-spec-trace");
     expect(piRuntimeHandshakeRequired("helper", "amend-spec-trace")).toBe(true);
-    expect(guardStateFileDecision(
-      'bun "$LOOM_DIR/engine/src/cli.ts" helper amend-spec-trace < /tmp/trace.json',
-      guardedLocations(),
-    ).kind).toBe("allow");
+    expect(guardDecision('bun "$LOOM_DIR/engine/src/cli.ts" helper amend-spec-trace < /tmp/trace.json')).toBe("allow");
   });
 });
 

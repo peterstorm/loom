@@ -306,7 +306,7 @@ describe("registration and the published result", () => {
     expect(parseRegisteredSecurityVerificationProgram(JSON.parse(JSON.stringify(doubled))).ok).toBe(false);
   });
 
-  it("names a new run when the ledger or findings move, even over the same claim set (E)", () => {
+  it("names a new run when the ledger or findings move, even over the same claim set", () => {
     const base = planOf(["a/b:one"])!;
     expect(base.run).toMatch(/^run\.verify-w1-g1-[0-9a-f]{12}$/);
     const ledgerMoved = planOf(["a/b:one"], [], auditOf({ ledgerDigest: "4".repeat(64) }))!;
@@ -318,7 +318,7 @@ describe("registration and the published result", () => {
     expect(new Set(slots).size).toBe(slots.length);
   });
 
-  it("offers the next generation while the current one is dead, and stops at the cap (E)", () => {
+  it("offers the next generation while the current one is dead, and stops at the cap", () => {
     const first = planOf(["a/b:one"])!;
     expect(first.input.generation).toBe(1);
     // A live (in-flight or importable) generation is the one to drive.
@@ -332,7 +332,7 @@ describe("registration and the published result", () => {
     expect(exhausted.ok ? "" : exhausted.error).toContain(`every one of the ${MAX_VERIFICATION_GENERATIONS} verification generations`);
   });
 
-  it("renders the start command with every path as one shell-quoted word (H)", () => {
+  it("renders the start command with every path as one shell-quoted word", () => {
     const plan = planOf(["a/b:one"])!;
     const command = renderVerificationStart(plan, "/tmp/my audit's runs/verification-runs");
     expect(command.split("\n")[0]).toContain(`--runs-root '/tmp/my audit'\\''s runs/verification-runs' --run '${plan.run}'`);
@@ -391,11 +391,48 @@ describe("import (D4)", () => {
     const altered = { ...result.ballots[0]!, vote: "advisory" as const };
     expect(refused(AUDIT, [altered])).toContain("already holds a different ballot set");
     expect(refused(AUDIT, [], { ...result, wave: 2 })).toContain("does not describe verification run");
-    expect(authenticateAudit(AUDIT, AUDIT).ok).toBe(true);
   });
 });
 
-describe("one fingerprint, one verification run (H)", () => {
+describe("audit authentication under an explicit binding policy", () => {
+  const sha = fc.stringMatching(/^[0-9a-f]{64}$/);
+  const observedArb = fc.record({
+    locator: fc.constantFrom("/audits/run-1", "/audits/other"),
+    runId: fc.constantFrom("run-1", "run-2"),
+    ledgerDigest: fc.oneof(fc.constant(AUDIT.ledgerDigest), sha),
+    findingsDigest: fc.oneof(fc.constant(AUDIT.findingsDigest), sha),
+  }).map((fields) => auditOf(fields));
+  const sameIdentity = (observed: AuditReference): boolean => observed.locator === AUDIT.locator && observed.runId === AUDIT.runId;
+  const sameDigests = (observed: AuditReference): boolean =>
+    observed.ledgerDigest === AUDIT.ledgerDigest && observed.findingsDigest === AUDIT.findingsDigest;
+
+  it("current: accepts exactly the audit whose identity AND ledger and findings digests are the issued ones", () => {
+    fc.assert(fc.property(observedArb, (observed) => {
+      expect(authenticateAudit(AUDIT, observed, "current").ok).toBe(sameIdentity(observed) && sameDigests(observed));
+    }));
+  });
+
+  it("issued: accepts exactly the audit whose identity is the issued one, whatever its digests moved to", () => {
+    fc.assert(fc.property(observedArb, (observed) => {
+      expect(authenticateAudit(AUDIT, observed, "issued").ok).toBe(sameIdentity(observed));
+    }));
+  });
+
+  it("issued is never stricter than current: what current admits, issued admits", () => {
+    fc.assert(fc.property(observedArb, (observed) => {
+      if (authenticateAudit(AUDIT, observed, "current").ok) expect(authenticateAudit(AUDIT, observed, "issued").ok).toBe(true);
+    }));
+  });
+
+  it("names the identity it refuses under either policy", () => {
+    for (const binding of ["current", "issued"] as const) {
+      const refused = authenticateAudit(AUDIT, auditOf({ runId: "run-2" }), binding);
+      expect(refused.ok ? "" : refused.error).toContain("was issued for audit run-1");
+    }
+  });
+});
+
+describe("one fingerprint, one verification run", () => {
   it("refuses importing a run whose fingerprint already carries another run's ballot", () => {
     const first = publishedRun(["a/b:one"]);
     const imported = ok(importVerificationResult({ ...first, audit: AUDIT, existing: [] }));
@@ -411,7 +448,7 @@ describe("one fingerprint, one verification run (H)", () => {
   });
 });
 
-describe("verdicts.json is a cache (B)", () => {
+describe("verdicts.json is a cache, never authority", () => {
   const RUN_DIRECTORY = "/audits/run-1/verification-runs/run";
   const attestationOf = (ballot: VerificationVerdict, overrides: Partial<CaptureAttestationFields> = {}): AttestationLookup => ({
     kind: "attested",
@@ -458,7 +495,7 @@ describe("verdicts.json is a cache (B)", () => {
   });
 });
 
-describe("capture attestations (B)", () => {
+describe("capture attestations", () => {
   const run = publishedRun(["a/b:one"], "c".repeat(64));
   const ballot = run.result.ballots[0]!;
   const authority = mintedSlot({ slotId: ballot.binding.slotId, fingerprints: ["a/b:one"] }, run.registration.runId).attempts[0];

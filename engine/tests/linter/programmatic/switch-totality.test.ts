@@ -18,10 +18,10 @@ import {
   handler as switchTotality,
   type SwitchScope,
 } from "../../../src/linter/programmatic/switch-totality";
-import { baselineKey, unusedBaselineEntries } from "../../../src/linter/programmatic/baseline";
+import { baselineKey, unusedBaselineEntries, type Baseline } from "../../../src/linter/programmatic/baseline";
 
 const FILE = "engine/src/core/example.ts";
-const NO_BASELINE: readonly string[] = [];
+const NO_BASELINE: Baseline = [];
 
 /** An unproven three-arm switch over a union tag. */
 const UNPROVEN = [
@@ -38,42 +38,31 @@ const UNPROVEN = [
   `}`,
 ].join("\n");
 
-/** A two-arm switch made total by a default arm that binds it to `never`. */
-const NEVER_DEFAULT = [
+/** A two-arm switch over `x.kind` whose default arm is the given text (one line, or several). */
+const withDefaultLine = (defaultLine: string): string => [
   `function name(x: Event): string {`,
   `  switch (x.kind) {`,
   `    case "a":`,
   `      return "a";`,
   `    case "b":`,
   `      return "b";`,
-  `    default: {`,
-  `      const unreachable: never = x;`,
-  `      return unreachable;`,
-  `    }`,
+  `    ${defaultLine}`,
   `  }`,
   `}`,
 ].join("\n");
 
+/** A two-arm switch made total by a default arm that binds it to `never`. */
+const NEVER_DEFAULT = withDefaultLine("default: {\n      const unreachable: never = x;\n      return unreachable;\n    }");
+
 /** A two-arm switch made total by a default arm delegating to an exhaustive match. */
-const MATCH_DEFAULT = [
-  `function name(x: Event): string {`,
-  `  switch (x.kind) {`,
-  `    case "a":`,
-  `      return "a";`,
-  `    case "b":`,
-  `      return "b";`,
-  `    default:`,
-  `      return match(x).with({ kind: "c" }, () => "c").exhaustive();`,
-  `  }`,
-  `}`,
-].join("\n");
+const MATCH_DEFAULT = withDefaultLine(`default:\n      return match(x).with({ kind: "c" }, () => "c").exhaustive();`);
 
 /** Run the rule with the repo baseline out of the way — these tests are about
  *  the rule's judgement, not about which files happen to be grandfathered. */
 const lint = (
   source: string,
   filePath: string = FILE,
-  baseline: readonly string[] = NO_BASELINE,
+  baseline: Baseline = NO_BASELINE,
   scope: SwitchScope = EVERYWHERE,
   projectRoot: string | null = null,
 ) => switchTotality(source, filePath, { ...DEFAULT_SWITCH_TOTALITY_OPTIONS, baseline, scope, projectRoot });
@@ -96,19 +85,7 @@ describe("switch-totality", () => {
   });
 
   it("accepts assertNever in the default arm", () => {
-    const source = [
-      `function name(x: Event): string {`,
-      `  switch (x.kind) {`,
-      `    case "a":`,
-      `      return "a";`,
-      `    case "b":`,
-      `      return "b";`,
-      `    default:`,
-      `      return assertNever(x);`,
-      `  }`,
-      `}`,
-    ].join("\n");
-    expect(lint(source)).toEqual([]);
+    expect(lint(withDefaultLine("default:\n      return assertNever(x);"))).toEqual([]);
   });
 
   it("accepts a default arm that delegates the remaining variants to match(...).exhaustive()", () => {
@@ -151,19 +128,7 @@ describe("switch-totality", () => {
   });
 
   it("does NOT accept `default: throw` — it compiles after a new variant is added", () => {
-    const source = [
-      `function name(x: Event): string {`,
-      `  switch (x.kind) {`,
-      `    case "a":`,
-      `      return "a";`,
-      `    case "b":`,
-      `      return "b";`,
-      `    default:`,
-      `      throw new Error("unreachable");`,
-      `  }`,
-      `}`,
-    ].join("\n");
-    expect(lint(source)).toHaveLength(1);
+    expect(lint(withDefaultLine(`default:\n      throw new Error("unreachable");`))).toHaveLength(1);
   });
 
   it("does not let a `: never` outside the default arm prove the switch", () => {
@@ -313,19 +278,6 @@ describe("switch-totality", () => {
     expect(lint(`switch (x.kind) { case "a": go(); case "b": stop(); }`)).toHaveLength(1);
   });
 
-  /** A two-arm switch whose default arm is the given single line. */
-  const withDefaultLine = (defaultLine: string): string => [
-    `function name(x: Event): string {`,
-    `  switch (x.kind) {`,
-    `    case "a":`,
-    `      return "a";`,
-    `    case "b":`,
-    `      return "b";`,
-    `    ${defaultLine}`,
-    `  }`,
-    `}`,
-  ].join("\n");
-
   it.each([
     ["assertNever", `default: return assertNever(x);`],
     ["a braced never binding", `default: { const unreachable: never = x; return unreachable; }`],
@@ -358,22 +310,7 @@ describe("switch-totality", () => {
   });
 
   it("does NOT accept a proof inside a block comment that spans lines", () => {
-    const source = [
-      `function name(x: Event): string {`,
-      `  switch (x.kind) {`,
-      `    case "a":`,
-      `      return "a";`,
-      `    case "b":`,
-      `      return "b";`,
-      `    default:`,
-      `      /*`,
-      `       const unreachable: never = x;`,
-      `      */`,
-      `      return "?";`,
-      `  }`,
-      `}`,
-    ].join("\n");
-    expect(lint(source)).toHaveLength(1);
+    expect(lint(withDefaultLine(`default:\n      /*\n       const unreachable: never = x;\n      */\n      return "?";`))).toHaveLength(1);
   });
 
   it("does not count `case` labels inside comments or strings as arms", () => {
@@ -430,13 +367,13 @@ describe("switch-totality baseline staleness", () => {
   it("reports entries no detected switch consumed", () => {
     const detected = [baselineKey(FILE, "x.kind")];
     const baseline = [baselineKey(FILE, "x.kind"), baselineKey(FILE, "y.status")];
-    expect(unusedBaselineEntries(detected, baseline)).toEqual([baselineKey(FILE, "y.status")]);
+    expect(unusedBaselineEntries({ detected, baseline })).toEqual([baselineKey(FILE, "y.status")]);
   });
 
   it("keeps the multiplicity of a duplicated entry", () => {
     const detected = [baselineKey(FILE, "x.kind")];
     const baseline = [baselineKey(FILE, "x.kind"), baselineKey(FILE, "x.kind")];
-    expect(unusedBaselineEntries(detected, baseline)).toEqual([baselineKey(FILE, "x.kind")]);
+    expect(unusedBaselineEntries({ detected, baseline })).toEqual([baselineKey(FILE, "x.kind")]);
   });
 
   it("distils every switch in a file into keys, skipping the language-closed ones", () => {
@@ -477,10 +414,10 @@ describe("switch-totality baseline staleness", () => {
   ])("reports a baselined switch's entry unused once the switch is converted to %s", (_proof, converted) => {
     const baseline = [baselineKey(FILE, "x.kind")];
     // Before the conversion the entry is live: it excuses the one unproven site.
-    expect(unusedBaselineEntries(detectedSwitchKeys(UNPROVEN, FILE), baseline)).toEqual([]);
+    expect(unusedBaselineEntries({ detected: detectedSwitchKeys(UNPROVEN, FILE), baseline })).toEqual([]);
     // After it, nothing consumes the entry — the paid debt shows up as stale.
     expect(lint(converted, FILE, baseline)).toEqual([]);
-    expect(unusedBaselineEntries(detectedSwitchKeys(converted, FILE), baseline)).toEqual(baseline);
+    expect(unusedBaselineEntries({ detected: detectedSwitchKeys(converted, FILE), baseline })).toEqual(baseline);
   });
 });
 
@@ -508,10 +445,10 @@ describe("switch-totality properties", () => {
   it("hides at most one violation per baseline entry, and never rots silently", () => {
     fc.assert(fc.property(
       fc.array(fc.constantFrom(baselineKey(FILE, "x.kind"), baselineKey(FILE, "y.status")), { maxLength: 5 }),
-      (baseline: readonly string[]) => {
+      (baseline: Baseline) => {
         const consumed = baseline.includes(baselineKey(FILE, "x.kind")) ? 1 : 0;
         expect(lint(UNPROVEN, FILE, baseline)).toHaveLength(1 - consumed);
-        expect(unusedBaselineEntries([baselineKey(FILE, "x.kind")], baseline)).toHaveLength(
+        expect(unusedBaselineEntries({ detected: [baselineKey(FILE, "x.kind")], baseline })).toHaveLength(
           baseline.length - consumed,
         );
       },

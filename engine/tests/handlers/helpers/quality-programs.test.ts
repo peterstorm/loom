@@ -192,6 +192,7 @@ describe("quality-program helper boundaries", () => {
       "applyWaveFacadeSubmission",
       "inspectRemediationFacade",
       "inspectStandaloneFacade",
+      "parseCliBindableFacadeProgram",
       "parseRegisteredFacadeProgram",
       "parseRemediationStartInput",
       "parseStandaloneStartInput",

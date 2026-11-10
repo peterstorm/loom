@@ -36,6 +36,7 @@ import {
   type SessionId,
 } from "../../../src/machine";
 import { disposeFixturePiSessions, fixturePiEnvironment } from "../../fixtures/pi-session";
+import { PERSISTENT_SUBAGENT_DIR_ENTRIES, PERSISTENT_SUBAGENT_STORES } from "../../../src/config";
 
 const subDir = mkdtempSync(join(tmpdir(), "loom-sweep-"));
 
@@ -169,6 +170,14 @@ describe("staleEntries (pure) — group max mtime governs", () => {
       ["dead.machine", cutoff - 10],
     ]);
     expect(staleEntries(mtimes, cutoff, new Set([sessionGroupKey("uncertain")]))).toEqual(["dead.machine"]);
+  });
+
+  it("never sweeps a persistent store — the run registry and the capture attestations outlive every session", () => {
+    const stores = Object.values(PERSISTENT_SUBAGENT_STORES).map(({ entry }) => entry);
+    expect(stores.sort()).toEqual(["security-audit-runs", "security-capture-attestations"]);
+    const mtimes = new Map([...stores.map((entry) => [entry, 0] as const), ["stray-old", 0]]);
+    expect(staleEntries(mtimes, cutoff)).toEqual(["stray-old"]);
+    expect([...PERSISTENT_SUBAGENT_DIR_ENTRIES].sort()).toEqual(stores);
   });
 });
 

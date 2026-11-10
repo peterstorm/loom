@@ -28,7 +28,8 @@ import { parseVerificationResult } from "../../src/core/security-verification";
 import type { SecurityFinding } from "../../src/core/security-findings";
 import { registeredSecurityAuditRuns } from "../../src/orchestration/security-audit-run-registry";
 import { aConfirmedFinding } from "../security/fixtures";
-import { SQLI, aRun, claimPayload, huntedRun, must, readJson, removeRuns, unitIdFor, type Run } from "./security-audit-harness";
+import { SQLI, aRun, claimPayload, huntedRun, must, readJson, removeRuns, unitIdFor } from "./security-audit-harness";
+import type { Run } from "./security-audit-run-seam";
 import {
   deliver,
   facade,
@@ -116,7 +117,7 @@ describe("security verification, end to end (ADR-0067)", () => {
     expect(brief).toMatchObject({ fingerprints: [SQLI], requestId: request!.authority.requestId });
     expect(brief.candidates.map((candidate) => candidate.fingerprint)).toEqual([SQLI]);
 
-    expect(await deliver(plan, request!, verifierResult([vote(SQLI)]))).toEqual({ ok: true, message: "captured" });
+    expect(await deliver(plan, request!, verifierResult([vote(SQLI)]))).toEqual({ ok: true });
     // The capturing harness attested exactly what it captured.
     const [attestation] = readdirSync(attestationDir()).map((name) => JSON.parse(readFileSync(join(attestationDir(), name), "utf8")));
     expect(attestation).toMatchObject({ kind: "security-capture-attestation", requestId: request!.authority.requestId,
@@ -171,7 +172,7 @@ describe("security verification, end to end (ADR-0067)", () => {
     expect((await run.invoke(["verify", "--from", plan.run])).error).toBeNull();
   });
 
-  it("blocks a brief whose retry is refused too — and status names the NEXT generation (E)", async () => {
+  it("blocks a brief whose retry is refused too — and status names the NEXT generation", async () => {
     const run = await huntedAudit();
     const plan = await owedPlan(run);
     const batch = await startVerification(plan);
@@ -208,7 +209,7 @@ describe("what a ballot cannot be (ADR-0067 refusals)", () => {
     expect(readJson<unknown[]>(run.out, "verdicts.json")).toEqual([]);
   });
 
-  it("refuses orchestration submit and correlate into a verifier slot (A)", async () => {
+  it("refuses orchestration submit and correlate into a verifier slot", async () => {
     const run = await huntedAudit();
     const plan = await owedPlan(run);
     const batch = await startVerification(plan);
@@ -225,7 +226,7 @@ describe("what a ballot cannot be (ADR-0067 refusals)", () => {
     expect((await resumeVerification(plan)).action?.kind).toBe("spawn-batch");
   });
 
-  it("refuses forged transcript bytes written straight into a verifier slot (B)", async () => {
+  it("refuses forged transcript bytes written straight into a verifier slot", async () => {
     const run = await huntedAudit();
     const plan = await owedPlan(run);
     const batch = await startVerification(plan);
@@ -241,7 +242,7 @@ describe("what a ballot cannot be (ADR-0067 refusals)", () => {
     expect((await owedPlan(run)).input.generation).toBe(2);
   });
 
-  it("refuses a natively captured transcript whose bytes were rewritten afterwards (B)", async () => {
+  it("refuses a natively captured transcript whose bytes were rewritten afterwards", async () => {
     const run = await huntedAudit();
     const plan = await owedPlan(run);
     const batch = await startVerification(plan);
@@ -252,7 +253,7 @@ describe("what a ballot cannot be (ADR-0067 refusals)", () => {
     expect((await run.invoke(["verify", "--from", plan.run])).error).toContain("does not match its capture attestation (capture digest)");
   });
 
-  it("never counts a ballot hand-written into verdicts.json, even a verbatim copy of a real one (B)", async () => {
+  it("never counts a ballot hand-written into verdicts.json, even a verbatim copy of a real one", async () => {
     const audit = await huntedAudit(1);
     await verifyWith(audit);
     const genuine = readJson<VerificationVerdict[]>(audit.out, "verdicts.json");
@@ -272,7 +273,7 @@ describe("what a ballot cannot be (ADR-0067 refusals)", () => {
     expect(audit.stdout()).toContain("publication: blocked");
   });
 
-  it("fails closed on a tampered or deleted attestation store (B)", async () => {
+  it("fails closed on a tampered or deleted attestation store", async () => {
     const run = await huntedAudit(1);
     await verifyWith(run);
     const [entry] = readdirSync(attestationDir());
@@ -299,7 +300,7 @@ describe("what a ballot cannot be (ADR-0067 refusals)", () => {
     rmSync(attestationDir(), { recursive: true, force: true });
     writeFileSync(attestationDir(), "not a directory");
     const stopped = await deliver(plan, batch.requests![0]!, verifierResult([vote(SQLI)]));
-    expect(stopped.ok).toBe(false);
+    if (stopped.ok) throw new Error("expected the capture to be refused");
     expect(JSON.parse(stopped.message)).toMatchObject({ kind: "retriable-failure", reason: "capture-attestation" });
     // Write-ahead: no transcript landed, so the slot still awaits its capture.
     expect(existsSync(transcriptPath(plan, batch.requests![0]!))).toBe(false);
@@ -313,12 +314,12 @@ describe("what a ballot cannot be (ADR-0067 refusals)", () => {
     const plan = await owedPlan(run);
     const batch = await startVerification(plan);
     const refused = await deliver(plan, batch.requests![0]!, verifierResult([vote(SQLI)]), "security-hunter-agent");
-    expect(refused.ok).toBe(false);
+    if (refused.ok) throw new Error("expected the capture to be refused");
     expect(refused.message).toContain("belongs to security-verifier-agent, not security-hunter-agent");
     expect((await resumeVerification(plan)).action?.kind).toBe("spawn-batch");
   });
 
-  it("refuses a run issued against older findings, and names a new run (E)", async () => {
+  it("refuses a run issued against older findings, and names a new run", async () => {
     const run = await huntedAudit();
     const plan = await verifiedRun(run);
     await fileSecondClaim(run);
@@ -331,7 +332,7 @@ describe("what a ballot cannot be (ADR-0067 refusals)", () => {
     expect(next.run).not.toBe(plan.run);
   });
 
-  it("names a new run when only the ledger moved after start (E)", async () => {
+  it("names a new run when only the ledger moved after start", async () => {
     const run = await huntedAudit();
     const plan = await owedPlan(run);
     await startVerification(plan);
@@ -383,7 +384,7 @@ describe("what a ballot cannot be (ADR-0067 refusals)", () => {
   });
 });
 
-describe("the audit stays registered while verification runs (D)", () => {
+describe("the audit stays registered while verification runs", () => {
   it("start and resume re-register an audit whose registry was wiped", async () => {
     const run = await huntedAudit();
     const plan = await owedPlan(run);
@@ -411,7 +412,7 @@ describe("the audit stays registered while verification runs (D)", () => {
   });
 });
 
-describe("printed commands survive any path (H)", () => {
+describe("printed commands survive any path", () => {
   it("status prints commands that run verbatim for an audit under a path with spaces and quotes", async () => {
     const parent = join(scratch, "it's an audit dir");
     mkdirSync(parent);
@@ -475,8 +476,8 @@ describe("Pi capture routing and the parent's import gate (ADR-0067)", () => {
   const bash = (command: string) => ({ toolName: "bash", input: { command } }) as never;
   const verifyCommand = (out: string, from: string) => `loom helper security-audit verify --out ${out} --from ${from}`;
   const importDecision = async (event: never, role: Readonly<{ kind: "parent" }> | Readonly<{ kind: "subagent"; parentSession: string | null }> = AS_PARENT) => {
-    const { piParentVerifyImportDecision } = await import("../../../pi/subagent-authority-gate");
-    return piParentVerifyImportDecision(event, parentCtx(), role);
+    const { piBashAuthorityDecision } = await import("../../../pi/subagent-authority-gate");
+    return piBashAuthorityDecision(event, parentCtx(), role);
   };
 
   it("authenticates a verifier request as extraction-only, captures it into its slot and attests the capture", async () => {
@@ -513,7 +514,15 @@ describe("Pi capture routing and the parent's import gate (ADR-0067)", () => {
   it("needs no in-process state: an attested run imports from any parent process (a restart, another session)", async () => {
     const pi = await piCapturedRun();
     await pi.finish();
-    expect(await importDecision(bash(verifyCommand(pi.run.out, pi.plan.run)))).toBeUndefined();
+    // A restart: drop EVERY module the capture loaded (the Pi capture path, the
+    // gate, the engine) and import the gate afresh, so nothing the capture left
+    // in memory — a witness, a cache, a module-level map — can carry the
+    // decision. Only what is on disk (the run, its attestations) remains.
+    vi.resetModules();
+    const { piBashAuthorityDecision } = await import("../../../pi/subagent-authority-gate");
+    const restarted = await piBashAuthorityDecision(bash(verifyCommand(pi.run.out, pi.plan.run)),
+      ({ cwd: "/another/session" }) as never, AS_PARENT);
+    expect(restarted).toBeUndefined();
     expect((await pi.run.invoke(["verify", "--from", pi.plan.run])).error).toBeNull();
   });
 
@@ -556,7 +565,7 @@ describe("Pi capture routing and the parent's import gate (ADR-0067)", () => {
     }
   });
 
-  it("has no opinion on anything that imports nothing, or in a subagent process", async () => {
+  it("has no opinion on anything that imports nothing; a subagent's import is the D6 fence's to refuse, not the proof's", async () => {
     const pi = await piCapturedRun();
     for (const command of [
       `loom helper security-audit status --out ${pi.run.out}`,
@@ -568,7 +577,9 @@ describe("Pi capture routing and the parent's import gate (ADR-0067)", () => {
       expect(await importDecision(bash(command)), command).toBeUndefined();
     }
     const verify = bash(verifyCommand(pi.run.out, pi.plan.run));
-    expect(await importDecision(verify, { kind: "subagent", parentSession: "pi-session" })).toBeUndefined();
+    const asSubagent = await importDecision(verify, { kind: "subagent", parentSession: "pi-session" });
+    expect(asSubagent?.reason).toContain("guard-subagent-authority (ADR-0067 D6)");
+    expect(asSubagent?.reason).not.toContain("import proof");
     expect(await importDecision({ toolName: "read", input: { path: "x" } } as never)).toBeUndefined();
   });
 

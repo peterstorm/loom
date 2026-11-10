@@ -209,6 +209,34 @@ export function parseRegisteredFacadeProgram(raw: unknown): FacadeRegistrationPa
   }
 }
 
+/**
+ * A facade program a parent's CLI slot write (`submit`, `correlate`) may bind a
+ * request under: every registered facade program EXCEPT security-verification.
+ * A verifier slot is filled only by native capture (ADR-0067), so the type a
+ * CLI write binds cannot name that program.
+ */
+export type CliBindableFacadeProgram = Exclude<RegisteredFacadeProgram, Readonly<{ kind: "security-verification" }>>;
+
+/**
+ * How a stored registration parses for a CLI slot write: the facade parse with
+ * the registered arm narrowed to `CliBindableFacadeProgram`, and a
+ * security-verification registration named as `native-capture-only` — never a
+ * registered program the caller must remember to refuse.
+ */
+export type CliBindableRegistrationParse =
+  | Readonly<{ kind: "registered"; program: CliBindableFacadeProgram }>
+  | Readonly<{ kind: "unclaimed" }>
+  | Readonly<{ kind: "invalid"; message: string }>
+  | Readonly<{ kind: "native-capture-only" }>;
+
+const NATIVE_CAPTURE_ONLY: CliBindableRegistrationParse = Object.freeze({ kind: "native-capture-only" });
+
+export function parseCliBindableFacadeProgram(raw: unknown): CliBindableRegistrationParse {
+  const parsed = parseRegisteredFacadeProgram(raw);
+  if (parsed.kind !== "registered") return parsed;
+  return parsed.program.kind === "security-verification" ? NATIVE_CAPTURE_ONLY : Object.freeze({ kind: "registered", program: parsed.program });
+}
+
 function parseWaveRegistrationAudit(raw: Readonly<Record<string, unknown>>): ProgramParse<Pick<RegisteredWaveGateProgram, "restart" | "orphanRecovery">> {
   let restart: WaveGateRestartAudit | undefined;
   if (Object.hasOwn(raw, "restart")) {

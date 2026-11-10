@@ -148,6 +148,11 @@ export function deriveWaveReopeningProof(
         candidate.taskRun.workspaceHeadSha !== packet.taskRun.workspaceHeadSha)) {
       throw new Error(`Task ${task.id} has contradictory immutable Review Packet workspace authorities`);
     }
+    // Unreachable by construction, kept as the narrowing TypeScript needs: the
+    // legacy return above fires when ANY entry of ANY Task lacks
+    // `workspaceHeadSha`, and `packet` is `entries[0]` of a non-empty `entries`
+    // (`taskContexts` refused an empty one), so its head is always set here. No
+    // input can reach it, so it has no behavioural test.
     if (packet.taskRun.workspaceHeadSha === undefined) {
       throw new Error(`Task ${task.id} immutable Review Packet records no workspace head`);
     }

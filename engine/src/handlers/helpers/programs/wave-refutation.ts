@@ -70,7 +70,7 @@ export async function driveWaveRefutation(
   current: WaveReadiness,
   catalog: PiCatalog,
 ): Promise<WavePhase> {
-  const { handle, manager, registration } = context;
+  const { handle, manager, registration, wave } = context;
   if (!(current.facts.findingCounts.kind === "known" && current.facts.findingCounts.value.activeCritical > 0)) {
     return proceed();
   }
@@ -179,8 +179,6 @@ export async function driveWaveRefutation(
     (outcome): outcome is Extract<FindingOutcome, { survives: false }> => !outcome.survives,
   );
   if (refutingOutcomes.length > 0) {
-    const wave = registration.input.wave;
-    if (wave === null) return settled(waveBlocked(handle, "Wave Refutation registration names no Wave to reconcile"));
     await manager.update((locked) => {
       const authorityProblem = waveRefutationCommitProblem(
         locked,

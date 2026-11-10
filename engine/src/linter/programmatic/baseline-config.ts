@@ -14,13 +14,13 @@
  */
 
 import { extname } from "node:path";
-import type { BaselineConfigKey, BaselineOwner } from "./baseline";
+import type { BaselineConfigKey, BaselineKey, BaselineOwner } from "./baseline";
 
 /** One source file as the detectors read it: its project-relative path and content. */
 export type BaselineSource = Readonly<{ path: string; content: string }>;
 
 /** One owner's recorded list, under the config key it lives in. */
-export type RecordedBaseline = Readonly<{ configKey: BaselineConfigKey; keys: readonly string[] }>;
+export type RecordedBaseline = Readonly<{ configKey: BaselineConfigKey; keys: readonly BaselineKey[] }>;
 
 /** The sites each owner flags in `sources` (those with an extension it reads), sorted. */
 export function recordedBaselines(

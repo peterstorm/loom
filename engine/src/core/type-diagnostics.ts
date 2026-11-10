@@ -119,7 +119,7 @@ export function parseTscOutput(output: string, projectDir: string): Parsed {
         line: lineNumber,
         column: columnNumber,
         code: Number(code),
-        message: message,
+        message,
       });
       last = { list: "located", index: located.length - 1 };
       continue;

@@ -1,15 +1,16 @@
 import type {
-  SpecTraceOwnership,
   SpecTraceWaveGateRetirement,
+  Task,
   TaskGraph,
 } from "../types";
 import type { OrchestrationRunId } from "./orchestration-contract";
 import {
+  matchRoster,
   parseOwnershipInput,
   parseSpecTraceContract,
-  rosterError,
   SPEC_TRACE_VERSION,
   specTraceDiagnosticMessages,
+  type RosterTrace,
 } from "./spec-trace";
 import { retireWaveReviewAuthority } from "./wave-gate-registration";
 
@@ -50,19 +51,17 @@ const reject = (message: string): SpecTraceUpgradeResult => Object.freeze({
 const sameStrings = (left: readonly string[], right: readonly string[]): boolean =>
   left.length === right.length && left.every((value, index) => value === right[index]);
 
-function installOwnership(graph: TaskGraph, ownership: ReadonlyMap<string, SpecTraceOwnership>): TaskGraph {
+/** The graph with every Task's trace replaced by its matched one: the matched
+ *  roster IS the graph's roster, in order, so no Task can go unmigrated. */
+function installOwnership(graph: TaskGraph, roster: readonly RosterTrace<Task>[]): TaskGraph {
   return Object.freeze({
     ...graph,
     spec_trace_version: SPEC_TRACE_VERSION,
-    tasks: Object.freeze(graph.tasks.map((task) => {
-      // The submitted roster is the graph's (checked before install), so every Task has its trace.
-      const trace = ownership.get(task.id);
-      return trace === undefined ? task : Object.freeze({
-        ...task,
-        spec_anchors: trace.spec_anchors,
-        spec_contributions: trace.spec_contributions,
-      });
-    })),
+    tasks: Object.freeze(roster.map(({ task, trace }) => Object.freeze({
+      ...task,
+      spec_anchors: trace.spec_anchors,
+      spec_contributions: trace.spec_contributions,
+    }))),
   });
 }
 
@@ -80,8 +79,8 @@ function validatedOwnershipCandidate(
 ): SpecTraceUpgradeResult | Readonly<{ candidate: TaskGraph }> {
   const parsed = parseOwnershipInput(raw, UPGRADE_LABEL);
   if (!parsed.ok) return reject(parsed.message);
-  const rosterProblem = rosterError(graph, parsed.value, UPGRADE_LABEL);
-  if (rosterProblem !== null) return reject(rosterProblem);
+  const roster = matchRoster(graph.tasks, parsed.value, UPGRADE_LABEL);
+  if (!roster.ok) return reject(roster.message);
   const executingTasks = graph.executing_tasks ?? [];
   if (executingTasks.length > 0) {
     return reject(
@@ -90,7 +89,7 @@ function validatedOwnershipCandidate(
     );
   }
 
-  const candidate = installOwnership(graph, parsed.value);
+  const candidate = installOwnership(graph, roster.value);
   const validated = parseSpecTraceContract(candidate.spec_trace_version, candidate.tasks);
   if (!validated.ok) {
     return reject(`Spec trace upgrade violates v2 ownership: ${specTraceDiagnosticMessages(validated).join("; ")}`);

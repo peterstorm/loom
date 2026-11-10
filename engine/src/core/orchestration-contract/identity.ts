@@ -285,6 +285,36 @@ export function nonEmpty<T>(values: readonly T[]): NonEmpty<T> | null {
   return nonEmptyOf(head, ...tail);
 }
 
+/** `before`, then `proof`, then `after`, as one frozen non-empty list: the
+ *  non-empty `proof` carries the proof for the whole concatenation, so no
+ *  caller re-narrows a list it already knows is non-empty. */
+export function concatNonEmpty<T>(before: readonly T[], proof: NonEmpty<T>, after: readonly T[] = []): NonEmpty<T> {
+  if (isNonEmpty(before)) {
+    const [head, ...tail] = before;
+    return nonEmptyOf(head, ...tail, ...proof, ...after);
+  }
+  const [head, ...tail] = proof;
+  return nonEmptyOf(head, ...tail, ...after);
+}
+
+/** Every value when every result is ok, else every error — both non-empty, in
+ *  input order, frozen. The kernel's one accumulator for a non-empty list of
+ *  results: the input's non-emptiness proves whichever list comes back. */
+export function allOk<T, E>(results: NonEmpty<DomainResult<T, E>>): DomainResult<NonEmpty<T>, NonEmpty<E>> {
+  const [head, ...tail] = results;
+  const start: DomainResult<NonEmpty<T>, NonEmpty<E>> = head.ok
+    ? Object.freeze({ ok: true, value: nonEmptyOf(head.value) })
+    : Object.freeze({ ok: false, error: nonEmptyOf(head.error) });
+  return tail.reduce<DomainResult<NonEmpty<T>, NonEmpty<E>>>((acc, result) => {
+    if (acc.ok) {
+      return result.ok
+        ? Object.freeze({ ok: true, value: concatNonEmpty([], acc.value, [result.value]) })
+        : Object.freeze({ ok: false, error: nonEmptyOf(result.error) });
+    }
+    return result.ok ? acc : Object.freeze({ ok: false, error: concatNonEmpty([], acc.error, [result.error]) });
+  }, start);
+}
+
 /** `map` that keeps the proof of non-emptiness the input carried. */
 export function mapNonEmpty<T, U>(values: NonEmpty<T>, f: (value: T, index: number) => U): NonEmpty<U> {
   const [head, ...tail] = values;

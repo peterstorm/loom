@@ -184,8 +184,8 @@ function parseVerifiedMutation(raw: unknown, path: string): Parsed<MutationVerdi
   if (errors.length > 0 || !counts.ok || survivors.kind === "not-array") return refused(errors);
   const [generated, killed, timedOut, invalid, unmutated] = counts.value as readonly number[];
   const built = verifiedMutationOf({
-    killed: killed, timedOut: timedOut, invalid: invalid, survivors: freezeArray(survivors.values),
-    unmutated: unmutated, ownerChangedInWave: record.value.ownerChangedInWave as boolean,
+    killed, timedOut, invalid, survivors: freezeArray(survivors.values),
+    unmutated, ownerChangedInWave: record.value.ownerChangedInWave as boolean,
   });
   if (!built.ok) return refused([`${path} is not a verified mutation run: ${built.error.kind}`]);
   return built.value.generated === generated ? parsed(built.value) : refused([`${path}.generated must equal the mutants its tallies count`]);

@@ -16,6 +16,7 @@ import {
   type DomainResult,
   type NonEmpty,
   type OrchestrationRunId,
+  mapNonEmpty,
   nonEmptyOf,
 } from "./orchestration-contract";
 import { readDenseDataArray, type DataBoundaryError } from "./orchestration-contract/bytes";
@@ -1366,7 +1367,7 @@ export function authorizeRemediationChecks(
       "candidate report exclusions must exactly equal selected frozen report paths",
     )]);
   }
-  const checks = plan.commands.map((command) => {
+  return success(mapNonEmpty(plan.commands, (command) => {
     const fields = {
       kind: "authorized-remediation-check" as const,
       scope,
@@ -1376,9 +1377,7 @@ export function authorizeRemediationChecks(
     const check = canonicalRecord({ ...fields, authorityDigest: digestJson(fields) });
     authorizedCheckBindings.set(check, canonicalRecord({ plan, candidate: binding.candidate }));
     return check;
-  });
-  const [head, ...tail] = checks;
-  return success(nonEmptyOf(head, ...tail));
+  }));
 }
 
 type RemediationProcessObservation = Readonly<{

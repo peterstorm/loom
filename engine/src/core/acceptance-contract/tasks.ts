@@ -8,7 +8,7 @@
 import { match } from "ts-pattern";
 import type { DomainResult, NonEmpty } from "../orchestration-contract";
 import { samePlanPath } from "../plan-path-match";
-import { allOk, err, freeze, mapNonEmpty, nonEmpty, ok } from "./kernel";
+import { allOk, err, freeze, mapNonEmpty, nonEmpty, nonEmptyOf, ok } from "./kernel";
 import type { AcceptanceContract, ContractTaskView, PlanContract } from "./model";
 
 /** Every path the freeze covers: the types file (if any), then each acceptance file. */
@@ -33,26 +33,37 @@ export type ContractWriterProblem =
 /**
  * The contract Task: the one Task whose file_list holds every frozen path,
  * with no other Task listing any of them. The one owner of that rule — plan
- * validation renders its problems, population refuses on them.
+ * validation renders its problems, population refuses on them. Hands back the
+ * writer Task itself, one of `tasks`' own elements, so a caller that reads
+ * more than its id never looks it up again.
  */
-export function contractWriter(
+export function contractWriterTask<T extends Pick<ContractTaskView, "id" | "file_list">>(
   paths: NonEmpty<string>,
-  tasks: readonly Pick<ContractTaskView, "id" | "file_list">[],
-): DomainResult<string, NonEmpty<ContractWriterProblem>> {
-  const writerOf = (path: string): DomainResult<string, ContractWriterProblem> => {
+  tasks: readonly T[],
+): DomainResult<T, NonEmpty<ContractWriterProblem>> {
+  const writerOf = (path: string): DomainResult<T, ContractWriterProblem> => {
     // Exact, not suffix-tolerant: the freeze hashes `root/path`, so the
     // writer must list that very path, not a deeper one that merely ends in it.
-    const [writer, ...others] = tasks
-      .filter((task) => (task.file_list ?? []).some((file) => samePlanPath(file, path)))
-      .map(({ id }) => id);
+    const [writer, ...others] = tasks.filter((task) => (task.file_list ?? []).some((file) => samePlanPath(file, path)));
     if (writer === undefined) return err(freeze({ kind: "unwritten", path }));
-    return others.length > 0 ? err(freeze({ kind: "shared", path, taskIds: freeze([writer, ...others]) })) : ok(writer);
+    return others.length > 0
+      ? err(freeze({ kind: "shared", path, taskIds: nonEmptyOf(writer.id, ...others.map(({ id }) => id)) }))
+      : ok(writer);
   };
   const writers = allOk(mapNonEmpty(paths, writerOf));
   if (!writers.ok) return writers;
   const [first, ...rest] = writers.value;
-  const split = [...new Set(rest)].filter((id) => id !== first);
-  return split.length === 0 ? ok(first) : err(freeze([freeze({ kind: "split", taskIds: freeze([first, ...split]) })]));
+  const split = [...new Set(rest.map(({ id }) => id))].filter((id) => id !== first.id);
+  return split.length === 0 ? ok(first) : err(nonEmptyOf(freeze({ kind: "split", taskIds: nonEmptyOf(first.id, ...split) })));
+}
+
+/** The contract Task's id — `contractWriterTask` for callers that need only that. */
+export function contractWriter(
+  paths: NonEmpty<string>,
+  tasks: readonly Pick<ContractTaskView, "id" | "file_list">[],
+): DomainResult<string, NonEmpty<ContractWriterProblem>> {
+  const writer = contractWriterTask(paths, tasks);
+  return writer.ok ? ok(writer.value.id) : writer;
 }
 
 /** One writer problem as the operator message plan validation and population

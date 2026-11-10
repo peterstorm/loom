@@ -11,6 +11,7 @@
 import { dirname, join, sep } from "node:path";
 import type { Violation } from "../types";
 import { makeViolation } from "../types";
+import { isAbsolutePath, projectRelative } from "./baseline";
 
 // --- Boundary Configuration ---
 
@@ -276,16 +277,14 @@ export function toRepositoryRelative(
 
 /**
  * The project-relative path of the file being linted: exact against the
- * project root when it is known and contains the file, otherwise recovered from
- * the boundary prefixes (`toRepositoryRelative`).
+ * project root when it is known and contains the file (the one relativization
+ * the baselined rules share, `projectRelative`), otherwise — an absolute path
+ * outside the root, or no root at all — recovered from the boundary prefixes
+ * (`toRepositoryRelative`).
  */
-function projectRelative(filePath: string, boundaries: readonly BoundaryRule[], projectRoot: string | null): string {
-  const normalized = filePath.split(sep).join("/");
-  if (projectRoot !== null) {
-    const root = projectRoot.split(sep).join("/").replace(/\/+$/, "");
-    if (normalized.startsWith(`${root}/`)) return normalized.slice(root.length + 1);
-  }
-  return toRepositoryRelative(filePath, boundaries);
+function relativeToProjectOrBoundaries(filePath: string, boundaries: readonly BoundaryRule[], projectRoot: string | null): string {
+  const fromRoot = projectRelative(filePath, projectRoot);
+  return isAbsolutePath(fromRoot) ? toRepositoryRelative(filePath, boundaries) : fromRoot;
 }
 
 /**
@@ -317,7 +316,7 @@ export function handler(
 ): Violation[] {
   // Normalize ONCE at entry: `resolveImportPath` joins against this path, so a
   // relative file path yields relative resolved imports for free.
-  const relativeFile = projectRelative(filePath, boundaries, options.projectRoot);
+  const relativeFile = relativeToProjectOrBoundaries(filePath, boundaries, options.projectRoot);
   const ungoverned = ungovernedRoot(relativeFile, boundaries, options.requireGovernance);
   if (ungoverned !== null) {
     return [makeViolation(

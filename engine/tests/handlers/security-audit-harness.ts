@@ -14,23 +14,10 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { createSecurityAuditHandler } from "../../src/handlers/helpers/security-audit";
-import { canonicalCoverageId } from "../../src/core/security-audit-contract";
+import { canonicalCoverageId, type SecurityProfile } from "../../src/core/security-audit-contract";
 import { HUNTER_ENVELOPE, aConfirmedFinding, aUnitResult, nSeeds } from "../security/fixtures";
+import { invokeAt, type Run } from "./security-audit-run-seam";
 import { verifyWith } from "./security-verification-harness";
-
-/** One invocation's outcome: accepted, or refused WITH the refusal — never
- *  one without the other. */
-export type Invocation =
-  | Readonly<{ ok: true; error: null }>
-  | Readonly<{ ok: false; error: string }>;
-
-export type Run = Readonly<{
-  out: string;
-  /** What the LAST invocation printed. */
-  stdout: () => string;
-  invoke: (args: readonly string[], stdin?: string) => Promise<Invocation>;
-}>;
 
 const created: string[] = [];
 
@@ -45,16 +32,15 @@ export function aRun(prefix = "loom-security-audit-"): Run {
   const out = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
   created.push(out);
   let printed = "";
-  const handler = createSecurityAuditHandler((text) => { printed += `${text}\n`; });
   return {
     out,
     stdout: () => printed,
     invoke: async (args, stdin = "") => {
-      // Each invocation starts a fresh buffer: tests assert on ONE command's
-      // output, never on the accumulated transcript.
-      printed = "";
-      const result = await handler(stdin, [args[0] ?? "", "--out", out, ...args.slice(1)]);
-      return result?.kind === "error" ? { ok: false, error: String(result.message ?? "") } : { ok: true, error: null };
+      // Each invocation keeps only its own output: tests assert on ONE
+      // command's output, never on the accumulated transcript.
+      const invoked = await invokeAt(out, args, stdin);
+      printed = invoked.printed;
+      return invoked.invocation;
     },
   };
 }
@@ -107,8 +93,11 @@ export function isolateSubagentDir(): string {
 /** The pinned source revision every test run starts at. */
 export const SOURCE = "0".repeat(40);
 
-/** The start argv every test run uses, short of `--repo` (each run names its own). */
-export const STARTED = ["start", "--source", SOURCE, "--profile", "standard"] as const;
+/** The start argv of a test run at `profile`, short of `--repo` (each run names its own). */
+const startArgv = (profile: SecurityProfile): readonly string[] => ["start", "--source", SOURCE, "--profile", profile];
+
+/** The start argv every test run uses unless it names a profile. */
+export const STARTED = startArgv("standard");
 
 /** The fingerprint of the one confirmed claim (`aConfirmedFinding`) a hunted run files. */
 export const SQLI = "api/login:sqli-email";
@@ -127,13 +116,15 @@ export type StartOptions = Readonly<{
   repo?: string;
   /** Stack signals for lens selection (default: none). */
   signals?: Readonly<Record<string, unknown>>;
-  /** Extra flags after the standard start argv (`--force`, `--budget 12`, …). */
+  /** The budget profile (default: `standard`). */
+  profile?: SecurityProfile;
+  /** Extra flags after the start argv (`--force`, `--budget 12`, …). */
   flags?: readonly string[];
 }>;
 
 /** The `start` invocation (argv and payload) a test run starts with. */
 export const startInvocation = (run: Run, options: StartOptions = {}): Readonly<{ args: readonly string[]; stdin: string }> => ({
-  args: [...STARTED, "--repo", options.repo ?? run.out, ...(options.flags ?? [])],
+  args: [...startArgv(options.profile ?? "standard"), "--repo", options.repo ?? run.out, ...(options.flags ?? [])],
   stdin: JSON.stringify({ units: options.units ?? [seedFor(0)], ...(options.signals === undefined ? {} : { signals: options.signals }) }),
 });
 

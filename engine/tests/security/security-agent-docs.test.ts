@@ -80,7 +80,7 @@ const PLACEHOLDER_VALUES: Readonly<Record<string, unknown>> = {
   subsystem: "auth",
   attack_class: "injection",
   ordinaryAttackClassBlock: "Injection: untrusted input reaching an interpreter.",
-  selectedCompanionBlocks: "WEB-PROTOCOL-AND-AUTH.md#authentication-and-session-handling",
+  selectedCompanionBlocks: "WEB-PROTOCOL-AND-AUTH.md#browser-session-attack-classes",
   block: "CLIENT-SIDE.md#dom",
   reassignIds: canonicalCoverageId(aRefs()),
   resolvedPriorLeads: "api/login:sqli-email: the unit's paths do not reach the sink.",

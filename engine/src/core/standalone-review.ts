@@ -464,11 +464,10 @@ export function finalizeStandaloneReview(
       survivingCriticals.push(finding);
       continue;
     }
-    const votes = nonEmpty(outcome.refutations);
-    if (votes === null) return fail([`refuted critical finding ${finding.id} lacks its refutations`]);
+    // A refuted outcome carries its non-empty refutations by type.
     refutedCriticals.push(Object.freeze({
       finding,
-      refutations: mapNonEmpty(votes, ({ lens, reason }): PanelRefutation => Object.freeze({ lens, reason })),
+      refutations: mapNonEmpty(outcome.refutations, ({ lens, reason }): PanelRefutation => Object.freeze({ lens, reason })),
     }));
   }
   return ok(Object.freeze({
@@ -600,7 +599,8 @@ export type StandaloneDispositionPublicationReader = (reference: StandaloneDispo
 export function readPublishedStandaloneDisposition(prepared: PreparedStandaloneDisposition,
   reference: StandaloneDispositionPublicationReference, read: StandaloneDispositionPublicationReader,
 ): DomainResult<PublishedStandaloneDisposition, StandaloneLineageError> {
-  if (!dispositions.has(prepared)) return rejectLineage("invalid-disposition", "Publication requires a prepared declaration.");
+  const history = dispositions.get(prepared);
+  if (history === undefined) return rejectLineage("invalid-disposition", "Publication requires a prepared declaration.");
   const referenceFields = readExactDataRecord(reference, ["locator", "runId", "dispositionDigest"], "disposition publication reference");
   if (!referenceFields.ok) return rejectLineage("invalid-disposition", "Publication reference must contain only own data fields.");
   const parsedReference = standalonePublicationReferenceSchema.safeParse({ locator: referenceFields.value.locator, runId: referenceFields.value.runId, resultDigest: referenceFields.value.dispositionDigest });
@@ -615,8 +615,6 @@ export function readPublishedStandaloneDisposition(prepared: PreparedStandaloneD
   if (!receipt.ok || receipt.value.kind !== "artifact-set-published" || receipt.value.runId !== lookup.runId ||
       receipt.value.effectId !== `effect:standalone-disposition:${prepared.digest}` || receipt.value.artifacts.length !== 1) return rejectLineage("invalid-disposition", "Disposition receipt does not match its exact Run/effect.");
   const artifact = receipt.value.artifacts[0];
-  const history = dispositions.get(prepared);
-  if (history === undefined) return rejectLineage("invalid-disposition", "Disposition was not prepared by this process.");
   if (artifact.runId !== lookup.runId || artifact.slot.path !== "artifacts/disposition.json" || artifact.digest !== prepared.digest || artifact.byteLength !== expected.length) return rejectLineage("invalid-disposition", "Disposition receipt differs from exact published bytes.");
   const published = canonicalRecord({ record: prepared.record, digest: prepared.digest,
     publication: lookup, history }) as PublishedStandaloneDisposition;
@@ -1136,41 +1134,57 @@ function prepareResultPublicationIntent(
   });
 }
 
+/**
+ * A finalization with the digest of the panel outcome it proves: the clean
+ * outcome when no panel was given, else the panel the finalization carries.
+ * The one seam that holds "a given panel is a returned panel" — both the
+ * ready-state construction and the publication re-verification read the
+ * digest from here, so neither re-derives it or re-guards the null panel.
+ */
+function finalizeProvenOutcome(
+  aggregate: StandaloneReviewAggregate,
+  panel: ParsedPanelOutcomes | null,
+): ParseResult<Readonly<{ result: AdjudicatedStandaloneReview; provenOutcomeDigest: string }>> {
+  const finalized = finalizeStandaloneReview(aggregate, panel);
+  if (!finalized.ok) return finalized;
+  const result = finalized.value;
+  if (panel === null) return ok(Object.freeze({ result, provenOutcomeDigest: canonicalDigest({ kind: "clean" }) }));
+  if (result.panel === null) return fail(["finalization dropped the proven panel outcome"]);
+  return ok(Object.freeze({ result, provenOutcomeDigest: canonicalDigest(panelOutcomeValue(result.panel)) }));
+}
+
 function readyToFinalize(
   state: StandaloneAggregatingState | StandaloneAwaitingRefutationState,
   event: Extract<StandaloneReviewMachineEvent, { kind: "aggregate-clean" | "refutation-completed" }>,
   aggregate: StandaloneReviewAggregate,
   panel: ParsedPanelOutcomes | null,
 ): StandaloneMachineResult {
-  const finalized = finalizeStandaloneReview(aggregate, panel);
-  if (!finalized.ok) {
-    return rejectTransition(state, event, "aggregate-route-mismatch", finalized.errors.join("; "));
+  const proven = finalizeProvenOutcome(aggregate, panel);
+  if (!proven.ok) {
+    return rejectTransition(state, event, "aggregate-route-mismatch", proven.errors.join("; "));
   }
-  if (finalized.value.reviewerEvidence.length === 0 ||
-      finalized.value.reviewerEvidence.some(({ authorityKind }) => authorityKind !== "request-bound")) {
+  const finalized = proven.value.result;
+  if (finalized.reviewerEvidence.length === 0 ||
+      finalized.reviewerEvidence.some(({ authorityKind }) => authorityKind !== "request-bound")) {
     return rejectTransition(state, event, "aggregate-route-mismatch",
       `schema-v${aggregate.schemaVersion} finalization requires exact non-empty request-bound reviewer evidence`);
   }
-  const publication = prepareResultPublicationIntent(finalized.value);
+  const publication = prepareResultPublicationIntent(finalized);
   if (!publication.ok) {
     return rejectTransition(state, event, "publication-receipt-mismatch", publication.error.message);
-  }
-  const finalizedPanel = finalized.value.panel;
-  if (panel !== null && finalizedPanel === null) {
-    return rejectTransition(state, event, "aggregate-route-mismatch", "finalization dropped the proven panel outcome");
   }
   const ready = canonicalRecord({
     ...state,
     kind: "ready-to-finalize" as const,
     aggregate,
-    panel: finalized.value.panel,
+    panel: finalized.panel,
     refutationCompletion: event.kind === "refutation-completed" ? event.completion : null,
     rosterDigest: state.completion.rosterDigest,
-    reviewerEvidenceDigest: canonicalDigest(finalized.value.reviewerEvidence),
+    reviewerEvidenceDigest: canonicalDigest(finalized.reviewerEvidence),
     aggregateDigest: canonicalDigest(serializeStandaloneAggregate(aggregate)),
-    provenOutcomeDigest: canonicalDigest(panel === null || finalizedPanel === null ? { kind: "clean" } : panelOutcomeValue(finalizedPanel)),
-    finalizationDigest: canonicalDigest(serializeAdjudicatedStandaloneReview(finalized.value)),
-    result: finalized.value,
+    provenOutcomeDigest: proven.value.provenOutcomeDigest,
+    finalizationDigest: canonicalDigest(serializeAdjudicatedStandaloneReview(finalized)),
+    result: finalized,
     publicationIntent: publication.value,
   });
   readyFinalizationCache.add(ready);
@@ -1199,17 +1213,17 @@ export function parseAuthoritativeStandaloneReviewResult(
       ready.completion.rosterDigest !== ready.rosterDigest) {
     return authoritativeResultFailure("frozen roster proof or aggregate digest changed before result publication");
   }
-  const finalized = finalizeStandaloneReview(ready.aggregate, ready.panel);
-  if (!finalized.ok || finalized.value.reviewerEvidence.length === 0 ||
-      (ready.panel !== null && finalized.value.panel === null) ||
-      canonicalDigest(finalized.value.reviewerEvidence) !== ready.reviewerEvidenceDigest ||
-      canonicalDigest(ready.panel === null || finalized.value.panel === null ? { kind: "clean" } : panelOutcomeValue(finalized.value.panel)) !== ready.provenOutcomeDigest ||
-      canonicalDigest(serializeAdjudicatedStandaloneReview(finalized.value)) !== ready.finalizationDigest) {
+  const proven = finalizeProvenOutcome(ready.aggregate, ready.panel);
+  if (!proven.ok || proven.value.result.reviewerEvidence.length === 0 ||
+      canonicalDigest(proven.value.result.reviewerEvidence) !== ready.reviewerEvidenceDigest ||
+      proven.value.provenOutcomeDigest !== ready.provenOutcomeDigest ||
+      canonicalDigest(serializeAdjudicatedStandaloneReview(proven.value.result)) !== ready.finalizationDigest) {
     return authoritativeResultFailure("proven panel outcome, reviewer evidence, aggregate, or finalization changed before publication");
   }
+  const finalized = proven.value.result;
   let expectedRaw: unknown;
   try {
-    expectedRaw = JSON.parse(serializeAdjudicatedStandaloneReview(finalized.value));
+    expectedRaw = JSON.parse(serializeAdjudicatedStandaloneReview(finalized));
   } catch {
     return authoritativeResultFailure(`engine-authored schema-v${ready.authority.schemaVersion} finalization is not canonical JSON`);
   }
@@ -1222,10 +1236,10 @@ export function parseAuthoritativeStandaloneReviewResult(
       ? "result publication receipt has the wrong effect kind"
       : reconciled.error.message);
   }
-  const authoritative = finalized.value as AuthoritativeStandaloneReviewResult;
+  const authoritative = finalized as AuthoritativeStandaloneReviewResult;
   authoritativeStandaloneResultCache.add(authoritative);
   standaloneResultPublications.set(authoritative, canonicalRecord({ artifact: ready.publicationIntent.artifacts[0],
-    serialization: serializeAdjudicatedStandaloneReview(finalized.value) }));
+    serialization: serializeAdjudicatedStandaloneReview(finalized) }));
   return canonicalRecord({ ok: true, value: authoritative, receipt: reconciled.value });
 }
 

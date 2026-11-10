@@ -32,12 +32,11 @@ import {
 } from "../../core/security-verification";
 import type { VerificationVerdict } from "../../core/security-adjudication";
 import { canonicalAttestedRunDirectory, captureAttestationLookup } from "../../orchestration/capture-attestation-store";
+import { describeCause } from "../../utils/describe-cause";
 import { openRegisteredRunDirectory, parseRunDirectoryReference, type RunDirHandle } from "../../orchestration/run-directory-handle";
 import { closeAnchoredDirectory, listDirectoryNamesNoFollow, openDirectoryNoFollow, readRunBytesNoFollow } from "../../utils/no-follow-fs";
 import { parseRegisteredFacadeProgram, replayVerificationOutcome, replayVerificationResult } from "./programs";
 import { SECURITY_VERIFICATION_RESULT_FILE, verificationRunsRoot, type AuditSnapshot } from "./security-audit-run";
-
-const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 export type OpenedVerificationRun = Readonly<{
   handle: RunDirHandle;
@@ -149,7 +148,7 @@ export async function observeVerificationGenerations(locator: string): Promise<D
       closeAnchoredDirectory(anchored);
     }
   } catch (error) {
-    return failure(`cannot list ${root}: ${describe(error)}`);
+    return failure(`cannot list ${root}: ${describeCause(error)}`);
   }
   const states = new Map<string, GenerationObservation>();
   for (const name of names.filter((entry) => entry.startsWith("run.verify-"))) {
@@ -170,13 +169,13 @@ export function readVerificationSource(locator: string, from: string): DomainRes
   try {
     bytes = readRunBytesNoFollow(join(handle.runDirectory, SECURITY_VERIFICATION_RESULT_FILE));
   } catch (error) {
-    return failure(`verification run ${handle.runId} has published no result.json (${describe(error)}); resume it until it is done`);
+    return failure(`verification run ${handle.runId} has published no result.json (${describeCause(error)}); resume it until it is done`);
   }
   let raw: unknown;
   try {
     raw = JSON.parse(bytes.toString("utf8"));
   } catch (error) {
-    return failure(`result.json is not valid JSON: ${describe(error)}`);
+    return failure(`result.json is not valid JSON: ${describeCause(error)}`);
   }
   const result = parseVerificationResult(raw);
   return result.ok ? success({ ...opened.value, bytes, result: result.value }) : failure(`result.json is malformed — ${result.error}`);

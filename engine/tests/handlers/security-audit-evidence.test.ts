@@ -16,14 +16,15 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { sandboxNonce, sandboxReceiptPrefix } from "../../src/core/security-sandbox";
 import { HUNTER_ENVELOPE } from "../security/fixtures";
 import { aSandboxReceipt } from "../security/sandbox-fixtures";
-import { aRun, assignUnit, isolateSubagentDir, removeRuns, startInvocation, startRun, unitIdFor, writeArtifact, type Invocation, type Run } from "./security-audit-harness";
+import { aRun, assignUnit, isolateSubagentDir, removeRuns, startInvocation, startRun, unitIdFor, writeArtifact } from "./security-audit-harness";
+import type { Invocation, Run } from "./security-audit-run-seam";
 
 /** The start every evidence test begins with: one unit, a budget, typed signals, `--repo` the run itself. */
 const EVIDENCE_START = { flags: ["--budget", "12"], signals: { languages: ["typescript"], servesHttp: true } } as const;
@@ -102,39 +103,31 @@ describe("a local check must name a receipt that proves a bounded run (INV-S1)",
     expect(refused.error).toContain("exit 1");
   });
 
-  it("refuses a receipt whose limits were not applied, and prose that is not a receipt", async () => {
-    const run = await assignedRun();
-
-    const unenforced = "agents/security-hunter-agent/artifacts/unenforced.json";
-    writeArtifact(run, unenforced, receiptFor(unenforced, { enforced: { cpu: false, memory: true, processes: true, fileSize: true } }));
-    const first = await submitLocal(run, unenforced);
-    expect(first.ok).toBe(false);
-    expect(first.error).toContain("cpu limit not applied");
-
+  it.each([
+    ["a limit that was not applied", "unenforced.json",
+      (artifact: string) => receiptFor(artifact, { enforced: { cpu: false, memory: true, processes: true, fileSize: true } }), "cpu limit not applied"],
     // A receipt whose home directory stayed writable is not a bounded run.
-    const openHome = "agents/security-hunter-agent/artifacts/open-home.json";
-    writeArtifact(run, openHome, receiptFor(openHome, { homeReadOnly: false }));
-    const openHomeResult = await submitLocal(run, openHome);
-    expect(openHomeResult.ok).toBe(false);
-    expect(openHomeResult.error).toContain("home directory not remounted read-only");
-
+    ["a home directory left writable", "open-home.json",
+      (artifact: string) => receiptFor(artifact, { homeReadOnly: false }), "home directory not remounted read-only"],
     // Nor is one whose target stayed writable: the script reports the target
     // closed only after a write to it failed, never as a literal.
-    const openTarget = "agents/security-hunter-agent/artifacts/open-target.json";
-    writeArtifact(run, openTarget, receiptFor(openTarget, { targetReadOnly: false }));
-    const openTargetResult = await submitLocal(run, openTarget);
-    expect(openTargetResult.ok).toBe(false);
-    expect(openTargetResult.error).toContain("target not remounted read-only");
+    ["a target left writable", "open-target.json",
+      (artifact: string) => receiptFor(artifact, { targetReadOnly: false }), "target not remounted read-only"],
+    ["prose that is not a receipt", "prose.md", () => "I ran it locally and it worked.\n", "is not a sandbox receipt"],
+  ] as const)("refuses %s", async (_case, file, body, expected) => {
+    const run = await assignedRun();
+    const artifact = `agents/security-hunter-agent/artifacts/${file}`;
+    writeArtifact(run, artifact, body(artifact));
+    const refused = await submitLocal(run, artifact);
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain(expected);
+  });
 
-    const prose = "agents/security-hunter-agent/artifacts/prose.md";
-    writeArtifact(run, prose, "I ran it locally and it worked.\n");
-    const second = await submitLocal(run, prose);
-    expect(second.ok).toBe(false);
-    expect(second.error).toContain("is not a sandbox receipt");
-
-    // A missing receipt file is a refusal, not a pass.
+  it("refuses a local check whose receipt file is missing: absence is not a pass", async () => {
+    const run = await assignedRun();
     const missing = await submitLocal(run, "agents/security-hunter-agent/artifacts/absent.json");
     expect(missing.ok).toBe(false);
+    expect(missing.error).toContain("absent.json");
   });
 
   it("refuses a receipt whose environment is not exactly the script's allowlist", async () => {
@@ -164,19 +157,44 @@ describe("--force starts a new run (INV-S2b)", () => {
     // Every document the new run owns is re-created empty; nothing stale survives.
     expect(JSON.parse(readFileSync(join(run.out, "findings.json"), "utf8"))).toEqual([]);
     expect(JSON.parse(readFileSync(join(run.out, "verdicts.json"), "utf8"))).toEqual([]);
-    // `verification-runs/` is the runs root a run's verification runs live in; an
-    // old run's verification evidence stays, bound to the old run id, so
-    // `verify --from` can never import it into the new run.
     const fresh = ["run.json", "ledger.json", "findings.json", "verdicts.json", "lenses.json", "verification-runs"];
     expect(readdirSync(run.out).filter((name) => !fresh.includes(name))).toEqual([]);
   });
 
-  it("refuses to reuse a directory without --force", async () => {
+  it("drops the previous run's verification runs: the new run's runs root starts empty", async () => {
     const run = await start(aRun());
-    const { args, stdin } = startInvocation(run, { signals: { languages: ["typescript"] } });
-    const again = await run.invoke(args, stdin);
-    expect(again.ok).toBe(false);
-    expect(again.error).toContain("--force");
+    // A verification run of the previous run, bound to its ledger: left in
+    // place it would sit under the new run's root as if this run had issued it.
+    mkdirSync(join(run.out, "verification-runs", "run.verify-w1-g1-stale"), { recursive: true });
+    writeFileSync(join(run.out, "verification-runs", "run.verify-w1-g1-stale", "program.json"), "{}\n");
+
+    const { args, stdin } = startInvocation(run, { flags: ["--force"] });
+    expect((await run.invoke(args, stdin)).error).toBeNull();
+    expect(readdirSync(join(run.out, "verification-runs"))).toEqual([]);
+  });
+
+  it("leaves the previous run whole when a fresh document cannot be staged", async () => {
+    const run = await start(aRun());
+    const before = Object.fromEntries(["run.json", "ledger.json", "lenses.json"].map((file) => [file, readFileSync(join(run.out, file), "utf8")]));
+    writeFileSync(join(run.out, "REPORT.md"), "# the previous run's report\n");
+    // A symlink planted where one fresh document stages: its write is refused,
+    // and that refusal must come BEFORE anything of the previous run is cleared.
+    const decoy = join(run.out, "..", `${run.out.split("/").pop()}-decoy.json`);
+    writeFileSync(decoy, "decoy\n");
+    try {
+      symlinkSync(decoy, join(run.out, "lenses.json.start-staged"));
+      const { args, stdin } = startInvocation(run, { signals: { languages: ["typescript"] }, flags: ["--force"] });
+      const refused = await run.invoke(args, stdin);
+      expect(refused.ok).toBe(false);
+      expect(refused.error).toContain("lenses.json.start-staged");
+      for (const [file, text] of Object.entries(before)) expect(readFileSync(join(run.out, file), "utf8")).toBe(text);
+      expect(readFileSync(join(run.out, "REPORT.md"), "utf8")).toBe("# the previous run's report\n");
+      expect(readFileSync(decoy, "utf8")).toBe("decoy\n");
+      // Nothing staged is left behind beside the run.
+      expect(readdirSync(run.out).filter((name) => name.endsWith(".start-staged"))).toEqual([]);
+    } finally {
+      rmSync(decoy, { force: true });
+    }
   });
 });
 

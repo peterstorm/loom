@@ -7,7 +7,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { configWithBaselines, recordedBaselines, type RecordedBaseline } from "../../../src/linter/programmatic/baseline-config";
-import type { BaselineOwner } from "../../../src/linter/programmatic/baseline";
+import { baselineKey, type BaselineOwner } from "../../../src/linter/programmatic/baseline";
 import { baselineOwners } from "../../../src/linter/programmatic/index";
 
 /** An owner whose detector flags every line that starts with `marker`. */
@@ -17,7 +17,7 @@ const markerOwner = (configKey: BaselineOwner["configKey"], marker: string, exte
   extensions,
   baseline: [],
   site: "marked line",
-  detect: (content, path) => content.split("\n").filter((line) => line.startsWith(marker)).map((line) => `${path}::${line}`),
+  detect: (content, path) => content.split("\n").filter((line) => line.startsWith(marker)).map((line) => baselineKey(path, line)),
 });
 
 const SWITCH = markerOwner("switchTotalityBaseline", "S");
@@ -37,7 +37,7 @@ describe("recordedBaselines", () => {
   });
 
   it("ignores the owner's current baseline: a since-proven site drops out on a re-record", () => {
-    const owner = { ...SWITCH, baseline: ["src/a.ts::S-gone"] };
+    const owner = { ...SWITCH, baseline: [baselineKey("src/a.ts", "S-gone")] };
     expect(recordedBaselines([owner], [{ path: "src/a.ts", content: "S1" }])).toEqual([
       { configKey: "switchTotalityBaseline", keys: ["src/a.ts::S1"] },
     ]);
@@ -96,7 +96,7 @@ describe("configWithBaselines", () => {
 
   const configKey = fc.constantFrom<RecordedBaseline["configKey"]>("switchTotalityBaseline", "discriminantBranchingBaseline");
   const recordedArb = fc.uniqueArray(
-    fc.record({ configKey, keys: fc.array(fc.string({ minLength: 1 }), { maxLength: 4 }) }),
+    fc.record({ configKey, keys: fc.array(fc.string({ minLength: 1 }).map((key) => baselineKey("src/a.ts", key)), { maxLength: 4 }) }),
     { selector: ({ configKey: key }) => key, maxLength: 2 },
   );
   const otherFields = fc.dictionary(

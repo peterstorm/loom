@@ -27,6 +27,7 @@ import type { StandaloneReviewAggregate, StandaloneReviewState } from "../../cor
 import { aggregateLegacyStandaloneReview, parseHistoricalStandaloneAggregate } from "../../core/legacy-archive";
 import { parseArtifactRef, type ArtifactRef } from "../../core/orchestration-contract";
 import { failure, success, type DomainResult } from "../../core/orchestration-contract/identity";
+import { describeCause } from "../../utils/describe-cause";
 import { resolveReviewFindings, reviewResolutionLog } from "../../core/review-output";
 import {
   argumentValue,
@@ -382,34 +383,41 @@ function init(runDir: string, inputPath: string): HookResult {
   return writeCanonicalOutput(json);
 }
 
-/** A prior pending or published aggregate forbids re-aggregation; null when the run is fresh. */
-function priorAggregationRefusal(runDir: string, aggregatePath: string, pendingPath: string): HookResult | null {
+/** Why aggregation stopped: the contract named in the error (`contractError`)
+ *  and its reasons, rendered once by `aggregate`. */
+type AggregationRefusal = Readonly<{ context: "standalone review" | "standalone review boundary"; errors: readonly string[] }>;
+
+const refused = (context: AggregationRefusal["context"], errors: readonly string[]): DomainResult<void, AggregationRefusal> =>
+  failure({ context, errors });
+
+/** A prior pending or published aggregate forbids re-aggregation; success when the run is fresh. */
+function priorAggregationRefusal(runDir: string, aggregatePath: string, pendingPath: string): DomainResult<void, AggregationRefusal> {
   if (existsSync(pendingPath)) {
-    return contractError("standalone review", [
+    return refused("standalone review", [
       "this run has an incomplete prior aggregation — start a new run directory",
     ]);
   }
-  if (!existsSync(aggregatePath)) return null;
+  if (!existsSync(aggregatePath)) return success(undefined);
   const existing = readJson(aggregatePath, "standalone aggregate", runDir);
   if (!existing.ok) {
-    return contractError("standalone review", [
+    return refused("standalone review", [
       "this run has a corrupt prior aggregate and cannot be resumed",
       ...existing.errors,
     ]);
   }
   const parsed = parseHistoricalStandaloneAggregate(existing.value);
   return parsed.ok
-    ? contractError("standalone review", ["this run has already been aggregated"])
-    : contractError("standalone review", [
+    ? refused("standalone review", ["this run has already been aggregated"])
+    : refused("standalone review", [
         "this run has a corrupt prior aggregate and cannot be resumed",
         ...parsed.errors,
       ]);
 }
 
-/** Stage, re-validate, and atomically publish aggregate.json; null on success. */
-function publishAggregate(runDir: string, pendingPath: string, aggregatePath: string, json: string): HookResult | null {
+/** Stage, re-validate, and atomically publish aggregate.json. */
+function publishAggregate(runDir: string, pendingPath: string, aggregatePath: string, json: string): DomainResult<void, AggregationRefusal> {
   const target = prepareWriteTargets(runDir, [], ["aggregate.json", ".aggregate.pending.json"]);
-  if (!target.ok) return contractError("standalone review boundary", target.errors);
+  if (!target.ok) return refused("standalone review boundary", target.errors);
   let stagedCreated = false;
   try {
     writeRunFileExclusiveNoFollow(pendingPath, json);
@@ -417,13 +425,13 @@ function publishAggregate(runDir: string, pendingPath: string, aggregatePath: st
     const staged = parseHistoricalStandaloneAggregate(JSON.parse(readRunFileNoFollow(pendingPath)));
     if (!staged.ok) throw new Error(`staged aggregate failed validation: ${staged.errors.join("; ")}`);
     publishStagedRunFile(pendingPath, aggregatePath);
-    return null;
+    return success(undefined);
   } catch (error) {
     let cleanupError: string | null = null;
     try { if (stagedCreated) removeRunFileNoFollow(pendingPath); }
-    catch (cleanup) { cleanupError = cleanup instanceof Error ? cleanup.message : String(cleanup); }
-    return contractError("standalone review", [
-      `cannot atomically publish aggregate: ${error instanceof Error ? error.message : String(error)}`,
+    catch (cleanup) { cleanupError = describeCause(cleanup); }
+    return refused("standalone review", [
+      `cannot atomically publish aggregate: ${describeCause(error)}`,
       ...(cleanupError === null ? [] : [`also failed to remove pending aggregate: ${cleanupError}`]),
     ]);
   }
@@ -449,7 +457,7 @@ function aggregate(runDir: string, inputPath: string): HookResult {
   const aggregatePath = join(runDir, "aggregate.json");
   const pendingPath = join(runDir, ".aggregate.pending.json");
   const prior = priorAggregationRefusal(runDir, aggregatePath, pendingPath);
-  if (prior !== null) return prior;
+  if (!prior.ok) return contractError(prior.error.context, prior.error.errors);
   if (resolve(inputPath) !== resolve(join(runDir, "review-input.json"))) {
     return contractError("standalone review boundary", [`--input must be ${join(runDir, "review-input.json")}`]);
   }
@@ -464,8 +472,8 @@ function aggregate(runDir: string, inputPath: string): HookResult {
   const result = aggregateLegacyStandaloneReview({ runId: session.value.runId, scope: session.value.scope, transcripts: loaded.value });
   if (!result.ok) return contractError("standalone review", result.errors);
   const json = serializeStandaloneAggregate(result.value.aggregate) + "\n";
-  const publishFailure = publishAggregate(runDir, pendingPath, aggregatePath, json);
-  if (publishFailure !== null) return publishFailure;
+  const published = publishAggregate(runDir, pendingPath, aggregatePath, json);
+  if (!published.ok) return contractError(published.error.context, published.error.errors);
   reportAggregation(loaded.value, result.value);
   return writeCanonicalOutput(json);
 }

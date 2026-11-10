@@ -61,7 +61,7 @@ describe("the operation set", () => {
   // the command's prose to them).
 
   it("declares nonce read-only and flags-only: it prints a binding, it never moves the run", () => {
-    expect(SECURITY_AUDIT_OPERATIONS.nonce).toEqual({ input: "flags", runtimeSkew: "available" });
+    expect(SECURITY_AUDIT_OPERATIONS.nonce).toEqual({ input: "flags", runtimeSkew: "available", runDirectory: "reads", subagent: "read-only" });
     expect(securityAuditOperationWrites("nonce")).toBe(false);
     expect(routeConsumesStdin("helper", "security-audit", ["nonce"])).toBe(false);
     expect(piRuntimeHandshakeRequired("helper", "security-audit", ["nonce"])).toBe(false);

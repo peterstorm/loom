@@ -28,6 +28,7 @@ import {
   canonicalStructuralEquals,
   isNonEmpty,
   failure,
+  parseArtifactDigest,
   parseSlotId,
   success,
   type DomainResult,
@@ -45,13 +46,12 @@ import {
 import { SECURITY_VERIFICATION_PROGRAM } from "./orchestration-contract/programs";
 import {
   SECURITY_VERIFIER_ROLE,
-  admittedMissingFact,
   catalogVerifierProfileProblem,
   parseVerificationVerdicts,
-  voteViolations,
-  type MissingFact,
+  parseVote,
   type VerdictViolation,
   type VerificationVerdict,
+  type VerifierVote,
 } from "./security-adjudication";
 import { isSecurityFingerprint, isWireRecord, unknownFieldViolations } from "./security-audit-contract";
 import type { ConfirmedFinding, SecurityFinding } from "./security-findings";
@@ -82,7 +82,7 @@ export const VERIFIER_VOTE_KEYS: readonly string[] = ["fingerprint", "vote", "re
 
 declare const parsedAuditReference: unique symbol;
 
-/** An audit reference's fields before the brand: what `isAuditReference` proves. */
+/** An audit reference's fields before the brand: what `parseAuditReference` proves. */
 type AuditReferenceFields = Readonly<{
   locator: string;
   runId: string;
@@ -134,9 +134,9 @@ const isWave = (value: unknown): value is number =>
 const exactKeys = (record: Readonly<Record<string, unknown>>, keys: readonly string[]): boolean =>
   Object.keys(record).length === keys.length && keys.every((key) => Object.hasOwn(record, key));
 
-/** The brand's one proof: every field in its grammar. */
-const isAuditReference = (fields: AuditReferenceFields): fields is AuditReference =>
-  isCanonicalLocator(fields.locator) && isAuditRunId(fields.runId) && isSha256(fields.ledgerDigest) && isSha256(fields.findingsDigest);
+/** The brand's minting step. Only `parseAuditReference` calls it, after every
+ *  field passed its grammar there: the proof is those checks, stated once. */
+const asAuditReference = (fields: AuditReferenceFields): AuditReference => fields as AuditReference;
 
 /** The one constructor of an `AuditReference`: the audit reference a start
  *  input or a registration names, and the one the shell's snapshot reader
@@ -150,20 +150,19 @@ export function parseAuditReference(raw: unknown): DomainResult<AuditReference, 
   if (!isSha256(raw.ledgerDigest) || !isSha256(raw.findingsDigest)) {
     return failure("audit.ledgerDigest and audit.findingsDigest must be sha256 digests");
   }
-  const fields: AuditReferenceFields = { locator: raw.locator, runId: raw.runId, ledgerDigest: raw.ledgerDigest, findingsDigest: raw.findingsDigest };
-  return isAuditReference(fields) ? success(fields) : failure("audit reference is malformed");
+  return success(asAuditReference({ locator: raw.locator, runId: raw.runId, ledgerDigest: raw.ledgerDigest, findingsDigest: raw.findingsDigest }));
 }
 
 const isGeneration = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= MAX_VERIFICATION_GENERATIONS;
 
-/** A start input's fields before the brand: what `isVerificationStart` proves. */
+/** A start input's fields before the brand: what `verificationStartOf` proves. */
 type VerificationStartFields = Readonly<{ schemaVersion: 1; audit: AuditReference; wave: number; generation: number }>;
 
-/** The brand's one proof: the audit reference in its grammar, the wave
- *  positive, the generation inside its bound. */
-const isVerificationStart = (fields: VerificationStartFields): fields is SecurityVerificationStart =>
-  parseAuditReference(fields.audit).ok && isWave(fields.wave) && isGeneration(fields.generation);
+/** The brand's minting step. Only `verificationStartOf` calls it, after the
+ *  wave and generation passed their grammar there; the audit's proof is carried
+ *  by its own `AuditReference` brand, so nothing re-parses it. */
+const asVerificationStart = (fields: VerificationStartFields): SecurityVerificationStart => fields as SecurityVerificationStart;
 
 /** The one constructor of a `SecurityVerificationStart`: the wire parser and
  *  `planVerificationStart` both mint through it, each refusal named. */
@@ -178,8 +177,7 @@ export function verificationStartOf(
   if (!isGeneration(generation)) {
     return failure(`security-verification generation must be an integer in 1..${MAX_VERIFICATION_GENERATIONS}`);
   }
-  const fields: VerificationStartFields = { schemaVersion: 1, audit: parsedAudit.value, wave, generation };
-  return isVerificationStart(fields) ? success(fields) : failure("security-verification start input is malformed");
+  return success(asVerificationStart({ schemaVersion: 1, audit: parsedAudit.value, wave, generation }));
 }
 
 export function parseSecurityVerificationStart(raw: unknown): DomainResult<SecurityVerificationStart, string> {
@@ -190,14 +188,29 @@ export function parseSecurityVerificationStart(raw: unknown): DomainResult<Secur
 }
 
 /**
- * Whether the audit as it stands now is the audit a verification run was issued
- * against. A run issued against older findings or an older ledger verified a
- * claim set that no longer exists, so its ballots are refused, not merged.
+ * How an audit is held to the issuance of a verification run:
+ * - `current`: the audit's ledger and findings must still be the ones the run
+ *   was issued against — driving, starting and importing a run: a moved audit
+ *   verified a claim set that no longer exists, so the run stops;
+ * - `issued`: only the audit's identity (locator, run id) must match — the
+ *   replay of an ALREADY-IMPORTED run whose ballots `verdicts.json` caches:
+ *   later waves move the ledger and findings, and that must not unprove the
+ *   ballots this run cast over its frozen briefs.
  */
-export function authenticateAudit(expected: AuditReference, observed: AuditReference): DomainResult<void, string> {
+export type AuditBinding = "current" | "issued";
+
+/**
+ * Whether the audit as it stands now is the audit a verification run was
+ * issued against, under `binding`. Identity (locator, run id) is required
+ * under both policies; the ledger and findings digests only under `current`.
+ * The policy is named by every caller — no default — so what a replay skips is
+ * decided here, in one tested rule, never by a caller editing the comparison.
+ */
+export function authenticateAudit(expected: AuditReference, observed: AuditReference, binding: AuditBinding): DomainResult<void, string> {
   if (expected.locator !== observed.locator || expected.runId !== observed.runId) {
     return failure(`verification run was issued for audit ${expected.runId} at ${expected.locator}, not ${observed.runId} at ${observed.locator}`);
   }
+  if (binding === "issued") return success(undefined);
   if (expected.findingsDigest !== observed.findingsDigest) {
     return failure(`audit findings changed since the verification run was issued (findings ${expected.findingsDigest} → ${observed.findingsDigest}); start a new verification run`);
   }
@@ -235,9 +248,12 @@ export function eligibleFingerprints(
  * (a harness resolves a spawn to its run by request id).
  */
 export const verificationSlotId = (issue: SecurityVerificationStart, fingerprints: readonly string[]): string =>
-  `security-verification-slot:${sha256Hex(JSON.stringify([
+  `${VERIFICATION_SLOT_PREFIX}${sha256Hex(JSON.stringify([
     issue.audit.runId, issue.audit.ledgerDigest, issue.audit.findingsDigest, issue.wave, issue.generation, fingerprints,
   ])).slice(0, 32)}`;
+
+/** Every verifier slot id's prefix, before the 32 hex digits it derives. */
+export const VERIFICATION_SLOT_PREFIX = "security-verification-slot:";
 
 /** A slot's two request ids, in attempt order. */
 export const verificationRequestIds = (slotId: string): readonly [string, string] => [`${slotId}:1`, `${slotId}:2`];
@@ -398,9 +414,10 @@ const registrationDigestOf = (fields: Omit<RegistrationFields, "registrationDige
   schemaVersion: fields.schemaVersion, kind: fields.kind, runId: fields.runId, input: fields.input, briefs: fields.briefs,
 }));
 
-/** The brand's one proof: the registration rules hold and the digest is its own. */
-const isRegisteredProgram = (fields: RegistrationFields): fields is RegisteredSecurityVerificationProgram =>
-  registrationProblem(fields.runId, fields.input, fields.briefs) === null && fields.registrationDigest === registrationDigestOf(fields);
+/** The brand's minting step. Only `registerSecurityVerification` calls it,
+ *  after `registrationProblem` held nothing and with the digest it computed:
+ *  the proof is that one check, stated once. */
+const asRegistered = (fields: RegistrationFields): RegisteredSecurityVerificationProgram => fields as RegisteredSecurityVerificationProgram;
 
 /**
  * Register a verification run — the one constructor of a registration, used
@@ -416,8 +433,7 @@ export function registerSecurityVerification(
   const problem = registrationProblem(runId, input, briefs);
   if (problem !== null) return failure(problem);
   const base = { schemaVersion: 1 as const, kind: SECURITY_VERIFICATION_PROGRAM, runId, input, briefs };
-  const fields: RegistrationFields = { ...base, registrationDigest: registrationDigestOf(base) };
-  return isRegisteredProgram(fields) ? success(fields) : failure(`verification run ${runId} does not register`);
+  return success(asRegistered({ ...base, registrationDigest: registrationDigestOf(base) }));
 }
 
 /** One registered brief read back: exact keys, a slot id in its grammar, and
@@ -544,14 +560,6 @@ export function verificationBriefText(input: Readonly<{
 
 // --- The verifier's result (D2) and per-brief admission ---
 
-/** One vote as the verifier returns it: no agent, profile or wave. */
-export type VerifierVote = Readonly<{
-  fingerprint: string;
-  vote: "critical" | "advisory";
-  reason: string;
-  missingFact: MissingFact | null;
-}>;
-
 const describeViolations = (violations: readonly VerdictViolation[]): string =>
   violations.map((violation) => `${violation.path}: ${violation.message}`).join("; ");
 
@@ -573,18 +581,15 @@ export function parseVerificationResultWire(raw: unknown): DomainResult<readonly
       violations.push({ path: base, message: "expected an object" });
       return;
     }
-    const local = [...unknownFieldViolations(entry, VERIFIER_VOTE_KEYS, base), ...voteViolations(entry, base)];
+    const local = unknownFieldViolations(entry, VERIFIER_VOTE_KEYS, base);
+    const vote = parseVote(entry, base);
+    if (!vote.ok) local.push(...vote.error);
     if (!Object.hasOwn(entry, "missingFact")) local.push({ path: `${base}.missingFact`, message: "required (null when none)" });
-    if (local.length > 0) {
+    if (local.length > 0 || !vote.ok) {
       violations.push(...local);
       return;
     }
-    votes.push({
-      fingerprint: String(entry.fingerprint),
-      vote: entry.vote === "critical" ? "critical" : "advisory",
-      reason: String(entry.reason),
-      missingFact: admittedMissingFact(entry.missingFact),
-    });
+    votes.push(vote.value);
   });
   return violations.length > 0 ? failure(violations) : success(votes);
 }
@@ -605,16 +610,15 @@ export function admitVerificationResult(brief: VerificationBrief, text: string):
   const parsed = parseVerificationResultWire(raw);
   if (!parsed.ok) return failure(describeViolations(parsed.error));
   const assigned = new Set<string>(brief.fingerprints);
-  const seen = new Set<string>();
+  const byFingerprint = new Map<string, VerifierVote>();
   for (const vote of parsed.value) {
     if (!assigned.has(vote.fingerprint)) return failure(`verdict for ${vote.fingerprint}, which is not in this brief (${brief.fingerprints.join(", ")})`);
-    if (seen.has(vote.fingerprint)) return failure(`duplicate verdict for ${vote.fingerprint}`);
-    seen.add(vote.fingerprint);
+    if (byFingerprint.has(vote.fingerprint)) return failure(`duplicate verdict for ${vote.fingerprint}`);
+    byFingerprint.set(vote.fingerprint, vote);
   }
-  const missing = brief.fingerprints.filter((fingerprint) => !seen.has(fingerprint));
+  const missing = brief.fingerprints.filter((fingerprint) => !byFingerprint.has(fingerprint));
   if (missing.length > 0) return failure(`no verdict for ${missing.join(", ")}`);
-  // Every fingerprint has its vote (checked above), so each lookup hits.
-  return success(brief.fingerprints.flatMap((fingerprint) => parsed.value.filter((vote) => vote.fingerprint === fingerprint).slice(0, 1)));
+  return success(brief.fingerprints.flatMap((fingerprint) => byFingerprint.get(fingerprint) ?? []));
 }
 
 /**
@@ -636,7 +640,8 @@ export function bindBallots(input: Readonly<{
   if (!profile.ok) return failure(`request ${authority.requestId} was minted under ${authority.modelProfile}, which is no catalog profile`);
   const profileProblem = catalogVerifierProfileProblem(profile.value);
   if (profileProblem !== null) return failure(`request ${authority.requestId} cannot cast a ballot: ${profileProblem}`);
-  if (!isSha256(input.captureDigest)) return failure("capture digest must be a sha256 digest");
+  const captureDigest = parseArtifactDigest(input.captureDigest);
+  if (!captureDigest.ok) return failure("capture digest must be a sha256 digest");
   const binding = {
     program: SECURITY_VERIFICATION_PROGRAM,
     runId: authority.runId,
@@ -645,7 +650,7 @@ export function bindBallots(input: Readonly<{
     attempt: authority.attempt,
     role: SECURITY_VERIFIER_ROLE,
     profile: profile.value,
-    captureDigest: input.captureDigest,
+    captureDigest: captureDigest.value,
   } as const;
   return success(input.votes.map((vote) => ({ ...vote, wave: input.wave, binding })));
 }
@@ -815,7 +820,7 @@ export function importVerificationResult(input: Readonly<{
       !canonicalStructuralEquals(result.audit, registration.input.audit) || result.wave !== registration.input.wave) {
     return failure(`result.json does not describe verification run ${registration.runId} as registered`);
   }
-  const authentic = authenticateAudit(registration.input.audit, input.audit);
+  const authentic = authenticateAudit(registration.input.audit, input.audit, "current");
   if (!authentic.ok) return authentic;
   const covered = coverageProblem(registration, result.ballots);
   if (covered !== null) return failure(covered);

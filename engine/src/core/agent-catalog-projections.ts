@@ -101,18 +101,18 @@ export function producerKindsOfAgent(agent: LoomAgentName): readonly PayloadProd
   if (entry.kind.kind === "reviewer" || entry.kind.kind === "review-verifier") {
     kinds.push(producerKind("reviewer-payload"));
   }
-  // Agents of catalog kind `security-verdict` (hunter, verifier, critic) emit
-  // payloads the audit program parses itself — `security-hunter-result`,
-  // `security-verification-result` and `security-coverage-critic` — not an
-  // emission-tool schema: D2 keeps the emission registry closed rather than
-  // adding a fourth producer kind. Answers [] here, like every other
-  // non-producer.
   if (entry.kind.kind === "review-verifier") {
     kinds.push(producerKind("refutation-verdict"));
   }
   if (entry.kind.kind === "arch-panel" && entry.profile === "panel-judge") {
     kinds.push(producerKind("judge-verdict"));
   }
+  // No branch for catalog kind `security-verdict` (hunter, verifier, critic):
+  // those Agents emit payloads the audit program parses itself —
+  // `security-hunter-result`, `security-verification-result` and
+  // `security-coverage-critic` — not an emission-tool schema. D2 keeps the
+  // emission registry closed rather than adding a fourth producer kind, so they
+  // answer [] like every other non-producer.
   return Object.freeze(kinds);
 }
 

@@ -1,8 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
 import {
   parseProjectConfig,
   projectRootOf,
@@ -14,8 +13,9 @@ import {
 import { createProgrammaticRules } from "../../../src/linter/programmatic";
 import { loadProjectConfig, loadRules } from "../../../src/linter/loader";
 import { isProgrammaticRule } from "../../../src/linter/types";
+import { LOOM_RULES_DIR, REPO_ROOT } from "../loom-project-config";
 
-const LOOM_DEFAULT_RULES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "lint-rules");
+const LOOM_DEFAULT_RULES = join(REPO_ROOT, "lint-rules");
 
 function makeTempDir(): string {
   return mkdtempSync(join(tmpdir(), "lint-config-"));
@@ -167,6 +167,16 @@ describe("programmatic config loader", () => {
       .toMatchObject({ ok: false, error: expect.stringContaining("'extra'") });
   });
 
+  it("holds exactly the keys the document carries — an absent key is absent, never present as undefined", () => {
+    const parsed = parseProjectConfig({ maxFunctionLines: 40, boundaries: [{ module: "src/a/", allow: [], deny: [] }] }, "config.json");
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(Object.keys(parsed.value)).toEqual(["boundaries", "maxFunctionLines"]);
+    expect(Object.keys(parsed.value.boundaries?.[0] ?? {})).toEqual(["module", "allow", "deny"]);
+    expect(Object.keys(parseProjectConfig({}, "config.json"))).toEqual(["ok", "value"]);
+    expect(parseProjectConfig({}, "config.json")).toStrictEqual({ ok: true, value: {} });
+  });
+
   it("names every known key in the refusal, and accepts each of them", () => {
     const result = parseProjectConfig({ bogus: 1 }, "config.json");
     expect(result.ok).toBe(false);
@@ -236,8 +246,7 @@ describe("scoping config: exclusions, purity roots and shells, governance", () =
   });
 
   it("Loom's own config parses under the strict loader", () => {
-    const repo = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
-    const config = loadProjectConfig(join(repo, ".claude/linter/rules"));
+    const config = loadProjectConfig(LOOM_RULES_DIR);
     expect(config.requireGovernance).toEqual(["engine/src/"]);
     expect(config.exclude?.length).toBeGreaterThan(0);
   });
@@ -352,6 +361,19 @@ describe("totality config: scope, baselines and the project root they are writte
     });
   });
 
+  it.each([
+    ["no separator", "src/domain/order.ts"],
+    ["no path", "::x.kind"],
+    ["no key", "src/domain/order.ts::"],
+  ])("refuses a baseline entry with %s — it could never match a site, and has no path to read back", (_shape, entry) => {
+    for (const key of ["switchTotalityBaseline", "discriminantBranchingBaseline"]) {
+      expect(parseProjectConfig({ [key]: ["src/a.ts::ok", entry] }, "config.json")).toEqual({
+        ok: false,
+        error: `config.json: ${key}[1] '${entry}' must be 'path::key' — a project-relative path, '::', then what the rule branched on`,
+      });
+    }
+  });
+
   it("refuses an EMPTY switch scope — it would silently match nothing", () => {
     const { rulesDir } = project({ switchTotalityModules: [] });
     expect(() => loadProjectConfig(rulesDir)).toThrow("'switchTotalityModules' must not be empty");
@@ -360,8 +382,11 @@ describe("totality config: scope, baselines and the project root they are writte
   it.each([
     [".claude/linter/rules"],
     [".pi/linter/rules"],
-  ])("finds the project root above a %s directory, and none above an unknown layout", (layout) => {
+  ])("finds the project root above a %s directory", (layout) => {
     expect(projectRootOf(`/work/shop/${layout}`)).toBe("/work/shop");
+  });
+
+  it("finds no project root above an unknown layout, or with no rules directory", () => {
     expect(projectRootOf("/work/shop/lint")).toBeNull();
     expect(projectRootOf(null)).toBeNull();
   });

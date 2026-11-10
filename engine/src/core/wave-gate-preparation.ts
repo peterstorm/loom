@@ -24,6 +24,7 @@ import {
   type ContextDigest,
   type DomainResult,
   type NonEmpty,
+  allOk,
   mapNonEmpty,
   nonEmpty,
   type OrchestrationRunId,
@@ -161,10 +162,13 @@ export function deriveWaveAdvisoryDecisionRequest(
       bytes: Object.freeze([...new TextEncoder().encode(JSON.stringify({ taskId: task.id, claim }))]),
     }));
   });
-  if (canonicalAdvisories.length === 0) return preparationFailure("no canonical advisories require user triage");
+  const triaged = nonEmpty(canonicalAdvisories);
+  if (triaged === null) return preparationFailure("no canonical advisories require user triage");
 
-  const advisories: WaveAdvisoryArtifactMaterial[] = [];
-  for (const { identity, bytes } of canonicalAdvisories) {
+  // One artifact per canonical advisory, so the non-empty triage list proves
+  // the material list non-empty; the first advisory that cannot be referenced
+  // refuses the request.
+  const built = allOk(mapNonEmpty(triaged, ({ identity, bytes }): DomainResult<WaveAdvisoryArtifactMaterial, WavePreparationError> => {
     const byteLength = parseArtifactByteLength(bytes.length);
     const digest = parseArtifactDigest(sha256Bytes(Uint8Array.from(bytes)));
     if (!byteLength.ok) return preparationFailure(byteLength.error.message);
@@ -179,8 +183,10 @@ export function deriveWaveAdvisoryDecisionRequest(
       byteLength: byteLength.value,
     });
     if (!reference.ok) return preparationFailure(reference.error.message);
-    advisories.push(canonicalRecord({ reference: reference.value, bytes }));
-  }
+    return canonicalRecord({ ok: true, value: canonicalRecord({ reference: reference.value, bytes }) });
+  }));
+  if (!built.ok) return canonicalRecord({ ok: false, error: built.error[0] });
+  const advisories = built.value;
 
   const contextBytes = Object.freeze([...new TextEncoder().encode(JSON.stringify(canonicalRecord({
     schemaVersion: 1,
@@ -192,8 +198,6 @@ export function deriveWaveAdvisoryDecisionRequest(
   if (!contextDigest.ok) return preparationFailure(contextDigest.error.message);
   const requestId = parseRequestId(`advisory-decision:${contextDigest.value.slice(0, 32)}`);
   if (!requestId.ok) return preparationFailure(requestId.error.message);
-  const advisoryMaterial = nonEmpty(advisories);
-  if (advisoryMaterial === null) return preparationFailure("no canonical advisories require user triage");
   const material = canonicalRecord({
     requestId: requestId.value,
     decisionDigest: contextDigest.value,
@@ -202,7 +206,7 @@ export function deriveWaveAdvisoryDecisionRequest(
       slot: canonicalRecord({ kind: "fixed-artifact-slot" as const, path: `contexts/${contextDigest.value}.json` }),
       bytes: contextBytes,
     }),
-    advisories: advisoryMaterial,
+    advisories,
   });
   waveAdvisoryDecisionMaterialProofs.add(material);
   return canonicalRecord({ ok: true, value: material });

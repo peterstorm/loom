@@ -24,9 +24,31 @@
  * linter ships no list keyed to one repository's tree.
  */
 
-export type Baseline = readonly string[];
+/**
+ * One baseline entry: the site's project-relative path, `::`, then what the
+ * rule branched on. The shape is a type, so a key built by `baselineKey` or
+ * accepted by `parseBaselineKey` always has a path to read back — an entry
+ * without `::` is refused when the config is parsed, never sliced into a
+ * wrong path later.
+ */
+export type BaselineKey = `${string}::${string}`;
 
-const isAbsolutePath = (path: string): boolean => path.startsWith("/") || /^[A-Za-z]:\//.test(path);
+export type Baseline = readonly BaselineKey[];
+
+const KEY_SEPARATOR = "::";
+
+/** A config entry as a baseline key, or null when it is not `path::key` with both sides non-empty. */
+export function parseBaselineKey(entry: string): BaselineKey | null {
+  const separator = entry.indexOf(KEY_SEPARATOR);
+  if (separator <= 0 || separator + KEY_SEPARATOR.length >= entry.length) return null;
+  return entry as BaselineKey;
+}
+
+/** The project-relative path a baseline key excuses a site in. */
+export const baselineKeyPath = (key: BaselineKey): string => key.slice(0, key.indexOf(KEY_SEPARATOR));
+
+/** A path rooted at `/` or at a Windows drive (`C:/`), forward-slashed. */
+export const isAbsolutePath = (path: string): boolean => path.startsWith("/") || /^[A-Za-z]:\//.test(path);
 
 /**
  * Normalize a lint target to the project-relative form baseline keys and module
@@ -53,21 +75,21 @@ export const projectRelative = (filePath: string, projectRoot: string | null): s
 /** The key form every rule uses: the site's repo-relative path, then the thing
  *  the rule branched on (`x.kind`, `event.status`), so a second branch on the
  *  same tag in the same file is its own entry. */
-export const baselineKey = (filePath: string, key: string): string =>
-  `${filePath.replace(/\\/g, "/")}::${key}`;
+export const baselineKey = (filePath: string, key: string): BaselineKey =>
+  `${filePath.replace(/\\/g, "/")}${KEY_SEPARATOR}${key}`;
 
 export interface BaselineCounter {
   /** Spend one entry for `key`; false when the baseline has none left. */
-  readonly consume: (key: string) => boolean;
+  readonly consume: (key: BaselineKey) => boolean;
   /** Entries no detected site consumed. */
-  readonly unused: (detected: readonly string[]) => readonly string[];
+  readonly unused: (detected: readonly BaselineKey[]) => readonly BaselineKey[];
 }
 
 export function baselineCounter(baseline: Baseline = []): BaselineCounter {
-  const remaining = new Map<string, number>();
+  const remaining = new Map<BaselineKey, number>();
   for (const key of baseline) remaining.set(key, (remaining.get(key) ?? 0) + 1);
 
-  const spendFrom = (counts: Map<string, number>, key: string): boolean => {
+  const spendFrom = (counts: Map<BaselineKey, number>, key: BaselineKey): boolean => {
     const left = counts.get(key) ?? 0;
     if (left === 0) return false;
     counts.set(key, left - 1);
@@ -86,9 +108,22 @@ export function baselineCounter(baseline: Baseline = []): BaselineCounter {
   };
 }
 
-/** Stateless convenience for callers that only ask the staleness question. */
-export function unusedBaselineEntries(detected: readonly string[], baseline: Baseline = []): readonly string[] {
+/**
+ * The two lists a baseline is compared against: the sites a rule detects, and
+ * the entries that excuse them. Both are key lists of one type, so they are
+ * passed by name — a positional swap would compile and flip the difference.
+ */
+export type BaselineComparison = Readonly<{ detected: readonly BaselineKey[]; baseline: Baseline }>;
+
+/** The baseline entries no detected site consumes — the stale debt. */
+export function unusedBaselineEntries({ detected, baseline }: BaselineComparison): readonly BaselineKey[] {
   return baselineCounter(baseline).unused(detected);
+}
+
+/** The detected sites no baseline entry excuses — what the rule reports. */
+export function unbaselinedSites({ detected, baseline }: BaselineComparison): readonly BaselineKey[] {
+  const entries = baselineCounter(baseline);
+  return detected.filter((key) => !entries.consume(key));
 }
 
 /** The `config.json` field each baselined rule keeps its list in. */
@@ -110,7 +145,7 @@ export type BaselineOwner = Readonly<{
   baseline: Baseline;
   /** What one entry excuses, in the rule's own words (`unproven switch`). */
   site: string;
-  detect: (content: string, filePath: string) => readonly string[];
+  detect: (content: string, filePath: string) => readonly BaselineKey[];
 }>;
 
 /**
@@ -123,11 +158,11 @@ export type BaselineOwner = Readonly<{
 export function staleBaselineEntries(
   owner: BaselineOwner,
   readSource: (repoRelativePath: string) => string | null,
-): readonly string[] {
-  const paths = [...new Set(owner.baseline.map((key) => key.slice(0, key.indexOf("::"))))];
+): readonly BaselineKey[] {
+  const paths = [...new Set(owner.baseline.map(baselineKeyPath))];
   const detected = paths.flatMap((path) => {
     const content = readSource(path);
     return content === null ? [] : owner.detect(content, path);
   });
-  return unusedBaselineEntries(detected, owner.baseline);
+  return unusedBaselineEntries({ detected, baseline: owner.baseline });
 }

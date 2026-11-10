@@ -38,7 +38,6 @@ import {
   openDirectoryNoFollow,
   publishDirectoryFileExclusiveNoFollow,
   readDirectoryFileNoFollow,
-  removeDirectoryFileNoFollow,
   resolveBaseDirectory,
   type AnchoredDirectory,
 } from "../utils/no-follow-fs";
@@ -53,8 +52,6 @@ const CLAIM_LEFTOVER = /^[0-9a-f]{64}\.json\.claim-[A-Za-z0-9.-]+$/;
 
 /** Is `name` an entry name (`<64 hex>.json`)? */
 export const isEntryName = (name: string): boolean => ENTRY_NAME.test(name);
-
-export const describeStoreError = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 function withAnchored<T>(directory: AnchoredDirectory, use: (directory: AnchoredDirectory) => T): T {
   try {
@@ -132,6 +129,3 @@ export function readEntryIfPresent(directory: AnchoredDirectory, name: string): 
  *  `isEntryName`. */
 export const listEntryNames = (directory: AnchoredDirectory, maximumNames: number): readonly string[] =>
   listDirectoryNamesNoFollow(directory, maximumNames).filter((name) => !CLAIM_LEFTOVER.test(name));
-
-/** Remove one entry; an entry already gone is success. */
-export const removeEntry = (directory: AnchoredDirectory, name: string): void => removeDirectoryFileNoFollow(directory, name);

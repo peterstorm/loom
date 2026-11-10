@@ -26,9 +26,29 @@
 import { match } from "ts-pattern";
 import { compareStrings } from "./ordering";
 import { catalogProfileOfAgent, parseLlmProfileId, type LlmProfileId } from "./model-profiles";
-import { failure, isNonEmpty, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type DomainResult } from "./orchestration-contract/identity";
+import {
+  failure,
+  isNonEmpty,
+  parseArtifactDigest,
+  parseOrchestrationRunId,
+  parseRequestId,
+  parseSlotId,
+  success,
+  type ArtifactDigest,
+  type DomainResult,
+  type OrchestrationRunId,
+  type RequestId,
+  type SlotId,
+} from "./orchestration-contract/identity";
 import { SECURITY_VERIFICATION_PROGRAM } from "./orchestration-contract/programs";
-import { isSecurityFingerprint, isVisibleText, isWireRecord, unknownFieldViolations, type WireViolation } from "./security-audit-contract";
+import {
+  isPositiveInteger,
+  isSecurityFingerprint,
+  isVisibleText,
+  isWireRecord,
+  unknownFieldViolations,
+  type WireViolation,
+} from "./security-audit-contract";
 import { catalogAgentOfOwner, coverageSettled, type CoverageLedger } from "./security-coverage";
 import {
   sortByFingerprint,
@@ -60,9 +80,9 @@ declare const missingFactBrand: unique symbol;
 export type MissingFact = string & Readonly<{ [missingFactBrand]: true }>;
 
 /** The vote grammar's one rule for a missing fact: visible prose. A blank
- *  string is refused by `voteViolations` (it is not "no missing fact" — that is
+ *  string is refused by `parseVote` (it is not "no missing fact" — that is
  *  `null`), so nothing downstream normalizes it. */
-export const isMissingFact = (value: unknown): value is MissingFact => isVisibleText(value);
+const isMissingFact = (value: unknown): value is MissingFact => isVisibleText(value);
 
 /**
  * Where a ballot came from, taken from AUTHORITY only (ADR-0067 D3): the
@@ -75,21 +95,21 @@ export type BallotBinding = Readonly<{
    *  (owned by the orchestration contract's program vocabulary). */
   program: typeof SECURITY_VERIFICATION_PROGRAM;
   /** The verification run that issued the request. */
-  runId: string;
-  requestId: string;
-  slotId: string;
+  runId: OrchestrationRunId;
+  requestId: RequestId;
+  slotId: SlotId;
   attempt: 1 | 2;
   role: typeof SECURITY_VERIFIER_ROLE;
   /** The catalog profile the request was MINTED under. */
   profile: LlmProfileId;
   /** SHA-256 of the captured transcript bytes the verdict was admitted from
    *  (the capture receipt's digest). */
-  captureDigest: string;
+  captureDigest: ArtifactDigest;
 }>;
 
-/** One verifier's ballot about one fingerprint, bound to the spawn that cast it.
- *  `agent` and `profile` are read from `binding`, never from a payload. */
-export type VerificationVerdict = Readonly<{
+/** The four fields a verifier itself decides about one fingerprint — no agent,
+ *  profile or wave. Only `parseVote` produces one from the wire. */
+export type VerifierVote = Readonly<{
   fingerprint: string;
   /** loom's refutation ballot: `critical` = the claim blocks; `advisory` = it
    *  does not survive as a confirmed finding. */
@@ -97,6 +117,11 @@ export type VerificationVerdict = Readonly<{
   reason: string;
   /** The one fact absent when the vote is advisory for lack of proof. */
   missingFact: MissingFact | null;
+}>;
+
+/** One verifier's ballot about one fingerprint, bound to the spawn that cast it.
+ *  `agent` and `profile` are read from `binding`, never from a payload. */
+export type VerificationVerdict = VerifierVote & Readonly<{
   /** The audit wave the verification run was issued for. */
   wave: number;
   binding: BallotBinding;
@@ -351,51 +376,46 @@ export function parseVerificationVerdicts(raw: unknown): DomainResult<readonly V
  *  entry, so one bad ballot never hides behind another's). */
 function parseVerdict(entry: unknown, base: string): DomainResult<VerificationVerdict, readonly VerdictViolation[]> {
   if (!isWireRecord(entry)) return failure([{ path: base, message: "expected an object" }]);
-  const local = [...unknownFieldViolations(entry, VERDICT_KEYS, base), ...voteViolations(entry, base)];
-  if (typeof entry.wave !== "number" || !Number.isInteger(entry.wave) || entry.wave < 1) {
-    local.push({ path: `${base}.wave`, message: "expected a positive integer" });
-  }
+  const local = unknownFieldViolations(entry, VERDICT_KEYS, base);
+  const vote = parseVote(entry, base);
+  if (!vote.ok) local.push(...vote.error);
+  const wave = isPositiveInteger(entry.wave) ? entry.wave : null;
+  if (wave === null) local.push({ path: `${base}.wave`, message: "expected a positive integer" });
   const binding = parseBallotBinding(entry.binding, `${base}.binding`);
   if (!binding.ok) return failure([...local, ...binding.error]);
-  if (local.length > 0) return failure(local);
-  return success({
-    fingerprint: String(entry.fingerprint),
-    vote: entry.vote === "critical" ? "critical" : "advisory",
-    reason: String(entry.reason),
-    missingFact: admittedMissingFact(entry.missingFact),
-    wave: Number(entry.wave),
-    binding: binding.value,
-  });
+  if (local.length > 0 || !vote.ok || wave === null) return failure(local);
+  return success({ ...vote.value, wave, binding: binding.value });
 }
-
-/** The missing fact of a vote `voteViolations` already admitted: `null`, or
- *  visible prose (a blank string is a violation there, never "no fact"). Shared
- *  with the verifier result wire so both read the field one way. */
-export const admittedMissingFact = (value: unknown): MissingFact | null => (isMissingFact(value) ? value : null);
 
 /**
  * The four fields a verifier itself decides — fingerprint, vote, reason and
- * missing fact — checked at `base`. Shared by the persisted ballot and the
- * verifier's own result wire (`core/security-verification`), so the two cannot
- * disagree about what a well-formed vote is.
+ * missing fact — parsed at `base` into a typed vote, or every violation they
+ * carry. Shared by the persisted ballot and the verifier's own result wire
+ * (`core/security-verification`), so the two cannot disagree about what a
+ * well-formed vote is, and neither re-reads a field the parse already proved.
  *
  * `missingFact` is load-bearing: an `advisory` vote WITH one demotes the claim
- * to a lead, WITHOUT one it is rejected.
+ * to a lead, WITHOUT one it is rejected. A blank string is a violation, never
+ * "no fact" (that is `null`).
  */
-export function voteViolations(record: Readonly<Record<string, unknown>>, base: string): VerdictViolation[] {
+export function parseVote(record: Readonly<Record<string, unknown>>, base: string): DomainResult<VerifierVote, readonly VerdictViolation[]> {
   const local: VerdictViolation[] = [];
-  if (!isSecurityFingerprint(record.fingerprint)) local.push({ path: `${base}.fingerprint`, message: "invalid fingerprint" });
-  if (record.vote !== "critical" && record.vote !== "advisory") {
-    local.push({ path: `${base}.vote`, message: "expected critical or advisory" });
-  }
-  if (!isVisibleText(record.reason)) local.push({ path: `${base}.reason`, message: "requires visible prose" });
-  if (record.missingFact !== null && !isMissingFact(record.missingFact)) {
-    local.push({ path: `${base}.missingFact`, message: "expected null or visible prose" });
-  }
-  return local;
+  const refuse = (field: string, message: string): null => {
+    local.push({ path: `${base}.${field}`, message });
+    return null;
+  };
+  const fingerprint = isSecurityFingerprint(record.fingerprint) ? record.fingerprint : refuse("fingerprint", "invalid fingerprint");
+  const vote = record.vote === "critical" || record.vote === "advisory" ? record.vote : refuse("vote", "expected critical or advisory");
+  const reason = isVisibleText(record.reason) ? record.reason : refuse("reason", "requires visible prose");
+  const missingFact = parseMissingFact(record.missingFact);
+  if (!missingFact.ok) refuse("missingFact", missingFact.error);
+  return fingerprint === null || vote === null || reason === null || !missingFact.ok
+    ? failure(local)
+    : success({ fingerprint, vote, reason, missingFact: missingFact.value });
 }
 
-const SHA256_HEX = /^[0-9a-f]{64}$/;
+const parseMissingFact = (value: unknown): DomainResult<MissingFact | null, string> =>
+  value === null || isMissingFact(value) ? success(value) : failure("expected null or visible prose");
 
 /** A ballot's binding: every identity in its grammar, the program and role the
  *  closed verification vocabulary, the profile the one the catalog assigns the
@@ -411,6 +431,7 @@ export function parseBallotBinding(raw: unknown, base: string): DomainResult<Bal
   const requestId = parseRequestId(raw.requestId);
   const slotId = parseSlotId(raw.slotId);
   const profile = parseLlmProfileId(raw.profile);
+  const captureDigest = parseArtifactDigest(raw.captureDigest);
   if (raw.program !== SECURITY_VERIFICATION_PROGRAM) local.push({ path: `${base}.program`, message: `expected ${SECURITY_VERIFICATION_PROGRAM}` });
   if (!runId.ok) local.push({ path: `${base}.runId`, message: runId.error.message });
   if (!requestId.ok) local.push({ path: `${base}.requestId`, message: requestId.error.message });
@@ -422,18 +443,20 @@ export function parseBallotBinding(raw: unknown, base: string): DomainResult<Bal
     const problem = catalogVerifierProfileProblem(profile.value);
     if (problem !== null) local.push({ path: `${base}.profile`, message: problem });
   }
-  if (typeof raw.captureDigest !== "string" || !SHA256_HEX.test(raw.captureDigest)) {
-    local.push({ path: `${base}.captureDigest`, message: "expected a sha256 capture digest" });
+  if (!captureDigest.ok) local.push({ path: `${base}.captureDigest`, message: "expected a sha256 capture digest" });
+  const attempt = raw.attempt;
+  if (local.length > 0 || !runId.ok || !requestId.ok || !slotId.ok || !profile.ok || !captureDigest.ok ||
+      (attempt !== 1 && attempt !== 2)) {
+    return failure(local);
   }
-  if (local.length > 0 || !runId.ok || !requestId.ok || !slotId.ok || !profile.ok) return failure(local);
   return success({
     program: SECURITY_VERIFICATION_PROGRAM,
     runId: runId.value,
     requestId: requestId.value,
     slotId: slotId.value,
-    attempt: raw.attempt === 2 ? 2 : 1,
+    attempt,
     role: SECURITY_VERIFIER_ROLE,
     profile: profile.value,
-    captureDigest: String(raw.captureDigest),
+    captureDigest: captureDigest.value,
   });
 }

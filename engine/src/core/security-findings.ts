@@ -27,10 +27,12 @@ import { compareStrings } from "./ordering";
 import { failure, success, type DomainResult, type NonEmpty } from "./orchestration-contract/identity";
 import {
   SECURITY_AUDIT_LIMITS,
+  deepFrozenCopy,
   hasVisibleProse,
   isSafeSourcePath,
   isSecurityFingerprint,
   isOneOf,
+  isPositiveInteger,
   isWireRecord,
   wireViolation,
   type WireViolation,
@@ -165,9 +167,6 @@ function canonicalKey(value: unknown): string {
 /** Upstream's `visibleContent`: at least one character a reader can see. */
 const isVisible = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && hasVisibleProse(value);
-
-const isPositiveInteger = (value: unknown): value is number =>
-  typeof value === "number" && Number.isInteger(value) && value >= 1;
 
 
 function checkKeys(
@@ -412,6 +411,12 @@ const VERDICT_KEYS: Readonly<Record<SecurityFinding["verdict"], readonly string[
   rejected: ["verdict", "fingerprint", "title", "description", "claimed_root_cause", "trace", "evidence", "reason"],
 };
 
+/** Membership in the verdict vocabulary, read from `VERDICT_KEYS` — the one
+ *  owner of which verdicts exist, so a verdict cannot be added to the key table
+ *  and missed by the guard. */
+const isVerdict = (value: unknown): value is SecurityFinding["verdict"] =>
+  typeof value === "string" && Object.hasOwn(VERDICT_KEYS, value);
+
 /** Every key some verdict carries.
  *  A stray key found among them belongs to ANOTHER verdict — the more useful diagnostic. */
 const ANY_VERDICT_KEYS: ReadonlySet<string> = new Set(Object.values(VERDICT_KEYS).flat());
@@ -434,17 +439,6 @@ function checkVerdictKeys(
     if (allowed.includes(key)) continue;
     violations.push(wireViolation(`${path}.${key}`, ANY_VERDICT_KEYS.has(key) ? `${verdict} findings must not carry this field` : "unexpected property"));
   }
-}
-
-/** A deep, frozen copy of a validated JSON value. The parser returns THIS, never
- *  the caller's input: handing back `raw` meant a later mutation of the document
- *  the caller still holds silently rewrote the "parsed" findings. */
-function frozenCopy(value: unknown): unknown {
-  if (Array.isArray(value)) return Object.freeze(value.map(frozenCopy));
-  if (isWireRecord(value)) {
-    return Object.freeze(Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, frozenCopy(entry)])));
-  }
-  return value;
 }
 
 /**
@@ -474,8 +468,8 @@ export function parseSecurityFindings(raw: unknown): DomainResult<readonly Secur
       violations.push(wireViolation(path, "expected an object"));
       return;
     }
-    if (!isOneOf(["confirmed", "needs_validation", "rejected"] as const, entry.verdict)) {
-      violations.push(wireViolation(`${path}.verdict`, "expected confirmed, needs_validation or rejected"));
+    if (!isVerdict(entry.verdict)) {
+      violations.push(wireViolation(`${path}.verdict`, `expected one of ${Object.keys(VERDICT_KEYS).join(", ")}`));
       return;
     }
     checkVerdictKeys(entry, entry.verdict, path, violations);
@@ -502,7 +496,7 @@ export function parseSecurityFindings(raw: unknown): DomainResult<readonly Secur
   // Every key, field and ordering rule of the union was checked above, so the
   // copy IS a `SecurityFinding[]` — the validator is the proof the cast names.
   return violations.length === 0
-    ? success(frozenCopy(raw) as readonly SecurityFinding[])
+    ? success(deepFrozenCopy(raw) as readonly SecurityFinding[])
     : failure(invalid(violations));
 }
 
@@ -553,6 +547,15 @@ const causeKey = (finding: SecurityFinding): string | null => {
   return `${sink}\u0000${rootCause}`;
 };
 
+/** A filing consolidation dropped because another record describes the same
+ *  defect: the absorbed fingerprint and the fingerprint of the record that was
+ *  kept in its place. */
+export type Absorption = Readonly<{ fingerprint: string; keptAs: string }>;
+
+/** What consolidation keeps, and every filing it absorbed into a kept record —
+ *  so no caller can lose a claim without being able to say where it went. */
+export type Consolidation<T> = Readonly<{ kept: readonly T[]; absorbed: readonly Absorption[] }>;
+
 /** One root cause, one record — where "one root cause" is a fact, not a
  *  sentence. Fingerprints are the identity; the root-cause TEXT catches the case
  *  where two hunters described one defect from different entry points and earned
@@ -565,11 +568,15 @@ const causeKey = (finding: SecurityFinding): string | null => {
  *
  *  A `pinned` fingerprint is never merged away: it is a record the run already
  *  holds (and a verifier may already have balloted, a unit may already list), so
- *  a later filing of the same defect yields to it whatever its verdict or trace. */
+ *  a later filing of the same defect yields to it whatever its verdict or trace.
+ *
+ *  Every record merged away is reported in `absorbed` with the fingerprint that
+ *  was kept for its defect (followed to the FINAL keeper when a later record
+ *  displaced an earlier one), sorted by fingerprint. */
 export function consolidateCandidates<T extends SecurityFinding>(
   candidates: readonly T[],
   pinned: ReadonlySet<string> = new Set(),
-): readonly T[] {
+): Consolidation<T> {
   const byFingerprint = new Map<string, T>();
   for (const candidate of candidates) {
     if (!byFingerprint.has(candidate.fingerprint)) byFingerprint.set(candidate.fingerprint, candidate);
@@ -578,7 +585,8 @@ export function consolidateCandidates<T extends SecurityFinding>(
   // whatever else shares its cause (no sink, or pinned). A cause key carries a
   // NUL, which no fingerprint can, so the two key spaces never collide.
   const kept = new Map<string, T>();
-  const pinnedCauses = new Set<string>();
+  const pinnedKeeper = new Map<string, string>();
+  const absorbedInto = new Map<string, string>();
   for (const candidate of [...byFingerprint.values()].sort((left, right) => compareStrings(left.fingerprint, right.fingerprint))) {
     const cause = causeKey(candidate);
     if (cause === null) {
@@ -586,16 +594,36 @@ export function consolidateCandidates<T extends SecurityFinding>(
       continue;
     }
     if (pinned.has(candidate.fingerprint)) {
+      const displaced = kept.get(cause);
+      if (displaced !== undefined) absorbedInto.set(displaced.fingerprint, candidate.fingerprint);
       kept.delete(cause);
-      pinnedCauses.add(cause);
+      pinnedKeeper.set(cause, candidate.fingerprint);
       kept.set(candidate.fingerprint, candidate);
       continue;
     }
-    if (pinnedCauses.has(cause)) continue;
+    const keeper = pinnedKeeper.get(cause);
+    if (keeper !== undefined) {
+      absorbedInto.set(candidate.fingerprint, keeper);
+      continue;
+    }
     const existing = kept.get(cause);
-    if (existing === undefined || outranks(candidate, existing)) kept.set(cause, candidate);
+    if (existing === undefined) {
+      kept.set(cause, candidate);
+    } else if (outranks(candidate, existing)) {
+      absorbedInto.set(existing.fingerprint, candidate.fingerprint);
+      kept.set(cause, candidate);
+    } else {
+      absorbedInto.set(candidate.fingerprint, existing.fingerprint);
+    }
   }
-  return [...kept.values()].sort((left, right) => compareStrings(left.fingerprint, right.fingerprint));
+  const finalKeeper = (fingerprint: string): string => {
+    const next = absorbedInto.get(fingerprint);
+    return next === undefined ? fingerprint : finalKeeper(next);
+  };
+  return {
+    kept: [...kept.values()].sort((left, right) => compareStrings(left.fingerprint, right.fingerprint)),
+    absorbed: [...absorbedInto.keys()].sort(compareStrings).map((fingerprint) => ({ fingerprint, keptAs: finalKeeper(fingerprint) })),
+  };
 }
 
 // --- Filing ---
@@ -610,6 +638,11 @@ export type FindingConflict = Readonly<{
 }>;
 
 export type FilingRefusal = FindingConflict | FindingsError;
+
+/** The document a submit leaves the run holding, and every filed record that
+ *  consolidation absorbed into a record the run already held (or into another
+ *  filing) — reported, so a hunter learns its claim was absorbed, not recorded. */
+export type FilingOutcome = Readonly<{ findings: readonly SecurityFinding[]; absorbed: readonly Absorption[] }>;
 
 /**
  * Fold a hunter's filed records into the run's candidates, then consolidate.
@@ -629,12 +662,13 @@ export type FilingRefusal = FindingConflict | FindingsError;
  * records are PINNED in it: a fresh filing of the same defect (same sink, same
  * root cause) under a new fingerprint yields to the record the run already
  * holds, so the record verification adjudicates — and that a unit's
- * `result_fingerprints` may already list — is never displaced.
+ * `result_fingerprints` may already list — is never displaced. Each such
+ * filing comes back in `absorbed`, naming the record kept in its place.
  */
 export function fileCandidates(
   existing: readonly SecurityFinding[],
   filed: readonly SecurityFinding[],
-): DomainResult<readonly SecurityFinding[], FilingRefusal> {
+): DomainResult<FilingOutcome, FilingRefusal> {
   const held = new Map(existing.map((finding) => [finding.fingerprint, canonicalKey(finding)]));
   const conflicts = filed
     .filter((finding) => {
@@ -652,7 +686,9 @@ export function fileCandidates(
     });
   }
   const fresh = filed.filter((finding) => !held.has(finding.fingerprint));
-  return parseSecurityFindings(consolidateCandidates(sortByFingerprint([...existing, ...fresh]), new Set(held.keys())));
+  const consolidated = consolidateCandidates(sortByFingerprint([...existing, ...fresh]), new Set(held.keys()));
+  const findings = parseSecurityFindings(consolidated.kept);
+  return findings.ok ? success({ findings: findings.value, absorbed: consolidated.absorbed }) : findings;
 }
 
 /** The adjudication ballot: loom's two levels, with the five-level ladder kept

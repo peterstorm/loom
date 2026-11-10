@@ -48,7 +48,7 @@
 import type { Violation } from "../types";
 import { makeViolation } from "../types";
 import { isTestFile } from "./config";
-import { baselineCounter, baselineKey, projectRelative, type Baseline } from "./baseline";
+import { baselineCounter, baselineKey, projectRelative, type Baseline, type BaselineKey } from "./baseline";
 
 export const RULE_NAME = "switch-totality";
 
@@ -304,7 +304,7 @@ type UnprovenSwitch = Readonly<{
   scrutinee: string;
   arms: number;
   /** `path::scrutinee`, the form a baseline entry is written in. */
-  key: string;
+  key: BaselineKey;
 }>;
 
 /**
@@ -369,6 +369,6 @@ export function detectedSwitchKeys(
   content: string,
   filePath: string,
   options: SwitchTotalityOptions = DEFAULT_SWITCH_TOTALITY_OPTIONS,
-): readonly string[] {
+): readonly BaselineKey[] {
   return unprovenSwitches(content, filePath, options).map((site) => site.key);
 }

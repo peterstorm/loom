@@ -61,9 +61,9 @@ import { parseStandaloneReviewerProtocolV3 } from "../core/standalone-lineage-co
 import { verifyStandalonePanelView } from "./standalone-panel-context";
 import { routedChildLaunchRoute } from "../utils/child-launch-route";
 import { openRegisteredRunDirectory, type RunDirHandle } from "./run-directory-handle";
-import { captureAttestationOf } from "../core/capture-attestation";
+import { captureAttestationOf, renderCaptureAttestation, type CaptureAttestation } from "../core/capture-attestation";
 import { SECURITY_VERIFICATION_PROGRAM } from "../core/orchestration-contract/programs";
-import { canonicalAttestedRunDirectory, recordCaptureAttestation } from "./capture-attestation-store";
+import { canonicalAttestedRunDirectory, captureAttestationLookup, recordCaptureAttestation } from "./capture-attestation-store";
 import { CONTEXT_PACKET_MAX_BYTES } from "./stored-context-packets";
 import { recordReadCoverageObservation, registeredReadCoverage } from "./standalone-read-coverage-evidence";
 
@@ -142,6 +142,18 @@ export const captureCandidates = (candidates: readonly FinalPayloadCandidate[]):
 
 const retriableFailure = (reason: string, message: string): CaptureOutcome =>
   Object.freeze({ kind: "retriable-failure", reason, message });
+
+/**
+ * One write-ahead step's verdict: proceed (`ok`), or stop the capture with the
+ * outcome to report (`error`). Explicit rather than `CaptureOutcome | null`, so
+ * "proceed" is a value of its own and a future non-failure outcome can never be
+ * mistaken for a stop.
+ */
+type WriteAheadResult = DomainResult<void, CaptureOutcome>;
+
+const PROCEED: WriteAheadResult = Object.freeze({ ok: true as const, value: undefined });
+
+const stopWith = (outcome: CaptureOutcome): WriteAheadResult => Object.freeze({ ok: false as const, error: outcome });
 
 // ---------------------------------------------------------------------------
 // Issued reviewer emission authority at the capture seam (AD-7/AD-8, T7)
@@ -587,9 +599,8 @@ type CapturePersistence = Readonly<{
   /** The already-captured set `bindCapture` refuses duplicates against. */
   duplicateGuard: (captured: ReadonlySet<CaptureKey>) => ReadonlySet<CaptureKey>;
   /** Every pre-write CHECK this purpose owns (context binding, durable-receipt
-   *  state). It publishes nothing. A returned outcome stops the capture; null
-   *  proceeds. */
-  admit: (handle: RunDirHandle, request: AgentRequestAuthority) => Promise<CaptureOutcome | null>;
+   *  state). It publishes nothing. */
+  admit: (handle: RunDirHandle, request: AgentRequestAuthority) => Promise<WriteAheadResult>;
   /** The purpose's durable write of the accepted bytes. */
   write: (
     handle: RunDirHandle,
@@ -602,25 +613,25 @@ type CapturePersistence = Readonly<{
 
 /** The context-binding refusal both purposes share: the packet the request
  *  names must describe that exact request and role. */
-const contextBindingRefusal = (
+async function contextBinding(
   handle: RunDirHandle,
   request: AgentRequestAuthority,
   context: Readonly<{ requestId: string; role: string }>,
-): Promise<CaptureOutcome> | null =>
-  context.requestId === request.requestId && context.role === request.role
-    ? null
-    : terminalizeCaptureRejection(handle, request, terminalCaptureRefusal(
-        "context-binding",
-        `context ${request.contextDigest} does not describe request ${request.requestId}/${request.role}`,
-      ));
+): Promise<WriteAheadResult> {
+  if (context.requestId === request.requestId && context.role === request.role) return PROCEED;
+  return stopWith(await terminalizeCaptureRejection(handle, request, terminalCaptureRefusal(
+    "context-binding",
+    `context ${request.contextDigest} does not describe request ${request.requestId}/${request.role}`,
+  )));
+}
 
 const LEGACY_CAPTURE: CapturePersistence = Object.freeze<CapturePersistence>({
   refuseCandidates: () => null,
   duplicateGuard: (captured) => captured,
   admit: async (handle, request) => {
     const context = handle.readContext(request.contextDigest);
-    if (!context.ok) return retriableFailure("context", context.error.message);
-    return contextBindingRefusal(handle, request, context.value);
+    if (!context.ok) return stopWith(retriableFailure("context", context.error.message));
+    return contextBinding(handle, request, context.value);
   },
   write: async (handle, request, receipt, payload) => {
     const written = await handle.captureTranscript(request, payload.bytes);
@@ -649,25 +660,25 @@ const STANDALONE_SUCCESSOR_CAPTURE: CapturePersistence = Object.freeze<CapturePe
     const context = request.program === "standalone-review"
       ? handle.readStandaloneSuccessorContext(request.contextDigest, CONTEXT_PACKET_MAX_BYTES)
       : handle.readContext(request.contextDigest);
-    if (!context.ok) return retriableFailure("context", context.error.message);
-    const unbound = contextBindingRefusal(handle, request, context.value);
-    if (unbound !== null) return unbound;
+    if (!context.ok) return stopWith(retriableFailure("context", context.error.message));
+    const bound = await contextBinding(handle, request, context.value);
+    if (!bound.ok) return bound;
     if (request.program === "refutation-panel") {
-      if (context.value.schemaVersion === 3) return retriableFailure("context", "refutation uses its own explicit packet contract");
+      if (context.value.schemaVersion === 3) return stopWith(retriableFailure("context", "refutation uses its own explicit packet contract"));
       const view = verifyStandalonePanelView(handle, context.value);
-      if (!view.ok) return retriableFailure("context", view.error);
+      if (!view.ok) return stopWith(retriableFailure("context", view.error));
     }
     const effect = nativeCaptureEffect(request);
-    if (!effect.ok) return retriableFailure("receipt", effect.error.message);
+    if (!effect.ok) return stopWith(retriableFailure("receipt", effect.error.message));
     const existing = handle.readReceipt(effect.value, 16_384);
-    if (!existing.ok) return retriableFailure("receipt", existing.error.message);
+    if (!existing.ok) return stopWith(retriableFailure("receipt", existing.error.message));
     // Any existing receipt (including a foreign/contradictory one) precludes repair.
     // Normal already-receipted duplicate delivery remains a refusal, not a new witness.
-    if (existing.value !== null) return { kind: "terminal-rejection", reason: "duplicate-capture", message: "native capture already has a durable receipt; duplicate delivery cannot replace it" };
+    if (existing.value !== null) return stopWith({ kind: "terminal-rejection", reason: "duplicate-capture", message: "native capture already has a durable receipt; duplicate delivery cannot replace it" });
     const rejected = handle.readCaptureRejection(request);
-    if (!rejected.ok) return retriableFailure("transcript", rejected.error.message);
-    if (rejected.value !== null) return { kind: "terminal-rejection", reason: "transcript", message: rejected.value };
-    return null;
+    if (!rejected.ok) return stopWith(retriableFailure("transcript", rejected.error.message));
+    if (rejected.value !== null) return stopWith({ kind: "terminal-rejection", reason: "transcript", message: rejected.value });
+    return PROCEED;
   },
   write: async (handle, request, receipt, payload, observation) => {
     const effect = nativeCaptureEffect(request);
@@ -688,13 +699,29 @@ const STANDALONE_SUCCESSOR_CAPTURE: CapturePersistence = Object.freeze<CapturePe
  * selects against. A schema-3 standalone-review registration (with the exact
  * frozen v3 protocol) is the native successor purpose; every other
  * registration is legacy. A reviewer-protocol projection failure is carried,
- * not raised: only the emission path reads it, as unavailable authority.
+ * not raised: only the emission path reads it, as unavailable authority. The
+ * capture-attestation step is resolved once from the request's program, so the
+ * shared pipeline runs whatever the plan supplies and names no program itself.
  */
 type RunCapturePlan = Readonly<{
   purpose: CapturePersistence;
   readCoverage: ReadCoveragePlan;
   reviewerProtocol: DomainResult<IssuedReviewerProtocol | null, string>;
+  attest: CaptureAttestationStep;
 }>;
+
+/**
+ * The capture-attestation write-ahead step (ADR-0067, amended): what a capture
+ * records in the protected attestation store before its bytes land in the
+ * run. A plan field, so the program that needs one supplies it and every other
+ * program supplies `NO_ATTESTATION`.
+ */
+type CaptureAttestationStep = (runDirectory: string, request: AgentRequestAuthority, receipt: CaptureReceipt) => WriteAheadResult;
+
+const NO_ATTESTATION: CaptureAttestationStep = () => PROCEED;
+
+const captureAttestationStep = (request: AgentRequestAuthority): CaptureAttestationStep =>
+  request.program === SECURITY_VERIFICATION_PROGRAM ? attestSecurityVerifierCapture : NO_ATTESTATION;
 
 /**
  * Whether, and from what, a capture records its read-coverage observation:
@@ -719,6 +746,7 @@ function readCoveragePlan(obligated: boolean, observeToolOutputs: (() => readonl
 
 function readRunCapturePlan(
   handle: RunDirHandle,
+  request: AgentRequestAuthority,
   observeToolOutputs: (() => readonly string[]) | undefined,
 ): DomainResult<RunCapturePlan, string> {
   const registration = handle.readProgramRegistration(16_777_216);
@@ -737,6 +765,7 @@ function readRunCapturePlan(
       purpose: successor ? STANDALONE_SUCCESSOR_CAPTURE : LEGACY_CAPTURE,
       readCoverage: readCoveragePlan(coverage.value !== null, observeToolOutputs),
       reviewerProtocol: projectRegisteredReviewerProtocol(raw),
+      attest: captureAttestationStep(request),
     }),
   };
 }
@@ -756,7 +785,7 @@ export async function captureHarnessResult(args: CaptureHarnessInput): Promise<C
   if (observation.kind === "terminal-refusal") {
     return terminalizeCaptureRejection(handle, request, observation);
   }
-  const plan = readRunCapturePlan(handle, args.observeToolOutputs);
+  const plan = readRunCapturePlan(handle, request, args.observeToolOutputs);
   if (!plan.ok) return retriableFailure("registration", plan.error);
   const refused = plan.value.purpose.refuseCandidates(observation.candidates);
   if (refused !== null) return reject(refused.reason, refused.message);
@@ -919,10 +948,15 @@ async function captureSelectedEmission(
  *    provenance is published (same posture as the native capture
  *    observation); the candidates-only arm publishes nothing and keeps today's
  *    byte-identical layout.
- * 4. WRITE — the purpose's durable write of the accepted bytes.
+ * 4. ATTEST — the plan's capture-attestation step (`plan.attest`, resolved
+ *    from the request's program; a no-op for every program but
+ *    security-verification).
+ * 5. WRITE — the purpose's durable write of the accepted bytes.
  *
- * A failed write-ahead step is retriable infrastructure, never a consumed
- * attempt and never silently-unrecorded evidence.
+ * A failed write-ahead step never consumes the attempt and never leaves
+ * evidence silently unrecorded. It is retriable infrastructure, except where
+ * the step names a permanent refusal (an admit check's terminal rejection, an
+ * attestation conflict) that no retry of these bytes can clear.
  */
 async function persistBoundCapture(
   handle: RunDirHandle,
@@ -933,44 +967,75 @@ async function persistBoundCapture(
   source: CaptureSource,
   observation: "fresh" | "recapture",
 ): Promise<CaptureOutcome> {
-  const stopped = await plan.purpose.admit(handle, request);
-  if (stopped !== null) return stopped;
-  const uncovered = await match(plan.readCoverage)
-    .with({ kind: "none" }, async () => null)
+  const admitted = await plan.purpose.admit(handle, request);
+  if (!admitted.ok) return admitted.error;
+  const covered = await match(plan.readCoverage)
+    .with({ kind: "none" }, async () => PROCEED)
     .with({ kind: "record-observed" }, ({ toolOutputs }) => recordReadCoverage(handle, request, toolOutputs))
     .with({ kind: "record-unobservable" }, () => recordReadCoverage(handle, request, () => null))
     .exhaustive();
-  if (uncovered !== null) return uncovered;
+  if (!covered.ok) return covered.error;
   if (source.kind === "selected") {
     const published = await publishCaptureSourceRecord(handle, request, receipt.harness, source.provenance, payload);
     if (!published.ok) return retriableFailure("capture-source", published.error);
   }
-  const attested = attestCapture(handle, request, receipt);
-  if (attested !== null) return attested;
+  const attested = plan.attest(handle.runDirectory, request, receipt);
+  if (!attested.ok) return attested.error;
   return plan.purpose.write(handle, request, receipt, payload, observation);
 }
 
 /**
- * The capture attestation write-ahead step (ADR-0067, amended): a security
- * verifier capture records, in the protected attestation store, that THIS
- * harness process captured exactly these bytes for exactly this request —
- * before the bytes land in the run. A ballot is authoritative only when its
- * capture digest matches this record, so a transcript written into the run by
- * anything else (a subagent's shell, a forged CLI write) is never ballotable.
- * Write-ahead, like the native capture observation: a failed transcript write
- * after it leaves an attestation for bytes the run does not hold, which proves
- * nothing and blocks nothing a matching re-capture needs. Every other program
- * records nothing here.
+ * The security verifier's capture attestation (ADR-0067, amended): record, in
+ * the protected attestation store, that THIS harness process captured exactly
+ * these bytes for exactly this request — before the bytes land in the run. A
+ * ballot is authoritative only when its capture digest matches this record, so
+ * a transcript written into the run by anything else (a subagent's shell, a
+ * forged CLI write) is never ballotable. Write-ahead, like the native capture
+ * observation: a failed transcript write after it leaves an attestation for
+ * bytes the run does not hold, which proves nothing and blocks nothing a
+ * matching re-capture needs.
+ *
+ * A refused record is classified by what the store holds
+ * (`attestationRefusal`): a different attestation already recorded for this
+ * request is a permanent conflict, every other refusal is retriable I/O.
  */
-function attestCapture(handle: RunDirHandle, request: AgentRequestAuthority, receipt: CaptureReceipt): CaptureOutcome | null {
-  if (request.program !== SECURITY_VERIFICATION_PROGRAM) return null;
-  const directory = canonicalAttestedRunDirectory(handle.runDirectory);
-  if (!directory.ok) return retriableFailure("capture-attestation", directory.error);
+export function attestSecurityVerifierCapture(
+  runDirectory: string,
+  request: AgentRequestAuthority,
+  receipt: CaptureReceipt,
+): WriteAheadResult {
+  const directory = canonicalAttestedRunDirectory(runDirectory);
+  if (!directory.ok) return stopWith(retriableFailure("capture-attestation", directory.error));
   const attestation = captureAttestationOf(request, receipt, directory.value);
-  if (attestation === null) return null;
-  if (!attestation.ok) return retriableFailure("capture-attestation", attestation.error);
+  if (attestation === null) return PROCEED;
+  if (!attestation.ok) return stopWith(retriableFailure("capture-attestation", attestation.error));
   const recorded = recordCaptureAttestation(attestation.value);
-  return recorded.ok ? null : retriableFailure("capture-attestation", recorded.error);
+  return recorded.ok ? PROCEED : stopWith(attestationRefusal(attestation.value, recorded.error));
+}
+
+/**
+ * Why an attestation could not be recorded, as the outcome to report. An
+ * attestation is never replaced, so when the store already holds a DIFFERENT
+ * one for this (run directory, request), these bytes can never be attested:
+ * the conflict is `terminal-rejection` (`capture-attestation-conflict`), naming
+ * both digests — a retry of the same bytes cannot clear it, and only a capture
+ * of exactly the attested bytes can complete the attempt. The reservation is
+ * NOT tombstoned, because that capture may still arrive. Anything else (the
+ * store unwritable or unreadable) is transient I/O and stays retriable.
+ */
+function attestationRefusal(attestation: CaptureAttestation, refusal: string): CaptureOutcome {
+  const held = captureAttestationLookup(attestation.runDirectory)(attestation.requestId);
+  if (held.kind !== "attested" || renderCaptureAttestation(held.attestation) === renderCaptureAttestation(attestation)) {
+    return retriableFailure("capture-attestation", refusal);
+  }
+  return Object.freeze({
+    kind: "terminal-rejection" as const,
+    reason: "capture-attestation-conflict",
+    message: `request ${attestation.requestId} of ${attestation.runDirectory} already holds a capture attestation for different bytes ` +
+      `(attested ${held.attestation.digest}, ${held.attestation.byteLength} bytes; this capture ${attestation.digest}, ` +
+      `${attestation.byteLength} bytes). An attestation is never replaced, so retrying these bytes cannot succeed; ` +
+      "only a capture of exactly the attested bytes can complete this attempt",
+  });
 }
 
 /**
@@ -979,17 +1044,16 @@ function attestCapture(handle: RunDirHandle, request: AgentRequestAuthority, rec
  * only then, so tool outputs are projected only for a request that owes them
  * (`null` records an unobservable attempt). Requests of other programs
  * (refutation verifiers) carry no read obligation and record nothing. A
- * failed record is the retriable outcome that stops the capture; otherwise
- * `null` proceeds.
+ * failed record is the retriable outcome that stops the capture.
  */
 async function recordReadCoverage(
   handle: RunDirHandle,
   request: AgentRequestAuthority,
   observe: () => readonly string[] | null,
-): Promise<CaptureOutcome | null> {
-  if (request.program !== "standalone-review") return null;
+): Promise<WriteAheadResult> {
+  if (request.program !== "standalone-review") return PROCEED;
   const recorded = await recordReadCoverageObservation(handle, request, observe());
-  return recorded.ok ? null : retriableFailure("read-coverage", recorded.error);
+  return recorded.ok ? PROCEED : stopWith(retriableFailure("read-coverage", recorded.error));
 }
 
 async function observeNativeCaptureArtifact(

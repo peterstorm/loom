@@ -12,7 +12,6 @@
 import { resolve } from "node:path";
 import type { AdmittedSpawnItem } from "../engine/src/core/spawn-admission";
 import { isRecord } from "../engine/src/core/plain-record";
-import { nonEmpty } from "../engine/src/core/orchestration-contract/identity";
 import { rosterAgentId } from "../engine/src/machine";
 import type { AgentId } from "../engine/src/machine/evidence";
 import {
@@ -68,6 +67,11 @@ const writeTarget = (input: Record<string, unknown>, path: string): PiWriteTarge
     : Object.freeze({ ok: false, error: `${path} must name one non-empty path, file_path, or filePath target` });
 };
 
+const editTarget = (edit: unknown, index: number): PiWriteTargetPathsResult =>
+  isRecord(edit)
+    ? writeTarget(edit, `write input.edits[${index}]`)
+    : Object.freeze({ ok: false, error: `write input.edits[${index}] must be a plain object` });
+
 /** Parse every target before a scoped write can proceed; no partial batch exists. */
 export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
   if (!isRecord(raw)) {
@@ -77,20 +81,18 @@ export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
   if (!Array.isArray(raw.edits) || raw.edits.length === 0) {
     return Object.freeze({ ok: false, error: "write input must contain a target or a non-empty edits array" });
   }
-  const paths: string[] = [];
-  for (const [index, edit] of raw.edits.entries()) {
-    if (!isRecord(edit)) {
-      return Object.freeze({ ok: false, error: `write input.edits[${index}] must be a plain object` });
-    }
-    const parsed = writeTarget(edit, `write input.edits[${index}]`);
+  // Head first: the first edit's target makes the list non-empty by type.
+  const [firstEdit, ...restEdits] = raw.edits;
+  const first = editTarget(firstEdit, 0);
+  if (!first.ok) return first;
+  const paths: [string, ...string[]] = [first.value[0]];
+  for (const [offset, edit] of restEdits.entries()) {
+    const parsed = editTarget(edit, offset + 1);
     if (!parsed.ok) return parsed;
     const target = parsed.value[0];
     if (!paths.includes(target)) paths.push(target);
   }
-  const targets = nonEmpty(paths);
-  return targets === null
-    ? Object.freeze({ ok: false, error: "write input must contain a target or a non-empty edits array" })
-    : Object.freeze({ ok: true, value: targets });
+  return Object.freeze({ ok: true, value: Object.freeze(paths) });
 }
 
 export function replacePiSpawnTask(raw: unknown, index: number, task: string): void {

@@ -182,11 +182,12 @@ the capture attestation the capturing harness wrote into the protected store
 (`core/capture-attestation.ts` decides; ADR-0067, amended). `verdicts.json` is a
 cache: `findings`, `status` and `publish` re-prove each cached ballot against its
 run and attestation before adjudication counts it (`admitCachedBallots`), so a
-hand-written ballot is a named publication blocker. Subagents are fenced off
-from every writing audit and orchestration operation, from hook entrypoints and
-nested harnesses, and from the run's authority files (`guard-subagent-authority`,
-defence in depth); on Pi the parent's import is also checked, before it runs,
-against the same persisted attestations `verify --from` proves.
+hand-written ballot is a named publication blocker. The deterministic core
+relies on one invariant of the subagent fence (`guard-subagent-authority`): it is
+defence in depth, never the proof — the persisted capture attestation is the one
+authority a ballot answers to, on both harnesses. The fence's contract and the
+Pi import gate are stated once, in
+[the subagent authority guard](security-audit.md#the-subagent-authority-guard).
 
 `publish` refuses on any blocker — an unverified confirmed claim, a same-profile
 ballot, an unsettled ledger — rather than publishing a smaller truth than the run

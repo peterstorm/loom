@@ -8,13 +8,7 @@
 import { describe, expect, it } from "vitest";
 import { READ_ONLY_STATE_COMMANDS } from "../../src/core/tool-vocabulary";
 import { hasReadOnlyHead } from "../../src/core/shell-command-head";
-import { guardStateFileDecision } from "../../src/core/guard-state-file";
-import { guardedLocations } from "../../src/config";
-
-const GUARDED = ".claude/state/active_task_graph.json";
-
-const guardDecision = (command: string): "allow" | "block" =>
-  guardStateFileDecision(command, guardedLocations()).kind === "block" ? "block" : "allow";
+import { GUARDED, guardDecision } from "../fixtures/guard-decision";
 
 describe("READ_ONLY_STATE_COMMANDS — documented exclusions stay excluded", () => {
   it.each([

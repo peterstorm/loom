@@ -51,11 +51,14 @@ const subagent = (command: unknown, extra: Record<string, unknown> = {}): string
 
 describe("caller identification", () => {
   it.each([
-    `loom helper security-audit verify --out ${"$RUN"}`,
+    "loom helper security-audit verify --out $RUN",
     "loom helper orchestration submit --run x",
     "echo x > /anywhere/ledger.json",
   ])("a PARENT call passes through, whatever it runs: %s", async (command) => {
     expect(await runGuardSubagentAuthority(payload(command.replace("$RUN", run)))).toEqual({ kind: "passthrough" });
+  });
+
+  it("a PARENT write onto a registered run's ledger passes through", async () => {
     expect(await runGuardSubagentAuthority(payload(`echo x > ${run}/ledger.json`))).toEqual({ kind: "passthrough" });
   });
 

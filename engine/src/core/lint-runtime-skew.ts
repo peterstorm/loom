@@ -1,4 +1,3 @@
-import { nonEmptyOf } from "./orchestration-contract";
 /**
  * Lint runtime skew: whether the full-tier lint that just judged a branch ran
  * rule code the branch itself does not carry (issue #57 D6).
@@ -12,6 +11,8 @@ import { nonEmptyOf } from "./orchestration-contract";
  *
  * Pure module: the shell observes both rule trees as digests and hands them in.
  */
+
+import { nonEmptyOf } from "./orchestration-contract";
 
 /** Every lint-rule file of one tree, as root-relative POSIX path → content sha256. */
 export type LintRuleDigests = ReadonlyMap<string, string>;

@@ -20,6 +20,9 @@ import {
   type SecurityRunMetadata,
 } from "../../src/core/security-audit-contract";
 import type { DomainResult } from "../../src/core/orchestration-contract/identity";
+import { SECURITY_VERIFICATION_PROGRAM } from "../../src/core/orchestration-contract/programs";
+import { SECURITY_VERIFIER_ROLE } from "../../src/core/security-adjudication";
+import { VERIFICATION_SLOT_PREFIX, verificationRequestIds } from "../../src/core/security-verification";
 import type { CoverageSeed } from "../../src/core/security-coverage";
 import type { ConfirmedFinding, NeedsValidationFinding, RejectedFinding } from "../../src/core/security-findings";
 import { NO_STACK_SIGNALS, STACK_SIGNAL_NAMES, STACK_SIGNAL_SHAPES, type StackSignals } from "../../src/core/security-lens-select";
@@ -99,7 +102,7 @@ export function aSeed(overrides: Partial<CoverageSeed> = {}): CoverageSeed {
     ordinary_attack_class_block: "Injection: untrusted input reaching an interpreter without parameterisation.",
     // A unit always names at least one selected block: a unit with no lens
     // behind it is a unit nobody chose, so the ledger requires the choice.
-    selected_companion_blocks: ["WEB-PROTOCOL-AND-AUTH.md#authentication-and-session-handling"],
+    selected_companion_blocks: ["WEB-PROTOCOL-AND-AUTH.md#browser-session-attack-classes"],
     excluded_blocks: [],
     prior: null,
     ...clone(overrides),
@@ -238,14 +241,16 @@ type WireOverrides<Shape> = Partial<Shape> & Readonly<Record<string, unknown>>;
  *  minted request it answered and its capture digest. The default request is
  *  a refutation-profile verifier's attempt 1. */
 export function aBallotBinding(overrides: WireOverrides<BallotBindingWire> = {}): BallotBindingWire {
-  const slotId = `security-verification-slot:${"0".repeat(32)}`;
+  // The program, role, slot-id prefix and request-id rule are production's own
+  // (imported, never re-spelled), so a rename there moves every fixture with it.
+  const slotId = `${VERIFICATION_SLOT_PREFIX}${"0".repeat(32)}`;
   const binding: BallotBindingWire = {
-    program: "security-verification",
+    program: SECURITY_VERIFICATION_PROGRAM,
     runId: "run.verify-w2-000000000000",
-    requestId: `${slotId}:1`,
+    requestId: verificationRequestIds(slotId)[0],
     slotId,
     attempt: 1,
-    role: "security-verifier-agent",
+    role: SECURITY_VERIFIER_ROLE,
     profile: REFUTATION_PROFILE,
     captureDigest: "a".repeat(64),
   };
@@ -275,7 +280,7 @@ export function aVerdict(
     missingFact: null,
     wave: 2,
     binding: aBallotBinding({
-      ...(slotId === undefined ? {} : { slotId, requestId: `${slotId}:1` }),
+      ...(slotId === undefined ? {} : { slotId, requestId: verificationRequestIds(slotId)[0] }),
       ...(profile === undefined ? {} : { profile }),
       ...(requestId === undefined ? {} : { requestId }),
       ...binding,
@@ -287,7 +292,7 @@ export function aVerdict(
 /** A ballot whose binding names the HUNT profile: the shape INV-S3 refuses to
  *  count — the vote of a model agreeing with itself. */
 export function aHunterBallot(overrides: Parameters<typeof aVerdict>[0] = {}): VerdictWire {
-  return aVerdict({ profile: HUNT_PROFILE, wave: 1, ...clone(overrides) });
+  return aVerdict({ profile: HUNT_PROFILE, wave: 1, ...overrides });
 }
 
 /** The identity every hunter result carries — spread into a submit payload. */

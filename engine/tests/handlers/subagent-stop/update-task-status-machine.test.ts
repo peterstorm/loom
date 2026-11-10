@@ -39,9 +39,7 @@ function tempDir(): string {
 afterEach(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
   dirs = [];
-  for (const f of sessionFiles) {
-    rmSync(f, { recursive: true, force: true });
-  }
+  for (const f of sessionFiles) rmSync(f, { recursive: true, force: true });
   sessionFiles = [];
   delete process.env.LOOM_MACHINES_DIR;
   vi.restoreAllMocks();

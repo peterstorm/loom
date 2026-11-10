@@ -201,7 +201,7 @@ const WRAPPER_FLAG_ARGS: Readonly<Record<string, readonly string[]>> = {
  *  START with a recognized wrapper. `env -S 'cmd…'` re-splits the option
  *  value as a command line. */
 function unwrapWrapper(tokens: readonly string[]): readonly string[] | null {
-  const head = headBase(unescapeCommandWord(unquote(tokens[0] ?? "")));
+  const head = headBase(commandName(tokens[0] ?? ""));
   if (!WRAPPER_HEADS.has(head)) return null;
   const consume = WRAPPER_FLAG_ARGS[head] ?? [];
   let i = 1;

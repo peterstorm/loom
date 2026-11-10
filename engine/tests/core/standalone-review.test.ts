@@ -379,6 +379,9 @@ describe("standalone review adjudication", () => {
     const result = finalizeStandaloneReview(state.aggregate, panel.value);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
+    // A given panel is a returned panel: the proven-outcome digest the ready
+    // state and publication re-verification share is read from it.
+    expect(result.value.panel).toEqual(panel.value);
     expect(result.value.survivingCriticals.map((finding) => finding.claim)).toEqual(["real blocker"]);
     expect(result.value.refutedCriticals[0]?.finding.claim).toBe("duplicate wording");
     expect(result.value.refutedCriticals[0]?.refutations).toEqual([

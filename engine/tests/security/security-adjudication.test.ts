@@ -28,6 +28,7 @@ import {
 import { assignUnits, recordUnitResult, seedCoverageUnit, type CoverageLedger } from "../../src/core/security-coverage";
 import { AGENT_POLICIES, LOOM_AGENT_NAMESPACE, catalogProfileOfAgent, resolveAgentPolicy } from "../../src/core/model-profiles";
 import { aConfirmedFinding, aRefs, aSeed, aVerdict, HUNTER_AGENT, ok, type VerdictWire } from "./fixtures";
+import { VERIFICATION_SLOT_PREFIX } from "../../src/core/security-verification";
 
 const findings = (fingerprints: readonly string[]) =>
   ok(parseSecurityFindings([...fingerprints].sort().map((fingerprint) => aConfirmedFinding({ fingerprint, title: `claim ${fingerprint}` }))));
@@ -37,7 +38,7 @@ let issued = 0;
 /** A bound ballot from a fresh verifier request (each call is a distinct
  *  spawn), as `verdicts.json` holds it. */
 const wire = (fingerprint: string, overrides: Parameters<typeof aVerdict>[0] = {}): VerdictWire =>
-  aVerdict({ fingerprint, wave: 1, slotId: `security-verification-slot:${String(++issued).padStart(32, "0")}`, ...overrides });
+  aVerdict({ fingerprint, wave: 1, slotId: `${VERIFICATION_SLOT_PREFIX}${String(++issued).padStart(32, "0")}`, ...overrides });
 
 /** Ballots as adjudication receives them: through the ballot parser. */
 const ballots = (...wires: readonly VerdictWire[]): readonly VerificationVerdict[] => ok(parseVerificationVerdicts(wires));

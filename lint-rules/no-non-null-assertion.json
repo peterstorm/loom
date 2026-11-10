@@ -5,7 +5,7 @@
   "extensions": [".ts", ".tsx", ".mts", ".cts"],
   "pattern": "[\\w$)\\]]!(?=[.\\[),;:\\]}])",
   "flags": "",
-  "excludePatterns": [".test.ts", ".test.tsx", ".test.mts", ".spec.ts", ".spec.tsx"],
+  "excludePatterns": [".test.ts", ".test.tsx", ".test.mts", ".test.cts", ".spec.ts", ".spec.tsx", ".spec.mts", ".spec.cts"],
   "fixHint": "Prove the value exists: destructure with a guard (`const [first] = xs; if (first === undefined) return …`), use `.at()`/`.find()` and narrow, or restructure so the type already excludes null/undefined.",
   "enabled": true
 }

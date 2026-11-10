@@ -7,6 +7,9 @@ import { splitHeredocs } from "../../src/core/shell-heredoc";
 import { blankSubstitutions } from "../../src/core/shell-match-views";
 import { scanSubstitutions } from "../../src/core/shell-substitution";
 
+/** The production guard scope every substitution walk below is read under. */
+const SCOPE = guardScope(guardedLocations());
+
 /**
  * Walker-divergence property net for guard-state-file's shell scanners.
  *
@@ -92,7 +95,7 @@ describe("guard-state-file walker divergence net", () => {
         (fragments) => {
           const text = fragments.join("");
           const expected = referenceLiveSubstitutionCount(text);
-          const flat = flattenSubstitutions(text, guardScope(guardedLocations()));
+          const flat = flattenSubstitutions(text, SCOPE);
           const blanked = blankSubstitutions(text);
           // flattenSubstitutions returns null ONLY on unbalanced openers —
           // the generator emits balanced spans, so it must parse.
@@ -113,7 +116,7 @@ describe("guard-state-file walker divergence net", () => {
         // state, the scanner would treat the following spans as inert and
         // the reference count would disagree.
         const text = `${quoted} ${spans.join(" ")}`;
-        const flat = flattenSubstitutions(text, guardScope(guardedLocations()));
+        const flat = flattenSubstitutions(text, SCOPE);
         if (flat === null) return;
         expect(flat.bodies.length).toBe(spans.length);
         expect(scanSubstitutions(text, () => "").bodies.length).toBe(spans.length);
@@ -202,11 +205,11 @@ describe("guard-state-file — backtick inside $( … )", () => {
   });
 
   it("flattens such a command instead of failing closed on a phantom unclosed span", () => {
-    expect(flattenSubstitutions("echo $(echo `a)b`)", guardScope(guardedLocations()))).not.toBeNull();
+    expect(flattenSubstitutions("echo $(echo `a)b`)", SCOPE)).not.toBeNull();
   });
 
   it("still reports a genuinely unclosed substitution", () => {
-    expect(flattenSubstitutions("echo $(echo `a)b`", guardScope(guardedLocations()))).toBeNull();
+    expect(flattenSubstitutions("echo $(echo `a)b`", SCOPE)).toBeNull();
   });
 
   it("keeps a guarded token inside a backtick-bearing body visible to the guard", () => {

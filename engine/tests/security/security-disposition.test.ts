@@ -22,7 +22,7 @@ import {
 } from "../../src/core/security-disposition";
 import { parseStandaloneDispositionStartInput } from "../../src/core/standalone-disposition-machine";
 import { parseSecurityFindings, type SecurityFinding } from "../../src/core/security-findings";
-import { renderReport } from "../../src/core/security-reports";
+import { derivePublication } from "../../src/core/security-reports";
 import { parseCoverageSeeds } from "../../src/core/security-coverage";
 import { aConfirmedFinding, aNeedsValidationFinding, aRejectedFinding, aRunMetadata, aSeed, ok } from "./fixtures";
 
@@ -58,25 +58,23 @@ describe("the decision the trichotomy forces", () => {
 
 describe("the decision set", () => {
   it("carries one entry per published record, sorted by fingerprint", () => {
-    const disposition = securityDisposition({ metadata: METADATA, locator: "/out", findings: findings() });
-    if (!disposition.ok) throw new Error("expected a disposition set");
-    expect(disposition.value.entries).toHaveLength(3);
-    expect(disposition.value.entries.map((entry) => entry.fingerprint)).toEqual([
+    const disposition = ok(securityDisposition({ metadata: METADATA, locator: "/out", findings: findings() }));
+    expect(disposition.entries).toHaveLength(3);
+    expect(disposition.entries.map((entry) => entry.fingerprint)).toEqual([
       "api/export:sqli-filter",
       "api/login:sqli-email",
       "api/search:sqli-terms",
     ]);
-    expect(disposition.value.entries.map((entry) => entry.decision)).toEqual(["deferred", "accepted", "dismissed"]);
-    expect(disposition.value.provenance).toBe("DECLARED");
-    expect(disposition.value.source.runId).toBe("audit-1");
-    expect(disposition.value.source.locator).toBe("/out");
+    expect(disposition.entries.map((entry) => entry.decision)).toEqual(["deferred", "accepted", "dismissed"]);
+    expect(disposition.provenance).toBe("DECLARED");
+    expect(disposition.source.runId).toBe("audit-1");
+    expect(disposition.source.locator).toBe("/out");
   });
 
   it("is byte-identical across two derivations of the same records", () => {
-    const once = securityDisposition({ metadata: METADATA, locator: "/out", findings: findings() });
-    const twice = securityDisposition({ metadata: METADATA, locator: "/out", findings: findings() });
-    if (!once.ok || !twice.ok) throw new Error("expected disposition sets");
-    expect(JSON.stringify(once.value)).toBe(JSON.stringify(twice.value));
+    const once = ok(securityDisposition({ metadata: METADATA, locator: "/out", findings: findings() }));
+    const twice = ok(securityDisposition({ metadata: METADATA, locator: "/out", findings: findings() }));
+    expect(JSON.stringify(once)).toBe(JSON.stringify(twice));
   });
 
   it("mints a different origin when the record changes", () => {
@@ -87,12 +85,11 @@ describe("the decision set", () => {
     expect(securityFindingOrigin("audit-1", before)).not.toBe(securityFindingOrigin("audit-2", before));
   });
 
-  it("digests exactly the four fields of each entry, in fingerprint order", () => {
-    const disposition = securityDisposition({ metadata: METADATA, locator: "/out", findings: findings() });
-    if (!disposition.ok) throw new Error("expected a disposition set");
+  it("digests the decision set: exactly the four fields of each entry, in fingerprint order", () => {
+    const disposition = ok(securityDisposition({ metadata: METADATA, locator: "/out", findings: findings() }));
     // The digest is over the entries as published — the same bytes a field-by-
     // field projection of them gives, so a re-derivation by a consumer agrees.
-    expect(disposition.value.source.resultDigest).toBe(canonicalDigest(disposition.value.entries.map((entry) => ({
+    expect(disposition.source.resultDigest).toBe(canonicalDigest(disposition.entries.map((entry) => ({
       origin: entry.origin,
       fingerprint: entry.fingerprint,
       decision: entry.decision,
@@ -101,42 +98,53 @@ describe("the decision set", () => {
   });
 
   it("changes the result digest when a decision changes", () => {
-    const accepted = securityDisposition({ metadata: METADATA, locator: "/out", findings: parse([aConfirmedFinding()]) });
-    const dismissed = securityDisposition({ metadata: METADATA, locator: "/out", findings: parse([aRejectedFinding()]) });
-    if (!accepted.ok || !dismissed.ok) throw new Error("expected disposition sets");
-    expect(accepted.value.source.resultDigest).not.toBe(dismissed.value.source.resultDigest);
+    const accepted = ok(securityDisposition({ metadata: METADATA, locator: "/out", findings: parse([aConfirmedFinding()]) }));
+    const dismissed = ok(securityDisposition({ metadata: METADATA, locator: "/out", findings: parse([aRejectedFinding()]) }));
+    expect(accepted.source.resultDigest).not.toBe(dismissed.source.resultDigest);
+  });
+
+  it("binds the published records through their origins: an edited record moves the digest, its decision unchanged", () => {
+    const before = ok(securityDisposition({ metadata: METADATA, locator: "/out", findings: parse([aConfirmedFinding()]) }));
+    const edited = parse([aConfirmedFinding({ description: "The handler interpolates an unvalidated `email`." })]);
+    const after = ok(securityDisposition({ metadata: METADATA, locator: "/out", findings: edited }));
+    expect(after.entries.map((entry) => entry.decision)).toEqual(before.entries.map((entry) => entry.decision));
+    expect(after.source.resultDigest).not.toBe(before.source.resultDigest);
+  });
+
+  it("keeps the digest when only run metadata that decides nothing changes (it digests the decision set)", () => {
+    const standard = ok(securityDisposition({ metadata: METADATA, locator: "/out", findings: findings() }));
+    const deep = ok(securityDisposition({ metadata: { ...METADATA, profile: "deep" }, locator: "/out", findings: findings() }));
+    expect(deep.profile).toBe("deep");
+    expect(deep.source.resultDigest).toBe(standard.source.resultDigest);
   });
 
   it("emits a zero-entry decision set for a clean run instead of refusing", () => {
-    const empty = securityDisposition({ metadata: METADATA, locator: "/out", findings: [] });
-    expect(empty.ok).toBe(true);
-    expect(empty.ok ? empty.value.entries : ["unexpected"]).toEqual([]);
-    expect(empty.ok ? renderDispositionHandoff(empty.value) : "").toContain("nothing to remediate");
+    const empty = ok(securityDisposition({ metadata: METADATA, locator: "/out", findings: [] }));
+    expect(empty.entries).toEqual([]);
+    expect(renderDispositionHandoff(empty)).toContain("nothing to remediate");
   });
 
   it("names the handoff command in prose", () => {
-    const disposition = securityDisposition({ metadata: METADATA, locator: "/out/audit-1", findings: findings() });
-    if (!disposition.ok) throw new Error("expected a disposition set");
+    const disposition = ok(securityDisposition({ metadata: METADATA, locator: "/out/audit-1", findings: findings() }));
     const paths = dispositionHandoffPaths("/out/audit-1", METADATA.runId);
     // The run name is carried, not re-derived by slicing the run directory apart.
     expect(paths.runName).toBe(`run.disposition-${METADATA.runId}`);
     expect(paths.runDir).toBe(`${paths.runsRoot}/${paths.runName}`);
-    const text = renderDispositionHandoff(disposition.value, paths);
+    // The paths are the disposition's own: derived from its source, never passed beside it.
+    const text = renderDispositionHandoff(disposition);
     expect(text).toContain("1 accepted, 1 deferred, 1 dismissed");
     // The command carries every flag the program requires and names the exact
-    // file the handler writes. The old spelling (`--run <locator>`, no stdin)
-    // named neither, so no reader could execute it.
+    // file the handler writes.
     expect(text).toContain(`--runs-root '${paths.runsRoot}'`);
     expect(text).toContain(`--run 'run.disposition-${METADATA.runId}' < '${paths.inputFile}'`);
-    expect(text).toContain(disposition.value.source.resultDigest);
+    expect(text).toContain(disposition.source.resultDigest);
   });
 
-  it("quotes every path of the handoff command as one shell word, whatever it holds (H)", () => {
+  it("quotes every path of the handoff command as one shell word, whatever it holds", () => {
     const locator = "/out/it's my audit dir";
-    const disposition = securityDisposition({ metadata: METADATA, locator, findings: findings() });
-    if (!disposition.ok) throw new Error("expected a disposition set");
+    const disposition = ok(securityDisposition({ metadata: METADATA, locator, findings: findings() }));
     const paths = dispositionHandoffPaths(locator, METADATA.runId);
-    const command = renderDispositionHandoff(disposition.value, paths).split("\n")
+    const command = renderDispositionHandoff(disposition).split("\n")
       .filter((line) => line.startsWith("    ")).map((line) => line.trim().replace(/ \\$/, "")).join(" ");
     // A real shell splits it back into exactly the intended words.
     const echoed = spawnSync("bash", ["-c", `printf '%s\\n' ${command.replace(/ < /, " ")}`], { encoding: "utf8" });
@@ -145,41 +153,35 @@ describe("the decision set", () => {
   });
 
   it("derives a start input the standalone-disposition loader parses", () => {
-    const disposition = securityDisposition({ metadata: METADATA, locator: "/out/audit-1", findings: findings() });
-    if (!disposition.ok) throw new Error("expected a disposition set");
-    const start = standaloneDispositionStart(disposition.value);
-    if (!start.ok) throw new Error(start.error.message);
+    const disposition = ok(securityDisposition({ metadata: METADATA, locator: "/out/audit-1", findings: findings() }));
+    const start = ok(standaloneDispositionStart(disposition));
     // The loader's OWN parser, not a re-implementation of its grammar.
-    const parsed = parseStandaloneDispositionStartInput(start.value);
-    if (!parsed.ok) throw new Error(parsed.error.message);
-    expect(parsed.value.source.locator).toBe("/out/audit-1");
-    expect(parsed.value.record.entries).toHaveLength(3);
-    expect(parsed.value.record.revision).toEqual({ kind: "initial" });
-    expect(parsed.value.previous).toBeNull();
+    const parsed = ok(parseStandaloneDispositionStartInput(start));
+    expect(parsed.source.locator).toBe("/out/audit-1");
+    expect(parsed.record.entries).toHaveLength(3);
+    expect(parsed.record.revision).toEqual({ kind: "initial" });
+    expect(parsed.previous).toBeNull();
   });
 });
 
 describe("the report's handoff section", () => {
   it("derives the same decision set the loader will receive", () => {
-    const ledger = parseCoverageSeeds([aSeed()]);
-    if (!ledger.ok) throw new Error("expected a ledger");
+    const ledger = ok(parseCoverageSeeds([aSeed()]));
     const published = findings();
-    const disposition = securityDisposition({ metadata: METADATA, locator: "/out", findings: published });
-    if (!disposition.ok) throw new Error("expected a disposition set");
-    const report = renderReport({ metadata: METADATA, ledger: ledger.value, findings: published, locator: "/out" });
+    const disposition = ok(securityDisposition({ metadata: METADATA, locator: "/out", findings: published }));
+    const report = ok(derivePublication({ metadata: METADATA, ledger, findings: published, locator: "/out" })).documents["REPORT.md"];
     expect(report).toContain("## Disposition handoff");
     const paths = dispositionHandoffPaths("/out", METADATA.runId);
     expect(report).toContain(`--runs-root '${paths.runsRoot}'`);
     expect(report).toContain(paths.inputFile);
     // The digest in the prose is the digest of the decision set, not a second
     // rendering of the same idea.
-    expect(report).toContain(disposition.value.source.resultDigest);
+    expect(report).toContain(disposition.source.resultDigest);
   });
 
   it("names no command for a clean run, because there is nothing to load", () => {
-    const ledger = parseCoverageSeeds([aSeed()]);
-    if (!ledger.ok) throw new Error("expected a ledger");
-    const report = renderReport({ metadata: METADATA, ledger: ledger.value, findings: [], locator: "/out" });
+    const ledger = ok(parseCoverageSeeds([aSeed()]));
+    const report = ok(derivePublication({ metadata: METADATA, ledger, findings: [], locator: "/out" })).documents["REPORT.md"];
     expect(report).toContain("## Disposition handoff");
     expect(report).toContain("nothing to remediate");
     expect(report).not.toContain("standalone-disposition --runs-root");

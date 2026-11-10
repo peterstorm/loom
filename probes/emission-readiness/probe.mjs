@@ -222,7 +222,7 @@ async function selectModelAndPrompt(rpc, result) {
   result.prompted = true;
 }
 
-/** Step 4, the gate: a refused gate never prompts. */
+/** 5. The gate: a refused gate never prompts. */
 async function applyGate(rpc, result, variant) {
   try {
     if (result.readinessObserved) {
@@ -240,7 +240,7 @@ async function applyGate(rpc, result, variant) {
 }
 
 /**
- * 5. Bounded settle: prompted variants wait for the first counted request;
+ * 6. Bounded settle: prompted variants wait for the first counted request;
  *    refused/timed-out variants get a short grace to prove nothing arrives.
  *    The held variant first waits for the child's hold-resolution marker so
  *    the ordering assertion compares the marker's arrival against the first
@@ -277,7 +277,7 @@ function matchingPromptFailures(result) {
   return result.modelSet ? [] : ["prompted without a verified probe model selection"];
 }
 
-/** 7. Variant assertions: what each variant must have observed. */
+/** 8. Variant assertions: what each variant must have observed. */
 const VARIANT_ASSERTIONS = {
   matching: (result) => [
     ...(!result.rpcAlive ? ["rpc channel never answered get_state"] : []),
@@ -322,7 +322,7 @@ async function runVariant(variant) {
   await applyGate(rpc, result, variant);
   await settle(rpc, hits, result, variant);
 
-  // 6. Cleanup kills only this probe's child.
+  // 7. Cleanup kills only this probe's child.
   await rpc.kill(100);
   server.close();
   result.requestCount = hits.length;
@@ -330,6 +330,7 @@ async function runVariant(variant) {
   const stderrText = rpc.stderr();
   if (stderrText) result.stderr = stderrText.slice(0, 400);
 
+  // 8. The variant's assertions (VARIANT_ASSERTIONS).
   result.failures.push(...(VARIANT_ASSERTIONS[variant]?.(result) ?? []));
   result.pass = result.failures.length === 0;
   await rm(tmp, { recursive: true, force: true });

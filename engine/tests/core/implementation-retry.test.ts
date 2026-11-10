@@ -141,6 +141,17 @@ describe("bounded implementation retry admission", () => {
     });
   });
 
+  it("refuses a protocol-2 Task that records no retry history start instead of minting authority", () => {
+    // An empty history derives `initial` without reading the history start,
+    // so the spawn admission is where its absence must fail closed.
+    const { implementation_retry_history_start: _start, ...unstarted } = retryTask([]);
+    expect(deriveImplementationRetryDisposition(unstarted)).toEqual({ kind: "initial", semanticAttempt: 1 });
+    expect(authorizeImplementationSpawn(unstarted, "Task ID: T1")).toEqual({
+      ok: false,
+      error: "Task T1 uses retry protocol 2 but records no retry history start",
+    });
+  });
+
   it("refuses a predecessor seed on an empty history before the first settlement can brick the graph", () => {
     // A state-authoring payload that writes a protocol-2 predecessor seed while
     // implementation_attempt_history is empty used to derive {kind: "initial"}

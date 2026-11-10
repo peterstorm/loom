@@ -57,6 +57,9 @@ function workspace(): string {
   return root;
 }
 
+/** The run directory of a fresh workspace, for a test that needs nothing beside it. */
+const runDirectory = (): string => join(workspace(), "run");
+
 /** The file an attacker wants read or deleted, outside the run directory. */
 function secretOutsideTheRun(root: string): string {
   const secret = join(root, "outside-the-run.txt");
@@ -175,8 +178,7 @@ describe("anchored lock ownership", () => {
   it.skipIf(runningAsRoot)(
     "never exposes a canonical recovery guard when prepared publication cannot start",
     () => {
-      const root = workspace();
-      const directory = join(root, "run");
+      const directory = runDirectory();
       const lockPath = join(directory, "publication-failure.lock");
       const recoveryPath = `${lockPath}.recovery`;
       writeFileSync(lockPath, "999999999");
@@ -196,8 +198,7 @@ describe("anchored lock ownership", () => {
   );
 
   it("refuses stale recovery when the tombstone owner changes after rename", () => {
-    const root = workspace();
-    const directory = join(root, "run");
+    const directory = runDirectory();
     writeFileSync(join(directory, "changed.lock"), "999999999");
     const anchored = openDirectoryNoFollow(directory);
     try {
@@ -214,8 +215,7 @@ describe("anchored lock ownership", () => {
   });
 
   it("preserves a lock with a malformed owner instead of treating it as proven dead", () => {
-    const root = workspace();
-    const directory = join(root, "run");
+    const directory = runDirectory();
     const lockPath = join(directory, "partial.lock");
     writeFileSync(lockPath, "not-a-pid");
     const anchored = openDirectoryNoFollow(directory);
@@ -229,8 +229,7 @@ describe("anchored lock ownership", () => {
   });
 
   it("surfaces a corrupted lock instead of reporting false from the read", () => {
-    const root = workspace();
-    const directory = join(root, "run");
+    const directory = runDirectory();
     // A directory occupying the lock name is a corrupted/attacked lock: the
     // owner read cannot complete (EISDIR). Recovery must name the cause rather
     // than collapsing it into "not recoverable" contention.
@@ -245,8 +244,7 @@ describe("anchored lock ownership", () => {
   });
 
   it("surfaces recovery-guard cleanup corruption after otherwise successful recovery", () => {
-    const root = workspace();
-    const directory = join(root, "run");
+    const directory = runDirectory();
     const lockName = "cleanup.lock";
     const recoveryPath = join(directory, `${lockName}.recovery`);
     writeFileSync(join(directory, lockName), "999999999");
@@ -262,8 +260,7 @@ describe("anchored lock ownership", () => {
   });
 
   it("refuses lock release when persisted ownership bytes were padded", async () => {
-    const root = workspace();
-    const directory = join(root, "run");
+    const directory = runDirectory();
     const lockPath = join(directory, "padded.lock");
 
     await expect(withAnchoredDirectoryLock(directory, "padded.lock", () => {
@@ -274,8 +271,7 @@ describe("anchored lock ownership", () => {
   });
 
   it("surfaces a release failure instead of reporting the protected operation as successful", async () => {
-    const root = workspace();
-    const directory = join(root, "run");
+    const directory = runDirectory();
     const lockPath = join(directory, "release.lock");
 
     await expect(withAnchoredDirectoryLock(directory, "release.lock", () => {
@@ -285,8 +281,7 @@ describe("anchored lock ownership", () => {
   });
 
   it("preserves both the operation and release failures", async () => {
-    const root = workspace();
-    const directory = join(root, "run");
+    const directory = runDirectory();
     const lockPath = join(directory, "aggregate.lock");
 
     try {
@@ -306,8 +301,7 @@ describe("anchored lock ownership", () => {
   });
 
   it("aggregates operation, lock-release, and directory-close failures without masking the primary", async () => {
-    const root = workspace();
-    const directory = join(root, "run");
+    const directory = runDirectory();
     if (process.platform === "darwin") {
       // Darwin addresses children through the proven-real path, so the release
       // channel is broken by removing the directory itself — pre-closing the
@@ -356,8 +350,7 @@ describe("anchored lock ownership", () => {
   });
 
   it("never overlaps critical sections while the recorded owner is alive", async () => {
-    const root = workspace();
-    const directory = join(root, "run");
+    const directory = runDirectory();
     let active = 0;
     let maxActive = 0;
     const critical = async () => {
@@ -377,8 +370,7 @@ describe("anchored lock ownership", () => {
   });
 
   it("surfaces a malformed planted recovery guard without entering", async () => {
-    const root = workspace();
-    const directory = join(root, "run");
+    const directory = runDirectory();
     writeFileSync(join(directory, "guarded.lock.recovery"), "planted");
 
     await expect(withAnchoredDirectoryLock(directory, "guarded.lock", () => undefined))
@@ -446,8 +438,7 @@ describe("removal refuses to follow a planted symlink", () => {
 
 describe("anchored leaf writes", () => {
   it("preserves exclusive first-writer semantics through both write entry points", () => {
-    const root = workspace();
-    const directory = join(root, "run");
+    const directory = runDirectory();
     const anchored = openDirectoryNoFollow(directory);
     try {
       writeDirectoryFileExclusiveNoFollow(anchored, "direct.txt", "first-direct");

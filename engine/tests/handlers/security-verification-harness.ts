@@ -23,7 +23,7 @@ import { parseRegisteredSecurityVerificationProgram, type SecurityVerificationSt
 import { parentAnnouncement, FIXTURE_CLAUDE_CODE_SESSION_ID } from "../fixtures/facade-parent";
 import { deliverClaudeSubagentStop } from "../fixtures/claude-native-capture";
 import type { FacadeAction } from "../../src/handlers/helpers/programs/program-result";
-import type { Run } from "./security-audit-harness";
+import type { Run } from "./security-audit-run-seam";
 
 export type Plan = Readonly<{
   runsRoot: string; run: string; input: SecurityVerificationStart; command: string; importCommand: string; awaitingBallots: number;
@@ -70,6 +70,12 @@ export const resumeVerification = (plan: Plan) => facade(["resume", "--runs-root
 
 let nativeOrdinal = 0;
 
+/** One delivery's outcome: captured, or refused WITH the reason — a capture
+ *  carries no message, a refusal always does (the shape `Invocation` has). */
+export type Delivery =
+  | Readonly<{ ok: true }>
+  | Readonly<{ ok: false; message: string }>;
+
 /**
  * Deliver one verifier spawn through Claude Code's native capture path: the
  * PostToolUse correlator (the harness's own `agent_id` and `subagent_type`,
@@ -81,7 +87,7 @@ export async function deliver(
   request: SpawnTask,
   finalText: string,
   role = "security-verifier-agent",
-): Promise<Readonly<{ ok: boolean; message: string }>> {
+): Promise<Delivery> {
   const agentId = `verifier-${++nativeOrdinal}`;
   const correlated = await recordClaudeSpawnCorrelation({
     session_id: FIXTURE_CLAUDE_CODE_SESSION_ID,
@@ -93,7 +99,7 @@ export async function deliver(
   const outcome = await deliverClaudeSubagentStop({ sessionId: FIXTURE_CLAUDE_CODE_SESSION_ID, agentId, agentType: role,
     transcriptDirectory: join(subagentDir(), "test-transcripts"), finalTexts: [finalText] },
   (stop) => captureClaudeResult(stop, plan.runsRoot, join(plan.runsRoot, plan.run)));
-  return outcome.kind === "captured" ? { ok: true, message: "captured" } : { ok: false, message: JSON.stringify(outcome) };
+  return outcome.kind === "captured" ? { ok: true } : { ok: false, message: JSON.stringify(outcome) };
 }
 
 export const verifierResult = (verdicts: readonly Record<string, unknown>[]): string =>

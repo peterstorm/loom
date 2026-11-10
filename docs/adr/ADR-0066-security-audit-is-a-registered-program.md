@@ -52,7 +52,9 @@ Option 2. `security-audit` is a registered program (P5 of the plan), with four
 non-negotiables. (The D-numbers follow the originating plan's decision list; D1
 and D4 are plan decisions this ADR does not restate.)
 
-- **D2 — Reuse reviewer payload v2 for hunter candidates.** A Loom Finding already carries
+- **D2 — Reuse reviewer payload v2 for hunter candidates.** *Superseded in part by the amendment
+  below — the hunter submits its own `security-hunter-result` document; the Finding vocabulary
+  and the deferred fourth producer kind stand.* A Loom Finding already carries
   preconditions, violated contract, consequence and evidence limits. The vulnerability
   trichotomy lives in the coverage ledger and the published `security-findings.json`, never on
   the wire. A fourth producer kind is deferred until a real sampling failure demands it.

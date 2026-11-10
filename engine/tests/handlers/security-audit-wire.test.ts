@@ -21,8 +21,8 @@ import {
   removeRuns,
   seedFor,
   startRun,
-  type Run,
 } from "./security-audit-harness";
+import type { Run } from "./security-audit-run-seam";
 
 beforeEach(() => { isolateSubagentDir(); });
 afterEach(removeRuns);

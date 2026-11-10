@@ -10,17 +10,15 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SANDBOX_LIMITS, sandboxReceiptPrefix } from "../../src/core/security-sandbox";
+import { DEFAULT_SANDBOX_LIMITS } from "../../src/core/security-sandbox";
 import { extractEvidence } from "../../src/machine/extract-evidence";
 import { parseEvidenceLine } from "../../src/machine/evidence";
 import { tokensFor } from "../../src/machine/advance";
 import type { HarnessToolCall } from "../../src/machine/harness-tool-call-types";
 import type { SandboxReceipt } from "../../src/core/security-sandbox";
-import { aSandboxReceipt } from "./sandbox-fixtures";
+import { NONCE, aSandboxReceipt, boundReceipt } from "./sandbox-fixtures";
 
 const noReport = () => null;
-
-const nonce = () => "0123456789abcdef";
 
 const bash = (command: string, stdout: string, exit = 0): HarnessToolCall => ({
   tool: "Bash",
@@ -30,25 +28,21 @@ const bash = (command: string, stdout: string, exit = 0): HarnessToolCall => ({
   cwd: ".",
 });
 
-const sandboxed = (stdout: string, command = "scripts/security-sandbox.sh --nonce 0123456789abcdef --target . -- scratch/run.sh"): HarnessToolCall =>
+const sandboxed = (stdout: string, command = `scripts/security-sandbox.sh --nonce ${NONCE} --target . -- scratch/run.sh`): HarnessToolCall =>
   bash(command, stdout);
-
-/** A receipt bound to the nonce the command carries. */
-const bound = (overrides: Record<string, unknown> = {}): string =>
-  `${sandboxReceiptPrefix(nonce())}${aSandboxReceipt(overrides)}`;
 
 const sandboxRuns = (call: HarnessToolCall): readonly SandboxReceipt[] =>
   extractEvidence(call, noReport).flatMap((event) => (event.kind === "SandboxRun" ? [event.receipt] : []));
 
 describe("SandboxRun evidence", () => {
   it("mints a fact from the script's receipt, whatever exit the run had", () => {
-    const ok = sandboxRuns(sandboxed(`log line\n${bound()}\n`));
+    const ok = sandboxRuns(sandboxed(`log line\n${boundReceipt()}\n`));
     expect(ok).toHaveLength(1);
     expect(ok[0]?.exit).toBe(0);
     expect(ok[0]?.limits).toEqual(DEFAULT_SANDBOX_LIMITS);
 
     const failed = sandboxRuns(
-      sandboxed(bound({ exit: 1 }), "bash scripts/security-sandbox.sh --nonce 0123456789abcdef -- true"),
+      sandboxed(boundReceipt({ exit: 1 }), `bash scripts/security-sandbox.sh --nonce ${NONCE} -- true`),
     );
     expect(failed[0]?.exit).toBe(1);
   });
@@ -57,8 +51,8 @@ describe("SandboxRun evidence", () => {
     // A receipt line the call printed itself, or one copied from another
     // artifact: the marker must carry the nonce this very command passed.
     const unbound = "scripts/security-sandbox.sh --target . -- repro";
-    expect(sandboxRuns(bash(unbound, bound()))).toEqual([]);
-    expect(sandboxRuns(bash(`${unbound} --nonce fedcba9876543210`, bound()))).toEqual([]);
+    expect(sandboxRuns(bash(unbound, boundReceipt()))).toEqual([]);
+    expect(sandboxRuns(bash(`${unbound} --nonce fedcba9876543210`, boundReceipt()))).toEqual([]);
   });
 
   it("mints nothing when the output carries no receipt", () => {
@@ -66,14 +60,14 @@ describe("SandboxRun evidence", () => {
   });
 
   it("mints nothing when the command does not name the one executor", () => {
-    expect(sandboxRuns(bash("./my-security-sandbox.sh", bound()))).toEqual([]);
-    expect(sandboxRuns(bash("sh -c 'echo hi'", bound()))).toEqual([]);
+    expect(sandboxRuns(bash("./my-security-sandbox.sh", boundReceipt()))).toEqual([]);
+    expect(sandboxRuns(bash("sh -c 'echo hi'", boundReceipt()))).toEqual([]);
   });
 
   it("mints nothing for an interrupted call, whose receipt describes an unfinished run", () => {
     const interrupted: HarnessToolCall = {
       tool: "Bash",
-      input: { command: "scripts/security-sandbox.sh --nonce 0123456789abcdef -- repro" },
+      input: { command: `scripts/security-sandbox.sh --nonce ${NONCE} -- repro` },
       outcome: { kind: "interrupted" },
       callId: null,
       cwd: ".",
@@ -82,7 +76,7 @@ describe("SandboxRun evidence", () => {
   });
 
   it("never advances a machine guard", () => {
-    const [receipt] = sandboxRuns(sandboxed(bound()));
+    const [receipt] = sandboxRuns(sandboxed(boundReceipt()));
     expect(receipt).toBeDefined();
     expect(tokensFor({ kind: "SandboxRun", receipt: receipt as SandboxReceipt })).toEqual([]);
   });

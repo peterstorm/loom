@@ -280,9 +280,10 @@ export const EFFECT_RECEIPT_FIELDS = Object.freeze([
 type BaseEffect = Readonly<{ effectId: EffectId; runId: OrchestrationRunId }>;
 type EnvelopeRecord = Readonly<Record<string, unknown>>;
 
-/** A protected wave-state revision: a non-negative safe integer. `name` is the
- *  field's own name, `field` its reported path. */
-function parseRevision(raw: unknown, field: string, name: string): DomainResult<number, ReconciliationParseError> {
+/** A protected wave-state revision: a non-negative safe integer. `field` is
+ *  its reported path; the message names the path's last segment. */
+function parseRevision(raw: unknown, field: string): DomainResult<number, ReconciliationParseError> {
+  const name = field.slice(field.lastIndexOf(".") + 1);
   return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0
     ? success(raw)
     : reconciliationFailure(field, `${name} must be a non-negative safe integer`);
@@ -290,13 +291,13 @@ function parseRevision(raw: unknown, field: string, name: string): DomainResult<
 
 /** How one identity list is parsed and reported: each entry's parser, the
  *  identity entries must not share, and the messages for an empty list and a
- *  duplicate identity. */
+ *  duplicate identity — reported at `duplicateField`, else at `field`. */
 type UniqueListRule<T> = Readonly<{
   field: string;
   emptyMessage: string;
   parseEntry: (entry: unknown, index: number) => DomainResult<T, ReconciliationParseError>;
   identity: (value: T) => string;
-  duplicateField: string;
+  duplicateField?: string;
   duplicateMessage: string;
 }>;
 
@@ -313,7 +314,7 @@ function parseUniqueNonEmptyList<T>(raw: unknown, rule: UniqueListRule<T>): Doma
     if (!parsed.ok) return parsed;
     values.push(parsed.value);
   }
-  if (new Set(values.map(rule.identity)).size !== values.length) return reconciliationFailure(rule.duplicateField, rule.duplicateMessage);
+  if (new Set(values.map(rule.identity)).size !== values.length) return reconciliationFailure(rule.duplicateField ?? rule.field, rule.duplicateMessage);
   const reconciled = nonEmpty(values);
   return reconciled === null ? reconciliationFailure(rule.field, rule.emptyMessage) : success(reconciled);
 }
@@ -331,7 +332,7 @@ function parsePublishArtifactSetIntent(envelope: EnvelopeRecord, base: BaseEffec
 function parseCommitProtectedWaveStateIntent(envelope: EnvelopeRecord, base: BaseEffect): DomainResult<EffectIntent, ReconciliationParseError> {
   const intent = reconciliationRecord(envelope, ["kind", "effectId", "runId", "expectedRevision", "stateDigest"], "intent");
   if (!intent.ok) return intent;
-  const revision = parseRevision(intent.value.expectedRevision, "intent.expectedRevision", "expectedRevision");
+  const revision = parseRevision(intent.value.expectedRevision, "intent.expectedRevision");
   if (!revision.ok) return revision;
   const stateDigest = parseArtifactDigest(intent.value.stateDigest);
   if (!stateDigest.ok) return reconciliationFailure("intent.stateDigest", stateDigest.error.message);
@@ -404,7 +405,7 @@ export function parseEffectIntent(raw: unknown): DomainResult<EffectIntent, Reco
 function parseProtectedWaveStateCommittedReceipt(envelope: EnvelopeRecord, base: BaseEffect): DomainResult<EffectReceipt, ReconciliationParseError> {
   const receipt = reconciliationRecord(envelope, ["kind", "effectId", "runId", "committedRevision", "stateDigest"], "receipt");
   if (!receipt.ok) return receipt;
-  const revision = parseRevision(receipt.value.committedRevision, "receipt.committedRevision", "committedRevision");
+  const revision = parseRevision(receipt.value.committedRevision, "receipt.committedRevision");
   if (!revision.ok) return revision;
   const stateDigest = parseArtifactDigest(receipt.value.stateDigest);
   if (!stateDigest.ok) return reconciliationFailure("receipt.stateDigest", stateDigest.error.message);
@@ -422,7 +423,6 @@ function parseAgentRequestsReservedReceipt(envelope: EnvelopeRecord, base: BaseE
       return parsed.ok ? success(parsed.value) : reconciliationFailure(`receipt.requestIds[${index}]`, parsed.error.message);
     },
     identity: (requestId) => requestId,
-    duplicateField: "receipt.requestIds",
     duplicateMessage: "requestIds must be unique",
   });
   if (!requestIds.ok) return requestIds;

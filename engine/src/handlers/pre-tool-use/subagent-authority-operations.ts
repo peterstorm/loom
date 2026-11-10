@@ -1,16 +1,11 @@
 /**
- * The authority helpers' operations, split by the trait each operation table
- * already declares (ADR-0067 D6): a `runtimeSkew: "available"` operation is a
- * read-only projection a subagent may run; every other operation writes run
- * state and is the parent's alone. Derived, never copied, so an operation added
- * to either table is classified by the trait it is forced to declare.
- *
- * The derivation reads the Pi runtime-skew trait as subagent authority on
- * purpose: both mean "writes nothing" today, and a new writing operation
- * defaults to handshake-required and so to parent-only (fail closed). Both
- * tables document this dependency on the trait itself; if the two policies
- * ever diverge, the tables gain an explicit authority trait and this split
- * reads that instead.
+ * The authority helpers' operations, split by the `subagent` trait each
+ * operation table declares (ADR-0067 D6): a `read-only` operation is a
+ * projection a subagent may run; a `parent-only` one moves run state and is
+ * the parent's alone. Derived, never copied, and the trait is required at
+ * declaration, so an operation added to either table is classified by the
+ * authority it is forced to state — not by a proxy policy such as Pi runtime
+ * skew.
  *
  * Lives beside the guard rather than in core because core may not import the
  * handler operation tables; both harness adapters pass this to
@@ -22,16 +17,16 @@ import { ORCHESTRATION_OPERATIONS } from "../helpers/orchestration-operations";
 import { SECURITY_AUDIT_OPERATIONS } from "../helpers/security-audit-operations";
 import { KNOWN_HANDLERS } from "../../handler-routes";
 
-type SkewTraits = Readonly<Record<string, Readonly<{ runtimeSkew: "available" | "handshake-required" }>>>;
+type SubagentAuthorityTraits = Readonly<Record<string, Readonly<{ subagent: "read-only" | "parent-only" }>>>;
 
-const splitByRuntimeSkew = (table: SkewTraits): HelperOperationSplit => Object.freeze({
+const splitBySubagentAuthority = (table: SubagentAuthorityTraits): HelperOperationSplit => Object.freeze({
   known: new Set(Object.keys(table)),
-  readOnly: new Set(Object.entries(table).filter(([, traits]) => traits.runtimeSkew === "available").map(([name]) => name)),
+  readOnly: new Set(Object.entries(table).filter(([, traits]) => traits.subagent === "read-only").map(([name]) => name)),
 });
 
 export const AUTHORITY_HELPER_OPERATIONS: AuthorityHelperOperations = Object.freeze({
-  "security-audit": splitByRuntimeSkew(SECURITY_AUDIT_OPERATIONS),
-  orchestration: splitByRuntimeSkew(ORCHESTRATION_OPERATIONS),
+  "security-audit": splitBySubagentAuthority(SECURITY_AUDIT_OPERATIONS),
+  orchestration: splitBySubagentAuthority(ORCHESTRATION_OPERATIONS),
 });
 
 /** The CLI's harness-hook route families (every top-level route but

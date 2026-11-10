@@ -21,7 +21,7 @@ loom helper security-audit start --out ../audit-run-1 --repo . --profile standar
                 "subsystem": "auth", "attack_class": "injection" },
       "starting_paths": ["src/api/login.ts"],
       "ordinary_attack_class_block": "Injection: untrusted input reaching an interpreter.",
-      "selected_companion_blocks": ["WEB-PROTOCOL-AND-AUTH.md#authentication-and-session-handling"] } ],
+      "selected_companion_blocks": ["WEB-PROTOCOL-AND-AUTH.md#browser-session-attack-classes"] } ],
   "signals": { "languages": ["ts"], "manifests": ["package.json"], "servesHttp": true } }
 JSON
 ```
@@ -84,7 +84,7 @@ This is the authoritative operations table. Every operation takes `--out
 | `nonce` | flags `--artifact` | the path is not `agents/<owner-id>/artifacts/<file>`, no `in_progress` unit is owned by that owner, an archived attempt already cited the artifact, the run directory lies inside the target |
 | `submit` | stdin (`security-hunter-result`: `units`, optional `findings`) | the run is published, the envelope is not `{schemaVersion: 1, kind: "security-hunter-result"}` or carries an unknown key, a unit is not the named owner's or not the current wave, a check is malformed, a `local` check names no receipt or a receipt that does not prove a bounded run, a filed fingerprint the run already holds arrives with different content |
 | `defer` | flags `--reason [--unit]` | the run is published, the reason is missing, the unit is not `planned` |
-| `merge-critic` | stdin (critic result) | the run is published, a proposal is malformed, a reassigned unit has no evidence to archive |
+| `merge-critic` | stdin (critic result) | the run is published, a proposal is malformed, a reassigned unit has no evidence to archive (`reassign-unit-has-no-evidence`), a reassignment carries no reason of its own (`missing-reassignment-reason`), a settled unit to reassign has no recorded owner to archive the attempt under (`terminal-unit-has-no-owner`), a resolution names a lead the engine cannot place (`unplaceable-resolution`) |
 | `verify` | flags (`--from <verification-run>`) | stdin ballots; the run is published; the verification run is not a `security-verification` run under this audit, is unfinished, was issued against an older ledger or findings, or its `result.json` differs from the replay of its captured evidence |
 | `findings` | flags `[--json]` | the ledger or records do not parse |
 | `publish` | flags | any publication blocker (see below) |
@@ -189,10 +189,22 @@ runs ungated. The extension cannot decide the role from launch flags, but it
 writes a one-time stderr notice when it loads in a process launched like a
 headless child (`--mode json|rpc`, `--no-session`) that carries no marker.
 
+The authority guard and the rules gate read the same marker with opposite safe
+directions. For **authority**, any marked process — explicit, inherited or
+malformed — is a subagent, because refusing authority writes is safe. For the
+**rules gate**, exemption is the unsafe direction, so only a provable child
+agent is exempt: `LOOM_PI_SUBAGENT=1`, or a headless launch (`json`, `rpc` or
+`print` mode) whose inherited `LOOM_PI_PARENT_PID` names another process. An
+interactive `pi` that merely inherited the marker (for example one started from
+a Loom Pi session's shell) and any malformed marker stay gated, and an
+interactive process the authority guard treats as a subagent gets a stderr
+notice naming why and which policy applies.
+
 - **Helper operations.** A subagent may run only the read-only operations:
   `security-audit nonce|status|findings` and the read-only `orchestration`
-  projections. The split is derived from the operation tables' `runtimeSkew`
-  trait, so every writing operation (`start`, `assign`, `submit`, `defer`,
+  projections. The split is derived from the operation tables' `subagent`
+  trait (`read-only` vs `parent-only`, declared beside `runtimeSkew` but a
+  separate fact), so every writing operation (`start`, `assign`, `submit`, `defer`,
   `merge-critic`, `verify`, `publish`, `disposition`; `orchestration start`,
   `resume`, `submit`, `correlate`, `decide`, `abandon`, …) is refused, as is an
   operation the guard cannot name statically.
@@ -207,7 +219,15 @@ headless child (`--mode json|rpc`, `--no-session`) that carries no marker.
   ancestor), and each run is registered under both its spelled and real path,
   so `/tmp` ↔ `/private/tmp` and a symlinked `--out` are covered. Reads, copying
   authority *out*, and writes under `agents/<owner-id>/{scratch,artifacts}`
-  stay allowed, as does `scripts/security-sandbox.sh`.
+  stay allowed, as does `scripts/security-sandbox.sh`. The run's entry names
+  have one owner, `core/audit-run-authority.ts`.
+- **The run registry.** Every writing `helper security-audit` operation — and
+  the `security-verification` program's `start` and `resume` — registers its run
+  in `<subagent dir>/security-audit-runs/`. Registration is idempotent and never
+  swept, so a registry wiped mid-audit is rebuilt by the next write; a write
+  whose run cannot be registered is refused. At 4096 live entries the registrar
+  prunes entries whose directory is gone, and the reader fails closed only while
+  still over the cap. An unreadable registry refuses every authority-named path.
 - **Normalisations.** Escaped command words (`\loom`), wrappers (`time`,
   `command`, `builtin`, `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `env`,
   `sudo`, …), `coproc` and `!`; programs a shell is fed through a pipe, a
@@ -226,7 +246,15 @@ from pieces (`eval "$a $b"`), a variable holding a whole authority path,
 interpreter code built at runtime, names spelled in `printf` escapes, or a
 script whose text is runtime-built. `engine/tests/core/subagent-authority.test.ts`
 pins each of these as a known gap. None of them can produce an *attested*
-capture.
+capture: the capturing harness writes a capture attestation into
+`<subagent dir>/security-capture-attestations/` (one immutable entry per
+verifier attempt, never swept), `verify --from` requires it for every ballot,
+and `findings`/`status`/`publish` re-prove every ballot `verdicts.json` caches.
+
+This section is the one statement of the ADR-0067 guard and import-gate
+contract. `docs/operations.md`, `docs/architecture.md` and
+`docs/deterministic-core.md` point here and repeat only the invariant they rely
+on; an amendment edits this section.
 
 **Pi's import gate.** On Pi, the parent's `helper security-audit verify --from
 <run>` is checked before it runs, by the same proof `verify --from` itself runs

@@ -341,14 +341,8 @@ function freshRunsRoot(prefix: string): string {
 }
 
 function standaloneAndRemediationSmoke(): void {
-  const { cwd, changedPath } = changedStandaloneRepository("standalone");
-
-  const runsRoot = freshRunsRoot("loom-facade-smoke-runs-");
-  const reviewRun = join(runsRoot, "run.standalone-critical");
-  mkdirSync(reviewRun, { recursive: true });
-  const initial = asSpawnBatch(run(cwd, [
-    "start", "standalone-review", "--runs-root", runsRoot, "--run", reviewRun,
-  ], JSON.stringify({ kind: "comments", files: [changedPath], dryRun: false })), "standalone start");
+  const { cwd, changedPath, runsRoot, reviewRun, initial } =
+    startedStandaloneReview("standalone-critical", "standalone start", "comments");
   assertBatchReplay(cwd, runsRoot, reviewRun, initial, "standalone initial batch");
 
   let next: unknown = initial;
@@ -548,14 +542,18 @@ function criticalRemediationSmoke(): void {
   process.stdout.write("  ✓ surviving critical → fresh required report → repair-checked exact index installation\n");
 }
 
-/** A started `kind: "all"` Standalone Review over a fresh changed repository,
- *  with its run evidence in its own runs root. */
+/** A started Standalone Review over a fresh changed repository, with its run
+ *  evidence in its own runs root: the one construction path every Standalone
+ *  Review smoke over a changed repository starts from. */
 type StartedStandaloneReview = ReviewRunFixture & Readonly<{
   changedPath: string;
   initial: SpawnBatch;
 }>;
 
-function startedStandaloneReview(label: string, startLabel: string): StartedStandaloneReview {
+/** The review kinds the smokes start: every reviewer, or the comment reviewers only. */
+type StandaloneReviewKind = "all" | "comments";
+
+function startedStandaloneReview(label: string, startLabel: string, kind: StandaloneReviewKind = "all"): StartedStandaloneReview {
   const { cwd, changedPath } = changedStandaloneRepository(label);
 
   const runsRoot = freshRunsRoot("loom-facade-smoke-runs-");
@@ -563,7 +561,7 @@ function startedStandaloneReview(label: string, startLabel: string): StartedStan
   mkdirSync(reviewRun, { recursive: true });
   const initial = asSpawnBatch(run(cwd, [
     "start", "standalone-review", "--runs-root", runsRoot, "--run", reviewRun,
-  ], JSON.stringify({ kind: "all", files: [changedPath], dryRun: false })), startLabel);
+  ], JSON.stringify({ kind, files: [changedPath], dryRun: false })), startLabel);
   return { cwd, changedPath, runsRoot, reviewRun, initial };
 }
 

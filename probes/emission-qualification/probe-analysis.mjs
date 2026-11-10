@@ -108,17 +108,19 @@ function wireToolFields(spec, record) {
   const fn = toolDef.function ?? toolDef;
   const frozen = JSON.parse(spec.schemaBytes);
   const wireParamsEqualFrozen = deepEqual(fn.parameters, frozen);
-  const wireKeys = Object.keys(fn.parameters ?? {});
   return {
     toolSent: true,
     strictFlag: fn.strict,
     wireToolDef: toolDef,
     wireParamsEqualFrozen,
-    ...(wireParamsEqualFrozen
-      ? {}
-      : { wireParamsNote: `wire top-level keys [${wireKeys.join(", ")}] vs frozen [${Object.keys(frozen).join(", ")}]` }),
+    ...(wireParamsEqualFrozen ? {} : { wireParamsNote: wireParamsNote(fn.parameters, frozen) }),
     responseFormat: record.request.response_format ?? undefined,
   };
+}
+
+/** Why the wire parameters differ from the frozen schema: their top-level keys side by side. */
+function wireParamsNote(wireParameters, frozen) {
+  return `wire top-level keys [${Object.keys(wireParameters ?? {}).join(", ")}] vs frozen [${Object.keys(frozen).join(", ")}]`;
 }
 
 /** The tool call the response stream assembled, and its raw arguments judged against the detectors. */

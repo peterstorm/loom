@@ -36,7 +36,7 @@ import type {
   SpecParseError,
 } from "./parse-spec";
 import { specParseErrorMessage } from "./parse-spec";
-import { parseArtifactDigest, type ArtifactDigest, mapNonEmpty, nonEmptyOf } from "./orchestration-contract";
+import { parseArtifactDigest, type ArtifactDigest, mapNonEmpty, nonEmpty } from "./orchestration-contract";
 
 /**
  * The families a Task may legitimately claim to have completed. `OOS` is
@@ -720,14 +720,17 @@ Readonly<{ ok: false; error: string }> {
       if (!parsed.ok) return parsed;
       errors.push(parsed.value);
     }
-    const [head, ...tail] = errors;
+    const parsedErrors = nonEmpty(errors);
+    if (parsedErrors === null) {
+      return Object.freeze({ ok: false, error: "spec_index_observation.reason unparsed shape is malformed" });
+    }
     return Object.freeze({
       ok: true,
       value: Object.freeze({
         kind: "unparsed",
         path: record.path,
         contentDigest: digest.value,
-        errors: nonEmptyOf(head, ...tail),
+        errors: parsedErrors,
       }),
     });
   }

@@ -115,8 +115,8 @@ import {
   type PiEmissionReadinessRegistration,
 } from "./emission-readiness";
 import { piBashCommand, piWriteTargetPaths, replacePiSpawnTask } from "./tool-input";
-import { piParentVerifyImportDecision, piSubagentAuthorityDecision } from "./subagent-authority-gate";
-import { markPiParentEnvironment, unmarkedSubagentLaunchNotice } from "./subagent-process";
+import { piBashAuthorityDecision } from "./subagent-authority-gate";
+import { currentPiProcessMarker, markPiParentEnvironment, unmarkedSubagentLaunchNotice } from "./subagent-process";
 import {
   registerPiEmissionLaunchBridge,
   type PiSubagentLaunchEventBus,
@@ -304,7 +304,7 @@ export default function (
   // Read the unmarked-launch notice BEFORE marking: a process launched like a
   // headless child but carrying no marker is a parent by the marker rule, and
   // a launcher that dropped the environment would leave the D6 gate inert.
-  const unmarkedLaunch = unmarkedSubagentLaunchNotice(process.env, process.argv);
+  const unmarkedLaunch = unmarkedSubagentLaunchNotice(currentPiProcessMarker(), process.argv);
   if (unmarkedLaunch !== null) process.stderr.write(`loom(pi): ${unmarkedLaunch}\n`);
   markPiParentEnvironment(null);
   pi.on("resources_discover", () => {
@@ -389,15 +389,6 @@ export default function (
         }
       }
 
-      // Subagent authority (ADR-0067 D6): in a subagent process, bash may not
-      // change audit or orchestration authority. Inert in the parent session.
-      // The Claude Code twin is the guard-subagent-authority hook.
-      if (event.toolName === "bash") {
-        currentGuard = "guard-subagent-authority";
-        const authority = piSubagentAuthorityDecision(event, ctx);
-        if (authority !== undefined) return authority;
-      }
-
       // Guard state file from bash writes
       if (event.toolName === "bash") {
         currentGuard = "guard-state-file";
@@ -432,12 +423,15 @@ export default function (
         }
       }
 
-      // ADR-0067: the parent's `security-audit verify --from` imports only a
-      // verification run its persisted capture attestations prove.
+      // Bash authority (ADR-0067), one decision dispatching on this process's
+      // role: a subagent may not change audit or orchestration authority (D6,
+      // the Claude Code twin is the guard-subagent-authority hook); a parent's
+      // `security-audit verify --from` imports only a run its persisted
+      // capture attestations prove.
       if (event.toolName === "bash") {
-        currentGuard = "security-verification-import";
-        const imported = await piParentVerifyImportDecision(event, ctx);
-        if (imported !== undefined) return imported;
+        currentGuard = "bash-authority";
+        const authority = await piBashAuthorityDecision(event, ctx);
+        if (authority !== undefined) return authority;
       }
 
       // Subagent tool → `prepareSpawnBatch` owns the ordered observe → expand →

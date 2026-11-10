@@ -11,7 +11,7 @@
   "boundaries": [
     {
       "module": "engine/src/linter/",
-      "description": "The linter bounded context. Imports itself, node builtins and the one shared test-file classifier (INV-2); never the hook shells, the parsers or protected state.",
+      "description": "The linter bounded context. Imports itself, node builtins, ts-pattern and the one shared test-file classifier (INV-2); never the hook shells, the parsers or protected state.",
       "allow": [
         "./",
         "engine/src/linter/",
@@ -28,7 +28,7 @@
     },
     {
       "module": "engine/src/core/",
-      "description": "The functional core. Imports itself, the type barrel and the named pure machine/utils leaves only — never config.ts (env-derived facts are injected by the shells); node builtins and packages are per-file grants (perFileAllow / perFileExactAllow), never blanket.",
+      "description": "The functional core. Imports itself, the type barrel, ts-pattern and the named pure machine/utils leaves only — never config.ts (env-derived facts are injected by the shells); node builtins and other packages are per-file grants (perFileAllow / perFileExactAllow), never blanket.",
       "allow": [
         "./",
         "engine/src/core/",
@@ -272,7 +272,7 @@
     },
     {
       "module": "engine/src/parsers/",
-      "description": "Harness and tool OUTPUT scrapers (transcripts, bash output). Import themselves, node builtins and the two shared core vocabularies (tool-vocabulary, claude-record-kind) only.",
+      "description": "Harness and tool OUTPUT scrapers (transcripts, bash output). Import themselves, node builtins, the type barrel, ts-pattern and the two shared core vocabularies (tool-vocabulary, claude-record-kind) only.",
       "allow": [
         "./",
         "engine/src/parsers/",
@@ -290,7 +290,7 @@
     },
     {
       "module": "engine/src/orchestration/",
-      "description": "The orchestration shell: drives the pure core and owns filesystem, protected-state and Git effects. Imports inward (core, utils, pure machine evidence); never the hook handlers, the linter or the parsers.",
+      "description": "The orchestration shell: drives the pure core and owns filesystem, protected-state and Git effects. Imports inward — the core, utils, the type barrel, config, the state manager and the pure machine evidence — plus node builtins, zod and ts-pattern; never the hook handlers, the linter or the parsers.",
       "allow": [
         "./",
         "engine/src/orchestration/",
@@ -320,7 +320,7 @@
     },
     {
       "module": "engine/src/handlers/",
-      "description": "The hook and helper entry points — the outermost shell. May import every inner layer; only the CLI and the routing table may import a handler, never the reverse of that.",
+      "description": "The hook and helper entry points — the outermost shell. May import every inner layer (the core, orchestration, utils, machine, parsers, the linter's index/loader/rule-sources, the type barrel, config, the state manager, the routing table and the two sidecars) plus node builtins, zod and ts-pattern; only the CLI and the routing table may import a handler, never the reverse of that.",
       "allow": [
         "./",
         "engine/src/handlers/",
@@ -348,7 +348,7 @@
     },
     {
       "module": "engine/src/machine/",
-      "description": "The Guarded Skill Machine: a pure reducer core (types, advance, evidence, extraction) and its ledger/report-discovery/task-graph-pointer shell. Imports the core, config and the lock and no-follow filesystem primitives; node builtins only in the shell files granted below.",
+      "description": "The Guarded Skill Machine: a pure reducer core (types, advance, evidence, extraction) and its ledger/report-discovery/task-graph-pointer shell. Imports itself, the core, the type barrel, config, ts-pattern and the lock and no-follow filesystem primitives; node builtins only in the shell files granted below.",
       "allow": [
         "./",
         "engine/src/machine/",
@@ -399,7 +399,7 @@
     },
     {
       "module": "engine/src/utils/",
-      "description": "Shell utilities: filesystem (including the anchored no-follow primitives every shell layer shares), Git, locking and transcript helpers. Import the core, the pure machine evidence, the transcript parser and runtime compatibility; never the hook handlers, orchestration or the CLI.",
+      "description": "Shell utilities: filesystem (including the anchored no-follow primitives every shell layer shares), Git, locking and transcript helpers. Import themselves, the core, the type barrel, the pure machine evidence, the transcript and bash-output parsers, runtime compatibility, node builtins, zod and ts-pattern; never the hook handlers, orchestration or the CLI.",
       "allow": [
         "./",
         "engine/src/utils/",
@@ -422,7 +422,7 @@
     },
     {
       "module": "engine/src/cli.ts",
-      "description": "The process entry point: routes argv to a handler through the routing table.",
+      "description": "The process entry point: routes argv to a handler through the routing table. Imports the routing table, phase init, runtime compatibility, the type barrel, the no-follow filesystem primitives, node builtins and ts-pattern.",
       "allow": [
         "engine/src/handler-routes",
         "engine/src/phase-init",
@@ -436,7 +436,7 @@
     },
     {
       "module": "engine/src/config.ts",
-      "description": "Process configuration: harness detection, protected paths and the task-graph location. Reads env and probes Git; imports the core, the linter's rules-directory layouts and the Git/path utilities it probes with.",
+      "description": "Process configuration: harness detection, protected paths and the task-graph location. Reads env and probes Git; imports the core, the type barrel, the linter's rules-directory layouts, the Git/path utilities it probes with, node builtins and ts-pattern.",
       "allow": [
         "engine/src/core/",
         "engine/src/linter/programmatic/config",
@@ -452,7 +452,7 @@
     },
     {
       "module": "engine/src/handler-routes.ts",
-      "description": "The CLI routing table: pure data over the two helper operation tables.",
+      "description": "The CLI routing table: pure data over the two helper operation tables (its only imports).",
       "allow": [
         "engine/src/handlers/helpers/orchestration-operations",
         "engine/src/handlers/helpers/security-audit-operations"
@@ -461,7 +461,7 @@
     },
     {
       "module": "engine/src/implementation-attempt-sidecar.ts",
-      "description": "The implementation-attempt sidecar file shell.",
+      "description": "The implementation-attempt sidecar file shell. Imports config, the core, the machine, the no-follow filesystem primitives and node builtins.",
       "allow": [
         "engine/src/config",
         "engine/src/core/",
@@ -473,7 +473,7 @@
     },
     {
       "module": "engine/src/phase-init.ts",
-      "description": "Phase initialization from the artifacts found on disk.",
+      "description": "Phase initialization from the artifacts found on disk. Imports the type barrel and the file finder only.",
       "allow": [
         "engine/src/types",
         "engine/src/utils/find-file"
@@ -482,7 +482,7 @@
     },
     {
       "module": "engine/src/runtime-compatibility.ts",
-      "description": "The runtime compatibility probe (installed runtime vs checkout).",
+      "description": "The runtime compatibility probe (installed runtime vs checkout). Imports the core and node builtins only.",
       "allow": [
         "engine/src/core/",
         "node:"
@@ -491,7 +491,7 @@
     },
     {
       "module": "engine/src/state-file-wire.ts",
-      "description": "The protected state file's wire codec.",
+      "description": "The protected state file's wire codec. Imports config, the core, the machine, the type barrel and node builtins.",
       "allow": [
         "engine/src/config",
         "engine/src/core/",
@@ -503,7 +503,7 @@
     },
     {
       "module": "engine/src/state-manager.ts",
-      "description": "The protected state writer: the one module that writes task-graph state.",
+      "description": "The protected state writer: the one module that writes task-graph state. Imports config, the core, the machine, runtime compatibility, the wire codec, the type barrel, the no-follow filesystem primitives and node builtins.",
       "allow": [
         "engine/src/config",
         "engine/src/core/",
@@ -518,7 +518,7 @@
     },
     {
       "module": "engine/src/stop-check-note-sidecar.ts",
-      "description": "The stop-check note sidecar file shell.",
+      "description": "The stop-check note sidecar file shell. Imports config, the core, the pure machine evidence and node builtins.",
       "allow": [
         "engine/src/config",
         "engine/src/core/",

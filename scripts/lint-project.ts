@@ -43,6 +43,7 @@ import type * as LinterIndex from "../engine/src/linter/index.ts";
 import type * as LinterConfig from "../engine/src/linter/programmatic/config.ts";
 import type * as LinterLoader from "../engine/src/linter/loader.ts";
 import type * as ProjectScope from "../engine/src/linter/project-scope.ts";
+import type * as PurityRule from "../engine/src/linter/programmatic/no-io-in-pure-modules.ts";
 import type { ReasonedPath } from "../engine/src/linter/programmatic/config.ts";
 import type * as ProgrammaticRules from "../engine/src/linter/programmatic/index.ts";
 import type * as Baselines from "../engine/src/linter/programmatic/baseline.ts";
@@ -69,6 +70,8 @@ const { CLAUDE_PROJECT_RULES_DIR, PI_PROJECT_RULES_DIR, PROJECT_RULES_LAYOUTS, p
 const { loadProjectConfig }: typeof LinterLoader = await import(join(LOOM_ROOT, "engine/src/linter/loader.ts"));
 const { isLintableName, isNeverSourceDirectory, scopeOf, scopeDrift }: typeof ProjectScope =
   await import(join(LOOM_ROOT, "engine/src/linter/project-scope.ts"));
+const { matchesModulePath }: typeof PurityRule =
+  await import(join(LOOM_ROOT, "engine/src/linter/programmatic/no-io-in-pure-modules.ts"));
 const { baselineOwners }: typeof ProgrammaticRules = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/index.ts"));
 const { staleBaselineEntries }: typeof Baselines = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/baseline.ts"));
 const { configWithBaselines, recordedBaselines }: typeof BaselineConfig =
@@ -114,6 +117,10 @@ function selectRulesDir(): string {
 
 const RULES_DIR = selectRulesDir();
 
+/** The rules directory when it exists, else null — decided once: the config
+ *  loader, the rule loader and `--init` all read this one answer. */
+const EXISTING_RULES_DIR: string | null = existsSync(RULES_DIR) ? RULES_DIR : null;
+
 // ---------------------------------------------------------------------------
 // File walker — everything lintable, minus the project's explicit exclusions
 // ---------------------------------------------------------------------------
@@ -134,6 +141,20 @@ function walkLintable(dir: string): string[] {
   });
 }
 
+let projectWalk: readonly string[] | undefined;
+
+/**
+ * Every lintable file in the project, BEFORE exclusions — walked at most once
+ * per run. The lint set of a full run, the scope-drift universe, `--init`'s
+ * starter roots and `--write-baseline`'s sources all read this one walk, so
+ * they cannot disagree about the tree, and a targeted run with the drift pass
+ * off never walks the project at all.
+ */
+function projectFiles(): readonly string[] {
+  projectWalk ??= walkLintable(PROJECT_ROOT);
+  return projectWalk;
+}
+
 type Scoped = Readonly<{ lint: readonly string[]; excluded: readonly Readonly<{ file: string; reason: string }>[] }>;
 
 /** Split candidate files into those linted and those an exclusion entry removes, with its reason. */
@@ -152,8 +173,10 @@ function applyExclusions(files: readonly string[], exclusions: readonly Reasoned
 // ---------------------------------------------------------------------------
 
 /** The starter programmatic config for a project's detected languages; Java's
- *  settings win where both are present. */
-function starterLinterConfig(hasTs: boolean, hasJava: boolean): Record<string, unknown> {
+ *  settings win where both are present. Each pure root is a candidate, kept
+ *  only when it names a file in the project (`present`): a root that matches
+ *  nothing is stale scoping, which fails the very next run. */
+function starterLinterConfig(hasTs: boolean, hasJava: boolean, present: (root: string) => boolean): Record<string, unknown> {
   const config: Record<string, unknown> = {};
   if (hasTs) {
     // Directory roots (trailing `/`): every non-test file beneath is pure
@@ -162,7 +185,7 @@ function starterLinterConfig(hasTs: boolean, hasJava: boolean): Record<string, u
     config.pureModules = [
       "src/domain/",
       "src/types/",
-    ];
+    ].filter(present);
     config.boundaries = [];
     config.maxFunctionLines = 50;
     config.excludeFromMaxLines = [".test.ts", ".spec.ts"];
@@ -174,7 +197,7 @@ function starterLinterConfig(hasTs: boolean, hasJava: boolean): Record<string, u
     config.pureModules = [
       "domain/model/",
       "domain/service/",
-    ];
+    ].filter(present);
     config.boundaries = [];
     config.maxFunctionLines = 40;
     config.excludeFromMaxLines = [".test.java", "Test.java"];
@@ -185,7 +208,9 @@ function starterLinterConfig(hasTs: boolean, hasJava: boolean): Record<string, u
 const INIT_NEXT_STEPS: readonly string[] = [
   "",
   "Next steps:",
-  "  1. Edit config.json to define your architectural boundaries",
+  "  1. Edit config.json to define your architectural boundaries and the",
+  "     functional core (pureModules lists only the starter roots this",
+  "     project already has)",
   "  2. Add regex rule overrides as .json files in rules/",
   "  3. Run with --write-baseline to grandfather pre-existing unproven",
   "     switches and if-chains (switch-totality applies to every TypeScript",
@@ -206,7 +231,7 @@ const INIT_NEXT_STEPS: readonly string[] = [
 ];
 
 function initLinterConfig(): void {
-  if (existsSync(RULES_DIR)) {
+  if (EXISTING_RULES_DIR !== null) {
     console.log(`Linter rules directory already exists: ${relative(PROJECT_ROOT, RULES_DIR)}`);
     console.log("To add rules, create .json files there. See loom lint-rules/README.md.");
     return;
@@ -221,9 +246,11 @@ function initLinterConfig(): void {
     existsSync(join(PROJECT_ROOT, "build.gradle")) ||
     existsSync(join(PROJECT_ROOT, "build.gradle.kts"));
 
+  const files = projectFiles().map(projectPath);
+  const hasFileUnder = (root: string): boolean => files.some((file) => matchesModulePath(file, root));
   writeFileSync(
     join(RULES_DIR, "config.json"),
-    JSON.stringify(starterLinterConfig(hasTs, hasJava), null, 2) + "\n",
+    JSON.stringify(starterLinterConfig(hasTs, hasJava, hasFileUnder), null, 2) + "\n",
   );
 
   console.log(`✓ Created ${relative(PROJECT_ROOT, RULES_DIR)}/`);
@@ -280,6 +307,18 @@ function parseArgs(args: string[]): CliOpts {
 // Baseline drift — a grandfathered list nobody re-checks rots silently
 // ---------------------------------------------------------------------------
 
+/** The project's config, parsed strictly once; a refusal ends the run (exit 2). */
+function projectConfig(): LinterConfig.ProgrammaticConfig {
+  try {
+    return loadProjectConfig(EXISTING_RULES_DIR);
+  } catch (error) {
+    console.error(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(2);
+  }
+}
+
+const owners = (config: LinterConfig.ProgrammaticConfig): readonly BaselineOwner[] => baselineOwners(config, PROJECT_ROOT);
+
 /**
  * A list that only ever suppresses violations cannot report its own decay: a
  * deleted, renamed or since-proven site costs nothing. So every rule that keeps
@@ -295,18 +334,6 @@ function parseArgs(args: string[]): CliOpts {
  * config and keyed relative to its root, so the drift report means the same in
  * a target repository as in loom.
  */
-/** The project's config, parsed strictly once; a refusal ends the run (exit 2). */
-function projectConfig(): LinterConfig.ProgrammaticConfig {
-  try {
-    return loadProjectConfig(existsSync(RULES_DIR) ? RULES_DIR : null);
-  } catch (error) {
-    console.error(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
-    process.exit(2);
-  }
-}
-
-const owners = (config: LinterConfig.ProgrammaticConfig): readonly BaselineOwner[] => baselineOwners(config, PROJECT_ROOT);
-
 function baselineDrift(config: LinterConfig.ProgrammaticConfig): string[] {
   const readSource = (path: string): string | null => {
     const absolute = join(PROJECT_ROOT, path);
@@ -335,7 +362,7 @@ function baselineDrift(config: LinterConfig.ProgrammaticConfig): string[] {
 function writeBaseline(config: LinterConfig.ProgrammaticConfig): void {
   const projectOwners = owners(config);
   const extensions = new Set(projectOwners.flatMap((owner) => owner.extensions));
-  const sources = applyExclusions(walkLintable(PROJECT_ROOT), config.exclude ?? []).lint
+  const sources = applyExclusions(projectFiles(), config.exclude ?? []).lint
     .filter((file) => extensions.has(extname(file)))
     .map((file) => ({ path: projectPath(file), content: readFileSync(file, "utf-8") }));
   const recorded = recordedBaselines(projectOwners, sources);
@@ -372,22 +399,24 @@ if (opts.writeBaseline) {
   process.exit(0);
 }
 
-// Resolve project rules dir (null if doesn't exist — lintFiles handles gracefully)
-const projectRulesDir = existsSync(RULES_DIR) ? RULES_DIR : null;
 const exclusions = config.exclude ?? [];
 
-/** Candidate files: the explicit arguments (a file exactly; a directory walked),
- *  or the whole project. The exclusion list applies to every candidate. */
-function candidates(): string[] {
-  if (opts.paths.length === 0) return walkLintable(PROJECT_ROOT);
+/**
+ * Candidate files: the explicit arguments (a file exactly; a directory walked),
+ * or the whole project. The exclusion list applies to every candidate. A path
+ * argument that does not exist ends the run (exit 2) before anything is linted:
+ * a mistyped path must not pass as a clean one.
+ */
+function candidates(): readonly string[] {
+  if (opts.paths.length === 0) return projectFiles();
+  const missing = opts.paths.filter((pattern) => statSync(resolve(pattern), { throwIfNoEntry: false }) === undefined);
+  if (missing.length > 0) {
+    console.error(`ERROR: ${missing.join(", ")} ${missing.length === 1 ? "does" : "do"} not exist — nothing was linted`);
+    process.exit(2);
+  }
   return opts.paths.flatMap((pattern) => {
     const resolved = resolve(pattern);
-    const stat = statSync(resolved, { throwIfNoEntry: false });
-    if (!stat) {
-      console.error(`WARNING: ${pattern} does not exist, skipping`);
-      return [];
-    }
-    return stat.isDirectory() ? walkLintable(resolved) : [resolved];
+    return statSync(resolved).isDirectory() ? walkLintable(resolved) : [resolved];
   });
 }
 
@@ -401,6 +430,13 @@ if (!opts.json) {
 }
 
 if (files.length === 0) {
+  // An empty project has nothing to lint. Paths that were named and yield no
+  // file — every one excluded, or a directory with no lintable source — are a
+  // run that checked nothing, and must not read as a pass.
+  if (opts.paths.length > 0) {
+    console.error(`ERROR: ${opts.paths.join(", ")} yielded no file to lint (${scoped.excluded.length} excluded by config) — nothing was linted`);
+    process.exit(2);
+  }
   console.log("No source files found to lint.");
   process.exit(0);
 }
@@ -428,7 +464,7 @@ const BATCH_TIMEOUT_MS = 10_000;
 const allViolations: ViolationRecord[] = [];
 let errorCount = 0;
 
-for (const [file, result] of lintFiles(files, opts.tier, DEFAULT_RULES_DIR, projectRulesDir, BATCH_TIMEOUT_MS)) {
+for (const [file, result] of lintFiles(files, opts.tier, DEFAULT_RULES_DIR, EXISTING_RULES_DIR, BATCH_TIMEOUT_MS)) {
   if (result.kind === "violations" && result.violations.length > 0) {
     for (const v of result.violations) {
       allViolations.push({
@@ -456,7 +492,7 @@ for (const [file, result] of lintFiles(files, opts.tier, DEFAULT_RULES_DIR, proj
 // unnoticed. Scoping drift is judged against the whole project's files, never
 // a targeted run's subset.
 const driftLines = opts.baselineCheck && opts.tier === "full"
-  ? [...baselineDrift(config), ...scopeDrift(config, walkLintable(PROJECT_ROOT).map(projectPath))]
+  ? [...baselineDrift(config), ...scopeDrift(config, projectFiles().map(projectPath))]
   : [];
 
 // ONE failure predicate for every output mode. A file the linter could not read

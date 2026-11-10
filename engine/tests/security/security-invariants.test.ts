@@ -21,7 +21,7 @@ import {
   type UnitResult,
 } from "../../src/core/security-coverage";
 import { parseSecurityFindings, type SecurityFinding } from "../../src/core/security-findings";
-import { renderRunDocuments } from "../../src/core/security-reports";
+import { derivePublication, type RunDocuments } from "../../src/core/security-reports";
 import {
   HUNTER_AGENT as HUNTER,
   aConfirmedFinding,
@@ -116,11 +116,11 @@ const aFindingSet = (): readonly SecurityFinding[] =>
 describe("published documents are order-invariant (INV-S6b)", () => {
   it("renders the same bytes for every permutation of the finding set", () => {
     const ledger = ok(recordUnitResult(anAssignedLedger(), aResult({ status: "covered" })));
-    const baseline = renderRunDocuments({ metadata, ledger, findings: aFindingSet(), locator: "/out" });
+    const baseline = ok(derivePublication({ metadata, ledger, findings: aFindingSet(), locator: "/out" }));
     const set = [...aFindingSet()];
     fc.assert(
       fc.property(fc.shuffledSubarray(set, { minLength: set.length, maxLength: set.length }), (shuffled) => {
-        expect(renderRunDocuments({ metadata, ledger, findings: shuffled, locator: "/out" })).toEqual(baseline);
+        expect(ok(derivePublication({ metadata, ledger, findings: shuffled, locator: "/out" }))).toEqual(baseline);
       }),
       { numRuns: 25 },
     );
@@ -128,10 +128,10 @@ describe("published documents are order-invariant (INV-S6b)", () => {
 
   it("orders each document's entries by fingerprint, not by arrival", () => {
     const ledger = ok(recordUnitResult(anAssignedLedger(), aResult({ status: "covered" })));
-    const documents = renderRunDocuments({ metadata, ledger, findings: aFindingSet(), locator: "/out" });
+    const { documents } = ok(derivePublication({ metadata, ledger, findings: aFindingSet(), locator: "/out" }));
     // Each document carries the verdicts it is about; within one, order follows
     // the fingerprint, so a reader comparing two runs sees the same sequence.
-    const expectations: readonly (readonly [document: string, fingerprints: readonly string[]])[] = [
+    const expectations: readonly (readonly [document: keyof RunDocuments, fingerprints: readonly string[]])[] = [
       ["FINDINGS-DETAIL.md", ["a/first", "b/second"]],
       ["NEEDS-VALIDATION.md", ["c/third"]],
       // REPORT.md's needs-validation table names a lead by TITLE, not by
@@ -139,7 +139,7 @@ describe("published documents are order-invariant (INV-S6b)", () => {
       ["REPORT.md", ["a/first", "b/second", "d/fourth"]],
     ];
     for (const [document, fingerprints] of expectations) {
-      const body = documents[document] ?? "";
+      const body = documents[document];
       const positions = fingerprints.map((fingerprint) => body.indexOf(fingerprint));
       expect(positions.every((position) => position >= 0), document).toBe(true);
       expect([...positions].sort((left, right) => left - right), document).toEqual(positions);

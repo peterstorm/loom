@@ -35,7 +35,7 @@ export const CAPTURE_ATTESTATION_KIND = "security-capture-attestation" as const;
 
 declare const mintedAttestation: unique symbol;
 
-/** An attestation's fields before the brand: what `isCaptureAttestation` proves. */
+/** An attestation's fields before the brand: what `mintCaptureAttestation` proves. */
 type CaptureAttestationRecord = Readonly<{
   schemaVersion: 1;
   kind: typeof CAPTURE_ATTESTATION_KIND;
@@ -94,9 +94,10 @@ const idsBounded = (ids: Pick<CaptureAttestationRecord, "runId" | "runDirectory"
 const measureBounded = (measure: Pick<CaptureAttestationRecord, "digest" | "byteLength">): boolean =>
   SHA256_HEX.test(measure.digest) && Number.isSafeInteger(measure.byteLength) && measure.byteLength >= 0;
 
-/** The brand's one proof: every field inside its bound. */
-const isCaptureAttestation = (record: CaptureAttestationRecord): record is CaptureAttestation =>
-  idsBounded(record) && measureBounded(record);
+/** The brand's one minting step. Only `mintCaptureAttestation` calls it, and
+ *  only after every field passed its bound there: the proof is those checks,
+ *  stated once, and this step only records it in the type. */
+const asMinted = (record: CaptureAttestationRecord): CaptureAttestation => record as CaptureAttestation;
 
 /** The store entry name of the attestation for one (run directory, request):
  *  a record stored under any other name is refused on read, so an entry cannot
@@ -127,11 +128,10 @@ export function mintCaptureAttestation(fields: CaptureAttestationFields): Domain
   if (typeof digest !== "string" || typeof byteLength !== "number" || !measureBounded({ digest, byteLength })) {
     return failure("carries a malformed digest or length");
   }
-  const record: CaptureAttestationRecord = {
+  return success(asMinted({
     schemaVersion: 1, kind: CAPTURE_ATTESTATION_KIND, program: SECURITY_VERIFICATION_PROGRAM,
     runId, runDirectory, requestId, slotId, attempt, role: SECURITY_VERIFIER_ROLE, harness, nativeId, digest, byteLength,
-  };
-  return isCaptureAttestation(record) ? success(record) : failure("is malformed");
+  }));
 }
 
 /** Parse one stored attestation: exact keys, the fixed schema version, kind,

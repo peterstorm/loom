@@ -131,7 +131,7 @@ loom helper security-audit start --out ../audit-run-1 --repo . \
                           "subsystem": "auth", "attack_class": "injection" },
                "starting_paths": ["src/api/login.ts"],
                "ordinary_attack_class_block": "…",
-               "selected_companion_blocks": ["WEB-PROTOCOL-AND-AUTH.md#authentication-and-session-handling"] } ],
+               "selected_companion_blocks": ["WEB-PROTOCOL-AND-AUTH.md#browser-session-attack-classes"] } ],
   "signals": { "languages": ["ts"], "servesHttp": true } }
 JSON
 
@@ -157,6 +157,12 @@ loom helper security-audit disposition --out ../audit-run-1
 loom helper security-audit status  --out ../audit-run-1 [--json]
 ```
 
+A companion block is named `<LENS.md>#<section>`: the lens file and the slug of
+one of its section headings (`#browser-session-attack-classes` is
+`## Browser-session attack classes` in `WEB-PROTOCOL-AND-AUTH.md`). The engine
+records the reference as text and does not resolve it, so name a heading the lens
+really has.
+
 `assign --agent` names a catalog agent; it prints `assigned <coverage-id> to
 owner <owner-id> at wave <n>`, and the hunter settles under exactly that owner id
 (`security-hunter-agent`, or `security-hunter-agent--2` after a reassignment).
@@ -169,7 +175,17 @@ The hunter returns its own envelope,
 `{ "schemaVersion": 1, "kind": "security-hunter-result", "units": [...], "findings": [...] }`
 (`units` required, `findings` optional), and `submit` refuses any other. A
 fingerprint the run already holds, re-filed with different content, is refused
-before anything is written; a verbatim re-file is kept once.
+before anything is written; a verbatim re-file is kept once. A filing of a defect
+the run already holds under another fingerprint (same sink, same root cause) is
+absorbed into the held record, and `submit` says so —
+`absorbed <fingerprint>: same sink and root cause as <kept>, …` — so check the
+claim against the kept record rather than assuming it was recorded.
+
+`merge-critic` reads the critic document alone, or wrapped as
+`{ "critic": …, "reassignmentReasons": { "<coverage-id>": "<why>" }, "priorLeadOwners": { "<fingerprint>": "<coverage-id>" } }`.
+Every id in `reassignIds` needs its reason — the archived attempt records it,
+and a reassignment without one is refused (`missing-reassignment-reason`) — and
+every resolved prior lead needs the coverage id of the unit that carries it.
 
 Verification ballots never travel on stdin. A verification run is issued
 against the ledger and findings as they stand, so start it only after the

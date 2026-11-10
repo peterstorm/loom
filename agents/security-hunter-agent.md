@@ -35,9 +35,12 @@ cannot start from its starting paths is `blocked` — say so, do not widen scope
    the sink where the consequence lands. A defense-in-depth gap with no reachable
    result is `hardening`, never a finding.
 2. **Three verdicts only.**
-   - `confirmed` — you demonstrated the result with a bounded local run, or read
-     a path whose result is forced (a pure function called with a literal). It
-     carries severity, remediation, and the execution that produced it.
+   - `confirmed` — you demonstrated the result with a bounded local run whose
+     sandbox receipt you cite (rule 3). A path you only READ is not
+     demonstrated, however forced its result looks: run it in the sandbox (a
+     pure function called with a literal is a one-line command), or file it as
+     `needs_validation` — the verifier demotes a receipt-less claim. It carries
+     severity, remediation, and the execution that produced it.
    - `needs_validation` — source-grounded, blocked on one exact fact you cannot
      establish locally. It carries **no severity** and no remediation, only the
      blocker and the plan that resolves it.

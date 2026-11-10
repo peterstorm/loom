@@ -30,6 +30,14 @@
  *   disposition-runs/        the runs root the handoff command names for remediation
  *   REPORT.md / FINDINGS-DETAIL.md / NEEDS-VALIDATION.md   derived prose (publish)
  *
+ * `start` commits a fresh run the way `publish` commits a publication: every
+ * new document is staged beside its final name first, the previous run (its
+ * documents and its `verification-runs/`) is cleared only once all of them
+ * staged, and the staged documents are then moved into place with `run.json`
+ * LAST. A failed staging write leaves the previous run untouched; a failure
+ * after that leaves no `run.json`, so the directory reads as holding no run —
+ * never as a run whose documents disagree.
+ *
  * Every read is fail-closed and parsed by the core that owns the document, so a
  * hand-edited or half-written file stops the run with a named violation instead
  * of flowing into a report. Writes go through the no-follow filesystem helpers:
@@ -56,10 +64,12 @@ import { compareStrings } from "../../core/ordering";
 import {
   ensureDirectoryNoFollow,
   ensureResolvedBaseDirectory,
+  publishStagedRunFile,
   resolveBaseDirectory,
   writeRunFileExclusiveNoFollow,
   writeRunFileNoFollow,
 } from "../../utils/no-follow-fs";
+import { describeCause } from "../../utils/describe-cause";
 import {
   admitWave,
   isWireRecord,
@@ -89,7 +99,7 @@ import {
   type CoverageLedger,
   type UnitResult,
 } from "../../core/security-coverage";
-import { fileCandidates, parseSecurityFindings, type SecurityFinding } from "../../core/security-findings";
+import { fileCandidates, parseSecurityFindings, type Absorption, type SecurityFinding } from "../../core/security-findings";
 import { adjudicateRun } from "../../core/security-adjudication";
 import {
   importVerificationResult,
@@ -115,9 +125,9 @@ import {
 import { SECURITY_AUDIT_RUN_FILES } from "../../core/audit-run-authority";
 import { registerSecurityAuditRun } from "../../orchestration/security-audit-run-registry";
 import { renderLensSelection, type LensSelection } from "../../core/security-lens-select";
-import { dispositionHandoffPaths, renderDispositionHandoff, securityDisposition, standaloneDispositionStart } from "../../core/security-disposition";
+import { renderDispositionHandoff, securityDisposition, standaloneDispositionStart } from "../../core/security-disposition";
 import { DEFAULT_SANDBOX_LIMITS, bindSandboxRun, judgeLocalReceipt, renderSandboxInstructions } from "../../core/security-sandbox";
-import { renderRunDocuments } from "../../core/security-reports";
+import { derivePublication } from "../../core/security-reports";
 import { argumentValue, hasFlag, unconsumedValueArguments } from "./cli-args";
 import {
   parseSecurityAuditOperation,
@@ -138,15 +148,13 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set([
   "--out", "--repo", "--source", "--profile", "--budget", "--run-id", "--unit", "--agent", "--wave", "--reason", "--artifact", "--from",
 ]);
 
-const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-
 /** Every stdin payload's first step: strict JSON, or a refusal naming the
  *  operation whose input it was. */
 function parseJsonInput(label: SecurityAuditOperation, stdin: string): DomainResult<unknown, string> {
   try {
     return success(JSON.parse(stdin));
   } catch (error) {
-    return failure(`${label} input is not valid JSON: ${describe(error)}`);
+    return failure(`${label} input is not valid JSON: ${describeCause(error)}`);
   }
 }
 
@@ -160,12 +168,22 @@ type Store = Readonly<{
   out: string;
   has: (file: string) => boolean;
   write: (file: string, value: string, options?: Readonly<{ exclusive?: boolean }>) => DomainResult<void, string>;
-  /** Remove every document this run directory may hold, for `start --force`. A
-   *  new run must not inherit the previous run's records: `findings.json`,
-   *  `security-findings.json` and `disposition.json` from an older run would
-   *  otherwise enter the new run's adjudication as if this run had filed them. */
-  clear: () => DomainResult<readonly string[], string>;
+  /** Commit a fresh run's documents as one replacement (`replaceRunDocuments`).
+   *  With `reset` (`start --force`), every document of the previous run goes
+   *  first: `findings.json`, `security-findings.json` and `disposition.json`
+   *  from an older run would otherwise enter the new run's adjudication as if
+   *  this run had filed them, and its verification runs would sit under the
+   *  new run's root. */
+  replaceRun: (documents: FreshDocuments, reset: boolean) => DomainResult<void, string>;
 }>;
+
+/** A fresh run's documents in commit order: `run.json`, the commit marker, is
+ *  the LAST entry by construction (`writeFreshRun` builds the list). */
+type FreshDocuments = readonly (readonly [file: string, content: string])[];
+
+/** The suffix a fresh document is staged under, beside its final name (a
+ *  staged file is published by a rename inside the run directory). */
+const STAGED_SUFFIX = ".start-staged";
 
 /** Write one run document through the no-follow helpers: a symlinked run file is
  *  refused rather than written through, and an exclusive write fails when the
@@ -186,23 +204,66 @@ function writeAt(
     else writeRunFileNoFollow(path, value);
     return success(undefined);
   } catch (error) {
-    return failure(`cannot write ${path}: ${describe(error)}`);
+    return failure(`cannot write ${path}: ${describeCause(error)}`);
   }
 }
 
-/** Remove every document of a previous run, naming what went. */
-function clearRunDocuments(root: string): DomainResult<readonly string[], string> {
-  const removed: string[] = [];
+/** Remove every document of a previous run and its verification runs (whose
+ *  runs are bound to the previous run's ledger, and would otherwise sit under
+ *  the new run's root as if this run had issued them). */
+function clearRunDocuments(root: string): DomainResult<void, string> {
+  const runs = verificationRunsRoot(root);
+  // A runs root planted as a symlink is refused, never removed or followed:
+  // the run directory's own subdirectories are held to the no-follow rule.
+  if (existsSync(runs) && lstatSync(runs).isSymbolicLink()) {
+    return failure(`cannot reset ${root}: ${runs} must not be a symbolic link`);
+  }
   try {
     for (const file of RUN_DOCUMENTS) {
       const path = join(root, file);
-      if (!existsSync(path)) continue;
-      rmSync(path);
-      removed.push(file);
+      if (existsSync(path)) rmSync(path);
     }
-    return success(removed);
+    rmSync(runs, { recursive: true, force: true });
+    return success(undefined);
   } catch (error) {
-    return failure(`cannot reset ${root}: ${describe(error)}`);
+    return failure(`cannot reset ${root}: ${describeCause(error)}`);
+  }
+}
+
+/** Remove whatever staged files a failed `start` left; best effort, because the
+ *  refusal that called it is the error the operator must see. */
+function discardStaged(root: string, documents: FreshDocuments): void {
+  for (const [file] of documents) rmSync(join(root, `${file}${STAGED_SUFFIX}`), { force: true });
+}
+
+/**
+ * Replace the run in `root` with `documents`: stage every one beside its
+ * final name, then (with `reset`) clear the previous run, then move each
+ * staged file into place in order — `run.json` last, so it is the commit
+ * point. Nothing of the previous run is touched until every new document
+ * staged.
+ */
+function replaceRunDocuments(root: string, documents: FreshDocuments, reset: boolean): DomainResult<void, string> {
+  for (const [file, content] of documents) {
+    const staged = writeAt(root, `${file}${STAGED_SUFFIX}`, content);
+    if (!staged.ok) {
+      discardStaged(root, documents);
+      return staged;
+    }
+  }
+  if (reset) {
+    const cleared = clearRunDocuments(root);
+    if (!cleared.ok) {
+      discardStaged(root, documents);
+      return cleared;
+    }
+  }
+  try {
+    for (const [file] of documents) publishStagedRunFile(join(root, `${file}${STAGED_SUFFIX}`), join(root, file));
+    return success(undefined);
+  } catch (error) {
+    discardStaged(root, documents);
+    return failure(`cannot commit the fresh run in ${root}: ${describeCause(error)}`);
   }
 }
 
@@ -231,7 +292,7 @@ function canonicalRunDirectory(out: string, writes: boolean): DomainResult<strin
     return success(join(writes ? ensureResolvedBaseDirectory(base) : resolveBaseDirectory(base), basename(spelled)));
   } catch (error) {
     if (!writes && (error as NodeJS.ErrnoException).code === "ENOENT") return success(spelled);
-    return failure(`cannot resolve the base of run directory ${spelled}: ${describe(error)}`);
+    return failure(`cannot resolve the base of run directory ${spelled}: ${describeCause(error)}`);
   }
 }
 
@@ -247,14 +308,14 @@ function openStore(out: string, writes: boolean): DomainResult<Store, string> {
     try {
       ensureDirectoryNoFollow(root);
     } catch (error) {
-      return failure(`cannot prepare run directory ${root}: ${describe(error)}`);
+      return failure(`cannot prepare run directory ${root}: ${describeCause(error)}`);
     }
   }
   return success({
     out: root,
     has: (file) => existsSync(join(root, file)),
     write: (file, value, options) => writeAt(root, file, value, options),
-    clear: () => clearRunDocuments(root),
+    replaceRun: (documents, reset) => replaceRunDocuments(root, documents, reset),
   });
 }
 
@@ -290,14 +351,6 @@ const readFindings = (store: Store): DomainResult<readonly SecurityFinding[], st
  *  their absence is a refusal rather than an empty list. */
 const readPublished = (store: Store): DomainResult<readonly SecurityFinding[], string> =>
   readRunDocument<readonly SecurityFinding[]>(store.out, FILES.published, parseSecurityFindings);
-
-/** The four documents adjudication reads, read ONCE through the shared seam:
- *  `findings`, `publish`, `status` and `verify --from` each project this one
- *  snapshot, so no projection reads a document twice or pairs a ledger with
- *  ballots from a different moment. */
-type RunSnapshot = AuditSnapshot;
-
-const readSnapshot = (store: Store): DomainResult<RunSnapshot, string> => readAuditSnapshot(store.out);
 
 /**
  * The run metadata of a run that may still change. A published run is CLOSED:
@@ -365,7 +418,7 @@ function readSourceRevision(repo: string, explicit: string | null): DomainResult
       ? success({ commit, worktreeDirty: status !== "" })
       : failure(`git in ${repo} returned an unexpected revision ${JSON.stringify(commit)}`);
   } catch (error) {
-    return failure(`cannot read the source revision in ${repo}: ${describe(error)} (pass --source to pin it explicitly)`);
+    return failure(`cannot read the source revision in ${repo}: ${describeCause(error)} (pass --source to pin it explicitly)`);
   }
 }
 
@@ -396,24 +449,26 @@ function startInputs(store: Store, args: readonly string[], stdin: string): Doma
   return success({ repo, profile: profile.value, budget: budget.value, payload: payload.value, ledger: ledger.value });
 }
 
-/** Write the five documents a fresh run starts with. One place, so a new file
- *  in the run directory is added to exactly one list (`FILES`). */
+/** Commit the five documents a fresh run starts with, `run.json` last (the
+ *  commit point). One place, so a new file in the run directory is added to
+ *  exactly one list (`FILES`). */
 function writeFreshRun(
   store: Store,
   documents: Readonly<{ metadata: SecurityRunMetadata; ledger: CoverageLedger; selection: LensSelection }>,
+  reset: boolean,
 ): DomainResult<void, string> {
   const { metadata, ledger, selection } = documents;
-  return writeInOrder([
-    () => store.write(FILES.run, json(metadata)),
-    () => store.write(FILES.ledger, json(ledger)),
-    () => store.write(FILES.findings, json([])),
-    () => store.write(FILES.verdicts, json([])),
-    () => store.write(FILES.lenses, json({
+  return store.replaceRun([
+    [FILES.ledger, json(ledger)],
+    [FILES.findings, json([])],
+    [FILES.verdicts, json([])],
+    [FILES.lenses, json({
       selected: selection.included.map((entry) => ({ lens: entry.lens, score: entry.score, reasons: entry.reasons })),
       excluded: selection.excluded,
       rendered: renderLensSelection(selection),
-    })),
-  ]);
+    })],
+    [FILES.run, json(metadata)],
+  ], reset);
 }
 
 function runStart(store: Store, args: readonly string[], stdin: string): DomainResult<string, string> {
@@ -441,14 +496,10 @@ function runStart(store: Store, args: readonly string[], stdin: string): DomainR
   if (!selfCheck.ok) return failure(`run metadata is malformed —\n${describeAuditRefusal(selfCheck.error)}`);
 
   // `--force` starts a NEW run in the same directory, so every document of the
-  // previous run goes: its candidate findings, published records and prose would
-  // otherwise enter this run's adjudication as if this run had produced them.
-  if (hasFlag(args, "--force")) {
-    const cleared = store.clear();
-    if (!cleared.ok) return cleared;
-  }
-
-  const written = writeFreshRun(store, { metadata: started.metadata, ledger, selection: started.selection });
+  // previous run goes — once the new ones are staged: its candidate findings,
+  // published records and prose would otherwise enter this run's adjudication
+  // as if this run had produced them.
+  const written = writeFreshRun(store, { metadata: started.metadata, ledger, selection: started.selection }, hasFlag(args, "--force"));
   if (!written.ok) return written;
   const authority = claimRunAuthority(store.out);
   if (!authority.ok) return authority;
@@ -467,7 +518,7 @@ function claimRunAuthority(out: string): DomainResult<void, string> {
   try {
     ensureDirectoryNoFollow(verificationRunsRoot(out));
   } catch (error) {
-    return failure(`cannot prepare ${verificationRunsRoot(out)}: ${describe(error)}`);
+    return failure(`cannot prepare ${verificationRunsRoot(out)}: ${describeCause(error)}`);
   }
   return registerWithGuard(out);
 }
@@ -647,16 +698,26 @@ function runSubmit(store: Store, args: readonly string[], stdin: string): Domain
   const settlement = settleUnits(ledger.value, results);
   if (!settlement.ok) return settlement;
   const { ledger: next, settled } = settlement.value;
+  const { findings, absorbed } = records.value;
 
   // Findings FIRST, the ledger LAST. If the ledger write fails, the units are
   // still in flight and the findings are already on disk; the retried submit
   // settles them and re-files records the merge recognises, so it converges.
   // The other order lost the findings: the units were settled, and the retry
   // was refused because nothing was in flight any more.
-  const written = writeInOrder([() => store.write(FILES.findings, json(records.value)), () => store.write(FILES.ledger, json(next))]);
+  const written = writeInOrder([() => store.write(FILES.findings, json(findings)), () => store.write(FILES.ledger, json(next))]);
   if (!written.ok) return written;
-  return success(`settled ${settled.length} unit(s); run now holds ${records.value.length} finding record(s)`);
+  return success([
+    `settled ${settled.length} unit(s); run now holds ${findings.length} finding record(s)`,
+    ...absorbed.map(absorptionLine),
+  ].join("\n"));
 }
+
+/** A filed record consolidation absorbed, said out loud: the hunter's claim was
+ *  not recorded under its own fingerprint, and the record that stands for it is
+ *  named so the claim can be checked against it. */
+const absorptionLine = ({ fingerprint, keptAs }: Absorption): string =>
+  `absorbed ${fingerprint}: same sink and root cause as ${keptAs}, which the run keeps in its place`;
 
 /** Settle every result against the ledger in memory; the caller persists once.
  *  A refusal names the unit, so a hunter is not left guessing which one broke. */
@@ -750,7 +811,6 @@ function runMergeCritic(store: Store, args: readonly string[], stdin: string): D
     `accepted ${merged.value.accepted.length} unit(s)`,
     `reassigned ${merged.value.reassigned.length}`,
     `resolved ${merged.value.resolved.length} prior lead(s)`,
-    ...(merged.value.collisions.length === 0 ? [] : [`collisions: ${merged.value.collisions.join(", ")}`]),
     `critic stop: ${critic.value.stop}`,
   ].join("\n"));
 }
@@ -782,7 +842,7 @@ async function runVerify(store: Store, args: readonly string[], stdin: string): 
   if (!run.ok) return run;
   const source = readVerificationSource(store.out, from);
   if (!source.ok) return source;
-  const snapshot = readSnapshot(store);
+  const snapshot = readAuditSnapshot(store.out);
   if (!snapshot.ok) return snapshot;
   // The decision first (authentic audit, current digests, exact coverage),
   // then the proof that result.json is what the captured evidence replays.
@@ -816,7 +876,7 @@ type Adjudicated = Readonly<{ findings: readonly SecurityFinding[]; blockers: re
  * not counted, and its run becomes a named publication blocker, so a ballot
  * written into `verdicts.json` by hand never reaches a report.
  */
-async function adjudicate(snapshot: RunSnapshot): Promise<DomainResult<Adjudicated, string>> {
+async function adjudicate(snapshot: AuditSnapshot): Promise<DomainResult<Adjudicated, string>> {
   const cache = await proveCachedBallots(snapshot);
   const decision = adjudicateRun({ ledger: snapshot.ledger, findings: snapshot.findings, verdicts: cache.admitted });
   if (!decision.ok) {
@@ -834,7 +894,9 @@ async function adjudicate(snapshot: RunSnapshot): Promise<DomainResult<Adjudicat
 async function runFindings(store: Store, args: readonly string[]): Promise<DomainResult<string, string>> {
   const flags = parseFlags(args, ["--out", "--json"]);
   if (!flags.ok) return flags;
-  const snapshot = readSnapshot(store);
+  // Read ONCE: every projection below reads this one snapshot, so none pairs a
+  // ledger with ballots from a different moment.
+  const snapshot = readAuditSnapshot(store.out);
   if (!snapshot.ok) return snapshot;
   const adjudicated = await adjudicate(snapshot.value);
   if (!adjudicated.ok) return adjudicated;
@@ -845,14 +907,15 @@ async function runFindings(store: Store, args: readonly string[]): Promise<Domai
     // second is the fact a machine caller most needs.
     return success(json({ findings: adjudicated.value.findings, publicationBlockers: adjudicated.value.blockers }));
   }
-  const documents = renderRunDocuments({
+  const publication = derivePublication({
     metadata: snapshot.value.run,
     ledger: snapshot.value.ledger,
     findings: adjudicated.value.findings,
     locator: store.out,
   });
+  if (!publication.ok) return failure(`the run's disposition cannot be derived — ${publication.error.message}`);
   return success([
-    documents["REPORT.md"] ?? "",
+    publication.value.documents["REPORT.md"],
     ...(adjudicated.value.blockers.length === 0 ? [] : [
       "## Publication blockers",
       ...adjudicated.value.blockers.map((blocker) => `- ${blocker}`),
@@ -863,7 +926,7 @@ async function runFindings(store: Store, args: readonly string[]): Promise<Domai
 async function runPublish(store: Store, args: readonly string[]): Promise<DomainResult<string, string>> {
   const flags = parseFlags(args, ["--out"]);
   if (!flags.ok) return flags;
-  const snapshot = readSnapshot(store);
+  const snapshot = readAuditSnapshot(store.out);
   if (!snapshot.ok) return snapshot;
   const adjudicated = await adjudicate(snapshot.value);
   if (!adjudicated.ok) return adjudicated;
@@ -882,13 +945,17 @@ async function runPublish(store: Store, args: readonly string[]): Promise<Domain
   const records = parseSecurityFindings(adjudicated.value.findings);
   if (!records.ok) return failure(`adjudicated records are malformed —\n${describeAuditRefusal(records.error)}`);
 
-  const documents = renderRunDocuments({ metadata, ledger, findings: records.value, locator: store.out });
+  // One derivation of the disposition: the report's handoff IS it, and a run
+  // whose disposition cannot be derived is refused here, before any write,
+  // rather than published with the handoff reduced to an error sentence.
+  const publication = derivePublication({ metadata, ledger, findings: records.value, locator: store.out });
+  if (!publication.ok) return failure(`publish refused: the run's disposition cannot be derived — ${publication.error.message}`);
   const complete = status.runStatus === "complete";
   // Commit order: prose, then records, then `run.json` LAST. The `published`
   // flag is the commit point, so a write that fails part-way leaves the run
   // visibly unpublished rather than half-published.
   const written = writeInOrder([
-    ...Object.entries(documents).map(([name, content]) => () => store.write(name, content)),
+    ...Object.entries(publication.value.documents).map(([name, content]) => () => store.write(name, content)),
     () => store.write(FILES.published, json(records.value)),
     () => store.write(FILES.run, json(metadata)),
   ]);
@@ -929,14 +996,13 @@ function runDisposition(store: Store, args: readonly string[]): DomainResult<str
   if (!written.ok) return written;
   const handoff = store.write(FILES.dispositionHandoff, json(start.value));
   if (!handoff.ok) return handoff;
-  const paths = dispositionHandoffPaths(store.out, run.value.runId);
 
   const count = (decision: string): number => disposition.value.entries.filter((entry) => entry.decision === decision).length;
   return success([
     `disposition set written to ${join(store.out, FILES.disposition)}`,
     `${count("accepted")} accepted; ${count("deferred")} deferred; ${count("dismissed")} dismissed`,
     "",
-    renderDispositionHandoff(disposition.value, paths),
+    renderDispositionHandoff(disposition.value),
   ].join("\n"));
 }
 
@@ -957,7 +1023,7 @@ type VerificationStatus = Readonly<{
   retiredRuns: readonly Readonly<{ run: string; reason: string }>[];
 }> | null;
 
-async function verificationStatus(snapshot: RunSnapshot): Promise<DomainResult<VerificationStatus, string>> {
+async function verificationStatus(snapshot: AuditSnapshot): Promise<DomainResult<VerificationStatus, string>> {
   if (snapshot.run.published) return success(null);
   const locator = snapshot.reference.locator;
   const generations = await observeVerificationGenerations(locator);
@@ -987,7 +1053,7 @@ async function verificationStatus(snapshot: RunSnapshot): Promise<DomainResult<V
  *  the JSON and the prose cannot describe different runs. The run's status is
  *  DERIVED from the ledger (`runStatusOf`), never read back from `run.json`'s
  *  copy, which is only as current as the last `start` or `publish`. */
-function statusDocument(snapshot: RunSnapshot, adjudicated: Adjudicated, verification: VerificationStatus) {
+function statusDocument(snapshot: AuditSnapshot, adjudicated: Adjudicated, verification: VerificationStatus) {
   const { run, ledger } = snapshot;
   const summary = summarizeCoverage(ledger);
   const status = runStatusOf(ledger);
@@ -1022,7 +1088,7 @@ function statusDocument(snapshot: RunSnapshot, adjudicated: Adjudicated, verific
 async function runStatus(store: Store, args: readonly string[]): Promise<DomainResult<string, string>> {
   const flags = parseFlags(args, ["--out", "--json"]);
   if (!flags.ok) return flags;
-  const snapshot = readSnapshot(store);
+  const snapshot = readAuditSnapshot(store.out);
   if (!snapshot.ok) return snapshot;
   const adjudicated = await adjudicate(snapshot.value);
   if (!adjudicated.ok) return adjudicated;

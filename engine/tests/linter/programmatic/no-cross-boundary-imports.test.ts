@@ -51,6 +51,30 @@ describe("no-cross-boundary-imports: the generic default and governance", () => 
     expect(boundaryHandler("export const x = 1;\n", "/work/shop/tools/x.ts", domain, options)).toEqual([]);
   });
 
+  describe("the project-relative frame: the project root first, the boundary prefixes as fallback", () => {
+    const ungovernedName = (filePath: string, projectRoot: string | null): string | undefined =>
+      boundaryHandler("export const x = 1;\n", filePath, domain, { requireGovernance: ["src/"], projectRoot })[0]?.fixHint;
+
+    it("strips the root from an absolute path inside it (a trailing slash on the root is the same root)", () => {
+      expect(ungovernedName("/work/shop/src/api/routes.ts", "/work/shop/")).toContain('"src/api/routes.ts" lies under "src/"');
+    });
+
+    it("recovers an absolute path outside the root, or with no root, from the boundary prefixes", () => {
+      expect(ungovernedName("/elsewhere/src/domain/order.ts", "/work/shop")).toBeUndefined();
+      expect(boundaryHandler(`import { db } from "../infra/db";\n`, "/elsewhere/src/domain/order.ts", domain,
+        { requireGovernance: ["src/"], projectRoot: "/work/shop" })).toHaveLength(1);
+      expect(boundaryHandler(`import { db } from "../infra/db";\n`, "/elsewhere/src/domain/order.ts", domain)).toHaveLength(1);
+    });
+
+    it("reads a Windows path in a Windows root with forward slashes", () => {
+      expect(ungovernedName("C:\\work\\shop\\src\\api\\routes.ts", "C:\\work\\shop")).toContain('"src/api/routes.ts" lies under "src/"');
+    });
+
+    it("takes a relative path as project-relative, forward-slashed", () => {
+      expect(ungovernedName("src\\api\\routes.ts", null)).toContain('"src/api/routes.ts" lies under "src/"');
+    });
+  });
+
   it("Loom governs every engine/src directory, and every top-level engine/src file", () => {
     for (const file of [
       "engine/src/handlers/helpers/orchestration.ts",

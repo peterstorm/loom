@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import fc from "fast-check";
 import {
   classifyPurity,
   codeOfLine,
@@ -138,6 +139,36 @@ describe("no-io-in-pure-modules", () => {
       expect(lint(`const q = "a" + process.env.B + "\n`)).toHaveLength(1);
     });
 
+    it("reads past a `//` inside a template literal or a regex literal — neither is a comment", () => {
+      expect(lint("const url = `https://${process.env.HOST}/api`;\n")).toHaveLength(1);
+      expect(lint("const url = `https://example.test/` + process.env.PATH_SUFFIX;\n")).toHaveLength(1);
+      expect(lint("const scheme = /^https?:\\/\\//; const t = Date.now();\n")).toHaveLength(1);
+      expect(lint("if (/a\\/\\/b/.test(s)) Math.random();\n")).toHaveLength(1);
+      expect(lint("const r = [/x\\/\\//, Date.now()];\n")).toHaveLength(1);
+    });
+
+    it("carries template text across lines, so a continuation line's `//` is not a comment either", () => {
+      const content = ["const page = `", "  see https://example.test ${process.env.HOST}", "`;"].join("\n");
+      const violations = lint(content);
+      expect(violations).toHaveLength(1);
+      expect(violations[0].line).toBe(2);
+    });
+
+    it("reads code after a block comment that closes on the same line", () => {
+      expect(lint("/* the shell's clock */ const t = Date.now();\n")).toHaveLength(1);
+    });
+
+    it("still treats a division as a division and the comment after it as a comment", () => {
+      expect(lint("const half = total / 2; // Math.random() lives in the shell\n")).toHaveLength(0);
+      expect(lint("const ratio = (a) / b / c; // process.env is read by the shell\n")).toHaveLength(0);
+    });
+
+    it("ignores an import named in a comment or a string, never one in code", () => {
+      expect(lint(`/* import { readFileSync } from "node:fs"; */\nconst x = 1;\n`)).toHaveLength(0);
+      expect(lint(`const hint = 'import x from "node:fs"';\n`)).toHaveLength(0);
+      expect(lint(`/* a note */ import { readFileSync } from "node:fs";\n`)).toHaveLength(1);
+    });
+
     it("reports multiple violations in one file", () => {
       const content = [
         `import { readFileSync } from "node:fs";`,
@@ -153,6 +184,26 @@ describe("no-io-in-pure-modules", () => {
       expect(codeOfLine(`call("a // b", 'c') // tail`)).toBe(`call("", '') `);
       expect(codeOfLine("x = `${y}` + 1")).toBe("x = `${y}` + 1");
       expect(codeOfLine(`s = "esc \\" quote" + t`)).toBe(`s = "" + t`);
+    });
+
+    it("keeps a `//` inside a template or regex literal, and the code after it", () => {
+      expect(codeOfLine("u = `http://${h}` // tail")).toBe("u = `http://${h}` ");
+      expect(codeOfLine("u = `${'a // b'}` + x")).toBe("u = `${''}` + x");
+      expect(codeOfLine("r = /\\/\\//g; y // tail")).toBe("r = /\\/\\//g; y ");
+      expect(codeOfLine("r = /[/]/; y")).toBe("r = /[/]/; y");
+      expect(codeOfLine("q = a / b // tail")).toBe("q = a / b ");
+      expect(codeOfLine("/* c */ code /* d */")).toBe(" code ");
+    });
+
+    it("leaves an unclosed quote or regex delimiter as code: when in doubt the text is checked", () => {
+      expect(codeOfLine(`x = "open + y`)).toBe(`x = "open + y`);
+      expect(codeOfLine("x = (/open + y")).toBe("x = (/open + y");
+    });
+
+    it("never drops a character that is not inside a string or a comment (property)", () => {
+      fc.assert(fc.property(fc.stringMatching(/^[a-z $.(){}=+]*$/), (source) => {
+        expect(codeOfLine(source)).toBe(source);
+      }));
     });
   });
 });

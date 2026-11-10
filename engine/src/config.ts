@@ -30,6 +30,7 @@ import { frozenSet } from "./core/frozen";
 import { UTILITY_AGENTS } from "./core/phase-policy";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
 import { guardedDirsOf, protectedDirsOf, type GuardedLocations } from "./core/guarded-locations";
+import { nonEmptyOf, type NonEmpty } from "./core/orchestration-contract/identity";
 import { projectRulesLayout } from "./linter/programmatic/config";
 import { projectRootForStateFile } from "./core/phase-artifact-paths";
 import { observeGitProbe, type GitProbeStep } from "./utils/git-probe";
@@ -248,16 +249,22 @@ export const SUBAGENT_DIR = process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subage
  *  identical to SUBAGENT_DIR (the env never changes mid-process there). */
 export const subagentDir = (): string => process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subagents";
 
+declare const PERSISTENT_SUBAGENT_STORE: unique symbol;
+
 /**
  * A store that lives in the protected subagent dir and outlives every
  * session: its entry name there, and its directory, resolved lazily like
- * `subagentDir()`. Built only by `persistentStore` below, so a store cannot
- * name its directory without being in `PERSISTENT_SUBAGENT_STORES`.
+ * `subagentDir()`. Branded and minted only by the module-private
+ * `persistentStore` below, so a structurally identical `{ entry, dir }`
+ * literal does not type-check: a store cannot name its directory without
+ * being in `PERSISTENT_SUBAGENT_STORES`, and the stale sweep exempts it.
  */
-export type PersistentSubagentStore = Readonly<{ entry: string; dir: () => string }>;
+export type PersistentSubagentStore = Readonly<{ entry: string; dir: () => string }> &
+  { readonly [PERSISTENT_SUBAGENT_STORE]: true };
 
+// The one mint of the brand.
 const persistentStore = (entry: string): PersistentSubagentStore =>
-  Object.freeze({ entry, dir: () => join(subagentDir(), entry) });
+  Object.freeze({ entry, dir: () => join(subagentDir(), entry) }) as PersistentSubagentStore;
 
 /**
  * Every persistent store of the subagent dir, declared ONCE. The SessionStart
@@ -359,16 +366,17 @@ const CLAUDE_TASK_GRAPH_PATH = ".claude/state/active_task_graph.json";
 /** Ordered task-graph locations. An explicit override is authoritative. Pi
  * otherwise prefers its native state directory but can resume Loom sessions
  * created before the Pi state split from the legacy Claude-compatible path. */
-function taskGraphRelatives(): readonly string[] {
-  if (process.env.LOOM_STATE_PATH) return [process.env.LOOM_STATE_PATH];
+function taskGraphRelatives(): NonEmpty<string> {
+  if (process.env.LOOM_STATE_PATH) return nonEmptyOf(process.env.LOOM_STATE_PATH);
   return detectHarness() === "pi"
-    ? [PI_TASK_GRAPH_PATH, CLAUDE_TASK_GRAPH_PATH]
-    : [CLAUDE_TASK_GRAPH_PATH];
+    ? nonEmptyOf(PI_TASK_GRAPH_PATH, CLAUDE_TASK_GRAPH_PATH)
+    : nonEmptyOf(CLAUDE_TASK_GRAPH_PATH);
 }
 
 /** Primary relative path used when no existing graph can be found. */
 function taskGraphRelative(): string {
-  return taskGraphRelatives()[0];
+  const [primary] = taskGraphRelatives();
+  return primary;
 }
 
 /**
@@ -622,7 +630,11 @@ export const typeDiagnosticsCacheDir = (env: Readonly<Record<string, string | un
 
 /** The project's rules directory under `root` (default: cwd), or null when it
  *  has none. Harness-independent: the lookup order is the linter's
- *  (`projectRulesLayout`), so Claude Code and Pi read the same directory. */
+ *  (`projectRulesLayout`), so Claude Code and Pi read the same directory.
+ *  Null means "no project rules": every caller hands it to `loadRules`, which
+ *  then loads the shipped defaults only — no other directory is consulted.
+ *  `helper validate-lint-rules` is where a misplaced directory surfaces: it
+ *  names both layouts it looked for and reports 0 project rules. */
 export const projectRulesDir = (root: string = process.cwd()): string | null => {
   const layout = projectRulesLayout((candidate) => pathExistsFailClosed(join(root, candidate)));
   return layout === null ? null : join(root, layout);

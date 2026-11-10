@@ -1,11 +1,16 @@
 import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { executeRules } from "../../src/linter/executor";
 import { loadRules } from "../../src/linter/loader";
 import { handler as boundaryRule, underPrefix } from "../../src/linter/programmatic/no-cross-boundary-imports";
-import { LOOM_BOUNDARIES, LOOM_BOUNDARY_OPTIONS, TYPESCRIPT_COMPILER_API_SEAMS } from "./loom-project-config";
+import {
+  LOOM_BOUNDARIES,
+  LOOM_BOUNDARY_OPTIONS,
+  LOOM_RULES_DIR,
+  REPO_ROOT,
+  TYPESCRIPT_COMPILER_API_SEAMS,
+} from "./loom-project-config";
 
 /**
  * This repository's own project lint rules (INV-1: strict sampling is only ever preferred, never required;
@@ -14,13 +19,11 @@ import { LOOM_BOUNDARIES, LOOM_BOUNDARY_OPTIONS, TYPESCRIPT_COMPILER_API_SEAMS }
  * (`projectRulesLayout`), so Claude Code and Pi enforce the same files.
  */
 
-const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const DEFAULT_RULES_DIR = join(REPO_ROOT, "lint-rules");
-const CANONICAL = join(REPO_ROOT, ".claude/linter/rules");
 
 describe("project lint rules: one directory for both harnesses", () => {
   it("the repository carries its rules once, in the Claude Code layout both harnesses read first", () => {
-    expect(existsSync(CANONICAL)).toBe(true);
+    expect(existsSync(LOOM_RULES_DIR)).toBe(true);
     expect(existsSync(join(REPO_ROOT, ".pi/linter/rules"))).toBe(false);
   });
 });
@@ -79,7 +82,7 @@ const noDeadline = (): void => undefined;
 
 describe("project lint rules: the G4 slice 2 ownership rules refuse a second owner", () => {
   it.each(OWNERSHIP_RULES)("$rule refuses each line outside its owners, and spares its owners, test files and the sanctioned call", (row) => {
-    const rule = loadRules(DEFAULT_RULES_DIR, CANONICAL, "full", { includeProgrammatic: false })
+    const rule = loadRules(DEFAULT_RULES_DIR, LOOM_RULES_DIR, "full", { includeProgrammatic: false })
       .find(({ name }) => name === row.rule);
     expect(rule, row.rule).toMatchObject({ kind: "regex", enabled: true });
     if (rule === undefined) return;
@@ -103,8 +106,9 @@ describe("project lint rules: the G4 slice 2 ownership rules refuse a second own
  * exact, so a `typescript/...` subpath is refused even there.
  */
 describe("project lint rules: the TypeScript compiler API enters only through its seams", () => {
+  const PLAIN_IMPORT = "import ts from \"typescript\";";
   const SPELLINGS: readonly string[] = [
-    "import ts from \"typescript\";",
+    PLAIN_IMPORT,
     "import type { SourceFile } from 'typescript';",
     "import \"typescript\";",
     "const ts = require(\"typescript\");",
@@ -143,7 +147,7 @@ describe("project lint rules: the TypeScript compiler API enters only through it
   });
 
   it("refuses a new engine module no boundary governs, whatever it imports", () => {
-    expect(refusedLines("engine/src/new-root-module.ts", SPELLINGS[0] ?? "")).toEqual([1]);
+    expect(refusedLines("engine/src/new-root-module.ts", PLAIN_IMPORT)).toEqual([1]);
   });
 
   it.each([...TYPESCRIPT_COMPILER_API_SEAMS])("admits the exact specifier, in every spelling, in the seam %s — and no subpath", (seam) => {

@@ -26,8 +26,8 @@
  */
 
 import { verifyWith } from "../handlers/security-verification-harness";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { aRun, must, removeRuns, startRun } from "../handlers/security-audit-harness";
+import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -53,9 +53,8 @@ import { SEVERITY_SCORES, parseSecurityFindings, type SecurityFinding, type Seve
 import { parseVerificationVerdicts } from "../../src/core/security-adjudication";
 import { SECURITY_LENSES, selectSecurityLenses, type SecurityLens, type StackSignals } from "../../src/core/security-lens-select";
 import { securityDisposition } from "../../src/core/security-disposition";
-import { renderRunDocuments } from "../../src/core/security-reports";
+import { derivePublication } from "../../src/core/security-reports";
 import { BOOLEAN_SIGNALS, HUNTER_AGENT, HUNTER_ENVELOPE, aConfirmedFinding, aRefs, aRunMetadata, aSeed, aSignals, aUnitResult, aVerdict, ok } from "./fixtures";
-import { createSecurityAuditHandler } from "../../src/handlers/helpers/security-audit";
 
 const CALIBRATION_ROOT = resolve(__dirname, "../fixtures/security/calibration");
 
@@ -142,17 +141,35 @@ const DEFECTS = parseDefectSet(JSON.parse(readFileSync(join(CALIBRATION_ROOT, "D
 
 const fingerprintOf = (defect: PlantedDefect): string => `calibration/${defect.id.toLowerCase()}`;
 
+/** The planted files, once: the scope's paths and its `scopePaths` are the same set. */
+const PLANTED_FILES: readonly string[] = [...new Set(DEFECTS.defects.map((defect) => defect.file))].sort();
+
 const METADATA = aRunMetadata({
   runId: "calibration-run",
   repo: CALIBRATION_ROOT,
   target: CALIBRATION_ROOT,
-  scope: { paths: DEFECTS.defects.map((defect) => defect.file).sort(), kind: "tree", baseRef: null, headRef: null },
-  scopePaths: [...new Set(DEFECTS.defects.map((defect) => defect.file))].sort(),
+  scope: { paths: PLANTED_FILES, kind: "tree", baseRef: null, headRef: null },
+  scopePaths: PLANTED_FILES,
   budget: 24,
 });
 
 const refsFor = (defect: PlantedDefect): CoverageRefs =>
   aRefs({ surface: defect.surface, boundary: defect.boundary, subsystem: defect.subsystem, attack_class: defect.attack_class });
+
+/** The coverage id of the unit that hunts `defect`. */
+const coverageIdOf = (defect: PlantedDefect): string => canonicalCoverageId(refsFor(defect));
+
+/** The one source check a hunter settles `defect`'s unit with. The golden
+ *  ledger and the helper-driven run both settle with exactly this, so the two
+ *  runs stay comparable by construction. */
+const checkFor = (defect: PlantedDefect) => ({
+  agent_id: HUNTER_AGENT,
+  reviewed_paths: [defect.file],
+  invariant: `No untrusted input reaches the sink in ${defect.subsystem}.`,
+  method: "source" as const,
+  result: defect.claim,
+  artifact: null,
+});
 
 const seedFor = (defect: PlantedDefect): CoverageSeed => aSeed({
   refs: refsFor(defect),
@@ -182,19 +199,12 @@ const settledLedger = (status: Extract<TerminalDisposition, "covered" | "candida
   let ledger = ok(assignUnits(planned, planned.map((unit) => ({ coverageId: unit.coverage_id, agentId: HUNTER_AGENT, wave: 1 })))).ledger;
   for (const defect of DEFECTS.defects) {
     ledger = ok(recordUnitResult(ledger, {
-      coverageId: canonicalCoverageId(refsFor(defect)),
+      coverageId: coverageIdOf(defect),
       agentId: HUNTER_AGENT,
       wave: 1,
       status,
       reviewedPaths: [defect.file],
-      checks: [{
-        agent_id: HUNTER_AGENT,
-        reviewed_paths: [defect.file],
-        invariant: `No untrusted input reaches the sink in ${defect.subsystem}.`,
-        method: "source",
-        result: defect.claim,
-        artifact: null,
-      }],
+      checks: [checkFor(defect)],
       fingerprints: status === "candidate" ? [fingerprintOf(defect)] : [],
     }));
   }
@@ -304,7 +314,7 @@ describe("the enumeration reaches every planted defect", () => {
     expect(ledger).toHaveLength(DEFECTS.defects.length);
     expect(unreachedDefects(ledger)).toEqual([]);
     for (const defect of DEFECTS.defects) {
-      const unit = ledger.find((candidate) => candidate.coverage_id === canonicalCoverageId(refsFor(defect)));
+      const unit = ledger.find((candidate) => candidate.coverage_id === coverageIdOf(defect));
       expect(unit?.status, defect.id).toBe("planned");
     }
   });
@@ -350,8 +360,7 @@ describe("a recorded run reaches every planted defect", () => {
       ...METADATA,
       selectedCompanions: selectSecurityLenses(DEFECTS.signals, { maxLenses: SECURITY_PROFILE_LENSES.deep }).included.map((entry) => entry.lens),
     }));
-    const documents = renderRunDocuments({ metadata, ledger, findings, locator: "/calibration" });
-    const report = documents["REPORT.md"] ?? "";
+    const report = ok(derivePublication({ metadata, ledger, findings, locator: "/calibration" })).documents["REPORT.md"];
 
     for (const defect of DEFECTS.defects) {
       expect(report.split(fingerprintOf(defect))).toHaveLength(2);
@@ -362,88 +371,53 @@ describe("a recorded run reaches every planted defect", () => {
 
   it("derives one accepted decision per confirmed defect", () => {
     const { findings } = recordedRun();
-    const disposition = securityDisposition({ metadata: METADATA, locator: "/calibration", findings });
-    if (!disposition.ok) throw new Error(disposition.error.message);
-    expect(disposition.value.entries).toHaveLength(DEFECTS.defects.length);
-    expect(disposition.value.entries.every((entry) => entry.decision === "accepted")).toBe(true);
+    const disposition = ok(securityDisposition({ metadata: METADATA, locator: "/calibration", findings }));
+    expect(disposition.entries).toHaveLength(DEFECTS.defects.length);
+    expect(disposition.entries.every((entry) => entry.decision === "accepted")).toBe(true);
   });
 
   it("drives the same records through the helper's own operations", async () => {
-    // The real path: verifier transcripts land under the subagent dir below and
-    // the capture path reads them without following symlinks, so an aliased
-    // temp root (macOS `/var` → `/private/var`) would refuse the capture.
-    const out = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-calibration-")));
+    // The lifecycle seam every handler suite uses (`security-audit-harness`):
+    // a real-path temp run directory and the helper invoked the way `cli.ts`
+    // invokes it. Verifier transcripts land under the subagent dir below and the
+    // capture path reads them without following symlinks.
+    const run = aRun("loom-calibration-");
     // `start` registers the run with the subagent write guard; keep that
     // registry inside this test's scratch directory.
-    vi.stubEnv("LOOM_SUBAGENT_DIR", join(out, ".subagents"));
+    vi.stubEnv("LOOM_SUBAGENT_DIR", join(run.out, ".subagents"));
     try {
-      const printed: string[] = [];
-      const handler = createSecurityAuditHandler((text) => { printed.push(text); });
-      const invoke = async (args: readonly string[], stdin = "") =>
-        handler(stdin, [args[0] ?? "", "--out", out, ...args.slice(1)]);
-
-      const expectOk = (result: { kind: string; message?: string }, step: string) => {
-        if (result.kind === "error") throw new Error(`${step}: ${result.message ?? "error"}`);
-      };
-
-      const started = await invoke(
-        ["start", "--repo", CALIBRATION_ROOT, "--source", "0".repeat(40), "--profile", "deep", "--budget", "24"],
-        JSON.stringify({ units: seeds(), signals: DEFECTS.signals }),
-      );
-      expectOk(started, "start");
-
+      await startRun(run, { repo: CALIBRATION_ROOT, profile: "deep", flags: ["--budget", "24"], units: seeds(), signals: DEFECTS.signals });
+      for (const defect of DEFECTS.defects) {
+        await must(run, ["assign", "--unit", coverageIdOf(defect), "--agent", HUNTER_AGENT, "--wave", "1"]);
+      }
       const results = DEFECTS.defects.map((defect) => aUnitResult({
-        coverageId: canonicalCoverageId(refsFor(defect)),
+        coverageId: coverageIdOf(defect),
         status: "candidate",
         reviewedPaths: [defect.file],
         fingerprints: [fingerprintOf(defect)],
-        checks: [{
-          agent_id: HUNTER_AGENT,
-          reviewed_paths: [defect.file],
-          invariant: `No untrusted input reaches the sink in ${defect.subsystem}.`,
-          method: "source",
-          result: defect.claim,
-          artifact: null,
-        }],
+        checks: [checkFor(defect)],
       }));
-
-      for (const defect of DEFECTS.defects) {
-        const assigned = await invoke(["assign", "--unit", canonicalCoverageId(refsFor(defect)), "--agent", HUNTER_AGENT, "--wave", "1"]);
-        expectOk(assigned, `assign ${defect.id}`);
-      }
-
-      const submitted = await invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE, units: results, findings: DEFECTS.defects.map(findingFor) }));
-      expectOk(submitted, "submit");
+      await must(run, ["submit"], JSON.stringify({ ...HUNTER_ENVELOPE, units: results, findings: DEFECTS.defects.map(findingFor) }));
 
       // The ballots come from the real verification program and Claude Code's
       // native capture path (ADR-0067, amended): a hand-written ballot is
       // never counted.
-      await verifyWith({
-        out,
-        stdout: () => printed.join("\n"),
-        invoke: async (args, stdin = "") => {
-          printed.length = 0;
-          const result = await invoke(args, stdin);
-          return result.kind === "error" ? { ok: false as const, error: String(result.message ?? "") } : { ok: true as const, error: null };
-        },
-      });
+      await verifyWith(run);
 
-      const published = await invoke(["publish"]);
-      expectOk(published, "publish");
-      const publishedFindings = JSON.parse(readFileSync(join(out, "security-findings.json"), "utf-8")) as readonly { fingerprint: string }[];
+      await must(run, ["publish"]);
+      const publishedFindings = JSON.parse(readFileSync(join(run.out, "security-findings.json"), "utf-8")) as readonly { fingerprint: string }[];
       expect(publishedFindings.map((finding) => finding.fingerprint).sort()).toEqual(
         DEFECTS.defects.map(fingerprintOf).sort(),
       );
-      expect(readFileSync(join(out, "REPORT.md"), "utf-8")).toContain("coverage");
+      expect(readFileSync(join(run.out, "REPORT.md"), "utf-8")).toContain("coverage");
 
-      const disposition = await invoke(["disposition"]);
-      expectOk(disposition, "disposition");
-      const decisions = JSON.parse(readFileSync(join(out, "disposition.json"), "utf-8")) as { entries: readonly { decision: string }[] };
+      await must(run, ["disposition"]);
+      const decisions = JSON.parse(readFileSync(join(run.out, "disposition.json"), "utf-8")) as { entries: readonly { decision: string }[] };
       expect(decisions.entries).toHaveLength(DEFECTS.defects.length);
       expect(decisions.entries.every((entry) => entry.decision === "accepted")).toBe(true);
     } finally {
       vi.unstubAllEnvs();
-      rmSync(out, { recursive: true, force: true });
+      removeRuns();
     }
   }, 30_000);
 });
@@ -467,7 +441,7 @@ describe("the fixture is not a happy-path prop", () => {
     expect(validateLedger(ledger)).toEqual([]);
     const sqli = findings.filter((finding) => finding.fingerprint === "calibration/cal-sqli-01");
     expect(sqli).toHaveLength(1);
-    const report = renderRunDocuments({ metadata, ledger, findings: sqli, locator: "/calibration" })["REPORT.md"] ?? "";
+    const report = ok(derivePublication({ metadata, ledger, findings: sqli, locator: "/calibration" })).documents["REPORT.md"];
     expect(report).toContain("calibration/cal-sqli-01");
     for (const defect of DEFECTS.defects.slice(1)) {
       expect(report).not.toContain(fingerprintOf(defect));

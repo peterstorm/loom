@@ -6,10 +6,13 @@
  */
 
 export {
+  parseCliBindableFacadeProgram,
   parseRegisteredFacadeProgram,
   parseRemediationStartInput,
   parseStandaloneStartInput,
   parseWaveGateStartInput,
+  type CliBindableFacadeProgram,
+  type CliBindableRegistrationParse,
   type RegisteredStandaloneProgram,
 } from './registration';
 export type { RegisteredRemediationProgram, RemediationStartInputV2 } from './remediation-registration';

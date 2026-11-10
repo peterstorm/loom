@@ -307,11 +307,9 @@ function overlappingClasses(modelClasses: Readonly<Record<ModelClass, readonly s
 
 /** Parse the optional `targets` map of exact named Pi targets. */
 function parseTargets(raw: unknown): RoutingPolicyResult<Record<string, NamedPiTarget>> {
+  if (raw === undefined) return ok({});
+  if (!isRecord(raw)) return invalidConfig("routing config targets must be an object");
   const targets: Record<string, NamedPiTarget> = {};
-  if (raw !== undefined && !isRecord(raw)) {
-    return invalidConfig("routing config targets must be an object");
-  }
-  if (!isRecord(raw)) return ok(targets);
   for (const [name, target] of Object.entries(raw)) {
     if (!isNonEmptyString(name) || !isRecord(target) || typeof target.model !== "string") {
       return invalidConfig(`routing config target ${JSON.stringify(name)} must contain an exact model ref`);

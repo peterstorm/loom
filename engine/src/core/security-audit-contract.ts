@@ -60,6 +60,18 @@ export const unknownFieldViolations = (
   return (order === "sorted" ? unknown.sort(compareStrings) : unknown).map((key) => wireViolation(`${base}.${key}`, "unknown field"));
 };
 
+/** A deep, frozen copy of a JSON value. A wire parser returns THIS, never the
+ *  caller's input: handing back `raw` meant a later mutation of the document
+ *  the caller still holds silently rewrote the value the parser proved. The
+ *  ledger and findings parsers both read through it. */
+export function deepFrozenCopy(value: unknown): unknown {
+  if (Array.isArray(value)) return Object.freeze(value.map(deepFrozenCopy));
+  if (isWireRecord(value)) {
+    return Object.freeze(Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, deepFrozenCopy(entry)])));
+  }
+  return value;
+}
+
 /**
  * An optional list of strings. Absent is an empty list; present-but-malformed
  * (`"a"`, `[1]`, `{}`) is a named violation and an empty list — never a silent
@@ -179,6 +191,11 @@ export function isVisibleText(value: unknown, maxLength: number = SECURITY_AUDIT
     hasVisibleProse(value)
   );
 }
+
+/** A positive integer (a wave, a source line): the one spelling of that
+ *  predicate across the security volumes. */
+export const isPositiveInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value >= 1;
 
 export const isSecurityFingerprint = (value: unknown): value is string =>
   typeof value === "string" && SECURITY_FINGERPRINT_PATTERN.test(value);
@@ -552,16 +569,15 @@ export function parsePriorRecordFacts(
   if (unexpected.length > 0) {
     return failure({ path: "prior", message: `unexpected field(s): ${unexpected.join(", ")}` });
   }
-  if (!(PRIOR_RECORD_VERDICTS as readonly unknown[]).includes(record.verdict)) {
+  const verdict = record.verdict;
+  if (!isOneOf(PRIOR_RECORD_VERDICTS, verdict)) {
     return failure({ path: "prior.verdict", message: `expected one of ${PRIOR_RECORD_VERDICTS.join(", ")}` });
   }
   const unchanged = record.sourceUnchanged;
   if (unchanged !== null && typeof unchanged !== "boolean") {
     return failure({ path: "prior.sourceUnchanged", message: "expected true, false or null" });
   }
-  // Membership was just checked, so this is the parser's own proof, not a cast
-  // over unexamined input.
-  return success({ verdict: record.verdict as PriorRecordFacts["verdict"], sourceUnchanged: unchanged });
+  return success({ verdict, sourceUnchanged: unchanged });
 }
 
 /**

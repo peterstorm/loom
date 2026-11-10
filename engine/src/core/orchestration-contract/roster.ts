@@ -5,12 +5,11 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 import { CURRENT_PI_CATALOG, currentProfileBindings, parseAgentName, parseLlmProfileId, parseRecordedLlmProfileId, piModelPattern, profileBindingsUnder, recordedProfileBindings, resolveAgentPolicy, type ClaudeCodeBinding, type CurrentProfileBindings, type LlmProfileId, type LocalPiBinding, type LoomAgentName, type PiBinding, type PiLowering, type RecordedLlmProfileId, type RecordedPiLowering } from '../model-profiles';
-import { canonicalRecord, describeUnknown, failure, isNonEmpty, parseArtifactByteLength, parseArtifactDigest, parseContextDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type ArtifactByteLength, type ArtifactDigest, type ContextDigest, type DomainResult, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
+import { canonicalRecord, describeUnknown, failure, isNonEmpty, nonEmpty, nonEmptyOf, parseArtifactByteLength, parseArtifactDigest, parseContextDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type ArtifactByteLength, type ArtifactDigest, type ContextDigest, type DomainResult, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
 import { includes, readDenseDataArray, readExactDataRecord, type DataBoundaryError, type DataBoundaryReason } from './bytes';
 import { parseFixedArtifactSlot, type ExactHarnessBinding, type FixedArtifactSlot } from './artifacts';
 import { ORCHESTRATION_PROGRAMS, type OrchestrationProgram } from './programs';
 import { type SemanticPayloadDiagnostic } from './errors';
-import { nonEmpty, nonEmptyOf } from "./identity";
 
 export type AgentRequestAuthority<Attempt extends SemanticAttempt = SemanticAttempt> = Readonly<{
   runId: OrchestrationRunId;

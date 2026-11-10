@@ -16,7 +16,7 @@
 # "reproduced locally" is auditable after the fact and a missing sandbox shows
 # up as a blocker rather than a claim.
 #
-# Three properties make the receipt evidence rather than a string:
+# Four properties make the receipt evidence rather than a string:
 #   * the command's own stdout is captured and printed BEFORE the receipt, so a
 #     command that prints a receipt line cannot outrank the script's own;
 #   * with `--nonce`, the receipt prefix carries a value the caller generated,
@@ -137,7 +137,8 @@ INNER_REPORT="$(unshare --map-root-user --mount --net --pid --fork --mount-proc 
   bash -c '
     set -uo pipefail
     target="$1"; scratch="$2"; cpu="$3"; memmb="$4"; procs="$5"; filemb="$6"; wall="$7"; home="$8"; envcount="$9"
-    shift 9
+    command_stdout="${10}"
+    shift 10
     env_assignments=("${@:1:$envcount}")
     shift "$envcount"
     # Everything read-only that the namespace lets us close. A remount that
@@ -237,10 +238,10 @@ INNER_REPORT="$(unshare --map-root-user --mount --net --pid --fork --mount-proc 
     done
     # The command stdout is captured, not streamed: the script must print the
     # receipt LAST, and a command that prints a receipt line must not outrank it.
-    timeout --signal=KILL "$wall" env -i "${env_assignments[@]}" "$@" > "$scratch/.command-stdout" 2>&1
-    exit $?
+    # The last command: its status (the timeout KILL included) is the status of this shell.
+    timeout --signal=KILL "$wall" env -i "${env_assignments[@]}" "$@" > "$command_stdout" 2>&1
   ' _ "$TARGET" "$SCRATCH" "$CPU_SECONDS" "$MEM_MB" "$PROCS" "$FILE_MB" "$WALL_SECONDS" "$REAL_HOME" \
-    "${#ENV_ASSIGNMENTS[@]}" "${ENV_ASSIGNMENTS[@]}" "$@")"
+    "${#ENV_ASSIGNMENTS[@]}" "$COMMAND_STDOUT" "${ENV_ASSIGNMENTS[@]}" "$@")"
 INNER_STATUS=$?
 
 [ -f "$COMMAND_STDOUT" ] && cat "$COMMAND_STDOUT"

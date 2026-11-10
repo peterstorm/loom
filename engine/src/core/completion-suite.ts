@@ -33,7 +33,7 @@ import {
   type AcceptanceObservation,
   type AcceptanceReportFacts,
 } from "./acceptance-contract";
-import { canonicalStructuralEquals, isNonEmpty, mapNonEmpty, nonEmpty, nonEmptyOf } from "./orchestration-contract";
+import { canonicalStructuralEquals, concatNonEmpty, isNonEmpty, mapNonEmpty, nonEmpty, nonEmptyOf } from "./orchestration-contract";
 import {
   collectDenseArray,
   exactRecordErrors,
@@ -1390,11 +1390,10 @@ export function evaluateWaveCompletionSuite(
   const stale = staleFields(authority.value, result.value);
   if (isNonEmpty(stale)) return authorityRejection([freeze({ kind: "stale-result", mismatchedFields: freeze(stale) })]);
 
-  const authorityFailures = [
-    ...rosterAuthorityFailures(authority.value, result.value),
-    ...observationAuthorityFailures(authority.value, result.value, expectation),
-  ];
-  if (isNonEmpty(authorityFailures)) return authorityRejection(authorityFailures);
+  const roster = judgeRoster(authority.value, result.value);
+  const observationFailures = observationAuthorityFailures(authority.value, result.value, expectation);
+  if (roster.kind === "rejected") return authorityRejection(concatNonEmpty([], roster.failures, observationFailures));
+  if (isNonEmpty(observationFailures)) return authorityRejection(observationFailures);
 
   const verdict = recordedAcceptanceVerdict(result.value.acceptance);
   const checks = checkProcessFailures(authority.value, result.value, verdict.excused);
@@ -1407,23 +1406,40 @@ export function evaluateWaveCompletionSuite(
   })];
   const rejection = processRejection([...checks.infrastructure, ...owner.infrastructure], [...checks.semantic, ...acceptance, ...owner.semantic]);
   if (rejection !== null) return rejection;
-  // The roster check above already refuses a result missing any authorized
-  // check, so an empty result cannot reach here; refuse it explicitly anyway.
-  const acceptedChecks = nonEmpty(result.value.checks);
-  if (acceptedChecks === null) {
-    return authorityRejection([freeze({ kind: "missing-check-results", checkIds: mapNonEmpty(authority.value.checks, ({ checkId }) => checkId) })]);
-  }
-  return freeze({ kind: "accepted", receipt: acceptedReceipt(authority.value, result.value, acceptedChecks) });
+  return freeze({ kind: "accepted", receipt: acceptedReceipt(authority.value, result.value, roster.checks) });
 }
 
-/** The result's roster against the authorized roster: missing, surplus, duplicate, wrong-scope or mispoliced checks. */
-function rosterAuthorityFailures(
+/** The roster judgement: a matched roster carries the result's checks as
+ *  the non-empty list it then provably is, so acceptance needs no re-narrowing. */
+type RosterJudgement =
+  | Readonly<{ kind: "matched"; checks: NonEmpty<CompletionCheckResult> }>
+  | Readonly<{ kind: "rejected"; failures: NonEmpty<CompletionAuthorityFailure> }>;
+
+/** The result's roster against the authorized roster: missing, surplus,
+ *  duplicate, wrong-scope or mispoliced checks. The authorized roster is
+ *  non-empty, so a result with no checks is missing every one of them. */
+function judgeRoster(
   authority: AuthorizedWaveCompletionSuite,
   result: WaveCompletionSuiteResult,
+): RosterJudgement {
+  const checks = nonEmpty(result.checks);
+  if (checks === null) {
+    return freeze({
+      kind: "rejected",
+      failures: nonEmptyOf(freeze({ kind: "missing-check-results", checkIds: mapNonEmpty(authority.checks, ({ checkId }) => checkId) })),
+    });
+  }
+  const failures = rosterAuthorityFailures(authority, checks);
+  return isNonEmpty(failures) ? freeze({ kind: "rejected", failures }) : freeze({ kind: "matched", checks });
+}
+
+function rosterAuthorityFailures(
+  authority: AuthorizedWaveCompletionSuite,
+  checks: NonEmpty<CompletionCheckResult>,
 ): readonly CompletionAuthorityFailure[] {
   const expectedById = new Map(authority.checks.map((check) => [check.checkId, check]));
   const resultCounts = new Map<CompletionCheckId, number>();
-  for (const check of result.checks) resultCounts.set(check.checkId, (resultCounts.get(check.checkId) ?? 0) + 1);
+  for (const check of checks) resultCounts.set(check.checkId, (resultCounts.get(check.checkId) ?? 0) + 1);
   const missing = authority.checks.filter((check) => !resultCounts.has(check.checkId)).map((check) => check.checkId);
   const surplus = [...resultCounts.keys()].filter((checkId) => !expectedById.has(checkId)).sort(compareStrings);
   const duplicates = [...resultCounts.entries()].filter(([, count]) => count > 1).map(([checkId]) => checkId).sort(compareStrings);
@@ -1434,7 +1450,7 @@ function rosterAuthorityFailures(
   if (missingIds !== null) failures.push(freeze({ kind: "missing-check-results", checkIds: missingIds }));
   if (surplusIds !== null) failures.push(freeze({ kind: "surplus-check-results", checkIds: surplusIds }));
   if (duplicateIds !== null) failures.push(freeze({ kind: "duplicate-check-results", checkIds: duplicateIds }));
-  for (const check of result.checks) {
+  for (const check of checks) {
     const expected = expectedById.get(check.checkId);
     if (expected === undefined) continue;
     if (check.scope !== "wave") failures.push(freeze({ kind: "wrong-check-scope", checkId: check.checkId, actualScope: check.scope }));

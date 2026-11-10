@@ -27,6 +27,7 @@ import { parseVerificationVerdicts, type VerificationVerdict } from "../../core/
 import { parseAuditReference, type AuditReference } from "../../core/security-verification";
 import { SECURITY_AUDIT_RUN_FILES, SECURITY_AUDIT_VERIFICATION_RUNS_DIR } from "../../core/audit-run-authority";
 import { readRunFileNoFollow } from "../../utils/no-follow-fs";
+import { describeCause } from "../../utils/describe-cause";
 
 /** The four documents adjudication reads, read once, plus the audit's identity. */
 export type AuditSnapshot = Readonly<{
@@ -39,7 +40,6 @@ export type AuditSnapshot = Readonly<{
   reference: AuditReference;
 }>;
 
-const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /**
  * Render any core refusal as readable prose: a string as-is, a list of
@@ -76,7 +76,7 @@ export function readRunText(root: string, file: string): DomainResult<string, st
   try {
     return success(readRunFileNoFollow(path));
   } catch (error) {
-    return failure(`cannot read ${path}: ${describe(error)}`);
+    return failure(`cannot read ${path}: ${describeCause(error)}`);
   }
 }
 
@@ -93,12 +93,12 @@ function readDocument(root: string, file: string): DomainResult<ReadDocument, st
     // was lost — never "no findings" or "no ballots".
     return failure((error as NodeJS.ErrnoException).code === "ENOENT"
       ? `${path} is missing — a run directory always holds it`
-      : `cannot read ${path}: ${describe(error)}`);
+      : `cannot read ${path}: ${describeCause(error)}`);
   }
   try {
     return success({ text, value: JSON.parse(text) as unknown });
   } catch (error) {
-    return failure(`${path} is not valid JSON: ${describe(error)}`);
+    return failure(`${path} is not valid JSON: ${describeCause(error)}`);
   }
 }
 
@@ -111,7 +111,7 @@ function parseDocument<T>(root: string, file: string, document: ReadDocument, pa
   try {
     result = parse(document.value);
   } catch (error) {
-    return failure(`${path} is malformed — unexpected ${describe(error)}`);
+    return failure(`${path} is malformed — unexpected ${describeCause(error)}`);
   }
   return result.ok ? success(result.value) : failure(`${path} is malformed —\n${describeAuditRefusal(result.error)}`);
 }

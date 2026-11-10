@@ -7,5 +7,5 @@
   "flags": "",
   "fixHint": "Resolve the TODO/FIXME issue or create a tracked issue and remove the comment",
   "enabled": true,
-  "excludePatterns": [".test.ts", ".spec.ts", ".test.tsx"]
+  "excludePatterns": [".test.ts", ".test.tsx", ".test.mts", ".test.cts", ".spec.ts", ".spec.tsx", ".spec.mts", ".spec.cts", ".test.js", ".test.jsx", ".test.mjs", ".test.cjs", ".spec.js", ".spec.jsx", ".spec.mjs", ".spec.cjs"]
 }

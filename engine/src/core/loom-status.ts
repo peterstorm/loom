@@ -33,13 +33,13 @@ import { renderProjectVerificationCoverage } from "./verification-manifest";
 import {
   blockedAction,
   canonicalRecord,
+  concatNonEmpty,
   doneAction,
   parseOrchestrationRunId,
   terminalBlockedDiagnostic,
   type ExternalAction,
   type NonEmpty,
   type OrchestrationRunId,
-  nonEmpty,
   nonEmptyOf,
 } from "./orchestration-contract";
 import type { GateDeps } from "./wave-gate-checks";
@@ -322,8 +322,7 @@ export function deriveNextAction(snapshot: WaveReadinessSnapshot): NextActionDec
   }
   return canonicalRecord({
     action,
-    // actionReasons is non-empty, so the concatenation is too.
-    reasons: nonEmpty([...snapshot.reasons, ...actionReasons]) ?? actionReasons,
+    reasons: concatNonEmpty(snapshot.reasons, actionReasons),
   });
 }
 
@@ -581,7 +580,7 @@ function unstartedWaveStatus(
   if (window.kind === "contradiction") return deriveUnavailableLoomStatus([window.reason]);
   if (window.kind === "unavailable") return unavailableStatus(window.message);
   const { wave, recovery, message } = window;
-  const reasons: readonly StatusReason[] = [
+  const reasons = concatNonEmpty([
     ...window.pendingTaskIds.map((taskId) =>
       statusReason("wave-implementation-pending", `${taskId} has not reached implemented`, taskId)),
     ...window.activeTaskIds.map((taskId) =>
@@ -592,9 +591,7 @@ function unstartedWaveStatus(
         `after fixing the cause, remediate it: ${remediateEscalationCommand(task)}`,
       task.taskId,
     )),
-    statusReason(windowReasonKind(recovery), message),
-    ...skeletonsUnobservedReason(recovery, skeletons),
-  ];
+  ], nonEmptyOf(statusReason(windowReasonKind(recovery), message)), skeletonsUnobservedReason(recovery, skeletons));
 
   return canonicalRecord({
     schemaVersion: 1,
@@ -604,8 +601,7 @@ function unstartedWaveStatus(
     }), deps.currentWaveWorkspace, deps.currentWaveCompletionResult),
     next: canonicalRecord({
       action: waveImplementationAction(message, recovery),
-      // The window reason above is always present; the fallback is that same reason.
-      reasons: nonEmpty(reasons) ?? nonEmptyOf(statusReason(windowReasonKind(recovery), message)),
+      reasons,
     }),
   });
 }
@@ -753,7 +749,7 @@ export function withOwnerVerificationRemedies(status: LoomStatus): LoomStatus {
     ...status,
     next: canonicalRecord({
       ...status.next,
-      reasons: nonEmpty([...status.next.reasons, ...reasons]) ?? status.next.reasons,
+      reasons: concatNonEmpty([], status.next.reasons, reasons),
     }),
   });
 }

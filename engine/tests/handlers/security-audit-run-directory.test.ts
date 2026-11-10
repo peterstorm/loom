@@ -15,6 +15,7 @@ import type { CoverageUnit } from "../../src/core/security-coverage";
 import { registeredSecurityAuditRuns } from "../../src/orchestration/security-audit-run-registry";
 import { aVerdict } from "../security/fixtures";
 import { STARTED, aRun, claimPayload, isolateSubagentDir, readJson, removeRuns, seedFor, startRun, unitIdFor } from "./security-audit-harness";
+import { invokeAt as invokeCli } from "./security-audit-run-seam";
 
 beforeEach(() => { isolateSubagentDir(); });
 afterEach(removeRuns);
@@ -36,13 +37,16 @@ describe("the run directory reads", () => {
     const run = await startRun(aRun());
     const elsewhere = join(run.out, "..", `${run.out.split("/").pop()}-elsewhere.json`);
     writeFileSync(elsewhere, "[]");
-    // Replace a document the run itself wrote, so the read is the symlinked one.
-    rmSync(join(run.out, "ledger.json"));
-    symlinkSync(elsewhere, join(run.out, "ledger.json"));
-    const status = await run.invoke(["status"]);
-    expect(status.ok).toBe(false);
-    expect((status.error ?? "").toLowerCase()).toMatch(/symlink|symbolic|eloop/);
-    rmSync(elsewhere, { force: true });
+    try {
+      // Replace a document the run itself wrote, so the read is the symlinked one.
+      rmSync(join(run.out, "ledger.json"));
+      symlinkSync(elsewhere, join(run.out, "ledger.json"));
+      const status = await run.invoke(["status"]);
+      expect(status.ok).toBe(false);
+      expect((status.error ?? "").toLowerCase()).toMatch(/symlink|symbolic|eloop/);
+    } finally {
+      rmSync(elsewhere, { force: true });
+    }
   });
 
   it("refuses an empty ledger instead of claiming coverage of nothing", async () => {
@@ -149,9 +153,8 @@ describe("a run directory under a symlinked base (/var → /private/var)", () =>
   afterEach(() => { rmSync(scratch, { recursive: true, force: true }); });
 
   const invokeAt = async (out: string, args: readonly string[], stdin = "") => {
-    let printed = "";
-    const result = await createSecurityAuditHandler((text) => { printed += `${text}\n`; })(stdin, [args[0] ?? "", "--out", out, ...args.slice(1)]);
-    return { error: result?.kind === "error" ? String(result.message ?? "") : null, printed };
+    const { invocation, printed } = await invokeCli(out, args, stdin);
+    return { error: invocation.error, printed };
   };
   const startAt = (out: string, extra: readonly string[] = []) =>
     invokeAt(out, [...STARTED, "--repo", scratch, ...extra], JSON.stringify({ units: [seedFor(0)] }));

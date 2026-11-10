@@ -23,6 +23,10 @@ const smokeFiles = [
 ] as const;
 const stages = ["lint", "unit", ...smokeFiles.map(([, stage]) => stage)];
 
+/** A TypeScript stage script that runs the sentinel for `stage` and exits with its status. */
+const tsSentinel = (stage: string): string =>
+  `import { spawnSync } from 'node:child_process'; process.exit(spawnSync('node', ['../sentinel.cjs', '${stage}'], {stdio:'inherit'}).status ?? 1);`;
+
 function fixture(failingStage: string): string {
   const directory = mkdtempSync(join(tmpdir(), "loom-verify-"));
   temporaryDirectories.push(directory);
@@ -46,11 +50,9 @@ if (stage === ${JSON.stringify(failingStage)}) process.exit(17);
   put("node_modules/.bin/pi", "#!/usr/bin/env bash\nexit 92\n");
   chmodSync(join(directory, "node_modules/.bin/pi"), 0o755);
   // The project linter's full tier: a stage between the compiler and the suite.
-  put("scripts/lint-project.ts", `import { spawnSync } from 'node:child_process'; process.exit(spawnSync('node', ['../sentinel.cjs', 'lint'], {stdio:'inherit'}).status ?? 1);`);
+  put("scripts/lint-project.ts", tsSentinel("lint"));
   for (const [path, stage] of smokeFiles) {
-    put(path, path.endsWith(".ts")
-      ? `import { spawnSync } from 'node:child_process'; process.exit(spawnSync('node', ['../sentinel.cjs', '${stage}'], {stdio:'inherit'}).status ?? 1);`
-      : `#!/usr/bin/env bash\nexec node ../sentinel.cjs ${stage}\n`);
+    put(path, path.endsWith(".ts") ? tsSentinel(stage) : `#!/usr/bin/env bash\nexec node ../sentinel.cjs ${stage}\n`);
   }
   mkdirSync(join(directory, "engine/scripts"), { recursive: true });
   mkdirSync(join(directory, "engine/src/core"), { recursive: true });

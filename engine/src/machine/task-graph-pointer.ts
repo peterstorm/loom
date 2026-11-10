@@ -119,7 +119,7 @@ export function parseSessionTaskGraphPointerLeaseRegistry(
   if (previous !== null && !previous.ok) {
     return Object.freeze({ ok: false, error: "pointer lease registry previous must be null or one canonical absolute path" });
   }
-  if (!Array.isArray(record.leases) || record.leases.length === 0) {
+  if (!Array.isArray(record.leases)) {
     return Object.freeze({ ok: false, error: "pointer lease registry leases must be non-empty" });
   }
   const parsedLeases = record.leases.flatMap((lease) => {

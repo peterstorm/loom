@@ -72,15 +72,15 @@ const verdict = (command: string, ctx?: SubagentAuthorityContext): string => {
   return decision.kind === "allow" ? "allow" : decision.refusal.rule;
 };
 
-describe("helper operations — the split is derived from each table's runtimeSkew trait", () => {
+describe("helper operations — the split is derived from each table's subagent trait", () => {
   it.each(Object.entries(SECURITY_AUDIT_OPERATIONS))("security-audit %s", (operation, traits) => {
     expect(verdict(`loom helper security-audit ${operation} --out ${R}`))
-      .toBe(traits.runtimeSkew === "available" ? "allow" : "authority-helper-operation");
+      .toBe(traits.subagent === "read-only" ? "allow" : "authority-helper-operation");
   });
 
   it.each(Object.entries(ORCHESTRATION_OPERATIONS))("orchestration %s", (operation, traits) => {
     expect(verdict(`loom helper orchestration ${operation} --run run.x`))
-      .toBe(traits.runtimeSkew === "available" ? "allow" : "authority-helper-operation");
+      .toBe(traits.subagent === "read-only" ? "allow" : "authority-helper-operation");
   });
 
   it("refuses exactly the ADR-0067 D6 lists (and allows its read-only list)", () => {
@@ -95,12 +95,12 @@ describe("helper operations — the split is derived from each table's runtimeSk
     }
   });
 
-  it("the split mirrors the tables exactly: every known operation is known, read-only is the skew-available set", () => {
+  it("the split mirrors the tables exactly: every known operation is known, read-only is the subagent read-only set", () => {
     for (const [helper, table] of [["security-audit", SECURITY_AUDIT_OPERATIONS], ["orchestration", ORCHESTRATION_OPERATIONS]] as const) {
       const split = AUTHORITY_HELPER_OPERATIONS[helper];
       expect([...split.known].sort()).toEqual(Object.keys(table).sort());
       expect([...split.readOnly].sort()).toEqual(
-        Object.entries(table).filter(([, t]) => t.runtimeSkew === "available").map(([name]) => name).sort());
+        Object.entries(table).filter(([, t]) => t.subagent === "read-only").map(([name]) => name).sort());
     }
   });
 

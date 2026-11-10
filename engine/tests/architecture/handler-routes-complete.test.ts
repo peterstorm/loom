@@ -14,9 +14,9 @@
  * the dynamic import actually resolves against.
  */
 import { describe, expect, it } from "vitest";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { KNOWN_HANDLERS } from "../../src/handler-routes";
 
 const ENGINE = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -25,31 +25,32 @@ const HANDLERS = join(ENGINE, "src", "handlers");
 /**
  * The handler names `cli.ts` can import for one hook type.
  *
- * Each directory holds two kinds of file: handler modules (default export,
- * invoked as `<hook-type> <name>`) and internal modules those handlers import
- * — `pre-tool-use-input`, `spawn-vetoes`, the helpers' operations tables. Only
- * the default export is a handler, so that is the filter, and it is the same
- * property the CLI depends on at the call site.
+ * Each directory holds two kinds of file: handler modules (a default-exported
+ * function, invoked as `<hook-type> <name>`) and internal modules those
+ * handlers import — `pre-tool-use-input`, `spawn-vetoes`, the helpers'
+ * operations tables. The filter is the property the CLI depends on, tested the
+ * way the CLI tests it: the module is imported and its `default` must be a
+ * function. Any export form (`export default`, `export { x as default }`,
+ * a re-export) counts exactly when the CLI's import would find a handler.
  */
-function handlerFiles(hookType: string): readonly string[] {
+async function handlerFiles(hookType: string): Promise<readonly string[]> {
   const directory = join(HANDLERS, hookType === "helper" ? "helpers" : hookType);
-  return readdirSync(directory)
-    .filter((entry) => entry.endsWith(".ts"))
-    .map((entry) => entry.slice(0, -3))
-    .filter((name) => hasDefaultExport(readFileSync(join(directory, `${name}.ts`), "utf-8")))
-    .sort();
+  const names = readdirSync(directory).filter((entry) => entry.endsWith(".ts")).map((entry) => entry.slice(0, -3));
+  const handlers: string[] = [];
+  for (const name of names) {
+    const module = await import(pathToFileURL(join(directory, `${name}.ts`)).href) as { default?: unknown };
+    if (typeof module.default === "function") handlers.push(name);
+  }
+  return handlers.sort();
 }
 
-const hasDefaultExport = (content: string): boolean =>
-  /^export default\b/m.test(content) || /^export \{[^}]*\bdefault\b[^}]*\}/m.test(content);
-
 describe("every hook-type route set matches the handler files it routes to", () => {
-  it("routes exactly the handler modules that exist, for each hook type", () => {
+  it("routes exactly the handler modules that exist, for each hook type", async () => {
     for (const [hookType, routed] of Object.entries(KNOWN_HANDLERS)) {
       expect([...routed].sort(), `${hookType}: routed handlers vs src/handlers/${hookType}`)
-        .toEqual(handlerFiles(hookType));
+        .toEqual(await handlerFiles(hookType));
     }
-  });
+  }, 120_000);
 
   it("covers every hook directory, so a new directory cannot go unrouted", () => {
     const directories = readdirSync(HANDLERS).sort().filter((entry) => !entry.includes("."));

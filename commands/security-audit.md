@@ -76,7 +76,7 @@ This is a summary; the authoritative table, with every refusal, is in
 | `assign` | flags | Give a planned unit to a catalog agent; prints the owner id the hunter settles under and the `nonce` command for it |
 | `nonce` | flags | Print the sandbox nonce and filled-in bounded-run instructions for one artifact of a unit in flight (read-only) |
 | `submit` | stdin | Record a hunter's `security-hunter-result` against its unit; a re-filed fingerprint with different content is refused |
-| `merge-critic` | stdin | Fold the critic's proposed units in, deduped by canonical coverage id |
+| `merge-critic` | stdin | Fold the critic's proposed units in, deduped by canonical coverage id; every reassigned unit needs its reason (`reassignmentReasons`) |
 | `verify` | flags | Import a finished `security-verification` run's bound ballots (`--from <verification-run>`; `status` prints the start command) that decide `confirmed`/`needs_validation`/`rejected` at `findings` and `publish` |
 | `defer` | flags | Mark an unreachable unit with one of the four reason tokens |
 | `findings` | flags | Render the report from the validated records (read-only) |

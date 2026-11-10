@@ -32,10 +32,9 @@ describe("parseSecurityAuditStart", () => {
       fc.subarray([...BOOLEAN_SIGNALS]),
       fc.array(fc.constantFrom("ts", "rs", "tsx"), { maxLength: 3 }),
       (enabled, languages) => {
+        // One value: the parsed signals equal the input signals.
         const signals = { ...Object.fromEntries(enabled.map((name) => [name, true])), languages };
-        expect(ok(parseSecurityAuditStart({ units: [], signals })).signals).toEqual(
-          aSignals({ ...Object.fromEntries(enabled.map((name) => [name, true])), languages }),
-        );
+        expect(ok(parseSecurityAuditStart({ units: [], signals })).signals).toEqual(aSignals(signals));
       },
     ));
   });

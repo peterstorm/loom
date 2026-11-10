@@ -16,6 +16,7 @@
 
 import { resolve } from "node:path";
 import { DEFAULT_TEST_FILE_SUFFIXES, isTestFileBySuffixes } from "../../core/test-file-classification";
+import { parseBaselineKey, type Baseline } from "./baseline";
 import { underPrefix, type BoundaryRule, type CapabilityGrant } from "./no-cross-boundary-imports";
 
 // --- Config types ---
@@ -63,10 +64,10 @@ export interface ProgrammaticConfig {
   readonly switchTotalityModules?: readonly [string, ...string[]];
   /** Grandfathered `path::scrutinee` keys the switch-totality rule excuses,
    *  each entry consuming one violation. Empty means "no debt". */
-  readonly switchTotalityBaseline?: readonly string[];
+  readonly switchTotalityBaseline?: Baseline;
   /** Grandfathered `path::discriminant` keys the
    *  exhaustive-discriminant-branching rule excuses, one violation each. */
-  readonly discriminantBranchingBaseline?: readonly string[];
+  readonly discriminantBranchingBaseline?: Baseline;
 }
 
 /** Every key `config.json` may carry — the one list the strict parse checks against. */
@@ -189,16 +190,27 @@ function parseOptionalStringArray(raw: unknown, filePath: string, key: string): 
     typeof entry === "string" && entry.length > 0 ? entry : refuse(`${filePath}: '${key}' entries must be non-empty strings`));
 }
 
-/** An optional list that, when present, must also be non-empty: a scope whose
- *  empty form would silently match nothing. */
-function parseOptionalNonEmptyStringArray(raw: unknown, filePath: string, key: string): [string, ...string[]] | undefined {
-  const list = parseOptionalStringArray(raw, filePath, key);
+/** A parsed optional list that, when present, must also be non-empty: a scope
+ *  whose empty form would silently match nothing. The one "must not be empty"
+ *  refusal every non-empty list shares. */
+function nonEmptyWhenPresent(list: string[] | undefined, filePath: string, key: string): [string, ...string[]] | undefined {
   if (list === undefined) return undefined;
   const [first, ...rest] = list;
   if (first === undefined) {
     return refuse(`${filePath}: '${key}' must not be empty — omit it for the default scope, or disable the rule by name`);
   }
   return [first, ...rest];
+}
+
+function parseOptionalNonEmptyStringArray(raw: unknown, filePath: string, key: string): [string, ...string[]] | undefined {
+  return nonEmptyWhenPresent(parseOptionalStringArray(raw, filePath, key), filePath, key);
+}
+
+/** `path::key` grandfathered entries: an entry with no path or no key could
+ *  never match a site, and would be read back as a wrong path — refused by name. */
+function parseOptionalBaseline(raw: unknown, filePath: string, key: string): Baseline | undefined {
+  return parseOptionalStringArray(raw, filePath, key)?.map((entry, index) =>
+    parseBaselineKey(entry) ?? refuse(`${filePath}: ${key}[${index}] '${entry}' must be 'path::key' — a project-relative path, '::', then what the rule branched on`));
 }
 
 /**
@@ -223,13 +235,7 @@ function parseOptionalModulePaths(raw: unknown, filePath: string, key: string): 
 
 /** A path list that, when present, must be non-empty (`requireGovernance`). */
 function parseOptionalNonEmptyModulePaths(raw: unknown, filePath: string, key: string): [string, ...string[]] | undefined {
-  const list = parseOptionalNonEmptyStringArray(raw, filePath, key);
-  if (list === undefined) return undefined;
-  const [first, ...rest] = list;
-  return [
-    parseModulePath(first, `${filePath}: ${key}[0]`),
-    ...rest.map((entry, index) => parseModulePath(entry, `${filePath}: ${key}[${index + 1}]`)),
-  ];
+  return nonEmptyWhenPresent(parseOptionalModulePaths(raw, filePath, key), filePath, key);
 }
 
 /** `[{ path, reason }]` — an exemption list where every entry carries its justification. */
@@ -268,10 +274,20 @@ function parseOptionalBoundaries(raw: unknown, filePath: string): BoundaryRule[]
   return raw.map((b, i) => parseBoundary(b, filePath, i));
 }
 
+/**
+ * The parsed config holds exactly the keys the document carries: an absent key
+ * is absent from the value, never present with `undefined`, so a key iteration
+ * or `Object.hasOwn` reads the document's shape and not the parser's.
+ */
+function presentFields<T extends object>(fields: Partial<T>): Partial<T> {
+  // Sound for Partial<T>: dropping a key whose value is undefined leaves a value every optional key admits.
+  return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)) as Partial<T>;
+}
+
 function parseConfigObject(json: unknown, filePath: string): ProgrammaticConfig {
   const obj = plainObject(json, `Linter config at ${filePath}`);
   refuseUnknownKeys(obj, PROGRAMMATIC_CONFIG_KEYS, `Linter config at ${filePath}`);
-  return Object.freeze({
+  const parsed: ProgrammaticConfig = {
     exclude: parseOptionalReasonedPaths(obj.exclude, filePath, "exclude"),
     boundaries: parseOptionalBoundaries(obj.boundaries, filePath),
     requireGovernance: parseOptionalNonEmptyModulePaths(obj.requireGovernance, filePath, "requireGovernance"),
@@ -280,7 +296,8 @@ function parseConfigObject(json: unknown, filePath: string): ProgrammaticConfig 
     maxFunctionLines: parseOptionalPositiveInt(obj.maxFunctionLines, filePath, "maxFunctionLines"),
     excludeFromMaxLines: parseOptionalStringArray(obj.excludeFromMaxLines, filePath, "excludeFromMaxLines"),
     ...parseTotalityConfig(obj, filePath),
-  });
+  };
+  return Object.freeze(presentFields(parsed));
 }
 
 type TotalityConfigKey =
@@ -302,8 +319,8 @@ function parseTotalityConfig(
     maxDiscriminantBranches: parseOptionalPositiveInt(obj.maxDiscriminantBranches, filePath, "maxDiscriminantBranches"),
     discriminantTags: parseOptionalStringArray(obj.discriminantTags, filePath, "discriminantTags"),
     switchTotalityModules: parseOptionalNonEmptyStringArray(obj.switchTotalityModules, filePath, "switchTotalityModules"),
-    switchTotalityBaseline: parseOptionalStringArray(obj.switchTotalityBaseline, filePath, "switchTotalityBaseline"),
-    discriminantBranchingBaseline: parseOptionalStringArray(obj.discriminantBranchingBaseline, filePath, "discriminantBranchingBaseline"),
+    switchTotalityBaseline: parseOptionalBaseline(obj.switchTotalityBaseline, filePath, "switchTotalityBaseline"),
+    discriminantBranchingBaseline: parseOptionalBaseline(obj.discriminantBranchingBaseline, filePath, "discriminantBranchingBaseline"),
   };
 }
 
@@ -349,10 +366,12 @@ function parseBoundary(raw: unknown, filePath: string, index: number): BoundaryR
   }
   return Object.freeze({
     module,
-    description: typeof b.description === "string" ? b.description : undefined,
     allow: parseStringList(b.allow, `${where}.allow`),
     deny: parseStringList(b.deny, `${where}.deny`),
-    perFileAllow: parseOptionalGrants(b.perFileAllow, `${where}.perFileAllow`, module),
-    perFileExactAllow: parseOptionalGrants(b.perFileExactAllow, `${where}.perFileExactAllow`, module),
+    ...presentFields<BoundaryRule>({
+      description: typeof b.description === "string" ? b.description : undefined,
+      perFileAllow: parseOptionalGrants(b.perFileAllow, `${where}.perFileAllow`, module),
+      perFileExactAllow: parseOptionalGrants(b.perFileExactAllow, `${where}.perFileExactAllow`, module),
+    }),
   });
 }

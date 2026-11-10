@@ -30,6 +30,7 @@ import {
   incompleteReasonSource,
   mergeCritic,
   parseCoverageSeeds,
+  parseLedger,
   parseCriticResult,
   parseHunterResult,
   parseOwnedArtifactPath,
@@ -40,10 +41,12 @@ import {
   sortLedger,
   summarizeCoverage,
   validateLedger,
+  type CoverageCriticResult,
   type CoverageError,
   type CoverageLedger,
   type CoverageSeed,
   type CoverageUnit,
+  type CriticError,
 } from "../../src/core/security-coverage";
 import type { DomainResult } from "../../src/core/orchestration-contract/identity";
 import { HUNTER_ENVELOPE, aConfirmedFinding, aRefs, aSeed, aUnitResult, ok } from "./fixtures";
@@ -323,6 +326,20 @@ describe("coverage ledger: state machine", () => {
     expect(same.accepted).toEqual([]);
   });
 
+  it("accepts a proposal for a new cell under its canonical id, planned at the critic's wave", () => {
+    const unit = seed();
+    const refs = aRefs({ surface: "http:GET /admin", boundary: "role check", subsystem: "admin", attack_class: "authz-bypass" });
+    const merged = ok(mergeCritic([unit], {
+      missingUnits: [{ refs, startingPaths: ["src/admin.ts"], ordinaryAttackClassBlock: null, selectedCompanionBlocks: [], excludedBlocks: [] }],
+      reassignIds: [],
+      resolvedPriorLeads: [],
+      stop: false,
+    }, { wave: 3, reassignmentReasons: {} }));
+    const accepted = merged.ledger.find((entry) => entry.coverage_id === merged.accepted[0]);
+    expect(merged.accepted).toHaveLength(1);
+    expect(accepted).toMatchObject({ status: "planned", wave: 3, agent_id: null, starting_paths: ["src/admin.ts"] });
+  });
+
   it("defers unreachable units with a reason and only then claims completeness", () => {
     const a = seed({ refs: aRefs({ surface: "s1", boundary: "b", subsystem: "s", attack_class: "a1" }) });
     const b = seed({ refs: aRefs({ surface: "s2", boundary: "b", subsystem: "s", attack_class: "a2" }) });
@@ -348,6 +365,90 @@ describe("coverage ledger: state machine", () => {
  *  field was named, not merely that something was. */
 const refusedPaths = (result: DomainResult<unknown, CoverageError>): readonly string[] =>
   result.ok ? [] : result.error.violations.map((entry) => entry.path);
+
+describe("mergeCritic fails closed rather than dropping a lead or erasing an attempt", () => {
+  const unit = seed();
+  const candidate = (): CoverageLedger => settled(assigned([unit], unit.coverage_id, HUNTER), unit.coverage_id, HUNTER, "tenant-scope/cache-key");
+  /** A settled unit carrying one unresolved prior lead, as a blocked hunt leaves it. */
+  const blockedWithLead = (): CoverageLedger => ok(recordUnitResult(assigned([unit], unit.coverage_id, HUNTER), {
+    coverageId: unit.coverage_id,
+    ...evidence(HUNTER, "unused"),
+    status: "blocked",
+    fingerprints: [],
+    unresolved: ["prior/lead-1", "the cache configuration is not in the repository"],
+    wave: 1,
+  }));
+  const critic = (overrides: Partial<CoverageCriticResult>): CoverageCriticResult =>
+    ({ missingUnits: [], reassignIds: [], resolvedPriorLeads: [], stop: false, ...overrides });
+  const REASON = { [unit.coverage_id]: "critic: the cache path was not followed" };
+
+  it.each<readonly [string, () => CoverageLedger, CoverageCriticResult, Readonly<{ reassignmentReasons: Readonly<Record<string, string>>; priorLeadOwners?: Readonly<Record<string, string>> }>, Partial<CriticError> & Readonly<{ kind: CriticError["kind"] }>]>([
+    ["a resolution with no owning unit recorded", blockedWithLead, critic({ resolvedPriorLeads: ["prior/lead-1"] }), { reassignmentReasons: {} },
+      { kind: "unplaceable-resolution", fingerprint: "prior/lead-1", reason: "no owning unit recorded" }],
+    ["a resolution naming an unknown coverage id", blockedWithLead, critic({ resolvedPriorLeads: ["prior/lead-1"] }),
+      { reassignmentReasons: {}, priorLeadOwners: { "prior/lead-1": "no::such::cell::x" } },
+      { kind: "unplaceable-resolution", fingerprint: "prior/lead-1", reason: "unknown coverage ID no::such::cell::x" }],
+    ["a resolution on a unit that does not carry the lead", blockedWithLead, critic({ resolvedPriorLeads: ["prior/other"] }),
+      { reassignmentReasons: {}, priorLeadOwners: { "prior/other": unit.coverage_id } },
+      { kind: "unplaceable-resolution", fingerprint: "prior/other", reason: `${unit.coverage_id} does not carry this lead` }],
+    ["reassigning a planned unit", () => [unit], critic({ reassignIds: [unit.coverage_id] }), { reassignmentReasons: REASON },
+      { kind: "reassign-unit-has-no-evidence", coverageId: unit.coverage_id, status: "planned" }],
+    ["reassigning an in-flight unit", () => assigned([unit], unit.coverage_id, HUNTER), critic({ reassignIds: [unit.coverage_id] }), { reassignmentReasons: REASON },
+      { kind: "reassign-unit-has-no-evidence", coverageId: unit.coverage_id, status: "in_progress" }],
+    ["a reassignment with no reason", candidate, critic({ reassignIds: [unit.coverage_id] }), { reassignmentReasons: {} },
+      { kind: "missing-reassignment-reason", coverageId: unit.coverage_id }],
+    ["a reassignment whose reason is blank", candidate, critic({ reassignIds: [unit.coverage_id] }), { reassignmentReasons: { [unit.coverage_id]: "  " } },
+      { kind: "missing-reassignment-reason", coverageId: unit.coverage_id }],
+    ["a settled unit with no recorded owner", () => [{ ...candidate()[0]!, agent_id: null }], critic({ reassignIds: [unit.coverage_id] }), { reassignmentReasons: REASON },
+      { kind: "terminal-unit-has-no-owner", coverageId: unit.coverage_id, status: "candidate" }],
+  ])("refuses %s, naming it", (_case, ledger, result, maps, expected) => {
+    const refused = mergeCritic(ledger(), result, { wave: 2, ...maps });
+    expect(refused.ok).toBe(false);
+    expect(refused.ok ? null : refused.error).toEqual(expected);
+  });
+
+  it("refuses a reassignment of an unknown coverage id as a named violation", () => {
+    const refused = mergeCritic(candidate(), critic({ reassignIds: ["no::such::cell::x"] }), { wave: 2, reassignmentReasons: {} });
+    expect(refusedPaths(refused as DomainResult<unknown, CoverageError>)).toEqual(["reassignIds"]);
+    expect(refused.ok ? "" : JSON.stringify(refused.error)).toContain("unknown coverage ID no::such::cell::x");
+  });
+
+  it("never invents an owner: every archived attempt names the owner that ran it", () => {
+    const merged = ok(mergeCritic(candidate(), critic({ reassignIds: [unit.coverage_id] }), { wave: 2, reassignmentReasons: REASON }));
+    expect(merged.ledger[0]!.attempts.map((attempt) => attempt.agent_id)).toEqual([HUNTER]);
+  });
+
+  it("resolves a lead the named unit carries", () => {
+    const merged = ok(mergeCritic(blockedWithLead(), critic({ resolvedPriorLeads: ["prior/lead-1"] }),
+      { wave: 2, reassignmentReasons: {}, priorLeadOwners: { "prior/lead-1": unit.coverage_id } }));
+    expect(merged.resolved).toEqual(["prior/lead-1"]);
+    expect(merged.ledger[0]!.unresolved).toEqual(["the cache configuration is not in the repository"]);
+  });
+});
+
+describe("parseLedger returns its own proof, never the caller's array", () => {
+  it("hands back a deep frozen copy: mutating the raw document afterwards changes nothing", () => {
+    const unit = seed();
+    const raw: unknown = JSON.parse(JSON.stringify(settled(assigned([unit], unit.coverage_id, HUNTER), unit.coverage_id, HUNTER, "tenant-scope/cache-key")));
+    const parsed = ok(parseLedger(raw));
+    expect(parsed).not.toBe(raw);
+    const document = raw as { status: string; reviewed_paths: string[] }[];
+    document[0]!.status = "planned";
+    document[0]!.reviewed_paths.push("src/forged.ts");
+    expect(parsed[0]!.status).toBe("candidate");
+    expect(parsed[0]!.reviewed_paths).toEqual(["src/reports/controller.ts"]);
+    expect(Object.isFrozen(parsed)).toBe(true);
+    expect(Object.isFrozen(parsed[0])).toBe(true);
+    expect(Object.isFrozen(parsed[0]!.reviewed_paths)).toBe(true);
+  });
+
+  it("still drives every transition from the frozen ledger it returned", () => {
+    const unit = seed();
+    const parsed = ok(parseLedger(JSON.parse(JSON.stringify([unit]))));
+    const inFlight = assigned(parsed, unit.coverage_id, HUNTER);
+    expect(validateLedger(settled(inFlight, unit.coverage_id, HUNTER, "tenant-scope/cache-key"))).toEqual([]);
+  });
+});
 
 describe("coverage ledger: construction enforces the ledger's own state rule", () => {
   const seedResult = (overrides: Partial<CoverageSeed>) => seedCoverageUnit({ ...aSeed(), ...overrides });
@@ -505,7 +606,7 @@ describe("admitArtifactNonce", () => {
     const reassigned = ok(mergeCritic(
       settledLocal,
       { missingUnits: [], reassignIds: [first.coverage_id], resolvedPriorLeads: [], stop: false },
-      { wave: 2, reassignmentReasons: {} },
+      { wave: 2, reassignmentReasons: { [first.coverage_id]: "critic: the receipt's tenant pair was never varied" } },
     )).ledger;
     // HUNTER is still in flight on the second unit, so only the archive refuses.
     const refused = admitArtifactNonce(reassigned, artifact);

@@ -33,7 +33,7 @@
 import type { Violation } from "../types";
 import { makeViolation } from "../types";
 import { isTestFile } from "./config";
-import { baselineCounter, projectRelative, baselineKey, type Baseline } from "./baseline";
+import { baselineCounter, projectRelative, baselineKey, type Baseline, type BaselineKey } from "./baseline";
 
 export const RULE_NAME = "exhaustive-discriminant-branching";
 
@@ -231,8 +231,8 @@ function branchRuns(lines: readonly string[], tags: readonly string[]): readonly
 }
 
 /** A chain this rule flags absent a baseline, with the key a baseline entry
- *  for it is written under. */
-type CandidateChain = BranchRun & Readonly<{ key: string }>;
+ *  for it is written under and the text of its first branch line. */
+type CandidateChain = BranchRun & Readonly<{ key: BaselineKey; snippet: string }>;
 
 /**
  * The chains the rule flags absent its baseline: enough branches, chain-shaped,
@@ -259,7 +259,7 @@ function candidateChains(
 
   return Object.freeze(branchRuns(lines, tags)
     .filter((run) => run.branches >= maxBranches && run.chainEvidence && !provenNear(run.firstLine, run.lastLine))
-    .map((run) => ({ ...run, key: baselineKey(relative, run.discriminant) })));
+    .map((run) => ({ ...run, key: baselineKey(relative, run.discriminant), snippet: lines[run.firstLine - 1]?.trim() ?? "" })));
 }
 
 export function handler(
@@ -267,7 +267,6 @@ export function handler(
   filePath: string,
   options: DiscriminantBranchingOptions = DEFAULT_DISCRIMINANT_BRANCHING_OPTIONS,
 ): readonly Violation[] {
-  const lines = content.split("\n");
   const entries = baselineCounter(options.baseline);
   return Object.freeze(candidateChains(content, filePath, options)
     .filter((chain) => !entries.consume(chain.key))
@@ -275,7 +274,7 @@ export function handler(
       RULE_NAME,
       filePath,
       chain.firstLine,
-      lines[chain.firstLine - 1]?.trim() ?? "",
+      chain.snippet,
       `${chain.branches} branches on \`${chain.discriminant}\` — use match(...).exhaustive() or a \`never\` default so a new variant is a compile error`,
     )));
 }
@@ -286,6 +285,6 @@ export function detectedChainKeys(
   content: string,
   filePath: string,
   options: DiscriminantBranchingOptions = DEFAULT_DISCRIMINANT_BRANCHING_OPTIONS,
-): readonly string[] {
+): readonly BaselineKey[] {
   return candidateChains(content, filePath, options).map((chain) => chain.key);
 }

@@ -10,13 +10,24 @@
 
 import { describe, expect, it } from "vitest";
 import { parseSecurityFindings, type SecurityFinding } from "../../src/core/security-findings";
-import { assignUnits, coverageSettled, deferPlannedUnits, recordUnitResult, runStatusOf, seedCoverageUnit, type CoverageLedger } from "../../src/core/security-coverage";
+import {
+  assignUnits,
+  coverageSettled,
+  deferPlannedUnits,
+  mergeCritic,
+  recordUnitResult,
+  runStatusOf,
+  seedCoverageUnit,
+  unitOfFingerprint,
+  type CoverageLedger,
+} from "../../src/core/security-coverage";
+import { securityDisposition } from "../../src/core/security-disposition";
 import { HUNTER_AGENT as HUNTER, aRefs, aRunMetadata, ok } from "./fixtures";
 import {
+  derivePublication,
   renderFindingsDetail,
   renderNeedsValidation,
-  renderReport,
-  renderRunDocuments,
+  type PublicationInput,
 } from "../../src/core/security-reports";
 
 const CONFIRMED = {
@@ -113,12 +124,16 @@ const ledger = (): CoverageLedger => {
   }));
 };
 
+/** The run's documents, derived through the one publication derivation. */
+const documentsOf = (input: Omit<PublicationInput, "locator">) => ok(derivePublication({ ...input, locator: "/out" })).documents;
+const reportOf = (input: Omit<PublicationInput, "locator">): string => documentsOf(input)["REPORT.md"];
+
 describe("report derivation", () => {
   it("renders every published record exactly where its verdict says (INV-S6)", () => {
     const findings = parse([CONFIRMED, NEEDS_VALIDATION, REJECTED]);
-    const documents = renderRunDocuments({ metadata, ledger: ledger(), findings, locator: "/out" });
+    const documents = documentsOf({ metadata, ledger: ledger(), findings });
 
-    const report = documents["REPORT.md"] ?? "";
+    const report = documents["REPORT.md"];
     expect(report.match(/authz:1/g)?.length).toBe(1);
     expect(report).toContain("Report export skips the tenant predicate");
     expect(report).toContain("Webhook target may be re-resolved after validation");
@@ -127,19 +142,19 @@ describe("report derivation", () => {
     expect(report).toContain("Rejected claims");
     expect(report).not.toContain("Report title is reflected unescaped");
 
-    const needsValidation = documents["NEEDS-VALIDATION.md"] ?? "";
+    const needsValidation = documents["NEEDS-VALIDATION.md"];
     expect(needsValidation).toContain("ssrf:1");
     expect(needsValidation).not.toContain("authz:1");
     expect(needsValidation).not.toContain("xss:1");
 
-    const detail = documents["FINDINGS-DETAIL.md"] ?? "";
+    const detail = documents["FINDINGS-DETAIL.md"];
     expect(detail).toContain("authz:1");
     expect(detail).not.toContain("ssrf:1");
   });
 
   it("gives a needs_validation lead no severity anywhere (INV-S4b)", () => {
     const findings = parse([NEEDS_VALIDATION]);
-    const needsValidation = renderNeedsValidation({ metadata, ledger: ledger(), findings, locator: "/out" });
+    const needsValidation = renderNeedsValidation({ metadata, findings });
     expect(needsValidation).not.toMatch(/\b(critical|high|medium|low)\b/i);
     expect(needsValidation).not.toContain("Severity:");
     expect(needsValidation).toContain("Blockers:");
@@ -147,20 +162,18 @@ describe("report derivation", () => {
 
   it("is byte-identical for identical records (INV-S6b)", () => {
     const findings = parse([CONFIRMED, NEEDS_VALIDATION, REJECTED]);
-    const first = renderRunDocuments({ metadata, ledger: ledger(), findings, locator: "/out" });
-    const second = renderRunDocuments({ metadata, ledger: ledger(), findings, locator: "/out" });
+    const first = derivePublication({ metadata, ledger: ledger(), findings, locator: "/out" });
+    const second = derivePublication({ metadata, ledger: ledger(), findings, locator: "/out" });
     expect(first).toEqual(second);
-    expect(renderReport({ metadata, ledger: ledger(), findings, locator: "/out" })).toBe(renderReport({ metadata, ledger: ledger(), findings, locator: "/out" }));
   });
 
   it("discloses an incomplete run instead of claiming coverage", () => {
     const deferred = ok(deferPlannedUnits(ledger(), deferReason));
     expect(coverageSettled(deferred)).toBe(true);
-    const report = renderReport({
+    const report = reportOf({
       metadata: { ...metadata, runStatus: "incomplete", incompleteReason: deferReason },
       ledger: deferred,
       findings: [],
-      locator: "/out",
     });
     expect(report).toContain("Run status: incomplete");
     expect(report).toContain(deferReason);
@@ -169,7 +182,7 @@ describe("report derivation", () => {
 
   it("marks an incomplete reason no deferral recorded as inferred, and a recorded one as itself", () => {
     const render = (deferred: CoverageLedger) =>
-      renderReport({ metadata: { ...metadata, ...runStatusOf(deferred) }, ledger: deferred, findings: [], locator: "/out" });
+      reportOf({ metadata: { ...metadata, ...runStatusOf(deferred) }, ledger: deferred, findings: [] });
     const prose = ok(deferPlannedUnits(planned(), "the export endpoint was unreachable from the sandbox"));
     const inferred = render(prose);
     expect(inferred).toContain("`validation_budget_exhausted` (inferred: no deferred unit recorded an upstream reason");
@@ -181,15 +194,60 @@ describe("report derivation", () => {
   });
 
   it("prints a diff scope by its two commits", () => {
-    expect(renderReport({ metadata, ledger: ledger(), findings: [], locator: "/out" })).toContain(`- Scope: ${"0".repeat(40)}..${"1".repeat(40)}`);
+    expect(reportOf({ metadata, ledger: ledger(), findings: [] })).toContain(`- Scope: ${"0".repeat(40)}..${"1".repeat(40)}`);
   });
 
   it("renders the positive case without inventing findings", () => {
     const settledLedger = ok(deferPlannedUnits(ledger(), "no_remaining_work"));
-    const report = renderReport({ metadata, ledger: settledLedger, findings: [], locator: "/out", hardening: ["Parameterized queries are used throughout the export path."] });
+    const report = reportOf({ metadata, ledger: settledLedger, findings: [], hardening: ["Parameterized queries are used throughout the export path."] });
     expect(report).toContain("0 confirmed, 0 needing validation, 0 rejected");
     expect(report).toContain("Parameterized queries are used throughout the export path.");
-    expect(renderFindingsDetail({ metadata, ledger: settledLedger, findings: [], locator: "/out" })).toContain("No medium-or-higher confirmed finding");
-    expect(renderNeedsValidation({ metadata, ledger: settledLedger, findings: [], locator: "/out" })).toContain("No unresolved lead");
+    expect(renderFindingsDetail({ metadata, findings: [] })).toContain("No medium-or-higher confirmed finding");
+    expect(renderNeedsValidation({ metadata, findings: [] })).toContain("No unresolved lead");
+  });
+});
+
+describe("one derivation of the disposition (INV-S6)", () => {
+  it("hands the report the very disposition disposition.json is derived from", () => {
+    const findings = parse([CONFIRMED, NEEDS_VALIDATION, REJECTED]);
+    const publication = ok(derivePublication({ metadata, ledger: ledger(), findings, locator: "/out" }));
+    expect(publication.disposition).toEqual(ok(securityDisposition({ metadata, locator: "/out", findings })));
+    expect(publication.documents["REPORT.md"]).toContain(`Decision set: disposition.json (${publication.disposition.source.resultDigest}).`);
+  });
+
+  it("refuses the publication when the disposition cannot be derived, rather than rendering the error as prose", () => {
+    // Two records under one fingerprint (two parsed documents concatenated)
+    // give one origin two decisions: no report is produced at all.
+    const twice = [...parse([CONFIRMED]), ...parse([CONFIRMED])];
+    const refused = derivePublication({ metadata, ledger: ledger(), findings: twice, locator: "/out" });
+    expect(refused.ok).toBe(false);
+    if (refused.ok) throw new Error("expected a refusal");
+    expect(refused.error.message).toContain("duplicate fingerprint authz:1");
+  });
+});
+
+describe("fingerprint ownership survives a reassignment", () => {
+  /** The candidate unit of `ledger()`, reassigned by a critic: its filing moves
+   *  into an archived attempt and the live list is cleared. */
+  const reassigned = (): CoverageLedger => {
+    const settled = ledger();
+    const [unit] = settled;
+    return ok(mergeCritic(settled, { missingUnits: [], reassignIds: [unit!.coverage_id], resolvedPriorLeads: [], stop: false }, {
+      wave: 1,
+      reassignmentReasons: { [unit!.coverage_id]: "the tenant predicate needs a second look" },
+    })).ledger;
+  };
+
+  it("finds the unit that filed a fingerprint in an archived attempt", () => {
+    const after = reassigned();
+    expect(after[0]!.result_fingerprints).toEqual([]);
+    expect(unitOfFingerprint(after, "authz:1")?.coverage_id).toBe(after[0]!.coverage_id);
+    expect(unitOfFingerprint(after, "never:filed")).toBeNull();
+  });
+
+  it("keeps the finding's boundary in the report instead of printing it unmapped", () => {
+    const report = reportOf({ metadata, ledger: reassigned(), findings: parse([CONFIRMED]) });
+    expect(report).toContain("| high | Report export skips the tenant predicate | tenant isolation |");
+    expect(report).not.toContain("unmapped");
   });
 });

@@ -65,7 +65,7 @@ import {
 } from "./panel-kernel";
 import { STANDALONE_REVIEW_SUBJECT } from "./reviewer-contract";
 import { sha256Hex } from "./digest";
-import { nonEmptyOf, type ArtifactDigest } from "./orchestration-contract/identity";
+import { nonEmpty, type ArtifactDigest } from "./orchestration-contract/identity";
 
 // ---------------------------------------------------------------------------
 // Lenses
@@ -1325,9 +1325,9 @@ export function countRefutationVotes(
     upheldBy: Object.freeze(upheldBy),
     uncertainFrom: Object.freeze(uncertainFrom),
   });
-  const [head, ...tail] = refutations;
-  return head !== undefined && refutations.length >= threshold
-    ? Object.freeze({ survives: false as const, votes, refutations: nonEmptyOf(head, ...tail) })
+  const refuted = nonEmpty(refutations);
+  return refuted !== null && refuted.length >= threshold
+    ? Object.freeze({ survives: false as const, votes, refutations: refuted })
     : Object.freeze({ survives: true as const, votes, refutations: Object.freeze(refutations) });
 }
 

@@ -10,6 +10,7 @@ import validateAgentSkill, {
 } from "../../../src/handlers/pre-tool-use/validate-agent-skill";
 import { TASK_GRAPH_PATH } from "../../../src/config";
 import { AGENT_POLICIES } from "../../../src/core/model-profiles";
+import { SECURITY_AUDIT_AGENTS } from "../../../src/core/agent-catalog-projections";
 
 const TMP = "/tmp/loom-skill-test-" + process.pid;
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
@@ -402,6 +403,41 @@ describe("the Agent Catalog against the skill gate", () => {
     // A security agent the gate does not know is spawned with its skill
     // preload unproven — the gate passes unknown non-namespaced names through.
     expect(SECURITY_AGENTS.filter((agent) => !VALIDATED_AGENTS.has(agent))).toEqual([]);
+  });
+
+  it("validates every security-audit agent the catalog projection names, so none is an unspawnable kind", () => {
+    // Derived from the same projection the gate spreads into VALIDATED_AGENTS:
+    // a new security-verdict kind lands here with no list to update.
+    expect([...SECURITY_AUDIT_AGENTS].sort()).toEqual(["security-critic-agent", "security-hunter-agent", "security-verifier-agent"]);
+    expect([...SECURITY_AUDIT_AGENTS].filter((agent) => !VALIDATED_AGENTS.has(agent))).toEqual([]);
+  });
+
+  it.each([...SECURITY_AUDIT_AGENTS])("admits a namespaced %s spawn — gated on exactly the skills its definition declares", async (agent) => {
+    const declared = parseSkillsFromFrontmatter(join(REPO_ROOT, "agents", `${agent}.md`));
+    expect(declared.kind).not.toBe("unreadable");
+    const skills = declared.kind === "skills" ? declared.names : [];
+    const createdGraph = !existsSync(TASK_GRAPH_PATH);
+    const previousRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    if (createdGraph) {
+      mkdirSync(dirname(TASK_GRAPH_PATH), { recursive: true });
+      writeFileSync(TASK_GRAPH_PATH, "{}");
+    }
+    process.env.CLAUDE_PLUGIN_ROOT = REPO_ROOT;
+    const spawn = (prompt: string) => validateAgentSkill(JSON.stringify({
+      tool_name: "Task",
+      tool_input: { subagent_type: `loom:${agent}`, prompt },
+    }), []);
+    try {
+      // Known to the gate: never the "unknown namespaced agent" block.
+      expect((await spawn(`Apply ${skills.map((skill) => `the ${skill} skill`).join(" and ") || "your brief"} to this unit.`)).kind).not.toBe("block");
+      const omitted = await spawn("Look at this unit.");
+      expect(omitted.kind).toBe(skills.length === 0 ? "allow" : "block");
+      if (omitted.kind === "block") expect(omitted.message).toContain(skills[0]);
+    } finally {
+      if (previousRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = previousRoot;
+      if (createdGraph) rmSync(TASK_GRAPH_PATH, { force: true });
+    }
   });
 
   it("names no catalog agent with the ledger's owner-id separator", () => {

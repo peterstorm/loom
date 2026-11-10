@@ -295,9 +295,15 @@ The TypeScript rules read every TypeScript spelling (`.ts .tsx .mts .cts`).
 architecture.md's "no silencing casts" and "no catch-all handlers": each one
 asserts something the compiler or the caller would otherwise have had to prove.
 `no-non-null-assertion` exempts test files — there a failed assumption throws
-and fails the test, which is the assertion's purpose. Turning it on in Loom
-meant 415 production assertions: 318 were redundant (the type already excluded
-`undefined`), the other 97 became real narrowing.
+and fails the test, which is the assertion's purpose.
+
+The rules that exempt tests (`no-non-null-assertion`, `no-console-log`,
+`no-todo-fixme`) name one test-file list between them: `.test.` and `.spec.`
+before every extension the rule reads — `ts tsx mts cts`, and for
+`no-todo-fixme` also `js jsx mjs cjs`. A rule that reads `.mts` exempts
+`.test.mts`, so a test file is never exempt from one rule and held to another.
+`engine/tests/linter/regex-rules.test.ts` pins each rule's matching and
+non-matching lines and that exemption list.
 
 **"Use ts-pattern instead of switch" is `switch-totality`**, a programmatic rule
 that also runs in this tier (below). The old regex rule `prefer-ts-pattern` is

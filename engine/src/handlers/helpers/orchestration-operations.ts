@@ -1,11 +1,14 @@
 /**
  * The orchestration helper's operation table: every `helper orchestration
- * <operation>`, each declaring the two traits the CLI route layer must know
- * before it imports the helper. Pure data with no imports, so `handler-routes`
+ * <operation>`, each declaring the traits that the CLI route layer and the
+ * subagent write guard consult. Pure data with no imports, so `handler-routes`
  * can read it on every CLI start without loading the helper itself.
  *
- * The helper's dispatcher matches exhaustively over these names, so a new
- * operation cannot be added without declaring both traits here.
+ * The helper's dispatcher matches exhaustively over these names, and every
+ * trait is required, so a new operation cannot be added without declaring each
+ * policy here. Each policy is its own trait with exactly one reader; today the
+ * skew-available operations are exactly the subagent-runnable ones, but that
+ * is a coincidence of two facts, not one fact stated twice.
  */
 
 export type OrchestrationOperationTraits = Readonly<{
@@ -17,39 +20,40 @@ export type OrchestrationOperationTraits = Readonly<{
    */
   input: "stdin" | "flags";
   /**
-   * `available`: a pure projection that mutates nothing and stays usable
-   * during Pi runtime skew, because it is what an operator needs WHILE
-   * recovering from skew (`status`: where is the graph; `inspect`: what state
-   * is this run in, and is it recoverable). Gating it would make the handshake
-   * failure undiagnosable from inside the session that hit it.
+   * Pi runtime skew, read by `handler-routes`. `available`: a pure projection
+   * that stays usable during Pi runtime skew, because it is what an operator
+   * needs WHILE recovering from skew (`status`: where is the graph; `inspect`:
+   * what state is this run in, and is it recoverable). Gating it would make
+   * the handshake failure undiagnosable from inside the session that hit it.
    * `handshake-required`: every other operation, `abandon` included, since its
    * marker is durable and terminal.
-   *
-   * A second reader: the subagent write guard derives "a subagent may run
-   * this" from `available` (`pre-tool-use/subagent-authority-operations.ts`),
-   * because read-only-under-skew and read-only-for-a-subagent are the same fact
-   * today. An operation that must be one but not the other needs an explicit
-   * authority trait here, not a change to the skew policy.
    */
   runtimeSkew: "available" | "handshake-required";
+  /**
+   * Subagent authority (ADR-0067 D6), read by the subagent write guard
+   * (`pre-tool-use/subagent-authority-operations.ts`). `read-only`: a subagent
+   * may run it. `parent-only`: it moves orchestration authority and is the
+   * parent's alone.
+   */
+  subagent: "read-only" | "parent-only";
 }>;
 
 export const ORCHESTRATION_OPERATIONS = Object.freeze({
-  status: Object.freeze({ input: "flags", runtimeSkew: "available" }),
-  inspect: Object.freeze({ input: "flags", runtimeSkew: "available" }),
-  brief: Object.freeze({ input: "flags", runtimeSkew: "available" }),
-  start: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required" }),
-  restart: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
-  "recover-orphan": Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
-  resume: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
-  submit: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required" }),
-  correlate: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
-  complete: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
-  decide: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required" }),
-  abandon: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
-  remediate: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
-  attest: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
-  "reopen-task": Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
+  status: Object.freeze({ input: "flags", runtimeSkew: "available", subagent: "read-only" }),
+  inspect: Object.freeze({ input: "flags", runtimeSkew: "available", subagent: "read-only" }),
+  brief: Object.freeze({ input: "flags", runtimeSkew: "available", subagent: "read-only" }),
+  start: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required", subagent: "parent-only" }),
+  restart: Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
+  "recover-orphan": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
+  resume: Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
+  submit: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required", subagent: "parent-only" }),
+  correlate: Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
+  complete: Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
+  decide: Object.freeze({ input: "stdin", runtimeSkew: "handshake-required", subagent: "parent-only" }),
+  abandon: Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
+  remediate: Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
+  attest: Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
+  "reopen-task": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
 } as const satisfies Readonly<Record<string, OrchestrationOperationTraits>>);
 
 export type OrchestrationOperation = keyof typeof ORCHESTRATION_OPERATIONS;

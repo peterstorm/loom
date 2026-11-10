@@ -12,15 +12,24 @@
  * appear as findings, and that two renders of the same run are byte-identical.
  *
  * The report also ends on the handoff (ADR-0066): an audit never patches, so the
- * last section derives the disposition set `/review-and-fix` consumes and names
- * the exact command that loads it.
+ * last section prints the disposition set `/review-and-fix` consumes and names
+ * the exact command that loads it. The disposition is derived ONCE, by
+ * `derivePublication`, and handed to the renderer: the report's handoff and
+ * `disposition.json` come from one derivation, and a disposition that cannot
+ * be derived refuses the publication instead of rendering as an error sentence.
  *
  * Pure module: no I/O, no clock, no randomness.
  */
 
 import type { SecurityRunMetadata } from "./security-audit-contract";
-import { incompleteReasonSource, summarizeCoverage, type CoverageLedger } from "./security-coverage";
-import { dispositionHandoffPaths, renderDispositionHandoff, securityDisposition } from "./security-disposition";
+import { success, type DomainResult } from "./orchestration-contract/identity";
+import { incompleteReasonSource, summarizeCoverage, unitOfFingerprint, type CoverageLedger } from "./security-coverage";
+import {
+  renderDispositionHandoff,
+  securityDisposition,
+  type DispositionError,
+  type SecurityDisposition,
+} from "./security-disposition";
 import {
   sortByFingerprint,
   type ConfirmedFinding,
@@ -38,16 +47,19 @@ export type ReportInput = Readonly<{
   hardening?: readonly string[];
   /** The final coverage critic's own verdict, quoted as-is. */
   criticStop?: boolean | null;
-  /** Where the published records live. REQUIRED: the handoff prints the command
-   *  that loads them, and a report rendered without it would name the working
-   *  directory as the decision set's home. */
-  locator: string;
+  /** The decision set this publication hands off, derived once by
+   *  `derivePublication` from these same findings. It carries the locator the
+   *  handoff command names, so the report needs no second copy of it. */
+  disposition: SecurityDisposition;
 }>;
 
-/** The boundary of the unit that filed a fingerprint, or `unmapped` when no
- *  settled unit carries it. */
+/** What the detail documents read: the run's name and its records. */
+export type DetailInput = Pick<ReportInput, "metadata" | "findings">;
+
+/** The boundary of the unit that filed a fingerprint — live or archived, as
+ *  the ledger's `unitOfFingerprint` answers — or `unmapped` when none did. */
 const boundaryOf = (ledger: CoverageLedger, fingerprint: string): string =>
-  ledger.find((unit) => unit.result_fingerprints.includes(fingerprint))?.boundary ?? "unmapped";
+  unitOfFingerprint(ledger, fingerprint)?.boundary ?? "unmapped";
 
 const cell = (text: string): string => text.replace(/\|/g, "\\|").replace(/\s+/g, " ").trim();
 
@@ -214,23 +226,8 @@ export function renderReport(input: ReportInput): string {
     "",
     rejectedNote(rejected),
     "",
-    handoffSection(input),
+    renderDispositionHandoff(input.disposition),
   ].join("\n");
-}
-
-/** The handoff is DERIVED like everything else here: the report's decision set
- *  and `disposition.json` come from one function, so the prose cannot describe
- *  decisions the loader will not receive (INV-S6). */
-function handoffSection(input: ReportInput): string {
-  const derived = securityDisposition({
-    metadata: input.metadata,
-    locator: input.locator,
-    findings: input.findings,
-  });
-  if (!derived.ok) return ["## Disposition handoff", "", derived.error.message].join("\n");
-  // The paths are always derived; `renderDispositionHandoff` alone decides that
-  // a run with nothing to remediate prints no command.
-  return renderDispositionHandoff(derived.value, dispositionHandoffPaths(input.locator, input.metadata.runId));
 }
 
 /** A trace as the numbered list both detail documents print. */
@@ -301,7 +298,7 @@ const findingDetail = (finding: ConfirmedFinding, index: number): readonly strin
 ];
 
 /** `FINDINGS-DETAIL.md` — full traces and reproductions for medium and above. */
-export function renderFindingsDetail(input: ReportInput): string {
+export function renderFindingsDetail(input: DetailInput): string {
   const detail = confirmedOf(input.findings).filter(
     (finding) => finding.severity.overall_severity !== "informational" && finding.severity.overall_severity !== "low",
   );
@@ -315,7 +312,7 @@ export function renderFindingsDetail(input: ReportInput): string {
 }
 
 /** `NEEDS-VALIDATION.md` — prioritised leads, no severity, exact blockers. */
-export function renderNeedsValidation(input: ReportInput): string {
+export function renderNeedsValidation(input: DetailInput): string {
   const leads = needsValidationOf(input.findings);
   if (leads.length === 0) return `# Needs validation — ${input.metadata.repo}\n\n_No unresolved lead._\n`;
 
@@ -355,10 +352,38 @@ export function renderNeedsValidation(input: ReportInput): string {
 }
 
 /** The three derived prose documents, keyed by their fixed filenames. */
-export function renderRunDocuments(input: ReportInput): Readonly<Record<string, string>> {
-  return {
-    "REPORT.md": renderReport(input),
-    "FINDINGS-DETAIL.md": renderFindingsDetail(input),
-    "NEEDS-VALIDATION.md": renderNeedsValidation(input),
-  };
+export type RunDocuments = Readonly<Record<"REPORT.md" | "FINDINGS-DETAIL.md" | "NEEDS-VALIDATION.md", string>>;
+
+/** A run's publication: its decision set and the prose that describes it, from
+ *  ONE derivation of the disposition. */
+export type Publication = Readonly<{ disposition: SecurityDisposition; documents: RunDocuments }>;
+
+export type PublicationInput = Omit<ReportInput, "disposition"> & Readonly<{
+  /** Where the published records live: the handoff command loads them from
+   *  here, so a publication derived without it would name the working
+   *  directory as the decision set's home. */
+  locator: string;
+}>;
+
+/**
+ * Derive a run's publication: the disposition set (`securityDisposition`, the
+ * same function `disposition.json` is written from) and the three prose
+ * documents that print it. INV-S6 holds by construction — the report's
+ * handoff is that disposition, not a second derivation of it — and a
+ * disposition that cannot be derived (a duplicate fingerprint) is a refusal the
+ * caller acts on, never prose inside a report that still publishes.
+ */
+export function derivePublication(input: PublicationInput): DomainResult<Publication, DispositionError> {
+  const { locator, ...report } = input;
+  const disposition = securityDisposition({ metadata: input.metadata, locator, findings: input.findings });
+  if (!disposition.ok) return disposition;
+  const reportInput: ReportInput = { ...report, disposition: disposition.value };
+  return success({
+    disposition: disposition.value,
+    documents: {
+      "REPORT.md": renderReport(reportInput),
+      "FINDINGS-DETAIL.md": renderFindingsDetail(reportInput),
+      "NEEDS-VALIDATION.md": renderNeedsValidation(reportInput),
+    },
+  });
 }

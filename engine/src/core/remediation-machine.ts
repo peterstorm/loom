@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { match, P } from "ts-pattern";
+import { match } from "ts-pattern";
 import { parseReviewerProtocolDescriptor } from "./reviewer-contract";
 import { parseStandaloneReviewerProtocolV3 } from "./standalone-lineage-contract";
 import { compareStrings } from "./ordering";
@@ -2721,14 +2721,14 @@ function parseActiveState(
   }
   const state = discriminant.value.state;
   const common = ["state", "authority", "recoveryAttemptIds", "consumedRecoveryReceiptIds"];
-  // Every other discriminant (including the non-active and malformed ones) is
-  // held to the common fields; the active-state check below rejects it.
+  // An open domain: every other discriminant (including the non-active and
+  // malformed ones) is held to the common fields, and the active-state check
+  // below rejects it.
   const fields = match(state)
     .with("audited", () => [...common, "audited"])
     .with("staged-temporary-index", () => [...common, "audited", "staged"])
     .with("verified", () => [...common, "audited", "staged", "verified"])
-    .with(P.string, P.nullish, () => common)
-    .exhaustive();
+    .otherwise(() => common);
   const record = exactRecord(raw, fields, "remediationState");
   if (!record.ok) return activeStateParseFailure("state", record.error);
   if (!["authority-frozen", "paths-registered", "audited", "staged-temporary-index", "verified"].includes(String(state))) {

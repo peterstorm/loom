@@ -3,18 +3,20 @@
  * operations that take input (start/submit/decide) read stdin to EOF; every
  * flags-only orchestration operation must not, or an inherited stdin that is
  * never closed hangs the command (observed: `orchestration abandon` blocked
- * for ten minutes under a parent shell whose stdin stayed open). The
- * security-audit helper is operation-dependent the same way and is pinned by
- * its own traits table below.
+ * for ten minutes under a parent shell whose stdin stayed open).
+ *
+ * The row-by-row agreement between the route predicates and each helper's
+ * operation table lives in ONE suite at the handler-routes seam
+ * (`architecture/handler-routes-operations.test.ts`). This file keeps what
+ * only a real process can prove: a flags-only operation exits under an open
+ * stdin.
  */
 
 import { afterAll, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { KNOWN_HANDLERS, piRuntimeHandshakeRequired, routeConsumesStdin } from "../../src/handler-routes";
-import { ORCHESTRATION_OPERATIONS } from "../../src/handlers/helpers/orchestration-operations";
-import { SECURITY_AUDIT_OPERATIONS } from "../../src/handlers/helpers/security-audit-operations";
+import { KNOWN_HANDLERS, routeConsumesStdin } from "../../src/handler-routes";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { aSeed } from "../security/fixtures";
 
@@ -47,6 +49,14 @@ const waitForExit = async (child: ChildProcess, timeoutMs: number): Promise<"exi
   return outcome;
 };
 
+/** Everything the child prints on the named streams, in arrival order; read
+ *  the getter once the child has exited. */
+const collectOutput = (child: ChildProcess, streams: readonly ("stdout" | "stderr")[]): (() => string) => {
+  let printed = "";
+  for (const stream of streams) child[stream]?.on("data", (chunk: Buffer) => { printed += chunk.toString("utf8"); });
+  return () => printed;
+};
+
 describe("routeConsumesStdin", () => {
   it("reads stdin only for the orchestration operations that take input", () => {
     for (const operation of ["start", "submit", "decide"]) {
@@ -59,33 +69,11 @@ describe("routeConsumesStdin", () => {
     expect(routeConsumesStdin("helper", "orchestration", [])).toBe(false);
   });
 
-  it("derives both route decisions from each operation's declared traits", () => {
-    for (const [operation, traits] of Object.entries(ORCHESTRATION_OPERATIONS)) {
-      expect(routeConsumesStdin("helper", "orchestration", [operation]), operation).toBe(traits.input === "stdin");
-      expect(piRuntimeHandshakeRequired("helper", "orchestration", [operation]), operation)
-        .toBe(traits.runtimeSkew === "handshake-required");
-    }
-    // An operation the table does not declare reads nothing and stays gated.
-    expect(routeConsumesStdin("helper", "orchestration", ["unknown"])).toBe(false);
-    expect(piRuntimeHandshakeRequired("helper", "orchestration", ["unknown"])).toBe(true);
-    expect(piRuntimeHandshakeRequired("helper", "orchestration", ["toString"])).toBe(true);
-  });
-
-  it("derives the security-audit routes from its own operation traits", () => {
-    for (const [operation, traits] of Object.entries(SECURITY_AUDIT_OPERATIONS)) {
-      expect(routeConsumesStdin("helper", "security-audit", [operation]), operation).toBe(traits.input === "stdin");
-      expect(piRuntimeHandshakeRequired("helper", "security-audit", [operation]), operation)
-        .toBe(traits.runtimeSkew === "handshake-required");
-    }
-    expect(routeConsumesStdin("helper", "security-audit", ["unknown"])).toBe(false);
-    expect(piRuntimeHandshakeRequired("helper", "security-audit", ["unknown"])).toBe(true);
-  });
-
   it("keeps every other known route on stdin", () => {
     for (const [hookType, handlers] of Object.entries(KNOWN_HANDLERS)) {
       for (const handler of handlers) {
         // Both helpers are operation-dependent: stdin and skew follow a traits
-        // table, and the two tests above pin those tables row by row.
+        // table, pinned row by row at the handler-routes seam.
         if (hookType === "helper" && (handler === "orchestration" || handler === "security-audit")) continue;
         expect(routeConsumesStdin(hookType, handler, []), `${hookType}/${handler}`).toBe(true);
       }
@@ -113,11 +101,10 @@ describe("a flags-only operation with an inherited open stdin", () => {
     expect(seeding.exitCode, "start must succeed before status proves anything").toBe(0);
 
     const child = spawnCli(["helper", "security-audit", "status", "--out", out], "open");
-    let printed = "";
-    child.stdout?.on("data", (chunk: Buffer) => { printed += chunk.toString("utf8"); });
+    const printed = collectOutput(child, ["stdout"]);
     expect(await waitForExit(child, 20_000)).toBe("exited");
     expect(child.exitCode).toBe(0);
-    expect(printed).toContain("coverage:");
+    expect(printed()).toContain("coverage:");
 
     // `nonce` is flags-only too: with nothing in flight it refuses — and it
     // must REACH that refusal rather than wait on the open stdin.
@@ -125,11 +112,9 @@ describe("a flags-only operation with an inherited open stdin", () => {
       ["helper", "security-audit", "nonce", "--out", out, "--artifact", "agents/security-hunter-agent/artifacts/repro.txt"],
       "open",
     );
-    let refusal = "";
-    nonce.stderr?.on("data", (chunk: Buffer) => { refusal += chunk.toString("utf8"); });
-    nonce.stdout?.on("data", (chunk: Buffer) => { refusal += chunk.toString("utf8"); });
+    const refusal = collectOutput(nonce, ["stderr", "stdout"]);
     expect(await waitForExit(nonce, 20_000)).toBe("exited");
     expect(nonce.exitCode).not.toBe(0);
-    expect(refusal).toContain("no in_progress unit is owned by security-hunter-agent");
+    expect(refusal()).toContain("no in_progress unit is owned by security-hunter-agent");
   }, 60_000);
 });

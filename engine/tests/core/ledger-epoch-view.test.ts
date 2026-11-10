@@ -221,14 +221,22 @@ describe("renderEpoch", () => {
 // --- SandboxRun facts ---
 
 describe("renderEpoch: SandboxRun", () => {
+  // The fixture receipt's unchanging lines: each case below pins only the facts it changes.
+  const LIMITS_LINE = "    limits cpu 10s, address space 1024MB, processes 128, file 32MB, wall 60s, scratch 64MB";
+  const ALL_ENFORCED_LINE = "    enforced cpu yes, memory yes, processes yes, file size yes";
+  const SCRATCH_LINE = "    scratch 12B after the run; env PATH,HOME,TMPDIR,LANG,TERM";
+  /** The isolation detail line, with the fixture's facts unless a case changes them. */
+  const isolationLine = ({ loopback = "yes", target = "yes", home = "yes", root = "no", unremounted = 0 } = {}): string =>
+    `    network namespace, loopback up ${loopback}; target read-only ${target}; home read-only ${home}; root read-only ${root}; unremounted mounts ${unremounted}`;
+
   it("a bounded run states the gate's verdict and every receipt fact", () => {
     expect(renderEpoch([sandboxRun(IMPL)], IMPL).slice(1)).toEqual([
       "#0 SandboxRun exit 0",
       "    within limits",
-      "    limits cpu 10s, address space 1024MB, processes 128, file 32MB, wall 60s, scratch 64MB",
-      "    enforced cpu yes, memory yes, processes yes, file size yes",
-      "    scratch 12B after the run; env PATH,HOME,TMPDIR,LANG,TERM",
-      "    network namespace, loopback up yes; target read-only yes; home read-only yes; root read-only no; unremounted mounts 0",
+      LIMITS_LINE,
+      ALL_ENFORCED_LINE,
+      SCRATCH_LINE,
+      isolationLine(),
     ]);
   });
 
@@ -236,10 +244,10 @@ describe("renderEpoch: SandboxRun", () => {
     expect(renderEpoch([sandboxRun(IMPL, { exit: null, scratchBytes: null })], IMPL).slice(1)).toEqual([
       "#0 SandboxRun exit none recorded",
       "    NOT within limits: exit null; scratch footprint unmeasured",
-      "    limits cpu 10s, address space 1024MB, processes 128, file 32MB, wall 60s, scratch 64MB",
-      "    enforced cpu yes, memory yes, processes yes, file size yes",
+      LIMITS_LINE,
+      ALL_ENFORCED_LINE,
       "    scratch unmeasured after the run; env PATH,HOME,TMPDIR,LANG,TERM",
-      "    network namespace, loopback up yes; target read-only yes; home read-only yes; root read-only no; unremounted mounts 0",
+      isolationLine(),
     ]);
   });
 
@@ -257,23 +265,23 @@ describe("renderEpoch: SandboxRun", () => {
       "#0 SandboxRun exit 0",
       "    NOT within limits: memory limit not applied; file-size limit not applied; target not remounted read-only; " +
         "home directory not remounted read-only",
-      "    limits cpu 10s, address space 1024MB, processes 128, file 32MB, wall 60s, scratch 64MB",
+      LIMITS_LINE,
       "    enforced cpu yes, memory no, processes yes, file size no",
-      "    scratch 12B after the run; env PATH,HOME,TMPDIR,LANG,TERM",
-      "    network namespace, loopback up yes; target read-only no; home read-only no; root read-only yes; unremounted mounts 4",
+      SCRATCH_LINE,
+      isolationLine({ target: "no", home: "no", root: "yes", unremounted: 4 }),
     ]);
   });
 
   it("residual exposure is reported but does not unbound a run", () => {
     const lines = renderEpoch([sandboxRun(IMPL, { readOnlyRoot: false, unremountedMounts: 9 })], IMPL);
     expect(lines[2]).toBe("    within limits");
-    expect(lines.at(-1)).toBe("    network namespace, loopback up yes; target read-only yes; home read-only yes; root read-only no; unremounted mounts 9");
+    expect(lines.at(-1)).toBe(isolationLine({ unremounted: 9 }));
   });
 
   it("a dead loopback is recorded on the detail line but does not unbound a run", () => {
     const lines = renderEpoch([sandboxRun(IMPL, { loopbackUp: false })], IMPL);
     expect(lines[2]).toBe("    within limits");
-    expect(lines.at(-1)).toBe("    network namespace, loopback up no; target read-only yes; home read-only yes; root read-only no; unremounted mounts 0");
+    expect(lines.at(-1)).toBe(isolationLine({ loopback: "no" }));
   });
 });
 

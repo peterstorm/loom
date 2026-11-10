@@ -22,8 +22,8 @@ import {
   seedFor,
   startRun,
   unitIdFor,
-  type Run,
 } from "./security-audit-harness";
+import type { Run } from "./security-audit-run-seam";
 import { verifyWith } from "./security-verification-harness";
 
 beforeEach(() => { isolateSubagentDir(); });
@@ -164,6 +164,39 @@ describe("merge-critic", () => {
     expect(refused.ok).toBe(false);
     expect(refused.error).toContain(expected);
     expect(readFileSync(join(run.out, "ledger.json"), "utf8")).toBe(before);
+  });
+
+  it("refuses a reassignment without its reason, writing nothing", async () => {
+    const run = await settledRun();
+    const before = readFileSync(join(run.out, "ledger.json"), "utf8");
+    const refused = await run.invoke(["merge-critic"], JSON.stringify(aCritic({ reassignIds: [unitIdFor(0)] })));
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain(`missing-reassignment-reason: coverageId=${unitIdFor(0)}`);
+    expect(readFileSync(join(run.out, "ledger.json"), "utf8")).toBe(before);
+  });
+});
+
+// --- Consolidation is reported, never silent ---
+
+describe("submit reports what consolidation absorbed", () => {
+  it("names a filing of a held defect under a new fingerprint, and the record kept in its place", async () => {
+    const run = await startRun(aRun(), { units: nSeeds(2) });
+    await assignUnit(run, 0);
+    await assignUnit(run, 1);
+    // The run holds the confirmed claim SQLI (unit 0).
+    expect((await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE,
+      units: [aUnitResult({ coverageId: unitIdFor(0), status: "candidate", fingerprints: [SQLI] })],
+      findings: [aConfirmedFinding()],
+    }))).error).toBeNull();
+    // A second hunter files the same sink and root cause under a new fingerprint.
+    const refiled = aConfirmedFinding({ fingerprint: "api/auth:sqli-login-email" });
+    const submitted = await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE,
+      units: [aUnitResult({ coverageId: unitIdFor(1), status: "candidate", fingerprints: ["api/auth:sqli-login-email"] })],
+      findings: [refiled],
+    }));
+    expect(submitted.error).toBeNull();
+    expect(run.stdout()).toContain(`absorbed api/auth:sqli-login-email: same sink and root cause as ${SQLI}, which the run keeps in its place`);
+    expect(readJson<SecurityFinding[]>(run.out, "findings.json").map((finding) => finding.fingerprint)).toEqual([SQLI]);
   });
 });
 

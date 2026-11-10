@@ -483,16 +483,16 @@ function reportConflicts(
  * what the operator froze and what the digest covers.
  */
 function parseTestFileSuffixes(raw: unknown, path: string): Parsed<NonEmpty<string>> {
-  if (!Array.isArray(raw) || raw.length === 0 || !raw.every((suffix): suffix is string => typeof suffix === "string")) {
-    return failure([`${path} must be a non-empty array of strings`]);
-  }
-  const errors = raw.flatMap((suffix, index) => suffix === "" || /[\\/]/.test(suffix)
+  const suffixes = Array.isArray(raw) && raw.every((suffix): suffix is string => typeof suffix === "string")
+    ? nonEmpty(raw)
+    : null;
+  if (suffixes === null) return failure([`${path} must be a non-empty array of strings`]);
+  const errors = suffixes.flatMap((suffix, index) => suffix === "" || /[\\/]/.test(suffix)
     ? [`${path}[${index}] must be a non-empty suffix without a path separator`]
     : []);
-  const repeated = [...new Set(raw.filter((suffix, index) => raw.indexOf(suffix) !== index))].sort(compareStrings);
+  const repeated = [...new Set(suffixes.filter((suffix, index) => suffixes.indexOf(suffix) !== index))].sort(compareStrings);
   if (repeated.length > 0) errors.push(`${path} repeats suffixes: ${repeated.join(", ")}`);
-  const suffixes = nonEmpty(raw);
-  return errors.length === 0 && suffixes !== null ? success(suffixes) : failure(errors);
+  return errors.length === 0 ? success(suffixes) : failure(errors);
 }
 
 const TEST_FILES_SOURCES: ReadonlySet<unknown> = new Set<FrozenTestFiles["source"]>(["operator-manifest", "engine-default"]);

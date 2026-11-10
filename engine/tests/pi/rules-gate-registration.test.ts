@@ -95,10 +95,52 @@ describe("registerRulesGate", () => {
     expect(await h({ type: "tool_call", toolName: "read", toolCallId: "t", input: { path: target } }, ctx("tui", "/s"))).toBeUndefined();
   });
 
-  it("exempts a process carrying the subagent marker, in any mode", async () => {
+  it("exempts a process carrying the explicit subagent marker, in any mode", async () => {
     vi.stubEnv("LOOM_PI_SUBAGENT", "1");
+    for (const mode of ["json", "rpc", "tui"]) {
+      expect(await handlersFor().get("tool_call")!(editEvent(target), ctx(mode, undefined)), mode).toBeUndefined();
+    }
+  });
+
+  it("exempts a headless process whose inherited parent marker names another pid (the launcher's child)", async () => {
+    vi.stubEnv("LOOM_PI_SUBAGENT", undefined);
+    vi.stubEnv("LOOM_PI_PARENT_PID", String(process.pid + 1));
     expect(await handlersFor().get("tool_call")!(editEvent(target), ctx("json", undefined))).toBeUndefined();
-    expect(await handlersFor().get("tool_call")!(editEvent(target), ctx("rpc", undefined))).toBeUndefined();
+  });
+
+  it("GATES an interactive process that merely inherited a parent marker (a nested pi from a Loom shell)", async () => {
+    vi.stubEnv("LOOM_PI_SUBAGENT", undefined);
+    vi.stubEnv("LOOM_PI_PARENT_PID", String(process.pid + 1));
+    expect(await handlersFor().get("tool_call")!(editEvent(target), ctx("tui", "/s.jsonl"))).toMatchObject({ block: true });
+  });
+
+  it("GATES a malformed marker, in any mode", async () => {
+    vi.stubEnv("LOOM_PI_SUBAGENT", undefined);
+    vi.stubEnv("LOOM_PI_PARENT_PID", "not-a-pid");
+    for (const mode of ["json", "rpc", "tui"]) {
+      expect(await handlersFor().get("tool_call")!(editEvent(target), ctx(mode, undefined)), mode).toMatchObject({ block: true });
+    }
+  });
+
+  it("tells an interactive process the authority gate treats as a subagent so, on stderr at session start", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      vi.stubEnv("LOOM_PI_SUBAGENT", undefined);
+      vi.stubEnv("LOOM_PI_PARENT_PID", String(process.pid + 1));
+      await handlersFor().get("session_start")!({}, ctx("tui", "/s.jsonl"));
+      const written = stderr.mock.calls.map(([text]) => String(text)).join("");
+      expect(written).toContain("this interactive Pi process is treated as a SUBAGENT");
+      expect(written).toContain("the rules gate still applies");
+
+      stderr.mockClear();
+      vi.stubEnv("LOOM_PI_PARENT_PID", undefined);
+      await handlersFor().get("session_start")!({}, ctx("tui", "/s.jsonl"));
+      vi.stubEnv("LOOM_PI_PARENT_PID", String(process.pid + 1));
+      await handlersFor().get("session_start")!({}, ctx("json", undefined));
+      expect(stderr).not.toHaveBeenCalled();
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it("gates a headless parent (json mode, no session file, no marker) — launch flags no longer exempt", async () => {

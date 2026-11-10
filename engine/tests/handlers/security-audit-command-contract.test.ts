@@ -37,45 +37,33 @@ const tableRows = (document: string): readonly Row[] =>
       return match === null ? [] : [{ operation: match[1] ?? "", input: match[2] ?? "" }];
     });
 
-describe("docs/security-audit.md, the authoritative operations table", () => {
-  it("names every operation the program declares, exactly once, with its declared input", () => {
-    // The operator guide is where an operator reads what each operation refuses;
-    // an operation missing from it is a refusal set nobody documented, and a row
-    // naming an undeclared operation is a command that exits "unknown operation".
-    const rows = tableRows(operatorGuide);
+// The operator guide is where an operator reads what each operation refuses,
+// the command file is the parent's runbook: both tables are held to ONE rule.
+// The operation set is CLOSED, so an undeclared name is not a typo in the docs
+// — it is a command that exits "unknown operation" — and an operation missing
+// from a table is a capability (or a refusal set) nobody documented.
+describe.each([
+  ["docs/security-audit.md", operatorGuide],
+  ["commands/security-audit.md", command],
+] as const)("the operations table of %s", (_name, document) => {
+  it("names every operation the program declares, exactly once, and no other", () => {
+    const rows = tableRows(document);
+    expect(rows.length).toBeGreaterThan(0);
     const named = rows.map((row) => row.operation);
     expect(new Set(named).size).toBe(named.length);
     expect([...named].sort()).toEqual(Object.keys(SECURITY_AUDIT_OPERATIONS).sort());
-    for (const row of rows) {
-      expect(parseSecurityAuditOperation(row.operation), row.operation).toBe(row.operation);
+    for (const row of rows) expect(parseSecurityAuditOperation(row.operation), row.operation).toBe(row.operation);
+  });
+
+  it("declares, for each operation, the input the traits table declares", () => {
+    for (const row of tableRows(document)) {
+      expect(["stdin", "flags"]).toContain(row.input);
       expect(row.input, row.operation).toBe(SECURITY_AUDIT_OPERATIONS[row.operation as keyof typeof SECURITY_AUDIT_OPERATIONS].input);
     }
   });
 });
 
 describe("commands/security-audit.md", () => {
-  it("names only operations the program declares", () => {
-    expect(tableRows(command).length).toBeGreaterThan(0);
-    for (const row of tableRows(command)) {
-      // The operation set is CLOSED: an undeclared name is not a typo in the
-      // docs, it is a command that exits with "unknown operation".
-      expect(parseSecurityAuditOperation(row.operation), row.operation).toBe(row.operation);
-    }
-  });
-
-  it("names every operation the program declares, exactly once", () => {
-    const named = tableRows(command).map((row) => row.operation);
-    expect(new Set(named).size).toBe(named.length);
-    expect(named.sort()).toEqual(Object.keys(SECURITY_AUDIT_OPERATIONS).sort());
-  });
-
-  it("declares, for each operation, the input the traits table declares", () => {
-    for (const row of tableRows(command)) {
-      expect(row.input, row.operation).toBe(SECURITY_AUDIT_OPERATIONS[row.operation as keyof typeof SECURITY_AUDIT_OPERATIONS].input);
-      expect(["stdin", "flags"]).toContain(row.input);
-    }
-  });
-
   it("tells the operator which projections survive a runtime skew", () => {
     const available = Object.entries(SECURITY_AUDIT_OPERATIONS)
       .filter(([, traits]) => traits.runtimeSkew === "available")

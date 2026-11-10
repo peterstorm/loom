@@ -259,39 +259,33 @@ const SANDBOX_SCRIPT = "security-sandbox.sh";
 const SANDBOX_NONCE_WORD = /^[0-9a-f]{16,64}$/;
 
 /**
- * One invocation of the sandbox script, parsed from ONE simple command: the
- * script is the command the segment RUNS (its head, behind any wrapper, or the
- * script argument of a `bash`/`sh` head), and the nonce is that script's own
- * `--nonce` option, read from the same segment's words before the `--` that
- * starts the wrapped command. The pairing is the type: there is no way to hold
- * a nonce that did not come from the invocation that names the script.
- *
- * `echo scripts/security-sandbox.sh --nonce …` runs `echo`, so it is no
- * invocation; a `--nonce` after `--` belongs to the wrapped command; a
- * missing, repeated or malformed nonce leaves the invocation unbound.
+ * The option words of the sandbox script a segment RUNS — its head, behind any
+ * wrapper, or the script argument of a `bash`/`sh` head — or null when the
+ * segment runs something else. `echo scripts/security-sandbox.sh --nonce …`
+ * runs `echo`, so it is no invocation.
  */
-type SandboxInvocation =
-  | Readonly<{ kind: "bound"; segment: string; script: string; nonce: string }>
-  | Readonly<{ kind: "unbound"; segment: string; script: string }>;
-
-/** The script word a segment runs, and the words after it — or null when the
- *  segment runs something else. */
-function sandboxScriptCall(words: readonly string[]): Readonly<{ script: string; args: readonly string[] }> | null {
+function sandboxScriptArgs(words: readonly string[]): readonly string[] | null {
   const [head, ...rest] = words;
   if (head === undefined) return null;
   const resolved = resolvedInterpreter(head, rest);
   if (resolved === null) return null;
-  if (resolved.head === SANDBOX_SCRIPT) return { script: head, args: resolved.args };
+  if (resolved.head === SANDBOX_SCRIPT) return resolved.args;
   if (!SH_FAMILY_HEADS.has(resolved.head)) return null;
   // `bash [-x …] scripts/security-sandbox.sh …`: the first operand is the script.
   const at = resolved.args.findIndex((arg) => !unquote(arg).startsWith("-"));
   const script = at === -1 ? undefined : resolved.args[at];
   if (script === undefined || resolved.args.slice(0, at).some((arg) => unquote(arg) === "-c")) return null;
-  return headBase(unquote(script)) === SANDBOX_SCRIPT ? { script, args: resolved.args.slice(at + 1) } : null;
+  return headBase(unquote(script)) === SANDBOX_SCRIPT ? resolved.args.slice(at + 1) : null;
 }
 
-/** The script's own `--nonce`, from its option words (every script option
- *  takes one value; `--` ends them). Null unless exactly one well-formed nonce. */
+/**
+ * The script's own `--nonce`, from the option words of ONE invocation (every
+ * script option takes one value; `--` ends them and starts the wrapped
+ * command, so a `--nonce` after it belongs to that command). Null unless
+ * exactly one well-formed nonce: a missing, repeated or malformed nonce leaves
+ * the invocation unbound. Read from the same segment that runs the script, so
+ * a nonce cannot come from anywhere but the invocation that names it.
+ */
 function scriptNonce(args: readonly string[]): string | null {
   const nonces: string[] = [];
   for (let index = 0; index < args.length; index++) {
@@ -304,16 +298,13 @@ function scriptNonce(args: readonly string[]): string | null {
   return nonces.length === 1 && SANDBOX_NONCE_WORD.test(nonces[0]) ? nonces[0] : null;
 }
 
-/** Every sandbox-script invocation a command line makes, one per segment. */
-function sandboxInvocations(command: string): readonly SandboxInvocation[] {
-  return splitCommandSegmentsWithOps(command).flatMap(({ text }): readonly SandboxInvocation[] => {
-    const segment = stripComment(text).trim();
-    const call = sandboxScriptCall(shellWords(stripEnvPrefix(segment)));
-    if (call === null) return [];
-    const nonce = scriptNonce(call.args);
-    return [nonce === null
-      ? { kind: "unbound", segment, script: call.script }
-      : { kind: "bound", segment, script: call.script, nonce }];
+/** The nonce of every bound sandbox-script invocation a command line makes,
+ *  one per segment that runs the script with exactly one well-formed nonce. */
+function sandboxNonces(command: string): readonly string[] {
+  return splitCommandSegmentsWithOps(command).flatMap(({ text }): readonly string[] => {
+    const args = sandboxScriptArgs(shellWords(stripEnvPrefix(stripComment(text).trim())));
+    const nonce = args === null ? null : scriptNonce(args);
+    return nonce === null ? [] : [nonce];
   });
 }
 
@@ -341,7 +332,7 @@ function bashEvidence(
   }
   const run = bashRun(bashOutcome);
   // A sandboxed execution mints its receipt as a fact of its own. The command
-  // must RUN the script (sandboxInvocations) and the receipt must parse: a
+  // must RUN the script (sandboxNonces) and the receipt must parse: a
   // hunter's prose about reproducing a bug is not evidence, so a script call
   // whose output lost the receipt mints nothing and its finding stays a lead.
   // An interrupted call is excluded outright — the harness killed the script,
@@ -349,7 +340,7 @@ function bashEvidence(
   // The receipt must carry the nonce THAT invocation passed: without it the
   // receipt is a line of text the call could have printed itself.
   if (!run.interrupted) {
-    const nonces = new Set(sandboxInvocations(command).flatMap((call) => (call.kind === "bound" ? [call.nonce] : [])));
+    const nonces = new Set(sandboxNonces(command));
     for (const nonce of nonces) {
       const receipt = parseSandboxReceipt(run.stdout, nonce);
       if (receipt.ok) events.push({ kind: "SandboxRun", receipt: receipt.value });

@@ -1,14 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { guardStateFileDecision } from "../../src/core/guard-state-file";
-import { guardedLocations } from "../../src/config";
 import { expandBraces } from "../../src/core/shell-match-views";
+import { GUARDED, guardDecision } from "../fixtures/guard-decision";
 import { MODERN_BASH } from "../fixtures/modern-bash";
-
-const guardDecision = (command: string): "allow" | "block" =>
-  guardStateFileDecision(command, guardedLocations()).kind === "block" ? "block" : "allow";
-
-const GUARDED = ".claude/state/active_task_graph.json";
 
 /**
  * `busyboxExecutesStdin` — the applet classifier inside the heredoc guard.

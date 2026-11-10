@@ -29,8 +29,8 @@ import {
   type CaptureAttestation,
 } from "../core/capture-attestation";
 import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
+import { describeCause } from "../utils/describe-cause";
 import {
-  describeStoreError,
   publishEntryOnce,
   readEntryIfPresent,
   withExistingEntryStore,
@@ -44,7 +44,7 @@ export function canonicalAttestedRunDirectory(runDirectory: string): DomainResul
   try {
     return success(realpathSync.native(runDirectory));
   } catch (error) {
-    return failure(`cannot resolve verification run directory ${runDirectory}: ${describeStoreError(error)}`);
+    return failure(`cannot resolve verification run directory ${runDirectory}: ${describeCause(error)}`);
   }
 }
 
@@ -62,7 +62,7 @@ export function recordCaptureAttestation(attestation: CaptureAttestation): Domai
       ? success(undefined)
       : failure(`request ${attestation.requestId} of ${attestation.runDirectory} already holds a different capture attestation`);
   } catch (error) {
-    return failure(`cannot record the capture attestation of ${attestation.requestId} in ${STORE.dir()}: ${describeStoreError(error)}`);
+    return failure(`cannot record the capture attestation of ${attestation.requestId} in ${STORE.dir()}: ${describeCause(error)}`);
   }
 }
 
@@ -81,7 +81,7 @@ export function captureAttestationLookup(runDirectory: string): (requestId: stri
     try {
       text = withExistingEntryStore(STORE, (store) => readEntryIfPresent(store, name), () => null);
     } catch (error) {
-      return { kind: "refused", reason: `the capture attestation store cannot be read: ${describeStoreError(error)}` };
+      return { kind: "refused", reason: `the capture attestation store cannot be read: ${describeCause(error)}` };
     }
     if (text === null) return { kind: "absent" };
     const parsed = parseCaptureAttestation(name, text);

@@ -233,8 +233,9 @@ installed plugin reading a config that uses `exclude`, `impureModules`,
 installed plugin is updated. Prove config changes with `bun scripts/lint-project.ts`
 from the checkout, as above.
 
-**A rule that only subtracts violations is a rule that silently stops
-applying.** Grandfathered baselines (`switch-totality`,
+### Baselines: a rule that only subtracts violations silently stops applying
+
+Grandfathered baselines (`switch-totality`,
 `exhaustive-discriminant-branching`) excuse sites that predate the rule, and
 their failure mode is silence: a renamed scrutinee or a deleted switch leaves an
 entry protecting nothing. The lists are project data in `config.json`

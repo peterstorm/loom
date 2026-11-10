@@ -14,8 +14,8 @@
  *     `helper orchestration <op>` are refused unless the operation is a
  *     read-only projection. The split is DERIVED from each helper's operation
  *     table (`security-audit-operations.ts`, `orchestration-operations.ts`): an
- *     operation whose `runtimeSkew` is `available` writes nothing and is
- *     allowed; every other operation writes run state and is refused. An
+ *     operation whose `subagent` trait is `read-only` writes nothing and is
+ *     allowed; every `parent-only` operation writes run state and is refused. An
  *     operation that is not statically one known name is refused too.
  *  2. HARNESS ENTRYPOINTS. A Loom CLI hook route (`subagent-stop`,
  *     `post-tool-use`, … — the harness's job, never an agent's) and a nested
@@ -153,8 +153,8 @@ const AUTHORITY_HELPERS = ["security-audit", "orchestration"] as const;
 export type AuthorityHelper = (typeof AUTHORITY_HELPERS)[number];
 
 /**
- * One helper's operation names, split by its table's `runtimeSkew` trait:
- * `readOnly` holds the skew-`available` projections (they write nothing),
+ * One helper's operation names, split by its table's `subagent` trait:
+ * `readOnly` holds the `read-only` projections (they write nothing),
  * `known` every operation the dispatcher accepts. The split is derived from
  * the tables by the shell (`handlers/pre-tool-use/subagent-authority-operations`)
  * — core may not import the handler tables, and must not keep a copy of them.
@@ -213,6 +213,22 @@ function wordMayBe(word: string, literal: string): boolean {
   return wordViews(word)?.includes(literal) ?? true;
 }
 
+/**
+ * How a text is read — the file's central distinction, as one type:
+ * - `typed`: the command line the agent wrote. Every over-approximation
+ *   applies: a word the shell completes at runtime may name anything.
+ * - `script`: the text of a script FILE the line runs — a whole program full
+ *   of runtime-completed words (`"$@"`, `"$cmd"`), judged on what it names
+ *   literally.
+ */
+type ScopeMode = "typed" | "script";
+
+/** Does `word` name `literal` under `mode`: on a typed line whenever it MAY
+ *  (`wordMayBe`); in a script only when it literally does — no runtime part,
+ *  and one of its spellings is the literal. */
+const namesLiteral = (word: string, literal: string, mode: ScopeMode): boolean =>
+  mode === "typed" ? wordMayBe(word, literal) : !hasRuntimePart(word) && (wordViews(word)?.includes(literal) ?? false);
+
 /** The governed helper a word may name: one, any (runtime-built), or none. */
 function helperNamed(word: string): AuthorityHelper | "unresolved" | null {
   if (hasRuntimePart(word)) return "unresolved";
@@ -244,13 +260,13 @@ const CLI_ENTRY = /^cli\.(?:ts|js|mjs)$/;
 
 /** The words after the CLI entry point of a Loom CLI invocation, or null when
  *  the command is not one. */
-function loomCliArguments(head: string, args: readonly string[], literalOnly = false): readonly string[] | null {
+function loomCliArguments(head: string, args: readonly string[], mode: ScopeMode): readonly string[] | null {
   if (head === "loom" || CLI_ENTRY.test(headBase(head))) return args;
   // `$(which loom) helper …`: judge the arguments — on a typed line. In a
   // script FILE a runtime head (`"$@"`, `"$cmd"`) is ordinary plumbing.
-  if (hasRuntimePart(head)) return literalOnly ? null : args;
+  if (hasRuntimePart(head)) return mode === "script" ? null : args;
   if (!JS_RUNTIMES.has(head)) return null;
-  const entry = args.findIndex((arg) => CLI_ENTRY.test(headBase(unquote(arg))) || (!literalOnly && hasRuntimePart(arg)));
+  const entry = args.findIndex((arg) => CLI_ENTRY.test(headBase(unquote(arg))) || (mode === "typed" && hasRuntimePart(arg)));
   return entry === -1 ? null : args.slice(entry + 1);
 }
 
@@ -267,15 +283,14 @@ function helperInvocation(
   operations: AuthorityHelperOperations,
   head: string,
   args: readonly string[],
-  literalOnly = false,
+  mode: ScopeMode,
 ): HelperInvocation | null {
-  const cliArgs = loomCliArguments(head, args, literalOnly);
+  const cliArgs = loomCliArguments(head, args, mode);
   if (cliArgs === null) return null;
   for (let index = 0; index + 1 < cliArgs.length; index++) {
-    const word = cliArgs[index];
-    if (literalOnly ? hasRuntimePart(word) || !(wordViews(word)?.includes("helper") ?? false) : !wordMayBe(word, "helper")) continue;
+    if (!namesLiteral(cliArgs[index], "helper", mode)) continue;
     const helper = helperNamed(cliArgs[index + 1]);
-    if (helper === null || (literalOnly && helper === "unresolved")) continue;
+    if (helper === null || (mode === "script" && helper === "unresolved")) continue;
     const operation = cliArgs[index + 2];
     return {
       helper,
@@ -306,16 +321,15 @@ type PathScope = Readonly<{
   /** The filesystem port's canonical spelling of an absolute path. */
   canonicalize: (absolutePath: string) => string;
   /**
-   * `typed`: the command line the agent wrote — every over-approximation
-   * applies (a word the shell completes at runtime, a relative word after an
-   * unresolvable `cd`, or a glob counts as authority when its segments may
-   * name an authority entry). `script`: the text of a script FILE the line
-   * runs — a whole program full of runtime-completed words and `case`
-   * patterns, judged on the paths it names literally (and still on every
-   * helper, hook, harness and interpreter rule). An unreadable registry keeps
-   * the suffix rule in both modes.
+   * `typed`: every over-approximation applies (a word the shell completes at
+   * runtime, a relative word after an unresolvable `cd`, or a glob counts as
+   * authority when its segments may name an authority entry). `script`: a
+   * whole program full of runtime-completed words and `case` patterns,
+   * judged on the paths it names literally (and still on every helper, hook,
+   * harness and interpreter rule). An unreadable registry keeps the suffix
+   * rule in both modes.
    */
-  mode: "typed" | "script";
+  mode: ScopeMode;
 }>;
 
 const segmentsOf = (path: string): readonly string[] => path.split("/").filter((s) => s !== "" && s !== ".");
@@ -820,8 +834,8 @@ function packageRunnerTarget(head: string, args: readonly string[]): string | nu
 }
 
 /** The hook route a Loom CLI invocation names, or null. */
-function hookRouteOf(context: SubagentAuthorityContext, head: string, args: readonly string[], literalOnly: boolean): string | null {
-  const cliArgs = loomCliArguments(head, args, literalOnly);
+function hookRouteOf(context: SubagentAuthorityContext, head: string, args: readonly string[], mode: ScopeMode): string | null {
+  const cliArgs = loomCliArguments(head, args, mode);
   const route = cliArgs?.[0];
   if (route === undefined || hasRuntimePart(route)) return null;
   return wordViews(route)?.find((view) => context.hookRoutes.has(view)) ?? null;
@@ -995,10 +1009,10 @@ function judgeSegment(
 
   const harness = nestedHarness(head, args);
   if (harness !== null) return { kind: "refused", refusal: { rule: "nested-harness", segment, harness } };
-  const route = hookRouteOf(context, head, args, scope.mode === "script");
+  const route = hookRouteOf(context, head, args, scope.mode);
   if (route !== null) return { kind: "refused", refusal: { rule: "harness-hook-entrypoint", segment, route } };
 
-  const invocation = helperInvocation(context.helperOperations, head, args, scope.mode === "script");
+  const invocation = helperInvocation(context.helperOperations, head, args, scope.mode);
   if (invocation !== null && invocation.verdict !== "read-only") {
     return {
       kind: "refused",
@@ -1066,7 +1080,7 @@ export type SecurityAuditVerifyInvocation =
 /** A helper invocation that may be `security-audit verify`, or null. */
 function verifyInvocationOf(segment: string, invocation: HelperInvocation | null): SecurityAuditVerifyInvocation | null {
   if (invocation === null || invocation.helper === "orchestration" || invocation.operation === null) return null;
-  if (!wordMayBe(invocation.operation, "verify")) return null;
+  if (!namesLiteral(invocation.operation, "verify", "typed")) return null;
   const args: string[] = [];
   for (const word of invocation.rest) {
     // Brace and glob words are expanded by the shell into words the head
@@ -1125,7 +1139,7 @@ function collectVerifyInvocations(
           .exhaustive());
       }
       for (const program of executed.programs) found.push(...collectVerifyInvocations(program, context, lineScope, depth + 1));
-      const invocation = verifyInvocationOf(segment, helperInvocation(context.helperOperations, head, args));
+      const invocation = verifyInvocationOf(segment, helperInvocation(context.helperOperations, head, args, "typed"));
       if (invocation !== null) found.push(invocation);
     }
   }

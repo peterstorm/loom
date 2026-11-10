@@ -14,6 +14,8 @@
 import { join } from "node:path";
 import { match } from "ts-pattern";
 import type { AgentRequestAuthority } from "./orchestration-contract";
+import type { LoomAgentName } from "./model-profiles";
+import { SECURITY_VERIFIER_ROLE } from "./security-adjudication";
 import { FROZEN_DIFF_PAGE_UNITS, type FrozenDiff } from "./standalone-read-coverage";
 
 /** The issued reviewer delivery of one emission-eligible request, by registered schema version. */
@@ -69,8 +71,11 @@ export const archivedReviewerInstructionPaths = (packageRoot: string, role: stri
     wirePath: join(packageRoot, "references", "reviewer-protocol-v1", "agents", "_shared", "wire-contract.md"),
   });
 
-/** Roles that read their small authority sections whole: spec-check and the security verifier (ADR-0067). */
-const SECTION_READERS: ReadonlySet<string> = new Set(["spec-check-invoker", "security-verifier-agent"]);
+/** Roles that read their small authority sections whole: spec-check and the security verifier (ADR-0067).
+ *  Typed by the Agent Catalog's role names, and the verifier read from its one
+ *  owner (`SECURITY_VERIFIER_ROLE`): a renamed role is a compile error here,
+ *  never a role that silently stops receiving its section command. */
+const SECTION_READERS: ReadonlySet<LoomAgentName> = new Set<LoomAgentName>(["spec-check-invoker", SECURITY_VERIFIER_ROLE]);
 
 /**
  * The section-reader command line for a role that consumes its authority

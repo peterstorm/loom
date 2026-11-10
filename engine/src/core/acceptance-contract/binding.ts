@@ -16,7 +16,7 @@ import { normalizePlanPath } from "../plan-path-match";
 import { dependsOnAny } from "../task-dependencies";
 import { COVERED_BY_ACCEPTANCE_CONTRACT, type NewTestWaiverReason } from "../verification-policy";
 import type { ContractProblem, PlanContract } from "./model";
-import { claims, contractWriter, coveredAnchors, frozenPaths, renderContractWriterProblem } from "./tasks";
+import { claims, contractWriterTask, coveredAnchors, frozenPaths, renderContractWriterProblem } from "./tasks";
 
 /** The Task fields contract binding reads, already narrowed from raw input. */
 export type ContractBindingTask = Readonly<{
@@ -112,18 +112,16 @@ export function contractBindingErrors(
       if (earlier === undefined) frozenBy.set(key, contract.id);
       else errors.push(`${label}: '${key}' is frozen by ${earlier} and ${contract.id} — a frozen path belongs to one contract`);
     }
-    const writer = contractWriter(paths, tasks);
+    const writer = contractWriterTask(paths, tasks);
     if (!writer.ok) {
       errors.push(...writer.error.map((problem) => `${label}: ${renderContractWriterProblem(problem)}`));
       continue;
     }
-    const contractTask = writer.value;
+    const contractTask = writer.value.id;
     const covered = coveredAnchors(declaration);
     resolved.push({ contractTask, covered });
-    // contractWriter returns one of `tasks`' own ids, so the lookup always hits.
-    const claimed = byId.get(contractTask)?.spec_anchors ?? [];
     for (const anchor of covered) {
-      if (claimed.includes(anchor)) {
+      if (writer.value.spec_anchors.includes(anchor)) {
         errors.push(`${label}: ${contractTask} is ${contract.id}'s contract task but claims ${anchor} in spec_anchors — its tests ` +
           "are red by design; list it in spec_contributions and let the task that turns it green claim it");
       }

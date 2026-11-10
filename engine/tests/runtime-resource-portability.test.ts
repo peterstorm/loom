@@ -147,7 +147,6 @@ describe("project rules directory", () => {
   });
 });
 
-
 describe("TaskGraph repository-root discovery", () => {
   const configScript = `import { TASK_GRAPH_PATH } from ${JSON.stringify(CONFIG_URL)}; console.log(TASK_GRAPH_PATH);`;
 

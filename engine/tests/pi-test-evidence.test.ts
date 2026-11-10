@@ -4,6 +4,9 @@ import { parseBashTestOutput } from "../src/parsers/parse-bash-test-output";
 import { readPersistedOutput } from "../src/utils/persisted-output";
 import { extractTestEvidence } from "../src/core/test-evidence";
 
+/** The production parser with the production persisted-output reader bound once. */
+const parseBashOutput = (jsonl: string): string => parseBashTestOutput(jsonl, readPersistedOutput);
+
 type PiToolResultMessage = Extract<PiMessage, { role: "toolResult" }>;
 
 const testRun = (
@@ -37,7 +40,7 @@ function claudeJsonl(messages: readonly PiMessage[]): string {
 
 describe("Pi test-evidence transcript adapter", () => {
   it("preserves a real Bash test call/result pair for the anti-spoofing parser", () => {
-    const output = parseBashTestOutput(claudeJsonl(testRun("654 pass\n0 fail\n")), readPersistedOutput);
+    const output = parseBashOutput(claudeJsonl(testRun("654 pass\n0 fail\n")));
 
     expect(output).toContain("654 pass");
     expect(extractTestEvidence(output)).toEqual({
@@ -52,7 +55,7 @@ describe("Pi test-evidence transcript adapter", () => {
       content: [{ type: "text", text: "654 pass, 0 fail" }],
     }];
 
-    const output = parseBashTestOutput(claudeJsonl(messages), readPersistedOutput);
+    const output = parseBashOutput(claudeJsonl(messages));
     expect(output).toBe("");
     expect(extractTestEvidence(output).passed).toBe(false);
   });
@@ -61,7 +64,7 @@ describe("Pi test-evidence transcript adapter", () => {
     const messages = testRun("654 pass\n0 fail\n");
     messages[1] = { ...messages[1], toolCallId: "different-call" };
 
-    expect(parseBashTestOutput(claudeJsonl(messages), readPersistedOutput)).toBe("");
+    expect(parseBashOutput(claudeJsonl(messages))).toBe("");
   });
 
   it("rejects print-only commands that mention a test runner in data or comments", () => {

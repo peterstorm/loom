@@ -409,6 +409,14 @@ function pastCompoundSyntax(line: string, i: number, compound: string[]): number
 const cutsGroup = (operator: ShellOperator): boolean =>
   operator.separator !== null && operator.separator !== "|";
 
+/** The `$(…)` or backtick span opening at `i`: where its body starts and its
+ *  closing index (-1 when it never closes), or null when none opens there. */
+function commandSubstitutionAt(text: string, i: number): Readonly<{ bodyStart: number; close: number }> | null {
+  if (text[i] === "$" && text[i + 1] === "(") return { bodyStart: i + 2, close: findClosingParen(text, i + 2) };
+  if (text[i] === "`") return { bodyStart: i + 1, close: findClosingBacktick(text, i + 1) };
+  return null;
+}
+
 /** Does any `$(…)`/backtick substitution in `text` start with a command
  *  that READS stdin? `eval "$(cat)" << 'EOF'` executes the body through the
  *  substitution's stdin channel, so the executor pair must see it as a
@@ -417,26 +425,15 @@ function textReadsStdinViaSubstitution(text: string): boolean {
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     if (c === "\\") { i++; continue; }
-    if (c === "$" && text[i + 1] === "(") {
-      const close = findClosingParen(text, i + 2);
-      if (close === -1) return false;
-      const body = text.slice(i + 2, close);
-      const analyzed = analyzeCommandHead(body);
-      if (analyzed !== null && SUBSTITUTION_READER_HEADS.has(analyzed.head)) return true;
-      if (textReadsStdinViaSubstitution(body)) return true;
-      i = close;
-      continue;
-    }
-    if (c === "`") {
-      const close = findClosingBacktick(text, i + 1);
-      if (close === -1) return false;
-      const body = text.slice(i + 1, close);
-      const analyzed = analyzeCommandHead(body);
-      if (analyzed !== null && SUBSTITUTION_READER_HEADS.has(analyzed.head)) return true;
-      if (textReadsStdinViaSubstitution(body)) return true;
-      i = close;
-      continue;
-    }
+    const span = commandSubstitutionAt(text, i);
+    if (span === null) continue;
+    const { bodyStart, close } = span;
+    if (close === -1) return false;
+    const body = text.slice(bodyStart, close);
+    const analyzed = analyzeCommandHead(body);
+    if (analyzed !== null && SUBSTITUTION_READER_HEADS.has(analyzed.head)) return true;
+    if (textReadsStdinViaSubstitution(body)) return true;
+    i = close;
   }
   return false;
 }
@@ -823,33 +820,14 @@ function scanPastHeredocSpans(
     }
     if (c === "\\") { i += Math.min(2, limit - i); continue; }
     if (c === "'" || c === '"') { quote = c; i++; continue; }
-    if (c === "$" && text[i + 1] === "{") {
-      // A `<<` inside ${…} is parameter-expansion WORD text, never a
-      // heredoc opener (${x:-<<'EOF'}); skipping the whole span stops it
-      // from swallowing the real command text that follows as a fake body.
-      const close = findClosingBrace(text, i + 2);
-      if (close === -1) return { next: limit, unparseable: true };
-      i = close + 1;
-      continue;
-    }
-    if (c === "$" && text[i + 1] === "(") {
-      const close = findClosingParen(text, i + 2);
-      if (close === -1) return { next: limit, unparseable: true };
-      i = close + 1;
-      continue;
-    }
-    if ((c === "<" || c === ">") && text[i + 1] === "(") {
-      const close = findClosingParen(text, i + 2);
-      if (close === -1) return { next: limit, unparseable: true };
-      i = close + 1;
-      continue;
-    }
-    if (c === "`") {
-      const close = findClosingBacktick(text, i + 1);
-      if (close === -1) return { next: limit, unparseable: true };
-      i = close + 1;
-      continue;
-    }
+    // `${…}`, `$(…)`, `<(…)`/`>(…)` and backticks, classified by the one
+    // span walker the opener-line grouping also uses. A `<<` inside ${…} is
+    // parameter-expansion WORD text, never a heredoc opener (${x:-<<'EOF'});
+    // skipping the whole span stops it from swallowing the real command text
+    // that follows as a fake body.
+    const pastSpan = pastSubstitutionSpan(text, i);
+    if (pastSpan === -1) return { next: limit, unparseable: true };
+    if (pastSpan !== null) { i = pastSpan; continue; }
     if (c === "<" && text[i + 1] === "<") {
       if (text[i + 2] === "<") { i += 3; continue; } // `<<<` here-string: no body
       return { next: i, unparseable: false };

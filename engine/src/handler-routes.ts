@@ -116,9 +116,10 @@ export const PI_RUNTIME_HANDSHAKE_ROUTES: ReadonlySet<string> = new Set([
   "helper/security-audit",
 ]);
 
-/** The two per-operation traits a route predicate consults. Every operation
- *  helper's table declares them (`orchestration-operations.ts`,
- *  `security-audit-operations.ts`). */
+/** The two per-operation traits the route predicates consult: `input` for
+ *  stdin, `runtimeSkew` for the Pi handshake. Every operation helper's table
+ *  declares them (`orchestration-operations.ts`, `security-audit-operations.ts`);
+ *  the tables' other traits belong to other readers. */
 type HelperOperationTraits = Readonly<{
   input: "stdin" | "flags";
   runtimeSkew: "available" | "handshake-required";
@@ -132,18 +133,19 @@ type OperationTraitsLookup = (extraArgs: readonly string[]) => HelperOperationTr
  * Helpers that dispatch per operation, keyed by helper name: one row each, so
  * a new operation helper is one entry here and both route predicates below
  * consult it through the same lookup. A helper absent from this registry is
- * judged as a whole route.
+ * judged as a whole route. A Map, so an inherited property name (`constructor`)
+ * is never a row and a lookup's absence is in its type.
  */
-const OPERATION_HELPERS: Readonly<Record<string, OperationTraitsLookup>> = Object.freeze({
-  orchestration: (extraArgs) => {
+const OPERATION_HELPERS: ReadonlyMap<string, OperationTraitsLookup> = new Map<string, OperationTraitsLookup>([
+  ["orchestration", (extraArgs) => {
     const operation = parseOrchestrationOperation(extraArgs[0]);
     return operation === null ? null : ORCHESTRATION_OPERATIONS[operation];
-  },
-  "security-audit": (extraArgs) => {
+  }],
+  ["security-audit", (extraArgs) => {
     const operation = parseSecurityAuditOperation(extraArgs[0]);
     return operation === null ? null : SECURITY_AUDIT_OPERATIONS[operation];
-  },
-});
+  }],
+]);
 
 /**
  * How a route's operation resolves: `whole-route` when the route is not an
@@ -160,10 +162,8 @@ function routeOperation(
   handlerName: string | undefined,
   extraArgs: readonly string[],
 ): RouteOperation {
-  const lookup = hookType === "helper" && handlerName !== undefined && Object.hasOwn(OPERATION_HELPERS, handlerName)
-    ? OPERATION_HELPERS[handlerName]!
-    : null;
-  return lookup === null ? { kind: "whole-route" } : { kind: "operation", traits: lookup(extraArgs) };
+  const lookup = hookType === "helper" && handlerName !== undefined ? OPERATION_HELPERS.get(handlerName) : undefined;
+  return lookup === undefined ? { kind: "whole-route" } : { kind: "operation", traits: lookup(extraArgs) };
 }
 
 /** Whether a route must prove it matches the Pi extension runtime first. An

@@ -18,37 +18,45 @@
  */
 import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { baselineKey, staleBaselineEntries, unusedBaselineEntries } from "../../../src/linter/programmatic/baseline";
+import { join } from "node:path";
+import {
+  baselineKey,
+  baselineKeyPath,
+  staleBaselineEntries,
+  unbaselinedSites,
+  unusedBaselineEntries,
+} from "../../../src/linter/programmatic/baseline";
 import { baselineOwners } from "../../../src/linter/programmatic/index";
 import { projectRootOf } from "../../../src/linter/programmatic/config";
-import { loadProjectConfig } from "../../../src/linter/loader";
 import { loadRules } from "../../../src/linter/loader";
 import { executeRules } from "../../../src/linter/executor";
+import { isLintableName, isNeverSourceDirectory, scopeOf } from "../../../src/linter/project-scope";
+import { LOOM_CONFIG, LOOM_RULES_DIR, REPO_ROOT } from "../loom-project-config";
 import {
   DEFAULT_DISCRIMINANT_BRANCHING_OPTIONS,
   detectedChainKeys,
   handler as chainRule,
 } from "../../../src/linter/programmatic/exhaustive-discriminant-branching";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
-const LOOM_RULES_DIR = join(REPO_ROOT, ".claude/linter/rules");
-const LOOM_CONFIG = loadProjectConfig(LOOM_RULES_DIR);
 const LOOM_OWNERS = baselineOwners(LOOM_CONFIG, REPO_ROOT);
 
-/** Every `.ts`/`.tsx` the rules can see, repo-relative and sorted. */
-function sourceFiles(dir: string): readonly string[] {
-  return readdirSync(dir).flatMap((entry) => {
-    if (["node_modules", "dist", ".git", ".claude", ".pi"].includes(entry)) return [];
+/**
+ * Every lintable file `lint-project` reads, repo-relative and sorted: the same
+ * never-source directories, the same lintable names and the same `exclude`
+ * entries (`project-scope.ts`), so this guard sees exactly the tree the rules
+ * see — `.mts` and `.cts` included. Test files stay in: each detector skips
+ * them itself, as the rule does.
+ */
+function lintedFiles(dir: string): readonly string[] {
+  return readdirSync(dir).sort().flatMap((entry): readonly string[] => {
+    if (isNeverSourceDirectory(entry)) return [];
     const full = join(dir, entry);
-    if (statSync(full).isDirectory()) return sourceFiles(full);
-    return entry.endsWith(".ts") || entry.endsWith(".tsx") ? [full] : [];
-  }).sort();
+    if (statSync(full).isDirectory()) return lintedFiles(full);
+    return isLintableName(entry) ? [full.slice(REPO_ROOT.length + 1).replace(/\\/g, "/")] : [];
+  });
 }
 
-const RELATIVE = sourceFiles(REPO_ROOT).map((full) => full.slice(REPO_ROOT.length + 1).replace(/\\/g, "/"));
-const PRODUCTION = RELATIVE.filter((path) => !path.includes(".test.") && !path.includes(".spec.") && !path.endsWith(".d.ts"));
+const LINTED = lintedFiles(REPO_ROOT).filter((path) => scopeOf(path, LOOM_CONFIG.exclude ?? []).kind === "lint");
 
 const readRepoSource = (path: string): string | null => {
   try {
@@ -70,7 +78,7 @@ describe("loom's own totality baselines", () => {
     // every target project gets.
     expect(LOOM_CONFIG.switchTotalityModules).toBeUndefined();
     expect(LOOM_CONFIG.switchTotalityBaseline?.length).toBeGreaterThan(0);
-    expect(projectRootOf(LOOM_RULES_DIR)).toBe(join(REPO_ROOT));
+    expect(projectRootOf(LOOM_RULES_DIR)).toBe(REPO_ROOT);
   });
 
   it.each(LOOM_OWNERS.map((owner) => [owner.rule, owner] as const))(
@@ -83,11 +91,11 @@ describe("loom's own totality baselines", () => {
   it.each(LOOM_OWNERS.map((owner) => [owner.rule, owner] as const))(
     "%s: the baseline excuses every site in the live tree, so a new unproven site fails here",
     (_rule, owner) => {
-      const detected = PRODUCTION
+      const detected = LINTED
         .filter((path) => owner.extensions.some((extension) => path.endsWith(extension)))
         .flatMap((path) => owner.detect(readFileSync(join(REPO_ROOT, path), "utf-8"), path));
       // Every detected site has an entry: nothing above the baseline.
-      expect(unusedBaselineEntries(owner.baseline, detected)).toEqual([]);
+      expect(unbaselinedSites({ detected, baseline: owner.baseline })).toEqual([]);
     },
   );
 
@@ -106,7 +114,7 @@ describe("loom's own totality baselines", () => {
     // rules directory. A baselined site must stay excused on that path, and a
     // fresh copy of the same switch in an unbaselined file must not.
     const [baselined] = LOOM_CONFIG.switchTotalityBaseline!;
-    const path = baselined!.slice(0, baselined!.indexOf("::"));
+    const path = baselineKeyPath(baselined!);
     const rules = loadRules(join(REPO_ROOT, "lint-rules"), LOOM_RULES_DIR, "immediate")
       .filter((rule) => rule.name === "switch-totality");
     const absolute = join(REPO_ROOT, path);
@@ -156,7 +164,7 @@ describe("exhaustive-discriminant-branching baseline", () => {
     expect(detected.length).toBeGreaterThan(0);
     const baseline = detected.filter((key) => key.startsWith(`${path}::`));
     expect(baseline).toEqual(LOOM_CONFIG.discriminantBranchingBaseline!.filter((entry) => entry.startsWith(`${path}::`)));
-    expect(unusedBaselineEntries(detected, baseline)).toEqual([]);
+    expect(unusedBaselineEntries({ detected, baseline })).toEqual([]);
     expect(chainRule(source, absolute, { ...options, baseline })).toEqual([]);
   });
 
@@ -167,12 +175,12 @@ describe("exhaustive-discriminant-branching baseline", () => {
   it("reports a baselined chain's entry unused once a totality proof sits beside it", () => {
     const path = "engine/src/core/brand-new.ts";
     const baseline = [baselineKey(path, "event.kind")];
-    expect(unusedBaselineEntries(detectedChainKeys(CHAIN, path), baseline)).toEqual([]);
+    expect(unusedBaselineEntries({ detected: detectedChainKeys(CHAIN, path), baseline })).toEqual([]);
     // The chain is now proven by the `never` binding below its tail: the rule
     // no longer flags it, so nothing may keep consuming its entry.
     const proven = CHAIN.replace('  return "?";', "  const unreachable: never = event;\n  return unreachable;");
     expect(chainRule(proven, path, NO_BASELINE)).toEqual([]);
-    expect(unusedBaselineEntries(detectedChainKeys(proven, path), baseline)).toEqual(baseline);
+    expect(unusedBaselineEntries({ detected: detectedChainKeys(proven, path), baseline })).toEqual(baseline);
   });
 
   it("detects no chain in a test file, matching the handler", () => {

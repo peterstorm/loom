@@ -127,6 +127,37 @@ describe("the Trusted Review Witness Aggregate", () => {
       .rejects.toThrow("current witnessed Standalone Review changed during verification; no older authority accepted");
   });
 
+  it("refuses as changed when the verified run is retracted or the session forgotten mid-verification", async () => {
+    const { cwd, runsRoot } = project("p");
+    const binding = runBinding(runsRoot, "run.a");
+
+    const retracted = createTrustedReviewWitnesses();
+    retracted.touch(SESSION, binding);
+    const duringRetract = retracted.verify({ cwd, sessionId: SESSION });
+    retracted.retract(SESSION, binding);
+    await expect(duringRetract).rejects.toThrow("changed during verification; no older authority accepted");
+
+    const forgotten = createTrustedReviewWitnesses();
+    forgotten.touch(SESSION, binding);
+    const duringForget = forgotten.verify({ cwd, sessionId: SESSION });
+    forgotten.forget(SESSION);
+    await expect(duringForget).rejects.toThrow("changed during verification; no older authority accepted");
+  });
+
+  it("a rejection that settles against an unchanged root retires nothing: an older witnessed run survives it", async () => {
+    const witnesses = createTrustedReviewWitnesses();
+    const { cwd, runsRoot } = project("p");
+    const older = runBinding(runsRoot, "run.a");
+    const newer = runBinding(runsRoot, "run.b");
+    witnesses.touch(SESSION, older);
+    witnesses.remember(SESSION, older, "code-reviewer", markedTask(CONTEXT_DIGEST), captured("d".repeat(64)));
+    witnesses.touch(SESSION, newer);
+    await expect(witnesses.verify({ cwd, sessionId: SESSION })).rejects.toThrow(rejectionOf("run.b"));
+    // Retracting the unwitnessed newer run makes the witnessed older run current again.
+    witnesses.retract(SESSION, newer);
+    await expect(witnesses.verify({ cwd, sessionId: SESSION })).rejects.toThrow(rejectionOf("run.a"));
+  });
+
   it("forgets every root of the session it retires, and only that session", async () => {
     const witnesses = createTrustedReviewWitnesses();
     const first = project("first");
