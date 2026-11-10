@@ -34,7 +34,7 @@ import {
   writeDirectoryFileExclusiveNoFollow,
   writeRunFileExclusiveNoFollow,
   writeRunFileNoFollow,
-} from "../../src/orchestration/no-follow-fs";
+} from "../../src/utils/no-follow-fs";
 
 const cleanup: string[] = [];
 const runningAsRoot = typeof process.getuid === "function" && process.getuid() === 0;

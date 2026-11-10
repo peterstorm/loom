@@ -1,25 +1,53 @@
 /**
- * Project-local configuration for programmatic lint rules.
+ * Project-local configuration for the linter: its scope and its programmatic
+ * rules.
  *
- * Loaded from `config.json` INSIDE the project rules directory —
+ * Read from `config.json` INSIDE the project rules directory —
  * `.claude/linter/rules/config.json` (Claude Code) or
- * `.pi/linter/rules/config.json` (Pi), beside the project's rule files. Allows
- * projects to define their own architectural boundaries, pure modules and
- * grandfathered baselines without modifying the loom source.
+ * `.pi/linter/rules/config.json` (Pi), beside the project's rule files — by
+ * the loader shell (`loadProjectConfig` in `../loader.ts`). This module is the
+ * pure half: the schema, and the one parse from JSON to a config value.
+ *
+ * The parse is FAIL-CLOSED and STRICT. Every key is known, every value is
+ * checked, and an unknown key is refused by name: a typo such as `exlude` or
+ * `pureModule` must not silently fall back to the built-in default, because
+ * the default for a scoping key is "check nothing" or "check everything".
  */
 
-import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { DEFAULT_TEST_FILE_SUFFIXES, isTestFileBySuffixes } from "../../core/test-file-classification";
-import type { BoundaryRule } from "./no-cross-boundary-imports";
+import { underPrefix, type BoundaryRule, type CapabilityGrant } from "./no-cross-boundary-imports";
 
 // --- Config types ---
 
+/**
+ * A project path carved out of a rule's scope, with the reason it is carved
+ * out. The reason is part of the value, not a comment beside it: config.json
+ * cannot hold comments, and an exemption nobody can justify is an exemption
+ * nobody can retire.
+ *
+ * `path` is project-relative. A trailing `/` names a directory (every file
+ * beneath it, at any depth); otherwise it names exactly one file. Globs are
+ * not supported and are refused at parse time — a glob that matched nothing
+ * used to be a silent no-op.
+ */
+export type ReasonedPath = Readonly<{ path: string; reason: string }>;
+
 export interface ProgrammaticConfig {
+  /** Paths the project linter never reads (vendored, generated), each with its reason. */
+  readonly exclude?: readonly ReasonedPath[];
   /** Import boundary rules (for no-cross-boundary-imports) */
   readonly boundaries?: readonly BoundaryRule[];
-  /** Glob patterns for pure modules (for no-io-in-pure-modules) */
+  /** Path prefixes inside which EVERY file must be governed by a boundary
+   *  rule; an ungoverned file there is a violation, not an allow. Absent
+   *  means a file no boundary names may import anything. Never empty. */
+  readonly requireGovernance?: readonly [string, ...string[]];
+  /** The functional core (for no-io-in-pure-modules): directory roots and
+   *  single files. Every non-test file beneath a root is pure unless
+   *  `impureModules` names it. Absent means the rule checks nothing. */
   readonly pureModules?: readonly string[];
+  /** The imperative shells inside the pure roots, each with the I/O it does. */
+  readonly impureModules?: readonly ReasonedPath[];
   /** Max function body lines (for max-function-lines) */
   readonly maxFunctionLines?: number;
   /** File patterns to exclude from max-function-lines */
@@ -41,13 +69,37 @@ export interface ProgrammaticConfig {
   readonly discriminantBranchingBaseline?: readonly string[];
 }
 
+/** Every key `config.json` may carry — the one list the strict parse checks against. */
+export const PROGRAMMATIC_CONFIG_KEYS: readonly (keyof ProgrammaticConfig)[] = Object.freeze([
+  "exclude",
+  "boundaries",
+  "requireGovernance",
+  "pureModules",
+  "impureModules",
+  "maxFunctionLines",
+  "excludeFromMaxLines",
+  "maxDiscriminantBranches",
+  "discriminantTags",
+  "switchTotalityModules",
+  "switchTotalityBaseline",
+  "discriminantBranchingBaseline",
+]);
+
 /** Default config when no project config exists */
 export const EMPTY_CONFIG: ProgrammaticConfig = {};
+
+/** The outcome of parsing one config document. */
+export type ConfigParse =
+  | Readonly<{ ok: true; value: ProgrammaticConfig }>
+  | Readonly<{ ok: false; error: string }>;
 
 /**
  * The project rules directory layouts, relative to the project root: Claude
  * Code reads `.claude/linter/rules`, Pi reads `.pi/linter/rules`. Owned here;
  * `PROJECT_RULES_DIR` in `engine/src/config.ts` picks one per harness.
+ * Claude Code's layout is listed first: where a project carries both, it is
+ * the canonical copy (`scripts/lint-project.ts` reads it and refuses a Pi twin
+ * whose config differs).
  */
 export const CLAUDE_PROJECT_RULES_DIR = ".claude/linter/rules";
 export const PI_PROJECT_RULES_DIR = ".pi/linter/rules";
@@ -79,121 +131,150 @@ export function projectRootOf(rulesDir: string | null): string | null {
 export const isTestFile = (filePath: string): boolean =>
   isTestFileBySuffixes(filePath, DEFAULT_TEST_FILE_SUFFIXES);
 
+// --- Parse ---
+
+/** A malformed config: thrown by the field parsers below, caught once by
+ *  `parseProjectConfig`, which is the only exit and returns it as a value. */
+class ConfigError extends Error {}
+
+function refuse(message: string): never {
+  throw new ConfigError(message);
+}
+
 /**
- * Loads project-local programmatic config from the linter config directory.
- * Returns EMPTY_CONFIG if file doesn't exist (graceful default).
- * Throws on malformed JSON (fail-closed).
+ * Parse one `config.json` document. Pure: the caller (the loader shell) reads
+ * the bytes and decides what a refusal means — for the hook and lint-project it
+ * fails the run closed.
  */
-export function loadProjectConfig(configDir: string | null): ProgrammaticConfig {
-  if (!configDir) return EMPTY_CONFIG;
-
-  const configPath = join(configDir, "config.json");
-  let content: string;
+export function parseProjectConfig(json: unknown, configPath: string): ConfigParse {
   try {
-    content = readFileSync(configPath, "utf-8");
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return EMPTY_CONFIG;
-    throw new Error(
-      `Cannot read linter config at ${configPath}: ${e instanceof Error ? e.message : String(e)}. Check file permissions.`
-    );
+    return { ok: true, value: parseConfigObject(json, configPath) };
+  } catch (error) {
+    if (error instanceof ConfigError) return { ok: false, error: error.message };
+    throw error;
   }
+}
 
-  let json: unknown;
-  try {
-    json = JSON.parse(content);
-  } catch (e) {
-    throw new Error(
-      `Malformed linter config at ${configPath}: ${e instanceof Error ? e.message : String(e)}`
-    );
+/** A plain JSON object, or a refusal naming what was found instead. */
+function plainObject(raw: unknown, where: string): Readonly<Record<string, unknown>> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return refuse(`${where}: expected a JSON object`);
+  return raw as Record<string, unknown>;
+}
+
+/** Refuse every key outside `known`, naming each — a typo must not read as "use the default". */
+function refuseUnknownKeys(obj: Readonly<Record<string, unknown>>, known: readonly string[], where: string): void {
+  const unknown = Object.keys(obj).filter((key) => !known.includes(key));
+  if (unknown.length > 0) {
+    refuse(`${where}: unknown key${unknown.length === 1 ? "" : "s"} ${unknown.map((key) => `'${key}'`).join(", ")} — known keys are ${known.join(", ")}`);
   }
-
-  if (typeof json !== "object" || json === null || Array.isArray(json)) {
-    throw new Error(`Linter config at ${configPath}: expected a JSON object`);
-  }
-
-  const obj = json as Record<string, unknown>;
-  return parseConfig(obj, configPath);
 }
 
 /**
  * Every optional list on ProgrammaticConfig asks the same question — an array
  * whose entries are non-empty strings — and every optional bound asks "a
- * positive integer". These two replace five near-identical blocks.
- *
- * The non-empty check is now uniform. `discriminantTags` already had it;
- * `pureModules` and `excludeFromMaxLines` did not, and an empty entry in either
- * is a prefix that matches EVERY path — it would silently mark the whole tree
- * pure, or exempt it from the line bound. Fail-closed parsing is this loader's
- * contract, so the looser two are brought up to the stricter one.
+ * positive integer". An empty entry in a path list is a prefix that matches
+ * EVERY path — it would silently mark the whole tree pure, or exempt it from
+ * the line bound — so the non-empty check is uniform.
  */
-function parseOptionalStringArray(
-  raw: unknown,
-  filePath: string,
-  key: string,
-): string[] | undefined {
+function parseOptionalStringArray(raw: unknown, filePath: string, key: string): string[] | undefined {
   if (raw === undefined) return undefined;
-  if (!Array.isArray(raw)) {
-    throw new Error(`${filePath}: '${key}' must be an array`);
-  }
-  if (!raw.every((entry: unknown) => typeof entry === "string" && entry.length > 0)) {
-    throw new Error(`${filePath}: '${key}' entries must be non-empty strings`);
-  }
-  return raw as string[];
+  if (!Array.isArray(raw)) return refuse(`${filePath}: '${key}' must be an array`);
+  return raw.map((entry: unknown) =>
+    typeof entry === "string" && entry.length > 0 ? entry : refuse(`${filePath}: '${key}' entries must be non-empty strings`));
 }
 
 /** An optional list that, when present, must also be non-empty: a scope whose
  *  empty form would silently match nothing. */
-function parseOptionalNonEmptyStringArray(
-  raw: unknown,
-  filePath: string,
-  key: string,
-): [string, ...string[]] | undefined {
+function parseOptionalNonEmptyStringArray(raw: unknown, filePath: string, key: string): [string, ...string[]] | undefined {
   const list = parseOptionalStringArray(raw, filePath, key);
   if (list === undefined) return undefined;
   const [first, ...rest] = list;
   if (first === undefined) {
-    throw new Error(`${filePath}: '${key}' must not be empty — omit it for the default scope, or disable the rule by name`);
+    return refuse(`${filePath}: '${key}' must not be empty — omit it for the default scope, or disable the rule by name`);
   }
   return [first, ...rest];
 }
 
-function parseOptionalPositiveInt(
-  raw: unknown,
-  filePath: string,
-  key: string,
-): number | undefined {
+/**
+ * A project-relative module path: what every scoping list holds. Refused when
+ * it could silently match the wrong set — a glob (no glob support exists, so
+ * it matched nothing), an absolute path or a `./` / `../` spelling (paths are
+ * compared as written, relative to the project root).
+ */
+function parseModulePath(raw: unknown, where: string): string {
+  if (typeof raw !== "string" || raw.length === 0) return refuse(`${where} must be a non-empty string`);
+  if (raw.includes("*")) return refuse(`${where} '${raw}' is a glob — name a directory with a trailing '/' (every file beneath it) or one file`);
+  if (raw.startsWith("/") || raw.startsWith("./") || raw.startsWith("../") || raw.includes("\\")) {
+    return refuse(`${where} '${raw}' must be project-relative, forward-slashed, without a leading '/', './' or '../'`);
+  }
+  return raw;
+}
+
+function parseOptionalModulePaths(raw: unknown, filePath: string, key: string): string[] | undefined {
+  const list = parseOptionalStringArray(raw, filePath, key);
+  return list?.map((entry, index) => parseModulePath(entry, `${filePath}: ${key}[${index}]`));
+}
+
+/** A path list that, when present, must be non-empty (`requireGovernance`). */
+function parseOptionalNonEmptyModulePaths(raw: unknown, filePath: string, key: string): [string, ...string[]] | undefined {
+  const list = parseOptionalNonEmptyStringArray(raw, filePath, key);
+  if (list === undefined) return undefined;
+  const [first, ...rest] = list;
+  return [
+    parseModulePath(first, `${filePath}: ${key}[0]`),
+    ...rest.map((entry, index) => parseModulePath(entry, `${filePath}: ${key}[${index + 1}]`)),
+  ];
+}
+
+/** `[{ path, reason }]` — an exemption list where every entry carries its justification. */
+function parseOptionalReasonedPaths(raw: unknown, filePath: string, key: string): ReasonedPath[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) return refuse(`${filePath}: '${key}' must be an array of { path, reason }`);
+  const parsed = raw.map((entry: unknown, index): ReasonedPath => {
+    const where = `${filePath}: ${key}[${index}]`;
+    const obj = plainObject(entry, where);
+    refuseUnknownKeys(obj, ["path", "reason"], where);
+    const path = parseModulePath(obj.path, `${where}.path`);
+    if (typeof obj.reason !== "string" || obj.reason.trim().length === 0) {
+      return refuse(`${where}.reason must be a non-empty string — every exemption states why`);
+    }
+    return Object.freeze({ path, reason: obj.reason });
+  });
+  const seen = new Set<string>();
+  for (const { path } of parsed) {
+    if (seen.has(path)) refuse(`${filePath}: '${key}' lists '${path}' twice`);
+    seen.add(path);
+  }
+  return parsed;
+}
+
+function parseOptionalPositiveInt(raw: unknown, filePath: string, key: string): number | undefined {
   if (raw === undefined) return undefined;
   if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) {
-    throw new Error(`${filePath}: '${key}' must be a positive integer`);
+    return refuse(`${filePath}: '${key}' must be a positive integer`);
   }
   return raw;
 }
 
 function parseOptionalBoundaries(raw: unknown, filePath: string): BoundaryRule[] | undefined {
   if (raw === undefined) return undefined;
-  if (!Array.isArray(raw)) {
-    throw new Error(`${filePath}: 'boundaries' must be an array`);
-  }
+  if (!Array.isArray(raw)) return refuse(`${filePath}: 'boundaries' must be an array`);
   return raw.map((b, i) => parseBoundary(b, filePath, i));
 }
 
-function parseConfig(obj: Record<string, unknown>, filePath: string): ProgrammaticConfig {
-  // Mutable while assembling; returned as the readonly ProgrammaticConfig
-  const config: { -readonly [K in keyof ProgrammaticConfig]?: ProgrammaticConfig[K] } = {};
-
-  const boundaries = parseOptionalBoundaries(obj.boundaries, filePath);
-  if (boundaries !== undefined) config.boundaries = boundaries;
-
-  const pureModules = parseOptionalStringArray(obj.pureModules, filePath, "pureModules");
-  if (pureModules !== undefined) config.pureModules = pureModules;
-
-  const maxFunctionLines = parseOptionalPositiveInt(obj.maxFunctionLines, filePath, "maxFunctionLines");
-  if (maxFunctionLines !== undefined) config.maxFunctionLines = maxFunctionLines;
-
-  const excludeFromMaxLines = parseOptionalStringArray(obj.excludeFromMaxLines, filePath, "excludeFromMaxLines");
-  if (excludeFromMaxLines !== undefined) config.excludeFromMaxLines = excludeFromMaxLines;
-
-  return { ...config, ...parseTotalityConfig(obj, filePath) } as ProgrammaticConfig;
+function parseConfigObject(json: unknown, filePath: string): ProgrammaticConfig {
+  const obj = plainObject(json, `Linter config at ${filePath}`);
+  refuseUnknownKeys(obj, PROGRAMMATIC_CONFIG_KEYS, `Linter config at ${filePath}`);
+  return Object.freeze({
+    exclude: parseOptionalReasonedPaths(obj.exclude, filePath, "exclude"),
+    boundaries: parseOptionalBoundaries(obj.boundaries, filePath),
+    requireGovernance: parseOptionalNonEmptyModulePaths(obj.requireGovernance, filePath, "requireGovernance"),
+    pureModules: parseOptionalModulePaths(obj.pureModules, filePath, "pureModules"),
+    impureModules: parseOptionalReasonedPaths(obj.impureModules, filePath, "impureModules"),
+    maxFunctionLines: parseOptionalPositiveInt(obj.maxFunctionLines, filePath, "maxFunctionLines"),
+    excludeFromMaxLines: parseOptionalStringArray(obj.excludeFromMaxLines, filePath, "excludeFromMaxLines"),
+    ...parseTotalityConfig(obj, filePath),
+  });
 }
 
 type TotalityConfigKey =
@@ -204,79 +285,68 @@ type TotalityConfigKey =
   | "discriminantBranchingBaseline";
 
 /** The two totality rules' knobs: the if-chain threshold and tags,
- *  switch-totality's scope, and the grandfathered keys each rule excuses. */
+ *  switch-totality's scope, and the grandfathered keys each rule excuses.
+ *  Every field rejects a bad value loudly — a declared-but-unread field is a
+ *  silent default, the one failure this loader exists to exclude. */
 function parseTotalityConfig(
-  obj: Record<string, unknown>,
+  obj: Readonly<Record<string, unknown>>,
   filePath: string,
 ): Pick<ProgrammaticConfig, TotalityConfigKey> {
-  const config: { -readonly [K in TotalityConfigKey]?: ProgrammaticConfig[K] } = {};
+  return {
+    maxDiscriminantBranches: parseOptionalPositiveInt(obj.maxDiscriminantBranches, filePath, "maxDiscriminantBranches"),
+    discriminantTags: parseOptionalStringArray(obj.discriminantTags, filePath, "discriminantTags"),
+    switchTotalityModules: parseOptionalNonEmptyStringArray(obj.switchTotalityModules, filePath, "switchTotalityModules"),
+    switchTotalityBaseline: parseOptionalStringArray(obj.switchTotalityBaseline, filePath, "switchTotalityBaseline"),
+    discriminantBranchingBaseline: parseOptionalStringArray(obj.discriminantBranchingBaseline, filePath, "discriminantBranchingBaseline"),
+  };
+}
 
-  // These two were DECLARED on ProgrammaticConfig and READ by
-  // `createProgrammaticRules`, but never parsed here — so a project that set
-  // either one got the built-in default with no throw and no log, the one
-  // failure mode this loader's "fail-closed" contract is supposed to exclude.
-  // Every field rejects a bad value loudly; these now do too.
-  const maxDiscriminantBranches = parseOptionalPositiveInt(
-    obj.maxDiscriminantBranches,
-    filePath,
-    "maxDiscriminantBranches",
-  );
-  if (maxDiscriminantBranches !== undefined) config.maxDiscriminantBranches = maxDiscriminantBranches;
+const BOUNDARY_KEYS: readonly string[] = Object.freeze(["module", "description", "allow", "deny", "perFileAllow", "perFileExactAllow"]);
 
-  const discriminantTags = parseOptionalStringArray(obj.discriminantTags, filePath, "discriminantTags");
-  if (discriminantTags !== undefined) config.discriminantTags = discriminantTags;
+function parseStringList(raw: unknown, where: string): string[] {
+  if (!Array.isArray(raw)) return refuse(`${where} must be an array`);
+  return raw.map((entry: unknown) => typeof entry === "string" ? entry : refuse(`${where} entries must be strings`));
+}
 
-  // switch-totality's scope and the grandfathered keys each rule excuses parse
-  // here for the same reason — a declared-but-unread field is a silent default.
-  const switchTotalityModules = parseOptionalNonEmptyStringArray(
-    obj.switchTotalityModules,
-    filePath,
-    "switchTotalityModules",
-  );
-  if (switchTotalityModules !== undefined) config.switchTotalityModules = switchTotalityModules;
-
-  const switchTotalityBaseline = parseOptionalStringArray(
-    obj.switchTotalityBaseline,
-    filePath,
-    "switchTotalityBaseline",
-  );
-  if (switchTotalityBaseline !== undefined) config.switchTotalityBaseline = switchTotalityBaseline;
-
-  const discriminantBranchingBaseline = parseOptionalStringArray(
-    obj.discriminantBranchingBaseline,
-    filePath,
-    "discriminantBranchingBaseline",
-  );
-  if (discriminantBranchingBaseline !== undefined) config.discriminantBranchingBaseline = discriminantBranchingBaseline;
-
-  return config;
+/**
+ * `{ "<file>": { "allow": [...], "reason": "..." } }` — a per-file capability
+ * grant. Each is an exception to its boundary's allowlist, so each carries the
+ * reason it was granted, and names exactly one file.
+ */
+function parseOptionalGrants(raw: unknown, where: string, module: string): Readonly<Record<string, CapabilityGrant>> | undefined {
+  if (raw === undefined) return undefined;
+  const obj = plainObject(raw, where);
+  return Object.freeze(Object.fromEntries(Object.entries(obj).map(([file, grant]) => {
+    const at = `${where}["${file}"]`;
+    const path = parseModulePath(file, `${where} key`);
+    if (path.endsWith("/")) refuse(`${at} must name one file — a grant is per file, never per directory`);
+    if (!underPrefix(path, module)) refuse(`${at} names a file outside '${module}' — the grant could never apply`);
+    const fields = plainObject(grant, at);
+    refuseUnknownKeys(fields, ["allow", "reason"], at);
+    const allow = parseStringList(fields.allow, `${at}.allow`);
+    if (allow.length === 0) refuse(`${at}.allow must not be empty — delete the grant instead`);
+    const reason = fields.reason;
+    if (typeof reason !== "string" || reason.trim().length === 0) {
+      return refuse(`${at}.reason must be a non-empty string — every capability grant states why`);
+    }
+    return [path, Object.freeze({ allow: Object.freeze(allow), reason })];
+  })));
 }
 
 function parseBoundary(raw: unknown, filePath: string, index: number): BoundaryRule {
-  if (typeof raw !== "object" || raw === null) {
-    throw new Error(`${filePath}: boundaries[${index}] must be an object`);
+  const where = `${filePath}: boundaries[${index}]`;
+  const b = plainObject(raw, where);
+  refuseUnknownKeys(b, BOUNDARY_KEYS, where);
+  const module = parseModulePath(b.module, `${where}.module`);
+  if (b.description !== undefined && (typeof b.description !== "string" || b.description.length === 0)) {
+    refuse(`${where}.description must be a non-empty string when present`);
   }
-  const b = raw as Record<string, unknown>;
-
-  if (typeof b.module !== "string" || b.module === "") {
-    throw new Error(`${filePath}: boundaries[${index}].module must be a non-empty string`);
-  }
-  if (!Array.isArray(b.allow)) {
-    throw new Error(`${filePath}: boundaries[${index}].allow must be an array`);
-  }
-  if (!b.allow.every((a: unknown) => typeof a === "string")) {
-    throw new Error(`${filePath}: boundaries[${index}].allow entries must be strings`);
-  }
-  if (!Array.isArray(b.deny)) {
-    throw new Error(`${filePath}: boundaries[${index}].deny must be an array`);
-  }
-  if (!b.deny.every((d: unknown) => typeof d === "string")) {
-    throw new Error(`${filePath}: boundaries[${index}].deny entries must be strings`);
-  }
-
-  return {
-    module: b.module,
-    allow: b.allow as string[],
-    deny: b.deny as string[],
-  };
+  return Object.freeze({
+    module,
+    description: typeof b.description === "string" ? b.description : undefined,
+    allow: parseStringList(b.allow, `${where}.allow`),
+    deny: parseStringList(b.deny, `${where}.deny`),
+    perFileAllow: parseOptionalGrants(b.perFileAllow, `${where}.perFileAllow`, module),
+    perFileExactAllow: parseOptionalGrants(b.perFileExactAllow, `${where}.perFileExactAllow`, module),
+  });
 }

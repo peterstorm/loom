@@ -76,10 +76,9 @@ export function classifyOutcome(a, v, d) {
   return "violation inconclusive";
 }
 
-/** One phase's observations from its captured proxy records and execute-arg entries. */
-export function analyzePhase(spec, { phaseRecords, phaseArgs, promptRejected }) {
-  const conforms = spec.conformsDetect !== undefined ? detector(spec.conformsDetect) : null;
-  const analysis = {
+/** A phase's observations before any proxy record is read. */
+function initialAnalysis({ phaseRecords, phaseArgs, promptRejected }) {
+  return {
     modelRequests: phaseRecords.length,
     upstreamError: undefined,
     promptRejected: promptRejected ?? undefined,
@@ -98,48 +97,65 @@ export function analyzePhase(spec, { phaseRecords, phaseArgs, promptRejected }) 
     executeObserved: false,
     duplicateExecute: phaseArgs.length > 1,
   };
+}
+
+/** The registered tool as the request carried it on the wire, against its frozen schema. */
+function wireToolFields(spec, record) {
+  const toolDef = record.request.tools?.find(
+    (t) => t.function?.name === spec.registeredToolName || t.name === spec.registeredToolName,
+  );
+  if (!toolDef) return {};
+  const fn = toolDef.function ?? toolDef;
+  const frozen = JSON.parse(spec.schemaBytes);
+  const wireParamsEqualFrozen = deepEqual(fn.parameters, frozen);
+  const wireKeys = Object.keys(fn.parameters ?? {});
+  return {
+    toolSent: true,
+    strictFlag: fn.strict,
+    wireToolDef: toolDef,
+    wireParamsEqualFrozen,
+    ...(wireParamsEqualFrozen
+      ? {}
+      : { wireParamsNote: `wire top-level keys [${wireKeys.join(", ")}] vs frozen [${Object.keys(frozen).join(", ")}]` }),
+    responseFormat: record.request.response_format ?? undefined,
+  };
+}
+
+/** The tool call the response stream assembled, and its raw arguments judged against the detectors. */
+function streamFields(spec, record, conforms) {
+  const stream = assembleToolCalls(record.response?.raw ?? "");
+  const fields = { streamMalformedChunks: stream.malformed };
+  const raw = stream.calls.find((c) => c.name === spec.registeredToolName);
+  if (!raw) return fields;
+  try {
+    const parsed = JSON.parse(raw.arguments);
+    fields.rawArgs = parsed;
+    if (conforms !== null) fields.rawArgsConforms = conforms(parsed) === true;
+    fields.rawArgsViolation = detector(spec.violationDetect)(parsed) === true;
+  } catch (error) {
+    fields.rawArgsParseError = error.message;
+  }
+  return fields;
+}
+
+/** One phase's observations from its captured proxy records and execute-arg entries. */
+export function analyzePhase(spec, { phaseRecords, phaseArgs, promptRejected }) {
+  const conforms = spec.conformsDetect !== undefined ? detector(spec.conformsDetect) : null;
+  const analysis = initialAnalysis({ phaseRecords, phaseArgs, promptRejected });
   const record = phaseRecords[0];
   if (!record) return analysis;
-  analysis.httpStatus = record.response?.status;
-  analysis.accepted = record.response?.status === 200;
   // Infrastructure unavailability (the proxy could not reach the upstream, or
   // no response body ever landed) is recorded AS infrastructure: the
   // classifier reports it without route-verdict vocabulary.
   const upstreamFailure = phaseRecords.find((r) => r.upstreamError !== undefined);
-  analysis.upstreamError = upstreamFailure?.upstreamError ??
-    (phaseRecords.some((r) => r.response === undefined)
-      ? "no response body was captured from the recording proxy"
-      : undefined);
-  const toolDef = record.request.tools?.find(
-    (t) => t.function?.name === spec.registeredToolName || t.name === spec.registeredToolName,
-  );
-  if (toolDef) {
-    analysis.toolSent = true;
-    const fn = toolDef.function ?? toolDef;
-    analysis.strictFlag = fn.strict;
-    analysis.wireToolDef = toolDef;
-    const frozen = JSON.parse(spec.schemaBytes);
-    analysis.wireParamsEqualFrozen = deepEqual(fn.parameters, frozen);
-    if (!analysis.wireParamsEqualFrozen) {
-      const wireKeys = Object.keys(fn.parameters ?? {});
-      const frozenKeys = Object.keys(frozen);
-      analysis.wireParamsNote = `wire top-level keys [${wireKeys.join(", ")}] vs frozen [${frozenKeys.join(", ")}]`;
-    }
-    analysis.responseFormat = record.request.response_format ?? undefined;
-  }
-  const stream = assembleToolCalls(record.response?.raw ?? "");
-  analysis.streamMalformedChunks = stream.malformed;
-  const raw = stream.calls.find((c) => c.name === spec.registeredToolName);
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw.arguments);
-      analysis.rawArgs = parsed;
-      if (conforms !== null) analysis.rawArgsConforms = conforms(parsed) === true;
-      analysis.rawArgsViolation = detector(spec.violationDetect)(parsed) === true;
-    } catch (error) {
-      analysis.rawArgsParseError = error.message;
-    }
-  }
+  Object.assign(analysis, {
+    httpStatus: record.response?.status,
+    accepted: record.response?.status === 200,
+    upstreamError: upstreamFailure?.upstreamError ??
+      (phaseRecords.some((r) => r.response === undefined)
+        ? "no response body was captured from the recording proxy"
+        : undefined),
+  }, wireToolFields(spec, record), streamFields(spec, record, conforms));
   analysis.executeObserved = phaseArgs.some((entry) => entry.tool === spec.registeredToolName);
   return analysis;
 }

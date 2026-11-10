@@ -121,7 +121,7 @@ export function semanticVerifierSlots(
         contextDigest: value(parseContextDigest(hexDigest(`${runId}:${binding.slotId}:${attempt}:context`))),
         outputSlot: `transcripts/${binding.slotId}-attempt-${attempt}.json`,
       })));
-    return value(parseAgentRosterSlot(attempts[0]!, attempts[1]!));
+    return value(parseAgentRosterSlot(attempts[0], attempts[1]));
   });
 }
 
@@ -184,7 +184,7 @@ function publishPanelBatch(
     authority,
     context: { digest: authority.contextDigest, slot: `contexts/${authority.contextDigest}.json` },
   }));
-  const intent = value(prepareInitialBatchPublicationIntent(requests[0]!.runId, effectId, rawRequests));
+  const intent = value(prepareInitialBatchPublicationIntent(requests[0].runId, effectId, rawRequests));
   const receipt = {
     schemaVersion: 1,
     kind: "batch-published",

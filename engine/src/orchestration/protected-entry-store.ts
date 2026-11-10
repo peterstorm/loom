@@ -41,7 +41,7 @@ import {
   removeDirectoryFileNoFollow,
   resolveBaseDirectory,
   type AnchoredDirectory,
-} from "./no-follow-fs";
+} from "../utils/no-follow-fs";
 
 /** An entry is one short record. */
 export const MAXIMUM_ENTRY_BYTES = 16 * 1024;

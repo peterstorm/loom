@@ -1,7 +1,7 @@
 /** Bounded byte observation and both-attempt packet construction for explicit standalone successors. */
 import { lstatSync, type Stats } from "node:fs";
 import { createHash } from "node:crypto";
-import { readRunBytesNoFollow } from "../../../orchestration/no-follow-fs";
+import { readRunBytesNoFollow } from "../../../utils/no-follow-fs";
 import { CONTEXT_PACKET_MAX_BYTES } from "../../../orchestration/stored-context-packets";
 import { encodeByteSection, serializeStandaloneReviewerContextPacketV3, type ByteSection, type StandaloneReviewerContextPacketV3 } from "../../../core/context-packets";
 import { parseBoundedReviewerJson } from "../../../core/reviewer-protocol";
@@ -218,7 +218,7 @@ export function standaloneSuccessorPackets(prepared: PreparedStandaloneSuccessor
       if (!bounded.ok) return bounded;
       packets.push(bounded.value); attempts.push(bounded.value.digest);
     }
-    contexts.push(Object.freeze({ attempts: Object.freeze([attempts[0]!, attempts[1]!]) as readonly [string, string] }));
+    contexts.push(Object.freeze({ attempts: Object.freeze([attempts[0], attempts[1]]) as readonly [string, string] }));
   }
   return { ok: true, value: Object.freeze({ packets: Object.freeze(packets), contexts: Object.freeze(contexts) }) };
 }

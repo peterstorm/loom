@@ -47,10 +47,10 @@ export function dataBoundaryFailure<T>(
 }
 
 export function sameDataDescriptor(
-  left: PropertyDescriptor,
+  left: PropertyDescriptor | undefined,
   right: PropertyDescriptor | undefined,
 ): boolean {
-  return right !== undefined && "value" in left && "value" in right &&
+  return left !== undefined && right !== undefined && "value" in left && "value" in right &&
     Object.is(left.value, right.value) && left.enumerable === right.enumerable &&
     left.configurable === right.configurable && left.writable === right.writable;
 }
@@ -122,7 +122,7 @@ export function readExactDataRecord(
       return dataBoundaryFailure(
         "unknown-field",
         `${label} contains unknown field(s): ${unknown.join(", ")}`,
-        unknown[0]!,
+        unknown[0],
       );
     }
 
@@ -157,7 +157,7 @@ export function readExactDataRecord(
     if (
       Object.getPrototypeOf(raw) !== prototype || finalKeys.length !== keys.length ||
       finalKeys.some((key, index) => key !== keys[index]) ||
-      stringKeys.some((key) => !sameDataDescriptor(descriptors.get(key)!, Object.getOwnPropertyDescriptor(raw, key)))
+      stringKeys.some((key) => !sameDataDescriptor(descriptors.get(key), Object.getOwnPropertyDescriptor(raw, key)))
     ) {
       return dataBoundaryFailure("mutated-during-read", `${label} changed while it was being inspected`);
     }

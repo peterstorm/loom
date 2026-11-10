@@ -31,7 +31,7 @@ import { CONFORMANCE_NOT_OWED } from "../core/skeleton/conformance-verdict";
 import type { ConformanceFile, ContractConformance, ContractSurface, SkeletonTarget } from "../core/skeleton/types";
 import type { Task, TaskGraph } from "../types";
 import { observeFrozenSurface, typedContract } from "./frozen-surface-observation";
-import { resolveBaseDirectory } from "./no-follow-fs";
+import { resolveBaseDirectory } from "../utils/no-follow-fs";
 import { readRepositoryLeafNoFollow } from "./repository-leaf";
 import { renderResolutionProblem } from "../core/skeleton/problems";
 import { describeCause } from "../utils/describe-cause";

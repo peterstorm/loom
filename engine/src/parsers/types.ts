@@ -107,9 +107,14 @@ export function getContentBlocks(line: TranscriptLine): ContentBlock[] {
 export function detectFormat(content: string): TranscriptFormat {
   // Pi sessions start with {"type":"session","version":...}
   const firstLine = content.split("\n")[0] ?? "";
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(firstLine);
-    if (parsed.type === "session" && parsed.version !== undefined) return "pi";
-  } catch {}
-  return "claude";
+    parsed = JSON.parse(firstLine);
+  } catch (error) {
+    if (error instanceof SyntaxError) return "claude"; // not a JSON line: not a Pi session header
+    throw error;
+  }
+  const isPiHeader = typeof parsed === "object" && parsed !== null &&
+    "type" in parsed && parsed.type === "session" && "version" in parsed && parsed.version !== undefined;
+  return isPiHeader ? "pi" : "claude";
 }

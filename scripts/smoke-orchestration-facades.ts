@@ -601,7 +601,7 @@ function standaloneReviewerRetrySmoke(): void {
   // not among the review scope paths, so the engine's frozen-scope validator
   // must reject that ONE slot and issue its attempt-2 retry instead of aborting
   // the run at aggregation with no recovery path.
-  const first = initial.requests[0]!;
+  const first = initial.requests[0];
   const retryBatch = asSpawnBatch(
     submitOutOfScope(review, first),
     "standalone retry batch after out-of-scope finding",
@@ -644,14 +644,14 @@ function standaloneRetryTerminalBlockSmoke(): void {
   const review = startedStandaloneReview("standalone-retry-block", "standalone retry-block start");
   const { cwd, runsRoot, reviewRun, initial } = review;
 
-  const first = initial.requests[0]!;
+  const first = initial.requests[0];
   const retryBatch = asSpawnBatch(submitOutOfScope(review, first), "retry-block attempt-1 rejection");
   const retry = retryBatch.requests.find(({ authority }) => authority.slotId === first.authority.slotId);
-  check(retry !== undefined && retry!.authority.attempt === 2, "retry-block slot did not advance to attempt 2");
+  check(retry !== undefined && retry.authority.attempt === 2, "retry-block slot did not advance to attempt 2");
 
   // The retry repeats the same scope violation: the second and final attempt
   // must terminal-block the run.
-  const blocked = record(submitOutOfScope(review, retry!), "retry-block final outcome");
+  const blocked = record(submitOutOfScope(review, retry), "retry-block final outcome");
   check(blocked.kind === "blocked", `retry-block must block, got ${blocked.kind}`);
   const replay = record(
     run(cwd, ["resume", "--runs-root", runsRoot, "--run", reviewRun]),

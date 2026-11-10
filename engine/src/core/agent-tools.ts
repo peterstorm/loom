@@ -58,7 +58,7 @@ function frontmatterLines(content: string): readonly Line[] | null {
   if (!fm) return null;
   const lines: Line[] = [];
   let offset = content.indexOf("\n") + 1;
-  for (const raw of fm[1]!.split("\n")) {
+  for (const raw of fm[1].split("\n")) {
     const text = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
     lines.push({ text, start: offset, end: offset + text.length });
     offset += raw.length + 1;
@@ -89,8 +89,8 @@ function locateToolsField(content: string): ToolsField {
   if (keyed.length === 0) return { kind: "none" };
   if (keyed.length > 1) return { kind: "unreadable", reason: "agent frontmatter declares the tools field more than once" };
 
-  const index = keyed[0]!;
-  const line = lines[index]!;
+  const index = keyed[0];
+  const line = lines[index];
   const value = line.text.slice(line.text.indexOf(":") + 1).trim();
 
   if (value.startsWith("[")) {

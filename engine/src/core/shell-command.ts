@@ -118,7 +118,7 @@ export function hasUnbalancedQuotes(segment: string): boolean {
 /** Strip a trailing unquoted shell comment. */
 export function stripComment(segment: string): string {
   return scanUnquoted<string>(segment, 0, (char, index) =>
-    char === "#" && (index === 0 || /\s/.test(segment[index - 1]!))
+    char === "#" && (index === 0 || /\s/.test(segment[index - 1]))
       ? halt(segment.slice(0, index))
       : CONTINUE) ?? segment;
 }

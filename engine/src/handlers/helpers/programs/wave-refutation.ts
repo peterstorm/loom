@@ -179,6 +179,8 @@ export async function driveWaveRefutation(
     (outcome): outcome is Extract<FindingOutcome, { survives: false }> => !outcome.survives,
   );
   if (refutingOutcomes.length > 0) {
+    const wave = registration.input.wave;
+    if (wave === null) return settled(waveBlocked(handle, "Wave Refutation registration names no Wave to reconcile"));
     await manager.update((locked) => {
       const authorityProblem = waveRefutationCommitProblem(
         locked,
@@ -191,7 +193,7 @@ export async function driveWaveRefutation(
       return {
         ...locked,
         tasks,
-        wave_gates: reconcileWaveBlock(locked.wave_gates, tasks, locked.spec_check, registration.input.wave!),
+        wave_gates: reconcileWaveBlock(locked.wave_gates, tasks, locked.spec_check, wave),
       };
     });
     // The tally retired at least one finding, so the derived snapshot

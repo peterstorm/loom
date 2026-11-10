@@ -183,7 +183,7 @@ function paramExpansionEnd(text: string, start: number): ParamExpansion {
   }
   if (/[A-Za-z_]/.test(next)) {
     let j = start + 2;
-    while (j < text.length && /[A-Za-z0-9_]/.test(text[j]!)) j++;
+    while (j < text.length && /[A-Za-z0-9_]/.test(text[j])) j++;
     return { kind: "empty", end: j };
   }
   if (SPECIAL_PARAM.test(next)) return { kind: "empty", end: start + 2 };

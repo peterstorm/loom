@@ -33,7 +33,7 @@ export function statusPaths(output: string): DomainResult<readonly string[], str
   const records = output.split("\0");
   const paths: string[] = [];
   for (let index = 0; index < records.length; index += 1) {
-    const record = records[index]!;
+    const record = records[index];
     if (record === "" || record.startsWith("# ")) continue;
     const path = recordPath(record);
     if (path === null) return failure(`git status printed an unrecognized record: ${JSON.stringify(record)}`);

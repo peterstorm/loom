@@ -38,7 +38,7 @@ import { parseRepositoryPath } from "./repository-path";
  *  null when the marker is absent. Markers are engine-authored, one per line. */
 export function loomMarkerValue(prompt: string, name: string): string | null {
   const match = prompt.match(new RegExp(`^LOOM_${name}:[ \\t]*(\\S+)[ \\t]*$`, "m"));
-  return match ? match[1]! : null;
+  return match ? match[1] : null;
 }
 
 /** The run directory a spawn belongs to, derived from its LOOM_CONTEXT_PATH
@@ -90,8 +90,8 @@ export function anchoredRunDirectoryFromContextPath(
   if (!contained.ok) return null;
   const components = contained.value.relative.split("/");
   if (components.length < 3 || components[0] !== ".claude") return null;
-  if (!RUN_LAYOUT_COMPONENTS.has(components[components.length - 2]!)) return null;
-  if (!parseOrchestrationRunId(components[components.length - 1]!).ok) return null;
+  if (!RUN_LAYOUT_COMPONENTS.has(components[components.length - 2])) return null;
+  if (!parseOrchestrationRunId(components[components.length - 1]).ok) return null;
   return contained.value.absolute;
 }
 

@@ -37,9 +37,7 @@ const sessions = ["missing-fields", "missing-fields-armed", "corrupt-binding", "
 afterAll(() => {
   for (const s of sessions) {
     for (const path of [ledgerPath(s), machineBindingPath(s), `${SUBAGENT_DIR}/${s}.active`]) {
-      try {
-        rmSync(path, { recursive: true, force: true });
-      } catch {}
+      rmSync(path, { recursive: true, force: true });
     }
   }
 });

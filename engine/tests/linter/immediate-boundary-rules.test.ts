@@ -5,11 +5,12 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadRules, lintFile } from "../../src/linter/index";
 import type { LintResult, Rule } from "../../src/linter/types";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { LOOM_RULES_DIR } from "./loom-project-config";
 
 const DEFAULT_RULES_DIR = resolve(__dirname, "../../../lint-rules");
 const programmaticNames = (rules: readonly Rule[]): readonly string[] =>
@@ -20,14 +21,18 @@ afterEach(() => {
   for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-/** Writes `content` as the pilot's core types file and lints it in the immediate tier. */
+/** Writes `content` as the pilot's core types file in a project carrying Loom's
+ *  own boundary config, and lints it in the immediate tier as the hook would. */
 function lintCoreFile(content: string): LintResult {
   const root = canonicalTempDir("immediate-boundary-");
   cleanup.push(root);
   const file = join(root, "engine", "src", "core", "contract-status-types.ts");
+  const rulesDir = join(root, ".claude", "linter", "rules");
   mkdirSync(join(root, "engine", "src", "core"), { recursive: true });
+  mkdirSync(rulesDir, { recursive: true });
+  copyFileSync(join(LOOM_RULES_DIR, "config.json"), join(rulesDir, "config.json"));
   writeFileSync(file, content);
-  return lintFile(file, "immediate", DEFAULT_RULES_DIR, null, 5_000);
+  return lintFile(file, "immediate", DEFAULT_RULES_DIR, rulesDir, 5_000);
 }
 
 describe("immediate tier programmatic rules", () => {

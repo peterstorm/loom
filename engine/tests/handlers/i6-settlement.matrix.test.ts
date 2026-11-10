@@ -69,7 +69,7 @@ import {
   type EvidenceSnapshot,
 } from "../../src/handlers/subagent-stop/update-task-status";
 import { registerTaskExecutionBatch } from "../../src/handlers/task-execution";
-import { SUBAGENT_DIR } from "../../src/config";
+import { SUBAGENT_DIR, guardedLocations } from "../../src/config";
 import type { ImplementationAuthorityObservation } from "../../src/implementation-attempt-sidecar";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import {
@@ -867,15 +867,15 @@ describe("the implementation brief states I6 up front and names the repair on re
     expect(prompt).toMatch(/one exception to the Constraints' never-`git restore` rule/);
     expect(authorizeImplementationSpawn(task, prompt)).toMatchObject({ ok: true, kind: "retry" });
     // #118: the command the brief renders must pass the agent's own state-file guard.
-    expect(guardStateFileDecision(command).kind).toBe("allow");
+    expect(guardStateFileDecision(command, guardedLocations()).kind).toBe("allow");
   });
 
   it("#118: the restore command passes the state-file guard for any repository root, and the old substitution form does not", () => {
     for (const root of [ROOT, "/home/dev/my repo", "/srv/project's work"]) {
-      expect(guardStateFileDecision(baselineRestoreCommand("d".repeat(40), [LEDGER_TYPES, LEDGER_IMPL], root)).kind).toBe("allow");
+      expect(guardStateFileDecision(baselineRestoreCommand("d".repeat(40), [LEDGER_TYPES, LEDGER_IMPL], root), guardedLocations()).kind).toBe("allow");
     }
     // The pilot's form: an opaque `$(…)` the guard must assume could name guarded state.
-    expect(guardStateFileDecision(`(cd "$(git rev-parse --show-toplevel)" && git rev-parse --verify --quiet ${"d".repeat(40)}^0)`).kind).toBe("block");
+    expect(guardStateFileDecision(`(cd "$(git rev-parse --show-toplevel)" && git rev-parse --verify --quiet ${"d".repeat(40)}^0)`, guardedLocations()).kind).toBe("block");
   });
 
   describe("the retry's restore command, run by real bash against a real repository", () => {

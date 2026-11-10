@@ -107,12 +107,12 @@ describe("isError", () => {
 
 describe("makeViolation", () => {
   it("creates a valid Violation", () => {
-    const v = makeViolation("no-any", "/src/app.ts", 42, "  const x: any = 1;  ", "Use a specific type");
+    const v = makeViolation("no-any", "/src/app.ts", 42, "  const x: number = 1;  ", "Use a specific type");
     expect(v).toEqual({
       rule: "no-any",
       file: "/src/app.ts",
       line: 42,
-      text: "const x: any = 1;",  // trimmed
+      text: "const x: number = 1;",  // trimmed
       fixHint: "Use a specific type",
     });
   });

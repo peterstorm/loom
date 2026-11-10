@@ -8,7 +8,7 @@
  * fatal UTF-8. The next change to either policy therefore cannot make the two
  * capture paths diverge.
  */
-import { readRunBytesNoFollow } from "./no-follow-fs";
+import { readRunBytesNoFollow } from "../utils/no-follow-fs";
 
 /** The bound every Claude transcript read observes before decoding (16 MiB). */
 export const CLAUDE_TRANSCRIPT_MAX_BYTES = 16_777_216;

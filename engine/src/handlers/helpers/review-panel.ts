@@ -367,11 +367,9 @@ const handler: HookHandler = async (stdin, args) => {
     const standalone = argumentValue(args, "--standalone");
     const wave = positiveInteger(rawWave);
     if (!runDir || (rawWave === null) === (standalone === null) || (rawWave !== null && wave === null)) return usageError;
-    return operationBrief(
-      runsRoot,
-      runDir,
-      standalone !== null ? { kind: "standalone", path: standalone } : { kind: "wave", wave: wave! },
-    );
+    if (standalone !== null) return operationBrief(runsRoot, runDir, { kind: "standalone", path: standalone });
+    if (wave === null) return usageError;
+    return operationBrief(runsRoot, runDir, { kind: "wave", wave });
   }
 
   if (!MANIFEST_SCOPED.has(operation)) return usageError;
@@ -461,7 +459,7 @@ const handler: HookHandler = async (stdin, args) => {
   // rule itself is `panelSizeConflict` in the core; this is just where the two
   // integers are read.
   const recordedLensCount = manifestLensCount(manifestRaw);
-  const requestedLensCount = rawLensCount === null ? null : positiveInteger(rawLensCount)!;
+  const requestedLensCount = rawLensCount === null ? null : positiveInteger(rawLensCount);
   const sizeConflict = panelSizeConflict(requestedLensCount, recordedLensCount);
   if (sizeConflict !== null) return contractError("review manifest", [sizeConflict]);
   const lensCount = requestedLensCount ?? recordedLensCount ?? REVIEW_LENSES_DEFAULT;

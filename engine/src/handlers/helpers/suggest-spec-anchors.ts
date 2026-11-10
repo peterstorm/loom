@@ -48,7 +48,11 @@ function findLatestSpec(): string | null {
       const specPath = join(specsDir, dir.name, "spec.md");
       if (existsSync(specPath)) return specPath;
     }
-  } catch {}
+  } catch (error) {
+    // A spec directory removed between the listing and its stat means "no
+    // latest spec"; any other failure (permissions, I/O) is not silence.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
   return null;
 }
 

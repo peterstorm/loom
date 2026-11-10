@@ -50,7 +50,7 @@ import {
   type StandaloneReviewState,
   type StandaloneReviewAggregate,
 } from "./standalone-review-model";
-import { parseArtifactDigest, parseArtifactRef, parseOrchestrationRunId, parseRequestId, parseSlotId, type ArtifactDigest, type ArtifactRef, type DomainResult, type NonEmpty, type OrchestrationRunId } from "./orchestration-contract";
+import { mapNonEmpty, parseArtifactDigest, parseArtifactRef, parseOrchestrationRunId, parseRequestId, parseSlotId, type ArtifactDigest, type ArtifactRef, type DomainResult, type OrchestrationRunId } from "./orchestration-contract";
 import { findingsUnionError, parseStoredFindings } from "./findings";
 import { isCaptureRejectionAuditRecord } from "./harness-capture";
 import type { CompletedWaveGateRegistration, Finding, RefutedFinding, TaskGraph } from "../types";
@@ -256,7 +256,7 @@ export function parseAdjudicatedStandaloneReview(
         return;
       }
       const parsedFinding = parseStoredFindings([entry.finding]);
-      if (parsedFinding.length !== 1 || parsedFinding[0]!.severity !== "critical") {
+      if (parsedFinding.length !== 1 || parsedFinding[0].severity !== "critical") {
         errors.push(`result.refuted_critical_findings[${index}].finding must be critical`);
         return;
       }
@@ -270,7 +270,7 @@ export function parseAdjudicatedStandaloneReview(
       });
       const [head, ...tail] = refs;
       if (head === undefined) errors.push(`result.refuted_critical_findings[${index}].refutations must be non-empty`);
-      else refutedCriticals.push({ finding: parsedFinding[0]!, refutations: [head, ...tail] });
+      else refutedCriticals.push({ finding: parsedFinding[0], refutations: [head, ...tail] });
     });
   }
 
@@ -337,7 +337,7 @@ export function parseAdjudicatedStandaloneReview(
         advisories: Object.freeze([...advisories]),
         refutedCriticals: Object.freeze(refutedCriticals.map(({ finding, refutations }) => Object.freeze({
           finding,
-          refutations: Object.freeze(refutations.map(({ lens, reason }) => Object.freeze({ lens, reason }))) as NonEmpty<PanelRefutation>,
+          refutations: mapNonEmpty(refutations, ({ lens, reason }): PanelRefutation => Object.freeze({ lens, reason })),
         }))),
         panel,
       }));

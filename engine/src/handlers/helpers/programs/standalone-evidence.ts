@@ -259,7 +259,7 @@ function scopePacketProblem(
   if (sections.length !== 1) {
     return `context ${request.contextDigest} must contain exactly one standalone-review-authority section`;
   }
-  const parsed = parseScopePacketAuthority(sections[0]!.bytes);
+  const parsed = parseScopePacketAuthority(sections[0].bytes);
   if (!parsed.ok) return parsed.message;
   const witnessed = parsed.value;
   if (witnessed.runId !== authority.runId || witnessed.role !== request.role ||
@@ -294,13 +294,13 @@ export function readStandaloneReviewedSource(
         message: `context ${request.contextDigest} must contain exactly one standalone-frozen-source section`,
       });
     }
-    if (sectionDigest !== null && sections[0]!.digest !== sectionDigest) {
+    if (sectionDigest !== null && sections[0].digest !== sectionDigest) {
       return Object.freeze({ ok: false, message: "standalone reviewer contexts attest different frozen source snapshots" });
     }
     if (reviewed !== null) continue; // Equal authenticated section digest: one immutable source parse per roster.
-    const parsed = parseReviewedSource(sections[0]!.bytes, authority.scope, registration.schemaVersion === 3 ? 2 : 1);
+    const parsed = parseReviewedSource(sections[0].bytes, authority.scope, registration.schemaVersion === 3 ? 2 : 1);
     if (!parsed.ok) return parsed;
-    sectionDigest = sections[0]!.digest;
+    sectionDigest = sections[0].digest;
     reviewed = parsed.value;
   }
   return reviewed === null
@@ -580,7 +580,7 @@ export function replayStandaloneResultFromEvidence(
               ? `refutation retry publication is absent for ${retryAuthority.slotId}`
               : retry.message);
           }
-          const retryRequest = retry.requests[0]!;
+          const retryRequest = retry.requests[0];
           if (!captured.value.has(captureKey(retryAuthority.slotId, 2))) {
             return failed(`checkpoint-independent replay is missing refutation retry ${retryAuthority.requestId}`);
           }

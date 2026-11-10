@@ -132,7 +132,7 @@ export function withBatchSubjects<R>(
       message: `published ${published.length} Wave review request(s) for ${subjects.length} batch subject(s)`,
     }) };
   }
-  return { ok: true, value: Object.freeze(published.map((request, index) => [request, subjects[index]!] as const)) };
+  return { ok: true, value: Object.freeze(published.map((request, index) => [request, subjects[index]] as const)) };
 }
 
 /**

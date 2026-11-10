@@ -89,7 +89,7 @@ export function stopCheckExpectation(
     return testcases === null ? [] : [freeze({ contractId: contract.id, testcases })];
   }));
   if (owed === null) return NONE;
-  const files = nonEmpty([...new Set(owed.flatMap(({ testcases }) => testcases.map(({ file }) => file)))])!;
+  const files = nonEmpty([...new Set(owed.flatMap(({ testcases }) => testcases.map(({ file }) => file)))]);
   const owingContracts = contracts.filter(({ id }) => owed.some(({ contractId }) => contractId === id));
   return freeze({
     kind: "owed",

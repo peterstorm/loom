@@ -59,7 +59,7 @@ import {
   resolveBaseDirectory,
   writeRunFileExclusiveNoFollow,
   writeRunFileNoFollow,
-} from "../../orchestration/no-follow-fs";
+} from "../../utils/no-follow-fs";
 import {
   admitWave,
   isWireRecord,

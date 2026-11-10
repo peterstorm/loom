@@ -33,7 +33,7 @@ import {
 import type { VerificationVerdict } from "../../core/security-adjudication";
 import { canonicalAttestedRunDirectory, captureAttestationLookup } from "../../orchestration/capture-attestation-store";
 import { openRegisteredRunDirectory, parseRunDirectoryReference, type RunDirHandle } from "../../orchestration/run-directory-handle";
-import { closeAnchoredDirectory, listDirectoryNamesNoFollow, openDirectoryNoFollow, readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
+import { closeAnchoredDirectory, listDirectoryNamesNoFollow, openDirectoryNoFollow, readRunBytesNoFollow } from "../../utils/no-follow-fs";
 import { parseRegisteredFacadeProgram, replayVerificationOutcome, replayVerificationResult } from "./programs";
 import { SECURITY_VERIFICATION_RESULT_FILE, verificationRunsRoot, type AuditSnapshot } from "./security-audit-run";
 

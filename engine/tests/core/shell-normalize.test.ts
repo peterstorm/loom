@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { normalizeShellSpan, normalizeShellVariants } from "../../src/core/shell-normalize";
 import { extractShellWriteTargets } from "../../src/core/shell-write-targets";
 import { guardStateFileDecision } from "../../src/core/guard-state-file";
+import { guardedLocations } from "../../src/config";
 
 /**
  * The shared normalizer is the single owner of bash word-normalization. These
@@ -277,7 +278,7 @@ describe("guard ⇄ evidence normalization parity (same input, same decoded lite
     const hexPath =
       "$'\\x2e\\x63\\x6c\\x61\\x75\\x64\\x65\\x2f\\x73\\x74\\x61\\x74\\x65\\x2f" +
       "\\x61\\x63\\x74\\x69\\x76\\x65\\x5f\\x74\\x61\\x73\\x6b\\x5f\\x67\\x72\\x61\\x70\\x68\\x2e\\x6a\\x73\\x6f\\x6e'";
-    expect(guardStateFileDecision(`echo X > ${hexPath}`).kind).toBe("block");
+    expect(guardStateFileDecision(`echo X > ${hexPath}`, guardedLocations()).kind).toBe("block");
     expect(extractShellWriteTargets(`echo X > ${hexPath}`)).toEqual([
       ".claude/state/active_task_graph.json",
     ]);

@@ -696,7 +696,7 @@ function parsedCanonicalStandaloneResult(
     return fail(canonicalRecord({
       kind: "invalid-path-authority",
       field: "standaloneResult.scope",
-      path: excluded[0]!,
+      path: excluded[0],
       message: `standalone result scope contains excluded Loom evidence path(s): ${excluded.join(", ")}`,
     }));
   }
@@ -861,7 +861,7 @@ export function parseRemediationPathAuthority(
     return invalid("sourceResultJson", "path authority does not match its standalone result run and exact scope");
   }
   const excluded = [...reviewed.value.paths, ...support.value.paths].filter(isExcludedRemediationPath);
-  if (excluded.length > 0) return invalid("authorizedPaths", "path authority contains excluded Loom evidence", excluded[0]!);
+  if (excluded.length > 0) return invalid("authorizedPaths", "path authority contains excluded Loom evidence", excluded[0]);
   const combined = combineDistinctPathSets(reviewed.value, support.value);
   if (!combined.ok || !sameArray(combined.value.paths, authorized.value.paths)) {
     return invalid("authorizedPaths", combined.ok

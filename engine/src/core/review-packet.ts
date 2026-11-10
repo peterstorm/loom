@@ -333,7 +333,7 @@ export function canonicalJson(value: JsonValue): string {
   if (isJsonArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   return `{${Object.keys(value)
     .sort(compareStrings)
-    .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key]!)}`)
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
     .join(",")}}`;
 }
 

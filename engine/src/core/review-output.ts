@@ -103,7 +103,7 @@ function protocolFailure(code: ReviewerProtocolFailure["code"], path: string, me
   let length = 0;
   for (const character of message) {
     const rendered = /[\p{Cc}\p{Cf}\p{Cs}]/u.test(character)
-      ? `\\u{${character.codePointAt(0)!.toString(16)}}` : character;
+      ? `\\u{${character.codePointAt(0)?.toString(16) ?? ""}}` : character;
     const bytes = encoder.encode(rendered).length;
     if (length + bytes > 2048) break;
     length += bytes;
@@ -238,7 +238,7 @@ function parseCurrentReviewerEvidence(
   // reviewer that loses an attempt to a re-derivable defect loses the run.
   const outside = payload.findings.findIndex(({ file }) => file !== null && !scopeCovers(subject.scope, file));
   if (outside >= 0) {
-    const file = payload.findings[outside]!.file;
+    const file = payload.findings[outside].file;
     return protocolFailure(
       "out-of-scope",
       `/findings/${outside}/file`,
@@ -534,7 +534,7 @@ function extractFindings(block: string): LegacyParsedFindings {
 function declaredCount(text: string, severity: "CRITICAL" | "ADVISORY"): number | null {
   const pattern = new RegExp(String.raw`^[ \t\-*]*\*{0,2}${severity}_COUNT:?\*{0,2}\s*(\d+)`, "gm");
   let declared: string | null = null;
-  for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) declared = match[1]!;
+  for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) declared = match[1];
   return declared === null ? null : Number(declared);
 }
 
@@ -560,7 +560,8 @@ export function parseMachineSummary(output: string): LegacyParsedFindings | null
   // subsection under the summary would end it early rather than swallow a
   // sibling section's prose into the findings.
   const nextHeading = block.match(/\n#{2,4}\s+[^#]/);
-  if (nextHeading && nextHeading.index! > 0) block = block.slice(0, nextHeading.index!);
+  const headingAt = nextHeading?.index;
+  if (headingAt !== undefined && headingAt > 0) block = block.slice(0, headingAt);
 
   return chooseSource(extractFindings(block), block);
 }
@@ -615,9 +616,9 @@ function alignStructuredSeverity(
       : remaining.findIndex((marker) => marker.claim === draft.claim);
     if (match < 0) return draft;
     const [marker] = remaining.splice(match, 1);
-    return marker!.severity === draft.severity
+    return marker.severity === draft.severity
       ? draft
-      : Object.freeze({ ...draft, severity: marker!.severity });
+      : Object.freeze({ ...draft, severity: marker.severity });
   });
 }
 
@@ -735,7 +736,7 @@ function legacySectionClaims(output: string, heading: "Critical" | "Advisory"): 
   return section === null
     ? []
     : [...section[0].matchAll(/^- (?:\*\*)?(.+?)(?:\*\*)?$/gm)]
-        .map((match) => match[1]!)
+        .map((match) => match[1])
         .filter((claim) => claim !== "None");
 }
 
@@ -831,7 +832,7 @@ const REVIEW_LIFECYCLE_BLOCK =
 function lastMarker(text: string, name: string): string | null {
   const pattern = new RegExp(`^[ \\t\\-*]*\\*{0,2}${name}:?\\*{0,2}\\s*(\\S+)`, "gim");
   let value: string | null = null;
-  for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) value = match[1]!;
+  for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) value = match[1];
   return value;
 }
 
@@ -855,14 +856,14 @@ function parsePriorAssessments(
   REVIEW_LIFECYCLE_BLOCK.lastIndex = 0;
   const bodies: string[] = [];
   for (let match = REVIEW_LIFECYCLE_BLOCK.exec(transcript); match !== null;
-       match = REVIEW_LIFECYCLE_BLOCK.exec(transcript)) bodies.push(match[1]!);
+       match = REVIEW_LIFECYCLE_BLOCK.exec(transcript)) bodies.push(match[1]);
   if (bodies.length === 0) {
     return { ok: false, error: "review_lifecycle block missing for packet-bound review" };
   }
   if (bodies.length > 1) {
     return { ok: false, error: "packet-bound review must contain exactly one review_lifecycle block" };
   }
-  const body = bodies[0]!;
+  const body = bodies[0];
   let raw: unknown;
   try {
     raw = JSON.parse(body);

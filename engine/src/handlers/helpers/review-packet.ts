@@ -143,7 +143,7 @@ function directoryLeaves(root: string, baseSha: BaseSha, path: string): readonly
   const inspected = inspectRepositoryPath(root, path, "review packet path");
   const directoryNow = inspected.exists && lstatSync(inspected.absolute).isDirectory();
   const directoryAtBase = nulSeparated(git(["ls-tree", "-z", "--full-tree", baseSha, "--", path], root))
-    .some((entry) => entry.split("\t")[0]!.split(" ")[1] === "tree");
+    .some((entry) => entry.split("\t")[0].split(" ")[1] === "tree");
   if (!directoryNow && !directoryAtBase) return null;
   return reviewedDirectoryLeafPaths(root, baseSha, path);
 }

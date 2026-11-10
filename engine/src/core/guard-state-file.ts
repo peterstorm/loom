@@ -1,8 +1,9 @@
 /**
  * Core: Guard state files from direct modification via Bash.
- * Harness-agnostic — no stdin parsing. Not pure: guardStateFile reads the
- * filesystem (a fail-closed existence probe); the decision core
- * (guardStateFileDecision) is pure.
+ * Harness-agnostic — no stdin parsing — and pure: the guarded directories
+ * arrive as a `GuardedLocations` value the shell resolves from configuration
+ * at decision time, and the task-graph existence gate lives in the shells
+ * (the `pre-tool-use/guard-state-file` hook, the Pi extension).
  *
  * DENY-BY-DEFAULT (round 14, replacing the WRITE_PATTERNS denylist): a line
  * that never references a guarded path (state files, state dir, subagent dir,
@@ -96,15 +97,7 @@
 
 import type { HookResult } from "../types";
 import { scanSubstitutions, type SubstitutionContext } from "./shell-substitution";
-import {
-  WHITELISTED_HELPERS,
-  stateFilePatterns,
-  protectedDirPatterns,
-  protectedDirSegments,
-  guardedDirSegments,
-  SUBAGENT_DIR,
-  defaultTaskGraphExists,
-} from "../config";
+import { guardedDirsOf, protectedDirsOf, type GuardedLocations } from "./guarded-locations";
 import { stripComment, stripEnvPrefix } from "./shell-command";
 import { hasOutputRedirect, hasReadOnlyHead, pipeChains, unquote } from "./shell-command-head";
 import { MAX_SUBSTITUTION_DEPTH, splitHeredocs } from "./shell-heredoc";
@@ -115,6 +108,26 @@ import {
   referencesPattern,
   type LeadingDotPolicy,
 } from "./shell-match-views";
+
+/** The helpers whose own segment may write guarded state (never a protected
+ *  directory) — matched by `segmentInvokesHelper` below. */
+export const WHITELISTED_HELPERS: readonly string[] = [
+  "complete-wave-gate",
+  "mark-tests-passed",
+  "store-review-findings",
+  "store-spec-check",
+  "populate-task-graph",
+  "write-verification-manifest",
+  "upgrade-spec-trace",
+  "amend-spec-trace",
+  "revise-contract",
+  "repair-task-graph",
+  "review-packet",
+  "store-test-evidence",
+  "reconcile-implementation-proof",
+  "set-phase",
+  "cleanup-state",
+];
 
 const BLOCK: HookResult = {
   kind: "block",
@@ -165,21 +178,55 @@ function segmentInvokesHelper(segment: string): boolean {
   return WHITELISTED_HELPERS.includes(tokens[3] ?? "");
 }
 
-/** The two scope predicates of ONE decision, fixed to the whole command
- *  line's leading-dot policy — a segment judged alone must not lose a
- *  `shopt -s dotglob` that an earlier segment of the same line ran. */
-interface GuardScope {
+/** The scope of ONE decision: its two predicates, fixed to the guarded
+ *  locations and to the whole command line's leading-dot policy (a segment
+ *  judged alone must not lose a `shopt -s dotglob` that an earlier segment of
+ *  the same line ran), and the placeholder a protected-dir substitution body
+ *  flattens to. */
+export interface GuardScope {
   readonly guardedState: (text: string) => boolean;
   readonly protectedDir: (text: string) => boolean;
+  /** A path inside the subagent dir — itself a protected-dir reference. */
+  readonly protectedPlaceholder: string;
 }
 
-const scopeFor = (policy: LeadingDotPolicy): GuardScope => ({
-  guardedState: (text) => referencesPattern(text, stateFilePatterns, guardedDirSegments, policy),
-  protectedDir: (text) => referencesPattern(text, protectedDirPatterns, protectedDirSegments, policy),
-});
+const escapeRegex = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** Fail-closed scope for callers that judge a fragment without its line. */
-const FAIL_CLOSED_SCOPE = scopeFor("wildcards-match");
+/** A directory as `/`-split segments (empty segments dropped) for the glob-
+ *  intersection scope test: a glob path reaching AT or INTO a guarded dir
+ *  could name a guarded file even when no literal survives quote-collapse. */
+const toSegments = (dir: string): readonly string[] => dir.split("/").filter((s) => s !== "");
+
+/**
+ * The scope one decision judges with. Guarded state is the task-graph and
+ * review-invocations names plus every guarded directory: an agent writing the
+ * evidence ledger or binding files in the subagent dir would forge trusted
+ * test evidence or fake attribution, `rm` of a machine definition makes the
+ * gate see "no machine" for a bound agent, and a glob (`active_task*.json`,
+ * `.claude/state/*.json`) or brace (`active_task_{graph,x}.json`) write names
+ * a state directory but never the file literal — so only a dir match catches
+ * it. The protected dirs (subagent, machine definitions) are additionally
+ * never helper-writable. `policy` defaults to the fail-closed leading-dot
+ * policy for callers judging a fragment without its line.
+ */
+export function guardScope(
+  locations: GuardedLocations,
+  policy: LeadingDotPolicy = "wildcards-match",
+): GuardScope {
+  const guardedDirs = guardedDirsOf(locations);
+  const protectedDirs = protectedDirsOf(locations);
+  const statePattern = new RegExp(
+    ["active_task_graph", "review-invocations", ...guardedDirs].map(escapeRegex).join("|"),
+  );
+  const protectedPattern = new RegExp(protectedDirs.map(escapeRegex).join("|"));
+  const guardedSegments = guardedDirs.map(toSegments);
+  const protectedSegments = protectedDirs.map(toSegments);
+  return {
+    guardedState: (text) => referencesPattern(text, statePattern, guardedSegments, policy),
+    protectedDir: (text) => referencesPattern(text, protectedPattern, protectedSegments, policy),
+    protectedPlaceholder: `${locations.subagentDir}/__subst__`,
+  };
+}
 
 interface FlattenedCommand {
   /** Substitution bodies, outermost-first — each is judged as its own line. */
@@ -210,11 +257,11 @@ interface FlattenedCommand {
  *  surface more references. The load-bearing property of the non-empty
  *  placeholder texts is that they cannot form a redirect or separator:
  *  OPAQUE_OUTPUT and the literal parts contain only [A-Za-z_/] plus U+2217,
- *  and the `${SUBAGENT_DIR}` prefix is redirect/separator-free as shipped
- *  (`/tmp/claude-subagents`) — this is contingent on an operator-set
- *  LOOM_SUBAGENT_DIR staying free of shell-special characters. */
+ *  and the subagent-dir prefix of `protectedPlaceholder` is redirect/
+ *  separator-free as shipped (`/tmp/claude-subagents`) — this is contingent on
+ *  an operator-set LOOM_SUBAGENT_DIR staying free of shell-special characters. */
 function placeholderFor(body: string, scope: GuardScope, context: SubstitutionContext): string {
-  if (scope.protectedDir(body)) return `${SUBAGENT_DIR}/__subst__`;
+  if (scope.protectedDir(body)) return scope.protectedPlaceholder;
   if (scope.guardedState(body)) return "active_task_graph__subst__";
   return knownWordOutput(context) ?? OPAQUE_OUTPUT;
 }
@@ -227,12 +274,13 @@ function placeholderFor(body: string, scope: GuardScope, context: SubstitutionCo
  * literal, and `$(…)`/backticks stay live in double quotes while `<(…)`/`>(…)`
  * do not. Returns null when an opener has no closer — unbalanced substitution
  * syntax on a guarded line is judged unparseable, and unparseable fails closed
- * at the caller. `scope` classifies each body for its placeholder; it
- * defaults to the fail-closed scope for callers judging text out of context.
+ * at the caller. `scope` classifies each body for its placeholder (a caller
+ * judging text out of context passes `guardScope(locations)`, whose default
+ * leading-dot policy is the fail-closed one).
  */
 export function flattenSubstitutions(
   command: string,
-  scope: GuardScope = FAIL_CLOSED_SCOPE,
+  scope: GuardScope,
 ): FlattenedCommand | null {
   const scan = scanSubstitutions(command, (body, context) => placeholderFor(body, scope, context));
   if (scan.unclosed) return null;
@@ -240,12 +288,12 @@ export function flattenSubstitutions(
 }
 
 /**
- * The pure guard decision (no fs) — exported so tests exercise the REAL
- * logic instead of a simulation. guardStateFile wraps it with the
- * task-graph-exists check.
+ * The pure guard decision over the guarded locations the shell resolved for
+ * this call. The shells (the `pre-tool-use/guard-state-file` hook, the Pi
+ * extension) gate it on the task graph existing.
  */
-export function guardStateFileDecision(command: string): HookResult {
-  return decide(command, 0, scopeFor(leadingDotPolicyOf(command)));
+export function guardStateFileDecision(command: string, locations: GuardedLocations): HookResult {
+  return decide(command, 0, guardScope(locations, leadingDotPolicyOf(command)));
 }
 
 function decide(command: string, depth: number, scope: GuardScope): HookResult {
@@ -312,16 +360,4 @@ function judgePipeChains(flattened: string, scope: GuardScope): HookResult {
   }
 
   return { kind: "allow" };
-}
-
-// Default task-graph existence probe: the shared fail-closed probe in config
-// (`defaultTaskGraphExists` — ENOENT is the only absent answer). Historically
-// a byte-identical twin of the block-direct-edits default; one home now.
-
-export function guardStateFile(
-  command: string,
-  taskGraphExists: () => boolean = defaultTaskGraphExists,
-): HookResult {
-  if (!taskGraphExists()) return { kind: "allow" };
-  return guardStateFileDecision(command);
 }

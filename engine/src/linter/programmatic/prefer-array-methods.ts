@@ -61,30 +61,30 @@ export function handler(content: string, filePath: string): readonly Violation[]
   const violations: Violation[] = [];
 
   for (let index = 0; index < lines.length - 2; index++) {
-    const declaration = ACCUMULATOR_DECL.exec(lines[index]!);
+    const declaration = ACCUMULATOR_DECL.exec(lines[index]);
     if (declaration === null) continue;
-    const accumulator = declaration[1]!;
-    if (!FOR_OF_OPEN.test(lines[index + 1]!)) continue;
+    const accumulator = declaration[1];
+    if (!FOR_OF_OPEN.test(lines[index + 1])) continue;
 
     // Collect the body up to its closing brace at the loop's indentation.
-    const indent = /^\s*/.exec(lines[index + 1]!)![0];
+    const indent = lines[index + 1].match(/^\s*/)?.[0] ?? "";
     const body: string[] = [];
     let closed = false;
     for (let cursor = index + 2; cursor < lines.length; cursor++) {
-      const line = lines[cursor]!;
+      const line = lines[cursor];
       if (line === `${indent}}`) { closed = true; break; }
       body.push(line);
       if (body.length > 3) break;
     }
     if (!closed || body.length === 0) continue;
     if (body.some((line) => DISQUALIFYING.test(line))) continue;
-    if (body.length !== 1 || !pushInto(accumulator).test(body[0]!)) continue;
+    if (body.length !== 1 || !pushInto(accumulator).test(body[0])) continue;
 
     violations.push(makeViolation(
       "prefer-array-methods",
       filePath,
       index + 1,
-      lines[index]!.trim(),
+      lines[index].trim(),
       `\`${accumulator}\` is only pushed into — use map/filter/flatMap and delete the mutable binding`,
     ));
   }

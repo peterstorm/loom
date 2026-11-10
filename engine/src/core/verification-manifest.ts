@@ -22,6 +22,7 @@ import {
   type DomainResult,
   type NonEmpty,
 } from "./orchestration-contract";
+import { nonEmpty, nonEmptyOf } from "./orchestration-contract/identity";
 import { canonicalJson, type JsonValue } from "./review-packet";
 import { sha256Bytes, sha256Hex } from "./digest";
 import {
@@ -242,7 +243,7 @@ const failure = <T>(errors: readonly string[]): Parsed<T> => freeze({
   ok: false,
   error: freeze({
     kind: "invalid-verification-manifest",
-    errors: freezeArray(errors.length === 0 ? ["verification manifest is invalid"] : errors) as NonEmpty<string>,
+    errors: nonEmpty(errors) ?? nonEmptyOf("verification manifest is invalid"),
   }),
 });
 
@@ -490,7 +491,8 @@ function parseTestFileSuffixes(raw: unknown, path: string): Parsed<NonEmpty<stri
     : []);
   const repeated = [...new Set(raw.filter((suffix, index) => raw.indexOf(suffix) !== index))].sort(compareStrings);
   if (repeated.length > 0) errors.push(`${path} repeats suffixes: ${repeated.join(", ")}`);
-  return errors.length === 0 ? success(freezeArray(raw) as NonEmpty<string>) : failure(errors);
+  const suffixes = nonEmpty(raw);
+  return errors.length === 0 && suffixes !== null ? success(suffixes) : failure(errors);
 }
 
 const TEST_FILES_SOURCES: ReadonlySet<unknown> = new Set<FrozenTestFiles["source"]>(["operator-manifest", "engine-default"]);

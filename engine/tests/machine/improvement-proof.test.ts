@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { resolveTestEvidence } from "../../src/core/implementation-evidence";
 import { extractTestEvidence } from "../../src/core/test-evidence";
 import { parseBashTestOutput } from "../../src/parsers/parse-bash-test-output";
+import { readPersistedOutput } from "../../src/utils/persisted-output";
 import { claudeBashOutcome } from "../../src/core/harness-tool-call";
 import { classifyTestCommand, extractEvidence } from "../../src/machine/extract-evidence";
 import { foldEvidence, isToolAllowed, isTerminal, blockExplanation } from "../../src/machine/advance";
@@ -40,7 +41,7 @@ function bashTranscript(command: string, output: string): string {
 describe("R2 — real exit status beats happy output text", () => {
   const lyingOutput = "Tests run: 12, Failures: 0, Errors: 0\nBUILD SUCCESS";
   const transcript = bashTranscript("mvn test", lyingOutput);
-  const bashOutput = parseBashTestOutput(transcript);
+  const bashOutput = parseBashTestOutput(transcript, readPersistedOutput);
 
   it("OLD: transcript regex is fooled by the output text", () => {
     expect(extractTestEvidence(bashOutput).passed).toBe(true); // the documented weakness
@@ -106,7 +107,7 @@ describe("R2 — the spoofs the review found are dead", () => {
   it("plain echo spoof: unanchored Node/Mocha prose mints no pass", () => {
     const spoofCmd = 'echo "npm test: 5 passing"';
     const transcript = bashTranscript(spoofCmd, "npm test: 5 passing");
-    const bashOutput = parseBashTestOutput(transcript);
+    const bashOutput = parseBashTestOutput(transcript, readPersistedOutput);
 
     expect(extractTestEvidence(bashOutput)).toEqual({ passed: false, evidence: "" });
     const ledger = extractEvidence(claudeCall("Bash", { command: spoofCmd }, { exit_code: 0, stdout: "npm test: 5 passing" }), () => null);

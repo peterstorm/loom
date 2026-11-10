@@ -572,7 +572,7 @@ Do not write `active_task_graph.json`, machine bindings, or evidence ledgers dir
 Protection is layered:
 
 1. TaskGraph mode is `0444` at rest.
-2. `guard-state-file` denies Bash segments that may write guarded paths.
+2. `guard-state-file` denies Bash segments that may write guarded paths. The decision is pure (`core/guard-state-file.ts`); the hook (and Pi's `tool_call` twin) arms it only while a task graph exists and resolves the guarded directories — every task-graph state directory, the verification-manifest directory, `LOOM_SUBAGENT_DIR` and `LOOM_MACHINES_DIR` — at decision time, so a re-pointed directory is guarded without a restart.
 3. `guard-subagent-authority` (ADR-0067 D6, amended; Claude Code `Bash` hook, Pi `bash` `tool_call` twin) refuses, inside a subagent only, `helper security-audit|orchestration` operations that are not read-only projections (the split is each operation table's `runtimeSkew` trait), Loom CLI hook entrypoints (`subagent-stop`, `post-tool-use`, … and the `hooks/scripts` shims), nested harnesses (`claude`, `pi`, `npx`/`bunx`/`pnpm dlx` of either), interpreter code (`python -c`, `node -e/-p`, `bun -e`, `perl -e`, `ruby -e`, awk) that invokes a writing helper operation or imports an engine authority module, and writes onto a registered security-audit run's authority files (`core/audit-run-authority.ts`, the one owner of the run's entry names), the run directory or its ancestors, or a protected Loom directory. Command words are unescaped, wrappers (`time`, `command`, `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `env`, …) unwrapped, and programs fed to a shell (pipes, here-strings, input redirects, script files, `source`) judged — script files read at decision time, bounded and regular-file-only. Paths are judged in their canonical spelling too (realpath of the deepest existing ancestor). Every writing `helper security-audit` operation — and the `security-verification` program's `start` and `resume` — registers its run in `<subagent dir>/security-audit-runs/` under both its spelled and real path (never swept; idempotent, so a registry wiped mid-audit is rebuilt by the next write, and a write whose run cannot be registered is refused; at 4096 live entries the registrar prunes entries whose directory is gone, and the reader fails closed only while still over the cap); an unreadable registry refuses every authority-named path. It is a shell-string fence with documented gaps (runtime-built command names, a variable holding a whole path, runtime-built interpreter code) — the data path is the proof: the capturing harness writes a capture attestation into `<subagent dir>/security-capture-attestations/` (one immutable entry per verifier attempt, never swept), `verify --from` requires it for every ballot, and `findings`/`status`/`publish` re-prove every ballot `verdicts.json` caches. On Pi the same `tool_call` chain also checks the parent's `helper security-audit verify --from <run>`: the extension's Trusted Review Witness first, then the persisted attestations (so a Pi restart no longer strands a captured run). Pi decides "subagent" from an explicit environment marker (`LOOM_PI_SUBAGENT=1` on the extension's own `--mode rpc` children; `LOOM_PI_PARENT_PID`, published by every Loom Pi session, on every process it launches), never from launch flags — the rules gate uses the same marker, so a headless parent (`pi --mode json -p --no-session` without the marker) is now gated.
 4. Under Pi, a content-addressed Runtime Revision handshake rejects stale-extension/fresh-CLI mutations before dynamic import; `StateManager` repeats the check before chmod or lock creation.
 5. `StateManager` serializes writes with a lock and atomic rename.
@@ -1367,11 +1367,23 @@ The gate proves context and articulation, never genuine adherence; the substance
 
 ## Linter operations
 
-### Scan a path
+### Scan the project
 
 ```bash
-bun scripts/lint-project.ts engine/src
+bun scripts/lint-project.ts            # the whole repository, from any directory in it
+bun scripts/lint-project.ts engine/src # one directory (exclusions still apply)
 ```
+
+Everything is linted; exclusions are explicit and reasoned. The scan reads every
+lintable file — tests, `.mts`/`.cts`/`.mjs`/`.cjs` and declaration files
+included — minus the `exclude` entries in `.claude/linter/rules/config.json`,
+each with its reason. The full scan runs inside `npm run verify` (the engine's
+`lint` script, between the compiler and the suite), so a violation or a stale
+baseline, exclusion, purity shell, boundary or grant fails verification locally
+and in CI. Loom's purity roots (`engine/src/core`, `machine`, `linter`,
+`parsers`), its declared shells and its boundaries for every `engine/src`
+directory and top-level file live in that config, not in the rule code. See
+[the runner reference](../skills/lint-project/references/runner.md).
 
 ### Rule tiers
 

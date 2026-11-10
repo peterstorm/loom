@@ -1,10 +1,12 @@
 /**
  * Guard state files from direct modification via Bash tool.
  *
- * Claude Code wrapper — delegates to core/ for the guard decision, then
- * stamps the call-start time for this tool call (the report-freshness
- * ordering check in record-evidence consumes it: a disk artifact may vouch
- * for a test run only when its mtime is at/after the call start).
+ * Claude Code wrapper — arms the guard only while a task graph exists,
+ * resolves the guarded locations from config, delegates to core/ for the
+ * pure guard decision, then stamps the call-start time for this tool call
+ * (the report-freshness ordering check in record-evidence consumes it: a disk
+ * artifact may vouch for a test run only when its mtime is at/after the call
+ * start).
  *
  * The stamp is written AFTER the guard decision is computed and is
  * best-effort fail-open WITH a stderr line — a thrown stamp write can never
@@ -13,8 +15,23 @@
  */
 
 import type { HookHandler, HookResult, PreToolUseInput } from "../../types";
-import { guardStateFile } from "../../core/guard-state-file";
+import { guardStateFileDecision } from "../../core/guard-state-file";
+import { defaultTaskGraphExists, guardedLocations } from "../../config";
 import { fsSessionRegistry, parseSessionId, type SessionRegistry } from "../../machine";
+
+/**
+ * The shell side of the state-file guard: no task graph → nothing to guard
+ * (the shared fail-closed probe — ENOENT is the only absent answer);
+ * otherwise the pure decision over the guarded locations resolved NOW, so a
+ * re-pointed LOOM_* directory is guarded without a module reload.
+ */
+export function guardStateFile(
+  command: string,
+  taskGraphExists: () => boolean = defaultTaskGraphExists,
+): HookResult {
+  if (!taskGraphExists()) return { kind: "allow" };
+  return guardStateFileDecision(command, guardedLocations());
+}
 
 /**
  * Best-effort call-start stamp: only when the session id parses and the

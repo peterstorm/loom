@@ -9,6 +9,7 @@ import {
   canonicalRecord, canonicalStructuralEquals, mintAgentRosterSlot,
   parseExactRoster, parseOrchestrationRunId, rosterSlotErrorMessages,
   type AgentRosterSlot, type DomainResult, type MintedAgentRosterSlot, type NonEmpty,
+  nonEmptyOf,
 } from "./orchestration-contract";
 import { failure, success } from "./orchestration-contract/identity";
 import { compareStrings } from "./ordering";
@@ -49,7 +50,7 @@ function preparationFailure(errors: readonly string[]): DomainResult<never, Stan
   const [head, ...tail] = errors.length > 0 ? errors : ["standalone review preparation failed"];
   return failure(canonicalRecord({
     kind: "standalone-review-preparation-blocked",
-    errors: Object.freeze([head!, ...tail]) as NonEmpty<string>,
+    errors: nonEmptyOf(head, ...tail),
   }));
 }
 
@@ -104,18 +105,19 @@ export function prepareStandaloneReview(
         !scopeResult.ok || JSON.stringify(scopeResult.value) !== JSON.stringify(input.successor.snapshot.map(row => row.path))) {
       errors.push("successor requires exact nominal lineage Run and frozen scope");
     } else {
-      selected = input.successor.reviewers;
-      if (safety.ok && safety.value.some((entry, index) => (entry.status === "absent") !== (input.successor!.snapshot[index]!.kind === "absent"))) {
+      const successor = input.successor;
+      selected = successor.reviewers;
+      if (safety.ok && safety.value.some((entry, index) => (entry.status === "absent") !== (successor.snapshot[index].kind === "absent"))) {
         errors.push("successor scope safety must match its frozen presence/absence observation");
       }
-      if (metadata.ok && selectStandaloneReviewers(metadata.value).some(role => !selected!.includes(role))) {
+      if (metadata.ok && selectStandaloneReviewers(metadata.value).some(role => !successor.reviewers.includes(role))) {
         errors.push("successor roster must retain deterministic current reviewer selection");
       }
     }
   }
   if (selected !== null && roster.ok) {
     const roles = roster.value.orderedSlots.map((slot) => slot.attempts[0].role);
-    if (roles.length !== selected.length || roles.some((role, index) => role !== selected![index])) {
+    if (roles.length !== selected.length || roles.some((role, index) => role !== selected[index])) {
       errors.push("roster roles must exactly match the deterministic reviewer selection in canonical order");
     }
   }
@@ -138,10 +140,10 @@ export function prepareStandaloneReview(
     roster: roster.value,
   });
   const [firstSlot, ...otherSlots] = authority.roster.orderedSlots;
-  const initialRequests = Object.freeze([
+  const initialRequests = nonEmptyOf(
     firstSlot.attempts[0],
     ...otherSlots.map((slot) => slot.attempts[0]),
-  ]) as NonEmpty<AgentRosterSlot["attempts"][0]>;
+  );
   const prepared: PreparedStandaloneReview = Object.freeze({ authority, initialRequests });
   return success(prepared);
 }

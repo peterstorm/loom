@@ -9,6 +9,7 @@ import { type AcceptedAgentResultError, type SemanticPayloadDiagnostic, type Sem
 import { MAX_SEMANTIC_PAYLOAD_ARRAY_LENGTH, causedMessage, describeThrownCause, readDenseDataArray, readExactDataRecord } from './bytes';
 import { CompleteRosterMembership, immutableMap, isRegisteredExactRoster, parseStoredAgentRequestAuthority, sameHarnessBinding, type AgentRequestAuthority, type ExactRoster, type RosterViolation, type UnissuedResultCause } from './roster';
 import { authorityResolutionFailure, issuedSpawnRequestFor, parseIssuedSpawnRequestAgainstRegistration, parseIssuedSpawnRequestIdentity, resolveRegisteredPublicationAuthority, samePublicationIdentity, type PublicationAuthorityResolver, type RegisteredBatchPublicationAuthority, type SpawnRequest } from './publication';
+import { nonEmpty, nonEmptyOf } from "./identity";
 
 /**
  * The `CompleteRoster` proof cache. This volume is its only minter, so it lives
@@ -77,7 +78,7 @@ export function issuedRequestAuthorityMismatchCause(
 ): UnissuedResultCause {
   return canonicalRecord({
     kind: "issued-request-authority-mismatch",
-    fields: Object.freeze([...fields]) as NonEmpty<string>,
+    fields: nonEmptyOf(...fields),
     message,
   });
 }
@@ -299,22 +300,22 @@ export function parseCompleteRoster<T>(
   if (!isRegisteredExactRoster(exactRoster)) {
     return failure(canonicalRecord({
       kind: "incomplete-or-invalid-roster",
-      violations: Object.freeze([canonicalRecord({
+      violations: nonEmptyOf(canonicalRecord({
         kind: "untrusted-exact-roster" as const,
-      })]) as NonEmpty<RosterViolation>,
+      })),
     }));
   }
   const results = readDenseDataArray(rawResults, "accepted Agent results");
   if (!results.ok) {
     return failure(canonicalRecord({
       kind: "incomplete-or-invalid-roster",
-      violations: Object.freeze([canonicalRecord({
+      violations: nonEmptyOf(canonicalRecord({
         kind: "malformed-result-boundary" as const,
         field: results.error.field,
         index: results.error.index,
         reason: results.error.reason,
         message: results.error.message,
-      })]) as NonEmpty<RosterViolation>,
+      })),
     }));
   }
   if (results.value.length !== exactRoster.orderedSlots.length) {
@@ -387,8 +388,8 @@ export function parseCompleteRoster<T>(
       return;
     }
     const issuedAuthorityMismatches = bindingMismatches(authority, issuedRequest.value.authority);
-    if (issuedAuthorityMismatches.length > 0) {
-      const fields = Object.freeze(issuedAuthorityMismatches) as NonEmpty<string>;
+    const fields = nonEmpty(issuedAuthorityMismatches);
+    if (fields !== null) {
       violations.push(canonicalRecord({
         kind: "unissued-result",
         index,
@@ -441,22 +442,25 @@ export function parseCompleteRoster<T>(
   if (head !== undefined) {
     return failure(canonicalRecord({
       kind: "incomplete-or-invalid-roster",
-      violations: Object.freeze([head, ...violations.slice(1)]) as NonEmpty<RosterViolation>,
+      violations: nonEmptyOf(head, ...violations.slice(1)),
     }));
   }
 
-  const ordered = exactRoster.orderedSlots.map((slot) => candidates.get(slot.slotId));
-  if (ordered.some((result) => result === undefined)) {
+  const ordered = exactRoster.orderedSlots.flatMap((slot) => {
+    const result = candidates.get(slot.slotId);
+    return result === undefined ? [] : [result];
+  });
+  const proven = ordered.length === exactRoster.orderedSlots.length ? nonEmpty(ordered) : null;
+  if (proven === null) {
     return failure(canonicalRecord({
       kind: "incomplete-or-invalid-roster",
-      violations: Object.freeze([canonicalRecord({
+      violations: nonEmptyOf(canonicalRecord({
         kind: "result-count-mismatch",
         expected: exactRoster.orderedSlots.length,
         actual: candidates.size,
-      })]) as NonEmpty<RosterViolation>,
+      })),
     }));
   }
-  const proven = Object.freeze(ordered) as NonEmpty<AcceptedAgentResult<T>>;
   const completeRoster = canonicalRecord({
     ordered: proven,
     bySlot: immutableMap(proven.map((result) => [result.authority.slotId, result] as const)),

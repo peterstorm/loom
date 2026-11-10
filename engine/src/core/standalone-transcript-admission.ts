@@ -4,7 +4,6 @@
  * legacy archive's canonical-transcript aggregation share the same scoped legacy parse.
  */
 import { attributeFindings, type Finding } from "./findings";
-import type { NonEmpty } from "./orchestration-contract";
 import { fail, ok, type ParseResult } from "./panel-kernel";
 import {
   parseReviewerEvidence as parseIssuedReviewerEvidence, resolveReviewFindings,
@@ -14,6 +13,7 @@ import { renderReviewerPayloadDiagnostic } from "./reviewer-protocol";
 import { STANDALONE_REVIEW_SUBJECT } from "./reviewer-contract";
 import type { StandaloneReviewAggregate, StandaloneReviewerEvidence, StandaloneReviewState } from "./standalone-review-model";
 import { findingScopeErrors, type StandaloneReviewerRole } from "./standalone-review-scope";
+import { nonEmptyOf } from "./orchestration-contract";
 
 export type StandaloneTranscriptAdmission =
   | Readonly<{ ok: true; findings: ParsedFindings }>
@@ -105,6 +105,6 @@ export function aggregateCanonicalTranscripts(
     : ok(Object.freeze({
         kind: "requires-refutation",
         aggregate,
-        criticals: Object.freeze([head, ...tail]) as NonEmpty<Finding>,
+        criticals: nonEmptyOf(head, ...tail),
       }));
 }

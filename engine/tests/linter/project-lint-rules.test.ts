@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { executeRules } from "../../src/linter/executor";
 import { loadRules } from "../../src/linter/loader";
-import { TYPESCRIPT_COMPILER_API_SEAMS } from "../../src/linter/programmatic/no-cross-boundary-imports";
+import { TYPESCRIPT_COMPILER_API_SEAMS } from "./loom-project-config";
 
 /**
  * This repository's own project lint rules (INV-1: strict sampling is only ever preferred, never required;

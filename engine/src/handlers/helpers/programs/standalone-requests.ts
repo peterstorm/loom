@@ -25,7 +25,7 @@ import { type FrozenStandaloneReviewAuthority } from '../../../core/standalone-r
 import { safeIoCause } from '../../../core/safe-io-cause';
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ContextPacket } from '../../../core/context-packets';
 import type { StandaloneDoneState } from '../../../core/standalone-review';
-import { readRunBytesNoFollow } from '../../../orchestration/no-follow-fs';
+import { readRunBytesNoFollow } from '../../../utils/no-follow-fs';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import type { RegisteredReviewProgram } from './registration';
 import { durablePublicationDigest, durableRefutationRequests, type DurableRequestRecovery } from './durable-requests';

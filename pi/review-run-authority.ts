@@ -56,13 +56,13 @@ export type PiOrchestrationMarkers = Readonly<{
 }>;
 
 export function orchestrationMarkers(task: string, item: string): PiOrchestrationMarkers | null {
-  const requestIds = [...task.matchAll(/^LOOM_REQUEST_ID:[ \t]*(\S+)[ \t]*$/gm)].map((match) => match[1]!);
-  const contextDigests = [...task.matchAll(/^LOOM_CONTEXT_DIGEST:[ \t]*(\S+)[ \t]*$/gm)].map((match) => match[1]!);
+  const requestIds = [...task.matchAll(/^LOOM_REQUEST_ID:[ \t]*(\S+)[ \t]*$/gm)].map((match) => match[1]);
+  const contextDigests = [...task.matchAll(/^LOOM_CONTEXT_DIGEST:[ \t]*(\S+)[ \t]*$/gm)].map((match) => match[1]);
   if (requestIds.length === 0 && contextDigests.length === 0) return null;
   if (requestIds.length !== 1 || contextDigests.length !== 1) {
     throw new Error(`${item} must carry exactly one LOOM_REQUEST_ID and one LOOM_CONTEXT_DIGEST authority marker`);
   }
-  return Object.freeze({ requestId: requestIds[0]!, contextDigest: contextDigests[0]! });
+  return Object.freeze({ requestId: requestIds[0], contextDigest: contextDigests[0] });
 }
 
 function environmentRunBinding(): SessionRunBinding | null {
@@ -109,7 +109,7 @@ export function sessionRunBinding(
         : `multiple Pi session run bindings contain issued request/context authority ${identities}`,
     );
   }
-  return matches[0]!;
+  return matches[0];
 }
 
 type PiRegisteredReviewProgram =
@@ -318,10 +318,10 @@ export function readPiIssuedSpawnRequest(
     const issued = opened.value.readIssuedRequests();
     if (!issued.ok) return failure({ message: issued.error.message });
     const matches = issued.value.filter((candidate) => candidate.requestId === requestId);
-    if (matches.length !== 1 || matches[0]!.contextDigest !== contextDigest || matches[0]!.role !== agent) {
+    if (matches.length !== 1 || matches[0].contextDigest !== contextDigest || matches[0].role !== agent) {
       return failure({ message: `no unique reserved ${agent} request ${requestId} binds context ${contextDigest}` });
     }
-    const authenticated = authenticatePiIssuedReviewRequest(opened.value, matches[0]!);
+    const authenticated = authenticatePiIssuedReviewRequest(opened.value, matches[0]);
     return authenticated.kind === "authenticated"
       ? qualifyRoute(authenticated.classified, authenticated.published.authority)
       : failure({ message: piIssuedSpawnRequestRefusal(requestId, authenticated) });
@@ -406,7 +406,7 @@ export async function recordPiSpawnCorrelators(
 
   for (const [index, admission] of itemAdmissions.entries()) {
     const { item } = admission;
-    const markers = parsedMarkers[index]!;
+    const markers = parsedMarkers[index];
     if (markers === null) throw new Error("Pi orchestration marker completeness invariant failed");
     const exactRequestId = markers.requestId;
     const request = available.find((candidate) => candidate.requestId === exactRequestId);

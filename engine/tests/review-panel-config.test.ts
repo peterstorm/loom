@@ -2,11 +2,13 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { UTILITY_AGENTS, assertReviewPanelDisjoint, reviewPanelOverlap } from "../src/config";
+import { assertReviewPanelDisjoint, reviewPanelOverlap } from "../src/config";
+import { UTILITY_AGENTS } from "../src/core/phase-policy";
 import { ARCH_PANEL_AGENTS, IMPL_AGENTS, PHASE_AGENT_MAP, REVIEW_AGENTS, REVIEW_SUB_AGENTS, REVIEW_PANEL_AGENTS } from "../src/core/agent-catalog-projections";
 import { categorize } from "../src/handlers/subagent-stop/dispatch";
 import { VALIDATED_AGENTS } from "../src/handlers/pre-tool-use/validate-agent-skill";
 import { KNOWN_HANDLERS } from "../src/handler-routes";
+import { WHITELISTED_HELPERS } from "../src/core/guard-state-file";
 import {
   REVIEW_LENSES,
   REVIEW_LENSES_DEFAULT,
@@ -80,12 +82,7 @@ describe("review-panel helper route", () => {
     // only the run directory, so it stays out of guard-state-file's scope. It
     // must not be allowlisted: that would let any Bash line mentioning both
     // "review-panel" and the state path through the guard.
-    const config = readFileSync(join(REPO_ROOT, "engine", "src", "config.ts"), "utf-8");
-    const whitelist = config.slice(
-      config.indexOf("WHITELISTED_HELPERS"),
-      config.indexOf("Subagent tracking directory"),
-    );
-    expect(whitelist).not.toContain("review-panel");
+    expect(WHITELISTED_HELPERS).not.toContain("review-panel");
   });
 });
 

@@ -150,7 +150,7 @@ function readInterviewFields(markdown: string): {
       errors.push(`${label} must appear exactly once at column 0; found ${matching.length}`);
       continue;
     }
-    const value = matching[0]!.slice(label.length).trim();
+    const value = matching[0].slice(label.length).trim();
     if (value.length === 0) {
       errors.push(`${label} must have a non-empty value`);
       continue;
@@ -169,7 +169,7 @@ function closedVocabularyValue(
   errors: string[],
 ): string | undefined {
   const value = raw?.toLowerCase();
-  if (value && !allowed.includes(value)) errors.push(enumError(label, raw!, allowed));
+  if (raw !== undefined && value && !allowed.includes(value)) errors.push(enumError(label, raw, allowed));
   return value;
 }
 
@@ -484,7 +484,7 @@ function parseJudgeRanking(
  *  crossCheck — its findings have no meaningful order. */
 function requireNonIncreasingScores(rankings: readonly JudgeRanking[]): readonly string[] {
   for (let index = 1; index < rankings.length; index++) {
-    if (rankings[index - 1]!.score < rankings[index]!.score) {
+    if (rankings[index - 1].score < rankings[index].score) {
       return ["rankings must be ordered by non-increasing score"];
     }
   }

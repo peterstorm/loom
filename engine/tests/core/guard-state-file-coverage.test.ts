@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import { guardStateFileDecision } from "../../src/core/guard-state-file";
+import { guardedLocations } from "../../src/config";
 import { expandBraces } from "../../src/core/shell-match-views";
 import { MODERN_BASH } from "../fixtures/modern-bash";
 
 const guardDecision = (command: string): "allow" | "block" =>
-  guardStateFileDecision(command).kind === "block" ? "block" : "allow";
+  guardStateFileDecision(command, guardedLocations()).kind === "block" ? "block" : "allow";
 
 const GUARDED = ".claude/state/active_task_graph.json";
 

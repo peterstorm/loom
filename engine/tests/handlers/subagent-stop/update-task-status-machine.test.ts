@@ -40,9 +40,7 @@ afterEach(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
   dirs = [];
   for (const f of sessionFiles) {
-    try {
-      rmSync(f, { recursive: true, force: true });
-    } catch {}
+    rmSync(f, { recursive: true, force: true });
   }
   sessionFiles = [];
   delete process.env.LOOM_MACHINES_DIR;

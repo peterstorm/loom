@@ -24,7 +24,7 @@
 
 import { describe, it, expect, afterAll } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ORCHESTRATION_RUNS_SUFFIX } from "../../src/machine/evidence";
@@ -51,9 +51,7 @@ function tempDir(): string {
 
 afterAll(() => {
   for (const dir of dirs) {
-    try {
-      chmodSync(dir, 0o700);
-    } catch {}
+    if (existsSync(dir)) chmodSync(dir, 0o700);
     rmSync(dir, { recursive: true, force: true });
   }
 });

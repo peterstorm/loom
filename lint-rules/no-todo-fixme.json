@@ -2,7 +2,7 @@
   "kind": "regex",
   "name": "no-todo-fixme",
   "description": "Disallow TODO/FIXME comments — resolve issues before committing",
-  "extensions": [".ts", ".tsx", ".js", ".jsx"],
+  "extensions": [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
   "pattern": "//\\s*(TODO|FIXME)",
   "flags": "",
   "fixHint": "Resolve the TODO/FIXME issue or create a tracked issue and remove the comment",

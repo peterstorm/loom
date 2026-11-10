@@ -23,7 +23,7 @@ import {
 } from "../core/implementation-binding";
 import type { ImplementationAttemptAuthority } from "../core/implementation-completion";
 import type { ActiveAgent, AgentId, SessionId } from "../machine";
-import { readRunBytesNoFollow } from "../orchestration/no-follow-fs";
+import { readRunBytesNoFollow } from "../utils/no-follow-fs";
 import { parseFirstUserPrompt } from "../parsers/parse-transcript";
 import { StateManager } from "../state-manager";
 import { resolveAgentTranscriptPath } from "../utils/agent-transcript-path";

@@ -276,7 +276,7 @@ function parsePromptContext<T>(
   if (lines.length === 0) return { ok: true, value: null, sourceLine: null };
   if (lines.length !== 1) return { ok: false, error: `implementation prompt must contain at most one ${name} context` };
   const prefix = `${label}: `;
-  const line = lines[0]!;
+  const line = lines[0];
   if (!line.startsWith(prefix)) return { ok: false, error: `implementation ${name} context must use the canonical label separator` };
   let raw: unknown;
   try {
@@ -633,8 +633,11 @@ export function authorizeImplementationSpawn(
   if (!parsedTaskId.ok) return { ok: false, error: parsedTaskId.error.errors.join("; ") };
   const history = task.implementation_attempt_history ?? [];
   const historyStart = task.implementation_retry_protocol === 2
-    ? task.implementation_retry_history_start!
+    ? task.implementation_retry_history_start
     : history.length;
+  if (historyStart === undefined) {
+    return { ok: false, error: `Task ${task.id} uses retry protocol 2 but records no retry history start` };
+  }
   const lineagePredecessorReceiptId: ImplementationSettlementReceiptId | null =
     task.implementation_retry_protocol === 2
       ? task.implementation_retry_predecessor_receipt_id ?? null

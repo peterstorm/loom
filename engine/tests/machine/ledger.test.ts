@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll, vi } from "vitest";
-import { appendFileSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Evidence } from "../../src/machine/types";
@@ -31,9 +31,7 @@ afterAll(() => {
   }
   for (const name of entries) {
     if (!name.startsWith(run)) continue;
-    try {
-      unlinkSync(`${SUBAGENT_DIR}/${name}`);
-    } catch {}
+    rmSync(`${SUBAGENT_DIR}/${name}`, { force: true });
   }
 });
 

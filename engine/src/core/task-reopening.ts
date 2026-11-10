@@ -82,7 +82,7 @@ export function parseTaskReopeningArgs(args: readonly string[]): DomainResult<Ta
   let reason: string | undefined;
   const tasks: string[] = [];
   for (let index = 0; index < args.length; index += 2) {
-    const flag = args[index]!;
+    const flag = args[index];
     const value = args[index + 1];
     if (flag !== "--wave" && flag !== "--task" && flag !== "--reason") return fail(`unknown argument '${flag}'`);
     if (value === undefined || isFlagToken(value)) return fail(`${flag} needs a value`);

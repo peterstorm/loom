@@ -175,7 +175,7 @@ function idBlocks(body: string, prefix: string): { id: string; title: string; bl
   const matches = [...body.matchAll(headingRe)];
   return matches.map((m, i) => {
     const start = (m.index ?? 0) + m[0].length;
-    const end = i + 1 < matches.length ? matches[i + 1].index! : body.length;
+    const end = i + 1 < matches.length ? matches[i + 1].index : body.length;
     return { id: m[1], title: m[2].trim(), block: body.slice(start, end) };
   });
 }
@@ -243,7 +243,7 @@ function labelledList(block: string, label: RegExp): LabelledList {
   const lines = block.split("\n").map((line) => line.replace(/\r$/, ""));
   const at = lines.findIndex((line) => label.test(line));
   if (at === -1) return { kind: "absent" };
-  const inline = lines[at]!.replace(label, "").trim();
+  const inline = lines[at].replace(label, "").trim();
   if (inline !== "") return { kind: "inline", value: inline };
   const after = lines.slice(at + 1);
   const firstItem = after.findIndex((line) => line.trim() !== "");
@@ -276,8 +276,8 @@ function siblingDeclaration(block: string): SiblingDeclaration {
   const entries: SiblingEntryPoint[] = [];
   for (const line of list.items) {
     const item = SIBLING_ITEM.exec(line);
-    if (item === null || item[1]!.toLowerCase() === "none") return { status: "malformed", line };
-    entries.push({ path: item[1]!, note: item[2]?.trim() ?? null });
+    if (item === null || item[1].toLowerCase() === "none") return { status: "malformed", line };
+    entries.push({ path: item[1], note: item[2]?.trim() ?? null });
   }
   return entries.length === 0 ? { status: "empty" } : { status: "declared", entries };
 }
@@ -363,7 +363,7 @@ function parseOwnership(block: string): InvariantOwnership {
     ...(matrixTest === null ? [{ kind: "missing-matrix-test" } as const] : []),
     ...(mutation.kind === "refused" ? [mutation.problem] : []),
   ];
-  return { kind: "malformed", problems: [first!, ...rest] };
+  return { kind: "malformed", problems: [first, ...rest] };
 }
 
 /** The types surface, three states plus the problems decidable from the text. */
@@ -398,8 +398,8 @@ function contractAcceptance(block: string): Readonly<{ files: readonly ContractA
       problems.push({ kind: "malformed-acceptance", line });
       continue;
     }
-    const path = normalizePlanPath(item[1]!);
-    const anchors = item[2]!.split(",").map((anchor) => anchor.trim()).filter((anchor) => anchor !== "");
+    const path = normalizePlanPath(item[1]);
+    const anchors = item[2].split(",").map((anchor) => anchor.trim()).filter((anchor) => anchor !== "");
     problems.push(...anchors.filter((anchor) => !COVERABLE_ANCHOR.test(anchor))
       .map((anchor): ContractProblem => ({ kind: "invalid-anchor", path, anchor })));
     problems.push(...[...new Set(anchors.filter((anchor, index) => anchors.indexOf(anchor) !== index))]
@@ -452,15 +452,18 @@ function parseContract(block: string): ContractDeclaration {
   ];
   if (first !== undefined) return { kind: "malformed", problems: [first, ...rest] };
   // No problem means every part parsed: types and statement are present and
-  // at least one acceptance file was listed.
+  // at least one acceptance file was listed — each absence is its own problem.
   const [head, ...tail] = files;
+  if (types === null) return { kind: "malformed", problems: [{ kind: "missing-types" }] };
+  if (statement === null) return { kind: "malformed", problems: [{ kind: "missing-statement" }] };
+  if (head === undefined) return { kind: "malformed", problems: [{ kind: "missing-acceptance" }] };
   return {
     kind: "declared",
-    types: types!,
-    acceptance: [head!, ...tail],
+    types: types,
+    acceptance: [head, ...tail],
     supportedDomain: supportedDomain === null ? null : normalizePlanPath(supportedDomain),
     entryPoint,
-    statement: statement!,
+    statement: statement,
   };
 }
 
@@ -512,8 +515,9 @@ function collectStrays(
   // LC/INV/CT-shaped headings outside their sections.
   for (const m of text.matchAll(/^###\s+((?:LC|INV|CT)[-\s][^\n]*)$/gim)) {
     const idx = m.index ?? 0;
-    const home = blockGrammar.find(({ prefix }) => new RegExp(`^${prefix}[-\\s]`, "i").test(m[1]))!;
-    if (!inRange(idx, home.s)) {
+    const home = blockGrammar.find(({ prefix }) => new RegExp(`^${prefix}[-\\s]`, "i").test(m[1]));
+    // The heading pattern admits exactly the grammar's LC/INV/CT prefixes, so a home always exists.
+    if (home !== undefined && !inRange(idx, home.s)) {
       strays.push({ kind: "misplaced-heading", heading: m[1].trim(), home: home.section });
     }
   }

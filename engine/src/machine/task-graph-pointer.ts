@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { isAbsolute, normalize } from "node:path";
 import { subagentDir } from "../config";
+import { nonEmpty, nonEmptyOf } from "../core/orchestration-contract/identity";
 import {
   closeAnchoredDirectory,
   ensureDirectoryNoFollow,
@@ -14,7 +15,7 @@ import {
   writeDirectoryFileAtomicNoFollow,
   writeDirectoryFileExclusiveNoFollow,
   type AnchoredDirectory,
-} from "../orchestration/no-follow-fs";
+} from "../utils/no-follow-fs";
 import {
   parseAgentId,
   parseSessionId,
@@ -121,12 +122,18 @@ export function parseSessionTaskGraphPointerLeaseRegistry(
   if (!Array.isArray(record.leases) || record.leases.length === 0) {
     return Object.freeze({ ok: false, error: "pointer lease registry leases must be non-empty" });
   }
-  const leases = record.leases.map((lease) => parseUuid<PointerLeaseId>(lease));
-  if (leases.some((lease) => lease === null)) {
+  const parsedLeases = record.leases.flatMap((lease) => {
+    const parsed = parseUuid<PointerLeaseId>(lease);
+    return parsed === null ? [] : [parsed];
+  });
+  if (parsedLeases.length !== record.leases.length) {
     return Object.freeze({ ok: false, error: "pointer lease registry contains an invalid lease id" });
   }
-  const parsedLeases = leases as PointerLeaseId[];
-  if (new Set(parsedLeases).size !== parsedLeases.length) {
+  const registryLeases = nonEmpty(parsedLeases);
+  if (registryLeases === null) {
+    return Object.freeze({ ok: false, error: "pointer lease registry leases must be non-empty" });
+  }
+  if (new Set(registryLeases).size !== registryLeases.length) {
     return Object.freeze({ ok: false, error: "pointer lease registry lease ids must be unique" });
   }
   return Object.freeze({
@@ -137,7 +144,7 @@ export function parseSessionTaskGraphPointerLeaseRegistry(
       generationId,
       target: target.value,
       previous: previous === null ? null : previous.value,
-      leases: Object.freeze(parsedLeases) as readonly [PointerLeaseId, ...PointerLeaseId[]],
+      leases: registryLeases,
     }),
   });
 }
@@ -218,7 +225,7 @@ function acquirePointerLease(
     }
     const next = Object.freeze({
       ...registry,
-      leases: Object.freeze([...registry.leases, leaseId]) as readonly [PointerLeaseId, ...PointerLeaseId[]],
+      leases: nonEmptyOf(...registry.leases, leaseId),
     });
     writeRegistry(anchored, registryName, next);
     return bindingFor(canonicalDirectory, pointerName, registryName, next, leaseId);
@@ -245,11 +252,11 @@ function releasePointerLease(
   if (registry.generationId !== binding.generationId || registry.target !== binding.target) return "ownership-lost";
   if (optionalPointer(anchored, binding.pointerName) !== registry.target) return "ownership-lost";
   if (!registry.leases.includes(binding.leaseId)) return "not-owned";
-  const remaining = registry.leases.filter((lease) => lease !== binding.leaseId);
-  if (remaining.length > 0) {
+  const remaining = nonEmpty(registry.leases.filter((lease) => lease !== binding.leaseId));
+  if (remaining !== null) {
     writeRegistry(anchored, binding.registryName, Object.freeze({
       ...registry,
-      leases: Object.freeze(remaining) as readonly [PointerLeaseId, ...PointerLeaseId[]],
+      leases: remaining,
     }));
     return "rolled-back";
   }

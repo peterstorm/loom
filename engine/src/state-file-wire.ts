@@ -890,7 +890,7 @@ function parseSpecTraceAmendment(raw: unknown): ParseResult<SpecTraceAmendment> 
     kind: "spec-trace-amendment",
     wave: wave.value,
     retiredRunId: retiredRunId === null ? null : retiredRunId.value,
-    changes: Object.freeze([first!, ...rest]) as SpecTraceAmendment["changes"],
+    changes: Object.freeze([first, ...rest]) as SpecTraceAmendment["changes"],
     specIndexObservation: observation.value,
   }));
 }
@@ -2172,8 +2172,8 @@ function completionRosterConflict(
     return "active_wave_completion_suite checks must exactly match the verification_manifest roster";
   }
   for (let index = 0; index < authorized.value.checks.length; index += 1) {
-    const expected = authorized.value.checks[index]!;
-    const actual = receipt.checks[index]!;
+    const expected = authorized.value.checks[index];
+    const actual = receipt.checks[index];
     if (actual.checkId !== expected.checkId || actual.scope !== expected.scope) {
       return "active_wave_completion_suite checks must exactly match the verification_manifest roster";
     }

@@ -22,7 +22,7 @@ import type {
   Task,
   TaskGraph,
 } from "../types";
-import type { NonEmpty } from "./orchestration-contract";
+import { mapNonEmpty, nonEmpty } from "./orchestration-contract";
 import {
   recordedAnchorHashes,
   renderRequirementTraceEdges,
@@ -101,8 +101,9 @@ function changesOf(
 ): readonly AmendedTrace[] {
   return graph.tasks.flatMap((task) => {
     const before = traceOf(task);
-    const after = ownership.get(task.id)!;
-    return sameRequirementTrace(before, after)
+    // rosterError has matched the submitted roster to the graph's, so every Task has its trace.
+    const after = ownership.get(task.id);
+    return after === undefined || sameRequirementTrace(before, after)
       ? []
       : [Object.freeze({ task, change: Object.freeze({ taskId: task.id, before, after }) })];
   });
@@ -206,7 +207,8 @@ export function amendSpecTrace(
   if (inputProblem !== null) return refuse("invalid-input", inputProblem);
 
   const amendedTraces = changesOf(graph, parsed.value);
-  if (amendedTraces.length === 0) return Object.freeze({ ok: true, value: Object.freeze({ kind: "unchanged", graph }) });
+  const amendedChanges = nonEmpty(amendedTraces);
+  if (amendedChanges === null) return Object.freeze({ ok: true, value: Object.freeze({ kind: "unchanged", graph }) });
 
   const wave = graph.current_wave;
   if (graph.current_phase !== "execute" || wave === undefined) {
@@ -246,8 +248,7 @@ export function amendSpecTrace(
     kind: "spec-trace-amendment",
     wave,
     retiredRunId: graph.active_wave_gate?.runId ?? null,
-    // Non-empty: the unchanged replay returned above.
-    changes: Object.freeze(amendedTraces.map(({ change }) => change)) as NonEmpty<SpecTraceAmendmentChange>,
+    changes: mapNonEmpty(amendedChanges, ({ change }) => change),
     specIndexObservation: specIndexObservationOf(specIndex),
   });
   // A live gate was refused above, so only a tombstone or residue is retired.

@@ -22,7 +22,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { baselineKey, staleBaselineEntries, unusedBaselineEntries } from "../../../src/linter/programmatic/baseline";
 import { baselineOwners } from "../../../src/linter/programmatic/index";
-import { loadProjectConfig, projectRootOf } from "../../../src/linter/programmatic/config";
+import { projectRootOf } from "../../../src/linter/programmatic/config";
+import { loadProjectConfig } from "../../../src/linter/loader";
 import { loadRules } from "../../../src/linter/loader";
 import { executeRules } from "../../../src/linter/executor";
 import {

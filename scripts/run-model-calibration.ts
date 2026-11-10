@@ -66,10 +66,10 @@ import {
 const args = process.argv.slice(2);
 const value = (flag: string, fallback: string): string => {
   const index = args.indexOf(flag);
-  return index >= 0 && args[index + 1] ? args[index + 1]! : fallback;
+  return index >= 0 && args[index + 1] ? args[index + 1] : fallback;
 };
 const values = (flag: string): readonly string[] =>
-  args.flatMap((arg, index) => (arg === flag && args[index + 1] ? [args[index + 1]!] : []));
+  args.flatMap((arg, index) => (arg === flag && args[index + 1] ? [args[index + 1]] : []));
 const REPO_ROOT = resolve(dirname(new URL(import.meta.url).pathname), "..");
 /** Retained records name files relative to the checkout, never by machine path. */
 const repoRelative = (path: string): string => relative(REPO_ROOT, path);

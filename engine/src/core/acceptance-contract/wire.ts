@@ -58,9 +58,10 @@ function list<T>(raw: unknown, path: string, item: (value: unknown, path: string
 }
 
 function nonEmptyList<T>(raw: unknown, path: string, item: (value: unknown, path: string) => Parsed<T>): Parsed<NonEmpty<T>> {
-  if (Array.isArray(raw) && raw.length === 0) return err(`${path} must be non-empty`);
   const values = list(raw, path, item);
-  return values.ok ? ok(nonEmpty(values.value)!) : values;
+  if (!values.ok) return values;
+  const present = nonEmpty(values.value);
+  return present === null ? err(`${path} must be non-empty`) : ok(present);
 }
 
 /** A non-empty anchor list naming each anchor once, as the plan grammar does. */
@@ -241,7 +242,7 @@ function parseRevisionHistory(
   // recorded only after the freeze, each revision starts from the bytes the
   // one before it stamped, and the bytes frozen now are the last revision's.
   const broken = revisions.findIndex((revision, index) =>
-    index > 0 && !canonicalStructuralEquals(revision.previous, revisions[index - 1]!.paths));
+    index > 0 && !canonicalStructuralEquals(revision.previous, revisions[index - 1].paths));
   if (broken !== -1) return err(`${path}.revisions[${broken}].previous must equal revision ${broken}'s paths`);
   const last = revisions.at(-1);
   if (last === undefined && frozen.state === "revised") return err(`${path}.freeze is revised but records no revision`);

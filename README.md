@@ -263,12 +263,13 @@ engine/src/
 │   └── model-*.ts                  model policy and calibration
 ├── orchestration/                  imperative shell
 │   ├── run-directory-handle.ts     anchored fixed-layout persistence
-│   ├── no-follow-fs.ts             descriptor/no-follow filesystem operations
 │   ├── context-packets.ts          immutable spawn context
 │   ├── effect-runner.ts            effect intent/receipt reconciliation
 │   ├── program-journal.ts           event journal record format + parser
 │   └── git-remediation.ts           verified-index installation
 ├── handlers/                       harness and helper boundaries
+├── utils/                          lowest shell layer (node builtins + core only)
+│   └── no-follow-fs.ts             descriptor/no-follow filesystem operations
 ├── machine/                        guarded per-Agent phase machines/evidence
 ├── linter/                         immediate and full-tier lint
 └── parsers/                        transcript, test, artifact, plan parsers
@@ -327,10 +328,10 @@ Loom’s linter is automatic and fail-closed.
 | Immediate | after Edit/Write | project/default regex rules; per-file deadline |
 | Full | Wave Gate or explicit scan | regex plus programmatic structural rules |
 
-Bundled programmatic rules enforce bounded-context imports, I/O-free pure modules, maximum function length, and Fugue generated-structure integrity. Project configuration lives under `.claude/linter/` or `.pi/linter/`.
+Bundled programmatic rules enforce bounded-context imports, I/O-free pure modules, maximum function length, and Fugue generated-structure integrity. Project configuration lives under `.claude/linter/` or `.pi/linter/`. The project scan lints everything — tests included — minus an explicit, reasoned `exclude` list, and runs inside `npm run verify`.
 
 ```bash
-bun scripts/lint-project.ts <path>
+bun scripts/lint-project.ts [path]
 ```
 
 See [Lint Rules](lint-rules/README.md).

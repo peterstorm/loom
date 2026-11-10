@@ -52,7 +52,7 @@ export function attributeReportedFile(
   const exact = declared.find((file) => normalizePlanPath(file) === relative);
   if (exact !== undefined) return exact;
   const jvmClass = !relative.includes("/") && JVM_CLASS.test(relative)
-    ? relative.split("$")[0]!.replace(/\./g, "/")
+    ? relative.split("$")[0].replace(/\./g, "/")
     : null;
   const matches = declared.filter((file) => {
     const path = normalizePlanPath(file);
@@ -61,5 +61,5 @@ export function attributeReportedFile(
     const withoutExtension = path.replace(/\.[^./]+$/, "");
     return withoutExtension === jvmClass || withoutExtension.endsWith(`/${jvmClass}`);
   });
-  return matches.length === 1 ? matches[0]! : null;
+  return matches.length === 1 ? matches[0] : null;
 }

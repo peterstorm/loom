@@ -37,6 +37,7 @@ import {
   type ExactRosterError,
   type MintedAgentRosterSlot,
   type NonEmpty,
+  nonEmpty,
   type OrchestrationRunId,
   type RequestId,
   type RosterIssuanceError,
@@ -88,11 +89,11 @@ export const panelError = (
 
 function nonEmptyDistinctStrings(raw: unknown): readonly [string, ...string[]] | null {
   const values = safeArray(raw);
-  if (values === null || values.length === 0 ||
-      values.some((value) => typeof value !== "string" || value.trim() !== value || value.length === 0)) return null;
-  const strings = values as string[];
-  if (new Set(strings).size !== strings.length) return null;
-  return Object.freeze([...strings]) as readonly [string, ...string[]];
+  if (values === null) return null;
+  const strings = values.flatMap((value) =>
+    typeof value === "string" && value.trim() === value && value.length > 0 ? [value] : []);
+  if (strings.length !== values.length || new Set(strings).size !== strings.length) return null;
+  return nonEmpty(strings);
 }
 
 export function authorityMatches(left: AgentRequestAuthority, right: AgentRequestAuthority): boolean {
@@ -394,7 +395,9 @@ function refutationPanelAuthority(
         identityRunId.ok ? identityRunId.value : runId.value,
       ));
     }
-    if (errors.length > 0 || !runId.ok || !identityRunId.ok || !roster.ok || parsedLenses.length === 0 || findings.length === 0) {
+    const authorityFindings = nonEmpty(findings);
+    const authorityLenses = nonEmpty(parsedLenses);
+    if (errors.length > 0 || !runId.ok || !identityRunId.ok || !roster.ok || authorityLenses === null || authorityFindings === null) {
       return persistentFailure(panelError("invalid-authority", errors.join("; ") || "refutation authority is invalid"));
     }
     return persistentSuccess(Object.freeze({
@@ -402,8 +405,8 @@ function refutationPanelAuthority(
       panel: "refutation" as const,
       runId: runId.value,
       identityRunId: identityRunId.value,
-      findings: Object.freeze(findings) as readonly [BriefFinding, ...BriefFinding[]],
-      lenses: Object.freeze(parsedLenses) as readonly [ReviewLens, ...ReviewLens[]],
+      findings: authorityFindings,
+      lenses: authorityLenses,
       verifierRoster: roster.value,
     }));
   } catch {

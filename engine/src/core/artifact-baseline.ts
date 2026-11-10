@@ -294,7 +294,9 @@ export function changedDeclaredArtifacts<Scheme extends SnapshotScheme>(
   ];
   if (errors.length > 0) return fail(errors);
   return ok(Object.freeze(baseline.flatMap((entry) => {
-    const now = currentByArtifact.get(entry.artifact)!;
-    return snapshotEquals(entry.snapshot, now.snapshot) ? [] : [entry.artifact];
+    // Every declared artifact is in the current snapshot (checked above); an
+    // absent one could only read as changed.
+    const now = currentByArtifact.get(entry.artifact);
+    return now !== undefined && snapshotEquals(entry.snapshot, now.snapshot) ? [] : [entry.artifact];
   })));
 }

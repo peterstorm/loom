@@ -9,11 +9,12 @@ import { describe, expect, it } from "vitest";
 import { READ_ONLY_STATE_COMMANDS } from "../../src/core/tool-vocabulary";
 import { hasReadOnlyHead } from "../../src/core/shell-command-head";
 import { guardStateFileDecision } from "../../src/core/guard-state-file";
+import { guardedLocations } from "../../src/config";
 
 const GUARDED = ".claude/state/active_task_graph.json";
 
 const guardDecision = (command: string): "allow" | "block" =>
-  guardStateFileDecision(command).kind === "block" ? "block" : "allow";
+  guardStateFileDecision(command, guardedLocations()).kind === "block" ? "block" : "allow";
 
 describe("READ_ONLY_STATE_COMMANDS — documented exclusions stay excluded", () => {
   it.each([

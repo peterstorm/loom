@@ -5,9 +5,9 @@
  * injected ports, so the decision logic itself is data-in /
  * data-out and can be exercised with in-memory fixtures.
  *
- * Definition site of `detectPhase` and `checkArtifacts`. `core/index.ts` and the
- * `handlers/pre-tool-use/validate-phase-order` wrapper re-export them onward, so
- * import sites that predate the move keep working.
+ * Definition site of `detectPhase` and `checkArtifacts`. The
+ * `handlers/pre-tool-use/validate-phase-order` wrapper re-exports them onward,
+ * so import sites that predate the move keep working.
  */
 
 import { match } from "ts-pattern";
@@ -18,7 +18,7 @@ import {
   ARCH_PANEL_PHASE,
   UTILITY_AGENTS,
   VALID_TRANSITIONS,
-} from "../config";
+} from "./phase-policy";
 import { stripNamespace } from "../utils/strip-namespace";
 import { hasStandaloneReviewContext } from "./review-output";
 

@@ -613,7 +613,8 @@ export function admitVerificationResult(brief: VerificationBrief, text: string):
   }
   const missing = brief.fingerprints.filter((fingerprint) => !seen.has(fingerprint));
   if (missing.length > 0) return failure(`no verdict for ${missing.join(", ")}`);
-  return success(brief.fingerprints.map((fingerprint) => parsed.value.find((vote) => vote.fingerprint === fingerprint)!));
+  // Every fingerprint has its vote (checked above), so each lookup hits.
+  return success(brief.fingerprints.flatMap((fingerprint) => parsed.value.filter((vote) => vote.fingerprint === fingerprint).slice(0, 1)));
 }
 
 /**

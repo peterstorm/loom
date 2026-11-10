@@ -29,7 +29,7 @@ import {
   ensureRelativeDirectoryNoFollow,
   listDirectoryNamesNoFollow,
   openDirectoryNoFollow,
-} from "../../orchestration/no-follow-fs";
+} from "../../utils/no-follow-fs";
 
 // `RunLayout` and the two layouts are pure data and live in the kernel, beside
 // the manifest parsers that give them meaning — those parsers used to hardcode
@@ -360,7 +360,7 @@ export {
   removeRunFileNoFollow,
   writeRunFileExclusiveNoFollow,
   writeRunFileNoFollow,
-} from "../../orchestration/no-follow-fs";
+} from "../../utils/no-follow-fs";
 
 /**
  * Delete the artifacts in an item directory that the caller is not about to

@@ -648,7 +648,7 @@ async function reconcileMissingReservedResults(
       if (missingSpecChecks.length > 1) {
         specAuthorityProblems.push("multiple reserved spec-check slots were missing; no unique authority exists");
       } else if (missingSpecChecks.length === 1) {
-        const missing = missingSpecChecks[0]!;
+        const missing = missingSpecChecks[0];
         const authority = specCheckAuthorityOf(missing.item);
         const problem = piSpecCheckAuthorityProblem(state, authority);
         if (problem !== null || authority === null) {

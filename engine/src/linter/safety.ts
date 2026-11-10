@@ -192,8 +192,9 @@ function extractGroups(pattern: string): GroupInfo[] {
 
     if (ch === "(") {
       stack.push(i);
-    } else if (ch === ")" && stack.length > 0) {
-      const start = stack.pop()!;
+    } else if (ch === ")") {
+      const start = stack.pop();
+      if (start === undefined) continue; // an unopened ")" closes no group
       let content = pattern.slice(start + 1, i);
 
       // Remove non-capturing group prefix

@@ -175,7 +175,7 @@ export function parseContractRevisionArgs(args: readonly string[]): DomainResult
   const fail = (problem: string) => freeze({ ok: false as const, error: `${problem}. ${USAGE}` });
   const values = new Map<string, string>();
   for (let index = 0; index < args.length; index += 2) {
-    const flag = args[index]!;
+    const flag = args[index];
     const value = args[index + 1];
     if (flag !== "--contract" && flag !== "--reason") return fail(`unknown argument '${flag}'`);
     if (value === undefined) return fail(`${flag} needs a value`);

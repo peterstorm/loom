@@ -875,7 +875,8 @@ export function prepareWaveReviewBatch(
   }
   const workspaceByTask = new Map<string, ReviewedWorkspaceObservation>();
   for (const task of tasks) {
-    const observation = observationsByTask.get(task.id)!;
+    const observation = observationsByTask.get(task.id);
+    if (observation === undefined) return failure("current Wave workspace observations differ from the exact registered Task roster");
     const snapshot = admitReviewedWorkspace(task.id, taskReviewScope(task), observation);
     if (!snapshot.ok) return failure(snapshot.error);
     workspaceByTask.set(task.id, snapshot.value);
@@ -943,7 +944,8 @@ export function prepareWaveReviewBatch(
   const frozenSourceByTask = new Map<string, ByteSection>();
   if (registration.schemaVersion === 2) {
     for (const task of tasks) {
-      const snapshot = workspaceByTask.get(task.id)!;
+      const snapshot = workspaceByTask.get(task.id);
+      if (snapshot === undefined) return failure(`Task ${task.id} has no admitted reviewed workspace`);
       const source = encodeByteSection(WAVE_FROZEN_SOURCE_SECTION, JSON.stringify(waveFrozenSource(snapshot)));
       if (!source.ok) return failure(source.error.message);
       frozenSourceByTask.set(task.id, source.value);

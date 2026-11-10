@@ -97,7 +97,7 @@ const REQUEST_MARKER = /^LOOM_REQUEST_ID:[ \t]*(\S+)[ \t]*$/gm;
 
 /** Every LOOM_REQUEST_ID marker an engine-issued Agent prompt carries (exactly one when it is engine-issued). */
 export function requestMarkers(prompt: string): readonly string[] {
-  return Object.freeze([...prompt.matchAll(REQUEST_MARKER)].map((match) => match[1]!));
+  return Object.freeze([...prompt.matchAll(REQUEST_MARKER)].map((match) => match[1]));
 }
 
 /**
@@ -123,7 +123,7 @@ function sessionBindings(context: ClaudeRunContext): BindingResult<readonly Sess
 /** The one binding that issued `requestId`; none or several is a fault. */
 function bindingIssuing(bindings: readonly SessionRunBinding[], requestId: string): BindingResult<ClaudeRun> {
   const matches = bindings.filter((binding) => (binding.requestIds as readonly string[]).includes(requestId));
-  if (matches.length === 1) return ok(Object.freeze({ runsRoot: matches[0]!.runsRoot, runDirectory: matches[0]!.runDirectory }));
+  if (matches.length === 1) return ok(Object.freeze({ runsRoot: matches[0].runsRoot, runDirectory: matches[0].runDirectory }));
   return failed(matches.length === 0
     ? `no Claude Code session run binding contains issued request ${requestId}`
     : `multiple Claude Code session run bindings contain issued request ${requestId}`);
@@ -203,7 +203,7 @@ export function resolveClaudeStopRun(
     return failed(`Claude agent ${nativeId} is correlated in multiple session-bound runs`);
   }
   if (owners.length === 1) {
-    return ok(bound({ runsRoot: owners[0]!.runsRoot, runDirectory: owners[0]!.runDirectory }));
+    return ok(bound({ runsRoot: owners[0].runsRoot, runDirectory: owners[0].runDirectory }));
   }
 
   const prompt = spawnPrompt();
@@ -213,8 +213,8 @@ export function resolveClaudeStopRun(
   if (markers.length !== 1) {
     return failed("Claude orchestration prompt must carry exactly one LOOM_REQUEST_ID marker");
   }
-  const run = bindingIssuing(bindings.value, markers[0]!);
-  return run.ok ? ok(Object.freeze({ kind: "uncorrelated" as const, run: run.value, requestId: markers[0]! })) : run;
+  const run = bindingIssuing(bindings.value, markers[0]);
+  return run.ok ? ok(Object.freeze({ kind: "uncorrelated" as const, run: run.value, requestId: markers[0] })) : run;
 }
 
 /**

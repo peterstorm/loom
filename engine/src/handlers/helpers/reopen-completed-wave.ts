@@ -137,18 +137,21 @@ export function deriveWaveReopeningProof(
 
   const expected = new Map<string, string>();
   for (const [index, task] of waveTasks.entries()) {
-    const entries = authorities[index]!;
-    const packet = entries[0]!;
+    const entries = authorities[index];
+    const packet = entries[0];
     const declared = task.file_list ?? [];
-    if (declared.length !== packet.task!.declaredFiles.length ||
-        declared.some((path, pathIndex) => path !== packet.task!.declaredFiles[pathIndex])) {
+    if (declared.length !== packet.task.declaredFiles.length ||
+        declared.some((path, pathIndex) => path !== packet.task.declaredFiles[pathIndex])) {
       throw new Error(`Task ${task.id} current declared scope differs from the immutable Review Packet scope`);
     }
-    if (entries.some((candidate) => candidate.taskRun!.packetId !== packet.taskRun!.packetId ||
-        candidate.taskRun!.workspaceHeadSha !== packet.taskRun!.workspaceHeadSha)) {
+    if (entries.some((candidate) => candidate.taskRun.packetId !== packet.taskRun.packetId ||
+        candidate.taskRun.workspaceHeadSha !== packet.taskRun.workspaceHeadSha)) {
       throw new Error(`Task ${task.id} has contradictory immutable Review Packet workspace authorities`);
     }
-    expected.set(task.id, packet.taskRun!.workspaceHeadSha!);
+    if (packet.taskRun.workspaceHeadSha === undefined) {
+      throw new Error(`Task ${task.id} immutable Review Packet records no workspace head`);
+    }
+    expected.set(task.id, packet.taskRun.workspaceHeadSha);
   }
   const observed = observeWorkspace(waveTasks);
   const observations = new Map(observed.map((observation) => [observation.taskId, observation.headSha]));

@@ -69,7 +69,7 @@ import { realPhaseOrderDeps } from "../engine/src/handlers/pre-tool-use/validate
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 import { admitPiSpawnBatch } from "../engine/src/core/spawn-admission";
 
-import { taskGraphPath, subagentDir, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
+import { taskGraphPath, subagentDir, guardedLocations, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
 import { currentOrchestrationStatus } from "../engine/src/handlers/helpers/orchestration";
@@ -81,7 +81,7 @@ import { piOperatorNoteSink, piPostEdit } from "../engine/src/handlers/pi-adapte
 import { lintFile } from "../engine/src/linter/index";
 import { typeDiagnosticsAdvisory } from "../engine/src/handlers/type-diagnostics-runner";
 import { publishLoomReviewAuthorityBridge } from "../engine/src/handlers/helpers/programs/review-authority-bridge";
-import { assertAnchoredFilesystemPlatformSupported } from "../engine/src/orchestration/no-follow-fs";
+import { assertAnchoredFilesystemPlatformSupported } from "../engine/src/utils/no-follow-fs";
 import { materializePiResources } from "./resources";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
 import { buildPiRoutingContext } from "../engine/src/utils/model-routing-context";
@@ -333,7 +333,7 @@ export default function (
     // Fail CLOSED on a crashed guard: an uncaught throw in this chain has
     // undefined polarity in pi (whether the tool proceeds is the harness's
     // choice) — a guard that dies must block, loudly naming itself, or a
-    // crash in e.g. guardStateFile silently waves state-file writes through.
+    // crash in e.g. guardStateFileDecision silently waves state-file writes through.
     let currentGuard = "session-id";
     try {
       // Before ANY guard reads the parent's route: Pi exports its model once at
@@ -406,7 +406,7 @@ export default function (
         if (command === null) {
           result = { kind: "block", message: "BLOCKED: malformed Pi bash input while the Loom state-file guard is active." };
         } else if (graphIsActive) {
-          result = guardStateFileDecision(command);
+          result = guardStateFileDecision(command, guardedLocations());
         }
         // Call-start stamp, under THIS (child) session: the evidence
         // recorder's report discovery reads it there to prove an artifact

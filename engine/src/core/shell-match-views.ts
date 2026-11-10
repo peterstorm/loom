@@ -47,7 +47,7 @@ const MAX_BRACE_VIEWS = 256;
 function sequenceOptions(content: string): string[] | null {
   const seq = content.match(/^([A-Za-z]|[+-]?\d+)\.\.([A-Za-z]|[+-]?\d+)(?:\.\.([+-]?\d+))?$/);
   if (seq === null) return null;
-  const first = seq[1]!, second = seq[2]!, stepText = seq[3];
+  const first = seq[1], second = seq[2], stepText = seq[3];
   const firstIsAlpha = /^[A-Za-z]$/.test(first);
   const secondIsAlpha = /^[A-Za-z]$/.test(second);
   if (firstIsAlpha !== secondIsAlpha) return null; // `{a..10..2}` stays literal in bash
@@ -138,9 +138,9 @@ function firstBraceGroup(text: string): BraceGroup | null {
 export function expandBraces(text: string): string[] | null {
   const results: string[] = [];
   const stack: string[] = [text];
-  while (stack.length > 0) {
-    if (results.length + stack.length > MAX_BRACE_VIEWS) return null;
-    const cur = stack.pop()!;
+  for (let cur = stack.pop(); cur !== undefined; cur = stack.pop()) {
+    // `cur` has left the stack: it still counts toward the bound.
+    if (results.length + stack.length + 1 > MAX_BRACE_VIEWS) return null;
     const group = firstBraceGroup(cur);
     if (group === null) { results.push(cur); continue; }
     for (const opt of group.options) {
@@ -331,11 +331,10 @@ export function knownWordOutput(context: SubstitutionContext): string | null {
  */
 export function referencesPattern(
   text: string,
-  pattern: () => RegExp,
-  dirs: () => readonly (readonly string[])[],
+  pattern: RegExp,
+  dirs: readonly (readonly string[])[],
   policy: LeadingDotPolicy,
 ): boolean {
-  const exemplars = dirs();
   const blanked = blankSubstitutions(text);
   const completed = wildcardSubstitutions(text);
   // Reveal-monotonic bases, deduped: substitutions LITERAL vs EMPTY vs WILDCARD,
@@ -356,9 +355,9 @@ export function referencesPattern(
       // → `/tmp/claude-subagents`); reveal it so a doubled slash can't hide the
       // guarded dir literal. Reveal-monotonic — only ever joins path parts.
       const view = collapseSingleCharClass(raw).replace(/\/{2,}/g, "/");
-      if (pattern().test(view)) return true;
+      if (pattern.test(view)) return true;
       for (const token of view.split(/\s+/)) {
-        if (tokenGlobHitsGuardedDir(token, exemplars, policy)) return true;
+        if (tokenGlobHitsGuardedDir(token, dirs, policy)) return true;
       }
     }
   }

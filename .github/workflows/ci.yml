@@ -17,7 +17,7 @@ jobs:
       # diagnosis.
       fail-fast: false
       # macOS exists for a reason the Linux job can never cover: the
-      # anchored no-follow filesystem layer (engine/src/orchestration/
+      # anchored no-follow filesystem layer (engine/src/utils/
       # no-follow-fs.ts) takes a darwin branch (O_NOFOLLOW_ANY-proven real
       # path) that Linux CI never executes. Pin the newest standard macOS
       # runner; it is free on public repositories.

@@ -10,8 +10,8 @@
  */
 
 import type { ProgrammaticRule } from "../types";
-import { handler as crossBoundaryHandler, DEFAULT_BOUNDARIES } from "./no-cross-boundary-imports";
-import { handler as ioInPureHandler, DEFAULT_PURE_MODULES } from "./no-io-in-pure-modules";
+import { handler as crossBoundaryHandler, DEFAULT_BOUNDARIES, type BoundaryOptions } from "./no-cross-boundary-imports";
+import { handler as ioInPureHandler, DEFAULT_PURITY_SCOPE, type PurityScope } from "./no-io-in-pure-modules";
 import { handler as maxFunctionLinesHandler, DEFAULT_MAX_LINES, DEFAULT_EXCLUDE_PATTERNS } from "./max-function-lines";
 import { handler as fugueGeneratedIntegrityHandler } from "./fugue-generated-integrity";
 import {
@@ -33,9 +33,31 @@ import {
 import type { BaselineOwner } from "./baseline";
 import { type ProgrammaticConfig, EMPTY_CONFIG } from "./config";
 
+/** Every TypeScript module spelling: the totality rules need a type system
+ *  (a `never` binding proves nothing in JavaScript). */
+const TYPESCRIPT_EXTENSIONS: readonly string[] = Object.freeze([".ts", ".tsx", ".mts", ".cts"]);
+
+/** TypeScript and JavaScript in every module spelling: the rules that read
+ *  syntax both languages share — imports, I/O globals, function bodies,
+ *  ternaries, loops. */
+const SCRIPT_EXTENSIONS: readonly string[] = Object.freeze([...TYPESCRIPT_EXTENSIONS, ".js", ".jsx", ".mjs", ".cjs"]);
+
 /** The files both totality rules read, owned once for the rules and their
  *  baseline owners. */
-const TOTALITY_EXTENSIONS: readonly string[] = Object.freeze([".ts", ".tsx"]);
+const TOTALITY_EXTENSIONS: readonly string[] = TYPESCRIPT_EXTENSIONS;
+
+/** The boundary rule's options for one project. */
+export function boundaryOptions(config: ProgrammaticConfig, projectRoot: string | null): BoundaryOptions {
+  return Object.freeze({ requireGovernance: config.requireGovernance ?? [], projectRoot });
+}
+
+/** The purity rule's scope for one project: its roots and declared shells. */
+export function purityScope(config: ProgrammaticConfig): PurityScope {
+  return Object.freeze({
+    pureModules: config.pureModules ?? DEFAULT_PURITY_SCOPE.pureModules,
+    impureModules: config.impureModules ?? DEFAULT_PURITY_SCOPE.impureModules,
+  });
+}
 
 /** switch-totality's options for one project — the ONE mapping from config,
  *  shared by the live rule and its staleness detector so the two can never
@@ -101,17 +123,17 @@ export function baselineOwners(config: ProgrammaticConfig, projectRoot: string |
  * The two import-boundary rules. Both run in the "immediate" tier: a forbidden
  * import is refused when it is written.
  */
-function importBoundaryRules(
-  boundaries: NonNullable<ProgrammaticConfig["boundaries"]>,
-  pureModules: NonNullable<ProgrammaticConfig["pureModules"]>,
-): readonly ProgrammaticRule[] {
+function importBoundaryRules(config: ProgrammaticConfig, projectRoot: string | null): readonly ProgrammaticRule[] {
+  const boundaries = config.boundaries ?? DEFAULT_BOUNDARIES;
+  const options = boundaryOptions(config, projectRoot);
+  const scope = purityScope(config);
   return [
     {
       kind: "programmatic",
       name: "no-cross-boundary-imports",
       description: "Enforce bounded context import boundaries — dependency arrows must point inward",
-      extensions: [".ts", ".tsx", ".java"],
-      handler: (content, filePath) => crossBoundaryHandler(content, filePath, boundaries),
+      extensions: [...SCRIPT_EXTENSIONS, ".java"],
+      handler: (content, filePath) => crossBoundaryHandler(content, filePath, boundaries, options),
       tier: "immediate",
       fixHint: "Move this import to the correct layer or inject via a port",
       enabled: true,
@@ -121,8 +143,8 @@ function importBoundaryRules(
       kind: "programmatic",
       name: "no-io-in-pure-modules",
       description: "Disallow I/O operations in functional core modules",
-      extensions: [".ts", ".tsx", ".java"],
-      handler: (content, filePath) => ioInPureHandler(content, filePath, pureModules),
+      extensions: [...SCRIPT_EXTENSIONS, ".java"],
+      handler: (content, filePath) => ioInPureHandler(content, filePath, scope),
       tier: "immediate",
       fixHint: "Extract I/O to the imperative shell or inject via a dependency parameter",
       enabled: true,
@@ -136,7 +158,7 @@ function maxFunctionLinesRule(maxLines: number, excludePatterns: readonly string
     kind: "programmatic",
     name: "max-function-lines",
     description: `Enforce maximum function body length (configured: ${maxLines} lines)`,
-    extensions: [".ts", ".tsx", ".java"],
+    extensions: [...SCRIPT_EXTENSIONS, ".java"],
     handler: (content, filePath) => maxFunctionLinesHandler(content, filePath, maxLines, excludePatterns),
     tier: "full",
     fixHint: "Decompose into smaller functions with single responsibilities",
@@ -199,7 +221,7 @@ function expressionShapeRules(): readonly ProgrammaticRule[] {
       kind: "programmatic",
       name: "no-nested-ternary",
       description: "A ternary whose else-branch opens another ternary — one level is the ceiling",
-      extensions: [".ts", ".tsx"],
+      extensions: SCRIPT_EXTENSIONS,
       handler: (content, filePath) => nestedTernaryHandler(content, filePath),
       tier: "full",
       fixHint: "Use if with early returns, or match(...).exhaustive() when the branches are a discriminated union. Type-level conditionals are exempt.",
@@ -210,7 +232,7 @@ function expressionShapeRules(): readonly ProgrammaticRule[] {
       kind: "programmatic",
       name: "prefer-array-methods",
       description: "A mutable accumulator whose loop only pushes into it is a map/filter written with extra state",
-      extensions: [".ts", ".tsx"],
+      extensions: SCRIPT_EXTENSIONS,
       handler: (content, filePath) => preferArrayMethodsHandler(content, filePath),
       tier: "full",
       fixHint: "Use map/filter/flatMap and delete the mutable binding. Loops with break, continue, return, or await are exempt — the rewrite is not mechanical there.",
@@ -231,7 +253,7 @@ export function createProgrammaticRules(
   projectRoot: string | null = null,
 ): readonly ProgrammaticRule[] {
   return [
-    ...importBoundaryRules(config.boundaries ?? DEFAULT_BOUNDARIES, config.pureModules ?? DEFAULT_PURE_MODULES),
+    ...importBoundaryRules(config, projectRoot),
     maxFunctionLinesRule(
       config.maxFunctionLines ?? DEFAULT_MAX_LINES,
       config.excludeFromMaxLines ?? DEFAULT_EXCLUDE_PATTERNS,

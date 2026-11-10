@@ -45,7 +45,7 @@ export function argumentValues(args: readonly string[], flag: string): readonly 
 export function unconsumedValueArguments(args: readonly string[], flags: ReadonlySet<string>): readonly string[] {
   const unconsumed: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
-    const token = args[index]!;
+    const token = args[index];
     if (!flags.has(token)) {
       unconsumed.push(token);
       continue;

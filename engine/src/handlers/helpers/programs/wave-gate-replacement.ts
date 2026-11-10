@@ -52,7 +52,7 @@ async function exhaustedWaveReviewerAttempts(
       if (attempts.length !== 1) {
         return { ok: false, message: `Wave Gate restart requires exactly one attempt-2 authority for ${task.id}/${slot.agent}` };
       }
-      const authority = attempts[0]!;
+      const authority = attempts[0];
       const attemptOne = issued.value.find((candidate) => candidate.program === "wave-gate" && candidate.attempt === 1 &&
         candidate.slotId === slot.slot_id && candidate.role === slot.agent);
       if (attemptOne === undefined) return { ok: false, message: `Wave Gate restart lacks attempt-1 authority for ${task.id}/${slot.agent}` };
@@ -128,7 +128,7 @@ export async function restartWaveGateFacade(
     }
     let prepared: WaveGateRestartPreparation;
     if (alreadyRestarted) {
-      const active = before.active_wave_gate!;
+      const active = before.active_wave_gate;
       const stored = storedProgram;
       if (stored === null || stored.kind !== "wave-gate" || active.wave !== stored.input.wave ||
           active.authorityDigest !== stored.authorityDigest || active.terminalOutcome !== null) {

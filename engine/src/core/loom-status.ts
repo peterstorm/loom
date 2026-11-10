@@ -39,6 +39,8 @@ import {
   type ExternalAction,
   type NonEmpty,
   type OrchestrationRunId,
+  nonEmpty,
+  nonEmptyOf,
 } from "./orchestration-contract";
 import type { GateDeps } from "./wave-gate-checks";
 import { deriveWaveCompletionSuiteReadiness } from "./wave-completion-suite-readiness";
@@ -320,7 +322,8 @@ export function deriveNextAction(snapshot: WaveReadinessSnapshot): NextActionDec
   }
   return canonicalRecord({
     action,
-    reasons: Object.freeze([...snapshot.reasons, ...actionReasons]) as NonEmpty<StatusReason>,
+    // actionReasons is non-empty, so the concatenation is too.
+    reasons: nonEmpty([...snapshot.reasons, ...actionReasons]) ?? actionReasons,
   });
 }
 
@@ -335,7 +338,8 @@ function unavailableStatus(message: string): LoomStatus {
 
 /** Fail-closed status retains the complete fact inventory; no zero/ready value is fabricated. */
 function deriveUnavailableLoomStatus(rawReasons: NonEmpty<StatusReason>): LoomStatus {
-  const reasons = Object.freeze([...rawReasons]) as NonEmpty<StatusReason>;
+  const [firstReason, ...otherReasons] = rawReasons;
+  const reasons = nonEmptyOf(firstReason, ...otherReasons);
   const unavailable = (): Readonly<{ kind: "unavailable"; reasons: NonEmpty<StatusReason> }> =>
     canonicalRecord({ kind: "unavailable", reasons });
   return canonicalRecord({
@@ -390,7 +394,7 @@ function deriveNonExecuteLoomStatus(
       value: canonicalRecord({
         kind: "not-needed",
         findingIds: Object.freeze([]) as readonly [],
-        reasons: Object.freeze(["there is no active execute Wave"]) as NonEmpty<string>,
+        reasons: nonEmptyOf("there is no active execute Wave"),
       }),
     }),
     waveCompletionSuiteReadiness: canonicalRecord({
@@ -401,7 +405,7 @@ function deriveNonExecuteLoomStatus(
       kind: "known",
       value: canonicalRecord({
         kind: "ineligible",
-        failedPrerequisites: Object.freeze([noWaveReason.message]) as NonEmpty<string>,
+        failedPrerequisites: nonEmptyOf(noWaveReason.message),
       }),
     }),
   });
@@ -410,7 +414,7 @@ function deriveNonExecuteLoomStatus(
     facts,
     next: canonicalRecord({
       action: invalidAuthorityBlockedAction(statusRunId, noWaveReason.message),
-      reasons: Object.freeze([noWaveReason]) as NonEmpty<StatusReason>,
+      reasons: nonEmptyOf(noWaveReason),
     }),
   });
 }
@@ -462,11 +466,11 @@ function persistedTerminalBlockedStatus(
     schemaVersion: 1,
     facts: waveScopedStatusFacts(graph, registration.wave, canonicalRecord({
       kind: "ineligible",
-      failedPrerequisites: Object.freeze([registration.terminalOutcome.diagnostic.message]) as NonEmpty<string>,
+      failedPrerequisites: nonEmptyOf(registration.terminalOutcome.diagnostic.message),
     }), currentWorkspace, currentResult),
     next: canonicalRecord({
       action: built.value,
-      reasons: Object.freeze([blockedReason]) as NonEmpty<StatusReason>,
+      reasons: nonEmptyOf(blockedReason),
     }),
   });
 }
@@ -519,7 +523,7 @@ function committedTerminalStatus(
     ),
     next: canonicalRecord({
       action: done.value,
-      reasons: Object.freeze([completeReason, ...finishedReasons]) as NonEmpty<StatusReason>,
+      reasons: nonEmptyOf(completeReason, ...finishedReasons),
     }),
   });
 }
@@ -596,11 +600,12 @@ function unstartedWaveStatus(
     schemaVersion: 1,
     facts: waveScopedStatusFacts(graph, wave, canonicalRecord({
       kind: "ineligible",
-      failedPrerequisites: Object.freeze([message]) as NonEmpty<string>,
+      failedPrerequisites: nonEmptyOf(message),
     }), deps.currentWaveWorkspace, deps.currentWaveCompletionResult),
     next: canonicalRecord({
       action: waveImplementationAction(message, recovery),
-      reasons: Object.freeze(reasons) as NonEmpty<StatusReason>,
+      // The window reason above is always present; the fallback is that same reason.
+      reasons: nonEmpty(reasons) ?? nonEmptyOf(statusReason(windowReasonKind(recovery), message)),
     }),
   });
 }
@@ -748,7 +753,7 @@ export function withOwnerVerificationRemedies(status: LoomStatus): LoomStatus {
     ...status,
     next: canonicalRecord({
       ...status.next,
-      reasons: Object.freeze([...status.next.reasons, ...reasons]) as NonEmpty<StatusReason>,
+      reasons: nonEmpty([...status.next.reasons, ...reasons]) ?? status.next.reasons,
     }),
   });
 }

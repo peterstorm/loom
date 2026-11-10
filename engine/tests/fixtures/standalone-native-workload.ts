@@ -65,11 +65,11 @@ const paths = Object.freeze([
   "engine/src/handlers/helpers/programs/standalone-successor-source.ts",
   "engine/src/handlers/helpers/programs/standalone.ts",
   "engine/src/orchestration/harness-capture-runtime.ts",
-  "engine/src/orchestration/no-follow-fs.ts",
   "engine/src/orchestration/remediation-candidate.ts",
   "engine/src/orchestration/run-directory-handle.ts",
   "engine/src/orchestration/session-run-bindings.ts",
   "engine/src/orchestration/standalone-panel-context.ts",
+  "engine/src/utils/no-follow-fs.ts",
   "pi/transcript-adapter.ts",
   "scripts/read-context-packet.ts",
 ]);

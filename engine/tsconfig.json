@@ -22,5 +22,20 @@
       "fast-check": ["./node_modules/fast-check"]
     }
   },
-  "include": ["src", "tests", "../pi", "../calibration", "../scripts/run-model-calibration.ts", "../scripts/read-context-packet.ts", "../scripts/read-context-section.ts", "../scripts/ledger-epoch.ts", "../scripts/route-stub.ts", "../scripts/smoke-orchestration-facades.ts", "../scripts/lint-project.ts", "../scripts/stamp-wire-contract.ts", "../probes/emission-qualification/*.mts", "../probes/emission-qualification/*.test.ts", "scripts/typecheck.ts", "scripts/bun-version-pin.ts", "vitest.config.ts", "vitest-worker-budget.ts"]
+  // Everything TypeScript in the repository typechecks, by glob — a new
+  // script, probe or Pi module is a compiler root the moment it exists, with
+  // no per-file entry to forget. The probes' .mjs drivers are JavaScript:
+  // linted (scripts/lint-project.ts), typed at their seam by
+  // probes/emission-qualification/probe-analysis.d.mts, not compiled here.
+  "include": [
+    "src",
+    "tests",
+    "scripts/**/*.ts",
+    "*.ts",
+    "../pi",
+    "../calibration",
+    "../scripts/**/*.ts",
+    "../probes/**/*.ts",
+    "../probes/**/*.mts"
+  ]
 }

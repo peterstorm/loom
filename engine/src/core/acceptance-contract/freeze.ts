@@ -4,7 +4,7 @@
  */
 
 import { canonicalStructuralEquals, type ArtifactDigest, type DomainResult, type NonEmpty } from "../orchestration-contract";
-import { err, freeze, nonEmpty, ok } from "./kernel";
+import { allOk, err, freeze, mapNonEmpty, nonEmpty, ok } from "./kernel";
 import type { AcceptanceContract, AcceptanceFreeze, FrozenPathDigest } from "./model";
 import { frozenPaths } from "./tasks";
 import { observedRoster, recordsRoster, type AcceptanceExpectation, type AcceptanceReportFacts } from "./gate";
@@ -77,17 +77,12 @@ export function frozenPathDigests(
   contract: Pick<AcceptanceContract, "types" | "acceptance">,
   observations: FrozenPathObservations,
 ): DomainResult<NonEmpty<FrozenPathDigest>, NonEmpty<FrozenPathProblem>> {
-  const paths = frozenPaths(contract);
-  const digests: FrozenPathDigest[] = [];
-  const problems: FrozenPathProblem[] = [];
-  for (const path of paths) {
+  return allOk(mapNonEmpty(frozenPaths(contract), (path): DomainResult<FrozenPathDigest, FrozenPathProblem> => {
     const observation = observations.get(path);
-    if (observation === undefined) problems.push(freeze({ kind: "not-observed", path }));
-    else if (observation.kind === "unreadable") problems.push(freeze({ kind: "unreadable", path, reason: observation.reason }));
-    else digests.push(freeze({ path, sha256: observation.sha256 }));
-  }
-  const failed = nonEmpty(problems);
-  return failed === null ? ok(nonEmpty(digests)!) : err(failed);
+    if (observation === undefined) return err(freeze({ kind: "not-observed", path }));
+    if (observation.kind === "unreadable") return err(freeze({ kind: "unreadable", path, reason: observation.reason }));
+    return ok(freeze({ path, sha256: observation.sha256 }));
+  }));
 }
 
 /** One operator message naming every drifted frozen path. */

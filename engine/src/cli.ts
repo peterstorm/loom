@@ -15,7 +15,7 @@ import { hookSuccessStdout, nonEmptyMessage } from "./types";
 import { resolveInitialState } from "./phase-init";
 import { KNOWN_HANDLERS, failureExitCode, piRuntimeHandshakeRequired, routeConsumesStdin } from "./handler-routes";
 import { captureLoomRuntimeIdentity, piCliMutationCompatibility } from "./runtime-compatibility";
-import { assertAnchoredFilesystemPlatformSupported } from "./orchestration/no-follow-fs";
+import { assertAnchoredFilesystemPlatformSupported } from "./utils/no-follow-fs";
 
 /**
  * Failure polarity for the top-level catch, derived from argv BEFORE

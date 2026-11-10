@@ -23,7 +23,7 @@ import { readJavaTypesSurface } from "../core/skeleton/java-surface";
 import { skeletonLanguageOf } from "../core/skeleton/language";
 import { readTsTypesSurface, typesImportSpecifier } from "../core/skeleton/ts-surface";
 import type { FrozenSurface, ResolutionProblem, SpecifierStyle, SurfaceProblem } from "../core/skeleton/types";
-import { readRunBytesNoFollow, resolveBaseDirectory } from "./no-follow-fs";
+import { readRunBytesNoFollow, resolveBaseDirectory } from "../utils/no-follow-fs";
 import { describeCause } from "../utils/describe-cause";
 
 export type FrozenSurfaceMode = "stamped" | "current";

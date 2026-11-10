@@ -4,16 +4,89 @@ import {
   resolveImportPath,
   checkBoundaryViolation,
   underPrefix,
-  handler,
+  handler as boundaryHandler,
   toRepositoryRelative,
+  ungovernedRoot,
   DEFAULT_BOUNDARIES,
+  type BoundaryOptions,
+  type BoundaryRule,
 } from "../../../src/linter/programmatic/no-cross-boundary-imports";
+import { LOOM_BOUNDARIES } from "../loom-project-config";
+
+/** The rule under Loom's own boundaries (config.json) unless a test passes its own. */
+const handler = (
+  content: string,
+  filePath: string,
+  boundaries: readonly BoundaryRule[] = LOOM_BOUNDARIES,
+  options?: BoundaryOptions,
+) => boundaryHandler(content, filePath, boundaries, options);
+
+describe("no-cross-boundary-imports: the generic default and governance", () => {
+  it("ships no boundaries: a project with no config is governed by nothing", () => {
+    expect(DEFAULT_BOUNDARIES).toEqual([]);
+    expect(boundaryHandler(`import { x } from "../infra/db";\n`, "src/domain/order.ts")).toEqual([]);
+  });
+
+  const domain: readonly BoundaryRule[] = [{ module: "src/domain/", allow: ["src/domain/"], deny: [] }];
+  const governed: BoundaryOptions = { requireGovernance: ["src/"], projectRoot: null };
+
+  it("under requireGovernance, a file no boundary names is itself a violation", () => {
+    const violations = boundaryHandler("export const x = 1;\n", "src/api/routes.ts", domain, governed);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]?.fixHint).toContain("Ungoverned module");
+    expect(violations[0]?.fixHint).toContain('"src/api/routes.ts" lies under "src/"');
+  });
+
+  it("governs nothing outside its roots, and nothing a boundary already names", () => {
+    expect(boundaryHandler("export const x = 1;\n", "scripts/tool.ts", domain, governed)).toEqual([]);
+    expect(boundaryHandler("export const x = 1;\n", "src/domain/order.ts", domain, governed)).toEqual([]);
+    expect(ungovernedRoot("src/domain/order.ts", domain, ["src/"])).toBeNull();
+    expect(ungovernedRoot("src/api/routes.ts", domain, ["src/"])).toBe("src/");
+  });
+
+  it("relativizes an absolute path against the project root, so a root-relative governance prefix matches", () => {
+    const options: BoundaryOptions = { requireGovernance: ["src/"], projectRoot: "/work/shop" };
+    expect(boundaryHandler("export const x = 1;\n", "/work/shop/src/api/routes.ts", domain, options)).toHaveLength(1);
+    expect(boundaryHandler(`import { db } from "../infra/db";\n`, "/work/shop/src/domain/order.ts", domain, options)).toHaveLength(1);
+    expect(boundaryHandler("export const x = 1;\n", "/work/shop/tools/x.ts", domain, options)).toEqual([]);
+  });
+
+  it("Loom governs every engine/src directory, and every top-level engine/src file", () => {
+    for (const file of [
+      "engine/src/handlers/helpers/orchestration.ts",
+      "engine/src/machine/ledger.ts",
+      "engine/src/utils/git.ts",
+      "engine/src/cli.ts",
+      "engine/src/config.ts",
+      "engine/src/state-manager.ts",
+      "engine/src/types.ts",
+    ]) expect(ungovernedRoot(file, LOOM_BOUNDARIES, ["engine/src/"]), file).toBeNull();
+  });
+
+  it("Loom's boundaries point inward: no inner layer may import a handler or the CLI", () => {
+    for (const file of ["engine/src/core/x.ts", "engine/src/machine/x.ts", "engine/src/utils/x.ts", "engine/src/orchestration/x.ts", "engine/src/parsers/x.ts", "engine/src/linter/x.ts"]) {
+      expect(checkBoundaryViolation(file, "engine/src/handlers/helpers/orchestration", LOOM_BOUNDARIES), file).not.toBeNull();
+      expect(checkBoundaryViolation(file, "engine/src/cli", LOOM_BOUNDARIES), file).not.toBeNull();
+    }
+    expect(checkBoundaryViolation("engine/src/handlers/x.ts", "engine/src/cli", LOOM_BOUNDARIES)).toContain("must not import");
+    expect(checkBoundaryViolation("engine/src/utils/x.ts", "engine/src/orchestration/git-remediation", LOOM_BOUNDARIES)).not.toBeNull();
+    expect(checkBoundaryViolation("engine/src/handlers/x.ts", "engine/src/orchestration/git-remediation", LOOM_BOUNDARIES)).toBeNull();
+  });
+
+  it("every Loom capability grant carries its reason", () => {
+    for (const boundary of LOOM_BOUNDARIES) {
+      for (const [file, grant] of [...Object.entries(boundary.perFileAllow ?? {}), ...Object.entries(boundary.perFileExactAllow ?? {})]) {
+        expect(grant.reason.trim().length, `${boundary.module} → ${file}`).toBeGreaterThan(0);
+      }
+    }
+  });
+});
 
 describe("no-cross-boundary-imports", () => {
   it("declares the audited SAX dependency for only the structured report parser", () => {
     expect(handler('import { SaxesParser } from "saxes";', "engine/src/core/structured-test-report.ts")).toEqual([]);
     expect(handler('import { SaxesParser } from "saxes";', "engine/src/core/defect-family-accounting.ts")).toHaveLength(1);
-    expect(DEFAULT_BOUNDARIES.find(({ module }) => module === "engine/src/core/")?.perFileAllow?.["engine/src/core/structured-test-report.ts"]).toEqual(["saxes"]);
+    expect(LOOM_BOUNDARIES.find(({ module }) => module === "engine/src/core/")?.perFileAllow?.["engine/src/core/structured-test-report.ts"]?.allow).toEqual(["saxes"]);
     // Exact package entry/subpath rejection is exercised by machine-purity's
     // executable closure gate; this older boundary policy matches prefixes.
   });
@@ -33,7 +106,7 @@ describe("no-cross-boundary-imports", () => {
   });
   it("exact per-file grants cannot override explicit denials", () => {
     expect(checkBoundaryViolation("src/domain/a.ts", "pkg", [{
-      module: "src/domain/", allow: [], deny: ["pkg"], perFileExactAllow: { "src/domain/a.ts": ["pkg"] },
+      module: "src/domain/", allow: [], deny: ["pkg"], perFileExactAllow: { "src/domain/a.ts": { allow: ["pkg"], reason: "audited entrypoint" } },
     }])).toContain("must not import");
   });
   describe("underPrefix", () => {
@@ -142,7 +215,7 @@ describe("no-cross-boundary-imports", () => {
       const result = checkBoundaryViolation(
         "engine/src/linter/loader.ts",
         "engine/src/linter/types",
-        DEFAULT_BOUNDARIES
+        LOOM_BOUNDARIES
       );
       expect(result).toBeNull();
     });
@@ -151,7 +224,7 @@ describe("no-cross-boundary-imports", () => {
       const result = checkBoundaryViolation(
         "engine/src/linter/loader.ts",
         "engine/src/core/validate-phase-order",
-        DEFAULT_BOUNDARIES
+        LOOM_BOUNDARIES
       );
       expect(result).not.toBeNull();
       expect(result).toContain("may only import from");
@@ -159,12 +232,12 @@ describe("no-cross-boundary-imports", () => {
       expect(checkBoundaryViolation(
         "engine/src/linter/programmatic/config.ts",
         "engine/src/core/test-file-classification",
-        DEFAULT_BOUNDARIES
+        LOOM_BOUNDARIES
       )).toBeNull();
       expect(checkBoundaryViolation(
         "engine/src/linter/programmatic/config.ts",
         "engine/src/core/test-file-classification-extra",
-        DEFAULT_BOUNDARIES
+        LOOM_BOUNDARIES
       )).not.toBeNull();
     });
 
@@ -172,7 +245,7 @@ describe("no-cross-boundary-imports", () => {
       const result = checkBoundaryViolation(
         "engine/src/linter/executor.ts",
         "engine/src/handlers/pi-adapter",
-        DEFAULT_BOUNDARIES
+        LOOM_BOUNDARIES
       );
       expect(result).not.toBeNull();
     });
@@ -181,7 +254,7 @@ describe("no-cross-boundary-imports", () => {
       const result = checkBoundaryViolation(
         "engine/src/core/validate-phase-order.ts",
         "engine/src/linter/types",
-        DEFAULT_BOUNDARIES
+        LOOM_BOUNDARIES
       );
       expect(result).not.toBeNull();
     });
@@ -190,25 +263,29 @@ describe("no-cross-boundary-imports", () => {
       const result = checkBoundaryViolation(
         "engine/src/parsers/parse-transcript.ts",
         "engine/src/handlers/dispatch",
-        DEFAULT_BOUNDARIES
+        LOOM_BOUNDARIES
       );
       expect(result).not.toBeNull();
     });
 
     it("allows files outside boundary rules", () => {
       const result = checkBoundaryViolation(
-        "engine/src/handlers/pi-adapter.ts",
+        "scripts/lint-project.ts",
         "engine/src/linter/index",
-        DEFAULT_BOUNDARIES
+        LOOM_BOUNDARIES
       );
-      expect(result).toBeNull(); // handlers have no boundary rule — allowed
+      expect(result).toBeNull(); // scripts/ has no boundary rule and no governance root — allowed
+    });
+
+    it("allows a handler to import the linter's entry point, through the handlers boundary", () => {
+      expect(checkBoundaryViolation("engine/src/handlers/pi-adapter.ts", "engine/src/linter/index", LOOM_BOUNDARIES)).toBeNull();
     });
 
     it("allows node: imports in linter", () => {
       const result = checkBoundaryViolation(
         "engine/src/linter/loader.ts",
         "node:fs",
-        DEFAULT_BOUNDARIES
+        LOOM_BOUNDARIES
       );
       expect(result).toBeNull();
     });
@@ -218,13 +295,13 @@ describe("no-cross-boundary-imports", () => {
       const granted = checkBoundaryViolation(
         "engine/src/core/harness-resources.ts",
         "node:path",
-        DEFAULT_BOUNDARIES
+        LOOM_BOUNDARIES
       );
       expect(granted).toBeNull();
       const grantedHash = checkBoundaryViolation(
         "engine/src/core/digest.ts",
         "node:crypto",
-        DEFAULT_BOUNDARIES
+        LOOM_BOUNDARIES
       );
       expect(grantedHash).toBeNull();
       // A listed module reaching a NON-granted subpath is still refused:
@@ -232,7 +309,7 @@ describe("no-cross-boundary-imports", () => {
       const ungranted = checkBoundaryViolation(
         "engine/src/core/harness-resources.ts",
         "node:fs",
-        DEFAULT_BOUNDARIES
+        LOOM_BOUNDARIES
       );
       expect(ungranted).not.toBeNull();
       expect(ungranted).toContain("may only import from");
@@ -246,7 +323,7 @@ describe("no-cross-boundary-imports", () => {
         "engine/src/core/block-direct-edits.ts",
       ]) {
         expect(
-          checkBoundaryViolation(withdrawnFrom, "node:fs", DEFAULT_BOUNDARIES),
+          checkBoundaryViolation(withdrawnFrom, "node:fs", LOOM_BOUNDARIES),
           withdrawnFrom,
         ).not.toBeNull();
       }
@@ -255,7 +332,7 @@ describe("no-cross-boundary-imports", () => {
       const unlisted = checkBoundaryViolation(
         "engine/src/core/findings.ts",
         "node:fs",
-        DEFAULT_BOUNDARIES
+        LOOM_BOUNDARIES
       );
       expect(unlisted).not.toBeNull();
       expect(unlisted).toContain("per-module only");
@@ -286,7 +363,7 @@ describe("no-cross-boundary-imports", () => {
       const violating = handler(
         `import { parseTaskGraph } from "../state-manager";\n`,
         "engine/src/core/example.ts",
-        DEFAULT_BOUNDARIES,
+        LOOM_BOUNDARIES,
       );
       expect(violating).toHaveLength(1);
       expect(violating[0]?.rule).toBe("no-cross-boundary-imports");
@@ -295,7 +372,7 @@ describe("no-cross-boundary-imports", () => {
       const clean = handler(
         `import { canonicalRecord } from "./orchestration-contract";\n`,
         "engine/src/core/example.ts",
-        DEFAULT_BOUNDARIES,
+        LOOM_BOUNDARIES,
       );
       expect(clean).toEqual([]);
     });
@@ -451,7 +528,7 @@ describe("no-cross-boundary-imports (extended)", () => {
       const violations = handler(
         content,
         "/home/dev/checkout/engine/src/core/thing.ts",
-        DEFAULT_BOUNDARIES,
+        LOOM_BOUNDARIES,
       );
 
       expect(violations).toHaveLength(1);
@@ -459,8 +536,8 @@ describe("no-cross-boundary-imports (extended)", () => {
     });
 
     it("agrees with the relative form for the same file", () => {
-      const absolute = handler(content, "/home/dev/checkout/engine/src/core/thing.ts", DEFAULT_BOUNDARIES);
-      const relative = handler(content, "engine/src/core/thing.ts", DEFAULT_BOUNDARIES);
+      const absolute = handler(content, "/home/dev/checkout/engine/src/core/thing.ts", LOOM_BOUNDARIES);
+      const relative = handler(content, "engine/src/core/thing.ts", LOOM_BOUNDARIES);
 
       expect(absolute).toHaveLength(relative.length);
     });
@@ -469,7 +546,7 @@ describe("no-cross-boundary-imports (extended)", () => {
       const violations = handler(
         `import { parseSessionId } from "./block-direct-edits";`,
         "/home/dev/checkout/engine/src/core/thing.ts",
-        DEFAULT_BOUNDARIES,
+        LOOM_BOUNDARIES,
       );
 
       expect(violations).toHaveLength(0);
@@ -477,7 +554,7 @@ describe("no-cross-boundary-imports (extended)", () => {
 
     describe("toRepositoryRelative", () => {
       it("reduces an absolute path to its repo-relative form", () => {
-        expect(toRepositoryRelative("/home/dev/checkout/engine/src/core/thing.ts"))
+        expect(toRepositoryRelative("/home/dev/checkout/engine/src/core/thing.ts", LOOM_BOUNDARIES))
           .toBe("engine/src/core/thing.ts");
       });
 
@@ -486,12 +563,12 @@ describe("no-cross-boundary-imports (extended)", () => {
       });
 
       it("resolves against the innermost checkout when one is nested in another", () => {
-        expect(toRepositoryRelative("/srv/engine/src/core/checkout/engine/src/core/thing.ts"))
+        expect(toRepositoryRelative("/srv/engine/src/core/checkout/engine/src/core/thing.ts", LOOM_BOUNDARIES))
           .toBe("engine/src/core/thing.ts");
       });
 
       it("returns a path under no boundary unchanged", () => {
-        expect(toRepositoryRelative("/home/dev/checkout/scripts/tool.ts"))
+        expect(toRepositoryRelative("/home/dev/checkout/scripts/tool.ts", LOOM_BOUNDARIES))
           .toBe("/home/dev/checkout/scripts/tool.ts");
       });
     });

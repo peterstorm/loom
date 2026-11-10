@@ -59,7 +59,7 @@ export function requestFrozenDiff(handle: RunDirHandle, request: AgentRequestAut
   const sections = packet.value.fixedContext.filter(({ label }) => label === STANDALONE_FROZEN_DIFF_SECTION);
   if (sections.length !== 1) return { ok: false, error: `context ${request.contextDigest} has no single ${STANDALONE_FROZEN_DIFF_SECTION} section` };
   try {
-    return parseFrozenDiff(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(sections[0]!.bytes))));
+    return parseFrozenDiff(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(sections[0].bytes))));
   } catch (thrown) {
     const cause = boundedThrownCause(thrown, "frozen diff section");
     return { ok: false, error: `frozen diff section is unreadable (${cause.name}: ${cause.message})` };

@@ -21,7 +21,7 @@ import type { ImplementationAttemptAuthority } from "../../core/implementation-c
 import { sha256Bytes } from "../../core/digest";
 import type { DomainResult } from "../../core/orchestration-contract";
 import type { SkeletonRecord } from "../../core/skeleton/types";
-import { resolveBaseDirectory } from "../../orchestration/no-follow-fs";
+import { resolveBaseDirectory } from "../../utils/no-follow-fs";
 import { readRepositoryLeafNoFollow, type RepositoryLeaf } from "../../orchestration/repository-leaf";
 import { captureDeclaredArtifactBaseline } from "../../utils/declared-artifact-snapshot";
 import { changedRepositoryArtifactsSince } from "../../utils/repository-change-baseline";

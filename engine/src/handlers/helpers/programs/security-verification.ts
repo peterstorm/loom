@@ -49,7 +49,7 @@ import {
   type VerificationBrief,
 } from "../../../core/security-verification";
 import { SECURITY_VERIFIER_ROLE, type VerificationVerdict } from "../../../core/security-adjudication";
-import { readRunBytesNoFollow, writeRunBytesExclusiveNoFollow } from "../../../orchestration/no-follow-fs";
+import { readRunBytesNoFollow, writeRunBytesExclusiveNoFollow } from "../../../utils/no-follow-fs";
 import { parseRunDirectoryReference, type RunDirHandle } from "../../../orchestration/run-directory-handle";
 import { readAuditSnapshot, SECURITY_VERIFICATION_RESULT_FILE, verificationRunsRoot, type AuditSnapshot } from "../security-audit-run";
 import { registerSecurityAuditRun } from "../../../orchestration/security-audit-run-registry";

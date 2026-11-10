@@ -164,7 +164,7 @@ function vitestVerdictKind(failed: number, passed: number): RunnerVerdict["kind"
 function latestVitestVerdict(input: string): RunnerVerdict | null {
   const summaries = allMatches(input, /^[ \t]*Tests?[ \t]+(\d+[^\n]*?)[ \t]*$/m)
     .map((match): RunnerVerdict => {
-      const summary = match[1]!;
+      const summary = match[1];
       const body = summary.replace(/[ \t]+\(\d+\)$/, "");
       const parsed = parseVitestSegments(body);
       if (parsed === null) {

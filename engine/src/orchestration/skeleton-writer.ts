@@ -62,7 +62,7 @@ import {
   resolveBaseDirectory,
   writeDirectoryFileAtomicModeNoFollow,
   type AnchoredDirectory,
-} from "./no-follow-fs";
+} from "../utils/no-follow-fs";
 import { describeCause } from "../utils/describe-cause";
 
 /** Why the writer refused a path, before or instead of touching it. */
@@ -206,7 +206,7 @@ function guarded(
     try {
       const parent = openParent(rootDirectory, segments.slice(0, -1));
       try {
-        return effect(parent, segments[segments.length - 1]!);
+        return effect(parent, segments[segments.length - 1]);
       } finally {
         if (parent !== rootDirectory) closeAnchoredDirectory(parent);
       }

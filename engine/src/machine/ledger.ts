@@ -232,7 +232,7 @@ export function readBindingAuthority(
 export type ActiveAgent = Readonly<{ agentId: AgentId; agentType: AgentType | null }>;
 
 /** Column 0 of a roster line — the identity every existing reader means. */
-const rosterLineAgentId = (line: string): AgentId => rosterAgentId(line.split("\t")[0]!.trim());
+const rosterLineAgentId = (line: string): AgentId => rosterAgentId(line.split("\t")[0].trim());
 
 function readActiveAgentEntries(sessionId: SessionId): ActiveAgent[] {
   const path = activeFlagPath(sessionId);

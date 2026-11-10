@@ -501,7 +501,7 @@ function settleSlots<Request extends SpawnRequest>(
   const index = slots.findIndex((slot) => slot.request.id === event.requestId);
   if (index < 0) return reject({ kind: "unknown-outcome", requestId: event.requestId });
 
-  const slot = slots[index]!;
+  const slot = slots[index];
   if (slot.status === "succeeded") {
     return reject({ kind: "duplicate-outcome", requestId: event.requestId });
   }

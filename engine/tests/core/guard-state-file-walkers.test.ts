@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { flattenSubstitutions } from "../../src/core/guard-state-file";
+import { flattenSubstitutions, guardScope } from "../../src/core/guard-state-file";
+import { guardedLocations } from "../../src/config";
 import { analyzeCommandHead } from "../../src/core/shell-command-head";
 import { splitHeredocs } from "../../src/core/shell-heredoc";
 import { blankSubstitutions } from "../../src/core/shell-match-views";
@@ -91,7 +92,7 @@ describe("guard-state-file walker divergence net", () => {
         (fragments) => {
           const text = fragments.join("");
           const expected = referenceLiveSubstitutionCount(text);
-          const flat = flattenSubstitutions(text);
+          const flat = flattenSubstitutions(text, guardScope(guardedLocations()));
           const blanked = blankSubstitutions(text);
           // flattenSubstitutions returns null ONLY on unbalanced openers —
           // the generator emits balanced spans, so it must parse.
@@ -112,7 +113,7 @@ describe("guard-state-file walker divergence net", () => {
         // state, the scanner would treat the following spans as inert and
         // the reference count would disagree.
         const text = `${quoted} ${spans.join(" ")}`;
-        const flat = flattenSubstitutions(text);
+        const flat = flattenSubstitutions(text, guardScope(guardedLocations()));
         if (flat === null) return;
         expect(flat.bodies.length).toBe(spans.length);
         expect(scanSubstitutions(text, () => "").bodies.length).toBe(spans.length);
@@ -201,11 +202,11 @@ describe("guard-state-file — backtick inside $( … )", () => {
   });
 
   it("flattens such a command instead of failing closed on a phantom unclosed span", () => {
-    expect(flattenSubstitutions("echo $(echo `a)b`)")).not.toBeNull();
+    expect(flattenSubstitutions("echo $(echo `a)b`)", guardScope(guardedLocations()))).not.toBeNull();
   });
 
   it("still reports a genuinely unclosed substitution", () => {
-    expect(flattenSubstitutions("echo $(echo `a)b`")).toBeNull();
+    expect(flattenSubstitutions("echo $(echo `a)b`", guardScope(guardedLocations()))).toBeNull();
   });
 
   it("keeps a guarded token inside a backtick-bearing body visible to the guard", () => {

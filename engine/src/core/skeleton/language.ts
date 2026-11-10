@@ -71,7 +71,7 @@ function javaTarget(path: string, segments: readonly string[], className: string
 
 export const skeletonLanguageOf: SkeletonLanguageOfFn = (path) => {
   const segments = path.split("/");
-  const basename = segments[segments.length - 1]!;
+  const basename = segments[segments.length - 1];
   const dot = basename.lastIndexOf(".");
   const extension = dot > 0 ? basename.slice(dot) : "";
   if (TYPESCRIPT_EXTENSIONS.includes(extension) && !DECLARATION_FILE.test(basename)) {

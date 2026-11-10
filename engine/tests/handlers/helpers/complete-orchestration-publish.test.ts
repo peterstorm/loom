@@ -15,8 +15,8 @@ import { graphFixture, taskFixture } from "../../fixtures/task-lifecycle";
 
 const removal = vi.hoisted(() => ({ fail: false }));
 
-vi.mock("../../../src/orchestration/no-follow-fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../src/orchestration/no-follow-fs")>();
+vi.mock("../../../src/utils/no-follow-fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../src/utils/no-follow-fs")>();
   return {
     ...actual,
     removeDirectoryRegularFileNoFollow: (...args: Parameters<typeof actual.removeDirectoryRegularFileNoFollow>) => {

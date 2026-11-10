@@ -98,8 +98,9 @@ export function prepareExhaustedWaveGateRestart(
   }
   const outstanding = waveTasks.flatMap((task) => {
     const run = task.review_run;
-    if (run === undefined) return [];
-    return run.slot_authority!.filter((slot) =>
+    // A bound run carries its slot authority (waveRunRosterProblem, above).
+    if (run === undefined || run.slot_authority === undefined) return [];
+    return run.slot_authority.filter((slot) =>
       !run.evidence.some(({ agent }) => agent === slot.agent),
     ).map((slot) => ({ task, slot }));
   });

@@ -1,7 +1,7 @@
 /** Read-only native panel delivery: the verifier has Read, not Bash. Packet authority stays separate. */
 import { createHash } from "node:crypto";
 import { parseContextPacket, parseStandaloneReviewerContextPacketV3, type ContextPacket, type ByteSection } from "../core/context-packets";
-import { readRunBytesNoFollow } from "./no-follow-fs";
+import { readRunBytesNoFollow } from "../utils/no-follow-fs";
 import { CONTEXT_PACKET_MAX_BYTES, readStoredContextPacketFile } from "./stored-context-packets";
 import type { RunDirHandle } from "./run-directory-handle";
 import type { DomainResult } from "../core/orchestration-contract";
@@ -52,7 +52,7 @@ export function wrapStandalonePanelLine(line: string): readonly string[] {
   let offset = 0;
   while (offset < line.length) {
     let end = Math.min(offset + 4096, line.length);
-    if (end < line.length && /[\uD800-\uDBFF]/.test(line[end - 1]!) && /[\uDC00-\uDFFF]/.test(line[end]!)) {
+    if (end < line.length && /[\uD800-\uDBFF]/.test(line[end - 1]) && /[\uDC00-\uDFFF]/.test(line[end])) {
       end -= 1;
     }
     chunks.push(line.slice(offset, end));

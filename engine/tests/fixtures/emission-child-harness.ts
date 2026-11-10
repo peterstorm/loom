@@ -225,10 +225,7 @@ export type CountingServer = Readonly<{
  *  evidence, the rejection bounds the run, and no real model is involved. */
 export const startCountingServer = (): Promise<CountingServer> => {
   const hits: CountedRequest[] = [];
-  let resolveFirstRequest!: (request: CountedRequest) => void;
-  const firstRequest = new Promise<CountedRequest>((resolve) => {
-    resolveFirstRequest = resolve;
-  });
+  const { promise: firstRequest, resolve: resolveFirstRequest } = Promise.withResolvers<CountedRequest>();
   const server = createServer((request, response) => {
     let body = "";
     request.on("data", (chunk: Buffer) => {
@@ -439,10 +436,7 @@ export interface Deferred<T> {
 }
 
 export const deferred = <T>(): Deferred<T> => {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((settle) => {
-    resolve = settle;
-  });
+  const { promise, resolve } = Promise.withResolvers<T>();
   return { promise, resolve };
 };
 

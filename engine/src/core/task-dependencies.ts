@@ -12,8 +12,7 @@ export function dependsOnAny(
 ): boolean {
   const seen = new Set<string>();
   const queue = [...dependsOn];
-  while (queue.length > 0) {
-    const id = queue.shift()!;
+  for (let id = queue.shift(); id !== undefined; id = queue.shift()) {
     if (targets.has(id)) return true;
     if (seen.has(id)) continue;
     seen.add(id);

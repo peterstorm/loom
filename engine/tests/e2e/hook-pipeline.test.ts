@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, chmodSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, chmodSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { TaskGraph, Task, WaveGate } from "../../src/types";
@@ -175,7 +175,7 @@ describe("E2E: hook pipeline state machine", () => {
 
   afterEach(() => {
     // Restore permissions for cleanup
-    try { chmodSync(statePath, 0o644); } catch {}
+    if (existsSync(statePath)) chmodSync(statePath, 0o644);
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -283,7 +283,7 @@ describe("E2E: edge cases", () => {
   });
 
   afterEach(() => {
-    try { chmodSync(statePath, 0o644); } catch {}
+    if (existsSync(statePath)) chmodSync(statePath, 0o644);
     rmSync(tmpDir, { recursive: true, force: true });
   });
 

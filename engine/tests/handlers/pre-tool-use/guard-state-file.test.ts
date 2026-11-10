@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import fc from "fast-check";
-import { WHITELISTED_HELPERS, SUBAGENT_DIR, MACHINES_DIR } from "../../../src/config";
-import { guardStateFileDecision } from "../../../src/core/guard-state-file";
+import { SUBAGENT_DIR, MACHINES_DIR, guardedLocations } from "../../../src/config";
+import { guardStateFileDecision, WHITELISTED_HELPERS } from "../../../src/core/guard-state-file";
 import { runGuardStateFile, stampCallStart } from "../../../src/handlers/pre-tool-use/guard-state-file";
 import { type SessionRegistry } from "../../../src/machine/evidence";
 import { inMemorySessionRegistry } from "../../machine/fake-session-registry";
@@ -13,7 +13,7 @@ import { sessionIdOf } from "../../fixtures/machine-identities";
  * only wraps the task-graph-exists FS check around it.
  */
 function guardDecision(command: string): "allow" | "block" {
-  return guardStateFileDecision(command).kind === "block" ? "block" : "allow";
+  return guardStateFileDecision(command, guardedLocations()).kind === "block" ? "block" : "allow";
 }
 
 describe("guard-state-file — property tests", () => {
@@ -1049,12 +1049,12 @@ describe("guard-state-file — heredoc bodies are data, not command text (issue-
   });
 
   it("block messages name the offending segment and its pipe-chain (issue-20 addendum)", () => {
-    const result = guardStateFileDecision("npm install && rm .claude/state/active_task_graph.json");
+    const result = guardStateFileDecision("npm install && rm .claude/state/active_task_graph.json", guardedLocations());
     expect(result.kind).toBe("block");
     if (result.kind === "block") {
       expect(result.message).toContain("Offending segment: \"rm .claude/state/active_task_graph.json\"");
     }
-    const piped = guardStateFileDecision("echo x | rm .claude/state/active_task_graph.json");
+    const piped = guardStateFileDecision("echo x | rm .claude/state/active_task_graph.json", guardedLocations());
     expect(piped.kind).toBe("block");
     if (piped.kind === "block") {
       expect(piped.message).toContain("In chain:");

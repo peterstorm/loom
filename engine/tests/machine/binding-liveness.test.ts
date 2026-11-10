@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, afterAll, vi } from "vitest";
-import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import {
   bindMachineAgent,
   ledgerPath,
@@ -44,9 +44,7 @@ const sessions = ["stale", "fresh", "extend", "mixed", "mixed-reap", "gate-stale
 afterAll(() => {
   for (const s of sessions) {
     for (const path of [ledgerPath(s), machineBindingPath(s), `${SUBAGENT_DIR}/${s}.active`]) {
-      try {
-        unlinkSync(path);
-      } catch {}
+      rmSync(path, { force: true });
     }
   }
 });

@@ -420,11 +420,11 @@ export function matchCalibrationFindings(
   );
   const expectationOrder = orderedExpectations
     .map((_, index) => index)
-    .sort((left, right) => candidates[left]!.length - candidates[right]!.length || compareStrings(orderedExpectations[left]!.id, orderedExpectations[right]!.id));
+    .sort((left, right) => candidates[left].length - candidates[right].length || compareStrings(orderedExpectations[left].id, orderedExpectations[right].id));
   const predictionOwner = new Map<number, number>();
 
   const assign = (expectationIndex: number, visited: Set<number>): boolean => {
-    for (const edge of candidates[expectationIndex]!) {
+    for (const edge of candidates[expectationIndex]) {
       if (visited.has(edge.index)) continue;
       visited.add(edge.index);
       const owner = predictionOwner.get(edge.index);
@@ -445,7 +445,7 @@ export function matchCalibrationFindings(
     const predictionIndex = predictionByExpectation.get(expectationIndex);
     return predictionIndex === undefined
       ? []
-      : [{ expectation, prediction: orderedPredictions[predictionIndex]! }];
+      : [{ expectation, prediction: orderedPredictions[predictionIndex] }];
   });
   const matchedExpectationIds = new Set(matches.map((match) => match.expectation.id));
   const matchedPredictions = new Set(predictionOwner.keys());
@@ -475,8 +475,12 @@ export function scoreCalibration(
   if (errors.length > 0) return fail(errors);
 
   const predictionByCase = new Map(predictions.cases.map((entry) => [entry.caseId, entry]));
-  const cases: CalibrationCaseScore[] = corpus.cases.map((corpusCase): CalibrationCaseScore => {
-    const predictionCase = predictionByCase.get(corpusCase.id)!;
+  // The id sets are equal (checked above), so every corpus case pairs with its prediction.
+  const paired = corpus.cases.flatMap((corpusCase) => {
+    const predictionCase = predictionByCase.get(corpusCase.id);
+    return predictionCase === undefined ? [] : [{ corpusCase, predictionCase }];
+  });
+  const cases: CalibrationCaseScore[] = paired.map(({ corpusCase, predictionCase }): CalibrationCaseScore => {
     if (predictionCase.status === "not-executed") {
       return { caseId: corpusCase.id, state: corpusCase.state, execution: "not-executed", reason: predictionCase.reason };
     }

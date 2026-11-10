@@ -21,7 +21,7 @@ const smokeFiles = [
   ["scripts/smoke-pi-resources.sh", "pi"],
   ["artifacts/tests/test-validate-task-graph.sh", "graph"],
 ] as const;
-const stages = ["unit", ...smokeFiles.map(([, stage]) => stage)];
+const stages = ["lint", "unit", ...smokeFiles.map(([, stage]) => stage)];
 
 function fixture(failingStage: string): string {
   const directory = mkdtempSync(join(tmpdir(), "loom-verify-"));
@@ -45,6 +45,8 @@ if (stage === ${JSON.stringify(failingStage)}) process.exit(17);
   chmodSync(join(directory, "engine/node_modules/.bin/vitest"), 0o755);
   put("node_modules/.bin/pi", "#!/usr/bin/env bash\nexit 92\n");
   chmodSync(join(directory, "node_modules/.bin/pi"), 0o755);
+  // The project linter's full tier: a stage between the compiler and the suite.
+  put("scripts/lint-project.ts", `import { spawnSync } from 'node:child_process'; process.exit(spawnSync('node', ['../sentinel.cjs', 'lint'], {stdio:'inherit'}).status ?? 1);`);
   for (const [path, stage] of smokeFiles) {
     put(path, path.endsWith(".ts")
       ? `import { spawnSync } from 'node:child_process'; process.exit(spawnSync('node', ['../sentinel.cjs', '${stage}'], {stdio:'inherit'}).status ?? 1);`
@@ -118,10 +120,11 @@ describe("canonical verification command", () => {
     expect(result.stderr).toBe("");
   });
 
-  it("has one compiler gate followed by the existing complete test command", () => {
+  it("has one compiler gate, then the full-tier project lint, then the existing complete test command", () => {
     expect(rootPackage.scripts.verify).toBe("npm --prefix engine run verify");
     expect(enginePackage.scripts.preverify).toBe("bash scripts/verify-prerequisites.sh");
-    expect(enginePackage.scripts.verify).toBe("npm run typecheck && npm run test");
+    expect(enginePackage.scripts.verify).toBe("npm run typecheck && npm run lint && npm run test");
+    expect(enginePackage.scripts.lint).toBe("env -u PI_CODING_AGENT bun ../scripts/lint-project.ts");
     expect(enginePackage.scripts.typecheck).toBe("bun scripts/typecheck.ts");
     expect(enginePackage.scripts["typecheck:unused"]).toBe("npm run typecheck");
     expect(enginePackage.scripts.test).toBe("npm run test:unit && env -u PI_CODING_AGENT npm run test:smoke");
@@ -208,7 +211,7 @@ describe("canonical verification command", () => {
 
   it.each([
     { failingStage: "none", exitCode: 0, failed: 0, summary: "2 passed | 1 skipped (3)", expectedStages: stages },
-    { failingStage: "unit", exitCode: 1, failed: 1, summary: "1 failed | 1 passed | 1 skipped (3)", expectedStages: ["unit"] },
+    { failingStage: "unit", exitCode: 1, failed: 1, summary: "1 failed | 1 passed | 1 skipped (3)", expectedStages: ["lint", "unit"] },
     { failingStage: "graph", exitCode: 17, failed: 0, summary: "2 passed | 1 skipped (3)", expectedStages: stages },
   ])("installed Vitest writes root JUnit once; $failingStage failure still controls root exit", async ({ failingStage, exitCode, failed, summary, expectedStages }) => {
     const directory = fixture(failingStage);

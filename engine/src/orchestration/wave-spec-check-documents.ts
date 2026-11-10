@@ -5,7 +5,7 @@ import type { TaskGraphProjectBoundary } from "../config";
 import type { SpecIndexAvailability, WaveSpecCheckObservation } from "../core/wave-review-authority";
 import { projectSpecBytes } from "./spec-index-observation";
 import type { WaveSpecCheckDocumentAuthority } from "../types";
-import { readRunBytesNoFollow } from "./no-follow-fs";
+import { readRunBytesNoFollow } from "../utils/no-follow-fs";
 
 export type { WaveSpecCheckObservation } from "../core/wave-review-authority";
 

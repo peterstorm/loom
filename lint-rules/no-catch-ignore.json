@@ -1,0 +1,10 @@
+{
+  "kind": "regex",
+  "name": "no-catch-ignore",
+  "description": "Disallow an empty catch block — it swallows every failure, including the ones nobody anticipated, and turns a code regression into silence",
+  "extensions": [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
+  "pattern": "catch\\s*(?:\\([^)]*\\))?\\s*\\{\\s*\\}",
+  "flags": "",
+  "fixHint": "Catch only what you expect (inspect the error code and rethrow the rest), or return the failure as a value. If ignoring a specific failure is genuinely correct, name it in the block: `catch (error) { if (!isMissing(error)) throw error; }`.",
+  "enabled": true
+}

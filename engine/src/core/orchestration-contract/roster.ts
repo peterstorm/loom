@@ -10,6 +10,7 @@ import { includes, readDenseDataArray, readExactDataRecord, type DataBoundaryErr
 import { parseFixedArtifactSlot, type ExactHarnessBinding, type FixedArtifactSlot } from './artifacts';
 import { ORCHESTRATION_PROGRAMS, type OrchestrationProgram } from './programs';
 import { type SemanticPayloadDiagnostic } from './errors';
+import { nonEmpty, nonEmptyOf } from "./identity";
 
 export type AgentRequestAuthority<Attempt extends SemanticAttempt = SemanticAttempt> = Readonly<{
   runId: OrchestrationRunId;
@@ -118,7 +119,7 @@ type ProfileAuthority = Readonly<{
 
 /** Exactly one violation, as the non-empty list a refusal carries. */
 const oneViolation = (only: AgentRequestAuthorityViolation): NonEmpty<AgentRequestAuthorityViolation> =>
-  Object.freeze([only]) as NonEmpty<AgentRequestAuthorityViolation>;
+  nonEmptyOf(only);
 
 /** An authority error carrying exactly one violation. */
 const singleViolationError = (only: AgentRequestAuthorityViolation): AgentRequestAuthorityError =>
@@ -767,7 +768,7 @@ export function rosterSlotErrorMessages(error: AgentRosterSlotError): NonEmpty<s
         return [`roster slot: ${entry.kind}`];
     }
   });
-  return Object.freeze([head ?? "roster slot: invalid", ...rest]) as NonEmpty<string>;
+  return nonEmptyOf(head ?? "roster slot: invalid", ...rest);
 }
 
 function pairRosterSlot<Authority extends AgentRequestAuthority>(
@@ -777,28 +778,19 @@ function pairRosterSlot<Authority extends AgentRequestAuthority>(
   slotId: SlotId;
   attempts: readonly [Authority & AgentRequestAuthority<1>, Authority & AgentRequestAuthority<2>];
 }>, AgentRosterSlotError> {
-  const violations: RosterViolation[] = [];
+  const invalidSlot = (violations: NonEmpty<RosterViolation>) =>
+    failure(canonicalRecord({ kind: "invalid-agent-roster-slot" as const, violations }));
+  const malformedAttempt = (attempt: 1 | 2, error: AgentRequestAuthorityError): RosterViolation =>
+    canonicalRecord({ kind: "malformed-attempt-authority", attempt, authorityViolations: error.violations });
   if (!first.ok) {
-    violations.push(canonicalRecord({
-      kind: "malformed-attempt-authority",
-      attempt: 1,
-      authorityViolations: first.error.violations,
-    }));
+    return invalidSlot(nonEmptyOf(
+      malformedAttempt(1, first.error),
+      ...(retry.ok ? [] : [malformedAttempt(2, retry.error)]),
+    ));
   }
-  if (!retry.ok) {
-    violations.push(canonicalRecord({
-      kind: "malformed-attempt-authority",
-      attempt: 2,
-      authorityViolations: retry.error.violations,
-    }));
-  }
-  if (!first.ok || !retry.ok) {
-    return failure(canonicalRecord({
-      kind: "invalid-agent-roster-slot",
-      violations: Object.freeze(violations) as NonEmpty<RosterViolation>,
-    }));
-  }
+  if (!retry.ok) return invalidSlot(nonEmptyOf(malformedAttempt(2, retry.error)));
 
+  const violations: RosterViolation[] = [];
   for (const field of authorityPairMismatches(first.value, retry.value)) {
     violations.push(canonicalRecord({ kind: "attempt-pair-mismatch", slotId: first.value.slotId, field }));
   }
@@ -818,12 +810,8 @@ function pairRosterSlot<Authority extends AgentRequestAuthority>(
       }),
     }));
   }
-  if (violations.length > 0) {
-    return failure(canonicalRecord({
-      kind: "invalid-agent-roster-slot",
-      violations: Object.freeze(violations) as NonEmpty<RosterViolation>,
-    }));
-  }
+  const pairViolations = nonEmpty(violations);
+  if (pairViolations !== null) return invalidSlot(pairViolations);
   return success(canonicalRecord({
     slotId: first.value.slotId,
     attempts: Object.freeze([first.value, retry.value] as const),
@@ -934,13 +922,13 @@ export function parseExactRoster(
   if (!slots.ok) {
     return failure(canonicalRecord({
       kind: "invalid-exact-roster",
-      violations: Object.freeze([canonicalRecord({
+      violations: nonEmptyOf(canonicalRecord({
         kind: "malformed-roster-boundary" as const,
         field: slots.error.field,
         index: slots.error.index,
         reason: slots.error.reason,
         message: slots.error.message,
-      })]) as NonEmpty<RosterViolation>,
+      })),
     }));
   }
   return assembleExactRoster(slots.value.map((rawSlot, index): RosterEntry<AgentRosterSlot> => {
@@ -1061,18 +1049,15 @@ function assembleExactRoster<S extends AgentRosterSlot>(
     }
   }
 
-  const head = violations[0];
-  if (head !== undefined || canonicalRun === null || canonicalProgram === null || canonicalSlots.length === 0) {
-    const completeViolations = head === undefined
-      ? [{ kind: "empty-roster" as const }]
-      : [head, ...violations.slice(1)];
+  const rosterViolations = nonEmpty(violations);
+  const orderedSlots = nonEmpty(canonicalSlots);
+  if (rosterViolations !== null || canonicalRun === null || canonicalProgram === null || orderedSlots === null) {
     return failure(canonicalRecord({
       kind: "invalid-exact-roster",
-      violations: Object.freeze(completeViolations) as NonEmpty<RosterViolation>,
+      violations: rosterViolations ?? nonEmptyOf<RosterViolation>({ kind: "empty-roster" }),
     }));
   }
 
-  const orderedSlots = Object.freeze(canonicalSlots) as NonEmpty<S>;
   const exactRoster = canonicalRecord({
     runId: canonicalRun,
     program: canonicalProgram,

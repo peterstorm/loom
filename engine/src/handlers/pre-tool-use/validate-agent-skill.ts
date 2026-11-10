@@ -6,7 +6,8 @@
 
 import { readFileSync } from "node:fs";
 import type { HookHandler, PreToolUseInput } from "../../types";
-import { TASK_GRAPH_PATH, UTILITY_AGENTS, pathExistsFailClosed } from "../../config";
+import { TASK_GRAPH_PATH, pathExistsFailClosed } from "../../config";
+import { UTILITY_AGENTS } from "../../core/phase-policy";
 import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS, REVIEW_PANEL_AGENTS, ARCH_PANEL_AGENTS, SECURITY_AUDIT_AGENTS } from "../../core/agent-catalog-projections";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import { stripNamespace } from "../../utils/strip-namespace";

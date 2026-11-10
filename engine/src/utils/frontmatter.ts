@@ -18,9 +18,9 @@ export function parseFrontmatterFields(content: string): Record<string, string> 
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!match) return null;
   const fields: Record<string, string> = {};
-  for (const line of match[1]!.split(/\r?\n/)) {
+  for (const line of match[1].split(/\r?\n/)) {
     const field = line.match(/^([A-Za-z][A-Za-z0-9_-]*):\s*(.*?)\s*$/);
-    if (field && field[2] !== "") fields[field[1]!] = field[2]!;
+    if (field && field[2] !== "") fields[field[1]] = field[2];
   }
   return fields;
 }

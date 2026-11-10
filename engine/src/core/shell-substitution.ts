@@ -122,7 +122,7 @@ export function staticHeredocCat(command: string, start: number): Readonly<{ lit
   const opener = /^[ \t]*cat[ \t]+<<(-?)[ \t]*(?:'([^'\n]+)'|"([^"\\\n$`]+)")[ \t]*\n/.exec(command.slice(start));
   if (opener === null) return null;
   const minus = opener[1] === "-";
-  const delimiter = opener[2] ?? opener[3]!;
+  const delimiter = opener[2] ?? opener[3];
   const lines: string[] = [];
   let cursor = start + opener[0].length;
   while (cursor <= command.length) {

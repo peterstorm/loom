@@ -34,7 +34,7 @@ import { type FrozenStandaloneReviewAuthority } from '../../../core/standalone-r
 import { parseStandaloneReviewMachineState, serializeStandaloneReviewMachineState } from '../../../core/standalone-review-checkpoint';
 import { parseStandaloneRefutationCompletion } from '../../../core/standalone-refutation-completion';
 import { completePersistentRefutationPanel, panelRequestIdentity, refutationPanelCheckpoint, rejectRefutationVerdict, startPersistentRefutationPanel, submitRefutationVerdict, type PersistentRefutationPanelEvent } from '../../../core/persistent-panel';
-import { readRunBytesNoFollow, writeRunBytesExclusiveNoFollow } from '../../../orchestration/no-follow-fs';
+import { readRunBytesNoFollow, writeRunBytesExclusiveNoFollow } from '../../../utils/no-follow-fs';
 import { captureKey } from '../../../core/harness-capture';
 import { type RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { standaloneReviewerProtocolResolver, readRegisteredStandaloneAuthority } from './reviewer-protocol-resolution';
@@ -117,7 +117,7 @@ export async function prepareStandaloneSuccessorFacadeStart(runsRoot: string, ru
     if (!prepared.ok) return { ok: false as const, message: prepared.error.errors.join("; ") };
     const registration: RegisteredStandaloneSuccessorProgram = Object.freeze({ schemaVersion: 3, kind: "standalone-review",
       reviewerProtocol: STANDALONE_REVIEWER_PROTOCOL_V3, input, currentSource: source.value.source,
-      previousContexts: Object.freeze(lineage.value.packets[0]!.variableContext.slice(1)),
+      previousContexts: Object.freeze(lineage.value.packets[0].variableContext.slice(1)),
       authority: JSON.parse(serializeStandaloneReviewAuthority(prepared.value.authority), (_key: string, value: unknown) =>
         typeof value === "object" && value !== null ? Object.freeze(value) : value) });
     // Mint the registration's wire bytes ONCE at preflight: the start token

@@ -14,7 +14,7 @@ import { parseRegisteredStandaloneDispositionProgram, startStandaloneDisposition
   standaloneDispositionReceipt, reduceStandaloneDisposition, checkStandaloneDispositionCheckpoint,
   type RegisteredStandaloneDispositionProgram, type StandaloneDispositionStartInput, type StandaloneDispositionState } from "../../../core/standalone-disposition-machine";
 import { openRegisteredRunDirectory, type RunDirHandle } from "../../../orchestration/run-directory-handle";
-import { openDirectoryNoFollow, closeAnchoredDirectory, readRunBytesNoFollow } from "../../../orchestration/no-follow-fs";
+import { openDirectoryNoFollow, closeAnchoredDirectory, readRunBytesNoFollow } from "../../../utils/no-follow-fs";
 import type { ProgramParse } from "./program-result";
 
 const maximum = STANDALONE_LINEAGE_LIMITS.retainedBytes;

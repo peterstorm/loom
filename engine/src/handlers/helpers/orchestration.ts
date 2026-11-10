@@ -75,7 +75,7 @@ import { match, P } from "ts-pattern";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { recordReadCoverageObservation, runReadCoverage } from "../../orchestration/standalone-read-coverage-evidence";
-import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
+import { readRunBytesNoFollow } from "../../utils/no-follow-fs";
 import { dirname, join, resolve } from "node:path";
 import { observeTaskGraphProjectBoundary, SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
 import { isReviewAgent } from "../../core/agent-catalog-projections";
@@ -1529,7 +1529,7 @@ async function resumeOperation(args: readonly string[], emission: Emission): Pro
  * is the expected outcome on a harness that captures transcripts itself, where
  * the parent's follow-up submit confirms what the extension already stored. The
  * stored bytes stay authoritative and the run's current action is emitted, the
- * same as any other submit — so an auto-capturing harness walks the one façade
+ * same as every other submit — so an auto-capturing harness walks the one façade
  * path whose happy-path output used to be a bare sentence on stderr and an
  * exit code indistinguishable from a genuine failure.
  */

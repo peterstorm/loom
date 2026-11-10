@@ -3,7 +3,7 @@
  * Extracts and stores phase artifacts from transcript.
  *
  * Canonical phase-agent chain (happy path; transitions may skip stages per
- * config.VALID_TRANSITIONS — types.ts PHASES is the authoritative order,
+ * core/phase-policy VALID_TRANSITIONS — types.ts PHASES is the authoritative order,
  * which includes init as the first phase).
  */
 
@@ -11,7 +11,8 @@ import { readFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { match } from "ts-pattern";
 import type { HookHandler, HookResult, Phase, TaskGraph } from "../../types";
-import { PHASE_ORDER, CLARIFY_THRESHOLD, observeTaskGraphProjectBoundary } from "../../config";
+import { PHASE_ORDER, observeTaskGraphProjectBoundary } from "../../config";
+import { CLARIFY_THRESHOLD } from "../../core/phase-policy";
 import { PHASE_AGENT_MAP } from "../../core/agent-catalog-projections";
 import { StateManager } from "../../state-manager";
 import { parsePhaseArtifacts } from "../../parsers/parse-phase-artifacts";
@@ -28,7 +29,7 @@ import {
   type SpecArtifactDirectory,
 } from "../../core/phase-artifact-paths";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
-import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
+import { readRunBytesNoFollow } from "../../utils/no-follow-fs";
 
 // Re-exported because this module's own containment rule moved to the pure core
 // so the Pi shell could share it verbatim; the name stays importable from here.

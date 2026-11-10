@@ -266,7 +266,8 @@ describe("editedFilePath", () => {
   });
 
   it("returns null for non-object input", () => {
-    expect(editedFilePath("string" as any)).toBeNull();
+    // Deliberately ill-typed input: the guard must hold for a caller that lies about the type.
+    expect(editedFilePath("string" as unknown as Record<string, unknown>)).toBeNull();
   });
 
   it("returns null when no file_path or path field", () => {

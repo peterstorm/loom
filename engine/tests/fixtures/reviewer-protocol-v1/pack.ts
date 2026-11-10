@@ -12,9 +12,16 @@ type PackResult = Readonly<{ ok: true; value: ReadonlyMap<string, Uint8Array> }>
 const storedEntries = z.array(z.strictObject({ path: z.string(), base64bytes: z.string() }));
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 
+/** The inventory's file list for one golden. */
+function goldenFiles(name: GoldenName) {
+  const golden = inventory.goldens.find((entry) => entry.name === name);
+  if (golden === undefined) throw new Error(`no golden named ${name} in the inventory`);
+  return golden.files;
+}
+
 /** The bound comes from original logical byte counts, never a gzip header or decoded input. */
 function expectedStorageLength(name: GoldenName): number {
-  const files = inventory.goldens.find((entry) => entry.name === name)!.files;
+  const files = goldenFiles(name);
   return 2 + files.length - 1 + files.reduce((sum, entry) => sum +
     Buffer.byteLength(JSON.stringify({ path: entry.path, base64bytes: "" })) + 4 * Math.ceil(entry.byteLength / 3), 0);
 }
@@ -32,7 +39,7 @@ export function parseReviewerV1Pack(name: GoldenName, bytes: Uint8Array): PackRe
   }
   const parsed = storedEntries.safeParse(json);
   if (!parsed.success) return { ok: false, error: "storage-format" };
-  const expected = inventory.goldens.find((entry) => entry.name === name)!.files;
+  const expected = goldenFiles(name);
   if (parsed.data.length !== expected.length) return { ok: false, error: "path-roster" };
   // Canonical STORAGE JSON rejects duplicate/escaped keys, reordered fields and whitespace.
   // Logical artifact bytes are base64-decoded only: never parsed or reserialized here.
@@ -40,7 +47,7 @@ export function parseReviewerV1Pack(name: GoldenName, bytes: Uint8Array): PackRe
   if (text !== canonical) return { ok: false, error: "noncanonical" };
   const files = new Map<string, Uint8Array>();
   for (const [index, entry] of parsed.data.entries()) {
-    const original = expected[index]!;
+    const original = expected[index];
     if (entry.path !== original.path) return { ok: false, error: "path-roster" };
     if (entry.base64bytes.length !== 4 * Math.ceil(original.byteLength / 3)) return { ok: false, error: "logical-bytes" };
     const decoded = Buffer.from(entry.base64bytes, "base64");

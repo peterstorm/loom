@@ -233,7 +233,7 @@ export function sweepStaleSessions(
   if (directory.kind === "absent") return Object.freeze([]);
   if (directory.kind === "unavailable") {
     const diagnostics = Object.freeze([diagnostic("read-directory", dir, directory.cause)]);
-    process.stderr.write(`${renderDiagnostic(diagnostics[0]!)}\n`);
+    process.stderr.write(`${renderDiagnostic(diagnostics[0])}\n`);
     return diagnostics;
   }
 

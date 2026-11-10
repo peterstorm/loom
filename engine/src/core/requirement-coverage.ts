@@ -36,7 +36,7 @@ import type {
   SpecParseError,
 } from "./parse-spec";
 import { specParseErrorMessage } from "./parse-spec";
-import { parseArtifactDigest, type ArtifactDigest } from "./orchestration-contract";
+import { parseArtifactDigest, type ArtifactDigest, mapNonEmpty, nonEmptyOf } from "./orchestration-contract";
 
 /**
  * The families a Task may legitimately claim to have completed. `OOS` is
@@ -727,7 +727,7 @@ Readonly<{ ok: false; error: string }> {
         kind: "unparsed",
         path: record.path,
         contentDigest: digest.value,
-        errors: Object.freeze([head, ...tail]) as NonEmpty<SpecParseError>,
+        errors: nonEmptyOf(head, ...tail),
       }),
     });
   }
@@ -777,7 +777,7 @@ export function specIndexObservationOf(availability: SpecIndexAvailability): Spe
         kind: "unavailable",
         reason: Object.freeze({
           ...reason,
-          errors: Object.freeze(reason.errors.map((error) => Object.freeze({ ...error }))) as NonEmpty<SpecParseError>,
+          errors: mapNonEmpty(reason.errors, (error) => Object.freeze({ ...error })),
         }),
       }))
     .exhaustive();

@@ -65,7 +65,7 @@ import {
 } from "./panel-kernel";
 import { STANDALONE_REVIEW_SUBJECT } from "./reviewer-contract";
 import { sha256Hex } from "./digest";
-import { type ArtifactDigest } from "./orchestration-contract/identity";
+import { nonEmptyOf, type ArtifactDigest } from "./orchestration-contract/identity";
 
 // ---------------------------------------------------------------------------
 // Lenses
@@ -854,7 +854,7 @@ function findTopLevelVerdictObjects(text: string): readonly VerdictObjectSpan[] 
     let quote: '"' | "'" | null = null;
     let escaped = false;
     for (let index = start; index < text.length; index += 1) {
-      const char = text[index]!;
+      const char = text[index];
       if (quote !== null) {
         if (escaped) escaped = false;
         else if (char === "\\") escaped = true;
@@ -911,11 +911,11 @@ export function refutationVerdictJson(raw: string): ParseResult<string> {
           ? "refutation verdict is not valid JSON and contains no single json fence"
           : "refutation verdict contains competing JSON-looking payloads and no json fence"]);
       }
-      const only = candidates[0]!;
+      const only = candidates[0];
       return ok(trimmed.slice(only.start, only.end));
     }
-    const candidate = fenced[0]![1]!.trim();
-    const outside = `${trimmed.slice(0, fenced[0]!.index)}\n${trimmed.slice(fenced[0]!.index! + fenced[0]![0].length)}`;
+    const candidate = fenced[0][1].trim();
+    const outside = `${trimmed.slice(0, fenced[0].index)}\n${trimmed.slice(fenced[0].index + fenced[0][0].length)}`;
     // Ordinary analysis/code prose (including `{ strict: true }`) is tolerated.
     // A structurally valid outside JSON object claiming decoded `criterion` or
     // `verdicts` authority is a competing payload, including Unicode-escaped
@@ -1327,7 +1327,7 @@ export function countRefutationVotes(
   });
   const [head, ...tail] = refutations;
   return head !== undefined && refutations.length >= threshold
-    ? Object.freeze({ survives: false as const, votes, refutations: [head, ...tail] as NonEmptyRefutations })
+    ? Object.freeze({ survives: false as const, votes, refutations: nonEmptyOf(head, ...tail) })
     : Object.freeze({ survives: true as const, votes, refutations: Object.freeze(refutations) });
 }
 

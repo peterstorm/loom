@@ -10,7 +10,7 @@ import {
   realPhaseOrderDeps,
 } from "../../src/handlers/pre-tool-use/validate-phase-order";
 import type { ArtifactProbe, ArtifactState } from "../../src/handlers/pre-tool-use/validate-phase-order";
-import { VALID_TRANSITIONS } from "../../src/config";
+import { VALID_TRANSITIONS } from "../../src/core/phase-policy";
 import { validatePhaseOrder } from "../../src/core/validate-phase-order";
 
 // ─── helpers ────────────────────────────────────────────────────────────────

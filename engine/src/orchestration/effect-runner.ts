@@ -92,8 +92,8 @@ async function runPublishArtifactSet(
   }
   const destinations = new Set<string>();
   for (let index = 0; index < staged.length; index += 1) {
-    const candidate = staged[index]!;
-    const expected = intent.artifacts[index]!;
+    const candidate = staged[index];
+    const expected = intent.artifacts[index];
     const slotPath = `artifacts/${candidate.relativePath}`;
     if (destinations.has(slotPath)) {
       return failure(intent.effectId, false, `staged artifact destination is duplicated: ${slotPath}`);

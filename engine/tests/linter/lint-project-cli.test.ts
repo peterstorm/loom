@@ -6,9 +6,14 @@
  * - `--write-baseline` records every unproven site into each harness's
  *   `config.json`, keeps the other fields, and a re-run changes nothing;
  * - a stale baseline entry fails the run (exit 1) and is reported in the JSON
- *   output's `baselineDrift`;
+ *   output's `staleEntries`;
  * - a lint ERROR (a file the linter could not lint) fails `--json`, not only
- *   the human-readable mode.
+ *   the human-readable mode;
+ * - the scope is everything lintable — tests included — minus the config's
+ *   reasoned `exclude` list, which applies to explicit paths too, and whose
+ *   stale entries fail the run;
+ * - the project root is found from a subdirectory with its own package.json,
+ *   an unknown config key and diverging harness copies refuse to run (exit 2).
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
@@ -33,6 +38,9 @@ const UNPROVEN_SWITCH = [
 ].join("\n");
 const SITE = "src/shape.ts::s.kind";
 
+/** One `no-any-type` violation, assembled so this file's own source does not carry one. */
+const ANY_ANNOTATED = (name: string): string => `export const ${name}:${" "}${"an"}y = 1;\n`;
+
 let project: string;
 
 beforeEach(() => {
@@ -56,7 +64,12 @@ function lintProject(...args: string[]): Readonly<{ status: number | null; stdou
 
 const configBytes = (dir: string): string => readFileSync(join(project, dir, "config.json"), "utf8");
 
-type JsonReport = Readonly<{ violations: readonly unknown[]; errorCount: number; baselineDrift: readonly string[] }>;
+type JsonReport = Readonly<{
+  violations: readonly Readonly<{ file: string; rule: string }>[];
+  errorCount: number;
+  staleEntries: readonly string[];
+  excluded: readonly Readonly<{ file: string; reason: string }>[];
+}>;
 const jsonReport = (stdout: string): JsonReport => JSON.parse(stdout) as JsonReport;
 
 describe("lint-project.ts, spawned over a temporary project", () => {
@@ -75,13 +88,13 @@ describe("lint-project.ts, spawned over a temporary project", () => {
     // The baselined site is excused and nothing in the baseline is stale.
     const linted = lintProject("--json");
     expect(linted.status, linted.stdout).toBe(0);
-    expect(jsonReport(linted.stdout)).toEqual({ violations: [], errorCount: 0, baselineDrift: [] });
+    expect(jsonReport(linted.stdout)).toEqual({ violations: [], errorCount: 0, staleEntries: [], excluded: [] });
   });
 
-  it("a stale baseline entry exits 1 and is reported in the JSON output's baselineDrift", () => {
+  it("a stale baseline entry exits 1 and is reported in the JSON output's staleEntries", () => {
     expect(lintProject("--write-baseline").status).toBe(0);
     // Both harness configs move together, as --write-baseline keeps them
-    // (the script reads the Pi one when `.pi/` exists).
+    // (each harness's hook reads its own copy, so the script refuses a divergence).
     for (const dir of HARNESS_DIRS) {
       const config = JSON.parse(configBytes(dir));
       writeFileSync(join(project, dir, "config.json"),
@@ -92,7 +105,7 @@ describe("lint-project.ts, spawned over a temporary project", () => {
     expect(linted.status).toBe(1);
     const report = jsonReport(linted.stdout);
     expect(report.violations).toEqual([]);
-    expect(report.baselineDrift).toEqual([
+    expect(report.staleEntries).toEqual([
       "switch-totality: src/gone.ts::x.kind (no unproven switch matches it any more — delete the baseline entry)",
     ]);
     // --no-baseline-check skips the drift pass: the tier itself is clean.
@@ -115,5 +128,74 @@ describe("lint-project.ts, spawned over a temporary project", () => {
     expect(report.errorCount).toBeGreaterThan(0);
     expect(report.violations).toEqual([]);
     expect(lintProject("--summary").status).toBe(1);
+  });
+
+  /** Rewrites both harness copies of config.json with extra fields. */
+  function configure(fields: Record<string, unknown>): void {
+    for (const dir of HARNESS_DIRS) {
+      writeFileSync(join(project, dir, "config.json"), `${JSON.stringify({ ...JSON.parse(configBytes(dir)), ...fields }, null, 2)}\n`);
+    }
+  }
+
+  it("lints test files by default — a rule that skips tests says so itself", () => {
+    expect(lintProject("--write-baseline").status).toBe(0);
+    writeFileSync(join(project, "src", "shape.test.ts"), ANY_ANNOTATED("x"));
+    const linted = lintProject("--json");
+    expect(linted.status).toBe(1);
+    expect(jsonReport(linted.stdout).violations).toContainEqual(expect.objectContaining({ file: "src/shape.test.ts", rule: "no-any-type" }));
+  });
+
+  it("lints the TypeScript module spellings (.mts, .cts) the walker used to skip", () => {
+    expect(lintProject("--write-baseline").status).toBe(0);
+    writeFileSync(join(project, "src", "esm.mts"), ANY_ANNOTATED("x"));
+    writeFileSync(join(project, "src", "cjs.cts"), ANY_ANNOTATED("y"));
+    const files = jsonReport(lintProject("--json").stdout).violations.map(({ file }) => file);
+    expect(files).toEqual(expect.arrayContaining(["src/esm.mts", "src/cjs.cts"]));
+  });
+
+  it("an excluded path is never linted, is listed with its reason, and stays excluded when named explicitly", () => {
+    expect(lintProject("--write-baseline").status).toBe(0);
+    mkdirSync(join(project, "third_party"));
+    writeFileSync(join(project, "third_party", "lib.ts"), ANY_ANNOTATED("x"));
+    configure({ exclude: [{ path: "third_party/", reason: "vendored upstream, byte-pinned" }] });
+
+    const linted = lintProject("--json");
+    expect(linted.status, linted.stdout).toBe(0);
+    expect(jsonReport(linted.stdout).excluded).toEqual([{ file: "third_party/lib.ts", reason: "third_party/ — vendored upstream, byte-pinned" }]);
+
+    const explicit = lintProject("third_party/lib.ts");
+    expect(explicit.stdout).toContain("excluded: third_party/lib.ts (third_party/ — vendored upstream, byte-pinned)");
+    expect(explicit.stdout).not.toContain("no-any-type");
+  });
+
+  it("an exclusion that matches no file is stale: exit 1", () => {
+    expect(lintProject("--write-baseline").status).toBe(0);
+    configure({ exclude: [{ path: "gone/", reason: "was vendored" }] });
+    const linted = lintProject("--json");
+    expect(linted.status).toBe(1);
+    expect(jsonReport(linted.stdout).staleEntries).toEqual(["exclude: gone/ (matches no file — delete the exclusion)"]);
+  });
+
+  it("finds the project root from a subdirectory that has its own package.json", () => {
+    expect(lintProject("--write-baseline").status).toBe(0);
+    mkdirSync(join(project, "engine"));
+    writeFileSync(join(project, "engine", "package.json"), "{}\n");
+    const result = spawnSync("bun", [SCRIPT, "--json"], { cwd: join(project, "engine"), encoding: "utf8", timeout: 60_000 });
+    expect(result.status, result.stderr).toBe(0);
+    expect(jsonReport(result.stdout).staleEntries).toEqual([]);
+  });
+
+  it("refuses to run on an unknown config key (exit 2), naming it", () => {
+    configure({ exlude: [] });
+    const linted = lintProject("--json");
+    expect(linted.status).toBe(2);
+    expect(linted.stderr).toContain("unknown key 'exlude'");
+  });
+
+  it("refuses to run when the two harness copies diverge (exit 2)", () => {
+    writeFileSync(join(project, ".pi/linter/rules", "config.json"), `${JSON.stringify({ maxFunctionLines: 61 }, null, 2)}\n`);
+    const linted = lintProject("--json");
+    expect(linted.status).toBe(2);
+    expect(linted.stderr).toContain("differ in: config.json");
   });
 });

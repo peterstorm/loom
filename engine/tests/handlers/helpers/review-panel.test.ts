@@ -688,7 +688,7 @@ describe("review-panel helper CLI", () => {
   });
 
   it("refuses a write target it cannot stat, rather than assuming it is absent", () => {
-    // The blanket `catch {}` was labelled ENOENT but never inspected the code,
+    // The blanket empty catch was labelled ENOENT but never inspected the code,
     // so EACCES on a parent component and ELOOP both read as "target absent,
     // safe to write" — defeating the symlink check this function exists to
     // perform. A directory with no execute bit makes lstat fail with EACCES.

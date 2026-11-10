@@ -7,7 +7,7 @@
 import { parseReviewPath } from '../review-packet';
 import { type RepositoryPath } from '../repository-path';
 import { posix } from 'node:path';
-import { canonicalRecord, describeUnknown, failure, parseArtifactDigest, parseEffectId, parseOrchestrationRunId, parseRequestId, success, type ArtifactDigest, type DomainResult, type EffectId, type NonEmpty, type OrchestrationRunId, type RequestId } from './identity';
+import { canonicalRecord, describeUnknown, failure, nonEmpty, parseArtifactDigest, parseEffectId, parseOrchestrationRunId, parseRequestId, success, type ArtifactDigest, type DomainResult, type EffectId, type NonEmpty, type OrchestrationRunId, type RequestId } from './identity';
 import { digestRawTranscriptBytes, parseRawTranscriptBytes, readDenseDataArray, readExactDataRecord } from './bytes';
 import { parseStoredAgentRequestAuthority, parseArtifactRef, type AgentRequestAuthority, type ArtifactRef } from './roster';
 
@@ -233,7 +233,8 @@ export function parseArtifactArray(raw: unknown, prefix: string): DomainResult<N
     assignments.set(parsed.value.slot.path, assignment);
     artifacts.push(parsed.value);
   }
-  return success(Object.freeze(artifacts) as NonEmpty<ArtifactRef>);
+  const published = nonEmpty(artifacts);
+  return published === null ? reconciliationFailure(prefix, `${prefix} must be a non-empty array`) : success(published);
 }
 
 export function parseRepositoryPathValue(raw: unknown, prefix: string): DomainResult<RepositoryPath, ReconciliationParseError> {
@@ -313,7 +314,8 @@ function parseUniqueNonEmptyList<T>(raw: unknown, rule: UniqueListRule<T>): Doma
     values.push(parsed.value);
   }
   if (new Set(values.map(rule.identity)).size !== values.length) return reconciliationFailure(rule.duplicateField, rule.duplicateMessage);
-  return success(Object.freeze(values) as NonEmpty<T>);
+  const reconciled = nonEmpty(values);
+  return reconciled === null ? reconciliationFailure(rule.field, rule.emptyMessage) : success(reconciled);
 }
 
 function parsePublishArtifactSetIntent(envelope: EnvelopeRecord, base: BaseEffect): DomainResult<EffectIntent, ReconciliationParseError> {
@@ -484,8 +486,8 @@ function publishedArtifactsMismatch(intent: PublishArtifactSet, receipt: EffectR
   if (receipt.kind !== "artifact-set-published") return { field: "receipt.kind", message: `expected artifact-set-published, received ${receipt.kind}` };
   if (intent.artifacts.length !== receipt.artifacts.length) return { field: "receipt.artifacts", message: "artifact count mismatch" };
   for (let index = 0; index < intent.artifacts.length; index++) {
-    const expected = intent.artifacts[index]!;
-    const actual = receipt.artifacts[index]!;
+    const expected = intent.artifacts[index];
+    const actual = receipt.artifacts[index];
     if (expected.runId !== actual.runId) return { field: `receipt.artifacts[${index}].runId`, message: "artifact run mismatch" };
     if (expected.slot.path !== actual.slot.path) return { field: `receipt.artifacts[${index}].slot`, message: "artifact slot mismatch" };
     if (expected.digest !== actual.digest) return { field: `receipt.artifacts[${index}].digest`, message: "artifact digest mismatch" };
@@ -516,7 +518,7 @@ function reservedRequestsMismatch(intent: ReserveAgentRequests, receipt: EffectR
   if (receipt.kind !== "agent-requests-reserved") return { field: "receipt.kind", message: `expected agent-requests-reserved, received ${receipt.kind}` };
   if (receipt.requestIds.length !== intent.requests.length) return { field: "receipt.requestIds", message: "reserved request count mismatch" };
   for (let index = 0; index < intent.requests.length; index++) {
-    if (receipt.requestIds[index] !== intent.requests[index]!.requestId) return { field: `receipt.requestIds[${index}]`, message: "reserved request identity or order mismatch" };
+    if (receipt.requestIds[index] !== intent.requests[index].requestId) return { field: `receipt.requestIds[${index}]`, message: "reserved request identity or order mismatch" };
   }
   return null;
 }
@@ -525,7 +527,7 @@ function inspectedPathsMismatch(intent: InspectGitRemediation, receipt: EffectRe
   if (receipt.kind !== "git-remediation-inspected") return { field: "receipt.kind", message: `expected git-remediation-inspected, received ${receipt.kind}` };
   if (receipt.paths.length !== intent.paths.length) return { field: "receipt.paths", message: "inspected path count mismatch" };
   for (let index = 0; index < intent.paths.length; index++) {
-    if (!samePath(intent.paths[index]!, receipt.paths[index]!)) return { field: `receipt.paths[${index}]`, message: "inspected path identity or order mismatch" };
+    if (!samePath(intent.paths[index], receipt.paths[index])) return { field: `receipt.paths[${index}]`, message: "inspected path identity or order mismatch" };
   }
   return null;
 }

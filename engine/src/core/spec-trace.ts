@@ -199,7 +199,7 @@ function relationalDiagnostics(tasks: readonly RequirementTraceTask[]): readonly
         continue;
       }
       if (waves.size !== 1) continue;
-      const completionWave = [...waves][0]!;
+      const completionWave = [...waves][0];
       if (task.wave > completionWave) {
         diagnostics.push(diagnostic(
           "contribution-after-completion",
@@ -324,7 +324,8 @@ export function amendmentHistoryError(
     latest.set(change.taskId, change);
   }
   for (const [taskId, change] of latest) {
-    if (!sameRequirementTrace(traceOf(byId.get(taskId)!), change.after)) {
+    const task = byId.get(taskId);
+    if (task === undefined || !sameRequirementTrace(traceOf(task), change.after)) {
       return `Task ${taskId} Requirement trace contradicts its latest spec_trace_amendments change`;
     }
   }

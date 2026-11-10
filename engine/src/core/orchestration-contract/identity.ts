@@ -271,6 +271,26 @@ export type NonEmpty<T> = readonly [T, ...T[]];
 export const isNonEmpty = <Values extends readonly unknown[]>(values: Values): values is Values & NonEmpty<Values[number]> =>
   values.length > 0;
 
+/** A frozen non-empty list built from its head and tail: the head IS the
+ *  proof, so no caller asserts non-emptiness with a cast. */
+export function nonEmptyOf<T>(head: T, ...tail: readonly T[]): NonEmpty<T> {
+  return Object.freeze([head, ...tail]);
+}
+
+/** `values` as a frozen non-empty list, or null when there is none — the
+ *  narrowing for a computed list; the caller owns the explicit empty branch. */
+export function nonEmpty<T>(values: readonly T[]): NonEmpty<T> | null {
+  if (!isNonEmpty(values)) return null;
+  const [head, ...tail] = values;
+  return nonEmptyOf(head, ...tail);
+}
+
+/** `map` that keeps the proof of non-emptiness the input carried. */
+export function mapNonEmpty<T, U>(values: NonEmpty<T>, f: (value: T, index: number) => U): NonEmpty<U> {
+  const [head, ...tail] = values;
+  return nonEmptyOf(f(head, 0), ...tail.map((value, index) => f(value, index + 1)));
+}
+
 export type SemanticAttempt = 1 | 2;
 
 declare const RUN_ID: unique symbol;

@@ -55,8 +55,9 @@ function installOwnership(graph: TaskGraph, ownership: ReadonlyMap<string, SpecT
     ...graph,
     spec_trace_version: SPEC_TRACE_VERSION,
     tasks: Object.freeze(graph.tasks.map((task) => {
-      const trace = ownership.get(task.id)!;
-      return Object.freeze({
+      // The submitted roster is the graph's (checked before install), so every Task has its trace.
+      const trace = ownership.get(task.id);
+      return trace === undefined ? task : Object.freeze({
         ...task,
         spec_anchors: trace.spec_anchors,
         spec_contributions: trace.spec_contributions,
@@ -67,7 +68,7 @@ function installOwnership(graph: TaskGraph, ownership: ReadonlyMap<string, SpecT
 
 function traceOwnershipUnchanged(graph: TaskGraph, candidate: TaskGraph): boolean {
   return graph.tasks.every((task, index) => {
-    const candidateTask = candidate.tasks[index]!;
+    const candidateTask = candidate.tasks[index];
     return sameStrings(task.spec_anchors ?? [], candidateTask.spec_anchors ?? []) &&
       sameStrings(task.spec_contributions ?? [], candidateTask.spec_contributions ?? []);
   });

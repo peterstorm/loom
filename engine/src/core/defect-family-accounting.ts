@@ -16,6 +16,7 @@ import {
   type DomainResult,
   type NonEmpty,
   type OrchestrationRunId,
+  nonEmptyOf,
 } from "./orchestration-contract";
 import { readDenseDataArray, type DataBoundaryError } from "./orchestration-contract/bytes";
 import {
@@ -108,7 +109,7 @@ function accountingFailure<T>(failures: readonly DefectFamilyFailure[]): DomainR
     : [problem("invalid-declaration", "defectFamily", "Defect-Family Accounting is invalid")];
   return failure(canonicalRecord({
     kind: "invalid-defect-family-accounting" as const,
-    failures: Object.freeze([head!, ...tail]) as NonEmpty<DefectFamilyFailure>,
+    failures: nonEmptyOf(head, ...tail),
   }));
 }
 
@@ -581,7 +582,7 @@ function parseSiblingAccounting(raw: unknown, path: string): InternalParse<Decla
     ? parsed(canonicalRecord({
         kind: "declared-siblings" as const,
         provenance: "DECLARED" as const,
-        entries: Object.freeze([head, ...tail]) as NonEmpty<SiblingDisposition>,
+        entries: nonEmptyOf(head, ...tail),
       }))
     : failure(immutableArray(failures));
 }
@@ -640,7 +641,7 @@ function parseStringIds(raw: unknown, path: string): InternalParse<NonEmpty<Find
   ));
   const [head, ...tail] = [...ids].sort(compareStrings);
   return failures.length === 0 && head !== undefined
-    ? parsed(Object.freeze([head, ...tail]) as NonEmpty<FindingId>)
+    ? parsed(nonEmptyOf(head, ...tail))
     : failure(immutableArray(failures));
 }
 
@@ -691,7 +692,7 @@ function parseRepairGroup(raw: unknown, path: string): InternalParse<DeclaredRep
         rootCause: rootCause.value,
         invariant: invariant.value,
         siblings: siblings.value,
-        checks: Object.freeze([firstCheck, ...otherChecks]) as NonEmpty<DeclaredRepairCheck>,
+        checks: nonEmptyOf(firstCheck, ...otherChecks),
       }))
     : failure(immutableArray(failures));
 }
@@ -867,7 +868,7 @@ function parseDefectFamilyDeclaration(
   const declaration = canonicalRecord({
     kind: "declared-defect-family-accounting" as const,
     provenance: "DECLARED" as const,
-    dispositions: Object.freeze([firstDisposition, ...otherDispositions]) as NonEmpty<CriticalFindingDisposition>,
+    dispositions: nonEmptyOf(firstDisposition, ...otherDispositions),
     groups: immutableArray(groups),
   });
   return success(declaration);
@@ -991,7 +992,7 @@ export function prepareDefectFamilyVerification(
       kind: "blocked-declaration" as const,
       source: inventory,
       declaration,
-      failures: Object.freeze([head!, ...tail]) as NonEmpty<DefectFamilyFailure>,
+      failures: nonEmptyOf(head, ...tail),
     });
     verificationPlanCache.add(plan);
     return success(plan);
@@ -1046,7 +1047,7 @@ export function prepareDefectFamilyVerification(
     source: inventory,
     declaration,
     manifestDigest: manifest.value.manifestDigest,
-    commands: Object.freeze([firstCommand, ...otherCommands]) as NonEmpty<ProjectCommandAuthority>,
+    commands: nonEmptyOf(firstCommand, ...otherCommands),
   });
   verificationPlanCache.add(plan);
   return success(plan);
@@ -1377,7 +1378,7 @@ export function authorizeRemediationChecks(
     return check;
   });
   const [head, ...tail] = checks;
-  return success(Object.freeze([head, ...tail]) as NonEmpty<AuthorizedRemediationCheck>);
+  return success(nonEmptyOf(head, ...tail));
 }
 
 type RemediationProcessObservation = Readonly<{
@@ -1583,7 +1584,7 @@ function blockedAssessment(
     status: "blocked" as const,
     source: plan.source,
     declaration: plan.declaration,
-    failures: Object.freeze([head!, ...tail]) as NonEmpty<DefectFamilyFailure>,
+    failures: nonEmptyOf(head, ...tail),
   };
   const assessment = canonicalRecord({ ...fields, digest: digestJson(fields) });
   assessmentCache.add(assessment);
@@ -1678,7 +1679,7 @@ function evaluateDefectFamilyAccounting(
     declaration: plan.declaration,
     candidateWitnessDigest: candidate.digest,
     candidatePaths: evidence.candidatePaths,
-    repairedChecks: Object.freeze([firstCheck, ...otherChecks]) as NonEmpty<EngineObservedRepairedCheck>,
+    repairedChecks: nonEmptyOf(firstCheck, ...otherChecks),
     provenance: canonicalRecord({
       grouping: "DECLARED" as const,
       rootCause: "DECLARED" as const,

@@ -58,10 +58,10 @@ function reviewSlotAuthorityRoster(
     if (matches.length !== 1) {
       return refuse(`current Review Packet requires exactly one ${agent} slot, got ${matches.length}`);
     }
-    slots.push(Object.freeze({ agent, slot_id: matches[0]!.slotId, attempted: 1 as const }));
+    slots.push(Object.freeze({ agent, slot_id: matches[0].slotId, attempted: 1 as const }));
   }
   const [first, ...rest] = slots;
-  return { ok: true, value: Object.freeze([first!, ...rest]) };
+  return { ok: true, value: Object.freeze([first, ...rest]) };
 }
 
 /** The batch's spec-check attempt-1 authority: every Wave review batch opens with exactly one. */
@@ -156,13 +156,18 @@ export function installWaveReviewRunsTransition(
     const roster = reviewSlotAuthorityRoster(expectedAgents, authorities);
     if (!roster.ok) return roster;
     const slotAuthority = roster.value;
-    const currentSlot = (slot: LegacyReviewRunSlotAuthority): CurrentReviewRunSlotAuthority => {
-      const request = authorities.find(({ role }) => role === slot.agent)!;
-      return Object.freeze({ ...slot, request_id: request.requestId, context_digest: request.contextDigest });
+    const currentSlot = (slot: LegacyReviewRunSlotAuthority): readonly CurrentReviewRunSlotAuthority[] => {
+      const request = authorities.find(({ role }) => role === slot.agent);
+      return request === undefined ? [] : [Object.freeze({ ...slot, request_id: request.requestId, context_digest: request.contextDigest })];
     };
     const [firstSlot, ...remainingSlots] = slotAuthority;
+    const [firstCurrent] = currentSlot(firstSlot);
+    const remainingCurrent = remainingSlots.flatMap(currentSlot);
+    if (firstCurrent === undefined || remainingCurrent.length !== remainingSlots.length) {
+      return refuse(`Task ${task.id} current Review Packet lacks the exact reviewer roster`);
+    }
     const currentSlots: readonly [CurrentReviewRunSlotAuthority, ...CurrentReviewRunSlotAuthority[]] =
-      Object.freeze([currentSlot(firstSlot), ...remainingSlots.map(currentSlot)]);
+      Object.freeze([firstCurrent, ...remainingCurrent]);
     if (task.review_run !== undefined) {
       const run = task.review_run;
       const sameProtocol = registration.schemaVersion === 2

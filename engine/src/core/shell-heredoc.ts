@@ -127,13 +127,13 @@ const isFdDevicePath = (word: string): boolean => FD_DEVICE_PATH.test(unquote(wo
  *  heredoc body is the script. */
 function shFamilyExecutesStdin(args: readonly string[]): boolean {
   for (let i = 0; i < args.length; i++) {
-    const a = unquote(args[i]!);
+    const a = unquote(args[i]);
     if (a === "-s") return true;
     if (a === "-c") return false;
     if (a === "--") {
       // `bash -- file` = file; `bash -- /dev/stdin` = the bound body; `bash --` = stdin.
       if (i === args.length - 1) return true;
-      return isFdDevicePath(args[i + 1]!);
+      return isFdDevicePath(args[i + 1]);
     }
     if (a === "-") return true;
     if (a.startsWith("-")) continue;
@@ -147,7 +147,7 @@ function shFamilyExecutesStdin(args: readonly string[]): boolean {
  *  applet (`busybox cat`, `busybox awk`) treats stdin as data. */
 function busyboxExecutesStdin(args: readonly string[]): boolean {
   for (let i = 0; i < args.length; i++) {
-    const a = unquote(args[i]!);
+    const a = unquote(args[i]);
     if (a === "--") break;
     if (a.startsWith("-")) continue;
     const applet = headBase(a);
@@ -169,7 +169,7 @@ function interpreterExecutesStdin(head: string, args: readonly string[]): boolea
   const continueFlags = MODULE_CONTINUE_FLAGS[head] ?? [];
   const programFlags = MODULE_PROGRAM_FLAGS[head] ?? [];
   for (let i = 0; i < args.length; i++) {
-    const a = unquote(args[i]!);
+    const a = unquote(args[i]);
     if (a === "-") return true;
     if (inline.includes(a)) return false;
     // A file program supplied via a bound descriptor — `php -f /dev/stdin`,
@@ -220,8 +220,8 @@ export const readsProgramFromStdin = (head: string, args: readonly string[]): bo
 export function inlineProgramArg(head: string, args: readonly string[]): string | null {
   const inline = SH_FAMILY_HEADS.has(head) ? ["-c"] : INLINE_PROGRAM_FLAGS[head] ?? [];
   for (let i = 0; i < args.length; i++) {
-    const a = unquote(args[i]!);
-    if (inline.includes(a)) return i + 1 < args.length ? unquote(args[i + 1]!) : null;
+    const a = unquote(args[i]);
+    if (inline.includes(a)) return i + 1 < args.length ? unquote(args[i + 1]) : null;
     if (!a.startsWith("-") && a !== "-") return null;
   }
   return null;
@@ -266,7 +266,7 @@ function findClosingBrace(text: string, start: number): number {
   let depth = 1;
   let quote: '"' | "'" | null = null;
   for (let i = start; i < text.length; i++) {
-    const c = text[i]!;
+    const c = text[i];
     if (quote !== null) {
       if (quote !== "'" && c === "\\") { i++; continue; }
       if (c === quote) quote = null;
@@ -317,7 +317,7 @@ function openerLineGroups(line: string): readonly OpenerGroup[] {
   let i = 0;
   const n = line.length;
   while (i < n) {
-    const c = line[i]!;
+    const c = line[i];
     if (quote === "'") { if (c === "'") quote = null; i++; continue; }
     if (quote === '"') {
       if (c === "\\") { i += 2; continue; }
@@ -363,7 +363,7 @@ function pastSubstitutionSpan(line: string, i: number): number | null {
 
 /** Is `pos` outside the line or a word-boundary character? */
 const isWordBoundary = (line: string, pos: number): boolean =>
-  pos < 0 || pos >= line.length || /\s/.test(line[pos]!) || ";&|(){}".includes(line[pos]!);
+  pos < 0 || pos >= line.length || /\s/.test(line[pos]) || ";&|(){}".includes(line[pos]);
 
 /** Close the innermost open compound of `kind` and everything nested in it. */
 function popCompoundUntil(compound: string[], kind: string): void {
@@ -376,7 +376,7 @@ function popCompoundUntil(compound: string[], kind: string): void {
  *  opens/closes `if`/loop/`case` — pushing or popping `compound` (the
  *  caller's open-compound stack); null when `i` starts none of them. */
 function pastCompoundSyntax(line: string, i: number, compound: string[]): number | null {
-  const c = line[i]!;
+  const c = line[i];
   const top = compound[compound.length - 1];
   if (c === "{") { compound.push("{"); return i + 1; }
   if (c === "}") { if (top === "{") compound.pop(); return i + 1; }
@@ -415,7 +415,7 @@ const cutsGroup = (operator: ShellOperator): boolean =>
  *  reader. One nesting level — recursion re-enters for deeper spans. */
 function textReadsStdinViaSubstitution(text: string): boolean {
   for (let i = 0; i < text.length; i++) {
-    const c = text[i]!;
+    const c = text[i];
     if (c === "\\") { i++; continue; }
     if (c === "$" && text[i + 1] === "(") {
       const close = findClosingParen(text, i + 2);

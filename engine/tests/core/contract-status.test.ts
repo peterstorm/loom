@@ -8,10 +8,11 @@ import type { AcceptanceContract, AcceptanceTestcase, FrozenPathDigest } from ".
 import { contractStatusView, renderContractStatus } from "../../src/core/contract-status";
 import { NO_ACCEPTANCE_CONTRACTS } from "../../src/core/contract-status-types";
 import {
-  DEFAULT_PURE_MODULES,
+  isPureModule,
   handler as noIoHandler,
 } from "../../src/linter/programmatic/no-io-in-pure-modules";
 import type { Task, TaskGraph } from "../../src/types";
+import { LOOM_PURITY_SCOPE } from "../linter/loom-project-config";
 import { digest } from "../fixtures/acceptance-fixtures";
 import { contract as contractFixture, task as fixtureTask, type ContractOptions } from "../fixtures/contract-status-fixtures";
 import { graphFixture } from "../fixtures/task-lifecycle";
@@ -217,8 +218,8 @@ describe("contract-status module boundary", () => {
   it.each(["engine/src/core/contract-status.ts", "engine/src/core/contract-status-types.ts"])(
     "%s is enrolled as a pure module and passes the purity rule",
     (mod) => {
-      expect(DEFAULT_PURE_MODULES).toContain(mod);
-      expect(noIoHandler(readFileSync(resolve(REPO_ROOT, mod), "utf-8"), mod)).toEqual([]);
+      expect(isPureModule(mod, LOOM_PURITY_SCOPE)).toBe(true);
+      expect(noIoHandler(readFileSync(resolve(REPO_ROOT, mod), "utf-8"), mod, LOOM_PURITY_SCOPE)).toEqual([]);
     },
   );
 });

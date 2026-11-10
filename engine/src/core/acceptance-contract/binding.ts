@@ -120,9 +120,10 @@ export function contractBindingErrors(
     const contractTask = writer.value;
     const covered = coveredAnchors(declaration);
     resolved.push({ contractTask, covered });
-    const writes = byId.get(contractTask)!;
+    // contractWriter returns one of `tasks`' own ids, so the lookup always hits.
+    const claimed = byId.get(contractTask)?.spec_anchors ?? [];
     for (const anchor of covered) {
-      if (writes.spec_anchors.includes(anchor)) {
+      if (claimed.includes(anchor)) {
         errors.push(`${label}: ${contractTask} is ${contract.id}'s contract task but claims ${anchor} in spec_anchors — its tests ` +
           "are red by design; list it in spec_contributions and let the task that turns it green claim it");
       }

@@ -2,8 +2,10 @@
 /**
  * loom-lint — Run loom linter rules against a codebase.
  *
- * Generic runner that works in any project. Detects project type (Claude Code / Pi),
- * locates rules, and runs the full-tier linter across source files.
+ * Generic runner that works in any project. Finds the project root and its rules
+ * directory, and runs the full-tier linter across EVERY lintable file — tests
+ * included — minus the project's explicit, reasoned `exclude` list in
+ * config.json. Rules that do not apply to tests exclude them per rule.
  *
  * Usage:
  *   bun /path/to/loom/scripts/lint-project.ts [options] [file patterns...]
@@ -12,7 +14,9 @@
  *   --init          Create .claude/linter/rules/ with starter config (interactive)
  *   --tier=full     Run full tier (default: full)
  *   --tier=immediate  Run immediate tier only (regex rules, the import-boundary rules and switch-totality, fast)
- *   --no-baseline-check  Skip the grandfathered-baseline staleness pass
+ *   --no-baseline-check  Skip the staleness pass (grandfathered baselines and
+ *                   scoping entries — exclusions, pure roots, shells, boundaries —
+ *                   that no longer name anything)
  *   --write-baseline  Record every pre-existing totality site in the project's
  *                   config.json (switchTotalityBaseline, discriminantBranchingBaseline),
  *                   in every harness rules directory present, then exit
@@ -22,14 +26,14 @@
  *   --no-fix-hints  Hide fix hints
  *
  * Examples:
- *   bun lint-project.ts                    # Lint all source files
- *   bun lint-project.ts packages/core/     # Lint specific directory
+ *   bun lint-project.ts                    # Lint every lintable file in the project
+ *   bun lint-project.ts packages/core/     # Lint specific directory (exclusions still apply)
  *   bun lint-project.ts --init             # Setup linter config
  *   bun lint-project.ts --write-baseline   # Grandfather existing unproven switches/chains
  *   bun lint-project.ts --summary          # Just counts
  */
 
-import { resolve, join, extname, dirname, relative } from "node:path";
+import { resolve, join, extname, dirname, relative, sep } from "node:path";
 import { readdirSync, statSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 // The engine is loaded at runtime from THIS script's own loom installation, and
 // typed from the same modules: a type-only import erases at runtime, so the
@@ -37,6 +41,9 @@ import { readdirSync, statSync, readFileSync, existsSync, mkdirSync, writeFileSy
 // engine's own, checked by the compiler instead of mirrored by hand.
 import type * as LinterIndex from "../engine/src/linter/index.ts";
 import type * as LinterConfig from "../engine/src/linter/programmatic/config.ts";
+import type * as LinterLoader from "../engine/src/linter/loader.ts";
+import type * as ProjectScope from "../engine/src/linter/project-scope.ts";
+import type { ReasonedPath } from "../engine/src/linter/programmatic/config.ts";
 import type * as ProgrammaticRules from "../engine/src/linter/programmatic/index.ts";
 import type * as Baselines from "../engine/src/linter/programmatic/baseline.ts";
 import type * as BaselineConfig from "../engine/src/linter/programmatic/baseline-config.ts";
@@ -56,74 +63,98 @@ if (!existsSync(DEFAULT_RULES_DIR)) {
   process.exit(2);
 }
 
-const { lintFile }: typeof LinterIndex = await import(join(LOOM_ROOT, "engine/src/linter/index.ts"));
-const { loadProjectConfig, PROJECT_RULES_LAYOUTS }: typeof LinterConfig = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/config.ts"));
+const { lintFiles }: typeof LinterIndex = await import(join(LOOM_ROOT, "engine/src/linter/index.ts"));
+const { CLAUDE_PROJECT_RULES_DIR, PI_PROJECT_RULES_DIR, PROJECT_RULES_LAYOUTS }: typeof LinterConfig =
+  await import(join(LOOM_ROOT, "engine/src/linter/programmatic/config.ts"));
+const { loadProjectConfig }: typeof LinterLoader = await import(join(LOOM_ROOT, "engine/src/linter/loader.ts"));
+const { isLintableName, isNeverSourceDirectory, scopeOf, scopeDrift }: typeof ProjectScope =
+  await import(join(LOOM_ROOT, "engine/src/linter/project-scope.ts"));
 const { baselineOwners }: typeof ProgrammaticRules = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/index.ts"));
 const { staleBaselineEntries }: typeof Baselines = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/baseline.ts"));
 const { configWithBaselines, recordedBaselines }: typeof BaselineConfig =
   await import(join(LOOM_ROOT, "engine/src/linter/programmatic/baseline-config.ts"));
 
 // ---------------------------------------------------------------------------
-// Detect project root and harness type
+// Detect project root and rules directory
 // ---------------------------------------------------------------------------
 
+/**
+ * The project root: the nearest ancestor holding a linter rules directory
+ * (`.claude/linter/rules` or `.pi/linter/rules`), else the nearest ancestor
+ * holding `.git` (the repository root), else the starting directory. Running
+ * from a subdirectory such as `engine/` — which has its own package.json —
+ * still finds the repository's rules, so the same command lints the same tree
+ * wherever it is started.
+ */
 function findProjectRoot(startDir: string): string {
-  let dir = startDir;
-  while (dir !== "/") {
-    if (existsSync(join(dir, "package.json")) ||
-        existsSync(join(dir, ".git")) ||
-        existsSync(join(dir, ".claude")) ||
-        existsSync(join(dir, ".pi"))) {
-      return dir;
-    }
-    dir = dirname(dir);
-  }
-  return startDir;
-}
-
-function detectHarness(root: string): "claude" | "pi" {
-  if (existsSync(join(root, ".pi"))) return "pi";
-  return "claude";
+  const ancestors = (dir: string): string[] => dir === dirname(dir) ? [dir] : [dir, ...ancestors(dirname(dir))];
+  const chain = ancestors(resolve(startDir));
+  return chain.find((dir) => PROJECT_RULES_LAYOUTS.some((layout) => existsSync(join(dir, layout))))
+    ?? chain.find((dir) => existsSync(join(dir, ".git")))
+    ?? resolve(startDir);
 }
 
 const PROJECT_ROOT = findProjectRoot(process.cwd());
-const HARNESS = detectHarness(PROJECT_ROOT);
-const LINTER_DIR = join(PROJECT_ROOT, HARNESS === "pi" ? ".pi/linter" : ".claude/linter");
-const RULES_DIR = join(LINTER_DIR, "rules");
+const CLAUDE_RULES_DIR = join(PROJECT_ROOT, CLAUDE_PROJECT_RULES_DIR);
+const PI_RULES_DIR = join(PROJECT_ROOT, PI_PROJECT_RULES_DIR);
+
+/**
+ * The rules directory this run reads: the Claude Code layout when present (it
+ * is canonical), else the Pi layout, else the layout `--init` creates — the
+ * Pi one only in a project that has a `.pi` directory and no `.claude` one.
+ * Each harness's hook reads its own layout, so where BOTH exist they must hold
+ * the same rule files byte for byte (`harnessDivergence`): otherwise this run
+ * and one of the hooks would enforce different policies.
+ */
+function selectRulesDir(): string {
+  if (existsSync(CLAUDE_RULES_DIR)) return CLAUDE_RULES_DIR;
+  if (existsSync(PI_RULES_DIR)) return PI_RULES_DIR;
+  return existsSync(join(PROJECT_ROOT, ".pi")) && !existsSync(join(PROJECT_ROOT, ".claude")) ? PI_RULES_DIR : CLAUDE_RULES_DIR;
+}
+
+const RULES_DIR = selectRulesDir();
+
+/** The rule files (and config.json) that differ between the two harness copies, or none. */
+function harnessDivergence(): string[] {
+  if (!existsSync(CLAUDE_RULES_DIR) || !existsSync(PI_RULES_DIR)) return [];
+  const jsonFiles = (dir: string): string[] => readdirSync(dir).filter((name) => name.endsWith(".json")).sort();
+  const names = [...new Set([...jsonFiles(CLAUDE_RULES_DIR), ...jsonFiles(PI_RULES_DIR)])].sort();
+  const bytes = (dir: string, name: string): string | null =>
+    existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf-8") : null;
+  return names.filter((name) => bytes(CLAUDE_RULES_DIR, name) !== bytes(PI_RULES_DIR, name));
+}
 
 // ---------------------------------------------------------------------------
-// File walker
+// File walker — everything lintable, minus the project's explicit exclusions
 // ---------------------------------------------------------------------------
 
-const SKIP_DIRS = new Set([
-  "node_modules", ".git", ".claude", ".pi", "dist", "build", "out",
-  ".next", "target", ".gradle", "__pycache__",
-  ".direnv", ".devenv", ".nix-defexpr", "result",
-  "vendor", "coverage", ".turbo", ".cache",
-]);
+/** Project-relative, forward-slashed: the frame every config path is written in. */
+const projectPath = (absolute: string): string => relative(PROJECT_ROOT, absolute).split(sep).join("/");
 
-const SOURCE_EXTENSIONS = new Set([
-  ".ts", ".tsx", ".js", ".jsx", ".java", ".kt", ".scala",
-]);
+/** Every lintable file beneath `dir`, BEFORE exclusions. Directories that never
+ *  hold project source (`NEVER_SOURCE_DIRECTORIES`) are not entered. */
+function walkLintable(dir: string): string[] {
+  return readdirSync(dir).sort().flatMap((entry): string[] => {
+    if (isNeverSourceDirectory(entry)) return [];
+    const full = join(dir, entry);
+    const stat = statSync(full, { throwIfNoEntry: false });
+    if (stat === undefined) return [];
+    if (stat.isDirectory()) return walkLintable(full);
+    return stat.isFile() && isLintableName(entry) ? [full] : [];
+  });
+}
 
-function walkSource(dir: string, opts: { includeTests: boolean }): string[] {
-  const results: string[] = [];
-  try {
-    for (const entry of readdirSync(dir)) {
-      if (SKIP_DIRS.has(entry)) continue;
-      const full = join(dir, entry);
-      const stat = statSync(full, { throwIfNoEntry: false });
-      if (!stat) continue;
-      if (stat.isDirectory()) {
-        results.push(...walkSource(full, opts));
-      } else if (SOURCE_EXTENSIONS.has(extname(entry))) {
-        if (entry.endsWith(".d.ts")) continue;
-        if (!opts.includeTests && (entry.includes(".test.") || entry.includes(".spec."))) continue;
-        results.push(full);
-      }
-    }
-  } catch { /* skip unreadable dirs */ }
-  return results;
+type Scoped = Readonly<{ lint: readonly string[]; excluded: readonly Readonly<{ file: string; reason: string }>[] }>;
+
+/** Split candidate files into those linted and those an exclusion entry removes, with its reason. */
+function applyExclusions(files: readonly string[], exclusions: readonly ReasonedPath[]): Scoped {
+  const decided = files.map((file) => ({ file, decision: scopeOf(projectPath(file), exclusions) }));
+  return {
+    lint: decided.filter(({ decision }) => decision.kind === "lint").map(({ file }) => file),
+    excluded: decided.flatMap(({ file, decision }) => decision.kind === "excluded"
+      ? [{ file: projectPath(file), reason: `${decision.exclusion.path} — ${decision.exclusion.reason}` }]
+      : []),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -135,10 +166,12 @@ function walkSource(dir: string, opts: { includeTests: boolean }): string[] {
 function starterLinterConfig(hasTs: boolean, hasJava: boolean): Record<string, unknown> {
   const config: Record<string, unknown> = {};
   if (hasTs) {
+    // Directory roots (trailing `/`): every non-test file beneath is pure
+    // unless `impureModules` names it with its reason. No globs — a glob is
+    // refused, because it used to match nothing silently.
     config.pureModules = [
       "src/domain/",
       "src/types/",
-      "packages/*/src/types/",
     ];
     config.boundaries = [];
     config.maxFunctionLines = 50;
@@ -170,8 +203,11 @@ const INIT_NEXT_STEPS: readonly string[] = [
   "  4. Run this script again to lint your codebase",
   "",
   "Available config fields:",
+  "  exclude       — [{ path, reason }] never linted (vendored, generated)",
   "  boundaries    — import direction rules per module",
-  "  pureModules   — paths that must be side-effect free",
+  "  requireGovernance — roots where a file no boundary names is a violation",
+  "  pureModules   — roots/files that must be side-effect free",
+  "  impureModules — [{ path, reason }] shells inside the pure roots",
   "  maxFunctionLines — max function body length (default: 50)",
   "  switchTotalityModules — narrow switch-totality to these path prefixes",
   "  switchTotalityBaseline / discriminantBranchingBaseline — grandfathered sites",
@@ -216,7 +252,6 @@ interface CliOpts {
   json: boolean;
   summary: boolean;
   fixHints: boolean;
-  includeTests: boolean;
   baselineCheck: boolean;
   paths: string[];
 }
@@ -229,7 +264,6 @@ function parseArgs(args: string[]): CliOpts {
     json: false,
     summary: false,
     fixHints: true,
-    includeTests: false,
     baselineCheck: true,
     paths: [],
   };
@@ -242,7 +276,6 @@ function parseArgs(args: string[]): CliOpts {
     else if (arg === "--json") opts.json = true;
     else if (arg === "--summary") opts.summary = true;
     else if (arg === "--no-fix-hints") opts.fixHints = false;
-    else if (arg === "--include-tests") opts.includeTests = true;
     else if (arg === "--no-baseline-check") opts.baselineCheck = false;
     else if (!arg.startsWith("--")) opts.paths.push(arg);
     else {
@@ -272,15 +305,24 @@ function parseArgs(args: string[]): CliOpts {
  * config and keyed relative to its root, so the drift report means the same in
  * a target repository as in loom.
  */
-const owners = (): readonly BaselineOwner[] =>
-  baselineOwners(loadProjectConfig(existsSync(RULES_DIR) ? RULES_DIR : null), PROJECT_ROOT);
+/** The project's config, parsed strictly once; a refusal ends the run (exit 2). */
+function projectConfig(): LinterConfig.ProgrammaticConfig {
+  try {
+    return loadProjectConfig(existsSync(RULES_DIR) ? RULES_DIR : null);
+  } catch (error) {
+    console.error(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(2);
+  }
+}
 
-function baselineDrift(): string[] {
+const owners = (config: LinterConfig.ProgrammaticConfig): readonly BaselineOwner[] => baselineOwners(config, PROJECT_ROOT);
+
+function baselineDrift(config: LinterConfig.ProgrammaticConfig): string[] {
   const readSource = (path: string): string | null => {
     const absolute = join(PROJECT_ROOT, path);
     return existsSync(absolute) ? readFileSync(absolute, "utf-8") : null;
   };
-  return owners().flatMap((owner) =>
+  return owners(config).flatMap((owner) =>
     staleBaselineEntries(owner, readSource).map((key) =>
       `${owner.rule}: ${key} (no ${owner.site} matches it any more — delete the baseline entry)`));
 }
@@ -294,18 +336,19 @@ function baselineDrift(): string[] {
  * recorded and what the next config holds are the engine's pure decision
  * (`recordedBaselines`, `configWithBaselines`: every other field kept, an
  * empty list removed rather than written); this shell only walks, reads and
- * writes.
+ * writes. The walk is the lint walk — every lintable file minus the
+ * exclusions — so a baseline never records a site the linter does not read.
  *
  * The detectors ignore the current baseline, so a re-run after converting a
  * site drops its entry — the baseline only ever shrinks under this command
  * unless new unproven code was added, which the diff makes visible.
  */
-function writeBaseline(): void {
-  const projectOwners = owners();
+function writeBaseline(config: LinterConfig.ProgrammaticConfig): void {
+  const projectOwners = owners(config);
   const extensions = new Set(projectOwners.flatMap((owner) => owner.extensions));
-  const sources = walkSource(PROJECT_ROOT, { includeTests: false })
+  const sources = applyExclusions(walkLintable(PROJECT_ROOT), config.exclude ?? []).lint
     .filter((file) => extensions.has(extname(file)))
-    .map((file) => ({ path: relative(PROJECT_ROOT, file), content: readFileSync(file, "utf-8") }));
+    .map((file) => ({ path: projectPath(file), content: readFileSync(file, "utf-8") }));
   const recorded = recordedBaselines(projectOwners, sources);
 
   const harnessDirs = PROJECT_RULES_LAYOUTS
@@ -335,29 +378,47 @@ if (opts.init) {
   process.exit(0);
 }
 
+// The two harness copies must agree before either is trusted: each hook reads
+// its own, so a divergence means this run and one hook enforce different rules.
+const diverged = harnessDivergence();
+if (diverged.length > 0) {
+  console.error(`ERROR: ${CLAUDE_PROJECT_RULES_DIR} and ${PI_PROJECT_RULES_DIR} differ in: ${diverged.join(", ")} — each harness's hook reads its own copy, so they must be byte-identical`);
+  process.exit(2);
+}
+
+const config = projectConfig();
+
 if (opts.writeBaseline) {
-  writeBaseline();
+  writeBaseline(config);
   process.exit(0);
 }
 
-// Resolve project rules dir (null if doesn't exist — lintFile handles gracefully)
+// Resolve project rules dir (null if doesn't exist — lintFiles handles gracefully)
 const projectRulesDir = existsSync(RULES_DIR) ? RULES_DIR : null;
+const exclusions = config.exclude ?? [];
 
-// Collect files to lint
-let files: string[];
-if (opts.paths.length > 0) {
-  files = opts.paths.flatMap(pattern => {
+/** Candidate files: the explicit arguments (a file exactly; a directory walked),
+ *  or the whole project. The exclusion list applies to every candidate. */
+function candidates(): string[] {
+  if (opts.paths.length === 0) return walkLintable(PROJECT_ROOT);
+  return opts.paths.flatMap((pattern) => {
     const resolved = resolve(pattern);
     const stat = statSync(resolved, { throwIfNoEntry: false });
     if (!stat) {
       console.error(`WARNING: ${pattern} does not exist, skipping`);
       return [];
     }
-    if (stat.isDirectory()) return walkSource(resolved, { includeTests: opts.includeTests });
-    return [resolved];
+    return stat.isDirectory() ? walkLintable(resolved) : [resolved];
   });
-} else {
-  files = walkSource(PROJECT_ROOT, { includeTests: opts.includeTests });
+}
+
+const scoped = applyExclusions(candidates(), exclusions);
+const files = scoped.lint;
+
+if (!opts.json) {
+  for (const { file, reason } of opts.paths.length > 0 ? scoped.excluded : []) {
+    console.log(`  excluded: ${file} (${reason})`);
+  }
 }
 
 if (files.length === 0) {
@@ -366,7 +427,7 @@ if (files.length === 0) {
 }
 
 if (!opts.json && !opts.summary) {
-  console.log(`Linting ${files.length} files (tier: ${opts.tier}, project: ${relative(process.cwd(), PROJECT_ROOT) || "."})...\n`);
+  console.log(`Linting ${files.length} files (tier: ${opts.tier}, project: ${relative(process.cwd(), PROJECT_ROOT) || "."}, ${scoped.excluded.length} excluded by config)...\n`);
 }
 
 // ---------------------------------------------------------------------------
@@ -381,16 +442,18 @@ interface ViolationRecord {
   fixHint: string;
 }
 
+/** A batch audit, not a latency-bound hook: each file gets a generous budget,
+ *  so a loaded host cannot turn a clean file into a lint error. */
+const BATCH_TIMEOUT_MS = 10_000;
+
 const allViolations: ViolationRecord[] = [];
 let errorCount = 0;
 
-for (const file of files) {
-  const result = lintFile(file, opts.tier, DEFAULT_RULES_DIR, projectRulesDir);
-
+for (const [file, result] of lintFiles(files, opts.tier, DEFAULT_RULES_DIR, projectRulesDir, BATCH_TIMEOUT_MS)) {
   if (result.kind === "violations" && result.violations.length > 0) {
     for (const v of result.violations) {
       allViolations.push({
-        file: relative(PROJECT_ROOT, file),
+        file: projectPath(file),
         line: v.line,
         rule: v.rule,
         text: v.text,
@@ -400,7 +463,7 @@ for (const file of files) {
   } else if (result.kind === "error") {
     errorCount++;
     if (!opts.json) {
-      console.error(`  ERROR: ${relative(PROJECT_ROOT, file)}: ${result.message}`);
+      console.error(`  ERROR: ${projectPath(file)}: ${result.message}`);
     }
   }
 }
@@ -409,9 +472,13 @@ for (const file of files) {
 // Output
 // ---------------------------------------------------------------------------
 
-// Drift is independent of violations: a baseline entry can be stale while the
-// tier is clean, which is exactly the case that used to go unnoticed.
-const driftLines = opts.baselineCheck && opts.tier === "full" ? baselineDrift() : [];
+// Drift is independent of violations: a baseline entry or a scoping entry can
+// be stale while the tier is clean, which is exactly the case that used to go
+// unnoticed. Scoping drift is judged against the whole project's files, never
+// a targeted run's subset.
+const driftLines = opts.baselineCheck && opts.tier === "full"
+  ? [...baselineDrift(config), ...scopeDrift(config, walkLintable(PROJECT_ROOT).map(projectPath))]
+  : [];
 
 // ONE failure predicate for every output mode. A file the linter could not read
 // fails the run in each of them: the JSON and summary modes used to exit 0 on a
@@ -420,7 +487,7 @@ const failed = allViolations.length > 0 || errorCount > 0 || driftLines.length >
 const exitCode = failed ? 1 : 0;
 
 if (opts.json) {
-  console.log(JSON.stringify({ violations: allViolations, errorCount, baselineDrift: driftLines }, null, 2));
+  console.log(JSON.stringify({ violations: allViolations, errorCount, staleEntries: driftLines, excluded: scoped.excluded }, null, 2));
   process.exit(exitCode);
 }
 
@@ -433,10 +500,11 @@ if (opts.summary) {
   const filesWithViolations = new Set(allViolations.map(v => v.file)).size;
 
   console.log(`Files scanned: ${files.length}`);
+  console.log(`Files excluded by config: ${scoped.excluded.length}`);
   console.log(`Files with violations: ${filesWithViolations}`);
   console.log(`Total violations: ${allViolations.length}`);
   if (errorCount > 0) console.log(`Errors: ${errorCount}`);
-  if (driftLines.length > 0) console.log(`Stale baseline entries: ${driftLines.length}`);
+  if (driftLines.length > 0) console.log(`Stale entries: ${driftLines.length}`);
   console.log("");
   if (byRule.size > 0) {
     console.log("By rule:");
@@ -467,7 +535,7 @@ if (!failed) {
     console.log(`✗ ${allViolations.length} violation(s) in ${filesWithViolations} file(s)`);
   }
   if (driftLines.length > 0) {
-    console.log(`✗ ${driftLines.length} stale baseline entr${driftLines.length === 1 ? "y" : "ies"}`);
+    console.log(`✗ ${driftLines.length} stale entr${driftLines.length === 1 ? "y" : "ies"} (baselines or scoping)`);
   }
   if (errorCount > 0) {
     console.log(`⚠ ${errorCount} file(s) had lint errors`);

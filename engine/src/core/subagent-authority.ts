@@ -272,9 +272,9 @@ function helperInvocation(
   const cliArgs = loomCliArguments(head, args, literalOnly);
   if (cliArgs === null) return null;
   for (let index = 0; index + 1 < cliArgs.length; index++) {
-    const word = cliArgs[index]!;
+    const word = cliArgs[index];
     if (literalOnly ? hasRuntimePart(word) || !(wordViews(word)?.includes("helper") ?? false) : !wordMayBe(word, "helper")) continue;
-    const helper = helperNamed(cliArgs[index + 1]!);
+    const helper = helperNamed(cliArgs[index + 1]);
     if (helper === null || (literalOnly && helper === "unresolved")) continue;
     const operation = cliArgs[index + 2];
     return {
@@ -345,7 +345,7 @@ function literalTouches(path: string, root: AuthorityRoot, reach: boolean): bool
   if (reach && (path === "/" || root.path.startsWith(`${path}/`))) return true;
   if (!path.startsWith(`${root.path}/`)) return false;
   if (root.entries === "all") return true;
-  const first = path.slice(root.path.length + 1).split("/")[0]!;
+  const first = path.slice(root.path.length + 1).split("/")[0];
   return root.entries.includes(first);
 }
 
@@ -356,11 +356,11 @@ function globTouches(path: string, root: AuthorityRoot, reach: boolean, policy: 
   const glob = segmentsOf(path);
   const target = segmentsOf(root.path);
   const prefix = Math.min(glob.length, target.length);
-  for (let k = 0; k < prefix; k++) if (!segmentGlobMatches(glob[k]!, target[k]!, policy)) return false;
+  for (let k = 0; k < prefix; k++) if (!segmentGlobMatches(glob[k], target[k], policy)) return false;
   if (glob.length < target.length) return reach;
   if (glob.length === target.length) return true;
   if (root.entries === "all") return true;
-  const next = glob[target.length]!;
+  const next = glob[target.length];
   return root.entries.some((entry) => segmentGlobMatches(next, entry, policy));
 }
 
@@ -453,7 +453,7 @@ function textNamesRoot(text: string, scope: PathScope): string | null {
 /** Leading environment assignments of a simple command (`TMPDIR=/tmp cmd`). */
 function envAssignmentCount(words: readonly string[]): number {
   let count = 0;
-  while (count < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[count]!)) count++;
+  while (count < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[count])) count++;
   return count < words.length ? count : 0; // a bare assignment IS the command
 }
 
@@ -491,7 +491,7 @@ function redirectOperands(segment: string): readonly RedirectOperand[] {
   const words = shellWords(stripComment(segment).trim());
   const redirects: RedirectOperand[] = [];
   for (let index = 0; index < words.length; index++) {
-    const fused = splitFusedRedirect(words[index]!);
+    const fused = splitFusedRedirect(words[index]);
     const operator = fused === null ? undefined : REDIRECT_OPERATOR.exec(fused.rest)?.[0];
     if (fused === null || operator === undefined) continue;
     const inline = fused.rest.slice(operator.length);
@@ -581,7 +581,7 @@ function executedPrograms(head: string, args: readonly string[]): ExecutedProgra
   if (head === "eval") return { programs: [args.join(" ")], words: new Set(args) };
   if (head === "xargs") {
     let index = 0;
-    while (index < args.length && args[index]!.startsWith("-")) index += XARGS_VALUE_FLAGS.has(args[index]!) ? 2 : 1;
+    while (index < args.length && args[index].startsWith("-")) index += XARGS_VALUE_FLAGS.has(args[index]) ? 2 : 1;
     const command = args.slice(index);
     return command.length === 0 ? none : { programs: [command.join(" ")], words: new Set(command) };
   }
@@ -589,9 +589,9 @@ function executedPrograms(head: string, args: readonly string[]): ExecutedProgra
     const programs: string[] = [];
     const words = new Set<string>();
     for (let index = 0; index < args.length; index++) {
-      if (!FIND_EXEC_ACTIONS.has(args[index]!)) continue;
+      if (!FIND_EXEC_ACTIONS.has(args[index])) continue;
       const command: string[] = [];
-      for (index++; index < args.length && !/^(?:\\?;|\+)$/.test(args[index]!); index++) command.push(args[index]!);
+      for (index++; index < args.length && !/^(?:\\?;|\+)$/.test(args[index]); index++) command.push(args[index]);
       if (command.length > 0) programs.push(command.join(" "));
       for (const word of command) words.add(word);
     }
@@ -644,7 +644,7 @@ function readScriptWord(word: string, scope: PathScope, filesystem: SubagentFile
 function shebangInterpreter(text: string): string | null {
   const line = /^#!\s*(\S+)(?:\s+(\S+))?/.exec(text);
   if (line === null) return null;
-  const interpreter = headBase(line[1]!);
+  const interpreter = headBase(line[1]);
   return interpreter === "env" ? (line[2] === undefined ? null : headBase(line[2])) : interpreter;
 }
 
@@ -667,7 +667,7 @@ function executedFilePrograms(literalHead: string, scope: PathScope, filesystem:
  *  stdin, or no word). */
 function shellScriptWord(args: readonly string[]): string | null {
   for (let index = 0; index < args.length; index++) {
-    const arg = args[index]!;
+    const arg = args[index];
     if (arg === "-c" || arg === "-s" || arg === "-") return null;
     if (arg === "--") return args[index + 1] ?? null;
     if (SH_VALUE_FLAGS.has(arg)) { index++; continue; }
@@ -706,7 +706,7 @@ function pipedText(producers: readonly string[], scope: PathScope, filesystem: S
 /** The first program operand of an awk invocation (after its options). */
 function awkProgram(args: readonly string[]): string | null {
   for (let index = 0; index < args.length; index++) {
-    const arg = args[index]!;
+    const arg = args[index];
     if (arg === "-f") return null; // a program FILE: not literal code
     if (["-F", "-v", "-i", "-l"].includes(arg)) { index++; continue; }
     if (arg.startsWith("-")) continue;
@@ -728,7 +728,7 @@ function fedPrograms(
   scope: PathScope,
   filesystem: SubagentFilesystemView,
 ): readonly FedProgram[] {
-  const segment = chain[index]!;
+  const segment = chain[index];
   const { literalHead, head, args: words } = segmentCommand(segment);
   // A redirect fused with quoted text (`<<<'a b'`) survives the head
   // tokenizer as an argument word: it is stdin syntax, never a program word.
@@ -773,7 +773,7 @@ const ENGINE_AUTHORITY_MODULE =
 function codeAuthorityReason(code: string, context: SubagentAuthorityContext): string | null {
   const tokens = code.split(/[^A-Za-z0-9_./@:-]+/).filter((token) => token !== "");
   for (let index = 0; index < tokens.length; index++) {
-    const token = tokens[index]!;
+    const token = tokens[index];
     const helper = AUTHORITY_HELPERS.find((name) => name === tokens[index + 1]);
     if (token === "helper" && helper !== undefined) {
       const operation = tokens[index + 2];
@@ -929,15 +929,14 @@ function judgeLine(command: string, context: SubagentAuthorityContext, scope: Pa
       if (judged.kind === "refused") return judged.refusal;
       facts.push(judged.facts);
     }
-    const redirected = facts.find((fact) => fact.redirectTouch !== null);
-    if (redirected !== undefined) {
-      return { rule: "authority-path-write", segment: redirected.segment, path: redirected.redirectTouch! };
+    for (const fact of facts) {
+      if (fact.redirectTouch !== null) return { rule: "authority-path-write", segment: fact.segment, path: fact.redirectTouch };
     }
-    const touched = facts.find((fact) => fact.touches !== null);
-    if (touched === undefined) continue;
+    const touched = facts.find((fact) => fact.touches !== null)?.touches ?? null;
+    if (touched === null) continue;
     const writer = facts.find((fact) => !fact.readOnly);
     if (writer !== undefined) {
-      return { rule: "authority-path-write", segment: writer.segment, path: touched.touches! };
+      return { rule: "authority-path-write", segment: writer.segment, path: touched };
     }
   }
   return null;
@@ -1076,7 +1075,7 @@ function verifyInvocationOf(segment: string, invocation: HelperInvocation | null
     if (views === null || views.length !== 1) {
       return { kind: "unresolved", segment, reason: `argument ${JSON.stringify(word)} is completed by the shell at runtime` };
     }
-    args.push(views[0]!);
+    args.push(views[0]);
   }
   const operation = hasRuntimePart(invocation.operation) ? null : wordViews(invocation.operation);
   const staticVerify = invocation.helper === "security-audit" && operation?.length === 1 && operation[0] === "verify";

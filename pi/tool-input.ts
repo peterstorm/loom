@@ -12,6 +12,7 @@
 import { resolve } from "node:path";
 import type { AdmittedSpawnItem } from "../engine/src/core/spawn-admission";
 import { isRecord } from "../engine/src/core/plain-record";
+import { nonEmpty } from "../engine/src/core/orchestration-contract/identity";
 import { rosterAgentId } from "../engine/src/machine";
 import type { AgentId } from "../engine/src/machine/evidence";
 import {
@@ -86,7 +87,10 @@ export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
     const target = parsed.value[0];
     if (!paths.includes(target)) paths.push(target);
   }
-  return Object.freeze({ ok: true, value: Object.freeze(paths) as readonly [string, ...string[]] });
+  const targets = nonEmpty(paths);
+  return targets === null
+    ? Object.freeze({ ok: false, error: "write input must contain a target or a non-empty edits array" })
+    : Object.freeze({ ok: true, value: targets });
 }
 
 export function replacePiSpawnTask(raw: unknown, index: number, task: string): void {

@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { type RegexRule, type Rule, type Tier, type RuleSource, isRegexRule } from "./types";
 import { analyzeRegex } from "./safety";
 import { createProgrammaticRules } from "./programmatic/index";
-import { loadProjectConfig, projectRootOf } from "./programmatic/config";
+import { EMPTY_CONFIG, parseProjectConfig, projectRootOf, type ProgrammaticConfig } from "./programmatic/config";
 import { isDeclarativeRuleFile } from "./rule-sources";
 
 // --- Public API ---
@@ -83,6 +83,41 @@ export function loadRules(
   }
 
   return tier === "immediate" ? enabled.filter(isRegexRule) : enabled;
+}
+
+/**
+ * Reads the project-local linter config from a project rules directory: the
+ * shell half of `parseProjectConfig`. Returns EMPTY_CONFIG when the directory
+ * is null or holds no `config.json`; throws on an unreadable file, malformed
+ * JSON or a config the strict parse refuses (fail-closed — a broken config
+ * must never silently become "no config").
+ */
+export function loadProjectConfig(configDir: string | null): ProgrammaticConfig {
+  if (!configDir) return EMPTY_CONFIG;
+
+  const configPath = join(configDir, "config.json");
+  let content: string;
+  try {
+    content = readFileSync(configPath, "utf-8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return EMPTY_CONFIG;
+    throw new Error(
+      `Cannot read linter config at ${configPath}: ${e instanceof Error ? e.message : String(e)}. Check file permissions.`
+    );
+  }
+
+  let json: unknown;
+  try {
+    json = JSON.parse(content);
+  } catch (e) {
+    throw new Error(
+      `Malformed linter config at ${configPath}: ${e instanceof Error ? e.message : String(e)}`
+    );
+  }
+
+  const parsed = parseProjectConfig(json, configPath);
+  if (!parsed.ok) throw new Error(parsed.error);
+  return parsed.value;
 }
 
 // --- Internal Functions ---

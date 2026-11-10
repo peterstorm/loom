@@ -40,7 +40,7 @@ export function parsePhaseArtifacts(content: string, specDir?: string | null): P
         const isPlan = filePath.endsWith("/plan.md");
         const prevIsPlan = artifacts.plan_file?.endsWith("/plan.md") ?? false;
         if (!artifacts.plan_file || (isPlan && !prevIsPlan)
-            || (isPlan === prevIsPlan && filePath.length > artifacts.plan_file!.length)) {
+            || (isPlan === prevIsPlan && filePath.length > artifacts.plan_file.length)) {
           artifacts.plan_file = filePath;
         }
       }

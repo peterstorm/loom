@@ -26,7 +26,7 @@ import { parseSecurityFindings, type SecurityFinding } from "../../core/security
 import { parseVerificationVerdicts, type VerificationVerdict } from "../../core/security-adjudication";
 import { parseAuditReference, type AuditReference } from "../../core/security-verification";
 import { SECURITY_AUDIT_RUN_FILES, SECURITY_AUDIT_VERIFICATION_RUNS_DIR } from "../../core/audit-run-authority";
-import { readRunFileNoFollow } from "../../orchestration/no-follow-fs";
+import { readRunFileNoFollow } from "../../utils/no-follow-fs";
 
 /** The four documents adjudication reads, read once, plus the audit's identity. */
 export type AuditSnapshot = Readonly<{

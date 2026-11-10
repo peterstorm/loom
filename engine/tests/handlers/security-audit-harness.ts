@@ -67,7 +67,7 @@ export const readJson = <T>(out: string, file: string): T => JSON.parse(readFile
 
 /** The seed a test starts a run with, by index, so a unit id and its cell
  *  cannot drift: `unitIdFor(i)` is derived from exactly `seedFor(i)`. */
-export const seedFor = (index: number) => nSeeds(index + 1)[index]!;
+export const seedFor = (index: number) => nSeeds(index + 1)[index];
 export const unitIdFor = (index: number): string => canonicalCoverageId(seedFor(index).refs);
 
 /** Write a file under the run directory, creating its parents — how a test

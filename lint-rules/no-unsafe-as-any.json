@@ -1,0 +1,10 @@
+{
+  "kind": "regex",
+  "name": "no-unsafe-as-any",
+  "description": "Disallow `as any` — a cast to any switches the type checker off for every use of the value downstream; it is the silencing cast in its purest form",
+  "extensions": [".ts", ".tsx", ".mts", ".cts"],
+  "pattern": "\\bas\\s+any\\b",
+  "flags": "",
+  "fixHint": "Type the value: parse it (parse, don't validate), narrow it with a type guard, or use `unknown` and narrow. In a test feeding deliberately ill-typed input, say so with `as unknown as T`.",
+  "enabled": true
+}

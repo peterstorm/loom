@@ -107,7 +107,7 @@ function branchBody(line: string): string {
   let depth = 0;
   let quote: string | null = null;
   for (let index = open; index < line.length; index++) {
-    const char = line[index]!;
+    const char = line[index];
     if (quote !== null) {
       if (char === "\\") index++;
       else if (char === quote) quote = null;
@@ -202,7 +202,7 @@ function branchRuns(lines: readonly string[], tags: readonly string[]): readonly
   };
 
   for (let index = 0; index < lines.length; index++) {
-    const line = lines[index]!;
+    const line = lines[index];
     // Scope end BEFORE branch matching: the run is over whether or not this
     // line also opens a branch, and a `} else if` never undercuts runIndent.
     if (current !== null && closesEnclosingBlock(line, runIndent)) settle();

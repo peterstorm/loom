@@ -295,13 +295,13 @@ function sandboxScriptCall(words: readonly string[]): Readonly<{ script: string;
 function scriptNonce(args: readonly string[]): string | null {
   const nonces: string[] = [];
   for (let index = 0; index < args.length; index++) {
-    const word = unquote(args[index]!);
+    const word = unquote(args[index]);
     if (word === "--") break;
     if (word.startsWith("--nonce=")) nonces.push(unquote(word.slice("--nonce=".length)));
     else if (word === "--nonce") nonces.push(unquote(args[++index] ?? ""));
     else if (word.startsWith("--") && !word.includes("=")) index++; // the option's value
   }
-  return nonces.length === 1 && SANDBOX_NONCE_WORD.test(nonces[0]!) ? nonces[0]! : null;
+  return nonces.length === 1 && SANDBOX_NONCE_WORD.test(nonces[0]) ? nonces[0] : null;
 }
 
 /** Every sandbox-script invocation a command line makes, one per segment. */

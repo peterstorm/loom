@@ -165,7 +165,7 @@ function moveCopyOperands(args: readonly string[]): Readonly<{ operands: readonl
   let targetDirectory: string | null = null;
   let optionsDone = false;
   for (let i = 0; i < args.length; i++) {
-    const word = args[i]!;
+    const word = args[i];
     if (optionsDone || word === "-" || !word.startsWith("-")) {
       operands.push(word);
     } else if (word === "--") {
@@ -211,7 +211,7 @@ function collectMoveCopyTargets(segment: string, out: string[]): void {
     return;
   }
   if (operands.length < 2) return;
-  const destination = operands[operands.length - 1]!;
+  const destination = operands[operands.length - 1];
   const sources = operands.slice(0, -1);
   if (sources.length > 1 || destination.endsWith("/")) {
     for (const source of sources) out.push(insideDirectory(destination, source));

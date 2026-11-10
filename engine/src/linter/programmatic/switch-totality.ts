@@ -137,7 +137,7 @@ function lexLines(content: string): readonly LexedLine[] {
     };
     let quote: string | null = null;
     for (let at = 0; at < line.length; at++) {
-      const char = line[at]!;
+      const char = line[at];
       const pair = line.slice(at, at + 2);
       if (inBlockComment) {
         if (pair === "*/") { inBlockComment = false; blank(2); at++; }
@@ -145,7 +145,7 @@ function lexLines(content: string): readonly LexedLine[] {
       } else if (quote !== null) {
         text += char;
         quoted.push(true);
-        if (char === "\\" && at + 1 < line.length) { text += line[at + 1]!; quoted.push(true); at++; }
+        if (char === "\\" && at + 1 < line.length) { text += line[at + 1]; quoted.push(true); at++; }
         else if (char === quote) quote = null;
       } else if (pair === "//") {
         blank(line.length - at);
@@ -192,7 +192,7 @@ function scanSwitchLine({ text, quoted }: LexedLine, depth: number): LineScan {
   const nestedBodies: number[] = [];
   let level = depth;
   for (let at = 0; at < text.length; at++) {
-    const char = text[at]!;
+    const char = text[at];
     depthAt[at] = level;
     nestedAt[at] = nestedBodies.length;
     if (!quoted[at] && char === "{") {
@@ -256,7 +256,7 @@ function switchSpan(lines: readonly LexedLine[], startLine: number): SwitchSpan 
   let defaultText = "";
 
   for (let index = startLine; index < lines.length; index++) {
-    const line = lines[index]!;
+    const line = lines[index];
     const scan = scanSwitchLine(line, depth);
     const labels = ownArmLabels(line, scan);
     let next = 0;
@@ -269,7 +269,7 @@ function switchSpan(lines: readonly LexedLine[], startLine: number): SwitchSpan 
         inDefault = label.kind === "default";
         at = label.end - 1;
       } else if (inDefault && scan.ownBody[at]) {
-        defaultText += line.quoted[at] ? " " : line.text[at]!;
+        defaultText += line.quoted[at] ? " " : line.text[at];
       }
     }
     defaultText += "\n";
@@ -330,13 +330,13 @@ function unprovenSwitches(
   return Object.freeze(lines.flatMap((line, index): readonly UnprovenSwitch[] => {
     const head = SWITCH_HEAD.exec(line.text);
     if (head === null) return [];
-    const scrutinee = head[1]!;
+    const scrutinee = head[1];
     if (LANGUAGE_CLOSED.test(scrutinee)) return [];
     const span = switchSpan(lines, index);
     if (span.arms < options.minArms || span.proven) return [];
     return [{
       line: index + 1,
-      headText: rawLines[index]!.trim(),
+      headText: rawLines[index].trim(),
       scrutinee,
       arms: span.arms,
       key: baselineKey(relative, scrutinee),

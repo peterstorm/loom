@@ -39,6 +39,6 @@ export function waveBaseOf(tasks: readonly WaveBaseTask[], wave: number, owner: 
   if (missing.length > 0) {
     return failure({ kind: "missing-wave-base", detail: `Task ${missing.join(", ")} changed ${owner} but records no start_sha, so the owner's Wave base is unknown` });
   }
-  const [first, second, ...rest] = [...new Set(listing.map((task) => task.start_sha!))];
-  return second === undefined ? success({ kind: "commit", sha: first! }) : success({ kind: "merge-base", shas: [first!, second, ...rest] });
+  const [first, second, ...rest] = [...new Set(listing.flatMap((task) => task.start_sha === undefined ? [] : [task.start_sha]))];
+  return second === undefined ? success({ kind: "commit", sha: first }) : success({ kind: "merge-base", shas: [first, second, ...rest] });
 }

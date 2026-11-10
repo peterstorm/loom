@@ -27,17 +27,8 @@ import { spawn } from "node:child_process";
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/**
- * RPC framing: strict JSONL, split on \n only. A line that is not JSON is
- * retained as a `__non_json__` marker (first 120 characters), never dropped.
- *
- * @param {NodeJS.ReadableStream} stdout
- * @param {{ retain?: (event: any) => any }} [options]
- */
-export function makeBus(stdout, { retain = (event) => event } = {}) {
-  const events = [];
-  const waiters = [];
-  const listeners = new Set();
+/** Call `onLine` with every non-blank \n-terminated line `stdout` emits, in order. */
+function onJsonlLines(stdout, onLine) {
   let buffer = "";
   stdout.on("data", (data) => {
     buffer += data.toString();
@@ -45,34 +36,31 @@ export function makeBus(stdout, { retain = (event) => event } = {}) {
     while ((index = buffer.indexOf("\n")) !== -1) {
       const line = buffer.slice(0, index);
       buffer = buffer.slice(index + 1);
-      if (!line.trim()) continue;
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        events.push({ type: "__non_json__", line: line.slice(0, 120) });
-        continue;
-      }
-      events.push(retain(event));
-      const cursor = events.length;
-      for (const listener of listeners) listener(event);
-      for (let i = waiters.length - 1; i >= 0; i--) {
-        const waiter = waiters[i];
-        if (waiter.predicate(event)) {
-          waiters.splice(i, 1);
-          clearTimeout(waiter.timer);
-          waiter.resolve({ event, cursor });
-        }
-      }
+      if (line.trim()) onLine(line);
     }
   });
-  /**
-   * Resolve `{ event, cursor }` for the first retained event at or after the
-   * cursor `since` — or the first future event — matching `predicate`;
-   * reject after `ms` naming `label`. `cursor` is the position just past the
-   * matched event.
-   */
-  const next = (predicate, ms, label, since = 0) => {
+}
+
+/** Resolve (and retire) every pending waiter whose predicate `event` satisfies. */
+function settleWaiters(waiters, event, cursor) {
+  for (let i = waiters.length - 1; i >= 0; i--) {
+    const waiter = waiters[i];
+    if (waiter.predicate(event)) {
+      waiters.splice(i, 1);
+      clearTimeout(waiter.timer);
+      waiter.resolve({ event, cursor });
+    }
+  }
+}
+
+/**
+ * Resolve `{ event, cursor }` for the first retained event at or after the
+ * cursor `since` — or the first future event — matching `predicate`;
+ * reject after `ms` naming `label`. `cursor` is the position just past the
+ * matched event.
+ */
+function nextMatching(events, waiters) {
+  return (predicate, ms, label, since = 0) => {
     const at = events.findIndex((event, index) => index >= since && predicate(event));
     if (at !== -1) return Promise.resolve({ event: events[at], cursor: at + 1 });
     return new Promise((resolve, reject) => {
@@ -88,6 +76,33 @@ export function makeBus(stdout, { retain = (event) => event } = {}) {
       waiters.push(waiter);
     });
   };
+}
+
+/**
+ * RPC framing: strict JSONL, split on \n only. A line that is not JSON is
+ * retained as a `__non_json__` marker (first 120 characters), never dropped.
+ *
+ * @param {NodeJS.ReadableStream} stdout
+ * @param {{ retain?: (event: any) => any }} [options]
+ */
+export function makeBus(stdout, { retain = (event) => event } = {}) {
+  const events = [];
+  const waiters = [];
+  const listeners = new Set();
+  onJsonlLines(stdout, (line) => {
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      events.push({ type: "__non_json__", line: line.slice(0, 120) });
+      return;
+    }
+    events.push(retain(event));
+    const cursor = events.length;
+    for (const listener of listeners) listener(event);
+    settleWaiters(waiters, event, cursor);
+  });
+  const next = nextMatching(events, waiters);
   return {
     events,
     next,

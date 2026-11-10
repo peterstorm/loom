@@ -302,9 +302,9 @@ export function taskExecutionOwnershipError(
   }
 
   for (let leftIndex = 0; leftIndex < requestedTasks.length; leftIndex++) {
-    const left = requestedTasks[leftIndex]!;
+    const left = requestedTasks[leftIndex];
     for (let rightIndex = leftIndex + 1; rightIndex < requestedTasks.length; rightIndex++) {
-      const right = requestedTasks[rightIndex]!;
+      const right = requestedTasks[rightIndex];
       if (left.wave !== right.wave) continue;
       const overlap = declaredPathOverlap(left, right);
       if (overlap === undefined) continue;

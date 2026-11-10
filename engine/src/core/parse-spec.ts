@@ -675,7 +675,7 @@ export function parseSpec(markdown: string): SpecParseResult {
     // The ranges are disjoint and sorted by start, and the lines arrive in
     // document order: advancing one cursor past expired ranges makes the
     // membership test O(1) amortized instead of O(ranges) per line.
-    while (rangeIndex < collectedRanges.length && collectedRanges[rangeIndex]!.end <= documentLine) {
+    while (rangeIndex < collectedRanges.length && collectedRanges[rangeIndex].end <= documentLine) {
       rangeIndex += 1;
     }
     const range = collectedRanges[rangeIndex];

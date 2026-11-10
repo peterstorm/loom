@@ -206,7 +206,7 @@ function unwrapWrapper(tokens: readonly string[]): readonly string[] | null {
   const consume = WRAPPER_FLAG_ARGS[head] ?? [];
   let i = 1;
   while (i < tokens.length) {
-    const t = tokens[i]!;
+    const t = tokens[i];
     if (t === "--") { i++; break; }
     if (head === "env" && (t === "-S" || t === "--split-string")) {
       // `env -S 'bash -c …'` / `env --split-string '…'`: the option VALUE is
@@ -252,7 +252,7 @@ export function resolvedInterpreter(
   // interpreter resolves. (This runs on the unquoted token; a word QUOTED
   // around its operator — a command literally named `bash<<x` — mis-splits
   // to `bash`, which only errs fail-closed: the body is judged as a script.)
-  const rawHead = unquote(tokens[0]!);
+  const rawHead = unquote(tokens[0]);
   const split = splitFusedRedirect(rawHead);
   return { head: headBase(unescapeCommandWord(split?.head ?? rawHead)), args: tokens.slice(1) };
 }
@@ -340,7 +340,7 @@ const REDIRECT_OPS = ["<<<", "<<-", "<<", ">>", "<>", ">&", ">", "<"] as const;
 export function splitFusedRedirect(word: string): { readonly head: string; readonly rest: string } | null {
   let quote: '"' | "'" | "`" | null = null;
   for (let i = 0; i < word.length; i++) {
-    const c = word[i]!;
+    const c = word[i];
     if (quote !== null) {
       if (quote !== "'" && c === "\\") { i++; continue; }
       if (c === quote) quote = null;
@@ -372,7 +372,7 @@ const FUSED_REDIRECT = /^(?:[0-9]+[<>]|[<>]|&>)[^\s]*$/;
 function commandArgs(words: readonly string[], from: number): readonly string[] {
   const args: string[] = [];
   for (let k = from; k < words.length; k++) {
-    const w = words[k]!;
+    const w = words[k];
     if (w === ")" || w === "}") continue; // compound closes are syntax, never args
     if (PURE_REDIRECT.test(w)) { k++; continue; } // operator + target/delimiter
     if (FUSED_REDIRECT.test(w)) continue; // `3>file`, `2>&1`, `<<'EOF'`
@@ -406,7 +406,7 @@ export function analyzeCommandHead(segment: string): { head: string; args: reado
   let i = 0;
   let inCase = false;
   for (let guard = 0; guard < 8 && i < words.length; guard++) {
-    const raw = words[i]!;
+    const raw = words[i];
     const w = unquote(raw);
     if (w === "case") { inCase = true; i++; continue; }
     // `coproc cmd …` runs cmd; `coproc NAME { …; }` / `coproc NAME ( … )`
@@ -424,7 +424,7 @@ export function analyzeCommandHead(segment: string): { head: string; args: reado
     // a real word after it. A `)` followed only by redirects is a subshell
     // close (`( x ) << 'EOF'`), not a pattern terminator.
     if (words[i + 1] === ")" && i + 2 < words.length && words[i + 2] !== ")" &&
-        !PURE_REDIRECT.test(words[i + 2]!) && !FUSED_REDIRECT.test(words[i + 2]!)) {
+        !PURE_REDIRECT.test(words[i + 2]) && !FUSED_REDIRECT.test(words[i + 2])) {
       i += 2;
       continue;
     }
@@ -440,5 +440,5 @@ export function analyzeCommandHead(segment: string): { head: string; args: reado
     break;
   }
   if (i >= words.length) return null;
-  return { head: commandName(words[i]!), args: commandArgs(words, i + 1) };
+  return { head: commandName(words[i]), args: commandArgs(words, i + 1) };
 }

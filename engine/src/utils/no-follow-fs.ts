@@ -27,10 +27,13 @@
  * `/var` are system symlinks, so a strict rule applied from the filesystem
  * root would refuse every real run directory.
  *
- * These live in the orchestration layer because both the panel helpers and the
- * anchored `RunDirHandle` need them. ADR-0004 assigns anchored filesystem
- * effects to this narrow orchestration adapter; handlers import them from here
- * rather than recreating no-follow authority at each call site.
+ * These live in `utils/` — the lowest shell layer, importing node builtins
+ * only — because every shell layer needs them: the orchestration adapters (the
+ * anchored `RunDirHandle`, panel and report stores, as ADR-0004 assigns), the
+ * machine's task-graph pointer, the protected state writer, the CLI and the
+ * hook handlers. Placing them here keeps every one of those import edges
+ * pointing inward; callers import them rather than recreating no-follow
+ * authority at each call site.
  */
 
 import {

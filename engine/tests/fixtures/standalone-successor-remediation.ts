@@ -60,7 +60,7 @@ async function publishOriginalReview(runsRoot: string) {
   const source = value(handles.createRunDirectory(runsRoot, "source"));
   const started = await standalone.startStandaloneFacade(source, { kind: "types", files: ["src/repair.mjs"], dryRun: false });
   if (!started.ok) throw Error(started.message);
-  const critical = { ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, file: "src/repair.mjs", line: 1 };
+  const critical = { ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0], file: "src/repair.mjs", line: 1 };
   for (const [index, { authority }] of (started.action as Action).requests.entries()) {
     await capture(source, authority, { schemaVersion: 2, kind: "standalone-review", findings: index === 0 ? [
       { ...critical, claim: "Original surviving assertion" }, { ...critical, claim: "Original refuted assertion" },
@@ -73,7 +73,7 @@ async function publishOriginalReview(runsRoot: string) {
   if (!panel.ok || (panel.action as Action).kind !== "spawn-batch") throw Error(JSON.stringify(panel));
   for (const { authority } of (panel.action as Action).requests) {
     const packet = value(source.readContext(authority.contextDigest));
-    const context = JSON.parse(Buffer.from(packet.fixedContext[0]!.bytes).toString());
+    const context = JSON.parse(Buffer.from(packet.fixedContext[0].bytes).toString());
     await capture(source, authority, { criterion: context.lens, verdicts: context.findings.map((finding: { id: string; claim: string }) => ({
       finding_id: finding.id, verdict: finding.claim === "Original refuted assertion" ? "refuted" : "upheld", reasoning: `Exact original ${context.lens} reason`,
     })) });
@@ -115,14 +115,20 @@ export async function publishedSuccessorForRemediation(root: string, mode: "comp
   const issued = await standalone.startPreparedStandaloneSuccessor(successor, prepared);
   if (!issued.ok) throw Error(issued.message);
   const requests = (issued.action as Action).requests;
-  const packet = value(successor.readStandaloneSuccessorContext(requests[0]!.authority.contextDigest));
-  const visible = JSON.parse(Buffer.from(packet.fixedContext.find(row => row.label === "standalone-lineage")!.bytes).toString());
+  const packet = value(successor.readStandaloneSuccessorContext(requests[0].authority.contextDigest));
+  const lineageSection = packet.fixedContext.find(row => row.label === "standalone-lineage");
+  if (lineageSection === undefined) throw new Error("successor context carries no standalone-lineage section");
+  const visible = JSON.parse(Buffer.from(lineageSection.bytes).toString());
   const payload: StandaloneReviewerPayloadV3 = { schemaVersion: 3, kind: "standalone-successor-review",
     lineageDigest: visible.lineageDigest, snapshotDigest: visible.snapshotDigest, findings: [],
     priorAssessments: originalLineage.inventory.map((row, index) => {
       const origin = lineage.standaloneOriginReference(row.origin);
-      if (index === 1) return mode === "limited" ? { origin, verdict: "not-assessable", reason: "Current applicability unavailable" }
-        : { origin, verdict: "retained", decisionDigest: lineage.standaloneDecisionReference(row.history.at(-1)!), reason: "Original refutation still applies" };
+      if (index === 1) {
+        if (mode === "limited") return { origin, verdict: "not-assessable", reason: "Current applicability unavailable" };
+        const latest = row.history.at(-1);
+        if (latest === undefined) throw new Error("a retained lineage row has no decision history");
+        return { origin, verdict: "retained", decisionDigest: lineage.standaloneDecisionReference(latest), reason: "Original refutation still applies" };
+      }
       if (index === 3 || (index === 0 && mode === "active")) return { origin, verdict: "still-present", reason: "Original assertion remains applicable" };
       return { origin, verdict: "repaired", reason: "Verified relevant changed implementation", change: { path: "src/repair.mjs", description: "Predicate now returns true" } };
     }),

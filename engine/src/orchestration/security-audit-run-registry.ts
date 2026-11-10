@@ -31,7 +31,7 @@ import { PERSISTENT_SUBAGENT_STORES } from "../config";
 import { sha256Hex } from "../core/digest";
 import { observePathPresence } from "../utils/path-presence";
 import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
-import type { AnchoredDirectory } from "./no-follow-fs";
+import type { AnchoredDirectory } from "../utils/no-follow-fs";
 import {
   describeStoreError,
   isEntryName,

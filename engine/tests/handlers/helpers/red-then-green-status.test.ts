@@ -46,9 +46,9 @@ import type { RedThenGreenGap } from "../../../src/core/red-then-green-types";
 import { UNKNOWN_TASK_PREFIX } from "../../../src/core/stop-check-plan-types";
 import type { FrozenVerificationManifest } from "../../../src/core/verification-manifest";
 import { COVERED_BY_ACCEPTANCE_CONTRACT } from "../../../src/core/verification-policy";
-import { WHITELISTED_HELPERS } from "../../../src/config";
 import { KNOWN_HANDLERS, PI_RUNTIME_HANDSHAKE_ROUTES, piRuntimeHandshakeRequired } from "../../../src/handler-routes";
-import { DEFAULT_PURE_MODULES } from "../../../src/linter/programmatic/no-io-in-pure-modules";
+import { isPureModule } from "../../../src/linter/programmatic/no-io-in-pure-modules";
+import { LOOM_PURITY_SCOPE } from "../../linter/loom-project-config";
 import type { Evidence } from "../../../src/machine/types";
 import { StateManager } from "../../../src/state-manager";
 import type { HookResult, Task, TaskGraph } from "../../../src/types";
@@ -76,6 +76,7 @@ import {
   waivedTask,
 } from "../../fixtures/red-then-green-status-fixtures";
 import { graphFixture, protectedGraphFixture, satisfiedProof, taskFixture } from "../../fixtures/task-lifecycle";
+import { WHITELISTED_HELPERS } from "../../../src/core/guard-state-file";
 
 // --- Fixtures unique to the helper ---
 
@@ -209,10 +210,10 @@ describe("red-then-green-status helper routing", () => {
     expect(typeof redThenGreenStatus).toBe("function");
   });
 
-  it("FR-006: the Red-Then-Green Status core is enrolled in the no-io-in-pure-modules defaults", () => {
-    expect(DEFAULT_PURE_MODULES).toContain("engine/src/core/red-then-green-status.ts");
+  it("FR-006: the Red-Then-Green Status core is held to purity by Loom's no-io-in-pure-modules scope", () => {
+    expect(isPureModule("engine/src/core/red-then-green-status.ts", LOOM_PURITY_SCOPE)).toBe(true);
     // The one module of its import closure not enrolled before it: the duty's owner.
-    expect(DEFAULT_PURE_MODULES).toContain("engine/src/core/implementation-application.ts");
+    expect(isPureModule("engine/src/core/implementation-application.ts", LOOM_PURITY_SCOPE)).toBe(true);
   });
 });
 

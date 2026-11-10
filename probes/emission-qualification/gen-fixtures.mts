@@ -14,7 +14,8 @@ import { buildManifest, MANIFEST_PATH, renderManifest } from "./fixture-manifest
 const manifest = buildManifest();
 mkdirSync(dirname(MANIFEST_PATH), { recursive: true });
 writeFileSync(MANIFEST_PATH, renderManifest(manifest));
-console.log(`wrote ${manifest.length} fixtures to fixtures/manifest.json`);
+// The report IS this generator's interface: written to stdout as its output.
+process.stdout.write(`wrote ${manifest.length} fixtures to fixtures/manifest.json\n`);
 for (const entry of manifest) {
-  console.log(`  ${entry.registeredToolName}: schema ${(entry.schemaBytes.length / 1024).toFixed(1)}KB digest ${entry.schemaDigest.slice(0, 16)}…`);
+  process.stdout.write(`  ${entry.registeredToolName}: schema ${(entry.schemaBytes.length / 1024).toFixed(1)}KB digest ${entry.schemaDigest.slice(0, 16)}…\n`);
 }

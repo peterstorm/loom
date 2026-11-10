@@ -32,7 +32,7 @@ import {
 } from "../../core/subagent-authority";
 import { registeredSecurityAuditRuns } from "../../orchestration/security-audit-run-registry";
 import { AUTHORITY_HELPER_OPERATIONS, HARNESS_HOOK_ROUTES } from "./subagent-authority-operations";
-import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
+import { readRunBytesNoFollow } from "../../utils/no-follow-fs";
 import { parsePreToolUseInput } from "./pre-tool-use-input";
 
 const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -107,7 +107,7 @@ export const GUARD_FILESYSTEM: SubagentFilesystemView = Object.freeze({
 const canonicalCwd = (cwd: unknown): string | null => {
   if (typeof cwd !== "string" || !isAbsolute(cwd)) return null;
   const forms = spellings(cwd);
-  return forms[forms.length - 1]!;
+  return forms[forms.length - 1];
 };
 
 /**

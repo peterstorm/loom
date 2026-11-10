@@ -32,7 +32,7 @@ import { admitAnchoredRunAuthority, chargePredecessorBytes, enterPredecessorRun,
   predecessorFrozenSourceText, predecessorReadBound, predecessorTraversal, resumeAfterChildWalk,
   type PredecessorTraversal } from "../../../core/standalone-predecessor-chain";
 import { readStandaloneReviewedSource, replayStandaloneCliCaptures } from "./standalone-evidence";
-import { readRunBytesNoFollow } from "../../../orchestration/no-follow-fs";
+import { readRunBytesNoFollow } from "../../../utils/no-follow-fs";
 import { openRegisteredRunDirectory, type RunDirHandle } from "../../../orchestration/run-directory-handle";
 import { readStoredContextPacketFile } from "../../../orchestration/stored-context-packets";
 import { parsedAuthority, parseRegistration, sameRegisteredStandalonePrograms } from "./registration";

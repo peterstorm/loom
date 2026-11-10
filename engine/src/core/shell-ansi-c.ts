@@ -34,6 +34,27 @@ export function findAnsiCClose(text: string, start: number): number {
  * `xy`). An unknown escape drops the backslash and keeps the char
  * (reveal-monotonic).
  */
+/** A numeric escape's grammar: where its digits start (after the backslash),
+ *  which digits, their radix, how the value is reduced, and how it decodes. */
+type NumericEscape = Readonly<{
+  offset: number;
+  digits: RegExp;
+  radix: number;
+  reduce: (value: number) => number;
+  decode: (code: number) => string;
+}>;
+
+const asIs = (value: number): number => value;
+
+/** The numeric escape introduced by `n` (`\xHH`, `\uHHHH`, `\UHHHHHHHH`, `\NNN`), or null. */
+function numericEscape(n: string): NumericEscape | null {
+  if (n === "x") return { offset: 2, digits: /^[0-9a-fA-F]{1,2}/, radix: 16, reduce: asIs, decode: String.fromCharCode };
+  if (n === "u") return { offset: 2, digits: /^[0-9a-fA-F]{1,4}/, radix: 16, reduce: asIs, decode: String.fromCodePoint };
+  if (n === "U") return { offset: 2, digits: /^[0-9a-fA-F]{1,8}/, radix: 16, reduce: asIs, decode: String.fromCodePoint };
+  if (n >= "0" && n <= "7") return { offset: 1, digits: /^[0-7]{1,3}/, radix: 8, reduce: (value) => value & 0xff, decode: String.fromCharCode };
+  return null;
+}
+
 export function decodeAnsiC(body: string): string {
   const NAMED: Readonly<Record<string, string>> = {
     a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", n: "\n",
@@ -50,31 +71,16 @@ export function decodeAnsiC(body: string): string {
       out += "\\";
       break;
     }
-    if (n === "x") {
-      const hex = body.slice(i + 2).match(/^[0-9a-fA-F]{1,2}/);
-      if (hex) {
-        const code = parseInt(hex[0], 16);
+    const numeric = numericEscape(n);
+    if (numeric !== null) {
+      const digits = body.slice(i + numeric.offset).match(numeric.digits);
+      if (digits) {
+        const code = numeric.reduce(parseInt(digits[0], numeric.radix));
         if (code === 0) return out; // bash truncates the body at a NUL
-        out += String.fromCharCode(code);
-        i += 1 + hex[0].length;
+        out += numeric.decode(code);
+        i += numeric.offset - 1 + digits[0].length;
         continue;
       }
-    } else if (n === "u" || n === "U") {
-      const hex = body.slice(i + 2).match(n === "u" ? /^[0-9a-fA-F]{1,4}/ : /^[0-9a-fA-F]{1,8}/);
-      if (hex) {
-        const code = parseInt(hex[0], 16);
-        if (code === 0) return out; // bash truncates the body at a NUL
-        out += String.fromCodePoint(code);
-        i += 1 + hex[0].length;
-        continue;
-      }
-    } else if (n >= "0" && n <= "7") {
-      const oct = body.slice(i + 1).match(/^[0-7]{1,3}/)!;
-      const code = parseInt(oct[0], 8) & 0xff;
-      if (code === 0) return out; // bash truncates the body at a NUL
-      out += String.fromCharCode(code);
-      i += oct[0].length;
-      continue;
     } else if (n in NAMED) {
       out += NAMED[n];
       i++;

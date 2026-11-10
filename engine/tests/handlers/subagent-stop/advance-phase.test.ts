@@ -12,7 +12,8 @@ import advancePhaseHandler, {
 } from "../../../src/handlers/subagent-stop/advance-phase";
 import { parseSpecArtifactDirectory } from "../../../src/core/phase-artifact-paths";
 import { findFile } from "../../../src/utils/find-file";
-import { CLARIFY_THRESHOLD, PHASE_ORDER, SUBAGENT_DIR } from "../../../src/config";
+import { PHASE_ORDER, SUBAGENT_DIR } from "../../../src/config";
+import { CLARIFY_THRESHOLD } from "../../../src/core/phase-policy";
 import { ARCH_PANEL_AGENTS, PHASE_AGENT_MAP } from "../../../src/core/agent-catalog-projections";
 import { stripNamespace } from "../../../src/utils/strip-namespace";
 import type { Phase, TaskGraph } from "../../../src/types";

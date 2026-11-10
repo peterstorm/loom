@@ -13,7 +13,7 @@ const reviewerPayloadV2 = (claim: string) =>
   reviewerPayloadV2Schema.parse({
     schemaVersion: 2,
     kind: "standalone-review",
-    findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim }],
+    findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0], claim }],
   });
 export const validReviewerArgumentsV2 = (claim: string): unknown => reviewerPayloadV2(claim);
 
@@ -55,7 +55,7 @@ export const validRefutationArguments = (criterion: string): unknown => ({
 export const whitespaceOnlyArguments = (kind: PayloadProducerKindName): unknown => {
   switch (kind) {
     case "reviewer-payload": {
-      const finding = reviewerPayloadV2("real claim").findings[0]!;
+      const finding = reviewerPayloadV2("real claim").findings[0];
       return { schemaVersion: 2, kind: "standalone-review", findings: [{ ...finding, claim: "   " }] };
     }
     case "judge-verdict":

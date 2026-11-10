@@ -27,6 +27,7 @@ import {
 import { parseTranscript } from "../../parsers/parse-transcript";
 import { parseFilesModified } from "../../parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../parsers/parse-bash-test-output";
+import { readPersistedOutput } from "../../utils/persisted-output";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 import {
   epochOf,
@@ -348,7 +349,7 @@ export const runUpdateTaskStatus = async (
 
   const transcript = parseTranscript(transcriptContent);
   const rawFilesModified = parseFilesModified(transcriptContent);
-  const bashTestOutput = parseBashTestOutput(transcriptContent);
+  const bashTestOutput = parseBashTestOutput(transcriptContent, readPersistedOutput);
 
   // Modern identity comes only from the snapshotted sidecar. Transcript and
   // sole-executing inference remain compatibility-only for legacy graphs.

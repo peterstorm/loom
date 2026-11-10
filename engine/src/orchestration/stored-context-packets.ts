@@ -14,7 +14,7 @@ import { dirname, join } from "node:path";
 import { withStoredSectionBytes } from "../core/context-packets";
 import type { DomainResult } from "../core/orchestration-contract";
 import type { PublishedPacketFile } from "../core/predecessor-archive";
-import { readRunBytesNoFollow } from "./no-follow-fs";
+import { readRunBytesNoFollow } from "../utils/no-follow-fs";
 
 /** The Run Directory child holding section blobs, one file per section digest. */
 export const CONTEXT_SECTION_BLOBS = "blobs";

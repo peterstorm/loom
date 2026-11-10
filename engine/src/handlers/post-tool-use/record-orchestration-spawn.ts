@@ -71,7 +71,7 @@ export async function recordClaudeSpawnCorrelation(
     return explicit.ok ? { kind: "passthrough" } : { kind: "error", message: explicit.message };
   }
   if (markers.length !== 1) return { kind: "error", message: "Claude orchestration prompt must carry exactly one LOOM_REQUEST_ID marker" };
-  const run = resolveClaudeSpawnRun(context, markers[0]!);
+  const run = resolveClaudeSpawnRun(context, markers[0]);
   if (!run.ok) return { kind: "error", message: run.message };
 
   const rawRole = toolInput?.["subagent_type"] ?? toolInput?.["agent"];
@@ -83,9 +83,9 @@ export async function recordClaudeSpawnCorrelation(
   }
 
   const recorded = await recordClaudeSpawnCorrelator(run.value, {
-    requestId: markers[0]!,
+    requestId: markers[0],
     role,
-    nativeId: nativeIds[0]!,
+    nativeId: nativeIds[0],
   });
   return recorded.ok ? { kind: "allow" } : { kind: "error", message: recorded.message };
 }

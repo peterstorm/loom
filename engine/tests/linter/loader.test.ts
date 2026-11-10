@@ -431,7 +431,7 @@ describe("loadRules", () => {
 
     it("defaults flags to empty string when not provided", () => {
       const ruleData = makeValidRule({ name: "no-flags" });
-      delete (ruleData as any).flags;
+      delete ruleData.flags;
       writeRule(defaultDir, "noflag.json", ruleData);
 
       const rules = loadRules(defaultDir, null, "full", { includeProgrammatic: false }) as RegexRule[];
@@ -476,7 +476,7 @@ describe("loadRules", () => {
 
     it("absent/undefined flags defaults to empty string", () => {
       const ruleData = makeValidRule({ name: "no-flags-rule" });
-      delete (ruleData as any).flags;
+      delete ruleData.flags;
       writeRule(defaultDir, "noflag.json", ruleData);
 
       const rules = loadRules(defaultDir, null, "full", { includeProgrammatic: false }) as RegexRule[];

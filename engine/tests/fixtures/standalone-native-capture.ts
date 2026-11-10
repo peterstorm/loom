@@ -40,14 +40,14 @@ async function nativeBatchCapturer(root: string, harness: "claude" | "pi", sessi
       if (calls.some(result => result !== undefined)) throw Error(`native spawn refused: ${JSON.stringify(calls)}`);
       redeliver = (observed = texts) => emit("tool_result", { toolName: "subagent", toolCallId, input, isError: false, content: [],
         details: { results: input.tasks.map((item, index) => ({ agent: item.agent, task: item.task, exitCode: 0,
-          messages: [...piReadMessages(reads[index]!), { role: "assistant", content: observed[index]!.map(text => ({ type: "text", text })) }] })) } });
+          messages: [...piReadMessages(reads[index]), { role: "assistant", content: observed[index].map(text => ({ type: "text", text })) }] })) } });
       return redeliver();
     }
     // Claude: each request's harness correlator is recorded once; every
     // (re)delivery then writes its transcript and dispatches its SubagentStop.
     const nativeIds = requests.map((_, index) => `${toolCallId}-${index}`);
     for (const [index, { authority }] of requests.entries()) {
-      value(await handle.recordHarnessCorrelator({ schemaVersion: 1, harness: "claude", nativeId: nativeIds[index]!,
+      value(await handle.recordHarnessCorrelator({ schemaVersion: 1, harness: "claude", nativeId: nativeIds[index],
         requestId: authority.requestId, role: authority.role, attempt: authority.attempt }));
     }
     redeliver = async (observed = texts) => {
@@ -55,9 +55,9 @@ async function nativeBatchCapturer(root: string, harness: "claude" | "pi", sessi
       for (const [index, { authority }] of requests.entries()) {
         process.env.LOOM_ORCHESTRATION_RUNS_ROOT = handle.identity.runsRoot;
         process.env.LOOM_ORCHESTRATION_RUN_DIR = handle.runDirectory;
-        responses.push(await deliverClaudeSubagentStop({ sessionId: session.sessionId, agentId: nativeIds[index]!,
-          agentType: authority.role, transcriptDirectory: session.directory, finalTexts: observed[index]!,
-          leadingRecords: claudeReadLines(reads[index]!) }, (stop) => dispatch.runDispatch(JSON.stringify(stop), [])));
+        responses.push(await deliverClaudeSubagentStop({ sessionId: session.sessionId, agentId: nativeIds[index],
+          agentType: authority.role, transcriptDirectory: session.directory, finalTexts: observed[index],
+          leadingRecords: claudeReadLines(reads[index]) }, (stop) => dispatch.runDispatch(JSON.stringify(stop), [])));
       }
       return responses;
     };

@@ -86,10 +86,10 @@ export default function (pi) {
   }
 }
 
-function setupProbe(pi) {
-  // The counting provider substitute: a real provider registration pointing at
-  // the local counting server. Every model request the child would send lands
-  // there and is counted; the server rejects, so no real model is involved.
+/** The counting provider substitute: a real provider registration pointing at
+ *  the local counting server. Every model request the child would send lands
+ *  there and is counted; the server rejects, so no real model is involved. */
+function registerCountingProvider(pi) {
   pi.registerProvider("probe", {
     name: "Probe Counting Provider",
     baseUrl: countBaseUrl,
@@ -107,11 +107,13 @@ function setupProbe(pi) {
       },
     ],
   });
+}
 
-  // The fake emission tool: same registration surface the production
-  // emission-tool registration will use (registerTool + parameters as the
-  // frozen schema + terminating execute). Errors are thrown, never returned
-  // as objects (the harness contract: returning never sets isError).
+/** The fake emission tool: same registration surface the production
+ *  emission-tool registration will use (registerTool + parameters as the
+ *  frozen schema + terminating execute). Errors are thrown, never returned
+ *  as objects (the harness contract: returning never sets isError). */
+function registerProbeTool(pi) {
   pi.registerTool({
     name: toolName,
     label: "Probe Emission Tool",
@@ -127,7 +129,11 @@ function setupProbe(pi) {
       };
     },
   });
+}
 
+function setupProbe(pi) {
+  registerCountingProvider(pi);
+  registerProbeTool(pi);
   const registeredAndActive = pi.getActiveTools().includes(toolName);
   const readinessPayload = {
     kind: "readiness",

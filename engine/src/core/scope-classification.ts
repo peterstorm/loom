@@ -47,7 +47,7 @@ export function classifyScope(
   const extensions = scope.map((path) => posix.extname(path).toLowerCase());
   const languages = [...new Set(extensions.filter(Boolean).map((extension) => extension.slice(1)))].sort();
   const sourceOrTestChanged = scope.some((path, index) =>
-    SOURCE_EXTENSIONS.has(extensions[index]!) || /(^|\/)(test|tests|__tests__)(\/|$)/.test(path));
+    SOURCE_EXTENSIONS.has(extensions[index]) || /(^|\/)(test|tests|__tests__)(\/|$)/.test(path));
   // Canonically, docsOnly implies commentsChanged and excludes sourceOrTestChanged.
   const docsOnly = !sourceOrTestChanged
     && scope.every((path) => /(^|\/)(docs?|README)(\/|\.|$)|\.(md|mdx|txt)$/.test(path));
@@ -56,7 +56,7 @@ export function classifyScope(
     ...(docsOnly
       ? { docsOnly: true as const, sourceOrTestChanged: false as const, commentsChanged: true as const }
       : { docsOnly: false as const, sourceOrTestChanged, commentsChanged: scope.some((path) => /\.(md|mdx)$/.test(path)) }),
-    typesChanged: scope.some((_, index) => TYPE_EXTENSIONS.has(extensions[index]!)),
+    typesChanged: scope.some((_, index) => TYPE_EXTENSIONS.has(extensions[index])),
     additions,
     fileCount: scope.length,
     // "New structure" means a genuinely NEW deep path (a fresh service,

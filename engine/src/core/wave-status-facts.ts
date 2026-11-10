@@ -19,15 +19,13 @@ import type {
   WaveGateCompletionEligibility,
 } from "../types";
 import { newTestsSatisfied, testEvidenceSatisfied, type GateDecision } from "./wave-gate-checks";
-import { canonicalRecord, type NonEmpty } from "./orchestration-contract";
+import { canonicalRecord, type NonEmpty, nonEmpty, nonEmptyOf } from "./orchestration-contract";
 
 export const statusReason = (kind: StatusReason["kind"], message: string, taskId: string | null = null): StatusReason =>
   canonicalRecord({ kind, message, taskId });
 
-export const nonEmptyReasons = (values: readonly StatusReason[], fallback: StatusReason): NonEmpty<StatusReason> => {
-  const all = values.length === 0 ? [fallback] : values;
-  return Object.freeze(all) as NonEmpty<StatusReason>;
-};
+export const nonEmptyReasons = (values: readonly StatusReason[], fallback: StatusReason): NonEmpty<StatusReason> =>
+  nonEmpty(values) ?? nonEmptyOf(fallback);
 
 /** First matching bucket wins; the order below IS the precedence. */
 function taskBucket(task: Task, executing: ReadonlySet<string>): keyof StatusTaskCounts {
@@ -59,11 +57,13 @@ export function deriveTestReadinessForTasks(tasks: readonly Task[]): TestReadine
     const reasons: string[] = [];
     if (!testEvidenceSatisfied(task)) reasons.push("passing test evidence is missing");
     if (!newTestsSatisfied(task)) reasons.push("required new tests were not observed");
-    return reasons.length === 0 ? [] : [canonicalRecord({ taskId: task.id, reasons: Object.freeze(reasons) as NonEmpty<string> })];
+    const taskReasons = nonEmpty(reasons);
+    return taskReasons === null ? [] : [canonicalRecord({ taskId: task.id, reasons: taskReasons })];
   });
-  return affected.length === 0
+  const affectedTasks = nonEmpty(affected);
+  return affectedTasks === null
     ? canonicalRecord({ kind: "ready", affectedTasks: Object.freeze([]) })
-    : canonicalRecord({ kind: "not-ready", affectedTasks: Object.freeze(affected) as NonEmpty<(typeof affected)[number]> });
+    : canonicalRecord({ kind: "not-ready", affectedTasks });
 }
 
 export const deriveTestReadiness = (graph: TaskGraph, wave: number): TestReadiness =>
@@ -133,17 +133,19 @@ function activeCriticalFindingIds(graph: TaskGraph, wave: number): readonly stri
 
 export function panelNeed(graph: TaskGraph, wave: number): RefutationPanelNeed {
   const findingIds = activeCriticalFindingIds(graph, wave);
-  return findingIds.length === 0
-    ? canonicalRecord({ kind: "not-needed", findingIds: Object.freeze([]), reasons: Object.freeze(["the active Wave has no critical Findings"]) as NonEmpty<string> })
-    : canonicalRecord({ kind: "needed", findingIds: Object.freeze(findingIds) as NonEmpty<string>, reasons: Object.freeze([`${findingIds.length} active critical Finding(s) require refutation`]) as NonEmpty<string> });
+  const neededIds = nonEmpty(findingIds);
+  return neededIds === null
+    ? canonicalRecord({ kind: "not-needed", findingIds: Object.freeze([]), reasons: nonEmptyOf("the active Wave has no critical Findings") })
+    : canonicalRecord({ kind: "needed", findingIds: neededIds, reasons: nonEmptyOf(`${findingIds.length} active critical Finding(s) require refutation`) });
 }
 
 export function completionEligibility(decision: GateDecision): WaveGateCompletionEligibility {
   const failed = decision.checks.flatMap((check) => check.passed ? [] : [check.reason]);
   if (decision.verdict.kind === "fail" && decision.checks.length === 0) failed.push(decision.verdict.reason);
-  return failed.length === 0
+  const failedPrerequisites = nonEmpty(failed);
+  return failedPrerequisites === null
     ? canonicalRecord({ kind: "eligible", failedPrerequisites: Object.freeze([]) })
-    : canonicalRecord({ kind: "ineligible", failedPrerequisites: Object.freeze(failed) as NonEmpty<string> });
+    : canonicalRecord({ kind: "ineligible", failedPrerequisites });
 }
 
 export function readinessReasons(

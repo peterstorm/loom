@@ -207,9 +207,10 @@ export function createRegisteredRemediationProgramV2(
     if (!scope.ok) return failure(scope.error.failures.map(({ message }) => message).join("; "));
     const checks = authorizeRemediationChecks(input.verification, scope.value);
     if (!checks.ok) return failure(checks.error.failures.map(({ message }) => message).join("; "));
+    if (input.manifest === null) return failure("selected remediation verification requires its frozen manifest");
     registeredVerification = Object.freeze({
       kind: "selected-operator-checks",
-      manifest: input.manifest!,
+      manifest: input.manifest,
       checks: checks.value,
     });
   }

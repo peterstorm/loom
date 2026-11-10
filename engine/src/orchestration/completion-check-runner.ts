@@ -33,7 +33,7 @@ import {
   parseCanonicalRepositoryRoot,
   type CanonicalRepositoryRoot,
 } from "../utils/workspace-digest";
-import { readRunBytesNoFollow, removeRunRegularFileNoFollow } from "./no-follow-fs";
+import { readRunBytesNoFollow, removeRunRegularFileNoFollow } from "../utils/no-follow-fs";
 
 type ProjectCommandCheck = Extract<AuthorizedWaveCompletionCheck, { readonly kind: "project-command" }>;
 type RunnerCommand = ProjectCommandCheck | ProjectCommandAuthority;

@@ -4,22 +4,23 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
-  loadProjectConfig,
+  parseProjectConfig,
   projectRootOf,
   EMPTY_CONFIG,
+  PROGRAMMATIC_CONFIG_KEYS,
   type ProgrammaticConfig,
 } from "../../../src/linter/programmatic/config";
 import { createProgrammaticRules } from "../../../src/linter/programmatic";
-import { loadRules } from "../../../src/linter/loader";
+import { loadProjectConfig, loadRules } from "../../../src/linter/loader";
 import { isProgrammaticRule } from "../../../src/linter/types";
 
 const LOOM_DEFAULT_RULES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "lint-rules");
 
-describe("programmatic config loader", () => {
-  function makeTempDir(): string {
-    return mkdtempSync(join(tmpdir(), "lint-config-"));
-  }
+function makeTempDir(): string {
+  return mkdtempSync(join(tmpdir(), "lint-config-"));
+}
 
+describe("programmatic config loader", () => {
   it("returns EMPTY_CONFIG when configDir is null", () => {
     expect(loadProjectConfig(null)).toEqual(EMPTY_CONFIG);
   });
@@ -146,6 +147,100 @@ describe("programmatic config loader", () => {
 
     const config = loadProjectConfig(dir);
     expect(config).toEqual({});
+  });
+
+  it("refuses an unknown key by name — a typo must not silently fall back to the default scope", () => {
+    const dir = makeTempDir();
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ exlude: [], pureModule: ["src/"] }));
+
+    expect(() => loadProjectConfig(dir)).toThrow(/unknown keys 'exlude', 'pureModule'/);
+  });
+
+  it("refuses an unknown key inside a boundary, an exemption or a grant", () => {
+    const refused = (json: unknown) => parseProjectConfig(json, "config.json");
+    expect(refused({ boundaries: [{ module: "src/a/", allow: [], deny: [], perFileAlow: {} }] }))
+      .toMatchObject({ ok: false, error: expect.stringContaining("'perFileAlow'") });
+    expect(refused({ exclude: [{ path: "vendor-js/", reason: "vendored", why: "x" }] }))
+      .toMatchObject({ ok: false, error: expect.stringContaining("'why'") });
+    expect(refused({ boundaries: [{ module: "src/a/", allow: [], deny: [], perFileAllow: { "src/a/x.ts": { allow: ["node:fs"], reason: "r", extra: 1 } } }] }))
+      .toMatchObject({ ok: false, error: expect.stringContaining("'extra'") });
+  });
+
+  it("names every known key in the refusal, and accepts each of them", () => {
+    const result = parseProjectConfig({ bogus: 1 }, "config.json");
+    expect(result.ok).toBe(false);
+    if (!result.ok) for (const key of PROGRAMMATIC_CONFIG_KEYS) expect(result.error).toContain(key);
+  });
+});
+
+describe("scoping config: exclusions, purity roots and shells, governance", () => {
+  const parse = (json: unknown) => parseProjectConfig(json, "config.json");
+
+  it("parses exclusions and impure shells as { path, reason } pairs", () => {
+    const result = parse({
+      exclude: [{ path: "third_party/", reason: "vendored upstream" }],
+      pureModules: ["src/domain/"],
+      impureModules: [{ path: "src/domain/repository.ts", reason: "reads the database" }],
+      requireGovernance: ["src/"],
+    });
+    expect(result).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        exclude: [{ path: "third_party/", reason: "vendored upstream" }],
+        pureModules: ["src/domain/"],
+        impureModules: [{ path: "src/domain/repository.ts", reason: "reads the database" }],
+        requireGovernance: ["src/"],
+      }),
+    });
+  });
+
+  it.each([
+    [{ exclude: [{ path: "vendor-js/" }] }, "reason must be a non-empty string"],
+    [{ exclude: [{ path: "vendor-js/", reason: "  " }] }, "reason must be a non-empty string"],
+    [{ impureModules: [{ path: "src/a.ts", reason: "" }] }, "reason must be a non-empty string"],
+    [{ exclude: ["vendor-js/"] }, "expected a JSON object"],
+    [{ exclude: [{ path: "a/", reason: "x" }, { path: "a/", reason: "y" }] }, "lists 'a/' twice"],
+  ])("refuses an exemption without its justification: %j", (json, message) => {
+    expect(parse(json)).toMatchObject({ ok: false, error: expect.stringContaining(message) });
+  });
+
+  it.each([
+    [{ pureModules: ["packages/*/src/"] }, "is a glob"],
+    [{ exclude: [{ path: "engine/**", reason: "x" }] }, "is a glob"],
+    [{ pureModules: ["/abs/src/"] }, "must be project-relative"],
+    [{ impureModules: [{ path: "./src/a.ts", reason: "x" }] }, "must be project-relative"],
+    [{ pureModules: [""] }, "non-empty strings"],
+  ])("refuses a path that would silently match the wrong set: %j", (json, message) => {
+    expect(parse(json)).toMatchObject({ ok: false, error: expect.stringContaining(message) });
+  });
+
+  it("refuses an empty governance scope — it would govern nothing", () => {
+    expect(parse({ requireGovernance: [] })).toMatchObject({ ok: false, error: expect.stringContaining("must not be empty") });
+  });
+
+  it("parses per-file capability grants with their reasons, and refuses a grant without one", () => {
+    const grant = { allow: ["node:path"], reason: "pure path math" };
+    expect(parse({ boundaries: [{ module: "src/a/", description: "the a layer", allow: [], deny: [], perFileAllow: { "src/a/x.ts": grant } }] }))
+      .toEqual({ ok: true, value: expect.objectContaining({ boundaries: [expect.objectContaining({ description: "the a layer", perFileAllow: { "src/a/x.ts": grant } })] }) });
+    expect(parse({ boundaries: [{ module: "src/a/", allow: [], deny: [], perFileAllow: { "src/a/x.ts": { allow: ["node:path"] } } }] }))
+      .toMatchObject({ ok: false, error: expect.stringContaining("every capability grant states why") });
+  });
+
+  it("refuses a grant that could never apply: a directory, or a file outside the boundary's module", () => {
+    const grant = { allow: ["node:fs"], reason: "r" };
+    expect(parse({ boundaries: [{ module: "src/a/", allow: [], deny: [], perFileAllow: { "src/a/sub/": grant } }] }))
+      .toMatchObject({ ok: false, error: expect.stringContaining("must name one file") });
+    expect(parse({ boundaries: [{ module: "src/a/", allow: [], deny: [], perFileAllow: { "src/b/x.ts": grant } }] }))
+      .toMatchObject({ ok: false, error: expect.stringContaining("outside 'src/a/'") });
+  });
+
+  it("Loom's own config parses under the strict loader, in both harness copies", () => {
+    const repo = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
+    for (const layout of [".claude/linter/rules", ".pi/linter/rules"]) {
+      const config = loadProjectConfig(join(repo, layout));
+      expect(config.requireGovernance, layout).toEqual(["engine/src/"]);
+      expect(config.exclude?.length, layout).toBeGreaterThan(0);
+    }
   });
 
   // Both fields were declared on ProgrammaticConfig and read by

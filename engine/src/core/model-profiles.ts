@@ -23,6 +23,7 @@
  */
 
 import type { Phase } from "./phases";
+import { mapNonEmpty } from "./orchestration-contract/identity";
 
 export const LLM_PROFILE_IDS = [
   "implementation",
@@ -371,7 +372,7 @@ export function recordedProfileBindings(profileId: RecordedLlmProfileId): Record
     const row = RETIRED_PROFILE_BINDINGS[profileId];
     return Object.freeze({
       claude: Object.freeze({ harness: "claude-code", model: row.claudeCode }),
-      pi: Object.freeze(row.pi.map(lowerPiTarget) as [PiBinding, ...PiBinding[]]),
+      pi: mapNonEmpty(row.pi, lowerPiTarget),
     });
   }
   const [current, ...history] = issuedPiTargets(profileId);

@@ -20,6 +20,7 @@ import { bunJunitOutputFileFromCommand, findReport, outputFileFromCommand } from
 const NO_RUN = { output: "", exit: null } as const;
 import { judgeTestRun } from "../src/machine/test-report";
 import { guardStateFileDecision } from "../src/core/guard-state-file";
+import { guardedLocations } from "../src/config";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const read = (...parts: string[]) => readFileSync(join(ROOT, ...parts), "utf-8");
@@ -65,7 +66,7 @@ describe("documented final-verification forms stay accepted by the evidence reco
         const report = reportPathOf(classified!.segment);
         expect(report).not.toBeNull();
         expect(isAbsolute(report!)).toBe(true);
-        expect(guardStateFileDecision(cmd).kind).toBe("allow");
+        expect(guardStateFileDecision(cmd, guardedLocations()).kind).toBe("allow");
       });
     }
   }
