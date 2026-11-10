@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -58,16 +59,24 @@ function source(id = "project:test"): string {
   });
 }
 
+function manifestPath(root: string): string {
+  return join(root, ".loom", "verification-manifest.json");
+}
+
+function installedCheckIds(root: string): readonly string[] {
+  const installed = JSON.parse(readFileSync(manifestPath(root), "utf-8")) as {
+    readonly checks: readonly { readonly id: string }[];
+  };
+  return installed.checks.map((check) => check.id);
+}
+
 describe("write-verification-manifest", () => {
   it("validates and installs canonical operator authority before task population", async () => {
     const { root } = project();
 
     expect((await writeVerificationManifest(source(), [])).kind).toBe("passthrough");
 
-    const installed = JSON.parse(
-      readFileSync(join(root, ".loom", "verification-manifest.json"), "utf-8"),
-    ) as { readonly checks: readonly { readonly id: string }[] };
-    expect(installed.checks.map((check) => check.id)).toEqual(["project:test"]);
+    expect(installedCheckIds(root)).toEqual(["project:test"]);
     expect((await writeVerificationManifest(source(), [])).kind).toBe("passthrough");
   });
 
@@ -80,17 +89,80 @@ describe("write-verification-manifest", () => {
     expect(() => readFileSync(join(root, ".loom", "verification-manifest.json"))).toThrow();
   });
 
-  it("refuses to overwrite different installed authority", async () => {
-    project();
+  it("refuses to overwrite different installed authority and names --replace", async () => {
+    const { root } = project();
     expect((await writeVerificationManifest(source(), [])).kind).toBe("passthrough");
+    const before = readFileSync(manifestPath(root), "utf-8");
 
     const result = await writeVerificationManifest(source("project:typecheck"), []);
 
     expect(result.kind).toBe("error");
-    if (result.kind === "error") expect(result.message).toContain("refusing overwrite");
+    if (result.kind === "error") {
+      expect(result.message).toContain("refusing overwrite");
+      expect(result.message).toContain("--replace");
+    }
+    expect(readFileSync(manifestPath(root), "utf-8")).toBe(before);
   });
 
-  it("refuses mutation after task population", async () => {
+  it("treats an installed manifest that differs only in formatting as the same authority", async () => {
+    const { root } = project();
+    mkdirSync(join(root, ".loom"));
+    const handWritten = JSON.stringify(JSON.parse(source()), null, 7);
+    writeFileSync(manifestPath(root), handWritten);
+
+    expect((await writeVerificationManifest(source(), [])).kind).toBe("passthrough");
+    expect(readFileSync(manifestPath(root), "utf-8")).toBe(handWritten);
+  });
+
+  it("replaces different authority with --replace before task population, leaving no staged file", async () => {
+    const { root } = project();
+    expect((await writeVerificationManifest(source(), [])).kind).toBe("passthrough");
+
+    const result = await writeVerificationManifest(source("project:typecheck"), ["--replace"]);
+
+    expect(result.kind).toBe("passthrough");
+    expect(installedCheckIds(root)).toEqual(["project:typecheck"]);
+    expect(readdirSync(join(root, ".loom"))).toEqual(["verification-manifest.json"]);
+  });
+
+  it("replaces an invalid installed manifest only with --replace", async () => {
+    const { root } = project();
+    mkdirSync(join(root, ".loom"));
+    writeFileSync(manifestPath(root), "{broken");
+
+    const refused = await writeVerificationManifest(source(), []);
+    expect(refused.kind).toBe("error");
+    if (refused.kind === "error") expect(refused.message).toContain("not a valid verification manifest");
+    expect(readFileSync(manifestPath(root), "utf-8")).toBe("{broken");
+
+    expect((await writeVerificationManifest(source(), ["--replace"])).kind).toBe("passthrough");
+    expect(installedCheckIds(root)).toEqual(["project:test"]);
+  });
+
+  it("refuses unknown arguments without touching the manifest", async () => {
+    const { root } = project();
+
+    const result = await writeVerificationManifest(source(), ["--replce"]);
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toContain("unexpected arguments");
+    expect(() => readFileSync(manifestPath(root))).toThrow();
+  });
+
+  it("refuses to replace through a symlinked manifest file", async () => {
+    const { root } = project();
+    mkdirSync(join(root, ".loom"));
+    const outside = join(root, "outside.json");
+    writeFileSync(outside, source());
+    symlinkSync(outside, manifestPath(root));
+
+    const result = await writeVerificationManifest(source("project:typecheck"), ["--replace"]);
+
+    expect(result.kind).toBe("error");
+    expect(readFileSync(outside, "utf-8")).toBe(source());
+  });
+
+  it("refuses mutation after task population, with or without --replace", async () => {
     const { statePath } = project();
     const graph = JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph;
     writeFileSync(statePath, JSON.stringify({
@@ -105,10 +177,12 @@ describe("write-verification-manifest", () => {
       })],
     }));
 
-    const result = await writeVerificationManifest(source(), []);
+    for (const args of [[], ["--replace"]]) {
+      const result = await writeVerificationManifest(source(), args);
 
-    expect(result.kind).toBe("error");
-    if (result.kind === "error") expect(result.message).toContain("already frozen");
+      expect(result.kind).toBe("error");
+      if (result.kind === "error") expect(result.message).toContain("already frozen");
+    }
   });
 
   it("refuses a symlinked manifest directory", async () => {

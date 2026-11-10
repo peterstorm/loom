@@ -1,18 +1,23 @@
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { match } from "ts-pattern";
 import { taskGraphPath } from "../../config";
+import { VERIFICATION_MANIFEST_SOURCE_PATH } from "../../core/verification-manifest";
 import {
-  VERIFICATION_MANIFEST_SOURCE_PATH,
-  parseVerificationManifest,
-} from "../../core/verification-manifest";
+  canonicalizeManifestSource,
+  parseManifestInstallArgs,
+  planManifestInstall,
+  type CanonicalManifest,
+} from "../../core/verification-manifest-install";
 import {
   ensureDirectoryNoFollow,
+  publishStagedRunFile,
   readRunFileNoFollow,
+  removeRunFileNoFollow,
   writeRunFileExclusiveNoFollow,
 } from "../../orchestration/no-follow-fs";
 import { StateManager } from "../../state-manager";
-import type { HookHandler } from "../../types";
+import type { HookHandler, HookResult } from "../../types";
 
-const MAX_SOURCE_BYTES = 1_048_576;
 const CANONICAL_STATE_PATHS = Object.freeze([
   join(".claude", "state", "active_task_graph.json"),
   join(".pi", "state", "active_task_graph.json"),
@@ -37,28 +42,41 @@ function projectRootFromStatePath(statePath: string): ProjectRootResult {
       };
 }
 
-function parseSource(stdin: string):
-  | Readonly<{ ok: true; canonical: string }>
-  | Readonly<{ ok: false; error: string }> {
-  if (Buffer.byteLength(stdin, "utf-8") > MAX_SOURCE_BYTES) {
-    return { ok: false, error: `source exceeds ${MAX_SOURCE_BYTES} bytes` };
-  }
-  let raw: unknown;
+/** The installed manifest's text, or null when none exists. Never follows a link. */
+function readInstalled(target: string): string | null {
   try {
-    raw = JSON.parse(stdin) as unknown;
+    return readRunFileNoFollow(target);
   } catch (cause) {
-    return {
-      ok: false,
-      error: `source must be JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
-    };
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw cause;
   }
-  const parsed = parseVerificationManifest(raw);
-  return parsed.ok
-    ? { ok: true, canonical: `${JSON.stringify(parsed.value, null, 2)}\n` }
-    : { ok: false, error: parsed.error.errors.join("; ") };
 }
 
-const handler: HookHandler = async (stdin) => {
+/**
+ * Replace the manifest atomically: stage the canonical bytes in a fresh
+ * sibling, then rename it over the target inside the same anchored directory,
+ * so a reader sees the old authority or the new one, never a partial file.
+ */
+function replaceAtomically(target: string, manifest: CanonicalManifest): void {
+  const staged = join(dirname(target), `.${basename(target)}.replace-${process.pid}`);
+  writeRunFileExclusiveNoFollow(staged, manifest);
+  try {
+    publishStagedRunFile(staged, target);
+  } catch (cause) {
+    try {
+      removeRunFileNoFollow(staged);
+    } catch {
+      // Report the publish failure, not the cleanup's: a leftover staged
+      // sibling is inert, since population reads only the target path.
+    }
+    throw cause;
+  }
+}
+
+const handler: HookHandler = async (stdin, args): Promise<HookResult> => {
+  const mode = parseManifestInstallArgs(args);
+  if (!mode.ok) return { kind: "error", message: `write-verification-manifest: ${mode.error}` };
+
   const statePath = taskGraphPath();
   const manager = StateManager.fromPath(statePath);
   if (manager === null) return { kind: "error", message: `No task graph at ${statePath}` };
@@ -79,27 +97,32 @@ const handler: HookHandler = async (stdin) => {
     };
   }
 
-  const source = parseSource(stdin);
-  if (!source.ok) return { kind: "error", message: `Invalid verification manifest: ${source.error}` };
+  const candidate = canonicalizeManifestSource(stdin);
+  if (!candidate.ok) return { kind: "error", message: `Invalid verification manifest: ${candidate.error}` };
   const projectRoot = projectRootFromStatePath(statePath);
   if (!projectRoot.ok) return { kind: "error", message: projectRoot.error };
 
   const target = join(projectRoot.value, VERIFICATION_MANIFEST_SOURCE_PATH);
   try {
     ensureDirectoryNoFollow(dirname(target));
-    try {
-      writeRunFileExclusiveNoFollow(target, source.canonical);
-      return { kind: "passthrough" };
-    } catch (cause) {
-      if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
-      const existing = readRunFileNoFollow(target);
-      return existing === source.canonical
-        ? { kind: "passthrough" }
-        : {
-            kind: "error",
-            message: `${VERIFICATION_MANIFEST_SOURCE_PATH} already exists with different authority; refusing overwrite`,
-          };
-    }
+    const plan = planManifestInstall(
+      readInstalled(target),
+      candidate.value,
+      mode.value,
+      VERIFICATION_MANIFEST_SOURCE_PATH,
+    );
+    return match(plan)
+      .with({ kind: "create" }, ({ manifest }): HookResult => {
+        writeRunFileExclusiveNoFollow(target, manifest);
+        return { kind: "passthrough" };
+      })
+      .with({ kind: "unchanged" }, (): HookResult => ({ kind: "passthrough" }))
+      .with({ kind: "replace" }, ({ manifest }): HookResult => {
+        replaceAtomically(target, manifest);
+        return { kind: "passthrough" };
+      })
+      .with({ kind: "refuse" }, ({ reason }): HookResult => ({ kind: "error", message: reason }))
+      .exhaustive();
   } catch (cause) {
     return {
       kind: "error",
