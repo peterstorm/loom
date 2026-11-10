@@ -13,7 +13,8 @@
  *   symlink, never copied, and never written through; one the checkout
  *   carries from HEAD is replaced by the link.
  * - `runWithOwner` rewrites only the owner file, deletes the runner's stale
- *   report, runs, and restores the owner's original bytes afterwards, even
+ *   report and makes sure its directory exists (an ignored report directory
+ *   is never overlaid), runs, and restores the owner's original bytes afterwards, even
  *   when the run throws; a restore that fails after a throwing run keeps the
  *   run's throw as the cause.
  * - The worktree is removed (`git worktree remove --force`, then the directory
@@ -222,6 +223,9 @@ function workspaceAt(root: CanonicalRepositoryRoot, ownerPath: ReviewPath, repor
     root,
     runWithOwner: async <R>(variant: OwnerVariant, execute: (at: CanonicalRepositoryRoot) => Promise<R>): Promise<R> => {
       rmSync(report, { force: true });
+      // The report directory is usually ignored, so the overlay never brings it;
+      // a runner that does not create it (Bun's JUnit reporter) would exit 0 reportless.
+      mkdirSync(dirname(report), { recursive: true });
       let value: R;
       try {
         if (variant.kind === "mutant") {
