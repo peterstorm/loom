@@ -1,20 +1,39 @@
 import type { OwnerObligation, Phase, PlanContract, PlanInvariant, Task, TaskGraph } from "../types";
-import { acceptanceContractsFromPlan, redWindowTaskIds } from "./acceptance-contract";
+import { acceptanceContractsFromPlan, frozenPaths, redWindowTaskIds, type AcceptanceContract } from "./acceptance-contract";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
-import { obligationsFromInvariants, renderObligationsError, verifyOwed } from "./owner-verification/obligations";
+import { match } from "ts-pattern";
+import {
+  authoredDistillTaskRefusal,
+  planDistillTasks,
+  plannedDistillTasks,
+  taskRolePolicy,
+  type DistillPlan,
+  type DistillTaskPlan,
+  type TaskRole,
+} from "./distill-task";
+import { DISTILL_AGENT } from "./model-profiles";
+import { contractTaskIdsOf, obligationsFromInvariants, renderObligationsError, verifyOwed } from "./owner-verification/obligations";
 import type { ProofBoundaryObservation } from "./proof-boundary-observation";
 import { newWaveGate } from "./wave-gate-model";
 import type { DomainResult } from "./orchestration-contract";
 import { bindingTaskView, NO_EXPORT_BINDINGS, renderBindingProblem, validateExportBindings } from "./skeleton/bindings";
 import type { ExportBinding, ExportBindingsDeclaration, SkeletonRecord } from "./skeleton/types";
-import { derivePendingTaskProof, redThenGreenScope, taskRedThenGreenEra, type RedThenGreenEra } from "./proof-obligations";
+import {
+  derivePendingTaskProof,
+  frozenRedThenGreenEra,
+  redThenGreenScope,
+  taskRedThenGreenEra,
+  type RedThenGreenEra,
+} from "./proof-obligations";
+import { taskArtifactExpectation } from "./task-artifact-expectation";
 import {
   ACCEPTANCE_RED_WINDOW,
+  DISTILL_VERIFICATION_POLICY,
   serializeVerificationPolicy,
   taskVerificationPolicy,
   type VerificationPolicy,
 } from "./verification-policy";
-import type { FrozenVerificationManifest } from "./verification-manifest";
+import { distillPassSetting, type FrozenVerificationManifest } from "./verification-manifest";
 import {
   recordedAnchorHashes,
   renderRequirementTraceEdges,
@@ -72,11 +91,21 @@ function taskWaveRosterError(tasks: readonly AuthoredTask[]): string | null {
     : `Authored Task Waves must be contiguous from 1; expected Wave ${gap + 1}, got ${waves[gap]}`;
 }
 
+/**
+ * The refusal of an authored Task naming the distill agent (ADR-0068): the
+ * distill pass is engine-added, so a roster that authors one would carry two,
+ * or one over a scope the engine never derived.
+ */
+function authoredDistillTaskError(tasks: readonly AuthoredTask[]): string | null {
+  const engineOnly = tasks.find((task) => !taskRolePolicy(task).authorable);
+  return engineOnly === undefined ? null : authoredDistillTaskRefusal(engineOnly.id);
+}
+
 /** Parse the authored roster topology before it can become population authority. */
 export function parseAuthoredTaskRoster(tasks: readonly AuthoredTask[]): AuthoredTaskRosterParseResult {
   const [first, ...rest] = tasks;
   if (first === undefined) return Object.freeze({ ok: false, error: "TaskGraph population requires at least one authored Task" });
-  const error = taskWaveRosterError(tasks);
+  const error = taskWaveRosterError(tasks) ?? authoredDistillTaskError(tasks);
   if (error !== null) return Object.freeze({ ok: false, error });
   return Object.freeze({
     ok: true,
@@ -135,6 +164,7 @@ export type TaskGraphPopulationError = Readonly<{
   kind:
     | "no-tasks"
     | "invalid-task-waves"
+    | "authored-distill-task"
     | "phase-not-populatable"
     | "non-pending-tasks"
     | "spec-authority-changed"
@@ -154,7 +184,12 @@ const POPULATABLE_PHASES: ReadonlySet<Phase> = new Set<Phase>(["decompose", "exe
 export type TaskGraphPopulationResult =
   | Readonly<{
       ok: true;
-      value: Readonly<{ state: TaskGraph; waves: readonly number[] }>;
+      value: Readonly<{
+        state: TaskGraph;
+        waves: readonly number[];
+        /** What the distill planner decided for the roster, so the shell can say why a roster got no pass. */
+        distillPlan: DistillPlan;
+      }>;
     }>
   | Readonly<{ ok: false; error: TaskGraphPopulationError }>;
 
@@ -293,37 +328,122 @@ function windowPolicy(policy: VerificationPolicy, inRedWindow: boolean): Verific
     : policy;
 }
 
-function sanitizeTask(
-  task: AuthoredTask,
-  specIndex: SpecIndexAvailability,
+/**
+ * What population holds of a Task of each role before it writes the record.
+ * Keyed by `TaskRole`, so a new role does not compile until it says what it
+ * is populated from.
+ */
+type PopulationInputs = Readonly<{
+  authored: Readonly<{
+    task: AuthoredTask;
+    specIndex: SpecIndexAvailability;
+    /** Whether the Task sits inside a contract's red window (`windowPolicy`). */
+    inRedWindow: boolean;
+  }>;
+  distill: Readonly<{ plan: DistillTaskPlan }>;
+}>;
+
+/** One Task to populate: its role, and that role's inputs. */
+type PopulatedTaskSource = { [Role in TaskRole]: Readonly<{ role: Role }> & PopulationInputs[Role] }[TaskRole];
+
+/** What a role decides of its Task's pending record. */
+type RoleTaskFields = Readonly<{
+  id: string;
+  description: string;
+  agent: string;
+  wave: number;
+  dependsOn: readonly string[];
+  specAnchors: readonly string[];
+  specContributions: readonly string[];
+  anchorHashes: Readonly<Record<string, string>>;
+  verificationPolicy: VerificationPolicy;
+  planContext: string | undefined;
+  fileList: readonly string[];
+  /** The declared-artifact baseline captured at population; undefined leaves the first registration to stamp it. */
+  proofBaseline: readonly DeclaredArtifactBaseline[] | undefined;
+}>;
+
+/** An authored Task's fields: what the roster authored, sanitized, with the trace hashes and baseline population observed. */
+function authoredTaskFields(
+  { task, specIndex, inRedWindow }: PopulationInputs["authored"],
   proofBoundary: PopulationProofBoundary,
-  inRedWindow: boolean,
-  redThenGreen: RedThenGreenEra,
-): Task {
-  const verificationPolicy = windowPolicy(taskVerificationPolicy(task), inRedWindow);
-  const proofBaseline = proofBoundary.kind === "captured" ? proofBoundary.baselines.get(task.id) : undefined;
-  const completionAnchors = Object.freeze([...(task.spec_anchors ?? [])]);
-  const anchorHashes = specIndex.kind === "indexed"
-    ? recordedAnchorHashes(specIndex.index, completionAnchors)
-    : Object.freeze({});
-  return Object.freeze({
+): RoleTaskFields {
+  const specAnchors = task.spec_anchors ?? [];
+  return {
     id: task.id,
     description: task.description,
     agent: task.agent,
     wave: task.wave,
+    dependsOn: task.depends_on ?? [],
+    specAnchors,
+    specContributions: task.spec_contributions ?? [],
+    anchorHashes: specIndex.kind === "indexed" ? recordedAnchorHashes(specIndex.index, specAnchors) : Object.freeze({}),
+    verificationPolicy: windowPolicy(taskVerificationPolicy(task), inRedWindow),
+    planContext: task.plan_context,
+    fileList: task.file_list,
+    proofBaseline: proofBoundary.kind === "captured" ? proofBoundary.baselines.get(task.id) : undefined,
+  };
+}
+
+/**
+ * A Distill Task's fields (ADR-0068 §2), all but its id, Wave, description
+ * and scope fixed here: the distill agent, no dependency, no Requirement
+ * trace, no plan context, the engine-only policy, and the Distill Scope as
+ * its file list. It carries no population baseline: the scope's bytes at
+ * population are the bytes before its siblings implemented anything, so its
+ * declared-artifact baseline is stamped at its first registration, which is
+ * what its siblings left.
+ */
+function distillTaskFields({ plan }: PopulationInputs["distill"]): RoleTaskFields {
+  return {
+    id: plan.id,
+    description: plan.description,
+    agent: DISTILL_AGENT,
+    wave: plan.wave,
+    dependsOn: [],
+    specAnchors: [],
+    specContributions: [],
+    anchorHashes: Object.freeze({}),
+    verificationPolicy: DISTILL_VERIFICATION_POLICY,
+    planContext: undefined,
+    fileList: plan.scope,
+    proofBaseline: undefined,
+  };
+}
+
+/**
+ * The one pending Task record population writes, for a Task of either role:
+ * the fields its role decides, no execution state, the population revision
+ * when Git captured the proof boundary, a pending Proof derived under the
+ * Task's own expectation (`taskArtifactExpectation`), and an unreviewed
+ * review record. A caller names the role and passes that role's inputs, so it
+ * cannot write a Distill Task with a dependency, a trace or a baseline.
+ */
+function populatedTask(source: PopulatedTaskSource, proofBoundary: PopulationProofBoundary, redThenGreen: RedThenGreenEra): Task {
+  const fields = match(source)
+    .with({ role: "authored" }, (authored) => authoredTaskFields(authored, proofBoundary))
+    .with({ role: "distill" }, distillTaskFields)
+    .exhaustive();
+  const { agent, verificationPolicy, proofBaseline } = fields;
+  return Object.freeze({
+    id: fields.id,
+    description: fields.description,
+    agent,
+    wave: fields.wave,
     status: "pending",
-    depends_on: Object.freeze([...(task.depends_on ?? [])]),
-    spec_anchors: completionAnchors,
-    spec_contributions: Object.freeze([...(task.spec_contributions ?? [])]),
-    ...(Object.keys(anchorHashes).length === 0 ? {} : { spec_anchor_hashes: anchorHashes }),
+    depends_on: Object.freeze([...fields.dependsOn]),
+    spec_anchors: Object.freeze([...fields.specAnchors]),
+    spec_contributions: Object.freeze([...fields.specContributions]),
+    ...(Object.keys(fields.anchorHashes).length === 0 ? {} : { spec_anchor_hashes: fields.anchorHashes }),
     verification_policy: serializeVerificationPolicy(verificationPolicy),
-    ...(task.plan_context === undefined ? {} : { plan_context: task.plan_context }),
-    file_list: Object.freeze([...task.file_list]),
+    ...(fields.planContext === undefined ? {} : { plan_context: fields.planContext }),
+    file_list: Object.freeze([...fields.fileList]),
     ...(proofBaseline === undefined ? {} : { artifact_baseline: proofBaseline }),
     ...(proofBoundary.kind === "captured" ? { start_sha: proofBoundary.revision } : {}),
     proof: derivePendingTaskProof({
       verificationPolicy,
-      declaredArtifacts: task.file_list,
+      declaredArtifacts: fields.fileList,
+      declaredArtifactExpectation: taskArtifactExpectation({ agent }),
       redThenGreen,
     }),
     review_status: "pending",
@@ -337,6 +457,25 @@ function sanitizeTask(
 }
 
 /**
+ * What the one planner (`planDistillTasks`) decides for this roster: the
+ * authored roster, the contract Tasks and frozen paths of the contracts
+ * population is about to stamp, the frozen manifest's Test-File
+ * Classification, and the operator's `distillPass` setting.
+ */
+function distillPlanOf(
+  command: Pick<TaskGraphPopulationCommand, "tasks" | "verificationManifest">,
+  contracts: readonly AcceptanceContract[],
+): DistillPlan {
+  return planDistillTasks({
+    tasks: command.tasks,
+    contractTaskIds: contractTaskIdsOf({ acceptance_contracts: contracts }),
+    frozenPaths: contracts.flatMap((contract) => frozenPaths(contract)),
+    era: frozenRedThenGreenEra(command.verificationManifest),
+    setting: distillPassSetting(command.verificationManifest),
+  });
+}
+
+/**
  * Pure TaskGraph aggregate command. The shell supplies parser-proven authored
  * data and immutable observations; this function owns every state transition
  * performed while the StateManager lock is held.
@@ -344,6 +483,11 @@ function sanitizeTask(
  * It is also the only way out of decompose: the Tasks and the move to execute
  * land in one write, so an execute graph with no Tasks cannot be written
  * (issue #50). The decompose agent's SubagentStop leaves the phase alone.
+ *
+ * The roster it writes is the authored Tasks followed by the Distill Tasks it
+ * adds itself (ADR-0068), at most one per Wave and never a Wave of its own:
+ * the Wave Gates are still the authored Waves'. Every population replaces the
+ * whole roster, so re-population never keeps an earlier graph's Distill Task.
  */
 export function populateTaskGraph(
   existing: TaskGraph,
@@ -356,6 +500,8 @@ export function populateTaskGraph(
   }
   const waveError = taskWaveRosterError(command.tasks);
   if (waveError !== null) return reject("invalid-task-waves", waveError);
+  const authoredDistill = authoredDistillTaskError(command.tasks);
+  if (authoredDistill !== null) return reject("authored-distill-task", authoredDistill);
   if (!POPULATABLE_PHASES.has(existing.current_phase)) {
     return reject(
       "phase-not-populatable",
@@ -403,6 +549,7 @@ export function populateTaskGraph(
   const skeletons = carriedSkeletons(existing.skeletons ?? [], exportBindings.value);
   const redWindow = redWindowTaskIds(contracts.value, command.tasks);
   const redThenGreen = redThenGreenScope(command.verificationManifest, contracts.value);
+  const distillPlan = distillPlanOf(command, contracts.value);
 
   const waves = taskWaves(command.tasks);
   const waveGates = Object.freeze(Object.fromEntries(
@@ -437,13 +584,15 @@ export function populateTaskGraph(
     spec_file: lockedSpecFile,
     spec_index_observation: specIndexObservationOf(command.specIndex),
     proof_boundary_observation: proofBoundaryObservationOf(command.proofBoundary),
-    tasks: Object.freeze(command.tasks.map((task) => sanitizeTask(
-      task,
-      command.specIndex,
-      command.proofBoundary,
-      redWindow.has(task.id),
-      taskRedThenGreenEra(redThenGreen, task.id),
-    ))),
+    tasks: Object.freeze([
+      ...command.tasks.map((task) => populatedTask(
+        { role: "authored", task, specIndex: command.specIndex, inRedWindow: redWindow.has(task.id) },
+        command.proofBoundary,
+        taskRedThenGreenEra(redThenGreen, task.id),
+      )),
+      ...plannedDistillTasks(distillPlan).map((plan) =>
+        populatedTask({ role: "distill", plan }, command.proofBoundary, taskRedThenGreenEra(redThenGreen, plan.id))),
+    ]),
     ...(contracts.value.length === 0 ? {} : { acceptance_contracts: contracts.value }),
     // Always stamped, `[]` included: only a graph populated before owner
     // verification lacks the field, and it alone owes nothing (FR-004).
@@ -459,5 +608,5 @@ export function populateTaskGraph(
     ...(command.issue === undefined ? {} : { github_issue: command.issue }),
     ...(command.repo === undefined ? {} : { github_repo: command.repo }),
   });
-  return Object.freeze({ ok: true, value: Object.freeze({ state, waves }) });
+  return Object.freeze({ ok: true, value: Object.freeze({ state, waves, distillPlan }) });
 }

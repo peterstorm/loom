@@ -34,6 +34,7 @@ import {
   type GateDeps as CoreGateDeps,
   type PlanModelsSource as CorePlanModelsSource,
 } from "../../core/wave-gate-checks";
+import { waveReviewStanding } from "../../core/wave-review-authority";
 
 /** Resolve the plan's executable models from state — effectful shell helper */
 export function loadPlanModelsSource(planFile: string | null | undefined): PlanModelsSource {
@@ -225,7 +226,10 @@ export function generateWaveGateSummary(
     const critCount = task.critical_findings?.length ?? 0;
     const advCount = task.advisory_findings?.length ?? 0;
     lines.push(`#### ${task.id}: ${task.description?.slice(0, 60) ?? ''}`);
-    lines.push(`**Status:** ${task.review_status} — ${critCount} critical, ${advCount} advisory`);
+    const standing = waveReviewStanding(task);
+    lines.push(standing.kind === "reviewed"
+      ? `**Status:** ${task.review_status} — ${critCount} critical, ${advCount} advisory`
+      : `**Status:** not reviewed (exempt from Wave review: ${standing.reason})`);
 
     if (task.advisory_findings?.length) {
       lines.push('<details>');

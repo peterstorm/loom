@@ -6,7 +6,7 @@ Rendered by the Loom engine (`helper orchestration brief`) for each owed impleme
 
 ## !! MANDATORY FINAL STEP — READ THIS FIRST !!
 
-**Your LAST action before finishing MUST be running the required regression command via the Bash tool when the Verification Policy below says `regression: required`. Skip it only when that policy explicitly carries a typed regression waiver. New-test creation is independent: write new tests exactly when `new_tests: required`; a new-test waiver never waives regression execution.**
+**Your LAST action before finishing MUST be running the required regression command via the Bash tool when the Verification Policy below says `regression: required`. Skip it only when that policy explicitly carries a typed regression waiver other than `distill-pass`. A `distill-pass` Task still owes this run after its last edit, and may finish without it only when it changed no file; the Verification Policy section says why. New-test creation is independent: write new tests exactly when `new_tests: required`; a new-test waiver never waives regression execution.**
 
 ### The final verification run: ONE bare command that writes a structured report
 
@@ -77,6 +77,8 @@ Regression execution and new-test creation are separate obligations. Follow each
 
 When this is an exact `LOOM_IMPLEMENTATION_RETRY_CONTEXT` appendix, it is exact attempt-2 admission evidence and the failure kinds are the previous attempt's deterministic diagnostics. The spawn gate validates these bytes against protected settlement history before minting attempt authority. Address the diagnostics during this attempt. When the previous attempt was refused for contract conformance, the appendix continues after its `LOOM_IMPLEMENTATION_RETRY_CONTEXT` line with a "Declared-artifact contract violations (declared-artifact-contract-violated)" section. It lists each violated file, then each violation's subject, reason (`deleted`, `renamed`, `retyped`, `still-unimplemented`, `shadows-frozen-adt` or `re-lists-frozen-variants`) and remedy. Fix every listed violation before completing. A line "and N more violations not shown" means the receipt held only the first violations of that file, so re-check the whole file against the Frozen Signatures section below. When it says `None — semantic attempt 1.`, no retry admission evidence exists.
 
+When it carries a `LOOM_DISTILL_PASS: 1` appendix, this Task is its Wave's distill pass and the spawn gate has bound those bytes to the Task's protected file list. The appendix then replaces "Required Workflow" below: you implement nothing, write no test and create no file. Where another section of this brief reads as an instruction to implement, the appendix wins.
+
 ## Operator Note
 
 {operator_note}
@@ -129,7 +131,7 @@ The engine derives this section from the plan's `## Contracts` and the TaskGraph
 
 {frozen_signatures}
 
-The engine derives this section from the TaskGraph's export-binding stamp, its skeleton records and the frozen types files on disk, through the same derivation `helper orchestration status` shows. A skeleton is yours to fill, never to re-sign: if a frozen signature is wrong, stop and report it, because only an operator Contract Revision changes a types file.
+The engine derives this section from the TaskGraph's export-binding stamp, its skeleton records and the frozen types files on disk, through the same derivation `helper orchestration status` shows. A frozen signature is never yours to re-sign, whether you fill its skeleton or distill the body its owner wrote: if one is wrong, stop and report it, because only an operator Contract Revision changes a types file.
 
 ## Files to Create/Modify
 
@@ -156,6 +158,8 @@ Available at: {plan_file_path}
 - Implement only the assigned portion of Requirement Contributions; do not treat them as Wave completion authority
 
 ## Required Workflow
+
+A distill pass (a `LOOM_DISTILL_PASS: 1` appendix under "Engine-Issued Implementation Retry Context") follows that appendix's rules instead of the steps below.
 
 1. Read & apply the **Architecture & Language Rules** inlined above — binding constraints, not suggestions
 2. Read the plan file and understand scope

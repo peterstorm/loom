@@ -15,8 +15,8 @@ import {
   type RegexRule,
   type ProgrammaticRule,
   type Violation,
+  hasFirstCallSetup,
   isRegexRule,
-  isProgrammaticRule,
   makeViolation,
 } from "./types";
 import { analyzeRegex } from "./safety";
@@ -31,6 +31,8 @@ const DEADLINE_CHECK_INTERVAL = 100;
  * 2. For RegexRules: compile via analyzeRegex, test each line, collect violations
  * 3. For ProgrammaticRules: invoke handler(content, filePath), collect violations
  * 4. All execution wrapped in a shared deadline timeout (fail-closed on exceed)
+ * 5. Rules declaring `firstCallSetup` run last, in the order given, with the
+ *    deadline checked once before the first of them
  *
  * @param rules - Pre-loaded rules (may include disabled or non-matching rules)
  * @param filePath - Absolute file path (used for extension matching + violation context)
@@ -65,19 +67,22 @@ export function executeRules(
     return [];
   }
 
-  const violations: Violation[] = [];
+  // The order the deadline needs is decided HERE, beside the deadline, not by
+  // whoever assembled the list: a rule with first-call setup (see
+  // `ProgrammaticRule.firstCallSetup`) runs after every rule without one.
+  const withSetup = matchingRules.filter(hasFirstCallSetup);
+  const violations = matchingRules
+    .filter((rule) => !hasFirstCallSetup(rule))
+    .flatMap((rule) => isRegexRule(rule)
+      ? executeRegexRule(rule, filePath, content, checkDeadline)
+      : executeProgrammaticRule(rule, filePath, content, checkDeadline));
+  if (withSetup.length === 0) return violations;
 
-  for (const rule of matchingRules) {
-    if (isRegexRule(rule)) {
-      const ruleViolations = executeRegexRule(rule, filePath, content, checkDeadline);
-      violations.push(...ruleViolations);
-    } else if (isProgrammaticRule(rule)) {
-      const ruleViolations = executeProgrammaticRule(rule, filePath, content, checkDeadline);
-      violations.push(...ruleViolations);
-    }
-  }
-
-  return violations;
+  // One check for everything that ran above — an overrun there still fails
+  // closed — and none between the setup rules: the time one of them spends
+  // building is charged to no rule.
+  checkDeadline();
+  return [...violations, ...withSetup.flatMap((rule) => rule.handler(content, filePath))];
 }
 
 /**

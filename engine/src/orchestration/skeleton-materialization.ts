@@ -4,7 +4,8 @@
  * and before any attempt baseline is captured, so the engine's bytes are on
  * disk — and never an implementer's write — when the attempt starts.
  *
- * 1. **Stage two.** Every binding the registering Tasks hold is resolved
+ * 1. **Stage two.** Every binding the registering Tasks hold
+ *    (`skeletonHolderFiles`; a Distill Task holds none, ADR-0068 §9) is resolved
  *    against its contract's types file, whose bytes must equal the freeze
  *    stamp (`observeFrozenSurface`, `stamped`). Any missing alias, non-function
  *    or generic alias, drifted or unreadable types file, unfrozen contract or
@@ -33,7 +34,7 @@
 
 import { isNonEmpty, type DomainResult, type NonEmpty } from "../core/orchestration-contract";
 import { normalizePlanPath, samePlanPath } from "../core/plan-path-match";
-import { productionFiles } from "../core/skeleton/graph-view";
+import { productionFiles, skeletonHolderFiles } from "../core/skeleton/graph-view";
 import { ABSENT, presentSkeletonOf, skeletonOutcomesOf } from "../core/skeleton/outcomes";
 import { renderResolutionProblem, renderSkeletonProblem, type LeftPreparedName } from "../core/skeleton/problems";
 import type { SkeletonCandidate } from "../core/skeleton/records";
@@ -213,7 +214,12 @@ export function materializeTaskSkeletons(
   if (graph.export_bindings === undefined) return { ok: true, value: NOTHING };
   const tasks = graph.tasks.filter(({ id }) => taskIds.includes(id));
   const paths = tasks.flatMap((task) => productionFiles(graph, task));
-  const held = graph.export_bindings.filter((binding) => paths.some((path) => samePlanPath(path, binding.path)));
+  // Stage two resolves the bindings the Tasks HOLD (`skeletonHolderFiles`): a
+  // Distill Task lists bound files and holds none, so nothing is resolved,
+  // generated or written on its behalf. Its paths are still observed, for
+  // the outcomes `skeletonOutcomesOf` records.
+  const holderPaths = tasks.flatMap((task) => skeletonHolderFiles(graph, task));
+  const held = graph.export_bindings.filter((binding) => holderPaths.some((path) => samePlanPath(path, binding.path)));
   const candidates = candidatesFor(root, graph, held);
   if (!candidates.ok) return candidates;
   const observations = observePaths(root, paths, candidates.value);

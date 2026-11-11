@@ -7,6 +7,10 @@ import {
   type ValidationScope,
 } from "../../src/handlers/helpers/validate-task-graph";
 import { parseTaskGraph } from "../../src/state-manager";
+import { authoredDistillTaskRefusal } from "../../src/core/distill-task";
+import { DISTILL_AGENT } from "../../src/core/model-profiles";
+import { DISTILL_VERIFICATION_POLICY } from "../../src/core/verification-policy";
+import { distillTaskFixture } from "../fixtures/task-lifecycle";
 
 const PERSISTED_LIFECYCLE = {
   current_phase: "execute",
@@ -472,6 +476,40 @@ describe("validateFull (pure)", () => {
     });
     const warned = stderr.mock.calls.some(([msg]) => String(msg).includes("doesn't match no-test patterns"));
     expect(warned).toBe(true);
+    stderr.mockRestore();
+  });
+
+  it("refuses a decompose payload that authors a Distill Task", () => {
+    const result = validateFull({
+      plan_title: "x", plan_file: "x", spec_file: "x",
+      tasks: [
+        validTask,
+        { ...validTask, id: "T2", description: "Distill the Wave", agent: DISTILL_AGENT },
+      ],
+    }, "decompose-payload");
+
+    expect(errorsOf(result)).toEqual([authoredDistillTaskRefusal("T2")]);
+    expect(authoredDistillTaskRefusal("T2")).toBe(
+      "Task T2: agent 'distill-agent' is engine-only; the distill pass is engine-added, one per Wave, " +
+      "at TaskGraph population. Remove the Task",
+    );
+  });
+
+  it.each([
+    { agent: DISTILL_AGENT, warned: false },
+    { agent: "code-implementer-agent", warned: true },
+  ])("total test waiver warning for a stored $agent Task: $warned", ({ agent, warned }) => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const distill = distillTaskFixture({ id: "T2", wave: 1, scope: ["src/t1.ts"], description: "Second pass over the Wave" });
+    expect(distill.verification_policy).toEqual({
+      regression: DISTILL_VERIFICATION_POLICY.regression,
+      new_tests: DISTILL_VERIFICATION_POLICY.newTests,
+    });
+
+    validateFull({ plan_title: "x", plan_file: "x", spec_file: "x", tasks: [{ ...distill, agent }] });
+
+    expect(stderr.mock.calls.some(([msg]) => String(msg).includes("Task T2 waives regression and new-test verification")))
+      .toBe(warned);
     stderr.mockRestore();
   });
 
@@ -1060,7 +1098,7 @@ describe("validateFull agrees with the load boundary about the findings aggregat
 
   it("does NOT apply the findings rules to the agent-controlled decompose payload", () => {
     // populate-task-graph validates the payload BEFORE TaskGraph Population's
-    // sanitizeTask strips execution state a planner must never mint. Holding it to the
+    // populatedTask strips execution state a planner must never mint. Holding it to the
     // findings invariants would reject exactly the forged input that
     // sanitization exists to clean, turning a successful strip into a hard fail.
     const forged = graph({ findings: [], critical_findings: ["planted"], advisory_findings: [] });

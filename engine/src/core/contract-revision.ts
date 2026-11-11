@@ -7,7 +7,8 @@
  * wrong, the operator edits it and records a revision: the new bytes are
  * stamped, the roster is cleared so the next Wave Gate re-records it green, and
  * the current Wave's claimants that already implemented against the old bytes
- * return to revalidation. A claimant in a completed Wave is verified scope —
+ * return to revalidation, with that Wave's settled Distill Task when any
+ * claimant does (ADR-0068 §7). A claimant in a completed Wave is verified scope —
  * that Wave must be reopened first, never silently re-judged.
  *
  * Its Wave precondition (execute Phase, no live gate, no implementation
@@ -44,7 +45,7 @@ import type { LeftPreparedName, SkeletonProblem } from "./skeleton/problems";
 import { installSkeletonRecords } from "./skeleton/records";
 import { renderSkeletonRevisionLines } from "./skeleton/status";
 import type { SkeletonRecord } from "./skeleton/types";
-import { reopenableWave, returnWaveTasksToRevalidation, type WaveReopeningRefusal } from "./task-revalidation";
+import { reopenableWave, returnedTaskIds, returnWaveTasksToRevalidation, type WaveReopeningRefusal } from "./task-revalidation";
 import type { TaskGraph } from "../types";
 
 /** The longest reason a revision records; it is an audit line, not a document. */
@@ -243,25 +244,28 @@ export function reviseAcceptanceContract(
     return refuse("unchanged", `${contract.id}'s frozen bytes are unchanged; edit them before recording a revision`);
   }
 
-  const revalidatedIds = claimants
-    .filter((task) => task.wave === wave && task.status === "implemented")
-    .map(({ id }) => id);
+  // The current Wave's suite receipt and reviews judged the old bytes, and its
+  // Distill Task distilled code written against them: the transition returns
+  // it with the claimants, and the revision audits every Task it returned.
+  const revalidated = returnWaveTasksToRevalidation(
+    reopenable.value,
+    claimants.filter((task) => task.wave === wave && task.status === "implemented").map(({ id }) => id),
+  );
   const revision: ContractRevision = freeze({
     revision: contract.revisions.length + 1,
     reason: request.reason,
     previous: contract.freeze.paths,
     paths: observed.value,
-    revalidatedTaskIds: Object.freeze(revalidatedIds),
+    revalidatedTaskIds: returnedTaskIds(revalidated.returned),
   });
   const revisedContract: AcceptanceContract = freeze({
     ...contract,
     freeze: freeze({ state: "revised", paths: observed.value }),
     revisions: Object.freeze([...contract.revisions, revision]),
   });
-  // The current Wave's suite receipt and reviews judged the old bytes. The
-  // transition reads no contract, so the revised one is written over its result.
+  // The transition reads no contract, so the revised one is written over its result.
   const revisedGraph: TaskGraph = {
-    ...returnWaveTasksToRevalidation(reopenable.value, revalidatedIds),
+    ...revalidated.graph,
     acceptance_contracts: contracts.map((entry) => entry.id === contract.id ? revisedContract : entry),
     ...(skeletons.settlements.size > 0 ? { skeletons: revisedSkeletonRecords(graph.skeletons ?? [], skeletons, revision.revision) } : {}),
   };

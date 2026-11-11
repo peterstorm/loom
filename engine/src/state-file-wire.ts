@@ -42,6 +42,7 @@ import type {
   OrphanedWaveGateRetirement,
   OwnerObligation,
   WaveReopeningAudit,
+  ReopenedTaskIds,
   TaskReopeningAudit,
   SpecCheck,
   SpecTraceAmendment,
@@ -60,6 +61,7 @@ import {
   parseEffectId,
   parseOrchestrationRunId,
   parseSlotId,
+  nonEmpty,
   type NonEmpty,
 } from "./core/orchestration-contract";
 import {
@@ -91,8 +93,17 @@ import {
   specTraceDiagnosticMessages,
   type TraceFields,
 } from "./core/spec-trace";
-import { parseTaskVerificationPolicy } from "./core/verification-policy";
+import {
+  claimsDistillPassWaiver,
+  DISTILL_PASS,
+  isDistillVerificationPolicy,
+  parseTaskVerificationPolicy,
+  type ParsedTaskVerificationPolicy,
+} from "./core/verification-policy";
+import { isDistillTask, taskRolePolicy } from "./core/distill-task";
+import { taskArtifactExpectation } from "./core/task-artifact-expectation";
 import { MAX_TASK_REOPENING_REASON_LENGTH } from "./core/task-reopening";
+import { reopenedTaskIds, type ReopenedTaskIdsRefusal } from "./core/task-revalidation";
 import {
   isProtectedVerificationPath,
   parseAcceptedWaveCompletionReceipt,
@@ -911,6 +922,73 @@ const TASK_REOPENING_AUDIT_FIELDS = [
   "schemaVersion", "kind", "wave", "reopenedTaskIds", "reason", "abandonedRunId",
 ] as const;
 
+/** The one field a reopening audit gained with the Distill Task (ADR-0068);
+ *  audits written before it carry none. */
+const SWEPT_DISTILL_TASK_IDS_FIELD = "sweptDistillTaskIds";
+
+/** A non-empty list of distinct Task ids under `label`, or why it is not one. */
+function parseDistinctTaskIds(raw: unknown, label: string): ParseResult<NonEmpty<TaskId>> {
+  const ids: readonly unknown[] = Array.isArray(raw) ? raw : [];
+  const parsed: TaskId[] = [];
+  for (const id of ids) {
+    const taskId = parseTaskIdAt(id, label);
+    if (!taskId.ok) return taskId;
+    parsed.push(taskId.value);
+  }
+  const taskIds = nonEmpty(parsed);
+  if (taskIds === null) return parseErr(`${label} must be a non-empty array`);
+  return new Set(taskIds).size === taskIds.length
+    ? parseOk(taskIds)
+    : parseErr(`${label} names a Task more than once`);
+}
+
+/** Why `reopenedTaskIds` refused an audit's ids, in the State File's words. */
+function reopenedTaskIdsRefusalMessage(refusal: ReopenedTaskIdsRefusal, label: string): string {
+  const path = `${label}.${SWEPT_DISTILL_TASK_IDS_FIELD}`;
+  switch (refusal.kind) {
+    case "swept-not-reopened":
+      return `${path}: ${refusal.taskId} is not among ${label}.reopenedTaskIds`;
+    case "swept-every-reopened":
+      return `${path} names every reopened Task; a Distill Task is swept only with another Task of its Wave`;
+    default: {
+      const unhandled: never = refusal;
+      return unhandled;
+    }
+  }
+}
+
+/**
+ * The ids of one reopening audit under `label`: its parsed `reopened` ids and
+ * the Distill Tasks its raw `sweptDistillTaskIds` field says were swept back
+ * with them. The field may be absent; present, it is a non-empty list of
+ * distinct Task ids, and `reopenedTaskIds` holds it to the rule both audits
+ * share (drawn from `reopened`, never all of it). `distillTaskIds` are the
+ * roster's Distill Tasks when the audit's Tasks are still on the roster, so a
+ * swept id naming any other Task is refused; null skips that check. A swept id
+ * outside `reopened` is reported first, then one that is no Distill Task, then
+ * a sweep of every reopened Task.
+ */
+function parseReopenedTaskIds(
+  rawSwept: unknown,
+  label: string,
+  reopened: NonEmpty<TaskId>,
+  distillTaskIds: ReadonlySet<string> | null,
+): ParseResult<ReopenedTaskIds> {
+  const path = `${label}.${SWEPT_DISTILL_TASK_IDS_FIELD}`;
+  let swept: readonly TaskId[] = [];
+  if (rawSwept !== undefined) {
+    if (!Array.isArray(rawSwept) || rawSwept.length === 0) return parseErr(`${path} must be a non-empty array when present`);
+    const parsed = parseDistinctTaskIds(rawSwept, path);
+    if (!parsed.ok) return parsed;
+    swept = parsed.value;
+  }
+  const ids = reopenedTaskIds(reopened, swept);
+  if (!ids.ok && ids.error.kind === "swept-not-reopened") return parseErr(reopenedTaskIdsRefusalMessage(ids.error, label));
+  const notDistill = distillTaskIds === null ? undefined : swept.find((id) => !distillTaskIds.has(id));
+  if (notDistill !== undefined) return parseErr(`${path}: ${notDistill} is not a Distill Task`);
+  return ids.ok ? parseOk(ids.value) : parseErr(reopenedTaskIdsRefusalMessage(ids.error, label));
+}
+
 /** Parse one immutable audit of implemented active-Wave Tasks reopened for
  *  re-implementation. Every reopened id must name a Task of the audited Wave. */
 function parseTaskReopeningAudit(
@@ -920,28 +998,20 @@ function parseTaskReopeningAudit(
 ): ParseResult<TaskReopeningAudit> {
   if (!isRecord(raw)) return parseErr(`${label} must be an object`);
   const record = raw as Record<string, unknown>;
-  const fieldsError = exactFieldsError(record, TASK_REOPENING_AUDIT_FIELDS, [], label);
+  const fieldsError = exactFieldsError(record, TASK_REOPENING_AUDIT_FIELDS, [SWEPT_DISTILL_TASK_IDS_FIELD], label);
   if (fieldsError !== null) return parseErr(fieldsError);
   if (record.schemaVersion !== 1 || record.kind !== "implemented-tasks-reopened") {
     return parseErr(`${label} has invalid schema or kind`);
   }
   const wave = parseIntegerBound(record.wave, `${label}.wave`, 1, "an integer >= 1 within the safe-integer range");
   if (!wave.ok) return parseErr(wave.error);
-  const ids = record.reopenedTaskIds;
-  if (!Array.isArray(ids) || ids.length === 0) return parseErr(`${label}.reopenedTaskIds must be a non-empty array`);
-  const idError = ids.map((id) => taskIdError(id, `${label}.reopenedTaskIds`)).find((error) => error !== null);
-  if (idError !== undefined) return parseErr(idError);
-  const [first, ...rest] = ids.flatMap((id) => {
-    const parsed = parseTaskId(id);
-    return parsed.ok ? [parsed.value] : [];
-  });
-  if (first === undefined) return parseErr(`${label}.reopenedTaskIds must be a non-empty array`);
-  const reopenedTaskIds: NonEmpty<TaskId> = Object.freeze([first, ...rest] as const);
-  if (new Set(reopenedTaskIds).size !== reopenedTaskIds.length) {
-    return parseErr(`${label}.reopenedTaskIds names a Task more than once`);
-  }
-  const foreign = reopenedTaskIds.find((id) => !tasks.some((task) => task.id === id && task.wave === wave.value));
+  const reopened = parseDistinctTaskIds(record.reopenedTaskIds, `${label}.reopenedTaskIds`);
+  if (!reopened.ok) return reopened;
+  const foreign = reopened.value.find((id) => !tasks.some((task) => task.id === id && task.wave === wave.value));
   if (foreign !== undefined) return parseErr(`${label}.reopenedTaskIds: ${foreign} is not a Task of Wave ${wave.value}`);
+  const distillTaskIds = new Set(tasks.filter(isDistillTask).flatMap(({ id }) => typeof id === "string" ? [id] : []));
+  const reopenedIds = parseReopenedTaskIds(record[SWEPT_DISTILL_TASK_IDS_FIELD], label, reopened.value, distillTaskIds);
+  if (!reopenedIds.ok) return reopenedIds;
   const reason = record.reason;
   if (typeof reason !== "string" || reason.trim() !== reason || reason.length === 0 ||
       reason.length > MAX_TASK_REOPENING_REASON_LENGTH) {
@@ -955,7 +1025,7 @@ function parseTaskReopeningAudit(
     schemaVersion: 1,
     kind: "implemented-tasks-reopened",
     wave: wave.value,
-    reopenedTaskIds,
+    ...reopenedIds.value,
     reason,
     abandonedRunId: abandonedRunId === null ? null : abandonedRunId.value,
   }));
@@ -981,14 +1051,21 @@ function parseTaskReopeningHistory(
     : parseErr("task_reopening_history names one abandoned Wave Gate run in two audits");
 }
 
+/** `value` as the Task id it is under `label`, or why it is not one. */
+function parseTaskIdAt(value: unknown, label: string): ParseResult<TaskId> {
+  if (typeof value !== "string" || value === "") {
+    return parseErr(`${label}: id must be a non-empty string, got ${JSON.stringify(value)}`);
+  }
+  const parsed = parseTaskId(value, `${label}: id`);
+  return parsed.ok
+    ? parseOk(parsed.value)
+    : parseErr(`${label}: id must match T\\d+, got ${JSON.stringify(value)}`);
+}
+
 /** One task-identity grammar shared by load and operator-validation boundaries. */
 export function taskIdError(value: unknown, label: string): string | null {
-  if (typeof value !== "string" || value === "") {
-    return `${label}: id must be a non-empty string, got ${JSON.stringify(value)}`;
-  }
-  return parseTaskId(value, `${label}: id`).ok
-    ? null
-    : `${label}: id must match T\\d+, got ${JSON.stringify(value)}`;
+  const parsed = parseTaskIdAt(value, label);
+  return parsed.ok ? null : parsed.error;
 }
 
 export function orphanExecutionReservationError(
@@ -1494,6 +1571,53 @@ function taskPacketError(
   return null;
 }
 
+const isEmptyOrAbsent = (value: unknown): boolean => value === undefined || (Array.isArray(value) && value.length === 0);
+
+/**
+ * The Distill Task's fixed shape (ADR-0068), and the one waiver only it may
+ * carry. Population is the only writer of a Distill Task, so every field it
+ * stamps is exact here: the engine-only policy, no dependency (its Wave's
+ * other Tasks gate it, not `depends_on`), no Requirement trace, and a
+ * non-empty Distill Scope. Attestation mode is refused: its Proof is
+ * `behaviour-preserved`, and an attested Proof cannot be both.
+ */
+function taskDistillError(
+  t: Record<string, unknown>,
+  label: string,
+  verification: ParsedTaskVerificationPolicy,
+): string | null {
+  if (!isDistillTask(t)) {
+    return claimsDistillPassWaiver(verification.policy)
+      ? `${label}: waiver reason ${DISTILL_PASS} is engine-only and belongs to a Distill Task alone`
+      : null;
+  }
+  if (t.implementation_attestation !== undefined) {
+    return `${label}: a Distill Task cannot be in attestation mode`;
+  }
+  if (verification.source !== "explicit" || !isDistillVerificationPolicy(verification.policy)) {
+    return `${label}: a Distill Task must carry exactly the verification_policy that waives regression and new_tests as ${DISTILL_PASS}`;
+  }
+  if (!isEmptyOrAbsent(t.depends_on)) return `${label}: a Distill Task must have empty depends_on`;
+  if (!isEmptyOrAbsent(t.spec_anchors)) return `${label}: a Distill Task must have empty spec_anchors`;
+  if (!isEmptyOrAbsent(t.spec_contributions)) return `${label}: a Distill Task must have empty spec_contributions`;
+  return Array.isArray(t.file_list) && t.file_list.length > 0
+    ? null
+    : `${label}: a Distill Task must have a non-empty file_list (its Distill Scope)`;
+}
+
+/** A Wave carries at most one Distill Task: the second one found, as its refusal. */
+function distillTaskPerWaveError(tasks: readonly Record<string, unknown>[]): string | null {
+  const firstByWave = new Map<unknown, Record<string, unknown>>();
+  for (const task of tasks.filter(isDistillTask)) {
+    const first = firstByWave.get(task.wave);
+    if (first !== undefined) {
+      return `Task ${String(task.id)}: Wave ${String(task.wave)} already has the Distill Task ${String(first.id)}; a Wave carries at most one`;
+    }
+    firstByWave.set(task.wave, task);
+  }
+  return null;
+}
+
 /** Status, review status/generation/run, and exact flat lifecycle invariants. */
 function taskStatusError(
   t: Record<string, unknown>,
@@ -1510,6 +1634,8 @@ function taskStatusError(
   if (t.implementation_attestation !== undefined && t.implementation_attestation !== true) {
     return `${label}: implementation_attestation must be true when present`;
   }
+  const distillError = taskDistillError(t, label, verification.value);
+  if (distillError !== null) return distillError;
   if (t.implementation_attestation === true) {
     if (verification.value.policy.regression.kind !== "required") {
       return `${label}: attestation mode requires regression verification`;
@@ -1556,11 +1682,12 @@ function taskStatusError(
   if (t.legacy_missing_proof === true) return `${label}: legacy_missing_proof requires absent Proof`;
   const proof = parseTaskProof(t.proof);
   if (!proof.ok) return `${label}: invalid proof: ${proof.errors.join("; ")}`;
-  const expectation = t.implementation_attestation === true ? "attested" as const : "changed" as const;
+  // The one expectation rule (`taskArtifactExpectation`): a Distill Task's
+  // stored Proof must be exactly task-completed and behaviour-preserved.
   const expectedObligations = deriveProofObligations({
     verificationPolicy: verification.value.policy,
     declaredArtifacts: Array.isArray(t.file_list) ? t.file_list : [],
-    declaredArtifactExpectation: expectation,
+    declaredArtifactExpectation: taskArtifactExpectation(t),
     redThenGreen: taskRedThenGreenEra(scope, id),
   });
   const obligationsMatch = proof.value.obligations.length === expectedObligations.length &&
@@ -1804,17 +1931,16 @@ function parseWaveReopeningHistory(raw: unknown): ParseResult<readonly WaveReope
   for (const [index, rawAudit] of raw.entries()) {
     if (!isRecord(rawAudit)) return parseErr(`wave_reopening_history[${index}] must be an object`);
     const audit = rawAudit as Record<string, unknown>;
-    const fields = exactFieldsError(audit, ["schemaVersion", "kind", "proofMode", "runId", "wave", "authorityDigest", "completionReceipt", "reopenedTaskIds"], [], `wave_reopening_history[${index}]`);
+    const fields = exactFieldsError(audit, ["schemaVersion", "kind", "proofMode", "runId", "wave", "authorityDigest", "completionReceipt", "reopenedTaskIds"], [SWEPT_DISTILL_TASK_IDS_FIELD], `wave_reopening_history[${index}]`);
     if (fields !== null || audit.schemaVersion !== 1 || audit.kind !== "completed-wave-reopened-for-review-integrity" ||
         (audit.proofMode !== "modern-exact-workspace-drift" && audit.proofMode !== "legacy-workspace-authority-unverifiable")) {
       return parseErr(fields ?? `wave_reopening_history[${index}] has invalid schema, kind, or proof mode`);
     }
     const runId = parseOrchestrationRunId(audit.runId);
     const authorityDigest = parseArtifactDigest(audit.authorityDigest);
+    const reopened = parseDistinctTaskIds(audit.reopenedTaskIds, `wave_reopening_history[${index}].reopenedTaskIds`);
     if (!runId.ok || !authorityDigest.ok || typeof audit.wave !== "number" || !Number.isSafeInteger(audit.wave) || audit.wave < 1 ||
-        !Array.isArray(audit.reopenedTaskIds) || audit.reopenedTaskIds.length === 0 ||
-        audit.reopenedTaskIds.some((id) => taskIdError(id, `wave_reopening_history[${index}].reopenedTaskIds`) !== null) ||
-        new Set(audit.reopenedTaskIds).size !== audit.reopenedTaskIds.length ||
+        !reopened.ok ||
         typeof audit.completionReceipt !== "object" || audit.completionReceipt === null) {
       return parseErr(`wave_reopening_history[${index}] has invalid authority, receipt, or reopened Task ids`);
     }
@@ -1828,10 +1954,14 @@ function parseWaveReopeningHistory(raw: unknown): ParseResult<readonly WaveReope
         !Number.isSafeInteger(committedRevision) || committedRevision < 1) {
       return parseErr(`wave_reopening_history[${index}] has an invalid completion receipt`);
     }
+    // The audited Tasks may have left the roster since, so no roster check here.
+    const reopenedIds = parseReopenedTaskIds(
+      audit[SWEPT_DISTILL_TASK_IDS_FIELD], `wave_reopening_history[${index}]`, reopened.value, null);
+    if (!reopenedIds.ok) return reopenedIds;
     audits.push(Object.freeze({ schemaVersion: 1, kind: "completed-wave-reopened-for-review-integrity", proofMode: audit.proofMode,
       runId: runId.value, wave: audit.wave, authorityDigest: authorityDigest.value,
       completionReceipt: Object.freeze({ kind: "protected-wave-state-committed" as const, effectId: effectId.value, runId: runId.value, committedRevision, stateDigest: stateDigest.value }),
-      reopenedTaskIds: Object.freeze([...(audit.reopenedTaskIds as string[])]), }));
+      ...reopenedIds.value }));
   }
   const identities = audits.map((audit) => `${audit.runId}:${audit.authorityDigest}`);
   return new Set(identities).size === identities.length ? parseOk(Object.freeze(audits)) : parseErr("wave_reopening_history contains duplicate authority audits");
@@ -1963,7 +2093,7 @@ function migrateParsedTask(
       proof: derivePendingTaskProof({
         verificationPolicy: verification.value.policy,
         declaredArtifacts: Array.isArray(task.file_list) ? task.file_list : [],
-        declaredArtifactExpectation: task.implementation_attestation === true ? "attested" : "changed",
+        declaredArtifactExpectation: taskArtifactExpectation(task),
         redThenGreen: taskRedThenGreenEra(scope, identity.value),
       }),
     };
@@ -2086,6 +2216,8 @@ function parseTaskGraphTasks(
   const taskIds = parsedTasks.map((task) => task.id as string);
   const duplicateTaskId = taskIds.find((id, index) => taskIds.indexOf(id) !== index);
   if (duplicateTaskId !== undefined) return parseErr(`duplicate task id: ${duplicateTaskId}`);
+  const distillWaveError = distillTaskPerWaveError(parsedTasks);
+  if (distillWaveError !== null) return parseErr(distillWaveError);
   const orphanReservation = orphanExecutionReservationError(parsedTasks, [...executing]);
   if (orphanReservation !== null) return parseErr(orphanReservation);
   const relationError = parsedTasks.flatMap((task) => {
@@ -2666,6 +2798,8 @@ function parseSkeletonOutcome(raw: unknown, label: string): ParseResult<Skeleton
       return exact(["kind"], { kind: "contract-has-no-types-file" });
     case "exists-not-skeletonized":
       return exact(["kind"], { kind: "exists-not-skeletonized" });
+    case "absent-no-skeleton-owed":
+      return exact(["kind"], { kind: "absent-no-skeleton-owed" });
     default:
       return parseErr(`${label}.kind is no skeleton outcome, got ${JSON.stringify(raw.kind)}`);
   }
@@ -2718,11 +2852,14 @@ type ParsedSkeletonFields = Readonly<{
  *   Contract Revision may change, so the origins are not compared);
  * - `unsupported-language` is bound, and `skeletonLanguageOf` (INV-6) gives
  *   the path exactly that reason;
- * - `no-bound-exports` and `contract-has-no-types-file` are unbound.
+ * - `no-bound-exports` and `contract-has-no-types-file` are unbound;
+ * - `absent-no-skeleton-owed` is bound at a skeleton target, on a Task that
+ *   holds no Skeleton (`TaskRolePolicy.holdsSkeletons`): a holder of such a
+ *   path is written one.
  */
 function recordedOutcomeConflict(
   { path, outcome }: PathSkeletonOutcome,
-  fields: Readonly<{ exportBindings: readonly ExportBinding[]; skeletons: readonly SkeletonRecord[] }>,
+  fields: Readonly<{ exportBindings: readonly ExportBinding[]; skeletons: readonly SkeletonRecord[]; holdsSkeletons: boolean }>,
 ): string | null {
   const binding = fields.exportBindings.find((candidate) => candidate.path === path);
   switch (outcome.kind) {
@@ -2743,6 +2880,12 @@ function recordedOutcomeConflict(
       return binding === undefined ? null : `records '${path}' as ${outcome.kind}, but export_bindings binds it to ${binding.contract}`;
     case "exists-not-skeletonized":
       return null;
+    case "absent-no-skeleton-owed":
+      if (fields.holdsSkeletons) return `records '${path}' as absent-no-skeleton-owed, but the Task holds its own Skeletons`;
+      if (binding === undefined) return `records '${path}' as absent-no-skeleton-owed, but export_bindings does not bind it`;
+      return skeletonLanguageOf(path).kind === "supported"
+        ? null
+        : `records '${path}' as absent-no-skeleton-owed, but the path is no skeleton target`;
   }
 }
 
@@ -2760,7 +2903,11 @@ function recordedOutcomesError(tasks: readonly Record<string, unknown>[], fields
     if (fields.exportBindings === undefined) {
       return `${label} is recorded, but the TaskGraph has no export_bindings stamp; a graph populated before G2 records no skeleton outcome`;
     }
-    const stamped = { exportBindings: fields.exportBindings, skeletons: fields.skeletons ?? [] };
+    const stamped = {
+      exportBindings: fields.exportBindings,
+      skeletons: fields.skeletons ?? [],
+      holdsSkeletons: taskRolePolicy(task).holdsSkeletons,
+    };
     for (const [entry, recorded] of outcomes.entries()) {
       const conflict = recordedOutcomeConflict(recorded, stamped);
       if (conflict !== null) return `${label}[${entry}] ${conflict}`;

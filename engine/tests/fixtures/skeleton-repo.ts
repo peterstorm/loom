@@ -890,6 +890,8 @@ function asSkeletonOutcome(value: unknown): SkeletonOutcome | null {
       return oneOf(UNSUPPORTED_REASONS, value.reason) ? { kind: "unsupported-language", reason: value.reason } : null;
     case "exists-not-skeletonized":
       return { kind: "exists-not-skeletonized" };
+    case "absent-no-skeleton-owed":
+      return { kind: "absent-no-skeleton-owed" };
     default:
       return null;
   }
@@ -1157,13 +1159,14 @@ export function briefOf(repo: SkeletonRepo, taskId: string): string {
   return rendered.value.prompt;
 }
 
-/** The exact render strings of the five skeleton outcomes and the stale flag (AD-13, FR-033). */
+/** The exact render strings of the skeleton outcomes and the stale flag (AD-13, FR-033). */
 export const OUTCOME_TEXT = Object.freeze({
   written: "skeleton written",
   noBoundExports: "no bound exports, no skeleton",
   noTypesFile: "contract has no types file, no skeletons",
   unsupported: "unsupported language, no skeleton",
   exists: "exists, not skeletonized",
+  absentNoSkeletonOwed: "absent, no skeleton owed",
   stale: "stale against revised contract",
 });
 

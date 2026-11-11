@@ -8,6 +8,8 @@ import { hasStandaloneReviewContext, invalidateTaskReview } from "./review-outpu
 import { newWaveGate, reconcileWaveBlock, waveBlockCauses } from "./wave-gate-model";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 import { artifactCovers } from "./path-coverage";
+import { distillDispatchBlockers, distillWithheldMessage } from "./distill-task";
+import { nonEmpty } from "./orchestration-contract";
 import {
   canonicalArtifactBaselineDigest,
   createImplementationAttemptAuthority,
@@ -79,8 +81,30 @@ function dependencyExecutionBlock(state: TaskGraph, task: Task): TaskExecutionDe
   return null;
 }
 
-/** Pure task gate used by both single and batch shell entry points. */
-export function taskExecutionDecision(state: TaskGraph, taskId: string): TaskExecutionDecision {
+/**
+ * A Distill Task is withheld until every other Task of its Wave is
+ * implemented and unreserved (ADR-0068). `distillDispatchBlockers` is the one
+ * rule, so registration refuses exactly what status does not offer. A stale
+ * reservation still blocks here: its owner is re-dispatched first. The Tasks
+ * registering in the same batch count as reserved, so a Distill Task never
+ * starts beside a Wave sibling, implemented or not.
+ */
+function distillExecutionBlock(state: TaskGraph, task: Task, batchTaskIds: readonly string[]): TaskExecutionDecision | null {
+  const reserved = new Set([...(state.executing_tasks ?? []), ...batchTaskIds]);
+  const blockers = nonEmpty(distillDispatchBlockers(state.tasks, reserved, task));
+  return blockers === null ? null : { kind: "ineligible", reason: distillWithheldMessage(task.id, blockers) };
+}
+
+/**
+ * Pure task gate used by both single and batch shell entry points.
+ * `batchTaskIds` names every Task registering in the same batch, `taskId`
+ * included; a caller deciding one Task alone omits it.
+ */
+export function taskExecutionDecision(
+  state: TaskGraph,
+  taskId: string,
+  batchTaskIds: readonly string[] = [],
+): TaskExecutionDecision {
   const task = state.tasks.find((candidate) => candidate.id === taskId);
   if (!task) return { kind: "eligible" };
   if (task.status === "completed") {
@@ -100,6 +124,9 @@ export function taskExecutionDecision(state: TaskGraph, taskId: string): TaskExe
 
   const dependencyBlock = dependencyExecutionBlock(state, task);
   if (dependencyBlock !== null) return dependencyBlock;
+
+  const distillBlock = distillExecutionBlock(state, task, batchTaskIds);
+  if (distillBlock !== null) return distillBlock;
 
   if (task.wave === currentWave && currentWave > 1) {
     const prevWave = String(currentWave - 1);
@@ -659,7 +686,7 @@ export function taskExecutionRegistrationError(
   const ownership = taskExecutionOwnershipError(current, expectedTaskIds, mode, staleReservations);
   if (ownership !== null) return ownership;
   for (const [taskIndex, taskId] of expectedTaskIds.entries()) {
-    const decision = taskExecutionDecision(current, taskId);
+    const decision = taskExecutionDecision(current, taskId, expectedTaskIds);
     if (decision.kind === "ineligible") return decision.reason;
     const task = current.tasks.find((candidate) => candidate.id === taskId);
     const baseline = baselines.get(taskId);

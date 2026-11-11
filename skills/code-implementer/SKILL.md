@@ -95,7 +95,7 @@ After writing code, verify:
 - [ ] **Invariants enforced**: Constructors validate? Invalid states unrepresentable?
 - [ ] **Error paths typed**: Using Either/Result? No hidden throws?
 - [ ] **Testable without mocks**: Can test core logic with plain data?
-- [ ] **Distilled**: Run a `distill` apply-mode pass over the new code — reuse before rewrite, no dead/speculative code, no pass-throughs, right altitude. Tests stay green after each move.
+- [ ] **Distilled**: Tidy the new code with the `distill` lens before you finish — reuse before rewrite, no dead/speculative code, no pass-throughs, right altitude. Tests stay green after each move. Inside Loom orchestration nothing checks this item: the enforced pass is the Wave's Distill Task, which a separate agent runs over your implementation files after you settle. Leave it little to do.
 - [ ] **Deep enough**: Check the new modules with the `deepen` lens — deletion test on every wrapper, interfaces narrower than their implementations, no seam without two adapters (production + test). Interfaces you created in this task, fix now; shallowness in pre-existing interfaces, report as a recommended `deepen` session — never redesign it inline.
 
 ---

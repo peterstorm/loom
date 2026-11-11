@@ -13,7 +13,7 @@ import { contractRole } from "../core/acceptance-contract";
 import { sha256Bytes } from "../core/digest";
 import { isNonEmpty, type DomainResult } from "../core/orchestration-contract";
 import { normalizePlanPath, samePlanPath } from "../core/plan-path-match";
-import { productionFiles } from "../core/skeleton/graph-view";
+import { productionFiles, skeletonHolderFiles } from "../core/skeleton/graph-view";
 import { ABSENT } from "../core/skeleton/outcomes";
 import { renderResolutionProblem, renderSkeletonProblem, type SkeletonProblem } from "../core/skeleton/problems";
 import type { UnresolvedSkeletonBinding } from "../core/skeleton/status";
@@ -152,8 +152,8 @@ function observeContract(root: string, contract: TypedContract, bindings: readon
 }
 
 /**
- * Observe the skeletons of `observed`, resolving the bindings of `resolving`
- * (the Tasks a spawn would register). Each contract a resolving Task binds is
+ * Observe the skeletons of `observed`, resolving the bindings `resolving`
+ * (the Tasks a spawn would register) hold. Each contract a resolving Task binds is
  * read in `stamped` mode, as registration reads it, so a drifted or
  * unparseable types file is the problem registration would refuse with; a
  * contract that resolves gets canonical skeletons (`canonicalContractSkeletons`)
@@ -169,9 +169,15 @@ export function observeSkeletons(
   resolving: readonly Task[],
 ): DomainResult<SkeletonObservation, string> {
   if (graph.export_bindings === undefined) return { ok: true, value: NOTHING_OBSERVED };
-  const resolvingPaths = resolving.flatMap((task) => productionFiles(graph, task));
-  const held = graph.export_bindings.filter((binding) => resolvingPaths.some((path) => samePlanPath(path, binding.path)));
-  const contracts = relevantContractIds(graph, observed, held.map(({ contract }) => contract)).flatMap((id) => {
+  const boundAt = (paths: readonly string[]): readonly ExportBinding[] =>
+    (graph.export_bindings ?? []).filter((binding) => paths.some((path) => samePlanPath(path, binding.path)));
+  // The bindings a spawn would resolve are the ones its Tasks HOLD
+  // (`skeletonHolderFiles`): a Distill Task lists bound files and holds none,
+  // so it reports no stage-two problem. Its brief still reads the frozen
+  // surface of every contract its files bind, so those contracts are observed.
+  const held = boundAt(resolving.flatMap((task) => skeletonHolderFiles(graph, task)));
+  const listed = boundAt(resolving.flatMap((task) => productionFiles(graph, task)));
+  const contracts = relevantContractIds(graph, observed, listed.map(({ contract }) => contract)).flatMap((id) => {
     const found = (graph.acceptance_contracts ?? []).find((contract) => contract.id === id);
     const typed = found === undefined ? null : typedContract(found);
     return typed === null || typed.freeze.state === "awaiting-red" ? [] : [typed];

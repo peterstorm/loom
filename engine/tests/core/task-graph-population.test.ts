@@ -16,6 +16,10 @@ import { PHASES, type PlanContract, type TaskGraph } from "../../src/types";
 import { parseExportBindings } from "../../src/core/skeleton/bindings";
 import type { SkeletonRecord } from "../../src/core/skeleton/types";
 import { parseTaskGraph } from "../../src/state-file-wire";
+import { isDistillTask } from "../../src/core/distill-task";
+
+/** The authored roster as population wrote it, without the Distill Tasks it appends (ADR-0068). */
+const authoredTasksOf = (state: TaskGraph) => state.tasks.filter((task) => !isDistillTask(task));
 
 const specSource = `# Feature: Population
 
@@ -151,7 +155,7 @@ describe("populateTaskGraph aggregate command", () => {
     });
     expect(result.value.state.spec_index_observation).not.toHaveProperty("index");
     expect(Object.isFrozen(result.value.state.spec_index_observation)).toBe(true);
-    expect(result.value.state.tasks).toEqual([
+    expect(authoredTasksOf(result.value.state)).toEqual([
       expect.objectContaining({
         id: "T1",
         status: "pending",
@@ -439,7 +443,9 @@ describe("populateTaskGraph aggregate command", () => {
         if (!result.ok) return;
         expect(result.value.waves).toEqual(waves);
         expect(Object.keys(result.value.state.wave_gates).map(Number)).toEqual(waves);
-        expect(result.value.state.tasks).toHaveLength(tasks.length);
+        expect(authoredTasksOf(result.value.state)).toHaveLength(tasks.length);
+        // Each Wave lists one implementation file, so each gets its one Distill Task and no gate of its own.
+        expect(result.value.state.tasks.filter(isDistillTask).map(({ wave }) => wave)).toEqual(waves);
         for (const task of result.value.state.tasks) {
           expect(task).toMatchObject({
             status: "pending",
@@ -485,6 +491,9 @@ describe("populateTaskGraph stamps the plan's Acceptance Contracts", () => {
       T1: { kind: "waived", reason: "acceptance-red-window" },
       T2: { kind: "waived", reason: "acceptance-red-window" },
       T3: { kind: "required" },
+      // The Distill Tasks of Waves 1 and 2 carry their own engine-only waiver, never the red window's.
+      T4: { kind: "waived", reason: "distill-pass" },
+      T5: { kind: "waived", reason: "distill-pass" },
     });
     // The proof derives from the stamped policy: no regression obligation to fail.
     expect(result.value.state.tasks[0]!.proof!.obligations.map(({ kind }) => kind)).not.toContain("regression-test-pass");
@@ -531,7 +540,7 @@ describe("populateTaskGraph owns the decompose → execute transition (issue #50
     if (!result.ok) return;
     expect(result.value.state.current_phase).toBe("execute");
     expect(result.value.state.phase_artifacts).toEqual({ architecture: "plan.md", decompose: "task_graph" });
-    expect(result.value.state.tasks.map(({ id }) => id)).toEqual(["T1"]);
+    expect(authoredTasksOf(result.value.state).map(({ id }) => id)).toEqual(["T1"]);
   });
 
   it("re-population during execute stays in execute", () => {

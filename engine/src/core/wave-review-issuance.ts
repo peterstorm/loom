@@ -45,7 +45,7 @@ const refuse = (message: string): DomainResult<never, IssuanceRefusal> =>
 export type WaveReviewInstallObservation = Readonly<{
   registration: RegisteredWaveGateProgram;
   batch: WaveRequestBatch;
-  /** Reviewed workspace of every registered Task, observed before the lock. */
+  /** Reviewed workspace of every reviewed registered Task, observed before the lock. */
   workspaces: readonly ReviewedWorkspaceObservation[];
   /** Current spec/plan observation at the batch's document paths. */
   specCheckObservation: WaveSpecCheckObservation;
@@ -140,6 +140,19 @@ export function installWaveReviewRunsTransition(
       continue;
     }
     const taskRun = batch.taskRuns.find(({ taskId }) => taskId === task.id);
+    // The Task's own review, derived from the locked graph the batch was just
+    // proven to have been prepared from (`lockedPreparation` above).
+    const review = waveTaskReviewRoster(locked, registration.schemaVersion, task);
+    if (review.kind === "exempt") {
+      // An exempt Task is registered and installs nothing: no Review Packet,
+      // no Review Run, no change to its review state.
+      if (taskRun !== undefined || task.review_run !== undefined) {
+        return refuse(`Task ${task.id} is exempt from Wave review (${review.reason}) but carries a Review Packet`);
+      }
+      tasks.push(task);
+      continue;
+    }
+    const expectedAgents = review.roster;
     const currentWorkspace = workspaceByTask.get(task.id);
     const lockedScope = taskReviewScope(task);
     const exactScope = currentWorkspace !== undefined && lockedScope.length === currentWorkspace.scope.length &&
@@ -156,9 +169,6 @@ export function installWaveReviewRunsTransition(
       }
       if (context.kind === "loaded" && context.value.taskRun?.taskId === task.id) authorities.push(authority);
     }
-    // The Task's own roster, derived from the locked graph the batch was just
-    // proven to have been prepared from (`lockedPreparation` above).
-    const expectedAgents = waveTaskReviewRoster(locked, registration.schemaVersion, task);
     if (authorities.length !== expectedAgents.length) {
       return refuse(`Task ${task.id} current Review Packet lacks the exact reviewer roster`);
     }

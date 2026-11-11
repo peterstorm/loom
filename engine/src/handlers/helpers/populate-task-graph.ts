@@ -32,6 +32,7 @@ import { runGit } from "../../utils/git-execution-policy";
 import { renderProofBoundaryNotice } from "../../core/proof-boundary-observation";
 import { acceptanceObservationProblem } from "../../core/acceptance-contract";
 import { parsePlanExportBindings } from "../../core/parse-plan-models";
+import { distillPlanNote, isDistillTask } from "../../core/distill-task";
 import {
   parseAuthoredTaskRoster,
   populateTaskGraph,
@@ -288,6 +289,13 @@ function parseArgs(args: string[]): ParsedPopulateArgs {
   };
 }
 
+/** What population wrote: the roster size, the engine-added distill passes among it, and the Waves. */
+function populationSummary({ state, waves }: Extract<TaskGraphPopulationResult, { ok: true }>["value"]): string {
+  const distill = state.tasks.filter(isDistillTask).map(({ id }) => id);
+  const added = distill.length === 0 ? "" : ` (${distill.length} engine-added distill pass: ${distill.join(", ")})`;
+  return `Task graph populated: ${state.tasks.length} tasks${added}, waves: ${waves.join(", ")}`;
+}
+
 /**
  * Decompose stdin is agent-controlled text: it may DESCRIBE work (id,
  * description, agent, wave, deps, Requirement Completion Claims,
@@ -335,7 +343,7 @@ const handler: HookHandler = async (stdin, args) => {
   }
 
   // Validate decompose output before merging. Scoped to the PAYLOAD: the
-  // findings aggregate is agent-forgeable here and core `sanitizeTask`
+  // findings aggregate is agent-forgeable here and core `populatedTask`
   // strips it during population, so holding this to the load-boundary findings
   // rules would reject exactly the input that sanitization exists to clean.
   const validation = validateFull(decompose as unknown as Record<string, unknown>, "decompose-payload");
@@ -483,19 +491,23 @@ const handler: HookHandler = async (stdin, args) => {
   }
   if (!applied.ok) return { kind: "error", message: applied.error.message };
 
-  const taskCount = decompose.tasks.length;
-  process.stderr.write(`Task graph populated: ${taskCount} tasks, waves: ${applied.value.waves.join(", ")}\n`);
+  process.stderr.write(`${populationSummary(applied.value)}\n`);
   // Rendered from the persisted observation, the one record later readers see.
   const observation = applied.value.state.proof_boundary_observation;
   const boundaryNotice = observation === undefined ? null : renderProofBoundaryNotice(observation);
   if (boundaryNotice !== null) process.stderr.write(`${boundaryNotice}\n`);
+  // A roster the planner gave no distill pass for a reason the operator did
+  // not choose says so, beside the summary that shows none was added.
+  const distillNote = distillPlanNote(applied.value.distillPlan);
+  if (distillNote !== null) process.stderr.write(`${distillNote}\n`);
 
   return {
     kind: "passthrough",
     systemMessage: renderProjectVerificationCoverage(deriveProjectVerificationCoverage(preparedManifest.value)) +
       ` Install ${VERIFICATION_MANIFEST_SOURCE_PATH} before population to configure project checks; ` +
       "later source edits do not change this TaskGraph's frozen authority." +
-      (boundaryNotice === null ? "" : ` ${boundaryNotice}`),
+      (boundaryNotice === null ? "" : ` ${boundaryNotice}`) +
+      (distillNote === null ? "" : ` ${distillNote}`),
   };
 };
 

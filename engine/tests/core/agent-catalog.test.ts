@@ -46,9 +46,15 @@ describe("Agent Catalog projections match the pre-catalog memberships", () => {
 
   it("implementation agents", () => {
     expect([...IMPL_AGENTS].sort()).toEqual([
-      "adr-writer-agent", "code-implementer-agent", "frontend-agent", "java-test-agent",
+      "adr-writer-agent", "code-implementer-agent", "distill-agent", "frontend-agent", "java-test-agent",
       "security-agent", "test-engineer", "ts-test-agent",
     ]);
+    // ADR-0068: the Distill Task's agent is an implementation agent with the
+    // implementation profile and the distill skill, pinned by value.
+    expect(AGENT_CATALOG["distill-agent"]).toMatchObject({
+      kind: { kind: "impl" }, profile: "implementation", requiredSkill: "distill",
+    });
+    expect(isImplementationAgent("distill-agent")).toBe(true);
     expect(isImplementationAgent("code-implementer-agent")).toBe(true);
     expect(isImplementationAgent("code-implementer")).toBe(true);
     expect(isImplementationAgent("code-reviewer")).toBe(false);

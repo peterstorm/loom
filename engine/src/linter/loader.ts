@@ -10,8 +10,10 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { type RegexRule, type Rule, type Tier, type RuleSource, isRegexRule } from "./types";
 import { analyzeRegex } from "./safety";
-import { createProgrammaticRules } from "./programmatic/index";
+import { createProgrammaticRules, projectLintContext, type ProjectLintContext } from "./programmatic/index";
 import { EMPTY_CONFIG, parseProjectConfig, projectRootOf, type ProgrammaticConfig } from "./programmatic/config";
+import { EMPTY_CORPUS, type AuthoritativeCorpus, type CloneCorpus } from "./clones/clone-detection";
+import { authoritativeCorpus, cacheAssistedCorpus, defaultCacheFile, type CorpusSource } from "./clones/project-corpus";
 import { isDeclarativeRuleFile } from "./rule-sources";
 
 // --- Public API ---
@@ -66,9 +68,11 @@ export function loadRules(
   if (options?.includeProgrammatic !== false) {
     // Load project-local config for programmatic rules, and the root of the
     // project it belongs to — the frame its paths and baseline keys are in.
-    const projectConfig = loadProjectConfig(projectDir);
-    // Always create with config — createProgrammaticRules handles defaults via ??
-    const programmaticRules = createProgrammaticRules(projectConfig, projectRootOf(projectDir));
+    // Always create with config — createProgrammaticRules handles defaults via ??.
+    // The executor, not this list's order, decides which rule runs last.
+    const programmaticRules = createProgrammaticRules(
+      LINT_CONTEXT_OF_TIER[tier](loadProjectConfig(projectDir), projectRootOf(projectDir)),
+    );
 
     const programmaticEnabled = programmaticRules.filter((rule) => {
       // Check if a project rule disabled this programmatic rule by name
@@ -84,6 +88,46 @@ export function loadRules(
 
   return tier === "immediate" ? enabled.filter(isRegexRule) : enabled;
 }
+
+/**
+ * One project's lint context, its corpus made by `corpusOf`. Nothing is walked
+ * here: the corpus builds itself on the rule's first call. A rules directory in
+ * neither layout has no known project root (null), so there is no project to
+ * search and the corpus is the empty one.
+ */
+function lintContext<Corpus extends CloneCorpus>(
+  config: ProgrammaticConfig,
+  projectRoot: string | null,
+  corpusOf: (source: CorpusSource) => Corpus,
+): ProjectLintContext<Corpus | AuthoritativeCorpus> {
+  return projectLintContext(config, projectRoot, (clone) =>
+    projectRoot === null ? EMPTY_CORPUS : corpusOf({ projectRoot, exclusions: config.exclude ?? [], clone }));
+}
+
+/**
+ * The lint context whose clone corpus fingerprints every file from its bytes:
+ * what the full tier, the baseline drift report and `--write-baseline` decide
+ * from.
+ */
+export const authoritativeLintContext = (
+  config: ProgrammaticConfig,
+  projectRoot: string | null,
+): ProjectLintContext<AuthoritativeCorpus> => lintContext(config, projectRoot, authoritativeCorpus);
+
+/**
+ * The edit hook's lint context: its corpus keeps a fingerprint cache, so an
+ * edit costs one walk. The cache can hide a copy, so nothing that decides is
+ * built from this one.
+ */
+const editLintContext = (config: ProgrammaticConfig, projectRoot: string | null): ProjectLintContext =>
+  lintContext(config, projectRoot, (source) => cacheAssistedCorpus(source, defaultCacheFile(source.projectRoot)));
+
+/** The corpus each tier's rules may read: the full tier decides, so only an authoritative one. */
+type TierCorpus = Readonly<{ immediate: CloneCorpus; full: AuthoritativeCorpus }>;
+
+const LINT_CONTEXT_OF_TIER: {
+  readonly [T in Tier]: (config: ProgrammaticConfig, projectRoot: string | null) => ProjectLintContext<TierCorpus[T]>;
+} = { immediate: editLintContext, full: authoritativeLintContext };
 
 /**
  * Reads the project-local linter config from a project rules directory: the

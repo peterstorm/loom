@@ -1,0 +1,17 @@
+{
+  "agent": "distill-agent",
+  "enforcedTools": ["Edit", "Write", "MultiEdit"],
+  "phases": [
+    {
+      "id": "green-baseline",
+      "allowedTools": [],
+      "advance": { "event": "TestRunPassed", "min": 1 }
+    },
+    {
+      "id": "distill",
+      "terminal": true,
+      "allowedTools": ["Edit", "Write", "MultiEdit"],
+      "requires": [{ "event": "TestRunPassed", "min": 1 }]
+    }
+  ]
+}

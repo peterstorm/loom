@@ -18,7 +18,9 @@
  * Test files never get an outcome; an unknown Task is `unknown-task`, never
  * an empty list, while a Task with no production files has an empty list.
  * `presentSkeletonOf` is `touched` exactly when the file is not untouched,
- * else `canonical` or `engine-bytes`. The five render strings are exact.
+ * else `canonical` or `engine-bytes`. The render strings are exact. A Task
+ * that holds no Skeleton (a Distill Task) is covered by
+ * `skeleton-outcomes-distill.test.ts`.
  *
  * Sibling row (T11): the spawn materialization's `planTaskSkeletons`, fed
  * this same graph and observation set, records exactly the owner's outcome
@@ -290,6 +292,7 @@ describe("INV-4 owner: exact render strings", () => {
     [{ kind: "unsupported-language", reason: "jvm-non-java" }, "unsupported language, no skeleton"],
     [{ kind: "unsupported-language", reason: "other-extension" }, "unsupported language, no skeleton"],
     [EXISTS, "exists, not skeletonized"],
+    [{ kind: "absent-no-skeleton-owed" }, "absent, no skeleton owed"],
   ];
   for (const [outcome, rendered] of rows) {
     it(`${JSON.stringify(outcome)} renders '${rendered}'`, () => {
@@ -297,7 +300,7 @@ describe("INV-4 owner: exact render strings", () => {
     });
   }
 
-  it("renders every outcome of the matrix graph to one of the five strings", () => {
+  it("renders every outcome of the matrix graph, whose Tasks all hold their Skeletons, to one of the five holder strings", () => {
     const strings = new Set(["T1", "T2", "T3", "T4"].flatMap((id) =>
       knownSkeletonOutcomes(GRAPH, id, OBSERVATIONS).map(({ outcome }) => renderSkeletonOutcome(outcome))));
     expect([...strings].sort()).toEqual([

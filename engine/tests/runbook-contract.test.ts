@@ -386,6 +386,7 @@ describe("G2 skeleton prose ↔ the skeleton engine", () => {
       { kind: "contract-has-no-types-file" },
       { kind: "unsupported-language", reason: "other-extension" },
       { kind: "exists-not-skeletonized" },
+      { kind: "absent-no-skeleton-owed" },
     ];
     const missing = outcomes.map(renderSkeletonOutcome).filter((wording) => !operations.includes(wording));
     expect(missing, `docs/operations.md never shows: ${missing.join(", ")}`).toEqual([]);

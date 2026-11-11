@@ -14,6 +14,7 @@ import {
   type AgentType,
   type SessionId,
 } from "../../src/machine";
+import { DISTILL_AGENT } from "../../src/core/model-profiles";
 
 const parsedOrThrow = <T>(parsed: T | null, what: string, raw: string): T => {
   if (parsed === null) throw new Error(`fixture ${what} ${JSON.stringify(raw)} must parse`);
@@ -28,3 +29,6 @@ export const agentTypeOf = (raw: string): AgentType => parsedOrThrow(parseAgentT
 
 /** The implementation agent type every implementer-ledger suite uses. */
 export const IMPLEMENTER_TYPE: AgentType = agentTypeOf("code-implementer-agent");
+
+/** The Distill Task's agent type (ADR-0068), for suites that bind or load its machine. */
+export const DISTILLER_TYPE: AgentType = agentTypeOf(DISTILL_AGENT);

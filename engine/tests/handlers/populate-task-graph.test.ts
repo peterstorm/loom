@@ -13,6 +13,7 @@ import { execFileSync } from "node:child_process";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import populate, { resolvedSpecFile } from "../../src/handlers/helpers/populate-task-graph";
 import type { Task, TaskGraph } from "../../src/types";
+import { isDistillTask } from "../../src/core/distill-task";
 import { deriveWaveCompletionSuiteReadiness } from "../../src/core/wave-completion-suite-readiness";
 import { StateManager } from "../../src/state-manager";
 import { taskFixture } from "../fixtures/task-lifecycle";
@@ -23,6 +24,9 @@ import {
 import { capturedSpecCheck } from "../../src/core/spec-check";
 import { canonicalSpecBeside } from "../fixtures/spec-index-fixture";
 import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
+
+/** The authored roster as population wrote it, without the Distill Tasks it appends (ADR-0068). */
+const authoredTasksOf = (state: TaskGraph) => state.tasks.filter((task) => !isDistillTask(task));
 
 /**
  * Exercises the REAL populate-task-graph overwrite guard through the handler's
@@ -179,7 +183,8 @@ describe("populate-task-graph — overwrite guard (funneled through the real han
     const result = await populate(decomposeJson(plan), ["--force"]);
     expect(result.kind).toBe("passthrough");
     const after = JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph;
-    expect(after.tasks.map((t) => t.id)).toEqual(["T9"]);
+    // The authored Task, then its Wave's engine-added Distill Task.
+    expect(after.tasks.map((t) => t.id)).toEqual(["T9", "T10"]);
   });
 
   it("allows overwriting when every existing task is pending and freezes missing source as default", async () => {
@@ -189,7 +194,8 @@ describe("populate-task-graph — overwrite guard (funneled through the real han
     const result = await populate(decomposeJson(plan), []);
     expect(result.kind).toBe("passthrough");
     const after = JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph;
-    expect(after.tasks.map((t) => t.id)).toEqual(["T9"]);
+    // The authored Task, then its Wave's engine-added Distill Task.
+    expect(after.tasks.map((t) => t.id)).toEqual(["T9", "T10"]);
     expect(after.verification_manifest).toEqual(defaultVerificationManifest());
   });
 });
@@ -205,7 +211,7 @@ describe("populate-task-graph — owns decompose → execute (issue #50 Gap 1)",
     const after = JSON.parse(stateBytes(statePath)) as TaskGraph;
     expect(after.current_phase).toBe("execute");
     expect(after.phase_artifacts).toEqual({ decompose: "task_graph" });
-    expect(after.tasks.map(({ id }) => id)).toEqual(["T9"]);
+    expect(after.tasks.map(({ id }) => id)).toEqual(["T9", "T10"]);
   });
 
   it("leaves a decompose graph in decompose, byte for byte, when population fails", async () => {
@@ -725,7 +731,7 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
         expect((await populate(payload, [])).kind).toBe("passthrough");
         const after = JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph;
         expect(after.spec_trace_version).toBe(2);
-        expect(after.tasks.map(({ spec_anchors, spec_contributions, status, review_status }) => ({
+        expect(authoredTasksOf(after).map(({ spec_anchors, spec_contributions, status, review_status }) => ({
           spec_anchors, spec_contributions, status, review_status,
         }))).toEqual([
           { spec_anchors: [], spec_contributions: [anchor], status: "pending", review_status: "pending" },
@@ -852,7 +858,7 @@ describe("populate-task-graph — engine-derived Requirement content hashes", ()
   it("cannot be pre-stamped by the decompose payload", async () => {
     // Decompose says WHICH Requirements a Task completes; the specification's
     // own bytes say what they SAID. An authored hash is dropped like every
-    // other field core `sanitizeTask` does not pick.
+    // other field core `populatedTask` does not pick.
     const dir = tempDir();
     const plan = modelFreePlan(dir);
     writeManifest(dir);
@@ -1028,8 +1034,11 @@ describe("populate-task-graph — Acceptance Contracts", () => {
     expect(result.kind, result.kind === "error" ? result.message : "").toBe("passthrough");
     const graph = JSON.parse(stateBytes(statePath)) as TaskGraph;
     expect(graph.acceptance_contracts).toMatchObject([{ id: "CT-1", contractTask: "T1", freeze: { state: "awaiting-red" } }]);
-    for (const task of graph.tasks) {
+    for (const task of authoredTasksOf(graph)) {
       expect(task.verification_policy?.regression).toEqual({ kind: "waived", reason: "acceptance-red-window" });
+    }
+    for (const task of graph.tasks.filter(isDistillTask)) {
+      expect(task.verification_policy?.regression).toEqual({ kind: "waived", reason: "distill-pass" });
     }
   });
 

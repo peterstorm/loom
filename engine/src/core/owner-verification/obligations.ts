@@ -37,6 +37,10 @@
  *     its change owes nothing until real code lands.
  *   - `firstOwingWave`: the earliest Wave that owes it, by which population
  *     validation requires the matrix test.
+ *   - A Distill Task (ADR-0068) is no part of the schedule. Its file list
+ *     repeats its Wave siblings' implementation files, and it changes how
+ *     they are written, never whether a family is due or owed: its siblings'
+ *     own listings decide both (`scheduledBy`, `implementationTasks`).
  *
  * Roles are classified through `plan-paths.ts`, the one path rule plan
  * validation and the brief already share.
@@ -47,6 +51,7 @@ import { match } from "ts-pattern";
 import type { PlanInvariant, PlanModels, Task, TaskGraph } from "../../types";
 import type { AcceptanceContract } from "../acceptance-contract";
 import { canonicalDigest } from "../digest";
+import { taskRolePolicy } from "../distill-task";
 import { parseInvariantId, type InvariantId } from "../invariant-id";
 import { canonicalStructuralEquals, failure, success, type ArtifactDigest, type DomainResult, type NonEmpty } from "../orchestration-contract/identity";
 import { isPlaceholderExemptionReason } from "../parse-plan-models";
@@ -314,8 +319,16 @@ export function obligationsAgree(stamped: readonly OwnerObligation[], fromPlan: 
 // The two owner duties: what a Wave owes the gate, and what one Task touches
 // ---------------------------------------------------------------------------
 
-/** The Tasks the family schedule reads: their identity, Wave and file list. */
-export type ScheduledTask = Pick<Task, "id" | "wave" | "file_list">;
+/**
+ * The Tasks the family schedule reads: their identity, Wave and file list,
+ * and their agent when the roster carries it. A roster view without `agent`
+ * (an authored decompose payload) holds no Distill Task: population adds it.
+ */
+export type ScheduledTask = Pick<Task, "id" | "wave" | "file_list"> & Partial<Pick<Task, "agent">>;
+
+/** The Tasks whose listings schedule a family: every Task but a Distill Task. */
+const scheduledBy = <T extends ScheduledTask>(tasks: readonly T[]): readonly T[] =>
+  tasks.filter((task) => taskRolePolicy(task).schedulesFamilies);
 
 /** The stamp a duty reads; absent on a graph populated before owner verification. */
 type OwnerStamp = Readonly<{ owner_obligations?: TaskGraph["owner_obligations"] }>;
@@ -334,12 +347,18 @@ type StampedGraph = OwnerStamp & Readonly<{
 export const contractTaskIdsOf = (graph: Pick<StampedGraph, "acceptance_contracts">): ReadonlySet<string> =>
   new Set((graph.acceptance_contracts ?? []).map(({ contractTask }) => contractTask));
 
-/** A graph's Tasks other than its contract Tasks: the ones whose family change owes, and whose change the mutants cover. */
+/**
+ * A graph's Tasks other than its contract Tasks and its Distill Tasks: the
+ * ones whose family change owes, and whose change the mutants cover. A
+ * Distill Task's edits to an owner are covered through the sibling that lists
+ * the owner, whose Wave base predates them; counting the Distill Task too
+ * would add a second base for the same change.
+ */
 export function implementationTasks<T extends ScheduledTask>(
   graph: Readonly<{ tasks: readonly T[] }> & Pick<StampedGraph, "acceptance_contracts">,
 ): readonly T[] {
   const contractTaskIds = contractTaskIdsOf(graph);
-  return graph.tasks.filter((task) => !contractTaskIds.has(task.id));
+  return scheduledBy(graph.tasks).filter((task) => !contractTaskIds.has(task.id));
 }
 
 // ---------------------------------------------------------------------------
@@ -348,7 +367,7 @@ export function implementationTasks<T extends ScheduledTask>(
 
 /** Whether a family path is due by `wave`: no Task lists it (it exists already), or a Task of this Wave or an earlier one does. */
 function isDueBy(tasks: readonly ScheduledTask[], wave: number, path: string): boolean {
-  const listing = tasks.filter((task) => listsPath(task.file_list ?? [], path));
+  const listing = scheduledBy(tasks).filter((task) => listsPath(task.file_list ?? [], path));
   return listing.length === 0 || listing.some((task) => task.wave <= wave);
 }
 
@@ -361,14 +380,14 @@ function isDueBy(tasks: readonly ScheduledTask[], wave: number, path: string): b
 export const duePaths = (tasks: readonly ScheduledTask[], wave: number, family: FamilyPaths): NonEmpty<string> =>
   [family.owner, ...family.siblings.map(({ path }) => path).filter((path) => isDueBy(tasks, wave, path))];
 
-/** Whether `wave` owes the family: its owner is due, and a Wave Task other than a contract Task changes the owner or a sibling. */
+/** Whether `wave` owes the family: its owner is due, and a Wave Task other than a contract Task or a Distill Task changes the owner or a sibling. */
 export function owesInWave(
   tasks: readonly ScheduledTask[],
   contractTaskIds: ReadonlySet<string>,
   wave: number,
   family: FamilyPaths,
 ): boolean {
-  return isDueBy(tasks, wave, family.owner) && tasks.some((task) =>
+  return isDueBy(tasks, wave, family.owner) && scheduledBy(tasks).some((task) =>
     task.wave === wave && !contractTaskIds.has(task.id) && changesFamily(invariantRoles(task.file_list ?? [], family)));
 }
 

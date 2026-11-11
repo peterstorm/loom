@@ -13,13 +13,14 @@
  * Options:
  *   --init          Create .claude/linter/rules/ with starter config (interactive)
  *   --tier=full     Run full tier (default: full)
- *   --tier=immediate  Run immediate tier only (regex rules, the import-boundary rules and switch-totality, fast)
+ *   --tier=immediate  Run immediate tier only (regex rules, the import-boundary rules, switch-totality and
+ *                   no-duplicate-block, fast)
  *   --no-baseline-check  Skip the staleness pass (grandfathered baselines and
  *                   scoping entries — exclusions, pure roots, shells, boundaries —
  *                   that no longer name anything)
- *   --write-baseline  Record every pre-existing totality site in the project's
- *                   config.json (switchTotalityBaseline, discriminantBranchingBaseline),
- *                   then exit
+ *   --write-baseline  Record every pre-existing totality site and copied block in the
+ *                   project's config.json (switchTotalityBaseline,
+ *                   discriminantBranchingBaseline, duplicateBlockBaseline), then exit
  *   --json          Output raw JSON violations
  *   --summary       Show only summary counts
  *   --fix-hints     Show fix hints (default: true)
@@ -29,12 +30,12 @@
  *   bun lint-project.ts                    # Lint every lintable file in the project
  *   bun lint-project.ts packages/core/     # Lint specific directory (exclusions still apply)
  *   bun lint-project.ts --init             # Setup linter config
- *   bun lint-project.ts --write-baseline   # Grandfather existing unproven switches/chains
+ *   bun lint-project.ts --write-baseline   # Grandfather existing unproven switches/chains and copied blocks
  *   bun lint-project.ts --summary          # Just counts
  */
 
 import { resolve, join, extname, dirname, relative, sep } from "node:path";
-import { readdirSync, statSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { statSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 // The engine is loaded at runtime from THIS script's own loom installation, and
 // typed from the same modules: a type-only import erases at runtime, so the
 // shapes the script consumes (the baseline owner, the lint result) are the
@@ -43,6 +44,7 @@ import type * as LinterIndex from "../engine/src/linter/index.ts";
 import type * as LinterConfig from "../engine/src/linter/programmatic/config.ts";
 import type * as LinterLoader from "../engine/src/linter/loader.ts";
 import type * as ProjectScope from "../engine/src/linter/project-scope.ts";
+import type * as ProjectWalk from "../engine/src/linter/project-walk.ts";
 import type * as PurityRule from "../engine/src/linter/programmatic/no-io-in-pure-modules.ts";
 import type { ReasonedPath } from "../engine/src/linter/programmatic/config.ts";
 import type * as ProgrammaticRules from "../engine/src/linter/programmatic/index.ts";
@@ -67,9 +69,10 @@ if (!existsSync(DEFAULT_RULES_DIR)) {
 const { lintFiles }: typeof LinterIndex = await import(join(LOOM_ROOT, "engine/src/linter/index.ts"));
 const { CLAUDE_PROJECT_RULES_DIR, PI_PROJECT_RULES_DIR, PROJECT_RULES_LAYOUTS, projectRulesLayout }: typeof LinterConfig =
   await import(join(LOOM_ROOT, "engine/src/linter/programmatic/config.ts"));
-const { loadProjectConfig }: typeof LinterLoader = await import(join(LOOM_ROOT, "engine/src/linter/loader.ts"));
-const { isLintableName, isNeverSourceDirectory, scopeOf, scopeDrift }: typeof ProjectScope =
+const { authoritativeLintContext, loadProjectConfig }: typeof LinterLoader = await import(join(LOOM_ROOT, "engine/src/linter/loader.ts"));
+const { scopeOf, scopeDrift }: typeof ProjectScope =
   await import(join(LOOM_ROOT, "engine/src/linter/project-scope.ts"));
+const { walkLintableFiles }: typeof ProjectWalk = await import(join(LOOM_ROOT, "engine/src/linter/project-walk.ts"));
 const { matchesModulePath }: typeof PurityRule =
   await import(join(LOOM_ROOT, "engine/src/linter/programmatic/no-io-in-pure-modules.ts"));
 const { baselineOwners }: typeof ProgrammaticRules = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/index.ts"));
@@ -128,18 +131,9 @@ const EXISTING_RULES_DIR: string | null = existsSync(RULES_DIR) ? RULES_DIR : nu
 /** Project-relative, forward-slashed: the frame every config path is written in. */
 const projectPath = (absolute: string): string => relative(PROJECT_ROOT, absolute).split(sep).join("/");
 
-/** Every lintable file beneath `dir`, BEFORE exclusions. Directories that never
- *  hold project source (`NEVER_SOURCE_DIRECTORIES`) are not entered. */
-function walkLintable(dir: string): string[] {
-  return readdirSync(dir).sort().flatMap((entry): string[] => {
-    if (isNeverSourceDirectory(entry)) return [];
-    const full = join(dir, entry);
-    const stat = statSync(full, { throwIfNoEntry: false });
-    if (stat === undefined) return [];
-    if (stat.isDirectory()) return walkLintable(full);
-    return stat.isFile() && isLintableName(entry) ? [full] : [];
-  });
-}
+/** Every lintable file beneath `dir`, BEFORE exclusions — the engine's one
+ *  project walk, which the clone corpus reads too. */
+const walkLintable = (dir: string): readonly string[] => walkLintableFiles(dir).map((file) => file.absolute);
 
 let projectWalk: readonly string[] | undefined;
 
@@ -213,8 +207,11 @@ const INIT_NEXT_STEPS: readonly string[] = [
   "     project already has)",
   "  2. Add regex rule overrides as .json files in rules/",
   "  3. Run with --write-baseline to grandfather pre-existing unproven",
-  "     switches and if-chains (switch-totality applies to every TypeScript",
-  "     file by default; new sites must prove totality)",
+  "     switches and if-chains, and blocks already written twice",
+  "     (switch-totality applies to every non-test TypeScript file and",
+  "     no-duplicate-block to every TypeScript and JavaScript file, tests",
+  "     included, by default; new sites must prove totality, new copies",
+  "     are refused)",
   "  4. Run this script again to lint your codebase",
   "",
   "Available config fields:",
@@ -226,6 +223,8 @@ const INIT_NEXT_STEPS: readonly string[] = [
   "  maxFunctionLines — max function body length (default: 50)",
   "  switchTotalityModules — narrow switch-totality to these path prefixes",
   "  switchTotalityBaseline / discriminantBranchingBaseline — grandfathered sites",
+  "  duplicateBlockMinTokens / duplicateBlockMinLines — how long a copy is (default: 100 tokens, 8 lines)",
+  "  duplicateBlockBaseline — grandfathered copies",
   "",
   "See: lint-rules/README.md for full documentation",
 ];
@@ -317,7 +316,10 @@ function projectConfig(): LinterConfig.ProgrammaticConfig {
   }
 }
 
-const owners = (config: LinterConfig.ProgrammaticConfig): readonly BaselineOwner[] => baselineOwners(config, PROJECT_ROOT);
+/** Every baselined rule of the project, each detecting against the project's
+ *  own clone corpus, fingerprinted from the files' bytes as the full tier does. */
+const owners = (config: LinterConfig.ProgrammaticConfig): readonly BaselineOwner[] =>
+  baselineOwners(authoritativeLintContext(config, PROJECT_ROOT));
 
 /**
  * A list that only ever suppresses violations cannot report its own decay: a
@@ -346,8 +348,8 @@ function baselineDrift(config: LinterConfig.ProgrammaticConfig): string[] {
 
 /**
  * Record every site each baselined rule flags today as that rule's baseline,
- * so a project adopts the totality rules without every pre-existing switch
- * blocking the next edit to its file. Written into the project's one
+ * so a project adopts the totality rules and no-duplicate-block without every
+ * pre-existing switch or copy blocking the next edit to its file. Written into the project's one
  * `config.json`, creating it when absent. Which sites are
  * recorded and what the next config holds are the engine's pure decision
  * (`recordedBaselines`, `configWithBaselines`: every other field kept, an

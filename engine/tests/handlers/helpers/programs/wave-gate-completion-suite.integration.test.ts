@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -11,6 +11,7 @@ import {
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
+import { collectedChild } from "../../../fixtures/collected-child";
 import { satisfiedProof } from "../../../fixtures/task-lifecycle";
 import { afterEach, describe, expect, it } from "vitest";
 import { disposeFixturePiSessions, fixturePiEnvironment } from "../../../fixtures/pi-session";
@@ -132,16 +133,7 @@ async function invokeCli(
   statePath = join(root, ".claude/state/active_task_graph.json"),
 ) {
   const env = { ...fixturePiEnvironment(root), LOOM_STATE_PATH: statePath };
-  const result = await new Promise<Readonly<{ status: number | null; stdout: string; stderr: string }>>((resolve, reject) => {
-    const child = spawn("bun", [CLI, "helper", "orchestration", ...args], { cwd, env });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8").on("data", (text: string) => { stdout += text; });
-    child.stderr.setEncoding("utf8").on("data", (text: string) => { stderr += text; });
-    child.on("error", reject);
-    child.on("close", (status) => resolve({ status, stdout, stderr }));
-    child.stdin.end(stdin);
-  });
+  const result = await collectedChild("bun", [CLI, "helper", "orchestration", ...args], { cwd, env }, stdin);
   if (result.status !== 0) throw new Error(`${result.stderr}\n${result.stdout}`);
   return result.stdout;
 }

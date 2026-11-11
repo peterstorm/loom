@@ -75,7 +75,7 @@ Active when preloaded by the `code-simplifier` reviewer (standalone `/review-pr`
 
 ### Apply mode — edit, test-gated
 
-Active when the user asks you to simplify, or as a post-implementation pass after `code-implementer` work.
+Active when the user asks you to simplify, or as a post-implementation pass after `code-implementer` work. Inside Loom orchestration the Wave's Distill Task runs this mode, scoped by its brief: only the files the brief lists, which never include a test file, so step 3 does not apply there.
 
 1. **Baseline** — run the tests that cover the scope. If they are not green, stop: distilling on a red baseline destroys the only behavior oracle you have.
 2. **One move at a time** — apply a single catalog move, re-run the covering tests, then the next. Never batch unrelated moves into one unverifiable diff.

@@ -22,6 +22,7 @@ import type {
   Task,
   TaskGraph,
 } from "../types";
+import { taskRolePolicy } from "./distill-task";
 import { mapNonEmpty, nonEmpty } from "./orchestration-contract";
 import {
   recordedAnchorHashes,
@@ -165,6 +166,22 @@ function completedWaveRefusal(
       );
 }
 
+/**
+ * A Distill Task traces to no Requirement (ADR-0068): it is the Wave's distill
+ * pass, and the State File refuses one carrying a trace. Refused here by name,
+ * so an amendment never produces a graph that cannot be loaded.
+ */
+function distillTraceRefusal(amended: readonly AmendedTrace[]): SpecTraceAmendmentResult | null {
+  const traced = amended.filter(({ task }) => !taskRolePolicy(task).traceable).map(({ task }) => task.id);
+  return traced.length === 0
+    ? null
+    : refuse(
+        "invalid-trace",
+        `${LABEL} cannot give a Requirement trace to the engine-added distill pass: ${traced.join(", ")}; ` +
+          "list it with empty spec_anchors and spec_contributions",
+      );
+}
+
 function specIndexRefusal(
   specIndex: SpecIndexAvailability,
   amended: readonly AmendedTrace[],
@@ -227,6 +244,7 @@ export function amendSpecTrace(
   }
   const preconditionRefusal = liveGateRefusal(graph) ??
     completedWaveRefusal(graph, amendedTraces) ??
+    distillTraceRefusal(amendedTraces) ??
     specIndexRefusal(specIndex, amendedTraces);
   if (preconditionRefusal !== null) return preconditionRefusal;
 

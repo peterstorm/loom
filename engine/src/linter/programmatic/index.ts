@@ -1,8 +1,9 @@
 /**
  * Programmatic rule registry — provides built-in programmatic rules. Every
- * rule runs in the "full" tier; the import-boundary rules AND `switch-totality`
- * also run in the "immediate" tier, so a forbidden import or an unproven switch
- * is refused when it is written rather than when the Wave Gate starts.
+ * rule runs in the "full" tier; the import-boundary rules, `switch-totality`
+ * AND `no-duplicate-block` also run in the "immediate" tier, so a forbidden
+ * import, an unproven switch or a copied block is refused when it is written
+ * rather than when the Wave Gate starts.
  *
  * Rules are configured via project-local config (`config.json` inside the
  * project rules directory: `.claude/linter/rules/` or `.pi/linter/rules/`).
@@ -30,8 +31,22 @@ import {
   RULE_NAME as SWITCH_TOTALITY_RULE,
   type SwitchTotalityOptions,
 } from "./switch-totality";
+import {
+  handler as duplicateBlockHandler,
+  detectedCloneKeys,
+  FIX_HINT as DUPLICATE_BLOCK_FIX_HINT,
+  RULE_NAME as DUPLICATE_BLOCK_RULE,
+  type DuplicateBlockOptions,
+} from "./no-duplicate-block";
+import {
+  CLONE_EXTENSIONS,
+  DEFAULT_CLONE_OPTIONS,
+  type AuthoritativeCorpus,
+  type CloneCorpus,
+  type CloneOptions,
+} from "../clones/clone-detection";
 import type { BaselineOwner } from "./baseline";
-import { type ProgrammaticConfig, EMPTY_CONFIG } from "./config";
+import type { ProgrammaticConfig } from "./config";
 
 /** Every TypeScript module spelling: the totality rules need a type system
  *  (a `never` binding proves nothing in JavaScript). */
@@ -88,15 +103,66 @@ export function discriminantBranchingOptions(
   });
 }
 
+/** no-duplicate-block's options for one project. */
+function duplicateBlockOptions(config: ProgrammaticConfig, projectRoot: string | null): DuplicateBlockOptions {
+  return Object.freeze({
+    clone: Object.freeze({
+      minTokens: config.duplicateBlockMinTokens ?? DEFAULT_CLONE_OPTIONS.minTokens,
+      minLines: config.duplicateBlockMinLines ?? DEFAULT_CLONE_OPTIONS.minLines,
+    }),
+    baseline: config.duplicateBlockBaseline ?? [],
+    projectRoot,
+  });
+}
+
 /**
- * Every rule that keeps a grandfathered list, for one project's config.
+ * Everything the rules of one project are built from: its config, its root
+ * (the frame the config's paths and baseline keys are written in, or null with
+ * no project), no-duplicate-block's options and the clone corpus that rule
+ * reads. `createProgrammaticRules` and `baselineOwners` both take this one
+ * value, so the live rule and its staleness detector share a corpus and options.
+ *
+ * `Corpus` records whether the corpus may have read the fingerprint cache;
+ * `baselineOwners` accepts only one that did not.
+ */
+export type ProjectLintContext<Corpus extends CloneCorpus = CloneCorpus> = Readonly<{
+  config: ProgrammaticConfig;
+  projectRoot: string | null;
+  duplicateBlock: DuplicateBlockOptions;
+  corpus: Corpus;
+}>;
+
+/**
+ * The lint context of one project. `corpusFor` is handed the clone thresholds
+ * the rule compares with, so a corpus cannot be fingerprinted under other ones.
+ * Nothing is read here: a project corpus builds itself on the rule's first call.
+ */
+export function projectLintContext<Corpus extends CloneCorpus>(
+  config: ProgrammaticConfig,
+  projectRoot: string | null,
+  corpusFor: (clone: CloneOptions) => Corpus,
+): ProjectLintContext<Corpus> {
+  const duplicateBlock = duplicateBlockOptions(config, projectRoot);
+  return Object.freeze({ config, projectRoot, duplicateBlock, corpus: corpusFor(duplicateBlock.clone) });
+}
+
+/**
+ * Every rule that keeps a grandfathered list, for one project.
  * `scripts/lint-project.ts` reports the stale entries of each and writes them
  * with `--write-baseline`, and Loom's baseline test asserts each against the
  * live tree — all iterate THIS list, so a baselined rule cannot be left out of
  * the drift report. Each owner detects with exactly the options its live rule
  * runs with.
+ *
+ * The context's corpus must be authoritative: a baseline records and reports
+ * what is in the tree, and a cache-assisted corpus can hide a copy.
  */
-export function baselineOwners(config: ProgrammaticConfig, projectRoot: string | null): readonly BaselineOwner[] {
+export function baselineOwners({
+  config,
+  projectRoot,
+  duplicateBlock: cloneOptions,
+  corpus,
+}: ProjectLintContext<AuthoritativeCorpus>): readonly BaselineOwner[] {
   const switchOptions = switchTotalityOptions(config, projectRoot);
   const chainOptions = discriminantBranchingOptions(config, projectRoot);
   return Object.freeze([
@@ -115,6 +181,14 @@ export function baselineOwners(config: ProgrammaticConfig, projectRoot: string |
       baseline: chainOptions.baseline,
       site: "unproven if-chain",
       detect: (content: string, filePath: string) => detectedChainKeys(content, filePath, chainOptions),
+    },
+    {
+      rule: DUPLICATE_BLOCK_RULE,
+      configKey: "duplicateBlockBaseline",
+      extensions: CLONE_EXTENSIONS,
+      baseline: cloneOptions.baseline,
+      site: "copied block",
+      detect: (content: string, filePath: string) => detectedCloneKeys(content, filePath, corpus, cloneOptions),
     },
   ]);
 }
@@ -243,15 +317,40 @@ function expressionShapeRules(): readonly ProgrammaticRule[] {
 }
 
 /**
- * Creates the programmatic rule set, optionally configured by project-local config.
- * Config allows projects to define their own boundaries, pure modules, limits
- * and baselines; `projectRoot` is the root of the project that config belongs
- * to — the frame its paths and baseline keys are written in.
+ * The copied-block rule. IMMEDIATE: the author of a copy knows what it is a
+ * copy of only while writing it, and the project's baseline keeps every
+ * pre-existing copy from blocking an unrelated edit to its file.
+ *
+ * Its first call in a process builds the corpus, which can outlast the
+ * per-file deadline. It declares that (`firstCallSetup`) and the executor,
+ * which owns the deadline, runs it after every other rule.
  */
-export function createProgrammaticRules(
-  config: ProgrammaticConfig = EMPTY_CONFIG,
-  projectRoot: string | null = null,
-): readonly ProgrammaticRule[] {
+function duplicateBlockRule({ duplicateBlock: options, corpus }: ProjectLintContext): ProgrammaticRule {
+  return {
+    kind: "programmatic",
+    name: DUPLICATE_BLOCK_RULE,
+    description: `A block of ${options.clone.minTokens}+ identical tokens over ${options.clone.minLines}+ lines that another project file, or this one, already holds`,
+    extensions: CLONE_EXTENSIONS,
+    handler: (content, filePath) => duplicateBlockHandler(content, filePath, corpus, options),
+    tier: "immediate",
+    firstCallSetup: true,
+    fixHint: DUPLICATE_BLOCK_FIX_HINT,
+    enabled: true,
+    source: "default",
+  };
+}
+
+/**
+ * Creates the programmatic rule set for one project (`EMPTY_CONFIG` in the
+ * context for the built-in defaults). Config allows projects to define their
+ * own boundaries, pure modules, limits and baselines. With no project the
+ * context's root is null and its corpus `EMPTY_CORPUS`, so no-duplicate-block
+ * finds only the repeats inside each file.
+ *
+ * The order of this list is free: the executor decides what runs last.
+ */
+export function createProgrammaticRules(context: ProjectLintContext): readonly ProgrammaticRule[] {
+  const { config, projectRoot } = context;
   return [
     ...importBoundaryRules(config, projectRoot),
     maxFunctionLinesRule(
@@ -261,5 +360,6 @@ export function createProgrammaticRules(
     fugueGeneratedIntegrityRule(),
     ...totalityRules(config, projectRoot),
     ...expressionShapeRules(),
+    duplicateBlockRule(context),
   ];
 }

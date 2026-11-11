@@ -113,8 +113,8 @@ A packet-bound collection of evidence from the exact expected reviewer roster fo
 _Avoid_: Review Generation, Refutation Panel, reviewer batch (without the binding)
 
 **Wave Review Roster**:
-The ordered reviewers one Wave **Task** is issued, derived per Task from protected state (`waveTaskReviewRoster`): the base five (code-reviewer, silent-failure-hunter, pr-test-analyzer, type-design-analyzer, comment-analyzer), plus architecture-tech-lead appended last when the Task's packets carry the **Owner Map** (ADR-0047). Order is slot authority, so the base five keep their indices either way. Issuance, the locked install, slot membership, retries, restart and completed-protocol verification all compare against this derived roster, never against a persisted copy.
-_Avoid_: Reviewer list, "the five reviewers" (an owner-mapped Task has six)
+The ordered reviewers one Wave **Task** is issued, derived per Task from protected state (`waveTaskReviewRoster`): the base five (code-reviewer, silent-failure-hunter, pr-test-analyzer, type-design-analyzer, comment-analyzer), plus architecture-tech-lead appended last when the Task's packets carry the **Owner Map** (ADR-0047). Order is slot authority, so the base five keep their indices either way. Issuance, the locked install, slot membership, retries, restart and completed-protocol verification all compare against this derived roster, never against a persisted copy. A **Distill Task** has no roster: the same derivation answers the explicit exemption `{ kind: "exempt", reason: "distill-task" }`, never an empty roster. It stays among the gate's registered Tasks, is issued no reviewer and no **Review Packet**, and completes without a `passed` review status; its Wave siblings' packets read the distilled bytes. Gate checks, drivers and renderers read a Wave's Tasks through one Wave-review view (`waveReviewView`: the reviewed Tasks, those whose review is outstanding, and the exempt ones with why), so none waits on a Task that is never reviewed.
+_Avoid_: Reviewer list, "the five reviewers" (an owner-mapped Task has six), empty roster (for the Distill Task's exemption)
 
 **Lens**:
 A single committed perspective an agent argues from, assigned rather than chosen, so a panel's diversity is structural instead of hoped for. Deliberately two disjoint vocabularies — see Flagged Ambiguities.
@@ -249,7 +249,7 @@ The shared vocabulary between developers and domain experts within a bounded con
 _Avoid_: Glossary (it's more than a glossary — it's the living language of the system)
 
 **Tier**:
-An execution scope that determines which lint rules apply. "Immediate" (PostToolUse after edits: regex rules plus the programmatic rules whose own tier is immediate — the two import-boundary rules — under a cooperative 50ms per-file deadline) or "full" (Wave Gate/explicit scan, all rules including programmatic structural analysis).
+An execution scope that determines which lint rules apply. "Immediate" (PostToolUse after edits: regex rules plus the programmatic rules whose own tier is immediate — the two import-boundary rules, switch totality and the copied-block rule — under a cooperative 50ms per-file deadline checked before each rule) or "full" (Wave Gate/explicit scan, all rules including programmatic structural analysis).
 _Avoid_: Level, mode, severity
 
 **Aggregate**:
@@ -329,7 +329,7 @@ The immutable, self-digested audit record for one exact Implementation Attempt t
 _Avoid_: Rollback receipt, cleanup log, retry counter
 
 **Proof Obligation**:
-An engine-authored requirement a Task must discharge before its status can become implemented: completion, required regression tests, required new tests, the **Red-Then-Green Obligation** where its TaskGraph's era owes it, and declared artifacts changed. Regression and new-test obligations derive independently from Verification Policy. Evidence keeps its provenance; Pi structured evidence is never relabeled as ledger-trusted.
+An engine-authored requirement a Task must discharge before its status can become implemented: completion, required regression tests, required new tests, the **Red-Then-Green Obligation** where its TaskGraph's era owes it, and declared artifacts changed. Regression and new-test obligations derive independently from Verification Policy. A **Distill Task** owes exactly two: completion and `behaviour-preserved`. The second is satisfied on one of three recorded bases: `unchanged` (the attempt left its scope as its attempt baseline captured it), `tests-passed` (it changed scope paths, no changed path violates contract conformance, and the regression verdict is a pass the evaluation policy admits) or `restored` (the engine wrote the scope back; the basis keeps the failure kinds that caused it). New tests and red-then-green are never owed by it. Evidence keeps its provenance; Pi structured evidence is never relabeled as ledger-trusted.
 _Avoid_: Checklist item, self-report, completion claim
 
 **Red-Then-Green Obligation** (I6):
@@ -370,7 +370,7 @@ The pure TaskGraph aggregate command that consumes validated Wave/manual authori
 _Avoid_: Spec-check store, transport-specific settlement, evidence write
 
 **TaskGraph Population**:
-The pure aggregate command that consumes a non-empty parser-proven authored Task roster, prepared Spec/verification authority, overwrite authority, and one locked TaskGraph and returns either a typed population refusal or the complete reset graph. It owns Task sanitization, Requirement Content Hash stamping, Wave Gate construction, current-Wave reset, and removal of every active or historical Wave/epoch/spec-check/completion authority tied to the replaced Tasks; the Hook owns JSON/CLI parsing, Git/filesystem observation, model checks, locking, and persistence.
+The pure aggregate command that consumes a non-empty parser-proven authored Task roster, prepared Spec/verification authority, overwrite authority, and one locked TaskGraph and returns either a typed population refusal or the complete reset graph. It owns Task sanitization, the Distill Tasks it appends after the authored roster (at most one per Wave, from `planDistillTasks`; an authored Task naming `distill-agent` is refused), Requirement Content Hash stamping, Wave Gate construction, current-Wave reset, and removal of every active or historical Wave/epoch/spec-check/completion authority tied to the replaced Tasks; the Hook owns JSON/CLI parsing, Git/filesystem observation, model checks, locking, and persistence.
 _Avoid_: Populate hook policy, task merge, graph initializer
 
 **Requirement Trace Amendment**:
@@ -490,7 +490,7 @@ One line of a plan's `**Export bindings:**` list in `## File Structure` — `` -
 _Avoid_: Interface block (the plan's `**Interface:**` prose is never read for signatures), export list, stub list
 
 **Skeleton**:
-An engine-written file at a not-yet-existing bound path: it imports exactly the bound aliases from the frozen types file and declares each bound export with its frozen type and a body throwing `unimplemented: <name>` (TypeScript `export const name: Alias`; Java a `public final class` of `public static final Alias name` lambdas). Written through the one no-clobber writer at its Task's spawn, before the attempt baselines, so its bytes are never the implementer's write; recorded with the digest the engine wrote (`skeletons`). Completion refuses a bound export that is deleted, renamed, retyped or still unimplemented (`declared-artifact-contract-violated`). A Contract Revision refreshes an untouched skeleton and flags a modified one stale. Every non-test `file_list` path has exactly one skeleton outcome (`core/skeleton/outcomes.ts`): skeleton written, no bound exports, contract has no types file, unsupported language, or exists, not skeletonized.
+An engine-written file at a not-yet-existing bound path: it imports exactly the bound aliases from the frozen types file and declares each bound export with its frozen type and a body throwing `unimplemented: <name>` (TypeScript `export const name: Alias`; Java a `public final class` of `public static final Alias name` lambdas). Written through the one no-clobber writer at its Task's spawn, before the attempt baselines, so its bytes are never the implementer's write; recorded with the digest the engine wrote (`skeletons`). Completion refuses a bound export that is deleted, renamed, retyped or still unimplemented (`declared-artifact-contract-violated`). A Contract Revision refreshes an untouched skeleton and flags a modified one stale. Every non-test `file_list` path has exactly one skeleton outcome (`core/skeleton/outcomes.ts`): skeleton written, no bound exports, contract has no types file, unsupported language, or exists, not skeletonized. A **Distill Task** holds no Skeleton, so it is never "skeleton written": where its holder would be written one it is absent, no skeleton owed.
 _Avoid_: Stub (alone — a **Contract Stub** is the skeleton the contract Task's stop writes), scaffold, template
 
 **Contract Stub**:
@@ -527,6 +527,22 @@ The optional `affectedRunner` key of a schema-2 verification manifest. It is fro
 Loom's own manifest entry is operator-owned.
 _Avoid_: Related-tests command, affected script
 
+**Distill Task**:
+The one engine-added **Task** a **Wave** may carry: the Task whose **Agent** is `distill-agent`, which is its whole identity ([ADR-0068](docs/adr/ADR-0068-the-distill-pass-is-an-engine-added-task-per-wave.md)). **TaskGraph Population** appends it after the authored roster, and no authored Task may name that Agent. A fresh Agent runs the `distill` Skill in apply mode over the **Distill Scope**, after the Wave's other Tasks are implemented and before the **Wave Gate** reviews them. It has no dependencies and no Requirement trace, carries the engine-only `distill-pass` waiver for both requirements of its **Verification Policy**, owes the `behaviour-preserved` **Proof Obligation** in place of the test and artifact obligations, is exempt from Wave review, and cannot be attested. A pass that changes nothing is a legal outcome. Every Distill Task rule that is not proof evaluation is decided in `core/distill-task.ts`, which derives each Task's **Task Role** and holds the policy its rules read.
+
+**Task Role**:
+What a **Task** is in its TaskGraph, closed and derived in one place (`taskRoleOf`): `authored`, a Task the decompose roster wrote, or `distill`, a **Distill Task**. Every rule that differs between the two is one field of the role's policy (`TaskRolePolicy`: whether the Task may be authored, holds Skeletons, is attestable, traceable, schedules an Invariant family, is reviewed at its Wave Gate, is reconciled from stored evidence, and what its dispatch and Proof carry), so a caller reads the field and a new role does not compile until it answers each one. It is derived, never stored: the State File holds no role.
+_Avoid_: Task kind, Task type (the Agent's kind is a different thing), distill flag
+_Avoid_: Distill phase, simplification Task, cleanup Task, refactor Task, distill step (it is a Task with its own attempt, not a step of another Task)
+
+**Distill Scope**:
+A **Distill Task**'s `file_list`: the implementation files (by the frozen **Test-File Classification**) listed by its Wave's authored Tasks, other than **Contract Tasks** and `adr-writer-agent` Tasks, minus every **Acceptance Contract**'s frozen paths, without repeats, in the order the Tasks first list them. It never holds a test file, so the pass cannot weaken the tests that judge it. A Wave whose scope would be empty gets no Distill Task. It is the only set of files the pass may edit.
+_Avoid_: Wave diff, distill file list (alone), **Changed Files** (those are one attempt's ledger writes)
+
+**Distill Pass Setting**:
+The optional `distillPass` key of a schema-2 verification manifest: `"on"` or `"off"`, nothing else. It is frozen at population and included in the manifest digest only when it is declared; absent reads as `on`, as does the engine default and a TaskGraph with no frozen manifest. `off` makes **TaskGraph Population** add no Distill Task (ADR-0068). It reaches only TaskGraphs populated after it: a graph already populated keeps the Distill Tasks it has.
+_Avoid_: Distill flag, skip-distill, simplifier toggle
+
 **Changed Files**:
 A Task attempt's files as of its stop: the epoch's ledger `FileWrite` paths, deduplicated in first-write order, inside the repository, and still existing at stop time. A rename shows up under its new path, because a literal `mv`, `git mv` or `cp` mints a write for its destination. They come only from the pure `changedFilesAtStop` (INV-7), which receives the epoch events and an injected existence predicate. Its three callers are the Claude stop dispatcher, the Pi report-only stop and `helper stop-check-plan`. The result is the parsed value `none | some(NonEmpty)`, which the planner consumes and never derives. Files written with no ledger event are not among them.
 _Avoid_: Diff, modified files, touched files
@@ -556,11 +572,11 @@ The Waves from a contract Wave through the last Wave completing one of its cover
 _Avoid_: Grace period, expected-failure list
 
 **Contract Revision**:
-The operator-only way to change an **Acceptance Contract**'s frozen bytes (`helper revise-contract`): it re-stamps them, clears the roster for the next gate to re-record, appends an audited revision, returns the current Wave's implemented claimants to revalidation and retires that Wave's review and suite authority. Refused while a Wave Gate is live, before the freeze or the contract Wave's completion, and while any claimant sits in a completed Wave.
+The operator-only way to change an **Acceptance Contract**'s frozen bytes (`helper revise-contract`): it re-stamps them, clears the roster for the next gate to re-record, appends an audited revision, returns the current Wave's implemented claimants to revalidation, and with them that Wave's settled **Distill Task**, and retires that Wave's review and suite authority. The revision's audit lists every Task it returned. Refused while a Wave Gate is live, before the freeze or the contract Wave's completion, and while any claimant sits in a completed Wave.
 _Avoid_: Unfreeze, test fix, override
 
 **Task Reopening**:
-The operator-only way to make an `implemented` Task of the active Wave dispatchable again, so a Wave Gate advisory or surviving critical on it can be fixed (`helper orchestration reopen-task --wave N --task Tn --reason "…"`, [ADR-0045](docs/adr/ADR-0045-an-implemented-task-is-reopened-through-one-engine-operation.md)). It runs under the TaskGraph lock, in the same transition a **Contract Revision** uses (`returnWaveTasksToRevalidation`). It retires the Wave's review and suite authority, an abandoned run's tombstone included. It returns each named Task to protected `pending` revalidation at a new Review Generation, keeping its Findings as prior Findings. It leaves the Wave's other Tasks `implemented` and appends one `implemented-tasks-reopened` audit to `task_reopening_history`. Status then owes each reopened Task an `initial-implementation` dispatch, and the next Wave Gate starts only after each settles afresh. Refused outside the execute Phase or the active Wave, after the Wave completed, while a Wave Gate is live or an abandoned run names a successor, while implementation or a subagent is active, and for a Task that is not `implemented` or whose lineage cannot derive a dispatch. Replaying it while the Tasks await re-implementation changes nothing. Distinct from reopening a completed Wave (`helper reopen-completed-wave`).
+The operator-only way to make an `implemented` Task of the active Wave dispatchable again, so a Wave Gate advisory or surviving critical on it can be fixed (`helper orchestration reopen-task --wave N --task Tn --reason "…"`, [ADR-0045](docs/adr/ADR-0045-an-implemented-task-is-reopened-through-one-engine-operation.md)). It runs under the TaskGraph lock, in the same transition a **Contract Revision** uses (`returnWaveTasksToRevalidation`). It retires the Wave's review and suite authority, an abandoned run's tombstone included. It returns each named Task to protected `pending` revalidation at a new Review Generation, keeping its Findings as prior Findings. It leaves the Wave's other Tasks `implemented`, with one exception: when the operator did not name the Wave's settled **Distill Task**, the same transition returns it too, so the re-implemented code is distilled again. It appends one `implemented-tasks-reopened` audit to `task_reopening_history`; the audit lists every reopened Task and, under `sweptDistillTaskIds`, the ones the engine swept back unnamed. Naming the Distill Task alone reopens only it. Status then owes each reopened Task an `initial-implementation` dispatch, and the next Wave Gate starts only after each settles afresh. Refused outside the execute Phase or the active Wave, after the Wave completed, while a Wave Gate is live or an abandoned run names a successor, while implementation or a subagent is active, and for a Task that is not `implemented` or whose lineage cannot derive a dispatch. Replaying it while the Tasks await re-implementation changes nothing. Distinct from reopening a completed Wave (`helper reopen-completed-wave`), whose exact payload must itself name the Wave's Distill Task with any sibling it returns.
 _Avoid_: Re-dispatch (alone), reset, force re-populate
 
 **Contract Status**:
@@ -584,7 +600,7 @@ The exact bytes one Task's review scope held when a Wave review was prepared, wi
 _Avoid_: Workspace snapshot (alias), file dump, worktree state
 
 **Implementation Window**:
-An execute Wave with no live Wave Gate: before its gate starts, or after an abandoned Run that names no successor. One pure classifier decides which Tasks are active, reclaimable, escalated or dispatchable and the one recovery that follows; status only renders it.
+An execute Wave with no live Wave Gate: before its gate starts, or after an abandoned Run that names no successor. One pure classifier decides which Tasks are active, reclaimable, escalated or dispatchable and the one recovery that follows; status only renders it. It withholds a **Distill Task** until every other Task of its Wave is `implemented` or `completed` and holds no reservation; registration refuses it by the same rule, so status never offers a dispatch registration would refuse.
 _Avoid_: Unstarted Wave (alone), pre-gate state
 
 ## Relationships
@@ -595,6 +611,8 @@ _Avoid_: Unstarted Wave (alone), pre-gate state
 - A **Requirement Contribution** never enters Wave Gate completion scope; the **Requirement Completion Claim** does
 - Every **Requirement Contribution** has exactly one same-or-later completion Wave, and none may occur after completion
 - A **Wave Gate** validates all **Tasks** in a **Wave** before the next **Wave** begins
+- **TaskGraph Population** adds at most one **Distill Task** per **Wave**, over that Wave's **Distill Scope**, unless the **Distill Pass Setting** is `off`; it is dispatched after its Wave siblings settle, is never reviewed, and returns to revalidation whenever one of them does
+- A **Distill Task** attempt that changed its **Distill Scope** without proving it preserved behaviour is restored by settlement, not retried; a write outside the scope fails the attempt as it does for any Task
 - A **Tier** determines which lint rules execute: "immediate" runs regex rules and the immediate-tier programmatic rules after edits, "full" runs all rules at Wave Gate boundaries or explicit scans
 - An **Agent** executes exactly one **Task** or one **Phase**
 - Every Loom-owned **Agent** resolves one explicit requested **LLM Profile** before spawn; Pi launcher overrides are explicit at the transport boundary

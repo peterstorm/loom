@@ -286,7 +286,7 @@ describe("the per-Task Wave review roster (FR-022, ADR-0047)", () => {
   const task = touching.tasks[0]!;
 
   it("a schema-2 Task touching an owned family gets architecture-tech-lead appended to the base five", () => {
-    expect(waveTaskReviewRoster(touching, 2, task)).toEqual(OWNER_MAPPED_WAVE_REVIEW_AGENTS);
+    expect(waveTaskReviewRoster(touching, 2, task)).toEqual({ kind: "roster", roster: OWNER_MAPPED_WAVE_REVIEW_AGENTS });
   });
 
   it.each([
@@ -295,7 +295,7 @@ describe("the per-Task Wave review roster (FR-022, ADR-0047)", () => {
     ["an empty stamp", graphOf(["src/rules/sibling-a.ts"], []), 2],
     ["a schema-1 registration", touching, 1],
   ] as const)("%s keeps exactly the base five", (_name, graph, schemaVersion) => {
-    expect(waveTaskReviewRoster(graph, schemaVersion, graph.tasks[0]!)).toEqual(BASE_WAVE_REVIEW_AGENTS);
+    expect(waveTaskReviewRoster(graph, schemaVersion, graph.tasks[0]!)).toEqual({ kind: "roster", roster: BASE_WAVE_REVIEW_AGENTS });
   });
 
   it("derives every registered Task's roster in registration order, refusing a Task the graph lost", () => {

@@ -9,15 +9,24 @@ const AUTHORED_REGRESSION_WAIVER_REASONS = [
 export const ACCEPTANCE_RED_WINDOW = "acceptance-red-window" as const;
 
 /**
+ * The engine-only waiver a Distill Task carries for both requirements
+ * (ADR-0068): its one `behaviour-preserved` obligation owes a regression pass
+ * exactly when the attempt changed its scope, and it never adds tests.
+ */
+export const DISTILL_PASS = "distill-pass" as const;
+
+/**
  * Engine-only reasons: population stamps `acceptance-red-window` on a Task
  * whose full-suite run would see a contract's still-pending acceptance
  * testcases fail, and the Wave Gate's acceptance-aware suite becomes its
- * regression authority. An authored payload can never claim either.
+ * regression authority; it stamps `distill-pass` on the Distill Task it adds.
+ * An authored payload can never claim any of them.
  */
 export const REGRESSION_WAIVER_REASONS = [
   ...AUTHORED_REGRESSION_WAIVER_REASONS,
   "legacy-new-tests-required-false",
   ACCEPTANCE_RED_WINDOW,
+  DISTILL_PASS,
 ] as const;
 export type RegressionWaiverReason = (typeof REGRESSION_WAIVER_REASONS)[number];
 
@@ -35,6 +44,7 @@ const AUTHORED_NEW_TEST_WAIVER_REASONS = [
 export const NEW_TEST_WAIVER_REASONS = [
   ...AUTHORED_NEW_TEST_WAIVER_REASONS,
   "legacy-new-tests-required-false",
+  DISTILL_PASS,
 ] as const;
 export type NewTestWaiverReason = (typeof NEW_TEST_WAIVER_REASONS)[number];
 
@@ -80,6 +90,25 @@ export const REQUIRED_VERIFICATION_POLICY: VerificationPolicy = Object.freeze({
   regression: required,
   newTests: required,
 });
+
+const distillWaiver = Object.freeze({ kind: "waived" as const, reason: DISTILL_PASS });
+
+/** A Distill Task's whole policy; nothing else may carry it. */
+export const DISTILL_VERIFICATION_POLICY: VerificationPolicy = Object.freeze({
+  regression: distillWaiver,
+  newTests: distillWaiver,
+});
+
+const waivedAsDistillPass = (requirement: VerificationRequirement<string>): boolean =>
+  requirement.kind === "waived" && requirement.reason === DISTILL_PASS;
+
+/** Whether a policy is exactly a Distill Task's: both requirements waived as `distill-pass`. */
+export const isDistillVerificationPolicy = (policy: VerificationPolicy): boolean =>
+  waivedAsDistillPass(policy.regression) && waivedAsDistillPass(policy.newTests);
+
+/** Whether either requirement claims the engine-only `distill-pass` waiver. */
+export const claimsDistillPassWaiver = (policy: VerificationPolicy): boolean =>
+  waivedAsDistillPass(policy.regression) || waivedAsDistillPass(policy.newTests);
 
 export const LEGACY_TESTS_WAIVED_POLICY: VerificationPolicy = Object.freeze({
   regression: legacyRegressionWaiver,

@@ -10,7 +10,12 @@
  * Contract Revision uses (`returnWaveTasksToRevalidation`): its Findings stay
  * as prior Findings for the next Review Run, the Wave's review and suite
  * authority is retired, and only a fresh implementation settlement lets the
- * next gate start. The other Tasks of the Wave stay `implemented`.
+ * next gate start. The other Tasks of the Wave stay `implemented`, except its
+ * Distill Task: the transition sweeps a settled one back with the named Tasks
+ * (ADR-0068 §7), so the re-implemented code is distilled again. The audit
+ * lists it among the reopened Tasks and again under `sweptDistillTaskIds`,
+ * which is how a replay and the operator message tell a swept Task from a
+ * named one. Naming the Distill Task alone reopens only it, and sweeps none.
  *
  * It shares its Wave precondition with Contract Revision (`reopenableWave`)
  * and adds only its own: the named Wave is the active one, it has not
@@ -26,6 +31,7 @@ import { parseTaskId, type TaskId } from "./task-id";
 import { deriveTaskImplementationDispatch } from "./task-implementation-dispatch";
 import {
   reopenableWave,
+  reopenedTaskIdsOf,
   returnWaveTasksToRevalidation,
   type ReopenableWave,
   type WaveReopeningRefusal,
@@ -57,7 +63,10 @@ export type TaskReopeningRefusalKind =
 export type TaskReopeningRefusal = Readonly<{ kind: TaskReopeningRefusalKind; message: string }>;
 
 export type TaskReopening =
-  /** The Tasks were reopened: persist `graph`, which appends `audit`. */
+  /** The Tasks were reopened: persist `graph`, which appends `audit`. The
+   *  audit lists every reopened Task and, apart, the ones among them the
+   *  engine swept back (`sweptDistillTaskIds`: the Wave's settled Distill
+   *  Task, ADR-0068 §7). */
   | Readonly<{ kind: "reopened"; graph: TaskGraph; audit: TaskReopeningAudit }>
   /** This exact reopening already committed and its Tasks still await
    *  re-implementation: nothing to write. */
@@ -114,8 +123,21 @@ export function parseTaskReopeningArgs(args: readonly string[]): DomainResult<Ta
   return freeze({ ok: true as const, value: freeze({ wave: Number(wave), taskIds, reason }) });
 }
 
-const sameIds = (left: readonly string[], right: readonly string[]): boolean =>
-  left.length === right.length && left.every((id) => right.includes(id));
+/** The Distill Tasks an audit says the engine swept back; none when it records none. */
+export const sweptDistillTaskIdsOf = (audit: Pick<TaskReopeningAudit, "sweptDistillTaskIds">): readonly TaskId[] =>
+  audit.sweptDistillTaskIds ?? [];
+
+/**
+ * Whether `audit` reopened what `request` names: every named Task, and beyond
+ * them only the Tasks the audit records as swept, which no request has to
+ * name. The audit is the record of what the operator named; the roster is not
+ * consulted.
+ */
+const reopenedWhatRequestNames = (audit: TaskReopeningAudit, request: TaskReopeningRequest): boolean => {
+  const swept = sweptDistillTaskIdsOf(audit);
+  return request.taskIds.every((id) => audit.reopenedTaskIds.includes(id)) &&
+    audit.reopenedTaskIds.every((id) => request.taskIds.includes(id) || swept.includes(id));
+};
 
 /** Every target still sits in protected revalidation, awaiting its fresh settlement. */
 const awaitingReimplementation = (task: Task | undefined): boolean =>
@@ -125,7 +147,7 @@ const awaitingReimplementation = (task: Task | undefined): boolean =>
 function replayedAudit(graph: TaskGraph, request: TaskReopeningRequest): TaskReopeningAudit | undefined {
   const last = (graph.task_reopening_history ?? []).at(-1);
   if (last === undefined || last.wave !== request.wave || last.reason !== request.reason ||
-      !sameIds(last.reopenedTaskIds, request.taskIds)) {
+      !reopenedWhatRequestNames(last, request)) {
     return undefined;
   }
   return last.reopenedTaskIds.every((id) => awaitingReimplementation(graph.tasks.find((task) => task.id === id)))
@@ -185,16 +207,6 @@ function targetRefusal(graph: TaskGraph, request: TaskReopeningRequest): DomainR
 }
 
 /**
- * `ids` in TaskGraph order, so one reopening has one canonical audit whatever
- * order the operator named. Every id names a graph Task once `targetRefusal`
- * passed; were none to, the operator's order is kept rather than an empty list.
- */
-function inGraphOrder(graph: TaskGraph, ids: NonEmpty<TaskId>): NonEmpty<TaskId> {
-  const [first, ...rest] = graph.tasks.flatMap(({ id }) => ids.filter((requested) => requested === id));
-  return first === undefined ? ids : Object.freeze([first, ...rest] as const);
-}
-
-/**
  * Reopen implemented Tasks of the active Wave for re-implementation, or
  * refuse with the exact precondition that failed: the shared Wave-reopening
  * precondition (`reopenableWave`), then this operation's own Wave and target
@@ -213,21 +225,27 @@ export function reopenImplementedTasks(
   const refusal = waveRefusal(reopenable.value, request) ?? targetRefusal(graph, request);
   if (refusal !== null) return refusal;
 
-  const reopenedTaskIds = inGraphOrder(graph, request.taskIds);
+  const reopened = returnWaveTasksToRevalidation(reopenable.value, request.taskIds);
+  // The audited ids are every Task the transition returned, named and swept,
+  // in TaskGraph order, so one reopening has one canonical audit whatever
+  // order the operator named. The transition returns none only when no named
+  // id is a Task of the roster, which `targetRefusal` has already refused in
+  // these words; the branch is the narrowing the type needs, not a second rule.
+  const reopenedIds = reopenedTaskIdsOf(reopened.returned);
+  if (reopenedIds === null) return refuse("unknown-task", `${request.taskIds[0]} is not a Task of this TaskGraph`);
   const audit: TaskReopeningAudit = freeze({
     schemaVersion: 1,
     kind: "implemented-tasks-reopened",
     wave: request.wave,
-    reopenedTaskIds,
+    ...reopenedIds,
     reason: request.reason,
     abandonedRunId: reopenable.value.abandonedRunId,
   });
-  const reopened = returnWaveTasksToRevalidation(reopenable.value, reopenedTaskIds);
   return freeze({
     ok: true as const,
     value: freeze({
       kind: "reopened" as const,
-      graph: { ...reopened, task_reopening_history: Object.freeze([...(graph.task_reopening_history ?? []), audit]) },
+      graph: { ...reopened.graph, task_reopening_history: Object.freeze([...(graph.task_reopening_history ?? []), audit]) },
       audit,
     }),
   });

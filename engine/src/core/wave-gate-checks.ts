@@ -12,7 +12,7 @@
  * `wave-gate-machine`.
  */
 
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import { reviewedWorkspaceDrift, type ReviewedWorkspaceObservation } from "./reviewed-workspace";
 import type {
   PlanModels,
@@ -32,6 +32,7 @@ import { renderProjectVerificationCoverage } from "./verification-manifest";
 import { deriveWaveCompletionSuiteReadiness } from "./wave-completion-suite-readiness";
 import { canonicalRecord, type NonEmpty, nonEmptyOf } from "./orchestration-contract";
 import type { FrozenPathObservations } from "./acceptance-contract";
+import { waveReviewStanding, waveReviewView } from "./wave-review-authority";
 
 export type GateCheck =
   | Readonly<{ passed: true; summary: string }>
@@ -45,13 +46,18 @@ export function gateCheckMessage(check: GateCheck): string {
 }
 
 function proofFailureMessage(failure: ProofFailure): string {
-  switch (failure.kind) {
-    case "declared-artifact-not-changed":
-    case "declared-artifact-drifted": return `${failure.kind}:${failure.artifact}`;
-    case "untrusted-regression-tests-failed":
-    case "untrusted-regression-pass": return `${failure.kind}:${failure.label}`;
-    default: return failure.kind;
-  }
+  return match(failure)
+    .with({ kind: P.union("declared-artifact-not-changed", "declared-artifact-drifted") },
+      ({ kind, artifact }) => `${kind}:${artifact}`)
+    .with({ kind: P.union("untrusted-regression-tests-failed", "untrusted-regression-pass") },
+      ({ kind, label }) => `${kind}:${label}`)
+    .with({
+      kind: P.union(
+        "task-not-completed", "test-result-missing", "regression-tests-failed", "new-tests-not-observed",
+        "red-then-green-unproven", "attempt-scope-drifted", "declared-artifact-contract-violated",
+      ),
+    }, ({ kind }) => kind)
+    .exhaustive();
 }
 
 function unreadyTaskMessage(task: Task): string {
@@ -146,17 +152,28 @@ export function checkNewTests(tasks: readonly Task[]): GateCheck {
   );
 }
 
+/** One Task's line in the passed review check: its review status, or why it owes no review. */
+const reviewEvidenceLine = (task: Task): string => {
+  const standing = waveReviewStanding(task);
+  return standing.kind === "reviewed" ? String(task.review_status) : `not required (exempt from Wave review: ${standing.reason})`;
+};
+
+/**
+ * Every Task that owes Wave review has passed or blocked. A Task exempt from
+ * Wave review (`waveReviewView`) owes none: it is neither counted nor
+ * failed, and its line says so instead of showing a review status.
+ */
 export function checkReviews(tasks: readonly Task[]): GateCheck {
-  const reviewed = tasks.filter((task) => task.review_status === "passed" || task.review_status === "blocked");
-  if (reviewed.length !== tasks.length) {
-    const unreviewed = tasks.filter((task) => !task.review_status || task.review_status === "pending").map((task) => task.id);
-    const failedReview = tasks.filter((task) => task.review_status === "evidence_capture_failed").map((task) => task.id);
+  const { reviewed: owed, outstanding } = waveReviewView(tasks);
+  if (outstanding.length > 0) {
+    const unreviewed = outstanding.filter((task) => !task.review_status || task.review_status === "pending").map((task) => task.id);
+    const failedReview = outstanding.filter((task) => task.review_status === "evidence_capture_failed").map((task) => task.id);
     const parts = ["FAILED: Not all tasks have been reviewed."];
     if (failedReview.length > 0) parts.push(`  Evidence capture failed: ${failedReview.join(", ")}`);
     if (unreviewed.length > 0) parts.push(`  Unreviewed: ${unreviewed.join(", ")}`);
     return fail(parts.join("\n"));
   }
-  return pass(`5. Reviews verified (${tasks.length}/${tasks.length} tasks):\n${tasks.map((task) => `     ${task.id}: ${task.review_status}`).join("\n")}`);
+  return pass(`5. Reviews verified (${owed.length}/${owed.length} tasks):\n${tasks.map((task) => `     ${task.id}: ${reviewEvidenceLine(task)}`).join("\n")}`);
 }
 
 export function checkSpecAlignment(state: TaskGraph, wave: number): GateCheck {
@@ -307,7 +324,13 @@ export function checkWaveCompletionSuite(
     .exhaustive();
 }
 
-export function checkReviewedWorkspace(tasks: readonly Task[], deps: GateDeps): GateCheck {
+/**
+ * Accepted Review Packet bytes still match the workspace. Only reviewed Tasks
+ * are observed and compared: a Task exempt from Wave review holds no accepted
+ * review authority, and its bytes are its reviewed siblings'.
+ */
+export function checkReviewedWorkspace(waveTasks: readonly Task[], deps: GateDeps): GateCheck {
+  const { reviewed: tasks } = waveReviewView(waveTasks);
   if (!tasks.some((task) => task.accepted_review_authority !== undefined)) {
     // Pre-integrity historical packets have no byte snapshot authority to
     // compare. New engine-owned Wave packets always retain one on acceptance.
@@ -461,12 +484,15 @@ export function applyGateDecision(state: TaskGraph, decision: GateDecision): Tas
   const clearedTasks = state.tasks.map((task): Task => {
     if (task.wave !== decision.wave || task.status === "completed") return task;
     if (task.status !== "implemented" || task.proof?.state !== "satisfied") return task;
+    // A Task exempt from Wave review completes with its Wave but was never
+    // reviewed, so completion writes it no `passed`: its exemption is derived
+    // from its role (`waveReviewStanding`), not from a stored status.
     return {
       ...task,
       status: "completed",
       proof: task.proof,
       legacy_missing_proof: undefined,
-      review_status: "passed",
+      ...(waveReviewStanding(task).kind === "reviewed" ? { review_status: "passed" as const } : {}),
     };
   });
   // `blocked` is DERIVED, never asserted. `wave-gate-model`'s `waveHasBlockCause`

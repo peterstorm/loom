@@ -81,7 +81,8 @@ export type AcceptanceFreeze =
   | Readonly<{ state: "revised"; paths: NonEmpty<FrozenPathDigest> }>;
 
 /** One operator Contract Revision: why, the bytes before and after, and the
- *  claimant Tasks it returned to revalidation. */
+ *  Tasks it returned to revalidation, in TaskGraph order: its current-Wave
+ *  implemented claimants and, with them, that Wave's settled Distill Task. */
 export type ContractRevision = Readonly<{
   revision: number;
   reason: string;

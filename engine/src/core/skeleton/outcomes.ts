@@ -16,6 +16,11 @@
  *   4. bound, but `skeletonLanguageOf` says unsupported → `unsupported-language`;
  *   5. bound and supported → `skeleton-written { origin: "spawn" }` (to write).
  *
+ * A Task that holds no Skeleton (a Distill Task, ADR-0068 §9) is the one
+ * exception (`nonHolderOutcomeOf`): it never reports `skeleton-written`, so
+ * the planner derives no write for it, and where a holder would be given a
+ * Skeleton it reports `absent-no-skeleton-owed`.
+ *
  * A path the observations do not mention is absent. A Task id the graph does
  * not hold is `unknown-task`, never an empty outcome list: no Task and a Task
  * with no production files stay distinguishable.
@@ -23,6 +28,7 @@
 
 import { match } from "ts-pattern";
 import { contractRole } from "../acceptance-contract";
+import { taskRolePolicy } from "../distill-task";
 import { samePlanPath } from "../plan-path-match";
 import type { Task, TaskGraph } from "../../types";
 import { skeletonLanguageOf } from "./language";
@@ -63,6 +69,7 @@ const written = (origin: SkeletonOrigin): SkeletonOutcome => Object.freeze({ kin
 const EXISTS: SkeletonOutcome = Object.freeze({ kind: "exists-not-skeletonized" });
 const NO_BOUND_EXPORTS: SkeletonOutcome = Object.freeze({ kind: "no-bound-exports" });
 const NO_TYPES_FILE: SkeletonOutcome = Object.freeze({ kind: "contract-has-no-types-file" });
+const ABSENT_NO_SKELETON_OWED: SkeletonOutcome = Object.freeze({ kind: "absent-no-skeleton-owed" });
 /** What a path the observations do not mention is: absent. */
 export const ABSENT: PathObservation = Object.freeze({ kind: "absent" });
 
@@ -83,13 +90,36 @@ function outcomeOf(graph: TaskGraph, task: Task, path: string, observation: Path
   return target.kind === "unsupported" ? Object.freeze({ kind: "unsupported-language", reason: target.reason }) : written("spawn");
 }
 
+/**
+ * The outcome at one path of a Task that holds no Skeleton (a Distill Task,
+ * ADR-0068 §9), given the outcome a holder of the path would get.
+ *
+ * No Skeleton is ever written, adopted or refreshed on its behalf, so it
+ * never reports `skeleton-written`:
+ * - a present path is `exists-not-skeletonized`, even while it still holds
+ *   the engine's bytes (that Skeleton is its holder's);
+ * - an absent path keeps the holder's reason no Skeleton belongs there
+ *   (unbound, or an unsupported language);
+ * - an absent path a holder would be given a Skeleton at is
+ *   `absent-no-skeleton-owed`: a sibling deleted the file, and nothing is
+ *   written in its place.
+ */
+function nonHolderOutcomeOf(holderOutcome: SkeletonOutcome, observation: PathObservation): SkeletonOutcome {
+  if (observation.kind === "present") return EXISTS;
+  return holderOutcome.kind === "skeleton-written" ? ABSENT_NO_SKELETON_OWED : holderOutcome;
+}
+
 export const skeletonOutcomesOf: SkeletonOutcomesOfFn = (graph, taskId, observations) => {
   const task = graph.tasks.find(({ id }) => id === taskId);
   if (task === undefined) return { ok: false, error: Object.freeze({ kind: "unknown-task", taskId }) };
+  const { holdsSkeletons } = taskRolePolicy(task);
   return {
     ok: true,
-    value: Object.freeze(productionFiles(graph, task).map((path): PathSkeletonOutcome =>
-      Object.freeze({ path, outcome: outcomeOf(graph, task, path, observations.get(path) ?? ABSENT) }))),
+    value: Object.freeze(productionFiles(graph, task).map((path): PathSkeletonOutcome => {
+      const observation = observations.get(path) ?? ABSENT;
+      const holderOutcome = outcomeOf(graph, task, path, observation);
+      return Object.freeze({ path, outcome: holdsSkeletons ? holderOutcome : nonHolderOutcomeOf(holderOutcome, observation) });
+    })),
   };
 };
 
@@ -101,4 +131,5 @@ export const renderSkeletonOutcome = (outcome: SkeletonOutcome): string =>
     .with({ kind: "contract-has-no-types-file" }, () => "contract has no types file, no skeletons")
     .with({ kind: "unsupported-language" }, () => "unsupported language, no skeleton")
     .with({ kind: "exists-not-skeletonized" }, () => "exists, not skeletonized")
+    .with({ kind: "absent-no-skeleton-owed" }, () => "absent, no skeleton owed")
     .exhaustive();

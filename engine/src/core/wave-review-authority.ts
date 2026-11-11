@@ -20,6 +20,7 @@ import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type
 import { parseReviewerProtocolDescriptor } from "./reviewer-contract";
 import type { OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, WaveGateRestartAudit } from "./wave-gate-program";
 import { DECISION_RECORD_AGENT } from "./model-profiles";
+import { taskRolePolicy, type TaskRolePolicy } from "./distill-task";
 import { isWaveReviewRole, waveReviewRoster, type WaveReviewRole, type WaveReviewRoster } from "./agent-catalog-projections";
 import {
   AGENT_REQUIRED_SKILLS,
@@ -120,8 +121,80 @@ export type WaveReviewSubject =
   | Readonly<{ role: "spec-check-invoker"; taskId: null }>
   | Readonly<{ role: WaveReviewRole; taskId: string }>;
 
-/** One registered Task with its ordered Wave review roster. */
+/** One reviewed registered Task with its ordered Wave review roster. */
 export type WaveTaskReviewRoster = Readonly<{ taskId: string; roster: WaveReviewRoster }>;
+
+/**
+ * A Wave Task that owes no Wave review, and why. Closed: a Distill Task is the
+ * one exemption (ADR-0068 §6). Its Wave siblings' Review Packets read current
+ * bytes, so they already review the distilled code; a packet of its own would
+ * be the whole Wave's diff a second time.
+ */
+export type WaveReviewExempt = Readonly<{ kind: "exempt"; reason: NonNullable<TaskRolePolicy["waveReviewExemption"]> }>;
+
+/**
+ * The Wave review one Task owes: its ordered roster, or the explicit
+ * exemption. "No reviewers" is never an empty roster, so nothing can issue,
+ * collect or settle a zero-reviewer Review Run by accident. Both arms are
+ * tagged; a persisted Review Run keeps the bare roster (`expected_agents`).
+ */
+export type WaveTaskReview = Readonly<{ kind: "roster"; roster: WaveReviewRoster }> | WaveReviewExempt;
+
+/** What Wave review reads of a Task: its role's identity and its stored review status. */
+type WaveReviewedTask = Pick<Task, "agent" | "review_status">;
+
+/**
+ * Where one Task stands in its Wave's review: reviewed, with whether the gate
+ * still waits for its review evidence (its review has neither passed nor
+ * blocked), or exempt, with the reason. An exempt Task is never outstanding,
+ * whatever its stored `review_status`.
+ */
+export type WaveReviewStanding =
+  | Readonly<{ kind: "reviewed"; outstanding: boolean }>
+  | WaveReviewExempt;
+
+/**
+ * The one Wave-review rule for a single Task (`TaskRolePolicy` names the
+ * exemption). The roster derivation, the completion write and every renderer
+ * of one Task's review line ask here.
+ */
+export function waveReviewStanding(task: WaveReviewedTask): WaveReviewStanding {
+  const reason = taskRolePolicy(task).waveReviewExemption;
+  return Object.freeze(reason === null
+    ? { kind: "reviewed", outstanding: task.review_status !== "passed" && task.review_status !== "blocked" }
+    : { kind: "exempt", reason });
+}
+
+/**
+ * A Wave's Tasks as its review sees them, each list in the order given:
+ * - `reviewed`: the Tasks a Review Packet, a reviewed workspace and an
+ *   accepted review exist for;
+ * - `outstanding`: those of them whose review evidence the gate still waits
+ *   for;
+ * - `exempt`: the Tasks that owe no review, each with why.
+ * Every Task is in exactly one of `reviewed` and `exempt`.
+ */
+export type WaveReviewView<T> = Readonly<{
+  reviewed: readonly T[];
+  outstanding: readonly T[];
+  exempt: readonly Readonly<{ task: T; exemption: WaveReviewExempt }>[];
+}>;
+
+/**
+ * The Wave-review view of `tasks`. Gate checks, drivers and renderers that
+ * read review state of more than one Task read it through this view, so none
+ * can wait on, observe or count a Task that is never reviewed.
+ */
+export function waveReviewView<T extends WaveReviewedTask>(tasks: readonly T[]): WaveReviewView<T> {
+  const standings = tasks.map((task) => ({ task, standing: waveReviewStanding(task) }));
+  return Object.freeze({
+    reviewed: Object.freeze(standings.flatMap(({ task, standing }) => (standing.kind === "reviewed" ? [task] : []))),
+    outstanding: Object.freeze(standings.flatMap(({ task, standing }) =>
+      (standing.kind === "reviewed" && standing.outstanding ? [task] : []))),
+    exempt: Object.freeze(standings.flatMap(({ task, standing }) =>
+      (standing.kind === "exempt" ? [Object.freeze({ task, exemption: standing })] : []))),
+  });
+}
 
 /**
  * The owner obligations a Wave reviewer packet for `task` carries as its
@@ -134,14 +207,14 @@ function ownerMapObligations(graph: TaskGraph, schemaVersion: 1 | 2, task: Task)
   return schemaVersion === 2 ? taskOwnerDuty(graph, task.file_list ?? []).touched : [];
 }
 
-/** One Task's roster together with the owner-map obligations whose presence picked it. */
+/** One reviewed Task's roster together with the owner-map obligations whose presence picked it. */
 type WaveTaskReviewDerivation = WaveTaskReviewRoster & Readonly<{ ownerMap: readonly OwnerObligation[] }>;
 
 /**
- * The one presence-to-roster derivation (FR-022, ADR-0047): the base five, plus
- * `architecture-tech-lead` appended last when the Task's packets carry the
- * owner map. Issuance renders the owner map from this same result, so the
- * section and the roster cannot disagree.
+ * The one presence-to-roster derivation (FR-022, ADR-0047) of a reviewed Task:
+ * the base five, plus `architecture-tech-lead` appended last when the Task's
+ * packets carry the owner map. Issuance renders the owner map from this same
+ * result, so the section and the roster cannot disagree.
  */
 function waveTaskReviewDerivation(graph: TaskGraph, schemaVersion: 1 | 2, task: Task): WaveTaskReviewDerivation {
   const ownerMap = ownerMapObligations(graph, schemaVersion, task);
@@ -149,15 +222,22 @@ function waveTaskReviewDerivation(graph: TaskGraph, schemaVersion: 1 | 2, task: 
 }
 
 /**
- * A Wave Task's ordered reviewer roster. Issuance, the locked install and
- * every later roster comparison (`waveRunRosterProblem`, completed-protocol
- * verification) derive it here from protected state, never from a persisted copy.
+ * A Wave Task's review: its ordered reviewer roster, or its exemption.
+ * Issuance, the locked install and every later roster comparison
+ * (`waveRunRosterProblem`, completed-protocol verification) derive it here
+ * from protected state, never from a persisted copy.
  */
-export function waveTaskReviewRoster(graph: TaskGraph, schemaVersion: 1 | 2, task: Task): WaveReviewRoster {
-  return waveTaskReviewDerivation(graph, schemaVersion, task).roster;
+export function waveTaskReviewRoster(graph: TaskGraph, schemaVersion: 1 | 2, task: Task): WaveTaskReview {
+  const standing = waveReviewStanding(task);
+  return standing.kind === "exempt"
+    ? standing
+    : Object.freeze({ kind: "roster", roster: waveTaskReviewDerivation(graph, schemaVersion, task).roster });
 }
 
-/** Every registered Task's roster, in registration order; refuses a Task the graph no longer holds. */
+/**
+ * Every reviewed registered Task's roster, in registration order; an exempt
+ * Task contributes none. Refuses a Task the graph no longer holds.
+ */
 export function waveTaskReviewRosters(
   graph: TaskGraph,
   schemaVersion: 1 | 2,
@@ -167,21 +247,21 @@ export function waveTaskReviewRosters(
   for (const taskId of taskIds) {
     const task = graph.tasks.find((candidate) => candidate.id === taskId);
     if (task === undefined) return { ok: false, error: `registered Wave Task ${taskId} disappeared` };
-    rosters.push(Object.freeze({ taskId, roster: waveTaskReviewRoster(graph, schemaVersion, task) }));
+    const review = waveTaskReviewRoster(graph, schemaVersion, task);
+    if (review.kind === "roster") rosters.push(Object.freeze({ taskId, roster: review.roster }));
   }
   return { ok: true, value: Object.freeze(rosters) };
 }
 
 /**
  * Why a persisted Review Run does not carry its Task's exact derived roster:
- * its `expected_agents` differ, or its slot authority is missing or does not
- * bind that roster's agents in order, one slot per agent.
+ * its `expected_agents` differ, its slot authority is missing or does not
+ * bind that roster's agents in order, one slot per agent, or the Task is
+ * exempt from Wave review and may carry no Review Run at all.
  */
-export type WaveRunRosterProblem = Readonly<{
-  kind: "expected-agents-differ" | "slot-authority-differs";
-  taskId: string;
-  roster: WaveReviewRoster;
-}>;
+export type WaveRunRosterProblem =
+  | Readonly<{ kind: "expected-agents-differ" | "slot-authority-differs"; taskId: string; roster: WaveReviewRoster }>
+  | Readonly<{ kind: "task-exempt"; taskId: string; exemption: WaveReviewExempt }>;
 
 /**
  * The one roster-versus-persisted-run check. Slot membership, exhausted-run
@@ -194,7 +274,9 @@ export function waveRunRosterProblem(
   task: Task,
   run: Pick<ReviewRun, "expected_agents" | "slot_authority">,
 ): WaveRunRosterProblem | null {
-  const roster = waveTaskReviewRoster(graph, schemaVersion, task);
+  const review = waveTaskReviewRoster(graph, schemaVersion, task);
+  if (review.kind === "exempt") return Object.freeze({ kind: "task-exempt", taskId: task.id, exemption: review });
+  const { roster } = review;
   if (!canonicalStructuralEquals(run.expected_agents, roster)) {
     return Object.freeze({ kind: "expected-agents-differ", taskId: task.id, roster });
   }
@@ -208,8 +290,8 @@ export function waveRunRosterProblem(
 
 /**
  * The canonical order of a Wave review batch, and its only definition:
- * spec-check first, then every registered Task in registration order, each
- * with every role of its own roster in roster order. Request issuance,
+ * spec-check first, then every reviewed registered Task in registration
+ * order, each with every role of its own roster in roster order. Request issuance,
  * persisted batch recovery and spawn-task labelling all read this order.
  */
 export function waveReviewSubjects(rosters: readonly WaveTaskReviewRoster[]): readonly WaveReviewSubject[] {
@@ -870,13 +952,19 @@ export function prepareWaveReviewBatch(
     }
     observationsByTask.set(observation.taskId, observation);
   }
-  // Pairing IS the roster check: a Task without an observation is refused
-  // here, so every admitted Task below carries its workspace by construction.
-  const observed = tasks.flatMap((task) => {
+  // A Task exempt from Wave review (ADR-0068 §6) stays on the registered
+  // roster and in the spec-check scope, and contributes nothing else: no
+  // workspace, no epoch entry, no Task run, no subject, packet or slot. Its
+  // bytes are its reviewed siblings' and reach the epoch through them.
+  const { reviewed } = waveReviewView(tasks);
+  // Pairing IS the roster check: a reviewed Task without an observation is
+  // refused here, so every admitted Task below carries its workspace by
+  // construction; so is an observation of an exempt or foreign Task.
+  const observed = reviewed.flatMap((task) => {
     const observation = observationsByTask.get(task.id);
     return observation === undefined ? [] : [Object.freeze({ task, observation })];
   });
-  if (observationsByTask.size !== tasks.length || observed.length !== tasks.length) {
+  if (observationsByTask.size !== reviewed.length || observed.length !== reviewed.length) {
     return failure("current Wave workspace observations differ from the exact registered Task roster");
   }
   const admitted: Readonly<{ task: Task; workspace: ReviewedWorkspaceObservation }>[] = [];
@@ -956,7 +1044,7 @@ export function prepareWaveReviewBatch(
   // stamped graph, and only for a Task touching some owned family. Every other
   // packet keeps its exact pre-feature bytes (SC-005). The same presence picks
   // the Task's roster, so an owner-mapped Task also issues architecture-tech-lead.
-  const derivations = tasks.map((task) => waveTaskReviewDerivation(graph, registration.schemaVersion, task));
+  const derivations = reviewed.map((task) => waveTaskReviewDerivation(graph, registration.schemaVersion, task));
   const ownerMapByTask = new Map<string, ByteSection>();
   for (const { taskId, ownerMap: touched } of derivations) {
     if (!isNonEmpty(touched)) continue;
@@ -1004,7 +1092,7 @@ export function prepareWaveReviewBatch(
     // The packet names the role's Skill for the Agent to read; the request's
     // own profile, bindings and Skill are minted from the catalog below.
     const requiredSkill = AGENT_REQUIRED_SKILLS[subject.role];
-    const task = subject.taskId === null ? null : tasks.find(({ id }) => id === subject.taskId) ?? null;
+    const task = subject.taskId === null ? null : reviewed.find(({ id }) => id === subject.taskId) ?? null;
     const section = encodeByteSection(WAVE_REVIEW_AUTHORITY_SECTION, JSON.stringify({
       runId,
       wave: registration.input.wave,

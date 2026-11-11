@@ -810,7 +810,8 @@ describe("populate-task-graph enforces model bindings (the state-write funnel)",
     const result = await populateHandler(decomposeJson(planFile, ["src/order-machine.ts", "src/order-machine.test.ts"]), []);
     expect(result.kind).toBe("passthrough");
     const written = JSON.parse(readFileSync(statePath, "utf-8"));
-    expect(written.tasks).toHaveLength(1);
+    // The authored Task, then its Wave's engine-added Distill Task (ADR-0068).
+    expect(written.tasks).toHaveLength(2);
     expect(written.plan_file).toBe(planFile);
   });
 

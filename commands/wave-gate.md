@@ -7,6 +7,8 @@ description: "Run the engine-owned Wave Gate lifecycle after wave implementation
 # Wave Gate
 
 Run this after the implementation hook reports that the active Wave is implemented.
+That includes the Wave's Distill Task, which status offers for dispatch like any
+other Task once its Wave siblings have settled.
 The engine owns protected-state verification, test readiness, Review Packets,
 reviewer/model/Skill selection, exact request authority, retries, aggregation,
 Refutation Panel routing, advisory suspension, automatic full-tier lint, and
@@ -56,8 +58,11 @@ Execute only the one typed action returned by `start`, `resume`, or `decide`:
   request; resume only after every chunk finishes. The initial Wave review
   batch is one spec-check request plus each Task's reviewer roster: five
   reviewers, or six for a Task touching an owned Invariant's family
-  (`architecture-tech-lead` appended to carry the owner map, ADR-0047). Never
-  infer the count; spawn exactly the requests returned.
+  (`architecture-tech-lead` appended to carry the owner map, ADR-0047). The
+  Wave's Distill Task (agent `distill-agent`, the engine-added pass that
+  simplified the Wave's code, ADR-0068) is registered with the Wave but gets no
+  reviewer: the other Tasks' packets read the distilled bytes. Never infer the
+  count; spawn exactly the requests returned.
 - `await-user`: present the advisory findings the request references exactly as
   supplied, and ask the operator whether to approve them. The only decision a
   Wave Gate accepts is approval (below).

@@ -24,7 +24,14 @@ import type { ParsedSpec } from "./parse-spec";
 import { predecessorOutputErrorMessage, predecessorOutputs, renderPredecessorOutputs } from "./predecessor-output";
 import { specIndexUnavailableMessage, type SpecIndexAvailability } from "./requirement-coverage";
 import { findResidualPlaceholders } from "./validate-template-substitution";
-import { ACCEPTANCE_RED_WINDOW, taskVerificationPolicy, type VerificationRequirement } from "./verification-policy";
+import {
+  ACCEPTANCE_RED_WINDOW,
+  DISTILL_PASS,
+  taskVerificationPolicy,
+  type VerificationPolicy,
+  type VerificationRequirement,
+} from "./verification-policy";
+import { taskRoleOf, type TaskRole } from "./distill-task";
 import { match } from "ts-pattern";
 import { invariantRoles, type OwnedInvariant } from "./plan-paths";
 import { contractTaskIdsOf, duePaths, owesInWave, type TaskOwnerDuty } from "./owner-verification/obligations";
@@ -211,6 +218,27 @@ function requirementRendering(requirement: VerificationRequirement<string>): str
   return requirement.kind === "required" ? "required" : `waived (${requirement.reason})`;
 }
 
+/**
+ * What the engine-only `distill-pass` waiver means (ADR-0068), stated under
+ * the policy lines that carry it. The waiver names which Proof Obligation
+ * holds the test requirement; it never excuses the run itself.
+ */
+const DISTILL_PASS_WAIVER =
+  `**\`${DISTILL_PASS}\` is not a licence to skip your test runs.** Both arms are waived because this Task's one Proof ` +
+  "Obligation, `behaviour-preserved`, carries the test requirement instead. It is satisfied when you leave every file below " +
+  "unchanged. When you change one, it owes a trusted passing run after your last edit: the final verification run this brief " +
+  "opens with. You write no new tests.";
+
+/** The Verification Policy section: each arm, then what an engine-only waiver on it means for this Task. */
+function verificationPolicyLines(policy: VerificationPolicy): readonly string[] {
+  const distillPass = policy.regression.kind === "waived" && policy.regression.reason === DISTILL_PASS;
+  return [
+    `- regression: ${requirementRendering(policy.regression)}`,
+    `- new_tests: ${requirementRendering(policy.newTests)}`,
+    ...(distillPass ? ["", DISTILL_PASS_WAIVER] : []),
+  ];
+}
+
 function bulleted(lines: readonly string[], none: string): string {
   return lines.length === 0 ? none : lines.map((line) => `- ${line}`).join("\n");
 }
@@ -308,6 +336,32 @@ function roleLines(fileList: readonly string[], ownership: OwnedInvariant): read
   ];
 }
 
+/**
+ * A Distill Task's one role in a family whose files its scope holds
+ * (ADR-0068): it implements no rule, so it is told what a distill move must
+ * leave where it is. No line when its scope holds none of the family.
+ */
+function distillRoleLines(fileList: readonly string[], ownership: OwnedInvariant): readonly string[] {
+  const played = invariantRoles(fileList, ownership);
+  const held = [
+    ...(played.owner ? [ownership.owner] : []),
+    ...played.siblings.map(({ path }) => path),
+    ...(played.matrixTest ? [ownership.matrixTest] : []),
+  ];
+  return held.length === 0
+    ? []
+    : [`- Distill pass: your scope holds ${held.map((path) => `\`${path}\``).join(", ")}. Simplify in place. The rule stays in the owner ` +
+        `module \`${ownership.owner}\`, once, and every sibling entry point keeps calling it: moving the rule, inlining it into a ` +
+        "sibling, or removing a sibling's call is not a distill move."];
+}
+
+/** The role lines a Task's brief shows for one family: an implementer's roles, or a Distill Task's one. */
+const familyRoleLines = (task: Task, ownership: OwnedInvariant): readonly string[] =>
+  match(taskRoleOf(task))
+    .with("authored", () => roleLines(task.file_list ?? [], ownership))
+    .with("distill", () => distillRoleLines(task.file_list ?? [], ownership))
+    .exhaustive();
+
 /** One owned Invariant's block: its statement, the Task's roles, then the whole family, so a sibling sees its owner and its peers. */
 function familyBlock({ id, title, statement, ownership }: OwnedFamily, roles: readonly string[]): string {
   const { owner, siblings, matrixTest } = ownership;
@@ -341,18 +395,17 @@ function invariantOwnership(
   contracts: readonly AcceptanceContract[],
   source: InvariantOwnershipSource,
 ): string {
-  const fileList = task.file_list ?? [];
   const blocks = match(source)
     .with({ kind: "stamped" }, ({ touched }) => {
       const schedule = dutySchedule(task, roster, contracts);
       return touched.map((obligation) => {
         const family = familyOfObligation(obligation);
-        return `${familyBlock(family, roleLines(fileList, family.ownership))}\n\n${ownerDuties(obligation, schedule)}`;
+        return `${familyBlock(family, familyRoleLines(task, family.ownership))}\n\n${ownerDuties(obligation, schedule)}`;
       });
     })
     .with({ kind: "plan" }, ({ invariants }) => invariants.flatMap(({ id, title, statement, ownership }) => {
       if (ownership.kind !== "owned") return [];
-      const roles = roleLines(fileList, ownership);
+      const roles = familyRoleLines(task, ownership);
       return roles.length === 0 ? [] : [familyBlock({ id, title, statement, ownership }, roles)];
     }))
     .exhaustive();
@@ -390,14 +443,25 @@ function coverageTargets({ invariant, owner, siblings }: OwnerObligation, dueSib
  * changed lines, or the declared exemption. A contract Task's stub owes
  * neither, so its brief says when verification starts instead; a Wave the
  * gate does not owe (`owesInWave`) is told so before the duties it will owe.
+ * A Distill Task owes none of them and is told what its moves are judged by
+ * (`distillOwnerNote`).
  */
-function ownerDuties(obligation: OwnerObligation, { task, roster, contractTaskIds }: DutySchedule): string {
-  const { invariant, owner, siblings, matrixTest, mutation } = obligation;
-  if (contractTaskIds.has(task.id)) {
+function ownerDuties(obligation: OwnerObligation, schedule: DutySchedule): string {
+  const { invariant } = obligation;
+  if (schedule.contractTaskIds.has(schedule.task.id)) {
     return `**Owner duties (${invariant}):** none in this Wave. You are a contract Task, so your change to this family is a ` +
       `compiling stub, and a stub owes no owner verification. The Wave Gate verifies ${invariant} from the first Wave in which ` +
       "an implementation Task changes its owner or a sibling.";
   }
+  return match(taskRoleOf(schedule.task))
+    .with("authored", () => implementerOwnerDuties(obligation, schedule))
+    .with("distill", () => distillOwnerNote(obligation))
+    .exhaustive();
+}
+
+/** The coverage and mutation duties of an implementation Task that is no contract Task. */
+function implementerOwnerDuties(obligation: OwnerObligation, { task, roster, contractTaskIds }: DutySchedule): string {
+  const { invariant, owner, siblings, matrixTest, mutation } = obligation;
   const due = new Set(duePaths(roster, task.wave, obligation));
   const quotedSiblings = (isDue: boolean): readonly string[] =>
     siblings.filter(({ path }) => due.has(path) === isDue).map(({ path }) => quoted(path));
@@ -421,6 +485,24 @@ function ownerDuties(obligation: OwnerObligation, { task, roster, contractTaskId
       `the declared reason: ${reason}. Sibling coverage still applies.`)
     .exhaustive();
   return `${coverage}\n\n${mutationDuty}`;
+}
+
+/**
+ * What Owner Verification means to a Distill Task (ADR-0068). The Wave's
+ * implementation Tasks owe the duties; the Wave Gate still judges the bytes
+ * the pass leaves, so the note names what a move in the family can break.
+ */
+function distillOwnerNote({ invariant, owner, matrixTest, mutation }: OwnerObligation): string {
+  const judged = match(mutation)
+    .with({ kind: "verify" }, () =>
+      `every line you change in ${quoted(owner)} is one of the owner's lines changed in the Wave, and each mutant the fixed ` +
+      `operator set makes of it must be killed by ${quoted(matrixTest)}. Leave a line alone when you cannot see a test that pins it.`)
+    .with({ kind: "exempt" }, ({ reason }) =>
+      `${invariant} declares a mutation exemption, so ${quoted(owner)} is not mutation-verified; the declared reason: ${reason}.`)
+    .exhaustive();
+  return `**Owner Verification (${invariant}):** owed by this Wave's implementation Tasks, not by your pass. The Wave Gate ` +
+    `still checks that the imports of ${quoted(matrixTest)}, followed through re-exports, reach the family, so keep every export ` +
+    `and re-export it reaches them through. And ${judged}`;
 }
 
 /**
@@ -497,12 +579,27 @@ function claimantBlock(contract: AcceptanceContract, claims: readonly string[]):
  *  that authored its own regression waiver keeps that reason. */
 function bystanderBlock(contract: AcceptanceContract, task: Task): string {
   const files = contract.acceptance.map(({ path }) => `\`${path}\``).join(", ");
-  const regression = taskVerificationPolicy(task).regression;
-  const waived = regression.kind === "waived" && regression.reason === ACCEPTANCE_RED_WINDOW
+  return `**${contract.id}: ${contract.title}** — its acceptance testcases in ${files} may still fail in a full-suite run until the Tasks completing ${coveredAnchors(contract).join(", ")} land. ` +
+    redWindowGuidance(taskVerificationPolicy(task).regression);
+}
+
+/**
+ * What a red-window Task does about the pending failures, by the regression
+ * arm it carries. A `distill-pass` Task is judged by its own final run
+ * (ADR-0068), so that run must leave the pending testcases out; every other
+ * Task leaves them to the Wave Gate's suite.
+ */
+function redWindowGuidance(regression: VerificationPolicy["regression"]): string {
+  const waiver = regression.kind === "waived" ? regression.reason : null;
+  if (waiver === DISTILL_PASS) {
+    return "Your pass is judged by your own final run, and a run that includes a failing testcase is a failed run: the engine " +
+      "then restores your edits. Run the tests that cover your files without these acceptance files. " +
+      "A failure anywhere else after one of your moves means the move changed behaviour: undo it.";
+  }
+  const waived = waiver === ACCEPTANCE_RED_WINDOW
     ? `Your regression run is waived for that reason (\`${ACCEPTANCE_RED_WINDOW}\`); the Wave Gate's suite judges everything else.`
     : "The Wave Gate's suite, which knows which testcases are pending, judges them.";
-  return `**${contract.id}: ${contract.title}** — its acceptance testcases in ${files} may still fail in a full-suite run until the Tasks completing ${coveredAnchors(contract).join(", ")} land. ` +
-    `${waived} Failures anywhere else are yours to fix.`;
+  return `${waived} Failures anywhere else are yours to fix.`;
 }
 
 /**
@@ -518,15 +615,13 @@ function acceptanceContractSection(
   stamp: readonly ExportBinding[] | undefined,
 ): string {
   const tasks = roster.some(({ id }) => id === task.id) ? roster : [...roster, task];
-  const blocks = contracts.flatMap((contract) => {
-    const role = contractRole(contract, task, tasks);
-    switch (role.kind) {
-      case "contract-task": return [contractTaskBlock(contract, contractStubAuthor(contract, stamp))];
-      case "claimant": return [claimantBlock(contract, role.anchors)];
-      case "red-window": return [bystanderBlock(contract, task)];
-      case "none": return [];
-    }
-  });
+  const blocks = contracts.flatMap((contract) =>
+    match(contractRole(contract, task, tasks))
+      .with({ kind: "contract-task" }, () => [contractTaskBlock(contract, contractStubAuthor(contract, stamp))])
+      .with({ kind: "claimant" }, ({ anchors }) => [claimantBlock(contract, anchors)])
+      .with({ kind: "red-window" }, () => [bystanderBlock(contract, task)])
+      .with({ kind: "none" }, () => [])
+      .exhaustive());
   return blocks.length === 0 ? NO_ACCEPTANCE_CONTRACT : blocks.join("\n\n");
 }
 
@@ -538,10 +633,19 @@ export const NO_PRODUCTION_FILES = "None — this Task owns no production file, 
 /** Literal substituted for `{frozen_signatures}` when the observed TaskGraph does not hold the Task. */
 export const TASK_NOT_OBSERVED = "None — the TaskGraph its skeletons were observed in does not hold this Task, so it has no skeleton outcome.";
 
-const FROZEN_SIGNATURES_LEAD =
-  "Each production file you own, with its skeleton outcome and the exports bound to it. An outcome not yet recorded is what the " +
-  "engine does when it registers this attempt: it writes each missing bound skeleton before your attempt starts, may refresh a " +
-  "skeleton that is still the engine's untouched bytes, and never modifies a file you or anyone else has changed.";
+/**
+ * The section's lead by Task role. A Distill Task's files (ADR-0068) are its
+ * scope, not its work, and their skeletons are filled.
+ */
+const FROZEN_SIGNATURES_LEADS: Readonly<Record<TaskRole, string>> = {
+  authored:
+    "Each production file you own, with its skeleton outcome and the exports bound to it. An outcome not yet recorded is what the " +
+    "engine does when it registers this attempt: it writes each missing bound skeleton before your attempt starts, may refresh a " +
+    "skeleton that is still the engine's untouched bytes, and never modifies a file you or anyone else has changed.",
+  distill:
+    "Each production file in your scope, with its skeleton outcome and the exports bound to it. The Tasks that own these files " +
+    "implemented them before your pass, so an outcome here is a record of what the file is, never a skeleton for you to fill.",
+};
 
 const renderFrozenAdt = (adt: FrozenAdt): string =>
   match(adt)
@@ -564,14 +668,27 @@ function frozenAdtParagraph(contract: AcceptanceContract, surface: DomainResult<
     "local union or sealed type: settlement refuses either (`declared-artifact-contract-violated`).";
 }
 
-/** The frozen-signature and marker rules (FR-024) over the aliases the Task's bound exports are typed by. */
-function frozenSignatureRules(bindings: readonly ExportBinding[]): string {
+/**
+ * The frozen-signature rule (FR-024) over the aliases the Task's bound exports
+ * are typed by, then what the Task does with the bodies: an implementer
+ * replaces each skeleton body and its marker; a Distill Task (ADR-0068) meets
+ * bodies their owning Tasks already wrote, and may simplify only those.
+ */
+function frozenSignatureRules(task: Task, bindings: readonly ExportBinding[]): string {
   const aliases = [...new Set(bindings.flatMap(({ exports }) => exports.map(({ alias }) => alias)))];
-  return `**Frozen signatures.** The bound exports' signatures are frozen: keep each export's name, typed by its frozen ` +
-    `alias (${aliases.map(quoted).join(", ")}) from its contract's types file; never rename, delete or re-type one. Each skeleton ` +
-    "body throws its `unimplemented: <name>` marker: replace every body, and remove every `unimplemented: <name>` marker — none " +
-    "may remain at completion. Settlement refuses a deleted, renamed, retyped or still-unimplemented bound export " +
-    "(`declared-artifact-contract-violated`).";
+  const frozen = `**Frozen signatures.** The bound exports' signatures are frozen: keep each export's name, typed by its frozen ` +
+    `alias (${aliases.map(quoted).join(", ")}) from its contract's types file; never rename, delete or re-type one.`;
+  return match(taskRoleOf(task))
+    .with("authored", () =>
+      `${frozen} Each skeleton ` +
+      "body throws its `unimplemented: <name>` marker: replace every body, and remove every `unimplemented: <name>` marker — none " +
+      "may remain at completion. Settlement refuses a deleted, renamed, retyped or still-unimplemented bound export " +
+      "(`declared-artifact-contract-violated`).")
+    .with("distill", () =>
+      `${frozen} The Tasks that own these files already replaced every skeleton body: simplify a body, never its signature. ` +
+      "Settlement refuses a deleted, renamed or retyped bound export (`declared-artifact-contract-violated`), and the engine " +
+      "then restores your edits.")
+    .exhaustive();
 }
 
 /** The stage-two problems of the Task's bindings (AS-051): registration refuses its spawn until each is repaired. */
@@ -615,7 +732,7 @@ const frozenDuties = (graph: TaskGraph, task: Task, surfaces: FrozenSignaturesIn
     .with({ kind: "owed" }, ({ bindings, contracts }): FrozenDuties => ({
       bindings,
       paragraphs: [
-        ...(bindings.length === 0 ? [] : [frozenSignatureRules(bindings)]),
+        ...(bindings.length === 0 ? [] : [frozenSignatureRules(task, bindings)]),
         ...contracts.map((contract) => frozenAdtParagraph(contract, surfaces.get(contract.id))),
       ],
     }))
@@ -637,7 +754,7 @@ function stampedFrozenSignatures(task: Task, { graph, observations, surfaces, un
     return [`- ${quoted(path)} — ${renderSkeletonOutcome(outcome)}${flag === undefined ? "" : `; ${renderStaleSkeleton(flag)}`}`, ...exports];
   });
   return [
-    FROZEN_SIGNATURES_LEAD,
+    FROZEN_SIGNATURES_LEADS[taskRoleOf(task)],
     fileLines.join("\n"),
     ...paragraphs,
     ...(unresolved.length === 0 ? [] : [unresolvedBindingsParagraph(unresolved)]),
@@ -755,6 +872,10 @@ function redThenGreenSection(
       return { ok: false, error: { kind: "red-then-green-proof-unfrozen", message: duty.reason } };
     case "owed":
       break;
+    default: {
+      const unreachable: never = duty;
+      return unreachable;
+    }
   }
   const classification = classifyTaskFiles(task.file_list ?? [], duty.testFiles, task.artifact_baseline);
   const created = classification.createdImplementationFiles;
@@ -847,8 +968,7 @@ export function renderImplementationBrief(
     dependencies: task.depends_on.length === 0 ? "none" : task.depends_on.join(", "),
     predecessor_outputs: renderPredecessorOutputs(predecessors.value),
     verification_policy: [
-      `- regression: ${requirementRendering(policy.regression)}`,
-      `- new_tests: ${requirementRendering(policy.newTests)}`,
+      ...verificationPolicyLines(policy),
       ...(redThenGreen.value === null ? [] : ["", redThenGreen.value]),
     ].join("\n"),
     implementation_retry_context: dispatch.promptAppendix ?? NO_RETRY_CONTEXT,

@@ -21,7 +21,7 @@ import { ensureWaveCompletionSuite, observeWaveCompletionWorkspace } from '../wa
 import { observeReviewedWorkspace } from '../reviewed-workspace';
 import { observeWaveSpecCheckDocuments } from '../../../orchestration/wave-spec-check-documents';
 import type { TaskGraph } from '../../../types';
-import { waveSpecCheckDocumentsMatch, waveTaskReviewRosters } from '../../../core/wave-review-authority';
+import { waveReviewView, waveSpecCheckDocumentsMatch, waveTaskReviewRosters } from '../../../core/wave-review-authority';
 import { exactObject } from './registration';
 import type { FacadeDriveResult } from './program-result';
 import {
@@ -203,8 +203,9 @@ async function resumeWaveGateAfter(
     const specCheck = await driveWaveSpecCheckRetry(context, currentIssued);
     if (specCheck.kind !== "proceed") return conclude(specCheck);
     const refreshed = specCheck.value;
-    if (registration.schemaVersion === 2 && refreshed.tasks.some((task) => {
-      if (!registration.taskIds.includes(task.id)) return false;
+    // Only reviewed Tasks are bound: a Task exempt from Wave review holds no accepted review authority.
+    const registeredTasks = refreshed.tasks.filter((task) => registration.taskIds.includes(task.id));
+    if (registration.schemaVersion === 2 && waveReviewView(registeredTasks).reviewed.some((task) => {
       const accepted = task.accepted_review_authority;
       return accepted?.run_id !== handle.runId || accepted.authority_digest !== registration.authorityDigest ||
         accepted.generation !== (task.review_generation ?? 0) ||

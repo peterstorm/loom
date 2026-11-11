@@ -1,6 +1,6 @@
 # Loom Agents
 
-Loom owns 28 Agent definitions. Every definition maps to one semantic model profile in `engine/src/core/model-profiles.ts`; definitions that need domain knowledge declare preloaded Skills in frontmatter.
+Loom owns 32 Agent definitions. Every definition maps to one semantic model profile in `engine/src/core/model-profiles.ts`; definitions that need domain knowledge declare preloaded Skills in frontmatter.
 
 For workflow placement and exact roles, see [Workflows](../docs/workflows.md). The model/profile contract is documented in [Model profiles and calibration](../docs/model-profiles-and-calibration.md).
 
@@ -38,8 +38,11 @@ The finalizer is the normal `architecture-agent`; only its completion advances t
 | `test-engineer` | General project-scoped test work | — |
 | `security-agent` | Authentication/authorization/application security work | `security-expert` |
 | `adr-writer-agent` | Expand architecture decisions into ADRs | — |
+| `distill-agent` | One Wave's distill pass: the `distill` skill in apply mode over the files the Wave's other Tasks implemented. Engine-assigned only | `distill` |
 
-Implementation Agents are the only TaskGraph Agent values that actually execute a task: decompose emits them, and the SubagentStop dispatch applies completion only for them. (Task-graph validation accepts any known agent name, so a graph naming a non-implementation agent as a task validates but then strands rather than running.) Under Pi they receive Task-bound write grants; phase/panel writers receive narrower artifact grants.
+`distill-agent` is never chosen by decompose or by a user. TaskGraph Population adds at most one Distill Task per Wave and assigns this Agent to it (ADR-0068); `validate-task-graph --decompose-payload` and `populate-task-graph` refuse an authored Task that names it. On Claude Code its Guarded Skill Machine (`machines/distill-agent.machine.json`) denies Edit, Write and MultiEdit until one test run has passed.
+
+Implementation Agents are the only TaskGraph Agent values that actually execute a task: decompose emits them (all but `distill-agent`), and the SubagentStop dispatch applies completion only for them. (Task-graph validation accepts any known agent name, so a graph naming a non-implementation agent as a task validates but then strands rather than running.) Under Pi they receive Task-bound write grants; phase/panel writers receive narrower artifact grants.
 
 ## Review and quality Agents
 

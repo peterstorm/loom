@@ -226,21 +226,29 @@ fail the run, never silently fall back to a default that checks nothing.
 | `maxDiscriminantBranches` | `number` | `3` | Branches on one tag at which `exhaustive-discriminant-branching` reads an if-chain as a switch |
 | `discriminantTags` | `string[]` | `kind`, `status`, `verdict`, `stage`, `severity`, `type` | Field names that tag a discriminated union |
 | `discriminantBranchingBaseline` | `string[]` | `[]` | Grandfathered `path::discriminant` chains `exhaustive-discriminant-branching` excuses |
+| `duplicateBlockMinTokens` | `number` | `100` | Identical tokens in a row that make a copy for `no-duplicate-block` |
+| `duplicateBlockMinLines` | `number` | `8` | Lines a copy must span on both sides |
+| `duplicateBlockBaseline` | `string[]` | `[]` | Grandfathered `path::otherPath@digest` copies `no-duplicate-block` excuses, one entry per copy |
 
-### Baselines: adopting the totality rules on an existing codebase
+### Baselines: adopting the totality rules and no-duplicate-block on an existing codebase
 
-`switch-totality` applies to every TypeScript file in every project, so a
-codebase with switches that predate it would block the next edit to each of
-those files. Record them once:
+`switch-totality` applies to every TypeScript file in every project, and
+`no-duplicate-block` to every TypeScript and JavaScript file, so a codebase
+with switches or copied blocks that predate them would block the next edit to
+each of those files. Record them once:
 
 ```bash
 bun <loom-plugin-dir>/scripts/lint-project.ts --write-baseline
 ```
 
 This writes every unproven switch and if-chain into `switchTotalityBaseline` /
-`discriminantBranchingBaseline`, keyed relative to the project root. A
+`discriminantBranchingBaseline`, and every copied block into
+`duplicateBlockBaseline`, keyed relative to the project root. A
 baselined site costs nothing until it is converted; a new site must prove
-totality. The list is debt, and it only shrinks: `lint-project` (full tier)
+totality, and a new copy is refused. A copy across two files has two entries,
+one per file; a block repeated inside one file has one. An entry names the
+copied tokens: editing a baselined copy on one side makes it a new, shorter or
+different copy that is reported again. The list is debt, and it only shrinks: `lint-project` (full tier)
 fails on any entry no live site consumes, so a converted switch's entry must
 be deleted — re-running `--write-baseline` does it.
 
@@ -337,6 +345,7 @@ callers all moved to the real name lives forever. Derived values like
 | `no-cross-boundary-imports` | immediate + full | TS, JS, Java | Import direction between bounded contexts; under `requireGovernance`, every file belongs to one |
 | `no-io-in-pure-modules` | immediate + full | TS, JS, Java | No filesystem/network/console/non-determinism in the functional core |
 | `switch-totality` | immediate + full | TS | A switch with 2+ arms proves totality — `match(…).exhaustive()`, or a `default` arm binding the scrutinee to `never` |
+| `no-duplicate-block` | immediate + full | TS, JS | No block of 100+ identical tokens over 8+ lines that another project file, or the same file, already holds |
 | `max-function-lines` | full | TS, JS, Java | Function bodies ≤ configured max (default: 50 lines) |
 | `fugue-generated-integrity` | full | TS | Structural projection of Fugue-generated files matches the stamped SHA-256 |
 | `exhaustive-discriminant-branching` | full | TS | 3+ branches on one discriminant without a totality proof |
@@ -347,6 +356,26 @@ callers all moved to the real name lives forever. Derived values like
 A rule that fires on correct code teaches people the rule is wrong, and then it
 gets disabled — which is worse than not having it.
 
+- `no-duplicate-block` applies to **every TypeScript and JavaScript file, tests
+  included** — a fixture builder pasted into a second test file is the copy it
+  exists for. It compares tokens, so reformatting or re-commenting a copy does
+  not hide it, and renaming one identifier inside it does: it finds pasted
+  code, not similar code. Import statements never count, and a file under
+  `exclude` is never the other side of a copy. It needs the project to have a
+  rules directory (`lint-project --init`): the directory is how the linter
+  knows the project root, and without one only repeats inside the edited file
+  are found. On an edit the other files are found through a fingerprint cache
+  under the temp directory, keyed by each file's size and modification time.
+  The cache can hide a copy only in a file whose content changed while its
+  size and modification time both stayed identical; it can never invent one,
+  because a nominated file is compared by its current bytes. The Wave Gate and
+  `lint-project` read every file, never the cache, and are the authority. A
+  cache written under another fingerprint scheme (another lexer, hash or
+  `duplicateBlockMinTokens`) is discarded and rebuilt.
+  One line repeated dozens of times (a generated table) is reported for its
+  first 32 repetitions of any one fingerprint, not for every pairing of every
+  repetition: a copy goes unreported only when everything in it has already
+  been repeated 32 times earlier in one of the two files.
 - `switch-totality` applies to **every non-test TypeScript file** by default.
   Only the `default` arm can prove a switch — a `never` binding,
   `assertNever(x)`, or `default: return match(x)…exhaustive()`; an
@@ -453,7 +482,7 @@ The `fixHint` is shown to the AI agent (or developer) when a violation fires. Ma
 
 ## Programmatic Rules
 
-Programmatic rules run TypeScript handler functions that can perform deeper structural analysis than regex allows. Each declares its tier: the import-boundary rules and `switch-totality` run after every edit (`"immediate"`) and at the Wave Gate; the rest only at the Wave Gate (`"full"`).
+Programmatic rules run TypeScript handler functions that can perform deeper structural analysis than regex allows. Each declares its tier: the import-boundary rules, `switch-totality` and `no-duplicate-block` run after every edit (`"immediate"`) and at the Wave Gate; the rest only at the Wave Gate (`"full"`).
 
 ### How They Work
 
@@ -547,7 +576,7 @@ All regex patterns are statically analyzed for ReDoS (Regular Expression Denial 
 
 Even if a pattern passes static analysis, regex execution checks a **50ms per-file deadline** every 100 lines and after each regex rule. This bounds ordinary multi-line work and fails closed once control returns to a check.
 
-This is cooperative, not a preemptive sandbox: JavaScript cannot interrupt one synchronous `RegExp.test()` that is already catastrophically backtracking, and programmatic handlers are checked before invocation but not preempted while running. Static rejection is therefore the primary defense against a single blocking match; custom programmatic rules are not supported from JSON. Do not describe the deadline as a guarantee that arbitrary regex or handler code cannot hang.
+This is cooperative, not a preemptive sandbox: JavaScript cannot interrupt one synchronous `RegExp.test()` that is already catastrophically backtracking, and programmatic handlers are checked before invocation but not preempted while running. A programmatic rule whose first call does one-off project-wide work declares it (`firstCallSetup` — `no-duplicate-block` builds its clone corpus); the executor runs such rules after every other rule, with one deadline check before them, so no rule is refused for time a setup spent, whatever order the rules were registered in. Static rejection is therefore the primary defense against a single blocking match; custom programmatic rules are not supported from JSON. Do not describe the deadline as a guarantee that arbitrary regex or handler code cannot hang.
 
 ---
 

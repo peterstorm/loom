@@ -5,6 +5,7 @@ import {
   parseProofObligationInput,
 } from "../../src/core/proof-obligations";
 import {
+  DISTILL_VERIFICATION_POLICY,
   LEGACY_TESTS_WAIVED_POLICY,
   REQUIRED_VERIFICATION_POLICY,
   parseTaskVerificationPolicy,
@@ -64,8 +65,43 @@ describe("VerificationPolicy", () => {
       expect(parsed.errors).toEqual(expect.arrayContaining([
         "verification_policy.command is not allowed",
         "verification_policy.regression.extra is not allowed",
-        "verification_policy.regression.reason must be one of documentation-only, generated-artifact, legacy-new-tests-required-false, acceptance-red-window",
+        "verification_policy.regression.reason must be one of documentation-only, generated-artifact, legacy-new-tests-required-false, acceptance-red-window, distill-pass",
       ]));
+    }
+    expect(parseVerificationPolicy({
+      regression: { kind: "required" },
+      new_tests: { kind: "waived", reason: "because-I-said-so" },
+    })).toEqual({
+      ok: false,
+      errors: [
+        "verification_policy.new_tests.reason must be one of existing-tests-sufficient, documentation-only, generated-artifact, covered-by-acceptance-contract, legacy-new-tests-required-false, distill-pass",
+      ],
+    });
+  });
+
+  it("keeps the distill-pass waiver engine-only: stored policy carries it, authored policy cannot claim it", () => {
+    const stored = serializeVerificationPolicy(DISTILL_VERIFICATION_POLICY);
+    expect(stored).toEqual({
+      regression: { kind: "waived", reason: "distill-pass" },
+      new_tests: { kind: "waived", reason: "distill-pass" },
+    });
+    expect(parseTaskVerificationPolicy({ verification_policy: stored }, "Task T9", "stored")).toEqual({
+      ok: true,
+      value: { policy: DISTILL_VERIFICATION_POLICY, source: "explicit" },
+    });
+    expect(parseTaskVerificationPolicy({ verification_policy: stored }, "Task T9", "authored")).toEqual({
+      ok: false,
+      errors: [
+        "Task T9.verification_policy.regression.reason must be one of documentation-only, generated-artifact",
+        "Task T9.verification_policy.new_tests.reason must be one of existing-tests-sufficient, documentation-only, generated-artifact, covered-by-acceptance-contract",
+      ],
+    });
+    // One requirement claiming it is refused as well: neither side is authorable.
+    for (const claimed of [
+      { regression: { kind: "waived", reason: "distill-pass" }, new_tests: { kind: "required" } },
+      { regression: { kind: "required" }, new_tests: { kind: "waived", reason: "distill-pass" } },
+    ]) {
+      expect(parseTaskVerificationPolicy({ verification_policy: claimed }, "Task T9", "authored")).toMatchObject({ ok: false });
     }
   });
 

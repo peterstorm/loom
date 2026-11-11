@@ -122,6 +122,7 @@ Architecture Decision Records preserve why the system has its current shape:
 - [ADR-0064: Bun reports — file identity from the `file` attribute, collection errors from the console](adr/ADR-0064-bun-reports-file-identity-and-console-collection-errors.md)
 - [ADR-0066: Security audit is a registered program, not a skill-side workflow](adr/ADR-0066-security-audit-is-a-registered-program.md)
 - [ADR-0067: Security ballots are bound to issued verifier spawns](adr/ADR-0067-security-ballots-are-bound-to-issued-verifier-spawns.md)
+- [ADR-0068: The distill pass is an engine-added Task per Wave](adr/ADR-0068-the-distill-pass-is-an-engine-added-task-per-wave.md)
 
 ## Harness and migration notes
 
