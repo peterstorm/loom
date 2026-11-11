@@ -10,8 +10,10 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { type RegexRule, type Rule, type Tier, type RuleSource, isRegexRule } from "./types";
 import { analyzeRegex } from "./safety";
-import { createProgrammaticRules } from "./programmatic/index";
+import { createProgrammaticRules, duplicateBlockOptions } from "./programmatic/index";
 import { EMPTY_CONFIG, parseProjectConfig, projectRootOf, type ProgrammaticConfig } from "./programmatic/config";
+import { EMPTY_CORPUS, type CloneCorpus } from "./clones/clone-detection";
+import { defaultCacheFile, projectCorpus } from "./clones/project-corpus";
 import { isDeclarativeRuleFile } from "./rule-sources";
 
 // --- Public API ---
@@ -67,8 +69,13 @@ export function loadRules(
     // Load project-local config for programmatic rules, and the root of the
     // project it belongs to — the frame its paths and baseline keys are in.
     const projectConfig = loadProjectConfig(projectDir);
+    const projectRoot = projectRootOf(projectDir);
     // Always create with config — createProgrammaticRules handles defaults via ??
-    const programmaticRules = createProgrammaticRules(projectConfig, projectRootOf(projectDir));
+    const programmaticRules = createProgrammaticRules(
+      projectConfig,
+      projectRoot,
+      cloneCorpus(projectConfig, projectRoot, tier),
+    );
 
     const programmaticEnabled = programmaticRules.filter((rule) => {
       // Check if a project rule disabled this programmatic rule by name
@@ -83,6 +90,25 @@ export function loadRules(
   }
 
   return tier === "immediate" ? enabled.filter(isRegexRule) : enabled;
+}
+
+/**
+ * The clone corpus no-duplicate-block reads for one project and tier. Nothing
+ * is walked here: the corpus builds itself on the rule's first call.
+ *
+ * The immediate tier keeps a fingerprint cache so an edit costs one walk; the
+ * full tier — the Wave Gate and `lint-project`, which decide — fingerprints
+ * every file from its bytes. A rules directory in neither layout has no known
+ * project root, so there is no project to search.
+ */
+export function cloneCorpus(config: ProgrammaticConfig, projectRoot: string | null, tier: Tier): CloneCorpus {
+  if (projectRoot === null) return EMPTY_CORPUS;
+  return projectCorpus({
+    projectRoot,
+    exclusions: config.exclude ?? [],
+    clone: duplicateBlockOptions(config, projectRoot).clone,
+    cacheFile: tier === "immediate" ? defaultCacheFile(projectRoot) : null,
+  });
 }
 
 /**

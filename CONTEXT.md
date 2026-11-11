@@ -249,7 +249,7 @@ The shared vocabulary between developers and domain experts within a bounded con
 _Avoid_: Glossary (it's more than a glossary — it's the living language of the system)
 
 **Tier**:
-An execution scope that determines which lint rules apply. "Immediate" (PostToolUse after edits: regex rules plus the programmatic rules whose own tier is immediate — the two import-boundary rules — under a cooperative 50ms per-file deadline) or "full" (Wave Gate/explicit scan, all rules including programmatic structural analysis).
+An execution scope that determines which lint rules apply. "Immediate" (PostToolUse after edits: regex rules plus the programmatic rules whose own tier is immediate — the two import-boundary rules, switch totality and the copied-block rule — under a cooperative 50ms per-file deadline checked before each rule) or "full" (Wave Gate/explicit scan, all rules including programmatic structural analysis).
 _Avoid_: Level, mode, severity
 
 **Aggregate**:

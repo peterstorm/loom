@@ -68,6 +68,13 @@ export interface ProgrammaticConfig {
   /** Grandfathered `path::discriminant` keys the
    *  exhaustive-discriminant-branching rule excuses, one violation each. */
   readonly discriminantBranchingBaseline?: Baseline;
+  /** Identical tokens in a row that make a copy (for no-duplicate-block). */
+  readonly duplicateBlockMinTokens?: number;
+  /** Lines a copy must span on both sides (for no-duplicate-block). */
+  readonly duplicateBlockMinLines?: number;
+  /** Grandfathered `path::otherPath@digest` keys the no-duplicate-block rule
+   *  excuses, one copy each. */
+  readonly duplicateBlockBaseline?: Baseline;
 }
 
 /** Every key `config.json` may carry — the one list the strict parse checks against. */
@@ -84,6 +91,9 @@ export const PROGRAMMATIC_CONFIG_KEYS: readonly (keyof ProgrammaticConfig)[] = O
   "switchTotalityModules",
   "switchTotalityBaseline",
   "discriminantBranchingBaseline",
+  "duplicateBlockMinTokens",
+  "duplicateBlockMinLines",
+  "duplicateBlockBaseline",
 ]);
 
 /** Default config when no project config exists */
@@ -210,7 +220,7 @@ function parseOptionalNonEmptyStringArray(raw: unknown, filePath: string, key: s
  *  never match a site, and would be read back as a wrong path — refused by name. */
 function parseOptionalBaseline(raw: unknown, filePath: string, key: string): Baseline | undefined {
   return parseOptionalStringArray(raw, filePath, key)?.map((entry, index) =>
-    parseBaselineKey(entry) ?? refuse(`${filePath}: ${key}[${index}] '${entry}' must be 'path::key' — a project-relative path, '::', then what the rule branched on`));
+    parseBaselineKey(entry) ?? refuse(`${filePath}: ${key}[${index}] '${entry}' must be 'path::key' — a project-relative path, '::', then what the rule flagged there`));
 }
 
 /**
@@ -296,8 +306,23 @@ function parseConfigObject(json: unknown, filePath: string): ProgrammaticConfig 
     maxFunctionLines: parseOptionalPositiveInt(obj.maxFunctionLines, filePath, "maxFunctionLines"),
     excludeFromMaxLines: parseOptionalStringArray(obj.excludeFromMaxLines, filePath, "excludeFromMaxLines"),
     ...parseTotalityConfig(obj, filePath),
+    ...parseDuplicateBlockConfig(obj, filePath),
   };
   return Object.freeze(presentFields(parsed));
+}
+
+type DuplicateBlockConfigKey = "duplicateBlockMinTokens" | "duplicateBlockMinLines" | "duplicateBlockBaseline";
+
+/** no-duplicate-block's knobs: how long a copy is, and the copies already there. */
+function parseDuplicateBlockConfig(
+  obj: Readonly<Record<string, unknown>>,
+  filePath: string,
+): Pick<ProgrammaticConfig, DuplicateBlockConfigKey> {
+  return {
+    duplicateBlockMinTokens: parseOptionalPositiveInt(obj.duplicateBlockMinTokens, filePath, "duplicateBlockMinTokens"),
+    duplicateBlockMinLines: parseOptionalPositiveInt(obj.duplicateBlockMinLines, filePath, "duplicateBlockMinLines"),
+    duplicateBlockBaseline: parseOptionalBaseline(obj.duplicateBlockBaseline, filePath, "duplicateBlockBaseline"),
+  };
 }
 
 type TotalityConfigKey =

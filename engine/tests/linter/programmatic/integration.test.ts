@@ -14,13 +14,14 @@ describe("programmatic rules integration", () => {
     const rules = loadRules(realDefaultDir, null, "full");
     const programmatic = rules.filter((r: Rule) => r.kind === "programmatic");
 
-    expect(programmatic.length).toBe(8);
+    expect(programmatic.length).toBe(9);
     const names = programmatic.map((r) => r.name).sort();
     expect(names).toEqual([
       "exhaustive-discriminant-branching",
       "fugue-generated-integrity",
       "max-function-lines",
       "no-cross-boundary-imports",
+      "no-duplicate-block",
       "no-io-in-pure-modules",
       "no-nested-ternary",
       "prefer-array-methods",
@@ -33,6 +34,7 @@ describe("programmatic rules integration", () => {
     const programmatic = rules.filter((r: Rule) => r.kind === "programmatic");
     expect(programmatic.map(({ name }) => name).sort()).toEqual([
       "no-cross-boundary-imports",
+      "no-duplicate-block",
       "no-io-in-pure-modules",
       "switch-totality",
     ]);
