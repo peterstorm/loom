@@ -11,6 +11,7 @@ import {
   type ProgrammaticConfig,
 } from "../../../src/linter/programmatic/config";
 import { createProgrammaticRules } from "../../../src/linter/programmatic";
+import { EMPTY_CORPUS } from "../../../src/linter/clones/clone-detection";
 import { loadProjectConfig, loadRules } from "../../../src/linter/loader";
 import { isProgrammaticRule } from "../../../src/linter/types";
 import { LOOM_RULES_DIR, REPO_ROOT } from "../loom-project-config";
@@ -277,6 +278,20 @@ describe("scoping config: exclusions, purity roots and shells, governance", () =
     expect(() => loadProjectConfig(dir)).toThrow("'maxDiscriminantBranches' must be a positive integer");
   });
 
+  it.each([0, -3, 1.5, "100", null])("refuses %j as either no-duplicate-block threshold: the detector receives a positive integer or nothing", (raw) => {
+    for (const key of ["duplicateBlockMinTokens", "duplicateBlockMinLines"]) {
+      expect(parseProjectConfig({ [key]: raw }, "config.json")).toEqual({
+        ok: false,
+        error: `config.json: '${key}' must be a positive integer`,
+      });
+    }
+  });
+
+  it("carries the no-duplicate-block thresholds through as parsed", () => {
+    expect(parseProjectConfig({ duplicateBlockMinTokens: 60, duplicateBlockMinLines: 1 }, "config.json"))
+      .toEqual({ ok: true, value: { duplicateBlockMinTokens: 60, duplicateBlockMinLines: 1 } });
+  });
+
   it("throws on discriminantTags entries that are not non-empty strings", () => {
     const dir = makeTempDir();
     writeFileSync(join(dir, "config.json"), JSON.stringify({ discriminantTags: ["kind", ""] }));
@@ -299,7 +314,7 @@ describe("scoping config: exclusions, purity roots and shells, governance", () =
       `}`,
     ].join("\n");
     const rule = (config: ProgrammaticConfig) =>
-      createProgrammaticRules(config).find((r) => r.name === "exhaustive-discriminant-branching")!;
+      createProgrammaticRules(config, null, EMPTY_CORPUS).find((r) => r.name === "exhaustive-discriminant-branching")!;
 
     expect(rule(EMPTY_CONFIG).handler(source, "engine/src/core/example.ts")).toEqual([]);
     expect(rule(loadProjectConfig(dir)).handler(source, "engine/src/core/example.ts")).toHaveLength(1);
@@ -414,7 +429,7 @@ describe("totality config: scope, baselines and the project root they are writte
   });
 
   it("applies switch-totality to a target project with no config at all", () => {
-    const rule = createProgrammaticRules(EMPTY_CONFIG).find((candidate) => candidate.name === "switch-totality")!;
+    const rule = createProgrammaticRules(EMPTY_CONFIG, null, EMPTY_CORPUS).find((candidate) => candidate.name === "switch-totality")!;
     expect(rule.handler(UNPROVEN, "/work/shop/src/domain/order.ts")).toHaveLength(1);
   });
 });

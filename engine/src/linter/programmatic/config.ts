@@ -16,6 +16,7 @@
 
 import { resolve } from "node:path";
 import { DEFAULT_TEST_FILE_SUFFIXES, isTestFileBySuffixes } from "../../core/test-file-classification";
+import { isPositiveInt, type PositiveInt } from "../positive-int";
 import { parseBaselineKey, type Baseline } from "./baseline";
 import { underPrefix, type BoundaryRule, type CapabilityGrant } from "./no-cross-boundary-imports";
 
@@ -68,10 +69,11 @@ export interface ProgrammaticConfig {
   /** Grandfathered `path::discriminant` keys the
    *  exhaustive-discriminant-branching rule excuses, one violation each. */
   readonly discriminantBranchingBaseline?: Baseline;
-  /** Identical tokens in a row that make a copy (for no-duplicate-block). */
-  readonly duplicateBlockMinTokens?: number;
+  /** Identical tokens in a row that make a copy (for no-duplicate-block). A
+   *  positive integer by type: the detector receives it as parsed. */
+  readonly duplicateBlockMinTokens?: PositiveInt;
   /** Lines a copy must span on both sides (for no-duplicate-block). */
-  readonly duplicateBlockMinLines?: number;
+  readonly duplicateBlockMinLines?: PositiveInt;
   /** Grandfathered `path::otherPath@digest` keys the no-duplicate-block rule
    *  excuses, one copy each. */
   readonly duplicateBlockBaseline?: Baseline;
@@ -270,12 +272,9 @@ function parseOptionalReasonedPaths(raw: unknown, filePath: string, key: string)
   return parsed;
 }
 
-function parseOptionalPositiveInt(raw: unknown, filePath: string, key: string): number | undefined {
+function parseOptionalPositiveInt(raw: unknown, filePath: string, key: string): PositiveInt | undefined {
   if (raw === undefined) return undefined;
-  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) {
-    return refuse(`${filePath}: '${key}' must be a positive integer`);
-  }
-  return raw;
+  return isPositiveInt(raw) ? raw : refuse(`${filePath}: '${key}' must be a positive integer`);
 }
 
 function parseOptionalBoundaries(raw: unknown, filePath: string): BoundaryRule[] | undefined {

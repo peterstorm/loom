@@ -14,36 +14,68 @@
  *      the same k-gram wherever it appears, so two sources that share such a
  *      run always share a fingerprint.
  *   2. `candidatePaths` — the sources an index says share a fingerprint.
- *   3. `clonesBetween` — the exact answer for one pair: every shared
- *      fingerprint is a seed, extended token by token in both directions, then
- *      cut back to whole lines.
+ *   3. `clonesBetween` — the exact answer for one pair: a shared fingerprint
+ *      is a seed, extended token by token in both directions, then cut back to
+ *      whole lines. The seeds are bounded (`MAX_SEEDS_PER_HASH`), so a source
+ *      that repeats one line thousands of times costs no more to compare than
+ *      one that repeats it a few dozen times.
  *
  * A fingerprint only nominates; step 3 compares tokens. A stale or colliding
  * index entry can therefore cost a comparison, never report a clone that is
  * not there.
  *
- * Zero dependencies beyond the linter's own source segmenter.
+ * Zero dependencies beyond the linter's own source segmenter and its
+ * positive-integer type.
  */
 
-import { sourceSegments } from "../programmatic/no-io-in-pure-modules";
+import { isPositiveInt, type PositiveInt } from "../positive-int";
+import { sourceSegments } from "../source-segments";
 
 // --- Options ---
 
-/** How long a shared run must be before it is a clone. */
-export type CloneOptions = Readonly<{ minTokens: number; minLines: number }>;
+/**
+ * How long a shared run must be before it is a clone. Both thresholds are
+ * positive integers by type: the config parse and `parseCloneOptions` are the
+ * only ways to make one, so nothing below checks or clamps them.
+ */
+export type CloneOptions = Readonly<{ minTokens: PositiveInt; minLines: PositiveInt }>;
+
+/** The outcome of `parseCloneOptions`: the linter's own result shape (`ConfigParse` is the other). */
+export type CloneOptionsParse =
+  | Readonly<{ ok: true; value: CloneOptions }>
+  | Readonly<{ ok: false; error: string }>;
+
+/** Thresholds as clone options, or which one is not a positive integer. */
+export function parseCloneOptions(raw: Readonly<{ minTokens: unknown; minLines: unknown }>): CloneOptionsParse {
+  const { minTokens, minLines } = raw;
+  if (!isPositiveInt(minTokens)) return { ok: false, error: `minTokens must be a positive integer, got ${String(minTokens)}` };
+  if (!isPositiveInt(minLines)) return { ok: false, error: `minLines must be a positive integer, got ${String(minLines)}` };
+  return { ok: true, value: Object.freeze({ minTokens, minLines }) };
+}
+
+/** A literal through the one parser: a wrong literal fails this module's load, never a lint run. */
+function literalCloneOptions(minTokens: number, minLines: number): CloneOptions {
+  const parsed = parseCloneOptions({ minTokens, minLines });
+  if (!parsed.ok) throw new Error(parsed.error);
+  return parsed.value;
+}
 
 /**
  * 100 tokens over 8 lines is roughly a ten-line function body: long enough
  * that the copy is a decision somebody made, short enough to catch a fixture
  * builder or a re-implemented predicate.
  */
-export const DEFAULT_CLONE_OPTIONS: CloneOptions = Object.freeze({ minTokens: 100, minLines: 8 });
+export const DEFAULT_CLONE_OPTIONS: CloneOptions = literalCloneOptions(100, 8);
 
-/** The k-gram length: half the threshold, so the window is as long again. */
+/**
+ * The k-gram length: half the threshold, so the window is as long again. A
+ * threshold of one token still needs a one-token gram, the only case the floor
+ * of one decides.
+ */
 const gramSize = (options: CloneOptions): number => Math.max(1, Math.floor(options.minTokens / 2));
 
 /** The winnowing window, in k-grams: `gramSize + windowSize - 1 === minTokens`. */
-const windowSize = (options: CloneOptions): number => Math.max(1, options.minTokens - gramSize(options) + 1);
+const windowSize = (options: CloneOptions): number => options.minTokens - gramSize(options) + 1;
 
 // --- Tokens ---
 
@@ -66,12 +98,16 @@ const IMPORT_SPAN_LIMIT = 400;
 const FNV_OFFSET = 0x811c9dc5;
 const FNV_PRIME = 0x01000193;
 
+/** One FNV-1a step: `value` folded into `hash`. */
+const mixed = (hash: number, value: number): number => Math.imul(hash ^ value, FNV_PRIME);
+
+/** A hash as eight hex digits. */
+const hex = (hash: number): string => (hash >>> 0).toString(16).padStart(8, "0");
+
 /** FNV-1a over UTF-16 code units, as a signed 32-bit integer. */
 function hashText(text: string): number {
   let hash = FNV_OFFSET;
-  for (let index = 0; index < text.length; index += 1) {
-    hash = Math.imul(hash ^ text.charCodeAt(index), FNV_PRIME);
-  }
+  for (let index = 0; index < text.length; index += 1) hash = mixed(hash, text.charCodeAt(index));
   return hash | 0;
 }
 
@@ -207,16 +243,68 @@ function winnow(grams: Int32Array, window: number): Int32Array {
   return Int32Array.from(selected);
 }
 
-/** Lex and fingerprint one source. */
-export function fingerprint(path: string, content: string, options: CloneOptions = DEFAULT_CLONE_OPTIONS): Fingerprinted {
+/** Lex one source, then hash and winnow its k-grams at the given sizes. */
+function fingerprinted(path: string, content: string, gram: number, window: number): Fingerprinted {
   const stream = tokenStream(content);
-  const grams = gramHashes(stream.hashes, gramSize(options));
-  return { path, stream, grams, selected: winnow(grams, windowSize(options)) };
+  const grams = gramHashes(stream.hashes, gram);
+  return { path, stream, grams, selected: winnow(grams, window) };
 }
+
+/** Lex and fingerprint one source. */
+export const fingerprint = (path: string, content: string, options: CloneOptions = DEFAULT_CLONE_OPTIONS): Fingerprinted =>
+  fingerprinted(path, content, gramSize(options), windowSize(options));
 
 /** The distinct fingerprint hashes of one source — what an index stores and is asked about. */
 export const fingerprintHashes = (source: Fingerprinted): readonly number[] =>
   [...new Set(Array.from(source.selected, (index) => source.grams[index] ?? 0))];
+
+// --- Scheme identity ---
+
+/**
+ * What a stored fingerprint hash means: the lexer, the token and k-gram hashes,
+ * the winnowing, and the gram and window sizes it was computed with. Two hashes
+ * are comparable only under the same scheme, so whoever stores hashes
+ * (`index-cache.ts`) stores this beside them and trusts nothing stored under
+ * another. Only `fingerprintScheme` makes one.
+ */
+export type FingerprintScheme = string & { readonly __brand: "FingerprintScheme" };
+
+/**
+ * A source that passes through every part of the lexer: import statements of
+ * each shape, a dynamic import, both comment forms, each string quote, a
+ * template with interpolations, a regex literal beside a division, names,
+ * numbers and punctuation.
+ */
+const SCHEME_PROBE = [
+  "import { one } from \"./one\";",
+  "import type {",
+  "  Two,",
+  "} from \"./two\";",
+  "import \"./side-effect\";",
+  "const lazy = await import(\"./lazy\"); // a line comment",
+  "/* a block comment */ const text = `u://${host}/${'a // b'}` + 'single';",
+  "const ratio = total / count / 2.5e3;",
+  "const found = /[/]\\/+/g.test(text) ? items[0x1f] : { key: \"value\" };",
+].join("\n");
+
+/** Small enough that the probe's handful of lines fills several windows. */
+const PROBE_GRAM = 4;
+const PROBE_WINDOW = 5;
+
+/**
+ * The scheme a source is fingerprinted under with these options. It is not a
+ * number somebody remembers to bump: it is what the scheme DOES to the probe —
+ * every token hash, k-gram hash and selected index, digested — with the gram
+ * and window sizes the options give. Change the segmenter, `CODE_TOKEN`, the
+ * import skip, a hash constant or the winnowing, and the identity changes with
+ * it. The line threshold is not part of it: fingerprints do not depend on it.
+ */
+export function fingerprintScheme(options: CloneOptions): FingerprintScheme {
+  const probe = fingerprinted("probe", SCHEME_PROBE, PROBE_GRAM, PROBE_WINDOW);
+  const digest = [...probe.stream.hashes, ...probe.grams, ...probe.selected].reduce(mixed, FNV_OFFSET);
+  // The one place a scheme is made; the brand says the string came from here.
+  return `${hex(digest)}/k${gramSize(options)}/w${windowSize(options)}` as FingerprintScheme;
+}
 
 // --- Index ---
 
@@ -281,11 +369,54 @@ export type CloneSite = Readonly<{ path: string; startLine: number; endLine: num
 export type Clone = Readonly<{ tokens: number; digest: string; here: CloneSite; there: CloneSite }>;
 
 /** A shared run: `length` tokens from `start` in the target, from `start + delta` in the other. */
-type Run = Readonly<{ start: number; delta: number; length: number }>;
+export type Run = Readonly<{ start: number; delta: number; length: number }>;
 
-/** Where each selected gram hash of `source` sits. */
+/** A seed: one fingerprint two sources share, at `[targetIndex, otherIndex]`. */
+type Seed = readonly [number, number];
+
+/**
+ * How many positions of ONE fingerprint hash, per source, seed a comparison.
+ *
+ * Without a cap the seeds are a cross product: a source that repeats one line
+ * 3,000 times holds 3,000 positions of one hash, which pair into millions of
+ * seeds against itself or a file like it. With it, the seeds of one comparison
+ * number at most `MAX_SEEDS_PER_HASH` × the smaller source's fingerprints.
+ *
+ * The cap never invents a clone — a seed is still extended by comparing
+ * tokens. What it can miss is stated exactly: a shared run goes unreported only
+ * when EVERY fingerprint inside it sits, in one of the two sources, after that
+ * source's first `MAX_SEEDS_PER_HASH` positions of the same fingerprint. That
+ * is a run made of something its source has already repeated 32 times — rows of
+ * a generated table, a long list of identical lines — and the first 32
+ * repetitions are still compared, so the repetition is reported; only its
+ * further restatements are not. Hand-written code is far below the cap: the
+ * most any Loom file repeats one fingerprint is 14 times.
+ */
+export const MAX_SEEDS_PER_HASH = 32;
+
+/** Where each selected gram hash of `source` sits, ascending. */
 const selectedByHash = (source: Fingerprinted): ReadonlyMap<number, readonly number[]> =>
   grouped(Array.from(source.selected, (index) => [source.grams[index] ?? 0, index] as const));
+
+/** The positions of each selected gram hash that may seed a comparison: its first `MAX_SEEDS_PER_HASH`. */
+const seedPositions = (source: Fingerprinted): ReadonlyMap<number, readonly number[]> =>
+  new Map(Array.from(selectedByHash(source), ([hash, positions]) => [hash, positions.slice(0, MAX_SEEDS_PER_HASH)] as const));
+
+/**
+ * The seeds of one comparison, in target order. The cap applies to both
+ * sources alike, so asking from the other side pairs the same positions.
+ * Within one source (`self`), only pairs with the copy after the original.
+ */
+function seedPairs(target: Fingerprinted, other: Fingerprinted, self: boolean): readonly Seed[] {
+  const theirs = seedPositions(other);
+  const mine = self ? theirs : seedPositions(target);
+  return Array.from(mine)
+    .flatMap(([hash, positions]) => {
+      const partners = theirs.get(hash) ?? [];
+      return positions.flatMap((a) => partners.filter((b) => !self || b > a).map((b): Seed => [a, b]));
+    })
+    .sort((left, right) => left[0] - right[0] || left[1] - right[1]);
+}
 
 /** The maximal run of equal tokens through the seed `(a, b)`. */
 function extend(left: Int32Array, right: Int32Array, a: number, b: number): Run {
@@ -303,30 +434,33 @@ function extend(left: Int32Array, right: Int32Array, a: number, b: number): Run 
  */
 const withinSelf = (run: Run): Run => ({ ...run, length: Math.min(run.length, run.delta) });
 
-const covers = (run: Run, a: number, b: number): boolean =>
-  b - a === run.delta && a >= run.start && a < run.start + run.length;
+/**
+ * One comparison before any threshold: its maximal runs, each once, and the
+ * number of seeds it paired to find them — the work `MAX_SEEDS_PER_HASH` bounds.
+ */
+export type SharedRuns = Readonly<{ seeds: number; runs: readonly Run[] }>;
 
-/** Every seed two fingerprinted sources share; within one source, only pairs with the copy after the original. */
-function seeds(target: Fingerprinted, other: Fingerprinted): readonly (readonly [number, number])[] {
+/**
+ * The maximal runs through `target`'s seeds with `other`. Pass the same value
+ * twice for the runs a source shares with itself.
+ *
+ * Each maximal run is extended once. Seeds arrive in target order, and the
+ * maximal runs at one distance (`delta`) never overlap, so a seed lies inside a
+ * run already found exactly when the last run extended at its distance reaches
+ * past it: one lookup per seed, no search through the runs found so far.
+ */
+export function sharedRuns(target: Fingerprinted, other: Fingerprinted): SharedRuns {
   const self = target === other;
-  const byHash = selectedByHash(other);
-  return Array.from(target.selected).flatMap((a) =>
-    (byHash.get(target.grams[a] ?? 0) ?? [])
-      .filter((b) => !self || b > a)
-      .map((b) => [a, b] as const),
-  );
-}
-
-/** The maximal runs through `target`'s seeds with `other`, each once. */
-function sharedRuns(target: Fingerprinted, other: Fingerprinted): readonly Run[] {
-  const self = target === other;
+  const seeds = seedPairs(target, other, self);
+  const reach = new Map<number, number>();
   const runs: Run[] = [];
-  for (const [a, b] of seeds(target, other)) {
-    if (runs.some((run) => covers(run, a, b))) continue;
+  for (const [a, b] of seeds) {
+    if ((reach.get(b - a) ?? 0) > a) continue;
     const run = extend(target.stream.hashes, other.stream.hashes, a, b);
+    reach.set(run.delta, run.start + run.length);
     runs.push(self ? withinSelf(run) : run);
   }
-  return runs;
+  return { seeds: seeds.length, runs };
 }
 
 const leadsLine = (lines: Uint32Array, index: number): boolean => index === 0 || lines[index - 1] !== lines[index];
@@ -357,13 +491,8 @@ const siteOf = (source: Fingerprinted, start: number, length: number): CloneSite
 const lineSpan = (site: CloneSite): number => site.endLine - site.startLine + 1;
 
 /** The run's tokens as eight hex digits. */
-function runDigest(hashes: Int32Array, run: Run): string {
-  let hash = FNV_OFFSET;
-  for (let index = run.start; index < run.start + run.length; index += 1) {
-    hash = Math.imul(hash ^ hashes[index], FNV_PRIME);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
-}
+const runDigest = (hashes: Int32Array, run: Run): string =>
+  hex(hashes.subarray(run.start, run.start + run.length).reduce(mixed, FNV_OFFSET));
 
 /**
  * Every clone `target` shares with `other`, in `target` order. Pass the same
@@ -374,7 +503,7 @@ export function clonesBetween(
   other: Fingerprinted,
   options: CloneOptions = DEFAULT_CLONE_OPTIONS,
 ): readonly Clone[] {
-  return sharedRuns(target, other)
+  return sharedRuns(target, other).runs
     .map((run) => wholeLines(target.stream.lines, other.stream.lines, run))
     .filter((run) => run.length >= options.minTokens)
     .map((run) => ({

@@ -8,24 +8,71 @@ import {
   candidatePaths,
   cloneIndex,
   clonesBetween,
+  DEFAULT_CLONE_OPTIONS,
   fingerprint,
   fingerprintHashes,
+  fingerprintScheme,
+  MAX_SEEDS_PER_HASH,
+  parseCloneOptions,
+  sharedRuns,
   tokenStream,
-  type CloneOptions,
+  type Clone,
   type Fingerprinted,
 } from "../../../src/linter/clones/clone-detection";
+import { block, cloneOptions } from "../../fixtures/clone-fixtures";
 
 /** Small thresholds so a fixture is a dozen lines, not a hundred. */
-const OPTIONS: CloneOptions = { minTokens: 20, minLines: 4 };
-
-/** `count` statements, one per line, each made of tokens no other block shares. */
-const block = (name: string, count: number): string =>
-  Array.from({ length: count }, (_, row) => `const ${name}${row} = compute${name}(${row}, "${name}");`).join("\n");
+const OPTIONS = cloneOptions(20, 4);
 
 const SHARED = block("shared", 8);
 
 const source = (path: string, ...blocks: readonly string[]): Fingerprinted =>
   fingerprint(path, blocks.join("\n"), OPTIONS);
+
+describe("parseCloneOptions", () => {
+  it("accepts two positive integers, and the shipped defaults are such a pair", () => {
+    expect(parseCloneOptions({ minTokens: 1, minLines: 1 })).toEqual({ ok: true, value: { minTokens: 1, minLines: 1 } });
+    expect(DEFAULT_CLONE_OPTIONS).toEqual({ minTokens: 100, minLines: 8 });
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "100", null, undefined])(
+    "refuses %s as either threshold, naming the one it refused",
+    (raw) => {
+      expect(parseCloneOptions({ minTokens: raw, minLines: 8 })).toEqual({
+        ok: false,
+        error: `minTokens must be a positive integer, got ${String(raw)}`,
+      });
+      expect(parseCloneOptions({ minTokens: 100, minLines: raw })).toEqual({
+        ok: false,
+        error: `minLines must be a positive integer, got ${String(raw)}`,
+      });
+    },
+  );
+
+  it("fingerprints at the smallest threshold there is: one token is one gram in a window of one", () => {
+    const single = fingerprint("src/a.ts", "a b c", cloneOptions(1, 1));
+    expect(Array.from(single.selected)).toEqual([0, 1, 2]);
+  });
+});
+
+describe("fingerprintScheme", () => {
+  it("is the same for options that fingerprint alike: the line threshold is not part of it", () => {
+    expect(fingerprintScheme(cloneOptions(100, 3))).toBe(fingerprintScheme(DEFAULT_CLONE_OPTIONS));
+  });
+
+  it("differs when the token threshold does: the hashes are of other k-grams", () => {
+    expect(fingerprintScheme(cloneOptions(70, 8))).not.toBe(fingerprintScheme(DEFAULT_CLONE_OPTIONS));
+  });
+
+  // A change detector on purpose. This value moves whenever the segmenter, the
+  // tokenizer, the import skip, a hash constant or the winnowing changes what a
+  // fingerprint means. Cached fingerprints retire themselves when it does; a
+  // project's `duplicateBlockBaseline` digests may have moved with it, so
+  // re-check them (`lint-project`) before updating the value here.
+  it("names what the scheme does to its probe, and the gram and window sizes", () => {
+    expect(fingerprintScheme(DEFAULT_CLONE_OPTIONS)).toBe("c823ffd7/k50/w51");
+  });
+});
 
 describe("tokenStream", () => {
   it("ignores whitespace and comments", () => {
@@ -142,6 +189,15 @@ describe("clonesBetween", () => {
     expect(clonesBetween(plain, plain, OPTIONS)).toEqual([]);
   });
 
+  it("reports a block written three times running once per repeat, never the same pair twice", () => {
+    const thrice = source("src/a.ts", SHARED, SHARED, SHARED);
+
+    expect(clonesBetween(thrice, thrice, OPTIONS).map(({ here, there }) => [here.startLine, there.startLine])).toEqual([
+      [1, 9],
+      [1, 17],
+    ]);
+  });
+
   it("gives a run the same digest wherever it sits, and another when it changes", () => {
     const digestOf = (target: Fingerprinted, other: Fingerprinted): string | undefined =>
       clonesBetween(target, other, OPTIONS)[0]?.digest;
@@ -151,6 +207,71 @@ describe("clonesBetween", () => {
 
     expect(digestOf(moved, original)).toBe(digestOf(original, moved));
     expect(digestOf(source("src/c.ts", grown), source("src/d.ts", grown))).not.toBe(digestOf(moved, original));
+  });
+});
+
+describe("the seed bound", () => {
+  /** One line written `count` times: every fingerprint of the source is the same hash. */
+  const repeated = (path: string, count: number): Fingerprinted =>
+    source(path, ...Array.from({ length: count }, () => `const value = compute(input, "x");`));
+
+  const sites = (clones: readonly Clone[]): readonly string[] =>
+    clones.map(({ here, there }) => `${here.startLine}-${here.endLine}:${there.startLine}-${there.endLine}`);
+
+  it("pairs no more seeds for 3,000 identical lines than for 300, within one file or across two", () => {
+    const small = repeated("src/small.ts", 300);
+    const big = repeated("src/big.ts", 3_000);
+    const other = repeated("src/other.ts", 3_000);
+
+    // Uncapped these are cross products: ~4.5 million seeds within `big`, ~9 million against `other`.
+    expect(big.selected.length).toBeGreaterThan(2_900);
+    expect(sharedRuns(big, big).seeds).toBe(sharedRuns(small, small).seeds);
+    expect(sharedRuns(big, big).seeds).toBeLessThanOrEqual(MAX_SEEDS_PER_HASH ** 2);
+    expect(sharedRuns(big, other).seeds).toBe(sharedRuns(small, other).seeds);
+    expect(sharedRuns(big, other).seeds).toBeLessThanOrEqual(MAX_SEEDS_PER_HASH ** 2);
+  });
+
+  it("never pairs more seeds than the cap times the smaller source's fingerprints", () => {
+    const table = (path: string, rows: number): Fingerprinted =>
+      source(path, ...Array.from({ length: rows }, (_, row) => `  { id: ${row % 7}, name: "row", flags: [1, 2, 3] },`));
+    const long = table("src/long.ts", 2_000);
+    const short = table("src/short.ts", 150);
+
+    for (const [target, other] of [[long, short], [short, long], [long, long]] as const) {
+      const { seeds, runs } = sharedRuns(target, other);
+      expect(seeds).toBeLessThanOrEqual(MAX_SEEDS_PER_HASH * Math.min(target.selected.length, other.selected.length));
+      // Each maximal run is extended once: never more runs than seeds, never one twice.
+      expect(runs.length).toBeLessThanOrEqual(seeds);
+      expect(new Set(runs.map((run) => `${run.start}:${run.delta}`)).size).toBe(runs.length);
+    }
+  });
+
+  it("still reports the repetition, each pairing once", () => {
+    const big = repeated("src/big.ts", 3_000);
+
+    const clones = clonesBetween(big, big, OPTIONS);
+
+    expect(clones.length).toBeGreaterThan(0);
+    expect(new Set(sites(clones)).size).toBe(clones.length);
+  });
+
+  it("misses a copy only past a source's first 32 occurrences of every fingerprint in it", () => {
+    const copies = 40;
+    // Each copy of SHARED sits behind a line of its own, so no run reaches from one copy into the next.
+    const many = source("src/many.ts", ...Array.from({ length: copies }, (_, copy) => [block(`gap${copy}`, 1), SHARED].join("\n")));
+    const one = source("src/one.ts", SHARED);
+
+    const reported = clonesBetween(many, one, OPTIONS).map((clone) => clone.here.startLine);
+
+    // Copy `n` starts on line 9n + 2: the first 32 are reported, the last 8 are not.
+    expect(reported).toEqual(Array.from({ length: MAX_SEEDS_PER_HASH }, (_, copy) => copy * 9 + 2));
+    // From the other side the same 32 pairings, mirrored: the cap is symmetric.
+    expect(clonesBetween(one, many, OPTIONS).map((clone) => clone.there.startLine)).toEqual(reported);
+  });
+
+  it("changes nothing below the cap: 32 copies are 32 reports", () => {
+    const many = source("src/many.ts", ...Array.from({ length: MAX_SEEDS_PER_HASH }, (_, copy) => [block(`gap${copy}`, 1), SHARED].join("\n")));
+    expect(clonesBetween(many, source("src/one.ts", SHARED), OPTIONS)).toHaveLength(MAX_SEEDS_PER_HASH);
   });
 });
 

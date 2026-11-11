@@ -17,11 +17,11 @@ import {
   fingerprintHashes,
   tokenStream,
   type Clone,
-  type CloneOptions,
 } from "../../../src/linter/clones/clone-detection";
+import { cloneOptions } from "../../fixtures/clone-fixtures";
 
 /** Eight tokens a line, so three lines clear the token threshold. */
-const OPTIONS: CloneOptions = { minTokens: 24, minLines: 3 };
+const OPTIONS = cloneOptions(24, 3);
 
 const line = (id: number): string => `const v${id} = f${id}(${id});`;
 

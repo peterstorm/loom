@@ -70,7 +70,8 @@ export function loadRules(
     // project it belongs to — the frame its paths and baseline keys are in.
     const projectConfig = loadProjectConfig(projectDir);
     const projectRoot = projectRootOf(projectDir);
-    // Always create with config — createProgrammaticRules handles defaults via ??
+    // Always create with config — createProgrammaticRules handles defaults via ??.
+    // The executor, not this list's order, decides which rule runs last.
     const programmaticRules = createProgrammaticRules(
       projectConfig,
       projectRoot,

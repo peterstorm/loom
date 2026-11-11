@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import type { CloneOptions } from "../../../src/linter/clones/clone-detection";
+import { fingerprintScheme } from "../../../src/linter/clones/clone-detection";
 import {
   cachedHashes,
   EMPTY_INDEX_CACHE,
@@ -14,8 +14,9 @@ import {
   type CachedFile,
   type IndexCache,
 } from "../../../src/linter/clones/index-cache";
+import { cloneOptions } from "../../fixtures/clone-fixtures";
 
-const OPTIONS: CloneOptions = { minTokens: 100, minLines: 8 };
+const SCHEME = fingerprintScheme(cloneOptions(100, 8));
 
 const cachedFile: fc.Arbitrary<CachedFile> = fc.record({
   size: fc.nat(),
@@ -30,33 +31,49 @@ const cache: fc.Arbitrary<IndexCache> = fc
 const FILE: CachedFile = { size: 10, mtimeMs: 1_700_000_000_123.5, hashes: [1, -2, 3] };
 const ONE: IndexCache = new Map([["src/a.ts", FILE]]);
 
+/** A document shaped like the cache's own, under whatever scheme it names. */
+const document = (scheme: unknown, files: unknown): string => JSON.stringify({ scheme, files });
+
 describe("index cache", () => {
   it("reads back exactly what it rendered", () => {
     fc.assert(
       fc.property(cache, (written) => {
-        expect(parseIndexCache(renderIndexCache(written, OPTIONS), OPTIONS)).toEqual(written);
+        expect(parseIndexCache(renderIndexCache(written, SCHEME), SCHEME)).toEqual(written);
       }),
     );
   });
 
   it("is empty for a cache built with another token threshold: its hashes are of other k-grams", () => {
-    expect(parseIndexCache(renderIndexCache(ONE, OPTIONS), { ...OPTIONS, minTokens: 70 })).toEqual(EMPTY_INDEX_CACHE);
+    expect(parseIndexCache(renderIndexCache(ONE, SCHEME), fingerprintScheme(cloneOptions(70, 8)))).toEqual(EMPTY_INDEX_CACHE);
   });
 
   it("keeps a cache when only the line threshold differs: fingerprints do not depend on it", () => {
-    expect(parseIndexCache(renderIndexCache(ONE, OPTIONS), { ...OPTIONS, minLines: 3 })).toEqual(ONE);
+    expect(parseIndexCache(renderIndexCache(ONE, SCHEME), fingerprintScheme(cloneOptions(100, 3)))).toEqual(ONE);
+  });
+
+  it("is empty for a cache written under another scheme identity, whatever its entries hold", () => {
+    const [probeDigest, ...sizes] = SCHEME.split("/");
+    const otherLexer = ["00000000", ...sizes].join("/");
+    expect(otherLexer).not.toBe(SCHEME);
+    expect(probeDigest).toMatch(/^[0-9a-f]{8}$/);
+
+    // Same sizes, same well-formed entries: only what the scheme does to its probe differs.
+    expect(parseIndexCache(document(otherLexer, { "src/a.ts": [10, FILE.mtimeMs, [1, -2, 3]] }), SCHEME)).toEqual(EMPTY_INDEX_CACHE);
+    expect(parseIndexCache(document(SCHEME, { "src/a.ts": [10, FILE.mtimeMs, [1, -2, 3]] }), SCHEME)).toEqual(ONE);
   });
 
   it.each([
     ["not JSON", "{ torn"],
     ["not an object", "[]"],
-    ["another version", JSON.stringify({ version: 0, minTokens: 100, files: {} })],
-    ["no file table", JSON.stringify({ version: 1, minTokens: 100 })],
-    ["an entry of another shape", JSON.stringify({ version: 1, minTokens: 100, files: { "a.ts": [1, 2] } })],
-    ["a hash that is not an integer", JSON.stringify({ version: 1, minTokens: 100, files: { "a.ts": [1, 2, [0.5]] } })],
-    ["one bad entry among good ones", JSON.stringify({ version: 1, minTokens: 100, files: { "a.ts": [1, 2, [3]], "b.ts": "x" } })],
+    ["the hand-versioned document this one replaced", JSON.stringify({ version: 1, minTokens: 100, files: {} })],
+    ["without a scheme", JSON.stringify({ files: {} })],
+    ["under a scheme that is not a string", document(1, {})],
+    ["without a file table", JSON.stringify({ scheme: SCHEME })],
+    ["holding an entry of another shape", document(SCHEME, { "a.ts": [1, 2] })],
+    ["holding a hash that is not an integer", document(SCHEME, { "a.ts": [1, 2, [0.5]] })],
+    ["holding one bad entry among good ones", document(SCHEME, { "a.ts": [1, 2, [3]], "b.ts": "x" })],
   ])("is empty for a document that is %s", (_label, text) => {
-    expect(parseIndexCache(text, OPTIONS)).toEqual(EMPTY_INDEX_CACHE);
+    expect(parseIndexCache(text, SCHEME)).toEqual(EMPTY_INDEX_CACHE);
   });
 
   it("answers with the cached hashes only while size and time both match", () => {

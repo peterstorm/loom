@@ -10,6 +10,22 @@
   ],
   "boundaries": [
     {
+      "module": "engine/src/linter/clones/",
+      "description": "The clone detector, a leaf of the linter: the rule package imports it, never the reverse. Imports itself, the linter's shared leaves and node builtins. Listed before the linter boundary because the first matching boundary governs a file.",
+      "allow": [
+        "./",
+        "engine/src/linter/",
+        "node:"
+      ],
+      "deny": [
+        "engine/src/linter/programmatic/",
+        "engine/src/handlers/",
+        "engine/src/parsers/",
+        "engine/src/state-manager",
+        "engine/src/cli"
+      ]
+    },
+    {
       "module": "engine/src/linter/",
       "description": "The linter bounded context. Imports itself, node builtins, ts-pattern and the one shared test-file classifier (INV-2); never the hook shells, the parsers or protected state.",
       "allow": [

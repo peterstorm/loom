@@ -3,11 +3,20 @@
  * entry excuses, and that it reaches the edit hook's own entry point.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { lintFile } from "../../../src/linter/index";
-import { EMPTY_CORPUS, fingerprint, type CloneCorpus, type CloneOptions } from "../../../src/linter/clones/clone-detection";
+import {
+  DEFAULT_CLONE_OPTIONS,
+  EMPTY_CORPUS,
+  fingerprint,
+  fingerprintScheme,
+  type CloneCorpus,
+} from "../../../src/linter/clones/clone-detection";
+import { parseIndexCache, renderIndexCache } from "../../../src/linter/clones/index-cache";
+import { defaultCacheFile } from "../../../src/linter/clones/project-corpus";
 import { createProgrammaticRules } from "../../../src/linter/programmatic";
+import { EMPTY_CONFIG } from "../../../src/linter/programmatic/config";
 import {
   detectedCloneKeys,
   FIX_HINT,
@@ -15,14 +24,12 @@ import {
   RULE_NAME,
   type DuplicateBlockOptions,
 } from "../../../src/linter/programmatic/no-duplicate-block";
-import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import type { Tier } from "../../../src/linter/types";
+import { block, cloneOptions, cloneProjects } from "../../fixtures/clone-fixtures";
 
 const DEFAULT_RULES_DIR = resolve(__dirname, "../../../../lint-rules");
-const CLONE: CloneOptions = { minTokens: 20, minLines: 4 };
+const CLONE = cloneOptions(20, 4);
 const OPTIONS: DuplicateBlockOptions = { clone: CLONE, baseline: [], projectRoot: "/project" };
-
-const block = (name: string, count: number): string =>
-  Array.from({ length: count }, (_, row) => `const ${name}${row} = compute${name}(${row}, "${name}");`).join("\n");
 
 const SHARED = block("shared", 8);
 const ORIGINAL = [block("before", 2), SHARED].join("\n");
@@ -81,33 +88,20 @@ describe("no-duplicate-block", () => {
     }), excused)).toHaveLength(1);
   });
 
-  it("is the last programmatic rule, so the corpus it builds on first use delays no other rule past its deadline", () => {
-    expect(createProgrammaticRules().at(-1)?.name).toBe(RULE_NAME);
+  it("declares its first-call setup, which is what makes the executor run it last (executor.test.ts pins the ordering)", () => {
+    const declaring = createProgrammaticRules(EMPTY_CONFIG, null, EMPTY_CORPUS).filter((rule) => rule.firstCallSetup === true);
+    expect(declaring.map((rule) => rule.name)).toEqual([RULE_NAME]);
   });
 });
 
-describe("no-duplicate-block through the edit hook's entry point", () => {
-  const cleanup: string[] = [];
-  afterEach(() => {
-    for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true });
-  });
+describe("no-duplicate-block through the lint entry points", () => {
+  const projects = cloneProjects("no-duplicate-block-");
+  afterEach(projects.dispose);
 
-  /** A project with a rules directory, the given config and files. */
-  function project(config: Readonly<Record<string, unknown>>, files: Readonly<Record<string, string>>): string {
-    const root = canonicalTempDir("no-duplicate-block-");
-    cleanup.push(root);
-    const rulesDir = join(root, ".claude", "linter", "rules");
-    mkdirSync(rulesDir, { recursive: true });
-    writeFileSync(join(rulesDir, "config.json"), JSON.stringify(config));
-    for (const [path, content] of Object.entries(files)) {
-      mkdirSync(dirname(join(root, path)), { recursive: true });
-      writeFileSync(join(root, path), content);
-    }
-    return root;
-  }
+  const lint = (root: string, path: string, tier: Tier) =>
+    lintFile(join(root, path), tier, DEFAULT_RULES_DIR, projects.rulesDir(root), 5_000);
 
-  const lintEdited = (root: string, path: string) =>
-    lintFile(join(root, path), "immediate", DEFAULT_RULES_DIR, join(root, ".claude", "linter", "rules"), 5_000);
+  const lintEdited = (root: string, path: string) => lint(root, path, "immediate");
 
   /** Long enough for the shipped defaults: 100 tokens over 8 lines. */
   const body = block("builder", 12);
@@ -115,28 +109,47 @@ describe("no-duplicate-block through the edit hook's entry point", () => {
     "tests/first.test.ts": [block("first", 2), body].join("\n"),
     "tests/second.test.ts": [block("second", 2), body].join("\n"),
   };
+  const REFUSED = {
+    kind: "violations",
+    violations: [expect.objectContaining({ rule: RULE_NAME, line: 3, text: expect.stringContaining("tests/first.test.ts:3-14") })],
+  };
 
   it("refuses a fixture builder pasted into a second test file, on the edit, twice running", () => {
-    const root = project({}, FILES);
-    const expected = {
-      kind: "violations",
-      violations: [expect.objectContaining({ rule: RULE_NAME, line: 3, text: expect.stringContaining("tests/first.test.ts:3-14") })],
-    };
+    const root = projects.create(FILES, {});
     // The second run reads the fingerprint cache the first one wrote.
-    expect(lintEdited(root, "tests/second.test.ts")).toEqual(expected);
-    expect(lintEdited(root, "tests/second.test.ts")).toEqual(expected);
+    expect(lintEdited(root, "tests/second.test.ts")).toEqual(REFUSED);
+    expect(lintEdited(root, "tests/second.test.ts")).toEqual(REFUSED);
   });
 
   it("passes once the copy is replaced by an import", () => {
-    const root = project({}, FILES);
+    const root = projects.create(FILES, {});
     expect(lintEdited(root, "tests/second.test.ts").kind).toBe("violations");
     writeFileSync(join(root, "tests/second.test.ts"), `import { builders } from "./first.test";\n${block("second", 3)}`);
     expect(lintEdited(root, "tests/second.test.ts")).toEqual({ kind: "pass" });
   });
 
   it("honours the project's thresholds and never compares an excluded file", () => {
-    expect(lintEdited(project({ duplicateBlockMinTokens: 500 }, FILES), "tests/second.test.ts")).toEqual({ kind: "pass" });
-    const vendored = project({ exclude: [{ path: "tests/first.test.ts", reason: "vendored" }] }, FILES);
+    expect(lintEdited(projects.create(FILES, { duplicateBlockMinTokens: 500 }), "tests/second.test.ts")).toEqual({ kind: "pass" });
+    const vendored = projects.create(FILES, { exclude: [{ path: "tests/first.test.ts", reason: "vendored" }] });
     expect(lintEdited(vendored, "tests/second.test.ts")).toEqual({ kind: "pass" });
+  });
+
+  it("reads the fingerprint cache on the edit and never in the full tier: a poisoned cache hides the copy from the edit alone", () => {
+    const root = projects.create(FILES, {});
+    const cacheFile = defaultCacheFile(root);
+    const scheme = fingerprintScheme(DEFAULT_CLONE_OPTIONS);
+    expect(lintEdited(root, "tests/second.test.ts")).toEqual(REFUSED);
+
+    // Every entry keeps its size and time and loses its hashes: nothing is nominated any more.
+    const written = parseIndexCache(readFileSync(cacheFile, "utf-8"), scheme);
+    expect([...written.keys()]).toEqual(Object.keys(FILES));
+    const poisoned = renderIndexCache(new Map([...written].map(([path, file]) => [path, { ...file, hashes: [] }] as const)), scheme);
+    writeFileSync(cacheFile, poisoned);
+
+    expect(lintEdited(root, "tests/second.test.ts")).toEqual({ kind: "pass" });
+    // The Wave Gate and lint-project lint in the full tier: every file from its bytes.
+    expect(lint(root, "tests/second.test.ts", "full")).toEqual(REFUSED);
+    // And the full tier neither repaired nor replaced the cache it does not read.
+    expect(readFileSync(cacheFile, "utf-8")).toBe(poisoned);
   });
 });

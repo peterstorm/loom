@@ -38,12 +38,21 @@ export interface ProgrammaticRule {
    *  and cheap enough for the per-edit budget, so it runs on every edit and
    *  again at the Wave Gate; a `full` rule runs only at the Wave Gate. */
   readonly tier: Tier;
+  /** Set on a rule whose first call in a process does one-off, project-wide
+   *  work that can outlast a per-file deadline (no-duplicate-block builds its
+   *  clone corpus). `executeRules` runs every such rule after all the others
+   *  and never checks the deadline between them, so no rule is refused for
+   *  time a setup spent — wherever the rule sits in the list it was given. */
+  readonly firstCallSetup?: true;
   readonly fixHint: string;
   readonly enabled: boolean;
   readonly source: RuleSource;
 }
 
 export type Rule = RegexRule | ProgrammaticRule;
+
+/** Does this rule do one-off setup on its first call? Only a programmatic rule can. */
+export const hasFirstCallSetup = (rule: Rule): boolean => rule.kind === "programmatic" && rule.firstCallSetup === true;
 
 // --- Violation ---
 

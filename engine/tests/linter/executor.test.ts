@@ -355,6 +355,70 @@ describe("executeRules — programmatic rules", () => {
   });
 });
 
+// --- First-call setup: the order the deadline needs is the executor's ---
+
+describe("executeRules — rules with first-call setup", () => {
+  const BUDGET_MS = 50;
+
+  /** A clock the rules move, a deadline over it, and the order the handlers ran in. */
+  function clockedRun() {
+    let now = 0;
+    const ran: string[] = [];
+    const rule = (name: string, costMs: number, overrides: Partial<ProgrammaticRule> = {}): ProgrammaticRule =>
+      makeProgrammaticRule({
+        name,
+        handler: (_content, filePath) => {
+          ran.push(name);
+          now += costMs;
+          return [makeViolation(name, filePath, 1, name, "fix")];
+        },
+        ...overrides,
+      });
+    const run = (rules: readonly (RegexRule | ProgrammaticRule)[]) =>
+      executeRules(rules, "/src/app.ts", "content", createDeadlineChecker(BUDGET_MS, () => now)).map((violation) => violation.rule);
+    return { rule, run, ran };
+  }
+
+  it("runs a setup rule after a rule appended behind it, so the later rule is not refused for the setup's time", () => {
+    const { rule, run } = clockedRun();
+    const corpusBuilder = rule("builds-a-corpus", 10 * BUDGET_MS, { firstCallSetup: true });
+
+    // The registration order that used to be forbidden by a comment: a rule after the slow one.
+    expect(run([rule("first", 1), corpusBuilder, rule("appended-later", 1)])).toEqual(["first", "appended-later", "builds-a-corpus"]);
+  });
+
+  it("refuses the appended rule when the slow one does not declare its setup — the failure the declaration prevents", () => {
+    const { rule, run, ran } = clockedRun();
+
+    expect(() => run([rule("undeclared-slow", 10 * BUDGET_MS), rule("appended-later", 1)])).toThrow(/exceeded timeout/);
+    expect(ran).toEqual(["undeclared-slow"]);
+  });
+
+  it("charges no setup rule for another's setup, and keeps them in the order given", () => {
+    const { rule, run } = clockedRun();
+    const setups = [rule("setup-a", 10 * BUDGET_MS, { firstCallSetup: true }), rule("setup-b", 10 * BUDGET_MS, { firstCallSetup: true })];
+
+    expect(run([...setups, makeRegexRule({ name: "regex", pattern: "content" }), rule("plain", 1)])).toEqual(["regex", "plain", "setup-a", "setup-b"]);
+  });
+
+  it("still fails closed before the setup rules when the rules ahead of them overran", () => {
+    const { rule, run, ran } = clockedRun();
+
+    expect(() => run([rule("setup", 1, { firstCallSetup: true }), rule("overruns", 2 * BUDGET_MS)])).toThrow(/exceeded timeout/);
+    expect(ran).toEqual(["overruns"]);
+  });
+
+  it("leaves a disabled or non-matching setup rule out, like any other", () => {
+    const { rule, run } = clockedRun();
+
+    expect(run([
+      rule("disabled", 1, { firstCallSetup: true, enabled: false }),
+      rule("other-extension", 1, { firstCallSetup: true, extensions: [".java"] }),
+      rule("plain", 1),
+    ])).toEqual(["plain"]);
+  });
+});
+
 // --- Mixed Rule Types ---
 
 describe("executeRules — mixed regex + programmatic rules", () => {

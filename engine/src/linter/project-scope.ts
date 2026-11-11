@@ -51,6 +51,13 @@ export type ScopeDecision =
   | Readonly<{ kind: "excluded"; exclusion: ReasonedPath }>;
 
 /**
+ * A project's `exclude` list as the scope reads it. Named here so a reader of
+ * the scope (the clone corpus) depends on this module alone, not on the config
+ * schema under `programmatic/`.
+ */
+export type Exclusions = readonly ReasonedPath[];
+
+/**
  * Is this project-relative path under an exclusion entry? Anchored: an entry
  * names a path from the project root, never a suffix that might recur deeper.
  */
@@ -58,7 +65,7 @@ export const isUnderEntry = (relativePath: string, entry: string): boolean =>
   entry.endsWith("/") ? relativePath.startsWith(entry) : relativePath === entry;
 
 /** Where one project-relative file stands: linted, or excluded with its reason. */
-export function scopeOf(relativePath: string, exclusions: readonly ReasonedPath[]): ScopeDecision {
+export function scopeOf(relativePath: string, exclusions: Exclusions): ScopeDecision {
   const normalized = relativePath.replace(/\\/g, "/");
   const exclusion = exclusions.find(({ path }) => isUnderEntry(normalized, path));
   return exclusion === undefined ? { kind: "lint" } : { kind: "excluded", exclusion };

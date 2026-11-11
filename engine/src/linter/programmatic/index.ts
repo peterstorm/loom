@@ -38,9 +38,9 @@ import {
   RULE_NAME as DUPLICATE_BLOCK_RULE,
   type DuplicateBlockOptions,
 } from "./no-duplicate-block";
-import { CLONE_EXTENSIONS, DEFAULT_CLONE_OPTIONS, EMPTY_CORPUS, type CloneCorpus } from "../clones/clone-detection";
+import { CLONE_EXTENSIONS, DEFAULT_CLONE_OPTIONS, type CloneCorpus } from "../clones/clone-detection";
 import type { BaselineOwner } from "./baseline";
-import { type ProgrammaticConfig, EMPTY_CONFIG } from "./config";
+import type { ProgrammaticConfig } from "./config";
 
 /** Every TypeScript module spelling: the totality rules need a type system
  *  (a `never` binding proves nothing in JavaScript). */
@@ -118,14 +118,15 @@ export function duplicateBlockOptions(config: ProgrammaticConfig, projectRoot: s
  * the drift report. Each owner detects with exactly the options its live rule
  * runs with.
  *
- * `corpus` is the project's clone corpus. Without one, no-duplicate-block sees
- * only the repeats inside each file, so every entry naming another file reads
- * as stale: pass the project's corpus wherever the baseline is judged.
+ * `corpus` is the project's clone corpus, and has no default: against an empty
+ * one no-duplicate-block sees only the repeats inside each file, so every
+ * entry naming another file would read as stale. A caller with no project says
+ * so by passing `EMPTY_CORPUS`.
  */
 export function baselineOwners(
   config: ProgrammaticConfig,
   projectRoot: string | null,
-  corpus: CloneCorpus = EMPTY_CORPUS,
+  corpus: CloneCorpus,
 ): readonly BaselineOwner[] {
   const switchOptions = switchTotalityOptions(config, projectRoot);
   const chainOptions = discriminantBranchingOptions(config, projectRoot);
@@ -285,6 +286,10 @@ function expressionShapeRules(): readonly ProgrammaticRule[] {
  * The copied-block rule. IMMEDIATE: the author of a copy knows what it is a
  * copy of only while writing it, and the project's baseline keeps every
  * pre-existing copy from blocking an unrelated edit to its file.
+ *
+ * Its first call in a process builds the corpus, which can outlast the
+ * per-file deadline. It declares that (`firstCallSetup`) and the executor,
+ * which owns the deadline, runs it after every other rule.
  */
 function duplicateBlockRule(config: ProgrammaticConfig, projectRoot: string | null, corpus: CloneCorpus): ProgrammaticRule {
   const options = duplicateBlockOptions(config, projectRoot);
@@ -295,6 +300,7 @@ function duplicateBlockRule(config: ProgrammaticConfig, projectRoot: string | nu
     extensions: CLONE_EXTENSIONS,
     handler: (content, filePath) => duplicateBlockHandler(content, filePath, corpus, options),
     tier: "immediate",
+    firstCallSetup: true,
     fixHint: DUPLICATE_BLOCK_FIX_HINT,
     enabled: true,
     source: "default",
@@ -302,22 +308,21 @@ function duplicateBlockRule(config: ProgrammaticConfig, projectRoot: string | nu
 }
 
 /**
- * Creates the programmatic rule set, optionally configured by project-local config.
- * Config allows projects to define their own boundaries, pure modules, limits
- * and baselines; `projectRoot` is the root of the project that config belongs
- * to — the frame its paths and baseline keys are written in. `corpus` is that
- * project's clone corpus; without one no-duplicate-block finds only the
- * repeats inside each file.
+ * Creates the programmatic rule set for one project's config (`EMPTY_CONFIG`
+ * for the built-in defaults). Config allows projects to define their own
+ * boundaries, pure modules, limits and baselines; `projectRoot` is the root of
+ * the project that config belongs to — the frame its paths and baseline keys
+ * are written in, or null with no project. `corpus` is that project's clone
+ * corpus, and has no default: against an empty one no-duplicate-block finds
+ * only the repeats inside each file, so a caller with no project says so by
+ * passing `EMPTY_CORPUS`.
  *
- * no-duplicate-block is LAST, and must stay last: its first call in a process
- * builds the corpus, which can outlast the per-file deadline the executor
- * checks before each rule. Nothing runs after it, so nothing is refused for
- * time the corpus spent.
+ * The order of this list is free: the executor decides what runs last.
  */
 export function createProgrammaticRules(
-  config: ProgrammaticConfig = EMPTY_CONFIG,
-  projectRoot: string | null = null,
-  corpus: CloneCorpus = EMPTY_CORPUS,
+  config: ProgrammaticConfig,
+  projectRoot: string | null,
+  corpus: CloneCorpus,
 ): readonly ProgrammaticRule[] {
   return [
     ...importBoundaryRules(config, projectRoot),

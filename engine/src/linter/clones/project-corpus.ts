@@ -11,7 +11,8 @@
  *
  * Two trust levels, chosen by the caller:
  *   - with a cache file (the edit hook): unchanged files keep the fingerprints
- *     the last edit computed, so an edit costs one walk and one file's lexing;
+ *     the last edit computed, so an edit costs one walk, plus lexing the edited
+ *     file, the nominated candidates and any file whose size or time changed;
  *   - without one (the Wave Gate, `lint-project`): every file is fingerprinted
  *     from its bytes. The cache can only hide a clone, so the checks that
  *     decide never read it.
@@ -21,8 +22,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, extname, join, relative, sep } from "node:path";
-import type { ReasonedPath } from "../programmatic/config";
-import { scopeOf } from "../project-scope";
+import { scopeOf, type Exclusions } from "../project-scope";
 import { walkLintableFiles, type WalkedFile } from "../project-walk";
 import {
   candidatePaths,
@@ -30,10 +30,12 @@ import {
   cloneIndex,
   fingerprint,
   fingerprintHashes,
+  fingerprintScheme,
   type CloneCorpus,
   type CloneIndex,
   type CloneOptions,
   type Fingerprinted,
+  type FingerprintScheme,
 } from "./clone-detection";
 import {
   cachedHashes,
@@ -48,7 +50,7 @@ import {
 export type ProjectCorpusOptions = Readonly<{
   projectRoot: string;
   /** The project's `exclude` list: an excluded file is never a clone's other side. */
-  exclusions: readonly ReasonedPath[];
+  exclusions: Exclusions;
   clone: CloneOptions;
   /** The fingerprint cache file, or null to fingerprint every file from its bytes. */
   cacheFile: string | null;
@@ -72,26 +74,45 @@ function readSource(absolute: string): string | null {
   }
 }
 
-function readCache(cacheFile: string | null, options: CloneOptions): IndexCache {
+function readCache(cacheFile: string | null, scheme: FingerprintScheme): IndexCache {
   if (cacheFile === null) return EMPTY_INDEX_CACHE;
   try {
-    return parseIndexCache(readFileSync(cacheFile, "utf-8"), options);
+    return parseIndexCache(readFileSync(cacheFile, "utf-8"), scheme);
   } catch {
     // Absent or unreadable cache file: every file is fingerprinted from its bytes.
     return EMPTY_INDEX_CACHE;
   }
 }
 
-function writeCache(cacheFile: string, cache: IndexCache, options: CloneOptions): void {
+function writeCache(cacheFile: string, cache: IndexCache, scheme: FingerprintScheme): void {
   const partial = `${cacheFile}.${process.pid}.tmp`;
   try {
     mkdirSync(dirname(cacheFile), { recursive: true });
-    writeFileSync(partial, renderIndexCache(cache, options));
+    writeFileSync(partial, renderIndexCache(cache, scheme));
     renameSync(partial, cacheFile);
   } catch {
     // An unwritable cache directory costs the next edit a full fingerprinting
     // pass and nothing else; it must not fail the lint of a correct file.
   }
+}
+
+/** Do two caches hold the same files at the same size and time? Hashes follow from those. */
+function sameCache(left: IndexCache, right: IndexCache): boolean {
+  if (left.size !== right.size) return false;
+  return [...right].every(([path, file]) => {
+    const other = left.get(path);
+    return other !== undefined && other.size === file.size && other.mtimeMs === file.mtimeMs;
+  });
+}
+
+type CorpusFile = Readonly<{ file: WalkedFile; path: string }>;
+
+/** The files a copy may be a copy of: the lint walk's script files, minus the project's exclusions. */
+function corpusFiles(projectRoot: string, exclusions: Exclusions): readonly CorpusFile[] {
+  return walkLintableFiles(projectRoot)
+    .filter((file) => CLONE_EXTENSIONS.includes(extname(file.absolute)))
+    .map((file) => ({ file, path: relative(projectRoot, file.absolute).split(sep).join("/") }))
+    .filter(({ path }) => scopeOf(path, exclusions).kind === "lint");
 }
 
 /**
@@ -102,8 +123,6 @@ export function projectCorpus({ projectRoot, exclusions, clone, cacheFile }: Pro
   const loaded = new Map<string, Fingerprinted | null>();
   let index: CloneIndex | undefined;
 
-  const projectPath = (absolute: string): string => relative(projectRoot, absolute).split(sep).join("/");
-
   const load = (path: string): Fingerprinted | null => {
     const known = loaded.get(path);
     if (known !== undefined) return known;
@@ -113,24 +132,27 @@ export function projectCorpus({ projectRoot, exclusions, clone, cacheFile }: Pro
     return source;
   };
 
+  /** A file's hashes from its bytes, or null when it is gone. Reached only when the cache has none that apply. */
+  const hashesFromBytes = (path: string): readonly number[] | null => {
+    const source = load(path);
+    return source === null ? null : fingerprintHashes(source);
+  };
+
   const cachedFileOf = (cache: IndexCache, path: string, file: WalkedFile): CachedFile | null => {
-    const hashes = cachedHashes(cache, path, file) ?? fingerprintHashesOf(load(path));
+    const hashes = cachedHashes(cache, path, file) ?? hashesFromBytes(path);
     return hashes === null ? null : { size: file.size, mtimeMs: file.mtimeMs, hashes };
   };
 
   const build = (): CloneIndex => {
-    const previous = readCache(cacheFile, clone);
-    const files = walkLintableFiles(projectRoot)
-      .filter((file) => CLONE_EXTENSIONS.includes(extname(file.absolute)))
-      .map((file) => ({ file, path: projectPath(file.absolute) }))
-      .filter(({ path }) => scopeOf(path, exclusions).kind === "lint");
+    const scheme = fingerprintScheme(clone);
+    const previous = readCache(cacheFile, scheme);
     const current: IndexCache = new Map(
-      files.flatMap(({ file, path }) => {
+      corpusFiles(projectRoot, exclusions).flatMap(({ file, path }) => {
         const entry = cachedFileOf(previous, path, file);
         return entry === null ? [] : [[path, entry] as const];
       }),
     );
-    if (cacheFile !== null && !sameCache(previous, current)) writeCache(cacheFile, current, clone);
+    if (cacheFile !== null && !sameCache(previous, current)) writeCache(cacheFile, current, scheme);
     return cloneIndex(indexEntries(current));
   };
 
@@ -143,16 +165,4 @@ export function projectCorpus({ projectRoot, exclusions, clone, cacheFile }: Pro
       });
     },
   };
-}
-
-const fingerprintHashesOf = (source: Fingerprinted | null): readonly number[] | null =>
-  source === null ? null : fingerprintHashes(source);
-
-/** Do two caches hold the same files at the same size and time? Hashes follow from those. */
-function sameCache(left: IndexCache, right: IndexCache): boolean {
-  if (left.size !== right.size) return false;
-  return [...right].every(([path, file]) => {
-    const other = left.get(path);
-    return other !== undefined && other.size === file.size && other.mtimeMs === file.mtimeMs;
-  });
 }
