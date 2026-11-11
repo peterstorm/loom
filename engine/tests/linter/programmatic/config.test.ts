@@ -369,7 +369,7 @@ describe("totality config: scope, baselines and the project root they are writte
     for (const key of ["switchTotalityBaseline", "discriminantBranchingBaseline"]) {
       expect(parseProjectConfig({ [key]: ["src/a.ts::ok", entry] }, "config.json")).toEqual({
         ok: false,
-        error: `config.json: ${key}[1] '${entry}' must be 'path::key' — a project-relative path, '::', then what the rule branched on`,
+        error: `config.json: ${key}[1] '${entry}' must be 'path::key' — a project-relative path, '::', then what the rule flagged there`,
       });
     }
   });

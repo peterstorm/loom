@@ -2,9 +2,9 @@
  * Grandfathered-violation baselines, owned in one place.
  *
  * A baseline is debt with a shape: a list of `path::key` entries where each
- * entry excuses exactly one violation of one rule. Two rules need it — the
+ * entry excuses exactly one violation of one rule. Three rules need it — the
  * switch form and the if-chain form of "branching on a union without a totality
- * proof" — and a baseline that only ever SUPPRESSES is a list nobody notices
+ * proof", and the copied block — and a baseline that only ever SUPPRESSES is a list nobody notices
  * decaying: a deleted switch, a renamed scrutinee, or a refactor that made the
  * branch total all leave an entry behind that protects nothing, hides that the
  * file improved, and tells the next reader the debt is still real.
@@ -19,7 +19,8 @@
  *
  * A baseline is PROJECT data, not linter data: every project keeps its own in
  * its linter `config.json` (`switchTotalityBaseline`,
- * `discriminantBranchingBaseline`), written by `lint-project --write-baseline`.
+ * `discriminantBranchingBaseline`, `duplicateBlockBaseline`), written by
+ * `lint-project --write-baseline`.
  * Loom's own debt lives in Loom's `config.json` like any other project's — the
  * linter ships no list keyed to one repository's tree.
  */
@@ -127,7 +128,7 @@ export function unbaselinedSites({ detected, baseline }: BaselineComparison): re
 }
 
 /** The `config.json` field each baselined rule keeps its list in. */
-export type BaselineConfigKey = "switchTotalityBaseline" | "discriminantBranchingBaseline";
+export type BaselineConfigKey = "switchTotalityBaseline" | "discriminantBranchingBaseline" | "duplicateBlockBaseline";
 
 /**
  * A rule that keeps a grandfathered list, as the staleness pass sees it: the

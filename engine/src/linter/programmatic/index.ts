@@ -1,8 +1,9 @@
 /**
  * Programmatic rule registry — provides built-in programmatic rules. Every
- * rule runs in the "full" tier; the import-boundary rules AND `switch-totality`
- * also run in the "immediate" tier, so a forbidden import or an unproven switch
- * is refused when it is written rather than when the Wave Gate starts.
+ * rule runs in the "full" tier; the import-boundary rules, `switch-totality`
+ * AND `no-duplicate-block` also run in the "immediate" tier, so a forbidden
+ * import, an unproven switch or a copied block is refused when it is written
+ * rather than when the Wave Gate starts.
  *
  * Rules are configured via project-local config (`config.json` inside the
  * project rules directory: `.claude/linter/rules/` or `.pi/linter/rules/`).
@@ -30,6 +31,14 @@ import {
   RULE_NAME as SWITCH_TOTALITY_RULE,
   type SwitchTotalityOptions,
 } from "./switch-totality";
+import {
+  handler as duplicateBlockHandler,
+  detectedCloneKeys,
+  FIX_HINT as DUPLICATE_BLOCK_FIX_HINT,
+  RULE_NAME as DUPLICATE_BLOCK_RULE,
+  type DuplicateBlockOptions,
+} from "./no-duplicate-block";
+import { CLONE_EXTENSIONS, DEFAULT_CLONE_OPTIONS, EMPTY_CORPUS, type CloneCorpus } from "../clones/clone-detection";
 import type { BaselineOwner } from "./baseline";
 import { type ProgrammaticConfig, EMPTY_CONFIG } from "./config";
 
@@ -88,6 +97,19 @@ export function discriminantBranchingOptions(
   });
 }
 
+/** no-duplicate-block's options for one project — shared by the live rule, its
+ *  staleness detector and the corpus the shell builds for both. */
+export function duplicateBlockOptions(config: ProgrammaticConfig, projectRoot: string | null): DuplicateBlockOptions {
+  return Object.freeze({
+    clone: Object.freeze({
+      minTokens: config.duplicateBlockMinTokens ?? DEFAULT_CLONE_OPTIONS.minTokens,
+      minLines: config.duplicateBlockMinLines ?? DEFAULT_CLONE_OPTIONS.minLines,
+    }),
+    baseline: config.duplicateBlockBaseline ?? [],
+    projectRoot,
+  });
+}
+
 /**
  * Every rule that keeps a grandfathered list, for one project's config.
  * `scripts/lint-project.ts` reports the stale entries of each and writes them
@@ -95,10 +117,19 @@ export function discriminantBranchingOptions(
  * live tree — all iterate THIS list, so a baselined rule cannot be left out of
  * the drift report. Each owner detects with exactly the options its live rule
  * runs with.
+ *
+ * `corpus` is the project's clone corpus. Without one, no-duplicate-block sees
+ * only the repeats inside each file, so every entry naming another file reads
+ * as stale: pass the project's corpus wherever the baseline is judged.
  */
-export function baselineOwners(config: ProgrammaticConfig, projectRoot: string | null): readonly BaselineOwner[] {
+export function baselineOwners(
+  config: ProgrammaticConfig,
+  projectRoot: string | null,
+  corpus: CloneCorpus = EMPTY_CORPUS,
+): readonly BaselineOwner[] {
   const switchOptions = switchTotalityOptions(config, projectRoot);
   const chainOptions = discriminantBranchingOptions(config, projectRoot);
+  const cloneOptions = duplicateBlockOptions(config, projectRoot);
   return Object.freeze([
     {
       rule: SWITCH_TOTALITY_RULE,
@@ -115,6 +146,14 @@ export function baselineOwners(config: ProgrammaticConfig, projectRoot: string |
       baseline: chainOptions.baseline,
       site: "unproven if-chain",
       detect: (content: string, filePath: string) => detectedChainKeys(content, filePath, chainOptions),
+    },
+    {
+      rule: DUPLICATE_BLOCK_RULE,
+      configKey: "duplicateBlockBaseline",
+      extensions: CLONE_EXTENSIONS,
+      baseline: cloneOptions.baseline,
+      site: "copied block",
+      detect: (content: string, filePath: string) => detectedCloneKeys(content, filePath, corpus, cloneOptions),
     },
   ]);
 }
@@ -243,14 +282,42 @@ function expressionShapeRules(): readonly ProgrammaticRule[] {
 }
 
 /**
+ * The copied-block rule. IMMEDIATE: the author of a copy knows what it is a
+ * copy of only while writing it, and the project's baseline keeps every
+ * pre-existing copy from blocking an unrelated edit to its file.
+ */
+function duplicateBlockRule(config: ProgrammaticConfig, projectRoot: string | null, corpus: CloneCorpus): ProgrammaticRule {
+  const options = duplicateBlockOptions(config, projectRoot);
+  return {
+    kind: "programmatic",
+    name: DUPLICATE_BLOCK_RULE,
+    description: `A block of ${options.clone.minTokens}+ identical tokens over ${options.clone.minLines}+ lines that another project file, or this one, already holds`,
+    extensions: CLONE_EXTENSIONS,
+    handler: (content, filePath) => duplicateBlockHandler(content, filePath, corpus, options),
+    tier: "immediate",
+    fixHint: DUPLICATE_BLOCK_FIX_HINT,
+    enabled: true,
+    source: "default",
+  };
+}
+
+/**
  * Creates the programmatic rule set, optionally configured by project-local config.
  * Config allows projects to define their own boundaries, pure modules, limits
  * and baselines; `projectRoot` is the root of the project that config belongs
- * to — the frame its paths and baseline keys are written in.
+ * to — the frame its paths and baseline keys are written in. `corpus` is that
+ * project's clone corpus; without one no-duplicate-block finds only the
+ * repeats inside each file.
+ *
+ * no-duplicate-block is LAST, and must stay last: its first call in a process
+ * builds the corpus, which can outlast the per-file deadline the executor
+ * checks before each rule. Nothing runs after it, so nothing is refused for
+ * time the corpus spent.
  */
 export function createProgrammaticRules(
   config: ProgrammaticConfig = EMPTY_CONFIG,
   projectRoot: string | null = null,
+  corpus: CloneCorpus = EMPTY_CORPUS,
 ): readonly ProgrammaticRule[] {
   return [
     ...importBoundaryRules(config, projectRoot),
@@ -261,5 +328,6 @@ export function createProgrammaticRules(
     fugueGeneratedIntegrityRule(),
     ...totalityRules(config, projectRoot),
     ...expressionShapeRules(),
+    duplicateBlockRule(config, projectRoot, corpus),
   ];
 }

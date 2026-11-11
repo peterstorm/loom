@@ -46,7 +46,7 @@ for every rule at once.
 |--------|--------|
 | *(paths…)* | Lint these files or directories. An explicit file is linted exactly — unless the exclusion list names it, which prints `excluded: <file> (<reason>)` |
 | `--tier=full` | All rules (default) |
-| `--tier=immediate` | The edit-time tier only: regex rules, the import-boundary pair, `switch-totality` |
+| `--tier=immediate` | The edit-time tier only: regex rules, the import-boundary pair, `switch-totality`, `no-duplicate-block` |
 | `--summary` | Counts by rule |
 | `--json` | `{ violations, errorCount, staleEntries, excluded }` |
 | `--no-fix-hints` | Hide fix hints |

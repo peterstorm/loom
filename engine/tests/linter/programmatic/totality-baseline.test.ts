@@ -28,7 +28,7 @@ import {
 } from "../../../src/linter/programmatic/baseline";
 import { baselineOwners } from "../../../src/linter/programmatic/index";
 import { projectRootOf } from "../../../src/linter/programmatic/config";
-import { loadRules } from "../../../src/linter/loader";
+import { cloneCorpus, loadRules } from "../../../src/linter/loader";
 import { executeRules } from "../../../src/linter/executor";
 import { isLintableName, isNeverSourceDirectory, scopeOf } from "../../../src/linter/project-scope";
 import { LOOM_CONFIG, LOOM_RULES_DIR, REPO_ROOT } from "../loom-project-config";
@@ -38,7 +38,8 @@ import {
   handler as chainRule,
 } from "../../../src/linter/programmatic/exhaustive-discriminant-branching";
 
-const LOOM_OWNERS = baselineOwners(LOOM_CONFIG, REPO_ROOT);
+/** Each owner detects against Loom's own clone corpus, fingerprinted from the files' bytes as `lint-project` does. */
+const LOOM_OWNERS = baselineOwners(LOOM_CONFIG, REPO_ROOT, cloneCorpus(LOOM_CONFIG, REPO_ROOT, "full"));
 
 /**
  * Every lintable file `lint-project` reads, repo-relative and sorted: the same
@@ -71,9 +72,10 @@ describe("loom's own totality baselines", () => {
     expect(LOOM_OWNERS.map((owner) => [owner.rule, owner.configKey])).toEqual([
       ["switch-totality", "switchTotalityBaseline"],
       ["exhaustive-discriminant-branching", "discriminantBranchingBaseline"],
+      ["no-duplicate-block", "duplicateBlockBaseline"],
     ]);
     // The drift message is rule-aware: a chain entry never reads as a switch.
-    expect(LOOM_OWNERS.map((owner) => owner.site)).toEqual(["unproven switch", "unproven if-chain"]);
+    expect(LOOM_OWNERS.map((owner) => owner.site)).toEqual(["unproven switch", "unproven if-chain", "copied block"]);
     // Loom does not narrow switch-totality: it holds itself to the default
     // every target project gets.
     expect(LOOM_CONFIG.switchTotalityModules).toBeUndefined();

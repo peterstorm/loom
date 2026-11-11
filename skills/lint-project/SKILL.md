@@ -141,9 +141,10 @@ Generate additional `.json` rule files in the same `rules/` directory for projec
 }
 ```
 
-**Grandfather pre-existing totality sites.** `switch-totality` applies to every
-TypeScript file without configuration, so an existing codebase's unproven
-switches would block the next agent edit to each file. Record them once, after
+**Grandfather pre-existing totality sites and copied blocks.** `switch-totality`
+applies to every TypeScript file without configuration, and `no-duplicate-block`
+to every TypeScript and JavaScript file, so an existing codebase's unproven
+switches and already-duplicated blocks would block the next agent edit to each file. Record them once, after
 `config.json` exists:
 
 ```bash
@@ -236,10 +237,10 @@ from the checkout, as above.
 ### Baselines: a rule that only subtracts violations silently stops applying
 
 Grandfathered baselines (`switch-totality`,
-`exhaustive-discriminant-branching`) excuse sites that predate the rule, and
+`exhaustive-discriminant-branching`, `no-duplicate-block`) excuse sites that predate the rule, and
 their failure mode is silence: a renamed scrutinee or a deleted switch leaves an
 entry protecting nothing. The lists are project data in `config.json`
-(`switchTotalityBaseline`, `discriminantBranchingBaseline`), keyed relative to
+(`switchTotalityBaseline`, `discriminantBranchingBaseline`, `duplicateBlockBaseline`), keyed relative to
 the project root and written by `scripts/lint-project.ts --write-baseline`.
 `scripts/lint-project.ts` reports stale entries in any project and exits
 non-zero on them; loom asserts its own lists against its live tree in

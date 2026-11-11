@@ -1387,7 +1387,7 @@ directory and top-level file live in that config, not in the rule code. See
 
 ### Rule tiers
 
-Regex rules run on every edit (the `immediate` tier, `lint-file` PostToolUse) and at the Wave Gate. Each programmatic rule declares its own earliest tier: `no-cross-boundary-imports` and `no-io-in-pure-modules` are `immediate`, so a forbidden import is refused when the file is written; the rest (`max-function-lines`, `exhaustive-discriminant-branching`, `no-nested-ternary`, `prefer-array-methods`, `fugue-generated-integrity`) run only in the `full` tier at the Wave Gate.
+Regex rules run on every edit (the `immediate` tier, `lint-file` PostToolUse) and at the Wave Gate. Each programmatic rule declares its own earliest tier: `no-cross-boundary-imports`, `no-io-in-pure-modules`, `switch-totality` and `no-duplicate-block` are `immediate`, so a forbidden import, an unproven switch or a copied block is refused when the file is written; the rest (`max-function-lines`, `exhaustive-discriminant-branching`, `no-nested-ternary`, `prefer-array-methods`, `fugue-generated-integrity`) run only in the `full` tier at the Wave Gate.
 
 ### Validate rule files
 
