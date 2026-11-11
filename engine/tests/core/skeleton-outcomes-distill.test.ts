@@ -13,25 +13,15 @@ import { skeletonOutcomesOf } from "../../src/core/skeleton/outcomes";
 import type { ExportBinding, PathObservation, PathSkeletonOutcome, SkeletonRecord } from "../../src/core/skeleton/types";
 import { planTaskSkeletons } from "../../src/orchestration/skeleton-materialization";
 import type { TaskGraph } from "../../src/types";
+import { observationArb, SHAS } from "../fixtures/skeleton-arbitraries";
 import { binding, unwrap } from "../fixtures/skeleton-builders";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
-
-const SHAS = ["a", "b", "c"].map((fill) => fill.repeat(64));
 
 const pathArb = fc.tuple(
   fc.constantFrom("src", "src/main/java/a", "lib"),
   fc.constantFrom("A", "B", "C", "D", "E", "F"),
   fc.constantFrom(".ts", ".tsx", ".java", ".kt", ".rs"),
 ).map(([dir, name, ext]) => `${dir}/${name}${ext}`);
-
-const observationArb: fc.Arbitrary<PathObservation> = fc.oneof(
-  fc.constant<PathObservation>({ kind: "absent" }),
-  fc.record({
-    kind: fc.constant("present" as const),
-    sha256: fc.constantFrom(...SHAS),
-    canonicalSha256: fc.option(fc.constantFrom(...SHAS), { nil: null }),
-  }),
-);
 
 const scenarioArb = fc.record({
   files: fc.uniqueArray(pathArb, { minLength: 1, maxLength: 8 }),

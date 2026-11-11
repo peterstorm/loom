@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +11,7 @@ import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../src/orchestration/harness-capt
 import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
 import { ORCHESTRATION_RUNS_SUFFIX, readSessionRunBindings } from "../../src/orchestration/session-run-bindings";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { collectedChild } from "../fixtures/collected-child";
 import { git } from "../fixtures/git-repository";
 
 /**
@@ -81,16 +81,7 @@ function project() {
 type Project = ReturnType<typeof project>;
 
 function run(command: string, args: readonly string[], cwd: string, env: NodeJS.ProcessEnv, stdin = "") {
-  return new Promise<Readonly<{ status: number | null; stdout: string; stderr: string }>>((resolve, reject) => {
-    const child = spawn(command, [...args], { cwd, env });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8").on("data", (text: string) => { stdout += text; });
-    child.stderr.setEncoding("utf8").on("data", (text: string) => { stderr += text; });
-    child.on("error", reject);
-    child.on("close", (status) => resolve({ status, stdout, stderr }));
-    child.stdin.end(stdin);
-  });
+  return collectedChild(command, args, { cwd, env }, stdin);
 }
 
 /** The façade as Claude Code's Bash runs it: Claude session variables only. */

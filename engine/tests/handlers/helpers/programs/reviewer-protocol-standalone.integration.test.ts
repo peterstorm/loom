@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
-import { spawn, spawnSync } from "node:child_process";
+import { collectedChild } from "../../../fixtures/collected-child";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -67,19 +68,10 @@ function project() {
 type Action = Readonly<{ kind: string; requests?: readonly Readonly<{ authority: AgentRequestAuthority; task: string }>[] }>;
 /** Child-only real runtime admission. No parent environment or live worktree mutation. */
 async function runCli(root: string, args: readonly string[], stdin = "", parent: FacadeParent = "pi"): Promise<Action> {
-  const result = await new Promise<Readonly<{ status: number | null; stdout: string; stderr: string }>>((resolve, reject) => {
-    const child = spawn("bun", [cli, "helper", "orchestration", ...args], {
-      cwd: root,
-      env: facadeParentEnvironment(parent, root),
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8").on("data", (text: string) => { stdout += text; });
-    child.stderr.setEncoding("utf8").on("data", (text: string) => { stderr += text; });
-    child.on("error", reject);
-    child.on("close", (status) => resolve({ status, stdout, stderr }));
-    child.stdin.end(stdin);
-  });
+  const result = await collectedChild("bun", [cli, "helper", "orchestration", ...args], {
+    cwd: root,
+    env: facadeParentEnvironment(parent, root),
+  }, stdin);
   expect(result.status, result.stderr).toBe(0);
   if (result.status !== 0) throw new Error(result.stderr);
   return JSON.parse(result.stdout) as Action;

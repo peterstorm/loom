@@ -1,6 +1,7 @@
 import { captureReviewedTranscript } from "../../fixtures/read-coverage";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { collectedChild } from "../../fixtures/collected-child";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -287,16 +288,7 @@ function runCli(
     env[PI_EXTENSION_RUNTIME_REVISION_ENV] ??= CURRENT_RUNTIME.revision;
   }
   if (cwd === ENGINE || cwd === PACKAGE_ROOT) throw new Error("CLI fixture must not use a package checkout cwd");
-  return new Promise<Readonly<{ status: number | null; stdout: string; stderr: string }>>((resolve, reject) => {
-    const child = spawn("bun", [CLI, "helper", "orchestration", ...args], { cwd, env });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8").on("data", (text: string) => { stdout += text; });
-    child.stderr.setEncoding("utf8").on("data", (text: string) => { stderr += text; });
-    child.on("error", reject);
-    child.on("close", (status) => resolve({ status, stdout, stderr }));
-    child.stdin.end(stdin);
-  });
+  return collectedChild("bun", [CLI, "helper", "orchestration", ...args], { cwd, env }, stdin);
 }
 
 // --- status -----------------------------------------------------------------

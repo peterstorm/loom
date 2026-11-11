@@ -12,6 +12,7 @@ import { isTestFileBySuffixes, DEFAULT_TEST_FILE_SUFFIXES } from "../../src/core
 import { skeletonLanguageOf } from "../../src/core/skeleton/language";
 import { isUntouchedSkeleton, renderSkeletonOutcome } from "../../src/core/skeleton/outcomes";
 import { knownSkeletonOutcomes } from "../fixtures/known-skeleton-outcomes";
+import { observationArb, SHAS } from "../fixtures/skeleton-arbitraries";
 import { binding, frozenManifestWith } from "../fixtures/skeleton-builders";
 import { OUTCOME_TEXT } from "../fixtures/skeleton-repo";
 import type { ExportBinding, PathObservation, SkeletonRecord } from "../../src/core/skeleton/types";
@@ -22,22 +23,11 @@ import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 const { stale: _staleFlag, ...OUTCOME_WORDING } = OUTCOME_TEXT;
 const RENDERED: ReadonlySet<string> = new Set(Object.values(OUTCOME_WORDING));
 
-const SHAS = ["a", "b", "c"].map((fill) => fill.repeat(64));
-
 const pathArb = fc.tuple(
   fc.constantFrom("src", "src/main/java/a", "lib", "tests"),
   fc.constantFrom("A", "B", "C", "D", "E", "F"),
   fc.constantFrom(".ts", ".tsx", ".java", ".kt", ".rs", ".test.ts", ".spec.tsx"),
 ).map(([dir, name, ext]) => `${dir}/${name}${ext}`);
-
-const observationArb: fc.Arbitrary<PathObservation> = fc.oneof(
-  fc.constant<PathObservation>({ kind: "absent" }),
-  fc.record({
-    kind: fc.constant("present" as const),
-    sha256: fc.constantFrom(...SHAS),
-    canonicalSha256: fc.option(fc.constantFrom(...SHAS), { nil: null }),
-  }),
-);
 
 const scenarioArb = fc.record({
   files: fc.uniqueArray(pathArb, { maxLength: 10 }),

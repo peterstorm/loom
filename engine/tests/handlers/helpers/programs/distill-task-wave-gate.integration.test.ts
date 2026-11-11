@@ -3,7 +3,6 @@
  * §6), driven through the real CLI façade: the Distill Task is registered
  * with its Wave, issued no reviewer, and completes with the Wave unreviewed.
  */
-import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +15,7 @@ import { openRunDirectory, type RunDirHandle } from "../../../../src/orchestrati
 import { parseTaskGraph } from "../../../../src/state-manager";
 import type { TaskGraph } from "../../../../src/types";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
+import { collectedChild } from "../../../fixtures/collected-child";
 import { facadeParentEnvironment } from "../../../fixtures/facade-parent";
 import { git as gitWithEnvironment, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository";
 import { value } from "../../../fixtures/parse-result";
@@ -82,16 +82,7 @@ function project(distillStatus: "pending" | "implemented"): Project {
 }
 
 function cliResult(p: Project, args: readonly string[], stdin = "") {
-  return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn("bun", [cli, "helper", "orchestration", ...args], { cwd: p.root, env: facadeParentEnvironment("pi", p.root) });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8").on("data", (text: string) => { stdout += text; });
-    child.stderr.setEncoding("utf8").on("data", (text: string) => { stderr += text; });
-    child.on("error", reject);
-    child.on("close", (status) => resolve({ status, stdout, stderr }));
-    child.stdin.end(stdin);
-  });
+  return collectedChild("bun", [cli, "helper", "orchestration", ...args], { cwd: p.root, env: facadeParentEnvironment("pi", p.root) }, stdin);
 }
 async function runCli(p: Project, args: readonly string[], stdin = ""): Promise<Action> {
   const result = await cliResult(p, args, stdin);
