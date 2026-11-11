@@ -20,6 +20,8 @@ import {
   type PersistedWaveBatchCandidate,
   type WaveRequestBatch,
   type WaveReviewRegistrationAuthority,
+  waveReviewedTasks,
+  waveReviewOutstanding,
   waveTaskReviewRosters,
 } from '../../../core/wave-review-authority';
 import { durableRefutationRequests, publicationResolver } from './durable-requests';
@@ -52,7 +54,7 @@ export function waveRequests(
     authority,
     graph,
     attempt,
-    observeReviewedWorkspace(tasks),
+    observeReviewedWorkspace(waveReviewedTasks(tasks)),
     observeWaveSpecCheckDocuments({
       specFile: graph.spec_file,
       planFile: graph.plan_file,
@@ -75,7 +77,7 @@ export async function installWaveReviewRuns(
   if (!specCheck.ok) throw new Error(specCheck.error.message);
   const preinstall = manager.load();
   const workspaces = observeReviewedWorkspace(
-    preinstall.tasks.filter(({ id }) => registration.taskIds.includes(id)),
+    waveReviewedTasks(preinstall.tasks.filter(({ id }) => registration.taskIds.includes(id))),
   );
   const specCheckObservation = observeWaveSpecCheckDocuments({
     specFile: batch.specCheckDocuments.spec.path,
@@ -187,8 +189,7 @@ export async function reconcileWaveReviewIssuance(
   const hasCollectingPacket = refreshed.tasks.some((task) =>
     registration.taskIds.includes(task.id) && task.review_run !== undefined);
   const needsFreshPacket = refreshed.tasks.some((task) =>
-    registration.taskIds.includes(task.id) && task.review_run === undefined &&
-    task.review_status !== "passed" && task.review_status !== "blocked");
+    registration.taskIds.includes(task.id) && task.review_run === undefined && waveReviewOutstanding(task));
   if (!hasCollectingPacket && needsFreshPacket) {
     const batch = batchFor(refreshed);
     await installWaveReviewRuns(manager, registration, batch);

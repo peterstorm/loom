@@ -16,6 +16,9 @@ export const renderImplementationLifecycleError = (error: ImplementationLifecycl
       `Task ${taskId} has a terminal implementation failure; remediate the escalation before attesting`)
     .with({ kind: "already-attested" }, ({ taskId }) =>
       `Task ${taskId} is already in attestation mode; nothing to attest`)
+    .with({ kind: "distill-task-not-attestable" }, ({ taskId }) =>
+      `Task ${taskId} is its Wave's distill pass, which proves behaviour-preserved and cannot be attested; ` +
+        "a distill pass that changes nothing already settles")
     .with({ kind: "proof-already-satisfied" }, ({ taskId }) =>
       `Task ${taskId} already carries satisfied proof; nothing to attest`)
     .with({ kind: "attestation-context-invalid" }, ({ taskId, detail }) =>

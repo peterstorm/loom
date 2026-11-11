@@ -3,10 +3,11 @@ import { StateManager } from "../../state-manager";
 import { taskGraphPath } from "../../config";
 import { newWaveGate, reconcileWaveBlock } from "../../core/wave-gate-model";
 import { parseTaskId } from "../../core/task-id";
-import { returnToRevalidation } from "../../core/task-revalidation";
+import { nonEmpty } from "../../core/orchestration-contract";
+import { returnToRevalidation, revalidationTargets, sweptAmongReturned } from "../../core/task-revalidation";
 import { observeReviewedWorkspace } from "./reviewed-workspace";
 import { openRunDirectory } from "../../orchestration/run-directory-handle";
-import { readWaveReviewContext, type WaveReviewContextAuthority } from "../../core/wave-review-authority";
+import { readWaveReviewContext, waveReviewedTasks, type WaveReviewContextAuthority } from "../../core/wave-review-authority";
 import type { HookHandler, Task, TaskGraph, WaveReopeningAudit } from "../../types";
 
 const USAGE = "Usage: helper reopen-completed-wave --runs-root <root> < exact-reopening.json";
@@ -110,17 +111,23 @@ function taskContexts(
  * headSha is a batch epoch, not a workspace digest: it is deliberately never
  * compared with current bytes. If any completed Task lacks workspaceHeadSha,
  * byte-exact authority for the Wave is unverifiable and every completed Task
- * must be reopened for a fresh review. */
+ * must be reopened for a fresh review.
+ *
+ * Only reviewed Tasks hold packet authority and are compared. A Task exempt
+ * from Wave review (the Distill Task) is never proven drifted itself: the
+ * proof names it when it names any of its siblings, because re-implemented
+ * code is distilled again (`revalidationTargets`). */
 export function deriveWaveReopeningProof(
   graph: TaskGraph,
   request: ReopenRequest,
   contexts: readonly WaveReviewContextAuthority[],
   observeWorkspace: (tasks: readonly Task[]) => readonly Readonly<{ taskId: string; headSha: string }>[],
 ): WaveReopeningProof {
-  const waveTasks = graph.tasks.filter((task) => task.wave === request.wave);
-  if (waveTasks.length === 0 || waveTasks.some((task) => task.status !== "completed")) {
+  const everyWaveTask = graph.tasks.filter((task) => task.wave === request.wave);
+  if (everyWaveTask.length === 0 || everyWaveTask.some((task) => task.status !== "completed")) {
     throw new Error("reopening requires every Task in the completed Wave to remain completed");
   }
+  const waveTasks = waveReviewedTasks(everyWaveTask);
   const authorities = waveTasks.map((task) => {
     const taskAuthority = taskContexts(task, request, contexts);
     if (taskAuthority.length === 0) {
@@ -131,7 +138,7 @@ export function deriveWaveReopeningProof(
   if (authorities.some((entries) => entries.some(({ taskRun }) => taskRun.workspaceHeadSha === undefined))) {
     return Object.freeze({
       mode: "legacy-workspace-authority-unverifiable",
-      taskIds: Object.freeze(waveTasks.map(({ id }) => id)),
+      taskIds: revalidationTargets(graph.tasks, waveTasks.map(({ id }) => id)).taskIds,
     });
   }
 
@@ -163,9 +170,10 @@ export function deriveWaveReopeningProof(
   if (observations.size !== waveTasks.length || waveTasks.some((task) => observations.get(task.id) === undefined)) {
     throw new Error("current declared-workspace bytes could not be observed for every completed Task");
   }
+  const drifted = waveTasks.flatMap((task) => observations.get(task.id) !== expected.get(task.id) ? [task.id] : []);
   return Object.freeze({
     mode: "modern-exact-workspace-drift",
-    taskIds: Object.freeze(waveTasks.flatMap((task) => observations.get(task.id) !== expected.get(task.id) ? [task.id] : [])),
+    taskIds: revalidationTargets(graph.tasks, drifted).taskIds,
   });
 }
 
@@ -212,6 +220,13 @@ export function reopenCompletedWave(
       `reopening proof Task ${foreignProofTask} does not belong to completed Wave ${request.wave}`,
     );
   }
+  // The engine-derived proof already names the Wave's Distill Task with any
+  // sibling; a hand-built proof that leaves it standing is refused, never swept
+  // silently past the operator's exact payload.
+  const unswept = revalidationTargets(graph.tasks, proof.taskIds).sweptDistillTaskIds;
+  if (unswept.length > 0) {
+    throw new Error(`reopening proof must also name the Wave's Distill Task ${unswept.join(", ")}: re-implemented code is distilled again`);
+  }
   const completed = (graph.wave_gate_history ?? []).find((entry) => entry.runId === request.runId);
   if (completed === undefined || completed.wave !== request.wave || completed.authorityDigest !== request.authorityDigest) {
     throw new Error("reopening requires the exact completed run/wave/authority receipt");
@@ -219,6 +234,7 @@ export function reopenCompletedWave(
   if (!exactIds(request.taskIds, proof.taskIds)) {
     throw new Error(`reopening taskIds must exactly equal engine-derived ${proof.mode}: ${proof.taskIds.join(", ") || "none"}`);
   }
+  const swept = nonEmpty(sweptAmongReturned(graph.tasks, proof.taskIds));
   const audit: WaveReopeningAudit = Object.freeze({
     schemaVersion: 1,
     kind: "completed-wave-reopened-for-review-integrity",
@@ -228,6 +244,9 @@ export function reopenCompletedWave(
     authorityDigest: completed.authorityDigest,
     completionReceipt: completed.completionReceipt,
     reopenedTaskIds: Object.freeze([...proof.taskIds]),
+    // The payload names the Distill Task too, so the audit says which ids
+    // returned with a sibling and were never judged by the proof itself.
+    ...(swept === null ? {} : { sweptDistillTaskIds: swept }),
   });
   const tasks = graph.tasks.map((task) => proof.taskIds.includes(task.id) ? returnToRevalidation(task, graph.verification_manifest) : task);
   const gate = {

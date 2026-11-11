@@ -224,6 +224,8 @@ For each Wave, the orchestrator spawns all dependency-ready implementation Tasks
 
 Direct parent edits are blocked while an orchestration is active. Implementation happens through Agents so completion, files, test evidence, and proof can be attributed.
 
+A Wave with implementation files also carries one engine-added Distill Task (`distill-agent`, [ADR-0068](adr/ADR-0068-the-distill-pass-is-an-engine-added-task-per-wave.md)). Status offers its dispatch only after every other Task of the Wave has settled, and the Wave Gate starts after it settles. See [The distill pass](operations.md#the-distill-pass-distill-task).
+
 A Task reaches `implemented` only when its proof obligations are satisfied **and** the Implementation Completion Oracle accepts an exact Task Completion Suite for the engine-issued Implementation Attempt. Completion prose, a Task id inferred from `executing_tasks`, and an unreserved harness result are cleanup evidence only.
 
 Claude binds authority through a session+Agent sidecar published with no-replace semantics at SubagentStart; Pi stores the exact authority on its ReservedSlot. Duplicate delivery is idempotent, and a late result cannot release a newer reservation. Every applied transition appends one immutable settlement receipt and atomically updates lifecycle/evidence, clears only matching attempt fields, invalidates review/spec/Wave authority when required, and recomputes `impl_complete`.
@@ -262,7 +264,7 @@ The parent executes only the returned action and resumes the same run.
 
 ### Review stage
 
-For every Wave Task, Loom creates an immutable Review Packet and issues the exact reviewer roster:
+For every Wave Task except the Wave's Distill Task, which is exempt from review, Loom creates an immutable Review Packet and issues the exact reviewer roster:
 
 - `code-reviewer`;
 - `silent-failure-hunter`;

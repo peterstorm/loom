@@ -50,6 +50,7 @@ import {
 } from "../engine/src/handlers/helpers/task-local-completion";
 import {
   productionExactSettlementPorts,
+  releaseSettledDistillSnapshot,
   settleExactImplementation,
   type ExactImplementationSettlementPorts,
   type ExactNewTestCollectionArgs,
@@ -749,6 +750,9 @@ async function applyExactImplementationPiResult(args: ExactPiSettlementArgs): Pr
       value: application,
     };
   });
+  // Only now is the settlement committed, so only now may a Distill Task's
+  // snapshot go (ADR-0068): a re-run before the commit would still need it.
+  releaseSettledDistillSnapshot(args.repository.root(), args.authority, settled.application);
   return renderExactPiSettlement(args.binding.taskId, args.log, settled);
 }
 

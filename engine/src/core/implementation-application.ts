@@ -7,7 +7,7 @@ import {
   type TaskGraph,
   type TaskTestResult,
 } from "../types";
-import { nonEmptyOf } from "./orchestration-contract";
+import { nonEmptyOf, type NonEmpty } from "./orchestration-contract";
 export { parseNewTestEvidence, type NewTestEvidence } from "../types";
 import {
   DECLARED_ARTIFACT_BASELINE,
@@ -45,6 +45,7 @@ import { parseReviewPath, type ReviewPath } from "./review-packet";
 import { isUntouchedSkeleton } from "./skeleton/outcomes";
 import { CONFORMANCE_NOT_OWED, type ContractConformance } from "./skeleton/conformance-verdict";
 import type { SkeletonRecord } from "./skeleton/types";
+import { proofArtifactChanges, taskArtifactExpectation } from "./task-artifact-expectation";
 import type { FrozenTestFiles } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
 import { taskVerificationPolicy } from "./verification-policy";
@@ -463,7 +464,7 @@ export function applyUntrustedStopResolution(
     {
       verificationPolicy: taskVerificationPolicy(target),
       declaredArtifacts: target.file_list ?? [],
-      declaredArtifactExpectation: target.implementation_attestation === true ? "attested" : "changed",
+      declaredArtifactExpectation: taskArtifactExpectation(target),
     },
     {
       taskCompleted: false,
@@ -505,6 +506,11 @@ export type IncomingImplementationEvidence = Readonly<{
    *  judge's verdict over the Task's in-scope files. Required, so a settlement
    *  path cannot skip the contract check by omitting it. */
   contractConformance: ContractConformance;
+  /** Present exactly when the settlement shell wrote a Distill Task's
+   *  snapshot back before the byte observation this evidence travels with
+   *  (ADR-0068 §5): the failure kinds the attempt's own bytes would have
+   *  settled with. `behaviour-preserved` then records the `restored` basis. */
+  restoredAfter?: NonEmpty<string>;
 }>;
 
 /**
@@ -866,16 +872,22 @@ export function settleObservedImplementation(
     evidence: {
       taskCompleted: incoming.taskCompleted,
       ...(normalized.testResult === undefined ? {} : { testResult: normalized.testResult }),
-      // Attestation reads the raw attempt-scope byte delta, never the
-      // transcript-attributed set: an unreported write must surface as drift
-      // on the attested obligations, not as a clean verification.
-      filesModified: task.implementation_attestation === true
-        ? bytes.attemptScopeChangedPaths
-        : bytes.cumulativeProofArtifactChanges,
+      // Which observation the Proof judges follows the Task's expectation
+      // (`proofArtifactChanges`). Attestation and a Distill Task read the raw
+      // attempt-scope byte delta, never the transcript-attributed set: an
+      // unreported write must surface as drift on the attested obligations,
+      // or as a change `behaviour-preserved` owes tests for, not as a clean
+      // verification. A Distill Task never reads the cumulative delta, which
+      // is its siblings' implementation and not what this attempt changed.
+      filesModified: proofArtifactChanges(taskArtifactExpectation(task), {
+        attemptScope: bytes.attemptScopeChangedPaths,
+        cumulative: bytes.cumulativeProofArtifactChanges,
+      }),
       newTestsWritten: normalized.newTests.written,
       newTestEvidence: normalized.newTests.evidence,
       ...(incoming.redThenGreen === undefined ? {} : { redThenGreen: incoming.redThenGreen }),
       contractConformance: incoming.contractConformance,
+      ...(incoming.restoredAfter === undefined ? {} : { restoredAfter: incoming.restoredAfter }),
     },
     proofEvaluationPolicy,
   });

@@ -24,6 +24,7 @@ import { deriveWaveAdvisoryDecisionRequest } from "./wave-gate-preparation";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import {
   taskReviewScope,
+  waveReviewOutstanding,
   waveRunRosterProblem,
   waveSpecCheckDocumentsMatch,
   type WaveReviewContextAuthority,
@@ -143,8 +144,7 @@ export function waveRefutationCommitProblem(
     return "Refutation Panel task authority differs from the locked current Wave";
   }
   const collecting = graph.tasks.some((task) => task.wave === wave && task.review_run !== undefined);
-  const unreviewed = graph.tasks.some((task) => task.wave === wave &&
-    task.review_status !== "passed" && task.review_status !== "blocked");
+  const unreviewed = graph.tasks.some((task) => task.wave === wave && waveReviewOutstanding(task));
   if (collecting || unreviewed) {
     return "Refutation Panel cannot commit while locked current-Wave review evidence is incomplete";
   }

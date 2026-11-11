@@ -20,6 +20,7 @@ import {
   taskExecutionRegistrationError,
   type ExecutionBatchMode,
   type TaskExecutionRosterObservation,
+  type TaskExecutionAuthorityPlan,
   type TaskExecutionSpawn,
   type ValidateTaskExecutionInput,
 } from "../core/validate-task-execution";
@@ -30,6 +31,15 @@ import { repositoryContext } from "../utils/git";
 import { anyActiveSubagent } from "../machine";
 import { materializeTaskSkeletons } from "../orchestration/skeleton-materialization";
 import { renderLeftPreparedName } from "../core/skeleton/problems";
+import {
+  describeDistillSnapshotFailure,
+  distillSnapshotScope,
+  settledDistillSnapshotDigests,
+  type DistillSnapshotPort,
+} from "../core/distill-snapshot";
+import { isDistillTask } from "../core/distill-task";
+import type { DomainResult } from "../core/orchestration-contract";
+import { discardDistillSnapshots, gitDistillSnapshots } from "../orchestration/distill-snapshot";
 
 type RepositoryChangeBaseline = ArtifactBaseline<"repository-change">;
 
@@ -41,6 +51,46 @@ export type TaskExecutionRegistrationOutcome =
   | Readonly<{ kind: "block"; message: string }>;
 
 class LockedRegistrationRefusal extends Error {}
+
+/**
+ * Snapshot every registering Distill Task's attempt scope under its freshly
+ * minted authority (ADR-0068 §5), before the reservation is committed and so
+ * before its agent can write. The scope is the attempt baseline's own paths
+ * (`distillSnapshotScope`), captured moments earlier from the same bytes.
+ * Returns the authority digests snapshotted, for the caller to discard should
+ * the locked registration then refuse. A snapshot that cannot be taken
+ * refuses the batch, and the snapshots already taken for it are discarded: no
+ * Distill Task attempt exists without one.
+ *
+ * It first discards the snapshots of the Task's earlier, semantically settled
+ * attempts (`settledDistillSnapshotDigests`): the settlement transport
+ * discards them once its state is persisted, and this catches one whose
+ * discard was lost.
+ */
+function captureDistillSnapshots(
+  root: string,
+  state: TaskGraph,
+  plans: readonly TaskExecutionAuthorityPlan[],
+  snapshots: DistillSnapshotPort,
+): DomainResult<readonly string[], string> {
+  const captured: string[] = [];
+  for (const { authority, baselines } of plans) {
+    const task = state.tasks.find((candidate) => candidate.id === authority.taskId);
+    if (task === undefined || !isDistillTask(task)) continue;
+    discardDistillSnapshots(root, settledDistillSnapshotDigests(task), snapshots);
+    const snapshot = snapshots.capture(root, authority.authorityDigest, distillSnapshotScope(baselines.attempt));
+    if (!snapshot.ok) {
+      discardDistillSnapshots(root, captured, snapshots);
+      return {
+        ok: false,
+        error: `Cannot snapshot the distill scope of ${authority.taskId}: ${describeDistillSnapshotFailure(snapshot.error)}; ` +
+          "a Distill Task attempt is not registered without the snapshot its restore needs",
+      };
+    }
+    captured.push(authority.authorityDigest);
+  }
+  return { ok: true, value: Object.freeze(captured) };
+}
 
 /**
  * Imperative shell: preflight one snapshot, capture baselines, then register
@@ -56,12 +106,17 @@ class LockedRegistrationRefusal extends Error {}
  * the worktree's graph and snapshots the worktree's baselines, while the
  * orchestrator runtime itself stays rooted wherever it is. The no-argument
  * call preserves the historical runtime-cwd resolution exactly.
+ *
+ * A Distill Task's attempt scope is snapshotted (`captureDistillSnapshots`)
+ * once its authority is minted and before the locked update commits the
+ * reservation; `distillSnapshots` is the store, Git's in production.
  */
 export async function registerTaskExecutionBatch(
   spawns: readonly TaskExecutionSpawn[],
   mode: ExecutionBatchMode = "parallel",
   rosterObservation?: TaskExecutionRosterObservation,
   spawnCwd?: string,
+  distillSnapshots: DistillSnapshotPort = gitDistillSnapshots,
 ): Promise<TaskExecutionRegistrationOutcome> {
   const inputs = spawns.filter(
     (spawn): spawn is Extract<TaskExecutionSpawn, { kind: "implementation" }> =>
@@ -110,7 +165,7 @@ export async function registerTaskExecutionBatch(
   if (ownershipError !== null) return { kind: "block", message: `BLOCKED: ${ownershipError}` };
 
   for (const taskId of taskIds) {
-    const decision = taskExecutionDecision(state, taskId);
+    const decision = taskExecutionDecision(state, taskId, taskIds);
     if (decision.kind === "ineligible") return { kind: "block", message: `BLOCKED: ${decision.reason}` };
   }
 
@@ -206,6 +261,8 @@ export async function registerTaskExecutionBatch(
     skeletons.value,
   );
   if (!authorityBatch.ok) return { kind: "block", message: `BLOCKED: ${authorityBatch.error}` };
+  const snapshotted = captureDistillSnapshots(repository.root, state, authorityBatch.plans, distillSnapshots);
+  if (!snapshotted.ok) return { kind: "block", message: `BLOCKED: ${snapshotted.error}` };
 
   try {
     const authorities = await manager.updateAndReturn((current) => {
@@ -231,6 +288,8 @@ export async function registerTaskExecutionBatch(
     });
     return { kind: "registered", authorities };
   } catch (error) {
+    // Nothing was reserved, so no attempt will ever read these snapshots.
+    discardDistillSnapshots(repository.root, snapshotted.value, distillSnapshots);
     const message = error instanceof Error ? error.message : String(error);
     return {
       kind: "block",
@@ -242,10 +301,12 @@ export async function registerTaskExecutionBatch(
 /** Exact rollback used when a harness cannot carry a just-minted capability.
  *  The optional `spawnCwd` must be the SAME repository the registration
  *  resolved: a rollback that targets a different graph would reclaim
- *  reservations the wrong State File still holds. */
+ *  reservations the wrong State File still holds. A rolled-back Distill Task
+ *  attempt never ran, so its snapshot is discarded with it. */
 export async function rollbackTaskExecutionRegistration(
   authorities: readonly ImplementationAttemptAuthority[],
   spawnCwd?: string,
+  distillSnapshots: DistillSnapshotPort = gitDistillSnapshots,
 ): Promise<HookResult> {
   if (authorities.length === 0) return { kind: "allow" };
   let statePath = "<unresolved>";
@@ -257,7 +318,15 @@ export async function rollbackTaskExecutionRegistration(
     }
     const rolledBackAt = parseIsoInstant(new Date().toISOString(), "rollback instant");
     if (!rolledBackAt.ok) return { kind: "block", message: `BLOCKED: ${rolledBackAt.error.errors.join("; ")}` };
-    await manager.update((state) => rollbackTaskExecutionAuthorityBatch(state, authorities, rolledBackAt.value));
+    const distillTaskIds = await manager.updateAndReturn((state) => ({
+      state: rollbackTaskExecutionAuthorityBatch(state, authorities, rolledBackAt.value),
+      value: new Set(state.tasks.filter(isDistillTask).map(({ id }): string => id)),
+    }));
+    const rolledBackDistill = authorities.filter(({ taskId }) => distillTaskIds.has(taskId));
+    const repository = rolledBackDistill.length === 0 ? null : repositoryContext(spawnCwd);
+    if (repository?.ok === true) {
+      discardDistillSnapshots(repository.root, rolledBackDistill.map(({ authorityDigest }) => authorityDigest), distillSnapshots);
+    }
     return { kind: "allow" };
   } catch (error) {
     return {

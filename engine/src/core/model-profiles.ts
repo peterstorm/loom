@@ -456,6 +456,10 @@ export const AGENT_CATALOG = Object.freeze({
   "comment-analyzer": traits("focused-review", plainKind("reviewer")),
   "decompose-agent": traits("focused-review", phaseKind("decompose")),
   "deepen-agent": traits("panel-design", plainKind("utility"), "deepen"),
+  // The Wave's engine-added distill pass (ADR-0068). An impl agent, so it
+  // holds attempt authority and write admission like any Task's agent; no
+  // authored Task may name it.
+  "distill-agent": traits("implementation", plainKind("impl"), "distill"),
   "frontend-agent": traits("implementation", plainKind("impl"), "nextjs-frontend-design"),
   "grill-agent": traits("panel-design", plainKind("utility"), "grill"),
   "java-test-agent": traits("implementation", plainKind("impl"), "java-test-engineer"),
@@ -486,6 +490,10 @@ export type LoomAgentName = keyof typeof AGENT_CATALOG;
  *  shipped. Its Tasks trace to the plan's decisions rather than to a
  *  Requirement, and they form the plan's final Wave. */
 export const DECISION_RECORD_AGENT = "adr-writer-agent" satisfies LoomAgentName;
+
+/** The Agent of a Distill Task (ADR-0068). A Task is a Distill Task exactly
+ *  when this is its agent; `core/distill-task.ts` owns every rule that follows. */
+export const DISTILL_AGENT = "distill-agent" satisfies LoomAgentName;
 
 /** Row view of the catalog, in catalog order. */
 const CATALOG_ENTRIES = Object.entries(AGENT_CATALOG) as readonly [LoomAgentName, AgentTraits][];

@@ -54,6 +54,7 @@ import { parseAcceptanceContracts } from "../../core/acceptance-contract";
 import { redThenGreenScope, type RedThenGreenScope } from "../../core/proof-obligations";
 import { parseFrozenVerificationManifest } from "../../core/verification-manifest";
 import { DECISION_RECORD_AGENT } from "../../core/model-profiles";
+import { authoredDistillTaskRefusal, isDistillTask } from "../../core/distill-task";
 export type { ValidationResult } from "./validation-result";
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -219,6 +220,10 @@ export function validateFull(
       errors.push(`Task ${tid}: 'agent' must be a non-empty string`);
     } else if (!KNOWN_AGENTS.has(agent)) {
       errors.push(`Task ${tid}: unknown agent '${agent}'`);
+    } else if (scope === "decompose-payload" && isDistillTask(task)) {
+      // Refused here as population refuses it, so the operator meets it at
+      // decompose validation and not first at populate-task-graph.
+      errors.push(authoredDistillTaskRefusal(tid));
     }
 
     const wave = task.wave as number | undefined;
@@ -280,8 +285,10 @@ export function validateFull(
 
     // A total test waiver remains suspicious for code work. Independent policy
     // allows existing-tests-sufficient to waive only new-test creation without
-    // suppressing the regression obligation or triggering this warning.
-    if (verification.ok && !requiresRegression(verification.value.policy) &&
+    // suppressing the regression obligation or triggering this warning. A
+    // Distill Task waives both by construction: its one obligation carries
+    // the test requirement (ADR-0068), so it is never the suspicious case.
+    if (verification.ok && !isDistillTask(task) && !requiresRegression(verification.value.policy) &&
         !requiresNewTests(verification.value.policy) && task.description &&
         !NO_TEST_KEYWORDS.test(task.description as string)) {
       process.stderr.write(

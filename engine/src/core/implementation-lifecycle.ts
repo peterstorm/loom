@@ -11,6 +11,7 @@ import {
   type ImplementationRetryDisposition,
 } from "./implementation-retry";
 import { derivePendingTaskProof, type PendingTaskProof } from "./proof-obligations";
+import { isDistillTask } from "./distill-task";
 import { canonicalJson } from "./review-packet";
 import { sha256Hex } from "./digest";
 import {
@@ -41,6 +42,7 @@ export type ImplementationLifecycleError =
   | Readonly<{ kind: "invalid-lineage"; taskId: string; errors: readonly string[] }>
   | Readonly<{ kind: "terminal-escalation"; taskId: string }>
   | Readonly<{ kind: "already-attested"; taskId: string }>
+  | Readonly<{ kind: "distill-task-not-attestable"; taskId: string }>
   | Readonly<{ kind: "proof-already-satisfied"; taskId: string }>
   | Readonly<{ kind: "attestation-context-invalid"; taskId: string; detail: string }>
   | Readonly<{ kind: "task-already-settled"; taskId: string; status: "completed" | "implemented" }>
@@ -85,6 +87,9 @@ export function armImplementationAttestation(
   task: Task,
   input: Readonly<{ executing: boolean }>,
 ): LifecycleResult<AttestationCommand> {
+  // A Distill Task's Proof is `behaviour-preserved`; attestation would rewrite
+  // it into a state the State File refuses to load (ADR-0068).
+  if (isDistillTask(task)) return lifecycleFailure({ kind: "distill-task-not-attestable", taskId: task.id });
   if (task.status !== "pending") {
     return lifecycleFailure({ kind: "task-not-pending", taskId: task.id, status: task.status });
   }

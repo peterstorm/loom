@@ -25,6 +25,7 @@ import {
 import { nonEmpty, nonEmptyOf } from "./orchestration-contract/identity";
 import { canonicalJson, type JsonValue } from "./review-packet";
 import { sha256Bytes, sha256Hex } from "./digest";
+import { DISTILL_PASS_SETTINGS, type DistillPassSetting } from "./distill-pass-setting";
 import {
   collectDenseArray,
   exactRecordErrors,
@@ -39,8 +40,9 @@ import type { OwnerCheckAuthority } from "./owner-check-authority";
 
 export const VERIFICATION_MANIFEST_SOURCE_PATH = ".loom/verification-manifest.json" as const;
 export const VERIFICATION_MANIFEST_SCHEMA_VERSION = 1 as const;
-/** Source schema 2 adds the optional `acceptanceRunner`, `affectedRunner` and
- *  `testFileSuffixes`; schema 1 stays valid and means none of them. */
+/** Source schema 2 adds the optional `acceptanceRunner`, `affectedRunner`,
+ *  `testFileSuffixes` and `distillPass`; schema 1 stays valid and means none
+ *  of them. */
 export const VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION = 2 as const;
 export const VERIFICATION_MANIFEST_KIND = "loom-verification-manifest" as const;
 
@@ -112,20 +114,23 @@ type VerificationManifestBase = Readonly<{
   checks: readonly VerificationManifestCheck[];
 }>;
 
-/** Schema 1 cannot declare a runner or test-file suffixes; schema 2 may, and
- *  carries each key only when the operator declares it. */
+/** Schema 1 cannot declare a runner, test-file suffixes or the distill-pass
+ *  switch; schema 2 may, and carries each key only when the operator declares it. */
 export type VerificationManifest =
   | VerificationManifestBase & Readonly<{
       schemaVersion: typeof VERIFICATION_MANIFEST_SCHEMA_VERSION;
       acceptanceRunner?: never;
       affectedRunner?: never;
       testFileSuffixes?: never;
+      distillPass?: never;
     }>
   | VerificationManifestBase & Readonly<{
       schemaVersion: typeof VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION;
       acceptanceRunner?: AcceptanceRunner;
       affectedRunner?: AffectedRunner;
       testFileSuffixes?: NonEmpty<string>;
+      /** Whether population adds each Wave's Distill Task (ADR-0068); absent means `on`. */
+      distillPass?: DistillPassSetting;
     }>;
 
 /** The engine default's classification: the only one an engine-default source may carry. */
@@ -147,6 +152,10 @@ type FrozenVerificationManifestBase = Readonly<{
  * made since it existed carries it, the engine default included; only a
  * TaskGraph frozen before it lacks it, and that absence is exactly the
  * pre-I6 era.
+ *
+ * `distillPass` is the operator's distill-pass switch (ADR-0068), frozen only
+ * when the operator file declares it; `distillPassSetting` reads it, absent
+ * as `on`. The engine default declares nothing, so it never carries one.
  */
 export type FrozenVerificationManifest =
   | FrozenVerificationManifestBase & Readonly<{
@@ -155,6 +164,7 @@ export type FrozenVerificationManifest =
       acceptanceRunner?: never;
       affectedRunner?: never;
       testFiles?: EngineDefaultTestFiles;
+      distillPass?: never;
     }>
   | FrozenVerificationManifestBase & Readonly<{
       source: OperatorFileSource;
@@ -162,7 +172,16 @@ export type FrozenVerificationManifest =
       acceptanceRunner?: AcceptanceRunner;
       affectedRunner?: AffectedRunner;
       testFiles?: FrozenTestFiles;
+      distillPass?: DistillPassSetting;
     }>;
+
+/**
+ * Whether population adds the Distill Tasks under this frozen manifest: the
+ * operator's declared setting, or `on` when none was declared (and for a
+ * TaskGraph that carries no manifest at all).
+ */
+export const distillPassSetting = (manifest: FrozenVerificationManifest | undefined): DistillPassSetting =>
+  manifest?.distillPass ?? "on";
 
 /**
  * A manifest frozen since the test-file classification existed: its
@@ -495,6 +514,14 @@ function parseTestFileSuffixes(raw: unknown, path: string): Parsed<NonEmpty<stri
   return errors.length === 0 ? success(suffixes) : failure(errors);
 }
 
+/** The distill-pass switch: exactly one of `DISTILL_PASS_SETTINGS`. */
+function parseDistillPass(raw: unknown, path: string): Parsed<DistillPassSetting> {
+  const setting = DISTILL_PASS_SETTINGS.find((candidate) => candidate === raw);
+  return setting === undefined
+    ? failure([`${path} must be one of ${DISTILL_PASS_SETTINGS.map((candidate) => `"${candidate}"`).join(", ")}`])
+    : success(setting);
+}
+
 const TEST_FILES_SOURCES: ReadonlySet<unknown> = new Set<FrozenTestFiles["source"]>(["operator-manifest", "engine-default"]);
 
 function parseFrozenTestFiles(raw: unknown, path: string): Parsed<FrozenTestFiles> {
@@ -556,8 +583,8 @@ const errorsOf = (...results: readonly (Parsed<unknown> | null)[]): readonly str
 /** The value of an optional key that parsed, or null when it was not declared. */
 const valueOrNull = <T>(result: Parsed<T> | null): T | null => result?.ok === true ? result.value : null;
 
-const SOURCE_OPTIONAL_KEYS = ["acceptanceRunner", "affectedRunner", "testFileSuffixes"] as const;
-const FROZEN_OPTIONAL_KEYS = ["acceptanceRunner", "affectedRunner", "testFiles"] as const;
+const SOURCE_OPTIONAL_KEYS = ["acceptanceRunner", "affectedRunner", "testFileSuffixes", "distillPass"] as const;
+const FROZEN_OPTIONAL_KEYS = ["acceptanceRunner", "affectedRunner", "testFiles", "distillPass"] as const;
 
 function parseDocument(raw: unknown): Parsed<VerificationManifest> {
   // A non-record falls through to exactRecord, which names the shape error.
@@ -583,7 +610,9 @@ function parseDocument(raw: unknown): Parsed<VerificationManifest> {
     parseRunner(record.value.affectedRunner, "verificationManifest.affectedRunner", AFFECTED_RUNNER_ROLE));
   const suffixes = optionalKey(declared, "testFileSuffixes", () =>
     parseTestFileSuffixes(record.value.testFileSuffixes, "verificationManifest.testFileSuffixes"));
-  errors.push(...errorsOf(checks, acceptance, affected, suffixes));
+  const distillPass = optionalKey(declared, "distillPass", () =>
+    parseDistillPass(record.value.distillPass, "verificationManifest.distillPass"));
+  errors.push(...errorsOf(checks, acceptance, affected, suffixes, distillPass));
   if (!checks.ok || errors.length > 0) return failure(errors);
   const conflicts = reportConflicts(
     valueOrNull(acceptance), valueOrNull(affected), checks.value.map(({ report }) => report), "verificationManifest",
@@ -597,6 +626,7 @@ function parseDocument(raw: unknown): Parsed<VerificationManifest> {
         ...(acceptance?.ok === true ? { acceptanceRunner: acceptance.value } : {}),
         ...(affected?.ok === true ? { affectedRunner: affected.value } : {}),
         ...(suffixes?.ok === true ? { testFileSuffixes: suffixes.value } : {}),
+        ...(distillPass?.ok === true ? { distillPass: distillPass.value } : {}),
       })
     : freeze({ schemaVersion: VERIFICATION_MANIFEST_SCHEMA_VERSION, kind: VERIFICATION_MANIFEST_KIND, checks: checks.value });
   return success(manifest);
@@ -630,12 +660,16 @@ type FrozenOptionalFields = Readonly<{
   acceptanceRunner: AcceptanceRunner | null;
   affectedRunner: AffectedRunner | null;
   testFiles: FrozenTestFiles | null;
+  distillPass: DistillPassSetting | null;
 }>;
+
+/** What the engine default seals beside its classification: no runner and no declared switch. */
+const NOTHING_DECLARED = { acceptanceRunner: null, affectedRunner: null, distillPass: null } as const;
 
 function manifestAuthorityJson(
   source: VerificationManifestSource,
   checks: readonly ProjectWaveCompletionCheck[],
-  { acceptanceRunner, affectedRunner, testFiles }: FrozenOptionalFields,
+  { acceptanceRunner, affectedRunner, testFiles, distillPass }: FrozenOptionalFields,
 ): JsonValue {
   const projectChecks: readonly JsonValue[] = checks.map((check): JsonValue => ({
     kind: check.kind,
@@ -657,6 +691,7 @@ function manifestAuthorityJson(
     ...(acceptanceRunner === null ? {} : { acceptanceRunner: runnerAuthorityJson(acceptanceRunner) }),
     ...(affectedRunner === null ? {} : { affectedRunner: runnerAuthorityJson(affectedRunner) }),
     ...(testFiles === null ? {} : { testFiles: { source: testFiles.source, suffixes: testFiles.suffixes } }),
+    ...(distillPass === null ? {} : { distillPass }),
   };
 }
 
@@ -681,26 +716,26 @@ function engineDefaultManifest(testFiles: EngineDefaultTestFiles | null): Engine
     schemaVersion: VERIFICATION_MANIFEST_SCHEMA_VERSION,
     kind: "frozen-verification-manifest",
     source: ENGINE_DEFAULT_SOURCE,
-    manifestDigest: digestJson(manifestAuthorityJson(ENGINE_DEFAULT_SOURCE, [], {
-      acceptanceRunner: null, affectedRunner: null, testFiles,
-    })),
+    manifestDigest: digestJson(manifestAuthorityJson(ENGINE_DEFAULT_SOURCE, [], { ...NOTHING_DECLARED, testFiles })),
     projectChecks: Object.freeze([] as const),
     ...(testFiles === null ? {} : { testFiles }),
   });
 }
 
 function operatorFileManifest(authority: OperatorFileAuthority): OperatorFileFrozenManifest {
-  const { source, acceptanceRunner, affectedRunner, testFiles } = authority;
+  const { source, acceptanceRunner, affectedRunner, testFiles, distillPass } = authority;
   const projectChecks = freezeArray([...authority.checks].sort((left, right) => compareStrings(left.checkId, right.checkId)));
+  const optional = { acceptanceRunner, affectedRunner, testFiles, distillPass };
   return freeze({
     schemaVersion: VERIFICATION_MANIFEST_SCHEMA_VERSION,
     kind: "frozen-verification-manifest",
     source,
-    manifestDigest: digestJson(manifestAuthorityJson(source, projectChecks, { acceptanceRunner, affectedRunner, testFiles })),
+    manifestDigest: digestJson(manifestAuthorityJson(source, projectChecks, optional)),
     projectChecks,
     ...(acceptanceRunner === null ? {} : { acceptanceRunner }),
     ...(affectedRunner === null ? {} : { affectedRunner }),
     ...(testFiles === null ? {} : { testFiles }),
+    ...(distillPass === null ? {} : { distillPass }),
   });
 }
 
@@ -778,6 +813,7 @@ export function freezeVerificationManifest(rawBytes: unknown): Parsed<I6EraVerif
       testFiles: parsed.value.testFileSuffixes === undefined
         ? ENGINE_DEFAULT_TEST_FILES
         : freeze({ source: "operator-manifest" as const, suffixes: parsed.value.testFileSuffixes }),
+      distillPass: parsed.value.distillPass ?? null,
     }));
   });
 }
@@ -842,6 +878,7 @@ type FrozenFields = Readonly<{
   acceptance: Parsed<AcceptanceRunner> | null;
   affected: Parsed<AcceptanceRunner> | null;
   testFiles: Parsed<FrozenTestFiles> | null;
+  distillPass: Parsed<DistillPassSetting> | null;
 }>;
 
 function frozenTagErrors(record: UnknownRecord): string[] {
@@ -866,13 +903,15 @@ function parseFrozenFields(record: UnknownRecord, declared: readonly string[]): 
       parseRunner(record.affectedRunner, "frozenVerificationManifest.affectedRunner", AFFECTED_RUNNER_ROLE)),
     testFiles: optionalKey(declared, "testFiles", () =>
       parseFrozenTestFiles(record.testFiles, "frozenVerificationManifest.testFiles")),
+    distillPass: optionalKey(declared, "distillPass", () =>
+      parseDistillPass(record.distillPass, "frozenVerificationManifest.distillPass")),
   });
 }
 
 /** Cross-field refusals, in their reporting order: report conflicts, engine-default authority, digest shape. */
 function frozenFieldErrors(fields: FrozenFields): string[] {
-  const { source, checks, declaredDigest, acceptance, affected, testFiles } = fields;
-  const errors = [...errorsOf(source, checks, acceptance, affected, testFiles)];
+  const { source, checks, declaredDigest, acceptance, affected, testFiles, distillPass } = fields;
+  const errors = [...errorsOf(source, checks, acceptance, affected, testFiles, distillPass)];
   if (checks.ok) {
     errors.push(...reportConflicts(
       valueOrNull(acceptance), valueOrNull(affected), checks.value.map(({ reportPolicy }) => reportPolicy), "frozenVerificationManifest",
@@ -887,6 +926,9 @@ function frozenFieldErrors(fields: FrozenFields): string[] {
   }
   if (engineDefault && valueOrNull(testFiles)?.source === "operator-manifest") {
     errors.push("frozenVerificationManifest engine-default source cannot carry an operator-manifest testFiles");
+  }
+  if (engineDefault && distillPass !== null) {
+    errors.push("frozenVerificationManifest engine-default source cannot carry a distillPass setting");
   }
   if (!declaredDigest.ok) errors.push(`frozenVerificationManifest.manifestDigest: ${declaredDigest.error.message}`);
   if (engineDefault && checks.ok && checks.value.length > 0) {
@@ -915,6 +957,7 @@ function canonicalFrozenManifest(
         acceptanceRunner: valueOrNull(fields.acceptance),
         affectedRunner: valueOrNull(fields.affected),
         testFiles: frozenTestFiles,
+        distillPass: valueOrNull(fields.distillPass),
       });
 }
 

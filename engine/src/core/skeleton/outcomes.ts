@@ -16,6 +16,9 @@
  *   4. bound, but `skeletonLanguageOf` says unsupported → `unsupported-language`;
  *   5. bound and supported → `skeleton-written { origin: "spawn" }` (to write).
  *
+ * A Distill Task is the one exception (`distillOutcomeOf`, ADR-0068 §9): it
+ * never reports `skeleton-written`, so the planner derives no write for it.
+ *
  * A path the observations do not mention is absent. A Task id the graph does
  * not hold is `unknown-task`, never an empty outcome list: no Task and a Task
  * with no production files stay distinguishable.
@@ -23,6 +26,7 @@
 
 import { match } from "ts-pattern";
 import { contractRole } from "../acceptance-contract";
+import { isDistillTask } from "../distill-task";
 import { samePlanPath } from "../plan-path-match";
 import type { Task, TaskGraph } from "../../types";
 import { skeletonLanguageOf } from "./language";
@@ -83,13 +87,37 @@ function outcomeOf(graph: TaskGraph, task: Task, path: string, observation: Path
   return target.kind === "unsupported" ? Object.freeze({ kind: "unsupported-language", reason: target.reason }) : written("spawn");
 }
 
+/**
+ * A Distill Task's outcome at one path (ADR-0068 §9), given the outcome a
+ * holder of the path would get, or null where no outcome is true of it.
+ *
+ * No Skeleton is ever written, adopted or refreshed on a Distill Task's
+ * behalf, so it never reports `skeleton-written`:
+ * - a present path is `exists-not-skeletonized`, even while it still holds
+ *   the engine's bytes (that Skeleton is its holder's);
+ * - an absent path keeps the holder's reason no Skeleton belongs there
+ *   (unbound, or an unsupported language);
+ * - an absent path a holder would be given a Skeleton at has NO outcome: a
+ *   sibling deleted it, nothing is written, and none of the five outcomes
+ *   says so. It is the one path FR-030's "exactly one outcome" leaves out.
+ */
+function distillOutcomeOf(holderOutcome: SkeletonOutcome, observation: PathObservation): SkeletonOutcome | null {
+  if (observation.kind === "present") return EXISTS;
+  return holderOutcome.kind === "skeleton-written" ? null : holderOutcome;
+}
+
 export const skeletonOutcomesOf: SkeletonOutcomesOfFn = (graph, taskId, observations) => {
   const task = graph.tasks.find(({ id }) => id === taskId);
   if (task === undefined) return { ok: false, error: Object.freeze({ kind: "unknown-task", taskId }) };
+  const distill = isDistillTask(task);
   return {
     ok: true,
-    value: Object.freeze(productionFiles(graph, task).map((path): PathSkeletonOutcome =>
-      Object.freeze({ path, outcome: outcomeOf(graph, task, path, observations.get(path) ?? ABSENT) }))),
+    value: Object.freeze(productionFiles(graph, task).flatMap((path): readonly PathSkeletonOutcome[] => {
+      const observation = observations.get(path) ?? ABSENT;
+      const holderOutcome = outcomeOf(graph, task, path, observation);
+      const outcome = distill ? distillOutcomeOf(holderOutcome, observation) : holderOutcome;
+      return outcome === null ? [] : [Object.freeze({ path, outcome })];
+    })),
   };
 };
 

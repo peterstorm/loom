@@ -743,6 +743,11 @@ export type WaveReopeningAudit = Readonly<{
   completionReceipt: ProtectedWaveStateCommitted;
   /** Reopened Tasks; legacy authority never labels these as proven drift. */
   reopenedTaskIds: readonly string[];
+  /** The Distill Tasks among `reopenedTaskIds` that returned because a sibling
+   *  did (ADR-0068), never on the audit's own ground: no byte comparison ever
+   *  judged them. The operator's exact payload names them too. Absent when the
+   *  reopening swept none, and on every audit written before the Distill Task. */
+  sweptDistillTaskIds?: OrchestrationNonEmpty<string>;
 }>;
 
 /** Immutable audit of implemented Tasks of the active Wave that the operator
@@ -756,6 +761,11 @@ export type TaskReopeningAudit = Readonly<{
   wave: number;
   /** Distinct Tasks of `wave`, in TaskGraph order; a reopening names at least one. */
   reopenedTaskIds: OrchestrationNonEmpty<TaskId>;
+  /** The Distill Tasks among `reopenedTaskIds` that the operator did not name:
+   *  the engine swept them back with the named Tasks (ADR-0068). Absent when
+   *  the reopening swept none, and on every audit written before the Distill
+   *  Task. Every other reopened id is one the operator named. */
+  sweptDistillTaskIds?: OrchestrationNonEmpty<TaskId>;
   /** The operator's non-blank reason, at most 512 characters. */
   reason: string;
   /** The abandoned Wave Gate run whose review authority the reopening

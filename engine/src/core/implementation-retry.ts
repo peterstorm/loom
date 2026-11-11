@@ -22,6 +22,7 @@ import {
   type RetryRequiredSettlementReceipt,
   type SemanticAttempt,
 } from "./implementation-completion";
+import { DISTILL_APPENDIX_LABEL, distillPromptAppendix, isDistillTask } from "./distill-task";
 import { compareStrings } from "./ordering";
 import { canonicalJson, type JsonValue } from "./review-packet";
 import { sha256Hex } from "./digest";
@@ -69,6 +70,9 @@ export type RetryableImplementationTask = Readonly<{
   implementation_retry_protocol?: 2;
   implementation_retry_history_start?: number;
   implementation_retry_predecessor_receipt_id?: ImplementationSettlementReceiptId;
+  /** The Task's agent and protected file list: a Distill Task's bind its distill appendix. */
+  agent?: string;
+  file_list?: readonly string[];
   /** Attestation-mode fields; present only on a Task the attest program authored. */
   implementation_attestation?: true;
   proof?: TaskProof;
@@ -266,13 +270,18 @@ type ContextPayloadParser<T> = (raw: unknown) =>
   | Readonly<{ ok: true; value: T }>
   | Readonly<{ ok: false; errors: readonly string[] }>;
 
+const promptLines = (prompt: string): readonly string[] => prompt.split(/\r?\n/u);
+
+/** Whether a prompt line claims to be the engine-issued context `label` names. */
+const carriesLabel = (label: string) => (line: string): boolean => line.startsWith(`${label}:`);
+
 function parsePromptContext<T>(
   prompt: string,
   label: string,
   name: string,
   parse: ContextPayloadParser<T>,
 ): PromptContextParse<T> {
-  const lines = prompt.split(/\r?\n/u).filter((line) => line.startsWith(`${label}:`));
+  const lines = promptLines(prompt).filter(carriesLabel(label));
   if (lines.length === 0) return { ok: true, value: null, sourceLine: null };
   if (lines.length !== 1) return { ok: false, error: `implementation prompt must contain at most one ${name} context` };
   const prefix = `${label}: `;
@@ -406,6 +415,33 @@ export function deriveImplementationAttestationContext(
 
 const parsePromptAttestationContext = (prompt: string): PromptContextParse<ImplementationAttestationContext> =>
   parsePromptContext(prompt, IMPLEMENTATION_ATTESTATION_CONTEXT_LABEL, "attestation", parseImplementationAttestationContext);
+
+/**
+ * Bind the distill appendix (ADR-0068): every dispatched prompt of a Distill
+ * Task carries the exact appendix its protected file list derives, once, as
+ * whole lines; no other Task's prompt may carry a line claiming to be one.
+ * Found by its label like the retry and attestation contexts; its body is
+ * prose, so it is compared as lines rather than parsed. Null when the prompt
+ * is bound.
+ */
+function distillAppendixRefusal(task: RetryableImplementationTask, prompt: string): string | null {
+  const lines = promptLines(prompt);
+  const claims = lines.flatMap((line, index) => (carriesLabel(DISTILL_APPENDIX_LABEL)(line) ? [index] : []));
+  if (!isDistillTask(task)) {
+    return claims.length === 0
+      ? null
+      : `Task ${task.id} is not a Distill Task; refusing a caller-supplied distill appendix`;
+  }
+  const [start, ...others] = claims;
+  if (start === undefined) {
+    return `Task ${task.id} is its Wave's distill pass and requires the exact distill appendix from orchestration status`;
+  }
+  if (others.length > 0) return "implementation prompt must contain at most one distill appendix";
+  const expected = distillPromptAppendix(task).split("\n");
+  return expected.every((line, offset) => lines[start + offset] === line)
+    ? null
+    : `Task ${task.id} distill appendix bytes do not match its protected file list`;
+}
 
 type ImplementationRetryLineage =
   | Readonly<{ kind: "initial" }>
@@ -628,6 +664,10 @@ export function authorizeImplementationSpawn(
     case "initial":
     case "retry":
       break;
+    default: {
+      const unreachable: never = disposition;
+      return unreachable;
+    }
   }
   const parsedTaskId = parseTaskId(task.id, "implementation spawn task id");
   if (!parsedTaskId.ok) return { ok: false, error: parsedTaskId.error.errors.join("; ") };
@@ -672,6 +712,8 @@ export function authorizeImplementationSpawn(
   } else if (suppliedAttestation.value !== null) {
     return { ok: false, error: `Task ${task.id} is not in attestation mode; refusing a caller-supplied attestation context` };
   }
+  const distillRefusal = distillAppendixRefusal(task, prompt);
+  if (distillRefusal !== null) return { ok: false, error: distillRefusal };
   if (disposition.kind === "initial") {
     return supplied.value === null
       ? {

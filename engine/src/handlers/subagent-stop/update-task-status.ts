@@ -73,6 +73,7 @@ import {
 } from "../helpers/task-local-completion";
 import {
   productionExactSettlementPorts,
+  releaseSettledDistillSnapshot,
   settleExactImplementation,
 } from "../helpers/exact-implementation-settlement";
 // Historical callers import these shell utilities from this handler. Keep the
@@ -582,6 +583,9 @@ export const runUpdateTaskStatus = async (
     if (modernSettlement === undefined) {
       return { kind: "error", message: "update-task-status: modern Oracle settlement produced no transition" };
     }
+    // The locked update has committed the settlement, so a Distill Task
+    // attempt it released no longer needs its snapshot (ADR-0068 §5).
+    releaseSettledDistillSnapshot(repositoryRoot, authority, modernSettlement);
     if (modernSettlement.kind === "error") {
       return {
         kind: "error",

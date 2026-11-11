@@ -25,6 +25,10 @@ import {
   type TaskStatus,
 } from "../../src/types";
 import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
+import { isDistillTask } from "../../src/core/distill-task";
+import { DISTILL_AGENT } from "../../src/core/model-profiles";
+import { taskArtifactExpectation } from "../../src/core/task-artifact-expectation";
+import { DISTILL_VERIFICATION_POLICY, serializeVerificationPolicy } from "../../src/core/verification-policy";
 
 /*
  * Protected-state builders. Each mints its value through the production
@@ -174,8 +178,33 @@ export function graphFixture(tasks: readonly Task[]): TaskGraph {
 }
 
 /**
+ * The pending Proof a fixture Task carries, derived under the Task's own
+ * expectation (`taskArtifactExpectation`), as population derives it. A
+ * Distill Task (`agent: DISTILL_AGENT`) is derived under its engine-only
+ * policy, so its Proof is exactly task-completed and behaviour-preserved.
+ */
+function fixturePendingProof(input: TaskFixtureInput) {
+  return derivePendingTaskProof({
+    ...(isDistillTask(input)
+      ? { verificationPolicy: DISTILL_VERIFICATION_POLICY }
+      : { newTestsRequired: input.new_tests_required ?? true }),
+    declaredArtifacts: input.file_list ?? [],
+    declaredArtifactExpectation: taskArtifactExpectation(input),
+  });
+}
+
+/** The policy population stamps on a Distill Task, unless the fixture states its own. */
+function distillPolicyDefault(input: TaskFixtureInput): Pick<TaskCommonMetadata, "verification_policy"> {
+  return isDistillTask(input) && input.verification_policy === undefined
+    ? { verification_policy: serializeVerificationPolicy(DISTILL_VERIFICATION_POLICY) }
+    : {};
+}
+
+/**
  * Test-only lifecycle smart constructor. It keeps old scenario builders concise
  * without making illegal Task lifecycle combinations representable in production.
+ * `taskFixture({ agent: DISTILL_AGENT, file_list: [...], ... })` yields a
+ * Distill Task the State File loads.
  */
 export function taskFixture(input: TaskFixtureInput): Task {
   const {
@@ -192,9 +221,10 @@ export function taskFixture(input: TaskFixtureInput): Task {
     : suppliedNewTestObservation;
   const metadata = {
     ...baseMetadata,
+    ...distillPolicyDefault(input),
     ...(newTestObservation === undefined ? {} : { new_test_observation: newTestObservation }),
   };
-  const pending = pendingTaskProof(input.file_list ?? [], input.new_tests_required ?? true);
+  const pending = fixturePendingProof(input);
   if (status === "pending") {
     const proof = suppliedProof ?? pending;
     return proof.state === "satisfied" || revalidation === true
@@ -213,4 +243,47 @@ export function taskFixture(input: TaskFixtureInput): Task {
     return { ...metadata, status: "pending", proof: pending };
   }
   return { ...metadata, status: "failed", proof: evaluated };
+}
+
+/**
+ * The satisfied Proof of a Distill Task whose pass left every scope path as
+ * it found it: `behaviour-preserved` on the `unchanged` basis, the outcome
+ * that needs no test evidence (ADR-0068 §4).
+ */
+export function satisfiedDistillProof(scope: readonly string[]): SatisfiedTaskProof {
+  const evaluated = evaluateTaskProof(
+    { verificationPolicy: DISTILL_VERIFICATION_POLICY, declaredArtifacts: scope, declaredArtifactExpectation: "preserved" },
+    observedEvidence({ taskCompleted: true, filesModified: [] }),
+  );
+  if (evaluated.state !== "satisfied") throw new Error(`satisfied distill proof fixture is ${evaluated.state}`);
+  return evaluated;
+}
+
+export type DistillTaskFixtureInput =
+  & Readonly<{ id: string; wave: number; /** The Distill Scope: the Task's `file_list`. */ scope: readonly string[] }>
+  & Partial<Omit<TaskFixtureInput, "id" | "wave" | "agent" | "file_list">>;
+
+/**
+ * A Wave's Distill Task as population writes it: `agent: DISTILL_AGENT`, no
+ * dependencies, no Requirement trace, `file_list` = `scope`, review pending.
+ * `taskFixture` derives its engine-only policy and pending Proof; a settled
+ * status (`implemented`, `completed`) carries `satisfiedDistillProof` unless
+ * the caller states another Proof. The one builder every Distill Task suite
+ * uses, so a change to what a Distill Task is lands in one place.
+ */
+export function distillTaskFixture({ id, wave, scope, ...overrides }: DistillTaskFixtureInput): Task {
+  const settled = overrides.status === "implemented" || overrides.status === "completed";
+  return taskFixture({
+    id,
+    description: `Distill pass for Wave ${wave}`,
+    agent: DISTILL_AGENT,
+    wave,
+    depends_on: [],
+    file_list: [...scope],
+    spec_anchors: [],
+    spec_contributions: [],
+    review_status: "pending",
+    ...(settled ? { proof: satisfiedDistillProof(scope) } : {}),
+    ...overrides,
+  });
 }

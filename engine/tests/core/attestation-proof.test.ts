@@ -207,7 +207,10 @@ describe("attestation parsers", () => {
       newTestsRequired: true,
       declaredArtifacts: [],
       declaredArtifactExpectation: "inverted",
-    })).toMatchObject({ ok: false, errors: expect.arrayContaining(["declaredArtifactExpectation must be changed or attested"]) });
+    })).toMatchObject({
+      ok: false,
+      errors: expect.arrayContaining(["declaredArtifactExpectation must be one of changed, attested, preserved"]),
+    });
     expect(parseProofObligationInput({
       verificationPolicy: serializeVerificationPolicy(LEGACY_TESTS_WAIVED_POLICY),
       declaredArtifacts: ["x.ts"],

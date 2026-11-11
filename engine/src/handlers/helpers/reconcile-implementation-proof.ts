@@ -45,6 +45,8 @@ import {
 import { parseWaveArg } from "./wave-args";
 import { isExactGitSha } from "../../core/git-sha";
 import { taskVerificationPolicy } from "../../core/verification-policy";
+import { taskArtifactExpectation } from "../../core/task-artifact-expectation";
+import { isDistillTask } from "../../core/distill-task";
 
 export interface RecoveryPacketBinding {
   readonly taskId: string;
@@ -260,8 +262,28 @@ function reconcileEra(task: Task, verificationManifest: FrozenVerificationManife
       return "owed-if-new-tests";
     case "proof-unfrozen":
       throw new Error(`cannot reconcile: ${duty.reason}`);
+    default: {
+      const unreachable: never = duty;
+      return unreachable;
+    }
   }
 }
+
+/**
+ * Whether a Task's Proof can only be derived by settling one of its attempts,
+ * so reconcile leaves the Task exactly as it is: a Distill Task (ADR-0068 §9).
+ *
+ * Its one obligation beyond completion, `behaviour-preserved`, is a statement
+ * about ONE attempt: what that attempt changed against its attempt baseline,
+ * and whether the engine restored it. Settlement retires that baseline with
+ * the attempt, so reconcile has nothing to re-read: current bytes against the
+ * Task's first baseline are its siblings' work plus every earlier pass, and
+ * re-evaluating from them would either invent an `unchanged` basis for an
+ * attempt that never ran (an undispatched Distill Task) or overwrite a stored
+ * `restored` or `tests-passed` basis with one. Its stored Proof stands until
+ * its next attempt settles.
+ */
+const settledOnlyByAttempt = (task: Task): boolean => isDistillTask(task);
 
 /** Re-evaluate a failed aggregate from already-persisted evidence. This does
  * not invent completion or test provenance: it keeps the prior completion
@@ -281,7 +303,7 @@ export function reconcileTaskFromStoredEvidence(
   verificationManifest: FrozenVerificationManifest | undefined,
   contractConformance: ContractConformance,
 ): Task {
-  if (task.status === "completed") return task;
+  if (task.status === "completed" || settledOnlyByAttempt(task)) return task;
   // The ADT arrives parsed; no legacy-pair re-coercion here.
   const newTestsWritten = collectedNewTests.written;
   const newTestEvidence = collectedNewTests.evidence;
@@ -290,7 +312,7 @@ export function reconcileTaskFromStoredEvidence(
     {
       verificationPolicy: taskVerificationPolicy(task),
       declaredArtifacts: task.file_list ?? [],
-      declaredArtifactExpectation: task.implementation_attestation === true ? "attested" : "changed",
+      declaredArtifactExpectation: taskArtifactExpectation(task),
       redThenGreen: reconcileEra(task, verificationManifest),
     },
     {
@@ -418,6 +440,8 @@ const handler: HookHandler = async (_stdin, args) => {
       let recoveredWritesApplied = false;
       const tasks = state.tasks.map((task) => {
         if (task.wave !== wave || task.status === "completed" || task.proof?.state === "satisfied") return task;
+        // Before any byte is read: a Distill Task has no baseline to read against.
+        if (settledOnlyByAttempt(task)) return task;
         if (task.legacy_missing_proof === true && recoveredBaselineSha === null) return task;
         const recoveredPaths = recoveredPackets.modifiedPathsByTask.get(task.id) ?? [];
         // Historical recovery may alter only Tasks carrying engine-issued,

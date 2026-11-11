@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { AGENT_CATALOG } from "../../src/core/model-profiles";
 import { parseMachine, parseMachineJson } from "../../src/machine/parse-machine";
 
 const valid = {
@@ -191,6 +192,24 @@ describe("shipped machine definitions", () => {
       // R1 is real: the first phase must not allow any file-modifying tool
       expect(result.value.phases[0].allowedTools).toEqual([]);
       expect(result.value.enforcedTools).toEqual(expect.arrayContaining(["Edit", "Write", "MultiEdit"]));
+    }
+  });
+
+  // The shipped set, pinned by value: a machine file opts its agent type into
+  // gating, so adding or dropping one is a reviewed change, and a file whose
+  // name and `agent` disagree would never bind (loadMachine reads by type).
+  it("ships exactly the known machines, each parsing and naming the agent of its file", () => {
+    const directory = join(__dirname, "../../../machines");
+    const shipped = readdirSync(directory).filter((name) => name.endsWith(".machine.json")).sort();
+    expect(shipped).toEqual([
+      "code-implementer-agent.machine.json",
+      "distill-agent.machine.json",
+      "security-hunter-agent.machine.json",
+    ]);
+    for (const file of shipped) {
+      const result = parseMachineJson(readFileSync(join(directory, file), "utf-8"));
+      expect(result, file).toMatchObject({ ok: true, value: { agent: file.replace(/\.machine\.json$/, "") } });
+      if (result.ok) expect(AGENT_CATALOG, file).toHaveProperty(result.value.agent);
     }
   });
 });

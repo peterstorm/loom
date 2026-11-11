@@ -13,6 +13,8 @@
  * Every policy decision of the window lives here: which outstanding Tasks hold
  * active implementation authority, which reservations are reclaimable, which
  * Tasks escalated or are dispatchable, and which one recovery follows. A
+ * Distill Task is outstanding like any other, but is dispatchable only once
+ * the rest of its Wave is implemented and unreserved (ADR-0068). A
  * spawn owed while stage two leaves an export binding unresolved (the
  * skeleton report's problems, AS-051) is replaced by its repair, because
  * registration would refuse that spawn with the same problems. The
@@ -20,6 +22,7 @@
  * shell supplies the reservation-liveness observation.
  */
 import type { StatusReason, TaskGraph, WaveImplementationDispatch, WaveImplementationRecovery } from "../types";
+import { distillDispatchBlockers, distillWithheldMessage } from "./distill-task";
 import { canonicalRecord, nonEmpty, type NonEmpty } from "./orchestration-contract";
 import { quoteShellArgument } from "./shell-quoting";
 import { deriveTaskImplementationDispatch } from "./task-implementation-dispatch";
@@ -77,6 +80,26 @@ const notInWindow: ImplementationWindow = Object.freeze({ kind: "not-in-window" 
 
 const contradiction = (message: string, taskId: string | null = null): ImplementationWindow =>
   canonicalRecord({ kind: "contradiction", reason: statusReason("authority-contradiction", message, taskId) });
+
+/** A Distill Task the window does not offer yet, with the Wave Tasks it waits for (ADR-0068). */
+type WithheldDistillTask = Readonly<{ taskId: string; blockers: NonEmpty<string> }>;
+
+/**
+ * The outstanding Distill Tasks `distillDispatchBlockers` withholds, in graph
+ * order. Registration asks the same rule of the same reservations
+ * (`taskExecutionDecision`), reclaimable ones included, so status never
+ * offers a dispatch registration would refuse.
+ */
+function withheldDistillTasks(
+  graph: TaskGraph,
+  executing: ReadonlySet<string>,
+  outstanding: readonly TaskGraph["tasks"][number][],
+): readonly WithheldDistillTask[] {
+  return outstanding.flatMap((task) => {
+    const blockers = nonEmpty(distillDispatchBlockers(graph.tasks, executing, task));
+    return blockers === null ? [] : [{ taskId: task.id, blockers }];
+  });
+}
 
 /**
  * Classify a parsed protected graph against the implementation window.
@@ -173,8 +196,11 @@ export function classifyImplementationWindow(
       invalidAttestation.task.id,
     );
   }
+  const withheld = withheldDistillTasks(graph, executing, outstanding);
   const dispatches = derivations.flatMap(({ task, derivation }): readonly WaveImplementationDispatch[] =>
-    derivation.kind === "dispatch" && !activeTaskIds.has(task.id) ? [derivation.dispatch] : []);
+    derivation.kind === "dispatch" && !activeTaskIds.has(task.id) && !withheld.some(({ taskId }) => taskId === task.id)
+      ? [derivation.dispatch]
+      : []);
 
   const window = (recovery: WaveImplementationRecovery, message: string): ImplementationWindow => canonicalRecord({
     kind: "window",
@@ -249,5 +275,15 @@ export function classifyImplementationWindow(
       `Wave ${wave} implementation is in progress; wait for ${active.length} active task(s)`,
     );
   }
-  return contradiction(`Wave ${wave} has outstanding Tasks but no legal implementation recovery`);
+  // Every blocker of a withheld Distill Task is itself outstanding, so a legal
+  // graph left through one of the recoveries above. Reaching here with one
+  // withheld means its blockers can never settle.
+  const stuck = withheld.at(0);
+  return stuck === undefined
+    ? contradiction(`Wave ${wave} has outstanding Tasks but no legal implementation recovery`)
+    : contradiction(
+        `${distillWithheldMessage(stuck.taskId, stuck.blockers)}; none of them is dispatchable, active or escalated, ` +
+          "so the distill pass can never start; repair the Task Graph",
+        stuck.taskId,
+      );
 }

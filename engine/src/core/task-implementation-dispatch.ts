@@ -3,6 +3,7 @@ import {
   deriveImplementationAttestationContext,
   deriveImplementationRetryDisposition,
 } from "./implementation-retry";
+import { distillPromptAppendix, isDistillTask } from "./distill-task";
 import { canonicalRecord, type NonEmpty } from "./orchestration-contract";
 
 export type TaskImplementationDispatchDerivation =
@@ -22,6 +23,10 @@ export type TaskImplementationDispatchDerivation =
  * boundary proved mode/obligations/policy lockstep, so derivation can only
  * fail on an in-memory graph; either way no dispatch a child could not legally
  * be admitted on is emitted.
+ *
+ * A Distill Task's dispatch carries the fixed distill appendix (ADR-0068),
+ * which the spawn gate binds as well. The appendices follow the retry context
+ * in one order: attestation, then distill.
  */
 export function deriveTaskImplementationDispatch(task: Task): TaskImplementationDispatchDerivation {
   const disposition = deriveImplementationRetryDisposition(task);
@@ -33,19 +38,25 @@ export function deriveTaskImplementationDispatch(task: Task): TaskImplementation
       failureKinds: disposition.failureKinds,
     });
   }
-  let attestationLine: string | null = null;
+  const appendices: string[] = [];
   if (task.implementation_attestation === true) {
     const attestation = deriveImplementationAttestationContext(task);
     if (!attestation.ok) return canonicalRecord({ kind: "invalid-attestation" as const, error: attestation.error });
-    attestationLine = attestation.promptAppendix;
+    appendices.push(attestation.promptAppendix);
   }
+  if (isDistillTask(task)) appendices.push(distillPromptAppendix(task));
   const dispatch: WaveImplementationDispatch = disposition.kind === "initial"
-    ? canonicalRecord({ kind: "initial-implementation", taskId: task.id, semanticAttempt: 1, promptAppendix: attestationLine })
+    ? canonicalRecord({
+        kind: "initial-implementation",
+        taskId: task.id,
+        semanticAttempt: 1,
+        promptAppendix: appendices.length === 0 ? null : appendices.join("\n"),
+      })
     : canonicalRecord({
         kind: "retry-implementation",
         taskId: task.id,
         semanticAttempt: 2,
-        promptAppendix: attestationLine === null ? disposition.promptAppendix : `${disposition.promptAppendix}\n${attestationLine}`,
+        promptAppendix: [disposition.promptAppendix, ...appendices].join("\n"),
       });
   return canonicalRecord({ kind: "dispatch" as const, dispatch });
 }

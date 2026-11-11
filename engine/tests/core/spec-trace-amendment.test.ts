@@ -14,6 +14,7 @@ import { findingId } from "../fixtures/finding-id";
 import {
   activeWaveGateFixture,
   completedWaveGateFixture,
+  distillTaskFixture,
   protectedGraphFixture,
   taskFixture,
 } from "../fixtures/task-lifecycle";
@@ -382,5 +383,45 @@ describe("spec_trace_amendments load boundary", () => {
     const tampered = raw(committed());
     mutate(tampered);
     expect(parseTaskGraph(tampered).ok).toBe(false);
+  });
+});
+
+describe("amendSpecTrace over a roster that carries a Distill Task (ADR-0068)", () => {
+  /** `populated()` with Wave 2's Distill Task T4 over T2's and T3's files, as population appends it. */
+  const withDistillTask = (): TaskGraph => {
+    const graph = populated();
+    return protectedGraphFixture({
+      ...graph,
+      tasks: [...graph.tasks, distillTaskFixture({ id: "T4", wave: 2, scope: ["src/T2.ts", "src/T3.ts"] })],
+    });
+  };
+  const DISTILL_ROW = { id: "T4", spec_anchors: [], spec_contributions: [] };
+  const change = { T3: { anchors: ["FR-002"], contributions: [] } };
+
+  it("refuses a roster that leaves the Distill Task out, naming it", () => {
+    expect(refusal(withDistillTask(), amendment(change))).toMatchObject({
+      kind: "invalid-input",
+      message: expect.stringContaining("roster is stale or partial; missing existing Tasks: T4"),
+    });
+  });
+
+  it("amends when the roster lists the Distill Task with an empty trace, and leaves it untouched", () => {
+    const before = withDistillTask();
+    const base = amendment(change);
+    const { graph } = amended(before, { ...base, tasks: [...base.tasks, DISTILL_ROW] });
+    expect(taskById(graph, "T3").spec_anchors).toEqual(["FR-002"]);
+    expect(taskById(graph, "T4")).toBe(taskById(before, "T4"));
+    expect(reloads(graph).ok).toBe(true);
+  });
+
+  it("refuses a roster that gives the Distill Task a trace, so no unloadable graph is ever produced", () => {
+    const base = amendment();
+    // FR-001 is completed by T2 in the same Wave, so the contribution is otherwise a legal v2 edge.
+    const traced = { ...base, tasks: [...base.tasks, { ...DISTILL_ROW, spec_contributions: ["FR-001"] }] };
+    expect(refusal(withDistillTask(), traced)).toEqual({
+      kind: "invalid-trace",
+      message: "Spec trace amendment cannot give a Requirement trace to the engine-added distill pass: T4; " +
+        "list it with empty spec_anchors and spec_contributions",
+    });
   });
 });

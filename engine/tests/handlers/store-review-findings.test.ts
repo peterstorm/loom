@@ -5,8 +5,16 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { parseFindings, updateTaskFindings, OVERRIDE_AGENT } from "../../src/handlers/helpers/store-review-findings";
+import {
+  parseFindings,
+  reviewOverrideRefusal,
+  updateTaskFindings,
+  OVERRIDE_AGENT,
+} from "../../src/handlers/helpers/store-review-findings";
 import { claimsOfSeverity } from "../../src/core/findings";
+import { AGENT_POLICIES, DISTILL_AGENT } from "../../src/core/model-profiles";
+import { waveReviewExemption } from "../../src/core/wave-review-authority";
+import { distillTaskFixture } from "../fixtures/task-lifecycle";
 import { parseTaskGraph } from "../../src/state-manager";
 import type { Task } from "../../src/types";
 import { findingId } from "../fixtures/finding-id";
@@ -326,5 +334,61 @@ describe("store-review-findings CLI — an override must land or say why not", (
     // The override is a lockstep writer; findingsLockstepError now proves it.
     run(["--task", "T1"], "CRITICAL: a blocker\nADVISORY: a nit\n");
     expect(parseTaskGraph(state()).ok).toBe(true);
+  });
+
+  describe("a Task exempt from Wave review (the Distill Task, ADR-0068)", () => {
+    const withDistillTask = () => {
+      // A Distill Task exists only on a trace-v2 graph, so its sibling carries a v2 trace too.
+      const base = graph();
+      const sibling = { ...base.tasks[0], spec_anchors: [], spec_contributions: [] };
+      const distill = distillTaskFixture({ id: "T2", wave: 1, scope: ["src/a.ts"], status: "implemented" });
+      writeFileSync(statePath, JSON.stringify({ ...base, spec_trace_version: 2, tasks: [sibling, distill] }, null, 2));
+      return readFileSync(statePath, "utf-8");
+    };
+
+    it.each<readonly [string, readonly string[], string]>([
+      ["a critical", ["--task", "T2"], "CRITICAL: operator-added blocker\n"],
+      ["an advisory", ["--task", "T2"], "ADVISORY: a nit\n"],
+      ["--dismiss-all", ["--task", "T2", "--dismiss-all"], ""],
+    ])("REFUSES %s on it, naming the exemption, and writes nothing", (_label, args, input) => {
+      const before = withDistillTask();
+      const result = run(args, input);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("Task 'T2' is exempt from Wave review (distill-task)");
+      expect(result.stderr).toContain("store the Finding on the Task whose file it concerns");
+      expect(result.stderr).not.toContain("Stored findings for T2");
+      expect(readFileSync(statePath, "utf-8")).toBe(before);
+    });
+
+    it("still stores an override on its reviewed sibling, and leaves the Distill Task untouched", () => {
+      withDistillTask();
+      const distilled = state().tasks[1];
+      const result = run(["--task", "T1"], "CRITICAL: operator-added blocker\n");
+      expect(result.status, result.stderr).toBe(0);
+      expect(state().tasks[0].review_status).toBe("blocked");
+      expect(state().tasks[1]).toEqual(distilled);
+      expect(parseTaskGraph(state()).ok).toBe(true);
+    });
+  });
+});
+
+describe("reviewOverrideRefusal (pure)", () => {
+  it("is null for every reviewed Task", () => {
+    expect(reviewOverrideRefusal(baseTask)).toBeNull();
+    expect(reviewOverrideRefusal({ id: "T3", agent: "code-implementer-agent" })).toBeNull();
+    expect(reviewOverrideRefusal({ id: "T3", agent: "adr-writer-agent" })).toBeNull();
+  });
+
+  it("refuses exactly the Tasks the Wave Gate exempts from review, naming the Task and the exemption", () => {
+    fc.assert(fc.property(fc.constantFrom(...AGENT_POLICIES.map(({ agent }) => agent)), fc.integer({ min: 1, max: 99 }), (agent, n) => {
+      const task = { id: `T${n}`, agent };
+      const refusal = reviewOverrideRefusal(task);
+      const exemption = waveReviewExemption(task);
+      expect(refusal === null).toBe(exemption === null);
+      if (refusal !== null && exemption !== null) {
+        expect(refusal).toContain(`Task 'T${n}' is exempt from Wave review (${exemption.reason})`);
+      }
+    }));
+    expect(reviewOverrideRefusal({ id: "T9", agent: DISTILL_AGENT })).toContain("its Wave's distill pass");
   });
 });

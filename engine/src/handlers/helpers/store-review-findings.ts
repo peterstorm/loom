@@ -4,8 +4,10 @@
  * Reads CRITICAL:/ADVISORY: lines from stdin.
  */
 
+import { match } from "ts-pattern";
 import type { HookHandler, ReviewStatus, Task } from "../../types";
 import { reconcileWaveBlock } from "../../core/wave-gate-model";
+import { waveReviewExemption } from "../../core/wave-review-authority";
 import { TASK_GRAPH_PATH } from "../../config";
 import {
   attributeFindings,
@@ -147,6 +149,24 @@ export function updateTaskFindings(
   };
 }
 
+/**
+ * Pure: why the manual override may not write review state onto `task`, or
+ * null. A Task exempt from Wave review (`waveReviewExemption`, the one
+ * exemption rule) holds no review state: no gate check reads a status or a
+ * Finding stored on it, so an override written there would pass or block
+ * nothing while reporting that it had.
+ */
+export function reviewOverrideRefusal(task: Pick<Task, "id" | "agent">): string | null {
+  const exemption = waveReviewExemption(task);
+  if (exemption === null) return null;
+  const why = match(exemption.reason)
+    .with("distill-task", () =>
+      "it is its Wave's distill pass, and the Wave Gate reviews the distilled code through the Tasks that implemented it")
+    .exhaustive();
+  return `Task '${task.id}' is exempt from Wave review (${exemption.reason}): ${why}. ` +
+    "No review status or Finding is stored on it; store the Finding on the Task whose file it concerns.";
+}
+
 const handler: HookHandler = async (stdin, args) => {
   const taskId = argumentValue(args, "--task");
   if (!taskId) return { kind: "error", message: "--task required" };
@@ -196,7 +216,12 @@ const handler: HookHandler = async (stdin, args) => {
   // write released the lock between them, leaving a window where a concurrent
   // writer sees a stored critical on an unblocked wave.
   const dismissAll = args.includes("--dismiss-all");
-  await mgr.update((s) => {
+  const lockedRefusal = await mgr.updateAndReturn<string | null>((s) => {
+    // A Task exempt from Wave review is refused under the lock, on the Task
+    // this transform would update, and the unchanged graph is written back.
+    const locked = s.tasks.find((t) => t.id === taskId);
+    const refusal = locked === undefined ? null : reviewOverrideRefusal(locked);
+    if (refusal !== null) return { state: s, value: refusal };
     const tasks = s.tasks.map((t) => (
       t.id === taskId ? updateTaskFindings(t, critical, advisory, !dismissAll) : t
     ));
@@ -215,11 +240,15 @@ const handler: HookHandler = async (stdin, args) => {
     // honored here: clearing a review block must not silently drop a spec-check
     // block that this command never adjudicated.
     return {
-      ...s,
-      tasks,
-      wave_gates: reconcileWaveBlock(s.wave_gates, tasks, s.spec_check, target.wave),
+      state: {
+        ...s,
+        tasks,
+        wave_gates: reconcileWaveBlock(s.wave_gates, tasks, s.spec_check, target.wave),
+      },
+      value: null,
     };
   });
+  if (lockedRefusal !== null) return { kind: "error", message: lockedRefusal };
 
   // A dismissal and a two-finding override used to print the same shape of
   // line, differing only in a zero. Named, because this one passed a review.

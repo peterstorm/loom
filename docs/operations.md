@@ -757,7 +757,7 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration brief --task T4 --note "f
 - every `--task` (one or more, distinct) is `implemented` in that Wave, with an implementation lineage that can derive a dispatch (an escalated lineage is remediated first, with `helper orchestration remediate`);
 - a non-blank `--reason` of at most 512 characters.
 
-It then applies the transition a Contract Revision uses. The abandoned run's review epoch, spec-check, suite receipt and tombstone are retired, and review evidence that run accepted is kept as Findings. Each named Task returns to protected `pending` revalidation at a new Review Generation, and its Findings stay as prior Findings for the next Review Run. The Wave's gate bits reset (`impl_complete: false`, `tests_passed: null`, `reviews_complete: false`), and the Wave's other Tasks stay `implemented`. One `implemented-tasks-reopened` audit is appended to `task_reopening_history`, recording the Wave, the Task ids, the reason, and the abandoned run id (or `null`). Status then owes each reopened Task an `initial-implementation` dispatch, `brief` renders it, and the Wave Gate cannot start until each settles afresh. Re-running the same command while those Tasks still await re-implementation changes nothing. The same request after they are `pending` but with a different reason, or for a Task that is no longer `implemented`, is refused. `populate-task-graph --force` is never the recovery: it resets every Task and discards all settled evidence.
+It then applies the transition a Contract Revision uses. The abandoned run's review epoch, spec-check, suite receipt and tombstone are retired, and review evidence that run accepted is kept as Findings. Each named Task returns to protected `pending` revalidation at a new Review Generation, and its Findings stay as prior Findings for the next Review Run. The Wave's gate bits reset (`impl_complete: false`, `tests_passed: null`, `reviews_complete: false`), and the Wave's other Tasks stay `implemented`, except its `implemented` Distill Task, which returns with them (see [The distill pass](#the-distill-pass-distill-task)). One `implemented-tasks-reopened` audit is appended to `task_reopening_history`, recording the Wave, the Task ids, the Distill Tasks among them that the engine swept back unnamed (`sweptDistillTaskIds`, absent when there is none), the reason, and the abandoned run id (or `null`). Status then owes each reopened Task an `initial-implementation` dispatch, `brief` renders it, and the Wave Gate cannot start until each settles afresh. Re-running the same command while those Tasks still await re-implementation changes nothing. The same request after they are `pending` but with a different reason, or for a Task that is no longer `implemented`, is refused. `populate-task-graph --force` is never the recovery: it resets every Task and discards all settled evidence.
 
 ### Pi reports runtime version skew
 
@@ -954,6 +954,63 @@ Whenever any implementation agent stops, claimant or not, the engine runs the te
 - **Pi is report-only.** The Pi parent runs both checks over the child's epoch in the parent ledger after the child has ended, and reports the outcome as below. It never blocks.
 - **A handed-back agent is never blocked.** A Claude Code subagent that ends its turn with a delivered `SubagentHandback` has finished: the harness does not keep it working, so a block would only drop the stop's settlement and leave the Task stranded with live authority. When a check would block such a stop, the dispatcher reads the agent's transcript (`claudeFinalTurnHandedBack`), turns the block into a note (`… cannot be held open: it settles now, and the Wave Gate judges the Task.`) and settles. A failed or unanswered handback, a legacy final text, or a transcript it cannot read keeps the block.
 
+### The distill pass (Distill Task)
+
+Population adds one engine-owned Distill Task to every Wave that has implementation files ([ADR-0068](adr/ADR-0068-the-distill-pass-is-an-engine-added-task-per-wave.md)). A fresh `distill-agent` runs the `distill` skill in apply mode over the files the Wave's other Tasks implemented, before the Wave Gate reviews them. A decompose payload cannot author one: `validate-task-graph --decompose-payload` and `populate-task-graph` both refuse a Task whose agent is `distill-agent`.
+
+**What you see.**
+
+- `populate-task-graph` names what it added: `Task graph populated: 5 tasks (2 engine-added distill pass: T4, T5), waves: 1, 2`. Each Distill Task is numbered after the highest authored Task id, has no dependencies and no Requirement trace, and its `file_list` is its Distill Scope: the Wave's implementation files, never a test file and never an Acceptance Contract's frozen path.
+- `helper orchestration status` lists the Distill Task among its Wave's pending Tasks from the start, but does not offer its dispatch while any other Task of the Wave is not yet `implemented` or `completed`, or still holds a reservation. Once they have all settled, it is the one dispatch status offers. Dispatch it from status like any other dispatch (`helper orchestration brief`); the Wave Gate cannot start before it settles.
+- A spawn attempted early is refused at registration, on both harnesses: `T9 is its Wave's distill pass and runs after every other Task of the Wave is implemented; still outstanding: T1`.
+- Its brief carries a `LOOM_DISTILL_PASS: 1` appendix that lists its files and replaces the implementation workflow. The spawn gate compares the appendix line for line with the Task's protected file list.
+- At the Wave Gate it is registered with its Wave and issued no reviewer. Its review status reads `not required (exempt from Wave review: distill-task)`; the other Tasks' Review Packets read the distilled bytes. `helper store-review-findings --task <its id>` is refused for the same reason.
+
+**How it settles.** Its Proof holds two obligations, `task-completed` and `behaviour-preserved`. The evidence of the second records which basis held:
+
+| Basis | Meaning |
+|---|---|
+| `unchanged` | The pass left every file as it found it. No test run is owed. |
+| `tests-passed` | The pass changed files, a trusted passing run follows its last edit, and no changed file breaks a frozen signature. |
+| `restored` | The pass changed files and could not prove it preserved behaviour, so the engine wrote every file back. `after` lists the failure kinds that caused it, for example `"after": ["proof:regression-tests-failed"]`. |
+
+- A restored pass settles `implemented`: its edits are gone, the Wave loses nothing, and no retry is dispatched. Read `after` to see what the pass could not prove.
+- A write outside its file list is not restored, because the engine holds no bytes for it. It fails the attempt as it does for any Task: one retry, then escalation.
+- A restore that fails, or that leaves a file differing from what the attempt started with, settles `infrastructure-blocked`. The message names the Git tree that still holds the attempt's starting bytes, `refs/loom/distill/<authority digest>`.
+
+**Reopening.**
+
+- `reopen-task` on any other Task of the Wave also returns the Wave's `implemented` Distill Task to revalidation, so the re-implemented code is distilled again. The command says so (`The engine reopened T9 with them: …`), and the audit lists T9 among `reopenedTaskIds` and again under `sweptDistillTaskIds`. Naming the Distill Task alone reopens only it. Naming it together with a sibling records no sweep.
+- A Contract Revision returns it with the current Wave's implemented claimants.
+- `reopen-completed-wave` derives a Task set that includes the Wave's Distill Task whenever it includes a sibling, and your exact payload must name it too (`reopening taskIds must exactly equal engine-derived …`). The audit marks it under `sweptDistillTaskIds`: it returned with a sibling and was never itself proven drifted.
+
+**Requirement trace rosters.** The exact-roster JSON for `amend-spec-trace` covers every Task of the graph, Distill Tasks included, each as `{"id":"T9","spec_anchors":[],"spec_contributions":[]}`. A roster that leaves one out is refused as `roster is stale or partial; missing existing Tasks: T9`. A Distill Task never carries a trace: the State File refuses to load one that does.
+
+**Claude Code and Pi.**
+
+- On Claude Code, `machines/distill-agent.machine.json` denies Edit, Write and MultiEdit until one test run has passed with a parsed report: the skill's "green baseline first" rule. After that, edits and test runs are free.
+- A Pi child runs without the live phase gate, so on Pi that rule is prose in the brief and the agent definition only.
+- Settlement is the authority on both: it compares the files with the attempt's starting bytes and reads the test evidence from the ledger.
+- Pi needs the rendered `distill-agent` definition before a Wave with a Distill Task can be dispatched: run `scripts/sync-pi-agents.sh`, then `/reload`.
+
+**Turning it off.**
+
+- Opt out for a project with one optional key in a schema-2 `.loom/verification-manifest.json`:
+
+  ```json
+  {
+    "schemaVersion": 2,
+    "kind": "loom-verification-manifest",
+    "checks": [ … ],
+    "distillPass": "off"
+  }
+  ```
+
+  - The value is `"on"` or `"off"`; anything else is refused, and schema 1 refuses the key. Absent means `on`.
+  - It is frozen at population and covered by the manifest digest only when declared, so a manifest that does not declare it freezes to the digest it always had.
+  - It reaches only TaskGraphs populated after it. To drop the Distill Tasks of a graph that has not started, set the key and re-run `populate-task-graph`: every population replaces the whole roster.
+- There is no Distill Task without the key either for a Wave whose Tasks list no implementation file (test files, by the frozen `testFileSuffixes`, and an Acceptance Contract's frozen paths are never in its scope), for a Wave of ADR Tasks, and for a TaskGraph frozen before the test-file classification existed.
+
 ### Stop-check notes reach the orchestrator
 
 A stop check that fails open, or reports only, leaves a note naming the cause. That note is the only trace of a check that did not decide, so it goes to the orchestrating session as well as the operator.
@@ -1027,7 +1084,7 @@ On success, one immutable `SpecTraceWaveGateRetirement` audit preserves the old 
 
 ### Amending a v2 Requirement trace
 
-A populated v2 graph whose Completion Claims or Contributions are wrong (a Requirement claimed by the wrong Task, a missing Contribution) is corrected in place, not by `populate-task-graph --force`. Re-population resets every Task to `pending` and discards all settled implementation, review and refutation results; an amendment keeps them. Prepare the same exact-roster JSON as the legacy upgrade, every Task once in protected order, then:
+A populated v2 graph whose Completion Claims or Contributions are wrong (a Requirement claimed by the wrong Task, a missing Contribution) is corrected in place, not by `populate-task-graph --force`. Re-population resets every Task to `pending` and discards all settled implementation, review and refutation results; an amendment keeps them. Prepare the same exact-roster JSON as the legacy upgrade, every Task once in protected order (each Distill Task too, with two empty arrays), then:
 
 ```bash
 bun "$LOOM_DIR/engine/src/cli.ts" helper amend-spec-trace \

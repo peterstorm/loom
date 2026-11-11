@@ -33,6 +33,8 @@ Read the spec and plan, then decompose into parallel task graph.
 
 Fallback: `general-purpose`
 
+Never assign `distill-agent`. The engine adds each Wave's distill pass itself at population (ADR-0068); a payload Task naming it is refused.
+
 ---
 
 ## Decompose Rules

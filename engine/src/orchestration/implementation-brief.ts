@@ -28,7 +28,8 @@ import {
   type ImplementationBriefRequest,
   type RuleDocument,
 } from "../core/implementation-brief";
-import type { DomainResult } from "../core/orchestration-contract";
+import { distillDispatchBlockers, distillWithheldMessage } from "../core/distill-task";
+import { nonEmpty, type DomainResult } from "../core/orchestration-contract";
 import { bindingStampAgreement } from "../core/skeleton/bindings";
 import { deriveTaskImplementationDispatch } from "../core/task-implementation-dispatch";
 import { taskOwnerDuty } from "../core/owner-verification/obligations";
@@ -117,6 +118,10 @@ export function renderTaskImplementationBrief(
     if (task.status === "completed") {
       return { ok: false, error: `Task ${taskId} is completed; it is owed no implementation dispatch` };
     }
+    // A withheld Distill Task (ADR-0068) is owed no dispatch yet: status does
+    // not offer it and registration refuses it, by this same rule.
+    const distillBlockers = nonEmpty(distillDispatchBlockers(graph.tasks, new Set(graph.executing_tasks ?? []), task));
+    if (distillBlockers !== null) return { ok: false, error: distillWithheldMessage(taskId, distillBlockers) };
     const derivation = deriveTaskImplementationDispatch(task);
     if (derivation.kind === "escalated") {
       return { ok: false, error: `Task ${taskId} reached terminal implementation escalation (${derivation.failureKinds.join(", ")}); it is owed no dispatch` };

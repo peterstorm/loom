@@ -8,7 +8,12 @@
 
 import { taskGraphPath } from "../../config";
 import { anyActiveSubagent } from "../../machine/ledger";
-import { parseTaskReopeningArgs, reopenImplementedTasks, type TaskReopening } from "../../core/task-reopening";
+import {
+  parseTaskReopeningArgs,
+  reopenImplementedTasks,
+  sweptDistillTaskIdsOf,
+  type TaskReopening,
+} from "../../core/task-reopening";
 import { StateManager } from "../../state-manager";
 import type { HookResult } from "../../types";
 import { assertQuiescentUnderLock, subagentActiveRefusal, type SubagentActivity } from "./subagent-quiescence";
@@ -18,10 +23,14 @@ const OPERATION = "task reopening";
 function outcomeMessage(outcome: TaskReopening): string {
   const { wave, reopenedTaskIds } = outcome.audit;
   const tasks = reopenedTaskIds.join(", ");
-  return outcome.kind === "already-reopened"
-    ? `Wave ${wave}: ${tasks} already reopened; nothing changed.\n`
-    : `Wave ${wave}: ${tasks} reopened for re-implementation. Run helper orchestration brief --task <id> ` +
-      "(with --note for the Finding to fix) to dispatch each, then start a fresh Wave Gate once they settle.\n";
+  if (outcome.kind === "already-reopened") return `Wave ${wave}: ${tasks} already reopened; nothing changed.\n`;
+  const sweptIds = sweptDistillTaskIdsOf(outcome.audit);
+  const swept = sweptIds.length === 0
+    ? ""
+    : ` The engine reopened ${sweptIds.join(", ")} with them: it is the Wave's distill pass ` +
+      "and is dispatched again once the other Tasks settle.";
+  return `Wave ${wave}: ${tasks} reopened for re-implementation.${swept} Run helper orchestration brief --task <id> ` +
+    "(with --note for the Finding to fix) to dispatch each, then start a fresh Wave Gate once they settle.\n";
 }
 
 /** The operation over an injected subagent probe; production uses the evidence ledger. */

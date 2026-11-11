@@ -46,7 +46,8 @@ export type ProofObligation =
   | Readonly<{ kind: "red-then-green" }>
   | Readonly<{ kind: "attempt-scope-attested" }>
   | Readonly<{ kind: "declared-artifact-changed"; artifact: string }>
-  | Readonly<{ kind: "declared-artifact-attested"; artifact: string }>;
+  | Readonly<{ kind: "declared-artifact-attested"; artifact: string }>
+  | Readonly<{ kind: "behaviour-preserved" }>;
 
 /**
  * A TaskGraph's I6 era, with what the era brings. `owed-if-new-tests` marks a
@@ -154,8 +155,15 @@ export function taskRedThenGreenEra(scope: RedThenGreenScope, taskId: string): R
  * `attested` inverts the comparison for a Task whose work predates the
  * attempt: the child must leave the declared bytes EXACTLY as the attempt
  * baseline captured them, and a write is a failure, not a proof.
+ * `preserved` is a Distill Task's (ADR-0068): the child may change the
+ * declared bytes or leave them alone, and owes one `behaviour-preserved`
+ * obligation over the whole scope instead of one obligation per artifact.
  */
-export type DeclaredArtifactExpectation = "changed" | "attested";
+export const DECLARED_ARTIFACT_EXPECTATIONS = ["changed", "attested", "preserved"] as const;
+export type DeclaredArtifactExpectation = (typeof DECLARED_ARTIFACT_EXPECTATIONS)[number];
+
+const isDeclaredArtifactExpectation = (value: unknown): value is DeclaredArtifactExpectation =>
+  DECLARED_ARTIFACT_EXPECTATIONS.some((expectation) => expectation === value);
 
 /**
  * Small decomposition-owned input from which obligations are deterministically
@@ -225,6 +233,12 @@ export interface ObservedProofEvidence {
    * `not-owed` — so no path can skip the contract check by omission.
    */
   readonly contractConformance: ContractConformance;
+  /**
+   * Why the settlement shell wrote a Distill Task's snapshot back before this
+   * observation was taken (ADR-0068): the failures the attempt's own bytes
+   * would have settled with. Absent when nothing was restored.
+   */
+  readonly restoredAfter?: NonEmpty<string>;
 }
 
 /**
@@ -382,7 +396,21 @@ export type ProofEvidence =
   | Readonly<{ kind: "red-then-green"; red: RunRef; implementationWrite: string; green: RunRef }>
   | Readonly<{ kind: "attempt-scope-attested" }>
   | Readonly<{ kind: "declared-artifact-changed"; artifact: string }>
-  | Readonly<{ kind: "declared-artifact-attested"; artifact: string }>;
+  | Readonly<{ kind: "declared-artifact-attested"; artifact: string }>
+  | Readonly<{ kind: "behaviour-preserved"; basis: BehaviourPreservedBasis }>;
+
+/**
+ * Why a Distill Task's attempt is known to have preserved behaviour
+ * (ADR-0068). `unchanged`: it left every scope path as its attempt baseline
+ * captured it. `restored`: it changed them, could not prove the change, and
+ * the engine wrote the snapshot back; `after` keeps what it would have
+ * failed with. `tests-passed`: it changed them and the regression verdict is
+ * a pass the evaluation policy admits, with the provenance that pass had.
+ */
+export type BehaviourPreservedBasis =
+  | Readonly<{ kind: "unchanged" }>
+  | Readonly<{ kind: "restored"; after: NonEmpty<string> }>
+  | Readonly<{ kind: "tests-passed"; provenance: "evidence-ledger" | "pi-structured" }>;
 
 export type PendingProofResult = Readonly<{
   state: "pending";
@@ -458,14 +486,28 @@ export function deriveProofObligations(input: ProofObligationInput): NonEmpty<Pr
     ...(requiresNewTests(policy) && input.redThenGreen === "owed-if-new-tests"
       ? [Object.freeze({ kind: "red-then-green" as const })]
       : []),
-    ...(expectation === "attested"
-      ? [Object.freeze({ kind: "attempt-scope-attested" as const })]
-      : []),
-    ...artifacts.map((artifact) => Object.freeze(expectation === "attested"
-      ? { kind: "declared-artifact-attested" as const, artifact }
-      : { kind: "declared-artifact-changed" as const, artifact })),
+    ...scopeObligations(expectation, artifacts),
   ];
   return nonEmptyOf(Object.freeze({ kind: "task-completed" }), ...tail);
+}
+
+/** The obligations the declared artifacts owe under one expectation, in artifact order. */
+function scopeObligations(expectation: DeclaredArtifactExpectation, artifacts: readonly string[]): readonly ProofObligation[] {
+  switch (expectation) {
+    case "changed":
+      return artifacts.map((artifact) => Object.freeze({ kind: "declared-artifact-changed" as const, artifact }));
+    case "attested":
+      return [
+        Object.freeze({ kind: "attempt-scope-attested" as const }),
+        ...artifacts.map((artifact) => Object.freeze({ kind: "declared-artifact-attested" as const, artifact })),
+      ];
+    case "preserved":
+      return [Object.freeze({ kind: "behaviour-preserved" as const })];
+    default: {
+      const unreachable: never = expectation;
+      return unreachable;
+    }
+  }
 }
 
 /** Derive the initial aggregate; no observation has been interpreted yet. */
@@ -599,6 +641,54 @@ const evaluateDeclaredArtifactChanged = (
       });
 };
 
+const REGRESSION_OBLIGATION = Object.freeze({ kind: "regression-test-pass" as const });
+
+/**
+ * The `behaviour-preserved` arm (ADR-0068). An attempt that left the scope as
+ * its baseline captured it preserved behaviour trivially, whether it never
+ * wrote or the engine restored it. One that changed the scope owes what an
+ * implementation attempt owes for the same bytes: no contract violation in a
+ * changed path, then a regression pass the policy admits. It fails with those
+ * obligations' own failures, so a reader meets no second vocabulary.
+ */
+const evaluateBehaviourPreserved = (
+  obligation: Extract<ProofObligation, { kind: "behaviour-preserved" }>,
+  observed: ObservedProofEvidence,
+  policy: ProofEvaluationPolicy,
+): EvaluatedProofResult => {
+  const satisfied = (basis: BehaviourPreservedBasis): EvaluatedProofResult => Object.freeze({
+    state: "satisfied",
+    obligation,
+    evidence: Object.freeze({ kind: "behaviour-preserved", basis: Object.freeze(basis) }),
+  });
+  if (observed.filesModified.length === 0) {
+    return satisfied(observed.restoredAfter === undefined
+      ? { kind: "unchanged" }
+      : { kind: "restored", after: mapNonEmpty(observed.restoredAfter, (reason) => reason) });
+  }
+  const violated = observed.filesModified.flatMap((artifact) => {
+    const violations = violationsOf(observed.contractConformance, artifact);
+    return violations === undefined ? [] : [{ artifact, violations }];
+  }).at(0);
+  if (violated !== undefined) {
+    return Object.freeze({
+      state: "failed",
+      obligation,
+      failure: Object.freeze({
+        kind: "declared-artifact-contract-violated",
+        artifact: violated.artifact,
+        violations: mapNonEmpty(violated.violations, (violation) => Object.freeze({ ...violation })),
+      }),
+    });
+  }
+  const regression = evaluateRegression(REGRESSION_OBLIGATION, observed.testResult, policy);
+  if (regression.state === "failed") return Object.freeze({ state: "failed", obligation, failure: regression.failure });
+  return satisfied({
+    kind: "tests-passed",
+    provenance: regression.evidence.kind === "regression-test-pass" ? regression.evidence.provenance : "evidence-ledger",
+  });
+};
+
 const evaluateOne = (
   obligation: ProofObligation,
   observed: ObservedProofEvidence,
@@ -666,6 +756,8 @@ const evaluateOne = (
             obligation,
             evidence: Object.freeze({ kind: "declared-artifact-attested", artifact: obligation.artifact }),
           });
+    case "behaviour-preserved":
+      return evaluateBehaviourPreserved(obligation, observed, policy);
   }
 };
 
@@ -768,7 +860,7 @@ const parseNonEmptyString = (raw: unknown, path: string): ProofParseResult<strin
 export function parseProofObligation(raw: unknown, path = "obligation"): ProofParseResult<ProofObligation> {
   if (!isRecord(raw)) return fail([`${path} must be an object`]);
   if (raw.kind === "task-completed" || raw.kind === "regression-test-pass" || raw.kind === "new-tests" ||
-      raw.kind === "red-then-green" || raw.kind === "attempt-scope-attested") {
+      raw.kind === "red-then-green" || raw.kind === "attempt-scope-attested" || raw.kind === "behaviour-preserved") {
     const kind = raw.kind;
     return parseExactRecordArm<ProofObligation>(raw, path, ["kind"], () =>
       ok(Object.freeze({ kind })));
@@ -780,7 +872,7 @@ export function parseProofObligation(raw: unknown, path = "obligation"): ProofPa
       return artifact.ok ? ok(Object.freeze({ kind, artifact: artifact.value })) : artifact;
     });
   }
-  return fail([`${path}.kind must be task-completed, regression-test-pass, new-tests, red-then-green, attempt-scope-attested, declared-artifact-changed, or declared-artifact-attested`]);
+  return fail([`${path}.kind must be task-completed, regression-test-pass, new-tests, red-then-green, attempt-scope-attested, declared-artifact-changed, declared-artifact-attested, or behaviour-preserved`]);
 }
 
 type VerificationPolicySelection = Readonly<{
@@ -807,9 +899,8 @@ function selectVerificationPolicy(raw: Record<string, unknown>): VerificationPol
 function proofInputShapeErrors(raw: Record<string, unknown>): readonly string[] {
   return [
     ...(Array.isArray(raw.declaredArtifacts) ? [] : ["declaredArtifacts must be an array"]),
-    ...(raw.declaredArtifactExpectation !== undefined &&
-        raw.declaredArtifactExpectation !== "changed" && raw.declaredArtifactExpectation !== "attested"
-      ? ["declaredArtifactExpectation must be changed or attested"]
+    ...(raw.declaredArtifactExpectation !== undefined && !isDeclaredArtifactExpectation(raw.declaredArtifactExpectation)
+      ? [`declaredArtifactExpectation must be one of ${DECLARED_ARTIFACT_EXPECTATIONS.join(", ")}`]
       : []),
     ...(raw.redThenGreen !== undefined && raw.redThenGreen !== "owed-if-new-tests" && raw.redThenGreen !== "not-owed"
       ? ["redThenGreen must be owed-if-new-tests or not-owed"]
@@ -1030,12 +1121,23 @@ function parseContractConformance(raw: unknown, path = "contractConformance"): P
   });
 }
 
+/** The observed changed paths in order, with every element error; absent reads as none. */
+function parseModifiedFiles(raw: unknown): Readonly<{ files: readonly string[]; errors: readonly string[] }> {
+  if (raw === undefined) return { files: [], errors: [] };
+  if (!Array.isArray(raw)) return { files: [], errors: ["filesModified must be an array when present"] };
+  const parsed = raw.map((value: unknown, index) => parseNonEmptyString(value, `filesModified[${index}]`));
+  return {
+    files: parsed.flatMap((entry) => (entry.ok ? [entry.value] : [])),
+    errors: parsed.flatMap((entry) => (entry.ok ? [] : entry.errors)),
+  };
+}
+
 export function parseObservedProofEvidence(raw: unknown): ProofParseResult<ObservedProofEvidence> {
   if (!isRecord(raw)) return fail(["observed proof evidence must be an object"]);
   const exact = parseExactRecordArm(
     raw,
     "observed proof evidence",
-    ["taskCompleted", "testResult", "filesModified", "newTestsWritten", "newTestEvidence", "redThenGreen", "contractConformance"],
+    ["taskCompleted", "testResult", "filesModified", "newTestsWritten", "newTestEvidence", "redThenGreen", "contractConformance", "restoredAfter"],
     () => ok(true),
   );
   if (!exact.ok) return fail(exact.errors);
@@ -1053,17 +1155,14 @@ export function parseObservedProofEvidence(raw: unknown): ProofParseResult<Obser
   const contractConformance = parseContractConformance(raw.contractConformance);
   if (!contractConformance.ok) errors.push(...contractConformance.errors);
 
+  const restoredAfter = raw.restoredAfter === undefined
+    ? undefined
+    : parseNonEmptyArray(raw.restoredAfter, "restoredAfter", parseNonEmptyString);
+  if (restoredAfter !== undefined && !restoredAfter.ok) errors.push(...restoredAfter.errors);
+
   if (typeof raw.taskCompleted !== "boolean") errors.push("taskCompleted must be a boolean");
-  const files: string[] = [];
-  if (raw.filesModified !== undefined && !Array.isArray(raw.filesModified)) {
-    errors.push("filesModified must be an array when present");
-  } else if (Array.isArray(raw.filesModified)) {
-    raw.filesModified.forEach((value, index) => {
-      const parsed = parseNonEmptyString(value, `filesModified[${index}]`);
-      if (parsed.ok) files.push(parsed.value);
-      else errors.push(...parsed.errors);
-    });
-  }
+  const modified = parseModifiedFiles(raw.filesModified);
+  errors.push(...modified.errors);
   if (raw.newTestsWritten !== undefined && typeof raw.newTestsWritten !== "boolean") {
     errors.push("newTestsWritten must be a boolean when present");
   }
@@ -1075,11 +1174,12 @@ export function parseObservedProofEvidence(raw: unknown): ProofParseResult<Obser
   return ok(Object.freeze({
     taskCompleted: raw.taskCompleted === true,
     ...(testResult === undefined ? {} : { testResult }),
-    filesModified: Object.freeze([...new Set(files)]),
+    filesModified: Object.freeze([...new Set(modified.files)]),
     ...(typeof raw.newTestsWritten === "boolean" ? { newTestsWritten: raw.newTestsWritten } : {}),
     ...(typeof raw.newTestEvidence === "string" ? { newTestEvidence: raw.newTestEvidence } : {}),
     ...(redThenGreen?.ok ? { redThenGreen: redThenGreen.value } : {}),
     contractConformance: contractConformance.value,
+    ...(restoredAfter?.ok ? { restoredAfter: restoredAfter.value } : {}),
   }));
 }
 
@@ -1167,6 +1267,26 @@ function parseRegressionPassEvidence(raw: Record<string, unknown>, path: string)
   });
 }
 
+function parseBehaviourPreservedBasis(raw: unknown, path: string): ProofParseResult<BehaviourPreservedBasis> {
+  if (!isRecord(raw)) return fail([`${path} must be an object`]);
+  if (raw.kind === "unchanged") {
+    return parseExactRecordArm<BehaviourPreservedBasis>(raw, path, ["kind"], () => ok(Object.freeze({ kind: "unchanged" })));
+  }
+  if (raw.kind === "restored") {
+    return parseExactRecordArm<BehaviourPreservedBasis>(raw, path, ["kind", "after"], () => {
+      const after = parseNonEmptyArray(raw.after, `${path}.after`, parseNonEmptyString);
+      return after.ok ? ok(Object.freeze({ kind: "restored", after: after.value })) : after;
+    });
+  }
+  if (raw.kind === "tests-passed") {
+    return parseExactRecordArm<BehaviourPreservedBasis>(raw, path, ["kind", "provenance"], () =>
+      raw.provenance === "evidence-ledger" || raw.provenance === "pi-structured"
+        ? ok(Object.freeze({ kind: "tests-passed", provenance: raw.provenance }))
+        : fail([`${path}.provenance must be evidence-ledger or pi-structured`]));
+  }
+  return fail([`${path}.kind must be unchanged, restored, or tests-passed`]);
+}
+
 export function parseProofEvidence(raw: unknown, path = "evidence"): ProofParseResult<ProofEvidence> {
   if (!isRecord(raw)) return fail([`${path} must be an object`]);
   if (raw.kind === "task-completed" || raw.kind === "attempt-scope-attested") {
@@ -1195,8 +1315,22 @@ export function parseProofEvidence(raw: unknown, path = "evidence"): ProofParseR
       return facts.ok ? ok(Object.freeze({ kind: "red-then-green", ...facts.value })) : facts;
     });
   }
+  if (raw.kind === "behaviour-preserved") {
+    return parseExactRecordArm<ProofEvidence>(raw, path, ["kind", "basis"], () => {
+      const basis = parseBehaviourPreservedBasis(raw.basis, `${path}.basis`);
+      return basis.ok ? ok(Object.freeze({ kind: "behaviour-preserved", basis: basis.value })) : basis;
+    });
+  }
   return fail([`${path}.kind is not recognized proof evidence`]);
 }
+
+/** Every failure the regression verdict can produce, for the two obligations that judge it. */
+const REGRESSION_FAILURE_KINDS: readonly ProofFailure["kind"][] = Object.freeze([
+  "test-result-missing",
+  "regression-tests-failed",
+  "untrusted-regression-tests-failed",
+  "untrusted-regression-pass",
+]);
 
 const resultMatchesObligation = (result: ProofObligationResult): boolean => {
   if (result.state === "failed") {
@@ -1204,12 +1338,7 @@ const resultMatchesObligation = (result: ProofObligationResult): boolean => {
       case "task-completed":
         return result.failure.kind === "task-not-completed";
       case "regression-test-pass":
-        return [
-          "test-result-missing",
-          "regression-tests-failed",
-          "untrusted-regression-tests-failed",
-          "untrusted-regression-pass",
-        ].includes(result.failure.kind);
+        return REGRESSION_FAILURE_KINDS.includes(result.failure.kind);
       case "new-tests":
         return result.failure.kind === "new-tests-not-observed";
       case "red-then-green":
@@ -1223,6 +1352,9 @@ const resultMatchesObligation = (result: ProofObligationResult): boolean => {
       case "declared-artifact-attested":
         return result.failure.kind === "declared-artifact-drifted"
           && result.failure.artifact === result.obligation.artifact;
+      case "behaviour-preserved":
+        return REGRESSION_FAILURE_KINDS.includes(result.failure.kind) ||
+          result.failure.kind === "declared-artifact-contract-violated";
     }
   }
   if (result.state === "satisfied") {
