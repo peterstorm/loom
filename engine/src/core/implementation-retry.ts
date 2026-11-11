@@ -22,7 +22,7 @@ import {
   type RetryRequiredSettlementReceipt,
   type SemanticAttempt,
 } from "./implementation-completion";
-import { DISTILL_APPENDIX_LABEL, distillPromptAppendix, isDistillTask } from "./distill-task";
+import { DISTILL_APPENDIX_LABEL, distillPromptAppendix, taskRolePolicy } from "./distill-task";
 import { compareStrings } from "./ordering";
 import { canonicalJson, type JsonValue } from "./review-packet";
 import { sha256Hex } from "./digest";
@@ -426,8 +426,9 @@ const parsePromptAttestationContext = (prompt: string): PromptContextParse<Imple
  */
 function distillAppendixRefusal(task: RetryableImplementationTask, prompt: string): string | null {
   const lines = promptLines(prompt);
-  const claims = lines.flatMap((line, index) => (carriesLabel(DISTILL_APPENDIX_LABEL)(line) ? [index] : []));
-  if (!isDistillTask(task)) {
+  const claimsAppendix = carriesLabel(DISTILL_APPENDIX_LABEL);
+  const claims = lines.flatMap((line, index) => (claimsAppendix(line) ? [index] : []));
+  if (taskRolePolicy(task).dispatchAppendix === "none") {
     return claims.length === 0
       ? null
       : `Task ${task.id} is not a Distill Task; refusing a caller-supplied distill appendix`;

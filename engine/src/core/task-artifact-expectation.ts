@@ -5,7 +5,7 @@
  * obligations and the evidence they are evaluated against cannot disagree.
  * Pure.
  */
-import { isDistillTask } from "./distill-task";
+import { taskRolePolicy } from "./distill-task";
 import type { DeclaredArtifactExpectation } from "./proof-obligations";
 
 /** What the choice reads of a Task; a raw State File record qualifies before it is proven. */
@@ -20,7 +20,7 @@ export type ArtifactExpectationSource = Readonly<{ agent?: unknown; implementati
  * order of the two tests is unobservable on a loaded Task.
  */
 export function taskArtifactExpectation(task: ArtifactExpectationSource): DeclaredArtifactExpectation {
-  if (isDistillTask(task)) return "preserved";
+  if (taskRolePolicy(task).declaredArtifacts === "preserved") return "preserved";
   return task.implementation_attestation === true ? "attested" : "changed";
 }
 

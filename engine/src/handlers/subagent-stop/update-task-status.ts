@@ -63,7 +63,6 @@ import {
   describeSettlement,
   isWaveComplete,
   settleUnavailableImplementation,
-  type ImplementationSettlementApplicationResult,
   type NewTestEvidence,
 } from "../../core/implementation-application";
 import {
@@ -73,8 +72,7 @@ import {
 } from "../helpers/task-local-completion";
 import {
   productionExactSettlementPorts,
-  releaseSettledDistillSnapshot,
-  settleExactImplementation,
+  settleAndPersistExactImplementation,
 } from "../helpers/exact-implementation-settlement";
 // Historical callers import these shell utilities from this handler. Keep the
 // surface while the implementation lives in the neutral shared shell module.
@@ -561,31 +559,18 @@ export const runUpdateTaskStatus = async (
   if (authority !== null) {
     const observedAt = parseIsoInstant(new Date().toISOString(), "Claude implementation observation instant");
     if (!observedAt.ok) return { kind: "error", message: observedAt.error.errors.join("; ") };
-    const modernOutcome: { settlement?: ImplementationSettlementApplicationResult } = {};
-    const settlementPorts = productionExactSettlementPorts(repositoryRoot, mgr.getPath());
-    await mgr.update((locked) => {
-      const settled = settleExactImplementation(locked, {
-        transport: "Claude",
-        authority,
-        observedAt: observedAt.value,
-        parserModifiedPaths: filesModified,
-        parserPathLabel: "Claude transcript files_modified",
-        taskCompleted: true,
-        testResult: testEvidence.result,
-        testEvidence: testEvidence.evidence,
-        proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
-        ledger: epochLedger,
-      }, settlementPorts);
-      modernOutcome.settlement = settled.application;
-      return settled.application.kind === "error" ? locked : settled.application.state;
-    });
-    const modernSettlement = modernOutcome.settlement;
-    if (modernSettlement === undefined) {
-      return { kind: "error", message: "update-task-status: modern Oracle settlement produced no transition" };
-    }
-    // The locked update has committed the settlement, so a Distill Task
-    // attempt it released no longer needs its snapshot (ADR-0068 §5).
-    releaseSettledDistillSnapshot(repositoryRoot, authority, modernSettlement);
+    const { application: modernSettlement } = await settleAndPersistExactImplementation(mgr, {
+      transport: "Claude",
+      authority,
+      observedAt: observedAt.value,
+      parserModifiedPaths: filesModified,
+      parserPathLabel: "Claude transcript files_modified",
+      taskCompleted: true,
+      testResult: testEvidence.result,
+      testEvidence: testEvidence.evidence,
+      proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
+      ledger: epochLedger,
+    }, productionExactSettlementPorts(repositoryRoot, mgr.getPath()));
     if (modernSettlement.kind === "error") {
       return {
         kind: "error",

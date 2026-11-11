@@ -37,7 +37,7 @@ import {
   settledDistillSnapshotDigests,
   type DistillSnapshotPort,
 } from "../core/distill-snapshot";
-import { isDistillTask } from "../core/distill-task";
+import { distillSnapshotRef, isDistillTask } from "../core/distill-task";
 import type { DomainResult } from "../core/orchestration-contract";
 import { discardDistillSnapshots, gitDistillSnapshots } from "../orchestration/distill-snapshot";
 
@@ -63,9 +63,9 @@ class LockedRegistrationRefusal extends Error {}
  * Distill Task attempt exists without one.
  *
  * It first discards the snapshots of the Task's earlier, semantically settled
- * attempts (`settledDistillSnapshotDigests`): the settlement transport
- * discards them once its state is persisted, and this catches one whose
- * discard was lost.
+ * attempts (`settledDistillSnapshotDigests`): settlement discards each once
+ * its state is persisted (`settleAndPersistExactImplementation`), and this
+ * catches one whose discard was lost.
  */
 function captureDistillSnapshots(
   root: string,
@@ -298,6 +298,28 @@ export async function registerTaskExecutionBatch(
   }
 }
 
+/**
+ * Discard the snapshots of rolled-back Distill Task attempts. The rollback is
+ * already committed, so a repository that cannot be resolved here fails
+ * nothing: the refs it leaves are named on stderr, as a failed discard is.
+ */
+function discardRolledBackDistillSnapshots(
+  rolledBack: readonly ImplementationAttemptAuthority[],
+  spawnCwd: string | undefined,
+  snapshots: DistillSnapshotPort,
+): void {
+  const digests = rolledBack.map(({ authorityDigest }) => authorityDigest);
+  const repository = repositoryContext(spawnCwd);
+  if (repository.ok) {
+    discardDistillSnapshots(repository.root, digests, snapshots);
+    return;
+  }
+  process.stderr.write(
+    `[loom] distill snapshot note: ${digests.map(distillSnapshotRef).join(", ")} left in place for rolled-back ` +
+      `${rolledBack.map(({ taskId }) => taskId).join(", ")}: ${repository.error}\n`,
+  );
+}
+
 /** Exact rollback used when a harness cannot carry a just-minted capability.
  *  The optional `spawnCwd` must be the SAME repository the registration
  *  resolved: a rollback that targets a different graph would reclaim
@@ -323,10 +345,7 @@ export async function rollbackTaskExecutionRegistration(
       value: new Set(state.tasks.filter(isDistillTask).map(({ id }): string => id)),
     }));
     const rolledBackDistill = authorities.filter(({ taskId }) => distillTaskIds.has(taskId));
-    const repository = rolledBackDistill.length === 0 ? null : repositoryContext(spawnCwd);
-    if (repository?.ok === true) {
-      discardDistillSnapshots(repository.root, rolledBackDistill.map(({ authorityDigest }) => authorityDigest), distillSnapshots);
-    }
+    if (rolledBackDistill.length > 0) discardRolledBackDistillSnapshots(rolledBackDistill, spawnCwd, distillSnapshots);
     return { kind: "allow" };
   } catch (error) {
     return {

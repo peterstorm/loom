@@ -8,7 +8,7 @@
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { isDistillTask } from "../../src/core/distill-task";
+import { distillPlanNote, isDistillTask } from "../../src/core/distill-task";
 import { DECISION_RECORD_AGENT, DISTILL_AGENT } from "../../src/core/model-profiles";
 import { derivePendingTaskProof } from "../../src/core/proof-obligations";
 import {
@@ -240,6 +240,23 @@ describe("population adds no Distill Task", () => {
 
   it("when the frozen manifest carries no Test-File Classification", () => {
     expect(distillTasksOf(populated({ verificationManifest: legacyDefaultVerificationManifest() }))).toEqual([]);
+  });
+
+  it("and its result says why: the plan it derived, or the reason it derived none", () => {
+    const planOf = (verificationManifest: FrozenVerificationManifest) => {
+      const result = populateTaskGraph(graph(), command({ verificationManifest }));
+      if (!result.ok) throw new Error(result.error.message);
+      return result.value.distillPlan;
+    };
+
+    expect(planOf(operatorManifest({ distillPass: "off" }))).toEqual({ kind: "not-planned", reason: "pass-off" });
+    expect(planOf(legacyDefaultVerificationManifest())).toEqual({ kind: "not-planned", reason: "no-frozen-classification" });
+    expect(distillPlanNote(planOf(legacyDefaultVerificationManifest()))).toContain("No distill pass");
+    expect(distillPlanNote(planOf(operatorManifest({ distillPass: "off" })))).toBeNull();
+    expect(planOf(defaultVerificationManifest())).toMatchObject({
+      kind: "planned",
+      tasks: [{ id: "T2", wave: 1, scope: ["src/a.ts"], sourceTaskIds: ["T1"] }],
+    });
   });
 });
 

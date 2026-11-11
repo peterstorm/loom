@@ -46,7 +46,7 @@ import { parseWaveArg } from "./wave-args";
 import { isExactGitSha } from "../../core/git-sha";
 import { taskVerificationPolicy } from "../../core/verification-policy";
 import { taskArtifactExpectation } from "../../core/task-artifact-expectation";
-import { isDistillTask } from "../../core/distill-task";
+import { taskRolePolicy } from "../../core/distill-task";
 
 export interface RecoveryPacketBinding {
   readonly taskId: string;
@@ -283,7 +283,7 @@ function reconcileEra(task: Task, verificationManifest: FrozenVerificationManife
  * `restored` or `tests-passed` basis with one. Its stored Proof stands until
  * its next attempt settles.
  */
-const settledOnlyByAttempt = (task: Task): boolean => isDistillTask(task);
+const settledOnlyByAttempt = (task: Task): boolean => taskRolePolicy(task).proofSettlement === "attempt-only";
 
 /** Re-evaluate a failed aggregate from already-persisted evidence. This does
  * not invent completion or test provenance: it keeps the prior completion

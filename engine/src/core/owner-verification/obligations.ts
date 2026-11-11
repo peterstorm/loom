@@ -51,7 +51,7 @@ import { match } from "ts-pattern";
 import type { PlanInvariant, PlanModels, Task, TaskGraph } from "../../types";
 import type { AcceptanceContract } from "../acceptance-contract";
 import { canonicalDigest } from "../digest";
-import { isDistillTask } from "../distill-task";
+import { taskRolePolicy } from "../distill-task";
 import { parseInvariantId, type InvariantId } from "../invariant-id";
 import { canonicalStructuralEquals, failure, success, type ArtifactDigest, type DomainResult, type NonEmpty } from "../orchestration-contract/identity";
 import { isPlaceholderExemptionReason } from "../parse-plan-models";
@@ -328,7 +328,7 @@ export type ScheduledTask = Pick<Task, "id" | "wave" | "file_list"> & Partial<Pi
 
 /** The Tasks whose listings schedule a family: every Task but a Distill Task. */
 const scheduledBy = <T extends ScheduledTask>(tasks: readonly T[]): readonly T[] =>
-  tasks.filter((task) => !isDistillTask(task));
+  tasks.filter((task) => taskRolePolicy(task).schedulesFamilies);
 
 /** The stamp a duty reads; absent on a graph populated before owner verification. */
 type OwnerStamp = Readonly<{ owner_obligations?: TaskGraph["owner_obligations"] }>;

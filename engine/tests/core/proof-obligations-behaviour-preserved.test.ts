@@ -13,9 +13,11 @@ import {
   parseProofObligationInput,
   parseTaskProof,
   type ObservedProofEvidence,
+  type ObservedProofFacts,
   type ProofObligationInput,
   type ProofTestResult,
 } from "../../src/core/proof-obligations";
+import type { NonEmpty } from "../../src/core/orchestration-contract";
 import type { ConformanceViolation, ContractConformance } from "../../src/core/skeleton/types";
 import { observedEvidence } from "../fixtures/task-lifecycle";
 
@@ -30,8 +32,15 @@ const DISTILL: ProofObligationInput = {
   declaredArtifactExpectation: "preserved",
 };
 
-const attempt = (overrides: Partial<ObservedProofEvidence>): ObservedProofEvidence =>
+/** What a test states of an attempt whose scope was not restored. */
+type AttemptOverrides = Partial<ObservedProofFacts> & Readonly<{ filesModified?: readonly string[] }>;
+
+const attempt = (overrides: AttemptOverrides): ObservedProofEvidence =>
   observedEvidence({ taskCompleted: true, filesModified: [], ...overrides });
+
+/** The observation the shell takes after writing the snapshot back for `reasons`. */
+const restoredAttempt = (...reasons: NonEmpty<string>): ObservedProofEvidence =>
+  observedEvidence({ taskCompleted: true, filesModified: [], restoredAfter: reasons });
 
 const RETYPED: ConformanceViolation = { subject: "priceOrder", reason: "retyped", remedy: null };
 const violating = (artifact: string): ContractConformance => ({ kind: "judged", violations: new Map([[artifact, [RETYPED]]]) });
@@ -55,10 +64,24 @@ describe("behaviour-preserved", () => {
   });
 
   it("records a restoration, with what the attempt would have failed with", () => {
-    const proof = evaluateTaskProof(DISTILL, attempt({ restoredAfter: ["proof:regression-tests-failed"] }));
+    const proof = evaluateTaskProof(DISTILL, restoredAttempt("proof:regression-tests-failed"));
     expect(proof.results[1]).toMatchObject({
       evidence: { kind: "behaviour-preserved", basis: { kind: "restored", after: ["proof:regression-tests-failed"] } },
     });
+  });
+
+  it("is restored whatever test verdict travels with it, and keeps a copy of the reasons, never the caller's list", () => {
+    const reasons: NonEmpty<string> = ["proof:regression-tests-failed", "task-byte-scope-violation"];
+    const observed = observedEvidence({
+      taskCompleted: true, testResult: { verdict: "trusted-fail" }, filesModified: [], restoredAfter: reasons,
+    });
+
+    const preserved = evaluateTaskProof(DISTILL, observed).results[1];
+
+    expect(preserved).toMatchObject({ state: "satisfied", evidence: { basis: { kind: "restored", after: reasons } } });
+    const basis = preserved?.state === "satisfied" && preserved.evidence.kind === "behaviour-preserved" ? preserved.evidence.basis : undefined;
+    expect(basis?.kind === "restored" ? basis.after : reasons).not.toBe(reasons);
+    expect(Object.isFrozen(basis?.kind === "restored" ? basis.after : null)).toBe(true);
   });
 
   it("is satisfied by a trusted pass after a change, keeping the pass's provenance", () => {
@@ -72,7 +95,7 @@ describe("behaviour-preserved", () => {
     });
   });
 
-  it.each<[string, Partial<ObservedProofEvidence>, string]>([
+  it.each<[string, AttemptOverrides, string]>([
     ["no test run", {}, "test-result-missing"],
     ["a failing run", { testResult: { verdict: "trusted-fail" } }, "regression-tests-failed"],
     ["a pass the policy does not admit", { testResult: PI_PASS }, "untrusted-regression-pass"],
@@ -82,7 +105,7 @@ describe("behaviour-preserved", () => {
   });
 
   it("fails a changed path that violates its contract even under a trusted pass, and ignores an unchanged one", () => {
-    const pass: Partial<ObservedProofEvidence> = { filesModified: ["src/price.ts"], testResult: { verdict: "trusted-pass" } };
+    const pass: AttemptOverrides = { filesModified: ["src/price.ts"], testResult: { verdict: "trusted-pass" } };
     expect(evaluateTaskProof(DISTILL, attempt({ ...pass, contractConformance: violating("src/price.ts") }))).toMatchObject({
       state: "failed",
       failures: [{ kind: "declared-artifact-contract-violated", artifact: "src/price.ts", violations: [RETYPED] }],
@@ -127,8 +150,40 @@ describe("behaviour-preserved at the parse boundaries", () => {
   it("reads a restoration reason list and refuses an empty one", () => {
     const base = { taskCompleted: true, filesModified: [], contractConformance: { kind: "not-owed" } };
     expect(parseObservedProofEvidence({ ...base, restoredAfter: ["proof:test-result-missing"] }))
-      .toMatchObject({ ok: true, value: { restoredAfter: ["proof:test-result-missing"] } });
+      .toMatchObject({ ok: true, value: { filesModified: [], restoredAfter: ["proof:test-result-missing"] } });
     expect(parseObservedProofEvidence({ ...base, restoredAfter: [] })).toMatchObject({ ok: false });
+  });
+
+  it("reads a restoration with no filesModified field, and refuses one that names a changed path", () => {
+    const base = { taskCompleted: true, contractConformance: { kind: "not-owed" }, restoredAfter: ["proof:test-result-missing"] };
+    expect(parseObservedProofEvidence(base))
+      .toMatchObject({ ok: true, value: { filesModified: [], restoredAfter: ["proof:test-result-missing"] } });
+    expect(parseObservedProofEvidence({ ...base, filesModified: ["src/price.ts"] })).toEqual({
+      ok: false,
+      errors: ["restoredAfter is observed only with no filesModified: a restored scope has no changed path"],
+    });
+  });
+
+  it("property: an observation parses as restored or as changed paths, never both", () => {
+    const path = fc.constantFrom(...SCOPE);
+    const reason = fc.constantFrom("proof:regression-tests-failed", "proof:test-result-missing", "task-byte-scope-violation");
+    fc.assert(fc.property(
+      fc.option(fc.uniqueArray(path), { nil: undefined }),
+      fc.option(fc.uniqueArray(reason, { minLength: 1 }), { nil: undefined }),
+      (filesModified, restoredAfter) => {
+        const parsed = parseObservedProofEvidence({
+          taskCompleted: true,
+          contractConformance: { kind: "not-owed" },
+          ...(filesModified === undefined ? {} : { filesModified }),
+          ...(restoredAfter === undefined ? {} : { restoredAfter }),
+        });
+        const changed = filesModified ?? [];
+        expect(parsed.ok).toBe(restoredAfter === undefined || changed.length === 0);
+        if (!parsed.ok) return;
+        expect(parsed.value.filesModified).toEqual(restoredAfter === undefined ? changed : []);
+        expect(parsed.value.restoredAfter).toEqual(restoredAfter);
+      },
+    ));
   });
 
   it.each([

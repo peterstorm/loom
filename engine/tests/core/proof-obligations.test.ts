@@ -36,7 +36,7 @@ const input: ProofObligationInput = {
   declaredArtifacts: ["engine/src/core/proof-obligations.ts", "engine/tests/core/proof-obligations.test.ts"],
 };
 
-const completeEvidence: ObservedProofEvidence = trustedPassEvidence([...input.declaredArtifacts], {
+const completeEvidence = trustedPassEvidence([...input.declaredArtifacts], {
   newTestEvidence: "vitest: 12 tests passed",
 });
 
@@ -465,7 +465,7 @@ describe("proof properties", () => {
         fc.integer({ min: 0, max: 8 }),
         (artifacts, removalIndex) => {
           const source = { newTestsRequired: true, declaredArtifacts: artifacts };
-          const full: ObservedProofEvidence = trustedPassEvidence(artifacts);
+          const full = trustedPassEvidence(artifacts);
           const variants: ObservedProofEvidence[] = [
             { ...full, testResult: undefined },
             { ...full, newTestsWritten: false },
@@ -684,6 +684,26 @@ describe("declared-artifact contract conformance (AD-5, FR-021)", () => {
     expect(parseProofObligationResult({
       state: "failed", obligation: { kind: "task-completed" }, failure,
     }).ok).toBe(false);
+  });
+
+  it("refuses a filesModified that is no list of non-empty paths, naming each bad element", () => {
+    const base = { taskCompleted: true, contractConformance: { kind: "not-owed" } };
+    expect(parseObservedProofEvidence({ ...base, filesModified: "src/a.ts" })).toEqual({
+      ok: false,
+      errors: ["filesModified must be an array when present"],
+    });
+    expect(parseObservedProofEvidence({ ...base, filesModified: ["src/a.ts", "", 7, "  "] })).toEqual({
+      ok: false,
+      errors: [
+        "filesModified[1] must be a non-empty string",
+        "filesModified[2] must be a non-empty string",
+        "filesModified[3] must be a non-empty string",
+      ],
+    });
+    // Absent reads as no changed path; a present list is trimmed and de-duplicated in order.
+    expect(parseObservedProofEvidence(base)).toMatchObject({ ok: true, value: { filesModified: [] } });
+    expect(parseObservedProofEvidence({ ...base, filesModified: [" src/b.ts ", "src/a.ts", "src/b.ts"] }))
+      .toMatchObject({ ok: true, value: { filesModified: ["src/b.ts", "src/a.ts"] } });
   });
 
   it("refuses an observation that has not decided contractConformance (AD-5: required, never judges nothing)", () => {

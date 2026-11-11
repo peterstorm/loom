@@ -9,16 +9,20 @@ import { afterEach, describe, expect, it } from "vitest";
 import { distillSnapshotRef } from "../../src/core/distill-task";
 import { DISTILL_AGENT } from "../../src/core/model-profiles";
 import { evaluateProofObligations } from "../../src/core/proof-obligations";
-import { releaseSettledDistillSnapshot } from "../../src/handlers/helpers/exact-implementation-settlement";
+import {
+  productionExactSettlementPorts,
+  settleAndPersistExactImplementation,
+} from "../../src/handlers/helpers/exact-implementation-settlement";
 import { registerTaskExecutionBatch } from "../../src/handlers/task-execution";
 import { observeSkeletons } from "../../src/orchestration/skeleton-observation";
 import type { Task } from "../../src/types";
-import { gitResult } from "../fixtures/git-repository";
+import { behaviourPreservedBasis, distillSnapshotRefs, settlementFacts } from "../fixtures/distill-settlement";
 import {
   authorityOf,
   canonicalSkeletonOf,
   cleanupSkeletonRepos,
   graphOf,
+  managerOf,
   PATHS,
   recordedOutcomes,
   recordedSkeletons,
@@ -83,8 +87,7 @@ function distillWave(options: SkeletonRepoOptions = {}, pricing = IMPLEMENTED_PR
   return repo;
 }
 
-const distillRefs = (repo: SkeletonRepo): readonly string[] =>
-  gitResult(repo.root, ["for-each-ref", "--format=%(refname)", "refs/loom/distill"]).stdout.trim().split("\n").filter((ref) => ref !== "");
+const distillRefs = (repo: SkeletonRepo): readonly string[] => distillSnapshotRefs(repo.root);
 
 describe("registering a Distill Task over bound files", () => {
   it("writes no skeleton at a bound path a sibling left missing, and records only outcomes that are true", async () => {
@@ -103,7 +106,8 @@ describe("registering a Distill Task over bound files", () => {
       [PATHS.tsLegacy]: { kind: "exists-not-skeletonized" },
       [PATHS.pythonRates]: { kind: "unsupported-language", reason: "other-extension" },
       [PATHS.tsHelpers]: { kind: "no-bound-exports" },
-      // PATHS.tsQuotes: bound, supported and missing. Nothing is written and no outcome says so.
+      // Bound, supported and missing: nothing is written, and the outcome says so.
+      [PATHS.tsQuotes]: { kind: "absent-no-skeleton-owed" },
     });
     // The State File with those outcomes loads, and the attempt is live with its snapshot.
     expect(graphOf(repo).tasks.find(({ id }) => id === "T9")?.active_implementation_attempt).toBeDefined();
@@ -167,19 +171,19 @@ describe("a distill move that breaks a bound export", () => {
     const authority = authorityOf(await registered(repo, "T9"), "T9");
     repo.write(PATHS.tsPricing, PRICING_WITHOUT_PARSE_ORDER);
 
-    const settled = await settleAttempt(repo, authority, [PATHS.tsPricing]);
+    // Settled and persisted as a transport does it, so the snapshot's release is the settlement's own.
+    const settled = await settleAndPersistExactImplementation(
+      managerOf(repo),
+      settlementFacts(authority, { verdict: "trusted-pass" }, [PATHS.tsPricing]),
+      productionExactSettlementPorts(repo.root, repo.statePath),
+    );
 
     expect(settled.application).toMatchObject({ kind: "applied", transition: { kind: "implemented" } });
     expect(repo.read(PATHS.tsPricing)).toBe(IMPLEMENTED_PRICING);
     const task = graphOf(repo).tasks.find(({ id }) => id === "T9");
-    const basis = task?.proof?.state === "satisfied"
-      ? task.proof.results.flatMap((result) =>
-          result.state === "satisfied" && result.evidence.kind === "behaviour-preserved" ? [result.evidence.basis] : [])[0]
-      : undefined;
+    const basis = task === undefined ? undefined : behaviourPreservedBasis(task);
     expect(basis).toMatchObject({ kind: "restored" });
     expect(basis?.kind === "restored" ? basis.after.join(" ") : "").toContain("declared-artifact-contract-violated");
-
-    releaseSettledDistillSnapshot(repo.root, authority, settled.application);
     expect(distillRefs(repo)).toEqual([]);
   });
 

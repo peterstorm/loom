@@ -11,11 +11,17 @@ import {
   EMPTY_CORPUS,
   fingerprint,
   fingerprintScheme,
-  type CloneCorpus,
+  type AuthoritativeCorpus,
+  type CloneOptions,
 } from "../../../src/linter/clones/clone-detection";
 import { parseIndexCache, renderIndexCache } from "../../../src/linter/clones/index-cache";
-import { defaultCacheFile } from "../../../src/linter/clones/project-corpus";
-import { createProgrammaticRules } from "../../../src/linter/programmatic";
+import { cacheAssistedCorpus, defaultCacheFile } from "../../../src/linter/clones/project-corpus";
+import { authoritativeLintContext } from "../../../src/linter/loader";
+import {
+  baselineOwners,
+  createProgrammaticRules,
+  projectLintContext,
+} from "../../../src/linter/programmatic";
 import { EMPTY_CONFIG } from "../../../src/linter/programmatic/config";
 import {
   detectedCloneKeys,
@@ -36,7 +42,8 @@ const ORIGINAL = [block("before", 2), SHARED].join("\n");
 const COPY = [block("mine", 3), SHARED].join("\n");
 
 /** A corpus holding exactly these project-relative sources. */
-const corpusOf = (sources: Readonly<Record<string, string>>): CloneCorpus => ({
+const corpusOf = (sources: Readonly<Record<string, string>>): AuthoritativeCorpus => ({
+  trust: "bytes",
   candidates: (target) =>
     Object.entries(sources)
       .filter(([path]) => path !== target.path)
@@ -89,8 +96,42 @@ describe("no-duplicate-block", () => {
   });
 
   it("declares its first-call setup, which is what makes the executor run it last (executor.test.ts pins the ordering)", () => {
-    const declaring = createProgrammaticRules(EMPTY_CONFIG, null, EMPTY_CORPUS).filter((rule) => rule.firstCallSetup === true);
+    const declaring = createProgrammaticRules(authoritativeLintContext(EMPTY_CONFIG, null)).filter((rule) => rule.firstCallSetup === true);
     expect(declaring.map((rule) => rule.name)).toEqual([RULE_NAME]);
+  });
+});
+
+describe("the project lint context", () => {
+  const CONFIG = { duplicateBlockMinTokens: CLONE.minTokens, duplicateBlockMinLines: CLONE.minLines };
+
+  it("hands the corpus the thresholds the rule and its baseline owner compare with", () => {
+    const asked: CloneOptions[] = [];
+    const context = projectLintContext(CONFIG, "/project", (clone) => {
+      asked.push(clone);
+      return CORPUS;
+    });
+
+    expect(asked).toEqual([CLONE]);
+    expect(context.duplicateBlock.clone).toBe(asked[0]);
+    // One context, both consumers: the rule reports the copy and the owner keys the same one.
+    const rule = createProgrammaticRules(context).find((candidate) => candidate.name === RULE_NAME);
+    const owner = baselineOwners(context).find((candidate) => candidate.rule === RULE_NAME);
+    expect(rule?.handler(COPY, "/project/src/copy.ts")).toHaveLength(1);
+    expect(owner?.detect(COPY, "/project/src/copy.ts")).toEqual(detectedCloneKeys(COPY, "/project/src/copy.ts", CORPUS, OPTIONS));
+  });
+
+  it("builds the deciding checks from a corpus that reads no cache, and refuses a baseline a cache-assisted one", () => {
+    const root = "/project";
+    expect(authoritativeLintContext(CONFIG, root).corpus.trust).toBe("bytes");
+    expect(authoritativeLintContext(CONFIG, null).corpus).toBe(EMPTY_CORPUS);
+
+    const edit = projectLintContext(CONFIG, root, (clone) =>
+      cacheAssistedCorpus({ projectRoot: root, exclusions: [], clone }, defaultCacheFile(root)));
+    expect(edit.corpus.trust).toBe("cache-assisted");
+    // The rules of an edit may read the cache; a baseline may not. Nothing is walked: a corpus builds on first use.
+    expect(createProgrammaticRules(edit).some((rule) => rule.name === RULE_NAME)).toBe(true);
+    // @ts-expect-error a cache-assisted corpus can hide a copy, so no baseline owner is built from one
+    baselineOwners(edit);
   });
 });
 

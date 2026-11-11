@@ -45,7 +45,7 @@ import type { LeftPreparedName, SkeletonProblem } from "./skeleton/problems";
 import { installSkeletonRecords } from "./skeleton/records";
 import { renderSkeletonRevisionLines } from "./skeleton/status";
 import type { SkeletonRecord } from "./skeleton/types";
-import { reopenableWave, returnWaveTasksToRevalidation, type WaveReopeningRefusal } from "./task-revalidation";
+import { reopenableWave, returnedTaskIds, returnWaveTasksToRevalidation, type WaveReopeningRefusal } from "./task-revalidation";
 import type { TaskGraph } from "../types";
 
 /** The longest reason a revision records; it is an audit line, not a document. */
@@ -256,7 +256,7 @@ export function reviseAcceptanceContract(
     reason: request.reason,
     previous: contract.freeze.paths,
     paths: observed.value,
-    revalidatedTaskIds: revalidated.returned.taskIds,
+    revalidatedTaskIds: returnedTaskIds(revalidated.returned),
   });
   const revisedContract: AcceptanceContract = freeze({
     ...contract,

@@ -11,7 +11,7 @@ import {
   type ImplementationRetryDisposition,
 } from "./implementation-retry";
 import { derivePendingTaskProof, type PendingTaskProof } from "./proof-obligations";
-import { isDistillTask } from "./distill-task";
+import { taskRolePolicy } from "./distill-task";
 import { canonicalJson } from "./review-packet";
 import { sha256Hex } from "./digest";
 import {
@@ -89,7 +89,7 @@ export function armImplementationAttestation(
 ): LifecycleResult<AttestationCommand> {
   // A Distill Task's Proof is `behaviour-preserved`; attestation would rewrite
   // it into a state the State File refuses to load (ADR-0068).
-  if (isDistillTask(task)) return lifecycleFailure({ kind: "distill-task-not-attestable", taskId: task.id });
+  if (!taskRolePolicy(task).attestable) return lifecycleFailure({ kind: "distill-task-not-attestable", taskId: task.id });
   if (task.status !== "pending") {
     return lifecycleFailure({ kind: "task-not-pending", taskId: task.id, status: task.status });
   }

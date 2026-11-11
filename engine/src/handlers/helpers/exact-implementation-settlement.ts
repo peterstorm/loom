@@ -1,8 +1,7 @@
 import type { Task, TaskGraph, TaskTestResult } from "../../types";
 import {
   describeDistillSnapshotFailure,
-  distillRestoreOf,
-  distillSnapshotRetention,
+  distillSettlementOutcome,
   distillSnapshotScope,
   keptDistillSnapshotNote,
   type DistillSnapshotFailure,
@@ -31,6 +30,8 @@ import type { LedgerObservation, RedThenGreenObservation } from "../../core/red-
 import { classifyTaskFiles } from "../../core/test-file-classification";
 import { taskVerificationPolicy, type NewTestWaiverReason, type VerificationRequirement } from "../../core/verification-policy";
 import { observeContractConformance } from "../../orchestration/contract-conformance-observation";
+import type { ParsedTaskGraph } from "../../state-manager";
+import { describeCause } from "../../utils/describe-cause";
 import { canonicalRepositoryPaths } from "../../utils/repository-path";
 import {
   collectNewTestEvidence,
@@ -214,17 +215,23 @@ type Observed<T> =
 const observed = <T>(value: T): Observed<T> => ({ ok: true, value });
 const withheld = (settlement: ExactImplementationSettlement): Observed<never> => ({ ok: false, settlement });
 
+/** An observation that could not be made: the infrastructure settlement naming it and its cause. */
+const withheldBecause = (
+  { state, facts }: SettlementContext,
+  observation: string,
+  cause: unknown,
+  bytes?: TaskLocalByteObservation,
+): Observed<never> =>
+  withheld(unavailable(state, facts, `${facts.transport} ${observation} unavailable: ${describeCause(cause)}`, bytes));
+
 /** The attempt's bytes against its baselines, under locked Wave ownership. */
-function observeAttemptBytes({ state, task, facts, ports }: SettlementContext): Observed<TaskLocalByteObservation> {
+function observeAttemptBytes(context: SettlementContext): Observed<TaskLocalByteObservation> {
+  const { state, task, facts, ports } = context;
   let siblingOwnedPaths: readonly string[];
   try {
     siblingOwnedPaths = currentWaveSiblingOwnedPaths(state, task, ports.repository.root);
   } catch (error) {
-    return withheld(unavailable(
-      state,
-      facts,
-      `${facts.transport} sibling ownership observation unavailable: ${error instanceof Error ? error.message : String(error)}`,
-    ));
+    return withheldBecause(context, "sibling ownership observation", error);
   }
   let bytes: TaskLocalByteObservation;
   try {
@@ -242,11 +249,7 @@ function observeAttemptBytes({ state, task, facts, ports }: SettlementContext): 
       engineSkeletons: state.skeletons ?? [],
     });
   } catch (error) {
-    return withheld(unavailable(
-      state,
-      facts,
-      `${facts.transport} task-local observation unavailable: ${error instanceof Error ? error.message : String(error)}`,
-    ));
+    return withheldBecause(context, "task-local observation", error);
   }
   const suiteOutcome = bytes.suite.checks[0]?.outcome;
   return suiteOutcome?.kind === "observation-unavailable"
@@ -259,9 +262,10 @@ type ObservedAttemptEvidence = Pick<IncomingImplementationEvidence, "newTests" |
 
 /** New-test evidence, the I6 judgment and contract conformance over the observed bytes. */
 function observeAttemptEvidence(
-  { state, task, duty, facts, ports }: SettlementContext,
+  context: SettlementContext,
   bytes: TaskLocalByteObservation,
 ): Observed<ObservedAttemptEvidence> {
+  const { state, task, duty, facts, ports } = context;
   let newTests: NewTestObservationResult<NewTestEvidence>;
   try {
     newTests = ports.newTests.collect({
@@ -270,29 +274,17 @@ function observeAttemptEvidence(
       startSha: task.start_sha,
     });
   } catch (error) {
-    return withheld(unavailable(
-      state,
-      facts,
-      `${facts.transport} new-test observation unavailable: ${error instanceof Error ? error.message : String(error)}`,
-      bytes,
-    ));
+    return withheldBecause(context, "new-test observation", error, bytes);
   }
   if (!newTests.ok) {
-    return withheld(unavailable(
-      state,
-      facts,
-      `${facts.transport} new-test observation unavailable: ${describeNewTestObservationError(newTests.error)}`,
-      bytes,
-    ));
+    return withheldBecause(context, "new-test observation", describeNewTestObservationError(newTests.error), bytes);
   }
   const redThenGreen = judgeAttemptRedThenGreen(task, duty, facts, ports.repository.root);
   if (redThenGreen.kind === "unavailable") return withheld(unavailable(state, facts, redThenGreen.reason, bytes));
   // Conformance against the frozen contracts (AD-5): which files owe it is
   // the observation's scope (INV-5); a read failure is infrastructure.
   const conformance = observeContractConformance(ports.repository.root, state, task);
-  if (!conformance.ok) {
-    return withheld(unavailable(state, facts, `${facts.transport} contract conformance observation unavailable: ${conformance.error}`, bytes));
-  }
+  if (!conformance.ok) return withheldBecause(context, "contract conformance observation", conformance.error, bytes);
   return observed({
     newTests: newTests.value,
     ...(redThenGreen.kind === "judged" ? { redThenGreen: redThenGreen.observation } : {}),
@@ -314,7 +306,9 @@ type ObservedSettlement = Readonly<{
  * observed. Nothing is persisted here: the settlement is a value the caller
  * commits, so a Distill Task's trial may be discarded (`settleDistillAttempt`).
  * `restoredAfter` is present exactly when the shell wrote the Task's snapshot
- * back before this observation.
+ * back before this observation. It reaches the evidence only when the scope
+ * is back at its baseline: an observation that still shows a changed path is
+ * no restored one, and its caller replaces that settlement.
  */
 function observeAndSettle(context: SettlementContext, restoredAfter?: NonEmpty<string>): ObservedSettlement {
   const { state, facts } = context;
@@ -335,7 +329,7 @@ function observeAndSettle(context: SettlementContext, restoredAfter?: NonEmpty<s
           testResult: facts.testResult,
           testEvidence: facts.testEvidence,
           ...evidence.value,
-          ...(restoredAfter === undefined ? {} : { restoredAfter }),
+          ...(restoredAfter === undefined || scopeChanged.length > 0 ? {} : { restoredAfter }),
         },
         facts.proofEvaluationPolicy,
         bytes.value,
@@ -396,13 +390,14 @@ function settleRestoredDistillAttempt(
 
 /**
  * A Distill Task attempt (ADR-0068 §5): settle once as a TRIAL, then let the
- * pure `distillRestoreOf` decide. `keep` makes the trial the result. `restore`
- * (the attempt changed its scope and the trial would settle a semantic
- * failure) discards the trial and settles again on the restored bytes.
+ * pure `distillSettlementOutcome` decide. `keep` makes the trial the result.
+ * `restore` (the attempt changed its scope and the trial would settle a
+ * semantic failure) discards the trial and settles again on the restored
+ * bytes.
  */
 function settleDistillAttempt(context: SettlementContext, snapshots: DistillSnapshotPort): ExactImplementationSettlement {
   const trial = observeAndSettle(context);
-  const decision = distillRestoreOf(trial.scopeChanged, trial.settlement.application);
+  const decision = distillSettlementOutcome(trial.scopeChanged, trial.settlement.application).restore;
   switch (decision.kind) {
     case "keep":
       return trial.settlement;
@@ -419,11 +414,11 @@ function settleDistillAttempt(context: SettlementContext, snapshots: DistillSnap
  * and render outcomes; this operation alone observes bytes/new tests and calls
  * the Oracle, without relabeling either transport's test provenance.
  *
- * It runs under the caller's State File lock and persists nothing: the caller
- * commits the returned state. For a Distill Task it may write the attempt's
- * snapshot back first (`settleDistillAttempt`); `distillSnapshots` is the
- * store, Git's in production. The caller then calls
- * `releaseSettledDistillSnapshot` once the state is committed. */
+ * It runs under a State File lock and persists nothing: the settlement is a
+ * value. A transport settles through `settleAndPersistExactImplementation`,
+ * which commits it and then lets the attempt's snapshot go. For a Distill Task
+ * this may write the attempt's snapshot back first (`settleDistillAttempt`);
+ * `distillSnapshots` is the store, Git's in production. */
 export function settleExactImplementation(
   state: TaskGraph,
   facts: ExactImplementationTransportFacts,
@@ -449,20 +444,61 @@ export function settleExactImplementation(
 }
 
 /**
- * Let go of a settled Distill Task attempt's snapshot. Call it only AFTER the
- * settlement's state is committed to the State File: until then a re-run of
- * the settlement may still need the snapshot. A semantic settlement discards
- * it; an `infrastructure-blocked`, `ignored` or `error` application keeps it
- * (`distillSnapshotRetention`). A snapshot that cannot be discarded is a
- * leftover ref, reported and never a failure of the settlement.
+ * Let go of a persisted Distill Task settlement's snapshot. A semantic
+ * settlement discards it; an `infrastructure-blocked`, `ignored` or `error`
+ * application keeps it (`distillSettlementOutcome`). A snapshot that cannot
+ * be discarded is a leftover ref, reported and never a failure of the
+ * settlement.
  */
-export function releaseSettledDistillSnapshot(
+function releaseSettledDistillSnapshot(
   repositoryRoot: string,
   authority: ImplementationAttemptAuthority,
   application: ImplementationSettlementApplicationResult,
-  distillSnapshots: DistillSnapshotPort = gitDistillSnapshots,
+  distillSnapshots: DistillSnapshotPort,
 ): void {
   const task = application.state.tasks.find((candidate) => candidate.id === authority.taskId);
-  if (task === undefined || !isDistillTask(task) || distillSnapshotRetention(application) === "keep") return;
+  // The scope delta decides only `restore`; retention reads the settlement alone.
+  if (task === undefined || !isDistillTask(task) || distillSettlementOutcome([], application).retention === "keep") return;
   discardDistillSnapshots(repositoryRoot, [authority.authorityDigest], distillSnapshots);
+}
+
+/**
+ * The State File a settlement is committed to: one locked read-modify-write
+ * that resolves once the produced state is persisted, and rejects when it is
+ * not. `StateManager` satisfies it, and so does Pi's `TaskGraphStore`.
+ */
+export type ExactSettlementStatePort = Readonly<{
+  updateAndReturn<T>(
+    mutate: (state: ParsedTaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
+  ): Promise<T>;
+}>;
+
+/**
+ * Settle one attempt and make the settlement durable: the entry point of both
+ * transports. In order:
+ *
+ * 1. under the State File lock, `settleExactImplementation` settles against
+ *    the locked graph (an `error` application leaves that graph as it is);
+ * 2. the lock commits the settled state;
+ * 3. only then is the attempt's Distill snapshot released
+ *    (`releaseSettledDistillSnapshot`, ADR-0068 §5).
+ *
+ * The order is the invariant this function owns. Until step 2 lands, a re-run
+ * of the settlement may still need the snapshot to restore from, so a commit
+ * that rejects rejects here and nothing is released. A release lost after the
+ * commit leaves a ref the Task's next registration drops.
+ */
+export async function settleAndPersistExactImplementation(
+  stateFile: ExactSettlementStatePort,
+  facts: ExactImplementationTransportFacts,
+  ports: ExactImplementationSettlementPorts,
+  distillSnapshots: DistillSnapshotPort = gitDistillSnapshots,
+): Promise<ExactImplementationSettlement> {
+  const settled = await stateFile.updateAndReturn((locked) => {
+    const settlement = settleExactImplementation(locked, facts, ports, distillSnapshots);
+    const { application } = settlement;
+    return { state: application.kind === "error" ? locked : application.state, value: settlement };
+  });
+  releaseSettledDistillSnapshot(ports.repository.root, facts.authority, settled.application, distillSnapshots);
+  return settled;
 }

@@ -52,7 +52,8 @@ export interface ProgrammaticRule {
 export type Rule = RegexRule | ProgrammaticRule;
 
 /** Does this rule do one-off setup on its first call? Only a programmatic rule can. */
-export const hasFirstCallSetup = (rule: Rule): boolean => rule.kind === "programmatic" && rule.firstCallSetup === true;
+export const hasFirstCallSetup = (rule: Rule): rule is ProgrammaticRule & { readonly firstCallSetup: true } =>
+  rule.kind === "programmatic" && rule.firstCallSetup === true;
 
 // --- Violation ---
 

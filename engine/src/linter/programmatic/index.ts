@@ -38,7 +38,13 @@ import {
   RULE_NAME as DUPLICATE_BLOCK_RULE,
   type DuplicateBlockOptions,
 } from "./no-duplicate-block";
-import { CLONE_EXTENSIONS, DEFAULT_CLONE_OPTIONS, type CloneCorpus } from "../clones/clone-detection";
+import {
+  CLONE_EXTENSIONS,
+  DEFAULT_CLONE_OPTIONS,
+  type AuthoritativeCorpus,
+  type CloneCorpus,
+  type CloneOptions,
+} from "../clones/clone-detection";
 import type { BaselineOwner } from "./baseline";
 import type { ProgrammaticConfig } from "./config";
 
@@ -97,9 +103,8 @@ export function discriminantBranchingOptions(
   });
 }
 
-/** no-duplicate-block's options for one project — shared by the live rule, its
- *  staleness detector and the corpus the shell builds for both. */
-export function duplicateBlockOptions(config: ProgrammaticConfig, projectRoot: string | null): DuplicateBlockOptions {
+/** no-duplicate-block's options for one project. */
+function duplicateBlockOptions(config: ProgrammaticConfig, projectRoot: string | null): DuplicateBlockOptions {
   return Object.freeze({
     clone: Object.freeze({
       minTokens: config.duplicateBlockMinTokens ?? DEFAULT_CLONE_OPTIONS.minTokens,
@@ -111,26 +116,55 @@ export function duplicateBlockOptions(config: ProgrammaticConfig, projectRoot: s
 }
 
 /**
- * Every rule that keeps a grandfathered list, for one project's config.
+ * Everything the rules of one project are built from: its config, its root
+ * (the frame the config's paths and baseline keys are written in, or null with
+ * no project), no-duplicate-block's options and the clone corpus that rule
+ * reads. `createProgrammaticRules` and `baselineOwners` both take this one
+ * value, so the live rule and its staleness detector share a corpus and options.
+ *
+ * `Corpus` records whether the corpus may have read the fingerprint cache;
+ * `baselineOwners` accepts only one that did not.
+ */
+export type ProjectLintContext<Corpus extends CloneCorpus = CloneCorpus> = Readonly<{
+  config: ProgrammaticConfig;
+  projectRoot: string | null;
+  duplicateBlock: DuplicateBlockOptions;
+  corpus: Corpus;
+}>;
+
+/**
+ * The lint context of one project. `corpusFor` is handed the clone thresholds
+ * the rule compares with, so a corpus cannot be fingerprinted under other ones.
+ * Nothing is read here: a project corpus builds itself on the rule's first call.
+ */
+export function projectLintContext<Corpus extends CloneCorpus>(
+  config: ProgrammaticConfig,
+  projectRoot: string | null,
+  corpusFor: (clone: CloneOptions) => Corpus,
+): ProjectLintContext<Corpus> {
+  const duplicateBlock = duplicateBlockOptions(config, projectRoot);
+  return Object.freeze({ config, projectRoot, duplicateBlock, corpus: corpusFor(duplicateBlock.clone) });
+}
+
+/**
+ * Every rule that keeps a grandfathered list, for one project.
  * `scripts/lint-project.ts` reports the stale entries of each and writes them
  * with `--write-baseline`, and Loom's baseline test asserts each against the
  * live tree — all iterate THIS list, so a baselined rule cannot be left out of
  * the drift report. Each owner detects with exactly the options its live rule
  * runs with.
  *
- * `corpus` is the project's clone corpus, and has no default: against an empty
- * one no-duplicate-block sees only the repeats inside each file, so every
- * entry naming another file would read as stale. A caller with no project says
- * so by passing `EMPTY_CORPUS`.
+ * The context's corpus must be authoritative: a baseline records and reports
+ * what is in the tree, and a cache-assisted corpus can hide a copy.
  */
-export function baselineOwners(
-  config: ProgrammaticConfig,
-  projectRoot: string | null,
-  corpus: CloneCorpus,
-): readonly BaselineOwner[] {
+export function baselineOwners({
+  config,
+  projectRoot,
+  duplicateBlock: cloneOptions,
+  corpus,
+}: ProjectLintContext<AuthoritativeCorpus>): readonly BaselineOwner[] {
   const switchOptions = switchTotalityOptions(config, projectRoot);
   const chainOptions = discriminantBranchingOptions(config, projectRoot);
-  const cloneOptions = duplicateBlockOptions(config, projectRoot);
   return Object.freeze([
     {
       rule: SWITCH_TOTALITY_RULE,
@@ -291,8 +325,7 @@ function expressionShapeRules(): readonly ProgrammaticRule[] {
  * per-file deadline. It declares that (`firstCallSetup`) and the executor,
  * which owns the deadline, runs it after every other rule.
  */
-function duplicateBlockRule(config: ProgrammaticConfig, projectRoot: string | null, corpus: CloneCorpus): ProgrammaticRule {
-  const options = duplicateBlockOptions(config, projectRoot);
+function duplicateBlockRule({ duplicateBlock: options, corpus }: ProjectLintContext): ProgrammaticRule {
   return {
     kind: "programmatic",
     name: DUPLICATE_BLOCK_RULE,
@@ -308,22 +341,16 @@ function duplicateBlockRule(config: ProgrammaticConfig, projectRoot: string | nu
 }
 
 /**
- * Creates the programmatic rule set for one project's config (`EMPTY_CONFIG`
- * for the built-in defaults). Config allows projects to define their own
- * boundaries, pure modules, limits and baselines; `projectRoot` is the root of
- * the project that config belongs to — the frame its paths and baseline keys
- * are written in, or null with no project. `corpus` is that project's clone
- * corpus, and has no default: against an empty one no-duplicate-block finds
- * only the repeats inside each file, so a caller with no project says so by
- * passing `EMPTY_CORPUS`.
+ * Creates the programmatic rule set for one project (`EMPTY_CONFIG` in the
+ * context for the built-in defaults). Config allows projects to define their
+ * own boundaries, pure modules, limits and baselines. With no project the
+ * context's root is null and its corpus `EMPTY_CORPUS`, so no-duplicate-block
+ * finds only the repeats inside each file.
  *
  * The order of this list is free: the executor decides what runs last.
  */
-export function createProgrammaticRules(
-  config: ProgrammaticConfig,
-  projectRoot: string | null,
-  corpus: CloneCorpus,
-): readonly ProgrammaticRule[] {
+export function createProgrammaticRules(context: ProjectLintContext): readonly ProgrammaticRule[] {
+  const { config, projectRoot } = context;
   return [
     ...importBoundaryRules(config, projectRoot),
     maxFunctionLinesRule(
@@ -333,6 +360,6 @@ export function createProgrammaticRules(
     fugueGeneratedIntegrityRule(),
     ...totalityRules(config, projectRoot),
     ...expressionShapeRules(),
-    duplicateBlockRule(config, projectRoot, corpus),
+    duplicateBlockRule(context),
   ];
 }

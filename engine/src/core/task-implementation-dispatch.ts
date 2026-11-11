@@ -3,7 +3,7 @@ import {
   deriveImplementationAttestationContext,
   deriveImplementationRetryDisposition,
 } from "./implementation-retry";
-import { distillPromptAppendix, isDistillTask } from "./distill-task";
+import { distillPromptAppendix, taskRolePolicy } from "./distill-task";
 import { canonicalRecord, type NonEmpty } from "./orchestration-contract";
 
 export type TaskImplementationDispatchDerivation =
@@ -44,7 +44,7 @@ export function deriveTaskImplementationDispatch(task: Task): TaskImplementation
     if (!attestation.ok) return canonicalRecord({ kind: "invalid-attestation" as const, error: attestation.error });
     appendices.push(attestation.promptAppendix);
   }
-  if (isDistillTask(task)) appendices.push(distillPromptAppendix(task));
+  if (taskRolePolicy(task).dispatchAppendix === "distill") appendices.push(distillPromptAppendix(task));
   const dispatch: WaveImplementationDispatch = disposition.kind === "initial"
     ? canonicalRecord({
         kind: "initial-implementation",

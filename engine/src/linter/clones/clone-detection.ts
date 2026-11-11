@@ -350,11 +350,26 @@ export const CLONE_EXTENSIONS: readonly string[] = Object.freeze([
  * What the rule needs from a project: the other sources that may hold a copy of
  * `target`, fingerprinted. The port; `project-corpus.ts` is the adapter that
  * reads a project, and a test passes a literal.
+ *
+ * `trust` says what nominated the candidates. A `"bytes"` corpus fingerprinted
+ * every source from its current bytes, so it misses no copy. A
+ * `"cache-assisted"` one may have taken fingerprints from the edit hook's
+ * cache, which can hide a copy. The checks that decide — the full tier and the
+ * baselines — ask for an `AuthoritativeCorpus` and so cannot be given the
+ * second kind.
  */
-export type CloneCorpus = Readonly<{ candidates: (target: Fingerprinted) => readonly Fingerprinted[] }>;
+export type CloneCorpus<Trust extends CorpusTrust = CorpusTrust> = Readonly<{
+  trust: Trust;
+  candidates: (target: Fingerprinted) => readonly Fingerprinted[];
+}>;
+
+export type CorpusTrust = "bytes" | "cache-assisted";
+
+/** A corpus that never read the fingerprint cache. */
+export type AuthoritativeCorpus = CloneCorpus<"bytes">;
 
 /** No project: nothing can be a copy of anything else, so only a source's own repeats are found. */
-export const EMPTY_CORPUS: CloneCorpus = Object.freeze({ candidates: () => [] });
+export const EMPTY_CORPUS: AuthoritativeCorpus = Object.freeze({ trust: "bytes", candidates: () => [] });
 
 // --- Clones ---
 

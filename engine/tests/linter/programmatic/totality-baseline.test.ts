@@ -28,7 +28,7 @@ import {
 } from "../../../src/linter/programmatic/baseline";
 import { baselineOwners } from "../../../src/linter/programmatic/index";
 import { projectRootOf } from "../../../src/linter/programmatic/config";
-import { cloneCorpus, loadRules } from "../../../src/linter/loader";
+import { authoritativeLintContext, loadRules } from "../../../src/linter/loader";
 import { executeRules } from "../../../src/linter/executor";
 import { isLintableName, isNeverSourceDirectory, scopeOf } from "../../../src/linter/project-scope";
 import { LOOM_CONFIG, LOOM_RULES_DIR, REPO_ROOT } from "../loom-project-config";
@@ -39,7 +39,7 @@ import {
 } from "../../../src/linter/programmatic/exhaustive-discriminant-branching";
 
 /** Each owner detects against Loom's own clone corpus, fingerprinted from the files' bytes as `lint-project` does. */
-const LOOM_OWNERS = baselineOwners(LOOM_CONFIG, REPO_ROOT, cloneCorpus(LOOM_CONFIG, REPO_ROOT, "full"));
+const LOOM_OWNERS = baselineOwners(authoritativeLintContext(LOOM_CONFIG, REPO_ROOT));
 
 /**
  * Every lintable file `lint-project` reads, repo-relative and sorted: the same

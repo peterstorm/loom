@@ -9,13 +9,14 @@
  * rule load, so a batch run walks once and a run that never meets a script file
  * never walks at all.
  *
- * Two trust levels, chosen by the caller:
- *   - with a cache file (the edit hook): unchanged files keep the fingerprints
- *     the last edit computed, so an edit costs one walk, plus lexing the edited
- *     file, the nominated candidates and any file whose size or time changed;
- *   - without one (the Wave Gate, `lint-project`): every file is fingerprinted
- *     from its bytes. The cache can only hide a clone, so the checks that
- *     decide never read it.
+ * Two constructors, one per trust level, and the corpus type says which made it:
+ *   - `cacheAssistedCorpus` (the edit hook): unchanged files keep the
+ *     fingerprints the last edit computed, so an edit costs one walk, plus
+ *     lexing the edited file, the nominated candidates and any file whose size
+ *     or time changed;
+ *   - `authoritativeCorpus` (the Wave Gate, `lint-project`): every file is
+ *     fingerprinted from its bytes. The cache can only hide a clone, so the
+ *     checks that decide take an `AuthoritativeCorpus` and never read it.
  */
 
 import { createHash } from "node:crypto";
@@ -31,6 +32,7 @@ import {
   fingerprint,
   fingerprintHashes,
   fingerprintScheme,
+  type AuthoritativeCorpus,
   type CloneCorpus,
   type CloneIndex,
   type CloneOptions,
@@ -47,13 +49,12 @@ import {
   type IndexCache,
 } from "./index-cache";
 
-export type ProjectCorpusOptions = Readonly<{
+/** The project a corpus reads, and the thresholds its sources are fingerprinted with. */
+export type CorpusSource = Readonly<{
   projectRoot: string;
   /** The project's `exclude` list: an excluded file is never a clone's other side. */
   exclusions: Exclusions;
   clone: CloneOptions;
-  /** The fingerprint cache file, or null to fingerprint every file from its bytes. */
-  cacheFile: string | null;
 }>;
 
 /** Where the edit hook keeps one project's fingerprint cache: outside the project, keyed by its root. */
@@ -116,10 +117,14 @@ function corpusFiles(projectRoot: string, exclusions: Exclusions): readonly Corp
 }
 
 /**
- * The corpus of one project. `candidates` fingerprints lazily and remembers
- * what it read, so a batch run lexes each source once.
+ * One project's `candidates`, reading `cacheFile` when given one and every
+ * file's bytes otherwise. It fingerprints lazily and remembers what it read, so
+ * a batch run lexes each source once.
  */
-export function projectCorpus({ projectRoot, exclusions, clone, cacheFile }: ProjectCorpusOptions): CloneCorpus {
+function projectCandidates(
+  { projectRoot, exclusions, clone }: CorpusSource,
+  cacheFile: string | null,
+): CloneCorpus["candidates"] {
   const loaded = new Map<string, Fingerprinted | null>();
   let index: CloneIndex | undefined;
 
@@ -156,13 +161,19 @@ export function projectCorpus({ projectRoot, exclusions, clone, cacheFile }: Pro
     return cloneIndex(indexEntries(current));
   };
 
-  return {
-    candidates: (target) => {
-      index ??= build();
-      return candidatePaths(target, index).flatMap((path) => {
-        const source = load(path);
-        return source === null ? [] : [source];
-      });
-    },
+  return (target) => {
+    index ??= build();
+    return candidatePaths(target, index).flatMap((path) => {
+      const source = load(path);
+      return source === null ? [] : [source];
+    });
   };
 }
+
+/** The corpus that decides: every file fingerprinted from its bytes, no cache read or written. */
+export const authoritativeCorpus = (source: CorpusSource): AuthoritativeCorpus =>
+  ({ trust: "bytes", candidates: projectCandidates(source, null) });
+
+/** The edit hook's corpus: unchanged files keep the fingerprints `cacheFile` holds for them. */
+export const cacheAssistedCorpus = (source: CorpusSource, cacheFile: string): CloneCorpus<"cache-assisted"> =>
+  ({ trust: "cache-assisted", candidates: projectCandidates(source, cacheFile) });

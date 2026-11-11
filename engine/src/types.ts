@@ -442,7 +442,7 @@ interface TaskCommonMetadataBase {
    * migrate opportunistically.
    *
    * The coordinated writers keep the three in lockstep, and every one of them
-   * writes all three together: `sanitizeTask` (the initializer, in
+   * writes all three together: `populatedTask` (the initializer, in
    * core/task-graph-population); `mergeFindings` (legacy/unbound
    * review), `finalizeReviewRun` (packet-bound review),
    * `applyFindingOutcomes` (panel adjudication), and
@@ -728,10 +728,42 @@ export type CompletedWaveGateRegistration =
       completionSuite: AcceptedWaveCompletionReceipt;
     }>;
 
+declare const REOPENED_TASK_IDS: unique symbol;
+
+/**
+ * The Task ids a reopening audit records: every Task the reopening returned
+ * to revalidation and, apart, the Distill Tasks among them that returned only
+ * because a sibling did (ADR-0068 §7). Minted only in
+ * `core/task-revalidation` (`reopenedTaskIds` for ids read from the State
+ * File, `reopenedTaskIdsOf` for the ids a reopening returned), so every audit
+ * holds what they establish: the swept ids are a strict subset of the
+ * reopened ones, because a Distill Task is swept only with another Task that
+ * returned on the reopening's own ground.
+ *
+ * Each audit says what its own ground is, and so which Distill Tasks count as
+ * swept: see `TaskReopeningAudit` and `WaveReopeningAudit`.
+ */
+export type ReopenedTaskIds = Readonly<{
+  /** The distinct Tasks the reopening returned; at least one. */
+  reopenedTaskIds: OrchestrationNonEmpty<TaskId>;
+  /** The Distill Tasks among `reopenedTaskIds` that returned with a sibling.
+   *  Absent when the reopening swept none, and on every audit written before
+   *  the Distill Task; never empty, and never every reopened Task. */
+  sweptDistillTaskIds?: OrchestrationNonEmpty<TaskId>;
+  readonly [REOPENED_TASK_IDS]: true;
+}>;
+
 /** Immutable audit of a completed Wave reopened because exact workspace
  * bytes drifted, or because legacy completion authority could not prove those
  * bytes. This is completed-Wave history; orphaned active-run replacement is
- * modeled separately by `OrphanedWaveGateRetirement`. */
+ * modeled separately by `OrphanedWaveGateRetirement`.
+ *
+ * Its `reopenedTaskIds` are the operator's exact payload, in payload order;
+ * legacy authority never labels them as proven drift. The payload is the
+ * whole returned set, so it names the Wave's Distill Task too, and
+ * `sweptDistillTaskIds` are the Distill Tasks in it that sit beside a
+ * reopened authored Task of their Wave: no byte comparison ever judged them
+ * (`exactRevalidationTargets`). */
 export type WaveReopeningAudit = Readonly<{
   schemaVersion: 1;
   kind: "completed-wave-reopened-for-review-integrity";
@@ -741,38 +773,31 @@ export type WaveReopeningAudit = Readonly<{
   wave: number;
   authorityDigest: ArtifactDigest;
   completionReceipt: ProtectedWaveStateCommitted;
-  /** Reopened Tasks; legacy authority never labels these as proven drift. */
-  reopenedTaskIds: readonly string[];
-  /** The Distill Tasks among `reopenedTaskIds` that returned because a sibling
-   *  did (ADR-0068), never on the audit's own ground: no byte comparison ever
-   *  judged them. The operator's exact payload names them too. Absent when the
-   *  reopening swept none, and on every audit written before the Distill Task. */
-  sweptDistillTaskIds?: OrchestrationNonEmpty<string>;
-}>;
+}> & ReopenedTaskIds;
 
 /** Immutable audit of implemented Tasks of the active Wave that the operator
  * reopened for re-implementation (`helper orchestration reopen-task`), so a
  * Wave Gate Finding on them can be fixed after the run is abandoned. Unlike
  * `WaveReopeningAudit` it names no completion receipt: the Wave never
- * completed. */
+ * completed.
+ *
+ * Its `reopenedTaskIds` are Tasks of `wave` in TaskGraph order: the ones the
+ * operator named and, beyond them, `sweptDistillTaskIds`, the Distill Tasks
+ * the operator did NOT name and the engine swept back with the named Tasks
+ * (`revalidationTargets`). A Distill Task the operator named is reopened on
+ * the operator's ground and is never recorded as swept, so every reopened id
+ * outside `sweptDistillTaskIds` is one the operator named. */
 export type TaskReopeningAudit = Readonly<{
   schemaVersion: 1;
   kind: "implemented-tasks-reopened";
   wave: number;
-  /** Distinct Tasks of `wave`, in TaskGraph order; a reopening names at least one. */
-  reopenedTaskIds: OrchestrationNonEmpty<TaskId>;
-  /** The Distill Tasks among `reopenedTaskIds` that the operator did not name:
-   *  the engine swept them back with the named Tasks (ADR-0068). Absent when
-   *  the reopening swept none, and on every audit written before the Distill
-   *  Task. Every other reopened id is one the operator named. */
-  sweptDistillTaskIds?: OrchestrationNonEmpty<TaskId>;
   /** The operator's non-blank reason, at most 512 characters. */
   reason: string;
   /** The abandoned Wave Gate run whose review authority the reopening
    *  retired; null when no abandoned run was still on the graph (none had
    *  registered, or an earlier reopening already retired it). */
   abandonedRunId: OrchestrationRunId | null;
-}>;
+}> & ReopenedTaskIds;
 
 export type OrphanedWaveGateRetirement = Readonly<{
   schemaVersion: 1;

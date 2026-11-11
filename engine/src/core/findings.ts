@@ -33,10 +33,10 @@
  * drifted before.
  *
  * Three further lockstep writers are not review steps: `updateTaskFindings`
- * (the manual operator override), `fixTaskFindings` (`--fix`), and `sanitizeTask`
+ * (the manual operator override), `fixTaskFindings` (`--fix`), and `populatedTask`
  * in TaskGraph Population (the decomposition that first admits a Task to the
  * graph). The first two derive their views through `claimsOfSeverity` here;
- * `sanitizeTask` admits a Task with no findings at all, so it writes the empty
+ * `populatedTask` admits a Task with no findings at all, so it writes the empty
  * triple directly. All three are
  * held to the same invariant by `findingsLockstepError` at the load boundary —
  * the enumeration of all seven writers lives on `Task.findings` in types.ts.

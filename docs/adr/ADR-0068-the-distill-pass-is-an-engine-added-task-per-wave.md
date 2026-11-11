@@ -87,11 +87,14 @@ A distill pass that cannot prove it preserved behaviour must not cost the Wave a
 - **Snapshot.** Registration of a Distill Task attempt stores the scope's bytes as one Git tree
   (`git hash-object -w` per leaf, built in a throwaway index) kept alive by the ref
   `refs/loom/distill/<authority digest>`. Nothing is recorded on the Task. The ref is deleted once the
-  attempt settles semantically, and kept when it settles `infrastructure-blocked`.
+  attempt settles semantically, and kept when it settles `infrastructure-blocked`. One entry point, used by
+  both transports, settles the attempt, persists the settled state, and only then deletes the ref: a
+  settlement whose state never lands keeps the snapshot its re-run restores from. A delete that is lost
+  after the state landed leaves a ref the Task's next registration drops.
 - **Decision.** Settlement first settles the attempt's bytes as a trial. One pure function over the
-  attempt's changed scope paths and the trial's failure kinds answers `keep` or `restore(reasons)`. It
-  restores exactly when the attempt changed scope paths and the trial would settle anything but
-  `implemented`.
+  attempt's changed scope paths and the trial settlement answers both questions: `keep` or
+  `restore(reasons)` for the bytes, and `keep` or `discard` for the snapshot. It restores exactly when the
+  attempt changed scope paths and the trial would settle anything but `implemented`.
 - **Restore.** The settlement shell writes the snapshot back, re-observes the scope, and settles on the new
   observation. The obligation is then satisfied on the `restored` basis, which keeps the reasons. A restore
   that fails, or leaves a path differing from the baseline, is `infrastructure-blocked`.
@@ -139,7 +142,7 @@ live phase gate; settlement is the authority on both.
   were never proven drifted. A Contract Revision's audit has no such field: its operator names a contract,
   never a Task, so every id it lists is engine-derived.
 - **The legacy manual review override refuses it.** `helper store-review-findings` writes no review state
-  onto a Task that `waveReviewExemption` exempts.
+  onto a Task that `waveReviewStanding` exempts.
 - **No skeletons.** Registration writes no Skeleton for a Distill Task: it implements nothing, and a bound
   path missing from its scope is a sibling's deletion to judge, not a file to scaffold.
 - **Attestation and reconcile.** A Distill Task cannot be armed for attestation. Proof reconcile treats it
@@ -175,6 +178,8 @@ live phase gate; settlement is the authority on both.
   `restored`.
 - **An `implemented` receipt cannot say a restore happened.** Only the Task's Proof does. The restored
   Task's stored test result is the agent's failing one.
-- **A bound scope path that is missing at the Distill Task's registration has no skeleton outcome
-  recorded**, an exception to "every production path has one outcome". Stage-two binding problems block
-  the binding's real holder, not the Distill Task.
+- **A bound scope path that is missing at the Distill Task's registration records the outcome
+  `absent-no-skeleton-owed`** ("absent, no skeleton owed"), so "every production path has one outcome"
+  holds for a Distill Task too and the sibling's deletion is visible in status and the brief. The State
+  File admits that outcome only on a Task that holds no Skeleton, at a bound path that is a skeleton
+  target. Stage-two binding problems block the binding's real holder, not the Distill Task.

@@ -13,13 +13,15 @@
  * - `tasks[].skeleton_outcomes` — one outcome ADT per distinct file_list path,
  *   each agreeing with the stamp and the records: a `skeleton-written` path
  *   has its record, an `unsupported-language` one is bound and unsupported
- *   for exactly that reason, and an unbound outcome's path is unbound.
+ *   for exactly that reason, an unbound outcome's path is unbound, and an
+ *   `absent-no-skeleton-owed` one is a Distill Task's bound skeleton target.
  *
  * A graph populated before G2 carries none of them and loads unchanged.
  */
 
 import { describe, expect, it } from "vitest";
 import { parseTaskGraph, type ParsedTaskGraph } from "../src/state-file-wire";
+import { DISTILL_AGENT } from "../src/core/model-profiles";
 import { parseAuthoredTaskRoster, populateTaskGraph, type AuthoredTask } from "../src/core/task-graph-population";
 import { defaultVerificationManifest } from "../src/core/verification-manifest";
 import type { PlanContract } from "../src/types";
@@ -135,15 +137,24 @@ const OUTCOMES = [
   { path: JAVA_PRICING, outcome: { kind: "skeleton-written", origin: "revision" } },
 ];
 
-/** The pre-G2 graph with the G2 fields added as raw JSON. */
+/**
+ * The pre-G2 graph with the G2 fields added as raw JSON: `outcomes` on the
+ * implementation Task T2, `distillOutcomes` on the Distill Task population
+ * added to T2's Wave.
+ */
 function g2Graph(fields: Readonly<{
   bindings?: unknown;
   skeletons?: unknown;
   outcomes?: unknown;
+  distillOutcomes?: unknown;
 }> = {}): Record<string, unknown> {
   const base = preG2Graph();
-  const tasks = (base.tasks as Record<string, unknown>[]).map((entry) =>
-    entry.id === "T2" && fields.outcomes !== undefined ? { ...entry, skeleton_outcomes: fields.outcomes } : entry);
+  const outcomesOf = (entry: Record<string, unknown>): unknown =>
+    entry.id === "T2" ? fields.outcomes : entry.agent === DISTILL_AGENT ? fields.distillOutcomes : undefined;
+  const tasks = (base.tasks as Record<string, unknown>[]).map((entry) => {
+    const outcomes = outcomesOf(entry);
+    return outcomes === undefined ? entry : { ...entry, skeleton_outcomes: outcomes };
+  });
   return {
     ...base,
     tasks,
@@ -365,6 +376,32 @@ describe("tasks[].skeleton_outcomes against the stamp and the records", () => {
     ];
     const graph = loaded(g2Graph({ bindings: BINDINGS, outcomes }));
     expect(viaDisk(graph.tasks.find(({ id }) => id === "T2")?.skeleton_outcomes)).toEqual(outcomes);
+  });
+
+  it("loads a Distill Task's absent-no-skeleton-owed outcome at a bound skeleton target", () => {
+    const distillOutcomes = [{ path: QUOTES, outcome: { kind: "absent-no-skeleton-owed" } }];
+    const graph = loaded(g2Graph({ bindings: BINDINGS, distillOutcomes }));
+    expect(viaDisk(graph.tasks.find(({ agent }) => agent === DISTILL_AGENT)?.skeleton_outcomes)).toEqual(distillOutcomes);
+  });
+
+  it.each<[string, Parameters<typeof g2Graph>[0], RegExp]>([
+    [
+      "on a Task that holds its Skeletons",
+      { bindings: BINDINGS, skeletons: RECORDS, outcomes: patchAt(OUTCOMES, 1, { outcome: { kind: "absent-no-skeleton-owed" } }) },
+      /tasks\[2\] \("T2"\)\.skeleton_outcomes\[1\] records 'src\/order\/quotes\.ts' as absent-no-skeleton-owed, but the Task holds its own Skeletons/,
+    ],
+    [
+      "at an unbound path",
+      { bindings: BINDINGS, distillOutcomes: [{ path: HELPERS, outcome: { kind: "absent-no-skeleton-owed" } }] },
+      /skeleton_outcomes\[0\] records 'src\/order\/helpers\.ts' as absent-no-skeleton-owed, but export_bindings does not bind it/,
+    ],
+    [
+      "at a bound path that is no skeleton target",
+      { bindings: BINDINGS, distillOutcomes: [{ path: RATES, outcome: { kind: "absent-no-skeleton-owed" } }] },
+      /skeleton_outcomes\[0\] records 'src\/order\/rates\.py' as absent-no-skeleton-owed, but the path is no skeleton target/,
+    ],
+  ])("refuses an absent-no-skeleton-owed outcome %s", (_label, fields, message) => {
+    expect(refusal(g2Graph(fields))).toMatch(message);
   });
 
   it("refuses the first contradicting Task, naming its index and id", () => {

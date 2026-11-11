@@ -50,9 +50,9 @@ import {
 } from "../engine/src/handlers/helpers/task-local-completion";
 import {
   productionExactSettlementPorts,
-  releaseSettledDistillSnapshot,
-  settleExactImplementation,
+  settleAndPersistExactImplementation,
   type ExactImplementationSettlementPorts,
+  type ExactImplementationTransportFacts,
   type ExactNewTestCollectionArgs,
 } from "../engine/src/handlers/helpers/exact-implementation-settlement";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
@@ -716,14 +716,13 @@ function piExactSettlementPorts(args: ExactPiSettlementArgs): ExactImplementatio
   });
 }
 
-/** The locked exact settlement. Impure by necessity: its ports read the repository against the locked Task. */
-function settleLockedPiResult(
-  state: TaskGraph,
+/** What the Pi transport carries into the exact settlement: the accepted transcript's verdict under the Pi evidence policy. */
+function piSettlementFacts(
   args: ExactPiSettlementArgs,
   transcript: Extract<ImplementationTranscriptObservation, { kind: "accepted" }>,
   modifiedPaths: readonly string[],
-): LockedPiSettlement {
-  return settleExactImplementation(state, {
+): ExactImplementationTransportFacts {
+  return {
     transport: "Pi",
     authority: args.authority,
     observedAt: args.observedAt,
@@ -734,7 +733,7 @@ function settleLockedPiResult(
     testEvidence: transcript.test.evidence.evidence,
     proofEvaluationPolicy: PI_STRUCTURED_EVIDENCE_POLICY,
     ledger: args.ledger,
-  }, piExactSettlementPorts(args));
+  };
 }
 
 async function applyExactImplementationPiResult(args: ExactPiSettlementArgs): Promise<PiResultOutcome> {
@@ -743,16 +742,11 @@ async function applyExactImplementationPiResult(args: ExactPiSettlementArgs): Pr
   if (transcript.kind === "malformed") return settleExactPiInfrastructure(args, transcript.failureReason);
   const modified = readImplementationModifiedPaths(args.repository, transcript.resultMessages, args.binding.taskId);
   if (!modified.ok) return settleExactPiInfrastructure(args, modified.message);
-  const settled = await args.store.updateAndReturn((state) => {
-    const application = settleLockedPiResult(state, args, transcript, modified.filesModified);
-    return {
-      state: applicationState(state, application.application),
-      value: application,
-    };
-  });
-  // Only now is the settlement committed, so only now may a Distill Task's
-  // snapshot go (ADR-0068): a re-run before the commit would still need it.
-  releaseSettledDistillSnapshot(args.repository.root(), args.authority, settled.application);
+  const settled = await settleAndPersistExactImplementation(
+    args.store,
+    piSettlementFacts(args, transcript, modified.filesModified),
+    piExactSettlementPorts(args),
+  );
   return renderExactPiSettlement(args.binding.taskId, args.log, settled);
 }
 

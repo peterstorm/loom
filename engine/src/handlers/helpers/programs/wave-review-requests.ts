@@ -20,8 +20,7 @@ import {
   type PersistedWaveBatchCandidate,
   type WaveRequestBatch,
   type WaveReviewRegistrationAuthority,
-  waveReviewedTasks,
-  waveReviewOutstanding,
+  waveReviewView,
   waveTaskReviewRosters,
 } from '../../../core/wave-review-authority';
 import { durableRefutationRequests, publicationResolver } from './durable-requests';
@@ -54,7 +53,7 @@ export function waveRequests(
     authority,
     graph,
     attempt,
-    observeReviewedWorkspace(waveReviewedTasks(tasks)),
+    observeReviewedWorkspace(waveReviewView(tasks).reviewed),
     observeWaveSpecCheckDocuments({
       specFile: graph.spec_file,
       planFile: graph.plan_file,
@@ -77,7 +76,7 @@ export async function installWaveReviewRuns(
   if (!specCheck.ok) throw new Error(specCheck.error.message);
   const preinstall = manager.load();
   const workspaces = observeReviewedWorkspace(
-    waveReviewedTasks(preinstall.tasks.filter(({ id }) => registration.taskIds.includes(id))),
+    waveReviewView(preinstall.tasks.filter(({ id }) => registration.taskIds.includes(id))).reviewed,
   );
   const specCheckObservation = observeWaveSpecCheckDocuments({
     specFile: batch.specCheckDocuments.spec.path,
@@ -186,10 +185,9 @@ export async function reconcileWaveReviewIssuance(
   }
 
   let refreshed = manager.load();
-  const hasCollectingPacket = refreshed.tasks.some((task) =>
-    registration.taskIds.includes(task.id) && task.review_run !== undefined);
-  const needsFreshPacket = refreshed.tasks.some((task) =>
-    registration.taskIds.includes(task.id) && task.review_run === undefined && waveReviewOutstanding(task));
+  const registered = refreshed.tasks.filter((task) => registration.taskIds.includes(task.id));
+  const hasCollectingPacket = registered.some((task) => task.review_run !== undefined);
+  const needsFreshPacket = waveReviewView(registered).outstanding.some((task) => task.review_run === undefined);
   if (!hasCollectingPacket && needsFreshPacket) {
     const batch = batchFor(refreshed);
     await installWaveReviewRuns(manager, registration, batch);

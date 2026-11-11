@@ -2,7 +2,9 @@ import {
   derivePendingTaskProof,
   evaluateProofObligations,
   evaluateTaskProof,
+  type ObservedArtifactChanges,
   type ObservedProofEvidence,
+  type ObservedProofFacts,
   type RedThenGreenEra,
   type SatisfiedTaskProof,
   type TaskProof,
@@ -105,24 +107,28 @@ export function shownRedThenGreen(implementationWrite = "src/fixture.ts"): RedTh
  *  `not-owed` — the judgment every Task outside a skeleton contract settles
  *  with. Pass `contractConformance` to state a different judgment. */
 export function observedEvidence(
-  evidence: Omit<ObservedProofEvidence, "contractConformance"> & Partial<Pick<ObservedProofEvidence, "contractConformance">>,
+  evidence: Omit<ObservedProofFacts, "contractConformance"> & Partial<Pick<ObservedProofFacts, "contractConformance">> & ObservedArtifactChanges,
 ): ObservedProofEvidence {
   return { contractConformance: CONFORMANCE_NOT_OWED, ...evidence };
 }
 
+/** Observed evidence of an attempt whose scope was not restored: its changed paths, which a test may replace. */
+export type UnrestoredProofEvidence = Extract<ObservedProofEvidence, { restoredAfter?: undefined }>;
+
 /** Observed evidence for a completed Task that changed exactly `files`, with a
- *  ledger-trusted pass and new tests written; `overrides` replace any field. */
+ *  ledger-trusted pass and new tests written; `overrides` replace any other field. */
 export function trustedPassEvidence(
   files: readonly string[],
-  overrides: Partial<ObservedProofEvidence> = {},
-): ObservedProofEvidence {
-  return observedEvidence({
+  overrides: Partial<ObservedProofFacts> = {},
+): UnrestoredProofEvidence {
+  return {
+    contractConformance: CONFORMANCE_NOT_OWED,
     taskCompleted: true,
     testResult: { verdict: "trusted-pass" },
     filesModified: files,
     newTestsWritten: true,
     ...overrides,
-  });
+  };
 }
 
 /** A satisfied Proof for a Task that changed exactly its declared files, with
@@ -243,6 +249,32 @@ export function taskFixture(input: TaskFixtureInput): Task {
     return { ...metadata, status: "pending", proof: pending };
   }
   return { ...metadata, status: "failed", proof: evaluated };
+}
+
+/** The implementation file a fixture Task owns by default: `src/<id, lower-cased>.ts`. */
+export const fileOf = (id: string): string => `src/${id.toLowerCase()}.ts`;
+
+export type SiblingTaskFixtureInput = Readonly<{ id: string }> & Partial<Omit<TaskFixtureInput, "id">>;
+
+/**
+ * An implementer Task of the Wave a Distill Task distils: `code-implementer-agent`,
+ * Wave 1, no dependencies, owning `fileOf(id)`. Pending unless `status` says
+ * otherwise; a settled one carries the satisfied Proof of its `file_list`
+ * unless the caller states another. `overrides` replace any field.
+ */
+export function siblingTaskFixture({ id, ...overrides }: SiblingTaskFixtureInput): Task {
+  const file_list = overrides.file_list ?? [fileOf(id)];
+  const settled = overrides.status !== undefined && overrides.status !== "pending";
+  return taskFixture({
+    id,
+    description: id,
+    agent: "code-implementer-agent",
+    wave: 1,
+    depends_on: [],
+    ...(settled ? { proof: satisfiedProof(file_list) } : {}),
+    ...overrides,
+    file_list,
+  });
 }
 
 /**

@@ -7,7 +7,7 @@
 import { match } from "ts-pattern";
 import type { HookHandler, ReviewStatus, Task } from "../../types";
 import { reconcileWaveBlock } from "../../core/wave-gate-model";
-import { waveReviewExemption } from "../../core/wave-review-authority";
+import { waveReviewStanding } from "../../core/wave-review-authority";
 import { TASK_GRAPH_PATH } from "../../config";
 import {
   attributeFindings,
@@ -151,14 +151,14 @@ export function updateTaskFindings(
 
 /**
  * Pure: why the manual override may not write review state onto `task`, or
- * null. A Task exempt from Wave review (`waveReviewExemption`, the one
+ * null. A Task exempt from Wave review (`waveReviewStanding`, the one
  * exemption rule) holds no review state: no gate check reads a status or a
  * Finding stored on it, so an override written there would pass or block
  * nothing while reporting that it had.
  */
 export function reviewOverrideRefusal(task: Pick<Task, "id" | "agent">): string | null {
-  const exemption = waveReviewExemption(task);
-  if (exemption === null) return null;
+  const exemption = waveReviewStanding(task);
+  if (exemption.kind === "reviewed") return null;
   const why = match(exemption.reason)
     .with("distill-task", () =>
       "it is its Wave's distill pass, and the Wave Gate reviews the distilled code through the Tasks that implemented it")

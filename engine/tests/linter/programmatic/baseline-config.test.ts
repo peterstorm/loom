@@ -9,7 +9,7 @@ import fc from "fast-check";
 import { configWithBaselines, recordedBaselines, type RecordedBaseline } from "../../../src/linter/programmatic/baseline-config";
 import { baselineKey, type BaselineOwner } from "../../../src/linter/programmatic/baseline";
 import { baselineOwners } from "../../../src/linter/programmatic/index";
-import { EMPTY_CORPUS } from "../../../src/linter/clones/clone-detection";
+import { authoritativeLintContext } from "../../../src/linter/loader";
 
 /** An owner whose detector flags every line that starts with `marker`. */
 const markerOwner = (configKey: BaselineOwner["configKey"], marker: string, extensions: readonly string[] = [".ts"]): BaselineOwner => ({
@@ -51,7 +51,7 @@ describe("recordedBaselines", () => {
 
   it("drives the real registered owners over a real unproven switch", () => {
     // No project: nothing can be a copy of another file, said out loud.
-    const owners = baselineOwners({}, null, EMPTY_CORPUS);
+    const owners = baselineOwners(authoritativeLintContext({}, null));
     const source = [
       "type Shape = { kind: 'a' } | { kind: 'b' };",
       "export function f(s: Shape): number {",

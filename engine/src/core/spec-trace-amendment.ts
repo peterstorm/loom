@@ -22,7 +22,7 @@ import type {
   Task,
   TaskGraph,
 } from "../types";
-import { isDistillTask } from "./distill-task";
+import { taskRolePolicy } from "./distill-task";
 import { mapNonEmpty, nonEmpty } from "./orchestration-contract";
 import {
   recordedAnchorHashes,
@@ -172,7 +172,7 @@ function completedWaveRefusal(
  * so an amendment never produces a graph that cannot be loaded.
  */
 function distillTraceRefusal(amended: readonly AmendedTrace[]): SpecTraceAmendmentResult | null {
-  const traced = amended.filter(({ task }) => isDistillTask(task)).map(({ task }) => task.id);
+  const traced = amended.filter(({ task }) => !taskRolePolicy(task).traceable).map(({ task }) => task.id);
   return traced.length === 0
     ? null
     : refuse(

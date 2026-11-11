@@ -22,11 +22,17 @@ import {
   sweptDistillTaskIdsOf,
   type TaskReopening,
 } from "../../src/core/task-reopening";
+import { parseTaskId } from "../../src/core/task-id";
 import {
+  exactRevalidationTargets,
   reopenableWave,
+  reopenedTaskIds,
+  reopenedTaskIdsOf,
+  returnedTaskIds,
   returnWaveTasksToRevalidation,
   revalidationTargets,
-  sweptAmongReturned,
+  sweptDistillTaskIds,
+  type RevalidationTargets,
 } from "../../src/core/task-revalidation";
 import { checkImplementationProof } from "../../src/core/wave-gate-checks";
 import { newWaveGate } from "../../src/core/wave-gate-model";
@@ -43,18 +49,16 @@ import {
   activeWaveGateFixture,
   completedWaveGateFixture,
   distillTaskFixture,
+  fileOf,
   protectedGraphFixture,
-  satisfiedProof,
-  taskFixture,
+  siblingTaskFixture,
 } from "../fixtures/task-lifecycle";
 
-const fileOf = (id: string): string => `src/${id.toLowerCase()}.ts`;
-
-const authored = (id: string, wave: number, status: TaskStatus, extra: Partial<Task> = {}): Task => taskFixture({
-  id, description: id, agent: "code-implementer-agent", wave, depends_on: [],
-  file_list: [fileOf(id)], spec_anchors: [], spec_contributions: [],
+const authored = (id: string, wave: number, status: TaskStatus, extra: Partial<Task> = {}): Task => siblingTaskFixture({
+  id,
+  wave,
   status,
-  ...(status === "pending" ? {} : { proof: satisfiedProof([fileOf(id)]) }),
+  spec_anchors: [], spec_contributions: [],
   review_status: status === "pending" ? "pending" : "passed",
   review_generation: 2,
   ...extra,
@@ -104,34 +108,84 @@ const committed = (graph: TaskGraph, ...taskIds: readonly string[]): Extract<Tas
   return outcome;
 };
 
+/** The two lists a reopening reads off its targets: every returned Task, and the swept ones among them. */
+const returnedAndSwept = (targets: RevalidationTargets) =>
+  ({ taskIds: returnedTaskIds(targets), sweptDistillTaskIds: sweptDistillTaskIds(targets) });
+
 describe("revalidationTargets: the one sweep rule every reopening shares", () => {
   const tasks = paused().tasks;
+  const named = (...taskIds: readonly string[]) => returnedAndSwept(revalidationTargets(tasks, taskIds));
 
   it("adds the settled Distill Task of each named Task's Wave, in TaskGraph order", () => {
-    expect(revalidationTargets(tasks, ["T2"])).toEqual({ taskIds: ["T2", "T9"], sweptDistillTaskIds: ["T9"] });
-    expect(revalidationTargets(tasks, ["T2", "T1"])).toEqual({ taskIds: ["T1", "T2", "T9"], sweptDistillTaskIds: ["T9"] });
+    expect(named("T2")).toEqual({ taskIds: ["T2", "T9"], sweptDistillTaskIds: ["T9"] });
+    expect(named("T2", "T1")).toEqual({ taskIds: ["T1", "T2", "T9"], sweptDistillTaskIds: ["T9"] });
   });
 
   it("sweeps nothing for the Distill Task named itself, a pending one, or no Task", () => {
-    expect(revalidationTargets(tasks, ["T9"])).toEqual({ taskIds: ["T9"], sweptDistillTaskIds: [] });
-    expect(revalidationTargets(tasks, ["T3"])).toEqual({ taskIds: ["T3"], sweptDistillTaskIds: [] });
-    expect(revalidationTargets(tasks, [])).toEqual({ taskIds: [], sweptDistillTaskIds: [] });
+    expect(named("T9")).toEqual({ taskIds: ["T9"], sweptDistillTaskIds: [] });
+    expect(named("T3")).toEqual({ taskIds: ["T3"], sweptDistillTaskIds: [] });
+    expect(named()).toEqual({ taskIds: [], sweptDistillTaskIds: [] });
+  });
+
+  it("returns nothing for a named id that is no Task of the roster", () => {
+    expect(named("T77")).toEqual({ taskIds: [], sweptDistillTaskIds: [] });
+    expect(named("T77", "T2")).toEqual({ taskIds: ["T2", "T9"], sweptDistillTaskIds: ["T9"] });
+  });
+
+  it("lists each returned Task once, under its one ground", () => {
+    expect(revalidationTargets(tasks, ["T2", "T2", "T1"])).toEqual([
+      { taskId: "T1", swept: false }, { taskId: "T2", swept: false }, { taskId: "T9", swept: true },
+    ]);
   });
 
   it("for any named Tasks, returns each of them, plus only settled Distill Tasks of their Waves, none named", () => {
     const ids = tasks.map(({ id }) => id);
-    fc.assert(fc.property(fc.subarray(ids), (named) => {
-      const { taskIds, sweptDistillTaskIds } = revalidationTargets(tasks, named);
-      expect(taskIds).toEqual(ids.filter((id) => named.includes(id) || sweptDistillTaskIds.includes(id)));
-      const waves = new Set(tasks.filter(({ id }) => named.includes(id)).map(({ wave }) => wave));
-      for (const id of sweptDistillTaskIds) {
+    fc.assert(fc.property(fc.subarray(ids), (chosen) => {
+      const { taskIds, sweptDistillTaskIds: sweptIds } = named(...chosen);
+      expect(taskIds).toEqual(ids.filter((id) => chosen.includes(id) || sweptIds.some((swept) => swept === id)));
+      const waves = new Set(tasks.filter(({ id }) => chosen.includes(id)).map(({ wave }) => wave));
+      for (const id of sweptIds) {
         const swept = tasks.find((task) => task.id === id)!;
-        expect(named).not.toContain(id);
+        expect(chosen).not.toContain(id);
         expect(swept).toMatchObject({ agent: DISTILL_AGENT, status: "implemented" });
         expect(waves.has(swept.wave)).toBe(true);
       }
       // Idempotent: the swept set needs no second sweep.
-      expect(revalidationTargets(tasks, taskIds).sweptDistillTaskIds).toEqual([]);
+      expect(named(...taskIds).sweptDistillTaskIds).toEqual([]);
+    }));
+  });
+});
+
+describe("the ids a reopening audit records have one constructor", () => {
+  const tasks = paused("implemented").tasks;
+  const ids = tasks.map(({ id }) => value(parseTaskId(id)));
+
+  it("accepts swept ids exactly when they are a strict subset of the reopened ones", () => {
+    fc.assert(fc.property(fc.subarray(ids, { minLength: 1 }), fc.subarray(ids), (reopened, swept) => {
+      const [first, ...rest] = reopened;
+      const result = reopenedTaskIds([first, ...rest], swept);
+      const foreign = swept.find((id) => !reopened.includes(id));
+      if (foreign !== undefined) {
+        expect(result).toEqual({ ok: false, error: { kind: "swept-not-reopened", taskId: foreign } });
+      } else if (swept.length === reopened.length) {
+        expect(result).toEqual({ ok: false, error: { kind: "swept-every-reopened" } });
+      } else {
+        // Absent, never empty: the State File refuses `[]`.
+        expect(result).toEqual({
+          ok: true,
+          value: { reopenedTaskIds: reopened, ...(swept.length === 0 ? {} : { sweptDistillTaskIds: swept }) },
+        });
+      }
+    }));
+  });
+
+  it("records what a reopening returned exactly as it would accept those ids read back", () => {
+    fc.assert(fc.property(fc.subarray(tasks.map(({ id }) => id)), (chosen) => {
+      const targets = revalidationTargets(tasks, chosen);
+      const [first, ...rest] = returnedTaskIds(targets);
+      const recorded = reopenedTaskIdsOf(targets);
+      if (first === undefined) expect(recorded).toBeNull();
+      else expect({ ok: true, value: recorded }).toEqual(reopenedTaskIds([first, ...rest], sweptDistillTaskIds(targets)));
     }));
   });
 });
@@ -254,7 +308,7 @@ describe("Task Reopening sweeps the Wave's Distill Task back", () => {
       expect(sweptDistillTaskIdsOf(audit)).toEqual(audit.reopenedTaskIds.filter((id) => !named.includes(id)));
       expect(audit.reopenedTaskIds).toEqual(expect.arrayContaining(named));
       // Absent, never empty: the State File refuses `[]`.
-      expect(audit.sweptDistillTaskIds?.length ?? 1).toBeGreaterThan(0);
+      if (audit.sweptDistillTaskIds !== undefined) expect(audit.sweptDistillTaskIds.length).toBeGreaterThan(0);
     }));
   });
 
@@ -306,9 +360,9 @@ describe("Task Reopening sweeps the Wave's Distill Task back", () => {
   it("the shared transition returns exactly what it reports", () => {
     const reopenable = value(reopenableWave(paused()));
     const { graph, returned } = returnWaveTasksToRevalidation(reopenable, ["T2"]);
-    expect(returned).toEqual({ taskIds: ["T2", "T9"], sweptDistillTaskIds: ["T9"] });
+    expect(returnedAndSwept(returned)).toEqual({ taskIds: ["T2", "T9"], sweptDistillTaskIds: ["T9"] });
     expect(graph.tasks.filter(({ revalidation_required }) => revalidation_required === true).map(({ id }) => id))
-      .toEqual(returned.taskIds);
+      .toEqual(returnedTaskIds(returned));
     expect(graph.wave_gates["1"]).toMatchObject({ impl_complete: false, tests_passed: null, reviews_complete: false });
   });
 });
@@ -373,7 +427,7 @@ describe("Contract Revision sweeps the current Wave's Distill Task back", () => 
     spec_trace_version: 2, current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
     spec_file: null, plan_file: null, current_wave: 2, executing_tasks: [],
     tasks: [
-      authored("T1", 1, "completed", { file_list: [TYPES, ACCEPTANCE], proof: satisfiedProof([TYPES, ACCEPTANCE]) }),
+      authored("T1", 1, "completed", { file_list: [TYPES, ACCEPTANCE] }),
       authored("T2", 2, claimant, { depends_on: ["T1"], spec_anchors: ["AS-001"] }),
       authored("T3", 2, "implemented", { depends_on: ["T1"] }),
       distill("T9", 2, [fileOf("T2"), fileOf("T3")], distillStatus),
@@ -491,13 +545,37 @@ describe("reopening a completed Wave sweeps its Distill Task back", () => {
     expect(alone.wave_reopening_history?.[0]).not.toHaveProperty("sweptDistillTaskIds");
   });
 
-  it("sweptAmongReturned names exactly the listed Distill Tasks that have a listed sibling", () => {
+  describe("exactRevalidationTargets: the ids are the whole returned set", () => {
     const tasks = graph().tasks;
-    expect(sweptAmongReturned(tasks, ["T22", "T30"])).toEqual(["T30"]);
-    expect(sweptAmongReturned(tasks, ["T19", "T22"])).toEqual([]);
-    expect(sweptAmongReturned(tasks, ["T30"])).toEqual([]);
-    expect(sweptAmongReturned(tasks, ["T23", "T30"])).toEqual([]);
-    expect(sweptAmongReturned(tasks, [])).toEqual([]);
+    const exact = (...taskIds: readonly string[]) => returnedAndSwept(value(exactRevalidationTargets(tasks, taskIds)));
+
+    it("marks as swept exactly the listed Distill Tasks that have a listed sibling, in the order given", () => {
+      expect(exact("T22", "T30")).toEqual({ taskIds: ["T22", "T30"], sweptDistillTaskIds: ["T30"] });
+      expect(exact("T30", "T22", "T19")).toEqual({ taskIds: ["T30", "T22", "T19"], sweptDistillTaskIds: ["T30"] });
+      expect(exact("T30")).toEqual({ taskIds: ["T30"], sweptDistillTaskIds: [] });
+      expect(exact("T23", "T30")).toEqual({ taskIds: ["T23", "T30"], sweptDistillTaskIds: [] });
+      expect(exact()).toEqual({ taskIds: [], sweptDistillTaskIds: [] });
+    });
+
+    it("adds nothing: a set that leaves a settled Distill Task beside a returned sibling is refused with it", () => {
+      expect(exactRevalidationTargets(tasks, ["T19", "T22"])).toEqual({ ok: false, error: ["T30"] });
+    });
+
+    it("returns nothing for an id that is no Task of the roster", () => {
+      expect(exact("T77", "T30")).toEqual({ taskIds: ["T30"], sweptDistillTaskIds: [] });
+    });
+
+    it("for any Tasks, accepts what the named sweep returns, with at least the same Distill Tasks swept", () => {
+      const rosterIds = tasks.map(({ id }) => id);
+      fc.assert(fc.property(fc.subarray(rosterIds), (chosen) => {
+        const named = returnedAndSwept(revalidationTargets(tasks, chosen));
+        const whole = exact(...named.taskIds);
+        expect(whole.taskIds).toEqual(named.taskIds);
+        expect(whole.sweptDistillTaskIds).toEqual(expect.arrayContaining([...named.sweptDistillTaskIds]));
+        // The set names a swept Distill Task too; the named sweep never does.
+        for (const id of whole.sweptDistillTaskIds) expect(tasks.find((task) => task.id === id)?.agent).toBe(DISTILL_AGENT);
+      }));
+    });
   });
 
   it.each<readonly [string, unknown, string]>([

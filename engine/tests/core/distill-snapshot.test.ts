@@ -1,16 +1,14 @@
 /**
- * The pure half of the Distill Snapshot (ADR-0068 §5): which trial settlement
- * writes the snapshot back, which settlement lets it go, and the snapshot
- * tree's wire format.
+ * The pure half of the Distill Snapshot (ADR-0068 §5): what a settlement
+ * means for the attempt's bytes and for its snapshot, and the snapshot tree's
+ * wire format.
  */
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
   describeDistillSnapshotFailure,
-  distillRestoreOf,
-  distillSnapshotRetention,
+  distillSettlementOutcome,
   distillSnapshotScope,
-  distillTrialFailureKinds,
   parseSnapshotTree,
   restoredFilePermissions,
   settledDistillSnapshotDigests,
@@ -30,41 +28,34 @@ const blocked: DistillTrialSettlement = { kind: "applied", transition: { kind: "
 const ignored: DistillTrialSettlement = { kind: "ignored" };
 const errored: DistillTrialSettlement = { kind: "error" };
 
-describe("distillTrialFailureKinds", () => {
-  it("names a semantic failure's receipt kinds and nothing for every other arm", () => {
-    expect(distillTrialFailureKinds(implemented)).toEqual([]);
-    expect(distillTrialFailureKinds(failing("retry-required", ["proof:regression-tests-failed"])))
-      .toEqual(["proof:regression-tests-failed"]);
-    expect(distillTrialFailureKinds(failing("escalation-required", ["proof:test-result-missing", "task-byte-scope-violation"])))
-      .toEqual(["proof:test-result-missing", "task-byte-scope-violation"]);
-    expect(distillTrialFailureKinds(blocked)).toEqual([]);
-    expect(distillTrialFailureKinds(ignored)).toEqual([]);
-    expect(distillTrialFailureKinds(errored)).toEqual([]);
-  });
-});
-
-describe("distillRestoreOf", () => {
+describe("distillSettlementOutcome", () => {
   const CHANGED = ["src/a.ts"];
+  const KEEP = { kind: "keep" };
 
-  it("keeps a trial that settled implemented, changed or not", () => {
-    expect(distillRestoreOf(CHANGED, implemented)).toEqual({ kind: "keep" });
-    expect(distillRestoreOf([], implemented)).toEqual({ kind: "keep" });
+  it("keeps the bytes of a settlement that settled implemented, changed or not, and lets its snapshot go", () => {
+    expect(distillSettlementOutcome(CHANGED, implemented)).toEqual({ restore: KEEP, retention: "discard" });
+    expect(distillSettlementOutcome([], implemented)).toEqual({ restore: KEEP, retention: "discard" });
   });
 
-  it("restores a changed scope the trial would fail, carrying the failure kinds", () => {
-    expect(distillRestoreOf(CHANGED, failing("retry-required", ["proof:regression-tests-failed"])))
-      .toEqual({ kind: "restore", after: ["proof:regression-tests-failed"] });
-    expect(distillRestoreOf(CHANGED, failing("escalation-required", ["task-byte-scope-violation"])))
-      .toEqual({ kind: "restore", after: ["task-byte-scope-violation"] });
+  it("restores a changed scope a semantic failure would settle, carrying every failure kind, and lets the snapshot go", () => {
+    expect(distillSettlementOutcome(CHANGED, failing("retry-required", ["proof:regression-tests-failed"])))
+      .toEqual({ restore: { kind: "restore", after: ["proof:regression-tests-failed"] }, retention: "discard" });
+    expect(distillSettlementOutcome(CHANGED, failing("escalation-required", ["proof:test-result-missing", "task-byte-scope-violation"])))
+      .toEqual({ restore: { kind: "restore", after: ["proof:test-result-missing", "task-byte-scope-violation"] }, retention: "discard" });
   });
 
-  it("keeps an unchanged scope whatever the trial failed for: there is nothing to write back", () => {
-    expect(distillRestoreOf([], failing("retry-required", ["task-byte-scope-violation"]))).toEqual({ kind: "keep" });
+  it("keeps an unchanged scope whatever the settlement failed for: there is nothing to write back", () => {
+    expect(distillSettlementOutcome([], failing("retry-required", ["task-byte-scope-violation"])))
+      .toEqual({ restore: KEEP, retention: "discard" });
   });
 
-  it("never restores for an infrastructure-blocked, ignored or error trial: none of them judged the bytes", () => {
-    for (const trial of [blocked, ignored, errored]) {
-      expect(distillRestoreOf(CHANGED, trial)).toEqual({ kind: "keep" });
+  it("keeps a changed scope whose semantic failure names no failure kind: a restore needs a reason", () => {
+    expect(distillSettlementOutcome(CHANGED, failing("retry-required", []))).toEqual({ restore: KEEP, retention: "discard" });
+  });
+
+  it("neither restores nor lets the snapshot go for an infrastructure-blocked, ignored or error settlement: none judged the bytes", () => {
+    for (const settlement of [blocked, ignored, errored]) {
+      expect(distillSettlementOutcome(CHANGED, settlement)).toEqual({ restore: KEEP, retention: "keep" });
     }
   });
 
@@ -85,30 +76,37 @@ describe("distillRestoreOf", () => {
       fc.uniqueArray(failureKind, { minLength: 1, maxLength: 4 }),
     ).map(([kind, kinds]) => failing(kind, kinds)),
   );
-  const wouldNotImplement = (trial: DistillTrialSettlement): boolean =>
-    trial.kind === "applied" && (trial.transition.kind === "retry-required" || trial.transition.kind === "escalation-required");
+  const semanticFailureKinds = (settlement: DistillTrialSettlement): readonly string[] | null =>
+    settlement.kind === "applied" && (settlement.transition.kind === "retry-required" || settlement.transition.kind === "escalation-required")
+      ? settlement.transition.receipt.failureKinds
+      : null;
 
-  it("property: restore iff the scope changed AND the trial settled a semantic failure", () => {
+  it("property: restore iff the scope changed AND the settlement is a semantic failure; retention never reads the scope", () => {
     fc.assert(fc.property(
       fc.uniqueArray(fc.constantFrom("src/a.ts", "src/b.ts", "src/dir/c.ts"), { maxLength: 3 }),
       trialArb,
-      (changed, trial) => {
-        const decision = distillRestoreOf(changed, trial);
-        expect(decision.kind === "restore").toBe(changed.length > 0 && wouldNotImplement(trial));
-        if (decision.kind === "restore") expect(decision.after).toEqual(distillTrialFailureKinds(trial));
+      (changed, settlement) => {
+        const { restore, retention } = distillSettlementOutcome(changed, settlement);
+        const failureKinds = semanticFailureKinds(settlement);
+        expect(restore.kind === "restore").toBe(changed.length > 0 && failureKinds !== null);
+        if (restore.kind === "restore") expect(restore.after).toEqual(failureKinds);
+        expect(retention).toBe(distillSettlementOutcome([], settlement).retention);
+        // A settlement that restores always lets its snapshot go once persisted.
+        if (restore.kind === "restore") expect(retention).toBe("discard");
       },
     ));
   });
-});
 
-describe("distillSnapshotRetention", () => {
-  it("discards after every semantic settlement and keeps otherwise", () => {
-    expect(distillSnapshotRetention(implemented)).toBe("discard");
-    expect(distillSnapshotRetention(failing("retry-required", ["proof:regression-tests-failed"]))).toBe("discard");
-    expect(distillSnapshotRetention(failing("escalation-required", ["task-byte-scope-violation"]))).toBe("discard");
-    expect(distillSnapshotRetention(blocked)).toBe("keep");
-    expect(distillSnapshotRetention(ignored)).toBe("keep");
-    expect(distillSnapshotRetention(errored)).toBe("keep");
+  it("property: registration drops exactly the attempts whose persisted settlement let the snapshot go", () => {
+    const applied = fc.constantFrom(implemented, blocked, failing("retry-required", ["proof:regression-tests-failed"]), failing("escalation-required", ["task-byte-scope-violation"]));
+    fc.assert(fc.property(fc.array(applied, { maxLength: 6 }), (settlements) => {
+      const history = settlements.flatMap((settlement, index) =>
+        settlement.kind === "applied" ? [{ authorityDigest: `digest-${index}`, transition: settlement.transition.kind }] : []);
+      const released = history
+        .filter((_, index) => distillSettlementOutcome([], settlements[index]!).retention === "discard")
+        .map(({ authorityDigest }) => authorityDigest);
+      expect(settledDistillSnapshotDigests({ agent: DISTILL_AGENT, implementation_attempt_history: history })).toEqual(released);
+    }));
   });
 });
 

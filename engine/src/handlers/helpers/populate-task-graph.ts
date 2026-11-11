@@ -32,7 +32,7 @@ import { runGit } from "../../utils/git-execution-policy";
 import { renderProofBoundaryNotice } from "../../core/proof-boundary-observation";
 import { acceptanceObservationProblem } from "../../core/acceptance-contract";
 import { parsePlanExportBindings } from "../../core/parse-plan-models";
-import { isDistillTask } from "../../core/distill-task";
+import { distillPlanNote, isDistillTask } from "../../core/distill-task";
 import {
   parseAuthoredTaskRoster,
   populateTaskGraph,
@@ -343,7 +343,7 @@ const handler: HookHandler = async (stdin, args) => {
   }
 
   // Validate decompose output before merging. Scoped to the PAYLOAD: the
-  // findings aggregate is agent-forgeable here and core `sanitizeTask`
+  // findings aggregate is agent-forgeable here and core `populatedTask`
   // strips it during population, so holding this to the load-boundary findings
   // rules would reject exactly the input that sanitization exists to clean.
   const validation = validateFull(decompose as unknown as Record<string, unknown>, "decompose-payload");
@@ -496,13 +496,18 @@ const handler: HookHandler = async (stdin, args) => {
   const observation = applied.value.state.proof_boundary_observation;
   const boundaryNotice = observation === undefined ? null : renderProofBoundaryNotice(observation);
   if (boundaryNotice !== null) process.stderr.write(`${boundaryNotice}\n`);
+  // A roster the planner gave no distill pass for a reason the operator did
+  // not choose says so, beside the summary that shows none was added.
+  const distillNote = distillPlanNote(applied.value.distillPlan);
+  if (distillNote !== null) process.stderr.write(`${distillNote}\n`);
 
   return {
     kind: "passthrough",
     systemMessage: renderProjectVerificationCoverage(deriveProjectVerificationCoverage(preparedManifest.value)) +
       ` Install ${VERIFICATION_MANIFEST_SOURCE_PATH} before population to configure project checks; ` +
       "later source edits do not change this TaskGraph's frozen authority." +
-      (boundaryNotice === null ? "" : ` ${boundaryNotice}`),
+      (boundaryNotice === null ? "" : ` ${boundaryNotice}`) +
+      (distillNote === null ? "" : ` ${distillNote}`),
   };
 };
 

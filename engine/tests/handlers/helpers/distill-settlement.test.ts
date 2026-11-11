@@ -2,8 +2,10 @@
  * A failed distill pass is restored, not retried (ADR-0068 §5): the shared
  * settlement shell settles a Distill Task attempt once as a trial, writes the
  * attempt's snapshot back when the pure decision says so, and settles again
- * on the restored bytes. Ports are in-memory: a fake worktree the byte
- * observation reads, and a fake snapshot store.
+ * on the restored bytes; persisted through `settleAndPersistExactImplementation`
+ * it commits that settlement and only then lets the snapshot go. Ports are
+ * in-memory: a fake worktree the byte observation reads, a fake snapshot
+ * store, and a fake State File.
  */
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
@@ -18,8 +20,10 @@ import {
 } from "../../../src/core/implementation-application";
 import {
   createImplementationAttemptAuthority,
+  parseIsoInstant,
   type ImplementationAttemptAuthority,
 } from "../../../src/core/implementation-completion";
+import { authorizeImplementationSpawn, createImplementationAttemptContext } from "../../../src/core/implementation-retry";
 import { DISTILL_AGENT } from "../../../src/core/model-profiles";
 import {
   PI_STRUCTURED_EVIDENCE_POLICY,
@@ -27,14 +31,22 @@ import {
   type ProofEvaluationPolicy,
 } from "../../../src/core/proof-obligations";
 import {
-  releaseSettledDistillSnapshot,
+  settleAndPersistExactImplementation,
   settleExactImplementation,
   type ExactImplementationSettlement,
   type ExactImplementationSettlementPorts,
   type ExactImplementationTransportFacts,
+  type ExactSettlementStatePort,
 } from "../../../src/handlers/helpers/exact-implementation-settlement";
+import { parseTaskGraph } from "../../../src/state-manager";
 import type { Task, TaskGraph, TaskTestResult } from "../../../src/types";
-import { protectedGraphFixture, satisfiedProof, taskFixture } from "../../fixtures/task-lifecycle";
+import {
+  behaviourPreservedBasis as behaviourPreserved,
+  REFUSING_DISTILL_SNAPSHOTS,
+  settlementFacts,
+} from "../../fixtures/distill-settlement";
+import { value } from "../../fixtures/parse-result";
+import { protectedGraphFixture, siblingTaskFixture, taskFixture } from "../../fixtures/task-lifecycle";
 
 const ROOT = "/fixture";
 const SCOPE = ["src/a.ts", "src/b.ts"] as const;
@@ -70,13 +82,12 @@ function authorityFor(taskId: string, reservationId: string, baseline = ATTEMPT_
   return parsed.value;
 }
 
-const sibling = (id: string, file: string): Task => taskFixture({
-  id, description: id, agent: "code-implementer-agent", wave: 1, status: "implemented", depends_on: [],
-  file_list: [file], proof: satisfiedProof([file]),
-});
+const sibling = (id: string, file: string): Task => siblingTaskFixture({ id, status: "implemented", file_list: [file] });
 
 /** A Wave whose siblings are implemented and whose Task `T3` holds `attempt`. */
 function graphWith(attempt: ImplementationAttemptAuthority, agent: string): TaskGraph {
+  const admission = authorizeImplementationSpawn({ id: "T3" }, "Task ID: T3");
+  if (!admission.ok) throw new Error(admission.error);
   const reserved = taskFixture({
     id: "T3",
     description: "the Wave's third Task",
@@ -91,7 +102,8 @@ function graphWith(attempt: ImplementationAttemptAuthority, agent: string): Task
     attempt_artifact_baseline: ATTEMPT_BASELINE,
     attempt_repository_baseline: [],
     reserved_at: attempt.reservedAt,
-    // As registration stamps a modern attempt, so the settled Task loads.
+    // As registration stamps a modern attempt, so the Task loads before and after it settles.
+    active_implementation_context: createImplementationAttemptContext({ authority: attempt, prompt: "Task ID: T3", admission }),
     implementation_retry_protocol: 2,
     implementation_retry_history_start: 0,
   });
@@ -119,25 +131,16 @@ const NO_TRUSTED_RUN: TaskTestResult = {
   provenance: "unverified",
 };
 
-function factsFor(
+const OBSERVED_AT = value(parseIsoInstant("2026-11-11T00:01:00.000Z", "fixture settlement instant"));
+
+/** The settlement facts of `attempt`, observed at one fixed instant so equal inputs settle to equal values. */
+const factsFor = (
   attempt: ImplementationAttemptAuthority,
   testResult: TaskTestResult,
   parserModifiedPaths: readonly string[],
   proofEvaluationPolicy: ProofEvaluationPolicy = TRUSTED_LEDGER_ONLY_POLICY,
-): ExactImplementationTransportFacts {
-  return {
-    transport: "Claude",
-    authority: attempt,
-    observedAt: "2026-11-11T00:01:00.000Z" as never,
-    parserModifiedPaths,
-    parserPathLabel: "fixture paths",
-    taskCompleted: true,
-    testResult,
-    testEvidence: "fixture evidence",
-    proofEvaluationPolicy,
-    ledger: { kind: "read", events: [] },
-  };
-}
+): ExactImplementationTransportFacts =>
+  settlementFacts(attempt, testResult, parserModifiedPaths, { observedAt: OBSERVED_AT, proofEvaluationPolicy });
 
 /** The fake worktree, its settlement ports, and the fake snapshot store over it. */
 type World = Readonly<{
@@ -218,12 +221,6 @@ const settledTask = (settled: ExactImplementationSettlement): Task => {
   if (task === undefined) throw new Error("fixture: T3 missing after settlement");
   return task;
 };
-
-const behaviourPreserved = (task: Task): unknown =>
-  task.proof?.state === "pending" || task.proof === undefined
-    ? undefined
-    : task.proof.results.flatMap((result) =>
-        result.state === "satisfied" && result.evidence.kind === "behaviour-preserved" ? [result.evidence.basis] : [])[0];
 
 const restores = ({ calls }: World): readonly string[] => calls.filter((call) => call.startsWith("restore"));
 
@@ -366,10 +363,6 @@ describe("a restore that does not put the scope back is infrastructure", () => {
     expect(settled.infrastructureReason).toContain("proof:regression-tests-failed");
     expect(settledTask(settled)).toMatchObject({ status: "pending", revalidation_required: true });
     expect(settledTask(settled).retry_count).toBeUndefined();
-
-    releaseSettledDistillSnapshot(ROOT, attempt, settled.application, w.snapshots);
-    expect(w.stored.has(attempt.authorityDigest)).toBe(true);
-    expect(w.calls.filter((call) => call.startsWith("discard"))).toEqual([]);
   });
 
   it("blocks when no snapshot exists, without claiming one was kept", () => {
@@ -398,52 +391,151 @@ describe("a restore that does not put the scope back is infrastructure", () => {
   });
 });
 
-describe("releasing a settled attempt's snapshot", () => {
-  const settle = (testResult: TaskTestResult, edit: (files: Map<string, string>) => void) => {
-    const attempt = authorityFor("T3", `distill-release-${testResult.verdict}-${Math.random()}`);
-    const w = world(attempt);
-    edit(w.files);
-    const settled = settleExactImplementation(graphWith(attempt, DISTILL_AGENT), factsFor(attempt, testResult, ["src/a.ts"]), w.ports, w.snapshots);
-    return { attempt, w, settled };
-  };
+const COMMIT = "commit";
 
-  it("never discards inside the settlement: the caller has not persisted yet", () => {
-    const { attempt, w } = settle(TRUSTED_FAIL, (files) => files.set("src/a.ts", "a distilled\n"));
+/**
+ * An in-memory State File over `initial`. A commit is recorded in `calls`,
+ * beside the snapshot store's own calls, so their order can be read. With
+ * `commitFails` the settlement runs and its state is then refused.
+ */
+function stateFileOver(initial: TaskGraph, calls: string[], commitFails = false): ExactSettlementStatePort & { current: () => TaskGraph } {
+  let current = initial;
+  return {
+    current: () => current,
+    updateAndReturn: async (mutate) => {
+      const produced = mutate(value(parseTaskGraph(current)));
+      if (commitFails) throw new Error("fixture: the State File write did not land");
+      current = produced.state;
+      calls.push(COMMIT);
+      return produced.value;
+    },
+  };
+}
+
+describe("persisting a settlement and releasing its snapshot", () => {
+  /** A Distill Task attempt over `edit`ed files, settled and persisted through the seam. */
+  const persist = async (
+    label: string,
+    testResult: TaskTestResult,
+    edit: (files: Map<string, string>) => void,
+    options: WorldOptions & Readonly<{ commitFails?: boolean }> = {},
+  ) => {
+    const attempt = authorityFor("T3", `distill-persist-${label}`);
+    const w = world(attempt, options);
+    edit(w.files);
+    const stateFile = stateFileOver(graphWith(attempt, DISTILL_AGENT), w.calls, options.commitFails);
+    const settling = settleAndPersistExactImplementation(stateFile, factsFor(attempt, testResult, ["src/a.ts"]), w.ports, w.snapshots);
+    return { attempt, w, stateFile, settling };
+  };
+  const distilled = (files: Map<string, string>) => files.set("src/a.ts", "a distilled\n");
+  const discard = (attempt: ImplementationAttemptAuthority): string => `discard ${attempt.authorityDigest}`;
+
+  it("never discards inside the settlement itself: nothing is persisted yet", () => {
+    const attempt = authorityFor("T3", "distill-trial-only");
+    const w = world(attempt);
+    distilled(w.files);
+
+    settleExactImplementation(graphWith(attempt, DISTILL_AGENT), factsFor(attempt, TRUSTED_FAIL, ["src/a.ts"]), w.ports, w.snapshots);
+
+    expect(w.stored.has(attempt.authorityDigest)).toBe(true);
+    expect(restores(w)).toHaveLength(1);
+  });
+
+  it("restores, commits the settled state, and only then discards the snapshot", async () => {
+    const { attempt, w, stateFile, settling } = await persist("restored", TRUSTED_FAIL, distilled);
+
+    const settled = await settling;
+
+    expect(settled.application).toMatchObject({ kind: "applied", transition: { kind: "implemented" } });
+    expect(w.calls).toEqual([`restore ${ROOT} ${attempt.authorityDigest} src/a.ts,src/b.ts`, COMMIT, discard(attempt)]);
+    expect(stateFile.current()).toBe(settled.application.state);
+    expect(w.stored.has(attempt.authorityDigest)).toBe(false);
+  });
+
+  it("discards after an implemented settlement and after a semantic failure, each after its commit", async () => {
+    const implemented = await persist("implemented", TRUSTED_PASS, distilled);
+    expect((await implemented.settling).application).toMatchObject({ transition: { kind: "implemented" } });
+    expect(implemented.w.calls).toEqual([COMMIT, discard(implemented.attempt)]);
+
+    const failed = await persist("retry", TRUSTED_PASS, (files) => files.set(OUTSIDE, "out of scope\n"));
+    expect((await failed.settling).application).toMatchObject({ transition: { kind: "retry-required" } });
+    expect(failed.w.calls).toEqual([COMMIT, discard(failed.attempt)]);
+  });
+
+  it("releases nothing when the commit is rejected: a re-run still has the snapshot to restore from", async () => {
+    const { attempt, w, stateFile, settling } = await persist("commit-lost", TRUSTED_FAIL, distilled, { commitFails: true });
+    const before = stateFile.current();
+
+    await expect(settling).rejects.toThrow("the State File write did not land");
+
+    expect(w.calls).toEqual([`restore ${ROOT} ${attempt.authorityDigest} src/a.ts,src/b.ts`]);
+    expect(w.stored.has(attempt.authorityDigest)).toBe(true);
+    expect(stateFile.current()).toBe(before);
+  });
+
+  it("keeps the snapshot of an attempt that settled infrastructure-blocked", async () => {
+    const { attempt, w, settling } = await persist("blocked", TRUSTED_FAIL, distilled, {
+      restoreFailure: { kind: "scope-path-failed", path: "src/a.ts", detail: "EACCES: permission denied" },
+    });
+
+    expect((await settling).application).toMatchObject({ kind: "applied", transition: { kind: "infrastructure-blocked" } });
+
+    expect(w.calls).toEqual([`restore ${ROOT} ${attempt.authorityDigest} src/a.ts,src/b.ts`, COMMIT]);
     expect(w.stored.has(attempt.authorityDigest)).toBe(true);
   });
 
-  it("discards after an implemented settlement and after a semantic failure", () => {
-    const implemented = settle(TRUSTED_PASS, (files) => files.set("src/a.ts", "a distilled\n"));
-    releaseSettledDistillSnapshot(ROOT, implemented.attempt, implemented.settled.application, implemented.w.snapshots);
-    expect(implemented.w.stored.has(implemented.attempt.authorityDigest)).toBe(false);
-
-    const failed = settle(TRUSTED_PASS, (files) => files.set(OUTSIDE, "out of scope\n"));
-    expect(failed.settled.application).toMatchObject({ transition: { kind: "retry-required" } });
-    releaseSettledDistillSnapshot(ROOT, failed.attempt, failed.settled.application, failed.w.snapshots);
-    expect(failed.w.stored.has(failed.attempt.authorityDigest)).toBe(false);
-  });
-
-  it("keeps the snapshot of a result the settlement ignored", () => {
+  it("keeps the snapshot of a result the settlement ignored", async () => {
     const attempt = authorityFor("T3", "distill-late");
     const replacement = authorityFor("T3", "distill-replacement");
     const w = world(attempt);
-    const ignored = settleExactImplementation(graphWith(replacement, DISTILL_AGENT), factsFor(attempt, TRUSTED_PASS, []), w.ports, w.snapshots);
-    expect(ignored.application).toMatchObject({ kind: "ignored" });
+    const stateFile = stateFileOver(graphWith(replacement, DISTILL_AGENT), w.calls);
 
-    releaseSettledDistillSnapshot(ROOT, attempt, ignored.application, w.snapshots);
-    expect(w.calls).toEqual([]);
+    const ignored = await settleAndPersistExactImplementation(stateFile, factsFor(attempt, TRUSTED_PASS, []), w.ports, w.snapshots);
+
+    expect(ignored.application).toMatchObject({ kind: "ignored" });
+    expect(w.calls).toEqual([COMMIT]);
   });
 
-  it("never asks the store about a Task that is no Distill Task", () => {
+  it("never asks the store about a Task that is no Distill Task", async () => {
     const attempt = authorityFor("T3", "implementer-release");
     const w = world(attempt);
     w.files.set("src/a.ts", "a implemented\n");
     w.files.set("src/b.ts", "b implemented\n");
-    const settled = settleExactImplementation(graphWith(attempt, "code-implementer-agent"), factsFor(attempt, TRUSTED_PASS, [...SCOPE]), w.ports, w.snapshots);
-    expect(settled.application).toMatchObject({ kind: "applied", transition: { kind: "implemented" } });
+    const stateFile = stateFileOver(graphWith(attempt, "code-implementer-agent"), w.calls);
 
-    releaseSettledDistillSnapshot(ROOT, attempt, settled.application, w.snapshots);
-    expect(w.calls).toEqual([]);
+    const settled = await settleAndPersistExactImplementation(stateFile, factsFor(attempt, TRUSTED_PASS, [...SCOPE]), w.ports, w.snapshots);
+
+    expect(settled.application).toMatchObject({ kind: "applied", transition: { kind: "implemented" } });
+    expect(w.calls).toEqual([COMMIT]);
+  });
+
+  it("property: the snapshot goes exactly when a semantic settlement was committed, and never before the commit", async () => {
+    await fc.assert(fc.asyncProperty(
+      fc.constantFrom<TaskTestResult>(TRUSTED_PASS, TRUSTED_FAIL, NO_TRUSTED_RUN),
+      fc.constantFrom("keep", "edit", "delete"),
+      fc.boolean(),
+      fc.boolean(),
+      fc.boolean(),
+      async (testResult, scopeEdit, outside, restoreFails, commitFails) => {
+        const { attempt, w, settling } = await persist("property", testResult, (files) => {
+          if (scopeEdit === "edit") files.set("src/a.ts", "a distilled\n");
+          if (scopeEdit === "delete") files.delete("src/a.ts");
+          if (outside) files.set(OUTSIDE, "out of scope\n");
+        }, {
+          commitFails,
+          ...(restoreFails ? { restoreFailure: { kind: "git-failed", command: "cat-file", detail: "exited 128" } } : {}),
+        });
+
+        const settled = await settling.catch(() => null);
+
+        const discarded = w.calls.includes(discard(attempt));
+        const semantic = settled?.application.kind === "applied" && settled.application.transition.kind !== "infrastructure-blocked";
+        expect(discarded).toBe(semantic);
+        expect(w.stored.has(attempt.authorityDigest)).toBe(!semantic);
+        if (discarded) expect(w.calls.indexOf(COMMIT)).toBeLessThan(w.calls.indexOf(discard(attempt)));
+        if (commitFails) expect(settled).toBeNull();
+      },
+    ), { numRuns: 80 });
   });
 });
 
@@ -479,12 +571,7 @@ describe("a Task that is no Distill Task is never restored", () => {
       expect([...w.files]).toEqual(after);
       // The same facts settle to the same value with no snapshot store at all
       // to consult: the result is the single settlement, nothing more.
-      const refusing: DistillSnapshotPort = {
-        capture: () => { throw new Error("capture must not be called"); },
-        restore: () => { throw new Error("restore must not be called"); },
-        discard: () => { throw new Error("discard must not be called"); },
-      };
-      expect(settleExactImplementation(state, facts, w.ports, refusing)).toEqual(settled);
+      expect(settleExactImplementation(state, facts, w.ports, REFUSING_DISTILL_SNAPSHOTS)).toEqual(settled);
     }), { numRuns: 60 });
   });
 

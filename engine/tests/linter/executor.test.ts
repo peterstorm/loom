@@ -383,7 +383,7 @@ describe("executeRules — rules with first-call setup", () => {
     const { rule, run } = clockedRun();
     const corpusBuilder = rule("builds-a-corpus", 10 * BUDGET_MS, { firstCallSetup: true });
 
-    // The registration order that used to be forbidden by a comment: a rule after the slow one.
+    // A rule registered after a firstCallSetup rule still runs before it.
     expect(run([rule("first", 1), corpusBuilder, rule("appended-later", 1)])).toEqual(["first", "appended-later", "builds-a-corpus"]);
   });
 

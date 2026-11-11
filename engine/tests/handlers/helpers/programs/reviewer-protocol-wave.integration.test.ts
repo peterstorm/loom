@@ -112,8 +112,7 @@ function project(priors: readonly Finding[] = []) {
 type Action = Readonly<{ kind: string; requests?: readonly Readonly<{ authority: AgentRequestAuthority; task: string }>[];
   diagnostic?: { message: string }; request?: { requestId: string }; outcome?: unknown }>;
 async function cliResult(p: ReturnType<typeof project>, args: readonly string[], stdin = "", parent: FacadeParent = "pi") {
-  const result = await collectedChild("bun", [cli, "helper", "orchestration", ...args], { cwd: p.root, env: facadeParentEnvironment(parent, p.root) }, stdin);
-  return result;
+  return collectedChild("bun", [cli, "helper", "orchestration", ...args], { cwd: p.root, env: facadeParentEnvironment(parent, p.root) }, stdin);
 }
 async function runCli(p: ReturnType<typeof project>, args: readonly string[], stdin = "", parent: FacadeParent = "pi"): Promise<Action> {
   const result = await cliResult(p, args, stdin, parent);

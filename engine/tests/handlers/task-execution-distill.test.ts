@@ -1,25 +1,24 @@
 /**
  * A Distill Task attempt through the real shells (ADR-0068 §5, §9), in real
  * temporary Git repositories: registration snapshots the scope under the
- * attempt's ref and refuses when it cannot; the shared settlement shell and
- * the Claude Code stop transport restore a pass that could not prove itself;
- * the snapshot is discarded only after the settlement is persisted; and Proof
- * reconcile leaves a Distill Task exactly as it is.
+ * attempt's ref and refuses when it cannot; the persisted settlement, the
+ * Claude Code stop transport and the Pi result transport restore a pass that
+ * could not prove itself and discard the snapshot only after the settlement
+ * is persisted; and Proof reconcile leaves a Distill Task exactly as it is.
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DistillSnapshotPort } from "../../src/core/distill-snapshot";
 import { distillSnapshotRef } from "../../src/core/distill-task";
-import { parseIsoInstant, type ImplementationAttemptAuthority } from "../../src/core/implementation-completion";
+import type { ImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import { DISTILL_AGENT } from "../../src/core/model-profiles";
-import { TRUSTED_LEDGER_ONLY_POLICY } from "../../src/core/proof-obligations";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
 import {
   productionExactSettlementPorts,
-  releaseSettledDistillSnapshot,
-  settleExactImplementation,
+  settleAndPersistExactImplementation,
   type ExactImplementationSettlement,
+  type ExactSettlementStatePort,
 } from "../../src/handlers/helpers/exact-implementation-settlement";
 import reconcileImplementationProof, {
   reconcileTaskFromStoredEvidence,
@@ -30,10 +29,18 @@ import type { ImplementationAuthorityObservation } from "../../src/implementatio
 import { gitDistillSnapshots } from "../../src/orchestration/distill-snapshot";
 import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 import { StateManager } from "../../src/state-manager";
-import { parseNewTestEvidence, type Task, type TaskTestResult } from "../../src/types";
+import { parseNewTestEvidence, type Task, type TaskGraph, type TaskTestResult } from "../../src/types";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import {
+  behaviourPreservedBasis as basisOf,
+  distillSnapshotRefs,
+  REFUSING_DISTILL_SNAPSHOTS,
+  settlementFacts,
+} from "../fixtures/distill-settlement";
 import { git, gitResult, write } from "../fixtures/git-repository";
-import { graphFixture, protectedGraphFixture, satisfiedProof, taskFixture } from "../fixtures/task-lifecycle";
+import { slot } from "../fixtures/pi-reserved-slot";
+import { applyImplementationPiResult } from "../../../pi/subagent-result";
+import { graphFixture, protectedGraphFixture, siblingTaskFixture, taskFixture } from "../fixtures/task-lifecycle";
 
 const roots: string[] = [];
 const ENVIRONMENT = ["LOOM_STATE_PATH", "CLAUDE_PROJECT_DIR", "LOOM_SUBAGENT_DIR"] as const;
@@ -54,10 +61,7 @@ const NOT_STALE = { kind: "at-registration", anyActiveForGraph: false } as const
 
 type Repo = Readonly<{ root: string; statePath: string }>;
 
-const sibling = (id: string, file: string): Task => taskFixture({
-  id, description: id, agent: "code-implementer-agent", wave: 1, status: "implemented", depends_on: [],
-  file_list: [file], proof: satisfiedProof([file]),
-});
+const sibling = (id: string, file: string): Task => siblingTaskFixture({ id, status: "implemented", file_list: [file] });
 
 const distillTask = (scope: readonly string[] = SCOPE): Task => taskFixture({
   id: "T3", description: "Distill pass for Wave 1", agent: DISTILL_AGENT, wave: 1, depends_on: [], file_list: [...scope],
@@ -97,8 +101,7 @@ const taskOf = (repo: Repo, id = "T3"): Task => {
 };
 const read = (repo: Repo, path: string): string => readFileSync(join(repo.root, path), "utf-8");
 const stdout = (repo: Repo, args: readonly string[]): string => gitResult(repo.root, args).stdout.trim();
-const distillRefs = (repo: Repo): readonly string[] =>
-  stdout(repo, ["for-each-ref", "--format=%(refname)", "refs/loom/distill"]).split("\n").filter((ref) => ref !== "");
+const distillRefs = (repo: Repo): readonly string[] => distillSnapshotRefs(repo.root);
 
 /** The spawn the engine owes `T3` now: its marker and the appendices its dispatch carries. */
 function spawnOf(repo: Repo) {
@@ -120,38 +123,61 @@ async function register(repo: Repo, snapshots?: DistillSnapshotPort): Promise<Im
   return authority;
 }
 
-/** Settle through the shared shell with production ports, persisting as a transport does. */
-async function settle(
+type SettleOptions = Readonly<{
+  taskCompleted?: boolean;
+  /** The State File the settlement commits to; the repository's own by default. */
+  stateFile?: ExactSettlementStatePort;
+  /** The snapshot store; Git's by default. */
+  snapshots?: DistillSnapshotPort;
+}>;
+
+/** Settle and persist through the one entry point both transports use, with production ports. */
+function settle(
   repo: Repo,
   authority: ImplementationAttemptAuthority,
   testResult: TaskTestResult,
   modified: readonly string[],
-  taskCompleted = true,
+  { taskCompleted = true, stateFile = manager(repo), snapshots }: SettleOptions = {},
 ): Promise<ExactImplementationSettlement> {
-  const observedAt = parseIsoInstant(new Date().toISOString(), "fixture settlement instant");
-  if (!observedAt.ok) throw new Error(observedAt.error.errors.join("; "));
-  return manager(repo).updateAndReturn((state) => {
-    const settlement = settleExactImplementation(state, {
-      transport: "Claude",
-      authority,
-      observedAt: observedAt.value,
-      parserModifiedPaths: modified,
-      parserPathLabel: "fixture result paths",
-      taskCompleted,
-      testResult,
-      testEvidence: "fixture evidence",
-      proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
-      ledger: { kind: "read", events: [] },
-    }, productionExactSettlementPorts(repo.root, repo.statePath));
-    return { state: settlement.application.state, value: settlement };
-  });
+  return settleAndPersistExactImplementation(
+    stateFile,
+    settlementFacts(authority, testResult, modified, { taskCompleted }),
+    productionExactSettlementPorts(repo.root, repo.statePath),
+    snapshots,
+  );
 }
 
-const basisOf = (task: Task): unknown =>
-  task.proof === undefined || task.proof.state === "pending"
-    ? undefined
-    : task.proof.results.flatMap((result) =>
-        result.state === "satisfied" && result.evidence.kind === "behaviour-preserved" ? [result.evidence.basis] : [])[0];
+/** What the repository held the moment a settlement's commit had landed: its snapshot refs, and `T3` as stored. */
+type CommitObservation = Readonly<{ refs: readonly string[]; task: Task }>;
+
+/** The repository's State File, observing the repository each time one of its commits has landed. */
+function observedStateFile(repo: Repo): Readonly<{ stateFile: ExactSettlementStatePort; commits: readonly CommitObservation[] }> {
+  const commits: CommitObservation[] = [];
+  return {
+    commits,
+    stateFile: {
+      updateAndReturn: async (mutate) => {
+        const committed = await manager(repo).updateAndReturn(mutate);
+        commits.push({ refs: distillRefs(repo), task: taskOf(repo) });
+        return committed;
+      },
+    },
+  };
+}
+
+/** A State File whose lock runs the settlement and whose write then never lands; `lost` holds each state it dropped. */
+function crashingStateFile(repo: Repo): Readonly<{ stateFile: ExactSettlementStatePort; lost: readonly TaskGraph[] }> {
+  const lost: TaskGraph[] = [];
+  return {
+    lost,
+    stateFile: {
+      updateAndReturn: async (mutate) => {
+        lost.push(mutate(manager(repo).load()).state);
+        throw new Error("fixture: crashed before the State File write");
+      },
+    },
+  };
+}
 
 describe("registering a Distill Task attempt", () => {
   it("snapshots the scope as a tree under the attempt's ref, and writes no skeleton", async () => {
@@ -202,14 +228,9 @@ describe("registering a Distill Task attempt", () => {
   it("leaves a registration of no Distill Task alone: the snapshot store is never called", async () => {
     const pending = taskFixture({ id: "T1", description: "one", agent: "code-implementer-agent", wave: 1, depends_on: [], file_list: ["src/a.ts"] });
     const repo = repository([pending]);
-    const refusing: DistillSnapshotPort = {
-      capture: () => { throw new Error("capture must not be called"); },
-      restore: () => { throw new Error("restore must not be called"); },
-      discard: () => { throw new Error("discard must not be called"); },
-    };
 
     const outcome = await registerTaskExecutionBatch(
-      [{ kind: "implementation", prompt: "Task ID: T1", description: "" }], "parallel", NOT_STALE, repo.root, refusing,
+      [{ kind: "implementation", prompt: "Task ID: T1", description: "" }], "parallel", NOT_STALE, repo.root, REFUSING_DISTILL_SNAPSHOTS,
     );
 
     expect(outcome.kind).toBe("registered");
@@ -226,16 +247,53 @@ describe("registering a Distill Task attempt", () => {
     expect(distillRefs(repo)).toEqual([]);
     expect(taskOf(repo).active_implementation_attempt).toBeUndefined();
   });
+
+  it("rolls back and names the snapshot it left behind when the repository cannot be resolved", async () => {
+    const repo = repository();
+    const authority = await register(repo);
+    const ref = distillSnapshotRef(authority.authorityDigest);
+    // The rollback resolves its State File from LOOM_STATE_PATH and its repository from here: no repository.
+    const elsewhere = canonicalTempDir("loom-distill-no-repository-");
+    roots.push(elsewhere);
+    process.env.CLAUDE_PROJECT_DIR = elsewhere;
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    await expect(rollbackTaskExecutionRegistration([authority])).resolves.toEqual({ kind: "allow" });
+
+    expect(taskOf(repo).active_implementation_attempt).toBeUndefined();
+    expect(distillRefs(repo)).toEqual([ref]);
+    const notes = stderr.mock.calls.map(([chunk]) => String(chunk)).filter((line) => line.includes("distill snapshot note"));
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain(`${ref} left in place for rolled-back T3: cannot resolve repository root and HEAD from ${elsewhere}`);
+  });
+
+  it("writes no snapshot note when the rolled-back Task is no Distill Task, whatever the repository", async () => {
+    const pending = taskFixture({ id: "T1", description: "one", agent: "code-implementer-agent", wave: 1, depends_on: [], file_list: ["src/a.ts"] });
+    const repo = repository([pending]);
+    const outcome = await registerTaskExecutionBatch(
+      [{ kind: "implementation", prompt: "Task ID: T1", description: "" }], "parallel", NOT_STALE, repo.root, REFUSING_DISTILL_SNAPSHOTS,
+    );
+    if (outcome.kind !== "registered") throw new Error(`registration refused: ${outcome.message}`);
+    const elsewhere = canonicalTempDir("loom-distill-no-repository-");
+    roots.push(elsewhere);
+    process.env.CLAUDE_PROJECT_DIR = elsewhere;
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    await expect(rollbackTaskExecutionRegistration(outcome.authorities, undefined, REFUSING_DISTILL_SNAPSHOTS)).resolves.toEqual({ kind: "allow" });
+
+    expect(stderr.mock.calls.map(([chunk]) => String(chunk)).filter((line) => line.includes("distill snapshot note"))).toEqual([]);
+  });
 });
 
 describe("settling a registered Distill Task attempt with the real snapshot store", () => {
-  it("restores a pass whose tests fail, persists the restored basis, and keeps the ref until it is released", async () => {
+  it("restores a pass whose tests fail, persists the restored basis, and only then discards the snapshot", async () => {
     const repo = repository();
     const authority = await register(repo);
     writeFileSync(join(repo.root, "src/a.ts"), "export const a = 1 as number;\n");
     rmSync(join(repo.root, "src/b.ts"));
+    const { stateFile, commits } = observedStateFile(repo);
 
-    const settled = await settle(repo, authority, { verdict: "trusted-fail" }, [...SCOPE]);
+    const settled = await settle(repo, authority, { verdict: "trusted-fail" }, [...SCOPE], { stateFile });
 
     expect(settled.application).toMatchObject({ kind: "applied", transition: { kind: "implemented" } });
     expect(read(repo, "src/a.ts")).toBe("export const a = 1;\n");
@@ -245,9 +303,10 @@ describe("settling a registered Distill Task attempt with the real snapshot stor
     const task = protectedGraphFixture(JSON.parse(readFileSync(repo.statePath, "utf-8"))).tasks.find(({ id }) => id === "T3");
     expect(task).toMatchObject({ status: "implemented" });
     expect(task === undefined ? undefined : basisOf(task)).toEqual({ kind: "restored", after: ["proof:regression-tests-failed"] });
-    expect(distillRefs(repo)).toEqual([distillSnapshotRef(authority.authorityDigest)]);
-
-    releaseSettledDistillSnapshot(repo.root, authority, settled.application);
+    // The snapshot was still there once the settled state was on disk, and is gone now.
+    expect(commits).toEqual([
+      { refs: [distillSnapshotRef(authority.authorityDigest)], task: expect.objectContaining({ status: "implemented" }) },
+    ]);
     expect(distillRefs(repo)).toEqual([]);
   });
 
@@ -261,6 +320,7 @@ describe("settling a registered Distill Task attempt with the real snapshot stor
     expect(settled.application).toMatchObject({ kind: "applied", transition: { kind: "implemented" } });
     expect(read(repo, "src/a.ts")).toBe("export const a = 1 as number;\n");
     expect(basisOf(taskOf(repo))).toEqual({ kind: "tests-passed", provenance: "evidence-ledger" });
+    expect(distillRefs(repo)).toEqual([]);
   });
 
   it("settles a pass that changed nothing on the unchanged basis", async () => {
@@ -273,51 +333,57 @@ describe("settling a registered Distill Task attempt with the real snapshot stor
     expect(basisOf(taskOf(repo))).toEqual({ kind: "unchanged" });
   });
 
-  it("re-running a settlement whose restore ran but whose state was never persisted settles the same Task state", async () => {
+  it("keeps the snapshot when the settled state never lands, and the re-run settles the same Task state", async () => {
     const repo = repository();
     const authority = await register(repo);
     writeFileSync(join(repo.root, "src/a.ts"), "export const a = 1 as number;\n");
     const before = readFileSync(repo.statePath, "utf-8");
-    const observedAt = parseIsoInstant("2026-11-11T00:01:00.000Z", "fixture instant");
-    if (!observedAt.ok) throw new Error("fixture instant");
-    const facts = {
-      transport: "Claude" as const, authority, observedAt: observedAt.value, parserModifiedPaths: ["src/a.ts"],
-      parserPathLabel: "fixture result paths", taskCompleted: true, testResult: { verdict: "trusted-fail" } as const,
-      testEvidence: "fixture evidence", proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY, ledger: { kind: "read" as const, events: [] },
-    };
-    const ports = productionExactSettlementPorts(repo.root, repo.statePath);
+    const { stateFile, lost } = crashingStateFile(repo);
 
     // The crash: the settlement restored the bytes, and the State File write never landed.
-    const lost = settleExactImplementation(manager(repo).load(), facts, ports);
-    expect(lost.application).toMatchObject({ kind: "applied", transition: { kind: "implemented" } });
+    await expect(settle(repo, authority, { verdict: "trusted-fail" }, ["src/a.ts"], { stateFile }))
+      .rejects.toThrow("crashed before the State File write");
+
     expect(readFileSync(repo.statePath, "utf-8")).toBe(before);
     expect(read(repo, "src/a.ts")).toBe("export const a = 1;\n");
     expect(distillRefs(repo)).toEqual([distillSnapshotRef(authority.authorityDigest)]);
 
-    const rerun = settleExactImplementation(manager(repo).load(), facts, ports);
+    const rerun = await settle(repo, authority, { verdict: "trusted-fail" }, ["src/a.ts"]);
 
     expect(rerun.application).toMatchObject({ kind: "applied", transition: { kind: "implemented" } });
     expect(read(repo, "src/a.ts")).toBe("export const a = 1;\n");
-    const [lostTask, rerunTask] = [lost, rerun].map(({ application }) => application.state.tasks.find(({ id }) => id === "T3"));
+    const lostTask = lost[0]?.tasks.find(({ id }) => id === "T3");
+    const rerunTask = taskOf(repo);
+    expect(lostTask).toMatchObject({ status: "implemented" });
     expect(rerunTask).toMatchObject({ status: "implemented", files_modified: lostTask?.files_modified });
     // The one difference: the bytes already equal the baseline, so the re-run records `unchanged`.
     expect(lostTask === undefined ? undefined : basisOf(lostTask)).toEqual({ kind: "restored", after: ["proof:regression-tests-failed"] });
-    expect(rerunTask === undefined ? undefined : basisOf(rerunTask)).toEqual({ kind: "unchanged" });
+    expect(basisOf(rerunTask)).toEqual({ kind: "unchanged" });
+    expect(distillRefs(repo)).toEqual([]);
   });
 
-  it("restores the scope and retries the attempt for a write outside it; the retry's registration drops the settled snapshot", async () => {
+  it("restores the scope and retries the attempt for a write outside it; a snapshot whose release was lost is dropped by the retry's registration", async () => {
     const repo = repository();
     const first = await register(repo);
     writeFileSync(join(repo.root, "src/a.ts"), "export const a = 1 as number;\n");
     writeFileSync(join(repo.root, "docs/notes.md"), "rewritten by the distiller\n");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const losingTheRelease: DistillSnapshotPort = {
+      ...gitDistillSnapshots,
+      discard: () => ({ ok: false, error: { kind: "git-failed", command: "update-ref", detail: "exited 128: fatal: cannot lock ref" } }),
+    };
 
-    const settled = await settle(repo, first, { verdict: "trusted-pass" }, ["src/a.ts", "docs/notes.md"]);
+    const settled = await settle(
+      repo, first, { verdict: "trusted-pass" }, ["src/a.ts", "docs/notes.md"], { snapshots: losingTheRelease },
+    );
 
     expect(settled.application).toMatchObject({ kind: "applied", transition: { kind: "retry-required" } });
     expect(read(repo, "src/a.ts")).toBe("export const a = 1;\n");
     expect(read(repo, "docs/notes.md")).toBe("rewritten by the distiller\n");
     expect(basisOf(taskOf(repo))).toMatchObject({ kind: "restored" });
-    // The transport's release was lost: the settled attempt's ref is still there.
+    // The settlement stands and says what it could not let go of.
+    expect(stderr.mock.calls.map(([chunk]) => String(chunk)))
+      .toContain("[loom] distill snapshot note: git update-ref exited 128: fatal: cannot lock ref\n");
     expect(distillRefs(repo)).toEqual([distillSnapshotRef(first.authorityDigest)]);
     git(repo.root, ["checkout", "--", "docs/notes.md"]);
 
@@ -331,17 +397,21 @@ describe("settling a registered Distill Task attempt with the real snapshot stor
     const repo = repository();
     const first = await register(repo);
     writeFileSync(join(repo.root, "src/a.ts"), "export const a = 1 as number;\n");
-    // No snapshot to restore from: the restore fails, so the settlement is infrastructure.
-    expect(gitDistillSnapshots.discard(repo.root, first.authorityDigest).ok).toBe(true);
-    const blocked = await settle(repo, first, { verdict: "trusted-fail" }, ["src/a.ts"]);
+    const unrestorable: DistillSnapshotPort = {
+      ...gitDistillSnapshots,
+      restore: () => ({ ok: false, error: { kind: "scope-path-failed", path: "src/a.ts", detail: "EACCES: permission denied" } }),
+    };
+
+    const blocked = await settle(repo, first, { verdict: "trusted-fail" }, ["src/a.ts"], { snapshots: unrestorable });
+
     expect(blocked.application).toMatchObject({ kind: "applied", transition: { kind: "infrastructure-blocked" } });
-    expect(blocked.infrastructureReason).toContain("no distill snapshot is stored under");
+    expect(blocked.infrastructureReason).toContain("src/a.ts: EACCES: permission denied");
     expect(read(repo, "src/a.ts")).toBe("export const a = 1 as number;\n");
-    // Put the blocked attempt's snapshot back, as a kept one would be.
-    git(repo.root, ["checkout", "--", "src/a.ts"]);
-    expect(gitDistillSnapshots.capture(repo.root, first.authorityDigest, [...SCOPE]).ok).toBe(true);
-    releaseSettledDistillSnapshot(repo.root, first, blocked.application);
+    expect(taskOf(repo)).toMatchObject({ status: "pending" });
+    // The bytes the attempt started from are still held, for the operator to restore by hand.
     expect(distillRefs(repo)).toEqual([distillSnapshotRef(first.authorityDigest)]);
+    expect(stdout(repo, ["cat-file", "blob", `${distillSnapshotRef(first.authorityDigest)}:src/a.ts`])).toBe("export const a = 1;");
+    git(repo.root, ["checkout", "--", "src/a.ts"]);
 
     const second = await register(repo);
 
@@ -413,6 +483,54 @@ describe("the Claude Code stop transport", () => {
   }, 30_000);
 });
 
+describe("the Pi result transport", () => {
+  /** Deliver `T3`'s Pi result for a registered attempt, under an empty evidence epoch: no trusted test run. */
+  async function delivered(messagesOf: (repo: Repo) => unknown) {
+    const repo = repository();
+    const authority = await register(repo);
+    writeFileSync(join(repo.root, "src/a.ts"), "export const a = 1 as number;\n");
+    const outcome = await applyImplementationPiResult({
+      store: manager(repo),
+      repository: { root: () => repo.root, isRepo: () => true },
+      authoritativeStatePath: repo.statePath,
+      agentType: DISTILL_AGENT,
+      result: { agent: DISTILL_AGENT, task: "Task ID: T3", exitCode: 0, messages: messagesOf(repo) },
+      reservedSlot: slot({ agentType: DISTILL_AGENT, taskId: "T3", implementationAuthority: authority }),
+      parentPrompt: "",
+      ledger: { kind: "read", events: [] },
+    });
+    return { repo, authority, outcome };
+  }
+
+  it("restores an unproven pass, settles it implemented, and discards the snapshot once the state is persisted", async () => {
+    const { repo, authority } = await delivered((at) => [
+      { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "write", arguments: { path: join(at.root, "src/a.ts") } }] },
+      { role: "assistant", content: [{ type: "text", text: "**Task ID:** T3\n\nDistill pass done." }] },
+    ]);
+
+    expect(read(repo, "src/a.ts")).toBe("export const a = 1;\n");
+    const task = taskOf(repo);
+    expect(task).toMatchObject({ status: "implemented" });
+    expect(basisOf(task)).toMatchObject({ kind: "restored" });
+    expect(task.implementation_attempt_history).toEqual([
+      expect.objectContaining({ authorityDigest: authority.authorityDigest, transition: "implemented" }),
+    ]);
+    expect(distillRefs(repo)).toEqual([]);
+  });
+
+  it("keeps the snapshot of a result it settles as infrastructure, with the pass still on disk", async () => {
+    // No transcript to read: the attempt is infrastructure-blocked before any scope is judged.
+    const { repo, authority, outcome } = await delivered(() => null);
+
+    expect(outcome.processingErrors.join("\n")).toContain("Pi transcript evidence capture failed");
+    expect(taskOf(repo).implementation_attempt_history).toEqual([
+      expect.objectContaining({ authorityDigest: authority.authorityDigest, transition: "infrastructure-blocked" }),
+    ]);
+    expect(read(repo, "src/a.ts")).toBe("export const a = 1 as number;\n");
+    expect(distillRefs(repo)).toEqual([distillSnapshotRef(authority.authorityDigest)]);
+  });
+});
+
 describe("Proof reconcile and a Distill Task", () => {
   it("returns a Distill Task unchanged whatever evidence it is handed", () => {
     const undispatched = distillTask();
@@ -441,7 +559,7 @@ describe("Proof reconcile and a Distill Task", () => {
     writeFileSync(join(repo.root, "src/a.ts"), "export const a = 1 as number;\n");
     // Unproven AND never completed: the scope is restored and the Proof still
     // fails (`task-not-completed`), so reconcile would re-evaluate any other Task here.
-    await settle(repo, authority, { verdict: "trusted-fail" }, ["src/a.ts"], false);
+    await settle(repo, authority, { verdict: "trusted-fail" }, ["src/a.ts"], { taskCompleted: false });
     const settledTask = taskOf(repo);
     expect(settledTask).toMatchObject({ status: "pending", proof: { state: "failed" } });
     expect(basisOf(settledTask)).toEqual({

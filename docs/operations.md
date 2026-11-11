@@ -1009,7 +1009,10 @@ Population adds one engine-owned Distill Task to every Wave that has implementat
   - The value is `"on"` or `"off"`; anything else is refused, and schema 1 refuses the key. Absent means `on`.
   - It is frozen at population and covered by the manifest digest only when declared, so a manifest that does not declare it freezes to the digest it always had.
   - It reaches only TaskGraphs populated after it. To drop the Distill Tasks of a graph that has not started, set the key and re-run `populate-task-graph`: every population replaces the whole roster.
-- There is no Distill Task without the key either for a Wave whose Tasks list no implementation file (test files, by the frozen `testFileSuffixes`, and an Acceptance Contract's frozen paths are never in its scope), for a Wave of ADR Tasks, and for a TaskGraph frozen before the test-file classification existed.
+- Some Waves get no Distill Task whatever the key says:
+  - A Wave whose Tasks list no implementation file. Test files (by the frozen `testFileSuffixes`) and an Acceptance Contract's frozen paths are never in a Distill Scope.
+  - A Wave that holds only ADR Tasks or Tasks that write an Acceptance Contract. Their files are not distilled.
+  - Every Wave of a TaskGraph whose verification manifest froze no test-file classification: a graph frozen before the classification existed, or one with no manifest. `populate-task-graph` says so in one line: `No distill pass: the verification manifest froze no test-file classification, so no Distill Scope can be derived and no Wave gets a Distill Task.`
 
 ### Stop-check notes reach the orchestrator
 
@@ -1171,6 +1174,7 @@ Because the bytes exist before the baselines, engine bytes are never the impleme
 | `contract has no types file, no skeletons` | the Task claims a `**Types file:** none` contract and the path is unbound |
 | `no bound exports, no skeleton` | no binding names the path |
 | `unsupported language, no skeleton` | bound, but neither TypeScript nor Java under a `src/main/java/` root |
+| `absent, no skeleton owed` | a Distill Task's scope path that is bound and missing: a sibling deleted the file, and the engine writes no skeleton for a Distill Task |
 
 **Status.** `helper orchestration status` (and `--json`, field `skeletons`) lists, per current-Wave Task and path, the outcome marked recorded (written at that Task's spawn) or projected (not spawned yet), every skeleton flagged `stale against revised contract`, and every stage-two problem.
 

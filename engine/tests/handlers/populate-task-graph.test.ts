@@ -14,9 +14,6 @@ import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import populate, { resolvedSpecFile } from "../../src/handlers/helpers/populate-task-graph";
 import type { Task, TaskGraph } from "../../src/types";
 import { isDistillTask } from "../../src/core/distill-task";
-
-/** The authored roster as population wrote it, without the Distill Tasks it appends (ADR-0068). */
-const authoredTasksOf = (state: TaskGraph) => state.tasks.filter((task) => !isDistillTask(task));
 import { deriveWaveCompletionSuiteReadiness } from "../../src/core/wave-completion-suite-readiness";
 import { StateManager } from "../../src/state-manager";
 import { taskFixture } from "../fixtures/task-lifecycle";
@@ -27,6 +24,9 @@ import {
 import { capturedSpecCheck } from "../../src/core/spec-check";
 import { canonicalSpecBeside } from "../fixtures/spec-index-fixture";
 import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
+
+/** The authored roster as population wrote it, without the Distill Tasks it appends (ADR-0068). */
+const authoredTasksOf = (state: TaskGraph) => state.tasks.filter((task) => !isDistillTask(task));
 
 /**
  * Exercises the REAL populate-task-graph overwrite guard through the handler's
@@ -858,7 +858,7 @@ describe("populate-task-graph — engine-derived Requirement content hashes", ()
   it("cannot be pre-stamped by the decompose payload", async () => {
     // Decompose says WHICH Requirements a Task completes; the specification's
     // own bytes say what they SAID. An authored hash is dropped like every
-    // other field core `sanitizeTask` does not pick.
+    // other field core `populatedTask` does not pick.
     const dir = tempDir();
     const plan = modelFreePlan(dir);
     writeManifest(dir);

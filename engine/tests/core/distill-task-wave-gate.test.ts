@@ -25,14 +25,11 @@ import {
 import { installWaveReviewRunsTransition } from "../../src/core/wave-review-issuance";
 import type { RegisteredWaveGateProgram } from "../../src/core/wave-gate-program";
 import {
-  isWaveReviewExempt,
-  owesWaveReview,
   prepareWaveReviewBatch,
   readWaveReviewContext,
-  waveReviewExemption,
-  waveReviewOutstanding,
+  waveReviewStanding,
   waveReviewSubjects,
-  waveReviewedTasks,
+  waveReviewView,
   waveRunRosterProblem,
   waveTaskReviewRoster,
   waveTaskReviewRosters,
@@ -48,9 +45,9 @@ import { observedWorkspace } from "../fixtures/reviewed-workspace";
 import {
   activeWaveGateFixture,
   distillTaskFixture,
+  fileOf,
   protectedGraphFixture,
-  satisfiedProof,
-  taskFixture,
+  siblingTaskFixture,
   type DistillTaskFixtureInput,
 } from "../fixtures/task-lifecycle";
 
@@ -62,14 +59,13 @@ afterEach(() => {
 const PLAN_FILE = ".claude/plans/2026-11-11-distill.md";
 const RUN_ID = value(parseOrchestrationRunId("run.distill-wave-gate"));
 const AUTHORITY = "a".repeat(64);
-const fileOf = (id: string): string => `src/${id.toLowerCase()}.ts`;
 
-const sibling = (id: string, status: TaskStatus = "implemented", extra: Partial<Task> = {}): Task => taskFixture({
-  id, description: id, agent: "code-implementer-agent", wave: 1, depends_on: [],
-  spec_anchors: [], spec_contributions: [],
-  file_list: [fileOf(id)], files_modified: [fileOf(id)],
+/** A reviewed Wave's sibling: it changed its file under a trusted pass with new tests, and its review is pending. */
+const sibling = (id: string, status: TaskStatus = "implemented", extra: Partial<Task> = {}): Task => siblingTaskFixture({
+  id,
   status,
-  ...(status === "pending" ? {} : { proof: satisfiedProof([fileOf(id)]) }),
+  spec_anchors: [], spec_contributions: [],
+  files_modified: [fileOf(id)],
   test_result: { verdict: "trusted-pass" },
   new_tests_written: true,
   new_test_evidence: "one property",
@@ -115,7 +111,7 @@ const workspaceOf = (task: Task) => {
 };
 
 /** Prepare the Wave's batch from a workspace of exactly `observedTasks`. */
-const prepare = (root: string, graph: TaskGraph, observedTasks: readonly Task[] = waveReviewedTasks(graph.tasks)) =>
+const prepare = (root: string, graph: TaskGraph, observedTasks: readonly Task[] = waveReviewView(graph.tasks).reviewed) =>
   prepareWaveReviewBatch(
     RUN_ID,
     { ...registrationOf(graph.tasks.map(({ id }) => id)), input: { wave: 1 } },
@@ -135,16 +131,13 @@ describe("Wave review roster of a Distill Task (ADR-0068 §6)", () => {
   it("is the explicit exemption, never an empty roster", () => {
     const review = waveTaskReviewRoster(graph, 2, t3!);
     expect(review).toEqual({ kind: "exempt", reason: "distill-task" });
-    expect(isWaveReviewExempt(review)).toBe(true);
-    expect(waveReviewExemption(t3!)).toEqual(review);
-    expect(owesWaveReview(t3!)).toBe(false);
+    expect(waveReviewStanding(t3!)).toEqual(review);
   });
 
-  it("leaves every other Task its derived roster", () => {
+  it("leaves every other Task its derived roster, tagged as one", () => {
     const review = waveTaskReviewRoster(graph, 2, t1!);
-    expect(isWaveReviewExempt(review)).toBe(false);
-    expect(review).toEqual(BASE_WAVE_REVIEW_AGENTS);
-    expect(waveReviewExemption(t1!)).toBeNull();
+    expect(review).toEqual({ kind: "roster", roster: BASE_WAVE_REVIEW_AGENTS });
+    expect(waveReviewStanding(t1!)).toEqual({ kind: "reviewed", outstanding: true });
   });
 
   it("contributes no roster to the registered Wave's rosters, and no subject", () => {
@@ -167,10 +160,40 @@ describe("Wave review roster of a Distill Task (ADR-0068 §6)", () => {
   it("is never outstanding for review, whatever its stored review status", () => {
     const statuses: readonly (ReviewStatus | undefined)[] = [undefined, "pending", "passed", "blocked", "evidence_capture_failed"];
     for (const review_status of statuses) {
-      expect(waveReviewOutstanding({ agent: DISTILL_AGENT, review_status })).toBe(false);
-      expect(waveReviewOutstanding({ agent: "code-implementer-agent", review_status }))
-        .toBe(review_status !== "passed" && review_status !== "blocked");
+      expect(waveReviewStanding({ agent: DISTILL_AGENT, review_status })).toEqual({ kind: "exempt", reason: "distill-task" });
+      expect(waveReviewStanding({ agent: "code-implementer-agent", review_status }))
+        .toEqual({ kind: "reviewed", outstanding: review_status !== "passed" && review_status !== "blocked" });
     }
+  });
+});
+
+describe("the Wave-review view of a Wave's Tasks", () => {
+  const reviewStatus = fc.constantFrom<ReviewStatus | undefined>(undefined, "pending", "passed", "blocked", "evidence_capture_failed");
+  const wave = fc.array(fc.record({ distill: fc.boolean(), review_status: reviewStatus }), { maxLength: 8 })
+    .map((rows) => rows.map(({ distill: isDistill, review_status }, index) => ({
+      id: `T${index + 1}`, agent: isDistill ? DISTILL_AGENT : "code-implementer-agent", review_status,
+    })));
+
+  it("property: every Task is reviewed or exempt, never both, each list in the order given", () => {
+    fc.assert(fc.property(wave, (tasks) => {
+      const view = waveReviewView(tasks);
+      const exempt = view.exempt.map(({ task }) => task);
+      expect(view.reviewed).toEqual(tasks.filter(({ agent }) => agent !== DISTILL_AGENT));
+      expect(exempt).toEqual(tasks.filter(({ agent }) => agent === DISTILL_AGENT));
+      expect(view.exempt.every(({ exemption }) => exemption.kind === "exempt" && exemption.reason === "distill-task")).toBe(true);
+    }));
+  });
+
+  it("property: the outstanding Tasks are the reviewed ones that neither passed nor blocked, and each Task's standing agrees", () => {
+    fc.assert(fc.property(wave, (tasks) => {
+      const view = waveReviewView(tasks);
+      expect(view.outstanding).toEqual(view.reviewed.filter(({ review_status }) => review_status !== "passed" && review_status !== "blocked"));
+      for (const task of tasks) {
+        const standing = waveReviewStanding(task);
+        expect(standing.kind === "reviewed").toBe(view.reviewed.includes(task));
+        expect(standing.kind === "reviewed" && standing.outstanding).toBe(view.outstanding.includes(task));
+      }
+    }));
   });
 });
 
@@ -226,7 +249,7 @@ describe("Wave review batch of a Wave with a Distill Task", () => {
     });
     const batch = prepared(root, locked);
     const installed = installWaveReviewRunsTransition(locked, {
-      registration, batch, workspaces: waveReviewedTasks(locked.tasks).map(workspaceOf), specCheckObservation: documentsOf(root),
+      registration, batch, workspaces: waveReviewView(locked.tasks).reviewed.map(workspaceOf), specCheckObservation: documentsOf(root),
     });
     if (!installed.ok) throw new Error(installed.error.message);
     const [t1, t2, t3] = installed.value.tasks;
@@ -236,7 +259,7 @@ describe("Wave review batch of a Wave with a Distill Task", () => {
     expect(t3!.review_run).toBeUndefined();
     // Replaying the install over its own result changes nothing.
     const replay = installWaveReviewRunsTransition(installed.value, {
-      registration, batch, workspaces: waveReviewedTasks(locked.tasks).map(workspaceOf), specCheckObservation: documentsOf(root),
+      registration, batch, workspaces: waveReviewView(locked.tasks).reviewed.map(workspaceOf), specCheckObservation: documentsOf(root),
     });
     expect(replay.ok && replay.value.tasks).toEqual(installed.value.tasks);
   });

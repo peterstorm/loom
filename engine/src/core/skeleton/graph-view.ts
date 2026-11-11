@@ -8,7 +8,7 @@
  * declared on the canonical `TaskGraph` and `Task`. Pure.
  */
 
-import { isDistillTask } from "../distill-task";
+import { taskRolePolicy } from "../distill-task";
 import { frozenRedThenGreenEra } from "../proof-obligations";
 import { classifyTaskFiles, ENGINE_DEFAULT_TEST_FILES } from "../test-file-classification";
 import type { Task, TaskGraph } from "../../types";
@@ -35,5 +35,5 @@ export function productionFiles(graph: TaskGraph, task: Task): readonly string[]
  * a bound export.
  */
 export function skeletonHolderFiles(graph: TaskGraph, task: Task): readonly string[] {
-  return isDistillTask(task) ? Object.freeze([]) : productionFiles(graph, task);
+  return taskRolePolicy(task).holdsSkeletons ? productionFiles(graph, task) : Object.freeze([]);
 }

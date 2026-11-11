@@ -481,7 +481,9 @@ declares:
    types and leaves a modified one on disk flagged stale.
 6. **Outcomes.** Every non-test `file_list` path gets exactly one outcome, in
    both the brief and status: skeleton written, no bound exports, contract has
-   no types file, unsupported language, or exists, not skeletonized.
+   no types file, unsupported language, or exists, not skeletonized. A Distill
+   Task holds no skeleton: its bound scope path that a sibling deleted is
+   absent, no skeleton owed.
 
 **Java holder shape.** A Java contract's types file has exactly one top-level
 `public` interface or `final class` (the holder), and every functional

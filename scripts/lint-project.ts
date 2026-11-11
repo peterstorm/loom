@@ -69,7 +69,7 @@ if (!existsSync(DEFAULT_RULES_DIR)) {
 const { lintFiles }: typeof LinterIndex = await import(join(LOOM_ROOT, "engine/src/linter/index.ts"));
 const { CLAUDE_PROJECT_RULES_DIR, PI_PROJECT_RULES_DIR, PROJECT_RULES_LAYOUTS, projectRulesLayout }: typeof LinterConfig =
   await import(join(LOOM_ROOT, "engine/src/linter/programmatic/config.ts"));
-const { cloneCorpus, loadProjectConfig }: typeof LinterLoader = await import(join(LOOM_ROOT, "engine/src/linter/loader.ts"));
+const { authoritativeLintContext, loadProjectConfig }: typeof LinterLoader = await import(join(LOOM_ROOT, "engine/src/linter/loader.ts"));
 const { scopeOf, scopeDrift }: typeof ProjectScope =
   await import(join(LOOM_ROOT, "engine/src/linter/project-scope.ts"));
 const { walkLintableFiles }: typeof ProjectWalk = await import(join(LOOM_ROOT, "engine/src/linter/project-walk.ts"));
@@ -208,8 +208,10 @@ const INIT_NEXT_STEPS: readonly string[] = [
   "  2. Add regex rule overrides as .json files in rules/",
   "  3. Run with --write-baseline to grandfather pre-existing unproven",
   "     switches and if-chains, and blocks already written twice",
-  "     (switch-totality and no-duplicate-block apply to every file by",
-  "     default; new sites must prove totality, new copies are refused)",
+  "     (switch-totality applies to every non-test TypeScript file and",
+  "     no-duplicate-block to every TypeScript and JavaScript file, tests",
+  "     included, by default; new sites must prove totality, new copies",
+  "     are refused)",
   "  4. Run this script again to lint your codebase",
   "",
   "Available config fields:",
@@ -317,7 +319,7 @@ function projectConfig(): LinterConfig.ProgrammaticConfig {
 /** Every baselined rule of the project, each detecting against the project's
  *  own clone corpus, fingerprinted from the files' bytes as the full tier does. */
 const owners = (config: LinterConfig.ProgrammaticConfig): readonly BaselineOwner[] =>
-  baselineOwners(config, PROJECT_ROOT, cloneCorpus(config, PROJECT_ROOT, "full"));
+  baselineOwners(authoritativeLintContext(config, PROJECT_ROOT));
 
 /**
  * A list that only ever suppresses violations cannot report its own decay: a

@@ -1,4 +1,4 @@
-import { canonicalStructuralEquals, mapNonEmpty, nonEmpty, nonEmptyOf, type NonEmpty } from "./orchestration-contract";
+import { canonicalStructuralEquals, concatNonEmpty, mapNonEmpty, nonEmpty, nonEmptyOf, type NonEmpty } from "./orchestration-contract";
 import type { RedThenGreenGap, RedThenGreenObservation, RunRef } from "./red-then-green-types";
 import {
   isViolationReason,
@@ -211,11 +211,24 @@ export type ProofTestResult =
       readonly provenance: UntrustedTestProvenance;
     };
 
+/**
+ * What the shell observed of the attempt's bytes. Either the paths that
+ * differ, or (ADR-0068) that it wrote a Distill Task's snapshot back first:
+ * `restoredAfter` names the failures the attempt's own bytes would have
+ * settled with, and a restored scope has no changed path, so the two cannot
+ * be observed together.
+ */
+export type ObservedArtifactChanges =
+  | Readonly<{ filesModified: readonly string[]; restoredAfter?: undefined }>
+  | Readonly<{ filesModified: readonly []; restoredAfter: NonEmpty<string> }>;
+
 /** Observations collected by the imperative shell and consumed by this pure core. */
-export interface ObservedProofEvidence {
+export type ObservedProofEvidence = ObservedProofFacts & ObservedArtifactChanges;
+
+/** Every observation but the byte delta (`ObservedArtifactChanges`). */
+export interface ObservedProofFacts {
   readonly taskCompleted: boolean;
   readonly testResult?: ProofTestResult;
-  readonly filesModified: readonly string[];
   readonly newTestsWritten?: boolean;
   readonly newTestEvidence?: string;
   /**
@@ -233,12 +246,6 @@ export interface ObservedProofEvidence {
    * `not-owed` — so no path can skip the contract check by omission.
    */
   readonly contractConformance: ContractConformance;
-  /**
-   * Why the settlement shell wrote a Distill Task's snapshot back before this
-   * observation was taken (ADR-0068): the failures the attempt's own bytes
-   * would have settled with. Absent when nothing was restored.
-   */
-  readonly restoredAfter?: NonEmpty<string>;
 }
 
 /**
@@ -519,11 +526,20 @@ export function derivePendingTaskProof(input: ProofObligationInput): PendingTask
   return Object.freeze({ state: "pending", obligations, results });
 }
 
+/** A regression verdict: its failure, or the pass with the provenance it had. */
+type EvaluatedRegression =
+  | Extract<EvaluatedProofResult, { state: "failed" }>
+  | Readonly<{
+      state: "satisfied";
+      obligation: ProofObligation;
+      evidence: Extract<ProofEvidence, { kind: "regression-test-pass" }>;
+    }>;
+
 const evaluateRegression = (
   obligation: Extract<ProofObligation, { kind: "regression-test-pass" }>,
   result: ProofTestResult | undefined,
   policy: ProofEvaluationPolicy,
-): EvaluatedProofResult => {
+): EvaluatedRegression => {
   if (result === undefined) {
     return Object.freeze({
       state: "failed",
@@ -601,6 +617,9 @@ const evaluateRedThenGreen = (
         failure: Object.freeze({ kind: "red-then-green-unproven", gap: observation.gap }),
       });
 
+/** The observed changed paths as one list of paths; a restored scope's is empty. */
+const changedPaths = (observed: ObservedProofEvidence): readonly string[] => observed.filesModified;
+
 /** The violations the conformance judgment found in one artifact, or none. */
 const violationsOf = (conformance: ContractConformance, artifact: string): NonEmpty<ConformanceViolation> | undefined =>
   conformance.kind === "judged" ? conformance.violations.get(artifact) : undefined;
@@ -628,7 +647,7 @@ const evaluateDeclaredArtifactChanged = (
       }),
     });
   }
-  return observed.filesModified.includes(obligation.artifact)
+  return changedPaths(observed).includes(obligation.artifact)
     ? Object.freeze({
         state: "satisfied",
         obligation,
@@ -661,11 +680,8 @@ const evaluateBehaviourPreserved = (
     obligation,
     evidence: Object.freeze({ kind: "behaviour-preserved", basis: Object.freeze(basis) }),
   });
-  if (observed.filesModified.length === 0) {
-    return satisfied(observed.restoredAfter === undefined
-      ? { kind: "unchanged" }
-      : { kind: "restored", after: mapNonEmpty(observed.restoredAfter, (reason) => reason) });
-  }
+  if (observed.restoredAfter !== undefined) return satisfied({ kind: "restored", after: observed.restoredAfter });
+  if (observed.filesModified.length === 0) return satisfied({ kind: "unchanged" });
   const violated = observed.filesModified.flatMap((artifact) => {
     const violations = violationsOf(observed.contractConformance, artifact);
     return violations === undefined ? [] : [{ artifact, violations }];
@@ -683,10 +699,7 @@ const evaluateBehaviourPreserved = (
   }
   const regression = evaluateRegression(REGRESSION_OBLIGATION, observed.testResult, policy);
   if (regression.state === "failed") return Object.freeze({ state: "failed", obligation, failure: regression.failure });
-  return satisfied({
-    kind: "tests-passed",
-    provenance: regression.evidence.kind === "regression-test-pass" ? regression.evidence.provenance : "evidence-ledger",
-  });
+  return satisfied({ kind: "tests-passed", provenance: regression.evidence.provenance });
 };
 
 const evaluateOne = (
@@ -745,7 +758,7 @@ const evaluateOne = (
       // inverted: a verify-only child leaves the declared bytes untouched, so
       // the artifact's absence from the changed set is the satisfaction. A
       // write during an attestation attempt is drift, never evidence.
-      return observed.filesModified.includes(obligation.artifact)
+      return changedPaths(observed).includes(obligation.artifact)
         ? Object.freeze({
             state: "failed",
             obligation,
@@ -802,10 +815,9 @@ export function evaluateProofObligations(
 ): FailedTaskProof | SatisfiedTaskProof {
   // Do not retain caller-owned object/array aliases in the proof aggregate.
   const authoredObligations = mapNonEmpty(obligations, freezeObligation);
-  const normalizedObserved: ObservedProofEvidence = {
-    ...observed,
-    filesModified: normalizedPaths(observed.filesModified),
-  };
+  const normalizedObserved: ObservedProofEvidence = observed.restoredAfter === undefined
+    ? { ...observed, filesModified: normalizedPaths(observed.filesModified) }
+    : { ...observed, restoredAfter: concatNonEmpty([], observed.restoredAfter) };
   const results = mapNonEmpty(
     authoredObligations,
     (obligation) => evaluateOne(obligation, normalizedObserved, policy),
@@ -1121,6 +1133,9 @@ function parseContractConformance(raw: unknown, path = "contractConformance"): P
   });
 }
 
+/** The changed paths of a restored scope: none. */
+const NO_FILES_MODIFIED: readonly [] = Object.freeze([]);
+
 /** The observed changed paths in order, with every element error; absent reads as none. */
 function parseModifiedFiles(raw: unknown): Readonly<{ files: readonly string[]; errors: readonly string[] }> {
   if (raw === undefined) return { files: [], errors: [] };
@@ -1130,6 +1145,32 @@ function parseModifiedFiles(raw: unknown): Readonly<{ files: readonly string[]; 
     files: parsed.flatMap((entry) => (entry.ok ? [entry.value] : [])),
     errors: parsed.flatMap((entry) => (entry.ok ? [] : entry.errors)),
   };
+}
+
+/**
+ * What the attempt left of its artifacts: the paths it changed, or the reasons
+ * its scope was restored. The two are never observed together, because a
+ * restored scope has no changed path.
+ */
+function parseObservedArtifactChanges(
+  rawFilesModified: unknown,
+  rawRestoredAfter: unknown,
+): ProofParseResult<ObservedArtifactChanges> {
+  const modified = parseModifiedFiles(rawFilesModified);
+  const restoredAfter = rawRestoredAfter === undefined
+    ? undefined
+    : parseNonEmptyArray(rawRestoredAfter, "restoredAfter", parseNonEmptyString);
+  const errors = [
+    ...(restoredAfter === undefined || restoredAfter.ok ? [] : restoredAfter.errors),
+    ...modified.errors,
+    ...(restoredAfter?.ok === true && modified.files.length > 0
+      ? ["restoredAfter is observed only with no filesModified: a restored scope has no changed path"]
+      : []),
+  ];
+  if (errors.length > 0) return fail(errors);
+  return ok(restoredAfter?.ok === true
+    ? { filesModified: NO_FILES_MODIFIED, restoredAfter: restoredAfter.value }
+    : { filesModified: Object.freeze([...new Set(modified.files)]) });
 }
 
 export function parseObservedProofEvidence(raw: unknown): ProofParseResult<ObservedProofEvidence> {
@@ -1155,14 +1196,10 @@ export function parseObservedProofEvidence(raw: unknown): ProofParseResult<Obser
   const contractConformance = parseContractConformance(raw.contractConformance);
   if (!contractConformance.ok) errors.push(...contractConformance.errors);
 
-  const restoredAfter = raw.restoredAfter === undefined
-    ? undefined
-    : parseNonEmptyArray(raw.restoredAfter, "restoredAfter", parseNonEmptyString);
-  if (restoredAfter !== undefined && !restoredAfter.ok) errors.push(...restoredAfter.errors);
+  const changes = parseObservedArtifactChanges(raw.filesModified, raw.restoredAfter);
+  if (!changes.ok) errors.push(...changes.errors);
 
   if (typeof raw.taskCompleted !== "boolean") errors.push("taskCompleted must be a boolean");
-  const modified = parseModifiedFiles(raw.filesModified);
-  errors.push(...modified.errors);
   if (raw.newTestsWritten !== undefined && typeof raw.newTestsWritten !== "boolean") {
     errors.push("newTestsWritten must be a boolean when present");
   }
@@ -1170,16 +1207,15 @@ export function parseObservedProofEvidence(raw: unknown): ProofParseResult<Obser
     errors.push("newTestEvidence must be a string when present");
   }
 
-  if (errors.length > 0 || !contractConformance.ok) return fail(errors);
+  if (errors.length > 0 || !contractConformance.ok || !changes.ok) return fail(errors);
   return ok(Object.freeze({
     taskCompleted: raw.taskCompleted === true,
     ...(testResult === undefined ? {} : { testResult }),
-    filesModified: Object.freeze([...new Set(modified.files)]),
     ...(typeof raw.newTestsWritten === "boolean" ? { newTestsWritten: raw.newTestsWritten } : {}),
     ...(typeof raw.newTestEvidence === "string" ? { newTestEvidence: raw.newTestEvidence } : {}),
     ...(redThenGreen?.ok ? { redThenGreen: redThenGreen.value } : {}),
     contractConformance: contractConformance.value,
-    ...(restoredAfter?.ok ? { restoredAfter: restoredAfter.value } : {}),
+    ...changes.value,
   }));
 }
 

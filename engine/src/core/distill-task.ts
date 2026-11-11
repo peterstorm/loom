@@ -4,11 +4,13 @@
  * implemented code before the Wave Gate reviews it.
  *
  * This module owns every Distill Task rule that is not proof evaluation:
- * which Task is one, which Waves get one and over which files, when it may be
- * dispatched, what its dispatch tells the agent, when a failed pass is
- * restored, and which Distill Tasks a reopening sweeps back. Population,
- * status, registration, settlement and reopening each call here, so none of
- * them can disagree. Pure: every observation arrives as a parameter.
+ * which Task is one (the Task role), what its role changes of the rules every
+ * Task has (`TaskRolePolicy`), which Waves get one and over which files, when
+ * it may be dispatched, what its dispatch tells the agent, and which Distill
+ * Tasks a reopening sweeps back. Population, status, registration, settlement
+ * and reopening each call here, so none of them can disagree. What a
+ * settlement does with a failed pass is `core/distill-snapshot`'s. Pure:
+ * every observation arrives as a parameter.
  */
 import type { DistillPassSetting } from "./distill-pass-setting";
 import { DECISION_RECORD_AGENT, DISTILL_AGENT } from "./model-profiles";
@@ -38,11 +40,90 @@ export type DistillTaskView = Readonly<{
 }>;
 
 /**
- * Whether a Task is a Distill Task. Its agent is its whole identity. The
- * State File load boundary asks this of a raw record, so `agent` is read as
- * unknown: anything but the exact agent name is not a Distill Task.
+ * The role a Task plays in its TaskGraph. Closed: `authored` is every Task
+ * the decompose roster wrote, `distill` the one TaskGraph Population adds per
+ * Wave (ADR-0068).
  */
-export const isDistillTask = (task: Readonly<{ agent?: unknown }>): boolean => task.agent === DISTILL_AGENT;
+export type TaskRole = "authored" | "distill";
+
+/** What a Task's role is read from; a raw State File record qualifies before it is proven. */
+type TaskRoleSource = Readonly<{ agent?: unknown }>;
+
+/**
+ * A Task's role, and the one place it is derived. A Distill Task's agent is
+ * its whole identity. The State File load boundary asks this of a raw record,
+ * so `agent` is read as unknown: anything but the exact agent name is
+ * `authored`.
+ */
+export const taskRoleOf = (task: TaskRoleSource): TaskRole => (task.agent === DISTILL_AGENT ? "distill" : "authored");
+
+/**
+ * Whether a Task is a Distill Task, narrowing its agent. Nothing else is
+ * narrowed: a raw record is asked before its other fields are proven.
+ */
+export const isDistillTask = <T extends TaskRoleSource>(task: T): task is T & Readonly<{ agent: typeof DISTILL_AGENT }> =>
+  taskRoleOf(task) === "distill";
+
+/**
+ * Every rule that varies by Task role and is a plain choice. A caller reads
+ * the field its rule is; none branches on the role's identity, and a new role
+ * does not compile until it answers every field.
+ */
+export type TaskRolePolicy = Readonly<{
+  /** Whether a decompose roster may name a Task of this role. Population adds the others itself. */
+  authorable: boolean;
+  /** Whether the Task holds the export bindings at its production files, so a Skeleton is written or refreshed on its behalf. */
+  holdsSkeletons: boolean;
+  /** What its Proof asks of its declared artifacts: that the Task produced them, or that it preserved their behaviour. */
+  declaredArtifacts: "produced" | "preserved";
+  /** Whether an operator may arm implementation attestation on it. */
+  attestable: boolean;
+  /** Whether it may carry a Requirement trace. */
+  traceable: boolean;
+  /** Whether its file list schedules an owned Invariant's family for Owner Verification. */
+  schedulesFamilies: boolean;
+  /** Why it owes no Wave review, or null when its Wave Gate reviews it. */
+  waveReviewExemption: "distill-task" | null;
+  /** Whether reconcile may re-evaluate its Proof from stored evidence, or only an attempt's settlement writes it. */
+  proofSettlement: "reconcilable" | "attempt-only";
+  /** The fixed appendix every dispatch of it carries. */
+  dispatchAppendix: "none" | "distill";
+  /** What a policy waiving both test requirements means for it: worth a warning, or what the role always carries. */
+  totalTestWaiver: "suspicious" | "by-construction";
+}>;
+
+const TASK_ROLE_POLICIES: Readonly<Record<TaskRole, TaskRolePolicy>> = Object.freeze({
+  authored: Object.freeze({
+    authorable: true,
+    holdsSkeletons: true,
+    declaredArtifacts: "produced",
+    attestable: true,
+    traceable: true,
+    schedulesFamilies: true,
+    waveReviewExemption: null,
+    proofSettlement: "reconcilable",
+    dispatchAppendix: "none",
+    totalTestWaiver: "suspicious",
+  }),
+  distill: Object.freeze({
+    authorable: false,
+    holdsSkeletons: false,
+    declaredArtifacts: "preserved",
+    attestable: false,
+    traceable: false,
+    schedulesFamilies: false,
+    waveReviewExemption: "distill-task",
+    proofSettlement: "attempt-only",
+    dispatchAppendix: "distill",
+    totalTestWaiver: "by-construction",
+  }),
+});
+
+/** The policy of a role. */
+export const taskRolePolicyOf = (role: TaskRole): TaskRolePolicy => TASK_ROLE_POLICIES[role];
+
+/** The policy of a Task's role. */
+export const taskRolePolicy = (task: TaskRoleSource): TaskRolePolicy => taskRolePolicyOf(taskRoleOf(task));
 
 /** Why an authored Task naming the distill agent is refused: population adds the pass itself. */
 export const authoredDistillTaskRefusal = (taskId: string): string =>
@@ -74,6 +155,17 @@ export type DistillPlanInput = Readonly<{
   setting: DistillPassSetting;
 }>;
 
+/**
+ * What planning the distill pass decided for a roster: the Distill Tasks its
+ * Waves get (none when no Wave has a scope), or why no Wave was planned.
+ */
+export type DistillPlan =
+  | Readonly<{ kind: "planned"; tasks: readonly DistillTaskPlan[] }>
+  | Readonly<{ kind: "not-planned"; reason: "pass-off" | "no-frozen-classification" }>;
+
+const PASS_OFF: DistillPlan = Object.freeze({ kind: "not-planned", reason: "pass-off" });
+const NO_FROZEN_CLASSIFICATION: DistillPlan = Object.freeze({ kind: "not-planned", reason: "no-frozen-classification" });
+
 const taskNumber = (id: string): number => (TASK_ID_PATTERN.test(id) ? Number(id.slice(1)) : 0);
 
 const describeDistillTask = (wave: number, sources: NonEmpty<string>): string =>
@@ -89,12 +181,13 @@ const describeDistillTask = (wave: number, sources: NonEmpty<string>): string =>
  * minus every frozen contract path: a test file in scope would let the
  * distiller weaken its own oracle, and a frozen path listed by a second Task
  * makes the State File refuse to load. A Wave with an empty scope gets no
- * Task; neither does any Wave when the manifest froze no classification or
- * the operator turned the pass off.
+ * Task. No Wave is planned at all when the operator turned the pass off or
+ * the manifest froze no classification, and the plan says which.
  */
-export function planDistillTasks(input: DistillPlanInput): readonly DistillTaskPlan[] {
+export function planDistillTasks(input: DistillPlanInput): DistillPlan {
   const { era } = input;
-  if (input.setting === "off" || era.kind === "not-owed") return Object.freeze([]);
+  if (input.setting === "off") return PASS_OFF;
+  if (era.kind === "not-owed") return NO_FROZEN_CLASSIFICATION;
   const { suffixes } = era.testFiles;
   const inScope = (path: string): boolean =>
     !isTestFileBySuffixes(path, suffixes) && !input.frozenPaths.some((frozen) => samePlanPath(frozen, path));
@@ -110,13 +203,42 @@ export function planDistillTasks(input: DistillPlanInput): readonly DistillTaskP
     const sourceTaskIds = nonEmpty(sources.filter(({ file_list }) => file_list.some(inScope)).map(({ id }) => id));
     return scope === null || sourceTaskIds === null ? [] : [{ wave, scope, sourceTaskIds }];
   });
-  return Object.freeze(scoped.map(({ wave, scope, sourceTaskIds }, index) => Object.freeze({
-    id: `T${firstId + index}`,
-    wave,
-    scope,
-    sourceTaskIds,
-    description: describeDistillTask(wave, sourceTaskIds),
-  })));
+  return Object.freeze({
+    kind: "planned",
+    tasks: Object.freeze(scoped.map(({ wave, scope, sourceTaskIds }, index) => Object.freeze({
+      id: `T${firstId + index}`,
+      wave,
+      scope,
+      sourceTaskIds,
+      description: describeDistillTask(wave, sourceTaskIds),
+    }))),
+  });
+}
+
+/** The Distill Tasks of a plan: none when the roster was not planned. */
+export const plannedDistillTasks = (plan: DistillPlan): readonly DistillTaskPlan[] =>
+  plan.kind === "planned" ? plan.tasks : Object.freeze([]);
+
+/**
+ * The operator-visible line for a roster that gets no distill pass, or null
+ * when nothing needs saying. `pass-off` is the operator's own manifest
+ * setting, so it is not repeated back; a manifest that froze no Test-File
+ * Classification is not a choice, and without the line the missing pass
+ * would have no stated cause.
+ */
+export function distillPlanNote(plan: DistillPlan): string | null {
+  if (plan.kind === "planned") return null;
+  switch (plan.reason) {
+    case "pass-off":
+      return null;
+    case "no-frozen-classification":
+      return "No distill pass: the verification manifest froze no test-file classification, so no Distill Scope " +
+        "can be derived and no Wave gets a Distill Task.";
+    default: {
+      const unreachable: never = plan.reason;
+      return unreachable;
+    }
+  }
 }
 
 /**
@@ -172,28 +294,6 @@ export function distillPromptAppendix(task: Readonly<{ id: string; file_list?: r
     "Leaving the files unchanged is an acceptable result: if nothing is worth a move, say so and stop after the passing run.",
     "If your final state cannot be proven (tests failing, or no trusted pass after your last edit), the engine restores every file to what it held when you started.",
   ].join("\n");
-}
-
-/** What settlement does with a Distill Task attempt's bytes. */
-export type DistillRestoreDecision =
-  | Readonly<{ kind: "keep" }>
-  | Readonly<{ kind: "restore"; after: NonEmpty<string> }>;
-
-const KEEP: DistillRestoreDecision = Object.freeze({ kind: "keep" });
-
-/**
- * Whether settlement writes a Distill Task's snapshot back. It restores
- * exactly when the attempt changed scope paths and the Oracle, judging those
- * bytes, would settle anything but `implemented`: the pass could not prove it
- * preserved behaviour, so its edits must not reach review. `failureKinds` are
- * that trial settlement's failure kinds and become the evidence's `after`.
- */
-export function distillRestoreDecision(
-  changedScopePaths: readonly string[],
-  failureKinds: readonly string[],
-): DistillRestoreDecision {
-  const after = nonEmpty(failureKinds);
-  return changedScopePaths.length === 0 || after === null ? KEEP : Object.freeze({ kind: "restore", after });
 }
 
 /** The Git ref that keeps one Distill Task attempt's snapshot tree alive until settlement. */

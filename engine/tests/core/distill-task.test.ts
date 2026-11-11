@@ -1,19 +1,20 @@
 /**
  * The Distill Task rules (ADR-0068): which Waves get one and over which files,
- * when it may be dispatched, what its dispatch says, when a failed pass is
- * restored, and which Distill Tasks a reopening sweeps back.
+ * when it may be dispatched, what its dispatch says, and which Distill Tasks a
+ * reopening sweeps back.
  */
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
   DISTILL_APPENDIX_HEADER,
   distillDispatchBlockers,
+  distillPlanNote,
   distillPromptAppendix,
-  distillRestoreDecision,
   distillSnapshotRef,
   distillTasksReopenedWith,
   isDistillTask,
   planDistillTasks,
+  plannedDistillTasks,
   type DistillPlanInput,
   type DistillSourceTask,
 } from "../../src/core/distill-task";
@@ -21,15 +22,19 @@ import { DECISION_RECORD_AGENT, DISTILL_AGENT } from "../../src/core/model-profi
 import type { FrozenRedThenGreenEra } from "../../src/core/proof-obligations";
 import { ENGINE_DEFAULT_TEST_FILES } from "../../src/core/test-file-classification";
 import type { TaskStatus } from "../../src/types";
-import { satisfiedProof, taskFixture } from "../fixtures/task-lifecycle";
+import { siblingTaskFixture, type SiblingTaskFixtureInput } from "../fixtures/task-lifecycle";
 
 const ERA: FrozenRedThenGreenEra = { kind: "owed-if-new-tests", testFiles: ENGINE_DEFAULT_TEST_FILES };
 
 const source = (id: string, wave: number, file_list: readonly string[], agent = "code-implementer-agent"): DistillSourceTask =>
   ({ id, agent, wave, file_list });
 
-const plan = (tasks: readonly DistillSourceTask[], overrides: Partial<DistillPlanInput> = {}) =>
+const planning = (tasks: readonly DistillSourceTask[], overrides: Partial<DistillPlanInput> = {}) =>
   planDistillTasks({ tasks, contractTaskIds: new Set(), frozenPaths: [], era: ERA, setting: "on", ...overrides });
+
+/** The Distill Tasks the roster gets. */
+const plan = (tasks: readonly DistillSourceTask[], overrides: Partial<DistillPlanInput> = {}) =>
+  plannedDistillTasks(planning(tasks, overrides));
 
 describe("planDistillTasks", () => {
   it("adds one Task per Wave over its implementation files, numbered after the authored ids", () => {
@@ -63,6 +68,25 @@ describe("planDistillTasks", () => {
     expect(plan(tasks, overrides)).toEqual([]);
   });
 
+  it("says why no Wave was planned, and tells a planned roster with nothing to distill apart from both", () => {
+    const tasks = [source("T1", 1, ["src/a.ts"])];
+    expect(planning(tasks, { setting: "off" })).toEqual({ kind: "not-planned", reason: "pass-off" });
+    expect(planning(tasks, { era: { kind: "not-owed" } })).toEqual({ kind: "not-planned", reason: "no-frozen-classification" });
+    // The operator's setting is the cause it names when both hold.
+    expect(planning(tasks, { setting: "off", era: { kind: "not-owed" } })).toEqual({ kind: "not-planned", reason: "pass-off" });
+    expect(planning([source("T1", 1, ["tests/a.test.ts"])])).toEqual({ kind: "planned", tasks: [] });
+  });
+
+  it("notes a missing pass only when the operator did not choose it", () => {
+    const tasks = [source("T1", 1, ["src/a.ts"])];
+    expect(distillPlanNote(planning(tasks, { era: { kind: "not-owed" } })))
+      .toBe("No distill pass: the verification manifest froze no test-file classification, so no Distill Scope " +
+        "can be derived and no Wave gets a Distill Task.");
+    expect(distillPlanNote(planning(tasks, { setting: "off" }))).toBeNull();
+    expect(distillPlanNote(planning(tasks))).toBeNull();
+    expect(distillPlanNote(planning([source("T1", 1, ["tests/a.test.ts"])]))).toBeNull();
+  });
+
   it("skips a Wave with nothing to distill without leaving a gap in the ids", () => {
     expect(plan([
       source("T1", 1, ["tests/only.test.ts"]),
@@ -91,17 +115,8 @@ describe("planDistillTasks", () => {
   });
 });
 
-const sibling = (id: string, status: TaskStatus, overrides: Readonly<Record<string, unknown>> = {}) => taskFixture({
-  id,
-  description: id,
-  agent: "code-implementer-agent",
-  wave: 1,
-  depends_on: [],
-  file_list: [`src/${id}.ts`],
-  status,
-  ...(status === "pending" ? {} : { proof: satisfiedProof([`src/${id}.ts`]) }),
-  ...overrides,
-});
+const sibling = (id: string, status: TaskStatus, overrides: Partial<SiblingTaskFixtureInput> = {}) =>
+  siblingTaskFixture({ id, status, ...overrides });
 
 const distill = (id = "T9", status: TaskStatus = "pending", wave = 1) =>
   sibling(id, status, { agent: DISTILL_AGENT, wave, file_list: ["src/T1.ts", "src/T2.ts"] });
@@ -131,15 +146,6 @@ describe("distillPromptAppendix", () => {
     expect(appendix.split("\n")[0]).toBe(DISTILL_APPENDIX_HEADER);
     expect(appendix).toContain("- src/a.ts\n- src/b.ts");
     expect(distillPromptAppendix({ id: "T9", file_list: ["src/a.ts", "src/b.ts"] })).toBe(appendix);
-  });
-});
-
-describe("distillRestoreDecision", () => {
-  it("restores exactly when the attempt changed its scope and would not settle implemented", () => {
-    expect(distillRestoreDecision(["src/a.ts"], ["proof:regression-tests-failed"]))
-      .toEqual({ kind: "restore", after: ["proof:regression-tests-failed"] });
-    expect(distillRestoreDecision(["src/a.ts"], [])).toEqual({ kind: "keep" });
-    expect(distillRestoreDecision([], ["proof:task-not-completed"])).toEqual({ kind: "keep" });
   });
 });
 

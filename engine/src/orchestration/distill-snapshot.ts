@@ -107,11 +107,15 @@ function lstatIfPresent(path: string): Stats | null {
   try {
     return lstatSync(path);
   } catch (error) {
-    const code = error !== null && typeof error === "object" && "code" in error ? error.code : null;
+    const code = errorCodeOf(error);
     if (code === "ENOENT" || code === "ENOTDIR") return null;
     throw error;
   }
 }
+
+/** The system error code a filesystem throw carries, or null when it carries none. */
+const errorCodeOf = (error: unknown): unknown =>
+  error !== null && typeof error === "object" && "code" in error ? error.code : null;
 
 // ---------------------------------------------------------------------------
 // Capture
@@ -220,7 +224,10 @@ function presentLeafPaths(root: string, scopePath: string, exists: boolean): rea
 /**
  * Remove one leaf the snapshot lacks, then every directory it leaves empty
  * below the scope path — and the scope path itself when the snapshot holds
- * nothing there, so a directory the attempt created is gone again.
+ * nothing there, so a directory the attempt created is gone again. The walk
+ * up ends at the first directory that still holds something (`ENOTEMPTY`, or
+ * `EEXIST` where the platform reports it so) or is already gone; any other
+ * failure to remove one is thrown, and becomes this scope path's failure.
  */
 function removeLeaf(root: string, scopePath: string, leaf: string, removeScopeDirectory: boolean): void {
   rmSync(join(root, leaf), { force: true });
@@ -228,8 +235,10 @@ function removeLeaf(root: string, scopePath: string, leaf: string, removeScopeDi
   while (withinScopePath(scopePath, directory) && (directory !== scopePath || removeScopeDirectory)) {
     try {
       rmdirSync(join(root, directory));
-    } catch {
-      return;
+    } catch (error) {
+      const code = errorCodeOf(error);
+      if (code === "ENOTEMPTY" || code === "EEXIST" || code === "ENOENT") return;
+      throw error;
     }
     directory = dirname(directory);
   }

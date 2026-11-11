@@ -5,9 +5,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fingerprint, fingerprintScheme } from "../../../src/linter/clones/clone-detection";
+import { fingerprint, fingerprintScheme, type CloneCorpus } from "../../../src/linter/clones/clone-detection";
 import { parseIndexCache, renderIndexCache } from "../../../src/linter/clones/index-cache";
-import { defaultCacheFile, projectCorpus } from "../../../src/linter/clones/project-corpus";
+import { authoritativeCorpus, cacheAssistedCorpus, defaultCacheFile } from "../../../src/linter/clones/project-corpus";
 import { block, cloneOptions, cloneProjects } from "../../fixtures/clone-fixtures";
 
 const CLONE = cloneOptions(20, 4);
@@ -21,13 +21,16 @@ const UNRELATED = fingerprint("src/elsewhere.ts", block("elsewhere", 12), CLONE)
 const projects = cloneProjects("project-corpus-");
 afterEach(projects.dispose);
 
-const corpusOf = (root: string, cacheFile: string | null, exclusions: readonly { path: string; reason: string }[] = []) =>
-  projectCorpus({ projectRoot: root, exclusions, clone: CLONE, cacheFile });
+/** The project's corpus: cache-assisted when given a cache file, authoritative (bytes only) when given null. */
+function corpusOf(root: string, cacheFile: string | null, exclusions: readonly { path: string; reason: string }[] = []): CloneCorpus {
+  const source = { projectRoot: root, exclusions, clone: CLONE };
+  return cacheFile === null ? authoritativeCorpus(source) : cacheAssistedCorpus(source, cacheFile);
+}
 
 const candidatesIn = (root: string, cacheFile: string | null, exclusions: readonly { path: string; reason: string }[] = []) =>
   corpusOf(root, cacheFile, exclusions).candidates(TARGET).map((source) => source.path);
 
-describe("projectCorpus", () => {
+describe("the project corpus", () => {
   it("nominates the script files sharing a block, by project-relative path", () => {
     const root = projects.create({
       "src/copy.ts": [SHARED, block("copy", 2)].join("\n"),
@@ -63,7 +66,7 @@ describe("projectCorpus", () => {
   });
 });
 
-describe("projectCorpus with a fingerprint cache", () => {
+describe("the project corpus with a fingerprint cache", () => {
   const cached = (root: string) => parseIndexCache(readFileSync(defaultCacheFile(root), "utf-8"), SCHEME);
 
   it("records every compared file's size, time and fingerprints on first use", () => {
@@ -160,7 +163,7 @@ describe("projectCorpus with a fingerprint cache", () => {
   });
 });
 
-describe("projectCorpus reading a source that changed under it", () => {
+describe("the project corpus reading a source that changed under it", () => {
   /** A corpus whose index is built — from a warm cache, so no source has been read yet. */
   function builtCorpus(root: string) {
     const cacheFile = defaultCacheFile(root);

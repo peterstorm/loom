@@ -44,7 +44,7 @@ import {
   type WaveGateState,
   type WaveReadinessSnapshot,
 } from "./wave-gate-machine";
-import { waveReviewOutstanding } from "./wave-review-authority";
+import { waveReviewView } from "./wave-review-authority";
 
 export type WavePreparationError = Readonly<{
   kind: "wave-preparation-rejected";
@@ -75,7 +75,7 @@ export function deriveWaveRefutationPlan(
   if (collecting.length > 0) {
     return preparationFailure(`current Review Packet evidence must complete before refutation: ${collecting.join(", ")}`);
   }
-  const unreviewed = snapshot.waveTasks.filter(waveReviewOutstanding);
+  const unreviewed = waveReviewView(snapshot.waveTasks).outstanding;
   if (unreviewed.length > 0) {
     return preparationFailure(
       `current-generation review evidence must complete before refutation: ${unreviewed.map(({ id }) => id).join(", ")}`,

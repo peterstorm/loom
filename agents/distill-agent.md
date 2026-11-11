@@ -19,22 +19,14 @@ Your brief carries a `LOOM_DISTILL_PASS: 1` appendix. It lists the files of this
 You MUST follow this exact sequence:
 
 1. **Read** every file the appendix lists, and the tests that cover them. Those files, and no others, are your scope.
-2. **Green baseline before the first edit.** Run the tests that cover the listed files via the Bash tool and see them pass, using a report-writing form from step 5. On Claude Code the machine refuses Edit, Write and MultiEdit until one test run has passed with a parsed report. If the baseline is red, make no edit: report the failing tests and stop. When the brief's "Acceptance Contract" section names acceptance files that may still fail in this Wave, run the tests that cover your files without those files, as that section says.
+2. **Green baseline before the first edit.** Run the tests that cover the listed files via the Bash tool and see them pass, using a report-writing form from the table step 5 names. On Claude Code the machine refuses Edit, Write and MultiEdit until one test run has passed with a parsed report. If the baseline is red, make no edit: report the failing tests and stop. When the brief's "Acceptance Contract" section names acceptance files that may still fail in this Wave, run the tests that cover your files without those files, as that section says.
 3. **One catalog move at a time.** Apply one move from the `distill` catalog, then re-run the same tests. If they fail, undo that move with an edit and re-run before trying anything else.
 4. **Stay inside the pass.**
    - Never edit a test file.
    - Never edit, create or delete a file outside the appendix's list.
    - Never change an exported signature, name or type. That is a deepening, not a distill move: report it instead.
    - Never fix a bug you find. Report it.
-5. **Finish with one final verification run after your last edit.** The FINAL run must be ONE bare command per Bash call (no `cd … &&`, `;`, `&&`, `||`, `&`, pipes, or redirects) that makes the runner write a structured report to an ABSOLUTE, literal path in an existing directory outside the repository, a path you never write yourself:
-   - Bun: `bun test --reporter=junit --reporter-outfile=/tmp/loom-<task-id>-bun.xml` (sub-project: `bun test --cwd=/abs/sub --reporter=junit --reporter-outfile=/tmp/loom-<task-id>-bun.xml`)
-   - Vitest: `npx vitest run --reporter=default --reporter=json --outputFile=/tmp/loom-<task-id>-vitest.json` (sub-project: `npx --prefix /abs/sub vitest run --root /abs/sub --reporter=default --reporter=json --outputFile=/tmp/loom-<task-id>-vitest.json` — `--prefix` runs the sub-project's own Vitest, `--root` its config and tests)
-   - Jest: `npx jest --json --outputFile=/tmp/loom-<task-id>-jest.json`
-   - npm script running Vitest: `npm test -- --reporter=default --reporter=json --outputFile=/tmp/loom-<task-id>-vitest.json` (sub-project: `npm test --prefix /abs/sub -- --reporter=default --reporter=json --outputFile=/tmp/loom-<task-id>-vitest.json`; for a Jest script pass `--json --outputFile=…` instead)
-   - Maven / Gradle: `mvn test` / `./gradlew test` from the repository root (reports are found automatically)
-   - pytest, cargo, go and similar: no structured report is read; a green run stays untrusted, so say so in your report
-
-   Your Task prompt's "final verification run" table is the authoritative list.
+5. **Finish with one final verification run after your last edit.** The FINAL run must be ONE bare command per Bash call (no `cd … &&`, `;`, `&&`, `||`, `&`, pipes, or redirects) that makes the runner write a structured report to an ABSOLUTE, literal path in an existing directory outside the repository, a path you never write yourself. Take the command for your runner from the "final verification run" table at the top of your brief: it lists every form the engine accepts.
 6. **Stop only after test output shows pass markers** in your Bash tool output (e.g., "X passing", "Tests run: X, Failures: 0", "X pass").
 
 ## Changing nothing is a legitimate result

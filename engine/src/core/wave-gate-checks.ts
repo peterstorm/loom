@@ -32,7 +32,7 @@ import { renderProjectVerificationCoverage } from "./verification-manifest";
 import { deriveWaveCompletionSuiteReadiness } from "./wave-completion-suite-readiness";
 import { canonicalRecord, type NonEmpty, nonEmptyOf } from "./orchestration-contract";
 import type { FrozenPathObservations } from "./acceptance-contract";
-import { owesWaveReview, waveReviewExemption, waveReviewedTasks } from "./wave-review-authority";
+import { waveReviewStanding, waveReviewView } from "./wave-review-authority";
 
 export type GateCheck =
   | Readonly<{ passed: true; summary: string }>
@@ -154,21 +154,20 @@ export function checkNewTests(tasks: readonly Task[]): GateCheck {
 
 /** One Task's line in the passed review check: its review status, or why it owes no review. */
 const reviewEvidenceLine = (task: Task): string => {
-  const exemption = waveReviewExemption(task);
-  return exemption === null ? String(task.review_status) : `not required (exempt from Wave review: ${exemption.reason})`;
+  const standing = waveReviewStanding(task);
+  return standing.kind === "reviewed" ? String(task.review_status) : `not required (exempt from Wave review: ${standing.reason})`;
 };
 
 /**
  * Every Task that owes Wave review has passed or blocked. A Task exempt from
- * Wave review (`waveReviewExemption`) owes none: it is neither counted nor
+ * Wave review (`waveReviewView`) owes none: it is neither counted nor
  * failed, and its line says so instead of showing a review status.
  */
 export function checkReviews(tasks: readonly Task[]): GateCheck {
-  const owed = waveReviewedTasks(tasks);
-  const reviewed = owed.filter((task) => task.review_status === "passed" || task.review_status === "blocked");
-  if (reviewed.length !== owed.length) {
-    const unreviewed = owed.filter((task) => !task.review_status || task.review_status === "pending").map((task) => task.id);
-    const failedReview = owed.filter((task) => task.review_status === "evidence_capture_failed").map((task) => task.id);
+  const { reviewed: owed, outstanding } = waveReviewView(tasks);
+  if (outstanding.length > 0) {
+    const unreviewed = outstanding.filter((task) => !task.review_status || task.review_status === "pending").map((task) => task.id);
+    const failedReview = outstanding.filter((task) => task.review_status === "evidence_capture_failed").map((task) => task.id);
     const parts = ["FAILED: Not all tasks have been reviewed."];
     if (failedReview.length > 0) parts.push(`  Evidence capture failed: ${failedReview.join(", ")}`);
     if (unreviewed.length > 0) parts.push(`  Unreviewed: ${unreviewed.join(", ")}`);
@@ -331,7 +330,7 @@ export function checkWaveCompletionSuite(
  * review authority, and its bytes are its reviewed siblings'.
  */
 export function checkReviewedWorkspace(waveTasks: readonly Task[], deps: GateDeps): GateCheck {
-  const tasks = waveReviewedTasks(waveTasks);
+  const { reviewed: tasks } = waveReviewView(waveTasks);
   if (!tasks.some((task) => task.accepted_review_authority !== undefined)) {
     // Pre-integrity historical packets have no byte snapshot authority to
     // compare. New engine-owned Wave packets always retain one on acceptance.
@@ -487,13 +486,13 @@ export function applyGateDecision(state: TaskGraph, decision: GateDecision): Tas
     if (task.status !== "implemented" || task.proof?.state !== "satisfied") return task;
     // A Task exempt from Wave review completes with its Wave but was never
     // reviewed, so completion writes it no `passed`: its exemption is derived
-    // from its identity (`waveReviewExemption`), not from a stored status.
+    // from its role (`waveReviewStanding`), not from a stored status.
     return {
       ...task,
       status: "completed",
       proof: task.proof,
       legacy_missing_proof: undefined,
-      ...(owesWaveReview(task) ? { review_status: "passed" as const } : {}),
+      ...(waveReviewStanding(task).kind === "reviewed" ? { review_status: "passed" as const } : {}),
     };
   });
   // `blocked` is DERIVED, never asserted. `wave-gate-model`'s `waveHasBlockCause`

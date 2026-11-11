@@ -61,13 +61,18 @@ export type UnsupportedReason =
 
 export type SkeletonOrigin = "spawn" | "contract-stub" | "revision";
 
-/** Exactly one per non-test file_list path. */
+/**
+ * Exactly one per non-test file_list path. `absent-no-skeleton-owed` is a
+ * Task that holds no Skeleton (a Distill Task, ADR-0068 §9) at an absent path
+ * a holder would be given one at: the file is missing and nothing is written.
+ */
 export type SkeletonOutcome =
   | Readonly<{ kind: "skeleton-written"; origin: SkeletonOrigin }>
   | Readonly<{ kind: "no-bound-exports" }>
   | Readonly<{ kind: "contract-has-no-types-file" }>
   | Readonly<{ kind: "unsupported-language"; reason: UnsupportedReason }>
-  | Readonly<{ kind: "exists-not-skeletonized" }>;
+  | Readonly<{ kind: "exists-not-skeletonized" }>
+  | Readonly<{ kind: "absent-no-skeleton-owed" }>;
 
 export type PathSkeletonOutcome = Readonly<{ path: string; outcome: SkeletonOutcome }>;
 

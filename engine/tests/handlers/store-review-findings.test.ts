@@ -13,7 +13,7 @@ import {
 } from "../../src/handlers/helpers/store-review-findings";
 import { claimsOfSeverity } from "../../src/core/findings";
 import { AGENT_POLICIES, DISTILL_AGENT } from "../../src/core/model-profiles";
-import { waveReviewExemption } from "../../src/core/wave-review-authority";
+import { waveReviewStanding } from "../../src/core/wave-review-authority";
 import { distillTaskFixture } from "../fixtures/task-lifecycle";
 import { parseTaskGraph } from "../../src/state-manager";
 import type { Task } from "../../src/types";
@@ -383,10 +383,10 @@ describe("reviewOverrideRefusal (pure)", () => {
     fc.assert(fc.property(fc.constantFrom(...AGENT_POLICIES.map(({ agent }) => agent)), fc.integer({ min: 1, max: 99 }), (agent, n) => {
       const task = { id: `T${n}`, agent };
       const refusal = reviewOverrideRefusal(task);
-      const exemption = waveReviewExemption(task);
-      expect(refusal === null).toBe(exemption === null);
-      if (refusal !== null && exemption !== null) {
-        expect(refusal).toContain(`Task 'T${n}' is exempt from Wave review (${exemption.reason})`);
+      const standing = waveReviewStanding(task);
+      expect(refusal === null).toBe(standing.kind === "reviewed");
+      if (refusal !== null && standing.kind === "exempt") {
+        expect(refusal).toContain(`Task 'T${n}' is exempt from Wave review (${standing.reason})`);
       }
     }));
     expect(reviewOverrideRefusal({ id: "T9", agent: DISTILL_AGENT })).toContain("its Wave's distill pass");

@@ -31,7 +31,6 @@ import {
   taskRedThenGreenEra,
   TRUSTED_LEDGER_ONLY_POLICY,
   writtenContract,
-  type ObservedProofEvidence,
   type ProofObligation,
   type RedThenGreenEra,
   type RedThenGreenScope,
@@ -90,7 +89,7 @@ const ALL_GAPS: readonly RedThenGreenGap[] = [
   { kind: "ledger-unavailable" },
 ];
 
-const observed = (redThenGreen?: RedThenGreenObservation): ObservedProofEvidence =>
+const observed = (redThenGreen?: RedThenGreenObservation) =>
   trustedPassEvidence([TEST_FILE, IMPL_FILE], {
     newTestEvidence: "new tests",
     ...(redThenGreen === undefined ? {} : { redThenGreen }),

@@ -5,14 +5,14 @@
  * preserved behaviour is written back.
  *
  * This module owns the pure half: the port the shells capture, restore and
- * discard through, its typed failures, the tree's wire format, which trial
- * settlement restores (`distillRestoreOf`, over `distillRestoreDecision`),
- * and which settlement lets the snapshot go (`distillSnapshotRetention`).
- * `orchestration/distill-snapshot.ts` is the Git adapter. Pure.
+ * discard through, its typed failures, the tree's wire format, and what a
+ * settlement means for the attempt's bytes and for its snapshot
+ * (`distillSettlementOutcome`). `orchestration/distill-snapshot.ts` is the
+ * Git adapter. Pure.
  */
 import { match } from "ts-pattern";
-import { distillRestoreDecision, distillSnapshotRef, isDistillTask, type DistillRestoreDecision } from "./distill-task";
-import type { DomainResult } from "./orchestration-contract";
+import { distillSnapshotRef, isDistillTask } from "./distill-task";
+import { nonEmpty, type DomainResult, type NonEmpty } from "./orchestration-contract";
 
 // ---------------------------------------------------------------------------
 // The port
@@ -125,16 +125,32 @@ export const restoredFilePermissions = (current: number, executable: boolean): n
   executable ? current | ((current & 0o444) >> 2) : current & ~0o111;
 
 // ---------------------------------------------------------------------------
-// Restore: which trial settlement writes the snapshot back
+// Settlement: what a settlement does with the attempt's bytes and its snapshot
 // ---------------------------------------------------------------------------
 
+/** What settlement does with a Distill Task attempt's bytes. */
+export type DistillRestoreDecision =
+  | Readonly<{ kind: "keep" }>
+  | Readonly<{ kind: "restore"; after: NonEmpty<string> }>;
+
+/** Whether a settled attempt's snapshot is still needed. */
+export type DistillSnapshotRetention = "discard" | "keep";
+
+/** Every transition a settlement receipt records. */
+type SettlementTransition =
+  | "implemented"
+  | "retry-required"
+  | "escalation-required"
+  | "infrastructure-blocked"
+  | "escalation-remediated";
+
 /**
- * What the restore decision reads of a trial settlement. It is declared here,
- * not imported: `core/implementation-application` reaches `distill-task`, so
- * importing its result type back would close an import cycle. Every
+ * What this module reads of a settlement. It is declared here, not imported:
+ * `core/implementation-application` reaches `distill-task`, so importing its
+ * result type back would close an import cycle. Every
  * `ImplementationSettlementApplicationResult` has this shape, and a new
  * application or transition kind makes it unassignable here until
- * `distillTrialFailureKinds` says what the kind means.
+ * `distillSettlementOutcome` says what the kind means.
  */
 export type DistillTrialSettlement =
   | Readonly<{
@@ -147,86 +163,86 @@ export type DistillTrialSettlement =
   | Readonly<{ kind: "ignored" }>
   | Readonly<{ kind: "error" }>;
 
+/** What one settlement means for a Distill Task attempt: its bytes, and its snapshot. */
+export type DistillSettlementOutcome = Readonly<{
+  /** Whether the shell writes the snapshot back before the settlement stands. */
+  restore: DistillRestoreDecision;
+  /** Whether the snapshot is still needed once the settlement is persisted. */
+  retention: DistillSnapshotRetention;
+}>;
+
+const KEEP: DistillRestoreDecision = Object.freeze({ kind: "keep" });
+
+/** An application that settled nothing changes nothing: bytes and snapshot both stay. */
+const NOTHING_SETTLED: DistillSettlementOutcome = Object.freeze({ restore: KEEP, retention: "keep" });
+
 /**
- * The semantic failure kinds a trial settlement would settle with, as its
- * receipt names them. Only a semantic failure (`retry-required`,
- * `escalation-required`) has any: `implemented` proved the bytes, and an
- * `infrastructure-blocked`, `ignored` or `error` application judged nothing,
- * so none of them is a reason to restore.
+ * The one rule for which transition settles a snapshot. A semantic transition
+ * (`implemented`, `retry-required`, `escalation-required`, and the
+ * `escalation-remediated` receipt that restates an escalated attempt) judged
+ * the scope bytes and restored them where they were unproven, so the snapshot
+ * has no reader left. `infrastructure-blocked` judged nothing: its snapshot is
+ * the only copy of the bytes the attempt started from, and it is kept for the
+ * operator.
  */
-export const distillTrialFailureKinds = (trial: DistillTrialSettlement): readonly string[] =>
-  match(trial)
-    .with({ kind: "applied" }, ({ transition }) =>
-      match(transition)
-        .with({ kind: "implemented" }, (): readonly string[] => [])
-        .with({ kind: "retry-required" }, { kind: "escalation-required" }, ({ receipt }) => receipt.failureKinds)
-        .with({ kind: "infrastructure-blocked" }, (): readonly string[] => [])
-        .exhaustive())
-    .with({ kind: "ignored" }, (): readonly string[] => [])
-    .with({ kind: "error" }, (): readonly string[] => [])
+const snapshotRetentionAfter = (transition: SettlementTransition): DistillSnapshotRetention =>
+  match(transition)
+    .with("implemented", "retry-required", "escalation-required", "escalation-remediated", (): DistillSnapshotRetention => "discard")
+    .with("infrastructure-blocked", (): DistillSnapshotRetention => "keep")
     .exhaustive();
 
 /**
- * What settlement does with a Distill Task attempt's bytes after its trial:
- * `distillRestoreDecision` over the attempt's raw scope delta and the trial's
- * semantic failure kinds.
+ * What a settlement means for a Distill Task attempt, decided in one place.
+ *
+ * `restore`: the snapshot is written back exactly when the attempt changed
+ * scope paths and the settlement is a semantic failure. The pass could not
+ * prove it preserved behaviour, so its edits must not reach review; the
+ * receipt's failure kinds become the evidence's `after`. `implemented` proved
+ * the bytes, and an `infrastructure-blocked`, `ignored` or `error` application
+ * judged nothing, so none of them restores.
+ *
+ * `retention`: `snapshotRetentionAfter` for an applied transition; an
+ * `ignored` or `error` application settled nothing and keeps the snapshot.
+ *
+ * The shell reads `restore` of the trial settlement, with the attempt's raw
+ * scope delta, and `retention` of the settlement it persisted.
  */
-export const distillRestoreOf = (
+export const distillSettlementOutcome = (
   changedScopePaths: readonly string[],
-  trial: DistillTrialSettlement,
-): DistillRestoreDecision => distillRestoreDecision(changedScopePaths, distillTrialFailureKinds(trial));
-
-// ---------------------------------------------------------------------------
-// Release: which settlement lets the snapshot go
-// ---------------------------------------------------------------------------
-
-/** Whether a settled attempt's snapshot is still needed. */
-export type DistillSnapshotRetention = "discard" | "keep";
-
-/**
- * What a persisted settlement means for its attempt's snapshot. A semantic
- * settlement (`implemented`, `retry-required`, `escalation-required`) judged
- * the scope bytes and restored them where they were unproven, so the snapshot
- * has no reader left. An `infrastructure-blocked` settlement judged nothing:
- * its snapshot is the only copy of the bytes the attempt started from, and it
- * is kept for the operator. An `ignored` or `error` application settled
- * nothing.
- */
-export const distillSnapshotRetention = (settlement: DistillTrialSettlement): DistillSnapshotRetention =>
+  settlement: DistillTrialSettlement,
+): DistillSettlementOutcome =>
   match(settlement)
-    .with({ kind: "applied" }, ({ transition }) =>
-      match(transition)
-        .with({ kind: "implemented" }, { kind: "retry-required" }, { kind: "escalation-required" }, (): DistillSnapshotRetention => "discard")
-        .with({ kind: "infrastructure-blocked" }, (): DistillSnapshotRetention => "keep")
-        .exhaustive())
-    .with({ kind: "ignored" }, { kind: "error" }, (): DistillSnapshotRetention => "keep")
+    .with({ kind: "applied" }, ({ transition }) => Object.freeze({
+      restore: match(transition)
+        .with({ kind: "retry-required" }, { kind: "escalation-required" }, ({ receipt }): DistillRestoreDecision => {
+          const after = nonEmpty(receipt.failureKinds);
+          return changedScopePaths.length === 0 || after === null ? KEEP : Object.freeze({ kind: "restore", after });
+        })
+        .with({ kind: "implemented" }, { kind: "infrastructure-blocked" }, () => KEEP)
+        .exhaustive(),
+      retention: snapshotRetentionAfter(transition.kind),
+    }))
+    .with({ kind: "ignored" }, { kind: "error" }, () => NOTHING_SETTLED)
     .exhaustive();
 
 /** What `settledDistillSnapshotDigests` reads of a Task: its agent and its settlement receipts. */
 export type DistillSnapshotHistory = Readonly<{
   agent?: unknown;
-  implementation_attempt_history?: readonly Readonly<{
-    authorityDigest: string;
-    transition: "implemented" | "retry-required" | "escalation-required" | "infrastructure-blocked" | "escalation-remediated";
-  }>[];
+  implementation_attempt_history?: readonly Readonly<{ authorityDigest: string; transition: SettlementTransition }>[];
 }>;
 
 /**
  * The attempts of a Distill Task whose snapshot nothing needs any more: every
- * attempt its history records a semantic settlement for (an
- * `escalation-remediated` receipt restates its escalated attempt's digest).
- * Registration discards these, so a snapshot whose discard was lost after its
- * settlement persisted does not outlive the Task's next attempt. An
- * `infrastructure-blocked` attempt is never listed: see
- * `distillSnapshotRetention`. Empty for any other Task.
+ * attempt whose receipt `snapshotRetentionAfter` discards. Registration
+ * discards these, so a snapshot whose discard was lost after its settlement
+ * persisted does not outlive the Task's next attempt. Empty for any other
+ * Task.
  */
 export function settledDistillSnapshotDigests(task: DistillSnapshotHistory): readonly string[] {
   if (!isDistillTask(task)) return Object.freeze([]);
-  const settled = (task.implementation_attempt_history ?? []).flatMap(({ authorityDigest, transition }) =>
-    match(transition)
-      .with("implemented", "retry-required", "escalation-required", "escalation-remediated", () => [authorityDigest])
-      .with("infrastructure-blocked", (): string[] => [])
-      .exhaustive());
+  const settled = (task.implementation_attempt_history ?? [])
+    .filter(({ transition }) => snapshotRetentionAfter(transition) === "discard")
+    .map(({ authorityDigest }) => authorityDigest);
   return Object.freeze([...new Set(settled)]);
 }
 

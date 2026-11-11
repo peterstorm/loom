@@ -26,7 +26,7 @@ import { semanticAttemptReceipt } from "../fixtures/implementation-settlement";
 import {
   distillTaskFixture,
   graphFixture,
-  taskFixture,
+  siblingTaskFixture,
   type DistillTaskFixtureInput,
   type TaskFixtureInput,
 } from "../fixtures/task-lifecycle";
@@ -36,9 +36,9 @@ const LIVE = new Date(NOW).toISOString();
 const STALE = "2000-01-01T00:00:00.000Z";
 const observed = (anyActiveForGraph = false) => ({ kind: "observed" as const, observedAtMs: NOW, anyActiveForGraph });
 
-const sibling = (id: string, overrides: Partial<TaskFixtureInput> = {}): Task => taskFixture({
-  id, description: id, agent: "code-implementer-agent", wave: 1, depends_on: [], file_list: [`src/${id}.ts`], ...overrides,
-});
+/** A Wave sibling owning `src/<id>.ts`, the spelling this suite's scopes and messages use. */
+const sibling = (id: string, overrides: Partial<TaskFixtureInput> = {}): Task =>
+  siblingTaskFixture({ id, file_list: [`src/${id}.ts`], ...overrides });
 
 /** The Wave's Distill Task T9 over `scope`; `implemented` settles it on the `unchanged` basis. */
 const distill = (scope: readonly string[], overrides: Partial<DistillTaskFixtureInput> = {}): Task =>

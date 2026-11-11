@@ -1,7 +1,8 @@
 /**
  * Skeletons and a Distill Task (ADR-0068 §9): it holds no export binding, so
- * `skeletonOutcomesOf` never reports `skeleton-written` for it and the planner
- * derives no write. That its recorded outcomes load is proven against a real
+ * `skeletonOutcomesOf` never reports `skeleton-written` for it, reports
+ * `absent-no-skeleton-owed` where a holder would be written one, and the
+ * planner derives no write. That its recorded outcomes load is proven against a real
  * State File in `handlers/task-execution-distill-skeletons.test.ts`.
  */
 import fc from "fast-check";
@@ -9,12 +10,13 @@ import { describe, expect, it } from "vitest";
 import { DISTILL_AGENT } from "../../src/core/model-profiles";
 import { productionFiles, skeletonHolderFiles } from "../../src/core/skeleton/graph-view";
 import { skeletonLanguageOf } from "../../src/core/skeleton/language";
-import { skeletonOutcomesOf } from "../../src/core/skeleton/outcomes";
+import { renderSkeletonOutcome, skeletonOutcomesOf } from "../../src/core/skeleton/outcomes";
 import type { ExportBinding, PathObservation, PathSkeletonOutcome, SkeletonRecord } from "../../src/core/skeleton/types";
 import { planTaskSkeletons } from "../../src/orchestration/skeleton-materialization";
 import type { TaskGraph } from "../../src/types";
 import { observationArb, SHAS } from "../fixtures/skeleton-arbitraries";
 import { binding, unwrap } from "../fixtures/skeleton-builders";
+import { OUTCOME_TEXT } from "../fixtures/skeleton-repo";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 
 const pathArb = fc.tuple(
@@ -75,7 +77,7 @@ describe("skeletonHolderFiles", () => {
 });
 
 describe("a Distill Task's skeleton outcomes", () => {
-  it("property: never skeleton-written; a present path exists; an absent path keeps the holder's reason or has no outcome", () => {
+  it("property: exactly one outcome per production path, never skeleton-written; a present path exists; an absent path keeps the holder's reason or is owed no skeleton", () => {
     fc.assert(fc.property(scenarioArb, (raw) => {
       const { graph, files, bound, observations } = build(raw);
       const distill = new Map(outcomesOf(graph, "T9", observations).map(({ path, outcome }) => [path, outcome] as const));
@@ -87,15 +89,27 @@ describe("a Distill Task's skeleton outcomes", () => {
         if (observation.kind === "present") {
           expect(outcome).toEqual({ kind: "exists-not-skeletonized" });
         } else if (bound.has(path) && skeletonLanguageOf(path).kind === "supported") {
-          // A holder would be given a Skeleton here; a Distill Task is given nothing, and says nothing.
+          // A holder would be given a Skeleton here; a Distill Task is given nothing, and says so.
           expect(holder.get(path)).toEqual({ kind: "skeleton-written", origin: "spawn" });
-          expect(outcome).toBeUndefined();
+          expect(outcome).toEqual({ kind: "absent-no-skeleton-owed" });
         } else {
           expect(outcome).toEqual(holder.get(path));
         }
       }
-      expect([...distill.keys()]).toEqual(files.filter((path) => distill.has(path)));
+      expect(outcomesOf(graph, "T9", observations).map(({ path }) => path)).toEqual(productionFiles(graph, graph.tasks[1]!));
+      expect([...holder.values()].some(({ kind }) => kind === "absent-no-skeleton-owed")).toBe(false);
     }), { numRuns: 300 });
+  });
+
+  it("a bound path a sibling deleted is absent with no skeleton owed, where its holder is written one", () => {
+    const { graph, observations } = build({
+      files: ["src/A.ts"], boundMask: [true, false, false, false, false, false, false, false],
+      recordMask: [null, null, null, null, null, null, null, null],
+      observed: [undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined],
+    });
+    expect(outcomesOf(graph, "T2", observations)).toEqual([{ path: "src/A.ts", outcome: { kind: "skeleton-written", origin: "spawn" } }]);
+    expect(outcomesOf(graph, "T9", observations)).toEqual([{ path: "src/A.ts", outcome: { kind: "absent-no-skeleton-owed" } }]);
+    expect(renderSkeletonOutcome({ kind: "absent-no-skeleton-owed" })).toBe(OUTCOME_TEXT.absentNoSkeletonOwed);
   });
 
   it("property: the planner derives no write for it, whatever is on disk", () => {

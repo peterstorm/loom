@@ -3,11 +3,16 @@ import { StateManager } from "../../state-manager";
 import { taskGraphPath } from "../../config";
 import { newWaveGate, reconcileWaveBlock } from "../../core/wave-gate-model";
 import { parseTaskId } from "../../core/task-id";
-import { nonEmpty } from "../../core/orchestration-contract";
-import { returnToRevalidation, revalidationTargets, sweptAmongReturned } from "../../core/task-revalidation";
+import {
+  exactRevalidationTargets,
+  reopenedTaskIdsOf,
+  returnedTaskIds,
+  returnToRevalidation,
+  revalidationTargets,
+} from "../../core/task-revalidation";
 import { observeReviewedWorkspace } from "./reviewed-workspace";
 import { openRunDirectory } from "../../orchestration/run-directory-handle";
-import { readWaveReviewContext, waveReviewedTasks, type WaveReviewContextAuthority } from "../../core/wave-review-authority";
+import { readWaveReviewContext, waveReviewView, type WaveReviewContextAuthority } from "../../core/wave-review-authority";
 import type { HookHandler, Task, TaskGraph, WaveReopeningAudit } from "../../types";
 
 const USAGE = "Usage: helper reopen-completed-wave --runs-root <root> < exact-reopening.json";
@@ -65,7 +70,7 @@ function exactIds(left: readonly string[], right: readonly string[]): boolean {
  * it is wholly untouched: any reservation, implementation, test/proof, review,
  * packet, finding, recovery, retry, or execution evidence blocks reopening.
  * Population-time proof-boundary stamps (start_sha and artifact_baseline) are
- * planning provenance, not Task progress: sanitizeTask stamps them on every
+ * planning provenance, not Task progress: populatedTask stamps them on every
  * roster Task before any work exists, so they must not refuse a documented
  * completed-Wave reopen. */
 export function hasLaterWaveTaskProgress(task: Task, executingTaskIds: readonly string[]): boolean {
@@ -127,7 +132,7 @@ export function deriveWaveReopeningProof(
   if (everyWaveTask.length === 0 || everyWaveTask.some((task) => task.status !== "completed")) {
     throw new Error("reopening requires every Task in the completed Wave to remain completed");
   }
-  const waveTasks = waveReviewedTasks(everyWaveTask);
+  const waveTasks = waveReviewView(everyWaveTask).reviewed;
   const authorities = waveTasks.map((task) => {
     const taskAuthority = taskContexts(task, request, contexts);
     if (taskAuthority.length === 0) {
@@ -138,7 +143,7 @@ export function deriveWaveReopeningProof(
   if (authorities.some((entries) => entries.some(({ taskRun }) => taskRun.workspaceHeadSha === undefined))) {
     return Object.freeze({
       mode: "legacy-workspace-authority-unverifiable",
-      taskIds: revalidationTargets(graph.tasks, waveTasks.map(({ id }) => id)).taskIds,
+      taskIds: returnedTaskIds(revalidationTargets(graph.tasks, waveTasks.map(({ id }) => id))),
     });
   }
 
@@ -173,7 +178,7 @@ export function deriveWaveReopeningProof(
   const drifted = waveTasks.flatMap((task) => observations.get(task.id) !== expected.get(task.id) ? [task.id] : []);
   return Object.freeze({
     mode: "modern-exact-workspace-drift",
-    taskIds: revalidationTargets(graph.tasks, drifted).taskIds,
+    taskIds: returnedTaskIds(revalidationTargets(graph.tasks, drifted)),
   });
 }
 
@@ -210,7 +215,6 @@ export function reopenCompletedWave(
     throw new Error("reopening proof requires every Task in the completed Wave to remain completed");
   }
   const waveTaskIds = new Set(waveTasks.map(({ id }) => id));
-  if (proof.taskIds.length === 0) throw new Error("reopening proof requires at least one completed-Wave Task ID");
   if (new Set(proof.taskIds).size !== proof.taskIds.length) {
     throw new Error("reopening proof Task IDs must be unique");
   }
@@ -220,13 +224,16 @@ export function reopenCompletedWave(
       `reopening proof Task ${foreignProofTask} does not belong to completed Wave ${request.wave}`,
     );
   }
-  // The engine-derived proof already names the Wave's Distill Task with any
-  // sibling; a hand-built proof that leaves it standing is refused, never swept
-  // silently past the operator's exact payload.
-  const unswept = revalidationTargets(graph.tasks, proof.taskIds).sweptDistillTaskIds;
-  if (unswept.length > 0) {
-    throw new Error(`reopening proof must also name the Wave's Distill Task ${unswept.join(", ")}: re-implemented code is distilled again`);
+  // The proof is the whole returned set. The engine-derived one already names
+  // the Wave's Distill Task with any sibling; a hand-built proof that leaves it
+  // standing is refused, never swept silently past the operator's exact payload.
+  const returned = exactRevalidationTargets(graph.tasks, proof.taskIds);
+  if (!returned.ok) {
+    throw new Error(`reopening proof must also name the Wave's Distill Task ${returned.error.join(", ")}: re-implemented code is distilled again`);
   }
+  // Every proof id is a Task of the Wave, so the proof returns none only when it names none.
+  const reopenedIds = reopenedTaskIdsOf(returned.value);
+  if (reopenedIds === null) throw new Error("reopening proof requires at least one completed-Wave Task ID");
   const completed = (graph.wave_gate_history ?? []).find((entry) => entry.runId === request.runId);
   if (completed === undefined || completed.wave !== request.wave || completed.authorityDigest !== request.authorityDigest) {
     throw new Error("reopening requires the exact completed run/wave/authority receipt");
@@ -234,7 +241,6 @@ export function reopenCompletedWave(
   if (!exactIds(request.taskIds, proof.taskIds)) {
     throw new Error(`reopening taskIds must exactly equal engine-derived ${proof.mode}: ${proof.taskIds.join(", ") || "none"}`);
   }
-  const swept = nonEmpty(sweptAmongReturned(graph.tasks, proof.taskIds));
   const audit: WaveReopeningAudit = Object.freeze({
     schemaVersion: 1,
     kind: "completed-wave-reopened-for-review-integrity",
@@ -243,10 +249,9 @@ export function reopenCompletedWave(
     wave: completed.wave,
     authorityDigest: completed.authorityDigest,
     completionReceipt: completed.completionReceipt,
-    reopenedTaskIds: Object.freeze([...proof.taskIds]),
     // The payload names the Distill Task too, so the audit says which ids
     // returned with a sibling and were never judged by the proof itself.
-    ...(swept === null ? {} : { sweptDistillTaskIds: swept }),
+    ...reopenedIds,
   });
   const tasks = graph.tasks.map((task) => proof.taskIds.includes(task.id) ? returnToRevalidation(task, graph.verification_manifest) : task);
   const gate = {

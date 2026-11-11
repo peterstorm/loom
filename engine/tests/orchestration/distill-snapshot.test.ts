@@ -315,4 +315,38 @@ describe("refusals are values", () => {
       chmodSync(join(root, "locked"), 0o755);
     }
   });
+
+  it("fails a restore that cannot remove a directory the attempt created, rather than reporting the scope restored", () => {
+    const root = repository({ "pkg/keep.ts": "keep\n" });
+    expectOk(gitDistillSnapshots.capture(root, DIGEST, ["pkg"]));
+    write(root, "pkg/made/deep/new.ts", "new\n");
+    // `deep` empties, and its parent refuses to let it go.
+    chmodSync(join(root, "pkg/made"), 0o555);
+    try {
+      const restored = gitDistillSnapshots.restore(root, DIGEST, ["pkg"]);
+      // Root ignores directory permissions; everyone else gets the typed failure.
+      if (process.getuid?.() === 0) {
+        expect(restored.ok).toBe(true);
+        expect(existsSync(join(root, "pkg/made"))).toBe(false);
+      } else {
+        expect(restored).toMatchObject({
+          ok: false, error: { kind: "scope-path-failed", path: "pkg", detail: expect.stringMatching(/EACCES|EPERM/) },
+        });
+        expect(existsSync(join(root, "pkg/made/deep"))).toBe(true);
+      }
+    } finally {
+      chmodSync(join(root, "pkg/made"), 0o755);
+    }
+  });
+
+  it("stops at a directory that still holds something, which is no failure", () => {
+    const root = repository({ "pkg/keep.ts": "keep\n", "pkg/made/kept.ts": "kept\n" });
+    expectOk(gitDistillSnapshots.capture(root, DIGEST, ["pkg"]));
+    write(root, "pkg/made/deep/new.ts", "new\n");
+
+    expectOk(gitDistillSnapshots.restore(root, DIGEST, ["pkg"]));
+
+    expect(existsSync(join(root, "pkg/made/deep"))).toBe(false);
+    expect(read(root, "pkg/made/kept.ts")).toBe("kept\n");
+  });
 });

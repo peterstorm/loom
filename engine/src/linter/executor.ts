@@ -17,7 +17,6 @@ import {
   type Violation,
   hasFirstCallSetup,
   isRegexRule,
-  isProgrammaticRule,
   makeViolation,
 } from "./types";
 import { analyzeRegex } from "./safety";
@@ -71,7 +70,7 @@ export function executeRules(
   // The order the deadline needs is decided HERE, beside the deadline, not by
   // whoever assembled the list: a rule with first-call setup (see
   // `ProgrammaticRule.firstCallSetup`) runs after every rule without one.
-  const withSetup = matchingRules.filter(isProgrammaticRule).filter(hasFirstCallSetup);
+  const withSetup = matchingRules.filter(hasFirstCallSetup);
   const violations = matchingRules
     .filter((rule) => !hasFirstCallSetup(rule))
     .flatMap((rule) => isRegexRule(rule)

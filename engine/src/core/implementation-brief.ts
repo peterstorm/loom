@@ -31,7 +31,7 @@ import {
   type VerificationPolicy,
   type VerificationRequirement,
 } from "./verification-policy";
-import { isDistillTask } from "./distill-task";
+import { taskRoleOf, type TaskRole } from "./distill-task";
 import { match } from "ts-pattern";
 import { invariantRoles, type OwnedInvariant } from "./plan-paths";
 import { contractTaskIdsOf, duePaths, owesInWave, type TaskOwnerDuty } from "./owner-verification/obligations";
@@ -357,7 +357,10 @@ function distillRoleLines(fileList: readonly string[], ownership: OwnedInvariant
 
 /** The role lines a Task's brief shows for one family: an implementer's roles, or a Distill Task's one. */
 const familyRoleLines = (task: Task, ownership: OwnedInvariant): readonly string[] =>
-  isDistillTask(task) ? distillRoleLines(task.file_list ?? [], ownership) : roleLines(task.file_list ?? [], ownership);
+  match(taskRoleOf(task))
+    .with("authored", () => roleLines(task.file_list ?? [], ownership))
+    .with("distill", () => distillRoleLines(task.file_list ?? [], ownership))
+    .exhaustive();
 
 /** One owned Invariant's block: its statement, the Task's roles, then the whole family, so a sibling sees its owner and its peers. */
 function familyBlock({ id, title, statement, ownership }: OwnedFamily, roles: readonly string[]): string {
@@ -440,15 +443,25 @@ function coverageTargets({ invariant, owner, siblings }: OwnerObligation, dueSib
  * changed lines, or the declared exemption. A contract Task's stub owes
  * neither, so its brief says when verification starts instead; a Wave the
  * gate does not owe (`owesInWave`) is told so before the duties it will owe.
+ * A Distill Task owes none of them and is told what its moves are judged by
+ * (`distillOwnerNote`).
  */
-function ownerDuties(obligation: OwnerObligation, { task, roster, contractTaskIds }: DutySchedule): string {
-  const { invariant, owner, siblings, matrixTest, mutation } = obligation;
-  if (contractTaskIds.has(task.id)) {
+function ownerDuties(obligation: OwnerObligation, schedule: DutySchedule): string {
+  const { invariant } = obligation;
+  if (schedule.contractTaskIds.has(schedule.task.id)) {
     return `**Owner duties (${invariant}):** none in this Wave. You are a contract Task, so your change to this family is a ` +
       `compiling stub, and a stub owes no owner verification. The Wave Gate verifies ${invariant} from the first Wave in which ` +
       "an implementation Task changes its owner or a sibling.";
   }
-  if (isDistillTask(task)) return distillOwnerNote(obligation);
+  return match(taskRoleOf(schedule.task))
+    .with("authored", () => implementerOwnerDuties(obligation, schedule))
+    .with("distill", () => distillOwnerNote(obligation))
+    .exhaustive();
+}
+
+/** The coverage and mutation duties of an implementation Task that is no contract Task. */
+function implementerOwnerDuties(obligation: OwnerObligation, { task, roster, contractTaskIds }: DutySchedule): string {
+  const { invariant, owner, siblings, matrixTest, mutation } = obligation;
   const due = new Set(duePaths(roster, task.wave, obligation));
   const quotedSiblings = (isDue: boolean): readonly string[] =>
     siblings.filter(({ path }) => due.has(path) === isDue).map(({ path }) => quoted(path));
@@ -620,15 +633,19 @@ export const NO_PRODUCTION_FILES = "None — this Task owns no production file, 
 /** Literal substituted for `{frozen_signatures}` when the observed TaskGraph does not hold the Task. */
 export const TASK_NOT_OBSERVED = "None — the TaskGraph its skeletons were observed in does not hold this Task, so it has no skeleton outcome.";
 
-const FROZEN_SIGNATURES_LEAD =
-  "Each production file you own, with its skeleton outcome and the exports bound to it. An outcome not yet recorded is what the " +
-  "engine does when it registers this attempt: it writes each missing bound skeleton before your attempt starts, may refresh a " +
-  "skeleton that is still the engine's untouched bytes, and never modifies a file you or anyone else has changed.";
-
-/** The section's lead for a Distill Task (ADR-0068): the files are its scope, not its work, and their skeletons are filled. */
-const DISTILL_FROZEN_SIGNATURES_LEAD =
-  "Each production file in your scope, with its skeleton outcome and the exports bound to it. The Tasks that own these files " +
-  "implemented them before your pass, so an outcome here is a record of what the file is, never a skeleton for you to fill.";
+/**
+ * The section's lead by Task role. A Distill Task's files (ADR-0068) are its
+ * scope, not its work, and their skeletons are filled.
+ */
+const FROZEN_SIGNATURES_LEADS: Readonly<Record<TaskRole, string>> = {
+  authored:
+    "Each production file you own, with its skeleton outcome and the exports bound to it. An outcome not yet recorded is what the " +
+    "engine does when it registers this attempt: it writes each missing bound skeleton before your attempt starts, may refresh a " +
+    "skeleton that is still the engine's untouched bytes, and never modifies a file you or anyone else has changed.",
+  distill:
+    "Each production file in your scope, with its skeleton outcome and the exports bound to it. The Tasks that own these files " +
+    "implemented them before your pass, so an outcome here is a record of what the file is, never a skeleton for you to fill.",
+};
 
 const renderFrozenAdt = (adt: FrozenAdt): string =>
   match(adt)
@@ -661,14 +678,17 @@ function frozenSignatureRules(task: Task, bindings: readonly ExportBinding[]): s
   const aliases = [...new Set(bindings.flatMap(({ exports }) => exports.map(({ alias }) => alias)))];
   const frozen = `**Frozen signatures.** The bound exports' signatures are frozen: keep each export's name, typed by its frozen ` +
     `alias (${aliases.map(quoted).join(", ")}) from its contract's types file; never rename, delete or re-type one.`;
-  return isDistillTask(task)
-    ? `${frozen} The Tasks that own these files already replaced every skeleton body: simplify a body, never its signature. ` +
-      "Settlement refuses a deleted, renamed or retyped bound export (`declared-artifact-contract-violated`), and the engine " +
-      "then restores your edits."
-    : `${frozen} Each skeleton ` +
+  return match(taskRoleOf(task))
+    .with("authored", () =>
+      `${frozen} Each skeleton ` +
       "body throws its `unimplemented: <name>` marker: replace every body, and remove every `unimplemented: <name>` marker — none " +
       "may remain at completion. Settlement refuses a deleted, renamed, retyped or still-unimplemented bound export " +
-      "(`declared-artifact-contract-violated`).";
+      "(`declared-artifact-contract-violated`).")
+    .with("distill", () =>
+      `${frozen} The Tasks that own these files already replaced every skeleton body: simplify a body, never its signature. ` +
+      "Settlement refuses a deleted, renamed or retyped bound export (`declared-artifact-contract-violated`), and the engine " +
+      "then restores your edits.")
+    .exhaustive();
 }
 
 /** The stage-two problems of the Task's bindings (AS-051): registration refuses its spawn until each is repaired. */
@@ -734,7 +754,7 @@ function stampedFrozenSignatures(task: Task, { graph, observations, surfaces, un
     return [`- ${quoted(path)} — ${renderSkeletonOutcome(outcome)}${flag === undefined ? "" : `; ${renderStaleSkeleton(flag)}`}`, ...exports];
   });
   return [
-    isDistillTask(task) ? DISTILL_FROZEN_SIGNATURES_LEAD : FROZEN_SIGNATURES_LEAD,
+    FROZEN_SIGNATURES_LEADS[taskRoleOf(task)],
     fileLines.join("\n"),
     ...paragraphs,
     ...(unresolved.length === 0 ? [] : [unresolvedBindingsParagraph(unresolved)]),

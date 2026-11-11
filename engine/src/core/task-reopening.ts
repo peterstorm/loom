@@ -31,6 +31,7 @@ import { parseTaskId, type TaskId } from "./task-id";
 import { deriveTaskImplementationDispatch } from "./task-implementation-dispatch";
 import {
   reopenableWave,
+  reopenedTaskIdsOf,
   returnWaveTasksToRevalidation,
   type ReopenableWave,
   type WaveReopeningRefusal,
@@ -206,26 +207,6 @@ function targetRefusal(graph: TaskGraph, request: TaskReopeningRequest): DomainR
 }
 
 /**
- * The audited ids of one reopening: every Task the transition returned, named
- * and swept, in TaskGraph order, so one reopening has one canonical audit
- * whatever order the operator named. `returned` holds every named Task once
- * `targetRefusal` passed; were it to hold none, the operator's ids are kept
- * rather than an empty list.
- */
-function auditedTaskIds(named: NonEmpty<TaskId>, returned: readonly string[]): NonEmpty<TaskId> {
-  return taskIdsOf(returned) ?? named;
-}
-
-/** The Task ids among `ids`, in order, or null when there is none. */
-function taskIdsOf(ids: readonly string[]): NonEmpty<TaskId> | null {
-  const [first, ...rest] = ids.flatMap((id) => {
-    const parsed = parseTaskId(id);
-    return parsed.ok ? [parsed.value] : [];
-  });
-  return first === undefined ? null : Object.freeze([first, ...rest] as const);
-}
-
-/**
  * Reopen implemented Tasks of the active Wave for re-implementation, or
  * refuse with the exact precondition that failed: the shared Wave-reopening
  * precondition (`reopenableWave`), then this operation's own Wave and target
@@ -245,13 +226,18 @@ export function reopenImplementedTasks(
   if (refusal !== null) return refusal;
 
   const reopened = returnWaveTasksToRevalidation(reopenable.value, request.taskIds);
-  const swept = taskIdsOf(reopened.returned.sweptDistillTaskIds);
+  // The audited ids are every Task the transition returned, named and swept,
+  // in TaskGraph order, so one reopening has one canonical audit whatever
+  // order the operator named. The transition returns none only when no named
+  // id is a Task of the roster, which `targetRefusal` has already refused in
+  // these words; the branch is the narrowing the type needs, not a second rule.
+  const reopenedIds = reopenedTaskIdsOf(reopened.returned);
+  if (reopenedIds === null) return refuse("unknown-task", `${request.taskIds[0]} is not a Task of this TaskGraph`);
   const audit: TaskReopeningAudit = freeze({
     schemaVersion: 1,
     kind: "implemented-tasks-reopened",
     wave: request.wave,
-    reopenedTaskIds: auditedTaskIds(request.taskIds, reopened.returned.taskIds),
-    ...(swept === null ? {} : { sweptDistillTaskIds: swept }),
+    ...reopenedIds,
     reason: request.reason,
     abandonedRunId: reopenable.value.abandonedRunId,
   });

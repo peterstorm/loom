@@ -189,7 +189,8 @@ describe("readTsTypesSurface: frozen ADTs", () => {
     expect(surface.adts).toContainEqual({ kind: "brand", name: "ContractId" });
     const outcomes = surface.adts.find((adt): adt is Extract<FrozenAdt, { kind: "discriminated-union" }> =>
       adt.kind === "discriminated-union" && adt.name === "SkeletonOutcome");
-    expect(outcomes?.tags).toHaveLength(5);
+    expect(outcomes?.tags).toHaveLength(6);
+    expect(outcomes?.tags).toContain("absent-no-skeleton-owed");
   });
 });
 
