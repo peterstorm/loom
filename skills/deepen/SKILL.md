@@ -93,7 +93,7 @@ Once the user picks a candidate, walk its design tree depth-first:
 
 Record decisions as they land, never in a batch at the end:
 
-- A new domain concept, or a fuzzy term sharpened: update `CONTEXT.md` (format: [CONTEXT-FORMAT.md](../grill/references/CONTEXT-FORMAT.md)).
+- A new domain concept, or a fuzzy term sharpened: update `CONTEXT.md`, or the context file `CONTEXT-MAP.md` lists for that area when a map exists (format: [CONTEXT-FORMAT.md](../grill/references/CONTEXT-FORMAT.md)).
 - The user rejects a candidate for a load-bearing reason: offer an ADR, but only when a future explorer would re-suggest the refactor without it.
 
 ### 4. Interface Design (optional)

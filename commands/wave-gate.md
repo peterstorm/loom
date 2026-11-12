@@ -91,6 +91,12 @@ and nothing is recorded. Approval lets the gate continue past its advisories to
 lint and completion. To act on an advisory (or a surviving critical) instead, do
 not decide: follow [Acting on a Finding](#acting-on-a-finding).
 
+Classify every advisory before approving. Relevant (in scope for the Task,
+actionable, consistent with project conventions): fix through Acting on a
+Finding. Not relevant (out-of-scope refactor, contradicts a project convention,
+false positive, deliberately deferred): record a one-line reason. Every advisory
+ends fixed, deferred (reason) or dismissed (reason).
+
 At a contract Wave's pause, read `helper orchestration status` before deciding.
 An `acceptance-freeze-pending` reason names every advisory on a file this
 gate's Acceptance Freeze stamps when it completes. Receipt installation does not
@@ -205,7 +211,7 @@ authority with its stale review epoch and spec-check scope. Task
 implementation and review evidence and completed history survive. Missing,
 unreadable, foreign, changed, non-abandoned or superseded authority is refused.
 After success, start a fresh Wave Gate normally; never clear protected fields by
-hand. See `docs/operations.md` for the ownership JSON contract.
+hand. See `docs/reference/recovery.md` for the ownership JSON contract.
 
 ## Restarting an exhausted reviewer run
 

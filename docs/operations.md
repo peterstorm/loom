@@ -1,10 +1,11 @@
 # Operating Loom
 
-This guide covers status, the Run Directory protocol, protected state, the rules gate, and what to do when an orchestration stops. For lifecycle semantics, read [Workflows](workflows.md); for module boundaries, read [Architecture](architecture.md).
+This guide covers status, the Run Directory protocol, protected state, the rules gate, and what to do when an orchestration stops. For lifecycle semantics, read [Workflows](workflows.md); for module boundaries, read [Architecture](architecture.md). Its sibling files:
 
 | For | Read |
 |---|---|
 | Read-only helpers that print what the engine knows | [Helpers](reference/helpers.md#read-only-helpers) |
+| The commands that change protected state to recover a run | [Recovery operations](reference/recovery.md) |
 | The verification manifest, stop checks, owner verification, the distill pass, Acceptance Contracts and skeletons | [Verification](verification.md#verification) |
 | The reviewer protocol, standalone lineage, the plan design review and remediation | [Standalone review](standalone-review.md#standalone-review-and-the-reviewer-protocol) |
 | Validating and changing Loom itself | [Development](development.md#developing-loom) |
@@ -50,7 +51,7 @@ Unreadable or malformed authority is represented as `unavailable` and leads to `
 
 Status re-proves accepted Review Packet authority the way the Wave Gate does: it reads each reviewed Task's declared bytes in the TaskGraph's own project and compares them with the reviewed snapshot. While a gate waits on an advisory decision, unchanged bytes therefore read as intact, and only real drift or a Git observation failure fails the `Review Packet workspace integrity` prerequisite.
 
-Modern completion-suite readiness (`required`, `accepted`, `rejected`, or `stale`) includes `projectVerificationCoverage`. `configured` carries non-empty sorted `checkIds`, not a pass. `not-configured` distinguishes `engine-default` (source absent at population), `empty-operator-manifest` (explicit zero project checks), and `historical-unknown` (archived reserved-only receipt without source provenance). Reserved-only suites remain eligible to advance when the existing gates pass; report “Reserved checks accepted; Project verification NOT CONFIGURED,” not “project verification passed.” Completed schema-v2 coverage comes from the archived receipt roster, never today's manifest. `legacy-unavailable` remains unavailable without invented coverage. These are read-model facts, not new persisted authority or waivers.
+Population reports coverage immediately. Modern completion-suite readiness (`required`, `accepted`, `rejected`, or `stale`) includes `projectVerificationCoverage`. `configured` carries non-empty sorted `checkIds`, not a pass. `not-configured` distinguishes `engine-default` (source absent at population), `empty-operator-manifest` (explicit zero project checks), and `historical-unknown` (archived reserved-only receipt without source provenance). Reserved-only suites remain eligible to advance when the existing gates pass; report “Reserved checks accepted; Project verification NOT CONFIGURED,” not “project verification passed.” Completed schema-v2 coverage comes from the archived receipt roster, never today's manifest. `legacy-unavailable` remains unavailable without invented coverage. These are read-model facts, not new persisted authority or waivers.
 
 Raw state inspection remains useful for diagnosis, but it is not gate logic:
 
@@ -195,13 +196,14 @@ Find what you see in the first column. An entry that has mechanics of its own is
 | A completed Wave's reviewed bytes drifted | a remediation invalidation was missed | [Reopen the completed Wave](reference/recovery.md#completed-wave-has-post-review-workspace-integrity-loss) |
 | Pi refuses a mutation for runtime version skew | the loaded extension and the checkout differ | [Reload](#pi-reports-runtime-version-skew) |
 | `populate-task-graph` refuses the spec or a Requirement id | the authored trace cannot be proved against the Spec Index | [Population refuses](#population-refuses-the-spec-or-a-requirement-id) |
+| Status is blocked: `the execute Phase holds no Tasks` | an older engine left the graph at `execute` without installing the approved Tasks | [The execute Phase holds no Tasks](#the-execute-phase-holds-no-tasks) |
 | The load boundary directs a repair | the State File is malformed | [State is malformed](#state-is-malformed) |
 
 ### Task remains `pending`
 
 - If its Agent is still in `executing_tasks`, wait or diagnose a hang.
 - If the Agent crashed, SubagentStop/cleanup clears execution attribution; respawn the exact Task.
-- If proof is unsatisfied, inspect `proof.obligations` rather than trusting completion prose.
+- If proof is unsatisfied, inspect `proof.obligations` rather than trusting completion prose. How an attempt is checked, settled and retried is in [Implementation attempts and settlement](verification.md#implementation-attempts-and-settlement).
 - The settlement line (`Task T1 settlement: …` on Claude Code, `loom(pi): T1 settlement: …` on Pi) and the Task's `failure_reason` both say why a failed attempt was not implemented. A `task-byte-scope-violation` names the paths written outside the Task's declared files: the first 10, then `and N more`. Remove stray files that are not the Task's work, such as a killed test run's leftovers, before the retry, or that retry fails the same way.
 - An `infrastructure-blocked` settlement names each failure's own reason in parentheses (a longer reason is cut to its first 1,000 characters followed by `…`), for example `implementation-observation-unavailable (Claude JSONL transcript record 16 is malformed or truncated: …)`. A reason that repeats an earlier one is named once. Infrastructure blocks never use up the retry: fix the named cause, then dispatch what `orchestration status` lists.
 - Claude Code writes harness records into a subagent transcript beside the conversation: `attachment`, `system`, and request telemetry (`api-request`, `api-request-shape`, `api-request-blob`). An `api-request-blob` carries a copy of earlier turns, sometimes with a `system` role. Only `user` and `assistant` records are read as the agent's activity (`core/claude-record-kind.ts`). Harness records are accepted without reading their message and never count as written files, test output or tool results. A transcript that a strict check still refuses names the exact record in its reason.
@@ -219,7 +221,7 @@ A Task owes the red-then-green obligation (I6) when it requires new tests, is ne
 2. then its first write to an implementation file;
 3. then a qualifying green covering every one of its test files.
 
-A qualifying run is a ledger `TestRun` with an exit code and a parsed structured report that records per-file results. The obligation, the gaps and the soundness limit are defined in [Deterministic implementation, I6](roadmap.md#during-the-loop--put-the-oracle-inside-the-agents-iteration).
+A qualifying run is a ledger `TestRun` with an exit code and a parsed structured report that records per-file results. What a run must be, the green rule and the order of the gaps are in [Red-then-green (I6): what a run must be](verification.md#red-then-green-i6-what-a-run-must-be); the soundness limit is in [Guarded Skill Machines](../machines/README.md#known-residual-limits).
 
 A failure reads `proof:red-then-green-unproven:<gap>` in the settlement line and in the retry receipt. Each gap points to a likely cause:
 
@@ -229,7 +231,7 @@ A failure reads `proof:red-then-green-unproven:<gap>` in the settlement line and
 - `red-missing` with `untrustedOnly: false`: qualifying runs exist, but none shows red on a Task test file. Either the tests never failed, or they only failed to collect in a Task that creates no implementation file. A collection or import error is red only when the Task creates an implementation file, meaning one whose Task-level `artifact_baseline` entry is `missing`. The brief names those files.
 - `red-after-first-implementation-write`: the code came before the failing test.
 
-The retry brief tells the agent to return its implementation files to the attempt baseline with one Bash call, observe red, and then implement. The call runs from the repository root and first checks that the baseline is a commit. The baseline is the Task's `start_sha`, or `HEAD` when none was recorded; the brief then says that the uncommitted changes are discarded. The call restores each file the baseline has (`git restore`) and deletes each file the Task created (`rm -f`). If the baseline is not a commit, it fails before changing anything. A `ledger-unavailable` gap, or an unreadable ledger at settlement, is infrastructure. It does not use up the semantic attempt.
+The retry brief tells the agent to return its implementation files to the attempt baseline with one Bash call, observe red, and then implement. The call runs from the repository root and first checks that the baseline is a commit. The baseline is the Task's `start_sha`, or `HEAD` when none was recorded; the brief then says that the uncommitted changes are discarded. The call restores each file the baseline has (`git restore`) and deletes each file the Task created (`rm -f`). If the baseline is not a commit, it fails before changing anything. Neither the restore nor the delete mints a `FileWrite`. A `ledger-unavailable` gap, or an unreadable ledger at settlement, is infrastructure. It does not use up the semantic attempt.
 
 To see the facts settlement judged, numbered the way the gap and the stored evidence cite them, read the attempt's epoch (see [Reading an attempt's ledger epoch](reference/helpers.md#reading-an-attempts-ledger-epoch)). For the I6 judgment itself, use [`helper red-then-green-status`](reference/helpers.md#where-does-a-task-stand-on-i6).
 
@@ -276,6 +278,8 @@ A missing handshake means the Pi session predates this protocol or did not load 
 
 ### Wave Gate full-tier lint refuses imports the branch allows
 
+Full-tier lint is the reserved `loom:full-tier-lint` suite check. During migration, the existing terminal lint invocation also remains as a fail-closed canary.
+
 The Wave Gate's `loom:full-tier-lint` check runs against the branch's files (the completion suite changes into the worktree), but the lint rule code is the loaded runtime's, not the branch's. A branch that changes a rule, for example a new per-file capability grant in `no-cross-boundary-imports` for a `node:` builtin or an exact-specifier package, therefore fails the gate with a boundary refusal that its own rule would admit. The branch's files are correct; the runtime is older.
 
 This is the Runtime Revision design working as intended: infrastructure the gate depends on must be loaded before the gate can use it. Land the rule change on the checkout Loom is installed from (merge it, or port it there), run `/reload` (or restart Pi), then start a fresh Wave Gate. Do not weaken the branch's imports or its rules to get past the check.
@@ -291,6 +295,10 @@ The refusal names this case itself. When the full-tier lint fails, the gate's di
 - any Requirement trace when the plan has no `spec_file`.
 
 Fix the specification or the decompose output and re-run population. The rule is the one `amend-spec-trace` applies to added ids (`unprovenRequirementTrace`), so an id population admits is one the Implementation Brief can render.
+
+### The execute Phase holds no Tasks
+
+`populate-task-graph` atomically installs the validated graph. That install is the only way out of `decompose`: the decompose agent finishing leaves the phase alone, and population moves it to `execute` in the same write, so `execute` never holds an empty TaskGraph. `helper set-phase` cannot enter `execute` either, so its loop-back cannot strand an empty graph there. Status reports a graph an older engine left at `execute` with no Tasks as blocked, and names both recoveries: populate the approved graph, or return to `decompose`.
 
 ### State is malformed
 

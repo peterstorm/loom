@@ -7,7 +7,7 @@ directory holds, what each operation refuses, and what to do with the result.
 
 For the method — enumerating units, lenses, sandbox evidence, the finding
 trichotomy — read `skills/security-audit/SKILL.md`. For why the program is code
-rather than prose, read `docs/deterministic-core.md` §8 and ADR-0066.
+rather than prose, read [Guarantees and honest limits](architecture.md#guarantees-and-honest-limits) and ADR-0066.
 `/security-audit` (`commands/security-audit.md`) starts the same workflow and
 adds the parent session's duties. The operations table below is the only one,
 and a test binds it to the traits table the engine routes on.
@@ -277,9 +277,9 @@ verifier attempt, never swept), `verify --from` requires it for every ballot,
 and `findings`/`status`/`publish` re-prove every ballot `verdicts.json` caches.
 
 This section is the one statement of the ADR-0067 guard and import-gate
-contract. `docs/operations.md`, `docs/architecture.md` and
-`docs/deterministic-core.md` point here and repeat only the invariant they rely
-on; an amendment edits this section.
+contract. `docs/operations.md` and `docs/architecture.md`
+(`architecture.md#guarantees-and-honest-limits`) point here and repeat only the
+invariant they rely on; an amendment edits this section.
 
 **Pi's import gate.** On Pi, the parent's `helper security-audit verify --from
 <run>` is checked before it runs, by the same proof `verify --from` itself runs

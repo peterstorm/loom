@@ -43,7 +43,7 @@ It prints suggested anchors with confidence scores:
 
 Assign partial work to `spec_contributions`, and each Requirement to `spec_anchors` only on its culminating Task and Wave. The validator refuses overlap, duplicate entries, more than one completion Wave, a Requirement with no completion owner, and a Contribution after completion.
 
-Once Tasks are populated, correct a wrong Completion Claim or Contribution with `helper amend-spec-trace` (`docs/operations.md`, "Amending a v2 Requirement trace"), never by re-running `populate-task-graph --force`.
+Once Tasks are populated, correct a wrong Completion Claim or Contribution with `helper amend-spec-trace` (`docs/reference/recovery.md`, "Amending a v2 Requirement trace"), never by re-running `populate-task-graph --force`.
 
 ## 4c. User approval
 

@@ -121,14 +121,11 @@ Typical guidance is 8–12 Tasks, 4–5 Waves, and 4–6 parallel Tasks per Wave
 
 ### Verification manifest
 
-A project may declare the commands every Wave must pass (build, typecheck, tests) in `.loom/verification-manifest.json`. The file is the operator's, not the decompose agent's:
+A project may declare the commands every Wave must pass (build, typecheck, tests) in `.loom/verification-manifest.json`. The file is the operator's, not the decompose agent's: it is installed before population through `helper write-verification-manifest`, population freezes it into the TaskGraph, and with no manifest the Wave Gate runs only the engine's own checks, such as full-tier lint.
 
-- it is installed before population through `helper write-verification-manifest`, which validates it; a direct write to the guarded path is blocked;
-- population reads those exact bytes and freezes them into the TaskGraph, so changing the file later does not change a run already populated;
-- commands run without a shell, from a bounded list of build and test executables;
-- with no manifest, the Wave Gate runs only the engine's own checks, such as full-tier lint.
+Status and the Wave Gate report which project checks are configured as `projectVerificationCoverage`. "Configured" does not mean "passed": a configured check must still produce accepted evidence at the gate.
 
-Status and the Wave Gate report which project checks are configured as `projectVerificationCoverage`. "Configured" does not mean "passed": a configured check must still produce accepted evidence at the gate. The manifest's fields, the command policy, report requirements and enrollment are in [operations](verification.md#enrolling-a-critical-repair-check).
+[Verification](verification.md#the-verification-manifest) has the keys, the [executable allowlist and argv policy](verification.md#command-policy), [installation](verification.md#installing-the-manifest) and [enrolling a critical-repair check](verification.md#enrolling-a-critical-repair-check).
 
 ### Phase 5: execute
 
@@ -147,7 +144,7 @@ A Wave with implementation files also carries one engine-added Distill Task (`di
 
 **Completion.** A Task reaches `implemented` only when its proof obligations are satisfied and its attempt wrote only files the Task owns. The engine issues each attempt its own authority, so completion prose, a guessed Task id or a late result from an earlier attempt cannot complete a Task. The engine runs no project commands while a Wave's Tasks are still writing: Agents run their Task's tests themselves, and whole-project build, typecheck and test commands run once, at the Wave Gate.
 
-**Retry.** A failed attempt gets one retry. Status publishes the retry's exact context, naming what the first attempt failed, and the spawn gate accepts only those bytes. A second failure is a terminal escalation that an operator must resolve; there is no third attempt. A failure of the infrastructure (an unreadable baseline, a Git error) does not consume the retry. Recovery commands: [operations](reference/recovery.md#implementation-escalation-semantic-attempt-2-exhausted).
+**Retry.** A failed attempt gets one retry. Status publishes the retry's exact context, naming what the first attempt failed, and the spawn gate accepts only those bytes. A second failure is a terminal escalation that an operator must resolve; there is no third attempt. A failure of the infrastructure (an unreadable baseline, a Git error) does not consume the retry. Recovery commands: [operations](reference/recovery.md#implementation-escalation-semantic-attempt-2-exhausted). The attempt and settlement rules: [Implementation attempts and settlement](verification.md#implementation-attempts-and-settlement).
 
 ## Task proof obligations
 

@@ -432,7 +432,7 @@ const traits = (
 ): AgentTraits => Object.freeze({ profile: selectedProfile, kind: agentKind, requiredSkill, transport });
 
 /**
- * The Agent Catalog (see CONTEXT.md): the single declarative registry defining
+ * The Agent Catalog (see docs/contexts/harness/CONTEXT.md): the single declarative registry defining
  * every Loom-owned Agent's identity — kind, model profile, and required Skill.
  * Keyed by name, so a duplicate or double-kinded Agent is unrepresentable.
  * Every agent set, phase map, and policy table elsewhere is a DERIVED

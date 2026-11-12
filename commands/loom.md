@@ -161,17 +161,13 @@ For each Wave, loop on canonical status. Never work out what to spawn from `pend
    - `start-wave-gate`: go to step 3.
    - `start-successor-wave-gate`: go to step 3, and start `/wave-gate` with exactly `recovery.runId` as the run id, never a fresh one.
    - `repair-wave-start-readiness` (diagnostic `wave-start-not-ready`): implementation has stopped but a start prerequisite is unmet. Stop and resolve each entry of `recovery.failures` (for example, re-attest a reopened Task). Do not start the Wave Gate; it refuses the same prerequisites.
-   - `skeleton-bindings-unresolved` (blocked, in place of `spawn-wave-implementation`): a Task's export bindings do not resolve against its contract's frozen types file. Every problem is named. Spawn nothing. Resolve it through the plan and a Contract Revision (`docs/operations.md`), then re-read status.
+   - `skeleton-bindings-unresolved` (blocked, in place of `spawn-wave-implementation`): a Task's export bindings do not resolve against its contract's frozen types file. Every problem is named. Spawn nothing. Resolve it through the plan and a Contract Revision (`docs/verification.md`), then re-read status.
    - `skeletons-unobserved` (a reason beside an owed `spawn-wave-implementation`, never a block): status could not read a skeleton path or types file. Spawn as listed; registration reads them again.
    - **Skeleton outcomes** in status and in each brief (`skeleton written`, `no bound exports, no skeleton`, `contract has no types file, no skeletons`, `unsupported language, no skeleton`, `exists, not skeletonized`, `absent, no skeleton owed`, and `stale against revised contract`) are information, never a dispatch. The engine writes skeletons itself. Never write or delete one by hand.
 2. When the batch settles, re-read status and repeat step 1. Leave the loop only on `start-wave-gate` or `start-successor-wave-gate`; `escalate-wave-implementation` ends execution.
 3. When status says `start-wave-gate`, run `/wave-gate`. Do not review inline or skip it: the spawn gate refuses next-Wave Tasks until the gate completes. `commands/wave-gate.md` is the protocol. The gate runs the completion suite from the protected Verification Manifest itself; never run a substitute command, and never silence a failure by editing the authority that caught it.
 4. If the gate is blocked by critical findings, fix them through [Acting on a Finding](wave-gate.md#acting-on-a-finding) (abandon, `reopen-task`, `brief --note`, fresh `/wave-gate`).
-5. Advisory findings pause the gate at `awaiting-advisory-decision`. Triage every one with the user's standards in mind:
-   - **Relevant** (in scope for the Task, actionable, consistent with the project's conventions): fix it through Acting on a Finding, with the advisory text as the `--note`. If it cannot be fixed cleanly, defer it with a reason.
-   - **Not relevant** (out-of-scope refactor, contradicts a project convention, false positive, deliberately deferred): record a one-line reason.
-   - Approve (`{"kind":"approve"}` through `decide`) only when every advisory is fixed, deferred with a reason, or dismissed with a reason. Never drop one silently.
-   - In a contract Wave, check status for an `acceptance-freeze-pending` reason first. Approval is what freezes the contract's files, so reopen the contract Task and fix its relevant advisories before approving.
+5. Advisory findings pause the gate at `awaiting-advisory-decision`. Classify and act on every one as `commands/wave-gate.md` says (the paragraphs before [Acting on a Finding](wave-gate.md#acting-on-a-finding), including the contract-Wave `acceptance-freeze-pending` check), and approve only then.
 6. When the gate reports the Wave complete, return to step 1 for the next Wave. After the final Wave Gate reports `done`, complete the orchestration (recovery runbook).
 
 ### Implementation briefs

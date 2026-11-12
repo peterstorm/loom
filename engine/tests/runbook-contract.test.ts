@@ -16,9 +16,9 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const read = (...parts: string[]) => readFileSync(join(REPO_ROOT, ...parts), "utf-8");
 
 /**
- * The runbooks are executable prose: `commands/loom.md` and
- * `commands/wave-gate.md` tell a model which helper to invoke, with which
- * flags, in which order. The engine's side of every one of those calls is
+ * The runbooks are executable prose: `commands/loom.md` (the dispatcher), the
+ * on-demand runbooks under `references/loom/*.md` and `commands/wave-gate.md`
+ * tell a model which helper to invoke, with which flags, in which order. The engine's side of every one of those calls is
  * proven — by unit tests, by CLI-driven tests, and by the smoke suite.
  * What the prose SAYS about them was proven by nothing but hardcoded greps.
  *

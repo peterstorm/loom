@@ -1,6 +1,6 @@
 # Verification
 
-What Loom runs to check a Task or a Wave, and how an operator configures it: the verification manifest, critical-repair checks, the three stop checks, owner verification at the Wave Gate, the distill pass, and Acceptance Contracts with their skeletons. The read-only views of this state are in [Helpers](reference/helpers.md#read-only-helpers).
+What Loom runs to check a Task or a Wave, and how an operator configures it: the verification manifest, critical-repair checks, the three stop checks, implementation attempts and their settlement, owner verification at the Wave Gate, the distill pass, and Acceptance Contracts with their skeletons. The read-only views of this state are in [Helpers](reference/helpers.md#read-only-helpers).
 
 ## The verification manifest
 
@@ -62,9 +62,22 @@ Every key is frozen at population and covered by the manifest digest. The two sw
 Both runners get the same form checks as a project check:
 
 - `{files}` must be exactly one whole argument. The engine replaces it with the file paths, one argument each, written relative to the runner's `cwd`: with `"cwd": "engine"`, `engine/tests/x.test.ts` is passed as `tests/x.test.ts`.
-- The executable and argv follow the project-check rules: the allowlist and no shell. The allowlist and the argv policy are listed in [Workflows](workflows.md#verification-manifest). `npx` is not on the allowlist, and `npm` must name a script (`run`, `run-script`, `test`, `check` or `build`), so Loom's `vitest related` goes through the engine's `test:affected` script. A project that calls its runner directly declares, for example, `"executable": "vitest"` with `"args": ["run", "--reporter=junit", "--outputFile=.loom/completion-reports/acceptance.junit.xml", "{files}"]` and `"cwd": "."`.
+- The executable and argv follow the project-check rules: the allowlist and no shell. The allowlist and the argv policy are listed under [Command policy](#command-policy). `npx` is not on the allowlist, and `npm` must name a script (`run`, `run-script`, `test`, `check` or `build`), so Loom's `vitest related` goes through the engine's `test:affected` script. A project that calls its runner directly declares, for example, `"executable": "vitest"` with `"args": ["run", "--reporter=junit", "--outputFile=.loom/completion-reports/acceptance.junit.xml", "{files}"]` and `"cwd": "."`.
 - `report` is a `required-file` beneath `.loom/completion-reports/`; the affected runner's is a JUnit report. Its path must differ from every Wave check's, and the two runners' paths must differ from each other.
 - `timeoutMs` is at most 240000 for each runner, inside the SubagentStop hook's 300 s timeout. A change set touching a hub module can select thousands of related tests (Loom's own `handler-routes.ts` took 138 s). Because the affected runner launches only when the time left holds its whole timeout, its `timeoutMs` plus the acceptance run's actual duration must fit in 270 s. Loom's own manifest declares 200000, which leaves 70 s for the acceptance run.
+
+### Command policy
+
+Commands always execute with `shell: false` under an explicit executable/subcommand policy:
+
+- allowed basenames are the bounded build/test/runtime set `biome`, `bun`, `cargo`, `cmake`, `deno`, `dotnet`, `eslint`, `gcc`, `g++`, `go`, `gradle`, `gradlew`, `java`, `javac`, `jest`, `make`, `mvn`, `mvnw`, `ninja`, `node`, `npm`, `perl`, `pnpm`, `pytest`, `python`, `python3`, `python3.10`, `python3.11`, `python3.12`, `python3.13`, `python3.14`, `pypy3`, `ruby`, `rustc`, `tsc`, `vitest`, `yarn`;
+- a project-local executable path is accepted only when its basename is in that same set (for example `node_modules/.bin/vitest` or `tools/gradlew`);
+- `npm`, `pnpm`, and `yarn` accept only explicit `run`, `run-script`, `test`, `check`, or `build` script forms; `exec`, `dlx`, `x`, implicit binary dispatch, `npx`, and `bunx` are rejected;
+- runtimes accept bounded file/test/check/build modes. Inline modes are rejected, including Node `-e`/`-p`/`--eval`/`--print`, Bun `eval`/`-e`/`x`, Deno `eval`, Python `-c`, and Perl/Ruby `-e`/`-E`.
+
+Every project command (Wave checks, stop-check runners, remediation checks) runs under the caller's environment minus the hook-invocation variables `CLAUDE_PROJECT_DIR`, `CLAUDE_PLUGIN_ROOT`, `CLAUDE_PLUGIN_DATA` and `CLAUDE_ENV_FILE`. A stop check launches from inside a hook, where the harness sets them; the Wave Gate launches from the operator's shell, where none is set. Dropping them gives a command the same environment from both, so a project test that reads `CLAUDE_PROJECT_DIR` cannot fail at a stop and pass at the gate.
+
+Shells and generic dispatchers are not allowlisted. Traversal, duplicate/reserved ids, and surplus fields are also rejected. Required reports must live beneath `.loom/completion-reports/`; those report bytes are excluded from workspace authority, while tracked and non-ignored untracked implementation bytes remain bound by the Wave workspace digest. Once the TaskGraph is populated, changing the source file does not change the frozen command authority.
 
 ### Installing the manifest
 
@@ -78,9 +91,53 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper write-verification-manifest --replace <
 
 The `helper write-verification-manifest` operation requires an existing loadable TaskGraph whose Task roster is empty. It compares authority, not bytes: a manifest that parses to the installed authority is an unchanged replay, however it is formatted. It refuses a different (or invalid) existing manifest unless called with `--replace`, which stages and atomically renames the new manifest into place, and it refuses every change after Task population, with or without the flag ([ADR-0065](adr/ADR-0065-manifest-helper-compares-authority-and-replaces-before-population.md)). Standalone remediation has no TaskGraph requirement; the helper's empty-TaskGraph requirement is a separate configuration-installation constraint.
 
-**A manifest-only bootstrap.** The helper needs the empty TaskGraph that `init-state` creates; it is not a writer for arbitrary paths. An operator who only wants to install or inspect a manifest runs `init-state`, then the helper, then the sanctioned `cleanup-state`. Never manufacture Tasks or Waves, or hand-write state, to satisfy it (see [Workflows](workflows.md#verification-manifest)).
+**A manifest-only bootstrap.** The helper needs the empty TaskGraph that `init-state` creates; it is not a writer for arbitrary paths. An operator who only wants to install or inspect a manifest runs `init-state`, then the helper, then the sanctioned `cleanup-state`. Never manufacture Tasks or Waves, or hand-write state, to satisfy it. Do not tear down an unrelated active graph. This metadata bootstrap installs source configuration only; it creates no Task/Wave verification authority.
 
 ## Enrolling a critical-repair check
+
+Critical-remediation checks must use `required-file`. For other projects, here is a complete Vitest alternative whose fixed argv names the exact output file:
+
+<!-- wire-example: verification-manifest -->
+```json
+{
+  "schemaVersion": 1,
+  "kind": "loom-verification-manifest",
+  "checks": [
+    {
+      "id": "project:repair-regression",
+      "scope": "wave",
+      "executable": "node_modules/.bin/vitest",
+      "args": ["run", "tests/repair-regression.test.ts", "--reporter=json", "--outputFile=.loom/completion-reports/repair-regression.json"],
+      "cwd": ".",
+      "timeoutMs": 120000,
+      "report": { "kind": "required-file", "path": ".loom/completion-reports/repair-regression.json" }
+    }
+  ]
+}
+```
+
+A Node JUnit alternative is also parser-valid:
+
+<!-- wire-example: verification-manifest -->
+```json
+{
+  "schemaVersion": 1,
+  "kind": "loom-verification-manifest",
+  "checks": [
+    {
+      "id": "project:repair-regression",
+      "scope": "wave",
+      "executable": "node",
+      "args": ["--test", "--test-reporter=junit", "--test-reporter-destination=.loom/completion-reports/repair-regression.xml", "tests/repair-regression.test.mjs"],
+      "cwd": ".",
+      "timeoutMs": 120000,
+      "report": { "kind": "required-file", "path": ".loom/completion-reports/repair-regression.xml" }
+    }
+  ]
+}
+```
+
+These are alternatives, not commands Loom adds automatically. The operator must choose a real repository test and ensure the selected fixed command produces the exact configured path. That path must be below `.loom/completion-reports/`, untracked, and Git-ignored; the config neither creates the report nor ignores it. Do not add a generic root task runner solely for enrollment.
 
 Critical remediation selects check IDs from the operator-owned `.loom/verification-manifest.json`. The selected fixed executable/argv must itself create a **new** report at the **exact** configured path on every run. The file must be a fresh parseable JUnit XML or Vitest/Jest JSON report beneath `.loom/completion-reports/`, remain untracked, and be Git-ignored. A normal process exit is insufficient: the parsed report must show more than zero executed tests, zero failures, and not an all-skipped run.
 
@@ -194,6 +251,34 @@ A Pi implementation child records its own tool calls into the parent session's e
 - **Plan view.** `helper stop-check-plan` cannot resolve a Pi child's epoch from a separate process, so for a Pi run it shows no changed files.
 - **No live gate.** The live phase gate is still absent on Pi; only recording was added.
 
+## Implementation attempts and settlement
+
+How one implementation attempt is issued, checked and settled, and how the single retry is derived. The symptoms are in [Task remains `pending`](operations.md#task-remains-pending) and [Task fails I6](operations.md#task-fails-i6-red-then-green); the exit from a terminal escalation is [`remediate`](reference/recovery.md#implementation-escalation-semantic-attempt-2-exhausted).
+
+A Task reaches `implemented` only when its proof obligations are satisfied **and** the Implementation Completion Oracle accepts an exact Task Completion Suite for the engine-issued Implementation Attempt. Completion prose, a Task id inferred from `executing_tasks`, and an unreserved harness result are cleanup evidence only.
+
+Claude binds authority through a session+Agent sidecar published with no-replace semantics at SubagentStart; Pi stores the exact authority on its ReservedSlot. Duplicate delivery is idempotent, and a late result cannot release a newer reservation. Every applied transition appends one immutable settlement receipt and atomically updates lifecycle/evidence, clears only matching attempt fields, invalidates review/spec/Wave authority when required, and recomputes `impl_complete`.
+
+The Slice 3 Task-local suite has one engine-owned check: `loom:task-byte-scope`. Its allowed set is the current `attempt_artifact_baseline` (declared plus previously attributed paths captured at registration). Current-attempt bytes compare that baseline; cumulative declared-artifact Proof still compares the first `artifact_baseline`. A transcript path outside the allowed set is semantic failure regardless of ownership. Baseline/path/read/Git uncertainty is infrastructure-blocked. Shared exact settlement derives canonical sibling ownership under the TaskGraph lock from every other current-Wave Task's `file_list` and `files_modified`. Repository changes from the attempt's `repository_baseline` classify as Task-local when currently allowed, inert/non-attributable when sibling-owned, and semantic out-of-scope otherwise; an unowned changed path invalidates that settlement even when omitted from the transcript. Every exact settlement retires the repository boundary, so a retried or infrastructure-blocked Task re-arms on a fresh boundary and repository movement between attempts is never attributed to it; only an attempt that ends without settlement leaves its boundary for the next registration to reuse. No unresolved-path carry is persisted: the State File parser validates a legacy `unresolved_repository_paths` field and drops it.
+
+`executing_tasks` is parser-bound to the Task roster. An unknown reservation makes the TaskGraph corrupt and blocks readiness/writes until `repair-task-graph` explicitly removes it with a diagnostic. Session `.task_graph` pointers are bound through one Claude/Pi helper that canonicalizes the active graph, refreshes stale pointers atomically without following symlinks, and rolls back only an exact owned binding.
+
+The engine-owned Task Completion Oracle launches **no Task/project subprocesses**. Implementation Agents still run the Task-level regression commands required by their Verification Policy via Bash, producing evidence for settlement. Engine-owned build, typecheck, test commands, package scripts, reports, and full-tier lint execute only in the quiescent Wave suite.
+
+Bounded retry is derived from immutable settlement history. Unversioned Slice-3 history uses a read-only compatibility projection until the next registration records protocol 2, a strict suffix start, and—when migrating into attempt 2—its predecessor retry receipt. Protocol-2 receipts from that cutover are reduced in wire order: a receipt is legal only for the current semantic attempt, and reordered, contradictory, wrong-attempt, skipped-terminal, or post-escalation history fails closed. A semantic attempt-1 failure emits `retry-required`; canonical status then publishes one exact `LOOM_IMPLEMENTATION_RETRY_CONTEXT` appendix binding the Task, attempt 2, predecessor receipt, and sorted failure kinds. When the predecessor receipt carries `declared-artifact-contract-violated` failures (G2 completion conformance: a bound export `deleted`, `renamed`, `retyped` or `still-unimplemented`, or a frozen ADT `shadows-frozen-adt` or `re-lists-frozen-variants`), the appendix adds a violation section after that authority line. The section is headed "Declared-artifact contract violations (declared-artifact-contract-violated) the previous attempt left; fix every one before completing:" and lists, per violated file, each encoded violation's subject, reason and remedy. When the receipt's failure-kind bound omitted some violations of a file, it ends that file's list with "and N more violations not shown"; the stored Proof keeps them all. A receipt entry that does not parse is shown verbatim, never dropped. Both parts derive from the retry context alone (`renderImplementationRetryContext` in `engine/src/core/implementation-retry.ts`), so status, the spawn gate and the State File load boundary render the same bytes. The shared Claude/Pi spawn gate requires those exact status-issued bytes, freezes its prompt/context digest with the new attempt authority before dispatch, and refuses stale, altered, missing, duplicate, invented, or representation-different retry context. Infrastructure-blocked receipts never consume the semantic budget and remain eligible at the same attempt. Status excludes non-reclaimable Tasks already executing or carrying active attempt authority; policy-expired reservations become dispatchable only under observed-empty roster authority so registration can reclaim them atomically. It emits `await-wave-implementation` when nothing is dispatchable. A semantic attempt-2 failure emits `escalation-required`; status becomes non-retryable and no attempt 3 can be registered. An accepted current-attempt implementation receipt starts a fresh attempt-1 lineage if the non-completed Task is later deliberately reopened for remediation.
+
+A Task carries an explicit `verification_policy`. Historical `new_tests_required` booleans remain read-compatible, but new TaskGraphs persist the explicit policy and reject conflicting dual declarations.
+
+### Red-then-green (I6): what a run must be
+
+Who owes I6, the three steps and what each gap means are in [Task fails I6](operations.md#task-fails-i6-red-then-green); the limits of a proof over logged facts are in [Guarded Skill Machines](../machines/README.md#known-residual-limits). The rules below complete that entry.
+
+- **Test files and implementation files.** `core/test-file-classification.ts` (INV-2) splits the Task's `file_list` by the frozen suffixes. These are the manifest's `testFileSuffixes`, or the engine default `.test.ts`, `.spec.ts`, `.test.tsx` and `.spec.tsx`. Every other `file_list` entry is an implementation file, including fixtures, helpers and types files.
+- **What a run must be.** Only a *qualifying* run counts: a ledger `TestRun` with a real exit code and a parsed structured report that records per-file results. The file is a JUnit testcase's `file` attribute when it writes one (Bun), else its `classname` (Vitest, Surefire), or the Vitest JSON `testResults[].name`. A reported file maps to a declared test file only through `attributeReportedFile` (INV-5), which also handles absolute paths and JVM class names.
+- **Green.** A later qualifying run that exits 0. In that run every Task test file must be attributed, run at least one testcase (a skipped, pending, todo or disabled testcase did not run), and have no failure or collection error. A run over only some of the test files never greens the Task.
+- **Judgment.** `judgeRedThenGreen` in `core/red-then-green.ts` is a pure, total function over the epoch's ordered facts. It is evaluated at completion, and its judgment is never stored. An unmet obligation is the proof failure `proof:red-then-green-unproven:<gap>`. The gaps take this precedence: `no-test-files`, then `implementation-write-missing`, then `red-missing` or `red-after-first-implementation-write`, then `green-missing`. `red-missing` and `green-missing` carry `untrustedOnly` in one case: no qualifying run meets the step, but the epoch holds a non-qualifying run or the test result is Pi-structured. A satisfied obligation records the red run, the implementation file and the green run as `red-then-green` evidence.
+- **Trust model.** I6 fails closed. It is judged at settlement from the attempt epoch's ledger facts, on both harnesses: Claude Code folds its session ledger, and Pi reads the child's epoch back from the parent ledger. An unreadable ledger settles as infrastructure-blocked, not as a semantic failure, so it does not use up the retry. Transcript evidence and Pi-structured tool results never satisfy a step. Stored-evidence reconciliation reads no ledger. It carries forward a `red-then-green` result that an earlier settlement satisfied, and otherwise evaluates as `ledger-unavailable`.
+
 ## Owner verification blocks a Wave Gate
 
 A plan's owned invariants (`**Owner module:**` a path) are Wave Gate obligations. Population stamps each one into the TaskGraph as an Owner Obligation (`owner_obligations`, written on every population, `[]` included). Whenever that stamp is present, the Wave completion suite carries the engine-reserved check `loom:owner-verification`. A graph populated before owner enforcement existed has no stamp, owes nothing, and its suite roster and digest are unchanged.
@@ -268,7 +353,7 @@ Population adds one engine-owned Distill Task to every Wave that has implementat
 **What you see.**
 
 - `populate-task-graph` names what it added: `Task graph populated: 5 tasks (2 engine-added distill pass: T4, T5), waves: 1, 2`. Each Distill Task is numbered after the highest authored Task id, has no dependencies and no Requirement trace, and its `file_list` is its Distill Scope: the Wave's implementation files, never a test file and never an Acceptance Contract's frozen path.
-- `helper orchestration status` lists the Distill Task among its Wave's pending Tasks from the start, but does not offer its dispatch while any other Task of the Wave is not yet `implemented` or `completed`, or still holds a reservation. Once they have all settled, it is the one dispatch status offers. Dispatch it from status like any other dispatch (`helper orchestration brief`); the Wave Gate cannot start before it settles.
+- `helper orchestration status` lists the Distill Task among its Wave's pending Tasks from the start, but does not offer its dispatch while any other Task of the Wave is not yet `implemented` or `completed`, or still holds a reservation. One predicate (`distillDispatchBlockers`) decides that for status and for registration. Once they have all settled, it is the one dispatch status offers. Dispatch it from status like any other dispatch (`helper orchestration brief`); the Wave Gate cannot start before it settles.
 - A spawn attempted early is refused at registration, on both harnesses: `T9 is its Wave's distill pass and runs after every other Task of the Wave is implemented; still outstanding: T1`.
 - Its brief carries a `LOOM_DISTILL_PASS: 1` appendix that lists its files and replaces the implementation workflow. The spawn gate compares the appendix line for line with the Task's protected file list.
 - At the Wave Gate it is registered with its Wave and issued no reviewer. Its review status reads `not required (exempt from Wave review: distill-task)`; the other Tasks' Review Packets read the distilled bytes. `helper store-review-findings --task <its id>` is refused for the same reason.

@@ -280,7 +280,7 @@ export const UNGOVERNED: readonly Readonly<{ path: string; reason: string }>[] =
   { path: "references/reviewer-protocol-v1/", reason: "archived reviewer protocol, byte-frozen" },
   { path: "references/reviewer-wire/wire-contract.md", reason: "rendered whole from the reviewer codec; the stamp check compares its bytes" },
   { path: "skills/security-expert/", reason: "teaches third-party formats (JWT, Keycloak, OWASP), none of them a Loom wire" },
-  { path: "skills/nextjs-frontend-design/", reason: "teaches third-party formats (tsconfig), none of them a Loom wire" },
+  { path: "skills/nextjs-frontend-design/", reason: "teaches third-party formats (Next.js, Tailwind), none of them a Loom wire" },
 ];
 
 /** Whether the marker rule applies to a repo-relative Markdown path. */

@@ -5,7 +5,7 @@
  * (`coverage.ts`, `mutation-plan.ts`, `outcome.ts`, `verdict.ts`,
  * `obligations.ts`), never here.
  *
- * Vocabulary (CONTEXT.md):
+ * Vocabulary (docs/contexts/owner-verification/CONTEXT.md):
  * - Owner Obligation: one owned Invariant of the plan, stamped into the
  *   TaskGraph at population. The Wave Gate owes it sibling coverage and
  *   mutation verification when the Wave owes its family (`owesInWave`).

@@ -41,7 +41,7 @@ The key insight: traditional DDD puts behavior *on* mutable aggregate objects (`
 ### Ubiquitous Language
 
 - Every domain concept has one name, used in code, tests, docs and conversation.
-- If a `CONTEXT.md` exists, it is the source of truth for terminology.
+- If a `CONTEXT.md` exists, it is the source of truth for terminology, together with the context files a `CONTEXT-MAP.md` lists.
 - When code uses a different word than the domain expert would, rename the code.
 - Generic names (`Manager`, `Service`, `Handler`, `Processor`) and technical suffixes (`UserDTO`, `OrderEntity`) are not domain language; use the domain's nouns.
 

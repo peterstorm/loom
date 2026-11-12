@@ -51,7 +51,7 @@ When the user states how something works, check whether the code agrees. If you 
 
 ### Update CONTEXT.md as Terms Settle
 
-Write each term to `CONTEXT.md` the moment it is settled, in the format of [CONTEXT-FORMAT.md](./references/CONTEXT-FORMAT.md): a new term with a tight definition and an _Avoid_ list, an existing term whose meaning shifted, a new relationship, or a resolved collision under Flagged Ambiguities.
+Write each term to `CONTEXT.md`, or to the context file `CONTEXT-MAP.md` lists for that area when a map exists, the moment it is settled, in the format of [CONTEXT-FORMAT.md](./references/CONTEXT-FORMAT.md): a new term with a tight definition and an _Avoid_ list, an existing term whose meaning shifted, a new relationship, or a resolved collision under Flagged Ambiguities.
 
 ### Challenge the Domain Model
 

@@ -2,7 +2,7 @@
 name: grill-agent
 model-profile: panel-design
 model: opus
-description: Domain-aware design challenger that stress-tests plans against the project's ubiquitous language, DDD model, and documented decisions. Updates CONTEXT.md inline.
+description: Domain-aware design challenger that stress-tests plans against the project's ubiquitous language, DDD model, and documented decisions. Writes each settled term to CONTEXT.md, or to the context file CONTEXT-MAP.md lists for that area when a map exists.
 color: red
 skills:
   - grill

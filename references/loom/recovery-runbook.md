@@ -77,12 +77,12 @@ Hooks and `/wave-gate` drive most state-writing helpers themselves (`complete-wa
 | `store-review-findings`, `store-spec-check` | The false-positive overrides above |
 | `cleanup-state` | Abort (below) |
 
-The guard's list also holds `complete-wave-gate`, `store-test-evidence`, `reconcile-implementation-proof` and `upgrade-spec-trace`. Run one of those by hand only for a recovery that `docs/operations.md` names.
+The guard's list also holds `complete-wave-gate`, `store-test-evidence`, `reconcile-implementation-proof` and `upgrade-spec-trace`. Run one of those by hand only for a recovery that `docs/operations.md` or `docs/reference/recovery.md` names.
 
 **Outside the guard's scope when invoked as documented** (they name no guarded path):
 
 - `validate-task-graph`, `validate-lint-rules`, and `lint-wave-gate` (a diagnostic; the registered Wave Gate runs the same full-tier lint itself).
-- `orchestration status`, `contract-status` and `stop-check-plan --task <id>`: pure reads of the State File that write only to stdout. `contract-status` takes no arguments and prints each Acceptance Contract's freeze state, roster and due Waves. `stop-check-plan` prints what the Acceptance Stop Check would do at that Task's stop, or the one reason the check is off; it refuses an unknown Task id with a non-zero exit. See `docs/operations.md`.
+- `orchestration status`, `contract-status` and `stop-check-plan --task <id>`: pure reads of the State File that write only to stdout. `contract-status` takes no arguments and prints each Acceptance Contract's freeze state, roster and due Waves. `stop-check-plan` prints what the Acceptance Stop Check would do at that Task's stop, or the one reason the check is off; it refuses an unknown Task id with a non-zero exit. See `docs/reference/helpers.md`.
 - `panel-contract` (the architecture panel), `review-panel` and `standalone-review`: each writes only into a run directory under the runs root it is given (`.claude/specs/{date_slug}/panel-runs/`, `.claude/reviews/panel-runs/`, `.claude/reviews/review-and-fix-runs/`). Invoked against a guarded path they are blocked like anything else.
 - `accept-plan-design-review` (Phase 3.6): its arguments name only a runs root under `.claude/reviews/`, and its one State File write goes through the engine's locked writer.
 

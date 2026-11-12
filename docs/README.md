@@ -19,6 +19,7 @@ Documentation for Loom 1.1. Runbooks live in `commands/` and `skills/`; these do
 | [Verification](verification.md) | The verification manifest, stop checks, owner verification, the distill pass, Acceptance Contracts and skeletons |
 | [Standalone review](standalone-review.md) | The reviewer protocol, read coverage, standalone lineage, the plan design review, remediation |
 | [Read-only helpers](reference/helpers.md) | The helpers that print what the engine knows |
+| [Recovery operations](reference/recovery.md) | The commands that change protected state to recover a run: remediation, reopening a Task or a completed Wave, upgrading or amending the spec trace |
 | [Model profiles and calibration](model-profiles-and-calibration.md) | Model policy per Agent, emission route classes and qualification, the calibration corpus |
 
 ## Understanding and changing Loom
@@ -35,6 +36,7 @@ Documentation for Loom 1.1. Runbooks live in `commands/` and `skills/`; these do
 
 - [`/loom` prompt layout](loom-prompt-decomposition.md) — what `commands/loom.md` holds, the four on-demand runbooks under `references/loom/`, and the tests that pin them.
 - [Architecture Decision Records](adr/README.md) — why the system has its current shape, with each decision's status.
+- `family-sites.baseline.json` — the recorded baseline of the family-site metric; see [Development](development.md).
 - [`contexts/`](../CONTEXT-MAP.md) — the per-area glossaries listed by `CONTEXT-MAP.md`. The core vocabulary is the root [`CONTEXT.md`](../CONTEXT.md).
 
 ## Proposals and design notes

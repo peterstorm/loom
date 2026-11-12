@@ -6,7 +6,7 @@ These operations change protected state. Each is the only sanctioned way to make
 
 ## Implementation escalation (semantic attempt 2 exhausted)
 
-A modern implementation Task gets exactly two semantic attempts. When attempt 2's settlement also fails its proof, the lineage records an `escalation-required` receipt and further implementation dispatch is refused — the engine will not spin a third unreviewed attempt. Attestation byte drift is terminal on attempt 1 because refreshing its baseline would certify child-authored bytes. The direct exit from either terminal state is `remediate`; it is deliberate, reason-echoed, and never rewrites history:
+A modern implementation Task gets exactly two semantic attempts ([Implementation attempts and settlement](../verification.md#implementation-attempts-and-settlement)). When attempt 2's settlement also fails its proof, the lineage records an `escalation-required` receipt and further implementation dispatch is refused — the engine will not spin a third unreviewed attempt. Attestation byte drift is terminal on attempt 1 because refreshing its baseline would certify child-authored bytes. The direct exit from either terminal state is `remediate`; it is deliberate, reason-echoed, and never rewrites history:
 
 ```bash
 # Consume the escalation: append one escalation-remediated receipt and return
