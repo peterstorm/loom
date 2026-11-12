@@ -2,199 +2,157 @@
 
 ## Attack Vectors
 
-### Malicious File Execution
-Upload `.jsp`, `.php`, `.sh` to a web-accessible directory → remote code execution.
+| Attack | How |
+|--------|-----|
+| Malicious file execution | `.jsp`, `.php`, `.sh` stored where the server will execute it |
+| Path traversal via filename | `filename="../../webapps/ROOT/shell.jsp"` |
+| Content-type spoofing | The request says `image/png`; the bytes are something else |
+| Active content | SVG and HTML run script when opened from your origin |
+| Polyglot | A valid image that is also valid script or HTML |
+| Decompression bomb | A small archive that expands to gigabytes, or to millions of entries |
 
-### Path Traversal via Filename
-```
-filename="../../webapps/ROOT/shell.jsp"
-```
+## Rules
 
-### Content Type Spoofing
-File claims to be `image/png` but contains executable code.
+1. The client's filename and `Content-Type` are attacker-controlled. Use neither to decide the type or the stored name.
+2. Detect the type from the content and allowlist it. The stored extension comes from the detected type.
+3. Generate the stored name (UUID). Keep the original name only as data, for display.
+4. Store outside the web root, with owner-only permissions, never under a static resource location.
+5. Serve through a handler that authorizes the caller, as an attachment, ideally from a separate origin.
+6. Limit size per file, per request, and per extracted archive.
 
-### Zip Bomb / Decompression Bomb
-Small compressed file expands to gigabytes → disk/memory exhaustion.
+## Upload Handler
 
-### Polyglot Files
-Valid image that is also valid JavaScript/HTML — bypasses content-type checks.
-
-## Prevention
-
-### Complete Upload Handler
 ```java
 @RestController
 public class FileUploadController {
 
-    private static final long MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
-    private static final Set<String> ALLOWED_EXTENSIONS = Set.of(
-        ".pdf", ".png", ".jpg", ".jpeg", ".csv", ".xlsx"
-    );
-    private static final Set<String> ALLOWED_CONTENT_TYPES = Set.of(
-        "application/pdf", "image/png", "image/jpeg", "text/csv",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    );
+    private static final long MAX_FILE_SIZE = 10 * 1024 * 1024;
+    private static final Path UPLOAD_DIR = Path.of("/var/app/uploads");        // outside the web root
+    private static final Map<String, String> EXTENSION_BY_TYPE = Map.of(
+        "application/pdf", ".pdf",
+        "image/png", ".png",
+        "image/jpeg", ".jpg");
+
+    private final Tika tika = new Tika();                                      // Apache Tika: detects from content
 
     @PostMapping("/upload")
-    public UploadResponse upload(@RequestParam MultipartFile file) {
-        validateFile(file);
-
-        // Generate safe filename — NEVER use original
-        String ext = getValidExtension(file.getOriginalFilename());
-        String safeName = UUID.randomUUID() + ext;
-
-        // Store outside web root
-        Path target = Paths.get("/var/app/uploads").resolve(safeName);
-        file.transferTo(target);
-
-        // Set restrictive permissions
-        Files.setPosixFilePermissions(target, Set.of(
-            PosixFilePermission.OWNER_READ,
-            PosixFilePermission.OWNER_WRITE
-        ));
-
-        return new UploadResponse(safeName);
-    }
-
-    private void validateFile(MultipartFile file) {
-        if (file.isEmpty()) throw new BadRequestException("Empty file");
-        if (file.getSize() > MAX_FILE_SIZE) throw new BadRequestException("File too large");
-
-        // Validate content type
-        String contentType = file.getContentType();
-        if (!ALLOWED_CONTENT_TYPES.contains(contentType)) {
+    public UploadResponse upload(@RequestParam MultipartFile file) throws IOException {
+        if (file.isEmpty() || file.getSize() > MAX_FILE_SIZE) {
+            throw new BadRequestException("Invalid file size");
+        }
+        String detected;
+        try (InputStream in = file.getInputStream()) {
+            detected = tika.detect(in);                                        // magic bytes, not the request header
+        }
+        String extension = EXTENSION_BY_TYPE.get(detected);
+        if (extension == null) {
             throw new BadRequestException("File type not allowed");
         }
 
-        // Validate extension
-        getValidExtension(file.getOriginalFilename());
-
-        // Validate actual content (magic bytes)
-        validateMagicBytes(file);
-    }
-
-    private String getValidExtension(String filename) {
-        if (filename == null) throw new BadRequestException("No filename");
-        int dot = filename.lastIndexOf('.');
-        if (dot < 0) throw new BadRequestException("No extension");
-        String ext = filename.substring(dot).toLowerCase();
-        if (!ALLOWED_EXTENSIONS.contains(ext)) {
-            throw new BadRequestException("Extension not allowed: " + ext);
+        String storedName = UUID.randomUUID() + extension;                     // never the original filename
+        Path target = UPLOAD_DIR.resolve(storedName);
+        try (InputStream in = file.getInputStream()) {
+            Files.copy(in, target);                                            // fails if the name exists
         }
-        return ext;
-    }
-
-    private void validateMagicBytes(MultipartFile file) {
-        try {
-            byte[] header = new byte[8];
-            file.getInputStream().read(header);
-
-            // Check magic bytes match claimed type
-            String contentType = file.getContentType();
-            if ("image/png".equals(contentType) && !isPng(header)) {
-                throw new BadRequestException("File content doesn't match PNG");
-            }
-            if ("application/pdf".equals(contentType) && !isPdf(header)) {
-                throw new BadRequestException("File content doesn't match PDF");
-            }
-        } catch (IOException e) {
-            throw new BadRequestException("Cannot read file");
-        }
-    }
-
-    private boolean isPng(byte[] header) {
-        return header[0] == (byte) 0x89 && header[1] == 0x50
-            && header[2] == 0x4E && header[3] == 0x47;
-    }
-
-    private boolean isPdf(byte[] header) {
-        return header[0] == 0x25 && header[1] == 0x50
-            && header[2] == 0x44 && header[3] == 0x46; // %PDF
+        Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("rw-------"));
+        return new UploadResponse(storedName);
     }
 }
 ```
 
-### Serving Uploaded Files Safely
+What detection does not give you:
+- **Text formats** (CSV, JSON, plain text) have no signature. Accept them only by parsing them with a strict parser and rejecting what does not parse.
+- **Containers** (`.xlsx`, `.docx` are zip archives) need the archive limits below and an XML parser configured per `xxe-prevention.md`.
+- **SVG** is XML with script. Do not accept it as an image; if you must, rasterise it or serve it only as an attachment from a separate origin.
+- **A matching signature is not a clean file.** Re-encode images (decode and write a new PNG/JPEG) to drop polyglot payloads and metadata, and scan with an antivirus engine (ClamAV, or your cloud provider's scanner) before the file becomes downloadable.
+
+## Serving Uploaded Files
+
 ```java
-@GetMapping("/files/{filename}")
-public ResponseEntity<Resource> download(@PathVariable String filename) {
-    // Validate filename format (UUID + extension only)
-    if (!filename.matches("^[a-f0-9-]+\\.[a-z]{3,4}$")) {
-        throw new BadRequestException("Invalid filename");
-    }
+private static final Pattern STORED_NAME =
+    Pattern.compile("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}\\.(pdf|png|jpg)$");
 
-    Path file = Paths.get("/var/app/uploads").resolve(filename).normalize();
-    if (!file.startsWith("/var/app/uploads")) {
-        throw new SecurityException("Path traversal attempt");
+@GetMapping("/files/{name}")
+public ResponseEntity<Resource> download(@PathVariable String name, Authentication auth) {
+    if (!STORED_NAME.matcher(name).matches()) {
+        throw new BadRequestException("Invalid file name");
     }
-
-    Resource resource = new FileSystemResource(file);
+    if (!uploads.isReadableBy(name, auth.getName())) {            // object-level authorization
+        throw new AccessDeniedException("Not authorized");
+    }
     return ResponseEntity.ok()
-        .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
+        .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + name + "\"")
         .header("X-Content-Type-Options", "nosniff")
-        .header("Content-Security-Policy", "default-src 'none'")
-        .body(resource);
+        .header("Content-Security-Policy", "default-src 'none'; sandbox")
+        .contentType(MediaType.APPLICATION_OCTET_STREAM)
+        .body(new FileSystemResource(UPLOAD_DIR.resolve(name)));
 }
 ```
 
-### Zip/Archive Upload Safety
+The name pattern admits no separator, so no containment check is needed here; for any looser input use `resolveExistingFile` from `path-traversal.md`. Serving user content from a separate origin (for example `usercontent.example.net`) keeps a file that does render from reading your application's cookies and DOM.
+
+## Archive Extraction
+
+A zip entry's declared size is written by whoever made the archive, and with `ZipInputStream` it is often `-1`. Count the bytes you write.
+
 ```java
-public void extractZipSafely(Path zipFile, Path targetDir, long maxTotalSize) {
-    long totalSize = 0;
-    int maxEntries = 1000;
-    int entryCount = 0;
+/** Extract into an empty directory created for this archive; delete it if this throws. */
+public static void extractZip(Path zipFile, Path targetDir, long maxTotalBytes, int maxEntries)
+        throws IOException {
+    Path base = targetDir.toRealPath();
+    long total = 0;
+    int entries = 0;
+    byte[] buffer = new byte[8192];
 
     try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zipFile))) {
-        ZipEntry entry;
-        while ((entry = zis.getNextEntry()) != null) {
-            if (++entryCount > maxEntries) {
-                throw new SecurityException("Too many zip entries");
+        for (ZipEntry entry; (entry = zis.getNextEntry()) != null; ) {
+            if (++entries > maxEntries) {
+                throw new IOException("Too many zip entries");
             }
-
-            // Path traversal check
-            Path entryPath = targetDir.resolve(entry.getName()).normalize();
-            if (!entryPath.startsWith(targetDir)) {
-                throw new SecurityException("Zip path traversal: " + entry.getName());
+            Path out = base.resolve(entry.getName()).normalize();              // zip slip check
+            if (!out.startsWith(base)) {
+                throw new IOException("Zip entry escapes target directory");
             }
-
-            // Size check (zip bomb protection)
-            totalSize += entry.getSize();
-            if (totalSize > maxTotalSize) {
-                throw new SecurityException("Zip exceeds size limit");
-            }
-
-            // Extract
             if (entry.isDirectory()) {
-                Files.createDirectories(entryPath);
-            } else {
-                Files.createDirectories(entryPath.getParent());
-                Files.copy(zis, entryPath);
+                Files.createDirectories(out);
+                continue;
+            }
+            Files.createDirectories(out.getParent());
+            try (OutputStream os = Files.newOutputStream(out, StandardOpenOption.CREATE_NEW)) {
+                for (int n; (n = zis.read(buffer)) != -1; ) {
+                    total += n;                                                // bytes actually produced
+                    if (total > maxTotalBytes) {
+                        throw new IOException("Zip exceeds size limit");
+                    }
+                    os.write(buffer, 0, n);
+                }
             }
         }
     }
 }
 ```
 
-### Spring Boot Configuration
+Do not extract nested archives recursively without applying the same budget to the whole tree.
+
+## Spring Boot Configuration
 ```yaml
 spring:
   servlet:
     multipart:
       max-file-size: 10MB
       max-request-size: 10MB
-      file-size-threshold: 2KB  # Write to disk above this
-      location: /tmp/uploads    # Temp storage location
+      file-size-threshold: 2KB   # write to disk above this
+      location: /var/app/upload-tmp
 ```
 
 ## Quick Reference
 
 | Layer | Check |
 |-------|-------|
-| Extension | Allowlist valid extensions |
-| Content-Type | Allowlist MIME types |
-| Magic bytes | Verify file header matches claimed type |
-| Filename | Generate UUID, never use original |
-| Storage | Outside web root, restrictive permissions |
-| Serving | `Content-Disposition: attachment`, `nosniff`, no inline execution |
-| Size | Enforce limits on individual file and request |
-| Archives | Entry count limit, total size limit, path traversal check |
+| Type | Detected from content, allowlisted; client `Content-Type` and extension ignored |
+| Filename | Generated UUID plus the extension of the detected type |
+| Storage | Outside web root, owner-only permissions, not a static location |
+| Content | Re-encode images, antivirus scan, no SVG/HTML as inline content |
+| Serving | Authorized handler, `Content-Disposition: attachment`, `nosniff`, separate origin |
+| Size | Per file, per request, and bytes actually extracted |
+| Archives | Entry count limit, byte budget while copying, zip-slip check |

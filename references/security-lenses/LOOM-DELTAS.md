@@ -18,7 +18,7 @@ hunter's `agentId`, every check's `agent_id`, and its scratch and artifact paths
 ## Receipt nonces are engine-issued
 
 A hunter cannot compute the nonce its sandbox receipt is bound to. The parent
-runs `loom helper security-audit nonce --out <run> --artifact
+runs the engine's `helper security-audit nonce --out <run> --artifact
 agents/<owner-id>/artifacts/<file>` — issued only for an owner with a unit in
 flight, never for an artifact an archived attempt cited — and the hunter runs
 the printed command verbatim, redirecting stdout into exactly that artifact.
@@ -40,6 +40,21 @@ home actually failed inside the sandbox; an unknown home reads as open, and a
 receipt with an open home does not count as an observed result. Owners:
 `scripts/security-sandbox.sh`, `sandboxWithinLimits` in
 `engine/src/core/security-sandbox.ts`.
+
+## The sandbox needs `unshare`
+
+Upstream's "bounded local fixtures" are, in Loom, one script that runs under
+Linux `unshare`. On a host without it the script exits before running anything
+and prints no receipt, so a claim there is `needs_validation` naming the
+missing capability. Owner: `scripts/security-sandbox.sh`.
+
+## Lens paths are plugin-relative
+
+`start` prints the selection as `references/security-lenses/<LENS>.md`. That
+path is relative to the Loom plugin root, never to the audited repository, and
+the parent gives a hunter absolute paths. Upstream's "Phase 1" (reconnaissance)
+is not vendored; the `security-audit` skill's "Enumerating units" replaces it.
+Owner: `renderLensSelection` in `engine/src/core/security-lens-select.ts`.
 
 ## The profile caps lens breadth
 

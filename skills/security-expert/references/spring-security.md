@@ -1,16 +1,9 @@
 # Spring Security Reference
 
-## Table of Contents
-1. [Architecture Overview](#architecture-overview)
-2. [Filter Chain](#filter-chain)
-3. [OAuth2 Resource Server](#oauth2-resource-server)
-4. [Method Security](#method-security)
-5. [Common Configurations](#common-configurations)
-6. [Testing Security](#testing-security)
+Samples use the lambda DSL, which is valid on Spring Security 6.x (Boot 3) and 7 (Boot 4). Where an API differs by version, the sample says so. Topics owned elsewhere: token validation `jwt-security.md`, CSRF `csrf-prevention.md`, headers and CORS `security-headers.md`, `PermissionEvaluator` and policies `authorization-patterns.md`, OAuth client flows `oauth-oidc.md`.
 
-## Architecture Overview
+## Architecture
 
-### Security Filter Chain
 ```
 Request → DelegatingFilterProxy → FilterChainProxy → SecurityFilterChain → Controller
                                         ↓
@@ -19,15 +12,14 @@ Request → DelegatingFilterProxy → FilterChainProxy → SecurityFilterChain �
                                Authentication object
 ```
 
-### Key Components
-- **SecurityContextHolder**: Thread-local storage for Authentication
-- **Authentication**: Principal + credentials + authorities
-- **AuthenticationManager**: Validates credentials
-- **AuthorizationManager**: Checks permissions
+- **SecurityContextHolder**: holds the `Authentication` for the current request
+- **Authentication**: principal, credentials, authorities
+- **AuthenticationManager**: validates credentials
+- **AuthorizationManager**: decides access
 
 ## Filter Chain
 
-### Default Filter Order (Spring Security 6.x)
+### Typical filter order (resource server, Spring Security 6.x)
 ```
 1. DisableEncodeUrlFilter
 2. WebAsyncManagerIntegrationFilter
@@ -45,78 +37,61 @@ Request → DelegatingFilterProxy → FilterChainProxy → SecurityFilterChain �
 14. ExceptionTranslationFilter
 15. AuthorizationFilter                   ← Access decisions
 ```
+The exact list depends on what is configured; `logging.level.org.springframework.security=DEBUG` prints the chain of your application at startup.
 
-### Custom Filter Example
+### Custom filter
 ```java
-@Component
 public class ApiKeyAuthFilter extends OncePerRequestFilter {
     @Override
-    protected void doFilterInternal(HttpServletRequest request, 
-                                    HttpServletResponse response, 
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                     FilterChain chain) throws ServletException, IOException {
         String apiKey = request.getHeader("X-API-Key");
-        if (apiKey != null && validateApiKey(apiKey)) {
-            Authentication auth = new ApiKeyAuthentication(apiKey, getAuthorities(apiKey));
-            SecurityContextHolder.getContext().setAuthentication(auth);
+        if (apiKey != null) {
+            apiKeys.authenticate(apiKey)                         // looks up a hash of the key; empty if unknown
+                .ifPresent(auth -> SecurityContextHolder.getContext().setAuthentication(auth));
         }
-        chain.doFilter(request, response);
+        chain.doFilter(request, response);                       // unauthenticated requests are refused by the rules below
     }
 }
 
-// Register in filter chain
 http.addFilterBefore(apiKeyFilter, BearerTokenAuthenticationFilter.class);
 ```
+Store API keys hashed and compare in constant time (`MessageDigest.isEqual`). Do not also register the filter as a `@Component`, or Boot adds it to the servlet chain a second time, outside Spring Security.
 
 ## OAuth2 Resource Server
 
-### JWT Configuration
 ```java
 @Configuration
 @EnableWebSecurity
 public class ResourceServerConfig {
-    
+
     @Bean
-    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+    public SecurityFilterChain filterChain(HttpSecurity http, JwtDecoder jwtDecoder) throws Exception {
         http
-            .csrf(csrf -> csrf.disable())  // Stateless API
-            .sessionManagement(session -> 
+            // Only because this API authenticates solely by the Authorization header.
+            // If any credential (session or token) is ever sent by cookie, keep CSRF on: csrf-prevention.md
+            .csrf(csrf -> csrf.disable())
+            .sessionManagement(session ->
                 session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .oauth2ResourceServer(oauth2 -> oauth2
                 .jwt(jwt -> jwt
-                    .decoder(jwtDecoder())
+                    .decoder(jwtDecoder)                         // algorithms, issuer, audience: jwt-security.md
                     .jwtAuthenticationConverter(jwtAuthConverter())))
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers("/actuator/health").permitAll()
                 .requestMatchers("/api/admin/**").hasRole("ADMIN")
                 .requestMatchers("/api/**").authenticated()
-                .anyRequest().denyAll());
-        
+                .anyRequest().denyAll());                        // deny by default
+
         return http.build();
     }
-    
-    @Bean
-    public JwtDecoder jwtDecoder() {
-        NimbusJwtDecoder decoder = NimbusJwtDecoder
-            .withJwkSetUri("https://auth.example.com/.well-known/jwks.json")
-            .build();
-        
-        OAuth2TokenValidator<Jwt> validator = new DelegatingOAuth2TokenValidator<>(
-            JwtValidators.createDefaultWithIssuer("https://auth.example.com"),
-            new JwtClaimValidator<List<String>>("aud", 
-                aud -> aud != null && aud.contains("my-api")),
-            new JwtTimestampValidator(Duration.ofSeconds(60))  // Clock skew
-        );
-        
-        decoder.setJwtValidator(validator);
-        return decoder;
-    }
-    
+
     @Bean
     public JwtAuthenticationConverter jwtAuthConverter() {
         JwtGrantedAuthoritiesConverter authorities = new JwtGrantedAuthoritiesConverter();
         authorities.setAuthoritiesClaimName("roles");
         authorities.setAuthorityPrefix("ROLE_");
-        
+
         JwtAuthenticationConverter converter = new JwtAuthenticationConverter();
         converter.setJwtGrantedAuthoritiesConverter(authorities);
         converter.setPrincipalClaimName("sub");
@@ -125,127 +100,59 @@ public class ResourceServerConfig {
 }
 ```
 
-### Opaque Token (Token Introspection)
+The `JwtDecoder` bean must validate the audience as well as the issuer; the Boot default built from `issuer-uri` alone does not check `aud` unless `spring.security.oauth2.resourceserver.jwt.audiences` is set. Keycloak's nested roles need the converter in `keycloak.md`.
+
+### Opaque tokens (introspection)
 ```java
 http.oauth2ResourceServer(oauth2 -> oauth2
     .opaqueToken(opaque -> opaque
-        .introspectionUri("https://auth.example.com/introspect")
-        .introspectionClientCredentials("client-id", "client-secret")));
+        .introspectionUri("https://auth.example.com/realms/app/protocol/openid-connect/token/introspect")
+        .introspectionClientCredentials(clientId, clientSecret)));     // from configuration, not literals
 ```
+
+### Browser-facing chains
+A chain that authenticates with a session or any cookie keeps CSRF protection enabled (`csrf-prevention.md`), sets headers and CORS per `security-headers.md`, and logs users in per `oauth-oidc.md`. Give the cookie-authenticated routes and the bearer-token routes separate `SecurityFilterChain` beans with `securityMatcher(...)` rather than one chain with CSRF disabled for both.
 
 ## Method Security
 
-### Enable Method Security
 ```java
 @Configuration
-@EnableMethodSecurity(prePostEnabled = true, securedEnabled = true)
+@EnableMethodSecurity            // @PreAuthorize/@PostAuthorize on; add securedEnabled = true for @Secured
 public class MethodSecurityConfig { }
 ```
 
-### Annotations
 ```java
 @Service
 public class DocumentService {
-    
-    // Role-based
+
     @PreAuthorize("hasRole('ADMIN')")
     public void deleteAll() { }
-    
-    // Multiple roles
+
     @PreAuthorize("hasAnyRole('ADMIN', 'MANAGER')")
     public List<Document> listAll() { }
-    
-    // Custom expression with parameter
+
+    // Parameter-based expression
     @PreAuthorize("#document.ownerId == authentication.name or hasRole('ADMIN')")
     public void update(Document document) { }
-    
-    // Post-filter results
-    @PostFilter("filterObject.ownerId == authentication.name or hasRole('ADMIN')")
-    public List<Document> findAll() { }
-    
-    // Return value check
+
+    // Check the returned object; the method body has already run, so use only on reads
     @PostAuthorize("returnObject.ownerId == authentication.name")
     public Document findById(String id) { }
-    
-    // Permission evaluator
-    @PreAuthorize("hasPermission(#id, 'Document', 'READ')")
+
+    // Filters in memory after loading everything; prefer a query scoped to the caller
+    @PostFilter("filterObject.ownerId == authentication.name or hasRole('ADMIN')")
+    public List<Document> findAll() { }
+
+    // Delegates to a PermissionEvaluator: authorization-patterns.md
+    @PreAuthorize("hasPermission(#id, 'Document', 'read')")
     public Document read(String id) { }
 }
 ```
 
-### Custom Permission Evaluator
-```java
-@Component
-public class CustomPermissionEvaluator implements PermissionEvaluator {
-    
-    @Override
-    public boolean hasPermission(Authentication auth, Object target, Object permission) {
-        if (target instanceof Document doc) {
-            return checkDocumentPermission(auth, doc, permission.toString());
-        }
-        return false;
-    }
-    
-    @Override
-    public boolean hasPermission(Authentication auth, Serializable targetId, 
-                                 String targetType, Object permission) {
-        // Load object and check
-        return checkPermissionById(auth, targetId, targetType, permission.toString());
-    }
-}
+Method security is proxy-based: a call from another method of the same bean bypasses it, and so does a `private` method.
 
-@Configuration
-@EnableMethodSecurity
-public class MethodSecurityConfig {
-    @Bean
-    public MethodSecurityExpressionHandler methodSecurityExpressionHandler(
-            CustomPermissionEvaluator evaluator) {
-        DefaultMethodSecurityExpressionHandler handler = 
-            new DefaultMethodSecurityExpressionHandler();
-        handler.setPermissionEvaluator(evaluator);
-        return handler;
-    }
-}
-```
+## Error Handling
 
-## Common Configurations
-
-### CORS Configuration
-```java
-@Bean
-public CorsConfigurationSource corsConfigurationSource() {
-    CorsConfiguration config = new CorsConfiguration();
-    config.setAllowedOrigins(List.of("https://app.example.com"));
-    config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
-    config.setAllowedHeaders(List.of("Authorization", "Content-Type"));
-    config.setExposedHeaders(List.of("X-Request-Id"));
-    config.setAllowCredentials(true);
-    config.setMaxAge(3600L);
-    
-    UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
-    source.registerCorsConfiguration("/api/**", config);
-    return source;
-}
-
-// In security config
-http.cors(cors -> cors.configurationSource(corsConfigurationSource()));
-```
-
-### Security Headers
-```java
-http.headers(headers -> headers
-    .contentSecurityPolicy(csp -> 
-        csp.policyDirectives("default-src 'self'; script-src 'self'"))
-    .frameOptions(frame -> frame.deny())
-    .xssProtection(xss -> xss.disable())  // Modern browsers don't need
-    .contentTypeOptions(Customizer.withDefaults())
-    .referrerPolicy(referrer -> 
-        referrer.policy(ReferrerPolicyHeaderWriter.ReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN))
-    .permissionsPolicy(permissions -> 
-        permissions.policy("geolocation=(), microphone=(), camera=()")));
-```
-
-### Error Handling
 ```java
 http.exceptionHandling(exceptions -> exceptions
     .authenticationEntryPoint((request, response, authException) -> {
@@ -263,78 +170,46 @@ http.exceptionHandling(exceptions -> exceptions
             """);
     }));
 ```
+Return fixed messages. Exception text can reveal which check failed or whether an account exists.
 
 ## Testing Security
 
-### Test Configuration
 ```java
 @SpringBootTest
 @AutoConfigureMockMvc
 class SecurityTest {
-    
+
     @Autowired
     private MockMvc mockMvc;
-    
+
     @Test
     void unauthenticatedRequest_returns401() throws Exception {
         mockMvc.perform(get("/api/protected"))
             .andExpect(status().isUnauthorized());
     }
-    
-    @Test
-    @WithMockUser(roles = "USER")
-    void authenticatedUser_canAccessProtected() throws Exception {
-        mockMvc.perform(get("/api/protected"))
-            .andExpect(status().isOk());
-    }
-    
+
     @Test
     @WithMockUser(roles = "USER")
     void regularUser_cannotAccessAdmin() throws Exception {
         mockMvc.perform(get("/api/admin"))
             .andExpect(status().isForbidden());
     }
-    
+
+    @Test
+    void unmappedRoute_isDenied() throws Exception {
+        mockMvc.perform(get("/not-listed").with(jwt()))
+            .andExpect(status().isForbidden());
+    }
+
     @Test
     void withJwt_canAccess() throws Exception {
         mockMvc.perform(get("/api/protected")
             .with(jwt()
-                .jwt(jwt -> jwt
-                    .subject("user-123")
-                    .claim("roles", List.of("USER"))
-                    .claim("aud", List.of("my-api")))))
+                .jwt(jwt -> jwt.subject("user-123"))
+                .authorities(new SimpleGrantedAuthority("ROLE_USER"))))
             .andExpect(status().isOk());
     }
 }
 ```
 
-### Custom Security Test Annotation
-```java
-@Target({ElementType.METHOD, ElementType.TYPE})
-@Retention(RetentionPolicy.RUNTIME)
-@WithSecurityContext(factory = WithMockAdminSecurityContextFactory.class)
-public @interface WithMockAdmin {
-    String username() default "admin";
-}
-
-public class WithMockAdminSecurityContextFactory 
-        implements WithSecurityContextFactory<WithMockAdmin> {
-    
-    @Override
-    public SecurityContext createSecurityContext(WithMockAdmin annotation) {
-        SecurityContext context = SecurityContextHolder.createEmptyContext();
-        
-        JwtAuthenticationToken auth = new JwtAuthenticationToken(
-            Jwt.withTokenValue("mock-token")
-                .header("alg", "RS256")
-                .subject(annotation.username())
-                .claim("roles", List.of("ADMIN"))
-                .build(),
-            List.of(new SimpleGrantedAuthority("ROLE_ADMIN"))
-        );
-        
-        context.setAuthentication(auth);
-        return context;
-    }
-}
-```
+`jwt()` and `@WithMockUser` put an `Authentication` in place without running the decoder, so they test authorization rules, not token validation. Test the `JwtDecoder` separately with tokens signed by a test key: wrong audience, wrong issuer, expired, wrong algorithm.

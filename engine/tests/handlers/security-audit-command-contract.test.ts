@@ -1,13 +1,13 @@
 /**
- * Binds `commands/security-audit.md` — and the authoritative operations table in
- * `docs/security-audit.md` — to the operation table they describe, on the model
- * of `spec-check-command-contract.test.ts`.
+ * Binds the operations table in `docs/security-audit.md` — the one table, which
+ * `commands/security-audit.md` points at — to the operation table it describes,
+ * on the model of `spec-check-command-contract.test.ts`.
  *
- * The command file is a hand-written mirror of a typed table `tsc` cannot see
+ * The doc's table is a hand-written mirror of a typed table `tsc` cannot see
  * and no other test reads. Every drift it can carry is a real defect an operator
- * meets at run time: an operation the command names that the program does not
+ * meets at run time: an operation the table names that the program does not
  * declare (a hard error, because the set is closed), an operation the program
- * declares that the command never mentions (a capability nobody reaches), an
+ * declares that the table never mentions (a capability nobody reaches), an
  * `input` column that disagrees with the traits table (a flags-only operation
  * invoked with a payload that is then silently ignored), or a claim that a
  * read-only projection survives a runtime skew when its traits say otherwise.
@@ -37,17 +37,14 @@ const tableRows = (document: string): readonly Row[] =>
       return match === null ? [] : [{ operation: match[1] ?? "", input: match[2] ?? "" }];
     });
 
-// The operator guide is where an operator reads what each operation refuses,
-// the command file is the parent's runbook: both tables are held to ONE rule.
-// The operation set is CLOSED, so an undeclared name is not a typo in the docs
-// — it is a command that exits "unknown operation" — and an operation missing
-// from a table is a capability (or a refusal set) nobody documented.
-describe.each([
-  ["docs/security-audit.md", operatorGuide],
-  ["commands/security-audit.md", command],
-] as const)("the operations table of %s", (_name, document) => {
+// The operator guide is where an operator reads what each operation takes and
+// refuses; it owns the ONE operations table. The operation set is CLOSED, so an
+// undeclared name is not a typo in the docs — it is a command that exits
+// "unknown operation" — and an operation missing from the table is a capability
+// (or a refusal set) nobody documented.
+describe("the operations table of docs/security-audit.md", () => {
   it("names every operation the program declares, exactly once, and no other", () => {
-    const rows = tableRows(document);
+    const rows = tableRows(operatorGuide);
     expect(rows.length).toBeGreaterThan(0);
     const named = rows.map((row) => row.operation);
     expect(new Set(named).size).toBe(named.length);
@@ -56,30 +53,40 @@ describe.each([
   });
 
   it("declares, for each operation, the input the traits table declares", () => {
-    for (const row of tableRows(document)) {
+    for (const row of tableRows(operatorGuide)) {
       expect(["stdin", "flags"]).toContain(row.input);
       expect(row.input, row.operation).toBe(SECURITY_AUDIT_OPERATIONS[row.operation as keyof typeof SECURITY_AUDIT_OPERATIONS].input);
     }
   });
-});
 
-describe("commands/security-audit.md", () => {
   it("tells the operator which projections survive a runtime skew", () => {
     const available = Object.entries(SECURITY_AUDIT_OPERATIONS)
       .filter(([, traits]) => traits.runtimeSkew === "available")
       .map(([operation]) => operation)
       .sort();
-    // The command says "`status`, `findings` and `nonce` stay available while
-    // the Pi runtime is skewed". If the traits change, that sentence is wrong,
-    // and an operator recovering from a skew is exactly who reads it.
+    // The guide says "`status`, `findings` and `nonce` are read-only … and stay
+    // available while the Pi runtime is skewed". If the traits change, that
+    // sentence is wrong, and an operator recovering from a skew is exactly who
+    // reads it.
     expect(available).toEqual(["findings", "nonce", "status"]);
-    for (const operation of available) {
-      expect(command, operation).toContain(`\`${operation}\``);
-    }
+    const prose = operatorGuide.replace(/\s+/g, " ");
+    expect(prose).toContain("`status`, `findings` and `nonce` are read-only");
+    expect(prose).toContain("stay available while the Pi runtime is skewed");
     for (const operation of Object.keys(SECURITY_AUDIT_OPERATIONS)) {
       if (available.includes(operation)) continue;
       expect(securityAuditOperationWrites(operation as keyof typeof SECURITY_AUDIT_OPERATIONS), operation).toBe(true);
     }
+  });
+});
+
+describe("commands/security-audit.md", () => {
+  it("keeps no operations table of its own and points at the guide's", () => {
+    // One owner per fact: a second table is a second place to drift. The
+    // command is the parent's entry point, so it must send the parent to the
+    // table the block above binds.
+    expect(tableRows(command)).toEqual([]);
+    expect(command).toContain("docs/security-audit.md");
+    expect(command).toContain("skills/security-audit/SKILL.md");
   });
 
   it("names the run directory as the argument every operation takes", () => {
