@@ -7,20 +7,18 @@
  * already left pending; without it both the pre-lock and locked guards refuse.
  */
 
-import { lstatSync, readFileSync } from "node:fs";
+import { lstatSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { HookHandler, HookResult, TaskGraph } from "../../types";
 import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import { validateFull, fixFull } from "./validate-task-graph";
 import {
-  checkPlanTextBindings,
+  checkPlanModelBindings,
   productionModelBindingDeps,
-  readBindingPlan,
-  type PlanReadResult,
+  type ParsedPlan,
+  type PlanBindingDeps,
 } from "./validate-model-bindings";
-import { artifactDigestOfBytes } from "../../core/digest";
-import type { ArtifactDigest } from "../../core/orchestration-contract/identity";
 import { populationPlanDesignRequirement } from "../../core/plan-design-review";
 import { argumentValue, hasFlag } from "./cli-args";
 import {
@@ -39,7 +37,6 @@ import { observeExactHead } from "../../utils/git";
 import { runGit } from "../../utils/git-execution-policy";
 import { renderProofBoundaryNotice } from "../../core/proof-boundary-observation";
 import { acceptanceObservationProblem } from "../../core/acceptance-contract";
-import { parsePlanExportBindings, type PlanModels } from "../../core/parse-plan-models";
 import { distillPlanNote, isDistillTask } from "../../core/distill-task";
 import { parseDecomposeEnvelope, parseDecomposeInput, type DecomposeEnvelope, type DecomposeInput } from "../../core/decompose-payload";
 import { isRecord } from "../../core/plain-record";
@@ -294,31 +291,8 @@ type LockedPopulation =
   | Extract<TaskGraphPopulationResult, { ok: true }>
   | Readonly<{ ok: false; message: string }>;
 
-/** The plan file's bytes, or why they could not be read. */
-type PlanBytesRead =
-  | Readonly<{ ok: true; bytes: Uint8Array }>
-  | Readonly<{ ok: false; error: string }>;
-
-/** Port: the one read population makes of the plan. */
-type ReadPlanBytes =(path: string) => PlanBytesRead;
-
-const readPlanFile: ReadPlanBytes = (path) => {
-  try {
-    return { ok: true, bytes: readFileSync(path) };
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
-  }
-};
-
-/** The plan as population consumes it: its text for the binding check and the digest of the same bytes for the design gate. */
-type PopulationPlan = Readonly<{ content: string; sha256: ArtifactDigest }>;
-
-const populationPlan = (read: ReadPlanBytes) => (path: string): PlanReadResult<PopulationPlan> => {
-  const bytes = read(path);
-  return bytes.ok
-    ? { ok: true, plan: { content: Buffer.from(bytes.bytes).toString("utf-8"), sha256: artifactDigestOfBytes(bytes.bytes) } }
-    : bytes;
-};
+/** Port: the one read population makes of the plan, the binding check's own. */
+type ReadPlan = PlanBindingDeps["readPlan"];
 
 const bindingFailure = (errors: readonly string[]): HookResult => ({
   kind: "error",
@@ -345,7 +319,7 @@ function populationSummary({ state, waves }: Extract<TaskGraphPopulationResult, 
  * verdicts exist only via the evidence ledger, mirroring the refusal in
  * store-test-evidence.
  */
-async function populateFromDecompose(readPlan: ReadPlanBytes, stdin: string, args: string[]): Promise<HookResult> {
+async function populateFromDecompose(readPlan: ReadPlan, stdin: string, args: string[]): Promise<HookResult> {
   // Resolved at call time (not import time) so env re-pointing is honored.
   const statePath = taskGraphPath();
   const mgr = StateManager.fromPath(statePath);
@@ -436,14 +410,6 @@ function loadExistingState(mgr: StateManager, statePath: string): PopulationStep
   }
 }
 
-/** The plan read once and checked: its path, the digest of its bytes, its validated models and export bindings. */
-type CheckedPlan = Readonly<{
-  path: string;
-  sha256: ArtifactDigest;
-  models: PlanModels;
-  exportBindings: ReturnType<typeof parsePlanExportBindings>;
-}>;
-
 /**
  * Executable-models policy: bindings are enforced here fail-closed —
  * validate-task-graph's 4a run is advisory to the orchestrator, this is the
@@ -459,31 +425,24 @@ type CheckedPlan = Readonly<{
  * file to disarm the check. The SAME resolved path is persisted —
  * persisting the payload's path would disarm the wave-gate lifecycle check.
  *
- * The plan is read ONCE, through `readPlan`: the binding check validates
- * these bytes, the export bindings population stamps are parsed from them,
- * and the plan design gate compares their digest, so a plan edited between
- * the three can never stamp bindings that were not checked nor pass a review
- * of other bytes.
+ * The plan is read ONCE, through `readPlan`, by the binding check itself: it
+ * validates these bytes, and the `ParsedPlan` it returns carries the export
+ * bindings population stamps and the digest the plan design gate compares, all
+ * from the same bytes, so a plan edited between them can never stamp bindings
+ * that were not checked nor pass a review of other bytes.
  */
 function readCheckedPlan(
-  readPlan: ReadPlanBytes,
+  readPlan: ReadPlan,
   existingState: TaskGraph,
   decompose: DecomposeInput,
   payload: DecomposeEnvelope,
-): PopulationStep<CheckedPlan> {
-  const plan = readBindingPlan(
+): PopulationStep<ParsedPlan> {
+  const bindings = checkPlanModelBindings(
     existingState.plan_file ?? existingState.phase_artifacts?.architecture ?? decompose.plan_file,
-    populationPlan(readPlan),
+    payload.tasks.filter(isRecord),
+    { ...productionModelBindingDeps, readPlan },
   );
-  if (!plan.ok) return { ok: false, result: bindingFailure(plan.errors) };
-  const bindings = checkPlanTextBindings(plan.plan.content, payload.tasks.filter(isRecord), productionModelBindingDeps);
-  if (!bindings.ok) return { ok: false, result: bindingFailure(bindings.errors) };
-  return { ok: true, value: {
-    path: plan.path,
-    sha256: plan.plan.sha256,
-    models: bindings.models,
-    exportBindings: parsePlanExportBindings(plan.plan.content),
-  } };
+  return bindings.ok ? { ok: true, value: bindings.plan } : { ok: false, result: bindingFailure(bindings.errors) };
 }
 
 type PreparedPopulation = Readonly<{ command: TaskGraphPopulationCommand; manifest: FrozenVerificationManifest }>;
@@ -499,7 +458,7 @@ function preparePopulation(
   statePath: string,
   existingState: TaskGraph,
   decompose: DecomposeInput,
-  plan: CheckedPlan,
+  plan: ParsedPlan,
   args: PopulateArgs,
 ): PopulationStep<PreparedPopulation> {
   const repositoryRoot = canonicalGitRoot();
@@ -549,30 +508,25 @@ type ObservedPopulation = Pick<
 
 function populationCommand(
   decompose: DecomposeInput,
-  plan: CheckedPlan,
+  plan: ParsedPlan,
   { issue, repo, force }: PopulateArgs,
   observed: ObservedPopulation,
 ): TaskGraphPopulationCommand {
-  const { exportBindings } = plan;
   return Object.freeze({
+    ...observed,
     planTitle: decompose.plan_title,
     validatedPlanFile: plan.path,
     ...(decompose.spec_file === undefined ? {} : { authoredSpecFile: decompose.spec_file }),
-    tasks: observed.tasks,
-    verificationManifest: observed.verificationManifest,
-    specIndex: observed.specIndex,
-    observedSpecFile: observed.observedSpecFile,
     force,
     ...(issue === undefined ? {} : { issue }),
     ...(repo === undefined ? {} : { repo }),
-    proofBoundary: observed.proofBoundary,
     contracts: plan.models.contracts,
     // Validated by checkPlanModelBindings (exemptions included), so the
     // locked transform stamps Owner Obligations from proven plan data.
     invariants: plan.models.invariants,
     // Validated by checkPlanModelBindings from the same plan bytes;
     // population re-validates them against the roster before stamping.
-    ...(exportBindings === undefined ? {} : { exportBindings }),
+    exportBindings: plan.exportBindings,
   });
 }
 
@@ -588,7 +542,7 @@ async function applyPopulation(
   mgr: StateManager,
   existingState: TaskGraph,
   command: TaskGraphPopulationCommand,
-  plan: CheckedPlan,
+  plan: ParsedPlan,
 ): Promise<PopulationStep<PopulatedGraph>> {
   const populate = (existing: TaskGraph): LockedPopulation => {
     const designRequirement = populationPlanDesignRequirement(existing, plan.sha256, plan.path);
@@ -638,7 +592,7 @@ function populatedResult(populated: PopulatedGraph, manifest: FrozenVerification
 }
 
 /** The populate helper over `readPlan`, the one read it makes of the plan; production reads the file. */
-export const createPopulateTaskGraphHandler = (readPlan: ReadPlanBytes = readPlanFile): HookHandler =>
+export const createPopulateTaskGraphHandler = (readPlan: ReadPlan = productionModelBindingDeps.readPlan): HookHandler =>
   (stdin, args) => populateFromDecompose(readPlan, stdin, args);
 
 export default createPopulateTaskGraphHandler();

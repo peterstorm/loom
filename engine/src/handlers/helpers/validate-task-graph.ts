@@ -870,8 +870,8 @@ const handler: HookHandler = async (stdin, args) => {
         message: [`Executable-model binding validation FAILED (${bindings.errors.length} errors):`, ...bindings.errors.map((e) => `  - ${e}`)].join("\n"),
       };
     }
-    const models = bindings.models;
-    if (models && (models.lifecycles.length > 0 || models.pipeline !== null || models.invariants.length > 0)) {
+    const { models } = bindings.plan;
+    if (models.lifecycles.length > 0 || models.pipeline !== null || models.invariants.length > 0) {
       process.stderr.write(`Executable-model bindings valid: ${models.lifecycles.length} lifecycles, ${models.pipeline ? 1 : 0} pipeline, ${models.invariants.length} invariants\n`);
     }
   }

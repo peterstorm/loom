@@ -25,8 +25,8 @@ import { capturedSpecCheck } from "../../src/core/spec-check";
 import { canonicalSpecBeside } from "../fixtures/spec-index-fixture";
 import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
 import { parseDecomposeEnvelope } from "../../src/core/decompose-payload";
-import { sha256Hex } from "../../src/core/digest";
-import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract/identity";
+import { artifactDigestOfBytes, sha256Hex } from "../../src/core/digest";
+import { parseArtifactDigest, parseOrchestrationRunId, type ArtifactDigest } from "../../src/core/orchestration-contract/identity";
 import {
   PLAN_DESIGN_REVIEW_REQUIRED,
   PLAN_DESIGN_REVIEW_SKIPPED,
@@ -831,12 +831,13 @@ describe("populate-task-graph — the validator and the typed parser cannot disa
 
 describe("populate-task-graph — asks the plan design gate on first population (ADR-0070)", () => {
   const PLAN_TEXT = "# Plan\n\nNo models.\n";
-  const accepted = (planText: string): RecordedPlanDesignReview => ({
+  const acceptedDigest = (planSha256: ArtifactDigest): RecordedPlanDesignReview => ({
     status: "accepted",
-    planSha256: value(parseArtifactDigest(sha256Hex(planText))),
+    planSha256,
     runId: value(parseOrchestrationRunId("design")),
     resultDigest: value(parseArtifactDigest("a".repeat(64))),
   });
+  const accepted = (planText: string): RecordedPlanDesignReview => acceptedDigest(value(parseArtifactDigest(sha256Hex(planText))));
 
   it.each<[string, RecordedPlanDesignReview, string]>([
     ["a review is still required", PLAN_DESIGN_REVIEW_REQUIRED, "has no accepted design review"],
@@ -881,12 +882,28 @@ describe("populate-task-graph — asks the plan design gate on first population 
 
   describe("reads the plan once, through its injected read", () => {
     const REVIEWED = "# Plan\n\nThe reviewed bytes.\n";
-    /** A plan read that serves `text` whatever the file holds, recording each path it was asked for. */
-    const servingPlan = (text: string, reads: string[]) =>
+    /** A plan read that serves `plan` whatever the file holds, recording each path it was asked for. */
+    const servingPlan = (plan: string | Uint8Array, reads: string[]) =>
       createPopulateTaskGraphHandler((path) => {
         reads.push(path);
-        return { ok: true, bytes: Buffer.from(text) };
+        return { ok: true, bytes: typeof plan === "string" ? Buffer.from(plan) : plan };
       });
+
+    it("gates on the digest of the raw bytes, so a plan that is not UTF-8 matches a review of exactly those bytes", async () => {
+      // Decoding replaces the 0xff byte, so a digest of the decoded text would not match the review.
+      const bytes = Uint8Array.from([...Buffer.from(REVIEWED), 0xff, 0x0a]);
+      expect(sha256Hex(Buffer.from(bytes).toString("utf-8"))).not.toBe(artifactDigestOfBytes(bytes));
+      const dir = tempDir();
+      const plan = modelFreePlan(dir);
+      writeState(dir, plan, [], {
+        current_phase: "decompose",
+        plan_design_review: acceptedDigest(artifactDigestOfBytes(bytes)),
+      });
+      const reads: string[] = [];
+
+      expect((await servingPlan(bytes, reads)(decomposeJson(plan), [])).kind).toBe("passthrough");
+      expect(reads).toEqual([plan]);
+    });
 
     it("gates on the digest of the bytes that read returned: an accepted review of them populates though the file differs", async () => {
       const dir = tempDir();

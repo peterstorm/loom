@@ -17,6 +17,7 @@ import {
   checkPlanModelBindings,
   validateModelBindings,
   type ModelBindingDeps,
+  type PlanBindingDeps,
 } from "../../src/handlers/helpers/validate-model-bindings";
 
 const PLAN_FILE = ".claude/plans/exemption.md";
@@ -53,10 +54,10 @@ const EVERY_PATH_PRESENT: Pick<ModelBindingDeps, "pathPresence"> = { pathPresenc
 /** No file is readable: validation over already-parsed models. */
 const DEPS: ModelBindingDeps = { ...EVERY_PATH_PRESENT, readFile: () => ({ ok: false, error: "ENOENT" }) };
 
-/** The populate / repair / validate entry point over plan text: only `PLAN_FILE` is readable. */
-const DEPS_WITH_PLAN = (text: string): ModelBindingDeps => ({
-  ...EVERY_PATH_PRESENT,
-  readFile: (path) => path === PLAN_FILE ? { ok: true, content: text } : { ok: false, error: "ENOENT" },
+/** The populate / repair / validate entry point over plan text: only the plan, `PLAN_FILE`, is readable. */
+const DEPS_WITH_PLAN = (text: string): PlanBindingDeps => ({
+  ...DEPS,
+  readPlan: (path) => path === PLAN_FILE ? { ok: true, bytes: Buffer.from(text) } : { ok: false, error: "ENOENT" },
 });
 
 const errorsOf = (text: string): readonly string[] => {
@@ -127,7 +128,7 @@ describe("mutation exemption grammar (CT-1)", () => {
     const admitted = checkPlanModelBindings(PLAN_FILE, [], DEPS_WITH_PLAN(reasoned));
     expect(admitted.kind).toBe("validated");
     if (admitted.kind === "validated") {
-      const ownership = admitted.models.invariants[0]!.ownership;
+      const ownership = admitted.plan.models.invariants[0]!.ownership;
       expect(ownership).toMatchObject({ kind: "owned", mutation: { kind: "exempt", reason: "equivalent mutants only" } });
     }
   });

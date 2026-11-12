@@ -9,10 +9,12 @@ import {
   validateModelBindings,
   checkPlanModelBindings,
   type ModelBindingDeps,
+  type PlanBindingDeps,
 } from "../../src/handlers/helpers/validate-model-bindings";
 import { pathsMatch } from "../../src/core/plan-path-match";
 import { parseTaskVerificationPolicy } from "../../src/core/verification-policy";
-import { parsePlanModels, type PlanInvariant, type PlanModels } from "../../src/core/parse-plan-models";
+import { artifactDigestOfBytes, sha256Hex } from "../../src/core/digest";
+import { parsePlanExportBindings, parsePlanModels, type PlanInvariant, type PlanModels } from "../../src/core/parse-plan-models";
 import type { ContractProblem, InvariantOwnership, OwnershipProblem } from "../../src/types";
 import { invariantId } from "../fixtures/owner-obligation";
 
@@ -27,19 +29,32 @@ function expectError(r: { ok: true } | { ok: false; errors: readonly string[] },
 
 const NO_MODELS: PlanModels = { lifecycles: [], pipeline: null, invariants: [], contracts: [], strays: [] };
 
-const NO_FILES: ModelBindingDeps = {
+const NO_FILES: PlanBindingDeps = {
   readFile: (path) => ({ ok: false, error: `ENOENT: ${path}` }),
+  readPlan: (path) => ({ ok: false, error: `ENOENT: ${path}` }),
   pathPresence: () => ({ kind: "absent" }),
 };
 
-function depsWith(files: Record<string, string>): ModelBindingDeps {
+function depsWith(files: Record<string, string>): PlanBindingDeps {
   return {
     readFile: (path) => path in files
       ? { ok: true, content: files[path]! }
       : { ok: false, error: `ENOENT: ${path}` },
+    readPlan: (path) => path in files
+      ? { ok: true, bytes: Buffer.from(files[path]!) }
+      : { ok: false, error: `ENOENT: ${path}` },
     pathPresence: (path) => (path in files ? { kind: "present" } : { kind: "absent" }),
   };
 }
+
+/** No files, but a plan read that serves `bytes` for any path, recording each path it was asked for. */
+const servingPlanBytes = (bytes: Uint8Array, reads: string[]): PlanBindingDeps => ({
+  ...NO_FILES,
+  readPlan: (path) => {
+    reads.push(path);
+    return { ok: true, bytes };
+  },
+});
 
 const UNOWNED: InvariantOwnership = { kind: "unowned", reason: "a prohibition" };
 const CHECKABLE: PlanInvariant["tier"] = { status: "ok", tier: "checkable" };
@@ -632,6 +647,39 @@ describe("checkPlanModelBindings (fail-closed entry point)", () => {
   it("errors when the plan declares near-miss model markers", () => {
     const deps = depsWith({ "plan.md": "# Plan\n\n## Lifecycles:\n\n### LC-1: Order\n\n**Machine file:** m.ts\n" });
     expectError(checkPlanModelBindings("plan.md", [], deps), "Model declaration problem");
+  });
+
+  it("reads the plan once, through readPlan, and digests its raw bytes beside the models parsed from them", () => {
+    // Not UTF-8: decoding replaces the 0xff byte, so a digest of the decoded text differs from the bytes'.
+    const bytes = Uint8Array.from([...Buffer.from(PLAN_WITH_LC), 0xff, 0x0a]);
+    const text = Buffer.from(bytes).toString("utf-8");
+    expect(sha256Hex(text)).not.toBe(artifactDigestOfBytes(bytes));
+    const reads: string[] = [];
+
+    // NO_FILES refuses every readFile, so the plan can only have come through readPlan.
+    const check = checkPlanModelBindings("plan.md", [task({ file_list: ["src/order-machine.ts"] })], servingPlanBytes(bytes, reads));
+
+    expect(reads).toEqual(["plan.md"]);
+    expect(check).toMatchObject({
+      kind: "validated",
+      plan: { path: "plan.md", sha256: artifactDigestOfBytes(bytes), models: parsePlanModels(text) },
+    });
+  });
+
+  it("carries the export bindings parsed from the bytes it checked, when they fail too", () => {
+    const text = [
+      "# Plan", "",
+      "## File Structure", "",
+      "**Export bindings:**",
+      "- `src/payload-impl.ts` — CT-9: handlePayload: PayloadFn", "",
+    ].join("\n");
+    expect(parsePlanExportBindings(text).bindings).toHaveLength(1);
+    const reads: string[] = [];
+
+    const check = checkPlanModelBindings("plan.md", [], servingPlanBytes(Buffer.from(text), reads));
+
+    expect(reads).toEqual(["plan.md"]);
+    expect(check).toMatchObject({ kind: "invalid-bindings", plan: { exportBindings: parsePlanExportBindings(text) } });
   });
 });
 
