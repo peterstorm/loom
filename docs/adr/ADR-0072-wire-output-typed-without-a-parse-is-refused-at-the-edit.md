@@ -93,9 +93,12 @@ Loom's own list is empty: its sites are fixed, not recorded.
 - `as unknown as T` is no longer a way past `no-unsafe-as-any` for a wire value.
 - A target project adopting the rule on an existing codebase runs `--write-baseline` once; the list only
   shrinks.
-- The rule reads the file twice (lexical spans, bracket pairs). Measured on a 10,500-line, 515 kB file with
-  4,500 wire calls it takes about half of the 50 ms per-file budget; a file with no wire call costs a
-  substring search.
+- The rule reads the file twice (lexical spans, bracket pairs) and its cost grows linearly with the text.
+  On a CI runner a 10,500-line, 515 kB file with 4,500 wire calls (3,000 of them sites) took about 50 ms,
+  the whole per-file budget: roughly 5 µs per line. A file that large and that dense in wire calls can
+  therefore overrun the deadline on slow hardware, and the edit then fails closed with a timeout error.
+  The test pins a 2,100-line file of the same shape inside the budget and pins linear growth as a ratio
+  between two sizes. A file with no wire call costs a substring search.
 
 ## Known limits
 The rule reads text and has no type information. None of the following is caught:

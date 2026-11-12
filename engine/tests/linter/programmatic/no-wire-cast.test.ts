@@ -415,8 +415,16 @@ describe("no-wire-cast properties", () => {
 describe("no-wire-cast inside the per-edit budget", () => {
   /** The hook's per-file deadline (`DEFAULT_TIMEOUT_MS` in `linter/index.ts`), which every immediate rule shares. */
   const PER_FILE_BUDGET_MS = 50;
-  const FUNCTIONS = 1_500;
-  const LARGE = Array.from({ length: FUNCTIONS }, (_, index) => [
+  /** Each generated function: seven lines, three wire calls, two of them sites (the `as Head` and the typed assignment). */
+  const LINES_PER_FUNCTION = 7;
+  const SITES_PER_FUNCTION = 2;
+  /**
+   * 2,100 lines with 600 sites: a large source file, sized to leave real margin on slow hardware. The rule
+   * costs about 5 µs per line of this shape on a CI runner (10,500 lines with 3,000 sites measured about
+   * 50 ms there, the whole budget), so this file takes about a fifth of it.
+   */
+  const FUNCTIONS = 300;
+  const fileOf = (functions: number): string => Array.from({ length: functions }, (_, index) => [
     `export function load${index}(text: string, response: Response): Order {`,
     `  const raw: unknown = JSON.parse(text); // not "JSON.parse(text) as Order"`,
     `  const head = JSON.parse(text) as Head${index};`,
@@ -425,19 +433,34 @@ describe("no-wire-cast inside the per-edit budget", () => {
     `  return parseOrder(raw, head, order, /[(]\\d+[)]/.test(text));`,
     `}`,
   ].join("\n")).join("\n");
+  const LARGE = fileOf(FUNCTIONS);
 
-  it("reads a 10,000-line file with thousands of sites well inside it", () => {
-    expect(LARGE.split("\n")).toHaveLength(FUNCTIONS * 7);
-    const elapsed = Array.from({ length: 5 }, () => {
-      const started = performance.now();
-      const violations = lint(LARGE);
-      const spent = performance.now() - started;
-      expect(violations).toHaveLength(FUNCTIONS * 2);
-      return spent;
-    });
+  /** One timed run of the rule over a generated file of `functions` functions, checking it found every site. */
+  const timedRun = (source: string, functions: number): number => {
+    const started = performance.now();
+    const violations = lint(source);
+    const spent = performance.now() - started;
+    expect(violations).toHaveLength(functions * SITES_PER_FUNCTION);
+    return spent;
+  };
+
+  it(`reads a ${(FUNCTIONS * LINES_PER_FUNCTION).toLocaleString("en-US")}-line file with ${FUNCTIONS * SITES_PER_FUNCTION} sites inside the budget`, () => {
+    expect(LARGE.split("\n")).toHaveLength(FUNCTIONS * LINES_PER_FUNCTION);
+    const elapsed = Array.from({ length: 5 }, () => timedRun(LARGE, FUNCTIONS));
     // The fastest of five runs: the cost of the rule, not of whatever else the machine was doing.
     expect(Math.min(...elapsed)).toBeLessThan(PER_FILE_BUDGET_MS);
-    expect(lint(LARGE).at(-1)?.line).toBe(FUNCTIONS * 7 - 2);
+    expect(lint(LARGE).at(-1)?.line).toBe(FUNCTIONS * LINES_PER_FUNCTION - 2);
+  });
+
+  it("grows linearly with the file: four times the text costs well under twelve times the time", () => {
+    // A ratio, not a deadline, so machine speed cancels out: a linear scan pays about 4×, a scan gone
+    // quadratic 16×. Each size is the fastest of five runs, taken in alternation so drift and warm-up
+    // fall on both alike.
+    const quadruple = fileOf(FUNCTIONS * 4);
+    const runs = Array.from({ length: 5 }, () => [timedRun(LARGE, FUNCTIONS), timedRun(quadruple, FUNCTIONS * 4)] as const);
+    const fastestOnce = Math.min(...runs.map(([once]) => once));
+    const fastestFourfold = Math.min(...runs.map(([, fourfold]) => fourfold));
+    expect(fastestFourfold).toBeLessThan(fastestOnce * 12);
   });
 
   it("answers a file that names neither call without reading it", () => {
