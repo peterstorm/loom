@@ -114,7 +114,7 @@ Reference these guidelines when:
 
 - `advanced-event-handler-refs` - Store event handlers in refs
 - `advanced-init-once` - Initialize app once per app load
-- `advanced-use-latest` - useLatest for stable callback refs
+- `advanced-use-latest` - useEffectEvent for stable callback refs
 
 ## How to Use
 
@@ -130,7 +130,3 @@ Each rule file contains:
 - Incorrect code example with explanation
 - Correct code example with explanation
 - Additional context and references
-
-## Full Compiled Document
-
-For the complete guide with all rules expanded: `AGENTS.md`
