@@ -6,6 +6,8 @@
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
+import type { ArtifactDigest, OrchestrationRunId } from "../../src/core/orchestration-contract/identity";
+import type { TaskId } from "../../src/core/task-id";
 import { parseReopenRequest } from "../../src/core/wave-reopening-request";
 import { notAJsonObject } from "../fixtures/json-wire";
 import { refusal, value } from "../fixtures/parse-result";
@@ -30,6 +32,15 @@ describe("parseReopenRequest", () => {
     }));
   });
 
+  it("returns each field as the identity its parse proved: a run id, an artifact digest and a non-empty list of Task ids", () => {
+    const request = value(parseReopenRequest(JSON.stringify(VALID)));
+    // Compile-time: each assignment typechecks only while the parsed type carries the brand.
+    const runId: OrchestrationRunId = request.runId;
+    const authorityDigest: ArtifactDigest = request.authorityDigest;
+    const [first, ...rest]: readonly [TaskId, ...TaskId[]] = request.taskIds;
+    expect({ runId, authorityDigest, taskIds: [first, ...rest] }).toEqual({ runId: VALID.runId, authorityDigest: DIGEST, taskIds: VALID.taskIds });
+  });
+
   it("refuses text that is not JSON, keeping the JSON parser's cause", () => {
     expect(refusal(parseReopenRequest("{"))).toMatch(/^reopening payload must be valid JSON: .+/);
   });
@@ -49,6 +60,8 @@ describe("parseReopenRequest", () => {
 
   it.each([
     ["a blank runId", { ...VALID, runId: "  " }],
+    ["a runId that is not a canonical run id", { ...VALID, runId: "wave run 3" }],
+    ["a runId that names a path", { ...VALID, runId: "../wave-run" }],
     ["a zero wave", { ...VALID, wave: 0 }],
     ["a fractional wave", { ...VALID, wave: 1.5 }],
     ["a wave given as text", { ...VALID, wave: "3" }],

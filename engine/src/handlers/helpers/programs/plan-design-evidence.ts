@@ -14,17 +14,9 @@ import type { StandaloneDispositionPublicationReference } from "../../../core/st
 import { parseStandaloneReviewerRole, type StandaloneReviewerRole } from "../../../core/standalone-review-scope";
 import { describeCause } from "../../../utils/describe-cause";
 import { failed, type ProgramParse } from "./program-result";
-import type { RegisteredStandaloneProgram } from "./registration";
+import { readObligated } from "./registration";
 import { readSelectedStandaloneDisposition } from "./standalone-disposition-source";
 import { readAuthenticatedStandaloneRun } from "./standalone-source";
-
-/**
- * Whether the Run was registered with the read obligation (ADR-0022). Only a
- * schema-2 registration carrying the read-coverage policy obliges it; a v1
- * Run, a v2 Run without the policy and a successor (v3) Run do not.
- */
-export const readObligated = (registration: RegisteredStandaloneProgram): boolean =>
-  registration.schemaVersion === 2 && registration.readCoverage !== undefined;
 
 type FrozenPlanScope = PlanDesignEvidence["scope"];
 

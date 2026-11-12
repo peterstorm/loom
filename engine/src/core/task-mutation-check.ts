@@ -45,6 +45,7 @@ import { TASK_MUTATION_OPERATORS, type TaskMutant, type TaskMutationOperator } f
 import { contractTaskIdsOf } from "./owner-verification/obligations";
 import type { MatrixTestRun } from "./owner-verification/types";
 import { isRepoRelativePlanPath, normalizePlanPath } from "./plan-path-match";
+import { isRecord, type UnknownRecord } from "./plain-record";
 import { parseJunitTestcases } from "./structured-test-report";
 import { frozenRedThenGreenEra } from "./proof-obligations";
 import { quoteShellArgument } from "./shell-quoting";
@@ -350,9 +351,6 @@ type TaskMutationResultFields =
   | Readonly<{ kind: "inconclusive"; invalid: number; candidates: number }>
   | Readonly<{ kind: "unavailable"; reason: string }>;
 
-/** The kinds a result can be, in the order the record's parser names them. */
-const TASK_MUTATION_RESULT_KINDS = Object.freeze(["no-mutants", "clean", "survivors", "inconclusive", "unavailable"] as const);
-
 /** A run's tallies before the result's invariants are checked. */
 export type TaskMutationTally = Readonly<{
   candidates: number;
@@ -466,15 +464,12 @@ export function taskMutationRecordJson({ taskId, digest, result }: RecordedTaskM
   });
 }
 
-type UnknownRecord = Readonly<Record<string, unknown>>;
-
-const isRecord = (raw: unknown): raw is UnknownRecord => typeof raw === "object" && raw !== null && !Array.isArray(raw);
 const isList = (raw: unknown): raw is readonly unknown[] => Array.isArray(raw);
 const isPosition = (raw: unknown): raw is number => isCount(raw) && raw > 0;
 const isText = (raw: unknown): raw is string => typeof raw === "string" && raw !== "";
 
 /** The keys a record of this shape holds, or the refusal naming any other. */
-function exactKeys(raw: UnknownRecord, keys: readonly string[], path: string): string | null {
+function exactKeys(raw: Readonly<UnknownRecord>, keys: readonly string[], path: string): string | null {
   const unknown = Object.keys(raw).filter((key) => !keys.includes(key));
   const missing = keys.filter((key) => !(key in raw));
   if (unknown.length > 0) return `${path} has unknown key(s) ${unknown.join(", ")}`;
@@ -498,7 +493,7 @@ function parseSurvivor(raw: unknown, path: string): DomainResult<TaskSurvivor, s
 }
 
 /** A counted field of a decided result: a non-negative integer, or the refusal naming it. */
-function countAt(raw: UnknownRecord, key: string, path: string): DomainResult<number, string> {
+function countAt(raw: Readonly<UnknownRecord>, key: string, path: string): DomainResult<number, string> {
   const value = raw[key];
   return isCount(value) ? success(value) : failure(`${path}.${key} must be a non-negative integer`);
 }
@@ -514,7 +509,11 @@ function parseSurvivors(raw: unknown, path: string): DomainResult<NonEmpty<TaskS
   return isNonEmpty(survivors) ? success(survivors) : failure(`${path} must name at least one survivor`);
 }
 
-/** The wire keys each decided kind holds besides `kind`, in serialized order. */
+/**
+ * The wire keys each decided kind holds besides `kind`, in serialized order.
+ * Its keys are the decided kinds, in the order the parser names them: the
+ * one list of them, exhaustive by its type.
+ */
 const DECIDED_KEYS: Readonly<Record<Exclude<TaskMutationResult["kind"], "unavailable">, readonly string[]>> = Object.freeze({
   "no-mutants": [],
   "clean": ["killed", "invalid", "candidates"],
@@ -524,15 +523,17 @@ const DECIDED_KEYS: Readonly<Record<Exclude<TaskMutationResult["kind"], "unavail
 
 type DecidedKind = keyof typeof DECIDED_KEYS;
 
-const isDecidedKind = (raw: unknown): raw is DecidedKind =>
-  TASK_MUTATION_RESULT_KINDS.some((kind) => kind !== "unavailable" && kind === raw);
+const isDecidedKind = (raw: unknown): raw is DecidedKind => typeof raw === "string" && Object.hasOwn(DECIDED_KEYS, raw);
+
+/** Every kind a result's wire form may name, quoted, as the refusal of any other lists them. */
+const RESULT_KINDS_TEXT = [...Object.keys(DECIDED_KEYS), "unavailable"].map((kind) => `"${kind}"`).join(", ");
 
 /**
  * A decided result's wire form, through the one constructor: a document whose
  * counts make another kind than the one it names (a "clean" run with no kill,
  * say) is refused, never re-read as the kind its counts make.
  */
-function parseDecided(raw: UnknownRecord, kind: DecidedKind, path: string): DomainResult<TaskMutationResult, string> {
+function parseDecided(raw: Readonly<UnknownRecord>, kind: DecidedKind, path: string): DomainResult<TaskMutationResult, string> {
   const shape = exactKeys(raw, ["kind", ...DECIDED_KEYS[kind]], path);
   if (shape !== null) return failure(shape);
   const counted = (key: string): DomainResult<number, string> => key in raw ? countAt(raw, key, path) : success(0);
@@ -552,7 +553,7 @@ function parseDecided(raw: UnknownRecord, kind: DecidedKind, path: string): Doma
 function parseResult(raw: unknown, path: string): DomainResult<TaskMutationResult, string> {
   if (!isRecord(raw)) return failure(`${path} must be an object`);
   if (isDecidedKind(raw.kind)) return parseDecided(raw, raw.kind, path);
-  if (raw.kind !== "unavailable") return failure(`${path}.kind must be one of ${TASK_MUTATION_RESULT_KINDS.map((kind) => `"${kind}"`).join(", ")}`);
+  if (raw.kind !== "unavailable") return failure(`${path}.kind must be one of ${RESULT_KINDS_TEXT}`);
   const shape = exactKeys(raw, ["kind", "reason"], path);
   if (shape !== null) return failure(shape);
   return isText(raw.reason) ? success(taskMutationUnavailable(raw.reason)) : failure(`${path}.reason must be a non-empty string`);

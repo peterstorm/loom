@@ -25,6 +25,7 @@ import {
   type ImplementationAttemptAuthority,
 } from "../../src/core/implementation-completion";
 import type { WaveReviewContextAuthority } from "../../src/core/wave-review-authority";
+import { parseReopenRequest } from "../../src/core/wave-reopening-request";
 import { taskFixture, observedEvidence } from "../fixtures/task-lifecycle";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { findingId } from "../fixtures/finding-id";
@@ -80,7 +81,12 @@ const graph = (tasks: readonly Task[] = [task("T19", 3), task("T22", 3), pending
   tasks, wave_gates: { "3": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false } },
   wave_gate_history: [{ schemaVersion: 1, kind: "completed-wave-gate", runId: "wave-run", wave: 3, authorityDigest: digest, revision: 1, completionReceipt: receipt } as never],
 });
-const request = { runId: "wave-run", wave: 3, authorityDigest: digest, taskIds: ["T19", "T22"] };
+/** A reopening payload as the helper's parser admits it. */
+const reopenRequest = (raw: Readonly<{ runId: string; wave: number; authorityDigest: string; taskIds: readonly string[] }>) =>
+  value(parseReopenRequest(JSON.stringify(raw)));
+const request = reopenRequest({ runId: "wave-run", wave: 3, authorityDigest: digest, taskIds: ["T19", "T22"] });
+/** The Wave 3 request naming exactly `taskIds`. */
+const requestFor = (...taskIds: readonly string[]) => reopenRequest({ ...request, taskIds });
 
 function context(taskId: string, workspaceHeadSha?: string): WaveReviewContextAuthority {
   const taskRun = {
@@ -126,11 +132,11 @@ describe("reviewed workspace integrity", () => {
 
 describe("completed Wave reopening proof", () => {
   it("treats the realistic chatbot Wave 3 packets as legacy authority unverifiable and never observes their bytes", () => {
-    const chatbotRequest = {
+    const chatbotRequest = reopenRequest({
       runId: "wave-gate-w3-v2-20260822T185702Z", wave: 3,
       authorityDigest: "d211895cbd476d455f9005d1460428e607cf0d12e142b6d04575ca3b54bf07fc",
       taskIds: ["T19", "T22"],
-    };
+    });
     const chatbotGraph = graph([
       { ...task("T19", 3), review_generation: 5 }, task("T22", 3), pendingTask("T23", 4),
     ]);
@@ -151,7 +157,7 @@ describe("completed Wave reopening proof", () => {
 
   it("requires every completed Task for legacy/unverifiable authority and rejects the old partial recovery list", () => {
     const derived = deriveWaveReopeningProof(graph(), request, [context("T19"), context("T22")], () => []);
-    expect(() => reopenCompletedWave(graph(), { ...request, taskIds: ["T22"] }, derived)).toThrow("legacy-workspace-authority-unverifiable");
+    expect(() => reopenCompletedWave(graph(), requestFor("T22"), derived)).toThrow("legacy-workspace-authority-unverifiable");
     expect(reopenCompletedWave(graph(), request, derived).wave_reopening_history?.[0]).toMatchObject({
       kind: "completed-wave-reopened-for-review-integrity",
       proofMode: "legacy-workspace-authority-unverifiable",
@@ -165,19 +171,21 @@ describe("completed Wave reopening proof", () => {
     );
     expect(derived).toEqual(modernProof(["T22"]));
     expect(() => reopenCompletedWave(graph(), request, derived)).toThrow("exactly equal");
-    const reopened = reopenCompletedWave(graph(), { ...request, taskIds: ["T22"] }, derived);
+    const reopened = reopenCompletedWave(graph(), requestFor("T22"), derived);
     expect(reopened.wave_reopening_history?.[0]).toMatchObject({ proofMode: "modern-exact-workspace-drift", reopenedTaskIds: ["T22"] });
     expect(() => deriveWaveReopeningProof(graph(), request, [context("T19", head), context("T22", head)], () => [])).toThrow("could not be observed");
   });
 
+  // A parsed request names a non-empty list of distinct Task ids, so an empty or
+  // repeated list exists only as a forged proof: those rows keep the canonical request.
   it.each([
-    ["empty", modernProof([]), []],
-    ["duplicate", modernProof(["T19", "T19"]), ["T19", "T19"]],
-    ["forged", modernProof(["T999"]), ["T999"]],
-    ["wrong-Wave", modernProof(["T23"]), ["T23"]],
-  ] as const)("rejects %s structural proof Task IDs before changing terminal history", (_label, forged, taskIds) => {
+    ["empty", modernProof([]), request],
+    ["duplicate", modernProof(["T19", "T19"]), request],
+    ["forged", modernProof(["T999"]), requestFor("T999")],
+    ["wrong-Wave", modernProof(["T23"]), requestFor("T23")],
+  ] as const)("rejects %s structural proof Task IDs before changing terminal history", (_label, forged, named) => {
     const before = graph();
-    expect(() => reopenCompletedWave(before, { ...request, taskIds }, forged)).toThrow(/completed-Wave Task|unique|belong to completed Wave/i);
+    expect(() => reopenCompletedWave(before, named, forged)).toThrow(/completed-Wave Task|unique|belong to completed Wave/i);
     expect(before.wave_gate_history).toHaveLength(1);
     expect(before.wave_reopening_history).toBeUndefined();
   });

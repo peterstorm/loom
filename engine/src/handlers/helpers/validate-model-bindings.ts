@@ -441,19 +441,37 @@ export type PlanBindingCheck =
   /** Models were declared and every binding validated. */
   | { readonly kind: "validated"; readonly ok: true; readonly models: PlanModels };
 
+type PlanUnavailable = Extract<PlanBindingCheck, { kind: "plan-unavailable" }>;
+
+/** What a read of the plan yields: at least its text, and whatever else the caller read from the same bytes. */
+type PlanText = Readonly<{ content: string }>;
+
+/** One read of the plan: what it yielded, or why it could not be made. */
+export type PlanReadResult<Plan extends PlanText> =
+  | Readonly<{ ok: true; plan: Plan }>
+  | Readonly<{ ok: false; error: string }>;
+
 /**
- * Fail-closed entry point: read the plan, parse models, validate bindings.
+ * The plan the binding check validates: its path and what the one read of it
+ * yielded — so a caller whose read carries more than the text (populate's
+ * byte digest) keeps it beside the text it checked — or why it cannot be
+ * consulted.
+ */
+type BindingPlan<Plan extends PlanText> =
+  | Readonly<{ ok: true; path: string; plan: Plan }>
+  | PlanUnavailable;
+
+/**
+ * Read the plan the bindings are checked against, failing closed.
  *
  * - Non-string or empty `planFile` → plan-unavailable (the graph names no plan to check)
  * - Plan file unreadable → plan-unavailable (a graph must not pass validation
  *   because its plan cannot be read — that would let a typo'd path disarm the gate)
- * - Plan readable, no models declared → opted-out (genuine opt-out)
  */
-export function checkPlanModelBindings(
+export function readBindingPlan<Plan extends PlanText>(
   planFile: unknown,
-  tasks: readonly Record<string, unknown>[],
-  deps: ModelBindingDeps,
-): PlanBindingCheck {
+  read: (path: string) => PlanReadResult<Plan>,
+): BindingPlan<Plan> {
   if (typeof planFile !== "string" || planFile.trim().length === 0) {
     return {
       kind: "plan-unavailable",
@@ -461,16 +479,31 @@ export function checkPlanModelBindings(
       errors: ["plan_file must be a non-empty string path — executable-model bindings cannot be verified without the plan"],
     };
   }
-  const read = deps.readFile(planFile);
-  if (!read.ok) {
+  const result = read(planFile);
+  if (!result.ok) {
     return {
       kind: "plan-unavailable",
       ok: false,
-      errors: [`cannot read plan_file '${planFile}': ${read.error} — executable-model bindings cannot be verified (fix the path or run from the repo root)`],
+      errors: [`cannot read plan_file '${planFile}': ${result.error} — executable-model bindings cannot be verified (fix the path or run from the repo root)`],
     };
   }
-  const models = parsePlanModels(read.content);
-  const exportBindings = parsePlanExportBindings(read.content);
+  return { ok: true, path: planFile, plan: result.plan };
+}
+
+/** The binding port's text read as a plan read. */
+const planTextRead = (readFile: ModelBindingDeps["readFile"]) => (path: string): PlanReadResult<PlanText> => {
+  const read = readFile(path);
+  return read.ok ? { ok: true, plan: read } : read;
+};
+
+/** Parse the models of a plan that was read, and validate their bindings. No models declared → opted-out (genuine opt-out). */
+export function checkPlanTextBindings(
+  planText: string,
+  tasks: readonly Record<string, unknown>[],
+  deps: ModelBindingDeps,
+): Exclude<PlanBindingCheck, PlanUnavailable> {
+  const models = parsePlanModels(planText);
+  const exportBindings = parsePlanExportBindings(planText);
   // A model-free plan still validates: a Task may not claim the contract
   // new-test waiver when no contract exists to stand in for its tests.
   const result = validateModelBindings(models, tasks, deps, exportBindings);
@@ -478,4 +511,14 @@ export function checkPlanModelBindings(
   // Export bindings opt a plan in like any model; an invalid one never reaches here.
   const declared = hasModels(models) || exportBindings.bindings.length > 0;
   return declared ? { kind: "validated", ok: true, models } : { kind: "opted-out", ok: true, models };
+}
+
+/** Fail-closed entry point: read the plan (`readBindingPlan`), then parse its models and validate their bindings. */
+export function checkPlanModelBindings(
+  planFile: unknown,
+  tasks: readonly Record<string, unknown>[],
+  deps: ModelBindingDeps,
+): PlanBindingCheck {
+  const plan = readBindingPlan(planFile, planTextRead(deps.readFile));
+  return plan.ok ? checkPlanTextBindings(plan.plan.content, tasks, deps) : plan;
 }

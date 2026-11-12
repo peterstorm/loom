@@ -6,7 +6,7 @@
 
 import { readFileSync } from "node:fs";
 import type { HookHandler } from "../../types";
-import { failClosedInput } from "./pre-tool-use-input";
+import { failClosedGuard } from "./pre-tool-use-input";
 import { TASK_GRAPH_PATH, pathExistsFailClosed } from "../../config";
 import { UTILITY_AGENTS } from "../../core/phase-policy";
 import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS, REVIEW_PANEL_AGENTS, ARCH_PANEL_AGENTS, SECURITY_AUDIT_AGENTS } from "../../core/agent-catalog-projections";
@@ -56,20 +56,11 @@ export function parseSkillsFromFrontmatter(filePath: string): DeclaredSkills {
     : parsed;
 }
 
-const handler: HookHandler = async (stdin) => {
-  // ENOENT is the only "orchestration inactive" answer. Bare `existsSync`
-  // reads EACCES/ELOOP/ENOTDIR/EIO as absence too, which would let every
-  // subagent spawn past this gate unvalidated — the same fail-open the
-  // malformed-input branch below already refuses to take.
-  if (!pathExistsFailClosed(TASK_GRAPH_PATH)) return { kind: "allow" };
-
-  // Malformed hook input on a spawn-gate route: fail CLOSED. An uncaught
-  // parse crash exits 1 (NON-blocking for PreToolUse), letting a Task spawn
-  // without its required skill. (Route is in FAIL_CLOSED_ROUTES for crashes
-  // that escape this handler too.)
-  const parsed = failClosedInput("validate-agent-skill", stdin);
-  if (!parsed.ok) return parsed.block;
-  const { input } = parsed;
+// Malformed hook input on a spawn-gate route: fail CLOSED. An uncaught
+// parse crash exits 1 (NON-blocking for PreToolUse), letting a Task spawn
+// without its required skill. (Route is in FAIL_CLOSED_ROUTES for crashes
+// that escape this handler too.)
+const skillGuard = failClosedGuard("validate-agent-skill", (input) => {
   if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
 
   const subagentType = (input.tool_input?.subagent_type as string | undefined)
@@ -154,7 +145,15 @@ const handler: HookHandler = async (stdin) => {
   }
 
   return { kind: "allow" };
-};
+});
+
+// ENOENT is the only "orchestration inactive" answer. Bare `existsSync`
+// reads EACCES/ELOOP/ENOTDIR/EIO as absence too, which would let every
+// subagent spawn past this gate unvalidated — the same fail-open the
+// malformed-input guard refuses to take. The probe runs before the payload is
+// parsed: with no orchestration, even a malformed payload is allowed.
+const handler: HookHandler = async (stdin) =>
+  pathExistsFailClosed(TASK_GRAPH_PATH) ? skillGuard(stdin) : { kind: "allow" };
 
 // A brief marker is judged as the brief it expands to: the brief, not the
 // marker, must reference the agent's skill.

@@ -47,6 +47,7 @@ import { describeCause } from "../utils/describe-cause";
 import { readFileOrAbsence } from "../utils/file-absence";
 import type { CanonicalRepositoryRoot } from "../utils/workspace-digest";
 
+const UTF8 = new TextEncoder();
 const KEPT = /^[A-Za-z0-9-]$/;
 
 /**
@@ -54,12 +55,15 @@ const KEPT = /^[A-Za-z0-9-]$/;
  * stay as they are, and every other UTF-8 byte (`_` included) becomes `_`
  * and its two lowercase hex digits. Each escape has a fixed width and `_`
  * never stands for itself, so two distinct ids never share a segment, and the
- * segment holds no path separator.
+ * segment holds no path separator. A kept character is one ASCII byte, and
+ * every byte of a multi-byte character is above ASCII, so the rule reads
+ * byte by byte.
  */
 export function taskIdFileSegment(taskId: string): string {
-  return [...taskId].map((character) => KEPT.test(character)
-    ? character
-    : [...new TextEncoder().encode(character)].map((byte) => `_${byte.toString(16).padStart(2, "0")}`).join("")).join("");
+  return Array.from(UTF8.encode(taskId), (byte) => {
+    const character = String.fromCharCode(byte);
+    return KEPT.test(character) ? character : `_${byte.toString(16).padStart(2, "0")}`;
+  }).join("");
 }
 
 /** Where the record of `taskId` in the repository at `root` is kept. */

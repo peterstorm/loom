@@ -34,7 +34,7 @@ import { registeredSecurityAuditRuns } from "../../orchestration/security-audit-
 import { AUTHORITY_HELPER_OPERATIONS, HARNESS_HOOK_ROUTES } from "./subagent-authority-operations";
 import { readRunBytesNoFollow } from "../../utils/no-follow-fs";
 import { describeCause } from "../../utils/describe-cause";
-import { failClosedInput } from "./pre-tool-use-input";
+import { failClosedGuard } from "./pre-tool-use-input";
 
 
 /** A path and its realpath, when the two differ and the path exists. */
@@ -135,23 +135,22 @@ export function subagentAuthorityBlock(command: string, context: SubagentAuthori
   return decision.kind === "allow" ? null : renderSubagentAuthorityRefusal(decision.refusal, context);
 }
 
-export async function runGuardSubagentAuthority(
+export function runGuardSubagentAuthority(
   stdin: string,
   readRuns: () => readonly string[] = registeredSecurityAuditRuns,
 ): Promise<HookResult> {
-  const parsed = failClosedInput("guard-subagent-authority", stdin);
-  if (!parsed.ok) return parsed.block;
-  const { input } = parsed;
-  // Only Claude Code's own marker identifies a subagent; any value it carries
-  // (even a malformed one) means the call did not come from the parent.
-  if (input.agent_id === undefined) return passthroughResult();
-  if (input.tool_name !== "Bash") return passthroughResult();
-  const command = input.tool_input.command;
-  if (typeof command !== "string") {
-    return blockResult(`guard-subagent-authority: non-string Bash command (${typeof command}) — failing closed`);
-  }
-  const block = subagentAuthorityBlock(command, observeSubagentAuthorityContext(input.cwd, readRuns));
-  return block === null ? passthroughResult() : blockResult(block);
+  return failClosedGuard("guard-subagent-authority", (input) => {
+    // Only Claude Code's own marker identifies a subagent; any value it carries
+    // (even a malformed one) means the call did not come from the parent.
+    if (input.agent_id === undefined) return passthroughResult();
+    if (input.tool_name !== "Bash") return passthroughResult();
+    const command = input.tool_input.command;
+    if (typeof command !== "string") {
+      return blockResult(`guard-subagent-authority: non-string Bash command (${typeof command}) — failing closed`);
+    }
+    const block = subagentAuthorityBlock(command, observeSubagentAuthorityContext(input.cwd, readRuns));
+    return block === null ? passthroughResult() : blockResult(block);
+  })(stdin);
 }
 
 const handler: HookHandler = async (stdin) => runGuardSubagentAuthority(stdin);

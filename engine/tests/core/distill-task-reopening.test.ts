@@ -36,6 +36,7 @@ import {
 } from "../../src/core/task-revalidation";
 import { checkImplementationProof } from "../../src/core/wave-gate-checks";
 import { newWaveGate } from "../../src/core/wave-gate-model";
+import { parseReopenRequest } from "../../src/core/wave-reopening-request";
 import type { WaveReviewContextAuthority } from "../../src/core/wave-review-authority";
 import {
   deriveWaveReopeningProof,
@@ -475,7 +476,8 @@ describe("reopening a completed Wave sweeps its Distill Task back", () => {
     wave_gates: { "3": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false } },
     wave_gate_history: [completedWaveGateFixture({ runId: "wave-run", wave: 3, authorityDigest: AUTHORITY })],
   });
-  const request = (...taskIds: readonly string[]) => ({ runId: "wave-run", wave: 3, authorityDigest: AUTHORITY, taskIds });
+  const request = (...taskIds: readonly string[]) =>
+    value(parseReopenRequest(JSON.stringify({ runId: "wave-run", wave: 3, authorityDigest: AUTHORITY, taskIds })));
 
   const context = (taskId: string, workspaceHeadSha?: string): WaveReviewContextAuthority => ({
     runId, wave: 3, authorityDigest: artifactDigest(AUTHORITY), batchEpoch: artifactDigest(HEAD),

@@ -25,7 +25,7 @@ import {
   type SpawnTaskFacts,
 } from '../../../core/spawn-task-text';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
-import { parseRegisteredFacadeProgram, type RegisteredReviewProgram } from './registration';
+import { parseRegisteredFacadeProgram, readObligated, type RegisteredReviewProgram } from './registration';
 import { publishedReviewerRequest } from './durable-requests';
 import { reviewerProtocolResolver } from './reviewer-protocol-resolution';
 import { requestFrozenDiff } from '../../../orchestration/standalone-read-coverage-evidence';
@@ -183,7 +183,7 @@ function observeDeliveryInputs(
   }
   if (program.schemaVersion === 3) return Object.freeze({ version: 3 });
   if (program.schemaVersion === 2) {
-    if (program.kind !== "standalone-review" || program.readCoverage === undefined) {
+    if (program.kind !== "standalone-review" || !readObligated(program)) {
       return Object.freeze({ version: 2, readObligation: null });
     }
     const diff = requestFrozenDiff(handle, request);

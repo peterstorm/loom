@@ -10,6 +10,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { safeRecord } from "../../src/core/exact-data";
+import { isRecord } from "../../src/core/plain-record";
 import { panelError, persistentFailure, persistentSuccess } from "../../src/core/panel-authority";
 import { parseOrchestrationRunId, type OrchestrationRunId } from "../../src/core/orchestration-contract";
 import {
@@ -25,6 +26,7 @@ import {
   type PanelProgramDefinition,
   type PanelStep,
 } from "../../src/core/persistent-panel-program";
+import { wireOf } from "../fixtures/json-wire";
 import { createPanelPublications } from "../fixtures/panel-authority";
 import { refusal, value } from "../fixtures/parse-result";
 
@@ -140,7 +142,7 @@ describe("persistent panel program kernel: replay and checkpoints", () => {
       expect(jsonEqual(replayed.state, recorded.state)).toBe(true);
       const checkpoint = value(panelProgramCheckpoint(TALLY, recorded.state, record(events).events, resolver));
       expect(checkpoint).toMatchObject({ schemaVersion: 2, kind: "tally-panel-checkpoint", authority: { runId: "run.tally" } });
-      const restored = value(parsePanelProgramCheckpoint(TALLY, JSON.parse(JSON.stringify(checkpoint)), resolver));
+      const restored = value(parsePanelProgramCheckpoint(TALLY, wireOf(checkpoint), resolver));
       expect(jsonEqual(restored.state, recorded.state)).toBe(true);
       expect(value(resumePanelProgram(TALLY, restored.state)).action).toEqual({ kind: "tally", count });
     }));
@@ -162,7 +164,9 @@ describe("persistent panel program kernel: replay and checkpoints", () => {
   /** The durable JSON of a two-increment checkpoint, as a shell reads it back. */
   const durableCheckpoint = (): Record<string, unknown> => {
     const { step, events } = record(increments(2));
-    return JSON.parse(JSON.stringify(value(panelProgramCheckpoint(TALLY, step.state, events, resolver)))) as Record<string, unknown>;
+    const durable = wireOf(value(panelProgramCheckpoint(TALLY, step.state, events, resolver)));
+    if (!isRecord(durable)) throw new Error("a checkpoint serializes to a JSON object");
+    return durable;
   };
   const NOT_EXACT = { kind: "malformed-checkpoint", message: "tally checkpoint must be an exact schemaVersion 2 record" } as const;
   const DISAGREES = { kind: "malformed-checkpoint", message: "tally checkpoint state disagrees with its immutable event prefix" } as const;
@@ -203,7 +207,7 @@ describe("persistent panel program kernel: replay and checkpoints", () => {
     fc.assert(fc.property(fc.integer({ min: 0, max: 12 }), fc.boolean(), (count, finish) => {
       const { step, events } = record([...increments(count), ...(finish ? [FINISH] : [])]);
       const written = value(panelProgramCheckpoint(TALLY, step.state, events, resolver));
-      const parsed = value(parsePanelProgramCheckpointRecord(TALLY, JSON.parse(JSON.stringify(written)), resolver));
+      const parsed = value(parsePanelProgramCheckpointRecord(TALLY, wireOf(written), resolver));
       expect(parsed.checkpoint).toEqual(written);
       expect(jsonEqual(parsed.checkpoint, written)).toBe(true);
       expect(Object.isFrozen(parsed.checkpoint)).toBe(true);
