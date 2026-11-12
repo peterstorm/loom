@@ -366,7 +366,11 @@ The full sequence is the [`/loom` Phase 3.6 runbook](../references/loom/plan-des
 
 **Not doing the review.** `init-state --skip-plan-design-review` records `{"status":"not-required","reason":"skipped"}` when the orchestration starts. There is no flag that skips it later. A State File initialized before the gate existed has no `plan_design_review` field and is not gated; running the review and the helper on it records `accepted` and turns the digest binding on.
 
-**Known limits.** The gate is on the decompose spawn only: execute is not gated, and `populate-task-graph` does not ask it. The record is not re-proved against the Run Directory after acceptance.
+**Population asks it too.** `populate-task-graph` refuses first population (a graph still in `decompose`) with `populate-task-graph: TaskGraph population requires plan-design-review (...)`, the same requirement the decompose spawn names, so a payload written by hand is held to it as well. Open it the same way.
+
+**The plan moved during acceptance.** `accept-plan-design-review` re-hashes the plan under the State File lock. If the plan was edited after the review was judged it refuses with `the plan changed while its review was being accepted`; if the graph was re-pointed at another plan it refuses with `the task graph names a different plan than the one judged`. Run the helper again; an edited plan needs a fresh review.
+
+**Known limits.** Execute is not gated: neither an execute spawn nor re-population in execute asks the gate. The record is not re-proved against the Run Directory after acceptance.
 
 ## Remediation and Git safety
 

@@ -84,11 +84,11 @@ At every implementation Agent's stop, the engine runs the manifest's affected ru
 _Avoid_: Affected gate, regression check, test cadence
 
 **Task Mutation Check**:
-The check an implementation Agent runs on its own Task before it stops: it mutates the lines the Task changed, runs the affected runner against each mutant, and names every mutant the tests did not kill. A missing, stale or surviving result blocks the stop on Claude Code, a bounded number of times. It fails open and is never completion evidence.
+The check an implementation Agent runs on its own Task before it stops: it mutates the lines the Task changed, runs the affected runner against each mutant, and names every mutant the tests did not kill. A run whose every mutant only broke collection or ran no test is inconclusive, never clean. A missing, stale or surviving result blocks the stop on Claude Code, a bounded number of times. It fails open and is never completion evidence.
 _Avoid_: Mutation gate, mutation testing (alone — **Owner Verification** also mutates), Task-level Owner Verification (that is the Wave Gate's, over an Invariant's owner)
 
 **Task Mutation Record**:
-What one **Task Mutation Check** run leaves: its result (clean, survivors or unavailable) with a digest of the bytes it judged, so a record of other bytes is stale. One runtime file per Task, never in the TaskGraph.
+What one **Task Mutation Check** run leaves: its result (no mutants, clean, survivors, inconclusive or unavailable; clean always names a kill) with a digest of the bytes it judged, so a record of other bytes is stale. One runtime file per Task, never in the TaskGraph.
 _Avoid_: Mutation receipt, mutation proof (it proves nothing to settlement), mutation evidence
 _Mechanics_: Keyed by Task, not by Agent, because the check cannot learn which Agent ran it.
 

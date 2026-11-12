@@ -4,7 +4,7 @@ Read by the `/loom` orchestrator after plan alignment has settled and before it 
 
 **When it runs.** Always, unless `--skip-plan-design-review` was passed to `init-state`, or the State File has no `plan_design_review` field (it was initialized before the gate existed). Any edit to the plan after acceptance closes the gate again, so run it only once plan alignment is done.
 
-**What it is.** A gate on the decompose spawn, not a phase: `current_phase` does not change and no phase agent runs ([ADR-0070](../../docs/adr/ADR-0070-the-plan-design-review-gates-decompose.md)). The plan is reviewed by `code-reviewer`, `type-design-analyzer` and `architecture-tech-lead` as a Standalone Review of kind `plan-design`, each with a plan design lens in its Context Packet and each obliged to read the whole plan.
+**What it is.** A gate on decompose, not a phase: the decompose spawn asks it, `populate-task-graph` asks it again on first population, `current_phase` does not change and no phase agent runs ([ADR-0070](../../docs/adr/ADR-0070-the-plan-design-review-gates-decompose.md)). The plan is reviewed by `code-reviewer`, `type-design-analyzer` and `architecture-tech-lead` as a Standalone Review of kind `plan-design`, each with a plan design lens in its Context Packet and each obliged to read the whole plan.
 
 Run every command from the repository root.
 
@@ -56,6 +56,6 @@ On success it prints `Plan design review accepted: <plan> sha256 <digest> (run <
 ## Refusals
 
 - **A critical survived refutation.** The helper refuses with the Finding ids. Present the findings to the user, edit the plan to resolve them (or loop back to architecture as in Phase 3.5), and start a fresh review at step 1. A `plan-design` review has no successor.
-- **The plan was edited after acceptance.** The decompose spawn is blocked with both digests. Start a fresh review at step 1.
+- **The plan was edited after acceptance.** The decompose spawn and first population are blocked with both digests. Start a fresh review at step 1. An edit made while the helper runs is caught under the State File lock: the helper refuses with `the plan changed while its review was being accepted`.
 
 Never write `plan_design_review` yourself. After `init-state`, the helper is its only writer.

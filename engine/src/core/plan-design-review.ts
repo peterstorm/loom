@@ -11,7 +11,9 @@
  * plan after acceptance changes the digest and closes the gate again.
  *
  * Pure: no I/O. `handlers/helpers/accept-plan-design-review` gathers the
- * evidence and writes the record; `core/validate-phase-order` asks the gate.
+ * evidence and writes the record; `core/validate-phase-order` asks the gate on
+ * a decompose spawn and `handlers/helpers/populate-task-graph` asks it on first
+ * population. `core/standalone-review-scope` holds the kind's review profile.
  */
 import { match } from "ts-pattern";
 import {
@@ -21,16 +23,19 @@ import {
   success,
   type ArtifactDigest,
   type DomainResult,
+  type NonEmpty,
   type OrchestrationRunId,
 } from "./orchestration-contract/identity";
+import type { Phase } from "./phases";
 import { hasExactKeys, isRecord } from "./plain-record";
+import type { ReviewPath } from "./review-packet";
+import { PLAN_DESIGN_REVIEW_KIND, type StandaloneReviewKind, type StandaloneReviewerRole } from "./standalone-review-kinds";
+
+export { PLAN_DESIGN_REVIEW_KIND };
 
 // ---------------------------------------------------------------------------
 // The review
 // ---------------------------------------------------------------------------
-
-/** The Standalone Review kind that reviews an architecture plan's design before decompose. */
-export const PLAN_DESIGN_REVIEW_KIND = "plan-design";
 
 /**
  * The plan design review's roster, in canonical spawn order. It belongs to the
@@ -42,7 +47,7 @@ export const PLAN_DESIGN_REVIEWERS = Object.freeze([
   "code-reviewer",
   "type-design-analyzer",
   "architecture-tech-lead",
-] as const);
+] as const satisfies readonly StandaloneReviewerRole[]);
 export type PlanDesignReviewer = (typeof PLAN_DESIGN_REVIEWERS)[number];
 
 // ---------------------------------------------------------------------------
@@ -123,7 +128,7 @@ export function parsePlanDesignReview(raw: unknown): DomainResult<RecordedPlanDe
 export type PlanDesignGate =
   | Readonly<{ kind: "open" }>
   | Readonly<{ kind: "review-required" }>
-  | Readonly<{ kind: "plan-changed"; acceptedSha256: ArtifactDigest; currentSha256: string }>;
+  | Readonly<{ kind: "plan-changed"; acceptedSha256: ArtifactDigest; currentSha256: ArtifactDigest }>;
 
 const GATE_OPEN: PlanDesignGate = Object.freeze({ kind: "open" });
 const GATE_REVIEW_REQUIRED: PlanDesignGate = Object.freeze({ kind: "review-required" });
@@ -132,7 +137,7 @@ const GATE_REVIEW_REQUIRED: PlanDesignGate = Object.freeze({ kind: "review-requi
  * Whether decompose may start. It may when no review is required, or when the
  * accepted review's digest is the digest of the plan as it is now.
  */
-export function planDesignGate(review: PlanDesignReview, currentPlanSha256: string): PlanDesignGate {
+export function planDesignGate(review: PlanDesignReview, currentPlanSha256: ArtifactDigest): PlanDesignGate {
   return match(review)
     .with({ status: "not-required" }, () => GATE_OPEN)
     .with({ status: "required" }, () => GATE_REVIEW_REQUIRED)
@@ -159,41 +164,67 @@ export function renderPlanDesignRequirement(gate: Exclude<PlanDesignGate, Readon
     .exhaustive();
 }
 
+/** What the gate requires of the plan at `planPath`, or null when it is open. */
+export function planDesignRequirement(review: PlanDesignReview, currentPlanSha256: ArtifactDigest, planPath: string): string | null {
+  const gate = planDesignGate(review, currentPlanSha256);
+  return gate.kind === "open" ? null : renderPlanDesignRequirement(gate, planPath);
+}
+
+/**
+ * The gate as TaskGraph Population asks it. First population (decompose →
+ * execute) is the transition that cuts Tasks from the plan, so it needs what a
+ * decompose spawn needs, whoever wrote the payload. Re-population in execute is
+ * not gated, as execute spawns are not: a plan may be amended once Tasks exist.
+ */
+export function populationPlanDesignRequirement(
+  state: Readonly<{ current_phase: Phase; plan_design_review?: RecordedPlanDesignReview }>,
+  currentPlanSha256: ArtifactDigest,
+  planPath: string,
+): string | null {
+  return state.current_phase === "decompose"
+    ? planDesignRequirement(planDesignReviewOf(state.plan_design_review), currentPlanSha256, planPath)
+    : null;
+}
+
 // ---------------------------------------------------------------------------
 // Judging a completed review
 // ---------------------------------------------------------------------------
 
 /**
  * What an authenticated, published Standalone Review says about itself. Every
- * field is read from the Run Directory by the shell; nothing is self-reported
- * by the caller of the helper.
+ * field is read from the Run Directory by the shell and parsed there into the
+ * type it has here; nothing is self-reported by the caller of the helper.
  */
 export type PlanDesignEvidence = Readonly<{
   runId: OrchestrationRunId;
   resultDigest: ArtifactDigest;
-  requestedKinds: readonly string[];
+  requestedKinds: NonEmpty<StandaloneReviewKind>;
   /** The frozen scope in order, each path with the SHA-256 of its frozen bytes, or null when no bytes were frozen. */
-  scope: readonly Readonly<{ path: string; sha256: string | null }>[];
-  reviewers: readonly string[];
+  scope: readonly Readonly<{ path: ReviewPath; sha256: ArtifactDigest | null }>[];
+  reviewers: readonly StandaloneReviewerRole[];
   /** Whether the Run was registered with the read obligation, so every reviewer was observed reading the whole plan. */
   readObligated: boolean;
   /** The Finding ids of the criticals the Refutation Panel left standing. */
   survivingCriticals: readonly string[];
   advisoryCount: number;
-  /** Whether a published Advisory Disposition covering every advisory was presented. */
+  /**
+   * Whether the caller named an Advisory Disposition that the shell
+   * authenticated as a publication against this review. Any decision is
+   * enough; nothing here checks which advisories it decides.
+   */
   dispositionPublished: boolean;
 }>;
 
 /** The plan as it is now: its repository-relative path and the SHA-256 of its bytes. */
-export type CurrentPlan = Readonly<{ path: string; sha256: ArtifactDigest }>;
+export type CurrentPlan = Readonly<{ path: ReviewPath; sha256: ArtifactDigest }>;
 
 export type PlanDesignRefusal =
-  | Readonly<{ kind: "wrong-kind"; requestedKinds: readonly string[] }>
-  | Readonly<{ kind: "scope-mismatch"; scope: readonly string[]; planPath: string }>
+  | Readonly<{ kind: "wrong-kind"; requestedKinds: readonly StandaloneReviewKind[] }>
+  | Readonly<{ kind: "scope-mismatch"; scope: readonly ReviewPath[]; planPath: ReviewPath }>
   | Readonly<{ kind: "roster-incomplete"; missing: readonly PlanDesignReviewer[] }>
   | Readonly<{ kind: "read-not-obligated" }>
-  | Readonly<{ kind: "plan-unobserved"; planPath: string }>
-  | Readonly<{ kind: "plan-changed-since-review"; reviewedSha256: string; currentSha256: ArtifactDigest }>
+  | Readonly<{ kind: "plan-unobserved"; planPath: ReviewPath }>
+  | Readonly<{ kind: "plan-changed-since-review"; reviewedSha256: ArtifactDigest; currentSha256: ArtifactDigest }>
   | Readonly<{ kind: "surviving-criticals"; findingIds: readonly string[] }>
   | Readonly<{ kind: "advisories-undisposed"; advisoryCount: number }>;
 
@@ -297,8 +328,8 @@ const LENS_QUESTIONS = {
   ],
 } as const satisfies Readonly<Record<PlanDesignReviewer, readonly string[]>>;
 
-const isPlanDesignReviewer = (role: string): role is PlanDesignReviewer =>
-  (PLAN_DESIGN_REVIEWERS as readonly string[]).includes(role);
+const isPlanDesignReviewer = (role: StandaloneReviewerRole): role is PlanDesignReviewer =>
+  PLAN_DESIGN_REVIEWERS.some((member) => member === role);
 
 /** The lens section text for one plan design reviewer. */
 export function renderPlanDesignLens(role: PlanDesignReviewer): string {
@@ -317,11 +348,10 @@ export function renderPlanDesignLens(role: PlanDesignReviewer): string {
 }
 
 /**
- * The lens section a reviewer's packet carries, or null when the review is not
- * a plan design review or the role is outside its roster.
+ * The lens section a plan design reviewer's packet carries, or null for a role
+ * outside the roster. Whether a review is a plan design review at all is the
+ * kind's review profile (`standaloneReviewProfile`), which hands this out.
  */
-export function planDesignLens(requestedKinds: readonly string[], role: string): string | null {
-  return requestedKinds.includes(PLAN_DESIGN_REVIEW_KIND) && isPlanDesignReviewer(role)
-    ? renderPlanDesignLens(role)
-    : null;
+export function planDesignLens(role: StandaloneReviewerRole): string | null {
+  return isPlanDesignReviewer(role) ? renderPlanDesignLens(role) : null;
 }

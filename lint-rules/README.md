@@ -372,8 +372,10 @@ try { raw = JSON.parse(text); } catch { return left(invalidJson()); }
 
 Multi-line forms are read whole (the type, the argument or the `as` may sit on
 later lines). The scan is a balanced-bracket walk over the file's code — no
-compiler API — and a file that names neither call is answered without being
-read. An assignment is judged by the nearest `const`/`let`/`var` declaration of
+compiler API — and a file whose text holds neither `JSON` nor `json` is
+answered without being lexed. That exit is a substring test, not a test for the
+call: a file that holds `json` anywhere (`./package.json`, a `toJSON` method, a
+comment) is lexed even when it names no wire call. An assignment is judged by the nearest `const`/`let`/`var` declaration of
 that name whose block still encloses it; parameters are not declarations.
 
 `wireCastBaseline` grandfathers pre-existing sites, keyed `path::as T` (an

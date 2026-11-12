@@ -3,10 +3,12 @@
  * name, the PRODUCTION parser that decides it and the values that stand in for
  * the doc's placeholders.
  *
- * `WireShapeId` is a closed union and `WIRE_SHAPES` is a record over it, so an
- * id without a parser does not compile. No entry re-implements a rule: each one
- * calls the function the engine itself calls on that input, with whatever
- * surrounding authority that function needs built from the suite's fixtures.
+ * `WireShapeId` (`doc-wire-shape-ids.ts`) is a closed union and `WIRE_SHAPES`
+ * is a record over it, so an id without a parser does not compile. No entry
+ * re-implements a rule: each one calls the function the engine itself calls on
+ * that input, with whatever surrounding authority that function needs built
+ * from the suite's fixtures. The entry's `parse` body is the one statement of
+ * which production function decides the shape; no label restates it.
  */
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -24,9 +26,9 @@ import { parseCoverageSeeds, parseCriticResult, parseHunterResult } from "../../
 import { parseVerificationResultWire } from "../../src/core/security-verification";
 import { parseOwnershipInput } from "../../src/core/spec-trace";
 import { parseStandaloneDispositionStartBytes } from "../../src/core/standalone-disposition-machine";
+import { parseUserDecision } from "../../src/core/user-decision";
 import { parseVerificationManifest } from "../../src/core/verification-manifest";
-import { parseUserDecision } from "../../src/handlers/helpers/orchestration";
-import { parseReopenRequest } from "../../src/handlers/helpers/reopen-completed-wave";
+import { parseReopenRequest } from "../../src/core/wave-reopening-request";
 import {
   parseRemediationStartInput,
   parseStandaloneStartInput,
@@ -36,8 +38,10 @@ import { validateFull } from "../../src/handlers/helpers/validate-task-graph";
 import { loadRules } from "../../src/linter/loader";
 import { parseProjectConfig } from "../../src/linter/programmatic/config";
 import { mintedCriterion } from "../fixtures/architecture-criterion";
+import { isJsonArray } from "../fixtures/json-wire";
 import { standaloneFixture } from "../fixtures/standalone-remediation-authority";
 import { REFUTATION_PROFILE, aRefs } from "../security/fixtures";
+import type { WireShapeId } from "./doc-wire-shape-ids";
 import {
   REPO_ROOT,
   parseDocJson,
@@ -47,34 +51,6 @@ import {
   type PlaceholderTable,
 } from "./doc-wire-examples";
 
-export const WIRE_SHAPE_IDS = [
-  "architecture-panel-journal",
-  "completed-wave-reopening",
-  "decompose-task-graph",
-  "defect-family-accounting",
-  "implementation-brief-request",
-  "judge-verdict",
-  "linter-project-config",
-  "linter-regex-rule",
-  "refutation-verdict",
-  "remediation-start",
-  "security-audit-start",
-  "security-critic-result",
-  "security-hunter-result",
-  "security-verification-result",
-  "spec-trace-ownership",
-  "standalone-disposition-start",
-  "standalone-review-start",
-  "verification-manifest",
-  "wave-gate-decision",
-  "wave-gate-start",
-] as const;
-
-export type WireShapeId = (typeof WIRE_SHAPE_IDS)[number];
-
-export const parseWireShapeId = (raw: string): WireShapeId | null =>
-  WIRE_SHAPE_IDS.find((id) => id === raw) ?? null;
-
 /** Whether the production parser admitted a documented example, and what it said if not. */
 export type WireParse =
   | Readonly<{ ok: true }>
@@ -82,13 +58,11 @@ export type WireParse =
 
 /**
  * One documented shape.
- * - `parser` names the production function(s) `parse` calls, for the failure
- *   message and the contributor doc.
  * - `format`: a `json` example is read as JSON and its placeholders resolved
  *   before `parse` sees it; a `text` example reaches `parse` as its own string.
+ * - `parse` calls the production function(s) that decide the shape.
  */
 export type WireShape = Readonly<{
-  parser: string;
   format: "json" | "text";
   placeholders: PlaceholderTable;
   parse: (raw: unknown) => WireParse;
@@ -110,7 +84,7 @@ const requireRecord = (raw: unknown, parse: (record: Readonly<Record<string, unk
   isWireRecord(raw) ? parse(raw) : refused("the example is not a JSON object");
 
 const entriesOf = (raw: unknown): readonly Readonly<Record<string, unknown>>[] =>
-  Array.isArray(raw as unknown) ? (raw as readonly unknown[]).filter(isWireRecord) : [];
+  isJsonArray(raw) ? raw.filter(isWireRecord) : [];
 
 // --- Surrounding authority, from the suite's fixtures ---
 
@@ -158,7 +132,9 @@ function parseRegexRule(raw: unknown): WireParse {
   }
 }
 
-const SECURITY_PLACEHOLDERS: PlaceholderTable = {
+/** The one placeholder table the three security shapes (hunter, critic,
+ *  verifier) share; `security-agent-docs.test.ts` resolves their blocks by it. */
+export const SECURITY_PLACEHOLDERS: PlaceholderTable = {
   coverageId: canonicalCoverageId(aRefs()),
   reviewedPaths: "src/api/login.ts",
   reviewed_paths: "src/api/login.ts",
@@ -186,7 +162,6 @@ const NO_PLACEHOLDERS: PlaceholderTable = {};
 
 export const WIRE_SHAPES: Readonly<Record<WireShapeId, WireShape>> = {
   "architecture-panel-journal": {
-    parser: "translateLegacyPanelJournal + startArchitectureDispatchProgram + reduceArchitectureProgram (helper panel-program architecture)",
     format: "json",
     placeholders: {
       candidateLenses: sequence(...PANEL_LENSES),
@@ -209,32 +184,21 @@ export const WIRE_SHAPES: Readonly<Record<WireShapeId, WireShape>> = {
     },
   },
   "completed-wave-reopening": {
-    parser: "parseReopenRequest (helper reopen-completed-wave)",
     format: "json",
     placeholders: { runId: "run.completed-wave-3", authorityDigest: SHA256 },
-    parse: (raw) => {
-      try {
-        parseReopenRequest(JSON.stringify(raw));
-        return ADMITTED;
-      } catch (error) {
-        return refused(error instanceof Error ? error.message : String(error));
-      }
-    },
+    parse: (raw) => settle(parseReopenRequest(JSON.stringify(raw))),
   },
   "decompose-task-graph": {
-    parser: "validateFull(json, \"decompose-payload\") (helper populate-task-graph)",
     format: "json",
     placeholders: NO_PLACEHOLDERS,
     parse: (raw) => requireRecord(raw, (graph) => settle(validateFull({ ...graph }, "decompose-payload"))),
   },
   "defect-family-accounting": {
-    parser: "prepareDefectFamilyAccounting (remediation preflight)",
     format: "json",
     placeholders: NO_PLACEHOLDERS,
     parse: parseAccounting,
   },
   "implementation-brief-request": {
-    parser: "parseImplementationBriefRequest (the brief marker and its operator notes)",
     format: "text",
     placeholders: NO_PLACEHOLDERS,
     parse: (raw) => {
@@ -244,13 +208,11 @@ export const WIRE_SHAPES: Readonly<Record<WireShapeId, WireShape>> = {
     },
   },
   "judge-verdict": {
-    parser: "parseJudgeVerdict",
     format: "json",
     placeholders: { criterion: JUDGE_CRITERION, candidate: CANDIDATE, strongest_idea: "Keep the parser at the boundary." },
     parse: (raw) => settle(parseJudgeVerdict(JSON.stringify(raw), JUDGE_CRITERION, [CANDIDATE])),
   },
   "linter-project-config": {
-    parser: "parseProjectConfig (.claude/linter/rules/config.json)",
     format: "json",
     placeholders: {
       path: "third_party/",
@@ -265,13 +227,11 @@ export const WIRE_SHAPES: Readonly<Record<WireShapeId, WireShape>> = {
     parse: (raw) => settle(parseProjectConfig(raw, ".claude/linter/rules/config.json")),
   },
   "linter-regex-rule": {
-    parser: "loadRules (a declarative rule file under .claude/linter/rules/)",
     format: "json",
     placeholders: NO_PLACEHOLDERS,
     parse: parseRegexRule,
   },
   "refutation-verdict": {
-    parser: "parseRefutationVerdict",
     format: "json",
     placeholders: { criterion: REVIEW_LENS, finding_id: "T1:code-reviewer-1" },
     parse: (raw) => {
@@ -283,7 +243,6 @@ export const WIRE_SHAPES: Readonly<Record<WireShapeId, WireShape>> = {
     },
   },
   "remediation-start": {
-    parser: "parseRemediationStartInput + prepareDefectFamilyAccounting (orchestration start remediation)",
     format: "json",
     placeholders: { sourceRun: "run.source-review", supportPaths: "docs/remediation-plan.md" },
     parse: (raw) => {
@@ -292,7 +251,6 @@ export const WIRE_SHAPES: Readonly<Record<WireShapeId, WireShape>> = {
     },
   },
   "security-audit-start": {
-    parser: "parseSecurityAuditStart + parseCoverageSeeds (security-audit start)",
     format: "json",
     placeholders: NO_PLACEHOLDERS,
     parse: (raw) => {
@@ -301,55 +259,46 @@ export const WIRE_SHAPES: Readonly<Record<WireShapeId, WireShape>> = {
     },
   },
   "security-critic-result": {
-    parser: "parseCriticResult (security-audit merge-critic)",
     format: "json",
     placeholders: SECURITY_PLACEHOLDERS,
     parse: (raw) => settle(parseCriticResult(raw)),
   },
   "security-hunter-result": {
-    parser: "parseHunterResult (security-audit submit)",
     format: "json",
     placeholders: SECURITY_PLACEHOLDERS,
     parse: (raw) => settle(parseHunterResult(raw)),
   },
   "security-verification-result": {
-    parser: "parseVerificationResultWire",
     format: "json",
     placeholders: SECURITY_PLACEHOLDERS,
     parse: (raw) => settle(parseVerificationResultWire(raw)),
   },
   "spec-trace-ownership": {
-    parser: "parseOwnershipInput (helper upgrade-spec-trace, helper amend-spec-trace)",
     format: "json",
     placeholders: NO_PLACEHOLDERS,
     parse: (raw) => settle(parseOwnershipInput(raw, "documented example")),
   },
   "standalone-disposition-start": {
-    parser: "parseStandaloneDispositionStartBytes (orchestration start standalone-disposition)",
     format: "json",
     placeholders: { resultDigest: SHA256, origin: SHA256 },
     parse: (raw) => settle(parseStandaloneDispositionStartBytes(new TextEncoder().encode(JSON.stringify(raw)))),
   },
   "standalone-review-start": {
-    parser: "parseStandaloneStartInput (orchestration start standalone-review, successor input included)",
     format: "json",
     placeholders: { resultDigest: SHA256, dispositionDigest: SHA256 },
     parse: (raw) => settle(parseStandaloneStartInput(raw)),
   },
   "verification-manifest": {
-    parser: "parseVerificationManifest (helper write-verification-manifest)",
     format: "json",
     placeholders: NO_PLACEHOLDERS,
     parse: (raw) => settle(parseVerificationManifest(raw)),
   },
   "wave-gate-decision": {
-    parser: "parseUserDecision, as a registered Wave Gate's decision (helper orchestration decide)",
     format: "json",
     placeholders: NO_PLACEHOLDERS,
-    parse: (raw) => settle(parseUserDecision(JSON.stringify(raw), true)),
+    parse: (raw) => settle(parseUserDecision(JSON.stringify(raw), "wave-gate")),
   },
   "wave-gate-start": {
-    parser: "parseWaveGateStartInput (orchestration start wave-gate)",
     format: "json",
     placeholders: NO_PLACEHOLDERS,
     parse: (raw) => settle(parseWaveGateStartInput(raw)),
@@ -365,15 +314,14 @@ export function documentedValue(shapeId: WireShapeId, text: string): unknown {
 
 /** Put one documented example through its shape's production parser. An example
  *  that cannot be read at all (broken JSON, an unresolved placeholder) is a
- *  refusal like any other, so the suite reports it beside its file and line. */
+ *  refusal like any other, so the suite reports it beside its file and line.
+ *  Its shape id was parsed at the scan, so it always names a registered shape. */
 export function parseDocumentedExample(example: DocExample): WireParse {
-  const shapeId = parseWireShapeId(example.shapeId);
-  if (shapeId === null) return refused(`unregistered wire shape: ${example.shapeId}`);
   let value: unknown;
   try {
-    value = documentedValue(shapeId, example.text);
+    value = documentedValue(example.shapeId, example.text);
   } catch (error) {
     return refused(`the example cannot be read: ${error instanceof Error ? error.message : String(error)}`);
   }
-  return WIRE_SHAPES[shapeId].parse(value);
+  return WIRE_SHAPES[example.shapeId].parse(value);
 }

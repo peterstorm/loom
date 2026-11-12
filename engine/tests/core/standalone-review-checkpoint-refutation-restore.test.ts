@@ -113,6 +113,23 @@ describe("durable Refutation Panel completion receipt restore diagnostics", () =
     expect(replayed.ok).toBe(true);
   });
 
+  it("replays a receipt whose T2 checkpoint records the legacy roster view, as the panel's own parse admits it", () => {
+    const panelCheckpoint = record.parse(completion.completedPanelCheckpoint);
+    const state = record.parse(panelCheckpoint.state);
+    const authority = record.parse(state.authority);
+    const roster = record.parse(authority.verifierRoster);
+    const slots = z.array(z.unknown()).parse(roster.orderedSlots);
+    const legacy = {
+      ...panelCheckpoint,
+      state: { ...state, authority: { ...authority, verifierRoster: { ...roster, byId: { size: slots.length } } } },
+    };
+    const replayed = parseStandaloneReviewMachineState(
+      { ...checkpoint, kind: "ready-to-finalize", refutationCompletion: { ...completion, completedPanelCheckpoint: legacy } },
+      contextualPublications(files), protocols(files), registeredAuthority(files),
+    );
+    expect(replayed.ok).toBe(true);
+  });
+
   it("names an absent receipt", () => {
     expect(replayRefusal(null)).toBe(`${PREFIX}the persisted completion receipt is absent or not an object`);
   });

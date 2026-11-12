@@ -21,7 +21,14 @@ import { parseReviewerProtocolDescriptor } from "./reviewer-contract";
 import type { OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, WaveGateRestartAudit } from "./wave-gate-program";
 import { DECISION_RECORD_AGENT } from "./model-profiles";
 import { taskRolePolicy, type TaskRolePolicy } from "./distill-task";
-import { isWaveReviewRole, waveReviewRoster, type WaveReviewRole, type WaveReviewRoster } from "./agent-catalog-projections";
+import {
+  BASE_WAVE_REVIEW_AGENTS,
+  isWaveReviewRole,
+  waveReviewRoster,
+  type ArchitectureLensReasons,
+  type WaveReviewRole,
+  type WaveReviewRoster,
+} from "./agent-catalog-projections";
 import {
   AGENT_REQUIRED_SKILLS,
   canonicalRecord,
@@ -219,31 +226,54 @@ function ownerMapObligations(graph: TaskGraph, schemaVersion: 1 | 2, task: Task)
 type InstalledReviewRoster = Pick<ReviewRun, "expected_agents"> | undefined;
 
 /**
+ * What a Task's installed Review Run says about the contract-surface reason
+ * (ADR-0069 §5):
+ * - `derive`: no run is installed, or its roster cannot say whether its
+ *   packets carried the surface; the surface is derived from the stamped
+ *   contracts as usual.
+ * - `issued-without-surface`: the run names the base five while no other
+ *   reason puts the architecture reviewer on the roster, so it was issued
+ *   before the Task's review carried the surface. It keeps that roster and
+ *   those packets, and settles as issued.
+ */
+export type InstalledContractSurface =
+  | Readonly<{ kind: "derive" }>
+  | Readonly<{ kind: "issued-without-surface" }>;
+
+const DERIVE_CONTRACT_SURFACE: InstalledContractSurface = Object.freeze({ kind: "derive" });
+const ISSUED_WITHOUT_CONTRACT_SURFACE: InstalledContractSurface = Object.freeze({ kind: "issued-without-surface" });
+
+/**
+ * The one reading of an installed Review Run for the contract-surface reason.
+ * `otherReasons` are the Task's architecture-lens reasons except the contract
+ * surface itself. When one holds, the run's roster is six with or without the
+ * surface, so it cannot tell the two apart (ADR-0069's owner-mapped known
+ * limit) and the surface is derived.
+ */
+export function installedContractSurface(
+  installed: InstalledReviewRoster,
+  otherReasons: Omit<ArchitectureLensReasons, "contractSurface">,
+): InstalledContractSurface {
+  if (installed === undefined || otherReasons.ownerMap) return DERIVE_CONTRACT_SURFACE;
+  return canonicalStructuralEquals(installed.expected_agents, BASE_WAVE_REVIEW_AGENTS)
+    ? ISSUED_WITHOUT_CONTRACT_SURFACE
+    : DERIVE_CONTRACT_SURFACE;
+}
+
+/**
  * The contract surfaces a Wave reviewer packet for `task` carries (ADR-0069),
  * and so the one home of contract-surface presence: only a schema-2 Wave, and
- * only the surfaces `reviewedContractSurfaces` says the Task writes.
- *
- * A Review Run already installed with the Task's roster as it is without this
- * reason keeps that roster and those packets: the run was issued before the
- * Task's review carried the surface, and it settles as issued. When the owner
- * map already puts the architecture reviewer on the roster, the installed
- * roster cannot tell the two apart and the surface is derived as usual.
+ * only the surfaces `reviewedContractSurfaces` says the Task writes, unless
+ * the installed Review Run was issued without them (`installedContractSurface`).
  */
 function contractSurfacesReviewed(
   graph: TaskGraph,
   schemaVersion: 1 | 2,
   task: Task,
-  ownerMapped: boolean,
-  installed: InstalledReviewRoster,
+  installed: InstalledContractSurface,
 ): readonly ReviewedContractSurface[] {
-  if (schemaVersion !== 2) return [];
-  const withoutSurface = waveReviewRoster({ ownerMap: ownerMapped, contractSurface: false });
-  const installedWithoutSurface = installed !== undefined &&
-    withoutSurface !== waveReviewRoster({ ownerMap: ownerMapped, contractSurface: true }) &&
-    canonicalStructuralEquals(installed.expected_agents, withoutSurface);
-  return installedWithoutSurface
-    ? []
-    : reviewedContractSurfaces(graph.acceptance_contracts ?? [], graph.export_bindings ?? [], task.id);
+  if (schemaVersion !== 2 || installed.kind === "issued-without-surface") return [];
+  return reviewedContractSurfaces(graph.acceptance_contracts ?? [], graph.export_bindings ?? [], task.id);
 }
 
 /**
@@ -270,10 +300,12 @@ function waveTaskReviewDerivation(
   installed: InstalledReviewRoster,
 ): WaveTaskReviewDerivation {
   const ownerMap = ownerMapObligations(graph, schemaVersion, task);
-  const contractSurfaces = contractSurfacesReviewed(graph, schemaVersion, task, isNonEmpty(ownerMap), installed);
+  const ownerMapped = isNonEmpty(ownerMap);
+  const contractSurfaces = contractSurfacesReviewed(
+    graph, schemaVersion, task, installedContractSurface(installed, { ownerMap: ownerMapped }));
   return Object.freeze({
     taskId: task.id,
-    roster: waveReviewRoster({ ownerMap: isNonEmpty(ownerMap), contractSurface: isNonEmpty(contractSurfaces) }),
+    roster: waveReviewRoster({ ownerMap: ownerMapped, contractSurface: isNonEmpty(contractSurfaces) }),
     ownerMap,
     contractSurfaces,
   });
@@ -1106,8 +1138,9 @@ export function prepareWaveReviewBatch(
 
   // The owner map (plan AD-9): only reviewer packets of a schema-2 Wave over a
   // stamped graph, and only for a Task touching some owned family. Every other
-  // packet keeps its exact pre-feature bytes (SC-005). The same presence picks
-  // the Task's roster, so an owner-mapped Task also issues architecture-tech-lead.
+  // packet keeps its exact pre-feature bytes (SC-005). The owner map is one of
+  // the two reasons for the architecture lens: either reason (owner map or
+  // contract surface) puts architecture-tech-lead on the Task's roster.
   const derivations = reviewed.map((task) =>
     waveTaskReviewDerivation(graph, registration.schemaVersion, task, task.review_run));
   const ownerMapByTask = new Map<string, ByteSection>();

@@ -21,10 +21,10 @@ import {
 } from "./phase-policy";
 import { stripNamespace } from "../utils/strip-namespace";
 import { hasStandaloneReviewContext } from "./review-output";
+import { parseArtifactDigest } from "./orchestration-contract/identity";
 import {
-  planDesignGate,
+  planDesignRequirement,
   planDesignReviewOf,
-  renderPlanDesignRequirement,
   type RecordedPlanDesignReview,
 } from "./plan-design-review";
 
@@ -148,35 +148,38 @@ export function planArtifactOf(
 
 const NO_PLAN = "architecture (no plan.md found)";
 
+/** The plan-alignment gate, once the plan this graph names is resolved. */
 function checkPlanAlignmentGate(state: ArtifactState, probe: ArtifactProbe): string | null {
-  if (!planArtifactOf(state, probe)) return NO_PLAN;
-  if (!state.skipped_phases.includes("plan-alignment")) {
-    const specDir = state.spec_dir ?? ".claude/specs";
-    if (!probe.findFile(specDir, "plan-alignment.md")) {
-      return "plan-alignment (no plan-alignment.md found)";
-    }
-  }
-  return null;
+  if (state.skipped_phases.includes("plan-alignment")) return null;
+  const specDir = state.spec_dir ?? ".claude/specs";
+  return probe.findFile(specDir, "plan-alignment.md") ? null : "plan-alignment (no plan-alignment.md found)";
 }
 
 /**
  * The plan design gate (ADR-0070): decompose needs the design review this
  * graph requires, accepted for the plan's bytes as they are now. Only the
- * digest is read; the review's Run Directory is never opened here.
+ * digest of `plan` (the plan the alignment gate just resolved) is read; the
+ * review's Run Directory is never opened here.
  */
-function checkPlanDesignGate(state: ArtifactState, probe: ArtifactProbe): string | null {
+function checkPlanDesignGate(state: ArtifactState, plan: string, probe: ArtifactProbe): string | null {
   const review = planDesignReviewOf(state.plan_design_review);
   if (review.status === "not-required") return null;
-  const plan = planArtifactOf(state, probe);
-  if (!plan) return NO_PLAN;
-  let currentSha256: string;
+  let observed: string;
   try {
-    currentSha256 = probe.sha256(plan);
+    observed = probe.sha256(plan);
   } catch (e) {
     return `architecture (plan unreadable: ${(e as Error).message})`;
   }
-  const gate = planDesignGate(review, currentSha256);
-  return gate.kind === "open" ? null : renderPlanDesignRequirement(gate, plan);
+  const currentSha256 = parseArtifactDigest(observed);
+  return currentSha256.ok
+    ? planDesignRequirement(review, currentSha256.value, plan)
+    : `architecture (plan digest unreadable: ${currentSha256.error.message})`;
+}
+
+/** The plan this graph names, then `gates` over it; NO_PLAN when there is none. */
+function withPlan(state: ArtifactState, probe: ArtifactProbe, gates: (plan: string) => string | null): string | null {
+  const plan = planArtifactOf(state, probe);
+  return plan === null ? NO_PLAN : gates(plan);
 }
 
 /**
@@ -232,10 +235,11 @@ export function checkArtifacts(
       return null;
     })
     .with("plan-alignment", () => planArtifactOf(state, probe) ? null : NO_PLAN)
-    .with("decompose", () => checkPlanAlignmentGate(state, probe) ?? checkPlanDesignGate(state, probe))
+    .with("decompose", () => withPlan(state, probe, (plan) =>
+      checkPlanAlignmentGate(state, probe) ?? checkPlanDesignGate(state, plan, probe)))
     // Execute keeps the plan-alignment gate only: the design gate binds the
     // plan Tasks are cut from, and a plan may be amended once they exist.
-    .with("execute", () => checkPlanAlignmentGate(state, probe))
+    .with("execute", () => withPlan(state, probe, () => checkPlanAlignmentGate(state, probe)))
     .with("init", () => null)
     .with("brainstorm", () => null)
     .exhaustive();

@@ -30,8 +30,8 @@ import { parseAuthorizedWaveCompletionCheck } from "../../src/core/completion-su
 import { applyMutant, mutationPlan, MUTANT_CAP_PER_INVARIANT } from "../../src/core/owner-verification/mutation-plan";
 import type { CommandExecutionResult } from "../../src/orchestration/completion-check-runner";
 import type { OwnerVariant } from "../../src/orchestration/owner-mutation-workspace";
+import { matrixTestRunOf } from "../../src/orchestration/mutation-run-steps";
 import {
-  matrixTestRunOf,
   runOwnerVerification,
   runPlan,
   type OwnerVerificationInput,

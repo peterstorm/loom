@@ -483,7 +483,10 @@ function wireCalls(source: Source): readonly WireCallSite[] {
  * these sites and reports the rest, and `detectedWireCastKeys` hands the same
  * sites to the staleness pass.
  *
- * A file that names neither call is answered before it is lexed.
+ * A file whose text holds neither `JSON` nor `json` is answered before it is
+ * lexed. The test is on the substring, not the call: a file with no wire call
+ * that still holds one of them (`./package.json`, a `toJSON` method, a comment)
+ * pays the lex and the bracket pairing before `wireCalls` finds nothing.
  */
 function wireCasts(content: string, filePath: string, options: WireCastOptions): readonly WireCast[] {
   if (isTestFile(projectRelative(filePath, options.projectRoot))) return [];

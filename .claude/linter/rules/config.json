@@ -288,7 +288,7 @@
     },
     {
       "module": "engine/src/parsers/",
-      "description": "Harness and tool OUTPUT scrapers (transcripts, bash output). Import themselves, node builtins, the type barrel, ts-pattern and the two shared core vocabularies (tool-vocabulary, claude-record-kind) only.",
+      "description": "Harness and tool OUTPUT scrapers (transcripts, bash output). Import themselves, node builtins, the type barrel, ts-pattern, the two shared core vocabularies (tool-vocabulary, claude-record-kind) and the core's one JSON-object predicate (plain-record, a pure leaf with no imports) only.",
       "allow": [
         "./",
         "engine/src/parsers/",
@@ -296,6 +296,7 @@
         "engine/src/types",
         "engine/src/core/tool-vocabulary",
         "engine/src/core/claude-record-kind",
+        "engine/src/core/plain-record",
         "ts-pattern"
       ],
       "deny": [

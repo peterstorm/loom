@@ -15,7 +15,9 @@ import {
   parsePlanDesignReview,
   planDesignGate,
   planDesignLens,
+  planDesignRequirement,
   planDesignReviewOf,
+  populationPlanDesignRequirement,
   renderPlanDesignRefusal,
   renderPlanDesignRequirement,
   type AcceptedPlanDesignReview,
@@ -24,12 +26,16 @@ import {
   type PlanDesignRefusal,
   type RecordedPlanDesignReview,
 } from "../../src/core/plan-design-review";
-import { STANDALONE_REVIEWER_ROLES } from "../../src/core/standalone-review-scope";
+import { PHASES } from "../../src/core/phases";
+import { parseReviewPath, type ReviewPath } from "../../src/core/review-packet";
+import { STANDALONE_REVIEWER_ROLES, standaloneReviewProfile } from "../../src/core/standalone-review-scope";
 import { refusal, value } from "../fixtures/parse-result";
 
 const digestArb: fc.Arbitrary<ArtifactDigest> = fc
   .stringMatching(/^[0-9a-f]{64}$/)
   .map((hex) => value(parseArtifactDigest(hex)));
+const digest = (hex: string): ArtifactDigest => value(parseArtifactDigest(hex));
+const reviewPath = (raw: string): ReviewPath => value(parseReviewPath(raw));
 const runIdArb = fc.stringMatching(/^[a-z][a-z0-9-]{0,20}$/).map((id) => value(parseOrchestrationRunId(id)));
 const acceptedArb: fc.Arbitrary<AcceptedPlanDesignReview> = fc.record({
   status: fc.constant("accepted" as const),
@@ -101,7 +107,7 @@ describe("planDesignGate", () => {
   it("names the plan and the accepting helper in each closed-gate message", () => {
     const required = renderPlanDesignRequirement({ kind: "review-required" }, ".claude/plans/p.md");
     const changed = renderPlanDesignRequirement(
-      { kind: "plan-changed", acceptedSha256: value(parseArtifactDigest("a".repeat(64))), currentSha256: "b".repeat(64) },
+      { kind: "plan-changed", acceptedSha256: digest("a".repeat(64)), currentSha256: digest("b".repeat(64)) },
       ".claude/plans/p.md",
     );
     for (const message of [required, changed]) {
@@ -112,13 +118,44 @@ describe("planDesignGate", () => {
     expect(changed).toContain("a".repeat(64));
     expect(changed).toContain("b".repeat(64));
   });
+
+  it("states a requirement exactly when the gate is closed, as the gate renders it", () => {
+    fc.assert(fc.property(fc.option(recordedArb, { nil: undefined }), digestArb, (recorded, current) => {
+      const review = planDesignReviewOf(recorded);
+      const gate = planDesignGate(review, current);
+      const requirement = planDesignRequirement(review, current, "plan.md");
+      expect(requirement).toBe(gate.kind === "open" ? null : renderPlanDesignRequirement(gate, "plan.md"));
+    }));
+  });
 });
 
-const PLAN: CurrentPlan = { path: ".claude/plans/feature.md", sha256: value(parseArtifactDigest("1".repeat(64))) };
+describe("populationPlanDesignRequirement", () => {
+  it("asks the decompose gate on first population and nothing on re-population or any other phase", () => {
+    fc.assert(fc.property(fc.constantFrom(...PHASES), fc.option(recordedArb, { nil: undefined }), digestArb, (phase, recorded, current) => {
+      const state = { current_phase: phase, ...(recorded === undefined ? {} : { plan_design_review: recorded }) };
+      expect(populationPlanDesignRequirement(state, current, "plan.md")).toBe(
+        phase === "decompose" ? planDesignRequirement(planDesignReviewOf(recorded), current, "plan.md") : null);
+    }));
+  });
+
+  it("refuses first population while the review is required or the plan moved past its acceptance", () => {
+    const reviewed = digest("1".repeat(64));
+    const accepted: AcceptedPlanDesignReview = {
+      status: "accepted", planSha256: reviewed, runId: value(parseOrchestrationRunId("design")), resultDigest: digest("2".repeat(64)),
+    };
+    const decompose = (plan_design_review: RecordedPlanDesignReview) => ({ current_phase: "decompose" as const, plan_design_review });
+    expect(populationPlanDesignRequirement(decompose(PLAN_DESIGN_REVIEW_REQUIRED), reviewed, "plan.md")).toContain("has no accepted design review");
+    expect(populationPlanDesignRequirement(decompose(accepted), digest("3".repeat(64)), "plan.md")).toContain("changed after its design review");
+    expect(populationPlanDesignRequirement(decompose(accepted), reviewed, "plan.md")).toBeNull();
+    expect(populationPlanDesignRequirement(decompose(PLAN_DESIGN_REVIEW_SKIPPED), reviewed, "plan.md")).toBeNull();
+  });
+});
+
+const PLAN: CurrentPlan = { path: reviewPath(".claude/plans/feature.md"), sha256: digest("1".repeat(64)) };
 
 const evidence = (overrides: Partial<PlanDesignEvidence> = {}): PlanDesignEvidence => ({
   runId: value(parseOrchestrationRunId("plan-design-1")),
-  resultDigest: value(parseArtifactDigest("2".repeat(64))),
+  resultDigest: digest("2".repeat(64)),
   requestedKinds: [PLAN_DESIGN_REVIEW_KIND],
   scope: [{ path: PLAN.path, sha256: PLAN.sha256 }],
   reviewers: [...PLAN_DESIGN_REVIEWERS],
@@ -148,13 +185,13 @@ describe("judgePlanDesignEvidence", () => {
   it.each<[string, Partial<PlanDesignEvidence>, PlanDesignRefusal["kind"]]>([
     ["another review kind", { requestedKinds: ["architecture"] }, "wrong-kind"],
     ["a kind set wider than plan-design", { requestedKinds: [PLAN_DESIGN_REVIEW_KIND, "code"] }, "wrong-kind"],
-    ["a scope naming another file", { scope: [{ path: "docs/other.md", sha256: PLAN.sha256 }] }, "scope-mismatch"],
-    ["a scope wider than the plan", { scope: [{ path: PLAN.path, sha256: PLAN.sha256 }, { path: "src/a.ts", sha256: PLAN.sha256 }] }, "scope-mismatch"],
+    ["a scope naming another file", { scope: [{ path: reviewPath("docs/other.md"), sha256: PLAN.sha256 }] }, "scope-mismatch"],
+    ["a scope wider than the plan", { scope: [{ path: PLAN.path, sha256: PLAN.sha256 }, { path: reviewPath("src/a.ts"), sha256: PLAN.sha256 }] }, "scope-mismatch"],
     ["an empty scope", { scope: [] }, "scope-mismatch"],
     ["a roster missing the type lens", { reviewers: ["code-reviewer", "architecture-tech-lead"] }, "roster-incomplete"],
     ["a registration without the read obligation", { readObligated: false }, "read-not-obligated"],
     ["a plan that was absent when frozen", { scope: [{ path: PLAN.path, sha256: null }] }, "plan-unobserved"],
-    ["a plan edited since the review", { scope: [{ path: PLAN.path, sha256: "3".repeat(64) }] }, "plan-changed-since-review"],
+    ["a plan edited since the review", { scope: [{ path: PLAN.path, sha256: digest("3".repeat(64)) }] }, "plan-changed-since-review"],
     ["a surviving critical", { survivingCriticals: ["code-reviewer-1"] }, "surviving-criticals"],
   ])("refuses %s", (_label, overrides, kind) => {
     expect(refusal(judgePlanDesignEvidence(evidence(overrides), PLAN)).kind).toBe(kind);
@@ -183,11 +220,11 @@ describe("judgePlanDesignEvidence", () => {
   it("words every refusal with what to do next", () => {
     const refusals: readonly PlanDesignRefusal[] = [
       { kind: "wrong-kind", requestedKinds: ["code"] },
-      { kind: "scope-mismatch", scope: ["a.md"], planPath: PLAN.path },
+      { kind: "scope-mismatch", scope: [reviewPath("a.md")], planPath: PLAN.path },
       { kind: "roster-incomplete", missing: ["type-design-analyzer"] },
       { kind: "read-not-obligated" },
       { kind: "plan-unobserved", planPath: PLAN.path },
-      { kind: "plan-changed-since-review", reviewedSha256: "3".repeat(64), currentSha256: PLAN.sha256 },
+      { kind: "plan-changed-since-review", reviewedSha256: digest("3".repeat(64)), currentSha256: PLAN.sha256 },
       { kind: "surviving-criticals", findingIds: ["code-reviewer-1"] },
     ];
     for (const each of refusals) expect(renderPlanDesignRefusal(each)).toMatch(/start a (fresh )?plan-design standalone review|review the plan as it exists/);
@@ -199,7 +236,8 @@ describe("judgePlanDesignEvidence", () => {
 describe("planDesignLens", () => {
   it("gives every plan design reviewer its own lens, naming the role", () => {
     const lenses = PLAN_DESIGN_REVIEWERS.map((role) => {
-      const lens = planDesignLens([PLAN_DESIGN_REVIEW_KIND], role);
+      const lens = standaloneReviewProfile([PLAN_DESIGN_REVIEW_KIND]).lens(role);
+      expect(lens).toBe(planDesignLens(role));
       expect(lens).toContain(`### Your lens: ${role}`);
       expect(lens).toContain("Rate a finding critical when the plan, built as written");
       return lens;
@@ -209,9 +247,9 @@ describe("planDesignLens", () => {
 
   it("gives no lens outside a plan design review or outside its roster", () => {
     for (const role of STANDALONE_REVIEWER_ROLES) {
-      expect(planDesignLens(["architecture"], role)).toBeNull();
-      if (!(PLAN_DESIGN_REVIEWERS as readonly string[]).includes(role)) {
-        expect(planDesignLens([PLAN_DESIGN_REVIEW_KIND], role)).toBeNull();
+      expect(standaloneReviewProfile(["architecture"]).lens(role)).toBeNull();
+      if (!PLAN_DESIGN_REVIEWERS.some((member) => member === role)) {
+        expect(standaloneReviewProfile([PLAN_DESIGN_REVIEW_KIND]).lens(role)).toBeNull();
       }
     }
   });

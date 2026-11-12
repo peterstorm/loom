@@ -52,6 +52,7 @@ import type * as ProgrammaticRules from "../engine/src/linter/programmatic/index
 import type * as Baselines from "../engine/src/linter/programmatic/baseline.ts";
 import type * as BaselineConfig from "../engine/src/linter/programmatic/baseline-config.ts";
 import type { BaselineOwner } from "../engine/src/linter/programmatic/baseline.ts";
+import type * as PlainRecord from "../engine/src/core/plain-record.ts";
 
 // ---------------------------------------------------------------------------
 // Resolve loom installation
@@ -80,6 +81,7 @@ const { baselineOwners }: typeof ProgrammaticRules = await import(join(LOOM_ROOT
 const { staleBaselineEntries }: typeof Baselines = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/baseline.ts"));
 const { configWithBaselines, recordedBaselines }: typeof BaselineConfig =
   await import(join(LOOM_ROOT, "engine/src/linter/programmatic/baseline-config.ts"));
+const { isRecord }: typeof PlainRecord = await import(join(LOOM_ROOT, "engine/src/core/plain-record.ts"));
 
 // ---------------------------------------------------------------------------
 // Detect project root and rules directory
@@ -376,12 +378,11 @@ function writeBaseline(config: LinterConfig.ProgrammaticConfig): void {
   // The config was already parsed through the engine's loader (`projectConfig`),
   // so a malformed one failed the run instead of being silently rewritten.
   const stored: unknown = existsSync(path) ? JSON.parse(readFileSync(path, "utf-8")) : {};
-  if (typeof stored !== "object" || stored === null || Array.isArray(stored)) {
+  if (!isRecord(stored)) {
     console.error(`${relative(PROJECT_ROOT, path)} is not a JSON object; baseline not written`);
     process.exit(2);
   }
-  const existing: Record<string, unknown> = { ...stored };
-  writeFileSync(path, `${JSON.stringify(configWithBaselines(existing, recorded), null, 2)}\n`);
+  writeFileSync(path, `${JSON.stringify(configWithBaselines(stored, recorded), null, 2)}\n`);
   console.log(`✓ ${relative(PROJECT_ROOT, path)}: ${recorded.map(({ configKey, keys }) => `${configKey} ${keys.length}`).join(", ")}`);
 }
 

@@ -24,6 +24,16 @@ import {
 import { capturedSpecCheck } from "../../src/core/spec-check";
 import { canonicalSpecBeside } from "../fixtures/spec-index-fixture";
 import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
+import { parseDecomposeEnvelope } from "../../src/core/decompose-payload";
+import { sha256Hex } from "../../src/core/digest";
+import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract/identity";
+import {
+  PLAN_DESIGN_REVIEW_REQUIRED,
+  PLAN_DESIGN_REVIEW_SKIPPED,
+  type RecordedPlanDesignReview,
+} from "../../src/core/plan-design-review";
+import { fixFull, validateFull } from "../../src/handlers/helpers/validate-task-graph";
+import { value } from "../fixtures/parse-result";
 
 /** The authored roster as population wrote it, without the Distill Tasks it appends (ADR-0068). */
 const authoredTasksOf = (state: TaskGraph) => state.tasks.filter((task) => !isDistillTask(task));
@@ -757,6 +767,116 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
     if (result.kind === "error") expect(result.message).toContain("--fix could not repair");
     const after = JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph;
     expect(after.tasks).toEqual([]);
+  });
+});
+
+describe("populate-task-graph — the validator and the typed parser cannot disagree silently", () => {
+  /** A payload the graph validator admits but whose Task carries a mistyped plan_context only the typed parser reads. */
+  const mistypedPlanContext = (plan: string, task: Readonly<Record<string, unknown>> = {}): string => {
+    const payload = JSON.parse(decomposeJson(plan)) as { tasks: Array<Record<string, unknown>> };
+    payload.tasks[0] = { ...payload.tasks[0], plan_context: 42, ...task };
+    return JSON.stringify(payload);
+  };
+
+  it("refuses a payload validateFull accepts when parseDecomposeInput does not, and writes nothing", async () => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, [], { current_phase: "decompose" });
+    const before = stateBytes(statePath);
+    const payload = mistypedPlanContext(plan);
+    const envelope = parseDecomposeEnvelope(JSON.parse(payload));
+    expect(envelope.ok && validateFull(envelope.value, "decompose-payload").ok).toBe(true);
+
+    expect(await populate(payload, [])).toEqual({
+      kind: "error",
+      message: "Decompose validation failed:\n  - Task T9: 'plan_context' must be a string when present",
+    });
+    expect(stateBytes(statePath)).toBe(before);
+  });
+
+  it("refuses with the typed parser's reason after --fix repaired everything the validator saw", async () => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, [], { current_phase: "decompose" });
+    const before = stateBytes(statePath);
+    // depends_on is the validator's (repairable) complaint; plan_context is the parser's.
+    const result = await populate(mistypedPlanContext(plan, { depends_on: "T1" }), ["--fix"]);
+    expect(result).toEqual({
+      kind: "error",
+      message: "Decompose validation failed:\n  - Task T9: 'plan_context' must be a string when present",
+    });
+    expect(stateBytes(statePath)).toBe(before);
+  });
+
+  it("re-admits every --fix repair of an admitted payload, so a repaired payload is never refused as an envelope", () => {
+    // populate-task-graph re-parses the --fix output as a decompose envelope and
+    // refuses with "--fix could not repair all issues" if it fails. fixFull keeps
+    // the payload an object with the same fields and the same number of Tasks,
+    // so that refusal guards a repair contract no admitted JSON payload breaks.
+    const field = fc.constantFrom("spec_trace_version", "plan_title", "plan_file", "spec_file");
+    const payloadArb = fc.record({
+      fields: fc.dictionary(field, fc.jsonValue()),
+      tasks: fc.array(fc.jsonValue(), { minLength: 1, maxLength: 4 }),
+    }).map(({ fields, tasks }) => ({ ...fields, tasks }));
+    fc.assert(fc.property(payloadArb, (raw) => {
+      const envelope = parseDecomposeEnvelope(raw);
+      expect(envelope.ok).toBe(true);
+      if (!envelope.ok) return;
+      const repaired = parseDecomposeEnvelope(JSON.parse(fixFull(envelope.value).json));
+      expect(repaired.ok).toBe(true);
+      expect(repaired.ok && repaired.value.tasks.length).toBe(envelope.value.tasks.length);
+    }));
+  });
+});
+
+describe("populate-task-graph — asks the plan design gate on first population (ADR-0070)", () => {
+  const PLAN_TEXT = "# Plan\n\nNo models.\n";
+  const accepted = (planText: string): RecordedPlanDesignReview => ({
+    status: "accepted",
+    planSha256: value(parseArtifactDigest(sha256Hex(planText))),
+    runId: value(parseOrchestrationRunId("design")),
+    resultDigest: value(parseArtifactDigest("a".repeat(64))),
+  });
+
+  it.each<[string, RecordedPlanDesignReview, string]>([
+    ["a review is still required", PLAN_DESIGN_REVIEW_REQUIRED, "has no accepted design review"],
+    ["the plan changed after its acceptance", accepted("# Plan\n\nThe reviewed bytes.\n"), "changed after its design review was accepted"],
+  ])("refuses to cut Tasks from the plan while %s, and writes nothing", async (_label, review, reason) => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, [], { current_phase: "decompose", plan_design_review: review });
+    const before = stateBytes(statePath);
+
+    const result = await populate(decomposeJson(plan), []);
+
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("TaskGraph population requires plan-design-review") });
+    expect(result).toMatchObject({ message: expect.stringContaining(reason) });
+    expect(result).toMatchObject({ message: expect.stringContaining(plan) });
+    expect(stateBytes(statePath)).toBe(before);
+  });
+
+  it.each<[string, RecordedPlanDesignReview | undefined]>([
+    ["the review accepted for the plan's current bytes", accepted(PLAN_TEXT)],
+    ["the review skipped at init-state", PLAN_DESIGN_REVIEW_SKIPPED],
+    ["a graph initialized before the review existed", undefined],
+  ])("populates with %s", async (_label, review) => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, [], {
+      current_phase: "decompose", ...(review === undefined ? {} : { plan_design_review: review }),
+    });
+
+    expect((await populate(decomposeJson(plan), [])).kind).toBe("passthrough");
+    const after = JSON.parse(stateBytes(statePath)) as TaskGraph;
+    expect(after.current_phase).toBe("execute");
+    expect(after.plan_design_review).toEqual(review);
+  });
+
+  it("does not gate re-population in execute: a plan may be amended once Tasks exist", async () => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    writeState(dir, plan, [existingTask("T1", "pending")], { current_phase: "execute", plan_design_review: PLAN_DESIGN_REVIEW_REQUIRED });
+    expect((await populate(decomposeJson(plan), [])).kind).toBe("passthrough");
   });
 });
 

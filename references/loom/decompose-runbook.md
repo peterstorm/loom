@@ -85,6 +85,8 @@ echo "$DECOMPOSE_OUTPUT" | bun {LOOM_DIR}/engine/src/cli.ts helper populate-task
 
 It validates again, freezes the verification manifest, installs the Tasks and Waves with `github_issue`, `spec_file`, `plan_file` and `current_wave: 1`, and moves `current_phase` from `decompose` to `execute` in the same write. It refuses any phase other than `decompose` (first population) or `execute` (re-population). Relay the Project Verification Coverage it reports: `configured` with its check ids, or `not-configured` (`engine-default` or `empty-operator-manifest`).
 
+On first population the helper asks the plan design gate of the plan bytes it read: it refuses while `plan_design_review` is `required` or `accepted` for other bytes, exactly as the decompose spawn does. Re-population in execute is not gated.
+
 The helper leaves the State File read-only (mode 444). Do not run `chmod` yourself; the state guard blocks it.
 
 ## 4e. Context checkpoint

@@ -137,7 +137,7 @@ An immutable review-and-adjudication record outside the wave lifecycle. It binds
 _Avoid_: Synthetic Task, fake Wave, ad-hoc review output
 
 **Plan Design Review**:
-The review of a **Plan**'s design before Tasks are cut from it: a **Standalone Review Run** scoped to exactly the Plan. A gate on the decompose spawn, not a Phase; acceptance is bound to the reviewed bytes, so any later edit closes the gate until a fresh review is accepted.
+The review of a **Plan**'s design before Tasks are cut from it: a **Standalone Review Run** scoped to exactly the Plan. A gate on decompose, not a Phase: the decompose spawn asks it, and first TaskGraph population asks it again. Acceptance is bound to the reviewed bytes, so any later edit closes the gate until a fresh review is accepted.
 _Avoid_: Plan review (plan alignment is also one), design phase, plan-design phase, architecture review (that is the `architecture` Standalone Review kind), plan approval
 
 ### Proof

@@ -23,6 +23,7 @@ import { isWireRecord } from "../../src/core/security-audit-contract";
 import { parseRegisteredSecurityVerificationProgram, parseSecurityVerificationStart, type SecurityVerificationStart } from "../../src/core/security-verification";
 import { parentAnnouncement, FIXTURE_CLAUDE_CODE_SESSION_ID } from "../fixtures/facade-parent";
 import { deliverClaudeSubagentStop } from "../fixtures/claude-native-capture";
+import { isJsonArray } from "../fixtures/json-wire";
 import type { FacadeAction } from "../../src/handlers/helpers/programs/program-result";
 import type { Run } from "./security-audit-run-seam";
 
@@ -46,7 +47,7 @@ export type Action = Readonly<{ kind: FacadeAction["kind"]; requests?: readonly 
 
 const isString = (value: unknown): value is string => typeof value === "string";
 const isListOf = <T>(value: unknown, isEntry: (entry: unknown) => entry is T): value is readonly T[] =>
-  Array.isArray(value as unknown) && (value as readonly unknown[]).every(isEntry);
+  isJsonArray(value) && value.every(isEntry);
 const isAbsentOr = <T>(value: unknown, isPresent: (present: unknown) => present is T): value is T | undefined =>
   value === undefined || isPresent(value);
 

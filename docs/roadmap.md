@@ -124,7 +124,7 @@ The verification tiers catch defects; this part reduces how many exist to catch.
 
 ### At completion — make "done" unclaimable without proof
 
-**Q4 on Pi.** The Task mutation check is advisory on Pi, because Pi settles after the child has ended. Enforcing it there would need an engine-added Task after each implementation Task, as the distill pass added one per Wave.
+**Q4 on Pi.** The Task mutation check is advisory on Pi, because Pi settles after the child has ended. A run that could not decide is `unavailable`, and a run whose every mutant only broke collection or ran no test is `inconclusive`, never clean; neither blocks. Enforcing it there would need an engine-added Task after each implementation Task, as the distill pass added one per Wave.
 
 **I9 — Best-of-N for flagged tasks: spend generation tokens to save remediation tokens.** Once completion is machine-scored, exploit it: for tasks decompose flags as high-risk (novel module, security-touching, wide blast radius), spawn 2–3 isolated implementers and let the engine pick the candidate with the best deterministic score; a reviewer breaks ties. Sampling and selecting is the standard way to convert stochastic generation into near-deterministic output, and it is only rational because the selector is code. Existing completion checks and Git worktree primitives are useful substrate, but isolated Task worktrees, candidate selection and integration, and mutation-on-diff scoring are prerequisites, not shipped machinery. The economics usually favour it: twice the generation on one hard task is cheaper than one remediation cycle.
 

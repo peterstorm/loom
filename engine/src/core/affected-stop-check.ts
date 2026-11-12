@@ -97,9 +97,16 @@ export type Blocking<Failure> = Readonly<{ failure: Failure; blocks: number }>;
  * and its message are both of this shape, so neither can name no check.
  */
 export type SomeChecks<Acceptance, Affected, Mutation> =
-  | Readonly<{ acceptance: Acceptance; affected: Affected | null; mutation: Mutation | null }>
-  | Readonly<{ acceptance: null; affected: Affected; mutation: Mutation | null }>
-  | Readonly<{ acceptance: null; affected: null; mutation: Mutation }>;
+  | AcceptanceFirst<Acceptance, Affected, Mutation>
+  | AffectedFirst<Affected, Mutation>
+  | MutationOnly<Mutation>;
+
+/** The checks with acceptance filled, the others optional. */
+type AcceptanceFirst<Acceptance, Affected, Mutation> = Readonly<{ acceptance: Acceptance; affected: Affected | null; mutation: Mutation | null }>;
+/** The checks with acceptance empty and affected filled. */
+type AffectedFirst<Affected, Mutation> = Readonly<{ acceptance: null; affected: Affected; mutation: Mutation | null }>;
+/** The checks with only mutation filled. */
+type MutationOnly<Mutation> = Readonly<{ acceptance: null; affected: null; mutation: Mutation }>;
 
 /** The slots as `SomeChecks`, or null when none is filled. */
 function someChecks<Acceptance, Affected, Mutation>(
@@ -110,6 +117,27 @@ function someChecks<Acceptance, Affected, Mutation>(
   if (acceptance !== null) return freeze({ acceptance, affected, mutation });
   if (affected !== null) return freeze({ acceptance: null, affected, mutation });
   return mutation === null ? null : freeze({ acceptance: null, affected: null, mutation });
+}
+
+/**
+ * Each filled slot through `f`, in check order. The result fills exactly the
+ * slots `checks` fills, so it names at least one check too: a block's message
+ * parts are this mapping over the checks the block names, and adding a stop
+ * check changes the slot shape here, never in a shell.
+ */
+export function mapSomeChecks<Check, Part>(
+  checks: SomeChecks<Check, Check, Check>,
+  f: (name: StopCheckName, check: Check) => Part,
+): SomeChecks<Part, Part, Part> {
+  const at = (name: StopCheckName, check: Check | null): Part | null => check === null ? null : f(name, check);
+  const acceptanceFirst = (some: SomeChecks<Check, Check, Check>): some is AcceptanceFirst<Check, Check, Check> => some.acceptance !== null;
+  const affectedFirst = (some: SomeChecks<Check, Check, Check>): some is AffectedFirst<Check, Check> =>
+    some.acceptance === null && some.affected !== null;
+  if (acceptanceFirst(checks)) {
+    return freeze({ acceptance: f("acceptance", checks.acceptance), affected: at("affected", checks.affected), mutation: at("mutation", checks.mutation) });
+  }
+  if (affectedFirst(checks)) return freeze({ acceptance: null, affected: f("affected", checks.affected), mutation: at("mutation", checks.mutation) });
+  return freeze({ acceptance: null, affected: null, mutation: f("mutation", checks.mutation) });
 }
 
 /** The checks one block names: at least one, in check order. A check absent

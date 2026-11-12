@@ -6,6 +6,16 @@ export function sha256Bytes(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+/**
+ * SHA-256 over bytes as the branded `ArtifactDigest`: the digest of an
+ * artifact's exact bytes, minted through the identity parser, never by cast.
+ */
+export function artifactDigestOfBytes(bytes: Uint8Array): ArtifactDigest {
+  const digest = parseArtifactDigest(sha256Bytes(bytes));
+  if (!digest.ok) throw new Error(`invariant: sha256Bytes emitted a non-digest: ${digest.error.message}`);
+  return digest.value;
+}
+
 /** Deterministic SHA-256 over UTF-8 text. */
 export function sha256Hex(text: string): string {
   return sha256Bytes(Buffer.from(text, "utf-8"));

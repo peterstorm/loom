@@ -42,6 +42,7 @@ import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { stateFileJson, task, writeStateFile } from "../fixtures/contract-status-fixtures";
 import { inMemoryBlockCounters } from "../fixtures/stop-check-block-counters";
 import { AFFECTED_REPORT, AFFECTED_RUNNER, observedRun, parsedRun } from "../fixtures/stop-check-runners";
+import { talliedResult } from "../fixtures/task-mutation";
 
 const SESSION = "stop-checks-isolation-session";
 const AGENT = "agent-ledger";
@@ -111,7 +112,8 @@ async function project(): Promise<Project> {
   return { root, canonicalRoot: canonicalRoot.value, statePath };
 }
 
-const CLEAN: TaskMutationResult = { kind: "clean", mutants: 2, candidates: 2 };
+const CLEAN: TaskMutationResult = talliedResult({ killed: 2, candidates: 2 });
+const INCONCLUSIVE: TaskMutationResult = talliedResult({ invalid: 2, candidates: 2 });
 const SURVIVORS = taskMutationResultOf([{
   mutant: { id: "m", path: "src/ledger.ts", line: 1, column: 1, start: 0, end: 6, operator: "statement-removal", original: "export", replacement: ";" },
   outcome: "survived",
@@ -252,6 +254,7 @@ describe("ADR-0071: settlement is byte-identical under every Task mutation check
   it.each<[string, Outcome, string | null]>([
     ["a clean run", { run: "passes", mutation: CLEAN }, null],
     ["a run that could not decide", { run: "passes", mutation: taskMutationUnavailable("the unmutated tests fail") }, "its last run was unavailable: the unmutated tests fail"],
+    ["a run whose every mutant was invalid", { run: "passes", mutation: INCONCLUSIVE }, "its last run was inconclusive: none of its 2 mutant(s) could be judged"],
     ["no run at the block cap", { run: "passes", mutation: null, mutationBlocks: AT_CAP }, "the Task mutation check reached its 2-block cap"],
     ["survivors at the block cap", { run: "passes", mutation: SURVIVORS, mutationBlocks: AT_CAP }, "the Task mutation check reached its 2-block cap"],
     ["an unreadable block counter", { run: "passes", mutation: null, mutationBlocks: { kind: "unreadable", reason: "counter is not JSON" } }, "the Task mutation check's block counter is unreadable"],

@@ -4,6 +4,7 @@
  */
 
 import { claudeRecordKind } from "../core/claude-record-kind";
+import { isRecord } from "../core/plain-record";
 
 export type TranscriptFormat = "claude" | "pi";
 
@@ -64,10 +65,6 @@ export interface PiContentBlock {
   id?: string;
   arguments?: Record<string, unknown>;
 }
-
-/** A parsed JSON object: not null, not an array. */
-export const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** A field that is not of its declared type is absent, never a value of another type. */
 const stringField = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);

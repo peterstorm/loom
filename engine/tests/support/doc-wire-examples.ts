@@ -21,16 +21,22 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { WIRE_CONTRACT_END, WIRE_CONTRACT_START } from "../../src/core/wire-contract";
+import { isJsonArray } from "../fixtures/json-wire";
+import { parseWireShapeId, type WireShapeId } from "./doc-wire-shape-ids";
 
 export const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
 
 // --- Markers ---
 
-/** What a `wire-example` marker line says. `malformed` is a line that claims
- *  the channel and says nothing the suite can act on; it is kept as data so the
- *  completeness check can name it instead of the scan silently skipping it. */
+/** What a `wire-example` marker line says. The shape id is parsed here, once:
+ *  a `shape` marker names a registered shape, and a well-formed id the
+ *  registry does not hold is `unregistered`. `malformed` is a line that claims
+ *  the channel and says nothing the suite can act on. Both are kept as data so
+ *  the completeness check can name them instead of the scan silently skipping
+ *  them. */
 export type WireMarker =
-  | Readonly<{ kind: "shape"; shapeId: string }>
+  | Readonly<{ kind: "shape"; shapeId: WireShapeId }>
+  | Readonly<{ kind: "unregistered"; shapeId: string }>
   | Readonly<{ kind: "none"; reason: string }>
   | Readonly<{ kind: "malformed"; text: string }>;
 
@@ -45,7 +51,9 @@ export function parseWireMarker(line: string): WireMarker | null {
   const text = claimed.trim();
   const reason = OPT_OUT.exec(text)?.[1];
   if (reason !== undefined) return { kind: "none", reason: reason.trim() };
-  return SHAPE_ID.test(text) && text !== "none" ? { kind: "shape", shapeId: text } : { kind: "malformed", text };
+  if (!SHAPE_ID.test(text) || text === "none") return { kind: "malformed", text };
+  const shapeId = parseWireShapeId(text);
+  return shapeId === null ? { kind: "unregistered", shapeId: text } : { kind: "shape", shapeId };
 }
 
 export const renderShapeMarker = (shapeId: string): string => `<!-- wire-example: ${shapeId} -->`;
@@ -54,7 +62,9 @@ export const renderOptOutMarker = (reason: string): string => `<!-- wire-example
 // --- Fences ---
 
 /** One fenced block of a doc. `line` is the 1-based line of its opening fence;
- *  `marker` is the marker on the nearest non-blank line above it, if any. */
+ *  `language` is the first word of its info string, lower-cased (empty when it
+ *  has none); `marker` is the marker on the nearest non-blank line above it, if
+ *  any. */
 export type DocFence = Readonly<{
   file: string;
   line: number;
@@ -69,7 +79,14 @@ export type DocScan = Readonly<{
   danglingMarkerLines: readonly number[];
 }>;
 
-const FENCE_OPEN = /^\s*(`{3,})\s*([A-Za-z0-9_+-]*)\s*$/;
+/** A backtick fence opener: its ticks and its info string. As in CommonMark,
+ *  the info string is any text without a backtick (```json title="x",
+ *  ```json {1,2}), and its first word is the language. Reading only a bare
+ *  language would skip such a fence whole and take its closing line for the
+ *  opener of a bogus one. */
+const FENCE_OPEN = /^\s*(`{3,})([^`]*)$/;
+
+const languageOf = (info: string): string => info.trim().split(/\s+/)[0].toLowerCase();
 
 /**
  * Scan one doc. A stamped wire-contract region is skipped whole: its fences are
@@ -98,13 +115,13 @@ export function scanDoc(file: string, source: string): DocScan {
 
     const opened = FENCE_OPEN.exec(line);
     if (opened !== null) {
-      const [, ticks, language] = opened;
+      const [, ticks, info] = opened;
       const closing = lines.findIndex((candidate, at) => at > index && candidate.trim() === ticks);
       const end = closing === -1 ? lines.length : closing;
       fences.push({
         file,
         line: index + 1,
-        language: language.toLowerCase(),
+        language: languageOf(info),
         body: lines.slice(index + 1, end).join("\n"),
         marker: pending?.marker ?? null,
       });
@@ -153,16 +170,17 @@ export function jsonTextsOf(fence: DocFence): readonly string[] {
   return SHELL_LANGUAGES.includes(fence.language) ? heredocBodies(fence.body).filter(looksLikeJson) : [];
 }
 
-/** One documented example bound to the shape its marker names. */
+/** One documented example bound to the registered shape its marker names. */
 export type DocExample = Readonly<{
   file: string;
   line: number;
-  shapeId: string;
+  shapeId: WireShapeId;
   text: string;
 }>;
 
-/** The examples a fence contributes: none without a shape marker; the fence's
- *  JSON texts when it shows JSON; otherwise the marked fence's own body. */
+/** The examples a fence contributes: none without a registered shape marker;
+ *  the fence's JSON texts when it shows JSON; otherwise the marked fence's own
+ *  body. */
 export function examplesOf(fence: DocFence): readonly DocExample[] {
   if (fence.marker?.kind !== "shape") return [];
   const { shapeId } = fence.marker;
@@ -170,23 +188,22 @@ export function examplesOf(fence: DocFence): readonly DocExample[] {
   return (json.length > 0 ? json : [fence.body]).map((text) => ({ file: fence.file, line: fence.line, shapeId, text }));
 }
 
-/** Why a doc's markers are incomplete or unusable, one line per defect. `knownShapeIds`
- *  is the registry's id list, so a marker naming no registered shape is a defect here. */
-export function markerDefects(scan: DocScan, file: string, knownShapeIds: readonly string[]): readonly string[] {
+/** The defect a fence's marker carries, if any. */
+function fenceDefect(fence: DocFence, at: string): string | null {
+  const { marker } = fence;
+  if (marker === null) {
+    return jsonTextsOf(fence).length > 0 ? `${at} documents JSON with no wire-example marker above the fence` : null;
+  }
+  if (marker.kind === "malformed") {
+    return `${at} wire-example marker is neither a shape id nor "none — <reason>": ${JSON.stringify(marker.text)}`;
+  }
+  return marker.kind === "unregistered" ? `${at} wire-example marker names an unregistered shape: ${marker.shapeId}` : null;
+}
+
+/** Why a doc's markers are incomplete or unusable, one line per defect. */
+export function markerDefects(scan: DocScan, file: string): readonly string[] {
   const dangling = scan.danglingMarkerLines.map((line) => `${file}:${line} wire-example marker is not directly above a fence`);
-  const fenced = scan.fences.flatMap((fence) => {
-    const at = `${file}:${fence.line}`;
-    if (fence.marker === null) {
-      return jsonTextsOf(fence).length > 0 ? [`${at} documents JSON with no wire-example marker above the fence`] : [];
-    }
-    if (fence.marker.kind === "malformed") {
-      return [`${at} wire-example marker is neither a shape id nor "none — <reason>": ${JSON.stringify(fence.marker.text)}`];
-    }
-    if (fence.marker.kind === "shape" && !knownShapeIds.includes(fence.marker.shapeId)) {
-      return [`${at} wire-example marker names an unregistered shape: ${fence.marker.shapeId}`];
-    }
-    return [];
-  });
+  const fenced = scan.fences.flatMap((fence) => fenceDefect(fence, `${file}:${fence.line}`) ?? []);
   return [...dangling, ...fenced];
 }
 
@@ -239,8 +256,8 @@ export type PlaceholderTable = Readonly<Record<string, unknown>>;
  * `"wave": 1`) are kept exactly as written — they are part of the contract.
  */
 export function resolvePlaceholders(value: unknown, placeholders: PlaceholderTable, key = "$", position = 0): unknown {
-  if (Array.isArray(value as unknown)) {
-    return (value as readonly unknown[]).map((entry, index) => resolvePlaceholders(entry, placeholders, key, index));
+  if (isJsonArray(value)) {
+    return value.map((entry, index) => resolvePlaceholders(entry, placeholders, key, index));
   }
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(
@@ -265,7 +282,7 @@ export function resolvePlaceholders(value: unknown, placeholders: PlaceholderTab
 /** The keys a documented object names. An array is read through its first
  *  element, which is how the docs show a list's item shape. */
 export const keysOf = (value: unknown): readonly string[] => {
-  if (Array.isArray(value as unknown)) return keysOf((value as readonly unknown[])[0]);
+  if (isJsonArray(value)) return keysOf(value[0]);
   return value !== null && typeof value === "object" ? Object.keys(value) : [];
 };
 
@@ -308,7 +325,7 @@ export const governedExamples = (docs: readonly GovernedDoc[]): readonly DocExam
 
 /** The one example of `shapeId` a doc carries, parsed as JSON. A doc with none,
  *  or with several, fails here by name. */
-export function documentedJson(docs: readonly GovernedDoc[], file: string, shapeId: string): unknown {
+export function documentedJson(docs: readonly GovernedDoc[], file: string, shapeId: WireShapeId): unknown {
   const examples = governedExamples(docs).filter((example) => example.file === file && example.shapeId === shapeId);
   if (examples.length !== 1) throw new Error(`${file} documents ${examples.length} ${shapeId} examples, expected exactly one`);
   return parseDocJson(examples[0].text);

@@ -203,6 +203,7 @@ import {
   type RegisteredStandaloneProgram,
 } from "./programs";
 import { advisoryDecisionApproved, waveGateDecisionMismatch } from "../../core/wave-gate-membership";
+import { parseUserDecision } from "../../core/user-decision";
 import { parseBoundedReviewerJson } from '../../core/reviewer-protocol';
 import { parseOrchestrationOperation } from "./orchestration-operations";
 import { remediateOperation } from "./remediate-implementation-escalation";
@@ -1868,35 +1869,13 @@ function waveDecisionAuthorityError(binding: DecisionBinding): HookResult | null
   return mismatch === null ? null : { kind: "error", message: mismatch };
 }
 
-/** The decision `decide` reads from stdin: any JSON object, and for a
- *  registered Wave Gate (`waveDecision`) exactly `{"kind":"approve"}`. */
-export function parseUserDecision(stdin: string, waveDecision: boolean): Readonly<{ ok: true; value: object }> |
-  Readonly<{ ok: false; result: HookResult }> {
-  if (stdin.trim().length === 0) {
-    return { ok: false, result: { kind: "error", message: "a decision must be supplied on stdin" } };
-  }
-  let decision: unknown;
-  try {
-    decision = JSON.parse(stdin) as unknown;
-  } catch (error) {
-    return { ok: false, result: { kind: "error", message: `decision must be valid JSON: ${error instanceof Error ? error.message : String(error)}` } };
-  }
-  if (typeof decision !== "object" || decision === null || Array.isArray(decision)) {
-    return { ok: false, result: { kind: "error", message: "decision must be a JSON object" } };
-  }
-  if (waveDecision && (Object.keys(decision).length !== 1 || (decision as Record<string, unknown>).kind !== "approve")) {
-    return { ok: false, result: { kind: "error", message: "Wave advisory decision must be exactly {\"kind\":\"approve\"}" } };
-  }
-  return { ok: true, value: decision };
-}
-
 async function decideOperation(stdin: string, args: readonly string[], emission: Emission): Promise<HookResult> {
   const binding = bindDecision(args);
   if (!binding.ok) return binding.result;
   const authorityError = waveDecisionAuthorityError(binding.value);
   if (authorityError !== null) return authorityError;
-  const decision = parseUserDecision(stdin, binding.value.registration !== null);
-  if (!decision.ok) return decision.result;
+  const decision = parseUserDecision(stdin, binding.value.registration === null ? "unregistered-run" : "wave-gate");
+  if (!decision.ok) return { kind: "error", message: decision.error };
   const { handle, decisionId, registration } = binding.value;
   await handle.appendEvent({
     schemaVersion: 1, sequence: 0,

@@ -54,6 +54,7 @@ import {
 import {
   blockAdmission,
   judgeAffectedRun,
+  mapSomeChecks,
   renderAffectedBlock,
   renderExcusedAcceptanceTestcase,
   renderStopChecksBlock,
@@ -195,18 +196,21 @@ function affectedArm(taskId: string, plan: AffectedPlan, observation: AffectedOb
     .exhaustive();
 }
 
+/** The repository root the stop resolved, or why it could not. */
+type ResolvedRoot = ReturnType<StopCheckShellPorts["repositoryRoot"]>;
+
 /**
  * The mutation arm's result. It runs no runner: a Task that owes the check
  * has its record's standing observed, and `taskMutationStopVerdict` decides.
  * A missing root or a throwing observation is a note, never a block.
  */
-function mutationResult(input: StopChecksInput, graph: TaskGraph, root: CanonicalRepositoryRoot | null, rootFault: string | null): CheckResult {
+function mutationResult(input: StopChecksInput, graph: TaskGraph, resolvedRoot: ResolvedRoot): CheckResult {
   const duty = taskMutationDuty(graph, input.taskId);
   const observe = (): TaskMutationObservation => {
     if (duty.kind === "off") return NO_TASK_MUTATION_CHECK;
-    if (root === null) return Object.freeze({ kind: "unavailable", reason: rootFault ?? "the repository root is unavailable" });
+    if (!resolvedRoot.ok) return Object.freeze({ kind: "unavailable", reason: resolvedRoot.reason });
     try {
-      return input.taskMutation(duty, root);
+      return input.taskMutation(duty, resolvedRoot.root);
     } catch (cause) {
       return Object.freeze({ kind: "unavailable", reason: describe(cause) });
     }
@@ -325,16 +329,8 @@ const notesOf = (results: Results): readonly string[] =>
 type Stopper = Pick<StopChecksInput, "taskId" | "agentKey">;
 
 /** Each blocking check's part of the message, rendered with the blocks its counter leaves: the same checks the block names. */
-function blockParts(blocking: BlockingChecks<Failing, Failing, Failing>): StopChecksBlockParts {
-  const part = (name: StopCheckName, { failure, blocks }: Blocking<Failing>): string => failure.part(CAPS[name] - blocks);
-  const optional = (name: StopCheckName, check: Blocking<Failing> | null): string | null => check === null ? null : part(name, check);
-  if (blocking.acceptance !== null) {
-    return { acceptance: part("acceptance", blocking.acceptance), affected: optional("affected", blocking.affected), mutation: optional("mutation", blocking.mutation) };
-  }
-  return blocking.affected !== null
-    ? { acceptance: null, affected: part("affected", blocking.affected), mutation: optional("mutation", blocking.mutation) }
-    : { acceptance: null, affected: null, mutation: part("mutation", blocking.mutation) };
-}
+const blockParts = (blocking: BlockingChecks<Failing, Failing, Failing>): StopChecksBlockParts =>
+  mapSomeChecks<Blocking<Failing>, string>(blocking, (name, { failure, blocks }) => failure.part(CAPS[name] - blocks));
 
 /** Settle the results into one outcome, writing only the counters the decision names. */
 function settle({ taskId, agentKey }: Stopper, results: Results, issued: Issued, ports: StopCheckShellPorts, extraNotes: readonly string[]): StopChecksOutcome {
@@ -373,7 +369,7 @@ async function decide(input: StopChecksInput, ports: StopCheckShellPorts): Promi
     affected: affectedArm(taskId, plan.affected, observation),
   });
   // The mutation arm runs no runner, so it is settled before the lock is taken.
-  const mutation = resolvedRoot.ok ? mutationResult(input, graph, resolvedRoot.root, null) : mutationResult(input, graph, null, resolvedRoot.reason);
+  const mutation = mutationResult(input, graph, resolvedRoot);
   // Only a check that would run, or that would block, reads its counter.
   const issued: Issued = Object.freeze({
     acceptance: isRunnable(planned.acceptance) ? ports.blocks.issued("acceptance", input.agentKey) : NO_BLOCKS_ISSUED,

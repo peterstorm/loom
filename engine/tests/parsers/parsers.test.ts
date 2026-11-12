@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import { parsePiEntry } from "../../src/parsers/types";
+import { notAJsonObject, wireOf } from "../fixtures/json-wire";
 
 import { parseFirstUserPrompt, parseTranscript } from "../../src/parsers/parse-transcript";
 import { parseFilesModified } from "../../src/parsers/parse-files-modified";
@@ -239,9 +240,6 @@ describe("parsePiEntry", () => {
     { type: fc.string(), id: fc.string(), parentId: fc.option(fc.string(), { nil: null }), message },
     { requiredKeys: ["type"] },
   );
-  const wireOf = (value: unknown): unknown => JSON.parse(JSON.stringify(value));
-  const notAnObject = fc.jsonValue().filter((value) => typeof value !== "object" || value === null || Array.isArray(value));
-
   it("round-trips every entry through its wire form", () => {
     fc.assert(fc.property(entry, (value) => {
       expect(parsePiEntry(wireOf(value))).toEqual(wireOf(value));
@@ -249,7 +247,7 @@ describe("parsePiEntry", () => {
   });
 
   it("refuses a value that is not an object or has no string type", () => {
-    fc.assert(fc.property(notAnObject, (value) => {
+    fc.assert(fc.property(notAJsonObject, (value) => {
       expect(parsePiEntry(value)).toBeNull();
     }));
     fc.assert(fc.property(entry, fc.jsonValue().filter((value) => typeof value !== "string"), (value, type) => {

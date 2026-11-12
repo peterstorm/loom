@@ -7,7 +7,6 @@ import {
   TASK_MUTATION_OPERATORS,
   WAVE_GATE_OPERATORS,
   applyMutant,
-  applyTaskMutant,
   mutantTimeoutMs,
   mutationPlan,
   mutationPlanOf,
@@ -336,7 +335,7 @@ describe("taskMutants", () => {
       ["guard-removal", 2], ["condition-negation", 2], ["comparison-flip", 2],
     ]);
     expect(candidates).toBe(mutants.length);
-    expect(applyTaskMutant(GUARDED, guards[0]!).split("\n")[1]).toBe("  ;");
+    expect(applyMutant(GUARDED, guards[0]!).split("\n")[1]).toBe("  ;");
   });
 
   it.each([
@@ -390,7 +389,7 @@ describe("taskMutants", () => {
       for (const mutant of first.mutants) {
         const text = texts.get(mutant.path) ?? "";
         expect(text.slice(mutant.start, mutant.end)).toBe(mutant.original);
-        const mutated = applyTaskMutant(text, mutant);
+        const mutated = applyMutant(text, mutant);
         expect(mutated).not.toBe(text);
         expect(mutated.slice(0, mutant.start) + mutated.slice(mutant.start + mutant.replacement.length)).toBe(text.slice(0, mutant.start) + text.slice(mutant.end));
       }

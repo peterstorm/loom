@@ -35,7 +35,7 @@ import { readStandaloneReviewedSource, replayStandaloneCliCaptures } from "./sta
 import { readRunBytesNoFollow } from "../../../utils/no-follow-fs";
 import { openRegisteredRunDirectory, type RunDirHandle } from "../../../orchestration/run-directory-handle";
 import { readStoredContextPacketFile } from "../../../orchestration/stored-context-packets";
-import { parsedAuthority, parseRegistration, sameRegisteredStandalonePrograms } from "./registration";
+import { parsedAuthority, parseRegistration, sameRegisteredStandalonePrograms, type RegisteredStandaloneProgram } from "./registration";
 import { publishedReviewerRequest, publicationResolver } from "./durable-requests";
 import { readPublishedStandaloneResult } from "./standalone-requests";
 import type { ProgramParse } from "./program-result";
@@ -45,6 +45,21 @@ type SuccessorSourcePreparation = Readonly<{ prepared: PreparedStandaloneSuccess
   contexts: Extract<ReturnType<typeof standaloneSuccessorPackets>, { ok: true }>["value"]["contexts"] }>;
 type SuccessorAdmission = SuccessorSourcePreparation & { readonly authority: FrozenStandaloneReviewAuthority };
 type CompletedSource = StandaloneDoneState & { readonly locator: string };
+/** A completed source with the registration its authentication parsed, kept beside (never inside) the done state. */
+type CompletedRun = Readonly<{ source: CompletedSource; registration: RegisteredStandaloneProgram }>;
+
+/**
+ * One authenticated walk of a completed Standalone Review Run: its done state
+ * (published result and frozen authority), its lineage source (frozen scope
+ * snapshot and reviewer roster) and the registration that walk parsed. A
+ * caller needing more than one of them reads them together here, so they come
+ * from one authentication and cannot observe the Run in two states.
+ */
+export type AuthenticatedStandaloneRun = Readonly<{
+  done: StandaloneDoneState;
+  lineage: StandaloneLineageSource;
+  registration: RegisteredStandaloneProgram;
+}>;
 
 /** One shell step's result and the walk's remaining traversal: returned, never mutated in place. */
 type Walked<T> = ProgramParse<Readonly<{ walked: T; traversal: PredecessorTraversal }>>;
@@ -194,13 +209,37 @@ export async function readAuthenticatedStandaloneLineageSource(sourceRunsRoot: s
   return source.ok ? { ok: true, value: source.value.walked } : source;
 }
 
+/**
+ * A completed Run read once: its done state, its lineage source and its
+ * registration, all from the one authentication `readCompletedStandaloneSource`
+ * makes. (A v1/v2 lineage still re-reads the registration below, to prove it
+ * did not change between result authentication and the scope observation.)
+ */
+export async function readAuthenticatedStandaloneRun(runsRoot: string, run: string): Promise<ProgramParse<AuthenticatedStandaloneRun>> {
+  const authenticated = await authenticateRunWithin(runsRoot, run, predecessorTraversal());
+  if (!authenticated.ok) return authenticated;
+  const { completed: { source, registration }, lineage } = authenticated.value.walked;
+  return { ok: true, value: Object.freeze({ done: source, lineage, registration }) };
+}
+
 async function authenticateLineageSourceWithin(sourceRunsRoot: string, sourceRun: string,
   traversal: PredecessorTraversal): Promise<Walked<StandaloneLineageSource>> {
-  const completed = await readCompletedStandaloneSource(sourceRunsRoot, sourceRun, traversal);
-  if (!completed.ok) return completed;
-  const { walked: source, traversal: remaining } = completed.value;
-  const walked = (lineage: ReturnType<typeof prepareStandaloneLineageSource>): Walked<StandaloneLineageSource> =>
-    lineage.ok ? { ok: true, value: { walked: lineage.value, traversal: remaining } } : { ok: false, message: lineage.error.message };
+  const authenticated = await authenticateRunWithin(sourceRunsRoot, sourceRun, traversal);
+  return authenticated.ok
+    ? { ok: true, value: { walked: authenticated.value.walked.lineage, traversal: authenticated.value.traversal } }
+    : authenticated;
+}
+
+async function authenticateRunWithin(sourceRunsRoot: string, sourceRun: string,
+  traversal: PredecessorTraversal): Promise<Walked<Readonly<{ completed: CompletedRun; lineage: StandaloneLineageSource }>>> {
+  const read = await readCompletedStandaloneSource(sourceRunsRoot, sourceRun, traversal);
+  if (!read.ok) return read;
+  const { walked: completed, traversal: remaining } = read.value;
+  const { source } = completed;
+  const walked = (lineage: ReturnType<typeof prepareStandaloneLineageSource>): Walked<Readonly<{ completed: CompletedRun; lineage: StandaloneLineageSource }>> =>
+    lineage.ok
+      ? { ok: true, value: { walked: Object.freeze({ completed, lineage: lineage.value }), traversal: remaining } }
+      : { ok: false, message: lineage.error.message };
   if (source.result.schemaVersion === 3) return walked(prepareStandaloneLineageSource(source.result, source.locator));
   try {
     const opened = openRegisteredRunDirectory(sourceRunsRoot, sourceRun);
@@ -239,7 +278,7 @@ async function authenticateLineageSourceWithin(sourceRunsRoot: string, sourceRun
 
 export async function readAuthenticatedStandaloneSource(sourceRunsRoot: string, sourceRun: string): Promise<ProgramParse<StandaloneDoneState>> {
   const completed = await readCompletedStandaloneSource(sourceRunsRoot, sourceRun, predecessorTraversal());
-  return completed.ok ? { ok: true, value: completed.value.walked } : completed;
+  return completed.ok ? { ok: true, value: completed.value.walked.source } : completed;
 }
 
 function readSourceCheckpoint(handle: RunDirHandle, maximumBytes: number): ProgramParse<Buffer> {
@@ -284,7 +323,7 @@ function observeSourceState(handle: RunDirHandle, registration: Extract<ReturnTy
 
 /** One bounded explicit predecessor walk; neither a missing nor corrupt current source is history. */
 async function readCompletedStandaloneSource(sourceRunsRoot: string, sourceRun: string,
-  traversal: PredecessorTraversal): Promise<Walked<CompletedSource>> {
+  traversal: PredecessorTraversal): Promise<Walked<CompletedRun>> {
   try {
     const opened = openRegisteredRunDirectory(sourceRunsRoot, sourceRun);
     if (!opened.ok) return { ok: false, message: `source run: ${opened.error.message}` };
@@ -316,7 +355,11 @@ async function readCompletedStandaloneSource(sourceRunsRoot: string, sourceRun: 
     const anchored = admitAnchoredRunAuthority(JSON.parse(identity.toString("utf8")),
       { runId: handle.runId, runsRoot: handle.identity.runsRoot, runDirectory: handle.runDirectory });
     if (!anchored.ok) return { ok: false, message: anchored.error };
-    return { ok: true, value: { walked: Object.freeze({ ...published.value, locator: handle.runDirectory }),
+    return { ok: true, value: {
+      walked: Object.freeze({
+        source: Object.freeze({ ...published.value, locator: handle.runDirectory }),
+        registration: registration.value,
+      }),
       traversal: resumeAfterChildWalk(traversal, observed.value.traversal) } };
   } catch (cause) {
     return { ok: false, message: `source standalone review is unavailable: ${cause instanceof Error ? cause.message : String(cause)}` };

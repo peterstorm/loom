@@ -40,7 +40,10 @@ structure, and a Markdown plan has neither.
 ## Decision
 
 ### 1. The review is a Standalone Review of kind `plan-design`
-`plan-design` is a Standalone Review kind. Its rules, owned by `core/plan-design-review.ts`:
+`plan-design` is a Standalone Review kind. Its rules are owned by `core/plan-design-review.ts` and reach
+the Standalone Review through one per-kind review profile (`standaloneReviewProfile`,
+`core/standalone-review-scope.ts`), which registration, successor ingress, reviewer selection, the read
+obligation and the packet lens all consult:
 
 - **Roster.** Fixed at `code-reviewer`, `type-design-analyzer`, `architecture-tech-lead`, whatever the scope
   facts say. `selectStandaloneReviewers` answers it before it reads any scope fact.
@@ -81,11 +84,22 @@ The gate reads the State File and the plan's digest through `ArtifactProbe.sha25
 Directory. A closed gate names the plan, both digests when they differ, and the commands that open it. Both
 harnesses call the same function. Execute is not gated: the gate binds the plan Tasks are cut from.
 
+`populate-task-graph` asks the same gate (`populationPlanDesignRequirement`) on first population, the
+decompose → execute transition that actually cuts the Tasks, so a payload populated without spawning
+`decompose-agent` is held to it too. It digests the plan bytes it already read once for the
+executable-model binding check, and asks the gate of the graph before the lock and again of the graph read
+under it. `--skip-plan-design-review` (the State File's `not-required`) and an absent record leave it open.
+Re-population in execute is not gated, like an execute spawn.
+
 ### 4. Acceptance
 `helper accept-plan-design-review --runs-root <dir> --run <run>` is the only writer of `accepted`. The shell
-authenticates the Run's published result and lineage, reads whether the registration carries the read
-obligation, and authenticates a named disposition against this review. One pure function
-(`judgePlanDesignEvidence`) then accepts, or refuses with one reason:
+reads the Run in one authenticated walk (`readAuthenticatedStandaloneRun`), which returns the published
+result, the lineage source (frozen scope and roster) and the registration together; whether the
+registration carries the read obligation is read from that registration. It then authenticates a named
+disposition against this review, and parses every value into the type the judgement takes (digests as
+`ArtifactDigest`, paths as `ReviewPath`, kinds and roles as their closed unions). The plan path is
+canonicalised through the same parsers the review's scope passes (`parseRepositoryPath`, `parseReviewPath`).
+One pure function (`judgePlanDesignEvidence`) then accepts, or refuses with one reason:
 
 | Refusal | When |
 | --- | --- |
@@ -99,7 +113,8 @@ obligation, and authenticates a named disposition against this review. One pure 
 | `advisories-undisposed` | There are advisories and no published disposition was named. |
 
 On acceptance one locked write stores the record, after re-reading under the lock that the graph still
-names the plan that was judged.
+names the plan that was judged and re-hashing that plan: bytes that changed after they were judged are
+refused, so the stored `planSha256` is the plan's digest at the moment it is written.
 
 ### 5. Criticals and advisories
 A critical the Refutation Panel refuted does not block. A critical that survived is resolved by editing the
@@ -122,18 +137,22 @@ and the digest binding applies.
 - **The record trusts one authentication.** The gate does not re-prove the Run Directory. A Run Directory
   deleted or retired after acceptance leaves the record standing, and `runId` and `resultDigest` are then
   references nothing can follow.
-- **The helper authenticates the Run twice**, once for the published result and once for the lineage source.
-  Both reads are needed and neither returns the other's fields.
+- **The helper authenticates the Run once.** One walk returns the published result, the lineage source and
+  the registration. For a schema-1 or schema-2 Run that walk re-reads the registration once more, to prove it
+  did not change between authenticating the result and reading the frozen scope. A named disposition is a
+  separate Run, read and authenticated against this review's lineage.
 - **The plan path is compared relative to the working directory.** The helper and the review must run from
   the repository root, as every helper documented in `/loom` does. From another directory the helper
   refuses with `scope-mismatch`; it never accepts a different file.
 - **The record is not cleared by a phase loop-back.** `set-phase --phase architecture` keeps an `accepted`
   record. A rewritten plan closes the gate through its digest; a plan restored to the reviewed bytes opens
   it again, which is correct.
-- **Execute is not gated.** A plan edited after population is not reviewed again by this gate.
+- **Execute is not gated.** A plan edited after population is not reviewed again by this gate, and
+  re-population in execute does not ask it.
 - **The lens is prose.** Nothing checks that a reviewer answered its questions, beyond the read obligation
   and the result grammar every reviewer already meets.
-- **The gate is on the decompose spawn.** `populate-task-graph` does not ask it. An operator who populates
-  from a hand-written payload without spawning `decompose-agent` is not stopped by this gate.
+- **The gate is asked at both decompose seams.** The decompose spawn asks it, and `populate-task-graph` asks
+  it again on first population, so a hand-written payload populated without spawning `decompose-agent` is
+  refused while the plan has no accepted review for its current bytes.
 - The Wave Review Roster is unchanged. Whether a Wave's type and architecture reviewers may be reduced for
   a Task cut from a design-reviewed plan is not decided here.

@@ -20,8 +20,10 @@ import {
   type SpawnRequest,
 } from '../../../core/orchestration-contract';
 import { serializeAdjudicatedStandaloneReview } from '../../../core/standalone-review-records';
-import { selectStandaloneReviewers, type StandaloneReviewKind, type StandaloneReviewMetadata } from '../../../core/standalone-review-scope';
-import { PLAN_DESIGN_LENS_SECTION, PLAN_DESIGN_REVIEW_KIND, planDesignLens } from '../../../core/plan-design-review';
+import {
+  selectStandaloneReviewers, standaloneReviewProfile, type StandaloneReviewKind, type StandaloneReviewMetadata,
+} from '../../../core/standalone-review-scope';
+import { PLAN_DESIGN_LENS_SECTION } from '../../../core/plan-design-review';
 import { type FrozenStandaloneReviewAuthority } from '../../../core/standalone-review-model';
 import { safeIoCause } from '../../../core/safe-io-cause';
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ContextPacket } from '../../../core/context-packets';
@@ -121,7 +123,7 @@ export const WHOLE_DOCUMENT_BASE = "none:whole-document";
 
 /** The read obligation a review of `kind` starts with. */
 export function standaloneReadCoverageStart(kind: StandaloneReviewKind, baselineRevision: string): StandaloneReadCoverageStart {
-  return kind === PLAN_DESIGN_REVIEW_KIND
+  return standaloneReviewProfile([kind]).readObligation === "whole-document"
     ? Object.freeze({ obligation: "whole-document" })
     : Object.freeze({ obligation: "baseline-diff", baselineRevision });
 }
@@ -160,6 +162,7 @@ export function standalonePackets(
   frozenDiff: FrozenDiff | null;
 }> {
   const reviewers = selectStandaloneReviewers(reviewMetadata);
+  const profile = standaloneReviewProfile(reviewMetadata.requestedKinds);
   const files = frozenScopeFiles(scope);
   const sourceSection = frozenSourceSection(files, headRevision);
   const frozenDiff = readCoverage === undefined ? null : frozenScopeDiff(files, readCoverage, headRevision);
@@ -176,8 +179,8 @@ export function standalonePackets(
       if (!requestId.ok) throw new Error(requestId.error.message);
       const section = encodeByteSection("standalone-review-authority", JSON.stringify({ runId, scope, role, attempt }));
       if (!section.ok) throw new Error(section.error.message);
-      // A plan design review's packet also carries its role's lens (ADR-0070).
-      const lens = planDesignLens(reviewMetadata.requestedKinds, role);
+      // A kind with a lens (the plan design review, ADR-0070) adds it to the role's packet.
+      const lens = profile.lens(role);
       const lensSection = lens === null ? null : encodeByteSection(PLAN_DESIGN_LENS_SECTION, lens);
       if (lensSection !== null && !lensSection.ok) throw new Error(lensSection.error.message);
       const packet = buildReviewerContextPacket({

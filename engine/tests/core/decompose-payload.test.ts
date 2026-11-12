@@ -8,6 +8,7 @@ import {
   type DecomposeParse,
 } from "../../src/core/decompose-payload";
 import type { AuthoredTask } from "../../src/core/task-graph-population";
+import { notAJsonObject, wireOf } from "../fixtures/json-wire";
 
 const required = { kind: "required" } as const;
 const requirement = <Reason extends string>(reason: Reason) =>
@@ -44,8 +45,6 @@ const decomposeInput: fc.Arbitrary<DecomposeInput> = fc.record(
   { requiredKeys: ["plan_title", "tasks"] },
 );
 
-const wireOf = (value: unknown): unknown => JSON.parse(JSON.stringify(value));
-
 /** Both steps over one wire value, as `populate-task-graph` runs them. */
 function decode(wire: unknown): DecomposeParse<DecomposeInput> {
   const envelope = parseDecomposeEnvelope(wire);
@@ -65,7 +64,7 @@ describe("parseDecomposeEnvelope", () => {
   });
 
   it("refuses every JSON value that is not an object", () => {
-    fc.assert(fc.property(fc.jsonValue().filter((value) => typeof value !== "object" || value === null || Array.isArray(value)), (value) => {
+    fc.assert(fc.property(notAJsonObject, (value) => {
       expect(parseDecomposeEnvelope(value)).toEqual({ ok: false, error: "Decompose JSON must be an object" });
     }));
   });

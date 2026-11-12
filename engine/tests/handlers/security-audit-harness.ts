@@ -21,13 +21,12 @@ import { canonicalCoverageId, parseSecurityRunMetadata, type SecurityProfile, ty
 import { parseLedger, type CoverageLedger } from "../../src/core/security-coverage";
 import { parseSecurityFindings, type SecurityFinding } from "../../src/core/security-findings";
 import { readRunDocument } from "../../src/handlers/helpers/security-audit-run";
+import { isJsonArray } from "../fixtures/json-wire";
 import { HUNTER_ENVELOPE, aConfirmedFinding, aUnitResult, nSeeds, ok } from "../security/fixtures";
 import { invokeAt, type Run } from "./security-audit-run-seam";
 import { verifyWith } from "./security-verification-harness";
 
 const created: string[] = [];
-
-const isJsonArray = (value: unknown): value is readonly unknown[] => Array.isArray(value);
 
 /** A fresh run directory and a handler bound to it. Every directory is removed
  *  by `removeRuns`, which each test file registers in `afterEach`.
