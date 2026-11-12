@@ -18,7 +18,7 @@ import type { HookHandler, HookResult, PreToolUseInput } from "../../types";
 import { guardStateFileDecision } from "../../core/guard-state-file";
 import { defaultTaskGraphExists, guardedLocations } from "../../config";
 import { fsSessionRegistry, parseSessionId, type SessionRegistry } from "../../machine";
-import { failClosedInput } from "./pre-tool-use-input";
+import { failClosedGuard } from "./pre-tool-use-input";
 
 /**
  * The shell side of the state-file guard: no task graph → nothing to guard
@@ -66,37 +66,35 @@ export async function stampCallStart(
   }
 }
 
-export const runGuardStateFile = async (
+export const runGuardStateFile = (
   stdin: string,
   registry: SessionRegistry = fsSessionRegistry,
   guard: (command: string) => HookResult = guardStateFile,
-): Promise<HookResult> => {
+): Promise<HookResult> =>
   // Malformed hook input on a guard route: fail CLOSED. A parse crash
   // would exit 1 — NON-blocking for PreToolUse — silently waving the
   // Bash call past the state-file guard.
-  const parsed = failClosedInput("guard-state-file", stdin);
-  if (!parsed.ok) return parsed.block;
-  const { input } = parsed;
-  // A present-but-non-string `command` is a malformed Bash call. The `as string`
-  // cast is a lie: the normalizers iterate `text.length`, which is `undefined`
-  // for objects/numbers/booleans, so the loops no-op and every match view comes
-  // back empty — referencesGuardedState=false → ALLOW, silently waving the call
-  // past the guard (fail-OPEN). Reject it here, failing CLOSED, mirroring the
-  // malformed-JSON branch above and the defensive `typeof` in extract-evidence.
-  const rawCommand = input.tool_input?.command;
-  if (rawCommand !== undefined && typeof rawCommand !== "string") {
-    return {
-      kind: "block",
-      message: `guard-state-file: non-string Bash command (${typeof rawCommand}) — failing closed`,
-    };
-  }
-  const command = rawCommand ?? "";
-  // Decide FIRST, stamp AFTER: the stamp is side-band bookkeeping and must
-  // not sit between the input and the block/allow decision.
-  const result = guard(command);
-  await stampCallStart(input, registry);
-  return result;
-};
+  failClosedGuard("guard-state-file", async (input) => {
+    // A present-but-non-string `command` is a malformed Bash call. The `as string`
+    // cast is a lie: the normalizers iterate `text.length`, which is `undefined`
+    // for objects/numbers/booleans, so the loops no-op and every match view comes
+    // back empty — referencesGuardedState=false → ALLOW, silently waving the call
+    // past the guard (fail-OPEN). Reject it here, failing CLOSED, mirroring the
+    // malformed-JSON block above and the defensive `typeof` in extract-evidence.
+    const rawCommand = input.tool_input?.command;
+    if (rawCommand !== undefined && typeof rawCommand !== "string") {
+      return {
+        kind: "block",
+        message: `guard-state-file: non-string Bash command (${typeof rawCommand}) — failing closed`,
+      };
+    }
+    const command = rawCommand ?? "";
+    // Decide FIRST, stamp AFTER: the stamp is side-band bookkeeping and must
+    // not sit between the input and the block/allow decision.
+    const result = guard(command);
+    await stampCallStart(input, registry);
+    return result;
+  })(stdin);
 
 const handler: HookHandler = async (stdin) => runGuardStateFile(stdin);
 

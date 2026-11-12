@@ -571,7 +571,7 @@ ${bindingLine}
   const check = (plan: string, roster: readonly Record<string, unknown>[] = ROSTER) =>
     checkPlanModelBindings("plan.md", roster, {
       ...NO_FILES,
-      readFile: (path) => (path === "plan.md" ? { ok: true, content: plan } : { ok: false, error: `ENOENT: ${path}` }),
+      readPlan: (path) => (path === "plan.md" ? { ok: true, bytes: Buffer.from(plan) } : { ok: false, error: `ENOENT: ${path}` }),
     });
 
   it("AS-001: the fail-closed check validates a plan whose only model is its export bindings", () => {

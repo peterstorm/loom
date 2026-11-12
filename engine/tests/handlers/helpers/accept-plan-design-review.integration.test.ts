@@ -20,8 +20,9 @@ import { unifiedDiff } from "../../../src/core/unified-diff";
 import { checkArtifacts } from "../../../src/core/validate-phase-order";
 import acceptPlanDesignReview, { createAcceptPlanDesignReviewHandler, type PlanProbe } from "../../../src/handlers/helpers/accept-plan-design-review";
 import { readPlanDesignEvidence } from "../../../src/handlers/helpers/programs";
-import { parseRegistration } from "../../../src/handlers/helpers/programs/registration";
+import { parseRegistration, readObligated } from "../../../src/handlers/helpers/programs/registration";
 import { resumeStandaloneFacade, startStandaloneFacade } from "../../../src/handlers/helpers/programs/standalone";
+import { readAuthenticatedStandaloneRun } from "../../../src/handlers/helpers/programs/standalone-source";
 import {
   prepareStandaloneDispositionFacadeStart, readStandaloneDispositionSource, startStandaloneDispositionFacade,
 } from "../../../src/handlers/helpers/programs/standalone-disposition";
@@ -276,6 +277,30 @@ describe.sequential("plan design review", { timeout: 60_000 }, () => {
     expect(value(unobliged).readObligated).toBe(false);
     expect(await accept(root, "design")).toMatchObject({ kind: "error", message: expect.stringContaining("registered without the read obligation") });
     expect(await recorded(root)).toEqual({ status: "required" });
+  });
+
+  it("reads a completed Run in one walk whose registration is the one that walk parsed", async () => {
+    const root = project();
+    const { handle, requests } = await start(root, "design");
+    await review(root, handle, requests);
+    const walk = () => inDirectory(root, () => readAuthenticatedStandaloneRun(join(root, "runs"), "design"));
+
+    const run = value(await walk());
+    expect(run.registration).toEqual(value(parseRegistration(value(handle.readProgramRegistration()))));
+    expect(readObligated(run.registration)).toBe(true);
+    expect(run.done.authority.runId).toBe("design");
+    expect(run.lineage.publication.runId).toBe("design");
+
+    // Bytes registered without the read-coverage policy: the next walk returns
+    // exactly what it parsed from them, never a registration remembered from before.
+    const program = join(handle.runDirectory, "program.json");
+    const stored = JSON.parse(readFileSync(program, "utf8")) as Record<string, unknown>;
+    const { readCoverage: _dropped, ...withoutPolicy } = stored;
+    chmodSync(program, 0o644);
+    writeFileSync(program, JSON.stringify(withoutPolicy));
+    const rewalked = value(await walk());
+    expect(rewalked.registration).toEqual(value(parseRegistration(withoutPolicy)));
+    expect(readObligated(rewalked.registration)).toBe(false);
   });
 
   it("refuses a review that froze no bytes for the plan", async () => {

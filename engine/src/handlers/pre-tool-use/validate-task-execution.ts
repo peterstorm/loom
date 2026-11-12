@@ -12,7 +12,7 @@
  */
 
 import { preToolUseRewriteResult, type HookHandler, type HookResult } from "../../types";
-import { failClosedInput } from "./pre-tool-use-input";
+import { failClosedGuard } from "./pre-tool-use-input";
 import { validateTaskExecution } from "../task-execution";
 import { claudeAgentTypeRefusal } from "../../core/model-profiles";
 import { CLAUDE_SPAWN_TOOLS, SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
@@ -31,13 +31,10 @@ export function createValidateTaskExecutionHandler(
   vetoes: readonly SpawnVetoEntry[] = SPAWN_VETOES,
   render: RenderTaskBrief = renderActiveTaskBrief,
 ): HookHandler {
-  return async (stdin) => {
-    // Malformed hook input on a spawn-gate route: fail CLOSED. An uncaught
-    // parse crash exits 1 (NON-blocking for PreToolUse), waving the Task
-    // spawn past wave-order/dependency/review-gate enforcement.
-    const parsed = failClosedInput("validate-task-execution", stdin);
-    if (!parsed.ok) return parsed.block;
-    const { input } = parsed;
+  // Malformed hook input on a spawn-gate route: fail CLOSED. An uncaught
+  // parse crash exits 1 (NON-blocking for PreToolUse), waving the Task
+  // spawn past wave-order/dependency/review-gate enforcement.
+  return failClosedGuard("validate-task-execution", async (input, stdin) => {
     if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
     // Before anything reserves: Claude Code rejects a Loom Agent named other
     // than `loom:<agent>` only after admission, which would strand the reservation.
@@ -58,7 +55,7 @@ export function createValidateTaskExecutionHandler(
       description: (toolInput.description as string) ?? "",
     });
     return expanded === null ? result : rewrittenToBrief(result, expanded.toolInput);
-  };
+  });
 }
 
 export default createValidateTaskExecutionHandler();

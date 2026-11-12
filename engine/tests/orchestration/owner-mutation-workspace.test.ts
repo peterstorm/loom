@@ -214,6 +214,17 @@ describe("withMutationWorkspace", () => {
     expect(read(repo.root, OWNER_FIXTURE.owner)).toBe(original);
   }, TIMEOUT_MS);
 
+  it("AS-016: a run finds the report's parent directory even when it is ignored and absent from the worktree (a runner like Bun's JUnit reporter does not create it)", async () => {
+    const repo = build();
+    const reportDir = (root: string): string => join(root, ...OWNER_FIXTURE.report.split("/"), "..");
+    const result = await withMutationWorkspace(specOf(repo), async (workspace) => {
+      const before = existsSync(reportDir(workspace.root));
+      const during = await workspace.runWithOwner({ kind: "baseline" }, async (root) => existsSync(reportDir(root)));
+      return { before, during };
+    });
+    expect(result).toEqual({ ok: true, value: { before: false, during: true } });
+  }, TIMEOUT_MS);
+
   it("restores the owner even when the run throws", async () => {
     const repo = build();
     const original = read(repo.root, OWNER_FIXTURE.owner);

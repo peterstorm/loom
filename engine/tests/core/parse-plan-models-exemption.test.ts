@@ -73,7 +73,7 @@ const errorsOf = (text: string): readonly string[] => {
 const checked = (text: string) =>
   checkPlanModelBindings(PLAN_FILE, [], {
     ...DEPS,
-    readFile: (path) => path === PLAN_FILE ? { ok: true, content: text } : { ok: false, error: "ENOENT" },
+    readPlan: (path) => path === PLAN_FILE ? { ok: true, bytes: Buffer.from(text) } : { ok: false, error: "ENOENT" },
   });
 
 /**

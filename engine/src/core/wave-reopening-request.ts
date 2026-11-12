@@ -6,15 +6,24 @@
  * Pure: a refusal is returned as data, and the handler renders it.
  */
 
-import type { DomainResult } from "./orchestration-contract";
+import {
+  nonEmpty,
+  parseArtifactDigest,
+  parseOrchestrationRunId,
+  type ArtifactDigest,
+  type DomainResult,
+  type NonEmpty,
+  type OrchestrationRunId,
+} from "./orchestration-contract/identity";
 import { hasExactKeys, isRecord } from "./plain-record";
 import { parseTaskId, type TaskId } from "./task-id";
 
+/** The reopening payload as its parse proved it: each field the identity it was checked to be. */
 export type ReopenRequest = Readonly<{
-  runId: string;
+  runId: OrchestrationRunId;
   wave: number;
-  authorityDigest: string;
-  taskIds: readonly string[];
+  authorityDigest: ArtifactDigest;
+  taskIds: NonEmpty<TaskId>;
 }>;
 
 const REOPEN_REQUEST_KEYS: readonly string[] = ["runId", "wave", "authorityDigest", "taskIds"];
@@ -22,17 +31,16 @@ const REOPEN_REQUEST_KEYS: readonly string[] = ["runId", "wave", "authorityDiges
 const refused = (message: string): DomainResult<ReopenRequest, string> => ({ ok: false, error: message });
 
 /** Each entry as a Task id, or null when any entry is not one or the list is empty or repeats one. */
-function parseTaskIds(raw: unknown): readonly TaskId[] | null {
+function parseTaskIds(raw: unknown): NonEmpty<TaskId> | null {
   if (!Array.isArray(raw)) return null;
   const entries: readonly unknown[] = raw;
-  if (entries.length === 0) return null;
   const ids: TaskId[] = [];
   for (const entry of entries) {
     const id = parseTaskId(entry, "reopening.taskId");
     if (!id.ok) return null;
     ids.push(id.value);
   }
-  return new Set(ids).size === ids.length ? Object.freeze(ids) : null;
+  return new Set(ids).size === ids.length ? nonEmpty(ids) : null;
 }
 
 /** The exact reopening payload: `runId`, `wave`, `authorityDigest` and `taskIds`, and no other key. */
@@ -47,13 +55,15 @@ export function parseReopenRequest(raw: string): DomainResult<ReopenRequest, str
   if (!hasExactKeys(value, REOPEN_REQUEST_KEYS)) {
     return refused("reopening payload must contain exactly runId/wave/authorityDigest/taskIds");
   }
-  const { runId, wave, authorityDigest } = value;
+  const { wave } = value;
+  const runId = parseOrchestrationRunId(value.runId);
+  const authorityDigest = parseArtifactDigest(value.authorityDigest);
   const taskIds = parseTaskIds(value.taskIds);
-  if (typeof runId !== "string" || runId.trim() === "" ||
+  if (!runId.ok ||
       typeof wave !== "number" || !Number.isInteger(wave) || wave < 1 ||
-      typeof authorityDigest !== "string" || !/^[0-9a-f]{64}$/.test(authorityDigest) ||
+      !authorityDigest.ok ||
       taskIds === null) {
     return refused("reopening payload has invalid run/wave/authority/task ids");
   }
-  return { ok: true, value: Object.freeze({ runId, wave, authorityDigest, taskIds }) };
+  return { ok: true, value: Object.freeze({ runId: runId.value, wave, authorityDigest: authorityDigest.value, taskIds }) };
 }
