@@ -8,27 +8,31 @@ Loom supports one full feature-delivery lifecycle and several standalone quality
 |---|---|---:|---:|---|
 | Full feature delivery | `/loom` | Yes | Panels/Wave Gates only | Implemented, reviewed Waves |
 | Architecture panel | `/loom --panel[=N]` | Phase state | Yes | One user-selected architecture plan |
+| Plan design review | inside `/loom`, before decompose | Records the acceptance | Yes | The plan accepted for its exact bytes, or Findings to fix |
 | Wave quality gate | `/wave-gate` | Yes | Yes | Advance, await decision, or block |
 | Standalone review | `/review-pr` | No | Yes | Adjudicated `result.json` |
 | Review and remediation | `/review-and-fix` | No feature graph | Review + remediation runs | Verified Git index, commit, optional push |
+| Security audit | `/security-audit` | No | Yes | Verified findings and a coverage-accounted report |
 | Spec alignment | `/spec-check` | Reads active context when present | No standalone program | Per-requirement drift findings |
 | Requirements only | `/specify`, `/clarify`, `/brainstorming` | Only when invoked by `/loom` | No | Requirements/design artifact |
 | Project lint | `/lint-project` or script | No | No | Regex + structural violations |
 
+Two terms recur. The **TaskGraph** (the State File) is the protected record of one feature run: its phase, Tasks, Waves and evidence. A **Run Directory** is the immutable folder one review, panel, gate or remediation writes its evidence into. Both are described in [Architecture](architecture.md#two-persistence-domains).
+
 ## Full `/loom` lifecycle
 
 ```text
-brainstorm → specify → clarify? → architecture → plan alignment → decompose
-                                                                    |
-                                                                    v
-                                                    Wave 1 implementation Tasks
-                                                                    |
-                                                               Wave Gate
-                                                                    |
-                                                    Wave 2 ... → final Wave
+brainstorm → specify → clarify? → architecture → plan alignment → plan design review → decompose
+                                                                                           |
+                                                                                           v
+                                                                           Wave 1 implementation Tasks
+                                                                                           |
+                                                                                      Wave Gate
+                                                                                           |
+                                                                           Wave 2 ... → final Wave
 ```
 
-The initial TaskGraph is created before Phase 0, activating ordering, direct-edit, state, model, Skill, and prompt guards.
+The initial TaskGraph is created before the first phase, which activates the ordering, direct-edit, state, model, Skill and prompt guards.
 
 ### Phase 0: brainstorm
 
@@ -80,9 +84,9 @@ The plan defines boundaries, data flow, file structure, decisions, implementatio
 5. **Aggregate in code.** Verdicts must cover the exact candidate set. Ranking uses total, then ordered criterion scores, then lexical candidate filename.
 6. **Choose and finalize.** Ranking is a recommendation. The user still chooses; `architecture-agent` may graft compatible strongest ideas and records `AD-1: Approach selection (panel)`.
 
-Candidates, verdicts, ranking, and authority stay in a fresh run beneath the spec directory. A plan-alignment loop-back uses standard single-Agent architecture rather than opening a second panel.
+Candidates, verdicts, ranking, and authority stay in a fresh run beneath the spec directory. A plan-alignment loop-back uses standard single-Agent architecture, not a second panel.
 
-**Pi transport:** the panel interviewer and other live-question phase roles run through `loom_interactive_subagent`, which relays the child Agent's standard UI requests to the parent Pi TUI. The normal Pi `subagent` transport remains headless and refuses these roles. See [Pi Interactive Phase Transport](pi-phase-agent-interviews.md).
+On Pi, the interviewer and the other roles that question the user run through `loom_interactive_subagent`; see [Using Loom with Pi](pi-usage.md#interactive-phase-agents).
 
 ### Phase 3.5: plan alignment
 
@@ -98,7 +102,7 @@ If gaps remain, the user either loops back to architecture with the report or ex
 
 Before decompose, the plan's design is reviewed by `code-reviewer`, `type-design-analyzer` and `architecture-tech-lead` as a Standalone Review of kind `plan-design` whose only file is the plan. `helper accept-plan-design-review` then records the acceptance in the State File, bound to the plan's SHA-256. A critical that survives refutation is resolved by editing the plan and reviewing it again; advisories need a published disposition. Any edit to the plan after acceptance blocks the decompose spawn until a fresh review is accepted.
 
-It is a gate, not a phase: `current_phase` does not change. Skip it with `--skip-plan-design-review`. The exact commands are in [`/loom` Phase 3.6](../commands/loom.md#phase-36-plan-design-review); the rules are in [ADR-0070](adr/ADR-0070-the-plan-design-review-gates-decompose.md).
+It is a gate, not a phase: `current_phase` does not change. Skip it with `--skip-plan-design-review`. The exact commands are in the [plan design review runbook](../references/loom/plan-design-review-runbook.md); the rules are in [ADR-0070](adr/ADR-0070-the-plan-design-review-gates-decompose.md).
 
 ### Phase 4: decompose
 
@@ -111,114 +115,20 @@ It is a gate, not a phase: `current_phase` does not change. Skip it with `--skip
 - spec anchors;
 - executable lifecycle/pipeline/invariant bindings from the plan.
 
-The user approves the proposed Tasks/Waves. Loom creates a GitHub Issue and `populate-task-graph` atomically installs the validated graph. That install is the only way out of `decompose`: the decompose agent finishing leaves the phase alone, and population moves it to `execute` in the same write, so `execute` never holds an empty TaskGraph. `helper set-phase` cannot enter `execute` either, so its loop-back cannot strand an empty graph there. Status reports a graph an older engine left at `execute` with no Tasks as blocked, and names both recoveries: populate the approved graph, or return to `decompose`. A decompose agent with no usable output, or a plan rejected at approval, leaves the run in `decompose`, ready for a re-spawn. Before population, optional operator-owned command authority is validated and installed through `helper write-verification-manifest`; direct writes to the guarded `.loom/verification-manifest.json` path are intentionally blocked. During population, the engine reads those exact bytes and freezes the resulting authority into the protected TaskGraph. Decompose JSON cannot provide or override it. An absent file selects the engine default with only reserved checks. The state file returns to mode `0444`.
+The user approves the Tasks and Waves. Loom opens a GitHub Issue and `populate-task-graph` installs the graph and moves the phase to `execute` in one write. Nothing else can enter `execute`. A decompose agent with no usable output, or a plan rejected at approval, leaves the run in `decompose`, ready for a re-spawn.
 
 Typical guidance is 8–12 Tasks, 4–5 Waves, and 4–6 parallel Tasks per Wave. These are planning bounds, not a license to force a small feature into needless Tasks.
 
 ### Verification manifest
 
-Project-wide Wave checks are declared before Task population. Write the JSON to an unguarded temporary file, then pass it through the validating seam:
+A project may declare the commands every Wave must pass (build, typecheck, tests) in `.loom/verification-manifest.json`. The file is the operator's, not the decompose agent's:
 
-```bash
-bun ${LOOM_DIR}/engine/src/cli.ts helper write-verification-manifest < /tmp/loom-verification-manifest.json
-# replace an existing manifest (for example a schema-1 → schema-2 upgrade), still before population:
-bun ${LOOM_DIR}/engine/src/cli.ts helper write-verification-manifest --replace < /tmp/loom-verification-manifest.json
-```
+- it is installed before population through `helper write-verification-manifest`, which validates it; a direct write to the guarded path is blocked;
+- population reads those exact bytes and freezes them into the TaskGraph, so changing the file later does not change a run already populated;
+- commands run without a shell, from a bounded list of build and test executables;
+- with no manifest, the Wave Gate runs only the engine's own checks, such as full-tier lint.
 
-The helper requires an existing, loadable empty TaskGraph at the canonical `.claude/state/active_task_graph.json` or `.pi/state/active_task_graph.json` path. It validates before writing and compares authority, not bytes: an installed manifest that parses to the same authority (whatever its whitespace or key order) is accepted unchanged. Different installed authority, or an installed file that is not a valid manifest, is refused unless the call passes `--replace`; the replacement is staged and renamed into place atomically, never through a symlink. Every change is refused once Tasks are populated, with or without `--replace` ([ADR-0065](adr/ADR-0065-manifest-helper-compares-authority-and-replaces-before-population.md)). In normal `/loom` use, Phase 0 initialization already supplied that empty graph. For an approved first installation without a live orchestration, use official `init-state` to create an empty bootstrap, install with `write-verification-manifest`, then use `helper cleanup-state` on that same graph. Prepare real metadata/spec directories as required by initialization; never hand-author state JSON, session pointers, Tasks, Waves, or completion receipts. Do not tear down an unrelated active graph. This metadata bootstrap installs source configuration only; it creates no Task/Wave verification authority.
-
-Standalone remediation itself has no TaskGraph requirement. The empty-TaskGraph condition belongs only to this manifest helper. Replacing an existing operator manifest goes through `write-verification-manifest --replace` before population, approved like any sanctioned helper call; never copy a file over the protected path by hand. Never bypass protected paths or mutate a populated graph. Existing TaskGraphs keep the commands frozen at their own population even after a later source replacement.
-
-Loom's own repository uses this exact check; other projects choose their own operator-approved commands:
-
-<!-- wire-example: verification-manifest -->
-```json
-{
-  "schemaVersion": 1,
-  "kind": "loom-verification-manifest",
-  "checks": [
-    {
-      "id": "project:verify",
-      "scope": "wave",
-      "executable": "npm",
-      "args": ["run", "verify"],
-      "cwd": ".",
-      "timeoutMs": 1800000,
-      "report": { "kind": "required-file", "path": ".loom/completion-reports/verify.junit.xml" }
-    }
-  ]
-}
-```
-
-For Loom, this is the same root `npm run verify` used locally and by Linux CI, including tag pushes: engine prerequisites, then typecheck, then the entire existing Vitest + six-smoke test script. Install both root and engine frozen dependencies first and use a full-history checkout: deterministic calibration tests resolve committed historical revisions from remote refs, so CI uses `actions/checkout` with `fetch-depth: 0`. See [Development validation](operations.md#development-validation). The manifest is an operator source, not an executable script: `verify` must not call the manifest runner or a Wave Gate, which would recurse. A local/CI process success does not mint a Wave receipt. Only the registered runtime suite observes the frozen command and installs its own evidence; never create a receipt manually. The user-approved 2026-09-09 idle enrollment changed only the report policy, not the fixed command. Its existing Vitest invocation now writes the required root JUnit file via `--reporter=default --reporter=junit --outputFile=../.loom/completion-reports/verify.junit.xml` from `engine/`; `.loom/completion-reports/` is Git-ignored and generated reports stay untracked. JUnit describes only Vitest tests; normal zero exit of the whole command also proves the compiler and six smokes passed. A green report never overrides a later smoke failure. This enrollment is not a completed live schema-v2 remediation; the registered engine must still observe a fresh passing command and report.
-
-Critical-remediation checks must use `required-file`. For other projects, here is a complete Vitest alternative whose fixed argv names the exact output file:
-
-<!-- wire-example: verification-manifest -->
-```json
-{
-  "schemaVersion": 1,
-  "kind": "loom-verification-manifest",
-  "checks": [
-    {
-      "id": "project:repair-regression",
-      "scope": "wave",
-      "executable": "node_modules/.bin/vitest",
-      "args": ["run", "tests/repair-regression.test.ts", "--reporter=json", "--outputFile=.loom/completion-reports/repair-regression.json"],
-      "cwd": ".",
-      "timeoutMs": 120000,
-      "report": { "kind": "required-file", "path": ".loom/completion-reports/repair-regression.json" }
-    }
-  ]
-}
-```
-
-A Node JUnit alternative is also parser-valid:
-
-<!-- wire-example: verification-manifest -->
-```json
-{
-  "schemaVersion": 1,
-  "kind": "loom-verification-manifest",
-  "checks": [
-    {
-      "id": "project:repair-regression",
-      "scope": "wave",
-      "executable": "node",
-      "args": ["--test", "--test-reporter=junit", "--test-reporter-destination=.loom/completion-reports/repair-regression.xml", "tests/repair-regression.test.mjs"],
-      "cwd": ".",
-      "timeoutMs": 120000,
-      "report": { "kind": "required-file", "path": ".loom/completion-reports/repair-regression.xml" }
-    }
-  ]
-}
-```
-
-These are alternatives, not commands Loom adds automatically. The operator must choose a real repository test and ensure the selected fixed command produces the exact configured path. That path must be below `.loom/completion-reports/`, untracked, and Git-ignored; the config neither creates the report nor ignores it. Critical repair acceptance requires a newly produced report, normal exit, more than zero executed tests, and zero failures—an empty or all-skipped report is not evidence. Before launching, the engine removes the exact old ignored/untracked regular report via no-follow, descriptor-relative unlink anchored to its Linux parent; touching stale bytes cannot pass, but an identical fresh rewrite may. Reset failure blocks before launch. This strict critical-remediation reset is **Linux-only**; Darwin fails closed before launch, without changing zero-critical remediation or Wave behavior. Reports are bounded to **8 MiB** and XML depth **128**; v2 event reads, append reconciliation/new appends, and inspection are bounded to **12 MiB per encoded event, 64 MiB per encoded journal, 1024 records**. See [report boundary and enrollment](operations.md#enrolling-a-critical-repair-check) for exact scope and recovery. Do not add a generic root task runner solely for enrollment.
-
-Commands always execute with `shell: false` under an explicit executable/subcommand policy:
-
-- allowed basenames are the bounded build/test/runtime set `biome`, `bun`, `cargo`, `cmake`, `deno`, `dotnet`, `eslint`, `gcc`, `g++`, `go`, `gradle`, `gradlew`, `java`, `javac`, `jest`, `make`, `mvn`, `mvnw`, `ninja`, `node`, `npm`, `perl`, `pnpm`, `pytest`, `python`, `python3`, `python3.10`, `python3.11`, `python3.12`, `python3.13`, `python3.14`, `pypy3`, `ruby`, `rustc`, `tsc`, `vitest`, `yarn`;
-- a project-local executable path is accepted only when its basename is in that same set (for example `node_modules/.bin/vitest` or `tools/gradlew`);
-- `npm`, `pnpm`, and `yarn` accept only explicit `run`, `run-script`, `test`, `check`, or `build` script forms; `exec`, `dlx`, `x`, implicit binary dispatch, `npx`, and `bunx` are rejected;
-- runtimes accept bounded file/test/check/build modes. Inline modes are rejected, including Node `-e`/`-p`/`--eval`/`--print`, Bun `eval`/`-e`/`x`, Deno `eval`, Python `-c`, and Perl/Ruby `-e`/`-E`.
-
-Every project command (Wave checks, stop-check runners, remediation checks) runs under the caller's environment minus the hook-invocation variables `CLAUDE_PROJECT_DIR`, `CLAUDE_PLUGIN_ROOT`, `CLAUDE_PLUGIN_DATA` and `CLAUDE_ENV_FILE`. A stop check launches from inside a hook, where the harness sets them; the Wave Gate launches from the operator's shell, where none is set. Dropping them gives a command the same environment from both, so a project test that reads `CLAUDE_PROJECT_DIR` cannot fail at a stop and pass at the gate.
-
-Shells and generic dispatchers are not allowlisted. Traversal, duplicate/reserved ids, and surplus fields are also rejected. Required reports must live beneath `.loom/completion-reports/`; those report bytes are excluded from workspace authority, while tracked and non-ignored untracked implementation bytes remain bound by the Wave workspace digest. Once the TaskGraph is populated, changing the source file does not change the frozen command authority.
-
-### Project Verification Coverage
-
-Population reports coverage immediately. Canonical status and Wave Gate summaries expose the same independent `projectVerificationCoverage` projection:
-
-| Value | Meaning |
-|---|---|
-| `not-configured`, reason `engine-default` | Source was absent at population; only reserved checks were frozen. |
-| `not-configured`, reason `empty-operator-manifest` | Operator source explicitly contained zero project checks. |
-| `not-configured`, reason `historical-unknown` | Archived accepted receipt has only reserved checks; absent-versus-empty source provenance is unavailable. |
-| `configured`, non-empty sorted `checkIds` | Those project commands are configured; this alone says nothing about their outcome. |
-
-Missing and empty manifests retain the existing engine-only advancing policy. An accepted reserved-only suite is **not** a project verification pass, nor a new waiver. Nonempty configuration must still earn accepted, current suite evidence; neither a count nor “configured” means passed. Coverage appears on `required`, `accepted`, `rejected`, and `stale` readiness. Completed schema-v2 Waves derive it from their archived accepted receipt roster, not today's source or frozen manifest. Legacy-unavailable readiness stays unavailable without invented coverage. No coverage field is persisted, no new strict requirement for all projects is introduced, and unconfigured test/build/typecheck categories are not implied to have run.
+Status and the Wave Gate report which project checks are configured as `projectVerificationCoverage`. "Configured" does not mean "passed": a configured check must still produce accepted evidence at the gate. The manifest's fields, the command policy, report requirements and enrollment are in [operations](verification.md#enrolling-a-critical-repair-check).
 
 ### Phase 5: execute
 
@@ -233,19 +143,11 @@ For each Wave, the orchestrator spawns all dependency-ready implementation Tasks
 
 Direct parent edits are blocked while an orchestration is active. Implementation happens through Agents so completion, files, test evidence, and proof can be attributed.
 
-A Wave with implementation files also carries one engine-added Distill Task (`distill-agent`, [ADR-0068](adr/ADR-0068-the-distill-pass-is-an-engine-added-task-per-wave.md)). Status offers its dispatch only after every other Task of the Wave has settled, and the Wave Gate starts after it settles. See [The distill pass](operations.md#the-distill-pass-distill-task).
+A Wave with implementation files also carries one engine-added Distill Task (`distill-agent`, [ADR-0068](adr/ADR-0068-the-distill-pass-is-an-engine-added-task-per-wave.md)). Status offers its dispatch only after every other Task of the Wave has settled, and the Wave Gate starts after it settles. See [The distill pass](verification.md#the-distill-pass-distill-task).
 
-A Task reaches `implemented` only when its proof obligations are satisfied **and** the Implementation Completion Oracle accepts an exact Task Completion Suite for the engine-issued Implementation Attempt. Completion prose, a Task id inferred from `executing_tasks`, and an unreserved harness result are cleanup evidence only.
+**Completion.** A Task reaches `implemented` only when its proof obligations are satisfied and its attempt wrote only files the Task owns. The engine issues each attempt its own authority, so completion prose, a guessed Task id or a late result from an earlier attempt cannot complete a Task. The engine runs no project commands while a Wave's Tasks are still writing: Agents run their Task's tests themselves, and whole-project build, typecheck and test commands run once, at the Wave Gate.
 
-Claude binds authority through a session+Agent sidecar published with no-replace semantics at SubagentStart; Pi stores the exact authority on its ReservedSlot. Duplicate delivery is idempotent, and a late result cannot release a newer reservation. Every applied transition appends one immutable settlement receipt and atomically updates lifecycle/evidence, clears only matching attempt fields, invalidates review/spec/Wave authority when required, and recomputes `impl_complete`.
-
-The Slice 3 Task-local suite has one engine-owned check: `loom:task-byte-scope`. Its allowed set is the current `attempt_artifact_baseline` (declared plus previously attributed paths captured at registration). Current-attempt bytes compare that baseline; cumulative declared-artifact Proof still compares the first `artifact_baseline`. A transcript path outside the allowed set is semantic failure regardless of ownership. Baseline/path/read/Git uncertainty is infrastructure-blocked. Shared exact settlement derives canonical sibling ownership under the TaskGraph lock from every other current-Wave Task's `file_list` and `files_modified`. Repository changes from the attempt's `repository_baseline` classify as Task-local when currently allowed, inert/non-attributable when sibling-owned, and semantic out-of-scope otherwise; an unowned changed path invalidates that settlement even when omitted from the transcript. Every exact settlement retires the repository boundary, so a retried or infrastructure-blocked Task re-arms on a fresh boundary and repository movement between attempts is never attributed to it; only an attempt that ends without settlement leaves its boundary for the next registration to reuse. No unresolved-path carry is persisted: the State File parser validates a legacy `unresolved_repository_paths` field and drops it.
-
-`executing_tasks` is parser-bound to the Task roster. An unknown reservation makes the TaskGraph corrupt and blocks readiness/writes until `repair-task-graph` explicitly removes it with a diagnostic. Session `.task_graph` pointers are bound through one Claude/Pi helper that canonicalizes the active graph, refreshes stale pointers atomically without following symlinks, and rolls back only an exact owned binding.
-
-The engine-owned Task Completion Oracle launches **no Task/project subprocesses**. Implementation Agents still run the Task-level regression commands required by their Verification Policy via Bash, producing evidence for settlement. Engine-owned build, typecheck, test commands, package scripts, reports, and full-tier lint execute only in the quiescent Wave suite.
-
-Bounded retry is derived from immutable settlement history. Unversioned Slice-3 history uses a read-only compatibility projection until the next registration records protocol 2, a strict suffix start, and—when migrating into attempt 2—its predecessor retry receipt. Protocol-2 receipts from that cutover are reduced in wire order: a receipt is legal only for the current semantic attempt, and reordered, contradictory, wrong-attempt, skipped-terminal, or post-escalation history fails closed. A semantic attempt-1 failure emits `retry-required`; canonical status then publishes one exact `LOOM_IMPLEMENTATION_RETRY_CONTEXT` appendix binding the Task, attempt 2, predecessor receipt, and sorted failure kinds. When the predecessor receipt carries `declared-artifact-contract-violated` failures (G2 completion conformance: a bound export `deleted`, `renamed`, `retyped` or `still-unimplemented`, or a frozen ADT `shadows-frozen-adt` or `re-lists-frozen-variants`), the appendix adds a violation section after that authority line. The section is headed "Declared-artifact contract violations (declared-artifact-contract-violated) the previous attempt left; fix every one before completing:" and lists, per violated file, each encoded violation's subject, reason and remedy. When the receipt's failure-kind bound omitted some violations of a file, it ends that file's list with "and N more violations not shown"; the stored Proof keeps them all. A receipt entry that does not parse is shown verbatim, never dropped. Both parts derive from the retry context alone (`renderImplementationRetryContext` in `engine/src/core/implementation-retry.ts`), so status, the spawn gate and the State File load boundary render the same bytes. The shared Claude/Pi spawn gate requires those exact status-issued bytes, freezes its prompt/context digest with the new attempt authority before dispatch, and refuses stale, altered, missing, duplicate, invented, or representation-different retry context. Infrastructure-blocked receipts never consume the semantic budget and remain eligible at the same attempt. Status excludes non-reclaimable Tasks already executing or carrying active attempt authority; policy-expired reservations become dispatchable only under observed-empty roster authority so registration can reclaim them atomically. It emits `await-wave-implementation` when nothing is dispatchable. A semantic attempt-2 failure emits `escalation-required`; status becomes non-retryable and no attempt 3 can be registered. An accepted current-attempt implementation receipt starts a fresh attempt-1 lineage if the non-completed Task is later deliberately reopened for remediation.
+**Retry.** A failed attempt gets one retry. Status publishes the retry's exact context, naming what the first attempt failed, and the spawn gate accepts only those bytes. A second failure is a terminal escalation that an operator must resolve; there is no third attempt. A failure of the infrastructure (an unreadable baseline, a Git error) does not consume the retry. Recovery commands: [operations](reference/recovery.md#implementation-escalation-semantic-attempt-2-exhausted).
 
 ## Task proof obligations
 
@@ -253,7 +155,7 @@ The engine derives proof from declared requirements and observed evidence. Depen
 
 - Agent completion;
 - a passing regression test result;
-- newly written tests;
+- newly written tests, written test-first: a failing run before the first implementation write, then a passing one;
 - every declared artifact changed, with engine-written skeleton bytes subtracted, and, where completion conformance is owed, conforming to the frozen contract (a violation fails as `declared-artifact-contract-violated` before the changed test runs).
 
 Evidence retains provenance:
@@ -263,7 +165,7 @@ Evidence retains provenance:
 - transcript fallback is explicitly untrusted/degraded;
 - a pass invalidated by later writes does not remain a pass.
 
-A Task carries an explicit `verification_policy` with independent `regression` and `new_tests` requirements. Each arm is either `required` or `waived` with a typed reason. For example, `existing-tests-sufficient` waives new-test creation while retaining regression execution; `documentation-only` may waive both. Historical `new_tests_required` booleans remain read-compatible, but new TaskGraphs persist the explicit policy and reject conflicting dual declarations. Neither policy waives declared-artifact proof or review.
+A Task carries an explicit `verification_policy` with independent `regression` and `new_tests` requirements. Each arm is either `required` or `waived` with a typed reason. For example, `existing-tests-sufficient` waives new-test creation while retaining regression execution; `documentation-only` may waive both. Neither policy waives declared-artifact proof or review. How evidence is recorded and trusted: [Guarded Skill Machines](../machines/README.md#the-evidence-ledger).
 
 ## Wave Gate
 
@@ -280,9 +182,9 @@ For every Wave Task except the Wave's Distill Task, which is exempt from review,
 - `pr-test-analyzer`;
 - `type-design-analyzer`;
 - `comment-analyzer`;
-- `architecture-tech-lead`, appended last, only for a Task whose packets carry the owner map (it touches an owned Invariant's family; ADR-0047).
+- `architecture-tech-lead`, appended last, only for a Task that touches an owned Invariant's family (ADR-0047) or writes an Acceptance Contract's types file (ADR-0069).
 
-`spec-check-invoker` runs once for the Wave; its grammar, identity and Requirement Coverage floor are unchanged. Fresh reviewer registrations use Reviewer Protocol v2: exactly one JSON final payload under the issued packet's frozen schema/rubric, with engine-derived counts/IDs. Wave payloads echo packetId/generation and assess every prior ID once in packet order. Criticals require full Finding Basis; advisories require reason. Structure is not proof of truth or impact. Exact final bytes are captured into engine-reserved slots, then registered resume admits/settles them without legacy polling/concatenation. Malformed current output creates failed evidence, not a synthetic Finding. See [protocol operations](operations.md#reviewer-protocol-v2).
+`spec-check-invoker` runs once for the Wave. Each reviewer returns exactly one JSON payload under the schema and rubric its packet carries; the engine derives counts and Finding ids. A critical must state its full basis and an advisory its reason. Structure is not proof of truth or impact. Malformed output is recorded as failed evidence, never as a Finding. See [protocol operations](standalone-review.md#reviewer-protocol-v2).
 
 ### Remediation-aware reviews
 
@@ -303,26 +205,19 @@ Baseline lenses are `reproduction` and `intent`; signals can add `blast-radius`,
 
 A strict majority must refute a Finding. `uncertain` is neutral and ties keep the Finding. Refuted Findings move to `refuted_findings` with all reasoning; they are never deleted.
 
-Only criticals are refuted. Advisories are user-policy decisions, not verifier work.
-The same panel assesses the assertion including its preconditions, contract and
-consequence, retaining full current basis. A true assertion is not refuted merely
-because repair seems unimportant; surviving criticals block. No severity downgrade
-or standalone severity-dispute action is added. The existing explicit Wave operator
-override remains separate, never automatic fallback for malformed reviewer evidence.
+Only criticals are refuted; advisories are the user's decision, not verifier work. The panel judges whether the assertion holds, including its preconditions, contract and consequence. A true assertion is not refuted because fixing it seems unimportant, and a surviving critical blocks. There is no severity downgrade. The explicit operator override is separate and is never an automatic fallback for malformed reviewer evidence.
 
 ### Advisory decision
 
-A Wave with surviving advisories reaches `await-user`. The user records a disposition and reason. The lifecycle has one “decision accepted” transition; fixed/deferred/dismissed meaning remains in the decision payload rather than multiplying lifecycle states.
+A Wave with surviving advisories reaches `await-user`. The user records a disposition and reason. The lifecycle has one “decision accepted” transition; fixed/deferred/dismissed meaning remains in the decision payload.
 
-### Quiescent completion suite, full lint, and completion
+### Completion suite, full lint, and completion
 
-After every current-Wave implementation Agent has stopped and Task proof/test requirements pass, the registered Wave Gate executes the frozen completion suite against the integrated Git-visible workspace. Exit code, timeout, signal, spawn failure, and required-report production remain independent facts. Missing, duplicate, surplus, stale, malformed, or conflicting results fail closed; infrastructure failures remain distinct from semantic check failures.
+After every implementation Agent of the Wave has stopped and Task proof passes, the Wave Gate runs the frozen completion suite against the integrated workspace: the project's manifest checks, full-tier lint (`loom:full-tier-lint`), and owner verification where the plan declares owned Invariants. Exit code, timeout, signal, spawn failure and report production are recorded as separate facts. A missing, duplicate, stale, malformed or conflicting result fails closed, and an infrastructure failure stays distinct from a failing check.
 
-The engine publishes the exact result immutably in the Wave Run Directory. An accepted result is then bound into protected state with run, Wave, registration revision, manifest, suite, result, and workspace digests. Resume reuses the protected receipt or recovers it from exact immutable result bytes after a crash; it never reruns commands over ambiguous occupied evidence. `/loom --status` reports accepted, stale, rejected, pending, or unavailable suite authority without executing commands.
+The exact result is published immutably in the Wave's Run Directory and, when accepted, bound into protected state together with the workspace digest. Resume reuses that receipt; it never reruns commands over evidence it cannot tell apart. `/loom --status` reports accepted, stale, rejected, pending or unavailable suite authority without executing anything.
 
-Full-tier lint is the reserved `loom:full-tier-lint` suite check. During migration, the existing terminal lint invocation also remains as a fail-closed canary. Structural failures such as forbidden imports, I/O in pure modules, oversized functions, or changed generated integrity block advancement.
-
-The final protected-state commit re-observes the workspace and checks implementation proof, completion-suite authority, reviews, spec alignment, surviving criticals, and required lifecycle artifacts. Success archives a schema-v2 completion record, marks Tasks completed, and advances the Wave; otherwise a typed diagnostic explains the block. Historical schema-v1 Waves and active TaskGraphs created before this feature remain read-compatible and are never rewritten. The direct `complete-wave-gate` helper is compatibility-only: it refuses every graph carrying `verification_manifest`. Modern corrected findings are stored first and then the exact registered Wave Gate is resumed (or `/wave-gate` is started when no registration exists), so no direct helper can bypass suite execution or invent current-workspace/Run Directory authority.
+The final protected-state commit re-observes the workspace and checks implementation proof, completion-suite authority, reviews, spec alignment, surviving criticals, and required lifecycle artifacts. Success marks Tasks completed and advances the Wave; otherwise a typed diagnostic explains the block.
 
 ### Exhausted reviewer restart
 
@@ -343,34 +238,32 @@ The registered Standalone Review Program:
 7. runs the registered refutation panel when criticals exist;
 8. publishes authoritative `result.json` at the Run Directory root.
 
-The result separates `surviving_critical_findings`, `advisory_findings`, and `refuted_critical_findings`. A missing roster member or invalid panel result blocks publication.
-Use `helper orchestration inspect --runs-root <root> --run <run>` for the
-engine-rendered emitted/admitted and after-refutation summary from authenticated
-published authority, not authored arithmetic. JSON inspection keeps its existing
-shape; no summary artifact is added.
+The result separates `surviving_critical_findings`, `advisory_findings`, and `refuted_critical_findings`. A missing roster member or invalid panel result blocks publication. For counts, use `helper orchestration inspect --runs-root <root> --run <run>`, which renders them from the published result; do not compute them by hand.
 
-Completed and unfinished issued reviewer v1 runs retain their original protocol,
-including all retry/replay prefixes and packet-first archived role/shared-wire
-instructions. The archive does not invent an originally frozen rubric/persona.
-Fresh starts select v2 internally, never by output sniffing or caller flag.
+Review aspects are `code`, `errors`, `tests`, `types`, `comments`, `architecture`, `simplify`, and `all` (default):
 
-Review aspects are `code`, `errors`, `tests`, `types`, `comments`, `architecture`, `simplify`, and `all` (default). Architecture review is included explicitly for `all`/`architecture` and by size/shape policy for large structural changes.
+- `simplify` runs `code-simplifier` (the `distill` skill in review mode). Under `all` it joins whenever the scope changes source or test files.
+- `architecture` runs `architecture-tech-lead` (the `deepen` skill in review mode). Under `all` it always joins, and it is selected automatically for more than 500 additions, more than 10 files, or new structure.
+
+A later review of the same work can be started as an explicit successor of an earlier one, which keeps the earlier Findings and their history ([operations](standalone-review.md#standalone-lineage)).
 
 ## `/review-and-fix`
 
 This workflow composes two registered programs around semantic remediation:
 
 1. **Standalone review and adjudication.** Produce authoritative review `result.json`.
-2. **Plan and account.** Copy every surviving-critical Finding ID exactly once into a disposition. Repaired dispositions point to separately named Declared Repair Groups; unresolved and out-of-scope dispositions are allowed but block installation. Keep advisories under the existing autonomous accepted/deferred/dismissed policy outside critical groups, and retain refuted criticals for audit without repairing them.
-3. **Implement and validate.** Fix only repaired criticals and accepted advisories, declare root cause/invariant/sibling accounting/Historical RED with `DECLARED` provenance, and run real development checks. `--dry-run` stops before implementation.
-4. **Registered remediation v2.** Always supply `defectFamily`, including `{ "kind": "not-required" }` for an authoritative source with zero surviving criticals. The engine authenticates the source, performs preflight before Run Directory creation, selects fixed report-producing operator checks for critical repairs, records fresh repaired-state observations, binds them to immutable candidate authority, audits paths, and installs only an opaque versioned assessment.
-5. **Commit/push.** Read the actual nested `outcome.installation` receipt from `done`, commit that installed index, and push unless `--no-push`. Loom never force-pushes.
+2. **Plan and account.** Copy every surviving-critical Finding ID exactly once into a disposition. Repaired dispositions point to separately named Declared Repair Groups; unresolved and out-of-scope dispositions are allowed but block installation. Advisories are dispositioned as accepted, deferred or dismissed outside the critical groups, and refuted criticals are kept for audit without being repaired.
+3. **Implement and validate.** Fix only repaired criticals and accepted advisories, declare root cause, invariant, sibling accounting and the historical failing state, and run real development checks. `--dry-run` stops before implementation.
+4. **Registered remediation.** The engine authenticates the source review, selects the operator's fixed report-producing checks for critical repairs, observes them on the repaired state, binds the observations to the unchanged candidate bytes, audits paths, and installs exactly the verified set into the Git index.
+5. **Commit/push.** Read the installation receipt from `done`, commit that installed index, and push unless `--no-push`. Loom never force-pushes.
 
-A Declared Repair Group does not replace or mint Finding IDs. Compatible sibling reuse across distinct groups is allowed; duplicate sibling paths inside one group or conflicting cross-group statuses are rejected. `repair-checked` means the repaired-state checks were engine-observed on unchanged candidate bytes. It does not prove the declared family, root cause, invariant, sibling completeness, or Historical RED, and it is not `ResolvedFinding` status. An operator-owned fixed command can still fabricate a syntactically valid new report; structured fresh engine observations are not semantic proof.
+What the result means: `repair-checked` says the repaired-state checks were observed by the engine on unchanged candidate bytes. The grouping, root cause, invariant and sibling accounting are the parent's declarations, not engine observations, and an operator-owned command can still write a valid-looking report. `repair-checked` is not proof that the defect family is closed.
 
-Completed schema-v1 remediation remains read-only `historical-unknown`, returning its old receipt without reinstalling; unfinished v1 cannot install and missing v2 authority never downgrades. Completed-v2 replay refuses missing/malformed checkpoint audit arrays with an explicit audit-path diagnostic. The source review's immutable publication remains source authority, not a new P3 assessment. P4 source review, merge, publication and runtime cutover remain pending. Subsequent review/install must use the actually admitted runtime, with unchanged P3 v2 report/install policy; a reviewer-v1 source is not a remediation-v1 run. The Skill 3.1 bootstrap in ADR-0008 remains historical P3 context. Reload/restart after package installation; never bypass runtime admission.
+The parent must not substitute its own `git add` recipe or inject process outcomes, report bytes, manifests, installation receipts, or Run JSON through remediation input or hand-built run artifacts. Exact staged-set installation is a security and correctness boundary, not convenience automation. See the [Review and Fix Skill](../skills/review-and-fix/SKILL.md) and [operations recovery](standalone-review.md#remediation-and-git-safety).
 
-The parent must not substitute its own `git add` recipe or inject process outcomes, report bytes, manifests, installation receipts, or Run JSON through remediation input or hand-built run artifacts. Exact staged-set installation is a security and correctness boundary, not convenience automation. See the canonical [Review and Fix Skill](../skills/review-and-fix/SKILL.md) and [operations recovery](operations.md#remediation-and-git-safety).
+## `/security-audit`
+
+A security audit is a registered program with its own run directory. It enumerates the coverage units it will examine, assigns one hunter per unit, has an independent verifier on a different model profile try to refute each claim, and has a critic check the coverage claim against the recorded work. A claim is confirmed only with a sandbox receipt and a verifying ballot; anything less is recorded as a lead without a severity. Publication refuses while coverage is unsettled. Everything else is in [Running a security audit](security-audit.md).
 
 ## Standalone requirement workflows
 

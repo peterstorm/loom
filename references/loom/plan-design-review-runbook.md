@@ -40,7 +40,7 @@ until the result is `done` or `blocked`.
 
 ## 3. Dispose of the advisories, if there are any
 
-Triage them with the user and publish the complete ordered decisions with the `standalone-disposition` program ([operations: immediate advisory publication](../../docs/operations.md#immediate-advisory-publication)). Any decision is enough; advisories never block. Keep the disposition's absolute Run directory, its Run id and its disposition digest.
+Triage them with the user and publish the complete ordered decisions with the `standalone-disposition` program ([operations: immediate advisory publication](../../docs/standalone-review.md#immediate-advisory-publication)). Any decision is enough; advisories never block. Keep the disposition's absolute Run directory, its Run id and its disposition digest.
 
 ## 4. Accept the review
 

@@ -301,7 +301,7 @@ describe("the fragment's tool-primary emission wording (FR-020/AS-012)", () => {
 
   it("the archived issued v1 fragment is NOT rewritten (AS-012)", () => {
     // The schema-2 archive is no longer kept in the tree: nothing read it, and
-    // docs/operations.md records the commit that reproduces it.
+    // docs/standalone-review.md records the commit that reproduces it.
     const shared = readFileSync(join(REPO_ROOT, "references/reviewer-protocol-v1/agents/_shared/wire-contract.md"), "utf-8");
     expect(shared).not.toContain(REVIEWER_EMISSION_TOOL_CONTRACT_TEMPLATE);
     expect(shared).not.toContain(REVIEWER_EMISSION_TOOL_CONTRACT_PLACEHOLDER);

@@ -1,7 +1,7 @@
 # ADR-0068: The distill pass is an engine-added Task per Wave
 
 ## Status
-Proposed (2026-11-11). Implements Q1 of the deterministic-implementation plan's Q-track.
+Accepted (2026-11-11). Implements Q1 of the deterministic-implementation plan's Q-track.
 
 ## Context
 Across 1,247 labelled review findings, the simplification lens (`code-simplifier`, which runs the `distill`

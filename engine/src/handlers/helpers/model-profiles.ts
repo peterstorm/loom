@@ -34,7 +34,7 @@ const frontmatter = (content: string): Record<string, unknown> | null =>
 function markdownFiles(dir: string): string[] {
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
-    .filter((name) => name.endsWith(".md") && name !== "README.md")
+    .filter((name) => name.endsWith(".md"))
     .sort();
 }
 

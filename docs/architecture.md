@@ -35,13 +35,13 @@ protected TaskGraph       immutable Run Directory
 
 Loom is not only an engine. Its package includes the semantic resources agents execute:
 
-- `commands/` — slash-command runbooks. `/loom`, `/wave-gate`, `/review-pr`, and `/review-and-fix` are the principal operational surfaces.
+- `commands/` — slash-command runbooks. `/loom`, `/wave-gate`, `/review-pr`, `/review-and-fix` and `/security-audit` are the principal operational surfaces.
 - `commands/templates/` — parameterized prompts for sequential phases, implementation Tasks, architecture-panel roles, and refutation verification.
-- `agents/` — 28 Loom-owned Agent definitions with explicit semantic model profiles and, where needed, preloaded Skills.
+- `agents/` — the Agent definitions, each with an explicit model profile and, where needed, a preloaded Skill ([inventory](agents.md)).
 - `skills/` — reusable architecture, implementation, testing, security, frontend, lint, review/remediation, deepening, and domain-language knowledge.
-- `rules/` — architecture and language guidance supplied to implementation/review Agents.
-- `references/` — plan/spec/ADR templates plus design and refutation lens catalogs.
-- `lint-rules/` and `machines/` — executable policy rather than prompt guidance.
+- `rules/` — architecture and language guidance supplied to implementation and review Agents.
+- `references/` — plan, spec and ADR templates, lens catalogs, and the runbooks `/loom` loads on demand.
+- `lint-rules/` and `machines/` — executable policy, not prompt guidance.
 
 These resources are shared source. Claude Code consumes them from the plugin. Pi renders commands, skills, references, and rules into a content-addressed cache and renders Agent definitions into the user Agent directory.
 
@@ -55,39 +55,46 @@ These resources are shared source. Claude Code consumes them from the plugin. Pi
 bun engine/src/cli.ts <hook-type> <handler> [arguments]
 ```
 
-`engine/src/handler-routes.ts` is the closed routing table. Spawn and state guards are marked fail-closed so a top-level import or stdin failure exits with blocking polarity rather than accidentally allowing a call.
+`engine/src/handler-routes.ts` is the closed routing table (`KNOWN_HANDLERS`). The spawn gates, the direct-edit block and the state guard act only while a State File exists. The routes marked *fail-closed* block when the handler itself crashes (`FAIL_CLOSED_ROUTES`), so a top-level import or stdin failure cannot allow a call by accident.
 
-Claude Code lifecycle coverage:
+| Hook shim | Event and matcher | Purpose |
+|---|---|---|
+| `validate-phase-order.sh` | PreToolUse: Task/Agent/subagent | Phase sequencing: refuses a phase agent whose prerequisite phase is incomplete, and the decompose spawn until the plan design review is accepted for the plan's current bytes (or skipped). *Fail-closed* |
+| `validate-task-execution.sh` | PreToolUse: Task/Agent/subagent | Expands an implementation brief marker; checks Wave and dependency order and path ownership; reclaims only policy-eligible reservations; writes skeletons; captures baselines; registers attempt and retry authority atomically. *Fail-closed* |
+| `validate-template-substitution.sh` | PreToolUse: Task/Agent/subagent | Refuses a prompt that still holds an unsubstituted `{variable}`. *Fail-closed* |
+| `validate-agent-model.sh` | PreToolUse: Task/Agent/subagent | Refuses a spawn whose model does not match the agent's LLM Profile. *Fail-closed* |
+| `validate-agent-skill.sh` | PreToolUse: Task/Agent/subagent | Refuses a spawn whose prompt does not name the agent's required skill. *Fail-closed* |
+| `block-direct-edits.sh` | PreToolUse: Edit, Write, MultiEdit | Keeps the orchestrator from editing; a phase agent writes only under its artifact roots, and an implementation agent only once its exact Implementation Attempt is bound (pending is a retriable block, refused a hard block). Scoped to the Orchestrated Repository: a write whose every canonical target lies outside the root owning the live graph passes (ADR-0046). *Fail-closed* |
+| `enforce-phase-tools.sh` | PreToolUse: Edit, Write, MultiEdit | Guarded-skill machine: denies a tool the bound agent's phase does not allow. *Fail-closed* |
+| `guard-state-file.sh` | PreToolUse: Bash | Deny by default on guarded state paths: only read-only commands and the helpers in `WHITELISTED_HELPERS` (`core/guard-state-file.ts`) pass. Covers the task graph, subagent evidence and binding files, and machine definitions. *Fail-closed* |
+| `guard-subagent-authority.sh` | PreToolUse: Bash | A subagent may not change audit or orchestration authority (ADR-0067 D6). *Fail-closed* |
+| `rules-gate.sh` | PreToolUse: Edit, Write, MultiEdit, Bash | Blocks code edits until the Loom rules and skills are in the model's context and adherence is stated. *Fail-closed* |
+| `mark-subagent-active.sh` | SubagentStart | Tracks active subagents and binds the guarded-skill machine; binds an implementation agent's exact attempt when its prompt is already on disk, else leaves it pending |
+| `record-evidence.sh` | PostToolUse: Read, Edit, Write, MultiEdit, Bash; PostToolUseFailure: Bash | Appends epoch-stamped facts (file reads, file writes, test runs) to the evidence ledger. Claude Code fires PostToolUse only when a call succeeded, so a failing test run reaches the ledger only through the failure event |
+| `lint-file.sh` | PostToolUse: Edit, Write, MultiEdit | Immediate-tier lint: regex rules plus the immediate-tier programmatic rules; the full tier runs at the Wave Gate |
+| `type-diagnostics.sh` | PostToolUse: Edit, Write, MultiEdit | Runs the project's incremental type check after a TypeScript edit and reports what no longer typechecks. Advisory; never blocks |
+| `record-orchestration-spawn.sh` | PostToolUse: Task/Agent | Binds an engine-issued request id to the harness's child agent id |
+| `surface-stop-check-notes.sh` | PostToolUse: Task/Agent | Hands the orchestrating session the stop-check notes its agents left |
+| `cleanup-stale-subagents.sh` | SessionStart | Sweeps stale subagent tracking and binding files |
+| `resume-after-clear.sh` | SessionStart: clear | Restores the `/loom` execution context after `/clear` |
+| `dispatch.sh` | SubagentStop | Runs the stop checks, then routes by agent type to the handlers below (`engine/src/handlers/subagent-stop/`) |
+| ↳ `capture-orchestration-result` | via dispatch, first | Request-bound capture of an engine-issued agent's result into its Run Directory |
+| ↳ `advance-phase` | via dispatch | Advances `current_phase` once the phase's artifact is on disk, and records `spec_file` and `plan_file` |
+| ↳ `update-task-status` | via dispatch | Settles an implementation attempt: implemented, retry-required, escalation-required or infrastructure-blocked |
+| ↳ `store-reviewer-findings` | via dispatch | Parses review findings |
+| ↳ `store-spec-check-findings` | via dispatch | Parses spec-check findings |
+| ↳ `cleanup-subagent-flag` | via dispatch, always | Removes subagent tracking and machine bindings |
 
-- **PreToolUse** — phase order, Wave/task order, prompt substitution, model/Skill policy, direct-edit policy (scoped to the Orchestrated Repository: writes whose every canonical target lies outside the root owning the live graph pass; ADR-0046), guarded machine tools, state-path Bash guard. An implementation brief marker (`LOOM_IMPLEMENTATION_BRIEF: T5`, optionally followed by `LOOM_OPERATOR_NOTE: <text>` lines that become the brief's Operator Note section) is expanded here: `validate-task-execution` renders the brief, runs every spawn veto and the reservation on it, and returns it as the call's `updatedInput`, so the parent sends only the marker. Its sibling gates expand the marker themselves, because hooks on one matcher see only the original input (`engine/src/handlers/pre-tool-use/implementation-brief-marker.ts`).
-- **PostToolUse** — immediate lint, evidence recording, and orchestration-spawn correlation. Evidence recording (`handlers/post-tool-use/record-evidence.ts`) attributes the call to an agent epoch, normalizes the hook payload with `claudeToolCall`, and hands it to the shared minting shell (see [Evidence ledger: one minting rule](#evidence-ledger-one-minting-rule)).
-- **PostToolUseFailure** (Bash) — evidence recording for a failed call. Claude Code fires PostToolUse only when a tool call succeeded; a Bash command that exits non-zero is a failed call, so a failing test run reaches the ledger only through this event.
-- **SubagentStart** — active-Agent tracking and guarded-machine epoch binding.
-- **SubagentStop** — the stop checks (the Acceptance Stop Check, then the Affected-Test Stop Check, run by `handlers/subagent-stop/stop-checks.ts` from the one planner `planStopChecks`; and the Task Mutation Check, which runs nothing at the stop and reads the record `helper mutation-check` left, decided by `core/task-mutation-check.ts`, ADR-0071), then phase advancement, implementation proof reconciliation (including the I6 red-then-green judgment over the agent's epoch), review/spec evidence capture, orchestration transcript capture, cleanup.
-- **SessionStart** — stale binding cleanup and post-`/clear` context restoration.
+Two details the table does not show:
+
+- **Implementation brief marker.** The parent sends only a marker (`LOOM_IMPLEMENTATION_BRIEF: T5`, optionally followed by `LOOM_OPERATOR_NOTE: <text>` lines that become the brief's Operator Note section). `validate-task-execution` renders the brief, runs every spawn veto and the reservation on it, and returns it as the call's `updatedInput`. Its sibling gates expand the marker themselves, because hooks on one matcher see only the original input (`engine/src/handlers/pre-tool-use/implementation-brief-marker.ts`).
+- **Stop checks.** At SubagentStop, `handlers/subagent-stop/stop-checks.ts` runs the Acceptance Stop Check and then the Affected-Test Stop Check from one planner (`planStopChecks`). The Task Mutation Check runs nothing at the stop: it reads the record `helper mutation-check` left ([ADR-0071](adr/ADR-0071-the-task-mutation-check-names-surviving-mutants-before-the-stop.md)). What each check does is in [operations](verification.md#acceptance-stop-check-claimants).
 
 ### Pi
 
-`pi/extension.ts` is the Pi registration shell: it maps Pi `tool_call`, `tool_result`, Agent lifecycle, and resource discovery events to the same core decisions, and owns the per-process session state those handlers share. Pi-specific concerns live in adapter modules beside it:
+`pi/extension.ts` is the Pi registration shell. It maps Pi's `tool_call`, `tool_result`, Agent lifecycle and resource discovery events to the same core decisions, and owns the per-process session state those handlers share. Because a Pi subagent is a separate process, the adapter adds three things Claude Code does not need: one-time write grants for children, a binding from Pi's native batch-item identity to the engine's request identity, and a recorder that writes a child's tool calls into the parent's evidence ledger. Interactive phase Agents run as RPC children whose dialogs are relayed to the parent TUI.
 
-- deriving package identity from `import.meta.url` and capturing a content-addressed **Runtime Revision** published to child CLI processes (`pi/extension.ts`);
-- preparing each spawn batch through one ordered pipeline — observe its governing task graph, expand implementation brief markers, then run the Spawn Admission core (`pi/spawn-preparation.ts`, `pi/implementation-brief-expansion.ts`, `pi/spawn-graph.ts`);
-- reading and rewriting Pi tool-call payloads and deriving per-slot roster identities (`pi/tool-input.ts`);
-- reserving an admitted batch's lifecycle — roster rows, pointer lease, request correlators, review and spec-check authorities, write grants, task execution — before Pi may dispatch it (`pi/spawn-lifecycle.ts`), recording every capability it takes in the batch's claims ledger, whose pure rollback plan, release executors over injected ports and remaining-debt derivation `pi/spawn-claims.ts` owns, while its production release ports and the parent-session release orchestrators settlement and shutdown share live in the thin shell `pi/spawn-claim-shell.ts`;
-- rendering resources through `pi/resources.ts`, and resolving the Pi user agent directory the spawn definition port reads through the one pure rule the routing loader and the PreToolUse model guard share (`engine/src/core/pi-agent-directory.ts`);
-- adapting Pi messages through `pi/transcript-adapter.ts`;
-- settling finished subagent results: `pi/subagent-result-batch.ts` parses the harness batch, `pi/reserved-slot.ts` parses each slot's role claims into one role authority at the spawn producer (the reservation stores only that parsed slot), `pi/subagent-settlement.ts` holds the pure locked reducers, and `pi/subagent-result.ts` is the shell that observes evidence and runs them under the TaskGraph lock;
-- minting and consuming scoped write grants through `pi/write-grant.ts`. Each grant also carries the parent's evidence ledger address (`evidenceLedger`: parent session and agent type);
-- recording a child's tool calls into the parent's evidence ledger (`pi/evidence-recorder.ts`). The recorder registers before every other `tool_result` handler, normalizes the event with `piToolCall`, and calls the shared minting shell under the epoch of the child's grant. The pure `piEvidenceTarget` decides from the grant state alone whether the child may record. The parent reads a child's epoch back with `piChildEvidence` for I6 settlement and the report-only stop checks;
-- correlating native Pi batch-item identities to engine-issued request identities, and the one issued-review-request authentication spawn admission and capture share (`pi/review-run-authority.ts`); witnessing captured standalone review transcripts in the per-factory Trusted Review Witness Aggregate (`pi/trusted-review-witness.ts`);
-- capturing exact final result bytes into reserved Run Directory slots (`pi/review-capture.ts`);
-- staging emission-enabled launches with the installed subagent launcher (`pi/emission-launch-bridge.ts`), whose readiness verifier runs the one launcher step sequence (`pi/emission-readiness-sequence.ts`) and is decided by the launcher's pure readiness and route gate (`pi/emission-readiness-gate.ts`), over the readiness protocol (command, entry type, report shape) both sides import from `pi/emission-readiness-protocol.ts`;
-- holding each parent session's spawn reservations and cleanup debt (`pi/spawn-reservation.ts`), and settling a completed batch against its reservation through the SubagentStop dispatcher, its pure per-result routing (`pi/subagent-result-route.ts`) and its per-concern appliers (`pi/subagent-stop.ts`, `pi/subagent-result.ts`, `pi/reserved-results.ts`);
-- activating a child's write grant and keeping a rejected child's direct edits blocked (`pi/child-write-grant.ts`), and releasing every capability a session still holds at shutdown — its child binding included, as a claims ledger of its own (`pi/session-shutdown.ts`);
-- holding an emission-enabled child behind its launcher readiness barrier (`pi/emission-readiness.ts`, over the pure child surface in `pi/emission-tool.ts`);
-- running interactive phase Agents as RPC children and relaying their standard dialogs to the parent TUI.
-
-The legacy `pi/loom-bridge.ts` bridge was removed; `pi/extension.ts` is the only Pi state adapter, and the Pi package manifest pins the bridge's absence.
+The module inventory and the contributor checklist are in [Pi adapter](pi-adapter.md); installation and operation are in [Using Loom with Pi](pi-usage.md).
 
 ## Layer 3: handler shell and parsing boundaries
 
@@ -115,20 +122,20 @@ The project follows “parse, do not cast”: untrusted JSON, transcripts, paths
 | Area | Primary source | Responsibility |
 |---|---|---|
 | Spawn validation | `validate-phase-order.ts`, `validate-task-execution.ts`, `validate-template-substitution.ts` | Enforce lifecycle and prompt prerequisites |
-| Protected Bash policy | `guard-state-file.ts` (state-file policy; pure — the guarded directories arrive as a `GuardedLocations` value from `guarded-locations.ts`, which the hook shell and the Pi extension resolve from `config.ts` per decision, and the task-graph existence gate stays in those shells), `subagent-authority.ts` (ADR-0067 D6: a subagent's audit/orchestration authority writes — defence in depth, never the proof; the contract is [the subagent authority guard](security-audit.md#the-subagent-authority-guard)), over one pure shell grammar: `shell-command-head.ts` (heads, wrappers, redirects, pipe-chains), `shell-heredoc.ts`, `shell-match-views.ts`, `shell-normalize.ts`, `shell-ansi-c.ts`, `shell-substitution.ts` (the one substitution-span scanner, shared with test-run classification in `machine/extract-evidence.ts`) | Detect guarded-path writes through shell syntax and fail closed |
+| Protected Bash policy | `guard-state-file.ts` (state-file policy; pure — the guarded directories arrive as a `GuardedLocations` value from `guarded-locations.ts`, which the hook shell and the Pi extension resolve from `config.ts` per decision), `subagent-authority.ts` (a subagent's audit and orchestration authority writes; defence in depth, never the proof; see [the subagent authority guard](security-audit.md#the-subagent-authority-guard)), over one pure shell grammar: `shell-command-head.ts`, `shell-heredoc.ts`, `shell-match-views.ts`, `shell-normalize.ts`, `shell-ansi-c.ts`, `shell-substitution.ts` | Detect guarded-path writes through shell syntax and fail closed |
 | Completion evidence | `proof-obligations.ts`, `wave-gate-model.ts` | Derive whether a Task earned `implemented` |
-| Operator reopening | `task-revalidation.ts` (`returnToRevalidation`; `returnWaveTasksToRevalidation`, the active-Wave transition Contract Revision and Task Reopening share), `task-reopening.ts` (`helper orchestration reopen-task`: preconditions, audit, idempotent replay) | Make settled Tasks dispatchable again without discarding evidence |
+| Operator reopening | `task-revalidation.ts` (the active-Wave transition Contract Revision and Task Reopening share), `task-reopening.ts` (`helper orchestration reopen-task`: preconditions, audit, idempotent replay) | Make settled Tasks dispatchable again without discarding evidence |
 | Finding lifecycle | `findings.ts`, `review-output.ts`, `review-packet.ts` | Stable identity, generations, packet-bound remediation verification |
 | Architecture panel | `panel-kernel.ts`, `panel-contract.ts`, `panel-program.ts` | Lenses, exact candidates/criteria, verdict validation, ranking, retries |
 | Refutation panel | `panel-kernel.ts`, `review-panel.ts`, `panel-program.ts` | Exact critical set, verifier lenses, majority tally, retained audit |
-| Standalone review | `standalone-review.ts` — the cohesive aggregate owner: source/disposition/successor preparation, issued admission, roster aggregation, the LC-2 reducer and its private publication/lineage custody share one owner, and callers import the reducer and lineage preparation from it directly. `standalone-successor-reviewer.ts` is the one remaining consumed named entry surface into that owner, not an independent implementation | Frozen scope/roster, successor admission, aggregation, current refutation work, authoritative result |
-| Standalone lineage (P5) | `standalone-lineage-contract.ts` (wire contract below the aggregate) plus the `standalone-review.ts` cohesive owner; `standalone-successor-reviewer.ts` is a consumed named entry surface | Original identity/history, explicit policy/source joins, complete current assessment and canonical projections |
-| Advisory publication (P5) | `standalone-disposition-machine.ts` | No-agent immutable DECLARED publication and exact effect reconciliation |
-| Wave Gate | `wave-gate-machine.ts` (LC-1 reducer, proof-carrying readiness snapshot, next-action proof, completion commit, which stamps the Acceptance Freeze from the archived suite receipt), `wave-gate-checks.ts` (gate evaluation), `wave-completion-suite-readiness.ts`, `wave-gate-preparation.ts` (refutation/advisory actions), `wave-gate-registration.ts` (admission, install with abandoned-run supersession, review-authority reset), `wave-status-facts.ts`, `loom-status.ts` (canonical status read model), `task-implementation-dispatch.ts` | Review/refutation/advisory/completion lifecycle and canonical status |
-| Acceptance Contracts | `acceptance-contract/` behind one curated `index.ts`: `kernel.ts` (private result helpers), `model.ts` (shapes), `tasks.ts` (writer rule, claimants, red window, contract roles, population), `binding.ts` (plan-binding validation, with the transitive-dependency rule from `task-dependencies.ts`), `gate.ts` (Wave Gate expectation, attribution, RED/GREEN judgment, the recorded observation and its verdict), `freeze.ts` (Acceptance Freeze, drift), `wire.ts` (persisted parsers); `contract-revision.ts` (operator Contract Revision) | Contracts before code: frozen acceptance tests observed red, then green by Requirement |
-| Owner verification (G5b) | `owner-verification/` (pure; INV-2 purity-linted; the directory is the full list): `types.ts` (CT-1 declarations) and `parse.ts` (their wire parsers); `obligations.ts` (the one owner of which Owner Obligations a Wave or Task owes, through its two duty entry points `waveOwnerDuty` and `taskOwnerDuty`); `suite-authority.ts` (`authorizeGraphCompletionSuite`, the one authorize-from-TaskGraph function the gate and readiness share); `plan-integrity.ts` (the gate's plan-against-stamp drift check); `owed-verification.ts` (the gate's owner-observation decision and the runner's per-obligation run plan, decided before anything runs); `import-graph.ts` and `mutation-plan.ts` (the only two modules allowed to import `typescript`, parsing already-read text); `coverage.ts`, `repo-path.ts` (the one repository-path rule coverage and `tsconfig-paths.ts` share) and `tsconfig-paths.ts` (the matrix test's `paths` aliases); `wave-base.ts` (which commit the owner is diffed against), `ls-tree.ts` (what `git ls-tree` says about the owner at that base) and `status-paths.ts` (the worktree overlay's path set from `git status`); `outcome.ts`, `verdict.ts`, `owner-map.ts`, `status.ts` (the one status projection both `helper orchestration status` renderers serialize); beside it, `core/family-sites.ts` (the family-site metric, not part of `owner-verification/`) | Sibling coverage, deterministic mutation plans, report-only outcome classification, per-Invariant verdicts, the reviewer owner map |
+| Standalone review | `standalone-review.ts`, the one owner of source, disposition and successor preparation, issued admission, roster aggregation and the review reducer; `standalone-successor-reviewer.ts` is a named entry surface into it | Frozen scope/roster, successor admission, aggregation, current refutation work, authoritative result |
+| Standalone lineage | `standalone-lineage-contract.ts` (the wire contract below the aggregate), `standalone-disposition-machine.ts` (advisory publication without Agents) | Original identity and history, explicit policy and source joins, complete current assessment |
+| Plan design review | `plan-design-review.ts` | The kind and its roster, the State File record, the gate decision |
+| Wave Gate | `wave-gate-machine.ts` (the reducer, readiness snapshot, next-action proof and the completion commit, which stamps the Acceptance Freeze from the archived suite receipt), `wave-gate-checks.ts`, `wave-completion-suite-readiness.ts`, `wave-gate-preparation.ts`, `wave-gate-registration.ts`, `wave-status-facts.ts`, `loom-status.ts` (canonical status read model), `task-implementation-dispatch.ts` | Review/refutation/advisory/completion lifecycle and canonical status |
+| Acceptance Contracts | `acceptance-contract/` behind one curated `index.ts`: `model.ts`, `tasks.ts` (writer rule, claimants, red window, population), `binding.ts`, `gate.ts` (expectation, attribution, red/green judgment), `freeze.ts`, `wire.ts`; `contract-revision.ts` | Contracts before code: frozen acceptance tests observed red, then green by Requirement |
+| Owner verification | `owner-verification/` (pure), with `obligations.ts` as the one owner of which obligations a Wave or Task owes; `core/family-sites.ts` beside it | Sibling coverage, deterministic mutation plans, report-only outcome classification, per-Invariant verdicts, the reviewer owner map |
 | Remediation | `remediation-machine.ts` | Scope authority, excluded evidence paths, audit/stage/install lifecycle |
-| Model policy | `model-profiles.ts` (profile and Agent Catalog, resolution, issuance eligibility), `agent-catalog-projections.ts` (derived agent sets, phase map, producer kinds), `pi-spawn-input.ts` (Pi `subagent` input parse), `model-calibration.ts` | Explicit cross-harness bindings, catalog-derived dispatch sets, and deterministic calibration scoring |
+| Model policy | `model-profiles.ts` (profile and Agent Catalog, resolution, issuance eligibility), `agent-catalog-projections.ts`, `pi-spawn-input.ts`, `model-calibration.ts` | Explicit cross-harness bindings, catalog-derived dispatch sets, deterministic calibration scoring |
 | Compatibility | `legacy-archive.ts` | Read-only parsers for historical artifacts; never new domain behavior |
 
 ### Algebraic state machines
@@ -138,7 +145,7 @@ The Wave Gate, standalone review, refutation/architecture panels, and remediatio
 - Wave Gate: `preparing → awaiting-review-results → awaiting-refutation? → awaiting-advisory-decision? → ready-to-complete → done`.
 - A malformed semantic result gets one retry; an attempt-2 semantic rejection reaches a typed terminal block.
 - Infrastructure-effect failures preserve the predecessor and expected effect so a receipt can reconcile the operation without replaying semantic work.
-- Complete rosters are parser-produced values; aggregation cannot accept a partial roster.
+- Complete rosters are parser-produced values; aggregation cannot accept a partial roster. A slot's identity binds its lens or criterion, so caller prose cannot swap it.
 
 The public action algebra is deliberately small:
 
@@ -147,30 +154,35 @@ The public action algebra is deliberately small:
 - `blocked` — stop with typed diagnostics;
 - `done` — report an authoritative completion receipt.
 
+The parent does not build event arrays, retry policy, reviewer lists, model lookups, or result JSON.
+
 ## Layer 5: orchestration shell
 
 `engine/src/orchestration/` is the imperative shell around the reducers.
 
 ### One façade
 
-`engine/src/handlers/helpers/orchestration.ts` is the parent-facing interface:
+`engine/src/handlers/helpers/orchestration.ts` (`helper orchestration <operation>`) is the parent-facing interface:
 
 ```text
-status
-start <architecture|refutation|standalone-review|standalone-disposition|wave-gate|remediation>
-restart                 # exhausted Wave reviewer run only
+status                  # canonical status; read-only
+brief                   # engine-rendered implementation brief and spawn invocation; read-only
+inspect                 # one run's program, state, captures and event tail; read-only
+start <architecture|refutation|standalone-review|standalone-disposition|wave-gate|remediation|security-verification>
 resume
-submit                   # compatibility/manual capture path
-correlate                # harness-native id → request authority
-complete                 # compatibility for old panel callers
-decide                   # user decision
+restart                 # exhausted Wave reviewer run only
+recover-orphan          # a Wave Gate whose Run Directory is missing
+abandon                 # retire a run; deletes nothing
+submit                  # compatibility/manual capture path
+correlate               # harness-native id → request authority
+complete                # compatibility for old panel callers
+decide                  # user decision
+remediate               # retire a terminal implementation escalation
+attest                  # arm implementation re-attestation
+reopen-task             # return implemented Tasks of the active Wave to pending
 ```
 
-Registered standalone-review, Wave Gate, remediation and P5 standalone-disposition
-programs are driven by `handlers/helpers/programs/`. The façade materializes Context
-Packets and complete request authorities for Agent work; disposition publication has
-no Agents. Harness adapters capture results directly; the parent never rewrites transcripts.
-P5 commands require a matching admitted runtime; see the [bootstrap restriction](operations.md#standalone-lineage-p5).
+The registered programs are driven by `handlers/helpers/programs/`. The façade materializes Context Packets and complete request authorities for Agent work; advisory publication has no Agents. Harness adapters capture results directly; the parent never rewrites transcripts. Flags and recovery use: [operations](operations.md#run-directory-operations).
 
 ### Program durability
 
@@ -187,22 +199,45 @@ Each program's drive function is plain shell code over this journal and the pure
 
 ### Effects and idempotency
 
-Reducers emit typed effect intents. `orchestration/effect-runner.ts` executes them and records receipts. On resume, an already-receipted effect is reconciled rather than run again. This separates “the domain authorizes this effect” from “the shell performed it.”
+Reducers emit typed effect intents. `orchestration/effect-runner.ts` executes them and records receipts. On resume, an already-receipted effect is reconciled, not run again. This separates “the domain authorizes this effect” from “the shell performed it.”
+
+Each effect reaches only the adapter it needs: run-artifact publication through the anchored `RunDirHandle`, the protected-state commit through `StateManager`, and Git-index operations through `git-remediation`. Pure validation and routing code receives none of them.
 
 ## Two persistence domains
 
 ### Protected TaskGraph
 
-The active feature lifecycle lives at:
+The active feature lifecycle lives in the State File:
 
 - Claude Code: `.claude/state/active_task_graph.json`
 - Pi: `.pi/state/active_task_graph.json`
 
-`StateManager` is the only general writer. It uses a lock, temporary-file/rename publication, and mode `0444` at rest. Hooks and a narrow helper allowlist mediate changes. The graph contains phase artifacts, skipped phases, Tasks/Waves, proof results, review generations/runs, Findings, Wave Gate records, Acceptance Contracts with their freeze and revisions, and GitHub tracking metadata.
+It is orchestration authority: an Agent that could edit it could forge phase completion, tests, Findings or Wave advancement. Protection has four layers:
 
-Under Pi, the extension hashes `engine/src/`, `pi/`, and runtime package metadata when it loads. Mutating CLI routes hash the checkout again before dynamic import, while `StateManager` repeats the check immediately before any chmod/lock/write. A missing or unequal Runtime Revision refuses the operation with a `/reload`/restart diagnostic. Status remains available during skew. This prevents a fresh CLI writer from emitting state that the stale in-memory extension cannot parse.
+1. mode `0444` at rest;
+2. a deny-by-default Bash guard over state, evidence, binding and machine paths;
+3. the `StateManager` lock plus temporary-file/rename writes;
+4. narrow hook and helper ownership of mutations.
 
-This graph is mutable protected state because a feature progresses over time.
+`StateManager` is the only general writer. The graph contains phase artifacts, skipped phases, Tasks/Waves, proof results, review generations/runs, Findings, Wave Gate records, Acceptance Contracts with their freeze and revisions, and GitHub tracking metadata.
+
+**The Bash guard.** Bash can reassemble the same path through quotes, ANSI-C strings, parameter expansion, brace and glob forms, substitutions, wrappers and heredocs. `core/guard-state-file.ts` evaluates reveal-monotonic views of the command and recursively judges live substitutions and script-bearing heredoc bodies. It distinguishes data from executable stdin: prose in a quoted heredoc is not treated as a command unless the heredoc feeds an interpreter or evaluator. Common wrappers and fused spellings are normalized before judgment. Unparseable or unbounded forms fail closed.
+
+**Runtime Revision (Pi).** The extension hashes `engine/src/`, `pi/`, and runtime package metadata when it loads. Mutating CLI routes hash the checkout again before dynamic import, while `StateManager` repeats the check immediately before any chmod/lock/write. A missing or unequal Runtime Revision refuses the operation with a `/reload`/restart diagnostic. Status remains available during skew. This prevents a fresh CLI writer from emitting state that the stale in-memory extension cannot parse.
+
+**Shape at initialization.** `cli.ts init-state` writes the State File before the first phase. Nobody authors it by hand.
+
+| Field | At `init-state` | Later |
+|---|---|---|
+| `current_phase` | `init`, or the first phase the skip flags leave | Advanced by `advance-phase`; `populate-task-graph` moves `decompose` to `execute` |
+| `phase_artifacts` | `{}` | One entry per completed phase |
+| `skipped_phases` | From the skip flags: `--skip-specify` adds `brainstorm`, `specify`, `clarify`; `--skip-plan-alignment` adds `plan-alignment` | Unchanged |
+| `plan_design_review` | `{"status":"required"}`, or `{"status":"not-required","reason":"skipped"}` with `--skip-plan-design-review` (a gate, so `skipped_phases` is unchanged) | Set to `accepted`, bound to the plan's bytes, only by `accept-plan-design-review` |
+| `spec_dir` | `.claude/specs/<date-slug>` | Unchanged |
+| `spec_file`, `plan_file` | `null` (`spec_file` is set at once with `--skip-specify`) | Recorded when the phase artifact appears |
+| `tasks`, `wave_gates` | `[]`, `{}` | Installed by `populate-task-graph` with `github_issue`, `current_wave` and `executing_tasks` |
+
+Task status moves `pending` → `implemented` (the exact attempt satisfies proof and the Task-local suite) → `completed` (its Wave Gate passed). A Task stays `pending` through an infrastructure block, through a failed attempt 1 (one attempt-2 retry is issued) and through a failed attempt 2 (status then publishes a terminal escalation; there is no attempt 3).
 
 ### Immutable Run Directories
 
@@ -226,11 +261,11 @@ run.<id>/
 └── artifacts/
 ```
 
-Authority, abandonment, request, context, section-blob, transcript, event, and receipt slots are immutable/exclusive.
+Authority, abandonment, request, context, section-blob, transcript, event, and receipt slots are immutable/exclusive. A symlink swap, a traversal component, a duplicate publication or a mismatched run identity fails closed, which protects evidence from both path bugs and prompt-chosen output paths.
 
-Context Packet digests cover section identity (label, length, digest), not an inline byte encoding, so a packet file lists its sections and their bytes live once in `blobs/<section-digest>`. A frozen Wave source shared by a Task's reviewers (five, or six when its packets carry the owner map) and their retries is one blob rather than a JSON byte array copied into every packet (a 34 MB Wave Gate run stores 1.9 MB). Every read restores section bytes through one resolver and re-hashes each section; packet files written before blob storage carry inline bytes and remain readable. The handle verifies the direct-child relation, rejects unsafe identity/path shapes, and reopens path components with no-follow filesystem operations. Checkpoints are projections; append-only events and immutable evidence remain the audit history.
+Context Packet digests cover section identity (label, length, digest), not an inline byte encoding, so a packet file lists its sections and their bytes live once in `blobs/<section-digest>`. A frozen Wave source shared by a Task's reviewers and their retries is one blob, not a JSON byte array copied into every packet (a 34 MB Wave Gate run stores 1.9 MB). Every read restores section bytes through one resolver and re-hashes each section; packet files written before blob storage carry inline bytes and remain readable. The handle verifies the direct-child relation, rejects unsafe identity/path shapes, and reopens path components with no-follow filesystem operations. Checkpoints are projections; append-only events and immutable evidence remain the audit history.
 
-A Run Directory is never deleted, so `abandoned.json` is how a retired run says so: it records the operator's terminal decision and, optionally, the run that replaced it. It is written once and never removes anything. Afterwards `helper orchestration inspect` still reads the run's evidence, but every operation that would advance the run refuses it, and no recovery can adopt it as a pristine replacement. It is deliberately not a program event — the event log is folded by each program's machine on every replay, and this is metadata about the run rather than a transition within it.
+A Run Directory is never deleted, so `abandoned.json` is how a retired run says so: it records the operator's terminal decision and, optionally, the run that replaced it. It is written once and never removes anything. Afterwards `helper orchestration inspect` still reads the run's evidence, but every operation that would advance the run refuses it, and no recovery can adopt it as a pristine replacement. It is deliberately not a program event: the event log is folded by each program's machine on every replay, and this is metadata about the run, not a transition within it.
 
 ## Request and evidence authority
 
@@ -248,9 +283,9 @@ A result is accepted only against that authority. The harness-native correlator 
 
 Context Packets split fixed and variable byte sections, hash the complete content, and are published before the spawn action. This avoids repeatedly asking a parent model to reconstruct scope and protocol prose.
 
-### Evidence ledger: one minting rule
+### Evidence ledger
 
-The evidence ledger (`<session>.evidence.jsonl`) holds facts only: `FileRead`, `FileWrite` and `TestRun`, each stamped with an agent epoch. Judgments such as trusted, passed or red-then-green are computed from those facts when they are read. Both harnesses mint facts through one rule (INV-4):
+The evidence ledger (`<session>.evidence.jsonl`) holds facts stamped with an agent epoch; judgments such as trusted, passed or red-then-green are computed from those facts when they are read. Both harnesses mint facts through one rule:
 
 ```text
 Claude PostToolUse/PostToolUseFailure payload ─ claudeToolCall ─┐
@@ -258,23 +293,13 @@ Claude PostToolUse/PostToolUseFailure payload ─ claudeToolCall ─┐
 Pi child tool_result event ─ piToolCall ────────────────────────┘
 ```
 
-- **Pure parts.** `core/harness-tool-call.ts` holds the two pure adapters. They reduce each harness's event to one `HarnessToolCall`: the tool, its input, its outcome (failed, exit, stdout, interrupted), the call id and the cwd. Claude Code's current Bash payloads carry no exit field. A PostToolUse Bash success is exit 0, unless the harness reinterpreted a non-zero exit (`returnCodeInterpretation`, as for a `grep` that matched nothing) or the call ran in the background; an explicit exit field is honoured when present. A PostToolUseFailure `error` starts `Exit code N`, and a timeout or an interrupt is a kill. Pi uses `details.exitCode` when it is an integer, and otherwise reads `isError` as exit 1 or 0. `machine/extract-evidence.ts` turns that call into facts. Its rules cover command classification and exit ownership. The shell write targets it mints come from `core/shell-write-targets.ts`, the evidence twin of the guard's redirect scanner: redirects, `tee`, and the destinations of a literal `mv`, `git mv` or `cp`. A device stream (`/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/tty`, `/dev/fd/<n>`) is never a target, so `cmd 2>/dev/null` mints no FileWrite (`isDeviceStreamPath`; absolute paths only, normalized lexically; other paths under `/dev` such as `/dev/shm` stay targets).
-- **The shell.** `machine/tool-evidence-recorder.ts` is the only production caller of `extractEvidence` and of the ledger append. It does three things:
-  - it runs report discovery, which applies the call-start freshness stamp and the agent-authored-artifact veto;
-  - it resolves `FileWrite` paths against the call's cwd;
-  - it appends to the target ledger under the target epoch.
-- **Per-file results.** A `TestRun` report summary (`TestReportSummary`) always carries the per-file results its structured report lists, `unrecorded` for a pre-feature line. `parseReportSummary` is the only constructor of a summary (INV-8), and it reconciles those results with the counts. When a ledger record's per-file data is malformed, the whole report reads as untrusted. The strict byte parser behind completion checks and remediation yields `ReportCounts` instead, counts alone from `parseReportCounts`, so it can never stand as a TestRun report.
-- **Targets.** Claude Code records into its own session ledger under the epoch that attribution resolves. A Pi child records into the parent session's ledger under `epochOf(grant agent id, agent type)`, the address its parent-issued grant carries. One child process is one agent, so attribution on Pi is exact by construction.
-
-A matrix test feeds the same tool-call fixtures through both adapters and asserts identical records. Consumers read the ledger only through epoch folds:
-- the SubagentStop test-result resolver;
-- I6 settlement (`judgeRedThenGreen`, whose classification also names the implementation files the Task creates by its first `artifact_baseline`, `createdImplementationFiles`, so a test that cannot yet load a module the Task creates is red: FR-007a);
-- the stop checks' changed files (`changedFilesAtStop`, INV-7);
-- `helper stop-check-plan`.
+The fact kinds, the minting rules, the trust judgment, attribution and the ledger's known limits are described once, in [Guarded Skill Machines](../machines/README.md#the-evidence-ledger). The decision is [ADR-0027](adr/ADR-0027-pi-ledger-capture-through-one-shared-minting-rule.md).
 
 ## Review authority model
 
 A review Finding is identified by Agent plus emission ordinal, never by model-supplied id. A Task implementation write increments its Review Generation. A Review Packet binds that generation to exact base/head revisions, exact path scope, diffs, postimage bytes, plan context, and proof obligations. Artifacts are files: a scoped directory is reviewed through its Git-visible leaves at either revision (deleted leaves included, ignored files excluded, symlinks by target), and every scoped path must cover at least one artifact.
+
+The protected graph records an engine-issued packet registration atomically with Review Run creation. A packet's self-hashes prove integrity; the registration proves issuance. A caller-authored file with recomputed hashes is not authority.
 
 A Review Run freezes:
 
@@ -285,7 +310,7 @@ A Review Run freezes:
 
 A Wave Task's roster is derived, never configured: `waveTaskReviewRoster` (`core/wave-review-authority.ts`) answers the base five, or the six with `architecture-tech-lead` appended last when the Task's review carries the architecture lens. `ArchitectureLensReasons` (`core/agent-catalog-projections.ts`) is the closed record of why: the Task's packets carry the owner map (ADR-0047), or the Task writes an Acceptance Contract's types file (ADR-0069). Each reason is also a fixed, digest-bound packet section rendered from the same derivation, so a section and the roster cannot disagree: `owner-map` for code-reviewer and architecture-tech-lead, `contract-surface` (`core/contract-surface-section.ts`) for type-design-analyzer and architecture-tech-lead. Both are schema-2 only and leave every other packet byte-identical. The derivation reads one persisted value: a Review Run already installed with the roster the Task has without the contract-surface reason keeps it.
 
-Every expected reviewer must assess every prior Finding exactly once before finalization. A `still_present` assessment keeps it active. A Finding becomes **resolved** only when the complete roster verifies remediation. A Finding becomes **refuted** only through adjudication (or an audited manual override); refutation is not resolution.
+Every expected reviewer must assess every prior Finding exactly once before finalization. A `still_present` assessment keeps it active. A Finding becomes **resolved** only when the complete roster verifies remediation. A Finding becomes **refuted** only through adjudication (or an audited manual override); refutation is not resolution. Finalization is atomic: old Findings resolve and new Findings activate together, or neither change occurs. The user-facing rules are in [Workflows](workflows.md#wave-gate).
 
 ### Plan design review
 
@@ -297,68 +322,26 @@ The architecture plan is design-reviewed before decompose ([ADR-0070](adr/ADR-00
 
 The coupling runs one way. The gate reads a digest from the State File and never opens a Run Directory; the Run never reads the State File.
 
-## Standalone lineage and publication (P5)
+### Standalone lineage
 
-P4 merged/reloaded; P5 is feature-worktree implementation with final validation,
-registered review and publication pending. [ADR-0010](adr/ADR-0010-standalone-finding-lineage.md)
-records the selected design and [operations](operations.md#standalone-lineage-p5)
-provides exact input, limits and the admitted-main bootstrap restriction.
+A standalone review reuses per-role Finding ordinals, so two independent reviews cannot share identity by id or similarity. Lineage makes the join explicit ([ADR-0010](adr/ADR-0010-standalone-finding-lineage.md)):
 
-The pure core separates prepared data, issued request membership, admitted evidence,
-complete roster proof and published result authority, concentrated in the cohesive
-`standalone-review.ts` aggregate owner. Self-hashes never substitute
-for independent publication. Shell shared computation has three named lower owners:
-`program-result.ts` owns the ProgramParse/FacadeDriveResult vocabulary and the closed
-`FacadeAction` union every driver emits (type-only imports, never a driver or parser),
-`standalone-evidence.ts` owns checkpoint-independent evidence, source observation and
-refutation replay, and `standalone-disposition-source.ts` owns bounded published
-advisory revision authentication. `standalone-source.ts`, `standalone.ts` and
-`standalone-disposition.ts` retain the per-program drivers and source authentication
-and consume those lower volumes instead of importing each other upward. Per-program
-drivers remain distinct (ADR-0005), and the
-façade exports real parent operations rather than every internal parser (ADR-0007).
+- **Advisory publication.** The `standalone-disposition` program records the parent's complete ordered accepted, deferred and dismissed decisions immediately, without Agents. The policy is declared, not observed; a correction names the exact earlier publication.
+- **Successor review.** An explicitly selected successor joins one exact predecessor result and policy revision, keeps its scope and roles, freezes source bytes, modes and absence, and conserves every original Finding with its id, assertion, severity, evidence and votes. Every current reviewer assesses every origin. Only new criticals and an evidence-bound reopening reach a fresh Refutation Panel; an unchanged upheld blocker stays active without re-adjudication.
+- **One reducer.** The existing standalone review reducer admits the successor's assessments; there is no second lifecycle. A current origin binds its Run, request, transcript and ordinal and takes its result identity from the enclosing publication, which avoids a self-digest cycle.
 
-A no-agent publisher records the full ordered advisory policy immediately, with
-DECLARED provenance and immutable correction/import history. An explicit successor
-joins one exact predecessor result and policy revision, preserves scope/roles,
-freezes source bytes/modes/absence, and conserves every original Finding Origin.
-Historical unknown observations remain unknown; missing current publication refuses.
-Current origins bind Run/request/transcript/ordinal and acquire their original result
-identity from enclosing publication downstream, avoiding a self-digest cycle.
+In the shell, three lower modules hold what the per-program drivers share, so the drivers never import each other: `program-result.ts` (the result vocabulary and the closed `FacadeAction` union every driver emits), `standalone-evidence.ts` (checkpoint-independent evidence, source observation and refutation replay) and `standalone-disposition-source.ts` (authentication of published advisory revisions). The drivers stay per program (ADR-0005), and the façade exports parent operations, not every internal parser (ADR-0007).
 
-The existing LC-2 reducer—not a second successor lifecycle—admits v3 ordered
-assessments from every current reviewer. All must identify repair/relevant changes
-for resolution. Refuted/resolved/policy-retired origins remain assessment obligations.
-Only new criticals and explicit evidence-bound critical reopening reach a fresh
-bound full panel; unchanged upheld blockers remain active without re-adjudication.
-Old IDs, high-water, assertion/severity/evidence and votes/reasons remain exact.
-Canonical counts distinguish new, inherited and current state; no fresh-panel-count
-or Repair-Checked shortcut can erase a blocker or critical coverage limitation.
+Lineage adds no automatic predecessor, branch join, similarity merge, severity override or review reuse, and a digest or a formally phrased claim is not semantic proof. Inputs, limits and commands: [operations](standalone-review.md#standalone-lineage).
 
-Claude/Pi native capture records real durable capture receipts; current replay cannot
-invent missing provenance. Pi adds current-only process witnesses with no older-Run
-fallback. Bounded reader projection and Read-only panel views expose frozen data,
-not independent authority. Fresh predecessor packet references retain exact original
-files rather than recursive copies; original bytes remain mandatory. Checkpoint-
-independent replay derives canonical JSON; published-source admission additionally
-requires the actual result bytes/receipt. P3 retains this **full exact v3 source**
-through unchanged schema-2 checks, candidate witnesses and guarded index installation.
+## Owner verification in the completion suite
 
-Independent standalone/Wave issuance stays v2. Issued v1/v2 initial/resume/retry and
-packet/result/receipt bytes remain under their original contracts. Pre-B4 development-
-only v3 panel transport changes are not historical v1/v2 migration. Resource limits
-are simultaneous boundary budgets, not an all-reads or whole-process heap proof.
-Formal wording/digests do not prove semantics; no formal planning tool, automatic
-previousRun, fork merge, similarity matching, severity override or review reuse is added.
-
-## Owner verification in the completion suite (G5b)
-
-Plan ownership declarations (G5a) become Wave Gate obligations through the existing Wave completion suite, not a new gate stage:
+A plan may declare that an Invariant is owned by one function, with the sibling entry points that must go through it. Those declarations become Wave Gate obligations through the existing Wave completion suite, not a new gate stage:
 
 ```text
 plan ─parsePlanModels─► obligationsFromInvariants (ownerObligationOf) ─► owner_obligations (stamped at population, [] included)
 Wave Gate ─ ensureWaveCompletionSuite ─ authorizeGraphCompletionSuite(graph, workspaceDigest)   (readiness calls the same)
-  ownerCheckAuthorityOf(waveOwnerDuty(graph, wave)) ── null (no stamp: pre-G5b graph) ──► suite roster and digest unchanged
+  ownerCheckAuthorityOf(waveOwnerDuty(graph, wave)) ── null (no stamp: older graph) ──► suite roster and digest unchanged
         │ non-null
         ▼
   authorizeWaveCompletionSuite(…, authority) ─► loom:owner-verification { obligationsDigest, owed }
@@ -372,13 +355,13 @@ Wave Gate ─ ensureWaveCompletionSuite ─ authorizeGraphCompletionSuite(graph,
   result.ownerVerification ─► evaluateWaveCompletionSuite ─► receipt or rejection
 ```
 
-- **One selection owner.** `core/owner-verification/obligations.ts` decides the Wave scope (`owesInWave`: the owner is due and a non-contract Task changed the owner or a sibling, G5a's `changesFamily`), the family schedule (`duePaths`, the paths sibling coverage requires by a Wave, and `firstOwingWave`, which population validation holds the matrix test to; ADR-0063), the touch scope (any role, for review packets and brief duties), the check authority, the drift check and which obligations owe mutation (`verifyOwed`). Callers never filter the raw stamp: they ask one of two duty entry points, `waveOwnerDuty(graph, wave)` (the owed obligations and the stamp digest; `ownerCheckAuthorityOf` derives its owner check and `stampAgreement` is its drift check, an absent stamp being drift) or `taskOwnerDuty(graph, fileList)` (the touched obligations), and each answers an absent stamp with its own `unstamped` variant, so the absent-versus-empty distinction is never re-encoded inline. An Owner Obligation is built only by `ownerObligationOf`, which the plan derivation and the State File parser share, and its Invariant is a branded `InvariantId`. Every caller is a declared INV-3 sibling with a row in `engine/tests/core/owner-obligations.matrix.test.ts`: `core/owner-verification/suite-authority.ts` (the one authorize-from-TaskGraph function, which the gate helper and readiness both call), `handlers/helpers/wave-completion-suite.ts` (the owed obligations the runner gets), `core/wave-completion-suite-readiness.ts`, `core/owner-verification/plan-integrity.ts` (`stampAgreement`), `state-file-wire.ts`, `orchestration/owner-verification-runner.ts` (through `verificationRuns` in `core/owner-verification/owed-verification.ts`) and `core/task-graph-population.ts` (`verifyOwed`), `core/wave-review-authority.ts` and `core/implementation-brief.ts` (`taskOwnerDuty`). The State File wire parse re-derives the check authority from the stamp on purpose, so a persisted receipt never certifies its own roster; the runner receives the `OwedVerification` the gate decided (`ownerObservationDecision`: the owed obligations with the authorized digest) instead of re-deriving it. `verification-manifest.ts` makes no ownership decision: its `owner` parameter is required, and it injects the check exactly when `suite-authority.ts` or the State File wire passes a non-null authority.
-- **Functional core, imperative shell.** Coverage, the mutation plan, outcome classification, the verdict, the plan-integrity check and the decision of what an owner check runs (`owed-verification.ts`) are pure functions in `core/owner-verification/`. All effects live in `orchestration/owner-verification-runner.ts` (file reads, tsconfig `paths` via `jsonc-parser`, Git base resolution, runner execution) and `orchestration/owner-mutation-workspace.ts` (worktree create, overlay of the reviewed workspace, `node_modules` symlinks, per-mutant rewrite and restore, removal in `finally`). The command is always the frozen `affectedRunner`'s, formed by `affectedRunnerCheck` with the matrix test as its only file; no command text comes from the plan.
-- **Fail closed.** `runOwnerVerification` never throws, by construction: every repository read is total (a file the filesystem refuses is `repository-file-unreadable`, never a missing sibling), the workspace observer and the obligation runs are guarded, and a throw that still escapes a step is the named `unexpected-error`, after which the real-workspace digest is still compared. The suite shell keeps a last-resort catch for the injected runner port with the same `unexpected-error` kind, and its own post-check digest comparison runs whatever the owner check returned. A throw from inside the isolated worktree (a failed owner restore, a runner step that throws) is rethrown by `withMutationWorkspace` (`orchestration/owner-mutation-workspace.ts`) after it removes the worktree; when the removal fails too, the rethrown error also names the leftover path. The runner's `mutationEvidence` catches that rethrow and turns it into the Invariant's `worktree-failed` infrastructure verdict, so the leftover path reaches the operator as data; only a throw that escapes every guarded step becomes `unexpected-error`. Every ambiguous observation (no report, unparseable report, nothing collected, an exit the report does not explain, a baseline timeout, a missing Wave base, a changed real workspace, an owner with syntax errors (`owner-unparseable`), a run whose every mutant only failed to collect (`no-valid-mutants`)) is infrastructure and never a kill. The pure verdict returns results that are not the plan's mutants as `plan-drift` data rather than throwing. A result whose only infrastructure failures are the owner check's is published as an attempt record beside the result slot, so a retry at the same workspace runs the check again.
-- **Receipt semantics unchanged.** The check is part of the suite digest, so receipt reuse, workspace binding, replay and status come from the existing suite. `checkWaveCompletionSuite` (`wave-gate-checks.ts`, run by `complete-wave-gate`) blocks on it without new code; both harnesses reach it through `programs/wave-gate.ts`.
-- **Review and brief.** `wave-review-authority.ts` appends the `owner-map` fixed section (`owner-map.ts`) to schema-2 code-reviewer and architecture-tech-lead packets of a Task that touches an owned family; it is inside the packet digest, and every other packet is byte-identical. The same owner-map presence picks the Task's Wave review roster (`waveTaskReviewRoster`): the base five plus architecture-tech-lead appended last, so the architecture reviewer is actually issued and the base reviewers' slot identities are unchanged (ADR-0047). `core/implementation-brief.ts` renders a stamped graph's ownership section from the stamp alone (each touched obligation's block, then its coverage and mutation duty or exemption, the coverage duty naming only the siblings due by the Task's Wave, and a contract Task told its stub owes nothing yet); only a pre-feature graph renders the plan's own blocks, with no duty (#134, ADR-0040). Standalone review builds no wave packet, so it never carries an owner map.
+- **One selection owner.** `core/owner-verification/obligations.ts` decides which obligations a Wave owes, the family schedule, which Tasks touch an owned family, and which obligations owe mutation. Callers never filter the raw stamp; they ask `waveOwnerDuty` or `taskOwnerDuty`, and each answers an absent stamp with its own variant, so "absent" and "empty" are never confused. Every caller is a row in `engine/tests/core/owner-obligations.matrix.test.ts` ([ADR-0032](adr/ADR-0032-owner-obligations-stamped-at-population-gate-fails-closed-on-drift.md), [ADR-0034](adr/ADR-0034-family-scope-keeps-changesfamily-selection-has-one-owner.md), [ADR-0063](adr/ADR-0063-owner-verification-follows-the-family-schedule.md)).
+- **Pure core, effects in two modules.** Coverage, the mutation plan, outcome classification, the verdict and the plan-integrity check are pure functions in `core/owner-verification/`. File reads, Git and runner execution live in `orchestration/owner-verification-runner.ts`; the isolated worktree lives in `orchestration/owner-mutation-workspace.ts`. The command is always the frozen `affectedRunner`'s, with the matrix test as its only file; no command text comes from the plan ([ADR-0035](adr/ADR-0035-sibling-coverage-is-direct-imports-closed-under-re-exports.md), [ADR-0036](adr/ADR-0036-deterministic-mutation-plan-over-changed-owner-lines.md), [ADR-0038](adr/ADR-0038-isolation-via-one-detached-worktree-per-invariant.md)).
+- **Fail closed.** The runner never throws: an unreadable file, a missing report, an unparseable owner, a missing Wave base and a changed real workspace are each a named infrastructure result, never a kill and never a pass ([ADR-0037](adr/ADR-0037-outcome-classification-reads-only-the-structured-report.md)).
+- **Receipt semantics unchanged.** The check is part of the suite digest, so receipt reuse, workspace binding, replay and status come from the existing suite ([ADR-0031](adr/ADR-0031-owner-verification-is-an-engine-reserved-completion-suite-check.md)).
+- **Review and brief.** A Task that touches an owned family gets the `owner-map` packet section and the sixth reviewer ([ADR-0039](adr/ADR-0039-the-second-copy-lens-is-an-engine-issued-packet-section.md), [ADR-0047](adr/ADR-0047-the-wave-review-roster-is-derived-per-task-from-owner-map-presence.md)), and its implementation brief states its coverage and mutation duty ([ADR-0040](adr/ADR-0040-brief-duties-and-status-projection.md)). A standalone review builds no Wave packet, so it never carries an owner map.
 
-Operator detail, status fields and remedies: [Operations — Owner verification](operations.md#owner-verification-blocks-a-wave-gate-g5b). Plan grammar and limits: `references/executable-models.md`.
+Operator detail, status fields and remedies: [operations](verification.md#owner-verification-blocks-a-wave-gate). Plan grammar: `references/executable-models.md`. Mechanics and limits: [Executable models: enforcement](executable-models-enforcement.md).
 
 ## Security and failure posture
 
@@ -387,16 +370,14 @@ Loom’s default is refusal when authority is incomplete or ambiguous:
 - guarded spawn routes fail closed on handler crashes;
 - Pi runtime/CLI version skew is rejected before Run Directory or TaskGraph mutation;
 - state and evidence paths are denied to arbitrary Bash writers;
-- decisions that probe a path through `utils/path-presence.ts` treat it as absent only on ENOENT: "present but unreadable" is its own answer, so an unreadable routing config, rule, run marker or agent definition refuses instead of reading as missing (moving the remaining raw `existsSync` checks onto it, with a lint ban, is tracked as G5a INV-1; `helper family-sites` counts what remains — 124 raw sites at the G5b base `626db7fb`, see [Operations](operations.md#measuring-second-sites-the-family-site-metric));
+- decisions that probe a path through `utils/path-presence.ts` treat it as absent only on ENOENT: "present but unreadable" is its own answer, so an unreadable routing config, rule, run marker or agent definition refuses instead of reading as missing (`helper family-sites` counts the raw `existsSync` checks that remain; see [operations](development.md#measuring-second-sites-the-family-site-metric));
 - a test command counts as evidence only at a real top-level position: a runner inside `$(…)`/`<(…)` never owns the line's exit or output;
 - Run Directory paths must be direct children and are accessed no-follow;
 - model and Skill bindings are explicit;
 - exact rosters reject missing, duplicate, foreign, and surplus results;
 - publication is batch-atomic where partial visibility would alter authority;
 - remediation excludes state/review evidence and installs only an audited temporary index;
-- legacy formats are isolated in a read-only archive rather than expanded in canonical parsers.
-
-Known limits are documented where they live: shell-text guarding cannot infer every multi-hop cwd construction; ledger-derived proof (I6) covers logged facts only, so a write that emits no ledger event, such as one by an interpreter, a generator or an unseen tool, is a silent hole, and shell writes are logged but cannot be vetoed ([Deterministic implementation, I6](deterministic-implementation.md#during-the-loop--put-the-oracle-inside-the-agents-iteration)); Claude’s evidence attribution stands down during ambiguous parallel activity; Pi RPC children support standard dialogs but not custom TUI components.
+- legacy formats are isolated in a read-only archive, not expanded in canonical parsers.
 
 ## Dependency direction
 
@@ -412,58 +393,45 @@ harness adapters and command runbooks
 
 `engine/src/core/` must not depend on Pi or Claude APIs. Every non-test file under `engine/src/core`, `machine`, `linter` and `parsers` is held to `no-io-in-pure-modules` unless the project config declares it a shell with the I/O it does, and `machine-purity.test.ts` proves the whole declared core's import closure stays pure. `core/` never imports `config.ts`: env-derived facts (protected directories, the task graph's presence) are resolved by the shells and passed in as domain values. Non-empty lists are proven, never asserted: `nonEmptyOf(head, ...tail)` and `nonEmpty(values)` (a `NonEmpty<T> | null` narrowing, so the empty case is an explicit branch) in `core/orchestration-contract/identity.ts` replace every `as NonEmpty` cast. The anchored no-follow filesystem primitives live in `utils/no-follow-fs.ts`, the lowest shell layer, so the machine shell, the protected state writer, the CLI and the orchestration adapters all import them inward. `no-cross-boundary-imports` governs every `engine/src` directory and top-level file (`requireGovernance`): a file no boundary names is a violation, so a new module states its dependency direction before it can hold code.
 
+## Guarantees and honest limits
+
+Loom uses models for judgment and code for authority. A model may design, implement, review, or argue that a Finding is wrong. It may not decide whether an exact roster is complete, whether evidence belongs to a request, whether a Wave may advance, or which files enter a commit. Prompt-only coordination drifts in predictable ways; each row below is one of them and the mechanism that replaced it.
+
+| Concern | Prompt-only failure | Deterministic authority |
+|---|---|---|
+| Task completion | Agent says “done” | Engine-derived proof obligations |
+| Tests | Transcript text looks green | Provenance-preserving ledger/structured evidence |
+| Review rerun | Old blocker omitted | Generation + packet + exact prior-id assessments |
+| Panel | Caller swaps or skips verdicts | Exact slots and complete-roster parser |
+| Retry | Parent improvises | Typed attempt-1/attempt-2 lifecycle |
+| Workflow order | Markdown sequence | Reducer state/event algebra |
+| Transcript persistence | Parent copies output | Harness captures exact bytes into fixed slots |
+| State writes | Agent edits JSON | Guard + StateManager + typed commit effect |
+| Run artifacts | Prompt chooses paths | Anchored fixed-layout RunDirHandle |
+| Git staging | Broad `git add` | Audited temporary index and witness recheck |
+| Security coverage | “We looked at everything” | Enumerated cells, settled ledger, refusals on publish |
+| Invariant | Reviewer remembers | Checkable lint rule or honest advisory prose |
+| Generated pipeline | Hand-wired drift | Fugue stamp + Loom integrity verification |
+
+The last two rows are the executable-models policy: a model in a plan either executes or it does not exist. A lifecycle is an imported reducer, a pipeline is generated code with an integrity stamp, and an invariant is either a lint rule loaded fail-closed or prose that says it is advisory ([Executable models: enforcement](executable-models-enforcement.md)).
+
+### Honest limits
+
+Determinism is scoped to what Loom can observe and own:
+
+- semantic design/review correctness still depends on models and user judgment;
+- a tool call with no `agent_id` cannot be attributed in a contended session, so it is neither recorded nor gated; Pi children run without the live phase gate, because Pi cannot name a tool call’s caller;
+- a legacy graph, whose Agents named no Task, may still attribute a result to the one executing Task (`inferSoleExecutingTask`), or on Pi to the first Task id in the parent's spawn prompt; such a guess settles only through the untrusted legacy resolution, which stores its evidence but leaves the Task pending for revalidation and reports the attribution as unproven, and it can never complete a Task, because completion requires engine-minted attempt authority;
+- report artifacts remain in an Agent-writable environment, with documented same-call forgery residuals; likewise a security sandbox receipt's nonce binds it to its artifact path but does not authenticate it against a hunter that writes the artifact itself, and a security ballot is bound to its issued verifier spawn, but against a subagent that evades the shell-string guard (on either harness) a verification run's capture file stays writable (no capture attestation backs it, so neither harness imports or counts such a slot; see [Running a security audit](./security-audit.md#honest-limits));
+- the shell guard judges command text, not an abstract Bash execution graph;
+- Pi's Interactive Phase Transport supports standard relayed dialogs but not `ctx.ui.custom()` components inside RPC children;
+- legacy readers remain for historical evidence but are frozen in `core/legacy-archive.ts`.
+
+These are documented boundaries, not silent claims of enforcement. The evidence ledger's own limits, including what red-then-green does not prove, are in [Guarded Skill Machines](../machines/README.md#known-residual-limits).
+
 ## Where to continue
 
 - User-visible lifecycle: [Workflows](workflows.md)
 - Persistence and recovery: [Operations](operations.md)
-- Enforcement details: [Deterministic core](deterministic-core.md)
-- Pi adapter: [Using Loom with Pi](pi-usage.md)
-- Architectural rationale: [ADR-0004](adr/ADR-0004-engine-owned-orchestration-automation.md)
-
-## Claude Code hook table
-
-Moved here from `commands/loom.md`, and completed from `hooks/hooks.json` and `engine/src/handler-routes.ts` (`KNOWN_HANDLERS`). Each shim under `hooks/scripts/` calls `bun engine/src/cli.ts <hook-type> <handler>`. The spawn gates, the direct-edit block and the state guard act only while a State File exists; the routes marked *fail-closed* block when the handler itself crashes (`FAIL_CLOSED_ROUTES`).
-
-| Hook shim | Event and matcher | Purpose |
-|---|---|---|
-| `validate-phase-order.sh` | PreToolUse: Task/Agent/subagent | Phase sequencing: refuses a phase agent whose prerequisite phase is incomplete, and the decompose spawn until the plan design review is accepted for the plan's current bytes (or skipped). *Fail-closed* |
-| `validate-task-execution.sh` | PreToolUse: Task/Agent/subagent | Expands an implementation brief marker; checks Wave and dependency order and path ownership; reclaims only policy-eligible reservations; writes skeletons; captures baselines; registers attempt and retry authority atomically. *Fail-closed* |
-| `validate-template-substitution.sh` | PreToolUse: Task/Agent/subagent | Refuses a prompt that still holds an unsubstituted `{variable}`. *Fail-closed* |
-| `validate-agent-model.sh` | PreToolUse: Task/Agent/subagent | Refuses a spawn whose model does not match the agent's LLM Profile. *Fail-closed* |
-| `validate-agent-skill.sh` | PreToolUse: Task/Agent/subagent | Refuses a spawn whose prompt does not name the agent's required skill. *Fail-closed* |
-| `block-direct-edits.sh` | PreToolUse: Edit, Write, MultiEdit | Keeps the orchestrator from editing; a phase agent writes only under its artifact roots, and an implementation agent only once its exact Implementation Attempt is bound (pending is a retriable block, refused a hard block). *Fail-closed* |
-| `enforce-phase-tools.sh` | PreToolUse: Edit, Write, MultiEdit | Guarded-skill machine: denies a tool the bound agent's phase does not allow. *Fail-closed* |
-| `guard-state-file.sh` | PreToolUse: Bash | Deny by default on guarded state paths: only read-only commands and the helpers in `WHITELISTED_HELPERS` (`core/guard-state-file.ts`) pass. Covers the task graph, subagent evidence and binding files, and machine definitions. *Fail-closed* |
-| `guard-subagent-authority.sh` | PreToolUse: Bash | A subagent may not change audit or orchestration authority (ADR-0067 D6). *Fail-closed* |
-| `rules-gate.sh` | PreToolUse: Edit, Write, MultiEdit, Bash | Blocks code edits until the Loom rules and skills are in the model's context and adherence is stated. *Fail-closed* |
-| `mark-subagent-active.sh` | SubagentStart | Tracks active subagents and binds the guarded-skill machine; binds an implementation agent's exact attempt when its prompt is already on disk, else leaves it pending |
-| `record-evidence.sh` | PostToolUse: Read, Edit, Write, MultiEdit, Bash; PostToolUseFailure: Bash | Appends epoch-stamped facts (file reads, file writes, test runs) to the evidence ledger |
-| `lint-file.sh` | PostToolUse: Edit, Write, MultiEdit | Immediate-tier lint: regex rules plus the immediate-tier programmatic rules; the full tier runs at the Wave Gate |
-| `type-diagnostics.sh` | PostToolUse: Edit, Write, MultiEdit | Runs the project's incremental type check after a TypeScript edit and reports what no longer typechecks. Advisory; never blocks |
-| `record-orchestration-spawn.sh` | PostToolUse: Task/Agent | Binds an engine-issued request id to the harness's child agent id |
-| `surface-stop-check-notes.sh` | PostToolUse: Task/Agent | Hands the orchestrating session the stop-check notes its agents left |
-| `cleanup-stale-subagents.sh` | SessionStart | Sweeps stale subagent tracking and binding files |
-| `resume-after-clear.sh` | SessionStart: clear | Restores the `/loom` execution context after `/clear` |
-| `dispatch.sh` | SubagentStop | Routes by agent type to the handlers below (`engine/src/handlers/subagent-stop/`) |
-| ↳ `capture-orchestration-result` | via dispatch, first | Request-bound capture of an engine-issued agent's result into its Run Directory |
-| ↳ `advance-phase` | via dispatch | Advances `current_phase` once the phase's artifact is on disk, and records `spec_file` and `plan_file` |
-| ↳ `update-task-status` | via dispatch | Settles an implementation attempt: implemented, retry-required, escalation-required or infrastructure-blocked |
-| ↳ `store-reviewer-findings` | via dispatch | Parses review findings |
-| ↳ `store-spec-check-findings` | via dispatch | Parses spec-check findings |
-| ↳ `cleanup-subagent-flag` | via dispatch, always | Removes subagent tracking and machine bindings |
-
-## State File shape at initialization
-
-Moved here from `commands/loom.md`. `cli.ts init-state` writes `.claude/state/active_task_graph.json` before Phase 0, and the engine keeps it mode 444 at rest; hooks and whitelisted helpers write through `StateManager`. Nobody authors this file by hand.
-
-| Field | At `init-state` | Later |
-|---|---|---|
-| `current_phase` | `init`, or the first phase the skip flags leave | Advanced by `advance-phase`; `populate-task-graph` moves `decompose` to `execute` |
-| `phase_artifacts` | `{}` | One entry per completed phase |
-| `skipped_phases` | From the skip flags: `--skip-specify` adds `brainstorm`, `specify`, `clarify`; `--skip-plan-alignment` adds `plan-alignment` | Unchanged |
-| `plan_design_review` | `{"status":"required"}`, or `{"status":"not-required","reason":"skipped"}` with `--skip-plan-design-review` (a gate, so `skipped_phases` is unchanged) | Set to `accepted`, bound to the plan's bytes, only by `accept-plan-design-review` |
-| `spec_dir` | `.claude/specs/<date-slug>` | Unchanged |
-| `spec_file`, `plan_file` | `null` (`spec_file` is set at once with `--skip-specify`) | Recorded when the phase artifact appears |
-| `tasks`, `wave_gates` | `[]`, `{}` | Installed by `populate-task-graph` with `github_issue`, `current_wave` and `executing_tasks` |
-
-Task status moves `pending` → `implemented` (the exact attempt satisfies proof and the Task-local suite) → `completed` (its Wave Gate passed). A Task stays `pending` through an infrastructure block, through a failed attempt 1 (one attempt-2 retry is issued) and through a failed attempt 2 (status then publishes a terminal escalation; there is no attempt 3).
+- Pi: [Using Loom with Pi](pi-usage.md) and [Pi adapter](pi-adapter.md)
+- Architectural rationale: [ADR-0004](adr/ADR-0004-engine-owned-orchestration-automation.md) and the [ADR index](adr/README.md)

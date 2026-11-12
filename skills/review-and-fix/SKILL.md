@@ -75,7 +75,7 @@ required Skill, task text and `LOOM_REQUEST_ID`; on Pi send at most eight
 requests per subagent call. Claude Code and Pi capture each reviewer's final
 bytes themselves. On another harness, hand them to the engine with
 `helper orchestration submit`
-([operations: read coverage](../../docs/operations.md#read-coverage-reviewer-protocol-v4)).
+([operations: read coverage](../../docs/standalone-review.md#read-coverage-reviewer-protocol-v4)).
 Then resume until `done`:
 
 ```bash
@@ -103,7 +103,7 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration inspect \
 ```
 
 A successor review is never automatic. If the user asks for one, follow
-[operations: explicit successor review](../../docs/operations.md#explicit-successor-review).
+[operations: explicit successor review](../../docs/standalone-review.md#explicit-successor-review).
 
 ## Phase 2 — Plan
 
@@ -174,7 +174,7 @@ exact repeat is idempotent, and if it is interrupted, `resume` finishes it
 without re-triage. A record with no receipt is not published. To correct a
 published decision, or to import one recorded before this program existed, use
 the revision shapes in
-[operations: immediate advisory publication](../../docs/operations.md#immediate-advisory-publication).
+[operations: immediate advisory publication](../../docs/standalone-review.md#immediate-advisory-publication).
 
 If no code or documentation fix remains, report the published decisions and
 stop. Zero surviving criticals need no remediation check, but a remediation
@@ -352,7 +352,7 @@ path it cannot reset safely fails before launch with
 exit, more than zero executed tests, zero failures, and an unchanged candidate.
 Several groups may select one check ID; it runs once. Enrollment and the report
 limits are in
-[operations: enrolling a critical-repair check](../../docs/operations.md#enrolling-a-critical-repair-check).
+[operations: enrolling a critical-repair check](../../docs/verification.md#enrolling-a-critical-repair-check).
 
 The engine audits the dirty paths, stages them in a temporary index and
 installs the verified index. Do not stage anything yourself, and never pass

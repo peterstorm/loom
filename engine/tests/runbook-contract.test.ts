@@ -320,7 +320,7 @@ describe("G2 skeleton prose ↔ the skeleton engine", () => {
     read("CONTEXT.md"),
     read("docs", "contexts", "acceptance-contracts", "CONTEXT.md"),
   ].join("\n");
-  const operations = read("docs", "operations.md");
+  const verification = read("docs", "verification.md");
   const loomRunbook = read("commands", "loom.md");
 
   /** Rule 12 of the decompose template, from its heading to the next rule. */
@@ -417,7 +417,7 @@ describe("G2 skeleton prose ↔ the skeleton engine", () => {
     expect(context).toMatch(new RegExp(`^\\*\\*${term}\\*\\*:\\n\\S`, "m"));
   });
 
-  it("operations documents every skeleton outcome in the engine's exact wording", () => {
+  it("the verification guide documents every skeleton outcome in the engine's exact wording", () => {
     const outcomes: readonly SkeletonOutcome[] = [
       { kind: "skeleton-written", origin: "spawn" },
       { kind: "no-bound-exports" },
@@ -426,10 +426,10 @@ describe("G2 skeleton prose ↔ the skeleton engine", () => {
       { kind: "exists-not-skeletonized" },
       { kind: "absent-no-skeleton-owed" },
     ];
-    const missing = outcomes.map(renderSkeletonOutcome).filter((wording) => !operations.includes(wording));
-    expect(missing, `docs/operations.md never shows: ${missing.join(", ")}`).toEqual([]);
-    expect(operations).toContain("stale against revised contract");
-    expect(operations).toContain("declared-artifact-contract-violated");
+    const missing = outcomes.map(renderSkeletonOutcome).filter((wording) => !verification.includes(wording));
+    expect(missing, `docs/verification.md never shows: ${missing.join(", ")}`).toEqual([]);
+    expect(verification).toContain("stale against revised contract");
+    expect(verification).toContain("declared-artifact-contract-violated");
   });
 
   it("the loom runbook's execute loop names the skeleton outcomes and the skeleton-bindings-unresolved blocker", () => {

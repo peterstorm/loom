@@ -410,10 +410,10 @@ describe("Pi spawn input parsing", () => {
 });
 
 describe("exhaustive Loom agent policy", () => {
-  it("covers every agents/*.md definition except README and no invented agent", () => {
+  it("covers every agents/*.md file, each an Agent definition, and no invented agent", () => {
     const testDir = dirname(fileURLToPath(import.meta.url));
     const discovered = readdirSync(join(testDir, "../../../agents"))
-      .filter((name) => name.endsWith(".md") && name !== "README.md")
+      .filter((name) => name.endsWith(".md"))
       .map((name) => name.slice(0, -".md".length))
       .sort();
 

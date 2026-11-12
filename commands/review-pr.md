@@ -146,7 +146,7 @@ or a publication failure is blocked evidence, not partial success.
 
 A successor review is never automatic, and there is no slash flag for one. If
 the user asks for one, follow
-[operations: explicit successor review](../docs/operations.md#explicit-successor-review).
+[operations: explicit successor review](../docs/standalone-review.md#explicit-successor-review).
 
 ## Examples
 

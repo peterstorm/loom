@@ -1,10 +1,17 @@
-# Operating and developing Loom
+# Operating Loom
 
-This guide covers status, persisted artifacts, recovery, validation, and contributor commands. For lifecycle semantics, read [Workflows](workflows.md); for module boundaries, read [Architecture](architecture.md).
+This guide covers status, the Run Directory protocol, protected state, the rules gate, and what to do when an orchestration stops. For lifecycle semantics, read [Workflows](workflows.md); for module boundaries, read [Architecture](architecture.md).
+
+| For | Read |
+|---|---|
+| Read-only helpers that print what the engine knows | [Helpers](reference/helpers.md#read-only-helpers) |
+| The verification manifest, stop checks, owner verification, the distill pass, Acceptance Contracts and skeletons | [Verification](verification.md#verification) |
+| The reviewer protocol, standalone lineage, the plan design review and remediation | [Standalone review](standalone-review.md#standalone-review-and-the-reviewer-protocol) |
+| Validating and changing Loom itself | [Development](development.md#developing-loom) |
 
 ## Prerequisites
 
-- Linux or macOS 13+ for the existing runtime (`/proc/self/fd` descriptor-relative authority on Linux; `O_NOFOLLOW_ANY` on macOS, with older Darwin kernels refused at startup). **Strict critical-remediation report reset works on both**: Linux unlinks through the retained parent descriptor; macOS re-proves the parent path (`O_NOFOLLOW_ANY` + identity) immediately before the unlink, refusing a planted symlink with ELOOP. Darwin retains the documented proof-to-use gap shared by every anchored leaf mutation. This does not change zero-critical remediation or Wave behavior.
+- Linux or macOS 13+. The runtime needs no-follow filesystem authority: `/proc/self/fd` descriptor-relative access on Linux, `O_NOFOLLOW_ANY` on macOS. An older Darwin kernel is refused at startup. Everything in these guides works on both, including the strict report reset before a critical-repair check ([how the two platforms do it](verification.md#enrolling-a-critical-repair-check)).
 - Bun (engine runtime and tests)
 - Git
 - Claude Code or Pi
@@ -12,18 +19,18 @@ This guide covers status, persisted artifacts, recovery, validation, and contrib
 
 Run commands from the repository being orchestrated unless a command explicitly changes into Loom’s `engine/` directory.
 
+**The CLI path.** Every command in these guides is written `bun "$LOOM_DIR/engine/src/cli.ts" helper …`. `LOOM_DIR` is the root of the Loom package the harness loaded. The Loom commands set it with `LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"`: Claude Code substitutes `${CLAUDE_PLUGIN_ROOT}` in command source, and under Pi the rendered resources replace that token and export `LOOM_PLUGIN_ROOT` for diagnostics. In your own shell, set `LOOM_DIR` to that package root, or to the checkout when you work in Loom's own repository.
+
 ## Canonical status
 
 Prefer the engine-derived status over hand-written `jq` readiness checks:
 
 ```bash
-bun "$LOOM_PLUGIN_ROOT/engine/src/cli.ts" helper orchestration status \
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration status \
   --runs-root ".claude/reviews/wave-gate-runs"
-bun "$LOOM_PLUGIN_ROOT/engine/src/cli.ts" helper orchestration status --json \
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration status --json \
   --runs-root ".claude/reviews/wave-gate-runs"
 ```
-
-Under Claude Code, command source uses `${CLAUDE_PLUGIN_ROOT}`; under Pi, rendered resources replace that token and export `LOOM_PLUGIN_ROOT` for diagnostics.
 
 Both renderers project one `LoomStatus` value. Status reports:
 
@@ -32,7 +39,7 @@ Both renderers project one `LoomStatus` value. Status reports:
 - failed proof obligations;
 - test readiness;
 - Wave completion-suite outcome and independent `projectVerificationCoverage`;
-- owner verification per owned Invariant, when the latest completion result ran it (coverage, mutant counts or the exemption, the time bound; see [Owner verification](#owner-verification-blocks-a-wave-gate-g5b));
+- owner verification per owned Invariant, when the latest completion result ran it (coverage, mutant counts or the exemption, the time bound; see [Owner verification](verification.md#owner-verification-blocks-a-wave-gate));
 - Review Run roster gaps and evidence failures;
 - active/advisory/resolved/refuted Finding counts;
 - whether a Refutation Panel is needed;
@@ -69,6 +76,8 @@ Typical roots:
 
 Create the exact root and a fresh `run.*` child. Never reuse a completed or blocked run.
 
+`helper orchestration start` resolves `--runs-root` and fails if it does not exist. It never creates the root, so a mistyped root cannot grow a second tree of runs. It then creates the run's own directory under that root, and tolerates one that is already there, which is why `mktemp -d` under the root also works.
+
 ### Registered program protocol
 
 ```bash
@@ -89,27 +98,9 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration decide \
 
 The façade also exposes `submit` and `correlate` for transport integration and compatibility. Normal Pi and Claude Code operation records native correlations and captures final bytes automatically, through the same mechanism on both harnesses: every `spawn-batch` (and every `done` with a `result.json`) the façade returns is first published as a **session run binding** — a registry file `<session-id>.orchestration-runs.json` under `LOOM_SUBAGENT_DIR` (default `/tmp/claude-subagents`) naming the run and the request ids it issued, stamped with the harness that owns the session. On Pi the session is `PI_SESSION_ID` (with `PI_CODING_AGENT=true`); on Claude Code it is `CLAUDE_CODE_SESSION_ID` (with `CLAUDECODE=1`), which Claude Code exposes to the main agent's Bash commands. A missing session id under either harness withholds the spawn batch with an error rather than issuing requests nobody could capture.
 
-The harness side reads the binding back by its own session id, and a registry stamped with the other harness is refused. Pi's extension resolves the run from the request markers in its spawn batch. On Claude Code, hook payloads carry the PARENT session's `session_id` for subagents too: PostToolUse on `Agent` records the native `agent_id` against the one binding that issued the prompt's `LOOM_REQUEST_ID`, and SubagentStop captures into the bound run whose correlator records that `agent_id`. Because a foreground Agent call finishes before it returns, its SubagentStop can precede that PostToolUse; the stop then records the same correlator from the agent's own spawn prompt (the transcript's opening message) before capturing. Claude Code subagents that finish with `SubagentHandback` are captured from that call's `message`. An agent no binding claims is left alone; a marker no binding (or several) issued, an unreadable registry, or a correlator in several runs is a hook error, never silent passthrough. `LOOM_ORCHESTRATION_RUNS_ROOT` and `LOOM_ORCHESTRATION_RUN_DIR`, when set, take precedence and pin the hooks to that one run (both or neither). `complete` remains a compatibility adapter for historical panel callers; deterministic operations are executed internally in new façade runs.
+The harness side reads the binding back by its own session id, and a registry stamped with the other harness is refused. Pi's extension resolves the run from the request markers in its spawn batch. On Claude Code, hook payloads carry the parent session's `session_id` for subagents too: PostToolUse on `Agent` records the native `agent_id` against the one binding that issued the prompt's `LOOM_REQUEST_ID`, and SubagentStop captures into the bound run whose correlator records that `agent_id`. Because a foreground Agent call finishes before it returns, its SubagentStop can precede that PostToolUse; the stop then records the same correlator from the agent's own spawn prompt (the transcript's opening message) before capturing. Claude Code subagents that finish with `SubagentHandback` are captured from that call's `message`. An agent no binding claims is left alone; a marker no binding (or several) issued, an unreadable registry, or a correlator in several runs is a hook error, never silent passthrough. `LOOM_ORCHESTRATION_RUNS_ROOT` and `LOOM_ORCHESTRATION_RUN_DIR`, when set, take precedence and pin the hooks to that one run (both or neither). `complete` remains a compatibility adapter for historical panel callers; deterministic operations are executed internally in new façade runs.
 
-### Inspecting one run
-
-`status` answers “where is the graph”; `inspect` answers “what state is this run in, and is it recoverable or stale?”. It is a pure read — it advances nothing.
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration inspect \
-  --runs-root <root> --run <run-directory> [--json]
-```
-
-It reports the registered program, the machine state read through that program’s own checkpoint shape, every issued slot with its attempt, capture status and the diagnostic that refused it, the event tail, and any abandonment marker. Facts it cannot read are reported as `unavailable` with the cause, never defaulted — so an unreadable checkpoint is distinguishable from a run that never wrote one. Prefer it over hand-reading `authority.json`, `program.json`, `checkpoint.json`, and `events/`. Like `status`, it stays available during a Pi runtime-revision skew, because it is exactly what diagnosing that skew needs.
-
-For standalone review, `inspect` calls `inspectStandaloneFacade`, re-proving
-independent registration, issued protocol, publication, checkpoint and actual
-result/receipt bytes. Only an authenticated done result gets
-`renderStandaloneReviewSummary`: emitted/admitted counts, after-refutation counts,
-and escaped rows with IDs, reviewers, locations, claims and full current
-basis/reason. The canonical result is `result.json` at the Run Directory root,
-not `artifacts/result.json`. JSON inspection retains its existing shape; no
-summary artifact or model-authored arithmetic becomes authority.
+To see what state one run is in, and whether it is recoverable or stale, use [`helper orchestration inspect`](reference/helpers.md#inspecting-one-run). It is a pure read.
 
 ### Retiring a superseded run
 
@@ -135,438 +126,6 @@ When the abandoned Run owns the matching protected Wave Gate, the same command a
 
 Pi’s native subagent transport accepts at most eight requests per call. Partition a larger engine-issued batch into ordered chunks of at most eight without changing any request. Resume only after all chunks finish.
 
-## Reviewer Protocol v2
-
-**P4 status:** merged as `96153ed` on 2026-09-10; publication and loaded-runtime
-reload were verified. See [ADR-0009](adr/ADR-0009-versioned-reviewer-protocol.md).
-P5 successor contracts are merged (PR #51) with review and remediation
-complete; publication and the /reload cutover happen after merge; see
-[Standalone lineage](#standalone-lineage-p5).
-
-Fresh independent standalone/Wave registrations select v2 internally. There is no
-independent-review protocol flag; only the explicit P5 successor input selects v3. Every reviewer reads the issued Context Packet first: its independent
-registration/publication joins, exact `reviewer-payload-schema` and
-`reviewer-impact-rubric` bytes select admission, never output sniffing. Emit exactly
-one JSON object with `findings`, no fences, narrative, Machine Summary, tallies,
-new IDs, or second lifecycle object. Wave additionally echoes issued packetId and
-generation and assesses each prior ID exactly once in packet order. Empty findings
-is explicit success only with all issued prior obligations satisfied.
-
-A critical's six fields are claim plus basis evidence, violatedContract,
-consequence, truthConfidence, and severityRationale. Evidence may be reproduction
-or concrete execution trace; executing a repro is not universally required.
-Advisories require a concise reason; optional basis must be complete. Reviewer
-execution claims are not engine receipts. Blocking requires a concrete consequence
-to supported behavior, safety/authority, explicit acceptance/verification
-obligations, or safe operator use. Factual error, confidence, style, shallowness,
-or a missing test alone is insufficient. Filled fields prove neither truth,
-impact, reachability, execution, nor semantic test adequacy.
-
-Current admission rejects the whole response on malformed JSON, duplicate keys,
-missing basis, foreign location, wrong binding or incomplete prior roster. It
-creates no synthetic Finding or P3 obligation. Limits include 1,048,576 final UTF-8
-bytes, 32 containers, 128 new findings and 4,096 priors; these are semantic
-admission bounds, not pre-capture transcript limits. The shared orchestration
-`submit` CLI separately refuses raw stdin above 16 MiB before handler invocation,
-chunk concatenation, byte-array expansion, or durable capture. Accepted
-strings/order/duplicates remain exact; the engine attributes IDs and
-derives counts. Stored/refuted/resolved/panel/P3 records retain full basis.
-
-The existing default three-lens panel, complete critical-ID coverage and strict
-majority are unchanged. It assesses assertions including their stated preconditions,
-contract and consequence. A true assertion is not refuted merely because repair
-seems unimportant. A surviving critical stays blocking. There is no automatic
-severity downgrade or new standalone severity-dispute authority. The old explicit
-Wave `helper store-review-findings` operator override (including `--dismiss-all`)
-is unchanged, separately audited, and **never automatic fallback** for failed
-reviewer evidence; an operator override does not prove an assertion false.
-
-Claude current reviewer stop captures exact final bytes then returns; registered
-resume owns Wave semantic settlement. Pi retains its native tool-call/index/agent
-and session-run capture binding and run-bound short-circuit. Neither routes current
-reviewers into legacy concatenation or CRITICAL_COUNT polling. Missing/ambiguous
-final output gets only the existing retry and terminal-blocks attempt 2; current
-transcript locator/read infrastructure failure stays unavailable without a semantic
-rejection tombstone. Missing/corrupt current registration cannot become legacy.
-
-### Read coverage (Reviewer Protocol v4)
-
-See [ADR-0022](adr/ADR-0022-engine-observed-standalone-read-coverage.md). Every
-fresh standalone review registers `readCoverage: loom-standalone-read-coverage v1`
-beside the unchanged v2 payload descriptor. A reviewer's result is admitted only
-after the engine itself observed that the reviewer was shown every unit of the
-scope's frozen diff. Issued v2 registrations without the policy, successor v3 and
-Wave Gate keep their exact admission.
-
-- **What must be read.** Each request's packet carries `standalone-frozen-diff`:
-  one unified diff per scoped file, from the review baseline (the merge base, or
-  HEAD) to the exact frozen bytes. Unchanged and binary files oblige nothing. The
-  issued task lists every obligated file with its unit and page counts under
-  `LOOM_READ_COVERAGE: every-frozen-diff-unit`.
-- **How to read it.** Append `--diff EXACT_SOURCE_PATH` to the task's
-  `LOOM_CONTEXT_READ_COMMAND`, then repeat with `--offset <nextOffset>` until
-  `nextOffset` is null. Pages are up to 12,000 units; other selections keep 4,096.
-  Run each reader call as its own command. A piped, filtered or truncated page
-  earns no credit.
-- **How it is verified.** At capture, the harness transcript's tool results are
-  checked line by line. Only exact reader pages whose text equals the frozen diff
-  at their range count. The verified ranges are written before the transcript to
-  `artifacts/read-coverage/<requestId>.json`, and the first observation of an
-  attempt is kept.
-- **When it refuses.** Resume and checkpoint-independent replay refuse a result
-  with any unread unit through the ordinary bounded retry, and the attempt-2 task
-  names every unread file and range. A capture without observed tool outputs also
-  refuses ("read coverage was not observed"). Attempt 2 failing terminal-blocks the
-  slot as before. Unreadable coverage evidence is infrastructure failure and
-  consumes no attempt.
-- **Budget.** A scope whose frozen diff exceeds 240,000 units is refused at
-  `start`, before anything is registered. Partition it into explicit `--files`
-  runs of at most that size. As a rule of thumb, keep each slice's `git diff`
-  under about 230 KB.
-- **Non-capturing harnesses.** `submit` accepts `--tool-outputs PATH`, a JSON array
-  of the delivered tool-output strings in order. It is verified exactly like a
-  native capture, and is refused for a Run without the policy. Claude Code and Pi
-  capture natively, so a parent on either harness never needs it.
-
-### Historical reviewer evidence
-
-Completed **and unfinished issued reviewer v1** runs keep their original protocol,
-normalization, synthetic-shortfall behavior, IDs, retries and result bytes.
-All seven reviewer tasks carry a concrete `LOOM_CONTEXT_READ_COMMAND`: a shell-quoted
-`bun` invocation of the admitted package's `scripts/read-context-packet.ts`, with
-the actual immutable `LOOM_CONTEXT_PATH` and expected request/digest/role/Skill.
-Run it with Claude `Bash` or Pi `bash`; no `readContextPacket` harness tool exists.
-The command first returns a bounded section index. Append `--section LABEL` to
-browse decoded sections or `--file EXACT_SOURCE_PATH` for frozen source text,
-then `--offset N --limit 4096` to continue. Fresh Wave v2 Task-reviewer packets
-carry one `wave-frozen-source` section built from the same dirty/untracked/absent
-artifact snapshot as `workspaceHeadSha`; spec-check packets do not receive source,
-and already-issued historical Wave packets remain byte-immutable. Each Task packet
-contains only that Task's declared/modified review scope. Text offsets count UTF-16
-units; index offsets count section entries (at most 32 per page). Section browsing
-omits source contents and binary/base64 fields while retaining binary/absent path,
-digest, and length metadata. Wave and standalone v1/v2 binary-file selection and
-any invalid UTF-8 fail; standalone v3 frozen source uses a binary representation
-for byte fidelity, but explicit `--file` selection returns it when fatal UTF-8
-decoding succeeds.
-The helper uses existing no-follow regular-file reads, fatal UTF-8, the packet
-parser and expected identity checks. Its 128 MiB input limit is a legacy
-v1/v2-selection ceiling (successor Context Packets are already bounded smaller
-by the protocol) and the 48 KiB output limit is a helper resource bound, not a
-change to protocol admission. Missing tools/paths,
-unsafe filesystem entries, invalid digests/identity or page bounds fail visibly.
-References remain data: no execution, network, frozen-file writes, Run/state/index
-mutation, or authority minting. Supplied expected IDs are not independent
-publication proof; that proof belongs to engine delivery. Both v1 and v2 use
-this helper without changing their frozen context bytes.
-
-Packet-first bootstrap delivers archived role plus shared fragment from
-`references/reviewer-protocol-v1/` at all four prefixes: initial publication,
-outstanding attempt-1 reissue, newly issued attempt 2, and already-published
-attempt-2 recovery, for standalone and registered Wave. Missing archive/authority
-fails visibly. Archives preserve baseline implementation instructions; old packets
-did not freeze a full rubric/persona, so these are not invented original Agent
-inputs. Nothing is appended to or rehashed into frozen old packets.
-
-This differs deliberately from ADR-0008: unfinished **remediation v1** remains
-refused. P3 can consume an opaque published review result v1 or v2, and P5 adds a deliberate
-v3 source arm retaining the full exact source JSON and complete lineage. It preserves
-original IDs, full basis and the original canonical result digest. Its selected
-operator checks, report freshness, accounting and installation authority are unchanged.
-
-The two completed historical goldens retain **90 exact logical files,
-20,250,407 bytes**, in two lossless gzip packs totaling **3,395,759 bytes**.
-Every decoded path/length/hash is independently checked against the unchanged
-original inventory. No receipt is newly authored and original anchoring metadata
-is untouched. Production pure parsers replay those bytes through in-memory
-resolvers: semantic/result-byte compatibility, **not relocated native filesystem
-admission**. Separate legitimate disposable fixtures exercise both native adapters,
-publication/reload/witness replay and actual P3 repair-check/index installation.
-Scripted basis is not a real product defect or semantic proof.
-
-### P4 implementation evidence limitations
-
-P4 B5's early inherited checkout-cwd CLI calls and mismatched fixture handshakes are
-not positive native evidence. Corrected tests use disposable cwd and explicit
-matching child-only runtime identity with `PI_CODING_AGENT:true`; final native/P3
-checks use the actual source loader and guarded fixture installation. The bounded
-scheduler-only yield in `machine-purity.test.ts` changes no audit assertion or
-capability grant. The normal root verify process-environment policy is unchanged
-and is not substituted for independently admitted native evidence.
-
-## Standalone lineage (P5)
-
-**Availability and bootstrap:** use these commands only when the loaded package's
-admitted Runtime Revision implements schema-v3 standalone lineage. Every mutating
-CLI must match that loaded revision; after installing or updating Loom, reload Pi
-(or restart the host) before mutation. A revision mismatch fails closed and is never
-permission to unset admission, switch a live session to unrelated checkout bytes,
-or retrofit an issued source review. Dated rollout evidence belongs in ADR-0010 and
-the remediation plans, not this operating contract.
-
-### Immediate advisory publication
-
-A completed standalone review has no advisory `await-user` stage. The parent
-triages autonomously under operator instructions and immediately publishes its
-complete decisions, even if no fix, remediation or successor will follow.
-This is a separate no-agent program; it does not adjudicate criticals or prove repairs.
-
-First obtain exact source identity and the **complete ordered** advisory inventory:
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration inspect \
-  --runs-root "<review-root>" --run "<completed-review-id>" --lineage
-```
-
-This emits JSON `kind: "standalone-lineage-source"`, `source`, `inventory`,
-`advisoryInventory`, `snapshot`, `reviewers`, `counts` and explicit `disposition`.
-Copy `source` unchanged. Each `advisoryInventory` row supplies `origin` and
-`findingId`; publication entries use the **origin digest**, not the local Finding ID.
-Copy every advisory in that order, including previously resolved or policy-retired
-advisories. Never derive origins or counts from prose, similarity or bare IDs.
-
-Prepare ordinary input JSON, not a registration/receipt/artifact, then invoke:
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration start standalone-disposition \
-  --runs-root "<policy-root>" --run "<fresh-policy-id>" < /path/to/declared-policy.json
-```
-
-Exact initial input shape (replace placeholders from inspection; expand entries to
-cover the entire inventory, or use `[]` only for an actually empty inventory):
-
-<!-- wire-example: standalone-disposition-start -->
-```json
-{
-  "source": {"locator":"/absolute/review-root/run.review","runId":"run.review","resultDigest":"<exact-result-sha256>"},
-  "record": {
-    "schemaVersion": 1,
-    "source": {"locator":"/absolute/review-root/run.review","runId":"run.review","resultDigest":"<exact-result-sha256>"},
-    "provenance": "DECLARED",
-    "revision": {"kind":"initial"},
-    "entries": [{"origin":"<inspection-origin-sha256>","decision":"accepted","reason":"Concrete evidence-based policy reason."}]
-  },
-  "previous": null
-}
-```
-
-`decision` is `accepted`, `deferred` or `dismissed`, with a non-empty reason.
-Source, full advisory coverage and selected revision authenticate before destination
-Run creation. The program checkpoints registered state, publishes `artifacts/disposition.json`,
-checkpoints artifact-published state, records its receipt, then writes the receipt-backed
-done checkpoint. `done.outcome.kind` is `standalone-disposition-published`;
-read `outcome.publication` (`locator`, `runId`, `dispositionDigest`), `record` and
-`receipt`. Exact repeat/resume is idempotent; conflicting bytes refuse. If interrupted,
-use ordinary `resume` on that Run: exact artifact/receipt facts reconstruct progress;
-a checkpoint cannot invent it. No Agent submission or user-decision action is needed.
-
-Corrections use a **fresh policy Run**, the same source and complete entries:
-`record.revision = {"kind":"correction","previousDigest":"<prior-disposition-sha256>"}`
-and `previous = {"locator":"/absolute/policy-root/run.prior","runId":"run.prior","dispositionDigest":"<same-prior-sha256>"}`.
-The prior record must already be published for that exact source. No in-place edit,
-automatic latest revision or branch join; explicit forks remain distinct.
-
-A present-day historical attestation uses `previous: null` and
-`record.revision = {"kind":"historical-import","proseReference":"<exact-retained-reference>","prose":"<exact retained prose text>"}`.
-Keep the original prose bytes/reference and explicitly map the complete advisory
-inventory; the engine does not infer IDs or decisions from prose. The resulting
-record is **DECLARED now**, not evidence that a historical decision was recorded then.
-Missing historical policy is `historical-decision-unavailable`, not a native empty
-record. An expected current record that is missing/corrupt is an error, never that
-historical-absence arm. Unselected inspection does not search for policy or prove
-that no published revision exists.
-
-Inspect one exact revision together with its source:
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration inspect \
-  --runs-root "<review-root>" --run "<completed-review-id>" --lineage \
-  --disposition "/absolute/policy-root/run.policy" \
-  --disposition-run "run.policy" --disposition-digest "<exact-disposition-sha256>"
-```
-
-All three policy flags are required together. The projection retains every selected
-revision/reason and Finding decision reference; it is not new authority.
-
-### Explicit successor review
-
-No slash-command successor flag or automatic `previousRun` exists. When a fresh
-successor review is explicitly wanted, supply the lower-level start input:
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration start standalone-review \
-  --runs-root "<successor-root>" --run "<fresh-successor-id>" < /path/to/successor.json
-```
-
-<!-- wire-example: standalone-review-start -->
-```json
-{
-  "schemaVersion": 3,
-  "kind": "all",
-  "files": ["src/example.ts", "tests/example.test.ts"],
-  "dryRun": false,
-  "successor": {
-    "source": {"locator":"/absolute/review-root/run.review","runId":"run.review","resultDigest":"<exact-result-sha256>"},
-    "disposition": {
-      "kind": "selected-record",
-      "publication": {"locator":"/absolute/policy-root/run.policy","runId":"run.policy","dispositionDigest":"<exact-disposition-sha256>"}
-    }
-  }
-}
-```
-
-The only alternate policy arm is explicit `{"kind":"historical-decision-unavailable"}`
-for genuinely unavailable historical policy—not fallback after selected-record failure.
-`files` must be non-empty, canonical, explicit and ordered; `dryRun` must be false.
-All predecessor paths and reviewer roles must remain; scope/roster may expand, never
-silently narrow. Include relevant dependencies/configuration/contracts explicitly.
-Role, model and request provenance remain separate; there is no live transitive
-source lane. Preflight refuses unsupported bounds/scope/roles before issuance.
-
-The engine observes exact source bytes, digest/length and normalized Git executable
-mode (`100644`/`100755`), or anchored-safe observed absence, before freezing both
-current attempts. Absence validates every extant parent without following symlinks.
-HEAD-derived commands are pinned to their captured revision. Identical porcelain-v2
-HEAD/index/worktree status witnesses bracket changed-path, additions, and reviewer
-selection derivation and remain stable across the final whole-scope stat/absence pass;
-any disagreement rejects before authority is encoded.
-Historical v1/v2 modes remain unknown (`null`); genuinely missing old source facts
-stay `historical-unknown`. Missing expected current source never becomes historical
-absence. Same HEAD is not byte equality; different HEAD is not repair. Deleted or
-renamed files keep the original Finding location and must not disappear from scope.
-
-Execute only returned requests, then `resume` as usual. Every current reviewer
-assesses **all** inherited origins exactly once in issued order: active, refuted,
-resolved and policy-retired. V3 final JSON contains `schemaVersion:3`,
-`kind:"standalone-successor-review"`, issued `lineageDigest`/`snapshotDigest`,
-`priorAssessments` and `findings` entries shaped as `{draft,relation}`. New drafts
-retain P4 v2 evidence; relations are `independent` or `distinct-related` with an
-exact prior origin and distinction. Reviewers never mint IDs or rewrite old claims.
-
-Resolution requires every expected reviewer to say `repaired`, give a reason and
-identify a relevant scoped implementation change against the same frozen snapshot.
-Known unchanged input cannot justify repair; unknown historical comparison is
-retained as unknown, not an observed change. `still-present` or `not-assessable`
-is valid evidence that prevents resolution; missing/duplicate/reordered/foreign or
-malformed rows refuse the entire response. Semantic rejection gets only attempt 2;
-infrastructure unavailability stays on the same attempt. No synthetic Finding.
-Repair-Checked, passing tests, hashes and formally phrased assertions are not
-semantic proof or automatic resolution.
-
-`retained` names an exact prior decision digest. `reopen` supplies the exact prior
-decision/refutation/resolution reference plus full new evidence, changed conditions
-or contradiction of the old reason, current applicability and evidence limits.
-Only **new criticals and explicit critical reopening** reach a fresh full bound
-Refutation Panel under the unchanged strict-majority rule. Already-upheld unchanged
-criticals stay active without a second panel. Original IDs, per-role ordinal
-high-water across retired history, assertion/severity/evidence, old votes/reasons
-and all generations remain. Advisory reopening never promotes severity; changed
-parent policy needs a later disposition publication. There is no parent critical
-override, similarity merge, multi-predecessor reconciliation or review reuse.
-Do not add another reviewer roster merely because remediation/rerun occurred.
-
-### Native delivery, replay and P3
-
-Claude and Pi capture exact correlated final bytes and durable
-`raw-transcript-captured` receipts at the native boundary. Missing/foreign receipts
-refuse; replay cannot manufacture provenance from raw files. If the native raw write
-succeeded but receipt recording failed, the current capture boundary can reconcile
-only a newly delivered **same native final** at the same semantic attempt. It must
-match the immutable write-ahead observation (request/context/correlator/payload origin)
-and exact already-written bytes. Missing observation, changed identity/bytes, a
-rejection or any existing/contradictory receipt refuses; ordinary already-receipted
-duplicates remain refused. Resume/replay alone cannot synthesize this recovery, and
-no additional Agent roster or semantic attempt is authorized. Retain the failure
-evidence; never hand-write an observation or receipt. Missing expected Run metadata
-is not recreated by native reads. Pi adds current-session process witnesses:
-the first exact standalone spawn binding selects the current Run for the root before
-capture, rejection never falls back, acceptance is idempotent and retires older
-witnesses, and shutdown prunes the session.
-
-Issued `LOOM_CONTEXT_READ_COMMAND` selects v3 with `--purpose standalone-successor`.
-Use bounded `--section`, `--file`, `--offset`/`--limit` pages, and explicit
-`--archive LABEL --archive-purpose v1-v2|standalone-successor` for predecessor packets.
-Fresh references retain exact original published packet bytes/path/length/digest;
-original files remain mandatory. Earlier frozen gzip encoding remains readable
-without recompression equality. Refutation verifiers have Read, not Bash, and receive
-a packet-bound `LOOM_CONTEXT_VIEW_PATH`; views are rechecked at delivery/capture,
-not result authority. See [native context instructions](standalone-successor-context.md).
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration inspect \
-  --runs-root "<successor-root>" --run "<successor-id>" --replay
-```
-
-Read-only replay returns `{"kind":"standalone-evidence-replay","digest":"...","json":"..."}`
-from exact registered CLI/native capture receipts, without trusting or rewriting
-that Run's result/checkpoint. It is not publication: normal source authentication
-also compares actual root `result.json` and its exact publication receipt.
-Human `inspect` derives **new vs inherited**, current dispositions and critical
-coverage from the canonical v3 result, never from parent arithmetic or panel counts.
-`--json` keeps the general inspection shape; `--lineage` is the complete source/policy
-projection. Neither results nor current origins contain their own result digest:
-current origins bind issued Run/request/transcript/ordinal; enclosing publication
-supplies result identity downstream. Contexts bind prepared lineage, not a future
-registration digest or future policy record.
-
-P3 consumes actual active `surviving_critical_findings`, never just new/panel work.
-Any limited current critical coverage blocks before checks/candidate/installable
-authority, even with zero active criticals. Full-coverage zero-critical sources use
-explicit `defectFamily:{"kind":"not-required"}`. V3 retains the entire byte-exact
-source JSON/digest, origins and histories through schema-2 remediation; no fabricated
-v2 source. Fixed operator checks, fresh reports, candidate bytes/modes, literal
-staging and guarded exact-index installation are unchanged. P3 does not rewrite
-source resolution status.
-
-### Resource and compatibility boundaries
-
-| Boundary | Limit |
-|---|---:|
-| Source regular file / aggregate raw bytes / paths | 512 KiB / 2 MiB / 4096 |
-| Prepared lineage + current source + predecessor-section payload | 4 MiB before packet byte arrays |
-| Canonical serialized successor packet | 16 MiB exact pre-issuance ceiling |
-| Retained predecessor-section payload | 2 MiB, at most 15 sections |
-| Exact predecessor packet observations | 64 MiB, charged to carried traversal allowance |
-| Individual retained context/registration/result/source read; start/submit stdin | 16 MiB |
-| Predecessor traversal | 64 Runs, cycle refusal; 64 MiB carried primary/artifact observations |
-| Origins / decisions per origin / retained review generations | 4096 / 64 / 64 |
-| Disposition revision chain / retained import prose | 64 revisions / 65,536 UTF-8 bytes |
-| Reviewer response / nesting / new drafts / prior rows | 1 MiB / 32 / 128 / 4096 |
-| Issued schema budgets (v2 / v3) | 12 KiB / 16 KiB |
-| Current reader packet / one archive expansion | 16 MiB / 16 MiB |
-| Reader page / index / encoded output | 4096 UTF-16 units / 32 entries / 48 KiB |
-| Current Claude transcript before decoding | 16 MiB |
-| Current Pi decoded transcript before adapter copying | 16 MiB text/key bytes, 65,536 values, depth 32 |
-| Current panel readable view | 16 MiB; 4096 UTF-16-unit display lines, never split inside a Unicode surrogate pair |
-
-Request reads also cap at 16 KiB/128 entries; captured slots at 128 with bounded
-per-slot enumeration. Native write-ahead observations cap at 16 KiB and are inert
-evidence, not capture receipts or replay authority. CLI submit and retained raw
-capture reads cap at 16 MiB; semantic admission still caps at 1 MiB. Disposition traversal has a separate 64 MiB read allowance.
-These simultaneous limits do not promise that all maxima fit together. Refuse,
-never truncate. They are **not** an all-reads cumulative, whole-Run or whole-process
-heap bound; JSON, byte arrays, repeated authenticated reads and native input can
-allocate more. Legacy reader ceiling remains 128 MiB; P3 report/journal budgets
-above remain unchanged.
-
-The representative owned seven-role Claude workload uses an explicit production
-path roster in `engine/tests/fixtures/standalone-native-workload.ts`, independent of
-Git dirty/index state. The test copies exact bytes and proves the same workload in
-staged and clean committed fixture states before actual native publication. The
-observed B5 focused run used 1,517,532 production bytes, 46 scope paths including
-three fixture paths, a 6,907,243-byte packet and 6,828,446-byte registration. This
-replaces the B4 dirty-tree-selected workload (1,506,719 bytes / 54 scope paths), not
-its historical evidence. These scripted measurements demonstrate representative
-capacity, not a live semantic review, every possible scope, a whole-heap bound or
-a final full-root timing guarantee. Final concurrent-code validation remains pending.
-
-Independent standalone and Wave issuance remain v2. V1/v2 initial publication,
-outstanding attempt 1, new attempt 2, already-published attempt-2 recovery and exact
-packet/result/receipt history remain under their issued contracts. P5's pre-B4
-**development-only v3 panel transport** changed before any live v3 publication;
-that is not a historical v1/v2 migration or permission to rewrite old packets.
-P5 adds no formal planning tooling, dual-snapshot execution or future-priority scope.
-
 ## Protected state rules
 
 Do not write `active_task_graph.json`, machine bindings, or evidence ledgers directly.
@@ -583,908 +142,6 @@ Protection is layered:
 
 If a helper says a direct write is blocked, use the named canonical operation; do not use `chmod`, output redirection, an interpreter, or path obfuscation to bypass it.
 
-## Common operating states
-
-### Task remains `pending`
-
-- If its Agent is still in `executing_tasks`, wait or diagnose a hang.
-- If the Agent crashed, SubagentStop/cleanup clears execution attribution; respawn the exact Task.
-- If proof is unsatisfied, inspect `proof.obligations` rather than trusting completion prose.
-- The settlement line (`Task T1 settlement: …` on Claude Code, `loom(pi): T1 settlement: …` on Pi) and the Task's `failure_reason` both say why a failed attempt was not implemented. A `task-byte-scope-violation` names the paths written outside the Task's declared files: the first 10, then `and N more`. Remove stray files that are not the Task's work, such as a killed test run's leftovers, before the retry, or that retry fails the same way.
-- An `infrastructure-blocked` settlement names each failure's own reason in parentheses (a longer reason is cut to its first 1,000 characters followed by `…`), for example `implementation-observation-unavailable (Claude JSONL transcript record 16 is malformed or truncated: …)`. A reason that repeats an earlier one is named once. Infrastructure blocks never use up the retry: fix the named cause, then dispatch what `orchestration status` lists.
-- Claude Code writes harness records into a subagent transcript beside the conversation: `attachment`, `system`, and request telemetry (`api-request`, `api-request-shape`, `api-request-blob`). An `api-request-blob` carries a copy of earlier turns, sometimes with a `system` role. Only `user` and `assistant` records are read as the agent's activity (`core/claude-record-kind.ts`). Harness records are accepted without reading their message and never count as written files, test output or tool results. A transcript that a strict check still refuses names the exact record in its reason.
-
-### Test evidence is missing or degraded
-
-The implementation Agent must run recognizable tests. For trusted Claude evidence, prefer a supported machine-readable report. A nonzero exit is trusted failure; a zero exit without an acceptable report may remain untrusted. Pi structured tool results retain their distinct provenance.
-
-Do not use `mark-tests-passed` to fabricate evidence. It is an evidence/status operation, not an escape hatch.
-
-### Task fails I6 (red-then-green)
-
-A Task owes I6 when it requires new tests, is neither an Acceptance Contract claimant nor a contract Task, and its TaskGraph was populated after I6 existed, which means its frozen manifest carries `testFiles`. A contract Task is exempt because it cannot satisfy I6: its contract Wave Gate requires every acceptance testcase it writes to be collected and failing, so those tests never go green in its attempt, and a test-only contract has no implementation file to write. The gate's observed red window is the contract Task's red evidence. Its Proof still owes `new-tests`, and its brief carries no I6 section. A Task that owes I6 settles `implemented` only when its attempt epoch's ledger shows three things in order:
-1. a qualifying red on one of its test files;
-2. then its first write to an implementation file;
-3. then a qualifying green covering every one of its test files.
-
-A qualifying run is a ledger `TestRun` with an exit code and a parsed structured report that records per-file results. The obligation, the gaps and the soundness limit are defined in [Deterministic implementation, I6](deterministic-implementation.md#during-the-loop--put-the-oracle-inside-the-agents-iteration).
-
-A failure reads `proof:red-then-green-unproven:<gap>` in the settlement line and in the retry receipt. Each gap points to a likely cause:
-
-- `no-test-files`: the `file_list` matches no frozen test suffix. Re-scope the Task, or declare `testFileSuffixes` in the manifest before the next population.
-- `implementation-write-missing`: the ledger holds no write to a non-test `file_list` entry. Either the agent wrote only through an unlogged path, such as an interpreter or a generator, or it wrote nothing.
-- `red-missing` or `green-missing` with `untrustedOnly: true`: tests ran, but no run was qualifying. Usual causes are a chained, piped or redirected command, a missing report option, or Pi-structured evidence with no ledger run. On Claude Code a failing run reaches the ledger only through the `PostToolUseFailure` hook; a runtime whose `hooks/hooks.json` predates that wiring records no red at all.
-- `red-missing` with `untrustedOnly: false`: qualifying runs exist, but none shows red on a Task test file. Either the tests never failed, or they only failed to collect in a Task that creates no implementation file. A collection or import error is red only when the Task creates an implementation file, meaning one whose Task-level `artifact_baseline` entry is `missing` (FR-007a). The brief names those files.
-- `red-after-first-implementation-write`: the code came before the failing test.
-
-The retry brief tells the agent to return its implementation files to the attempt baseline with one Bash call, observe red, and then implement. The call runs from the repository root and first checks that the baseline is a commit. The baseline is the Task's `start_sha`, or `HEAD` when none was recorded; the brief then says that the uncommitted changes are discarded. The call restores each file the baseline has (`git restore`) and deletes each file the Task created (`rm -f`). If the baseline is not a commit, it fails before changing anything. A `ledger-unavailable` gap, or an unreadable ledger at settlement, is infrastructure. It does not use up the semantic attempt.
-
-To see the facts settlement judged, numbered the way the gap and the stored evidence cite them, read the attempt's epoch (see [Reading an attempt's ledger epoch](#reading-an-attempts-ledger-epoch)). For the I6 judgment itself, use [`helper red-then-green-status`](#where-does-a-task-stand-on-i6).
-
-### Reading an attempt's ledger epoch
-
-Use this when an I6 result, or a `red #3` / `green #5` reference, needs checking against what the agent actually ran and wrote. The script prints one epoch of a session's evidence ledger, or lists the session's epochs. It runs in place from the repository:
-
-```bash
-# List the session's epochs, with each epoch's fact count.
-bun scripts/ledger-epoch.ts --session <session-id>
-
-# Print one attempt's facts, numbered as I6 settlement numbers them.
-bun scripts/ledger-epoch.ts --session <session-id> --agent <agent-id> --type <agent-type>
-```
-
-`--agent` and `--type` are given together or not at all. The session id is the Claude Code session that dispatched the Task (`CLAUDE_CODE_SESSION_ID` in the orchestrator's Bash commands).
-
-**Which epoch is the attempt's.** An epoch is `<agentId>:<agentType>`, the same identity settlement builds with `epochOf` when it judges the attempt. The agent id is the `agentId` of the Task's implementation-attempt sidecar (`<session>.<hex agent id>.implementation-attempt.json` in the subagent directory). The agent type is the subagent type the Task was dispatched with, without its plugin namespace: `loom:code-implementer-agent` is `code-implementer-agent`. The settlement line names the Task, not the agent, and cleanup removes the sidecar once the attempt settles. When neither is at hand, run the index form first: it prints each epoch in the order it first appears in the ledger, as `<agentId>:<agentType> — <n> fact(s)`, below a `<n> epoch(s)` header.
-
-**Positions.** The epoch view opens with `epoch <agentId>:<agentType> — <n> fact(s)` and prints one line per fact, `#<N> <Kind> …`. `N` is the fact's 0-based position in the epoch's ordered events, the same array settlement hands the I6 judge, so it is the number I6 evidence cites. If the evidence reads red `#3`, first write `#4`, green `#5`, those are lines `#3`, `#4` and `#5` here. Duplicate deliveries (the same `callId` and event recorded twice) are already dropped, exactly as settlement drops them, so the numbering never counts a fact twice. Records are printed as recorded. Nothing is reordered, escaped or truncated, and no `callId` is shown.
-
-**How each fact reads.**
-
-- `#N FileWrite <path> (via tool)` or `(via shell)`: a write through an edit tool, or one a shell command minted (such as `mv`, `cp` or a redirect).
-- `#N FileRead <path>`.
-- `#N TestRun <command>`, followed by indented detail lines:
-  - `exit <code>`, or `exit none recorded` when the ledger holds no exit code for the run;
-  - `no structured report` when no runner report was parsed for the run, or `report <source>: total <t>, failed <f>` when one was, followed by:
-    - `per-file results not recorded` when the report carries no per-file results;
-    - otherwise one line per test file, in report order: `<file>: executed <e>, failed <f>, skipped <s>`, with `, collection error` added when the file failed to collect. A report with an empty result list reads `no per-file results`.
-
-A run that reads `exit none recorded`, `no structured report` or `per-file results not recorded` is never a qualifying run, because a qualifying run needs an exit code and a parsed report with per-file results (see [Task fails I6](#task-fails-i6-red-then-green)). Such runs are what a `red-missing` or `green-missing` gap with `untrustedOnly: true` means: tests ran, but no run qualified. The view shows the facts; it does not mark which runs qualify.
-
-**Where the ledger is.** The script reads `$LOOM_SUBAGENT_DIR/<session>.evidence.jsonl`, with `LOOM_SUBAGENT_DIR` defaulting to `/tmp/claude-subagents`, the same file the hooks append to and settlement reads. Set `LOOM_SUBAGENT_DIR` to read a ledger elsewhere. The SessionStart stale sweep deletes old ledgers, so read the epoch while the session's files are still there.
-
-**Outcomes and exit codes.**
-
-- **0**: the view was printed on stdout. An epoch with no facts prints `epoch <agentId>:<agentType> holds no facts`, and an existing ledger with no records prints `ledger holds no epochs`. Both are statements, not refusals: they mean the ledger exists and holds nothing for that query.
-- **1**: a ledger refusal on stderr, with empty stdout. `ledger-epoch: no evidence ledger at <path>` names the path it looked for. A missing ledger is refused rather than read as empty, so it never looks like "the agent recorded nothing". An unreadable or corrupt ledger relays the engine's own message, `ledger-epoch: evidence ledger <path> is corrupt; refusing partial evidence: line N: <error>`. `line N` counts non-blank lines, which in practice is the physical line.
-- **2**: a usage refusal on stderr, with empty stdout: the reason, then the usage line. It covers a missing `--session`, `--agent` without `--type` or the reverse, an unknown or leftover argument, and an id the engine's identity parsers reject, such as `--session ../x`. No argument can address a file outside the subagent directory.
-
-The script is read-only. It never writes, truncates or creates a file, including the ledger and the subagent directory, so it is safe to run while a Wave, a Wave Gate or a subagent is live.
-
-**What it does not do.** It never judges I6: it does not say whether a run qualifies or whether the Task's red-then-green order holds. For that judgment, run [`helper red-then-green-status`](#where-does-a-task-stand-on-i6). It covers only Claude Code attempt epochs. A Pi implementation child's epoch, recorded under its parent-issued write grant, is not covered, and the script prints no machine-readable output.
-
-### Reviewer evidence is missing
-
-Registered programs derive the exact missing slots and issue retry requests. Resume the program; do not re-run the whole roster or manually write a transcript.
-
-A malformed semantic output gets one retry. Attempt-2 rejection is terminal for that run. Wave reviewer exhaustion has an explicit `orchestration restart` path; standalone runs should remain blocked audit evidence rather than be edited.
-
-### Implementation escalation (semantic attempt 2 exhausted)
-
-A modern implementation Task gets exactly two semantic attempts. When attempt 2's settlement also fails its proof, the lineage records an `escalation-required` receipt and further implementation dispatch is refused — the engine will not spin a third unreviewed attempt. Attestation byte drift is terminal on attempt 1 because refreshing its baseline would certify child-authored bytes. The direct exit from either terminal state is `remediate`; it is deliberate, reason-echoed, and never rewrites history:
-
-```bash
-# Consume the escalation: append one escalation-remediated receipt and return
-# the Task to a fresh attempt 1 (operator repaired the environment, re-scoped
-# the Task, or otherwise sanctioned a new proving round).
-bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration remediate \
-  --task <task-id> \
-  --receipt <exact-terminal-escalation-receipt-id> \
-  --reason "<why a fresh attempt is now sanctioned>"
-
-# Separately, arm re-attestation only on an eligible pending, nonterminal Task
-# when the declared artifacts ALREADY carry the completed work
-# (populate-task-graph --force reset, reopened Wave). An anchor-only repair
-# needs no attestation: amend-spec-trace keeps implementation proof.
-bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration attest \
-  --task <task-id> \
-  --reason "<why the work is known to be already present>"
-```
-
-`orchestration status` names the exact command for each escalated Task in its `implementation-escalation-required` reason, with the Task and receipt filled in and shell-quoted; only `--reason` is yours to write.
-
-`remediate` requires the EXACT receipt id of the Task's terminal escalation and refuses a repeat (`no longer escalated`), a live attempt, or a wrong receipt — all without touching state. The receipt is appended only; history start and the seed predecessor are untouched, and the walk past the remediation receipt lands on a fresh attempt 1 with a full two-attempt budget. The reason is echoed to stdout only; it is never persisted into the graph.
-
-`attest` refuses a live attempt, an escalated lineage (remediate first), a satisfied proof, a repeat (`already in attestation mode`), and an unknown Task — all without touching state. It rewrites exactly the proof surface under the TaskGraph lock: one scope-wide attestation obligation plus one attested obligation per declared artifact, a regression-required/new-tests-waived stored policy (the legacy `new_tests_required` boolean is CLEARED, not flipped — a `false` there would contradict the required regression at the load boundary), and the `implementation_attestation: true` flag. Lineage, baselines, and history are untouched. The dispatch binding requires the engine-derived `LOOM_IMPLEMENTATION_ATTESTATION_CONTEXT` line on every dispatch and refuses it on non-attestation Tasks. The attested child must change NOTHING inside the attempt scope: any byte move fails the scope obligation and terminalizes that attestation lineage, so it can never become a refreshed attempt-2 baseline. Restore the intended bytes, then use the exact terminal receipt with `remediate` before another proving round. The classified regression still runs. Reconcile measures drift against the attempt baseline (never the population baseline), so pre-existing population-relative changes are the attested work, not writes.
-
-### Completed Wave has post-review workspace-integrity loss
-
-A completed Wave may be reopened only through Loom's independent immutable Review Packet authority. This is the recovery for a missed remediation invalidation; do not edit the graph or decrement a Review Generation.
-
-<!-- wire-example: completed-wave-reopening -->
-```bash
-cat > /tmp/reopen-wave-3.json <<'JSON'
-{"runId":"<completed-run-id>","wave":3,"authorityDigest":"<completed-authority-digest>","taskIds":["T19","T22"]}
-JSON
-bun "$LOOM_DIR/engine/src/cli.ts" helper reopen-completed-wave \
-  --runs-root ".claude/reviews/wave-gate-runs" < /tmp/reopen-wave-3.json
-```
-
-For modern packets, `workspaceHeadSha` lets the helper derive exactly the completed Tasks whose declared bytes drifted. For historical packets without it, `headSha` is only a batch epoch and is never compared with current bytes: the helper records `legacy-workspace-authority-unverifiable` and requires every completed Task in that Wave. The payload Task list must equal that mode's engine-derived list in protected order. The helper requires execute phase, `current_wave === wave + 1`, no active Wave Gate, and no later-Wave Task progress evidence. It re-proves authority under the StateManager lock, removes only that completed Wave's terminal entry, restores `current_wave`, increments and invalidates reopened Tasks' review generation, and preserves all historical proof, test, artifact, and Finding bytes. Each reopened Task is instead returned to protected `pending` revalidation state; the Wave Gate resets `impl_complete: false`, `tests_passed: null`, and `reviews_complete: false`. Re-spawn **every reopened Task** before starting a new Wave Gate. The implementation Agent may make no production change when current code is correct, but it must run tests and stop with fresh task-linked test evidence; only that stop clears revalidation. An exact replay after success is idempotent; a changed payload is refused. Start a normal fresh Wave Gate only after every reopened Task revalidates.
-
-### Active Wave Gate Run Directory is missing
-
-Do not recreate the old directory or edit `active_wave_gate`. Create a pristine
-replacement direct child, copy the exact run ID/wave/digest from protected state,
-and use the atomic recovery operation:
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration recover-orphan \
-  --runs-root ".claude/reviews/wave-gate-runs" \
-  --run-id "<active-run-id>" --wave "<active-wave>" \
-  --digest "<active-authority-digest>" \
-  --new-run "<fresh-replacement-run-directory>"
-```
-
-It refuses if the old entry exists or any subagent is active, preserves review
-history and generations, records the retirement, installs replacement authority
-atomically, and returns the exact new spawn batch. `cleanup-state` remains a
-history-discarding last resort, not normal recovery.
-
-### Wave Gate reports critical Findings
-
-Fix surviving criticals through implementation Agents, then open a new Wave Gate run. Each affected Task is `implemented`, so it is owed no dispatch until it is reopened (see [Reopening an implemented Task to fix a Wave Gate Finding](#reopening-an-implemented-task-to-fix-a-wave-gate-finding)). Reopening increments its Review Generation. Do not remove Findings from the graph. The next Review Run verifies every prior id against a new Review Packet.
-
-### Wave Gate awaits advisory disposition
-
-Present the advisories the engine's request references. The only decision a Wave Gate records is exactly `{"kind":"approve"}` through `decide`; any other object is refused without writing. To fix an advisory first, `abandon` the run with a reason, reopen the Task, re-dispatch it, and start a fresh Wave Gate (see [Reopening an implemented Task to fix a Wave Gate Finding](#reopening-an-implemented-task-to-fix-a-wave-gate-finding)). Do not classify advisories silently in parent reasoning.
-
-In a contract Wave, `helper orchestration status` adds an `acceptance-freeze-pending` reason at this pause. It lists every advisory whose file is a frozen path of a contract still `awaiting-red` there. When the completion suite accepts, only its receipt is installed. The Acceptance Freeze is stamped by the locked completion commit, so the contract is still `awaiting-red` at the pause, and abandoning the run freezes nothing ([ADR-0044](adr/ADR-0044-the-acceptance-freeze-is-stamped-by-the-completion-commit.md)). Approval lets the gate complete and stamp the Acceptance Freeze over those bytes, so after it each fix needs a Contract Revision. Fix a relevant advisory before approving: abandon the run, reopen the contract Task, re-dispatch it, and start a fresh Wave Gate. The fresh gate reports no frozen-path drift for the fixed files. The reason is a status projection only; the decision request and its identity are unchanged.
-
-### Reopening an implemented Task to fix a Wave Gate Finding
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration abandon \
-  --runs-root ".claude/reviews/wave-gate-runs" --run "<run-id>" --reason "fix comment-analyzer-1 first"
-bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration reopen-task \
-  --wave 2 --task T4 --reason "comment-analyzer-1: the comment contradicts the code"
-bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration brief --task T4 --note "fix comment-analyzer-1"
-```
-
-`reopen-task` is the engine operation that makes an `implemented` Task of the active Wave dispatchable again ([ADR-0045](adr/ADR-0045-an-implemented-task-is-reopened-through-one-engine-operation.md)). Under the TaskGraph lock it requires all of the following:
-
-- the execute Phase, with `--wave` equal to `current_wave`;
-- no completed history for that Wave;
-- `active_wave_gate` absent, or an abandoned tombstone for that Wave that names no successor (abandoning with `--superseded-by` authorizes exactly that successor, so start it instead);
-- no executing Task, no active implementation attempt, and no active subagent (checked before and under the lock);
-- every `--task` (one or more, distinct) is `implemented` in that Wave, with an implementation lineage that can derive a dispatch (an escalated lineage is remediated first, with `helper orchestration remediate`);
-- a non-blank `--reason` of at most 512 characters.
-
-It then applies the transition a Contract Revision uses. The abandoned run's review epoch, spec-check, suite receipt and tombstone are retired, and review evidence that run accepted is kept as Findings. Each named Task returns to protected `pending` revalidation at a new Review Generation, and its Findings stay as prior Findings for the next Review Run. The Wave's gate bits reset (`impl_complete: false`, `tests_passed: null`, `reviews_complete: false`), and the Wave's other Tasks stay `implemented`, except its `implemented` Distill Task, which returns with them (see [The distill pass](#the-distill-pass-distill-task)). One `implemented-tasks-reopened` audit is appended to `task_reopening_history`, recording the Wave, the Task ids, the Distill Tasks among them that the engine swept back unnamed (`sweptDistillTaskIds`, absent when there is none), the reason, and the abandoned run id (or `null`). Status then owes each reopened Task an `initial-implementation` dispatch, `brief` renders it, and the Wave Gate cannot start until each settles afresh. Re-running the same command while those Tasks still await re-implementation changes nothing. The same request after they are `pending` but with a different reason, or for a Task that is no longer `implemented`, is refused. `populate-task-graph --force` is never the recovery: it resets every Task and discards all settled evidence.
-
-### Pi reports runtime version skew
-
-Do not repair state. The mutating CLI route compared the Runtime Revision published by Pi's loaded extension with the current checkout and refused before writing. Run `/reload` (or fully restart Pi while preserving the session), then retry the same idempotent operation. Canonical `orchestration status` remains available during skew.
-
-A missing handshake means the Pi session predates this protocol or did not load Loom; it is also resolved by reload/restart, not by deleting fields from the TaskGraph.
-
-### Wave Gate full-tier lint refuses imports the branch allows
-
-The Wave Gate's `loom:full-tier-lint` check runs against the branch's files (the completion suite changes into the worktree), but the lint rule code is the loaded runtime's, not the branch's. A branch that changes a rule, for example a new per-file capability grant in `no-cross-boundary-imports` for a `node:` builtin or an exact-specifier package, therefore fails the gate with a boundary refusal that its own rule would admit. The branch's files are correct; the runtime is older.
-
-This is the Runtime Revision design working as intended: infrastructure the gate depends on must be loaded before the gate can use it. Land the rule change on the checkout Loom is installed from (merge it, or port it there), run `/reload` (or restart Pi), then start a fresh Wave Gate. Do not weaken the branch's imports or its rules to get past the check.
-
-The refusal names this case itself. When the full-tier lint fails, the gate's diagnostic carries the lint's refusal (`loom:full-tier-lint: …`). If the gated repository is a Loom checkout whose `lint-rules/` or `engine/src/linter/` files differ from the loaded runtime's, the refusal opens with a `⚠` sentence naming the loaded runtime and the differing rule files. A plain project carries no lint rules of its own and never gets the sentence. A replayed rejection keeps only the lint's exit code, so its diagnostic tells you to run `helper lint-wave-gate`, which prints the same refusal and the same skew sentence.
-
-### Owner verification blocks a Wave Gate (G5b)
-
-A plan's owned invariants (`**Owner module:**` a path) are Wave Gate obligations. Population stamps each one into the TaskGraph as an Owner Obligation (`owner_obligations`, written on every population, `[]` included). Whenever that stamp is present, the Wave completion suite carries the engine-reserved check `loom:owner-verification`. A graph populated before G5b has no stamp, owes nothing, and its suite roster and digest are unchanged.
-
-**What the check does, in order:**
-
-1. **Plan integrity, every Wave.** It re-reads the plan the graph names (`plan_file`) and re-derives the obligations. It blocks, as infrastructure, on a missing `plan_file` or an unreadable plan (`plan-unreadable`), on strays or malformed ownership (`plan-malformed`), and on any difference from the stamp (`plan-drift`). This runs even when the Wave owes nothing; then the check records `verified` with no verdicts.
-2. **Scope.** It owes coverage and mutation only for the owned invariants the Wave owes: the owner is due (see step 3), and some Wave Task other than a contract Task has the owner or a sibling in its `file_list`. A contract Task writes at most a compiling stub, so its change owes nothing; verification starts with the first Wave whose implementation Task changes the family. A Wave that touched only the matrix test owes nothing; unowned invariants are never checked.
-3. **Sibling coverage**, per owed invariant: the matrix test's direct imports, followed through `export … from` re-exports and resolved through relative paths and the matrix test's tsconfig `paths`, must include every family path due by the Wave. A path is due when no Task lists it (it exists already) or a Task of this Wave or an earlier one does; a sibling only a later Wave lists is not yet required. A due path the imports do not reach still blocks. Type-only edges (`import type`, `export type … from`, and imports or re-exports whose every specifier is `type`) are erased at runtime and never count.
-4. **Mutation verification**, per owed invariant without a mutation exemption:
-   - the Wave base is the `start_sha` of the Wave's implementation Tasks listing the owner, never a contract Task's (their octopus merge-base when several); the owner's lines changed since then are the only mutation sites, so lines a contract Task's stub wrote are part of the base;
-   - the owner is parsed with the script kind its extension names (`.tsx`/`.jsx` with JSX), the same rule the coverage import graph uses; an owner with syntax errors blocks as `owner-unparseable` instead of being mutated from a recovered tree;
-   - six fixed operators (condition negation, comparison flip, logical swap, boolean-literal flip, return-value replacement, expression-statement removal) generate a deterministic set of at most 24 mutants, evenly spaced over the candidates; the rest are reported as unmutated;
-   - one detached git worktree per invariant holds HEAD plus every changed, untracked and deleted path of the real workspace, with `node_modules` shared by symlink; it is removed afterwards whatever happened;
-   - the matrix test runs first unmutated (the baseline), then once per mutant, through the frozen `affectedRunner` with the matrix test as its only file and a per-run limit of 60 s, clamped to the runner's own `timeoutMs`;
-   - the runner's JUnit report decides: a failing testcase kills, a timeout kills, collection or import errors only make the mutant invalid, an all-passing report with exit 0 means it survived. A run whose every generated mutant is invalid carries no mutation evidence and blocks as `no-valid-mutants`.
-5. **Isolation proof.** The real workspace's digest is taken before and after; any difference blocks (`real-workspace-changed`).
-
-The reported time bound is Σ over owed, non-exempt invariants of (1 baseline + selected mutants) × the per-run limit.
-
-**Prerequisite.** Mutation runs through the operator's frozen `affectedRunner` (a schema-2 `.loom/verification-manifest.json`, see [Affected-Test Stop Check](#affected-test-stop-check)); its report must be JUnit. Population refuses a plan with a non-exempt owned invariant and no `affectedRunner` (`owner-verification-runner-missing`). An exempt invariant needs no runner. Population refuses a plan whose matrix test first lands after the first Wave that owes its family (the gate would have no matrix test to run there). Population also refuses an owned invariant whose path plays two roles (the owner listed as a sibling, the matrix test as the owner or a sibling, a sibling listed twice) or an invariant owned twice (`invalid-owner-obligations`); the State File parser refuses such a stamp too.
-
-**Reading the result.** `helper orchestration status` (human and `--json`, one status document) reports, per owned invariant of the latest completion result:
-
-- coverage: pass, or the missing paths, or the infrastructure failure;
-- mutation: the counts generated, killed, timed out, invalid, survived and unmutated; or the declared exemption and its reason; or the infrastructure failure;
-- the time bound.
-
-In `--json`, `ownerVerification` is the persisted observation itself: `{ "kind": "verified", "obligationsDigest", "boundMs", "verdicts": [ { "invariant", "title", "owner", "matrixTest", "coverage": { "kind": "covered" | "missing" | "infrastructure", … }, "mutation": { "kind": "verified" | "exempt" | "red-baseline" | "infrastructure", … } } ] }`, or `{ "kind": "unavailable", "failure" }`. A verified mutation half carries `survivors`; the survived count is their number.
-
-With no owner verification to report, status says `not observed` and why (`--json`: `{ "kind": "not-observed", "reason": … }`), with exactly one of these reasons: `no persisted completion result`, `the persisted completion result carries no owner verification`, or `the persisted completion result is unavailable: …`.
-
-When the suite rejected the Wave and the owner check contributed findings, the next action names each invariant and its remedy. The rejection itself carries those lines (`ownerVerificationRemedies` on the completion-suite readiness fact), and the gate's own diagnostic prints the same lines, so the two always match.
-
-**Remedies:**
-
-| Finding | Meaning | Remedy |
-|---|---|---|
-| missing siblings | the matrix test's imports do not reach the named owner/sibling paths, each due by this Wave | strengthen the matrix test to import each named path (directly, or through a re-export barrel); importing a module that itself imports the owner does not count. Siblings only a later Wave lists are never named |
-| red baseline | the matrix test fails against the unmutated workspace, so no mutant ran | fix the failing testcases the diagnostic names |
-| survivor | a mutant at `<owner>:<line>:<column>` (`<operator>`, original and mutated text shown) was not killed | strengthen the matrix test to kill it, or declare a mutation exemption with a reason on the invariant |
-| `plan-unreadable`, `plan-malformed` | the named plan cannot be re-read, or it has strays or malformed ownership, or an owned invariant names a path in two roles | restore the plan file; fix the named declaration |
-| `plan-drift` | the plan's owned invariants differ from the stamp, or a named owner is not a file in the workspace (the stamp names a path the Wave no longer has, so the stamp, not the filesystem, is what is out of date) | restore the plan's owned invariants (or the owner file), or re-populate the TaskGraph from the plan |
-| `alias-config-unresolvable` | the matrix test's import graph cannot be resolved because the tsconfig that governs it does not parse, or has a malformed `extends`, `baseUrl` or `paths`; the plan itself is fine | fix the tsconfig/path alias configuration the detail names (the nearest `tsconfig.json` above the matrix test and its `extends` chain); re-run the gate |
-| `runner-missing` | the frozen manifest has no `affectedRunner`, or it cannot run the matrix test | install the runner and re-populate, or exempt the invariant |
-| `missing-wave-base` | a Wave Task listing the owner records no `start_sha`, or the base or the owner at it cannot be read, or the owner at the base is not a regular-file blob (a symlink, a gitlink or a directory: its bytes are not the owner's text, so the changed lines cannot be trusted) | make the recorded base commit reachable (fetch full history); a Task with no `start_sha` gets one when its implementation is dispatched; for an owner that was not a regular file at the base, name the real module as the owner, or declare a mutation exemption with a reason |
-| `spawn-failed`, `report-missing`, `report-unreadable`, `matrix-test-not-collected`, `exit-unexplained-by-report`, `baseline-timed-out` | the runner could not give a trustworthy JUnit verdict for the matrix test | fix the runner (it must write a fresh JUnit report naming the matrix test's file, and exit 0 when it passes) or the matrix test's runtime; raise the runner timeout for a slow baseline |
-| `worktree-failed` | the isolated copy could not be set up or removed, or failed during a run (the detail names a leftover worktree when a failed run also could not clean up) | check disk space, `git worktree list`, and stale worktrees (`git worktree prune` runs on each removal); remove a named leftover directory; re-run the gate |
-| `coverage-bound-exceeded` | the matrix test's import walk read more than 512 files | import the entry points more directly |
-| `owner-unparseable` | the owner module has syntax errors (the detail lists them as `line:column message`), so its mutation sites cannot be trusted | fix the syntax errors in the owner; a `.tsx`/`.jsx` owner must carry that extension to be parsed with JSX |
-| `no-valid-mutants` | mutants were generated, but every one only failed to collect (a collection or import error), so the matrix test gave no mutation evidence | fix what makes the mutated owner fail to load in the matrix test (an import-time side effect, a module-level throw), or declare a mutation exemption with a reason |
-| `repository-file-unreadable` | a file the check must read (a matrix test, an import it reaches, a tsconfig, the owner) exists but the filesystem refused it: `EACCES`, a symlink loop (`ELOOP`), `EIO`, `EMFILE`, `ENAMETOOLONG`; the detail names the path and the error. It is never reported as a missing sibling | fix the named path's permissions or link, free file descriptors, or shorten the path; re-run the gate |
-| `real-workspace-changed` | the real workspace digest differs after the run, or could not be observed (the observer failed or threw) | find what changed the workspace during the gate (a parallel writer) and re-run |
-| `unexpected-error` | a step built to return its failure as data threw anyway (an engine defect or an unanticipated exception), or an injected owner runner threw; the detail names the step and the error. The workspace digest is still compared, so a changed workspace reports `real-workspace-changed` instead | re-run the gate; if it repeats, report it with the detail, which names the throwing step |
-
-Every infrastructure failure blocks and never counts as a kill. A rejection whose only infrastructure failures are the owner check's, with no semantic failure, is published as an attempt record beside the result slot (`completion-suites/<suite>/<workspace>.owner-infrastructure/<sha256>.json`), so the evidence persists and a retry at the same workspace runs the check again. There is no automatic retry: re-run the Wave Gate. A rejection that also carries a semantic failure is published in the result slot and replays as rejected.
-
-**Declaring a mutation exemption after population is plan drift.** The exemption is part of the stamped obligation, so adding `**Mutation exemption:** <reason>` to the plan mid-flight makes the next gate block with `plan-drift` until the TaskGraph is re-populated, which resets every Task to `pending`. Prefer strengthening the matrix test; decide exemptions in the architecture phase.
-
-**Limits, stated honestly:**
-
-- A runtime import is proof of load, not of exercise. A matrix test that imports a sibling but never drives the rule through it passes coverage. A type-only import is erased at runtime and is not even proof of load, so it never counts.
-- Mutation covers the owner's lines changed in the Wave only: never siblings, never unchanged lines, never other files. A Wave that changed only a sibling runs the baseline and zero mutants (`owner unchanged in Wave`). A changed line with no construct the six operators rewrite yields zero mutants and says so.
-- Invalid mutants are neither killed nor survived; status and the verdict show the invalid count. A run whose every generated mutant is invalid blocks as `no-valid-mutants` (infrastructure, never a pass or a kill).
-- A matrix-test-only change does not trigger coverage or mutation.
-- Reviewers get the owner map and second-copy rule only in Wave review packets of the code-reviewer and architecture-tech-lead for Tasks touching an owned family. Such a Task is issued six reviewers, not five: architecture-tech-lead (profile `focused-review`, Skill `deepen`) is appended after the base five, and the Wave does not complete until it settles too (ADR-0047). A Contract Task whose contract declares a types file is issued the same six for its own reason (see [The Contract Task's review judges the contract surface](#the-contract-tasks-review-judges-the-contract-surface)); every other Task keeps exactly the base five. An identical second copy is advisory; whether a copy diverges is the reviewer's judgment, checked by the Refutation Panel. Standalone reviews carry no owner map.
-- `typescript` is loaded at runtime by the two owner-verification seams (`core/owner-verification/mutation-plan.ts`, `core/owner-verification/import-graph.ts`). It is declared an engine runtime dependency (`engine/package.json` `dependencies`, `^5.9.0`; it was already the engine's compiler, so no package was added) and installed by the documented `(cd engine && bun install --frozen-lockfile)`. The `5.9` floor is load-bearing: type-only import detection reads `ImportClause.phaseModifier`, which older compilers lack. An engine checkout without its locked install cannot run the Wave Gate.
-
-### Measuring second sites: the family-site metric
-
-`helper family-sites` counts the raw sites each known invariant family still has outside its owner modules. It reads every `.ts` file under `<root>/engine/src`, excludes test files and each family's owners, skips comment lines, and matches line patterns defined once, in `FAMILIES` (`engine/src/core/family-sites.ts`). It is read-only: no State File, no writes.
-
-```bash
-bun "$LOOM_PLUGIN_ROOT/engine/src/cli.ts" helper family-sites            # human report
-bun "$LOOM_PLUGIN_ROOT/engine/src/cli.ts" helper family-sites --json     # JSON, byte-identical for the same bytes
-bun "$LOOM_PLUGIN_ROOT/engine/src/cli.ts" helper family-sites \
-  --baseline docs/family-sites.baseline.json                             # per-family delta since the baseline
-bun "$LOOM_PLUGIN_ROOT/engine/src/cli.ts" helper family-sites --json \
-  --root /path/to/other/checkout                                         # measure another checkout
-```
-
-`--root` defaults to the Loom package that owns the engine, so the metric measures Loom itself wherever it is run from.
-
-**Baseline.** `docs/family-sites.baseline.json` was recorded with `--root` against a detached worktree of `626db7fb`, the `main` merge the G5b owner-enforcement feature started from:
-
-| Family | Owner modules | Raw sites at `626db7fb` |
-|---|---|---|
-| `fail-closed-path-probes` | `engine/src/utils/path-presence.ts` | 124 |
-| `shell-tokenizing` | `engine/src/core/shell-{quoting,command,normalize,substitution,write-targets,ansi-c}.ts` | 23 |
-| `claim-conservation` | `engine/src/core/findings.ts` | 13 |
-
-A delta marks a family whose patterns changed since the baseline, so a count moved by re-calibrated patterns is not mistaken for consolidation. The patterns are line regexes: the count is a gauge of consolidation progress, not a proof, and the metric blocks nothing. Consolidating the sites is separate work.
-
-### Acceptance Stop Check (claimants)
-
-When an implementation agent that claims a frozen Acceptance Contract's Requirement tries to stop, the engine runs that contract's acceptance files before settling the Task. If a testcase the agent owes is still not passing, the stop is blocked and the same agent keeps working with the failures in front of it. A testcase is owed when it decides one of the agent's claims and all its anchors are due by the Task's Wave.
-
-- **Opt in** with a schema-2 `.loom/verification-manifest.json` that declares an `acceptanceRunner`. The runner is frozen at population, like the project checks:
-
-  <!-- wire-example: verification-manifest -->
-  ```json
-  {
-    "schemaVersion": 2,
-    "kind": "loom-verification-manifest",
-    "checks": [ … ],
-    "acceptanceRunner": {
-      "executable": "vitest",
-      "args": ["run", "--reporter=junit", "--outputFile=.loom/completion-reports/acceptance.junit.xml", "{files}"],
-      "cwd": ".",
-      "timeoutMs": 120000,
-      "report": { "kind": "required-file", "path": ".loom/completion-reports/acceptance.junit.xml" }
-    }
-  }
-  ```
-
-- **The command.** `{files}` must be exactly one whole argument; the engine replaces it with the acceptance file paths, one argument each, written relative to the runner's `cwd` (with `"cwd": "engine"`, `engine/tests/x.test.ts` is passed as `tests/x.test.ts`). An owed file outside `cwd` cannot be named, so the check notes it and does not decide. The executable, argv and report follow the project-check rules: the allowlist, no shell, and a report beneath `.loom/completion-reports/` that no Wave check also uses. `timeoutMs` is at most 240000, inside the SubagentStop hook's 300 s timeout.
-- **Silent when off.** With no runner, or no owed testcase, the check does nothing and says nothing.
-- **Fails open.** In each of these cases the stop proceeds, the operator gets a `systemMessage` saying why the check did not decide, and the orchestrating session gets the same note (see [Stop-check notes reach the orchestrator](#stop-check-notes-reach-the-orchestrator)):
-  - another claimant's check holds the runner;
-  - the runner cannot start or finish, times out, or is killed by a signal (a killed runner's report is partial, so it is not judged);
-  - the report is missing or changed;
-  - the report has no testcase of the acceptance files;
-  - the block counter cannot be read;
-  - the agent has reached its 3-block cap;
-  - the check itself fails.
-
-  A runner lock that will not release is appended to the note, or turns a pass into a note.
-- **One run per repository at a time.** Every claimant shares the runner's one report path, and the runner resets that file before each launch. Checks are therefore serialized by a lock under the subagent directory. If a claimant stops while a sibling's check is running, its own check does not run, and the Wave Gate judges that claimant. A lock whose holder process has exited, or that is older than the longest permitted run plus 60 s, is reclaimed. Reclaiming renames the lock aside and deletes it only if it still holds the stale bytes. If another stop reclaimed it first and took a fresh lock, the renamed lock is linked back and this stop does not run.
-- **Cap.** An agent is blocked at most 3 times; its next stop proceeds with a `systemMessage` naming the cap. The count is kept per spawned agent under the subagent directory, never in the TaskGraph, and is cleared once that agent's stop proceeds.
-- **Not completion evidence.** Nothing is recorded as a test result or proof; the Wave Gate's completion suite stays the only authority.
-- **Pi is report-only.** Pi settles after the subagent has ended, so the outcome is an operator note and part of the subagent result the parent model reads. It never blocks.
-
-### Affected-Test Stop Check
-
-Whenever any implementation agent stops, claimant or not, the engine runs the tests affected by the files that agent changed (I7). It runs them through the operator-declared `affectedRunner`, after the Acceptance Stop Check. If an affected test fails, the stop is blocked and the same agent keeps working, with each failing test and its file in front of it.
-
-- **Opt in** with two optional keys in a schema-2 `.loom/verification-manifest.json`. Both are frozen at population and covered by the manifest digest:
-
-  <!-- wire-example: verification-manifest -->
-  ```json
-  {
-    "schemaVersion": 2,
-    "kind": "loom-verification-manifest",
-    "checks": [ … ],
-    "affectedRunner": {
-      "executable": "npm",
-      "args": ["run", "test:affected", "--", "{files}"],
-      "cwd": "engine",
-      "timeoutMs": 120000,
-      "report": { "kind": "required-file", "path": ".loom/completion-reports/affected.junit.xml" }
-    },
-    "testFileSuffixes": [".test.ts", ".spec.ts"]
-  }
-  ```
-
-  - Loom's own manifest uses this form. `npx` is not on the allowlist, and `npm` must name a script (`run`, `test`, `check` or `build`), so `vitest related` goes through the engine's `test:affected` script. `{files}` reaches the runner relative to its `cwd`.
-  - `affectedRunner` gets the same form checks as `acceptanceRunner`: the allowlist, no shell, `{files}` as one whole argument, and a `required-file` JUnit report beneath `.loom/completion-reports/`. Two further rules apply. `timeoutMs` is at most 240000, the same cap as the acceptance runner's: a change set touching a hub module can select thousands of related tests (Loom's own `handler-routes.ts` took 138 s). Because the affected runner launches only when the time left holds its whole timeout, its `timeoutMs` plus the acceptance run's actual duration must fit in 270 s. Loom's own manifest declares 200000, which leaves 70 s for the acceptance run. The report path must differ from the `acceptanceRunner`'s and from every Wave check's.
-  - `testFileSuffixes` is a non-empty list of distinct suffixes, none containing a path separator. Without it, the freeze records the engine default (`.test.ts`, `.spec.ts`, `.test.tsx`, `.spec.tsx`) as `testFiles: { source: "engine-default", … }`. The same classification decides I6's test and implementation files.
-
-  A manifest change reaches only TaskGraphs populated after it. The digest of a TaskGraph frozen earlier never changes.
-- **Changed files.** The changed files are the attempt epoch's ledger `FileWrite` paths, deduplicated in first-write order. Paths outside the repository are dropped, and so are paths absent at stop time, such as a deleted file. A renamed file appears under its new path, because a literal `mv`, `git mv` or `cp` mints a write for its destination. Only files beneath the runner's `cwd` are passed. Each is one argument, written relative to the `cwd`. A file written with no ledger event, for example by an interpreter or a generator, is not a changed file.
-- **Silent when off.** With no `affectedRunner` frozen, the check does nothing and says nothing.
-- **Fails open.** In each of these cases the stop proceeds, and a note names the cause to the operator (`systemMessage`) and to the orchestrating session:
-  - no changed files, or none beneath the runner `cwd` (the note lists the files outside it);
-  - the command cannot be formed for the changed files;
-  - the runner cannot start or does not complete;
-  - the runner times out or is killed;
-  - the runner leaves no readable report;
-  - another stop holds the runner lock;
-  - the repository root is unavailable;
-  - the block counter is unreadable;
-  - the agent has reached its 3-block cap;
-  - the check crashes.
-
-  A report with zero testcases passes, and the stop notes it.
-- **Expected-RED acceptance failures do not block.** A contract Wave writes acceptance tests that must fail until later Waves implement them, and an affected run can select them. The check excuses exactly the failures the Wave Gate excuses, by the same rule: a collected failure in an owed contract's acceptance file during the contract's Wave, or after it while every anchor the testcase names is still pending. When those are the only failures, the stop proceeds with a note naming them (`its only failing tests are acceptance tests this Wave expects to fail`), and no block is counted. When other tests also fail, the stop blocks for those alone, and the block message lists the excused acceptance failures under `Not blocking — acceptance tests this Wave expects to fail (the Wave Gate's rule):`. An acceptance file that fails to collect, a due or unanchored acceptance testcase, and a contract whose RED was never observed still block.
-- **Budget.** Both checks run inside the SubagentStop hook's 300 s timeout, minus a 30 s reserve for settlement. The affected runner launches only if the remaining time holds its whole `timeoutMs`. Otherwise the stop notes that the budget was exhausted. The timeout is never clipped.
-- **One lock, one message.** The acceptance check and the affected check run in sequence under one acquisition of the per-repository runner lock described above. Each report is read back digest-checked while the lock is held. When both checks fail, the agent gets one block message with an `## Acceptance stop check` section and an `## Affected-test stop check` section. Under the affected heading, each failure reads `- '<name>' (<file>) — failed` or `- '<name>' (<file>) — failed to collect`.
-- **Separate caps.** Each check has its own per-agent counter (`*.acceptance-stop-check.json` and `*.affected-stop-check.json`), each capped at 3 blocks. A check's counter increases only when that check contributes failures to a block. Both counters clear when the stop proceeds.
-- **Not completion evidence.** No affected-run fact reaches settlement, proof, receipts or Wave Gate evidence. A test proves this by settling the same Task under every affected outcome and finding byte-identical proof and receipts.
-- **Pi is report-only.** The Pi parent runs both checks over the child's epoch in the parent ledger after the child has ended, and reports the outcome as below. It never blocks.
-- **A handed-back agent is never blocked.** A Claude Code subagent that ends its turn with a delivered `SubagentHandback` has finished: the harness does not keep it working, so a block would only drop the stop's settlement and leave the Task stranded with live authority. When a check would block such a stop, the dispatcher reads the agent's transcript (`claudeFinalTurnHandedBack`), turns the block into a note (`… cannot be held open: it settles now, and the Wave Gate judges the Task.`) and settles. A failed or unanswered handback, a legacy final text, or a transcript it cannot read keeps the block.
-
-### Task mutation check
-
-While an implementer still holds its context, it can ask the engine which of the lines it changed its tests do not answer ([ADR-0071](adr/ADR-0071-the-task-mutation-check-names-surviving-mutants-before-the-stop.md)). The implementation brief tells it to, with the exact command:
-
-```bash
-bun <loom>/engine/src/cli.ts helper mutation-check --task T5
-```
-
-The brief asks for one Bash call with a 600000 ms timeout, after the Task's tests pass and before its final verification run.
-
-- **What it does.** For each TypeScript or JavaScript implementation file the Task declares (not a test file by the frozen `testFileSuffixes`, not a `.d.ts`, beneath the `affectedRunner`'s `cwd`), it diffs the file against the Task's `start_sha`, plans mutants on the changed lines, and keeps at most 8, evenly spaced over all the files. Per mutated file it opens one isolated worktree outside the repository, runs the frozen `affectedRunner` over the file unmutated, then once per mutant. The real workspace is only read.
-- **Operators.** The Wave Gate's six, preceded by `guard-removal`: an `if` with no `else` whose body only exits (`throw`, `return`, `continue` or `break`) is replaced by an empty statement. The Wave Gate's Owner Verification keeps its six operators and its mutant ids unchanged.
-- **What it prints.** One line per survivor: `- <file>:<line>:<column> <operator>: \`<original>\` → \`<mutant>\``, then `killed by:` and the test that kills a mutant of that operator. A file for which no test ran has every mutant reported as a survivor, marked `(no test ran for this file)`. A run with no survivor prints `clean`. The implementer adds the test and runs the check again, or names an equivalent mutant and says why in its final report. There is no waiver syntax.
-- **`unavailable` never blocks.** The run does not decide when the unmutated tests fail (a sibling Task's half-written code is the usual cause), a run leaves no readable report, the runner cannot start, the worktree cannot be made, the Task records no `start_sha`, a file does not parse, the Task's files change while it runs, or its 480 s deadline cannot hold another run. A mutant whose run times out counts as killed.
-- **The record.** The result is written to the runtime directory (beside the stop-check block counters) as `task-mutation.<repository hash>.<task id>.json`, with a digest of the Task's `start_sha` and the bytes of every file it declares, tests included. Any later edit to one of those files makes the record stale. It is not in the TaskGraph, and nothing reads it but the stop. Like other unsessioned runtime files it is removed by the session-start sweep once it is an hour old, after which the check reads as not run.
-- **At the stop.** The third stop check reads the record; it runs no runner. On Claude Code it blocks the stop, at most 2 times per agent, when the record is missing, stale, or names survivors. The block appears under `## Task mutation check`, joined with the other two checks' sections when they also fail, and repeats the command. After 2 blocks the stop proceeds with a note. An agent that ended with a delivered hand-back is never blocked. Every fault (unreadable record, unreadable file, unreadable counter, no repository root) is a note. On Pi it is report-only, like the other two.
-- **Not completion evidence.** Nothing the check observes reaches Proof, receipts or the Wave Gate. Its runner executions happen inside the helper, in a worktree, so the ledger records the one `helper mutation-check` call as an ordinary command: no test run, no file write. The implementer's own final verification run is still what its Proof reads.
-- **Who owes it.** Every implementation Task of a TaskGraph that froze an `affectedRunner` and a test-file classification, except a Contract Task, an ADR Task and a Distill Task, and except a Task with no mutable file. `helper mutation-check` on a Task that owes nothing prints `not owed — <reason>` and exits 0.
-- **Turn it off** for a project with one key of the schema-2 `.loom/verification-manifest.json`:
-
-  <!-- wire-example: verification-manifest -->
-  ```json
-  {
-    "schemaVersion": 2,
-    "kind": "loom-verification-manifest",
-    "checks": [ … ],
-    "taskMutationCheck": "off"
-  }
-  ```
-
-  The key takes `"on"` or `"off"`; absent means on. Like `distillPass`, it is frozen at population, is in the manifest digest only when declared, and reaches only TaskGraphs populated after it.
-- **Limits.**
-  - The record is a file an implementer's shell could write by hand. The check is advice to an agent that wants its tests to be good, not a control against one that does not.
-  - Only TypeScript and JavaScript are mutated. A Task whose implementation files are all in another language owes nothing.
-  - "Changed lines" are every line that differs from `start_sha`, so they include lines an earlier attempt or another Task changed in the same file since.
-  - Files the Task changed but did not declare are neither mutated nor digested.
-  - The 8 mutants are a sample. A clean run does not show that every changed line is tested.
-  - Each mutant's run is limited to the `affectedRunner`'s `timeoutMs`, capped at 60 s as at the Wave Gate.
-
-### The distill pass (Distill Task)
-
-Population adds one engine-owned Distill Task to every Wave that has implementation files ([ADR-0068](adr/ADR-0068-the-distill-pass-is-an-engine-added-task-per-wave.md)). A fresh `distill-agent` runs the `distill` skill in apply mode over the files the Wave's other Tasks implemented, before the Wave Gate reviews them. A decompose payload cannot author one: `validate-task-graph --decompose-payload` and `populate-task-graph` both refuse a Task whose agent is `distill-agent`.
-
-**What you see.**
-
-- `populate-task-graph` names what it added: `Task graph populated: 5 tasks (2 engine-added distill pass: T4, T5), waves: 1, 2`. Each Distill Task is numbered after the highest authored Task id, has no dependencies and no Requirement trace, and its `file_list` is its Distill Scope: the Wave's implementation files, never a test file and never an Acceptance Contract's frozen path.
-- `helper orchestration status` lists the Distill Task among its Wave's pending Tasks from the start, but does not offer its dispatch while any other Task of the Wave is not yet `implemented` or `completed`, or still holds a reservation. Once they have all settled, it is the one dispatch status offers. Dispatch it from status like any other dispatch (`helper orchestration brief`); the Wave Gate cannot start before it settles.
-- A spawn attempted early is refused at registration, on both harnesses: `T9 is its Wave's distill pass and runs after every other Task of the Wave is implemented; still outstanding: T1`.
-- Its brief carries a `LOOM_DISTILL_PASS: 1` appendix that lists its files and replaces the implementation workflow. The spawn gate compares the appendix line for line with the Task's protected file list.
-- At the Wave Gate it is registered with its Wave and issued no reviewer. Its review status reads `not required (exempt from Wave review: distill-task)`; the other Tasks' Review Packets read the distilled bytes. `helper store-review-findings --task <its id>` is refused for the same reason.
-
-**How it settles.** Its Proof holds two obligations, `task-completed` and `behaviour-preserved`. The evidence of the second records which basis held:
-
-| Basis | Meaning |
-|---|---|
-| `unchanged` | The pass left every file as it found it. No test run is owed. |
-| `tests-passed` | The pass changed files, a trusted passing run follows its last edit, and no changed file breaks a frozen signature. |
-| `restored` | The pass changed files and could not prove it preserved behaviour, so the engine wrote every file back. `after` lists the failure kinds that caused it, for example `"after": ["proof:regression-tests-failed"]`. |
-
-- A restored pass settles `implemented`: its edits are gone, the Wave loses nothing, and no retry is dispatched. Read `after` to see what the pass could not prove.
-- A write outside its file list is not restored, because the engine holds no bytes for it. It fails the attempt as it does for any Task: one retry, then escalation.
-- A restore that fails, or that leaves a file differing from what the attempt started with, settles `infrastructure-blocked`. The message names the Git tree that still holds the attempt's starting bytes, `refs/loom/distill/<authority digest>`.
-
-**Reopening.**
-
-- `reopen-task` on any other Task of the Wave also returns the Wave's `implemented` Distill Task to revalidation, so the re-implemented code is distilled again. The command says so (`The engine reopened T9 with them: …`), and the audit lists T9 among `reopenedTaskIds` and again under `sweptDistillTaskIds`. Naming the Distill Task alone reopens only it. Naming it together with a sibling records no sweep.
-- A Contract Revision returns it with the current Wave's implemented claimants.
-- `reopen-completed-wave` derives a Task set that includes the Wave's Distill Task whenever it includes a sibling, and your exact payload must name it too (`reopening taskIds must exactly equal engine-derived …`). The audit marks it under `sweptDistillTaskIds`: it returned with a sibling and was never itself proven drifted.
-
-**Requirement trace rosters.** The exact-roster JSON for `amend-spec-trace` covers every Task of the graph, Distill Tasks included, each as `{"id":"T9","spec_anchors":[],"spec_contributions":[]}`. A roster that leaves one out is refused as `roster is stale or partial; missing existing Tasks: T9`. A Distill Task never carries a trace: the State File refuses to load one that does.
-
-**Claude Code and Pi.**
-
-- On Claude Code, `machines/distill-agent.machine.json` denies Edit, Write and MultiEdit until one test run has passed with a parsed report: the skill's "green baseline first" rule. After that, edits and test runs are free.
-- A Pi child runs without the live phase gate, so on Pi that rule is prose in the brief and the agent definition only.
-- Settlement is the authority on both: it compares the files with the attempt's starting bytes and reads the test evidence from the ledger.
-- Pi needs the rendered `distill-agent` definition before a Wave with a Distill Task can be dispatched: run `scripts/sync-pi-agents.sh`, then `/reload`.
-
-**Turning it off.**
-
-- Opt out for a project with one optional key in a schema-2 `.loom/verification-manifest.json`:
-
-  <!-- wire-example: verification-manifest -->
-  ```json
-  {
-    "schemaVersion": 2,
-    "kind": "loom-verification-manifest",
-    "checks": [ … ],
-    "distillPass": "off"
-  }
-  ```
-
-  - The value is `"on"` or `"off"`; anything else is refused, and schema 1 refuses the key. Absent means `on`.
-  - It is frozen at population and covered by the manifest digest only when declared, so a manifest that does not declare it freezes to the digest it always had.
-  - It reaches only TaskGraphs populated after it. To drop the Distill Tasks of a graph that has not started, set the key and re-run `populate-task-graph`: every population replaces the whole roster.
-- Some Waves get no Distill Task whatever the key says:
-  - A Wave whose Tasks list no implementation file. Test files (by the frozen `testFileSuffixes`) and an Acceptance Contract's frozen paths are never in a Distill Scope.
-  - A Wave that holds only ADR Tasks or Tasks that write an Acceptance Contract. Their files are not distilled.
-  - Every Wave of a TaskGraph whose verification manifest froze no test-file classification: a graph frozen before the classification existed, or one with no manifest. `populate-task-graph` says so in one line: `No distill pass: the verification manifest froze no test-file classification, so no Distill Scope can be derived and no Wave gets a Distill Task.`
-
-### Decompose is blocked on the plan design review
-
-A decompose spawn is refused with `plan-design-review (<plan> has no accepted design review: ...)` or `plan-design-review (<plan> changed after its design review was accepted: reviewed sha256 <a>, now <b>; ...)`. The State File's `plan_design_review` is `required`, or `accepted` for bytes the plan no longer has ([ADR-0070](adr/ADR-0070-the-plan-design-review-gates-decompose.md)).
-
-**Open it.** From the repository root, run a Standalone Review of kind `plan-design` whose `files` is exactly the plan, drive it to `done`, publish a disposition if it has advisories ([above](#immediate-advisory-publication)), then:
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper accept-plan-design-review \
-  --runs-root "<review-root>" --run "<completed-review-id>" \
-  [--disposition "<absolute disposition Run directory>" --disposition-run "<its Run id>" --disposition-digest "<its disposition sha256>"]
-```
-
-The full sequence is [`/loom` Phase 3.6](../commands/loom.md#phase-36-plan-design-review). The helper reads the plan this State File names and everything else from the authenticated Run Directory; it takes no claim from the caller beyond which Run and which disposition to read.
-
-**What a refusal means.** Every refusal starts `accept-plan-design-review:` and names one cause:
-
-| Message says | Do |
-| --- | --- |
-| the review's kind is not exactly `["plan-design"]` | Start a `plan-design` review. A `types` or `architecture` review of the plan is not one. |
-| the frozen scope is not exactly the plan | Start the review with `files` naming only the plan, from the repository root. |
-| the review ran without a reviewer, or without the read obligation | Start a fresh `plan-design` review. |
-| the plan changed after it was reviewed | Start a fresh review of the edited plan. |
-| N critical finding(s) survived refutation | Edit the plan to resolve them, then start a fresh review. There is no override and no successor review. |
-| N advisory finding(s) have no published disposition | Publish a `standalone-disposition` for this review and pass the three `--disposition*` flags. |
-| the named disposition is not a published disposition of this review | Pass the disposition published against this exact review result. |
-
-**Not doing the review.** `init-state --skip-plan-design-review` records `{"status":"not-required","reason":"skipped"}` when the orchestration starts. There is no flag that skips it later. A State File initialized before the gate existed has no `plan_design_review` field and is not gated; running the review and the helper on it records `accepted` and turns the digest binding on.
-
-**Known limits.** The gate is on the decompose spawn only: execute is not gated, and `populate-task-graph` does not ask it. The record is not re-proved against the Run Directory after acceptance.
-
-### Stop-check notes reach the orchestrator
-
-A stop check that fails open, or reports only, leaves a note naming the cause. That note is the only trace of a check that did not decide, so it goes to the orchestrating session as well as the operator.
-
-- **Claude Code.** A SubagentStop `systemMessage` reaches the operator's terminal but never the orchestrating model. So the dispatcher also writes the note to `<LOOM_SUBAGENT_DIR>/<session>.<agent>.stop-check-note.json` before settlement, so a settlement failure cannot lose it, and names it in any settlement or cleanup error. The `surface-stop-check-notes` PostToolUse hook on the orchestrator's `Task`/`Agent` calls takes every note of its session, deletes each one, and adds them to the model's context as `additionalContext`, under the heading "Loom stop checks did not decide, or reported only, for these Tasks". It also shows them to the operator.
-  - A foreground spawn's note is waiting when its call returns.
-  - A background spawn's PostToolUse fires at launch, before its stop, so its note arrives with the next `Task`/`Agent` result.
-  - A claimed sidecar is renamed before it is read, so concurrent hooks never deliver a note twice. An unreadable sidecar is named once and removed. An undelivered note is swept with the other runtime files after the stale-subagent TTL.
-  - The shim skips the bun spawn when no note sidecar exists at all.
-- **Pi.** The parent settles after the child has ended. Each report line goes to the operator through the extension's operator sink: to the UI when there is one, otherwise to stderr as a `[loom]` line. The lines are also appended under the same heading to the subagent tool result the parent model reads. When settlement raises processing errors, the notes follow the error text that replaces the result.
-
-### Pi evidence ledger recorder
-
-A Pi implementation child records its own tool calls into the parent session's evidence ledger, under the epoch of its parent-issued write grant. It uses the same minting rule as Claude Code's PostToolUse recorder (`machine/tool-evidence-recorder.ts`), so I6 settlement and the I7 stop check on Pi read the same kind of facts as on Claude Code.
-
-- **Ledger address.** The parent puts the ledger address (its session and the spawn item's agent type) into the grant at spawn. The grant MAC binds it.
-- **No valid grant, no record.** A child with no grant, a rejected grant, or a binding that survives only as cleanup debt records nothing. It prints one stderr note per reason. Plain Pi sessions and the parent stay quiet.
-- **Exit codes.** Pi 0.83 and 0.84 expose no bash exit code. The recorder reads an error result as exit 1 and a clean one as exit 0. A result ending in Pi's abort or timeout status line counts as interrupted.
-- **Plan view.** `helper stop-check-plan` cannot resolve a Pi child's epoch from a separate process, so for a Pi run it shows no changed files.
-- **No live gate.** The live phase gate is still absent on Pi; only recording was added.
-
-### Population refuses the spec or a Requirement id
-
-`populate-task-graph` proves the authored trace against the Spec Index before writing anything. It refuses, naming the cause:
-
-- a declared `spec_file` that cannot be read, is not UTF-8, or does not parse as a canonical specification (every required section, including `## Appendix: Glossary`), even when no Task claims from it;
-- a Task whose `spec_anchors` or `spec_contributions` name an id the Spec Index does not define as a completable FR or AS entry (`NFR-`, `SC-` and Out-of-Scope ids included), listed as `T3 → NFR-001`;
-- any Requirement trace when the plan has no `spec_file`.
-
-Fix the specification or the decompose output and re-run population. The rule is the one `amend-spec-trace` applies to added ids (`unprovenRequirementTrace`), so an id population admits is one the Implementation Brief can render.
-
-### Active graph uses the legacy Requirement trace contract
-
-Legacy graphs without `spec_trace_version` remain readable and auditable. To upgrade exactly one active legacy graph, prepare JSON covering the exact existing Task roster in protected order; provide both arrays for every Task:
-
-<!-- wire-example: spec-trace-ownership -->
-```json
-{
-  "spec_trace_version": 2,
-  "tasks": [
-    {"id":"T1","spec_anchors":[],"spec_contributions":["FR-001"]},
-    {"id":"T2","spec_anchors":["FR-001"],"spec_contributions":[]}
-  ]
-}
-```
-
-Then run the sanctioned atomic helper (use `.pi/state/...` through Loom's normal `LOOM_STATE_PATH` under Pi):
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper upgrade-spec-trace \
-  < /path/to/exact-trace-ownership.json
-```
-
-The helper uses StateManager's lock, validates the resulting v2 graph through the same pure trace parser used by normal loading and `validate-task-graph`, and changes only `spec_trace_version`, `spec_anchors`, and `spec_contributions`. It rejects duplicate, missing, reordered, or foreign roster entries; stale conflicting replays; active subagents; and invalid ownership. An exact replay is idempotent.
-
-By default the helper refuses while protected `active_wave_gate` authority exists. Normally, resume and finish that registered Wave Gate until the engine archives it and clears active authority. If the run is blocked specifically because its legacy Requirement scope is wrong, finishing it is impossible. Use this explicit retirement sequence instead, substituting the exact `runsRoot` and `runId` stored in `active_wave_gate`:
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration abandon \
-  --runs-root "<exact-protected-runsRoot>" \
-  --run "<exact-protected-active-runId>" \
-  --reason "legacy Requirement scope prevents this Wave Gate from completing"
-
-bun "$LOOM_DIR/engine/src/cli.ts" helper upgrade-spec-trace \
-  --retire-abandoned-run \
-  < /path/to/exact-trace-ownership.json
-```
-
-Usually omit `--superseded-by` and start the replacement only after migration. If an already-created successor Run Directory was deliberately named during abandonment, the upgrade re-proves that exact direct child and preserves the pointer as audit data; it does not install the successor as protected authority. The upgrade opens the exact protected Run Directory, proves its engine-owned Wave Gate program (Wave, Task roster, and authority digest), reads the immutable abandonment marker, then repeats those proofs under StateManager's lock. Missing/unreadable/foreign markers, authority drift, missing or foreign supersession targets, and non-abandoned runs cause no TaskGraph mutation.
-
-On success, one immutable `SpecTraceWaveGateRetirement` audit preserves the old run id, Wave, authority digest, revision, runs root, and exact abandonment reason/supersession. The same locked commit installs trace v2 and retires the run's review authority as a successor install would, except that another Wave's `spec_check` and its block are left alone: it clears `active_wave_gate`, `wave_review_epoch`, `active_wave_completion_suite`, the retired Wave's `spec_check`, the Wave's in-flight `review_run`s, and review acceptance granted by the abandoned run (those reviews reopen), and re-derives the retired Wave's block. Tasks, proofs, Findings, Review Generations, Refutations, Resolutions, issued packets, completed/orphan retirement history, and implementation evidence remain intact, so the next `start wave-gate` installs cleanly. An exact replay does not append another audit; a different mapping remains refused.
-
-### Amending a v2 Requirement trace
-
-A populated v2 graph whose Completion Claims or Contributions are wrong (a Requirement claimed by the wrong Task, a missing Contribution) is corrected in place, not by `populate-task-graph --force`. Re-population resets every Task to `pending` and discards all settled implementation, review and refutation results; an amendment keeps them. Prepare the same exact-roster JSON as the legacy upgrade, every Task once in protected order (each Distill Task too, with two empty arrays), then:
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper amend-spec-trace \
-  < /path/to/exact-trace-ownership.json
-```
-
-Arrays compare as sets, so a reordering is not an amendment and an exact replay writes nothing. The helper refuses, without writing, when:
-
-- the input is not the exact Task roster in order, or a Task's array repeats an id;
-- the graph is legacy (use `upgrade-spec-trace`) or not in the execute Phase;
-- any Task is executing or a subagent is active;
-- a Wave Gate is live: its review packets froze the old trace, so first run `helper orchestration abandon` on it. A `terminal-abandoned` tombstone is accepted and retired; a legacy terminal (`done` or `terminal-blocked`) registration is refused too and must first be migrated to terminal history;
-- any Task in a completed Wave (`wave_gate_history`) would change. Completed Waves are verified scope, so moving a Completion Claim into or out of one is refused too;
-- an added id is not a completable FR/AS entry in the Spec Index observed now, or that Spec Index is unavailable (fail closed; removals still apply), or `spec_file` moved during the call;
-- the result breaks v2 ownership (`parseSpecTraceContract`).
-
-On success, one locked write:
-
-- replaces only the changed Tasks' `spec_anchors`/`spec_contributions`;
-- keeps the recorded Requirement Content Hash of every retained Completion Claim (drift evidence survives), mints one from the observed Spec Index for every added claim, and drops removed claims' hashes;
-- retires the current Wave's trace-derived review authority. Over an abandoned tombstone this is what a successor gate install does: it clears `review_run`, the current Wave's `spec_check`, `wave_review_epoch`, `active_wave_completion_suite`, the tombstone, and review acceptance granted by that run, and re-derives Wave blocks. Another Wave's `spec_check` and its block are left alone. With no gate registered, the same reset runs only if some of that review state is left for the current Wave; otherwise nothing else changes, so an older Wave's `spec_check` survives;
-- appends a `spec_trace_amendments` audit naming the Wave, the retired run (or `null`), each change before and after, and the Spec Index observation.
-
-Task status, proof, attempt history, test evidence, Findings, Refutations, Resolutions and completed history are untouched, so nothing is re-implemented. Start the Wave Gate next: it issues fresh packets over the amended trace, and spec-check and reviewers judge the new scope. The State File boundary refuses a graph whose trace contradicts a Task's latest amendment, or whose amendment history for a Task does not chain, and re-population drops the audit together with the Tasks it described.
-
-### The Contract Task's review judges the contract surface
-
-A Contract Task's Wave review is the last review before any dependent Task implements against the contract's types file. When the contract declares a types file (not `**Types file:** none`) and the Wave Gate runs the current reviewer protocol (schema 2), that review changes in two ways (ADR-0069):
-
-- **Six reviewers, not five.** `architecture-tech-lead` (profile `focused-review`, Skill `deepen`) is appended after the base five, exactly as for a Task touching an owned family. The Wave does not complete until it settles. A Task that is both is issued six, not seven.
-- **One more packet section.** The `type-design-analyzer` and `architecture-tech-lead` packets of that Task carry a `contract-surface` section: each contract's id, title, statement, types file, `<plan file>#CT-n` and bound exports, then what to judge (states the types can represent that the statement forbids, primitive obsession, module shape and seams, duplicate policy across the bound exports) and that a defect is cheapest before the freeze. The Task's other four packets, every other Task's packets and the spec-check packet are byte-identical to a graph without the contract.
-
-Nothing else moves: slot and request ids of the base five are unchanged, findings follow the existing severity rules and the Refutation Panel, and a critical finding on the types file blocks the contract Wave like any other. Fixing it there is an ordinary Task Reopening; after the freeze it is a Contract Revision (next section).
-
-**A run in flight across an engine upgrade.** A Review Run that was installed with five reviewers on such a Task, before the engine issued the sixth, keeps its five and its issued packets and settles as issued. The limits:
-
-- A Contract Task whose review already finished (no Review Run left) inside a Wave Gate that is still open derives six reviewers on the next resume, because a finished review records no roster. The five-reviewer batch on disk no longer matches that roster. If the gate then blocks or re-issues requests for that Task, abandon the run and start a fresh Wave Gate; the Contract Task is then reviewed by all six.
-- A Contract Task that also touches an owned family already had six reviewers, so its installed roster does not say whether its packets carried the section. Its in-flight run continues on the packets it was issued. A batch that has to be re-derived (a crash part-way through publication) is re-derived with the section and differs from the issued one. Recover the same way.
-
-### A frozen acceptance test or contract types file is wrong
-
-An Acceptance Contract's frozen paths (its types file and acceptance tests) change only through an operator Contract Revision. A Wave Gate that finds them changed blocks with `frozen acceptance drifted: CT-n '<path>' changed`; a claimant that finds a frozen test wrong stops and reports it. Either restore the frozen bytes, or edit the frozen files yourself and record the revision:
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper revise-contract \
-  --contract CT-1 --reason "AS-003 asserted the wrong error variant"
-```
-
-The helper hashes the frozen paths as they are now, then commits under the TaskGraph lock. It refuses, without writing, when:
-
-- the arguments are not exactly `--contract CT-<n>` and a non-blank `--reason` of at most 512 characters;
-- the contract is not in the TaskGraph, or the graph is not in the execute Phase;
-- any Task is executing or a subagent is active;
-- a Wave Gate is live — abandon it with `helper orchestration abandon` first; an abandoned tombstone is accepted and retired;
-- the contract is still `awaiting-red`: its contract Task owns the files until its Wave Gate observes them red;
-- the contract Wave has not completed;
-- any Task claiming a covered Requirement sits in a completed Wave — that Wave was verified against the old bytes, so reopen it first (`helper reopen-completed-wave`, above);
-- a frozen path is missing or unreadable (the refusal names the read error, e.g. a symlink the no-follow read refuses), or the bytes did not change;
-- the contracts changed between the helper's observation and its lock, so it never read a path the locked contract freezes (`observation-stale`) — retry.
-
-On success, one locked write:
-
-- sets the freeze to `revised` with the new digests and appends a numbered revision (reason, previous and new digests, revalidated Task ids) — the old bytes stay auditable;
-- returns the current Wave's `implemented` claimants to `pending` with `revalidation_required`, keeping their proof and incrementing their review generation, exactly as a reopened Wave does — re-spawn them before starting the Wave Gate;
-- retires the current Wave's review and suite authority (`active_wave_completion_suite`, review runs, the Wave's spec-check) and resets its `tests_passed` and `reviews_complete` — and its `impl_complete` too when any claimant was returned to revalidation.
-
-The next Wave Gate judges the contract green against the new bytes and re-records its roster, which freezes it again.
-
-Before that locked write, the helper also settles the contract's engine-written **Skeletons** (below). It re-resolves the contract's **Export Bindings** against the revised types file, then, for each recorded skeleton of the contract:
-
-- an untouched one (its bytes still equal the digest the engine wrote, or the canonical bytes) is refreshed in place to the revised signatures, through the writer's digest-guarded replace, and re-recorded with origin `revision` — printed as `skeleton refreshed <path> from the revised types`;
-- a modified one is left exactly as it is and flagged stale — printed as `skeleton <path>: stale against revised contract (modified, left as it is)`. Status and the brief show the flag; completion still enforces the revised aliases on it, so the implementer adapts it;
-- a binding the revised types no longer resolve is printed as `skeleton binding problem: …; the next spawn's stage two blocks on it`.
-- a write that could not remove its prepared file is printed as `skeleton note: <path>: the prepared name <.name> beside it could not be removed (…); delete it` — the settlement stands, delete the dot-file.
-
-The refresh writes precede the locked update; if the update is then refused, the refreshed bytes stay and the next spawn adopts them by content.
-
-### Skeletons and contract stubs (G2)
-
-A plan's `## File Structure` can bind each new implementation file to the exports it provides, as `**Export bindings:**` lines (`` - `path` — CT-n: name: Alias, … ``, one contract per file, and on a TypeScript binding no export name equal to an alias on its line — the `name-collides-with-alias` refusal (a Java binding may reuse an alias as a name, but no alias may be the file's own class name — `alias-collides-with-class`); see `references/executable-models.md`). Population stamps them into the TaskGraph (`export_bindings`), and the engine then writes, records and checks the files itself. Nothing here needs an operator action unless something is refused.
-
-**Contract stubs at the contract Task's stop.** When the contract Task's agent stops, before the stop checks and before settlement, both stop shells (Claude Code's SubagentStop and Pi's) read the contract's not-yet-frozen types file and write a stub at every bound file of that contract, so the acceptance tests compile and fail by assertion. The contract Task never writes them, and validation refuses a bound path in its `file_list`. A binding that does not resolve writes no stub; it is reported as a stop note (`[loom] …`), never a block, and the contract Wave Gate then sees an uncollected acceptance file, which is no behavioral RED — fix the types file through the contract Task. Stubs are not frozen paths; in the Wave that owns their file they are ordinary skeletons with origin `contract-stub`.
-
-**Skeletons at spawn.** When the spawn gate admits an implementation Task (Claude Code's `validate-task-execution`, Pi's spawn lifecycle — the same `registerTaskExecutionBatch`), it runs one step before any attempt baseline is captured:
-
-1. **Stage two.** Every binding of the registering Tasks is resolved against its contract's types file, whose bytes must equal the freeze stamp. A missing alias, a non-function or generic alias, a Java holder of the wrong shape, an unfrozen contract or drifted bytes refuses the whole registration, every problem named, before a byte is written. Status reports the same problems as `skeleton-bindings-unresolved` in place of `spawn-wave-implementation`. When status itself cannot read a skeleton path or types file, it blocks nothing (registration reads them again and is the authority) but names the gap under the `skeletons-unobserved` reason beside the owed spawn.
-2. **Write.** Registration writes each missing bound skeleton of the Task before the attempt starts, may refresh a skeleton that is still the engine's untouched bytes (one generated from an older types surface), and never modifies a file anyone has changed. Every write goes through the one no-clobber writer: repo-relative only, never a frozen path, no symlinked ancestor; a create never replaces an existing file, and a refresh replaces a file only while its bytes still equal the expected engine digest. Canonical bytes already on disk with no record (for example after a refused registration) are adopted as they are. This covers the first attempt, a retry whose skeleton was deleted and an infrastructure respawn alike.
-3. **Record.** The engine-written digest (`engineSha256`) and the types digest are committed with the reservation (`skeletons`), with each path's outcome (`task.skeleton_outcomes`).
-
-Because the bytes exist before the baselines, engine bytes are never the implementer's write. A file whose bytes equal the recorded engine digest never satisfies "changed", and never counts as an out-of-scope change of the contract Task.
-
-**Skeleton outcomes.** Every non-test `file_list` path has exactly one outcome, the same in status and in the brief (`core/skeleton/outcomes.ts`):
-
-| Outcome | Meaning |
-|---|---|
-| `skeleton written` | the engine wrote it (origin `spawn`, `contract-stub` or `revision`) and it is still untouched, or it is about to at spawn |
-| `exists, not skeletonized` | the file already exists and is not an untouched engine skeleton; it is never modified |
-| `contract has no types file, no skeletons` | the Task claims a `**Types file:** none` contract and the path is unbound |
-| `no bound exports, no skeleton` | no binding names the path |
-| `unsupported language, no skeleton` | bound, but neither TypeScript nor Java under a `src/main/java/` root |
-| `absent, no skeleton owed` | a Distill Task's scope path that is bound and missing: a sibling deleted the file, and the engine writes no skeleton for a Distill Task |
-
-**Status.** `helper orchestration status` (and `--json`, field `skeletons`) lists, per current-Wave Task and path, the outcome marked recorded (written at that Task's spawn) or projected (not spawned yet), every skeleton flagged `stale against revised contract`, and every stage-two problem.
-
-**Completion.** For a Task binding or claiming a frozen contract, the `declared-artifact-changed` obligation fails `declared-artifact-contract-violated`, listing every violation, when a bound export is:
-
-- `deleted` — not exported, or the file is missing;
-- `renamed` — missing while another export carries its alias;
-- `retyped` — not `export const name: Alias` (TypeScript) or `static final Alias name` (Java) with the alias imported from the types file;
-- `still unimplemented` — its initializer still holds the exact string `unimplemented: <name>` (any other throw is fine);
-
-or when a production file in the types file's language `shadows frozen ADT` (declares a type named like a **Frozen ADT** or one of its variants) or `re-lists frozen variants` (a local union or sealed hierarchy re-declaring two or more of them; the diagnostic names the `Extract<…>` remedy). The violations go into the semantic retry appendix. A read failure while judging is an `implementation-observation-unavailable` infrastructure failure: it never consumes a semantic attempt and never passes. Attested Tasks, test files, and Tasks waiving regression as `documentation-only` or `generated-artifact` owe nothing. Graphs populated before G2 carry no bindings and run unchanged: their Tasks owe no conformance (`pre-g2-graph`).
-
-**Stray prepared files.** Each skeleton write first writes a dot-file `.<file>.loom-skeleton-…` beside the target and removes it afterwards. When that removal fails, nothing is blocked: registration prints `[loom] skeleton note: …` on stderr and the contract stop adds a `note:` line to its stop note, both naming the dot-file. Delete it.
-
-**Recovering.** A stage-two refusal means the plan and the frozen types disagree: add the missing signature to the types file through a Contract Revision (above), or correct the plan's bindings and re-populate. Never write or delete a skeleton by hand to get past it — a deleted skeleton is simply rewritten at the next spawn.
-
-### Where does each Acceptance Contract stand?
-
-Before revising a contract, or to see which acceptance testcases are still allowed to fail, print the Contract Status:
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper contract-status
-```
-
-It takes no arguments. For each Acceptance Contract, in TaskGraph order, it prints:
-
-- `CT-n  <title>  (contract Task Tn)`;
-- the freeze state: `awaiting RED`, `frozen at Wave N` followed by every roster testcase as `<file> › <name> — <anchors>`, or `revised (k revisions); roster cleared until the next Wave Gate re-records it` followed by the re-stamped paths;
-- each covered Requirement as `AS-00n due Wave N` (the latest Wave of a Task that claims it) or `AS-00n unclaimed`;
-- `revisions: k` when the contract has any Contract Revision.
-
-A TaskGraph without contracts prints the single line `no Acceptance Contracts`. The helper is read-only: it never writes the State File and never takes its lock, so it is safe while a Wave Gate is live or a subagent is active. Set `LOOM_STATE_PATH` to read a non-default graph. It exits 1 with `No task graph at <path>` when no TaskGraph exists, and with the load boundary's error when the graph is unreadable or corrupt — a corrupt graph is never reported as missing.
-
-### What will the stop checks run at a Task's stop?
-
-Before dispatching a Task, or when a stop check keeps an Agent working and you want to see why, print the Stop-Check Plan for that Task. It covers both the Acceptance Stop Check and the Affected-Test Stop Check:
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper stop-check-plan --task T2
-```
-
-It takes exactly one argument, `--task <id>`. When the check is on, it prints:
-
-- `T2 (Wave 2): acceptance stop check on`;
-- each owed testcase, grouped under its contract id, as `  <file> › <name>`. A roster testcase is owed only when every anchor it carries is due by the Task's Wave;
-- `files:` followed by each owed acceptance file, repository-relative;
-- `cwd: <runner cwd>`, then `argv: [...]` as JSON, with `{files}` already expanded so each owed file is one argument relative to the cwd, then `report: <report path>`.
-
-When the check is off, it prints one line, `T2 (Wave 2): acceptance stop check off — <reason>`. The reason is one of: no acceptance runner is frozen in the TaskGraph, the Task owes no frozen acceptance testcase due by its Wave (a contract still awaiting RED owes nothing), or the runner command could not be formed for the owed files. In the last case the runner's refusal follows on indented lines.
-
-An `affected tests:` section follows the acceptance lines. When the affected check is on, the section prints:
-
-```text
-affected tests:
-  changed files:
-    <file>              one line per file the runner gets, in first-write order
-  cwd: <affected runner cwd>
-  argv: [...]           {files} expanded, each file relative to the cwd
-  report: <report path>
-```
-
-When the affected check is off, the section prints `  affected stop check off — <reason>`. The reason is exactly one of these, in this precedence:
-1. no affected runner is frozen in this TaskGraph;
-2. this Task's attempt has no changed files beneath the affected runner cwd. Each changed file outside the cwd follows on its own line, as `outside the affected runner cwd: <file>`;
-3. the affected runner command could not be formed for the changed files. The refusal follows on indented lines.
-
-The helper reads the changed files from the Task's live attempt, read-only, through the same `changedFilesAtStop` derivation the hook uses. On Claude Code, the live attempt is the one implementation sidecar naming the Task, read from the session ledger. With no live attempt, which includes every Pi run, there are no changed files. A live attempt whose ledger epoch cannot be read exits 1 with the cause, so it never reads as "no changed files".
-
-The plan is `planStopChecks`, the one pure function both live checks decide from, on Claude Code and on Pi. So whenever a check's plan reads `off`, that check skips, or for a refused command it notes the refusal and runs nothing. When it reads `on`, the check would launch exactly the printed argv from the printed cwd. A parity matrix test runs the hook, the Pi stop and the helper over the same fixtures to pin this. At the stop itself the live checks also consult per-stop state the plan does not read: each check's block counter (after 3 blocks that check stops blocking), the repository root, the runner lock (another stop may hold it), and, for the affected check, the remaining hook budget. When one of those stops the check, the hook emits a note, the stop proceeds, and the plan still reads `on`. The helper never runs the runner. It is read-only: it never writes the State File and never takes its lock, so it is safe while a Wave Gate is live or a subagent is active. Set `LOOM_STATE_PATH` to read a non-default graph. It exits 1 on any of these:
-
-- `--task` is missing or has no value, or an argument is left unconsumed;
-- no TaskGraph exists (`No task graph at <path>`);
-- the graph is unreadable or corrupt (the load boundary's error; a corrupt graph is never reported as missing);
-- the Task id is not in the TaskGraph (`No task <id> in the TaskGraph`). A typo never reads as "nothing owed".
-
-### Where does a Task stand on I6?
-
-Use this before dispatching a Task, while its attempt is live, or after it fails with `proof:red-then-green-unproven:<gap>`. It prints the Red-Then-Green Status for that Task: whether the Task owes I6, how settlement splits its files, what the live attempt shows so far, and what the frozen Proof stores.
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper red-then-green-status --task T1
-```
-
-It takes exactly one argument, `--task <id>`. The output has four parts, always in this order.
-
-**1. Header.** One line, `<id> (Wave N, <status>): ` followed by one of:
-
-- `owes I6`;
-- `I6 not owed — <reason>`, where the reason is the first of these that applies:
-  - `TaskGraph predates I6`: the frozen manifest carries no `testFiles`;
-  - `writes Acceptance Contract <id>'s frozen files; the contract gate's red window is its red evidence`: the Task is that contract's contract Task, which never owes I6 (see [Task fails I6](#task-fails-i6-red-then-green));
-  - `claimant (acceptance contract)`: the Task is an Acceptance Contract claimant, which waives its new tests;
-  - `new tests waived: <reason>`: any other new-test waiver, for example `new tests waived: documentation-only`;
-  - `the frozen Proof carries no red-then-green obligation`: the Task requires new tests, but its frozen Proof owes no I6. The State File's load check makes this unreachable for a graph it admits; the line exists so every not-owed answer has a reason;
-- `I6 undeterminable — <reason>`: the Task's test-file classification or its Proof is not frozen yet, so settlement could not decide either.
-
-The reason only explains a `not owed` answer. The decision itself is `redThenGreenDuty`, the function settlement uses.
-
-**2. Files.** This part is printed only when the header reads `owes I6`. It shows the same split settlement judges by (`classifyTaskFiles`), with each list in `file_list` order:
-
-```text
-test files:
-  <file>
-implementation files:
-  <file>
-```
-
-An empty list prints as a single line, `test files: none` or `implementation files: none`. When you see `test files: none`, the Task fails with `no-test-files` (see [Task fails I6](#task-fails-i6-red-then-green)).
-
-**3. Live attempt.** This is the I6 judgment over the epoch of the live Claude Code attempt so far, computed by `judgeRedThenGreen` exactly as settlement calls it. It prints one of:
-
-- `live attempt not observable on this harness`: under Pi. The live attempt is never inspected;
-- `live attempt: none`: no implementation sidecar names the Task;
-- `live attempt: uninspectable — <reason>`: no readable sidecar names the Task, but some implementation attempt sidecars could not be read, so a live attempt may be missed;
-- `live attempt: unreadable — <reason>`: an attempt is live but cannot be judged. Either several live attempts name the Task, the attempt is rostered without a parseable role, its ledger epoch cannot be read, or the repository root cannot be resolved;
-- `live attempt: not judged (no I6 obligation to judge it by)`: an attempt is live, but the header reads `I6 not owed` or `I6 undeterminable`, so there is no obligation to judge it against;
-- `live attempt: shown`, followed by the three facts in order:
-
-  ```text
-  live attempt: shown
-    red #<index> <command>
-    first implementation write <path>
-    green #<index> <command>
-  ```
-
-- `live attempt: proof:red-then-green-unproven:<gap>`, with ` (untrusted runs only)` added when the gap's `untrustedOnly` is true. The gaps are listed in [Task fails I6](#task-fails-i6-red-then-green).
-
-Only a `shown` judgment carries ledger references. `#<index> <command>` names a qualifying run: `index` is the run's 0-based position in the epoch's ordered events, and `command` is that run's command. For an unproven judgment the helper prints only the gap. It does not show references for steps met before the gap, because the judge returns none and inferring them would re-derive the judgment.
-
-**4. Stored result.** This is the red-then-green result recorded in the Task's frozen Proof. The Proof holds each obligation's latest evaluation, so a Task pending a retry shows its latest gap. It prints one of:
-
-- `stored: no proof (legacy)`: the Task carries no frozen Proof;
-- `stored: no red-then-green obligation`: the frozen Proof owes no I6;
-- `stored: pending`;
-- `stored: shown`, followed by the same three indented `red`, `first implementation write` and `green` lines as a live `shown`;
-- `stored: proof:red-then-green-unproven:<gap>`: the failure kind settlement wrote to the receipt. A Proof failure other than an I6 gap reads `stored: proof:<kind>`.
-
-Problems with the live attempt (an uninspectable sidecar set, several live attempts, an unreadable epoch, an unresolvable repository root) and an undeterminable duty each print as their own line, and the helper still exits 0. It exits 1 only in these cases:
-
-- `--task` is missing or has no value, or an argument is left unconsumed;
-- no TaskGraph exists (`No task graph at <path>`);
-- the graph is unreadable or corrupt. The load boundary's error is printed, and a corrupt graph is never reported as missing;
-- the Task id is not in the TaskGraph (`No task <id> in the TaskGraph`). A typo never reads as "not owed".
-
-The helper is read-only. It never writes the State File, the ledger or the runtime directory, and it never takes the TaskGraph lock, so it is safe to run while a Wave or a Wave Gate is live or a subagent is active. Set `LOOM_STATE_PATH` to read a non-default graph.
-
-### State is malformed
-
-Use only when the load boundary explicitly directs recovery:
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper repair-task-graph
-```
-
-The repair path parses rejected bytes, applies conservative repair, refuses loss of Findings/audit data, validates both full and typed forms, installs atomically, and restores mode `0444`.
-
-### Completing an orchestration
-
-After the final Wave Gate, retire the TaskGraph:
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper complete-orchestration
-```
-
-The helper refuses, listing every reason, unless the graph has Tasks, all of them `completed`, and no Wave Gate run is registered as active. Under the TaskGraph lock it publishes the exact graph bytes beside the live graph as `.claude/state/completed_task_graph-<issue|no-issue>-<UTC stamp>.json`. The publish is exclusive and whole: the bytes are prepared under a temporary name and hard-linked into place, so an existing archive is never overwritten and a partial archive is never visible. It then removes the live graph. The archive is published before the removal, so a failure leaves both files, never neither.
-
-Every Loom guard keys on the live graph path: `block-direct-edits`, the Task/Agent spawn gates and the state guard. So they all lift, and a post-gate `/review-and-fix` can run in the same checkout. While a finished graph stays live, those guards stay on: Write and Edit into the Orchestrated Repository are refused, and spawns are phase-checked. `block-direct-edits` guards the repository that owns the live graph, meaning the canonical root of the Git working tree holding the State File. It also always guards Loom's protected directories, wherever they lie: the subagent directory (`LOOM_SUBAGENT_DIR`, default `/tmp/claude-subagents`, holding the evidence ledger, `.active`, `.machine` and `.task_graph` files) and the machine-definitions directory (`LOOM_MACHINES_DIR`). A parent write there would forge evidence or rewrite the gate, and the state guard covers them only for Bash. Writes whose every symlink-resolved target lies outside that root and outside both protected directories are allowed. That covers a session scratchpad, another worktree of the same repository, and a sibling directory such as `<root>-other/`. Worktrees nested under the root (for example `.claude/worktrees/`) are still inside. A target or root the guard cannot resolve (a dangling symlink, malformed input, a `LOOM_STATE_PATH` outside Git and outside the documented layouts) stays guarded. The state directory keeps its separate state guard. See [ADR-0046](adr/ADR-0046-the-direct-edit-guard-protects-only-the-orchestrated-repository.md).
-
-### Abandoning an orchestration
-
-`/loom --complete` and `--abort` are not implemented lifecycle flags. To abandon an unfinished orchestration, use the guarded teardown, which keeps no copy:
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper cleanup-state
-```
-
-Use it only with explicit operator intent. Preserve specs, plans, review runs, and the GitHub Issue as audit/recovery material.
-
-## Remediation and Git safety
-
-`/review-and-fix` must use the registered remediation program. Standalone remediation itself does **not** require a feature TaskGraph. Every new start is schema v2 and requires `defectFamily`, even when the source review has zero surviving criticals. Use the canonical Skill runbook for the complete input shape; do not hand-write a registration, checkpoint, event, or result.
-
-Before creating or claiming the requested Run Directory, start preflight authenticates the completed source review and its published result, parses complete critical-Finding accounting, selects any required operator checks, and captures the candidate baseline. Invalid input returns an ordinary start error and creates **no run**. Once preflight succeeds, the engine creates and registers the run; any later process/report failure, candidate drift, path audit failure, or installation refusal returns a durable `blocked` action for that registered run. Do not describe these two cases as the same recovery state.
-
-The program rejects:
-
-- a missing, duplicate, foreign, advisory, or refuted Finding ID in critical accounting;
-- unresolved or out-of-scope critical/sibling dispositions (valid declarations, but installation blockers);
-- dirty paths absent from review scope and explicit support paths;
-- Loom state, review, panel, and Run Directory evidence;
-- unrelated pre-staged work;
-- symlinks or non-canonical repository-relative paths at authority boundaries;
-- staged sets that differ from the audited set;
-- selected checks without a fresh required-file JUnit/Vitest report containing at least one executed and zero failed tests;
-- candidate byte, mode, path-roster, HEAD, or index drift through execution and installation.
-
-A failed check or changed candidate is immutable evidence for that run; start a fresh remediation run after correcting the cause. Removing unrelated dirty/staged state also changes the registered candidate, so it requires a fresh run rather than reuse of the old registration. A registered blocked run may be resumed idempotently for diagnosis or after a transient external condition only when source, registration, and candidate authority remain byte-identical. If remediation itself needs an omitted support path, the immutable registration cannot gain it: start a fresh run that names it and retain/abandon the older run as evidence.
-
-The engine stages into a temporary index with literal path semantics, verifies that index, and installs it under the real index lock only after an opaque installable Defect-Family Assessment exists. In the external schema-v2 `done` action, `outcome.kind` is `remediation-installed`, `outcome.installation` is the actual receipt returned by the Git adapter, and `outcome.defectFamilyAssessment` is the authenticated assessment. Read that action; never construct it. For zero surviving criticals, the assessment status is `not-required`; for critical repairs it is `repair-checked`. Neither means proven defect-family closure or a `ResolvedFinding`. Commit only after this `done` action. Never hand-stage, and never force-push.
-
-Completed schema-v1 remediation runs remain read-only and inspect as `done — historical P3 assessment unknown`; their external assessment is `historical-unknown`. Reading/resuming that history returns the existing receipt, never reinstalls the index or grants current installation authority. An unfinished schema-v1 run is blocked and must be replaced by a fresh schema-v2 run. Missing v2 fields never fall back to v1. The source Standalone Review Run retains its own schema and immutable publication; versioning remediation does not rewrite or invalidate that source history.
-
-Completed-v2 replay parses both checkpoint audit-path arrays before assessing retained observations. Missing or malformed arrays produce `remediation checkpoint audit paths are missing or malformed`, not invented empty-path evidence. If installation succeeds but checkpoint recording fails, preserve the explicit installed-index diagnostic and actual receipt: that failure does not mean rollback or “nothing was installed.” Do not hand-repair the checkpoint or reinstall from its prose; use read-only inspection and retain the interrupted evidence.
-
-**Runtime selection:** every mutating CLI must present the exact Runtime Revision admitted by the loaded extension. After a package update, reload Pi or restart the host before retrying; revision skew fails closed and must never be bypassed by unsetting admission variables. Use matching-runtime disposable fixtures for feature-checkout mutation experiments. Do not retrofit newly available records into an already-issued source review. Reviewer source version does not select remediation version: P3 schema-2 command/report/install policy remains separate. Dated publication and bootstrap evidence lives in the relevant ADR and remediation plans; development checks are not registered installation receipts.
-
-### Enrolling a critical-repair check
-
-Critical remediation selects check IDs from the operator-owned `.loom/verification-manifest.json`. The selected fixed executable/argv must itself create a **new** report at the **exact** configured path on every run. The file must be a fresh parseable JUnit XML or Vitest/Jest JSON report beneath `.loom/completion-reports/`, remain untracked, and be Git-ignored. A normal process exit is insufficient: the parsed report must show more than zero executed tests, zero failures, and not an all-skipped run.
-
-Before each selected critical check launches, the engine proves that exact literal report path is Git-ignored and untracked, then removes any old regular file through the anchored parent capability using no-follow: Linux unlinks through the retained parent descriptor; macOS re-proves the parent's whole path immediately before the unlink and refuses a planted-symlink parent with ELOOP (both reports survive a redirect attempt). Only ENOENT counts as absence; directories, symlinks, and permission failures fail before launch with `required report reset failed before launch`. Merely touching seeded green bytes cannot pass. A newly written report may have identical bytes to the previous report. Zero-critical remediation launches no check, and Wave report freshness behavior is unchanged.
-
-Strict reports are capped at **8 MiB (8,388,608 bytes)** and actual XML element depth **128** (root depth 1, including diagnostic elements). Structural XML parsing rejects malformed documents and DTDs; comments/CDATA do not create tests. Capture, persistence, and base64 replay enforce the report byte bound before oversized allocation/decoding. V2 remediation additionally caps each encoded event file at **12 MiB**, the aggregate encoded journal at **64 MiB**, and the journal at **1024 records**. These limits apply to retained-event reads, append reconciliation/new appends, and CLI inspection's event-tail read, before oversized file decoding/JSON parsing; enumeration is bounded too. They are not blanket limits on every Run artifact/checkpoint, or a claim that decoded heap usage equals encoded bytes. Legacy/default journal consumers retain their existing policy.
-
-These are fresh structured engine observations, **not semantic proof**: an operator-owned fixed command can still fabricate a syntactically valid new report. Neither process success nor a report digest proves that tests exercised the declared invariant, root cause, sibling completeness, or Historical RED.
-
-The `helper write-verification-manifest` operation requires an existing loadable TaskGraph whose Task roster is empty. It compares authority, not bytes: a manifest that parses to the installed authority is an unchanged replay, however it is formatted. It refuses a different (or invalid) existing manifest unless called with `--replace`, which stages and atomically renames the new manifest into place, and it refuses every change after Task population, with or without the flag ([ADR-0065](adr/ADR-0065-manifest-helper-compares-authority-and-replaces-before-population.md)). Standalone remediation has no TaskGraph requirement; this enrollment helper's idle-TaskGraph requirement is a separate configuration-installation constraint.
-
-**Current repository enrollment (2026-09-09):** with explicit user approval, the parent replaced only `project:verify`'s report policy at a verified idle boundary with no TaskGraph: `{ "kind": "required-file", "path": ".loom/completion-reports/verify.junit.xml" }`. The fixed executable `npm`, argv `["run", "verify"]`, root cwd, Wave scope, and 30-minute timeout are unchanged. This was operator configuration replacement, not use or modification of the create-only helper and not a live graph mutation. The existing `test:unit` script emits JUnit using installed Vitest; no runner or report writer was added. Only `.loom/completion-reports/` is newly Git-ignored. Existing populated TaskGraphs retain their already-frozen commands. Enrollment makes the check selectable for critical P3; it does not establish a passing check or completed live schema-v2 remediation. Do not bypass protected paths or edit a live graph. See [Verification manifest](workflows.md#verification-manifest) and the [dated enrollment follow-up](../.claude/plans/2026-09-09-junit-verification-enrollment.md).
-
 ## Rules gate (Claude Code and Pi)
 
 One decision, two thin adapters. `engine/src/core/rules-gate.ts` (pure) holds the policy, full-read coverage, adherence check and block text; `engine/src/core/bash-code-mutation.ts` classifies Bash mutations. Each harness only maps its own evidence into the core's `TranscriptEvent`s:
@@ -1492,7 +149,7 @@ One decision, two thin adapters. `engine/src/core/rules-gate.ts` (pure) holds th
 | Harness | Adapter | Entry |
 |---|---|---|
 | Claude Code | `engine/src/handlers/pre-tool-use/claude-transcript-events.ts` (transcript JSONL → events) | `rules-gate` PreToolUse hook, `hooks/scripts/rules-gate.sh`, matcher `Edit\|Write\|MultiEdit\|Bash` |
-| Pi | `pi/rules-gate.ts` (`buildContextEntries()` → events) | standalone Pi extension; `~/.dotfiles/pi/extensions/loom-rules-gate.ts` is a shim that loads it through the runtime loader |
+| Pi | `pi/rules-gate.ts` (`buildContextEntries()` → events) | standalone Pi extension; an operator installs a one-line shim in their Pi extensions directory that loads it through the runtime loader |
 
 `engine/tests/pi/rules-gate-parity.test.ts` runs one scenario matrix through both adapters and requires the same decision — change policy in the core only, and a drifting adapter fails there.
 
@@ -1516,40 +173,140 @@ Subagents are exempt — the orchestrator owns their compliance (Claude Code: `a
 
 The gate proves context and articulation, never genuine adherence; the substance of the `LOOM:` line is judged in review.
 
-## Linter operations
+## Common operating states
 
-### Scan the project
+Find what you see in the first column. An entry that has mechanics of its own is linked; the short ones follow the table.
+
+| You see | It means | Do |
+|---|---|---|
+| A Task stays `pending` | its Agent is still running, it crashed, or its proof failed | [Task remains `pending`](#task-remains-pending) |
+| `proof:red-then-green-unproven:<gap>` in a settlement line | the attempt did not show a red run, then a write, then a green run | [Task fails I6](#task-fails-i6-red-then-green) |
+| `implementation-escalation-required` in status | both semantic attempts failed, or an attestation drifted | [Implementation escalation](reference/recovery.md#implementation-escalation-semantic-attempt-2-exhausted) |
+| A stop blocked under `## Acceptance stop check`, `## Affected-test stop check` or `## Task mutation check` | a stop check found failing tests or surviving mutants, and the same agent keeps working | [Stop checks](verification.md#stop-checks) |
+| The Wave Gate reports critical Findings, or waits on advisories | reviewers found work to do | [Critical Findings](#wave-gate-reports-critical-findings), [advisory disposition](#wave-gate-awaits-advisory-disposition) |
+| The Wave Gate rejects with owner-verification findings | an owned invariant's matrix test misses a sibling or leaves a mutant alive | [The remedy table](verification.md#owner-verification-blocks-a-wave-gate) |
+| `loom:full-tier-lint` refuses an import the branch's own rules allow | the loaded runtime's lint rules are older than the branch's | [Full-tier lint](#wave-gate-full-tier-lint-refuses-imports-the-branch-allows) |
+| `frozen acceptance drifted: CT-n '<path>' changed` | a frozen Acceptance Contract path changed | [Contract Revision](verification.md#a-frozen-acceptance-test-or-contract-types-file-is-wrong) |
+| `skeleton-bindings-unresolved` in status | the plan's export bindings and the frozen types disagree | [Skeletons](verification.md#skeletons-and-contract-stubs) |
+| A decompose spawn refused with `plan-design-review (…)` | the plan has no accepted design review, or changed after it | [Plan design review](standalone-review.md#decompose-is-blocked-on-the-plan-design-review) |
+| A reviewer result refused for unread units | the reviewer did not page through the whole frozen diff | [Read coverage](standalone-review.md#read-coverage-reviewer-protocol-v4) |
+| Remediation returns `blocked`, or `required report reset failed before launch` | the candidate drifted, a check failed, or its old report could not be removed | [Remediation and Git safety](standalone-review.md#remediation-and-git-safety), [enrolling a check](verification.md#enrolling-a-critical-repair-check) |
+| Status reports the active Wave Gate run as orphaned | its Run Directory is missing | [Active Wave Gate Run Directory is missing](#active-wave-gate-run-directory-is-missing) |
+| A completed Wave's reviewed bytes drifted | a remediation invalidation was missed | [Reopen the completed Wave](reference/recovery.md#completed-wave-has-post-review-workspace-integrity-loss) |
+| Pi refuses a mutation for runtime version skew | the loaded extension and the checkout differ | [Reload](#pi-reports-runtime-version-skew) |
+| `populate-task-graph` refuses the spec or a Requirement id | the authored trace cannot be proved against the Spec Index | [Population refuses](#population-refuses-the-spec-or-a-requirement-id) |
+| The load boundary directs a repair | the State File is malformed | [State is malformed](#state-is-malformed) |
+
+### Task remains `pending`
+
+- If its Agent is still in `executing_tasks`, wait or diagnose a hang.
+- If the Agent crashed, SubagentStop/cleanup clears execution attribution; respawn the exact Task.
+- If proof is unsatisfied, inspect `proof.obligations` rather than trusting completion prose.
+- The settlement line (`Task T1 settlement: …` on Claude Code, `loom(pi): T1 settlement: …` on Pi) and the Task's `failure_reason` both say why a failed attempt was not implemented. A `task-byte-scope-violation` names the paths written outside the Task's declared files: the first 10, then `and N more`. Remove stray files that are not the Task's work, such as a killed test run's leftovers, before the retry, or that retry fails the same way.
+- An `infrastructure-blocked` settlement names each failure's own reason in parentheses (a longer reason is cut to its first 1,000 characters followed by `…`), for example `implementation-observation-unavailable (Claude JSONL transcript record 16 is malformed or truncated: …)`. A reason that repeats an earlier one is named once. Infrastructure blocks never use up the retry: fix the named cause, then dispatch what `orchestration status` lists.
+- Claude Code writes harness records into a subagent transcript beside the conversation: `attachment`, `system`, and request telemetry (`api-request`, `api-request-shape`, `api-request-blob`). An `api-request-blob` carries a copy of earlier turns, sometimes with a `system` role. Only `user` and `assistant` records are read as the agent's activity (`core/claude-record-kind.ts`). Harness records are accepted without reading their message and never count as written files, test output or tool results. A transcript that a strict check still refuses names the exact record in its reason.
+
+### Test evidence is missing or degraded
+
+The implementation Agent must run recognizable tests. For trusted Claude evidence, prefer a supported machine-readable report. A nonzero exit is trusted failure; a zero exit without an acceptable report may remain untrusted. Pi structured tool results retain their distinct provenance.
+
+Do not use `mark-tests-passed` to fabricate evidence. It is an evidence/status operation, not an escape hatch.
+
+### Task fails I6 (red-then-green)
+
+A Task owes the red-then-green obligation (I6) when it requires new tests, is neither an Acceptance Contract claimant nor a contract Task, and its TaskGraph was populated after I6 existed, which means its frozen manifest carries `testFiles`. A contract Task is exempt because it cannot satisfy I6: its contract Wave Gate requires every acceptance testcase it writes to be collected and failing, so those tests never go green in its attempt, and a test-only contract has no implementation file to write. The gate's observed red window is the contract Task's red evidence. Its Proof still owes `new-tests`, and its brief carries no I6 section. A Task that owes I6 settles `implemented` only when its attempt epoch's ledger shows three things in order:
+1. a qualifying red on one of its test files;
+2. then its first write to an implementation file;
+3. then a qualifying green covering every one of its test files.
+
+A qualifying run is a ledger `TestRun` with an exit code and a parsed structured report that records per-file results. The obligation, the gaps and the soundness limit are defined in [Deterministic implementation, I6](roadmap.md#during-the-loop--put-the-oracle-inside-the-agents-iteration).
+
+A failure reads `proof:red-then-green-unproven:<gap>` in the settlement line and in the retry receipt. Each gap points to a likely cause:
+
+- `no-test-files`: the `file_list` matches no frozen test suffix. Re-scope the Task, or declare `testFileSuffixes` in the manifest before the next population.
+- `implementation-write-missing`: the ledger holds no write to a non-test `file_list` entry. Either the agent wrote only through an unlogged path, such as an interpreter or a generator, or it wrote nothing.
+- `red-missing` or `green-missing` with `untrustedOnly: true`: tests ran, but no run was qualifying. Usual causes are a chained, piped or redirected command, a missing report option, or Pi-structured evidence with no ledger run. On Claude Code a failing run reaches the ledger only through the `PostToolUseFailure` hook; a runtime whose `hooks/hooks.json` predates that wiring records no red at all.
+- `red-missing` with `untrustedOnly: false`: qualifying runs exist, but none shows red on a Task test file. Either the tests never failed, or they only failed to collect in a Task that creates no implementation file. A collection or import error is red only when the Task creates an implementation file, meaning one whose Task-level `artifact_baseline` entry is `missing`. The brief names those files.
+- `red-after-first-implementation-write`: the code came before the failing test.
+
+The retry brief tells the agent to return its implementation files to the attempt baseline with one Bash call, observe red, and then implement. The call runs from the repository root and first checks that the baseline is a commit. The baseline is the Task's `start_sha`, or `HEAD` when none was recorded; the brief then says that the uncommitted changes are discarded. The call restores each file the baseline has (`git restore`) and deletes each file the Task created (`rm -f`). If the baseline is not a commit, it fails before changing anything. A `ledger-unavailable` gap, or an unreadable ledger at settlement, is infrastructure. It does not use up the semantic attempt.
+
+To see the facts settlement judged, numbered the way the gap and the stored evidence cite them, read the attempt's epoch (see [Reading an attempt's ledger epoch](reference/helpers.md#reading-an-attempts-ledger-epoch)). For the I6 judgment itself, use [`helper red-then-green-status`](reference/helpers.md#where-does-a-task-stand-on-i6).
+
+### Reviewer evidence is missing
+
+Registered programs derive the exact missing slots and issue retry requests. Resume the program; do not re-run the whole roster or manually write a transcript.
+
+A malformed semantic output gets one retry. Attempt-2 rejection is terminal for that run. Wave reviewer exhaustion has an explicit `orchestration restart` path; standalone runs should remain blocked audit evidence rather than be edited.
+
+### Active Wave Gate Run Directory is missing
+
+Do not recreate the old directory or edit `active_wave_gate`. Create a pristine
+replacement direct child, copy the exact run ID/wave/digest from protected state,
+and use the atomic recovery operation:
 
 ```bash
-bun scripts/lint-project.ts            # the whole repository, from any directory in it
-bun scripts/lint-project.ts engine/src # one directory (exclusions still apply)
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration recover-orphan \
+  --runs-root ".claude/reviews/wave-gate-runs" \
+  --run-id "<active-run-id>" --wave "<active-wave>" \
+  --digest "<active-authority-digest>" \
+  --new-run "<fresh-replacement-run-directory>"
 ```
 
-Everything is linted; exclusions are explicit and reasoned. The scan reads every
-lintable file — tests, `.mts`/`.cts`/`.mjs`/`.cjs` and declaration files
-included — minus the `exclude` entries in `.claude/linter/rules/config.json`,
-each with its reason. The full scan runs inside `npm run verify` (the engine's
-`lint` script, between the compiler and the suite), so a violation or a stale
-baseline, exclusion, purity shell, boundary or grant fails verification locally
-and in CI. Loom's purity roots (`engine/src/core`, `machine`, `linter`,
-`parsers`), its declared shells and its boundaries for every `engine/src`
-directory and top-level file live in that config, not in the rule code. See
-[the runner reference](../skills/lint-project/references/runner.md).
+It refuses if the old entry exists or any subagent is active, preserves review
+history and generations, records the retirement, installs replacement authority
+atomically, and returns the exact new spawn batch. `cleanup-state` remains a
+history-discarding last resort, not normal recovery.
 
-### Rule tiers
+### Wave Gate reports critical Findings
 
-Regex rules run on every edit (the `immediate` tier, `lint-file` PostToolUse) and at the Wave Gate. Each programmatic rule declares its own earliest tier: `no-cross-boundary-imports`, `no-io-in-pure-modules`, `switch-totality`, `no-duplicate-block` and `no-wire-cast` are `immediate`, so a forbidden import, an unproven switch, a copied block or `JSON.parse` / `.json()` output typed by `as T` or a `: T` annotation instead of being parsed (ADR-0072) is refused when the file is written; the rest (`max-function-lines`, `exhaustive-discriminant-branching`, `no-nested-ternary`, `prefer-array-methods`, `fugue-generated-integrity`) run only in the `full` tier at the Wave Gate.
+Fix surviving criticals through implementation Agents, then open a new Wave Gate run. Each affected Task is `implemented`, so it is owed no dispatch until it is reopened (see [Reopening an implemented Task to fix a Wave Gate Finding](reference/recovery.md#reopening-an-implemented-task-to-fix-a-wave-gate-finding)). Reopening increments its Review Generation. Do not remove Findings from the graph. The next Review Run verifies every prior id against a new Review Packet.
 
-### Validate rule files
+### Wave Gate awaits advisory disposition
+
+Present the advisories the engine's request references. The only decision a Wave Gate records is exactly `{"kind":"approve"}` through `decide`; any other object is refused without writing. To fix an advisory first, `abandon` the run with a reason, reopen the Task, re-dispatch it, and start a fresh Wave Gate (see [Reopening an implemented Task to fix a Wave Gate Finding](reference/recovery.md#reopening-an-implemented-task-to-fix-a-wave-gate-finding)). Do not classify advisories silently in parent reasoning.
+
+In a contract Wave, `helper orchestration status` adds an `acceptance-freeze-pending` reason at this pause. It lists every advisory whose file is a frozen path of a contract still `awaiting-red` there. When the completion suite accepts, only its receipt is installed. The Acceptance Freeze is stamped by the locked completion commit, so the contract is still `awaiting-red` at the pause, and abandoning the run freezes nothing ([ADR-0044](adr/ADR-0044-the-acceptance-freeze-is-stamped-by-the-completion-commit.md)). Approval lets the gate complete and stamp the Acceptance Freeze over those bytes, so after it each fix needs a Contract Revision. Fix a relevant advisory before approving, by the same recipe on the contract Task. The fresh gate reports no frozen-path drift for the fixed files. The reason is a status projection only; the decision request and its identity are unchanged.
+
+### Pi reports runtime version skew
+
+Do not repair state. The mutating CLI route compared the Runtime Revision published by Pi's loaded extension with the current checkout and refused before writing. Run `/reload` (or fully restart Pi while preserving the session), then retry the same idempotent operation. Canonical `orchestration status` remains available during skew.
+
+A missing handshake means the Pi session predates this protocol or did not load Loom; it is also resolved by reload/restart, not by deleting fields from the TaskGraph.
+
+### Wave Gate full-tier lint refuses imports the branch allows
+
+The Wave Gate's `loom:full-tier-lint` check runs against the branch's files (the completion suite changes into the worktree), but the lint rule code is the loaded runtime's, not the branch's. A branch that changes a rule, for example a new per-file capability grant in `no-cross-boundary-imports` for a `node:` builtin or an exact-specifier package, therefore fails the gate with a boundary refusal that its own rule would admit. The branch's files are correct; the runtime is older.
+
+This is the Runtime Revision design working as intended: infrastructure the gate depends on must be loaded before the gate can use it. Land the rule change on the checkout Loom is installed from (merge it, or port it there), run `/reload` (or restart Pi), then start a fresh Wave Gate. Do not weaken the branch's imports or its rules to get past the check.
+
+The refusal names this case itself. When the full-tier lint fails, the gate's diagnostic carries the lint's refusal (`loom:full-tier-lint: …`). If the gated repository is a Loom checkout whose `lint-rules/` or `engine/src/linter/` files differ from the loaded runtime's, the refusal opens with a `⚠` sentence naming the loaded runtime and the differing rule files. A plain project carries no lint rules of its own and never gets the sentence. A replayed rejection keeps only the lint's exit code, so its diagnostic tells you to run `helper lint-wave-gate`, which prints the same refusal and the same skew sentence.
+
+### Population refuses the spec or a Requirement id
+
+`populate-task-graph` proves the authored trace against the Spec Index before writing anything. It refuses, naming the cause:
+
+- a declared `spec_file` that cannot be read, is not UTF-8, or does not parse as a canonical specification (every required section, including `## Appendix: Glossary`), even when no Task claims from it;
+- a Task whose `spec_anchors` or `spec_contributions` name an id the Spec Index does not define as a completable FR or AS entry (`NFR-`, `SC-` and Out-of-Scope ids included), listed as `T3 → NFR-001`;
+- any Requirement trace when the plan has no `spec_file`.
+
+Fix the specification or the decompose output and re-run population. The rule is the one `amend-spec-trace` applies to added ids (`unprovenRequirementTrace`), so an id population admits is one the Implementation Brief can render.
+
+### State is malformed
+
+Use only when the load boundary explicitly directs recovery:
 
 ```bash
-bun engine/src/cli.ts helper validate-lint-rules                         # the project's rules directory
-bun engine/src/cli.ts helper validate-lint-rules .claude/linter/rules    # or name one explicitly
+bun "$LOOM_DIR/engine/src/cli.ts" helper repair-task-graph
 ```
 
-With no argument the helper validates the project's one rules directory — the first present of `.claude/linter/rules`, then `.pi/linter/rules` (a Pi-only project) — the same directory Claude Code's edit hook, Pi's post-edit lint, the Wave Gate lint and `lint-project` read; the lookup does not depend on the harness. With none present it validates the bundled defaults and says 0 project rules were checked. A nonexistent directory is an error for explicit validation. Runtime loading, by contrast, treats an absent project rules directory as “no project overrides.”
+The repair path parses rejected bytes, applies conservative repair, refuses loss of Findings/audit data, validates both full and typed forms, installs atomically, and restores mode `0444`.
 
-See [Lint Rules](../lint-rules/README.md) for configuration and tiers.
+## Recovery operations
+
+The commands that change protected state to recover a run (remediation, reopening a Task or a completed Wave, upgrading or amending the spec trace) are in [Recovery operations](reference/recovery.md).
+
+## Edit-time feedback
 
 ### Advisory type diagnostics
 
@@ -1574,194 +331,26 @@ It is **advisory and fail-open**: it never blocks an edit. Claude Code receives 
 | `LOOM_TYPE_DIAGNOSTICS=off` | Disable the check on both harnesses |
 | `LOOM_TYPE_DIAGNOSTICS_CACHE=/path` | Build-info and repeat memory location (default `$XDG_CACHE_HOME/loom/type-diagnostics`, else `~/.cache/loom/type-diagnostics`) |
 
-## Model policy operations
+## Ending an orchestration
+
+### Completing an orchestration
+
+After the final Wave Gate, retire the TaskGraph:
 
 ```bash
-# Inspect one Agent’s semantic profile and both bindings
-bun engine/src/cli.ts helper model-profiles agent --agent code-reviewer
-
-# Validate all source definitions
-bun engine/src/cli.ts helper model-profiles validate
-
-# Regenerate Pi Agent definitions
-bash scripts/sync-pi-agents.sh
+bun "$LOOM_DIR/engine/src/cli.ts" helper complete-orchestration
 ```
 
-Generated Pi Agents live under `${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/agents`. Regenerate after Agent, Skill, model-profile, or package-root changes, then `/reload` Pi.
+The helper refuses, listing every reason, unless the graph has Tasks, all of them `completed`, and no Wave Gate run is registered as active. Under the TaskGraph lock it publishes the exact graph bytes beside the live graph as `.claude/state/completed_task_graph-<issue|no-issue>-<UTC stamp>.json`. The publish is exclusive and whole: the bytes are prepared under a temporary name and hard-linked into place, so an existing archive is never overwritten and a partial archive is never visible. It then removes the live graph. The archive is published before the removal, so a failure leaves both files, never neither.
 
-## Model calibration
+Every Loom guard keys on the live graph path: `block-direct-edits`, the Task/Agent spawn gates and the state guard. So they all lift, and a post-gate `/review-and-fix` can run in the same checkout. While a finished graph stays live, those guards stay on: Write and Edit into the Orchestrated Repository are refused, and spawns are phase-checked. `block-direct-edits` guards the repository that owns the live graph, meaning the canonical root of the Git working tree holding the State File. It also always guards Loom's protected directories, wherever they lie: the subagent directory (`LOOM_SUBAGENT_DIR`, default `/tmp/claude-subagents`, holding the evidence ledger, `.active`, `.machine` and `.task_graph` files) and the machine-definitions directory (`LOOM_MACHINES_DIR`). A parent write there would forge evidence or rewrite the gate, and the state guard covers them only for Bash. Writes whose every symlink-resolved target lies outside that root and outside both protected directories are allowed. That covers a session scratchpad, another worktree of the same repository, and a sibling directory such as `<root>-other/`. Worktrees nested under the root (for example `.claude/worktrees/`) are still inside. A target or root the guard cannot resolve (a dangling symlink, malformed input, a `LOOM_STATE_PATH` outside Git and outside the documented layouts) stays guarded. The state directory keeps its separate state guard. See [ADR-0046](adr/ADR-0046-the-direct-edit-guard-protects-only-the-orchestrated-repository.md).
 
-Calibration is live-model work and is opt-in:
+### Abandoning an orchestration
+
+`/loom --complete` and `--abort` are not implemented lifecycle flags. To abandon an unfinished orchestration, use the guarded teardown, which keeps no copy:
 
 ```bash
-cd /path/to/loom
-LOOM_RUN_MODEL_CALIBRATION=1 bun scripts/run-model-calibration.ts \
-  --profile focused-review \
-  --corpus calibration/corpus.json \
-  --output calibration/results/focused-review.json
+bun "$LOOM_DIR/engine/src/cli.ts" helper cleanup-state
 ```
 
-Without `LOOM_RUN_MODEL_CALIBRATION=1`, the script exits without running models. Score predictions separately with the `helper model-calibration` operations. Read [Model profiles and calibration](model-profiles-and-calibration.md) before changing policy.
-
-## Development validation
-
-### Locked bootstrap and mandatory full gate
-
-The development/CI baseline is a full-history Git checkout on a non-root account with Node **22.23.2**, the Bun release pinned in the repository-root `.bun-version` (the one pin, never restated elsewhere: CI installs it through `oven-sh/setup-bun` `bun-version-file`, and the verification preflight blocks a local Bun that differs), npm, Git, and jq. Linux additionally requires Bash **4+** and GNU `timeout` on PATH. The macOS 13+ CI job uses Apple's Bash 3.2 and does not require GNU coreutils; its runtime support includes anchored report reset through a re-proven parent path. Full history is required because deterministic tests resolve the committed model-calibration corpus against historical revisions available through remote refs. A normal full clone checked out on `main` contains those objects; for an existing single-branch shallow clone, fetch every remote head before verification:
-
-```bash
-git fetch --unshallow origin '+refs/heads/*:refs/remotes/origin/*' --tags
-```
-
-From the Loom repository root:
-
-```bash
-bun install --frozen-lockfile
-(cd engine && bun install --frozen-lockfile)
-npm run verify
-```
-
-Both locks are required: root dependencies supply Pi/runtime resources; engine dependencies supply the compiler and Vitest, and `typescript`, which the Wave Gate's owner verification also loads at runtime and which is therefore declared under `dependencies` (no new package: it was already the engine's compiler). `preverify` checks required tools, that `bun --version` equals `.bun-version` (`engine/scripts/bun-version-pin.ts`), executable local Vitest/Pi, and that Pi resolves to the root-local locked CLI through npm's PATH. No global/latest Pi or network-fetching compiler fallback is accepted. Local preflight checks tool availability and the exact Bun pin (a different Bun can pass where the pinned one fails (`fs.closeSync(1)` is a silent no-op on 1.3.13 but not on the pinned release)); it does not pin Node, which CI checks explicitly alongside Bun.
-
-The same **root `npm run verify`** runs locally, in `.github/workflows/ci.yml` for PRs/branch pushes/tags, and through this repository's runtime Verification Manifest. CI checks out full history with `fetch-depth: 0`, installs both frozen graphs, preserves failures through `pipefail`, and attempts log artifact upload even after failure. It has a 60-minute job budget; the manifest separately bounds its command to 30 minutes. Neither is proof of a successful hosted CI run.
-
-Root `verify` delegates to engine `verify`: prerequisites → typecheck → existing `test`. That test script runs the entire existing Vitest suite (including property/integration tests) followed by all six unchanged smoke commands, once each on success:
-
-1. `scripts/smoke-panel-mode.sh`
-2. `scripts/smoke-review-panel.sh`
-3. `scripts/smoke-standalone-review.sh`
-4. `scripts/smoke-orchestration-facades.ts`
-5. `scripts/smoke-pi-resources.sh`
-6. `artifacts/tests/test-validate-task-graph.sh`
-
-The review-panel and standalone helper smokes explicitly retain historical/manual
-coverage. The façade smoke covers current issued payloads, bounded scope retries,
-refutation, advisory decisions, durable replay and actual disposable index
-installation; it supplies a matching runtime identity only to its CLI children.
-These scripted smokes do not spawn live Agents.
-
-The one Vitest invocation retains the default console reporter and also writes `.loom/completion-reports/verify.junit.xml` at the repository root. Its script uses `--reporter=default --reporter=junit --outputFile=../.loom/completion-reports/verify.junit.xml` because npm runs it from `engine/`. JUnit contains only Vitest test facts, including skipped/failed cases; it does not contain compiler or smoke testcases. Normal zero exit of the entire fixed command proves those other tiers passed too. A later smoke failure leaves the green unit report but the root command remains nonzero. Focused `test:unit` invocations overwrite the same file with focused facts: report existence alone is never full-gate or registered remediation evidence.
-
-Failure stops later stages. The existing test scripts normalize `PI_CODING_AGENT` for their subprocesses; do not replace them with Bun's built-in test runner. The mandatory full gate has **no file/test selectors or omitted smoke tier**. Existing platform-dependent skips must be reported (for example the Darwin-only filesystem case on Linux), not hidden behind a universal zero-skips claim. Live-model calibration remains opt-in and outside this gate.
-
-### Compiler boundary
-
-`engine/scripts/typecheck.ts` uses the explicitly installed TypeScript API with `noEmit`, `noUnusedLocals`, and `noUnusedParameters`. `engine/tsconfig.json` owns all `src`, `tests`, `../pi`, and `scripts/typecheck.ts` roots. Standalone repository-root scripts are not all explicit compiler roots; imported portions may be checked transitively.
-
-Only TS6133/TS6192/TS6196 unused diagnostics on compiler-proven external raw TypeScript, excluding declaration files and explicit roots, are non-fatal. Each original file/position/code/message remains visible. Owned diagnostics, ordinary external dependency errors, config/input failures, and compiler infrastructure failures remain fatal. This intentionally replaces the old fail-open path grep; `skipLibCheck` cannot suppress raw-source unused diagnostics. `typecheck:unused` is an alias of the same complete gate, not a weaker path.
-
-### Test hermeticity
-
-A test that passes or fails because of the machine, the run order, or the seed is a defect. Fix its cause; never add a retry.
-
-- **Temp files.** The global setup `engine/tests/setup/run-temp-root.ts` points `TMPDIR` at one fresh `loom-vitest-run-*` directory per run before any worker starts. Workers and the `bun`/`git` children they spawn inherit it, and the directory is deleted when the run ends. A killed run leaves that one directory behind. When the code under test refuses symlinked paths, make the fixture directory with `canonicalTempDir`, because the macOS temp root sits behind the `/var` symlink.
-- **Shared directories.** `LOOM_SUBAGENT_DIR` keeps its production default `/tmp/claude-subagents`, because the guard tests pin bypasses against that literal path. That is the directory a live Claude Code session's hooks use. A suite that writes there uses unique session ids and registers each session for cleanup at the moment it creates the id (see `record-evidence.test.ts`). `pi-extension-review-events.test.ts` keeps its shared fixture under the Git-ignored `.loom/completion-reports/`, because its paths must sit inside the project; a killed run leaves one directory there. Its tests that write Task artifacts each build a throwaway Git repository under the run's `TMPDIR` (`withTaskGraphRepository`) and assert each artifact path lies outside the checkout before writing it. A killed run once left `.tmp-pi-*` files in the checkout, and a live orchestration read them as a Task's out-of-scope writes.
-- **Host prerequisites.** `tests/pi/emission-installed-launcher.test.ts` needs the installed Pi subagent launcher under `~/.pi/agent/extensions/`. It is skipped only when `CI=true`; elsewhere a missing launcher fails loudly.
-- **Git config.** A test that fakes the operator's global Git config sets `GIT_CONFIG_GLOBAL` as well as `HOME`, because an ambient `GIT_CONFIG_GLOBAL` replaces `$HOME/.gitconfig`.
-- **Order.** Every test must pass in any order. When two tests are one observation split across a test boundary, the suite declares `describe(name, { shuffle: false }, …)`.
-- **Property tests.** Most property tests take a fresh random seed every run. A counterexample that turns up on CI is a real gap in the oracle or the code: add it as an explicit example and fix the cause. Never pin a seed to hide it.
-
-To check for environment dependence, run the unit suite under varied conditions and compare which tests fail:
-
-```bash
-cd engine
-npx vitest run --sequence.shuffle --sequence.seed=<n>      # run order
-TMPDIR=<path-through-a-symlink> npx vitest run             # macOS-style temp root
-TZ=Pacific/Kiritimati LC_ALL=C npx vitest run              # time zone and locale
-npx vitest run --maxWorkers=1 --minWorkers=1               # one worker, then many
-HOME=<empty-dir> GIT_CONFIG_GLOBAL=/dev/null npx vitest run # no operator config
-```
-
-The 2026-10-13 sweep ran each of these, plus every property-test file twice at 20× its declared runs on fresh seeds and a whole run with the clock moved 400 days ahead. A failing test in the empty-`HOME` run is expected only for the installed-launcher prerequisite above. A clock-shifting run cannot check file freshness, because Node reads file times with a system call that `libfaketime` does not intercept. Under it, a file written a moment ago looks as old as the shift.
-
-### Documented wire examples
-
-Every example of a wire shape in `agents/`, `commands/`, `skills/`, `docs/` and `references/` is put through the production parser that decides that shape ([ADR-0073](adr/ADR-0073-every-documented-wire-example-is-parsed-by-its-production-parser.md)). The suite is `engine/tests/docs/doc-wire-examples.test.ts`.
-
-A marker line directly above the fence says what the fence is:
-
-```text
-<!-- wire-example: <shape-id> -->          the fence documents that shape
-<!-- wire-example: none — <reason> -->     the fence shows JSON that is not a wire example
-```
-
-- **Which fences need one.** A `json` fence, and a shell fence with a heredoc whose body is JSON (one example per heredoc; the marker goes above the shell fence). Any other fence is an example only when it carries a shape marker, and its body is then the example text. The suite fails on an unmarked JSON fence, a marker with no fence below it, an unregistered shape id, and an opt-out with no real reason.
-- **Placeholders.** A value the reader must replace is written `<…>`: `"criterion": "<your lens, verbatim>"`. Everything else is a literal the parser must accept as written. `"a | b"` documents a choice and is read as its first option. A placeholder whose hint says `null` is read as `null`. A list may be elided as `[ … ]`.
-- **Adding an example of a registered shape.** Write the fence and put the marker above it. The shape ids are `WIRE_SHAPE_IDS` in `engine/tests/support/doc-wire-shapes.ts`. If the example uses a placeholder under a field the shape has no value for, the suite names the field; add the value to that shape's `placeholders`.
-- **Adding a shape.** Add the id to `WIRE_SHAPE_IDS` and an entry to `WIRE_SHAPES` whose `parse` calls the function the engine itself calls on that input. The record is total over the ids, so an id without a parser does not compile. The suite refuses a registered shape no doc teaches, a shape whose parser admits a document that is not its shape, and an example that also parses under another shape's id. If the engine's parser for the input is not exported, export it; do not restate its rules in the registry.
-- **Opting out.** Use `none — <reason>` only for JSON that is not Loom input: another tool's file, or output nothing parses back in. The reason is at least 20 characters and says which of the two it is.
-
-Not governed, each with its reason in `UNGOVERNED` (`engine/tests/support/doc-wire-examples.ts`): the stamped reviewer wire contract (the stamp check compares its bytes), `docs/adr/`, the archived reviewer protocols, and the `security-expert` and `nextjs-frontend-design` skills. JSON written inline in a sentence or a table cell is not detected.
-
-### Focused iteration (not full-gate evidence)
-
-```bash
-npm --prefix engine run typecheck
-npm --prefix engine run test:unit -- tests/runbook-contract.test.ts tests/panel-config.test.ts
-npm --prefix engine run test:unit -- tests/handlers/helpers/orchestration.test.ts
-npm --prefix engine run test:unit -- tests/pi-extension-review-events.test.ts
-npm --prefix engine run test:smoke
-# entire test script without the compiler gate:
-npm --prefix engine run test
-# equivalent package-script invocation from engine/:
-# bun run test
-```
-
-**Bare `bun test` is Bun's built-in runner, not `npm run test` / `bun run test`.** Report the exact command, exit status, test counts/skips, smoke completion or not-run stages, and environment. Focused green checks or separately green tiers are not a green canonical run. Do not claim full validation when concurrent work prevents a complete run on the final tree.
-
-## Repository map for operators
-
-```text
-.claude-plugin/plugin.json     Claude plugin metadata
-package.json                   Pi package registration and runtime dependencies
-commands/                      executable user runbooks
-skills/                        reusable Skill runbooks and knowledge
-agents/                        source Agent definitions
-hooks/                         Claude Code hook registration and shims
-pi/                            Pi adapter, renderer, transcript adapter, grants
-engine/src/core/               parsers, policy, reducers, domain values
-engine/src/orchestration/      anchored persistence, event journal, effects, Git remediation
-engine/src/handlers/           harness/CLI shell
-engine/tests/                  unit, property, integration, contract tests
-scripts/                       sync, lint, calibration, smoke scripts
-calibration/                   committed corpus; generated results are ignored
-docs/family-sites.baseline.json  family-site metric baseline at 626db7fb
-```
-
-## Operator notes moved from `/loom`
-
-These three notes were in `commands/loom.md`. They concern operators, not every orchestrated run.
-
-**Loom's own verification manifest.** When Loom orchestrates its own repository, `/loom` Phase 4d keeps the existing `project:verify` check: executable `npm`, args `["run", "verify"]`, cwd `.`, scope `wave`, timeout `1800000`, report `{"kind":"not-required"}`. It runs the same root `npm run verify` as local, CI and tag validation, and both frozen dependency installs are required. Never wire that script back into manifest execution or a Wave Gate.
-
-**A manifest-only bootstrap.** `helper write-verification-manifest` needs the empty TaskGraph that `init-state` creates; it is not a writer for arbitrary paths. An operator who only wants to install or inspect a manifest runs `init-state`, then the helper, then the sanctioned `cleanup-state`. Never manufacture Tasks or Waves, or hand-write state, to satisfy it (see [Workflows](workflows.md)).
-
-**Piloting a refusal or a block.** An operator note (`brief --task <Task> --note`) cannot make an agent misbehave on purpose: the brief tells the agent that a note never overrides its rules, and agents keep to them. A pilot that must exercise a refusal or a block needs a scenario whose natural course triggers it: for I7, a Task touching a widely imported hub file; for I6, a Task whose first test run genuinely passes.
-
-## Reviewer pipeline notes moved from the review prompts
-
-These notes were in `commands/review-pr.md`, `commands/wave-gate.md`, `skills/review-and-fix/SKILL.md` and the reviewer agents. A parent or a reviewer does not act on them; an operator or a maintainer may.
-
-**Where the shared reviewer text lives.** `references/reviewer-wire/` holds the four fragments every reviewer agent carries: `wire-contract.md` (generated from `renderReviewerWireContract()`), `bootstrap.md`, `before-you-emit.md` and `read-coverage.md` (hand-written). Edit a hand-written fragment, or the generator for the wire contract, then run `bun scripts/stamp-wire-contract.ts`; `--check` reports drift without writing. Never edit a stamped region in an agent file. The fragments used to sit in `agents/_shared/`, where Claude Code registered them as spawnable agents. The wire-contract start marker in each agent still names `agents/_shared/wire-contract.md`, because the byte-frozen schema-1 archive carries that marker and is read through the same extraction.
-
-**What a refutation verifier is issued.** A verifier's task carries `LOOM_CONTEXT_PATH`, and for a schema-3 successor panel `LOOM_CONTEXT_VIEW_PATH`. The packet's `outputContract` names the lens; its one authority section (`refutation-authority` for a standalone review, `wave-refutation-authority` for a Wave Gate) carries the lens name and the findings. The lens definition is not in the packet: the verifier agent reads the `## <lens>` section of `references/review-lenses.md` from the plugin. Nothing substitutes lens text into a prompt, and `commands/templates/review-verify.md`, which described that substitution, is gone.
-
-**The schema-2 reviewer guidance archive.** `references/reviewer-protocol-v2/` held exact copies of the seven reviewer agents, the verifier and the generated wire fragment as they were at commit `96153edc3dd755b4ac648ed48920b6670753c5a6`. Nothing in the engine, Pi extension, scripts or hooks read it, so it is no longer kept in the tree. A schema-2 request is governed by its own packet's frozen schema and rubric. To reproduce a file, run `git show 96153edc3dd755b4ac648ed48920b6670753c5a6:<path>` with a path from this list and compare its SHA-256:
-
-```text
-e3523e36f18751a9762b94409a63e4bb7a9b06aa8c6f89cd8f223f37a0d6f482  agents/architecture-tech-lead.md
-9c20d01da79ee344d7801149f79c8a560366c7610d01b15fa5c375873f172850  agents/code-reviewer.md
-5b5deeaaf2850aae24c9b29ee4df790c9e836a1a8e8ac294aee0c53f3003f821  agents/code-simplifier.md
-cabf2206cbace0107ead4eba4d002fc1f2ca08d4d095fd4007eeb67057ff79a9  agents/comment-analyzer.md
-4da60144489ff12f8c49a9788e13663e33d8c3b322d5af49e85415cb0194c834  agents/pr-test-analyzer.md
-e4bfbece88d39c675cb99dede874c237d2a2480e8c8035448273ae53b7875a43  agents/silent-failure-hunter.md
-7620a4596cd96175a93adbd38432e52ab6dd233dcd93e303329cf9cfea69a6ce  agents/type-design-analyzer.md
-7fc7c28ea029ffaf9760423df98aff82eadb49235bc48320c6c2d3ff91bf75e6  agents/_shared/wire-contract.md
-5e1e1f1383ece0f189186c8f232ebeebd15bb61b244394b1b206628488594ff0  agents/review-verifier-agent.md
-```
-
-The schema-1 archive, `references/reviewer-protocol-v1/`, stays: the engine names its files in every schema-1 reviewer task and refuses to issue one without them.
-
-**Who creates a Run Directory.** `helper orchestration start` resolves `--runs-root` and fails if it does not exist; it never creates the root, so a mistyped root cannot grow a second tree of runs. It then creates the run's own directory under that root, and tolerates one that is already there, which is why `mktemp -d` under the root also works.
-
-**Rollout text removed from the prompts.** The review prompts carried a "P5 bootstrap" that told the parent to use an older CLI and skill until the standalone-lineage work was published. That work merged with PR #51, and `standalone-disposition` is the shipped publisher, so the prompts no longer qualify it. Dated rollout evidence is in [ADR-0010](adr/ADR-0010-standalone-finding-lineage.md).
+Use it only with explicit operator intent. Preserve specs, plans, review runs, and the GitHub Issue as audit/recovery material.

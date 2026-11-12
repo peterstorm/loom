@@ -154,7 +154,7 @@ block.
 audited. Use it only when the operator asks for it: never invoke it
 automatically, and never as a fallback for a reviewer whose output was
 refused. Protocol detail is in
-[operations: Reviewer Protocol v2](../docs/operations.md#reviewer-protocol-v2).
+[operations: Reviewer Protocol v2](../docs/standalone-review.md#reviewer-protocol-v2).
 
 ## Completion suite and Project Verification Coverage
 

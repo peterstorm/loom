@@ -8,7 +8,7 @@ const prose = (path: string): string => readFileSync(`${root}${path}`, "utf8").r
 /**
  * A parent prompt keeps what the parent acts on. The parent never writes a
  * reviewer payload, so the protocol itself — fields, versions, retention,
- * byte limits — has one owner, docs/operations.md, and the three parent
+ * byte limits — has one owner, docs/standalone-review.md, and the three parent
  * runbooks carry the same three sentences about it.
  */
 const REVIEWER_RECAP =
@@ -31,7 +31,7 @@ describe("current reviewer runbooks preserve protocol and decision boundaries", 
     expect(text).not.toContain("artifacts/result.json");
     expect(text).toMatch(/never (compute tallies|from arithmetic) of your own/);
     expect(text).toContain("A successor review is never automatic");
-    expect(text).toContain("docs/operations.md#explicit-successor-review");
+    expect(text).toContain("docs/standalone-review.md#explicit-successor-review");
   });
 
   it.each(PARENT_RUNBOOKS)("%s carries no rollout bootstrap that gates a shipped program", (path) => {
@@ -74,11 +74,11 @@ describe("current reviewer runbooks preserve protocol and decision boundaries", 
     // This repository's own enrolled check is operator history, not a
     // Wave Gate instruction for every project that installs the plugin.
     expect(text).not.toContain("npm run verify");
-    expect(prose("docs/operations.md")).toContain(".loom/completion-reports/verify.junit.xml");
+    expect(prose("docs/development.md")).toContain(".loom/completion-reports/verify.junit.xml");
   });
 
   it("distinguishes historical semantic replay from native fixture evidence", () => {
-    const text = prose("docs/operations.md");
+    const text = prose("docs/standalone-review.md");
     expect(text).toContain("90 exact logical files, 20,250,407 bytes");
     expect(text).toContain("3,395,759 bytes");
     expect(text).toContain("unchanged original inventory");

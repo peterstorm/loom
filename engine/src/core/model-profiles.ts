@@ -437,9 +437,10 @@ const traits = (
  * Keyed by name, so a duplicate or double-kinded Agent is unrepresentable.
  * Every agent set, phase map, and policy table elsewhere is a DERIVED
  * projection of this record (`agent-catalog-projections.ts`), never a second
- * source. Keep it exhaustive over
- * agents/*.md (excluding README.md); validateAgentPolicyCatalog is the pure
- * drift check a shell or test runs after discovering the actual filenames.
+ * source. Keep it exhaustive over agents/*.md, which holds Agent definitions
+ * and nothing else (the inventory is docs/agents.md);
+ * validateAgentPolicyCatalog is the pure drift check a shell or test runs
+ * after discovering the actual filenames.
  */
 export const AGENT_CATALOG = Object.freeze({
   "adr-writer-agent": traits("implementation", plainKind("impl")),
