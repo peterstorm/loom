@@ -1,111 +1,32 @@
 ---
-description: Property-based testing patterns with jqwik - invariants, arbitraries
-globs: "**/*Test.java"
+description: Property-based testing - when to use it, which properties to write, idempotence vs idempotency
+globs: "**/*.{ts,tsx,js,jsx,java,kt,hs,scala,rs}"
 ---
 
-# Property-Based Testing (jqwik)
+# Property-Based Testing
 
-## When to Use Property Tests
-| Use Property Tests | Use Example Tests |
-|-------------------|-------------------|
+Language-neutral. Library code is in the test skills: `skills/java-test-engineer` (jqwik) and `skills/ts-test-engineer` (fast-check).
+
+## When to Use
+
+| Property tests | Example tests |
+|----------------|---------------|
 | Pure functions | Side effects (DB, HTTP) |
-| Validation logic | Specific business scenarios |
-| Parsers/serializers | Integration flows |
+| Validation and parsing | Specific business scenarios |
+| Serializers | Integration flows |
 | Mathematical properties | Small enumerable cases |
 
-## Property Patterns
+## Which Properties
 
-### Invariants
-Properties that must always hold true.
+- **Invariant**: always true of the output. "A discount never exceeds the subtotal", "end date is after start date".
+- **Round trip**: two operations cancel. "parse(serialize(x)) = x".
+- **Idempotence**: `f(f(x)) = f(x)`. "Normalising an already normalised string changes nothing". Not everything repeatable qualifies: applying a 10% discount twice is not applying it once.
+- **Commutativity**: order does not matter. "Adding lines in any order gives the same total".
 
-```java
-@Property
-void orderTotalAlwaysEqualsLineSum(@ForAll("orders") Order order) {
-    var lineSum = order.lines().stream()
-        .map(OrderLine::total)
-        .reduce(Money.ZERO, Money::add);
-    assertThat(order.total()).isEqualTo(lineSum);
-}
+Do not restate the implementation. A property that recomputes the result the way the code does ("total equals the sum of line totals", written with the same fold) passes whenever the code runs. Assert a relation the code does not compute directly: a bound, a round trip, an invariant under reordering.
 
-@Property
-void discountNeverExceedsSubtotal(@ForAll("orders") Order order,
-                                   @ForAll CustomerTier tier) {
-    var discount = PricingRules.calculateDiscount(order, tier);
-    assertThat(discount).isLessThanOrEqualTo(order.total());
-}
-```
+Generators produce only valid domain values, built through the same parsers as production input.
 
-### Round-Trip / Symmetry
-Operations that cancel each other.
+## Idempotence and Idempotency
 
-```java
-@Property
-void serializeDeserializeIsIdentity(@ForAll("orders") Order order) {
-    var json = mapper.writeValueAsString(order);
-    var restored = mapper.readValue(json, Order.class);
-    assertThat(restored).isEqualTo(order);
-}
-```
-
-### Idempotence
-Repeatable operations yield same result.
-
-```java
-@Property
-void normalizationIsIdempotent(@ForAll String input) {
-    var once = StringUtils.normalize(input);
-    var twice = StringUtils.normalize(once);
-    assertThat(twice).isEqualTo(once);
-}
-```
-
-### Commutativity
-Order-independent operations.
-- "Add items in any order = same total"
-
-## Custom Arbitraries
-```java
-@Provide
-Arbitrary<Order> orders() {
-    return Combinators.combine(
-        Arbitraries.longs().map(OrderId::new),
-        Arbitraries.longs().map(CustomerId::new),
-        Arbitraries.lists(orderLines()).ofMinSize(1).ofMaxSize(10),
-        Arbitraries.longs().map(Instant::ofEpochMilli)
-    ).as(Order::new);
-}
-
-@Provide
-Arbitrary<OrderLine> orderLines() {
-    return Combinators.combine(
-        Arbitraries.longs().map(ProductId::new),
-        Arbitraries.integers().between(1, 100),
-        Arbitraries.integers().between(1, 10000).map(Money::ofCents)
-    ).as(OrderLine::new);
-}
-
-@Provide
-Arbitrary<String> danishCprs() {
-    return Combinators.combine(
-        Arbitraries.integers().between(1, 31),
-        Arbitraries.integers().between(1, 12),
-        Arbitraries.integers().between(0, 99),
-        Arbitraries.integers().between(0, 9999)
-    ).as((d, m, y, s) -> String.format("%02d%02d%02d-%04d", d, m, y, s));
-}
-```
-
-## Identify Properties in Your Code
-
-1. **Invariants**: Always true
-   - "Total price = sum of line items"
-   - "End date > start date"
-
-2. **Inverse Operations**: Cancel each other
-   - "serialize -> deserialize = identity"
-
-3. **Idempotence**: Repeatable safely
-   - "Apply discount twice = apply once"
-
-4. **Commutativity**: Order-independent
-   - "Add items in any order = same total"
+Idempotence is the pure-function property above. Idempotency is about effects (`architecture.md` → "Effects are retry-safe") and needs a model-based property over the shell with a counting fake: for any sequence of retries, crashes after the downstream call, and timeouts on one key, the fake records at most one charge and every completed call returns the same outcome. Add two example tests beside it: N parallel calls with one key produce one effect, and the same key under two principals produces two independent attempts.
