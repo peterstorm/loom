@@ -11,7 +11,7 @@ import { parseIssuedReviewerProtocol, parseReviewerEvidence } from "../src/core/
 import { createPublicationAuthorityResolver, parseAgentRequestAuthority, parseIssuedSpawnRequest, parseOrchestrationRunId, parseRequestId } from "../src/core/orchestration-contract";
 import { resolveAgentPolicy, resolveModelProfile, lowerModelProfile } from "../src/core/model-profiles";
 import { sha256Hex } from "../src/core/digest";
-import { extractWireContractRegion } from "../src/core/wire-contract";
+import { REVIEWER_BOOTSTRAP_REGION, extractRegion, extractWireContractRegion } from "../src/core/wire-contract";
 import { value } from "./fixtures/parse-result";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -175,11 +175,10 @@ describe("every archived v1 REVIEW_SUB_AGENT retains the Machine Summary contrac
 });
 
 /** Independent in-memory publication bytes, parsed by the real issuance boundary. */
-function issuedContract(role: string, version: 1 | 2) {
+function issuedContract(role: string, version: 1 | 2, scope: readonly string[] = ["src/x.ts"]) {
   const runId = value(parseOrchestrationRunId(`run.shim.${role}.${version}`));
   const policy = value(resolveAgentPolicy(role));
   const profile = value(resolveModelProfile(policy.profile));
-  const scope = ["src/x.ts"];
   const input = {
     requestId: value(parseRequestId(`request:${role}:${version}`)), role, requiredSkill: policy.requiredSkill ?? "none",
     fixedContext: [value(encodeByteSection("standalone-review-authority", JSON.stringify({ runId, role, attempt: 1, scope })))],
@@ -208,6 +207,7 @@ function issuedContract(role: string, version: 1 | 2) {
 }
 
 const currentAgentFile = (role: string) => readFileSync(join(REPO_ROOT, "agents", `${role}.md`), "utf-8");
+const EXAMPLE_SECTION = "Example (standalone-review only)";
 function fencedSection(markdown: string, label: string): string {
   const section = markdown.split(`## ${label}\n\n`)[1];
   const found = section === undefined ? null : /^```json\n([\s\S]*?)\n```/.exec(section);
@@ -216,11 +216,16 @@ function fencedSection(markdown: string, label: string): string {
 }
 
 describe("all seven issued reviewer shims select packet authority before current guidance", () => {
-  it.each([...REVIEW_SUB_AGENTS])("%s stamped example is admitted under its actual issued v2 packet", (role) => {
-    const issued = issuedContract(role, 2);
+  it.each([...REVIEW_SUB_AGENTS])("%s stamped example is admitted under an issued v2 packet whose scope holds its files", (role) => {
     const markdown = currentAgentFile(role);
     const region = value(extractWireContractRegion(markdown));
-    const example = fencedSection(region, "Current example (standalone)");
+    const example = fencedSection(region, EXAMPLE_SECTION);
+    // The example names real locations, so it is admitted only where the
+    // frozen scope contains them, exactly like a reviewer's own payload.
+    const located = (JSON.parse(example) as { findings: { file: string }[] }).findings.map(({ file }) => file);
+    expect(located.length).toBeGreaterThan(0);
+    expect(parseReviewerEvidence(issuedContract(role, 2), new TextEncoder().encode(example)).ok).toBe(false);
+    const issued = issuedContract(role, 2, [...new Set(located)]);
     const schema = fencedSection(region, "reviewer-payload-schema");
     const packetSchema = issued.packet.fixedContext.find(({ label }) => label === "reviewer-payload-schema");
     const packetRubric = issued.packet.fixedContext.find(({ label }) => label === "reviewer-impact-rubric");
@@ -239,15 +244,19 @@ describe("all seven issued reviewer shims select packet authority before current
   it.each([...REVIEW_SUB_AGENTS])("%s genuine issued v1 selects read-only archived instructions, never v2", (role) => {
     const issued = issuedContract(role, 1);
     const markdown = currentAgentFile(role);
-    const bootstrap = markdown.split("\nYou are ")[0]!;
-    expect(bootstrap).toContain("## FIRST: issued Context Packet bootstrap");
+    // The shim says what to do and names only the archive directory; the exact
+    // paths come from the issued task (spawn-task-text.ts names both, verified
+    // to exist, per request). The sentence is stamped from one fragment.
+    const bootstrap = value(extractRegion(markdown, REVIEWER_BOOTSTRAP_REGION));
+    expect(markdown.indexOf(REVIEWER_BOOTSTRAP_REGION.start)).toBeLessThan(markdown.indexOf("\nYou are "));
+    expect(bootstrap.startsWith("## First: read the issued Context Packet\n")).toBe(true);
     expect(bootstrap).toContain("LOOM_CONTEXT_READ_COMMAND");
     expect(bootstrap).not.toContain("call `readContextPacket`");
     expect(bootstrap.indexOf("LOOM_CONTEXT_READ_COMMAND")).toBeLessThan(bootstrap.indexOf("schema-1"));
-    expect(bootstrap).toContain(`references/reviewer-protocol-v1/agents/${role}.md`);
-    expect(bootstrap).toContain("references/reviewer-protocol-v1/agents/_shared/wire-contract.md");
-    expect(bootstrap).toContain("INAPPLICABLE to this legacy request");
-    expect(bootstrap).toContain("If either archive is missing/unreadable, report unavailable and stop");
+    expect(bootstrap).toContain("For a schema-1 request, load the archived role and wire contract the task names (under `references/reviewer-protocol-v1/`) and follow them in place of this file");
+    expect(bootstrap).toContain("if either cannot be read, say so and stop");
+    expect(bootstrap).not.toContain("references/reviewer-protocol-v1/agents");
+    expect(markdown).not.toContain("references/reviewer-protocol-v2");
     const archive = agentFile(issued.request.role);
     const shared = readFileSync(join(REPO_ROOT, "references/reviewer-protocol-v1/agents/_shared/wire-contract.md"), "utf-8");
     expect(value(extractWireContractRegion(archive))).toBe(shared.replace(/\n$/, ""));
@@ -258,7 +267,7 @@ describe("all seven issued reviewer shims select packet authority before current
     expect(value(parseReviewerEvidence(issued, new TextEncoder().encode(output))).findings.criticalCount).toBe(0);
     expect(issued.packet.schemaVersion).toBe(1);
     expect(issued.packet.fixedContext.some(({ label }) => label === "reviewer-impact-rubric")).toBe(false);
-    const currentExample = fencedSection(value(extractWireContractRegion(markdown)), "Current example (standalone)");
+    const currentExample = fencedSection(value(extractWireContractRegion(markdown)), EXAMPLE_SECTION);
     expect(parseReviewerEvidence(issued, new TextEncoder().encode(currentExample)).ok).toBe(false);
   });
 });

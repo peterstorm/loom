@@ -1,6 +1,6 @@
 # ADR Template
 
-Used by `adr-writer-agent` when expanding plan AD-N seeds into full ADRs (one task per AD, scheduled by `phase-decompose.md` rule 6). Substitute all `{...}` placeholders. Output filename: `docs/adr/{NNNN}-{title-slug}.md`.
+Used by `adr-writer-agent` when expanding plan AD-N seeds into full ADRs (one task per AD, scheduled by `phase-decompose.md` rule 6). Substitute all `{...}` placeholders. The output path is the one in the task's `file_list`: decompose names it after the existing filename convention in `docs/adr/` and pre-allocates the number.
 
 ---
 

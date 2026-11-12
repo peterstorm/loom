@@ -386,35 +386,43 @@ describe("runtime immutability of derived config", () => {
   });
 });
 
-describe("commands/loom.md prose literals track the config constants", () => {
-  // loom.md hardcodes the lens cap and judge/designer counts as prose literals so
-  // the orchestrator reads a concrete number. panel-config pins those constants
-  // against panel-lenses.md, but nothing pins the loom.md prose against the
+describe("panel runbook prose literals track the config constants", () => {
+  // references/loom/panel-runbook.md (the on-demand `/loom --panel` procedure)
+  // hardcodes the lens cap and judge/designer counts as prose literals so the
+  // orchestrator reads a concrete number. panel-config pins those constants
+  // against panel-lenses.md, but nothing pins the runbook prose against the
   // constants — so a count change (or a bumped lens) leaves the prose silently
   // stale. Each case asserts the regex still matches (fails loud if the prose is
   // reworded past recognition) AND that the captured literal equals the constant.
-  const loomMd = readRepoFile("commands", "loom.md");
+  const runbook = readRepoFile("references", "loom", "panel-runbook.md");
   const cases: ReadonlyArray<{ label: string; re: RegExp; expected: number }> = [
     { label: "options: distinct lenses cap", re: /distinct lenses \((\d+)\)/, expected: PANEL_LENS_COUNT },
     { label: "Defaults: minimum count", re: /PANEL_DESIGNERS_MIN` \(currently (\d+)\)/, expected: PANEL_DESIGNERS_MIN },
     { label: "Defaults: maximum lens count", re: /PANEL_LENS_COUNT` \(currently (\d+)\)/, expected: PANEL_LENS_COUNT },
     { label: "Defaults: designer count", re: /PANEL_DESIGNERS_DEFAULT` \(currently (\d+)\)/, expected: PANEL_DESIGNERS_DEFAULT },
-    { label: "Defaults: judge count", re: /PANEL_JUDGES_DEFAULT` judges\*\* \(currently (\d+)/, expected: PANEL_JUDGES_DEFAULT },
+    { label: "Defaults: judge count", re: /PANEL_JUDGES_DEFAULT` \(currently (\d+)\)/, expected: PANEL_JUDGES_DEFAULT },
   ];
 
   for (const { label, re, expected } of cases) {
     it(`${label} literal equals ${expected}`, () => {
-      const match = loomMd.match(re);
-      expect(match, `loom.md prose no longer matches ${re} — reworded? re-pin this test`).not.toBeNull();
+      const match = runbook.match(re);
+      expect(match, `panel-runbook.md prose no longer matches ${re} — reworded? re-pin this test`).not.toBeNull();
       expect(Number(match![1])).toBe(expected);
     });
   }
+
+  it("the dispatcher states no panel count of its own, only when to read the runbook", () => {
+    const loomMd = readRepoFile("commands", "loom.md");
+    expect(loomMd).toContain("references/loom/panel-runbook.md");
+    expect(loomMd).not.toMatch(/PANEL_[A-Z_]+/);
+  });
 });
 
-describe("interview digest-label contract (producer ↔ runbook)", () => {
-  // arch-interviewer-agent.md writes these labels and the typed panel-contract
-  // parser validates them before loom.md selects lenses. Pin their documentation
-  // in both producer and runbook; parser behavior has direct unit coverage.
+describe("interview digest-label contract (producer ↔ parser)", () => {
+  // arch-interviewer-agent.md is the one owner of the digest format: it writes
+  // these labels and the typed panel-contract parser validates them before the
+  // orchestrator selects lenses. The spawn template defers to the agent
+  // (runbook-contract.test.ts pins that it restates none of them).
   const labels = [
     "**Primary axis:**",
     "**Testability bar:**",
@@ -432,13 +440,11 @@ describe("interview digest-label contract (producer ↔ runbook)", () => {
     "**Executable-model signal:**",
   ] as const;
   const interviewer = readRepoFile("agents", "arch-interviewer-agent.md");
-  const interviewTemplate = readRepoFile("commands", "templates", "phase-arch-interview.md");
   const parser = readRepoFile("engine", "src", "core", "panel-contract.ts");
 
   for (const label of labels) {
-    it(`${label} appears in agent, template, and typed parser`, () => {
+    it(`${label} appears in the agent definition and the typed parser`, () => {
       expect(interviewer, `arch-interviewer-agent.md no longer writes ${label}`).toContain(label);
-      expect(interviewTemplate, `phase-arch-interview.md no longer requests ${label}`).toContain(label);
       expect(parser, `panel-contract.ts no longer parses ${label}`).toContain(label);
     });
   }

@@ -7,236 +7,87 @@ argument-hint: "[$feature description] [--update] [--status]"
 
 # Specify - Requirements Before Design
 
-Formalize requirements into structured specifications before architecture/planning. Focus exclusively on WHAT and WHY - never HOW.
-
-**Position in flow:** `/brainstorming` → `/specify` → `/clarify` (auto) → architecture-tech-lead skill (`/skill:architecture-tech-lead` in Pi) → `/loom`
+Write requirements as a structured specification before any architecture or planning. A spec says WHAT users need and WHY, never HOW.
 
 **Arguments:** "$ARGUMENTS"
 
----
+## Two ways this skill runs
+
+- **Standalone (`/specify`).** Follow this whole file. The flow is `/specify` → `/clarify` (when the spec has more than 3 markers) → the `architecture-tech-lead` skill.
+- **Inside `/loom`.** The specify-agent preloads this skill and its phase prompt sets the order of work, the interview and the output path. Use only [Writing the specification](#writing-the-specification) and [Quality checks](#quality-checks) from this file. The sections marked *standalone only* do not apply: `/loom` runs clarify and architecture as its own phases.
+
+`/loom` runs its own brainstorm, specify and clarify phases. To have `/loom` use a spec written standalone, put it at `.claude/specs/{YYYY-MM-DD}-{slug}/spec.md` and start `/loom` with `--skip-specify`.
 
 ## Package resources
 
-Resolve this command's owning package once. Claude Code expands the token in
-source; Loom's Pi adapter renders it from the extension module's `import.meta.url`:
+Resolve this command's owning package once. Claude Code expands the token in source; Loom's Pi adapter renders it from the extension module's `import.meta.url`:
 
 ```bash
 LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"
 test -f "$LOOM_DIR/references/spec-template.md" || { echo "FATAL: active Loom package is incomplete: $LOOM_DIR"; exit 1; }
+printf 'LOOM_DIR=%s\n' "$LOOM_DIR"
 ```
 
-Never infer package identity from cwd or scan another harness's cache.
+Never infer the package from cwd or scan another harness's cache. Below, `{LOOM_DIR}` stands for the printed path.
 
-## Arguments
+## Arguments (standalone only)
 
-- `/specify "feature description"` - Create new specification
-- `/specify --update` - Update existing spec with new info
-- `/specify --status` - Show spec completeness
-
----
+- `/specify "feature description"`: create a new specification
+- `/specify --update`: update the existing spec with new information
+- `/specify --status`: report the spec's completeness against [Quality checks](#quality-checks) and its marker count
 
 ## Output
 
-Creates `.claude/specs/{YYYY-MM-DD}-{slug}/spec.md`
+`.claude/specs/{YYYY-MM-DD}-{slug}/spec.md`. `/clarify` later adds a `clarifications/` directory beside it.
 
-Structure:
-```
-.claude/specs/2025-01-29-user-auth/
-├── spec.md          # Main specification
-└── clarifications/  # Resolved uncertainty log (created by /clarify)
-```
+## Before writing (standalone only)
 
----
+1. **Derive the slug** from the description: 2-4 words, action-noun (`user-auth`, `email-validation`, `payment-flow`), lowercase, hyphenated, technical terms preserved.
+2. **Explore context.** Check existing specs (`ls .claude/specs/`), review the related code, and understand the current state.
 
-## Specification Process
+## Writing the specification
 
-### 1. Extract Short Name
+Read `{LOOM_DIR}/references/spec-template.md` and fill in its sections. The template owns the format: section names, the canonical `FR-NNN:` / `AS-NNN:` / `OOS-NNN:` identifiers, the glossary table, RFC 2119 keywords and the examples of good and bad entries. The engine parses that grammar, so follow it exactly.
 
-From description, derive 2-4 word slug:
-- Action-noun format: `user-auth`, `email-validation`, `payment-flow`
-- Preserve technical terms
-- Lowercase, hyphenated
+**No implementation detail.** A spec mentions no tech stack, API design, database schema, framework or code pattern. If you are tempted to write HOW, write `[NEEDS CLARIFICATION: technical approach TBD]` and move on.
 
-### 2. Explore Context
-
-Before writing spec:
-- Check existing specs: `ls .claude/specs/`
-- Review related code areas
-- Understand current state
-
-### 3. Write Specification
-
-Read `$LOOM_DIR/references/spec-template.md` from the package resolved above and populate its sections.
-
-**Critical constraint:** Spec describes WHAT users need and WHY. NO implementation details:
-- No tech stack mentions
-- No API designs
-- No database schemas
-- No framework references
-- No code patterns
-
-If tempted to write HOW, mark as `[NEEDS CLARIFICATION: technical approach TBD]` and move on.
-
-### 4. Mark Uncertainties
-
-For ANY ambiguity, use marker syntax:
+**Mark every ambiguity** where it occurs:
 
 ```markdown
 - FR-003: System MUST validate user input [NEEDS CLARIFICATION: validation rules undefined]
 ```
 
-Categories of uncertainty:
-- **Business logic** - rules, thresholds, behaviors
-- **Scope boundaries** - what's in/out
-- **Edge cases** - error states, limits
-- **Technical** - feasibility questions (arch-lead resolves these)
-- **User expectations** - unclear acceptance criteria
+Uncertainty comes in five kinds: business logic (rules, thresholds, behaviors), scope boundaries, edge cases (error states, limits), user expectations (unclear acceptance criteria), and technical feasibility. Technical questions are settled in architecture, not here.
 
-### 5. Auto-Trigger Clarify
+## Quality checks
 
-After writing spec, count markers:
-
-```bash
-# At least one spec must exist before counting; a missing spec is fatal, not a zero count.
-ls .claude/specs/*/spec.md >/dev/null 2>&1 || { echo "FATAL: no spec found under .claude/specs/ — run /specify first"; exit 1; }
-# grep -c prints one count per spec.md file (per-file, not a total) — including
-# specs with zero markers. It exits 1
-# when no spec has any markers (a good state for the spec) and 2 on a real error
-# (an unreadable or vanished spec) — only the good state is masked, so a real
-# I/O failure aborts set -e shells with grep's stderr visible.
-grep -c "NEEDS CLARIFICATION" .claude/specs/*/spec.md || [ $? -eq 1 ]
-```
-
-If the sum of the per-file counts printed above is > 3: Invoke `/clarify` before proceeding.
-
-If the sum is <= 3: Note markers for arch-lead to address during research phase.
-
----
-
-## Spec Template Reference
-
-See `{LOOM_DIR}/references/spec-template.md` for full template. Key sections:
-
-### User Scenarios (Required)
-
-```markdown
-## User Scenarios
-
-### US1: [P1] Account Creation
-**As a** new user
-**I want to** create an account with email
-**So that** I can access personalized features
-
-**Why P1:** Core functionality, blocks all other features
-
-**Acceptance Scenarios:**
-- AS-001: Given valid email and password, When I submit, Then account is created and confirmation sent
-- AS-002: Given existing email, When I submit, Then error shown with login link
-- AS-003: Given weak password, When I submit, Then requirements shown inline
-```
-
-Every acceptance scenario must have one unique canonical `AS-NNN:` ID across the specification.
-
-Priority levels:
-- **P1** - Must have, blocks other work
-- **P2** - Should have, significant value
-- **P3** - Nice to have, defer if needed
-
-### Functional Requirements (Required)
-
-```markdown
-## Functional Requirements
-
-- FR-001: System MUST allow email/password registration
-- FR-002: System MUST send confirmation email within 60 seconds
-- FR-003: System MUST enforce password policy [NEEDS CLARIFICATION: policy rules]
-- FR-004: System SHOULD support OAuth providers [NEEDS CLARIFICATION: which providers?]
-```
-
-Use MUST/SHOULD/MAY (RFC 2119):
-- **MUST** - Absolute requirement
-- **SHOULD** - Strong recommendation, exceptions need justification
-- **MAY** - Optional, nice-to-have
-
-### Success Criteria (Required)
-
-```markdown
-## Success Criteria
-
-- SC-001: 95% of registrations complete without error
-- SC-002: Confirmation emails delivered within 60 seconds (p95)
-- SC-003: Password validation feedback in <100ms
-- SC-004: Zero accounts created with invalid email format
-```
-
-Criteria MUST be:
-- **Measurable** - specific numbers, not "fast" or "reliable"
-- **Verifiable** - can write test/metric for it
-- **Technology-agnostic** - no "Redis cache hit rate"
-
-### Out of Scope (Required)
-
-Every exclusion must have one unique canonical `OOS-NNN:` ID.
-
-```markdown
-## Out of Scope
-
-Explicitly NOT part of this feature:
-- OOS-001: Social login (separate spec)
-- OOS-002: Account deletion (future work)
-- OOS-003: Profile editing (separate spec)
-- OOS-004: Admin user management
-```
-
-Prevents scope creep during implementation.
-
-### Appendix: Glossary (Required)
-
-```markdown
-## Appendix: Glossary
-
-| Term | Definition |
-|------|------------|
-| {domain term} | {meaning in this context} |
-```
-
-Every glossary row must have exactly two non-empty cells, and every term must be unique (case-insensitive). Data rows whose term is the reserved header term `Term` fail the structural parse (the canonical header is table furniture, not data).
-
----
-
-## Quality Checks
-
-Before finalizing spec, verify:
+Before finishing, verify:
 
 | Check | Criteria |
 |-------|----------|
-| No HOW | Zero tech stack, API, or implementation mentions |
-| Testable | Every FR has clear pass/fail condition |
-| Measurable | Every SC has specific metric |
+| No HOW | Zero tech stack, API or implementation mentions |
+| Testable | Every FR has a clear pass/fail condition |
+| Measurable | Every SC has a specific metric, not "fast" or "reliable" |
 | Scoped | Out of Scope section populated |
 | Glossary | Appendix: Glossary populated with non-empty, unique term/definition rows |
-| Prioritized | All user scenarios have P1/P2/P3 |
-| Uncertain marked | Ambiguities use `[NEEDS CLARIFICATION]` |
+| Prioritized | Every user scenario has P1, P2 or P3 |
+| Uncertain marked | Every ambiguity carries `[NEEDS CLARIFICATION: ...]` |
 
----
+## Counting markers and handing off (standalone only)
 
-## Handoff to Architecture
+Count the markers in the spec you just wrote, and in no other:
 
-When spec is ready (markers <= 3 or clarified):
+```bash
+SPEC=".claude/specs/<date>-<slug>/spec.md"
+test -f "$SPEC" || { echo "FATAL: no spec at $SPEC" >&2; exit 1; }
+# grep -c exits 1 when the count is 0 (a good state) and 2 on a real error.
+grep -c "NEEDS CLARIFICATION" "$SPEC" || [ $? -eq 1 ]
+```
 
-1. Commit spec: `git add .claude/specs/ && git commit -m "spec: {slug}"`
-2. Invoke the architecture-tech-lead skill (`/skill:architecture-tech-lead` in Pi) — the invocation this file's own description and Position in flow give; no `/architecture-tech-lead` command exists
-3. Arch-lead reads spec, produces plan with technical decisions
+- **More than 3:** invoke `/clarify` on that spec before going further.
+- **3 or fewer:** leave them for the architecture step to settle.
 
-Arch-lead resolves technical uncertainties during research phase.
+Then:
 
----
-
-## Constraints
-
-- NEVER include implementation details
-- NEVER skip User Scenarios section
-- NEVER use vague success criteria ("fast", "reliable")
-- ALWAYS mark uncertainties explicitly
-- ALWAYS include Out of Scope section
-- Auto-trigger /clarify if >3 markers
+1. Commit the spec: `git add .claude/specs/ && git commit -m "spec: {slug}"`
+2. Invoke the `architecture-tech-lead` skill. It reads the spec and produces a plan with the technical decisions.

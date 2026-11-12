@@ -16,7 +16,7 @@ Remove **incidental complexity** — complexity that isn't paying for itself —
 
 If not already in context this session, read `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md` and the one language rule matching the files in scope.
 
-Also read `CONTEXT.md` at the repo root if it exists. Idiom is project-relative: code that matches the loaded patterns is already simple by this project's definition, even if you would write it differently.
+Also read `CONTEXT.md` at the repo root if it exists; if a `CONTEXT-MAP.md` exists, read only the context files it lists for the area you are working in. Idiom is project-relative: code that matches the loaded patterns is already simple by this project's definition, even if you would write it differently.
 
 ## Vocabulary
 

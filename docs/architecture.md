@@ -419,3 +419,51 @@ harness adapters and command runbooks
 - Enforcement details: [Deterministic core](deterministic-core.md)
 - Pi adapter: [Using Loom with Pi](pi-usage.md)
 - Architectural rationale: [ADR-0004](adr/ADR-0004-engine-owned-orchestration-automation.md)
+
+## Claude Code hook table
+
+Moved here from `commands/loom.md`, and completed from `hooks/hooks.json` and `engine/src/handler-routes.ts` (`KNOWN_HANDLERS`). Each shim under `hooks/scripts/` calls `bun engine/src/cli.ts <hook-type> <handler>`. The spawn gates, the direct-edit block and the state guard act only while a State File exists; the routes marked *fail-closed* block when the handler itself crashes (`FAIL_CLOSED_ROUTES`).
+
+| Hook shim | Event and matcher | Purpose |
+|---|---|---|
+| `validate-phase-order.sh` | PreToolUse: Task/Agent/subagent | Phase sequencing: refuses a phase agent whose prerequisite phase is incomplete, and the decompose spawn until the plan design review is accepted for the plan's current bytes (or skipped). *Fail-closed* |
+| `validate-task-execution.sh` | PreToolUse: Task/Agent/subagent | Expands an implementation brief marker; checks Wave and dependency order and path ownership; reclaims only policy-eligible reservations; writes skeletons; captures baselines; registers attempt and retry authority atomically. *Fail-closed* |
+| `validate-template-substitution.sh` | PreToolUse: Task/Agent/subagent | Refuses a prompt that still holds an unsubstituted `{variable}`. *Fail-closed* |
+| `validate-agent-model.sh` | PreToolUse: Task/Agent/subagent | Refuses a spawn whose model does not match the agent's LLM Profile. *Fail-closed* |
+| `validate-agent-skill.sh` | PreToolUse: Task/Agent/subagent | Refuses a spawn whose prompt does not name the agent's required skill. *Fail-closed* |
+| `block-direct-edits.sh` | PreToolUse: Edit, Write, MultiEdit | Keeps the orchestrator from editing; a phase agent writes only under its artifact roots, and an implementation agent only once its exact Implementation Attempt is bound (pending is a retriable block, refused a hard block). *Fail-closed* |
+| `enforce-phase-tools.sh` | PreToolUse: Edit, Write, MultiEdit | Guarded-skill machine: denies a tool the bound agent's phase does not allow. *Fail-closed* |
+| `guard-state-file.sh` | PreToolUse: Bash | Deny by default on guarded state paths: only read-only commands and the helpers in `WHITELISTED_HELPERS` (`core/guard-state-file.ts`) pass. Covers the task graph, subagent evidence and binding files, and machine definitions. *Fail-closed* |
+| `guard-subagent-authority.sh` | PreToolUse: Bash | A subagent may not change audit or orchestration authority (ADR-0067 D6). *Fail-closed* |
+| `rules-gate.sh` | PreToolUse: Edit, Write, MultiEdit, Bash | Blocks code edits until the Loom rules and skills are in the model's context and adherence is stated. *Fail-closed* |
+| `mark-subagent-active.sh` | SubagentStart | Tracks active subagents and binds the guarded-skill machine; binds an implementation agent's exact attempt when its prompt is already on disk, else leaves it pending |
+| `record-evidence.sh` | PostToolUse: Read, Edit, Write, MultiEdit, Bash; PostToolUseFailure: Bash | Appends epoch-stamped facts (file reads, file writes, test runs) to the evidence ledger |
+| `lint-file.sh` | PostToolUse: Edit, Write, MultiEdit | Immediate-tier lint: regex rules plus the immediate-tier programmatic rules; the full tier runs at the Wave Gate |
+| `type-diagnostics.sh` | PostToolUse: Edit, Write, MultiEdit | Runs the project's incremental type check after a TypeScript edit and reports what no longer typechecks. Advisory; never blocks |
+| `record-orchestration-spawn.sh` | PostToolUse: Task/Agent | Binds an engine-issued request id to the harness's child agent id |
+| `surface-stop-check-notes.sh` | PostToolUse: Task/Agent | Hands the orchestrating session the stop-check notes its agents left |
+| `cleanup-stale-subagents.sh` | SessionStart | Sweeps stale subagent tracking and binding files |
+| `resume-after-clear.sh` | SessionStart: clear | Restores the `/loom` execution context after `/clear` |
+| `dispatch.sh` | SubagentStop | Routes by agent type to the handlers below (`engine/src/handlers/subagent-stop/`) |
+| ↳ `capture-orchestration-result` | via dispatch, first | Request-bound capture of an engine-issued agent's result into its Run Directory |
+| ↳ `advance-phase` | via dispatch | Advances `current_phase` once the phase's artifact is on disk, and records `spec_file` and `plan_file` |
+| ↳ `update-task-status` | via dispatch | Settles an implementation attempt: implemented, retry-required, escalation-required or infrastructure-blocked |
+| ↳ `store-reviewer-findings` | via dispatch | Parses review findings |
+| ↳ `store-spec-check-findings` | via dispatch | Parses spec-check findings |
+| ↳ `cleanup-subagent-flag` | via dispatch, always | Removes subagent tracking and machine bindings |
+
+## State File shape at initialization
+
+Moved here from `commands/loom.md`. `cli.ts init-state` writes `.claude/state/active_task_graph.json` before Phase 0, and the engine keeps it mode 444 at rest; hooks and whitelisted helpers write through `StateManager`. Nobody authors this file by hand.
+
+| Field | At `init-state` | Later |
+|---|---|---|
+| `current_phase` | `init`, or the first phase the skip flags leave | Advanced by `advance-phase`; `populate-task-graph` moves `decompose` to `execute` |
+| `phase_artifacts` | `{}` | One entry per completed phase |
+| `skipped_phases` | From the skip flags: `--skip-specify` adds `brainstorm`, `specify`, `clarify`; `--skip-plan-alignment` adds `plan-alignment` | Unchanged |
+| `plan_design_review` | `{"status":"required"}`, or `{"status":"not-required","reason":"skipped"}` with `--skip-plan-design-review` (a gate, so `skipped_phases` is unchanged) | Set to `accepted`, bound to the plan's bytes, only by `accept-plan-design-review` |
+| `spec_dir` | `.claude/specs/<date-slug>` | Unchanged |
+| `spec_file`, `plan_file` | `null` (`spec_file` is set at once with `--skip-specify`) | Recorded when the phase artifact appears |
+| `tasks`, `wave_gates` | `[]`, `{}` | Installed by `populate-task-graph` with `github_issue`, `current_wave` and `executing_tasks` |
+
+Task status moves `pending` → `implemented` (the exact attempt satisfies proof and the Task-local suite) → `completed` (its Wave Gate passed). A Task stays `pending` through an infrastructure block, through a failed attempt 1 (one attempt-2 retry is issued) and through a failed attempt 2 (status then publishes a terminal escalation; there is no attempt 3).

@@ -225,6 +225,10 @@ Give every exclusion a unique canonical `OOS-NNN:` ID. Include:
 - User types not supported in v1
 - Integrations deferred
 
+### Appendix: Glossary
+
+Required. Every row has exactly two non-empty cells, and every term is unique (case-insensitive). A data row whose term is the header word `Term` fails the parse.
+
 ### NEEDS CLARIFICATION Markers
 
 **Syntax:** `[NEEDS CLARIFICATION: {specific question}]`

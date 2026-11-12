@@ -20,7 +20,7 @@ Your task's `plan_context` contains an AD seed (Choice / Why / Rejected) from th
 - **Decision:** One-line statement of the chosen option, then concrete detail (architecture, components, file paths, invariants).
 - **Consequences:** Positive and Negative bullet lists. Be honest about tradeoffs and risks accepted.
 
-Write to the file path in your task's `file_list`. The path includes the pre-allocated ADR number (`docs/adr/NNNN-slug.md`) — do not change it.
+Write to the file path in your task's `file_list`. Decompose pre-allocated its ADR number and named it after the convention the project's `docs/adr/` already uses; do not change the path. Use that number in the document's title.
 
 Constraints:
 - Write exactly one ADR per invocation.

@@ -14,7 +14,7 @@ Deepen is for when the interface itself is the problem. Cleanup that leaves ever
 
 If not already in context this session, read `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md` and the one language rule matching the files in scope.
 
-Also read `CONTEXT.md` at the repo root if it exists (the ubiquitous language) and `docs/adr/` (decisions already made).
+Also read `CONTEXT.md` at the repo root if it exists (the ubiquitous language) and `docs/adr/` (decisions already made). If a `CONTEXT-MAP.md` exists, read only the context files it lists for the area you are working in.
 
 ## Vocabulary
 

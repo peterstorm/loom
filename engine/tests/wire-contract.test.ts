@@ -1,13 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentsOfKind } from "../src/core/agent-catalog-projections";
 import {
   READ_COVERAGE_BULLET_ANCHOR,
+  REVIEWER_BOOTSTRAP_REGION,
+  REVIEWER_PREFLIGHT_REGION,
+  WIRE_CONTRACT_REGION,
   extractReadCoverageBullet,
+  extractRegion,
   extractWireContractRegion,
   stampReadCoverageBullet,
+  stampRegion,
   stampWireContract,
 } from "../src/core/wire-contract";
 import { renderReviewerWireContract, renderReviewerWireInstructions } from "../src/core/reviewer-protocol";
@@ -20,9 +25,11 @@ import { EMISSION_TOOL_SPECS, issueEmissionBinding } from "../src/core/emission-
 import { parseRequestId } from "../src/core/orchestration-contract/identity";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const fragment = readFileSync(join(REPO_ROOT, "agents", "_shared", "wire-contract.md"), "utf-8");
-const readCoverageFragment = readFileSync(join(REPO_ROOT, "agents", "_shared", "read-coverage.md"), "utf-8");
+const readFragment = (name: string): string => readFileSync(join(REPO_ROOT, "references", "reviewer-wire", name), "utf-8");
+const fragment = readFragment("wire-contract.md");
+const readCoverageFragment = readFragment("read-coverage.md");
 const reviewers = agentsOfKind("reviewer");
+const reviewerFile = (agent: string): string => readFileSync(join(REPO_ROOT, "agents", `${agent}.md`), "utf-8");
 
 const REQUEST = parseRequestId("request:wire-contract");
 if (!REQUEST.ok) throw new Error(`fixture request id refused: ${REQUEST.error.message}`);
@@ -35,7 +42,7 @@ const REGISTRY_CELLS = (Object.keys(EMISSION_TOOL_SPECS) as Array<keyof typeof E
   }));
 
 /**
- * The Wire Contract has ONE source: agents/_shared/wire-contract.md. Each
+ * The Wire Contract has ONE source: references/reviewer-wire/wire-contract.md. Each
  * finding-producing reviewer carries a stamped copy between markers — never a
  * hand-edited one. This test is the drift gate: it uses the SAME extraction
  * the stamp script writes with, so "the regions match" here means re-running
@@ -73,7 +80,89 @@ describe("every reviewer carries the exact stamped Wire Contract", () => {
 });
 
 /**
- * The read-coverage bullet has ONE source too: agents/_shared/read-coverage.md,
+ * The Context Packet bootstrap and the payload preflight are hand-written once,
+ * in references/reviewer-wire/, and stamped between their own markers. Each was
+ * a block hand-copied into seven files; the copies had drifted apart. The
+ * drift gate is the stamper's own extraction, as for the Wire Contract above.
+ */
+describe.each([
+  ["bootstrap.md", REVIEWER_BOOTSTRAP_REGION],
+  ["before-you-emit.md", REVIEWER_PREFLIGHT_REGION],
+] as const)("every reviewer carries the exact stamped %s", (file, region) => {
+  const source = readFragment(file);
+
+  it.each([...reviewers])("agents/%s.md region is byte-identical to the fragment, and stamping it is idempotent", (agent) => {
+    const markdown = reviewerFile(agent);
+    expect(extractRegion(markdown, region)).toEqual({ ok: true, value: source.replace(/\n$/, "") });
+    expect(stampRegion(markdown, region, source)).toEqual({ ok: true, value: markdown });
+  });
+
+  it("the fragment opens with its own heading, so the region is a whole section", () => {
+    expect(source).toMatch(/^## \S/);
+    expect(source.endsWith("\n")).toBe(true);
+  });
+});
+
+describe("the reviewer regions sit in the order a reviewer reads them", () => {
+  it.each([...reviewers])("agents/%s.md opens with the bootstrap, then the read-coverage bullet, the preflight and the Wire Contract", (agent) => {
+    const markdown = reviewerFile(agent);
+    const positions = [
+      markdown.indexOf(REVIEWER_BOOTSTRAP_REGION.start),
+      markdown.indexOf(READ_COVERAGE_BULLET_ANCHOR),
+      markdown.indexOf(REVIEWER_PREFLIGHT_REGION.start),
+      markdown.indexOf(WIRE_CONTRACT_REGION.start),
+    ];
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+    // Nothing but frontmatter precedes the bootstrap: it is the first thing read.
+    expect(markdown.slice(0, positions[0]).trimEnd().endsWith("---")).toBe(true);
+    // The Wire Contract closes the file: no hand-written text trails the generated region.
+    expect(markdown.endsWith(`${WIRE_CONTRACT_REGION.end}\n`)).toBe(true);
+  });
+});
+
+describe("the fragments are not agents", () => {
+  it("agents/ holds no subdirectory", () => {
+    // Claude Code registers every Markdown file beneath agents/ as a spawnable
+    // agent, so a fragment kept there appeared in the roster with all tools.
+    const subdirectories = readdirSync(join(REPO_ROOT, "agents"), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+    expect(subdirectories).toEqual([]);
+  });
+});
+
+describe("stamping a marked region", () => {
+  const region = REVIEWER_BOOTSTRAP_REGION;
+  const file = (inner: string): string => `---\nname: demo\n---\n\n${region.start}\n${inner}\n${region.end}\n\nBody\n`;
+
+  it("replaces only the region and leaves every other byte untouched", () => {
+    expect(stampRegion(file("stale"), region, "fresh\n")).toEqual({ ok: true, value: file("fresh") });
+    expect(extractRegion(file("fresh"), region)).toEqual({ ok: true, value: "fresh" });
+  });
+
+  it("fills an empty region", () => {
+    expect(stampRegion(`${region.start}\n${region.end}\n`, region, "fresh\n"))
+      .toEqual({ ok: true, value: `${region.start}\nfresh\n${region.end}\n` });
+  });
+
+  it.each<readonly [string, string, string]>([
+    ["a missing start marker", `text\n${region.end}\n`, "missing reviewer-bootstrap start marker"],
+    ["a missing end marker", `${region.start}\ntext\n`, "missing reviewer-bootstrap end marker"],
+    ["markers out of order", `${region.end}\n${region.start}\n`, "reviewer-bootstrap markers are out of order"],
+  ])("refuses %s, naming the region", (_name, markdown, error) => {
+    expect(stampRegion(markdown, region, "fresh\n")).toEqual({ ok: false, error });
+    expect(extractRegion(markdown, region)).toEqual({ ok: false, error });
+  });
+
+  it("one region's markers never satisfy another's", () => {
+    expect(stampRegion(file("text"), REVIEWER_PREFLIGHT_REGION, "fresh\n"))
+      .toEqual({ ok: false, error: "missing reviewer-preflight start marker" });
+  });
+});
+
+/**
+ * The read-coverage bullet has ONE source too: references/reviewer-wire/read-coverage.md,
  * stamped by the same script over each reviewer's single anchored bullet. The
  * drift gate uses the stamper's own extraction, exactly like the region above.
  */
@@ -150,14 +239,37 @@ describe("the fragment's tool-primary emission wording (FR-020/AS-012)", () => {
     );
   });
 
-  it("the fragment's fallback carry-through carries the spawn-wide prohibition and the single-payload fallback (AS-012)", () => {
+  it("states the spawn-wide prohibition and the single-payload fallback once, in the template itself (AS-012)", () => {
+    // The template is the wording; a paragraph restating it beside the
+    // template would be the second wording AD-7 rules out.
+    const [lead, instruction, template] = fragment.split("\n\n");
+    expect(lead).toBe(REVIEWER_OUTPUT_CONTRACT);
+    expect(instruction).toBe(
+      `If your task names an emission tool, this wording applies instead, with that tool's name in place of ${REVIEWER_EMISSION_TOOL_CONTRACT_PLACEHOLDER}:`,
+    );
+    expect(template).toBe(`\`\`\`\n${REVIEWER_EMISSION_TOOL_CONTRACT_TEMPLATE}\n\`\`\``);
     for (const phrase of [
-      "deterministic fallback",
-      "never re-emit within the same spawn",
-      "a second call is refused as duplicate-call ambiguity",
-      "exactly the one issued payload object, nothing else",
-      "with the exact issued tool name substituted for the placeholder",
-    ]) expect(fragment, phrase).toContain(phrase);
+      "a second time in this spawn",
+      "Only if the tool is unavailable or refuses your arguments, fall back to the final message",
+      "exactly one JSON object conforming to the issued payload schema, and nothing else",
+    ]) {
+      expect(REVIEWER_EMISSION_TOOL_CONTRACT_TEMPLATE, phrase).toContain(phrase);
+      expect(fragment.split(phrase), phrase).toHaveLength(2);
+    }
+  });
+
+  it("shows the common case, located findings, and says the example is the standalone arm only", () => {
+    const example = /## Example \(standalone-review only\)\n\n```json\n([\s\S]*?)\n```\n\n(.*)\n/.exec(fragment);
+    expect(example).not.toBeNull();
+    const payload = JSON.parse(example![1]!) as { kind: string; findings: { severity: string; file: unknown; line: unknown }[] };
+    expect(payload.kind).toBe("standalone-review");
+    expect(payload.findings.map(({ severity }) => severity)).toEqual(["critical", "advisory"]);
+    for (const finding of payload.findings) {
+      expect(typeof finding.file).toBe("string");
+      expect(typeof finding.line).toBe("number");
+    }
+    expect(example![2]).toContain('"kind": "wave-review"');
+    expect(example![2]).toContain("refused");
   });
 
   it("the retained extraction-only final-message contract stays verbatim and leads the fragment", () => {
@@ -187,13 +299,13 @@ describe("the fragment's tool-primary emission wording (FR-020/AS-012)", () => {
     expect(region.value).toContain(REVIEWER_OUTPUT_CONTRACT);
   });
 
-  it("archived issued v1 and v2 fragments are NOT rewritten (AS-012)", () => {
-    for (const archive of ["references/reviewer-protocol-v1", "references/reviewer-protocol-v2"]) {
-      const shared = readFileSync(join(REPO_ROOT, archive, "agents", "_shared", "wire-contract.md"), "utf-8");
-      expect(shared, archive).not.toContain(REVIEWER_EMISSION_TOOL_CONTRACT_TEMPLATE);
-      expect(shared, archive).not.toContain(REVIEWER_EMISSION_TOOL_CONTRACT_PLACEHOLDER);
-      expect(shared, archive).not.toContain("primary final action");
-      expect(shared, archive).not.toContain("loom_emit_");
-    }
+  it("the archived issued v1 fragment is NOT rewritten (AS-012)", () => {
+    // The schema-2 archive is no longer kept in the tree: nothing read it, and
+    // docs/operations.md records the commit that reproduces it.
+    const shared = readFileSync(join(REPO_ROOT, "references/reviewer-protocol-v1/agents/_shared/wire-contract.md"), "utf-8");
+    expect(shared).not.toContain(REVIEWER_EMISSION_TOOL_CONTRACT_TEMPLATE);
+    expect(shared).not.toContain(REVIEWER_EMISSION_TOOL_CONTRACT_PLACEHOLDER);
+    expect(shared).not.toContain("primary final action");
+    expect(shared).not.toContain("loom_emit_");
   });
 });

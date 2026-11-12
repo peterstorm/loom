@@ -1,8 +1,6 @@
 Emit exactly one JSON object conforming to reviewer-payload-schema; apply reviewer-impact-rubric. No other final output.
 
-The final-message contract above is the deterministic fallback: it governs extraction-only requests outright, and it is the fallback when an emission-enabled request's registered tool is unavailable or refuses the arguments. On an emission-enabled request the engine renders the tool-primary wording below with the exact issued tool name substituted for the placeholder. Call that tool exactly once as the primary final action and never re-emit within the same spawn — a second call is refused as duplicate-call ambiguity — and the fallback final message carries exactly the one issued payload object, nothing else.
-
-## emission-tool-contract (tool-primary)
+If your task names an emission tool, this wording applies instead, with that tool's name in place of <issued emission tool name>:
 
 ```
 Emit the required payload by calling the exact tool <issued emission tool name> exactly once, with its arguments carrying the complete issued payload, and make that tool call your primary final action. Never call <issued emission tool name> a second time in this spawn. Only if the tool is unavailable or refuses your arguments, fall back to the final message: exactly one JSON object conforming to the issued payload schema, and nothing else.
@@ -411,7 +409,7 @@ Emit the required payload by calling the exact tool <issued emission tool name> 
 }
 ```
 
-## Current example (standalone)
+## Example (standalone-review only)
 
 ```json
 {
@@ -420,8 +418,8 @@ Emit the required payload by calling the exact tool <issued emission tool name> 
   "findings": [
     {
       "severity": "critical",
-      "file": null,
-      "line": null,
+      "file": "src/orders/update-order.ts",
+      "line": 42,
       "claim": "Supported input can be accepted without the required authorization check.",
       "basis": {
         "evidence": {
@@ -449,10 +447,19 @@ Emit the required payload by calling the exact tool <issued emission tool name> 
         "truthConfidence": 80,
         "severityRationale": "The reachable authorization violation blocks safe delivery."
       }
+    },
+    {
+      "severity": "advisory",
+      "file": "src/orders/update-order.ts",
+      "line": 57,
+      "claim": "The retry loop repeats the lookup the caller already performed.",
+      "reason": "Passing the loaded order in removes one query per retry; behavior is unchanged."
     }
   ]
 }
 ```
+
+A Wave request is refused this shape: its payload is `"kind": "wave-review"` with `packetId`, `generation` and `prior_findings`, as the schema and your task state.
 
 ## reviewer-impact-rubric
 

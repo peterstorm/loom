@@ -48,14 +48,7 @@ path/to/new/file.test.ts     — tests
 Only when a contract (see `## Contracts`) declares a types file and this
 group creates a file that provides functions it declares. Delete the label if
 not. Column 0, outside the fence, directly under the group's fenced block; one
-line per file and one contract per file; each `name: Alias` names a
-non-generic function-type alias of that contract's types file (in Java, a
-single-abstract-method interface nested in its one top-level holder). The
-engine writes each bound file as a skeleton before its Task starts, writes the
-contract stubs itself at the contract Task's stop, and refuses completion
-while a bound export is deleted, renamed, retyped or still unimplemented. A
-bound path belongs to one non-contract Task that depends on the contract
-Task, never to the contract Task.
+line per file and one contract per file. Grammar: executable-models.md §5.
 
 ### {Component/Domain B}
 
@@ -98,8 +91,8 @@ path/to/new/file.ts          — {purpose}
 ## Lifecycles
 
 Only if the design contains a real domain lifecycle. Delete section if not.
-See `references/executable-models.md` — a declared lifecycle MUST bind to a
-machine file that a task implements, or decompose validation fails.
+A declared lifecycle binds to a machine file that a task implements, or
+decompose validation fails (executable-models.md §1).
 
 ### LC-1: {Lifecycle Name}
 
@@ -118,8 +111,9 @@ machine file that a task implements, or decompose validation fails.
 ## Pipeline
 
 Only if the feature is a real pipeline AND the project uses fugue AND the
-user opted in at the approach gate. Delete section if not. The AuthoredDag
-sidecar must exist before decompose (architecture phase authors it).
+user opted in during the architecture interview. Delete section if not. The
+AuthoredDag sidecar must exist before decompose (the architecture phase
+writes it; executable-models.md §2).
 
 **AuthoredDag:** `{path/to/feature.dag.authored.json}`
 
@@ -132,14 +126,10 @@ sidecar must exist before decompose (architecture phase authors it).
 ## Invariants
 
 Only if the design has invariants worth stating. Delete section if not.
-Checkable invariants MUST have a rule file (written during this phase);
-non-checkable ones are honestly tiered advisory. A rule enforced at two or
-more entry points is an invariant, and EVERY invariant names its owner: the
-one module that implements the rule, every other entry point that applies it,
-and the matrix test that runs the rule through all of them — or
-`**Owner module:** none` with the reason it has no home. An owned invariant
-is mutation-verified at the Wave Gate unless it declares a reasoned
-`**Mutation exemption:**`.
+A checkable invariant has a rule file (written during this phase); one that
+cannot be checked is tiered advisory. A rule applied at two or more entry
+points is an invariant, and every invariant names its owner, or says why it
+has none (executable-models.md §3).
 
 ### INV-1: {Invariant Title}
 
@@ -165,14 +155,10 @@ is mutation-verified at the Wave Gate unless it declares a reasoned
 
 Only when the plan has a spec and a feature slice whose observable behavior a
 test can decide. Delete section if not. Each contract becomes one contract
-Task in an early Wave: it writes the declarations-only types file and the
-dedicated acceptance tests, and the engine writes the stubs those tests import
-from the `**Export bindings:**` in `## File Structure` when the contract Task
-stops; its Wave Gate must observe every acceptance test FAIL. Every algebraic
-data type the feature shares goes in the types file, where it is a frozen ADT:
-implementation files use it and never shadow or re-list it. The Wave Gate then freezes those files, and every
-Task that completes a covered Requirement depends on the contract Task and
-must turn the same tests green without changing them.
+Task in an early Wave that writes the declarations-only types file and the
+dedicated acceptance tests; later Tasks turn those tests green without
+changing them. Every algebraic data type the feature shares goes in the
+types file (executable-models.md §4 and §5).
 
 ### CT-1: {Contract Title}
 
@@ -269,68 +255,10 @@ Per component, not global.
 - Distinguish unit (pure) vs integration (I/O)
 - Note property tests where invariants exist
 
-**Executable Models (Lifecycles / Pipeline / Invariants / Contracts):**
-- Opt-in sections — most features need none of them. Absent = policy satisfied.
-- A model either executes or it doesn't exist: lifecycle → machine file the
-  implementation imports; pipeline → AuthoredDag that generates the graph;
-  checkable invariant → lint rule enforced fail-closed on every edit.
-- Never describe a lifecycle/pipeline in prose without the executable binding
-  — `validate-task-graph` blocks decompose on unbound models AND on near-miss
-  declarations (typo'd headings/labels are errors, not opt-outs).
-- **Exact grammar** — these sections are regex-parsed: headings
-  `## Lifecycles` / `## Pipeline` (one per plan) / `## Invariants` with no
-  suffix or colon; blocks `### LC-<n>: <title>` / `### INV-<n>: <title>`
-  (uppercase, numeric, colon); labels like `**Machine file:**` at column 0,
-  colon inside the bold, never as bullets. Machine-file paths repo-relative.
-  Close every code fence — an unterminated fence hides everything after it.
-- Rule files go in the project's one rules dir: `.claude/linter/rules/`, which
-  both harnesses read (`.pi/linter/rules/` only in a Pi-only project that has
-  no `.claude/linter/rules/`; never both).
-- **Invariant ownership** — every `INV-N` declares `**Owner module:**`. Owned:
-  `**Sibling entry points:**` (`- path — note` lines, or `none`) and
-  `**Matrix test:**`. Unowned: `**Owner module:** none` plus
-  `**Unowned reason:**`. Declare **one invariant per rule** (a family with
-  several rules gets several invariants), and write the `**Statement:**` so it
-  says which call sites the rule covers — otherwise the sibling list cannot be
-  checked for completeness.
-- **Owner verification (G5b)** — every owned `INV-N` becomes an Owner
-  Obligation. At the Wave Gate of a Wave that changes its owner or a sibling
-  (a contract Task's stub does not count), the matrix test must import the
-  owner and every sibling due by that Wave: one that exists already or that
-  this or an earlier Wave builds (directly or through `export … from`
-  re-exports; an import proves reach, not exercise). Siblings may land Wave by
-  Wave if each of those Waves updates the matrix test, which must itself land
-  no later than the first Wave that owes the family (the first Wave whose
-  non-contract Task changes the owner or a sibling once the owner is due).
-  And every
-  mutant of the owner's lines changed in that Wave must be killed by it (six
-  fixed operators, at most 24 mutants, each run through the verification
-  manifest's `affectedRunner`). A plan with a non-exempt owned invariant needs
-  a schema-2 `.loom/verification-manifest.json` declaring an `affectedRunner`
-  that writes JUnit; population refuses it otherwise.
-- **Mutation exemption** — `**Mutation exemption:** <reason>` on an owned
-  invariant skips only the mutation half; sibling coverage still runs. The
-  reason is mandatory. A blank reason, a placeholder reason (`none`, `n/a`,
-  `na`, `tbd`, `todo`, `-`, `—`, `null`, `nil`, `no`, `nothing`, in any case,
-  trailing punctuation ignored), or the line on an unowned invariant, is
-  malformed ownership and validation refuses the plan. Use it only when the
-  owner's changed lines cannot be meaningfully killed (timing-only code, say),
-  and say why.
-- **Contracts** — `### CT-<n>: <title>` blocks under `## Contracts`. The
-  `**Types file:**` is a NEW file holding declarations only (types,
-  interfaces, sealed ADTs, the signatures consumers import) — never an
-  implementation file or a shared `types.ts`, because its bytes freeze; or
-  `none` plus `**No types reason:**`. `**Acceptance tests:**` lists NEW,
-  dedicated test files (`*.acceptance.test.ts` or the project's equivalent),
-  one `- path — FR-n, AS-n` line each, naming only Requirements a test can
-  decide (measured or calibration anchors stay off). `**Supported domain:**`,
-  when present, names the acceptance file holding the supported/unsupported
-  table as test cases. `**Entry point:**`, when present, names the production
-  file the acceptance tests reach the code through (a CLI route, a handler);
-  every Task claiming a covered Requirement must write it or depend on the
-  Task that does. Several contracts per feature are normal; a vertical
-  slice with `**Types file:** none` carries the controls that must fail.
-- Full policy: `references/executable-models.md`
+**Executable Models (Lifecycles / Pipeline / Invariants / Contracts / Export bindings):**
+- Opt-in sections. Most features need none of them, and an absent section satisfies the policy.
+- A model either executes or it does not exist. Never describe a lifecycle or pipeline in prose without its executable binding: `validate-task-graph` blocks decompose on an unbound model and on a near-miss declaration (a misspelled heading or label is an error, not an opt-out).
+- The sections are regex-parsed. Before declaring one, read its section of `references/executable-models.md`, which owns the grammar, the ownership rules, the contract fields and the export-binding rules, and copy headings and labels exactly as the template above shows them.
 
 **What NOT to include:**
 - Implementation code (that's the impl agent's job)

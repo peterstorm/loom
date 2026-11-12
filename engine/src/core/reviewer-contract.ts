@@ -189,3 +189,21 @@ export const REVIEWER_PAYLOAD_EXAMPLE_V2: ReviewerPayloadV2 = reviewerPayloadV2S
     },
   }],
 });
+
+/**
+ * The example the stamped Wire Contract shows a reviewer: the common case, a
+ * critical and an advisory each at a real file and line. `REVIEWER_PAYLOAD_EXAMPLE_V2`
+ * stays location-free because fixtures admit it under scopes of their own, but
+ * a reviewer shown `file: null` copies it. Parsed by the admission schema
+ * here, so it cannot diverge from what admission accepts.
+ */
+export const REVIEWER_WIRE_CONTRACT_EXAMPLE_V2: ReviewerPayloadV2 = reviewerPayloadV2Schema.parse({
+  schemaVersion: 2, kind: "standalone-review", findings: [
+    { ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0], file: "src/orders/update-order.ts", line: 42 },
+    {
+      severity: "advisory", file: "src/orders/update-order.ts", line: 57,
+      claim: "The retry loop repeats the lookup the caller already performed.",
+      reason: "Passing the loaded order in removes one query per retry; behavior is unchanged.",
+    },
+  ],
+});

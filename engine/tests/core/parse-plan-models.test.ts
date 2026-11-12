@@ -689,4 +689,30 @@ describe("template conformance — the shipped plan template parses cleanly", ()
     expect(models.contracts.map(({ declaration }) => declaration.kind === "declared" ? declaration.types.kind : null))
       .toEqual(["file", "none"]);
   });
+
+  it("references/executable-models.md declaration examples match the parser grammar", () => {
+    // The reference owns the model grammar the architecture agent copies from,
+    // so its examples are run through the parser a plan is read with.
+    const here = dirname(fileURLToPath(import.meta.url));
+    const raw = readFileSync(join(here, "..", "..", "..", "references", "executable-models.md"), "utf-8");
+    const sections = [...raw.matchAll(/```markdown\n([\s\S]*?)\n```/g)]
+      .map((match) => match[1]!)
+      .filter((body) => /^## (Lifecycles|Pipeline|Invariants|Contracts)$/m.test(body));
+    expect(sections).toHaveLength(4);
+    const models = parsePlanModels(sections.join("\n\n"));
+
+    expect(models.strays).toEqual([]);
+    expect(models.lifecycles.map(({ id }) => id)).toEqual(["LC-1"]);
+    expect(models.lifecycles[0].machineFile).not.toBeNull();
+    expect(models.pipeline?.dagFile).not.toBeNull();
+    expect(models.invariants.map(({ id }) => id)).toEqual(["INV-1", "INV-2", "INV-3"]);
+    expect(models.invariants.map(({ tier }) => tier)).toEqual([
+      { status: "ok", tier: "checkable" },
+      { status: "ok", tier: "advisory" },
+      { status: "ok", tier: "advisory" },
+    ]);
+    expect(models.invariants.map(({ ownership }) => ownership.kind)).toEqual(["unowned", "unowned", "owned"]);
+    expect(models.contracts.map(({ declaration }) => declaration.kind === "declared" ? declaration.types.kind : null))
+      .toEqual(["file", "none"]);
+  });
 });

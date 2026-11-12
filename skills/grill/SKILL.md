@@ -19,7 +19,7 @@ If not already in context this session, read `${CLAUDE_PLUGIN_ROOT}/rules/archit
 Then load the domain context:
 
 1. `CONTEXT.md` at the repo root.
-2. `CONTEXT-MAP.md`, if it exists, to find the bounded contexts; load the `CONTEXT.md` of the one under discussion.
+2. `CONTEXT-MAP.md`, if it exists: read only the context files it lists for the area under discussion.
 
 If no `CONTEXT.md` exists, create one when the first term is settled (format: [CONTEXT-FORMAT.md](./references/CONTEXT-FORMAT.md)).
 

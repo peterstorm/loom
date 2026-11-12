@@ -1,10 +1,9 @@
 # Review Lenses
 
-The refutation lenses used by the wave gate's adversarial review panel (Step 3.5
-of `commands/wave-gate.md`). The `review-panel` helper selects the lens set from
-the finding brief; the orchestrator substitutes the chosen lens's section below
-into the `{lens_prompt}` variable of `commands/templates/review-verify.md`. Each
-verifier commits fully to ONE lens and judges **every** finding through it.
+The refutation lenses of the Refutation Panel, for Wave Gate and standalone
+review alike. The engine selects the lens set from the critical Findings and
+issues each verifier one lens by name. The verifier (`review-verifier-agent`)
+reads that lens's `## <lens>` section below and judges every Finding through it.
 
 Every lens fragment states three things a verifier must honor: what it **tries
 to refute**, what it **refuses to refute on** (so a lens does not stray into

@@ -14,7 +14,7 @@ Design only; do not implement. After the user approves, hand off to implementati
 
 If not already in context this session, read `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md` and the one language rule matching the files in scope.
 
-Also read `CONTEXT.md` at the repo root if it exists (ubiquitous language and domain relationships). The loaded rules are constraints on the design.
+Also read `CONTEXT.md` at the repo root if it exists (ubiquitous language and domain relationships); if a `CONTEXT-MAP.md` exists, read only the context files it lists for the area you are working in. The loaded rules are constraints on the design.
 
 ## Under `/loom`
 

@@ -20,9 +20,9 @@ You are running the **finalize stage** of a panel-mode architecture run. The int
 
 The interview digest at {interview_file_path} already captures the user's priorities. **Never re-run the questionnaire.** The approach gate remains mandatory: panel ranking is a recommendation, never an automatic decision.
 
-## CRITICAL: You CAN Write Files
+## Writing
 
-You are a subagent — Write/Edit is allowed, scoped to this phase's artifact directory (`.claude/plans/`, and panel-run dirs under `.claude/specs/{date_slug}/panel-runs/`). Do NOT read `.claude/hooks/` or `.claude/state/`. Write the plan only after the gate is resolved.
+You may write with Write/Edit under `.claude/plans/`, `.claude/specs/{date_slug}/` and the project's lint-rule directory (`.claude/linter/rules/`, or `.pi/linter/rules/` in a Pi-only project). Loom's hooks allow this; do not read `.claude/hooks/` or `.claude/state/` to check. Write the plan only after the gate is resolved.
 
 ## Validated judge verdicts
 
@@ -60,9 +60,9 @@ Present the **top 2–3 ranked candidates** via `AskUserQuestion` (single questi
 
 Take the user's chosen candidate as the base. Graft each judge's `strongest_idea` from losing candidates **only where compatible** with the chosen approach. Record what was grafted.
 
-### 5. Proceed with the standard architecture flow (§5–6)
+### 5. Proceed with the standard architecture flow (steps 5–7)
 
-Read `{loom_dir}/commands/templates/phase-architecture.md` (§5–6), `{loom_dir}/references/executable-models.md`, and `{loom_dir}/references/plan-template.md`. `{loom_dir}` was resolved and verified by the parent orchestrator; do not re-scan the plugin cache. Follow standard mode's design/plan requirements, executable-model rules, and commit behavior exactly.
+Read `{loom_dir}/commands/templates/phase-architecture.md` and follow its steps 5 ("Design the chosen approach"), 6 ("Executable models") and 7 ("Write the plan") exactly, including the reference files those steps name and the commit. That file is a template whose placeholders are not filled in: wherever it names the Loom package use `{loom_dir}`, and wherever it names the date slug use `{date_slug}`. `{loom_dir}` was resolved and verified by the parent orchestrator; do not look for the package anywhere else.
 
 **Output location:** `.claude/plans/{date_slug}.md`
 
@@ -70,7 +70,7 @@ Read `{loom_dir}/commands/templates/phase-architecture.md` (§5–6), `{loom_dir
 
 In `## Architectural Decisions`, add `### AD-1: Approach selection (panel)` with: the exact candidate manifest path; run id and lenses from the manifest; one-line verdict summary per criterion; the computed ranking verbatim (candidate, rank, total score); the user's choice; the panel recommendation if different; and grafted `strongest_idea`s. Canonical verdict files and the aggregate ranking remain in the run directory, while AD-1 is the durable plan-level summary.
 
-Commit per standard §6.
+Commit as step 7 of the standard template says.
 
 ## What NOT to do
 

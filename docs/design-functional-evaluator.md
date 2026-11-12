@@ -1,6 +1,8 @@
 # Functional Evaluator — Universal Build-and-Run Verification
 
-> Design doc — not yet implemented. Inspired by [Anthropic's harness design article](https://www.anthropic.com/engineering/harness-design-long-running-apps).
+> **Unimplemented design note.** Nothing in Loom reads this file, and no agent, command, hook or gate described below exists. It was moved here from `references/` so that it is no longer packaged as a prompt resource. The engine paths it names (`complete-wave-gate.ts`, `config.ts`, the legacy SubagentStop routing) have since changed: today a Wave Gate runs project checks from the protected Verification Manifest through its completion suite, which covers "do the tests pass" but not "start the built artifact and probe it". Treat the rest as a proposal to re-derive against the current engine, not as a description of it.
+>
+> Inspired by [Anthropic's harness design article](https://www.anthropic.com/engineering/harness-design-long-running-apps).
 
 ## Problem
 

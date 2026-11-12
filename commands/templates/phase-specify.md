@@ -4,90 +4,49 @@ Template for spawning specify-agent. All template variables must be substituted 
 
 ---
 
-## CRITICAL: You CAN Write Files
-
-**You are a subagent. The block-direct-edits hook detects subagents and allows Edit/Write — scoped to this phase's artifact directory** (`.claude/specs/{date_slug}/` or `.claude/plans/`); write only there.
-- You MUST use Write/Edit tools to create the spec file — this WILL work
-- Do NOT read `.claude/hooks/` or `.claude/state/` files — they are irrelevant to you
-- Do NOT check if you are "allowed" to write — you are. Just write.
-
----
-
-## CRITICAL: Interview the User BEFORE Writing
-
-**Do NOT write the spec on the first pass.** The user wants to be involved in shaping the spec, not just approving it at the end.
-
-You will:
-1. Read brainstorm.md to understand what's already settled.
-2. **Ask ALL the interview questions** listed below via `AskUserQuestion` to lock down every aspect of the spec. Under Pi, Loom relays this tool through the parent TUI while keeping this child Agent alive.
-3. Only THEN write the spec, informed by both brainstorm and the interview.
-
-If brainstorm.md gives a **confident, explicit, unambiguous** answer to a question, you may skip that specific question. When in doubt, ask. Do not skip questions just to be efficient — the user wants depth, not speed.
-
-Batch up to 4 related questions per `AskUserQuestion` call in either harness.
-
----
-
 ## Specify: {feature_description}
 
-**Brainstorm output:** Read `.claude/specs/{date_slug}/brainstorm.md` for selected approach, constraints, and scope.
+**Brainstorm output:** `.claude/specs/{date_slug}/brainstorm.md` (selected approach, constraints, scope)
 
 **Output location:** `.claude/specs/{date_slug}/spec.md`
+
+You are running inside `/loom` (Phase 1). You may write with Write/Edit under `.claude/specs/{date_slug}/`. Loom's hooks allow this; do not read `.claude/hooks/` or `.claude/state/` to check.
+
+Interview the user before you write: the spec is written once, after the interview, from the brainstorm and the answers together.
 
 ---
 
 ## Process
 
-### 1. Read Brainstorm + Establish Baseline
+### 1. Read the brainstorm
 
-Read `.claude/specs/{date_slug}/brainstorm.md` end-to-end. List in your head:
-- What's already locked (approach, in/out of scope, key constraints)
-- What's still vague or missing (priorities, success metrics, edge cases, acceptance bar)
+Read `.claude/specs/{date_slug}/brainstorm.md` end to end. Note what is settled (approach, scope, constraints) and what is still vague or missing (priorities, success metrics, edge cases, acceptance bar).
 
-### 2. Interview the User — Ask ALL Questions
+### 2. Interview the user
 
-Use multiple-choice options where possible. Batch across multiple calls/blocks (4 questions per batch max). **Cover every topic below** — skip a specific question only if brainstorm.md already gives a confident, explicit answer for it.
+Ask with `AskUserQuestion`, up to 4 related questions per call, multiple choice or short lists where possible. Under Pi, Loom relays the tool to the parent TUI while this Agent turn stays alive. Ask every topic; skip one only when brainstorm.md answers it explicitly.
 
-**Required interview topics:**
+1. **Scenario priorities.** Present the brainstorm's in-scope items and have the user assign each P1 (blocks everything), P2 (significant value) or P3 (nice to have).
+2. **Scope boundary check.** Surface anything that might be ambiguously in or out of scope and get a ruling on each.
+3. **Measurable success criteria.** Ask for numbers: latency targets, error rates, completion times, accuracy thresholds, throughput. "Fast" and "reliable" fail the spec quality check.
+4. **Acceptance bar for each P1 scenario.** The minimum behavior that counts as working: happy path, edge cases, error states, retries, idempotency.
+5. **Sensitive failure modes.** Which must be handled explicitly and which stay `[NEEDS CLARIFICATION]` (timeouts, partial failures, concurrent edits, network loss).
+6. **User-visible error states.** What users see when things fail.
+7. **Data and state lifecycle.** Creation, update, deletion, expiration and retention for any data the feature touches.
+8. **Permissions and access.** Who can do what: roles, ownership rules, audit requirements.
+9. **External dependencies and integration points.** The external systems the feature touches as they appear in user scenarios, not their implementation.
+10. **Out-of-scope clarifications.** What the user wants explicitly excluded.
 
-1. **Scenario priorities** — Present brainstorm's in-scope items, ask user to assign P1 (blocks everything), P2 (significant value), P3 (nice-to-have) to each.
-2. **Scope boundary check** — Surface anything you suspect might be ambiguously in/out of scope. Get an explicit ruling on each.
-3. **Measurable success criteria** — Ask for concrete numbers: latency targets, error rates, completion times, accuracy thresholds, throughput. Vague answers ("fast", "reliable") fail the spec quality check — push for numbers.
-4. **Acceptance bar for each P1 scenario** — For every P1, what's the minimum behavior that counts as "works"? Cover happy path, edge cases, error states, retries, idempotency.
-5. **Sensitive failure modes** — Which failure modes must be handled explicitly vs. left as `[NEEDS CLARIFICATION]`? (timeouts, partial failures, concurrent edits, network loss, etc.)
-6. **User-visible error states** — What should users see/experience when things fail? Error UX is often under-specified.
-7. **Data/state lifecycle** — Creation, update, deletion, expiration, retention policies for any data the feature touches.
-8. **Permissions & access** — Who can do what? Are there role-based restrictions, ownership rules, audit requirements?
-9. **External dependencies & integration points** — What external systems/services does this feature interact with from a user-facing perspective? (Not implementation — just what shows up in scenarios.)
-10. **Out-of-scope clarifications** — Items the user wants to **explicitly exclude** so they don't get pulled in during implementation.
+Do not ask about implementation (tech stack, APIs, database schema, frameworks, libraries); that is the architecture phase's job. If a question keeps drifting toward HOW, drop it and let the spec carry `[NEEDS CLARIFICATION: technical approach TBD]`.
 
-Prefer multiple-choice or short-list options over open-ended. Group related topics into single question batches when natural (e.g., priorities + scope often fit in one batch).
+### 3. Write the spec
 
-**Do NOT ask about implementation** (tech stack, APIs, DB schema, frameworks, libraries) — those are architecture's job. If a question keeps drifting toward HOW, drop it and let the spec mark `[NEEDS CLARIFICATION: technical approach TBD]`.
+Write `.claude/specs/{date_slug}/spec.md` in one pass. The format and content rules are the preloaded `specify` skill's (which reads `references/spec-template.md`). Put no implementation hints in it.
 
-### 3. Write the Spec
+### 4. Present a summary
 
-After the interview, write `.claude/specs/{date_slug}/spec.md` in one pass, incorporating both brainstorm context and interview answers. Follow the format from the preloaded `specify` skill (User Scenarios → Functional Requirements → Success Criteria → Out of Scope).
-
-### 4. Present Summary
-
-After writing, give a 5-bullet summary:
-- Path to spec file
+- Path to the spec file
 - Count of `[NEEDS CLARIFICATION]` markers
 - Top 3 functional requirements
 - Key acceptance bars decided in the interview
-- Anything you deliberately left as a marker (and why)
-
----
-
-## What NOT to Do
-
-- Do NOT write the spec first and ask questions after. Interview FIRST.
-- Do NOT skip interview topics for speed. The user explicitly wants the full questionnaire.
-- Do NOT ask HOW questions (tech stack, API shape, schemas) — those belong in architecture.
-- Do NOT write implementation hints into the spec.
-- Do NOT accept "fast", "reliable", "easy to use" as success criteria — push for numbers.
-
----
-
-The specify-agent has the `specify` skill preloaded which defines the spec format and content rules.
+- Anything deliberately left as a marker, and why

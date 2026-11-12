@@ -490,7 +490,7 @@ Fresh references retain exact original published packet bytes/path/length/digest
 original files remain mandatory. Earlier frozen gzip encoding remains readable
 without recompression equality. Refutation verifiers have Read, not Bash, and receive
 a packet-bound `LOOM_CONTEXT_VIEW_PATH`; views are rechecked at delivery/capture,
-not result authority. See [native context instructions](../references/standalone-successor-context.md).
+not result authority. See [native context instructions](standalone-successor-context.md).
 
 ```bash
 bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration inspect \
@@ -1727,3 +1727,41 @@ scripts/                       sync, lint, calibration, smoke scripts
 calibration/                   committed corpus; generated results are ignored
 docs/family-sites.baseline.json  family-site metric baseline at 626db7fb
 ```
+
+## Operator notes moved from `/loom`
+
+These three notes were in `commands/loom.md`. They concern operators, not every orchestrated run.
+
+**Loom's own verification manifest.** When Loom orchestrates its own repository, `/loom` Phase 4d keeps the existing `project:verify` check: executable `npm`, args `["run", "verify"]`, cwd `.`, scope `wave`, timeout `1800000`, report `{"kind":"not-required"}`. It runs the same root `npm run verify` as local, CI and tag validation, and both frozen dependency installs are required. Never wire that script back into manifest execution or a Wave Gate.
+
+**A manifest-only bootstrap.** `helper write-verification-manifest` needs the empty TaskGraph that `init-state` creates; it is not a writer for arbitrary paths. An operator who only wants to install or inspect a manifest runs `init-state`, then the helper, then the sanctioned `cleanup-state`. Never manufacture Tasks or Waves, or hand-write state, to satisfy it (see [Workflows](workflows.md)).
+
+**Piloting a refusal or a block.** An operator note (`brief --task <Task> --note`) cannot make an agent misbehave on purpose: the brief tells the agent that a note never overrides its rules, and agents keep to them. A pilot that must exercise a refusal or a block needs a scenario whose natural course triggers it: for I7, a Task touching a widely imported hub file; for I6, a Task whose first test run genuinely passes.
+
+## Reviewer pipeline notes moved from the review prompts
+
+These notes were in `commands/review-pr.md`, `commands/wave-gate.md`, `skills/review-and-fix/SKILL.md` and the reviewer agents. A parent or a reviewer does not act on them; an operator or a maintainer may.
+
+**Where the shared reviewer text lives.** `references/reviewer-wire/` holds the four fragments every reviewer agent carries: `wire-contract.md` (generated from `renderReviewerWireContract()`), `bootstrap.md`, `before-you-emit.md` and `read-coverage.md` (hand-written). Edit a hand-written fragment, or the generator for the wire contract, then run `bun scripts/stamp-wire-contract.ts`; `--check` reports drift without writing. Never edit a stamped region in an agent file. The fragments used to sit in `agents/_shared/`, where Claude Code registered them as spawnable agents. The wire-contract start marker in each agent still names `agents/_shared/wire-contract.md`, because the byte-frozen schema-1 archive carries that marker and is read through the same extraction.
+
+**What a refutation verifier is issued.** A verifier's task carries `LOOM_CONTEXT_PATH`, and for a schema-3 successor panel `LOOM_CONTEXT_VIEW_PATH`. The packet's `outputContract` names the lens; its one authority section (`refutation-authority` for a standalone review, `wave-refutation-authority` for a Wave Gate) carries the lens name and the findings. The lens definition is not in the packet: the verifier agent reads the `## <lens>` section of `references/review-lenses.md` from the plugin. Nothing substitutes lens text into a prompt, and `commands/templates/review-verify.md`, which described that substitution, is gone.
+
+**The schema-2 reviewer guidance archive.** `references/reviewer-protocol-v2/` held exact copies of the seven reviewer agents, the verifier and the generated wire fragment as they were at commit `96153edc3dd755b4ac648ed48920b6670753c5a6`. Nothing in the engine, Pi extension, scripts or hooks read it, so it is no longer kept in the tree. A schema-2 request is governed by its own packet's frozen schema and rubric. To reproduce a file, run `git show 96153edc3dd755b4ac648ed48920b6670753c5a6:<path>` with a path from this list and compare its SHA-256:
+
+```text
+e3523e36f18751a9762b94409a63e4bb7a9b06aa8c6f89cd8f223f37a0d6f482  agents/architecture-tech-lead.md
+9c20d01da79ee344d7801149f79c8a560366c7610d01b15fa5c375873f172850  agents/code-reviewer.md
+5b5deeaaf2850aae24c9b29ee4df790c9e836a1a8e8ac294aee0c53f3003f821  agents/code-simplifier.md
+cabf2206cbace0107ead4eba4d002fc1f2ca08d4d095fd4007eeb67057ff79a9  agents/comment-analyzer.md
+4da60144489ff12f8c49a9788e13663e33d8c3b322d5af49e85415cb0194c834  agents/pr-test-analyzer.md
+e4bfbece88d39c675cb99dede874c237d2a2480e8c8035448273ae53b7875a43  agents/silent-failure-hunter.md
+7620a4596cd96175a93adbd38432e52ab6dd233dcd93e303329cf9cfea69a6ce  agents/type-design-analyzer.md
+7fc7c28ea029ffaf9760423df98aff82eadb49235bc48320c6c2d3ff91bf75e6  agents/_shared/wire-contract.md
+5e1e1f1383ece0f189186c8f232ebeebd15bb61b244394b1b206628488594ff0  agents/review-verifier-agent.md
+```
+
+The schema-1 archive, `references/reviewer-protocol-v1/`, stays: the engine names its files in every schema-1 reviewer task and refuses to issue one without them.
+
+**Who creates a Run Directory.** `helper orchestration start` resolves `--runs-root` and fails if it does not exist; it never creates the root, so a mistyped root cannot grow a second tree of runs. It then creates the run's own directory under that root, and tolerates one that is already there, which is why `mktemp -d` under the root also works.
+
+**Rollout text removed from the prompts.** The review prompts carried a "P5 bootstrap" that told the parent to use an older CLI and skill until the standalone-lineage work was published. That work merged with PR #51, and `standalone-disposition` is the shipped publisher, so the prompts no longer qualify it. Dated rollout evidence is in [ADR-0010](adr/ADR-0010-standalone-finding-lineage.md).

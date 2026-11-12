@@ -8,23 +8,13 @@ import { REVIEW_PANEL_AGENTS } from "../src/core/agent-catalog-projections";
 import { detectPhase, isReviewPanelAgent } from "../src/core/validate-phase-order";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const TEMPLATES_DIR = join(REPO_ROOT, "commands", "templates");
-const TEMPLATE = "review-verify.md";
-const VARS = ["lens_name", "lens_prompt", "finding_manifest_path", "brief_file_path"];
+const LENS_REFERENCE_PATH = "references/review-lenses.md";
 
-const runbook = readFileSync(join(REPO_ROOT, "commands", "wave-gate.md"), "utf-8");
-const lensReference = readFileSync(join(REPO_ROOT, "references", "review-lenses.md"), "utf-8");
-const template = readFileSync(join(TEMPLATES_DIR, TEMPLATE), "utf-8");
+const lensReference = readFileSync(join(REPO_ROOT, LENS_REFERENCE_PATH), "utf-8");
+const verifier = readFileSync(join(REPO_ROOT, "agents", "review-verifier-agent.md"), "utf-8");
 
-/** Substitute every declared variable with a dummy value, as the gate does. */
-function substitute(raw: string, values: Record<string, string> = {}): string {
-  let out = raw;
-  for (const v of VARS) out = out.split(`{${v}}`).join(values[v] ?? `DUMMY_${v}`);
-  return out;
-}
-
-/** The `## <lens>` section of review-lenses.md, as the gate slices it. */
-function lensFragment(lens: string): string {
+/** The `## <lens>` section of review-lenses.md, the slice the verifier is told to read. */
+function lensSection(lens: string): string {
   const start = lensReference.indexOf(`\n## ${lens}\n`);
   expect(start, `lens reference has no section for ${lens}`).toBeGreaterThan(-1);
   const rest = lensReference.slice(start + 1);
@@ -32,29 +22,14 @@ function lensFragment(lens: string): string {
   return end === -1 ? rest : rest.slice(0, end);
 }
 
-describe("review-panel template placeholder audit", () => {
-  it("no residual placeholders after substituting declared vars", () => {
-    const residual = findResidualPlaceholders(substitute(template));
-    expect(residual, `residual placeholders: ${residual.join(" ")}`).toEqual([]);
-  });
-
-  it("keeps every declared variable inside the engine-owned template boundary", () => {
-    for (const v of VARS) {
-      expect(template.includes(`{${v}}`), `declared but unused in template: {${v}}`).toBe(true);
-      expect(runbook.includes(`{${v}}`), `parent runbook leaked engine substitution variable: {${v}}`).toBe(false);
-    }
-  });
-
-  it("every lens fragment substitutes without leaving a placeholder", () => {
-    // The fragments are authored prose; a stray `{word}` in one would block the
-    // verifier spawn at runtime, and only for the lens that happened to be
-    // selected — the worst kind of intermittent failure.
-    for (const lens of REVIEW_LENSES) {
-      const substituted = substitute(template, { lens_name: lens, lens_prompt: lensFragment(lens) });
-      expect(findResidualPlaceholders(substituted), `lens ${lens}`).toEqual([]);
-    }
-  });
-
+/**
+ * The engine issues a verifier its lens by NAME (the packet's output contract
+ * says "through lens '<name>'"); the definition lives in the lens reference,
+ * which the verifier agent is told to read. Nothing substitutes the lens text
+ * into a prompt, so the only link between a selected lens and its definition
+ * is the section heading. These pin that link in both directions.
+ */
+describe("the verifier can find the definition of every lens the engine can select", () => {
   it("the lens reference documents exactly the lenses the code selects from", () => {
     const documented = [...lensReference.matchAll(/^## ([a-z-]+)$/gm)]
       .map((m) => m[1]!)
@@ -62,18 +37,29 @@ describe("review-panel template placeholder audit", () => {
     expect(documented).toEqual([...REVIEW_LENSES]);
   });
 
-  it("the template names the verifier's output contract", () => {
+  it.each([...REVIEW_LENSES])("the %s section states what it refutes and what it refuses to refute on", (lens) => {
+    const section = lensSection(lens);
+    expect(section).toMatch(/refut/i);
+    expect(section.length).toBeGreaterThan(200);
+  });
+
+  it("the verifier agent names the lens reference and the section heading form", () => {
+    expect(verifier).toContain(`\${CLAUDE_PLUGIN_ROOT}/${LENS_REFERENCE_PATH}`);
+    expect(verifier).toContain("`## <your lens>`");
+  });
+
+  it("the verifier agent names its output contract", () => {
     // Derived from REFUTATION_VERDICTS, not a hand-copied list: a fourth
     // verdict kind added to the union must reach the prompt that asks for it,
     // and a hardcoded array here would go on passing while it did not.
     for (const word of [...REFUTATION_VERDICTS, "finding_id", "criterion"]) {
-      expect(template).toContain(word);
+      expect(verifier).toContain(word);
     }
   });
 });
 
-describe("verifier output round-trips through the substitution gate", () => {
-  it("brace-bearing reasoning is sanitized before it reaches any prompt", () => {
+describe("verifier output is sanitized before it is stored", () => {
+  it("brace-bearing reasoning carries no placeholder into any later prompt", () => {
     const raw = JSON.stringify({
       criterion: "intent",
       verdicts: [{ finding_id: "T1:code-reviewer-1", verdict: "refuted", reasoning: "the {never-throw} rule is deliberate" }],
@@ -83,7 +69,7 @@ describe("verifier output round-trips through the substitution gate", () => {
     if (!parsed.ok) return;
     const canonical = serializeRefutationVerdict(parsed.value);
     expect(canonical).not.toContain("{never-throw}");
-    expect(findResidualPlaceholders(substitute(template, { lens_prompt: canonical }))).toEqual([]);
+    expect(findResidualPlaceholders(canonical)).toEqual([]);
   });
 });
 
