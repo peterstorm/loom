@@ -5,1046 +5,203 @@ description: "This skill should be used when the user asks to 'plan this', 'orch
 argument-hint: "[$description] [--skip-brainstorm] [--skip-clarify] [--skip-specify] [--skip-plan-alignment] [--skip-plan-design-review] [--panel[=N]] [--status]"
 ---
 
-# Loom - Full Orchestration Skill
+# Loom - Full Orchestration
 
-Orchestrates the COMPLETE feature lifecycle: brainstorm → specify → clarify → architecture → plan-alignment → decompose → execute.
+Runs one feature from idea to reviewed code: brainstorm → specify → clarify → architecture → plan alignment → plan design review → decompose → execute. You are the orchestrator. Each phase's work is done by an agent you spawn; the engine's hooks enforce the order and record the results.
 
-**This is the SINGLE ENTRY POINT** for multi-step features. Spawns specialized agents for each phase.
+This file holds what every run needs. Four procedures that only some runs reach are in runbooks under `references/loom/`. Each is introduced below by a **Mandatory read** stanza that says when to read it. Read a runbook in full before acting on any part of it. If you cannot read it, stop and tell the user; do not improvise its procedure.
 
 **Arguments:** "$ARGUMENTS"
 
-## Prerequisites
+## Setup
 
-**BEFORE starting any phase**, run this check:
+Run every command of this skill from the repository root.
+
+**1. Check for bun.** The hooks need it. If it is missing, stop and tell the user.
+
 ```bash
 command -v bun || { echo "FATAL: bun not found. Run: nix develop ./.claude" >&2; exit 1; }
 ```
-If `bun` is missing, **STOP and tell the user**. Loom hooks require bun for TypeScript transcript parsing. Dev shell: `nix develop ./.claude`
 
-## Setup: Resolve Package Path
+**2. Resolve the package path.** Claude Code expands the token below in this file; Loom's Pi adapter renders it from the extension module's `import.meta.url`. Never infer the package from cwd, and never scan another harness's install cache.
 
-**FIRST STEP of every `/loom` invocation** — bind this command to the package
-that supplied it. Claude Code expands the token in the shared source; Loom's Pi
-adapter renders it from the extension module's `import.meta.url`:
 ```bash
 LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"
 test -f "$LOOM_DIR/engine/src/cli.ts" || { echo "FATAL: active Loom package is incomplete: $LOOM_DIR"; exit 1; }
 printf 'LOOM_DIR=%s\n' "$LOOM_DIR"
 ```
 
-Never infer package identity from cwd and never scan another harness's install
-cache. Store the printed path. **All subsequent references use it:**
-- Templates: `{LOOM_DIR}/commands/templates/<name>.md`
+**Path notation.** From here on, `{LOOM_DIR}` stands for the printed path. Write that path out literally in every command and file read. Shell variables do not survive from one Bash call to the next, so a later `$LOOM_DIR` would expand to nothing. The same holds for `{date_slug}` and every other `{name}` in this file and its runbooks: replace it with its value before running the line.
+
 - Engine CLI: `bun {LOOM_DIR}/engine/src/cli.ts`
-- References: `{LOOM_DIR}/references/<name>.md`
+- Templates: `{LOOM_DIR}/commands/templates/<name>.md`
+- References and runbooks: `{LOOM_DIR}/references/<name>.md`, `{LOOM_DIR}/references/loom/<name>.md`
 
-### Explicit LLM Profile contract
+**3. For `--status`, stop here:** run `bun {LOOM_DIR}/engine/src/cli.ts helper orchestration status` and relay what it prints. Do not assemble a summary from raw state.
 
-Every Loom-owned Agent has one semantic LLM Profile with complete Claude Code
-and Pi bindings. Before each spawn, resolve it:
+**4. Choose the slug.** `{date_slug}` is `YYYY-MM-DD-feature-name`, the same in every phase.
 
-```bash
-bun {LOOM_DIR}/engine/src/cli.ts helper model-profiles agent --agent "<AGENT_NAME>"
-```
-
-- **Claude Code:** pass the emitted `claudeCode.model` explicitly in the
-  `Agent`/`Task` call. It must match the agent's `model:` frontmatter.
-- **Pi:** the selected agent definition must contain the emitted exact
-  `pi.provider/pi.model:pi.thinking` model pattern. Run
-  `{LOOM_DIR}/scripts/sync-pi-agents.sh` after install/update.
-
-Missing or mismatched requested bindings BLOCK. Never omit a model. Pi launcher
-routing may explicitly inherit a local parent model; that transport policy is
-validated at the Pi spawn seam and is never inferred by this runbook.
-
-### Pi Interactive Phase Transport
-
-Under Pi, spawn `specify-agent`, `clarify-agent`, `architecture-agent`, and
-`arch-interviewer-agent` with the `loom_interactive_subagent` tool, one Agent
-per call. It runs a parent-owned RPC child and relays `AskUserQuestion` dialogs
-to the parent TUI without ending the child turn. The normal `subagent` tool is
-headless and refuses those roles. Continue using normal `subagent` for every
-reviewer, designer, judge, verifier, implementation Agent, and other headless
-role. Under Claude Code, use the native Agent/Task tool as usual.
-
----
-
-## Arguments
-
-- `/loom "description"` - Start new plan (runs full flow)
-- `/loom --skip-brainstorm` - Skip brainstorm phase (scope already clear)
-- `/loom --skip-clarify` - Skip clarify phase (accept markers as-is)
-- `/loom --skip-specify` - Skip brainstorm/specify/clarify (use existing spec)
-- `/loom --skip-plan-alignment` - Skip plan-alignment phase (proceed directly to decompose)
-- `/loom --skip-plan-design-review` - Skip the plan design review that gates decompose ([Phase 3.6](#phase-36-plan-design-review)). Recorded in the State File as `plan_design_review: {"status":"not-required","reason":"skipped"}`
-- `/loom --panel` - Architecture panel mode: N designer agents generate candidates in parallel (each with a lens), adversarial judges rank them against interview-derived criteria, and the finalizer presents the ranked approaches. `--panel=N` requires a decimal integer of at least `PANEL_DESIGNERS_MIN` (currently 2); malformed, fractional, duplicate, or smaller values are rejected. Values above the number of distinct lenses (5) are rejected. Bare `--panel` uses `PANEL_DESIGNERS_DEFAULT` (currently 3). Opt-in; only Phase 3 changes. See [panel-lenses.md](../references/panel-lenses.md) and [Phase 3 (panel mode)](#phase-3-panel-mode-loom---panel).
-- `/loom --status` - Show current status. Runs `bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration status` (add `--json` for the machine form). Both forms project ONE `LoomStatus` value, so they cannot disagree, and neither re-runs a gate check. When authority is unreadable every fact category is still reported as `unavailable` with its reasons and the next action is `blocked` — never a fabricated zero-or-ready value. Prefer this over the ad-hoc `jq` recipes in [Observability](#observability), which read raw fields and can contradict the engine.
-- The engine also exposes registered architecture/refutation panel dispatch through `helper orchestration start`. The detailed Phase 3 runbook below still owns interactive/template/file integration through the panel-contract helper chain; do not mix the two persistence protocols inside one panel run.
-- `/loom --complete` - Not implemented as a flag. After the final Wave Gate, run `helper complete-orchestration`. It archives the TaskGraph and lifts the Loom guards, and it refuses while any Task is unfinished.
-- `/loom --abort` - Not implemented as a flag. Use `helper cleanup-state` for deliberate teardown and preserve plan/spec/review audit artifacts.
-
-**Note:** All phases are MANDATORY by default. Skip flags allow explicit bypass with user acknowledgment.
-
-**Clarify threshold:** Markers > 3 triggers mandatory clarify phase. Source of truth: `{LOOM_DIR}/engine/src/config.ts`
-
----
-
-## Full Orchestration Flow
-
-```
-/loom "feature description"
-        │
-        ▼
-┌─────────────────────────────────────────────────────────┐
-│ Phase 0: BRAINSTORM [MANDATORY]                         │
-│   Agent: brainstorm-agent                               │
-│   Output: .claude/specs/{slug}/brainstorm.md            │
-│   Skip: --skip-brainstorm                               │
-└─────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────────────────────────────┐
-│ Phase 1: SPECIFY [MANDATORY]                            │
-│   Agent: specify-agent                                  │
-│   Output: .claude/specs/{slug}/spec.md                  │
-└─────────────────────────────────────────────────────────┘
-        │
-        ▼ (if >3 markers, else skip to ARCHITECTURE)
-┌─────────────────────────────────────────────────────────┐
-│ Phase 2: CLARIFY [MANDATORY if markers > 3]             │
-│   Agent: clarify-agent                                  │
-│   Output: Updated spec.md with resolved uncertainties   │
-│   Skip: --skip-clarify                                  │
-└─────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────────────────────────────┐
-│ Phase 3: ARCHITECTURE                                   │
-│   Agent: architecture-agent                             │
-│   Output: .claude/plans/{slug}.md                       │
-│   --panel: interviewer → N designers ∥ → judges ∥ →     │
-│            finalize (architecture-agent)                │
-└─────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────────────────────────────┐
-│ Phase 3.5: PLAN ALIGNMENT                               │
-│   Agent: plan-alignment-agent                           │
-│   Output: .claude/specs/{slug}/plan-alignment.md        │
-│   Skip: --skip-plan-alignment                           │
-│   Loop: gaps found → re-run architecture (with context) │
-└─────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────────────────────────────┐
-│ Phase 3.6: PLAN DESIGN REVIEW (gate, not a phase)       │
-│   Standalone review, kind plan-design, of the plan      │
-│   Then: helper accept-plan-design-review                │
-│   Skip: --skip-plan-design-review                       │
-│   Loop: critical survives → edit plan → fresh review    │
-└─────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────────────────────────────┐
-│ Phase 4: DECOMPOSE                                      │
-│   Extract tasks, assign agents, schedule waves          │
-│   Output: Task graph + GitHub Issue                     │
-└─────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────────────────────────────┐
-│ Phase 5: EXECUTE (wave by wave)                         │
-│   Spawn impl agents → wave-gate → advance               │
-│   Output: Working implementation                        │
-└─────────────────────────────────────────────────────────┘
-```
-
----
-
-## Phase 0: Brainstorm (MANDATORY)
-
-**Always run** unless `--skip-brainstorm` flag provided.
-
-**Hook enforcement:** `validate-phase-order.sh` blocks specify-agent if brainstorm not complete (unless skipped).
-
-**Load template:** Read `{LOOM_DIR}/commands/templates/phase-brainstorm.md`
-
-Substitute variables:
-- `{feature_description}` - User's original request
-- `{prior_context}` - Any notes from prior exploration
-
-**Spawn brainstorm-agent** with the substituted template as prompt.
-
-**Wait for agent completion.** Agent writes `.claude/specs/{date_slug}/brainstorm.md`.
-Hook detects the file and advances phase to `specify`.
-
-**User checkpoint:** Read brainstorm.md, present summary, ask:
-> "Approach: {selected approach}. Proceed to specification?"
-
-If user wants changes → re-spawn brainstorm-agent with feedback.
-If approved → pass brainstorm.md path as `{brainstorm_file}` to Phase 1.
-
----
-
-## Phase 1: Specify
-
-**Always run** (unless `--skip-specify` or spec already exists).
-
-**Load template:** Read `{LOOM_DIR}/commands/templates/phase-specify.md`
-
-Substitute variables:
-- `{feature_description}` - Refined description (from brainstorm or original)
-- `{date_slug}` - Same slug as brainstorm (agent reads brainstorm.md from this dir)
-- `{date_slug}` - `YYYY-MM-DD-feature-name` format
-
-**Spawn specify-agent** with the substituted template as prompt. Under Pi, use `loom_interactive_subagent`; under Claude Code, use the native Agent/Task tool.
-
-**Wait for agent completion.** Extract:
-- Spec file path
-- Count of `[NEEDS CLARIFICATION]` markers
-
-If markers > 3: Proceed to Phase 2.
-If markers <= 3: Skip to Phase 3.
-
----
-
-## Phase 2: Clarify (MANDATORY if markers > 3)
-
-**Run if:** spec has >3 `[NEEDS CLARIFICATION]` markers. Skip via `--skip-clarify` if accepting markers as-is.
-
-**Hook enforcement:** `validate-phase-order.sh` blocks architecture-agent if markers > 3 (unless clarify skipped).
-
-**Load template:** Read `{LOOM_DIR}/commands/templates/phase-clarify.md`
-
-Substitute variables:
-- `{spec_file_path}` - Path to spec from Phase 1
-- `{marker_count}` - Number of `[NEEDS CLARIFICATION]` markers
-
-**Spawn clarify-agent** with the substituted template as prompt. Under Pi, use `loom_interactive_subagent`; under Claude Code, use the native Agent/Task tool.
-
-**IMPORTANT: Do NOT pre-resolve markers in the agent prompt.** The clarify agent MUST ask the user via AskUserQuestion. Pass only the spec path and marker count — let the Agent drive the questioning through the harness's interactive transport.
-
-**Wait for agent completion.** Verify markers resolved.
-
-If still >3 markers: Ask user to resolve remaining, or proceed with caveats.
-
----
-
-## Phase 3: Architecture
-
-**Always run.**
-
-**Load template:** Read `{LOOM_DIR}/commands/templates/phase-architecture.md`
-
-Substitute variables:
-- `{feature_description}` - Feature name/description
-- `{spec_file_path}` - Path to spec from Phase 1
-- `{date_slug}` - `YYYY-MM-DD-feature-name` format
-- `{loom_dir}` - the exact `LOOM_DIR` resolved during setup
-
-**Spawn architecture-agent** with the substituted template as prompt. Under Pi, use `loom_interactive_subagent`; under Claude Code, use the native Agent/Task tool.
-
-**Wait for agent completion.** Extract:
-- Plan file path
-- Implementation phases
-- Executable models declared, if any (LC-N lifecycles, Pipeline AuthoredDag, INV-N invariants + rule files, CT-N contracts + types and acceptance files) — these are validated against the task graph in Phase 4a
-
-**If `--panel` was passed, use [Phase 3 (panel mode)](#phase-3-panel-mode-loom---panel) below instead of the single-agent spawn above.** Everything downstream (extraction, plan-alignment, decompose) is identical — panel mode still produces exactly one `plan.md` via one architecture-agent completion.
-
----
-
-## Phase 3 (panel mode): `/loom --panel`
-
-Runs only when `--panel` (or `--panel=N`) is passed. Reject multiple panel flags. Bare `--panel` uses `PANEL_DESIGNERS_DEFAULT`; for `--panel=N`, require `N` to match `^[0-9]+$` and be at least `PANEL_DESIGNERS_MIN`, then require it to be at most `PANEL_LENS_COUNT`. This is the markdown shell's executable contract mirroring `engine/src/config.ts`; never silently reinterpret malformed/fractional input.
-
-The `current_phase` stays `"architecture"` throughout. Panel agents are accepted only while that current phase is active and never advance it; the final `architecture-agent` advances to plan-alignment, or directly to decompose when `--skip-plan-alignment` is set.
-
-Defaults: **N designers** = `PANEL_DESIGNERS_DEFAULT` (currently 3), minimum `PANEL_DESIGNERS_MIN` (currently 2), maximum `PANEL_LENS_COUNT` (currently 5); **K = `PANEL_JUDGES_DEFAULT` judges** (currently 3, fixed at one per criterion).
-
-### Step 0 — Create a run-scoped artifact boundary
-
-Create a unique directory under the spec dir before spawning any panel agent:
+**5. Create the State File,** passing through the skip flags the user gave. This turns on hook enforcement for the whole run. With `--skip-specify` it requires `.claude/specs/{date_slug}/spec.md` to exist already.
 
 ```bash
-PANEL_RUNS_DIR=".claude/specs/{date_slug}/panel-runs"
-mkdir -p "$PANEL_RUNS_DIR" || exit 1
-PANEL_RUN_DIR="$(mktemp -d "$PANEL_RUNS_DIR/run.XXXXXXXXXX")" || exit 1
-mkdir "$PANEL_RUN_DIR/candidates" "$PANEL_RUN_DIR/verdicts" || exit 1
-PANEL_RUN_ID="${PANEL_RUN_DIR##*/}"
-printf '%s\n' "$PANEL_RUN_DIR"
-```
-
-Retain the printed path in orchestration context and substitute its concrete value in later calls; do not assume shell variables persist across Bash tool calls. Never reuse an existing run directory. All interview, candidate, manifest, and verdict artifacts for this invocation live under this directory. Old runs may remain as audit data but are never discovered or read implicitly.
-
-### Step 1 — Interview (once, interactive)
-
-**Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-interview.md`. Substitute `{feature_description}`, `{spec_file_path}`, `{interview_file_path}` (= `<panel-run-dir>/interview.md`), and `{loom_dir}` (= the already resolved `LOOM_DIR`).
-
-**Spawn `arch-interviewer-agent`.** Under Pi, use `loom_interactive_subagent`; under Claude Code, use the native Agent/Task tool. Wait for completion. Require the exact new file to be non-empty (`test -s`); because the run directory is unique, a prior run cannot satisfy this check. Validate and canonicalize the digest before fan-out:
-
-```bash
-bun "{LOOM_DIR}/engine/src/cli.ts" helper panel-contract interview \
-  < "<panel-run-dir>/interview.md" \
-  > "<panel-run-dir>/interview.json"
-```
-
-On any contract error (missing/duplicate/empty label or invalid enum), delete this run's invalid digest/JSON and re-spawn the interviewer with the field-level diagnostics. Retry once; if it is still invalid, stop panel mode and report the error. Lens and judge selection consume only the validated JSON.
-
-### Step 2 — Select lenses
-
-Read the lens fragments from `{LOOM_DIR}/references/panel-lenses.md`. Choose N lenses from `<panel-run-dir>/interview.json`:
-
-- **Always include** `simplicity-first` and `type-driven-fp` (which is why N cannot be below 2).
-- **Third lens (and any beyond N=3) from validated interview signals**, in priority order:
-  - `sensitiveBoundaries` begins `flagged` → `risk-security-first`
-  - `primaryAxis` = `performance` → `performance-first`
-  - `codebaseMaturity` = `brownfield` → `codebase-conventionist`
-  - Fill remaining slots from the lens table order.
-
-Take exactly N distinct lenses. Before designers spawn, write `<panel-run-dir>/manifest.json` with `run_id`, `interview_file`, `interview_json`, and an exact `candidates` array. Every candidate entry contains `lens`, `path` (`<panel-run-dir>/candidates/candidate-<lens>.md`), and bare `filename`. Build JSON with `jq -n`/`--arg` rather than string concatenation, then validate it immediately:
-
-```bash
-bun "{LOOM_DIR}/engine/src/cli.ts" helper panel-contract manifest \
-  --runs-root ".claude/specs/{date_slug}/panel-runs" \
-  --manifest "<panel-run-dir>/manifest.json" \
-  --designers "<N>"
-```
-
-Stop on failure. The helper binds run id, interview paths, allowed unique lenses, filenames, and candidate paths to this manifest's run directory. This manifest is the sole candidate-set authority for all later stages.
-
-### Step 3 — Designers (parallel, headless)
-
-The executable Panel Program, not this prose, owns dispatch order, retry limits,
-and LLM Profiles. Before spawning, obtain the criteria early with the Step 4
-`criteria` helper (it does not require candidate files), then build:
-
-<!-- wire-example: architecture-panel-journal -->
-```json
-{
-  "input": {
-    "candidateLenses": ["<manifest lens 1>", "<manifest lens N>"],
-    "judgeCriteria": ["<derived criterion 1>", "<derived criterion 3>"]
-  },
-  "events": []
-}
-```
-
-Pipe it to:
-
-```bash
-bun "{LOOM_DIR}/engine/src/cli.ts" helper panel-program architecture
-```
-
-The returned first action MUST be the exact designer `spawn-batch`. After every
-spawn or engine operation, append its canonical `spawn-outcome` or
-`engine-outcome` event and replay the document; execute only the newly returned
-action. This event-sourced replay makes completion order irrelevant and permits
-one retry per failed slot. Stop on `blocked`; do not hand-advance a stage.
-
-**Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-design.md`. For each manifest entry, substitute `{feature_description}`, `{lens_name}`, `{lens_prompt}`, `{spec_file_path}`, `{interview_file_path}` (= the manifest interview file), and `{candidate_output_path}` (= that exact entry's path).
-
-**Spawn the exact `arch-designer-agent` batch returned by the Panel Program in ONE message** (parallel Agent calls), using each request's resolved `modelProfile`. Wait for all to complete. For every manifest path, require a non-empty regular file that is not a symbolic link. For a failed entry, delete that run's empty/invalid artifact, re-spawn only that designer once, then repeat the same regular/non-empty/non-symlink check; stop if the retry still fails. Compare the candidate directory's bare filenames with `manifest.candidates[].filename` in both directions and stop on any missing or extra file. Judges and finalizer still read only manifest paths, never the directory.
-
-### Step 4 — Judges (parallel, headless)
-
-**Get the exact ordered criteria from the helper** — do not derive them by hand:
-
-```bash
-bun "{LOOM_DIR}/engine/src/cli.ts" helper panel-contract criteria \
-  --runs-root ".claude/specs/{date_slug}/panel-runs" \
-  --manifest "<panel-run-dir>/manifest.json" \
-  --designers "<N>"
-```
-
-It emits a JSON array of exactly K criteria derived from the validated digest: `primaryAxis` (verbatim), `testabilityBar` (verbatim), then the fixed `codebase fit + effort`. This is the single source of truth for both the criteria and their order — the `verdict` operation rejects any `--criterion` outside this set, and `aggregate` re-derives the same list, so the judge stage and the finalizer can no longer disagree.
-
-**Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-judge.md`. For each criterion, substitute `{criterion}`, `{candidate_manifest_path}`, and `{interview_json_path}`.
-
-**Spawn the exact `arch-judge-agent` batch returned by the Panel Program in ONE message** (parallel Agent calls), using each request's resolved `modelProfile`. Validate each raw output before it reaches finalization:
-
-```bash
-printf '%s' "$RAW_JUDGE_OUTPUT" | bun "{LOOM_DIR}/engine/src/cli.ts" helper panel-contract verdict \
-  --criterion "$EXACT_CRITERION" \
-  --runs-root ".claude/specs/{date_slug}/panel-runs" \
-  --manifest "<panel-run-dir>/manifest.json" \
-  --designers "<N>" \
-  > "<panel-run-dir>/verdicts/verdict-1.json"
-```
-
-Perform each validation in the same Bash call that defines the shown shell variables; repeat with `verdict-2.json` and `verdict-3.json` for criteria 2 and 3 — **`verdict-N.json` must hold criterion N**, and the helper enforces that when aggregating, so a swapped slot is a hard error rather than a silent mis-ranking. The helper requires valid JSON, a criterion drawn from the derived set, exact criterion identity, every manifest candidate exactly once, no foreign/duplicate candidates, integer scores 0–10 in non-increasing order, `fatal_flaw: string | null`, and non-empty `strongest_idea`; it strips curly braces from validated prose and emits canonical JSON. Re-spawn only an invalid judge with diagnostics, once; if still invalid, stop. Then combine those exact paths in criterion order with `jq -s`, not a directory glob.
-
-### Step 4.5 — Aggregate (deterministic, no agent)
-
-Compute the ranking in code, not in the finalizer's head:
-
-```bash
-bun "{LOOM_DIR}/engine/src/cli.ts" helper panel-contract aggregate \
-  --runs-root ".claude/specs/{date_slug}/panel-runs" \
-  --manifest "<panel-run-dir>/manifest.json" \
-  --designers "<N>" \
-  > "<panel-run-dir>/ranking.json"
-```
-
-`aggregate` re-reads and re-validates **every** verdict file from the run directory (it does not trust Step 4's output), matches each verdict to its criterion **by name**, verifies the criteria set is exactly the derived K with no duplicates or omissions, and emits the ranking sorted by total score → each criterion in order → lexical filename. Any failure is fatal: stop and report. Require `ranking.json` to be non-empty before continuing.
-
-### Step 5 — Finalize (interactive → writes plan.md)
-
-**Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-finalize.md`. Substitute `{feature_description}`, `{spec_file_path}`, `{interview_file_path}`, `{candidate_manifest_path}`, `{judge_verdicts}` (the canonical three-verdict JSON array, inlined), `{panel_ranking}` (the contents of `ranking.json`, inlined), `{date_slug}`, and `{loom_dir}`.
-
-**Spawn `architecture-agent`** with this template, using `loom_interactive_subagent` under Pi. It reads the already-computed ranking (it does not rank candidates itself); presents the top 2–3 with summary/trade-offs/testability/codebase-fit/effort; synthesizes the user's choice; writes `.claude/plans/{date_slug}.md` with `### AD-1: Approach selection (panel)`; and commits.
-
-**From here, the flow rejoins standard mode.** Its SubagentStop advances to plan-alignment, or directly to decompose when plan-alignment was skipped.
-
----
-
-## Phase 3.5: Plan Alignment
-
-**Always run** (unless `--skip-plan-alignment` flag provided).
-
-**Load template:** Read `{LOOM_DIR}/commands/templates/phase-plan-alignment.md`
-
-Substitute variables:
-- `{spec_file_path}` - Path to spec from Phase 1
-- `{plan_file_path}` - Path to plan from Phase 3
-- `{spec_dir}` - Spec directory (e.g. `.claude/specs/{date_slug}`)
-
-**Spawn plan-alignment-agent** with the substituted template as prompt.
-
-**Wait for agent completion.** Read gap report at `.claude/specs/{slug}/plan-alignment.md`.
-
-**If gaps found:** Present gap report to user. Ask:
-> "N gaps found. Re-run architecture with this feedback, or proceed to decompose?"
-
-A `FEAS-N` gap means a recorded discovery contradicts a Requirement or plan decision. When the Requirement itself is what the discovery makes wrong, re-running architecture cannot fix it: name that case and offer amending the spec (back to `/specify`) as a third option.
-
-- **If re-run:** Set phase back to architecture, clear the plan-alignment artifact from state, and delete the stale gap report from disk so advance-phase doesn't re-use it:
-  ```bash
-  bun ${LOOM_DIR}/engine/src/cli.ts helper set-phase --phase architecture --clear-artifact plan-alignment
-  rm -f ${spec_dir}/plan-alignment.md
-  ```
-  Re-spawn architecture-agent with gap report appended to prompt as additional context. When architecture completes, advance-phase transitions to plan-alignment again automatically.
-
-  **Panel-mode loop-back:** even if the plan was produced in `--panel` mode, a gap-report re-run uses the **standard single-agent architecture flow** (`phase-architecture.md`) — never re-panel. Retain the exact panel-run manifest path recorded in AD-1 and mention that manifest in the re-spawn prompt; require the agent to read only its `candidates[].path` entries if it revisits losing designs. Never scan a shared or run directory.
-- **If proceed:** Continue to Phase 3.6.
-
-**Loop-back warning:** If the user has chosen to re-run architecture 2 or more times, warn: "This is loop-back attempt N. Consider proceeding to decompose or refining the spec directly."
-
-**If no gaps:** Proceed to Phase 3.6.
-
-**Note:** The gap report is always written (even when no gaps). Its existence at `.claude/specs/{slug}/plan-alignment.md` is required by validate-phase-order to gate decompose entry.
-
----
-
-## Phase 3.6: Plan Design Review
-
-**Always run** (unless `--skip-plan-design-review` was passed to `init-state`, or the State File has no `plan_design_review` field because it was initialized before the gate existed). Run it after plan alignment has settled: any later edit to the plan closes the gate again.
-
-This is a gate on decompose, not a phase: the decompose spawn asks it, `populate-task-graph` asks it again on first population, `current_phase` does not change and no phase agent runs ([ADR-0070](../docs/adr/ADR-0070-the-plan-design-review-gates-decompose.md)). The plan is reviewed by `code-reviewer`, `type-design-analyzer` and `architecture-tech-lead` as a Standalone Review of kind `plan-design`, each with a plan design lens in its Context Packet and each obliged to read the whole plan.
-
-Run every command from the repository root.
-
-1. **Start the review.** `files` names exactly the plan, as a path relative to the repository root:
-
-   <!-- wire-example: standalone-review-start -->
-   ```bash
-   RUNS_ROOT=".claude/reviews/standalone-review-runs"
-   mkdir -p "$RUNS_ROOT"
-   RUN_DIR="$(mktemp -d "$RUNS_ROOT/run.XXXXXXXXXX")"
-   bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration start standalone-review \
-     --runs-root "$RUNS_ROOT" \
-     --run "$RUN_DIR" <<'JSON'
-   {"kind":"plan-design","files":[".claude/plans/{slug}.md"],"dryRun":false}
-   JSON
-   ```
-
-2. **Drive it to `done`** exactly as [`/review-pr` step 4](review-pr.md#4-execute-returned-actions) says: spawn each returned `spawn-batch`, then `helper orchestration resume --runs-root "$RUNS_ROOT" --run "$RUN_DIR"`, until `done` or `blocked`.
-
-3. **Dispose of the advisories, if the result has any.** Triage them with the user and publish the complete ordered decisions with the `standalone-disposition` program ([operations: immediate advisory publication](../docs/operations.md#immediate-advisory-publication)). Any decision is enough; advisories never block. Keep the disposition's absolute Run directory, Run id and disposition digest.
-
-4. **Accept the review.**
-
-   ```bash
-   bun "$LOOM_DIR/engine/src/cli.ts" helper accept-plan-design-review \
-     --runs-root "$RUNS_ROOT" --run "$RUN_DIR"
-   ```
-
-   With advisories, add `--disposition <absolute disposition Run directory> --disposition-run <its Run id> --disposition-digest <its disposition sha256>`.
-
-   On success it prints `Plan design review accepted: <plan> sha256 <digest> (run <id>)` and records `plan_design_review: {"status":"accepted", ...}` bound to the plan's bytes. On refusal it names the one reason and what to do.
-
-**If a critical survived refutation:** the helper refuses with the Finding ids. Present the findings to the user, edit the plan to resolve them (or loop back to architecture as in Phase 3.5), and start a fresh review at step 1. A `plan-design` review has no successor.
-
-**If the plan is edited after acceptance:** the decompose spawn and first population are blocked with both digests. Start a fresh review at step 1. An edit made while the helper runs is caught under the State File lock: the helper refuses with `the plan changed while its review was being accepted`.
-
-Do not write `plan_design_review` yourself. The helper is its only writer after `init-state`.
-
----
-
-## Phase 4: Decompose
-
-**Load template:** Read `{LOOM_DIR}/commands/templates/phase-decompose.md`
-
-Substitute variables:
-- `{feature_description}` - Feature name/description
-- `{spec_file_path}` - Path to spec from Phase 1
-- `{plan_file_path}` - Path to plan from Phase 3
-
-Replace every occurrence before spawning, including paths shown in explanatory
-examples. The required-output example deliberately uses the non-template
-sentinels `ABSOLUTE_SPEC_FILE_PATH` / `ABSOLUTE_PLAN_FILE_PATH`; tell the Agent
-to replace those with the same concrete paths in its output. If any
-`{feature_description}`, `{spec_file_path}`, or `{plan_file_path}` token remains
-in the assembled prompt, do not spawn.
-
-**Spawn decompose-agent** with the substituted template as prompt.
-
-**Wait for agent completion.** Agent outputs pure JSON task graph.
-
-The decompose agent's completion does **not** advance the phase: `current_phase` stays `decompose` through validation and approval, and only `populate-task-graph` (4d) moves it to `execute`, in the same write that installs the Tasks. An agent that returns no usable output therefore leaves the phase at `decompose` — re-spawn it. A plan rejected at 4c also stays in `decompose`. For the same reason `helper set-phase` refuses `--phase execute`: it accepts any Phase except `execute`. A graph left at `execute` with no Tasks by an engine older than this rule is reported by `/loom --status` as blocked, with both recoveries: pipe the approved decompose output to `populate-task-graph`, which also accepts an execute graph, or run `set-phase --phase decompose --clear-artifact decompose` and re-spawn the decompose agent.
-
-### 4a. Validate Output
-
-Run schema validator on agent output:
-
-```bash
-echo "$DECOMPOSE_OUTPUT" | bun ${LOOM_DIR}/engine/src/cli.ts helper validate-task-graph --decompose-payload -
-```
-
-Run the validator with cwd at the repository root (or the worktree root for a worktree orchestration): the plan's relative `**Rule file:**` paths (`.claude/linter/rules/...`) resolve against the process cwd — invoked from elsewhere, checkable INV-N rules false-fail with ENOENT.
-
-The validator also cross-checks executable-model bindings when the plan declares them (`## Lifecycles` / `## Pipeline` / `## Invariants`): every LC-N machine file must appear in a task's `file_list`, the AuthoredDag sidecar must exist and be structurally sound, every checkable INV-N rule file must exist, every CT-N contract must have exactly one contract task writing all its frozen paths with every claimant of a covered Requirement depending on it, every `**Export bindings:**` line must name one contract with a types file and bind a path that some non-contract task lists, every task listing it depending on that contract task (never the contract task itself: the engine writes its stubs), and near-miss declarations (typo'd headings/labels) are errors. A plan with contracts also needs `.loom/verification-manifest.json` to carry a project check that writes a JUnit report before population (4d), since Wave Gates observe acceptance RED and GREEN only through it. See `references/executable-models.md`. These same checks run fail-closed inside `populate-task-graph` (4d), so they cannot be skipped.
-
-**Routing validation failures — read the error text:**
-- Errors about the *task graph* (unknown agent, wave ordering, or an LC machine file "not in any task's file_list") → **re-spawn decompose-agent** with the error details. Decompose can fix these.
-- Errors about the *plan or its artifacts* (missing `**Machine file:**` / `**Tier:**` / `**Rule file:**` lines, "Model declaration problem" / near-miss headings, AuthoredDag or rule file missing/malformed, plan_file unreadable) → decompose can NEVER fix these; re-spawning it just loops. **Loop back to Phase 3** with the same mechanics as the plan-alignment loop-back:
-  ```bash
-  bun ${LOOM_DIR}/engine/src/cli.ts helper set-phase --phase architecture --clear-artifact plan-alignment
-  rm -f ${spec_dir}/plan-alignment.md
-  ```
-  Re-spawn architecture-agent with the validator errors appended as additional context.
-
-### 4b. Confirm Requirement Trace Ownership
-
-Fresh output MUST declare `spec_trace_version: 2`. Every Task carries both `spec_contributions` (partial traceability) and `spec_anchors` (Requirement Completion Claims). If the decompose Agent omitted a likely Requirement, use the helper for suggestions:
-
-```bash
-bun ${LOOM_DIR}/engine/src/cli.ts helper suggest-spec-anchors "task description" .claude/specs/*/spec.md
-```
-
-Returns JSON with suggested anchors and confidence scores:
-<!-- wire-example: none — abbreviated output of `helper suggest-spec-anchors`, which nothing parses back in -->
-```json
-[{"anchor":"FR-003","score":0.85,"text":"System MUST validate email format"},...]
-```
-
-Review suggestions and assign partial work to `spec_contributions`. Assign each Requirement to `spec_anchors` only on its culminating Task/Wave. The validator refuses overlap, duplicate entries, multiple completion Waves, missing completion ownership, and Contributions after completion.
-
-Once populated, a wrong Completion Claim or Contribution is corrected with `helper amend-spec-trace` (`docs/operations.md`, "Amending a v2 Requirement trace"), never by re-running `populate-task-graph --force`: the amendment keeps every settled implementation and review result, retires only the current Wave's review authority, and refuses to touch a live Wave Gate or completed Waves (except to remove an id the Spec Index does not define as FR or AS).
-
-### 4c. User Approval
-
-Present plan summary:
-- Spec path
-- Plan path
-- Task breakdown with agents
-- Wave schedule
-- GitHub Issue will be created
-
-Ask: "Proceed with this plan?"
-
-### 4d. Create Artifacts
-
-On approval, establish operator-owned completion authority before populating Tasks. If the project needs whole-program commands beyond Loom's reserved full-tier lint, build the exact schema from `docs/workflows.md` in an unguarded temporary file, then install it through the validating helper:
-
-<!-- wire-example: verification-manifest -->
-```bash
-cat > /tmp/loom-verification-manifest.json <<'JSON'
-{
-  "schemaVersion": 1,
-  "kind": "loom-verification-manifest",
-  "checks": []
-}
-JSON
-bun ${LOOM_DIR}/engine/src/cli.ts helper write-verification-manifest < /tmp/loom-verification-manifest.json
-```
-
-The empty `checks` example explicitly configures **no project verification**; it is not a passing test/build/typecheck setup. Preserve an existing operator source rather than replacing it with this example. For Loom's own repository, use its existing `project:verify` check: executable `npm`, args `["run", "verify"]`, cwd `.`, scope `wave`, timeout `1800000`, report `{"kind":"not-required"}`. This runs the same root `npm run verify` as local/CI/tag validation, with both frozen dependency installs required (see `docs/operations.md`). Never wire that script back into manifest execution or a Wave Gate.
-
-Replace the empty `checks` array with the operator-approved fixed executable/argument arrays. Never copy a model-authored shell string into the manifest. Direct Bash/Edit/Write access to `.loom/verification-manifest.json` is intentionally blocked after the State File activates; the helper is the sole installation seam, validates before writing, and refuses symlinks. It compares authority, not bytes, so an installed manifest that differs only in formatting is accepted unchanged. When the plan needs a different manifest than the one installed (for example a schema-2 `affectedRunner` for an owned invariant), re-run the helper with `--replace` after the user approves the new manifest; without the flag it refuses different authority and names the flag. Never ask the user to copy a file over the protected path instead. The manifest becomes immutable once Tasks are populated, `--replace` included ([ADR-0065](../docs/adr/ADR-0065-manifest-helper-compares-authority-and-replaces-before-population.md)). If no file exists, population freezes the engine default containing only reserved checks. The helper needs the canonical empty TaskGraph already created by official `init-state`; it is not a standalone arbitrary-path writer. An operator-only metadata bootstrap must use that initializer and sanctioned `cleanup-state` afterward, not manufactured Tasks/Waves or hand-written state (see `docs/workflows.md`).
-
-**A. GitHub Issue:**
-```bash
-gh issue create --title "Plan: {title}" --body "$(cat .claude/plans/{slug}.md)"
-```
-
-**B. State File:** Populate `.claude/state/active_task_graph.json` with tasks.
-
-Use the `populate-task-graph` helper (one of the state-writing helpers whitelisted in `engine/src/config.ts` and enforced by the guard-state-file hook). It re-runs the executable-model binding checks fail-closed before writing:
-
-```bash
-echo "$DECOMPOSE_OUTPUT" | bun ${LOOM_DIR}/engine/src/cli.ts helper populate-task-graph --issue ISSUE_NUMBER --repo OWNER/REPO
-```
-
-This helper:
-- Requires and persists `spec_trace_version: 2`, sanitizing both Task trace arrays
-- Reads existing state (phase tracking fields)
-- Reads, exactly parses, and freezes `.loom/verification-manifest.json` directly from the repository; decompose output cannot provide command authority
-- Reports Project Verification Coverage immediately: `configured` with non-empty check IDs, or `not-configured` with `engine-default` / `empty-operator-manifest`; later source edits cannot re-freeze this TaskGraph
-- Merges with validated decompose output (tasks, waves)
-- Adds `github_issue`, `spec_file`, `plan_file`, `current_wave: 1`
-- Moves `current_phase` decompose → execute (and records `phase_artifacts.decompose`) in the same write; it refuses any phase other than `decompose` (first population) or `execute` (re-population)
-- On first population, asks the plan design gate ([Phase 3.6](#phase-36-plan-design-review)) of the plan bytes it read: it refuses while `plan_design_review` is `required` or `accepted` for other bytes, exactly as the decompose spawn does; re-population in execute is not gated
-- Initializes `wave_gates`, `executing_tasks`
-- Writes via `StateManager` (chmod 444 protection)
-
-**C. Read-only protection (automatic):** The helper leaves the file chmod 444 — do **not** run `chmod` yourself; `chmod` is not an allowlisted read-only command, so the guard-state-file hook blocks it. State file stays chmod 444 at rest. Hooks and whitelisted helpers (`populate-task-graph`, `complete-wave-gate`, `set-phase`, …) write via `StateManager` (temporarily toggles to 644).
-
-### 4e. Context Checkpoint (Recommended)
-
-After populating the task graph and creating the GitHub issue, all planning artifacts are on disk.
-The planning conversation is no longer needed for execution.
-
-**Suggest to user:**
-> "Planning complete. All artifacts on disk. Run `/clear` to shed planning context before execution, or continue in current context."
-
-If user runs `/clear`: SessionStart hook auto-injects execution context. Continue from Phase 5.
-If user continues: Proceed to Phase 5 normally.
-
----
-
-## Phase 5: Execute
-
-For each wave:
-
-1. Read `helper orchestration status --json` and execute only its implementation-window recovery:
-   - `spawn-wave-implementation`: dispatch every listed Task through its engine-rendered implementation brief ([below](#implementation-briefs)). `retry-implementation` is the one engine-authorized semantic attempt 2; the brief carries its exact appendix.
-     - **The Distill Task.** A Wave with implementation files has one Task the engine added at population (agent `distill-agent`, ADR-0068): a fresh agent simplifies the code the Wave's other Tasks implemented, before the Wave Gate reviews it. Status lists it among the Wave's pending Tasks but offers its dispatch only after every other Task of the Wave has settled. When it appears in `recovery.dispatches`, dispatch it like any other dispatch, through its brief. It may settle having changed nothing.
-   - `await-wave-implementation`: spawn nothing; wait for the listed active Tasks to settle, then re-read status.
-   - `escalate-wave-implementation`: STOP and present every Task/receipt/failure kind to the user. Attempt 2 is terminal; manually re-spawning would be an unauthorized attempt 3 and the spawn gate refuses it.
-   - `start-wave-gate`: proceed to the Wave Gate. Status advises this only when every start prerequisite already holds (no executing Task, satisfied implementation proof, test evidence, new tests).
-   - `start-successor-wave-gate`: the same, but the Wave's abandoned Wave Gate run named a successor (`abandon --superseded-by`), and registration admits only that run. Start `/wave-gate` with exactly `recovery.runId` as the run id, never a fresh one.
-   - `repair-wave-start-readiness` (diagnostic `wave-start-not-ready`): implementation stopped but a start prerequisite is unmet; `recovery.failures` lists each one. STOP and resolve them (for example re-attest a reopened Task) — do not start the Wave Gate. `start wave-gate` refuses the same prerequisites, plus an existing live gate for the Wave and, under a Verification Manifest, full-tier lint, before claiming any Run Directory, so a refused start leaves nothing to abandon.
-   - `skeleton-bindings-unresolved` (blocked, in place of `spawn-wave-implementation`): a Task's **Export Bindings** do not resolve against its contract's frozen types file — a missing, non-function or generic alias, a Java holder of the wrong shape, or types-file bytes that drifted from the freeze stamp. Every problem is named. Spawn nothing: the spawn gate would refuse the same registration before writing a byte. Resolve it through the plan and a Contract Revision (`docs/operations.md`), then re-read status.
-   - `skeletons-unobserved` (a reason beside an owed `spawn-wave-implementation`, never a block): status could not read a skeleton path or types file. Spawn as listed; registration reads them again and refuses the spawn, every problem named, on anything it cannot read.
-   - **Skeleton outcomes.** Status (`skeletons`) and every brief give each non-test `file_list` path of the current Wave exactly one outcome — `skeleton written` (with its origin: spawn, contract stub or revision), `no bound exports, no skeleton`, `contract has no types file, no skeletons`, `unsupported language, no skeleton`, `exists, not skeletonized`, or for a Distill Task's bound scope path a sibling deleted `absent, no skeleton owed` — marked recorded (written at that Task's spawn) or projected (not yet spawned), plus every skeleton flagged `stale against revised contract`. They are information, never a dispatch: the engine writes the skeletons inside the spawn gate itself, and the contract stubs at the contract Task's stop. Never write or delete a skeleton by hand.
-2. Spawn only the Tasks in `recovery.dispatches`, in parallel when more than one is listed. Status excludes non-reclaimable Tasks already in `executing_tasks` or carrying active attempt authority; a policy-expired reservation with observed-empty roster authority is deliberately reissued so registration can reclaim it atomically.
-3. Wait for all dispatched Tasks to settle. Infrastructure-blocked attempts reuse the initial/retry dispatch arm for their preserved current semantic attempt; they never consume the budget or introduce another semantic dispatch kind. Semantic attempt 1 failure produces exactly one retry dispatch.
-4. Re-read canonical status and loop through steps 1–4 for every subsequent `spawn-wave-implementation` or `await-wave-implementation` recovery. Do not infer retry count from `pending`, `retry_count`, or `failure_reason`; immutable settlement history owns the budget. Exit this loop only on `start-wave-gate` or `start-successor-wave-gate`; `escalate-wave-implementation` is terminal and stops execution.
-5. **Only after `start-wave-gate` (or `start-successor-wave-gate`, with its exact run id), RUN `/wave-gate` — MANDATORY, via subagents** (see below)
-6. If blocked (critical findings): fix them through [Acting on a Finding](wave-gate.md#acting-on-a-finding) (abandon, `reopen-task`, `brief --note`, fresh `/wave-gate`)
-7. **Triage advisory findings and fix the RELEVANT ones** before advancing (see [Addressing Advisories](#addressing-advisories)). Advisories bypass refutation but pause the lifecycle at `awaiting-advisory-decision`. The engine records only approval (`{"kind":"approve"}` through `decide`), so triage first, and fix each relevant advisory through [Acting on a Finding](wave-gate.md#acting-on-a-finding). Approve once every advisory is fixed, deferred or dismissed with a reason. In a contract Wave, check status for an `acceptance-freeze-pending` reason first. Approval is what freezes the contract's files (receipt installation and abandonment do not), so reopen the contract Task and fix their relevant advisories before approving.
-8. **Let the registered `/wave-gate` façade run the frozen quiescent completion suite automatically.** It starts only after all current-Wave Agents stop and Task proof/test checks pass, before review publication. Project commands come only from the protected Verification Manifest and run without a shell. The reserved `loom:full-tier-lint` check runs programmatic rules; the existing terminal lint invocation remains a migration canary. Semantic and infrastructure failures return distinct blocked diagnostics. Never run an alternative model-authored command or silence a failure by editing the authority that caught it.
-9. Once the suite, reviews, relevant advisory disposition, spec alignment, and protected completion commit pass: advance to the next Wave.
-
-### Wave-Gate Enforcement (NON-NEGOTIABLE)
-
-**You MUST invoke `/wave-gate` by spawning review subagents.** You are NEVER allowed to:
-- Review code yourself inline and declare it "passed"
-- Skip the wave-gate and proceed to the next wave
-- Manually set `reviews_complete: true` in state
-
-**The wave-gate spawns these agents (see `commands/wave-gate.md` for full protocol — it is authoritative, this list is a summary):**
-1. `spec-check-invoker` — verifies implementation satisfies spec anchors (1 per wave)
-2. Per task: `code-reviewer`, `silent-failure-hunter`, `pr-test-analyzer`, `type-design-analyzer`, `comment-analyzer`
-3. `review-verifier-agent` — the **refutation panel** (wave-gate Step 3.5), N verifiers per wave, one per lens. MANDATORY whenever the wave has critical findings: an unadjudicated plausible-but-wrong critical costs a full remediation cycle. Driven by the registered Wave Gate through its persistent Refutation Panel program, never by the parent; a majority refutation moves a finding into `refuted_findings` with its reasoning, never deletes it. **Skip only when the wave has zero criticals.**
-
-**Steps 1 and 2 are spawned in parallel via the subagent-spawn tool (`Agent`, named `Task` in older harnesses).** Step 3 runs AFTER them — it adjudicates the findings they produced, so it cannot share their message. SubagentStop hooks automatically update state. Then `complete-wave-gate` helper advances the wave.
-
-**The `validate-task-execution` hook enforces this:** it blocks next-wave impl agents if `wave_gates[N-1].reviews_complete == false`. Even if you try to skip, the hook will BLOCK.
-
-**Re-spawn logic:** Never derive a re-spawn from raw `pending` state. Run canonical status and inspect `next.action.diagnostic.recovery`. It distinguishes dispatchable initial/current-attempt work, exact attempt-2 retry (including the required appendix), active work that must be awaited, and terminal escalation. Infrastructure recovery reuses the dispatch kind for its preserved semantic attempt. Spawn only `recovery.dispatches`; wait on `await-wave-implementation`; stop on `escalate-wave-implementation`.
-
-### Implementation briefs
-
-The engine renders every implementation prompt; never assemble one by hand. Run:
-
-```bash
-bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration brief
-```
-
-It renders `commands/templates/impl-agent-context.md` for each dispatch status owes, from protected authority only: the Task row, the engine-derived retry/attestation/distill appendix, the Spec Index text of its Requirement claims, the Agent Catalog skill, and the binding rules its `file_list` selects (`architecture.md` plus the TypeScript/Java/Rust pattern documents per extension; none for documentation-only Tasks). It refuses — naming the cause — any brief the spawn gates would refuse, so a rendered brief is admissible by construction. Each entry carries the exact invocation:
-
-- **Pi:** spawn `pi.agent` with `pi.task`, the one-line marker `LOOM_IMPLEMENTATION_BRIEF: <Task>`, and `agentScope: "user"`; batch several Tasks as `tasks`. The Loom extension expands each marker to the rendered brief before any gate reads it. Pass the marker exactly; do not paste the brief.
-- **Claude Code:** spawn `claude.subagent_type` (always `loom:<agent>`: Claude Code registers plugin agents only under the plugin namespace, so the bare catalog name names no agent there, and the spawn gate refuses any other form before it reserves the Task) with `claude.model`, `claude.description`, and `claude.prompt`, the same one-line marker. The `validate-task-execution` PreToolUse hook expands it to the rendered brief, runs every spawn gate on the brief, and hands the Agent the brief instead of the marker; your own context keeps only the marker. Pass the marker exactly; do not paste the brief. A marker that cannot expand blocks the spawn, naming the cause. `brief --prompt` adds the rendered brief to the output for reading only.
-- **Operator notes (#119).** To add an instruction to one Task's brief, run `brief --task <Task> --note "<text>"` (repeat `--note` for several) and spawn the invocation it prints. The marker then carries one `LOOM_OPERATOR_NOTE: <text>` line per note, and the expansion renders them into the brief's **Operator Note** section. The expanded brief is what the reservation digests, so the notes are part of the attempt's audited prompt. Nothing else may follow the marker: any other line, or a marker that is not the first line, is refused with this grammar rather than judged as a hand-written prompt. Each note is at most 500 characters, at most 8 per marker, and may not carry a `LOOM_` token, a `{template variable}` or a `Task ID:` binding. A note can focus the work inside the Task; the brief tells the agent it never widens the file list, waives a Verification Policy arm, or overrides the binding rules. Because of that, a note cannot be used to **induce a check failure** for a pilot. In the G4 slice 2 re-pilot, both agents refused induced notes ("write the code first", "break the exit code and skip the final run") and kept to the rules, so the I6 refusal and the I7 block never fired. A pilot that must exercise a refusal or a block needs a scenario whose natural course triggers it: for I7, a Task touching a widely imported hub file; for I6, a Task whose first test run genuinely passes. Do not rely on a note telling the agent to misbehave.
-
-  A marker carrying two notes, as `brief --task T5 --note … --note …` prints it:
-
-  <!-- wire-example: implementation-brief-request -->
-  ```text
-  LOOM_IMPLEMENTATION_BRIEF: T5
-  LOOM_OPERATOR_NOTE: Keep the exported signature of parseOrder unchanged.
-  LOOM_OPERATOR_NOTE: Cover the empty-cart case in the existing test file.
-  ```
-
----
-
-## Quick Start Examples
-
-### Full flow (recommended):
-```
-/loom "Add user authentication with email/password"
-```
-Runs: brainstorm → specify → clarify → arch → plan-alignment → decompose → execute
-
-### Skip to architecture (spec exists):
-```
-/loom --skip-specify "Add user authentication"
-```
-Runs: arch → plan-alignment → decompose → execute (uses existing spec)
-
-### Simple feature (clear scope):
-```
-/loom "Add logout button to navbar"
-```
-Detects simple → may skip brainstorm, minimal spec
-
----
-
-## State Management
-
-### State File Lifecycle
-
-The state file `.claude/state/active_task_graph.json` is created **before Phase 0** with minimal phase-tracking fields. This activates hook enforcement for the entire lifecycle.
-
-```bash
-# Initial state — computed from skip flags, validates spec.md exists for --skip-specify
 mkdir -p .claude/state .claude/specs/{date_slug}
-bun ${LOOM_DIR}/engine/src/cli.ts init-state \
+bun {LOOM_DIR}/engine/src/cli.ts init-state \
   [--skip-brainstorm] [--skip-clarify] [--skip-specify] [--skip-plan-alignment] \
   [--skip-plan-design-review] \
   --spec-dir .claude/specs/{date_slug} \
   --output .claude/state/active_task_graph.json
 ```
 
-<!-- Schema reference (for understanding the state shape):
-{
-  "current_phase": "init",       // or "specify"/"architecture" depending on skip flags
-  "phase_artifacts": {},
-  "skipped_phases": [],          // e.g. ["brainstorm","specify","clarify"] for --skip-specify
-                                 // e.g. ["plan-alignment"] for --skip-plan-alignment
-  "spec_dir": ".claude/specs/{date_slug}",
-  "spec_file": null,             // set automatically for --skip-specify
-  "plan_file": null,
-  "tasks": [],
-  "wave_gates": {}
-}
--->
+The engine keeps the State File read-only. Never `chmod` it, edit it or write to it; only hooks and the helpers named in this file and its runbooks change it.
 
-**IMPORTANT:** The engine sets `chmod 444` automatically at creation (`cli.ts init-state`) and after every `StateManager` write — do **not** run `chmod` yourself; the guard-state-file hook blocks it. This activates OS-level write protection — subagent Write tool calls will get EACCES. Only hooks and whitelisted helpers writing via `StateManager` can modify the file.
+## Arguments
 
-After Phase 4 (Decompose), the task graph is populated with tasks, waves, and GitHub issue info. This is done by passing decompose output through the `validate-task-graph` helper and writing the full state via `populate-task-graph`.
+- `/loom "description"`: start a new plan and run every phase.
+- `--skip-brainstorm`: skip Phase 0 (the scope is already clear).
+- `--skip-clarify`: skip Phase 2 and go to architecture whatever the marker count.
+- `--skip-specify`: skip Phases 0–2 and use the existing spec.
+- `--skip-plan-alignment`: skip Phase 3.5.
+- `--skip-plan-design-review`: skip the Phase 3.6 gate. Recorded as `plan_design_review: {"status":"not-required","reason":"skipped"}`.
+- `--panel` or `--panel=N`: produce the plan through an architecture panel (parallel designers, each with a lens, ranked by judges). Only Phase 3 changes; see its Mandatory read.
+- `--status`: show the current status (Setup step 3).
 
-**Hook activation timeline:**
-- State file created → all PreToolUse hooks activate (block-direct-edits, guard-state-file, validate-phase-order, validate-task-execution)
-- Phase agents complete → SubagentStop hooks fire (advance-phase updates current_phase)
-- Execute phase → full wave enforcement active
+There is no `--complete` and no `--abort` flag; both are helper invocations in the recovery runbook. A phase is skipped only by its flag. Clarify also drops out by itself when the spec has 3 markers or fewer (`CLARIFY_THRESHOLD` in `engine/src/core/phase-policy.ts`).
 
-### On `/loom "description"`:
-1. Create minimal state file (hooks activate)
-2. Run phases 0-4 (hooks enforce order, advance-phase tracks progress)
-3. Populate state with tasks after decompose
-4. Execute waves with full enforcement
+## Spawn rules
 
-### On `/loom --status`:
+- **Model.** Every Loom agent has one LLM Profile. Before each spawn, resolve it and pass the model explicitly; never omit it. A missing or mismatched binding blocks the spawn.
+  ```bash
+  bun {LOOM_DIR}/engine/src/cli.ts helper model-profiles agent --agent "<AGENT_NAME>"
+  ```
+  Claude Code: pass the emitted `claudeCode.model` in the `Agent`/`Task` call. Pi: the agent definition must contain the emitted `pi.provider/pi.model:pi.thinking` pattern; run `{LOOM_DIR}/scripts/sync-pi-agents.sh` after an install or update.
+- **Pi transport.** Under Pi, spawn `specify-agent`, `clarify-agent`, `architecture-agent` and `arch-interviewer-agent` with the `loom_interactive_subagent` tool, one agent per call; it relays their `AskUserQuestion` dialogs to the parent TUI. The plain `subagent` tool refuses those four roles. Use `subagent` for every other agent. Under Claude Code, use the native Agent/Task tool for all of them.
+- **Templates.** Read the phase's template, replace every variable the Phases table lists for it, and spawn the agent with the result as its prompt. A prompt that still contains a `{name}` variable is refused.
+- **Do not answer for the user.** Pass an interactive agent only the paths and values its template asks for. Never put pre-resolved answers into its prompt.
+- **One phase agent at a time.** Phases run in sequence. Only Phase 5 Tasks and panel batches are spawned in parallel, in one message.
 
-Run the façade and relay what it prints — do not hand-assemble a summary from
-`jq`, and do not re-derive readiness:
+## Phases
 
-```bash
-bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration status
-```
+| Phase | Agent | Template | Variables | Output | When it completes |
+|---|---|---|---|---|---|
+| 0 Brainstorm | `brainstorm-agent` | `phase-brainstorm.md` | `{feature_description}`, `{prior_context}`, `{date_slug}` | `.claude/specs/{date_slug}/brainstorm.md` | Phase advances to specify. User checkpoint |
+| 1 Specify | `specify-agent` | `phase-specify.md` | `{feature_description}`, `{date_slug}` | `.claude/specs/{date_slug}/spec.md` | More than 3 markers → clarify; otherwise architecture |
+| 2 Clarify | `clarify-agent` | `phase-clarify.md` | `{spec_file_path}`, `{marker_count}`, `{date_slug}` | The same spec, with no marker left | Advances to architecture only at 0 markers |
+| 3 Architecture | `architecture-agent` | `phase-architecture.md` | `{feature_description}`, `{spec_file_path}`, `{date_slug}`, `{loom_dir}` | `.claude/plans/{date_slug}.md` | Advances to plan alignment (or decompose when skipped) |
+| 3.5 Plan alignment | `plan-alignment-agent` | `phase-plan-alignment.md` | `{spec_file_path}`, `{plan_file_path}`, `{spec_dir}`, `{date_slug}` | `{spec_dir}/plan-alignment.md` | Advances to decompose. User checkpoint on gaps |
+| 3.6 Plan design review | reviewers, via the runbook | none | none | `plan_design_review: accepted` | Opens the decompose spawn |
+| 4 Decompose | `decompose-agent` | `phase-decompose.md` | `{feature_description}`, `{spec_file_path}`, `{plan_file_path}` | One line of JSON: the task graph | Stays `decompose` until Tasks are populated |
+| 5 Execute | implementation agents | engine-rendered briefs | none | Reviewed code, Wave by Wave | See Phase 5 |
 
-Every fact category appears, present or `unavailable`, followed by exactly one
-typed next action and its complete reason list:
+Variable values:
 
-```
-Loom Status v1
-- location: {"activePhase":"execute","activeWave":2}
-- tasks: {"counts":{"pending":1,"running":0,"implemented":2,"blocked":0,"completed":0}}
-- failedProofObligations: []
-- testReadiness: {"kind":"ready","affectedTasks":[]}
-- reviewRuns: {"rosterGaps":[],"evidenceFailures":[]}
-- findingCounts: {"activeCritical":0,"advisory":0,"resolved":0,"refuted":0}
-- refutationPanelNeed: {"kind":"not-needed","findingIds":[],"reasons":["the active Wave has no critical Findings"]}
-- waveCompletionSuiteReadiness: {"kind":"legacy-unavailable","verificationManifestDigest":null}
-- waveGateCompletionEligibility: {"kind":"ineligible","failedPrerequisites":["Wave 2 implementation is in progress"]}
-- nextAction: blocked
-- nextActionPayload: {"kind":"blocked","runId":"loom-status-authority","diagnostic":{"kind":"wave-gate-not-started","category":"healthy-wave-unstarted","runId":"loom-status-authority","message":"Wave 2 implementation is in progress; 1 task(s) are ready to dispatch","retry":{"kind":"advance-wave-lifecycle","eligible":true,"consumesSemanticAttempt":false},"recovery":{"kind":"spawn-wave-implementation","wave":2,"dispatches":[{"kind":"initial-implementation","taskId":"T3","semanticAttempt":1,"promptAppendix":null}]}}}
-- reasons:
-  - [wave-implementation-pending] T3 has not reached implemented
-  - [wave-gate-not-started] Wave 2 implementation is in progress; 1 task(s) are ready to dispatch
-```
+| Variable | Value |
+|---|---|
+| `{feature_description}` | The user's request; from Phase 1 on, as refined by the brainstorm |
+| `{prior_context}` | Notes from earlier exploration or the user's feedback on a previous brainstorm; `None.` when there are none |
+| `{date_slug}` | The slug from Setup |
+| `{spec_file_path}` | `.claude/specs/{date_slug}/spec.md` |
+| `{marker_count}` | The count of `NEEDS CLARIFICATION` in that spec |
+| `{loom_dir}` | The resolved `LOOM_DIR` path |
+| `{plan_file_path}` | `.claude/plans/{date_slug}.md` |
+| `{spec_dir}` | `.claude/specs/{date_slug}` |
 
-An `unavailable` category is a real answer, not a rendering gap: it means the
-authority behind that fact could not be parsed, and the action will be
-`blocked` with the reason attached.
+The hooks refuse a spawn whose prerequisite phase is not complete and advance `current_phase` when a phase agent's artifact is on disk. You do not set the phase yourself, except for the loop-backs below.
 
-### Completion or abort teardown
+## Your duties between phases
 
-`/loom --complete` and `/loom --abort` are not implemented argument handlers.
+**After Phase 0.** Read `brainstorm.md`, present its summary, and ask: "Approach: {selected approach}. Proceed to specification?" Under Pi this checkpoint is also where the user confirms the approach, because the brainstorm agent cannot ask. If the user wants changes, re-spawn `brainstorm-agent` with the feedback as `{prior_context}`.
 
-**Completion.** After the final Wave Gate reports `done`, retire the
-orchestration:
+**After Phase 1.** Note the spec path and count the markers in that one spec:
 
 ```bash
-bun ${LOOM_DIR}/engine/src/cli.ts helper complete-orchestration
+grep -c "NEEDS CLARIFICATION" .claude/specs/{date_slug}/spec.md || [ $? -eq 1 ]
 ```
 
-It refuses, naming each reason, unless every Task is `completed` and no Wave Gate
-run is active. Then, under the TaskGraph lock, it archives the exact graph bytes
-beside the live graph as `completed_task_graph-<issue>-<stamp>.json` and removes
-the live graph. Every Loom guard (direct-edit block, spawn gates, state guard)
-lifts, so a post-gate `/review-and-fix` can run in the same checkout. Until then
-those guards stay on.
+More than 3 means Phase 2 runs next (unless `--skip-clarify`); otherwise go to Phase 3.
 
-**Abort.** Only with explicit user confirmation to abandon an unfinished run,
-use the guarded teardown rather than direct file removal. It keeps no copy:
+**After Phase 2.** Count again. The phase advances only when the count is 0. If markers remain, re-spawn `clarify-agent` on them; it resolves each with the user or rewrites it as a deferral.
+
+**After Phase 3.** Note the plan path, the implementation phases, and any executable models the agent declared (LC-N lifecycles, the Pipeline AuthoredDag, INV-N invariants with rule files, CT-N contracts with types and acceptance files). Phase 4a validates them against the task graph.
+
+**After Phase 3.5.** Read `.claude/specs/{date_slug}/plan-alignment.md`. The report is always written, and decompose is refused without it.
+
+- No gaps: go to Phase 3.6.
+- Gaps: present the report and ask: "N gaps found. Re-run architecture with this feedback, or proceed to decompose?"
+- A `FEAS-N` gap means a recorded discovery contradicts a Requirement or a plan decision. When the Requirement itself is what the discovery makes wrong, re-running architecture cannot fix it: say so, and offer amending the spec (back to `/specify`) as a third option.
+- **Re-run:** set the phase back, delete the stale report, and re-spawn `architecture-agent` with the gap report appended to its prompt. Plan alignment then runs again.
+  ```bash
+  bun {LOOM_DIR}/engine/src/cli.ts helper set-phase --phase architecture --clear-artifact plan-alignment
+  rm -f .claude/specs/{date_slug}/plan-alignment.md
+  ```
+  Never re-panel on a loop-back. Even when the plan came from `--panel`, the re-run uses the standard `phase-architecture.md` flow. Give the agent the exact panel-run manifest path recorded in AD-1 and tell it to read only that manifest's `candidates[].path` entries if it revisits losing designs; never scan a shared or run directory.
+- **Proceed:** go to Phase 3.6.
+- From the second re-run on, warn: "This is loop-back attempt N. Consider proceeding to decompose or refining the spec directly."
+
+## Phase 3 with `--panel`
+
+**Mandatory read: `{LOOM_DIR}/references/loom/panel-runbook.md`.** Read it when `--panel` or `--panel=N` was passed, before you validate the flag's value or spawn anything for Phase 3. It replaces the single `architecture-agent` spawn and ends with the same plan file; everything after Phase 3 is unchanged.
+
+## Phase 3.6: Plan design review
+
+**Mandatory read: `{LOOM_DIR}/references/loom/plan-design-review-runbook.md`.** Read it once plan alignment has settled, before Phase 4, unless `--skip-plan-design-review` was passed. The plan is reviewed as a standalone review of kind `plan-design`, and `helper accept-plan-design-review` records the acceptance. The decompose spawn is refused until then, and again after any later edit to the plan.
+
+## Phase 4: Decompose
+
+**Mandatory read: `{LOOM_DIR}/references/loom/decompose-runbook.md`.** Read it when you reach Phase 4, before spawning `decompose-agent`. It covers the spawn, validation of the output and where each kind of failure goes (4a), Requirement trace ownership (4b), the user's approval (4c), the verification manifest, the GitHub Issue and `populate-task-graph` (4d), and the `/clear` checkpoint (4e).
+
+## Phase 5: Execute
+
+For each Wave, loop on canonical status. Never work out what to spawn from `pending`, `retry_count`, `failure_reason` or any other raw field.
+
+1. Read `helper orchestration status --json` and act on its `next.action.diagnostic.recovery`:
+   - `spawn-wave-implementation`: spawn exactly `recovery.dispatches`, in parallel, each through its brief ([below](#implementation-briefs)). A Task may reappear there after its reservation expired; that is intended. A `retry-implementation` dispatch is the one engine-authorized attempt 2, and its brief carries the retry appendix. An infrastructure-blocked attempt is re-dispatched under the same kind and does not use up an attempt.
+     - **The Distill Task.** A Wave with implementation files has one Task the engine added at population (agent `distill-agent`). Status offers its dispatch only after every other Task of the Wave has settled. Dispatch it like any other, through its brief. It may settle having changed nothing.
+   - `await-wave-implementation`: spawn nothing. Wait for the listed active Tasks to settle, then re-read status.
+   - `escalate-wave-implementation`: stop, and present every Task, receipt and failure kind to the user. Attempt 2 is final; the spawn gate refuses an attempt 3.
+   - `start-wave-gate`: go to step 3.
+   - `start-successor-wave-gate`: go to step 3, and start `/wave-gate` with exactly `recovery.runId` as the run id, never a fresh one.
+   - `repair-wave-start-readiness` (diagnostic `wave-start-not-ready`): implementation has stopped but a start prerequisite is unmet. Stop and resolve each entry of `recovery.failures` (for example, re-attest a reopened Task). Do not start the Wave Gate; it refuses the same prerequisites.
+   - `skeleton-bindings-unresolved` (blocked, in place of `spawn-wave-implementation`): a Task's export bindings do not resolve against its contract's frozen types file. Every problem is named. Spawn nothing. Resolve it through the plan and a Contract Revision (`docs/verification.md`), then re-read status.
+   - `skeletons-unobserved` (a reason beside an owed `spawn-wave-implementation`, never a block): status could not read a skeleton path or types file. Spawn as listed; registration reads them again.
+   - **Skeleton outcomes** in status and in each brief (`skeleton written`, `no bound exports, no skeleton`, `contract has no types file, no skeletons`, `unsupported language, no skeleton`, `exists, not skeletonized`, `absent, no skeleton owed`, and `stale against revised contract`) are information, never a dispatch. The engine writes skeletons itself. Never write or delete one by hand.
+2. When the batch settles, re-read status and repeat step 1. Leave the loop only on `start-wave-gate` or `start-successor-wave-gate`; `escalate-wave-implementation` ends execution.
+3. When status says `start-wave-gate`, run `/wave-gate`. Do not review inline or skip it: the spawn gate refuses next-Wave Tasks until the gate completes. `commands/wave-gate.md` is the protocol. The gate runs the completion suite from the protected Verification Manifest itself; never run a substitute command, and never silence a failure by editing the authority that caught it.
+4. If the gate is blocked by critical findings, fix them through [Acting on a Finding](wave-gate.md#acting-on-a-finding) (abandon, `reopen-task`, `brief --note`, fresh `/wave-gate`).
+5. Advisory findings pause the gate at `awaiting-advisory-decision`. Classify and act on every one as `commands/wave-gate.md` says (the paragraphs before [Acting on a Finding](wave-gate.md#acting-on-a-finding), including the contract-Wave `acceptance-freeze-pending` check), and approve only then.
+6. When the gate reports the Wave complete, return to step 1 for the next Wave. After the final Wave Gate reports `done`, complete the orchestration (recovery runbook).
+
+### Implementation briefs
+
+The engine renders every implementation prompt; never assemble one by hand. Run:
 
 ```bash
-bun ${LOOM_DIR}/engine/src/cli.ts helper cleanup-state
+bun {LOOM_DIR}/engine/src/cli.ts helper orchestration brief
 ```
 
-Optionally close or retain the GitHub Issue. Preserve specs, plans, and review
-Run Directories as audit/recovery evidence. Hooks deactivate when the protected
-TaskGraph is removed.
+It prints one entry for each dispatch status owes, and refuses, naming the cause, any brief the spawn gates would refuse. Each entry carries the exact invocation:
 
----
+- **Pi:** spawn `pi.agent` with `pi.task` (the one-line marker `LOOM_IMPLEMENTATION_BRIEF: <Task>`) and `agentScope: "user"`; batch several Tasks as `tasks`.
+- **Claude Code:** spawn `claude.subagent_type` (always `loom:<agent>`; the spawn gate refuses the bare name) with `claude.model`, `claude.description` and `claude.prompt`, the same one-line marker.
 
-## Hook Integration
+Pass the marker exactly and do not paste the brief: Loom expands the marker into the rendered brief before the agent sees it, and a marker that cannot expand blocks the spawn, naming the cause. `brief --prompt` prints the rendered brief for reading only.
 
-Hooks auto-activate when `active_task_graph.json` exists:
+**Operator notes.** `brief --task <Task> --note "<text>"` (repeatable; at most 8, 500 characters each) prints an invocation whose marker carries the notes. Spawn exactly that. A note focuses work inside the Task; it cannot widen the file list, waive verification or override the rules. The marker must be the first line, and only `LOOM_OPERATOR_NOTE:` lines may follow it. A note may not contain a `LOOM_` token, a `{template variable}` or a `Task ID:` binding.
 
-| Hook | Event | Purpose |
-|------|-------|---------|
-| `block-direct-edits.sh` | PreToolUse: Edit/Write/MultiEdit | Forces the subagent-spawn tool. A Claude implementation Agent writes only once its exact Implementation Attempt is bound (sidecar published from its own first prompt): pending is a retriable block, refused a hard block |
-| `enforce-phase-tools.sh` | PreToolUse: Edit/Write/MultiEdit | Guarded-skill-machine gate: denies enforced tools the bound agent's phase doesn't allow (fails closed) |
-| `guard-state-file.sh` | PreToolUse: Bash | Deny-by-default on guarded state paths: only read-only commands (`jq`, `cat`, `grep`, …) and whitelisted helpers pass — covers task graph + subagent evidence/binding files + machine definitions |
-| `validate-task-execution.sh` | PreToolUse: Agent/Task/subagent | Validates wave/dependency order and path ownership, reclaims only policy-eligible exact reservations, captures baselines, and atomically registers attempt/retry authority |
-| `validate-phase-order.sh` | PreToolUse: Agent/Task/subagent | Enforces phase sequencing |
-| `validate-template-substitution.sh` | PreToolUse: Agent/Task/subagent | Blocks unsubstituted `{variable}` patterns |
-| `validate-agent-model.sh` | PreToolUse: Agent/Task/subagent | Validates agent model assignment |
-| `validate-agent-skill.sh` | PreToolUse: Agent/Task/subagent | Validates agent skill preload |
-| `mark-subagent-active.sh` | SubagentStart | Tracks active subagents + binds the guarded skill machine (epoch); binds an implementation Agent's exact attempt when its prompt is already on disk, else leaves it pending |
-| `record-evidence.sh` | PostToolUse: Read/Edit/Write/MultiEdit/Bash | Appends epoch-stamped facts (FileRead/FileWrite/TestRun) to the evidence ledger |
-| `lint-file.sh` | PostToolUse: Edit/Write/MultiEdit | Runs the immediate-tier linter (regex rules plus the import-boundary programmatic rules; the other programmatic rules run at the wave gate) |
-| `cleanup-stale-subagents.sh` | SessionStart | Sweeps stale subagent tracking/binding files |
-| `resume-after-clear.sh` | SessionStart: clear | Restores loom context after /clear |
-| `dispatch.sh` | SubagentStop | Routes to the TS handlers below (`engine/src/handlers/subagent-stop/`) by agent type |
-| ↳ `advance-phase.ts` | via dispatch | Advances phase + captures spec_file/plan_file from transcript |
-| ↳ `update-task-status.ts` | via dispatch | Runs exact Implementation Completion Oracle settlement: implemented, retry-required, escalation-required, or infrastructure-blocked |
-| ↳ `store-reviewer-findings.ts` | via dispatch | Parses review findings |
-| ↳ `store-spec-check-findings.ts` | via dispatch | Parses spec-check findings |
-| ↳ `cleanup-subagent-flag.ts` | via dispatch | Cleans up subagent tracking + machine bindings (always runs) |
-
-**Do not call hook-owned state-writing helpers yourself.** The helpers that hooks/`/wave-gate` drive — `complete-wave-gate`, `StateManager`, `store-review-findings`/`store-spec-check` (except as a sanctioned override, below) — run automatically; calling them by hand races the hook that owns that write. A small set of DIRECT helper invocations IS sanctioned, used only where this document says to; they fall into two distinct classes:
-
-- **Whitelisted in the guard** (`engine/src/config.ts` `WHITELISTED_HELPERS`, so the guard permits them even on a guarded path): `write-verification-manifest` and `populate-task-graph` (Phase 4d), `amend-spec-trace` (in-place Requirement trace correction), `revise-contract` (operator Contract Revision of a frozen Acceptance Contract), `set-phase` loop-back, `mark-tests-passed` (read-only evidence status check, run during `/wave-gate` Step 2 — it reads persisted TaskGraph evidence and does NOT modify state), `repair-task-graph` (recovery only; it reads rejected JSON directly, applies `fixFull`, validates, and atomically replaces the graph without calling `StateManager.load()`), `review-packet create` (starts the packet-bound Review Run atomically while writing its immutable packet outside guarded state), and the `store-review-findings` / `store-spec-check` false-positive overrides.
-- **Merely out of the guard's scope when invoked as documented** (NOT in `WHITELISTED_HELPERS`): `validate-task-graph` / `validate-lint-rules`; the explicit diagnostic helper `lint-wave-gate` (the registered Wave Gate invokes the same full-tier shell automatically); `orchestration status` (a pure read that derives the canonical status value and renders it); the two panel contract helpers `panel-contract` (this document, Phase 3 panel mode) and `review-panel` (the parent-driven refutation panel that predates the registered Wave Gate, kept for its smoke suite and operator diagnosis — the registered Wave Gate runs its Refutation Panel itself and never invokes this helper); and `standalone-review` (`skills/review-and-fix/SKILL.md`) — they pass only because their documented invocations name no guarded path, writing instead into a run directory under the runs-root each one is given — `.claude/specs/{date_slug}/panel-runs/` for the architecture panel, `.claude/reviews/panel-runs/` for the wave refutation panel, and `.claude/reviews/review-and-fix-runs/` for standalone review. Invoked against a guarded path they would be blocked like anything else. `contract-status` is a pure read in the same class but needs no runs-root: it takes no arguments, reads only the State File, and writes only to stdout (each Acceptance Contract's freeze state, roster and due Waves; see `docs/operations.md`). It never writes the State File or takes its lock. `stop-check-plan --task <id>` is a pure read in the same class. It reads only the State File and writes only to stdout: what the Acceptance Stop Check would do at that Task's stop (the owed testcases by contract, the acceptance files, the runner cwd, the expanded argv and the report path), or the single reason the check is off. It never runs the runner, never writes the State File and never takes its lock. It refuses an unknown Task id, naming the id, with a non-zero exit (see `docs/operations.md`). `accept-plan-design-review` (Phase 3.6) is in this class although it writes: its invocation names only a runs-root under `.claude/reviews/`, and its one locked State File write goes through `StateManager`.
-
-  **One exception inside that class:** `review-panel tally` DOES write the task graph through `StateManager` — it moves refuted findings into `refuted_findings` and can demote `review_status` from `blocked` to `passed`. It is out of the guard's scope only because its arguments name the run directory rather than the state file. `wave-gate.md` never calls it: the registered Wave Gate adjudicates through its own Refutation Panel. The tally refuses a second tally on a run it has already adjudicated, and refuses `--threshold` outright — its bar is always the strict majority of the run's lenses. Do not invoke it to "re-check" a wave.
-
-Each sanctioned direct invocation still requires user approval. Everything else is hook-driven.
-
-When the load boundary reports a corrupt graph and names `repair-task-graph`, run:
-
-```bash
-bun ${LOOM_DIR}/engine/src/cli.ts helper repair-task-graph
+<!-- wire-example: implementation-brief-request -->
+```text
+LOOM_IMPLEMENTATION_BRIEF: T5
+LOOM_OPERATOR_NOTE: Keep the exported signature of parseOrder unchanged.
+LOOM_OPERATOR_NOTE: Cover the empty-cart case in the existing test file.
 ```
 
-Set `LOOM_STATE_PATH` only when repairing a non-default graph. The helper fails closed if repair would drop findings or audit data, validates the repaired graph at both the full-graph and typed load boundaries, and leaves the state file `0444` after its atomic replacement. Do not redirect `validate-task-graph --fix` into the guarded state file; that pure transformer cannot install its own output through the guard.
+## Invariants
 
----
+- Phase work is done by phase agents and implementation by Tasks spawned from engine briefs. While the State File exists, your own Edit and Write are blocked.
+- `helper orchestration status` decides what happens next. Raw state fields never do.
+- Every Wave passes through `/wave-gate` before the next Wave starts. You never review inline, and you never mark a review complete yourself.
+- State changes only through hooks and the helpers this file and its runbooks name.
+- One active plan at a time.
 
-## Operations Reference
+## Recovery, completion and abort
 
-### Status Transitions
-
-```
-pending → implemented    (exact attempt satisfies Proof and Task-local suite)
-pending → pending        (infrastructure block: same semantic attempt remains eligible)
-pending → pending        (attempt 1 semantic failure: one exact attempt-2 retry is issued)
-pending → pending        (attempt 2 semantic failure: Task stays pending while status publishes terminal escalation; no attempt 3)
-implemented → completed  (wave gate passed: tests + review + no critical findings)
-```
-
-### Observability
-
-**Prefer the engine's own status.** It derives one canonical value and renders
-it two ways, so the human and machine forms cannot drift from each other or
-from the program that actually decides readiness:
-
-```bash
-bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration status          # human
-bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration status --json   # machine
-```
-
-It reports active Phase and Wave, an exhaustive five-way Task partition,
-failed proof obligations, test readiness, Review Run roster gaps and evidence
-failures, the four Finding counts, Refutation Panel need, quiescent Wave completion-suite readiness/result failures and independent `projectVerificationCoverage`, Wave Gate completion eligibility, exactly one typed next action, and every contributing reason. Status reads persisted result authority but never executes verification commands.
-
-Relay coverage alongside outcome: `configured` carries non-empty sorted `checkIds` but is not a pass; `not-configured` distinguishes absent source (`engine-default`), explicit zero checks (`empty-operator-manifest`), and archived reserved-only evidence with unavailable source provenance (`historical-unknown`). Engine-only suites may still advance, but report reserved-check acceptance and **Project verification NOT CONFIGURED**, never “project verification passed.” Completed schema-v2 coverage comes from the archived receipt roster, not the live manifest. `legacy-unavailable` supplies no fabricated coverage. This projection is not a new persisted field, waiver, or strict all-projects requirement. Report configured command results only from accepted suite evidence; never create that receipt yourself.
-
-The `jq` recipes below read raw fields directly. They remain useful for
-inspecting a specific stored value, but they do NOT reproduce the engine's
-readiness logic — a task that looks `implemented` here may still be ineligible
-for advancement, and a missing field reads as absent rather than as the
-authority failure it is. Never derive a gate decision from them:
-
-```bash
-# Current state
-jq '.' .claude/state/active_task_graph.json
-
-# Per-task status
-jq '.tasks[] | {id, status, test_result, review_status}' .claude/state/active_task_graph.json
-
-# Wave gate status
-jq '.wave_gates' .claude/state/active_task_graph.json
-```
-
-### Common Issues
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| Task stays `pending` after settlement | Semantic or infrastructure outcome requires a canonical next decision | Read `orchestration status --json`; use only its initial/retry dispatch or escalation action |
-| Task stays `pending`, agent still running | Agent live (tracked via `executing_tasks`, there is no `in_progress` status) | Wait; do not duplicate the active authority |
-| Status reports `escalate-wave-implementation` | Exact semantic attempt 2 failed | Stop and present the receipt/failure kinds to the user; no attempt 3 exists |
-| `test_result` missing or not a pass | Evidence is absent, semantic-failed, or infrastructure-blocked | Run `orchestration status --json`; execute only its exact dispatch (including any attempt-2 appendix), wait action, or terminal escalation |
-| Wave not advancing | Gate blocked | Check `wave_gates[N].blocked`, run `/wave-gate` |
-| State write blocked | Guard hook active | State writes via hooks only; reads OK |
-| Test task blocked, impl wrote tests | Separate test task for new code | Don't create separate test tasks; mark superseded or merge |
-
-### Fixing Blocked Waves
-
-When blocked (critical findings), Edit/Write blocked too. To fix:
-1. **Re-spawn via Task/subagent** through [Acting on a Finding](wave-gate.md#acting-on-a-finding): the fix agent spawns from the reopened Task's brief, with the findings as its `--note`s (a subagent CAN Edit/Write). Never use `populate-task-graph --force`, which resets every Task.
-2. **Run `/wave-gate`** — re-reviews only blocked tasks
-3. **Override false positives** — pipe corrected findings through whitelisted helpers (guard hook allows these):
-   ```bash
-   # Override spec-check (e.g. FRs covered in later waves flagged as missing)
-   echo 'SPEC_CHECK_WAVE: N
-   SPEC_CHECK_CRITICAL_COUNT: 0
-   SPEC_CHECK_VERDICT: PASSED
-   MEDIUM: reason for override' | bun ${LOOM_DIR}/engine/src/cli.ts helper store-spec-check
-
-   # Override review findings (e.g. downgrade false critical to advisory)
-   echo 'ADVISORY: original finding — reason for downgrade' | bun ${LOOM_DIR}/engine/src/cli.ts helper store-review-findings --task T1
-   ```
-   For a modern TaskGraph (one with `verification_manifest`), persist the corrected findings and then return to the registered Wave Gate: resume its exact Run Directory with `helper orchestration resume`, or start a fresh `/wave-gate` run when no active registration exists. The registered façade re-observes `currentWaveWorkspace` and owns completion-suite execution. **Do not run direct `complete-wave-gate` for a modern graph**; it is legacy-only and refuses rather than inventing Run Directory or workspace authority. Use overrides only when findings are genuinely false positives — requires user approval.
-4. **Emergency**: the guard blocks a direct `rm` of the state file — use the whitelisted helper `bun ${LOOM_DIR}/engine/src/cli.ts helper cleanup-state`, then fix manually / rebuild from the GH issue
-
-### Addressing Advisories
-
-Critical findings **block** the gate. Advisory findings do **not** — but loom does not ignore them. After each wave gate, triage every advisory finding before advancing:
-
-**Classify each advisory:**
-- **Relevant** — in scope for the task, actionable, and consistent with project standards (the repo's `CLAUDE.md` / conventions). These get **fixed**.
-- **Not relevant** — out-of-scope refactor, nitpick that contradicts an established project convention, false positive, or work deliberately deferred to a later wave. These are **recorded** with a one-line reason, not fixed.
-
-**Fix relevant advisories** the same way as criticals, through [Acting on a Finding](wave-gate.md#acting-on-a-finding): the fix subagent spawns from the reopened Task's brief (Edit/Write are blocked for the orchestrator), carrying the advisory text as its `--note`, and makes the minimal change. The fresh `/wave-gate` that follows re-reviews the fix.
-
-**Best-effort, non-blocking:** if a relevant advisory can't be fixed cleanly (breaks tests, needs an upstream change), defer it with a reason rather than blocking the wave. Never silently drop an advisory — every advisory ends as *fixed*, *deferred (reason)*, or *dismissed (reason)*.
-
----
-
-## Constraints
-
-- **ALL phases via agents** - brainstorm, specify, clarify, architecture, plan-alignment, decompose agents
-- **ALL implementation via Task/subagent tool** - Edit/Write/MultiEdit blocked
-- **ALL state writes via hooks** - Bash writes blocked (exception: `start_sha` PreToolUse write)
-- **NEVER skip phases** unless explicit `--skip-X` flag provided
-- **NEVER proceed with >3 unresolved markers** without user acknowledgment or `--skip-clarify`
-- Only ONE active plan at a time
-
----
-
-## Phase Enforcement (Hooks)
-
-Two hooks enforce phase ordering:
-
-### PreToolUse: `validate-phase-order.sh`
-Blocks agent spawns if prerequisite phases not complete.
-
-| Target Agent | Requires |
-|--------------|----------|
-| specify-agent | brainstorm complete OR `--skip-brainstorm` |
-| clarify-agent | spec.md exists |
-| architecture-agent | spec.md exists + markers ≤ 3 OR `--skip-clarify` |
-| plan-alignment-agent | plan.md exists |
-| decompose-agent | plan.md exists + plan-alignment.md exists OR `--skip-plan-alignment`; and `plan_design_review` is `accepted` for the plan's current bytes, OR `--skip-plan-design-review`, OR the field is absent |
-| impl agents | plan.md exists + plan-alignment.md exists OR `--skip-plan-alignment` |
-
-### SubagentStop: `advance-phase.sh`
-Advances `current_phase` when phase agents complete.
-
-| Agent Completes | Next Phase |
-|-----------------|------------|
-| brainstorm-agent | specify |
-| specify-agent | clarify (if markers > 3) OR architecture |
-| clarify-agent | architecture |
-| architecture-agent | plan-alignment (OR decompose if `--skip-plan-alignment`) |
-| plan-alignment-agent | decompose |
-| decompose-agent | *(stays decompose)* — `populate-task-graph` moves to execute in the same write that installs the Tasks |
-
-**Artifact verification:** `advance-phase.sh` verifies expected files exist on disk before advancing:
-- After `specify`: checks `spec_file` exists
-- After `architecture`: checks `plan_file` exists
-- After `plan-alignment`: checks `plan-alignment.md` exists in spec dir
-
-### State Tracking
-
-<!-- wire-example: none — three fields of the State File shown for orientation; the engine writes that file and no one authors it -->
-```json
-{
-  "current_phase": "specify",
-  "phase_artifacts": {
-    "brainstorm": "completed",
-    "specify": null,
-    "clarify": null,
-    "architecture": null
-  },
-  "skipped_phases": ["clarify"]
-}
-```
-
-### Skip Flags
-
-- `--skip-brainstorm` - Adds "brainstorm" to `skipped_phases`, starts at specify
-- `--skip-clarify` - Adds "clarify" to `skipped_phases`, proceeds to architecture regardless of markers
-- `--skip-specify` - Adds brainstorm, specify, clarify to skipped; requires existing spec.md
-- `--skip-plan-alignment` - Adds "plan-alignment" to `skipped_phases`; architecture advances directly to decompose
-- `--skip-plan-design-review` - Records `plan_design_review` as `not-required` (`skipped`); `skipped_phases` is unchanged because the review is a gate, not a phase
-
----
-
-## Error Recovery
-
-| Failure | Recovery |
-|---------|----------|
-| Brainstorm agent unclear | Re-spawn with more specific prompt |
-| Specify agent too technical | Re-spawn with "focus on WHAT not HOW" |
-| Clarify agent stuck | Ask user to resolve remaining markers |
-| Architecture agent off-spec | Re-spawn referencing spec requirements |
-| Plan-alignment agent fails to write report | Re-spawn plan-alignment-agent; check spec_dir is writable |
-| Plan-alignment gaps unresolvable | Use `--skip-plan-alignment` or manually amend plan before proceeding |
-| Implementation agent fails tests | Follow canonical status: append its exact attempt-2 context once, or escalate after attempt 2 |
-| Wave gate blocked | Fix issues, re-run `/wave-gate` |
-
----
-
-## Plan Limits
-
-- **Max tasks:** 8-12 (split if larger)
-- **Max waves:** 4-5
-- **Max parallel tasks per wave:** 4-6
-
----
-
-## CRITICAL: Agent Spawning
-
-Each phase spawns ONE agent (except Execute which spawns wave tasks in parallel).
-
-**Sequential phases:** brainstorm → specify → clarify → architecture → plan-alignment
-**Parallel within wave:** T1, T2, T3 in same message
-
-Pass context forward between phases via agent outputs.
+**Mandatory read: `{LOOM_DIR}/references/loom/recovery-runbook.md`.** Read it before you act on a `blocked` status the Phase 5 list does not cover, override a finding you believe is a false positive, run a helper this file did not name, repair a State File the engine reports as corrupt, or complete or abandon the orchestration.

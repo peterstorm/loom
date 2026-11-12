@@ -196,13 +196,18 @@ describe("archived issued contracts are not rewritten (FR-020/AS-012)", () => {
   it("the unchanged schema/rubric claim carries its exact before/after comparison", () => {
     // The route-aware instruction render added NO second schema and rewrote NO
     // protocol bytes: the digests still derive from the frozen bytes, and the
-    // fragment the stamper writes still carries exactly those sections.
+    // fragment the stamper writes still carries exactly those sections. The
+    // schema is shown minified there, so it is compared as a value.
     expect(sha256Hex(REVIEWER_PAYLOAD_SCHEMA_V2)).toBe(CURRENT_REVIEWER_PROTOCOL.schemaDigest);
     expect(sha256Hex(REVIEWER_IMPACT_RUBRIC_V1)).toBe(CURRENT_REVIEWER_PROTOCOL.rubricDigest);
     const fragment = renderReviewerWireContract();
-    expect(fragment).toContain(REVIEWER_PAYLOAD_SCHEMA_V2);
+    const schemaSection = /\n## reviewer-payload-schema\n\n.*\n\n```json\n(.*)\n```\n/.exec(fragment);
+    expect(JSON.parse(schemaSection?.[1] ?? "null")).toEqual(JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2));
     expect(fragment.endsWith(REVIEWER_IMPACT_RUBRIC_V1)).toBe(true);
-    expect([...fragment.matchAll(/reviewer-payload-schema/g)]).toHaveLength(2);
+    // One schema section: the output contract names it, its heading opens it,
+    // and its one sentence says it is the packet's section in compact form.
+    expect([...fragment.matchAll(/## reviewer-payload-schema\n/g)]).toHaveLength(1);
+    expect([...fragment.matchAll(/reviewer-payload-schema/g)]).toHaveLength(3);
     expect(REVIEWER_OUTPUT_CONTRACT).toBe(
       "Emit exactly one JSON object conforming to reviewer-payload-schema; apply reviewer-impact-rubric. No other final output.",
     );

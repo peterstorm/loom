@@ -2,7 +2,7 @@
  * The sandbox contract: limits, the command that runs a bounded check, and the
  * receipt that turns "I reproduced it locally" into a recorded fact.
  *
- * `scripts/security-sandbox.sh` is the only executor. This volume owns the
+ * `scripts/security-sandbox.sh` (`sandboxScriptPath`) is the only executor. This volume owns the
  * grammar around it — the limits an operator may set, the argv a hunter is told
  * to run, and the receipt parser. Nothing here executes anything, and nothing
  * here trusts a hunter-supplied limit: the receipt comes from the script's own
@@ -27,6 +27,7 @@
  * builtins. The nonce below therefore uses a local deterministic hash.
  */
 
+import { loomHelperCommand } from "./loom-cli-command";
 import { failure, success, type DomainResult } from "./orchestration-contract/identity";
 import { SECURITY_AUDIT_LIMITS, isSafeSourcePath, isVisibleText, isWireRecord } from "./security-audit-contract";
 import { quoteShellArgument } from "./shell-quoting";
@@ -292,7 +293,14 @@ export function parseSandboxReceipt(stdout: string, nonce: string): DomainResult
   return parseSandboxReceiptValue(parsed);
 }
 
+/** Where the one executor lives in the Loom package at `packageRoot`. A hunter
+ *  works in the audited repository, not in the package, so every printed run
+ *  names the script by this absolute path. */
+export const sandboxScriptPath = (packageRoot: string): string => `${packageRoot}/scripts/security-sandbox.sh`;
+
 export type SandboxRequest = Readonly<{
+  /** The executor: `sandboxScriptPath` of the executing package. */
+  script: string;
   target: string;
   scratch: string;
   command: readonly string[];
@@ -312,11 +320,9 @@ const liesWithin = (path: string, directory: string): boolean =>
 /** The script and every flag of one sandbox run, before `--` and the command:
  *  the one argv grammar `sandboxCommand` validates and `renderSandboxInstructions`
  *  prints, so the two cannot name different flags. */
-function sandboxInvocation(
-  run: Readonly<{ target: string; scratch: string; limits: SandboxLimits; nonce?: string }>,
-): readonly string[] {
+function sandboxInvocation(run: Omit<SandboxRequest, "command">): readonly string[] {
   return [
-    "scripts/security-sandbox.sh",
+    run.script,
     "--target", run.target,
     "--scratch", run.scratch,
     "--cpu", String(run.limits.cpuSeconds),
@@ -334,8 +340,8 @@ function sandboxInvocation(
 const BARE_SHELL_WORD = /^[A-Za-z0-9_@%+=:,./-]+$/;
 
 /** An argv as one shell line that reads back as exactly that argv: a word in
- *  the bare-safe set is printed as itself (so the script path and the hex nonce
- *  stay the literals the evidence extractor recognises), and every other word —
+ *  the bare-safe set is printed as itself (so a plain script path and the hex
+ *  nonce read as typed), and every other word —
  *  a path with a space or a metacharacter, an empty word — goes through
  *  `quoteShellArgument`. The one renderer of a printed sandbox command. */
 export const renderShellWords = (argv: readonly string[]): string =>
@@ -436,10 +442,12 @@ export function judgeLocalReceipt(text: string, artifact: string): DomainResult<
   return success(receipt.value);
 }
 
-/** Everything one sandbox run is bound to: the nonce derived from the artifact
- *  the receipt will be cited as, where the run reads and writes, and the file its
- *  stdout must land in. */
+/** Everything one sandbox run is bound to: the executor, the nonce derived from
+ *  the artifact the receipt will be cited as, where the run reads and writes,
+ *  and the file its stdout must land in. */
 export type SandboxBinding = Readonly<{
+  /** The executor: `sandboxScriptPath` of the executing package. */
+  script: string;
   nonce: string;
   /** The frozen target the run audits. */
   target: string;
@@ -452,6 +460,8 @@ export type SandboxBinding = Readonly<{
 }>;
 
 export type SandboxPlacement = Readonly<{
+  /** The Loom package whose sandbox script runs the check. */
+  packageRoot: string;
   /** The run's frozen target directory. */
   target: string;
   /** The run directory, absolute. */
@@ -486,6 +496,7 @@ export function bindSandboxRun(placement: SandboxPlacement): DomainResult<Sandbo
     });
   }
   return success({
+    script: sandboxScriptPath(placement.packageRoot),
     nonce: sandboxNonce(placement.artifact),
     target: placement.target,
     scratch,
@@ -493,6 +504,12 @@ export function bindSandboxRun(placement: SandboxPlacement): DomainResult<Sandbo
     artifactFile: `${runDir}/${placement.artifact}`,
   });
 }
+
+/** The line `assign` prints under each minted owner: how the parent obtains the
+ *  receipt binding for one of that owner's artifacts (a hunter cannot derive the
+ *  nonce itself). `<file>` is the one word left for the parent to fill in. */
+export const renderNonceCommand = (packageRoot: string, runDir: string, owner: string): string =>
+  `${loomHelperCommand(packageRoot)} security-audit nonce --out ${quoteShellArgument(runDir)} --artifact agents/${owner}/artifacts/<file>`;
 
 /** The block a hunter is handed verbatim: what it may run and how, bound to one
  *  artifact. The nonce is supplied by the engine because the receipt is bound to
@@ -503,7 +520,7 @@ export function bindSandboxRun(placement: SandboxPlacement): DomainResult<Sandbo
  *  exactly as printed and the receipt lands in the bound file. */
 export function renderSandboxInstructions(limits: SandboxLimits, binding: SandboxBinding): string {
   const artifactDirectory = binding.artifactFile.slice(0, binding.artifactFile.lastIndexOf("/"));
-  const invocation = sandboxInvocation({ target: binding.target, scratch: binding.scratch, limits, nonce: binding.nonce });
+  const invocation = sandboxInvocation({ ...binding, limits });
   return [
     "Bounded local execution (the only way to claim an observed result):",
     `  ${renderShellWords(["mkdir", "-p", artifactDirectory])}`,

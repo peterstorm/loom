@@ -289,9 +289,6 @@ export function materializePiResources(rawPackageRoot: string, rawCacheRoot: str
   }
 
   const promptPaths = Object.freeze([join(root, "commands")]);
-  const skillPaths = Object.freeze([
-    join(root, "skills"),
-    join(root, "commands", "vercel-react-best-practices"),
-  ]);
+  const skillPaths = Object.freeze([join(root, "skills")]);
   return Object.freeze({ root, promptPaths, skillPaths });
 }

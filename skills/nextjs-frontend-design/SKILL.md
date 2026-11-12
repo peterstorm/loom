@@ -1,18 +1,13 @@
 ---
 name: nextjs-frontend-design
-description: |
-  This skill should be used when the user asks to 'build a Next.js app', 'create a dashboard',
-  'design a landing page', 'build a SaaS frontend', 'create React components', 'style my app',
-  'design system', 'UI components', or needs distinctive frontend design. Covers App Router,
-  React Server Components, type-safe APIs, Server Actions, and modern styling. Avoids generic
-  'AI slop' aesthetics (Inter fonts, purple gradients, predictable layouts) - creates memorable,
-  intentional interfaces instead. Triggers on: Next.js projects, e-commerce sites, admin panels,
-  marketing pages, or any frontend needing both architectural excellence and visual distinction.
+description: "This skill should be used when the user asks to 'build a Next.js app', 'design a landing page', 'create a dashboard', 'style my app', 'build a design system', or needs a Next.js interface with a deliberate visual direction. Covers choosing and executing an aesthetic (type, colour, motion, layout) and current App Router conventions (Server Components, Server Actions, caching, async request APIs). NOT for React/Next.js performance tuning (use vercel-react-best-practices)."
 ---
 
-# Next.js Frontend Design Skill
+# Next.js Frontend Design
 
-Create distinctive, production-grade Next.js applications combining expert TypeScript architecture with exceptional visual design.
+Build Next.js interfaces that are architecturally sound and look designed for their context. This file sets the approach and routes to the references; load a reference when its row in the table applies.
+
+If not already in context this session, read `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md` and `${CLAUDE_PLUGIN_ROOT}/rules/typescript-patterns.md`.
 
 <frontend_aesthetics>
 You tend to converge toward generic, "on distribution" outputs. In frontend design, this creates what users call the "AI slop" aesthetic. Avoid this: make creative, distinctive frontends that surprise and delight.
@@ -34,174 +29,36 @@ Avoid generic AI-generated aesthetics:
 Interpret creatively and make unexpected choices that feel genuinely designed for the context. Vary between light and dark themes, different fonts, different aesthetics. You still tend to converge on common choices (Space Grotesk, for example) across generations. Avoid this: it is critical that you think outside the box!
 </frontend_aesthetics>
 
----
+## Before writing code
 
-## Design Philosophy
+Commit to a direction:
 
-Before writing ANY code, commit to a **BOLD aesthetic direction**:
+1. **Purpose.** What problem does the interface solve, and who uses it?
+2. **Tone.** Pick a direction and commit to it fully: brutally minimal, maximalist, editorial, industrial, organic, luxury, playful, retro-futuristic, terminal, or one taken from the product's own subject.
+3. **Differentiation.** Name the one thing someone will remember.
 
-1. **Purpose**: What problem does this interface solve? Who uses it?
-2. **Tone**: Pick an extreme and commit fully:
-   - Brutally minimal, maximalist chaos, retro-futuristic, organic/natural
-   - Luxury/refined, playful/toy-like, editorial/magazine, brutalist/raw
-   - Art deco/geometric, soft/pastel, industrial/utilitarian, terminal/code
-   - Japanese minimalism, cyberpunk neon, Miami Vice pastels
-3. **Differentiation**: What's the ONE thing someone will remember?
+Bold maximalism and refined minimalism both work. What matters is that the choice is intentional and carried through; half-measures are what look generic. Match the implementation to the vision: a maximalist design needs elaborate code, a minimal one needs precision in spacing and type.
 
-**CRITICAL**: Bold maximalism and refined minimalism both work—the key is intentionality, not intensity. Half-measures produce mediocrity.
+## Scope of the brief
 
-**For comprehensive design guidance, see:** `references/design-philosophy.md`
+The brief above is written for marketing pages, landing pages and brand moments. It does not apply unchanged everywhere:
 
----
+- **Dashboards, admin panels, data-heavy tools and forms** call for restraint. A system or neutral font, solid backgrounds and conventional layout are correct there; distinction comes from hierarchy, alignment, density and one disciplined accent. See "Product UI" in `references/design-philosophy.md`.
+- **An existing brand guide or design system** outranks the brief. Follow it.
+- **Accessibility is a constraint on every direction**: 4.5:1 contrast for body text, keyboard access, a reduced-motion path.
 
-## Typography Quick Reference
+## Vary the choices
 
-**NEVER use**: Inter, Roboto, Open Sans, Lato, Arial, system fonts
+This skill ships no font list and no palette on purpose. Any fixed list becomes the new default, and every project built with it converges. Choose type and colour from the product's subject, and if the result matches your previous project, choose again. `references/design-philosophy.md` gives the principles (contrast in pairing, extremes of weight and size, dominant colour plus accent, measured contrast) and shows the `next/font` and Tailwind v4 token setup.
 
-**DO use**:
-- Code aesthetic: JetBrains Mono, Fira Code, IBM Plex Mono
-- Editorial: Playfair Display, Crimson Pro, Newsreader, Fraunces
-- Technical: IBM Plex Sans, Source Sans 3, Source Serif 4
-- Distinctive: Bricolage Grotesque, Syne, Outfit, DM Serif Display
+## Load when
 
-**Pairing principle**: High contrast = interesting. Display + monospace, serif + geometric sans.
+| Doing this | Read |
+|---|---|
+| Choosing or executing the visual direction: type, colour, backgrounds, layout, component styling, product-UI restraint, the pre-ship review | `references/design-philosophy.md` |
+| Writing pages, layouts, Server Actions, forms, Route Handlers, caching or revalidation, `proxy.ts`, typed env, or anything touching `params` / `cookies()` / `headers()` | `references/nextjs-patterns.md` |
+| Checking keyboard, focus, ARIA or contrast | `references/nextjs-patterns.md` → "Accessibility" |
+| Adding motion: easing, staggered reveals, Motion for React, reduced motion | `references/animation-recipes.md` |
+| Performance work: waterfalls, bundle size, re-renders, client data fetching | the `vercel-react-best-practices` skill (its `SKILL.md` indexes 57 rule files; read only the rules that apply) |
 
-**Use extremes**: Weight 100/200 vs 800/900 (not 400 vs 600). Size jumps of 3x+ (not 1.5x).
-
-```tsx
-// app/layout.tsx - Font setup
-import { Bricolage_Grotesque, JetBrains_Mono } from 'next/font/google';
-
-const fontDisplay = Bricolage_Grotesque({
-  subsets: ['latin'],
-  variable: '--font-display',
-  weight: ['200', '400', '800'],
-});
-
-const fontMono = JetBrains_Mono({
-  subsets: ['latin'],
-  variable: '--font-mono',
-});
-```
-
----
-
-## Styling Quick Reference
-
-### CSS Variables Setup
-
-```css
-/* globals.css */
-:root {
-  /* Typography */
-  --font-display: 'Bricolage Grotesque', sans-serif;
-  --font-body: 'Source Sans 3', sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
-
-  /* Colors - Commit to an aesthetic */
-  --color-bg: #0a0a0a;
-  --color-surface: #141414;
-  --color-text: #e8e8e8;
-  --color-muted: #6b6b6b;
-  --color-accent: #ff3e00;
-  --color-border: #2a2a2a;
-
-  /* Animation easings - NEVER use default ease */
-  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
-  --ease-out-back: cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-```
-
-### Page Load Animation
-
-```css
-/* Staggered reveal - high impact */
-.animate-stagger > * {
-  opacity: 0;
-  transform: translateY(20px);
-  animation: fadeUp 0.6s var(--ease-out-expo) forwards;
-}
-
-.animate-stagger > *:nth-child(1) { animation-delay: 0ms; }
-.animate-stagger > *:nth-child(2) { animation-delay: 100ms; }
-.animate-stagger > *:nth-child(3) { animation-delay: 200ms; }
-.animate-stagger > *:nth-child(4) { animation-delay: 300ms; }
-
-@keyframes fadeUp {
-  to { opacity: 1; transform: translateY(0); }
-}
-```
-
-### Background Atmosphere
-
-```css
-/* Gradient mesh - creates depth */
-.hero-bg {
-  background:
-    radial-gradient(ellipse at 20% 50%, rgba(120, 119, 198, 0.3), transparent 50%),
-    radial-gradient(ellipse at 80% 50%, rgba(255, 62, 0, 0.2), transparent 50%),
-    linear-gradient(180deg, var(--color-bg) 0%, var(--color-surface) 100%);
-}
-
-/* Noise texture overlay */
-.textured::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: url('/noise.svg');
-  opacity: 0.03;
-  pointer-events: none;
-}
-```
-
----
-
-## Anti-Patterns Checklist
-
-Before shipping, verify you have NOT:
-
-**Typography:**
-- [ ] Used Inter, Roboto, Arial, or system fonts
-- [ ] Font weights only differ by 200 (e.g., 400 vs 600)
-- [ ] Size hierarchy less than 2x between levels
-
-**Color:**
-- [ ] Purple gradient on white background
-- [ ] Blue-purple-pink gradient (the AI classic)
-- [ ] Evenly distributed pastel palette
-
-**Layout:**
-- [ ] Perfectly centered everything
-- [ ] Equal padding everywhere
-- [ ] Standard Bootstrap-like grid with no variation
-- [ ] Cards in a perfect 3-column grid
-
-**Animation:**
-- [ ] Default `ease` timing function
-- [ ] No page load orchestration
-- [ ] Hover effects that just change color
-
-**Backgrounds:**
-- [ ] Solid white or #f5f5f5
-- [ ] No texture, depth, or atmosphere
-
----
-
-## Reference Files
-
-**Design & Aesthetics:**
-- `references/design-philosophy.md` — Complete aesthetics guide, theme recipes, spatial composition, anti-patterns
-
-**Technical Patterns:**
-- `references/nextjs-patterns.md` — App Router, Server Components, Server Actions, Caching, Streaming, Accessibility
-- `references/typescript-patterns.md` — Advanced TypeScript patterns, API types, hooks
-- `references/component-library.md` — Production component implementations
-- `references/animation-recipes.md` — Motion design patterns, scroll effects, Framer Motion
-
----
-
-## Final Reminder
-
-**IMPORTANT**: Match implementation complexity to the aesthetic vision. Maximalist designs need elaborate code with extensive animations and effects. Minimalist designs need restraint, precision, and careful attention to spacing, typography, and subtle details. Elegance comes from executing the vision well.
-
-**Remember**: Claude is capable of extraordinary creative work. Don't hold back—show what can truly be created when thinking outside the box and committing fully to a distinctive vision.
+`references/nextjs-patterns.md` is required reading before the first Server Action, cache call or request-API use in a session. Next.js 15 and 16 and React 19 changed those APIs, and what you remember is likely the older behaviour.

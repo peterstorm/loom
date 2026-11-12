@@ -1,473 +1,136 @@
 # XSS Prevention Reference (React/TypeScript)
 
-## Table of Contents
-1. [XSS Types](#xss-types)
-2. [React Built-in Protection](#react-protection)
-3. [Dangerous Patterns](#dangerous-patterns)
-4. [Sanitization Libraries](#sanitization)
-5. [URL and Attribute Handling](#url-handling)
-6. [Content Security Policy](#csp)
-7. [Testing for XSS](#testing)
+## The Attack
 
-## XSS Types {#xss-types}
+Attacker-controlled data is interpreted as markup or script in a victim's browser.
 
-### Reflected XSS
-Malicious script in URL/request reflected back in response.
-
-### Stored XSS
-Malicious script saved in database, executed when other users view content.
-
-### DOM-Based XSS
-Client-side JavaScript processes untrusted data, modifies DOM unsafely.
+- **Stored**: the payload is saved and rendered to other users.
+- **Reflected**: the payload comes from the request (URL, form) and is echoed in the response.
+- **DOM-based**: client-side code moves untrusted data into a dangerous sink.
 
 ```typescript
-// Vulnerable: URL hash directly inserted into DOM
-document.getElementById('content').innerHTML = location.hash.slice(1);
+// VULNERABLE: DOM sink fed from the URL
+document.getElementById('content')!.innerHTML = location.hash.slice(1);
 ```
 
-## React Built-in Protection {#react-protection}
+## What React Does and Does Not Do
 
-### JSX Auto-Escaping
-React automatically escapes values embedded in JSX:
+React escapes strings rendered as children and as ordinary attribute values, so markup in data is displayed as text.
 
 ```tsx
-// SAFE: React escapes the content automatically
-function UserGreeting({ name }: { name: string }) {
-  return <div>Hello, {name}!</div>;
-}
-
-// SAFE: Dynamic attributes are also escaped
-function UserLink({ url, label }: { url: string; label: string }) {
-  return <a href={url}>{label}</a>;
-}
-
-// SAFE: Array rendering
-function CommentList({ comments }: { comments: string[] }) {
-  return (
-    <ul>
-      {comments.map((comment, i) => (
-        <li key={i}>{comment}</li>
-      ))}
-    </ul>
-  );
-}
+// SAFE: text content and plain attributes are escaped
+<div title={user.bio}>Hello, {user.name}</div>
+<ul>{comments.map((c) => <li key={c.id}>{c.text}</li>)}</ul>
 ```
 
-### What React Escapes
-- Text content between tags: `<div>{userInput}</div>`
-- Attribute values: `<div title={userInput}>`
-- Children passed to components
+Escaping is not enough for these sinks:
 
-### What React Does NOT Escape
-- `href` with `javascript:` protocol
-- Event handlers (if you somehow pass user strings)
-- Anything using the unsafe HTML API
+| Sink | Why | What to do |
+|------|-----|------------|
+| `dangerouslySetInnerHTML` | Raw HTML, no escaping | Sanitise first (below) |
+| `href`, `src`, `action`, `formAction` | The value is a URL; escaping does not stop `javascript:` or `data:` | Parse and allowlist the scheme (below) |
+| `ref.current.innerHTML = ...`, `document.write`, `insertAdjacentHTML` | Bypass React | Render through JSX instead |
+| `eval`, `new Function`, string arguments to `setTimeout`/`setInterval` | Code execution | Never with data |
+| `<script>` built from data, JSON inlined into a script block | `</script>` in the data closes the block | Use the framework's data passing; escape `<` as `<` if you must inline |
+| `style` from data, CSS injected as text | Data exfiltration, UI redress | Fixed class names; never user CSS |
 
-## Dangerous Patterns {#dangerous-patterns}
+## URLs
 
-### Setting innerHTML Unsafely
+React 19 refuses to render `javascript:` URLs in `href` and `src`; earlier versions only warn. Validate anyway: the check also covers older React, `data:` URLs and sinks React does not see (`window.location = url`, `window.open(url)`).
 
-When you MUST render HTML (e.g., CMS content), always sanitize first:
+```typescript
+const ALLOWED_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
 
-```tsx
-import DOMPurify from 'dompurify';
-
-// SAFE: Sanitized before rendering
-function RichContent({ html }: { html: string }) {
-  const sanitized = DOMPurify.sanitize(html);
-  return <div dangerouslySetInnerHTML={{ __html: sanitized }} />;
-}
-```
-
-**NEVER** use dangerouslySetInnerHTML with unsanitized user content.
-
-### Direct DOM Manipulation
-
-```tsx
-// VULNERABLE: Using refs to set innerHTML directly
-// SAFE alternative: Use React's normal rendering
-function GoodComponent({ content }: { content: string }) {
-  return <div>{content}</div>;  // Auto-escaped
-}
-```
-
-### Code Execution APIs
-
-**NEVER** use these with user input:
-- `eval()`
-- `Function()` constructor
-- `setTimeout/setInterval` with string arguments
-
-```tsx
-// SAFE: Use a proper expression parser for math
-import { evaluate } from 'mathjs';
-
-function SafeCalculator({ expression }: { expression: string }) {
+/** Parse, do not validate: returns the normalised URL or null. */
+export function parseSafeUrl(input: string, base: string): string | null {
+  let url: URL;
   try {
-    const result = evaluate(expression);
-    return <div>{result}</div>;
+    url = new URL(input, base);          // the URL parser strips the whitespace and control characters used to hide "javascript:"
   } catch {
-    return <div>Invalid expression</div>;
-  }
-}
-```
-
-### Dynamic Script/Style Injection
-
-**NEVER** create script elements with user-provided content.
-**NEVER** inject user CSS without strict sanitization.
-
-## Sanitization Libraries {#sanitization}
-
-### DOMPurify
-The gold standard for HTML sanitization:
-
-```tsx
-import DOMPurify from 'dompurify';
-
-// Basic sanitization
-const clean = DOMPurify.sanitize(dirty);
-
-// Configure allowed tags/attributes
-const clean = DOMPurify.sanitize(dirty, {
-  ALLOWED_TAGS: ['b', 'i', 'em', 'strong', 'a', 'p', 'br'],
-  ALLOWED_ATTR: ['href', 'title'],
-});
-
-// Strip all HTML, keep text only
-const textOnly = DOMPurify.sanitize(dirty, { ALLOWED_TAGS: [] });
-```
-
-### Rich Text Editor Pattern
-```tsx
-import DOMPurify from 'dompurify';
-
-interface RichTextProps {
-  content: string;
-  allowImages?: boolean;
-}
-
-function RichText({ content, allowImages = false }: RichTextProps) {
-  const config = {
-    ALLOWED_TAGS: [
-      'p', 'br', 'b', 'i', 'em', 'strong', 'a', 'ul', 'ol', 'li',
-      'blockquote', 'code', 'pre', 'h1', 'h2', 'h3',
-      ...(allowImages ? ['img'] : []),
-    ],
-    ALLOWED_ATTR: ['href', 'title', 'alt', 'src'],
-    ALLOW_DATA_ATTR: false,
-  };
-
-  const sanitized = DOMPurify.sanitize(content, config);
-
-  return (
-    <div
-      className="rich-text"
-      dangerouslySetInnerHTML={{ __html: sanitized }}
-    />
-  );
-}
-```
-
-### Markdown Rendering
-```tsx
-import { marked } from 'marked';
-import DOMPurify from 'dompurify';
-
-function MarkdownContent({ markdown }: { markdown: string }) {
-  const rawHtml = marked(markdown);
-  const cleanHtml = DOMPurify.sanitize(rawHtml);
-
-  return <div dangerouslySetInnerHTML={{ __html: cleanHtml }} />;
-}
-```
-
-## URL and Attribute Handling {#url-handling}
-
-### javascript: Protocol Attacks
-
-React does NOT block javascript: URLs automatically. Always validate:
-
-```tsx
-function sanitizeUrl(url: string): string {
-  try {
-    const parsed = new URL(url, window.location.origin);
-    if (!['http:', 'https:', 'mailto:'].includes(parsed.protocol)) {
-      return '#';
-    }
-    return url;
-  } catch {
-    if (url.startsWith('/') && !url.startsWith('//')) {
-      return url;
-    }
-    return '#';
-  }
-}
-
-// SAFE: Validate URL protocol
-function SafeLink({ url, label }: { url: string; label: string }) {
-  const safeUrl = sanitizeUrl(url);
-  return <a href={safeUrl}>{label}</a>;
-}
-```
-
-### Comprehensive URL Validation
-```tsx
-const ALLOWED_PROTOCOLS = ['http:', 'https:', 'mailto:', 'tel:'];
-
-function validateUrl(input: string): string | null {
-  if (!input?.trim()) return null;
-
-  // Block data: URLs (can contain scripts)
-  if (input.toLowerCase().startsWith('data:')) return null;
-
-  // Block javascript: (case-insensitive, with possible whitespace)
-  if (/^\s*javascript:/i.test(input)) return null;
-
-  try {
-    const url = new URL(input, window.location.origin);
-    if (!ALLOWED_PROTOCOLS.includes(url.protocol)) {
-      return null;
-    }
-    return input;
-  } catch {
-    if (input.startsWith('/') && !input.startsWith('//')) {
-      return input;
-    }
     return null;
   }
+  return ALLOWED_PROTOCOLS.has(url.protocol) ? url.href : null;
 }
+```
 
+```tsx
 function UserLink({ href, children }: { href: string; children: React.ReactNode }) {
-  const safeHref = validateUrl(href) ?? '#';
-  return <a href={safeHref}>{children}</a>;
+  const safe = parseSafeUrl(href, 'https://app.example.com');
+  return safe ? <a href={safe} rel="noopener noreferrer">{children}</a> : <span>{children}</span>;
 }
 ```
 
-### Image Sources
+Render the returned value, not the original string, so what was checked is what is used. For images and iframes additionally allowlist the host. Sending the user to an arbitrary external URL after login is an open redirect, a separate check: compare the origin with your own.
+
+## Rendering HTML
+
+When HTML from users or a CMS must be rendered, sanitise it with an allowlist.
+
+DOMPurify needs a DOM. In the browser it uses the page's; on the server (Node, React Server Components, and the server render of Client Components) plain `dompurify` has none. Use `isomorphic-dompurify`, or `dompurify` with a current `jsdom` window, or sanitise once on the server when the content is saved.
+
 ```tsx
-function validateImageUrl(url: string): string | null {
-  try {
-    const parsed = new URL(url, window.location.origin);
-    if (parsed.protocol !== 'https:' && parsed.origin !== window.location.origin) {
-      return null;
-    }
-    const allowedDomains = ['cdn.example.com', 'images.example.com'];
-    if (parsed.origin !== window.location.origin &&
-        !allowedDomains.includes(parsed.hostname)) {
-      return null;
-    }
-    return url;
-  } catch {
-    return null;
-  }
-}
+import DOMPurify from 'isomorphic-dompurify';
 
-function UserAvatar({ src, alt }: { src: string; alt: string }) {
-  const safeSrc = validateImageUrl(src) ?? '/default-avatar.png';
-  return <img src={safeSrc} alt={alt} />;
-}
-```
-
-## Content Security Policy {#csp}
-
-### Why CSP?
-Defense-in-depth layer. Even if XSS bypasses other protections, CSP can prevent script execution.
-
-### Next.js CSP Configuration
-```tsx
-// next.config.js
-const cspHeader = `
-  default-src 'self';
-  script-src 'self' 'nonce-{nonce}';
-  style-src 'self' 'unsafe-inline';
-  img-src 'self' https://cdn.example.com data:;
-  font-src 'self';
-  connect-src 'self' https://api.example.com;
-  frame-ancestors 'none';
-  base-uri 'self';
-  form-action 'self';
-`;
-
-module.exports = {
-  async headers() {
-    return [
-      {
-        source: '/(.*)',
-        headers: [
-          {
-            key: 'Content-Security-Policy',
-            value: cspHeader.replace(/\n/g, ''),
-          },
-        ],
-      },
-    ];
-  },
+const CONFIG = {
+  ALLOWED_TAGS: ['p', 'br', 'b', 'i', 'em', 'strong', 'a', 'ul', 'ol', 'li', 'blockquote', 'code', 'pre'],
+  ALLOWED_ATTR: ['href', 'title'],
+  ALLOW_DATA_ATTR: false,
 };
-```
 
-### Nonce-Based CSP (Next.js 13+)
-```tsx
-// middleware.ts
-import { NextResponse } from 'next/server';
-import type { NextRequest } from 'next/server';
-
-export function middleware(request: NextRequest) {
-  const nonce = Buffer.from(crypto.randomUUID()).toString('base64');
-  const csp = `
-    default-src 'self';
-    script-src 'self' 'nonce-${nonce}' 'strict-dynamic';
-    style-src 'self' 'nonce-${nonce}';
-    img-src 'self' data: https:;
-    font-src 'self';
-    connect-src 'self';
-    frame-ancestors 'none';
-  `.replace(/\n/g, '');
-
-  const response = NextResponse.next();
-  response.headers.set('Content-Security-Policy', csp);
-  response.headers.set('x-nonce', nonce);
-  return response;
-}
-
-// app/layout.tsx
-import { headers } from 'next/headers';
-import Script from 'next/script';
-
-export default function RootLayout({ children }: { children: React.ReactNode }) {
-  const nonce = headers().get('x-nonce') ?? '';
-
-  return (
-    <html>
-      <head>
-        <Script nonce={nonce} src="/analytics.js" />
-      </head>
-      <body>{children}</body>
-    </html>
-  );
+export function RichText({ html }: { html: string }) {
+  const clean = DOMPurify.sanitize(html, CONFIG);
+  return <div dangerouslySetInnerHTML={{ __html: clean }} />;
 }
 ```
 
-### CSP Directives Reference
-| Directive | Purpose |
-|-----------|---------|
-| `default-src` | Fallback for other directives |
-| `script-src` | JavaScript sources |
-| `style-src` | CSS sources |
-| `img-src` | Image sources |
-| `connect-src` | XHR, fetch, WebSocket |
-| `frame-ancestors` | Who can embed this page |
-| `form-action` | Form submission targets |
-| `base-uri` | Restrict `<base>` tag |
+- **Markdown**: the renderer's output is HTML and goes through the same sanitiser: `DOMPurify.sanitize(await marked.parse(markdown), CONFIG)`. Or render Markdown to React elements (`react-markdown`) without raw HTML enabled.
+- Sanitise as the last step before the sink. Sanitising and then transforming the string (templating, concatenation, another parser) can reintroduce markup.
+- Keep the sanitiser updated; bypasses are found and fixed regularly.
 
-### Report-Only Mode for Testing
-```typescript
-headers: [
-  {
-    key: 'Content-Security-Policy-Report-Only',
-    value: cspHeader,
-  },
-  {
-    key: 'Report-To',
-    value: '{"group":"csp","endpoints":[{"url":"/api/csp-report"}]}',
-  },
-]
-```
+## Content Security Policy
 
-## Testing for XSS {#testing}
+A CSP limits the damage when an injection gets through: with a nonce-based `script-src`, injected inline script does not run. `security-headers.md` owns the policy, the Next.js nonce setup and reporting.
 
-### Manual Test Payloads
-```
-<script>alert('xss')</script>
-<img src=x onerror=alert('xss')>
-<svg onload=alert('xss')>
-javascript:alert('xss')
-<a href="javascript:alert('xss')">click</a>
-<div onmouseover="alert('xss')">hover</div>
-```
+## Server-Rendered Views (Thymeleaf)
 
-### Unit Tests
+Thymeleaf escapes `th:text` and attribute values; `th:utext` is the raw sink and needs sanitised input (OWASP Java HTML Sanitizer or jsoup `Safelist`). JavaScript inlining (`th:inline="javascript"`) escapes for a script context; string concatenation into a script block does not.
+
+## Testing
+
 ```tsx
 import { render, screen } from '@testing-library/react';
-import { RichText, sanitizeUrl } from './security';
+import { RichText } from './RichText';
+import { parseSafeUrl } from './url';
 
-describe('XSS Prevention', () => {
-  it('should escape script tags in JSX', () => {
-    render(<div data-testid="content">{'<script>alert("xss")</script>'}</div>);
-    const content = screen.getByTestId('content');
-    expect(content.innerHTML).not.toContain('<script>');
-    expect(content.textContent).toContain('<script>');
+const BASE = 'https://app.example.com';
+
+it('drops event handlers and scripts from rich text', () => {
+  render(<RichText html={'<img src=x onerror=alert(1)><script>alert(1)</script><p>Safe</p>'} />);
+  const html = screen.getByText('Safe').parentElement!.innerHTML;
+  expect(html).not.toContain('onerror');
+  expect(html).not.toContain('<script');
+});
+
+it.each(['javascript:alert(1)', 'JAVASCRIPT:alert(1)', ' java\nscript:alert(1)', 'data:text/html,<script>alert(1)</script>'])(
+  'rejects %s', (input) => {
+    expect(parseSafeUrl(input, BASE)).toBeNull();
   });
 
-  it('should sanitize HTML content', () => {
-    const dirty = '<img src=x onerror=alert("xss")><p>Safe content</p>';
-    render(<RichText content={dirty} />);
-    const content = screen.getByText('Safe content');
-    expect(content.parentElement?.innerHTML).not.toContain('onerror');
-  });
-
-  it('should block javascript: URLs', () => {
-    expect(sanitizeUrl('javascript:alert(1)')).toBe('#');
-    expect(sanitizeUrl('JAVASCRIPT:alert(1)')).toBe('#');
-  });
-
-  it('should allow safe URLs', () => {
-    expect(sanitizeUrl('https://example.com')).toBe('https://example.com');
-    expect(sanitizeUrl('/relative/path')).toBe('/relative/path');
-  });
+it('accepts http(s) and resolves relative paths', () => {
+  expect(parseSafeUrl('https://example.com/a', BASE)).toBe('https://example.com/a');
+  expect(parseSafeUrl('/settings', BASE)).toBe('https://app.example.com/settings');
 });
 ```
 
-### Integration Tests
-```tsx
-import { test, expect } from '@playwright/test';
-
-test('XSS payload in search should be escaped', async ({ page }) => {
-  await page.goto('/search?q=<script>alert(1)</script>');
-
-  const dialogPromise = page.waitForEvent('dialog', { timeout: 1000 });
-  await expect(dialogPromise).rejects.toThrow();
-
-  await expect(page.locator('.search-query')).toContainText('<script>');
-});
-```
-
-### Automated Scanning
-```bash
-# Run OWASP ZAP against local dev server
-docker run -t owasp/zap2docker-stable zap-baseline.py \
-  -t http://host.docker.internal:3000
-
-# Use semgrep for static analysis
-npx @semgrep/semgrep --config=p/react
-```
+For end-to-end coverage, submit payloads through the UI in Playwright and assert no `dialog` event fires; run a DAST scan (OWASP ZAP baseline) against a deployed test environment.
 
 ## Quick Reference
 
-### Always Safe
-- Normal JSX: `<div>{userInput}</div>`
-- React state rendering
-- Props passed to components
-
-### Requires Sanitization
-- Rendering user-provided HTML
-- Markdown content
-- Rich text from CMS
-
-### Always Validate
-- User-controlled `href` attributes
-- Image/iframe `src` attributes
-- Any URL from user input
-
-### Never Do
-- Code execution APIs with user input
-- innerHTML without sanitization
-- `javascript:` URLs
-- Creating scripts from user content
-
-### Defense Layers
-1. **Primary**: React's auto-escaping
-2. **Sanitization**: DOMPurify for HTML content
-3. **URL validation**: Block dangerous protocols
-4. **CSP**: Prevent inline script execution
-5. **Testing**: Automated XSS payload testing
+| Do | Don't |
+|----|-------|
+| Render data through JSX | `innerHTML`, `document.write`, refs that set HTML |
+| Sanitise HTML with an allowlist right before `dangerouslySetInnerHTML` | Render CMS or user HTML raw |
+| Parse URLs and allowlist `http:`, `https:`, `mailto:` | Put user strings in `href`/`src` unchecked |
+| A sanitiser that has a DOM on the server | Plain `dompurify` in server code |
+| Nonce-based CSP as a second layer | Rely on CSP instead of fixing the sink |
+| Never `eval` data | Build script or CSS from data |

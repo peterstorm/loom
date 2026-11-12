@@ -1,28 +1,15 @@
 # JWT Security Reference
 
-## Table of Contents
-1. [JWT Structure](#jwt-structure)
-2. [Common Vulnerabilities](#common-vulnerabilities)
-3. [Secure Implementation](#secure-implementation)
-4. [Token Storage](#token-storage)
-5. [Refresh Token Patterns](#refresh-token-patterns)
-
 ## JWT Structure
 
 ```
 header.payload.signature
 ```
 
-### Header
 ```json
-{
-  "alg": "RS256",
-  "typ": "JWT",
-  "kid": "key-identifier"
-}
+{ "alg": "RS256", "typ": "at+jwt", "kid": "key-identifier" }
 ```
 
-### Payload (Claims)
 ```json
 {
   "iss": "https://auth.example.com",
@@ -45,173 +32,118 @@ header.payload.signature
 | `aud` | Contains your service | Cross-service token abuse |
 | `nbf` | Current time >= nbf | Premature token use |
 
+Also check what kind of token it is. An ID token is for the client that logged the user in; it is not an access token and an API must not accept it. Require an access token for your audience, and where the issuer sets the header, require `typ: at+jwt` (RFC 9068).
+
 ## Common Vulnerabilities
 
-### 1. Algorithm Confusion Attack
-**Attack**: Change `alg` header from RS256 to HS256, sign with public key
-**Prevention**: Explicitly specify allowed algorithms, never trust header
+| Attack | How | Prevention |
+|--------|-----|------------|
+| Algorithm confusion | `alg` changed from RS256 to HS256; token signed with the public key as HMAC secret | Configure the accepted algorithms; the token header never chooses |
+| `alg: none` | Signature removed | Same allowlist; never a "decode without verifying" call on a path that authorizes |
+| Key injection | Token carries its own key (`jwk`, `x5c`) or points to one (`jku`, `x5u`); or `kid` is used unsanitised in a file path or SQL lookup | Take keys only from the JWKS URI fixed in configuration; treat `kid` as a lookup key into that set |
+| Weak HMAC secret | Offline brute force of HS256 | Asymmetric keys (RS256, ES256); for HMAC, 256 random bits |
+| Cross-service reuse | A token issued for service A replayed to service B | Validate `aud` |
+| Token type confusion | ID token or refresh token sent as access token | Check `typ` / token use, audience |
+| Token theft | XSS, logs, a leaked bearer token | Short lifetime; sender-constrained tokens (DPoP, RFC 9449, or mTLS, RFC 8705); keep tokens out of logs and URLs |
+
+Do not pin key IDs: the issuer rotates keys by publishing a new `kid` in the JWKS, and a pinned list breaks on rotation.
+
+## Validation (Spring Security)
+
+Validation belongs in the decoder, so no request reaches a controller with an unvalidated token. Do not re-check claims by hand afterwards.
+
 ```java
-// Spring Boot - explicit algorithm
 @Bean
-public JwtDecoder jwtDecoder() {
+JwtDecoder jwtDecoder() {
     NimbusJwtDecoder decoder = NimbusJwtDecoder
-        .withPublicKey(rsaPublicKey)
+        .withJwkSetUri("https://auth.example.com/realms/app/protocol/openid-connect/certs")   // fixed in config
+        .jwsAlgorithm(SignatureAlgorithm.RS256)                // accepted algorithms
         .build();
-    decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(
-        new JwtTimestampValidator(),
-        new JwtIssuerValidator("https://auth.example.com")
-    ));
+
+    decoder.setJwtValidator(JwtValidators.createDefaultWithValidators(   // defaults: exp and nbf, 60 s clock skew
+        new JwtIssuerValidator("https://auth.example.com/realms/app"),
+        new JwtClaimValidator<List<String>>(JwtClaimNames.AUD,
+            aud -> aud != null && aud.contains("my-api"))));
     return decoder;
 }
 ```
 
-### 2. None Algorithm Attack
-**Attack**: Set `alg` to "none", remove signature
-**Prevention**: Reject tokens with alg=none, use allowlist of algorithms
+- `createDefaultWithValidators` exists from Spring Security 6.3. Earlier: `new DelegatingOAuth2TokenValidator<>(JwtValidators.createDefaultWithIssuer(issuer), audienceValidator)`. `createDefaultWithIssuer` already validates timestamps; adding a second `JwtTimestampValidator` is redundant.
+- With Spring Boot the same result needs no bean: set `spring.security.oauth2.resourceserver.jwt.issuer-uri`, `audiences` and, if not RS256, `jws-algorithms`.
+- To require RFC 9068 access tokens (Spring Security 6.5+): build the decoder with `.validateTypes(false)` and set `JwtValidators.createAtJwtValidator().issuer(...).audience(...).clientId(...).build()`.
+- Revocation before expiry needs server state: a denylist of `jti` values checked in a validator, or opaque tokens with introspection.
 
-### 3. Key Confusion (JWKS)
-**Attack**: Inject malicious key into JWKS endpoint
-**Prevention**: Pin expected key IDs, validate JWKS URL, use HTTPS only
+## Token Storage in Browsers
 
-### 4. Weak Secret Keys
-**Attack**: Brute force HS256 with weak secrets
-**Prevention**: Minimum 256-bit entropy for HS256, prefer RS256/ES256
+| Storage | Exposed to XSS | Sent automatically (CSRF) | Verdict |
+|---------|----------------|---------------------------|---------|
+| `localStorage` / `sessionStorage` | Yes, readable by any script | No | Avoid |
+| JS memory | Yes, while the page lives | No | Acceptable for short-lived tokens; lost on reload |
+| `HttpOnly` cookie | Not readable (still usable by injected script) | Yes | Only together with CSRF protection |
+| Server-side session (BFF) | No token in the browser | Session cookie: yes | Preferred for SPAs |
 
-### 5. Missing Signature Validation
-**Attack**: Modify payload, keep original signature
-**Prevention**: Always verify signature before trusting claims
+**Backend for frontend (BFF).** The backend is a confidential OAuth client, keeps access and refresh tokens server-side, and gives the browser only a session cookie. See `oauth-oidc.md`.
 
-### 6. Token Sidejacking
-**Attack**: Steal token via XSS, MITM, or logs
-**Prevention**: 
-- Bind token to TLS session (token binding)
-- Use short expiry + refresh rotation
-- Store in httpOnly cookies (not localStorage)
+**A token in a cookie is a cookie credential.** The browser attaches it to cross-site requests, so the API needs CSRF protection. `csrf.disable()` is correct only when no credential is ever sent by cookie (see `csrf-prevention.md` and `spring-security.md`).
 
-## Secure Implementation
-
-### Token Generation
 ```java
-public String generateToken(User user) {
-    Instant now = Instant.now();
-    JwtClaimsSet claims = JwtClaimsSet.builder()
-        .issuer("https://auth.example.com")
-        .subject(user.getId())
-        .audience(List.of("api.example.com"))
-        .issuedAt(now)
-        .expiresAt(now.plus(15, ChronoUnit.MINUTES))
-        .notBefore(now)
-        .claim("jti", UUID.randomUUID().toString())
-        .claim("roles", user.getRoles())
-        .build();
-    
-    return jwtEncoder.encode(JwtEncoderParameters.from(claims)).getTokenValue();
-}
-```
-
-### Token Validation Checklist
-```java
-public void validateToken(Jwt jwt) {
-    // 1. Signature verified by JwtDecoder
-    
-    // 2. Check expiration
-    if (jwt.getExpiresAt().isBefore(Instant.now())) {
-        throw new JwtValidationException("Token expired");
-    }
-    
-    // 3. Check issuer
-    if (!"https://auth.example.com".equals(jwt.getIssuer().toString())) {
-        throw new JwtValidationException("Invalid issuer");
-    }
-    
-    // 4. Check audience
-    if (!jwt.getAudience().contains("api.example.com")) {
-        throw new JwtValidationException("Invalid audience");
-    }
-    
-    // 5. Check not-before
-    if (jwt.getNotBefore() != null && jwt.getNotBefore().isAfter(Instant.now())) {
-        throw new JwtValidationException("Token not yet valid");
-    }
-    
-    // 6. Optional: Check token not revoked
-    if (tokenBlacklist.contains(jwt.getId())) {
-        throw new JwtValidationException("Token revoked");
-    }
-}
-```
-
-## Token Storage
-
-### Browser Storage Comparison
-| Storage | XSS Risk | CSRF Risk | Recommendation |
-|---------|----------|-----------|----------------|
-| localStorage | HIGH | None | ❌ Avoid |
-| sessionStorage | HIGH | None | ❌ Avoid |
-| httpOnly Cookie | Protected | Requires mitigation | ✅ Preferred |
-| Memory (JS variable) | Moderate | None | ⚠️ Lost on refresh |
-
-### Secure Cookie Configuration
-```java
-ResponseCookie cookie = ResponseCookie.from("access_token", token)
-    .httpOnly(true)          // Prevent JS access
-    .secure(true)            // HTTPS only
-    .sameSite("Strict")      // CSRF protection
-    .path("/api")            // Limit scope
+ResponseCookie cookie = ResponseCookie.from("__Host-access", token)
+    .httpOnly(true)
+    .secure(true)
+    .sameSite("Strict")
+    .path("/")                           // required by the __Host- prefix; no Domain attribute
     .maxAge(Duration.ofMinutes(15))
     .build();
 ```
 
-## Refresh Token Patterns
+## Refresh Tokens
 
-### Rotation Pattern (Recommended)
-1. Access token: 15 min expiry, stateless
-2. Refresh token: 7 days expiry, stored server-side
-3. On refresh: Invalidate old refresh token, issue new pair
-4. Detect reuse: If old refresh token used, revoke family
+### Rotation with family revocation
+1. Access token: short-lived (about 15 minutes), stateless.
+2. Refresh token: opaque random value, stored server-side as a hash, belongs to a family created at login.
+3. Each refresh consumes the presented token and issues a new pair in the same family.
+4. A consumed token presented again means the token leaked: revoke the whole family.
+
+Consuming the token must be one atomic statement. Read-then-write lets two concurrent requests both see "unused" and both receive a new pair.
 
 ```java
-public TokenPair refreshTokens(String refreshToken) {
-    RefreshTokenEntity stored = refreshTokenRepo.findByToken(refreshToken)
-        .orElseThrow(() -> new InvalidTokenException("Unknown refresh token"));
-    
-    // Detect token reuse (replay attack)
-    if (stored.isUsed()) {
-        refreshTokenRepo.revokeFamily(stored.getFamilyId());
-        throw new SecurityException("Refresh token reuse detected");
+public sealed interface RefreshResult {
+    record Rotated(TokenPair tokens) implements RefreshResult {}
+    record Rejected(String reason) implements RefreshResult {}
+}
+
+@Transactional
+public RefreshResult refresh(String presentedToken) {
+    String hash = sha256Hex(presentedToken);                   // the plaintext token is never stored
+    Optional<RefreshToken> found = refreshTokens.findByTokenHash(hash);
+    if (found.isEmpty()) return new RefreshResult.Rejected("unknown");
+    RefreshToken row = found.get();
+
+    // UPDATE refresh_token SET used_at = :now WHERE token_hash = :hash AND used_at IS NULL
+    boolean claimed = refreshTokens.markUsed(hash, clock.instant()) == 1;
+    if (!claimed) {
+        refreshTokens.revokeFamily(row.familyId());            // reuse detected
+        return new RefreshResult.Rejected("reuse");
     }
-    
-    // Mark as used
-    stored.setUsed(true);
-    refreshTokenRepo.save(stored);
-    
-    // Issue new token pair
-    String newAccessToken = generateAccessToken(stored.getUser());
-    String newRefreshToken = generateRefreshToken(stored.getUser(), stored.getFamilyId());
-    
-    return new TokenPair(newAccessToken, newRefreshToken);
+    if (row.revoked() || row.expiresAt().isBefore(clock.instant())) {
+        return new RefreshResult.Rejected("expired");
+    }
+    return new RefreshResult.Rotated(issuePair(row.userId(), row.familyId()));
 }
 ```
 
-### Token Binding
-Bind tokens to client fingerprint to prevent theft:
-```java
-String fingerprint = generateSecureRandom();
-String fingerprintHash = sha256(fingerprint);
+The result is a value, not an exception: throwing from the reuse branch would roll back the family revocation. The row count of the `UPDATE` is the only test of "unused"; exactly one concurrent caller gets `1`. A client that retries a refresh after a lost response trips reuse detection and has to log in again, which is the intended trade-off. `idempotency.md` covers the general pattern.
 
-// Include hash in JWT
-claims.claim("fpt", fingerprintHash);
+### Sender-constrained tokens
+Rotation detects theft after the fact. Binding prevents use of a stolen token: DPoP (RFC 9449) ties the token to a key held by the client, and mutual-TLS-bound tokens (RFC 8705) tie it to the client certificate. RFC 9700 requires refresh tokens of public clients to be sender-constrained or rotated.
 
-// Send fingerprint in separate httpOnly cookie
-ResponseCookie fpCookie = ResponseCookie.from("__Secure-Fgp", fingerprint)
-    .httpOnly(true)
-    .secure(true)
-    .sameSite("Strict")
-    .build();
+## Quick Reference
 
-// On validation, verify fingerprint matches
-String providedFingerprint = request.getCookie("__Secure-Fgp");
-if (!sha256(providedFingerprint).equals(jwt.getClaim("fpt"))) {
-    throw new SecurityException("Token binding mismatch");
-}
-```
+| Do | Don't |
+|----|-------|
+| Validate signature, `iss`, `aud`, `exp`, `nbf` in the decoder | Decode and trust claims |
+| Fix the algorithm list and the JWKS URI in configuration | Follow `alg`, `jku`, `jwk`, `x5u` from the token |
+| Accept only access tokens for your audience | Accept ID tokens at an API |
+| Short access tokens, rotated or bound refresh tokens | Long-lived bearer tokens |
+| BFF or CSRF-protected cookie for browsers | Tokens in `localStorage`; cookie tokens with CSRF off |
+| Atomic single-use refresh, stored hashed | Check-then-set, plaintext lookup |

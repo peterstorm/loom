@@ -75,7 +75,10 @@ describe('useCounter', () => {
 
 ## Testing with Providers
 
+One helper per project (`test/utils.tsx`), used wherever a component needs context:
+
 ```typescript
+import { render, type RenderOptions } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 function createTestQueryClient() {

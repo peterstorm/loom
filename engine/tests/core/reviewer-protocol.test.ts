@@ -4,7 +4,7 @@ import { z } from "zod/v4";
 import { parseReviewerPayloadV2, renderReviewerPayloadDiagnostic, renderReviewerWireContract } from "../../src/core/reviewer-protocol";
 import {
   CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_LIMITS,
-  REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, reviewerPayloadV2Schema,
+  REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, reviewerPayloadV2Schema,
   type FindingBasis, type ReviewerDraftV2, type ReviewerPayloadV2, type ReviewerProtocolFailure,
 } from "../../src/core/reviewer-contract";
 import { sha256Hex } from "../../src/core/digest";
@@ -317,10 +317,25 @@ describe("authoritative generated wire contract", () => {
   it("renders the exact issued full schema, example and rubric, not a second contract", () => {
     const rendered = renderReviewerWireContract();
     const json = [...rendered.matchAll(/```json\n([\s\S]*?)\n```/g)].map((match) => match[1]);
-    expect(json).toEqual([REVIEWER_PAYLOAD_SCHEMA_V2, JSON.stringify(REVIEWER_PAYLOAD_EXAMPLE_V2, null, 2)]);
-    expect(parseReviewerPayloadV2(bytes(json[1]))).toEqual({ ok: true, value: REVIEWER_PAYLOAD_EXAMPLE_V2 });
+    // The schema is shown minified (the packet section keeps the issued
+    // bytes): the same value, in the one compact spelling.
+    expect(JSON.parse(json[0]!)).toEqual(JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2));
+    expect(json).toEqual([JSON.stringify(JSON.parse(json[0]!)), JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, null, 2)]);
+    // Every reviewer spawn pays for the fragment: 10,617 bytes today, 15,048
+    // with the schema pretty-printed. The pin keeps it from growing back.
+    expect(bytes(rendered).length).toBeLessThanOrEqual(10 * 1024 + 512);
+    expect(parseReviewerPayloadV2(bytes(json[1]))).toEqual({ ok: true, value: REVIEWER_WIRE_CONTRACT_EXAMPLE_V2 });
     expect(rendered.endsWith(REVIEWER_IMPACT_RUBRIC_V1)).toBe(true);
     deepFrozen(REVIEWER_PAYLOAD_EXAMPLE_V2);
+    deepFrozen(REVIEWER_WIRE_CONTRACT_EXAMPLE_V2);
+    // The shown example is the fixture's critical at a real location, plus one advisory.
+    const [shownCritical, shownAdvisory] = REVIEWER_WIRE_CONTRACT_EXAMPLE_V2.findings;
+    expect(shownCritical).toEqual({ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0], file: shownCritical?.file, line: shownCritical?.line });
+    expect(shownAdvisory?.severity).toBe("advisory");
+    for (const finding of REVIEWER_WIRE_CONTRACT_EXAMPLE_V2.findings) {
+      expect(finding.file).not.toBeNull();
+      expect(finding.line).not.toBeNull();
+    }
   });
   it("generates strict objects and explains byte/cross-field/issuance constraints", () => {
     const schema = JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2);

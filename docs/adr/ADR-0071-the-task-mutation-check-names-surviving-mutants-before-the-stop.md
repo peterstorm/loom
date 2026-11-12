@@ -1,7 +1,7 @@
 # ADR-0071: The Task mutation check names surviving mutants before the stop
 
 ## Status
-Proposed (2026-11-12). Implements Q4 of the deterministic-implementation plan's Q-track.
+Accepted (2026-11-12). Implemented in PR #160. Implements Q4 of the deterministic-implementation plan's Q-track.
 
 ## Context
 A test that passes without asserting what the Task changed is the test-quality finding reviewers raise most:

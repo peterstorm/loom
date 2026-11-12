@@ -16,9 +16,9 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const read = (...parts: string[]) => readFileSync(join(REPO_ROOT, ...parts), "utf-8");
 
 /**
- * The runbooks are executable prose: `commands/loom.md` and
- * `commands/wave-gate.md` tell a model which helper to invoke, with which
- * flags, in which order. The engine's side of every one of those calls is
+ * The runbooks are executable prose: `commands/loom.md` (the dispatcher), the
+ * on-demand runbooks under `references/loom/*.md` and `commands/wave-gate.md`
+ * tell a model which helper to invoke, with which flags, in which order. The engine's side of every one of those calls is
  * proven — by unit tests, by CLI-driven tests, and by the smoke suite.
  * What the prose SAYS about them was proven by nothing but hardcoded greps.
  *
@@ -70,8 +70,10 @@ const PANELS = [
   {
     label: "architecture panel",
     helper: "panel-contract",
-    runbook: "commands/loom.md",
-    prose: read("commands", "loom.md"),
+    // The panel procedure is an on-demand runbook; `commands/loom.md` only
+    // tells the orchestrator when to read it.
+    runbook: "references/loom/panel-runbook.md",
+    prose: read("references", "loom", "panel-runbook.md"),
     operations: PANEL_CONTRACT_OPERATIONS,
   },
 ] as const;
@@ -140,16 +142,20 @@ describe.each(PANELS)("$label runbook ↔ $helper handler", ({ helper, runbook, 
  * The interview digest is the one contract that is prose on BOTH sides: the
  * interviewer agent is told which labels to emit, and `parseInterviewDigest`
  * requires exactly those labels at column 0. Nothing connected the two, so
- * renaming a field in the code would leave both prose files describing a digest
- * the parser rejects — and the failure would land on the first `panel-contract
+ * renaming a field in the code would leave the prose describing a digest the
+ * parser rejects — and the failure would land on the first `panel-contract
  * interview` call of every run, with a diagnostic pointing at the agent rather
  * than at the rename that caused it.
+ *
+ * The agent definition is the ONE owner of the digest format. The spawn
+ * template carries only per-run values and defers to it, so there is no second
+ * copy to drift.
  */
 describe("interview digest vocabulary ↔ parseInterviewDigest", () => {
   const SOURCES = [
     ["agents/arch-interviewer-agent.md", read("agents", "arch-interviewer-agent.md")],
-    ["commands/templates/phase-arch-interview.md", read("commands", "templates", "phase-arch-interview.md")],
   ] as const;
+  const TEMPLATE = read("commands", "templates", "phase-arch-interview.md");
 
   /** The labels the parser requires, read off its own field table. */
   const LABELS = [
@@ -175,36 +181,37 @@ describe("interview digest vocabulary ↔ parseInterviewDigest", () => {
     expect(missing, `interview prose never offers: ${missing.join(", ")}`).toEqual([]);
   });
 
-  it("the two prose sources agree with each other", () => {
-    // They are written and edited independently; a label fixed in one and
-    // missed in the other is drift the per-file checks above cannot see.
-    const [, agent] = SOURCES[0];
-    const [, template] = SOURCES[1];
-    for (const label of LABELS) {
-      expect(agent.includes(label)).toBe(template.includes(label));
-    }
+  it("the spawn template defers to the agent definition instead of restating the labels", () => {
+    // A second copy is edited independently of the first; a label fixed in one
+    // and missed in the other is drift no per-file check can see.
+    const restated = LABELS.filter((label) => TEMPLATE.includes(label));
+    expect(restated, `phase-arch-interview.md restates: ${restated.join(", ")}`).toEqual([]);
+    expect(TEMPLATE).toContain("your agent definition");
+    expect(TEMPLATE).toContain("references/architecture-interview.md");
   });
 });
 
 describe("engine-owned orchestration runbook contract", () => {
-  // The command file belongs here as much as the skill it defers to. It was
-  // outside this list, and its "In particular" bullets therefore kept
-  // describing the manual helper chain long after the registered façade
-  // replaced it — including a `standalone-review finalize` step that is a
-  // guaranteed contract error on exactly the runs it claimed to cover, because
-  // the registered program has already published `result.json` by then.
+  // The files that describe a workflow, each of which must drive it through
+  // the façade.
   const runbooks = [
     ["commands/wave-gate.md", read("commands", "wave-gate.md")],
-    ["commands/review-and-fix.md", read("commands", "review-and-fix.md")],
     ["skills/review-and-fix/SKILL.md", read("skills", "review-and-fix", "SKILL.md")],
   ] as const;
+  // The command file is held to the recipe ban as much as the skill it defers
+  // to. When it restated the workflow in its own bullets, they kept describing
+  // the manual helper chain long after the registered façade replaced it —
+  // including a `standalone-review finalize` step that is a guaranteed
+  // contract error on exactly the runs it claimed to cover. It is now a
+  // pointer, and the last test of this block keeps it one.
+  const prompts = [...runbooks, ["commands/review-and-fix.md", read("commands", "review-and-fix.md")]] as const;
 
   it.each(runbooks)("%s starts and resumes only through the façade", (_name, prose) => {
     expect(prose).toContain("helper orchestration start");
     expect(prose).toContain("helper orchestration resume");
   });
 
-  it.each(runbooks)("%s contains no parent-executable deterministic recipes", (_name, prose) => {
+  it.each(prompts)("%s contains no parent-executable deterministic recipes", (_name, prose) => {
     for (const forbidden of [
       "helper model-profiles agent",
       "helper review-panel brief",
@@ -223,9 +230,21 @@ describe("engine-owned orchestration runbook contract", () => {
 
     expect(skill).toContain("Every surviving critical Finding is mandatory");
     expect(skill).toContain("do not ask the operator to choose advisory IDs");
-    expect(command).toContain("always plan/fix every");
-    expect(command).toContain("autonomously decide which");
+    // The skill lets a critical be `unresolved` or `out-of-scope`, each of
+    // which blocks installation. A command telling the parent to "always
+    // fix every" critical contradicted it, so the command states no policy.
+    for (const disposition of ["`repaired`", "`unresolved`", "`out-of-scope`"]) expect(skill).toContain(disposition);
+    expect(command).not.toContain("always plan/fix every");
     expect(command).not.toContain("ask the user which advisories");
+  });
+
+  it("the /review-and-fix command is a pointer to the skill, not a second workflow", () => {
+    const command = read("commands", "review-and-fix.md");
+    const body = command.slice(command.indexOf("\n---\n", 4) + 5);
+    expect(body).toContain("${CLAUDE_PLUGIN_ROOT}/skills/review-and-fix/SKILL.md");
+    expect(body).toContain('"$ARGUMENTS"');
+    expect(body).not.toContain("helper ");
+    expect(body).not.toMatch(/^\s*[-*] /m);
   });
 
   /**
@@ -294,8 +313,14 @@ describe("G2 skeleton prose ↔ the skeleton engine", () => {
   const architecture = read("commands", "templates", "phase-architecture.md");
   const planTemplate = read("references", "plan-template.md");
   const executableModels = read("references", "executable-models.md");
-  const context = read("CONTEXT.md");
-  const operations = read("docs", "operations.md");
+  // The glossary is the core plus the per-context files CONTEXT-MAP.md lists;
+  // Skeleton is a core term, Export Binding and Frozen ADT live with the
+  // Acceptance Contract context.
+  const context = [
+    read("CONTEXT.md"),
+    read("docs", "contexts", "acceptance-contracts", "CONTEXT.md"),
+  ].join("\n");
+  const verification = read("docs", "verification.md");
   const loomRunbook = read("commands", "loom.md");
 
   /** Rule 12 of the decompose template, from its heading to the next rule. */
@@ -329,10 +354,13 @@ describe("G2 skeleton prose ↔ the skeleton engine", () => {
     expect(text).toContain("depends, directly or transitively, on the contract task");
   });
 
+  // The grammar has ONE owner, `references/executable-models.md`. The decompose
+  // template keeps the placement duties decompose acts on; the architecture
+  // template only sends the agent to the owning section.
   it.each([
     ["commands/templates/phase-decompose.md", decompose],
-    ["commands/templates/phase-architecture.md", architecture],
-  ])("FR-042: %s teaches the binding grammar, one contract per file, and the frozen-ADT rule", (_name, prose) => {
+    ["references/executable-models.md", executableModels],
+  ])("FR-042: %s teaches export bindings, one contract per file, and the frozen-ADT rule", (_name, prose) => {
     const text = flat(prose);
     expect(text).toContain("**Export bindings:**");
     // Case-insensitive: the rule may open a sentence or a bold run-in heading.
@@ -340,17 +368,27 @@ describe("G2 skeleton prose ↔ the skeleton engine", () => {
     expect(text.toLowerCase()).toContain("frozen adt");
   });
 
-  it("FR-042: the architecture template's binding grammar example parses cleanly through parseExportBindings", () => {
-    const parsed = bindingExamples(architecture);
-    expect(parsed.length, "no **Export bindings:** example in the architecture template").toBeGreaterThan(0);
+  it("FR-042: the architecture template sends the agent to the reference's export-binding and frozen-ADT sections", () => {
+    const text = flat(architecture);
+    expect(text).toContain("{loom_dir}/references/executable-models.md");
+    expect(text).toContain("**Export bindings:**");
+    expect(text).toContain("§5 Export bindings");
+    expect(text).toContain("Frozen ADTs");
+    expect(executableModels).toMatch(/^## 5\. Export bindings$/m);
+    expect(executableModels).toMatch(/^### Frozen ADTs$/m);
+  });
+
+  it("FR-042: the reference's binding grammar example parses cleanly through parseExportBindings", () => {
+    const parsed = bindingExamples(executableModels);
+    expect(parsed.length, "no **Export bindings:** example in references/executable-models.md").toBeGreaterThan(0);
     for (const { bindings, problems } of parsed) {
       expect(problems).toEqual([]);
       expect(bindings.length).toBeGreaterThan(0);
     }
   });
 
-  it("FR-042: the architecture template names the frozen-ADT rule's two refusals and its remedy", () => {
-    const text = flat(architecture);
+  it("FR-042: the reference names the frozen-ADT rule's two refusals and its remedy", () => {
+    const text = flat(executableModels);
     expect(text).toContain("shadows frozen ADT");
     expect(text).toContain("re-lists frozen variants");
     expect(text).toContain("Extract<");
@@ -379,7 +417,7 @@ describe("G2 skeleton prose ↔ the skeleton engine", () => {
     expect(context).toMatch(new RegExp(`^\\*\\*${term}\\*\\*:\\n\\S`, "m"));
   });
 
-  it("operations documents every skeleton outcome in the engine's exact wording", () => {
+  it("the verification guide documents every skeleton outcome in the engine's exact wording", () => {
     const outcomes: readonly SkeletonOutcome[] = [
       { kind: "skeleton-written", origin: "spawn" },
       { kind: "no-bound-exports" },
@@ -388,10 +426,10 @@ describe("G2 skeleton prose ↔ the skeleton engine", () => {
       { kind: "exists-not-skeletonized" },
       { kind: "absent-no-skeleton-owed" },
     ];
-    const missing = outcomes.map(renderSkeletonOutcome).filter((wording) => !operations.includes(wording));
-    expect(missing, `docs/operations.md never shows: ${missing.join(", ")}`).toEqual([]);
-    expect(operations).toContain("stale against revised contract");
-    expect(operations).toContain("declared-artifact-contract-violated");
+    const missing = outcomes.map(renderSkeletonOutcome).filter((wording) => !verification.includes(wording));
+    expect(missing, `docs/verification.md never shows: ${missing.join(", ")}`).toEqual([]);
+    expect(verification).toContain("stale against revised contract");
+    expect(verification).toContain("declared-artifact-contract-violated");
   });
 
   it("the loom runbook's execute loop names the skeleton outcomes and the skeleton-bindings-unresolved blocker", () => {

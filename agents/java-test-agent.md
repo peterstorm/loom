@@ -17,6 +17,6 @@ For the assigned task:
 - Write property tests with jqwik for pure functions and invariants
 - Use Testcontainers (not H2 / embedded fakes) for repository and integration tests
 - Use the narrowest Spring Boot test slice that proves the test (`@DataJpaTest`, `@WebMvcTest`, `@JsonTest`, etc.)
-- Mock only at outbound ports — never domain logic
+- Substitute I/O with the port's in-memory fake; never mock domain logic
 
 Ensure all tests pass before completing.

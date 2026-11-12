@@ -25,8 +25,7 @@ before="$(mktemp -d)"
 trap 'rm -rf "$before"' EXIT
 for agent in "$LOOM_DIR"/agents/*.md; do
   name="$(basename "$agent")"
-  [[ "$name" == "README.md" ]] && continue
-  [[ -f "$PI_AGENTS_DIR/$name" ]] && cp "$PI_AGENTS_DIR/$name" "$before/$name"
+  if [[ -f "$PI_AGENTS_DIR/$name" ]]; then cp "$PI_AGENTS_DIR/$name" "$before/$name"; fi
 done
 
 bun "$LOOM_DIR/engine/src/cli.ts" helper model-profiles render-pi \
@@ -38,7 +37,6 @@ copied=0
 unchanged=0
 for agent in "$LOOM_DIR"/agents/*.md; do
   name="$(basename "$agent")"
-  [[ "$name" == "README.md" ]] && continue
   if [[ -f "$before/$name" ]] && cmp -s "$before/$name" "$PI_AGENTS_DIR/$name"; then
     ((unchanged += 1))
   else

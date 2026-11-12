@@ -4,35 +4,31 @@ Template for spawning clarify-agent. All template variables must be substituted 
 
 ---
 
-## CRITICAL: You CAN Write Files
-
-**You are a subagent. The block-direct-edits hook detects subagents and allows Edit/Write — scoped to this phase's artifact directory** (`.claude/specs/{date_slug}/` or `.claude/plans/`); write only there.
-- You MUST use Write/Edit tools to update the spec file — this WILL work
-- Do NOT read `.claude/hooks/` or `.claude/state/` files — they are irrelevant to you
-- Do NOT check if you are "allowed" to write — you are. Just write.
-
----
-
-## CRITICAL: You MUST Ask the User
-
-**Every `[NEEDS CLARIFICATION]` marker requires a user decision.** You are NOT allowed to resolve markers on your own or accept pre-resolved answers from the orchestrator.
-
-- Ask each marker's question via `AskUserQuestion` (batch related ones, max 4 per call). Under Pi, Loom relays the tool to the parent TUI without ending this Agent turn.
-- Present multiple-choice options with clear trade-offs
-- Only update the spec AFTER receiving user answers
-- Technical uncertainties (HOW not WHAT) should be flagged for architecture phase, not asked here
-
----
-
 ## Clarify: {spec_file_path}
-
-Resolve uncertainties in the specification.
 
 **Marker count:** {marker_count} `[NEEDS CLARIFICATION]` markers found
 
-**Your output must include:**
-- Updated spec.md with markers resolved
-- Remaining marker count
-- Summary of decisions made
+You are running inside `/loom` (Phase 2). Follow the preloaded `clarify` skill for how to find, order and word questions and how to log answers. The rules below override it where they differ.
 
-The clarify-agent has the `clarify` skill preloaded which guides the questioning process.
+You may write with Write/Edit under `.claude/specs/{date_slug}/` (the spec and its `clarifications/` log). Loom's hooks allow this; do not read `.claude/hooks/` or `.claude/state/` to check.
+
+## Exit criterion
+
+The phase ends only when the spec contains no literal `NEEDS CLARIFICATION`. Loom counts that string anywhere in the file and refuses to advance while one remains, so there is no question limit per session: keep going until the count is zero.
+
+- **Business marker (WHAT):** resolve it with the user, then replace the marker with the resolved requirement.
+- **Technical marker (HOW):** do not ask. Rewrite it as `[DEFERRED TO ARCHITECTURE: <the open question>]`.
+- **Unanswerable for now:** rewrite it as `[DEFERRED: <what is open> until <what unblocks it>]`.
+
+## Asking
+
+Every business marker needs a user decision. Do not resolve one yourself, and do not accept answers pre-filled by the orchestrator.
+
+- Ask with `AskUserQuestion`, related markers batched, at most 4 questions per call. Under Pi, Loom relays the tool to the parent TUI without ending your turn.
+- Offer multiple-choice options with their trade-offs.
+- Update the spec only after the user answers.
+
+## Your output must include
+
+- The updated spec path and the remaining count of the literal `NEEDS CLARIFICATION` (it must be 0)
+- The decisions made, and every marker you deferred with its reason

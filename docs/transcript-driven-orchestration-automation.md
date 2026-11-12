@@ -156,5 +156,3 @@ The broader qualitative result is more important: the deleted logic did not move
 ## Remaining migration boundary
 
 Legacy helpers and historical run formats remain readable for audit compatibility. Their parsers are frozen in `engine/src/core/legacy-archive.ts`; new code must not extend those shapes. Canonical registered programs are the path for new standalone review, Wave Gate, and remediation work.
-
-Architecture panel’s detailed `/loom` phase still has interactive/template integration around the registered dispatch core, and Pi’s headless interview relay remains unresolved. Those limitations are documented rather than hidden.

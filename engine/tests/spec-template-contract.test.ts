@@ -33,28 +33,19 @@ describe("structural specification identifier contract", () => {
     expect(parsed.value.glossary.length).toBeGreaterThan(0);
   });
 
-  it("binds canonical identifier guidance in both the template and the specify skill", () => {
-    for (const source of [template, specify]) {
-      expect(source).toMatch(/unique canonical `AS-NNN:` ID/u);
-      expect(source).toMatch(/canonical `OOS-NNN:` ID/u);
-    }
+  it("binds canonical identifier guidance in the template, the one owner of the spec grammar", () => {
+    expect(template).toMatch(/unique canonical `AS-NNN:` ID/u);
+    expect(template).toMatch(/canonical `OOS-NNN:` ID/u);
   });
 
-  it("executes the specify skill's section-grammar examples through parseSpec", () => {
+  it("the specify skill defers to the template instead of restating the section grammar", () => {
+    // A second copy of the grammar is a second thing to keep parseable. The
+    // skill names the template and the identifier families, and carries no
+    // section-grammar example of its own.
+    expect(specify).toContain("references/spec-template.md");
+    expect(specify).toMatch(/`FR-NNN:` \/ `AS-NNN:` \/ `OOS-NNN:`/u);
     const fences = [...specify.matchAll(/```markdown\n([\s\S]*?)```/gu)].map((match) => match[1]);
-    const grammar = fences.filter((body) => body.startsWith("## "));
-    expect(grammar.length).toBe(5);
-    const parsed = parseSpec(grammar.join("\n"));
-    expect(parsed.ok).toBe(true);
-    if (!parsed.ok) return;
-    expect(parsed.value.scenarios.map(({ id }) => id)).toEqual(["AS-001", "AS-002", "AS-003"]);
-    expect(parsed.value.frs.map(({ id }) => id)).toEqual(["FR-001", "FR-002", "FR-003", "FR-004"]);
-    expect(parsed.value.oos.map(({ id }) => id)).toEqual(["OOS-001", "OOS-002", "OOS-003", "OOS-004"]);
-    // The specify grammar's placeholder glossary row is its only glossary
-    // entry and mints as a data row (header and separator rows are furniture)
-    // — the same mechanism the template-parse test pins, scoped here to the
-    // specify skill's five grammar fences.
-    expect(parsed.value.glossary.length).toBeGreaterThan(0);
+    expect(fences.filter((body) => body.startsWith("## "))).toEqual([]);
   });
 
   it("keeps bare Given bullets out of both guidance sources", () => {

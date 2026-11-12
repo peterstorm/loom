@@ -1,7 +1,7 @@
 # Panel Lenses
 
 The design lenses used by `/loom --panel`. The orchestrator selects a set of
-lenses (see the lens-selection rule in `commands/loom.md`), then substitutes the
+lenses (see the lens-selection rule in `references/loom/panel-runbook.md`), then substitutes the
 chosen lens's section below into the `{lens_prompt}` variable of
 `phase-arch-design.md`. Each designer commits fully to ONE lens.
 

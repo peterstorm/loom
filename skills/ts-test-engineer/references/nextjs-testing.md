@@ -1,43 +1,29 @@
 # Next.js Testing Reference
 
-Testing patterns for Next.js App Router applications.
+Testing patterns for Next.js App Router applications. Samples target Next.js 15 and later, where `params` is a Promise.
 
-## Testing Server Components
+The framework files (`page.tsx`, `route.ts`, Server Actions, `proxy.ts`) are the outermost shell. Keep them thin, put the behavior in a function that takes its ports, and test that function with object-literal fakes (see `vitest-patterns.md`). Rendering helpers with providers are in `react-component-testing.md`.
 
-**Important**: Vitest does not reliably support async Server Components. For async Server Components, prefer Playwright E2E tests. For synchronous Server Components or the client-side parts, unit testing works fine.
+## Server Components
 
-### Synchronous Server Components (testable with Vitest)
+Vitest does not support `async` Server Components. Unit test synchronous components and cover the async page with Playwright.
+
 ```typescript
-// components/UserCard.tsx (synchronous, receives data as props)
-export function UserCard({ user }: { user: User }) {
-  return <div>{user.name}</div>;
+// app/users/[id]/page.tsx — async: covered by E2E
+export default async function UserPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const user = await fetchUser(id);
+  return <UserProfile user={user} />;
 }
 
-// __tests__/UserCard.test.tsx
-it('should render user name', () => {
-  render(<UserCard user={{ id: '1', name: 'Test User' }} />);
-  expect(screen.getByText('Test User')).toBeInTheDocument();
-});
-```
-
-### Async Server Components (use E2E or extract logic)
-```typescript
-// Strategy: extract data fetching, test the pure rendering separately
-// app/users/[id]/page.tsx
-export default async function UserPage({ params }: { params: { id: string } }) {
-  const user = await fetchUser(params.id);
-  return <UserProfile user={user} />;  // Test UserProfile directly
-}
-
-// Test the synchronous child component instead:
-it('should render user profile', () => {
+// __tests__/UserProfile.test.tsx — the synchronous child, unit tested
+it('renders the user profile', () => {
   render(<UserProfile user={{ id: '1', name: 'Test User', email: 'test@example.com' }} />);
   expect(screen.getByText('Test User')).toBeInTheDocument();
 });
 ```
-```
 
-## Testing Client Components
+## Client Components
 
 ```typescript
 // components/Counter.tsx
@@ -49,275 +35,164 @@ export function Counter({ initial = 0 }: { initial?: number }) {
   const [count, setCount] = useState(initial);
   return (
     <div>
-      <span data-testid="count">{count}</span>
-      <button onClick={() => setCount(c => c + 1)}>Increment</button>
+      <output aria-label="count">{count}</output>
+      <button onClick={() => setCount((c) => c + 1)}>Increment</button>
     </div>
   );
 }
 
 // __tests__/Counter.test.tsx
-import { render, screen } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
-import { Counter } from '@/components/Counter';
+it('increments on click', async () => {
+  const user = userEvent.setup();
+  render(<Counter initial={5} />);
 
-describe('Counter', () => {
-  it('should increment on click', async () => {
-    const user = userEvent.setup();
-    render(<Counter initial={5} />);
+  await user.click(screen.getByRole('button', { name: /increment/i }));
 
-    expect(screen.getByTestId('count')).toHaveTextContent('5');
-
-    await user.click(screen.getByRole('button'));
-
-    expect(screen.getByTestId('count')).toHaveTextContent('6');
-  });
+  expect(screen.getByRole('status', { name: 'count' })).toHaveTextContent('6');
 });
 ```
 
-## Testing API Routes (Route Handlers)
+## Route Handlers
+
+A `route.ts` file may export only the HTTP methods and route config, so the handlers are built in a separate module from their ports and the route file wires in the real adapters.
 
 ```typescript
-// app/api/users/route.ts
-import { NextRequest, NextResponse } from 'next/server';
+// src/api/users.ts
+export const usersHandlers = ({ users }: { users: UserRepository }) => ({
+  GET: async (_request: Request, { params }: { params: Promise<{ id: string }> }) => {
+    const { id } = await params;
+    const user = await users.find(id);
+    return user
+      ? Response.json(user)
+      : Response.json({ error: 'Not found' }, { status: 404 });
+  },
+});
 
-export async function GET(request: NextRequest) {
-  const users = await db.user.findMany();
-  return NextResponse.json(users);
-}
-
-export async function POST(request: NextRequest) {
-  const body = await request.json();
-  const user = await db.user.create({ data: body });
-  return NextResponse.json(user, { status: 201 });
-}
+// app/api/users/[id]/route.ts
+export const { GET } = usersHandlers({ users: pgUserRepository(pool) });
 
 // __tests__/api/users.test.ts
-import { GET, POST } from '@/app/api/users/route';
+const { GET } = usersHandlers({ users: fakeUsers([aUser({ id: '1', name: 'Test User' })]) });
+const get = (id: string) =>
+  GET(new Request(`http://localhost/api/users/${id}`), { params: Promise.resolve({ id }) });
 
-describe('/api/users', () => {
-  describe('GET', () => {
-    it('should return users', async () => {
-      const request = new Request('http://localhost/api/users');
-      const response = await GET(request);
-      const data = await response.json();
+it('returns the user', async () => {
+  const response = await get('1');
 
-      expect(response.status).toBe(200);
-      expect(Array.isArray(data)).toBe(true);
-    });
-  });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ name: 'Test User' });
+});
 
-  describe('POST', () => {
-    it('should create user', async () => {
-      const request = new Request('http://localhost/api/users', {
-        method: 'POST',
-        body: JSON.stringify({ name: 'New User', email: 'new@test.com' }),
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      const response = await POST(request);
-      const data = await response.json();
-
-      expect(response.status).toBe(201);
-      expect(data.name).toBe('New User');
-    });
-  });
+it('returns 404 for an unknown user', async () => {
+  expect((await get('unknown')).status).toBe(404);
 });
 ```
 
-## Testing with Route Parameters
+A handler that reads `request.nextUrl` or `request.cookies` is typed `NextRequest`; construct `new NextRequest(url, init)` in its test.
+
+## Server Actions
+
+A `'use server'` file may export only async functions. The action parses the form and delegates; the delegate takes its ports, including cache revalidation.
 
 ```typescript
-// app/api/users/[id]/route.ts
-import { NextRequest, NextResponse } from 'next/server';
+// src/orchestrator/rename-user.ts
+export const renameUser =
+  ({ users, revalidate }: { users: UserRepository; revalidate: (path: string) => void }) =>
+  async (id: UserId, name: string): Promise<void> => {
+    const user = await users.find(id);
+    if (!user) return;
+    await users.save({ ...user, name });
+    revalidate('/users');
+  };
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
-  const user = await db.user.findUnique({ where: { id: params.id } });
-  if (!user) {
-    return NextResponse.json({ error: 'Not found' }, { status: 404 });
-  }
-  return NextResponse.json(user);
-}
-
-// __tests__/api/users/[id].test.ts
-import { GET } from '@/app/api/users/[id]/route';
-
-it('should return 404 for unknown user', async () => {
-  const request = new Request('http://localhost/api/users/unknown');
-  const response = await GET(request, { params: { id: 'unknown' } });
-
-  expect(response.status).toBe(404);
-});
-```
-
-## Testing Server Actions
-
-```typescript
 // actions/user.ts
 'use server';
-
-import { revalidatePath } from 'next/cache';
-
-export async function updateUser(formData: FormData) {
-  const id = formData.get('id') as string;
-  const name = formData.get('name') as string;
-
-  await db.user.update({ where: { id }, data: { name } });
-  revalidatePath('/users');
+export async function renameUserAction(formData: FormData) {
+  const input = parseRenameForm(formData);   // parse, don't cast
+  if (!input.ok) return input;
+  await renameUser({ users: pgUserRepository(pool), revalidate: revalidatePath })(input.value.id, input.value.name);
 }
 
-// __tests__/actions/user.test.ts
-import { updateUser } from '@/actions/user';
+// __tests__/rename-user.test.ts
+it('renames the user and revalidates the list', async () => {
+  const users = fakeUsers([aUser({ id: '1' })]);
+  const revalidated: string[] = [];
 
-vi.mock('next/cache', () => ({
-  revalidatePath: vi.fn(),
-}));
+  await renameUser({ users, revalidate: (path) => revalidated.push(path) })('1' as UserId, 'Updated Name');
 
-describe('updateUser', () => {
-  it('should update user and revalidate', async () => {
-    const formData = new FormData();
-    formData.set('id', '1');
-    formData.set('name', 'Updated Name');
-
-    await updateUser(formData);
-
-    expect(db.user.update).toHaveBeenCalledWith({
-      where: { id: '1' },
-      data: { name: 'Updated Name' },
-    });
-    expect(revalidatePath).toHaveBeenCalledWith('/users');
-  });
+  expect((await users.find('1' as UserId))?.name).toBe('Updated Name');
+  expect(revalidated).toEqual(['/users']);
 });
 ```
 
-## Testing with Providers
+## Proxy (Middleware)
+
+Next.js 16 renamed `middleware.ts` to `proxy.ts` and the exported function to `proxy`. On 15 and earlier the file and the function are named `middleware`; the test is the same.
 
 ```typescript
-// test/utils.tsx
-import { render, RenderOptions } from '@testing-library/react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-
-function createTestQueryClient() {
-  return new QueryClient({
-    defaultOptions: {
-      queries: { retry: false },
-      mutations: { retry: false },
-    },
-  });
-}
-
-export function renderWithProviders(
-  ui: React.ReactElement,
-  options?: Omit<RenderOptions, 'wrapper'>
-) {
-  const queryClient = createTestQueryClient();
-
-  function Wrapper({ children }: { children: React.ReactNode }) {
-    return (
-      <QueryClientProvider client={queryClient}>
-        {children}
-      </QueryClientProvider>
-    );
-  }
-
-  return render(ui, { wrapper: Wrapper, ...options });
-}
-
-// Usage
-import { renderWithProviders } from '@/test/utils';
-
-it('should render with providers', () => {
-  renderWithProviders(<MyComponent />);
-});
-```
-
-## Testing Middleware
-
-```typescript
-// middleware.ts
+// proxy.ts
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const token = request.cookies.get('token');
-
   if (!token && request.nextUrl.pathname.startsWith('/dashboard')) {
     return NextResponse.redirect(new URL('/login', request.url));
   }
-
   return NextResponse.next();
 }
 
-// __tests__/middleware.test.ts
-import { middleware } from '@/middleware';
+// __tests__/proxy.test.ts
 import { NextRequest } from 'next/server';
+import { proxy } from '@/proxy';
 
-describe('middleware', () => {
-  it('should redirect unauthenticated users from dashboard', () => {
-    const request = new NextRequest('http://localhost/dashboard');
-    const response = middleware(request);
+it('redirects unauthenticated users away from the dashboard', () => {
+  const response = proxy(new NextRequest('http://localhost/dashboard'));
 
-    expect(response.status).toBe(307);
-    expect(response.headers.get('location')).toContain('/login');
-  });
+  expect(response.status).toBe(307);
+  expect(response.headers.get('location')).toContain('/login');
+});
 
-  it('should allow authenticated users', () => {
-    const request = new NextRequest('http://localhost/dashboard', {
-      headers: { cookie: 'token=valid-token' },
-    });
-    const response = middleware(request);
+it('lets authenticated users through', () => {
+  const request = new NextRequest('http://localhost/dashboard', { headers: { cookie: 'token=valid-token' } });
 
-    expect(response.status).toBe(200);
-  });
+  expect(proxy(request).headers.get('location')).toBeNull();
 });
 ```
 
-## Testing with next/navigation
+## Components That Use `next/navigation`
+
+`next/navigation` cannot be passed in, so this is the case for `vi.mock`. The mock factory is hoisted above the imports; create the spy with `vi.hoisted` so the factory and the test share it.
 
 ```typescript
-// Mock next/navigation
+const { push } = vi.hoisted(() => ({ push: vi.fn() }));
+
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({
-    push: vi.fn(),
-    replace: vi.fn(),
-    back: vi.fn(),
-  }),
+  useRouter: () => ({ push }),
   usePathname: () => '/current-path',
-  useSearchParams: () => new URLSearchParams('?query=test'),
-  redirect: vi.fn(),
+  useSearchParams: () => new URLSearchParams('query=test'),
 }));
 
-// Test component using router
-import { useRouter } from 'next/navigation';
-
-it('should navigate on submit', async () => {
-  const mockPush = vi.fn();
-  vi.mocked(useRouter).mockReturnValue({ push: mockPush } as any);
-
+it('navigates on submit', async () => {
   const user = userEvent.setup();
   render(<SearchForm />);
 
   await user.type(screen.getByRole('searchbox'), 'query');
   await user.click(screen.getByRole('button', { name: /search/i }));
 
-  expect(mockPush).toHaveBeenCalledWith('/search?q=query');
+  expect(push).toHaveBeenCalledWith('/search?q=query');
 });
 ```
 
-## Testing Loading and Error States
+## Error Boundaries
+
+Import the `error.tsx` component under a name that does not shadow the global `Error`.
 
 ```typescript
-// app/users/loading.tsx
-export default function Loading() {
-  return <div role="progressbar">Loading users...</div>;
-}
-
 // app/users/error.tsx
 'use client';
 
-export default function Error({ error, reset }: { error: Error; reset: () => void }) {
+export default function UsersError({ error, reset }: { error: Error; reset: () => void }) {
   return (
     <div role="alert">
       <p>Error: {error.message}</p>
@@ -327,13 +202,13 @@ export default function Error({ error, reset }: { error: Error; reset: () => voi
 }
 
 // __tests__/users/error.test.tsx
-import Error from '@/app/users/error';
+import UsersError from '@/app/users/error';
 
-it('should display error and allow retry', async () => {
+it('displays the error and allows a retry', async () => {
   const reset = vi.fn();
   const user = userEvent.setup();
 
-  render(<Error error={new Error('Failed to load')} reset={reset} />);
+  render(<UsersError error={new Error('Failed to load')} reset={reset} />);
 
   expect(screen.getByRole('alert')).toHaveTextContent('Failed to load');
 

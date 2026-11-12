@@ -1,509 +1,173 @@
 # CSRF Prevention Reference
 
-## Table of Contents
-1. [CSRF Attack Mechanics](#csrf-mechanics)
-2. [When CSRF Protection Is Needed](#when-needed)
-3. [Synchronizer Token Pattern](#synchronizer-token)
-4. [Double Submit Cookie Pattern](#double-submit)
-5. [SameSite Cookie Deep Dive](#samesite)
-6. [Spring Security CSRF Config](#spring-csrf)
-7. [SPA/API CSRF Protection](#spa-api)
+## The Attack
 
-## CSRF Attack Mechanics {#csrf-mechanics}
-
-### What Is CSRF?
-Cross-Site Request Forgery tricks authenticated users into making unintended requests.
-
-### Attack Flow
-```
-1. User logs into bank.com (gets session cookie)
-2. User visits evil.com
-3. evil.com contains: <form action="https://bank.com/transfer" method="POST">
-4. Form auto-submits with user's cookies
-5. Bank processes transfer (user authenticated via cookie)
-```
-
-### Why Cookies Alone Aren't Enough
-Browsers automatically attach cookies to requests, even from other origins:
+A page on another site makes the victim's browser send a state-changing request to your application. The browser attaches the victim's credentials by itself, so the request arrives authenticated.
 
 ```html
-<!-- On evil.com -->
-<form action="https://bank.com/api/transfer" method="POST">
-  <input type="hidden" name="to" value="attacker" />
-  <input type="hidden" name="amount" value="10000" />
+<!-- on evil.example -->
+<form action="https://bank.example/api/transfer" method="POST">
+  <input type="hidden" name="to" value="attacker"><input type="hidden" name="amount" value="10000">
 </form>
-<script>document.forms[0].submit();</script>
+<script>document.forms[0].submit()</script>
 ```
 
-The user's bank.com session cookie is sent automatically.
+The attacker cannot read the response; the damage is the side effect.
 
-### What CSRF Can Do
-- State-changing actions (transfer money, change password)
-- Actions the user is authorized to perform
-- NOT data exfiltration (attacker can't read response)
+## When Protection Is Needed
 
-## When CSRF Protection Is Needed {#when-needed}
+Protection is needed whenever a state-changing request is authenticated by something the browser sends automatically: a session cookie, a token stored in a cookie, HTTP Basic credentials or a client certificate.
 
-### Protection Required
-| Scenario | Need CSRF Protection? |
-|----------|----------------------|
-| Session cookies (stateful) | **Yes** |
-| Form submissions | **Yes** |
-| AJAX with cookies | **Yes** |
-| Actions with side effects | **Yes** |
+| Credential | CSRF protection |
+|------------|-----------------|
+| Session cookie | Required |
+| JWT or other token in a cookie (including `HttpOnly`) | Required |
+| `Authorization: Bearer` header added by script, no cookie credential at all | Not needed |
+| No authentication (public read-only endpoint) | Not needed |
 
-### Protection Optional/Not Needed
-| Scenario | Need CSRF Protection? |
-|----------|----------------------|
-| Stateless JWT in header | No (not auto-attached) |
-| Public read-only endpoints | No |
-| CORS-protected API (no credentials) | No |
-| Requests requiring custom headers | Partial protection |
+**`csrf.disable()` is correct only if no credential is ever sent by cookie.** "It is a stateless API" is not the condition: a stateless API that reads its JWT from a cookie is as exposed as a session. `jwt-security.md` (token storage) and `spring-security.md` (resource server) repeat this condition where the choice is made.
 
-### Decision Matrix
-```
-Is request state-changing?
-  └─ No → No CSRF protection needed
-  └─ Yes → Is auth via cookies?
-            └─ No (JWT in header) → No CSRF protection needed
-            └─ Yes → CSRF protection required
-```
+CORS is not a CSRF defence. A cross-site form post is sent without any CORS check; CORS only decides whether the other site's script may read the response.
 
-## Synchronizer Token Pattern {#synchronizer-token}
+## Spring Security
 
-### How It Works
-1. Server generates unique token per session
-2. Token embedded in forms/stored for AJAX
-3. Server validates token on state-changing requests
-4. Attacker can't guess token (not in cookies)
+CSRF protection is on by default and covers POST, PUT, PATCH and DELETE.
 
-### Server-Side Implementation (Spring)
+### Server-rendered forms: synchronizer token
+The default. The token is stored in the HTTP session and written into each form; Thymeleaf adds the hidden `_csrf` field to every `th:action` form.
+
 ```java
-@Configuration
-@EnableWebSecurity
-public class SecurityConfig {
-
-    @Bean
-    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
-        http
-            .csrf(csrf -> csrf
-                // Use cookie-based token repository for SPAs
-                .csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse())
-                // Or session-based for traditional apps
-                // .csrfTokenRepository(new HttpSessionCsrfTokenRepository())
-            );
-        return http.build();
-    }
-}
+http.csrf(Customizer.withDefaults());   // HttpSessionCsrfTokenRepository
 ```
 
-### Form Integration (Thymeleaf)
-```html
-<!-- Token automatically included -->
-<form th:action="@{/transfer}" method="post">
-    <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}"/>
-    <!-- or just let Thymeleaf handle it automatically -->
-</form>
-```
+### Single-page applications: cookie-to-header token
+The server puts the token in a cookie that script can read; the SPA copies it into a request header. This is a double-submit pattern, not a synchronizer token.
 
-### Token Validation
-Spring Security automatically:
-1. Generates token on session creation
-2. Validates token on POST/PUT/DELETE/PATCH
-3. Rejects requests with invalid/missing tokens
-
-## Double Submit Cookie Pattern {#double-submit}
-
-### How It Works
-1. Server sets CSRF token in cookie (readable by JS)
-2. Client reads cookie, sends token in header/body
-3. Server compares cookie value with header/body value
-4. Attacker can't read cookie from different origin
-
-### Why It Works
-- Attacker can trigger requests with cookies (auto-attached)
-- Attacker CANNOT read cookie values (same-origin policy)
-- So attacker can't put correct token in header/body
-
-### Implementation
 ```java
-@Bean
-public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
-    http.csrf(csrf -> csrf
-        // Cookie readable by JavaScript
-        .csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse())
-        // For SPAs: expect token in header
-        .csrfTokenRequestHandler(new SpaCsrfTokenRequestHandler())
-    );
-    return http.build();
-}
+// Spring Security 7
+http.csrf(csrf -> csrf.spa());
+```
 
-// Custom handler for SPA pattern
-public class SpaCsrfTokenRequestHandler extends CsrfTokenRequestAttributeHandler {
+```java
+// Spring Security 6.x
+http.csrf(csrf -> csrf
+    .csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse())
+    .csrfTokenRequestHandler(new SpaCsrfTokenRequestHandler()));
 
-    private final CsrfTokenRequestHandler delegate = new XorCsrfTokenRequestAttributeHandler();
+final class SpaCsrfTokenRequestHandler implements CsrfTokenRequestHandler {
+    private final CsrfTokenRequestHandler plain = new CsrfTokenRequestAttributeHandler();
+    private final CsrfTokenRequestHandler xor = new XorCsrfTokenRequestAttributeHandler();
 
     @Override
-    public void handle(HttpServletRequest request, HttpServletResponse response,
-                       Supplier<CsrfToken> csrfToken) {
-        delegate.handle(request, response, csrfToken);
+    public void handle(HttpServletRequest request, HttpServletResponse response, Supplier<CsrfToken> csrfToken) {
+        this.xor.handle(request, response, csrfToken);   // BREACH protection for tokens rendered in a body
+        csrfToken.get();                                 // load the deferred token so the cookie is written
     }
 
     @Override
     public String resolveCsrfTokenValue(HttpServletRequest request, CsrfToken csrfToken) {
-        // Check header first (SPA), then parameter (forms)
-        String headerValue = request.getHeader(csrfToken.getHeaderName());
-        return (headerValue != null) ? headerValue :
-               delegate.resolveCsrfTokenValue(request, csrfToken);
+        String header = request.getHeader(csrfToken.getHeaderName());
+        // Header: raw token copied from the cookie. Otherwise: the masked _csrf form parameter.
+        return (StringUtils.hasText(header) ? this.plain : this.xor).resolveCsrfTokenValue(request, csrfToken);
     }
 }
 ```
+Without the `csrfToken.get()` call the token is deferred and the cookie is never sent, so the SPA has nothing to copy.
 
-### Client-Side (React/Fetch)
-```typescript
-// Read CSRF token from cookie
-function getCsrfToken(): string {
-  const match = document.cookie.match(/XSRF-TOKEN=([^;]+)/);
-  return match ? decodeURIComponent(match[1]) : '';
-}
+The client reads the `XSRF-TOKEN` cookie and sends its value in the `X-XSRF-TOKEN` header on every state-changing request (Angular and Axios do this by default; with `fetch`, add the header yourself).
 
-// Include in requests
-async function securePost(url: string, data: unknown) {
-  const response = await fetch(url, {
-    method: 'POST',
-    credentials: 'include',  // Send cookies
-    headers: {
-      'Content-Type': 'application/json',
-      'X-XSRF-TOKEN': getCsrfToken(),  // CSRF token in header
-    },
-    body: JSON.stringify(data),
-  });
-  return response.json();
-}
-```
+**Limit of double submit.** The server only checks that cookie and header agree. An attacker who can set a cookie for your domain (a compromised or takeover-prone sibling subdomain, or a plain-HTTP response on the same domain) supplies both values. Mitigations: host the application on a domain whose subdomains you control, serve only HTTPS with HSTS (`security-headers.md`), name the cookie with the `__Host-` prefix (`setCookieName`, with `Secure`, `Path=/` and no `Domain`; update the SPA to read the new name), and where you build the mechanism yourself, use OWASP's signed variant (an HMAC over the session id and a random value). The session-stored synchronizer token does not have this weakness.
 
-## SameSite Cookie Deep Dive {#samesite}
-
-### SameSite Values
-| Value | Cross-Site Requests | Top-Level Navigation |
-|-------|--------------------|--------------------|
-| `Strict` | Never sent | Never sent |
-| `Lax` | Never sent | Sent (GET only) |
-| `None` | Always sent* | Always sent* |
-
-*Requires `Secure` flag
-
-### Lax (Default in Modern Browsers)
+### Exemptions
 ```java
-// Cookie sent on:
-// - Same-site requests (always)
-// - Cross-site top-level navigation GET (clicking links)
-
-// Cookie NOT sent on:
-// - Cross-site POST/PUT/DELETE
-// - Cross-site AJAX
-// - Cross-site iframes
+http.csrf(csrf -> csrf.ignoringRequestMatchers("/api/webhooks/**"));
 ```
+Exempt only endpoints that carry no cookie credential and authenticate another way, for example webhooks verified by signature (`idempotency.md`). Prefer an exemption to disabling CSRF for the whole chain.
 
-### Strict
-```java
-// Cookie only sent on same-site requests
-// Never sent on cross-site requests, even navigation
+## SameSite Cookies
 
-// Good for: highly sensitive actions
-// Bad for: usability (user coming from email link won't be logged in)
-```
+`SameSite` controls whether a cookie is sent on requests that originate from another site.
 
-### Spring Configuration
-```java
-@Bean
-public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
-    http.sessionManagement(session -> session
-        .sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED)
-    );
-    return http.build();
-}
+| Value | Cross-site subrequests and form posts | Cross-site top-level GET navigation |
+|-------|---------------------------------------|-------------------------------------|
+| `Strict` | Not sent | Not sent |
+| `Lax` | Not sent | Sent |
+| `None` (requires `Secure`) | Sent | Sent |
 
-// application.yml
+- **Set it explicitly.** Browsers differ in what they do when the attribute is missing, and the browsers that default to `Lax` still send such a cookie on cross-site POSTs for about two minutes after it was set.
+- **"Site" is the registrable domain, not the origin.** `evil.example.com` and `app.example.com` are same-site, so SameSite does nothing against a hostile or compromised sibling subdomain.
+- `Lax` sends the cookie on top-level GET navigations, so a GET must never change state.
+- `Lax` is enough for OAuth and OIDC redirects back to your application (they are top-level GET navigations). `None` is needed only when your application is embedded or called from a different site, and it removes the protection.
+- `Strict` logs the user out of the first request when they arrive from an external link; use it for cookies that guard sensitive actions.
+
+```yaml
 server:
   servlet:
     session:
       cookie:
-        same-site: lax  # or strict
+        same-site: lax
         secure: true
         http-only: true
+        name: __Host-SESSION
 ```
 
-### SameSite Limitations
-- Not supported in older browsers
-- `Lax` allows GET navigation (logout CSRF still possible)
-- Cross-origin scenarios (subdomains, OAuth) require `None`
+SameSite is defence in depth. Keep the token.
 
-**Best Practice**: Use SameSite=Lax + synchronizer tokens
+## Fetch Metadata
 
-## Spring Security CSRF Config {#spring-csrf}
+Current browsers send `Sec-Fetch-Site` on every request: `same-origin`, `same-site`, `cross-site` or `none` (typed URL, bookmark). Rejecting state-changing requests that are not same-origin stops CSRF without a token and covers endpoints a token misses. Fall back to the `Origin` header for browsers that do not send it.
 
-### Enable CSRF (Default)
 ```java
-@Bean
-public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
-    // CSRF enabled by default
-    http.csrf(Customizer.withDefaults());
-    return http.build();
-}
-```
+public final class FetchMetadataFilter extends OncePerRequestFilter {
 
-### Disable for Stateless APIs
-```java
-@Bean
-public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
-    http
-        .csrf(csrf -> csrf.disable())  // Only for stateless JWT APIs
-        .sessionManagement(session -> session
-            .sessionCreationPolicy(SessionCreationPolicy.STATELESS));
-    return http.build();
-}
-```
+    private static final Set<String> SAFE_METHODS = Set.of("GET", "HEAD", "OPTIONS");
+    private final Set<String> ownOrigins;                 // e.g. "https://app.example.com"
 
-### Selective CSRF
-```java
-@Bean
-public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
-    http.csrf(csrf -> csrf
-        // Ignore CSRF for specific paths
-        .ignoringRequestMatchers("/api/webhooks/**")
-        .ignoringRequestMatchers("/api/public/**")
-    );
-    return http.build();
-}
-```
-
-### Custom Token Repository
-```java
-@Bean
-public CsrfTokenRepository csrfTokenRepository() {
-    // Cookie-based for SPAs
-    CookieCsrfTokenRepository repository = CookieCsrfTokenRepository.withHttpOnlyFalse();
-    repository.setCookieName("XSRF-TOKEN");
-    repository.setHeaderName("X-XSRF-TOKEN");
-    repository.setCookiePath("/");
-    return repository;
-}
-```
-
-### Testing with CSRF
-```java
-@WebMvcTest(UserController.class)
-class UserControllerTest {
-
-    @Autowired
-    private MockMvc mockMvc;
-
-    @Test
-    void createUser_shouldRequireCsrf() throws Exception {
-        mockMvc.perform(post("/api/users")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"name\":\"test\"}"))
-            .andExpect(status().isForbidden());  // No CSRF token
+    public FetchMetadataFilter(Set<String> ownOrigins) {
+        this.ownOrigins = Set.copyOf(ownOrigins);
     }
-
-    @Test
-    void createUser_withCsrf_shouldSucceed() throws Exception {
-        mockMvc.perform(post("/api/users")
-                .with(csrf())  // Add CSRF token
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"name\":\"test\"}"))
-            .andExpect(status().isCreated());
-    }
-}
-```
-
-## SPA/API CSRF Protection {#spa-api}
-
-### Custom Header Defense
-Require custom header that can't be set cross-origin:
-
-```java
-@Bean
-public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
-    http.csrf(csrf -> csrf.disable())  // Disable standard CSRF
-        .addFilterBefore(new CustomHeaderFilter(), UsernamePasswordAuthenticationFilter.class);
-    return http.build();
-}
-
-public class CustomHeaderFilter extends OncePerRequestFilter {
 
     @Override
-    protected void doFilterInternal(HttpServletRequest request,
-                                    HttpServletResponse response,
-                                    FilterChain chain) throws ServletException, IOException {
-
-        if (isStateChanging(request.getMethod())) {
-            String customHeader = request.getHeader("X-Requested-With");
-            if (!"XMLHttpRequest".equals(customHeader)) {
-                response.sendError(HttpServletResponse.SC_FORBIDDEN, "Missing custom header");
-                return;
-            }
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+            throws ServletException, IOException {
+        if (!SAFE_METHODS.contains(request.getMethod()) && !isSameOrigin(request)) {
+            response.sendError(HttpServletResponse.SC_FORBIDDEN);
+            return;
         }
         chain.doFilter(request, response);
     }
 
-    private boolean isStateChanging(String method) {
-        return "POST".equals(method) || "PUT".equals(method) ||
-               "DELETE".equals(method) || "PATCH".equals(method);
+    private boolean isSameOrigin(HttpServletRequest request) {
+        String site = request.getHeader("Sec-Fetch-Site");
+        if (site != null) {
+            return site.equals("same-origin");            // same-site is refused: sibling subdomains are not trusted
+        }
+        String origin = request.getHeader("Origin");
+        return origin != null && ownOrigins.contains(origin);   // neither header: refuse
     }
 }
 ```
+Apply it to cookie-authenticated routes. Non-browser clients send neither header, so routes they call with a bearer token need a separate filter chain.
 
-### Origin/Referer Validation
+## Common Mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| `csrf.disable()` "because it is an API" while authentication is a cookie | Keep CSRF on, or move the credential to a header |
+| GET that changes state (`/logout`, `/delete?id=`) | POST, PUT, PATCH or DELETE only |
+| Token present in a cookie but never compared with a header or field | The server must require the token outside the cookie |
+| Relying on SameSite or CORS alone | Token or Fetch Metadata check, SameSite on top |
+| Login form without CSRF protection | Protect it: login CSRF signs the victim into the attacker's account |
+| XSS anywhere on the origin | XSS defeats every CSRF defence; see `xss-prevention.md` |
+
+## Testing
+
 ```java
-@Component
-public class OriginValidationFilter extends OncePerRequestFilter {
-
-    private static final Set<String> ALLOWED_ORIGINS = Set.of(
-        "https://app.example.com",
-        "https://admin.example.com"
-    );
-
-    @Override
-    protected void doFilterInternal(HttpServletRequest request,
-                                    HttpServletResponse response,
-                                    FilterChain chain) throws ServletException, IOException {
-
-        if (isStateChanging(request.getMethod())) {
-            String origin = request.getHeader("Origin");
-            String referer = request.getHeader("Referer");
-
-            if (!isValidOrigin(origin, referer)) {
-                response.sendError(HttpServletResponse.SC_FORBIDDEN, "Invalid origin");
-                return;
-            }
-        }
-        chain.doFilter(request, response);
-    }
-
-    private boolean isValidOrigin(String origin, String referer) {
-        // Check Origin header first
-        if (origin != null) {
-            return ALLOWED_ORIGINS.contains(origin);
-        }
-        // Fall back to Referer
-        if (referer != null) {
-            try {
-                URL url = new URL(referer);
-                String refOrigin = url.getProtocol() + "://" + url.getHost();
-                return ALLOWED_ORIGINS.contains(refOrigin);
-            } catch (MalformedURLException e) {
-                return false;
-            }
-        }
-        // No origin info - block by default for state-changing
-        return false;
-    }
+@Test
+void postWithoutTokenIsForbidden() throws Exception {
+    mockMvc.perform(post("/api/users").with(user("alice"))
+            .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"test\"}"))
+        .andExpect(status().isForbidden());
 }
 ```
-
-### React/Next.js Integration
-```typescript
-// lib/api.ts
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
-
-async function fetchWithCsrf(url: string, options: RequestInit = {}) {
-  // Get CSRF token from cookie (set by backend)
-  const csrfToken = getCookie('XSRF-TOKEN');
-
-  const response = await fetch(`${API_BASE}${url}`, {
-    ...options,
-    credentials: 'include',
-    headers: {
-      ...options.headers,
-      'Content-Type': 'application/json',
-      'X-XSRF-TOKEN': csrfToken ?? '',
-      'X-Requested-With': 'XMLHttpRequest',
-    },
-  });
-
-  if (!response.ok) {
-    throw new ApiError(response.status, await response.text());
-  }
-
-  return response.json();
-}
-
-export const api = {
-  get: (url: string) => fetchWithCsrf(url, { method: 'GET' }),
-  post: (url: string, data: unknown) =>
-    fetchWithCsrf(url, { method: 'POST', body: JSON.stringify(data) }),
-  put: (url: string, data: unknown) =>
-    fetchWithCsrf(url, { method: 'PUT', body: JSON.stringify(data) }),
-  delete: (url: string) => fetchWithCsrf(url, { method: 'DELETE' }),
-};
-```
-
-## Common CSRF Mistakes
-
-### Mistake 1: CSRF Disabled for Convenience
-```java
-// VULNERABLE: Disabled because "it's just an API"
-http.csrf(csrf -> csrf.disable());
-
-// But API uses session cookies for auth = CSRF vulnerable!
-```
-
-### Mistake 2: GET Requests with Side Effects
-```java
-// VULNERABLE: State change on GET (no CSRF protection)
-@GetMapping("/api/logout")
-public void logout(HttpSession session) {
-    session.invalidate();
-}
-
-// SAFE: Use POST for state changes
-@PostMapping("/api/logout")
-public void logout(HttpSession session) {
-    session.invalidate();
-}
-```
-
-### Mistake 3: Token in Cookie Only
-```java
-// VULNERABLE: Token only in cookie, not validated in header/body
-// Attacker can trigger request with cookie auto-attached
-
-// SAFE: Double-submit - require token in both cookie AND header
-```
-
-### Mistake 4: Predictable Tokens
-```java
-// VULNERABLE: Token based on session ID
-String token = DigestUtils.md5Hex(session.getId());
-
-// SAFE: Cryptographically random token
-String token = UUID.randomUUID().toString();
-```
-
-## Quick Reference
-
-### When to Use CSRF Protection
-- Session cookies for authentication
-- Any state-changing operation
-- Traditional form submissions
-- AJAX with credentials: 'include'
-
-### When CSRF Can Be Disabled
-- Stateless JWT (token in Authorization header)
-- Public read-only APIs
-- Webhook endpoints (use HMAC signature instead)
-
-### Recommended Approach
-1. **SameSite=Lax cookies** (blocks most cross-site requests)
-2. **Plus synchronizer token** (defense in depth)
-3. **Plus origin validation** (additional layer)
-4. **Plus custom header requirement** (for APIs)
-
-### Testing Checklist
-- [ ] POST without token returns 403
-- [ ] POST with valid token succeeds
-- [ ] Token is unique per session
-- [ ] Token changes on login
-- [ ] GET requests don't have side effects
+The same request with `.with(csrf())` succeeds. Also assert that no GET handler has a side effect and that the session id and token change at login.

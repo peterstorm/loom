@@ -45,6 +45,7 @@
 
 import { match } from "ts-pattern";
 import { canonicalDigest } from "./digest";
+import { loomHelperCommand } from "./loom-cli-command";
 import { compareStrings } from "./ordering";
 import { failure, success, type ArtifactDigest, type DomainResult } from "./orchestration-contract/identity";
 import { standaloneDispositionSchema } from "./standalone-lineage-contract";
@@ -229,10 +230,11 @@ export function securityDisposition(input: Readonly<{
 }
 
 /** The handoff as prose, for the report and the `disposition` operation: what
- *  leaves the audit, and the exact command that consumes it, at the paths the
- *  disposition's own source derives. An operator should not have to read this
- *  module to know what to run next. */
-export function renderDispositionHandoff(disposition: SecurityDisposition): string {
+ *  leaves the audit, and the exact command that consumes it — through the Loom
+ *  package at `packageRoot` — at the paths the disposition's own source
+ *  derives. An operator should not have to read this module to know what to
+ *  run next, nor translate the line before running it. */
+export function renderDispositionHandoff(packageRoot: string, disposition: SecurityDisposition): string {
   const handoff = dispositionHandoffPaths(disposition.source.locator, disposition.source.runId);
   const count = (decision: SecurityDispositionDecision): number =>
     disposition.entries.filter((entry) => entry.decision === decision).length;
@@ -247,7 +249,7 @@ export function renderDispositionHandoff(disposition: SecurityDisposition): stri
     ...(disposition.entries.length === 0
       ? []
       : [
-        `    helper orchestration start standalone-disposition --runs-root ${quoteShellArgument(handoff.runsRoot)} \\`,
+        `    ${loomHelperCommand(packageRoot)} orchestration start standalone-disposition --runs-root ${quoteShellArgument(handoff.runsRoot)} \\`,
         `      --run ${quoteShellArgument(handoff.runName)} < ${quoteShellArgument(handoff.inputFile)}`,
         "",
       ]),

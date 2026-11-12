@@ -1,7 +1,7 @@
 # ADR-0070: The plan design review gates decompose
 
 ## Status
-Proposed (2026-11-12). Implements Q3 (plan side) of the deterministic-implementation plan's Q-track.
+Accepted (2026-11-12). Implemented in PR #160. Implements Q3 (plan side) of the deterministic-implementation plan's Q-track.
 
 ## Context
 Type-design and architecture findings are raised at the Wave Gate, after the code exists, and each one costs
