@@ -16,7 +16,7 @@
 
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import type { HookHandler, PreToolUseInput } from "../../types";
+import type { PreToolUseInput } from "../../types";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import {
   isLoomNamespacedAgent,
@@ -39,7 +39,7 @@ import { validatePiAgentDefinitionFile } from "../../utils/render-pi-agent";
 import { activeAgentDir, buildPiRoutingContext } from "../../utils/model-routing-context";
 import { piAgentDefinitionPath } from "../../core/pi-agent-directory";
 import { withBriefMarkerExpanded } from "./implementation-brief-marker";
-import { failClosedInput } from "./pre-tool-use-input";
+import { failClosedGuard } from "./pre-tool-use-input";
 
 type PiAgentDefinitionLookup =
   | Readonly<{ kind: "found"; path: string }>
@@ -89,10 +89,7 @@ function modelFrontmatter(path: string): ModelFrontmatterRead {
 const readString = (value: unknown): string | undefined =>
   typeof value === "string" ? value : undefined;
 
-const handler: HookHandler = async (stdin) => {
-  const parsed = failClosedInput("validate-agent-model", stdin);
-  if (!parsed.ok) return parsed.block;
-  const { input } = parsed;
+const handler = failClosedGuard("validate-agent-model", (input) => {
   if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
 
   // Read, not cast. `tool_input` is `Record<string, unknown>` straight off
@@ -197,7 +194,7 @@ const handler: HookHandler = async (stdin) => {
         kind: "block",
         message: `BLOCKED: Claude Code model policy failed for '${rawAgent}' (${path}):\n${errors.map((e) => `  - ${e}`).join("\n")}`,
       };
-};
+});
 
 export type EngineIssuedClaudeModelLookup =
   | Readonly<{ kind: "found"; model: string }>

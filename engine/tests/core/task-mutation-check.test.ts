@@ -253,30 +253,23 @@ const survivorArb: fc.Arbitrary<TaskSurvivor> = fc.record({
   coverage: fc.constantFrom<TaskSurvivor["coverage"]>("tested", "untested"),
 });
 
+/** A tally the constructor admits: candidates are 0 when no mutant was selected, and at least the mutants otherwise. */
+const tallyArb: fc.Arbitrary<TaskMutationTally> = fc.record({
+  killed: fc.nat({ max: 6 }),
+  invalid: fc.nat({ max: 6 }),
+  survivors: fc.array(survivorArb, { maxLength: 4 }),
+  extra: fc.nat({ max: 20 }),
+}).map(({ killed, invalid, survivors, extra }) => {
+  const mutants = killed + invalid + survivors.length;
+  return { killed, invalid, survivors, candidates: mutants === 0 ? 0 : mutants + extra };
+});
+
 const resultArb: fc.Arbitrary<TaskMutationResult> = fc.oneof(
   fc.string({ minLength: 1, maxLength: 40 }).map(taskMutationUnavailable),
-  fc.record({
-    killed: fc.nat({ max: 4 }),
-    invalid: fc.nat({ max: 4 }),
-    survivors: fc.array(survivorArb, { maxLength: 4 }),
-    extra: fc.nat({ max: 20 }),
-  }).map(({ killed, invalid, survivors, extra }) => {
-    const mutants = killed + invalid + survivors.length;
-    return talliedResult({ killed, invalid, survivors, candidates: mutants === 0 ? 0 : mutants + extra });
-  }),
+  tallyArb.map(talliedResult),
 );
 
 describe("taskMutationResult", () => {
-  const tallyArb: fc.Arbitrary<TaskMutationTally> = fc.record({
-    killed: fc.nat({ max: 6 }),
-    invalid: fc.nat({ max: 6 }),
-    survivors: fc.array(survivorArb, { maxLength: 4 }),
-    extra: fc.nat({ max: 20 }),
-  }).map(({ killed, invalid, survivors, extra }) => {
-    const mutants = killed + invalid + survivors.length;
-    return { killed, invalid, survivors, candidates: mutants === 0 ? 0 : mutants + extra };
-  });
-
   it("property: the kind follows from the tallies alone, and the result counts every mutant it was given", () => {
     fc.assert(fc.property(tallyArb, (tally) => {
       const result = taskMutationResult(tally);
@@ -396,7 +389,7 @@ describe("the Task mutation record", () => {
     ["another kind", { ...CLEAN, kind: "loom-receipt" }, /kind must be/],
     ["an empty Task id", { ...CLEAN, taskId: "" }, /taskId must be a non-empty string/],
     ["a digest that is no sha256", { ...CLEAN, digest: "abc" }, /digest must be a sha256 hex digest/],
-    ["an unknown result kind", { ...CLEAN, result: { kind: "passed" } }, /result\.kind must be one of "no-mutants", "clean"/],
+    ["an unknown result kind", { ...CLEAN, result: { kind: "passed" } }, /result\.kind must be one of "no-mutants", "clean", "survivors", "inconclusive", "unavailable"$/],
     ["more mutants than candidates", clean({ killed: 6 }), /more than the 5 candidate site/],
     ["a negative count", clean({ killed: -1 }), /result\.killed must be a non-negative integer/],
     ["a clean result with no kill: every mutant invalid", clean({ killed: 0, invalid: 3 }), /names a clean result, but its counts make it inconclusive/],

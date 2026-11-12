@@ -243,6 +243,11 @@ describe("the Task mutation record store", () => {
     expect(taskIdFileSegment("T_1")).toBe("T_5f1");
   });
 
+  it("escapes each UTF-8 byte of a multi-byte character, and only those", () => {
+    expect(taskIdFileSegment("Té")).toBe("T_c3_a9");
+    expect(taskIdFileSegment("T😀1")).toBe("T_f0_9f_98_801");
+  });
+
   it("property: two distinct Task ids never share a record file name, and none holds a separator", () => {
     const id = fc.string({ unit: fc.constantFrom("T", "1", "_", " ", "-", "/", ".", "é", "2", "f"), minLength: 1, maxLength: 8 });
     fc.assert(fc.property(id, id, (left, right) => {

@@ -31,6 +31,21 @@ describe("explicit bounded successor registration ingress", () => {
     expect(parseStandaloneSuccessorStartInput({ ...input, kind: "plan-design" })).toEqual({
       ok: false, message: "a plan-design review has no successor; start a fresh plan-design review of the edited plan" });
   });
+  it.each<[string, unknown, unknown, string]>([
+    ["an unknown kind over a valid scope", "bogus", ["a.ts"], "successor kind or bounded explicit scope is invalid"],
+    ["an unknown kind over an invalid scope", "bogus", "a.ts", "successor kind or bounded explicit scope is invalid"],
+    ["a kind that is not text", 7, ["a.ts"], "successor kind or bounded explicit scope is invalid"],
+    ["a refused kind over an invalid scope", "plan-design", "a.ts",
+      "a plan-design review has no successor; start a fresh plan-design review of the edited plan"],
+    ["a refused kind over an oversized scope", "plan-design", Array.from({ length: 4097 }, (_, i) => `a${i}.ts`),
+      "a plan-design review has no successor; start a fresh plan-design review of the edited plan"],
+    ["an allowed kind over a scope that is not a list", "types", "a.ts", "successor kind or bounded explicit scope is invalid"],
+    ["an allowed kind over an oversized scope", "types", Array.from({ length: 4097 }, (_, i) => `a${i}.ts`),
+      "successor kind or bounded explicit scope is invalid"],
+  ])("refuses %s in order: unknown kind, then a kind with no successor, then the scope", (_label, kind, files, message) => {
+    expect(parseStandaloneSuccessorStartInput({ ...input, kind, files })).toEqual({ ok: false, message });
+  });
+
   it("preserves exact explicit source and policy identities for arbitrary valid SHA-256 references", () => {
     fc.assert(fc.property(fc.uint8Array({ minLength: 32, maxLength: 32 }), bytes => {
       const digest = Buffer.from(bytes).toString("hex");

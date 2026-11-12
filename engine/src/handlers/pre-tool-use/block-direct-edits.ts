@@ -44,7 +44,7 @@ import {
   TASK_GRAPH_POINTER_SUFFIX,
   type SessionId,
 } from "../../machine/evidence";
-import { failClosedInput } from "./pre-tool-use-input";
+import { failClosedGuard } from "./pre-tool-use-input";
 import {
   ensureRosteredImplementationBinding,
   observeImplementationBinding,
@@ -354,12 +354,9 @@ function callerBindingProbe(
     : observeImplementationBinding(sessionId, agentId);
 }
 
-const handler: HookHandler = async (stdin) => {
-  // Malformed hook input on a guard route fails CLOSED: a crash would exit 1 —
-  // NON-blocking for PreToolUse — silently waving the edit past the guard.
-  const read = failClosedInput("block-direct-edits", stdin);
-  if (!read.ok) return read.block;
-  const parsed = read.input;
+// Malformed hook input on a guard route fails CLOSED: a crash would exit 1 —
+// NON-blocking for PreToolUse — silently waving the edit past the guard.
+const handler: HookHandler = failClosedGuard("block-direct-edits", (parsed) => {
   // One roster read feeds both the binding attempt and the decision. An
   // unparseable session id reaches core unchanged, which blocks on it.
   const sessionId = parseSessionId(parsed.session_id);
@@ -375,6 +372,6 @@ const handler: HookHandler = async (stdin) => {
       locateEdit: claudeEditSite(parsed, sessionId),
     },
   );
-};
+});
 
 export default handler;

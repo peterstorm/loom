@@ -416,7 +416,8 @@ describe("no-wire-cast properties", () => {
  * The cost of the rule, pinned as RATIOS between runs on the same machine, never as a wall-clock deadline:
  * machine speed and load cancel out of a ratio, and an absolute bound (a 2,100-line file under the hook's
  * 50 ms) failed once on a loaded CI runner with no regression in the rule. ADR-0072 states what these
- * pin and what they do not.
+ * pin and what they do not. The early exit for a file that never mentions JSON is pinned by watching
+ * the lexer (`no-wire-cast.early-exit.test.ts`), not by timing.
  */
 describe("no-wire-cast cost", () => {
   /** Each generated function: seven lines, three wire calls, two of them sites (the `as Head` and the typed assignment). */
@@ -473,17 +474,5 @@ describe("no-wire-cast cost", () => {
     const grown = fileOf(FUNCTIONS * GROWTH);
     const [once, grownCost] = fastestOf([findsEverySite(LARGE, FUNCTIONS), findsEverySite(grown, FUNCTIONS * GROWTH)]);
     expect(grownCost).toBeLessThan(once * GROWTH * 3);
-  });
-
-  it("answers a file whose text holds neither `JSON` nor `json` before lexing it; the same file holding `json` pays the lex", () => {
-    // The early exit is a substring test, not a test for the call: the second file names no wire call
-    // either, yet its `json` comment sends it through the lex and the bracket pairing.
-    const plain = Array.from({ length: 20_000 }, (_, index) => `export const value${index} = { id: ${index} };`).join("\n");
-    const mentioning = `${plain}\n// read from ./package.json`;
-    const [unlexed, lexed] = fastestOf([
-      () => expect(lint(plain)).toEqual([]),
-      () => expect(lint(mentioning)).toEqual([]),
-    ]);
-    expect(unlexed * 10).toBeLessThan(lexed);
   });
 });

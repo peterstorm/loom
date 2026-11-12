@@ -108,6 +108,19 @@ type AffectedFirst<Affected, Mutation> = Readonly<{ acceptance: null; affected: 
 /** The checks with only mutation filled. */
 type MutationOnly<Mutation> = Readonly<{ acceptance: null; affected: null; mutation: Mutation }>;
 
+/*
+ * Which shape a `SomeChecks` has, read from its slots' null-ness. TypeScript
+ * never narrows a union on a property whose type is generic, so a null test on
+ * `checks.acceptance` narrows that slot but not `checks`; these two predicates
+ * are where the shape is read, and a check that is neither is `MutationOnly`.
+ * Pass the check type explicitly: on a union one predicate has already
+ * narrowed, inference would read an empty slot's null as part of the check.
+ */
+const isAcceptanceFirst = <Check>(checks: SomeChecks<Check, Check, Check>): checks is AcceptanceFirst<Check, Check, Check> =>
+  checks.acceptance !== null;
+const isAffectedFirst = <Check>(checks: SomeChecks<Check, Check, Check>): checks is AffectedFirst<Check, Check> =>
+  checks.acceptance === null && checks.affected !== null;
+
 /** The slots as `SomeChecks`, or null when none is filled. */
 function someChecks<Acceptance, Affected, Mutation>(
   acceptance: Acceptance | null,
@@ -130,13 +143,10 @@ export function mapSomeChecks<Check, Part>(
   f: (name: StopCheckName, check: Check) => Part,
 ): SomeChecks<Part, Part, Part> {
   const at = (name: StopCheckName, check: Check | null): Part | null => check === null ? null : f(name, check);
-  const acceptanceFirst = (some: SomeChecks<Check, Check, Check>): some is AcceptanceFirst<Check, Check, Check> => some.acceptance !== null;
-  const affectedFirst = (some: SomeChecks<Check, Check, Check>): some is AffectedFirst<Check, Check> =>
-    some.acceptance === null && some.affected !== null;
-  if (acceptanceFirst(checks)) {
+  if (isAcceptanceFirst<Check>(checks)) {
     return freeze({ acceptance: f("acceptance", checks.acceptance), affected: at("affected", checks.affected), mutation: at("mutation", checks.mutation) });
   }
-  if (affectedFirst(checks)) return freeze({ acceptance: null, affected: f("affected", checks.affected), mutation: at("mutation", checks.mutation) });
+  if (isAffectedFirst<Check>(checks)) return freeze({ acceptance: null, affected: f("affected", checks.affected), mutation: at("mutation", checks.mutation) });
   return freeze({ acceptance: null, affected: null, mutation: f("mutation", checks.mutation) });
 }
 

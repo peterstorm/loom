@@ -26,6 +26,7 @@ export type RegisteredStandaloneSuccessorProgram = Readonly<{
   input: StandaloneSuccessorStartInput; authority: unknown; currentSource: ByteSection; previousContexts: readonly ByteSection[];
 }>;
 const bad = (message: string): ProgramParse<never> => ({ ok: false, message });
+const INVALID_KIND_OR_SCOPE = "successor kind or bounded explicit scope is invalid";
 function exact(raw: unknown, keys: readonly string[]): raw is Record<string, unknown> {
   return typeof raw === "object" && raw !== null && !Array.isArray(raw) && Reflect.ownKeys(raw).length === keys.length &&
     keys.every(key => { const field = Object.getOwnPropertyDescriptor(raw, key); return field !== undefined && "value" in field && field.enumerable; });
@@ -34,10 +35,11 @@ export function parseStandaloneSuccessorStartInput(raw: unknown): ProgramParse<S
   if (!exact(raw, ["schemaVersion", "kind", "files", "dryRun", "successor"]) || raw.schemaVersion !== 3 || raw.dryRun !== false ||
       !exact(raw.successor, ["source", "disposition"])) return bad("successor input requires explicit schemaVersion 3, kind, files, dryRun false, and successor source/disposition");
   const kind = parseStandaloneReviewKind(raw.kind);
+  if (kind === null) return bad(INVALID_KIND_OR_SCOPE);
   // A kind reviewed whole and afresh each time (an edited plan) has no successor.
-  const successor = kind === null ? null : standaloneReviewProfile([kind]).successor;
-  if (successor?.kind === "refused") return bad(successor.reason);
-  if (kind === null ||!Array.isArray(raw.files) || raw.files.length > STANDALONE_LINEAGE_LIMITS.paths) return bad("successor kind or bounded explicit scope is invalid");
+  const { successor } = standaloneReviewProfile([kind]);
+  if (successor.kind === "refused") return bad(successor.reason);
+  if (!Array.isArray(raw.files) || raw.files.length > STANDALONE_LINEAGE_LIMITS.paths) return bad(INVALID_KIND_OR_SCOPE);
   const scope = parseStandaloneReviewScope(raw.files);
   if (!scope.ok || !canonicalStructuralEquals(scope.value, raw.files)) return bad("successor files must be the ordered canonical explicit scope");
   if (!exact(raw.successor.source, ["locator", "runId", "resultDigest"])) return bad("successor publication reference must contain only exact own-data fields");

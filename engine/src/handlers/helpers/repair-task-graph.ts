@@ -3,7 +3,7 @@ import { pathExistsFailClosed, taskGraphPath } from "../../config";
 import { parseTaskGraph, StateManager } from "../../state-manager";
 import type { HookHandler, TaskGraph } from "../../types";
 import { fixFull, validateFull } from "./validate-task-graph";
-import { checkPlanModelBindings, productionModelBindingDeps, type ModelBindingDeps } from "./validate-model-bindings";
+import { checkPlanModelBindings, productionModelBindingDeps, type PlanBindingDeps } from "./validate-model-bindings";
 
 export type TaskGraphRepairPreparation =
   | {
@@ -33,7 +33,7 @@ export type TaskGraphRepairPreparation =
  */
 export function prepareTaskGraphRepair(
   raw: unknown,
-  deps: ModelBindingDeps = productionModelBindingDeps,
+  deps: PlanBindingDeps = productionModelBindingDeps,
 ): TaskGraphRepairPreparation {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return { ok: false, errors: ["Task graph must be a JSON object"] };

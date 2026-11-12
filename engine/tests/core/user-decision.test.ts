@@ -7,7 +7,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { parseUserDecision, type DecisionRecipient } from "../../src/core/user-decision";
-import { notAJsonObject } from "../fixtures/json-wire";
+import { notAJsonObject, wireOf } from "../fixtures/json-wire";
 import { refusal, value } from "../fixtures/parse-result";
 
 const RECIPIENTS: readonly DecisionRecipient[] = ["wave-gate", "unregistered-run"];
@@ -16,7 +16,7 @@ const objects = fc.dictionary(fc.string(), fc.jsonValue());
 describe("parseUserDecision", () => {
   it("property: an unregistered run records any JSON object as given", () => {
     fc.assert(fc.property(objects, (decision) => {
-      expect(value(parseUserDecision(JSON.stringify(decision), "unregistered-run"))).toEqual(JSON.parse(JSON.stringify(decision)));
+      expect(value(parseUserDecision(JSON.stringify(decision), "unregistered-run"))).toEqual(wireOf(decision));
     }));
   });
 

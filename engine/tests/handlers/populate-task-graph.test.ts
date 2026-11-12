@@ -11,7 +11,7 @@ import {
 import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
-import populate, { resolvedSpecFile } from "../../src/handlers/helpers/populate-task-graph";
+import populate, { createPopulateTaskGraphHandler, resolvedSpecFile } from "../../src/handlers/helpers/populate-task-graph";
 import type { Task, TaskGraph } from "../../src/types";
 import { isDistillTask } from "../../src/core/distill-task";
 import { deriveWaveCompletionSuiteReadiness } from "../../src/core/wave-completion-suite-readiness";
@@ -25,8 +25,8 @@ import { capturedSpecCheck } from "../../src/core/spec-check";
 import { canonicalSpecBeside } from "../fixtures/spec-index-fixture";
 import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
 import { parseDecomposeEnvelope } from "../../src/core/decompose-payload";
-import { sha256Hex } from "../../src/core/digest";
-import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract/identity";
+import { artifactDigestOfBytes, sha256Hex } from "../../src/core/digest";
+import { parseArtifactDigest, parseOrchestrationRunId, type ArtifactDigest } from "../../src/core/orchestration-contract/identity";
 import {
   PLAN_DESIGN_REVIEW_REQUIRED,
   PLAN_DESIGN_REVIEW_SKIPPED,
@@ -831,12 +831,13 @@ describe("populate-task-graph — the validator and the typed parser cannot disa
 
 describe("populate-task-graph — asks the plan design gate on first population (ADR-0070)", () => {
   const PLAN_TEXT = "# Plan\n\nNo models.\n";
-  const accepted = (planText: string): RecordedPlanDesignReview => ({
+  const acceptedDigest = (planSha256: ArtifactDigest): RecordedPlanDesignReview => ({
     status: "accepted",
-    planSha256: value(parseArtifactDigest(sha256Hex(planText))),
+    planSha256,
     runId: value(parseOrchestrationRunId("design")),
     resultDigest: value(parseArtifactDigest("a".repeat(64))),
   });
+  const accepted = (planText: string): RecordedPlanDesignReview => acceptedDigest(value(parseArtifactDigest(sha256Hex(planText))));
 
   it.each<[string, RecordedPlanDesignReview, string]>([
     ["a review is still required", PLAN_DESIGN_REVIEW_REQUIRED, "has no accepted design review"],
@@ -877,6 +878,85 @@ describe("populate-task-graph — asks the plan design gate on first population 
     const plan = modelFreePlan(dir);
     writeState(dir, plan, [existingTask("T1", "pending")], { current_phase: "execute", plan_design_review: PLAN_DESIGN_REVIEW_REQUIRED });
     expect((await populate(decomposeJson(plan), [])).kind).toBe("passthrough");
+  });
+
+  describe("reads the plan once, through its injected read", () => {
+    const REVIEWED = "# Plan\n\nThe reviewed bytes.\n";
+    /** A plan read that serves `plan` whatever the file holds, recording each path it was asked for. */
+    const servingPlan = (plan: string | Uint8Array, reads: string[]) =>
+      createPopulateTaskGraphHandler((path) => {
+        reads.push(path);
+        return { ok: true, bytes: typeof plan === "string" ? Buffer.from(plan) : plan };
+      });
+
+    it("gates on the digest of the raw bytes, so a plan that is not UTF-8 matches a review of exactly those bytes", async () => {
+      // Decoding replaces the 0xff byte, so a digest of the decoded text would not match the review.
+      const bytes = Uint8Array.from([...Buffer.from(REVIEWED), 0xff, 0x0a]);
+      expect(sha256Hex(Buffer.from(bytes).toString("utf-8"))).not.toBe(artifactDigestOfBytes(bytes));
+      const dir = tempDir();
+      const plan = modelFreePlan(dir);
+      writeState(dir, plan, [], {
+        current_phase: "decompose",
+        plan_design_review: acceptedDigest(artifactDigestOfBytes(bytes)),
+      });
+      const reads: string[] = [];
+
+      expect((await servingPlan(bytes, reads)(decomposeJson(plan), [])).kind).toBe("passthrough");
+      expect(reads).toEqual([plan]);
+    });
+
+    it("gates on the digest of the bytes that read returned: an accepted review of them populates though the file differs", async () => {
+      const dir = tempDir();
+      const plan = modelFreePlan(dir);
+      writeState(dir, plan, [], { current_phase: "decompose", plan_design_review: accepted(REVIEWED) });
+      const reads: string[] = [];
+
+      expect((await servingPlan(REVIEWED, reads)(decomposeJson(plan), [])).kind).toBe("passthrough");
+      expect(reads).toEqual([plan]);
+    });
+
+    it("refuses when the read returned bytes other than the reviewed ones, though the file holds the reviewed bytes", async () => {
+      const dir = tempDir();
+      const plan = modelFreePlan(dir);
+      const statePath = writeState(dir, plan, [], { current_phase: "decompose", plan_design_review: accepted(PLAN_TEXT) });
+      const before = stateBytes(statePath);
+      const reads: string[] = [];
+
+      const result = await servingPlan(REVIEWED, reads)(decomposeJson(plan), []);
+
+      expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("changed after its design review was accepted") });
+      expect(reads).toEqual([plan]);
+      expect(stateBytes(statePath)).toBe(before);
+    });
+
+    it("validates the model bindings of the text that read returned", async () => {
+      const dir = tempDir();
+      const plan = modelFreePlan(dir);
+      const statePath = writeState(dir, plan, [], { current_phase: "decompose" });
+      const before = stateBytes(statePath);
+      const reads: string[] = [];
+      const unboundInvariant = "# Plan\n\n## Invariants\n\n### INV-1: Fees are exact\n\n**Tier:** checkable\n";
+
+      const result = await servingPlan(unboundInvariant, reads)(decomposeJson(plan), []);
+
+      expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("Executable-model binding validation FAILED") });
+      expect(result).toMatchObject({ message: expect.stringContaining("no '**Rule file:**' declared") });
+      expect(reads).toEqual([plan]);
+      expect(stateBytes(statePath)).toBe(before);
+    });
+
+    it("reports a plan the read could not return, as the binding check names it", async () => {
+      const dir = tempDir();
+      const plan = modelFreePlan(dir);
+      writeState(dir, plan, [], { current_phase: "decompose" });
+      const unreadable = createPopulateTaskGraphHandler(() => ({ ok: false, error: "EACCES: permission denied" }));
+
+      expect(await unreadable(decomposeJson(plan), [])).toEqual({
+        kind: "error",
+        message: "Executable-model binding validation FAILED (1 errors) — task graph not populated:\n" +
+          `  - cannot read plan_file '${plan}': EACCES: permission denied — executable-model bindings cannot be verified (fix the path or run from the repo root)`,
+      });
+    });
   });
 });
 

@@ -42,6 +42,14 @@ export type RegisteredStandaloneProgram = RegisteredStandaloneSuccessorProgram |
   authority: unknown;
 }>);
 
+/**
+ * Whether the Run was registered with the read obligation (ADR-0022). Only a
+ * schema-2 registration carrying the read-coverage policy obliges it; a v1
+ * Run, a v2 Run without the policy and a successor (v3) Run do not.
+ */
+export const readObligated = (registration: RegisteredStandaloneProgram): boolean =>
+  registration.schemaVersion === 2 && registration.readCoverage !== undefined;
+
 export type RegisteredFacadeProgram = RegisteredStandaloneProgram | RegisteredRemediationProgram | RegisteredWaveGateProgram |
   RegisteredStandaloneDispositionProgram | RegisteredSecurityVerificationProgram;
 

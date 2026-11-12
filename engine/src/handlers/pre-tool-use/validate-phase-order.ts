@@ -4,8 +4,8 @@
  * Claude Code wrapper — delegates to core/.
  */
 
-import type { HookHandler, TaskGraph } from "../../types";
-import { failClosedInput } from "./pre-tool-use-input";
+import type { TaskGraph } from "../../types";
+import { failClosedGuard } from "./pre-tool-use-input";
 import {
   validatePhaseOrder,
   type PhaseOrderDeps,
@@ -16,10 +16,6 @@ import { StateManager } from "../../state-manager";
 import { realArtifactProbe } from "../../orchestration/artifact-probe";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { withBriefMarkerExpanded } from "./implementation-brief-marker";
-
-// The real phase-artifact reads live in a neutral shell module so other shells
-// share the adapter without importing this handler; re-exported for its tests.
-export { realArtifactProbe };
 
 /**
  * The real protected-state read. It lives HERE rather than in the gate core
@@ -48,19 +44,16 @@ export const realPhaseOrderDeps: PhaseOrderDeps = {
   artifacts: realArtifactProbe,
 };
 
-const handler: HookHandler = async (stdin) => {
-  // Malformed hook input on a spawn-gate route: fail CLOSED. Returning
-  // allow here would exit 0 and let a Task spawn out of phase order.
-  const parsed = failClosedInput("validate-phase-order", stdin);
-  if (!parsed.ok) return parsed.block;
-  const { input } = parsed;
+// Malformed hook input on a spawn-gate route: fail CLOSED. Returning
+// allow here would exit 0 and let a Task spawn out of phase order.
+const handler = failClosedGuard("validate-phase-order", (input) => {
   if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
 
   return validatePhaseOrder({
     agentType: stripNamespace((input.tool_input?.subagent_type as string) ?? (input.tool_input?.agent as string) ?? ""),
     prompt: (input.tool_input?.prompt as string) ?? (input.tool_input?.task as string) ?? "",
   }, realPhaseOrderDeps);
-};
+});
 
 // A brief marker is judged as the brief it expands to.
 export default withBriefMarkerExpanded("validate-phase-order", handler);
