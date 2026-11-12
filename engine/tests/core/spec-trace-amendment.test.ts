@@ -299,6 +299,55 @@ describe("amendSpecTrace", () => {
     expect(error.message).toContain(message);
   });
 
+  describe("retiring ids the Spec Index does not define from a completed Wave", () => {
+    // A graph populated before trace admission: a Success Criterion id is claimed
+    // in the current Wave and contributed to from completed Wave 1.
+    const legacy = (): TaskGraph => populated({
+      tasks: [
+        task("T1", 1, ["AS-001"], ["SC-011"], { "AS-001": hashOf("AS-001") }),
+        task("T2", 2, ["FR-001", "SC-011"], [], { "FR-001": DRIFTED }),
+        task("T3", 2, [], []),
+      ],
+    });
+    const retired = { anchors: ["AS-001"], contributions: [] };
+
+    it("removes the id from the completed Task and its current-Wave claimant, keeping verified claims and hashes", () => {
+      const before = legacy();
+      const { graph, amendment: entry } = amended(before, amendment({ T1: retired }));
+
+      expect(taskById(graph, "T1").spec_contributions).toEqual([]);
+      expect(taskById(graph, "T1").spec_anchors).toEqual(["AS-001"]);
+      expect(taskById(graph, "T1").spec_anchor_hashes).toEqual({ "AS-001": hashOf("AS-001") });
+      expect(taskById(graph, "T2").spec_anchors).toEqual(["FR-001"]);
+      expect(taskById(graph, "T2").spec_anchor_hashes).toEqual({ "FR-001": DRIFTED });
+      expect(entry.changes.map(({ taskId }) => taskId)).toEqual(["T1", "T2"]);
+      expect(reloads(graph).ok).toBe(true);
+    });
+
+    it.each<[string, unknown, SpecIndexAvailability]>([
+      ["a completable claim leaves with it", amendment({ T1: { anchors: [], contributions: [] } }), indexed],
+      ["a claim is added alongside", amendment({ T1: { anchors: ["AS-001", "FR-002"], contributions: [] } }), indexed],
+      ["no Spec Index can prove the id undefined", amendment({ T1: retired }), unavailable],
+    ])("still refuses the completed Task when %s", (_label, raw, specIndex) => {
+      const error = refusal(legacy(), raw, specIndex);
+      expect(error.kind).toBe("completed-wave-changed");
+      expect(error.message).toContain("T1 (Wave 1)");
+    });
+
+    it("refuses leaving the completed Task's Contribution without a claimant", () => {
+      const error = refusal(legacy(), {
+        spec_trace_version: 2,
+        tasks: [
+          { id: "T1", spec_anchors: ["AS-001"], spec_contributions: ["SC-011"] },
+          { id: "T2", spec_anchors: ["FR-001"], spec_contributions: [] },
+          { id: "T3", spec_anchors: [], spec_contributions: [] },
+        ],
+      });
+      expect(error.kind).toBe("invalid-trace");
+      expect(error.message).toContain("SC-011");
+    });
+  });
+
   it("fails closed on an added claim or Contribution when the Spec Index is unavailable, but still applies removals", () => {
     const graph = populated({ spec_index_observation: undefined });
     expect(refusal(graph, amendment({ T3: { anchors: ["FR-002"], contributions: [] } }), unavailable).kind)

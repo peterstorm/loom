@@ -482,7 +482,7 @@ Returns JSON with suggested anchors and confidence scores:
 
 Review suggestions and assign partial work to `spec_contributions`. Assign each Requirement to `spec_anchors` only on its culminating Task/Wave. The validator refuses overlap, duplicate entries, multiple completion Waves, missing completion ownership, and Contributions after completion.
 
-Once populated, a wrong Completion Claim or Contribution is corrected with `helper amend-spec-trace` (`docs/operations.md`, "Amending a v2 Requirement trace"), never by re-running `populate-task-graph --force`: the amendment keeps every settled implementation and review result, retires only the current Wave's review authority, and refuses to touch completed Waves or a live Wave Gate.
+Once populated, a wrong Completion Claim or Contribution is corrected with `helper amend-spec-trace` (`docs/operations.md`, "Amending a v2 Requirement trace"), never by re-running `populate-task-graph --force`: the amendment keeps every settled implementation and review result, retires only the current Wave's review authority, and refuses to touch a live Wave Gate or completed Waves (except to remove an id the Spec Index does not define as FR or AS).
 
 ### 4c. User Approval
 
