@@ -16,6 +16,7 @@
 
 import type { Violation } from "../types";
 import { makeViolation } from "../types";
+import { matchesAnyExcludePattern } from "../exclude-pattern";
 
 // --- Configuration ---
 
@@ -199,9 +200,9 @@ export function handler(
   maxLines: number = DEFAULT_MAX_LINES,
   excludePatterns: readonly string[] = DEFAULT_EXCLUDE_PATTERNS
 ): Violation[] {
-  // Skip excluded files (tests)
-  const normalizedPath = filePath.replace(/\\/g, "/");
-  if (excludePatterns.some((pattern) => normalizedPath.endsWith(pattern))) {
+  // Skip excluded files: test-suffix patterns, and directories named with a
+  // trailing slash — the same matcher every regex rule's exclusions use.
+  if (matchesAnyExcludePattern(filePath, excludePatterns)) {
     return [];
   }
 
