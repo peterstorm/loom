@@ -7,7 +7,12 @@
  * keeps all of that and retires, in the same transition, exactly the authority
  * the old trace produced: the current Wave's review epoch, spec-check and
  * packet-bound review state, which froze the old Requirement scope. Completed
- * Waves are verified scope and cannot be amended at all.
+ * Waves are verified scope and cannot be amended, with one exception: an id the
+ * Spec Index does not define as a completable FR or AS entry was never verified
+ * scope, so retiring it from a completed Wave's Task changes nothing that Wave
+ * proved. Without that exception a graph populated before trace admission
+ * (which may carry e.g. a Success Criterion id) can never dispatch the Task
+ * that still claims it.
  *
  * Requirement Content Hashes follow the edges they describe: a retained claim
  * keeps the hash recorded when its edge was made (so drift evidence survives),
@@ -25,6 +30,7 @@ import type {
 import { taskRolePolicy } from "./distill-task";
 import { mapNonEmpty, nonEmpty } from "./orchestration-contract";
 import {
+  completableRequirementIds,
   recordedAnchorHashes,
   renderRequirementTraceEdges,
   specIndexObservationOf,
@@ -151,18 +157,38 @@ function liveGateRefusal(graph: TaskGraph): SpecTraceAmendmentResult | null {
     : `${LABEL} refused: legacy terminal Wave Gate run ${active.runId} must be migrated to terminal history first`);
 }
 
+/**
+ * True when the change only removes ids the Spec Index does not define as
+ * completable: nothing is added, and no completable claim or contribution goes.
+ * An unavailable index proves nothing about an id, so it never qualifies.
+ */
+function retiresOnlyNonCompletableIds(
+  { before, after }: SpecTraceAmendmentChange,
+  specIndex: SpecIndexAvailability,
+): boolean {
+  if (specIndex.kind !== "indexed") return false;
+  const completable = completableRequirementIds(specIndex.index);
+  return (["spec_anchors", "spec_contributions"] as const).every((field) =>
+    added(before[field], after[field]).length === 0 &&
+    added(after[field], before[field]).every((removed) => !completable.has(removed)));
+}
+
 function completedWaveRefusal(
   graph: TaskGraph,
   amended: readonly AmendedTrace[],
+  specIndex: SpecIndexAvailability,
 ): SpecTraceAmendmentResult | null {
   const completedWaves = new Set((graph.wave_gate_history ?? []).map(({ wave }) => wave));
-  const frozen = amended.flatMap(({ task }) =>
-    completedWaves.has(task.wave) ? [`${task.id} (Wave ${task.wave})`] : []);
+  const frozen = amended.flatMap(({ task, change }) =>
+    completedWaves.has(task.wave) && !retiresOnlyNonCompletableIds(change, specIndex)
+      ? [`${task.id} (Wave ${task.wave})`]
+      : []);
   return frozen.length === 0
     ? null
     : refuse(
         "completed-wave-changed",
-        `${LABEL} cannot change Tasks in completed Waves, which are verified scope: ${frozen.join(", ")}`,
+        `${LABEL} cannot change Tasks in completed Waves, which are verified scope ` +
+          `(only ids the Spec Index does not define as FR or AS may be removed there): ${frozen.join(", ")}`,
       );
 }
 
@@ -243,7 +269,7 @@ export function amendSpecTrace(
     );
   }
   const preconditionRefusal = liveGateRefusal(graph) ??
-    completedWaveRefusal(graph, amendedTraces) ??
+    completedWaveRefusal(graph, amendedTraces, specIndex) ??
     distillTraceRefusal(amendedTraces) ??
     specIndexRefusal(specIndex, amendedTraces);
   if (preconditionRefusal !== null) return preconditionRefusal;
