@@ -63,6 +63,7 @@ describe("Task role", () => {
       proofSettlement: "reconcilable",
       dispatchAppendix: "none",
       totalTestWaiver: "suspicious",
+      taskMutationCheck: "eligible",
     } satisfies TaskRolePolicy);
     expect(distill).toEqual({
       authorable: false,
@@ -75,6 +76,7 @@ describe("Task role", () => {
       proofSettlement: "attempt-only",
       dispatchAppendix: "distill",
       totalTestWaiver: "by-construction",
+      taskMutationCheck: "exempt",
     } satisfies TaskRolePolicy);
     for (const rule of Object.keys(authored) as readonly (keyof TaskRolePolicy)[]) {
       expect(distill[rule], rule).not.toEqual(authored[rule]);

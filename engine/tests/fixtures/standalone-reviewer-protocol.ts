@@ -37,10 +37,13 @@ export function fixtureReviewerProtocols(
 ): ReviewerProtocolAuthorityResolver {
   const registration = standaloneFixtureRegistration(authority);
   const registered = value(parsedAuthority(registration));
-  const durableRequests = JSON.parse(JSON.stringify(requests)) as readonly SpawnRequest[];
+  // Each request is kept as the bytes a Run Directory would hold, so the
+  // resolver reads it back through the production parser, never as a typed value.
+  const durableRequests = requests.map(({ authority: issuedTo }, index) => ({ issuedTo, bytes: JSON.stringify(requests[index]) }));
   const durablePackets = new Map(packets.map((packet) => [packet.digest, packet]));
   return (request: AgentRequestAuthority) => {
-    const raw = durableRequests.find((candidate) => sameAgentRequestAuthority(candidate.authority, request));
+    const stored = durableRequests.find((candidate) => sameAgentRequestAuthority(candidate.issuedTo, request));
+    const raw: unknown = stored === undefined ? undefined : JSON.parse(stored.bytes);
     const issued = parseIssuedSpawnRequest(publications, raw);
     const packet = durablePackets.get(request.contextDigest);
     if (!issued.ok || packet === undefined) return { ok: false, error: {

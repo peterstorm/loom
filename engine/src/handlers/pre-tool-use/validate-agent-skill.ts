@@ -5,7 +5,8 @@
  */
 
 import { readFileSync } from "node:fs";
-import type { HookHandler, PreToolUseInput } from "../../types";
+import type { HookHandler } from "../../types";
+import { parsePreToolUseInput } from "./pre-tool-use-input";
 import { TASK_GRAPH_PATH, pathExistsFailClosed } from "../../config";
 import { UTILITY_AGENTS } from "../../core/phase-policy";
 import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS, REVIEW_PANEL_AGENTS, ARCH_PANEL_AGENTS, SECURITY_AUDIT_AGENTS } from "../../core/agent-catalog-projections";
@@ -62,17 +63,15 @@ const handler: HookHandler = async (stdin) => {
   // malformed-input branch below already refuses to take.
   if (!pathExistsFailClosed(TASK_GRAPH_PATH)) return { kind: "allow" };
 
-  let input: PreToolUseInput;
-  try {
-    input = JSON.parse(stdin);
-  } catch (e) {
+  const input = parsePreToolUseInput(stdin);
+  if (input instanceof Error) {
     // Malformed hook input on a spawn-gate route: fail CLOSED. An uncaught
     // parse crash exits 1 (NON-blocking for PreToolUse), letting a Task spawn
     // without its required skill. (Route is in FAIL_CLOSED_ROUTES for crashes
     // that escape this handler too.)
     return {
       kind: "block",
-      message: `validate-agent-skill: malformed hook input — failing closed: ${e instanceof Error ? e.message : String(e)}`,
+      message: `validate-agent-skill: malformed hook input — failing closed: ${input.message}`,
     };
   }
   if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };

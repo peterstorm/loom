@@ -38,7 +38,7 @@ import { readRunBytesNoFollow, writeRunBytesExclusiveNoFollow } from '../../../u
 import { captureKey } from '../../../core/harness-capture';
 import { type RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { standaloneReviewerProtocolResolver, readRegisteredStandaloneAuthority } from './reviewer-protocol-resolution';
-import { readPublishedStandaloneResult, durableRequests, recoverOrPublishStandaloneRetry, safeScope, standalonePackets, standalonePublicationEffectId } from './standalone-requests';
+import { readPublishedStandaloneResult, durableRequests, recoverOrPublishStandaloneRetry, safeScope, standalonePackets, standalonePublicationEffectId, standaloneReadCoverageStart } from './standalone-requests';
 import { deriveChangedPaths, gitText, metadata, reviewBaseline } from './changed-paths';
 import { STANDALONE_READ_COVERAGE_V1, readCoverageBudgetProblem } from '../../../core/standalone-read-coverage';
 import { decideRefutationTranscriptRead, refutationRejectionDiagnostic, standaloneRetryTask } from '../../../core/reviewer-retry';
@@ -176,7 +176,7 @@ export async function startStandaloneFacade(
     // diff. A scope too large for one reviewer to read is refused here, before
     // anything is registered or issued.
     const packetSet = standalonePackets(handle.runId, reviewMetadata, scope, changed.authority.head_revision,
-      { baselineRevision: reviewBaseline(changed) });
+      standaloneReadCoverageStart(input.kind, reviewBaseline(changed)));
     const budget = packetSet.frozenDiff === null ? "read-coverage frozen diff was not built" : readCoverageBudgetProblem(packetSet.frozenDiff);
     if (budget !== null) return failed(budget);
     const prepared = prepareFreshStandaloneReview({

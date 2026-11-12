@@ -2,12 +2,17 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
   MUTANT_CAP_PER_INVARIANT,
+  MUTANT_CAP_PER_TASK,
   MUTANT_TIMEOUT_MS,
+  TASK_MUTATION_OPERATORS,
+  WAVE_GATE_OPERATORS,
   applyMutant,
+  applyTaskMutant,
   mutantTimeoutMs,
   mutationPlan,
   mutationPlanOf,
   parseMutantCap,
+  taskMutants,
 } from "../../src/core/owner-verification/mutation-plan";
 import { sha256Hex } from "../../src/core/digest";
 import type { MutationOperator, MutationPlan } from "../../src/core/owner-verification/types";
@@ -259,5 +264,136 @@ describe("mutationPlan laws", () => {
       const ids = planOf(ownerText, changedLines, 1_000).mutants.map((mutant) => mutant.id);
       expect(new Set(ids).size).toBe(ids.length);
     }), { seed: 6_005, numRuns: 40 });
+  });
+});
+
+// The Task mutation check (ADR-0071): the Wave Gate's six operators and `guard-removal`, over a Task's files together.
+
+const GUARDED = [
+  "export function debit(balance: number, amount: number): number {", // 1
+  '  if (amount <= 0) throw new Error("amount must be positive");', // 2
+  "  if (amount > balance) {", // 3
+  "    return balance;", // 4
+  "  }", // 5
+  "  if (balance > 1000) { audit(balance); }", // 6
+  "  return balance - amount;", // 7
+  "}", // 8
+  "",
+].join("\n");
+
+const taskMutantsOf = (files: readonly (readonly [string, string])[], cap = 1_000) => {
+  const selected = taskMutants(files.map(([path, text]) => ({ path, text, changedLines: lines(1, text.split("\n").length) })), capOf(cap));
+  if (!selected.ok) throw new Error(`${selected.error.path} does not parse`);
+  return selected.value;
+};
+
+describe("the operator sets", () => {
+  it("ADR-0036: the Wave Gate applies exactly its six operators, in their fixed order", () => {
+    expect(WAVE_GATE_OPERATORS).toEqual([
+      "condition-negation", "comparison-flip", "logical-swap", "boolean-literal-flip", "return-value-replacement", "statement-removal",
+    ]);
+  });
+
+  it("ADR-0071: the Task mutation check applies guard-removal first, then the Wave Gate's six", () => {
+    expect(TASK_MUTATION_OPERATORS).toEqual(["guard-removal", ...WAVE_GATE_OPERATORS]);
+    expect(MUTANT_CAP_PER_TASK).toBe(8);
+  });
+
+  it("ADR-0036: a Wave Gate plan never holds a guard-removal mutant, and its ids are what they were before the operator existed", () => {
+    const plan = planOf(GUARDED, lines(1, 8));
+    expect(plan.mutants.map(({ operator }) => operator)).not.toContain("guard-removal");
+    expect(plan.candidates).toBe(9);
+    // The ids of the owner's guard-line mutants, computed before `guard-removal` existed.
+    expect(plan.mutants.slice(0, 2).map(({ id, operator }) => [operator, id])).toEqual([
+      ["condition-negation", sha256Hex(JSON.stringify([OWNER, 71, 82, "condition-negation"]))],
+      ["comparison-flip", sha256Hex(JSON.stringify([OWNER, 78, 80, "comparison-flip"]))],
+    ]);
+  });
+
+  it("ADR-0036: over generated owners, the Wave Gate plan is the Task selection of the same file with every guard-removal dropped", () => {
+    fc.assert(fc.property(ownerInput, ({ ownerText, changedLines }) => {
+      const gate = planOf(ownerText, changedLines, 1_000);
+      const selected = taskMutants([{ path: OWNER, text: ownerText, changedLines }], capOf(1_000));
+      if (!selected.ok) throw new Error("generated owner does not parse");
+      const withoutGuards = selected.value.mutants.filter(({ operator }) => operator !== "guard-removal");
+      expect(withoutGuards.map(({ id }) => id)).toEqual(gate.mutants.map(({ id }) => id));
+      expect(withoutGuards.map(({ path: _path, ...mutant }) => mutant)).toEqual(gate.mutants);
+    }), { seed: 6_101, numRuns: 60 });
+  });
+});
+
+describe("taskMutants", () => {
+  it("ADR-0071: an `if` with no else whose body only exits is a guard, removed whole, before the condition's own mutants", () => {
+    const { mutants, candidates } = taskMutantsOf([[OWNER, GUARDED]]);
+    const guards = mutants.filter(({ operator }) => operator === "guard-removal");
+    expect(guards.map(({ line, original, replacement }) => [line, original, replacement])).toEqual([
+      [2, 'if (amount <= 0) throw new Error("amount must be positive");', ";"],
+      [3, "if (amount > balance) {\n    return balance;\n  }", ";"],
+    ]);
+    // Line 6's `if` does not exit, so it is no guard.
+    expect(mutants.filter(({ line }) => line === 6).map(({ operator }) => operator)).not.toContain("guard-removal");
+    expect(mutants.slice(0, 3).map(({ operator, line }) => [operator, line])).toEqual([
+      ["guard-removal", 2], ["condition-negation", 2], ["comparison-flip", 2],
+    ]);
+    expect(candidates).toBe(mutants.length);
+    expect(applyTaskMutant(GUARDED, guards[0]!).split("\n")[1]).toBe("  ;");
+  });
+
+  it.each([
+    ["an if with an else", "if (x) { return 1; } else { go(); }"],
+    ["an if whose body does more than exit", "if (x) { go(); return 1; }"],
+    ["an if with an empty body", "if (x) { }"],
+  ])("ADR-0071: %s is not a guard", (_label, statement) => {
+    const text = `function f() {\n  ${statement}\n}\n`;
+    expect(taskMutantsOf([[OWNER, text]]).mutants.map(({ operator }) => operator)).not.toContain("guard-removal");
+  });
+
+  it.each(["throw new Error();", "return;", "continue;", "break;"])("ADR-0071: a guard may exit by `%s`", (exit) => {
+    const text = `function f() {\n  for (;;) {\n    if (x) ${exit}\n  }\n}\n`;
+    expect(taskMutantsOf([[OWNER, text]]).mutants.filter(({ operator }) => operator === "guard-removal")).toHaveLength(1);
+  });
+
+  it("ADR-0071: files are taken in the order given, each mutant naming its file, with ids unique across files", () => {
+    const { mutants } = taskMutantsOf([["src/b.ts", "g();\n"], ["src/a.ts", "g();\n"]]);
+    expect(mutants.map(({ path, operator }) => [path, operator])).toEqual([["src/b.ts", "statement-removal"], ["src/a.ts", "statement-removal"]]);
+    expect(new Set(mutants.map(({ id }) => id)).size).toBe(2);
+  });
+
+  it("ADR-0071: a file that does not parse refuses the whole selection, naming the file", () => {
+    const refused = taskMutants([
+      { path: "src/a.ts", text: "g();\n", changedLines: lines(1, 1) },
+      { path: "src/broken.ts", text: "function (\n", changedLines: lines(1, 1) },
+    ], MUTANT_CAP_PER_TASK);
+    expect(refused).toMatchObject({ ok: false, error: { kind: "owner-unparseable", path: "src/broken.ts" } });
+  });
+
+  const taskFiles = fc.array(fc.array(fc.constantFrom(...STATEMENTS, "if (x) return;", "if (x) { throw new Error(); }"), { minLength: 0, maxLength: 12 }), { minLength: 1, maxLength: 4 })
+    .map((files) => files.map((statements, index): readonly [string, string] => [`src/file-${index}.ts`, `function f() {\n${statements.join("\n")}\n}\n`]));
+
+  it("ADR-0071: the selection holds min(candidates, cap) mutants: the evenly spaced indices floor(i * n / cap) of all files' candidates together", () => {
+    fc.assert(fc.property(taskFiles, fc.integer({ min: 1, max: 12 }), (files, cap) => {
+      const all = taskMutantsOf(files);
+      const capped = taskMutantsOf(files, cap);
+      const n = all.mutants.length;
+      expect(capped.candidates).toBe(n);
+      expect(capped.mutants.length).toBe(Math.min(n, cap));
+      const expected = n <= cap ? all.mutants : Array.from({ length: cap }, (_, i) => all.mutants[Math.floor((i * n) / cap)]);
+      expect(capped.mutants).toEqual(expected);
+    }), { seed: 6_102, numRuns: 80 });
+  });
+
+  it("ADR-0071: the selection is deterministic, and every mutant rewrites only its own span on a changed line of its own file", () => {
+    fc.assert(fc.property(taskFiles, (files) => {
+      const texts = new Map(files);
+      const first = taskMutantsOf(files, MUTANT_CAP_PER_TASK);
+      expect(JSON.stringify(taskMutantsOf(files, MUTANT_CAP_PER_TASK))).toBe(JSON.stringify(first));
+      for (const mutant of first.mutants) {
+        const text = texts.get(mutant.path) ?? "";
+        expect(text.slice(mutant.start, mutant.end)).toBe(mutant.original);
+        const mutated = applyTaskMutant(text, mutant);
+        expect(mutated).not.toBe(text);
+        expect(mutated.slice(0, mutant.start) + mutated.slice(mutant.start + mutant.replacement.length)).toBe(text.slice(0, mutant.start) + text.slice(mutant.end));
+      }
+    }), { seed: 6_103, numRuns: 60 });
   });
 });

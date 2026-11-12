@@ -28,6 +28,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { MutationPolicy, OwnerObligation } from "../../src/core/owner-verification/types";
+import { isRecord } from "../../src/core/plain-record";
 import { redThenGreenEra } from "../../src/core/proof-obligations";
 import { freezeVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
 import type { RegisteredWaveGateProgram } from "../../src/core/wave-gate-program";
@@ -491,16 +492,33 @@ const WAVE_GATE_PROGRAM: RegisteredWaveGateProgram = Object.freeze({
   authorityDigest: AUTHORITY_DIGEST,
 });
 
+const isStringList = (value: unknown): value is readonly string[] =>
+  Array.isArray(value as unknown) && (value as readonly unknown[]).every((entry) => typeof entry === "string");
+
+/** One line of the launch log, as the runner stand-in wrote it. */
+function parseRunnerLaunch(line: string): RunnerLaunch {
+  const raw: unknown = JSON.parse(line);
+  if (!isRecord(raw)) throw new Error(`the runner logged a launch that is not an object: ${line}`);
+  const { cwd, files, owner } = raw;
+  if (typeof cwd !== "string" || !isStringList(files) || (owner !== null && typeof owner !== "string")) {
+    throw new Error(`the runner logged a malformed launch: ${line}`);
+  }
+  return { cwd, files, owner };
+}
+
 function readLaunches(log: string): readonly RunnerLaunch[] {
-  return readFileSync(log, "utf8").split("\n").filter((line) => line !== "")
-    .map((line) => JSON.parse(line) as RunnerLaunch);
+  return readFileSync(log, "utf8").split("\n").filter((line) => line !== "").map(parseRunnerLaunch);
 }
 
 function readPublishedResults(handle: RunDirHandle): readonly Record<string, unknown>[] {
   const results = join(handle.runDirectory, "artifacts");
   return filesBeneath(results, "completion-suites", () => false)
     .filter((path) => path.endsWith(".json"))
-    .map((path) => JSON.parse(readFileSync(join(results, path), "utf8")) as Record<string, unknown>);
+    .map((path) => {
+      const result: unknown = JSON.parse(readFileSync(join(results, path), "utf8"));
+      if (!isRecord(result)) throw new Error(`the published completion result ${path} is not a JSON object`);
+      return result;
+    });
 }
 
 function readWorkspaceBytes(root: string): Readonly<Record<string, string>> {

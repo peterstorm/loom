@@ -17,7 +17,7 @@ import type { HookHandler, Task, TaskGraph, WaveReopeningAudit } from "../../typ
 
 const USAGE = "Usage: helper reopen-completed-wave --runs-root <root> < exact-reopening.json";
 
-type ReopenRequest = Readonly<{
+export type ReopenRequest = Readonly<{
   runId: string;
   wave: number;
   authorityDigest: string;
@@ -35,7 +35,10 @@ export type WaveReopeningProof = Readonly<{
   taskIds: readonly string[];
 }>;
 
-function parseRequest(raw: string): ReopenRequest {
+/** The exact reopening payload the helper reads from stdin: `runId`, `wave`,
+ *  `authorityDigest` and `taskIds`, and no other key. A refusal throws; the
+ *  handler renders it. */
+export function parseReopenRequest(raw: string): ReopenRequest {
   let value: unknown;
   try {
     value = JSON.parse(raw);
@@ -328,7 +331,7 @@ export function formatWaveReopeningError(error: unknown): string {
 
 const handler: HookHandler = async (stdin, args) => {
   try {
-    const request = parseRequest(stdin);
+    const request = parseReopenRequest(stdin);
     const runsRoot = argumentValue(args, "--runs-root");
     if (runsRoot === null) return { kind: "error", message: USAGE };
     const manager = StateManager.fromPath(taskGraphPath());

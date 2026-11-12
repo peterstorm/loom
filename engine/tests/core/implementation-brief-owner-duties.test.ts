@@ -78,6 +78,7 @@ function ownership(fileList: readonly string[], stamp: readonly OwnerObligation[
     roster: graph.roster,
     contracts: graph.contracts,
     repositoryRoot: "/repo",
+    packageRoot: "/loom",
     operatorNotes: [],
     ownership: briefOwnership(stamp, INVARIANTS, value.file_list ?? []),
     frozenSignatures: unobservedSkeletons(graphFixture(graph.roster)),

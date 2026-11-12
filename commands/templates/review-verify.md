@@ -49,12 +49,13 @@ cycle; a false negative ships a bug. When in doubt, `uncertain`. Never vote
 
 Output ONLY valid JSON to stdout. No markdown, prose outside JSON, or code fences:
 
+<!-- wire-example: refutation-verdict -->
 ```json
 {
-  "criterion": "the lens, verbatim",
+  "criterion": "<the lens, verbatim>",
   "verdicts": [
     {
-      "finding_id": "the manifest id, verbatim",
+      "finding_id": "<the manifest id, verbatim>",
       "verdict": "refuted",
       "reasoning": "the specific evidence for this vote"
     }

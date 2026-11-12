@@ -8,10 +8,9 @@ import {
   parsePiJsonl,
   getContentBlocks,
   detectFormat,
+  isRecord,
   type ContentBlock,
-  type PiEntry,
   type TranscriptFormat,
-  type TranscriptLine,
 } from "./types";
 import { claudeRecordKind } from "../core/claude-record-kind";
 
@@ -92,24 +91,27 @@ export function parseFirstUserPrompt(
   let resolvedFormat = format;
   for (const [index, rawLine] of content.split("\n").entries()) {
     if (rawLine.trim() === "") continue;
-    let parsed: TranscriptLine | PiEntry;
+    let parsed: unknown;
     try {
-      parsed = JSON.parse(rawLine) as TranscriptLine | PiEntry;
+      parsed = JSON.parse(rawLine);
     } catch (error) {
       return promptFailure(
         `malformed transcript JSON before the first user prompt at line ${index + 1}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    if (!isRecord(parsed)) {
+      return promptFailure(`malformed transcript entry before the first user prompt at line ${index + 1}: expected a JSON object`);
+    }
+    // Only a message that is an object can carry a role; any other is no user prompt.
+    const message = isRecord(parsed.message) ? parsed.message : null;
 
     if (resolvedFormat === undefined) {
-      const candidate = parsed as PiEntry & { version?: unknown };
-      resolvedFormat = candidate.type === "session" && candidate.version !== undefined ? "pi" : "claude";
+      resolvedFormat = parsed.type === "session" && parsed.version !== undefined ? "pi" : "claude";
     }
 
     if (resolvedFormat === "pi") {
-      const entry = parsed as PiEntry;
-      if (entry.type !== "message" || entry.message?.role !== "user") continue;
-      const body = entry.message.content;
+      if (parsed.type !== "message" || message?.role !== "user") continue;
+      const body = message.content;
       const prompt = authoredPromptText(body);
       if (prompt === null) {
         return promptFailure(`first Pi user prompt has unsupported content at line ${index + 1}`);
@@ -120,9 +122,8 @@ export function parseFirstUserPrompt(
     }
 
     if (claudeRecordKind(parsed) === "harness") continue;
-    const line = parsed as TranscriptLine;
-    if (line.message?.role !== "user") continue;
-    const body = line.message.content;
+    if (message?.role !== "user") continue;
+    const body = message.content;
     if (Array.isArray(body) && body.some((block) =>
       typeof block === "object" && block !== null &&
       "type" in block && block.type === "tool_result"

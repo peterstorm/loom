@@ -103,6 +103,7 @@ RUN_DIR="$(mktemp -d "$RUNS_ROOT/run.XXXXXXXXXX")"
 
 Pass only parsed user policy:
 
+<!-- wire-example: standalone-review-start -->
 ```bash
 bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration start standalone-review \
   --runs-root "$RUNS_ROOT" \

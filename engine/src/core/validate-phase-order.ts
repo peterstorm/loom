@@ -21,6 +21,12 @@ import {
 } from "./phase-policy";
 import { stripNamespace } from "../utils/strip-namespace";
 import { hasStandaloneReviewContext } from "./review-output";
+import {
+  planDesignGate,
+  planDesignReviewOf,
+  renderPlanDesignRequirement,
+  type RecordedPlanDesignReview,
+} from "./plan-design-review";
 
 /**
  * The phase-artifact reads this gate needs, injected rather than imported.
@@ -40,6 +46,8 @@ export interface ArtifactProbe {
   readonly readText: (path: string) => string;
   /** Locate `filename` beneath `dir`, or null when absent. */
   readonly findFile: (dir: string, filename: string) => string | null;
+  /** Lowercase hex SHA-256 of the artifact's exact bytes. Throws like `readFileSync` when unreadable. */
+  readonly sha256: (path: string) => string;
 }
 
 /**
@@ -54,7 +62,7 @@ export interface ArtifactProbe {
 function resolveArtifact(
   artifact: string | undefined,
   fallback: string | null,
-  probe: ArtifactProbe,
+  probe: Pick<ArtifactProbe, "exists">,
 ): string | null {
   // If artifact is a real file path that exists, use it
   if (artifact && artifact !== "completed" && probe.exists(artifact)) {
@@ -124,11 +132,24 @@ export interface ArtifactState {
   readonly spec_file: string | null;
   readonly plan_file: string | null;
   readonly spec_dir?: string | null;
+  readonly plan_design_review?: RecordedPlanDesignReview;
 }
 
+/**
+ * The architecture plan this graph names, as an existing path, or null. The
+ * one resolution every plan-reading gate and the plan design acceptance share.
+ */
+export function planArtifactOf(
+  state: Pick<ArtifactState, "phase_artifacts" | "plan_file">,
+  probe: Pick<ArtifactProbe, "exists">,
+): string | null {
+  return resolveArtifact(state.phase_artifacts.architecture, state.plan_file, probe);
+}
+
+const NO_PLAN = "architecture (no plan.md found)";
+
 function checkPlanAlignmentGate(state: ArtifactState, probe: ArtifactProbe): string | null {
-  const plan = resolveArtifact(state.phase_artifacts.architecture, state.plan_file, probe);
-  if (!plan) return "architecture (no plan.md found)";
+  if (!planArtifactOf(state, probe)) return NO_PLAN;
   if (!state.skipped_phases.includes("plan-alignment")) {
     const specDir = state.spec_dir ?? ".claude/specs";
     if (!probe.findFile(specDir, "plan-alignment.md")) {
@@ -136,6 +157,26 @@ function checkPlanAlignmentGate(state: ArtifactState, probe: ArtifactProbe): str
     }
   }
   return null;
+}
+
+/**
+ * The plan design gate (ADR-0070): decompose needs the design review this
+ * graph requires, accepted for the plan's bytes as they are now. Only the
+ * digest is read; the review's Run Directory is never opened here.
+ */
+function checkPlanDesignGate(state: ArtifactState, probe: ArtifactProbe): string | null {
+  const review = planDesignReviewOf(state.plan_design_review);
+  if (review.status === "not-required") return null;
+  const plan = planArtifactOf(state, probe);
+  if (!plan) return NO_PLAN;
+  let currentSha256: string;
+  try {
+    currentSha256 = probe.sha256(plan);
+  } catch (e) {
+    return `architecture (plan unreadable: ${(e as Error).message})`;
+  }
+  const gate = planDesignGate(review, currentSha256);
+  return gate.kind === "open" ? null : renderPlanDesignRequirement(gate, plan);
 }
 
 /**
@@ -190,12 +231,10 @@ export function checkArtifacts(
       }
       return null;
     })
-    .with("plan-alignment", () => {
-      const plan = resolveArtifact(state.phase_artifacts.architecture, state.plan_file, probe);
-      if (!plan) return "architecture (no plan.md found)";
-      return null;
-    })
-    .with("decompose", () => checkPlanAlignmentGate(state, probe))
+    .with("plan-alignment", () => planArtifactOf(state, probe) ? null : NO_PLAN)
+    .with("decompose", () => checkPlanAlignmentGate(state, probe) ?? checkPlanDesignGate(state, probe))
+    // Execute keeps the plan-alignment gate only: the design gate binds the
+    // plan Tasks are cut from, and a plan may be amended once they exist.
     .with("execute", () => checkPlanAlignmentGate(state, probe))
     .with("init", () => null)
     .with("brainstorm", () => null)

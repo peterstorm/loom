@@ -214,6 +214,7 @@ describe("loadRules", () => {
         "no-cross-boundary-imports",
         "no-io-in-pure-modules",
         "switch-totality",
+        "no-wire-cast",
         "no-duplicate-block",
       ]);
     });

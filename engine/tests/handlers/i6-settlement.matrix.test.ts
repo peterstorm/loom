@@ -764,6 +764,7 @@ function briefInput(graph: TaskGraph, task: Task, overrides: Partial<Implementat
     contracts: [],
     verificationManifest: graph.verification_manifest,
     repositoryRoot: ROOT,
+    packageRoot: "/loom",
     operatorNotes: [],
     frozenSignatures: unobservedSkeletons(graph),
     ...overrides,

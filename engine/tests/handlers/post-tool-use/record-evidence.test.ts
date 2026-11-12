@@ -13,7 +13,8 @@ import { describe, it, expect, afterAll, vi } from "vitest";
 import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import recordEvidence from "../../../src/handlers/post-tool-use/record-evidence";
+import fc from "fast-check";
+import recordEvidence, { parseRecordEvidenceInput } from "../../../src/handlers/post-tool-use/record-evidence";
 import {
   appendEvidence,
   bindMachineAgent,
@@ -59,6 +60,44 @@ async function bind(session: SessionId, type: string, id: string): Promise<void>
 const post = (session: SessionId, tool: string, input: Record<string, unknown> = {}) =>
   JSON.stringify({ session_id: session, tool_name: tool, tool_input: input, cwd: "/tmp" });
 
+describe("parseRecordEvidenceInput", () => {
+  const IDENTITY_FIELDS = ["session_id", "tool_name", "cwd"] as const;
+  const callFields = fc.record(
+    {
+      hook_event_name: fc.jsonValue(),
+      tool_input: fc.jsonValue(),
+      tool_response: fc.jsonValue(),
+      error: fc.jsonValue(),
+      is_interrupt: fc.jsonValue(),
+      tool_use_id: fc.jsonValue(),
+      agent_id: fc.jsonValue(),
+    },
+    { requiredKeys: [] },
+  );
+  const identity = fc.record({ session_id: fc.string(), tool_name: fc.string(), cwd: fc.string() });
+  const wireOf = (value: unknown): unknown => JSON.parse(JSON.stringify(value));
+
+  it("round-trips a payload through its wire form", () => {
+    fc.assert(fc.property(identity, callFields, (ids, call) => {
+      expect(parseRecordEvidenceInput(wireOf({ ...call, ...ids }))).toEqual(wireOf({ ...call, ...ids }));
+    }));
+  });
+
+  it("reads an identity field that is not a string as absent and keeps the rest", () => {
+    const notAString = fc.jsonValue().filter((value) => typeof value !== "string");
+    fc.assert(fc.property(identity, callFields, fc.constantFrom(...IDENTITY_FIELDS), notAString, (ids, call, field, wrong) => {
+      const parsed = parseRecordEvidenceInput(wireOf({ ...call, ...ids, [field]: wrong }));
+      expect(parsed).toEqual({ ...wireOf({ ...call, ...ids }) as object, [field]: undefined });
+    }));
+  });
+
+  it("refuses every JSON value that is not an object", () => {
+    fc.assert(fc.property(fc.jsonValue().filter((value) => typeof value !== "object" || value === null || Array.isArray(value)), (value) => {
+      expect(parseRecordEvidenceInput(value)).toBeNull();
+    }));
+  });
+});
+
 describe("recorder never blocks — degenerate input contract", () => {
   it("empty stdin → passthrough", async () => {
     expect((await recordEvidence("", [])).kind).toBe("passthrough");
@@ -72,6 +111,24 @@ describe("recorder never blocks — degenerate input contract", () => {
     stderrSpy.mockRestore();
     expect(result.kind).toBe("passthrough");
     expect(text).toContain("record-evidence:");
+  });
+
+  it("JSON that is not an object → passthrough with a stderr note, never a block", async () => {
+    for (const stdin of ["null", "[]", "7", '"Read"']) {
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      const result = await recordEvidence(stdin, []);
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      stderrSpy.mockRestore();
+      expect(result.kind, stdin).toBe("passthrough");
+      expect(text, stdin).toContain("record-evidence: hook input is not a JSON object — nothing recorded");
+    }
+  });
+
+  it("a session_id or tool_name that is not a string → passthrough, as when it is missing", async () => {
+    for (const wrong of [7, true, null, ["s-1"], { id: "s-1" }]) {
+      expect((await recordEvidence(JSON.stringify({ session_id: wrong, tool_name: "Read" }), [])).kind).toBe("passthrough");
+      expect((await recordEvidence(JSON.stringify({ session_id: "s-1", tool_name: wrong }), [])).kind).toBe("passthrough");
+    }
   });
 
   it("missing session_id or tool_name → passthrough", async () => {

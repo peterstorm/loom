@@ -12,6 +12,7 @@ import { compareStrings } from "./ordering";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import { parseReviewPath, type ReviewPath } from "./review-packet";
 import { nonEmptyOf } from "./orchestration-contract";
+import { PLAN_DESIGN_REVIEWERS, PLAN_DESIGN_REVIEW_KIND } from "./plan-design-review";
 
 export const STANDALONE_REVIEWER_ROLES = Object.freeze([
   "code-reviewer",
@@ -25,9 +26,17 @@ export const STANDALONE_REVIEWER_ROLES = Object.freeze([
 export type StandaloneReviewerRole = (typeof STANDALONE_REVIEWER_ROLES)[number];
 
 const STANDALONE_REVIEW_KINDS = Object.freeze([
-  "code", "errors", "tests", "types", "comments", "architecture", "simplify", "all",
+  "code", "errors", "tests", "types", "comments", "architecture", "simplify", "all", PLAN_DESIGN_REVIEW_KIND,
 ] as const);
 export type StandaloneReviewKind = (typeof STANDALONE_REVIEW_KINDS)[number];
+
+/** The one review-kind grammar every start input and stored record parses through. */
+export function parseStandaloneReviewKind(raw: unknown): StandaloneReviewKind | null {
+  return STANDALONE_REVIEW_KINDS.find((kind) => kind === raw) ?? null;
+}
+
+/** The plan design roster (ADR-0070), proven here to name Standalone Review reviewers only. */
+const PLAN_DESIGN_ROSTER: NonEmpty<StandaloneReviewerRole> = nonEmptyOf(...PLAN_DESIGN_REVIEWERS);
 
 export type StandaloneReviewMetadata = (
   | Readonly<{ docsOnly: true; sourceOrTestChanged: false; commentsChanged: true }>
@@ -196,8 +205,10 @@ export function parseReviewMetadata(raw: unknown): ParseResult<StandaloneReviewM
   ] as const;
   const errors = exactKeys(raw, keys, "review_metadata");
   const requested = parseStringSet(raw.requested_kinds, "review_metadata.requested_kinds", errors);
-  const requestedKinds = requested.filter((kind): kind is StandaloneReviewKind =>
-    (STANDALONE_REVIEW_KINDS as readonly string[]).includes(kind));
+  const requestedKinds = requested.flatMap((kind): StandaloneReviewKind[] => {
+    const parsed = parseStandaloneReviewKind(kind);
+    return parsed === null ? [] : [parsed];
+  });
   if (requestedKinds.length !== requested.length) errors.push("review_metadata.requested_kinds contains an unknown review kind");
   const languages = parseStringSet(raw.languages, "review_metadata.languages", errors);
   const docsOnly = boolField(raw, "docs_only", errors);
@@ -231,6 +242,7 @@ export function parseReviewMetadata(raw: unknown): ParseResult<StandaloneReviewM
 /** Deterministic reviewer selection. The result order is canonical spawn order. */
 export function selectStandaloneReviewers(metadata: StandaloneReviewMetadata): NonEmpty<StandaloneReviewerRole> {
   const kinds = new Set(metadata.requestedKinds);
+  if (kinds.has(PLAN_DESIGN_REVIEW_KIND)) return PLAN_DESIGN_ROSTER;
   const all = kinds.has("all");
   // code-reviewer always leads the roster; the rest join by scope.
   const selected: StandaloneReviewerRole[] = [];

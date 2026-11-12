@@ -85,22 +85,23 @@ function resultToExit(result: HookResult): never {
   process.exit(1); // unreachable, satisfies TS
 }
 
-function parseInitStateArgs(args: string[]): { skipBrainstorm: boolean; skipClarify: boolean; skipSpecify: boolean; skipPlanAlignment: boolean; specDir: string; output: string } {
-  let skipBrainstorm = false, skipClarify = false, skipSpecify = false, skipPlanAlignment = false;
+function parseInitStateArgs(args: string[]): { skipBrainstorm: boolean; skipClarify: boolean; skipSpecify: boolean; skipPlanAlignment: boolean; skipPlanDesignReview: boolean; specDir: string; output: string } {
+  let skipBrainstorm = false, skipClarify = false, skipSpecify = false, skipPlanAlignment = false, skipPlanDesignReview = false;
   let specDir = "", output = "";
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--skip-brainstorm") skipBrainstorm = true;
     else if (args[i] === "--skip-clarify") skipClarify = true;
     else if (args[i] === "--skip-specify") skipSpecify = true;
     else if (args[i] === "--skip-plan-alignment") skipPlanAlignment = true;
+    else if (args[i] === "--skip-plan-design-review") skipPlanDesignReview = true;
     else if (args[i] === "--spec-dir" && args[i + 1]) specDir = args[++i];
     else if (args[i] === "--output" && args[i + 1]) output = args[++i];
   }
   if (!specDir || !output) {
-    process.stderr.write("Usage: bun cli.ts init-state [--skip-brainstorm] [--skip-clarify] [--skip-specify] [--skip-plan-alignment] --spec-dir <dir> --output <path>\n");
+    process.stderr.write("Usage: bun cli.ts init-state [--skip-brainstorm] [--skip-clarify] [--skip-specify] [--skip-plan-alignment] [--skip-plan-design-review] --spec-dir <dir> --output <path>\n");
     process.exit(1);
   }
-  return { skipBrainstorm, skipClarify, skipSpecify, skipPlanAlignment, specDir, output };
+  return { skipBrainstorm, skipClarify, skipSpecify, skipPlanAlignment, skipPlanDesignReview, specDir, output };
 }
 
 function enforcePiRuntimeHandshake(
@@ -124,7 +125,7 @@ function enforcePiRuntimeHandshake(
 function initializeState(args: string[]): never {
   const opts = parseInitStateArgs(args);
   const state = resolveInitialState(
-    { skipBrainstorm: opts.skipBrainstorm, skipClarify: opts.skipClarify, skipSpecify: opts.skipSpecify, skipPlanAlignment: opts.skipPlanAlignment },
+    { skipBrainstorm: opts.skipBrainstorm, skipClarify: opts.skipClarify, skipSpecify: opts.skipSpecify, skipPlanAlignment: opts.skipPlanAlignment, skipPlanDesignReview: opts.skipPlanDesignReview },
     opts.specDir,
   );
   mkdirSync(dirname(opts.output), { recursive: true });

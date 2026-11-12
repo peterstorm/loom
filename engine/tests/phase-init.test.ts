@@ -83,6 +83,15 @@ describe("resolveInitialState", () => {
     expect(state.wave_gates).toEqual({});
   });
 
+  it("records the plan design review as required unless it is skipped, without touching skipped_phases", () => {
+    expect(resolveInitialState({}, tmpDir).plan_design_review).toEqual({ status: "required" });
+    const skipped = resolveInitialState({ skipPlanDesignReview: true }, tmpDir);
+    expect(skipped.plan_design_review).toEqual({ status: "not-required", reason: "skipped" });
+    expect(skipped.skipped_phases).toEqual([]);
+    // Skipping plan-alignment is a different decision: the design review stays owed.
+    expect(resolveInitialState({ skipPlanAlignment: true }, tmpDir).plan_design_review).toEqual({ status: "required" });
+  });
+
   it("--skip-plan-alignment: skipped=[plan-alignment], phase=init", () => {
     const state = resolveInitialState({ skipPlanAlignment: true }, tmpDir);
     expect(state.current_phase).toBe("init");

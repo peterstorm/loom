@@ -156,6 +156,7 @@ export function renderTaskImplementationBrief(
       contracts: graph.acceptance_contracts ?? [],
       verificationManifest: graph.verification_manifest,
       repositoryRoot: projectRoot,
+      packageRoot,
       operatorNotes: request.operatorNotes,
       frozenSignatures: frozenSignatures.value,
     });

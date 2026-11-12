@@ -2,7 +2,7 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
   BASE_WAVE_REVIEW_AGENTS,
-  OWNER_MAPPED_WAVE_REVIEW_AGENTS,
+  ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS,
   waveReviewRoster,
 } from "../../src/core/agent-catalog-projections";
 import {
@@ -41,7 +41,7 @@ describe("waveReviewSubjects", () => {
 
   it("FR-022: an owner-mapped Task's subjects add architecture-tech-lead after its base five; other Tasks keep exactly five", () => {
     const subjects = waveReviewSubjects([
-      { taskId: "T1", roster: OWNER_MAPPED_WAVE_REVIEW_AGENTS },
+      { taskId: "T1", roster: ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS },
       { taskId: "T2", roster: BASE_WAVE_REVIEW_AGENTS },
     ]);
     expect(subjects).toEqual([
@@ -72,7 +72,8 @@ describe("classifyPersistedWaveBatch", () => {
   it("property: any permutation of the exact batch classifies as exact, in canonical order, whatever each Task's roster", () => {
     const rosters = fc.uniqueArray(fc.constantFrom("T1", "T2", "T3", "T4"), { minLength: 1, maxLength: 4 })
       .chain((taskIds) => fc.tuple(...taskIds.map((taskId) =>
-        fc.boolean().map((ownerMapped): WaveTaskReviewRoster => ({ taskId, roster: waveReviewRoster(ownerMapped) })))));
+        fc.record({ ownerMap: fc.boolean(), contractSurface: fc.boolean() })
+          .map((reasons): WaveTaskReviewRoster => ({ taskId, roster: waveReviewRoster(reasons) })))));
     fc.assert(fc.property(rosters.chain((taskRosters) =>
       fc.tuple(fc.constant(taskRosters), fc.shuffledSubarray(candidatesOf(taskRosters), { minLength: candidatesOf(taskRosters).length }))),
     ([taskRosters, shuffled]) => {
@@ -87,7 +88,7 @@ describe("classifyPersistedWaveBatch", () => {
   });
 
   it("FR-022: a persisted five-reviewer batch is incomplete against an owner-mapped Task's derived roster", () => {
-    const ownerMapped = [{ taskId: "T1", roster: OWNER_MAPPED_WAVE_REVIEW_AGENTS }] as const;
+    const ownerMapped = [{ taskId: "T1", roster: ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS }] as const;
     expect(classifyPersistedWaveBatch(ownerMapped, candidatesOf(base("T1")))).toEqual({ kind: "incomplete" });
     expect(classifyPersistedWaveBatch(base("T1"), candidatesOf(ownerMapped))).toEqual({ kind: "incomplete" });
   });

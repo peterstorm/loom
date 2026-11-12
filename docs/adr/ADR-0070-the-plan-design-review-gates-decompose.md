@@ -1,0 +1,139 @@
+# ADR-0070: The plan design review gates decompose
+
+## Status
+Proposed (2026-11-12). Implements Q3 (plan side) of the deterministic-implementation plan's Q-track.
+
+## Context
+Type-design and architecture findings are raised at the Wave Gate, after the code exists, and each one costs
+a fix run. Most of them are decisions the architecture plan already made: a state a type can represent but
+the plan calls impossible, a rule with two owners, a rule inside a shell.
+
+Nothing reviews those decisions before Tasks are cut from the plan. The plan-alignment gate checks that
+`plan-alignment.md` exists, and plan alignment maps the plan to the Requirements, not to design rules.
+`--panel` judges candidates, not the plan the finalizer writes. A Standalone Review of the plan file selects
+neither lens: the type lens needs a changed type file and the architecture lens needs size or new
+structure, and a Markdown plan has neither.
+
+## Options Considered
+
+1. **A new registered program.**
+   - Cons: the program union, registration, packets, slots, refutation, publication and inspection would
+     all be written twice. Everything a plan review needs from a program, `standalone-review` has.
+
+2. **A new phase between plan-alignment and decompose.**
+   - Cons: phases are entered by one agent and advanced by its stop. A review is a roster, a Refutation
+     Panel and a publication. The phase list, the transition table and every `skipped_phases` reader would
+     change for something that is a gate on decompose, not a step with its own agent.
+
+3. **The decompose gate opens the review's Run Directory.**
+   - Cons: a PreToolUse gate that authenticates a Run Directory on every decompose spawn couples the phase
+     gate to the review store in both directions, and makes the gate as slow and as fallible as that read.
+
+4. **A free-text or boolean record (`plan_design_reviewed: true`).**
+   - Cons: it says nothing about which bytes were reviewed. An edit after the review keeps the flag.
+
+5. **A `plan-design` Standalone Review kind and a digest-bound acceptance (chosen).**
+   - Pros: the review is an ordinary Standalone Review Run. The State File holds one record that names the
+     reviewed bytes. The gate compares one digest.
+   - Cons: accepting is a separate helper call, and the record trusts the helper's one authentication.
+
+## Decision
+
+### 1. The review is a Standalone Review of kind `plan-design`
+`plan-design` is a Standalone Review kind. Its rules, owned by `core/plan-design-review.ts`:
+
+- **Roster.** Fixed at `code-reviewer`, `type-design-analyzer`, `architecture-tech-lead`, whatever the scope
+  facts say. `selectStandaloneReviewers` answers it before it reads any scope fact.
+- **Scope.** `files` must name exactly one file, the plan. A start with `files: null` or more than one file
+  is refused at registration.
+- **Read obligation.** The whole document. Every other kind obliges its frozen diff against the baseline
+  revision; a plan committed unchanged at the baseline has an empty diff and would oblige no reading. A
+  `plan-design` review gives the file no base, so every unit of the plan is obliged (ADR-0022 applies
+  unchanged otherwise). The frozen diff records the base revision `none:whole-document`.
+- **Lens.** Each reviewer's Context Packet carries one more byte section, `plan-design-lens`: the questions
+  of that reviewer's lens, what makes a plan finding critical, and that findings are located in the plan
+  file. The frozen `references/reviewer-protocol-v2` files are not edited.
+- **No successor.** A `plan-design` successor start is refused. An edited plan gets a fresh review.
+
+### 2. The record
+The State File gains an optional `plan_design_review`, one of three exact shapes:
+
+| Shape | Meaning |
+| --- | --- |
+| `{"status":"required"}` | A review is owed. Written by `init-state`. |
+| `{"status":"not-required","reason":"skipped"}` | Written by `init-state --skip-plan-design-review`. |
+| `{"status":"accepted","planSha256","runId","resultDigest"}` | A review was accepted for those plan bytes. |
+
+It is parsed at the wire: extra keys, an unknown status, a malformed digest or Run id make the State File
+refuse to load. An absent field stays absent on a round trip. The gate reads an absent field as
+`not-required` for the reason `unrecorded`, which is never written. The skip is recorded here, not in
+`skipped_phases`: the review is not a phase.
+
+### 3. The gate
+A decompose spawn needs the plan-alignment gate and then the plan design gate (`checkPlanDesignGate`, in
+`core/validate-phase-order.ts`):
+
+- `not-required`: open.
+- `required`: closed.
+- `accepted`: open exactly when the SHA-256 of the plan's bytes now equals `planSha256`.
+
+The gate reads the State File and the plan's digest through `ArtifactProbe.sha256`. It never opens a Run
+Directory. A closed gate names the plan, both digests when they differ, and the commands that open it. Both
+harnesses call the same function. Execute is not gated: the gate binds the plan Tasks are cut from.
+
+### 4. Acceptance
+`helper accept-plan-design-review --runs-root <dir> --run <run>` is the only writer of `accepted`. The shell
+authenticates the Run's published result and lineage, reads whether the registration carries the read
+obligation, and authenticates a named disposition against this review. One pure function
+(`judgePlanDesignEvidence`) then accepts, or refuses with one reason:
+
+| Refusal | When |
+| --- | --- |
+| `wrong-kind` | The requested kinds are not exactly `["plan-design"]`. |
+| `scope-mismatch` | The frozen scope is not exactly the plan this graph names. |
+| `roster-incomplete` | A plan design reviewer is missing. |
+| `read-not-obligated` | The Run was registered without the read obligation. |
+| `plan-unobserved` | The review froze no bytes for the plan. |
+| `plan-changed-since-review` | The frozen bytes are not the plan's bytes now. |
+| `surviving-criticals` | A critical survived the Refutation Panel. |
+| `advisories-undisposed` | There are advisories and no published disposition was named. |
+
+On acceptance one locked write stores the record, after re-reading under the lock that the graph still
+names the plan that was judged.
+
+### 5. Criticals and advisories
+A critical the Refutation Panel refuted does not block. A critical that survived is resolved by editing the
+plan and reviewing it afresh: the edit changes the digest, so the old result can never be accepted for the
+new bytes. Advisories never block; they need a published Advisory Disposition of this review, named by
+`--disposition`, `--disposition-run` and `--disposition-digest`. Any decision is enough. A review with no
+advisories needs no disposition.
+
+### 6. Graphs that predate the record
+A State File written before this ADR has no `plan_design_review` and is never stranded: its decompose gate
+is as it was. Its operator may still run the review and the helper, after which the record is `accepted`
+and the digest binding applies.
+
+## Consequences
+- Every new orchestration runs three reviewers and a Refutation Panel before decompose, and again after
+  every plan edit made once a review was accepted. `--skip-plan-design-review` removes it for one
+  orchestration, visibly, in the State File.
+- A plan-alignment loop-back that rewrites the plan invalidates an acceptance. The review belongs after
+  plan alignment has settled.
+- **The record trusts one authentication.** The gate does not re-prove the Run Directory. A Run Directory
+  deleted or retired after acceptance leaves the record standing, and `runId` and `resultDigest` are then
+  references nothing can follow.
+- **The helper authenticates the Run twice**, once for the published result and once for the lineage source.
+  Both reads are needed and neither returns the other's fields.
+- **The plan path is compared relative to the working directory.** The helper and the review must run from
+  the repository root, as every helper documented in `/loom` does. From another directory the helper
+  refuses with `scope-mismatch`; it never accepts a different file.
+- **The record is not cleared by a phase loop-back.** `set-phase --phase architecture` keeps an `accepted`
+  record. A rewritten plan closes the gate through its digest; a plan restored to the reviewed bytes opens
+  it again, which is correct.
+- **Execute is not gated.** A plan edited after population is not reviewed again by this gate.
+- **The lens is prose.** Nothing checks that a reviewer answered its questions, beyond the read obligation
+  and the result grammar every reviewer already meets.
+- **The gate is on the decompose spawn.** `populate-task-graph` does not ask it. An operator who populates
+  from a hand-written payload without spawning `decompose-agent` is not stopped by this gate.
+- The Wave Review Roster is unchanged. Whether a Wave's type and architecture reviewers may be reduced for
+  a Task cut from a design-reviewed plan is not decided here.

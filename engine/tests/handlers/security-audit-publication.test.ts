@@ -10,7 +10,6 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseStandaloneDispositionStartInput } from "../../src/core/standalone-disposition-machine";
-import type { SecurityFinding } from "../../src/core/security-findings";
 import { HUNTER_ENVELOPE, aConfirmedFinding, aHunterBallot, aNeedsValidationFinding, aUnitResult, aVerdict } from "../security/fixtures";
 import {
   SQLI,
@@ -21,6 +20,7 @@ import {
   isolateSubagentDir,
   publishedRun,
   readJson,
+  readPublished,
   removeRuns,
   startRun,
   unitIdFor,
@@ -35,7 +35,7 @@ describe("adjudication", () => {
     const run = await huntedRun();
     await verifyWith(run, () => ({ vote: "advisory", missingFact: "The deployment may bind the value upstream." }));
     expect((await run.invoke(["publish"])).error).toBeNull();
-    const published = readJson<SecurityFinding[]>(run.out, "security-findings.json");
+    const published = readPublished(run.out);
     expect(published.map((finding) => finding.verdict)).toEqual(["needs_validation"]);
     expect(published[0].verdict === "needs_validation" ? published[0].blockers : []).toEqual(["The deployment may bind the value upstream."]);
   });
@@ -44,7 +44,7 @@ describe("adjudication", () => {
     const run = await huntedRun();
     await verifyWith(run, () => ({ vote: "advisory", missingFact: null }));
     expect((await run.invoke(["publish"])).error).toBeNull();
-    expect(readJson<SecurityFinding[]>(run.out, "security-findings.json").map((finding) => finding.verdict)).toEqual(["rejected"]);
+    expect(readPublished(run.out).map((finding) => finding.verdict)).toEqual(["rejected"]);
   });
 
   it("never counts a hand-written ballot — not even one whose binding names a verifier — and names its run as a blocker", async () => {
@@ -97,7 +97,7 @@ describe("adjudication", () => {
     expect(submitted.error).toBeNull();
     await verifyWith(run);
     expect((await run.invoke(["publish"])).error).toBeNull();
-    const published = readJson<SecurityFinding[]>(run.out, "security-findings.json");
+    const published = readPublished(run.out);
     expect(published.map((finding) => finding.verdict).sort()).toEqual(["confirmed", "needs_validation"]);
   });
 });
@@ -113,10 +113,11 @@ describe("the disposition handoff", () => {
   it("derives one decision per published record", async () => {
     const run = await publishedRun();
     expect((await run.invoke(["disposition"])).error).toBeNull();
-    const disposition = readJson<{ entries: readonly { fingerprint: string; decision: string }[]; source: { locator: string; runId: string } }>(run.out, "disposition.json");
-    expect(disposition.entries.map((entry) => entry.decision)).toEqual(["accepted"]);
-    expect(disposition.entries[0].fingerprint).toBe(SQLI);
-    expect(disposition.source.locator).toBe(run.out);
+    // `entries` is matched as a whole list: exactly one decision, for the one published record.
+    expect(readJson(run.out, "disposition.json")).toMatchObject({
+      entries: [{ fingerprint: SQLI, decision: "accepted" }],
+      source: { locator: run.out },
+    });
   });
 
   it("names the disposition set in the published report", async () => {

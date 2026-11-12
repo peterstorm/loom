@@ -11,7 +11,7 @@
  *
  * Roles: FR-022 names code-reviewer and architecture-tech-lead. Wave issuance
  * builds a packet for every role of the Task's own roster; a Task touching an
- * owned family is issued `OWNER_MAPPED_WAVE_REVIEW_AGENTS`, so both roles are
+ * owned family is issued `ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS`, so both roles are
  * issued (ADR-0047). Each testcase checks every issued packet whose role is one
  * of the two, and AS-022 requires both packets to be issued.
  */

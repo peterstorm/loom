@@ -10,6 +10,10 @@
  * must be byte-identical across them once the per-run identities (reservation
  * ids and the like, minted fresh by each registration) are named by position.
  * So nothing the affected check observed can have reached settlement.
+ *
+ * The Task mutation check (ADR-0071) is held to the same rule: the record
+ * `helper mutation-check` leaves is varied over every outcome that lets the
+ * stop proceed, and the settlement must not move.
  */
 
 import { execFileSync } from "node:child_process";
@@ -23,7 +27,9 @@ import {
   type StopCheckBlockCount,
   type StopCheckCommand,
 } from "../../src/core/affected-stop-check-types";
+import { taskMutationResultOf, taskMutationUnavailable, type TaskMutationResult } from "../../src/core/task-mutation-check";
 import { freezeVerificationManifest } from "../../src/core/verification-manifest";
+import { createMutationCheckHandler } from "../../src/handlers/helpers/mutation-check";
 import type { StopCheckShellPorts } from "../../src/handlers/subagent-stop/acceptance-stop-check";
 import { runDispatch } from "../../src/handlers/subagent-stop/dispatch";
 import { registerTaskExecutionBatch } from "../../src/handlers/task-execution";
@@ -105,6 +111,24 @@ async function project(): Promise<Project> {
   return { root, canonicalRoot: canonicalRoot.value, statePath };
 }
 
+const CLEAN: TaskMutationResult = { kind: "clean", mutants: 2, candidates: 2 };
+const SURVIVORS = taskMutationResultOf([{
+  mutant: { id: "m", path: "src/ledger.ts", line: 1, column: 1, start: 0, end: 6, operator: "statement-removal", original: "export", replacement: ";" },
+  outcome: "survived",
+}], 1);
+
+/** Leave the record of a `helper mutation-check` run that found `result`, through the helper itself. */
+async function recordMutationRun(at: Project, result: TaskMutationResult): Promise<void> {
+  const helper = createMutationCheckHandler({
+    write: () => undefined,
+    repositoryRoot: () => ({ ok: true, root: at.canonicalRoot }),
+    run: async () => result,
+    now: () => FIXED_NOW.getTime(),
+  });
+  const ran = await helper("", ["--task", "T3"]);
+  if (ran.kind !== "passthrough") throw new Error(`fixture mutation run refused: ${JSON.stringify(ran)}`);
+}
+
 /** What the injected affected runner does, plus the per-stop state that decides whether it launches. */
 type Outcome = Readonly<{
   run: "passes" | "fails" | "zero-tests" | "timed-out" | "killed" | "no-report" | "start-failed" | "did-not-complete";
@@ -112,6 +136,9 @@ type Outcome = Readonly<{
   lockHeld?: boolean;
   /** How long before this stop the hook started. */
   hookAgeMs?: number;
+  /** What the Task's last mutation run recorded, null when it never ran; a clean run by default. */
+  mutation?: TaskMutationResult | null;
+  mutationBlocks?: StopCheckBlockCount;
 }>;
 
 const junit = (outcome: "passed" | "failed" | "none"): Uint8Array => new TextEncoder().encode(
@@ -147,7 +174,12 @@ function ports(at: Project, outcome: Outcome): StopCheckShellPorts {
       }
     },
     readReport: (path) => reports.get(path) ?? new Uint8Array(),
-    blocks: inMemoryBlockCounters(outcome.affectedBlocks === undefined ? {} : { presets: { affected: outcome.affectedBlocks } }).counters,
+    blocks: inMemoryBlockCounters({
+      presets: {
+        ...(outcome.affectedBlocks === undefined ? {} : { affected: outcome.affectedBlocks }),
+        ...(outcome.mutationBlocks === undefined ? {} : { mutation: outcome.mutationBlocks }),
+      },
+    }).counters,
     pathExists: () => true,
     // The hook started `hookAgeMs` ago; the clock does not move during the stop.
     now: (() => { let first = true; return () => { const reading = first ? now - (outcome.hookAgeMs ?? 0) : now; first = false; return reading; }; })(),
@@ -175,6 +207,8 @@ function normalized(text: string): string {
 async function settle(outcome: Outcome): Promise<Readonly<{ result: HookResult; settled: string }>> {
   vi.useFakeTimers({ toFake: ["Date"], now: FIXED_NOW });
   const at = await project();
+  const mutation = outcome.mutation === undefined ? CLEAN : outcome.mutation;
+  if (mutation !== null) await recordMutationRun(at, mutation);
   const result = await runDispatch(JSON.stringify({
     session_id: SESSION, agent_id: AGENT, agent_type: AGENT_TYPE,
     agent_transcript_path: join(process.env.LOOM_SUBAGENT_DIR ?? "", `${AGENT}.transcript.jsonl`),
@@ -209,5 +243,35 @@ describe("INV-3: settlement is byte-identical under every affected-check outcome
     // The frozen manifest names the affected runner by design; nothing else may.
     const { verification_manifest: _frozen, ...settled } = JSON.parse(observed.settled) as Record<string, unknown>;
     expect(JSON.stringify(settled)).not.toMatch(/affected|related|ledger > balances/);
+  });
+});
+
+describe("ADR-0071: settlement is byte-identical under every Task mutation check outcome that proceeds", () => {
+  const AT_CAP: StopCheckBlockCount = { kind: "count", blocks: 2 };
+
+  it.each<[string, Outcome, string | null]>([
+    ["a clean run", { run: "passes", mutation: CLEAN }, null],
+    ["a run that could not decide", { run: "passes", mutation: taskMutationUnavailable("the unmutated tests fail") }, "its last run was unavailable: the unmutated tests fail"],
+    ["no run at the block cap", { run: "passes", mutation: null, mutationBlocks: AT_CAP }, "the Task mutation check reached its 2-block cap"],
+    ["survivors at the block cap", { run: "passes", mutation: SURVIVORS, mutationBlocks: AT_CAP }, "the Task mutation check reached its 2-block cap"],
+    ["an unreadable block counter", { run: "passes", mutation: null, mutationBlocks: { kind: "unreadable", reason: "counter is not JSON" } }, "the Task mutation check's block counter is unreadable"],
+  ])("with %s, the stop proceeds and the settled TaskGraph equals the clean settlement", async (_label, outcome, note) => {
+    const baseline = await settle(BASELINE);
+    const observed = await settle(outcome);
+
+    expect(observed.result.kind).toBe("passthrough");
+    if (note !== null && observed.result.kind === "passthrough") expect(observed.result.systemMessage).toContain(note);
+    expect(observed.settled).toBe(baseline.settled);
+    const { verification_manifest: _frozen, ...settled } = JSON.parse(observed.settled) as Record<string, unknown>;
+    expect(JSON.stringify(settled)).not.toMatch(/mutation|mutant|survivor|statement-removal/i);
+  });
+
+  it.each<[string, Outcome]>([
+    ["no run", { run: "passes", mutation: null }],
+    ["survivors", { run: "passes", mutation: SURVIVORS }],
+  ])("with %s below the cap, the stop is held and nothing is settled", async (_label, outcome) => {
+    const observed = await settle(outcome);
+    expect(observed.result.kind).toBe("block");
+    expect(observed.settled).toMatch(/"status":\s*"pending"/);
   });
 });

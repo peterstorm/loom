@@ -12,6 +12,14 @@ import {
 import type { ArtifactProbe, ArtifactState } from "../../src/handlers/pre-tool-use/validate-phase-order";
 import { VALID_TRANSITIONS } from "../../src/core/phase-policy";
 import { validatePhaseOrder } from "../../src/core/validate-phase-order";
+import { sha256Hex } from "../../src/core/digest";
+import {
+  PLAN_DESIGN_REVIEW_REQUIRED,
+  PLAN_DESIGN_REVIEW_SKIPPED,
+  type AcceptedPlanDesignReview,
+} from "../../src/core/plan-design-review";
+import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract/identity";
+import { value } from "../fixtures/parse-result";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -46,16 +54,18 @@ function baseState(overrides: Partial<ArtifactState> = {}): ArtifactState {
  */
 function memoryProbe(files: Readonly<Record<string, string>>): ArtifactProbe {
   const has = (path: string): boolean => Object.hasOwn(files, path);
+  const readText = (path: string): string => {
+    if (!has(path)) {
+      const error = new Error(`ENOENT: no such file or directory, open '${path}'`) as NodeJS.ErrnoException;
+      error.code = "ENOENT";
+      throw error;
+    }
+    return files[path]!;
+  };
   return {
     exists: has,
-    readText: (path: string): string => {
-      if (!has(path)) {
-        const error = new Error(`ENOENT: no such file or directory, open '${path}'`) as NodeJS.ErrnoException;
-        error.code = "ENOENT";
-        throw error;
-      }
-      return files[path]!;
-    },
+    readText,
+    sha256: (path: string): string => sha256Hex(readText(path)),
     findFile: (dir: string, filename: string): string | null => {
       const prefix = dir.endsWith("/") ? dir : `${dir}/`;
       return Object.keys(files).find((path) => path.startsWith(prefix) && path.endsWith(`/${filename}`)) ?? null;
@@ -444,6 +454,76 @@ describe("checkArtifacts — decompose phase", () => {
   });
 });
 
+// ─── checkArtifacts — the plan design gate (ADR-0070) ───────────────────────
+
+describe("checkArtifacts — plan design review", () => {
+  const SPEC_DIR = "/fixtures/specs";
+  const PLAN = "/fixtures/plan.md";
+  const ALIGNMENT = `${SPEC_DIR}/plan-alignment.md`;
+  const REVIEWED = "the reviewed plan";
+  const accepted = (planText: string): AcceptedPlanDesignReview => ({
+    status: "accepted",
+    planSha256: value(parseArtifactDigest(sha256Hex(planText))),
+    runId: value(parseOrchestrationRunId("plan-design-1")),
+    resultDigest: value(parseArtifactDigest("a".repeat(64))),
+  });
+  const gate = (phase: "decompose" | "execute", review: ArtifactState["plan_design_review"], planText = REVIEWED) =>
+    checkArtifacts(
+      phase,
+      baseState({ plan_file: PLAN, spec_dir: SPEC_DIR, ...(review === undefined ? {} : { plan_design_review: review }) }),
+      memoryProbe({ [PLAN]: planText, [ALIGNMENT]: "alignment" }),
+    );
+
+  it("blocks decompose while the review is required, naming the plan and the helper", () => {
+    const result = gate("decompose", PLAN_DESIGN_REVIEW_REQUIRED);
+    expect(result).toContain("plan-design-review");
+    expect(result).toContain(PLAN);
+    expect(result).toContain("helper accept-plan-design-review");
+  });
+
+  it("opens decompose for an acceptance of the plan's current bytes", () => {
+    expect(gate("decompose", accepted(REVIEWED))).toBeNull();
+  });
+
+  it("blocks decompose again when the plan was edited after acceptance, naming both digests", () => {
+    const result = gate("decompose", accepted(REVIEWED), "the plan, edited after review");
+    expect(result).toContain("changed after its design review was accepted");
+    expect(result).toContain(sha256Hex(REVIEWED));
+    expect(result).toContain(sha256Hex("the plan, edited after review"));
+  });
+
+  it("opens decompose when the review was skipped at init", () => {
+    expect(gate("decompose", PLAN_DESIGN_REVIEW_SKIPPED)).toBeNull();
+  });
+
+  it("opens decompose for a graph initialized before the review existed", () => {
+    expect(gate("decompose", undefined)).toBeNull();
+  });
+
+  it("reports the plan-alignment gap before the design review", () => {
+    const result = checkArtifacts(
+      "decompose",
+      baseState({ plan_file: PLAN, spec_dir: SPEC_DIR, plan_design_review: PLAN_DESIGN_REVIEW_REQUIRED }),
+      memoryProbe({ [PLAN]: REVIEWED }),
+    );
+    expect(result).toBe("plan-alignment (no plan-alignment.md found)");
+  });
+
+  it("reports an unreadable plan instead of treating it as unreviewed or reviewed", () => {
+    const result = checkArtifacts(
+      "decompose",
+      baseState({ plan_file: PLAN, spec_dir: SPEC_DIR, plan_design_review: accepted(REVIEWED) }),
+      { ...memoryProbe({ [PLAN]: REVIEWED, [ALIGNMENT]: "alignment" }), sha256: () => { throw new Error("EACCES: permission denied"); } },
+    );
+    expect(result).toBe("architecture (plan unreadable: EACCES: permission denied)");
+  });
+
+  it("does not gate execute: a plan may be amended once Tasks exist", () => {
+    expect(gate("execute", PLAN_DESIGN_REVIEW_REQUIRED)).toBeNull();
+    expect(gate("execute", accepted(REVIEWED), "amended during execution")).toBeNull();
+  });
+});
+
 // ─── checkArtifacts — execute phase ──────────────────────────────────────────
 
 describe("checkArtifacts — execute phase", () => {
@@ -545,9 +625,11 @@ describe("checkArtifacts — existing phases (regression)", () => {
   it("architecture blocked when spec.md is present but unreadable", () => {
     // The port reports the file as present and then throws on read — the shape
     // an EACCES spec.md has. The gate must report it, not treat it as absent.
+    const denied = (): string => { throw new Error("EACCES: permission denied"); };
     const unreadable: ArtifactProbe = {
       exists: (path: string) => path === SPEC,
-      readText: (): string => { throw new Error("EACCES: permission denied"); },
+      readText: denied,
+      sha256: denied,
       findFile: () => null,
     };
     const result = checkArtifacts("architecture", baseState({ spec_file: SPEC }), unreadable);
@@ -569,6 +651,7 @@ describe("realArtifactProbe", () => {
     expect(realArtifactProbe.exists(spec)).toBe(true);
     expect(realArtifactProbe.exists(join(tmp, "absent.md"))).toBe(false);
     expect(realArtifactProbe.readText(spec)).toBe("real content");
+    expect(realArtifactProbe.sha256(spec)).toBe(sha256Hex("real content"));
   });
 
   it("finds a file recursively beneath a directory", () => {

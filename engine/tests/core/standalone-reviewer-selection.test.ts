@@ -1,4 +1,6 @@
+import fc from "fast-check";
 import { describe, expect, it } from "vitest";
+import { PLAN_DESIGN_REVIEWERS } from "../../src/core/plan-design-review";
 import { selectStandaloneReviewers, type StandaloneReviewKind, type StandaloneReviewMetadata } from "../../src/core/standalone-review-scope";
 
 /**
@@ -84,5 +86,30 @@ describe("selectStandaloneReviewers: code-simplifier membership", () => {
       "architecture-tech-lead",
       "code-simplifier",
     ]);
+  });
+});
+
+describe("selectStandaloneReviewers: plan-design roster (ADR-0070)", () => {
+  it("is the fixed plan design roster whatever the scope facts say", () => {
+    fc.assert(fc.property(
+      fc.record({
+        docsOnly: fc.boolean(), sourceOrTestChanged: fc.boolean(), typesChanged: fc.boolean(), commentsChanged: fc.boolean(),
+        additions: fc.nat(5_000), fileCount: fc.integer({ min: 1, max: 40 }), newStructure: fc.boolean(),
+      }),
+      (facts) => {
+        const scope = facts.docsOnly && !facts.sourceOrTestChanged && facts.commentsChanged
+          ? { docsOnly: true, sourceOrTestChanged: false, commentsChanged: true } as const
+          : { docsOnly: false } as const;
+        expect(selectStandaloneReviewers(metadata({ ...facts, ...scope, requestedKinds: ["plan-design"] })))
+          .toEqual(["code-reviewer", "type-design-analyzer", "architecture-tech-lead"]);
+      },
+    ));
+  });
+
+  it("selects the type and architecture lenses for a Markdown plan no other kind would give them to", () => {
+    const markdownPlan = { docsOnly: true, commentsChanged: true, fileCount: 1 } as const;
+    expect(selectStandaloneReviewers(metadata({ ...markdownPlan, requestedKinds: ["types"] }))).not.toContain("type-design-analyzer");
+    expect(selectStandaloneReviewers(metadata({ ...markdownPlan, requestedKinds: ["code"] }))).not.toContain("architecture-tech-lead");
+    expect(selectStandaloneReviewers(metadata({ ...markdownPlan, requestedKinds: ["plan-design"] }))).toEqual(PLAN_DESIGN_REVIEWERS);
   });
 });

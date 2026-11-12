@@ -26,9 +26,10 @@ You are ONE of several parallel judges. Score **every manifest-listed candidate*
 
 Output ONLY valid JSON to stdout. No markdown, prose outside JSON, or code fences:
 
+<!-- wire-example: judge-verdict -->
 ```json
 {
-  "criterion": "the criterion, verbatim",
+  "criterion": "<the criterion, verbatim>",
   "rankings": [
     {
       "candidate": "candidate-<lens>.md",

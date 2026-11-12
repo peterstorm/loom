@@ -36,11 +36,12 @@ function lintCoreFile(content: string): LintResult {
 }
 
 describe("immediate tier programmatic rules", () => {
-  it("are exactly the rules whose own tier is immediate: the import-boundary pair, switch totality and the copied block", () => {
+  it("are exactly the rules whose own tier is immediate: the import-boundary pair, switch totality, the copied block and the wire cast", () => {
     expect(programmaticNames(loadRules(DEFAULT_RULES_DIR, null, "immediate"))).toEqual([
       "no-cross-boundary-imports",
       "no-duplicate-block",
       "no-io-in-pure-modules",
+      "no-wire-cast",
       "switch-totality",
     ]);
   });
@@ -62,6 +63,21 @@ describe("immediate tier programmatic rules", () => {
     {
       label: "pass the allowed import the pilot's fix used",
       content: 'import type { TaskGraph } from "../types";\nexport type View = TaskGraph;\n',
+      expected: { kind: "pass" },
+    },
+    {
+      label: "refuse wire output typed by assertion when the file is edited",
+      content: "export const readView = (text: string): View => JSON.parse(text) as View;\nexport type View = { id: string };\n",
+      expected: { kind: "violations", violations: [expect.objectContaining({ rule: "no-wire-cast", line: 1 })] },
+    },
+    {
+      label: "refuse wire output typed by annotation when the file is edited",
+      content: "export type View = { id: string };\nexport function readView(text: string): View {\n  const view: View = JSON.parse(text);\n  return view;\n}\n",
+      expected: { kind: "violations", violations: [expect.objectContaining({ rule: "no-wire-cast", line: 3 })] },
+    },
+    {
+      label: "pass wire output bound as unknown and handed to a parser",
+      content: "export const readView = (text: string, parse: (raw: unknown) => string): string => {\n  const raw: unknown = JSON.parse(text);\n  return parse(raw);\n};\n",
       expected: { kind: "pass" },
     },
   ])("$label", ({ content, expected }) => {

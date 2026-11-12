@@ -42,6 +42,7 @@ import {
   type SpawnRequest,
   type TrustedPublicationRegistrationLoader,
 } from "../../src/core/orchestration-contract";
+import { isRecord } from "../../src/core/plain-record";
 import { parseWaveFindingId, type BriefFinding, type ReviewLens, type WaveFindingId } from "../../src/core/review-panel";
 import { value } from "./parse-result";
 import { LOCAL_PI_BINDING } from "./local-pi-binding";
@@ -249,7 +250,9 @@ export function createPanelPublications(): PanelPublications {
     const key = registrationKey({ runId: request.issuance.runId, effectId: request.issuance.effectId });
     const original = registrations.get(key);
     if (original === undefined) throw new Error(`no registration for ${key}`);
-    registrations.set(key, bytes(rewrite(JSON.parse(new TextDecoder().decode(Uint8Array.from(original))) as Record<string, unknown>)));
+    const receipt: unknown = JSON.parse(new TextDecoder().decode(Uint8Array.from(original)));
+    if (!isRecord(receipt)) throw new Error(`the registration for ${key} is not a JSON object`);
+    registrations.set(key, bytes(rewrite(receipt)));
     try {
       return body();
     } finally {

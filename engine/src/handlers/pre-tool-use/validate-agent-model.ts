@@ -39,6 +39,7 @@ import { validatePiAgentDefinitionFile } from "../../utils/render-pi-agent";
 import { activeAgentDir, buildPiRoutingContext } from "../../utils/model-routing-context";
 import { piAgentDefinitionPath } from "../../core/pi-agent-directory";
 import { withBriefMarkerExpanded } from "./implementation-brief-marker";
+import { parsePreToolUseInput } from "./pre-tool-use-input";
 
 type PiAgentDefinitionLookup =
   | Readonly<{ kind: "found"; path: string }>
@@ -89,13 +90,11 @@ const readString = (value: unknown): string | undefined =>
   typeof value === "string" ? value : undefined;
 
 const handler: HookHandler = async (stdin) => {
-  let input: PreToolUseInput;
-  try {
-    input = JSON.parse(stdin);
-  } catch (error) {
+  const input = parsePreToolUseInput(stdin);
+  if (input instanceof Error) {
     return {
       kind: "block",
-      message: `validate-agent-model: malformed hook input — failing closed: ${error instanceof Error ? error.message : String(error)}`,
+      message: `validate-agent-model: malformed hook input — failing closed: ${input.message}`,
     };
   }
   if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };

@@ -20,8 +20,9 @@ import type { OwnerObligation } from "./types";
 export const OWNER_MAP_SECTION = "owner-map";
 
 /** The reviewer roles whose packets carry the owner map (FR-022); every other role's packet is unchanged.
- *  Both are Wave review roles: `code-reviewer` is on every roster, and an owner-mapped Task's roster
- *  appends `architecture-tech-lead` (ADR-0047), so each role named here is actually issued. */
+ *  Both are Wave review roles: `code-reviewer` is on every roster, and owner-map presence is a reason
+ *  for the architecture lens, whose roster appends `architecture-tech-lead` (ADR-0047), so each role
+ *  named here is actually issued. */
 export const OWNER_MAP_ROLES = Object.freeze(["code-reviewer", "architecture-tech-lead"] as const satisfies readonly WaveReviewRole[]);
 
 /** Whether `role` is owed the owner map. */

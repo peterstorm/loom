@@ -826,9 +826,10 @@ const handler: HookHandler = async (stdin, args) => {
     // the runs where it succeeded — and named issues they would then go looking
     // for in a file that no longer has them. A repair that cannot clear an error
     // is worth saying; one that did is worth not saying.
-    const after = isMinimal
-      ? validateMinimal(JSON.parse(repair.json))
-      : validateFull(JSON.parse(repair.json), scope);
+    const repaired: unknown = JSON.parse(repair.json);
+    const after = !isRecord(repaired)
+      ? fail(["repaired task graph is not a JSON object"])
+      : isMinimal ? validateMinimal(repaired) : validateFull(repaired, scope);
     if (!after.ok) {
       process.stderr.write(`Fixed structural defaults; ${after.errors.length} issues remain\n`);
       for (const err of after.errors) process.stderr.write(`  - ${err}\n`);

@@ -15,12 +15,14 @@
  * allowlists, and the blocks THEMSELVES — placeholders resolved to valid values
  * — through the real parsers. A fixture written to the doc's shape would prove
  * only that the fixture parses.
+ *
+ * The blocks are the docs' marked wire examples (`tests/support/doc-wire-examples.ts`),
+ * read and resolved by the same code that puts every documented example through
+ * its parser; what this file adds is the key-set and identity checks.
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { canonicalCoverageId, isWireRecord } from "../../src/core/security-audit-contract";
+import { isWireRecord } from "../../src/core/security-audit-contract";
 import {
   HUNTER_RESULT_KEYS,
   HUNTER_RESULT_KIND,
@@ -39,80 +41,23 @@ import {
   VERIFICATION_RESULT_KIND,
   VERIFIER_VOTE_KEYS,
 } from "../../src/core/security-verification";
-import { REFUTATION_PROFILE, aRefs, ok } from "./fixtures";
+import { documentedJson, keysOf, readGovernedDocs, resolvePlaceholders as resolveWith } from "../support/doc-wire-examples";
+import { WIRE_SHAPES, type WireShapeId } from "../support/doc-wire-shapes";
+import { ok } from "./fixtures";
 
-const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
-const AGENTS = join(REPO_ROOT, "agents");
+const docs = readGovernedDocs();
 
-/** The first fenced JSON block in a document. The docs are prose first, so a
- *  block may carry an elision comment beside its keys; comments are stripped and
- *  a dangling comma repaired before parsing. */
-const wireBlock = (agent: string): Record<string, unknown> => {
-  const source = readFileSync(join(AGENTS, agent), "utf8");
-  const fence = "```json\n";
-  const opened = source.indexOf(fence);
-  const closed = opened === -1 ? -1 : source.indexOf("```", opened + fence.length);
-  if (opened === -1 || closed === -1) throw new Error(`${agent} documents no JSON block`);
-  const block = source.slice(opened + fence.length, closed);
-  const withoutElisions = block.replace(/\/\*[\s\S]*?\*\//g, "").replace(/,\s*([}\]])/g, "$1");
-  return JSON.parse(withoutElisions) as Record<string, unknown>;
+/** The one example of `shapeId` an agent doc carries. */
+const wireBlock = (agent: string, shapeId: WireShapeId): Readonly<Record<string, unknown>> => {
+  const block = documentedJson(docs, `agents/${agent}`, shapeId);
+  if (!isWireRecord(block)) throw new Error(`${agent} documents a ${shapeId} that is not an object`);
+  return block;
 };
 
-/** A value the parsers accept for each placeholder-carrying key the docs use.
- *  Keyed by the FIELD, not by the placeholder's prose, so a doc may reword its
- *  hints freely; a new placeholder key with no entry here fails loudly rather
- *  than slipping through unresolved. */
-const PLACEHOLDER_VALUES: Readonly<Record<string, unknown>> = {
-  coverageId: canonicalCoverageId(aRefs()),
-  reviewedPaths: "src/api/login.ts",
-  reviewed_paths: "src/api/login.ts",
-  startingPaths: "src/api/login.ts",
-  invariant: "Every request field reaches the query as a bound parameter.",
-  result: "The field is interpolated into the query string.",
-  fingerprints: "api/login:sqli-email",
-  fingerprint: "api/login:sqli-email",
-  unresolved: "No database container to reproduce the payload.",
-  reason: "The sandbox payload returned the admin row.",
-  agent: "security-verifier-agent",
-  profile: REFUTATION_PROFILE,
-  surface: "http-ingress",
-  boundary: "api-edge",
-  subsystem: "auth",
-  attack_class: "injection",
-  ordinaryAttackClassBlock: "Injection: untrusted input reaching an interpreter.",
-  selectedCompanionBlocks: "WEB-PROTOCOL-AND-AUTH.md#browser-session-attack-classes",
-  block: "CLIENT-SIDE.md#dom",
-  reassignIds: canonicalCoverageId(aRefs()),
-  resolvedPriorLeads: "api/login:sqli-email: the unit's paths do not reach the sink.",
-};
-
-/**
- * Resolve a documented block into a concrete document, generically:
- * - `"a | b | c"` is a documented choice, resolved to its first option;
- * - a `<...>` placeholder whose hint allows `null` resolves to `null`;
- * - any other `<...>` placeholder resolves through `PLACEHOLDER_VALUES` by the
- *   key it sits under (an array's entries inherit the array's key).
- * Literal values the doc commits to (`"agentId": "security-hunter-agent"`,
- * `"wave": 1`) are kept exactly as written — they are part of the contract.
- */
-const resolvePlaceholders = (value: unknown, key = "$"): unknown => {
-  if (Array.isArray(value)) return value.map((entry) => resolvePlaceholders(entry, key));
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([field, entry]) => [field, resolvePlaceholders(entry, field)]));
-  }
-  if (typeof value !== "string") return value;
-  if (!value.includes("<")) return value.includes(" | ") ? value.split(" | ")[0] : value;
-  if (/\bnull\b/.test(value)) return null;
-  if (!(key in PLACEHOLDER_VALUES)) throw new Error(`no resolution for the placeholder under ${JSON.stringify(key)}: ${value}`);
-  return PLACEHOLDER_VALUES[key];
-};
-
-/** The keys a documented object names. An array is read through its first
- *  element, which is how the docs show a list's item shape. */
-const keysOf = (value: unknown): readonly string[] => {
-  if (Array.isArray(value)) return keysOf(value[0]);
-  return value !== null && typeof value === "object" ? Object.keys(value) : [];
-};
+/** A documented value with its placeholders resolved by the security shapes'
+ *  own table; `key` is the field the value sits under. */
+const resolvePlaceholders = (value: unknown, key = "$"): unknown =>
+  resolveWith(value, WIRE_SHAPES["security-hunter-result"].placeholders, key);
 
 /** The first item of a documented list, or a failure naming the list: a doc
  *  restructured so the list is gone must fail HERE, not turn every key-set
@@ -129,7 +74,7 @@ const unknownKeys = (documented: readonly string[], accepted: readonly string[])
   documented.filter((key) => !accepted.includes(key));
 
 describe("the hunter doc documents the wire `submit` parses", () => {
-  const block = wireBlock("security-hunter-agent.md");
+  const block = wireBlock("security-hunter-agent.md", "security-hunter-result");
   const unit = firstItem(block.units, "units");
   const check = firstItem(unit.checks, "units[0].checks");
 
@@ -184,7 +129,7 @@ describe("the hunter doc documents the wire `submit` parses", () => {
 });
 
 describe("the critic doc documents the wire `merge-critic` parses", () => {
-  const block = wireBlock("security-critic-agent.md");
+  const block = wireBlock("security-critic-agent.md", "security-critic-result");
 
   it("names no key the critic parser refuses", () => {
     expect(keysOf(block).length).toBeGreaterThan(0);
@@ -228,7 +173,7 @@ describe("the critic doc documents the wire `merge-critic` parses", () => {
 });
 
 describe("the verifier doc documents the result wire the verification program admits", () => {
-  const block = wireBlock("security-verifier-agent.md");
+  const block = wireBlock("security-verifier-agent.md", "security-verification-result");
   const vote = firstItem(block.verdicts, "verdicts");
 
   it("names no key the result parser refuses", () => {

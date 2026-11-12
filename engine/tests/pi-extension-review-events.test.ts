@@ -1262,6 +1262,9 @@ describe("Pi extension review tool_result integration", () => {
     expect(module.standaloneCompletionCheckpointProblem(JSON.stringify({ kind: "done" }))).toBeNull();
     expect(module.standaloneCompletionCheckpointProblem(JSON.stringify({ kind: "blocked" }))).toBe("review is not done");
     expect(module.standaloneCompletionCheckpointProblem("{")).toMatch(/^completion checkpoint is invalid JSON: .+/);
+    for (const notARecord of ["null", "[]", '"done"', "7", '[{"kind":"done"}]']) {
+      expect(module.standaloneCompletionCheckpointProblem(notARecord), notARecord).toBe("review is not done");
+    }
   });
 
   it("preserves malformed Pi transcript extraction as an explicit capture rejection", async () => {

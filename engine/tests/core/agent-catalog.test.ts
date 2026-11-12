@@ -12,9 +12,10 @@ import {
   REVIEW_SUB_AGENTS,
   BASE_WAVE_REVIEW_AGENTS,
   isWaveReviewRole,
-  OWNER_MAPPED_WAVE_REVIEW_AGENTS,
+  ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS,
   waveReviewRoster,
 } from "../../src/core/agent-catalog-projections";
+import { CONTRACT_SURFACE_ROLES } from "../../src/core/contract-surface-section";
 import { OWNER_MAP_ROLES } from "../../src/core/owner-verification/owner-map";
 import * as config from "../../src/config";
 import { AGENT_REQUIRED_SKILLS } from "../../src/core/orchestration-contract";
@@ -105,7 +106,7 @@ describe("the wave review roster is a selection from the catalog", () => {
     for (const name of [
       "ARCH_PANEL_AGENTS", "IMPL_AGENTS", "isReviewAgent", "KNOWN_AGENTS", "PHASE_AGENT_MAP",
       "REVIEW_AGENTS", "REVIEW_PANEL_AGENTS", "REVIEW_SUB_AGENTS", "BASE_WAVE_REVIEW_AGENTS",
-      "OWNER_MAPPED_WAVE_REVIEW_AGENTS", "waveReviewRoster", "isWaveReviewRole", "frozenSet",
+      "ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS", "waveReviewRoster", "isWaveReviewRole", "frozenSet",
     ]) expect(Object.keys(config), name).not.toContain(name);
   });
 
@@ -116,31 +117,42 @@ describe("the wave review roster is a selection from the catalog", () => {
     ]);
   });
 
-  // FR-022 / ADR-0047: an owner-mapped Task's roster appends the architecture
+  // FR-022 / ADR-0047: the architecture-lens roster appends the architecture
   // reviewer LAST, so every base reviewer keeps its index and slot identity.
-  it("the owner-mapped roster is the base roster with architecture-tech-lead appended last", () => {
-    expect(OWNER_MAPPED_WAVE_REVIEW_AGENTS).toEqual([...BASE_WAVE_REVIEW_AGENTS, "architecture-tech-lead"]);
+  it("the architecture-lens roster is the base roster with architecture-tech-lead appended last", () => {
+    expect(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS).toEqual([...BASE_WAVE_REVIEW_AGENTS, "architecture-tech-lead"]);
   });
 
-  it("waveReviewRoster maps owner-map presence to exactly one of the two rosters", () => {
-    expect(waveReviewRoster(false)).toBe(BASE_WAVE_REVIEW_AGENTS);
-    expect(waveReviewRoster(true)).toBe(OWNER_MAPPED_WAVE_REVIEW_AGENTS);
+  it.each([
+    [{ ownerMap: false, contractSurface: false }, BASE_WAVE_REVIEW_AGENTS],
+    [{ ownerMap: true, contractSurface: false }, ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS],
+    [{ ownerMap: false, contractSurface: true }, ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS],
+    [{ ownerMap: true, contractSurface: true }, ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS],
+  ] as const)("waveReviewRoster(%j) is the architecture-lens roster exactly when some reason holds", (reasons, roster) => {
+    expect(waveReviewRoster(reasons)).toBe(roster);
   });
 
-  it("every owner-map role is issued on the owner-mapped roster, so no FR-022 role is dead", () => {
+  it("every owner-map role is issued on the architecture-lens roster, so no FR-022 role is dead", () => {
     for (const role of OWNER_MAP_ROLES) {
-      expect(OWNER_MAPPED_WAVE_REVIEW_AGENTS, role).toContain(role);
+      expect(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, role).toContain(role);
+    }
+  });
+
+  it("every contract-surface role is issued on the architecture-lens roster, so no ADR-0069 role is dead", () => {
+    expect([...CONTRACT_SURFACE_ROLES]).toEqual(["type-design-analyzer", "architecture-tech-lead"]);
+    for (const role of CONTRACT_SURFACE_ROLES) {
+      expect(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, role).toContain(role);
     }
   });
 
   it("selects only reviewer-kind agents", () => {
-    for (const agent of OWNER_MAPPED_WAVE_REVIEW_AGENTS) {
+    for (const agent of ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS) {
       expect(AGENT_CATALOG[agent].kind.kind, agent).toBe("reviewer");
     }
   });
 
   it("isWaveReviewRole admits exactly the roles some Wave roster names", () => {
-    for (const agent of OWNER_MAPPED_WAVE_REVIEW_AGENTS) expect(isWaveReviewRole(agent), agent).toBe(true);
+    for (const agent of ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS) expect(isWaveReviewRole(agent), agent).toBe(true);
     for (const agent of ["spec-check-invoker", "code-simplifier", "review-verifier-agent", "code-implementer-agent"]) {
       expect(isWaveReviewRole(agent), agent).toBe(false);
     }

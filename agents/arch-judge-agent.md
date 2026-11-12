@@ -28,6 +28,7 @@ Your criterion is derived from the user's validated interview digest (the stated
 
 Output ONLY valid JSON to stdout. No markdown, no prose, no code fences.
 
+<!-- wire-example: judge-verdict -->
 ```json
 {
   "criterion": "<your criterion, verbatim from the prompt>",

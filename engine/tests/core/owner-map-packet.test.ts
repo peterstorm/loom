@@ -9,12 +9,11 @@
  *   leaves every other packet byte-identical (SC-005).
  */
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { BASE_WAVE_REVIEW_AGENTS, OWNER_MAPPED_WAVE_REVIEW_AGENTS } from "../../src/core/agent-catalog-projections";
+import { ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, BASE_WAVE_REVIEW_AGENTS } from "../../src/core/agent-catalog-projections";
 import type { ContextPacket } from "../../src/core/context-packets";
-import { parseOrchestrationRunId } from "../../src/core/orchestration-contract";
 import {
   OWNER_MAP_ROLES,
   isOwnerMapRole,
@@ -23,23 +22,25 @@ import {
   renderOwnerMapSection,
 } from "../../src/core/owner-verification/owner-map";
 import type { OwnerObligation } from "../../src/core/owner-verification/types";
-import { CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
 import {
-  prepareWaveReviewBatch,
   waveRunRosterProblem,
   waveTaskReviewRoster,
   waveTaskReviewRosters,
   type WaveRequestBatch,
-  type WaveReviewRegistrationAuthority,
 } from "../../src/core/wave-review-authority";
-import { observeWaveSpecCheckDocuments } from "../../src/orchestration/wave-spec-check-documents";
-import { parseTaskGraph } from "../../src/state-manager";
 import type { TaskGraph } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
-import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
-import { observedWorkspace } from "../fixtures/reviewed-workspace";
-import { taskFixture } from "../fixtures/task-lifecycle";
 import { ADMISSION, ADMISSION_FEE_TABLE_STAMP, FEE_TABLE, someParagraph } from "../fixtures/owner-families";
+import {
+  issueWaveBatchFixture,
+  packetDigests,
+  packetOf,
+  prepareWaveBatchFixture,
+  projectWithPlanFile,
+  reviewedTaskFixture,
+  reviewGraphFixture,
+  sectionTextOf,
+} from "../fixtures/wave-review-issuance";
 
 const cleanup: string[] = [];
 afterEach(() => {
@@ -97,64 +98,23 @@ describe("renderOwnerMapSection — the pure owner map", () => {
 // Wave review issuance
 // ---------------------------------------------------------------------------
 
-function projectWithPlan(): string {
-  const root = canonicalTempDir("loom-owner-map-unit-");
-  cleanup.push(root);
-  mkdirSync(join(root, ".claude", "plans"), { recursive: true });
-  writeFileSync(join(root, PLAN_FILE), "# Plan: owner map\n");
-  return root;
-}
+const projectWithPlan = (): string => projectWithPlanFile("loom-owner-map-unit-", PLAN_FILE, cleanup);
 
-function graphOf(fileList: readonly string[], stamp: readonly OwnerObligation[] | undefined): TaskGraph {
-  const parsed = parseTaskGraph({
-    spec_trace_version: 2, current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-    spec_file: null, plan_file: PLAN_FILE, wave_gates: {},
-    ...(stamp === undefined ? {} : { owner_obligations: stamp }),
-    tasks: [taskFixture({
-      id: "T1", description: "Reviewed Task", agent: "code-implementer-agent", wave: 1,
-      status: "implemented", depends_on: [], spec_anchors: [], spec_contributions: [],
-      file_list: [...fileList], files_modified: [...fileList],
-    })],
-  });
-  if (!parsed.ok) throw new Error(`fixture graph rejected: ${String(parsed.error)}`);
-  return parsed.value;
-}
+/** The State File stamp of `stamp`; an unstamped graph carries no field at all. */
+const stamped = (stamp: readonly OwnerObligation[] | undefined): Readonly<Record<string, unknown>> =>
+  stamp === undefined ? {} : { owner_obligations: stamp };
 
-const registrationOf = (schemaVersion: 1 | 2): WaveReviewRegistrationAuthority => ({
-  kind: "wave-gate",
-  input: { wave: 1 },
-  taskIds: ["T1"],
-  authorityDigest: "a".repeat(64),
-  ...(schemaVersion === 2
-    ? { schemaVersion: 2 as const, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL }
-    : { schemaVersion: 1 as const }),
-});
+const graphOf = (fileList: readonly string[], stamp: readonly OwnerObligation[] | undefined): TaskGraph =>
+  reviewGraphFixture(PLAN_FILE, [reviewedTaskFixture("T1", fileList)], stamped(stamp));
 
-function issue(root: string, graph: TaskGraph, schemaVersion: 1 | 2 = 2): WaveRequestBatch {
-  const runId = parseOrchestrationRunId("run.owner-map-unit");
-  if (!runId.ok) throw new Error(runId.error.message);
-  const files = graph.tasks[0]!.file_list ?? [];
-  const documents = observeWaveSpecCheckDocuments({
-    specFile: null,
-    planFile: PLAN_FILE,
-    projectBoundary: Object.freeze({ kind: "state-layout" as const, root }),
-  });
-  const workspace = [observedWorkspace("T1", files, files.map((path) => ({ path, bytes: Buffer.from(`// ${path}\n`) })))];
-  const batch = prepareWaveReviewBatch(runId.value, registrationOf(schemaVersion), graph, 1, workspace, documents);
-  if (!batch.ok) throw new Error(`issuance refused: ${batch.error.message}`);
-  return batch.value;
-}
+const issue = issueWaveBatchFixture;
 
-const ownerMapOf = (packet: ContextPacket): string | null => {
-  const section = packet.fixedContext.find(({ label }) => label === OWNER_MAP_SECTION);
-  return section === undefined ? null : Buffer.from(section.bytes).toString("utf8");
-};
+const ownerMapOf = (packet: ContextPacket): string | null => sectionTextOf(packet, OWNER_MAP_SECTION);
 
 const packetsByRole = (batch: WaveRequestBatch): ReadonlyMap<string, ContextPacket> =>
   new Map(batch.subjects.map((subject, index) => [subject.role, batch.packets[index]!] as const));
 
-/** The packet digests of a batch, which are the requests' retry identity. */
-const digests = (batch: WaveRequestBatch): readonly string[] => batch.packets.map(({ digest }) => digest);
+const digests = packetDigests;
 
 describe("Wave review issuance — the owner-map fixed section (AD-9)", () => {
   it("AS-022: the code-reviewer packet of a Task changing a sibling carries the touched Invariant only", () => {
@@ -220,17 +180,8 @@ describe("Wave review issuance — the owner-map fixed section (AD-9)", () => {
   });
 
   it("refuses issuance when a Task touches owned Invariants but the stamped graph names no plan_file to cite", () => {
-    const root = projectWithPlan();
-    const runId = parseOrchestrationRunId("run.owner-map-unit");
-    if (!runId.ok) throw new Error(runId.error.message);
     const graph: TaskGraph = { ...graphOf([ADMISSION.owner], STAMP), plan_file: null };
-    const documents = observeWaveSpecCheckDocuments({
-      specFile: null,
-      planFile: null,
-      projectBoundary: Object.freeze({ kind: "state-layout" as const, root }),
-    });
-    const workspace = [observedWorkspace("T1", [ADMISSION.owner], [{ path: ADMISSION.owner, bytes: Buffer.from("// owner\n") }])];
-    const batch = prepareWaveReviewBatch(runId.value, registrationOf(2), graph, 1, workspace, documents);
+    const batch = prepareWaveBatchFixture(projectWithPlan(), graph);
     expect(batch.ok).toBe(false);
     if (batch.ok) return;
     expect(batch.error.message).toBe("Task T1 touches owned Invariants but the stamped TaskGraph records no plan_file to cite");
@@ -250,43 +201,15 @@ describe("Wave review issuance — the owner-map fixed section (AD-9)", () => {
 // ---------------------------------------------------------------------------
 
 /** A Wave 1 graph of two Tasks: T1 declares `t1Files`, T2 an unrelated file. */
-function twoTaskGraph(t1Files: readonly string[], stamp: readonly OwnerObligation[] | undefined): TaskGraph {
-  const task = (id: string, files: readonly string[]) => taskFixture({
-    id, description: `Reviewed Task ${id}`, agent: "code-implementer-agent", wave: 1,
-    status: "implemented", depends_on: [], spec_anchors: [], spec_contributions: [],
-    file_list: [...files], files_modified: [...files],
-  });
-  const parsed = parseTaskGraph({
-    spec_trace_version: 2, current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-    spec_file: null, plan_file: PLAN_FILE, wave_gates: {},
-    ...(stamp === undefined ? {} : { owner_obligations: stamp }),
-    tasks: [task("T1", t1Files), task("T2", ["src/other.ts"])],
-  });
-  if (!parsed.ok) throw new Error(`fixture graph rejected: ${String(parsed.error)}`);
-  return parsed.value;
-}
-
-function issueTwo(root: string, graph: TaskGraph): WaveRequestBatch {
-  const runId = parseOrchestrationRunId("run.owner-map-roster");
-  if (!runId.ok) throw new Error(runId.error.message);
-  const documents = observeWaveSpecCheckDocuments({
-    specFile: null,
-    planFile: PLAN_FILE,
-    projectBoundary: Object.freeze({ kind: "state-layout" as const, root }),
-  });
-  const workspace = graph.tasks.map((task) => observedWorkspace(task.id, task.file_list ?? [],
-    (task.file_list ?? []).map((path) => ({ path, bytes: Buffer.from(`// ${path}\n`) }))));
-  const batch = prepareWaveReviewBatch(runId.value, { ...registrationOf(2), taskIds: ["T1", "T2"] }, graph, 1, workspace, documents);
-  if (!batch.ok) throw new Error(`issuance refused: ${batch.error.message}`);
-  return batch.value;
-}
+const twoTaskGraph = (t1Files: readonly string[], stamp: readonly OwnerObligation[] | undefined): TaskGraph =>
+  reviewGraphFixture(PLAN_FILE, [reviewedTaskFixture("T1", t1Files), reviewedTaskFixture("T2", ["src/other.ts"])], stamped(stamp));
 
 describe("the per-Task Wave review roster (FR-022, ADR-0047)", () => {
   const touching = graphOf(["src/rules/sibling-a.ts"], STAMP);
   const task = touching.tasks[0]!;
 
   it("a schema-2 Task touching an owned family gets architecture-tech-lead appended to the base five", () => {
-    expect(waveTaskReviewRoster(touching, 2, task)).toEqual({ kind: "roster", roster: OWNER_MAPPED_WAVE_REVIEW_AGENTS });
+    expect(waveTaskReviewRoster(touching, 2, task)).toEqual({ kind: "roster", roster: ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS });
   });
 
   it.each([
@@ -302,16 +225,16 @@ describe("the per-Task Wave review roster (FR-022, ADR-0047)", () => {
     const graph = twoTaskGraph(["src/rules/sibling-a.ts"], STAMP);
     expect(waveTaskReviewRosters(graph, 2, ["T2", "T1"])).toEqual({ ok: true, value: [
       { taskId: "T2", roster: BASE_WAVE_REVIEW_AGENTS },
-      { taskId: "T1", roster: OWNER_MAPPED_WAVE_REVIEW_AGENTS },
+      { taskId: "T1", roster: ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS },
     ] });
     expect(waveTaskReviewRosters(graph, 2, ["T1", "T9"])).toEqual({ ok: false, error: "registered Wave Task T9 disappeared" });
   });
 
   it("issuance: an owner-mapped Task issues six reviewer requests, an unrelated Task five, after the one spec-check", () => {
-    const batch = issueTwo(projectWithPlan(), twoTaskGraph(["src/rules/sibling-a.ts"], STAMP));
+    const batch = issue(projectWithPlan(), twoTaskGraph(["src/rules/sibling-a.ts"], STAMP));
     expect(batch.subjects).toEqual([
       { role: "spec-check-invoker", taskId: null },
-      ...OWNER_MAPPED_WAVE_REVIEW_AGENTS.map((role) => ({ role, taskId: "T1" })),
+      ...ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS.map((role) => ({ role, taskId: "T1" })),
       ...BASE_WAVE_REVIEW_AGENTS.map((role) => ({ role, taskId: "T2" })),
     ]);
     expect(batch.requests).toHaveLength(1 + 6 + 5);
@@ -323,8 +246,8 @@ describe("the per-Task Wave review roster (FR-022, ADR-0047)", () => {
     const graph = twoTaskGraph(["src/rules/sibling-a.ts"], STAMP);
     const rosters = waveTaskReviewRosters(graph, 2, ["T1", "T2"]);
     if (!rosters.ok) throw new Error(rosters.error);
-    expect(rosters.value.map(({ roster }) => roster)).toEqual([OWNER_MAPPED_WAVE_REVIEW_AGENTS, BASE_WAVE_REVIEW_AGENTS]);
-    const issued = issueTwo(projectWithPlan(), graph).subjects
+    expect(rosters.value.map(({ roster }) => roster)).toEqual([ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, BASE_WAVE_REVIEW_AGENTS]);
+    const issued = issue(projectWithPlan(), graph).subjects
       .flatMap((subject) => subject.taskId === null ? [] : [subject]);
     expect(rosters.value.map(({ taskId }) => ({
       taskId, roster: issued.filter((subject) => subject.taskId === taskId).map(({ role }) => role),
@@ -332,20 +255,18 @@ describe("the per-Task Wave review roster (FR-022, ADR-0047)", () => {
   });
 
   it("issuance: the architecture-tech-lead packet carries the same owner map as code-reviewer's", () => {
-    const batch = issueTwo(projectWithPlan(), twoTaskGraph(["src/rules/sibling-a.ts"], STAMP));
-    const packetOf = (role: string, taskId: string) =>
-      batch.packets[batch.subjects.findIndex((subject) => subject.role === role && subject.taskId === taskId)]!;
+    const batch = issue(projectWithPlan(), twoTaskGraph(["src/rules/sibling-a.ts"], STAMP));
     const expected = renderOwnerMapSection(PLAN_FILE, [ADMISSION]);
-    expect(ownerMapOf(packetOf("architecture-tech-lead", "T1"))).toBe(expected);
-    expect(ownerMapOf(packetOf("code-reviewer", "T1"))).toBe(expected);
-    expect(packetOf("architecture-tech-lead", "T1").requiredSkill).toBe("deepen");
-    for (const role of BASE_WAVE_REVIEW_AGENTS) expect(ownerMapOf(packetOf(role, "T2")), role).toBeNull();
+    expect(ownerMapOf(packetOf(batch, "architecture-tech-lead", "T1"))).toBe(expected);
+    expect(ownerMapOf(packetOf(batch, "code-reviewer", "T1"))).toBe(expected);
+    expect(packetOf(batch, "architecture-tech-lead", "T1").requiredSkill).toBe("deepen");
+    for (const role of BASE_WAVE_REVIEW_AGENTS) expect(ownerMapOf(packetOf(batch, role, "T2")), role).toBeNull();
   });
 
   it("appending the architecture reviewer leaves every base reviewer's slot and request identity unchanged", () => {
     const root = projectWithPlan();
-    const owned = issueTwo(root, twoTaskGraph(["src/rules/sibling-a.ts"], STAMP));
-    const unowned = issueTwo(root, twoTaskGraph(["src/rules/sibling-a.ts"], undefined));
+    const owned = issue(root, twoTaskGraph(["src/rules/sibling-a.ts"], STAMP));
+    const unowned = issue(root, twoTaskGraph(["src/rules/sibling-a.ts"], undefined));
     expect(owned.batchEpoch).toBe(unowned.batchEpoch);
     const identities = (batch: WaveRequestBatch) => batch.requests
       .filter(({ authority }) => authority.role !== "architecture-tech-lead")
@@ -369,23 +290,23 @@ describe("waveRunRosterProblem: the one roster-versus-persisted-run check (ADR-0
     waveRunRosterProblem(graph, 2, graph.tasks[0]!, run)?.kind ?? null;
 
   it("admits a run carrying the Task's derived roster in slot order: six for owner-mapped, five for a plain Task", () => {
-    expect(problem(owned, runOf(OWNER_MAPPED_WAVE_REVIEW_AGENTS, slotsOf(OWNER_MAPPED_WAVE_REVIEW_AGENTS)))).toBeNull();
+    expect(problem(owned, runOf(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, slotsOf(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS)))).toBeNull();
     expect(problem(plain, runOf(BASE_WAVE_REVIEW_AGENTS, slotsOf(BASE_WAVE_REVIEW_AGENTS)))).toBeNull();
   });
 
   it("refuses expected_agents that differ from the derived roster, in either direction", () => {
     expect(waveRunRosterProblem(owned, 2, owned.tasks[0]!, runOf(BASE_WAVE_REVIEW_AGENTS, slotsOf(BASE_WAVE_REVIEW_AGENTS))))
-      .toEqual({ kind: "expected-agents-differ", taskId: "T1", roster: OWNER_MAPPED_WAVE_REVIEW_AGENTS });
-    expect(problem(plain, runOf(OWNER_MAPPED_WAVE_REVIEW_AGENTS, slotsOf(OWNER_MAPPED_WAVE_REVIEW_AGENTS))))
+      .toEqual({ kind: "expected-agents-differ", taskId: "T1", roster: ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS });
+    expect(problem(plain, runOf(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, slotsOf(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS))))
       .toBe("expected-agents-differ");
   });
 
   it.each([
     ["missing", undefined],
-    ["short", slotsOf(OWNER_MAPPED_WAVE_REVIEW_AGENTS.slice(0, 5))],
-    ["reordered", slotsOf([...OWNER_MAPPED_WAVE_REVIEW_AGENTS].reverse())],
+    ["short", slotsOf(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS.slice(0, 5))],
+    ["reordered", slotsOf([...ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS].reverse())],
   ] as const)("refuses %s slot authority under exact expected_agents", (_name, slots) => {
-    expect(problem(owned, runOf(OWNER_MAPPED_WAVE_REVIEW_AGENTS, slots))).toBe("slot-authority-differs");
+    expect(problem(owned, runOf(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, slots))).toBe("slot-authority-differs");
   });
 });
 

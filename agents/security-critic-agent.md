@@ -50,6 +50,7 @@ The brief names the run directory. Read, in this order:
 
 Return exactly one JSON object and nothing else:
 
+<!-- wire-example: security-critic-result -->
 ```json
 {
   "schemaVersion": 1,

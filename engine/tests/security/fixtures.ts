@@ -27,7 +27,7 @@ import type { CoverageSeed } from "../../src/core/security-coverage";
 import type { ConfirmedFinding, NeedsValidationFinding, RejectedFinding } from "../../src/core/security-findings";
 import { NO_STACK_SIGNALS, STACK_SIGNAL_NAMES, STACK_SIGNAL_SHAPES, type StackSignals } from "../../src/core/security-lens-select";
 
-const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+const clone = <T>(value: T): T => structuredClone(value);
 
 /** Unwrap a `DomainResult` in a test: a refusal here means the fixture is
  *  wrong, not that the case under test is interesting. */

@@ -1868,7 +1868,9 @@ function waveDecisionAuthorityError(binding: DecisionBinding): HookResult | null
   return mismatch === null ? null : { kind: "error", message: mismatch };
 }
 
-function parseUserDecision(stdin: string, waveDecision: boolean): Readonly<{ ok: true; value: object }> |
+/** The decision `decide` reads from stdin: any JSON object, and for a
+ *  registered Wave Gate (`waveDecision`) exactly `{"kind":"approve"}`. */
+export function parseUserDecision(stdin: string, waveDecision: boolean): Readonly<{ ok: true; value: object }> |
   Readonly<{ ok: false; result: HookResult }> {
   if (stdin.trim().length === 0) {
     return { ok: false, result: { kind: "error", message: "a decision must be supplied on stdin" } };

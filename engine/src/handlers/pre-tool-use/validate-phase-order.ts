@@ -5,12 +5,14 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import type { HookHandler, PreToolUseInput, TaskGraph } from "../../types";
+import type { HookHandler, TaskGraph } from "../../types";
+import { parsePreToolUseInput } from "./pre-tool-use-input";
 import {
   validatePhaseOrder,
   type ArtifactProbe,
   type PhaseOrderDeps,
 } from "../../core/validate-phase-order";
+import { sha256Bytes } from "../../core/digest";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import { pathExistsFailClosed, taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
@@ -28,6 +30,7 @@ export const realArtifactProbe: ArtifactProbe = {
   exists: existsSync,
   readText: (path: string): string => readFileSync(path, "utf-8"),
   findFile,
+  sha256: (path: string): string => sha256Bytes(readFileSync(path)),
 };
 
 /**
@@ -58,15 +61,13 @@ export const realPhaseOrderDeps: PhaseOrderDeps = {
 };
 
 const handler: HookHandler = async (stdin) => {
-  let input: PreToolUseInput;
-  try {
-    input = JSON.parse(stdin);
-  } catch (e) {
+  const input = parsePreToolUseInput(stdin);
+  if (input instanceof Error) {
     // Malformed hook input on a spawn-gate route: fail CLOSED. Returning
     // allow here would exit 0 and let a Task spawn out of phase order.
     return {
       kind: "block",
-      message: `validate-phase-order: malformed hook input — failing closed: ${e instanceof Error ? e.message : String(e)}`,
+      message: `validate-phase-order: malformed hook input — failing closed: ${input.message}`,
     };
   }
   if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };

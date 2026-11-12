@@ -19,9 +19,9 @@ import {
   parseRefutationPanelCheckpoint,
   replayPersistentRefutationPanel,
   resumePersistentRefutationPanel,
-  type RefutationPanelCheckpoint,
   type RefutationPanelState,
 } from "./persistent-panel";
+import { isRecord } from "./plain-record";
 import {
   freezeStandalonePanelAuthority, panelOutcomeValue, parseFrozenStandalonePanelAuthority, parseStandalonePanelOutcomes,
   standaloneCurrentPanelCriticals, type FrozenStandalonePanelAuthority,
@@ -60,8 +60,23 @@ export type StandaloneRefutationCompletionReceipt = Readonly<{
   /** Parser-produced T2 state used by the in-process reducer. */
   completedPanelState: RefutationPanelState;
   /** Canonical T2 event checkpoint retained when completion crossed a durable boundary. */
-  completedPanelCheckpoint: RefutationPanelCheckpoint | null;
+  completedPanelCheckpoint: RetainedRefutationPanelCheckpoint | null;
 }>;
+
+/**
+ * The persisted JSON of a checkpoint `parseRefutationPanelCheckpoint` accepted.
+ * Only its envelope is typed: the authority, events and state stay the JSON
+ * they were, because a restore re-parses the whole checkpoint from them.
+ */
+export type RetainedRefutationPanelCheckpoint = Readonly<{
+  schemaVersion: 2;
+  kind: typeof REFUTATION_PANEL_CHECKPOINT_KIND;
+  authority: unknown;
+  events: readonly unknown[];
+  state: unknown;
+}>;
+
+const REFUTATION_PANEL_CHECKPOINT_KIND = "refutation-panel-checkpoint";
 
 /** Brand the receipt fields. Private: `parseStandaloneRefutationCompletion` is
  *  its only caller. */
@@ -85,6 +100,24 @@ function deepFreezeJson<T>(value: T): T {
     return Object.freeze(value);
   }
   return value;
+}
+
+/**
+ * A frozen JSON copy of a checkpoint, read as the envelope it must be. `null`
+ * when the copy is not a schemaVersion 2 Refutation Panel checkpoint record.
+ */
+function retainedRefutationPanelCheckpoint(raw: unknown): RetainedRefutationPanelCheckpoint | null {
+  const copy: unknown = JSON.parse(JSON.stringify(raw));
+  if (!isRecord(copy) || copy.schemaVersion !== 2 || copy.kind !== REFUTATION_PANEL_CHECKPOINT_KIND) return null;
+  const events: unknown = copy.events;
+  if (!Array.isArray(events)) return null;
+  return deepFreezeJson({
+    schemaVersion: 2,
+    kind: REFUTATION_PANEL_CHECKPOINT_KIND,
+    authority: copy.authority,
+    events,
+    state: copy.state,
+  });
 }
 
 function refutationManifestValue(authority: RefutationPanelAuthority): unknown {
@@ -203,11 +236,9 @@ export function parseStandaloneRefutationCompletion(input: Readonly<{
     return refutationAuthorityFailure(`refutation completion panel authority is invalid: ${persistedPanelAuthority.error.message}`);
   }
 
-  const stateLooksLikeCheckpoint = typeof input.completedPanelState === "object" &&
-    input.completedPanelState !== null &&
-    !Array.isArray(input.completedPanelState) &&
-    (input.completedPanelState as Record<string, unknown>).schemaVersion === 2 &&
-    (input.completedPanelState as Record<string, unknown>).kind === "refutation-panel-checkpoint";
+  const stateLooksLikeCheckpoint = isRecord(input.completedPanelState) &&
+    input.completedPanelState.schemaVersion === 2 &&
+    input.completedPanelState.kind === REFUTATION_PANEL_CHECKPOINT_KIND;
   if (stateLooksLikeCheckpoint && input.completedPanelCheckpoint !== undefined &&
       input.completedPanelCheckpoint !== null &&
       !canonicalStructuralEquals(input.completedPanelState, input.completedPanelCheckpoint)) {
@@ -217,7 +248,7 @@ export function parseStandaloneRefutationCompletion(input: Readonly<{
     (stateLooksLikeCheckpoint ? input.completedPanelState : undefined);
   const rawState = stateLooksLikeCheckpoint ? undefined : input.completedPanelState;
 
-  let checkpoint: RefutationPanelCheckpoint | null = null;
+  let checkpoint: RetainedRefutationPanelCheckpoint | null = null;
   let checkpointCompleted: Extract<RefutationPanelState, { stage: "done" }> | null = null;
   if (rawCheckpoint !== undefined && rawCheckpoint !== null) {
     if (input.publicationResolver === undefined) {
@@ -231,9 +262,10 @@ export function parseStandaloneRefutationCompletion(input: Readonly<{
     if (parsedCheckpoint.value.state.stage !== "done") {
       return refutationAuthorityFailure("canonical Refutation Panel checkpoint has not reached completed state");
     }
-    checkpoint = deepFreezeJson(
-      JSON.parse(JSON.stringify(rawCheckpoint)) as RefutationPanelCheckpoint,
-    );
+    checkpoint = retainedRefutationPanelCheckpoint(rawCheckpoint);
+    if (checkpoint === null) {
+      return refutationAuthorityFailure("canonical Refutation Panel checkpoint is not a schemaVersion 2 checkpoint record");
+    }
     checkpointCompleted = parsedCheckpoint.value.state;
   }
 

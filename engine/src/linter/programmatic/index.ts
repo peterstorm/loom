@@ -1,9 +1,10 @@
 /**
  * Programmatic rule registry — provides built-in programmatic rules. Every
- * rule runs in the "full" tier; the import-boundary rules, `switch-totality`
- * AND `no-duplicate-block` also run in the "immediate" tier, so a forbidden
- * import, an unproven switch or a copied block is refused when it is written
- * rather than when the Wave Gate starts.
+ * rule runs in the "full" tier; the import-boundary rules, `switch-totality`,
+ * `no-duplicate-block` AND `no-wire-cast` also run in the "immediate" tier, so
+ * a forbidden import, an unproven switch, a copied block or a wire value typed
+ * without being parsed is refused when it is written rather than when the Wave
+ * Gate starts.
  *
  * Rules are configured via project-local config (`config.json` inside the
  * project rules directory: `.claude/linter/rules/` or `.pi/linter/rules/`).
@@ -39,6 +40,13 @@ import {
   type DuplicateBlockOptions,
 } from "./no-duplicate-block";
 import {
+  handler as wireCastHandler,
+  detectedWireCastKeys,
+  FIX_HINT as WIRE_CAST_FIX_HINT,
+  RULE_NAME as WIRE_CAST_RULE,
+  type WireCastOptions,
+} from "./no-wire-cast";
+import {
   CLONE_EXTENSIONS,
   DEFAULT_CLONE_OPTIONS,
   type AuthoritativeCorpus,
@@ -60,6 +68,10 @@ const SCRIPT_EXTENSIONS: readonly string[] = Object.freeze([...TYPESCRIPT_EXTENS
 /** The files both totality rules read, owned once for the rules and their
  *  baseline owners. */
 const TOTALITY_EXTENSIONS: readonly string[] = TYPESCRIPT_EXTENSIONS;
+
+/** The files no-wire-cast reads: an assertion and an annotation exist only in
+ *  TypeScript. Owned once for the rule and its baseline owner. */
+const WIRE_CAST_EXTENSIONS: readonly string[] = TYPESCRIPT_EXTENSIONS;
 
 /** The boundary rule's options for one project. */
 export function boundaryOptions(config: ProgrammaticConfig, projectRoot: string | null): BoundaryOptions {
@@ -101,6 +113,12 @@ export function discriminantBranchingOptions(
     baseline: config.discriminantBranchingBaseline ?? defaults.baseline,
     projectRoot,
   });
+}
+
+/** no-wire-cast's options for one project — shared by the live rule and its
+ *  staleness detector, like the totality rules' above. */
+function wireCastOptions(config: ProgrammaticConfig, projectRoot: string | null): WireCastOptions {
+  return Object.freeze({ baseline: config.wireCastBaseline ?? [], projectRoot });
 }
 
 /** no-duplicate-block's options for one project. */
@@ -165,6 +183,7 @@ export function baselineOwners({
 }: ProjectLintContext<AuthoritativeCorpus>): readonly BaselineOwner[] {
   const switchOptions = switchTotalityOptions(config, projectRoot);
   const chainOptions = discriminantBranchingOptions(config, projectRoot);
+  const castOptions = wireCastOptions(config, projectRoot);
   return Object.freeze([
     {
       rule: SWITCH_TOTALITY_RULE,
@@ -189,6 +208,14 @@ export function baselineOwners({
       baseline: cloneOptions.baseline,
       site: "copied block",
       detect: (content: string, filePath: string) => detectedCloneKeys(content, filePath, corpus, cloneOptions),
+    },
+    {
+      rule: WIRE_CAST_RULE,
+      configKey: "wireCastBaseline",
+      extensions: WIRE_CAST_EXTENSIONS,
+      baseline: castOptions.baseline,
+      site: "unparsed wire value",
+      detect: (content: string, filePath: string) => detectedWireCastKeys(content, filePath, castOptions),
     },
   ]);
 }
@@ -341,6 +368,27 @@ function duplicateBlockRule({ duplicateBlock: options, corpus }: ProjectLintCont
 }
 
 /**
+ * The wire-value rule. IMMEDIATE: a type named for unparsed `JSON.parse` /
+ * `.json()` output is believed by every read written after it, so it is
+ * refused before those reads exist; the project's baseline keeps every
+ * pre-existing site from blocking an unrelated edit to its file.
+ */
+function wireCastRule(config: ProgrammaticConfig, projectRoot: string | null): ProgrammaticRule {
+  const options = wireCastOptions(config, projectRoot);
+  return {
+    kind: "programmatic",
+    name: WIRE_CAST_RULE,
+    description: "JSON.parse / .json() output typed by an assertion or an annotation instead of being parsed",
+    extensions: WIRE_CAST_EXTENSIONS,
+    handler: (content, filePath) => wireCastHandler(content, filePath, options),
+    tier: "immediate",
+    fixHint: WIRE_CAST_FIX_HINT,
+    enabled: true,
+    source: "default",
+  };
+}
+
+/**
  * Creates the programmatic rule set for one project (`EMPTY_CONFIG` in the
  * context for the built-in defaults). Config allows projects to define their
  * own boundaries, pure modules, limits and baselines. With no project the
@@ -360,6 +408,7 @@ export function createProgrammaticRules(context: ProjectLintContext): readonly P
     fugueGeneratedIntegrityRule(),
     ...totalityRules(config, projectRoot),
     ...expressionShapeRules(),
+    wireCastRule(config, projectRoot),
     duplicateBlockRule(context),
   ];
 }

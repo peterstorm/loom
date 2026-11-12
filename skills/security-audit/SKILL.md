@@ -124,6 +124,7 @@ Every operation takes `--out <run-dir>`; the run directory is the whole record.
 Keep it **outside** the audited repository: bounded local checks run in its
 `agents/<owner-id>/scratch`, and the sandbox refuses a scratch inside its target.
 
+<!-- wire-example: security-audit-start -->
 ```bash
 loom helper security-audit start --out ../audit-run-1 --repo . \
   --profile standard --budget 24 <<'JSON'
@@ -145,7 +146,7 @@ loom helper security-audit defer   --out ../audit-run-1 --unit <coverage-id> --r
 loom helper security-audit status  --out ../audit-run-1        # prints the start command below, exactly
 loom helper orchestration start security-verification \
   --runs-root <abs run-dir>/verification-runs --run run.verify-w<wave>-g<generation>-<id> <<'LOOM_VERIFICATION_START'
-{ …the input status printed… }
+<the input status printed, verbatim>
 LOOM_VERIFICATION_START
 #   → spawn each issued security-verifier-agent request verbatim; the harness captures its answer
 loom helper orchestration resume --runs-root <abs run-dir>/verification-runs --run run.verify-w<wave>-g<generation>-<id>   # until done

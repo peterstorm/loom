@@ -42,7 +42,7 @@ describe("implementation prompt required-skill contract", () => {
       const rendered = renderImplementationBrief({
         template, task, dispatch: derivation.dispatch, planFile: "plan.md",
         spec: { kind: "unavailable", reason: { kind: "no-spec-file" } }, rules, roster: [task], ownership: planOwnership(), contracts: [],
-        verificationManifest: undefined, repositoryRoot: "/repo", operatorNotes: [], frozenSignatures: unobservedSkeletons(graphFixture([task])),
+        verificationManifest: undefined, repositoryRoot: "/repo", packageRoot: "/loom", operatorNotes: [], frozenSignatures: unobservedSkeletons(graphFixture([task])),
       });
       if (!rendered.ok) throw new Error(rendered.error.message);
       expect(checkAgentSkillPrompt(source, rendered.value.prompt)).toEqual({ ok: true });

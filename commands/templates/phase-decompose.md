@@ -118,6 +118,7 @@ Output ONLY valid JSON. No markdown, no explanation, no code fences. Pure JSON.
 
 **TRANSPORT CONTRACT (binding):** your entire final message must be exactly ONE physical line of pure JSON — no newline characters anywhere inside the JSON, no markdown fences, no prose before or after. Multi-line final messages are silently dropped by the agent transport: the orchestrator receives no output and the run is lost. Single-line output returns even at ~100KB, so emit a long graph as one line anyway. (The shape example below is pretty-printed for readability; your emitted graph must be one physical line.)
 
+<!-- wire-example: decompose-task-graph -->
 ```json
 {
   "spec_trace_version": 2,

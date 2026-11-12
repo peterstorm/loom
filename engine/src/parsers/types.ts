@@ -46,13 +46,15 @@ export interface PiEntry {
   type: string;
   id?: string;
   parentId?: string | null;
-  message?: {
-    role: string;
-    content: PiContentBlock[] | string;
-    toolCallId?: string;
-    toolName?: string;
-    isError?: boolean;
-  };
+  message?: PiEntryMessage;
+}
+
+export interface PiEntryMessage {
+  role?: string;
+  content?: PiContentBlock[] | string;
+  toolCallId?: string;
+  toolName?: string;
+  isError?: boolean;
 }
 
 export interface PiContentBlock {
@@ -61,6 +63,60 @@ export interface PiContentBlock {
   name?: string;
   id?: string;
   arguments?: Record<string, unknown>;
+}
+
+/** A parsed JSON object: not null, not an array. */
+export const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** A field that is not of its declared type is absent, never a value of another type. */
+const stringField = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+
+function parsePiContentBlock(raw: unknown): PiContentBlock | null {
+  if (!isRecord(raw) || typeof raw.type !== "string") return null;
+  return {
+    type: raw.type,
+    text: stringField(raw.text),
+    name: stringField(raw.name),
+    id: stringField(raw.id),
+    arguments: isRecord(raw.arguments) ? raw.arguments : undefined,
+  };
+}
+
+function parsePiContent(raw: unknown): PiContentBlock[] | string | undefined {
+  if (typeof raw === "string") return raw;
+  if (!Array.isArray(raw as unknown)) return undefined;
+  return (raw as readonly unknown[]).flatMap((block) => {
+    const parsed = parsePiContentBlock(block);
+    return parsed === null ? [] : [parsed];
+  });
+}
+
+function parsePiEntryMessage(raw: unknown): PiEntryMessage | undefined {
+  if (!isRecord(raw)) return undefined;
+  return {
+    role: stringField(raw.role),
+    content: parsePiContent(raw.content),
+    toolCallId: stringField(raw.toolCallId),
+    toolName: stringField(raw.toolName),
+    isError: typeof raw.isError === "boolean" ? raw.isError : undefined,
+  };
+}
+
+/**
+ * One Pi session entry read from a parsed JSONL value, or `null` when the
+ * value is not an entry (not an object, or no string `type`). The read is
+ * tolerant like the extractors it feeds: a field or content block that is not
+ * what the format declares is dropped, and the rest of the entry is kept.
+ */
+export function parsePiEntry(raw: unknown): PiEntry | null {
+  if (!isRecord(raw) || typeof raw.type !== "string") return null;
+  return {
+    type: raw.type,
+    id: stringField(raw.id),
+    parentId: raw.parentId === null ? null : stringField(raw.parentId),
+    message: parsePiEntryMessage(raw.message),
+  };
 }
 
 // --- Shared parsers ---
@@ -83,15 +139,18 @@ export function* parseJsonl(content: string): Generator<TranscriptLine> {
   }
 }
 
-/** Read and parse JSONL file line by line (pi format) */
+/** The entries of a Pi JSONL transcript. A line that is not JSON, or not an entry, is skipped. */
 export function* parsePiJsonl(content: string): Generator<PiEntry> {
   for (const line of content.split("\n")) {
     if (!line.trim()) continue;
+    let parsed: unknown;
     try {
-      yield JSON.parse(line) as PiEntry;
+      parsed = JSON.parse(line);
     } catch {
-      // Skip invalid JSON lines
+      continue; // Skip invalid JSON lines
     }
+    const entry = parsePiEntry(parsed);
+    if (entry !== null) yield entry;
   }
 }
 

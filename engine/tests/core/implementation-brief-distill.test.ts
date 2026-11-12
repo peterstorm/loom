@@ -3,6 +3,10 @@
  * reads it: the distill appendix is there byte for byte, the waiver that
  * carries its test requirement is explained, and no section tells it to
  * implement, write tests, fill a skeleton or own an Invariant family.
+ *
+ * It also pins the Task mutation check's section (ADR-0071): an implementer's
+ * brief carries it exactly when the Task owes the check, and a Distill Task's
+ * never does.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -22,8 +26,9 @@ import {
   type RuleDocument,
 } from "../../src/core/implementation-brief";
 import { authorizeImplementationSpawn } from "../../src/core/implementation-retry";
-import { DISTILL_AGENT } from "../../src/core/model-profiles";
+import { DECISION_RECORD_AGENT, DISTILL_AGENT } from "../../src/core/model-profiles";
 import { NO_PREDECESSORS } from "../../src/core/predecessor-output";
+import { TASK_MUTATION_BASH_TIMEOUT_MS, taskMutationCommand } from "../../src/core/task-mutation-check";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
 import { validateTemplateSubstitution } from "../../src/core/validate-template-substitution";
 import { IMPLEMENTATION_BRIEF_TEMPLATE, renderTaskImplementationBrief } from "../../src/orchestration/implementation-brief";
@@ -36,6 +41,7 @@ import { briefOwnership, ownerObligation, planOwnership } from "../fixtures/owne
 import { binding, frozenManifestWith } from "../fixtures/skeleton-builders";
 import { cleanupSkeletonRepos, PATHS, skeletonRepo } from "../fixtures/skeleton-repo";
 import { distillTaskFixture, graphFixture, taskFixture, type TaskFixtureInput } from "../fixtures/task-lifecycle";
+import { mutationManifest } from "../fixtures/task-mutation";
 
 const TEMPLATE = readFileSync(join(LOOM_PACKAGE_ROOT, IMPLEMENTATION_BRIEF_TEMPLATE), "utf8");
 const RULES: ReadonlyMap<RuleDocument, string> = new Map(RULE_DOCUMENTS.map((name) =>
@@ -74,6 +80,7 @@ const render = (task: Task, overrides: Partial<ImplementationBriefInput> = {}): 
     ownership: planOwnership(),
     contracts: [],
     repositoryRoot: "/repo",
+    packageRoot: "/loom",
     operatorNotes: [],
     frozenSignatures: unobservedSkeletons(graphFixture(ROSTER)),
     ...overrides,
@@ -300,5 +307,43 @@ describe("a Distill Task's brief over bound exports and a red window", () => {
     expect(contract).not.toContain("Failures anywhere else are yours to fix");
     expect(contract).not.toContain("you are its contract Task");
     expect(contract).not.toContain("Turn these acceptance testcases green");
+  });
+});
+
+describe("the Task mutation check in a brief (ADR-0071)", () => {
+  const HEADING = "**Task mutation check.**";
+  const pending = (overrides: Partial<TaskFixtureInput> = {}): Task =>
+    implementer("T5", OWNER, { status: "pending", file_list: [OWNER, "src/order/pricing.test.ts", "docs/pricing.md"], ...overrides });
+  const policy = (task: Task, overrides: Partial<ImplementationBriefInput> = {}): string =>
+    section(render(task, { verificationManifest: mutationManifest(), ...overrides }), "Verification Policy");
+
+  it("tells an implementer that owes it the one command, its timeout, and the files it mutates", () => {
+    const text = policy(pending());
+    expect(text).toContain(`${HEADING} Once your tests pass and before your final verification run, run this as one Bash call with a timeout of ${TASK_MUTATION_BASH_TIMEOUT_MS} ms:`);
+    expect(text).toContain(`\n\`${taskMutationCommand("/loom", "T5")}\`\n`);
+    expect(text).toContain("at most 8 mutants");
+    expect(text).toContain("an equivalent mutant");
+    expect(text).toContain("makes the result stale, so run it after your last edit");
+    expect(text).toContain("at most 2 times");
+    expect(text).toContain("so your final verification run still follows it");
+    // Only the implementation file: the Task's test and its document are digested, never mutated.
+    expect(text).toMatch(/Files it mutates:\n- src\/order\/pricing\.ts(?!\n- )/);
+  });
+
+  it("keeps an owing implementer's brief admissible to the spawn gate", () => {
+    const task = pending();
+    const prompt = render(task, { verificationManifest: mutationManifest() });
+    expect(authorizeImplementationSpawn(task, prompt)).toMatchObject({ ok: true });
+    expect(validateTemplateSubstitution(prompt, true)).toEqual({ kind: "allow" });
+  });
+
+  it.each<[string, Task, Partial<ImplementationBriefInput>]>([
+    ["a Distill Task", PASS, {}],
+    ["an ADR Task", pending({ agent: DECISION_RECORD_AGENT, file_list: ["docs/adr/ADR-0001-pricing.md"] }), {}],
+    ["a Task with no TypeScript or JavaScript implementation file", pending({ file_list: ["src/order/Pricing.java"] }), {}],
+    ["a manifest that switches the check off", pending(), { verificationManifest: mutationManifest({ taskMutationCheck: "off" }) }],
+    ["a manifest with no affected runner", pending(), { verificationManifest: mutationManifest({ affectedRunner: undefined }) }],
+  ])("says nothing of the check to %s", (_label, task, overrides) => {
+    expect(render(task, { verificationManifest: mutationManifest(), ...overrides })).not.toContain(HEADING);
   });
 });

@@ -63,7 +63,7 @@ Claude Code lifecycle coverage:
 - **PostToolUse** — immediate lint, evidence recording, and orchestration-spawn correlation. Evidence recording (`handlers/post-tool-use/record-evidence.ts`) attributes the call to an agent epoch, normalizes the hook payload with `claudeToolCall`, and hands it to the shared minting shell (see [Evidence ledger: one minting rule](#evidence-ledger-one-minting-rule)).
 - **PostToolUseFailure** (Bash) — evidence recording for a failed call. Claude Code fires PostToolUse only when a tool call succeeded; a Bash command that exits non-zero is a failed call, so a failing test run reaches the ledger only through this event.
 - **SubagentStart** — active-Agent tracking and guarded-machine epoch binding.
-- **SubagentStop** — the stop checks (the Acceptance Stop Check, then the Affected-Test Stop Check, run by `handlers/subagent-stop/stop-checks.ts` from the one planner `planStopChecks`), then phase advancement, implementation proof reconciliation (including the I6 red-then-green judgment over the agent's epoch), review/spec evidence capture, orchestration transcript capture, cleanup.
+- **SubagentStop** — the stop checks (the Acceptance Stop Check, then the Affected-Test Stop Check, run by `handlers/subagent-stop/stop-checks.ts` from the one planner `planStopChecks`; and the Task Mutation Check, which runs nothing at the stop and reads the record `helper mutation-check` left, decided by `core/task-mutation-check.ts`, ADR-0071), then phase advancement, implementation proof reconciliation (including the I6 red-then-green judgment over the agent's epoch), review/spec evidence capture, orchestration transcript capture, cleanup.
 - **SessionStart** — stale binding cleanup and post-`/clear` context restoration.
 
 ### Pi
@@ -283,7 +283,19 @@ A Review Run freezes:
 - ordered active Finding ids;
 - generation and repository revisions.
 
+A Wave Task's roster is derived, never configured: `waveTaskReviewRoster` (`core/wave-review-authority.ts`) answers the base five, or the six with `architecture-tech-lead` appended last when the Task's review carries the architecture lens. `ArchitectureLensReasons` (`core/agent-catalog-projections.ts`) is the closed record of why: the Task's packets carry the owner map (ADR-0047), or the Task writes an Acceptance Contract's types file (ADR-0069). Each reason is also a fixed, digest-bound packet section rendered from the same derivation, so a section and the roster cannot disagree: `owner-map` for code-reviewer and architecture-tech-lead, `contract-surface` (`core/contract-surface-section.ts`) for type-design-analyzer and architecture-tech-lead. Both are schema-2 only and leave every other packet byte-identical. The derivation reads one persisted value: a Review Run already installed with the roster the Task has without the contract-surface reason keeps it.
+
 Every expected reviewer must assess every prior Finding exactly once before finalization. A `still_present` assessment keeps it active. A Finding becomes **resolved** only when the complete roster verifies remediation. A Finding becomes **refuted** only through adjudication (or an audited manual override); refutation is not resolution.
+
+### Plan design review
+
+The architecture plan is design-reviewed before decompose ([ADR-0070](adr/ADR-0070-the-plan-design-review-gates-decompose.md)). The review is a Standalone Review of kind `plan-design`; no program, phase or reviewer protocol was added. `core/plan-design-review.ts` owns every rule: the kind and its fixed roster, the State File record (`not-required | required | accepted{planSha256, runId, resultDigest}`), the gate decision, the judgement of a completed review, and the lens text. Three shells consume it:
+
+- `standalone-review-scope.ts` selects the fixed roster for the kind, and `programs/standalone-requests.ts` gives the plan a whole-document read obligation and appends the `plan-design-lens` section to each reviewer's packet.
+- `handlers/helpers/accept-plan-design-review.ts` takes the evidence from the programs volume (`readPlanDesignEvidence`, which authenticates the Run Directory), hands it to the pure `judgePlanDesignEvidence`, and makes the one locked State File write.
+- `core/validate-phase-order.ts` asks `planDesignGate` on a decompose spawn, with the plan's digest from the `ArtifactProbe.sha256` port.
+
+The coupling runs one way. The gate reads a digest from the State File and never opens a Run Directory; the Run never reads the State File.
 
 ## Standalone lineage and publication (P5)
 

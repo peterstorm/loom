@@ -33,6 +33,8 @@ import { renderProofBoundaryNotice } from "../../core/proof-boundary-observation
 import { acceptanceObservationProblem } from "../../core/acceptance-contract";
 import { parsePlanExportBindings } from "../../core/parse-plan-models";
 import { distillPlanNote, isDistillTask } from "../../core/distill-task";
+import { parseDecomposeEnvelope, parseDecomposeInput, type DecomposeEnvelope } from "../../core/decompose-payload";
+import { isRecord } from "../../core/plain-record";
 import {
   parseAuthoredTaskRoster,
   populateTaskGraph,
@@ -44,16 +46,6 @@ import {
 } from "../../core/task-graph-population";
 
 export { resolvedSpecFile };
-
-interface DecomposeInput {
-  spec_trace_version: 2;
-  plan_title: string;
-  plan_file?: string;
-  spec_file?: string;
-  tasks: readonly AuthoredTask[];
-}
-
-const DECOMPOSE_FIELDS = new Set(["spec_trace_version", "plan_title", "plan_file", "spec_file", "tasks"]);
 
 type PreparedManifest =
   | Readonly<{ ok: true; value: FrozenVerificationManifest }>
@@ -316,9 +308,9 @@ const handler: HookHandler = async (stdin, args) => {
   if (!parsedArgs.ok) return { kind: "error", message: `populate-task-graph: ${parsedArgs.error}` };
   const { issue, repo, fix, force } = parsedArgs.value;
 
-  let decompose: DecomposeInput;
+  let stdinJson: unknown;
   try {
-    decompose = JSON.parse(stdin) as DecomposeInput;
+    stdinJson = JSON.parse(stdin);
   } catch (e) {
     // Preserve the parse error: "Invalid JSON on stdin" alone left the operator
     // with no position or malformed token to look for.
@@ -327,37 +319,29 @@ const handler: HookHandler = async (stdin, args) => {
       message: `Invalid JSON on stdin: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
-
-  if (typeof decompose !== "object" || decompose === null || Array.isArray(decompose)) {
-    return { kind: "error", message: "Decompose JSON must be an object" };
-  }
-  const surplusFields = Object.keys(decompose).filter((field) => !DECOMPOSE_FIELDS.has(field)).sort();
-  if (surplusFields.length > 0) {
-    return {
-      kind: "error",
-      message: `Decompose JSON contains unsupported field(s): ${surplusFields.join(", ")}`,
-    };
-  }
-  if (!Array.isArray(decompose.tasks) || decompose.tasks.length === 0) {
-    return { kind: "error", message: "No tasks in decompose JSON" };
-  }
+  const authored = parseDecomposeEnvelope(stdinJson);
+  if (!authored.ok) return { kind: "error", message: authored.error };
 
   // Validate decompose output before merging. Scoped to the PAYLOAD: the
   // findings aggregate is agent-forgeable here and core `populatedTask`
   // strips it during population, so holding this to the load-boundary findings
   // rules would reject exactly the input that sanitization exists to clean.
-  const validation = validateFull(decompose as unknown as Record<string, unknown>, "decompose-payload");
+  let payload: DecomposeEnvelope = authored.value;
+  const validation = validateFull(payload, "decompose-payload");
   if (!validation.ok) {
     if (fix) {
-      const repair = fixFull(decompose as unknown as Record<string, unknown>);
+      const repair = fixFull(payload);
       for (const note of repair.notes) process.stderr.write(`  ${note}\n`);
-      decompose = JSON.parse(repair.json) as DecomposeInput;
+      const repairedJson: unknown = JSON.parse(repair.json);
+      const repaired = parseDecomposeEnvelope(repairedJson);
+      if (!repaired.ok) return { kind: "error", message: `--fix could not repair all issues:\n  - ${repaired.error}` };
+      payload = repaired.value;
       // fixFull normalizes repairable graph/task fields and findings/review
       // state; structural errors (unknown agent, wave gaps, self-dependency)
       // remain unfixable. Re-validate
       // so they fail loudly instead of reaching the persisted graph under a
       // misleading "Auto-fixed" banner.
-      const revalidation = validateFull(decompose as unknown as Record<string, unknown>, "decompose-payload");
+      const revalidation = validateFull(payload, "decompose-payload");
       if (!revalidation.ok) {
         return {
           kind: "error",
@@ -369,6 +353,10 @@ const handler: HookHandler = async (stdin, args) => {
       return { kind: "error", message: `Decompose validation failed:\n${validation.errors.map(e => `  - ${e}`).join("\n")}` };
     }
   }
+  // The typed input is read from the validated payload, never asserted of it.
+  const decoded = parseDecomposeInput(payload);
+  if (!decoded.ok) return { kind: "error", message: `Decompose validation failed:\n  - ${decoded.error}` };
+  const decompose = decoded.value;
 
   // Executable-models policy: bindings are enforced here fail-closed —
   // validate-task-graph's 4a run is advisory to the orchestrator, this is the
@@ -403,7 +391,7 @@ const handler: HookHandler = async (stdin, args) => {
   const planRead = typeof planFile === "string" ? productionModelBindingDeps.readFile(planFile) : null;
   const bindings = checkPlanModelBindings(
     planFile,
-    decompose.tasks as unknown as Record<string, unknown>[],
+    payload.tasks.filter(isRecord),
     {
       ...productionModelBindingDeps,
       readFile: (path) => (path === planFile && planRead !== null ? planRead : productionModelBindingDeps.readFile(path)),

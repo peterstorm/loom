@@ -12,6 +12,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import fc from "fast-check";
 import { editedFilePath } from "../../../src/core/tool-vocabulary";
 
 
@@ -45,7 +46,7 @@ function makeStdin(overrides: Record<string, unknown> = {}): string {
  */
 
 // Import the handler for direct invocation
-import handler from "../../../src/handlers/post-tool-use/lint-file";
+import handler, { parseLintHookInput } from "../../../src/handlers/post-tool-use/lint-file";
 
 describe("PostToolUse lint-file handler", () => {
   describe("passthrough cases", () => {
@@ -222,6 +223,30 @@ describe("PostToolUse lint-file handler", () => {
       expect(result).toEqual({ kind: "passthrough" });
     });
 
+    it("returns block on JSON that is not an object", async () => {
+      for (const stdin of ["null", "[]", "7", '"Write"', '[{"tool_name":"Write"}]']) {
+        expect(await handler(stdin, []), stdin).toEqual({
+          kind: "block",
+          message: "Lint hook error: hook input must be a JSON object",
+        });
+      }
+    });
+
+    it("returns passthrough when tool_name is not a string", async () => {
+      for (const toolName of [7, null, ["Write"], { name: "Write" }]) {
+        expect(await handler(makeStdin({ tool_name: toolName }), [])).toEqual({ kind: "passthrough" });
+      }
+    });
+
+    it("returns block when a lint-triggering tool's tool_input is not an object", async () => {
+      for (const toolInput of ["/path/to/file.ts", 7, ["/path/to/file.ts"]]) {
+        expect(await handler(makeStdin({ tool_input: toolInput }), [])).toEqual({
+          kind: "block",
+          message: "Lint hook error: Could not extract file_path from tool_input",
+        });
+      }
+    });
+
     it("returns block when file doesn't exist (fail-closed)", async () => {
       const stdin = makeStdin({
         tool_input: { file_path: "/absolutely/nonexistent/path.ts" },
@@ -253,6 +278,33 @@ describe("PostToolUse lint-file handler", () => {
       // Should process the file (not passthrough)
       expect(result.kind).toBe("allow");
     });
+  });
+});
+
+describe("parseLintHookInput", () => {
+  const toolInput = fc.dictionary(fc.string(), fc.jsonValue());
+  const notAnObject = fc.jsonValue().filter((value) => typeof value !== "object" || value === null || Array.isArray(value));
+
+  it("round-trips the two fields it reads through the wire form, ignoring every other field", () => {
+    fc.assert(fc.property(fc.string(), toolInput, fc.dictionary(fc.string(), fc.jsonValue()), (toolName, input, rest) => {
+      const wire: unknown = JSON.parse(JSON.stringify({ ...rest, tool_name: toolName, tool_input: input }));
+      expect(parseLintHookInput(wire)).toEqual({ toolName, toolInput: JSON.parse(JSON.stringify(input)) });
+    }));
+  });
+
+  it("reads a tool_name that is not a string, or a tool_input that is not an object, as null", () => {
+    const notAString = fc.jsonValue().filter((value) => typeof value !== "string");
+    fc.assert(fc.property(notAString, notAnObject, (toolName, input) => {
+      const wire: unknown = JSON.parse(JSON.stringify({ tool_name: toolName, tool_input: input }));
+      expect(parseLintHookInput(wire)).toEqual({ toolName: null, toolInput: null });
+    }));
+    expect(parseLintHookInput({})).toEqual({ toolName: null, toolInput: null });
+  });
+
+  it("refuses every JSON value that is not an object", () => {
+    fc.assert(fc.property(notAnObject, (value) => {
+      expect(parseLintHookInput(value)).toBeInstanceOf(Error);
+    }));
   });
 });
 

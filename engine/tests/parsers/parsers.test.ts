@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
+import fc from "fast-check";
+import { parsePiEntry } from "../../src/parsers/types";
 
 import { parseFirstUserPrompt, parseTranscript } from "../../src/parsers/parse-transcript";
 import { parseFilesModified } from "../../src/parsers/parse-files-modified";
@@ -116,6 +118,35 @@ describe("parseFirstUserPrompt", () => {
     });
   });
 
+  it.each(["null", "[]", "7", '"user"'])("fails closed when the non-object JSON line %s precedes a later valid user prompt", (line) => {
+    for (const header of [[], [JSON.stringify({ type: "session", version: 1 })]]) {
+      const content = [
+        ...header,
+        line,
+        JSON.stringify({ type: "message", message: { role: "user", content: "Review Task T2" } }),
+      ].join("\n");
+      expect(parseFirstUserPrompt(content)).toEqual({
+        ok: false,
+        error: `malformed transcript entry before the first user prompt at line ${header.length + 1}: expected a JSON object`,
+      });
+    }
+  });
+
+  it.each<{ readonly message: unknown }>([
+    { message: null },
+    { message: "user" },
+    { message: 7 },
+    { message: ["user"] },
+  ])("skips an entry whose message is $message, never reading it as the user prompt", ({ message }) => {
+    for (const [format, entryType] of [["pi", "message"], ["claude", "user"]] as const) {
+      const content = [
+        JSON.stringify({ type: entryType, message }),
+        JSON.stringify({ type: entryType, message: { role: "user", content: "Review Task T3" } }),
+      ].join("\n");
+      expect(parseFirstUserPrompt(content, format)).toEqual({ ok: true, prompt: "Review Task T3" });
+    }
+  });
+
   it.each([
     ["pi", [
       JSON.stringify({ type: "session", version: 1 }),
@@ -186,6 +217,73 @@ describe("parseTranscript", () => {
   ] as const)("extracts Pi %s content through the shared flattener", (_label, body, expected) => {
     const content = JSON.stringify({ type: "message", message: { role: "assistant", content: body } });
     expect(parseTranscript(content, "pi")).toBe(expected);
+  });
+});
+
+describe("parsePiEntry", () => {
+  const block = fc.record(
+    { type: fc.string(), text: fc.string(), name: fc.string(), id: fc.string(), arguments: fc.dictionary(fc.string(), fc.jsonValue()) },
+    { requiredKeys: ["type"] },
+  );
+  const message = fc.record(
+    {
+      role: fc.string(),
+      content: fc.oneof(fc.string(), fc.array(block, { maxLength: 3 })),
+      toolCallId: fc.string(),
+      toolName: fc.string(),
+      isError: fc.boolean(),
+    },
+    { requiredKeys: [] },
+  );
+  const entry = fc.record(
+    { type: fc.string(), id: fc.string(), parentId: fc.option(fc.string(), { nil: null }), message },
+    { requiredKeys: ["type"] },
+  );
+  const wireOf = (value: unknown): unknown => JSON.parse(JSON.stringify(value));
+  const notAnObject = fc.jsonValue().filter((value) => typeof value !== "object" || value === null || Array.isArray(value));
+
+  it("round-trips every entry through its wire form", () => {
+    fc.assert(fc.property(entry, (value) => {
+      expect(parsePiEntry(wireOf(value))).toEqual(wireOf(value));
+    }));
+  });
+
+  it("refuses a value that is not an object or has no string type", () => {
+    fc.assert(fc.property(notAnObject, (value) => {
+      expect(parsePiEntry(value)).toBeNull();
+    }));
+    fc.assert(fc.property(entry, fc.jsonValue().filter((value) => typeof value !== "string"), (value, type) => {
+      expect(parsePiEntry(wireOf({ ...value, type }))).toBeNull();
+    }));
+  });
+
+  it("drops a field of the wrong type and keeps the rest of the entry", () => {
+    const wrong = fc.constantFrom<readonly [string, unknown]>(["id", 7], ["parentId", 7], ["message", "text"], ["message", null]);
+    fc.assert(fc.property(entry, wrong, (value, [field, bad]) => {
+      const { [field]: _dropped, ...rest } = value as Readonly<Record<string, unknown>>;
+      expect(parsePiEntry(wireOf({ ...value, [field]: bad }))).toEqual(wireOf(rest));
+    }));
+  });
+
+  it("drops content that is neither text nor blocks, and blocks that are not blocks", () => {
+    fc.assert(fc.property(entry, fc.constantFrom<unknown>(7, null, { type: "text" }), (value, content) => {
+      expect(parsePiEntry(wireOf({ ...value, message: { role: "user", content } }))?.message).toEqual({ role: "user" });
+    }));
+    fc.assert(fc.property(fc.array(block, { maxLength: 3 }), fc.constantFrom<unknown>(null, "text", 7, { text: "untyped" }, { type: 7 }), (blocks, bad) => {
+      const parsed = parsePiEntry(wireOf({ type: "message", message: { content: [bad, ...blocks, bad] } }));
+      expect(parsed?.message?.content).toEqual(wireOf(blocks));
+    }));
+  });
+
+  it("lets the Pi extractors skip malformed entries and blocks instead of throwing", () => {
+    const content = [
+      "null",
+      "7",
+      JSON.stringify({ type: "message", message: { role: "assistant", content: [null, { type: "toolCall", name: 7, arguments: { path: "/tmp/no.ts" } }, { type: "toolCall", name: "write", arguments: "x" }] } }),
+      JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "kept" }, { type: "toolCall", name: "write", arguments: { path: "/tmp/yes.ts" } }] } }),
+    ].join("\n");
+    expect(parseFilesModified(content, "pi")).toEqual(["/tmp/yes.ts"]);
+    expect(parseTranscript(content, "pi")).toBe("kept");
   });
 });
 

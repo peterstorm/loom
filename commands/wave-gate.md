@@ -34,6 +34,7 @@ Name one fresh Run Directory, then start the registered program. The engine
 creates it; `--run` takes either the bare run id or a full path to that same
 direct child of `--runs-root`:
 
+<!-- wire-example: wave-gate-start -->
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration start wave-gate \
   --runs-root ".claude/reviews/wave-gate-runs" \
@@ -57,8 +58,10 @@ Execute only the one typed action returned by `start`, `resume`, or `decide`:
   chunks of at most eight without changing, dropping, or duplicating any
   request; resume only after every chunk finishes. The initial Wave review
   batch is one spec-check request plus each Task's reviewer roster: five
-  reviewers, or six for a Task touching an owned Invariant's family
-  (`architecture-tech-lead` appended to carry the owner map, ADR-0047). The
+  reviewers, or six (`architecture-tech-lead` appended) for a Task touching an
+  owned Invariant's family, which carries the owner map (ADR-0047), and for a
+  Contract Task writing its contract's types file, which carries the contract
+  surface (ADR-0069). The
   Wave's Distill Task (agent `distill-agent`, the engine-added pass that
   simplified the Wave's code, ADR-0068) is registered with the Wave but gets no
   reviewer: the other Tasks' packets read the distilled bytes. Never infer the
@@ -79,6 +82,7 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration resume \
 
 For an `await-user` action the operator approves:
 
+<!-- wire-example: wave-gate-decision -->
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration decide \
   --runs-root ".claude/reviews/wave-gate-runs" \
@@ -243,6 +247,7 @@ generation. Never repair, copy, or delete exhausted transcripts by hand.
 
 If a full-tier lint remediation changed declared bytes after accepted review evidence, completion is protected-blocked until the review is refreshed. For an already completed Wave, use the engine-owned recovery only with the exact terminal registration and the exact engine-derived Task list:
 
+<!-- wire-example: completed-wave-reopening -->
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper reopen-completed-wave \
   --runs-root ".claude/reviews/wave-gate-runs" <<'JSON'

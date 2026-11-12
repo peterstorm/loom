@@ -335,6 +335,7 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration start standalone-disposit
 Exact initial input shape (replace placeholders from inspection; expand entries to
 cover the entire inventory, or use `[]` only for an actually empty inventory):
 
+<!-- wire-example: standalone-disposition-start -->
 ```json
 {
   "source": {"locator":"/absolute/review-root/run.review","runId":"run.review","resultDigest":"<exact-result-sha256>"},
@@ -397,6 +398,7 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration start standalone-review \
   --runs-root "<successor-root>" --run "<fresh-successor-id>" < /path/to/successor.json
 ```
 
+<!-- wire-example: standalone-review-start -->
 ```json
 {
   "schemaVersion": 3,
@@ -699,6 +701,7 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration attest \
 
 A completed Wave may be reopened only through Loom's independent immutable Review Packet authority. This is the recovery for a missed remediation invalidation; do not edit the graph or decrement a Review Generation.
 
+<!-- wire-example: completed-wave-reopening -->
 ```bash
 cat > /tmp/reopen-wave-3.json <<'JSON'
 {"runId":"<completed-run-id>","wave":3,"authorityDigest":"<completed-authority-digest>","taskIds":["T19","T22"]}
@@ -838,7 +841,7 @@ Every infrastructure failure blocks and never counts as a kill. A rejection whos
 - Mutation covers the owner's lines changed in the Wave only: never siblings, never unchanged lines, never other files. A Wave that changed only a sibling runs the baseline and zero mutants (`owner unchanged in Wave`). A changed line with no construct the six operators rewrite yields zero mutants and says so.
 - Invalid mutants are neither killed nor survived; status and the verdict show the invalid count. A run whose every generated mutant is invalid blocks as `no-valid-mutants` (infrastructure, never a pass or a kill).
 - A matrix-test-only change does not trigger coverage or mutation.
-- Reviewers get the owner map and second-copy rule only in Wave review packets of the code-reviewer and architecture-tech-lead for Tasks touching an owned family. Such a Task is issued six reviewers, not five: architecture-tech-lead (profile `focused-review`, Skill `deepen`) is appended after the base five, and the Wave does not complete until it settles too (ADR-0047). Every other Task keeps exactly the base five. An identical second copy is advisory; whether a copy diverges is the reviewer's judgment, checked by the Refutation Panel. Standalone reviews carry no owner map.
+- Reviewers get the owner map and second-copy rule only in Wave review packets of the code-reviewer and architecture-tech-lead for Tasks touching an owned family. Such a Task is issued six reviewers, not five: architecture-tech-lead (profile `focused-review`, Skill `deepen`) is appended after the base five, and the Wave does not complete until it settles too (ADR-0047). A Contract Task whose contract declares a types file is issued the same six for its own reason (see [The Contract Task's review judges the contract surface](#the-contract-tasks-review-judges-the-contract-surface)); every other Task keeps exactly the base five. An identical second copy is advisory; whether a copy diverges is the reviewer's judgment, checked by the Refutation Panel. Standalone reviews carry no owner map.
 - `typescript` is loaded at runtime by the two owner-verification seams (`core/owner-verification/mutation-plan.ts`, `core/owner-verification/import-graph.ts`). It is declared an engine runtime dependency (`engine/package.json` `dependencies`, `^5.9.0`; it was already the engine's compiler, so no package was added) and installed by the documented `(cd engine && bun install --frozen-lockfile)`. The `5.9` floor is load-bearing: type-only import detection reads `ImportClause.phaseModifier`, which older compilers lack. An engine checkout without its locked install cannot run the Wave Gate.
 
 ### Measuring second sites: the family-site metric
@@ -872,6 +875,7 @@ When an implementation agent that claims a frozen Acceptance Contract's Requirem
 
 - **Opt in** with a schema-2 `.loom/verification-manifest.json` that declares an `acceptanceRunner`. The runner is frozen at population, like the project checks:
 
+  <!-- wire-example: verification-manifest -->
   ```json
   {
     "schemaVersion": 2,
@@ -910,6 +914,7 @@ Whenever any implementation agent stops, claimant or not, the engine runs the te
 
 - **Opt in** with two optional keys in a schema-2 `.loom/verification-manifest.json`. Both are frozen at population and covered by the manifest digest:
 
+  <!-- wire-example: verification-manifest -->
   ```json
   {
     "schemaVersion": 2,
@@ -954,6 +959,45 @@ Whenever any implementation agent stops, claimant or not, the engine runs the te
 - **Pi is report-only.** The Pi parent runs both checks over the child's epoch in the parent ledger after the child has ended, and reports the outcome as below. It never blocks.
 - **A handed-back agent is never blocked.** A Claude Code subagent that ends its turn with a delivered `SubagentHandback` has finished: the harness does not keep it working, so a block would only drop the stop's settlement and leave the Task stranded with live authority. When a check would block such a stop, the dispatcher reads the agent's transcript (`claudeFinalTurnHandedBack`), turns the block into a note (`… cannot be held open: it settles now, and the Wave Gate judges the Task.`) and settles. A failed or unanswered handback, a legacy final text, or a transcript it cannot read keeps the block.
 
+### Task mutation check
+
+While an implementer still holds its context, it can ask the engine which of the lines it changed its tests do not answer ([ADR-0071](adr/ADR-0071-the-task-mutation-check-names-surviving-mutants-before-the-stop.md)). The implementation brief tells it to, with the exact command:
+
+```bash
+bun <loom>/engine/src/cli.ts helper mutation-check --task T5
+```
+
+The brief asks for one Bash call with a 600000 ms timeout, after the Task's tests pass and before its final verification run.
+
+- **What it does.** For each TypeScript or JavaScript implementation file the Task declares (not a test file by the frozen `testFileSuffixes`, not a `.d.ts`, beneath the `affectedRunner`'s `cwd`), it diffs the file against the Task's `start_sha`, plans mutants on the changed lines, and keeps at most 8, evenly spaced over all the files. Per mutated file it opens one isolated worktree outside the repository, runs the frozen `affectedRunner` over the file unmutated, then once per mutant. The real workspace is only read.
+- **Operators.** The Wave Gate's six, preceded by `guard-removal`: an `if` with no `else` whose body only exits (`throw`, `return`, `continue` or `break`) is replaced by an empty statement. The Wave Gate's Owner Verification keeps its six operators and its mutant ids unchanged.
+- **What it prints.** One line per survivor: `- <file>:<line>:<column> <operator>: \`<original>\` → \`<mutant>\``, then `killed by:` and the test that kills a mutant of that operator. A file for which no test ran has every mutant reported as a survivor, marked `(no test ran for this file)`. A run with no survivor prints `clean`. The implementer adds the test and runs the check again, or names an equivalent mutant and says why in its final report. There is no waiver syntax.
+- **`unavailable` never blocks.** The run does not decide when the unmutated tests fail (a sibling Task's half-written code is the usual cause), a run leaves no readable report, the runner cannot start, the worktree cannot be made, the Task records no `start_sha`, a file does not parse, the Task's files change while it runs, or its 480 s deadline cannot hold another run. A mutant whose run times out counts as killed.
+- **The record.** The result is written to the runtime directory (beside the stop-check block counters) as `task-mutation.<repository hash>.<task id>.json`, with a digest of the Task's `start_sha` and the bytes of every file it declares, tests included. Any later edit to one of those files makes the record stale. It is not in the TaskGraph, and nothing reads it but the stop. Like other unsessioned runtime files it is removed by the session-start sweep once it is an hour old, after which the check reads as not run.
+- **At the stop.** The third stop check reads the record; it runs no runner. On Claude Code it blocks the stop, at most 2 times per agent, when the record is missing, stale, or names survivors. The block appears under `## Task mutation check`, joined with the other two checks' sections when they also fail, and repeats the command. After 2 blocks the stop proceeds with a note. An agent that ended with a delivered hand-back is never blocked. Every fault (unreadable record, unreadable file, unreadable counter, no repository root) is a note. On Pi it is report-only, like the other two.
+- **Not completion evidence.** Nothing the check observes reaches Proof, receipts or the Wave Gate. Its runner executions happen inside the helper, in a worktree, so the ledger records the one `helper mutation-check` call as an ordinary command: no test run, no file write. The implementer's own final verification run is still what its Proof reads.
+- **Who owes it.** Every implementation Task of a TaskGraph that froze an `affectedRunner` and a test-file classification, except a Contract Task, an ADR Task and a Distill Task, and except a Task with no mutable file. `helper mutation-check` on a Task that owes nothing prints `not owed — <reason>` and exits 0.
+- **Turn it off** for a project with one key of the schema-2 `.loom/verification-manifest.json`:
+
+  <!-- wire-example: verification-manifest -->
+  ```json
+  {
+    "schemaVersion": 2,
+    "kind": "loom-verification-manifest",
+    "checks": [ … ],
+    "taskMutationCheck": "off"
+  }
+  ```
+
+  The key takes `"on"` or `"off"`; absent means on. Like `distillPass`, it is frozen at population, is in the manifest digest only when declared, and reaches only TaskGraphs populated after it.
+- **Limits.**
+  - The record is a file an implementer's shell could write by hand. The check is advice to an agent that wants its tests to be good, not a control against one that does not.
+  - Only TypeScript and JavaScript are mutated. A Task whose implementation files are all in another language owes nothing.
+  - "Changed lines" are every line that differs from `start_sha`, so they include lines an earlier attempt or another Task changed in the same file since.
+  - Files the Task changed but did not declare are neither mutated nor digested.
+  - The 8 mutants are a sample. A clean run does not show that every changed line is tested.
+  - Each mutant's run is limited to the `affectedRunner`'s `timeoutMs`, capped at 60 s as at the Wave Gate.
+
 ### The distill pass (Distill Task)
 
 Population adds one engine-owned Distill Task to every Wave that has implementation files ([ADR-0068](adr/ADR-0068-the-distill-pass-is-an-engine-added-task-per-wave.md)). A fresh `distill-agent` runs the `distill` skill in apply mode over the files the Wave's other Tasks implemented, before the Wave Gate reviews them. A decompose payload cannot author one: `validate-task-graph --decompose-payload` and `populate-task-graph` both refuse a Task whose agent is `distill-agent`.
@@ -997,6 +1041,7 @@ Population adds one engine-owned Distill Task to every Wave that has implementat
 
 - Opt out for a project with one optional key in a schema-2 `.loom/verification-manifest.json`:
 
+  <!-- wire-example: verification-manifest -->
   ```json
   {
     "schemaVersion": 2,
@@ -1013,6 +1058,36 @@ Population adds one engine-owned Distill Task to every Wave that has implementat
   - A Wave whose Tasks list no implementation file. Test files (by the frozen `testFileSuffixes`) and an Acceptance Contract's frozen paths are never in a Distill Scope.
   - A Wave that holds only ADR Tasks or Tasks that write an Acceptance Contract. Their files are not distilled.
   - Every Wave of a TaskGraph whose verification manifest froze no test-file classification: a graph frozen before the classification existed, or one with no manifest. `populate-task-graph` says so in one line: `No distill pass: the verification manifest froze no test-file classification, so no Distill Scope can be derived and no Wave gets a Distill Task.`
+
+### Decompose is blocked on the plan design review
+
+A decompose spawn is refused with `plan-design-review (<plan> has no accepted design review: ...)` or `plan-design-review (<plan> changed after its design review was accepted: reviewed sha256 <a>, now <b>; ...)`. The State File's `plan_design_review` is `required`, or `accepted` for bytes the plan no longer has ([ADR-0070](adr/ADR-0070-the-plan-design-review-gates-decompose.md)).
+
+**Open it.** From the repository root, run a Standalone Review of kind `plan-design` whose `files` is exactly the plan, drive it to `done`, publish a disposition if it has advisories ([above](#immediate-advisory-publication)), then:
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper accept-plan-design-review \
+  --runs-root "<review-root>" --run "<completed-review-id>" \
+  [--disposition "<absolute disposition Run directory>" --disposition-run "<its Run id>" --disposition-digest "<its disposition sha256>"]
+```
+
+The full sequence is [`/loom` Phase 3.6](../commands/loom.md#phase-36-plan-design-review). The helper reads the plan this State File names and everything else from the authenticated Run Directory; it takes no claim from the caller beyond which Run and which disposition to read.
+
+**What a refusal means.** Every refusal starts `accept-plan-design-review:` and names one cause:
+
+| Message says | Do |
+| --- | --- |
+| the review's kind is not exactly `["plan-design"]` | Start a `plan-design` review. A `types` or `architecture` review of the plan is not one. |
+| the frozen scope is not exactly the plan | Start the review with `files` naming only the plan, from the repository root. |
+| the review ran without a reviewer, or without the read obligation | Start a fresh `plan-design` review. |
+| the plan changed after it was reviewed | Start a fresh review of the edited plan. |
+| N critical finding(s) survived refutation | Edit the plan to resolve them, then start a fresh review. There is no override and no successor review. |
+| N advisory finding(s) have no published disposition | Publish a `standalone-disposition` for this review and pass the three `--disposition*` flags. |
+| the named disposition is not a published disposition of this review | Pass the disposition published against this exact review result. |
+
+**Not doing the review.** `init-state --skip-plan-design-review` records `{"status":"not-required","reason":"skipped"}` when the orchestration starts. There is no flag that skips it later. A State File initialized before the gate existed has no `plan_design_review` field and is not gated; running the review and the helper on it records `accepted` and turns the digest binding on.
+
+**Known limits.** The gate is on the decompose spawn only: execute is not gated, and `populate-task-graph` does not ask it. The record is not re-proved against the Run Directory after acceptance.
 
 ### Stop-check notes reach the orchestrator
 
@@ -1049,6 +1124,7 @@ Fix the specification or the decompose output and re-run population. The rule is
 
 Legacy graphs without `spec_trace_version` remain readable and auditable. To upgrade exactly one active legacy graph, prepare JSON covering the exact existing Task roster in protected order; provide both arrays for every Task:
 
+<!-- wire-example: spec-trace-ownership -->
 ```json
 {
   "spec_trace_version": 2,
@@ -1112,6 +1188,20 @@ On success, one locked write:
 - appends a `spec_trace_amendments` audit naming the Wave, the retired run (or `null`), each change before and after, and the Spec Index observation.
 
 Task status, proof, attempt history, test evidence, Findings, Refutations, Resolutions and completed history are untouched, so nothing is re-implemented. Start the Wave Gate next: it issues fresh packets over the amended trace, and spec-check and reviewers judge the new scope. The State File boundary refuses a graph whose trace contradicts a Task's latest amendment, or whose amendment history for a Task does not chain, and re-population drops the audit together with the Tasks it described.
+
+### The Contract Task's review judges the contract surface
+
+A Contract Task's Wave review is the last review before any dependent Task implements against the contract's types file. When the contract declares a types file (not `**Types file:** none`) and the Wave Gate runs the current reviewer protocol (schema 2), that review changes in two ways (ADR-0069):
+
+- **Six reviewers, not five.** `architecture-tech-lead` (profile `focused-review`, Skill `deepen`) is appended after the base five, exactly as for a Task touching an owned family. The Wave does not complete until it settles. A Task that is both is issued six, not seven.
+- **One more packet section.** The `type-design-analyzer` and `architecture-tech-lead` packets of that Task carry a `contract-surface` section: each contract's id, title, statement, types file, `<plan file>#CT-n` and bound exports, then what to judge (states the types can represent that the statement forbids, primitive obsession, module shape and seams, duplicate policy across the bound exports) and that a defect is cheapest before the freeze. The Task's other four packets, every other Task's packets and the spec-check packet are byte-identical to a graph without the contract.
+
+Nothing else moves: slot and request ids of the base five are unchanged, findings follow the existing severity rules and the Refutation Panel, and a critical finding on the types file blocks the contract Wave like any other. Fixing it there is an ordinary Task Reopening; after the freeze it is a Contract Revision (next section).
+
+**A run in flight across an engine upgrade.** A Review Run that was installed with five reviewers on such a Task, before the engine issued the sixth, keeps its five and its issued packets and settles as issued. The limits:
+
+- A Contract Task whose review already finished (no Review Run left) inside a Wave Gate that is still open derives six reviewers on the next resume, because a finished review records no roster. The five-reviewer batch on disk no longer matches that roster. If the gate then blocks or re-issues requests for that Task, abandon the run and start a fresh Wave Gate; the Contract Task is then reviewed by all six.
+- A Contract Task that also touches an owned family already had six reviewers, so its installed roster does not say whether its packets carried the section. Its in-flight run continues on the packets it was issued. A batch that has to be re-derived (a crash part-way through publication) is re-derived with the section and differs from the issued one. Recover the same way.
 
 ### A frozen acceptance test or contract types file is wrong
 
@@ -1448,7 +1538,7 @@ directory and top-level file live in that config, not in the rule code. See
 
 ### Rule tiers
 
-Regex rules run on every edit (the `immediate` tier, `lint-file` PostToolUse) and at the Wave Gate. Each programmatic rule declares its own earliest tier: `no-cross-boundary-imports`, `no-io-in-pure-modules`, `switch-totality` and `no-duplicate-block` are `immediate`, so a forbidden import, an unproven switch or a copied block is refused when the file is written; the rest (`max-function-lines`, `exhaustive-discriminant-branching`, `no-nested-ternary`, `prefer-array-methods`, `fugue-generated-integrity`) run only in the `full` tier at the Wave Gate.
+Regex rules run on every edit (the `immediate` tier, `lint-file` PostToolUse) and at the Wave Gate. Each programmatic rule declares its own earliest tier: `no-cross-boundary-imports`, `no-io-in-pure-modules`, `switch-totality`, `no-duplicate-block` and `no-wire-cast` are `immediate`, so a forbidden import, an unproven switch, a copied block or `JSON.parse` / `.json()` output typed by `as T` or a `: T` annotation instead of being parsed (ADR-0072) is refused when the file is written; the rest (`max-function-lines`, `exhaustive-discriminant-branching`, `no-nested-ternary`, `prefer-array-methods`, `fugue-generated-integrity`) run only in the `full` tier at the Wave Gate.
 
 ### Validate rule files
 
@@ -1583,6 +1673,25 @@ HOME=<empty-dir> GIT_CONFIG_GLOBAL=/dev/null npx vitest run # no operator config
 ```
 
 The 2026-10-13 sweep ran each of these, plus every property-test file twice at 20× its declared runs on fresh seeds and a whole run with the clock moved 400 days ahead. A failing test in the empty-`HOME` run is expected only for the installed-launcher prerequisite above. A clock-shifting run cannot check file freshness, because Node reads file times with a system call that `libfaketime` does not intercept. Under it, a file written a moment ago looks as old as the shift.
+
+### Documented wire examples
+
+Every example of a wire shape in `agents/`, `commands/`, `skills/`, `docs/` and `references/` is put through the production parser that decides that shape ([ADR-0073](adr/ADR-0073-every-documented-wire-example-is-parsed-by-its-production-parser.md)). The suite is `engine/tests/docs/doc-wire-examples.test.ts`.
+
+A marker line directly above the fence says what the fence is:
+
+```text
+<!-- wire-example: <shape-id> -->          the fence documents that shape
+<!-- wire-example: none — <reason> -->     the fence shows JSON that is not a wire example
+```
+
+- **Which fences need one.** A `json` fence, and a shell fence with a heredoc whose body is JSON (one example per heredoc; the marker goes above the shell fence). Any other fence is an example only when it carries a shape marker, and its body is then the example text. The suite fails on an unmarked JSON fence, a marker with no fence below it, an unregistered shape id, and an opt-out with no real reason.
+- **Placeholders.** A value the reader must replace is written `<…>`: `"criterion": "<your lens, verbatim>"`. Everything else is a literal the parser must accept as written. `"a | b"` documents a choice and is read as its first option. A placeholder whose hint says `null` is read as `null`. A list may be elided as `[ … ]`.
+- **Adding an example of a registered shape.** Write the fence and put the marker above it. The shape ids are `WIRE_SHAPE_IDS` in `engine/tests/support/doc-wire-shapes.ts`. If the example uses a placeholder under a field the shape has no value for, the suite names the field; add the value to that shape's `placeholders`.
+- **Adding a shape.** Add the id to `WIRE_SHAPE_IDS` and an entry to `WIRE_SHAPES` whose `parse` calls the function the engine itself calls on that input. The record is total over the ids, so an id without a parser does not compile. The suite refuses a registered shape no doc teaches, a shape whose parser admits a document that is not its shape, and an example that also parses under another shape's id. If the engine's parser for the input is not exported, export it; do not restate its rules in the registry.
+- **Opting out.** Use `none — <reason>` only for JSON that is not Loom input: another tool's file, or output nothing parses back in. The reason is at least 20 characters and says which of the two it is.
+
+Not governed, each with its reason in `UNGOVERNED` (`engine/tests/support/doc-wire-examples.ts`): the stamped reviewer wire contract (the stamp check compares its bytes), `docs/adr/`, the archived reviewer protocols, and the `security-expert` and `nextjs-frontend-design` skills. JSON written inline in a sentence or a table cell is not detected.
 
 ### Focused iteration (not full-gate evidence)
 

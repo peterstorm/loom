@@ -105,6 +105,7 @@ other `kind` or `schemaVersion`, and any top-level key besides these four.
 optional. The example uses the first-attempt owner id; write the one your brief
 printed.
 
+<!-- wire-example: security-hunter-result -->
 ```json
 {
   "schemaVersion": 1,

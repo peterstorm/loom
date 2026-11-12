@@ -29,6 +29,7 @@ import { match } from "ts-pattern";
 import type { HookHandler } from "../../types";
 import { passthroughResult } from "../../types";
 import { claudeToolCall, type ClaudeToolPayload } from "../../core/harness-tool-call";
+import { isRecord } from "../../core/plain-record";
 import {
   attributeEvidence,
   type EvidenceAttribution,
@@ -73,13 +74,32 @@ type RecordEvidenceInput = Readonly<{
   cwd?: string;
 }> & Omit<ClaudeToolPayload, "tool_name" | "cwd">;
 
+const stringOrAbsent = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+
+/**
+ * Read the hook payload from parsed JSON, or `null` when it is not a JSON
+ * object. An identity field that is not a string reads as absent; the call
+ * fields stay untyped for `claudeToolCall`, which parses each one.
+ */
+export function parseRecordEvidenceInput(raw: unknown): RecordEvidenceInput | null {
+  if (!isRecord(raw)) return null;
+  return {
+    ...raw,
+    session_id: stringOrAbsent(raw.session_id),
+    tool_name: stringOrAbsent(raw.tool_name),
+    cwd: stringOrAbsent(raw.cwd),
+  };
+}
+
 export const runRecordEvidence = async (
   stdin: string,
   registry: SessionRegistry = fsSessionRegistry,
 ) => {
   try {
     if (!stdin || stdin.trim() === "") return passthroughResult();
-    const input: RecordEvidenceInput = JSON.parse(stdin);
+    const raw: unknown = JSON.parse(stdin);
+    const input = parseRecordEvidenceInput(raw);
+    if (input === null) return passthroughDiagnostic("record-evidence: hook input is not a JSON object — nothing recorded\n");
 
     const toolName = input.tool_name;
     if (!input.session_id || !toolName) return passthroughResult();

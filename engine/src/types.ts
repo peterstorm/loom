@@ -27,6 +27,7 @@ import type { FrozenVerificationManifest, ProjectVerificationCoverage } from "./
 import type { Phase } from "./core/phases";
 import type { SettledFloor, SpecIndexObservation } from "./core/requirement-coverage";
 import type { ProofBoundaryObservation } from "./core/proof-boundary-observation";
+import type { RecordedPlanDesignReview } from "./core/plan-design-review";
 import type { AcceptanceContract, PlanContract } from "./core/acceptance-contract";
 import type { MutationPolicy, OwnerObligation } from "./core/owner-verification/types";
 import type { SiblingEntryPoint } from "./core/sibling-entry-point";
@@ -1288,6 +1289,10 @@ export interface TaskGraph {
    * cause it could not. Absent on legacy graphs, which means unknown. */
   readonly proof_boundary_observation?: ProofBoundaryObservation;
   readonly plan_file: string | null;
+  /** Whether the plan's design was reviewed before decompose (ADR-0070).
+   * Absent on a graph initialized before the review existed, which the gate
+   * reads as not required (`planDesignReviewOf`). */
+  readonly plan_design_review?: RecordedPlanDesignReview;
   readonly plan_title?: string;
   /** `readonly` for the same reason `Task.findings` is: every producer already
    *  returns a fresh array, and an in-place `push`/`sort` on the task list is a

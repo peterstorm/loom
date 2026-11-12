@@ -59,8 +59,11 @@ export const affectedArgv = (...files: string[]): readonly string[] => [...AFFEC
 /** The argv a formed command launches. */
 export const argvOf = (command: StopCheckCommand): readonly string[] => [command.executable, ...command.args];
 
+/** A stop check that launches a runner: every check but the Task mutation check, which reads a record. */
+export type RunnerCheckName = Exclude<StopCheckName, "mutation">;
+
 /** Which check a formed command runs, told apart by its report path. A command for neither report fails the test. */
-export function checkNameOf(command: StopCheckCommand): StopCheckName {
+export function checkNameOf(command: StopCheckCommand): RunnerCheckName {
   const path = command.reportPolicy.kind === "required-file" ? command.reportPolicy.path : null;
   if (path === ACCEPTANCE_REPORT) return "acceptance";
   if (path === AFFECTED_REPORT) return "affected";

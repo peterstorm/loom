@@ -636,6 +636,24 @@ describe.sequential("Defect-Family Accounting production facade", () => {
     expect(readFileSync(join(completed.value.runDirectory, "checkpoint.json"))).toEqual(checkpointBefore);
     const refused = await resumeRemediationFacade(pending.value, registration);
     expect(refused.ok && refused.action.kind).toBe("blocked");
+    // A checkpoint that is JSON of the wrong shape is never read as an installed remediation.
+    const malformedCheckpoints = [
+      "null",
+      "[]",
+      '"done"',
+      JSON.stringify({ schemaVersion: 1, state: "done" }),
+      JSON.stringify({ schemaVersion: 1, state: null }),
+      JSON.stringify({ schemaVersion: 1, state: ["done"] }),
+    ];
+    for (const [index, checkpoint] of malformedCheckpoints.entries()) {
+      const malformed = createRunDirectory(fixture.runsRoot, `run.legacy-malformed-${index}`);
+      expect(malformed.ok).toBe(true);
+      if (!malformed.ok) return;
+      expect((await malformed.value.registerProgram(registration)).ok).toBe(true);
+      await malformed.value.writeCheckpoint(checkpoint);
+      const resumed = await resumeRemediationFacade(malformed.value, registration);
+      expect(resumed.ok && resumed.action.kind === "done", checkpoint).toBe(false);
+    }
     expect(readFileSync(join(fixture.repository, ".git", "index"))).toEqual(indexBefore);
   });
 

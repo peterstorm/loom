@@ -273,6 +273,7 @@ describe("the brief states no I6 duty to a contract writer", () => {
       frozenSignatures: unobservedSkeletons(graph),
       contracts: graph.acceptance_contracts ?? [],
       repositoryRoot: "/repo",
+      packageRoot: "/loom",
       operatorNotes: [],
     });
     if (!rendered.ok) throw new Error(rendered.error.message);

@@ -103,6 +103,7 @@ Generate additional `.json` rule files in the same `rules/` directory for projec
 
 **Key rules for config.json structure:**
 
+<!-- wire-example: linter-project-config -->
 ```json
 {
   "exclude": [
@@ -128,6 +129,7 @@ Generate additional `.json` rule files in the same `rules/` directory for projec
 
 **To disable a default loom rule**, create a JSON override with the same `name` and `"enabled": false`:
 
+<!-- wire-example: linter-regex-rule -->
 ```json
 {
   "kind": "regex",
@@ -141,10 +143,10 @@ Generate additional `.json` rule files in the same `rules/` directory for projec
 }
 ```
 
-**Grandfather pre-existing totality sites and copied blocks.** `switch-totality`
-applies to every TypeScript file without configuration, and `no-duplicate-block`
+**Grandfather pre-existing totality sites, copied blocks and wire casts.** `switch-totality`
+and `no-wire-cast` apply to every TypeScript file without configuration, and `no-duplicate-block`
 to every TypeScript and JavaScript file, so an existing codebase's unproven
-switches and already-duplicated blocks would block the next agent edit to each file. Record them once, after
+switches, already-duplicated blocks and `JSON.parse(…) as T` sites would block the next agent edit to each file. Record them once, after
 `config.json` exists:
 
 ```bash
@@ -184,6 +186,7 @@ I/O operations in the functional core (under a pure root, not a declared shell).
 - max-function-lines — decompose
 - no-non-null-assertion — prove the value exists (production code; tests are exempt)
 - no-unsafe-as-any — type the value instead of switching the checker off
+- no-wire-cast — bind `JSON.parse` / `.json()` output as `unknown` and pass it through a parser
 - no-catch-ignore — handle or rethrow; never an empty catch
 - no-null-return (Java) — Optional or an empty collection
 
@@ -197,6 +200,7 @@ Files scanned: N | Violations: N (boundary: X, purity: Y, quality: Z)
 - **Purity violations**: Extract the I/O to a shell and inject it as a parameter/port; only a module whose JOB is the I/O belongs in `impureModules`, with its reason
 - **Ungoverned module**: Add the boundary its directory needs, stating which way its imports point
 - **Non-null assertions**: Add explicit null checks with error returns
+- **Wire casts**: Bind the value as `unknown` and write (or reuse) a parser that returns the typed value or an error; never replace `as T` with `as unknown as T`, which the rule refuses too
 - **Function length**: Extract helper functions
 
 ---
@@ -237,10 +241,10 @@ from the checkout, as above.
 ### Baselines: a rule that only subtracts violations silently stops applying
 
 Grandfathered baselines (`switch-totality`,
-`exhaustive-discriminant-branching`, `no-duplicate-block`) excuse sites that predate the rule, and
+`exhaustive-discriminant-branching`, `no-duplicate-block`, `no-wire-cast`) excuse sites that predate the rule, and
 their failure mode is silence: a renamed scrutinee or a deleted switch leaves an
 entry protecting nothing. The lists are project data in `config.json`
-(`switchTotalityBaseline`, `discriminantBranchingBaseline`, `duplicateBlockBaseline`), keyed relative to
+(`switchTotalityBaseline`, `discriminantBranchingBaseline`, `duplicateBlockBaseline`, `wireCastBaseline`), keyed relative to
 the project root and written by `scripts/lint-project.ts --write-baseline`.
 `scripts/lint-project.ts` reports stale entries in any project and exits
 non-zero on them; loom asserts its own lists against its live tree in

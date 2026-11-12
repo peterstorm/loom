@@ -110,7 +110,7 @@ const unavailable = (kind: OwnerInfrastructureFailureKind, detail: string): Owne
 const ABSENCE_CODES: ReadonlySet<string> = new Set(["ENOENT", "ENOTDIR", "EISDIR"]);
 
 /** A repository-relative path's text, its absence, or why the filesystem refused it. Never throws. */
-function readRepositoryText(root: CanonicalRepositoryRoot, path: string): ModuleRead {
+export function readRepositoryText(root: CanonicalRepositoryRoot, path: string): ModuleRead {
   const absolute = posix.join(root, path);
   try {
     if (!statSync(absolute).isFile()) return MODULE_ABSENT;
@@ -179,7 +179,7 @@ function gitText(root: CanonicalRepositoryRoot, args: readonly string[]): Domain
 type ResolvableBase = Exclude<WaveBase, { readonly kind: "owner-unchanged" }>;
 
 /** The commit `waveBaseOf` chose, resolved in the real repository: the one start, or the octopus merge-base of several. */
-function resolveWaveBase(root: CanonicalRepositoryRoot, owner: string, base: ResolvableBase): DomainResult<string, OwnerInfrastructureFailure> {
+export function resolveWaveBase(root: CanonicalRepositoryRoot, owner: string, base: ResolvableBase): DomainResult<string, OwnerInfrastructureFailure> {
   const shas = base.kind === "commit" ? [base.sha] : base.shas;
   const resolved = base.kind === "commit"
     ? gitText(root, ["rev-parse", "--verify", "--quiet", `${base.sha}^{commit}`])
@@ -190,7 +190,7 @@ function resolveWaveBase(root: CanonicalRepositoryRoot, owner: string, base: Res
 }
 
 /** The owner's text at the Wave base, or null when the owner did not exist there (a new file: every line changed). */
-function ownerAtBase(root: CanonicalRepositoryRoot, base: string, owner: string): DomainResult<string | null, OwnerInfrastructureFailure> {
+export function ownerAtBase(root: CanonicalRepositoryRoot, base: string, owner: string): DomainResult<string | null, OwnerInfrastructureFailure> {
   const listed = gitText(root, ["ls-tree", "-z", base, "--", owner]);
   if (!listed.ok) return failure(infrastructure("missing-wave-base", `${owner} at the Wave base ${base} cannot be listed: ${listed.error}`));
   const entry = ownerAtBaseEntry(listed.value);
@@ -226,14 +226,15 @@ export function matrixTestRunOf(execution: CommandExecutionResult, elapsedMs: nu
   };
 }
 
-type MatrixTestCommand = Extract<AuthorizedWaveCompletionCheck, { readonly kind: "project-command" }>;
+export type MatrixTestCommand = Extract<AuthorizedWaveCompletionCheck, { readonly kind: "project-command" }>;
 
 /**
  * The frozen runner's command over the matrix test alone, formed by
  * `affectedRunnerCheck` and re-authorized with its time limit clamped by
- * `mutantTimeoutMs`: no command text ever comes from the plan.
+ * `mutantTimeoutMs`: no command text ever comes from the plan. The Task
+ * mutation check forms its command here too, over one implementation file.
  */
-function matrixTestCommand(runner: AffectedRunner, matrixTest: string): DomainResult<MatrixTestCommand, string> {
+export function matrixTestCommand(runner: AffectedRunner, matrixTest: string): DomainResult<MatrixTestCommand, string> {
   const formed = affectedRunnerCheck(runner, [matrixTest]);
   if (!formed.ok) return failure(formed.error.errors.join("; "));
   const clamped = parseAuthorizedWaveCompletionCheck({ ...formed.value, timeoutMs: mutantTimeoutMs(formed.value.timeoutMs) });
@@ -241,7 +242,8 @@ function matrixTestCommand(runner: AffectedRunner, matrixTest: string): DomainRe
   return clamped.value.kind === "project-command" ? success(clamped.value) : failure("the clamped runner command is not a project command");
 }
 
-async function runOnce(workspace: MutationWorkspace, command: MatrixTestCommand, owner: OwnerVariant): Promise<MatrixTestRun> {
+/** One execution of `command` in the isolated workspace, with the workspace's one rewritable file as `owner` says. */
+export async function runOnce(workspace: MutationWorkspace, command: MatrixTestCommand, owner: OwnerVariant): Promise<MatrixTestRun> {
   return workspace.runWithOwner(owner, async (at) => {
     const started = Date.now();
     const execution = await runProjectCommandAt(command, at);

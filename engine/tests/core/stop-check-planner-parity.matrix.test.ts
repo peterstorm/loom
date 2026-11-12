@@ -21,6 +21,7 @@ import { planStopChecks } from "../../src/core/acceptance-contract/stop-check-pl
 import { renderStopChecksPlan, stopChecksPlanView } from "../../src/core/acceptance-contract/stop-check-plan";
 import { MAX_AFFECTED_RUNNER_TIMEOUT_MS, type ChangedFiles } from "../../src/core/affected-stop-check-types";
 import { changedFilesAtStop } from "../../src/core/changed-files";
+import { NO_TASK_MUTATION_CHECK } from "../../src/core/task-mutation-check";
 import { freezeVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
 import { UNKEPT_BLOCK_COUNTERS } from "../../src/handlers/subagent-stop/acceptance-stop-check";
 import { runStopChecks } from "../../src/handlers/subagent-stop/stop-checks";
@@ -164,6 +165,7 @@ describe("INV-1: the live stop shells and the plan view act on the one plan", ()
       taskId,
       agentKey: "session.agent",
       changedFiles: () => ({ kind: "observed", changed }),
+      taskMutation: () => NO_TASK_MUTATION_CHECK,
       hookStartedAtMs: 0,
     }, claude.ports);
 

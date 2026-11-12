@@ -94,6 +94,12 @@ Candidates, verdicts, ranking, and authority stay in a fresh run beneath the spe
 
 If gaps remain, the user either loops back to architecture with the report or explicitly proceeds. Skip with `--skip-plan-alignment` only when that check is intentionally unnecessary.
 
+### Phase 3.6: plan design review
+
+Before decompose, the plan's design is reviewed by `code-reviewer`, `type-design-analyzer` and `architecture-tech-lead` as a Standalone Review of kind `plan-design` whose only file is the plan. `helper accept-plan-design-review` then records the acceptance in the State File, bound to the plan's SHA-256. A critical that survives refutation is resolved by editing the plan and reviewing it again; advisories need a published disposition. Any edit to the plan after acceptance blocks the decompose spawn until a fresh review is accepted.
+
+It is a gate, not a phase: `current_phase` does not change. Skip it with `--skip-plan-design-review`. The exact commands are in [`/loom` Phase 3.6](../commands/loom.md#phase-36-plan-design-review); the rules are in [ADR-0070](adr/ADR-0070-the-plan-design-review-gates-decompose.md).
+
 ### Phase 4: decompose
 
 `decompose-agent` emits JSON. Before state changes, the engine validates:
@@ -125,6 +131,7 @@ Standalone remediation itself has no TaskGraph requirement. The empty-TaskGraph 
 
 Loom's own repository uses this exact check; other projects choose their own operator-approved commands:
 
+<!-- wire-example: verification-manifest -->
 ```json
 {
   "schemaVersion": 1,
@@ -147,6 +154,7 @@ For Loom, this is the same root `npm run verify` used locally and by Linux CI, i
 
 Critical-remediation checks must use `required-file`. For other projects, here is a complete Vitest alternative whose fixed argv names the exact output file:
 
+<!-- wire-example: verification-manifest -->
 ```json
 {
   "schemaVersion": 1,
@@ -167,6 +175,7 @@ Critical-remediation checks must use `required-file`. For other projects, here i
 
 A Node JUnit alternative is also parser-valid:
 
+<!-- wire-example: verification-manifest -->
 ```json
 {
   "schemaVersion": 1,

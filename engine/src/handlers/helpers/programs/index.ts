@@ -38,6 +38,8 @@ export {
   resumeStandaloneFacade,
   startStandaloneFacade,
 } from './standalone';
+// ADR-0070: a completed plan-design review read as the evidence its acceptance is judged on.
+export { readPlanDesignEvidence } from './plan-design-evidence';
 export { resumeWaveGateFacade } from './wave-gate';
 export { prepareWaveGateFacadeStart, startWaveGateFacade } from './wave-gate-start';
 export { recoverOrphanedWaveGateFacade, restartWaveGateFacade } from './wave-gate-replacement';

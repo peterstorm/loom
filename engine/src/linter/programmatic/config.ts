@@ -77,6 +77,9 @@ export interface ProgrammaticConfig {
   /** Grandfathered `path::otherPath@digest` keys the no-duplicate-block rule
    *  excuses, one copy each. */
   readonly duplicateBlockBaseline?: Baseline;
+  /** Grandfathered `path::as T` / `path::name: T` keys the no-wire-cast rule
+   *  excuses, one site each. */
+  readonly wireCastBaseline?: Baseline;
 }
 
 /** Every key `config.json` may carry — the one list the strict parse checks against. */
@@ -96,6 +99,7 @@ export const PROGRAMMATIC_CONFIG_KEYS: readonly (keyof ProgrammaticConfig)[] = O
   "duplicateBlockMinTokens",
   "duplicateBlockMinLines",
   "duplicateBlockBaseline",
+  "wireCastBaseline",
 ]);
 
 /** Default config when no project config exists */
@@ -306,6 +310,7 @@ function parseConfigObject(json: unknown, filePath: string): ProgrammaticConfig 
     excludeFromMaxLines: parseOptionalStringArray(obj.excludeFromMaxLines, filePath, "excludeFromMaxLines"),
     ...parseTotalityConfig(obj, filePath),
     ...parseDuplicateBlockConfig(obj, filePath),
+    wireCastBaseline: parseOptionalBaseline(obj.wireCastBaseline, filePath, "wireCastBaseline"),
   };
   return Object.freeze(presentFields(parsed));
 }

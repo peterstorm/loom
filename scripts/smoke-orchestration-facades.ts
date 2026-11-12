@@ -209,7 +209,10 @@ function frozenDiffReads(cwd: string, request: SpawnRequest): readonly string[] 
       const read: SpawnSyncReturns<string> = spawnSync("bash", ["-c", `${command} --diff '${path}' --offset ${offset}`], { cwd, encoding: "utf8" });
       check(read.status === 0, `frozen diff read failed for ${path}: ${read.stderr}`);
       outputs.push(read.stdout);
-      offset = (JSON.parse(read.stdout) as { nextOffset: number | null }).nextOffset;
+      const page: unknown = JSON.parse(read.stdout);
+      const { nextOffset } = record(page, `frozen diff page for ${path}`);
+      check(nextOffset === null || typeof nextOffset === "number", `frozen diff page for ${path} has no numeric or null nextOffset`);
+      offset = nextOffset;
     }
   }
   check(outputs.length > 0, "read-coverage task listed no frozen diff to read");

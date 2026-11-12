@@ -130,8 +130,9 @@ export function parseReviewerEvidence(raw: unknown, runId: string, label: string
   return errors.length > 0 ? fail(errors) : ok(Object.freeze(evidence));
 }
 
-export function serializeAdjudicatedStandaloneReview(result: AdjudicatedStandaloneReview): string {
-  return JSON.stringify({
+/** The persisted record of an adjudicated review, before serialisation. */
+function adjudicatedStandaloneReviewRecord(result: AdjudicatedStandaloneReview) {
+  return {
     schema_version: result.schemaVersion,
     ...(result.schemaVersion !== 1 ? { reviewer_protocol: result.reviewerProtocol } : {}),
     ...(result.schemaVersion === 3 ? { successor: result.successor, lineage: result.lineage } : {}),
@@ -158,18 +159,21 @@ export function serializeAdjudicatedStandaloneReview(result: AdjudicatedStandalo
         uncertain_from: outcome.uncertainFrom,
       })),
     },
-  }, null, 2);
+  };
+}
+
+export function serializeAdjudicatedStandaloneReview(result: AdjudicatedStandaloneReview): string {
+  return JSON.stringify(adjudicatedStandaloneReviewRecord(result), null, 2);
 }
 
 /** Legacy helper output stays explicitly unversioned and never claims v1 authority. */
 export function serializeHistoricalAdjudicatedStandaloneReview(result: Extract<AdjudicatedStandaloneReview, { schemaVersion: 1 }>): string {
-  const versioned = JSON.parse(serializeAdjudicatedStandaloneReview(result)) as Record<string, unknown>;
   const {
     schema_version: _schemaVersion,
     subject_id: _subjectId,
     reviewer_evidence: _reviewerEvidence,
     ...historical
-  } = versioned;
+  } = adjudicatedStandaloneReviewRecord(result);
   return JSON.stringify(historical, null, 2);
 }
 

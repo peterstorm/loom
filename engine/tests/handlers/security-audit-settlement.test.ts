@@ -8,8 +8,6 @@
 import { chmodSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { CoverageUnit } from "../../src/core/security-coverage";
-import type { SecurityFinding } from "../../src/core/security-findings";
 import { HUNTER_ENVELOPE, aConfirmedFinding, aUnitResult, nSeeds } from "../security/fixtures";
 import {
   SQLI,
@@ -17,7 +15,9 @@ import {
   assignUnit,
   claimPayload,
   isolateSubagentDir,
-  readJson,
+  readClaims,
+  readLedger,
+  readPublished,
   removeRuns,
   seedFor,
   startRun,
@@ -33,7 +33,7 @@ describe("coverage settlement", () => {
   it("defers a single planned unit with a reason", async () => {
     const run = await startRun(aRun(), { units: nSeeds(2) });
     expect((await run.invoke(["defer", "--unit", unitIdFor(1), "--reason", "budget_cut"])).error).toBeNull();
-    const ledger = readJson<CoverageUnit[]>(run.out, "ledger.json");
+    const ledger = readLedger(run.out);
     expect(ledger.find((unit) => unit.coverage_id === unitIdFor(1))?.status).toBe("deferred");
     expect(ledger.find((unit) => unit.coverage_id === unitIdFor(1))?.unresolved).toContain("budget_cut");
     expect(ledger.find((unit) => unit.coverage_id === unitIdFor(0))?.status).toBe("planned");
@@ -42,7 +42,7 @@ describe("coverage settlement", () => {
   it("defers every planned unit when no unit is named", async () => {
     const run = await startRun(aRun(), { units: nSeeds(2) });
     expect((await run.invoke(["defer", "--reason", "scope_narrowed"])).error).toBeNull();
-    expect(readJson<CoverageUnit[]>(run.out, "ledger.json").every((unit) => unit.status === "deferred")).toBe(true);
+    expect(readLedger(run.out).every((unit) => unit.status === "deferred")).toBe(true);
   });
 
   it("refuses to defer a unit that is already owned", async () => {
@@ -112,7 +112,7 @@ describe("merge-critic", () => {
     expect(run.stdout()).toContain("reassigned 0");
     expect(run.stdout()).toContain("resolved 0 prior lead(s)");
     expect(run.stdout()).toContain("critic stop: false");
-    const added = readJson<CoverageUnit[]>(run.out, "ledger.json").find((unit) => unit.coverage_id === unitIdFor(1));
+    const added = readLedger(run.out).find((unit) => unit.coverage_id === unitIdFor(1));
     expect(added?.status).toBe("planned");
     expect(added?.wave).toBe(1);
   });
@@ -126,7 +126,7 @@ describe("merge-critic", () => {
     }));
     expect(merged.error).toBeNull();
     expect(run.stdout()).toContain("reassigned 1");
-    const [unit] = readJson<CoverageUnit[]>(run.out, "ledger.json");
+    const [unit] = readLedger(run.out);
     expect(unit!.status).toBe("planned");
     expect(unit!.wave).toBe(2);
     expect(unit!.attempts).toHaveLength(1);
@@ -142,7 +142,7 @@ describe("merge-critic", () => {
     }));
     expect(merged.error).toBeNull();
     expect(run.stdout()).toContain("resolved 1 prior lead(s)");
-    expect(readJson<CoverageUnit[]>(run.out, "ledger.json")[0]!.unresolved).toEqual([]);
+    expect(readLedger(run.out)[0]!.unresolved).toEqual([]);
   });
 
   it("refuses a malformed critic document, naming the field", async () => {
@@ -196,7 +196,7 @@ describe("submit reports what consolidation absorbed", () => {
     }));
     expect(submitted.error).toBeNull();
     expect(run.stdout()).toContain(`absorbed api/auth:sqli-login-email: same sink and root cause as ${SQLI}, which the run keeps in its place`);
-    expect(readJson<SecurityFinding[]>(run.out, "findings.json").map((finding) => finding.fingerprint)).toEqual([SQLI]);
+    expect(readClaims(run.out).map((finding) => finding.fingerprint)).toEqual([SQLI]);
   });
 });
 
@@ -241,7 +241,7 @@ describe("a reassigned unit, end to end", () => {
     // unresolvable-hunter refusal.
     const published = await run.invoke(["publish"]);
     expect(published.error).toBeNull();
-    expect(readJson<SecurityFinding[]>(run.out, "security-findings.json").map((finding) => finding.verdict)).toEqual(["confirmed"]);
+    expect(readPublished(run.out).map((finding) => finding.verdict)).toEqual(["confirmed"]);
   });
 });
 
@@ -268,15 +268,15 @@ describe("a submit whose ledger write fails", () => {
     }
     // Findings were written FIRST, so nothing filed was lost; the unit is still
     // in flight, so the retry can still settle it.
-    expect(readJson<SecurityFinding[]>(run.out, "findings.json").map((finding) => finding.fingerprint)).toEqual([SQLI]);
-    expect(readJson<CoverageUnit[]>(run.out, "ledger.json")[0]!.status).toBe("in_progress");
+    expect(readClaims(run.out).map((finding) => finding.fingerprint)).toEqual([SQLI]);
+    expect(readLedger(run.out)[0]!.status).toBe("in_progress");
 
     const retried = await run.invoke(["submit"], payload);
     expect(retried.error).toBeNull();
     expect(run.stdout()).toContain("run now holds 1 finding record(s)");
     expect(run.stdout()).not.toContain("not merged");
-    expect(readJson<SecurityFinding[]>(run.out, "findings.json")).toHaveLength(1);
-    expect(readJson<CoverageUnit[]>(run.out, "ledger.json")[0]!.status).toBe("candidate");
+    expect(readClaims(run.out)).toHaveLength(1);
+    expect(readLedger(run.out)[0]!.status).toBe("candidate");
   });
 
   it("refuses a re-filed fingerprint whose record differs, before writing anything", async () => {
@@ -297,7 +297,7 @@ describe("a submit whose ledger write fails", () => {
     expect(refiled.error).toContain(`the run already holds a different record for ${SQLI}`);
     expect(refiled.error).toContain("re-file byte-identical");
     expect(["ledger.json", "findings.json"].map((file) => readFileSync(join(run.out, file), "utf8"))).toEqual(before);
-    expect(readJson<CoverageUnit[]>(run.out, "ledger.json").find((unit) => unit.coverage_id === unitIdFor(1))?.status).toBe("in_progress");
+    expect(readLedger(run.out).find((unit) => unit.coverage_id === unitIdFor(1))?.status).toBe("in_progress");
   });
 
   it("keeps one copy of a verbatim re-file, whatever its key order", async () => {
@@ -307,6 +307,6 @@ describe("a submit whose ledger write fails", () => {
     const reordered = Object.fromEntries(Object.entries(aConfirmedFinding()).reverse());
     const again = await run.invoke(["submit"], JSON.stringify({ ...HUNTER_ENVELOPE, units: [], findings: [reordered] }));
     expect(again.error).toBeNull();
-    expect(readJson<SecurityFinding[]>(run.out, "findings.json")).toHaveLength(1);
+    expect(readClaims(run.out)).toHaveLength(1);
   });
 });

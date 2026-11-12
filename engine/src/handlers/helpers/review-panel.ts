@@ -69,6 +69,7 @@ import { parseStandalonePanelOutcomes } from "../../core/standalone-refutation-p
 import { serializeAdjudicatedStandaloneReview } from "../../core/standalone-review-records";
 import { loadEvidenceBoundAggregate } from "./standalone-review";
 import { observePathPresence, pathMayExist } from "../../utils/path-presence";
+import { isRecord } from "../../core/plain-record";
 
 export function standaloneTallyPublishErrors(
   original: unknown,
@@ -407,8 +408,10 @@ const handler: HookHandler = async (stdin, args) => {
       let closedIds = "<unknown findings>";
       let closureReadError: string | null = null;
       try {
-        const closure = JSON.parse(readFileSync(closurePath, "utf-8")) as { finding_ids?: unknown };
-        if (Array.isArray(closure.finding_ids) && closure.finding_ids.every((id) => typeof id === "string")) {
+        const closure: unknown = JSON.parse(readFileSync(closurePath, "utf-8"));
+        if (!isRecord(closure)) {
+          closureReadError = "the closure is not a JSON object";
+        } else if (Array.isArray(closure.finding_ids) && closure.finding_ids.every((id) => typeof id === "string")) {
           closedIds = closure.finding_ids.join(", ");
         }
       } catch (error) {
