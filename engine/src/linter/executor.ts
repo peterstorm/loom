@@ -20,6 +20,7 @@ import {
   makeViolation,
 } from "./types";
 import { analyzeRegex } from "./safety";
+import { matchesAnyExcludePattern } from "./exclude-pattern";
 
 /** How often (in lines) to check the deadline — amortizes overhead */
 const DEADLINE_CHECK_INTERVAL = 100;
@@ -50,14 +51,14 @@ export function executeRules(
   const ext = extname(filePath); // e.g. ".ts"
 
   // Filter: only enabled rules whose extensions include this file's extension
-  // and whose excludePatterns don't match the file path
+  // and whose excludePatterns don't match the file path (a file suffix, or a
+  // directory when the pattern ends with `/`)
   const matchingRules = rules.filter(
     (rule) => {
       if (!rule.enabled) return false;
       if (!rule.extensions.includes(ext)) return false;
       if (isRegexRule(rule) && rule.excludePatterns?.length) {
-        const normalizedPath = filePath.replace(/\\/g, "/");
-        if (rule.excludePatterns.some(p => normalizedPath.endsWith(p))) return false;
+        if (matchesAnyExcludePattern(filePath, rule.excludePatterns)) return false;
       }
       return true;
     }

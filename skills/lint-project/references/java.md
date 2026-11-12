@@ -217,7 +217,7 @@ These fire automatically — no project config needed:
 }
 ```
 
-**Note:** The `excludePatterns` uses `endsWith` matching, so `/infra/` matches any file whose path contains that segment.
+**Note:** A pattern ending in `/` is a directory and matches at a segment boundary, so `/infra/` matches `…/com/shop/infra/Db.java` and never `…/com/shop/infrastructure/Db.java`. A pattern without the trailing slash is a file suffix (`.test.ts`).
 
 ## Function Length
 

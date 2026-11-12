@@ -182,6 +182,32 @@ describe("executeRules — regex line-by-line execution", () => {
   });
 });
 
+// --- Rule exclusions: a suffix and a directory are both honoured ---
+
+describe("executeRules — excludePatterns", () => {
+  const consoleLogRule = (excludePatterns: readonly string[]) =>
+    makeRegexRule({ name: "no-console-log", pattern: "console\\.log", excludePatterns });
+
+  it("skips a test file by suffix and still flags the same line in production", () => {
+    const rule = consoleLogRule([".test.ts"]);
+
+    expect(executeRules([rule], "/work/shop/src/order.test.ts", "console.log(1);", noopDeadline)).toEqual([]);
+    expect(executeRules([rule], "/work/shop/src/order.ts", "console.log(1);", noopDeadline).length).toBe(1);
+  });
+
+  it("skips a whole directory named with a trailing slash, and no sibling that only shares a prefix", () => {
+    const rule = consoleLogRule(["apps/"]);
+
+    expect(executeRules([rule], "/work/shop/apps/demo/src/main.ts", "console.log(1);", noopDeadline)).toEqual([]);
+    expect(executeRules([rule], "/work/shop/packages/host/src/apps/main.ts", "console.log(1);", noopDeadline)).toEqual([]);
+    expect(executeRules([rule], "/work/shop/packages/approvals/main.ts", "console.log(1);", noopDeadline).length).toBe(1);
+  });
+
+  it("reads a file when the rule has no exclusions", () => {
+    expect(executeRules([consoleLogRule([])], "/work/shop/src/order.test.ts", "console.log(1);", noopDeadline).length).toBe(1);
+  });
+});
+
 // --- Multi-rule Aggregation (FR-005) ---
 
 describe("executeRules — multi-rule aggregation", () => {

@@ -25,7 +25,11 @@ export interface RegexRule {
   readonly fixHint: string;
   readonly enabled: boolean;
   readonly source: RuleSource;
-  readonly excludePatterns?: readonly string[];  // file path suffixes to skip (e.g. [".test.ts"])
+  /** Files this rule does not read — matched by the one matcher in
+   *  `exclude-pattern.ts`. A pattern ending in `/` is a directory (every file
+   *  beneath it, at a segment boundary); anything else is a file suffix
+   *  (e.g. `".test.ts"`). */
+  readonly excludePatterns?: readonly string[];
 }
 
 export interface ProgrammaticRule {

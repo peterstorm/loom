@@ -29,7 +29,7 @@ Each regex rule is a single `.json` file with the following fields:
 | `extensions` | `string[]` | ✅ | File extensions this rule applies to (e.g., `[".ts", ".tsx"]`). Include the leading dot. |
 | `pattern` | `string` | ✅ | Regex source string (without delimiters). Matched against each line. |
 | `flags` | `string` | No | Regex flags (e.g., `"i"` for case-insensitive). Defaults to `""`. |
-| `excludePatterns` | `string[]` | No | Normalized file-path suffixes this regex rule skips. |
+| `excludePatterns` | `string[]` | No | Files this rule skips. A pattern ending in `/` is a directory (`"src/infra/"` — every file beneath it, matched at a segment boundary); any other pattern is a file suffix (`".test.ts"`). One matcher serves both forms, for regex rules and for `maxFunctionLines`' `excludeFromMaxLines`. |
 | `fixHint` | `string` | ✅ | Actionable suggestion shown when the rule triggers. |
 | `enabled` | `boolean` | ✅ | Whether the rule is active. Set to `false` to disable. |
 
