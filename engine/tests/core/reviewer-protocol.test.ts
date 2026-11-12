@@ -317,7 +317,13 @@ describe("authoritative generated wire contract", () => {
   it("renders the exact issued full schema, example and rubric, not a second contract", () => {
     const rendered = renderReviewerWireContract();
     const json = [...rendered.matchAll(/```json\n([\s\S]*?)\n```/g)].map((match) => match[1]);
-    expect(json).toEqual([REVIEWER_PAYLOAD_SCHEMA_V2, JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, null, 2)]);
+    // The schema is shown minified (the packet section keeps the issued
+    // bytes): the same value, in the one compact spelling.
+    expect(JSON.parse(json[0]!)).toEqual(JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2));
+    expect(json).toEqual([JSON.stringify(JSON.parse(json[0]!)), JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, null, 2)]);
+    // Every reviewer spawn pays for the fragment: 10,617 bytes today, 15,048
+    // with the schema pretty-printed. The pin keeps it from growing back.
+    expect(bytes(rendered).length).toBeLessThanOrEqual(10 * 1024 + 512);
     expect(parseReviewerPayloadV2(bytes(json[1]))).toEqual({ ok: true, value: REVIEWER_WIRE_CONTRACT_EXAMPLE_V2 });
     expect(rendered.endsWith(REVIEWER_IMPACT_RUBRIC_V1)).toBe(true);
     deepFrozen(REVIEWER_PAYLOAD_EXAMPLE_V2);

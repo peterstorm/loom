@@ -63,7 +63,7 @@ The first seven are the reviewers: they return Findings. `spec-check-invoker` an
 
 Each reviewer starts by running the `LOOM_CONTEXT_READ_COMMAND` in its task, a read-only script that checks the Context Packet and pages its sections and files. It then returns exactly one JSON payload under the schema and impact rubric the packet carries. A request issued under the older protocol reads the archived instructions in `references/reviewer-protocol-v1/` instead and finishes under that protocol.
 
-The text all seven reviewers share lives in `references/reviewer-wire/`: `wire-contract.md` (generated from the engine's codec), `read-coverage.md`, `bootstrap.md` and `before-you-emit.md`. `scripts/stamp-wire-contract.ts` stamps the four fragments into every reviewer file, and `--check` reports drift. Edit a fragment and re-stamp; never edit a stamped region. Protocol details: [operations](standalone-review.md#reviewer-protocol-v2).
+The text all seven reviewers share lives in `references/reviewer-wire/`: `wire-contract.md` (generated from the engine's codec), `read-coverage.md`, `bootstrap.md` and `before-you-emit.md`. `scripts/stamp-wire-contract.ts` stamps the four fragments into every reviewer file, and `--check` reports drift. Edit a fragment and re-stamp; never edit a stamped region. The same script stamps the lens sections of `references/review-lenses.md` into `review-verifier-agent`. Protocol details: [operations](standalone-review.md#reviewer-protocol-v2).
 
 ### Emission on Pi
 

@@ -297,15 +297,19 @@ export function parseReviewerPayloadV2(rawBytes: Uint8Array): DomainResult<Revie
  * the final-message fallback, so no second wording restates them. The example
  * is the standalone arm at a real file and line; the Wave arm is named, not
  * shown, because a Wave reviewer that copies a standalone example is refused.
- * The schema/rubric bytes are untouched, so the protocol descriptor digests
- * are unaffected.
+ *
+ * The schema is shown minified: every reviewer spawn pays for this fragment,
+ * and the issued Context Packet already carries the digest-bound bytes. Only
+ * this rendering is compact; the schema value, the rubric and the packet
+ * sections are untouched, so the protocol descriptor digests are unaffected.
  */
 export function renderReviewerWireContract(): string {
+  const compactSchema = JSON.stringify(JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2));
   return [
     REVIEWER_OUTPUT_CONTRACT,
     `If your task names an emission tool, this wording applies instead, with that tool's name in place of ${REVIEWER_EMISSION_TOOL_CONTRACT_PLACEHOLDER}:`,
     `\`\`\`\n${REVIEWER_EMISSION_TOOL_CONTRACT_TEMPLATE}\n\`\`\``,
-    `## reviewer-payload-schema\n\n\`\`\`json\n${REVIEWER_PAYLOAD_SCHEMA_V2}\n\`\`\``,
+    `## reviewer-payload-schema\n\nThe issued Context Packet's \`reviewer-payload-schema\` section in compact form; the packet copy governs.\n\n\`\`\`json\n${compactSchema}\n\`\`\``,
     `## Example (standalone-review only)\n\n\`\`\`json\n${JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, null, 2)}\n\`\`\``,
     "A Wave request is refused this shape: its payload is `\"kind\": \"wave-review\"` with `packetId`, `generation` and `prior_findings`, as the schema and your task state.",
     `## reviewer-impact-rubric\n\n${REVIEWER_IMPACT_RUBRIC_V1}`,

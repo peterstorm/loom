@@ -27,7 +27,7 @@ Fresh standalone and Wave Gate reviews issue Reviewer Protocol v2 ([ADR-0009](ad
 
 ### What a refutation verifier is issued
 
-A verifier's task carries `LOOM_CONTEXT_PATH`, and for a schema-3 successor panel `LOOM_CONTEXT_VIEW_PATH`. The packet's `outputContract` names the lens; its one authority section (`refutation-authority` for a standalone review, `wave-refutation-authority` for a Wave Gate) carries the lens name and the findings. The lens definition is not in the packet: the verifier agent reads the `## <lens>` section of `references/review-lenses.md` from the plugin. Nothing substitutes lens text into a prompt.
+A verifier's task carries `LOOM_CONTEXT_PATH`, and for a schema-3 successor panel `LOOM_CONTEXT_VIEW_PATH`. The packet's `outputContract` names the lens; its one authority section (`refutation-authority` for a standalone review, `wave-refutation-authority` for a Wave Gate) carries the lens name and the findings. The lens definition is not in the packet: the verifier agent carries every lens's section, stamped from `references/review-lenses.md` by `scripts/stamp-wire-contract.ts`, and applies the one it was issued. Nothing substitutes lens text into a task.
 
 ### Read coverage (Reviewer Protocol v4)
 

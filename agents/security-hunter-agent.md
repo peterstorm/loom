@@ -58,7 +58,9 @@ starting paths is `blocked`: say so, do not widen scope.
      --nonce <the printed nonce> -- <command> > <run>/agents/<your-owner-id>/artifacts/<file>
    ```
 
-   Replace only `<command>`. Keep every flag and the redirect as given, and
+   `<loom>` is the Loom plugin's absolute path, already filled in: the command
+   runs from the repository you audit. Replace only `<command>`. Keep every
+   flag and the redirect as given, and
    cite `agents/<your-owner-id>/artifacts/<file>` as the check's `artifact`.
    The nonce binds the receipt to that one artifact path: a receipt in another
    file, or under another nonce, is refused. The command runs with no external
@@ -86,10 +88,10 @@ starting paths is `blocked`: say so, do not widen scope.
 
 ## Lenses
 
-The lens files are the vendored attack taxonomy. They live in the Loom plugin:
-use the absolute paths in your brief. A relative `references/security-lenses/…`
-path is relative to the Loom plugin root (`${CLAUDE_PLUGIN_ROOT}`), never to
-the repository you audit.
+The lens files are the vendored attack taxonomy. They live in the Loom plugin,
+never in the repository you audit: read them at the absolute paths in your
+brief. A block reference (`<LENS.md>#<section>`) names a file in that same
+directory.
 
 Read your attack class's entry in `ATTACK-CLASSES.md`. For each companion block
 (`<LENS.md>#<section>`), read that section and the lens's "Core discipline" and

@@ -208,9 +208,10 @@ function issuedContract(role: string, version: 1 | 2, scope: readonly string[] =
 
 const currentAgentFile = (role: string) => readFileSync(join(REPO_ROOT, "agents", `${role}.md`), "utf-8");
 const EXAMPLE_SECTION = "Example (standalone-review only)";
+/** A section's JSON fence: directly under its heading, or after one sentence. */
 function fencedSection(markdown: string, label: string): string {
   const section = markdown.split(`## ${label}\n\n`)[1];
-  const found = section === undefined ? null : /^```json\n([\s\S]*?)\n```/.exec(section);
+  const found = section === undefined ? null : /^(?:[^\n]+\n\n)?```json\n([\s\S]*?)\n```/.exec(section);
   if (found === null) throw new Error(`missing executable section ${label}`);
   return found[1]!;
 }
@@ -231,7 +232,9 @@ describe("all seven issued reviewer shims select packet authority before current
     const packetRubric = issued.packet.fixedContext.find(({ label }) => label === "reviewer-impact-rubric");
     expect(packetSchema).toBeDefined();
     expect(packetRubric).toBeDefined();
-    expect(schema).toBe(new TextDecoder().decode(Uint8Array.from(packetSchema!.bytes)));
+    // The stamped copy is minified; the packet section is the issued bytes.
+    // They are the same schema value, and the packet copy governs.
+    expect(JSON.parse(schema)).toEqual(JSON.parse(new TextDecoder().decode(Uint8Array.from(packetSchema!.bytes))));
     expect(region.split("## reviewer-impact-rubric\n\n")[1] + "\n")
       .toBe(new TextDecoder().decode(Uint8Array.from(packetRubric!.bytes)));
     const admitted = value(parseReviewerEvidence(issued, new TextEncoder().encode(example)));

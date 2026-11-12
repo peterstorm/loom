@@ -19,8 +19,13 @@
  * missing a marker or the anchored bullet fails loudly here and in
  * engine/tests/wire-contract.test.ts.
  *
+ * The refutation verifier (kind `review-verifier`) carries one region of its
+ * own: the lens sections of references/review-lenses.md, between the
+ * review-lenses markers. It is issued its lens by name, so the definitions
+ * travel in its own file.
+ *
  * Usage: bun scripts/stamp-wire-contract.ts [--check]
- *   --check  exit 1 if any stamped text differs from its fragment (no writes)
+ *   --check  exit 1 if any stamped text differs from its source (no writes)
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -28,18 +33,23 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentsOfKind } from "../engine/src/core/agent-catalog-projections";
 import { renderReviewerWireContract } from "../engine/src/core/reviewer-protocol";
+import { REVIEW_LENSES } from "../engine/src/core/review-panel";
 import {
   READ_COVERAGE_BULLET_ANCHOR,
+  REVIEW_LENSES_REGION,
   REVIEWER_BOOTSTRAP_REGION,
   REVIEWER_PREFLIGHT_REGION,
   WIRE_CONTRACT_REGION,
+  reviewLensSections,
   stampReadCoverageBullet,
   stampRegion,
+  type StampResult,
   type StampedRegion,
 } from "../engine/src/core/wire-contract";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const FRAGMENTS = "references/reviewer-wire";
+const LENS_REFERENCE = "references/review-lenses.md";
 const check = process.argv.includes("--check");
 const readFragment = (name: string): string => readFileSync(join(ROOT, FRAGMENTS, name), "utf-8");
 
@@ -52,45 +62,68 @@ if (readFileSync(wireContractPath, "utf-8") !== wireContract) {
   else writeFileSync(wireContractPath, wireContract);
 }
 
-/** Each stamped region with the fragment that owns it, in file order. */
-const regions: readonly Readonly<{ region: StampedRegion; file: string; text: string }>[] = [
-  { region: REVIEWER_BOOTSTRAP_REGION, file: "bootstrap.md", text: readFragment("bootstrap.md") },
-  { region: REVIEWER_PREFLIGHT_REGION, file: "before-you-emit.md", text: readFragment("before-you-emit.md") },
-  { region: WIRE_CONTRACT_REGION, file: "wire-contract.md", text: wireContract },
-];
-const readCoverage = readFragment("read-coverage.md");
+/** One source's replacement in an agent file, with the words that report it. */
+type Stamp = Readonly<{
+  apply: (agentMarkdown: string) => StampResult;
+  /** What a refused stamp should have found in the file. */
+  expected: string;
+  /** What `--check` reports when the file differs. */
+  difference: string;
+}>;
 
-for (const agent of agentsOfKind("reviewer")) {
+const regionStamp = (region: StampedRegion, source: string, text: string): Stamp => ({
+  apply: (agentMarkdown) => stampRegion(agentMarkdown, region, text),
+  expected: `${region.start} … ${region.end}`,
+  difference: `${region.name} region differs from ${source}`,
+});
+
+/** Apply every stamp to one agent file; a stamp the file cannot take is fatal. */
+function stampAgent(agent: string, stamps: readonly Stamp[]): void {
   const path = join(ROOT, "agents", `${agent}.md`);
-  const current = readFileSync(path, "utf-8");
-  let stamped = current;
+  let stamped = readFileSync(path, "utf-8");
   const differing: string[] = [];
-  for (const { region, file, text } of regions) {
-    const next = stampRegion(stamped, region, text);
+  for (const { apply, expected, difference } of stamps) {
+    const next = apply(stamped);
     if (!next.ok) {
-      console.error(`${agent}: ${next.error} (expected ${region.start} … ${region.end})`);
+      console.error(`${agent}: ${next.error} (expected ${expected})`);
       process.exit(1);
     }
-    if (next.value !== stamped) differing.push(`${region.name} region differs from ${FRAGMENTS}/${file}`);
+    if (next.value !== stamped) differing.push(difference);
     stamped = next.value;
   }
-  const bullet = stampReadCoverageBullet(stamped, readCoverage);
-  if (!bullet.ok) {
-    console.error(`${agent}: ${bullet.error} (expected one line starting ${READ_COVERAGE_BULLET_ANCHOR})`);
-    process.exit(1);
-  }
-  if (bullet.value !== stamped) differing.push(`read-coverage bullet differs from ${FRAGMENTS}/read-coverage.md`);
-  if (differing.length === 0) continue;
+  if (differing.length === 0) return;
   drifted += 1;
   if (check) {
     for (const difference of differing) console.error(`${agent}: ${difference}`);
   } else {
-    writeFileSync(path, bullet.value);
+    writeFileSync(path, stamped);
     process.stdout.write(`stamped ${agent}\n`);
   }
 }
 
+/** Every reviewer's stamps, in file order. */
+const readCoverage = readFragment("read-coverage.md");
+const reviewerStamps: readonly Stamp[] = [
+  regionStamp(REVIEWER_BOOTSTRAP_REGION, `${FRAGMENTS}/bootstrap.md`, readFragment("bootstrap.md")),
+  regionStamp(REVIEWER_PREFLIGHT_REGION, `${FRAGMENTS}/before-you-emit.md`, readFragment("before-you-emit.md")),
+  regionStamp(WIRE_CONTRACT_REGION, `${FRAGMENTS}/wire-contract.md`, wireContract),
+  {
+    apply: (agentMarkdown) => stampReadCoverageBullet(agentMarkdown, readCoverage),
+    expected: `one line starting ${READ_COVERAGE_BULLET_ANCHOR}`,
+    difference: `read-coverage bullet differs from ${FRAGMENTS}/read-coverage.md`,
+  },
+];
+for (const agent of agentsOfKind("reviewer")) stampAgent(agent, reviewerStamps);
+
+const lensSections = reviewLensSections(readFileSync(join(ROOT, LENS_REFERENCE), "utf-8"), REVIEW_LENSES);
+if (!lensSections.ok) {
+  console.error(`${LENS_REFERENCE}: ${lensSections.error}`);
+  process.exit(1);
+}
+const verifierStamps = [regionStamp(REVIEW_LENSES_REGION, LENS_REFERENCE, lensSections.value)];
+for (const agent of agentsOfKind("review-verifier")) stampAgent(agent, verifierStamps);
+
 if (check && drifted > 0) process.exit(1);
 process.stdout.write(
-  check ? "reviewer regions and read-coverage bullets match their fragments\n" : `done (${drifted} file(s) updated)\n`,
+  check ? "stamped regions and read-coverage bullets match their sources\n" : `done (${drifted} file(s) updated)\n`,
 );

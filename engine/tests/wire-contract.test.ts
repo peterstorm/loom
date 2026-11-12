@@ -3,14 +3,17 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentsOfKind } from "../src/core/agent-catalog-projections";
+import { REVIEW_LENSES } from "../src/core/review-panel";
 import {
   READ_COVERAGE_BULLET_ANCHOR,
+  REVIEW_LENSES_REGION,
   REVIEWER_BOOTSTRAP_REGION,
   REVIEWER_PREFLIGHT_REGION,
   WIRE_CONTRACT_REGION,
   extractReadCoverageBullet,
   extractRegion,
   extractWireContractRegion,
+  reviewLensSections,
   stampReadCoverageBullet,
   stampRegion,
   stampWireContract,
@@ -132,9 +135,48 @@ describe("the fragments are not agents", () => {
   });
 });
 
-describe("stamping a marked region", () => {
-  const region = REVIEWER_BOOTSTRAP_REGION;
-  const file = (inner: string): string => `---\nname: demo\n---\n\n${region.start}\n${inner}\n${region.end}\n\nBody\n`;
+/**
+ * The refutation verifier is issued its lens by name. The definitions have ONE
+ * source, references/review-lenses.md, and the verifier carries its lens
+ * sections between markers, stamped by the same script through the same seam.
+ */
+describe("the refutation verifier carries the exact stamped lens sections", () => {
+  const reference = readFileSync(join(REPO_ROOT, "references", "review-lenses.md"), "utf-8");
+  const sections = reviewLensSections(reference, REVIEW_LENSES);
+  const verifiers = agentsOfKind("review-verifier");
+
+  it("covers the verifier (a vacuous pass would prove nothing)", () => {
+    expect(verifiers).toEqual(["review-verifier-agent"]);
+  });
+
+  it.each([...verifiers])("agents/%s.md region is byte-identical to the reference's lens sections, and stamping it is idempotent", (agent) => {
+    expect(sections.ok, sections.ok ? "" : sections.error).toBe(true);
+    if (!sections.ok) return;
+    const markdown = reviewerFile(agent);
+    expect(extractRegion(markdown, REVIEW_LENSES_REGION)).toEqual({ ok: true, value: sections.value.replace(/\n$/, "") });
+    expect(stampRegion(markdown, REVIEW_LENSES_REGION, sections.value)).toEqual({ ok: true, value: markdown });
+    // The sections nest under the agent's own heading.
+    expect(markdown).toContain(`\n## Lenses\n\n${REVIEW_LENSES_REGION.start}\n### ${REVIEW_LENSES[0]}\n`);
+  });
+
+  it("takes the lens sections only, demoted one level, and nothing of the header", () => {
+    const source = "# Lenses\n\nHeader.\n\n## The standing rule\n\nRule.\n\n---\n\n## a\n\nA body.\n\n---\n\n## b\n\nB body.\n";
+    expect(reviewLensSections(source, ["a", "b"]))
+      .toEqual({ ok: true, value: "### a\n\nA body.\n\n---\n\n### b\n\nB body.\n" });
+  });
+
+  it.each<readonly [string, string, readonly string[], string]>([
+    ["a reference with no lens section", "# Lenses\n\n## other\n", ["a", "b"], "lens reference has no `## <lens>` section"],
+    ["a selectable lens with no section", "## a\n\nA.\n", ["a", "b"], "lens reference sections [a] are not the selectable lenses [a, b]"],
+    ["sections out of selection order", "## b\n\nB.\n\n## a\n\nA.\n", ["a", "b"], "lens reference sections [b, a] are not the selectable lenses [a, b]"],
+    ["a section no lens selects", "## a\n\nA.\n\n## b\n\nB.\n\n## c\n\nC.\n", ["a", "b"], "lens reference sections [a, b, c] are not the selectable lenses [a, b]"],
+  ])("refuses %s", (_name, source, lenses, error) => {
+    expect(reviewLensSections(source, lenses)).toEqual({ ok: false, error });
+  });
+});
+
+describe.each([REVIEWER_BOOTSTRAP_REGION, REVIEW_LENSES_REGION])("stamping the marked $name region", (region) => {
+  const file =(inner: string): string => `---\nname: demo\n---\n\n${region.start}\n${inner}\n${region.end}\n\nBody\n`;
 
   it("replaces only the region and leaves every other byte untouched", () => {
     expect(stampRegion(file("stale"), region, "fresh\n")).toEqual({ ok: true, value: file("fresh") });
@@ -147,9 +189,9 @@ describe("stamping a marked region", () => {
   });
 
   it.each<readonly [string, string, string]>([
-    ["a missing start marker", `text\n${region.end}\n`, "missing reviewer-bootstrap start marker"],
-    ["a missing end marker", `${region.start}\ntext\n`, "missing reviewer-bootstrap end marker"],
-    ["markers out of order", `${region.end}\n${region.start}\n`, "reviewer-bootstrap markers are out of order"],
+    ["a missing start marker", `text\n${region.end}\n`, `missing ${region.name} start marker`],
+    ["a missing end marker", `${region.start}\ntext\n`, `missing ${region.name} end marker`],
+    ["markers out of order", `${region.end}\n${region.start}\n`, `${region.name} markers are out of order`],
   ])("refuses %s, naming the region", (_name, markdown, error) => {
     expect(stampRegion(markdown, region, "fresh\n")).toEqual({ ok: false, error });
     expect(extractRegion(markdown, region)).toEqual({ ok: false, error });
@@ -283,11 +325,14 @@ describe("the fragment's tool-primary emission wording (FR-020/AS-012)", () => {
     expect(fragment).toContain(REVIEWER_EMISSION_TOOL_CONTRACT_PLACEHOLDER);
   });
 
-  it("the schema/rubric bytes are untouched by the tool-primary section (stamp/schema consistency)", () => {
-    expect(fragment).toContain(REVIEWER_PAYLOAD_SCHEMA_V2);
-    expect(fragment.endsWith(REVIEWER_IMPACT_RUBRIC_V1)).toBe(true);
+  it("the stamped schema is the issued schema value and the rubric bytes are untouched (stamp/schema consistency)", () => {
     // The template fence is plain text: exactly the schema and example remain ```json blocks.
-    expect([...fragment.matchAll(/```json\n([\s\S]*?)\n```/g)]).toHaveLength(2);
+    const blocks = [...fragment.matchAll(/```json\n([\s\S]*?)\n```/g)].map((match) => match[1]!);
+    expect(blocks).toHaveLength(2);
+    // Shown compact, so the bytes differ from the packet section; the value may not.
+    expect(JSON.parse(blocks[0]!)).toEqual(JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2));
+    expect(fragment).toContain("section in compact form; the packet copy governs.\n\n```json\n");
+    expect(fragment.endsWith(REVIEWER_IMPACT_RUBRIC_V1)).toBe(true);
   });
 
   it.each([...reviewers])("agents/%s.md carries the template and the retained contract in its stamped region", (agent) => {

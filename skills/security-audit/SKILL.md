@@ -14,9 +14,12 @@ needs Linux `unshare`. On a host without it (macOS has none) the sandbox refuses
 to start, so every claim stays `needs_validation`. The audit still accounts for
 coverage and reports leads there; say so in the summary.
 
-**`loom helper`**, here and in every line the engine prints, stands for
-`bun "$LOOM_DIR/engine/src/cli.ts" helper`, with `LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"`.
-No `loom` binary is installed.
+**Running an operation.** Each operation below is
+`bun "$LOOM_DIR/engine/src/cli.ts" helper security-audit <operation> --out <run-dir> …`,
+with `LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"`. The follow-up commands the engine
+prints (`assign`'s nonce line, `nonce`'s sandbox run, `status`'s verification
+start and import, `disposition`'s handoff) name that CLI, the sandbox script
+and the lens files by absolute path: run them as printed.
 
 Three properties separate this from a prompt that says "find vulnerabilities":
 
@@ -41,7 +44,8 @@ Three properties separate this from a prompt that says "find vulnerabilities":
 pinned in `MANIFEST.json`; `LOOM-DELTAS.md` beside it holds what Loom adds.
 `start` selects lenses from the stack signals you give it, always keeps
 `ATTACK-CLASSES.md`, and caps the count by profile. The lenses live in the
-plugin, never in the audited repository.
+plugin, never in the audited repository, so `start` prints each selected lens
+by its absolute path.
 
 ## Enumerating units
 
@@ -158,7 +162,7 @@ Read it before the first operation. This is only the order.
 3. Per planned unit: `assign --unit <coverage-id> --agent security-hunter-agent`,
    spawn one hunter with the owner id `assign` printed, and `submit` the JSON it
    returns. A hunter cannot compute the nonce its sandbox receipt is bound to;
-   the parent runs `nonce` and puts the output in the brief.
+   the parent runs `nonce` and puts the output in the brief, unchanged.
 4. Continue in the order Phases gives: critic and `merge-critic`, `defer`,
    `status` and the verification run it prints, `verify --from`, `findings`,
    `publish`, `disposition`, and `status` once more.

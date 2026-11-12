@@ -38,6 +38,7 @@ import { judgeAffectedRun } from "./affected-stop-check";
 import type { AffectedRunVerdict } from "./affected-stop-check-types";
 import { sha256Bytes, sha256Hex } from "./digest";
 import { taskRolePolicy } from "./distill-task";
+import { loomHelperCommand } from "./loom-cli-command";
 import { DECISION_RECORD_AGENT } from "./model-profiles";
 import { failure, isNonEmpty, mapNonEmpty, nonEmpty, success, type DomainResult, type NonEmpty } from "./orchestration-contract/identity";
 import { compareStrings } from "./ordering";
@@ -672,7 +673,7 @@ export const KILLING_TEST: Readonly<Record<TaskMutationOperator, string>> = Obje
  * a block both print it, so an implementer is never told two forms.
  */
 export const taskMutationCommand = (packageRoot: string, taskId: string): string =>
-  `bun ${quoteShellArgument(`${packageRoot}/engine/src/cli.ts`)} helper mutation-check --task ${quoteShellArgument(taskId)}`;
+  `${loomHelperCommand(packageRoot)} mutation-check --task ${quoteShellArgument(taskId)}`;
 
 const SNIPPET_CHARS = 120;
 

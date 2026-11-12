@@ -100,9 +100,12 @@ describe("lens selection", () => {
   });
 
   it("renders the choice and the exclusions for a prompt", () => {
-    const rendered = renderLensSelection(selectSecurityLenses(aSignals({ servesHttp: true }), STANDARD));
-    expect(rendered).toContain("references/security-lenses/ATTACK-CLASSES.md");
-    expect(rendered).toContain("references/security-lenses/WEB-PROTOCOL-AND-AUTH.md");
+    const rendered = renderLensSelection("/opt/loom", selectSecurityLenses(aSignals({ servesHttp: true }), STANDARD));
+    // Each included lens is an absolute path a hunter can read from the
+    // audited repository; a package-relative path names nothing there.
+    expect(rendered).toContain("\n- /opt/loom/references/security-lenses/ATTACK-CLASSES.md (base)");
+    expect(rendered).toContain("\n- /opt/loom/references/security-lenses/WEB-PROTOCOL-AND-AUTH.md (score ");
+    expect(rendered).not.toMatch(/^- references\//m);
     expect(rendered).toContain("Excluded lenses:");
   });
 

@@ -125,8 +125,9 @@ const ledger = (): CoverageLedger => {
 };
 
 /** The run's documents, derived through the one publication derivation. */
-const documentsOf = (input: Omit<PublicationInput, "locator">) => ok(derivePublication({ ...input, locator: "/out" })).documents;
-const reportOf = (input: Omit<PublicationInput, "locator">): string => documentsOf(input)["REPORT.md"];
+type Published = Omit<PublicationInput, "locator" | "packageRoot">;
+const documentsOf = (input: Published) => ok(derivePublication({ ...input, locator: "/out", packageRoot: "/loom" })).documents;
+const reportOf = (input: Published): string => documentsOf(input)["REPORT.md"];
 
 describe("report derivation", () => {
   it("renders every published record exactly where its verdict says (INV-S6)", () => {
@@ -162,8 +163,8 @@ describe("report derivation", () => {
 
   it("is byte-identical for identical records (INV-S6b)", () => {
     const findings = parse([CONFIRMED, NEEDS_VALIDATION, REJECTED]);
-    const first = derivePublication({ metadata, ledger: ledger(), findings, locator: "/out" });
-    const second = derivePublication({ metadata, ledger: ledger(), findings, locator: "/out" });
+    const first = derivePublication({ metadata, ledger: ledger(), findings, locator: "/out", packageRoot: "/loom" });
+    const second = derivePublication({ metadata, ledger: ledger(), findings, locator: "/out", packageRoot: "/loom" });
     expect(first).toEqual(second);
   });
 
@@ -210,7 +211,7 @@ describe("report derivation", () => {
 describe("one derivation of the disposition (INV-S6)", () => {
   it("hands the report the very disposition disposition.json is derived from", () => {
     const findings = parse([CONFIRMED, NEEDS_VALIDATION, REJECTED]);
-    const publication = ok(derivePublication({ metadata, ledger: ledger(), findings, locator: "/out" }));
+    const publication = ok(derivePublication({ metadata, ledger: ledger(), findings, locator: "/out", packageRoot: "/loom" }));
     expect(publication.disposition).toEqual(ok(securityDisposition({ metadata, locator: "/out", findings })));
     expect(publication.documents["REPORT.md"]).toContain(`Decision set: disposition.json (${publication.disposition.source.resultDigest}).`);
   });
@@ -219,7 +220,7 @@ describe("one derivation of the disposition (INV-S6)", () => {
     // Two records under one fingerprint (two parsed documents concatenated)
     // give one origin two decisions: no report is produced at all.
     const twice = [...parse([CONFIRMED]), ...parse([CONFIRMED])];
-    const refused = derivePublication({ metadata, ledger: ledger(), findings: twice, locator: "/out" });
+    const refused = derivePublication({ metadata, ledger: ledger(), findings: twice, locator: "/out", packageRoot: "/loom" });
     expect(refused.ok).toBe(false);
     if (refused.ok) throw new Error("expected a refusal");
     expect(refused.error.message).toContain("duplicate fingerprint authz:1");

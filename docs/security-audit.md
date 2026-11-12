@@ -14,16 +14,15 @@ and a test binds it to the traits table the engine routes on.
 
 ## Before you start
 
-**`loom helper` is shorthand.** No `loom` binary is installed. Everywhere on
-this page, and in every command line the engine prints (`assign`, `nonce` and
-`status` print `loom helper …` lines), `loom helper` stands for
-
-```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper
-```
-
-where `LOOM_DIR` is the Loom plugin root (`LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"`, as
-`commands/loom.md` resolves it). Substitute it when you run a printed line.
+**The CLI path.** Commands on this page are written
+`bun "$LOOM_DIR/engine/src/cli.ts" helper …`, where `LOOM_DIR` is the Loom
+plugin root (`LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"`, as `commands/loom.md` resolves
+it; [Operations](operations.md) says how to set it in your own shell). The
+lines the engine prints for the next step (`assign`, `nonce`, `status` and
+`disposition` each print one) need no substitution: they name the running
+package's `cli.ts`, the sandbox script and the lens files by absolute path,
+each as one shell-quoted word, so they run as printed from the audited
+repository or anywhere else.
 
 **A `confirmed` finding needs Linux.** A claim is published as `confirmed` only
 when a hunter demonstrated it in the bounded [sandbox](#the-sandbox), and the
@@ -36,7 +35,7 @@ demonstrated findings do not.
 
 <!-- wire-example: security-audit-start -->
 ```bash
-loom helper security-audit start --out ../audit-run-1 --repo . --profile standard --budget 24 <<'JSON'
+bun "$LOOM_DIR/engine/src/cli.ts" helper security-audit start --out ../audit-run-1 --repo . --profile standard --budget 24 <<'JSON'
 { "units": [
     { "refs": { "surface": "http-ingress", "boundary": "api-edge",
                 "subsystem": "auth", "attack_class": "injection" },
@@ -59,8 +58,10 @@ seeds mean the enumerator produced the same unit twice, which is worth seeing.
 `start` records the units it is given; choosing them is the parent's work, and
 the skill's "Enumerating units" section says how.
 
-The selection lists each lens as `references/security-lenses/<LENS>.md`. That
-path is relative to the Loom plugin root, not to the audited repository.
+The selection lists each lens by its absolute path in the Loom plugin
+(`<plugin>/references/security-lenses/<LENS>.md`), and `lenses.json` keeps the
+same text under `rendered`. The lenses live in the plugin, not in the audited
+repository, so hand a hunter those paths as printed.
 
 `--source <sha>` pins the revision; without it the run reads `git rev-parse
 HEAD` through the one Git seam and records whether the worktree was dirty. A
@@ -159,10 +160,11 @@ transcript in the run must still hash to it.
    says when the parent spawns it), and import before the next ledger change.
 2. **`status` prints the start command.** When confirmed claims await a bound
    ballot, `status` (and `status --json`, field `verification`) prints the exact
-   `loom helper orchestration start security-verification --runs-root
+   `bun '<plugin>/engine/src/cli.ts' helper orchestration start security-verification --runs-root
    '<run-dir>/verification-runs' --run 'run.verify-w<wave>-g<generation>-<id>'`
    command with its input on a here-document, and the import command; every
-   path is one shell-quoted word. Run them as printed. Claims are grouped into
+   path, the CLI's included, is absolute and one shell-quoted word. Run them
+   as printed. Claims are grouped into
    briefs of at most four; each brief is one verifier request on the
    `refutation` profile. When the current generation of a claim set is blocked
    or unimportable (a refused retry, a capture without its attestation),
@@ -179,8 +181,9 @@ transcript in the run must still hash to it.
    retry, told why; a refused retry blocks the run. `helper orchestration
    resume` drives the run to `done`, publishing `result.json`. Start and resume
    also re-register the audit with the subagent guard's registry.
-4. **Import it.** `loom helper security-audit verify --out <run-dir> --from
-   <verification-run>` authenticates the run (registered, under this audit,
+4. **Import it.** The import command `status` printed,
+   `bun "$LOOM_DIR/engine/src/cli.ts" helper security-audit verify --out <run-dir> --from <verification-run>`,
+   authenticates the run (registered, under this audit,
    issued against the current ledger and findings), requires `result.json` to
    be byte-identical to the replay of its captured evidence, and requires every
    ballot to match its capture attestation — a transcript with no attestation is
@@ -302,7 +305,7 @@ critic reassignment has archived an earlier one. `assign` prints the minted id:
 
 ```
 assigned <coverage-id> to owner <owner-id> at wave <n>
-nonce: loom helper security-audit nonce --out <run-dir> --artifact agents/<owner-id>/artifacts/<file>
+nonce: bun '<plugin>/engine/src/cli.ts' helper security-audit nonce --out '<run-dir>' --artifact agents/<owner-id>/artifacts/<file>
 ```
 
 The hunter settles under exactly that id — `agentId` and every check's
@@ -347,12 +350,13 @@ critic reassigns it: `defer` accepts only a `planned` unit.
 A hunter cannot compute the nonce its receipt is bound to. The parent runs
 
 ```bash
-loom helper security-audit nonce --out ../audit-run-1 --artifact agents/<owner-id>/artifacts/<file>
+bun "$LOOM_DIR/engine/src/cli.ts" helper security-audit nonce --out ../audit-run-1 --artifact agents/<owner-id>/artifacts/<file>
 ```
 
 and hands the output to the hunter: the nonce, and the exact sandbox command —
-target, the owner's scratch, every limit, `--nonce`, and the redirect into that
-artifact — with nothing left to fill in but the command under test. The local
+the script's absolute path, target, the owner's scratch, every limit,
+`--nonce`, and the redirect into that artifact — with nothing left to fill in
+but the command under test. The local
 check then cites exactly `agents/<owner-id>/artifacts/<file>` as its
 `artifact`.
 
@@ -457,11 +461,10 @@ that cites it. The hunter's rule is then to file the claim as
 `confirmed` claim that has no receipt. So on such a host no finding is
 published as `confirmed`.
 
-**Where the script is.** `nonce` prints the command with the path
-`scripts/security-sandbox.sh`, relative to the Loom plugin root. A hunter's
-working directory is the audited repository, so the parent puts the absolute
-path (`$LOOM_DIR/scripts/security-sandbox.sh`) into the hunter's brief. The
-engine recognises the script by file name under any path prefix.
+**Where the script is.** `scripts/security-sandbox.sh`, in the Loom plugin.
+`nonce` prints the command with the script's absolute path, so it runs as
+printed from the audited repository, which is a hunter's working directory.
+The engine recognises the script by file name under any path prefix.
 
 **What it enforces.** The script
 runs one command under `unshare` with only loopback networking, the target

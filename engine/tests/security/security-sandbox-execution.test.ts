@@ -34,6 +34,7 @@ import {
   renderShellWords,
   sandboxCommand,
   sandboxReceiptPrefix,
+  sandboxScriptPath,
   sandboxWithinLimits,
 } from "../../src/core/security-sandbox";
 import { ok } from "./fixtures";
@@ -73,6 +74,7 @@ describe("the printed sandbox command reads back as exactly its argv", () => {
 
   it("prints a run directory with a space or a metacharacter as the words the binding names", () => {
     const binding = {
+      script: sandboxScriptPath("/opt/my plugins/loom"),
       nonce: NONCE, target: "/srv/my repo", scratch: "/runs/it's here/agents/a/scratch",
       artifact: "agents/a/artifacts/x $y.txt", artifactFile: "/runs/it's here/agents/a/artifacts/x $y.txt",
     };
@@ -81,14 +83,15 @@ describe("the printed sandbox command reads back as exactly its argv", () => {
     expect(shellWords(mkdir.trim())).toEqual(["mkdir", "-p", "/runs/it's here/agents/a/artifacts"]);
     const sandbox = lines.find((line) => line.includes("security-sandbox.sh"))!;
     const [invocation, redirect] = sandbox.trim().split(" -- <command> [args...] > ");
-    const words = ok(sandboxCommand({ target: binding.target, scratch: binding.scratch, command: ["true"], limits: DEFAULT_SANDBOX_LIMITS, nonce: NONCE }));
+    const words = ok(sandboxCommand({ script: binding.script, target: binding.target, scratch: binding.scratch, command: ["true"], limits: DEFAULT_SANDBOX_LIMITS, nonce: NONCE }));
     const flags = words.slice(0, words.indexOf("--"));
     expect(shellWords(invocation!)).toEqual(flags);
     expect(shellWords(redirect!)).toEqual([binding.artifactFile]);
-    // The script path and the hex nonce stay bare words. That the evidence
-    // extractor recognises this printed line as an invocation bound to the
-    // binding's nonce is pinned in tests/machine/sandbox-invocation.test.ts.
-    expect(invocation).toMatch(/^scripts\/security-sandbox\.sh /);
+    // The script is one word naming the package's own file by absolute path,
+    // quoted because this package root holds a space; the hex nonce stays bare.
+    // That the evidence extractor recognises this printed line as an invocation
+    // bound to the binding's nonce is pinned in tests/machine/sandbox-invocation.test.ts.
+    expect(invocation).toMatch(/^'\/opt\/my plugins\/loom\/scripts\/security-sandbox\.sh' /);
     expect(invocation).toMatch(new RegExp(` --nonce ${NONCE}$`));
   });
 });

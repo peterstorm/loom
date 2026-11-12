@@ -1,7 +1,7 @@
 # ADR-0073: Every documented wire example is parsed by its production parser
 
 ## Status
-Proposed (2026-11-12). Implements Q5 of the deterministic-implementation plan's Q-track.
+Accepted (2026-11-12). Implemented in PR #160. Implements Q5 of the deterministic-implementation plan's Q-track.
 
 ## Context
 An agent definition, command, skill or operations doc that shows a wire shape is the contract a model or an

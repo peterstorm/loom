@@ -2,6 +2,15 @@
 
 One row per file in this directory. An ADR records why the system has its current shape; current behaviour is described in the documents the [documentation index](../README.md) lists.
 
+**Writing a new ADR.** Start from [`references/adr-template.md`](../../references/adr-template.md).
+
+- **Size.** Target 6KB; the hard cap is 10KB.
+- **Status.** One line: a word from the template's vocabulary plus a date.
+- **Changing a decision.** Write a new ADR that supersedes the old one, and add the one line "Superseded by ADR-NNNN" to the old one's Status. Do not amend the old ADR in place.
+- **What stays out.** Implementation notes, review-round history, test counts and digests belong in the PR or the plan.
+
+ADRs written before this norm (2026-11-12) are historical records and stay as they are, whatever their length.
+
 The table is derived from the files: the title is the ADR's H1, the status is the leading word or phrase of its Status section (with the date when the ADR gives one), and the last column lists the ADRs that Status section says it amends, supersedes or resolves. No ADR in this directory is marked superseded; decisions have been changed by amendment. `engine/tests/docs/adr-index.test.ts` fails when a file is missing from the table or a row's status no longer matches its ADR.
 
 | ADR | Decision | Status | Relation stated in Status |
@@ -14,8 +23,8 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0006](ADR-0006-lc1-reaches-production-by-projection.md) | LC-1 reaches production by projection, not by checkpoint | Accepted | — |
 | [ADR-0007](ADR-0007-curated-public-surface.md) | A facade publishes a curated Public Surface, not the union of its volumes | Accepted | — |
 | [ADR-0008](ADR-0008-versioned-defect-family-installation-authority.md) | Version Defect-Family evidence at the verified-index installation seam | Accepted | — |
-| [ADR-0009](ADR-0009-versioned-reviewer-protocol.md) | Version reviewer evidence at issued protocol authority | Accepted | — |
-| [ADR-0010](ADR-0010-standalone-finding-lineage.md) | Explicit standalone Finding and disposition lineage | Selected design implemented | — |
+| [ADR-0009](ADR-0009-versioned-reviewer-protocol.md) | Version reviewer evidence at issued protocol authority | Accepted (2026-09-10) | — |
+| [ADR-0010](ADR-0010-standalone-finding-lineage.md) | Explicit standalone Finding and disposition lineage | Accepted (2026-09-10) | — |
 | [ADR-0011](ADR-0011-type-driven-fp-approach-and-panel-provenance.md) | Retain the selected type-driven FP approach and panel provenance | Accepted | — |
 | [ADR-0012](ADR-0012-preferred-strict-sampling-with-exact-route-qualification.md) | Preferred strict sampling, with exact-route qualification | Accepted | — |
 | [ADR-0013](ADR-0013-model-initiated-emission-terminating-success.md) | Model-initiated emission, terminating success | Accepted | — |
@@ -74,8 +83,8 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0066](ADR-0066-security-audit-is-a-registered-program.md) | Security audit is a registered program, not a skill-side workflow | Accepted (2026-11-07) | — |
 | [ADR-0067](ADR-0067-security-ballots-are-bound-to-issued-verifier-spawns.md) | Security ballots are bound to issued verifier spawns | Accepted (2026-11-09) | amends ADR-0066 |
 | [ADR-0068](ADR-0068-the-distill-pass-is-an-engine-added-task-per-wave.md) | The distill pass is an engine-added Task per Wave | Accepted (2026-11-11) | — |
-| [ADR-0069](ADR-0069-the-contract-task-wave-review-judges-the-contract-surface.md) | The Contract Task's Wave review judges the contract surface | Proposed (2026-11-12) | — |
-| [ADR-0070](ADR-0070-the-plan-design-review-gates-decompose.md) | The plan design review gates decompose | Proposed (2026-11-12) | — |
-| [ADR-0071](ADR-0071-the-task-mutation-check-names-surviving-mutants-before-the-stop.md) | The Task mutation check names surviving mutants before the stop | Proposed (2026-11-12) | — |
-| [ADR-0072](ADR-0072-wire-output-typed-without-a-parse-is-refused-at-the-edit.md) | Wire output typed without a parse is refused at the edit | Proposed (2026-11-12) | — |
-| [ADR-0073](ADR-0073-every-documented-wire-example-is-parsed-by-its-production-parser.md) | Every documented wire example is parsed by its production parser | Proposed (2026-11-12) | — |
+| [ADR-0069](ADR-0069-the-contract-task-wave-review-judges-the-contract-surface.md) | The Contract Task's Wave review judges the contract surface | Accepted (2026-11-12) | — |
+| [ADR-0070](ADR-0070-the-plan-design-review-gates-decompose.md) | The plan design review gates decompose | Accepted (2026-11-12) | — |
+| [ADR-0071](ADR-0071-the-task-mutation-check-names-surviving-mutants-before-the-stop.md) | The Task mutation check names surviving mutants before the stop | Accepted (2026-11-12) | — |
+| [ADR-0072](ADR-0072-wire-output-typed-without-a-parse-is-refused-at-the-edit.md) | Wire output typed without a parse is refused at the edit | Accepted (2026-11-12) | — |
+| [ADR-0073](ADR-0073-every-documented-wire-example-is-parsed-by-its-production-parser.md) | Every documented wire example is parsed by its production parser | Accepted (2026-11-12) | — |

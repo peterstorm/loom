@@ -14,8 +14,10 @@ table, with every refusal). Run the audit through the registered
 `security-audit` program in the order the skill gives. Every operation takes
 `--out <run-dir>`; the run directory is the whole record.
 
-`LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"`, and `loom helper` in the engine's printed
-lines means `bun "$LOOM_DIR/engine/src/cli.ts" helper`.
+`LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"`, and an operation is
+`bun "$LOOM_DIR/engine/src/cli.ts" helper security-audit <operation> --out <run-dir> …`.
+The commands the engine prints for the next step already name that CLI by its
+absolute path: run them as printed.
 
 This file adds only what the parent session does around the operations.
 
@@ -28,14 +30,14 @@ One hunter, one coverage unit. After `assign`, spawn
   paths, the ordinary attack-class block, and the companion and excluded blocks;
 - the owner id and wave `assign` printed, the absolute run directory, and the
   repository path;
-- the absolute path of each lens file the unit names:
-  `${CLAUDE_PLUGIN_ROOT}/references/security-lenses/ATTACK-CLASSES.md` and the
-  lens of each companion block. `start` prints these paths relative to the
-  plugin, and a hunter's working directory is the audited repository;
-- for a bounded local run, the output of `loom helper security-audit nonce --out
-  <run-dir> --artifact agents/<owner-id>/artifacts/<file>`, with the script path
-  written as `${CLAUDE_PLUGIN_ROOT}/scripts/security-sandbox.sh`. Skip this on a
-  host without `unshare`: the hunter then files leads only.
+- the absolute path of each lens file the unit names, as `start` printed it:
+  `ATTACK-CLASSES.md` and the lens of each companion block. On `--resume`,
+  `lenses.json` holds the same list under `rendered`;
+- for a bounded local run, the unchanged output of
+  `bun "$LOOM_DIR/engine/src/cli.ts" helper security-audit nonce --out <run-dir> --artifact agents/<owner-id>/artifacts/<file>`
+  (`assign` prints this line for the owner it minted). It names the sandbox
+  script by absolute path, so the hunter runs it from the audited repository.
+  Skip this on a host without `unshare`: the hunter then files leads only.
 
 `submit` the hunter's final message unchanged.
 

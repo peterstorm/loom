@@ -10,6 +10,9 @@
  *   markers;
  * - `read-coverage.md`, one hand-written bullet located by its opening words.
  *
+ * The refutation verifier carries one more region, the lens sections of
+ * references/review-lenses.md, stamped by the same script.
+ *
  * This module owns the pure replacement so the stamp script and the drift
  * tests share one implementation — a test proving regions equal the fragment
  * through a DIFFERENT parser than the stamper writes with would be two
@@ -29,7 +32,7 @@ export type StampResult =
   | Readonly<{ ok: true; value: string }>
   | Readonly<{ ok: false; error: string }>;
 
-/** One marker-delimited region of a reviewer file, owned whole by one fragment. */
+/** One marker-delimited region of an agent file, owned whole by one fragment. */
 export type StampedRegion = Readonly<{ name: string; start: string; end: string }>;
 
 export const WIRE_CONTRACT_REGION: StampedRegion = Object.freeze({
@@ -52,7 +55,40 @@ export const REVIEWER_PREFLIGHT_REGION: StampedRegion = Object.freeze({
   end: "<!-- reviewer-preflight:end -->",
 });
 
-type RegionBounds = Readonly<{ ok: true; start: number; end: number }> | Readonly<{ ok: false; error: string }>;
+/** The refutation lens definitions the verifier carries (references/review-lenses.md). */
+export const REVIEW_LENSES_REGION: StampedRegion = Object.freeze({
+  name: "review-lenses",
+  start: "<!-- review-lenses:start — stamped from references/review-lenses.md -->",
+  end: "<!-- review-lenses:end -->",
+});
+
+/**
+ * The lens sections of references/review-lenses.md as the verifier carries
+ * them: from the first `## <lens>` heading to the end of the file, every
+ * heading demoted one level so the sections nest under the agent's
+ * `## Lenses`. The file's header (selection order, table, standing rule) is
+ * for maintainers and is not stamped.
+ *
+ * Refuses a reference whose sections from there on are not exactly `lenses`
+ * in order: the verifier is issued its lens by name, so a selectable lens
+ * with no section, or a section no lens selects, must stop the stamp.
+ */
+export function reviewLensSections(reference: string, lenses: readonly string[]): StampResult {
+  const lines = reference.split("\n");
+  const first = lines.findIndex((line) => lenses.some((lens) => line === `## ${lens}`));
+  if (first === -1) return { ok: false, error: "lens reference has no `## <lens>` section" };
+  const sections = lines.slice(first);
+  const documented = sections.filter((line) => line.startsWith("## ")).map((line) => line.slice(3));
+  if (documented.join("\n") !== lenses.join("\n")) {
+    return {
+      ok: false,
+      error: `lens reference sections [${documented.join(", ")}] are not the selectable lenses [${lenses.join(", ")}]`,
+    };
+  }
+  return { ok: true, value: sections.map((line) => /^#+ /.test(line) ? `#${line}` : line).join("\n") };
+}
+
+type RegionBounds =Readonly<{ ok: true; start: number; end: number }> | Readonly<{ ok: false; error: string }>;
 
 /** Where a region's markers sit, or an error naming which one is missing. */
 function regionBounds(agentMarkdown: string, region: StampedRegion): RegionBounds {

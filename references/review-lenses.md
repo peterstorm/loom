@@ -2,8 +2,11 @@
 
 The refutation lenses of the Refutation Panel, for Wave Gate and standalone
 review alike. The engine selects the lens set from the critical Findings and
-issues each verifier one lens by name. The verifier (`review-verifier-agent`)
-reads that lens's `## <lens>` section below and judges every Finding through it.
+issues each verifier one lens by name. This file is the single source of the
+lens definitions: `scripts/stamp-wire-contract.ts` stamps the `## <lens>`
+sections below into `agents/review-verifier-agent.md`, where the verifier reads
+its own lens and judges every Finding through it. Edit a lens here and
+re-stamp; never edit the stamped copy.
 
 Every lens fragment states three things a verifier must honor: what it **tries
 to refute**, what it **refuses to refute on** (so a lens does not stray into

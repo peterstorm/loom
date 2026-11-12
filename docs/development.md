@@ -201,6 +201,8 @@ A delta marks a family whose patterns changed since the baseline, so a count mov
 
 `references/reviewer-wire/` holds the four fragments every reviewer agent carries: `wire-contract.md` (generated from `renderReviewerWireContract()`), `bootstrap.md`, `before-you-emit.md` and `read-coverage.md` (hand-written). Edit a hand-written fragment, or the generator for the wire contract, then run `bun scripts/stamp-wire-contract.ts`; `--check` reports drift without writing. Never edit a stamped region in an agent file. The wire-contract start marker in each agent names `agents/_shared/wire-contract.md`, because the byte-frozen schema-1 archive carries that marker and is read through the same extraction.
 
+The same script stamps the `## <lens>` sections of `references/review-lenses.md` into `agents/review-verifier-agent.md`, between the `review-lenses` markers and one heading level deeper. Edit a lens in the reference and re-stamp.
+
 ## Loom's own repository
 
 **Loom's own verification manifest.** When Loom orchestrates its own repository, `/loom` Phase 4d keeps the existing `project:verify` check: executable `npm`, args `["run", "verify"]`, cwd `.`, scope `wave`, timeout `1800000`, and a required report at `.loom/completion-reports/verify.junit.xml` (the whole file is the example in [Verification](verification.md#the-verification-manifest)). It runs the same root `npm run verify` as local, CI and tag validation, and both frozen dependency installs are required. `verify` itself must never call the manifest runner or a Wave Gate, which would recurse.
