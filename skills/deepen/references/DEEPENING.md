@@ -1,47 +1,38 @@
 # Deepening
 
-How to deepen a cluster of shallow modules safely, given its dependencies. Uses the vocabulary in [LANGUAGE.md](LANGUAGE.md) and the FC/IS + port patterns from `rules/architecture.md`.
+How to deepen a cluster of shallow modules safely, given its dependencies. Uses the vocabulary in [LANGUAGE.md](LANGUAGE.md) and the FC/IS and port patterns from `rules/architecture.md`.
 
 ## Dependency Categories
 
-When assessing a candidate for deepening, classify its dependencies. The category determines how the deepened module is tested across its seam.
+Classify the candidate's dependencies. The category decides where the seam goes and how the deepened module is tested across it.
 
 ### 1. In-Process (Pure)
 
-Pure computation, in-memory state, no I/O. Always deepenable — merge the modules and test through the new interface directly. No adapter needed.
-
-**In our model:** This is functional core code. Merge shallow pure functions into a deeper pure function. Test with plain data, no mocks.
+Pure computation, in-memory state, no I/O. Always deepenable: merge the shallow pure functions into a deeper one and test it through the new interface with plain data. No adapter, no mocks. This is functional core code.
 
 ### 2. Local-Substitutable
 
-Dependencies where a real-engine test stand-in exists (Testcontainers Postgres, Testcontainers Redis, real SQLite). Deepenable when the stand-in catches the same bugs as production. The seam is the port interface; the stand-in is an adapter used in integration tests.
+A real-engine test stand-in exists (Testcontainers Postgres or Redis, real SQLite). The seam is the port interface. Integration tests run the real adapter against the stand-in; unit tests of the shell orchestrator use the port's in-memory fake.
 
-**In our model:** Use Testcontainers (not H2/PGLite/embedded fakes) for repository and infrastructure tests — in-process substitutes lie about schema, index, and migration behavior. The port interface is the seam; the Testcontainers-backed adapter is used in integration tests, the in-memory fake is used in unit tests of the shell orchestrator.
+Use Testcontainers rather than H2, PGLite or other in-process substitutes for repository and infrastructure tests: the substitutes lie about schema, index and migration behavior.
 
-### 3. Own Services Across Network (Port/Adapter)
+### 3. Own Services Across a Network (Port/Adapter)
 
-Your own services across a network boundary (microservices, internal APIs). Define a **port** at the seam. The deep module owns the logic; the transport is injected as an **adapter**. Tests use an in-memory adapter. Production uses an HTTP/gRPC/queue adapter.
-
-**In our model:** This is exactly our port pattern. The port is domain-typed, owned by the consumer. The adapter adapts the vendor/transport to it. In-memory fake ships with the port for tests.
+Your own services behind a network call (microservices, internal APIs). Define a port at the seam, domain-typed and owned by the consumer. The deep module owns the logic; the transport is an injected adapter (HTTP, gRPC, queue). The in-memory fake ships with the port.
 
 ### 4. True External (Fake)
 
-Third-party services (Stripe, Twilio, etc.) you don't control. The deepened module takes the external dependency as an injected port; tests provide a fake adapter.
-
-**In our model:** Same as port pattern. The port is domain-typed. For unit tests, use an in-memory fake. For integration tests, use WireMock (Java) or MSW (TypeScript) to verify real HTTP contract. No mocking frameworks — plain fakes that implement the port interface.
+Third-party services you don't control (Stripe, Twilio). Same port shape as category 3. Unit tests use an in-memory fake that implements the port; integration tests verify the real HTTP contract with WireMock (Java) or MSW (TypeScript). No mocking framework.
 
 ## Seam Discipline
 
-- **One adapter means a hypothetical seam. Two adapters means a real one.** Don't introduce a port unless at least two adapters are justified (typically production + test fake). This is already in our architecture rules: "skip the port and call the concrete thing" unless a real fake exists.
-
-- **Internal seams vs external seams.** A deep module can have internal seams (private to its implementation, used by its own tests) as well as the external seam at its interface. Don't expose internal seams through the interface just because tests use them.
+- A port needs two adapters to be a real seam (see "Principles" in LANGUAGE.md). Production plus a test fake is the usual pair.
+- A deep module can have internal seams, private to its implementation and used by its own tests, as well as the external seam at its interface. Don't expose an internal seam through the interface just because tests use it.
 
 ## Testing Strategy: Replace, Don't Layer
 
-- Old unit tests on shallow modules become waste once tests at the deepened module's interface exist — **delete them**.
-- Write new tests at the deepened module's interface. The **interface is the test surface**.
-- Tests assert on observable outcomes through the interface, not internal state.
-- Tests should survive internal refactors — they describe behaviour, not implementation.
-- For pure core deepenings: property tests on invariants (jqwik / fast-check).
-- For port deepenings: in-memory fake for unit tests, Testcontainers for integration.
-- If a test has to change when the implementation changes, it's testing past the interface.
+- Old unit tests on the shallow modules become waste once tests at the deepened module's interface exist. Delete them.
+- Write the new tests at the deepened module's interface. They assert on observable outcomes, not internal state.
+- If a test has to change when the implementation changes, it is testing past the interface.
+- Pure core deepenings: property tests on invariants (jqwik / fast-check).
+- Port deepenings: in-memory fake for unit tests, Testcontainers for integration.

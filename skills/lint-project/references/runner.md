@@ -7,10 +7,8 @@ any directory inside the project:
 bun ${CLAUDE_PLUGIN_ROOT}/scripts/lint-project.ts
 ```
 
-There is no inline copy to paste: an earlier version of this reference carried
-a second walker that skipped test files and `.mts`/`.cts`/`.mjs`/`.cjs`
-modules, so it and the shipped runner linted different trees. One runner, one
-scope.
+This is the only runner: the edit hooks and the Wave Gate lint the files they
+are given, and nothing else walks the project.
 
 ## The scope: everything, minus explicit exclusions
 
@@ -77,18 +75,21 @@ with no path arguments, exits 0 with "No source files found to lint."
 The project root is the nearest ancestor holding `.claude/linter/rules` or
 `.pi/linter/rules`, else the nearest holding `.git` — so running from a
 subdirectory with its own `package.json` (such as `engine/`) still lints the
-whole repository under its rules. A project has ONE rules directory, and the
-lookup does not depend on the harness: `.claude/linter/rules` when present,
-else `.pi/linter/rules` (a Pi-only project). Claude Code's edit hook, Pi's
-post-edit lint, the Wave Gate lint, `helper validate-lint-rules` with no
-argument and this runner all read that same directory, so there is no second
-copy to keep in step. A project carrying both layouts is refused (exit 2): the
+whole repository under its rules. Every path in `config.json` (module
+prefixes, baseline keys, exclusions) is relative to that root.
+
+A project has one rules directory, and the lookup does not depend on the
+harness: `.claude/linter/rules` when present, else `.pi/linter/rules` (a
+Pi-only project). Claude Code's edit hook, Pi's post-edit lint, the Wave Gate
+lint, `helper validate-lint-rules` with no argument and this runner all read
+that same directory. A project carrying both layouts is refused (exit 2): the
 hooks read only `.claude/linter/rules`, so the `.pi` twin would look enforced
 while nothing reads it. `--write-baseline` writes only the one directory;
 `--init` creates `.claude/linter/rules` unless the project has a `.pi`
 directory and no `.claude` one.
 
-## Important Notes
+With no rules directory, only Loom's default rules fire, and the boundary and
+purity rules check nothing.
 
-- `${CLAUDE_PLUGIN_ROOT}` means the owning Loom package root. Claude Code expands it directly; Loom's Pi resource adapter renders it from the extension module's `import.meta.url`.
-- If no rules directory exists, only loom's default rules fire — the boundary and purity rules are then inert (their defaults govern nothing).
+`${CLAUDE_PLUGIN_ROOT}` is the Loom package root. Claude Code expands it; Loom's
+Pi resource adapter renders it from the extension module's location.

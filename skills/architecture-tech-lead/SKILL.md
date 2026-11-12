@@ -1,74 +1,68 @@
 ---
 name: architecture-tech-lead
 version: "2.0.0"
-description: "This skill should be used when the user asks to 'design a feature', 'evaluate approaches', 'plan the architecture', 'domain modeling', 'DDD design', 'bounded contexts', 'functional core imperative shell', 'how should I structure this', 'what pattern should I use', or needs upfront architectural design for Java/Spring Boot, TypeScript/Next.js, or Rust codebases. For DESIGN decisions before implementation — not for reviewing existing code (use the architecture-tech-lead agent via /review-pr for that)."
+description: "Upfront architectural design for Java/Spring Boot, TypeScript/Next.js or Rust: evaluate approaches, model the domain (DDD, bounded contexts), place the functional core and the shell, before code exists. Not for reviewing existing code (/review-pr) or improving it (deepen)."
 ---
 
 # Architecture Tech Lead
 
-Upfront architectural design — plan the structure before writing code. Evaluate approaches, model domains, design for testability.
+Upfront architectural design: plan the structure before code is written. Evaluate approaches, model the domain, design for testability.
 
-**DESIGN only** — do NOT implement. After user approves, hand off to implementation.
-
-## Relationship to Agent
-
-- **This skill** = design new architecture (proactive, before code exists)
-- **architecture-tech-lead agent** = review existing code (reactive, via `/review-pr`)
-
-Don't duplicate the agent's work. If user wants a code review, point them to `/review-pr`.
+Design only; do not implement. After the user approves, hand off to implementation. This skill designs new architecture. Review of existing code is the `architecture-tech-lead` agent, reached through `/review-pr`.
 
 ## Context Loading
 
-Before designing, load the relevant architectural rules and domain context. Read ONLY what's needed:
+If not already in context this session, read `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md` and the one language rule matching the files in scope.
 
-**Always read:**
-- `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md` — core principles (FC/IS, DDD, immutability)
-- `CONTEXT.md` at the repo root (if it exists) — ubiquitous language and domain relationships
+Also read `CONTEXT.md` at the repo root if it exists (ubiquitous language and domain relationships). The loaded rules are constraints on the design.
 
-**Java** (if designing for Java/Spring Boot):
-- `${CLAUDE_PLUGIN_ROOT}/rules/java-patterns.md` — records, sealed types, Either, railway-oriented programming
-- `${CLAUDE_PLUGIN_ROOT}/rules/property-testing.md` — jqwik invariants
+## Under `/loom`
 
-**TypeScript** (if designing for TypeScript/Next.js):
-- `${CLAUDE_PLUGIN_ROOT}/rules/typescript-patterns.md` — discriminated unions, branded types, ts-pattern
-
-**Rust** (if designing for Rust):
-- `${CLAUDE_PLUGIN_ROOT}/rules/rust-patterns.md` — newtype, typestate, Result combinators
-
-Apply loaded rules as architectural constraints for the design.
+When this skill is preloaded by a `/loom` architecture phase, the phase template governs the interview: its topics, its batches of up to four questions, the approach gate and the plan format. Use Steps 2 to 5 below as design knowledge, and leave `CONTEXT.md` alone: it is updated only when this skill runs outside `/loom`.
 
 ## Design Process
 
 ### Step 1: Understand the Problem
 
-Ask the user (one question at a time):
-- What does this feature/system need to do?
+Ask the user, one question at a time when not running under `/loom`:
+- What does this feature or system need to do?
 - What data flows in and out?
 - What are the domain concepts? (nouns = entities, verbs = operations)
 - What side effects exist? (DB, APIs, filesystem, time, randomness)
 
-**Terminology check:** If the user introduces a term that conflicts with `CONTEXT.md`, call it out immediately. If they use a vague or overloaded term, propose a precise canonical term from the glossary or suggest adding a new one.
+If the user introduces a term that conflicts with `CONTEXT.md`, call it out immediately. If they use a vague or overloaded term, propose the canonical term from the glossary or suggest adding one.
 
 ### Step 2: Model the Domain
 
-- Identify domain entities, value objects, aggregates
-- Map bounded contexts if multiple domains involved
-- Define the "functional core" — pure business logic, no I/O
-- Define the "imperative shell" — thin shell orchestrators handling I/O via ports
+Work through the strategic design checklist:
 
-Refer to the package structure in `java-patterns.md` or `typescript-patterns.md` → "Package Structure" for where each concept lives (`domain/`, `orchestrator/`, `infra/`).
+1. **Bounded context** — does this belong to an existing context or need a new one?
+2. **Ubiquitous language** — which terms does the domain expert use? They go in `CONTEXT.md`.
+3. **Aggregates** — what must change together atomically? Group only that; when in doubt, split. "Can these change independently? Then they're separate aggregates."
+4. **Immutable data** — aggregates and entities are records, not mutable objects.
+5. **Command functions** — `(Aggregate, Command) → Either<Error, Aggregate + Events>` in the functional core. Invariants live here and in constructors, not in callers.
+6. **Value objects** — what has no identity and is defined by its attributes? These are the building blocks.
+7. **Domain events** — which state changes do other contexts need to know about? Commands return them; the shell publishes them.
+8. **Context relationships** — how does this context talk to the others? Pick from the table below.
+9. **Ports** — repositories and external adapters as interfaces in domain terms; the shell implements them.
+10. **Shell orchestrators** — load, call the pure core, persist. No business logic.
 
-**DDD validation during modeling:**
-- Challenge aggregate boundaries — "Can these change independently? Then they're separate aggregates."
-- Distinguish value objects from entities — "Does this have identity, or is it defined by attributes?"
-- Check bounded context ownership — "Who owns this concept? Same word, different meaning = different contexts."
-- Verify invariant placement — "Where is this rule enforced? Constructors and pure aggregate command functions, not callers."
+| Context relationship | Where it lives | When to use |
+|---|---|---|
+| **Published Language** | Between contexts | Upstream defines a stable schema (OpenAPI, events) for its consumers |
+| **Anti-Corruption Layer** | Imperative shell | Downstream translates upstream's model into its own domain terms |
+| **Shared Kernel** | Functional core (shared types) | Two contexts co-own a small set of types; use sparingly, it couples them tightly |
+| **Conformist** | Imperative shell | Downstream accepts upstream's model as it is; fine for trivial integrations |
 
-**Update CONTEXT.md inline:** When a domain term is defined or its meaning clarified during this step, update `CONTEXT.md` immediately — don't batch updates for later. Add the term with a tight definition, _Avoid_ list, and update Relationships if new connections emerge.
+An anti-corruption layer lives in the shell because translating between external and internal representations is I/O-adjacent work: parsing foreign formats, calling external APIs, mapping foreign types.
+
+Place each concept using "Package Structure" in the language rule (`domain/`, `orchestrator/`, `infra/`).
+
+When a domain term is defined or sharpened during this step and you are not running under `/loom`, update `CONTEXT.md` at once: a tight definition, an _Avoid_ list, and any new relationship.
 
 ### Step 3: Evaluate Approaches
 
-For significant decisions, present **2-3 options**:
+For significant decisions, present two or three options:
 
 | | Approach A | Approach B | Approach C |
 |---|---|---|---|
@@ -85,12 +79,13 @@ Recommend one with justification.
 
 Produce a design covering:
 
-1. **Component structure** — what modules/classes/functions, how they relate
-2. **Data flow** — fetch → transform (pure) → persist pattern
-3. **Error handling** — Either/Result types, where errors originate and propagate
-4. **Test strategy** — what's unit testable (pure core), what needs integration tests (shell)
-5. **Security implications** — flag if design introduces trust boundaries, auth decisions, or injection surfaces. Delegate deep review to `/security-expert`.
-6. **NFR concerns** — flag scalability bottlenecks, performance traps, observability gaps if relevant to the design
+1. **Component structure** — modules, classes and functions, and how they relate
+2. **Data flow** — fetch → transform (pure) → persist
+3. **Error handling** — Either/Result types, where errors originate and how they propagate
+4. **Effects** — which shell operations change the world, and how each is made retry-safe
+5. **Test strategy** — what is unit testable (pure core), what needs integration tests (shell)
+6. **Security implications** — trust boundaries, auth decisions, injection surfaces. Delegate deep review to `/security-expert`.
+7. **NFR concerns** — scalability bottlenecks, performance traps, observability gaps, where relevant
 
 ### Step 5: Validate Testability
 
@@ -133,7 +128,7 @@ If not, iterate the design until it passes.
 
 ## Constraints
 
-- Present approaches before recommending — don't jump to a solution
-- Be specific — use actual type names, function signatures from loaded rules
-- Be pragmatic — balance ideal architecture with effort
-- Explain the "why" — teach the principles, don't just prescribe
+- Present approaches before recommending one.
+- Be specific: actual type names and function signatures in the shapes the loaded rules use.
+- Be pragmatic: balance the ideal architecture against effort.
+- Explain why, so the principle is learned and not only the prescription.

@@ -1,171 +1,38 @@
 ---
 name: code-implementer
 version: "1.0.0"
-description: "This skill should be used when the user asks to 'implement', 'write code', 'build a feature', 'create a function', 'add functionality', 'code this', 'make this work', or needs to write production code for Java/Spring Boot or TypeScript/Next.js following FP, DDD, and testability patterns. Ensures code follows functional core/imperative shell, proper invariants, Either-based error handling, and is designed for testing without mocks."
+description: "Write production code for Java/Spring Boot, TypeScript/Next.js or Rust under the project's architecture rules: tests first, functional core and imperative shell, typed errors. Not for design (architecture-tech-lead), exploring an idea (brainstorming) or test-only work (java-test-engineer, ts-test-engineer)."
 ---
 
-# Code Implementer Skill
+# Code Implementer
 
-Expert implementation guidance ensuring code follows FP principles, DDD patterns, and is designed for maximum testability.
-
-**This is an IMPLEMENTATION skill** — write production code following the architectural patterns in the rules below. For design decisions and architectural review, use the `architecture-tech-lead` skill instead.
+The procedure for writing production code. What the code must look like is in the rules; this skill is the order of work and the two checks that close it.
 
 ## Context Loading
 
-Before implementing, you **MUST** read and apply the relevant rules — these are binding constraints, not optional references. Read what's needed for the target stack:
+If not already in context this session, read `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md` and the one language rule matching the files in scope.
 
-**Always read:**
-- `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md` — core principles (FC/IS, DDD, immutability, testability)
+The rules are constraints on the code, not background reading. Before the first line, be able to answer from them: where does I/O happen and where is the pure logic; what must always be true, and which type makes the opposite unrepresentable; which failures are expected, and what typed error carries each.
 
-**Java** (if implementing Java/Spring Boot):
-- `${CLAUDE_PLUGIN_ROOT}/rules/java-patterns.md` — records, sealed types, Either, railway-oriented programming
-- `${CLAUDE_PLUGIN_ROOT}/rules/property-testing.md` — jqwik invariants
-
-**TypeScript** (if implementing TypeScript/Next.js):
-- `${CLAUDE_PLUGIN_ROOT}/rules/typescript-patterns.md` — discriminated unions, branded types, ts-pattern
-
-**Rust** (if implementing Rust):
-- `${CLAUDE_PLUGIN_ROOT}/rules/rust-patterns.md` — newtype, typestate, Result combinators
-
-Apply loaded rules as binding constraints during implementation. Code that violates them is rejected at the wave gate.
-
----
-
-## Pre-Implementation Checklist
-
-Before writing code, verify:
-
-- [ ] **Boundaries clear**: Where does I/O happen vs pure logic?
-- [ ] **Invariants identified**: What must always be true?
-- [ ] **Types designed**: Records/sealed types for domain? Discriminated unions?
-- [ ] **Parse, don't validate**: Return validated types? Invalid states unrepresentable?
-- [ ] **Error handling**: Using Either/Result? What errors are possible?
-- [ ] **Testability**: Can business logic be unit tested without mocks?
-
----
-
-## During Implementation
-
-### Tests First
+## Tests First
 
 Write the test that decides the behavior before the code that provides it, and watch it fail for the right reason — a failing assertion, not a missing import. A test written after the code tends to encode whatever the code happens to do.
 
-When the brief's **Acceptance Contract** section gives this Task a role, that role is binding:
-- **Contract task** — write the declarations-only types file, the acceptance tests (each named after the Requirement it decides, `AS-003: …`), and stubs that compile and fail. Do not implement the behavior: the Wave Gate passes only when every acceptance test is collected and fails, then freezes those files.
-- **Claimant** — the frozen acceptance tests are your specification. Read them first, never edit them, and make the listed testcases pass. If one is wrong, stop and report it; only an operator Contract Revision may change it.
-- **Red-window task** — acceptance tests that later Waves complete may fail in your full-suite run; that is expected and the Wave Gate judges it. Every other failure is yours.
+- Pure core: unit tests with plain data, and property tests for what must always hold (see `${CLAUDE_PLUGIN_ROOT}/rules/property-testing.md`).
+- Shell: a few tests through in-memory port fakes; integration tests only to prove the I/O works, never to test business logic.
+- Stack-specific test technique is in the `java-test-engineer` and `ts-test-engineer` skills.
 
-### Structure Code as Functional Core + Imperative Shell
+### Acceptance Scenario tests
 
-Follow the package structure defined in `java-patterns.md` or `typescript-patterns.md` → "Package Structure".
+- A claimed Acceptance Scenario needs at least one test whose name starts with its identifier and a colon: `it('AS-004: rejects a stale cursor', …)`, or `@DisplayName("AS-004: rejects a stale cursor")` in JUnit.
+- `/spec-check` links scenarios to tests only by this name; a scenario without one is reported NOT COVERED.
+- The implementation brief's "Acceptance Scenario Test Names" section lists the names this Task owes.
 
-**Imperative Shell (`orchestrator/` or `tools/`)** — thin:
-- Fetches data (DB, APIs)
-- Calls pure functions
-- Persists results
-- Handles I/O errors
+## Implement
 
-**Functional Core (`domain/`)** — where logic lives:
-- Pure functions, no side effects
-- Receives all data as parameters
-- Returns new data, never mutates
-- Trivially unit testable
+Make the tests pass, in the shape the rules give: logic in pure functions that take data and return data, a thin shell that loads, calls and persists, expected failures returned as typed errors. Reuse an existing operation before writing a new one. Implement the whole behavior, not a part of it.
 
-### Apply Type Design
+## Before You Finish
 
-Apply patterns from imported rules:
-- **Java**: Records, sealed types, pattern matching (see java-patterns.md)
-- **TypeScript**: Discriminated unions, ts-pattern, Zod (see typescript-patterns.md)
-
-### Handle Errors Properly
-
-Use Either/Result for all expected failures (see java-patterns.md for Either examples):
-- Chain operations with `flatMap`
-- Collect validation errors with `Eithers.allFailures()`
-- Never throw for expected failures - return typed errors
-
----
-
-## Post-Implementation Checklist
-
-After writing code, verify:
-
-- [ ] **No business logic in shell**: All logic in pure functions?
-- [ ] **Immutability**: No mutations? Defensive copies where needed?
-- [ ] **Invariants enforced**: Constructors validate? Invalid states unrepresentable?
-- [ ] **Error paths typed**: Using Either/Result? No hidden throws?
-- [ ] **Testable without mocks**: Can test core logic with plain data?
-- [ ] **Distilled**: Tidy the new code with the `distill` lens before you finish — reuse before rewrite, no dead/speculative code, no pass-throughs, right altitude. Tests stay green after each move. Inside Loom orchestration nothing checks this item: the enforced pass is the Wave's Distill Task, which a separate agent runs over your implementation files after you settle. Leave it little to do.
+- [ ] **Distilled**: Tidy the new code with the `distill` lens before you finish — reuse before rewrite, no dead/speculative code, no pass-throughs, right altitude. Tests stay green after each move.
 - [ ] **Deep enough**: Check the new modules with the `deepen` lens — deletion test on every wrapper, interfaces narrower than their implementations, no seam without two adapters (production + test). Interfaces you created in this task, fix now; shallowness in pre-existing interfaces, report as a recommended `deepen` session — never redesign it inline.
-
----
-
-## Implementation Patterns Quick Reference
-
-### Data Transformation Flow
-```
-fetch (I/O) -> transform (pure) -> persist (I/O)
-```
-
-### Shell Orchestrator Structure
-```
-1. Fetch required data (shell - I/O)
-2. Call pure function with data (core - testable)
-3. Persist result (shell - I/O)
-4. Return result
-```
-
-### Invariant Enforcement
-```
-Constructor validates -> Object always valid -> No defensive checks elsewhere
-```
-
-### Error Handling Chain
-```
-validate -> process -> transform -> (all via flatMap/map)
-```
-
----
-
-## Test Strategy
-
-For every implementation, consider:
-
-### Unit Tests (core logic)
-- Test pure functions with plain data
-- No mocks needed
-- Cover edge cases
-
-### Property Tests (invariants)
-- What must ALWAYS be true?
-- Round-trip properties
-- Idempotence where applicable
-
-### Integration Tests (shell only)
-- Minimal - just verify I/O works
-- Use real DB/APIs in test containers
-- Don't test business logic here
-
-### Acceptance Scenario Tests
-- A claimed Acceptance Scenario needs at least one test whose name starts with its identifier and a colon: `it('AS-004: rejects a stale cursor', …)`, or `@DisplayName("AS-004: rejects a stale cursor")` in JUnit
-- `/spec-check` links scenarios to tests only by this name; a scenario without one is reported NOT COVERED
-- The implementation brief's "Acceptance Scenario Test Names" section lists the names this Task owes
-
----
-
-## Quality Standards
-
-- **Complete**: Implement full feature, not partial
-- **Testable**: Every function testable without mocks
-- **Typed Errors**: Either/Result for all failures
-- **Immutable**: No mutations without justification
-- **Validated**: Parse, don't validate - return validated types
-
----
-
-## Context Awareness
-
-Tailor to detected stack. See imported rules for patterns:
-- **Java**: java-patterns.md (records, sealed types, Either)
-- **TypeScript**: typescript-patterns.md (discriminated unions, ts-pattern)
-- **Testing**: property-testing.md (jqwik patterns)

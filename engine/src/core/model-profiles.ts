@@ -470,8 +470,10 @@ export const AGENT_CATALOG = Object.freeze({
   // review findings (D2 keeps the reviewer payload v2 WIRE for hunters, but
   // their transcript is parsed by the audit program, not store-reviewer-
   // findings). The verifier and critic sit on the refutation profile, so no
-  // verification vote ever comes from a hunter instance.
-  "security-hunter-agent": traits("focused-review", plainKind("security-verdict"), "security-audit"),
+  // verification vote ever comes from a hunter instance. None preloads the
+  // `security-audit` skill: it is the parent session's runbook, and each agent
+  // file carries what that agent acts on.
+  "security-hunter-agent": traits("focused-review", plainKind("security-verdict")),
   "security-verifier-agent": traits("refutation", plainKind("security-verdict")),
   "security-critic-agent": traits("refutation", plainKind("security-verdict")),
   "security-agent": traits("focused-review", plainKind("impl"), "security-expert"),
@@ -479,7 +481,6 @@ export const AGENT_CATALOG = Object.freeze({
   "skill-content-reviewer": traits("focused-review", plainKind("utility")),
   "spec-check-invoker": traits("spec-check-review", plainKind("spec-check"), "spec-check"),
   "specify-agent": traits("panel-design", phaseKind("specify"), "specify", "interactive-rpc"),
-  "test-engineer": traits("implementation", plainKind("impl")),
   "ts-test-agent": traits("implementation", plainKind("impl"), "ts-test-engineer"),
   "type-design-analyzer": traits("focused-review", plainKind("reviewer")),
 } satisfies Record<string, AgentTraits>);

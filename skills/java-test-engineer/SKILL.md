@@ -1,161 +1,143 @@
 ---
 name: java-test-engineer
 version: 1.0.0
-description: "This skill should be used when the user asks to 'write unit tests', 'add integration tests', 'test this Java code', 'add jqwik property tests', 'fix failing test', 'improve test coverage', 'add Spring Boot tests', 'add Testcontainers test', or needs guidance on JUnit 5, jqwik property testing, AssertJ, Mockito, Testcontainers, WireMock, or Spring Boot test slices for Java/Spring Boot applications. NOT for writing production code, build configuration, or deployment."
+description: "Java/Spring Boot tests: JUnit 5, jqwik property tests, AssertJ, Testcontainers, WireMock, Spring Boot test slices. Use to write, fix or extend Java tests. Not for TypeScript tests (ts-test-engineer), production code or build configuration."
 ---
 
-# Java Test Engineer Skill
+# Java Test Engineer
 
-Expert guidance for writing, reviewing, and fixing tests in Java/Spring Boot applications. Prioritizes property-based and integration tests over heavy mocking.
+How to write, review and fix tests in Java/Spring Boot applications. Property tests and real infrastructure come before mocking. When to reach for a property and which kinds exist is in `${CLAUDE_PLUGIN_ROOT}/rules/property-testing.md`; this skill owns the jqwik code.
 
----
-
-## Workflow
-
-### Step 1: Determine What to Test
+## Step 1: Determine What to Test
 
 | What you have | Test type | Tool |
 |---------------|-----------|------|
 | Pure function, value object, parser | Property test | jqwik |
 | Sealed type / discriminated union handler | Property test + example test | jqwik + JUnit 5 |
 | Domain service (functional core) | Unit test, no mocks | JUnit 5 + AssertJ |
+| Shell orchestrator | Unit test with in-memory port fakes | JUnit 5 + AssertJ, no Spring |
 | Repository / JPA entity | Slice test | `@DataJpaTest` + Testcontainers |
 | REST controller | Slice test | `@WebMvcTest` + MockMvc |
 | Full HTTP flow | Integration test | `@SpringBootTest` + Testcontainers |
 | Outbound HTTP client | Integration test | WireMock |
 | Critical end-to-end flow | E2E test | `@SpringBootTest(webEnvironment=RANDOM_PORT)` + RestAssured |
 
-### Step 2: Apply Core Principles
+## Step 2: Apply Core Principles
 
-1. **Test pyramid**: 70% unit (functional core, no Spring), 20% slice/integration, 10% full E2E.
-2. **Real over mocked**: Use real implementations for pure domain code. Reach for Testcontainers (Postgres, Kafka, Redis) instead of in-memory fakes — they catch real schema/index/migration bugs.
-3. **Test behavior, not implementation**: Assert on outputs and observable side effects (rows in DB, messages on topic), not on which methods were called. Mockito `verify(...)` is a smell unless asserting an interaction is the point.
-4. **Property tests > example tests** for pure functions, parsers, validators, state transitions, and any code with mathematical invariants.
-5. **Functional core has zero `@SpringBootTest`**: If you need Spring context to test domain logic, the design has leaked I/O into the core — fix the design, not the test.
+1. **Test pyramid**: about 70% unit (functional core and orchestrators over fakes, no Spring), 20% slice/integration, 10% full E2E.
+2. **Real over mocked**: real implementations for pure domain code; Testcontainers (Postgres, Kafka, Redis) instead of in-memory *databases* such as H2, which hide schema, index and migration bugs. In-memory *port fakes* remain the tool for orchestrator unit tests.
+3. **Behavior, not implementation**: assert on outputs and observable effects (rows in the database, messages on a topic, what the fake recorded), not on which methods were called.
+4. **Properties before examples** for pure functions, parsers, validators and state transitions.
+5. **No Spring in the functional core**: if testing domain logic needs a Spring context, I/O has leaked into the core. Fix the design, not the test.
 
-### Step 3: Write the Test
+## Step 3: Write the Test
 
-Pick the right base based on the unit under test (UUT):
-
-- **Pure UUT** → plain JUnit 5, no annotations beyond `@Test`/`@Property`. Fast, no context.
-- **JPA repository** → `@DataJpaTest` + Testcontainers Postgres. Real SQL, real migrations.
-- **REST controller** → `@WebMvcTest(SomeController.class)` with `@MockBean` only for direct collaborators, asserting on `MockMvc` response.
-- **Outbound port** → integration test with WireMock binding the real client to a stub server.
-- **Cross-cutting flow** → `@SpringBootTest` + Testcontainers, hit the HTTP API.
-
----
+- **Pure code** → plain JUnit 5 or jqwik, nothing beyond `@Test` / `@Property`.
+- **Shell orchestrator** → plain JUnit 5; construct it with the in-memory fakes that ship with its ports and a fixed `Clock`.
+- **JPA repository** → `@DataJpaTest` against Testcontainers Postgres: real SQL, real migrations.
+- **REST controller** → `@WebMvcTest(SomeController.class)`, asserting on the `MockMvc` response. Give the controller its real orchestrator over port fakes from a `@TestConfiguration`.
+- **Outbound adapter** → the real client bound to a WireMock server.
+- **Cross-cutting flow** → `@SpringBootTest` + Testcontainers, through the HTTP API.
 
 ## Property-Based Testing (jqwik)
 
-Property tests find edge cases automatically. Use for pure functions and type transformations.
-
-### When to Use
-
-| Use Property Tests | Use Example Tests |
-|-------------------|-------------------|
-| Pure functions | Side effects (DB, HTTP) |
-| Validation logic | Specific business scenarios |
-| Parsers/serializers | Small enumerable cases |
-| State transitions | Integration flows |
-| Mathematical invariants | Visual/UI assertions |
-
-### Common Patterns
-
-#### 1. Invariants — "This should always be true"
+A property states a fact about the result that does not repeat the implementation. If the assertion recomputes what the function computes, it proves nothing.
 
 ```java
+// Invariant
 @Property
-void totalAlwaysEqualsLineSum(@ForAll("orders") Order order) {
-    var lineSum = order.lines().stream()
-        .map(OrderLine::total)
-        .reduce(Money.ZERO, Money::add);
-    assertThat(order.total()).isEqualTo(lineSum);
+void discountNeverExceedsSubtotal(@ForAll("orders") Order order, @ForAll CustomerTier tier) {
+    assertThat(PricingRules.discount(order, tier)).isLessThanOrEqualTo(order.subtotal());
 }
-```
 
-#### 2. Round-Trip / Symmetry
-
-```java
+// Round trip
 @Property
-void serializeDeserializeIsIdentity(@ForAll("orders") Order order) throws Exception {
-    var json = mapper.writeValueAsString(order);
-    var restored = mapper.readValue(json, Order.class);
+void serializeThenDeserializeIsIdentity(@ForAll("orders") Order order) throws Exception {
+    var restored = mapper.readValue(mapper.writeValueAsString(order), Order.class);
     assertThat(restored).isEqualTo(order);
 }
-```
 
-#### 3. Idempotence
-
-```java
+// Idempotence: f(f(x)) = f(x). True of normalisers; not of a percentage discount.
 @Property
 void normalizationIsIdempotent(@ForAll String input) {
-    var once = StringUtils.normalize(input);
-    var twice = StringUtils.normalize(once);
-    assertThat(twice).isEqualTo(once);
+    var once = Emails.normalize(input);
+    assertThat(Emails.normalize(once)).isEqualTo(once);
 }
-```
 
-#### 4. Commutativity
-
-```java
+// Total handler over a sealed type
 @Property
-void mergeOrderDoesNotMatter(@ForAll("configs") Config a, @ForAll("configs") Config b) {
-    assertThat(merge(a, b)).isEqualTo(merge(b, a));
+void everyPaymentResultHasAMessage(@ForAll("paymentResults") PaymentResult result) {
+    assertThat(Receipts.messageFor(result)).isNotBlank();
 }
 ```
 
-### Custom Arbitraries
+Generators build valid domain values from parts:
 
 ```java
 @Provide
 Arbitrary<Order> orders() {
     return Combinators.combine(
-        Arbitraries.longs().map(OrderId::new),
-        Arbitraries.longs().map(CustomerId::new),
-        Arbitraries.lists(orderLines()).ofMinSize(1).ofMaxSize(10)
+        Arbitraries.longs().greaterOrEqual(1).map(OrderId::new),
+        Arbitraries.longs().greaterOrEqual(1).map(CustomerId::new),
+        orderLines().list().ofMinSize(1).ofMaxSize(10)
     ).as(Order::new);
 }
+
+@Provide
+Arbitrary<PaymentResult> paymentResults() {
+    return Arbitraries.oneOf(
+        Arbitraries.strings().alpha().ofMinLength(1).map(PaymentResult.Succeeded::new),
+        Arbitraries.of(DeclineReason.values()).map(PaymentResult.Declined::new));
+}
 ```
 
-### Sealed Types / Discriminated Unions
+### Idempotency of an effect (model-based)
+
+Idempotency is a different claim from idempotence: a command that arrives many times changes the world once and gets one answer. Test it through the orchestrator with a counting fake at the port, over generated sequences of retries and failures.
 
 ```java
-@Provide
-Arbitrary<Result<String, Error>> results() {
-    return Arbitraries.oneOf(
-        Arbitraries.strings().map(Result::ok),
-        Arbitraries.of(Error.values()).map(Result::err)
-    );
-}
+enum Step { RETRY, CRASH_AFTER_PSP, TIMEOUT }
 
 @Property
-void handleResultNeverThrows(@ForAll("results") Result<String, Error> result) {
-    assertThatCode(() -> handler.handle(result)).doesNotThrowAnyException();
+void atMostOneChargeAcrossRetries(@ForAll @Size(min = 1, max = 20) List<Step> steps) {
+    var psp = new CountingFakePsp();            // counts charges per idempotency key, replays the first outcome
+    var attempts = new InMemoryAttemptStore();  // port fake: claim and settle
+    var charge = new ChargeOrchestrator(attempts, psp);
+    var command = aChargeCommand();             // one merchant and one key for the whole run
+    var completed = new HashSet<Outcome>();
+
+    for (Step step : steps) {
+        psp.behaveOnNextCall(step);             // CRASH_AFTER_PSP: charge, then throw; TIMEOUT: outcome unknown
+        try {
+            charge.execute(command).peek(completed::add);  // your Either's right-side hook
+        } catch (SimulatedCrash crash) {
+            // the process died between the PSP call and settle; the next step is the retry
+        }
+    }
+
+    assertThat(psp.chargesFor(command.key())).isLessThanOrEqualTo(1);
+    assertThat(completed).hasSizeLessThanOrEqualTo(1);   // every completed call returned the same outcome
 }
 ```
 
-See `${CLAUDE_PLUGIN_ROOT}/rules/property-testing.md` for the full jqwik pattern catalog.
+Add two example tests beside it: N parallel calls with one key produce one charge, and the same key under two merchants produces two independent attempts.
 
----
-
-## Integration Tests with Testcontainers
-
-For anything touching a real DB, queue, or cache, use Testcontainers. In-memory replacements (H2, embedded Kafka) lie about behavior.
+## Repository Tests with Testcontainers
 
 ```java
-@SpringBootTest
-@Testcontainers
-class OrderRepositoryIT {
-
-    @Container
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16");
-
-    @DynamicPropertySource
-    static void props(DynamicPropertyRegistry registry) {
-        registry.add("spring.datasource.url", postgres::getJdbcUrl);
-        registry.add("spring.datasource.username", postgres::getUsername);
-        registry.add("spring.datasource.password", postgres::getPassword);
+@TestConfiguration(proxyBeanMethods = false)
+class Containers {
+    @Bean
+    @ServiceConnection
+    PostgreSQLContainer<?> postgres() {
+        return new PostgreSQLContainer<>("postgres:16");
     }
+}
+
+@DataJpaTest
+@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
+@Import(Containers.class)
+class OrderRepositoryIT {
 
     @Autowired OrderRepository repo;
 
@@ -167,9 +149,8 @@ class OrderRepositoryIT {
 }
 ```
 
-**Reuse containers across tests** with `withReuse(true)` + `~/.testcontainers.properties` `testcontainers.reuse.enable=true` to keep CI/local fast.
-
----
+- `@ServiceConnection` (Spring Boot 3.1+) supplies the connection details; no `@DynamicPropertySource` is needed.
+- The container is a bean, so every test class that shares the cached Spring context shares one container. That is the way to keep the suite fast locally and in CI. `withReuse(true)` is a local-only convenience and does nothing for a container managed by `@Container`.
 
 ## Spring Boot Test Slices
 
@@ -178,33 +159,30 @@ class OrderRepositoryIT {
 | `@DataJpaTest` | JPA, repositories, entity manager | Repository/SQL tests |
 | `@WebMvcTest` | MVC stack, controllers, filters | Controller/HTTP-shape tests |
 | `@JsonTest` | Jackson config | Serialization/deserialization tests |
-| `@RestClientTest` | RestTemplate/WebClient + MockRestServiceServer | Outbound HTTP client tests |
+| `@RestClientTest` | `RestClient` / `RestTemplate` + `MockRestServiceServer` | Outbound client built on those two. Not `WebClient`: use WireMock |
 | `@SpringBootTest` | Full context | Cross-cutting integration |
 
-Prefer the narrowest slice that proves the test. Full `@SpringBootTest` is slow — use sparingly.
-
----
+Use the narrowest slice that proves the test.
 
 ## Mocking Discipline
 
-Mockito is a tool, not a default. Use it only when:
-- The collaborator is a **port to the outside world** (HTTP client, message publisher) AND a slice/integration test would be disproportionate effort.
-- You need to **simulate failure modes** (timeout, 500) that are hard to trigger otherwise.
+Substitute behavior at ports with the in-memory fake that ships with the port. Mockito is for one case: a third-party type you cannot fake and cannot reach through a port. Failure modes (timeout, 500) are a fake that fails on demand or a WireMock stub, not a mock.
 
-Do NOT mock:
+Do not mock:
 - Value objects, records, sealed types — instantiate them.
-- Pure domain services — call them directly.
-- Repositories in service tests — use `@DataJpaTest` with Testcontainers, or test the service against an in-memory port implementation.
+- Pure domain functions — call them.
+- Repositories — `@DataJpaTest` with Testcontainers for the adapter, the in-memory port fake for the orchestrator.
 
 ```java
 // BAD: mocking domain logic
-when(pricingService.calculateTotal(any())).thenReturn(Money.ofCents(100));
+when(pricing.calculateTotal(any())).thenReturn(Money.ofCents(100));
 
-// GOOD: use the real domain service, test the orchestrator's behavior
-var orchestrator = new OrderOrchestrator(new PricingService(rules), repo);
+// GOOD: real pure core, fake port, assert on what the fake holds
+var orders = new InMemoryOrderRepository();
+var orchestrator = new SubmitOrderOrchestrator(orders, Clock.fixed(NOW, ZoneOffset.UTC));
 ```
 
----
+If a Spring test does replace a bean with a mock, the annotation is `@MockitoBean`; `@MockBean` is deprecated since Spring Boot 3.4 and removed in 4.0.
 
 ## Anti-Patterns
 
@@ -229,41 +207,18 @@ Thread.sleep(1000);
 // GOOD: Awaitility
 await().atMost(5, SECONDS).untilAsserted(() -> assertThat(...).isPresent());
 
-// BAD: @MockBean cascade for indirect collaborators
-@MockBean A; @MockBean B; @MockBean C;
+// BAD: a mock for every indirect collaborator
+@MockitoBean A a; @MockitoBean B b; @MockitoBean C c;
 // GOOD: smaller slice, or restructure the controller's dependencies
 ```
-
----
 
 ## Checklist
 
 - [ ] Test name describes behavior, not implementation
 - [ ] A test for a claimed Acceptance Scenario starts its display name with the identifier: `@DisplayName("AS-004: rejects a stale cursor")`. `/spec-check` links scenarios to tests only by this prefix
-- [ ] Functional-core tests have NO Spring, NO Mockito, NO `@Autowired`
-- [ ] Property tests cover pure functions with invariants
-- [ ] Integration tests use Testcontainers, not H2/embedded fakes
-- [ ] Slice tests use the narrowest slice that proves the test
-- [ ] Assertions on observable state, not Mockito `verify` (unless interaction IS the contract)
-- [ ] No `Thread.sleep` — use Awaitility for async waits
+- [ ] Functional-core and orchestrator tests have no Spring, no Mockito, no `@Autowired`
+- [ ] Pure functions with invariants have property tests; a retried effect has the model-based property
+- [ ] Anything touching infrastructure runs against Testcontainers, in the narrowest slice
+- [ ] Async waits use Awaitility
 - [ ] AssertJ fluent chains, not raw `assertEquals`
-- [ ] Test data via `@Provide` arbitraries or focused factories — not big shared fixtures
-
----
-
-## Constraints
-
-- Prefer property tests over example tests for pure functions
-- Use AssertJ (`assertThat`) over JUnit's `assertEquals`
-- Use Testcontainers for any test touching infrastructure
-- Use Awaitility for async assertions, never `Thread.sleep`
-- Mock only at the outer edge of the system (ports/clients), never domain logic
-- Tests in the functional core run without a Spring context
-
----
-
-## See Also
-
-- `${CLAUDE_PLUGIN_ROOT}/rules/java-patterns.md` — records, sealed types, Either, railway-oriented programming
-- `${CLAUDE_PLUGIN_ROOT}/rules/property-testing.md` — jqwik invariants and arbitraries
-- `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md` — functional core / imperative shell
+- [ ] Test data from `@Provide` arbitraries or focused factories, not big shared fixtures

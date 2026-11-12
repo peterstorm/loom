@@ -2,6 +2,8 @@
 
 Concrete behavior-preserving simplification moves, highest leverage first. Every move must pass the **reader test** (the next maintainer understands the code faster) and the **behavior test** (no observable output, error mode, or ordering changes). Uses the vocabulary in `SKILL.md` and deepen's `references/LANGUAGE.md`.
 
+Every move is bounded by the rule in `SKILL.md`: change a symbol only when every caller of it is inside the scope you were given. A symbol a caller outside the scope can see belongs to `deepen`; flag it and leave it.
+
 ## 1. Reuse Before Rewrite
 
 The cheapest code is code that already exists and is already tested.
@@ -29,7 +31,7 @@ Make the illegal states unrepresentable, then delete every branch that guarded t
 - Unused parameters, fields, return values, and exported symbols nothing imports
 - Speculative generality: configurability nothing configures, type parameters with one instantiation, hooks with no second caller. YAGNI applies retroactively.
 - Commented-out code — version control remembers; the file should not
-- **Boundary:** a port with one adapter and no test fake is deepen's "hypothetical seam" call, not a distill deletion — flag it for deepen rather than removing it unilaterally, because removing it changes where callers bind.
+- **Boundary:** an exported symbol with no importer anywhere is dead and goes. A port with one adapter and no test fake is deepen's "hypothetical seam" call, not a distill deletion: callers outside the scope bind to it, so flag it for deepen.
 
 ## 4. Collapse Pass-Throughs
 
@@ -41,6 +43,8 @@ A wrapper earns its existence by adding an invariant, translating a domain, or s
 - Re-export layers that rename without translating → import from the source
 
 Apply the **deletion test**: if deleting the wrapper makes complexity vanish, it was a pass-through; if complexity reappears at N call sites, it was earning its keep — leave it.
+
+**Boundary:** each of these changes where callers bind. Collapse the wrapper only when all of its callers are inside the scope; when one is outside, flag it for deepen.
 
 ## 5. Flatten Control Flow
 

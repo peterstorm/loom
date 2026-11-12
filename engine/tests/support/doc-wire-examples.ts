@@ -272,7 +272,7 @@ export const keysOf = (value: unknown): readonly string[] => {
 // --- The governed docs ---
 
 /** The directories whose Markdown teaches Loom's wire shapes. */
-export const GOVERNED_ROOTS: readonly string[] = ["agents", "commands", "skills", "docs", "references"];
+export const GOVERNED_ROOTS: readonly string[] = ["agents", "commands", "skills", "docs", "references", "lint-rules"];
 
 /** Paths under the governed roots that are not held to the marker rule, and why. */
 export const UNGOVERNED: readonly Readonly<{ path: string; reason: string }>[] = [
