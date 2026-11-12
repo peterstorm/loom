@@ -41,8 +41,10 @@ import {
   VERIFICATION_RESULT_KIND,
   VERIFIER_VOTE_KEYS,
 } from "../../src/core/security-verification";
+import { isJsonArray } from "../fixtures/json-wire";
 import { documentedJson, keysOf, readGovernedDocs, resolvePlaceholders as resolveWith } from "../support/doc-wire-examples";
-import { WIRE_SHAPES, type WireShapeId } from "../support/doc-wire-shapes";
+import type { WireShapeId } from "../support/doc-wire-shape-ids";
+import { SECURITY_PLACEHOLDERS } from "../support/doc-wire-shapes";
 import { ok } from "./fixtures";
 
 const docs = readGovernedDocs();
@@ -54,16 +56,16 @@ const wireBlock = (agent: string, shapeId: WireShapeId): Readonly<Record<string,
   return block;
 };
 
-/** A documented value with its placeholders resolved by the security shapes'
- *  own table; `key` is the field the value sits under. */
+/** A documented value with its placeholders resolved by the table the three
+ *  security shapes share; `key` is the field the value sits under. */
 const resolvePlaceholders = (value: unknown, key = "$"): unknown =>
-  resolveWith(value, WIRE_SHAPES["security-hunter-result"].placeholders, key);
+  resolveWith(value, SECURITY_PLACEHOLDERS, key);
 
 /** The first item of a documented list, or a failure naming the list: a doc
  *  restructured so the list is gone must fail HERE, not turn every key-set
  *  check below into a comparison of two empty lists. */
 const firstItem = (value: unknown, label: string): Readonly<Record<string, unknown>> => {
-  const first: unknown = Array.isArray(value) ? value[0] : undefined;
+  const first: unknown = isJsonArray(value) ? value[0] : undefined;
   if (!isWireRecord(first)) throw new Error(`${label} documents no object item`);
   return first;
 };

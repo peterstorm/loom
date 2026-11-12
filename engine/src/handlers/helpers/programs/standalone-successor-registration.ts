@@ -1,8 +1,8 @@
 /** Explicit successor ingress and frozen source data. These records are not nominal predecessor authority. */
 import { boundedThrownCause, canonicalStructuralEquals } from "../../../core/orchestration-contract";
 import { parseBoundedReviewerJson } from "../../../core/reviewer-protocol";
-import { parseStandaloneReviewKind, parseStandaloneReviewScope, STANDALONE_REVIEWER_ROLES, type StandaloneReviewKind } from "../../../core/standalone-review-scope";
-import { PLAN_DESIGN_REVIEW_KIND } from "../../../core/plan-design-review";
+import { parseStandaloneReviewKind, parseStandaloneReviewScope, STANDALONE_REVIEWER_ROLES, standaloneReviewProfile,
+  type StandaloneReviewKind } from "../../../core/standalone-review-scope";
 import { STANDALONE_LINEAGE_LIMITS, STANDALONE_REVIEWER_PROTOCOL_V3, parseStandaloneReviewerProtocolV3,
   standalonePublicationReferenceSchema, type StandalonePublicationReference } from "../../../core/standalone-lineage-contract";
 import type { StandaloneDispositionPublicationReference } from "../../../core/standalone-review-model";
@@ -34,9 +34,10 @@ export function parseStandaloneSuccessorStartInput(raw: unknown): ProgramParse<S
   if (!exact(raw, ["schemaVersion", "kind", "files", "dryRun", "successor"]) || raw.schemaVersion !== 3 || raw.dryRun !== false ||
       !exact(raw.successor, ["source", "disposition"])) return bad("successor input requires explicit schemaVersion 3, kind, files, dryRun false, and successor source/disposition");
   const kind = parseStandaloneReviewKind(raw.kind);
-  // An edited plan is reviewed whole and afresh, so its acceptance always rests on a read-coverage Run.
-  if (kind === PLAN_DESIGN_REVIEW_KIND) return bad("a plan-design review has no successor; start a fresh plan-design review of the edited plan");
-  if (kind === null || !Array.isArray(raw.files) || raw.files.length > STANDALONE_LINEAGE_LIMITS.paths) return bad("successor kind or bounded explicit scope is invalid");
+  // A kind reviewed whole and afresh each time (an edited plan) has no successor.
+  const successor = kind === null ? null : standaloneReviewProfile([kind]).successor;
+  if (successor?.kind === "refused") return bad(successor.reason);
+  if (kind === null ||!Array.isArray(raw.files) || raw.files.length > STANDALONE_LINEAGE_LIMITS.paths) return bad("successor kind or bounded explicit scope is invalid");
   const scope = parseStandaloneReviewScope(raw.files);
   if (!scope.ok || !canonicalStructuralEquals(scope.value, raw.files)) return bad("successor files must be the ordered canonical explicit scope");
   if (!exact(raw.successor.source, ["locator", "runId", "resultDigest"])) return bad("successor publication reference must contain only exact own-data fields");

@@ -58,8 +58,19 @@ The implementer is the one agent that can write the missing test cheaply, and on
   frozen `affectedRunner` over that file unmutated, then once per mutant. The real workspace is only read.
 - **Judgment.** Each JUnit report is judged by the affected-test stop check's judge, so a failure the Wave
   Gate excuses as expected RED is not a failure here. The runner's exit code is not read.
+- **Runs.** The selection, the base read and the runner execution are the steps Owner Verification takes,
+  from one shared shell module (`orchestration/mutation-run-steps.ts`), so the two checks cannot drift on
+  how changed lines or runner commands are formed.
 - **Output.** Each survivor on one line (`file:line:column operator: original → mutant`), then the test that
   kills a mutant of that operator.
+- **Result.** One of five kinds, built only by one constructor (`taskMutationResult`) that the run's tally
+  and the record parser share, so a result's kind always agrees with its counts. It counts `killed`,
+  `invalid` and the survivors apart, against the `candidates` they were selected from:
+  - `no-mutants`: no mutation site is on a changed line;
+  - `clean`: no survivor, and the tests killed at least one mutant;
+  - `survivors`: at least one mutant the tests did not kill;
+  - `inconclusive`: mutants were selected and every one was invalid, so the tests judged none;
+  - `unavailable`: the run could not decide.
 
 ### 2. One more operator, for Tasks only
 `guard-removal` replaces an `if` with no `else` whose body only exits (`throw`, `return`, `continue`,
@@ -71,7 +82,10 @@ operators and every mutant id it computed before. A test pins both.
 A run writes one runtime file per repository and Task, beside the stop checks' block counters. It holds the
 result and a digest of the Task's `start_sha` and the bytes, or absence, of every file the Task declares,
 tests included. The stop recomputes the digest; a record of other bytes is stale. The helper digests before
-and after its run and records `unavailable` when the two differ.
+and after its run and records `unavailable` when the two differ. The file name holds the Task id encoded
+injectively (letters, digits and `-` kept, every other UTF-8 byte written `_` and two hex digits), so no
+two Tasks share a record. Only absence (`ENOENT`, `ENOTDIR`, `EISDIR`) reads as "not there", by the one
+rule Owner Verification's reads use too (`utils/file-absence.ts`); any other refusal is a fault.
 
 ### 4. The stop check
 The mutation check is a third arm of the one stop shell, with its own block counter, capped at 2. It runs
@@ -79,9 +93,9 @@ no runner and takes no lock.
 
 - **Blocks** when the record is missing, stale, or names survivors. The block joins the other checks'
   sections in one message and repeats the command.
-- **Passes** on a clean record of the current bytes.
-- **Notes and proceeds** on an `unavailable` record, at the cap, and on every fault: an unreadable record,
-  file or counter, a throwing observation, no repository root.
+- **Passes** on a `clean` or `no-mutants` record of the current bytes.
+- **Notes and proceeds** on an `inconclusive` or `unavailable` record, at the cap, and on every fault: an
+  unreadable record, file or counter, a throwing observation, no repository root.
 - A stop that ended with a delivered hand-back is never held, by the dispatcher's existing rule.
 - On Pi the same decision is one report-only operator line.
 
@@ -98,8 +112,11 @@ will be mutated, how to answer a survivor, and that the check's runs are not its
 - **A red or unobservable baseline is `unavailable`,** never survivors. A sibling Task's unfinished work is
   the usual cause, and the message says so.
 - **A file no test ran for** has every mutant reported as a survivor, unrun, and marked as such.
-- **A mutant that only breaks collection, or runs no testcase, is no evidence.** It is counted and is not a
-  survivor.
+- **A mutant that only breaks collection, or runs no testcase, is no evidence.** It is counted as `invalid`,
+  apart from kills, and is not a survivor. A run whose every mutant is invalid is `inconclusive`, never
+  clean: a mutated file that fails to import would otherwise read as "your tests killed every mutant" when
+  no test ran against one. It notes and proceeds, like `unavailable`, and its message says to check that the
+  tests import the changed file and run.
 - **TypeScript and JavaScript only.** The operators read the TypeScript parser's tree.
 - **No waiver grammar.** An equivalent mutant is named in the implementer's final report. The cap of 2
   blocks is what lets the stop proceed.
@@ -117,6 +134,9 @@ will be mutated, how to answer a survivor, and that the check's runs are not its
   decision, the counters, the cap notes and the combined message are the ones the other two checks use.
 - **Loading the runner in the stop hook.** The record store is its own module, so the stop imports no
   worktree or runner code.
+- **A result that counts only the mutants selected.** A `clean` result of `mutants: N` cannot tell kills
+  from invalid runs, so a run that judged nothing printed and recorded "your tests killed all N mutant(s)".
+  The result counts `killed` and `invalid` apart, and its kind follows from the counts alone.
 
 ## Consequences
 - **Enforced within bounds on Claude Code, advisory on Pi.** Claude Code holds the stop at most twice. Pi

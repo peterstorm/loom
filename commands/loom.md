@@ -439,7 +439,7 @@ A `FEAS-N` gap means a recorded discovery contradicts a Requirement or plan deci
 
 **Always run** (unless `--skip-plan-design-review` was passed to `init-state`, or the State File has no `plan_design_review` field because it was initialized before the gate existed). Run it after plan alignment has settled: any later edit to the plan closes the gate again.
 
-This is a gate on the decompose spawn, not a phase: `current_phase` does not change and no phase agent runs ([ADR-0070](../docs/adr/ADR-0070-the-plan-design-review-gates-decompose.md)). The plan is reviewed by `code-reviewer`, `type-design-analyzer` and `architecture-tech-lead` as a Standalone Review of kind `plan-design`, each with a plan design lens in its Context Packet and each obliged to read the whole plan.
+This is a gate on decompose, not a phase: the decompose spawn asks it, `populate-task-graph` asks it again on first population, `current_phase` does not change and no phase agent runs ([ADR-0070](../docs/adr/ADR-0070-the-plan-design-review-gates-decompose.md)). The plan is reviewed by `code-reviewer`, `type-design-analyzer` and `architecture-tech-lead` as a Standalone Review of kind `plan-design`, each with a plan design lens in its Context Packet and each obliged to read the whole plan.
 
 Run every command from the repository root.
 
@@ -474,7 +474,7 @@ Run every command from the repository root.
 
 **If a critical survived refutation:** the helper refuses with the Finding ids. Present the findings to the user, edit the plan to resolve them (or loop back to architecture as in Phase 3.5), and start a fresh review at step 1. A `plan-design` review has no successor.
 
-**If the plan is edited after acceptance:** the decompose spawn is blocked with both digests. Start a fresh review at step 1.
+**If the plan is edited after acceptance:** the decompose spawn and first population are blocked with both digests. Start a fresh review at step 1. An edit made while the helper runs is caught under the State File lock: the helper refuses with `the plan changed while its review was being accepted`.
 
 Do not write `plan_design_review` yourself. The helper is its only writer after `init-state`.
 
@@ -593,6 +593,7 @@ This helper:
 - Merges with validated decompose output (tasks, waves)
 - Adds `github_issue`, `spec_file`, `plan_file`, `current_wave: 1`
 - Moves `current_phase` decompose → execute (and records `phase_artifacts.decompose`) in the same write; it refuses any phase other than `decompose` (first population) or `execute` (re-population)
+- On first population, asks the plan design gate ([Phase 3.6](#phase-36-plan-design-review)) of the plan bytes it read: it refuses while `plan_design_review` is `required` or `accepted` for other bytes, exactly as the decompose spawn does; re-population in execute is not gated
 - Initializes `wave_gates`, `executing_tasks`
 - Writes via `StateManager` (chmod 444 protection)
 

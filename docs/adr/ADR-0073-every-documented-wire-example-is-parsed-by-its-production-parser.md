@@ -65,9 +65,15 @@ A marker is an HTML comment on the nearest non-blank line above a fence, so it r
 - `<!-- wire-example: none — <reason> -->`: the fence shows JSON that is not a wire example. The reason is
   required and the suite refuses one shorter than 20 characters.
 
-A marker line that is neither is kept as a `malformed` marker and reported, not skipped.
+A marker line that is neither is kept as a `malformed` marker and reported, not skipped. The shape id is parsed
+once, at the scan, into the closed `WireShapeId`: a well-formed id the registry does not hold is kept as an
+`unregistered` marker and reported. An example therefore always names a registered shape, and nothing
+downstream of the scan re-checks the id.
 
 ### 2. What counts as an example
+A fence's language is the first word of its info string, so ` ```json title="x" ` and ` ```json {1,2} ` are
+`json` fences. An info string is any text without a backtick, as in CommonMark.
+
 - A `json` or `jsonc` fence is one example.
 - A shell fence is one example per heredoc whose body begins with `{` or `[`. The marker sits above the
   shell fence and applies to each.
@@ -90,9 +96,11 @@ Inside a governed doc, the region between the wire-contract stamp markers is ski
 already compares those bytes with the codec's rendering.
 
 ### 4. The registry
-`WIRE_SHAPE_IDS` is a closed list and `WIRE_SHAPES` is a record over it
-(`engine/tests/support/doc-wire-shapes.ts`), so an id without a parser does not compile. Each entry names
-and calls the production function for that input. No entry restates a rule.
+`WIRE_SHAPE_IDS` is a closed list (`engine/tests/support/doc-wire-shape-ids.ts`) and `WIRE_SHAPES` is a
+record over it (`engine/tests/support/doc-wire-shapes.ts`), so an id without a parser does not compile. Each
+entry calls the production function for that input, and its `parse` body is the one statement of which
+function that is: no free-text label restates it, so a renamed parser cannot leave a stale name behind. No
+entry restates a rule.
 
 Where a parser needs surrounding authority, the entry builds it from the suite's fixtures: the minted
 criterion and candidate filename for a judge verdict, a lens and the documented Finding ids for a refutation
@@ -101,8 +109,11 @@ loader as it reads a directory, so the example is installed as the one rule of a
 An architecture panel journal is decoded and then replayed through the program's reducer, as
 `helper panel-program` does, so an example whose events are well formed but out of order fails.
 
-A parser a doc teaches is exported for the registry to call. `parseUserDecision` (the Wave Gate decision)
-and `parseReopenRequest` (the completed-Wave reopening payload) are exported for that reason.
+A parser a doc teaches is exported for the registry to call, from the functional core. `parseUserDecision`
+(the Wave Gate decision, `engine/src/core/user-decision.ts`) and `parseReopenRequest` (the completed-Wave
+reopening payload, `engine/src/core/wave-reopening-request.ts`) are pure and return a `DomainResult`; the
+`decide` and `reopen-completed-wave` handlers keep the I/O and render the refusal in the same words as before.
+The registry calls the same functions and reads their result directly, with no adapter.
 
 Every entry must refuse a document that is not its shape, and no documented example may parse under another
 shape's id. Without the first check an entry that admitted everything would reduce the suite to "the docs
@@ -123,7 +134,9 @@ Placeholders follow one convention, which the corrected examples now obey:
 ### 6. Completeness
 The suite fails when a governed doc has an unmarked example, a malformed or dangling marker, or an
 unregistered shape id; when a registered shape is taught by no doc; when any marked example is refused by
-its parser; and when an example also parses under another shape's id. `security-agent-docs.test.ts` keeps its key-set and identity checks and now reads its blocks
+its parser; when an example also parses under another shape's id; and when an `UNGOVERNED` entry names no
+existing path (a trailing slash names a directory, anything else a file) or one the governed rule still
+covers. `security-agent-docs.test.ts` keeps its key-set and identity checks and now reads its blocks
 through the same extraction.
 
 ## Consequences
@@ -136,7 +149,8 @@ through the same extraction.
 - The lint rule parser (`parseRuleJson`) stays unexported and is reached through `loadRules`, the function
   the linter calls.
 - **Not detected: JSON outside a labelled fence.** A shape written inline in a sentence or a table cell, or
-  in a fence with no language, is not an example to the suite. The hunter envelope and the `merge-critic`
+  in a fence with no language, is not an example to the suite. Nor is a tilde (`~~~`) fence: the scan reads
+  backtick fences only. The hunter envelope and the `merge-critic`
   wrapper in `skills/security-audit/SKILL.md` are written that way, as are the inline shapes in
   `docs/security-audit.md` and `references/security-lenses/LOOM-DELTAS.md`.
 - **Context comes from fixtures.** A verdict is parsed against the lens, criterion, candidates and Finding

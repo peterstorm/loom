@@ -8,11 +8,11 @@ import {
   parsePiJsonl,
   getContentBlocks,
   detectFormat,
-  isRecord,
   type ContentBlock,
   type TranscriptFormat,
 } from "./types";
 import { claudeRecordKind } from "../core/claude-record-kind";
+import { isRecord } from "../core/plain-record";
 
 function textContent(content: unknown): string[] {
   if (typeof content === "string") return [content];

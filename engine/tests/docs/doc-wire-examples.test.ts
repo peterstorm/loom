@@ -9,9 +9,12 @@
  * parser as written.
  */
 
+import { existsSync, statSync } from "node:fs";
+import { join } from "node:path";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
+  REPO_ROOT,
   UNGOVERNED,
   examplesOf,
   governedExamples,
@@ -28,14 +31,15 @@ import {
   scanDoc,
   sequence,
 } from "../support/doc-wire-examples";
-import { WIRE_SHAPES, WIRE_SHAPE_IDS, parseDocumentedExample, parseWireShapeId } from "../support/doc-wire-shapes";
+import { WIRE_SHAPE_IDS, parseWireShapeId } from "../support/doc-wire-shape-ids";
+import { WIRE_SHAPES, parseDocumentedExample } from "../support/doc-wire-shapes";
 
 const docs = readGovernedDocs();
 const examples = governedExamples(docs);
 
 describe("the governed docs declare every wire example", () => {
   it("leaves no JSON example unmarked, no marker malformed, dangling or naming an unregistered shape", () => {
-    expect(docs.flatMap((doc) => markerDefects(doc.scan, doc.file, WIRE_SHAPE_IDS))).toEqual([]);
+    expect(docs.flatMap((doc) => markerDefects(doc.scan, doc.file))).toEqual([]);
   });
 
   it("gives every opt-out a reason a reader can act on", () => {
@@ -54,7 +58,18 @@ describe("the governed docs declare every wire example", () => {
     expect(reviewer?.scan.fences.filter((fence) => jsonTextsOf(fence).length > 0)).toEqual([]);
   });
 
-  it("names only paths that exist in its ungoverned list", () => {
+  it("names only paths that exist in its ungoverned list: a trailing slash names a directory, anything else a file", () => {
+    const missing = UNGOVERNED.flatMap(({ path }) => {
+      const onDisk = join(REPO_ROOT, path);
+      const directory = path.endsWith("/");
+      return existsSync(onDisk) && statSync(onDisk).isDirectory() === directory
+        ? []
+        : [`${path} is not an existing ${directory ? "directory" : "file"}`];
+    });
+    expect(missing).toEqual([]);
+  });
+
+  it("lists only paths isGoverned exempts, so no ungoverned entry is shadowed by the governed rule", () => {
     const governedOrNot = (path: string): boolean => isGoverned(path.endsWith("/") ? `${path}x.md` : path);
     expect(UNGOVERNED.filter((entry) => governedOrNot(entry.path))).toEqual([]);
   });
@@ -90,7 +105,6 @@ describe("every registered shape reaches a parser that can refuse", () => {
     const at = { file: "doc.md", line: 1 };
     expect(parseDocumentedExample({ ...at, shapeId: "wave-gate-start", text: "{ not json" }).ok).toBe(false);
     expect(parseDocumentedExample({ ...at, shapeId: "wave-gate-start", text: '{"wave":"<no entry for this key>"}' }).ok).toBe(false);
-    expect(parseDocumentedExample({ ...at, shapeId: "no-such-shape", text: "{}" }).ok).toBe(false);
     expect(parseDocumentedExample({ ...at, shapeId: "wave-gate-start", text: '{"wave":null}' }).ok).toBe(true);
   });
 });
@@ -135,6 +149,14 @@ describe("markers", () => {
       expect(parseWireShapeId(raw)).toBe(WIRE_SHAPE_IDS.find((id) => id === raw) ?? null);
     }));
   });
+
+  it("reads a well-formed id the registry does not hold as an unregistered marker, never as a shape", () => {
+    const kebabIds = fc.stringMatching(/^[a-z][a-z0-9]{0,8}(?:-[a-z0-9]{1,8}){0,3}$/)
+      .filter((id) => id !== "none" && parseWireShapeId(id) === null);
+    fc.assert(fc.property(kebabIds, (shapeId) => {
+      expect(parseWireMarker(renderShapeMarker(shapeId))).toEqual({ kind: "unregistered", shapeId });
+    }));
+  });
 });
 
 describe("scanning a doc", () => {
@@ -142,7 +164,7 @@ describe("scanning a doc", () => {
     fc.assert(fc.property(shapeIds, jsonValues, fc.array(proseLines), fc.array(proseLines), (shapeId, json, before, after) => {
       const source = [...before, "", renderShapeMarker(shapeId), fenced("json", json), "", ...after].join("\n");
       const scan = scanDoc("doc.md", source);
-      expect(markerDefects(scan, "doc.md", WIRE_SHAPE_IDS)).toEqual([]);
+      expect(markerDefects(scan, "doc.md")).toEqual([]);
       const found = scan.fences.flatMap(examplesOf);
       expect(found.map((example) => example.shapeId)).toEqual([shapeId]);
       expect(parseDocJson(found[0].text)).toEqual(JSON.parse(json));
@@ -154,7 +176,7 @@ describe("scanning a doc", () => {
       const heredoc = fenced("bash", `loom helper x <<'JSON'\n${json}\nJSON`);
       for (const block of [fenced("json", json), heredoc]) {
         const scan = scanDoc("doc.md", [...before, "", block].join("\n"));
-        expect(markerDefects(scan, "doc.md", WIRE_SHAPE_IDS)).toHaveLength(1);
+        expect(markerDefects(scan, "doc.md")).toHaveLength(1);
         expect(scan.fences.flatMap(examplesOf)).toEqual([]);
       }
     }));
@@ -163,14 +185,14 @@ describe("scanning a doc", () => {
   it("asks no marker of a fence that shows no JSON", () => {
     fc.assert(fc.property(fc.constantFrom("", "text", "bash", "typescript"), fc.array(proseLines, { minLength: 1 }), (language, body) => {
       const scan = scanDoc("doc.md", fenced(language, body.join("\n")));
-      expect(markerDefects(scan, "doc.md", WIRE_SHAPE_IDS)).toEqual([]);
+      expect(markerDefects(scan, "doc.md")).toEqual([]);
     }));
   });
 
   it("accepts an opt-out and yields no example for it", () => {
     fc.assert(fc.property(reasons, jsonValues, (reason, json) => {
       const scan = scanDoc("doc.md", [renderOptOutMarker(reason), fenced("json", json)].join("\n"));
-      expect(markerDefects(scan, "doc.md", WIRE_SHAPE_IDS)).toEqual([]);
+      expect(markerDefects(scan, "doc.md")).toEqual([]);
       expect(scan.fences.flatMap(examplesOf)).toEqual([]);
     }));
   });
@@ -183,9 +205,30 @@ describe("scanning a doc", () => {
     }));
   });
 
-  it("reports a marker naming a shape the registry does not hold", () => {
+  it("reports a marker naming a shape the registry does not hold, and yields no example for its fence", () => {
     const scan = scanDoc("doc.md", [renderShapeMarker("no-such-shape"), fenced("json", "{}")].join("\n"));
-    expect(markerDefects(scan, "doc.md", WIRE_SHAPE_IDS)).toEqual(["doc.md:2 wire-example marker names an unregistered shape: no-such-shape"]);
+    expect(markerDefects(scan, "doc.md")).toEqual(["doc.md:2 wire-example marker names an unregistered shape: no-such-shape"]);
+    expect(scan.fences.flatMap(examplesOf)).toEqual([]);
+  });
+
+  /** An info string after the language, as CommonMark allows. */
+  const infoSuffixes = fc.constantFrom(' title="example.json"', " {1,2}", " linenums", "  copy");
+
+  it("reads the first word of a fence's info string as its language, so a marked fence with attributes is its example", () => {
+    fc.assert(fc.property(shapeIds, jsonValues, infoSuffixes, (shapeId, json, suffix) => {
+      const scan = scanDoc("doc.md", [renderShapeMarker(shapeId), fenced(`json${suffix}`, json)].join("\n"));
+      expect(scan.fences.map(({ language }) => language)).toEqual(["json"]);
+      expect(markerDefects(scan, "doc.md")).toEqual([]);
+      expect(scan.fences.flatMap(examplesOf).map((example) => parseDocJson(example.text))).toEqual([JSON.parse(json)]);
+    }));
+  });
+
+  it("reports an unmarked JSON fence with attributes, and takes its closing line for no fence of its own", () => {
+    fc.assert(fc.property(jsonObjects, infoSuffixes, fc.array(proseLines, { minLength: 1 }), (json, suffix, after) => {
+      const scan = scanDoc("doc.md", [fenced(`json${suffix}`, json), "", ...after].join("\n"));
+      expect(scan.fences).toHaveLength(1);
+      expect(markerDefects(scan, "doc.md")).toEqual(["doc.md:1 documents JSON with no wire-example marker above the fence"]);
+    }));
   });
 
   it("reads a marked fence inside a list item, indentation and all", () => {

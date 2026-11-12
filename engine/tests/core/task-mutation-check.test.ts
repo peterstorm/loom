@@ -8,8 +8,11 @@
  * - `classifyTaskBaseline` and `classifyTaskMutantRun`: a red baseline is
  *   never a survivor, a timeout is a kill, a mutant that only breaks
  *   collection is no evidence;
+ * - `taskMutationResult`, the one constructor of a result: its kind follows
+ *   from the tallies alone, so a run whose every mutant was invalid is
+ *   `inconclusive` and never clean;
  * - the record: parse after serialize is the identity, and every malformed
- *   document is refused;
+ *   document, including one whose kind its counts contradict, is refused;
  * - `taskMutationStanding`, `taskMutationStopVerdict` and the renderers.
  */
 
@@ -17,7 +20,6 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { emptyAcceptanceExpectation, graphAcceptanceExpectation } from "../../src/core/acceptance-contract";
 import { DECISION_RECORD_AGENT } from "../../src/core/model-profiles";
-import type { NonEmpty } from "../../src/core/orchestration-contract/identity";
 import { TASK_MUTATION_OPERATORS, type TaskMutant } from "../../src/core/owner-verification/mutation-plan";
 import type { MatrixTestRun } from "../../src/core/owner-verification/types";
 import {
@@ -38,7 +40,9 @@ import {
   taskMutationCommand,
   taskMutationDigest,
   taskMutationDuty,
+  taskMutationMutants,
   taskMutationRecordJson,
+  taskMutationResult,
   taskMutationResultOf,
   taskMutationStanding,
   taskMutationStopVerdict,
@@ -47,12 +51,13 @@ import {
   type TaskMutantRun,
   type TaskMutationOffReason,
   type TaskMutationResult,
+  type TaskMutationTally,
   type TaskSurvivor,
 } from "../../src/core/task-mutation-check";
 import type { Task, TaskGraph } from "../../src/types";
-import { contract, frozenPaths, surface, task } from "../fixtures/contract-status-fixtures";
+import { contract, surface, task } from "../fixtures/contract-status-fixtures";
 import { distillTaskFixture, taskFixture } from "../fixtures/task-lifecycle";
-import { junitReport, mutationManifest, START_SHA, type JunitCase } from "../fixtures/task-mutation";
+import { junitReport, mutationManifest, START_SHA, talliedResult, type JunitCase } from "../fixtures/task-mutation";
 
 type Graph = Pick<TaskGraph, "tasks" | "verification_manifest" | "acceptance_contracts">;
 
@@ -207,7 +212,6 @@ describe("classifyTaskBaseline", () => {
     const expectation = graphAcceptanceExpectation({ acceptance_contracts: [awaiting], tasks: [task("T1", 1, [SURFACE.types, SURFACE.acceptance])] }, 1);
     const report = junitReport([{ file: SURFACE.acceptance, name: "AS-001: one valid call wins", outcome: "failed" }, passed("debits")]);
     expect(classifyTaskBaseline(exited(report), expectation)).toEqual({ kind: "green" });
-    expect(frozenPaths(SURFACE, "a").length).toBeGreaterThan(0);
   });
 
   it("property: a baseline is red exactly when some testcase failed, whatever else passed", () => {
@@ -250,21 +254,91 @@ const survivorArb: fc.Arbitrary<TaskSurvivor> = fc.record({
 });
 
 const resultArb: fc.Arbitrary<TaskMutationResult> = fc.oneof(
-  fc.record({ kind: fc.constant("unavailable" as const), reason: fc.string({ minLength: 1, maxLength: 40 }) }),
-  fc.tuple(fc.nat({ max: 8 }), fc.nat({ max: 40 })).map(([mutants, extra]) => ({ kind: "clean" as const, mutants, candidates: mutants + extra })),
-  fc.tuple(fc.array(survivorArb, { minLength: 1, maxLength: 8 }), fc.nat({ max: 4 }), fc.nat({ max: 40 })).map(([survivors, killed, extra]) => {
-    const [first, ...rest] = survivors;
-    if (first === undefined) throw new Error("the arbitrary generates at least one survivor");
-    const named: NonEmpty<TaskSurvivor> = [first, ...rest];
-    return { kind: "survivors" as const, mutants: survivors.length + killed, candidates: survivors.length + killed + extra, survivors: named };
+  fc.string({ minLength: 1, maxLength: 40 }).map(taskMutationUnavailable),
+  fc.record({
+    killed: fc.nat({ max: 4 }),
+    invalid: fc.nat({ max: 4 }),
+    survivors: fc.array(survivorArb, { maxLength: 4 }),
+    extra: fc.nat({ max: 20 }),
+  }).map(({ killed, invalid, survivors, extra }) => {
+    const mutants = killed + invalid + survivors.length;
+    return talliedResult({ killed, invalid, survivors, candidates: mutants === 0 ? 0 : mutants + extra });
   }),
 );
 
+describe("taskMutationResult", () => {
+  const tallyArb: fc.Arbitrary<TaskMutationTally> = fc.record({
+    killed: fc.nat({ max: 6 }),
+    invalid: fc.nat({ max: 6 }),
+    survivors: fc.array(survivorArb, { maxLength: 4 }),
+    extra: fc.nat({ max: 20 }),
+  }).map(({ killed, invalid, survivors, extra }) => {
+    const mutants = killed + invalid + survivors.length;
+    return { killed, invalid, survivors, candidates: mutants === 0 ? 0 : mutants + extra };
+  });
+
+  it("property: the kind follows from the tallies alone, and the result counts every mutant it was given", () => {
+    fc.assert(fc.property(tallyArb, (tally) => {
+      const result = taskMutationResult(tally);
+      if (!result.ok) throw new Error(result.error);
+      const mutants = tally.killed + tally.invalid + tally.survivors.length;
+      const expected = tally.survivors.length > 0 ? "survivors" : mutants === 0 ? "no-mutants" : tally.killed === 0 ? "inconclusive" : "clean";
+      expect(result.value.kind).toBe(expected);
+      expect(taskMutationMutants(result.value)).toBe(mutants);
+    }));
+  });
+
+  it("property: a clean result always names a kill, so a run that judged nothing is never clean", () => {
+    fc.assert(fc.property(tallyArb, (tally) => {
+      const result = taskMutationResult(tally);
+      if (result.ok && result.value.kind === "clean") expect(result.value.killed).toBeGreaterThan(0);
+      if (tally.killed === 0 && tally.survivors.length === 0) expect(result.ok && result.value.kind).not.toBe("clean");
+    }));
+  });
+
+  it("is inconclusive, never clean, when every selected mutant was invalid", () => {
+    expect(taskMutationResult({ candidates: 5, killed: 0, invalid: 3, survivors: [] }))
+      .toEqual({ ok: true, value: { kind: "inconclusive", invalid: 3, candidates: 5 } });
+  });
+
+  it("is clean when the tests killed one mutant and the rest were invalid, and counts both", () => {
+    expect(taskMutationResult({ candidates: 5, killed: 1, invalid: 2, survivors: [] }))
+      .toEqual({ ok: true, value: { kind: "clean", killed: 1, invalid: 2, candidates: 5 } });
+  });
+
+  it.each<[string, TaskMutationTally, RegExp]>([
+    ["more mutants than candidate sites", { candidates: 2, killed: 2, invalid: 1, survivors: [] }, /more than the 2 candidate site/],
+    ["candidate sites from which no mutant was selected", { candidates: 4, killed: 0, invalid: 0, survivors: [] }, /no mutant was selected from 4/],
+    ["a negative count", { candidates: 4, killed: -1, invalid: 0, survivors: [] }, /non-negative integers/],
+    ["a fractional count", { candidates: 4, killed: 0.5, invalid: 0, survivors: [] }, /non-negative integers/],
+  ])("refuses %s", (_label, tally, reason) => {
+    const result = taskMutationResult(tally);
+    expect(result.ok ? "" : result.error).toMatch(reason);
+  });
+});
+
 describe("taskMutationResultOf", () => {
-  it("is clean when every mutant was killed or invalid, and counts what it judged", () => {
+  it("is clean when the tests killed a mutant and none survived, and counts the invalid ones apart", () => {
     const runs: TaskMutantRun[] = [{ mutant: mutant(IMPL, 2), outcome: "killed" }, { mutant: mutant(IMPL, 5), outcome: "invalid" }];
-    expect(taskMutationResultOf(runs, 11)).toEqual({ kind: "clean", mutants: 2, candidates: 11 });
-    expect(taskMutationResultOf([], 0)).toEqual({ kind: "clean", mutants: 0, candidates: 0 });
+    expect(taskMutationResultOf(runs, 11)).toEqual({ kind: "clean", killed: 1, invalid: 1, candidates: 11 });
+    expect(taskMutationResultOf([], 0)).toEqual({ kind: "no-mutants" });
+  });
+
+  it("is inconclusive when every mutant only broke collection or ran no test: never clean", () => {
+    const runs: TaskMutantRun[] = [{ mutant: mutant(IMPL, 2), outcome: "invalid" }, { mutant: mutant(IMPL, 5), outcome: "invalid" }];
+    expect(taskMutationResultOf(runs, 4)).toEqual({ kind: "inconclusive", invalid: 2, candidates: 4 });
+  });
+
+  it("property: a run with no kill and no survivor is never clean", () => {
+    fc.assert(fc.property(fc.integer({ min: 1, max: 8 }), fc.nat({ max: 10 }), (invalid, extra) => {
+      const runs = Array.from({ length: invalid }, (_, at): TaskMutantRun => ({ mutant: mutant(IMPL, at + 1), outcome: "invalid" }));
+      expect(taskMutationResultOf(runs, invalid + extra).kind).toBe("inconclusive");
+    }));
+  });
+
+  it("is unavailable, naming why, when its tally cannot be a result", () => {
+    const result = taskMutationResultOf([{ mutant: mutant(IMPL, 2), outcome: "killed" }], 0);
+    expect(result).toMatchObject({ kind: "unavailable", reason: expect.stringContaining("the run's tally is inconsistent") });
   });
 
   it("names every survivor, and marks the ones no test ran for", () => {
@@ -274,7 +348,7 @@ describe("taskMutationResultOf", () => {
       { mutant: mutant("src/audit.ts", 9, "comparison-flip"), outcome: "untested" },
     ];
     const result = taskMutationResultOf(runs, 3);
-    expect(result).toMatchObject({ kind: "survivors", mutants: 3, candidates: 3 });
+    expect(result).toMatchObject({ kind: "survivors", killed: 1, invalid: 0, candidates: 3 });
     if (result.kind !== "survivors") return;
     expect(result.survivors.map(({ path, line, operator, coverage }) => [path, line, operator, coverage])).toEqual([
       [IMPL, 2, "guard-removal", "tested"],
@@ -307,10 +381,12 @@ describe("the Task mutation record", () => {
     }));
   });
 
-  const CLEAN = wire(recordedTaskMutation("T2", DIGEST, { kind: "clean", mutants: 2, candidates: 5 }));
+  const CLEAN = wire(recordedTaskMutation("T2", DIGEST, talliedResult({ killed: 2, candidates: 5 })));
   const SURVIVOR = { path: IMPL, line: 2, column: 3, operator: "guard-removal", original: "if (x) return;", replacement: ";", coverage: "tested" };
+  const clean = (overrides: Record<string, unknown>): Record<string, unknown> =>
+    ({ ...CLEAN, result: { kind: "clean", killed: 2, invalid: 0, candidates: 5, ...overrides } });
   const survivors = (overrides: Record<string, unknown>): Record<string, unknown> =>
-    ({ ...CLEAN, result: { kind: "survivors", mutants: 2, candidates: 5, survivors: [SURVIVOR], ...overrides } });
+    ({ ...CLEAN, result: { kind: "survivors", killed: 1, invalid: 0, candidates: 5, survivors: [SURVIVOR], ...overrides } });
 
   it.each<[string, unknown, RegExp]>([
     ["a non-object", "record", /must be an object/],
@@ -320,13 +396,18 @@ describe("the Task mutation record", () => {
     ["another kind", { ...CLEAN, kind: "loom-receipt" }, /kind must be/],
     ["an empty Task id", { ...CLEAN, taskId: "" }, /taskId must be a non-empty string/],
     ["a digest that is no sha256", { ...CLEAN, digest: "abc" }, /digest must be a sha256 hex digest/],
-    ["an unknown result kind", { ...CLEAN, result: { kind: "passed" } }, /result\.kind must be/],
-    ["more mutants than candidates", { ...CLEAN, result: { kind: "clean", mutants: 6, candidates: 5 } }, /exceeds/],
-    ["a negative count", { ...CLEAN, result: { kind: "clean", mutants: -1, candidates: 5 } }, /non-negative integers/],
+    ["an unknown result kind", { ...CLEAN, result: { kind: "passed" } }, /result\.kind must be one of "no-mutants", "clean"/],
+    ["more mutants than candidates", clean({ killed: 6 }), /more than the 5 candidate site/],
+    ["a negative count", clean({ killed: -1 }), /result\.killed must be a non-negative integer/],
+    ["a clean result with no kill: every mutant invalid", clean({ killed: 0, invalid: 3 }), /names a clean result, but its counts make it inconclusive/],
+    ["a clean result over nothing selected", clean({ killed: 0, invalid: 0, candidates: 0 }), /names a clean result, but its counts make it no-mutants/],
+    ["an inconclusive result that names a kill", { ...CLEAN, result: { kind: "inconclusive", invalid: 0, candidates: 0 } }, /counts make it no-mutants/],
+    ["a clean result missing its invalid count", { ...CLEAN, result: { kind: "clean", killed: 2, candidates: 5 } }, /lacks invalid/],
+    ["the retired mutants count", { ...CLEAN, result: { kind: "clean", mutants: 2, candidates: 5 } }, /unknown key\(s\) mutants/],
     ["an unavailable result with no reason", { ...CLEAN, result: { kind: "unavailable", reason: "" } }, /reason must be a non-empty string/],
-    ["a clean result carrying survivors", { ...CLEAN, result: { kind: "clean", mutants: 1, candidates: 1, survivors: [] } }, /unknown key\(s\) survivors/],
+    ["a clean result carrying survivors", clean({ survivors: [] }), /unknown key\(s\) survivors/],
     ["a survivors result naming none", survivors({ survivors: [] }), /at least one survivor/],
-    ["more survivors than mutants", survivors({ mutants: 0 }), /more survivors than/],
+    ["more survivors than candidates", survivors({ candidates: 1 }), /more than the 1 candidate site/],
     ["a survivor with an unknown operator", survivors({ survivors: [{ ...SURVIVOR, operator: "delete-file" }] }), /operator must be one of/],
     ["a survivor at an absolute path", survivors({ survivors: [{ ...SURVIVOR, path: "/etc/passwd" }] }), /repository-relative path/],
     ["a survivor at line 0", survivors({ survivors: [{ ...SURVIVOR, line: 0 }] }), /positive integers/],
@@ -338,7 +419,8 @@ describe("the Task mutation record", () => {
   });
 });
 
-const CLEAN_RESULT: TaskMutationResult = { kind: "clean", mutants: 3, candidates: 3 };
+const CLEAN_RESULT = talliedResult({ killed: 3, candidates: 3 });
+const INCONCLUSIVE_RESULT = talliedResult({ invalid: 2, candidates: 4 });
 const SURVIVORS_RESULT = taskMutationResultOf([{ mutant: mutant(IMPL, 2), outcome: "survived" }, { mutant: mutant(IMPL, 7, "comparison-flip"), outcome: "untested" }], 9);
 const COMMAND = taskMutationCommand("/opt/loom", "T2");
 
@@ -353,9 +435,18 @@ describe("taskMutationStanding and taskMutationStopVerdict", () => {
 
   const observedAs = (standing: ReturnType<typeof taskMutationStanding>) => ({ kind: "observed" as const, standing, command: COMMAND });
 
-  it("is idle for a Task that owes nothing and passes a clean current record", () => {
+  it("is idle for a Task that owes nothing and passes a clean current record, or one with nothing to mutate", () => {
     expect(taskMutationStopVerdict("T2", NO_TASK_MUTATION_CHECK)).toEqual({ kind: "idle" });
     expect(taskMutationStopVerdict("T2", observedAs({ kind: "current", result: CLEAN_RESULT }))).toEqual({ kind: "passed" });
+    expect(taskMutationStopVerdict("T2", observedAs({ kind: "current", result: talliedResult({ candidates: 0 }) }))).toEqual({ kind: "passed" });
+  });
+
+  it("never passes an inconclusive record: it is a note naming why the run judged nothing", () => {
+    expect(taskMutationStopVerdict("T2", observedAs({ kind: "current", result: INCONCLUSIVE_RESULT }))).toEqual({
+      kind: "note",
+      note: "Task mutation check for T2 did not decide (its last run was inconclusive: none of its 2 mutant(s) could be judged, " +
+        "because each only broke test collection or ran no test); the stop proceeds",
+    });
   });
 
   it("fails for a check that never ran, ran over other bytes, or left survivors, carrying the command", () => {
@@ -372,7 +463,7 @@ describe("taskMutationStanding and taskMutationStopVerdict", () => {
       .toEqual({ kind: "note", note: "Task mutation check for T2 did not decide (its record is unreadable: EACCES); the stop proceeds" });
   });
 
-  it("property: a stop is held only by a record that is missing, stale or names survivors", () => {
+  it("property: a stop is held only by a record that is missing, stale or names survivors, and passes only a clean or empty one", () => {
     const standing = fc.oneof(
       fc.constant({ kind: "not-run" as const }),
       fc.constant({ kind: "stale" as const }),
@@ -381,7 +472,9 @@ describe("taskMutationStanding and taskMutationStopVerdict", () => {
     fc.assert(fc.property(standing, (observed) => {
       const verdict = taskMutationStopVerdict("T2", observedAs(observed));
       const holds = observed.kind !== "current" || observed.result.kind === "survivors";
+      const passes = observed.kind === "current" && (observed.result.kind === "clean" || observed.result.kind === "no-mutants");
       expect(verdict.kind === "failing").toBe(holds);
+      expect(verdict.kind === "passed").toBe(passes);
     }));
   });
 });
@@ -397,10 +490,37 @@ describe("what the implementer reads", () => {
   });
 
   it("reports a clean run, a run with nothing to mutate, and an unavailable run in one line each", () => {
-    expect(renderTaskMutationReport("T2", CLEAN_RESULT)).toBe("Task mutation check for T2: clean — your tests killed all 3 mutant(s) (of 3 site(s) on changed lines).");
-    expect(renderTaskMutationReport("T2", { kind: "clean", mutants: 0, candidates: 0 })).toContain("no mutants");
+    expect(renderTaskMutationReport("T2", CLEAN_RESULT))
+      .toBe("Task mutation check for T2: clean — your tests killed all 3 mutant(s) they could judge (of 3 site(s) on changed lines).");
+    expect(renderTaskMutationReport("T2", talliedResult({ candidates: 0 })))
+      .toBe("Task mutation check for T2: clean — no mutants (no mutation site on a line this Task changed).");
     expect(renderTaskMutationReport("T2", taskMutationUnavailable("the unmutated tests fail")))
       .toBe("Task mutation check for T2: unavailable — the unmutated tests fail. It did not decide and will not block your stop.");
+  });
+
+  it("names the invalid mutants of a clean run apart from the ones its tests killed", () => {
+    expect(renderTaskMutationReport("T2", talliedResult({ killed: 1, invalid: 2, candidates: 6 })).split("\n")).toEqual([
+      "Task mutation check for T2: clean — your tests killed all 1 mutant(s) they could judge (of 6 site(s) on changed lines).",
+      "2 more mutant(s) only broke test collection or ran no test, so they are no evidence either way.",
+    ]);
+  });
+
+  it("reports a run whose every mutant was invalid as inconclusive, never as clean or killed", () => {
+    const report = renderTaskMutationReport("T2", INCONCLUSIVE_RESULT);
+    expect(report).toBe(
+      "Task mutation check for T2: inconclusive — none of its 2 mutant(s) could be judged, because each only broke test collection " +
+      "or ran no test (of 4 site(s) on changed lines). Check that your tests import the changed file and run. " +
+      "It did not decide and will not block your stop.");
+    expect(report).not.toContain("clean");
+    expect(report).not.toContain("killed");
+  });
+
+  it("property: no report claims a kill the result does not count", () => {
+    fc.assert(fc.property(resultArb, (result) => {
+      const report = renderTaskMutationReport("T2", result);
+      const killed = result.kind === "clean" || result.kind === "survivors" ? result.killed : 0;
+      if (killed === 0) expect(report).not.toMatch(/killed all/);
+    }));
   });
 
   it("names each survivor with its place, operator, change and killing test, and how to answer an equivalent mutant", () => {

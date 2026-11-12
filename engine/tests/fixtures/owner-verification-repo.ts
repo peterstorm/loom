@@ -493,7 +493,7 @@ const WAVE_GATE_PROGRAM: RegisteredWaveGateProgram = Object.freeze({
 });
 
 const isStringList = (value: unknown): value is readonly string[] =>
-  Array.isArray(value as unknown) && (value as readonly unknown[]).every((entry) => typeof entry === "string");
+  Array.isArray(value) && value.every((entry) => typeof entry === "string");
 
 /** One line of the launch log, as the runner stand-in wrote it. */
 function parseRunnerLaunch(line: string): RunnerLaunch {

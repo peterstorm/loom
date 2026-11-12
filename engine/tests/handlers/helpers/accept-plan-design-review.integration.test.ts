@@ -5,7 +5,7 @@
  * Real Git, real Run Directories and the real State File; reviewers are
  * scripted through the engine's own capture seam.
  */
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { sha256Bytes } from "../../../src/core/digest";
@@ -18,14 +18,15 @@ import { STANDALONE_FROZEN_DIFF_SECTION, parseFrozenDiff } from "../../../src/co
 import type { StandaloneReviewKind } from "../../../src/core/standalone-review-scope";
 import { unifiedDiff } from "../../../src/core/unified-diff";
 import { checkArtifacts } from "../../../src/core/validate-phase-order";
-import acceptPlanDesignReview from "../../../src/handlers/helpers/accept-plan-design-review";
+import acceptPlanDesignReview, { createAcceptPlanDesignReviewHandler, type PlanProbe } from "../../../src/handlers/helpers/accept-plan-design-review";
+import { readPlanDesignEvidence } from "../../../src/handlers/helpers/programs";
 import { parseRegistration } from "../../../src/handlers/helpers/programs/registration";
 import { resumeStandaloneFacade, startStandaloneFacade } from "../../../src/handlers/helpers/programs/standalone";
 import {
   prepareStandaloneDispositionFacadeStart, readStandaloneDispositionSource, startStandaloneDispositionFacade,
 } from "../../../src/handlers/helpers/programs/standalone-disposition";
 import { WHOLE_DOCUMENT_BASE } from "../../../src/handlers/helpers/programs/standalone-requests";
-import { realArtifactProbe } from "../../../src/handlers/pre-tool-use/validate-phase-order";
+import { realArtifactProbe } from "../../../src/orchestration/artifact-probe";
 import { createRunDirectory, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
 import { resolveInitialState } from "../../../src/phase-init";
 import { StateManager } from "../../../src/state-manager";
@@ -256,6 +257,93 @@ describe.sequential("plan design review", { timeout: 60_000 }, () => {
     const { handle, requests } = await start(root, "other-plan", "plan-design", [".claude/plans/other.md"]);
     await review(root, handle, requests);
     expect(await accept(root, "other-plan")).toMatchObject({ kind: "error", message: expect.stringContaining(`not exactly the plan ["${PLAN}"]`) });
+  });
+
+  it("reads the read obligation from the Run's own registration and refuses a Run registered without it", async () => {
+    const root = project();
+    const { handle, requests } = await start(root, "design");
+    await review(root, handle, requests);
+    const evidence = await inDirectory(root, () => readPlanDesignEvidence(join(root, "runs"), "design", null));
+    expect(value(evidence)).toMatchObject({ readObligated: true, reviewers: PLAN_DESIGN_REVIEWERS, requestedKinds: ["plan-design"] });
+
+    // The same completed Run, its registration rewritten as a schema-2 Run
+    // registered before the read obligation existed (no readCoverage policy).
+    const program = join(handle.runDirectory, "program.json");
+    const { readCoverage: _, ...historical } = JSON.parse(readFileSync(program, "utf8")) as Record<string, unknown>;
+    chmodSync(program, 0o644);
+    writeFileSync(program, JSON.stringify(historical));
+    const unobliged = await inDirectory(root, () => readPlanDesignEvidence(join(root, "runs"), "design", null));
+    expect(value(unobliged).readObligated).toBe(false);
+    expect(await accept(root, "design")).toMatchObject({ kind: "error", message: expect.stringContaining("registered without the read obligation") });
+    expect(await recorded(root)).toEqual({ status: "required" });
+  });
+
+  it("refuses a review that froze no bytes for the plan", async () => {
+    const root = project();
+    const aside = join(root, ".claude/plans/feature.md.aside");
+    renameSync(join(root, PLAN), aside);
+    const { handle, requests } = await start(root, "absent");
+    await review(root, handle, requests);
+    renameSync(aside, join(root, PLAN));
+    const evidence = await inDirectory(root, () => readPlanDesignEvidence(join(root, "runs"), "absent", null));
+    expect(value(evidence).scope).toEqual([{ path: PLAN, sha256: null }]);
+    expect(await accept(root, "absent")).toMatchObject({ kind: "error", message: expect.stringContaining(`the review froze no bytes for ${PLAN}`) });
+    expect(await recorded(root)).toEqual({ status: "required" });
+  });
+
+  /** The real plan probe, with `afterFirstDigest` run once, right after the pre-lock digest is taken. */
+  const probeEditingAfterJudging = (afterFirstDigest: () => void): PlanProbe => {
+    let digests = 0;
+    return {
+      exists: realArtifactProbe.exists,
+      sha256: (path) => {
+        const digest = realArtifactProbe.sha256(path);
+        if (++digests === 1) afterFirstDigest();
+        return digest;
+      },
+    };
+  };
+  const acceptWith = (root: string, run: string, probe: PlanProbe): Promise<HookResult> =>
+    inDirectory(root, () => createAcceptPlanDesignReviewHandler(probe)("", ["--runs-root", join(root, "runs"), "--run", run]));
+
+  it("re-hashes the plan under the lock and refuses bytes that changed after they were judged", async () => {
+    const root = project();
+    const { handle, requests } = await start(root, "design");
+    await review(root, handle, requests);
+    const edit = probeEditingAfterJudging(() => writeFileSync(join(root, PLAN), `${PLAN_TEXT}\n## Edited mid-acceptance\n`));
+    expect(await acceptWith(root, "design", edit)).toMatchObject({
+      kind: "error", message: expect.stringContaining("the plan changed while its review was being accepted"),
+    });
+    expect(await recorded(root)).toEqual({ status: "required" });
+    expect(await decomposeGate(root)).toContain("has no accepted design review");
+  });
+
+  it("refuses under the lock when the graph names another plan than the one judged", async () => {
+    const root = project();
+    writeFileSync(join(root, ".claude/plans/other.md"), "# Another plan\n");
+    const { handle, requests } = await start(root, "design");
+    await review(root, handle, requests);
+    const repoint = probeEditingAfterJudging(() => {
+      const state = JSON.parse(readFileSync(join(root, STATE), "utf8")) as Record<string, unknown>;
+      chmodSync(join(root, STATE), 0o644);
+      writeFileSync(join(root, STATE), JSON.stringify({ ...state, plan_file: ".claude/plans/other.md" }));
+    });
+    expect(await acceptWith(root, "design", repoint)).toMatchObject({
+      kind: "error", message: expect.stringContaining("the task graph names a different plan than the one judged"),
+    });
+    expect(await recorded(root)).toEqual({ status: "required" });
+  });
+
+  it("records the plan's digest re-read under the lock when nothing moved", async () => {
+    const root = project();
+    const { handle, requests } = await start(root, "design");
+    await review(root, handle, requests);
+    const digested: string[] = [];
+    const counting: PlanProbe = { exists: realArtifactProbe.exists, sha256: (path) => { digested.push(path); return realArtifactProbe.sha256(path); } };
+    expect(await acceptWith(root, "design", counting)).toEqual({ kind: "allow" });
+    // Once before judging, once under the lock.
+    expect(digested).toEqual([PLAN, PLAN]);
+    expect(await recorded(root)).toMatchObject({ status: "accepted", planSha256: sha256Bytes(Buffer.from(PLAN_TEXT)) });
   });
 
   it("leaves decompose open when the review was skipped at init, and still records an acceptance on request", async () => {

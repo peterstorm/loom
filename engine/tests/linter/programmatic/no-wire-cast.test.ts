@@ -412,18 +412,22 @@ describe("no-wire-cast properties", () => {
   });
 });
 
-describe("no-wire-cast inside the per-edit budget", () => {
-  /** The hook's per-file deadline (`DEFAULT_TIMEOUT_MS` in `linter/index.ts`), which every immediate rule shares. */
-  const PER_FILE_BUDGET_MS = 50;
+/**
+ * The cost of the rule, pinned as RATIOS between runs on the same machine, never as a wall-clock deadline:
+ * machine speed and load cancel out of a ratio, and an absolute bound (a 2,100-line file under the hook's
+ * 50 ms) failed once on a loaded CI runner with no regression in the rule. ADR-0072 states what these
+ * pin and what they do not.
+ */
+describe("no-wire-cast cost", () => {
   /** Each generated function: seven lines, three wire calls, two of them sites (the `as Head` and the typed assignment). */
   const LINES_PER_FUNCTION = 7;
   const SITES_PER_FUNCTION = 2;
-  /**
-   * 2,100 lines with 600 sites: a large source file, sized to leave real margin on slow hardware. The rule
-   * costs about 5 µs per line of this shape on a CI runner (10,500 lines with 3,000 sites measured about
-   * 50 ms there, the whole budget), so this file takes about a fifth of it.
-   */
+  /** 2,100 lines with 600 sites: a large source file of the shape ADR-0072 measured. */
   const FUNCTIONS = 300;
+  /** How many times larger the second file of the growth check is. */
+  const GROWTH = 8;
+  /** Runs per measurement: each job's cost is the fastest of them, the rule's cost and not the machine's. */
+  const RUNS = 5;
   const fileOf = (functions: number): string => Array.from({ length: functions }, (_, index) => [
     `export function load${index}(text: string, response: Response): Order {`,
     `  const raw: unknown = JSON.parse(text); // not "JSON.parse(text) as Order"`,
@@ -435,38 +439,51 @@ describe("no-wire-cast inside the per-edit budget", () => {
   ].join("\n")).join("\n");
   const LARGE = fileOf(FUNCTIONS);
 
-  /** One timed run of the rule over a generated file of `functions` functions, checking it found every site. */
-  const timedRun = (source: string, functions: number): number => {
+  /** The milliseconds one run of `job` takes. */
+  const timed = (job: () => void): number => {
     const started = performance.now();
-    const violations = lint(source);
-    const spent = performance.now() - started;
-    expect(violations).toHaveLength(functions * SITES_PER_FUNCTION);
-    return spent;
+    job();
+    return performance.now() - started;
   };
 
-  it(`reads a ${(FUNCTIONS * LINES_PER_FUNCTION).toLocaleString("en-US")}-line file with ${FUNCTIONS * SITES_PER_FUNCTION} sites inside the budget`, () => {
+  /**
+   * The fastest of `RUNS` runs of each job, the jobs taken in alternation so that drift and warm-up fall
+   * on all of them alike. One untimed run of each comes first: the first call pays for compiling the rule.
+   */
+  const fastestOf = (jobs: readonly (() => void)[]): readonly number[] => {
+    for (const job of jobs) job();
+    const runs = Array.from({ length: RUNS }, () => jobs.map(timed));
+    return jobs.map((_, index) => Math.min(...runs.map((run) => run[index])));
+  };
+
+  /** A run of the rule over a generated file of `functions` functions that checks it found every site. */
+  const findsEverySite = (source: string, functions: number) => (): void => {
+    expect(lint(source)).toHaveLength(functions * SITES_PER_FUNCTION);
+  };
+
+  it(`reads a ${(FUNCTIONS * LINES_PER_FUNCTION).toLocaleString("en-US")}-line file with ${FUNCTIONS * SITES_PER_FUNCTION} sites, each on its own line`, () => {
     expect(LARGE.split("\n")).toHaveLength(FUNCTIONS * LINES_PER_FUNCTION);
-    const elapsed = Array.from({ length: 5 }, () => timedRun(LARGE, FUNCTIONS));
-    // The fastest of five runs: the cost of the rule, not of whatever else the machine was doing.
-    expect(Math.min(...elapsed)).toBeLessThan(PER_FILE_BUDGET_MS);
+    findsEverySite(LARGE, FUNCTIONS)();
     expect(lint(LARGE).at(-1)?.line).toBe(FUNCTIONS * LINES_PER_FUNCTION - 2);
   });
 
-  it("grows linearly with the file: four times the text costs well under twelve times the time", () => {
-    // A ratio, not a deadline, so machine speed cancels out: a linear scan pays about 4×, a scan gone
-    // quadratic 16×. Each size is the fastest of five runs, taken in alternation so drift and warm-up
-    // fall on both alike.
-    const quadruple = fileOf(FUNCTIONS * 4);
-    const runs = Array.from({ length: 5 }, () => [timedRun(LARGE, FUNCTIONS), timedRun(quadruple, FUNCTIONS * 4)] as const);
-    const fastestOnce = Math.min(...runs.map(([once]) => once));
-    const fastestFourfold = Math.min(...runs.map(([, fourfold]) => fourfold));
-    expect(fastestFourfold).toBeLessThan(fastestOnce * 12);
+  it(`grows linearly with the file: ${GROWTH} times the text costs under ${GROWTH * 3} times the time`, () => {
+    // A linear scan pays about 8×, a scan gone quadratic 64×: the bound sits three times above the one
+    // and well under half of the other, so neither noise nor a quadratic regression is close to it.
+    const grown = fileOf(FUNCTIONS * GROWTH);
+    const [once, grownCost] = fastestOf([findsEverySite(LARGE, FUNCTIONS), findsEverySite(grown, FUNCTIONS * GROWTH)]);
+    expect(grownCost).toBeLessThan(once * GROWTH * 3);
   });
 
-  it("answers a file that names neither call without reading it", () => {
+  it("answers a file whose text holds neither `JSON` nor `json` before lexing it; the same file holding `json` pays the lex", () => {
+    // The early exit is a substring test, not a test for the call: the second file names no wire call
+    // either, yet its `json` comment sends it through the lex and the bracket pairing.
     const plain = Array.from({ length: 20_000 }, (_, index) => `export const value${index} = { id: ${index} };`).join("\n");
-    const started = performance.now();
-    expect(lint(plain)).toEqual([]);
-    expect(performance.now() - started).toBeLessThan(PER_FILE_BUDGET_MS);
+    const mentioning = `${plain}\n// read from ./package.json`;
+    const [unlexed, lexed] = fastestOf([
+      () => expect(lint(plain)).toEqual([]),
+      () => expect(lint(mentioning)).toEqual([]),
+    ]);
+    expect(unlexed * 10).toBeLessThan(lexed);
   });
 });

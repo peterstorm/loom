@@ -8,19 +8,23 @@
  *   (`subagentDir()`), beside the stop checks' block counters. It is keyed by
  *   Task, never by agent: `helper mutation-check` is a child process of the
  *   implementer's shell and cannot learn which agent ran it, while the digest
- *   inside the record already binds it to the exact bytes it judged. Like
- *   every unsessioned runtime file it is swept once it is older than
- *   `STALE_SUBAGENT_TTL_MS`; a swept record reads as `not-run`.
+ *   inside the record already binds it to the exact bytes it judged. The file
+ *   name encodes the Task id injectively (`taskIdFileSegment`), so no two
+ *   Tasks ever share a record file. Like every unsessioned runtime file it is
+ *   swept once it is older than `STALE_SUBAGENT_TTL_MS`; a swept record reads
+ *   as `not-run`.
  * - `observeTaskMutationDigest` reads the bytes of every file the Task
- *   declares. Only absence reads as "not there"; any other filesystem refusal
- *   is a failure, so an unreadable file can never pass for a deleted one.
+ *   declares, and the record is read, under the one absence rule
+ *   (`utils/file-absence.ts`): only absence reads as "not there", and any
+ *   other filesystem refusal is a failure, so an unreadable file can never
+ *   pass for a deleted one.
  * - `observeTaskMutation` is what the stop shells hand `runStopChecks`.
  *
  * Total: every function returns its fault as data and none throws.
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { subagentDir } from "../config";
 import { sha256Hex } from "../core/digest";
@@ -40,21 +44,27 @@ import {
   type TaskMutationRecord,
 } from "../core/task-mutation-check";
 import { describeCause } from "../utils/describe-cause";
+import { readFileOrAbsence } from "../utils/file-absence";
 import type { CanonicalRepositoryRoot } from "../utils/workspace-digest";
 
-const ABSENCE_CODES: ReadonlySet<string> = new Set(["ENOENT", "ENOTDIR", "EISDIR"]);
+const KEPT = /^[A-Za-z0-9-]$/;
 
-const errnoCode = (cause: unknown): unknown =>
-  typeof cause === "object" && cause !== null && "code" in cause ? cause.code : undefined;
-
-const isAbsence = (cause: unknown): boolean => {
-  const code = errnoCode(cause);
-  return typeof code === "string" && ABSENCE_CODES.has(code);
-};
+/**
+ * A Task id as one file-name segment, injectively: letters, digits and `-`
+ * stay as they are, and every other UTF-8 byte (`_` included) becomes `_`
+ * and its two lowercase hex digits. Each escape has a fixed width and `_`
+ * never stands for itself, so two distinct ids never share a segment, and the
+ * segment holds no path separator.
+ */
+export function taskIdFileSegment(taskId: string): string {
+  return [...taskId].map((character) => KEPT.test(character)
+    ? character
+    : [...new TextEncoder().encode(character)].map((byte) => `_${byte.toString(16).padStart(2, "0")}`).join("")).join("");
+}
 
 /** Where the record of `taskId` in the repository at `root` is kept. */
 export function taskMutationRecordPath(root: CanonicalRepositoryRoot, taskId: string, directory: string = subagentDir()): string {
-  return join(directory, `task-mutation.${sha256Hex(root).slice(0, 16)}.${taskId.replace(/[^A-Za-z0-9_-]/g, "_")}.json`);
+  return join(directory, `task-mutation.${sha256Hex(root).slice(0, 16)}.${taskIdFileSegment(taskId)}.json`);
 }
 
 /** The record a Task's last run left, `not-run` when there is none, or why the file cannot be read as a record. */
@@ -64,15 +74,12 @@ export function readTaskMutationRecord(
   directory: string = subagentDir(),
 ): DomainResult<TaskMutationRecord, string> {
   const path = taskMutationRecordPath(root, taskId, directory);
-  let text: string;
-  try {
-    text = readFileSync(path, "utf8");
-  } catch (cause) {
-    return isAbsence(cause) ? success(TASK_MUTATION_NOT_RUN) : failure(`${path}: ${describeCause(cause)}`);
-  }
+  const read = readFileOrAbsence(path);
+  if (read.kind === "absent") return success(TASK_MUTATION_NOT_RUN);
+  if (read.kind === "refused") return failure(`${path}: ${describeCause(read.cause)}`);
   let raw: unknown;
   try {
-    raw = JSON.parse(text);
+    raw = JSON.parse(new TextDecoder().decode(read.bytes));
   } catch (cause) {
     return failure(`${path} is not JSON: ${describeCause(cause)}`);
   }
@@ -106,11 +113,9 @@ export function writeTaskMutationRecord(
 
 /** One declared file's bytes beneath `root`, null when it is not there, or why the filesystem refused it. */
 function fileBytes(root: CanonicalRepositoryRoot, path: string): DomainResult<TaskFileBytes, string> {
-  try {
-    return success({ path, bytes: Uint8Array.from(readFileSync(join(root, path))) });
-  } catch (cause) {
-    return isAbsence(cause) ? success({ path, bytes: null }) : failure(`${path} cannot be read: ${describeCause(cause)}`);
-  }
+  const read = readFileOrAbsence(join(root, path));
+  if (read.kind === "refused") return failure(`${path} cannot be read: ${describeCause(read.cause)}`);
+  return success({ path, bytes: read.kind === "bytes" ? read.bytes : null });
 }
 
 /** The digest of the Task's base and declared files as they are beneath `root` now. */

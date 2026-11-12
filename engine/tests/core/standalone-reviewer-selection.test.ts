@@ -1,7 +1,10 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { PLAN_DESIGN_REVIEWERS } from "../../src/core/plan-design-review";
-import { selectStandaloneReviewers, type StandaloneReviewKind, type StandaloneReviewMetadata } from "../../src/core/standalone-review-scope";
+import {
+  STANDALONE_REVIEWER_ROLES, selectStandaloneReviewers, standaloneReviewProfile,
+  type StandaloneReviewKind, type StandaloneReviewMetadata,
+} from "../../src/core/standalone-review-scope";
 
 /**
  * Reviewer selection is the policy that decides which specialists a scope
@@ -111,5 +114,35 @@ describe("selectStandaloneReviewers: plan-design roster (ADR-0070)", () => {
     expect(selectStandaloneReviewers(metadata({ ...markdownPlan, requestedKinds: ["types"] }))).not.toContain("type-design-analyzer");
     expect(selectStandaloneReviewers(metadata({ ...markdownPlan, requestedKinds: ["code"] }))).not.toContain("architecture-tech-lead");
     expect(selectStandaloneReviewers(metadata({ ...markdownPlan, requestedKinds: ["plan-design"] }))).toEqual(PLAN_DESIGN_REVIEWERS);
+  });
+});
+
+describe("standaloneReviewProfile: the one home of per-kind policy", () => {
+  const SCOPE_SELECTED_KINDS = ["code", "errors", "tests", "types", "comments", "architecture", "simplify", "all"] as const;
+
+  it("gives every scope-selected kind the same unrestricted profile", () => {
+    for (const kind of SCOPE_SELECTED_KINDS) {
+      const profile = standaloneReviewProfile([kind]);
+      expect(profile.roster).toEqual({ kind: "scope-selected" });
+      expect(profile.scope).toEqual({ kind: "any" });
+      expect(profile.readObligation).toBe("baseline-diff");
+      expect(profile.successor).toEqual({ kind: "allowed" });
+      for (const role of STANDALONE_REVIEWER_ROLES) expect(profile.lens(role)).toBeNull();
+    }
+  });
+
+  it("fixes the plan design review's roster, single-file scope, whole-document read and fresh-review rule", () => {
+    const profile = standaloneReviewProfile(["plan-design"]);
+    expect(profile.roster).toEqual({ kind: "fixed", reviewers: PLAN_DESIGN_REVIEWERS });
+    expect(profile.scope).toEqual({ kind: "exactly-one-file", names: "the plan" });
+    expect(profile.readObligation).toBe("whole-document");
+    expect(profile.successor).toMatchObject({ kind: "refused", reason: expect.stringContaining("no successor") });
+  });
+
+  it("resolves a kind set to the profiled kind it contains, as reviewer selection does", () => {
+    fc.assert(fc.property(fc.subarray([...SCOPE_SELECTED_KINDS]), fc.boolean(), (kinds, planDesign) => {
+      const requested: StandaloneReviewKind[] = planDesign ? [...kinds, "plan-design"] : [...kinds];
+      expect(standaloneReviewProfile(requested)).toBe(standaloneReviewProfile([planDesign ? "plan-design" : "code"]));
+    }));
   });
 });

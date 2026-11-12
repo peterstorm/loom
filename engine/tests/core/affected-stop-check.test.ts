@@ -12,7 +12,9 @@
  *   property asserts no agent is blocked more than a check's cap by that
  *   check (SC-005);
  * - `renderAffectedBlock` and `renderStopChecksBlock` build the one combined
- *   message, with a heading per contributing check (AS-028).
+ *   message, with a heading per contributing check (AS-028);
+ * - `mapSomeChecks` maps exactly the checks a block names, in check order:
+ *   the shape the stop shell renders the block's parts through.
  */
 
 import fc from "fast-check";
@@ -33,9 +35,11 @@ import {
 import {
   blockAdmission,
   judgeAffectedRun,
+  mapSomeChecks,
   renderAffectedBlock,
   renderStopChecksBlock,
   stopCheckBlockDecision,
+  type Blocking,
   type BlockingChecks,
   type StopCheckBlockCaps,
   type StopCheckFailures,
@@ -384,7 +388,7 @@ describe("stopCheckBlockDecision", () => {
         for (const name of STOP_CHECK_NAMES) expect(contributed[name]).toBeLessThanOrEqual(CAPS[name]);
       }
       // A lost counter only ever fails open, so blocks stay bounded by every cap together.
-      expect(blocks).toBeLessThanOrEqual(CAP + CAP + MUTATION_CAP);
+      expect(blocks).toBeLessThanOrEqual(STOP_CHECK_NAMES.reduce((total, name) => total + CAPS[name], 0));
     }));
   });
 
@@ -503,5 +507,35 @@ describe("renderStopChecksBlock", () => {
     expect(acceptanceOnly).not.toContain(AFFECTED_BLOCK_HEADING);
 
     expect(renderStopChecksBlock({ acceptance: null, affected: null, mutation: "a guard survived" })).toBe(`${MUTATION_BLOCK_HEADING}\n\na guard survived`);
+  });
+});
+
+describe("mapSomeChecks", () => {
+  const ZERO = { acceptance: count(0), affected: count(0), mutation: count(0) };
+  type Markers = StopCheckFailures<string, string, string>;
+
+  it("maps each check a block names, with its name, and leaves the others empty", () => {
+    const failing: Markers = { acceptance: null, affected: "F", mutation: "M" };
+    const decision = stopCheckBlockDecision(ZERO, failing, CAPS);
+    if (decision.outcome !== "block") throw new Error("two failing checks under their caps block");
+    expect(mapSomeChecks<Blocking<string>, string>(decision.blocking, (name, { failure, blocks }) => `${name}:${failure}:${blocks}`))
+      .toEqual({ acceptance: null, affected: "affected:F:1", mutation: "mutation:M:1" });
+  });
+
+  it("property: the parts fill exactly the slots the block fills, each from its own check, in check order", () => {
+    const failure = (marker: string) => fc.constantFrom<string | null>(marker, null);
+    const failures: fc.Arbitrary<Markers> = fc.record({ acceptance: failure("A"), affected: failure("F"), mutation: failure("M") })
+      .filter(({ acceptance, affected, mutation }) => acceptance !== null || affected !== null || mutation !== null);
+    fc.assert(fc.property(failures, (failing) => {
+      const decision = stopCheckBlockDecision(ZERO, failing, CAPS);
+      if (decision.outcome !== "block") throw new Error("a failing check under its cap blocks");
+      const named: StopCheckName[] = [];
+      const parts = mapSomeChecks<Blocking<string>, string>(decision.blocking, (name, { failure: marker }) => {
+        named.push(name);
+        return `${name}:${marker}`;
+      });
+      for (const name of STOP_CHECK_NAMES) expect(parts[name]).toBe(failing[name] === null ? null : `${name}:${failing[name]}`);
+      expect(named).toEqual(STOP_CHECK_NAMES.filter((name) => failing[name] !== null));
+    }));
   });
 });

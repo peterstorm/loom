@@ -6,7 +6,7 @@
 
 import { readFileSync } from "node:fs";
 import type { HookHandler } from "../../types";
-import { parsePreToolUseInput } from "./pre-tool-use-input";
+import { failClosedInput } from "./pre-tool-use-input";
 import { TASK_GRAPH_PATH, pathExistsFailClosed } from "../../config";
 import { UTILITY_AGENTS } from "../../core/phase-policy";
 import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS, REVIEW_PANEL_AGENTS, ARCH_PANEL_AGENTS, SECURITY_AUDIT_AGENTS } from "../../core/agent-catalog-projections";
@@ -63,17 +63,13 @@ const handler: HookHandler = async (stdin) => {
   // malformed-input branch below already refuses to take.
   if (!pathExistsFailClosed(TASK_GRAPH_PATH)) return { kind: "allow" };
 
-  const input = parsePreToolUseInput(stdin);
-  if (input instanceof Error) {
-    // Malformed hook input on a spawn-gate route: fail CLOSED. An uncaught
-    // parse crash exits 1 (NON-blocking for PreToolUse), letting a Task spawn
-    // without its required skill. (Route is in FAIL_CLOSED_ROUTES for crashes
-    // that escape this handler too.)
-    return {
-      kind: "block",
-      message: `validate-agent-skill: malformed hook input — failing closed: ${input.message}`,
-    };
-  }
+  // Malformed hook input on a spawn-gate route: fail CLOSED. An uncaught
+  // parse crash exits 1 (NON-blocking for PreToolUse), letting a Task spawn
+  // without its required skill. (Route is in FAIL_CLOSED_ROUTES for crashes
+  // that escape this handler too.)
+  const parsed = failClosedInput("validate-agent-skill", stdin);
+  if (!parsed.ok) return parsed.block;
+  const { input } = parsed;
   if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
 
   const subagentType = (input.tool_input?.subagent_type as string | undefined)

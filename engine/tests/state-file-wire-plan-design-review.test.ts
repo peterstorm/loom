@@ -7,6 +7,7 @@
  */
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
+import { parseArtifactDigest } from "../src/core/orchestration-contract/identity";
 import { planDesignGate, planDesignReviewOf, type RecordedPlanDesignReview } from "../src/core/plan-design-review";
 import { resolveInitialState } from "../src/phase-init";
 import { parseTaskGraph } from "../src/state-file-wire";
@@ -46,7 +47,8 @@ describe("plan_design_review on the State File wire", () => {
   it("keeps an absent field absent, which the gate reads as not required", () => {
     const parsed = value(parseTaskGraph(viaDisk(graph())));
     expect("plan_design_review" in parsed).toBe(false);
-    expect(planDesignGate(planDesignReviewOf(parsed.plan_design_review), "0".repeat(64))).toEqual({ kind: "open" });
+    expect(planDesignGate(planDesignReviewOf(parsed.plan_design_review), value(parseArtifactDigest("0".repeat(64)))))
+      .toEqual({ kind: "open" });
   });
 
   it.each([

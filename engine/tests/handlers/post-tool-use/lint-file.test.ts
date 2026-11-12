@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import fc from "fast-check";
 import { editedFilePath } from "../../../src/core/tool-vocabulary";
+import { notAJsonObject, wireOf } from "../../fixtures/json-wire";
 
 
 // --- Test helpers ---
@@ -283,26 +284,24 @@ describe("PostToolUse lint-file handler", () => {
 
 describe("parseLintHookInput", () => {
   const toolInput = fc.dictionary(fc.string(), fc.jsonValue());
-  const notAnObject = fc.jsonValue().filter((value) => typeof value !== "object" || value === null || Array.isArray(value));
 
   it("round-trips the two fields it reads through the wire form, ignoring every other field", () => {
     fc.assert(fc.property(fc.string(), toolInput, fc.dictionary(fc.string(), fc.jsonValue()), (toolName, input, rest) => {
-      const wire: unknown = JSON.parse(JSON.stringify({ ...rest, tool_name: toolName, tool_input: input }));
-      expect(parseLintHookInput(wire)).toEqual({ toolName, toolInput: JSON.parse(JSON.stringify(input)) });
+      const wire = wireOf({ ...rest, tool_name: toolName, tool_input: input });
+      expect(parseLintHookInput(wire)).toEqual({ toolName, toolInput: wireOf(input) });
     }));
   });
 
   it("reads a tool_name that is not a string, or a tool_input that is not an object, as null", () => {
     const notAString = fc.jsonValue().filter((value) => typeof value !== "string");
-    fc.assert(fc.property(notAString, notAnObject, (toolName, input) => {
-      const wire: unknown = JSON.parse(JSON.stringify({ tool_name: toolName, tool_input: input }));
-      expect(parseLintHookInput(wire)).toEqual({ toolName: null, toolInput: null });
+    fc.assert(fc.property(notAString, notAJsonObject, (toolName, input) => {
+      expect(parseLintHookInput(wireOf({ tool_name: toolName, tool_input: input }))).toEqual({ toolName: null, toolInput: null });
     }));
     expect(parseLintHookInput({})).toEqual({ toolName: null, toolInput: null });
   });
 
   it("refuses every JSON value that is not an object", () => {
-    fc.assert(fc.property(notAnObject, (value) => {
+    fc.assert(fc.property(notAJsonObject, (value) => {
       expect(parseLintHookInput(value)).toBeInstanceOf(Error);
     }));
   });

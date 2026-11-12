@@ -53,7 +53,7 @@ import { task } from "../fixtures/contract-status-fixtures";
 import { inMemoryBlockCounters } from "../fixtures/stop-check-block-counters";
 import { recordingStopCheckPorts } from "../fixtures/stop-check-runners";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
-import { junitReport, mutationManifest, START_SHA, type JunitCase, type MutationManifestOverrides } from "../fixtures/task-mutation";
+import { junitReport, mutationManifest, START_SHA, talliedResult, type JunitCase, type MutationManifestOverrides } from "../fixtures/task-mutation";
 
 const IMPL = "src/ledger.ts";
 const TEST = "src/ledger.test.ts";
@@ -62,7 +62,7 @@ const AGENT = "session.agent";
 const COMMAND = taskMutationCommand(PACKAGE_ROOT, "T2");
 const PASSING: JunitCase = { file: TEST, name: "ledger > debits", outcome: "passed" };
 const FAILING: JunitCase = { file: TEST, name: "ledger > credits", outcome: "failed" };
-const CLEAN: TaskMutationResult = { kind: "clean", mutants: 3, candidates: 3 };
+const CLEAN: TaskMutationResult = talliedResult({ killed: 3, candidates: 3 });
 const GUARD: TaskMutant = {
   id: "guard", path: IMPL, line: 4, column: 3, start: 40, end: 70, operator: "guard-removal",
   original: "if (amount <= 0) throw new RangeError();", replacement: ";",
@@ -236,6 +236,14 @@ describe("the Task mutation check fails open", () => {
     await proceeds(stopper(space).stop, "Task mutation check for T2 did not decide (its last run was unavailable: the unmutated tests fail");
   });
 
+  it("for a run whose every mutant only broke collection or ran no test: inconclusive, never clean", async () => {
+    const space = workspace();
+    record(space, talliedResult({ invalid: 3, candidates: 5 }));
+    const outcome = await stopper(space).stop();
+    await proceeds(async () => outcome, "Task mutation check for T2 did not decide (its last run was inconclusive: none of its 3 mutant(s) could be judged");
+    expect(outcome.kind).not.toBe("passed");
+  });
+
   it("for a record that is not a record", async () => {
     const space = workspace();
     writeFileSync(taskMutationRecordPath(space.root, "T2", space.records), "{ not json");
@@ -285,6 +293,7 @@ describe("the block cap over any run of stops", () => {
     { kind: "stale" },
     { kind: "current", result: SURVIVORS },
     { kind: "current", result: CLEAN },
+    { kind: "current", result: talliedResult({ invalid: 2, candidates: 2 }) },
     { kind: "current", result: taskMutationUnavailable("the unmutated tests fail") },
   );
   const holds = (standing: TaskMutationStanding): boolean => standing.kind !== "current" || standing.result.kind === "survivors";

@@ -30,13 +30,17 @@ import {
 import { OWNER_MAP_SECTION } from "../../src/core/owner-verification/owner-map";
 import type { ExportBinding } from "../../src/core/skeleton/types";
 import {
+  classifyPersistedWaveBatch,
+  installedContractSurface,
   waveRunRosterProblem,
   waveTaskReviewRoster,
+  waveTaskReviewRosters,
   type WaveRequestBatch,
 } from "../../src/core/wave-review-authority";
 import type { ReviewRun, Task, TaskGraph } from "../../src/types";
 import { contract, surface } from "../fixtures/contract-status-fixtures";
 import { ADMISSION_FEE_TABLE_STAMP, FEE_TABLE, someParagraph } from "../fixtures/owner-families";
+import { value } from "../fixtures/parse-result";
 import { binding } from "../fixtures/skeleton-builders";
 import {
   issueWaveBatchFixture,
@@ -390,5 +394,77 @@ describe("a Review Run installed without the contract surface keeps its roster (
     expect(surfaceOf(packetOf(batch, "type-design-analyzer", "T1"))).toBe(renderContractSurfaceSection(PLAN_FILE, [PRICING_SURFACE]));
     expect(waveRunRosterProblem(owned, 2, taskOf(owned, "T1"), fiveAgentRun))
       .toEqual({ kind: "expected-agents-differ", taskId: "T1", roster: ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS });
+  });
+});
+
+describe("installedContractSurface: the one reading of an installed Review Run for the contract surface", () => {
+  const rosters = fc.constantFrom<readonly [string, ...string[]] | undefined>(
+    undefined,
+    BASE_WAVE_REVIEW_AGENTS,
+    ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS,
+    ["code-reviewer", "type-design-analyzer"],
+    ["architecture-tech-lead", ...BASE_WAVE_REVIEW_AGENTS],
+  );
+
+  it("property: a run was issued without the surface exactly when it names the base five and no other reason holds", () => {
+    fc.assert(fc.property(rosters, fc.boolean(), (agents, ownerMap) => {
+      const installed = agents === undefined ? undefined : { expected_agents: agents };
+      const issuedWithout = agents === BASE_WAVE_REVIEW_AGENTS && !ownerMap;
+      expect(installedContractSurface(installed, { ownerMap }))
+        .toEqual({ kind: issuedWithout ? "issued-without-surface" : "derive" });
+    }));
+  });
+
+  it("reads the roster by value, not by identity: an equal copy of the base five was issued without the surface", () => {
+    expect(installedContractSurface({ expected_agents: [...BASE_WAVE_REVIEW_AGENTS] }, { ownerMap: false }))
+      .toEqual({ kind: "issued-without-surface" });
+  });
+});
+
+/**
+ * ADR-0069 "Negative and known limits" names two cases as accepted behaviour:
+ * both fail closed, and neither is closed without a State File wire change.
+ * These tests pin that outcome, so a later change cannot turn either block
+ * into a roster mismatch that settles.
+ */
+describe("ADR-0069 known limits, pinned as accepted behaviour", () => {
+  it("a Contract Task whose review settled before the upgrade re-derives six against the five issued, so recovery refuses the issued batch", () => {
+    const root = projectWithPlan();
+    const issuedBeforeUpgrade = issueWaveBatchFixture(root, contractWave({}));
+    // Settled: the review passed and no Review Run is installed any longer, so
+    // nothing records the roster the batch was issued with.
+    const upgraded = contractWave(TYPED);
+    const settled: TaskGraph = {
+      ...upgraded,
+      tasks: upgraded.tasks.map((task): Task => (task.id === "T1" ? { ...task, review_status: "passed", review_run: undefined } : task)),
+    };
+    const rosters = value(waveTaskReviewRosters(settled, 2, ["T1", "T2"]));
+    expect(rosters).toEqual([
+      { taskId: "T1", roster: ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS },
+      { taskId: "T2", roster: BASE_WAVE_REVIEW_AGENTS },
+    ]);
+    // Persisted-batch recovery: the issued batch is not the derived one.
+    const recovered = issuedBeforeUpgrade.subjects.map(({ role, taskId }, index) => ({ role, taskId, value: index }));
+    expect(classifyPersistedWaveBatch(rosters, recovered)).toEqual({ kind: "incomplete" });
+    // Completed-protocol verification: the derived roster names a role no issued request carries.
+    expect(rolesOf(issuedBeforeUpgrade, "T1")).not.toContain("architecture-tech-lead");
+  });
+
+  it("an owner-mapped Contract Task keeps its six-agent run, but a republished batch differs from the issued one in exactly the two surface packets", () => {
+    const root = projectWithPlan();
+    const ownerStamp = { owner_obligations: ADMISSION_FEE_TABLE_STAMP };
+    const issuedBeforeUpgrade = issueWaveBatchFixture(root, contractWave(ownerStamp, [FEE_TABLE.matrixTest]));
+    const sixAgentRun = installedRun(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS);
+    const upgraded = withInstalledRun(contractWave({ ...TYPED, ...ownerStamp }, [FEE_TABLE.matrixTest]), "T1", sixAgentRun);
+    // The installed run is admitted: its roster is six with or without the surface.
+    expect(waveRunRosterProblem(upgraded, 2, taskOf(upgraded, "T1"), sixAgentRun)).toBeNull();
+    const republished = issueWaveBatchFixture(root, upgraded);
+    expect(republished.subjects).toEqual(issuedBeforeUpgrade.subjects);
+    const differing = republished.subjects.filter((_subject, index) =>
+      republished.packets[index]?.digest !== issuedBeforeUpgrade.packets[index]?.digest);
+    expect(differing).toEqual([
+      { role: "type-design-analyzer", taskId: "T1" },
+      { role: "architecture-tech-lead", taskId: "T1" },
+    ]);
   });
 });

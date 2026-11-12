@@ -6,7 +6,8 @@
  * - The base commit holds `src/ledger.mjs` without the guard and the runner
  *   `scripts/runner.mjs`. The Task's work is left uncommitted: the guard on
  *   line 2, and the test file `tests` selects.
- * - The frozen `affectedRunner` is `node scripts/runner.mjs {files}`. For each
+ * - The frozen manifest is the shared `mutationManifest` with `.test.mjs` test
+ *   files and `affectedRunner` `node scripts/runner.mjs {files}`. For each
  *   implementation file it is given, the runner imports the sibling
  *   `<name>.test.mjs`, runs every case it exports and writes a JUnit
  *   report. A test file that fails to load is reported as Vitest reports it:
@@ -20,13 +21,14 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isRecord } from "../../src/core/plain-record";
-import { freezeVerificationManifest, type FrozenVerificationManifest, type TaskMutationCheckSetting } from "../../src/core/verification-manifest";
+import type { FrozenVerificationManifest, TaskMutationCheckSetting } from "../../src/core/verification-manifest";
 import { StateManager } from "../../src/state-manager";
 import type { TaskGraph } from "../../src/types";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "./canonical-temp-dir";
 import { stateFileJson, task, writeStateFile } from "./contract-status-fixtures";
 import { taskFixture } from "./task-lifecycle";
+import { mutationManifest, type AffectedRunnerDeclaration } from "./task-mutation";
 
 export const LEDGER = Object.freeze({
   impl: "src/ledger.mjs",
@@ -136,21 +138,14 @@ function write(root: string, path: string, text: string): void {
   writeFileSync(join(root, path), text);
 }
 
-function manifestOf(setting: TaskMutationCheckSetting | undefined): FrozenVerificationManifest {
-  const frozen = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
-    schemaVersion: 2,
-    kind: "loom-verification-manifest",
-    checks: [],
-    testFileSuffixes: [".test.mjs"],
-    affectedRunner: {
-      executable: "node", args: [LEDGER.runner, "{files}"], cwd: ".", timeoutMs: 30_000,
-      report: { kind: "required-file", path: LEDGER.report },
-    },
-    ...(setting === undefined ? {} : { taskMutationCheck: setting }),
-  })));
-  if (!frozen.ok) throw new Error(`fixture manifest refused: ${frozen.error.errors.join("; ")}`);
-  return frozen.value;
-}
+/** The fixture's real runner: node runs `scripts/runner.mjs` over the files it is given. */
+const LEDGER_RUNNER: AffectedRunnerDeclaration = {
+  executable: "node", args: [LEDGER.runner, "{files}"], cwd: ".", timeoutMs: 30_000,
+  report: { kind: "required-file", path: LEDGER.report },
+};
+
+const manifestOf = (setting: TaskMutationCheckSetting | undefined): FrozenVerificationManifest =>
+  mutationManifest({ affectedRunner: LEDGER_RUNNER, testFileSuffixes: [".test.mjs"], ...(setting === undefined ? {} : { taskMutationCheck: setting }) });
 
 /** Build one fixture repository; `cleanupTaskMutationRepos` removes it. */
 export function taskMutationRepo(options: TaskMutationRepoOptions): TaskMutationRepo {

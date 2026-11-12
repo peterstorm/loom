@@ -934,7 +934,8 @@ function taskMutationSection(
       "mutant), name it and say why in your final report.",
     "Any later edit to a file in your file list makes the result stale, so run it after your last edit. The engine reads the result " +
       "when you stop: where the harness can keep you working, a missing, stale or surviving result does, at most " +
-      `${TASK_MUTATION_STOP_CHECK_MAX_BLOCKS} times. A result of \`unavailable\` never holds you. The check's own runs are not ` +
+      `${TASK_MUTATION_STOP_CHECK_MAX_BLOCKS} times. A result of \`unavailable\` never holds you, nor does \`inconclusive\` ` +
+      "(every mutant only broke test collection or ran no test: check that your tests import the changed file). The check's own runs are not " +
       "test evidence, so your final verification run still follows it.",
     "",
     "Files it mutates:",

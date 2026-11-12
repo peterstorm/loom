@@ -14,10 +14,12 @@
  * so they leave no test run and no report where the Task's own verification
  * is observed.
  *
- * Every result is printed and exits 0: survivors, a clean run, a Task that
- * owes nothing and a run that could not decide are all answers. Only a
- * command line or TaskGraph that cannot be read, or a record that cannot be
- * written, is an error.
+ * Every result is printed and exits 0: survivors, a clean run, a run with no
+ * mutation site, an inconclusive run (every mutant only broke collection or
+ * ran no test), a Task that owes nothing and a run that could not decide are
+ * all answers. Only a command line or TaskGraph that cannot be read, a Task id
+ * the TaskGraph does not hold, or a record that cannot be written, is an
+ * error.
  */
 
 import type { HookHandler, TaskGraph } from "../../types";

@@ -15,7 +15,7 @@ import { join } from "node:path";
 import fc from "fast-check";
 import { afterEach, describe, expect, it } from "vitest";
 import { emptyAcceptanceExpectation } from "../../src/core/acceptance-contract";
-import { applyTaskMutant, MUTANT_CAP_PER_TASK, taskMutants } from "../../src/core/owner-verification/mutation-plan";
+import { applyMutant, MUTANT_CAP_PER_TASK, taskMutants } from "../../src/core/owner-verification/mutation-plan";
 import type { MatrixTestRun } from "../../src/core/owner-verification/types";
 import {
   KILLING_TEST,
@@ -36,13 +36,14 @@ import {
   observeTaskMutation,
   observeTaskMutationDigest,
   readTaskMutationRecord,
+  taskIdFileSegment,
   taskMutationRecordPath,
   writeTaskMutationRecord,
 } from "../../src/orchestration/task-mutation-record";
 import { runFileMutants, runTaskMutationCheck, type TaskMutationBudget } from "../../src/orchestration/task-mutation-runner";
 import type { HookResult } from "../../src/types";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
-import { junitReport, type JunitCase } from "../fixtures/task-mutation";
+import { junitReport, talliedResult, type JunitCase } from "../fixtures/task-mutation";
 import {
   cleanupTaskMutationRepos,
   GUARDED_IMPL,
@@ -120,7 +121,7 @@ describe("runFileMutants", () => {
   it("runs the unmutated file first, then each mutant's text in plan order", async () => {
     const port = scripted((variant) => variant.kind === "baseline" ? GREEN : KILLED);
     const ran = await runFileMutants(port.run, FILE, SOURCE, NO_CONTRACTS, AMPLE(port));
-    expect(port.variants).toEqual([{ kind: "baseline" }, ...FILE.mutants.map((mutant) => ({ kind: "mutant", text: applyTaskMutant(SOURCE, mutant) }))]);
+    expect(port.variants).toEqual([{ kind: "baseline" }, ...FILE.mutants.map((mutant) => ({ kind: "mutant", text: applyMutant(SOURCE, mutant) }))]);
     expect(ran).toEqual({ ok: true, value: FILE.mutants.map((mutant) => ({ mutant, outcome: "killed" })) });
   });
 
@@ -197,7 +198,7 @@ describe("the Task mutation record store", () => {
     if (duty.kind !== "owed") throw new Error(`the fixture Task owes the check, but is ${duty.reason}`);
     return { at, duty };
   };
-  const CLEAN: TaskMutationResult = { kind: "clean", mutants: 3, candidates: 3 };
+  const CLEAN: TaskMutationResult = talliedResult({ killed: 3, candidates: 3 });
 
   it("reads back the record it wrote, and replaces an earlier one, leaving no staged file", () => {
     const { at, duty } = repo();
@@ -227,9 +228,27 @@ describe("the Task mutation record store", () => {
       taskMutationRecordPath(left.root, "T2", directory),
       taskMutationRecordPath(right.root, "T1", directory),
       taskMutationRecordPath(left.root, "../T1", directory),
+      taskMutationRecordPath(left.root, "T 1", directory),
+      taskMutationRecordPath(left.root, "T_1", directory),
+      taskMutationRecordPath(left.root, "T_201", directory),
     ];
     expect(new Set(paths).size).toBe(paths.length);
     for (const path of paths) expect(path.slice(directory.length + 1)).toMatch(/^task-mutation\.[0-9a-f]{16}\.[A-Za-z0-9_-]+\.json$/);
+  });
+
+  it("keeps an ordinary Task id readable in its file name", () => {
+    expect(taskIdFileSegment("T12")).toBe("T12");
+    expect(taskIdFileSegment("wave-2-T3")).toBe("wave-2-T3");
+    expect(taskIdFileSegment("T 1")).toBe("T_201");
+    expect(taskIdFileSegment("T_1")).toBe("T_5f1");
+  });
+
+  it("property: two distinct Task ids never share a record file name, and none holds a separator", () => {
+    const id = fc.string({ unit: fc.constantFrom("T", "1", "_", " ", "-", "/", ".", "é", "2", "f"), minLength: 1, maxLength: 8 });
+    fc.assert(fc.property(id, id, (left, right) => {
+      expect(taskIdFileSegment(left) === taskIdFileSegment(right)).toBe(left === right);
+      expect(taskIdFileSegment(left)).toMatch(/^[A-Za-z0-9_-]+$/);
+    }));
   });
 
   it.each([
@@ -378,7 +397,7 @@ describe("helper mutation-check over a real repository", () => {
     const at = taskMutationRepo({ tests: "strong" });
     const run = async (): Promise<TaskMutationResult> => {
       at.write(LEDGER.impl, `${GUARDED_IMPL}// edited mid-run\n`);
-      return { kind: "clean", mutants: 1, candidates: 1 };
+      return talliedResult({ killed: 1, candidates: 1 });
     };
     const { printed, records } = await helper(at, undefined, { run });
     expect(printed).toContain("unavailable — the Task's files changed while the check ran");
@@ -407,7 +426,7 @@ describe("helper mutation-check over a real repository", () => {
   it("returns an unwritable record as an error that still carries the result", async () => {
     const blocked = join(tempDir(), "not-a-directory");
     writeFileSync(blocked, "");
-    const run = async (): Promise<TaskMutationResult> => ({ kind: "clean", mutants: 2, candidates: 2 });
+    const run = async (): Promise<TaskMutationResult> => talliedResult({ killed: 2, candidates: 2 });
     const { result } = await helper(taskMutationRepo({ tests: "strong" }), undefined, { run, recordDirectory: blocked });
     expect(result.kind === "error" ? result.message : "").toMatch(/the record could not be written .*the result was:\nTask mutation check for T1: clean/s);
   });

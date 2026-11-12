@@ -47,7 +47,6 @@ import { sha256Hex } from "../digest";
 import { failure, isNonEmpty, success, type DomainResult } from "../orchestration-contract/identity";
 import { parseModule, syntaxErrorsOf } from "./import-graph";
 import type {
-  ApplyMutantFn,
   Mutant,
   MutantCap,
   MutationOperator,
@@ -283,7 +282,5 @@ export function taskMutants(files: readonly ModuleChange[], cap: MutantCap): Dom
 }
 
 /** A file's text with one mutant of either operator set applied: `[start, end)` replaced by `replacement`. */
-export const applyTaskMutant = (text: string, mutant: Pick<TaskMutant, "start" | "end" | "replacement">): string =>
+export const applyMutant = (text: string, mutant: Pick<TaskMutant, "start" | "end" | "replacement">): string =>
   text.slice(0, mutant.start) + mutant.replacement + text.slice(mutant.end);
-
-export const applyMutant: ApplyMutantFn = applyTaskMutant;

@@ -12,8 +12,7 @@ import { canonicalStructuralEquals, boundedThrownCause } from '../../../core/orc
 import { serializeStandaloneReviewAuthority } from '../../../core/standalone-review-records';
 import { parseStandaloneReviewAuthority } from '../../../core/standalone-review-preparation';
 import { type FrozenStandaloneReviewAuthority } from '../../../core/standalone-review-model';
-import { parseStandaloneReviewKind, type StandaloneReviewKind } from '../../../core/standalone-review-scope';
-import { PLAN_DESIGN_REVIEW_KIND } from '../../../core/plan-design-review';
+import { parseStandaloneReviewKind, standaloneReviewProfile, type StandaloneReviewKind } from '../../../core/standalone-review-scope';
 import { parseReviewerProtocolDescriptor } from '../../../core/reviewer-contract';
 import { parseStandaloneReadCoverage, type StandaloneReadCoveragePolicy } from '../../../core/standalone-read-coverage';
 import type { OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, RegisteredWaveGateProgram, WaveGateRestartAudit } from '../../../core/wave-gate-program';
@@ -78,9 +77,10 @@ export function parseStandaloneStartInput(raw: unknown): ProgramParse<Registered
       raw.files.some((path) => typeof path !== "string" || path.length === 0))) {
     return { ok: false, message: "standalone-review files must be null or a non-empty string array" };
   }
-  // A plan design review reviews one named document, never the changed-path union.
-  if (kind === PLAN_DESIGN_REVIEW_KIND && (raw.files === null || raw.files.length !== 1)) {
-    return { ok: false, message: "standalone-review kind plan-design requires files to name exactly the plan" };
+  // A kind that reviews one named document never takes the changed-path union.
+  const { scope } = standaloneReviewProfile([kind]);
+  if (scope.kind === "exactly-one-file" && (raw.files === null || raw.files.length !== 1)) {
+    return { ok: false, message: `standalone-review kind ${kind} requires files to name exactly ${scope.names}` };
   }
   if (typeof raw.dryRun !== "boolean") return { ok: false, message: "standalone-review dryRun must be boolean" };
   return { ok: true, value: Object.freeze({

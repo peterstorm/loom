@@ -8,9 +8,15 @@ import { afterAll, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import fc from "fast-check";
-import { parsePreToolUseInput } from "../../../src/handlers/pre-tool-use/pre-tool-use-input";
+import {
+  failClosedInput,
+  parsePreToolUseInput,
+  type FailClosedGuard,
+} from "../../../src/handlers/pre-tool-use/pre-tool-use-input";
+import blockDirectEdits from "../../../src/handlers/pre-tool-use/block-direct-edits";
 import enforcePhaseTools from "../../../src/handlers/pre-tool-use/enforce-phase-tools";
 import { runGuardStateFile } from "../../../src/handlers/pre-tool-use/guard-state-file";
+import { runGuardSubagentAuthority } from "../../../src/handlers/pre-tool-use/guard-subagent-authority";
 import validateAgentModel from "../../../src/handlers/pre-tool-use/validate-agent-model";
 import validateAgentSkill from "../../../src/handlers/pre-tool-use/validate-agent-skill";
 import validatePhaseOrder from "../../../src/handlers/pre-tool-use/validate-phase-order";
@@ -19,8 +25,14 @@ import validateTemplateSubstitution from "../../../src/handlers/pre-tool-use/val
 import { SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../../src/config";
 import { bindMachineAgent, ledgerPath, machineBindingPath, unbindMachineAgent } from "../../../src/machine/ledger";
 import type { HookHandler } from "../../../src/types";
+import { notAJsonObject } from "../../fixtures/json-wire";
 import { agentIdOf, agentTypeOf, sessionIdOf } from "../../fixtures/machine-identities";
 import { inMemorySessionRegistry } from "../../machine/fake-session-registry";
+
+/** The one block text every fail-closed guard gives a payload it cannot parse. */
+const malformedBlock = (guard: FailClosedGuard, detail: string) =>
+  ({ kind: "block", message: `${guard}: malformed hook input — failing closed: ${detail}` });
+const WRONG_SHAPE_DETAIL = "expected an object with tool_name and tool_input";
 
 /** Valid JSON that is not a PreToolUse payload: no object, no string `tool_name`, or no object `tool_input`. */
 const WRONG_SHAPES: readonly unknown[] = [
@@ -74,16 +86,43 @@ describe("parsePreToolUseInput", () => {
   });
 
   it("refuses every JSON value that is not an object, and unparseable text", () => {
-    fc.assert(fc.property(jsonValue.filter((value) => typeof value !== "object" || value === null || Array.isArray(value)), (value) => {
+    fc.assert(fc.property(notAJsonObject, (value) => {
       expect(parsePreToolUseInput(JSON.stringify(value))).toBeInstanceOf(Error);
     }));
     expect(parsePreToolUseInput("{not json")).toBeInstanceOf(SyntaxError);
   });
 });
 
+describe("failClosedInput", () => {
+  const guard = fc.constantFrom<FailClosedGuard>(
+    "block-direct-edits", "guard-state-file", "guard-subagent-authority", "validate-agent-model",
+    "validate-agent-skill", "validate-phase-order", "validate-task-execution", "validate-template-substitution",
+  );
+
+  it("hands every payload through as parsePreToolUseInput reads it", () => {
+    fc.assert(fc.property(guard, payload, (name, input) => {
+      expect(failClosedInput(name, JSON.stringify(input))).toEqual({ ok: true, input: parsePreToolUseInput(JSON.stringify(input)) });
+    }));
+  });
+
+  it("blocks every payload it cannot parse, naming the guard and the parse error", () => {
+    fc.assert(fc.property(guard, fc.constantFrom(...WRONG_SHAPES), (name, shape) => {
+      expect(failClosedInput(name, JSON.stringify(shape))).toEqual({ ok: false, block: malformedBlock(name, WRONG_SHAPE_DETAIL) });
+    }));
+    const unparseable = parsePreToolUseInput("{not json");
+    expect(unparseable).toBeInstanceOf(SyntaxError);
+    expect(failClosedInput("validate-phase-order", "{not json")).toEqual({
+      ok: false,
+      block: malformedBlock("validate-phase-order", unparseable instanceof Error ? unparseable.message : ""),
+    });
+  });
+});
+
 describe("a wrong-shaped PreToolUse payload takes each guard's malformed-input direction", () => {
-  const failClosed: ReadonlyArray<readonly [string, HookHandler]> = [
+  const failClosed: ReadonlyArray<readonly [FailClosedGuard, HookHandler]> = [
+    ["block-direct-edits", blockDirectEdits],
     ["guard-state-file", (stdin) => runGuardStateFile(stdin, inMemorySessionRegistry())],
+    ["guard-subagent-authority", (stdin) => runGuardSubagentAuthority(stdin, () => [])],
     ["validate-agent-model", validateAgentModel],
     ["validate-phase-order", validatePhaseOrder],
     ["validate-task-execution", validateTaskExecution],
@@ -93,11 +132,7 @@ describe("a wrong-shaped PreToolUse payload takes each guard's malformed-input d
   for (const [name, handler] of failClosed) {
     it(`${name} blocks`, async () => {
       for (const shape of WRONG_SHAPES) {
-        const result = await handler(JSON.stringify(shape), []);
-        expect(result, JSON.stringify(shape)).toMatchObject({
-          kind: "block",
-          message: expect.stringContaining(`${name}: malformed hook input — failing closed`),
-        });
+        expect(await handler(JSON.stringify(shape), []), JSON.stringify(shape)).toEqual(malformedBlock(name, WRONG_SHAPE_DETAIL));
       }
     });
   }
@@ -110,10 +145,8 @@ describe("a wrong-shaped PreToolUse payload takes each guard's malformed-input d
     }
     try {
       for (const shape of WRONG_SHAPES) {
-        expect(await validateAgentSkill(JSON.stringify(shape), []), JSON.stringify(shape)).toMatchObject({
-          kind: "block",
-          message: expect.stringContaining("validate-agent-skill: malformed hook input — failing closed"),
-        });
+        expect(await validateAgentSkill(JSON.stringify(shape), []), JSON.stringify(shape))
+          .toEqual(malformedBlock("validate-agent-skill", WRONG_SHAPE_DETAIL));
       }
     } finally {
       if (created) rmSync(TASK_GRAPH_PATH, { force: true });

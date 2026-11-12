@@ -44,7 +44,7 @@ import {
   TASK_GRAPH_POINTER_SUFFIX,
   type SessionId,
 } from "../../machine/evidence";
-import { parsePreToolUseInput } from "./pre-tool-use-input";
+import { failClosedInput } from "./pre-tool-use-input";
 import {
   ensureRosteredImplementationBinding,
   observeImplementationBinding,
@@ -333,11 +333,6 @@ export function artifactWriteRequest(
   return { callerAgentId: input.agent_id ?? null, targetPath, projectRoot };
 }
 
-/** Malformed hook input on a guard route fails CLOSED: a crash would exit 1 —
- *  NON-blocking for PreToolUse — silently waving the edit past the guard. */
-const malformed = (detail: string) =>
-  ({ kind: "block", message: `block-direct-edits: malformed hook input — failing closed: ${detail}` }) as const;
-
 /**
  * Adapter for core's `ImplementationBindingProbe`. The CALLER's binding is
  * attempted HERE, before the decision, inside the same handler that decides —
@@ -360,8 +355,11 @@ function callerBindingProbe(
 }
 
 const handler: HookHandler = async (stdin) => {
-  const parsed = parsePreToolUseInput(stdin);
-  if (parsed instanceof Error) return malformed(parsed.message);
+  // Malformed hook input on a guard route fails CLOSED: a crash would exit 1 —
+  // NON-blocking for PreToolUse — silently waving the edit past the guard.
+  const read = failClosedInput("block-direct-edits", stdin);
+  if (!read.ok) return read.block;
+  const parsed = read.input;
   // One roster read feeds both the binding attempt and the decision. An
   // unparseable session id reaches core unchanged, which blocks on it.
   const sessionId = parseSessionId(parsed.session_id);

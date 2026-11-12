@@ -70,8 +70,10 @@ The source segmenter gains a finer split, `lexicalSpans`, in which template text
 spans of their own; `sourceSegments` is that split with the two read as code, and its output is unchanged.
 The rule blanks every span that is not code, pairs every bracket in one pass, and answers each question
 about a site from those two tables. A refused shape inside a string, a comment, template text or a regex
-literal is therefore no site, and a bracket inside one cannot unbalance the walk. A file that names neither
-call is answered before it is lexed.
+literal is therefore no site, and a bracket inside one cannot unbalance the walk. A file whose text holds
+neither `JSON` nor `json` is answered before it is lexed. That early exit is a substring test, not a test
+for the call: a file with no wire call that still holds one of the two (`./package.json`, a `toJSON`
+method, a comment) pays the lex and the bracket pairing before the scan finds nothing.
 
 ### 3. Baseline
 Pre-existing sites are grandfathered per project in `wireCastBaseline`, keyed `path::as T` for an assertion
@@ -97,8 +99,16 @@ Loom's own list is empty: its sites are fixed, not recorded.
   On a CI runner a 10,500-line, 515 kB file with 4,500 wire calls (3,000 of them sites) took about 50 ms,
   the whole per-file budget: roughly 5 µs per line. A file that large and that dense in wire calls can
   therefore overrun the deadline on slow hardware, and the edit then fails closed with a timeout error.
-  The test pins a 2,100-line file of the same shape inside the budget and pins linear growth as a ratio
-  between two sizes. A file with no wire call costs a substring search.
+  A file whose text holds neither `JSON` nor `json` costs two substring searches; any other file, wire
+  call or not, pays the lex.
+- **What the tests pin, and what they do not.** The cost tests (`no-wire-cast.test.ts`, "no-wire-cast
+  cost") compare runs on the same machine, so its speed and load cancel out. They pin linear growth (a
+  file eight times larger costs under 24 times as much, where a quadratic scan would pay 64 times) and the
+  early exit (a 20,000-line file holding neither substring costs under a tenth of the same file with a
+  `json` comment, which is lexed). They do NOT pin any wall-clock time: no test holds the rule inside the
+  hook's 50 ms deadline. An absolute bound (a 2,100-line file under 50 ms) was tried and failed on a
+  loaded CI runner at 51.2 ms with no regression in the rule. The 5 µs per line above is a measurement,
+  not a tested guarantee; the deadline itself is enforced at run time, failing the edit closed.
 
 ## Known limits
 The rule reads text and has no type information. None of the following is caught:

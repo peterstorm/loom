@@ -24,6 +24,7 @@ import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { guardDecision } from "../fixtures/guard-decision";
+import { talliedResult } from "../fixtures/task-mutation";
 
 const COMMANDS = [
   taskMutationCommand(LOOM_PACKAGE_ROOT, "T1"),
@@ -41,7 +42,8 @@ const SURVIVORS = renderTaskMutationReport("T1", taskMutationResultOf([{
 
 const OUTPUTS = [
   SURVIVORS,
-  renderTaskMutationReport("T1", { kind: "clean", mutants: 8, candidates: 20 }),
+  renderTaskMutationReport("T1", talliedResult({ killed: 8, candidates: 20 })),
+  renderTaskMutationReport("T1", talliedResult({ invalid: 8, candidates: 20 })),
   renderTaskMutationReport("T1", taskMutationUnavailable("the unmutated tests of src/ledger.ts fail ('debits' (src/ledger.test.ts))")),
 ];
 

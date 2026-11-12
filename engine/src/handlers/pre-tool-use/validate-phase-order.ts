@@ -4,34 +4,22 @@
  * Claude Code wrapper — delegates to core/.
  */
 
-import { existsSync, readFileSync } from "node:fs";
 import type { HookHandler, TaskGraph } from "../../types";
-import { parsePreToolUseInput } from "./pre-tool-use-input";
+import { failClosedInput } from "./pre-tool-use-input";
 import {
   validatePhaseOrder,
-  type ArtifactProbe,
   type PhaseOrderDeps,
 } from "../../core/validate-phase-order";
-import { sha256Bytes } from "../../core/digest";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import { pathExistsFailClosed, taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
-import { findFile } from "../../utils/find-file";
+import { realArtifactProbe } from "../../orchestration/artifact-probe";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { withBriefMarkerExpanded } from "./implementation-brief-marker";
 
-/**
- * The real phase-artifact reads. Artifact absence only ever ADDS a block
- * reason, so a false "missing" here cannot open the gate — plain `existsSync`
- * is the correct probe for this direction, unlike the protected-state read
- * below.
- */
-export const realArtifactProbe: ArtifactProbe = {
-  exists: existsSync,
-  readText: (path: string): string => readFileSync(path, "utf-8"),
-  findFile,
-  sha256: (path: string): string => sha256Bytes(readFileSync(path)),
-};
+// The real phase-artifact reads live in a neutral shell module so other shells
+// share the adapter without importing this handler; re-exported for its tests.
+export { realArtifactProbe };
 
 /**
  * The real protected-state read. It lives HERE rather than in the gate core
@@ -61,15 +49,11 @@ export const realPhaseOrderDeps: PhaseOrderDeps = {
 };
 
 const handler: HookHandler = async (stdin) => {
-  const input = parsePreToolUseInput(stdin);
-  if (input instanceof Error) {
-    // Malformed hook input on a spawn-gate route: fail CLOSED. Returning
-    // allow here would exit 0 and let a Task spawn out of phase order.
-    return {
-      kind: "block",
-      message: `validate-phase-order: malformed hook input — failing closed: ${input.message}`,
-    };
-  }
+  // Malformed hook input on a spawn-gate route: fail CLOSED. Returning
+  // allow here would exit 0 and let a Task spawn out of phase order.
+  const parsed = failClosedInput("validate-phase-order", stdin);
+  if (!parsed.ok) return parsed.block;
+  const { input } = parsed;
   if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
 
   return validatePhaseOrder({

@@ -12,7 +12,8 @@
  * 2. Per file that holds a mutant, one isolated worktree
  *    (`withMutationWorkspace`, the Wave Gate's own): the frozen
  *    `affectedRunner` runs over that file unmutated, then once per mutant.
- *    The real workspace is only ever read.
+ *    The real workspace is only ever read. The read, the base and the run are
+ *    the steps Owner Verification takes too (`mutation-run-steps.ts`).
  * 3. `taskMutationResultOf` tallies the runs.
  *
  * A run launches only while the time left before the deadline holds its whole
@@ -23,7 +24,7 @@
 import { match } from "ts-pattern";
 import { graphAcceptanceExpectation, type AcceptanceExpectation } from "../core/acceptance-contract";
 import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
-import { applyTaskMutant, MUTANT_CAP_PER_TASK, taskMutants, type TaskMutants } from "../core/owner-verification/mutation-plan";
+import { applyMutant, MUTANT_CAP_PER_TASK, taskMutants, type TaskMutants } from "../core/owner-verification/mutation-plan";
 import type { MatrixTestRun } from "../core/owner-verification/types";
 import { parseReviewPath } from "../core/review-packet";
 import {
@@ -42,8 +43,8 @@ import { changedHeadLines } from "../core/unified-diff";
 import type { TaskGraph } from "../types";
 import { describeCause } from "../utils/describe-cause";
 import type { CanonicalRepositoryRoot } from "../utils/workspace-digest";
+import { matrixTestCommand, ownerAtBase, readRepositoryText, resolveWaveBase, runOnce } from "./mutation-run-steps";
 import { withMutationWorkspace, type OwnerVariant } from "./owner-mutation-workspace";
-import { matrixTestCommand, ownerAtBase, readRepositoryText, resolveWaveBase, runOnce } from "./owner-verification-runner";
 
 /** One runner execution over a file, with that file's bytes as `variant` says: the port `runFileMutants` sequences. */
 export type RunTaskFile = (variant: OwnerVariant) => Promise<MatrixTestRun>;
@@ -91,7 +92,7 @@ export async function runFileMutants(
   for (const mutant of mutants) {
     const lateMutant = exhausted(budget);
     if (lateMutant !== null) return failure(lateMutant);
-    const outcome = classifyTaskMutantRun(await run({ kind: "mutant", text: applyTaskMutant(text, mutant) }), expectation);
+    const outcome = classifyTaskMutantRun(await run({ kind: "mutant", text: applyMutant(text, mutant) }), expectation);
     if (outcome.kind === "unobservable") return failure(`a mutant run of ${path} could not be observed: ${outcome.reason}`);
     runs.push({ mutant, outcome: outcome.kind });
   }

@@ -31,6 +31,7 @@ import {
   type SessionId,
 } from "../../../src/machine/evidence";
 import { SUBAGENT_DIR } from "../../../src/config";
+import { notAJsonObject, wireOf } from "../../fixtures/json-wire";
 import { agentIdOf, agentTypeOf, sessionIdOf } from "../../fixtures/machine-identities";
 
 const run = `record-evidence-${process.pid}-${Date.now()}`;
@@ -75,7 +76,6 @@ describe("parseRecordEvidenceInput", () => {
     { requiredKeys: [] },
   );
   const identity = fc.record({ session_id: fc.string(), tool_name: fc.string(), cwd: fc.string() });
-  const wireOf = (value: unknown): unknown => JSON.parse(JSON.stringify(value));
 
   it("round-trips a payload through its wire form", () => {
     fc.assert(fc.property(identity, callFields, (ids, call) => {
@@ -92,7 +92,7 @@ describe("parseRecordEvidenceInput", () => {
   });
 
   it("refuses every JSON value that is not an object", () => {
-    fc.assert(fc.property(fc.jsonValue().filter((value) => typeof value !== "object" || value === null || Array.isArray(value)), (value) => {
+    fc.assert(fc.property(notAJsonObject, (value) => {
       expect(parseRecordEvidenceInput(value)).toBeNull();
     }));
   });

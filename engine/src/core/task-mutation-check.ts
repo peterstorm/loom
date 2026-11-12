@@ -6,15 +6,20 @@
  *
  * Every decision of the check lives here, and each has one home:
  * - `taskMutationDuty`: whether a Task owes the check at all, and over which
- *   files. `helper mutation-check` and the stop arm both ask it, so they
- *   cannot disagree about what the check covers.
+ *   files. `helper mutation-check`, the stop arm and the implementation brief
+ *   (`taskMutationSection` in `core/implementation-brief.ts`) all ask it, so
+ *   they cannot disagree about what the check covers.
  * - `taskMutationDigest`: the identity of what one run judged, over the Task's
  *   base and the bytes of every declared file. The record a run writes carries
  *   it; a stop recomputes it, so a record of other bytes is `stale`.
  * - `classifyTaskBaseline` and `classifyTaskMutantRun`: what one runner
  *   execution says. A red or unobservable baseline is never a survivor: a
  *   sibling Task's half-written bytes make the whole run `unavailable`.
- * - `taskMutationResultOf`: the tally of one run.
+ * - `taskMutationResult`: the one constructor of a run's result, which the
+ *   tally of a run (`taskMutationResultOf`) and the record parser share. A
+ *   result names what the run could judge: `clean` only when the tests killed
+ *   at least one mutant and none survived, `inconclusive` when every mutant
+ *   was no evidence either way, never "clean" over nothing judged.
  * - `parseTaskMutationRecord` and `taskMutationRecordJson`: the record's wire
  *   form, parsed and never cast.
  * - `taskMutationStopVerdict` and the two renderers: what a stop does with
@@ -30,10 +35,11 @@
 import { match } from "ts-pattern";
 import type { AcceptanceExpectation } from "./acceptance-contract/gate";
 import { judgeAffectedRun } from "./affected-stop-check";
+import type { AffectedRunVerdict } from "./affected-stop-check-types";
 import { sha256Bytes, sha256Hex } from "./digest";
 import { taskRolePolicy } from "./distill-task";
 import { DECISION_RECORD_AGENT } from "./model-profiles";
-import { failure, isNonEmpty, nonEmpty, success, type DomainResult, type NonEmpty } from "./orchestration-contract/identity";
+import { failure, isNonEmpty, mapNonEmpty, nonEmpty, success, type DomainResult, type NonEmpty } from "./orchestration-contract/identity";
 import { compareStrings } from "./ordering";
 import { TASK_MUTATION_OPERATORS, type TaskMutant, type TaskMutationOperator } from "./owner-verification/mutation-plan";
 import { contractTaskIdsOf } from "./owner-verification/obligations";
@@ -204,28 +210,47 @@ function reportOf(run: Extract<MatrixTestRun, { kind: "exited" }>): DomainResult
   return report.kind === "unreadable" ? failure(`the runner's report could not be read: ${report.reason}`) : success(report.bytes);
 }
 
+/** A verdict on a report the judge could read. */
+type ReadVerdict = Exclude<AffectedRunVerdict, { kind: "unobservable" }>;
+
 /**
- * The baseline of one file. The report is judged by the affected stop check's
- * own judge, so a failure the Wave Gate excuses as expected RED is not red
- * here either.
+ * What every classifier reads first: the run timed out, could not be
+ * observed (no start, no readable report, a report the judge cannot read), or
+ * its report's verdict. The report is judged by the affected stop check's own
+ * judge, so a failure the Wave Gate excuses as expected RED is no failure
+ * here either. A timeout is left to the caller: a baseline and a mutant read
+ * it oppositely.
  */
-export function classifyTaskBaseline(run: MatrixTestRun, expectation: AcceptanceExpectation): TaskBaseline {
+type JudgedRun =
+  | Readonly<{ kind: "timed-out"; elapsedMs: number }>
+  | Readonly<{ kind: "unobservable"; reason: string }>
+  | Readonly<{ kind: "judged"; verdict: ReadVerdict }>;
+
+function judgedRun(run: MatrixTestRun, expectation: AcceptanceExpectation): JudgedRun {
   if (run.kind === "spawn-failed") return unobservable(`the runner could not start: ${run.message}`);
-  if (run.kind === "timed-out") return unobservable(`the unmutated run exceeded its time limit after ${run.elapsedMs} ms`);
+  if (run.kind === "timed-out") return run;
   const report = reportOf(run);
   if (!report.ok) return unobservable(report.error);
   const verdict = judgeAffectedRun(parseJunitTestcases(report.value), expectation);
+  return verdict.kind === "unobservable" ? unobservable(verdict.reason) : Object.freeze({ kind: "judged", verdict });
+}
+
+const GREEN: TaskBaseline = Object.freeze({ kind: "green" });
+const UNTESTED: TaskBaseline = Object.freeze({ kind: "untested" });
+
+/** The baseline of one file. A timeout leaves it unobservable: nothing it ran can be trusted. */
+export function classifyTaskBaseline(run: MatrixTestRun, expectation: AcceptanceExpectation): TaskBaseline {
+  const judged = judgedRun(run, expectation);
+  if (judged.kind === "timed-out") return unobservable(`the unmutated run exceeded its time limit after ${judged.elapsedMs} ms`);
+  if (judged.kind === "unobservable") return judged;
+  const { verdict } = judged;
   switch (verdict.kind) {
     case "passed":
-      return Object.freeze({ kind: verdict.observed === "zero-tests" ? "untested" : "green" });
+      return verdict.observed === "zero-tests" ? UNTESTED : GREEN;
     case "excused":
-      return Object.freeze({ kind: "green" });
-    case "failing": {
-      const [first, ...rest] = verdict.testcases;
-      return Object.freeze({ kind: "red", failures: [first, ...rest].map(({ name, file }) => `'${name}' (${file})`) as [string, ...string[]] });
-    }
-    case "unobservable":
-      return unobservable(verdict.reason);
+      return GREEN;
+    case "failing":
+      return Object.freeze({ kind: "red", failures: mapNonEmpty(verdict.testcases, ({ name, file }) => `'${name}' (${file})`) });
     default: {
       const unreachable: never = verdict;
       return unreachable;
@@ -243,11 +268,10 @@ const INVALID: TaskMutantOutcome = Object.freeze({ kind: "invalid" });
  * or that ran no testcase, is `invalid`.
  */
 export function classifyTaskMutantRun(run: MatrixTestRun, expectation: AcceptanceExpectation): TaskMutantOutcome {
-  if (run.kind === "spawn-failed") return unobservable(`the runner could not start: ${run.message}`);
-  if (run.kind === "timed-out") return KILLED;
-  const report = reportOf(run);
-  if (!report.ok) return unobservable(report.error);
-  const verdict = judgeAffectedRun(parseJunitTestcases(report.value), expectation);
+  const judged = judgedRun(run, expectation);
+  if (judged.kind === "timed-out") return KILLED;
+  if (judged.kind === "unobservable") return judged;
+  const { verdict } = judged;
   switch (verdict.kind) {
     case "passed":
       return verdict.observed === "zero-tests" ? INVALID : SURVIVED;
@@ -255,8 +279,6 @@ export function classifyTaskMutantRun(run: MatrixTestRun, expectation: Acceptanc
       return SURVIVED;
     case "failing":
       return verdict.testcases.every(({ outcome }) => outcome === "collection-error") ? INVALID : KILLED;
-    case "unobservable":
-      return unobservable(verdict.reason);
     default: {
       const unreachable: never = verdict;
       return unreachable;
@@ -297,17 +319,93 @@ export type TaskSurvivor = Readonly<{
 /** What one mutant of a run came to, once its file's baseline was green or untested. */
 export type TaskMutantRun = Readonly<{ mutant: TaskMutant; outcome: "killed" | "invalid" | "survived" | "untested" }>;
 
+declare const TASK_MUTATION_RESULT: unique symbol;
+
 /**
- * What one `helper mutation-check` run found. `mutants` counts the mutants
- * selected and `candidates` the sites they were chosen from. `unavailable` is
- * a run that could not decide, and it never blocks.
+ * What one `helper mutation-check` run found. `candidates` counts the mutation
+ * sites on the Task's changed lines; the mutants selected from them are
+ * `killed + invalid + survivors`, derived and never stored. `invalid` counts
+ * the mutants that only broke collection or ran no test: no evidence either
+ * way, so they are never survivors and never kills.
+ * - `no-mutants`: no mutation site is on a changed line, so nothing was
+ *   selected (and `candidates` is 0).
+ * - `clean`: no survivor, and the tests killed at least one mutant.
+ * - `survivors`: at least one mutant the tests did not kill.
+ * - `inconclusive`: mutants were selected and every one was invalid, so the
+ *   tests judged none of them. It is no pass: it never reads as clean.
+ * - `unavailable`: the run could not decide.
+ * `inconclusive` and `unavailable` never block a stop.
+ *
+ * Branded: only `taskMutationResult` and `taskMutationUnavailable` build one,
+ * so a result's kind always agrees with its counts. A "clean" run that judged
+ * no mutant cannot be written.
  */
-export type TaskMutationResult =
-  | Readonly<{ kind: "clean"; mutants: number; candidates: number }>
-  | Readonly<{ kind: "survivors"; mutants: number; candidates: number; survivors: NonEmpty<TaskSurvivor> }>
+export type TaskMutationResult = TaskMutationResultFields & { readonly [TASK_MUTATION_RESULT]: true };
+
+/** A result's shape before its invariants are checked. */
+type TaskMutationResultFields =
+  | Readonly<{ kind: "no-mutants" }>
+  | Readonly<{ kind: "clean"; killed: number; invalid: number; candidates: number }>
+  | Readonly<{ kind: "survivors"; killed: number; invalid: number; candidates: number; survivors: NonEmpty<TaskSurvivor> }>
+  | Readonly<{ kind: "inconclusive"; invalid: number; candidates: number }>
   | Readonly<{ kind: "unavailable"; reason: string }>;
 
-export const taskMutationUnavailable = (reason: string): TaskMutationResult => Object.freeze({ kind: "unavailable", reason });
+/** The kinds a result can be, in the order the record's parser names them. */
+const TASK_MUTATION_RESULT_KINDS = Object.freeze(["no-mutants", "clean", "survivors", "inconclusive", "unavailable"] as const);
+
+/** A run's tallies before the result's invariants are checked. */
+export type TaskMutationTally = Readonly<{
+  candidates: number;
+  killed: number;
+  invalid: number;
+  survivors: readonly TaskSurvivor[];
+}>;
+
+/** The brand's one minting point, reached only once the invariants hold. */
+const mintResult = (fields: TaskMutationResultFields): TaskMutationResult => Object.freeze(fields) as TaskMutationResult;
+
+export const taskMutationUnavailable = (reason: string): TaskMutationResult => mintResult({ kind: "unavailable", reason });
+
+const isCount = (raw: unknown): raw is number => typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0;
+
+/**
+ * The only constructor of a decided result. It refuses a count that is not a
+ * non-negative integer, more mutants than candidate sites, and candidate sites
+ * from which no mutant was selected (the selection holds `min(candidates, cap)`
+ * mutants, and the cap is positive). The kind follows from the tallies alone:
+ * survivors when any mutant survived; otherwise no-mutants when none was
+ * selected, inconclusive when none was killed, and clean only when one was.
+ */
+export function taskMutationResult({ candidates, killed, invalid, survivors }: TaskMutationTally): DomainResult<TaskMutationResult, string> {
+  if (![candidates, killed, invalid].every(isCount)) return failure("the candidates, killed and invalid counts must be non-negative integers");
+  const mutants = killed + invalid + survivors.length;
+  if (mutants > candidates) return failure(`${mutants} mutant(s) were judged, more than the ${candidates} candidate site(s) they are selected from`);
+  if (mutants === 0 && candidates > 0) return failure(`no mutant was selected from ${candidates} candidate site(s)`);
+  const named = nonEmpty(survivors);
+  if (named !== null) return success(mintResult({ kind: "survivors", killed, invalid, candidates, survivors: Object.freeze(named) }));
+  if (mutants === 0) return success(mintResult({ kind: "no-mutants" }));
+  if (killed === 0) return success(mintResult({ kind: "inconclusive", invalid, candidates }));
+  return success(mintResult({ kind: "clean", killed, invalid, candidates }));
+}
+
+/** The mutants a decided result counts: those selected from its candidate sites. */
+export function taskMutationMutants(result: TaskMutationResult): number {
+  switch (result.kind) {
+    case "no-mutants":
+    case "unavailable":
+      return 0;
+    case "clean":
+      return result.killed + result.invalid;
+    case "survivors":
+      return result.killed + result.invalid + result.survivors.length;
+    case "inconclusive":
+      return result.invalid;
+    default: {
+      const unreachable: never = result;
+      return unreachable;
+    }
+  }
+}
 
 const survivorOf = ({ mutant, outcome }: TaskMutantRun): readonly TaskSurvivor[] =>
   outcome === "killed" || outcome === "invalid" ? [] : [Object.freeze({
@@ -320,12 +418,19 @@ const survivorOf = ({ mutant, outcome }: TaskMutantRun): readonly TaskSurvivor[]
     coverage: outcome === "untested" ? "untested" : "tested",
   })];
 
-/** The result of a run that judged every selected mutant: its survivors, or clean when there are none. */
+/**
+ * The result of a run that judged every selected mutant, tallied through
+ * `taskMutationResult`. Runs whose tally breaks its invariants (a defect in
+ * the runner, never an answer) are `unavailable`, naming why.
+ */
 export function taskMutationResultOf(runs: readonly TaskMutantRun[], candidates: number): TaskMutationResult {
-  const survivors = nonEmpty(runs.flatMap(survivorOf));
-  return survivors === null
-    ? Object.freeze({ kind: "clean", mutants: runs.length, candidates })
-    : Object.freeze({ kind: "survivors", mutants: runs.length, candidates, survivors });
+  const tallied = taskMutationResult({
+    candidates,
+    killed: runs.filter(({ outcome }) => outcome === "killed").length,
+    invalid: runs.filter(({ outcome }) => outcome === "invalid").length,
+    survivors: runs.flatMap(survivorOf),
+  });
+  return tallied.ok ? tallied.value : taskMutationUnavailable(`the run's tally is inconsistent: ${tallied.error}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -364,7 +469,7 @@ export function taskMutationRecordJson({ taskId, digest, result }: RecordedTaskM
 type UnknownRecord = Readonly<Record<string, unknown>>;
 
 const isRecord = (raw: unknown): raw is UnknownRecord => typeof raw === "object" && raw !== null && !Array.isArray(raw);
-const isCount = (raw: unknown): raw is number => typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0;
+const isList = (raw: unknown): raw is readonly unknown[] => Array.isArray(raw);
 const isPosition = (raw: unknown): raw is number => isCount(raw) && raw > 0;
 const isText = (raw: unknown): raw is string => typeof raw === "string" && raw !== "";
 
@@ -392,51 +497,65 @@ function parseSurvivor(raw: unknown, path: string): DomainResult<TaskSurvivor, s
   }));
 }
 
-function parseCounts(raw: UnknownRecord, path: string): DomainResult<Readonly<{ mutants: number; candidates: number }>, string> {
-  const { mutants, candidates } = raw;
-  if (!isCount(mutants) || !isCount(candidates)) return failure(`${path}.mutants and ${path}.candidates must be non-negative integers`);
-  return mutants > candidates
-    ? failure(`${path}.mutants (${mutants}) exceeds ${path}.candidates (${candidates})`)
-    : success({ mutants, candidates });
+/** A counted field of a decided result: a non-negative integer, or the refusal naming it. */
+function countAt(raw: UnknownRecord, key: string, path: string): DomainResult<number, string> {
+  const value = raw[key];
+  return isCount(value) ? success(value) : failure(`${path}.${key} must be a non-negative integer`);
 }
 
-function parseSurvivorsResult(raw: UnknownRecord, path: string): DomainResult<TaskMutationResult, string> {
-  const counts = parseCounts(raw, path);
-  if (!counts.ok) return counts;
-  if (!Array.isArray(raw.survivors as unknown)) return failure(`${path}.survivors must be an array`);
+function parseSurvivors(raw: unknown, path: string): DomainResult<NonEmpty<TaskSurvivor>, string> {
+  if (!isList(raw)) return failure(`${path} must be an array`);
   const survivors: TaskSurvivor[] = [];
-  for (const [index, entry] of (raw.survivors as readonly unknown[]).entries()) {
-    const survivor = parseSurvivor(entry, `${path}.survivors[${index}]`);
+  for (const [index, entry] of raw.entries()) {
+    const survivor = parseSurvivor(entry, `${path}[${index}]`);
     if (!survivor.ok) return survivor;
     survivors.push(survivor.value);
   }
-  if (!isNonEmpty(survivors)) return failure(`${path}.survivors must name at least one survivor`);
-  return survivors.length > counts.value.mutants
-    ? failure(`${path}.survivors names more survivors than ${path}.mutants`)
-    : success(Object.freeze({ kind: "survivors", ...counts.value, survivors: Object.freeze(survivors) }));
+  return isNonEmpty(survivors) ? success(survivors) : failure(`${path} must name at least one survivor`);
+}
+
+/** The wire keys each decided kind holds besides `kind`, in serialized order. */
+const DECIDED_KEYS: Readonly<Record<Exclude<TaskMutationResult["kind"], "unavailable">, readonly string[]>> = Object.freeze({
+  "no-mutants": [],
+  "clean": ["killed", "invalid", "candidates"],
+  "survivors": ["killed", "invalid", "candidates", "survivors"],
+  "inconclusive": ["invalid", "candidates"],
+});
+
+type DecidedKind = keyof typeof DECIDED_KEYS;
+
+const isDecidedKind = (raw: unknown): raw is DecidedKind =>
+  TASK_MUTATION_RESULT_KINDS.some((kind) => kind !== "unavailable" && kind === raw);
+
+/**
+ * A decided result's wire form, through the one constructor: a document whose
+ * counts make another kind than the one it names (a "clean" run with no kill,
+ * say) is refused, never re-read as the kind its counts make.
+ */
+function parseDecided(raw: UnknownRecord, kind: DecidedKind, path: string): DomainResult<TaskMutationResult, string> {
+  const shape = exactKeys(raw, ["kind", ...DECIDED_KEYS[kind]], path);
+  if (shape !== null) return failure(shape);
+  const counted = (key: string): DomainResult<number, string> => key in raw ? countAt(raw, key, path) : success(0);
+  const candidates = counted("candidates");
+  if (!candidates.ok) return candidates;
+  const killed = counted("killed");
+  if (!killed.ok) return killed;
+  const invalid = counted("invalid");
+  if (!invalid.ok) return invalid;
+  const survivors = kind === "survivors" ? parseSurvivors(raw.survivors, `${path}.survivors`) : success([]);
+  if (!survivors.ok) return survivors;
+  const result = taskMutationResult({ candidates: candidates.value, killed: killed.value, invalid: invalid.value, survivors: survivors.value });
+  if (!result.ok) return failure(`${path}: ${result.error}`);
+  return result.value.kind === kind ? result : failure(`${path} names a ${kind} result, but its counts make it ${result.value.kind}`);
 }
 
 function parseResult(raw: unknown, path: string): DomainResult<TaskMutationResult, string> {
   if (!isRecord(raw)) return failure(`${path} must be an object`);
-  // The kind is a wire value the type system does not own, so the fallback names the unknown-kind arm.
-  return match(raw.kind)
-    .returnType<DomainResult<TaskMutationResult, string>>()
-    .with("clean", () => {
-      const shape = exactKeys(raw, ["kind", "mutants", "candidates"], path);
-      if (shape !== null) return failure(shape);
-      const counts = parseCounts(raw, path);
-      return counts.ok ? success(Object.freeze({ kind: "clean", ...counts.value })) : counts;
-    })
-    .with("survivors", () => {
-      const shape = exactKeys(raw, ["kind", "mutants", "candidates", "survivors"], path);
-      return shape === null ? parseSurvivorsResult(raw, path) : failure(shape);
-    })
-    .with("unavailable", () => {
-      const shape = exactKeys(raw, ["kind", "reason"], path);
-      if (shape !== null) return failure(shape);
-      return isText(raw.reason) ? success(taskMutationUnavailable(raw.reason)) : failure(`${path}.reason must be a non-empty string`);
-    })
-    .otherwise(() => failure(`${path}.kind must be "clean", "survivors" or "unavailable"`));
+  if (isDecidedKind(raw.kind)) return parseDecided(raw, raw.kind, path);
+  if (raw.kind !== "unavailable") return failure(`${path}.kind must be one of ${TASK_MUTATION_RESULT_KINDS.map((kind) => `"${kind}"`).join(", ")}`);
+  const shape = exactKeys(raw, ["kind", "reason"], path);
+  if (shape !== null) return failure(shape);
+  return isText(raw.reason) ? success(taskMutationUnavailable(raw.reason)) : failure(`${path}.reason must be a non-empty string`);
 }
 
 /** A record document as a record, or the first reason it is not one. */
@@ -492,14 +611,19 @@ export type TaskMutationBlockCause =
 
 /**
  * The arm's verdict at one stop. It blocks for a check that never ran, ran
- * over other bytes, or left survivors; a clean record passes; a run that
- * could not decide, and every fault, is a note and the stop proceeds.
+ * over other bytes, or left survivors; a clean record, or one with no
+ * mutation site on a changed line, passes; an inconclusive or unavailable
+ * run, and every fault, is a note and the stop proceeds.
  */
 export type TaskMutationStopVerdict =
   | Readonly<{ kind: "idle" }>
   | Readonly<{ kind: "passed" }>
   | Readonly<{ kind: "note"; note: string }>
   | Readonly<{ kind: "failing"; cause: TaskMutationBlockCause; command: string }>;
+
+/** Why an inconclusive run judged nothing, as the helper and a stop note both say it. */
+const inconclusiveText = (invalid: number): string =>
+  `none of its ${invalid} mutant(s) could be judged, because each only broke test collection or ran no test`;
 
 const proceeds = (taskId: string, why: string): TaskMutationStopVerdict =>
   Object.freeze({ kind: "note", note: `Task mutation check for ${taskId} did not decide (${why}); the stop proceeds` });
@@ -511,8 +635,11 @@ export function taskMutationStopVerdict(taskId: string, observation: TaskMutatio
   if (standing.kind !== "current") return Object.freeze({ kind: "failing", cause: standing, command });
   const { result } = standing;
   switch (result.kind) {
+    case "no-mutants":
     case "clean":
       return Object.freeze({ kind: "passed" });
+    case "inconclusive":
+      return proceeds(taskId, `its last run was inconclusive: ${inconclusiveText(result.invalid)}`);
     case "unavailable":
       return proceeds(taskId, `its last run was unavailable: ${result.reason}`);
     case "survivors":
@@ -568,19 +695,31 @@ const ANSWER_SURVIVORS =
   "For each survivor, add the test that kills it and run the check again, or, when no test can tell the mutant from your code " +
   "(an equivalent mutant), name it and say why in your final report.";
 
+/** The line naming the mutants that were no evidence, or nothing when there were none. */
+const invalidLines = (invalid: number): readonly string[] =>
+  invalid === 0 ? [] : [`${invalid} more mutant(s) only broke test collection or ran no test, so they are no evidence either way.`];
+
 /** What `helper mutation-check` prints for one run. */
 export function renderTaskMutationReport(taskId: string, result: TaskMutationResult): string {
+  const head = `Task mutation check for ${taskId}:`;
   switch (result.kind) {
+    case "no-mutants":
+      return `${head} clean — no mutants (no mutation site on a line this Task changed).`;
     case "clean":
-      return result.mutants === 0
-        ? `Task mutation check for ${taskId}: clean — no mutants (no mutation site on a line this Task changed).`
-        : `Task mutation check for ${taskId}: clean — your tests killed all ${result.mutants} mutant(s) (of ${result.candidates} site(s) on changed lines).`;
+      return [
+        `${head} clean — your tests killed all ${result.killed} mutant(s) they could judge (of ${result.candidates} site(s) on changed lines).`,
+        ...invalidLines(result.invalid),
+      ].join("\n");
     case "survivors":
       return [
-        `Task mutation check for ${taskId}: ${result.survivors.length} of ${result.mutants} mutant(s) survived (of ${result.candidates} site(s) on changed lines).`,
+        `${head} ${result.survivors.length} of ${taskMutationMutants(result)} mutant(s) survived (of ${result.candidates} site(s) on changed lines).`,
         ...result.survivors.map(renderTaskSurvivor),
+        ...invalidLines(result.invalid),
         ANSWER_SURVIVORS,
       ].join("\n");
+    case "inconclusive":
+      return `${head} inconclusive — ${inconclusiveText(result.invalid)} (of ${result.candidates} site(s) on changed lines). ` +
+        "Check that your tests import the changed file and run. It did not decide and will not block your stop.";
     case "unavailable":
       return `Task mutation check for ${taskId}: unavailable — ${result.reason}. It did not decide and will not block your stop.`;
     default: {

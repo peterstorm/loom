@@ -101,6 +101,10 @@ Task has no contract surface for that run. Its roster stays five and its packets
 issued. `waveRunRosterProblem` asks the same question of the run it is given, so retries, slot membership,
 restart and the install's replay all admit that run.
 
+The rule has one home, `installedContractSurface(installed, { ownerMap })`. It takes the Task's other
+architecture-lens reasons by name and returns a tagged reading, `derive` or `issued-without-surface`: the run
+was issued without the surface exactly when it names the base five and no other reason holds.
+
 This is the only persisted roster the derivation reads. It weakens "never a persisted copy" (ADR-0047, option
 4) by exactly one admitted value: a Contract Task's run may name the base five. A fresh install never writes
 that, because a Task with no installed run derives six. Any other roster is still refused.
@@ -149,9 +153,12 @@ that, because a Task with no installed run derives six. Any other roster is stil
   contract is reviewed by exactly its Contract Task; a surface lists exactly its contract's bindings), the
   rendered text and rule, the label and roles, roster derivation (examples and a property over generated
   Waves), issuance (six requests, the section on both roles, digest binding, byte identity of every other
-  packet, unchanged base slot identities, both sections together, no plan file), and the installed-run rule
+  packet, unchanged base slot identities, both sections together, no plan file), the installed-run rule
   (admitted five- and six-agent runs, batches re-derived as issued, other rosters still refused, the
-  owner-mapped ambiguity).
+  owner-mapped ambiguity, and `installedContractSurface` over every roster and owner-map combination), and
+  both known limits above: a settled Contract Task re-derives six against the five issued, so persisted-batch
+  recovery classifies the issued batch `incomplete`; and an owner-mapped Contract Task's republished batch
+  differs from the issued one in exactly its type-design and architecture packets.
 - `engine/tests/core/agent-catalog.test.ts`: `waveReviewRoster` over all four reason combinations, and every
   contract-surface role on the architecture-lens roster.
 - `engine/tests/handlers/helpers/programs/reviewer-protocol-wave.integration.test.ts`: through the registered

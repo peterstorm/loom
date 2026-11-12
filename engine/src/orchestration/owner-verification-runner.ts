@@ -1,8 +1,10 @@
 /**
  * The owner-verification execution shell (AD-8; FR-008, FR-015, FR-016,
  * AS-007, AS-008, AS-016, AS-017). Every effect of owner verification lives
- * here or in `owner-mutation-workspace.ts`; every decision lives in the pure
- * core (`core/owner-verification/`):
+ * here, in `mutation-run-steps.ts` (the repository read, the Git base and the
+ * runner execution it shares with the Task mutation check) or in
+ * `owner-mutation-workspace.ts`; every decision lives in the pure core
+ * (`core/owner-verification/`):
  *
  * 1. The real workspace's digest is observed before anything runs.
  * 2. Per owed obligation, in stamp order:
@@ -36,17 +38,14 @@
  * step still throws is the named `unexpected-error` failure.
  */
 
-import { posix } from "node:path";
-import { readFileSync, realpathSync, statSync } from "node:fs";
 import { parse as parseJsonc, printParseErrorCode, type ParseError } from "jsonc-parser";
 import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
 import type { ArtifactDigest } from "../core/orchestration-contract";
-import { MODULE_ABSENT, siblingCoverage } from "../core/owner-verification/coverage";
-import { mutationPlan, applyMutant, mutantTimeoutMs, MUTANT_CAP_PER_INVARIANT } from "../core/owner-verification/mutation-plan";
+import { siblingCoverage } from "../core/owner-verification/coverage";
+import { mutationPlan, applyMutant, MUTANT_CAP_PER_INVARIANT } from "../core/owner-verification/mutation-plan";
 import { duePaths, implementationTasks } from "../core/owner-verification/obligations";
 import { pathAliasesOf, type ParseJsonc } from "../core/owner-verification/tsconfig-paths";
-import { waveBaseOf, type WaveBase } from "../core/owner-verification/wave-base";
-import { ownerAtBaseEntry } from "../core/owner-verification/ls-tree";
+import { waveBaseOf } from "../core/owner-verification/wave-base";
 import { verificationRuns, type ObligationRun, type OwedVerification } from "../core/owner-verification/owed-verification";
 import { classifyBaseline, classifyMutantRun } from "../core/owner-verification/outcome";
 import type {
@@ -54,7 +53,6 @@ import type {
   InvariantId,
   InvariantVerdict,
   MatrixTestRun,
-  ModuleRead,
   MutationPlan,
   OwnerInfrastructureFailure,
   OwnerInfrastructureFailureKind,
@@ -63,16 +61,14 @@ import type {
   PathAliases,
 } from "../core/owner-verification/types";
 import { invariantVerdict, mutationBoundMs, type MutantResult, type MutationEvidence } from "../core/owner-verification/verdict";
-import { parseAuthorizedWaveCompletionCheck, type AuthorizedWaveCompletionCheck } from "../core/completion-suite";
 import { parseReviewPath } from "../core/review-packet";
 import { changedHeadLines } from "../core/unified-diff";
-import { affectedRunnerCheck, type AffectedRunner, type FrozenVerificationManifest } from "../core/verification-manifest";
+import type { FrozenVerificationManifest } from "../core/verification-manifest";
 import type { TaskGraph } from "../types";
-import { runGit } from "../utils/git-execution-policy";
 import { describeCause } from "../utils/describe-cause";
 import type { CanonicalRepositoryRoot } from "../utils/workspace-digest";
-import { runProjectCommandAt, type CommandExecutionResult } from "./completion-check-runner";
-import { withMutationWorkspace, type MutationWorkspace, type OwnerVariant } from "./owner-mutation-workspace";
+import { infrastructure, matrixTestCommand, ownerAtBase, readRepositoryText, resolveWaveBase, runOnce } from "./mutation-run-steps";
+import { withMutationWorkspace, type OwnerVariant } from "./owner-mutation-workspace";
 
 export type OwnerVerificationInput = Readonly<{
   /** The real, reviewed workspace. */
@@ -90,39 +86,10 @@ export type OwnerVerificationInput = Readonly<{
   observeWorkspace: () => DomainResult<ArtifactDigest, string>;
 }>;
 
-const infrastructure = (kind: OwnerInfrastructureFailureKind, detail: string): OwnerInfrastructureFailure => ({ kind, detail });
-
 const unavailableBecause = (failure: OwnerInfrastructureFailure): OwnerVerificationObservation => ({ kind: "unavailable", failure });
 
 const unavailable = (kind: OwnerInfrastructureFailureKind, detail: string): OwnerVerificationObservation =>
   unavailableBecause(infrastructure(kind, detail));
-
-// ---------------------------------------------------------------------------
-// Real-workspace reads
-// ---------------------------------------------------------------------------
-
-/**
- * One repository file as the check reads it. `absent` is only "not there":
- * no such path, not a regular file, or a path resolving outside the
- * repository. A file the filesystem refuses (any other errno) is
- * `unreadable`, never absent, so it can never pass for a missing sibling.
- */
-const ABSENCE_CODES: ReadonlySet<string> = new Set(["ENOENT", "ENOTDIR", "EISDIR"]);
-
-/** A repository-relative path's text, its absence, or why the filesystem refused it. Never throws. */
-export function readRepositoryText(root: CanonicalRepositoryRoot, path: string): ModuleRead {
-  const absolute = posix.join(root, path);
-  try {
-    if (!statSync(absolute).isFile()) return MODULE_ABSENT;
-    const real = realpathSync.native(absolute);
-    if (!real.startsWith(`${root}/`)) return MODULE_ABSENT;
-    return { kind: "text", text: readFileSync(real, "utf-8") };
-  } catch (cause) {
-    const code = (cause as NodeJS.ErrnoException | null)?.code;
-    if (typeof code === "string" && ABSENCE_CODES.has(code)) return MODULE_ABSENT;
-    return { kind: "unreadable", failure: infrastructure("repository-file-unreadable", `${path} cannot be read: ${describeCause(cause)}`) };
-  }
-}
 
 // ---------------------------------------------------------------------------
 // tsconfig `paths`
@@ -165,91 +132,8 @@ function coverage(input: OwnerVerificationInput, obligation: OwnerObligation): C
 }
 
 // ---------------------------------------------------------------------------
-// The Wave base
-// ---------------------------------------------------------------------------
-
-function gitText(root: CanonicalRepositoryRoot, args: readonly string[]): DomainResult<string, string> {
-  try {
-    return success(runGit(["-C", root, ...args], { output: "text" }));
-  } catch (cause) {
-    return failure(`git ${args[0] ?? ""} failed: ${describeCause(cause)}`);
-  }
-}
-
-type ResolvableBase = Exclude<WaveBase, { readonly kind: "owner-unchanged" }>;
-
-/** The commit `waveBaseOf` chose, resolved in the real repository: the one start, or the octopus merge-base of several. */
-export function resolveWaveBase(root: CanonicalRepositoryRoot, owner: string, base: ResolvableBase): DomainResult<string, OwnerInfrastructureFailure> {
-  const shas = base.kind === "commit" ? [base.sha] : base.shas;
-  const resolved = base.kind === "commit"
-    ? gitText(root, ["rev-parse", "--verify", "--quiet", `${base.sha}^{commit}`])
-    : gitText(root, ["merge-base", "--octopus", ...base.shas]);
-  return resolved.ok && resolved.value.trim() !== ""
-    ? success(resolved.value.trim())
-    : failure(infrastructure("missing-wave-base", `the Wave base of ${owner} (${shas.join(", ")}) cannot be resolved${resolved.ok ? "" : `: ${resolved.error}`}`));
-}
-
-/** The owner's text at the Wave base, or null when the owner did not exist there (a new file: every line changed). */
-export function ownerAtBase(root: CanonicalRepositoryRoot, base: string, owner: string): DomainResult<string | null, OwnerInfrastructureFailure> {
-  const listed = gitText(root, ["ls-tree", "-z", base, "--", owner]);
-  if (!listed.ok) return failure(infrastructure("missing-wave-base", `${owner} at the Wave base ${base} cannot be listed: ${listed.error}`));
-  const entry = ownerAtBaseEntry(listed.value);
-  if (entry.kind === "absent") return success(null);
-  if (entry.kind === "not-a-file") return failure(infrastructure("missing-wave-base", `${owner} at the Wave base ${base} is not a file`));
-  const blob = gitText(root, ["cat-file", "blob", entry.blob]);
-  return blob.ok ? success(blob.value) : failure(infrastructure("missing-wave-base", `${owner} at the Wave base ${base} cannot be read: ${blob.error}`));
-}
-
-// ---------------------------------------------------------------------------
 // Runs
 // ---------------------------------------------------------------------------
-
-/**
- * One runner execution as the run the classifiers read. A runner that could
- * not run the command to an observed end (refused authority, unconfirmed
- * containment, a surviving process tree) never produced a report this check
- * may read, so it is the run that could not start, never a report.
- */
-export function matrixTestRunOf(execution: CommandExecutionResult, elapsedMs: number): MatrixTestRun {
-  if (!execution.ok) return { kind: "spawn-failed", message: `${execution.error.kind}: ${execution.error.message}` };
-  const value = execution.value.execution;
-  if (value.kind === "spawn-failed") return { kind: "spawn-failed", message: value.process.message };
-  if (value.process.timedOut) return { kind: "timed-out", elapsedMs };
-  const report = value.report;
-  return {
-    kind: "exited",
-    exitCode: value.process.exitCode,
-    signal: value.process.signal,
-    report: "outcome" in report ? { kind: "produced", bytes: report.bytes }
-      : report.kind === "unreadable" ? { kind: "unreadable", reason: report.message }
-      : { kind: "missing" },
-  };
-}
-
-export type MatrixTestCommand = Extract<AuthorizedWaveCompletionCheck, { readonly kind: "project-command" }>;
-
-/**
- * The frozen runner's command over the matrix test alone, formed by
- * `affectedRunnerCheck` and re-authorized with its time limit clamped by
- * `mutantTimeoutMs`: no command text ever comes from the plan. The Task
- * mutation check forms its command here too, over one implementation file.
- */
-export function matrixTestCommand(runner: AffectedRunner, matrixTest: string): DomainResult<MatrixTestCommand, string> {
-  const formed = affectedRunnerCheck(runner, [matrixTest]);
-  if (!formed.ok) return failure(formed.error.errors.join("; "));
-  const clamped = parseAuthorizedWaveCompletionCheck({ ...formed.value, timeoutMs: mutantTimeoutMs(formed.value.timeoutMs) });
-  if (!clamped.ok) return failure(clamped.error.errors.join("; "));
-  return clamped.value.kind === "project-command" ? success(clamped.value) : failure("the clamped runner command is not a project command");
-}
-
-/** One execution of `command` in the isolated workspace, with the workspace's one rewritable file as `owner` says. */
-export async function runOnce(workspace: MutationWorkspace, command: MatrixTestCommand, owner: OwnerVariant): Promise<MatrixTestRun> {
-  return workspace.runWithOwner(owner, async (at) => {
-    const started = Date.now();
-    const execution = await runProjectCommandAt(command, at);
-    return matrixTestRunOf(execution, Date.now() - started);
-  });
-}
 
 /** One matrix-test run with the owner's bytes as `owner` says: the port `runPlan` sequences. */
 export type RunMatrixTest = (owner: OwnerVariant) => Promise<MatrixTestRun>;

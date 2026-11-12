@@ -16,9 +16,10 @@ import {
   type RefutationPanelAuthority,
 } from "./panel-authority";
 import {
-  parseRefutationPanelCheckpoint,
+  parseRefutationPanelCheckpointRecord,
   replayPersistentRefutationPanel,
   resumePersistentRefutationPanel,
+  type RefutationPanelCheckpoint,
   type RefutationPanelState,
 } from "./persistent-panel";
 import { isRecord } from "./plain-record";
@@ -59,21 +60,10 @@ export type StandaloneRefutationCompletionReceipt = Readonly<{
   panel: ParsedPanelOutcomes;
   /** Parser-produced T2 state used by the in-process reducer. */
   completedPanelState: RefutationPanelState;
-  /** Canonical T2 event checkpoint retained when completion crossed a durable boundary. */
-  completedPanelCheckpoint: RetainedRefutationPanelCheckpoint | null;
-}>;
-
-/**
- * The persisted JSON of a checkpoint `parseRefutationPanelCheckpoint` accepted.
- * Only its envelope is typed: the authority, events and state stay the JSON
- * they were, because a restore re-parses the whole checkpoint from them.
- */
-export type RetainedRefutationPanelCheckpoint = Readonly<{
-  schemaVersion: 2;
-  kind: typeof REFUTATION_PANEL_CHECKPOINT_KIND;
-  authority: unknown;
-  events: readonly unknown[];
-  state: unknown;
+  /** Canonical T2 event checkpoint retained when completion crossed a durable
+   *  boundary: the record `parseRefutationPanelCheckpointRecord` accepted, in
+   *  the form `refutationPanelCheckpoint` writes. */
+  completedPanelCheckpoint: RefutationPanelCheckpoint | null;
 }>;
 
 const REFUTATION_PANEL_CHECKPOINT_KIND = "refutation-panel-checkpoint";
@@ -100,24 +90,6 @@ function deepFreezeJson<T>(value: T): T {
     return Object.freeze(value);
   }
   return value;
-}
-
-/**
- * A frozen JSON copy of a checkpoint, read as the envelope it must be. `null`
- * when the copy is not a schemaVersion 2 Refutation Panel checkpoint record.
- */
-function retainedRefutationPanelCheckpoint(raw: unknown): RetainedRefutationPanelCheckpoint | null {
-  const copy: unknown = JSON.parse(JSON.stringify(raw));
-  if (!isRecord(copy) || copy.schemaVersion !== 2 || copy.kind !== REFUTATION_PANEL_CHECKPOINT_KIND) return null;
-  const events: unknown = copy.events;
-  if (!Array.isArray(events)) return null;
-  return deepFreezeJson({
-    schemaVersion: 2,
-    kind: REFUTATION_PANEL_CHECKPOINT_KIND,
-    authority: copy.authority,
-    events,
-    state: copy.state,
-  });
 }
 
 function refutationManifestValue(authority: RefutationPanelAuthority): unknown {
@@ -248,25 +220,23 @@ export function parseStandaloneRefutationCompletion(input: Readonly<{
     (stateLooksLikeCheckpoint ? input.completedPanelState : undefined);
   const rawState = stateLooksLikeCheckpoint ? undefined : input.completedPanelState;
 
-  let checkpoint: RetainedRefutationPanelCheckpoint | null = null;
+  let checkpoint: RefutationPanelCheckpoint | null = null;
   let checkpointCompleted: Extract<RefutationPanelState, { stage: "done" }> | null = null;
   if (rawCheckpoint !== undefined && rawCheckpoint !== null) {
     if (input.publicationResolver === undefined) {
       return refutationAuthorityFailure("canonical Refutation Panel checkpoint replay requires publication authority");
     }
-    const parsedCheckpoint = parseRefutationPanelCheckpoint(
+    const parsedCheckpoint = parseRefutationPanelCheckpointRecord(
       rawCheckpoint,
       input.publicationResolver,
     );
     if (!parsedCheckpoint.ok) return refutationAuthorityFailure(parsedCheckpoint.error.message);
-    if (parsedCheckpoint.value.state.stage !== "done") {
+    const { step, checkpoint: accepted } = parsedCheckpoint.value;
+    if (step.state.stage !== "done") {
       return refutationAuthorityFailure("canonical Refutation Panel checkpoint has not reached completed state");
     }
-    checkpoint = retainedRefutationPanelCheckpoint(rawCheckpoint);
-    if (checkpoint === null) {
-      return refutationAuthorityFailure("canonical Refutation Panel checkpoint is not a schemaVersion 2 checkpoint record");
-    }
-    checkpointCompleted = parsedCheckpoint.value.state;
+    checkpoint = deepFreezeJson(accepted);
+    checkpointCompleted = step.state;
   }
 
   const resumed = rawState === undefined
@@ -443,10 +413,16 @@ export function restoreRefutationCompletion(
     publicationResolver,
   });
   if (!parsed.ok) return failure(parsed.error.message);
+  // A persisted checkpoint was just re-proved by the parse above, which retains
+  // it in the canonical form its writer emits; an older or legacy spelling of
+  // the same checkpoint (a roster view, a defaulted identity run) is the same
+  // proof, so the comparison asks only whether one was persisted at all.
   const supplied = {
     ...record,
     completedPanelState: completedPanelState ?? parsed.value.completedPanelState,
-    completedPanelCheckpoint: record.completedPanelCheckpoint ?? null,
+    completedPanelCheckpoint: record.completedPanelCheckpoint === undefined || record.completedPanelCheckpoint === null
+      ? null
+      : parsed.value.completedPanelCheckpoint,
   };
   return canonicalStructuralEquals(
     serializableRefutationCompletion(parsed.value),
