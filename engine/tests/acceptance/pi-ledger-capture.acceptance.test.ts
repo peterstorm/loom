@@ -256,6 +256,8 @@ function affectedRunnerManifestSource(): Uint8Array {
       timeoutMs: 60_000,
       report: { kind: "required-file", path: AFFECTED_REPORT },
     },
+    // These scenarios pin the affected-test check alone; the Task mutation check (ADR-0071) has its own suite.
+    taskMutationCheck: "off",
   }));
 }
 

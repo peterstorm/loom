@@ -229,23 +229,25 @@ fail the run, never silently fall back to a default that checks nothing.
 | `duplicateBlockMinTokens` | `number` | `100` | Identical tokens in a row that make a copy for `no-duplicate-block` |
 | `duplicateBlockMinLines` | `number` | `8` | Lines a copy must span on both sides |
 | `duplicateBlockBaseline` | `string[]` | `[]` | Grandfathered `path::otherPath@digest` copies `no-duplicate-block` excuses, one entry per copy |
+| `wireCastBaseline` | `string[]` | `[]` | Grandfathered `path::as T` / `path::name: T` sites `no-wire-cast` excuses, one entry per site |
 
-### Baselines: adopting the totality rules and no-duplicate-block on an existing codebase
+### Baselines: adopting the totality rules, no-duplicate-block and no-wire-cast on an existing codebase
 
-`switch-totality` applies to every TypeScript file in every project, and
-`no-duplicate-block` to every TypeScript and JavaScript file, so a codebase
-with switches or copied blocks that predate them would block the next edit to
-each of those files. Record them once:
+`switch-totality` and `no-wire-cast` apply to every TypeScript file in every
+project, and `no-duplicate-block` to every TypeScript and JavaScript file, so a
+codebase with switches, copied blocks or asserted wire values that predate them
+would block the next edit to each of those files. Record them once:
 
 ```bash
 bun <loom-plugin-dir>/scripts/lint-project.ts --write-baseline
 ```
 
 This writes every unproven switch and if-chain into `switchTotalityBaseline` /
-`discriminantBranchingBaseline`, and every copied block into
-`duplicateBlockBaseline`, keyed relative to the project root. A
+`discriminantBranchingBaseline`, every copied block into
+`duplicateBlockBaseline`, and every wire value typed without being parsed into
+`wireCastBaseline`, keyed relative to the project root. A
 baselined site costs nothing until it is converted; a new site must prove
-totality, and a new copy is refused. A copy across two files has two entries,
+totality, a new copy is refused, and a new wire value must be parsed. A copy across two files has two entries,
 one per file; a block repeated inside one file has one. An entry names the
 copied tokens: editing a baselined copy on one side makes it a new, shorter or
 different copy that is reported again. The list is debt, and it only shrinks: `lint-project` (full tier)
@@ -274,8 +276,8 @@ never apply is refused.
 ### No Config = Built-in Defaults
 
 If no `config.json` exists, every rule uses its built-in default.
-`switch-totality`, `exhaustive-discriminant-branching`, `max-function-lines`
-and the expression-shape rules apply to any project as-is. The boundary and
+`switch-totality`, `no-wire-cast`, `exhaustive-discriminant-branching`,
+`max-function-lines` and the expression-shape rules apply to any project as-is. The boundary and
 purity rules' defaults are empty — no boundaries, nothing pure — so they do
 nothing until the project declares its architecture. Loom's own architecture is
 declared the same way, in its `.claude/linter/rules/config.json`: nothing
@@ -346,6 +348,7 @@ callers all moved to the real name lives forever. Derived values like
 | `no-io-in-pure-modules` | immediate + full | TS, JS, Java | No filesystem/network/console/non-determinism in the functional core |
 | `switch-totality` | immediate + full | TS | A switch with 2+ arms proves totality — `match(…).exhaustive()`, or a `default` arm binding the scrutinee to `never` |
 | `no-duplicate-block` | immediate + full | TS, JS | No block of 100+ identical tokens over 8+ lines that another project file, or the same file, already holds |
+| `no-wire-cast` | immediate + full | TS | `JSON.parse` / `.json()` output is bound as `unknown` and parsed — never typed by `as T` or a `: T` annotation |
 | `max-function-lines` | full | TS, JS, Java | Function bodies ≤ configured max (default: 50 lines) |
 | `fugue-generated-integrity` | full | TS | Structural projection of Fugue-generated files matches the stamped SHA-256 |
 | `exhaustive-discriminant-branching` | full | TS | 3+ branches on one discriminant without a totality proof |
@@ -386,6 +389,20 @@ gets disabled — which is worse than not having it.
   `switch (typeof raw)`. An open domain (a plain `string`) has no `never` to
   bind — write `match(raw).with("a", …).otherwise(…)`, which makes the fallback
   a visible decision.
+- `no-wire-cast` applies to **every non-test TypeScript file**. It reads text,
+  not types, so it flags exactly three shapes — an assertion on the call, an
+  annotated `const`/`let`/`var` initialised by it, and an assignment to a name
+  whose nearest visible declaration is annotated — and only when the type is
+  not `unknown` (`Promise<unknown>` counts as `unknown` for an un-awaited
+  `.json()`). The call in argument position (`parseOrder(JSON.parse(text))`)
+  is the intended shape and never fires, and neither does the text of a refused
+  shape inside a string, a comment, template text or a regex literal. It does
+  **not** see an unannotated `const value = JSON.parse(text)`, a `return` under
+  a declared return type, a property read (`JSON.parse(text).id`), a class
+  field or a parameter default: there the `any` travels through a position
+  only the type checker can judge. A `.json()` call that takes arguments
+  (`Response.json(body)`, Express `res.json(body)`) writes a body and is not a
+  wire read. See [`#### no-wire-cast`](#no-wire-cast) below and ADR-0072.
 - `exhaustive-discriminant-branching` ignores one- and two-branch guard clauses.
   Guards are the *preferred* shape; only at three does an if-chain stop reading
   as a guard and start reading as a switch. It accepts either
@@ -482,7 +499,7 @@ The `fixHint` is shown to the AI agent (or developer) when a violation fires. Ma
 
 ## Programmatic Rules
 
-Programmatic rules run TypeScript handler functions that can perform deeper structural analysis than regex allows. Each declares its tier: the import-boundary rules, `switch-totality` and `no-duplicate-block` run after every edit (`"immediate"`) and at the Wave Gate; the rest only at the Wave Gate (`"full"`).
+Programmatic rules run TypeScript handler functions that can perform deeper structural analysis than regex allows. Each declares its tier: the import-boundary rules, `switch-totality`, `no-duplicate-block` and `no-wire-cast` run after every edit (`"immediate"`) and at the Wave Gate; the rest only at the Wave Gate (`"full"`).
 
 ### How They Work
 
@@ -542,6 +559,47 @@ Uses bracket-depth tracking to detect functions exceeding a line limit.
 **Excludes:** Test files (`.test.ts`, `.spec.ts`) by default.
 
 **Configure per-project:** Set `maxFunctionLines` and `excludeFromMaxLines` in `config.json`.
+
+#### `no-wire-cast`
+
+`JSON.parse(text)` and `response.json()` return `any`. Naming a type for that
+value by assertion or annotation checks nothing: the compiler takes the name on
+trust, and every read written afterwards is believed. The rule refuses the
+naming and asks for a parse.
+
+**Refuses** (`T` is any type but `unknown`):
+
+```typescript
+const order = JSON.parse(text) as Order;
+const order = (await response.json()) as Order;
+const order = JSON.parse(text) as unknown as Order;
+const order: Order = JSON.parse(text);
+let order: Order;
+order = await response.json();
+```
+
+**Accepts:**
+
+```typescript
+const raw: unknown = JSON.parse(text);
+const order = parseOrder(raw);                 // Either<ParseError, Order>
+const order = parseOrder(JSON.parse(text));    // the call in argument position
+let raw: unknown;
+try { raw = JSON.parse(text); } catch { return left(invalidJson()); }
+```
+
+Multi-line forms are read whole (the type, the argument or the `as` may sit on
+later lines). The scan is a balanced-bracket walk over the file's code — no
+compiler API — and a file whose text holds neither `JSON` nor `json` is
+answered without being lexed. That exit is a substring test, not a test for the
+call: a file that holds `json` anywhere (`./package.json`, a `toJSON` method, a
+comment) is lexed even when it names no wire call. An assignment is judged by the nearest `const`/`let`/`var` declaration of
+that name whose block still encloses it; parameters are not declarations.
+
+**Configure per-project:** `wireCastBaseline` grandfathers pre-existing sites,
+keyed `path::as T` (an assertion) or `path::name: T` (a binding), one entry per
+site; `lint-project --write-baseline` writes it and the full tier reports an
+entry no live site consumes.
 
 #### `fugue-generated-integrity`
 

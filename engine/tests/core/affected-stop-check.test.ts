@@ -6,13 +6,15 @@
  *   contract Wave, or a pending anchor after it) never blocks but is named; a
  *   property pins that the two agree testcase by testcase (CT-2 amendment A1);
  * - `stopCheckBlockDecision` is the whole block-counter transition rule for
- *   both checks: 0 → 1 → 2 → 3, then the cap fails open; an unreadable count
- *   fails open; each check has its own cap (AS-029); a proceeding stop clears
- *   both counters; each check's cap note states that check's own cap. A
- *   property asserts no agent is blocked more than its cap by either check
- *   (SC-005);
+ *   every check: 0 → 1 → 2 → 3, then the cap fails open; an unreadable count
+ *   fails open; each check has its own cap (AS-029), the Task mutation check's
+ *   being 2 (ADR-0071); each check's cap note states that check's own cap. A
+ *   property asserts no agent is blocked more than a check's cap by that
+ *   check (SC-005);
  * - `renderAffectedBlock` and `renderStopChecksBlock` build the one combined
- *   message, with a heading per contributing check (AS-028).
+ *   message, with a heading per contributing check (AS-028);
+ * - `mapSomeChecks` maps exactly the checks a block names, in check order:
+ *   the shape the stop shell renders the block's parts through.
  */
 
 import fc from "fast-check";
@@ -23,7 +25,9 @@ import {
   AFFECTED_EXCUSED_HEADING,
   AFFECTED_NOTE_TEXT,
   AFFECTED_STOP_CHECK_MAX_BLOCKS,
+  MUTATION_BLOCK_HEADING,
   STOP_CHECK_NAMES,
+  TASK_MUTATION_STOP_CHECK_MAX_BLOCKS,
   type FailingAffectedTestcase,
   type StopCheckBlockCount,
   type StopCheckName,
@@ -31,9 +35,11 @@ import {
 import {
   blockAdmission,
   judgeAffectedRun,
+  mapSomeChecks,
   renderAffectedBlock,
   renderStopChecksBlock,
   stopCheckBlockDecision,
+  type Blocking,
   type BlockingChecks,
   type StopCheckBlockCaps,
   type StopCheckFailures,
@@ -95,9 +101,11 @@ const acceptanceCase = (name: string, outcome: Case["outcome"]): Case => ({ file
 const REPORT = digest("e");
 
 const CAP = AFFECTED_STOP_CHECK_MAX_BLOCKS;
-/** Both checks at the production cap of 3. The acceptance constant lives in
- *  the acceptance shell, which this pure core's tests do not import. */
-const CAPS: StopCheckBlockCaps = { acceptance: CAP, affected: CAP };
+const MUTATION_CAP = TASK_MUTATION_STOP_CHECK_MAX_BLOCKS;
+/** The runner checks at the production cap of 3 and the mutation check at its
+ *  own. The acceptance constant lives in the acceptance shell, which this pure
+ *  core's tests do not import. */
+const CAPS: StopCheckBlockCaps = { acceptance: CAP, affected: CAP, mutation: MUTATION_CAP };
 const count = (blocks: number): StopCheckBlockCount => ({ kind: "count", blocks });
 const unreadable = (reason: string): StopCheckBlockCount => ({ kind: "unreadable", reason });
 
@@ -235,129 +243,170 @@ describe("stopCheckBlockDecision", () => {
   /** Each check's failure, as the shell passes it: the decision carries it into the block unchanged. */
   const A = "acceptance failure";
   const F = "affected failure";
-  type Failures = StopCheckFailures<string, string>;
-  const notFailing: Failures = { acceptance: null, affected: null };
+  const M = "mutation failure";
+  type Failures = StopCheckFailures<string, string, string>;
+  type Issued = Readonly<Record<StopCheckName, StopCheckBlockCount>>;
+  type Blocked = Readonly<Record<StopCheckName, Readonly<{ failure: string; blocks: number }> | null>>;
+  /** The failures of one stop: every check passing unless named. */
+  const failuresOf = (failing: Partial<Failures> = {}): Failures => ({ acceptance: null, affected: null, mutation: null, ...failing });
+  /** The counters of one stop: no block issued unless named. */
+  const issuedAt = (issued: Partial<Issued> = {}): Issued => ({ acceptance: count(0), affected: count(0), mutation: count(0), ...issued });
+  /** What a block names: no check unless named. */
+  const blockingOf = (blocking: Partial<Blocked>): Blocked => ({ acceptance: null, affected: null, mutation: null, ...blocking });
+  const MUTATION_CAP_NOTE = `the Task mutation check reached its ${MUTATION_CAP}-block cap`;
 
-  it("proceeds with no notes when neither check is failing, whatever the counts", () => {
+  it("proceeds with no notes when no check is failing, whatever the counts", () => {
     for (const issued of [count(0), count(CAP), unreadable("EACCES")]) {
-      expect(stopCheckBlockDecision({ acceptance: issued, affected: issued }, notFailing, CAPS)).toEqual({ outcome: "proceed", notes: [] });
+      expect(stopCheckBlockDecision({ acceptance: issued, affected: issued, mutation: issued }, failuresOf(), CAPS)).toEqual({ outcome: "proceed", notes: [] });
     }
   });
 
   it("walks a failing affected check from 0 to 1 to 2 to 3 blocks, then fails open at the cap", () => {
-    const failures: Failures = { acceptance: null, affected: F };
+    const failures = failuresOf({ affected: F });
     for (const blocks of [0, 1, 2]) {
-      expect(stopCheckBlockDecision({ acceptance: count(0), affected: count(blocks) }, failures, CAPS)).toEqual({
+      expect(stopCheckBlockDecision(issuedAt({ affected: count(blocks) }), failures, CAPS)).toEqual({
         outcome: "block",
-        blocking: { acceptance: null, affected: { failure: F, blocks: blocks + 1 } },
+        blocking: blockingOf({ affected: { failure: F, blocks: blocks + 1 } }),
         notes: [],
       });
     }
-    expect(stopCheckBlockDecision({ acceptance: count(0), affected: count(CAP) }, failures, CAPS))
+    expect(stopCheckBlockDecision(issuedAt({ affected: count(CAP) }), failures, CAPS))
       .toEqual({ outcome: "proceed", notes: [AFFECTED_NOTE_TEXT["cap-reached"]] });
   });
 
+  it("ADR-0071: blocks a failing mutation check twice, then fails open at its own cap of 2", () => {
+    const failures = failuresOf({ mutation: M });
+    for (const blocks of [0, 1]) {
+      expect(stopCheckBlockDecision(issuedAt({ mutation: count(blocks) }), failures, CAPS)).toEqual({
+        outcome: "block",
+        blocking: blockingOf({ mutation: { failure: M, blocks: blocks + 1 } }),
+        notes: [],
+      });
+    }
+    expect(stopCheckBlockDecision(issuedAt({ mutation: count(MUTATION_CAP) }), failures, CAPS))
+      .toEqual({ outcome: "proceed", notes: [MUTATION_CAP_NOTE] });
+    expect(stopCheckBlockDecision(issuedAt({ mutation: unreadable("EIO") }), failures, CAPS))
+      .toEqual({ outcome: "proceed", notes: ["the Task mutation check's block counter is unreadable: EIO"] });
+  });
+
   it("fails open with a note naming the cause when a failing check's counter is unreadable", () => {
-    const decision = stopCheckBlockDecision({ acceptance: count(0), affected: unreadable("counter.json is not JSON") }, { acceptance: null, affected: F }, CAPS);
+    const decision = stopCheckBlockDecision(issuedAt({ affected: unreadable("counter.json is not JSON") }), failuresOf({ affected: F }), CAPS);
 
     expect(decision).toEqual({ outcome: "proceed", notes: [`${AFFECTED_NOTE_TEXT["counter-unreadable"]}: counter.json is not JSON`] });
   });
 
   it("fails the acceptance check open on its own cap and unreadable counter, with its own notes", () => {
-    const failures: Failures = { acceptance: A, affected: null };
+    const failures = failuresOf({ acceptance: A });
 
-    expect(stopCheckBlockDecision({ acceptance: count(CAP), affected: count(0) }, failures, CAPS))
+    expect(stopCheckBlockDecision(issuedAt({ acceptance: count(CAP) }), failures, CAPS))
       .toEqual({ outcome: "proceed", notes: [`the acceptance stop check reached its ${CAP}-block cap`] });
-    expect(stopCheckBlockDecision({ acceptance: unreadable("EIO"), affected: count(0) }, failures, CAPS))
+    expect(stopCheckBlockDecision(issuedAt({ acceptance: unreadable("EIO") }), failures, CAPS))
       .toEqual({ outcome: "proceed", notes: ["the acceptance stop check's block counter is unreadable: EIO"] });
   });
 
-  it("AS-029: keeps an independent cap per check: one at its cap does not stop the other from blocking", () => {
-    const failing: Failures = { acceptance: A, affected: F };
+  it("AS-029: keeps an independent cap per check: one at its cap does not stop the others from blocking", () => {
+    const failing = failuresOf({ acceptance: A, affected: F });
 
-    expect(stopCheckBlockDecision({ acceptance: count(1), affected: count(CAP) }, failing, CAPS)).toEqual({
+    expect(stopCheckBlockDecision(issuedAt({ acceptance: count(1), affected: count(CAP) }), failing, CAPS)).toEqual({
       outcome: "block",
-      blocking: { acceptance: { failure: A, blocks: 2 }, affected: null },
+      blocking: blockingOf({ acceptance: { failure: A, blocks: 2 } }),
       notes: [AFFECTED_NOTE_TEXT["cap-reached"]],
     });
-    expect(stopCheckBlockDecision({ acceptance: count(CAP), affected: count(0) }, failing, CAPS)).toEqual({
+    expect(stopCheckBlockDecision(issuedAt({ acceptance: count(CAP) }), failing, CAPS)).toEqual({
       outcome: "block",
-      blocking: { acceptance: null, affected: { failure: F, blocks: 1 } },
+      blocking: blockingOf({ affected: { failure: F, blocks: 1 } }),
       notes: [`the acceptance stop check reached its ${CAP}-block cap`],
+    });
+    // The mutation check at its cap leaves a still-failing affected check blocking, and the reverse.
+    expect(stopCheckBlockDecision(issuedAt({ affected: count(2), mutation: count(MUTATION_CAP) }), failuresOf({ affected: F, mutation: M }), CAPS)).toEqual({
+      outcome: "block",
+      blocking: blockingOf({ affected: { failure: F, blocks: 3 } }),
+      notes: [MUTATION_CAP_NOTE],
+    });
+    expect(stopCheckBlockDecision(issuedAt({ affected: count(CAP), mutation: count(1) }), failuresOf({ affected: F, mutation: M }), CAPS)).toEqual({
+      outcome: "block",
+      blocking: blockingOf({ mutation: { failure: M, blocks: 2 } }),
+      notes: [AFFECTED_NOTE_TEXT["cap-reached"]],
     });
   });
 
   it("states each check's own cap in its note when the caps differ", () => {
-    const failing: Failures = { acceptance: A, affected: F };
-    const caps: StopCheckBlockCaps = { acceptance: 5, affected: CAP };
+    const failing = failuresOf({ acceptance: A, affected: F });
+    const caps: StopCheckBlockCaps = { ...CAPS, acceptance: 5 };
 
     // The acceptance check keeps blocking past the affected cap, up to its own.
-    expect(stopCheckBlockDecision({ acceptance: count(CAP), affected: count(CAP) }, failing, caps)).toEqual({
+    expect(stopCheckBlockDecision(issuedAt({ acceptance: count(CAP), affected: count(CAP) }), failing, caps)).toEqual({
       outcome: "block",
-      blocking: { acceptance: { failure: A, blocks: CAP + 1 }, affected: null },
+      blocking: blockingOf({ acceptance: { failure: A, blocks: CAP + 1 } }),
       notes: [AFFECTED_NOTE_TEXT["cap-reached"]],
     });
-    expect(stopCheckBlockDecision({ acceptance: count(5), affected: count(CAP) }, failing, caps))
+    expect(stopCheckBlockDecision(issuedAt({ acceptance: count(5), affected: count(CAP) }), failing, caps))
       .toEqual({ outcome: "proceed", notes: ["the acceptance stop check reached its 5-block cap", AFFECTED_NOTE_TEXT["cap-reached"]] });
   });
 
   it("names each check that contributes failures, with its failure and count + 1", () => {
-    expect(stopCheckBlockDecision({ acceptance: count(0), affected: count(2) }, { acceptance: A, affected: F }, CAPS)).toEqual({
+    expect(stopCheckBlockDecision(issuedAt({ affected: count(2), mutation: count(1) }), { acceptance: A, affected: F, mutation: M }, CAPS)).toEqual({
       outcome: "block",
-      blocking: { acceptance: { failure: A, blocks: 1 }, affected: { failure: F, blocks: 3 } },
+      blocking: { acceptance: { failure: A, blocks: 1 }, affected: { failure: F, blocks: 3 }, mutation: { failure: M, blocks: 2 } },
       notes: [],
     });
   });
 
   /** The checks a block names, each with the count its counter now records. */
-  const blockedChecks = (blocking: BlockingChecks<string, string>): ReadonlyArray<readonly [StopCheckName, number]> =>
+  const blockedChecks = (blocking: BlockingChecks<string, string, string>): ReadonlyArray<readonly [StopCheckName, number]> =>
     STOP_CHECK_NAMES.flatMap((name) => {
       const entry = blocking[name];
       return entry === null ? [] : [[name, entry.blocks] as const];
     });
 
-  it("SC-005: no agent is ever blocked more than the cap by either check, and every stop sequence ends", () => {
+  it("SC-005: no agent is ever blocked more than a check's cap by that check, and every stop sequence ends", () => {
     const failure = (marker: string) => fc.constantFrom<string | null>(marker, null);
-    const stop = fc.record({ acceptance: failure(A), affected: failure(F), unreadable: fc.constantFrom<StopCheckName | null>(null, null, null, "acceptance", "affected") });
+    const stop = fc.record({
+      acceptance: failure(A),
+      affected: failure(F),
+      mutation: failure(M),
+      unreadable: fc.constantFrom<StopCheckName | null>(null, null, null, ...STOP_CHECK_NAMES),
+    });
 
     fc.assert(fc.property(fc.array(stop, { minLength: 1, maxLength: 20 }), (stops) => {
-      const counters: Record<StopCheckName, number> = { acceptance: 0, affected: 0 };
-      const contributed: Record<StopCheckName, number> = { acceptance: 0, affected: 0 };
+      const counters: Record<StopCheckName, number> = { acceptance: 0, affected: 0, mutation: 0 };
+      const contributed: Record<StopCheckName, number> = { acceptance: 0, affected: 0, mutation: 0 };
       let blocks = 0;
-      for (const { acceptance, affected, unreadable: lost } of stops) {
+      for (const { unreadable: lost, ...failures } of stops) {
         const issued = (name: StopCheckName): StopCheckBlockCount => lost === name ? unreadable("lost") : count(counters[name]);
-        const decision = stopCheckBlockDecision({ acceptance: issued("acceptance"), affected: issued("affected") }, { acceptance, affected }, CAPS);
+        const decision = stopCheckBlockDecision({ acceptance: issued("acceptance"), affected: issued("affected"), mutation: issued("mutation") }, failures, CAPS);
         if (decision.outcome === "proceed") break; // the agent's stop proceeds: it ends.
         blocks += 1;
         const blocked = blockedChecks(decision.blocking);
         expect(blocked.length).toBeGreaterThan(0);
         for (const [name, recorded] of blocked) {
-          expect({ acceptance, affected }[name]).not.toBeNull();
+          expect(failures[name]).not.toBeNull();
           expect(recorded).toBe(counters[name] + 1);
           counters[name] = recorded;
           contributed[name] += 1;
         }
-        expect(contributed.acceptance).toBeLessThanOrEqual(CAP);
-        expect(contributed.affected).toBeLessThanOrEqual(CAP);
+        for (const name of STOP_CHECK_NAMES) expect(contributed[name]).toBeLessThanOrEqual(CAPS[name]);
       }
-      // A lost counter only ever fails open, so blocks stay bounded by both caps together.
-      expect(blocks).toBeLessThanOrEqual(2 * CAP);
+      // A lost counter only ever fails open, so blocks stay bounded by every cap together.
+      expect(blocks).toBeLessThanOrEqual(STOP_CHECK_NAMES.reduce((total, name) => total + CAPS[name], 0));
     }));
   });
 
-  it("SC-005: an agent failing both checks forever is blocked exactly the cap, then proceeds", () => {
-    const counters: Record<StopCheckName, number> = { acceptance: 0, affected: 0 };
+  it("SC-005: an agent failing every check forever is blocked exactly the largest cap, then proceeds", () => {
+    const counters: Record<StopCheckName, number> = { acceptance: 0, affected: 0, mutation: 0 };
     let blocks = 0;
     for (;;) {
-      const decision = stopCheckBlockDecision({ acceptance: count(counters.acceptance), affected: count(counters.affected) }, { acceptance: A, affected: F }, CAPS);
+      const issued = { acceptance: count(counters.acceptance), affected: count(counters.affected), mutation: count(counters.mutation) };
+      const decision = stopCheckBlockDecision(issued, { acceptance: A, affected: F, mutation: M }, CAPS);
       if (decision.outcome === "proceed") {
-        expect(decision.notes).toEqual([`the acceptance stop check reached its ${CAP}-block cap`, AFFECTED_NOTE_TEXT["cap-reached"]]);
+        expect(decision.notes).toEqual([`the acceptance stop check reached its ${CAP}-block cap`, AFFECTED_NOTE_TEXT["cap-reached"], MUTATION_CAP_NOTE]);
         break;
       }
       blocks += 1;
       for (const [name, recorded] of blockedChecks(decision.blocking)) counters[name] = recorded;
     }
     expect(blocks).toBe(CAP);
+    expect(counters.mutation).toBe(MUTATION_CAP);
   });
 });
 
@@ -378,8 +427,8 @@ describe("blockAdmission", () => {
     const issuedArb = fc.oneof(fc.integer({ min: 0, max: CAP + 2 }).map(count), fc.constant(unreadable("lost")));
     fc.assert(fc.property(fc.constantFrom(...STOP_CHECK_NAMES), issuedArb, (name, issued) => {
       const admission = blockAdmission(name, issued, CAPS[name]);
-      const failures = name === "acceptance" ? { acceptance: "A", affected: null } : { acceptance: null, affected: "F" };
-      const decision = stopCheckBlockDecision({ acceptance: count(0), affected: count(0), [name]: issued }, failures, CAPS);
+      const failures = { acceptance: null, affected: null, mutation: null, [name]: "failing" };
+      const decision = stopCheckBlockDecision({ acceptance: count(0), affected: count(0), mutation: count(0), [name]: issued }, failures, CAPS);
       if (admission.kind === "may-block") {
         expect(decision.outcome).toBe("block");
         if (decision.outcome === "block") expect(decision.blocking[name]?.blocks).toBe(admission.blocks);
@@ -436,23 +485,57 @@ describe("renderAffectedBlock", () => {
 
 describe("renderStopChecksBlock", () => {
   it("AS-028: lists the acceptance part, then the affected part, each under its own heading", () => {
-    const message = renderStopChecksBlock({ acceptance: "owed AS-001 still failing", affected: "ledger > balances failing" });
+    const message = renderStopChecksBlock({ acceptance: "owed AS-001 still failing", affected: "ledger > balances failing", mutation: "a guard survived" });
 
     const acceptance = message.indexOf(ACCEPTANCE_BLOCK_HEADING);
     const owed = message.indexOf("owed AS-001");
     const affected = message.indexOf(AFFECTED_BLOCK_HEADING);
     const ledger = message.indexOf("ledger > balances");
+    const mutation = message.indexOf(MUTATION_BLOCK_HEADING);
+    const guard = message.indexOf("a guard survived");
     expect(acceptance).toBe(0);
-    expect([acceptance, owed, affected, ledger].every((at, i, all) => at >= 0 && (i === 0 || at > all[i - 1]!))).toBe(true);
+    expect([acceptance, owed, affected, ledger, mutation, guard].every((at, i, all) => at >= 0 && (i === 0 || at > all[i - 1]!))).toBe(true);
   });
 
   it("carries a heading only for a check that contributes failures", () => {
-    const affectedOnly = renderStopChecksBlock({ acceptance: null, affected: "ledger > balances failing" });
+    const affectedOnly = renderStopChecksBlock({ acceptance: null, affected: "ledger > balances failing", mutation: null });
     expect(affectedOnly).toBe(`${AFFECTED_BLOCK_HEADING}\n\nledger > balances failing`);
     expect(affectedOnly).not.toContain(ACCEPTANCE_BLOCK_HEADING);
 
-    const acceptanceOnly = renderStopChecksBlock({ acceptance: "owed AS-001 still failing", affected: null });
+    const acceptanceOnly = renderStopChecksBlock({ acceptance: "owed AS-001 still failing", affected: null, mutation: null });
     expect(acceptanceOnly).toBe(`${ACCEPTANCE_BLOCK_HEADING}\n\nowed AS-001 still failing`);
     expect(acceptanceOnly).not.toContain(AFFECTED_BLOCK_HEADING);
+
+    expect(renderStopChecksBlock({ acceptance: null, affected: null, mutation: "a guard survived" })).toBe(`${MUTATION_BLOCK_HEADING}\n\na guard survived`);
+  });
+});
+
+describe("mapSomeChecks", () => {
+  const ZERO = { acceptance: count(0), affected: count(0), mutation: count(0) };
+  type Markers = StopCheckFailures<string, string, string>;
+
+  it("maps each check a block names, with its name, and leaves the others empty", () => {
+    const failing: Markers = { acceptance: null, affected: "F", mutation: "M" };
+    const decision = stopCheckBlockDecision(ZERO, failing, CAPS);
+    if (decision.outcome !== "block") throw new Error("two failing checks under their caps block");
+    expect(mapSomeChecks<Blocking<string>, string>(decision.blocking, (name, { failure, blocks }) => `${name}:${failure}:${blocks}`))
+      .toEqual({ acceptance: null, affected: "affected:F:1", mutation: "mutation:M:1" });
+  });
+
+  it("property: the parts fill exactly the slots the block fills, each from its own check, in check order", () => {
+    const failure = (marker: string) => fc.constantFrom<string | null>(marker, null);
+    const failures: fc.Arbitrary<Markers> = fc.record({ acceptance: failure("A"), affected: failure("F"), mutation: failure("M") })
+      .filter(({ acceptance, affected, mutation }) => acceptance !== null || affected !== null || mutation !== null);
+    fc.assert(fc.property(failures, (failing) => {
+      const decision = stopCheckBlockDecision(ZERO, failing, CAPS);
+      if (decision.outcome !== "block") throw new Error("a failing check under its cap blocks");
+      const named: StopCheckName[] = [];
+      const parts = mapSomeChecks<Blocking<string>, string>(decision.blocking, (name, { failure: marker }) => {
+        named.push(name);
+        return `${name}:${marker}`;
+      });
+      for (const name of STOP_CHECK_NAMES) expect(parts[name]).toBe(failing[name] === null ? null : `${name}:${failing[name]}`);
+      expect(named).toEqual(STOP_CHECK_NAMES.filter((name) => failing[name] !== null));
+    }));
   });
 });

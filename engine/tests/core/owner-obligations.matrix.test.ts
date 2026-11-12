@@ -274,7 +274,7 @@ describe("INV-3 sibling rows — review-packet owner map and brief duties follow
     const rendered = renderImplementationBrief({
       template: TEMPLATE, task: value, dispatch: derivation.dispatch, verificationManifest: undefined,
       planFile: PLAN_FILE, spec: { kind: "unavailable", reason: { kind: "no-spec-file" } }, rules: RULES,
-      roster: [], contracts: [], repositoryRoot: "/repo", operatorNotes: [], frozenSignatures: unobservedSkeletons(graphFixture([value])),
+      roster: [], contracts: [], repositoryRoot: "/repo", packageRoot: "/loom", operatorNotes: [], frozenSignatures: unobservedSkeletons(graphFixture([value])),
       ownership: briefOwnership(stamp, OWNED_PLAN_MODELS.invariants, files),
     });
     if (!rendered.ok) throw new Error(rendered.error.message);

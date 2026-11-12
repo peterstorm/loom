@@ -2,7 +2,7 @@
 name: loom
 version: "3.2.0"
 description: "This skill should be used when the user asks to 'plan this', 'orchestrate', 'break down', 'split into phases', 'coordinate tasks', 'create a plan', 'multi-step feature', or has complex tasks needing structured decomposition. Decomposes work into wave-based parallel tasks, assigns specialized agents, creates GitHub Issue for tracking, and manages execution through automated hooks."
-argument-hint: "[$description] [--skip-brainstorm] [--skip-clarify] [--skip-specify] [--skip-plan-alignment] [--panel[=N]] [--status]"
+argument-hint: "[$description] [--skip-brainstorm] [--skip-clarify] [--skip-specify] [--skip-plan-alignment] [--skip-plan-design-review] [--panel[=N]] [--status]"
 ---
 
 # Loom - Full Orchestration Skill
@@ -76,6 +76,7 @@ role. Under Claude Code, use the native Agent/Task tool as usual.
 - `/loom --skip-clarify` - Skip clarify phase (accept markers as-is)
 - `/loom --skip-specify` - Skip brainstorm/specify/clarify (use existing spec)
 - `/loom --skip-plan-alignment` - Skip plan-alignment phase (proceed directly to decompose)
+- `/loom --skip-plan-design-review` - Skip the plan design review that gates decompose ([Phase 3.6](#phase-36-plan-design-review)). Recorded in the State File as `plan_design_review: {"status":"not-required","reason":"skipped"}`
 - `/loom --panel` - Architecture panel mode: N designer agents generate candidates in parallel (each with a lens), adversarial judges rank them against interview-derived criteria, and the finalizer presents the ranked approaches. `--panel=N` requires a decimal integer of at least `PANEL_DESIGNERS_MIN` (currently 2); malformed, fractional, duplicate, or smaller values are rejected. Values above the number of distinct lenses (5) are rejected. Bare `--panel` uses `PANEL_DESIGNERS_DEFAULT` (currently 3). Opt-in; only Phase 3 changes. See [panel-lenses.md](../references/panel-lenses.md) and [Phase 3 (panel mode)](#phase-3-panel-mode-loom---panel).
 - `/loom --status` - Show current status. Runs `bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration status` (add `--json` for the machine form). Both forms project ONE `LoomStatus` value, so they cannot disagree, and neither re-runs a gate check. When authority is unreadable every fact category is still reported as `unavailable` with its reasons and the next action is `blocked` — never a fabricated zero-or-ready value. Prefer this over the ad-hoc `jq` recipes in [Observability](#observability), which read raw fields and can contradict the engine.
 - The engine also exposes registered architecture/refutation panel dispatch through `helper orchestration start`. The detailed Phase 3 runbook below still owns interactive/template/file integration through the panel-contract helper chain; do not mix the two persistence protocols inside one panel run.
@@ -132,6 +133,15 @@ role. Under Claude Code, use the native Agent/Task tool as usual.
 │   Output: .claude/specs/{slug}/plan-alignment.md        │
 │   Skip: --skip-plan-alignment                           │
 │   Loop: gaps found → re-run architecture (with context) │
+└─────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌─────────────────────────────────────────────────────────┐
+│ Phase 3.6: PLAN DESIGN REVIEW (gate, not a phase)       │
+│   Standalone review, kind plan-design, of the plan      │
+│   Then: helper accept-plan-design-review                │
+│   Skip: --skip-plan-design-review                       │
+│   Loop: critical survives → edit plan → fresh review    │
 └─────────────────────────────────────────────────────────┘
         │
         ▼
@@ -308,6 +318,7 @@ The executable Panel Program, not this prose, owns dispatch order, retry limits,
 and LLM Profiles. Before spawning, obtain the criteria early with the Step 4
 `criteria` helper (it does not require candidate files), then build:
 
+<!-- wire-example: architecture-panel-journal -->
 ```json
 {
   "input": {
@@ -414,13 +425,58 @@ A `FEAS-N` gap means a recorded discovery contradicts a Requirement or plan deci
   Re-spawn architecture-agent with gap report appended to prompt as additional context. When architecture completes, advance-phase transitions to plan-alignment again automatically.
 
   **Panel-mode loop-back:** even if the plan was produced in `--panel` mode, a gap-report re-run uses the **standard single-agent architecture flow** (`phase-architecture.md`) — never re-panel. Retain the exact panel-run manifest path recorded in AD-1 and mention that manifest in the re-spawn prompt; require the agent to read only its `candidates[].path` entries if it revisits losing designs. Never scan a shared or run directory.
-- **If proceed:** Continue to Phase 4.
+- **If proceed:** Continue to Phase 3.6.
 
 **Loop-back warning:** If the user has chosen to re-run architecture 2 or more times, warn: "This is loop-back attempt N. Consider proceeding to decompose or refining the spec directly."
 
-**If no gaps:** Proceed to Phase 4.
+**If no gaps:** Proceed to Phase 3.6.
 
 **Note:** The gap report is always written (even when no gaps). Its existence at `.claude/specs/{slug}/plan-alignment.md` is required by validate-phase-order to gate decompose entry.
+
+---
+
+## Phase 3.6: Plan Design Review
+
+**Always run** (unless `--skip-plan-design-review` was passed to `init-state`, or the State File has no `plan_design_review` field because it was initialized before the gate existed). Run it after plan alignment has settled: any later edit to the plan closes the gate again.
+
+This is a gate on decompose, not a phase: the decompose spawn asks it, `populate-task-graph` asks it again on first population, `current_phase` does not change and no phase agent runs ([ADR-0070](../docs/adr/ADR-0070-the-plan-design-review-gates-decompose.md)). The plan is reviewed by `code-reviewer`, `type-design-analyzer` and `architecture-tech-lead` as a Standalone Review of kind `plan-design`, each with a plan design lens in its Context Packet and each obliged to read the whole plan.
+
+Run every command from the repository root.
+
+1. **Start the review.** `files` names exactly the plan, as a path relative to the repository root:
+
+   <!-- wire-example: standalone-review-start -->
+   ```bash
+   RUNS_ROOT=".claude/reviews/standalone-review-runs"
+   mkdir -p "$RUNS_ROOT"
+   RUN_DIR="$(mktemp -d "$RUNS_ROOT/run.XXXXXXXXXX")"
+   bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration start standalone-review \
+     --runs-root "$RUNS_ROOT" \
+     --run "$RUN_DIR" <<'JSON'
+   {"kind":"plan-design","files":[".claude/plans/{slug}.md"],"dryRun":false}
+   JSON
+   ```
+
+2. **Drive it to `done`** exactly as [`/review-pr` step 4](review-pr.md#4-execute-returned-actions) says: spawn each returned `spawn-batch`, then `helper orchestration resume --runs-root "$RUNS_ROOT" --run "$RUN_DIR"`, until `done` or `blocked`.
+
+3. **Dispose of the advisories, if the result has any.** Triage them with the user and publish the complete ordered decisions with the `standalone-disposition` program ([operations: immediate advisory publication](../docs/operations.md#immediate-advisory-publication)). Any decision is enough; advisories never block. Keep the disposition's absolute Run directory, Run id and disposition digest.
+
+4. **Accept the review.**
+
+   ```bash
+   bun "$LOOM_DIR/engine/src/cli.ts" helper accept-plan-design-review \
+     --runs-root "$RUNS_ROOT" --run "$RUN_DIR"
+   ```
+
+   With advisories, add `--disposition <absolute disposition Run directory> --disposition-run <its Run id> --disposition-digest <its disposition sha256>`.
+
+   On success it prints `Plan design review accepted: <plan> sha256 <digest> (run <id>)` and records `plan_design_review: {"status":"accepted", ...}` bound to the plan's bytes. On refusal it names the one reason and what to do.
+
+**If a critical survived refutation:** the helper refuses with the Finding ids. Present the findings to the user, edit the plan to resolve them (or loop back to architecture as in Phase 3.5), and start a fresh review at step 1. A `plan-design` review has no successor.
+
+**If the plan is edited after acceptance:** the decompose spawn and first population are blocked with both digests. Start a fresh review at step 1. An edit made while the helper runs is caught under the State File lock: the helper refuses with `the plan changed while its review was being accepted`.
+
+Do not write `plan_design_review` yourself. The helper is its only writer after `init-state`.
 
 ---
 
@@ -476,6 +532,7 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper suggest-spec-anchors "task description"
 ```
 
 Returns JSON with suggested anchors and confidence scores:
+<!-- wire-example: none — abbreviated output of `helper suggest-spec-anchors`, which nothing parses back in -->
 ```json
 [{"anchor":"FR-003","score":0.85,"text":"System MUST validate email format"},...]
 ```
@@ -499,6 +556,7 @@ Ask: "Proceed with this plan?"
 
 On approval, establish operator-owned completion authority before populating Tasks. If the project needs whole-program commands beyond Loom's reserved full-tier lint, build the exact schema from `docs/workflows.md` in an unguarded temporary file, then install it through the validating helper:
 
+<!-- wire-example: verification-manifest -->
 ```bash
 cat > /tmp/loom-verification-manifest.json <<'JSON'
 {
@@ -535,6 +593,7 @@ This helper:
 - Merges with validated decompose output (tasks, waves)
 - Adds `github_issue`, `spec_file`, `plan_file`, `current_wave: 1`
 - Moves `current_phase` decompose → execute (and records `phase_artifacts.decompose`) in the same write; it refuses any phase other than `decompose` (first population) or `execute` (re-population)
+- On first population, asks the plan design gate ([Phase 3.6](#phase-36-plan-design-review)) of the plan bytes it read: it refuses while `plan_design_review` is `required` or `accepted` for other bytes, exactly as the decompose spawn does; re-population in execute is not gated
 - Initializes `wave_gates`, `executing_tasks`
 - Writes via `StateManager` (chmod 444 protection)
 
@@ -609,6 +668,14 @@ It renders `commands/templates/impl-agent-context.md` for each dispatch status o
 - **Claude Code:** spawn `claude.subagent_type` (always `loom:<agent>`: Claude Code registers plugin agents only under the plugin namespace, so the bare catalog name names no agent there, and the spawn gate refuses any other form before it reserves the Task) with `claude.model`, `claude.description`, and `claude.prompt`, the same one-line marker. The `validate-task-execution` PreToolUse hook expands it to the rendered brief, runs every spawn gate on the brief, and hands the Agent the brief instead of the marker; your own context keeps only the marker. Pass the marker exactly; do not paste the brief. A marker that cannot expand blocks the spawn, naming the cause. `brief --prompt` adds the rendered brief to the output for reading only.
 - **Operator notes (#119).** To add an instruction to one Task's brief, run `brief --task <Task> --note "<text>"` (repeat `--note` for several) and spawn the invocation it prints. The marker then carries one `LOOM_OPERATOR_NOTE: <text>` line per note, and the expansion renders them into the brief's **Operator Note** section. The expanded brief is what the reservation digests, so the notes are part of the attempt's audited prompt. Nothing else may follow the marker: any other line, or a marker that is not the first line, is refused with this grammar rather than judged as a hand-written prompt. Each note is at most 500 characters, at most 8 per marker, and may not carry a `LOOM_` token, a `{template variable}` or a `Task ID:` binding. A note can focus the work inside the Task; the brief tells the agent it never widens the file list, waives a Verification Policy arm, or overrides the binding rules. Because of that, a note cannot be used to **induce a check failure** for a pilot. In the G4 slice 2 re-pilot, both agents refused induced notes ("write the code first", "break the exit code and skip the final run") and kept to the rules, so the I6 refusal and the I7 block never fired. A pilot that must exercise a refusal or a block needs a scenario whose natural course triggers it: for I7, a Task touching a widely imported hub file; for I6, a Task whose first test run genuinely passes. Do not rely on a note telling the agent to misbehave.
 
+  A marker carrying two notes, as `brief --task T5 --note … --note …` prints it:
+
+  <!-- wire-example: implementation-brief-request -->
+  ```text
+  LOOM_IMPLEMENTATION_BRIEF: T5
+  LOOM_OPERATOR_NOTE: Keep the exported signature of parseOrder unchanged.
+  LOOM_OPERATOR_NOTE: Cover the empty-cart case in the existing test file.
+  ```
 
 ---
 
@@ -645,6 +712,7 @@ The state file `.claude/state/active_task_graph.json` is created **before Phase 
 mkdir -p .claude/state .claude/specs/{date_slug}
 bun ${LOOM_DIR}/engine/src/cli.ts init-state \
   [--skip-brainstorm] [--skip-clarify] [--skip-specify] [--skip-plan-alignment] \
+  [--skip-plan-design-review] \
   --spec-dir .claude/specs/{date_slug} \
   --output .claude/state/active_task_graph.json
 ```
@@ -772,7 +840,7 @@ Hooks auto-activate when `active_task_graph.json` exists:
 **Do not call hook-owned state-writing helpers yourself.** The helpers that hooks/`/wave-gate` drive — `complete-wave-gate`, `StateManager`, `store-review-findings`/`store-spec-check` (except as a sanctioned override, below) — run automatically; calling them by hand races the hook that owns that write. A small set of DIRECT helper invocations IS sanctioned, used only where this document says to; they fall into two distinct classes:
 
 - **Whitelisted in the guard** (`engine/src/config.ts` `WHITELISTED_HELPERS`, so the guard permits them even on a guarded path): `write-verification-manifest` and `populate-task-graph` (Phase 4d), `amend-spec-trace` (in-place Requirement trace correction), `revise-contract` (operator Contract Revision of a frozen Acceptance Contract), `set-phase` loop-back, `mark-tests-passed` (read-only evidence status check, run during `/wave-gate` Step 2 — it reads persisted TaskGraph evidence and does NOT modify state), `repair-task-graph` (recovery only; it reads rejected JSON directly, applies `fixFull`, validates, and atomically replaces the graph without calling `StateManager.load()`), `review-packet create` (starts the packet-bound Review Run atomically while writing its immutable packet outside guarded state), and the `store-review-findings` / `store-spec-check` false-positive overrides.
-- **Merely out of the guard's scope when invoked as documented** (NOT in `WHITELISTED_HELPERS`): `validate-task-graph` / `validate-lint-rules`; the explicit diagnostic helper `lint-wave-gate` (the registered Wave Gate invokes the same full-tier shell automatically); `orchestration status` (a pure read that derives the canonical status value and renders it); the two panel contract helpers `panel-contract` (this document, Phase 3 panel mode) and `review-panel` (the parent-driven refutation panel that predates the registered Wave Gate, kept for its smoke suite and operator diagnosis — the registered Wave Gate runs its Refutation Panel itself and never invokes this helper); and `standalone-review` (`skills/review-and-fix/SKILL.md`) — they pass only because their documented invocations name no guarded path, writing instead into a run directory under the runs-root each one is given — `.claude/specs/{date_slug}/panel-runs/` for the architecture panel, `.claude/reviews/panel-runs/` for the wave refutation panel, and `.claude/reviews/review-and-fix-runs/` for standalone review. Invoked against a guarded path they would be blocked like anything else. `contract-status` is a pure read in the same class but needs no runs-root: it takes no arguments, reads only the State File, and writes only to stdout (each Acceptance Contract's freeze state, roster and due Waves; see `docs/operations.md`). It never writes the State File or takes its lock. `stop-check-plan --task <id>` is a pure read in the same class. It reads only the State File and writes only to stdout: what the Acceptance Stop Check would do at that Task's stop (the owed testcases by contract, the acceptance files, the runner cwd, the expanded argv and the report path), or the single reason the check is off. It never runs the runner, never writes the State File and never takes its lock. It refuses an unknown Task id, naming the id, with a non-zero exit (see `docs/operations.md`).
+- **Merely out of the guard's scope when invoked as documented** (NOT in `WHITELISTED_HELPERS`): `validate-task-graph` / `validate-lint-rules`; the explicit diagnostic helper `lint-wave-gate` (the registered Wave Gate invokes the same full-tier shell automatically); `orchestration status` (a pure read that derives the canonical status value and renders it); the two panel contract helpers `panel-contract` (this document, Phase 3 panel mode) and `review-panel` (the parent-driven refutation panel that predates the registered Wave Gate, kept for its smoke suite and operator diagnosis — the registered Wave Gate runs its Refutation Panel itself and never invokes this helper); and `standalone-review` (`skills/review-and-fix/SKILL.md`) — they pass only because their documented invocations name no guarded path, writing instead into a run directory under the runs-root each one is given — `.claude/specs/{date_slug}/panel-runs/` for the architecture panel, `.claude/reviews/panel-runs/` for the wave refutation panel, and `.claude/reviews/review-and-fix-runs/` for standalone review. Invoked against a guarded path they would be blocked like anything else. `contract-status` is a pure read in the same class but needs no runs-root: it takes no arguments, reads only the State File, and writes only to stdout (each Acceptance Contract's freeze state, roster and due Waves; see `docs/operations.md`). It never writes the State File or takes its lock. `stop-check-plan --task <id>` is a pure read in the same class. It reads only the State File and writes only to stdout: what the Acceptance Stop Check would do at that Task's stop (the owed testcases by contract, the acceptance files, the runner cwd, the expanded argv and the report path), or the single reason the check is off. It never runs the runner, never writes the State File and never takes its lock. It refuses an unknown Task id, naming the id, with a non-zero exit (see `docs/operations.md`). `accept-plan-design-review` (Phase 3.6) is in this class although it writes: its invocation names only a runs-root under `.claude/reviews/`, and its one locked State File write goes through `StateManager`.
 
   **One exception inside that class:** `review-panel tally` DOES write the task graph through `StateManager` — it moves refuted findings into `refuted_findings` and can demote `review_status` from `blocked` to `passed`. It is out of the guard's scope only because its arguments name the run directory rather than the state file. `wave-gate.md` never calls it: the registered Wave Gate adjudicates through its own Refutation Panel. The tally refuses a second tally on a run it has already adjudicated, and refuses `--threshold` outright — its bar is always the strict majority of the run's lenses. Do not invoke it to "re-check" a wave.
 
@@ -903,6 +971,7 @@ Blocks agent spawns if prerequisite phases not complete.
 | clarify-agent | spec.md exists |
 | architecture-agent | spec.md exists + markers ≤ 3 OR `--skip-clarify` |
 | plan-alignment-agent | plan.md exists |
+| decompose-agent | plan.md exists + plan-alignment.md exists OR `--skip-plan-alignment`; and `plan_design_review` is `accepted` for the plan's current bytes, OR `--skip-plan-design-review`, OR the field is absent |
 | impl agents | plan.md exists + plan-alignment.md exists OR `--skip-plan-alignment` |
 
 ### SubagentStop: `advance-phase.sh`
@@ -924,6 +993,7 @@ Advances `current_phase` when phase agents complete.
 
 ### State Tracking
 
+<!-- wire-example: none — three fields of the State File shown for orientation; the engine writes that file and no one authors it -->
 ```json
 {
   "current_phase": "specify",
@@ -943,6 +1013,7 @@ Advances `current_phase` when phase agents complete.
 - `--skip-clarify` - Adds "clarify" to `skipped_phases`, proceeds to architecture regardless of markers
 - `--skip-specify` - Adds brainstorm, specify, clarify to skipped; requires existing spec.md
 - `--skip-plan-alignment` - Adds "plan-alignment" to `skipped_phases`; architecture advances directly to decompose
+- `--skip-plan-design-review` - Records `plan_design_review` as `not-required` (`skipped`); `skipped_phases` is unchanged because the review is a gate, not a phase
 
 ---
 

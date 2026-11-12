@@ -36,6 +36,7 @@ Home Manager installs the Pi binary and links these directories from the dotfile
 
 `~/.pi/agent/settings.json` is a mutable copy of `~/.dotfiles/pi/settings.json`. It declares Loom as a live local package:
 
+<!-- wire-example: none — Pi's own settings file, read by Pi and never by Loom -->
 ```json
 {
   "packages": [

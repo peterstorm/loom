@@ -73,9 +73,14 @@ describe("loom's own totality baselines", () => {
       ["switch-totality", "switchTotalityBaseline"],
       ["exhaustive-discriminant-branching", "discriminantBranchingBaseline"],
       ["no-duplicate-block", "duplicateBlockBaseline"],
+      ["no-wire-cast", "wireCastBaseline"],
     ]);
     // The drift message is rule-aware: a chain entry never reads as a switch.
-    expect(LOOM_OWNERS.map((owner) => owner.site)).toEqual(["unproven switch", "unproven if-chain", "copied block"]);
+    expect(LOOM_OWNERS.map((owner) => owner.site))
+      .toEqual(["unproven switch", "unproven if-chain", "copied block", "unparsed wire value"]);
+    // Loom grandfathers no wire value typed without being parsed: the rule's
+    // "nothing above the baseline" case below is the whole tree, held to zero.
+    expect(LOOM_CONFIG.wireCastBaseline).toBeUndefined();
     // Loom does not narrow switch-totality: it holds itself to the default
     // every target project gets.
     expect(LOOM_CONFIG.switchTotalityModules).toBeUndefined();
@@ -141,6 +146,20 @@ describe("loom's own totality baselines", () => {
       `}`,
     ].join("\n");
     expect(staleBaselineEntries(owner, (file) => (file === path ? proven : null))).toEqual(owner.baseline);
+  });
+
+  it("reports a wire-cast entry whose file is gone, and one whose value is now parsed, as stale", () => {
+    const wireCastOwner = LOOM_OWNERS.find((candidate) => candidate.rule === "no-wire-cast");
+    if (wireCastOwner === undefined) throw new Error("no-wire-cast keeps a baseline");
+    const path = "engine/src/core/converted.ts";
+    const live = baselineKey("engine/src/core/unparsed.ts", "as Order");
+    const stale = [baselineKey(path, "as Order"), baselineKey("engine/src/core/deleted.ts", "order: Order")];
+    const owner = { ...wireCastOwner, baseline: [live, ...stale] };
+    const sources: Readonly<Record<string, string>> = {
+      [path]: "export const order = parseOrder(JSON.parse(text));",
+      "engine/src/core/unparsed.ts": "export const order = JSON.parse(text) as Order;",
+    };
+    expect(staleBaselineEntries(owner, (file) => sources[file] ?? null)).toEqual(stale);
   });
 });
 

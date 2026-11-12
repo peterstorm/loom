@@ -26,11 +26,10 @@ import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { piRuntimeHandshakeRequired, routeConsumesStdin } from "../../src/handler-routes";
 import { SECURITY_AUDIT_OPERATIONS, SECURITY_AUDIT_OPERATION_ORDER, parseSecurityAuditOperation, securityAuditOperationWrites } from "../../src/handlers/helpers/security-audit-operations";
-import { SECURITY_AUDIT_LIMITS, type SecurityRunMetadata } from "../../src/core/security-audit-contract";
-import type { CoverageUnit } from "../../src/core/security-coverage";
+import { SECURITY_AUDIT_LIMITS } from "../../src/core/security-audit-contract";
 import type { SecurityFinding } from "../../src/core/security-findings";
 import { nSeeds } from "../security/fixtures";
-import { SOURCE, SQLI, aRun, claimPayload, isolateSubagentDir, readJson, removeRuns, seedFor, startInvocation, startRun, unitIdFor } from "./security-audit-harness";
+import { SOURCE, SQLI, aRun, claimPayload, isolateSubagentDir, readClaims, readLedger, readPublished, readRunMetadata, removeRuns, seedFor, startInvocation, startRun, unitIdFor } from "./security-audit-harness";
 import { verifyWith } from "./security-verification-harness";
 
 beforeEach(() => { isolateSubagentDir(); });
@@ -80,22 +79,22 @@ describe("a full run", () => {
     );
     expect(started.error).toBeNull();
 
-    const metadata = readJson<SecurityRunMetadata>(run.out, "run.json");
+    const metadata = readRunMetadata(run.out);
     expect(metadata.profile).toBe("standard");
     expect(metadata.sourceRef).toEqual({ commit: SOURCE, worktreeDirty: false });
     expect(metadata.scopePaths).toEqual(["src/subsystem-0/entry.ts"]);
     expect(metadata.selectedCompanions.length).toBeGreaterThan(0);
-    expect(readJson<CoverageUnit[]>(run.out, "ledger.json")[0].status).toBe("planned");
+    expect(readLedger(run.out)[0].status).toBe("planned");
 
     expect((await run.invoke(["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"])).error).toBeNull();
-    const assigned = readJson<CoverageUnit[]>(run.out, "ledger.json")[0];
+    const assigned = readLedger(run.out)[0];
     expect(assigned.status).toBe("in_progress");
     expect(assigned.agent_id).toBe("security-hunter-agent");
 
     const submitted = await run.invoke(["submit"], claimPayload(0));
     expect(submitted.error).toBeNull();
-    expect(readJson<CoverageUnit[]>(run.out, "ledger.json")[0].status).toBe("candidate");
-    expect(readJson<SecurityFinding[]>(run.out, "findings.json")).toHaveLength(1);
+    expect(readLedger(run.out)[0].status).toBe("candidate");
+    expect(readClaims(run.out)).toHaveLength(1);
 
     // Before any ballot, the confirmed claim is a publication blocker.
     const blocked = await run.invoke(["publish"]);
@@ -112,8 +111,8 @@ describe("a full run", () => {
 
     const published = await run.invoke(["publish"]);
     expect(published.error).toBeNull();
-    expect(readJson<SecurityFinding[]>(run.out, "security-findings.json")).toHaveLength(1);
-    expect(readJson<SecurityRunMetadata>(run.out, "run.json").runStatus).toBe("complete");
+    expect(readPublished(run.out)).toHaveLength(1);
+    expect(readRunMetadata(run.out).runStatus).toBe("complete");
     const written = readdirSync(run.out).sort();
     expect(written).toEqual([
       "FINDINGS-DETAIL.md",
@@ -194,7 +193,7 @@ describe("status derives the run's status from the ledger", () => {
     const run = await startRun(aRun());
     expect((await run.invoke(["defer", "--reason", "critic_budget_exhausted"])).error).toBeNull();
     // `run.json` is only rewritten by start and publish, so its copy is stale.
-    expect(readJson<SecurityRunMetadata>(run.out, "run.json").runStatus).toBe("in_progress");
+    expect(readRunMetadata(run.out).runStatus).toBe("in_progress");
 
     expect((await run.invoke(["status", "--json"])).error).toBeNull();
     const report = JSON.parse(run.stdout()) as { runStatus: string; incompleteReason: string | null };

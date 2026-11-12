@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { canonicalJson, type JsonValue } from "../../core/review-packet";
+import { canonicalJson, parseJsonValue } from "../../core/review-packet";
 import { parsePlanModels } from "../../core/parse-plan-models";
 import { waveOwnerDuty, type WaveOwnerDuty } from "../../core/owner-verification/obligations";
 import { planModelsIntegrityFailure } from "../../core/owner-verification/plan-integrity";
@@ -730,9 +730,17 @@ function replayCompletionResult(
     : conflict();
 }
 
+/**
+ * The result's canonical bytes. It is serialised first so that an `undefined`
+ * field is dropped as JSON drops it, then parsed as JSON data. A result that
+ * does not survive that as JSON data cannot be published, which is an engine
+ * defect and not an outcome of the suite.
+ */
 function canonicalResultBytes(result: WaveCompletionSuiteResult): readonly number[] {
-  const json = JSON.parse(JSON.stringify(result)) as JsonValue;
-  return freezeArray([...new TextEncoder().encode(canonicalJson(json))]);
+  const wire: unknown = JSON.parse(JSON.stringify(result));
+  const json = parseJsonValue(wire, "completion result");
+  if (!json.ok) throw new Error(`completion result is not JSON data: ${json.errors.join("; ")}`);
+  return freezeArray([...new TextEncoder().encode(canonicalJson(json.value))]);
 }
 
 /**

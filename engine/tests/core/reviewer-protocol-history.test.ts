@@ -472,8 +472,9 @@ for (const name of names) describe(`historical ${name}`, () => {
       expect(result.panel?.lenses).toEqual(["reproduction", "intent", "blast-radius"]);
       expect(result.panel?.threshold).toBe(2);
       expect(prepared.refutationCompletion?.completedPanelState.stage).toBe("done");
-      expect(prepared.refutationCompletion?.completedPanelCheckpoint?.events.map(({ type }) => type)).toEqual([
-        "refutation-verdict-accepted", "refutation-verdict-accepted", "refutation-verdict-accepted", "refutation-tally-completed",
+      expect(prepared.refutationCompletion?.completedPanelCheckpoint?.events).toMatchObject([
+        { type: "refutation-verdict-accepted" }, { type: "refutation-verdict-accepted" },
+        { type: "refutation-verdict-accepted" }, { type: "refutation-tally-completed" },
       ]);
     }
   });

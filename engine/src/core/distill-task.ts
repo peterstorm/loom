@@ -90,6 +90,8 @@ export type TaskRolePolicy = Readonly<{
   dispatchAppendix: "none" | "distill";
   /** What a policy waiving both test requirements means for it: worth a warning, or what the role always carries. */
   totalTestWaiver: "suspicious" | "by-construction";
+  /** Whether the Task mutation check (ADR-0071) may apply to it: a role that writes no test has no survivor to answer. */
+  taskMutationCheck: "eligible" | "exempt";
 }>;
 
 const TASK_ROLE_POLICIES: Readonly<Record<TaskRole, TaskRolePolicy>> = Object.freeze({
@@ -104,6 +106,7 @@ const TASK_ROLE_POLICIES: Readonly<Record<TaskRole, TaskRolePolicy>> = Object.fr
     proofSettlement: "reconcilable",
     dispatchAppendix: "none",
     totalTestWaiver: "suspicious",
+    taskMutationCheck: "eligible",
   }),
   distill: Object.freeze({
     authorable: false,
@@ -116,6 +119,7 @@ const TASK_ROLE_POLICIES: Readonly<Record<TaskRole, TaskRolePolicy>> = Object.fr
     proofSettlement: "attempt-only",
     dispatchAppendix: "distill",
     totalTestWaiver: "by-construction",
+    taskMutationCheck: "exempt",
   }),
 });
 

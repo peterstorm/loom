@@ -51,8 +51,10 @@ import {
   REPORT_ONLY_STOP_CHECK_PORTS,
   type StopCheckShellPorts,
 } from "../engine/src/handlers/subagent-stop/acceptance-stop-check";
-import { epochChangedFiles, runStopChecks, stopChecksReportLine } from "../engine/src/handlers/subagent-stop/stop-checks";
+import { epochChangedFiles, runStopChecks, stopChecksReportLine, type StopChecksInput } from "../engine/src/handlers/subagent-stop/stop-checks";
 import { contractStubStopNote, type ContractStubStore } from "../engine/src/orchestration/contract-stub-materialization";
+import { observeTaskMutation } from "../engine/src/orchestration/task-mutation-record";
+import { LOOM_PACKAGE_ROOT } from "../engine/src/utils/loom-package-root";
 import type { LedgerObservation } from "../engine/src/core/red-then-green-types";
 import { renderStopCheckNotes, type StopCheckNote } from "../engine/src/core/stop-check-note";
 import {
@@ -169,10 +171,11 @@ const reservedImplementationTaskIds = (reservation: PiSpawnReservation | undefin
     item.kind === "implementation" && item.taskId !== null ? [item.taskId] : []);
 
 /**
- * Both stop checks, report-only: Pi settles after the subagent has ended, so
- * a failing owed acceptance testcase or affected test is an operator note
- * here, never a block. The affected check runs over the changed files of the
- * child's own epoch in the parent ledger (`ledger`, FR-035), the same epoch
+ * The stop checks, report-only: Pi settles after the subagent has ended, so
+ * a failing owed acceptance testcase or affected test, and a Task mutation
+ * check that is missing, stale or left survivors (ADR-0071), is an operator
+ * note here, never a block. The affected check runs over the changed files of
+ * the child's own epoch in the parent ledger (`ledger`, FR-035), the same epoch
  * settlement judges. The checks are total, so they never raise a processing
  * error. Prints the report line to the operator and returns it as the note the
  * parent model also gets (#121), or null when there is nothing to say.
@@ -183,6 +186,7 @@ export async function reportImplementationStopChecks(
   ledger: LedgerObservation,
   ports: StopCheckShellPorts = REPORT_ONLY_STOP_CHECK_PORTS,
   notifyOperator: (line: string) => void = piStderrNote,
+  taskMutation: StopChecksInput["taskMutation"] = observeTaskMutation(LOOM_PACKAGE_ROOT),
 ): Promise<StopCheckNote | null> {
   if (taskId === null) return null;
   const outcome = await runStopChecks({
@@ -191,6 +195,7 @@ export async function reportImplementationStopChecks(
     taskId,
     agentKey: `pi.${taskId}`,
     changedFiles: epochChangedFiles(ledger, ports.pathExists),
+    taskMutation,
     hookStartedAtMs: ports.now(),
   }, ports);
   const line = stopChecksReportLine(taskId, outcome);

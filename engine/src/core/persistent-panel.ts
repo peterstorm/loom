@@ -49,11 +49,13 @@ import {
   jsonEqual,
   panelProgramCheckpoint,
   parsePanelProgramCheckpoint,
+  parsePanelProgramCheckpointRecord,
   reduceParsedPanelEvent,
   reducePanelProgram,
   replayPanelProgram,
   resumePanelProgram,
   type PanelCheckpoint,
+  type ParsedPanelCheckpoint,
   type PanelProgramDefinition,
   type PanelStep,
 } from "./persistent-panel-program";
@@ -974,4 +976,17 @@ export function refutationPanelCheckpoint(
 
 export function parseRefutationPanelCheckpoint(raw: unknown, resolver: PublicationAuthorityResolver): PersistentPanelResult<PersistentRefutationStep> {
   return parsePanelProgramCheckpoint(REFUTATION_PROGRAM, raw, resolver);
+}
+
+/** A refutation checkpoint as its parse accepted it: the step and the record. */
+export type ParsedRefutationPanelCheckpoint = ParsedPanelCheckpoint<
+  RefutationPanelAuthorityInput, RefutationPanelState, RefutationPanelAction, PersistentRefutationPanelEvent
+>;
+
+/** Parse a refutation checkpoint to its step AND the record it accepted, in the form `refutationPanelCheckpoint` writes. */
+export function parseRefutationPanelCheckpointRecord(
+  raw: unknown,
+  resolver: PublicationAuthorityResolver,
+): PersistentPanelResult<ParsedRefutationPanelCheckpoint> {
+  return parsePanelProgramCheckpointRecord(REFUTATION_PROGRAM, raw, resolver);
 }

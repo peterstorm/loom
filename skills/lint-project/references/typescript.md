@@ -6,6 +6,7 @@ TypeScript projects use relative imports (`./`, `../`) and package imports. The 
 
 ### Monorepo Pattern (packages/)
 
+<!-- wire-example: linter-project-config -->
 ```json
 {
   "boundaries": [
@@ -43,6 +44,7 @@ TypeScript projects use relative imports (`./`, `../`) and package imports. The 
 
 ### Flat src/ Pattern
 
+<!-- wire-example: linter-project-config -->
 ```json
 {
   "boundaries": [
@@ -62,6 +64,7 @@ TypeScript projects use relative imports (`./`, `../`) and package imports. The 
 
 ### Next.js App Router Pattern
 
+<!-- wire-example: linter-project-config -->
 ```json
 {
   "boundaries": [
@@ -113,6 +116,7 @@ The checker detects:
 
 ### Example purity config
 
+<!-- wire-example: linter-project-config -->
 ```json
 {
   "pureModules": [
@@ -143,6 +147,7 @@ shipped rules widen them: `no-non-null-assertion` matches `x!.`, `x![`, `f()!.`,
 binding-less `catch {}` in TypeScript and JavaScript.
 
 **no-unsafe-as-any.json** — Block `as any` type escape hatches:
+<!-- wire-example: linter-regex-rule -->
 ```json
 {
   "kind": "regex",
@@ -158,6 +163,7 @@ binding-less `catch {}` in TypeScript and JavaScript.
 ```
 
 **no-non-null-assertion.json** — Block `!.` operator:
+<!-- wire-example: linter-regex-rule -->
 ```json
 {
   "kind": "regex",
@@ -173,6 +179,7 @@ binding-less `catch {}` in TypeScript and JavaScript.
 ```
 
 **no-catch-ignore.json** — Block empty catch blocks:
+<!-- wire-example: linter-regex-rule -->
 ```json
 {
   "kind": "regex",
@@ -220,8 +227,33 @@ To narrow the rule to the modules that own your unions, set
 `switchTotalityModules` (non-empty) in `config.json`. The old opt-in
 `prefer-ts-pattern` regex rule is gone; delete a project copy of it.
 
+### Wire values: parse, never cast (already active)
+
+`no-wire-cast` runs after every edit on every non-test TypeScript file — no
+config needed. `JSON.parse(text)` and `response.json()` return `any`; the rule
+refuses giving that value a type without parsing it:
+
+```typescript
+const order = JSON.parse(text) as Order;              // refused
+const order = (await response.json()) as Order;       // refused
+const order = JSON.parse(text) as unknown as Order;   // refused
+const order: Order = JSON.parse(text);                // refused
+let order: Order; order = JSON.parse(text);           // refused
+
+const raw: unknown = JSON.parse(text);                // accepted
+const order = parseOrder(raw);                        // the parser returns Order or an error
+const order = parseOrder(JSON.parse(text));           // accepted: argument position
+```
+
+It reads text, not types: an unannotated `const value = JSON.parse(text)`, a
+`return JSON.parse(text)` under a declared return type and a property read
+(`JSON.parse(text).id`) are not flagged — the `any` there is the type
+checker's to catch. On an existing codebase, `--write-baseline` (above) records
+the sites that predate the rule in `wireCastBaseline`.
+
 ## Function Length
 
+<!-- wire-example: linter-project-config -->
 ```json
 {
   "maxFunctionLines": 50,

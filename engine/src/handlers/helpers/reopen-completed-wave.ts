@@ -2,7 +2,7 @@ import { argumentValue } from "./cli-args";
 import { StateManager } from "../../state-manager";
 import { taskGraphPath } from "../../config";
 import { newWaveGate, reconcileWaveBlock } from "../../core/wave-gate-model";
-import { parseTaskId } from "../../core/task-id";
+import { parseReopenRequest, type ReopenRequest } from "../../core/wave-reopening-request";
 import {
   exactRevalidationTargets,
   reopenedTaskIdsOf,
@@ -17,13 +17,6 @@ import type { HookHandler, Task, TaskGraph, WaveReopeningAudit } from "../../typ
 
 const USAGE = "Usage: helper reopen-completed-wave --runs-root <root> < exact-reopening.json";
 
-type ReopenRequest = Readonly<{
-  runId: string;
-  wave: number;
-  authorityDigest: string;
-  taskIds: readonly string[];
-}>;
-
 type WaveReopeningStore = Readonly<{
   updateAndReturn<T>(
     mutate: (state: TaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
@@ -34,33 +27,6 @@ export type WaveReopeningProof = Readonly<{
   mode: "modern-exact-workspace-drift" | "legacy-workspace-authority-unverifiable";
   taskIds: readonly string[];
 }>;
-
-function parseRequest(raw: string): ReopenRequest {
-  let value: unknown;
-  try {
-    value = JSON.parse(raw);
-  } catch (error) {
-    throw new Error(
-      `reopening payload must be valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("reopening payload must be an object");
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  const expected = ["authorityDigest", "runId", "taskIds", "wave"];
-  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
-    throw new Error("reopening payload must contain exactly runId/wave/authorityDigest/taskIds");
-  }
-  if (typeof record.runId !== "string" || record.runId.trim() === "" ||
-      typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1 ||
-      typeof record.authorityDigest !== "string" || !/^[0-9a-f]{64}$/.test(record.authorityDigest) ||
-      !Array.isArray(record.taskIds) || record.taskIds.length === 0 ||
-      record.taskIds.some((id) => !parseTaskId(id, "reopening.taskId").ok) ||
-      new Set(record.taskIds).size !== record.taskIds.length) {
-    throw new Error("reopening payload has invalid run/wave/authority/task ids");
-  }
-  return Object.freeze({ runId: record.runId, wave: record.wave, authorityDigest: record.authorityDigest, taskIds: Object.freeze([...record.taskIds] as string[]) });
-}
 
 function exactIds(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((id, index) => id === right[index]);
@@ -327,8 +293,10 @@ export function formatWaveReopeningError(error: unknown): string {
 }
 
 const handler: HookHandler = async (stdin, args) => {
+  const parsed = parseReopenRequest(stdin);
+  if (!parsed.ok) return { kind: "error", message: `[loom] reopen-completed-wave: ${parsed.error}` };
+  const request = parsed.value;
   try {
-    const request = parseRequest(stdin);
     const runsRoot = argumentValue(args, "--runs-root");
     if (runsRoot === null) return { kind: "error", message: USAGE };
     const manager = StateManager.fromPath(taskGraphPath());

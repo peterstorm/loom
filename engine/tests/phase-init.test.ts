@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { resolveInitialState } from "../src/phase-init";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 
 describe("resolveInitialState", () => {
   let tmpDir: string;
@@ -83,6 +85,15 @@ describe("resolveInitialState", () => {
     expect(state.wave_gates).toEqual({});
   });
 
+  it("records the plan design review as required unless it is skipped, without touching skipped_phases", () => {
+    expect(resolveInitialState({}, tmpDir).plan_design_review).toEqual({ status: "required" });
+    const skipped = resolveInitialState({ skipPlanDesignReview: true }, tmpDir);
+    expect(skipped.plan_design_review).toEqual({ status: "not-required", reason: "skipped" });
+    expect(skipped.skipped_phases).toEqual([]);
+    // Skipping plan-alignment is a different decision: the design review stays owed.
+    expect(resolveInitialState({ skipPlanAlignment: true }, tmpDir).plan_design_review).toEqual({ status: "required" });
+  });
+
   it("--skip-plan-alignment: skipped=[plan-alignment], phase=init", () => {
     const state = resolveInitialState({ skipPlanAlignment: true }, tmpDir);
     expect(state.current_phase).toBe("init");
@@ -123,6 +134,32 @@ describe("resolveInitialState", () => {
 
     const state = resolveInitialState({ skipSpecify: true }, specDir);
     expect(state.skipped_phases).not.toContain("plan-alignment");
+  });
+});
+
+/** The `init-state` argument wiring in cli.ts, run as the operator runs it. */
+describe("cli.ts init-state", () => {
+  const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+  let tmpDir: string;
+
+  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "loom-init-state-")); });
+  afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
+
+  const initState = (flags: readonly string[]): Record<string, unknown> => {
+    const output = join(tmpDir, `${flags.length}-state.json`);
+    const { PI_CODING_AGENT: _, ...env } = process.env;
+    const run = spawnSync("bun", [cli, "init-state", ...flags, "--spec-dir", join(tmpDir, "specs"), "--output", output], { encoding: "utf8", env });
+    expect(run.status, run.stderr).toBe(0);
+    return JSON.parse(readFileSync(output, "utf8")) as Record<string, unknown>;
+  };
+
+  it("records the plan design review as skipped exactly when --skip-plan-design-review is passed", () => {
+    expect(initState([]).plan_design_review).toEqual({ status: "required" });
+    const skipped = initState(["--skip-plan-design-review"]);
+    expect(skipped.plan_design_review).toEqual({ status: "not-required", reason: "skipped" });
+    expect(skipped.skipped_phases).toEqual([]);
+    // Another skip flag is a different decision: the design review stays owed.
+    expect(initState(["--skip-plan-alignment", "--skip-brainstorm"]).plan_design_review).toEqual({ status: "required" });
   });
 });
 

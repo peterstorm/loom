@@ -29,6 +29,7 @@ import {
 } from "../../engine/src/core/emission-tool";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, reviewerPayloadV2Schema } from "../../engine/src/core/reviewer-contract";
 import { judgeVerdictV1Schema } from "../../engine/src/core/panel-contract";
+import { isRecord } from "../../engine/src/core/plain-record";
 import { refutationVerdictV1Schema } from "../../engine/src/core/review-panel";
 import { standaloneReviewerPayloadV3Schema } from "../../engine/src/core/standalone-lineage-contract";
 import { probeRegisteredToolName } from "./qual-extension.ts";
@@ -155,7 +156,8 @@ const refutationViolationSource = (skeleton: Skeleton): string =>
 
 /** JSON round-trip copy plus a mutation, for building violation/garbage variants. */
 const mutateFixture = (fixture: unknown, mutate: (copy: Record<string, unknown>) => void): unknown => {
-  const copy = JSON.parse(JSON.stringify(fixture)) as Record<string, unknown>;
+  const copy: unknown = JSON.parse(JSON.stringify(fixture));
+  if (!isRecord(copy)) throw new Error("a probe fixture must serialise to a JSON object");
   mutate(copy);
   return copy;
 };

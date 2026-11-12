@@ -14,6 +14,7 @@ copy, and a test binds both to the traits table the engine routes on.
 
 ## Start here
 
+<!-- wire-example: security-audit-start -->
 ```bash
 loom helper security-audit start --out ../audit-run-1 --repo . --profile standard --budget 24 <<'JSON'
 { "units": [

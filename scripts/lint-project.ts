@@ -13,14 +13,15 @@
  * Options:
  *   --init          Create .claude/linter/rules/ with starter config (interactive)
  *   --tier=full     Run full tier (default: full)
- *   --tier=immediate  Run immediate tier only (regex rules, the import-boundary rules, switch-totality and
- *                   no-duplicate-block, fast)
+ *   --tier=immediate  Run immediate tier only (regex rules, the import-boundary rules, switch-totality,
+ *                   no-duplicate-block and no-wire-cast, fast)
  *   --no-baseline-check  Skip the staleness pass (grandfathered baselines and
  *                   scoping entries — exclusions, pure roots, shells, boundaries —
  *                   that no longer name anything)
- *   --write-baseline  Record every pre-existing totality site and copied block in the
- *                   project's config.json (switchTotalityBaseline,
- *                   discriminantBranchingBaseline, duplicateBlockBaseline), then exit
+ *   --write-baseline  Record every pre-existing totality site, copied block and wire cast in
+ *                   the project's config.json (switchTotalityBaseline,
+ *                   discriminantBranchingBaseline, duplicateBlockBaseline,
+ *                   wireCastBaseline), then exit
  *   --json          Output raw JSON violations
  *   --summary       Show only summary counts
  *   --fix-hints     Show fix hints (default: true)
@@ -51,6 +52,7 @@ import type * as ProgrammaticRules from "../engine/src/linter/programmatic/index
 import type * as Baselines from "../engine/src/linter/programmatic/baseline.ts";
 import type * as BaselineConfig from "../engine/src/linter/programmatic/baseline-config.ts";
 import type { BaselineOwner } from "../engine/src/linter/programmatic/baseline.ts";
+import type * as PlainRecord from "../engine/src/core/plain-record.ts";
 
 // ---------------------------------------------------------------------------
 // Resolve loom installation
@@ -79,6 +81,7 @@ const { baselineOwners }: typeof ProgrammaticRules = await import(join(LOOM_ROOT
 const { staleBaselineEntries }: typeof Baselines = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/baseline.ts"));
 const { configWithBaselines, recordedBaselines }: typeof BaselineConfig =
   await import(join(LOOM_ROOT, "engine/src/linter/programmatic/baseline-config.ts"));
+const { isRecord }: typeof PlainRecord = await import(join(LOOM_ROOT, "engine/src/core/plain-record.ts"));
 
 // ---------------------------------------------------------------------------
 // Detect project root and rules directory
@@ -225,6 +228,7 @@ const INIT_NEXT_STEPS: readonly string[] = [
   "  switchTotalityBaseline / discriminantBranchingBaseline — grandfathered sites",
   "  duplicateBlockMinTokens / duplicateBlockMinLines — how long a copy is (default: 100 tokens, 8 lines)",
   "  duplicateBlockBaseline — grandfathered copies",
+  "  wireCastBaseline — grandfathered JSON.parse / .json() casts (no-wire-cast)",
   "",
   "See: lint-rules/README.md for full documentation",
 ];
@@ -348,8 +352,8 @@ function baselineDrift(config: LinterConfig.ProgrammaticConfig): string[] {
 
 /**
  * Record every site each baselined rule flags today as that rule's baseline,
- * so a project adopts the totality rules and no-duplicate-block without every
- * pre-existing switch or copy blocking the next edit to its file. Written into the project's one
+ * so a project adopts the totality rules, no-duplicate-block and no-wire-cast without every
+ * pre-existing switch, copy or wire cast blocking the next edit to its file. Written into the project's one
  * `config.json`, creating it when absent. Which sites are
  * recorded and what the next config holds are the engine's pure decision
  * (`recordedBaselines`, `configWithBaselines`: every other field kept, an
@@ -373,8 +377,12 @@ function writeBaseline(config: LinterConfig.ProgrammaticConfig): void {
   const path = join(RULES_DIR, "config.json");
   // The config was already parsed through the engine's loader (`projectConfig`),
   // so a malformed one failed the run instead of being silently rewritten.
-  const existing: Record<string, unknown> = existsSync(path) ? JSON.parse(readFileSync(path, "utf-8")) : {};
-  writeFileSync(path, `${JSON.stringify(configWithBaselines(existing, recorded), null, 2)}\n`);
+  const stored: unknown = existsSync(path) ? JSON.parse(readFileSync(path, "utf-8")) : {};
+  if (!isRecord(stored)) {
+    console.error(`${relative(PROJECT_ROOT, path)} is not a JSON object; baseline not written`);
+    process.exit(2);
+  }
+  writeFileSync(path, `${JSON.stringify(configWithBaselines(stored, recorded), null, 2)}\n`);
   console.log(`✓ ${relative(PROJECT_ROOT, path)}: ${recorded.map(({ configKey, keys }) => `${configKey} ${keys.length}`).join(", ")}`);
 }
 

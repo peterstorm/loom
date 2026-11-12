@@ -27,8 +27,8 @@ export type InMemoryBlockCounters = Readonly<{
 const NONE_ISSUED: StopCheckBlockCount = Object.freeze({ kind: "count", blocks: 0 });
 
 export function inMemoryBlockCounters(options: InMemoryBlockCountersOptions = {}): InMemoryBlockCounters {
-  const counts = { acceptance: new Map<string, number>(), affected: new Map<string, number>() };
-  const cleared = { acceptance: new Set<string>(), affected: new Set<string>() };
+  const counts = { acceptance: new Map<string, number>(), affected: new Map<string, number>(), mutation: new Map<string, number>() };
+  const cleared = { acceptance: new Set<string>(), affected: new Set<string>(), mutation: new Set<string>() };
   const counters: StopCheckBlockCounters = {
     issued: (check, key) => {
       const recorded = counts[check].get(key);

@@ -80,6 +80,7 @@ Skip flags exist for explicit lifecycle bypasses:
 /loom --skip-specify "..."          # requires an existing spec
 /loom --skip-clarify "..."
 /loom --skip-plan-alignment "..."
+/loom --skip-plan-design-review "..."   # no design review of the plan before decompose
 ```
 
 `/loom --complete` and `--abort` are not implemented lifecycle flags. After the final Wave Gate, `helper complete-orchestration` archives the TaskGraph and lifts the guards. The guarded cleanup helper is only for deliberately abandoning an unfinished run. See [Operations](docs/operations.md).
@@ -112,6 +113,7 @@ Brainstorm → Spec → Clarify? → Architecture → Plan alignment → Decompo
 | Clarify | `clarify-agent` | updated spec + clarification log |
 | Architecture | `architecture-agent` | `.claude/plans/<slug>.md` |
 | Plan alignment | `plan-alignment-agent` | `.claude/specs/<slug>/plan-alignment.md` |
+| Plan design review (a gate, not a phase) | `code-reviewer`, `type-design-analyzer`, `architecture-tech-lead` | `plan_design_review` in protected state, bound to the plan's SHA-256 |
 | Decompose | `decompose-agent` | validated Tasks/Waves installed in protected state |
 
 The state file is created before planning starts, so hooks enforce phase order and artifact prerequisites throughout the lifecycle.

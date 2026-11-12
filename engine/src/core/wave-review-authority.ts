@@ -21,7 +21,14 @@ import { parseReviewerProtocolDescriptor } from "./reviewer-contract";
 import type { OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, WaveGateRestartAudit } from "./wave-gate-program";
 import { DECISION_RECORD_AGENT } from "./model-profiles";
 import { taskRolePolicy, type TaskRolePolicy } from "./distill-task";
-import { isWaveReviewRole, waveReviewRoster, type WaveReviewRole, type WaveReviewRoster } from "./agent-catalog-projections";
+import {
+  BASE_WAVE_REVIEW_AGENTS,
+  isWaveReviewRole,
+  waveReviewRoster,
+  type ArchitectureLensReasons,
+  type WaveReviewRole,
+  type WaveReviewRoster,
+} from "./agent-catalog-projections";
 import {
   AGENT_REQUIRED_SKILLS,
   canonicalRecord,
@@ -43,6 +50,13 @@ import { waveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "./wave-frozen-sour
 import { taskOwnerDuty } from "./owner-verification/obligations";
 import { isOwnerMapRole, OWNER_MAP_SECTION, renderOwnerMapSection } from "./owner-verification/owner-map";
 import type { OwnerObligation } from "./owner-verification/types";
+import {
+  CONTRACT_SURFACE_SECTION,
+  isContractSurfaceRole,
+  renderContractSurfaceSection,
+  reviewedContractSurfaces,
+  type ReviewedContractSurface,
+} from "./contract-surface-section";
 import {
   projectRequirementCoverage,
   renderRequirementCoverage,
@@ -201,37 +215,119 @@ export function waveReviewView<T extends WaveReviewedTask>(tasks: readonly T[]):
  * owner map (plan AD-9), and so the one home of owner-map presence: only a
  * schema-2 Wave, and only the obligations INV-3's owner says the Task's file
  * list touches (an unstamped graph touches nothing). Packet issuance renders
- * exactly these; the roster derivation below reads their presence.
+ * exactly these; the roster derivation below reads their presence as one of
+ * the two reasons for the architecture lens.
  */
 function ownerMapObligations(graph: TaskGraph, schemaVersion: 1 | 2, task: Task): readonly OwnerObligation[] {
   return schemaVersion === 2 ? taskOwnerDuty(graph, task.file_list ?? []).touched : [];
 }
 
-/** One reviewed Task's roster together with the owner-map obligations whose presence picked it. */
-type WaveTaskReviewDerivation = WaveTaskReviewRoster & Readonly<{ ownerMap: readonly OwnerObligation[] }>;
+/** What the roster derivation reads of the Review Run installed on a Task, if one is. */
+type InstalledReviewRoster = Pick<ReviewRun, "expected_agents"> | undefined;
 
 /**
- * The one presence-to-roster derivation (FR-022, ADR-0047) of a reviewed Task:
- * the base five, plus `architecture-tech-lead` appended last when the Task's
- * packets carry the owner map. Issuance renders the owner map from this same
- * result, so the section and the roster cannot disagree.
+ * What a Task's installed Review Run says about the contract-surface reason
+ * (ADR-0069 §5):
+ * - `derive`: no run is installed, or its roster cannot say whether its
+ *   packets carried the surface; the surface is derived from the stamped
+ *   contracts as usual.
+ * - `issued-without-surface`: the run names the base five while no other
+ *   reason puts the architecture reviewer on the roster, so it was issued
+ *   before the Task's review carried the surface. It keeps that roster and
+ *   those packets, and settles as issued.
  */
-function waveTaskReviewDerivation(graph: TaskGraph, schemaVersion: 1 | 2, task: Task): WaveTaskReviewDerivation {
+export type InstalledContractSurface =
+  | Readonly<{ kind: "derive" }>
+  | Readonly<{ kind: "issued-without-surface" }>;
+
+const DERIVE_CONTRACT_SURFACE: InstalledContractSurface = Object.freeze({ kind: "derive" });
+const ISSUED_WITHOUT_CONTRACT_SURFACE: InstalledContractSurface = Object.freeze({ kind: "issued-without-surface" });
+
+/**
+ * The one reading of an installed Review Run for the contract-surface reason.
+ * `otherReasons` are the Task's architecture-lens reasons except the contract
+ * surface itself. When one holds, the run's roster is six with or without the
+ * surface, so it cannot tell the two apart (ADR-0069's owner-mapped known
+ * limit) and the surface is derived.
+ */
+export function installedContractSurface(
+  installed: InstalledReviewRoster,
+  otherReasons: Omit<ArchitectureLensReasons, "contractSurface">,
+): InstalledContractSurface {
+  if (installed === undefined || otherReasons.ownerMap) return DERIVE_CONTRACT_SURFACE;
+  return canonicalStructuralEquals(installed.expected_agents, BASE_WAVE_REVIEW_AGENTS)
+    ? ISSUED_WITHOUT_CONTRACT_SURFACE
+    : DERIVE_CONTRACT_SURFACE;
+}
+
+/**
+ * The contract surfaces a Wave reviewer packet for `task` carries (ADR-0069),
+ * and so the one home of contract-surface presence: only a schema-2 Wave, and
+ * only the surfaces `reviewedContractSurfaces` says the Task writes, unless
+ * the installed Review Run was issued without them (`installedContractSurface`).
+ */
+function contractSurfacesReviewed(
+  graph: TaskGraph,
+  schemaVersion: 1 | 2,
+  task: Task,
+  installed: InstalledContractSurface,
+): readonly ReviewedContractSurface[] {
+  if (schemaVersion !== 2 || installed.kind === "issued-without-surface") return [];
+  return reviewedContractSurfaces(graph.acceptance_contracts ?? [], graph.export_bindings ?? [], task.id);
+}
+
+/**
+ * One reviewed Task's roster together with the two packet sections whose
+ * presence picked it: the owner-map obligations it touches and the contract
+ * surfaces it writes.
+ */
+type WaveTaskReviewDerivation = WaveTaskReviewRoster & Readonly<{
+  ownerMap: readonly OwnerObligation[];
+  contractSurfaces: readonly ReviewedContractSurface[];
+}>;
+
+/**
+ * The one presence-to-roster derivation (FR-022, ADR-0047, ADR-0069) of a
+ * reviewed Task: the base five, plus `architecture-tech-lead` appended last
+ * when the Task's packets carry the owner map or a contract surface. Issuance
+ * renders both sections from this same result, so a section and the roster
+ * cannot disagree.
+ */
+function waveTaskReviewDerivation(
+  graph: TaskGraph,
+  schemaVersion: 1 | 2,
+  task: Task,
+  installed: InstalledReviewRoster,
+): WaveTaskReviewDerivation {
   const ownerMap = ownerMapObligations(graph, schemaVersion, task);
-  return Object.freeze({ taskId: task.id, roster: waveReviewRoster(isNonEmpty(ownerMap)), ownerMap });
+  const ownerMapped = isNonEmpty(ownerMap);
+  const contractSurfaces = contractSurfacesReviewed(
+    graph, schemaVersion, task, installedContractSurface(installed, { ownerMap: ownerMapped }));
+  return Object.freeze({
+    taskId: task.id,
+    roster: waveReviewRoster({ ownerMap: ownerMapped, contractSurface: isNonEmpty(contractSurfaces) }),
+    ownerMap,
+    contractSurfaces,
+  });
+}
+
+/** A Wave Task's review against a given installed Review Run: its roster, or its exemption. */
+function waveTaskReview(graph: TaskGraph, schemaVersion: 1 | 2, task: Task, installed: InstalledReviewRoster): WaveTaskReview {
+  const standing = waveReviewStanding(task);
+  return standing.kind === "exempt"
+    ? standing
+    : Object.freeze({ kind: "roster", roster: waveTaskReviewDerivation(graph, schemaVersion, task, installed).roster });
 }
 
 /**
  * A Wave Task's review: its ordered reviewer roster, or its exemption.
  * Issuance, the locked install and every later roster comparison
  * (`waveRunRosterProblem`, completed-protocol verification) derive it here
- * from protected state, never from a persisted copy.
+ * from protected state. The only persisted roster it reads is the Task's own
+ * installed Review Run, and only as `contractSurfacesReviewed` says.
  */
 export function waveTaskReviewRoster(graph: TaskGraph, schemaVersion: 1 | 2, task: Task): WaveTaskReview {
-  const standing = waveReviewStanding(task);
-  return standing.kind === "exempt"
-    ? standing
-    : Object.freeze({ kind: "roster", roster: waveTaskReviewDerivation(graph, schemaVersion, task).roster });
+  return waveTaskReview(graph, schemaVersion, task, task.review_run);
 }
 
 /**
@@ -266,7 +362,7 @@ export type WaveRunRosterProblem =
 /**
  * The one roster-versus-persisted-run check. Slot membership, exhausted-run
  * restart, the locked install's replay and reviewer retries all ask this, so
- * a run settles only with the roster the engine derives now.
+ * a run settles only with the roster the engine derives for it now.
  */
 export function waveRunRosterProblem(
   graph: TaskGraph,
@@ -274,7 +370,7 @@ export function waveRunRosterProblem(
   task: Task,
   run: Pick<ReviewRun, "expected_agents" | "slot_authority">,
 ): WaveRunRosterProblem | null {
-  const review = waveTaskReviewRoster(graph, schemaVersion, task);
+  const review = waveTaskReview(graph, schemaVersion, task, run);
   if (review.kind === "exempt") return Object.freeze({ kind: "task-exempt", taskId: task.id, exemption: review });
   const { roster } = review;
   if (!canonicalStructuralEquals(run.expected_agents, roster)) {
@@ -1042,11 +1138,23 @@ export function prepareWaveReviewBatch(
 
   // The owner map (plan AD-9): only reviewer packets of a schema-2 Wave over a
   // stamped graph, and only for a Task touching some owned family. Every other
-  // packet keeps its exact pre-feature bytes (SC-005). The same presence picks
-  // the Task's roster, so an owner-mapped Task also issues architecture-tech-lead.
-  const derivations = reviewed.map((task) => waveTaskReviewDerivation(graph, registration.schemaVersion, task));
+  // packet keeps its exact pre-feature bytes (SC-005). The owner map is one of
+  // the two reasons for the architecture lens: either reason (owner map or
+  // contract surface) puts architecture-tech-lead on the Task's roster.
+  const derivations = reviewed.map((task) =>
+    waveTaskReviewDerivation(graph, registration.schemaVersion, task, task.review_run));
   const ownerMapByTask = new Map<string, ByteSection>();
-  for (const { taskId, ownerMap: touched } of derivations) {
+  // The contract surface (ADR-0069): only reviewer packets of a schema-2 Wave,
+  // and only for a Task writing an Acceptance Contract's types file. The same
+  // presence puts architecture-tech-lead on the Task's roster.
+  const contractSurfaceByTask = new Map<string, ByteSection>();
+  for (const { taskId, ownerMap: touched, contractSurfaces } of derivations) {
+    if (isNonEmpty(contractSurfaces)) {
+      const contractSurface = encodeByteSection(
+        CONTRACT_SURFACE_SECTION, renderContractSurfaceSection(graph.plan_file ?? null, contractSurfaces));
+      if (!contractSurface.ok) return failure(contractSurface.error.message);
+      contractSurfaceByTask.set(taskId, contractSurface.value);
+    }
     if (!isNonEmpty(touched)) continue;
     const planFile = graph.plan_file;
     if (planFile === null || planFile === undefined) {
@@ -1134,10 +1242,14 @@ export function prepareWaveReviewBatch(
     const ownerMapSection = subject.taskId !== null && isOwnerMapRole(subject.role)
       ? ownerMapByTask.get(subject.taskId) ?? null
       : null;
+    const contractSurfaceSection = subject.taskId !== null && isContractSurfaceRole(subject.role)
+      ? contractSurfaceByTask.get(subject.taskId) ?? null
+      : null;
     const fixedContext = [
       section.value,
       ...(sourceSection === null ? [] : [sourceSection]),
       ...(ownerMapSection === null ? [] : [ownerMapSection]),
+      ...(contractSurfaceSection === null ? [] : [contractSurfaceSection]),
       ...(coverageSection === null ? [] : [coverageSection.value]),
     ];
     const packetInput = {

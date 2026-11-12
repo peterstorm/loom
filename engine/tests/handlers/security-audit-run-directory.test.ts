@@ -11,10 +11,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createSecurityAuditHandler } from "../../src/handlers/helpers/security-audit";
-import type { CoverageUnit } from "../../src/core/security-coverage";
 import { registeredSecurityAuditRuns } from "../../src/orchestration/security-audit-run-registry";
 import { aVerdict } from "../security/fixtures";
-import { STARTED, aRun, claimPayload, isolateSubagentDir, readJson, removeRuns, seedFor, startRun, unitIdFor } from "./security-audit-harness";
+import { STARTED, aRun, claimPayload, isolateSubagentDir, readLedger, removeRuns, seedFor, startRun, unitIdFor } from "./security-audit-harness";
 import { invokeAt as invokeCli } from "./security-audit-run-seam";
 
 beforeEach(() => { isolateSubagentDir(); });
@@ -173,7 +172,7 @@ describe("a run directory under a symlinked base (/var → /private/var)", () =>
 
     expect((await invokeAt(spelled, ["assign", "--unit", unitIdFor(0), "--agent", "security-hunter-agent", "--wave", "1"])).error).toBeNull();
     expect((await invokeAt(spelled, ["submit"], claimPayload(0))).error).toBeNull();
-    expect(readJson<CoverageUnit[]>(canonical, "ledger.json")[0].status).toBe("candidate");
+    expect(readLedger(canonical)[0].status).toBe("candidate");
 
     const status = await invokeAt(spelled, ["status"]);
     expect(status.error).toBeNull();

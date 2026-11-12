@@ -248,9 +248,6 @@ export type OwnerUnparseable = Readonly<{ kind: "owner-unparseable"; diagnostics
 /** `mutation-plan.ts`'s entry point: a pure function of owner bytes, changed lines and cap. */
 export type MutationPlanFn = (input: MutationPlanInput) => DomainResult<MutationPlan, OwnerUnparseable>;
 
-/** The owner text with one mutant applied: `[start, end)` replaced by `replacement`. */
-export type ApplyMutantFn = (ownerText: string, mutant: Mutant) => string;
-
 // ---------------------------------------------------------------------------
 // Matrix-test runs and their outcomes
 // ---------------------------------------------------------------------------

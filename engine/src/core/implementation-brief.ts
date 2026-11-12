@@ -45,6 +45,9 @@ import { quoteShellArgument } from "./shell-quoting";
 import { classifyTaskFiles } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
 import { samePlanPath } from "./plan-path-match";
+import { TASK_MUTATION_STOP_CHECK_MAX_BLOCKS } from "./affected-stop-check-types";
+import { MUTANT_CAP_PER_TASK } from "./owner-verification/mutation-plan";
+import { TASK_MUTATION_BASH_TIMEOUT_MS, taskMutationCommand, taskMutationDuty } from "./task-mutation-check";
 import { renderSkeletonOutcome } from "./skeleton/outcomes";
 import { conformanceScope } from "./skeleton/scope";
 import { renderStaleSkeleton, staleSkeletons, taskSkeletonOutcomes, type UnresolvedSkeletonBinding } from "./skeleton/status";
@@ -145,6 +148,9 @@ export type ImplementationBriefInput = Readonly<{
   /** The TaskGraph's project root, absolute: where the I6 restore command
    *  runs, spelled literally so no command substitution reaches the guard. */
   repositoryRoot: string;
+  /** The active Loom package's root, absolute: the engine command a brief
+   *  names (the Task mutation check) runs through its CLI. */
+  packageRoot: string;
   /** The operator's notes from the dispatch marker (#119); empty for none. */
   operatorNotes: readonly OperatorNote[];
   /** What the shell observed for the Frozen Signatures section (G2 AD-13).
@@ -903,6 +909,41 @@ function redThenGreenSection(
 }
 
 /**
+ * The Task mutation check section (ADR-0071) for a Task `taskMutationDuty`
+ * says owes the check: the one command, when to run it, what to do with a
+ * survivor, and what the stop does with the result. Null for every other
+ * Task, so a brief never names a check its Task is exempt from.
+ */
+function taskMutationSection(
+  task: Task,
+  { roster, contracts, verificationManifest, packageRoot }: Pick<ImplementationBriefInput, "roster" | "contracts" | "verificationManifest" | "packageRoot">,
+): string | null {
+  const duty = taskMutationDuty({
+    tasks: [...roster.filter(({ id }) => id !== task.id), task],
+    verification_manifest: verificationManifest,
+    acceptance_contracts: contracts,
+  }, task.id);
+  if (duty.kind === "off") return null;
+  return [
+    "**Task mutation check.** Once your tests pass and before your final verification run, run this as one Bash call " +
+      `with a timeout of ${TASK_MUTATION_BASH_TIMEOUT_MS} ms:`,
+    `\`${taskMutationCommand(packageRoot, task.id)}\``,
+    `It mutates the lines you changed in the files below (at most ${MUTANT_CAP_PER_TASK} mutants), runs your affected tests against ` +
+      "each one in an isolated copy of the workspace, and prints every mutant your tests did not kill, with the test that kills it. " +
+      "For each survivor, add that test and run the check again. When no test can tell a mutant from your code (an equivalent " +
+      "mutant), name it and say why in your final report.",
+    "Any later edit to a file in your file list makes the result stale, so run it after your last edit. The engine reads the result " +
+      "when you stop: where the harness can keep you working, a missing, stale or surviving result does, at most " +
+      `${TASK_MUTATION_STOP_CHECK_MAX_BLOCKS} times. A result of \`unavailable\` never holds you, nor does \`inconclusive\` ` +
+      "(every mutant only broke test collection or ran no test: check that your tests import the changed file). The check's own runs are not " +
+      "test evidence, so your final verification run still follows it.",
+    "",
+    "Files it mutates:",
+    bulleted(duty.mutable, "None."),
+  ].join("\n");
+}
+
+/**
  * Render one Task's implementation brief, or refuse with the exact reason the
  * brief could not be admissible.
  */
@@ -959,6 +1000,7 @@ export function renderImplementationBrief(
   if (!redThenGreen.ok) return refused(redThenGreen.error.kind, redThenGreen.error.message);
 
   const policy = taskVerificationPolicy(task);
+  const mutationCheck = taskMutationSection(task, input);
   const values: Readonly<Record<BriefVariable, string>> = {
     rules_content: rulesContent,
     task_id: task.id,
@@ -970,6 +1012,7 @@ export function renderImplementationBrief(
     verification_policy: [
       ...verificationPolicyLines(policy),
       ...(redThenGreen.value === null ? [] : ["", redThenGreen.value]),
+      ...(mutationCheck === null ? [] : ["", mutationCheck]),
     ].join("\n"),
     implementation_retry_context: dispatch.promptAppendix ?? NO_RETRY_CONTEXT,
     operator_note: bulleted(input.operatorNotes, NO_OPERATOR_NOTE),

@@ -19,8 +19,9 @@
  */
 
 import { existsSync, readdirSync } from "node:fs";
-import type { HookHandler, PreToolUseInput } from "../../types";
+import type { HookHandler } from "../../types";
 import { allowResult, blockResult, passthroughResult } from "../../types";
+import { parsePreToolUseInput } from "./pre-tool-use-input";
 import { machinesDir, SUBAGENT_DIR } from "../../config";
 import {
   attributeEvidence,
@@ -62,10 +63,8 @@ export const runEnforcePhaseTools = async (
   stdin: string,
   registry: SessionRegistry = fsSessionRegistry,
 ) => {
-  let input: PreToolUseInput;
-  try {
-    input = JSON.parse(stdin);
-  } catch {
+  const input = parsePreToolUseInput(stdin);
+  if (input instanceof Error) {
     // Malformed stdin: fail closed only if some session is actually gated —
     // otherwise a harness format change would brick every ungated session.
     return anyBindingExists()

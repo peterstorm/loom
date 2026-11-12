@@ -17,6 +17,7 @@ import {
   jsonEqual,
   panelProgramCheckpoint,
   parsePanelProgramCheckpoint,
+  parsePanelProgramCheckpointRecord,
   reduceParsedPanelEvent,
   reducePanelProgram,
   replayPanelProgram,
@@ -196,6 +197,35 @@ describe("persistent panel program kernel: replay and checkpoints", () => {
     // The projection decides agreement, never membership: the twin still refuses real disagreement.
     const disagreeing = { ...echoed, state: { ...echoed.state, count: 7 } };
     expect(refusal(parsePanelProgramCheckpoint(twin, disagreeing, resolver))).toMatchObject(DISAGREES);
+  });
+
+  it("returns the accepted checkpoint as the record its writer emits, with the step it replays to", () => {
+    fc.assert(fc.property(fc.integer({ min: 0, max: 12 }), fc.boolean(), (count, finish) => {
+      const { step, events } = record([...increments(count), ...(finish ? [FINISH] : [])]);
+      const written = value(panelProgramCheckpoint(TALLY, step.state, events, resolver));
+      const parsed = value(parsePanelProgramCheckpointRecord(TALLY, JSON.parse(JSON.stringify(written)), resolver));
+      expect(parsed.checkpoint).toEqual(written);
+      expect(jsonEqual(parsed.checkpoint, written)).toBe(true);
+      expect(Object.isFrozen(parsed.checkpoint)).toBe(true);
+      expect(value(parsePanelProgramCheckpoint(TALLY, written, resolver))).toEqual(parsed.step);
+    }));
+  });
+
+  it("returns a checkpoint written in a spelling its canonical projection admits in the writer's form", () => {
+    const twin: typeof TALLY = {
+      ...TALLY,
+      canonicalStateJson: (stateJson) => typeof stateJson === "object" && stateJson !== null
+        ? Object.fromEntries(Object.entries(stateJson).filter(([key]) => key !== "echo"))
+        : stateJson,
+    };
+    const durable = durableCheckpoint();
+    const echoed = { ...durable, state: { ...(durable.state as object), echo: { size: 2 } } };
+    expect(value(parsePanelProgramCheckpointRecord(twin, echoed, resolver)).checkpoint).toEqual(durable);
+  });
+
+  it("refuses through the record parse exactly what the step parse refuses", () => {
+    const tampered = { ...durableCheckpoint(), state: { count: 7 } };
+    expect(refusal(parsePanelProgramCheckpointRecord(TALLY, tampered, resolver))).toEqual(refusal(parsePanelProgramCheckpoint(TALLY, tampered, resolver)));
   });
 });
 

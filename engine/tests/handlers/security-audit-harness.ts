@@ -14,8 +14,15 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { canonicalCoverageId, type SecurityProfile } from "../../src/core/security-audit-contract";
-import { HUNTER_ENVELOPE, aConfirmedFinding, aUnitResult, nSeeds } from "../security/fixtures";
+import { SECURITY_AUDIT_RUN_FILES } from "../../src/core/audit-run-authority";
+import type { DomainResult } from "../../src/core/orchestration-contract/identity";
+import { parseVerificationVerdicts, type VerificationVerdict } from "../../src/core/security-adjudication";
+import { canonicalCoverageId, parseSecurityRunMetadata, type SecurityProfile, type SecurityRunMetadata } from "../../src/core/security-audit-contract";
+import { parseLedger, type CoverageLedger } from "../../src/core/security-coverage";
+import { parseSecurityFindings, type SecurityFinding } from "../../src/core/security-findings";
+import { readRunDocument } from "../../src/handlers/helpers/security-audit-run";
+import { isJsonArray } from "../fixtures/json-wire";
+import { HUNTER_ENVELOPE, aConfirmedFinding, aUnitResult, nSeeds, ok } from "../security/fixtures";
 import { invokeAt, type Run } from "./security-audit-run-seam";
 import { verifyWith } from "./security-verification-harness";
 
@@ -49,7 +56,23 @@ export function removeRuns(): void {
   for (const dir of created.splice(0)) rmSync(dir, { recursive: true, force: true });
 }
 
-export const readJson = <T>(out: string, file: string): T => JSON.parse(readFileSync(join(out, file), "utf8")) as T;
+/** One run document, read the way the audit reads it back (`readRunDocument`):
+ *  no-follow, strict JSON, parsed by the core that owns it. A refusal throws,
+ *  naming the file: a test never asserts on a document the engine would refuse. */
+const readDocument = <T>(out: string, file: string, parse: (raw: unknown) => DomainResult<T, unknown>): T =>
+  ok(readRunDocument(out, file, parse));
+
+export const readRunMetadata = (out: string): SecurityRunMetadata => readDocument(out, SECURITY_AUDIT_RUN_FILES.run, parseSecurityRunMetadata);
+export const readLedger = (out: string): CoverageLedger => readDocument(out, SECURITY_AUDIT_RUN_FILES.ledger, parseLedger);
+/** The claims the hunt filed (`findings.json`). */
+export const readClaims = (out: string): readonly SecurityFinding[] => readDocument(out, SECURITY_AUDIT_RUN_FILES.findings, parseSecurityFindings);
+/** The adjudicated records `publish` wrote (`security-findings.json`). */
+export const readPublished = (out: string): readonly SecurityFinding[] => readDocument(out, SECURITY_AUDIT_RUN_FILES.published, parseSecurityFindings);
+export const readVerdicts = (out: string): readonly VerificationVerdict[] => readDocument(out, SECURITY_AUDIT_RUN_FILES.verdicts, parseVerificationVerdicts);
+
+/** A run file the engine writes and never reads back (`disposition.json`), as
+ *  the JSON it holds: the caller asserts on its shape. */
+export const readJson = (out: string, file: string): unknown => JSON.parse(readFileSync(join(out, file), "utf8"));
 
 /** The seed a test starts a run with, by index, so a unit id and its cell
  *  cannot drift: `unitIdFor(i)` is derived from exactly `seedFor(i)`. */
@@ -72,7 +95,9 @@ export function writeArtifact(run: Run, relativePath: string, content: string): 
  * a countable ballot comes from `verifyWith` (`security-verification-harness`).
  */
 export function handWriteBallots(run: Run, ballots: readonly unknown[]): void {
-  const existing = JSON.parse(readFileSync(join(run.out, "verdicts.json"), "utf8")) as unknown[];
+  // Read loosely on purpose: an earlier hand-written ballot may be one the parser refuses.
+  const existing = readJson(run.out, SECURITY_AUDIT_RUN_FILES.verdicts);
+  if (!isJsonArray(existing)) throw new Error("verdicts.json does not hold a list");
   writeFileSync(join(run.out, "verdicts.json"), `${JSON.stringify([...existing, ...ballots], null, 2)}\n`);
 }
 

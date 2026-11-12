@@ -1,7 +1,9 @@
 /**
- * The one stop shell for both stop checks (G4, AD-10): the acceptance check
- * (I-slice 1, a claimant's owed acceptance testcases) and the affected-test
- * check (I7, the tests the attempt's changed files affect).
+ * The one stop shell for the stop checks (G4, AD-10): the acceptance check
+ * (I-slice 1, a claimant's owed acceptance testcases), the affected-test
+ * check (I7, the tests the attempt's changed files affect) and the Task
+ * mutation check (ADR-0071), which runs no runner here: it reads the record
+ * `helper mutation-check` left and `taskMutationStopVerdict` decides.
  *
  * `runStopChecks` is the shell; every decision is pure and lives elsewhere:
  * - what each check would run comes from `planStopChecks` (INV-1), over the
@@ -39,6 +41,7 @@ import {
   SETTLEMENT_RESERVE_MS,
   STOP_CHECK_NAMES,
   STOP_HOOK_BUDGET_MS,
+  TASK_MUTATION_STOP_CHECK_MAX_BLOCKS,
   type AcceptancePlan,
   type AffectedPlan,
   type AffectedStopCheckNoteKind,
@@ -51,15 +54,25 @@ import {
 import {
   blockAdmission,
   judgeAffectedRun,
+  mapSomeChecks,
   renderAffectedBlock,
   renderExcusedAcceptanceTestcase,
   renderStopChecksBlock,
   stopCheckBlockDecision,
   type BlockAdmission,
   type Blocking,
+  type BlockingChecks,
   type StopCheckBlockCaps,
   type StopChecksBlockParts,
 } from "../../core/affected-stop-check";
+import {
+  NO_TASK_MUTATION_CHECK,
+  renderTaskMutationBlock,
+  taskMutationDuty,
+  taskMutationStopVerdict,
+  type OwedTaskMutation,
+  type TaskMutationObservation,
+} from "../../core/task-mutation-check";
 import { changedFilesAtStop, NO_CHANGED_FILES } from "../../core/changed-files";
 import { sha256Bytes } from "../../core/digest";
 import type { LedgerObservation } from "../../core/red-then-green-types";
@@ -75,6 +88,7 @@ const OUTPUT_TAIL_CHARS = 4_000;
 const CAPS: StopCheckBlockCaps = Object.freeze({
   acceptance: ACCEPTANCE_STOP_CHECK_MAX_BLOCKS,
   affected: AFFECTED_STOP_CHECK_MAX_BLOCKS,
+  mutation: TASK_MUTATION_STOP_CHECK_MAX_BLOCKS,
 });
 
 /** The attempt's changed files as the shell observed them, or why they could not be. */
@@ -91,6 +105,12 @@ export type StopChecksInput = Readonly<{
   agentKey: string;
   /** The attempt's changed files beneath the resolved repository root. */
   changedFiles: (root: CanonicalRepositoryRoot) => ChangedFilesObservation;
+  /**
+   * How the record of a Task that owes the mutation check stands against its
+   * files beneath the resolved repository root (ADR-0071). Asked only for a
+   * Task `taskMutationDuty` says owes the check; a throw is a note.
+   */
+  taskMutation: (duty: OwedTaskMutation, root: CanonicalRepositoryRoot) => TaskMutationObservation;
   /** The hook clock's first reading at hook entry; the budget is measured from it. */
   hookStartedAtMs: number;
 }>;
@@ -173,6 +193,35 @@ function affectedArm(taskId: string, plan: AffectedPlan, observation: AffectedOb
       ? null
       : outsideCwd.map((file) => `${AFFECTED_OUTSIDE_CWD_PREFIX}: ${file}`).join("; ")))
     .with({ kind: "command-refused" }, ({ errors }) => affectedNote(taskId, "command-refused", errors.join("; ")))
+    .exhaustive();
+}
+
+/** The repository root the stop resolved, or why it could not. */
+type ResolvedRoot = ReturnType<StopCheckShellPorts["repositoryRoot"]>;
+
+/**
+ * The mutation arm's result. It runs no runner: a Task that owes the check
+ * has its record's standing observed, and `taskMutationStopVerdict` decides.
+ * A missing root or a throwing observation is a note, never a block.
+ */
+function mutationResult(input: StopChecksInput, graph: TaskGraph, resolvedRoot: ResolvedRoot): CheckResult {
+  const duty = taskMutationDuty(graph, input.taskId);
+  const observe = (): TaskMutationObservation => {
+    if (duty.kind === "off") return NO_TASK_MUTATION_CHECK;
+    if (!resolvedRoot.ok) return Object.freeze({ kind: "unavailable", reason: resolvedRoot.reason });
+    try {
+      return input.taskMutation(duty, resolvedRoot.root);
+    } catch (cause) {
+      return Object.freeze({ kind: "unavailable", reason: describe(cause) });
+    }
+  };
+  return match(taskMutationStopVerdict(input.taskId, observe()))
+    .returnType<CheckResult>()
+    .with({ kind: "idle" }, () => IDLE)
+    .with({ kind: "passed" }, () => Object.freeze({ kind: "passed", note: null }))
+    .with({ kind: "note" }, ({ note }) => Object.freeze({ kind: "note", note }))
+    .with({ kind: "failing" }, ({ cause, command }) =>
+      Object.freeze({ kind: "failing", part: (remaining: number) => renderTaskMutationBlock(cause, command, remaining) }))
     .exhaustive();
 }
 
@@ -271,29 +320,36 @@ function admitted<Plan>(taskId: string, arm: Arm<Plan>, admission: BlockAdmissio
 }
 
 const notesOf = (results: Results): readonly string[] =>
-  [results.acceptance, results.affected].flatMap((result) =>
-    result.kind === "note" ? [result.note] : result.kind === "passed" && result.note !== null ? [result.note] : []);
+  STOP_CHECK_NAMES.flatMap((name) => {
+    const result = results[name];
+    return result.kind === "note" ? [result.note] : result.kind === "passed" && result.note !== null ? [result.note] : [];
+  });
 
 /** The stop the results belong to: whose Task it is, and whose counters a block writes. */
 type Stopper = Pick<StopChecksInput, "taskId" | "agentKey">;
 
+/** Each blocking check's part of the message, rendered with the blocks its counter leaves: the same checks the block names. */
+const blockParts = (blocking: BlockingChecks<Failing, Failing, Failing>): StopChecksBlockParts =>
+  mapSomeChecks<Blocking<Failing>, string>(blocking, (name, { failure, blocks }) => failure.part(CAPS[name] - blocks));
+
 /** Settle the results into one outcome, writing only the counters the decision names. */
 function settle({ taskId, agentKey }: Stopper, results: Results, issued: Issued, ports: StopCheckShellPorts, extraNotes: readonly string[]): StopChecksOutcome {
-  const decision = stopCheckBlockDecision(issued, { acceptance: failingOf(results.acceptance), affected: failingOf(results.affected) }, CAPS);
+  const decision = stopCheckBlockDecision(issued, {
+    acceptance: failingOf(results.acceptance),
+    affected: failingOf(results.affected),
+    mutation: failingOf(results.mutation),
+  }, CAPS);
   const notes = [...notesOf(results), ...decision.notes.map((note) => `stop checks for ${taskId}: ${note}`), ...extraNotes];
   if (decision.outcome === "proceed") {
     if (notes.length > 0) return Object.freeze({ kind: "note", message: notes.join("\n") });
-    return results.acceptance.kind === "passed" || results.affected.kind === "passed" ? Object.freeze({ kind: "passed" }) : Object.freeze({ kind: "skip" });
+    return STOP_CHECK_NAMES.some((name) => results[name].kind === "passed") ? Object.freeze({ kind: "passed" }) : Object.freeze({ kind: "skip" });
   }
   const { blocking } = decision;
-  if (blocking.acceptance !== null) ports.blocks.record("acceptance", agentKey, blocking.acceptance.blocks);
-  if (blocking.affected !== null) ports.blocks.record("affected", agentKey, blocking.affected.blocks);
-  const part = (name: StopCheckName, { failure, blocks }: Blocking<Failing>): string => failure.part(CAPS[name] - blocks);
-  // The block names at least one check, so its parts do too, acceptance first.
-  const parts: StopChecksBlockParts = blocking.acceptance !== null
-    ? { acceptance: part("acceptance", blocking.acceptance), affected: blocking.affected === null ? null : part("affected", blocking.affected) }
-    : { acceptance: null, affected: part("affected", blocking.affected) };
-  const body = renderStopChecksBlock(parts);
+  for (const name of STOP_CHECK_NAMES) {
+    const check = blocking[name];
+    if (check !== null) ports.blocks.record(name, agentKey, check.blocks);
+  }
+  const body = renderStopChecksBlock(blockParts(blocking));
   return Object.freeze({
     kind: "block",
     message: notes.length === 0 ? body : `${body}\n\nStop-check notes:\n${notes.map((note) => `- ${note}`).join("\n")}`,
@@ -312,17 +368,20 @@ async function decide(input: StopChecksInput, ports: StopCheckShellPorts): Promi
     acceptance: acceptanceArm(taskId, plan.acceptance, resolvedRoot.ok ? null : resolvedRoot.reason),
     affected: affectedArm(taskId, plan.affected, observation),
   });
-  // Only a check that would run reads its counter.
+  // The mutation arm runs no runner, so it is settled before the lock is taken.
+  const mutation = mutationResult(input, graph, resolvedRoot);
+  // Only a check that would run, or that would block, reads its counter.
   const issued: Issued = Object.freeze({
     acceptance: isRunnable(planned.acceptance) ? ports.blocks.issued("acceptance", input.agentKey) : NO_BLOCKS_ISSUED,
     affected: isRunnable(planned.affected) ? ports.blocks.issued("affected", input.agentKey) : NO_BLOCKS_ISSUED,
+    mutation: mutation.kind === "failing" ? ports.blocks.issued("mutation", input.agentKey) : NO_BLOCKS_ISSUED,
   });
   const acceptance = admitted(taskId, planned.acceptance, blockAdmission("acceptance", issued.acceptance, CAPS.acceptance));
   const affected = admitted(taskId, planned.affected, blockAdmission("affected", issued.affected, CAPS.affected));
 
   // Without a root every arm is already settled (a note, or idle when its check is off); the guard also narrows `root`.
   if (!resolvedRoot.ok || (!isRunnable(acceptance) && !isRunnable(affected))) {
-    return settle(input, { acceptance: resultOf(acceptance), affected: resultOf(affected) }, issued, ports, []);
+    return settle(input, { acceptance: resultOf(acceptance), affected: resultOf(affected), mutation }, issued, ports, []);
   }
   const root = resolvedRoot.root;
   const lock = ports.acquireRunner(root);
@@ -330,6 +389,7 @@ async function decide(input: StopChecksInput, ports: StopCheckShellPorts): Promi
     return settle(input, {
       acceptance: isRunnable(acceptance) ? acceptanceNote(taskId, lock.reason) : acceptance,
       affected: isRunnable(affected) ? affectedNote(taskId, "lock-held", lock.reason) : affected,
+      mutation,
     }, issued, ports, []);
   }
   const ran = await runAdmitted(input, { acceptance, affected }, Object.freeze({ graph, wave: plan.wave }), root, ports);
@@ -340,14 +400,14 @@ async function decide(input: StopChecksInput, ports: StopCheckShellPorts): Promi
     Object.freeze({ kind: "note", message: [crashNote(taskId, cause), ...lockNotes].join("\n") });
   if (!ran.ok) return crashed(ran.cause);
   try {
-    return settle(input, ran.results, issued, ports, lockNotes);
+    return settle(input, { ...ran.results, mutation }, issued, ports, lockNotes);
   } catch (cause) {
     return crashed(cause);
   }
 }
 
-/** The checks' results under the held lock, or the fault that stopped them: a throw never skips the release. */
-type Ran = Readonly<{ ok: true; results: Results }> | Readonly<{ ok: false; cause: unknown }>;
+/** The runner checks' results under the held lock, or the fault that stopped them: a throw never skips the release. */
+type Ran = Readonly<{ ok: true; results: Pick<Results, "acceptance" | "affected"> }> | Readonly<{ ok: false; cause: unknown }>;
 
 /** The TaskGraph a known Task's stop was planned from, and that Task's Wave. */
 type PlannedTask = Readonly<{ graph: TaskGraph; wave: number }>;
@@ -397,7 +457,7 @@ async function runAffectedWithinBudget(
 
 /**
  * Decide the stop. Total: every fault becomes a note, and a stop that
- * proceeds clears both of the agent's block counters.
+ * proceeds clears every one of the agent's block counters.
  */
 export async function runStopChecks(input: StopChecksInput, ports: StopCheckShellPorts): Promise<StopChecksOutcome> {
   let outcome: StopChecksOutcome;
@@ -426,7 +486,7 @@ export function stopChecksReportLine(taskId: string, outcome: StopChecksOutcome)
     case "skip":
       return null;
     case "passed":
-      return `stop checks: every acceptance and affected-test check that ran for ${taskId} passes`;
+      return `stop checks: every acceptance, affected-test and Task mutation check that ran for ${taskId} passes`;
     case "note":
       return outcome.message;
     case "block":

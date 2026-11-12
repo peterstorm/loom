@@ -32,6 +32,7 @@ import {
   type RemediationState,
   type RepositorySnapshotWitness,
 } from "../../../core/remediation-machine";
+import { isRecord } from "../../../core/plain-record";
 import type { StandaloneDoneState } from "../../../core/standalone-review";
 import { readAuthenticatedStandaloneSource } from "./standalone-source";
 import {
@@ -586,9 +587,11 @@ export async function resumeRemediationFacade(
     const checkpoint = await handle.readCheckpoint();
     if (checkpoint !== null) {
       try {
-        const raw = JSON.parse(checkpoint) as { schemaVersion?: unknown; state?: { state?: unknown; receipt?: unknown } };
-        if (raw.schemaVersion === 1 && raw.state?.state === "done") {
-          const receipt = parseVerifiedIndexInstalled(raw.state.receipt);
+        const raw: unknown = JSON.parse(checkpoint);
+        if (!isRecord(raw)) return failed(`remediation checkpoint is not a JSON object for ${handle.runDirectory}`);
+        const state = isRecord(raw.state) ? raw.state : null;
+        if (raw.schemaVersion === 1 && state?.state === "done") {
+          const receipt = parseVerifiedIndexInstalled(state.receipt);
           if (!receipt.ok) return failed(`legacy remediation done receipt is invalid: ${receipt.error.message}`);
           return {
             ok: true,

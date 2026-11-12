@@ -380,7 +380,7 @@ describe("totality config: scope, baselines and the project root they are writte
     ["no path", "::x.kind"],
     ["no key", "src/domain/order.ts::"],
   ])("refuses a baseline entry with %s — it could never match a site, and has no path to read back", (_shape, entry) => {
-    for (const key of ["switchTotalityBaseline", "discriminantBranchingBaseline"]) {
+    for (const key of ["switchTotalityBaseline", "discriminantBranchingBaseline", "duplicateBlockBaseline", "wireCastBaseline"]) {
       expect(parseProjectConfig({ [key]: ["src/a.ts::ok", entry] }, "config.json")).toEqual({
         ok: false,
         error: `config.json: ${key}[1] '${entry}' must be 'path::key' — a project-relative path, '::', then what the rule flagged there`,
@@ -425,6 +425,27 @@ describe("totality config: scope, baselines and the project root they are writte
       .find((candidate) => candidate.name === "switch-totality")!;
     expect(rule.handler(UNPROVEN, join(root, "src/domain/order.ts"))).toEqual([]);
     expect(rule.handler(UNPROVEN, join(root, "src/domain/invoice.ts"))).toHaveLength(1);
+  });
+
+  it("parses the wire-cast baseline, and excuses a target project's baselined site through the production loader — only that one", () => {
+    const baseline = ["src/orders/load.ts::as Order", "src/orders/load.ts::order: Order"];
+    const { root, rulesDir } = project({ wireCastBaseline: baseline });
+    expect(loadProjectConfig(rulesDir)).toEqual({ wireCastBaseline: baseline });
+    const rule = loadRules(LOOM_DEFAULT_RULES, rulesDir, "immediate")
+      .filter(isProgrammaticRule)
+      .find((candidate) => candidate.name === "no-wire-cast")!;
+    const source = "const head = JSON.parse(text) as Order;\nconst order: Order = await response.json();";
+    expect(rule.handler(source, join(root, "src/orders/load.ts"))).toEqual([]);
+    expect(rule.handler(source, join(root, "src/orders/save.ts"))).toHaveLength(2);
+    expect(rule.handler(`${source}\nconst tail = JSON.parse(text) as Order;`, join(root, "src/orders/load.ts")).map(({ line }) => line))
+      .toEqual([3]);
+  });
+
+  it("applies no-wire-cast to a target project with no config at all, in TypeScript only", () => {
+    const rule = createProgrammaticRules(authoritativeLintContext(EMPTY_CONFIG, null)).find((candidate) => candidate.name === "no-wire-cast")!;
+    expect(rule.handler("const order = JSON.parse(text) as Order;", "/work/shop/src/orders/load.ts")).toHaveLength(1);
+    expect(rule.tier).toBe("immediate");
+    expect(rule.extensions).toEqual([".ts", ".tsx", ".mts", ".cts"]);
   });
 
   it("applies switch-totality to a target project with no config at all", () => {

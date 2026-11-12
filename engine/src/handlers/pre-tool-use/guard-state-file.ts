@@ -18,6 +18,7 @@ import type { HookHandler, HookResult, PreToolUseInput } from "../../types";
 import { guardStateFileDecision } from "../../core/guard-state-file";
 import { defaultTaskGraphExists, guardedLocations } from "../../config";
 import { fsSessionRegistry, parseSessionId, type SessionRegistry } from "../../machine";
+import { failClosedInput } from "./pre-tool-use-input";
 
 /**
  * The shell side of the state-file guard: no task graph → nothing to guard
@@ -70,18 +71,12 @@ export const runGuardStateFile = async (
   registry: SessionRegistry = fsSessionRegistry,
   guard: (command: string) => HookResult = guardStateFile,
 ): Promise<HookResult> => {
-  let input: PreToolUseInput;
-  try {
-    input = JSON.parse(stdin);
-  } catch (e) {
-    // Malformed hook input on a guard route: fail CLOSED. A parse crash
-    // would exit 1 — NON-blocking for PreToolUse — silently waving the
-    // Bash call past the state-file guard.
-    return {
-      kind: "block",
-      message: `guard-state-file: malformed hook input — failing closed: ${e instanceof Error ? e.message : String(e)}`,
-    };
-  }
+  // Malformed hook input on a guard route: fail CLOSED. A parse crash
+  // would exit 1 — NON-blocking for PreToolUse — silently waving the
+  // Bash call past the state-file guard.
+  const parsed = failClosedInput("guard-state-file", stdin);
+  if (!parsed.ok) return parsed.block;
+  const { input } = parsed;
   // A present-but-non-string `command` is a malformed Bash call. The `as string`
   // cast is a lie: the normalizers iterate `text.length`, which is `undefined`
   // for objects/numbers/booleans, so the loops no-op and every match view comes

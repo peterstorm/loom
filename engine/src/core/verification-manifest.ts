@@ -41,8 +41,8 @@ import type { OwnerCheckAuthority } from "./owner-check-authority";
 export const VERIFICATION_MANIFEST_SOURCE_PATH = ".loom/verification-manifest.json" as const;
 export const VERIFICATION_MANIFEST_SCHEMA_VERSION = 1 as const;
 /** Source schema 2 adds the optional `acceptanceRunner`, `affectedRunner`,
- *  `testFileSuffixes` and `distillPass`; schema 1 stays valid and means none
- *  of them. */
+ *  `testFileSuffixes`, `distillPass` and `taskMutationCheck`; schema 1 stays
+ *  valid and means none of them. */
 export const VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION = 2 as const;
 export const VERIFICATION_MANIFEST_KIND = "loom-verification-manifest" as const;
 
@@ -114,8 +114,12 @@ type VerificationManifestBase = Readonly<{
   checks: readonly VerificationManifestCheck[];
 }>;
 
-/** Schema 1 cannot declare a runner, test-file suffixes or the distill-pass
- *  switch; schema 2 may, and carries each key only when the operator declares it. */
+/** The operator's `taskMutationCheck` manifest setting (ADR-0071); absent reads as `on`. */
+export const TASK_MUTATION_CHECK_SETTINGS = ["on", "off"] as const;
+export type TaskMutationCheckSetting = (typeof TASK_MUTATION_CHECK_SETTINGS)[number];
+
+/** Schema 1 cannot declare a runner, test-file suffixes or either switch;
+ *  schema 2 may, and carries each key only when the operator declares it. */
 export type VerificationManifest =
   | VerificationManifestBase & Readonly<{
       schemaVersion: typeof VERIFICATION_MANIFEST_SCHEMA_VERSION;
@@ -123,6 +127,7 @@ export type VerificationManifest =
       affectedRunner?: never;
       testFileSuffixes?: never;
       distillPass?: never;
+      taskMutationCheck?: never;
     }>
   | VerificationManifestBase & Readonly<{
       schemaVersion: typeof VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION;
@@ -131,6 +136,8 @@ export type VerificationManifest =
       testFileSuffixes?: NonEmpty<string>;
       /** Whether population adds each Wave's Distill Task (ADR-0068); absent means `on`. */
       distillPass?: DistillPassSetting;
+      /** Whether a Task's stop asks for its mutation check (ADR-0071); absent means `on`. */
+      taskMutationCheck?: TaskMutationCheckSetting;
     }>;
 
 /** The engine default's classification: the only one an engine-default source may carry. */
@@ -156,6 +163,9 @@ type FrozenVerificationManifestBase = Readonly<{
  * `distillPass` is the operator's distill-pass switch (ADR-0068), frozen only
  * when the operator file declares it; `distillPassSetting` reads it, absent
  * as `on`. The engine default declares nothing, so it never carries one.
+ *
+ * `taskMutationCheck` is the operator's Task-mutation-check switch (ADR-0071),
+ * frozen and read the same way (`taskMutationCheckSetting`).
  */
 export type FrozenVerificationManifest =
   | FrozenVerificationManifestBase & Readonly<{
@@ -165,6 +175,7 @@ export type FrozenVerificationManifest =
       affectedRunner?: never;
       testFiles?: EngineDefaultTestFiles;
       distillPass?: never;
+      taskMutationCheck?: never;
     }>
   | FrozenVerificationManifestBase & Readonly<{
       source: OperatorFileSource;
@@ -173,6 +184,7 @@ export type FrozenVerificationManifest =
       affectedRunner?: AffectedRunner;
       testFiles?: FrozenTestFiles;
       distillPass?: DistillPassSetting;
+      taskMutationCheck?: TaskMutationCheckSetting;
     }>;
 
 /**
@@ -182,6 +194,14 @@ export type FrozenVerificationManifest =
  */
 export const distillPassSetting = (manifest: FrozenVerificationManifest | undefined): DistillPassSetting =>
   manifest?.distillPass ?? "on";
+
+/**
+ * Whether a Task's stop asks for its mutation check under this frozen
+ * manifest: the operator's declared setting, or `on` when none was declared
+ * (and for a TaskGraph that carries no manifest at all).
+ */
+export const taskMutationCheckSetting = (manifest: FrozenVerificationManifest | undefined): TaskMutationCheckSetting =>
+  manifest?.taskMutationCheck ?? "on";
 
 /**
  * A manifest frozen since the test-file classification existed: its
@@ -514,13 +534,20 @@ function parseTestFileSuffixes(raw: unknown, path: string): Parsed<NonEmpty<stri
   return errors.length === 0 ? success(suffixes) : failure(errors);
 }
 
-/** The distill-pass switch: exactly one of `DISTILL_PASS_SETTINGS`. */
-function parseDistillPass(raw: unknown, path: string): Parsed<DistillPassSetting> {
-  const setting = DISTILL_PASS_SETTINGS.find((candidate) => candidate === raw);
+/** An operator switch: exactly one of its `settings`. */
+function parseSetting<Setting extends string>(raw: unknown, path: string, settings: readonly Setting[]): Parsed<Setting> {
+  const setting = settings.find((candidate) => candidate === raw);
   return setting === undefined
-    ? failure([`${path} must be one of ${DISTILL_PASS_SETTINGS.map((candidate) => `"${candidate}"`).join(", ")}`])
+    ? failure([`${path} must be one of ${settings.map((candidate) => `"${candidate}"`).join(", ")}`])
     : success(setting);
 }
+
+/** The distill-pass switch: exactly one of `DISTILL_PASS_SETTINGS`. */
+const parseDistillPass = (raw: unknown, path: string): Parsed<DistillPassSetting> => parseSetting(raw, path, DISTILL_PASS_SETTINGS);
+
+/** The Task-mutation-check switch: exactly one of `TASK_MUTATION_CHECK_SETTINGS`. */
+const parseTaskMutationCheck = (raw: unknown, path: string): Parsed<TaskMutationCheckSetting> =>
+  parseSetting(raw, path, TASK_MUTATION_CHECK_SETTINGS);
 
 const TEST_FILES_SOURCES: ReadonlySet<unknown> = new Set<FrozenTestFiles["source"]>(["operator-manifest", "engine-default"]);
 
@@ -583,8 +610,8 @@ const errorsOf = (...results: readonly (Parsed<unknown> | null)[]): readonly str
 /** The value of an optional key that parsed, or null when it was not declared. */
 const valueOrNull = <T>(result: Parsed<T> | null): T | null => result?.ok === true ? result.value : null;
 
-const SOURCE_OPTIONAL_KEYS = ["acceptanceRunner", "affectedRunner", "testFileSuffixes", "distillPass"] as const;
-const FROZEN_OPTIONAL_KEYS = ["acceptanceRunner", "affectedRunner", "testFiles", "distillPass"] as const;
+const SOURCE_OPTIONAL_KEYS = ["acceptanceRunner", "affectedRunner", "testFileSuffixes", "distillPass", "taskMutationCheck"] as const;
+const FROZEN_OPTIONAL_KEYS = ["acceptanceRunner", "affectedRunner", "testFiles", "distillPass", "taskMutationCheck"] as const;
 
 function parseDocument(raw: unknown): Parsed<VerificationManifest> {
   // A non-record falls through to exactRecord, which names the shape error.
@@ -612,7 +639,9 @@ function parseDocument(raw: unknown): Parsed<VerificationManifest> {
     parseTestFileSuffixes(record.value.testFileSuffixes, "verificationManifest.testFileSuffixes"));
   const distillPass = optionalKey(declared, "distillPass", () =>
     parseDistillPass(record.value.distillPass, "verificationManifest.distillPass"));
-  errors.push(...errorsOf(checks, acceptance, affected, suffixes, distillPass));
+  const taskMutationCheck = optionalKey(declared, "taskMutationCheck", () =>
+    parseTaskMutationCheck(record.value.taskMutationCheck, "verificationManifest.taskMutationCheck"));
+  errors.push(...errorsOf(checks, acceptance, affected, suffixes, distillPass, taskMutationCheck));
   if (!checks.ok || errors.length > 0) return failure(errors);
   const conflicts = reportConflicts(
     valueOrNull(acceptance), valueOrNull(affected), checks.value.map(({ report }) => report), "verificationManifest",
@@ -627,6 +656,7 @@ function parseDocument(raw: unknown): Parsed<VerificationManifest> {
         ...(affected?.ok === true ? { affectedRunner: affected.value } : {}),
         ...(suffixes?.ok === true ? { testFileSuffixes: suffixes.value } : {}),
         ...(distillPass?.ok === true ? { distillPass: distillPass.value } : {}),
+        ...(taskMutationCheck?.ok === true ? { taskMutationCheck: taskMutationCheck.value } : {}),
       })
     : freeze({ schemaVersion: VERIFICATION_MANIFEST_SCHEMA_VERSION, kind: VERIFICATION_MANIFEST_KIND, checks: checks.value });
   return success(manifest);
@@ -661,15 +691,16 @@ type FrozenOptionalFields = Readonly<{
   affectedRunner: AffectedRunner | null;
   testFiles: FrozenTestFiles | null;
   distillPass: DistillPassSetting | null;
+  taskMutationCheck: TaskMutationCheckSetting | null;
 }>;
 
 /** What the engine default seals beside its classification: no runner and no declared switch. */
-const NOTHING_DECLARED = { acceptanceRunner: null, affectedRunner: null, distillPass: null } as const;
+const NOTHING_DECLARED = { acceptanceRunner: null, affectedRunner: null, distillPass: null, taskMutationCheck: null } as const;
 
 function manifestAuthorityJson(
   source: VerificationManifestSource,
   checks: readonly ProjectWaveCompletionCheck[],
-  { acceptanceRunner, affectedRunner, testFiles, distillPass }: FrozenOptionalFields,
+  { acceptanceRunner, affectedRunner, testFiles, distillPass, taskMutationCheck }: FrozenOptionalFields,
 ): JsonValue {
   const projectChecks: readonly JsonValue[] = checks.map((check): JsonValue => ({
     kind: check.kind,
@@ -692,6 +723,7 @@ function manifestAuthorityJson(
     ...(affectedRunner === null ? {} : { affectedRunner: runnerAuthorityJson(affectedRunner) }),
     ...(testFiles === null ? {} : { testFiles: { source: testFiles.source, suffixes: testFiles.suffixes } }),
     ...(distillPass === null ? {} : { distillPass }),
+    ...(taskMutationCheck === null ? {} : { taskMutationCheck }),
   };
 }
 
@@ -723,9 +755,9 @@ function engineDefaultManifest(testFiles: EngineDefaultTestFiles | null): Engine
 }
 
 function operatorFileManifest(authority: OperatorFileAuthority): OperatorFileFrozenManifest {
-  const { source, acceptanceRunner, affectedRunner, testFiles, distillPass } = authority;
+  const { source, acceptanceRunner, affectedRunner, testFiles, distillPass, taskMutationCheck } = authority;
   const projectChecks = freezeArray([...authority.checks].sort((left, right) => compareStrings(left.checkId, right.checkId)));
-  const optional = { acceptanceRunner, affectedRunner, testFiles, distillPass };
+  const optional = { acceptanceRunner, affectedRunner, testFiles, distillPass, taskMutationCheck };
   return freeze({
     schemaVersion: VERIFICATION_MANIFEST_SCHEMA_VERSION,
     kind: "frozen-verification-manifest",
@@ -736,6 +768,7 @@ function operatorFileManifest(authority: OperatorFileAuthority): OperatorFileFro
     ...(affectedRunner === null ? {} : { affectedRunner }),
     ...(testFiles === null ? {} : { testFiles }),
     ...(distillPass === null ? {} : { distillPass }),
+    ...(taskMutationCheck === null ? {} : { taskMutationCheck }),
   });
 }
 
@@ -814,6 +847,7 @@ export function freezeVerificationManifest(rawBytes: unknown): Parsed<I6EraVerif
         ? ENGINE_DEFAULT_TEST_FILES
         : freeze({ source: "operator-manifest" as const, suffixes: parsed.value.testFileSuffixes }),
       distillPass: parsed.value.distillPass ?? null,
+      taskMutationCheck: parsed.value.taskMutationCheck ?? null,
     }));
   });
 }
@@ -879,6 +913,7 @@ type FrozenFields = Readonly<{
   affected: Parsed<AcceptanceRunner> | null;
   testFiles: Parsed<FrozenTestFiles> | null;
   distillPass: Parsed<DistillPassSetting> | null;
+  taskMutationCheck: Parsed<TaskMutationCheckSetting> | null;
 }>;
 
 function frozenTagErrors(record: UnknownRecord): string[] {
@@ -905,13 +940,15 @@ function parseFrozenFields(record: UnknownRecord, declared: readonly string[]): 
       parseFrozenTestFiles(record.testFiles, "frozenVerificationManifest.testFiles")),
     distillPass: optionalKey(declared, "distillPass", () =>
       parseDistillPass(record.distillPass, "frozenVerificationManifest.distillPass")),
+    taskMutationCheck: optionalKey(declared, "taskMutationCheck", () =>
+      parseTaskMutationCheck(record.taskMutationCheck, "frozenVerificationManifest.taskMutationCheck")),
   });
 }
 
 /** Cross-field refusals, in their reporting order: report conflicts, engine-default authority, digest shape. */
 function frozenFieldErrors(fields: FrozenFields): string[] {
-  const { source, checks, declaredDigest, acceptance, affected, testFiles, distillPass } = fields;
-  const errors = [...errorsOf(source, checks, acceptance, affected, testFiles, distillPass)];
+  const { source, checks, declaredDigest, acceptance, affected, testFiles, distillPass, taskMutationCheck } = fields;
+  const errors = [...errorsOf(source, checks, acceptance, affected, testFiles, distillPass, taskMutationCheck)];
   if (checks.ok) {
     errors.push(...reportConflicts(
       valueOrNull(acceptance), valueOrNull(affected), checks.value.map(({ reportPolicy }) => reportPolicy), "frozenVerificationManifest",
@@ -929,6 +966,9 @@ function frozenFieldErrors(fields: FrozenFields): string[] {
   }
   if (engineDefault && distillPass !== null) {
     errors.push("frozenVerificationManifest engine-default source cannot carry a distillPass setting");
+  }
+  if (engineDefault && taskMutationCheck !== null) {
+    errors.push("frozenVerificationManifest engine-default source cannot carry a taskMutationCheck setting");
   }
   if (!declaredDigest.ok) errors.push(`frozenVerificationManifest.manifestDigest: ${declaredDigest.error.message}`);
   if (engineDefault && checks.ok && checks.value.length > 0) {
@@ -958,6 +998,7 @@ function canonicalFrozenManifest(
         affectedRunner: valueOrNull(fields.affected),
         testFiles: frozenTestFiles,
         distillPass: valueOrNull(fields.distillPass),
+        taskMutationCheck: valueOrNull(fields.taskMutationCheck),
       });
 }
 

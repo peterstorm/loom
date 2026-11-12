@@ -5,10 +5,20 @@
  */
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { sourceSegments } from "../../src/linter/source-segments";
+import { lexicalSpans, sourceSegments } from "../../src/linter/source-segments";
 
-const kindsOf = (content: string): readonly (readonly [string, string])[] =>
-  sourceSegments(content).map(({ kind, start, end }) => [kind, content.slice(start, end)] as const);
+type Spans = readonly Readonly<{ kind: string; start: number; end: number }>[];
+
+const textOf = (content: string, spans: Spans): readonly (readonly [string, string])[] =>
+  spans.map(({ kind, start, end }) => [kind, content.slice(start, end)] as const);
+
+const kindsOf = (content: string): readonly (readonly [string, string])[] => textOf(content, sourceSegments(content));
+const spansOf = (content: string): readonly (readonly [string, string])[] => textOf(content, lexicalSpans(content));
+
+/** Every character is in exactly one span, in order, and no span is empty. */
+const tiles = (content: string, spans: Spans): boolean =>
+  spans.map(({ start, end }) => content.slice(start, end)).join("") === content
+  && spans.every(({ start, end }, index) => end > start && start === (spans[index - 1]?.end ?? 0));
 
 /** Text built from the characters the scanner branches on, so every path is reached. */
 const sourceText = fc.array(
@@ -42,9 +52,65 @@ describe("sourceSegments", () => {
 
   it("covers every character exactly once, in order, with no empty span", () => {
     fc.assert(fc.property(sourceText, (content) => {
-      const segments = sourceSegments(content);
-      expect(segments.map(({ start, end }) => content.slice(start, end)).join("")).toBe(content);
-      expect(segments.every(({ start, end }, index) => end > start && start === (segments[index - 1]?.end ?? 0))).toBe(true);
+      expect(tiles(content, sourceSegments(content))).toBe(true);
+    }));
+  });
+});
+
+describe("lexicalSpans", () => {
+  it("tells template text and a regex literal apart from the code around them", () => {
+    expect(spansOf("u = `http://${host}/x`; r = /[)(]\\//g;")).toEqual([
+      ["code", "u = "],
+      ["template", "`http://$"],
+      ["code", "{host}"],
+      ["template", "/x`"],
+      ["code", "; r = "],
+      ["regex", "/[)(]\\//"],
+      ["code", "g;"],
+    ]);
+  });
+
+  it("keeps an interpolation's own strings, comments and nested templates apart", () => {
+    expect(spansOf("`a${f(\"s\", `b${c}`) /* n */}z`")).toEqual([
+      ["template", "`a$"],
+      ["code", "{f("],
+      ["string", "\"s\""],
+      ["code", ", "],
+      ["template", "`b$"],
+      ["code", "{c}"],
+      ["template", "`"],
+      ["code", ") "],
+      ["comment", "/* n */"],
+      ["code", "}"],
+      ["template", "z`"],
+    ]);
+  });
+
+  it("leaves the brackets of its code spans balanced around every interpolation", () => {
+    const code = lexicalSpans("x = `(${a[0]}{`; y = `}${b}`;")
+      .filter(({ kind }) => kind === "code")
+      .map(({ start, end }) => "x = `(${a[0]}{`; y = `}${b}`;".slice(start, end))
+      .join("");
+    expect(code).toBe("x = {a[0]}; y = {b};");
+  });
+
+  it("covers every character exactly once, in order, with no empty span", () => {
+    fc.assert(fc.property(sourceText, (content) => {
+      expect(tiles(content, lexicalSpans(content))).toBe(true);
+    }));
+  });
+
+  it("is the segments once template text and regex literals are read as code", () => {
+    fc.assert(fc.property(sourceText, (content) => {
+      const coarse = lexicalSpans(content)
+        .map(({ kind, start, end }) => ({ kind: kind === "string" || kind === "comment" ? kind : "code", start, end }))
+        .reduce<{ kind: string; start: number; end: number }[]>((merged, span) => {
+          const last = merged.at(-1);
+          return last !== undefined && last.kind === "code" && span.kind === "code"
+            ? [...merged.slice(0, -1), { ...last, end: span.end }]
+            : [...merged, span];
+        }, []);
+      expect(sourceSegments(content)).toEqual(coarse);
     }));
   });
 });

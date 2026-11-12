@@ -25,6 +25,7 @@ The runner lints **every file with a lintable extension** — `.ts .tsx .mts .ct
   and the reason it must not be checked (vendored upstream code, generated
   files):
 
+<!-- wire-example: linter-project-config -->
 ```json
 {
   "exclude": [
@@ -46,12 +47,12 @@ for every rule at once.
 |--------|--------|
 | *(paths…)* | Lint these files or directories. An explicit file is linted exactly — unless the exclusion list names it, which prints `excluded: <file> (<reason>)` |
 | `--tier=full` | All rules (default) |
-| `--tier=immediate` | The edit-time tier only: regex rules, the import-boundary pair, `switch-totality`, `no-duplicate-block` |
+| `--tier=immediate` | The edit-time tier only: regex rules, the import-boundary pair, `switch-totality`, `no-duplicate-block`, `no-wire-cast` |
 | `--summary` | Counts by rule |
 | `--json` | `{ violations, errorCount, staleEntries, excluded }` |
 | `--no-fix-hints` | Hide fix hints |
 | `--no-baseline-check` | Skip the staleness pass |
-| `--write-baseline` | Record pre-existing totality sites in `config.json`, then exit |
+| `--write-baseline` | Record pre-existing totality sites, copied blocks and wire casts in `config.json`, then exit |
 | `--init` | Scaffold `.claude/linter/rules/config.json` (`.pi/linter/rules/` in a project with `.pi` and no `.claude`); its starter `pureModules` keeps only the roots the project already has, so the first run is not stale |
 
 ## What fails the run

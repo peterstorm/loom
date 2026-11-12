@@ -39,6 +39,7 @@ import { validatePiAgentDefinitionFile } from "../../utils/render-pi-agent";
 import { activeAgentDir, buildPiRoutingContext } from "../../utils/model-routing-context";
 import { piAgentDefinitionPath } from "../../core/pi-agent-directory";
 import { withBriefMarkerExpanded } from "./implementation-brief-marker";
+import { failClosedInput } from "./pre-tool-use-input";
 
 type PiAgentDefinitionLookup =
   | Readonly<{ kind: "found"; path: string }>
@@ -89,15 +90,9 @@ const readString = (value: unknown): string | undefined =>
   typeof value === "string" ? value : undefined;
 
 const handler: HookHandler = async (stdin) => {
-  let input: PreToolUseInput;
-  try {
-    input = JSON.parse(stdin);
-  } catch (error) {
-    return {
-      kind: "block",
-      message: `validate-agent-model: malformed hook input — failing closed: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
+  const parsed = failClosedInput("validate-agent-model", stdin);
+  if (!parsed.ok) return parsed.block;
+  const { input } = parsed;
   if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
 
   // Read, not cast. `tool_input` is `Record<string, unknown>` straight off

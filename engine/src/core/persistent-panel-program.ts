@@ -13,8 +13,8 @@
  *   - replay-equals-state (`replayPanelProgram`): one strict parse-and-reduce
  *     of an event prefix from the program's start;
  *   - the checkpoint record (`panelProgramCheckpoint`,
- *     `parsePanelProgramCheckpoint`), whose event prefix must replay to its
- *     recorded state — the form a panel persists in (ADR-0029);
+ *     `parsePanelProgramCheckpointRecord`), whose event prefix must replay to
+ *     its recorded state — the form a panel persists in (ADR-0029);
  *   - submission recording (`reduceParsedPanelEvent`) and `resumePanelProgram`.
  *
  * Membership is proved, never asserted: each program carries a
@@ -241,6 +241,26 @@ export function replayPanelProgram<A extends PanelAuthority, I, S extends PanelS
 
 export type PanelCheckpoint<I, E> = Readonly<{ schemaVersion: 2; kind: `${string}-panel-checkpoint`; authority: I; events: readonly E[]; state: unknown }>;
 
+/**
+ * The checkpoint record of an event prefix replayed from `authority`: the ONE
+ * construction of a checkpoint, so the record a checkpoint parse returns is
+ * exactly the record `panelProgramCheckpoint` writes for the same state.
+ */
+function checkpointRecord<A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
+  program: PanelProgramDefinition<A, I, S, Ac, E>,
+  authority: A,
+  replayed: ReplayedPrefix<S, Ac, E>,
+): PanelCheckpoint<I, E> {
+  const replayedState = JSON.parse(JSON.stringify(replayed.step.state)) as unknown;
+  return Object.freeze({
+    schemaVersion: 2 as const,
+    kind: `${program.name}-panel-checkpoint` as const,
+    authority: program.authorityJson(authority),
+    events: replayed.events,
+    state: replayedState,
+  });
+}
+
 /** The durable checkpoint of a proved state: its event prefix must replay exactly to it. */
 export function panelProgramCheckpoint<A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
   program: PanelProgramDefinition<A, I, S, Ac, E>,
@@ -254,22 +274,20 @@ export function panelProgramCheckpoint<A extends PanelAuthority, I, S extends Pa
   const replayed = replayPrefix(program, authority, events, resolver);
   if (!replayed.ok) return replayed;
   if (!statesAgree(program, state, replayed.value.step.state)) return persistentFailure(panelError("malformed-checkpoint", `${name} checkpoint event prefix does not replay to the supplied state`));
-  const replayedState = JSON.parse(JSON.stringify(replayed.value.step.state)) as unknown;
-  return persistentSuccess(Object.freeze({
-    schemaVersion: 2 as const,
-    kind: `${name}-panel-checkpoint` as const,
-    authority: program.authorityJson(authority),
-    events: replayed.value.events,
-    state: replayedState,
-  }));
+  return persistentSuccess(checkpointRecord(program, authority, replayed.value));
 }
 
-/** Parse a durable checkpoint: its authority, then its event prefix replayed to exactly its recorded state. */
-export function parsePanelProgramCheckpoint<A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
+/** A durable checkpoint as its parse accepted it: the step it replays to, and
+ *  the checkpoint record itself, in the form `panelProgramCheckpoint` writes. */
+export type ParsedPanelCheckpoint<I, S, Ac, E> = Readonly<{ step: PanelStep<S, Ac, E>; checkpoint: PanelCheckpoint<I, E> }>;
+
+/** Parse a durable checkpoint: its authority, then its event prefix replayed to
+ *  exactly its recorded state. Returns the step and the accepted record. */
+export function parsePanelProgramCheckpointRecord<A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
   program: PanelProgramDefinition<A, I, S, Ac, E>,
   raw: unknown,
   resolver: PublicationAuthorityResolver,
-): PersistentPanelResult<PanelStep<S, Ac, E>> {
+): PersistentPanelResult<ParsedPanelCheckpoint<I, S, Ac, E>> {
   const { name } = program;
   const checkpoint = safeRecord(raw, ["schemaVersion", "kind", "authority", "events", "state"]);
   if (checkpoint === null || checkpoint.schemaVersion !== 2 || checkpoint.kind !== `${name}-panel-checkpoint`) return persistentFailure(panelError("malformed-checkpoint", `${name} checkpoint must be an exact schemaVersion 2 record`));
@@ -278,5 +296,15 @@ export function parsePanelProgramCheckpoint<A extends PanelAuthority, I, S exten
   const replayed = replayPrefix(program, authority.value, checkpoint.events, resolver);
   if (!replayed.ok) return replayed;
   if (!statesAgree(program, checkpoint.state, replayed.value.step.state)) return persistentFailure(panelError("malformed-checkpoint", `${name} checkpoint state disagrees with its immutable event prefix`));
-  return persistentSuccess(replayed.value.step);
+  return persistentSuccess(Object.freeze({ step: replayed.value.step, checkpoint: checkpointRecord(program, authority.value, replayed.value) }));
+}
+
+/** Parse a durable checkpoint to the step it replays to (`parsePanelProgramCheckpointRecord` without the record). */
+export function parsePanelProgramCheckpoint<A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
+  program: PanelProgramDefinition<A, I, S, Ac, E>,
+  raw: unknown,
+  resolver: PublicationAuthorityResolver,
+): PersistentPanelResult<PanelStep<S, Ac, E>> {
+  const parsed = parsePanelProgramCheckpointRecord(program, raw, resolver);
+  return parsed.ok ? persistentSuccess(parsed.value.step) : parsed;
 }

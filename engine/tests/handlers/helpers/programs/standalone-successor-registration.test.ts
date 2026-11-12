@@ -21,6 +21,16 @@ describe("explicit bounded successor registration ingress", () => {
     const ordered = { ...input, files: ["b.ts", "a.ts"] };
     expect(parseStandaloneSuccessorStartInput(ordered)).toEqual({ ok: true, value: ordered });
   });
+  it("starts a plan-design review only over exactly one named file, and never as a successor", () => {
+    const plan = { kind: "plan-design", files: [".claude/plans/feature.md"], dryRun: false };
+    expect(parseStandaloneStartInput(plan)).toEqual({ ok: true, value: plan });
+    for (const files of [null, [".claude/plans/feature.md", "src/a.ts"]]) {
+      expect(parseStandaloneStartInput({ ...plan, files })).toEqual({
+        ok: false, message: "standalone-review kind plan-design requires files to name exactly the plan" });
+    }
+    expect(parseStandaloneSuccessorStartInput({ ...input, kind: "plan-design" })).toEqual({
+      ok: false, message: "a plan-design review has no successor; start a fresh plan-design review of the edited plan" });
+  });
   it("preserves exact explicit source and policy identities for arbitrary valid SHA-256 references", () => {
     fc.assert(fc.property(fc.uint8Array({ minLength: 32, maxLength: 32 }), bytes => {
       const digest = Buffer.from(bytes).toString("hex");

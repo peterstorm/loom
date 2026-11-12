@@ -7,8 +7,10 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { attributeFindings } from "../../../../src/core/findings";
 import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
-import { BASE_WAVE_REVIEW_AGENTS, OWNER_MAPPED_WAVE_REVIEW_AGENTS } from "../../../../src/core/agent-catalog-projections";
+import { BASE_WAVE_REVIEW_AGENTS, ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS } from "../../../../src/core/agent-catalog-projections";
 import { OWNER_MAP_SECTION, renderOwnerMapSection } from "../../../../src/core/owner-verification/owner-map";
+import { CONTRACT_SURFACE_SECTION, isContractSurfaceRole, renderContractSurfaceSection } from "../../../../src/core/contract-surface-section";
+import { contract } from "../../../fixtures/contract-status-fixtures";
 import { ownerObligation } from "../../../fixtures/owner-obligation";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
@@ -82,8 +84,17 @@ const OWNED_X = ownerObligation({
   invariant: "INV-1", title: "x is decided only by its owner", statement: "Every entry point reads x through src/x.ts.",
   owner: "src/x.ts", siblings: [], matrixTest: "tests/x.matrix.test.ts", mutation: { kind: "verify" },
 });
+const X_SURFACE = { types: "src/x.ts", acceptance: "tests/x.acceptance.test.ts" };
+/** One Acceptance Contract whose Contract Task is the fixture Task and whose types file is the file that Task modified. */
+const X_CONTRACT = contract({
+  id: "CT-1", title: "x", contractTask: "T1", surface: X_SURFACE, anchors: ["AS-001"], freeze: { state: "awaiting-red" },
+});
+/** `X_CONTRACT`'s frozen paths: the file list its Contract Task declares. */
+const X_CONTRACT_FILES = [X_SURFACE.types, X_SURFACE.acceptance];
+/** A graph whose Task declares `X_CONTRACT_FILES`, stamped with `X_CONTRACT`: that Task is then a Contract Task writing a types file. */
+const asContractTask = (state: TaskGraph): TaskGraph => ({ ...state, acceptance_contracts: [X_CONTRACT] });
 
-function project(priors: readonly Finding[] = []) {
+function project(priors: readonly Finding[] = [], declaredFiles: readonly string[] = ["src/x.ts"]) {
   const root = canonicalTempDir("loom-p4-wave-");
   roots.push(root);
   mkdirSync(join(root, "src"));
@@ -95,11 +106,11 @@ function project(priors: readonly Finding[] = []) {
   git(root, ["init", "-q"]);
   git(root, ["add", "src/x.ts", "spec.md", "plan.md"]);
   git(root, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]);
-  const proof = evaluateTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
-    trustedPassEvidence(["src/x.ts"]));
+  const proof = evaluateTaskProof({ newTestsRequired: true, declaredArtifacts: declaredFiles },
+    trustedPassEvidence(declaredFiles));
   if (proof.state !== "satisfied") throw new Error("fixture requires actual satisfied proof construction");
   const graph: TaskGraph = { ...graphFixture([taskFixture({ id: "T1", description: "review fixture", agent: "code-implementer-agent", wave: 1,
-    depends_on: [], status: "implemented", proof, file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+    depends_on: [], status: "implemented", proof, file_list: [...declaredFiles], files_modified: ["src/x.ts"],
     spec_anchors: ["FR-001", "AS-001"], spec_contributions: [], test_result: { verdict: "trusted-pass" },
     test_evidence: "fixture checks passed", new_tests_written: true, new_test_evidence: "fixture tests present",
     review_generation: 0, review_status: "pending", findings: [...priors],
@@ -240,10 +251,10 @@ describe("registered Wave reviewer protocol", () => {
     await new StateManager(p.statePath).update((locked) => ({ ...locked, owner_obligations: [OWNED_X] }));
     const { handle, action } = await start(p);
     const issued = action.requests!;
-    expect(issued.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...OWNER_MAPPED_WAVE_REVIEW_AGENTS]);
+    expect(issued.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS]);
     const run = graph(p).tasks[0]!.review_run!;
-    expect(run.expected_agents).toEqual(OWNER_MAPPED_WAVE_REVIEW_AGENTS);
-    expect(run.slot_authority!.map(({ agent }) => agent)).toEqual(OWNER_MAPPED_WAVE_REVIEW_AGENTS);
+    expect(run.expected_agents).toEqual(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS);
+    expect(run.slot_authority!.map(({ agent }) => agent)).toEqual(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS);
     const architecture = issued.at(-1)!;
     // A valid Reviewer Protocol v2 Wave request, minted from the catalog: the
     // architecture reviewer's own profile and preloaded Skill.
@@ -362,10 +373,53 @@ describe("registered Wave reviewer protocol", () => {
     const restarted = prepareExhaustedWaveGateRestart(state, handle.runId, registration(handle), "run.next", p.runsRoot, keys);
     if (!restarted.ok) throw new Error(restarted.message);
     expect(restarted.value.registration.restart?.exhaustedSlots)
-      .toEqual(OWNER_MAPPED_WAVE_REVIEW_AGENTS.map((agent) => `T1/${agent}`));
+      .toEqual(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS.map((agent) => `T1/${agent}`));
     expect(prepareExhaustedWaveGateRestart(toBaseFive(state), handle.runId, registration(handle), "run.next", p.runsRoot, keys))
       .toEqual({ ok: false, message: "task T1 Review Packet is not bound to the active epoch and exact reviewer roster" });
   }, 30_000);
+
+  it("ADR-0069: issues architecture-tech-lead last for a Contract Task writing a types file, and carries the contract surface to both surface roles", async () => {
+    const p = project([], X_CONTRACT_FILES);
+    await new StateManager(p.statePath).update(asContractTask);
+    const { handle, action } = await start(p);
+    const issued = action.requests!;
+    expect(issued.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS]);
+    const run = graph(p).tasks[0]!.review_run!;
+    expect(run.expected_agents).toEqual(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS);
+    expect(run.slot_authority!.map(({ agent }) => agent)).toEqual(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS);
+    expect(issued.at(-1)!.authority).toMatchObject({ role: "architecture-tech-lead", modelProfile: "focused-review", requiredSkill: "deepen" });
+    const surfaceText = renderContractSurfaceSection(join(p.root, "plan.md"), [{
+      contract: { id: X_CONTRACT.id, title: X_CONTRACT.title, statement: X_CONTRACT.statement }, typesFile: X_SURFACE.types, bindings: [],
+    }]);
+    for (const { authority } of issued.slice(1)) {
+      const section = value(handle.readContext(authority.contextDigest)).fixedContext
+        .find(({ label }) => label === CONTRACT_SURFACE_SECTION);
+      const expected = isContractSurfaceRole(authority.role) ? surfaceText : null;
+      expect(section === undefined ? null : Buffer.from(section.bytes).toString("utf8"), authority.role).toBe(expected);
+    }
+    expect(await resume(p, handle)).toMatchObject({ kind: "spawn-batch" });
+  }, 30_000);
+
+  it("ADR-0069: a five-agent Review Run installed before its Task's review carried the contract surface collects and settles as issued", async () => {
+    const p = project([], X_CONTRACT_FILES);
+    const { handle, action } = await start(p);
+    const issued = action.requests!;
+    expect(graph(p).tasks[0]!.review_run!.expected_agents).toEqual(BASE_WAVE_REVIEW_AGENTS);
+    await new StateManager(p.statePath).update(asContractTask);
+    await capture(handle, issued[0]!.authority, specPass);
+    const reviewers = issued.slice(1);
+    for (const { authority } of reviewers.slice(0, -1)) {
+      const step = await submit(p, handle, authority, payload(handle, authority));
+      expect(step.kind, `${authority.role}: ${JSON.stringify(step)}`).toBe("spawn-batch");
+      expect(graph(p).tasks[0]!.review_run!.expected_agents, authority.role).toEqual(BASE_WAVE_REVIEW_AGENTS);
+    }
+    const last = reviewers.at(-1)!.authority;
+    await submit(p, handle, last, payload(handle, last));
+    const settledTask = graph(p).tasks[0]!;
+    expect(settledTask.review_run).toBeUndefined();
+    expect(settledTask.review_status).toBe("passed");
+    expect(settledTask.accepted_review_authority?.run_id).toBe(handle.runId);
+  }, 60_000);
 
   it("re-anchors the completed Wave's claim hashes to the spec text its spec-check reviewed", async () => {
     const p = project();

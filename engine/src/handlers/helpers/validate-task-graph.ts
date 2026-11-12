@@ -55,9 +55,8 @@ import { redThenGreenScope, type RedThenGreenScope } from "../../core/proof-obli
 import { parseFrozenVerificationManifest } from "../../core/verification-manifest";
 import { DECISION_RECORD_AGENT } from "../../core/model-profiles";
 import { authoredDistillTaskRefusal, taskRolePolicy } from "../../core/distill-task";
+import { isRecord } from "../../core/plain-record";
 export type { ValidationResult } from "./validation-result";
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const VALID_PHASES = new Set<string>(PHASE_ORDER);
 
@@ -739,6 +738,13 @@ export function fixFull(json: Record<string, unknown>): FixReport {
   return { json: JSON.stringify(fixed, null, 2), notes, dataLoss };
 }
 
+/** The verdict on a repaired graph's JSON, held to the same tier the input was. */
+function revalidateRepair(repairedJson: string, isMinimal: boolean, scope: ValidationScope): ValidationResult {
+  const repaired: unknown = JSON.parse(repairedJson);
+  if (!isRecord(repaired)) return fail(["repaired task graph is not a JSON object"]);
+  return isMinimal ? validateMinimal(repaired) : validateFull(repaired, scope);
+}
+
 /** The task records of a graph, or `[]` when `tasks` is absent or not an array. */
 function tasksOf(json: Record<string, unknown>): Record<string, unknown>[] {
   return Array.isArray(json.tasks) ? (json.tasks as Record<string, unknown>[]) : [];
@@ -826,9 +832,7 @@ const handler: HookHandler = async (stdin, args) => {
     // the runs where it succeeded — and named issues they would then go looking
     // for in a file that no longer has them. A repair that cannot clear an error
     // is worth saying; one that did is worth not saying.
-    const after = isMinimal
-      ? validateMinimal(JSON.parse(repair.json))
-      : validateFull(JSON.parse(repair.json), scope);
+    const after = revalidateRepair(repair.json, isMinimal, scope);
     if (!after.ok) {
       process.stderr.write(`Fixed structural defaults; ${after.errors.length} issues remain\n`);
       for (const err of after.errors) process.stderr.write(`  - ${err}\n`);

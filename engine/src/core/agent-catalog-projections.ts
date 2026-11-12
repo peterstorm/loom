@@ -161,31 +161,39 @@ export const BASE_WAVE_REVIEW_AGENTS = Object.freeze([
   "comment-analyzer",
 ] as const satisfies readonly LoomAgentName[]);
 
-/** The roster of a Task whose Wave review packet carries the owner map
- *  (FR-022, ADR-0047): the base five with `architecture-tech-lead` appended
+/** The roster of a Task whose Wave review carries the architecture lens
+ *  (ADR-0047, ADR-0069): the base five with `architecture-tech-lead` appended
  *  LAST, so every base reviewer keeps its index and its slot identity. */
-export const OWNER_MAPPED_WAVE_REVIEW_AGENTS = Object.freeze([
+export const ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS = Object.freeze([
   ...BASE_WAVE_REVIEW_AGENTS,
   "architecture-tech-lead",
 ] as const satisfies readonly LoomAgentName[]);
 
 /** A Wave Task's ordered reviewer roster: exactly one of the two rosters above,
  *  so no other ordering or subset is representable. */
-export type WaveReviewRoster = typeof BASE_WAVE_REVIEW_AGENTS | typeof OWNER_MAPPED_WAVE_REVIEW_AGENTS;
+export type WaveReviewRoster = typeof BASE_WAVE_REVIEW_AGENTS | typeof ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS;
 
 /** Any role a Wave review roster can name. */
 export type WaveReviewRole = WaveReviewRoster[number];
 
-/** The roster of one Wave Task, from whether its review packet carries the
- *  owner map. Which Tasks do is decided elsewhere, once (wave-review-authority's
- *  owner-map obligations over obligations.ts's selection); this is only the
- *  presence → roster mapping. */
-export const waveReviewRoster = (ownerMapped: boolean): WaveReviewRoster =>
-  ownerMapped ? OWNER_MAPPED_WAVE_REVIEW_AGENTS : BASE_WAVE_REVIEW_AGENTS;
+/**
+ * Every reason a Wave Task's review carries the architecture lens, each
+ * answered: its packets carry the owner map (ADR-0047), or the Task writes an
+ * Acceptance Contract's types file (ADR-0069). Closed: a further reason is a
+ * further field, which every caller must answer before it compiles.
+ */
+export type ArchitectureLensReasons = Readonly<{ ownerMap: boolean; contractSurface: boolean }>;
+
+/** The roster of one Wave Task, from why its review carries the architecture
+ *  lens: the six when any reason holds, the base five when none does. Which
+ *  reasons hold for a Task is decided elsewhere, once (wave-review-authority);
+ *  this is only the reasons → roster mapping. */
+export const waveReviewRoster = (reasons: ArchitectureLensReasons): WaveReviewRoster =>
+  reasons.ownerMap || reasons.contractSurface ? ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS : BASE_WAVE_REVIEW_AGENTS;
 
 /** Whether `role` is one some Wave review roster names. */
 export const isWaveReviewRole = (role: string): role is WaveReviewRole =>
-  (OWNER_MAPPED_WAVE_REVIEW_AGENTS as readonly string[]).includes(role);
+  (ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS as readonly string[]).includes(role);
 
 export const LOOM_OWNED_AGENTS: readonly LoomAgentName[] = Object.freeze(
   AGENT_POLICIES.map(({ agent }) => agent),
@@ -267,7 +275,7 @@ export const KNOWN_AGENTS: ReadonlySet<string> = frozenSet([...IMPL_AGENTS, ...O
 
 /** Review sub-agents that produce findings per task. DERIVED from the Agent
  *  Catalog (kind `reviewer`) — membership only; the ordered wave rosters are
- *  BASE_WAVE_REVIEW_AGENTS / OWNER_MAPPED_WAVE_REVIEW_AGENTS above (their
+ *  BASE_WAVE_REVIEW_AGENTS / ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS above (their
  *  index-binding order lives beside the identities they select from). */
 export const REVIEW_SUB_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("reviewer"));
 

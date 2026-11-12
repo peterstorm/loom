@@ -20,7 +20,10 @@ import {
   type SpawnRequest,
 } from '../../../core/orchestration-contract';
 import { serializeAdjudicatedStandaloneReview } from '../../../core/standalone-review-records';
-import { selectStandaloneReviewers, type StandaloneReviewMetadata } from '../../../core/standalone-review-scope';
+import {
+  selectStandaloneReviewers, standaloneReviewProfile, type StandaloneReviewKind, type StandaloneReviewMetadata,
+} from '../../../core/standalone-review-scope';
+import { PLAN_DESIGN_LENS_SECTION } from '../../../core/plan-design-review';
 import { type FrozenStandaloneReviewAuthority } from '../../../core/standalone-review-model';
 import { safeIoCause } from '../../../core/safe-io-cause';
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ContextPacket } from '../../../core/context-packets';
@@ -104,17 +107,38 @@ const decodedSide = (bytes: Uint8Array): FrozenDiffSide => {
 };
 
 /**
+ * What a fresh review's frozen diff is taken against. `baseline-diff` diffs
+ * each file against its blob at the baseline revision — the same baseline the
+ * scope's added-line count measures against. `whole-document` gives no file a
+ * base, so every unit of every frozen file is obliged: a plan design review
+ * reviews a document, not a change, and a plan already committed at the
+ * baseline has an empty diff that would oblige no reading at all.
+ */
+export type StandaloneReadCoverageStart =
+  | Readonly<{ obligation: "baseline-diff"; baselineRevision: string }>
+  | Readonly<{ obligation: "whole-document" }>;
+
+/** The `baseRevision` a whole-document frozen diff records: it has no base revision. */
+export const WHOLE_DOCUMENT_BASE = "none:whole-document";
+
+/** The read obligation a review of `kind` starts with. */
+export function standaloneReadCoverageStart(kind: StandaloneReviewKind, baselineRevision: string): StandaloneReadCoverageStart {
+  return standaloneReviewProfile([kind]).readObligation === "whole-document"
+    ? Object.freeze({ obligation: "whole-document" })
+    : Object.freeze({ obligation: "baseline-diff", baselineRevision });
+}
+
+/**
  * The read-coverage obligation of a scope (ADR-0022): each frozen file's diff
- * against its blob at the baseline revision — the same baseline the scope's
- * added-line count measures against. The head side is the exact frozen bytes,
+ * against the base `start` names. The head side is the exact frozen bytes,
  * never a second worktree read.
  */
-export function frozenScopeDiff(files: readonly FrozenScopeFile[], baselineRevision: string, headRevision: string): FrozenDiff {
+export function frozenScopeDiff(files: readonly FrozenScopeFile[], start: StandaloneReadCoverageStart, headRevision: string): FrozenDiff {
   return freezeDiff({
-    baseRevision: baselineRevision,
+    baseRevision: start.obligation === "whole-document" ? WHOLE_DOCUMENT_BASE : start.baselineRevision,
     headRevision,
     files: files.map((file) => {
-      const base = baselineBlob(baselineRevision, file.path);
+      const base = start.obligation === "whole-document" ? null : baselineBlob(start.baselineRevision, file.path);
       return {
         path: file.path,
         base: base === null ? { kind: "absent" as const } : decodedSide(base),
@@ -124,9 +148,6 @@ export function frozenScopeDiff(files: readonly FrozenScopeFile[], baselineRevis
     }),
   });
 }
-
-/** Read coverage requested at start: the baseline the frozen diff is taken against. */
-export type StandaloneReadCoverageStart = Readonly<{ baselineRevision: string }>;
 
 export function standalonePackets(
   runId: string,
@@ -141,9 +162,10 @@ export function standalonePackets(
   frozenDiff: FrozenDiff | null;
 }> {
   const reviewers = selectStandaloneReviewers(reviewMetadata);
+  const profile = standaloneReviewProfile(reviewMetadata.requestedKinds);
   const files = frozenScopeFiles(scope);
   const sourceSection = frozenSourceSection(files, headRevision);
-  const frozenDiff = readCoverage === undefined ? null : frozenScopeDiff(files, readCoverage.baselineRevision, headRevision);
+  const frozenDiff = readCoverage === undefined ? null : frozenScopeDiff(files, readCoverage, headRevision);
   const diffSection = frozenDiff === null ? null : encodeByteSection(STANDALONE_FROZEN_DIFF_SECTION, JSON.stringify(frozenDiff));
   if (diffSection !== null && !diffSection.ok) throw new Error(diffSection.error.message);
   const packets: ContextPacket[] = [];
@@ -157,11 +179,20 @@ export function standalonePackets(
       if (!requestId.ok) throw new Error(requestId.error.message);
       const section = encodeByteSection("standalone-review-authority", JSON.stringify({ runId, scope, role, attempt }));
       if (!section.ok) throw new Error(section.error.message);
+      // A kind with a lens (the plan design review, ADR-0070) adds it to the role's packet.
+      const lens = profile.lens(role);
+      const lensSection = lens === null ? null : encodeByteSection(PLAN_DESIGN_LENS_SECTION, lens);
+      if (lensSection !== null && !lensSection.ok) throw new Error(lensSection.error.message);
       const packet = buildReviewerContextPacket({
         requestId: requestId.value,
         role,
         requiredSkill: AGENT_REQUIRED_SKILLS[role] ?? "none",
-        fixedContext: Object.freeze(diffSection === null ? [section.value, sourceSection] : [section.value, sourceSection, diffSection.value]),
+        fixedContext: Object.freeze([
+          section.value,
+          sourceSection,
+          ...(diffSection === null ? [] : [diffSection.value]),
+          ...(lensSection === null ? [] : [lensSection.value]),
+        ]),
         variableContext: Object.freeze([]),
       });
       if (!packet.ok) throw new Error(packet.error.message);

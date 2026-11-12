@@ -69,6 +69,7 @@ Name one fresh Run Directory and start the façade with user policy only. The
 engine creates the Run Directory; `--run` takes either its bare run id or a full
 path to that same direct child of `--runs-root`:
 
+<!-- wire-example: standalone-review-start -->
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration start standalone-review \
   --runs-root ".claude/reviews/review-and-fix-runs" \
@@ -237,6 +238,7 @@ Copy `source` unchanged into both input source fields. Copy **every**
 `record.entries` with the parent decision/reason. Do not use bare Finding IDs,
 compute origin hashes or infer a missing entry from prose. Prepare ordinary JSON:
 
+<!-- wire-example: standalone-disposition-start -->
 ```json
 {
   "source": {"locator":"/absolute/review-root/run.review","runId":"run.review","resultDigest":"<exact-result-sha256>"},
@@ -312,6 +314,7 @@ and contains exactly `sourceRunsRoot`, `sourceRun`, `supportPaths`, and
 
 For a source with zero surviving criticals:
 
+<!-- wire-example: remediation-start -->
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration start remediation \
   --runs-root ".claude/reviews/review-and-fix-runs" \
@@ -328,6 +331,7 @@ JSON
 For critical repairs, copy real Finding IDs and selected manifest check IDs;
 do not reuse these placeholders literally:
 
+<!-- wire-example: remediation-start -->
 ```json
 {
   "sourceRunsRoot": ".claude/reviews/review-and-fix-runs",
@@ -411,6 +415,7 @@ Recovery depends on the cause:
 
 All-unresolved accounting is represented without fake groups or checks:
 
+<!-- wire-example: defect-family-accounting -->
 ```json
 {
   "kind": "declared-defect-family-accounting",

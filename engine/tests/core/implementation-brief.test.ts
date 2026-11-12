@@ -135,6 +135,7 @@ const input = (value: Task, overrides: Partial<ImplementationBriefInput> = {}): 
   ownership: planOwnership(),
   contracts: [],
   repositoryRoot: "/repo",
+  packageRoot: "/loom",
   operatorNotes: [],
   frozenSignatures: unobservedSkeletons(graphFixture(ROSTER)),
   ...overrides,

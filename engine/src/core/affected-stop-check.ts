@@ -5,7 +5,8 @@
  *   `classifyFailedTestcase`, so one it would excuse as expected RED never
  *   blocks.
  * - `stopCheckBlockDecision` is the whole block-counter transition rule for
- *   both stop checks, applying `blockAdmission`, the per-check cap gate.
+ *   every stop check (the two runner checks and the Task mutation check),
+ *   applying `blockAdmission`, the per-check cap gate.
  * - `renderAffectedBlock` and `renderStopChecksBlock` build the one combined
  *   message a blocked agent reads.
  *
@@ -23,6 +24,9 @@ import {
   AFFECTED_BLOCK_HEADING,
   AFFECTED_EXCUSED_HEADING,
   AFFECTED_NOTE_TEXT,
+  MUTATION_BLOCK_HEADING,
+  STOP_CHECK_NAMES,
+  TASK_MUTATION_STOP_CHECK_MAX_BLOCKS,
   type AFFECTED_STOP_CHECK_MAX_BLOCKS,
   type AffectedRunVerdict,
   type ExcusedAcceptanceTestcase,
@@ -67,47 +71,99 @@ export const judgeAffectedRun: JudgeAffectedRunFn = (projection, expectation): A
  * for: a passing, skipped, off or fail-open check is null. The decision is
  * generic over the failure so a block can carry the very failure it blocks for.
  */
-export type StopCheckFailures<Acceptance, Affected> = Readonly<{ acceptance: Acceptance | null; affected: Affected | null }>;
+export type StopCheckFailures<Acceptance, Affected, Mutation> =
+  Readonly<{ acceptance: Acceptance | null; affected: Affected | null; mutation: Mutation | null }>;
 
 /**
  * Each check's own block cap, typed by what its cap note states.
- * - `affected` is the literal type of `AFFECTED_STOP_CHECK_MAX_BLOCKS`. Its
- *   note is the fixed `AFFECTED_NOTE_TEXT["cap-reached"]`, built from that
- *   constant, so any other cap would make the note misstate it.
+ * - `affected` and `mutation` are the literal types of their constants. Each
+ *   note states that constant, so any other cap would make the note misstate it.
  * - `acceptance` is any count. Its note writes in the cap it is given, so it
  *   is truthful for every value. Its constant, `ACCEPTANCE_STOP_CHECK_MAX_BLOCKS`,
  *   belongs to the acceptance shell, and a pure module does not import a shell.
  */
-export type StopCheckBlockCaps = Readonly<{ acceptance: number; affected: typeof AFFECTED_STOP_CHECK_MAX_BLOCKS }>;
+export type StopCheckBlockCaps = Readonly<{
+  acceptance: number;
+  affected: typeof AFFECTED_STOP_CHECK_MAX_BLOCKS;
+  mutation: typeof TASK_MUTATION_STOP_CHECK_MAX_BLOCKS;
+}>;
 
 /** A check that blocks this stop: the failure it blocks for, and the block
  *  count its counter now records. */
 export type Blocking<Failure> = Readonly<{ failure: Failure; blocks: number }>;
 
-/** The checks one block names: at least one, acceptance first. A check absent
+/**
+ * One slot per stop check, in check order, with at least one filled. A block
+ * and its message are both of this shape, so neither can name no check.
+ */
+export type SomeChecks<Acceptance, Affected, Mutation> =
+  | AcceptanceFirst<Acceptance, Affected, Mutation>
+  | AffectedFirst<Affected, Mutation>
+  | MutationOnly<Mutation>;
+
+/** The checks with acceptance filled, the others optional. */
+type AcceptanceFirst<Acceptance, Affected, Mutation> = Readonly<{ acceptance: Acceptance; affected: Affected | null; mutation: Mutation | null }>;
+/** The checks with acceptance empty and affected filled. */
+type AffectedFirst<Affected, Mutation> = Readonly<{ acceptance: null; affected: Affected; mutation: Mutation | null }>;
+/** The checks with only mutation filled. */
+type MutationOnly<Mutation> = Readonly<{ acceptance: null; affected: null; mutation: Mutation }>;
+
+/** The slots as `SomeChecks`, or null when none is filled. */
+function someChecks<Acceptance, Affected, Mutation>(
+  acceptance: Acceptance | null,
+  affected: Affected | null,
+  mutation: Mutation | null,
+): SomeChecks<Acceptance, Affected, Mutation> | null {
+  if (acceptance !== null) return freeze({ acceptance, affected, mutation });
+  if (affected !== null) return freeze({ acceptance: null, affected, mutation });
+  return mutation === null ? null : freeze({ acceptance: null, affected: null, mutation });
+}
+
+/**
+ * Each filled slot through `f`, in check order. The result fills exactly the
+ * slots `checks` fills, so it names at least one check too: a block's message
+ * parts are this mapping over the checks the block names, and adding a stop
+ * check changes the slot shape here, never in a shell.
+ */
+export function mapSomeChecks<Check, Part>(
+  checks: SomeChecks<Check, Check, Check>,
+  f: (name: StopCheckName, check: Check) => Part,
+): SomeChecks<Part, Part, Part> {
+  const at = (name: StopCheckName, check: Check | null): Part | null => check === null ? null : f(name, check);
+  const acceptanceFirst = (some: SomeChecks<Check, Check, Check>): some is AcceptanceFirst<Check, Check, Check> => some.acceptance !== null;
+  const affectedFirst = (some: SomeChecks<Check, Check, Check>): some is AffectedFirst<Check, Check> =>
+    some.acceptance === null && some.affected !== null;
+  if (acceptanceFirst(checks)) {
+    return freeze({ acceptance: f("acceptance", checks.acceptance), affected: at("affected", checks.affected), mutation: at("mutation", checks.mutation) });
+  }
+  if (affectedFirst(checks)) return freeze({ acceptance: null, affected: f("affected", checks.affected), mutation: at("mutation", checks.mutation) });
+  return freeze({ acceptance: null, affected: null, mutation: f("mutation", checks.mutation) });
+}
+
+/** The checks one block names: at least one, in check order. A check absent
  *  here keeps its counter unchanged. */
-export type BlockingChecks<Acceptance, Affected> =
-  | Readonly<{ acceptance: Blocking<Acceptance>; affected: Blocking<Affected> | null }>
-  | Readonly<{ acceptance: null; affected: Blocking<Affected> }>;
+export type BlockingChecks<Acceptance, Affected, Mutation> = SomeChecks<Blocking<Acceptance>, Blocking<Affected>, Blocking<Mutation>>;
 
 /**
  * The decision for one stop. A block names exactly the checks that contribute
- * failures, with the count each counter records. A proceeding stop clears both
- * counters, so it names none. `notes` explain every failing check that was not
- * allowed to block.
+ * failures, with the count each counter records. A proceeding stop clears
+ * every counter, so it names none. `notes` explain every failing check that
+ * was not allowed to block.
  */
-export type StopCheckBlockDecision<Acceptance, Affected> =
-  | Readonly<{ outcome: "block"; blocking: BlockingChecks<Acceptance, Affected>; notes: readonly string[] }>
+export type StopCheckBlockDecision<Acceptance, Affected, Mutation> =
+  | Readonly<{ outcome: "block"; blocking: BlockingChecks<Acceptance, Affected, Mutation>; notes: readonly string[] }>
   | Readonly<{ outcome: "proceed"; notes: readonly string[] }>;
 
 const CAP_NOTE: { readonly [K in StopCheckName]: (cap: StopCheckBlockCaps[K]) => string } = freeze({
   acceptance: (cap) => `the acceptance stop check reached its ${cap}-block cap`,
   affected: () => AFFECTED_NOTE_TEXT["cap-reached"],
+  mutation: () => `the Task mutation check reached its ${TASK_MUTATION_STOP_CHECK_MAX_BLOCKS}-block cap`,
 });
 
 const UNREADABLE_NOTE: Readonly<Record<StopCheckName, (reason: string) => string>> = freeze({
   acceptance: (reason) => `the acceptance stop check's block counter is unreadable: ${reason}`,
   affected: (reason) => `${AFFECTED_NOTE_TEXT["counter-unreadable"]}: ${reason}`,
+  mutation: (reason) => `the Task mutation check's block counter is unreadable: ${reason}`,
 });
 
 /** Whether one check may still block this agent, and the count its counter
@@ -147,21 +203,17 @@ function checkStep<K extends StopCheckName, Failure>(
     : freeze({ blocking: freeze({ failure, blocks: admission.blocks }), note: null });
 }
 
-export function stopCheckBlockDecision<Acceptance, Affected>(
+export function stopCheckBlockDecision<Acceptance, Affected, Mutation>(
   issued: Readonly<Record<StopCheckName, StopCheckBlockCount>>,
-  failures: StopCheckFailures<Acceptance, Affected>,
+  failures: StopCheckFailures<Acceptance, Affected, Mutation>,
   caps: StopCheckBlockCaps,
-): StopCheckBlockDecision<Acceptance, Affected> {
+): StopCheckBlockDecision<Acceptance, Affected, Mutation> {
   const acceptance = checkStep("acceptance", issued.acceptance, failures.acceptance, caps.acceptance);
   const affected = checkStep("affected", issued.affected, failures.affected, caps.affected);
-  const notes = freeze([acceptance.note, affected.note].filter((note): note is string => note !== null));
-  if (acceptance.blocking !== null) {
-    return freeze({ outcome: "block", blocking: freeze({ acceptance: acceptance.blocking, affected: affected.blocking }), notes });
-  }
-  if (affected.blocking !== null) {
-    return freeze({ outcome: "block", blocking: freeze({ acceptance: null, affected: affected.blocking }), notes });
-  }
-  return freeze({ outcome: "proceed", notes });
+  const mutation = checkStep("mutation", issued.mutation, failures.mutation, caps.mutation);
+  const notes = freeze([acceptance.note, affected.note, mutation.note].filter((note): note is string => note !== null));
+  const blocking = someChecks(acceptance.blocking, affected.blocking, mutation.blocking);
+  return blocking === null ? freeze({ outcome: "proceed", notes }) : freeze({ outcome: "block", blocking, notes });
 }
 
 // --- The block message ---
@@ -205,13 +257,19 @@ export function renderAffectedBlock(
 }
 
 /** The parts of one combined block message. At least one check contributes. */
-export type StopChecksBlockParts =
-  | Readonly<{ acceptance: string; affected: string | null }>
-  | Readonly<{ acceptance: null; affected: string }>;
+export type StopChecksBlockParts = SomeChecks<string, string, string>;
+
+const BLOCK_HEADING: Readonly<Record<StopCheckName, string>> = freeze({
+  acceptance: ACCEPTANCE_BLOCK_HEADING,
+  affected: AFFECTED_BLOCK_HEADING,
+  mutation: MUTATION_BLOCK_HEADING,
+});
 
 /** One combined block message: each contributing check's part under its own
- *  heading, acceptance first (AS-028). */
+ *  heading, in check order, acceptance first (AS-028). */
 export function renderStopChecksBlock(parts: StopChecksBlockParts): string {
-  const section = (heading: string, body: string | null): readonly string[] => body === null ? [] : [`${heading}\n\n${body}`];
-  return [...section(ACCEPTANCE_BLOCK_HEADING, parts.acceptance), ...section(AFFECTED_BLOCK_HEADING, parts.affected)].join("\n\n");
+  return STOP_CHECK_NAMES.flatMap((name) => {
+    const body = parts[name];
+    return body === null ? [] : [`${BLOCK_HEADING[name]}\n\n${body}`];
+  }).join("\n\n");
 }

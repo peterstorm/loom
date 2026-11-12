@@ -16,12 +16,13 @@ import {
   type RefutationPanelAuthority,
 } from "./panel-authority";
 import {
-  parseRefutationPanelCheckpoint,
+  parseRefutationPanelCheckpointRecord,
   replayPersistentRefutationPanel,
   resumePersistentRefutationPanel,
   type RefutationPanelCheckpoint,
   type RefutationPanelState,
 } from "./persistent-panel";
+import { isRecord } from "./plain-record";
 import {
   freezeStandalonePanelAuthority, panelOutcomeValue, parseFrozenStandalonePanelAuthority, parseStandalonePanelOutcomes,
   standaloneCurrentPanelCriticals, type FrozenStandalonePanelAuthority,
@@ -59,9 +60,13 @@ export type StandaloneRefutationCompletionReceipt = Readonly<{
   panel: ParsedPanelOutcomes;
   /** Parser-produced T2 state used by the in-process reducer. */
   completedPanelState: RefutationPanelState;
-  /** Canonical T2 event checkpoint retained when completion crossed a durable boundary. */
+  /** Canonical T2 event checkpoint retained when completion crossed a durable
+   *  boundary: the record `parseRefutationPanelCheckpointRecord` accepted, in
+   *  the form `refutationPanelCheckpoint` writes. */
   completedPanelCheckpoint: RefutationPanelCheckpoint | null;
 }>;
+
+const REFUTATION_PANEL_CHECKPOINT_KIND = "refutation-panel-checkpoint";
 
 /** Brand the receipt fields. Private: `parseStandaloneRefutationCompletion` is
  *  its only caller. */
@@ -203,11 +208,9 @@ export function parseStandaloneRefutationCompletion(input: Readonly<{
     return refutationAuthorityFailure(`refutation completion panel authority is invalid: ${persistedPanelAuthority.error.message}`);
   }
 
-  const stateLooksLikeCheckpoint = typeof input.completedPanelState === "object" &&
-    input.completedPanelState !== null &&
-    !Array.isArray(input.completedPanelState) &&
-    (input.completedPanelState as Record<string, unknown>).schemaVersion === 2 &&
-    (input.completedPanelState as Record<string, unknown>).kind === "refutation-panel-checkpoint";
+  const stateLooksLikeCheckpoint = isRecord(input.completedPanelState) &&
+    input.completedPanelState.schemaVersion === 2 &&
+    input.completedPanelState.kind === REFUTATION_PANEL_CHECKPOINT_KIND;
   if (stateLooksLikeCheckpoint && input.completedPanelCheckpoint !== undefined &&
       input.completedPanelCheckpoint !== null &&
       !canonicalStructuralEquals(input.completedPanelState, input.completedPanelCheckpoint)) {
@@ -223,18 +226,17 @@ export function parseStandaloneRefutationCompletion(input: Readonly<{
     if (input.publicationResolver === undefined) {
       return refutationAuthorityFailure("canonical Refutation Panel checkpoint replay requires publication authority");
     }
-    const parsedCheckpoint = parseRefutationPanelCheckpoint(
+    const parsedCheckpoint = parseRefutationPanelCheckpointRecord(
       rawCheckpoint,
       input.publicationResolver,
     );
     if (!parsedCheckpoint.ok) return refutationAuthorityFailure(parsedCheckpoint.error.message);
-    if (parsedCheckpoint.value.state.stage !== "done") {
+    const { step, checkpoint: accepted } = parsedCheckpoint.value;
+    if (step.state.stage !== "done") {
       return refutationAuthorityFailure("canonical Refutation Panel checkpoint has not reached completed state");
     }
-    checkpoint = deepFreezeJson(
-      JSON.parse(JSON.stringify(rawCheckpoint)) as RefutationPanelCheckpoint,
-    );
-    checkpointCompleted = parsedCheckpoint.value.state;
+    checkpoint = deepFreezeJson(accepted);
+    checkpointCompleted = step.state;
   }
 
   const resumed = rawState === undefined
@@ -411,10 +413,16 @@ export function restoreRefutationCompletion(
     publicationResolver,
   });
   if (!parsed.ok) return failure(parsed.error.message);
+  // A persisted checkpoint was just re-proved by the parse above, which retains
+  // it in the canonical form its writer emits; an older or legacy spelling of
+  // the same checkpoint (a roster view, a defaulted identity run) is the same
+  // proof, so the comparison asks only whether one was persisted at all.
   const supplied = {
     ...record,
     completedPanelState: completedPanelState ?? parsed.value.completedPanelState,
-    completedPanelCheckpoint: record.completedPanelCheckpoint ?? null,
+    completedPanelCheckpoint: record.completedPanelCheckpoint === undefined || record.completedPanelCheckpoint === null
+      ? null
+      : parsed.value.completedPanelCheckpoint,
   };
   return canonicalStructuralEquals(
     serializableRefutationCompletion(parsed.value),

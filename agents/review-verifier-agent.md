@@ -65,9 +65,10 @@ engine will not guess which one was final.
 
 The exact shape:
 
+<!-- wire-example: refutation-verdict -->
 ```json
 {
-  "criterion": "your lens, verbatim",
+  "criterion": "<your lens, verbatim>",
   "verdicts": [
     {
       "finding_id": "T1:code-reviewer-1",

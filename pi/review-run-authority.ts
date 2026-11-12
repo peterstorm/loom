@@ -41,6 +41,7 @@ import {
   type SessionRunBinding,
 } from "../engine/src/orchestration/session-run-bindings";
 import { captureKey } from "../engine/src/core/harness-capture";
+import { isRecord } from "../engine/src/core/plain-record";
 import { failure, success, type DomainResult } from "../engine/src/core/orchestration-contract/identity";
 import type {
   AgentRequestAuthority,
@@ -556,8 +557,8 @@ export function piResultAuthorityProblem(
 
 export function standaloneCompletionCheckpointProblem(checkpoint: string): string | null {
   try {
-    const parsed = JSON.parse(checkpoint) as { kind?: unknown };
-    return parsed.kind === "done" ? null : "review is not done";
+    const parsed: unknown = JSON.parse(checkpoint);
+    return isRecord(parsed) && parsed.kind === "done" ? null : "review is not done";
   } catch (error) {
     return `completion checkpoint is invalid JSON: ${error instanceof Error ? error.message : String(error)}`;
   }

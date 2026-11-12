@@ -25,10 +25,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PERSISTENT_SUBAGENT_STORES } from "../../src/config";
 import { parseVerificationVerdicts, type VerificationVerdict } from "../../src/core/security-adjudication";
 import { parseVerificationResult } from "../../src/core/security-verification";
-import type { SecurityFinding } from "../../src/core/security-findings";
 import { registeredSecurityAuditRuns } from "../../src/orchestration/security-audit-run-registry";
 import { aConfirmedFinding } from "../security/fixtures";
-import { SQLI, aRun, claimPayload, huntedRun, must, readJson, removeRuns, unitIdFor } from "./security-audit-harness";
+import { SQLI, aRun, claimPayload, huntedRun, must, readPublished, readVerdicts, removeRuns, unitIdFor } from "./security-audit-harness";
 import type { Run } from "./security-audit-run-seam";
 import {
   deliver,
@@ -139,18 +138,18 @@ describe("security verification, end to end (ADR-0067)", () => {
 
     expect((await run.invoke(["verify", "--from", plan.run])).error).toBeNull();
     expect(run.stdout()).toContain("imported 1 bound verdict(s)");
-    const verdicts = readJson<VerificationVerdict[]>(run.out, "verdicts.json");
+    const verdicts = readVerdicts(run.out);
     expect(parseVerificationVerdicts(verdicts).ok).toBe(true);
     expect(verdicts[0]!.binding.requestId).toBe(request!.authority.requestId);
     // Importing the same run again adds nothing.
     expect((await run.invoke(["verify", "--from", join(plan.runsRoot, plan.run)])).error).toBeNull();
     expect(run.stdout()).toContain("already imported");
-    expect(readJson<VerificationVerdict[]>(run.out, "verdicts.json")).toHaveLength(1);
+    expect(readVerdicts(run.out)).toHaveLength(1);
 
     expect(await verificationPlan(run)).toBeNull();
     const publishedRun = await run.invoke(["publish"]);
     expect(publishedRun.error).toBeNull();
-    expect(readJson<SecurityFinding[]>(run.out, "security-findings.json").map((finding) => finding.verdict)).toEqual(["confirmed"]);
+    expect(readPublished(run.out).map((finding) => finding.verdict)).toEqual(["confirmed"]);
   });
 
   it("gives a malformed answer exactly one retry, told why, and binds the retry's ballot", async () => {
@@ -206,7 +205,7 @@ describe("what a ballot cannot be (ADR-0067 refusals)", () => {
     expect(piped.error).toContain("no longer accepts ballots on stdin");
     expect(piped.error).toContain("verify --out <run-dir> --from <verification-run>");
     expect((await run.invoke(["verify"])).error).toContain("start security-verification");
-    expect(readJson<unknown[]>(run.out, "verdicts.json")).toEqual([]);
+    expect(readVerdicts(run.out)).toEqual([]);
   });
 
   it("refuses orchestration submit and correlate into a verifier slot", async () => {
@@ -237,7 +236,7 @@ describe("what a ballot cannot be (ADR-0067 refusals)", () => {
     expect((await resumeVerification(plan)).action?.kind).toBe("done");
     const refused = await run.invoke(["verify", "--from", plan.run]);
     expect(refused.error).toContain("was not natively captured: no capture attestation");
-    expect(readJson<unknown[]>(run.out, "verdicts.json")).toEqual([]);
+    expect(readVerdicts(run.out)).toEqual([]);
     // The unimportable run is dead: status names the next generation.
     expect((await owedPlan(run)).input.generation).toBe(2);
   });
@@ -256,7 +255,7 @@ describe("what a ballot cannot be (ADR-0067 refusals)", () => {
   it("never counts a ballot hand-written into verdicts.json, even a verbatim copy of a real one", async () => {
     const audit = await huntedAudit(1);
     await verifyWith(audit);
-    const genuine = readJson<VerificationVerdict[]>(audit.out, "verdicts.json");
+    const genuine = readVerdicts(audit.out);
 
     // The same ballot copied into another audit's cache: no run of THAT audit replays it.
     const other = await huntedAudit(1);
@@ -325,7 +324,7 @@ describe("what a ballot cannot be (ADR-0067 refusals)", () => {
     await fileSecondClaim(run);
     const stale = await run.invoke(["verify", "--from", plan.run]);
     expect(stale.error).toContain("audit findings changed since the verification run was issued");
-    expect(readJson<unknown[]>(run.out, "verdicts.json")).toEqual([]);
+    expect(readVerdicts(run.out)).toEqual([]);
     // The audit now owes a run over both claims, under a different name.
     const next = await owedPlan(run);
     expect(next.awaitingBallots).toBe(2);
@@ -357,7 +356,7 @@ describe("what a ballot cannot be (ADR-0067 refusals)", () => {
     writeFileSync(path, readFileSync(path, "utf8").replace("\"critical\"", "\"advisory\""));
     const tampered = await run.invoke(["verify", "--from", plan.run]);
     expect(tampered.error).toContain("does not match the result its captured evidence replays");
-    expect(readJson<unknown[]>(run.out, "verdicts.json")).toEqual([]);
+    expect(readVerdicts(run.out)).toEqual([]);
   });
 
   it("refuses a run of another audit, at start and at import", async () => {

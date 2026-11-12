@@ -14,7 +14,7 @@ describe("programmatic rules integration", () => {
     const rules = loadRules(realDefaultDir, null, "full");
     const programmatic = rules.filter((r: Rule) => r.kind === "programmatic");
 
-    expect(programmatic.length).toBe(9);
+    expect(programmatic.length).toBe(10);
     const names = programmatic.map((r) => r.name).sort();
     expect(names).toEqual([
       "exhaustive-discriminant-branching",
@@ -24,6 +24,7 @@ describe("programmatic rules integration", () => {
       "no-duplicate-block",
       "no-io-in-pure-modules",
       "no-nested-ternary",
+      "no-wire-cast",
       "prefer-array-methods",
       "switch-totality",
     ]);
@@ -36,6 +37,7 @@ describe("programmatic rules integration", () => {
       "no-cross-boundary-imports",
       "no-duplicate-block",
       "no-io-in-pure-modules",
+      "no-wire-cast",
       "switch-totality",
     ]);
   });

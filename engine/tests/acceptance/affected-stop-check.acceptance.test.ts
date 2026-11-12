@@ -81,6 +81,8 @@ function manifest(runners: Readonly<{ acceptance?: boolean; affected?: boolean }
     checks: [],
     ...(runners.acceptance === true ? { acceptanceRunner: ACCEPTANCE_RUNNER } : {}),
     ...(runners.affected === true ? { affectedRunner: AFFECTED_RUNNER } : {}),
+    // These scenarios pin the affected-test check alone; the Task mutation check (ADR-0071) has its own suite.
+    taskMutationCheck: "off",
   })));
   if (!frozen.ok) throw new Error(`fixture manifest refused: ${frozen.error.errors.join("; ")}`);
   return frozen.value;

@@ -8,7 +8,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { SecurityRunMetadata } from "../../src/core/security-audit-contract";
 import { HUNTER_ENVELOPE, aNeedsValidationFinding, aSeed, aUnitResult, aVerdict } from "../security/fixtures";
 import {
   SOURCE,
@@ -17,7 +16,7 @@ import {
   assignUnit,
   handWriteBallots,
   isolateSubagentDir,
-  readJson,
+  readRunMetadata,
   removeRuns,
   seedFor,
   startRun,
@@ -134,7 +133,7 @@ describe("start payload", () => {
     const base = "a".repeat(40);
     const head = "b".repeat(40);
     expect((await startWith(run, { units: [seedFor(0)], scope: { kind: "diff", baseRef: base, headRef: head } })).error).toBeNull();
-    const metadata = readJson<SecurityRunMetadata>(run.out, "run.json");
+    const metadata = readRunMetadata(run.out);
     expect(metadata.scope).toEqual({ paths: ["src/subsystem-0/entry.ts"], kind: "diff", baseRef: base, headRef: head });
     // No signals: only the always-included base lens.
     expect(metadata.selectedCompanions).toEqual(["ATTACK-CLASSES.md"]);

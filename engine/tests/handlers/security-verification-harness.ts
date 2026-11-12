@@ -19,9 +19,11 @@ import { orchestrationHandler, type Emission } from "../../src/handlers/helpers/
 import { resolveEmissionEnvironment } from "../../src/utils/emission-environment";
 import { recordClaudeSpawnCorrelation } from "../../src/handlers/post-tool-use/record-orchestration-spawn";
 import { captureClaudeResult } from "../../src/handlers/subagent-stop/capture-orchestration-result";
-import { parseRegisteredSecurityVerificationProgram, type SecurityVerificationStart } from "../../src/core/security-verification";
+import { isWireRecord } from "../../src/core/security-audit-contract";
+import { parseRegisteredSecurityVerificationProgram, parseSecurityVerificationStart, type SecurityVerificationStart } from "../../src/core/security-verification";
 import { parentAnnouncement, FIXTURE_CLAUDE_CODE_SESSION_ID } from "../fixtures/facade-parent";
 import { deliverClaudeSubagentStop } from "../fixtures/claude-native-capture";
+import { isJsonArray } from "../fixtures/json-wire";
 import type { FacadeAction } from "../../src/handlers/helpers/programs/program-result";
 import type { Run } from "./security-audit-run-seam";
 
@@ -39,11 +41,59 @@ export type SpawnTask = Readonly<{
  *  program cannot emit does not compile. */
 export type Action = Readonly<{ kind: FacadeAction["kind"]; requests?: readonly SpawnTask[]; outcome?: unknown; diagnostic?: { kind: string; message: string } }>;
 
+// --- Reading what the helpers print ---
+// `status --json` and a façade action are OUTPUT: the engine has no reader for
+// either, so the harness narrows them itself and names what it could not read.
+
+const isString = (value: unknown): value is string => typeof value === "string";
+const isListOf = <T>(value: unknown, isEntry: (entry: unknown) => entry is T): value is readonly T[] =>
+  isJsonArray(value) && value.every(isEntry);
+const isAbsentOr = <T>(value: unknown, isPresent: (present: unknown) => present is T): value is T | undefined =>
+  value === undefined || isPresent(value);
+
+const FACADE_ACTION_KINDS: Readonly<Record<FacadeAction["kind"], true>> = { "spawn-batch": true, "await-user": true, blocked: true, done: true };
+const isActionKind = (value: unknown): value is FacadeAction["kind"] => isString(value) && Object.hasOwn(FACADE_ACTION_KINDS, value);
+
+const isRetiredRun = (value: unknown): value is Plan["retiredRuns"][number] =>
+  isWireRecord(value) && isString(value.run) && isString(value.reason);
+
+const isSpawnAuthority = (value: unknown): value is SpawnTask["authority"] =>
+  isWireRecord(value) && isString(value.requestId) && isString(value.slotId) && (value.attempt === 1 || value.attempt === 2) &&
+  isString(value.role) && isString(value.program) && isString(value.modelProfile);
+
+const isSpawnTask = (value: unknown): value is SpawnTask =>
+  isWireRecord(value) && isSpawnAuthority(value.authority) && isString(value.task);
+
+const isDiagnostic = (value: unknown): value is NonNullable<Action["diagnostic"]> =>
+  isWireRecord(value) && isString(value.kind) && isString(value.message);
+
+const isAction = (value: unknown): value is Action =>
+  isWireRecord(value) && isActionKind(value.kind) &&
+  isAbsentOr(value.requests, (requests): requests is readonly SpawnTask[] => isListOf(requests, isSpawnTask)) &&
+  isAbsentOr(value.diagnostic, isDiagnostic);
+
+/** The `verification` member of a `status --json` document: the owed run, its
+ *  start input parsed by the program's own start parser, or null when none is owed. */
+function planOf(status: unknown): Plan | null {
+  if (!isWireRecord(status)) throw new Error("status --json printed no object");
+  const { verification } = status;
+  if (verification === null) return null;
+  if (!isWireRecord(verification)) throw new Error("status --json names no verification member");
+  const { runsRoot, run, input, command, importCommand, awaitingBallots, retiredRuns } = verification;
+  const start = parseSecurityVerificationStart(input);
+  if (!start.ok) throw new Error(`status --json printed a start input the program refuses: ${start.error}`);
+  if (!isString(runsRoot) || !isString(run) || !isString(command) || !isString(importCommand) ||
+      typeof awaitingBallots !== "number" || !isListOf(retiredRuns, isRetiredRun)) {
+    throw new Error(`status --json printed a malformed verification plan: ${JSON.stringify(verification)}`);
+  }
+  return { runsRoot, run, input: start.value, command, importCommand, awaitingBallots, retiredRuns };
+}
+
 /** The verification run `status --json` names, or null when none is owed. */
 export async function verificationPlan(run: Run): Promise<Plan | null> {
   const status = await run.invoke(["status", "--json"]);
   if (!status.ok) throw new Error(`status: ${status.error}`);
-  return (JSON.parse(run.stdout()) as { verification: Plan | null }).verification;
+  return planOf(JSON.parse(run.stdout()));
 }
 
 /** One façade invocation under a Claude Code parent, returning the action it printed. */
@@ -57,7 +107,9 @@ export async function facade(args: readonly string[], stdin = ""): Promise<Reado
   };
   const result = await orchestrationHandler(() => emission)(stdin, [...args]);
   if (result?.kind === "error") return { action: null, error: String(result.message) };
-  return { action: JSON.parse(printed.join("")) as Action, error: null };
+  const action: unknown = JSON.parse(printed.join(""));
+  if (!isAction(action)) throw new Error(`the façade printed no action: ${printed.join("")}`);
+  return { action, error: null };
 }
 
 export async function startVerification(plan: Plan): Promise<Action> {

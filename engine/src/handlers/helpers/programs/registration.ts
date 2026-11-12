@@ -12,7 +12,7 @@ import { canonicalStructuralEquals, boundedThrownCause } from '../../../core/orc
 import { serializeStandaloneReviewAuthority } from '../../../core/standalone-review-records';
 import { parseStandaloneReviewAuthority } from '../../../core/standalone-review-preparation';
 import { type FrozenStandaloneReviewAuthority } from '../../../core/standalone-review-model';
-import { type StandaloneReviewKind } from '../../../core/standalone-review-scope';
+import { parseStandaloneReviewKind, standaloneReviewProfile, type StandaloneReviewKind } from '../../../core/standalone-review-scope';
 import { parseReviewerProtocolDescriptor } from '../../../core/reviewer-contract';
 import { parseStandaloneReadCoverage, type StandaloneReadCoveragePolicy } from '../../../core/standalone-read-coverage';
 import type { OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, RegisteredWaveGateProgram, WaveGateRestartAudit } from '../../../core/wave-gate-program';
@@ -71,17 +71,20 @@ export function parseStandaloneStartInput(raw: unknown): ProgramParse<Registered
   if (!exactObject(raw, ["kind", "files", "dryRun"])) {
     return { ok: false, message: "standalone-review input must contain exactly kind, files, and dryRun" };
   }
-  const kinds = ["code", "errors", "tests", "types", "comments", "architecture", "simplify", "all"];
-  if (typeof raw.kind !== "string" || !kinds.includes(raw.kind)) {
-    return { ok: false, message: "standalone-review kind is invalid" };
-  }
+  const kind = parseStandaloneReviewKind(raw.kind);
+  if (kind === null) return { ok: false, message: "standalone-review kind is invalid" };
   if (raw.files !== null && (!Array.isArray(raw.files) || raw.files.length === 0 ||
       raw.files.some((path) => typeof path !== "string" || path.length === 0))) {
     return { ok: false, message: "standalone-review files must be null or a non-empty string array" };
   }
+  // A kind that reviews one named document never takes the changed-path union.
+  const { scope } = standaloneReviewProfile([kind]);
+  if (scope.kind === "exactly-one-file" && (raw.files === null || raw.files.length !== 1)) {
+    return { ok: false, message: `standalone-review kind ${kind} requires files to name exactly ${scope.names}` };
+  }
   if (typeof raw.dryRun !== "boolean") return { ok: false, message: "standalone-review dryRun must be boolean" };
   return { ok: true, value: Object.freeze({
-    kind: raw.kind as StandaloneReviewKind,
+    kind,
     files: raw.files === null ? null : Object.freeze([...(raw.files as string[])]),
     dryRun: raw.dryRun,
   }) };

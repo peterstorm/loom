@@ -11,6 +11,8 @@ export interface SkipFlags {
   skipClarify?: boolean;
   skipSpecify?: boolean;
   skipPlanAlignment?: boolean;
+  /** Record the plan design review (ADR-0070) as not required for this orchestration. */
+  skipPlanDesignReview?: boolean;
 }
 
 /** Resolve initial state from skip flags */
@@ -52,6 +54,9 @@ export function resolveInitialState(flags: SkipFlags, specDir: string): TaskGrap
     spec_dir: specDir,
     spec_file: specFile,
     plan_file: null,
+    // Every orchestration states its plan design review duty at init: owed
+    // unless skipped. Only a graph initialized before the review carries none.
+    plan_design_review: flags.skipPlanDesignReview ? { status: "not-required", reason: "skipped" } : { status: "required" },
     tasks: [],
     wave_gates: {},
   };

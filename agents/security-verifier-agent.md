@@ -55,6 +55,7 @@ verification brief: up to four candidates in the Context Packet at
 `LOOM_CONTEXT_SECTION_COMMAND --section security-verification-brief`. Return exactly one
 JSON object and nothing else — one verdict per fingerprint in your brief:
 
+<!-- wire-example: security-verification-result -->
 ```json
 {
   "schemaVersion": 1,

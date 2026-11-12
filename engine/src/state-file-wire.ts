@@ -82,6 +82,7 @@ import {
 } from "./core/requirement-coverage";
 import { parseStoredSpecCheck } from "./core/spec-check";
 import { parseProofBoundaryObservation, type ProofBoundaryObservation } from "./core/proof-boundary-observation";
+import { parsePlanDesignReview, type RecordedPlanDesignReview } from "./core/plan-design-review";
 import { reconcileWaveBlock, waveHasBlockCause, type WaveGate } from "./core/wave-gate-model";
 import { parseWaveSpecCheckDocumentsAuthority, type WaveSpecCheckDocumentRejection, type WaveSpecCheckDocumentsRejection } from "./core/wave-review-authority";
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
@@ -2941,6 +2942,7 @@ type ParsedTaskGraphParts = Readonly<{
   specCheck: SpecCheck | undefined;
   specIndexObservation: SpecIndexObservation | undefined;
   proofBoundaryObservation: ProofBoundaryObservation | undefined;
+  planDesignReview: RecordedPlanDesignReview | undefined;
   acceptanceContracts: readonly AcceptanceContract[] | undefined;
   ownerObligations: readonly OwnerObligation[] | undefined;
   skeletonFields: ParsedSkeletonFields;
@@ -2991,6 +2993,7 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     ...(parts.proofBoundaryObservation === undefined
       ? {}
       : { proof_boundary_observation: parts.proofBoundaryObservation }),
+    ...(parts.planDesignReview === undefined ? {} : { plan_design_review: parts.planDesignReview }),
     ...(waveReviewEpoch === undefined ? {} : { wave_review_epoch: waveReviewEpoch }),
     ...(verificationManifest === undefined ? {} : { verification_manifest: verificationManifest }),
     ...(activeWaveCompletionSuite === undefined ? {} : { active_wave_completion_suite: activeWaveCompletionSuite }),
@@ -3011,7 +3014,7 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
 function parseTaskGraphDocumentFields(
   obj: Record<string, unknown>,
 ): ParseResult<Pick<ParsedTaskGraphParts,
-  "phaseArtifacts" | "skippedPhases" | "specIndexObservation" | "proofBoundaryObservation">> {
+  "phaseArtifacts" | "skippedPhases" | "specIndexObservation" | "proofBoundaryObservation" | "planDesignReview">> {
   const lifecycleErrors = taskGraphLifecycleErrors(obj);
   if (lifecycleErrors[0] !== undefined) return parseErr(lifecycleErrors[0]);
   const phaseArtifacts = Object.freeze({ ...(obj.phase_artifacts as Record<string, string>) });
@@ -3033,11 +3036,18 @@ function parseTaskGraphDocumentFields(
   if (proofBoundaryObservation !== undefined && !proofBoundaryObservation.ok) {
     return parseErr(proofBoundaryObservation.error);
   }
+  // A graph initialized before the plan design review carries no record;
+  // absence stays absent and the gate reads it as not required.
+  const planDesignReview = obj.plan_design_review === undefined
+    ? undefined
+    : parsePlanDesignReview(obj.plan_design_review);
+  if (planDesignReview !== undefined && !planDesignReview.ok) return parseErr(planDesignReview.error);
   return parseOk({
     phaseArtifacts,
     skippedPhases,
     specIndexObservation: specIndexObservation.value,
     proofBoundaryObservation: proofBoundaryObservation?.value,
+    planDesignReview: planDesignReview?.value,
   });
 }
 

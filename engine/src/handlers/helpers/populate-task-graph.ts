@@ -7,13 +7,16 @@
  * already left pending; without it both the pre-lock and locked guards refuse.
  */
 
-import { lstatSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { HookHandler, TaskGraph } from "../../types";
 import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import { validateFull, fixFull } from "./validate-task-graph";
-import { checkPlanModelBindings, productionModelBindingDeps } from "./validate-model-bindings";
+import { checkPlanModelBindings, productionModelBindingDeps, type ModelFileRead } from "./validate-model-bindings";
+import { artifactDigestOfBytes } from "../../core/digest";
+import type { ArtifactDigest } from "../../core/orchestration-contract/identity";
+import { populationPlanDesignRequirement } from "../../core/plan-design-review";
 import { argumentValue, hasFlag } from "./cli-args";
 import {
   VERIFICATION_MANIFEST_SOURCE_PATH,
@@ -33,6 +36,8 @@ import { renderProofBoundaryNotice } from "../../core/proof-boundary-observation
 import { acceptanceObservationProblem } from "../../core/acceptance-contract";
 import { parsePlanExportBindings } from "../../core/parse-plan-models";
 import { distillPlanNote, isDistillTask } from "../../core/distill-task";
+import { parseDecomposeEnvelope, parseDecomposeInput, type DecomposeEnvelope } from "../../core/decompose-payload";
+import { isRecord } from "../../core/plain-record";
 import {
   parseAuthoredTaskRoster,
   populateTaskGraph,
@@ -44,16 +49,6 @@ import {
 } from "../../core/task-graph-population";
 
 export { resolvedSpecFile };
-
-interface DecomposeInput {
-  spec_trace_version: 2;
-  plan_title: string;
-  plan_file?: string;
-  spec_file?: string;
-  tasks: readonly AuthoredTask[];
-}
-
-const DECOMPOSE_FIELDS = new Set(["spec_trace_version", "plan_title", "plan_file", "spec_file", "tasks"]);
 
 type PreparedManifest =
   | Readonly<{ ok: true; value: FrozenVerificationManifest }>
@@ -289,6 +284,25 @@ function parseArgs(args: string[]): ParsedPopulateArgs {
   };
 }
 
+/** A population the plan design gate and `populateTaskGraph` both allowed, or the first refusal. */
+type LockedPopulation =
+  | Extract<TaskGraphPopulationResult, { ok: true }>
+  | Readonly<{ ok: false; message: string }>;
+
+/** The plan read once: its text for the binding check and, exactly when it was read, its byte digest for the design gate. */
+type PlanRead =
+  | (Extract<ModelFileRead, { ok: true }> & Readonly<{ sha256: ArtifactDigest }>)
+  | Extract<ModelFileRead, { ok: false }>;
+
+function readPlanOnce(path: string): PlanRead {
+  try {
+    const bytes = readFileSync(path);
+    return { ok: true, content: bytes.toString("utf-8"), sha256: artifactDigestOfBytes(bytes) };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 /** What population wrote: the roster size, the engine-added distill passes among it, and the Waves. */
 function populationSummary({ state, waves }: Extract<TaskGraphPopulationResult, { ok: true }>["value"]): string {
   const distill = state.tasks.filter(isDistillTask).map(({ id }) => id);
@@ -316,9 +330,9 @@ const handler: HookHandler = async (stdin, args) => {
   if (!parsedArgs.ok) return { kind: "error", message: `populate-task-graph: ${parsedArgs.error}` };
   const { issue, repo, fix, force } = parsedArgs.value;
 
-  let decompose: DecomposeInput;
+  let stdinJson: unknown;
   try {
-    decompose = JSON.parse(stdin) as DecomposeInput;
+    stdinJson = JSON.parse(stdin);
   } catch (e) {
     // Preserve the parse error: "Invalid JSON on stdin" alone left the operator
     // with no position or malformed token to look for.
@@ -327,37 +341,29 @@ const handler: HookHandler = async (stdin, args) => {
       message: `Invalid JSON on stdin: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
-
-  if (typeof decompose !== "object" || decompose === null || Array.isArray(decompose)) {
-    return { kind: "error", message: "Decompose JSON must be an object" };
-  }
-  const surplusFields = Object.keys(decompose).filter((field) => !DECOMPOSE_FIELDS.has(field)).sort();
-  if (surplusFields.length > 0) {
-    return {
-      kind: "error",
-      message: `Decompose JSON contains unsupported field(s): ${surplusFields.join(", ")}`,
-    };
-  }
-  if (!Array.isArray(decompose.tasks) || decompose.tasks.length === 0) {
-    return { kind: "error", message: "No tasks in decompose JSON" };
-  }
+  const authored = parseDecomposeEnvelope(stdinJson);
+  if (!authored.ok) return { kind: "error", message: authored.error };
 
   // Validate decompose output before merging. Scoped to the PAYLOAD: the
   // findings aggregate is agent-forgeable here and core `populatedTask`
   // strips it during population, so holding this to the load-boundary findings
   // rules would reject exactly the input that sanitization exists to clean.
-  const validation = validateFull(decompose as unknown as Record<string, unknown>, "decompose-payload");
+  let payload: DecomposeEnvelope = authored.value;
+  const validation = validateFull(payload, "decompose-payload");
   if (!validation.ok) {
     if (fix) {
-      const repair = fixFull(decompose as unknown as Record<string, unknown>);
+      const repair = fixFull(payload);
       for (const note of repair.notes) process.stderr.write(`  ${note}\n`);
-      decompose = JSON.parse(repair.json) as DecomposeInput;
+      const repairedJson: unknown = JSON.parse(repair.json);
+      const repaired = parseDecomposeEnvelope(repairedJson);
+      if (!repaired.ok) return { kind: "error", message: `--fix could not repair all issues:\n  - ${repaired.error}` };
+      payload = repaired.value;
       // fixFull normalizes repairable graph/task fields and findings/review
       // state; structural errors (unknown agent, wave gaps, self-dependency)
       // remain unfixable. Re-validate
       // so they fail loudly instead of reaching the persisted graph under a
       // misleading "Auto-fixed" banner.
-      const revalidation = validateFull(decompose as unknown as Record<string, unknown>, "decompose-payload");
+      const revalidation = validateFull(payload, "decompose-payload");
       if (!revalidation.ok) {
         return {
           kind: "error",
@@ -369,6 +375,10 @@ const handler: HookHandler = async (stdin, args) => {
       return { kind: "error", message: `Decompose validation failed:\n${validation.errors.map(e => `  - ${e}`).join("\n")}` };
     }
   }
+  // The typed input is read from the validated payload, never asserted of it.
+  const decoded = parseDecomposeInput(payload);
+  if (!decoded.ok) return { kind: "error", message: `Decompose validation failed:\n  - ${decoded.error}` };
+  const decompose = decoded.value;
 
   // Executable-models policy: bindings are enforced here fail-closed —
   // validate-task-graph's 4a run is advisory to the orchestrator, this is the
@@ -397,13 +407,14 @@ const handler: HookHandler = async (stdin, args) => {
     existingState.plan_file ??
     existingState.phase_artifacts?.architecture ??
     decompose.plan_file;
-  // The plan is read ONCE: the binding check validates these bytes and the
-  // export bindings population stamps are parsed from the same bytes, so a
-  // plan edited between the two can never stamp bindings that were not checked.
-  const planRead = typeof planFile === "string" ? productionModelBindingDeps.readFile(planFile) : null;
+  // The plan is read ONCE: the binding check validates these bytes, the export
+  // bindings population stamps are parsed from them, and the plan design gate
+  // compares their digest, so a plan edited between the three can never stamp
+  // bindings that were not checked nor pass a review of other bytes.
+  const planRead = typeof planFile === "string" ? readPlanOnce(planFile) : null;
   const bindings = checkPlanModelBindings(
     planFile,
-    decompose.tasks as unknown as Record<string, unknown>[],
+    payload.tasks.filter(isRecord),
     {
       ...productionModelBindingDeps,
       readFile: (path) => (path === planFile && planRead !== null ? planRead : productionModelBindingDeps.readFile(path)),
@@ -420,7 +431,11 @@ const handler: HookHandler = async (stdin, args) => {
   }
   // checkPlanModelBindings only passes when planFile is a readable string
   const validatedPlanFile = planFile as string;
-  const exportBindings = planRead?.ok === true ? parsePlanExportBindings(planRead.content) : undefined;
+  if (planRead?.ok !== true) {
+    return { kind: "error", message: `populate-task-graph: the plan ${validatedPlanFile} was not read` };
+  }
+  const exportBindings = parsePlanExportBindings(planRead.content);
+  const planSha256 = planRead.sha256;
 
   // Operator command authority is observed once in the repository shell before
   // lock acquisition. The locked transform below carries this prepared value;
@@ -475,13 +490,25 @@ const handler: HookHandler = async (stdin, args) => {
     // population re-validates them against the roster before stamping.
     ...(exportBindings === undefined ? {} : { exportBindings }),
   });
-  const preflight = populateTaskGraph(existingState, command);
-  if (!preflight.ok) return { kind: "error", message: preflight.error.message };
+  // The plan design gate (ADR-0070) is asked here too, not only on the
+  // decompose spawn: first population is the transition that cuts Tasks from
+  // the plan, whoever wrote the payload. It is asked of the graph as it is
+  // before the lock and again of the graph read under it.
+  const populate = (existing: TaskGraph): LockedPopulation => {
+    const designRequirement = populationPlanDesignRequirement(existing, planSha256, validatedPlanFile);
+    if (designRequirement !== null) {
+      return { ok: false, message: `populate-task-graph: TaskGraph population requires ${designRequirement}` };
+    }
+    const transition = populateTaskGraph(existing, command);
+    return transition.ok ? transition : { ok: false, message: transition.error.message };
+  };
+  const preflight = populate(existingState);
+  if (!preflight.ok) return { kind: "error", message: preflight.message };
 
-  let applied: TaskGraphPopulationResult;
+  let applied: LockedPopulation;
   try {
-    applied = await mgr.updateAndReturn<TaskGraphPopulationResult>((existing) => {
-      const transition = populateTaskGraph(existing, command);
+    applied = await mgr.updateAndReturn<LockedPopulation>((existing) => {
+      const transition = populate(existing);
       return transition.ok
         ? { state: transition.value.state, value: transition }
         : { state: existing, value: transition };
@@ -489,7 +516,7 @@ const handler: HookHandler = async (stdin, args) => {
   } catch (error) {
     return { kind: "error", message: error instanceof Error ? error.message : String(error) };
   }
-  if (!applied.ok) return { kind: "error", message: applied.error.message };
+  if (!applied.ok) return { kind: "error", message: applied.message };
 
   process.stderr.write(`${populationSummary(applied.value)}\n`);
   // Rendered from the persisted observation, the one record later readers see.

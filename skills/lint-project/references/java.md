@@ -6,6 +6,7 @@ Java projects use package imports (`import com.example.domain.Order;`). The boun
 
 ### Hexagonal / Ports & Adapters Pattern
 
+<!-- wire-example: linter-project-config -->
 ```json
 {
   "boundaries": [
@@ -46,6 +47,7 @@ Java projects use package imports (`import com.example.domain.Order;`). The boun
 
 ### DDD Layered Pattern
 
+<!-- wire-example: linter-project-config -->
 ```json
 {
   "boundaries": [
@@ -89,6 +91,7 @@ Java projects use package imports (`import com.example.domain.Order;`). The boun
 
 For multi-module projects, use the full path from repo root:
 
+<!-- wire-example: linter-project-config -->
 ```json
 {
   "boundaries": [
@@ -121,6 +124,7 @@ Paths that must be side-effect free. The checker detects:
 
 ### Example pureModules config
 
+<!-- wire-example: linter-project-config -->
 ```json
 {
   "pureModules": [
@@ -151,6 +155,7 @@ These fire automatically — no project config needed:
 
 **no-mutable-entity-fields.json** (disabled by default) — enforces immutable domain model. Enable for DDD projects using records or @Value:
 
+<!-- wire-example: linter-regex-rule -->
 ```json
 {
   "kind": "regex",
@@ -167,6 +172,7 @@ These fire automatically — no project config needed:
 ### Recommended project rules
 
 **no-lombok-data.json** — Block `@Data` (generates setters, breaks immutability):
+<!-- wire-example: linter-regex-rule -->
 ```json
 {
   "kind": "regex",
@@ -181,6 +187,7 @@ These fire automatically — no project config needed:
 ```
 
 **no-spring-component-scan.json** — Block broad component scanning:
+<!-- wire-example: linter-regex-rule -->
 ```json
 {
   "kind": "regex",
@@ -195,6 +202,7 @@ These fire automatically — no project config needed:
 ```
 
 **no-service-annotation-in-domain.json** — Block Spring in domain:
+<!-- wire-example: linter-regex-rule -->
 ```json
 {
   "kind": "regex",
@@ -213,6 +221,7 @@ These fire automatically — no project config needed:
 
 ## Function Length
 
+<!-- wire-example: linter-project-config -->
 ```json
 {
   "maxFunctionLines": 40,

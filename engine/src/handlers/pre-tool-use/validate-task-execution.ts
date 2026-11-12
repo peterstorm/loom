@@ -11,7 +11,8 @@
  * receives exactly the bytes every gate judged.
  */
 
-import { preToolUseRewriteResult, type HookHandler, type HookResult, type PreToolUseInput } from "../../types";
+import { preToolUseRewriteResult, type HookHandler, type HookResult } from "../../types";
+import { failClosedInput } from "./pre-tool-use-input";
 import { validateTaskExecution } from "../task-execution";
 import { claudeAgentTypeRefusal } from "../../core/model-profiles";
 import { CLAUDE_SPAWN_TOOLS, SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
@@ -31,18 +32,12 @@ export function createValidateTaskExecutionHandler(
   render: RenderTaskBrief = renderActiveTaskBrief,
 ): HookHandler {
   return async (stdin) => {
-    let input: PreToolUseInput;
-    try {
-      input = JSON.parse(stdin);
-    } catch (e) {
-      // Malformed hook input on a spawn-gate route: fail CLOSED. An uncaught
-      // parse crash exits 1 (NON-blocking for PreToolUse), waving the Task
-      // spawn past wave-order/dependency/review-gate enforcement.
-      return {
-        kind: "block",
-        message: `validate-task-execution: malformed hook input — failing closed: ${e instanceof Error ? e.message : String(e)}`,
-      };
-    }
+    // Malformed hook input on a spawn-gate route: fail CLOSED. An uncaught
+    // parse crash exits 1 (NON-blocking for PreToolUse), waving the Task
+    // spawn past wave-order/dependency/review-gate enforcement.
+    const parsed = failClosedInput("validate-task-execution", stdin);
+    if (!parsed.ok) return parsed.block;
+    const { input } = parsed;
     if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
     // Before anything reserves: Claude Code rejects a Loom Agent named other
     // than `loom:<agent>` only after admission, which would strand the reservation.

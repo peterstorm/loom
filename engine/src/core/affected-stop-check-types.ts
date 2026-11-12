@@ -11,9 +11,11 @@
  * Wave Gate's own rule (`isExpectedRedAcceptanceFailure`) excuses it, and the
  * stop reports it instead (CT-2 amendment A1). The acceptance check and
  * the affected check run in sequence under one runner lock and inside one hook
- * budget, and they produce one combined block message. Nothing here is
- * completion evidence: no type below reaches proof, receipts or Wave Gate
- * evidence (FR-026).
+ * budget, and they produce one combined block message. The Task mutation
+ * check (ADR-0071) is a third arm of the same stop that runs no runner; its
+ * name, cap and heading are declared here beside the others, and its rules
+ * live in `task-mutation-check.ts`. Nothing here is completion evidence: no
+ * type below reaches proof, receipts or Wave Gate evidence (FR-026).
  *
  * Types and fixed constants only: the types, sealed ADTs, function
  * signatures, budget constants and fixed text tables that the planner, the
@@ -187,12 +189,20 @@ export type StopChecksOutcome =
   /** The stop proceeds, and the operator is told what each check noted. */
   | Readonly<{ kind: "note"; message: string }>;
 
-/** Every stop check, in the order a stop runs them. The one list of check
- *  names: `StopCheckName` is derived from it, so the two cannot drift. */
-export const STOP_CHECK_NAMES = Object.freeze(["acceptance", "affected"] as const);
+/** Every stop check, in the order a stop decides them. The one list of check
+ *  names: `StopCheckName` is derived from it, so the two cannot drift.
+ *  `acceptance` and `affected` each run a runner; `mutation` (ADR-0071) runs
+ *  none: it reads the record `helper mutation-check` left. */
+export const STOP_CHECK_NAMES = Object.freeze(["acceptance", "affected", "mutation"] as const);
 
-/** The two stop checks. Each keeps its own per-agent block counter and cap. */
+/** The stop checks. Each keeps its own per-agent block counter and cap. */
 export type StopCheckName = (typeof STOP_CHECK_NAMES)[number];
+
+/** At most this many Task-mutation-check blocks per spawned agent; then the
+ *  arm fails open with a note. Lower than the runner checks' cap: a survivor
+ *  may be an equivalent mutant no test can kill, and the agent's answer to
+ *  that is prose in its report, which no stop can read. */
+export const TASK_MUTATION_STOP_CHECK_MAX_BLOCKS = 2;
 
 /** Blocks already issued to one agent by one check, or why that count cannot be read. */
 export type StopCheckBlockCount =
@@ -292,6 +302,11 @@ export const ACCEPTANCE_BLOCK_HEADING = "## Acceptance stop check";
  *  the run's expected-RED acceptance failures follow under
  *  `AFFECTED_EXCUSED_HEADING`, each reading `- '<name>' (<file>)`. */
 export const AFFECTED_BLOCK_HEADING = "## Affected-test stop check";
+
+/** The heading of the Task mutation check's part of a block message. It is
+ *  present exactly when that arm blocks: for a check that never ran, ran over
+ *  other bytes, or left survivors. */
+export const MUTATION_BLOCK_HEADING = "## Task mutation check";
 
 /** The line introducing a blocking run's expected-RED acceptance failures,
  *  which do not block. */

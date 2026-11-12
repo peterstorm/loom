@@ -2,9 +2,11 @@
  * The source segmenter — one TypeScript/JavaScript text split into code,
  * quoted strings and comments.
  *
- * Two readers share it, so it lives beside neither: `no-io-in-pure-modules`
- * reads the code with its strings emptied, and the clone detector
- * (`clones/clone-detection.ts`) lexes the segments into tokens. What a clone
+ * Three readers share it, so it lives beside none: `no-io-in-pure-modules`
+ * reads the code with its strings emptied, the clone detector
+ * (`clones/clone-detection.ts`) lexes the segments into tokens, and
+ * `no-wire-cast` reads the finer `lexicalSpans`, where template text and regex
+ * literals are not code either. What a clone
  * fingerprint means therefore depends on this module; the detector's
  * `fingerprintScheme` observes it through a probe, so a change here retires
  * every cached fingerprint without anyone remembering to.
@@ -37,47 +39,117 @@ const REGEX_PRECEDING_KEYWORDS: ReadonlySet<string> = new Set([
  */
 export function sourceSegments(content: string): readonly SourceSegment[] {
   const segments: SourceSegment[] = [];
+  for (const { kind, start, end } of lexicalSpans(content)) {
+    const last = segments.at(-1);
+    if (kind === "string" || kind === "comment") segments.push({ kind, start, end });
+    else if (last?.kind === "code") segments[segments.length - 1] = { kind: "code", start: last.start, end };
+    else segments.push({ kind: "code", start, end });
+  }
+  return segments;
+}
+
+/**
+ * One span of the finer split a syntax-shaped rule reads: the segments, with
+ * the text of a template literal and each regex literal told apart from the
+ * code around them. A `template` span runs from the backtick, or from the
+ * character after an interpolation's `}`, to the closing backtick or the `$` of
+ * the next `${`; the interpolation's braces and what they hold are `code`, so
+ * the brackets of the code spans alone stay balanced.
+ */
+export type LexicalSpan = Readonly<{ kind: SourceSegment["kind"] | "template" | "regex"; start: number; end: number }>;
+
+/**
+ * Split a source text into code, string, comment, template-text and regex
+ * spans. The scan is the one `sourceSegments` describes — that function is
+ * this one with template text and regex literals read as code.
+ */
+export function lexicalSpans(content: string): readonly LexicalSpan[] {
   const nesting: Nesting[] = [];
-  let codeStart = 0;
+  const { turn, literal, close } = spanRuns();
   let index = 0;
-  const skip = (kind: "string" | "comment", end: number): void => {
-    if (index > codeStart) segments.push({ kind: "code", start: codeStart, end: index });
-    segments.push({ kind, start: index, end });
+  /** A literal read whole from `index`. */
+  const whole = (kind: "string" | "comment" | "regex", end: number): void => {
+    literal(kind, index, end);
     index = end;
-    codeStart = end;
   };
   while (index < content.length) {
     const char = content[index];
     if (nesting.at(-1) === "template") {
-      index = templateStep(content, index, nesting);
+      const depth = nesting.length;
+      const stepped = templateStep(content, index, nesting);
+      // Deeper is a `${`, whose `{` is code; shallower is the closing backtick.
+      if (nesting.length !== depth) turn("code", nesting.length > depth ? stepped - 1 : stepped);
+      index = stepped;
       continue;
     }
     const next = content[index + 1];
     if (char === "/" && next === "/") {
-      skip("comment", lineEnd(content, index));
+      whole("comment", lineEnd(content, index));
       continue;
     }
     if (char === "/" && next === "*") {
-      skip("comment", blockCommentEnd(content, index));
+      whole("comment", blockCommentEnd(content, index));
       continue;
     }
     const stringClose = char === "\"" || char === "'" ? closingQuote(content, index) : -1;
     if (stringClose !== -1) {
-      skip("string", stringClose + 1);
+      whole("string", stringClose + 1);
       continue;
     }
     const regexClose = char === "/" && regexMayStart(content, index) ? regexEnd(content, index) : -1;
     if (regexClose !== -1) {
-      index = regexClose;
+      whole("regex", regexClose);
       continue;
     }
-    if (char === "`") nesting.push("template");
-    else if (char === "{") nesting.push("brace");
-    else if (char === "}") nesting.pop(); // closes a brace, or an interpolation back into its template
+    if (char === "`") {
+      turn("template", index);
+      nesting.push("template");
+    } else if (char === "{") nesting.push("brace");
+    else if (char === "}") {
+      nesting.pop(); // closes a brace, or an interpolation back into its template
+      if (nesting.at(-1) === "template") turn("template", index + 1);
+    }
     index += 1;
   }
-  if (content.length > codeStart) segments.push({ kind: "code", start: codeStart, end: content.length });
-  return segments;
+  return close(content.length);
+}
+
+/**
+ * The spans of one scan as they are written: code and template text accumulate
+ * in a run that is open until its kind turns, and a string, comment or regex is
+ * one span of its own.
+ */
+function spanRuns(): Readonly<{
+  /** End the open run at `at` and open one of `kind` there; nothing when it is that kind already. */
+  turn: (kind: "code" | "template", at: number) => void;
+  /** A literal from `start` to `end`; only code is ever open around one, and code resumes after it. */
+  literal: (kind: "string" | "comment" | "regex", start: number, end: number) => void;
+  /** End the open run at the text's end, and hand back every span. */
+  close: (length: number) => readonly LexicalSpan[];
+}> {
+  const spans: LexicalSpan[] = [];
+  let runKind: "code" | "template" = "code";
+  let runStart = 0;
+  const endRun = (at: number): void => {
+    if (at > runStart) spans.push({ kind: runKind, start: runStart, end: at });
+  };
+  return {
+    turn: (kind, at) => {
+      if (kind === runKind) return;
+      endRun(at);
+      runKind = kind;
+      runStart = at;
+    },
+    literal: (kind, start, end) => {
+      endRun(start);
+      spans.push({ kind, start, end });
+      runStart = end;
+    },
+    close: (length) => {
+      endRun(length);
+      return spans;
+    },
+  };
 }
 
 /** One step through template text: an escape, the closing backtick, a `${` into code, or a text character. */

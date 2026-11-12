@@ -202,6 +202,7 @@ describe("quality-program helper boundaries", () => {
       "prepareStandaloneSuccessorFacadeStart",
       "prepareWaveGateFacadeStart",
       "publishedReviewerRequest",
+      "readPlanDesignEvidence",
       "readStandaloneReviewedSource",
       "recoverOrphanedWaveGateFacade",
       "renderSpawnTask",
@@ -241,6 +242,9 @@ describe("quality-program helper boundaries", () => {
     // volume-private. The only exceptions are these named importer -> module
     // seams, each a separate published adapter rather than a program volume.
     const allowedVolumeImports = new Set([
+      // The shared ProgramParse failure constructor (`failed`): the plan design
+      // acceptance and its evidence reader build the same refusals with it.
+      "engine/src/handlers/helpers/accept-plan-design-review.ts -> program-result",
       "engine/src/handlers/helpers/orchestration.ts -> legacy-panel",
       "engine/src/handlers/helpers/orchestration.ts -> remediation-events",
       // The run-directory-only effect runner: the façade's transcript capture

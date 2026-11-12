@@ -34,7 +34,7 @@ import { registeredSecurityAuditRuns } from "../../orchestration/security-audit-
 import { AUTHORITY_HELPER_OPERATIONS, HARNESS_HOOK_ROUTES } from "./subagent-authority-operations";
 import { readRunBytesNoFollow } from "../../utils/no-follow-fs";
 import { describeCause } from "../../utils/describe-cause";
-import { parsePreToolUseInput } from "./pre-tool-use-input";
+import { failClosedInput } from "./pre-tool-use-input";
 
 
 /** A path and its realpath, when the two differ and the path exists. */
@@ -139,10 +139,9 @@ export async function runGuardSubagentAuthority(
   stdin: string,
   readRuns: () => readonly string[] = registeredSecurityAuditRuns,
 ): Promise<HookResult> {
-  const input = parsePreToolUseInput(stdin);
-  if (input instanceof Error) {
-    return blockResult(`guard-subagent-authority: malformed hook input — failing closed: ${input.message}`);
-  }
+  const parsed = failClosedInput("guard-subagent-authority", stdin);
+  if (!parsed.ok) return parsed.block;
+  const { input } = parsed;
   // Only Claude Code's own marker identifies a subagent; any value it carries
   // (even a malformed one) means the call did not come from the parent.
   if (input.agent_id === undefined) return passthroughResult();

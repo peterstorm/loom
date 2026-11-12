@@ -5,29 +5,96 @@
  * Pure parsing; standalone-review-preparation freezes these facts into authority.
  */
 import type { Finding } from "./findings";
-import type { LoomAgentName } from "./model-profiles";
 import type { NonEmpty } from "./orchestration-contract";
 import { isExactGitSha } from "./git-sha";
 import { compareStrings } from "./ordering";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import { parseReviewPath, type ReviewPath } from "./review-packet";
 import { nonEmptyOf } from "./orchestration-contract";
+import { PLAN_DESIGN_REVIEWERS, planDesignLens } from "./plan-design-review";
+import {
+  PLAN_DESIGN_REVIEW_KIND,
+  parseStandaloneReviewKind,
+  type StandaloneReviewKind,
+  type StandaloneReviewerRole,
+} from "./standalone-review-kinds";
 
-export const STANDALONE_REVIEWER_ROLES = Object.freeze([
-  "code-reviewer",
-  "silent-failure-hunter",
-  "pr-test-analyzer",
-  "type-design-analyzer",
-  "comment-analyzer",
-  "architecture-tech-lead",
-  "code-simplifier",
-] as const satisfies readonly LoomAgentName[]);
-export type StandaloneReviewerRole = (typeof STANDALONE_REVIEWER_ROLES)[number];
+// The kind and role grammars live in the `standalone-review-kinds` leaf so the
+// plan design rules can name them without importing this module; this module
+// stays the Standalone Review scope's surface for them.
+export {
+  STANDALONE_REVIEWER_ROLES,
+  parseStandaloneReviewKind,
+  parseStandaloneReviewerRole,
+  type StandaloneReviewKind,
+  type StandaloneReviewerRole,
+} from "./standalone-review-kinds";
 
-const STANDALONE_REVIEW_KINDS = Object.freeze([
-  "code", "errors", "tests", "types", "comments", "architecture", "simplify", "all",
-] as const);
-export type StandaloneReviewKind = (typeof STANDALONE_REVIEW_KINDS)[number];
+/**
+ * What a review kind fixes about a Standalone Review whatever its scope: the
+ * one home of per-kind policy. Registration, successor ingress, reviewer
+ * selection, the read obligation and the packet lens all read it here, so a
+ * kind with its own rules changes one entry, not every site that asks.
+ */
+export type StandaloneReviewProfile = Readonly<{
+  /** The roster the kind fixes, or `scope-selected` when the scope facts select it. */
+  roster: Readonly<{ kind: "fixed"; reviewers: NonEmpty<StandaloneReviewerRole> }> | Readonly<{ kind: "scope-selected" }>;
+  /** What an explicit `files` scope must name: any scope, or exactly one file (named for the operator). */
+  scope: Readonly<{ kind: "any" }> | Readonly<{ kind: "exactly-one-file"; names: string }>;
+  /** What the read obligation is taken against: the baseline revision, or the whole document. */
+  readObligation: "baseline-diff" | "whole-document";
+  /** The extra packet section a role's lens adds, or null. */
+  lens: (role: StandaloneReviewerRole) => string | null;
+  /** Whether a successor may continue a review of this kind. */
+  successor: Readonly<{ kind: "allowed" }> | Readonly<{ kind: "refused"; reason: string }>;
+}>;
+
+const SCOPE_SELECTED_PROFILE: StandaloneReviewProfile = Object.freeze({
+  roster: Object.freeze({ kind: "scope-selected" }),
+  scope: Object.freeze({ kind: "any" }),
+  readObligation: "baseline-diff",
+  lens: () => null,
+  successor: Object.freeze({ kind: "allowed" }),
+});
+
+/**
+ * The plan design review (ADR-0070). A Markdown plan changes no type and adds
+ * no structure, so the scope facts would never select its lenses: the kind
+ * fixes the roster. It reviews one document, every unit of it, and an edited
+ * plan is reviewed whole and afresh, never by a successor.
+ */
+const PLAN_DESIGN_PROFILE: StandaloneReviewProfile = Object.freeze({
+  roster: Object.freeze({ kind: "fixed", reviewers: nonEmptyOf<StandaloneReviewerRole>(...PLAN_DESIGN_REVIEWERS) }),
+  scope: Object.freeze({ kind: "exactly-one-file", names: "the plan" }),
+  readObligation: "whole-document",
+  lens: planDesignLens,
+  successor: Object.freeze({
+    kind: "refused",
+    reason: "a plan-design review has no successor; start a fresh plan-design review of the edited plan",
+  }),
+});
+
+const STANDALONE_REVIEW_PROFILES = Object.freeze({
+  code: SCOPE_SELECTED_PROFILE,
+  errors: SCOPE_SELECTED_PROFILE,
+  tests: SCOPE_SELECTED_PROFILE,
+  types: SCOPE_SELECTED_PROFILE,
+  comments: SCOPE_SELECTED_PROFILE,
+  architecture: SCOPE_SELECTED_PROFILE,
+  simplify: SCOPE_SELECTED_PROFILE,
+  all: SCOPE_SELECTED_PROFILE,
+  [PLAN_DESIGN_REVIEW_KIND]: PLAN_DESIGN_PROFILE,
+} satisfies Readonly<Record<StandaloneReviewKind, StandaloneReviewProfile>>);
+
+/**
+ * The profile of a review that requested `kinds`: the first kind with a
+ * profile of its own, else the scope-selected one. A start input names one
+ * kind, so a set mixing two profiled kinds is never registered.
+ */
+export function standaloneReviewProfile(kinds: readonly StandaloneReviewKind[]): StandaloneReviewProfile {
+  return kinds.map((kind) => STANDALONE_REVIEW_PROFILES[kind]).find((profile) => profile !== SCOPE_SELECTED_PROFILE)
+    ?? SCOPE_SELECTED_PROFILE;
+}
 
 export type StandaloneReviewMetadata = (
   | Readonly<{ docsOnly: true; sourceOrTestChanged: false; commentsChanged: true }>
@@ -196,8 +263,10 @@ export function parseReviewMetadata(raw: unknown): ParseResult<StandaloneReviewM
   ] as const;
   const errors = exactKeys(raw, keys, "review_metadata");
   const requested = parseStringSet(raw.requested_kinds, "review_metadata.requested_kinds", errors);
-  const requestedKinds = requested.filter((kind): kind is StandaloneReviewKind =>
-    (STANDALONE_REVIEW_KINDS as readonly string[]).includes(kind));
+  const requestedKinds = requested.flatMap((kind): StandaloneReviewKind[] => {
+    const parsed = parseStandaloneReviewKind(kind);
+    return parsed === null ? [] : [parsed];
+  });
   if (requestedKinds.length !== requested.length) errors.push("review_metadata.requested_kinds contains an unknown review kind");
   const languages = parseStringSet(raw.languages, "review_metadata.languages", errors);
   const docsOnly = boolField(raw, "docs_only", errors);
@@ -230,6 +299,8 @@ export function parseReviewMetadata(raw: unknown): ParseResult<StandaloneReviewM
 
 /** Deterministic reviewer selection. The result order is canonical spawn order. */
 export function selectStandaloneReviewers(metadata: StandaloneReviewMetadata): NonEmpty<StandaloneReviewerRole> {
+  const { roster } = standaloneReviewProfile(metadata.requestedKinds);
+  if (roster.kind === "fixed") return roster.reviewers;
   const kinds = new Set(metadata.requestedKinds);
   const all = kinds.has("all");
   // code-reviewer always leads the roster; the rest join by scope.

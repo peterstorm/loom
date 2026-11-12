@@ -650,6 +650,20 @@ describe("review-panel helper CLI", () => {
     expect(second.stderr).toMatch(/JSON|parse/i);
   });
 
+  it.each(["null", "[]", '"F1"', "7"])("keeps a tally closure holding the non-object JSON %s fail-closed and says so", (closure) => {
+    stage();
+    writeVerdicts([["upheld", "upheld"], ["upheld", "upheld"], ["upheld", "upheld"]]);
+    const first = run(["tally", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST]);
+    expect(first.status, first.stderr).toBe(0);
+    writeFileSync(join(runDir, "tally-closure.json"), `${closure}\n`);
+
+    const second = run(["tally", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST]);
+    expect(second.status).toBe(1);
+    expect(second.stderr).toContain("already been tallied or has an incomplete prior tally: <unknown findings>");
+    expect(second.stderr).toContain("cannot read tally closure");
+    expect(second.stderr).toContain("the closure is not a JSON object");
+  });
+
   it("refuses to re-tally a run it has already adjudicated", () => {
     // A second tally sent applyFindingOutcomes looking for findings the first
     // one had already moved into refuted_findings, where the invariant throw
