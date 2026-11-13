@@ -8,6 +8,7 @@ import {
   renderPiAgentDefinition,
   validatePiAgentDefinitionFile,
 } from "../../src/utils/render-pi-agent";
+import { REVIEW_LENSES_REGION, WIRE_CONTRACT_REGION, extractRegion } from "../../src/core/wire-contract";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
@@ -21,6 +22,19 @@ describe("exact Pi agent rendering", () => {
     const specify = expectedPiAgentDefinition("specify-agent", ROOT);
     expect(specify).toContain("## Preloaded Loom Skill: specify");
     expect(specify).toContain("# Specify - Requirements Before Design");
+  });
+
+  it("carries every stamped region through to the Pi body unchanged", () => {
+    // Pi rendering rewrites the frontmatter and the plugin-root token only, so
+    // a stamped region reads back through the stamper's own extraction.
+    for (const [agent, region] of [
+      ["code-reviewer", WIRE_CONTRACT_REGION],
+      ["review-verifier-agent", REVIEW_LENSES_REGION],
+    ] as const) {
+      const source = extractRegion(readFileSync(join(ROOT, "agents", `${agent}.md`), "utf-8"), region);
+      expect(source.ok, agent).toBe(true);
+      expect(extractRegion(expectedPiAgentDefinition(agent, ROOT), region), agent).toEqual(source);
+    }
   });
 
   it("lowers declared Claude tool names to one Pi tools line", () => {

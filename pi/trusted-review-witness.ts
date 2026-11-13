@@ -1,5 +1,5 @@
 /**
- * The Trusted Review Witness Aggregate (CONTEXT.md): the Pi extension's
+ * The Trusted Review Witness Aggregate (docs/contexts/harness/CONTEXT.md): the Pi extension's
  * witnesses of captured standalone-review transcripts, grouped by session,
  * Standalone Review root and Review Run, and the replay that turns the current
  * run's witnesses into a Loom review-authority receipt.

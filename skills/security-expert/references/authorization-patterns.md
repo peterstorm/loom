@@ -1,327 +1,218 @@
 # Authorization Patterns Reference
 
-## Table of Contents
-1. [RBAC (Role-Based Access Control)](#rbac)
-2. [ABAC (Attribute-Based Access Control)](#abac)
-3. [ReBAC (Relationship-Based Access Control)](#rebac)
-4. [Policy Engines](#policy-engines)
-5. [Implementation Examples](#implementation-examples)
+## Rules That Apply to Every Model
+
+1. **Deny by default.** The last line of every policy is a deny. An unknown action, resource type or missing attribute is a deny.
+2. **Deny rules are evaluated first** and win over any permit.
+3. **Every permit names the action** it allows. "Has clearance" or "is in the department" without an action permits delete as well as read.
+4. **Check the object, not only the route.** A role check on `/documents/**` does not stop user A reading user B's document (see `owasp-api-security.md`, API1).
+5. **Fail closed.** If the policy engine errors or times out, the answer is deny.
+
+## Choosing a Model
+
+| Model | Decision is a function of | Use when |
+|-------|---------------------------|----------|
+| RBAC | The user's roles | Stable job functions, coarse permissions, audit requirements |
+| ABAC | Subject, resource, action and environment attributes | Ownership, department, classification, time or location matter |
+| ReBAC | Relationships between objects (Zanzibar, SpiceDB) | Sharing, nested folders, teams, organisation hierarchies |
+
+They combine: RBAC at the route, ABAC or ReBAC at the object.
 
 ## RBAC
 
-### Concept
-Users → Roles → Permissions
+Users have roles; roles map to permissions; code checks the permission (`READ_DOCUMENT`), not the role name, so roles can be regrouped without touching call sites. A role with no mapping has no permissions.
 
-### When to Use
-- Well-defined job functions
-- Stable permission requirements
-- Audit/compliance requirements
-- Simple access patterns
-
-### Implementation Pattern
+### Role hierarchy (Spring Security 6.3+)
 ```java
-// Define roles
-public enum Role {
-    USER,
-    EDITOR,
-    ADMIN
-}
-
-// Define permissions
-public enum Permission {
-    READ_DOCUMENT,
-    WRITE_DOCUMENT,
-    DELETE_DOCUMENT,
-    MANAGE_USERS
-}
-
-// Role-permission mapping
-Map<Role, Set<Permission>> rolePermissions = Map.of(
-    Role.USER, Set.of(READ_DOCUMENT),
-    Role.EDITOR, Set.of(READ_DOCUMENT, WRITE_DOCUMENT),
-    Role.ADMIN, Set.of(READ_DOCUMENT, WRITE_DOCUMENT, DELETE_DOCUMENT, MANAGE_USERS)
-);
-
-// Check access
-public boolean hasPermission(User user, Permission permission) {
-    return user.getRoles().stream()
-        .flatMap(role -> rolePermissions.get(role).stream())
-        .anyMatch(p -> p == permission);
-}
-```
-
-### Hierarchical RBAC
-```java
-// Role hierarchy in Spring Security
 @Bean
-public RoleHierarchy roleHierarchy() {
-    RoleHierarchyImpl hierarchy = new RoleHierarchyImpl();
-    hierarchy.setHierarchy("""
-        ROLE_ADMIN > ROLE_MANAGER
-        ROLE_MANAGER > ROLE_USER
-        ROLE_USER > ROLE_GUEST
-        """);
-    return hierarchy;
+static RoleHierarchy roleHierarchy() {
+    return RoleHierarchyImpl.withDefaultRolePrefix()
+        .role("ADMIN").implies("MANAGER")
+        .role("MANAGER").implies("USER")
+        .build();
 }
 ```
+`RoleHierarchyImpl.fromHierarchy("ROLE_ADMIN > ROLE_MANAGER\nROLE_MANAGER > ROLE_USER")` is the string form; `new RoleHierarchyImpl()` with `setHierarchy` is the deprecated one. With `@PreAuthorize`, also pass the hierarchy to the `DefaultMethodSecurityExpressionHandler` (`setRoleHierarchy`).
 
 ## ABAC
 
-### Concept
-Access = f(Subject attributes, Resource attributes, Action, Environment)
+The decision is a pure function: attributes in, decision out. The clock is an input, which makes the time rule testable.
 
-### When to Use
-- Context-dependent decisions (time, location, device)
-- Resource-level attributes matter
-- Complex business rules
-- Dynamic policies
-
-### XACML-Style Policy Structure
-```
-Policy:
-  Target: resource.type == "document"
-  Rules:
-    - Effect: Permit
-      Condition: 
-        subject.department == resource.department AND
-        action == "read"
-    - Effect: Permit
-      Condition:
-        subject.clearance >= resource.classification AND
-        action in ["read", "write"]
-    - Effect: Deny (default)
-```
-
-### Implementation Pattern
 ```java
-public interface PolicyDecisionPoint {
-    AuthorizationDecision evaluate(AuthorizationContext context);
-}
+public enum Decision { PERMIT, DENY }
+public record Subject(String id, String department, int clearance) {}
+public record Document(String ownerId, String department, int classification, boolean confidential) {}
+public record AccessRequest(Subject subject, Document document, String action, LocalTime now) {}
 
-@Data
-public class AuthorizationContext {
-    private Subject subject;      // Who: user attributes
-    private Resource resource;    // What: resource attributes
-    private String action;        // How: read, write, delete
-    private Environment environment;  // When/Where: time, IP, device
-}
+public final class DocumentPolicy {
+    private static final LocalTime OPEN = LocalTime.of(9, 0);
+    private static final LocalTime CLOSE = LocalTime.of(18, 0);
 
-@Component
-public class DocumentAccessPDP implements PolicyDecisionPoint {
-    
-    @Override
-    public AuthorizationDecision evaluate(AuthorizationContext ctx) {
-        // Rule 1: Same department can read
-        if ("read".equals(ctx.getAction()) && 
-            ctx.getSubject().getDepartment().equals(ctx.getResource().getDepartment())) {
-            return AuthorizationDecision.PERMIT;
-        }
-        
-        // Rule 2: Clearance-based access
-        if (ctx.getSubject().getClearanceLevel() >= ctx.getResource().getClassification()) {
-            return AuthorizationDecision.PERMIT;
-        }
-        
-        // Rule 3: Time-based restriction
-        LocalTime now = LocalTime.now();
-        if (now.isBefore(LocalTime.of(9, 0)) || now.isAfter(LocalTime.of(18, 0))) {
-            if (ctx.getResource().isConfidential()) {
-                return AuthorizationDecision.DENY;
-            }
-        }
-        
-        return AuthorizationDecision.DENY;
+    public static Decision evaluate(AccessRequest r) {
+        boolean businessHours = !r.now().isBefore(OPEN) && r.now().isBefore(CLOSE);
+
+        // 1. Deny rules first: they win over every permit below.
+        if (r.document().confidential() && !businessHours) return Decision.DENY;
+        if (r.subject().clearance() < r.document().classification()) return Decision.DENY;
+
+        // 2. Permits, each tied to an action.
+        boolean owner = r.document().ownerId().equals(r.subject().id());
+        boolean sameDepartment = r.document().department().equals(r.subject().department());
+        boolean permitted = switch (r.action()) {
+            case "read" -> owner || sameDepartment;
+            case "write", "delete" -> owner;
+            default -> false;                                   // unknown action
+        };
+
+        // 3. Default deny.
+        return permitted ? Decision.PERMIT : Decision.DENY;
     }
 }
 ```
 
-### Spring Security Integration
+Clearance is a precondition here, not a permit: having clearance does not by itself allow anything.
+
+### Spring Security integration: `PermissionEvaluator`
+
 ```java
 @Component
-public class AbacPermissionEvaluator implements PermissionEvaluator {
-    
-    private final PolicyDecisionPoint pdp;
-    
+public class DocumentPermissionEvaluator implements PermissionEvaluator {
+
+    private final DocumentRepository documents;
+    private final Clock clock;
+
+    public DocumentPermissionEvaluator(DocumentRepository documents, Clock clock) {
+        this.documents = documents;
+        this.clock = clock;
+    }
+
     @Override
     public boolean hasPermission(Authentication auth, Object target, Object permission) {
-        AuthorizationContext ctx = AuthorizationContext.builder()
-            .subject(extractSubject(auth))
-            .resource(extractResource(target))
-            .action(permission.toString())
-            .environment(Environment.current())
-            .build();
-        
-        return pdp.evaluate(ctx) == AuthorizationDecision.PERMIT;
+        if (!(target instanceof Document document) || !(permission instanceof String action)) {
+            return false;                                       // unknown type: deny
+        }
+        AccessRequest request = new AccessRequest(subjectOf(auth), document, action, LocalTime.now(clock));
+        return DocumentPolicy.evaluate(request) == Decision.PERMIT;
     }
+
+    @Override
+    public boolean hasPermission(Authentication auth, Serializable id, String type, Object permission) {
+        if (!"Document".equals(type)) return false;
+        return documents.findById(id.toString())
+            .map(document -> hasPermission(auth, document, permission))
+            .orElse(false);                                     // missing object: deny
+    }
+
+    private Subject subjectOf(Authentication auth) { /* read claims from the validated token */ }
 }
 
-// Usage
-@PreAuthorize("hasPermission(#document, 'write')")
-public void updateDocument(Document document) { }
+@Bean
+static MethodSecurityExpressionHandler methodSecurityExpressionHandler(DocumentPermissionEvaluator evaluator) {
+    DefaultMethodSecurityExpressionHandler handler = new DefaultMethodSecurityExpressionHandler();
+    handler.setPermissionEvaluator(evaluator);
+    return handler;
+}
+
+@PreAuthorize("hasPermission(#id, 'Document', 'write')")
+public void update(String id, DocumentUpdate update) { }
 ```
 
-## ReBAC
+Subject attributes must come from a source the user cannot edit. A department or clearance claim copied from a self-service profile field is a privilege-escalation path (see `keycloak.md`, user attributes).
 
-### Concept
-Access based on relationships between entities (like Google Zanzibar/SpiceDB)
+## ReBAC (SpiceDB)
 
-### When to Use
-- Social/collaborative applications
-- Complex ownership hierarchies
-- Shared resources
-- Organization structures
+Schema, relationships and the check, in SpiceDB's notation. A relationship reads `resource#relation@subject`.
 
-### Relationship Model
 ```
-// Tuples: (object, relation, subject)
-document:report#owner@user:alice
-document:report#viewer@team:engineering#member
-folder:projects#parent@document:report
-team:engineering#member@user:bob
-```
+definition user {}
 
-### Permission Derivation
-```
-// Define relations and permissions
-type document {
+definition team {
+    relation member: user
+}
+
+definition folder {
+    relation viewer: user | team#member
+    permission read = viewer
+}
+
+definition document {
     relation owner: user
     relation viewer: user | team#member
     relation parent: folder
-    
+
     permission read = viewer + owner + parent->read
     permission write = owner
-    permission delete = owner
-}
-
-type folder {
-    relation owner: user
-    relation viewer: user | team#member
-    
-    permission read = viewer + owner
-}
-
-type team {
-    relation member: user
 }
 ```
 
-### Check Flow
 ```
-Q: Can bob read document:report?
-
-1. Is bob a direct viewer? → Check (document:report, viewer, user:bob)
-2. Is bob an owner? → Check (document:report, owner, user:bob)
-3. Is bob in a team that's a viewer? 
-   → Find teams where bob is member
-   → Check (document:report, viewer, team:X#member)
-4. Can bob read parent folder?
-   → Find parent folder
-   → Recursively check read permission
+document:report#owner@user:alice
+document:report#viewer@team:engineering#member
+document:report#parent@folder:projects
+team:engineering#member@user:bob
 ```
 
-### SpiceDB Example
 ```java
-// Using SpiceDB Java client
-SpiceDbClient client = SpiceDbClient.builder()
-    .target("localhost:50051")
-    .build();
+// authzed-java: generated gRPC stubs plus a bearer-token credential
+ManagedChannel channel = ManagedChannelBuilder.forTarget("spicedb.internal:50051")
+    .useTransportSecurity().build();
+PermissionsServiceGrpc.PermissionsServiceBlockingStub permissions =
+    PermissionsServiceGrpc.newBlockingStub(channel).withCallCredentials(new BearerToken(presharedKey));
 
-// Create relationship
-client.writeRelationships(WriteRelationshipsRequest.newBuilder()
-    .addUpdates(RelationshipUpdate.newBuilder()
-        .setOperation(Operation.TOUCH)
-        .setRelationship(Relationship.newBuilder()
-            .setResource(ObjectReference.newBuilder()
-                .setObjectType("document")
-                .setObjectId("report"))
-            .setRelation("owner")
-            .setSubject(SubjectReference.newBuilder()
-                .setObject(ObjectReference.newBuilder()
-                    .setObjectType("user")
-                    .setObjectId("alice")))))
+CheckPermissionResponse response = permissions.checkPermission(CheckPermissionRequest.newBuilder()
+    .setConsistency(Consistency.newBuilder().setFullyConsistent(true))
+    .setResource(ObjectReference.newBuilder().setObjectType("document").setObjectId("report"))
+    .setPermission("read")
+    .setSubject(SubjectReference.newBuilder()
+        .setObject(ObjectReference.newBuilder().setObjectType("user").setObjectId("bob")))
     .build());
 
-// Check permission
-CheckPermissionResponse response = client.checkPermission(
-    CheckPermissionRequest.newBuilder()
-        .setResource(ObjectReference.newBuilder()
-            .setObjectType("document")
-            .setObjectId("report"))
-        .setPermission("read")
-        .setSubject(SubjectReference.newBuilder()
-            .setObject(ObjectReference.newBuilder()
-                .setObjectType("user")
-                .setObjectId("bob")))
-        .build());
-
-boolean canRead = response.getPermissionship() == Permissionship.HAS_PERMISSION;
+boolean allowed = response.getPermissionship()
+    == CheckPermissionResponse.Permissionship.PERMISSIONSHIP_HAS_PERMISSION;   // anything else is deny
 ```
+
+A check that reads stale data can allow access that was just revoked. Use full consistency, or pass the token returned by the write, for checks that follow a permission change.
 
 ## Policy Engines
 
-### Open Policy Agent (OPA)
+### Open Policy Agent (Rego v1)
+OPA 1.0 requires `if` before a rule body and `:=` for assignment.
+
 ```rego
-# policy.rego
 package authz
 
-default allow = false
+default allow := false
 
-# Allow if user is admin
-allow {
-    input.user.roles[_] == "admin"
+allow if {
+    not denied
+    permitted
 }
 
-# Allow read if same department
-allow {
+denied if {
+    input.resource.confidential
+    not business_hours
+}
+
+permitted if "admin" in input.user.roles
+
+permitted if {
     input.action == "read"
     input.user.department == input.resource.department
 }
 
-# Allow during business hours
-allow {
-    input.action == "read"
-    time.hour(time.now_ns()) >= 9
-    time.hour(time.now_ns()) < 18
+business_hours if {
+    [hour, _, _] := time.clock([time.now_ns(), "Europe/Copenhagen"])
+    hour >= 9
+    hour < 18
 }
 ```
 
-```java
-// OPA integration
-@Component
-public class OpaAuthorizationManager {
-    
-    private final WebClient opaClient;
-    
-    public boolean isAuthorized(User user, Resource resource, String action) {
-        Map<String, Object> input = Map.of(
-            "user", Map.of(
-                "id", user.getId(),
-                "roles", user.getRoles(),
-                "department", user.getDepartment()
-            ),
-            "resource", Map.of(
-                "id", resource.getId(),
-                "type", resource.getType(),
-                "department", resource.getDepartment()
-            ),
-            "action", action
-        );
-        
-        OpaResponse response = opaClient.post()
-            .uri("/v1/data/authz/allow")
-            .bodyValue(Map.of("input", input))
-            .retrieve()
-            .bodyToMono(OpaResponse.class)
-            .block();
-        
-        return response.getResult();
-    }
-}
-```
+Business hours restricts; it is never a permit of its own. The caller treats only a literal `true` from `/v1/data/authz/allow` as allow: a missing result, an error or a timeout is deny.
 
 ### Casbin
+`r.obj == p.obj` compares strings, so a policy path with a wildcard never matches. Use a path-matching function.
+
 ```ini
-# model.conf
 [request_definition]
 r = sub, obj, act
 
@@ -335,93 +226,19 @@ g = _, _
 e = some(where (p.eft == allow))
 
 [matchers]
-m = g(r.sub, p.sub) && r.obj == p.obj && r.act == p.act
+m = g(r.sub, p.sub) && keyMatch2(r.obj, p.obj) && (r.act == p.act || p.act == "*")
 ```
 
 ```csv
-# policy.csv
 p, admin, /api/*, *
-p, user, /api/documents, read
-p, editor, /api/documents, write
+p, user, /api/documents/:id, read
+p, editor, /api/documents/:id, write
 g, alice, admin
 g, bob, editor
 ```
 
-## Implementation Examples
+`some(where (p.eft == allow))` is deny by default: a request no policy line matches is refused.
 
-### Combined RBAC + ABAC
-```java
-@Component
-public class HybridAuthorizationService {
-    
-    public boolean authorize(Authentication auth, Object resource, String action) {
-        // First check: RBAC for coarse-grained access
-        if (!hasRequiredRole(auth, resource, action)) {
-            return false;
-        }
-        
-        // Second check: ABAC for fine-grained rules
-        return evaluateAbacPolicy(auth, resource, action);
-    }
-    
-    private boolean hasRequiredRole(Authentication auth, Object resource, String action) {
-        if (resource instanceof Document) {
-            return switch (action) {
-                case "read" -> hasAnyRole(auth, "USER", "EDITOR", "ADMIN");
-                case "write" -> hasAnyRole(auth, "EDITOR", "ADMIN");
-                case "delete" -> hasAnyRole(auth, "ADMIN");
-                default -> false;
-            };
-        }
-        return false;
-    }
-    
-    private boolean evaluateAbacPolicy(Authentication auth, Object resource, String action) {
-        // Additional contextual checks
-        if (resource instanceof Document doc) {
-            // Owner can always access their documents
-            if (doc.getOwnerId().equals(auth.getName())) {
-                return true;
-            }
-            
-            // Check department access
-            String userDept = extractDepartment(auth);
-            if (doc.getDepartment().equals(userDept)) {
-                return true;
-            }
-            
-            // Time-based restrictions for confidential docs
-            if (doc.isConfidential() && !isBusinessHours()) {
-                return false;
-            }
-        }
-        return true;
-    }
-}
-```
+## Testing
 
-### Resource-Level Permissions Table
-```sql
-CREATE TABLE resource_permissions (
-    id UUID PRIMARY KEY,
-    resource_type VARCHAR(50) NOT NULL,
-    resource_id UUID NOT NULL,
-    principal_type VARCHAR(20) NOT NULL,  -- 'user' or 'group'
-    principal_id UUID NOT NULL,
-    permission VARCHAR(20) NOT NULL,      -- 'read', 'write', 'admin'
-    created_at TIMESTAMP DEFAULT NOW(),
-    UNIQUE(resource_type, resource_id, principal_type, principal_id, permission)
-);
-
--- Check permission
-SELECT EXISTS(
-    SELECT 1 FROM resource_permissions
-    WHERE resource_type = 'document'
-    AND resource_id = :resourceId
-    AND (
-        (principal_type = 'user' AND principal_id = :userId)
-        OR (principal_type = 'group' AND principal_id IN (:userGroupIds))
-    )
-    AND permission IN ('read', 'write', 'admin')
-);
-```
+For each policy, assert the denials as carefully as the permits: another user's object, an unknown action, a missing attribute, a deny rule combined with a matching permit, and the engine being unavailable.

@@ -147,7 +147,7 @@ describe("lowering declared tools for Pi", () => {
 
 describe("repository agent definitions", () => {
   const agentFiles = readdirSync(join(ROOT, "agents"), { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".md") && entry.name !== "README.md")
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
     .map((entry) => entry.name);
 
   it("finds the agent definitions it guards", () => {

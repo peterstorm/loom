@@ -51,7 +51,7 @@ function execute(snippet: string, sandbox: ReturnType<typeof fixture>) {
 
 describe("documented command preflights execute fail-closed", () => {
   it("missing Bun exits nonzero with the actionable dev-shell diagnostic on stderr", () => {
-    const result = execute(preflight("loom.md", "## Prerequisites"), fixture(false));
+    const result = execute(preflight("loom.md", "## Setup"), fixture(false));
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("FATAL: bun not found");
     expect(result.stderr).toContain("nix develop ./.claude");
@@ -60,7 +60,7 @@ describe("documented command preflights execute fail-closed", () => {
 
   it("available Bun passes discovery without executing or installing it", () => {
     const sandbox = fixture(true);
-    const result = execute(preflight("loom.md", "## Prerequisites"), sandbox);
+    const result = execute(preflight("loom.md", "## Setup"), sandbox);
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe(join(sandbox.bin, "bun"));
     expect(result.stderr).toBe("");

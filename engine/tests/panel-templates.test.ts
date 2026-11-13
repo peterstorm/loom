@@ -1,19 +1,26 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkAgentSkillPrompt } from "../src/core/agent-skills";
 import { findResidualPlaceholders } from "../src/core/validate-template-substitution";
 import { architectureCriterion, candidateFilename, parseJudgeVerdict, serializeJudgeVerdict } from "../src/core/panel-contract";
 
 /**
- * Template placeholder audit for the four panel-mode templates.
+ * Template placeholder audit for every phase template (`phase-*.md`).
  *
- * Encodes the substitution authoring rule from the panel-mode plan's hook-gate
- * audit: after every DECLARED variable is substituted, NO literal `{...}`
- * placeholder may survive in the spawned prompt — otherwise
- * validate-template-substitution blocks the Task spawn at runtime. Any naming
- * scheme referenced in prose must use angle brackets (`candidate-<lens>.md`),
- * never braces (`candidate-{lens}.md`).
+ * The substitution authoring rule: after every DECLARED variable is
+ * substituted, NO literal `{...}` placeholder may survive in the spawned prompt
+ * — otherwise validate-template-substitution blocks the spawn at runtime. Any
+ * naming scheme referenced in prose must use angle brackets
+ * (`candidate-<lens>.md`), never braces (`candidate-{lens}.md`).
+ *
+ * "Declared" is what the orchestrator is told to substitute: the Variables cell
+ * of the template's row in the Phases table of `commands/loom.md`, or in the
+ * template table of `references/loom/panel-runbook.md`. The two sets must be
+ * EQUAL. A variable the template uses and the table omits is a spawn the hook
+ * refuses; a variable the table lists and the template lacks is an instruction
+ * the orchestrator cannot follow.
  *
  * The residual-placeholder check imports the real detector
  * (findResidualPlaceholders) from validate-template-substitution so the two can
@@ -21,40 +28,62 @@ import { architectureCriterion, candidateFilename, parseJudgeVerdict, serializeJ
  * {type}/{id}/{name} false-positive set.
  */
 
-const TEMPLATES_DIR = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "commands",
-  "templates",
-);
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const TEMPLATES_DIR = join(REPO_ROOT, "commands", "templates");
+const readTemplate = (file: string) => readFileSync(join(TEMPLATES_DIR, file), "utf-8");
 
-// Declared variables per template — the exact set the orchestrator substitutes.
-const TEMPLATES: Record<string, string[]> = {
-  "phase-arch-interview.md": ["feature_description", "spec_file_path", "interview_file_path", "loom_dir"],
-  "phase-arch-design.md": [
-    "feature_description",
-    "lens_name",
-    "lens_prompt",
-    "spec_file_path",
-    "interview_file_path",
-    "candidate_output_path",
-  ],
-  "phase-arch-judge.md": ["criterion", "candidate_manifest_path", "interview_json_path"],
-  "phase-arch-finalize.md": [
-    "feature_description",
-    "spec_file_path",
-    "interview_file_path",
-    "candidate_manifest_path",
-    "judge_verdicts",
-    "panel_ranking",
-    "date_slug",
-    "loom_dir",
-  ],
+/** The documents that tell the orchestrator which variables to substitute. */
+const SUBSTITUTION_CONTRACTS = [
+  ["commands/loom.md", readFileSync(join(REPO_ROOT, "commands", "loom.md"), "utf-8")],
+  ["references/loom/panel-runbook.md", readFileSync(join(REPO_ROOT, "references", "loom", "panel-runbook.md"), "utf-8")],
+] as const;
+
+/** The agent each phase template is spawned for. */
+const TEMPLATE_AGENT: Readonly<Record<string, string>> = {
+  "phase-brainstorm.md": "brainstorm-agent",
+  "phase-specify.md": "specify-agent",
+  "phase-clarify.md": "clarify-agent",
+  "phase-architecture.md": "architecture-agent",
+  "phase-plan-alignment.md": "plan-alignment-agent",
+  "phase-decompose.md": "decompose-agent",
+  "phase-arch-interview.md": "arch-interviewer-agent",
+  "phase-arch-design.md": "arch-designer-agent",
+  "phase-arch-judge.md": "arch-judge-agent",
+  "phase-arch-finalize.md": "architecture-agent",
 };
 
+const PHASE_TEMPLATES = readdirSync(TEMPLATES_DIR).filter((file) => /^phase-.*\.md$/.test(file)).sort();
+
+const cells = (row: string): readonly string[] => row.split("|").slice(1, -1).map((cell) => cell.trim());
+
+/**
+ * The variables one document declares for a template: the `{name}` tokens in
+ * the "Variables" cell of the table row that names the file. Null when the
+ * document has no such row.
+ */
+function declaredIn(doc: string, file: string): readonly string[] | null {
+  const lines = doc.split("\n");
+  const rowIndex = lines.findIndex((line) => line.startsWith("|") && line.includes(`\`${file}\``));
+  if (rowIndex === -1) return null;
+  let headerIndex = rowIndex;
+  while (headerIndex > 0 && lines[headerIndex - 1]!.startsWith("|")) headerIndex -= 1;
+  const column = cells(lines[headerIndex]!).indexOf("Variables");
+  if (column === -1) return null;
+  const cell = cells(lines[rowIndex]!)[column] ?? "";
+  return [...cell.matchAll(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g)].map((match) => match[1]!);
+}
+
+/** The variables the orchestrator is told to substitute for a template. */
+function declaredVariables(file: string): readonly string[] {
+  const declarations = SUBSTITUTION_CONTRACTS
+    .map(([, doc]) => declaredIn(doc, file))
+    .filter((declared): declared is readonly string[] => declared !== null);
+  expect(declarations.length, `${file} must be declared in exactly one substitution table`).toBe(1);
+  return declarations[0] ?? [];
+}
+
 /** Substitute every declared variable with a dummy value. */
-function substitute(template: string, vars: string[]): string {
+function substitute(template: string, vars: readonly string[]): string {
   let out = template;
   for (const v of vars) {
     out = out.split(`{${v}}`).join(`DUMMY_${v}`);
@@ -62,35 +91,27 @@ function substitute(template: string, vars: string[]): string {
   return out;
 }
 
-describe("panel-mode template placeholder audit", () => {
-  const loomRunbook = readFileSync(join(TEMPLATES_DIR, "..", "loom.md"), "utf-8");
+describe("phase template placeholder audit", () => {
+  it("covers every phase template on disk", () => {
+    expect(PHASE_TEMPLATES).toEqual(Object.keys(TEMPLATE_AGENT).sort());
+  });
 
-  for (const [file, vars] of Object.entries(TEMPLATES)) {
+  for (const file of PHASE_TEMPLATES) {
+    it(`${file} — the template's placeholders equal the variables its substitution table declares`, () => {
+      const used = [...new Set(findResidualPlaceholders(readTemplate(file)).map((token) => token.slice(1, -1)))].sort();
+      expect(used).toEqual([...new Set(declaredVariables(file))].sort());
+    });
+
     it(`${file} — no residual placeholders after substituting declared vars`, () => {
-      const raw = readFileSync(join(TEMPLATES_DIR, file), "utf-8");
-      const substituted = substitute(raw, vars);
-      const residual = findResidualPlaceholders(substituted);
+      const residual = findResidualPlaceholders(substitute(readTemplate(file), declaredVariables(file)));
       expect(residual, `residual placeholders: ${residual.join(" ")}`).toEqual([]);
     });
 
-    it(`${file} — every declared variable appears in template and runbook substitution contract`, () => {
-      const raw = readFileSync(join(TEMPLATES_DIR, file), "utf-8");
-      for (const v of vars) {
-        expect(raw.includes(`{${v}}`), `declared but unused in template: {${v}}`).toBe(true);
-        expect(loomRunbook.includes(`{${v}}`), `runbook never substitutes: {${v}}`).toBe(true);
-      }
+    it(`${file} — names every skill its agent requires (validate-agent-skill gate)`, () => {
+      const agent = readFileSync(join(REPO_ROOT, "agents", `${TEMPLATE_AGENT[file]}.md`), "utf-8");
+      expect(checkAgentSkillPrompt(agent, readTemplate(file))).toEqual({ ok: true });
     });
   }
-
-  it("finalize template references the architecture-tech-lead skill (validate-agent-skill gate)", () => {
-    const raw = readFileSync(join(TEMPLATES_DIR, "phase-arch-finalize.md"), "utf-8");
-    expect(raw).toContain("architecture-tech-lead");
-  });
-
-  it("design template references the architecture-tech-lead skill (designers do design work)", () => {
-    const raw = readFileSync(join(TEMPLATES_DIR, "phase-arch-design.md"), "utf-8");
-    expect(raw).toContain("architecture-tech-lead");
-  });
 });
 
 /**
@@ -99,14 +120,12 @@ describe("panel-mode template placeholder audit", () => {
  */
 describe("panel-mode judge-verdict round-trip through the substitution gate", () => {
   const FINALIZE = "phase-arch-finalize.md";
-  const FINALIZE_VARS = TEMPLATES[FINALIZE]!;
 
   /** Substitute the finalize template with `{judge_verdicts}` set to `verdicts`
    *  and every other declared var to a dummy, mirroring the orchestrator. */
   function finalizeWithVerdicts(verdicts: string): string {
-    const raw = readFileSync(join(TEMPLATES_DIR, FINALIZE), "utf-8");
-    let out = raw;
-    for (const v of FINALIZE_VARS) {
+    let out = readTemplate(FINALIZE);
+    for (const v of declaredVariables(FINALIZE)) {
       const value = v === "judge_verdicts" ? verdicts : `DUMMY_${v}`;
       out = out.split(`{${v}}`).join(value);
     }

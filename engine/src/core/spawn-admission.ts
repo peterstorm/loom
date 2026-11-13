@@ -1,5 +1,5 @@
 /**
- * Spawn Admission (see CONTEXT.md): the pure decision that accepts or blocks
+ * Spawn Admission (see docs/contexts/harness/CONTEXT.md): the pure decision that accepts or blocks
  * one Pi subagent spawn batch before any state mutation.
  *
  * Functional core. Every gate that can be decided from values is decided

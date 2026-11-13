@@ -19,6 +19,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { type Tier, type LintResult, type Rule, passResult, violationsResult, lintErrorResult } from "./types";
 import { loadRules } from "./loader";
+import { projectRootOf } from "./programmatic/config";
 import { executeRules } from "./executor";
 import { createDeadlineChecker } from "./safety";
 
@@ -56,11 +57,17 @@ export function isBinaryBuffer(buffer: Buffer): boolean {
  * One copy, because two had already drifted: `lintFiles` hardcoded the hook's
  * 50ms budget where `lintFile` honoured its caller's, so the same file could
  * time out through one entry point and pass through the other.
+ *
+ * `projectRoot` is the root the project rules directory belongs to
+ * (`projectRootOf`), the same one the loader builds the programmatic rules
+ * with: a regex rule's `excludePatterns` are matched inside it, not against
+ * the directories above the checkout.
  */
 function lintLoadedFile(
   rules: readonly Rule[],
   filePath: string,
   timeoutMs: number,
+  projectRoot: string | null,
 ): LintResult {
   try {
     const absolutePath = resolve(filePath);
@@ -76,7 +83,7 @@ function lintLoadedFile(
 
     // The deadline checker is time-dependent, so the shell creates it.
     // executeRules internally filters by extension — no match returns [].
-    const violations = executeRules(rules, absolutePath, content, createDeadlineChecker(timeoutMs));
+    const violations = executeRules(rules, absolutePath, content, createDeadlineChecker(timeoutMs), projectRoot);
 
     // FR-008: No violations (including no rules matching extension) → pass
     return violationsResult(violations);
@@ -118,7 +125,7 @@ export function lintFile(
   } catch (error: unknown) {
     return lintErrorResult(error instanceof Error ? error.message : String(error));
   }
-  return lintLoadedFile(rules, filePath, timeoutMs);
+  return lintLoadedFile(rules, filePath, timeoutMs, projectRootOf(projectRulesDir));
 }
 
 /**
@@ -154,8 +161,9 @@ export function lintFiles(
     return results;
   }
 
+  const projectRoot = projectRootOf(projectRulesDir);
   for (const filePath of filePaths) {
-    results.set(filePath, lintLoadedFile(rules, filePath, timeoutMs));
+    results.set(filePath, lintLoadedFile(rules, filePath, timeoutMs, projectRoot));
   }
 
   return results;

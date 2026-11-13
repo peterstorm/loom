@@ -4,19 +4,12 @@ Template for spawning decompose-agent. All template variables must be substitute
 
 ---
 
-## CRITICAL: Scope Boundaries
-
-**You are a subagent. Do NOT read `.claude/hooks/` or `.claude/state/` files — they are irrelevant to you.**
-Focus ONLY on reading the spec and plan, then producing the task graph JSON.
-
----
-
 ## Decompose: {feature_description}
 
 **Spec:** {spec_file_path}
 **Plan:** {plan_file_path}
 
-Read the spec and plan, then decompose into parallel task graph.
+Read the spec and the plan, then decompose the plan into a parallel task graph. You write no files. Do not read `.claude/hooks/` or `.claude/state/`.
 
 ---
 
@@ -29,66 +22,48 @@ Read the spec and plan, then decompose into parallel task graph.
 | ts-test-agent | add missing tests to EXISTING TypeScript code only |
 | security-agent | security, auth, jwt, oauth, vulnerability |
 | frontend-agent | frontend, ui, react, next.js, component — **writes tests too** |
-| adr-writer-agent | write a single ADR document — used for tasks expanding plan AD-N entries (one task per AD) |
+| adr-writer-agent | write a single ADR document, for the tasks that expand plan AD-N entries (one task per AD) |
 
-Fallback: `general-purpose`
-
-Never assign `distill-agent`. The engine adds each Wave's distill pass itself at population (ADR-0068); a payload Task naming it is refused.
+Use only these agents; validation rejects any other name. Never assign `distill-agent`: the engine adds each Wave's distill pass itself at population, and a payload Task naming it is refused.
 
 ---
 
 ## Decompose Rules
 
-1. **Impl tasks include tests.** Do NOT create separate test tasks for new code. `code-implementer-agent` and `frontend-agent` write both impl AND tests. Separate test tasks cause deadlocks. The one exception is a plan Contract's contract task (Rule 12): it writes acceptance tests that later tasks turn green, by design.
-2. **Test-only agent** (`ts-test-agent`): only for adding tests to EXISTING code lacking coverage.
-3. **Sizing** — decompose further if:
-   - Task touches >5 files
-   - Multiple unrelated concerns in one task
-   - Description needs "and" to explain
-4. **Verification policy** — emit `verification_policy` with independent requirements. The discriminated union shape is binding: each requirement is exactly `{"kind": "required"}` or `{"kind": "waived", "reason": "<reason>"}` with exact keys — never the `{"required": true}` / `{"waived": "..."}` spelling:
-   - New behavior: `{"regression":{"kind":"required"},"new_tests":{"kind":"required"}}`.
-   - Refactor, rename, config, schema, migration, interface update: `{"regression":{"kind":"required"},"new_tests":{"kind":"waived","reason":"existing-tests-sufficient"}}` when existing coverage is genuinely sufficient.
-   - Docs/ADR-only: `{"regression":{"kind":"waived","reason":"documentation-only"},"new_tests":{"kind":"waived","reason":"documentation-only"}}`.
-   - Deterministic generated artifacts: `{"regression":{"kind":"waived","reason":"generated-artifact"},"new_tests":{"kind":"waived","reason":"generated-artifact"}}`.
-   Authored payloads may not claim the waiver reason `legacy-new-tests-required-false` (migration provenance — the engine rejects it).
-5. **Wave scheduling:**
-   - Wave 1: Tasks with no dependencies (run parallel)
-   - Wave 2: Tasks depending on Wave 1
-   - Wave N: Tasks depending on Wave N-1
-   - Dependencies MUST be in earlier waves
-6. **ADR tasks:** For each `### AD-N: <Title>` block in plan.md's `## Architectural Decisions` section, create exactly one task:
+1. **Impl tasks include tests.** `code-implementer-agent` and `frontend-agent` write both implementation and tests. Do not create a separate test task for new code; it deadlocks. The one exception is a plan Contract's contract task (rule 12), which writes acceptance tests that later tasks turn green.
+2. **Test-only agents** (`ts-test-agent`, `java-test-agent`): only for adding tests to EXISTING code that lacks coverage.
+3. **Sizing.** Decompose further when a task touches more than 5 files, mixes unrelated concerns, or needs "and" to describe.
+4. **Verification policy.** Every task carries a `verification_policy` with two independent arms. Each arm is exactly `{"kind": "required"}` or `{"kind": "waived", "reason": "<typed reason>"}`; never `{"required": true}` or `{"waived": "..."}`. The other rules name these four policies:
+   - **required / required** (new behavior): `{"regression":{"kind":"required"},"new_tests":{"kind":"required"}}`
+   - **existing-tests-sufficient** (refactor, rename, config, schema, migration or interface update whose existing coverage is sufficient): `{"regression":{"kind":"required"},"new_tests":{"kind":"waived","reason":"existing-tests-sufficient"}}`
+   - **documentation-only** (docs, ADRs): `{"regression":{"kind":"waived","reason":"documentation-only"},"new_tests":{"kind":"waived","reason":"documentation-only"}}`
+   - **generated-artifact** (deterministic generated output): `{"regression":{"kind":"waived","reason":"generated-artifact"},"new_tests":{"kind":"waived","reason":"generated-artifact"}}`
+
+   The typed reasons are `existing-tests-sufficient`, `documentation-only`, `generated-artifact` and, for `new_tests` only, `covered-by-acceptance-contract` (rule 12). Never author `legacy-new-tests-required-false` or `acceptance-red-window`; the engine rejects the first and stamps the second itself.
+5. **Wave scheduling.** Wave 1 holds tasks with no dependencies; wave N holds tasks depending on earlier waves. A dependency is always in an earlier wave. Tasks in one wave run in parallel.
+6. **ADR tasks.** For each `### AD-N: <Title>` block in the plan's `## Architectural Decisions` (skip the rule when the section is absent or empty), create exactly one task:
    - `agent`: `adr-writer-agent`
-   - `wave`: `(max wave used by impl tasks) + 1` — ADRs run in a dedicated final wave AFTER all impl waves so they can document what actually shipped. Rule 5 requires dependencies be in earlier waves; ADRs depend on all impl tasks, so they cannot share a wave with any of them.
-   - `depends_on`: all impl task IDs from prior waves (convention — not enforced by `validate-task-graph`; the wave-ordering rule is what gates execution)
-   - `verification_policy`: `{"regression":{"kind":"waived","reason":"documentation-only"},"new_tests":{"kind":"waived","reason":"documentation-only"}}` (exact union shape — Rule 4)
-   - `plan_context`: the full AD-N block text (Choice / Why / Rejected verbatim)
-   - `file_list`: `["docs/adr/<NNNN>-<slug>.md"]` where:
-     - `<NNNN>` = pre-allocated. Read existing `docs/adr/` (use Glob/Read), find max 4-digit prefix, increment for first AD, then sequential for subsequent ADs in plan order. If no ADRs exist, start at `0001`.
-     - `<slug>` = kebab-case from AD title (e.g., "Hono framework choice" → `hono-framework-choice`). Append `-2`, `-3` etc. on title collision within this run.
-   - `description`: `"Write ADR-<NNNN>: <AD title>"`
-   - `spec_anchors`: only requirements this final ADR Wave fully completes (normally empty `[]`)
-   - `spec_contributions`: normally empty `[]` because this dedicated final Wave occurs after implementation completion; use only when the Spec explicitly makes the ADR precursor work for a Requirement completed in this same final Wave
+   - `wave`: the highest implementation wave plus 1. ADRs run in their own final wave so they document what shipped.
+   - `depends_on`: every implementation task id
+   - `verification_policy`: documentation-only
+   - `plan_context`: the full AD-N block (Choice / Why / Rejected, verbatim)
+   - `file_list`: one path under `docs/adr/` that follows the existing filename convention there. Read the directory (Glob), find the highest number in use, and continue the sequence in plan order with the same prefix, zero-padding and kebab-case slug style as the existing files. If the directory has no ADRs, use `docs/adr/0001-<slug>.md`. The slug comes from the AD title ("Hono framework choice" → `hono-framework-choice`); append `-2`, `-3` on a collision within this run.
+   - `description`: `"Write ADR-<number>: <AD title>"`
+   - `spec_anchors` and `spec_contributions`: normally `[]`. Claim or contribute only when the spec itself makes the ADR part of a Requirement completed in this final wave.
+7. **Lifecycle tasks.** For each `### LC-N:` block in the plan's `## Lifecycles` (skip when absent):
+   - Create exactly one task that implements the declared `**Machine file:**` (the statechart or typed reducer, plus its tests): `code-implementer-agent`, policy required / required, in the earliest possible wave (usually 1).
+   - `file_list` includes the `**Machine file:**` path exactly as declared, plus its test file. A task path matches a declared path when it equals it or ends with `/<declared path>` (after `./` normalization): a deeper or absolute prefix on the task path is fine; a shallower path or a bare basename never matches a pathed declaration; a declaration with no directory segment matches only exactly.
+   - `plan_context`: the full LC-N block verbatim, plus the line `You are implementing this machine. Write property tests proving no undeclared transition is representable or accepted.`
+   - Every other task touching the lifecycle depends on the machine task (so it sits in a later wave) and has the LC-N block prepended to its `plan_context` with the line `The lifecycle machine at <machine file path> is the single source of truth — import it; never re-implement transitions or duplicate state literals.`
+8. **Pipeline tasks.** If the plan has a `## Pipeline` section with an `**AuthoredDag:**` path (skip when absent), read the AuthoredDag JSON, then:
+   - Create one wave-1 codegen task: `code-implementer-agent`, policy generated-artifact, description `Pipeline codegen: run 'fugue new --from <dag path>' to generate the graph code`. `file_list` is the generated output paths if the dag declares them, else `[]`. `plan_context` is the AuthoredDag path plus `If 'fugue new --from' fails its validation gauntlet, the authored dag itself is defective — report the failure verbatim and stop. Never hand-patch generated graph code to make it pass.`
+   - Create one task per node that needs a real body (fetch implementations, `buildInput`, prompts), depending on the codegen task, policy required / required. Its `plan_context` includes the node's purpose and its declared input and output schemas from the AuthoredDag, plus `Fill only the node body. Never hand-write or edit defineDag/graph wiring — it is generated. The declared schemas are binding contracts.`
+9. **Invariants create no tasks, but an owned family shapes the graph.** Checkable `INV-N` invariants are already lint rules. For each owned invariant (its `**Owner module:**` is a path):
+   - Every task whose `file_list` includes a `**Sibling entry points:**` path depends, directly or transitively, on the task whose `file_list` includes the owner, whenever a task builds the owner.
+   - Whenever a task's `file_list` includes the owner or a sibling, some task's `file_list` includes the `**Matrix test:**` path. Put that matrix-test change in the same wave as the owner or sibling change it covers: the Wave Gate judges the matrix test as that wave leaves it. Say in that task's description that the matrix test imports every sibling and covers the owner's changed lines.
+   - Do not copy invariant text into `plan_context`. The engine renders each task's ownership role and duties into its brief from the plan.
 
-   Skip ADR task creation if plan has no `## Architectural Decisions` section or it's empty.
-7. **Lifecycle tasks:** For each `### LC-N:` block in the plan's `## Lifecycles` section (skip rule if section absent):
-   - Create exactly one task that implements the declared `**Machine file:**` — the statechart/typed reducer plus its tests.
-   - `agent`: `code-implementer-agent`, `verification_policy`: `{"regression":{"kind":"required"},"new_tests":{"kind":"required"}}` (exact union shape — Rule 4)
-   - `wave`: the earliest wave possible (usually 1) — the machine is a foundation.
-   - `file_list`: MUST include the `**Machine file:**` path exactly as declared (plus its test file). The validator's tolerance is a one-directional suffix match: a task path counts when it equals the declared path or ends with `/<declared path>` (after `./` normalization) — so any deeper or absolute prefix on the task path is accepted. The reverse never holds: a shallower task path never satisfies a deeper declared path, a bare basename never satisfies a pathed declaration, and a declared path with no directory segment matches only exactly. Validation fails if no task's `file_list` contains it.
-   - `plan_context`: the full LC-N block verbatim (states + transition table), PLUS this line so the implementing agent sees the test bar: `You are implementing this machine. Write property tests proving no undeclared transition is representable or accepted.`
-   - Every other task that touches this lifecycle: add the machine task to its `depends_on` (later wave), and prepend the LC-N block to its `plan_context` with the line: `The lifecycle machine at <machine file path> is the single source of truth — import it; never re-implement transitions or duplicate state literals.`
-8. **Pipeline tasks:** If the plan has a `## Pipeline` section with an `**AuthoredDag:**` path (skip rule if absent):
-   - Read the AuthoredDag JSON file.
-   - Create one wave-1 codegen task — description: `Pipeline codegen: run 'fugue new --from <dag path>' to generate the graph code` — `agent`: `code-implementer-agent`, `verification_policy`: `{"regression":{"kind":"waived","reason":"generated-artifact"},"new_tests":{"kind":"waived","reason":"generated-artifact"}}` (deterministic codegen, no hand-written code; exact union shape — Rule 4). `file_list`: the generated output paths if the dag declares them, else `[]`. `plan_context`: the AuthoredDag path plus this failure protocol: `If 'fugue new --from' fails its validation gauntlet, the authored dag itself is defective — report the failure verbatim and stop. Never hand-patch generated graph code to make it pass.`
-   - Create one task per node needing a real body (fetch impls, `buildInput`, prompts), depending on the codegen task, with `verification_policy` `{"regression":{"kind":"required"},"new_tests":{"kind":"required"}}` (exact union shape — Rule 4). `plan_context` MUST include the node's purpose and declared input/output schemas from the AuthoredDag, plus the line: `Fill only the node body. Never hand-write or edit defineDag/graph wiring — it is generated. The declared schemas are binding contracts.`
-9. **Invariant tasks: none — but owned families shape the graph.** Checkable `INV-N` invariants are already lint rules enforced on every edit — do NOT create tasks for them. For each OWNED invariant (`**Owner module:**` is a path):
-   - Every task whose `file_list` includes a `**Sibling entry points:**` path must depend (directly or transitively) on the task whose `file_list` includes the `**Owner module:**`, whenever a task builds the owner. The owner exists before its callers.
-   - Whenever any task's `file_list` includes the owner or a sibling, some task's `file_list` must include the `**Matrix test:**` path.
-   - Do NOT copy invariant text into `plan_context`: the engine renders each Task's ownership role (owner, sibling, matrix-test author) and the whole family into its brief from the plan itself. Advisory invariants are never presented as enforced.
-   - **Matrix-test duties (owner verification).** The Wave Gate of every Wave whose Tasks change the owner or a sibling runs `loom:owner-verification` against the state of the Wave: the matrix test must import the owner and every sibling (re-exports count; a plain import of something that imports the owner does not), it must pass unmutated, and it must kill every mutant of the owner's lines changed in that Wave — unless the invariant declares a `**Mutation exemption:**`, which skips only the mutation half. The gate judges the matrix test as that Wave leaves it, so put the matrix-test change in the same Wave as the owner or sibling change it must cover (in the owner's Task or another Task of that Wave): a strengthening scheduled for a later Wave arrives after the gate that needed it. Its Task description says it imports every sibling and covers the owner's changed lines. The engine states these duties in the brief of every Task touching the family; do not restate them in `plan_context`. A Task changing only the matrix test triggers no owner verification by itself.
-   - A plan with a non-exempt owned invariant needs a frozen `affectedRunner` (schema-2 verification manifest) — population refuses the graph without one, so do not work around it in the graph.
-
-   Validation refuses a graph that breaks either rule, and refuses a declared path that neither exists nor is in any task's `file_list`.
+   Validation refuses a sibling task that does not depend on the owner's task, a family change with no matrix-test task, and a declared path that neither exists nor is in any task's `file_list`. Population refuses a plan with a non-exempt owned invariant unless the verification manifest has an `affectedRunner`; do not work around that in the graph.
 10. **Requirement trace v2 (binding):**
     - Emit top-level `spec_trace_version: 2` and BOTH trace arrays on every Task.
     - `spec_contributions` records partial work only. It is traceability, never Wave Gate completion scope.
@@ -97,26 +72,26 @@ Never assign `distill-agent`. The engine adds each Wave's distill pass itself at
     - Every contribution must have exactly one completion Wave at or after it; no contribution may appear after completion.
     - Both arrays name only `FR-NNN` and `AS-NNN` ids the spec defines. Non-functional requirements, success criteria (`NFR-`, `SC-`) and Out-of-Scope entries cannot be claimed or contributed to; population refuses any id the Spec Index does not define as a completable entry, and refuses a spec that does not parse as canonical.
 11. **Protected verification paths:** Decompose NEVER assigns the operator manifest `.loom/verification-manifest.json` or any engine report path beneath `.loom/completion-reports/` to a Task's `file_list`. These paths are engine/operator-owned, not implementation artifacts. This rule does not prohibit unrelated `.loom/` paths.
-12. **Contract tasks (contracts before code):** For each `### CT-N:` block in the plan's `## Contracts` section (skip rule if section absent):
-    - Create exactly one **contract task** in an early wave, before any task that completes a Requirement the contract's acceptance files list. `agent`: `code-implementer-agent`; `verification_policy`: `{"regression":{"kind":"required"},"new_tests":{"kind":"required"}}`.
-    - Its `file_list` MUST include every frozen path: the `**Types file:**` (unless `none`) and every `**Acceptance tests:**` path, exactly as declared. No other task may list a frozen path: the contract task is their only writer.
-    - **The engine writes the contract stubs; the contract task never writes a stub.** At the contract task's SubagentStop, before its stop checks, the engine reads its not-yet-frozen types file and writes a skeleton at every file the contract's `**Export bindings:**` name, each export throwing `unimplemented: <name>`, so the acceptance tests compile and fail by assertion. A bound path never goes in the contract task's `file_list` (validation refuses it): the stub belongs to the implementation task that later replaces it, and there it is an ordinary skeleton.
-    - **Export bindings (skeletons).** The plan's `## File Structure` carries `**Export bindings:**` lists — one line per file, one contract per file: `` - `path` — CT-n: name: Alias, name: Alias ``. When a task's `plan_context` mentions its bindings, copy the `**Export bindings:**` lines verbatim: never paraphrase, split, merge or re-qualify a binding, because the engine stamps them from the plan itself at population and refuses a brief whose plan drifted from that stamp. What decompose owes is placement: put each bound path in the `file_list` of exactly one non-contract task — the one that implements it — that depends, directly or transitively, on the contract task of the binding's CT. Validation refuses a bound path on the contract task (as it refuses a TypeScript binding line whose export name equals one of its aliases, `name-collides-with-alias`; a Java binding line may reuse an alias as a name but not alias the file's own class name, `alias-collides-with-class`), a bound path no non-contract task lists, a holder that does not depend on the contract task, and a bound path on a task whose regression waiver is `documentation-only` or `generated-artifact`. Each binding names a function-type alias the frozen types file declares; at the holder's spawn the engine writes the skeleton and the brief lists the frozen signatures. A **frozen ADT** (a discriminated union or branded type, or a Java sealed interface, record or permitted variant, in the types file) is never redeclared: an implementation file that shadows one or re-lists two or more of its variants fails completion, so never plan a task that "adds its own copy" of a frozen type.
-    - It lists the covered Requirements in `spec_contributions`, never in `spec_anchors`: it writes the tests, it does not satisfy them. Its wave gate passes only when every acceptance testcase is collected and FAILS.
-    - When the contract declares an `**Entry point:**`, a task claiming a covered Requirement MUST write that file or depend, directly or transitively, on a task other than the contract task that does: its acceptance tests reach the code through it, so they cannot pass earlier. Put the claim on the task that builds the entry point, or on one after it.
-    - Each task completing a covered Requirement (that Requirement in its `spec_anchors`) MUST depend, directly or transitively, on the contract task. Its tests are the frozen acceptance tests, so it MAY waive new tests: `"new_tests":{"kind":"waived","reason":"covered-by-acceptance-contract"}` — only when it claims a covered Requirement of a contract it depends on, and only when the frozen tests cover everything it adds.
-    - Do NOT copy the contract into `plan_context`: the engine renders each task's role (contract task, claimant, or a task running beside not-yet-green acceptance tests) into its brief from the plan and the freeze.
-    - Never author the regression waiver `acceptance-red-window`. The engine stamps it on every task from the contract wave through the last wave completing a covered Requirement that does not already carry its own regression waiver (an authored `documentation-only` or `generated-artifact` waiver is kept), because those tasks' full-suite runs see pending acceptance tests fail; the Wave Gate's suite is their regression authority.
+12. **Contract tasks.** For each `### CT-N:` block in the plan's `## Contracts` (skip when absent):
+    - Create exactly one **contract task**: `code-implementer-agent`, policy required / required, in an early wave, before any task that completes a Requirement the contract's acceptance files list.
+    - Its `file_list` includes every frozen path, exactly as declared: the `**Types file:**` (unless `none`) and every `**Acceptance tests:**` path. No other task lists a frozen path.
+    - **The engine writes the contract stubs; the contract task never writes a stub.** A bound path never goes in the contract task's `file_list`.
+    - **Export bindings.** The plan's `## File Structure` carries `**Export bindings:**` lines, one file per line and one contract per file. Put each bound path in the `file_list` of exactly one non-contract task, the one that implements it, and make that task depend, directly or transitively, on the contract task of the binding's CT. That task may not waive regression as `documentation-only` or `generated-artifact`. If a task's `plan_context` mentions its bindings, copy the `**Export bindings:**` lines verbatim; the engine stamps them from the plan and refuses a brief that drifted.
+    - **Frozen ADTs.** A type the contract's types file declares is a frozen ADT. Never plan a task that adds its own copy of one.
+    - The contract task lists the covered Requirements in `spec_contributions`, never in `spec_anchors`: it writes the tests, it does not satisfy them.
+    - Each task completing a covered Requirement (that Requirement in its `spec_anchors`) depends, directly or transitively, on the contract task. When the contract declares an `**Entry point:**`, that task also writes the entry-point file or depends on a task other than the contract task that does; put the claim on the task that builds the entry point, or on one after it.
+    - Such a task may waive new tests with `"new_tests":{"kind":"waived","reason":"covered-by-acceptance-contract"}`, but only when it claims a covered Requirement of a contract it depends on and the frozen tests cover everything it adds.
+    - Do not copy the contract into `plan_context`. The engine renders each task's role into its brief.
 
-    Validation refuses a contract no single task writes, a frozen path written by any other task, a bound path on the contract task, a contract task claiming a covered Requirement, a covered Requirement no task claims, a claimant that does not depend on the contract task, a claimant that neither writes the declared entry point nor waits for its writer, and a misused `covered-by-acceptance-contract` waiver. Population also refuses contracts unless `.loom/verification-manifest.json` has a project check writing a JUnit report (`"report": {"kind": "required-file", ...}`): RED and GREEN are observed only through that report.
+    Validation refuses a contract no single task writes, a frozen path written by any other task, a bound path on the contract task, a bound path no non-contract task lists, a holder that does not depend on the contract task, a bound path on a task with a `documentation-only` or `generated-artifact` regression waiver, a contract task claiming a covered Requirement, a covered Requirement no task claims, a claimant that does not depend on the contract task, a claimant that neither writes the declared entry point nor waits for its writer, and a misused `covered-by-acceptance-contract` waiver.
 
 ---
 
 ## Required Output
 
-Output ONLY valid JSON. No markdown, no explanation, no code fences. Pure JSON.
+Your entire final message is exactly ONE physical line of pure JSON: no newline characters anywhere inside it, no markdown fences, no prose before or after. A multi-line final message is dropped by the agent transport and the run is lost. Single-line output returns even at about 100KB, so emit a long graph as one line too. The shape example below is pretty-printed only for reading.
 
-**TRANSPORT CONTRACT (binding):** your entire final message must be exactly ONE physical line of pure JSON — no newline characters anywhere inside the JSON, no markdown fences, no prose before or after. Multi-line final messages are silently dropped by the agent transport: the orchestrator receives no output and the run is lost. Single-line output returns even at ~100KB, so emit a long graph as one line anyway. (The shape example below is pretty-printed for readability; your emitted graph must be one physical line.)
+In your output, replace `ABSOLUTE_SPEC_FILE_PATH` and `ABSOLUTE_PLAN_FILE_PATH` with the absolute spec and plan paths given at the top of this prompt.
 
 <!-- wire-example: decompose-task-graph -->
 ```json
@@ -165,6 +140,6 @@ Output ONLY valid JSON. No markdown, no explanation, no code fences. Pure JSON.
 | `depends_on` | yes | string[] | Task IDs from earlier waves only |
 | `spec_anchors` | yes | string[] | Requirement Completion Claims fully satisfied by this Wave (can be empty `[]`) |
 | `spec_contributions` | yes | string[] | Partial Requirement Contributions; never completion scope (can be empty `[]`) |
-| `verification_policy` | yes | object | Exact union shape per Rule 4: each requirement is `{"kind": "required"}` or `{"kind": "waived", "reason": "<typed reason>"}`; typed reasons are `existing-tests-sufficient`, `documentation-only`, `generated-artifact`, and (new tests only, Rule 12) `covered-by-acceptance-contract` |
+| `verification_policy` | yes | object | One of the policies of rule 4, or a rule 12 new-tests waiver |
 | `plan_context` | yes | string | Key points from plan for this task (can be empty `""`) |
 | `file_list` | yes | string[] | Files to create/modify (can be empty `[]`) |

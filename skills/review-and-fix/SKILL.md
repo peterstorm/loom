@@ -6,27 +6,9 @@ description: "Review a PR, adjudicate critical findings, remediate, validate, an
 
 # Review and Fix
 
-Canonical workflow: registered standalone review → engine-owned refutation →
-Plan and immediate immutable advisory publication → remediation → validation →
-verified index installation → commit/push. Explicit successor review is optional,
-never an automatic extra roster after remediation.
-
-## Availability and P5 bootstrap
-
-Skill 6 adds P5 advisory publication and explicit successor handling. The selected
-design is implemented on the feature worktree; **final validation, registered review
-and publication remain pending**. P4 merged as `96153ed` and reload was verified.
-
-**P5's own final registered source review/remediation MUST use the admitted main
-CLI and frozen Skill 5.0.0 contract, including its existing Plan advisory triage.**
-Loaded main runtime:
-`sha256:086c472e4e913376c07d69f5116c9ad9655546e22c91e40d28cba9fdd795bc79`.
-It does not implement the P5 publisher. Do not call the new mutator through it,
-switch a live parent to the feature CLI, unset admission, or retrofit P5 records
-into that source review. Feature mutations belong only in owned matching-runtime
-fixtures until publication/reload. After merge/package publication/reload, **new**
-triage may publish new P5 records honestly. The P5 instructions below apply only
-to that matching runtime; this bootstrap restriction takes precedence.
+Workflow: registered standalone review → engine-owned refutation → plan and
+publication of the advisory decisions → remediation → validation → verified
+index installation → commit and push.
 
 ## Arguments
 
@@ -35,42 +17,47 @@ to that matching runtime; this bootstrap restriction takes precedence.
   [--files file1,file2] [--no-push] [--dry-run] [--commit-msg "..."]
 ```
 
-`all` is the default. Resolve `LOOM_DIR` once from the active plugin package.
+`all` is the default. Resolve `LOOM_DIR` once from the active plugin package:
+
+```bash
+LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"
+test -f "$LOOM_DIR/engine/src/cli.ts" || exit 1
+```
 
 ## Invariants
 
-- The orchestration façade owns scope derivation, reviewer/model/Skill policy,
-  request authority, transcript capture, retries, aggregation, adjudication,
-  publication, path audit, temporary-index staging, verification, and install.
-- Execute only `spawn-batch`, `await-user`, `blocked`, or `done` actions.
+- The orchestration façade owns scope derivation, reviewer, model and Skill
+  selection, request authority, transcript capture, retries, aggregation,
+  adjudication, publication, path audit, temporary-index staging, verification
+  and installation.
+- Execute only the `spawn-batch`, `await-user`, `blocked` or `done` action a
+  command returns.
 - Never hand-build findings, verdicts, manifests, transcript files, Git
-  pathspecs, or protected-state mutations.
-- Refuted criticals are audited and never fixed. Every surviving critical ID
-  must be copied exactly once from canonical `result.json` into a disposition;
-  no caller mints a replacement Finding ID. A repaired disposition may refer to
-  a separately named Declared Repair Group, but that group ID never replaces
-  the source Finding ID. Unresolved/out-of-scope dispositions are valid and
-  block installation.
-- Advisory dispositions remain parent policy: accepted, deferred or dismissed.
-  Publish the complete ordered inventory immediately through the no-agent P5
-  publisher on a matching runtime, even if no fix/successor follows. Corrections
-  publish a new exact revision; never edit history. Advisories are never inserted
-  into critical repair groups.
-- Grouping, root cause, invariant, sibling accounting, and Historical RED are
-  `DECLARED`. Repaired checks alone become `ENGINE_OBSERVED`. Call the bounded
-  result `repair-checked`, never proven closure or `ResolvedFinding`. An
-  operator-owned fixed command can fabricate a syntactically valid new report;
-  fresh structured engine observations are not proof of test semantics.
+  pathspecs, Run artifacts or protected-state mutations.
+- Refuted criticals are reported and never fixed. Every surviving critical ID
+  is copied exactly once from the canonical `result.json` into a disposition;
+  you never mint a replacement Finding ID.
+- Advisory dispositions are your policy: accepted, deferred or dismissed.
+  Publish the complete ordered inventory as soon as you have decided, even if
+  no fix follows. A correction is a fresh revision; published history is never
+  edited. An advisory never goes into a critical repair group.
+- What you declare (grouping, root cause, invariant, siblings, Historical RED)
+  is `DECLARED`; only the checks the engine runs are observed. Call the outcome
+  `repair-checked`, never closed, proven or resolved.
 - Validation must pass before remediation installation. Never force-push.
+- A freshly installed or updated Pi package needs `/reload` or a restart
+  before these commands can mutate anything. Never unset runtime admission
+  variables to force a CLI through an older loaded extension.
 
 ## Phase 1 — Registered standalone review
 
-Name one fresh Run Directory and start the façade with user policy only. The
-engine creates the Run Directory; `--run` takes either its bare run id or a full
-path to that same direct child of `--runs-root`:
+Every program below takes a runs root and a fresh run id. The runs root must
+exist; the engine never creates it. `start` creates that Run Directory; `--run`
+takes the bare run id or the full path of that direct child of the runs root.
 
 <!-- wire-example: standalone-review-start -->
 ```bash
+mkdir -p ".claude/reviews/review-and-fix-runs"
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration start standalone-review \
   --runs-root ".claude/reviews/review-and-fix-runs" \
   --run "<fresh-review-run-id>" <<'JSON'
@@ -78,31 +65,17 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration start standalone-review \
 JSON
 ```
 
-Every fresh review carries an engine-enforced **read obligation** (ADR-0022). Each
-reviewer must be observed paging the scope's complete frozen diff with the reader's
-`--diff` mode, and a result with any unread page is refused and retried with the
-unread ranges. `start` refuses a scope whose frozen diff exceeds one reviewer's
-240,000-unit budget. When it does, partition the scope into explicit `--files` slices
-(roughly ≤ 230 KB of `git diff` each), one registered Run per slice, and review each
-slice. Never pass a larger slice to bypass the budget, and never treat a skimmed
-review's verdict as coverage.
+For `--files`, `files` is a non-empty JSON string array. If `start` refuses the
+scope for size, split it into `files` slices and review each in its own run, as
+[`/review-pr` step 3](../../commands/review-pr.md#3-start-one-fresh-run)
+describes. Never treat a slice you did not review as covered.
 
-Spawn the exact returned batch. Each reviewer's exact raw bytes must then reach
-its reserved slot. On a harness that captures transcripts itself (Claude Code, Pi)
-this already happened at spawn completion, together with the engine's read-coverage
-observation, and a repeat submit is an idempotent confirmation. On any other harness
-the parent performs it, once per issued request, and hands over the reviewer's
-delivered tool outputs (a JSON array of strings, in order) so coverage can be verified:
-
-```bash
-bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration submit \
-  --runs-root ".claude/reviews/review-and-fix-runs" \
-  --run "<same-review-run-id>" \
-  --request "<exact-request-id>" --slot "<exact-slot-id>" --attempt 1 \
-  --tool-outputs "<reviewer-tool-outputs.json>" \
-  < "<reviewer-raw-output>"
-```
-
+Spawn the exact returned batch, preserving each request's Agent, model,
+required Skill, task text and `LOOM_REQUEST_ID`; on Pi send at most eight
+requests per subagent call. Claude Code and Pi capture each reviewer's final
+bytes themselves. On another harness, hand them to the engine with
+`helper orchestration submit`
+([operations: read coverage](../../docs/standalone-review.md#read-coverage-reviewer-protocol-v4)).
 Then resume until `done`:
 
 ```bash
@@ -111,42 +84,17 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration resume \
   --run "<same-review-run-id>"
 ```
 
-The registered Standalone Review Program automatically routes non-empty
-critical sets through its registered Refutation Panel and publishes canonical
-`result.json`. Read remediation inputs only from that authoritative result:
+Reviewers return one JSON payload; the engine admits or retries it. A
+malformed payload is failed evidence, never a Finding. Surviving criticals
+block. The engine routes any critical through its Refutation Panel and
+publishes `result.json`. Read remediation inputs only from that result:
 
-- `surviving_critical_findings` — mandatory fixes
-- `advisory_findings` — autonomous parent triage by default
+- `surviving_critical_findings` — every one must be accounted for
+- `advisory_findings` — yours to triage
 - `refuted_critical_findings` — report, never fix
 
-### Issued reviewer protocol and canonical presentation
-
-Fresh independent reviews remain v2. Only explicit schema-3 successor start input
-selects v3; it does not change fresh Wave review. Independent reviews issue exactly
-one JSON final payload under the frozen
-`reviewer-payload-schema` and `reviewer-impact-rubric`. No Machine Summary,
-markers, numeric tallies, or reviewer-chosen new Finding IDs. Criticals require
-six fields: claim plus basis evidence, violatedContract, consequence,
-truthConfidence, and severityRationale. Advisories require a concise reason;
-optional basis must be complete. Truth confidence is not an impact score.
-Blocking consequence must concern supported behavior, safety/authority, explicit
-acceptance/verification obligations, or safe operator use. Factual error, style,
-architectural shallowness, or a missing test alone is insufficient. Filled fields
-prove neither truth, impact, reachability, execution, nor semantic test adequacy.
-
-Malformed current output fails evidence admission and creates no synthetic
-Finding or P3 repair obligation. It receives only the existing bounded retry.
-The engine deterministically admits a final message that wraps exactly one
-strict JSON object in prose or a code fence: the extracted payload still
-crosses the frozen schema and rubric, the original transcript stays immutable
-audit evidence, and zero or ambiguous candidates fail closed to the bounded
-retry. The same panel lenses and strict majority assess the assertion including its
-basis; a true assertion is not refuted merely because repair seems unimportant.
-A surviving critical stays blocking, with no severity downgrade or standalone
-severity-dispute action. The old explicit Wave operator override remains separate
-and is never automatic fallback for reviewer failure.
-
-Use the engine's existing inspection renderer, not parent-authored arithmetic:
+Take counts and Finding details from the engine's inspection, never from
+arithmetic of your own:
 
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration inspect \
@@ -154,50 +102,8 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration inspect \
   --run "<same-review-run-id>"
 ```
 
-It authenticates registered protocol, source contexts and publication, then renders
-emitted/admitted and after-refutation counts and full Finding details from the
-published root `result.json`. JSON output retains the existing inspection shape. No new
-summary artifact is authority. P3 retains every original source ID and full basis
-immutably, including refuted/advisory partitions and original result digest.
-Its selected operator checks, fresh required reports and verified-index policy
-are unchanged. For v3, human inspection reports new/inherited/current counts and
-coverage instead; full source JSON retains every origin/history.
-
-Completed and unfinished issued reviewer v1/v2 runs keep their original protocol,
-initial/resume/both-attempt retry behavior and exact context/result/receipt bytes.
-Read the issued packet first; v1 follows its archived role/shared wire under
-`references/reviewer-protocol-v1/`, while v2 keeps its exact P4 schema/rubric.
-Do not apply successor grammar to either. Development-only pre-B4 v3 panel context
-changes are not historical v1/v2 migrations. Unfinished remediation v1 is separately
-refused by ADR-0008. See [protocol operations](../../docs/operations.md#reviewer-protocol-v2).
-
-### Optional explicit successor
-
-Do not automatically select `previousRun`, repeat the reviewer roster, reuse old
-review as current completion, merge forks or infer identity from similarity.
-For an explicitly requested successor, use the exact schema-3 start JSON in
-[successor operations](../../docs/operations.md#explicit-successor-review): ordered
-explicit files, `dryRun:false`, exact predecessor locator/Run/result digest, and
-exact published policy revision (or honest explicit historical unavailability).
-There is no new slash-command successor flag. Preserve all predecessor paths and
-roles; include relevant dependency/configuration/contract paths explicitly.
-
-The full current roster assesses every inherited origin in issued order. Resolution
-requires unanimous `repaired` judgments with relevant implementation changes against
-one frozen byte/mode snapshot; disagreement/not-assessable prevents it. Missing or
-malformed coverage refuses the whole response under the existing single retry.
-Critical reopening requires new evidence bound to the exact old decision and goes
-through a fresh full Refutation Panel; only new criticals and explicit reopening
-need current panel work. Already-upheld unchanged criticals remain blocking.
-Preserve original IDs/assertions/severity/evidence, per-role high-water and all
-history. Advisory policy reconsideration needs a later disposition publication,
-never severity promotion. Digests, formal statements and Repair-Checked are not
-semantic proof. Historical unknown source facts never become inferred absence.
-
-V3 human inspection supplies new/inherited/current counts and coverage. P3 consumes
-actual active `surviving_critical_findings`, not fresh panel counts; limited current
-critical coverage blocks even a zero-active-critical install. Full source JSON and
-lineage remain exact through unchanged schema-2 checks/index installation.
+A successor review is never automatic. If the user asks for one, follow
+[operations: explicit successor review](../../docs/standalone-review.md#explicit-successor-review).
 
 ## Phase 2 — Plan
 
@@ -222,9 +128,9 @@ in-scope fix is practical. Defer or dismiss only with a concrete evidence-based
 reason. An explicit user instruction about a specific advisory overrides this
 default. Never add an advisory or refuted critical to `defectFamily`.
 
-### Publish advisory decisions now (matching P5 runtime only)
+### Publish the advisory decisions
 
-Before stopping or implementing, obtain the engine's exact source and complete
+Before stopping or implementing, get the engine's exact source and complete
 ordered advisory inventory:
 
 ```bash
@@ -233,10 +139,10 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration inspect \
   --run "<same-review-run-id>" --lineage
 ```
 
-Copy `source` unchanged into both input source fields. Copy **every**
-`advisoryInventory[].origin` in order, including retired/resolved advisories, into
-`record.entries` with the parent decision/reason. Do not use bare Finding IDs,
-compute origin hashes or infer a missing entry from prose. Prepare ordinary JSON:
+Copy `source` unchanged into both source fields. Copy every
+`advisoryInventory[].origin` in order, including retired and resolved
+advisories, into `record.entries` with your decision and reason. Do not use
+bare Finding IDs, compute origin hashes or infer an entry from prose:
 
 <!-- wire-example: standalone-disposition-start -->
 ```json
@@ -253,8 +159,7 @@ compute origin hashes or infer a missing entry from prose. Prepare ordinary JSON
 }
 ```
 
-Expand entries to exact coverage; `[]` is legal only for an empty advisory inventory.
-This input declares policy; it is not a hand-built Run artifact or receipt.
+`entries` covers the whole inventory; `[]` is legal only for an empty one.
 
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration start standalone-disposition \
@@ -262,55 +167,43 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration start standalone-disposit
   --run "<fresh-policy-run-id>" < /path/to/declared-policy.json
 ```
 
-Read `done.outcome.kind: standalone-disposition-published`, `publication`, `record`
-and `receipt`. The engine publishes `artifacts/disposition.json`; never write it
-manually. No Agents or await-user stage. Exact repeat/resume is idempotent; conflicting
-bytes refuse. If interrupted, ordinary `resume` reconciles exact artifact/receipt
-facts without re-triage. Do not treat an unreceipted record as published authority.
+Read `done.outcome.kind: standalone-disposition-published`, `publication`,
+`record` and `receipt`. The engine publishes `artifacts/disposition.json`;
+never write it yourself. The program spawns no Agents and asks no question. An
+exact repeat is idempotent, and if it is interrupted, `resume` finishes it
+without re-triage. A record with no receipt is not published. To correct a
+published decision, or to import one recorded before this program existed, use
+the revision shapes in
+[operations: immediate advisory publication](../../docs/standalone-review.md#immediate-advisory-publication).
 
-For a correction, publish a fresh policy Run with the same source, complete entries,
-`revision:{"kind":"correction","previousDigest":"<prior-digest>"}` and
-`previous:{"locator":"<absolute-prior-policy-run>","runId":"<prior-policy-id>","dispositionDigest":"<same-prior-digest>"}`.
-The prior revision must already be published; no automatic latest choice. An explicit
-present-day import uses `revision:{"kind":"historical-import","proseReference":"<retained-reference>","prose":"<exact-retained-prose>"}` and `previous:null`.
-It remains DECLARED now, never backdated. Missing historical policy is explicit
-`historical-decision-unavailable`, not an empty native record. Missing/corrupt
-expected current publication fails, never falls back to historical absence.
-See [complete publication/inspection operations](../../docs/operations.md#immediate-advisory-publication).
+If no code or documentation fix remains, report the published decisions and
+stop. Zero surviving criticals need no remediation check, but a remediation
+start still requires `defectFamily: {"kind":"not-required"}`.
 
-If no code or documentation fix remains, report the published decisions and stop;
-do not require a successor merely to retain them. Zero surviving criticals require
-no remediation check, manifest or check subprocess, but every remediation start
-still requires `defectFamily: {"kind":"not-required"}` and, for v3, complete current
-critical coverage. Under the P5-bootstrap restriction above, use the old Plan-only
-triage instead; never pretend this publication occurred.
-
-Write `.claude/plans/YYYY-MM-DD-pr-remediation.md` containing branch, exact
+Write `.claude/plans/YYYY-MM-DD-pr-remediation.md` containing the branch, exact
 scope, review Run Directory, every surviving-critical disposition, every
-Declared Repair Group, sibling disposition, selected check ID and Historical
-RED declaration, every advisory disposition/reason, accepted advisory fixes,
-refuted-finding audit, exact policy publication/revision reference (or explicit
-bootstrap/historical unavailability), and validation commands. Keep `DECLARED`
-facts distinct from checks the engine will later observe. `--dry-run` stops here:
-review/adjudication and policy custody occur, but no implementation/install/commit.
+Declared Repair Group with its sibling dispositions, selected check ID and
+Historical RED declaration, every advisory disposition and reason, the accepted
+advisory fixes, the refuted-finding audit, the policy publication reference and
+the validation commands. Keep what you declare distinct from what the engine
+will observe. `--dry-run` stops here: the review, adjudication and publication
+happen, but nothing is implemented, installed or committed.
 
 ## Phase 3 — Implement and validate
 
-Read `rules/architecture.md` and relevant language rules. Apply only criticals
-dispositioned `repaired` and accepted advisories; never repair a refuted
-Finding. Register every necessary support path in the remediation start input.
-Run typecheck/build and full relevant tests; iterate to a real fix. These
-development runs are not P3 evidence—the registered remediation runner must
-freshly observe each selected fixed check and its exact structured report.
-Stop without staging or committing if validation cannot pass.
+Read `rules/architecture.md` and the relevant language rules. Apply only
+criticals dispositioned `repaired` and accepted advisories; never repair a
+refuted Finding. Run typecheck, build and the relevant tests, and iterate to a
+real fix. These runs are yours, not remediation evidence: the registered
+remediation freshly runs each selected check itself. Stop without staging or
+committing if validation cannot pass.
 
 ## Phase 4 — Registered remediation
 
-Name a fresh remediation Run Directory. The source review run remains immutable
+Name a fresh remediation run id. The source review run remains immutable
 authority, and `sourceRun` names it the same way `--run` does — bare run id or a
-full path resolved against `sourceRunsRoot`. Every new start input is schema v2
-and contains exactly `sourceRunsRoot`, `sourceRun`, `supportPaths`, and
-`defectFamily`.
+full path resolved against `sourceRunsRoot`. The start input contains exactly
+`sourceRunsRoot`, `sourceRun`, `supportPaths`, and `defectFamily`.
 
 For a source with zero surviving criticals:
 
@@ -389,12 +282,11 @@ the plan file or a regression pin added for a fix — must be named in
 authorize a path its own start input never named. If one was omitted, start a
 **fresh** remediation run whose start input adds the path to `supportPaths`.
 
-Preflight authenticates the source, parses accounting, selects operator check
-authority when criticals exist, and captures candidate bytes **before** creating
-the requested Run Directory. Invalid source/input/declaration/manifest/check
-configuration is a start error and creates no run. Once registration exists, a
-returned `blocked` action is durable run evidence. Never delete it to retry.
-Recovery depends on the cause:
+`start` checks the source, the accounting, the selected checks and the
+candidate **before** creating the Run Directory. An invalid source, input,
+declaration, manifest or check configuration is a start error and creates no
+run. Once registration exists, a returned `blocked` action is durable run
+evidence. Never delete it to retry. Recovery depends on the cause:
 
 - **unrelated staged/dirty work** — remove it, then start a **fresh** run;
   removal changes the registered candidate, so the old run cannot be reused;
@@ -451,71 +343,34 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration abandon \
 run's program, state, per-slot capture, and rejection diagnostics in one
 command — use it instead of hand-reading `checkpoint.json` and `events/`.
 
-Resume until `done`. For critical repair, the selected operator command must
-have `report.kind = "required-file"` and itself produce its exact configured,
-ignored, untracked `.loom/completion-reports/...` JUnit/Vitest file **anew**.
-Before launch the engine removes that exact old regular report through a retained
-Linux parent descriptor with no-follow, descriptor-relative unlink. Touching
-seeded bytes cannot pass; a new report with identical bytes may. Only ENOENT is
-absence; unsafe paths, permission errors, or unsupported reset fail before launch
-with `required report reset failed before launch`. Strict critical reset is
-**Linux-only**: Darwin fails closed before launch. This does not change
-zero-critical remediation or Wave behavior.
+Resume until `done`. For a critical repair, each selected check must be
+enrolled with `report.kind = "required-file"` and must itself write its report
+anew on every run; the engine deletes the old report before launch, so touching
+an existing file cannot pass. This reset works on Linux and macOS. A report
+path it cannot reset safely fails before launch with
+`required report reset failed before launch`. The engine then requires a normal
+exit, more than zero executed tests, zero failures, and an unchanged candidate.
+Several groups may select one check ID; it runs once. Enrollment and the report
+limits are in
+[operations: enrolling a critical-repair check](../../docs/verification.md#enrolling-a-critical-repair-check).
 
-The engine requires normal exit, more than zero executed tests, zero failures,
-and unchanged candidate authority. Reports are limited to **8 MiB**, with XML
-element depth at most **128** (including diagnostics). V2 event reads, append
-reconciliation/new appends, and CLI inspection enforce **12 MiB per encoded event,
-64 MiB per encoded journal, 1024 records**, before oversized decoding/JSON parsing.
-These are not blanket limits on other Run artifacts or legacy journal consumers.
-Multiple groups may select the same check ID; each distinct selected ID executes
-once. See [operator enrollment](../../docs/operations.md#enrolling-a-critical-repair-check).
-Loom's user-approved 2026-09-09 idle enrollment now gives the unchanged root
-`project:verify` command required report `.loom/completion-reports/verify.junit.xml`.
-The existing Vitest invocation writes that Git-ignored, untracked report; it
-contains only Vitest facts, not compiler or smoke testcases. Normal zero exit of
-the whole command also proves the compiler and all six smokes passed; a green
-unit report cannot override a later smoke failure. Enrollment and development
-runs are not registered P3 evidence or a completed live schema-v2 remediation.
-The create-only manifest helper was neither used nor changed for this approved
-operator replacement; existing populated TaskGraphs retain frozen authority.
+The engine audits the dirty paths, stages them in a temporary index and
+installs the verified index. Do not stage anything yourself, and never pass
+command authority, process outcomes, report bytes, events or receipts through
+the remediation input.
 
-The engine proves observed dirty paths are authorized, rejects excluded Run
-evidence and unrelated staged work, stages literal paths in a temporary index,
-proves `audited == staged`, rechecks candidate and repository witnesses under
-the real index lock, and atomically installs the verified index. The parent must
-not run its own staging recipe and must never inject command authority, process
-outcomes, report bytes/counts, events, manifests, temporary-index outcomes,
-installation receipts, or Run JSON through remediation input or hand-built run
-artifacts.
-
-Read success from the external action's `outcome.installation` (the actual Git
-adapter receipt) and `outcome.defectFamilyAssessment` (`repair-checked` or
+Read success from the returned action's `outcome.installation` (the actual Git
+receipt) and `outcome.defectFamilyAssessment` (`repair-checked` or
 `not-required`). Commit the installed index and push unless `--no-push`. A push
-failure leaves the valid local commit intact and is reported with its SHA.
-
-**Publication status:** P4 merged/reloaded; P5 final validation, registered review
-and publication remain pending. Follow the bootstrap restriction at the start of
-this Skill: admitted main CLI/Skill 5.0.0 and existing Plan advisory triage for
-P5's own review/remediation. Source reviewer version never selects remediation
-version; schema-2 installation/report policy remains unchanged. The earlier
-Skill 3.1 bootstrap belongs to P3 history (ADR-0008). Documentation and development
-validation do not advance a Run or mint an installation receipt.
-
-A newly installed/updated Pi package requires `/reload` or a full Pi restart
-before this schema-v2 live workflow can mutate anything. Never unset runtime
-admission variables to force a fresh CLI through an older loaded extension.
+failure leaves the valid local commit intact; report it with its SHA.
 
 ## Phase 5 — Report
 
-Relay the inspection renderer's emitted/admitted and after-refutation counts for
-v1/v2, or new/inherited/current disposition and coverage counts for v3. Never count
-inherited history as newly emitted. Report exact policy publication/revision and
-DECLARED reasons (or honest bootstrap/historical unavailability), repaired
-dispositions from actual P3 accounting, every original critical
-Finding ID and disposition, Declared Repair Groups, blockers, every advisory
-disposition/reason, review/policy/remediation Run Directories as applicable, Plan,
-changed files, validation
-evidence, Defect-Family Assessment with provenance, actual installation receipt,
-commit SHA, branch, and push status. Include every refuted finding with panel
-reasoning. Say `repair-checked`, not closed/proven/resolved.
+Relay the inspection's counts; never count inherited history as newly emitted.
+Report every original critical Finding ID with its disposition, the Declared
+Repair Groups, any blockers, every advisory disposition and reason with its
+publication reference, every refuted Finding with the panel's reasoning, the
+review, policy and remediation Run Directories, the plan, changed files,
+validation evidence, the Defect-Family Assessment, the installation receipt,
+the commit SHA, branch and push status. Say `repair-checked`, not closed, proven
+or resolved.

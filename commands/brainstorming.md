@@ -1,6 +1,6 @@
 ---
 name: brainstorming
-description: "You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation."
+description: "Use when the user wants to explore or shape an idea before building it - a new feature, component or behavior change whose intent, scope or approach is not yet settled. Explores user intent, requirements and design before implementation."
 argument-hint: "[$idea]"
 ---
 
@@ -8,49 +8,33 @@ argument-hint: "[$idea]"
 
 **Arguments:** "$ARGUMENTS"
 
-## Overview
+Turn an idea into a settled intent and a chosen approach through dialogue with the user.
 
-Help turn ideas into fully formed designs and specs through natural collaborative dialogue.
+This skill runs two ways:
 
-Start by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design in small sections (200-300 words), checking after each section whether it looks right so far.
+- **Standalone (`/brainstorming`).** Follow the whole file and finish with a written design.
+- **Inside `/loom`.** The brainstorm-agent preloads this skill. Run "Understanding the idea" and "Exploring approaches" only, then stop: `/loom` has its own specify and architecture phases, and the phase prompt says how to ask and where to write. The sections marked *standalone only* do not apply.
 
-## The Process
+## Understanding the idea
 
-**Understanding the idea:**
-- Check out the current project state first (files, docs, recent commits)
-- Ask questions one at a time to refine the idea
-- Prefer multiple choice questions when possible, but open-ended is fine too
-- Only one question per message - if a topic needs more exploration, break it into multiple questions
-- Focus on understanding: purpose, constraints, success criteria
+- Look at the current project state first: files, docs, recent commits.
+- Ask questions one at a time to refine the idea. One question per message; if a topic needs more, ask a follow-up.
+- Prefer multiple choice; open-ended is fine when the options are not knowable.
+- Aim to understand purpose, constraints and success criteria.
 
-**Exploring approaches:**
-- Propose 2-3 different approaches with trade-offs
-- Present options conversationally with your recommendation and reasoning
-- Lead with your recommended option and explain why
+## Exploring approaches
 
-**Presenting the design:**
-- Once you believe you understand what you're building, present the design
-- Break it into sections of 200-300 words
-- Ask after each section whether it looks right so far
-- Cover: architecture, components, data flow, error handling, testing
-- Be ready to go back and clarify if something doesn't make sense
+- Propose 2-3 different approaches with their trade-offs.
+- Lead with the one you recommend and say why.
+- Remove features the idea does not need (YAGNI).
 
-## After the Design
+## Presenting the design (standalone only)
 
-**Documentation:**
-- Write the validated design to `docs/plans/YYYY-MM-DD-<topic>-design.md`
-- Use writing-clearly-and-concisely skill if available
-- Commit the design document to git
+- Once you understand what is being built, present the design in sections of 200-300 words.
+- After each section, ask whether it looks right so far, and go back when something does not.
+- Cover architecture, components, data flow, error handling and testing.
 
-**Implementation (if continuing):**
-- Ask: "Ready to set up for implementation?"
-- Use `/loom` for structured multi-phase implementation
+## After the design (standalone only)
 
-## Key Principles
-
-- **One question at a time** - Don't overwhelm with multiple questions
-- **Multiple choice preferred** - Easier to answer than open-ended when possible
-- **YAGNI ruthlessly** - Remove unnecessary features from all designs
-- **Explore alternatives** - Always propose 2-3 approaches before settling
-- **Incremental validation** - Present design in sections, validate each
-- **Be flexible** - Go back and clarify when something doesn't make sense
+- Write the validated design to `docs/plans/YYYY-MM-DD-<topic>-design.md` and commit it.
+- Ask: "Ready to set up for implementation?" If yes, use `/loom`. It runs its own brainstorm, specify and clarify phases from the same description; pass `--skip-brainstorm` when this session already settled the approach.

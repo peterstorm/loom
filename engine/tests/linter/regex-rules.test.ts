@@ -28,9 +28,12 @@ function shippedRule(name: string): Rule {
   return rule;
 }
 
+/** The project every fixture path below is written in. */
+const FIXTURE_PROJECT_ROOT = "/work/shop";
+
 /** The lines of `content` the rule flags in `filePath`, 1-based. */
 const flaggedLines = (rule: Rule, filePath: string, content: string): readonly number[] =>
-  executeRules([rule], filePath, content, () => undefined).map(({ line }) => line);
+  executeRules([rule], filePath, content, () => undefined, FIXTURE_PROJECT_ROOT).map(({ line }) => line);
 
 /** Refused spellings assembled from pieces, so this file's own source never carries one. */
 const AS_ANY = `as${" "}any`;

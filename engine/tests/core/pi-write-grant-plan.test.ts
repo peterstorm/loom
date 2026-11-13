@@ -20,7 +20,7 @@ describe("planPiWriteGrants — outside orchestration", () => {
   it("requires no grant for every implementation agent in the catalog", () => {
     const agents = [
       "code-implementer-agent", "ts-test-agent", "java-test-agent",
-      "test-engineer", "frontend-agent", "security-agent", "adr-writer-agent",
+      "frontend-agent", "security-agent", "adr-writer-agent",
     ];
     const result = plan(agents.map((agent) => ({ agent, task: "Do the thing." })), false);
     expect(result.ok).toBe(true);

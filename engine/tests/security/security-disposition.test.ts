@@ -121,7 +121,7 @@ describe("the decision set", () => {
   it("emits a zero-entry decision set for a clean run instead of refusing", () => {
     const empty = ok(securityDisposition({ metadata: METADATA, locator: "/out", findings: [] }));
     expect(empty.entries).toEqual([]);
-    expect(renderDispositionHandoff(empty)).toContain("nothing to remediate");
+    expect(renderDispositionHandoff("/opt/loom", empty)).toContain("nothing to remediate");
   });
 
   it("names the handoff command in prose", () => {
@@ -131,11 +131,12 @@ describe("the decision set", () => {
     expect(paths.runName).toBe(`run.disposition-${METADATA.runId}`);
     expect(paths.runDir).toBe(`${paths.runsRoot}/${paths.runName}`);
     // The paths are the disposition's own: derived from its source, never passed beside it.
-    const text = renderDispositionHandoff(disposition);
+    const text = renderDispositionHandoff("/opt/loom", disposition);
     expect(text).toContain("1 accepted, 1 deferred, 1 dismissed");
-    // The command carries every flag the program requires and names the exact
-    // file the handler writes.
-    expect(text).toContain(`--runs-root '${paths.runsRoot}'`);
+    // The command runs as printed — the package's own CLI by absolute path —
+    // carries every flag the program requires and names the exact file the
+    // handler writes.
+    expect(text).toContain(`    bun '/opt/loom/engine/src/cli.ts' helper orchestration start standalone-disposition --runs-root '${paths.runsRoot}' \\`);
     expect(text).toContain(`--run 'run.disposition-${METADATA.runId}' < '${paths.inputFile}'`);
     expect(text).toContain(disposition.source.resultDigest);
   });
@@ -144,11 +145,12 @@ describe("the decision set", () => {
     const locator = "/out/it's my audit dir";
     const disposition = ok(securityDisposition({ metadata: METADATA, locator, findings: findings() }));
     const paths = dispositionHandoffPaths(locator, METADATA.runId);
-    const command = renderDispositionHandoff(disposition).split("\n")
+    const command = renderDispositionHandoff("/opt/my plugins/loom", disposition).split("\n")
       .filter((line) => line.startsWith("    ")).map((line) => line.trim().replace(/ \\$/, "")).join(" ");
     // A real shell splits it back into exactly the intended words.
     const echoed = spawnSync("bash", ["-c", `printf '%s\\n' ${command.replace(/ < /, " ")}`], { encoding: "utf8" });
-    expect(echoed.stdout.split("\n")).toEqual(["helper", "orchestration", "start", "standalone-disposition",
+    expect(echoed.stdout.split("\n")).toEqual(["bun", "/opt/my plugins/loom/engine/src/cli.ts",
+      "helper", "orchestration", "start", "standalone-disposition",
       "--runs-root", paths.runsRoot, "--run", `run.disposition-${METADATA.runId}`, paths.inputFile, ""]);
   });
 
@@ -169,7 +171,7 @@ describe("the report's handoff section", () => {
     const ledger = ok(parseCoverageSeeds([aSeed()]));
     const published = findings();
     const disposition = ok(securityDisposition({ metadata: METADATA, locator: "/out", findings: published }));
-    const report = ok(derivePublication({ metadata: METADATA, ledger, findings: published, locator: "/out" })).documents["REPORT.md"];
+    const report = ok(derivePublication({ metadata: METADATA, ledger, findings: published, locator: "/out", packageRoot: "/opt/loom" })).documents["REPORT.md"];
     expect(report).toContain("## Disposition handoff");
     const paths = dispositionHandoffPaths("/out", METADATA.runId);
     expect(report).toContain(`--runs-root '${paths.runsRoot}'`);
@@ -181,7 +183,7 @@ describe("the report's handoff section", () => {
 
   it("names no command for a clean run, because there is nothing to load", () => {
     const ledger = ok(parseCoverageSeeds([aSeed()]));
-    const report = ok(derivePublication({ metadata: METADATA, ledger, findings: [], locator: "/out" })).documents["REPORT.md"];
+    const report = ok(derivePublication({ metadata: METADATA, ledger, findings: [], locator: "/out", packageRoot: "/opt/loom" })).documents["REPORT.md"];
     expect(report).toContain("## Disposition handoff");
     expect(report).toContain("nothing to remediate");
     expect(report).not.toContain("standalone-disposition --runs-root");

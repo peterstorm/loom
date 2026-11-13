@@ -16,7 +16,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { lintFile, isBinaryBuffer } from "../../src/linter/index";
+import { lintFile, lintFiles, isBinaryBuffer } from "../../src/linter/index";
 
 // --- Test Helpers ---
 
@@ -288,6 +288,52 @@ describe("lintFile", () => {
 
       const result = lintFile(filePath, "immediate", defaultDir, null);
       expect(result.kind).toBe("violations");
+    });
+  });
+
+  describe("exclusions are matched inside the project", () => {
+    // A project checked out beneath a directory called `apps`, excluding its
+    // own `apps/` from one regex rule and from max-function-lines.
+    const LONG_FUNCTION = ["function long() {", ...Array.from({ length: 60 }, (_, i) => `  const x${i} = ${i};`), "}", ""].join("\n");
+    const SOURCE = `console.log('x');\n${LONG_FUNCTION}`;
+
+    function projectUnderApps(): { rulesDir: string; inSrc: string; inApps: string } {
+      const root = join(tempDir, "apps", "shop");
+      const rulesDir = join(root, ".claude", "linter", "rules");
+      for (const dir of [rulesDir, join(root, "src"), join(root, "apps", "demo")]) mkdirSync(dir, { recursive: true });
+      writeRule(rulesDir, "no-console-log.json", makeValidRule({ excludePatterns: ["apps/"] }));
+      writeFileSync(join(rulesDir, "config.json"), JSON.stringify({ excludeFromMaxLines: ["apps/"] }));
+      const inSrc = join(root, "src", "order.ts");
+      const inApps = join(root, "apps", "demo", "main.ts");
+      writeFileSync(inSrc, SOURCE);
+      writeFileSync(inApps, SOURCE);
+      return { rulesDir, inSrc, inApps };
+    }
+
+    // The two rules that carry the exclusion. The fixture's two files are
+    // copies of each other, so no-duplicate-block reports both; it is not the
+    // rule under test.
+    const EXCLUDING_RULES = ["max-function-lines", "no-console-log"];
+
+    const excludingRulesReported = (result: ReturnType<typeof lintFile> | undefined): readonly string[] => {
+      if (result === undefined || result.kind === "error") throw new Error(`lint did not run: ${JSON.stringify(result)}`);
+      if (result.kind === "pass") return [];
+      return result.violations.map((violation) => violation.rule).filter((rule) => EXCLUDING_RULES.includes(rule)).sort();
+    };
+
+    it("lintFile reads a file whose checkout path, not its project path, contains the excluded directory", () => {
+      const { rulesDir, inSrc, inApps } = projectUnderApps();
+
+      expect(excludingRulesReported(lintFile(inSrc, "full", defaultDir, rulesDir, 5000))).toEqual(EXCLUDING_RULES);
+      expect(excludingRulesReported(lintFile(inApps, "full", defaultDir, rulesDir, 5000))).toEqual([]);
+    });
+
+    it("lintFiles applies the same frame", () => {
+      const { rulesDir, inSrc, inApps } = projectUnderApps();
+      const results = lintFiles([inSrc, inApps], "full", defaultDir, rulesDir, 5000);
+
+      expect(excludingRulesReported(results.get(inSrc))).toEqual(EXCLUDING_RULES);
+      expect(excludingRulesReported(results.get(inApps))).toEqual([]);
     });
   });
 

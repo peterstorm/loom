@@ -1,7 +1,9 @@
 # FR-008 feasibility probe — launcher readiness barrier (emission)
 
+> Frozen evidence, 2026-09-19; the readiness barrier shipped, so the "remains" list at the end is history. Current behaviour: [Pi adapter](../../docs/pi-adapter.md#emission-enabled-child-startup) and [Using Loom with Pi](../../docs/pi-usage.md#emission-activation-readiness-errors-and-retry-budget). The record below is kept as written.
+
 **Spec:** `.claude/specs/2026-09-16-grammar-constrained-decoding/spec.md` (FR-008, AS-020, SC-005)
-**Proven against:** installed `pi` 0.83.0 (`/nix/store/w594wdq06kgr892xbz9rlm18irkq98fc-pi-coding-agent-0.83.0`)
+**Proven against:** installed `pi` 0.83.0
 **Run:** `node probes/emission-readiness/probe.mjs` (all four variants; ~25s)
 **Code:** `probe.mjs` (driver: counting server, gate decision, variant assertions) · `probe-extension.mjs` (child extension) · the Pi RPC child (spawn, JSONL bus, request/response, kill) is the shared `../lib/rpc-child.mjs`, tested against a fake `pi` in `../lib/rpc-child.test.mjs`
 

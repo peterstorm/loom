@@ -20,14 +20,14 @@ function fixture(): { packageRoot: string; cacheRoot: string } {
   const cacheRoot = join(root, "cache");
   mkdirSync(join(packageRoot, "skills", "demo"), { recursive: true });
   mkdirSync(join(packageRoot, "commands", "templates"), { recursive: true });
-  mkdirSync(join(packageRoot, "commands", "vercel-react-best-practices"), { recursive: true });
+  mkdirSync(join(packageRoot, "skills", "vercel-react-best-practices"), { recursive: true });
   mkdirSync(join(packageRoot, "references"), { recursive: true });
   mkdirSync(join(packageRoot, "rules"), { recursive: true });
   writeFileSync(join(packageRoot, "skills", "demo", "SKILL.md"), "Read ${CLAUDE_PLUGIN_ROOT}/rules/a.md\n");
   writeFileSync(join(packageRoot, "skills", "demo", "asset.bin"), Buffer.from([0, 1, 2]));
   writeFileSync(join(packageRoot, "commands", "demo.md"), "Run ${CLAUDE_PLUGIN_ROOT}/engine/src/cli.ts\n");
   writeFileSync(join(packageRoot, "commands", "templates", "nested.md"), "${CLAUDE_PLUGIN_ROOT}/nested\n");
-  writeFileSync(join(packageRoot, "commands", "vercel-react-best-practices", "SKILL.md"), "portable\n");
+  writeFileSync(join(packageRoot, "skills", "vercel-react-best-practices", "SKILL.md"), "portable\n");
   writeFileSync(join(packageRoot, "references", "guide.md"), "${CLAUDE_PLUGIN_ROOT}/guide\n");
   writeFileSync(join(packageRoot, "rules", "a.md"), "rule\n");
   return { packageRoot, cacheRoot };
@@ -51,7 +51,10 @@ describe("Pi resource materialization", () => {
       .toBe(`${packageRoot}/nested\n`);
     expect([...readFileSync(join(resources.root, "skills", "demo", "asset.bin"))]).toEqual([0, 1, 2]);
     expect(resources.promptPaths).toEqual([join(resources.root, "commands")]);
-    expect(resources.skillPaths).toContain(join(resources.root, "skills"));
+    // Every skill, the vendored Vercel pack included, is found through the one skills root.
+    expect(resources.skillPaths).toEqual([join(resources.root, "skills")]);
+    expect(readFileSync(join(resources.root, "skills", "vercel-react-best-practices", "SKILL.md"), "utf-8"))
+      .toBe("portable\n");
     expect(Object.isFrozen(resources)).toBe(true);
     expect(Object.isFrozen(resources.promptPaths)).toBe(true);
     expect(Object.isFrozen(resources.skillPaths)).toBe(true);

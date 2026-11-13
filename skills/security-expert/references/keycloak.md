@@ -1,43 +1,18 @@
 # Keycloak Reference
 
-## Table of Contents
-1. [Core Concepts](#core-concepts)
-2. [Client Types](#client-types)
-3. [Authentication Flows](#authentication-flows)
-4. [Protocol Mappers](#protocol-mappers)
-5. [Realm Configuration](#realm-configuration)
-6. [Integration Patterns](#integration-patterns)
+Protocol rules (which flow, PKCE, redirect URIs, refresh tokens) are in `oauth-oidc.md`; token validation is in `jwt-security.md`. This file is the Keycloak configuration that implements them.
 
 ## Core Concepts
 
-### Realm
-- Isolated tenant with own users, roles, clients
-- Master realm for admin, separate realms per environment/tenant
-- Never use master realm for applications
+- **Realm**: an isolated tenant with its own users, roles and clients. Never use the `master` realm for applications.
+- **Client**: an application registered in a realm, with its redirect URIs and enabled flows.
+- **Roles**: realm roles (all clients), client roles (one client), composite roles.
+- **Endpoints** live under the realm: issuer `https://keycloak.example.com/realms/{realm}`, then `/protocol/openid-connect/auth`, `/token`, `/certs`.
 
-### Client
-- Application registered with Keycloak
-- Has client ID, optional client secret
-- Defines allowed redirect URIs, grant types
+## Clients
 
-### User
-- Identity with credentials
-- Has attributes, roles, groups
-- Can federate from LDAP, social providers
-
-### Roles
-- **Realm roles**: Global across all clients
-- **Client roles**: Scoped to specific client
-- **Composite roles**: Combine multiple roles
-
-## Client Types
-
-### Confidential Client
-- Has client secret
-- For server-side applications
-- Can use client_credentials grant
+### Confidential client (server-side web app, BFF)
 ```yaml
-# application.yml
 spring:
   security:
     oauth2:
@@ -47,101 +22,71 @@ spring:
             client-id: my-backend
             client-secret: ${KEYCLOAK_SECRET}
             authorization-grant-type: authorization_code
+            scope: openid, profile
+        provider:
+          keycloak:
+            issuer-uri: https://keycloak.example.com/realms/myrealm
 ```
 
-### Public Client
-- No client secret (cannot keep secrets)
-- For SPAs, mobile apps
-- Must use PKCE
-```javascript
-// PKCE flow for SPA
-const codeVerifier = generateCodeVerifier();
-const codeChallenge = await sha256(codeVerifier);
+### Public client (mobile app, SPA without a backend)
+No secret. Authorization code flow with PKCE (`S256`), `state` and `nonce`. Use a maintained library (`keycloak-js`, `oidc-client-ts`); if you build the request yourself, the challenge is base64url of the SHA-256 digest, not the hex digest:
 
-const authUrl = `${keycloakUrl}/auth?` + new URLSearchParams({
+```typescript
+const b64url = (bytes: Uint8Array) =>
+  btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const random = () => b64url(crypto.getRandomValues(new Uint8Array(32)));
+
+const codeVerifier = random();
+const state = random();          // compared with the state on the callback
+const nonce = random();          // compared with the nonce claim of the ID token
+const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(codeVerifier));
+
+const authUrl = `${issuer}/protocol/openid-connect/auth?` + new URLSearchParams({
   client_id: 'my-spa',
   response_type: 'code',
   redirect_uri: 'https://app.example.com/callback',
-  code_challenge: codeChallenge,
+  scope: 'openid profile',
+  state,
+  nonce,
+  code_challenge: b64url(new Uint8Array(digest)),
   code_challenge_method: 'S256',
-  scope: 'openid profile'
 });
 ```
 
-### Bearer-Only Client
-- Cannot initiate login
-- Only validates tokens
-- For APIs/resource servers
-```yaml
-# Keycloak client config
+For a browser SPA prefer a BFF over a public client (see `oauth-oidc.md`).
+
+### Client settings to enforce
+```json
 {
-  "clientId": "my-api",
-  "bearerOnly": true,
-  "publicClient": false
+  "clientId": "my-spa",
+  "publicClient": true,
+  "standardFlowEnabled": true,
+  "implicitFlowEnabled": false,
+  "directAccessGrantsEnabled": false,
+  "redirectUris": ["https://app.example.com/callback"],
+  "webOrigins": ["https://app.example.com"],
+  "attributes": { "pkce.code.challenge.method": "S256" }
 }
 ```
+- Redirect URIs are exact. No `*`, no pattern covering paths you do not own.
+- **Direct access grants (resource owner password credentials) stay off.** RFC 9700 says this grant must not be used: the client handles the password, and MFA and federation cannot work.
+- Implicit flow stays off.
 
-## Authentication Flows
+### Resource server (API)
+An API that only validates tokens does not need to be able to log anyone in. The old "bearer-only" access type is not offered by the current admin console; register a client with every flow disabled so there is something to name as audience and to attach client roles to.
 
-### Authorization Code Flow (Recommended)
-1. Redirect user to `/auth` endpoint
-2. User authenticates, Keycloak redirects with `code`
-3. Backend exchanges code for tokens
-4. Backend validates and uses tokens
-
-### Authorization Code + PKCE (SPAs/Mobile)
-Same as above, but with code_challenge to prevent interception:
-```
-code_challenge = BASE64URL(SHA256(code_verifier))
-```
-
-### Client Credentials (Service-to-Service)
+### Service to service
 ```bash
-curl -X POST "${KEYCLOAK_URL}/token" \
+curl -X POST "https://keycloak.example.com/realms/myrealm/protocol/openid-connect/token" \
   -d "grant_type=client_credentials" \
   -d "client_id=my-service" \
   -d "client_secret=${SECRET}"
 ```
 
-### Direct Grant (Resource Owner Password) - Avoid
-- Sends username/password to client
-- Only for legacy migration, trusted first-party apps
-- Cannot support MFA, social login
-
 ## Protocol Mappers
 
-### Adding Roles to Token
-```json
-{
-  "name": "realm-roles",
-  "protocol": "openid-connect",
-  "protocolMapper": "oidc-usermodel-realm-role-mapper",
-  "config": {
-    "claim.name": "roles",
-    "jsonType.label": "String",
-    "multivalued": "true",
-    "id.token.claim": "true",
-    "access.token.claim": "true"
-  }
-}
-```
-
-### Adding Custom Attributes
-```json
-{
-  "name": "department",
-  "protocol": "openid-connect",
-  "protocolMapper": "oidc-usermodel-attribute-mapper",
-  "config": {
-    "claim.name": "department",
-    "user.attribute": "department",
-    "id.token.claim": "true",
-    "access.token.claim": "true"
-  }
-}
-```
-
-### Audience Mapper (Critical for APIs)
+### Audience mapper (required for APIs)
+Without it the access token does not name your API in `aud`, and audience validation either fails or gets switched off.
 ```json
 {
   "name": "api-audience",
@@ -155,44 +100,82 @@ curl -X POST "${KEYCLOAK_URL}/token" \
 }
 ```
 
+### Realm roles
+```json
+{
+  "name": "realm-roles",
+  "protocol": "openid-connect",
+  "protocolMapper": "oidc-usermodel-realm-role-mapper",
+  "config": {
+    "claim.name": "roles",
+    "jsonType.label": "String",
+    "multivalued": "true",
+    "access.token.claim": "true"
+  }
+}
+```
+
+### User attributes
+```json
+{
+  "name": "department",
+  "protocol": "openid-connect",
+  "protocolMapper": "oidc-usermodel-attribute-mapper",
+  "config": {
+    "claim.name": "department",
+    "user.attribute": "department",
+    "access.token.claim": "true"
+  }
+}
+```
+
+Two conditions before an attribute is used for authorization:
+- **Declare it in the realm's User Profile.** Since Keycloak 24 the declarative user profile is on by default and unmanaged attributes are ignored unless the realm's unmanaged-attribute policy says otherwise.
+- **Make it admin-only.** Give the attribute `"permissions": { "view": ["admin"], "edit": ["admin"] }` (add `"user"` to `view` only if users may see it). An attribute a user can edit in the account console and that an API reads as `department` or `clearance` lets users grant themselves access.
+
 ## Realm Configuration
 
-### Security Settings
+### Login protection
 ```json
 {
   "sslRequired": "all",
   "bruteForceProtected": true,
   "permanentLockout": false,
+  "failureFactor": 5,
+  "waitIncrementSeconds": 60,
   "maxFailureWaitSeconds": 900,
   "minimumQuickLoginWaitSeconds": 60,
-  "waitIncrementSeconds": 60,
   "quickLoginCheckMilliSeconds": 1000,
-  "maxDeltaTimeSeconds": 43200,
-  "failureFactor": 5
+  "maxDeltaTimeSeconds": 43200
 }
 ```
 
-### Token Lifespans
+### Token lifespans and refresh rotation
 ```json
 {
   "accessTokenLifespan": 300,
-  "accessTokenLifespanForImplicitFlow": 300,
   "ssoSessionIdleTimeout": 1800,
   "ssoSessionMaxLifespan": 36000,
-  "offlineSessionIdleTimeout": 2592000,
   "accessCodeLifespan": 60,
-  "accessCodeLifespanUserAction": 300
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0
 }
 ```
+`revokeRefreshToken` with `refreshTokenMaxReuse: 0` makes each refresh token single-use.
 
-### Password Policy
-```
-length(12) and digits(1) and upperCase(1) and lowerCase(1) and specialChars(1) and notUsername and passwordHistory(5)
-```
+### Password policy
+Follow `password-hashing.md`: length and a denylist, no composition rules, no forced rotation. In Authentication → Policies → Password policy add:
 
-## Integration Patterns
+- Minimum length 15 (8 is acceptable only where MFA is required for every login)
+- Maximum length 64 or more
+- Not username, not email
+- The password denylist policy, with a list of common and breached passwords
 
-### Spring Boot Resource Server
+Do not add digit, upper-case, lower-case or special-character rules, and do not add password expiry.
+
+## Spring Integration
+
+### Resource server
 ```yaml
 spring:
   security:
@@ -200,69 +183,39 @@ spring:
       resourceserver:
         jwt:
           issuer-uri: https://keycloak.example.com/realms/myrealm
-          jwk-set-uri: https://keycloak.example.com/realms/myrealm/protocol/openid-connect/certs
+          audiences: my-api
 ```
+The JWKS URI is discovered from the issuer. The decoder and its validators are described in `jwt-security.md`.
 
+### Roles from `realm_access.roles`
 ```java
-@Configuration
-@EnableWebSecurity
-public class SecurityConfig {
-    @Bean
-    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
-        http.oauth2ResourceServer(oauth2 -> oauth2
-            .jwt(jwt -> jwt.jwtAuthenticationConverter(jwtAuthConverter())));
-        return http.build();
-    }
-    
-    @Bean
-    public JwtAuthenticationConverter jwtAuthConverter() {
-        JwtGrantedAuthoritiesConverter grantedAuthorities = new JwtGrantedAuthoritiesConverter();
-        grantedAuthorities.setAuthoritiesClaimName("roles");
-        grantedAuthorities.setAuthorityPrefix("ROLE_");
-        
-        JwtAuthenticationConverter converter = new JwtAuthenticationConverter();
-        converter.setJwtGrantedAuthoritiesConverter(grantedAuthorities);
-        return converter;
-    }
-}
-```
-
-### Custom Role Extraction from Nested Claims
-```java
-// For Keycloak's nested realm_access.roles structure
 public class KeycloakRoleConverter implements Converter<Jwt, Collection<GrantedAuthority>> {
     @Override
     public Collection<GrantedAuthority> convert(Jwt jwt) {
-        Map<String, Object> realmAccess = jwt.getClaim("realm_access");
-        if (realmAccess == null) return Collections.emptyList();
-        
-        @SuppressWarnings("unchecked")
-        List<String> roles = (List<String>) realmAccess.get("roles");
-        if (roles == null) return Collections.emptyList();
-        
+        Map<String, Object> realmAccess = jwt.getClaimAsMap("realm_access");
+        if (realmAccess == null || !(realmAccess.get("roles") instanceof Collection<?> roles)) {
+            return List.of();
+        }
         return roles.stream()
-            .map(role -> new SimpleGrantedAuthority("ROLE_" + role.toUpperCase()))
-            .collect(Collectors.toList());
+            .map(role -> (GrantedAuthority) new SimpleGrantedAuthority("ROLE_" + role.toString().toUpperCase(Locale.ROOT)))
+            .toList();
     }
 }
+
+// wire it in
+JwtAuthenticationConverter converter = new JwtAuthenticationConverter();
+converter.setJwtGrantedAuthoritiesConverter(new KeycloakRoleConverter());
+http.oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> jwt.jwtAuthenticationConverter(converter)));
 ```
 
-### Multi-Tenant Configuration
+### Several realms (multi-tenant)
+Each realm signs with its own keys. One decoder with one JWKS URI and a list of allowed issuers rejects every other realm's tokens at signature verification. Resolve the decoder from the issuer, from a fixed list:
+
 ```java
-@Component
-public class TenantJwtIssuerValidator implements OAuth2TokenValidator<Jwt> {
-    private final Set<String> allowedIssuers = Set.of(
-        "https://keycloak.example.com/realms/tenant1",
-        "https://keycloak.example.com/realms/tenant2"
-    );
-    
-    @Override
-    public OAuth2TokenValidatorResult validate(Jwt jwt) {
-        if (allowedIssuers.contains(jwt.getIssuer().toString())) {
-            return OAuth2TokenValidatorResult.success();
-        }
-        return OAuth2TokenValidatorResult.failure(
-            new OAuth2Error("invalid_issuer", "Unknown tenant", null));
-    }
-}
+JwtIssuerAuthenticationManagerResolver resolver = JwtIssuerAuthenticationManagerResolver.fromTrustedIssuers(
+    "https://keycloak.example.com/realms/tenant1",
+    "https://keycloak.example.com/realms/tenant2");
+
+http.oauth2ResourceServer(oauth2 -> oauth2.authenticationManagerResolver(resolver));
 ```
+The list is the allowlist. Never build a decoder from whatever `iss` a token carries. After authentication, check that the token's realm matches the tenant of the resource being accessed.

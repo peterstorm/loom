@@ -2,27 +2,7 @@
 
 ## Status
 
-Selected design implemented, **registered review and remediation complete**;
-merge, publication, and loaded-runtime cutover pending. The registered review
-(run.p5-source-review-13) closed with zero surviving critical findings and 15
-advisories — two accepted and fixed (cli.ts stdin bounding, safeIoCause
-standard-error classification), thirteen deferred with recorded reasons; a
-distill pass tightened the three highest-leverage deferrals (dense-array
-unification, attempt-one admission, the v2-vs-v3 admission seam) and skipped
-the WeakMap caches extraction as a hypothetical seam. The full gate (engine
-typecheck, exact-baseline unit suite, root verify 23/23 including all six
-smokes) held after every change. The branch merged main's PR #52
-reviewer-protocol-v2 changes, resolving the one conflict in
-`engine/src/core/reviewer-protocol.ts` in favor of the shared strict byte
-grammar factored for both v2 and v3.
-
-P4 merged as `96153edc3dd755b4ac648ed48920b6670753c5a6`, with publication and
-loaded-runtime reload verified. P5's review/remediation used admitted main
-runtime `sha256:086c472e4e913376c07d69f5116c9ad9655546e22c91e40d28cba9fdd795bc79`
-and the frozen Skill 5.0.0 contract, including ordinary Plan advisory triage.
-Feature mutations were confined to owned matching-runtime fixtures; admission
-was never unset and P5 policy was never retrofitted into the source review. New
-triage can publish new records honestly after merge/publication/reload.
+Accepted (2026-09-10). Implemented; merged in PR #51 (`3fb60e1a`).
 
 ## Context
 
@@ -223,7 +203,7 @@ Actual Repair-Checked does not mutate the source's active Finding or history.
 
 ## Bounds and evidence
 
-[Operations](../operations.md#resource-and-compatibility-boundaries) pins the actual
+[Operations](../standalone-review.md#resource-and-compatibility-boundaries) pins the actual
 simultaneous limits: 512 KiB/file, 2 MiB raw source, 4096 paths/origins, 4 MiB packet
 payload before byte arrays plus an exact 16 MiB canonical serialized-packet ceiling,
 2 MiB/15 predecessor sections, 16 MiB retained reads and
@@ -283,8 +263,36 @@ are pending.
 
 - [Selected P5 Plan](../../.claude/plans/2026-09-10-standalone-lineage.md)
 - [Domain language](../../CONTEXT.md)
-- [Operations and exact input](../operations.md#standalone-lineage-p5)
+- [Operations and exact input](../standalone-review.md#standalone-lineage)
 - [Review-and-fix Skill](../../skills/review-and-fix/SKILL.md)
 - [ADR-0005](ADR-0005-per-program-facade-drivers.md), [ADR-0007](ADR-0007-curated-public-surface.md),
   [ADR-0008](ADR-0008-versioned-defect-family-installation-authority.md),
   [ADR-0009](ADR-0009-versioned-reviewer-protocol.md)
+
+## History
+
+Until 2026-11-12 the Status section carried the review-round narrative below,
+written before PR #51 merged (2026-09-16). It is kept verbatim as a record; its
+"pending" clauses describe that moment, not the present.
+
+Selected design implemented, **registered review and remediation complete**;
+merge, publication, and loaded-runtime cutover pending. The registered review
+(run.p5-source-review-13) closed with zero surviving critical findings and 15
+advisories — two accepted and fixed (cli.ts stdin bounding, safeIoCause
+standard-error classification), thirteen deferred with recorded reasons; a
+distill pass tightened the three highest-leverage deferrals (dense-array
+unification, attempt-one admission, the v2-vs-v3 admission seam) and skipped
+the WeakMap caches extraction as a hypothetical seam. The full gate (engine
+typecheck, exact-baseline unit suite, root verify 23/23 including all six
+smokes) held after every change. The branch merged main's PR #52
+reviewer-protocol-v2 changes, resolving the one conflict in
+`engine/src/core/reviewer-protocol.ts` in favor of the shared strict byte
+grammar factored for both v2 and v3.
+
+P4 merged as `96153edc3dd755b4ac648ed48920b6670753c5a6`, with publication and
+loaded-runtime reload verified. P5's review/remediation used admitted main
+runtime `sha256:086c472e4e913376c07d69f5116c9ad9655546e22c91e40d28cba9fdd795bc79`
+and the frozen Skill 5.0.0 contract, including ordinary Plan advisory triage.
+Feature mutations were confined to owned matching-runtime fixtures; admission
+was never unset and P5 policy was never retrofitted into the source review. New
+triage can publish new records honestly after merge/publication/reload.

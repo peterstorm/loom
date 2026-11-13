@@ -1,7 +1,7 @@
 # ADR-0069: The Contract Task's Wave review judges the contract surface
 
 ## Status
-Proposed (2026-11-12). Implements the roster half of Q3 of the deterministic-implementation plan's Q-track
+Accepted (2026-11-12). Implemented in PR #160. Implements the roster half of Q3 of the deterministic-implementation plan's Q-track
 (the plan design review is ADR-0070). Extends ADR-0047; follows the packet-section pattern of ADR-0039.
 
 ## Context

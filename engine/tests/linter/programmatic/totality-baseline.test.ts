@@ -126,8 +126,8 @@ describe("loom's own totality baselines", () => {
       .filter((rule) => rule.name === "switch-totality");
     const absolute = join(REPO_ROOT, path);
     const source = readFileSync(absolute, "utf-8");
-    expect(executeRules(rules, absolute, source, () => undefined)).toEqual([]);
-    expect(executeRules(rules, join(REPO_ROOT, "engine/src/core/unbaselined-copy.ts"), source, () => undefined).length)
+    expect(executeRules(rules, absolute, source, () => undefined, REPO_ROOT)).toEqual([]);
+    expect(executeRules(rules, join(REPO_ROOT, "engine/src/core/unbaselined-copy.ts"), source, () => undefined, REPO_ROOT).length)
       .toBeGreaterThan(0);
   });
 

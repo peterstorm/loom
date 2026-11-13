@@ -270,9 +270,9 @@ describe("quality-program helper boundaries", () => {
 
   it("validates source profiles and renders every Pi agent onto the exact local route", () => {
     // The count is the agents directory's own fact, not a literal every added
-    // agent must chase: the helper validates each `.md` except the README.
+    // agent must chase: the helper validates each `.md` there.
     const agentFiles = readdirSync(join(ROOT, "agents"))
-      .filter((name) => name.endsWith(".md") && name !== "README.md");
+      .filter((name) => name.endsWith(".md"));
     expect(cli(["helper", "model-profiles", "validate", "--agents-dir", "agents"]))
       .toContain(`Validated ${agentFiles.length} Loom agent model profiles.`);
     const output = canonicalTempDir("loom-pi-agents-");

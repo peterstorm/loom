@@ -28,7 +28,7 @@
  * bind. Its shape is `match(raw).with("a", …).with("b", …).otherwise(…)`: the
  * fallback is then a visible decision in ts-pattern rather than a `default:`
  * that reads the same whether or not a union grew under it. That is
- * `rules/typescript-patterns.md`'s "use ts-pattern instead of switch", made a
+ * `rules/typescript-patterns.md`'s "Totality" section, made a
  * check instead of a sentence.
  *
  * `switch (typeof raw)` is exempt — its domain is closed by the language, not

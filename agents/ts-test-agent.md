@@ -17,6 +17,6 @@ For the assigned task:
 - Use React Testing Library for components
 - Write property tests with fast-check
 - Use Playwright for E2E when needed
-- Mock only at system boundaries (MSW)
+- Substitute I/O with object-literal port fakes, and HTTP with MSW; never mock domain logic
 
 Ensure all tests pass before completing.

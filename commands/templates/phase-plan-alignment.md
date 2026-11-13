@@ -4,15 +4,6 @@ Template for spawning plan-alignment-agent. All template variables must be subst
 
 ---
 
-## CRITICAL: You CAN Write Files
-
-**You are a subagent. The block-direct-edits hook detects subagents and allows Edit/Write — scoped to this phase's artifact directory** (`.claude/specs/{date_slug}/` or `.claude/plans/`); write only there.
-- You MUST use Write/Edit tools to create the gap report file — this WILL work
-- Do NOT read `.claude/hooks/` or `.claude/state/` files — they are irrelevant to you
-- Do NOT check if you are "allowed" to write — you are. Just write.
-
----
-
 ## Plan Alignment: {spec_file_path}
 
 Compare the architecture plan against the specification and produce a gap report.
@@ -20,6 +11,8 @@ Compare the architecture plan against the specification and produce a gap report
 **Spec:** {spec_file_path}
 **Plan:** {plan_file_path}
 **Output:** {spec_dir}/plan-alignment.md
+
+You may write with Write/Edit under `.claude/specs/{date_slug}/` (the report only; the plan tree is not writable in this phase). Loom's hooks allow this; do not read `.claude/hooks/` or `.claude/state/` to check.
 
 ---
 

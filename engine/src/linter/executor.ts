@@ -20,6 +20,7 @@ import {
   makeViolation,
 } from "./types";
 import { analyzeRegex } from "./safety";
+import { matchesAnyExcludePattern } from "./exclude-pattern";
 
 /** How often (in lines) to check the deadline — amortizes overhead */
 const DEADLINE_CHECK_INTERVAL = 100;
@@ -38,6 +39,10 @@ const DEADLINE_CHECK_INTERVAL = 100;
  * @param filePath - Absolute file path (used for extension matching + violation context)
  * @param content - Full file content as a string
  * @param checkDeadline - Injected deadline checker (throws if time exceeded)
+ * @param projectRoot - Root of the project the rules belong to: the frame
+ *   `excludePatterns` are matched in. Null when no project owns the rules; the
+ *   path is then matched as given. Required, so a caller cannot leave the
+ *   frame out by forgetting it.
  * @returns Aggregated Violation[] (may be empty)
  * @throws Error on timeout or handler exception (fail-closed)
  */
@@ -45,19 +50,20 @@ export function executeRules(
   rules: readonly Rule[],
   filePath: string,
   content: string,
-  checkDeadline: () => void
+  checkDeadline: () => void,
+  projectRoot: string | null
 ): readonly Violation[] {
   const ext = extname(filePath); // e.g. ".ts"
 
   // Filter: only enabled rules whose extensions include this file's extension
-  // and whose excludePatterns don't match the file path
+  // and whose excludePatterns don't match the file's project-relative path (a
+  // file suffix, or a directory when the pattern ends with `/`)
   const matchingRules = rules.filter(
     (rule) => {
       if (!rule.enabled) return false;
       if (!rule.extensions.includes(ext)) return false;
       if (isRegexRule(rule) && rule.excludePatterns?.length) {
-        const normalizedPath = filePath.replace(/\\/g, "/");
-        if (rule.excludePatterns.some(p => normalizedPath.endsWith(p))) return false;
+        if (matchesAnyExcludePattern(filePath, rule.excludePatterns, projectRoot)) return false;
       }
       return true;
     }

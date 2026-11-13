@@ -131,23 +131,23 @@ export const PANEL_DESIGNERS_MIN = PANEL_BASELINE_LENSES.length;
  *  the lens table itself for the reason above; panel-config.test.ts additionally
  *  asserts it equals the lens-heading count in references/panel-lenses.md, so a
  *  lens added to the markdown and not the table (or the reverse) fails CI.
- *  Referenced (with its numeric value) by commands/loom.md. */
+ *  Referenced (with its numeric value) by references/loom/panel-runbook.md. */
 export const PANEL_LENS_COUNT = PANEL_LENSES.length;
 
 /** Fixed number of adversarial judge agents for `/loom --panel`. Each judge scores
  *  every candidate against exactly one criterion (primary axis, testability bar,
  *  codebase-fit + effort), so the count is bound to those three criteria and is
  *  NOT user-configurable. The criteria themselves are derived IN CODE by
- *  `deriveJudgeCriteria` (core/panel-contract.ts), not by commands/loom.md prose;
+ *  `deriveJudgeCriteria` (core/panel-contract.ts), not by runbook prose;
  *  this constant must equal the number of criteria that function RETURNS,
- *  which panel-contract.test.ts asserts. Single numeric source of truth referenced by loom.md and the
- *  panel-config test. */
+ *  which panel-contract.test.ts asserts. Single numeric source of truth referenced by
+ *  references/loom/panel-runbook.md and the panel-config test. */
 export const PANEL_JUDGES_DEFAULT = 3;
 
 // There is deliberately no `clampPanelDesigners` here. It existed as an
 // exported, tested function that no engine code path ever called: the real
 // enforcement is `selectLenses`' range check, which REJECTS an out-of-range
-// designer count rather than clamping it, and `commands/loom.md` rejects
+// designer count rather than clamping it, and the panel runbook rejects
 // malformed raw flag values before that. A second set of bounds that nothing
 // consults is a specification wearing a function's clothes — it can drift from
 // the enforced rule with no runtime consequence and no failing test. The two

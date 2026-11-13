@@ -1,6 +1,6 @@
 # Model profiles and calibration
 
-Loom assigns models by Agent role, not by whatever model happens to run the parent session. `engine/src/core/model-profiles.ts` is the executable policy catalog.
+Loom assigns models by Agent role, not by whatever model happens to run the parent session. `engine/src/core/model-profiles.ts` is the executable policy catalog. This document owns three topics: the profile policy, the classes of emission route and how a route qualifies, and calibration.
 
 ## Why semantic profiles exist
 
@@ -9,7 +9,7 @@ An Agent needs different concrete settings in each harness:
 - Claude Code selects `haiku`, `sonnet`, or `opus`.
 - Pi selects an exact provider, model, and thinking level.
 
-A semantic profile binds both targets as one policy value. This lets orchestration request “focused review” rather than reimplement model equivalence in Markdown.
+A semantic profile binds both targets as one policy value, so orchestration requests "focused review" and no Markdown file has to restate which models are equivalent.
 
 Current profile ids:
 
@@ -23,101 +23,80 @@ Current profile ids:
 - `mechanical`
 - `spec-check-review`
 
-Pi runs local models only: every profile lowers its Pi binding to the one local route (`DESKTOP_VLLM_ROUTE`, `desktop-vllm/glm-5.3-flash-spark-tp2-v14:high`), so profiles differ only in their Claude Code model. The retired profile `qualified-local-review` and the retired cloud Pi targets (`openai-codex`, `github-copilot`) survive only as history: a stored request authority issued under them still parses, against exactly the bindings each profile has issued (`recordedProfileBindings`). Only that history is hand-written: a catalog profile's current binding is its catalog lowering (`currentProfileBindings`), never a second copy, so retargeting a profile changes one place and moves the outgoing target onto the front of the profile's retired history. A stored binding its profile never issued is refused once, against the whole recorded set; at issuance each differing field is named. See [ADR-0023](adr/ADR-0023-pi-runs-local-only-and-releases-per-route.md).
-
-Concrete targets are intentionally source-controlled in `LLM_PROFILES`; consult that catalog rather than copying a table into long-lived docs.
+Pi runs local models only ([ADR-0023](adr/ADR-0023-pi-runs-local-only-and-releases-per-route.md)): every profile lowers its Pi binding to the one local route, `DESKTOP_VLLM_ROUTE` in the catalog, so profiles differ only in their Claude Code model. Concrete targets are source-controlled in `LLM_PROFILES`. Read the catalog; do not copy a route or a model table into a document.
 
 ## Agent policy
 
-`AGENT_POLICIES` maps every Loom-owned Agent definition (excluding `agents/README.md`) to exactly one profile. Validation proves:
+The Agent Catalog maps every Agent definition under `agents/` to exactly one profile. Validation proves:
 
 - every source Agent has a policy;
 - no policy points at a missing Agent;
 - profile ids exist;
-- Claude frontmatter matches its profile;
+- Claude Code frontmatter matches its profile;
 - rendered Pi frontmatter contains the exact expected pattern;
 - required Skills resolve and are included in generated definitions.
 
-There is no implicit profile fallback. Missing Agent, profile, harness, or frontmatter data is a typed failure.
+There is no implicit profile fallback. A missing Agent, profile, harness or frontmatter value is a typed failure. The inventory of Agents is [Loom Agents](agents.md).
+
+## Issuance (minting)
+
+Every role is issued under its catalog profile; the parent's model never changes issuance. A request is checked against today's catalog once, where it is minted (`mintAgentRequestAuthority`, the only constructor of a `MintedAgentRequestAuthority`). What that type guarantees is its doc comment in `engine/src/core/orchestration-contract/roster.ts`.
+
+Each issuing seam takes the minted type or mints what it issues itself, so a builder that skipped the catalog check does not compile there:
+
+- a fresh roster slot (`mintAgentRosterSlot`): the standalone reviewer roster and every refutation verifier slot;
+- an exact roster (`issueExactRoster`): it takes its slots' identities and mints each slot itself, so no recorded slot and no cast value can reach it, and a slot the catalog will not mint is refused by its slot id with the catalog's reasons;
+- a refutation panel (`issueRefutationPanelAuthority`), which issues its roster through `issueExactRoster`;
+- the Wave review batch and materialized panel requests;
+- refutation verifier slots, minted only when the panel has no record, under the catalog the plan names.
+
+Coverage stops at an aggregate that is persisted as issued and only ever read back:
+
+- the standalone review authority's roster;
+- the architecture panel authority, whose requests are minted one at a time by panel materialization;
+- a refutation panel read back from its record, and the prepared panel every program consumes.
+
+### Recorded history
+
+A roster re-read from a checkpoint or a registration parses as recorded history. A stored authority may name a retired profile (`qualified-local-review`) or a retired cloud Pi target, and its Pi binding must be one that profile actually issued. A stored binding its profile never issued is refused. A panel already checkpointed or published is resumed and replayed from its recorded requests, so a panel issued before a catalog change is never re-minted and compared with today's catalog.
+
+Only that history is hand-written. A profile's current binding is its catalog lowering, never a second copy: retargeting a profile changes one place and moves the outgoing target to the front of that profile's retired history. A test pins that no history row repeats a target or lists the current one.
+
+Tests that need a run written before a retargeting pass the engine a catalog as it stood then. The engine refuses to build such a catalog from a binding the profile never issued, and what it mints under one is a plain recorded slot, never a minted one, so the minted type's local-only promise holds.
 
 ### Pi launcher routing
 
-The catalog defines the requested Pi binding, and every role is issued under its catalog profile; the parent's model never changes issuance.
+A machine's `model-routing.json` may explicitly make child Agents inherit a local parent model or use a named exact target. That is launcher policy at the spawn boundary: it cannot reinterpret an issued request's frozen profile or binding. Both Pi launchers, the headless `subagent` transport and the interactive phase transport, apply the same rules and record the same exact provider, model and thinking binding. Before a batch is emitted, every route its children will launch on is probed, and an unreachable route refuses the batch; the operator view is in [Using Loom with Pi](pi-usage.md#a-spawn-batch-is-refused-by-the-route-gate).
 
-**Issuance (minting).** A request is checked against today's catalog once, where it is minted by `mintAgentRequestAuthority`, the only constructor of a `MintedAgentRequestAuthority`. What that type guarantees, and why it is narrower than recorded history, is its doc comment in `engine/src/core/orchestration-contract/roster.ts`.
+## Emission routes and qualification
 
-Issuing seams, each of which takes the minted type or mints what it issues itself, so a builder that skipped the catalog check does not compile at them:
+An emission tool lets a reviewer, judge or refutation verifier return its payload as tool arguments under the frozen schema ([how it works](pi-adapter.md#emission)). The tools are issued only on an explicitly qualified route. The qualified route is module-local policy in `engine/src/core/issued-emission-capability.ts`, and it names the catalog's one local route. Because every profile lowers to that route, a request issued under a Pi parent, for a producer kind and version the frozen registry carries, is emission-enabled. A Claude Code parent, a stored request on a retired route and a launcher-routed different local model are extraction-only, with the reason recorded on the issued capability. Neither a caller nor ambient parent state can choose an enabled route.
 
-- a fresh roster slot: `mintAgentRosterSlot`, the one issuing seam of a slot (it mints both requests from their identities) — the standalone reviewer roster and every refutation verifier slot;
-- an exact roster: `issueExactRoster`, the one issuing seam of a roster, which owns both the catalog check and the aggregate: it takes its slots' identities and mints each slot itself (`mintAgentRosterSlot`), so the roster holds exactly the slots it minted — no recorded slot, and no value cast past the minted type, can reach it — and nothing is checked against the catalog twice; a slot the catalog will not mint is refused by its declared slot id with the catalog's own reasons (`unmintable-roster-slot`);
-- a refutation panel: `issueRefutationPanelAuthority`, which takes its verifier slots' identities and issues its roster through `issueExactRoster`;
-- the Wave review batch and materialized panel requests;
-- refutation verifier slots, through their one decision shared by the standalone and Wave programs (`engine/src/core/refutation-verifiers.ts`, its record read by `handlers/helpers/programs/refutation-verifiers.ts`): minted only when the panel has no record, under the catalog its plan names.
-
-Where coverage stops — an aggregate persisted as issued and only ever read back:
-
-- the standalone review authority's roster (parsed by the same code that re-reads the persisted authority);
-- the architecture panel authority (it has no issuing seam; its requests are minted one at a time by panel materialization);
-- a refutation panel read back from its record (checkpoint or attempt-1 receipt), and the prepared panel every program consumes, which is typed as history either way.
-
-**Recorded history.** Rosters re-read from checkpoints and registrations parse their attempts as recorded history: a stored authority may name a retired profile, and its Pi binding must be one its recorded profile has issued (`recordedProfileBindings`). Refutation verifier requests are minted for `review-verifier-agent` only when the panel has no record; a panel already checkpointed or published is resumed and replayed from its recorded requests (and a slot's attempt 2 carries its recorded attempt 1's profile, binding and Skill), so a panel issued before a catalog change is never re-minted and compared with today's catalog. No recorded Pi history row repeats a target or lists its profile's current one; the rows are constant data, so a test pins that invariant over every recorded profile (`piHistoryViolations`) rather than the catalog checking it each time it loads.
-
-**The Pi lowering table and historical replay.** Every Pi binding the catalog issues is read from one pure table, `PiLowering` (per catalog profile, its Pi target), carried by a `PiCatalog` ADT: `current` (`CURRENT_PI_CATALOG`, every profile on the local route — the catalog entries in `LLM_PROFILES`, `currentProfileBindings` and minting all read it) or `recorded-as-of`, the catalog as it stood when the profiles a replay names still lowered to a binding they recorded. Only `piCatalogAsOf` builds a `recorded-as-of` catalog, and it refuses (`unrecorded-pi-binding`) any binding its profile never issued (`recordedProfileBindings`), so a replay is history, never an invented binding. `profileBindingsUnder(lowering, profile)` lowers under either; only today's lowering yields a `LocalPiBinding`. Minting under a replayed catalog (`mintAgentRosterSlotAsOf`) runs the same issue-mode parse against that lowering but yields a plain recorded `AgentRosterSlot`, never a minted one, so the minted type's local-only promise holds. The replay seam is a typed parameter, not a module mock: `resumeStandaloneFacade` and `resumeWaveGateFacade` take the catalog a Refutation Panel with no record is minted under (today's by default; production never passes another), and thread it into the plan of the pure verifier decision (`decideRefutationVerifiers`), where `catalog` is a required field, so no issuing path mints under today's catalog by omission. Suites that need a run written before a retargeting (`engine/tests/fixtures/local-pi-binding.ts`, `retiredPiCatalog`) pass such a catalog to the engine, which writes the historical records itself.
-
-**Launcher routing.** A machine’s Pi launcher routing policy may explicitly choose local-parent inheritance or a named exact target for child Agents, but cannot reinterpret an issued request's frozen profile or binding. Both Pi launchers—the normal headless subagent transport and the Interactive Phase Transport—apply parent-model, workload, profile, and Agent specificity and record the same exact provider/model/thinking binding. The Pi spawn guard proves the generated definition, user-global Agent scope, and request authority while allowing the launcher’s explicit routing decision to determine the effective model.
-
-### Emission routes and qualification
-
-The frozen emission tools are issued only on an explicitly qualified route. The engine freezes the qualified route as module-local policy data (`QUALIFIED_EMISSION_ROUTE` in `engine/src/core/issued-emission-capability.ts`, naming the catalog's single route owner `DESKTOP_VLLM_ROUTE`): provider `desktop-vllm`, served model `glm-5.3-flash-spark-tp2-v14`. Since every catalog profile lowers to that route, a request issued under a Pi parent, for a producer kind/version the frozen registry carries, is emission-enabled; a Claude Code parent, a stored request on a retired route, or a launcher-routed different local model is extraction-only, with the reason recorded on the issued capability. Neither callers nor ambient parent state can choose an enabled route. Once a request is issued emission-enabled, a launcher or child that cannot honor it is refused before any model request, never silently degraded to an ordinary child (see [Pi usage](pi-usage.md#emission-activation-readiness-errors-and-retry-budget)).
-
-Activation is conjunctive and each condition is checked in its own layer: the issued request must name a producer kind the Agent Catalog authorizes for that Agent, its Pi binding must be the exact qualified route, the installed launcher must expose the `loom:subagent-launch:v2` port, and the child must pass its readiness barrier. Qualification alone enables nothing — it only makes issuance on that route possible.
-
-### Route reachability (fail closed)
-
-Before a Pi parent's facade CLI emits a spawn batch, each distinct route the batch's children will launch on must answer `GET {baseUrl}/models`, where `baseUrl` comes from Pi's `models.json` in the active agent directory. The launch route is the generated agent render's binding: the Agent's catalog binding after the `model-routing.json` rules for the observed parent (`resolveAgentLaunchBinding` in `engine/src/core/model-routing.ts`, the one rule the renderer, `render-pi` and the gate share). A refused connection, timeout, error status or a listing without the model refuses the spawn with the route, URL and reason; a provider without an endpoint is `unconfigured` — typically a routing rule naming a provider `models.json` does not declare — and the refusal says to declare its `baseUrl` or route the child elsewhere. There is no fallback route. Nothing is published to the session, so `helper orchestration resume` re-emits the same batch once the route answers. A Pi parent is exactly `PI_CODING_AGENT=true`, which Pi's own entry points set before anything runs, so a Pi spawn batch is gated whether or not it announces a session id (one without is then refused at session publication). The decision is the pure `gateEmission` (`engine/src/core/spawn-emission-gate.ts`), whose input is a Pi parent's spawn batch (`PiSpawnBatch`: the parent the CLI resolves from its environment variables is a discriminated union on its harness, so a Claude Code parent does not type there and is never gated), over the route-gate facts (agent directory, `LOOM_ROUTE_GATE`, `model-routing.json`) it reads only when the gate asks for them (`engine/src/utils/emission-environment.ts`). The batch is parsed once for the emitting run (`parseSpawnBatch`, `engine/src/core/spawn-request-authority.ts`), and the gate and session publication both act on that parse: a request that does not parse, or that belongs to another run, refuses the batch — the first such request in order, before any route-gate fact is read.
-
-An authentication refusal (HTTP 401/403), or a 2xx whose body is not a model list, counts as reachable but leaves the served model unverified: Loom reads only `baseUrl` and never resolves or sends credentials; Pi authenticates the inference itself. By default the batch is admitted and each such route is reported twice: on stderr as one JSON line, `{"event":"loom-route-unverified","route":…,"url":…,"cause":"auth-refused"|"unreadable-listing","status":…}`, and in the emitted spawn-batch action itself as `unverifiedRoutes: [{"route":…,"url":…,"cause":…,"status":…}]`, so a reader of the action alone sees it too. A batch whose every route listed its model carries no `unverifiedRoutes` field. Setting `LOOM_ROUTE_GATE=strict` refuses such a route instead; any other value of the variable, a request authority that does not parse, or a malformed `model-routing.json` or `models.json` refuses the batch (ADR-0023, amended).
-
-A stored request whose recorded Pi binding is not its profile's current binding — today, a request recorded on a retired cloud route (a `RetiredPiTarget`) before ADR-0023 moved Pi to the local route — is refused as **retired**, without a probe: a child is launched on its profile's current binding, so no route change can make the recorded binding runnable, and `resume` re-emits the same refusal. The refusal is derived from the two bindings, not from any one retirement: `route <provider/model> (recorded under profile '<profile>') is retired: the request records <recorded binding>, and profile '<profile>' now issues <current binding>`. Start a fresh run.
-
-### Release decision (AD-11, per route)
-
-The local route is qualified *unconstrained emission*: vLLM accepts the frozen schemas but does not enforce them, so the engine validates every payload. Under the `per-route-engine-authoritative` release policy (preregistration `gcd-ad11-pilot-2`), a cell on that route is released as *unconstrained emission, engine-authoritative* once its calibration window is complete and the latency (AS-015) and escaped-defect (AS-016) guardrails pass; AS-004 does not apply. No window has completed: the route stopped serving in each of the three pilot-2 windows. On 2026-10-09 the operator released every local-route cell as unconstrained emission, engine-authoritative by decision (ADR-0023, decision 5), with AS-015 and AS-016 waived and unmeasured, never reported as passed. Runtime behaviour does not depend on the release: a Pi parent's reviewers, judges and refutation verifiers are issued the emission tools either way. See `calibration/grammar-constrained-decoding/README.md`.
+Qualification alone enables nothing; it only makes issuance on that route possible. The other conditions (launcher port, child readiness) and their refusals are in [Using Loom with Pi](pi-usage.md#emission-activation-readiness-errors-and-retry-budget).
 
 Route classes (exact vocabulary):
 
 - **Constrained emission** — the route accepts the tool schema and enforces the advertised JSON-schema constraints at sampling time.
-- **Unconstrained emission** — the route accepts the exact frozen schema bytes but does not enforce preferred strict sampling; the engine parser stays authoritative. This is the recorded class of the currently qualified route (`probes/emission-qualification/`, consolidated in `.claude/specs/2026-09-16-grammar-constrained-decoding/feasibility.md` §2): all four schemas were accepted at HTTP 200 with the production `strict: "prefer"` registration, and the wire parameters were byte-identical to the frozen bytes, but schema-invalid arguments were demonstrably representable.
+- **Unconstrained emission** — the route accepts the exact frozen schema bytes but does not enforce preferred strict sampling; the engine parser stays authoritative. This is the recorded class of the qualified route ([`probes/emission-qualification/`](../probes/emission-qualification/README.md)): all four schemas were accepted at HTTP 200 with the production `strict: "prefer"` registration, and the wire parameters were byte-identical to the frozen bytes, but schema-invalid arguments were demonstrably representable.
 - **Extraction-only** — the harness or route cannot support the exact tool schema; no unsupported tool is advertised and no schema is rewritten or provider-specific payload construction introduced.
 
-Qualification is bound to the route identity — provider, served model, and frozen schema digest. **Requalification triggers:** a served-model switch, a frozen-schema digest change, or a pi upgrade that changes tool serialization or resolver strict-sampling behavior.
+Qualification is bound to the route identity: provider, served model and frozen schema digest. **Requalification triggers:** a served-model switch, a frozen-schema digest change, or a Pi upgrade that changes tool serialization or strict-sampling behaviour. A test pins the qualified route to the model the retained probe recordings were captured against, so a catalog model switch cannot land without new evidence.
 
-Operator configuration: provider capability flags (strict/constrained sampling, tool-call parser, served model) remain **user-side configuration**. Loom's contribution to that configuration is documentation only — it ships the frozen schemas as its own contract but never configures a provider or rewrites a schema for one, and it never treats a capability flag, a provider name, or a successful local schema round-trip as live qualification. Missing access blocks the corresponding evidence; it is never a pass.
+Provider capability flags (strict or constrained sampling, tool-call parser, served model) are the operator's configuration. Loom never treats a capability flag, a provider name or a successful local schema round-trip as live qualification. Missing access blocks the corresponding evidence; it is never a pass.
 
-Two budget/observability facts matter for calibration: emission and extraction rejection share one existing request-slot attempt budget (a semantic rejection at attempt 1 may advance to one fresh attempt-2 spawn; attempt-2 failure is terminal; there is no same-spawn correction protocol), and pi's own in-child validation-retry loop (~2 extra model requests on refused tool arguments) sits outside that accounting and must be counted in the emission arm's latency budget. Raw tool-argument bytes are not exposed at the harness seam, so duplicate-key behavior is never reported as measured.
+### Release decision
 
-## Engine-issued requests
-
-Registered programs place model policy inside `AgentRequestAuthority` before publication. Each spawn request includes:
-
-- semantic profile id;
-- exact Pi and Claude bindings;
-- Agent role;
-- required Skill;
-- Context Packet digest;
-- fixed output slot.
-
-This removes repeated parent-side model lookups from Wave Gate and standalone review execution. Spawn hooks still validate the binding at the harness seam.
+The local route is released as unconstrained emission with the engine authoritative: the server accepts the frozen schemas but does not enforce them, so the engine validates every payload. The release is the operator's decision (ADR-0023, decision 5), not a measured result. No calibration window completed, and the latency and escaped-defect guardrails are waived and unmeasured, never reported as passed. Runtime behaviour does not depend on the release: a Pi parent's reviewers, judges and refutation verifiers are issued the emission tools either way. Policy, definitions and the window log: [`calibration/grammar-constrained-decoding/`](../calibration/grammar-constrained-decoding/README.md).
 
 ## Pi Agent generation
 
-Source Agent definitions use Loom/Claude-oriented frontmatter and package-root tokens. Run:
+Source Agent definitions use Claude Code frontmatter and package-root tokens. Run:
 
 ```bash
 bash scripts/sync-pi-agents.sh
 ```
 
-The script calls the model-profile renderer, lowers package paths, inlines declared Skills, and writes integrity-stamped definitions to:
+The script calls the model-profile renderer, which emits exact Pi provider, model and thinking frontmatter, lowers declared tools and package paths, inlines declared Skills, and writes integrity-stamped definitions to:
 
 ```text
 ${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/agents
@@ -128,9 +107,9 @@ At spawn time, Loom freshly renders the active source and byte-compares it with 
 Run sync after changing:
 
 - an Agent body or frontmatter;
-- an Agent’s declared Skills;
+- an Agent's declared Skills;
 - the model profile catalog or Agent policy;
-- shared path lowering behavior;
+- shared path lowering behaviour;
 - the package installation root.
 
 Then run `/reload` in Pi.
@@ -142,7 +121,7 @@ bun engine/src/cli.ts helper model-profiles agent --agent comment-analyzer
 bun engine/src/cli.ts helper model-profiles validate
 ```
 
-The first command resolves one Agent. The second checks the full source catalog and definitions. Run the model-profile and Pi resource tests after policy changes.
+The first command resolves one Agent. The second checks the full source catalog and definitions. Run the model-profile and Pi resource tests after policy changes. Every engine-issued spawn request carries its profile and both harness bindings ([Request and evidence authority](architecture.md#request-and-evidence-authority)), and the spawn hooks validate the binding again at the harness seam.
 
 ## Calibration model
 
@@ -169,7 +148,7 @@ A run with any `not-executed` case is `incomplete` and cannot be interpreted as 
 
 ## Running live Pi calibration
 
-Live execution is deliberately opt-in and is not a normal CI step:
+Live execution is opt-in and is not a CI step:
 
 ```bash
 LOOM_RUN_MODEL_CALIBRATION=1 bun scripts/run-model-calibration.ts \
@@ -178,17 +157,7 @@ LOOM_RUN_MODEL_CALIBRATION=1 bun scripts/run-model-calibration.ts \
   --output calibration/results/focused-review.json
 ```
 
-The runner:
-
-1. parses the corpus;
-2. resolves the selected semantic profile;
-3. lowers it to the exact Pi target;
-4. builds one engine-authored prompt per case;
-5. invokes Pi in JSON mode against the case revision/context;
-6. extracts the final assistant JSON array;
-7. records executed and not-executed outcomes.
-
-Generated result files belong under `calibration/results/` and are ignored by Git unless intentionally promoted as evidence elsewhere.
+The runner parses the corpus, resolves the profile to its exact Pi target, builds one engine-authored prompt per case, runs Pi in JSON mode against the case's revision, extracts the final assistant JSON array, and records executed and not-executed outcomes. Write result files under `calibration/results/` and commit one only when it is deliberately kept as evidence.
 
 ## Changing a profile
 

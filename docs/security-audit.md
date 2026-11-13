@@ -5,18 +5,37 @@ enumerates what it will cover, records what it proved, and reports the
 difference. This is the operator's page: how to start a run, what the run
 directory holds, what each operation refuses, and what to do with the result.
 
-For the method — lenses, sandbox evidence, the finding trichotomy — read
-`skills/security-audit/SKILL.md`. For why the program is code rather than prose,
-read `docs/deterministic-core.md` §8 and ADR-0066. `/security-audit`
-(`commands/security-audit.md`) is the same workflow expressed as a slash command.
-The operations table below is the authoritative one; the command keeps a short
-copy, and a test binds both to the traits table the engine routes on.
+For the method — enumerating units, lenses, sandbox evidence, the finding
+trichotomy — read `skills/security-audit/SKILL.md`. For why the program is code
+rather than prose, read [Guarantees and honest limits](architecture.md#guarantees-and-honest-limits) and ADR-0066.
+`/security-audit` (`commands/security-audit.md`) starts the same workflow and
+adds the parent session's duties. The operations table below is the only one,
+and a test binds it to the traits table the engine routes on.
+
+## Before you start
+
+**The CLI path.** Commands on this page are written
+`bun "$LOOM_DIR/engine/src/cli.ts" helper …`, where `LOOM_DIR` is the Loom
+plugin root (`LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"`, as `commands/loom.md` resolves
+it; [Operations](operations.md) says how to set it in your own shell). The
+lines the engine prints for the next step (`assign`, `nonce`, `status` and
+`disposition` each print one) need no substitution: they name the running
+package's `cli.ts`, the sandbox script and the lens files by absolute path,
+each as one shell-quoted word, so they run as printed from the audited
+repository or anywhere else.
+
+**A `confirmed` finding needs Linux.** A claim is published as `confirmed` only
+when a hunter demonstrated it in the bounded [sandbox](#the-sandbox), and the
+sandbox runs under `unshare`. On a host without `unshare` — macOS has none —
+the sandbox refuses to start, no receipt exists, and every claim stays
+`needs_validation`. Coverage accounting, leads and the report work everywhere;
+demonstrated findings do not.
 
 ## Start here
 
 <!-- wire-example: security-audit-start -->
 ```bash
-loom helper security-audit start --out ../audit-run-1 --repo . --profile standard --budget 24 <<'JSON'
+bun "$LOOM_DIR/engine/src/cli.ts" helper security-audit start --out ../audit-run-1 --repo . --profile standard --budget 24 <<'JSON'
 { "units": [
     { "refs": { "surface": "http-ingress", "boundary": "api-edge",
                 "subsystem": "auth", "attack_class": "injection" },
@@ -36,6 +55,13 @@ directory inside the repository can only ever hold source checks.
 seed list is the enumeration: one entry per `(surface, boundary, subsystem,
 attack_class[, lifecycle])` cell. A cell seeded twice is refused — duplicate
 seeds mean the enumerator produced the same unit twice, which is worth seeing.
+`start` records the units it is given; choosing them is the parent's work, and
+the skill's "Enumerating units" section says how.
+
+The selection lists each lens by its absolute path in the Loom plugin
+(`<plugin>/references/security-lenses/<LENS>.md`), and `lenses.json` keeps the
+same text under `rendered`. The lenses live in the plugin, not in the audited
+repository, so hand a hunter those paths as printed.
 
 `--source <sha>` pins the revision; without it the run reads `git rev-parse
 HEAD` through the one Git seam and records whether the worktree was dirty. A
@@ -100,11 +126,9 @@ ballots (`critical` or `advisory`); the decision they make — `confirmed`,
 and `publish`.
 
 Every **writing** operation also registers the run directory with the subagent
-guard's registry (under the protected subagent directory) — `start` after its
-fresh documents land, every other writer before it writes. Registration is
-idempotent; if the registry was wiped mid-audit (a `/tmp` cleaner, a reboot),
-the next write rebuilds it, and a write whose run cannot be registered is
-refused rather than left unprotected.
+guard's registry — `start` after its fresh documents land, every other writer
+before it writes — and is refused when it cannot (see
+[the run registry](#the-subagent-authority-guard)).
 
 ## Verification
 
@@ -132,13 +156,15 @@ transcript in the run must still hash to it.
    `assign`, `submit`, `defer` or `merge-critic` moves them, and `verify --from`
    then refuses the run as stale; `status` names a NEW run (the run name binds
    both digests). Start verification once no hunter of the wave is in flight
-   and the critic is merged, and import before the next ledger change.
+   and the coverage critic's answer is merged (`commands/security-audit.md`
+   says when the parent spawns it), and import before the next ledger change.
 2. **`status` prints the start command.** When confirmed claims await a bound
    ballot, `status` (and `status --json`, field `verification`) prints the exact
-   `loom helper orchestration start security-verification --runs-root
+   `bun '<plugin>/engine/src/cli.ts' helper orchestration start security-verification --runs-root
    '<run-dir>/verification-runs' --run 'run.verify-w<wave>-g<generation>-<id>'`
    command with its input on a here-document, and the import command; every
-   path is one shell-quoted word. Run them as printed. Claims are grouped into
+   path, the CLI's included, is absolute and one shell-quoted word. Run them
+   as printed. Claims are grouped into
    briefs of at most four; each brief is one verifier request on the
    `refutation` profile. When the current generation of a claim set is blocked
    or unimportable (a refused retry, a capture without its attestation),
@@ -155,8 +181,9 @@ transcript in the run must still hash to it.
    retry, told why; a refused retry blocks the run. `helper orchestration
    resume` drives the run to `done`, publishing `result.json`. Start and resume
    also re-register the audit with the subagent guard's registry.
-4. **Import it.** `loom helper security-audit verify --out <run-dir> --from
-   <verification-run>` authenticates the run (registered, under this audit,
+4. **Import it.** The import command `status` printed,
+   `bun "$LOOM_DIR/engine/src/cli.ts" helper security-audit verify --out <run-dir> --from <verification-run>`,
+   authenticates the run (registered, under this audit,
    issued against the current ledger and findings), requires `result.json` to
    be byte-identical to the replay of its captured evidence, and requires every
    ballot to match its capture attestation — a transcript with no attestation is
@@ -253,9 +280,9 @@ verifier attempt, never swept), `verify --from` requires it for every ballot,
 and `findings`/`status`/`publish` re-prove every ballot `verdicts.json` caches.
 
 This section is the one statement of the ADR-0067 guard and import-gate
-contract. `docs/operations.md`, `docs/architecture.md` and
-`docs/deterministic-core.md` point here and repeat only the invariant they rely
-on; an amendment edits this section.
+contract. `docs/operations.md` and `docs/architecture.md`
+(`architecture.md#guarantees-and-honest-limits`) point here and repeat only the
+invariant they rely on; an amendment edits this section.
 
 **Pi's import gate.** On Pi, the parent's `helper security-audit verify --from
 <run>` is checked before it runs, by the same proof `verify --from` itself runs
@@ -278,7 +305,7 @@ critic reassignment has archived an earlier one. `assign` prints the minted id:
 
 ```
 assigned <coverage-id> to owner <owner-id> at wave <n>
-nonce: loom helper security-audit nonce --out <run-dir> --artifact agents/<owner-id>/artifacts/<file>
+nonce: bun '<plugin>/engine/src/cli.ts' helper security-audit nonce --out '<run-dir>' --artifact agents/<owner-id>/artifacts/<file>
 ```
 
 The hunter settles under exactly that id — `agentId` and every check's
@@ -298,17 +325,38 @@ with **different** content is refused, naming every such fingerprint, before
 anything is written: omit it, or re-file it byte-identical — verification
 adjudicates the record the run already holds.
 
+A filing of a defect the run already holds under another fingerprint (same
+sink, same root cause) is absorbed into the held record, and `submit` says so:
+`absorbed <fingerprint>: same sink and root cause as <kept>, which the run
+keeps in its place`. Check the claim against the kept record.
+
+### Critic merge
+
+`merge-critic` reads the critic's document alone, or wrapped as
+`{ "critic": …, "reassignmentReasons": { "<coverage-id>": "<why>" }, "priorLeadOwners": { "<lead>": "<coverage-id>" } }`.
+The critic's own keys are closed, so only the wrapper can carry the two maps.
+Every id in `reassignIds` needs its reason, which is archived with the attempt.
+Every entry of `resolvedPriorLeads` must be an entry of a unit's `unresolved`
+list, verbatim, and `priorLeadOwners` names the coverage id of that unit.
+
+A proposed unit enters as `planned` at the wave merged (`--wave`, default the
+run's latest), unless its cell is already in the ledger. A reassigned unit
+archives its attempt, returns to `planned` one wave on, and its next `assign`
+mints a fresh owner id. A `blocked` unit keeps the ledger unsettled until a
+critic reassigns it: `defer` accepts only a `planned` unit.
+
 ### Receipt nonces
 
 A hunter cannot compute the nonce its receipt is bound to. The parent runs
 
 ```bash
-loom helper security-audit nonce --out ../audit-run-1 --artifact agents/<owner-id>/artifacts/<file>
+bun "$LOOM_DIR/engine/src/cli.ts" helper security-audit nonce --out ../audit-run-1 --artifact agents/<owner-id>/artifacts/<file>
 ```
 
 and hands the output to the hunter: the nonce, and the exact sandbox command —
-target, the owner's scratch, every limit, `--nonce`, and the redirect into that
-artifact — with nothing left to fill in but the command under test. The local
+the script's absolute path, target, the owner's scratch, every limit,
+`--nonce`, and the redirect into that artifact — with nothing left to fill in
+but the command under test. The local
 check then cites exactly `agents/<owner-id>/artifacts/<file>` as its
 `artifact`.
 
@@ -334,10 +382,17 @@ candidate; `quick` reserves one critic and no clean-critique pass. A budget that
 cannot fund reconnaissance, the critic and one validation call is refused at
 `start` with the upstream reason token.
 
+The engine checks the budget once, at `start`. It does not count spawns
+afterwards: the parent session keeps the count and stops assigning hunters
+before it spends the critic and validation reserve.
+
 Budget exhaustion is not cleanliness: an unreached unit becomes `deferred` with
-its reason, and the run reports `incomplete` with `critic_budget_exhausted` or
-`validation_budget_exhausted`. Two runs are comparable only when their profiles
-and budgets are.
+its reason, and the run reports `incomplete`. `defer --reason` takes any visible
+text. When a deferred unit's reason is one of the upstream tokens
+(`critic_budget_exhausted`, `validation_budget_exhausted`, and the two `start`
+refusal tokens) the run reports that token; otherwise it reports
+`validation_budget_exhausted` and marks it inferred. Two runs are comparable
+only when their profiles and budgets are.
 
 ## Profiles and lens breadth
 
@@ -394,7 +449,24 @@ bring changed evidence rather than rediscover it.
 
 ## The sandbox
 
-`scripts/security-sandbox.sh` is the only way a hunter demonstrates a result. It
+`scripts/security-sandbox.sh` is the only way a hunter demonstrates a result.
+
+**Platform.** The sandbox needs Linux `unshare` (user, mount, network and pid
+namespaces). On a host without it — macOS, for one — the script prints
+`security-sandbox: unshare is unavailable, so no bounded execution can be
+claimed` on stderr and exits 126 before it creates anything. Nothing reaches
+stdout, so the artifact holds no receipt, and `submit` refuses a `local` check
+that cites it. The hunter's rule is then to file the claim as
+`needs_validation` naming the missing capability, and a verifier demotes a
+`confirmed` claim that has no receipt. So on such a host no finding is
+published as `confirmed`.
+
+**Where the script is.** `scripts/security-sandbox.sh`, in the Loom plugin.
+`nonce` prints the command with the script's absolute path, so it runs as
+printed from the audited repository, which is a hunter's working directory.
+The engine recognises the script by file name under any path prefix.
+
+**What it enforces.** The script
 runs one command under `unshare` with only loopback networking, the target
 bind-remounted read-only, `ulimit` CPU, address-space, process and file-size
 limits, and a wall clock. The child's environment is emptied and repopulated
@@ -462,10 +534,15 @@ dishonest hunter is the independent verifier, not the receipt.
   says the limits held; a receipt is evidence that the run happened under those
   limits — bound to its artifact, not authenticated (see the nonce above) — not
   that the exploit is exploitable in production.
-- Hunters cannot edit through tools (the machine gate denies `Edit`, `Write` and
-  `MultiEdit`), but a shell write outside the sandbox is **recorded, not
-  prevented**: it is visible to the reviewer of the unit. Inside the sandbox the
-  target and home are read-only.
+- Hunters cannot edit through tools: the agent definition grants `Read`, `Glob`,
+  `Grep` and `Bash` only. A shell write outside the sandbox is **not
+  prevented**. Whether it is recorded depends on how the audit runs. The
+  hunter's Guarded Skill Machine (`machines/security-hunter-agent.machine.json`)
+  denies `Edit`, `Write` and `MultiEdit` a second time and records shell writes
+  in the evidence ledger, but a machine binds only while a Loom TaskGraph is
+  active (`machines/README.md`). A standalone `/security-audit` has none, so
+  there the machine is not bound and a shell write leaves no record. Inside the
+  sandbox the target and home are read-only either way.
 - The audit proves an exploit for the *frozen revision*. A dirty worktree is
   recorded; the report is about the commit, not the bytes on disk.
 - Verification is a panel of model reviewers on a different profile, not a

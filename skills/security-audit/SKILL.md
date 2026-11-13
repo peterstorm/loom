@@ -6,62 +6,100 @@ description: "This skill should be used when the user asks to 'audit security', 
 
 # Security Audit
 
-A security audit that can say **what it covered** and **what it proved** — not a
-scan that reports whatever looked suspicious and calls it a day.
+A security audit that can say what it covered and what it proved. This is the
+parent session's runbook; the hunter, verifier and critic agents do not load it.
+
+**Platform.** A `confirmed` finding needs a bounded sandbox run, and the sandbox
+needs Linux `unshare`. On a host without it (macOS has none) the sandbox refuses
+to start, so every claim stays `needs_validation`. The audit still accounts for
+coverage and reports leads there; say so in the summary.
+
+**Running an operation.** Each operation below is
+`bun "$LOOM_DIR/engine/src/cli.ts" helper security-audit <operation> --out <run-dir> …`,
+with `LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"`. The follow-up commands the engine
+prints (`assign`'s nonce line, `nonce`'s sandbox run, `status`'s verification
+start and import, `disposition`'s handoff) name that CLI, the sandbox script
+and the lens files by absolute path: run them as printed.
 
 Three properties separate this from a prompt that says "find vulnerabilities":
 
 1. **Coverage is enumerated and settled before the run may claim completeness.**
    Every entrypoint × attack class is a unit with an owner, a status and a
-   terminal disposition. A budget timeout is *not* cleanliness — an unsettled
-   unit leaves the run incomplete with its reason recorded.
-2. **Evidence is machine-checked, not asserted.** The machine gate denies a
-   hunter `Edit`, `Write` and `MultiEdit`; a shell write is recorded, not
-   prevented. The only way it demonstrates an exploit is a bounded sandbox run —
-   target read-only (the run aborts otherwise), home read-only exactly when the
-   receipt attests `homeReadOnly` — whose receipt says the limits actually held.
-3. **Severity is earned.** A finding nobody verified has **no severity at all** —
-   it is a `needs_validation` lead. Severity enters the record only at
+   terminal disposition. A budget timeout is not cleanliness: an unsettled unit
+   leaves the run incomplete with its reason recorded.
+2. **Evidence is machine-checked, not asserted.** A hunter has no `Edit`,
+   `Write` or `MultiEdit` tool; a shell write is not prevented (the doc's
+   "Honest limits" says when it is recorded). The only way a hunter
+   demonstrates an exploit is a bounded sandbox run — target read-only (the run
+   aborts otherwise), home read-only exactly when the receipt attests
+   `homeReadOnly` — whose receipt says the limits held.
+3. **Severity is earned.** A finding nobody verified has no severity at all: it
+   is a `needs_validation` lead. Severity enters the record only at
    verification, by a reviewer from a different catalog profile.
 
-## The attack taxonomy is vendored, not paraphrased
+## The attack taxonomy is vendored
 
-`references/security-lenses/*.md` is the Cloudflare `security-audit-skill`
-taxonomy, byte-identical to upstream at the commit pinned in
-`references/security-lenses/MANIFEST.json` (see `ATTRIBUTION.md`). Lenses are
-selected, never rewritten: `selectSecurityLenses` scores each against the
-repository's stack signals and always keeps ATTACK-CLASSES first. The drift test
-re-digests every file, so "vendored" stays true.
+`${CLAUDE_PLUGIN_ROOT}/references/security-lenses/*.md` is the Cloudflare
+`security-audit-skill` taxonomy, byte-identical to upstream at the commit
+pinned in `MANIFEST.json`; `LOOM-DELTAS.md` beside it holds what Loom adds.
+`start` selects lenses from the stack signals you give it, always keeps
+`ATTACK-CLASSES.md`, and caps the count by profile. The lenses live in the
+plugin, never in the audited repository, so `start` prints each selected lens
+by its absolute path.
 
-Read the selected lens files before hunting. They carry the per-class attack
-mechanics — the part that is genuinely hard to re-derive per run.
+## Enumerating units
+
+`start` records the units you seed; it does not find them. Upstream's
+reconnaissance prose is not vendored, so "Phase 1" in the lens files means this
+step. Coverage is only as good as the cells seeded here.
+
+1. **Signals.** Read the manifests and languages, then set each stack signal
+   truthfully: `languages`, `manifests`, `servesHttp`, `rendersClientSide`,
+   `drivesModelsOrTools`, `usesQueuesOrRpc`, `isolatesTenants`,
+   `deploysInfrastructure`, `hasNativeMemory`, `hasAppOrLocalIpc`,
+   `hasReleasePipelines`, `hasSharedResourcePressure`. They decide which lenses
+   are selected; a misspelled signal is refused.
+2. **Surfaces.** List every entrypoint where untrusted input arrives first:
+   routes, CLI arguments, queue consumers, webhooks, file and protocol parsers,
+   IPC endpoints, jobs that read external data. `surface` names one.
+3. **Boundaries.** For each surface, name each trust boundary the input crosses
+   on its way to a sink: anonymous to authenticated, tenant to tenant, user to
+   admin, application to interpreter, service to service. One cell per boundary
+   crossed, so a surface that crosses two boundaries is two cells.
+4. **Subsystem.** The module that owns the path. Split a large codebase per
+   subsystem, as `ATTACK-CLASSES.md` and each lens's "When to use this file"
+   header advise.
+5. **Attack class.** For each surface, boundary and subsystem, seed one cell per
+   class in `ATTACK-CLASSES.md` that can apply there. `attack_class` is a short
+   stable token (`injection`, `access-control`);
+   `ordinary_attack_class_block` names that class's entry. The list at the top
+   of `ATTACK-CLASSES.md` says which companion lens fits which target; add a
+   companion block as `<LENS.md>#<section>`, the lens file and the slug of one
+   of its headings (`WEB-PROTOCOL-AND-AUTH.md#browser-session-attack-classes`).
+   The engine stores the reference as text and does not resolve it, so name a
+   heading the lens has. A block you considered and left out goes in
+   `excluded_blocks` with its reason.
+6. **Starting paths.** Give the file where the input arrives, and the sink's
+   file when you know it. Paths are repository-relative, and at least one is
+   required. A hunter that cannot start from them reports `blocked`, so name
+   real handlers, not directories.
+
+Seed a cell you decide not to hunt with `status` `out_of_scope` or
+`not_applicable` and its reason in `unresolved`, so the report discloses it. A
+cell seeded twice is refused. Each planned unit costs one hunter invocation, and
+`start` refuses a budget that cannot seat the first wave beside the critic and
+validation reserve. The payload example is in the doc's
+[Start here](../../docs/security-audit.md#start-here).
 
 ## Phases
 
-The program is a closed action set, not prose to follow loosely:
-
-```
-start → assign → submit ─┬─ status → orchestration start security-verification
-        ↖ defer / merge-critic ┘        → spawn verifiers → resume → verify --from
-                                                                  → findings → publish → disposition
-```
-
-In one line: `start` freezes and enumerates, `assign`/`submit` move one unit
-through one hunter (`nonce` binds that hunter's sandbox receipt), `defer` and `merge-critic` settle what hunters did not,
-`status` prints the `security-verification` run the settled wave owes, its
-issued verifier spawns cast the ballots, `verify --from` imports them, they
-decide `confirmed`/`needs_validation`/`rejected` at `findings` and `publish`, and
-`disposition` derives the handoff. The authoritative operations table — inputs
-and every refusal — is in
-[`docs/security-audit.md`](../../docs/security-audit.md#operations).
-
-**Only the parent session runs these operations.** Hunters and verifiers are
-subagents; the subagent authority guard refuses them every writing operation and
-every write onto the run's authority files (ADR-0067 D6). A subagent returns its
-result as its final message, and the parent records it.
-
-`status` is read-only and answers the only question that matters before
-stopping: **is the ledger settled?**
+`start` freezes the revision and records the units. `assign` and `submit` move
+one unit through one hunter. The coverage critic checks the wave, and
+`merge-critic` and `defer` settle what hunters did not. `status` prints the
+`security-verification` run the settled wave owes; its verifier spawns cast the
+ballots and `verify --from` imports them. `findings` and `publish` adjudicate
+each claim as `confirmed`, `needs_validation` or `rejected`, and `disposition`
+derives the handoff.
 
 ## The three things that go wrong without this shape
 
@@ -82,127 +120,55 @@ claimed.
 
 ## Finding trichotomy
 
-Mirrors upstream `report-schema.json` exactly (differential-tested against the
-vendored validator):
+Mirrors upstream `report-schema.json` (differential-tested against the vendored
+validator):
 
 | Verdict | Severity | Meaning |
 |---------|----------|---------|
 | `confirmed` | loom `critical` \| `advisory`; upstream 5-level `overall_severity` recorded and refutable | Demonstrated, with a verification verdict from a different profile |
-| `needs_validation` | **none** | Plausible, unverified — stays in the report as a lead |
+| `needs_validation` | none | Plausible, unverified — stays in the report as a lead |
 | `rejected` | n/a | Retained with its refutation; never silently dropped |
 
-Every published record reaches disposition: `confirmed` is accepted for
-remediation, `needs_validation` is deferred on its named blocker, `rejected` is
-dismissed with its refutation. Upstream's `overall_severity` is kept as a
-*recorded opinion* that may not exceed the demonstrated impact, so a hunter
-cannot inflate by adjective.
+Upstream's `overall_severity` is kept as a recorded opinion that may not exceed
+the demonstrated impact, so a hunter cannot inflate by adjective.
 
 ## Invariants
 
-`INV-S1` a hunter's tool writes are denied by machine gate (shell writes are
-recorded, not prevented; sandboxed commands see the target read-only — the run
-aborts otherwise — and home read-only exactly when the receipt attests
-`homeReadOnly`) ·
-`INV-S2` one terminal disposition per unit · `INV-S3` confirmed requires a
-verdict from a different catalog profile · `INV-S4` `needs_validation` carries
-no severity · `INV-S5` budget exhaustion ≠ clean coverage · `INV-S6` reports
-derive from validated records, byte-identically.
+`INV-S1` a hunter's evidence is a sandbox receipt, and it has no write tool
+(property 2) · `INV-S2` one terminal disposition per unit · `INV-S3`
+confirmed requires a verdict from a different catalog profile · `INV-S4`
+`needs_validation` carries no severity · `INV-S5` budget exhaustion ≠ clean
+coverage · `INV-S6` reports derive from validated records, byte-identically.
 
 ## Handoff
 
-An audit **never patches**. `publish` writes the report; `disposition` derives
-one decision per published record — `confirmed` → `accepted`,
-`needs_validation` → `deferred`, `rejected` → `dismissed` — into
+An audit never patches; that is what keeps its coverage claims checkable.
+`disposition` derives one decision per published record (`confirmed` →
+`accepted`, `needs_validation` → `deferred`, `rejected` → `dismissed`) into
 `disposition.json`, which `/review-and-fix` reads under `standalone-disposition`.
-The decision set is a function of the records, so the report's handoff section
-and the file cannot describe different decisions. Keeping the audit read-only is
-what makes its coverage claims checkable after the fact.
 
 ## Running it
 
-Every operation takes `--out <run-dir>`; the run directory is the whole record.
-Keep it **outside** the audited repository: bounded local checks run in its
-`agents/<owner-id>/scratch`, and the sandbox refuses a scratch inside its target.
+[`docs/security-audit.md`](../../docs/security-audit.md#operations) owns the
+operations table, every refusal, the run directory and the verification steps.
+Read it before the first operation. This is only the order.
 
-<!-- wire-example: security-audit-start -->
-```bash
-loom helper security-audit start --out ../audit-run-1 --repo . \
-  --profile standard --budget 24 <<'JSON'
-{ "units": [ { "refs": { "surface": "http-ingress", "boundary": "api-edge",
-                          "subsystem": "auth", "attack_class": "injection" },
-               "starting_paths": ["src/api/login.ts"],
-               "ordinary_attack_class_block": "…",
-               "selected_companion_blocks": ["WEB-PROTOCOL-AND-AUTH.md#browser-session-attack-classes"] } ],
-  "signals": { "languages": ["ts"], "servesHttp": true } }
-JSON
+1. Choose a run directory outside the audited repository and pass it as
+   `--out` to every operation. The sandbox refuses a scratch inside its target.
+2. `start` with the enumerated units and signals on stdin. It prints the lens
+   selection. If a unit names a companion lens the profile cap trimmed, start
+   again with `--force` on a wider profile, or move that block to the unit's
+   `excluded_blocks`.
+3. Per planned unit: `assign --unit <coverage-id> --agent security-hunter-agent`,
+   spawn one hunter with the owner id `assign` printed, and `submit` the JSON it
+   returns. A hunter cannot compute the nonce its sandbox receipt is bound to;
+   the parent runs `nonce` and puts the output in the brief, unchanged.
+4. Continue in the order Phases gives: critic and `merge-critic`, `defer`,
+   `status` and the verification run it prints, `verify --from`, `findings`,
+   `publish`, `disposition`, and `status` once more.
 
-loom helper security-audit assign  --out ../audit-run-1 --unit <coverage-id> --agent security-hunter-agent --wave 1
-loom helper security-audit nonce   --out ../audit-run-1 --artifact agents/<owner-id>/artifacts/<file>
-loom helper security-audit submit  --out ../audit-run-1 < hunter-result.json   # a security-hunter-result
-loom helper security-audit merge-critic --out ../audit-run-1 < critic.json
-loom helper security-audit defer   --out ../audit-run-1 --unit <coverage-id> --reason budget_cut
-
-# Verification, once the wave's hunt has settled:
-loom helper security-audit status  --out ../audit-run-1        # prints the start command below, exactly
-loom helper orchestration start security-verification \
-  --runs-root <abs run-dir>/verification-runs --run run.verify-w<wave>-g<generation>-<id> <<'LOOM_VERIFICATION_START'
-<the input status printed, verbatim>
-LOOM_VERIFICATION_START
-#   → spawn each issued security-verifier-agent request verbatim; the harness captures its answer
-loom helper orchestration resume --runs-root <abs run-dir>/verification-runs --run run.verify-w<wave>-g<generation>-<id>   # until done
-loom helper security-audit verify  --out <abs run-dir> --from run.verify-w<wave>-g<generation>-<id>
-
-loom helper security-audit findings --out ../audit-run-1 [--json]
-loom helper security-audit publish --out ../audit-run-1
-loom helper security-audit disposition --out ../audit-run-1
-loom helper security-audit status  --out ../audit-run-1 [--json]
-```
-
-A companion block is named `<LENS.md>#<section>`: the lens file and the slug of
-one of its section headings (`#browser-session-attack-classes` is
-`## Browser-session attack classes` in `WEB-PROTOCOL-AND-AUTH.md`). The engine
-records the reference as text and does not resolve it, so name a heading the lens
-really has.
-
-`assign --agent` names a catalog agent; it prints `assigned <coverage-id> to
-owner <owner-id> at wave <n>`, and the hunter settles under exactly that owner id
-(`security-hunter-agent`, or `security-hunter-agent--2` after a reassignment).
-It also prints the `nonce` command for that owner. A hunter cannot compute its
-receipt's nonce: when it needs a bounded local run, run `nonce` for the artifact
-it will cite and put the output — the nonce and the filled-in sandbox command —
-in its brief.
-
-The hunter returns its own envelope,
-`{ "schemaVersion": 1, "kind": "security-hunter-result", "units": [...], "findings": [...] }`
-(`units` required, `findings` optional), and `submit` refuses any other. A
-fingerprint the run already holds, re-filed with different content, is refused
-before anything is written; a verbatim re-file is kept once. A filing of a defect
-the run already holds under another fingerprint (same sink, same root cause) is
-absorbed into the held record, and `submit` says so —
-`absorbed <fingerprint>: same sink and root cause as <kept>, …` — so check the
-claim against the kept record rather than assuming it was recorded.
-
-`merge-critic` reads the critic document alone, or wrapped as
-`{ "critic": …, "reassignmentReasons": { "<coverage-id>": "<why>" }, "priorLeadOwners": { "<fingerprint>": "<coverage-id>" } }`.
-Every id in `reassignIds` needs its reason — the archived attempt records it,
-and a reassignment without one is refused (`missing-reassignment-reason`) — and
-every resolved prior lead needs the coverage id of the unit that carries it.
-
-Verification ballots never travel on stdin. A verification run is issued
-against the ledger and findings as they stand, so start it only after the
-wave's hunt has settled (no hunter in flight, critic merged) and import it
-before the next `assign`/`submit`/`defer`/`merge-critic`; a run whose audit
-moved is refused as stale and `status` names its replacement. Each ballot's
-agent and profile come from the minted verifier request, so a hunter cannot
-cast one. On Pi, the parent's import is checked before it runs against the run's
-persisted capture attestations — the proof `verify --from` itself runs, so a
-restart or another session never strands a correctly captured run — with
-`--out` absolute and `--from` the run name, as `status` prints them.
-
-`status`, `findings` and `nonce` are read-only and stay available while the Pi
-runtime is skewed — they are what you read *while* recovering. Every other
-operation proves the runtime first.
-
-`publish` refuses on any publication blocker (an unverified confirmed claim, a
-ballot cast on the hunt profile, an unsettled ledger) instead of publishing a
-smaller truth than the run covered.
+Only the parent session runs operations. The authority guard refuses a
+subagent every writing operation and every write onto the run's authority
+files, so each returns its result as its final message.
+`commands/security-audit.md` holds the parent's spawning duties: each agent's
+brief, when the critic runs, and what to check before stopping.

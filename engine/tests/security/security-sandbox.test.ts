@@ -20,8 +20,10 @@ import {
   parseSandboxReceipt,
   renderSandboxInstructions,
   sandboxCommand,
+  sandboxScriptPath,
   sandboxWithinLimits,
   type SandboxLimits,
+  type SandboxRequest,
 } from "../../src/core/security-sandbox";
 import { ok } from "./fixtures";
 import { NONCE, aSandboxReceipt, boundReceipt } from "./sandbox-fixtures";
@@ -35,7 +37,21 @@ const parseOk = (stdout: string) => {
   return parsed.value;
 };
 
+/** A Loom package somewhere a hunter is not: the script is named under it. */
+const PACKAGE_ROOT = "/opt/loom";
+const SCRIPT = sandboxScriptPath(PACKAGE_ROOT);
+
 const limits = (overrides: Partial<SandboxLimits> = {}): SandboxLimits => ({ ...DEFAULT_SANDBOX_LIMITS, ...overrides });
+
+/** A request the script accepts; each case states only what it varies. */
+const sandboxArgs = (overrides: Partial<SandboxRequest> = {}): SandboxRequest => ({
+  script: SCRIPT,
+  target: "/repo",
+  scratch: "/scratch",
+  command: ["true"],
+  limits: limits(),
+  ...overrides,
+});
 
 describe("sandbox receipt", () => {
   it("parses the script's own output", () => {
@@ -169,9 +185,9 @@ describe("sandbox receipt", () => {
   });
 
   it("bounds the nonce grammar", () => {
-    expect(sandboxCommand({ target: "/repo", scratch: "/scratch", command: ["true"], limits: limits(), nonce: "0123456789abcdef" }).ok).toBe(true);
-    expect(sandboxCommand({ target: "/repo", scratch: "/scratch", command: ["true"], limits: limits(), nonce: "nothex" }).ok).toBe(false);
-    expect(sandboxCommand({ target: "/repo", scratch: "/scratch", command: ["true"], limits: limits(), nonce: "0123" }).ok).toBe(false);
+    expect(sandboxCommand(sandboxArgs({ nonce: "0123456789abcdef" })).ok).toBe(true);
+    expect(sandboxCommand(sandboxArgs({ nonce: "nothex" })).ok).toBe(false);
+    expect(sandboxCommand(sandboxArgs({ nonce: "0123" })).ok).toBe(false);
   });
 });
 
@@ -251,31 +267,29 @@ describe("judgeLocalReceipt", () => {
 
 describe("sandbox command", () => {
   it("names the script, every limit, and the command after --", () => {
-    const command = sandboxCommand({
-      target: "/repo",
+    const command = sandboxCommand(sandboxArgs({
       scratch: "/runs/audit-1/agents/hunter-a/scratch",
       command: ["node", "--version"],
       limits: limits({ cpuSeconds: 3, wallClockSeconds: 5 }),
-    });
+    }));
     if (!command.ok) throw new Error(JSON.stringify(command.error));
-    expect(command.value[0]).toBe("scripts/security-sandbox.sh");
+    // The script is named by its absolute path in the package: a hunter's
+    // working directory is the audited repository, not the Loom package.
+    expect(command.value[0]).toBe("/opt/loom/scripts/security-sandbox.sh");
     expect(command.value.slice(-3)).toEqual(["--", "node", "--version"]);
     expect(command.value).toContain("--scratch-mb");
     expect(command.value[command.value.indexOf("--cpu") + 1]).toBe("3");
   });
 
   it("refuses a scratch inside the target, an empty command, and bad limits", () => {
-    expect(sandboxCommand({ target: "/repo", scratch: "/repo/scratch", command: ["true"], limits: limits() }).ok).toBe(false);
-    expect(sandboxCommand({ target: "/repo", scratch: "/scratch", command: [], limits: limits() }).ok).toBe(false);
-    expect(
-      sandboxCommand({ target: "/repo", scratch: "/scratch", command: ["true"], limits: limits({ cpuSeconds: 0 }) }).ok,
-    ).toBe(false);
-    expect(
-      sandboxCommand({ target: "/repo", scratch: "/scratch", command: ["a\u0000b"], limits: limits() }).ok,
-    ).toBe(false);
+    expect(sandboxCommand(sandboxArgs({ scratch: "/repo/scratch" })).ok).toBe(false);
+    expect(sandboxCommand(sandboxArgs({ command: [] })).ok).toBe(false);
+    expect(sandboxCommand(sandboxArgs({ limits: limits({ cpuSeconds: 0 }) })).ok).toBe(false);
+    expect(sandboxCommand(sandboxArgs({ command: ["a\u0000b"] })).ok).toBe(false);
   });
 
   const BINDING = {
+    script: SCRIPT,
     nonce: NONCE,
     target: "/repo",
     scratch: "/runs/run-1/agents/security-hunter-agent/scratch",
@@ -293,10 +307,11 @@ describe("sandbox command", () => {
 
   it("binds a run to one artifact: the judge's own nonce, the owner's scratch, and the artifact's file", () => {
     const artifact = "agents/security-hunter-agent--2/artifacts/sqli.txt";
-    const bound = bindSandboxRun({ target: "/repo", runDir: "/runs/run-1/", owner: "security-hunter-agent--2", artifact });
+    const bound = bindSandboxRun({ packageRoot: PACKAGE_ROOT, target: "/repo", runDir: "/runs/run-1/", owner: "security-hunter-agent--2", artifact });
     expect(bound).toEqual({
       ok: true,
       value: {
+        script: SCRIPT,
         nonce: sandboxNonce(artifact),
         target: "/repo",
         scratch: "/runs/run-1/agents/security-hunter-agent--2/scratch",
@@ -313,25 +328,25 @@ describe("sandbox command", () => {
     ["a run directory inside the target", "/repo", "/repo/.audit/run-1"],
     ["a run directory that is the target", "/repo", "/repo"],
   ])("refuses %s, whose scratch the script would refuse", (_case, target, runDir) => {
-    const refused = bindSandboxRun({ target, runDir, owner: "security-hunter-agent", artifact: "agents/security-hunter-agent/artifacts/a.txt" });
+    const refused = bindSandboxRun({ packageRoot: PACKAGE_ROOT, target, runDir, owner: "security-hunter-agent", artifact: "agents/security-hunter-agent/artifacts/a.txt" });
     expect(refused.ok ? null : refused.error.kind).toBe("scratch-inside-target");
     expect(refused.ok ? "" : refused.error.message).toContain("outside the audited repository");
   });
 
   it("does not mistake a sibling directory sharing the target's prefix for the target", () => {
-    expect(bindSandboxRun({ target: "/repo", runDir: "/repo-audits/run-1", owner: "security-hunter-agent", artifact: "agents/security-hunter-agent/artifacts/a.txt" }).ok).toBe(true);
+    expect(bindSandboxRun({ packageRoot: PACKAGE_ROOT, target: "/repo", runDir: "/repo-audits/run-1", owner: "security-hunter-agent", artifact: "agents/security-hunter-agent/artifacts/a.txt" }).ok).toBe(true);
   });
 
   it("fills every placeholder from the binding: target, scratch, nonce, and the one artifact stdout lands in", () => {
     const text = renderSandboxInstructions(DEFAULT_SANDBOX_LIMITS, BINDING);
-    expect(text).toContain(`--target ${BINDING.target} --scratch ${BINDING.scratch}`);
+    expect(text).toContain(`  ${SCRIPT} --target ${BINDING.target} --scratch ${BINDING.scratch}`);
     expect(text).toContain(`> ${BINDING.artifactFile}`);
     expect(text).toContain(`Redirect the script's stdout to exactly ${BINDING.artifactFile}`);
     expect(text).toContain(`"${BINDING.artifact}"`);
     // No placeholder survives: a hunter cannot compute the nonce or guess the paths.
     expect(text).not.toMatch(/<repo>|<run>|<your-agent-id>/);
     // The printed command line is the argv `sandboxCommand` builds, flag for flag.
-    const words = ok(sandboxCommand({ target: BINDING.target, scratch: BINDING.scratch, command: ["true"], limits: DEFAULT_SANDBOX_LIMITS, nonce: NONCE }));
+    const words = ok(sandboxCommand(sandboxArgs({ target: BINDING.target, scratch: BINDING.scratch, nonce: NONCE })));
     const flags = words.slice(1, words.indexOf("--"));
     expect(text.replace(/\\\n\s*/g, "")).toContain(flags.join(" "));
   });

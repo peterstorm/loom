@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { sandboxNonce, sandboxReceiptPrefix } from "../../src/core/security-sandbox";
+import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { HUNTER_ENVELOPE } from "../security/fixtures";
 import { aSandboxReceipt } from "../security/sandbox-fixtures";
 import { aRun, assignUnit, isolateSubagentDir, removeRuns, startInvocation, startRun, unitIdFor, writeArtifact } from "./security-audit-harness";
@@ -250,8 +251,11 @@ const unshareAvailable = spawnSync("unshare", ["--map-root-user", "--mount", "--
 describe("nonce: the engine hands out the binding a hunter cannot compute", () => {
   it("assign tells the parent how to obtain one, for the owner it minted", async () => {
     const run = await assignedRun();
+    // Runnable as printed, from any directory: the executing package's own CLI
+    // by absolute path. No `loom` binary exists to run a `loom helper …` line.
     expect(run.stdout()).toContain(
-      `nonce: loom helper security-audit nonce --out '${run.out}' --artifact agents/security-hunter-agent/artifacts/<file>`,
+      `nonce: bun '${join(LOOM_PACKAGE_ROOT, "engine", "src", "cli.ts")}' helper security-audit nonce --out '${run.out}' ` +
+        "--artifact agents/security-hunter-agent/artifacts/<file>",
     );
   });
 

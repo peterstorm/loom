@@ -556,7 +556,10 @@ describe("specIndexUnavailableMessage", () => {
 });
 
 describe("CONTEXT.md binding", () => {
-  const context = readFileSync(new URL("../../../CONTEXT.md", import.meta.url), "utf8").replace(/\s+/gu, " ");
+  const context = readFileSync(
+    new URL("../../../docs/contexts/requirements-trace/CONTEXT.md", import.meta.url),
+    "utf8",
+  ).replace(/\s+/gu, " ");
 
   it("executes the claims the living language makes, rather than checking a phrase exists", () => {
     // "Four outcomes are decided by structure alone" — exactly four settled

@@ -41,6 +41,7 @@ import {
   verifierSlotIdentities,
   MAX_VERIFICATION_GENERATIONS,
   admitCachedBallots,
+  renderVerificationImport,
   renderVerificationStart,
   type AuditReference,
   type GenerationState,
@@ -334,8 +335,17 @@ describe("registration and the published result", () => {
 
   it("renders the start command with every path as one shell-quoted word", () => {
     const plan = planOf(["a/b:one"])!;
-    const command = renderVerificationStart(plan, "/tmp/my audit's runs/verification-runs");
-    expect(command.split("\n")[0]).toContain(`--runs-root '/tmp/my audit'\\''s runs/verification-runs' --run '${plan.run}'`);
+    const command = renderVerificationStart("/opt/my plugins/loom", plan, "/tmp/my audit's runs/verification-runs");
+    expect(command.split("\n")[0]).toBe(
+      "bun '/opt/my plugins/loom/engine/src/cli.ts' helper orchestration start security-verification " +
+        `--runs-root '/tmp/my audit'\\''s runs/verification-runs' --run '${plan.run}' <<'LOOM_VERIFICATION_START'`,
+    );
+  });
+
+  it("renders the import command through the same package, with the run directory and the run as quoted words", () => {
+    expect(renderVerificationImport("/opt/loom", "/tmp/my audit", "run.verify-w1-g1-0123456789ab")).toBe(
+      "bun '/opt/loom/engine/src/cli.ts' helper security-audit verify --out '/tmp/my audit' --from 'run.verify-w1-g1-0123456789ab'",
+    );
   });
 
   it("parses the D1 start input exactly", () => {

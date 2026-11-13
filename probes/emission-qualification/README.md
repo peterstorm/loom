@@ -1,5 +1,7 @@
 # FR-002 qualification probe — exact-route schema qualification (emission)
 
+> Frozen evidence, 2026-09-19; the feature shipped. Current behaviour: [Model profiles and calibration](../../docs/model-profiles-and-calibration.md#emission-routes-and-qualification). The record below is kept as written.
+
 **Spec:** `.claude/specs/2026-09-16-grammar-constrained-decoding/spec.md` (FR-002, AS-023, SC-007, AD-2)
 **Qualified route:** `desktop-vllm` (vLLM) · model `glm-5.3-flash-spark-tp2-v14` (the served spark-preset profile) · each schema's digest below
 **Run:** `node probes/emission-qualification/probe.mjs` (fixtures first: `npx tsx probes/emission-qualification/gen-fixtures.mts`). The run exits nonzero whenever `probe-report.json` records an error, including every malformed SSE chunk in a captured stream (a phase with one draws no raw-argument conclusion).

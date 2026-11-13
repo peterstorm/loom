@@ -1,280 +1,119 @@
 ---
 name: lint-project
 version: "1.0.0"
-description: "This skill should be used when the user asks to 'lint the project', 'run linter', 'check lint rules', 'setup linting', 'add lint rules', 'configure linter', 'check architecture boundaries', 'check purity', 'run boundary checks', or needs to set up or run loom's programmatic linter against their codebase. Handles both initial setup (creating rules/config) and execution (running the linter and reporting violations)."
+description: "Set up and run Loom's linter in a project: create the rules directory and config (import boundaries, pure modules, baselines), run the whole-project lint, report and fix violations. Not for ESLint or other linters, or for PR review (/review-pr)."
 ---
 
 # Lint Project
 
-Set up and run loom's architectural linter against any codebase. Enforces FC/IS boundaries, import direction, purity constraints, and code quality rules at edit time and on demand.
+Set up and run Loom's architectural linter against a codebase: import direction, purity of the functional core, totality, and code-quality rules, at edit time and on demand.
 
-**This is a SETUP + EXECUTION skill** — first ensure the project has lint rules configured, then run the linter and report findings.
+This skill is the workflow. The facts live in one place each:
 
-**The scoping model: everything is linted; exclusions are explicit and reasoned.**
-The runner reads every file with a lintable extension — tests, `.mts`/`.cts`/`.mjs`/`.cjs`
-modules and declaration files included — minus one `exclude` list in `config.json`
-whose every entry states why that path must not be checked. The functional core is
-pure by default inside its roots (`pureModules`), minus declared shells
-(`impureModules`, each with the I/O it does). Under `requireGovernance`, a file no
-boundary names is a violation, not an allow. Every list that subtracts from the
-linter's reach is checked for staleness on every full run.
+| What | Where |
+|---|---|
+| Rule schema, config fields, every shipped rule, baselines | `${CLAUDE_PLUGIN_ROOT}/lint-rules/README.md` |
+| The runner: scope, options, exit codes, how the rules directory is found | `references/runner.md` |
+| Boundary templates for TypeScript / JavaScript | `references/typescript.md` |
+| Boundary templates for Java / Spring | `references/java.md` |
 
-## References
-
-| Section | File | Purpose |
-|---------|------|---------|
-| TypeScript setup | `references/typescript.md` | TS/JS boundary patterns, pure modules, regex rules |
-| Java setup | `references/java.md` | Java/Spring boundary patterns, purity, DDD rules |
-| Runner | `references/runner.md` | `scripts/lint-project.ts`: scope, options, exit codes |
-
----
+The model to keep in mind: everything is linted, and every exclusion is explicit and carries its reason.
 
 ## Workflow
 
-### Step 1: Check for Existing Configuration
-
-Check if the project already has linter rules:
+### Step 1: Check for existing configuration
 
 ```bash
 ls .claude/linter/rules/ 2>/dev/null || ls .pi/linter/rules/ 2>/dev/null || echo "NO_RULES"
 ```
 
-The first directory found is the project's one rules directory — both Claude Code and Pi read it. `.pi/linter/rules/` is used only by a Pi-only project that has no `.claude/linter/rules/`; a project carrying both is refused by `lint-project` (delete one).
+- Rules exist → go to Step 4.
+- No rules → Step 2.
 
-- If rules exist → skip to **Step 4** (Run Linter)
-- If no rules → proceed to **Step 2** (Setup)
+### Step 2: Analyze the project's architecture
 
-### Step 2: Analyze Project Architecture
-
-Before creating rules, understand the codebase:
-
-1. **Detect language/framework:**
-   ```bash
-   ls tsconfig.json package.json pom.xml build.gradle* settings.gradle* 2>/dev/null
-   ```
-
-2. **Identify module structure:**
-   ```bash
-   # TypeScript
-   find . -name "package.json" -not -path "*/node_modules/*" | head -20
-   # Java
-   find . -name "pom.xml" -o -name "build.gradle*" | head -10
-   find src/main/java -type d -maxdepth 4 2>/dev/null
-   ```
-
-3. **Identify architectural layers** — look for patterns:
+1. Detect the language and build: `tsconfig.json`, `package.json`, `pom.xml`, `build.gradle*`.
+2. Find the module structure: workspace `package.json` files, Maven or Gradle modules, the directories under the source root.
+3. Identify the layers:
    - `domain/`, `types/`, `models/` → pure core
-   - `infra/`, `adapters/`, `repository/` → I/O boundary
+   - `orchestrator/` → shell that sequences ports and pure logic
+   - `infra/`, `adapters/`, `repository/` → I/O adapters
    - `api/`, `controllers/`, `handlers/` → entry points
-   - `shared/`, `utils/`, `common/` → shared utilities
+4. Ask the user before writing any boundary:
+   - "What are your layers, and which may import which?"
+   - "Which modules are the functional core and must be free of I/O?"
+   - "Are there import patterns you want to forbid?"
 
-4. **Ask the user:**
-   - "What are your architectural layers and their allowed dependencies?"
-   - "Which modules should be side-effect free (functional core)?"
-   - "Are there any specific import patterns you want to forbid?"
+Check the answers against the import graph that exists. A boundary the current code already violates blocks the next edit to each violating file; say so and let the user choose between fixing the imports first and a narrower boundary.
 
-### Step 3: Generate Configuration
+### Step 3: Generate the configuration
 
-Create the linter directory:
+1. Scaffold the rules directory: `bun ${CLAUDE_PLUGIN_ROOT}/scripts/lint-project.ts --init`.
+2. Read the language reference (both, in a mixed project) and the "Project Configuration" section of the README.
+3. Write `config.json` inside the rules directory, beside the rule files:
+   - `boundaries`, one per layer, each with a `description` of which way its imports point
+   - `requireGovernance`, the source roots inside which every file must belong to a boundary
+   - `pureModules`, the functional core's roots; `impureModules`, the shells inside them, each with the I/O it does
+   - `exclude`, vendored or generated paths, each with its reason
+   - `maxFunctionLines` and `excludeFromMaxLines` if the defaults do not fit
+4. Add a rule file for each project-specific pattern, and a disabling file for each default rule the user does not want (README: "Rule File Schema", "Disabling a rule").
+5. Record what predates the rules, so existing switches, copied blocks and wire casts do not block the next edit to their files:
 
-```bash
-mkdir -p .claude/linter/rules
-```
+   ```bash
+   bun ${CLAUDE_PLUGIN_ROOT}/scripts/lint-project.ts --write-baseline
+   ```
 
-**Read the appropriate reference for the project's language:**
-- TypeScript/JavaScript → read `references/typescript.md`
-- Java/Kotlin/Spring → read `references/java.md`
-- Both → read both
+   Show the user the counts it prints. The lists are debt that only shrinks.
 
-Generate `config.json` in the `rules/` directory with:
-- `boundaries` — import direction enforcement per module (optional `description`, and per-file
-  capability grants `perFileAllow` / `perFileExactAllow`, each `{ "allow": [...], "reason": "..." }`)
-- `requireGovernance` — path roots inside which every file must belong to a boundary
-- `pureModules` — the functional core's roots (`dir/`) and single files: every non-test file beneath is pure
-- `impureModules` — `[{ "path", "reason" }]` — the shells inside those roots, each with the I/O it does
-- `exclude` — `[{ "path", "reason" }]` — paths the linter must never read (vendored, generated)
-- `maxFunctionLines` — max function body length
-- `excludeFromMaxLines` — test file patterns to skip
-
-The parse is strict: an unknown key, a glob, an absolute path, or an exemption without a
-reason is refused by name — a typo never silently falls back to "check nothing".
-
-Generate additional `.json` rule files in the same `rules/` directory for project-specific regex patterns.
-
-**Key rules for config.json structure:**
-
-<!-- wire-example: linter-project-config -->
-```json
-{
-  "exclude": [
-    { "path": "<vendored-or-generated-path>/", "reason": "<why it must not be checked>" }
-  ],
-  "requireGovernance": ["<source-root>/"],
-  "boundaries": [
-    {
-      "module": "<path-prefix-with-trailing-slash>/",
-      "description": "<what the module is and which way its imports point>",
-      "allow": ["./", "<allowed-import-prefixes>"],
-      "deny": ["<forbidden-import-prefixes>"]
-    }
-  ],
-  "pureModules": ["<functional-core-root>/"],
-  "impureModules": [
-    { "path": "<functional-core-root>/<shell>.ts", "reason": "<the I/O it does>" }
-  ],
-  "maxFunctionLines": 50,
-  "excludeFromMaxLines": [".test.ts", ".spec.ts", "Test.java"]
-}
-```
-
-**To disable a default loom rule**, create a JSON override with the same `name` and `"enabled": false`:
-
-<!-- wire-example: linter-regex-rule -->
-```json
-{
-  "kind": "regex",
-  "name": "no-todo-fixme",
-  "description": "Disabled for this project",
-  "extensions": [".ts"],
-  "pattern": "x^",
-  "flags": "",
-  "fixHint": "disabled",
-  "enabled": false
-}
-```
-
-**Grandfather pre-existing totality sites, copied blocks and wire casts.** `switch-totality`
-and `no-wire-cast` apply to every TypeScript file without configuration, and `no-duplicate-block`
-to every TypeScript and JavaScript file, so an existing codebase's unproven
-switches, already-duplicated blocks and `JSON.parse(…) as T` sites would block the next agent edit to each file. Record them once, after
-`config.json` exists:
-
-```bash
-bun ${CLAUDE_PLUGIN_ROOT}/scripts/lint-project.ts --write-baseline
-```
-
-Show the user the counts it prints; the lists are debt that only shrinks.
-
-### Step 4: Run the Linter
-
-Run the shipped runner (see `references/runner.md` for its scope, options and exit codes):
+### Step 4: Run the linter
 
 ```bash
 bun ${CLAUDE_PLUGIN_ROOT}/scripts/lint-project.ts
 ```
 
-Or for a summary only:
+Add `--summary` for counts by rule. Other options and the exit codes are in `references/runner.md`.
 
-```bash
-bun ${CLAUDE_PLUGIN_ROOT}/scripts/lint-project.ts --summary
-```
-
-### Step 5: Report Results
-
-Present findings grouped by severity:
+### Step 5: Report results
 
 ```markdown
 ## Lint Results
 
 ### Boundary Violations (must fix)
-Import direction breaks — domain importing infra, etc.
+Import direction breaks — domain importing infra, an ungoverned module.
 
 ### Purity Violations (must fix)
-I/O operations in the functional core (under a pure root, not a declared shell).
+I/O in the functional core (under a pure root, not a declared shell).
 
 ### Code Quality
-- max-function-lines — decompose
-- no-non-null-assertion — prove the value exists (production code; tests are exempt)
-- no-unsafe-as-any — type the value instead of switching the checker off
-- no-wire-cast — bind `JSON.parse` / `.json()` output as `unknown` and pass it through a parser
-- no-catch-ignore — handle or rethrow; never an empty catch
-- no-null-return (Java) — Optional or an empty collection
+Grouped by rule, with counts.
+
+### Stale Entries
+Exclusions, roots, grants or baseline entries that no longer match anything.
 
 ### Summary
 Files scanned: N | Violations: N (boundary: X, purity: Y, quality: Z)
 ```
 
-### Step 6: Fix Violations (if requested)
+### Step 6: Fix violations (if requested)
 
-- **Boundary violations**: Move the import to the correct layer, or introduce a port/interface
-- **Purity violations**: Extract the I/O to a shell and inject it as a parameter/port; only a module whose JOB is the I/O belongs in `impureModules`, with its reason
-- **Ungoverned module**: Add the boundary its directory needs, stating which way its imports point
-- **Non-null assertions**: Add explicit null checks with error returns
-- **Wire casts**: Bind the value as `unknown` and write (or reuse) a parser that returns the typed value or an error; never replace `as T` with `as unknown as T`, which the rule refuses too
-- **Function length**: Extract helper functions
-
----
-
-## Constraints
-
-- MUST check for existing rules before creating new ones
-- MUST ask user about their architecture before generating boundaries
-- MUST place `config.json` inside the `rules/` directory (same dir as rule JSONs)
-- MUST validate JSON syntax before writing rule files
-- MUST NOT generate boundaries that conflict with the project's actual import graph
-- Config location: `.claude/linter/rules/config.json`, read by both harnesses (`.pi/linter/rules/config.json` only in a Pi-only project without `.claude/linter/rules/`; never both)
-- When running the linter, use `${CLAUDE_PLUGIN_ROOT}/lint-rules` as the default rules directory
-- When running the linter, use `${CLAUDE_PLUGIN_ROOT}/engine/src/linter/index.ts` as the linter entry
-
----
-
-## Editing the linter itself
-
-When the linter is what you are changing, two things behave differently from
-editing ordinary code:
-
-**The edit-time hook reads the INSTALLED plugin's rules, not your checkout.**
-`lintFile` resolves `lint-rules/` and `engine/src/linter/` from the loom
-installation the hook was loaded from, so a rule you just wrote in a worktree —
-or a `perFileExactAllow` grant you just added to a worktree's config — is
-invisible to the hook until it loads your build. A new rule therefore proves
-itself with `bun scripts/lint-project.ts` (which lints the checkout it lives in)
-plus its own test, never with "the hook stayed quiet".
-
-**A newer `config.json` can outrun the installed engine.** The strict parser
-refuses unknown keys, but only from the version that knows them: an older
-installed plugin reading a config that uses `exclude`, `impureModules`,
-`requireGovernance` or reasoned capability grants may misread it until the
-installed plugin is updated. Prove config changes with `bun scripts/lint-project.ts`
-from the checkout, as above.
-
-### Baselines: a rule that only subtracts violations silently stops applying
-
-Grandfathered baselines (`switch-totality`,
-`exhaustive-discriminant-branching`, `no-duplicate-block`, `no-wire-cast`) excuse sites that predate the rule, and
-their failure mode is silence: a renamed scrutinee or a deleted switch leaves an
-entry protecting nothing. The lists are project data in `config.json`
-(`switchTotalityBaseline`, `discriminantBranchingBaseline`, `duplicateBlockBaseline`, `wireCastBaseline`), keyed relative to
-the project root and written by `scripts/lint-project.ts --write-baseline`.
-`scripts/lint-project.ts` reports stale entries in any project and exits
-non-zero on them; loom asserts its own lists against its live tree in
-`tests/linter/programmatic/totality-baseline.test.ts`. A baseline-backed rule
-registers in `baselineOwners` (`engine/src/linter/programmatic/index.ts`) and
-joins both the drift report and `--write-baseline`.
-
----
+- **Boundary violation**: move the import to the correct layer, or introduce a port.
+- **Ungoverned module**: add the boundary its directory needs, stating which way its imports point.
+- **Purity violation**: extract the I/O to a shell and pass it in as a parameter or port. Only a module whose job is the I/O belongs in `impureModules`, with its reason.
+- **Unproven switch**: `match(x)…exhaustive()`, or end the switch with `default: return assertNever(x)`.
+- **Wire cast**: bind the value as `unknown` and write or reuse a parser that returns the typed value or an error. `as unknown as T` is refused too.
+- **Non-null assertion**: an explicit check that returns an error.
+- **Empty catch**: handle or rethrow.
+- **Function length**: extract helper functions.
+- **Stale entry**: delete it; for baselines, re-run `--write-baseline`.
 
 ## Troubleshooting
 
-**"Rule file config.json: 'kind' must be a non-empty string"**
-- The loom loader wasn't skipping `config.json` when scanning for rules. Fixed in loader.ts — `loadRulesFromDir` now filters out `config.json`.
+**A boundary rule does not fire.** `module` must match the file's project-relative path with forward slashes, and end in `/` for a directory. A file under no boundary's `module` is not checked at all unless it sits under a `requireGovernance` root.
 
-**Boundary rule not firing:**
-- Check that `module` path matches the file's repo-relative path (forward slashes)
-- Check that the resolved import specifier starts with a `deny` entry
-- Relative imports (`./foo`, `../bar`) are resolved against the importing file's directory
+**An import is refused that no `deny` names.** `allow` is a closed list: inside a governed module, an import matching no `allow` entry is a violation. Add the prefix to `allow`, or grant it to one file with `perFileAllow` and a reason.
 
-**Pure module false positive on `new Date(arg)`:**
-- The purity checker flags only `new Date()` with no argument; `new Date(value)` is deterministic
-- A banned global named inside a string or a trailing `//` comment is not a call and is not flagged
+**No violations, but the architecture is wrong.** Without `boundaries` and `pureModules` the two architecture rules check nothing. Declare them, and set `requireGovernance` so a file in a directory no boundary names fails instead of passing.
 
-**A file excluded, or a module declared impure, that should not be:**
-- Every `exclude` and `impureModules` entry carries its reason — read it; an entry whose
-  reason no longer holds is deleted, and `lint-project` reports entries that match nothing
+**A file is excluded, or a module declared impure, that should not be.** Every `exclude` and `impureModules` entry carries its reason. Read it; delete the entry if the reason no longer holds.
 
-**No violations found but architecture is wrong:**
-- Boundaries use an allowlist — add explicit `deny` entries for forbidden patterns
-- Ensure `module` paths have trailing `/` for directory prefix matching
-- Set `requireGovernance` so a file in a directory no boundary names fails instead of passing
-- The shipped defaults govern nothing and hold nothing pure: a project without `boundaries` /
-  `pureModules` gets neither rule's protection
+**The config is refused.** The parse is strict: an unknown key, a glob, an absolute path, or an exemption without a reason is named in the error. `config.json` goes inside the rules directory; one level up it is never read.

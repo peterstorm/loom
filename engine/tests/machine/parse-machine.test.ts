@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { AGENT_CATALOG } from "../../src/core/model-profiles";
+import { machineToMermaid } from "../../src/machine/mermaid";
 import { parseMachine, parseMachineJson } from "../../src/machine/parse-machine";
 
 const valid = {
@@ -210,6 +211,19 @@ describe("shipped machine definitions", () => {
       const result = parseMachineJson(readFileSync(join(directory, file), "utf-8"));
       expect(result, file).toMatchObject({ ok: true, value: { agent: file.replace(/\.machine\.json$/, "") } });
       if (result.ok) expect(AGENT_CATALOG, file).toHaveProperty(result.value.agent);
+    }
+  });
+
+  // machines/README.md documents every shipped machine under a heading named
+  // for its agent, with the diagram machineToMermaid derives from the file.
+  it("documents each shipped machine in machines/README.md with its generated diagram", () => {
+    const directory = join(__dirname, "../../../machines");
+    const readme = readFileSync(join(directory, "README.md"), "utf-8");
+    for (const file of readdirSync(directory).filter((name) => name.endsWith(".machine.json"))) {
+      const result = parseMachineJson(readFileSync(join(directory, file), "utf-8"));
+      if (!result.ok) throw new Error(`${file}: ${result.error}`);
+      expect(readme, file).toContain(`\n## ${result.value.agent}\n`);
+      expect(readme, file).toContain(machineToMermaid(result.value));
     }
   });
 });

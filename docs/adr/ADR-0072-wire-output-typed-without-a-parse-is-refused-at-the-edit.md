@@ -1,7 +1,7 @@
 # ADR-0072: Wire output typed without a parse is refused at the edit
 
 ## Status
-Proposed (2026-11-12). Implements the immediate-tier half of Q6 of the deterministic-implementation plan's
+Accepted (2026-11-12). Implemented in PR #160. Implements the immediate-tier half of Q6 of the deterministic-implementation plan's
 Q-track.
 
 ## Context

@@ -10,8 +10,9 @@
 ## Language
 
 **Order**:
-{A concise description of the term — one sentence max. Define what it IS, not what it does.}
+{A concise description of the term — one or two sentences. Define what it IS, not what it does.}
 _Avoid_: Purchase, transaction
+_Mechanics_: {Optional. How the term's rule is carried out, when a reader needs that to use the term correctly.}
 
 **Invoice**:
 A request for payment sent to a customer after delivery.
@@ -40,7 +41,8 @@ _Avoid_: Client, buyer, account
 
 - **Be opinionated.** When multiple words exist for the same concept, pick the best one and list the others under _Avoid_.
 - **Flag conflicts explicitly.** If a term is used ambiguously, call it out in "Flagged Ambiguities" with a clear resolution.
-- **Keep definitions tight.** One sentence max. Define what it IS, not what it does.
+- **Keep definitions tight.** One or two sentences. Define what it IS, not what it does.
+- **`_Mechanics_:` is optional.** A term may end with one `_Mechanics_:` line, after `_Avoid_:`, stating how its rule is carried out: what happens, in what order, with what effect. It keeps the definition itself short. Leave it out when the definition is enough.
 - **Show relationships.** Use bold term names and express cardinality where obvious.
 - **Only include terms specific to this project's context.** General programming concepts (timeouts, error types, utility patterns) don't belong even if the project uses them extensively. Before adding a term, ask: is this a concept unique to this context, or a general programming concept? Only the former belongs.
 - **Group terms under subheadings** when natural clusters emerge. If all terms belong to a single cohesive area, a flat list is fine.
@@ -68,6 +70,8 @@ _Avoid_: Client, buyer, account
 - **Fulfillment → Billing**: Fulfillment emits `ShipmentDispatched`; Billing generates invoices
 - **Ordering ↔ Billing**: Shared kernel for `CustomerId` and `Money`
 ```
+
+Loom's own repository is an example of the multi-context form. The root `CONTEXT.md` holds the core vocabulary and is always read. `CONTEXT-MAP.md` lists six areas, each with its own file at `docs/contexts/<area>/CONTEXT.md` (for example `docs/contexts/review/CONTEXT.md`), and says when to read each one. A term is defined in exactly one file, and a new term goes into the file of the area it belongs to.
 
 ## When to Create
 

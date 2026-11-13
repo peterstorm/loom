@@ -15,9 +15,9 @@ Read-only verification that implementation aligns with specification. Mechanical
 
 ---
 
-## Process — FOLLOW EXACTLY
+## Process
 
-Every step below that says "Run:" is a command you MUST execute via Bash/Grep/Read tool. Do NOT skip tool calls. Do NOT assess from memory alone.
+Every "Run:" below is a command to execute with Bash, Grep or Read. Gather evidence with tool calls; never assess from memory.
 
 ### Which path you are on — decide ONCE, here
 
@@ -37,7 +37,7 @@ Two execution paths exist, and every step below depends on which one you are on.
 
 ### Step 1: Load artifacts and freeze scope authority
 
-**Registered Wave Gate (your task carries `LOOM_CONTEXT_SECTION_COMMAND`): Run this decoder.** It reads the immutable packet only, through the engine's digest-verifying section reader; do NOT read `active_task_graph.json` or the packet file itself on this path. Substitute the exact `LOOM_CONTEXT_SECTION_COMMAND` value from your task for `<LOOM_CONTEXT_SECTION_COMMAND>`.
+**Registered Wave Gate (your task carries `LOOM_CONTEXT_SECTION_COMMAND`): Run this decoder.** It reads the immutable packet only, through the engine's digest-verifying section reader. On this path the packet is the only scope authority: do not read `active_task_graph.json` or the packet file itself. Substitute the exact `LOOM_CONTEXT_SECTION_COMMAND` value from your task for `<LOOM_CONTEXT_SECTION_COMMAND>`.
 
 ```bash
 <LOOM_CONTEXT_SECTION_COMMAND> --section wave-review-authority | bun -e '
@@ -49,7 +49,7 @@ console.log(JSON.stringify({specFile: authority.specFile, wave: authority.wave, 
 '
 ```
 
-Save the exact `specFile`, `wave`, and `tasks` values. Each Task contains `completionAnchors`, `contributions`, `declaredFiles`, and `modifiedFiles`. This roster is immutable authority even if the live graph changes later.
+Save the exact `specFile`, `wave`, and `tasks` values. Each Task contains `completionAnchors`, `contributions`, `declaredFiles`, and `modifiedFiles`. This roster is immutable authority even if the live graph changes later. `contributions` are traceability only and never enter completion scope.
 
 **Then read the Requirement Coverage Projection from the same packet.** The engine has already joined the Spec Index against this exact roster; Steps 2, 4, 5, 6 and 7 consume that projection instead of re-deriving it.
 
@@ -64,7 +64,9 @@ The projection is engine-derived authority, not advice, and it states its own ru
 - **`Decided by`** — `engine` means the row is settled: copy it into your report verbatim, do not re-litigate it. `agent` means an assessment is still owed **regardless of severity**.
 - **`Severity`** — how bad the structural fact is. A `MEDIUM` (drifted) or `CRITICAL` (altered hash) row can still be `Decided by: agent`; severity never excuses you from reading the code.
 
-The projection's required-footer section gives every settled `CRITICAL:` line and its last line states their count. **Copy every settled line verbatim and do not fall below the count**—capture enforces both Finding identity and cardinality.
+This is the one rule for settled rows, and every later step relies on it: copy them verbatim and never overturn or soften one. The projection decided them from structure, so reading files cannot change them. If you believe a settled row is wrong, the defect is in the engine's join or in the graph; say so as a note in the summary.
+
+Copy every line from the projection's “Required settled CRITICAL footer lines” section verbatim into your footer, and do not fall below the count its last line states. Capture enforces Finding identity as well as the count floor; findings of your own may be added.
 
 If it renders `UNAVAILABLE` you are on the **Unprojected** path: nothing is settled, and the projection carries no Requirement text, no scenario roster, no exclusion list and no glossary.
 
@@ -101,7 +103,7 @@ Save the exact `specFile`, `wave`, and `tasks` from this one output. The TaskGra
 
 ### Step 2: Take the Requirement checklist
 
-**Projected:** the projection's rows ARE the checklist — one row per Requirement Completion Claim in the frozen roster, already joined against the Spec Index. Do not grep the spec for identifiers and do not re-count: the row set is engine-derived and complete by construction. `contributions` are partial traceability evidence only and never enter it.
+**Projected:** the projection's rows are the checklist — one row per Requirement Completion Claim in the frozen roster, already joined against the Spec Index. Do not grep the spec for identifiers and do not re-count: the row set is engine-derived and complete by construction.
 
 Carry each row forward with both of its facts:
 
@@ -115,16 +117,18 @@ Carry each row forward with both of its facts:
 
 ### Step 3: Get changed files (deterministic)
 
-**Run:**
+**Registered Wave Gate:** the changed files are the union of every frozen Task's `modifiedFiles` and `declaredFiles` from Step 1, and each Task's `declaredFiles` assigns files to Tasks. Do not run Git or query mutable task fields: the packet already froze this list.
+
+**Standalone `/spec-check`: Run:**
 ```bash
 git diff --name-only origin/main...HEAD
 ```
 
-For a registered Wave Gate, use only each frozen Task's `declaredFiles` for Task-to-file assignment; do not query mutable task fields. For standalone fallback, `declaredFiles` was normalized from the live graph in Step 1.
+`declaredFiles` was normalized from the live graph in Step 1.
 
 ### Step 4: Coverage check — per-Requirement verdicts
 
-**SETTLED rows (`Decided by: engine`) — copy, do not assess.** The projection decided these from structure, and reading files cannot change them. Emit each verbatim:
+**SETTLED rows (`Decided by: engine`).** Emit each as its projected detail dictates:
 
 | Projected detail | Emit | Severity |
 |---|---|---|
@@ -133,9 +137,7 @@ For a registered Wave Gate, use only each frozen Task's `declaredFiles` for Task
 | the Task declared no artifacts | `<anchor>: FAIL — the Task declared no artifacts` | CRITICAL |
 | the Task modified no files | `<anchor>: FAIL — the Task modified no files` | CRITICAL |
 
-You MUST NOT overturn a settled row. If you believe one is wrong, the defect is in the engine's join or in the graph, and it belongs in the summary as a note — not as a softened verdict.
-
-**PENDING rows (`Decided by: agent`) — assess.** This includes rows already carrying a severity: a `MEDIUM` drifted row and a `CRITICAL` altered-hash row are both still yours to assess, and the drifted one *most* of all, because its Requirement text moved after the claim was made.
+**PENDING rows (`Decided by: agent`) — assess.** This includes rows already carrying a severity: a `MEDIUM` drifted row and a `CRITICAL` altered-hash row are both still yours to assess, and the drifted one most of all, because its Requirement text moved after the claim was made.
 
 1. **Read the Requirement text.** On the Projected path the row's `Requirement` column carries it. On the Unprojected path, read it from the spec at `specFile`.
 2. **Read the relevant source file(s)** — use the changed files list and the Task's `declaredFiles`/`modifiedFiles`. Use Read tool.
@@ -143,11 +145,9 @@ You MUST NOT overturn a settled row. If you believe one is wrong, the defect is 
 4. **Emit verdict**: `<anchor>: PASS` or `<anchor>: FAIL — <specific reason>`, and for a drifted or altered-hash row also emit the projection's severity line beside it.
 
 **Rules:**
-- MUST emit exactly one verdict line per checklist row — settled and pending together. The projection's row count is the expected total.
-- "Soft compliance" is not PASS. If spec says "MUST do X" and code doesn't do X, it's FAIL.
-- MUST/SHALL requirements that are unimplemented = CRITICAL
-- SHOULD requirements that are unimplemented = HIGH
-- MAY requirements that are unimplemented = MEDIUM
+- Emit exactly one verdict line per checklist row, settled and pending together. The projection's row count is the expected total.
+- "Soft compliance" is not PASS. If the spec says "MUST do X" and the code does not do X, it is FAIL.
+- An unimplemented MUST/SHALL requirement is CRITICAL, SHOULD is HIGH, MAY is MEDIUM.
 
 **Then emit both unclaimed lists from the projection** — Functional Requirements and Acceptance Scenarios — each entry as CRITICAL: a Requirement or Scenario whose completion has no planned owner at any Wave. Requirement Contributions are deliberately not completion ownership; if a listed item has contributing work planned, say so beside the finding rather than dropping it.
 
@@ -171,7 +171,7 @@ The convention is `it('AS-001: …')`, or `@DisplayName("AS-001: …")` in JUnit
 
 If the unclaimed section says every scenario is claimed, Step 5 still checks every claimed `AS-NNN` row. It is empty only when the projection contains neither claimed AS rows nor unclaimed scenarios.
 
-**This step does not re-grade what Step 4 already settled.** Every identifier in the unclaimed-scenario roster already has its exact `CRITICAL:` line in the projection's required-footer section and in the settled floor. Coverage is an additional fact; never replace or downgrade that CRITICAL.
+Every identifier in the unclaimed-scenario roster already has its settled `CRITICAL:` line from Step 4. Coverage is an additional fact reported beside it.
 
 **Unprojected:** grep the spec for `Given .* When .* Then` lines and assess each, as before.
 
@@ -211,7 +211,7 @@ A Task that *claimed* an `OOS-NNN` as completed was already settled CRITICAL in 
 
 ### Per-Requirement Verdicts (MANDATORY)
 
-`Decided by` is copied from the projection, not judged by you, so a reader can tell a structural refutation from an assessment without re-running anything.
+`Decided by` is the projection's own column, so a reader can tell a structural refutation from an assessment without re-running anything.
 
 ```
 ## Requirement Coverage — Wave {N}
@@ -232,7 +232,7 @@ Total: {X}/{Y} PASS ({Z} FAIL) — {S} settled by the engine, {A} assessed.
 Settled CRITICAL floor: {F}. Reported CRITICAL: {R}.
 ```
 
-On the Unprojected path every row reads `agent` and the summary MUST say why no structural verdicts were available. `Decided by` is the projection's own column, not a judgement you make: copy it.
+On the Unprojected path every row reads `agent`, and the summary says why no structural verdicts were available.
 
 ### Per-Scenario Verdicts
 
@@ -275,9 +275,9 @@ On the Unprojected path every row reads `agent` and the summary MUST say why no 
 **Verdict:** PASSED | BLOCKED
 ```
 
-### Machine-Readable Footer (MANDATORY — parsed by hooks)
+### Machine-readable footer (required; parsed by hooks)
 
-The SubagentStop hook parses these exact patterns from the transcript. Emit them **exactly** as shown — no markdown formatting, no indentation, no code fences around them.
+The SubagentStop hook parses these exact patterns from the transcript. Emit them exactly as shown, with no markdown formatting, indentation or code fence around them.
 
 ```
 SPEC_CHECK_WAVE: {N}
@@ -292,12 +292,10 @@ SPEC_CHECK_HIGH_COUNT: {N}
 SPEC_CHECK_VERDICT: PASSED | BLOCKED
 ```
 
-**Rules for machine-readable lines:**
-- Each `CRITICAL:` / `HIGH:` / `MEDIUM:` line MUST start at column 0 (no leading spaces)
-- One finding per line, no line breaks within a finding
-- `SPEC_CHECK_CRITICAL_COUNT` and `SPEC_CHECK_HIGH_COUNT` MUST match their respective CRITICAL/HIGH lines; MEDIUM lines have no count marker
-- Even if counts are zero, emit the SPEC_CHECK_CRITICAL_COUNT, SPEC_CHECK_HIGH_COUNT, and SPEC_CHECK_VERDICT lines — all three are required, and a missing marker fails evidence capture rather than reading as zero
-- These lines appear AFTER the human-readable report, as the very last output
+- Each `CRITICAL:`, `HIGH:` and `MEDIUM:` line starts at column 0 and holds one finding with no line break.
+- `SPEC_CHECK_CRITICAL_COUNT` and `SPEC_CHECK_HIGH_COUNT` equal the number of `CRITICAL:` and `HIGH:` lines; `MEDIUM:` lines have no count marker.
+- `SPEC_CHECK_CRITICAL_COUNT`, `SPEC_CHECK_HIGH_COUNT` and `SPEC_CHECK_VERDICT` are all required, also when the counts are zero. A missing marker fails evidence capture; it is never read as zero.
+- The footer comes after the human-readable report, as the last output.
 
 ---
 
@@ -314,16 +312,6 @@ SPEC_CHECK_VERDICT: PASSED | BLOCKED
 
 ## Constraints
 
-- Read-only: NEVER modify code or spec
-- Findings only: Report issues, don't fix them
-- Spec is source of truth: Code must align to spec, not vice versa
-- CRITICAL blocks waves: Non-negotiable
-- MUST emit one verdict per in-scope Requirement Completion Claim — no skipping
-- Registered Wave Gate scope comes only from `LOOM_CONTEXT_PATH`; never reread mutable `active_task_graph.json`
-- The Requirement Coverage Projection is engine-derived authority: `Decided by: engine` rows are copied, never overturned or softened
-- Severity is not settlement. A `MEDIUM` or `CRITICAL` row that reads `Decided by: agent` still needs you to read the code
-- Copy every line from the projection's “Required settled CRITICAL footer lines” section verbatim; capture enforces Finding identity as well as the count floor, while still allowing additional Agent findings
-- An UNAVAILABLE projection puts you on the Unprojected path: nothing is settled, and the glossary and Out-of-Scope list must be read from the specification — say so in the summary
-- Requirement Contributions are traceability only and never enter completion scope
-- MUST use tool calls (Grep, Read, Bash) for evidence — no assessing from memory, and no re-deriving what the projection already decided
-- Different from code review: Alignment vs quality are separate concerns
+- Read-only: never modify code or the spec. Report issues; do not fix them.
+- The spec is the source of truth: code aligns to the spec, not the reverse.
+- A CRITICAL blocks the Wave.

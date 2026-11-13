@@ -119,12 +119,12 @@ describe("the repository's Bun pin", () => {
 
   it("is the only Bun release the operator docs and workflows hard-code", () => {
     const release = pin.trim();
-    expect(pinConsumers).toEqual(expect.arrayContaining(["README.md", join("docs", "operations.md"), join(workflowsDir, "ci.yml")]));
+    expect(pinConsumers).toEqual(expect.arrayContaining(["README.md", join("docs", "development.md"), join(workflowsDir, "ci.yml")]));
     for (const path of pinConsumers) expect(hardCodedBunVersions(read(path)).filter((found) => found !== release), path).toEqual([]);
   });
 
   it("is named by file in the docs that state the Bun requirement", () => {
-    for (const doc of ["README.md", "docs/operations.md"]) expect(read(doc), doc).toContain("`.bun-version`");
+    for (const doc of ["README.md", "docs/development.md"]) expect(read(doc), doc).toContain("`.bun-version`");
   });
 });
 

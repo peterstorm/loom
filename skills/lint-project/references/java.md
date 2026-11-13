@@ -1,95 +1,69 @@
 # Java / Spring Boot Lint Setup
 
+Boundary and purity templates. The config fields, the rule schema and every shipped rule are in `${CLAUDE_PLUGIN_ROOT}/lint-rules/README.md`.
+
 ## Boundary Rules
 
-Java projects use package imports (`import com.example.domain.Order;`). The boundary checker matches the full import specifier string against `deny`/`allow` lists using prefix matching.
+A Java import (`import com.example.domain.Order;`) is matched as its package name against the boundary whose `module` holds the file: `deny` first, then `allow`. `allow` is a closed list, so name every library the layer may import. Classes in the same package need no import and are not checked.
 
-### Hexagonal / Ports & Adapters Pattern
+The layers are the ones in `rules/java-patterns.md` → "Package Structure": `domain/`, `orchestrator/`, `infra/`, `api/` and `config/`. There is no `service` package.
 
 <!-- wire-example: linter-project-config -->
 ```json
 {
+  "requireGovernance": ["src/main/java/com/example/"],
   "boundaries": [
     {
       "module": "src/main/java/com/example/domain/",
-      "allow": ["./", "java.", "javax.validation", "jakarta.validation"],
+      "description": "Functional core: no Spring, no persistence, no I/O packages",
+      "allow": ["java.", "com.example.domain"],
       "deny": [
-        "com.example.infra",
-        "com.example.api",
-        "com.example.adapter",
-        "org.springframework",
-        "jakarta.persistence",
-        "javax.persistence",
-        "io.r2dbc",
-        "org.jooq",
-        "com.fasterxml.jackson"
+        "java.io", "java.nio.file", "java.net", "java.sql", "javax.sql",
+        "com.example.orchestrator", "com.example.infra", "com.example.api", "com.example.config",
+        "org.springframework", "jakarta.persistence", "jakarta.servlet", "com.fasterxml.jackson"
       ]
     },
     {
-      "module": "src/main/java/com/example/application/",
-      "allow": ["./", "java.", "com.example.domain"],
-      "deny": [
-        "com.example.infra",
-        "com.example.api",
-        "org.springframework.web",
-        "jakarta.servlet",
-        "javax.servlet"
-      ]
+      "module": "src/main/java/com/example/orchestrator/",
+      "description": "Shell orchestrators: domain logic and ports, never adapters",
+      "allow": [
+        "java.", "com.example.domain", "com.example.orchestrator",
+        "org.springframework.stereotype", "org.springframework.transaction"
+      ],
+      "deny": ["com.example.infra", "com.example.api", "org.springframework.web", "jakarta.servlet"]
     },
     {
       "module": "src/main/java/com/example/infra/",
-      "allow": ["./", "java.", "com.example.domain", "com.example.application", "org.springframework", "jakarta.persistence"],
-      "deny": ["com.example.api"]
+      "description": "Adapters: implement the domain's ports with vendor SDKs",
+      "allow": ["java.", "javax.sql", "com.example.domain", "com.example.infra", "org.springframework", "jakarta.persistence"],
+      "deny": ["com.example.orchestrator", "com.example.api"]
+    },
+    {
+      "module": "src/main/java/com/example/api/",
+      "description": "REST controllers: parse, call an orchestrator, format",
+      "allow": [
+        "java.", "com.example.domain", "com.example.orchestrator", "com.example.api",
+        "org.springframework", "jakarta.validation", "jakarta.servlet"
+      ],
+      "deny": ["com.example.infra"]
+    },
+    {
+      "module": "src/main/java/com/example/config/",
+      "description": "Spring configuration and bean wiring",
+      "allow": ["java.", "com.example", "org.springframework"],
+      "deny": []
     }
   ]
 }
 ```
 
-### DDD Layered Pattern
+- `@Service` on an orchestrator is allowed: it is a Spring stereotype, and component scanning wires the adapters. That is why `orchestrator/` may import `org.springframework.stereotype`.
+- The `deny` on `domain/` for `org.springframework` is what keeps Spring annotations out of the core. No separate regex rule is needed for it. Where a regex rule does have to skip a layer, give `excludePatterns` a directory entry: `/infra/` matches `…/com/shop/infra/Db.java` at a segment boundary and never `…/com/shop/infrastructure/Db.java`. An entry without the trailing slash is a file suffix (`Test.java`). Entries are matched against the path inside the project, so where the checkout lives never matters.
+- Add the project's own libraries (its Either, Vavr, Lombok) to the `allow` list of each layer that uses them.
 
-<!-- wire-example: linter-project-config -->
-```json
-{
-  "boundaries": [
-    {
-      "module": "src/main/java/com/example/domain/model/",
-      "allow": ["./", "java.", "com.example.domain.model"],
-      "deny": [
-        "com.example.domain.service",
-        "com.example.infrastructure",
-        "com.example.application",
-        "com.example.interfaces",
-        "org.springframework",
-        "jakarta.persistence"
-      ]
-    },
-    {
-      "module": "src/main/java/com/example/domain/service/",
-      "allow": ["./", "java.", "com.example.domain"],
-      "deny": [
-        "com.example.infrastructure",
-        "com.example.interfaces",
-        "org.springframework.web",
-        "org.springframework.data"
-      ]
-    },
-    {
-      "module": "src/main/java/com/example/application/",
-      "allow": ["./", "java.", "com.example.domain", "org.springframework.stereotype", "org.springframework.transaction"],
-      "deny": [
-        "com.example.infrastructure",
-        "com.example.interfaces",
-        "org.springframework.web",
-        "jakarta.servlet"
-      ]
-    }
-  ]
-}
-```
+### Multi-module Maven / Gradle
 
-### Multi-module Maven/Gradle
-
-For multi-module projects, use the full path from repo root:
+Use the full path from the repository root as each `module`:
 
 <!-- wire-example: linter-project-config -->
 ```json
@@ -97,12 +71,12 @@ For multi-module projects, use the full path from repo root:
   "boundaries": [
     {
       "module": "modules/domain/src/main/java/",
-      "allow": ["./", "java."],
-      "deny": ["com.example.infra", "com.example.api", "org.springframework"]
+      "allow": ["java.", "com.example.domain"],
+      "deny": ["java.io", "java.nio.file", "java.net", "java.sql", "com.example.infra", "com.example.api", "org.springframework"]
     },
     {
       "module": "modules/api/src/main/java/",
-      "allow": ["./", "java.", "com.example.domain", "com.example.application", "org.springframework"],
+      "allow": ["java.", "com.example.domain", "com.example.orchestrator", "com.example.api", "org.springframework"],
       "deny": ["com.example.infra"]
     }
   ]
@@ -111,67 +85,23 @@ For multi-module projects, use the full path from repo root:
 
 ## Pure Modules
 
-Paths that must be side-effect free. The checker detects:
-
-| Banned Import | Why |
-|---------------|-----|
-| `java.io` | Filesystem I/O |
-| `java.nio.file` | Filesystem I/O |
-| `java.net` | Network I/O |
-| `java.sql`, `javax.sql` | Database I/O |
-| `jakarta.servlet`, `javax.servlet` | HTTP I/O |
-| `java.lang.ProcessBuilder` | Process spawning |
-
-### Example pureModules config
+The functional core is pure by default inside its roots: every non-test file under a `pureModules` root is held to purity, including files added later. A shell that genuinely lives inside a root is declared in `impureModules` as `{ "path", "reason" }`, the reason being the I/O it does.
 
 <!-- wire-example: linter-project-config -->
 ```json
 {
-  "pureModules": [
-    "src/main/java/com/example/domain/model/",
-    "src/main/java/com/example/domain/service/",
-    "src/main/java/com/example/domain/vo/"
-  ]
+  "pureModules": ["src/main/java/com/example/domain/"]
 }
 ```
 
-**Note:** `java.util`, `java.time`, `java.math` are NOT flagged — they're pure computation.
+For Java the purity rule reports only ambient calls it can see in the text, such as `Math.random()` and `new Date()`. It does not read Java imports. Keep I/O packages out of the core with the `deny` entries on the `domain/` boundary above: `java.io`, `java.nio.file`, `java.net`, `java.sql`, `javax.sql`, `jakarta.servlet`. `java.util`, `java.time` and `java.math` are pure computation; inject a `Clock` instead of calling `Instant.now()`.
 
-## Regex Rules — Java
+## Regex Rules
 
-### Default rules (already active from loom)
+Active without configuration: `no-field-injection`, `no-null-return`, `no-raw-exception-catch`, `no-star-import`, `no-system-out`. `no-mutable-entity-fields` ships disabled; the README says how to enable it.
 
-These fire automatically — no project config needed:
+One project rule worth adding where Lombok is used:
 
-| Rule | What it catches | Fix |
-|------|-----------------|-----|
-| `no-field-injection` | `@Autowired`/`@Inject` on fields | Use constructor injection |
-| `no-null-return` | `return null;` | Return `Optional.empty()` or throw |
-| `no-raw-exception-catch` | `catch (Exception e)` | Catch specific types |
-| `no-star-import` | `import com.example.*;` | Use explicit imports |
-| `no-system-out` | `System.out.println()` | Use SLF4J logger |
-
-### Rules to consider enabling
-
-**no-mutable-entity-fields.json** (disabled by default) — enforces immutable domain model. Enable for DDD projects using records or @Value:
-
-<!-- wire-example: linter-regex-rule -->
-```json
-{
-  "kind": "regex",
-  "name": "no-mutable-entity-fields",
-  "description": "Block non-final instance fields in domain classes — use records or final fields",
-  "extensions": [".java"],
-  "pattern": "^\\s+(private|protected)\\s+(?!static|final|transient)[A-Z][\\w]*\\s+\\w+\\s*[;=]",
-  "flags": "",
-  "fixHint": "Make this field final, or convert the class to a Java record. Mutable fields break DDD invariants.",
-  "enabled": true
-}
-```
-
-### Recommended project rules
-
-**no-lombok-data.json** — Block `@Data` (generates setters, breaks immutability):
 <!-- wire-example: linter-regex-rule -->
 ```json
 {
@@ -181,43 +111,10 @@ These fire automatically — no project config needed:
   "extensions": [".java"],
   "pattern": "^\\s*@Data\\b",
   "flags": "",
-  "fixHint": "Replace @Data with @Value (immutable) or convert to a Java record. @Data generates setters which break domain invariants.",
+  "fixHint": "Replace @Data with @Value or convert the class to a record. @Data generates setters, which break domain invariants.",
   "enabled": true
 }
 ```
-
-**no-spring-component-scan.json** — Block broad component scanning:
-<!-- wire-example: linter-regex-rule -->
-```json
-{
-  "kind": "regex",
-  "name": "no-spring-component-scan",
-  "description": "Disallow @ComponentScan — use explicit @Bean configuration",
-  "extensions": [".java"],
-  "pattern": "@ComponentScan\\b",
-  "flags": "",
-  "fixHint": "Remove @ComponentScan and register beans explicitly via @Configuration/@Bean. Component scanning makes dependencies implicit and breaks testability.",
-  "enabled": true
-}
-```
-
-**no-service-annotation-in-domain.json** — Block Spring in domain:
-<!-- wire-example: linter-regex-rule -->
-```json
-{
-  "kind": "regex",
-  "name": "no-service-annotation-in-domain",
-  "description": "Disallow Spring annotations in domain layer",
-  "extensions": [".java"],
-  "pattern": "@(Service|Component|Repository|Controller|RestController)\\b",
-  "flags": "",
-  "fixHint": "Domain classes must not use Spring annotations. Spring wiring belongs in the configuration/infra layer. Use plain classes with constructor injection.",
-  "enabled": true,
-  "excludePatterns": ["/infra/", "/api/", "/adapter/", "/config/"]
-}
-```
-
-**Note:** The `excludePatterns` uses `endsWith` matching, so `/infra/` matches any file whose path contains that segment.
 
 ## Function Length
 
@@ -229,4 +126,4 @@ These fire automatically — no project config needed:
 }
 ```
 
-Java methods are typically more verbose than TypeScript — 40 lines is recommended. Test classes are excluded since test methods with setup/assertions tend to be longer.
+Java methods run longer than TypeScript functions; 40 lines is a reasonable limit. Test classes are excluded because a test method with setup and assertions is naturally long.

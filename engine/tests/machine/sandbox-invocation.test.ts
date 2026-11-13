@@ -10,6 +10,7 @@ import {
   DEFAULT_SANDBOX_LIMITS,
   renderSandboxInstructions,
   sandboxReceiptPrefix,
+  sandboxScriptPath,
   type SandboxReceipt,
 } from "../../src/core/security-sandbox";
 import { extractEvidence } from "../../src/machine/extract-evidence";
@@ -70,12 +71,12 @@ describe("SandboxRun — the receipt binds to the invocation that runs the scrip
   });
 
   // The hunter runs the line `renderSandboxInstructions` prints, so that exact
-  // line — paths with a space or a metacharacter shell-quoted, the script path
-  // and the hex nonce bare — must read back as ONE invocation bound to the
-  // binding's nonce, and to no other.
+  // line — the absolute script path and every other path shell-quoted when it
+  // holds a space or a metacharacter, bare otherwise — must read back as ONE
+  // invocation bound to the binding's nonce, and to no other.
   it.each([
-    ["plain paths", { target: "/repo", scratch: "/runs/r/agents/a/scratch", artifact: "agents/a/artifacts/x.txt", artifactFile: "/runs/r/agents/a/artifacts/x.txt" }],
-    ["a space and metacharacters", { target: "/srv/my repo", scratch: "/runs/it's here/agents/a/scratch", artifact: "agents/a/artifacts/x $y.txt", artifactFile: "/runs/it's here/agents/a/artifacts/x $y.txt" }],
+    ["plain paths", { script: sandboxScriptPath("/opt/loom"), target: "/repo", scratch: "/runs/r/agents/a/scratch", artifact: "agents/a/artifacts/x.txt", artifactFile: "/runs/r/agents/a/artifacts/x.txt" }],
+    ["a space and metacharacters", { script: sandboxScriptPath("/home/o'brien/my plugins/loom"), target: "/srv/my repo", scratch: "/runs/it's here/agents/a/scratch", artifact: "agents/a/artifacts/x $y.txt", artifactFile: "/runs/it's here/agents/a/artifacts/x $y.txt" }],
   ])("mints from the printed instruction line with %s", (_form, paths) => {
     const printed = renderSandboxInstructions(DEFAULT_SANDBOX_LIMITS, { nonce: NONCE, ...paths })
       .split("\n").find((line) => line.includes("security-sandbox.sh"))!.trim()

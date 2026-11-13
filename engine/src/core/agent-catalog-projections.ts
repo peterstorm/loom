@@ -54,7 +54,7 @@ export function isStandaloneReviewAgent(agent: string): boolean {
 
 /**
  * The producer-kind vocabulary for structured payload emission — the
- * CONTEXT.md **Payload Producer** term as data: which structured payload an
+ * docs/contexts/harness/CONTEXT.md **Payload Producer** term as data: which structured payload an
  * Agent emits.
  * The review-verifier Agent is genuinely dual-payload — reviewer-payload for
  * standalone/wave reviews, refutation-verdict for `/review-pr` panel verdicts

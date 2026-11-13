@@ -1116,8 +1116,11 @@ describe("parseSpec", () => {
   });
 
   it("binds the CONTEXT.md Spec Index definition as the executable colon boundary", () => {
-    const context = readFileSync(new URL("../../../CONTEXT.md", import.meta.url), "utf8");
-    // The Spec Index entry documents the colon as the deliberate
+    const context = readFileSync(
+      new URL("../../../docs/contexts/requirements-trace/CONTEXT.md", import.meta.url),
+      "utf8",
+    );
+    // The Spec Index mechanics note documents the colon as the deliberate
     // prose-disambiguation boundary; this test binds the living language to
     // the parser's behavior so neither can drift from the other.
     expect(context).toMatch(/\*\*Spec Index\*\*/u);

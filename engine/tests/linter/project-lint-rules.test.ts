@@ -87,7 +87,7 @@ describe("project lint rules: the G4 slice 2 ownership rules refuse a second own
     expect(rule, row.rule).toMatchObject({ kind: "regex", enabled: true });
     if (rule === undefined) return;
     const lint = (path: string, content: string): readonly number[] =>
-      executeRules([rule], join(REPO_ROOT, path), content, noDeadline).map(({ line }) => line);
+      executeRules([rule], join(REPO_ROOT, path), content, noDeadline, REPO_ROOT).map(({ line }) => line);
 
     const refusedLines = row.refused.split("\n").map((_line, index) => index + 1);
     expect(lint("engine/src/handlers/elsewhere.ts", row.refused)).toEqual(refusedLines);

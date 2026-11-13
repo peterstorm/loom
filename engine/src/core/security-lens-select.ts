@@ -256,10 +256,16 @@ export function selectSecurityLenses(
   };
 }
 
-/** The selection as the prompt fragment a hunter receives. */
-export function renderLensSelection(selection: LensSelection): string {
+/** Where a lens document lives in the Loom package at `packageRoot`. */
+const securityLensPath = (packageRoot: string, lens: SecurityLens): string =>
+  `${packageRoot}/references/security-lenses/${lens}`;
+
+/** The selection as the prompt fragment a hunter receives. Each included lens
+ *  is named by its absolute path in the Loom package at `packageRoot`: a hunter
+ *  works in the audited repository, where a package-relative path names nothing. */
+export function renderLensSelection(packageRoot: string, selection: LensSelection): string {
   const included = selection.included
-    .map((entry) => `- references/security-lenses/${entry.lens} (${entry.base ? "base" : `score ${entry.score}`}): ${entry.reasons.join("; ")}`)
+    .map((entry) => `- ${securityLensPath(packageRoot, entry.lens)} (${entry.base ? "base" : `score ${entry.score}`}): ${entry.reasons.join("; ")}`)
     .join("\n");
   const excluded = selection.excluded
     .map((entry) => `- ${entry.lens}: ${entry.reason}`)

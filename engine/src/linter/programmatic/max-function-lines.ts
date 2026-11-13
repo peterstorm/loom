@@ -16,20 +16,40 @@
 
 import type { Violation } from "../types";
 import { makeViolation } from "../types";
+import { matchesAnyExcludePattern } from "../exclude-pattern";
 
 // --- Configuration ---
 
 /** Maximum allowed lines in a function body */
-export const DEFAULT_MAX_LINES = 50;
+const DEFAULT_MAX_LINES = 50;
 
 /** File patterns to exclude (test files have long describe blocks) */
-export const DEFAULT_EXCLUDE_PATTERNS: readonly string[] = [
+const DEFAULT_EXCLUDE_PATTERNS: readonly string[] = Object.freeze([
   ".test.ts",
   ".spec.ts",
   ".test.tsx",
   ".spec.tsx",
   ".property.test.ts",
-];
+]);
+
+/**
+ * What one project's max-function-lines rule runs with. `projectRoot` is the
+ * frame `excludePatterns` are matched in, and null says no project owns the
+ * config: the path is then matched as given. It has no default, so a caller
+ * cannot leave the frame out by forgetting it.
+ */
+export type MaxFunctionLinesOptions = Readonly<{
+  maxLines: number;
+  excludePatterns: readonly string[];
+  projectRoot: string | null;
+}>;
+
+/** The rule with no project: the built-in limit and test-file exclusions. */
+export const DEFAULT_MAX_FUNCTION_LINES_OPTIONS: MaxFunctionLinesOptions = Object.freeze({
+  maxLines: DEFAULT_MAX_LINES,
+  excludePatterns: DEFAULT_EXCLUDE_PATTERNS,
+  projectRoot: null,
+});
 
 // --- Function detection ---
 
@@ -196,12 +216,11 @@ export function detectFunctions(content: string): readonly FunctionSpan[] {
 export function handler(
   content: string,
   filePath: string,
-  maxLines: number = DEFAULT_MAX_LINES,
-  excludePatterns: readonly string[] = DEFAULT_EXCLUDE_PATTERNS
+  { maxLines, excludePatterns, projectRoot }: MaxFunctionLinesOptions,
 ): Violation[] {
-  // Skip excluded files (tests)
-  const normalizedPath = filePath.replace(/\\/g, "/");
-  if (excludePatterns.some((pattern) => normalizedPath.endsWith(pattern))) {
+  // Skip excluded files: test-suffix patterns, and directories named with a
+  // trailing slash — the same matcher every regex rule's exclusions use.
+  if (matchesAnyExcludePattern(filePath, excludePatterns, projectRoot)) {
     return [];
   }
 
