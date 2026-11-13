@@ -88,7 +88,9 @@ export function reviewLensSections(reference: string, lenses: readonly string[])
   return { ok: true, value: sections.map((line) => /^#+ /.test(line) ? `#${line}` : line).join("\n") };
 }
 
-type RegionBounds =Readonly<{ ok: true; start: number; end: number }> | Readonly<{ ok: false; error: string }>;
+type RegionBounds =
+  | Readonly<{ ok: true; start: number; end: number }>
+  | Readonly<{ ok: false; error: string }>;
 
 /** Where a region's markers sit, or an error naming which one is missing. */
 function regionBounds(agentMarkdown: string, region: StampedRegion): RegionBounds {

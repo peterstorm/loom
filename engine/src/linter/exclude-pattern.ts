@@ -1,6 +1,8 @@
 /**
- * The ONE matcher for a rule's `excludePatterns` — which files a single rule
- * does not read.
+ * The one matcher for a rule's exclusion list — a regex rule's
+ * `excludePatterns` and `maxFunctionLines`' `excludeFromMaxLines`: which files
+ * a single rule does not read. (The purity and boundary rules scope by module
+ * entries, a different grammar with its own matcher.)
  *
  * Two forms, distinguished by a trailing slash, and nothing else:
  *
@@ -15,9 +17,10 @@
  * behaviour before the code did.
  *
  * The directory form matches at a SEGMENT boundary: `"/src/infra/"` cannot be
- * satisfied by `/src/infrastructure/Db.java`. A project-relative directory
- * pattern with no leading slash is anchored the same way, by prefixing one, so
- * the two spellings cannot disagree about what they exclude.
+ * satisfied by `/src/infrastructure/Db.java`. Pattern and path are both
+ * anchored by a leading slash before they are compared, so `src/infra/` and
+ * `/src/infra/` exclude the same files, and a relative path
+ * (`src/infra/Db.java`) is excluded exactly as its absolute spelling is.
  *
  * Paths are compared after normalizing separators, so a Windows checkout
  * matches the same patterns as a POSIX one. A pattern that is empty, or that is
@@ -31,9 +34,11 @@ export function matchesExcludePattern(filePath: string, pattern: string): boolea
 
   if (!pattern.endsWith("/")) return normalizedPath.endsWith(pattern);
 
-  const directory = pattern.startsWith("/") ? pattern : `/${pattern}`;
-  return directory !== "/" && normalizedPath.includes(directory);
+  const directory = withLeadingSlash(pattern);
+  return directory !== "/" && withLeadingSlash(normalizedPath).includes(directory);
 }
+
+const withLeadingSlash = (path: string): string => (path.startsWith("/") ? path : `/${path}`);
 
 /** Does any pattern exclude this file? False for an empty list. */
 export function matchesAnyExcludePattern(filePath: string, patterns: readonly string[]): boolean {

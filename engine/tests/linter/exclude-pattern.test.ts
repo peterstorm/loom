@@ -52,6 +52,13 @@ describe("matchesExcludePattern — directory form", () => {
     expect(matchesExcludePattern("/work/shop/approvals/x.ts", "apps/")).toBe(false);
   });
 
+  it("excludes a relative path exactly as its absolute spelling", () => {
+    expect(matchesExcludePattern("src/infra/Db.java", "src/infra/")).toBe(true);
+    expect(matchesExcludePattern("src/infra/Db.java", "/src/infra/")).toBe(true);
+    expect(matchesExcludePattern("src/infrastructure/Db.java", "src/infra/")).toBe(false);
+    expect(matchesExcludePattern("mysrc/infra/Db.java", "src/infra/")).toBe(false);
+  });
+
   it("matches a Windows path by its normalized separators", () => {
     expect(matchesExcludePattern("C:\\work\\shop\\src\\infra\\Db.java", "src/infra/")).toBe(true);
   });

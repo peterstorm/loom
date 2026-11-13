@@ -134,6 +134,19 @@ describe("max-function-lines", () => {
       expect(handler(content, "src/foo.property.test.ts")).toHaveLength(0);
     });
 
+    it("excludes every file beneath a directory pattern, and not a sibling that shares its prefix", () => {
+      const lines = ["function long() {"];
+      for (let i = 0; i < 100; i++) {
+        lines.push(`  const x${i} = ${i};`);
+      }
+      lines.push("}");
+      const content = lines.join("\n");
+
+      expect(handler(content, "src/infra/db.ts", 50, ["src/infra/"])).toHaveLength(0);
+      expect(handler(content, "/work/shop/src/infra/db.ts", 50, ["src/infra/"])).toHaveLength(0);
+      expect(handler(content, "src/infrastructure/db.ts", 50, ["src/infra/"])).toHaveLength(1);
+    });
+
     it("reports multiple over-length functions", () => {
       const makeLong = (name: string) => {
         const lines = [`function ${name}() {`];

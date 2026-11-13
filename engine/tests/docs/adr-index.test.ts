@@ -29,6 +29,8 @@ const indexRows: readonly IndexRow[] = index.split("\n").flatMap((line) => {
 const statusWordOf = (file: string): string => {
   const lines = readFileSync(join(ADR_DIR, file), "utf-8").split("\n");
   const heading = lines.findIndex((line) => /^#{2,3}\s*Status\s*$/i.test(line));
+  // No Status heading is no status word, never the file's first line.
+  if (heading === -1) return "";
   const first = lines.slice(heading + 1).find((line) => line.trim() !== "") ?? "";
   return /^[A-Za-z]+/.exec(first.replace(/\*/g, "").trim())?.[0] ?? "";
 };

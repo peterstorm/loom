@@ -257,7 +257,7 @@ export function selectSecurityLenses(
 }
 
 /** Where a lens document lives in the Loom package at `packageRoot`. */
-const securityLensPath =(packageRoot: string, lens: SecurityLens): string =>
+const securityLensPath = (packageRoot: string, lens: SecurityLens): string =>
   `${packageRoot}/references/security-lenses/${lens}`;
 
 /** The selection as the prompt fragment a hunter receives. Each included lens

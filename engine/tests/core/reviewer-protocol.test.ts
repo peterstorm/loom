@@ -321,8 +321,8 @@ describe("authoritative generated wire contract", () => {
     // bytes): the same value, in the one compact spelling.
     expect(JSON.parse(json[0]!)).toEqual(JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2));
     expect(json).toEqual([JSON.stringify(JSON.parse(json[0]!)), JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, null, 2)]);
-    // Every reviewer spawn pays for the fragment: 10,617 bytes today, 15,048
-    // with the schema pretty-printed. The pin keeps it from growing back.
+    // Every reviewer spawn pays for the fragment. The pin stops the
+    // pretty-printed schema from creeping back in.
     expect(bytes(rendered).length).toBeLessThanOrEqual(10 * 1024 + 512);
     expect(parseReviewerPayloadV2(bytes(json[1]))).toEqual({ ok: true, value: REVIEWER_WIRE_CONTRACT_EXAMPLE_V2 });
     expect(rendered.endsWith(REVIEWER_IMPACT_RUBRIC_V1)).toBe(true);

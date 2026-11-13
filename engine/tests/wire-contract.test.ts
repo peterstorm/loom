@@ -176,7 +176,7 @@ describe("the refutation verifier carries the exact stamped lens sections", () =
 });
 
 describe.each([REVIEWER_BOOTSTRAP_REGION, REVIEW_LENSES_REGION])("stamping the marked $name region", (region) => {
-  const file =(inner: string): string => `---\nname: demo\n---\n\n${region.start}\n${inner}\n${region.end}\n\nBody\n`;
+  const file = (inner: string): string => `---\nname: demo\n---\n\n${region.start}\n${inner}\n${region.end}\n\nBody\n`;
 
   it("replaces only the region and leaves every other byte untouched", () => {
     expect(stampRegion(file("stale"), region, "fresh\n")).toEqual({ ok: true, value: file("fresh") });

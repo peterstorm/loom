@@ -152,10 +152,10 @@ export function checkFunctionalCheck(state: TaskGraph, wave: number): GateCheck 
 }
 ```
 
-### 7. Config updates — `engine/src/config.ts`
+### 7. Agent catalog — `engine/src/core/model-profiles.ts`
 
-- Add `"functional-evaluator"` to `REVIEW_AGENTS` set (recognized as execute-phase agent)
-- Do NOT add to `REVIEW_SUB_AGENTS` (it's not a per-task reviewer)
+- Add a `"functional-evaluator"` entry to `AGENT_CATALOG`; `REVIEW_AGENTS` in `core/agent-catalog-projections.ts` derives from it (recognized as execute-phase agent)
+- Do NOT make it a `reviewer`-kind agent, so it stays out of `REVIEW_SUB_AGENTS` (it's not a per-task reviewer)
 
 ### 8. Wave-gate skill update — `commands/wave-gate.md`
 

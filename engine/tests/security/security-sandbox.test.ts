@@ -23,6 +23,7 @@ import {
   sandboxScriptPath,
   sandboxWithinLimits,
   type SandboxLimits,
+  type SandboxRequest,
 } from "../../src/core/security-sandbox";
 import { ok } from "./fixtures";
 import { NONCE, aSandboxReceipt, boundReceipt } from "./sandbox-fixtures";
@@ -41,6 +42,16 @@ const PACKAGE_ROOT = "/opt/loom";
 const SCRIPT = sandboxScriptPath(PACKAGE_ROOT);
 
 const limits = (overrides: Partial<SandboxLimits> = {}): SandboxLimits => ({ ...DEFAULT_SANDBOX_LIMITS, ...overrides });
+
+/** A request the script accepts; each case states only what it varies. */
+const sandboxArgs = (overrides: Partial<SandboxRequest> = {}): SandboxRequest => ({
+  script: SCRIPT,
+  target: "/repo",
+  scratch: "/scratch",
+  command: ["true"],
+  limits: limits(),
+  ...overrides,
+});
 
 describe("sandbox receipt", () => {
   it("parses the script's own output", () => {
@@ -174,9 +185,9 @@ describe("sandbox receipt", () => {
   });
 
   it("bounds the nonce grammar", () => {
-    expect(sandboxCommand({ script: SCRIPT, target:"/repo", scratch: "/scratch", command: ["true"], limits: limits(), nonce: "0123456789abcdef" }).ok).toBe(true);
-    expect(sandboxCommand({ script: SCRIPT, target:"/repo", scratch: "/scratch", command: ["true"], limits: limits(), nonce: "nothex" }).ok).toBe(false);
-    expect(sandboxCommand({ script: SCRIPT, target:"/repo", scratch: "/scratch", command: ["true"], limits: limits(), nonce: "0123" }).ok).toBe(false);
+    expect(sandboxCommand(sandboxArgs({ nonce: "0123456789abcdef" })).ok).toBe(true);
+    expect(sandboxCommand(sandboxArgs({ nonce: "nothex" })).ok).toBe(false);
+    expect(sandboxCommand(sandboxArgs({ nonce: "0123" })).ok).toBe(false);
   });
 });
 
@@ -256,13 +267,11 @@ describe("judgeLocalReceipt", () => {
 
 describe("sandbox command", () => {
   it("names the script, every limit, and the command after --", () => {
-    const command = sandboxCommand({
-      script: SCRIPT,
-      target: "/repo",
+    const command = sandboxCommand(sandboxArgs({
       scratch: "/runs/audit-1/agents/hunter-a/scratch",
       command: ["node", "--version"],
       limits: limits({ cpuSeconds: 3, wallClockSeconds: 5 }),
-    });
+    }));
     if (!command.ok) throw new Error(JSON.stringify(command.error));
     // The script is named by its absolute path in the package: a hunter's
     // working directory is the audited repository, not the Loom package.
@@ -273,14 +282,10 @@ describe("sandbox command", () => {
   });
 
   it("refuses a scratch inside the target, an empty command, and bad limits", () => {
-    expect(sandboxCommand({ script: SCRIPT, target:"/repo", scratch: "/repo/scratch", command: ["true"], limits: limits() }).ok).toBe(false);
-    expect(sandboxCommand({ script: SCRIPT, target:"/repo", scratch: "/scratch", command: [], limits: limits() }).ok).toBe(false);
-    expect(
-      sandboxCommand({ script: SCRIPT, target:"/repo", scratch: "/scratch", command: ["true"], limits: limits({ cpuSeconds: 0 }) }).ok,
-    ).toBe(false);
-    expect(
-      sandboxCommand({ script: SCRIPT, target:"/repo", scratch: "/scratch", command: ["a\u0000b"], limits: limits() }).ok,
-    ).toBe(false);
+    expect(sandboxCommand(sandboxArgs({ scratch: "/repo/scratch" })).ok).toBe(false);
+    expect(sandboxCommand(sandboxArgs({ command: [] })).ok).toBe(false);
+    expect(sandboxCommand(sandboxArgs({ limits: limits({ cpuSeconds: 0 }) })).ok).toBe(false);
+    expect(sandboxCommand(sandboxArgs({ command: ["a\u0000b"] })).ok).toBe(false);
   });
 
   const BINDING = {
@@ -341,7 +346,7 @@ describe("sandbox command", () => {
     // No placeholder survives: a hunter cannot compute the nonce or guess the paths.
     expect(text).not.toMatch(/<repo>|<run>|<your-agent-id>/);
     // The printed command line is the argv `sandboxCommand` builds, flag for flag.
-    const words = ok(sandboxCommand({ script: SCRIPT, target:BINDING.target, scratch: BINDING.scratch, command: ["true"], limits: DEFAULT_SANDBOX_LIMITS, nonce: NONCE }));
+    const words = ok(sandboxCommand(sandboxArgs({ target: BINDING.target, scratch: BINDING.scratch, nonce: NONCE })));
     const flags = words.slice(1, words.indexOf("--"));
     expect(text.replace(/\\\n\s*/g, "")).toContain(flags.join(" "));
   });
