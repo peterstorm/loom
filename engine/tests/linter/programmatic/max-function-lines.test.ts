@@ -147,6 +147,19 @@ describe("max-function-lines", () => {
       expect(handler(content, "src/infrastructure/db.ts", 50, ["src/infra/"])).toHaveLength(1);
     });
 
+    it("matches a directory pattern inside the project root, not against the directories above it", () => {
+      const lines = ["function long() {"];
+      for (let i = 0; i < 100; i++) {
+        lines.push(`  const x${i} = ${i};`);
+      }
+      lines.push("}");
+      const content = lines.join("\n");
+      const root = "/home/u/apps/shop";
+
+      expect(handler(content, `${root}/src/order.ts`, 50, ["apps/"], root)).toHaveLength(1);
+      expect(handler(content, `${root}/apps/demo/main.ts`, 50, ["apps/"], root)).toHaveLength(0);
+    });
+
     it("reports multiple over-length functions", () => {
       const makeLong = (name: string) => {
         const lines = [`function ${name}() {`];

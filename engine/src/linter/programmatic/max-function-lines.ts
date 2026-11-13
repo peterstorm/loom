@@ -193,16 +193,20 @@ export function detectFunctions(content: string): readonly FunctionSpan[] {
 /**
  * Programmatic rule handler for max-function-lines.
  * Reports violations for functions exceeding the line limit.
+ *
+ * `projectRoot` is the frame `excludePatterns` are matched in; null (the
+ * default) when no project owns the config, and the path is matched as given.
  */
 export function handler(
   content: string,
   filePath: string,
   maxLines: number = DEFAULT_MAX_LINES,
-  excludePatterns: readonly string[] = DEFAULT_EXCLUDE_PATTERNS
+  excludePatterns: readonly string[] = DEFAULT_EXCLUDE_PATTERNS,
+  projectRoot: string | null = null
 ): Violation[] {
   // Skip excluded files: test-suffix patterns, and directories named with a
   // trailing slash — the same matcher every regex rule's exclusions use.
-  if (matchesAnyExcludePattern(filePath, excludePatterns)) {
+  if (matchesAnyExcludePattern(filePath, excludePatterns, projectRoot)) {
     return [];
   }
 

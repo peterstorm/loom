@@ -1,3 +1,5 @@
+import { projectRelative } from "./programmatic/baseline";
+
 /**
  * The one matcher for a rule's exclusion list — a regex rule's
  * `excludePatterns` and `maxFunctionLines`' `excludeFromMaxLines`: which files
@@ -27,6 +29,10 @@
  * a bare `/`, matches nothing rather than everything: an exclusion list entry
  * that silently excluded the whole tree would make a rule look enforced while
  * it read nothing.
+ *
+ * This function compares the path AS GIVEN. A pattern is written in the
+ * project's frame, so the rules call `matchesAnyExcludePattern`, which puts the
+ * path in that frame first.
  */
 export function matchesExcludePattern(filePath: string, pattern: string): boolean {
   if (pattern.length === 0) return false;
@@ -40,7 +46,24 @@ export function matchesExcludePattern(filePath: string, pattern: string): boolea
 
 const withLeadingSlash = (path: string): string => (path.startsWith("/") ? path : `/${path}`);
 
-/** Does any pattern exclude this file? False for an empty list. */
-export function matchesAnyExcludePattern(filePath: string, patterns: readonly string[]): boolean {
-  return patterns.some((pattern) => matchesExcludePattern(filePath, pattern));
+/**
+ * Does any pattern exclude this file? False for an empty list.
+ *
+ * The path is made project-relative before it is compared. `lintFile` hands
+ * rules ABSOLUTE paths, and a directory pattern matched against one also
+ * matches the directories ABOVE the project: `apps/` would exclude every file
+ * of a checkout at `/home/u/apps/shop`, and the rule would read nothing while
+ * looking enforced. Inside the project a directory pattern still matches at
+ * any depth (`apps/` excludes `packages/host/src/apps/x.ts`).
+ *
+ * `projectRoot` is null when no project owns the rules. Then, and for a file
+ * outside the root, the path is compared as given (`projectRelative`).
+ */
+export function matchesAnyExcludePattern(
+  filePath: string,
+  patterns: readonly string[],
+  projectRoot: string | null,
+): boolean {
+  const path = projectRelative(filePath, projectRoot);
+  return patterns.some((pattern) => matchesExcludePattern(path, pattern));
 }

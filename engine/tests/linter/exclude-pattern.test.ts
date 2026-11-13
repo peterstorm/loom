@@ -70,10 +70,50 @@ describe("matchesExcludePattern — degenerate patterns exclude nothing", () => 
   });
 
   it("an empty list excludes nothing", () => {
-    expect(matchesAnyExcludePattern("/work/shop/src/order.ts", [])).toBe(false);
+    expect(matchesAnyExcludePattern("/work/shop/src/order.ts", [], "/work/shop")).toBe(false);
   });
 
   it("one matching pattern among several is enough", () => {
-    expect(matchesAnyExcludePattern("/work/shop/src/order.test.ts", ["apps/", ".test.ts"])).toBe(true);
+    expect(matchesAnyExcludePattern("/work/shop/src/order.test.ts", ["apps/", ".test.ts"], "/work/shop")).toBe(true);
+  });
+});
+
+describe("matchesAnyExcludePattern — patterns are matched inside the project", () => {
+  // A checkout whose own location spells the directory the pattern names.
+  const ROOT = "/home/u/apps/shop";
+
+  it("does not exclude a file because a directory above the project has the pattern's name", () => {
+    expect(matchesAnyExcludePattern(`${ROOT}/src/order.ts`, ["apps/"], ROOT)).toBe(false);
+    expect(matchesAnyExcludePattern(`${ROOT}/src/order.ts`, ["/apps/"], ROOT)).toBe(false);
+    expect(matchesAnyExcludePattern(`${ROOT}/src/order.ts`, ["u/apps/shop/"], ROOT)).toBe(false);
+  });
+
+  it("still excludes the project's own directory of that name, at any depth", () => {
+    expect(matchesAnyExcludePattern(`${ROOT}/apps/demo/main.ts`, ["apps/"], ROOT)).toBe(true);
+    expect(matchesAnyExcludePattern(`${ROOT}/packages/host/src/apps/x.ts`, ["apps/"], ROOT)).toBe(true);
+    expect(matchesAnyExcludePattern(`${ROOT}/approvals/x.ts`, ["apps/"], ROOT)).toBe(false);
+  });
+
+  it("reads the root with a trailing slash or Windows separators as the same root", () => {
+    expect(matchesAnyExcludePattern(`${ROOT}/src/order.ts`, ["apps/"], `${ROOT}/`)).toBe(false);
+    expect(matchesAnyExcludePattern("C:\\apps\\shop\\src\\order.ts", ["apps/"], "C:\\apps\\shop")).toBe(false);
+    expect(matchesAnyExcludePattern("C:\\apps\\shop\\apps\\demo\\main.ts", ["apps/"], "C:\\apps\\shop")).toBe(true);
+  });
+
+  it("leaves a file-suffix pattern alone: it never depended on where the checkout lives", () => {
+    expect(matchesAnyExcludePattern(`${ROOT}/src/order.test.ts`, [".test.ts"], ROOT)).toBe(true);
+    expect(matchesAnyExcludePattern(`${ROOT}/scripts/lint-project.ts`, ["scripts/lint-project.ts"], ROOT)).toBe(true);
+  });
+
+  it("takes an already-relative path as project-relative", () => {
+    expect(matchesAnyExcludePattern("apps/demo/main.ts", ["apps/"], ROOT)).toBe(true);
+    expect(matchesAnyExcludePattern("src/order.ts", ["apps/"], ROOT)).toBe(false);
+  });
+
+  it("compares the path as given when no project owns the rules, or the file is outside the root", () => {
+    expect(matchesAnyExcludePattern(`${ROOT}/src/order.ts`, ["apps/"], null)).toBe(true);
+    expect(matchesAnyExcludePattern("/srv/apps/other/x.ts", ["apps/"], ROOT)).toBe(true);
+    // A sibling whose name only starts with the root's is outside it.
+    expect(matchesAnyExcludePattern("/home/u/apps/shop-old/x.ts", ["apps/"], ROOT)).toBe(true);
   });
 });

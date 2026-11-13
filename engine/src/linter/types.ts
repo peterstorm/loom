@@ -26,9 +26,9 @@ export interface RegexRule {
   readonly enabled: boolean;
   readonly source: RuleSource;
   /** Files this rule does not read — matched by the one matcher in
-   *  `exclude-pattern.ts`. A pattern ending in `/` is a directory (every file
-   *  beneath it, at a segment boundary); anything else is a file suffix
-   *  (e.g. `".test.ts"`). */
+   *  `exclude-pattern.ts`, against the file's project-relative path. A pattern
+   *  ending in `/` is a directory (every file beneath it, at a segment
+   *  boundary); anything else is a file suffix (e.g. `".test.ts"`). */
   readonly excludePatterns?: readonly string[];
 }
 

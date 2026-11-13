@@ -56,7 +56,9 @@ Published as `run.pr167-src-policy-20261113` (disposition digest `b3537537…`) 
 
 ## Outside the admitted findings
 
-The source run's code-reviewer raised, on a first attempt the engine rejected for incomplete read coverage, that a directory pattern matches anywhere in an absolute path, so `apps/` also matches a checkout at `/home/u/apps/project/`. Its admitted second attempt reported nothing, so this is not a Finding and is not fixed here. It is real as far as the code reads: the matcher is given no project root.
+The source run's code-reviewer raised, on a first attempt the engine rejected for incomplete read coverage, that a directory pattern matches anywhere in an absolute path, so `apps/` also matches a checkout at `/home/u/apps/project/`. Its admitted second attempt reported nothing, so this is not a Finding and no remediation evidence covers it.
+
+Fixed afterwards at the operator's request, outside the review run: `matchesAnyExcludePattern` takes the project root and compares the project-relative path (`projectRelative`). `lintFile` / `lintFiles` derive the root from the project rules directory (`projectRootOf`) and pass it through `executeRules`; `max-function-lines` receives it from `createProgrammaticRules`. With no project root, or for a file outside it, the path is compared as given. Covered by `engine/tests/linter/{exclude-pattern,executor,index}.test.ts` and `programmatic/max-function-lines.test.ts`; the `lintFile` cases fail against the unfixed source.
 
 ## Validation (my runs, not remediation evidence)
 

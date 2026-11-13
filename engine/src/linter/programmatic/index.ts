@@ -254,13 +254,15 @@ function importBoundaryRules(config: ProgrammaticConfig, projectRoot: string | n
   ];
 }
 
-function maxFunctionLinesRule(maxLines: number, excludePatterns: readonly string[]): ProgrammaticRule {
+function maxFunctionLinesRule(config: ProgrammaticConfig, projectRoot: string | null): ProgrammaticRule {
+  const maxLines = config.maxFunctionLines ?? DEFAULT_MAX_LINES;
+  const excludePatterns = config.excludeFromMaxLines ?? DEFAULT_EXCLUDE_PATTERNS;
   return {
     kind: "programmatic",
     name: "max-function-lines",
     description: `Enforce maximum function body length (configured: ${maxLines} lines)`,
     extensions: [...SCRIPT_EXTENSIONS, ".java"],
-    handler: (content, filePath) => maxFunctionLinesHandler(content, filePath, maxLines, excludePatterns),
+    handler: (content, filePath) => maxFunctionLinesHandler(content, filePath, maxLines, excludePatterns, projectRoot),
     tier: "full",
     fixHint: "Decompose into smaller functions with single responsibilities",
     enabled: true,
@@ -401,10 +403,7 @@ export function createProgrammaticRules(context: ProjectLintContext): readonly P
   const { config, projectRoot } = context;
   return [
     ...importBoundaryRules(config, projectRoot),
-    maxFunctionLinesRule(
-      config.maxFunctionLines ?? DEFAULT_MAX_LINES,
-      config.excludeFromMaxLines ?? DEFAULT_EXCLUDE_PATTERNS,
-    ),
+    maxFunctionLinesRule(config, projectRoot),
     fugueGeneratedIntegrityRule(),
     ...totalityRules(config, projectRoot),
     ...expressionShapeRules(),

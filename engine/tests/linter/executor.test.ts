@@ -203,6 +203,18 @@ describe("executeRules — excludePatterns", () => {
     expect(executeRules([rule], "/work/shop/packages/approvals/main.ts", "console.log(1);", noopDeadline).length).toBe(1);
   });
 
+  it("matches a directory pattern inside the project root, not against the directories above it", () => {
+    const rule = consoleLogRule(["apps/"]);
+    const root = "/home/u/apps/shop";
+    const run = (filePath: string, projectRoot: string | null) =>
+      executeRules([rule], filePath, "console.log(1);", noopDeadline, projectRoot).length;
+
+    expect(run(`${root}/src/order.ts`, root)).toBe(1);
+    expect(run(`${root}/apps/demo/main.ts`, root)).toBe(0);
+    // With no project the path is matched as given.
+    expect(run(`${root}/src/order.ts`, null)).toBe(0);
+  });
+
   it("reads a file when the rule has no exclusions", () => {
     expect(executeRules([consoleLogRule([])], "/work/shop/src/order.test.ts", "console.log(1);", noopDeadline).length).toBe(1);
   });

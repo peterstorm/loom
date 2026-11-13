@@ -39,6 +39,9 @@ const DEADLINE_CHECK_INTERVAL = 100;
  * @param filePath - Absolute file path (used for extension matching + violation context)
  * @param content - Full file content as a string
  * @param checkDeadline - Injected deadline checker (throws if time exceeded)
+ * @param projectRoot - Root of the project the rules belong to: the frame
+ *   `excludePatterns` are matched in. Null (the default) when no project owns
+ *   the rules; the path is then matched as given.
  * @returns Aggregated Violation[] (may be empty)
  * @throws Error on timeout or handler exception (fail-closed)
  */
@@ -46,19 +49,20 @@ export function executeRules(
   rules: readonly Rule[],
   filePath: string,
   content: string,
-  checkDeadline: () => void
+  checkDeadline: () => void,
+  projectRoot: string | null = null
 ): readonly Violation[] {
   const ext = extname(filePath); // e.g. ".ts"
 
   // Filter: only enabled rules whose extensions include this file's extension
-  // and whose excludePatterns don't match the file path (a file suffix, or a
-  // directory when the pattern ends with `/`)
+  // and whose excludePatterns don't match the file's project-relative path (a
+  // file suffix, or a directory when the pattern ends with `/`)
   const matchingRules = rules.filter(
     (rule) => {
       if (!rule.enabled) return false;
       if (!rule.extensions.includes(ext)) return false;
       if (isRegexRule(rule) && rule.excludePatterns?.length) {
-        if (matchesAnyExcludePattern(filePath, rule.excludePatterns)) return false;
+        if (matchesAnyExcludePattern(filePath, rule.excludePatterns, projectRoot)) return false;
       }
       return true;
     }
