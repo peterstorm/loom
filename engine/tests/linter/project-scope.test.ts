@@ -18,8 +18,8 @@ describe("project scope: everything lintable, minus explicit exclusions", () => 
   });
 
   it("never enters a directory that holds no project source", () => {
-    for (const name of ["node_modules", ".git", ".claude", ".pi", "dist", "coverage"]) expect(isNeverSourceDirectory(name), name).toBe(true);
-    for (const name of ["src", "tests", "engine", "probes"]) expect(isNeverSourceDirectory(name), name).toBe(false);
+    for (const name of ["node_modules", ".git", ".claude", ".pi", "dist", "coverage", ".venv"]) expect(isNeverSourceDirectory(name), name).toBe(true);
+    for (const name of ["src", "tests", "engine", "probes", "venv"]) expect(isNeverSourceDirectory(name), name).toBe(false);
   });
 
   it("excludes a path under an entry, with the entry and its reason; anchored at the project root", () => {
