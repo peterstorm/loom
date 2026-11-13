@@ -20,7 +20,7 @@ The runner lints **every file with a lintable extension** — `.ts .tsx .mts .ct
 
 - directories that never hold a project's own source, in any project
   (`node_modules`, `.git`, `.claude`, `.pi`, `dist`, `build`, `out`, `.next`,
-  `target`, `.gradle`, `coverage`, `vendor`, `.cache`, …); and
+  `target`, `.gradle`, `coverage`, `vendor`, `.cache`, `.venv`, …); and
 - the project's `exclude` list in `config.json`, where every entry names a path
   and the reason it must not be checked (vendored upstream code, generated
   files):
