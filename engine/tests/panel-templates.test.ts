@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { checkAgentSkillPrompt } from "../src/core/agent-skills";
 import { findResidualPlaceholders } from "../src/core/validate-template-substitution";
 import { architectureCriterion, candidateFilename, parseJudgeVerdict, serializeJudgeVerdict } from "../src/core/panel-contract";
+import { describeMarkdownError, markdown, orFail, rowWhere, tableWithColumns, type Table, type TableRow } from "./support/markdown";
 
 /**
  * Template placeholder audit for every phase template (`phase-*.md`).
@@ -54,32 +55,29 @@ const TEMPLATE_AGENT: Readonly<Record<string, string>> = {
 
 const PHASE_TEMPLATES = readdirSync(TEMPLATES_DIR).filter((file) => /^phase-.*\.md$/.test(file)).sort();
 
-const cells = (row: string): readonly string[] => row.split("|").slice(1, -1).map((cell) => cell.trim());
+/** A document's substitution table: its one table with a Template and a Variables column. */
+const substitutionTable = ([name, text]: (typeof SUBSTITUTION_CONTRACTS)[number]): Table<"Template" | "Variables"> =>
+  orFail(tableWithColumns(markdown(name, text), ["Template", "Variables"]), describeMarkdownError);
 
 /**
- * The variables one document declares for a template: the `{name}` tokens in
- * the "Variables" cell of the table row that names the file. Null when the
- * document has no such row.
+ * The row of one document's substitution table whose Template cell names the
+ * file, or none. A template named only in another table or in prose is not
+ * declared there: only the table with a Variables column declares.
  */
-function declaredIn(doc: string, file: string): readonly string[] | null {
-  const lines = doc.split("\n");
-  const rowIndex = lines.findIndex((line) => line.startsWith("|") && line.includes(`\`${file}\``));
-  if (rowIndex === -1) return null;
-  let headerIndex = rowIndex;
-  while (headerIndex > 0 && lines[headerIndex - 1]!.startsWith("|")) headerIndex -= 1;
-  const column = cells(lines[headerIndex]!).indexOf("Variables");
-  if (column === -1) return null;
-  const cell = cells(lines[rowIndex]!)[column] ?? "";
-  return [...cell.matchAll(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g)].map((match) => match[1]!);
+function declarationIn(contract: (typeof SUBSTITUTION_CONTRACTS)[number], file: string): readonly TableRow<"Template" | "Variables">[] {
+  const row = rowWhere(substitutionTable(contract), "Template", `\`${file}\``);
+  if (row.ok) return [row.value];
+  if (row.error.kind === "row-not-found") return [];
+  throw new Error(describeMarkdownError(row.error));
 }
 
-/** The variables the orchestrator is told to substitute for a template. */
+/** The variables the orchestrator is told to substitute for a template: the `{name}` tokens of its Variables cell. */
 function declaredVariables(file: string): readonly string[] {
-  const declarations = SUBSTITUTION_CONTRACTS
-    .map(([, doc]) => declaredIn(doc, file))
-    .filter((declared): declared is readonly string[] => declared !== null);
+  const declarations = SUBSTITUTION_CONTRACTS.flatMap((contract) => declarationIn(contract, file));
   expect(declarations.length, `${file} must be declared in exactly one substitution table`).toBe(1);
-  return declarations[0] ?? [];
+  const [declaration] = declarations;
+  if (declaration === undefined) return [];
+  return [...declaration.cells.Variables.matchAll(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g)].map(([, name]) => name);
 }
 
 /** Substitute every declared variable with a dummy value. */
@@ -95,6 +93,12 @@ describe("phase template placeholder audit", () => {
   it("covers every phase template on disk", () => {
     expect(PHASE_TEMPLATES).toEqual(Object.keys(TEMPLATE_AGENT).sort());
   });
+
+  for (const contract of SUBSTITUTION_CONTRACTS) {
+    it(`${contract[0]} has one substitution table, with a Template and a Variables column`, () => {
+      expect(substitutionTable(contract).rows.length).toBeGreaterThan(0);
+    });
+  }
 
   for (const file of PHASE_TEMPLATES) {
     it(`${file} — the template's placeholders equal the variables its substitution table declares`, () => {

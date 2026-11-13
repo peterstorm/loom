@@ -12,38 +12,45 @@ import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { describeMarkdownError, markdown, orFail, sectionOf, tableWithColumns } from "../support/markdown";
 
 const ADR_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "docs", "adr");
-const index = readFileSync(join(ADR_DIR, "README.md"), "utf-8");
+const index = markdown("docs/adr/README.md", readFileSync(join(ADR_DIR, "README.md"), "utf-8"));
 const adrFiles = readdirSync(ADR_DIR).filter((name) => /^ADR-\d{4}-.+\.md$/.test(name)).sort();
 
 type IndexRow = Readonly<{ file: string; status: string }>;
 
-const indexRows: readonly IndexRow[] = index.split("\n").flatMap((line) => {
-  const cells = line.split("|").map((cell) => cell.trim());
-  const link = /^\[ADR-\d{4}\]\(([^)]+)\)$/.exec(cells[1] ?? "");
-  return link === null ? [] : [{ file: link[1]!, status: cells[3] ?? "" }];
-});
+/** The index table's rows. An ADR cell that is not a `[ADR-NNNN](file)` link is kept whole, so the file comparison names it. */
+const indexRows = (): readonly IndexRow[] =>
+  orFail(tableWithColumns(index, ["ADR", "Status"]), describeMarkdownError).rows.map(({ cells }) => ({
+    file: /^\[ADR-\d{4}\]\(([^)]+)\)$/.exec(cells.ADR)?.[1] ?? cells.ADR,
+    status: cells.Status,
+  }));
 
-/** The first word of the first non-empty line under an ADR's `## Status` heading. */
-const statusWordOf = (file: string): string => {
-  const lines = readFileSync(join(ADR_DIR, file), "utf-8").split("\n");
-  const heading = lines.findIndex((line) => /^#{2,3}\s*Status\s*$/i.test(line));
-  // No Status heading is no status word, never the file's first line.
-  if (heading === -1) return "";
-  const first = lines.slice(heading + 1).find((line) => line.trim() !== "") ?? "";
-  return /^[A-Za-z]+/.exec(first.replace(/\*/g, "").trim())?.[0] ?? "";
+/** What an ADR's Status section states: its leading word, or why there is none. */
+type StatedStatus =
+  | Readonly<{ kind: "word"; word: string }>
+  | Readonly<{ kind: "no-word"; firstLine: string }>
+  | Readonly<{ kind: "unreadable"; reason: string }>;
+
+/** The first word of the first non-empty line under an ADR's Status heading. */
+const statedStatusOf = (file: string): StatedStatus => {
+  const section = sectionOf(markdown(file, readFileSync(join(ADR_DIR, file), "utf-8")), "Status");
+  if (!section.ok) return { kind: "unreadable", reason: describeMarkdownError(section.error) };
+  const firstLine = section.value.lines.find((line) => line.trim() !== "") ?? "";
+  const word = /^[A-Za-z]+/.exec(firstLine.replace(/\*/g, "").trim())?.[0];
+  return word === undefined ? { kind: "no-word", firstLine } : { kind: "word", word };
 };
 
 describe("docs/adr/README.md", () => {
   it("has exactly one row per ADR file, in file order", () => {
-    expect(indexRows.map(({ file }) => file)).toEqual(adrFiles);
+    expect(indexRows().map(({ file }) => file)).toEqual(adrFiles);
   });
 
   it("states each ADR's own status", () => {
-    const stale = indexRows
-      .map(({ file, status }) => ({ file, status, stated: statusWordOf(file) }))
-      .filter(({ status, stated }) => stated === "" || !status.startsWith(stated));
+    const stale = indexRows()
+      .map(({ file, status }) => ({ file, status, stated: statedStatusOf(file) }))
+      .filter(({ status, stated }) => stated.kind !== "word" || !status.startsWith(stated.word));
     expect(stale).toEqual([]);
   });
 });

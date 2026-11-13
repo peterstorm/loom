@@ -20,22 +20,33 @@ import {
   parseSecurityAuditOperation,
   securityAuditOperationWrites,
 } from "../../src/handlers/helpers/security-audit-operations";
+import { describeMarkdownError, markdown, orFail, sectionOf, tableWithColumns, tablesOf, type Table } from "../support/markdown";
 
 const command = readFileSync(new URL("../../../commands/security-audit.md", import.meta.url), "utf8");
 const operatorGuide = readFileSync(new URL("../../../docs/security-audit.md", import.meta.url), "utf8");
 
 /** One row of an operation table: `| `op` | input … | … |`. The input cell
  *  starts with `stdin` or `flags`; the operator guide follows it with the
- *  payload keys or flag names, which this binding does not read. */
+ *  payload keys or flag names, which this binding does not read. A cell that
+ *  does not have that shape is kept whole, so the assertions below name it. */
 type Row = Readonly<{ operation: string; input: string }>;
 
-const tableRows = (document: string): readonly Row[] =>
-  document
-    .split("\n")
-    .flatMap((line) => {
-      const match = /^\|\s*`([a-z-]+)`\s*\|\s*([a-z]+)\b[^|]*\|/.exec(line);
-      return match === null ? [] : [{ operation: match[1] ?? "", input: match[2] ?? "" }];
-    });
+/** An operation cell: one code span holding an operation-shaped name. */
+const OPERATION_CELL = /^`([a-z-]+)`$/;
+
+/** The rows of the guide's operations table: the one table in its Operations section with an Operation and an Input column. */
+const tableRows = (): readonly Row[] => {
+  const section = orFail(sectionOf(markdown("docs/security-audit.md", operatorGuide), "Operations"), describeMarkdownError);
+  return orFail(tableWithColumns(section, ["Operation", "Input"]), describeMarkdownError).rows.map(({ cells }) => ({
+    operation: OPERATION_CELL.exec(cells.Operation)?.[1] ?? cells.Operation,
+    input: /^[a-z]+\b/.exec(cells.Input)?.[0] ?? cells.Input,
+  }));
+};
+
+/** A table that lists operations: it has an Operation column, or its first column names one. */
+const isOperationsTable = (table: Table): boolean =>
+  table.columns.includes("Operation")
+  || table.rows.some(({ cells }) => OPERATION_CELL.test(cells[table.columns[0] ?? ""] ?? ""));
 
 // The operator guide is where an operator reads what each operation takes and
 // refuses; it owns the ONE operations table. The operation set is CLOSED, so an
@@ -44,7 +55,7 @@ const tableRows = (document: string): readonly Row[] =>
 // (or a refusal set) nobody documented.
 describe("the operations table of docs/security-audit.md", () => {
   it("names every operation the program declares, exactly once, and no other", () => {
-    const rows = tableRows(operatorGuide);
+    const rows = tableRows();
     expect(rows.length).toBeGreaterThan(0);
     const named = rows.map((row) => row.operation);
     expect(new Set(named).size).toBe(named.length);
@@ -53,7 +64,7 @@ describe("the operations table of docs/security-audit.md", () => {
   });
 
   it("declares, for each operation, the input the traits table declares", () => {
-    for (const row of tableRows(operatorGuide)) {
+    for (const row of tableRows()) {
       expect(["stdin", "flags"]).toContain(row.input);
       expect(row.input, row.operation).toBe(SECURITY_AUDIT_OPERATIONS[row.operation as keyof typeof SECURITY_AUDIT_OPERATIONS].input);
     }
@@ -84,7 +95,8 @@ describe("commands/security-audit.md", () => {
     // One owner per fact: a second table is a second place to drift. The
     // command is the parent's entry point, so it must send the parent to the
     // table the block above binds.
-    expect(tableRows(command)).toEqual([]);
+    const tables = orFail(tablesOf(markdown("commands/security-audit.md", command)), describeMarkdownError);
+    expect(tables.filter(isOperationsTable)).toEqual([]);
     expect(command).toContain("docs/security-audit.md");
     expect(command).toContain("skills/security-audit/SKILL.md");
   });
