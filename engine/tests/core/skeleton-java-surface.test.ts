@@ -11,7 +11,7 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import * as javaSurface from "../../src/core/skeleton/java-surface";
 import { readJavaImplementationSurface, readJavaTypesSurface } from "../../src/core/skeleton/java-surface";
-import { handler as maxFunctionLines } from "../../src/linter/programmatic/max-function-lines";
+import { DEFAULT_MAX_FUNCTION_LINES_OPTIONS, handler as maxFunctionLines } from "../../src/linter/programmatic/max-function-lines";
 import type { JavaImplementationSurface, JavaTypesSurface, SurfaceProblem } from "../../src/core/skeleton/types";
 import type { DomainResult } from "../../src/core/orchestration-contract";
 import { unwrap } from "../fixtures/skeleton-builders";
@@ -746,6 +746,6 @@ describe("the java-surface module", () => {
 
   it("keeps every function within the full-tier max-function-lines bound", () => {
     const source = readFileSync(SOURCE_PATH, "utf8");
-    expect(maxFunctionLines(source, "engine/src/core/skeleton/java-surface.ts").map((violation) => violation.fixHint)).toEqual([]);
+    expect(maxFunctionLines(source, "engine/src/core/skeleton/java-surface.ts", DEFAULT_MAX_FUNCTION_LINES_OPTIONS).map((violation) => violation.fixHint)).toEqual([]);
   });
 });

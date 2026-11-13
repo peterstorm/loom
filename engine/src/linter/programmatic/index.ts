@@ -14,7 +14,11 @@
 import type { ProgrammaticRule } from "../types";
 import { handler as crossBoundaryHandler, DEFAULT_BOUNDARIES, type BoundaryOptions } from "./no-cross-boundary-imports";
 import { handler as ioInPureHandler, DEFAULT_PURITY_SCOPE, type PurityScope } from "./no-io-in-pure-modules";
-import { handler as maxFunctionLinesHandler, DEFAULT_MAX_LINES, DEFAULT_EXCLUDE_PATTERNS } from "./max-function-lines";
+import {
+  handler as maxFunctionLinesHandler,
+  DEFAULT_MAX_FUNCTION_LINES_OPTIONS,
+  type MaxFunctionLinesOptions,
+} from "./max-function-lines";
 import { handler as fugueGeneratedIntegrityHandler } from "./fugue-generated-integrity";
 import {
   handler as exhaustiveDiscriminantHandler,
@@ -254,15 +258,24 @@ function importBoundaryRules(config: ProgrammaticConfig, projectRoot: string | n
   ];
 }
 
+/** max-function-lines' options for one project. */
+function maxFunctionLinesOptions(config: ProgrammaticConfig, projectRoot: string | null): MaxFunctionLinesOptions {
+  const defaults = DEFAULT_MAX_FUNCTION_LINES_OPTIONS;
+  return Object.freeze({
+    maxLines: config.maxFunctionLines ?? defaults.maxLines,
+    excludePatterns: config.excludeFromMaxLines ?? defaults.excludePatterns,
+    projectRoot,
+  });
+}
+
 function maxFunctionLinesRule(config: ProgrammaticConfig, projectRoot: string | null): ProgrammaticRule {
-  const maxLines = config.maxFunctionLines ?? DEFAULT_MAX_LINES;
-  const excludePatterns = config.excludeFromMaxLines ?? DEFAULT_EXCLUDE_PATTERNS;
+  const options = maxFunctionLinesOptions(config, projectRoot);
   return {
     kind: "programmatic",
     name: "max-function-lines",
-    description: `Enforce maximum function body length (configured: ${maxLines} lines)`,
+    description: `Enforce maximum function body length (configured: ${options.maxLines} lines)`,
     extensions: [...SCRIPT_EXTENSIONS, ".java"],
-    handler: (content, filePath) => maxFunctionLinesHandler(content, filePath, maxLines, excludePatterns, projectRoot),
+    handler: (content, filePath) => maxFunctionLinesHandler(content, filePath, options),
     tier: "full",
     fixHint: "Decompose into smaller functions with single responsibilities",
     enabled: true,

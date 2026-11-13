@@ -40,8 +40,9 @@ const DEADLINE_CHECK_INTERVAL = 100;
  * @param content - Full file content as a string
  * @param checkDeadline - Injected deadline checker (throws if time exceeded)
  * @param projectRoot - Root of the project the rules belong to: the frame
- *   `excludePatterns` are matched in. Null (the default) when no project owns
- *   the rules; the path is then matched as given.
+ *   `excludePatterns` are matched in. Null when no project owns the rules; the
+ *   path is then matched as given. Required, so a caller cannot leave the
+ *   frame out by forgetting it.
  * @returns Aggregated Violation[] (may be empty)
  * @throws Error on timeout or handler exception (fail-closed)
  */
@@ -50,7 +51,7 @@ export function executeRules(
   filePath: string,
   content: string,
   checkDeadline: () => void,
-  projectRoot: string | null = null
+  projectRoot: string | null
 ): readonly Violation[] {
   const ext = extname(filePath); // e.g. ".ts"
 

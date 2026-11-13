@@ -1,8 +1,17 @@
 import { describe, it, expect } from "vitest";
 import {
+  DEFAULT_MAX_FUNCTION_LINES_OPTIONS as DEFAULTS,
   detectFunctions,
   handler,
+  type MaxFunctionLinesOptions,
 } from "../../../src/linter/programmatic/max-function-lines";
+
+/** The default options with another line limit. */
+const limit = (maxLines: number): MaxFunctionLinesOptions => ({ ...DEFAULTS, maxLines });
+
+/** A 50-line limit excluding `excludePatterns`, matched inside `projectRoot`. */
+const excluding = (excludePatterns: readonly string[], projectRoot: string | null): MaxFunctionLinesOptions =>
+  ({ maxLines: 50, excludePatterns, projectRoot });
 
 describe("max-function-lines", () => {
   describe("detectFunctions", () => {
@@ -87,7 +96,7 @@ describe("max-function-lines", () => {
   describe("handler", () => {
     it("returns no violations for short functions", () => {
       const content = `function short() {\n  return 1;\n}\n`;
-      const violations = handler(content, "src/foo.ts");
+      const violations = handler(content, "src/foo.ts", DEFAULTS);
       expect(violations).toHaveLength(0);
     });
 
@@ -99,7 +108,7 @@ describe("max-function-lines", () => {
       lines.push("}");
       const content = lines.join("\n");
 
-      const violations = handler(content, "src/foo.ts", 50);
+      const violations = handler(content, "src/foo.ts", limit(50));
       expect(violations).toHaveLength(1);
       expect(violations[0].rule).toBe("max-function-lines");
       expect(violations[0].line).toBe(1);
@@ -116,9 +125,9 @@ describe("max-function-lines", () => {
       const content = lines.join("\n");
 
       // 30 lines, max 25 → violation
-      expect(handler(content, "src/foo.ts", 25)).toHaveLength(1);
+      expect(handler(content, "src/foo.ts", limit(25))).toHaveLength(1);
       // 30 lines, max 50 → no violation
-      expect(handler(content, "src/foo.ts", 50)).toHaveLength(0);
+      expect(handler(content, "src/foo.ts", limit(50))).toHaveLength(0);
     });
 
     it("excludes test files by default", () => {
@@ -129,9 +138,9 @@ describe("max-function-lines", () => {
       lines.push("}");
       const content = lines.join("\n");
 
-      expect(handler(content, "src/foo.test.ts")).toHaveLength(0);
-      expect(handler(content, "src/foo.spec.ts")).toHaveLength(0);
-      expect(handler(content, "src/foo.property.test.ts")).toHaveLength(0);
+      expect(handler(content, "src/foo.test.ts", DEFAULTS)).toHaveLength(0);
+      expect(handler(content, "src/foo.spec.ts", DEFAULTS)).toHaveLength(0);
+      expect(handler(content, "src/foo.property.test.ts", DEFAULTS)).toHaveLength(0);
     });
 
     it("excludes every file beneath a directory pattern, and not a sibling that shares its prefix", () => {
@@ -142,9 +151,10 @@ describe("max-function-lines", () => {
       lines.push("}");
       const content = lines.join("\n");
 
-      expect(handler(content, "src/infra/db.ts", 50, ["src/infra/"])).toHaveLength(0);
-      expect(handler(content, "/work/shop/src/infra/db.ts", 50, ["src/infra/"])).toHaveLength(0);
-      expect(handler(content, "src/infrastructure/db.ts", 50, ["src/infra/"])).toHaveLength(1);
+      const infra = excluding(["src/infra/"], "/work/shop");
+      expect(handler(content, "src/infra/db.ts", infra)).toHaveLength(0);
+      expect(handler(content, "/work/shop/src/infra/db.ts", infra)).toHaveLength(0);
+      expect(handler(content, "src/infrastructure/db.ts", infra)).toHaveLength(1);
     });
 
     it("matches a directory pattern inside the project root, not against the directories above it", () => {
@@ -156,8 +166,10 @@ describe("max-function-lines", () => {
       const content = lines.join("\n");
       const root = "/home/u/apps/shop";
 
-      expect(handler(content, `${root}/src/order.ts`, 50, ["apps/"], root)).toHaveLength(1);
-      expect(handler(content, `${root}/apps/demo/main.ts`, 50, ["apps/"], root)).toHaveLength(0);
+      expect(handler(content, `${root}/src/order.ts`, excluding(["apps/"], root))).toHaveLength(1);
+      expect(handler(content, `${root}/apps/demo/main.ts`, excluding(["apps/"], root))).toHaveLength(0);
+      // With no project the path is matched as given.
+      expect(handler(content, `${root}/src/order.ts`, excluding(["apps/"], null))).toHaveLength(0);
     });
 
     it("reports multiple over-length functions", () => {
@@ -169,7 +181,7 @@ describe("max-function-lines", () => {
       };
 
       const content = makeLong("a") + "\n\n" + makeLong("b");
-      const violations = handler(content, "src/foo.ts", 50);
+      const violations = handler(content, "src/foo.ts", limit(50));
       expect(violations).toHaveLength(2);
     });
 
@@ -181,7 +193,7 @@ describe("max-function-lines", () => {
       lines.push("}");
       const content = lines.join("\n");
 
-      expect(handler(content, "src/foo.ts", 50)).toHaveLength(0);
+      expect(handler(content, "src/foo.ts", limit(50))).toHaveLength(0);
     });
 
     it("function at maxLines+1 triggers violation", () => {
@@ -192,7 +204,7 @@ describe("max-function-lines", () => {
       lines.push("}");
       const content = lines.join("\n");
 
-      expect(handler(content, "src/foo.ts", 50)).toHaveLength(1);
+      expect(handler(content, "src/foo.ts", limit(50))).toHaveLength(1);
     });
   });
 });
@@ -256,7 +268,7 @@ describe("max-function-lines (extended)", () => {
       lines.push("}");
       const content = lines.join("\n");
 
-      const violations = handler(content, "src/foo.ts", 50);
+      const violations = handler(content, "src/foo.ts", limit(50));
       expect(violations).toHaveLength(1);
       expect(violations[0].fixHint).toContain("formatIfNeeded");
     });
