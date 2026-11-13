@@ -36,6 +36,10 @@ export const NEVER_SOURCE_DIRECTORIES: ReadonlySet<string> = new Set([
   "node_modules", ".git", ".claude", ".pi", "dist", "build", "out",
   ".next", "target", ".gradle", "__pycache__",
   ".direnv", ".devenv", ".nix-defexpr", "result",
+  // A Python virtualenv: `nix develop`/direnv shells create one at the project
+  // root, so it exists on one developer's machine and not on CI's. A project
+  // `exclude` entry for it is stale exactly where it is absent.
+  ".venv",
   "vendor", "coverage", ".turbo", ".cache",
 ]);
 
