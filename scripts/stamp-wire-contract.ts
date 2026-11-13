@@ -24,6 +24,11 @@
  * review-lenses markers. It is issued its lens by name, so the definitions
  * travel in its own file.
  *
+ * Which stamps a kind carries and how they are applied to a file is
+ * engine/src/core/wire-contract.ts (`stampsFor`, `applyStamps`). This script
+ * is the shell around it: it reads the sources and the agent files, writes or
+ * reports, and sets the exit code.
+ *
  * Usage: bun scripts/stamp-wire-contract.ts [--check]
  *   --check  exit 1 if any stamped text differs from its source (no writes)
  */
@@ -35,93 +40,76 @@ import { agentsOfKind } from "../engine/src/core/agent-catalog-projections";
 import { renderReviewerWireContract } from "../engine/src/core/reviewer-protocol";
 import { REVIEW_LENSES } from "../engine/src/core/review-panel";
 import {
-  READ_COVERAGE_BULLET_ANCHOR,
-  REVIEW_LENSES_REGION,
-  REVIEWER_BOOTSTRAP_REGION,
-  REVIEWER_PREFLIGHT_REGION,
-  WIRE_CONTRACT_REGION,
+  REVIEW_LENS_REFERENCE,
+  REVIEWER_WIRE_FRAGMENTS,
+  applyStamps,
   reviewLensSections,
-  stampReadCoverageBullet,
-  stampRegion,
-  type StampResult,
-  type StampedRegion,
+  stampsFor,
+  type StampSources,
 } from "../engine/src/core/wire-contract";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const FRAGMENTS = "references/reviewer-wire";
-const LENS_REFERENCE = "references/review-lenses.md";
 const check = process.argv.includes("--check");
-const readFragment = (name: string): string => readFileSync(join(ROOT, FRAGMENTS, name), "utf-8");
+const readFragment = (name: string): string => readFileSync(join(ROOT, REVIEWER_WIRE_FRAGMENTS, name), "utf-8");
 
-const wireContract = renderReviewerWireContract();
-const wireContractPath = join(ROOT, FRAGMENTS, "wire-contract.md");
-let drifted = 0;
-if (readFileSync(wireContractPath, "utf-8") !== wireContract) {
-  drifted += 1;
-  if (check) console.error(`${FRAGMENTS}/wire-contract.md differs from the executable reviewer contract`);
-  else writeFileSync(wireContractPath, wireContract);
-}
+/** A file as this run found it: already equal to its source, or not. */
+type Outcome = "current" | "drifted";
 
-/** One source's replacement in an agent file, with the words that report it. */
-type Stamp = Readonly<{
-  apply: (agentMarkdown: string) => StampResult;
-  /** What a refused stamp should have found in the file. */
-  expected: string;
-  /** What `--check` reports when the file differs. */
-  difference: string;
-}>;
-
-const regionStamp = (region: StampedRegion, source: string, text: string): Stamp => ({
-  apply: (agentMarkdown) => stampRegion(agentMarkdown, region, text),
-  expected: `${region.start} … ${region.end}`,
-  difference: `${region.name} region differs from ${source}`,
-});
-
-/** Apply every stamp to one agent file; a stamp the file cannot take is fatal. */
-function stampAgent(agent: string, stamps: readonly Stamp[]): void {
-  const path = join(ROOT, "agents", `${agent}.md`);
-  let stamped = readFileSync(path, "utf-8");
-  const differing: string[] = [];
-  for (const { apply, expected, difference } of stamps) {
-    const next = apply(stamped);
-    if (!next.ok) {
-      console.error(`${agent}: ${next.error} (expected ${expected})`);
-      process.exit(1);
-    }
-    if (next.value !== stamped) differing.push(difference);
-    stamped = next.value;
-  }
-  if (differing.length === 0) return;
-  drifted += 1;
-  if (check) {
-    for (const difference of differing) console.error(`${agent}: ${difference}`);
-  } else {
-    writeFileSync(path, stamped);
-    process.stdout.write(`stamped ${agent}\n`);
-  }
-}
-
-/** Every reviewer's stamps, in file order. */
-const readCoverage = readFragment("read-coverage.md");
-const reviewerStamps: readonly Stamp[] = [
-  regionStamp(REVIEWER_BOOTSTRAP_REGION, `${FRAGMENTS}/bootstrap.md`, readFragment("bootstrap.md")),
-  regionStamp(REVIEWER_PREFLIGHT_REGION, `${FRAGMENTS}/before-you-emit.md`, readFragment("before-you-emit.md")),
-  regionStamp(WIRE_CONTRACT_REGION, `${FRAGMENTS}/wire-contract.md`, wireContract),
-  {
-    apply: (agentMarkdown) => stampReadCoverageBullet(agentMarkdown, readCoverage),
-    expected: `one line starting ${READ_COVERAGE_BULLET_ANCHOR}`,
-    difference: `read-coverage bullet differs from ${FRAGMENTS}/read-coverage.md`,
-  },
-];
-for (const agent of agentsOfKind("reviewer")) stampAgent(agent, reviewerStamps);
-
-const lensSections = reviewLensSections(readFileSync(join(ROOT, LENS_REFERENCE), "utf-8"), REVIEW_LENSES);
-if (!lensSections.ok) {
-  console.error(`${LENS_REFERENCE}: ${lensSections.error}`);
+/** A file that cannot be stamped at all stops the run. */
+function refuse(message: string): never {
+  console.error(message);
   process.exit(1);
 }
-const verifierStamps = [regionStamp(REVIEW_LENSES_REGION, LENS_REFERENCE, lensSections.value)];
-for (const agent of agentsOfKind("review-verifier")) stampAgent(agent, verifierStamps);
+
+/** The generated fragment itself, rewritten from the executable contract. */
+function stampWireContractFragment(wireContract: string): Outcome {
+  const path = join(ROOT, REVIEWER_WIRE_FRAGMENTS, "wire-contract.md");
+  if (readFileSync(path, "utf-8") === wireContract) return "current";
+  if (check) console.error(`${REVIEWER_WIRE_FRAGMENTS}/wire-contract.md differs from the executable reviewer contract`);
+  else writeFileSync(path, wireContract);
+  return "drifted";
+}
+
+/** Stamp every catalogued agent of the sources' kind. */
+function stampAgents(sources: StampSources): readonly Outcome[] {
+  const stamps = stampsFor(sources);
+  return agentsOfKind(sources.kind).map((agent): Outcome => {
+    const path = join(ROOT, "agents", `${agent}.md`);
+    const stamped = applyStamps(readFileSync(path, "utf-8"), stamps);
+    if (!stamped.ok) return refuse(`${agent}: ${stamped.error.reason} (expected ${stamped.error.expected})`);
+    if (stamped.differing.length === 0) return "current";
+    if (check) {
+      for (const difference of stamped.differing) console.error(`${agent}: ${difference}`);
+    } else {
+      writeFileSync(path, stamped.value);
+      process.stdout.write(`stamped ${agent}\n`);
+    }
+    return "drifted";
+  });
+}
+
+/** Read after the reviewers are stamped: a lens reference that does not
+ *  document the selectable lenses stops the run here. */
+function verifierSources(): StampSources {
+  const lensSections = reviewLensSections(readFileSync(join(ROOT, REVIEW_LENS_REFERENCE), "utf-8"), REVIEW_LENSES);
+  return lensSections.ok
+    ? { kind: "review-verifier", lensSections: lensSections.value }
+    : refuse(`${REVIEW_LENS_REFERENCE}: ${lensSections.error}`);
+}
+
+const wireContract = renderReviewerWireContract();
+const outcomes: readonly Outcome[] = [
+  stampWireContractFragment(wireContract),
+  ...stampAgents({
+    kind: "reviewer",
+    bootstrap: readFragment("bootstrap.md"),
+    preflight: readFragment("before-you-emit.md"),
+    wireContract,
+    readCoverage: readFragment("read-coverage.md"),
+  }),
+  ...stampAgents(verifierSources()),
+];
+const drifted = outcomes.filter((outcome) => outcome === "drifted").length;
 
 if (check && drifted > 0) process.exit(1);
 process.stdout.write(
