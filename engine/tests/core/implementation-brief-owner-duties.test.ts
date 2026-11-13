@@ -32,6 +32,7 @@ import type { PlanInvariant, Task } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { unobservedSkeletons } from "../fixtures/frozen-signatures";
+import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { briefOwnership, ownerObligation } from "../fixtures/owner-obligation";
 import {
   ADMISSION,
@@ -78,7 +79,7 @@ function ownership(fileList: readonly string[], stamp: readonly OwnerObligation[
     roster: graph.roster,
     contracts: graph.contracts,
     repositoryRoot: "/repo",
-    packageRoot: "/loom",
+    commands: loomCommandsAt("/loom"),
     operatorNotes: [],
     ownership: briefOwnership(stamp, INVARIANTS, value.file_list ?? []),
     frozenSignatures: unobservedSkeletons(graphFixture(graph.roster)),

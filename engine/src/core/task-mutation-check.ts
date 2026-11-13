@@ -38,7 +38,6 @@ import { judgeAffectedRun } from "./affected-stop-check";
 import type { AffectedRunVerdict } from "./affected-stop-check-types";
 import { sha256Bytes, sha256Hex } from "./digest";
 import { taskRolePolicy } from "./distill-task";
-import { loomHelperCommand } from "./loom-cli-command";
 import { DECISION_RECORD_AGENT } from "./model-profiles";
 import { failure, isNonEmpty, mapNonEmpty, nonEmpty, success, type DomainResult, type NonEmpty } from "./orchestration-contract/identity";
 import { compareStrings } from "./ordering";
@@ -49,7 +48,6 @@ import { isRepoRelativePlanPath, normalizePlanPath } from "./plan-path-match";
 import { isRecord, type UnknownRecord } from "./plain-record";
 import { parseJunitTestcases } from "./structured-test-report";
 import { frozenRedThenGreenEra } from "./proof-obligations";
-import { quoteShellArgument } from "./shell-quoting";
 import { isTestFileBySuffixes } from "./test-file-classification";
 import { taskMutationCheckSetting, type AffectedRunner } from "./verification-manifest";
 import type { TaskGraph } from "../types";
@@ -667,14 +665,6 @@ export const KILLING_TEST: Readonly<Record<TaskMutationOperator, string>> = Obje
   "return-value-replacement": "a test that asserts the returned value, not only that the call completes",
   "statement-removal": "a test that asserts the effect of this statement",
 });
-
-/**
- * The one command that runs the check for `taskId`, from the repository the
- * TaskGraph lives in, through the Loom package at `packageRoot`. The brief and
- * a block both print it, so an implementer is never told two forms.
- */
-export const taskMutationCommand = (packageRoot: string, taskId: string): string =>
-  `${loomHelperCommand(packageRoot)} mutation-check --task ${quoteShellArgument(taskId)}`;
 
 const SNIPPET_CHARS = 120;
 

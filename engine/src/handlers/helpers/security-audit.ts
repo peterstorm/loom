@@ -104,11 +104,10 @@ import { adjudicateRun } from "../../core/security-adjudication";
 import {
   importVerificationResult,
   planVerificationStart,
-  renderVerificationImport,
   renderVerificationStart,
   type VerificationStartPlan,
 } from "../../core/security-verification";
-import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
+import { LOOM_COMMANDS } from "../../utils/loom-package-root";
 import {
   observeVerificationGenerations,
   proveCachedBallots,
@@ -131,7 +130,6 @@ import {
   DEFAULT_SANDBOX_LIMITS,
   bindSandboxRun,
   judgeLocalReceipt,
-  renderNonceCommand,
   renderSandboxInstructions,
 } from "../../core/security-sandbox";
 import { derivePublication } from "../../core/security-reports";
@@ -472,7 +470,7 @@ function writeFreshRun(
     [FILES.lenses, json({
       selected: selection.included.map((entry) => ({ lens: entry.lens, score: entry.score, reasons: entry.reasons })),
       excluded: selection.excluded,
-      rendered: renderLensSelection(LOOM_PACKAGE_ROOT, selection),
+      rendered: renderLensSelection(LOOM_COMMANDS.securityLens, selection),
     })],
     [FILES.run, json(metadata)],
   ], reset);
@@ -581,7 +579,7 @@ function startReport(
     `coverage units: ${summary.total} (planned ${summary.byStatus.planned})`,
     `lenses: ${started.metadata.selectedCompanions.join(", ") || "none"}`,
     "",
-    renderLensSelection(LOOM_PACKAGE_ROOT, started.selection),
+    renderLensSelection(LOOM_COMMANDS.securityLens, started.selection),
   ].join("\n");
 }
 
@@ -617,7 +615,7 @@ function runAssign(store: Store, args: readonly string[]): DomainResult<string, 
   return success(assigned.value.assigned
     .flatMap((entry) => [
       `assigned ${entry.coverageId} to owner ${entry.ownerId} at wave ${entry.wave}`,
-      `nonce: ${renderNonceCommand(LOOM_PACKAGE_ROOT, store.out, entry.ownerId)}`,
+      `nonce: ${LOOM_COMMANDS.auditNonce(store.out, entry.ownerId)}`,
     ])
     .join("\n"));
 }
@@ -643,7 +641,7 @@ function runNonce(store: Store, args: readonly string[]): DomainResult<string, s
   if (!admitted.ok) return failure(`nonce refused: ${describeAuditRefusal(admitted.error)}`);
   const { artifact: owned, coverageIds } = admitted.value;
   const binding = bindSandboxRun({
-    packageRoot: LOOM_PACKAGE_ROOT, target: run.value.target, runDir: store.out, owner: owned.owner, artifact: owned.path,
+    script: LOOM_COMMANDS.sandboxScript, target: run.value.target, runDir: store.out, owner: owned.owner, artifact: owned.path,
   });
   if (!binding.ok) return failure(`nonce refused: ${describeAuditRefusal(binding.error)}`);
   return success([
@@ -921,7 +919,7 @@ async function runFindings(store: Store, args: readonly string[]): Promise<Domai
     ledger: snapshot.value.ledger,
     findings: adjudicated.value.findings,
     locator: store.out,
-    packageRoot: LOOM_PACKAGE_ROOT,
+    commands: LOOM_COMMANDS,
   });
   if (!publication.ok) return failure(`the run's disposition cannot be derived — ${publication.error.message}`);
   return success([
@@ -958,7 +956,7 @@ async function runPublish(store: Store, args: readonly string[]): Promise<Domain
   // One derivation of the disposition: the report's handoff IS it, and a run
   // whose disposition cannot be derived is refused here, before any write,
   // rather than published with the handoff reduced to an error sentence.
-  const publication = derivePublication({ metadata, ledger, findings: records.value, locator: store.out, packageRoot: LOOM_PACKAGE_ROOT });
+  const publication = derivePublication({ metadata, ledger, findings: records.value, locator: store.out, commands: LOOM_COMMANDS });
   if (!publication.ok) return failure(`publish refused: the run's disposition cannot be derived — ${publication.error.message}`);
   const complete = status.runStatus === "complete";
   // Commit order: prose, then records, then `run.json` LAST. The `published`
@@ -1012,7 +1010,7 @@ function runDisposition(store: Store, args: readonly string[]): DomainResult<str
     `disposition set written to ${join(store.out, FILES.disposition)}`,
     `${count("accepted")} accepted; ${count("deferred")} deferred; ${count("dismissed")} dismissed`,
     "",
-    renderDispositionHandoff(LOOM_PACKAGE_ROOT, disposition.value),
+    renderDispositionHandoff(LOOM_COMMANDS, disposition.value),
   ].join("\n"));
 }
 
@@ -1053,8 +1051,8 @@ async function verificationStatus(snapshot: AuditSnapshot): Promise<DomainResult
     runsRoot,
     run: plan.value.run,
     input: plan.value.input,
-    command: renderVerificationStart(LOOM_PACKAGE_ROOT, plan.value, runsRoot),
-    importCommand: renderVerificationImport(LOOM_PACKAGE_ROOT, locator, plan.value.run),
+    command: renderVerificationStart(LOOM_COMMANDS, plan.value, runsRoot),
+    importCommand: LOOM_COMMANDS.verificationImport(locator, plan.value.run),
     retiredRuns: [...generations.value].flatMap(([run, observed]) => observed.state === "dead" ? [{ run, reason: observed.reason }] : []),
   });
 }

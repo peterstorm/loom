@@ -11,6 +11,7 @@
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
+import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { SECURITY_PROFILE_LENSES } from "../../src/core/security-audit-contract";
 import {
   SECURITY_LENSES,
@@ -100,7 +101,7 @@ describe("lens selection", () => {
   });
 
   it("renders the choice and the exclusions for a prompt", () => {
-    const rendered = renderLensSelection("/opt/loom", selectSecurityLenses(aSignals({ servesHttp: true }), STANDARD));
+    const rendered = renderLensSelection(loomCommandsAt("/opt/loom").securityLens, selectSecurityLenses(aSignals({ servesHttp: true }), STANDARD));
     // Each included lens is an absolute path a hunter can read from the
     // audited repository; a package-relative path names nothing there.
     expect(rendered).toContain("\n- /opt/loom/references/security-lenses/ATTACK-CLASSES.md (base)");

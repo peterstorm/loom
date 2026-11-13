@@ -21,6 +21,7 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 
+import type { LoomCommands } from "./loom-cli-command";
 import type { SecurityRunMetadata } from "./security-audit-contract";
 import { success, type DomainResult } from "./orchestration-contract/identity";
 import { incompleteReasonSource, summarizeCoverage, unitOfFingerprint, type CoverageLedger } from "./security-coverage";
@@ -47,8 +48,8 @@ export type ReportInput = Readonly<{
   hardening?: readonly string[];
   /** The final coverage critic's own verdict, quoted as-is. */
   criticStop?: boolean | null;
-  /** The Loom package the handoff command runs through. */
-  packageRoot: string;
+  /** The printed commands of the Loom package the handoff command runs through. */
+  commands: LoomCommands;
   /** The decision set this publication hands off, derived once by
    *  `derivePublication` from these same findings. It carries the locator the
    *  handoff command names, so the report needs no second copy of it. */
@@ -228,7 +229,7 @@ export function renderReport(input: ReportInput): string {
     "",
     rejectedNote(rejected),
     "",
-    renderDispositionHandoff(input.packageRoot, input.disposition),
+    renderDispositionHandoff(input.commands, input.disposition),
   ].join("\n");
 }
 

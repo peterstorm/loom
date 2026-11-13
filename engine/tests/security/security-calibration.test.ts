@@ -30,6 +30,7 @@ import { aRun, must, removeRuns, startRun } from "../handlers/security-audit-har
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { loomCommandsAt } from "../fixtures/loom-package-root";
 import {
   SECURITY_PROFILE_LENSES,
   canonicalCoverageId,
@@ -360,7 +361,7 @@ describe("a recorded run reaches every planted defect", () => {
       ...METADATA,
       selectedCompanions: selectSecurityLenses(DEFECTS.signals, { maxLenses: SECURITY_PROFILE_LENSES.deep }).included.map((entry) => entry.lens),
     }));
-    const report = ok(derivePublication({ metadata, ledger, findings, locator: "/calibration", packageRoot: "/loom" })).documents["REPORT.md"];
+    const report = ok(derivePublication({ metadata, ledger, findings, locator: "/calibration", commands: loomCommandsAt("/loom") })).documents["REPORT.md"];
 
     for (const defect of DEFECTS.defects) {
       expect(report.split(fingerprintOf(defect))).toHaveLength(2);
@@ -441,7 +442,7 @@ describe("the fixture is not a happy-path prop", () => {
     expect(validateLedger(ledger)).toEqual([]);
     const sqli = findings.filter((finding) => finding.fingerprint === "calibration/cal-sqli-01");
     expect(sqli).toHaveLength(1);
-    const report = ok(derivePublication({ metadata, ledger, findings: sqli, locator: "/calibration", packageRoot: "/loom" })).documents["REPORT.md"];
+    const report = ok(derivePublication({ metadata, ledger, findings: sqli, locator: "/calibration", commands: loomCommandsAt("/loom") })).documents["REPORT.md"];
     expect(report).toContain("calibration/cal-sqli-01");
     for (const defect of DEFECTS.defects.slice(1)) {
       expect(report).not.toContain(fingerprintOf(defect));

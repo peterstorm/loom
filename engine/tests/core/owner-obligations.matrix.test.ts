@@ -108,6 +108,7 @@ import { parseAuthoredTaskRoster, populateTaskGraph } from "../../src/core/task-
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { briefOwnership, ownerObligation } from "../fixtures/owner-obligation";
 import { unobservedSkeletons } from "../fixtures/frozen-signatures";
+import { loomCommandsAt } from "../fixtures/loom-package-root";
 
 const ADMISSION: OwnerObligation = ownerObligation({
   invariant: "INV-1",
@@ -274,7 +275,7 @@ describe("INV-3 sibling rows — review-packet owner map and brief duties follow
     const rendered = renderImplementationBrief({
       template: TEMPLATE, task: value, dispatch: derivation.dispatch, verificationManifest: undefined,
       planFile: PLAN_FILE, spec: { kind: "unavailable", reason: { kind: "no-spec-file" } }, rules: RULES,
-      roster: [], contracts: [], repositoryRoot: "/repo", packageRoot: "/loom", operatorNotes: [], frozenSignatures: unobservedSkeletons(graphFixture([value])),
+      roster: [], contracts: [], repositoryRoot: "/repo", commands: loomCommandsAt("/loom"), operatorNotes: [], frozenSignatures: unobservedSkeletons(graphFixture([value])),
       ownership: briefOwnership(stamp, OWNED_PLAN_MODELS.invariants, files),
     });
     if (!rendered.ok) throw new Error(rendered.error.message);

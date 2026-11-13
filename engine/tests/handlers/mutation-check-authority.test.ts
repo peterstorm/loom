@@ -14,22 +14,23 @@
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { renderTaskMutationReport, taskMutationCommand, taskMutationResultOf, taskMutationUnavailable } from "../../src/core/task-mutation-check";
+import { renderTaskMutationReport, taskMutationResultOf, taskMutationUnavailable } from "../../src/core/task-mutation-check";
 import { KNOWN_HANDLERS, PI_RUNTIME_HANDSHAKE_ROUTES } from "../../src/handler-routes";
 import { observeSubagentAuthorityContext, subagentAuthorityBlock } from "../../src/handlers/pre-tool-use/guard-subagent-authority";
 import { classifyTestCommand, extractEvidence } from "../../src/machine/extract-evidence";
 import type { HarnessToolCall } from "../../src/machine/harness-tool-call-types";
 import { taskMutationRecordPath } from "../../src/orchestration/task-mutation-record";
-import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
+import { LOOM_COMMANDS } from "../../src/utils/loom-package-root";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { guardDecision } from "../fixtures/guard-decision";
+import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { talliedResult } from "../fixtures/task-mutation";
 
 const COMMANDS = [
-  taskMutationCommand(LOOM_PACKAGE_ROOT, "T1"),
-  taskMutationCommand("/home/o'brien/.claude/plugins/loom", "T12"),
-  `cd /repo && ${taskMutationCommand(LOOM_PACKAGE_ROOT, "T1")}`,
+  LOOM_COMMANDS.mutationCheck("T1"),
+  loomCommandsAt("/home/o'brien/.claude/plugins/loom").mutationCheck("T12"),
+  `cd /repo && ${LOOM_COMMANDS.mutationCheck("T1")}`,
 ];
 
 const SURVIVORS = renderTaskMutationReport("T1", taskMutationResultOf([{
@@ -77,7 +78,7 @@ describe("the Task mutation check's command under the guards", () => {
   });
 
   it("guard-subagent-authority still refuses the same CLI aimed at a hook route", () => {
-    const forged = taskMutationCommand(LOOM_PACKAGE_ROOT, "T1").replace("helper mutation-check", "subagent-stop dispatch");
+    const forged = LOOM_COMMANDS.mutationCheck("T1").replace("helper mutation-check", "subagent-stop dispatch");
     expect(subagentAuthorityBlock(forged, observeSubagentAuthorityContext("/repo"))).not.toBeNull();
   });
 

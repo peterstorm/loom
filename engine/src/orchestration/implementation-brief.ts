@@ -29,6 +29,7 @@ import {
   type RuleDocument,
 } from "../core/implementation-brief";
 import { distillDispatchBlockers, distillWithheldMessage } from "../core/distill-task";
+import { loomCommands, type LoomPackageRoot } from "../core/loom-cli-command";
 import { nonEmpty, type DomainResult } from "../core/orchestration-contract";
 import { bindingStampAgreement } from "../core/skeleton/bindings";
 import { deriveTaskImplementationDispatch } from "../core/task-implementation-dispatch";
@@ -94,11 +95,12 @@ function planInvariants(planFile: string | null): DomainResult<readonly PlanInva
 /**
  * Render the brief `request` asks for (its Task of the graph at `graphPath`,
  * with its operator notes), using the binding rules and template of the Loom
- * package at `packageRoot`. Refusals name the exact cause; nothing here writes.
+ * package at `packageRoot`, whose CLI the brief's commands name. Refusals name
+ * the exact cause; nothing here writes.
  */
 export function renderTaskImplementationBrief(
   graphPath: string,
-  packageRoot: string,
+  packageRoot: LoomPackageRoot,
   request: ImplementationBriefRequest,
 ): DomainResult<ImplementationBrief, string> {
   const { taskId } = request;
@@ -156,7 +158,7 @@ export function renderTaskImplementationBrief(
       contracts: graph.acceptance_contracts ?? [],
       verificationManifest: graph.verification_manifest,
       repositoryRoot: projectRoot,
-      packageRoot,
+      commands: loomCommands(packageRoot),
       operatorNotes: request.operatorNotes,
       frozenSignatures: frozenSignatures.value,
     });

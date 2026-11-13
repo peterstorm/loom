@@ -37,7 +37,6 @@ import {
   TASK_MUTATION_DEADLINE_MS,
   TASK_MUTATION_NOT_RUN,
   TASK_MUTATION_OFF_TEXT,
-  taskMutationCommand,
   taskMutationDigest,
   taskMutationDuty,
   taskMutationMutants,
@@ -56,6 +55,7 @@ import {
 } from "../../src/core/task-mutation-check";
 import type { Task, TaskGraph } from "../../src/types";
 import { contract, surface, task } from "../fixtures/contract-status-fixtures";
+import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { distillTaskFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { junitReport, mutationManifest, START_SHA, talliedResult, type JunitCase } from "../fixtures/task-mutation";
 
@@ -415,7 +415,7 @@ describe("the Task mutation record", () => {
 const CLEAN_RESULT = talliedResult({ killed: 3, candidates: 3 });
 const INCONCLUSIVE_RESULT = talliedResult({ invalid: 2, candidates: 4 });
 const SURVIVORS_RESULT = taskMutationResultOf([{ mutant: mutant(IMPL, 2), outcome: "survived" }, { mutant: mutant(IMPL, 7, "comparison-flip"), outcome: "untested" }], 9);
-const COMMAND = taskMutationCommand("/opt/loom", "T2");
+const COMMAND = loomCommandsAt("/opt/loom").mutationCheck("T2");
 
 describe("taskMutationStanding and taskMutationStopVerdict", () => {
   it("reads a record of these bytes as current, of other bytes or another Task as stale, and none as not-run", () => {
@@ -475,7 +475,7 @@ describe("taskMutationStanding and taskMutationStopVerdict", () => {
 describe("what the implementer reads", () => {
   it("forms one quoted command through the package's CLI", () => {
     expect(COMMAND).toBe("bun '/opt/loom/engine/src/cli.ts' helper mutation-check --task 'T2'");
-    expect(taskMutationCommand("/home/o'brien/loom", "T2")).toContain(`'/home/o'\\''brien/loom/engine/src/cli.ts'`);
+    expect(loomCommandsAt("/home/o'brien/loom").mutationCheck("T2")).toContain(`'/home/o'\\''brien/loom/engine/src/cli.ts'`);
   });
 
   it("gives every operator a killing test", () => {

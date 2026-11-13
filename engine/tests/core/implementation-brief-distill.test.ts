@@ -28,7 +28,7 @@ import {
 import { authorizeImplementationSpawn } from "../../src/core/implementation-retry";
 import { DECISION_RECORD_AGENT, DISTILL_AGENT } from "../../src/core/model-profiles";
 import { NO_PREDECESSORS } from "../../src/core/predecessor-output";
-import { TASK_MUTATION_BASH_TIMEOUT_MS, taskMutationCommand } from "../../src/core/task-mutation-check";
+import { TASK_MUTATION_BASH_TIMEOUT_MS } from "../../src/core/task-mutation-check";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
 import { validateTemplateSubstitution } from "../../src/core/validate-template-substitution";
 import { IMPLEMENTATION_BRIEF_TEMPLATE, renderTaskImplementationBrief } from "../../src/orchestration/implementation-brief";
@@ -36,6 +36,7 @@ import type { Task, TaskGraph } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { digest } from "../fixtures/acceptance-fixtures";
 import { unobservedSkeletons } from "../fixtures/frozen-signatures";
+import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { semanticAttemptReceipt } from "../fixtures/implementation-settlement";
 import { briefOwnership, ownerObligation, planOwnership } from "../fixtures/owner-obligation";
 import { binding, frozenManifestWith } from "../fixtures/skeleton-builders";
@@ -80,7 +81,7 @@ const render = (task: Task, overrides: Partial<ImplementationBriefInput> = {}): 
     ownership: planOwnership(),
     contracts: [],
     repositoryRoot: "/repo",
-    packageRoot: "/loom",
+    commands: loomCommandsAt("/loom"),
     operatorNotes: [],
     frozenSignatures: unobservedSkeletons(graphFixture(ROSTER)),
     ...overrides,
@@ -320,7 +321,7 @@ describe("the Task mutation check in a brief (ADR-0071)", () => {
   it("tells an implementer that owes it the one command, its timeout, and the files it mutates", () => {
     const text = policy(pending());
     expect(text).toContain(`${HEADING} Once your tests pass and before your final verification run, run this as one Bash call with a timeout of ${TASK_MUTATION_BASH_TIMEOUT_MS} ms:`);
-    expect(text).toContain(`\n\`${taskMutationCommand("/loom", "T5")}\`\n`);
+    expect(text).toContain(`\n\`${loomCommandsAt("/loom").mutationCheck("T5")}\`\n`);
     expect(text).toContain("at most 8 mutants");
     expect(text).toContain("an equivalent mutant");
     expect(text).toContain("makes the result stale, so run it after your last edit");

@@ -18,6 +18,7 @@
  * Pure: the shell reads the template, rules, graph and spec and passes them in.
  */
 
+import type { LoomCommands } from "./loom-cli-command";
 import { AGENT_CATALOG, type LoomAgentName } from "./model-profiles";
 import { canonicalRecord, type DomainResult } from "./orchestration-contract";
 import type { ParsedSpec } from "./parse-spec";
@@ -47,7 +48,7 @@ import type { FrozenVerificationManifest } from "./verification-manifest";
 import { samePlanPath } from "./plan-path-match";
 import { TASK_MUTATION_STOP_CHECK_MAX_BLOCKS } from "./affected-stop-check-types";
 import { MUTANT_CAP_PER_TASK } from "./owner-verification/mutation-plan";
-import { TASK_MUTATION_BASH_TIMEOUT_MS, taskMutationCommand, taskMutationDuty } from "./task-mutation-check";
+import { TASK_MUTATION_BASH_TIMEOUT_MS, taskMutationDuty } from "./task-mutation-check";
 import { renderSkeletonOutcome } from "./skeleton/outcomes";
 import { conformanceScope } from "./skeleton/scope";
 import { renderStaleSkeleton, staleSkeletons, taskSkeletonOutcomes, type UnresolvedSkeletonBinding } from "./skeleton/status";
@@ -148,9 +149,9 @@ export type ImplementationBriefInput = Readonly<{
   /** The TaskGraph's project root, absolute: where the I6 restore command
    *  runs, spelled literally so no command substitution reaches the guard. */
   repositoryRoot: string;
-  /** The active Loom package's root, absolute: the engine command a brief
-   *  names (the Task mutation check) runs through its CLI. */
-  packageRoot: string;
+  /** The active Loom package's printed commands: the engine command a brief
+   *  names (the Task mutation check) is `commands.mutationCheck`. */
+  commands: LoomCommands;
   /** The operator's notes from the dispatch marker (#119); empty for none. */
   operatorNotes: readonly OperatorNote[];
   /** What the shell observed for the Frozen Signatures section (G2 AD-13).
@@ -916,7 +917,7 @@ function redThenGreenSection(
  */
 function taskMutationSection(
   task: Task,
-  { roster, contracts, verificationManifest, packageRoot }: Pick<ImplementationBriefInput, "roster" | "contracts" | "verificationManifest" | "packageRoot">,
+  { roster, contracts, verificationManifest, commands }: Pick<ImplementationBriefInput, "roster" | "contracts" | "verificationManifest" | "commands">,
 ): string | null {
   const duty = taskMutationDuty({
     tasks: [...roster.filter(({ id }) => id !== task.id), task],
@@ -927,7 +928,7 @@ function taskMutationSection(
   return [
     "**Task mutation check.** Once your tests pass and before your final verification run, run this as one Bash call " +
       `with a timeout of ${TASK_MUTATION_BASH_TIMEOUT_MS} ms:`,
-    `\`${taskMutationCommand(packageRoot, task.id)}\``,
+    `\`${commands.mutationCheck(task.id)}\``,
     `It mutates the lines you changed in the files below (at most ${MUTANT_CAP_PER_TASK} mutants), runs your affected tests against ` +
       "each one in an isolated copy of the workspace, and prints every mutant your tests did not kill, with the test that kills it. " +
       "For each survivor, add that test and run the check again. When no test can tell a mutant from your code (an equivalent " +

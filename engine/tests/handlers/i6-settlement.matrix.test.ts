@@ -90,6 +90,7 @@ import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
 import { briefOwnership } from "../fixtures/owner-obligation";
 import { unobservedSkeletons } from "../fixtures/frozen-signatures";
+import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { piGrantedAgentId } from "../../../pi/write-grant";
 import { piImplementationLedger } from "../../../pi/subagent-settlement";
 import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
@@ -764,7 +765,7 @@ function briefInput(graph: TaskGraph, task: Task, overrides: Partial<Implementat
     contracts: [],
     verificationManifest: graph.verification_manifest,
     repositoryRoot: ROOT,
-    packageRoot: "/loom",
+    commands: loomCommandsAt("/loom"),
     operatorNotes: [],
     frozenSignatures: unobservedSkeletons(graph),
     ...overrides,

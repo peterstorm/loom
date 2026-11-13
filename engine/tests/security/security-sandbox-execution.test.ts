@@ -26,6 +26,7 @@ import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { loomCommandsAt } from "../fixtures/loom-package-root";
 import {
   DEFAULT_SANDBOX_LIMITS,
   describeUnboundedRun,
@@ -34,7 +35,6 @@ import {
   renderShellWords,
   sandboxCommand,
   sandboxReceiptPrefix,
-  sandboxScriptPath,
   sandboxWithinLimits,
 } from "../../src/core/security-sandbox";
 import { ok } from "./fixtures";
@@ -74,7 +74,7 @@ describe("the printed sandbox command reads back as exactly its argv", () => {
 
   it("prints a run directory with a space or a metacharacter as the words the binding names", () => {
     const binding = {
-      script: sandboxScriptPath("/opt/my plugins/loom"),
+      script: loomCommandsAt("/opt/my plugins/loom").sandboxScript,
       nonce: NONCE, target: "/srv/my repo", scratch: "/runs/it's here/agents/a/scratch",
       artifact: "agents/a/artifacts/x $y.txt", artifactFile: "/runs/it's here/agents/a/artifacts/x $y.txt",
     };
