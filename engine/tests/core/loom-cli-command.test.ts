@@ -94,6 +94,11 @@ describe("a root holding a space or a single quote", () => {
     expect(shellWords(AWKWARD.mutationCheck("T'1"), tmpdir()).slice(1)).toEqual(["helper", "mutation-check", "--task", "T'1"]);
   });
 
+  it("the CLI is quoted the one way sh reads back", () => {
+    expect(loomCommandsAt("/home/o'brien/loom").mutationCheck("T2"))
+      .toBe("bun '/home/o'\\''brien/loom/engine/src/cli.ts' helper mutation-check --task 'T2'");
+  });
+
   it("the sandbox script and lens paths keep the root verbatim", () => {
     expect(AWKWARD.sandboxScript).toBe(`${AWKWARD_ROOT}/scripts/security-sandbox.sh`);
     expect(AWKWARD.securityLens("AI-AND-LLM.md")).toBe(`${AWKWARD_ROOT}/references/security-lenses/AI-AND-LLM.md`);

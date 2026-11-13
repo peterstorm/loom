@@ -473,11 +473,6 @@ describe("taskMutationStanding and taskMutationStopVerdict", () => {
 });
 
 describe("what the implementer reads", () => {
-  it("forms one quoted command through the package's CLI", () => {
-    expect(COMMAND).toBe("bun '/opt/loom/engine/src/cli.ts' helper mutation-check --task 'T2'");
-    expect(loomCommandsAt("/home/o'brien/loom").mutationCheck("T2")).toContain(`'/home/o'\\''brien/loom/engine/src/cli.ts'`);
-  });
-
   it("gives every operator a killing test", () => {
     expect(Object.keys(KILLING_TEST).sort()).toEqual([...TASK_MUTATION_OPERATORS].sort());
   });
