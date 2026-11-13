@@ -21,12 +21,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
-import { aRun, assignUnit, claimPayload, must, removeRuns, startRun } from "./security-audit-harness";
+import { PRINTED_HELPER, aRun, assignUnit, claimPayload, must, removeRuns, startRun } from "./security-audit-harness";
 import type { Run } from "./security-audit-run-seam";
 import { verifyWith } from "./security-verification-harness";
-
-/** The words every printed helper command starts with. */
-const HELPER = `bun '${join(LOOM_PACKAGE_ROOT, "engine", "src", "cli.ts")}' helper `;
 
 /** The form that names a binary nobody installs. */
 const UNINSTALLED = "loom helper";
@@ -87,7 +84,7 @@ describe("what the security-audit program prints", () => {
     for (const [operation, text] of transcript) {
       expect(text, operation).not.toContain(UNINSTALLED);
       for (const line of text.split("\n").filter((candidate) => COMMAND_LINE.test(candidate))) {
-        expect(line, operation).toContain(HELPER);
+        expect(line, operation).toContain(`${PRINTED_HELPER} `);
       }
     }
     // Not vacuous: each of these operations does print a command to run.

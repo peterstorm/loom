@@ -21,10 +21,20 @@ import { canonicalCoverageId, parseSecurityRunMetadata, type SecurityProfile, ty
 import { parseLedger, type CoverageLedger } from "../../src/core/security-coverage";
 import { parseSecurityFindings, type SecurityFinding } from "../../src/core/security-findings";
 import { readRunDocument } from "../../src/handlers/helpers/security-audit-run";
+import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { isJsonArray } from "../fixtures/json-wire";
 import { HUNTER_ENVELOPE, aConfirmedFinding, aUnitResult, nSeeds, ok } from "../security/fixtures";
 import { invokeAt, type Run } from "./security-audit-run-seam";
 import { verifyWith } from "./security-verification-harness";
+
+/** The executing package's CLI entry point, by absolute path: the file every
+ *  printed helper command runs. Spelled here by hand, never through
+ *  `core/loom-cli-command`, so the suites that assert on what the program
+ *  prints hold an oracle independent of the renderer under test. */
+export const PACKAGE_CLI = join(LOOM_PACKAGE_ROOT, "engine", "src", "cli.ts");
+
+/** The words every printed helper command starts with; the helper's name and flags follow. */
+export const PRINTED_HELPER = `bun '${PACKAGE_CLI}' helper`;
 
 const created: string[] = [];
 

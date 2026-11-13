@@ -21,10 +21,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { sandboxNonce, sandboxReceiptPrefix } from "../../src/core/security-sandbox";
-import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { HUNTER_ENVELOPE } from "../security/fixtures";
 import { aSandboxReceipt } from "../security/sandbox-fixtures";
-import { aRun, assignUnit, isolateSubagentDir, removeRuns, startInvocation, startRun, unitIdFor, writeArtifact } from "./security-audit-harness";
+import { PRINTED_HELPER, aRun, assignUnit, isolateSubagentDir, removeRuns, startInvocation, startRun, unitIdFor, writeArtifact } from "./security-audit-harness";
 import type { Invocation, Run } from "./security-audit-run-seam";
 
 /** The start every evidence test begins with: one unit, a budget, typed signals, `--repo` the run itself. */
@@ -254,7 +253,7 @@ describe("nonce: the engine hands out the binding a hunter cannot compute", () =
     // Runnable as printed, from any directory: the executing package's own CLI
     // by absolute path. No `loom` binary exists to run a `loom helper …` line.
     expect(run.stdout()).toContain(
-      `nonce: bun '${join(LOOM_PACKAGE_ROOT, "engine", "src", "cli.ts")}' helper security-audit nonce --out '${run.out}' ` +
+      `nonce: ${PRINTED_HELPER} security-audit nonce --out '${run.out}' ` +
         "--artifact agents/security-hunter-agent/artifacts/<file>",
     );
   });
