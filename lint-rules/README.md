@@ -54,7 +54,7 @@ One regex rule per `.json` file:
 | `extensions` | `string[]` | yes | File extensions the rule reads, with the leading dot |
 | `pattern` | `string` | yes | Regex source without delimiters, tested against each line |
 | `flags` | `string` | no | Regex flags; defaults to `""` |
-| `excludePatterns` | `string[]` | no | Files the rule skips. An entry ending in `/` is a **directory**: `src/infra/` (or `/src/infra/`) skips every file beneath it, matched at a segment boundary, so never `src/infrastructure/`. Any other entry is a file **suffix**: `.test.ts`. Entries are matched against the file's path inside the project (the directory holding `.claude/` or `.pi/`), so a directory of the same name above the checkout excludes nothing. An empty entry or a bare `/` skips nothing |
+| `excludePatterns` | `string[]` | no | Files the rule skips. An entry ending in `/` is a **directory**: `src/infra/` (or `/src/infra/`) skips every file beneath it, matched at a segment boundary, so never `src/infrastructure/`. Any other entry is a file **suffix**: `.test.ts`. A directory is matched against the file's path inside the project (the directory holding `.claude/` or `.pi/`), so a directory of the same name above the checkout excludes nothing, and neither does a directory entry for a file outside the project or in a run with no project rules directory: the rule reads that file. A checkout reached through a symlink is the same project. A suffix matches wherever the file is. Entries are parsed when the rule loads: an empty entry, a bare `/` and a glob (`*`) are refused by name, since each could only exclude nothing |
 | `fixHint` | `string` | yes | The instruction shown with the violation. Must be non-empty, also on a disabled rule |
 | `enabled` | `boolean` | yes | `false` disables the rule |
 
@@ -160,7 +160,7 @@ The parse is strict: an unknown key (at the top level, in a boundary, an exempti
 | `pureModules` | `string[]` | `[]` (nothing pure) | The functional core: `dir/` roots and single files. Every non-test file beneath a root is pure |
 | `impureModules` | `{ path, reason }[]` | `[]` | The shells inside the pure roots, each with the I/O it does |
 | `maxFunctionLines` | `number` | `50` | Max lines per function body for `max-function-lines` |
-| `excludeFromMaxLines` | `string[]` | Test file patterns | Files to exclude from line-length checking, in the same two forms as a regex rule's `excludePatterns`, matched the same way: a file suffix, or a directory ending in `/`, against the path inside the project |
+| `excludeFromMaxLines` | `string[]` | Test file patterns | Files to exclude from line-length checking, in the same two forms as a regex rule's `excludePatterns`, parsed and matched the same way: a file suffix, or a directory ending in `/` matched against the path inside the project |
 | `switchTotalityModules` | non-empty `string[]` | every non-test TS file | Narrows `switch-totality` to these path prefixes. An empty list is refused — disable the rule by name instead |
 | `switchTotalityBaseline` | `string[]` | `[]` | Grandfathered `path::scrutinee` sites `switch-totality` excuses, one entry per site |
 | `maxDiscriminantBranches` | `number` | `3` | Branches on one tag at which `exhaustive-discriminant-branching` reads an if-chain as a switch |

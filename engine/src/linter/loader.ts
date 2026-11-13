@@ -10,6 +10,7 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { type RegexRule, type Rule, type Tier, type RuleSource, isRegexRule } from "./types";
 import { analyzeRegex } from "./safety";
+import { describeExcludePatternError, parseExcludePattern, type ExcludePattern } from "./exclude-pattern";
 import { createProgrammaticRules, projectLintContext, type ProjectLintContext } from "./programmatic/index";
 import { EMPTY_CONFIG, parseProjectConfig, projectRootOf, type ProgrammaticConfig } from "./programmatic/config";
 import { EMPTY_CORPUS, type AuthoritativeCorpus, type CloneCorpus } from "./clones/clone-detection";
@@ -291,14 +292,7 @@ function parseRegexRule(
   }
   const flags = typeof obj.flags === "string" ? obj.flags : "";
 
-  // Optional excludePatterns (file path suffixes to skip)
-  let excludePatterns: readonly string[] | undefined;
-  if (obj.excludePatterns !== undefined) {
-    if (!Array.isArray(obj.excludePatterns) || !obj.excludePatterns.every((p: unknown) => typeof p === "string")) {
-      throw new Error(`Rule '${base.name}' in ${filePath}: 'excludePatterns' must be an array of strings`);
-    }
-    excludePatterns = obj.excludePatterns as string[];
-  }
+  const excludePatterns = parseExcludePatterns(obj.excludePatterns, `Rule '${base.name}' in ${filePath}`);
 
   // Safety check — fail-closed on unsafe patterns
   const safety = analyzeRegex(pattern, flags);
@@ -320,6 +314,23 @@ function parseRegexRule(
     source,
     ...(excludePatterns ? { excludePatterns } : {}),
   };
+}
+
+/**
+ * A regex rule's optional `excludePatterns`, each entry parsed into the form
+ * the matcher reads. Throws, naming the rule and the entry, on anything that is
+ * not a list of patterns (fail-closed): an entry that could match nothing must
+ * not load as an exclusion the author believes in.
+ */
+function parseExcludePatterns(raw: unknown, where: string): readonly ExcludePattern[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) throw new Error(`${where}: 'excludePatterns' must be an array of strings`);
+  return raw.map((entry: unknown, index) => {
+    if (typeof entry !== "string") throw new Error(`${where}: 'excludePatterns' must be an array of strings`);
+    const parsed = parseExcludePattern(entry);
+    if (!parsed.ok) throw new Error(`${where}: excludePatterns[${index}] ${describeExcludePatternError(parsed.error)}`);
+    return parsed.value;
+  });
 }
 
 /**

@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, readFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { lintFile, lintFiles, isBinaryBuffer } from "../../src/linter/index";
@@ -297,7 +297,7 @@ describe("lintFile", () => {
     const LONG_FUNCTION = ["function long() {", ...Array.from({ length: 60 }, (_, i) => `  const x${i} = ${i};`), "}", ""].join("\n");
     const SOURCE = `console.log('x');\n${LONG_FUNCTION}`;
 
-    function projectUnderApps(): { rulesDir: string; inSrc: string; inApps: string } {
+    function projectUnderApps(): { root: string; rulesDir: string; inSrc: string; inApps: string } {
       const root = join(tempDir, "apps", "shop");
       const rulesDir = join(root, ".claude", "linter", "rules");
       for (const dir of [rulesDir, join(root, "src"), join(root, "apps", "demo")]) mkdirSync(dir, { recursive: true });
@@ -307,7 +307,7 @@ describe("lintFile", () => {
       const inApps = join(root, "apps", "demo", "main.ts");
       writeFileSync(inSrc, SOURCE);
       writeFileSync(inApps, SOURCE);
-      return { rulesDir, inSrc, inApps };
+      return { root, rulesDir, inSrc, inApps };
     }
 
     // The two rules that carry the exclusion. The fixture's two files are
@@ -334,6 +334,46 @@ describe("lintFile", () => {
 
       expect(excludingRulesReported(results.get(inSrc))).toEqual(EXCLUDING_RULES);
       expect(excludingRulesReported(results.get(inApps))).toEqual([]);
+    });
+
+    it("a file named through a symlink to the project is still in the project", () => {
+      const { root, rulesDir } = projectUnderApps();
+      const link = join(tempDir, "linked-shop");
+      symlinkSync(root, link);
+
+      expect(excludingRulesReported(lintFile(join(link, "src", "order.ts"), "full", defaultDir, rulesDir, 5000))).toEqual(EXCLUDING_RULES);
+      expect(excludingRulesReported(lintFile(join(link, "apps", "demo", "main.ts"), "full", defaultDir, rulesDir, 5000))).toEqual([]);
+    });
+
+    it("a rules directory named through a symlink to the project frames the same files", () => {
+      const { root, inSrc, inApps } = projectUnderApps();
+      const link = join(tempDir, "linked-shop");
+      symlinkSync(root, link);
+      const linkedRulesDir = join(link, ".claude", "linter", "rules");
+      const results = lintFiles([inSrc, inApps], "full", defaultDir, linkedRulesDir, 5000);
+
+      expect(excludingRulesReported(results.get(inSrc))).toEqual(EXCLUDING_RULES);
+      expect(excludingRulesReported(results.get(inApps))).toEqual([]);
+    });
+
+    it("reports a file named through a symlink by its path beneath the project root", () => {
+      const { root, rulesDir, inSrc } = projectUnderApps();
+      const link = join(tempDir, "linked-shop");
+      symlinkSync(root, link);
+      const result = lintFile(join(link, "src", "order.ts"), "full", defaultDir, rulesDir, 5000);
+
+      if (result.kind !== "violations") throw new Error(`expected violations, got ${result.kind}`);
+      expect([...new Set(result.violations.map((violation) => violation.file))]).toEqual([inSrc]);
+    });
+
+    it("reads a file outside the project: a directory exclusion cannot be placed there", () => {
+      const { rulesDir } = projectUnderApps();
+      const outside = join(tempDir, "elsewhere", "apps", "demo");
+      mkdirSync(outside, { recursive: true });
+      // Its own content, so no-duplicate-block has nothing to say about it.
+      writeFileSync(join(outside, "main.ts"), SOURCE.replaceAll("x", "outside"));
+
+      expect(excludingRulesReported(lintFile(join(outside, "main.ts"), "full", defaultDir, rulesDir, 5000))).toEqual(EXCLUDING_RULES);
     });
   });
 

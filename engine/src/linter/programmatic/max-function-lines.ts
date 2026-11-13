@@ -16,7 +16,7 @@
 
 import type { Violation } from "../types";
 import { makeViolation } from "../types";
-import { matchesAnyExcludePattern } from "../exclude-pattern";
+import { matchesAnyExcludePattern, type ExcludePattern } from "../exclude-pattern";
 
 // --- Configuration ---
 
@@ -24,23 +24,20 @@ import { matchesAnyExcludePattern } from "../exclude-pattern";
 const DEFAULT_MAX_LINES = 50;
 
 /** File patterns to exclude (test files have long describe blocks) */
-const DEFAULT_EXCLUDE_PATTERNS: readonly string[] = Object.freeze([
-  ".test.ts",
-  ".spec.ts",
-  ".test.tsx",
-  ".spec.tsx",
-  ".property.test.ts",
-]);
+const DEFAULT_EXCLUDE_PATTERNS: readonly ExcludePattern[] = Object.freeze(
+  [".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx", ".property.test.ts"]
+    .map((suffix): ExcludePattern => ({ kind: "suffix", suffix })),
+);
 
 /**
  * What one project's max-function-lines rule runs with. `projectRoot` is the
  * frame `excludePatterns` are matched in, and null says no project owns the
- * config: the path is then matched as given. It has no default, so a caller
- * cannot leave the frame out by forgetting it.
+ * config: a directory pattern then excludes nothing. It has no default, so a
+ * caller cannot leave the frame out by forgetting it.
  */
 export type MaxFunctionLinesOptions = Readonly<{
   maxLines: number;
-  excludePatterns: readonly string[];
+  excludePatterns: readonly ExcludePattern[];
   projectRoot: string | null;
 }>;
 

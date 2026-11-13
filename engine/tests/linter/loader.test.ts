@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadRules } from "../../src/linter/loader";
-import type { RegexRule } from "../../src/linter/types";
+import { isRegexRule, type RegexRule } from "../../src/linter/types";
 
 // --- Test Helpers ---
 
@@ -439,6 +439,41 @@ describe("loadRules", () => {
       const rules = loadRules(defaultDir, null, "full", { includeProgrammatic: false }) as RegexRule[];
 
       expect(rules[0].flags).toBe("");
+    });
+  });
+
+  describe("excludePatterns are parsed at load (fail-closed)", () => {
+    const loadWith = (excludePatterns: unknown): readonly RegexRule[] => {
+      writeRule(defaultDir, "excluding.json", makeValidRule({ name: "excluding", excludePatterns }));
+      return loadRules(defaultDir, null, "full", { includeProgrammatic: false }).filter(isRegexRule);
+    };
+
+    it("holds each entry as a file suffix or a directory", () => {
+      expect(loadWith([".test.ts", "apps/", "/src/infra/", "src\\gen\\"])[0].excludePatterns).toEqual([
+        { kind: "suffix", suffix: ".test.ts" },
+        { kind: "directory", segments: "/apps/" },
+        { kind: "directory", segments: "/src/infra/" },
+        { kind: "directory", segments: "/src/gen/" },
+      ]);
+    });
+
+    it("leaves a rule without the field without one", () => {
+      expect(loadWith(undefined)[0]).not.toHaveProperty("excludePatterns");
+    });
+
+    it.each([
+      [[".test.ts", ""], "excludePatterns[1] is empty — it would exclude nothing"],
+      [["/"], "excludePatterns[0] '/' names no directory"],
+      [["**/*.test.ts"], "excludePatterns[0] '**/*.test.ts' is a glob"],
+      [[".test.ts", 7], "'excludePatterns' must be an array of strings"],
+      [".test.ts", "'excludePatterns' must be an array of strings"],
+    ])("refuses %j, naming the rule and the entry", (excludePatterns, message) => {
+      expect(() => loadWith(excludePatterns)).toThrow(`Rule 'excluding' in ${join(defaultDir, "excluding.json")}: ${message}`);
+    });
+
+    it("every shipped rule's exclusions parse", () => {
+      const shipped = loadRules(join(__dirname, "../../../lint-rules"), null, "full", { includeProgrammatic: false });
+      expect(shipped.filter(isRegexRule).flatMap((rule) => rule.excludePatterns ?? []).length).toBeGreaterThan(0);
     });
   });
 

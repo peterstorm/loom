@@ -15,8 +15,9 @@
  * Zero external dependencies (node:fs, node:path, and internal imports only).
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { isAbsolutePath, projectRelative, spelledUnderRoot } from "./programmatic/baseline";
 import { type Tier, type LintResult, type Rule, passResult, violationsResult, lintErrorResult } from "./types";
 import { loadRules } from "./loader";
 import { projectRootOf } from "./programmatic/config";
@@ -49,6 +50,20 @@ export function isBinaryBuffer(buffer: Buffer): boolean {
   return false;
 }
 
+/**
+ * The path the rules are given for a file: the caller's own spelling when that
+ * is beneath the project root, and otherwise the file's real location spelled
+ * beneath the root, when the two differ only by a symlink (`spelledUnderRoot`).
+ * A file that really is outside the project keeps the caller's spelling.
+ *
+ * The real paths are read only for a file that does not already spell beneath
+ * the root, so an edit inside the project costs no extra system call.
+ */
+function pathInProjectFrame(resolvedPath: string, projectRoot: string | null): string {
+  if (projectRoot === null || !isAbsolutePath(projectRelative(resolvedPath, projectRoot))) return resolvedPath;
+  const real = { file: realpathSync(resolvedPath), root: realpathSync(projectRoot) };
+  return spelledUnderRoot(real, projectRoot) ?? resolvedPath;
+}
 
 /**
  * The per-file pipeline both entry points run: resolve → one buffered read →
@@ -61,7 +76,8 @@ export function isBinaryBuffer(buffer: Buffer): boolean {
  * `projectRoot` is the root the project rules directory belongs to
  * (`projectRootOf`), the same one the loader builds the programmatic rules
  * with: a regex rule's `excludePatterns` are matched inside it, not against
- * the directories above the checkout.
+ * the directories above the checkout. A violation reports the path the rules
+ * were given (`pathInProjectFrame`).
  */
 function lintLoadedFile(
   rules: readonly Rule[],
@@ -70,16 +86,18 @@ function lintLoadedFile(
   projectRoot: string | null,
 ): LintResult {
   try {
-    const absolutePath = resolve(filePath);
+    const resolvedPath = resolve(filePath);
 
     // One buffer read — binary detection and decoding cannot observe different reads.
-    const buffer = readFileSync(absolutePath);
+    const buffer = readFileSync(resolvedPath);
 
     // FR-009 / SC-007: Skip binary files entirely
     if (isBinaryBuffer(buffer)) return passResult();
 
     // Decode to UTF-8 from the same buffer (no second read)
     const content = buffer.toString("utf-8");
+
+    const absolutePath = pathInProjectFrame(resolvedPath, projectRoot);
 
     // The deadline checker is time-dependent, so the shell creates it.
     // executeRules internally filters by extension — no match returns [].

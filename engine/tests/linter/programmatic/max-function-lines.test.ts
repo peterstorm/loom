@@ -5,13 +5,14 @@ import {
   handler,
   type MaxFunctionLinesOptions,
 } from "../../../src/linter/programmatic/max-function-lines";
+import { excludePatterns } from "../exclude-patterns";
 
 /** The default options with another line limit. */
 const limit = (maxLines: number): MaxFunctionLinesOptions => ({ ...DEFAULTS, maxLines });
 
 /** A 50-line limit excluding `excludePatterns`, matched inside `projectRoot`. */
-const excluding = (excludePatterns: readonly string[], projectRoot: string | null): MaxFunctionLinesOptions =>
-  ({ maxLines: 50, excludePatterns, projectRoot });
+const excluding = (entries: readonly string[], projectRoot: string | null): MaxFunctionLinesOptions =>
+  ({ maxLines: 50, excludePatterns: excludePatterns(...entries), projectRoot });
 
 describe("max-function-lines", () => {
   describe("detectFunctions", () => {
@@ -168,8 +169,9 @@ describe("max-function-lines", () => {
 
       expect(handler(content, `${root}/src/order.ts`, excluding(["apps/"], root))).toHaveLength(1);
       expect(handler(content, `${root}/apps/demo/main.ts`, excluding(["apps/"], root))).toHaveLength(0);
-      // With no project the path is matched as given.
-      expect(handler(content, `${root}/src/order.ts`, excluding(["apps/"], null))).toHaveLength(0);
+      // With no project the frame is unknown: a directory excludes nothing.
+      expect(handler(content, `${root}/src/order.ts`, excluding(["apps/"], null))).toHaveLength(1);
+      expect(handler(content, `${root}/apps/demo/main.ts`, excluding(["apps/"], null))).toHaveLength(1);
     });
 
     it("reports multiple over-length functions", () => {

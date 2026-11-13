@@ -141,7 +141,8 @@ describe("shipped regex rules: one test-file exemption list", () => {
     const rule = shippedRule(name);
     expect([...rule.extensions].sort()).toEqual([...extensions].sort());
     const exempt = rule.kind === "regex" ? rule.excludePatterns ?? [] : [];
-    expect(exempt.filter((pattern) => /\.(test|spec)\./.test(pattern)).sort()).toEqual([...testSuffixes(extensions)].sort());
+    const suffixes = exempt.flatMap((pattern) => (pattern.kind === "suffix" ? [pattern.suffix] : []));
+    expect(suffixes.filter((suffix) => /\.(test|spec)\./.test(suffix)).sort()).toEqual([...testSuffixes(extensions)].sort());
   });
 
   it("an exempt test file is never flagged, and the same line in production is", () => {

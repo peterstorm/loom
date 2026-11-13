@@ -74,6 +74,25 @@ export const projectRelative = (filePath: string, projectRoot: string | null): s
   return normalized.startsWith(`${root}/`) ? normalized.slice(root.length + 1) : normalized;
 };
 
+/**
+ * A lint target spelled beneath the project root, when it is in the project
+ * and only its spelling says otherwise. A checkout reached through a symlink
+ * has two names (`/tmp/shop` and `/private/tmp/shop`, or a plugin directory
+ * linked into a dotfiles tree); given the file under one and the root under
+ * the other, `projectRelative` sees a file outside the project, and every
+ * baseline key, module scope and directory exclusion stops applying to it.
+ *
+ * Pure: the caller resolves both real paths. Null when the file's real path is
+ * not beneath the root's — the file really is outside the project.
+ */
+export const spelledUnderRoot = (
+  { file, root }: Readonly<{ file: string; root: string }>,
+  projectRoot: string,
+): string | null => {
+  const inRealRoot = projectRelative(file, root);
+  return isAbsolutePath(inRealRoot) ? null : `${projectRoot.replace(/\\/g, "/").replace(/\/+$/, "")}/${inRealRoot}`;
+};
+
 /** The key form every rule uses: the site's repo-relative path, then the thing
  *  the rule branched on (`x.kind`, `event.status`), so a second branch on the
  *  same tag in the same file is its own entry. */
