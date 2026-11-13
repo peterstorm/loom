@@ -80,7 +80,7 @@ export const markdown = (name: string, text: string): MarkdownSource =>
 type ProseLine = Readonly<{ line: number; text: string }>;
 type Scan = Readonly<{ prose: readonly ProseLine[]; fences: readonly Fence[] }>;
 type OpenFence = Readonly<{ line: number; marker: string; info: string; body: readonly string[] }>;
-type ScanState = Readonly<{ prose: readonly ProseLine[]; fences: readonly Fence[]; open: readonly OpenFence[] }>;
+type ScanState = Readonly<{ prose: readonly ProseLine[]; fences: readonly Fence[]; open: OpenFence | undefined }>;
 
 const FENCE_OPEN = /^\s*(`{3,}|~{3,})\s*([^`]*?)\s*$/;
 
@@ -90,27 +90,26 @@ const closes = (open: OpenFence, text: string): boolean => {
 };
 
 const step = (state: ScanState, text: string, line: number): ScanState => {
-  const [open] = state.open;
+  const { open } = state;
   if (open !== undefined) {
     return closes(open, text)
-      ? { ...state, open: [], fences: [...state.fences, { line: open.line, end: line, info: open.info, body: open.body.join("\n") }] }
-      : { ...state, open: [{ ...open, body: [...open.body, text] }] };
+      ? { ...state, open: undefined, fences: [...state.fences, { line: open.line, end: line, info: open.info, body: open.body.join("\n") }] }
+      : { ...state, open: { ...open, body: [...open.body, text] } };
   }
   const [, marker, info] = FENCE_OPEN.exec(text) ?? [];
   return marker === undefined || info === undefined
     ? { ...state, prose: [...state.prose, { line, text }] }
-    : { ...state, open: [{ line, marker, info, body: [] }] };
+    : { ...state, open: { line, marker, info, body: [] } };
 };
 
 function scan(source: MarkdownSource): DomainResult<Scan, MarkdownError> {
   const final = source.lines.reduce<ScanState>(
     (state, text, index) => step(state, text, source.firstLine + index),
-    { prose: [], fences: [], open: [] },
+    { prose: [], fences: [], open: undefined },
   );
-  const [unclosed] = final.open;
-  return unclosed === undefined
+  return final.open === undefined
     ? ok({ prose: final.prose, fences: final.fences })
-    : err({ kind: "unclosed-fence", source: source.name, line: unclosed.line });
+    : err({ kind: "unclosed-fence", source: source.name, line: final.open.line });
 }
 
 // --- Headings and sections -------------------------------------------------
@@ -168,22 +167,22 @@ const cellsOf = (text: string): readonly string[] => {
   return inner.split(/(?<!\\)\|/).map((cell) => cell.replace(/\\\|/g, "|").trim());
 };
 
+/** Adjacent prose lines that start with a pipe: never empty, its first line the would-be header. */
+type PipeRun = readonly [ProseLine, ...ProseLine[]];
+
 /** Runs of adjacent prose lines that start with a pipe. A fence between two pipe lines ends the run. */
-const pipeRuns = (prose: readonly ProseLine[]): readonly (readonly ProseLine[])[] =>
+const pipeRuns = (prose: readonly ProseLine[]): readonly PipeRun[] =>
   prose
     .filter(({ text }) => text.trimStart().startsWith("|"))
-    .reduce<readonly (readonly ProseLine[])[]>((runs, entry) => {
+    .reduce<readonly PipeRun[]>((runs, entry) => {
       const last = runs.at(-1);
-      const previous = last?.at(-1);
-      return last !== undefined && previous !== undefined && previous.line + 1 === entry.line
+      return last !== undefined && last[last.length - 1]?.line === entry.line - 1
         ? [...runs.slice(0, -1), [...last, entry]]
         : [...runs, [entry]];
     }, []);
 
-function tableOf(source: string, run: readonly ProseLine[]): DomainResult<Table, MarkdownError> {
-  const [header, alignment, ...body] = run;
+function tableOf(source: string, [header, alignment, ...body]: PipeRun): DomainResult<Table, MarkdownError> {
   const malformed = (line: number, defect: TableDefect) => err({ kind: "malformed-table" as const, source, line, defect });
-  if (header === undefined) throw new Error("a pipe run is never empty");
   const columns = cellsOf(header.text);
   const alignmentCells = alignment === undefined ? [] : cellsOf(alignment.text);
   if (alignment === undefined || !alignmentCells.every((cell) => ALIGNMENT_CELL.test(cell))) {
@@ -212,8 +211,8 @@ export function tablesOf(source: MarkdownSource): DomainResult<readonly Table[],
   const scanned = scan(source);
   if (!scanned.ok) return scanned;
   const parsed = pipeRuns(scanned.value.prose).map((run) => tableOf(source.name, run));
-  const failed = parsed.find((table) => !table.ok);
-  if (failed !== undefined && !failed.ok) return failed;
+  const [failed] = parsed.flatMap((table) => (table.ok ? [] : [table]));
+  if (failed !== undefined) return failed;
   return ok(parsed.flatMap((table) => (table.ok ? [table.value] : [])));
 }
 

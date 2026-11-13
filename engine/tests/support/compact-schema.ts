@@ -15,7 +15,7 @@
 import type { DomainResult } from "../../src/core/orchestration-contract/identity";
 import { describeMarkdownError, fencesOf, sectionOf, type MarkdownError, type MarkdownSource } from "./markdown";
 
-export const SCHEMA_SECTION = "reviewer-payload-schema";
+const SCHEMA_SECTION = "reviewer-payload-schema";
 
 /** The schema block: its exact text, and that text parsed. */
 export type CompactSchema = Readonly<{ text: string; value: unknown }>;

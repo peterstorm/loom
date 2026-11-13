@@ -75,9 +75,7 @@ function declarationIn(contract: (typeof SUBSTITUTION_CONTRACTS)[number], file: 
 function declaredVariables(file: string): readonly string[] {
   const declarations = SUBSTITUTION_CONTRACTS.flatMap((contract) => declarationIn(contract, file));
   expect(declarations.length, `${file} must be declared in exactly one substitution table`).toBe(1);
-  const [declaration] = declarations;
-  if (declaration === undefined) return [];
-  return [...declaration.cells.Variables.matchAll(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g)].map(([, name]) => name);
+  return declarations.flatMap(({ cells }) => [...cells.Variables.matchAll(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g)].map(([, name]) => name));
 }
 
 /** Substitute every declared variable with a dummy value. */
