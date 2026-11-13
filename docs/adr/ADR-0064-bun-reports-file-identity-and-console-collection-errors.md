@@ -89,7 +89,7 @@ The ledger read-back accepts `bun-console`.
   collection errors, and both attribute to the Task's declared files.
 
 **Negative:**
-- Console grammar is a weaker contract than XML. It is pinned by real Bun 1.4.2 fixtures; a format change
+- Console grammar is a weaker contract than XML. It is pinned by recorded Bun fixtures, each named for the release it was captured on; a format change
   makes Loom see fewer collection errors, which withholds a red rather than inventing one.
 - A test-file path containing whitespace is not recognized as a header (fail closed).
 - Console text inside a recognized run is agent-influenced in the same way a JUnit file is. As with every I6
