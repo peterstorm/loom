@@ -68,3 +68,35 @@ Fixed afterwards at the operator's request, outside the review run: `matchesAnyE
 ## Remediation
 
 Registered remediation against `run.pr167-src-review-20261113` with `defectFamily: not-required`; the test files and this plan are support paths.
+
+## Follow-up — branch `fix/exclusion-gaps-and-deferred-advisories`
+
+Done after PR #167 merged, at the operator's request. None of it is remediation evidence for the runs above.
+
+### Exclusion gaps closed
+
+- A directory pattern is matched only against a path known to be inside the project. With no project root, or for a file outside it, it excludes nothing and the rule reads the file. A suffix pattern matches wherever the file is.
+- `lintFile` / `lintFiles` spell a file beneath the project root when the file and the rules directory reach one checkout through different symlinks (`spelledUnderRoot`), so exclusions, baselines and module scopes apply. A violation then reports the path beneath the root.
+
+### Deferred advisories, now done
+
+| Finding | What changed |
+|---|---|
+| src type-design-analyzer-2 | `ExcludePattern` is a parsed `suffix` / `directory` union, built where the rule or config loads. An empty entry, a bare `/` and a glob are refused by name; backslashes are normalized. |
+| src type-design-analyzer-1 | `LoomPackageRoot` and `SandboxScript` are branded; `parseLoomPackageRoot` and `loomCommands` are the only minting points. |
+| src architecture-tech-lead-2 | `loomCommands(root)` in `core/loom-cli-command.ts` owns every printed spelling. `taskMutationCommand`, `renderNonceCommand`, `renderVerificationImport`, `sandboxScriptPath` and `securityLensPath` are deleted; handlers use `LOOM_COMMANDS`. |
+| src architecture-tech-lead-3 | `stampsFor` and `applyStamps` live in `core/wire-contract.ts`; `scripts/stamp-wire-contract.ts` is the shell. Output and exit codes compared equal to the old script on six trees. |
+| tests architecture-tech-lead-1 | `PACKAGE_CLI` / `PRINTED_HELPER` in `tests/handlers/security-audit-harness.ts`, hand-spelled, used by the three suites. |
+| tests architecture-tech-lead-2, pr-test-analyzer-2 | `tests/support/markdown.ts`: tables by column name, sections by heading, explicit not-found results. A template is declared only by its row in the table with a `Variables` column. |
+| tests code-simplifier-2 | `tests/support/compact-schema.ts`, used by the four schema suites. |
+
+### Behaviour changes to know about
+
+- A rule file or `config.json` holding an empty exclusion entry, a bare `/` or a `*` now fails to load.
+- A directory exclusion no longer applies to a file outside the project, or in a run whose rules directory is in neither layout.
+- A Loom package installed at a path holding a control character, or not starting with `/`, stops at import.
+
+### Not done
+
+- The local Bun (1.4.4) still differs from `.bun-version` (1.4.2); `tests/verification-command.test.ts` fails locally for that reason only.
+- Smoke tests were not run. The markdown and deleted files of PR #167 remain unreviewed.
