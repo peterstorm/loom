@@ -26,6 +26,8 @@ import {
 } from "../src/core/reviewer-contract";
 import { EMISSION_TOOL_SPECS, issueEmissionBinding } from "../src/core/emission-tool";
 import { parseRequestId } from "../src/core/orchestration-contract/identity";
+import { compactSchemaOf, describeCompactSchemaError } from "./support/compact-schema";
+import { describeMarkdownError, fencesOf, markdown, orFail } from "./support/markdown";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const readFragment = (name: string): string => readFileSync(join(REPO_ROOT, "references", "reviewer-wire", name), "utf-8");
@@ -327,10 +329,10 @@ describe("the fragment's tool-primary emission wording (FR-020/AS-012)", () => {
 
   it("the stamped schema is the issued schema value and the rubric bytes are untouched (stamp/schema consistency)", () => {
     // The template fence is plain text: exactly the schema and example remain ```json blocks.
-    const blocks = [...fragment.matchAll(/```json\n([\s\S]*?)\n```/g)].map((match) => match[1]!);
-    expect(blocks).toHaveLength(2);
+    const source = markdown("references/reviewer-wire/wire-contract.md", fragment);
+    expect(orFail(fencesOf(source, "json"), describeMarkdownError)).toHaveLength(2);
     // Shown compact, so the bytes differ from the packet section; the value may not.
-    expect(JSON.parse(blocks[0]!)).toEqual(JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2));
+    expect(orFail(compactSchemaOf(source), describeCompactSchemaError).value).toEqual(JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2));
     expect(fragment).toContain("section in compact form; the packet copy governs.\n\n```json\n");
     expect(fragment.endsWith(REVIEWER_IMPACT_RUBRIC_V1)).toBe(true);
   });
