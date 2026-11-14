@@ -756,7 +756,10 @@ describe("modern Wave completion suite shell", () => {
     const message = result.error.diagnostic.message;
     expect(message).toContain("no-console-log");
     expect(message).toContain("runtime skew, not a code defect");
-    expect(message).toContain("engine/src/linter/index.ts");
+    // Which rule files the note names first depends on the runtime's own tree
+    // (it names eight in path order; lint-runtime-skew.test.ts pins that), so
+    // assert only that it names the rule files and not some other path.
+    expect(message).toMatch(/differ from this branch's for (?:engine\/src\/linter|lint-rules)\//);
     // The note leads the refusal, so the gate's bounded copy of a long refusal keeps it.
     expect(message.indexOf("runtime skew")).toBeLessThan(message.indexOf("no-console-log"));
   });

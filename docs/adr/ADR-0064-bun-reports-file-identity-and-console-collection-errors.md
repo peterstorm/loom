@@ -103,5 +103,5 @@ The ledger read-back accepts `bun-console`.
   for byte on every machine.
 - A test-file path containing whitespace is not recognized as a header (fail closed).
 - Console text inside a recognized run is agent-influenced in the same way a JUnit file is. As with every I6
-  fact, the proof is as strong as the ledger (`docs/deterministic-implementation.md`, soundness limit), and a
+  fact, the proof is as strong as the ledger (`machines/README.md#known-residual-limits`), and a
   forged collection error can only claim a red, never a pass.

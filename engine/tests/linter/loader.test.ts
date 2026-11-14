@@ -216,6 +216,7 @@ describe("loadRules", () => {
         "switch-totality",
         "no-wire-cast",
         "no-duplicate-block",
+        "no-dangling-doc-reference",
       ]);
     });
 

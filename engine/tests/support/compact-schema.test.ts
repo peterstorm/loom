@@ -9,7 +9,7 @@ import { renderReviewerWireContract } from "../../src/core/reviewer-protocol";
 import { REVIEWER_PAYLOAD_SCHEMA_V2 } from "../../src/core/reviewer-contract";
 import { refusal, value } from "../fixtures/parse-result";
 import { compactSchemaOf, describeCompactSchemaError } from "./compact-schema";
-import { markdown } from "./markdown";
+import { markdown } from "../../src/linter/markdown";
 
 const LEAD = "The issued Context Packet's `reviewer-payload-schema` section in compact form; the packet copy governs.";
 const EXAMPLE = ["## Example (standalone-review only)", "", "```json", "{", '  "kind": "standalone-review"', "}", "```"];

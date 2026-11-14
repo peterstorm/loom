@@ -20,21 +20,10 @@ import { describeExcludePatternListError, parseExcludePatternList, type ExcludeP
 import { isPositiveInt, type PositiveInt } from "../positive-int";
 import { parseBaselineKey, type Baseline } from "./baseline";
 import { underPrefix, type BoundaryRule, type CapabilityGrant } from "./no-cross-boundary-imports";
+import type { DocReferenceScope } from "../doc-references/types";
+import type { ReasonedPath } from "../types";
 
 // --- Config types ---
-
-/**
- * A project path carved out of a rule's scope, with the reason it is carved
- * out. The reason is part of the value, not a comment beside it: config.json
- * cannot hold comments, and an exemption nobody can justify is an exemption
- * nobody can retire.
- *
- * `path` is project-relative. A trailing `/` names a directory (every file
- * beneath it, at any depth); otherwise it names exactly one file. Globs are
- * not supported and are refused at parse time — a glob that matched nothing
- * used to be a silent no-op.
- */
-export type ReasonedPath = Readonly<{ path: string; reason: string }>;
 
 export interface ProgrammaticConfig {
   /** Paths the project linter never reads (vendored, generated), each with its reason. */
@@ -82,6 +71,12 @@ export interface ProgrammaticConfig {
   /** Grandfathered `path::as T` / `path::name: T` keys the no-wire-cast rule
    *  excuses, one site each. */
   readonly wireCastBaseline?: Baseline;
+  /** The documents, plans and source comments whose references must resolve
+   *  (for no-dangling-doc-reference). Absent means the rule governs nothing. */
+  readonly docReferences?: DocReferenceScope;
+  /** Grandfathered `path::reference` keys the no-dangling-doc-reference rule
+   *  excuses, one occurrence each. */
+  readonly docReferenceBaseline?: Baseline;
 }
 
 /** Every key `config.json` may carry — the one list the strict parse checks against. */
@@ -102,6 +97,8 @@ export const PROGRAMMATIC_CONFIG_KEYS: readonly (keyof ProgrammaticConfig)[] = O
   "duplicateBlockMinLines",
   "duplicateBlockBaseline",
   "wireCastBaseline",
+  "docReferences",
+  "docReferenceBaseline",
 ]);
 
 /** Default config when no project config exists */
@@ -321,8 +318,36 @@ function parseConfigObject(json: unknown, filePath: string): ProgrammaticConfig 
     ...parseTotalityConfig(obj, filePath),
     ...parseDuplicateBlockConfig(obj, filePath),
     wireCastBaseline: parseOptionalBaseline(obj.wireCastBaseline, filePath, "wireCastBaseline"),
+    docReferences: parseOptionalDocReferences(obj.docReferences, filePath),
+    docReferenceBaseline: parseOptionalBaseline(obj.docReferenceBaseline, filePath, "docReferenceBaseline"),
   };
   return Object.freeze(presentFields(parsed));
+}
+
+const DOC_REFERENCE_KEYS: readonly (keyof DocReferenceScope)[] = Object.freeze(["govern", "plans", "exclude", "sourceRoots"]);
+
+/**
+ * no-dangling-doc-reference's scope. `govern` is required and non-empty: a
+ * scope that governs nothing is written by omitting `docReferences`, never by
+ * an empty list that reads as configured. A source root is a directory, so a
+ * trailing `/` is optional and dropped.
+ */
+function parseOptionalDocReferences(raw: unknown, filePath: string): DocReferenceScope | undefined {
+  if (raw === undefined) return undefined;
+  const where = `${filePath}: docReferences`;
+  const obj = plainObject(raw, where);
+  refuseUnknownKeys(obj, DOC_REFERENCE_KEYS, where);
+  const [first, ...rest] = parseOptionalReasonedPaths(obj.govern, filePath, "docReferences.govern") ?? [];
+  if (first === undefined) {
+    return refuse(`${where}.govern must be a non-empty array of { path, reason } — omit docReferences to govern nothing`);
+  }
+  const sourceRoots = parseOptionalModulePaths(obj.sourceRoots, filePath, "docReferences.sourceRoots") ?? [];
+  return Object.freeze({
+    govern: [first, ...rest],
+    plans: Object.freeze(parseOptionalReasonedPaths(obj.plans, filePath, "docReferences.plans") ?? []),
+    exclude: Object.freeze(parseOptionalReasonedPaths(obj.exclude, filePath, "docReferences.exclude") ?? []),
+    sourceRoots: Object.freeze(sourceRoots.map((root) => root.replace(/\/+$/, ""))),
+  });
 }
 
 type DuplicateBlockConfigKey = "duplicateBlockMinTokens" | "duplicateBlockMinLines" | "duplicateBlockBaseline";

@@ -14,7 +14,7 @@ scope by being listed, and nothing is out of scope by being forgotten.
 
 | Question | Answer | Where it is declared |
 |----------|--------|----------------------|
-| Which files does `lint-project` read? | Every file with a lintable extension (`.ts .tsx .mts .cts .js .jsx .mjs .cjs .java .kt .scala`), tests and declaration files included | — |
+| Which files does `lint-project` read? | Every file with a lintable extension (`.ts .tsx .mts .cts .js .jsx .mjs .cjs .java .kt .scala`), tests and declaration files included, and each Markdown file `docReferences` governs | `docReferences` |
 | …except? | Never-source directories (`node_modules`, `.git`, `.claude`, `.pi`, build output, `vendor`, …) and the project's `exclude` list | `exclude: [{ path, reason }]` |
 | Which rules skip tests? | Each rule that should, by itself | a regex rule's `excludePatterns`; `isTestFile` in a programmatic rule |
 | Which files must be pure? | Every non-test file under a `pureModules` root | `pureModules` |
@@ -170,6 +170,8 @@ The parse is strict: an unknown key (at the top level, in a boundary, an exempti
 | `duplicateBlockMinLines` | `number` | `8` | Lines a copy must span on both sides |
 | `duplicateBlockBaseline` | `string[]` | `[]` | Grandfathered `path::otherPath@digest` copies `no-duplicate-block` excuses, one entry per copy |
 | `wireCastBaseline` | `string[]` | `[]` | Grandfathered `path::as T` / `path::name: T` sites `no-wire-cast` excuses, one entry per site |
+| `docReferences` | `{ govern, plans?, exclude?, sourceRoots? }` | absent (reads nothing) | The documents and comments `no-dangling-doc-reference` holds to the project. `govern` is a non-empty `{ path, reason }[]`; see [`no-dangling-doc-reference`](#no-dangling-doc-reference) |
+| `docReferenceBaseline` | `string[]` | `[]` | Grandfathered `path::reference` mentions `no-dangling-doc-reference` excuses, one entry per reference |
 
 ### BoundaryRule
 
@@ -191,13 +193,13 @@ The parse is strict: an unknown key (at the top level, in a boundary, an exempti
 
 ### Baselines
 
-`switch-totality`, `exhaustive-discriminant-branching`, `no-duplicate-block` and `no-wire-cast` apply without configuration, so the sites that predate them in an existing codebase would block the next edit to each file. Record them once:
+`switch-totality`, `exhaustive-discriminant-branching`, `no-duplicate-block` and `no-wire-cast` apply without configuration, and `no-dangling-doc-reference` applies as soon as `docReferences` is written, so the sites that predate them in an existing codebase would block the next edit to each file. Record them once:
 
 ```bash
 bun <loom-plugin-dir>/scripts/lint-project.ts --write-baseline
 ```
 
-This writes the four `…Baseline` lists, keyed relative to the project root. A baselined site costs nothing until it is converted; a new site is held to the rule. A copy across two files has two entries, one per file, and an entry names the copied tokens, so editing one side of a baselined copy makes it a new copy that is reported again.
+This writes the five `…Baseline` lists, keyed relative to the project root. A baselined site costs nothing until it is converted; a new site is held to the rule. A copy across two files has two entries, one per file, and an entry names the copied tokens, so editing one side of a baselined copy makes it a new copy that is reported again.
 
 The lists are debt and only shrink: the full tier fails on an entry no live site consumes. Re-running `--write-baseline` removes the entries of converted sites.
 
@@ -241,6 +243,7 @@ Each is a TypeScript handler, `(content, filePath) => Violation[]`, registered i
 | `switch-totality` | immediate + full | TS | A switch with 2+ arms proves totality in its `default` arm |
 | `no-duplicate-block` | immediate + full | TS, JS | No block of 100+ identical tokens over 8+ lines that another project file, or the same file, already holds |
 | `no-wire-cast` | immediate + full | TS | `JSON.parse` / `.json()` output is bound as `unknown` and parsed — never typed by `as T` or a `: T` annotation |
+| `no-dangling-doc-reference` | immediate + full | Markdown; comments in TS, JS, Java, Kotlin, Scala | Every backticked path, file, symbol, link, spec id and ADR id in a governed document resolves against the project |
 | `max-function-lines` | full | TS, JS, Java | Function bodies ≤ `maxFunctionLines` (default 50); test files excluded by default |
 | `fugue-generated-integrity` | full | TS | Structural projection of Fugue-generated files matches the stamped SHA-256 |
 | `exhaustive-discriminant-branching` | full | TS | 3+ branches on one discriminant without a totality proof |
@@ -380,6 +383,78 @@ that name whose block still encloses it; parameters are not declarations.
 
 `wireCastBaseline` grandfathers pre-existing sites, keyed `path::as T` (an
 assertion) or `path::name: T` (a binding), one entry per site.
+
+#### `no-dangling-doc-reference`
+
+A document goes stale when another file changes: a module is renamed, a heading
+is reworded, an export is deleted. A check of the edited file alone cannot see
+that, so this rule reads the unedited document against the current tree. It
+reads nothing until `docReferences` names what it governs:
+
+<!-- wire-example: linter-project-config -->
+```json
+{
+  "docReferences": {
+    "govern": [
+      { "path": "docs/", "reason": "the documentation describes the tree as it is" },
+      { "path": "src/", "reason": "comments name the code beside them" }
+    ],
+    "plans": [
+      { "path": ".claude/plans/", "reason": "a plan's spec header and spec ids must resolve" }
+    ],
+    "exclude": [
+      { "path": "docs/vendor/", "reason": "upstream text, not ours to keep current" }
+    ],
+    "sourceRoots": ["src"]
+  }
+}
+```
+
+- A Markdown file under `govern` is read in full; a source file under `govern`
+  is read for its comments. A Markdown file under `plans` is read for its spec
+  header, its spec ids and its ADR ids only, because a plan names files that do
+  not exist yet. `exclude` carves trees out of both.
+- **A reference** is a code span shaped like a path, a file name or a word
+  (with an optional `()` call or a dotted path), a Markdown link, a plan's spec
+  header and its FR/AS/OOS ids, and an ADR id. Placeholder grammar
+  (`<name>`, `{id}`, `…`), commit hashes, URLs and other schemes, flags,
+  package scopes, media types (`text/plain`) and another document's line ids
+  are never references. Fenced
+  code and HTML comments are not read, and an unclosed fence is itself a
+  violation, because everything after it would go unread.
+- **A path** resolves in named frames: the referring file's directory, each
+  directory above it up to the project root, then each `sourceRoots` entry. A
+  path with no extension may name a module file, as an import specifier does.
+  There is no suffix matching, and an absolute path is refused because it names
+  one machine's checkout.
+- **A link** resolves as GitHub resolves it. A Markdown target's anchor must be
+  one of its GitHub heading slugs or an HTML anchor (`<a id="…">`).
+- **A word** (a symbol, a config key, a command) resolves when the project's
+  source text holds it as a whole word, or holds every segment of a dotted
+  path. The corpus is the non-comment text of every source, JSON, shell, YAML
+  and TOML file outside tests and fixtures, the names test code declares at the start of a
+  line, and every path segment and file stem. Comments are left out so a
+  comment cannot keep a deleted name alive. The match is deliberately lenient:
+  a word that occurs anywhere resolves, even when it is not the symbol the
+  document means.
+- **A spec id** goes through the engine's spec parser; a spec it refuses is
+  reported with the parser's reason. **An ADR id** must name a file in
+  `docs/adr/`, numbered with an ADR prefix or with adr-tools' bare four digits.
+
+A mention of something deliberately gone is history: write it without
+backticks, or baseline it. The rule does not guess which names are history.
+
+The source corpus is built once per process, on the first governed file
+(`firstCallSetup`), so no per-file deadline is charged for it. On the edit
+hook it costs about 400 ms on a 2,300-file tree; `lint-project` and the Wave
+Gate read the whole tree, which is where a doc made stale by an edit elsewhere
+is caught. `lint-project` walks a governed or plan path inside a directory the
+walk otherwise skips (`.claude/plans/`), lints a Markdown file only where the
+scope governs it, and reports a `docReferences` entry that matches no file as
+drift.
+
+`docReferenceBaseline` grandfathers pre-existing references, keyed
+`path::reference`, one entry per reference. See ADR-0074.
 
 #### `fugue-generated-integrity`
 

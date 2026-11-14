@@ -27,7 +27,8 @@ import {
 import { EMISSION_TOOL_SPECS, issueEmissionBinding } from "../src/core/emission-tool";
 import { parseRequestId } from "../src/core/orchestration-contract/identity";
 import { compactSchemaOf, describeCompactSchemaError } from "./support/compact-schema";
-import { describeMarkdownError, fencesOf, markdown, orFail } from "./support/markdown";
+import { describeMarkdownError, fencesOf, markdown } from "../src/linter/markdown";
+import { orFail } from "./support/or-fail";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const readFragment = (name: string): string => readFileSync(join(REPO_ROOT, "references", "reviewer-wire", name), "utf-8");

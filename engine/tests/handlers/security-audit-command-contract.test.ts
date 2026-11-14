@@ -20,7 +20,8 @@ import {
   parseSecurityAuditOperation,
   securityAuditOperationWrites,
 } from "../../src/handlers/helpers/security-audit-operations";
-import { describeMarkdownError, markdown, orFail, sectionOf, tableWithColumns, tablesOf, type Table } from "../support/markdown";
+import { describeMarkdownError, markdown, sectionOf, tableWithColumns, tablesOf, type Table } from "../../src/linter/markdown";
+import { orFail } from "../support/or-fail";
 
 const command = readFileSync(new URL("../../../commands/security-audit.md", import.meta.url), "utf8");
 const operatorGuide = readFileSync(new URL("../../../docs/security-audit.md", import.meta.url), "utf8");

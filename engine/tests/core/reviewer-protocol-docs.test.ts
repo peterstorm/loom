@@ -17,7 +17,8 @@ import {
   parseContextDigest, parseRequestId,
 } from "../../src/core/orchestration-contract/identity";
 import { compactSchemaOf, describeCompactSchemaError } from "../support/compact-schema";
-import { markdown, orFail } from "../support/markdown";
+import { markdown } from "../../src/linter/markdown";
+import { orFail } from "../support/or-fail";
 
 /**
  * The wire-instruction wording gate (FR-020/AS-012; AD-7): newly issued

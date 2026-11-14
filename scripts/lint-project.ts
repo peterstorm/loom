@@ -14,14 +14,14 @@
  *   --init          Create .claude/linter/rules/ with starter config (interactive)
  *   --tier=full     Run full tier (default: full)
  *   --tier=immediate  Run immediate tier only (regex rules, the import-boundary rules, switch-totality,
- *                   no-duplicate-block and no-wire-cast, fast)
+ *                   no-duplicate-block, no-wire-cast and no-dangling-doc-reference, fast)
  *   --no-baseline-check  Skip the staleness pass (grandfathered baselines and
  *                   scoping entries — exclusions, pure roots, shells, boundaries —
  *                   that no longer name anything)
- *   --write-baseline  Record every pre-existing totality site, copied block and wire cast in
- *                   the project's config.json (switchTotalityBaseline,
- *                   discriminantBranchingBaseline, duplicateBlockBaseline,
- *                   wireCastBaseline), then exit
+ *   --write-baseline  Record every pre-existing totality site, copied block, wire cast and
+ *                   dangling doc reference in the project's config.json
+ *                   (switchTotalityBaseline, discriminantBranchingBaseline,
+ *                   duplicateBlockBaseline, wireCastBaseline, docReferenceBaseline), then exit
  *   --json          Output raw JSON violations
  *   --summary       Show only summary counts
  *   --fix-hints     Show fix hints (default: true)
@@ -47,7 +47,8 @@ import type * as LinterLoader from "../engine/src/linter/loader.ts";
 import type * as ProjectScope from "../engine/src/linter/project-scope.ts";
 import type * as ProjectWalk from "../engine/src/linter/project-walk.ts";
 import type * as PurityRule from "../engine/src/linter/programmatic/no-io-in-pure-modules.ts";
-import type { ReasonedPath } from "../engine/src/linter/programmatic/config.ts";
+import type * as DocReferenceRule from "../engine/src/linter/programmatic/no-dangling-doc-reference.ts";
+import type { ReasonedPath } from "../engine/src/linter/types.ts";
 import type * as ProgrammaticRules from "../engine/src/linter/programmatic/index.ts";
 import type * as Baselines from "../engine/src/linter/programmatic/baseline.ts";
 import type * as BaselineConfig from "../engine/src/linter/programmatic/baseline-config.ts";
@@ -72,11 +73,13 @@ const { lintFiles }: typeof LinterIndex = await import(join(LOOM_ROOT, "engine/s
 const { CLAUDE_PROJECT_RULES_DIR, PI_PROJECT_RULES_DIR, PROJECT_RULES_LAYOUTS, projectRulesLayout }: typeof LinterConfig =
   await import(join(LOOM_ROOT, "engine/src/linter/programmatic/config.ts"));
 const { authoritativeLintContext, loadProjectConfig }: typeof LinterLoader = await import(join(LOOM_ROOT, "engine/src/linter/loader.ts"));
-const { scopeOf, scopeDrift }: typeof ProjectScope =
+const { scopeOf, scopeDrift, walkedBesides }: typeof ProjectScope =
   await import(join(LOOM_ROOT, "engine/src/linter/project-scope.ts"));
 const { walkLintableFiles }: typeof ProjectWalk = await import(join(LOOM_ROOT, "engine/src/linter/project-walk.ts"));
 const { matchesModulePath }: typeof PurityRule =
   await import(join(LOOM_ROOT, "engine/src/linter/programmatic/no-io-in-pure-modules.ts"));
+const { readingOf }: typeof DocReferenceRule =
+  await import(join(LOOM_ROOT, "engine/src/linter/programmatic/no-dangling-doc-reference.ts"));
 const { baselineOwners }: typeof ProgrammaticRules = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/index.ts"));
 const { staleBaselineEntries }: typeof Baselines = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/baseline.ts"));
 const { configWithBaselines, recordedBaselines }: typeof BaselineConfig =
@@ -146,10 +149,20 @@ let projectWalk: readonly string[] | undefined;
  * starter roots and `--write-baseline`'s sources all read this one walk, so
  * they cannot disagree about the tree, and a targeted run with the drift pass
  * off never walks the project at all.
+ *
+ * With a config, the paths it governs beneath a directory the walk never
+ * enters (`walkedBesides`: a project's `.claude/plans/`) are walked too, so a
+ * governed plan is linted in the full tier, not only when it is edited.
  */
-function projectFiles(): readonly string[] {
+function projectFiles(config: LinterConfig.ProgrammaticConfig | null): readonly string[] {
   projectWalk ??= walkLintable(PROJECT_ROOT);
-  return projectWalk;
+  const besides = config === null ? [] : walkedBesides(config).flatMap((path) => {
+    const absolute = join(PROJECT_ROOT, path);
+    const stat = statSync(absolute, { throwIfNoEntry: false });
+    if (stat === undefined) return [];
+    return stat.isDirectory() ? walkLintable(absolute) : [absolute];
+  });
+  return besides.length === 0 ? projectWalk : [...new Set([...projectWalk, ...besides])].sort();
 }
 
 type Scoped = Readonly<{ lint: readonly string[]; excluded: readonly Readonly<{ file: string; reason: string }>[] }>;
@@ -229,6 +242,8 @@ const INIT_NEXT_STEPS: readonly string[] = [
   "  duplicateBlockMinTokens / duplicateBlockMinLines — how long a copy is (default: 100 tokens, 8 lines)",
   "  duplicateBlockBaseline — grandfathered copies",
   "  wireCastBaseline — grandfathered JSON.parse / .json() casts (no-wire-cast)",
+  "  docReferences — { govern, plans, exclude, sourceRoots } whose references must resolve (no-dangling-doc-reference)",
+  "  docReferenceBaseline — grandfathered dangling doc references",
   "",
   "See: lint-rules/README.md for full documentation",
 ];
@@ -249,7 +264,7 @@ function initLinterConfig(): void {
     existsSync(join(PROJECT_ROOT, "build.gradle")) ||
     existsSync(join(PROJECT_ROOT, "build.gradle.kts"));
 
-  const files = projectFiles().map(projectPath);
+  const files = projectFiles(null).map(projectPath);
   const hasFileUnder = (root: string): boolean => files.some((file) => matchesModulePath(file, root));
   writeFileSync(
     join(RULES_DIR, "config.json"),
@@ -352,8 +367,9 @@ function baselineDrift(config: LinterConfig.ProgrammaticConfig): string[] {
 
 /**
  * Record every site each baselined rule flags today as that rule's baseline,
- * so a project adopts the totality rules, no-duplicate-block and no-wire-cast without every
- * pre-existing switch, copy or wire cast blocking the next edit to its file. Written into the project's one
+ * so a project adopts the totality rules, no-duplicate-block, no-wire-cast and
+ * no-dangling-doc-reference without every pre-existing switch, copy, wire cast
+ * or dangling reference blocking the next edit to its file. Written into the project's one
  * `config.json`, creating it when absent. Which sites are
  * recorded and what the next config holds are the engine's pure decision
  * (`recordedBaselines`, `configWithBaselines`: every other field kept, an
@@ -368,7 +384,7 @@ function baselineDrift(config: LinterConfig.ProgrammaticConfig): string[] {
 function writeBaseline(config: LinterConfig.ProgrammaticConfig): void {
   const projectOwners = owners(config);
   const extensions = new Set(projectOwners.flatMap((owner) => owner.extensions));
-  const sources = applyExclusions(projectFiles(), config.exclude ?? []).lint
+  const sources = applyExclusions(projectFiles(config), config.exclude ?? []).lint
     .filter((file) => extensions.has(extname(file)))
     .map((file) => ({ path: projectPath(file), content: readFileSync(file, "utf-8") }));
   const recorded = recordedBaselines(projectOwners, sources);
@@ -418,7 +434,7 @@ const exclusions = config.exclude ?? [];
  * a mistyped path must not pass as a clean one.
  */
 function candidates(): readonly string[] {
-  if (opts.paths.length === 0) return projectFiles();
+  if (opts.paths.length === 0) return projectFiles(config);
   const missing = opts.paths.filter((pattern) => statSync(resolve(pattern), { throwIfNoEntry: false }) === undefined);
   if (missing.length > 0) {
     console.error(`ERROR: ${missing.join(", ")} ${missing.length === 1 ? "does" : "do"} not exist — nothing was linted`);
@@ -430,7 +446,15 @@ function candidates(): readonly string[] {
   });
 }
 
-const scoped = applyExclusions(candidates(), exclusions);
+/**
+ * A Markdown file is linted only where the project governs its references:
+ * no other rule reads one, so a docs folder in a project without
+ * `docReferences` is a run that checked nothing, not a clean one.
+ */
+const readByARule = (file: string): boolean =>
+  extname(file) !== ".md" || readingOf(projectPath(file), config.docReferences ?? null) !== null;
+
+const scoped = applyExclusions(candidates().filter(readByARule), exclusions);
 const files = scoped.lint;
 
 if (!opts.json) {
@@ -502,7 +526,7 @@ for (const [file, result] of lintFiles(files, opts.tier, DEFAULT_RULES_DIR, EXIS
 // unnoticed. Scoping drift is judged against the whole project's files, never
 // a targeted run's subset.
 const driftLines = opts.baselineCheck && opts.tier === "full"
-  ? [...baselineDrift(config), ...scopeDrift(config, projectFiles().map(projectPath))]
+  ? [...baselineDrift(config), ...scopeDrift(config, projectFiles(config).map(projectPath))]
   : [];
 
 // ONE failure predicate for every output mode. A file the linter could not read

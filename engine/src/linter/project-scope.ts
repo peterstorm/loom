@@ -14,15 +14,18 @@
  */
 
 import { extname } from "node:path";
-import type { ProgrammaticConfig, ReasonedPath } from "./programmatic/config";
+import type { ProgrammaticConfig } from "./programmatic/config";
+import type { ReasonedPath } from "./types";
 import { underPrefix } from "./programmatic/no-cross-boundary-imports";
 import { classifyPurity, matchesModulePath, type PurityScope } from "./programmatic/no-io-in-pure-modules";
 
-/** Every extension some rule may read. A file with any other extension holds no lintable source. */
+/** Every extension some rule may read. A file with any other extension holds
+ *  nothing to lint. Markdown is read by no-dangling-doc-reference alone. */
 export const LINTABLE_EXTENSIONS: ReadonlySet<string> = new Set([
   ".ts", ".tsx", ".mts", ".cts",
   ".js", ".jsx", ".mjs", ".cjs",
   ".java", ".kt", ".scala",
+  ".md",
 ]);
 
 /**
@@ -48,6 +51,20 @@ export const isLintableName = (name: string): boolean => LINTABLE_EXTENSIONS.has
 
 /** Does a directory name hold no project source? */
 export const isNeverSourceDirectory = (name: string): boolean => NEVER_SOURCE_DIRECTORIES.has(name);
+
+/**
+ * The paths a project's config governs that the walk never enters: a
+ * `docReferences` entry beneath a directory that never holds source, such as
+ * `.claude/plans/`. `lint-project` walks each of them besides the project, so
+ * a governed plan is linted in the full tier, not only when it is edited.
+ */
+export function walkedBesides(config: ProgrammaticConfig): readonly string[] {
+  const scope = config.docReferences;
+  if (scope === undefined) return [];
+  return [...scope.govern, ...scope.plans]
+    .map(({ path }) => path)
+    .filter((path) => path.split("/").some(isNeverSourceDirectory));
+}
 
 /** One project path's place in the lint scope. */
 export type ScopeDecision =
@@ -85,7 +102,9 @@ export function scopeOf(relativePath: string, exclusions: Exclusions): ScopeDeci
  *   is a typo or a moved directory, so its rule checks nothing there;
  * - a declared shell (`impureModules`) is stale unless it names a file that a
  *   pure root would otherwise hold to purity;
- * - a per-file capability grant is stale when its file is gone.
+ * - a per-file capability grant is stale when its file is gone;
+ * - a doc-reference scope entry or source root that matches no file governs,
+ *   carves out or frames nothing.
  */
 export function scopeDrift(config: ProgrammaticConfig, files: readonly string[]): readonly string[] {
   const none = (matches: (file: string) => boolean): boolean => !files.some(matches);
@@ -111,5 +130,21 @@ export function scopeDrift(config: ProgrammaticConfig, files: readonly string[])
         .filter((granted) => !files.includes(granted))
         .map((granted) => `boundaries: ${boundary.module} grants ${granted} (no such file — delete the grant)`),
     ]),
+    ...docReferenceDrift(config, none),
+  ];
+}
+
+/** The doc-reference scope entries and source roots that match no file. */
+function docReferenceDrift(config: ProgrammaticConfig, none: (matches: (file: string) => boolean) => boolean): readonly string[] {
+  const scope = config.docReferences;
+  if (scope === undefined) return [];
+  const lists = [["govern", scope.govern], ["plans", scope.plans], ["exclude", scope.exclude]] as const;
+  return [
+    ...lists.flatMap(([key, entries]) => entries
+      .filter(({ path }) => none((file) => isUnderEntry(file, path)))
+      .map(({ path }) => `docReferences.${key}: ${path} (matches no file — fix or delete the entry)`)),
+    ...scope.sourceRoots
+      .filter((root) => none((file) => file.startsWith(`${root}/`)))
+      .map((root) => `docReferences.sourceRoots: ${root} (holds no file — fix or delete the root)`),
   ];
 }
