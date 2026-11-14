@@ -14,6 +14,7 @@ import { createProgrammaticRules } from "../../../src/linter/programmatic";
 import { authoritativeLintContext, loadProjectConfig, loadRules } from "../../../src/linter/loader";
 import { isProgrammaticRule } from "../../../src/linter/types";
 import { LOOM_RULES_DIR, REPO_ROOT } from "../loom-project-config";
+import { excludePatterns } from "../exclude-patterns";
 
 const LOOM_DEFAULT_RULES = join(REPO_ROOT, "lint-rules");
 
@@ -80,7 +81,7 @@ describe("programmatic config loader", () => {
     }));
 
     const config = loadProjectConfig(dir);
-    expect(config.excludeFromMaxLines).toEqual([".test.java", ".spec.ts"]);
+    expect(config.excludeFromMaxLines).toEqual(excludePatterns(".test.java", ".spec.ts"));
   });
 
   it("throws on malformed JSON (fail-closed)", () => {
@@ -225,6 +226,29 @@ describe("scoping config: exclusions, purity roots and shells, governance", () =
     expect(parse(json)).toMatchObject({ ok: false, error: expect.stringContaining(message) });
   });
 
+  it("parses excludeFromMaxLines into file suffixes and directories", () => {
+    expect(parse({ excludeFromMaxLines: ["Test.java", "apps/", "src\\gen\\"] })).toEqual({
+      ok: true,
+      value: {
+        excludeFromMaxLines: [
+          { kind: "suffix", suffix: "Test.java" },
+          { kind: "directory", segments: "/apps/" },
+          { kind: "directory", segments: "/src/gen/" },
+        ],
+      },
+    });
+  });
+
+  it.each([
+    [{ excludeFromMaxLines: ["Test.java", "/"] }, "excludeFromMaxLines[1] '/' names no directory"],
+    [{ excludeFromMaxLines: ["**/*.test.ts"] }, "excludeFromMaxLines[0] '**/*.test.ts' is a glob"],
+    [{ excludeFromMaxLines: ["Test.java", "./src/"] }, "excludeFromMaxLines[1] './src/' holds an empty, '.' or '..' segment"],
+    [{ excludeFromMaxLines: [""] }, "non-empty strings"],
+    [{ excludeFromMaxLines: "Test.java" }, "must be an array"],
+  ])("refuses a max-lines exclusion that would not mean what its author wrote: %j", (json, message) => {
+    expect(parse(json)).toMatchObject({ ok: false, error: expect.stringContaining(message) });
+  });
+
   it("refuses an empty governance scope — it would govern nothing", () => {
     expect(parse({ requireGovernance: [] })).toMatchObject({ ok: false, error: expect.stringContaining("must not be empty") });
   });
@@ -336,7 +360,7 @@ describe("scoping config: exclusions, purity roots and shells, governance", () =
     expect(config.boundaries).toHaveLength(1);
     expect(config.pureModules).toHaveLength(1);
     expect(config.maxFunctionLines).toBe(40);
-    expect(config.excludeFromMaxLines).toEqual([".test.java"]);
+    expect(config.excludeFromMaxLines).toEqual(excludePatterns(".test.java"));
     expect(config.maxDiscriminantBranches).toBe(4);
     expect(config.discriminantTags).toEqual(["kind"]);
   });

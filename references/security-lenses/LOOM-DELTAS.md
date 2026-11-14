@@ -26,7 +26,9 @@ archived attempt cited — and the hunter runs the printed command verbatim,
 redirecting stdout into exactly that artifact. The printed command names the
 sandbox script by its absolute path in the plugin.
 Owners: `admitArtifactNonce` in `engine/src/core/security-coverage.ts`,
-`bindSandboxRun` in `engine/src/core/security-sandbox.ts`.
+`bindSandboxRun` in `engine/src/core/security-sandbox.ts`; the nonce line and
+the script's absolute path are spelled by `loomCommands` (`auditNonce`,
+`sandboxScript`) in `engine/src/core/loom-cli-command.ts`.
 
 ## The hunter files its own envelope
 
@@ -58,7 +60,9 @@ prints each selected lens by its absolute path
 (`<plugin>/references/security-lenses/<LENS>.md`) and the parent hands a hunter
 those paths as printed. Upstream's "Phase 1" (reconnaissance)
 is not vendored; the `security-audit` skill's "Enumerating units" replaces it.
-Owner: `renderLensSelection` in `engine/src/core/security-lens-select.ts`.
+Owners: `loomCommands(…).securityLens` in `engine/src/core/loom-cli-command.ts`
+spells the path; `renderLensSelection` in `engine/src/core/security-lens-select.ts`
+prints it.
 
 ## The profile caps lens breadth
 

@@ -54,7 +54,7 @@ import {
 import { epochChangedFiles, runStopChecks, stopChecksReportLine, type StopChecksInput } from "../engine/src/handlers/subagent-stop/stop-checks";
 import { contractStubStopNote, type ContractStubStore } from "../engine/src/orchestration/contract-stub-materialization";
 import { observeTaskMutation } from "../engine/src/orchestration/task-mutation-record";
-import { LOOM_PACKAGE_ROOT } from "../engine/src/utils/loom-package-root";
+import { LOOM_COMMANDS } from "../engine/src/utils/loom-package-root";
 import type { LedgerObservation } from "../engine/src/core/red-then-green-types";
 import { renderStopCheckNotes, type StopCheckNote } from "../engine/src/core/stop-check-note";
 import {
@@ -186,7 +186,7 @@ export async function reportImplementationStopChecks(
   ledger: LedgerObservation,
   ports: StopCheckShellPorts = REPORT_ONLY_STOP_CHECK_PORTS,
   notifyOperator: (line: string) => void = piStderrNote,
-  taskMutation: StopChecksInput["taskMutation"] = observeTaskMutation(LOOM_PACKAGE_ROOT),
+  taskMutation: StopChecksInput["taskMutation"] = observeTaskMutation(LOOM_COMMANDS),
 ): Promise<StopCheckNote | null> {
   if (taskId === null) return null;
   const outcome = await runStopChecks({

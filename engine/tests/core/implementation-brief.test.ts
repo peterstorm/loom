@@ -47,6 +47,7 @@ import { cleanupSkeletonRepos, PATHS, skeletonRepo, TS_CONTRACT, TS_TYPES_TEXT, 
 import { IMPLEMENTATION_BRIEF_TEMPLATE, NO_PLAN_TO_CHECK, renderTaskImplementationBrief } from "../../src/orchestration/implementation-brief";
 import { stubbedContracts } from "../../src/orchestration/contract-stub-materialization";
 import { unobservedSkeletons } from "../fixtures/frozen-signatures";
+import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { admittedNote } from "../fixtures/operator-note";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import { invariantId, planOwnership } from "../fixtures/owner-obligation";
@@ -135,7 +136,7 @@ const input = (value: Task, overrides: Partial<ImplementationBriefInput> = {}): 
   ownership: planOwnership(),
   contracts: [],
   repositoryRoot: "/repo",
-  packageRoot: "/loom",
+  commands: loomCommandsAt("/loom"),
   operatorNotes: [],
   frozenSignatures: unobservedSkeletons(graphFixture(ROSTER)),
   ...overrides,

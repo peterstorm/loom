@@ -42,6 +42,7 @@ import { withoutRedThenGreen, withRedThenGreen } from "../fixtures/red-then-gree
 import { indexedSpec } from "../fixtures/spec-index-fixture";
 import { briefOwnership } from "../fixtures/owner-obligation";
 import { unobservedSkeletons } from "../fixtures/frozen-signatures";
+import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { trustedPassEvidence } from "../fixtures/task-lifecycle";
 
 // --- Fixtures ---
@@ -273,7 +274,7 @@ describe("the brief states no I6 duty to a contract writer", () => {
       frozenSignatures: unobservedSkeletons(graph),
       contracts: graph.acceptance_contracts ?? [],
       repositoryRoot: "/repo",
-      packageRoot: "/loom",
+      commands: loomCommandsAt("/loom"),
       operatorNotes: [],
     });
     if (!rendered.ok) throw new Error(rendered.error.message);

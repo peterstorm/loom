@@ -11,6 +11,7 @@
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
+import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { canonicalCoverageId } from "../../src/core/security-audit-contract";
 import {
   assignUnits,
@@ -116,11 +117,11 @@ const aFindingSet = (): readonly SecurityFinding[] =>
 describe("published documents are order-invariant (INV-S6b)", () => {
   it("renders the same bytes for every permutation of the finding set", () => {
     const ledger = ok(recordUnitResult(anAssignedLedger(), aResult({ status: "covered" })));
-    const baseline = ok(derivePublication({ metadata, ledger, findings: aFindingSet(), locator: "/out", packageRoot: "/loom" }));
+    const baseline = ok(derivePublication({ metadata, ledger, findings: aFindingSet(), locator: "/out", commands: loomCommandsAt("/loom") }));
     const set = [...aFindingSet()];
     fc.assert(
       fc.property(fc.shuffledSubarray(set, { minLength: set.length, maxLength: set.length }), (shuffled) => {
-        expect(ok(derivePublication({ metadata, ledger, findings: shuffled, locator: "/out", packageRoot: "/loom" }))).toEqual(baseline);
+        expect(ok(derivePublication({ metadata, ledger, findings: shuffled, locator: "/out", commands: loomCommandsAt("/loom") }))).toEqual(baseline);
       }),
       { numRuns: 25 },
     );
@@ -128,7 +129,7 @@ describe("published documents are order-invariant (INV-S6b)", () => {
 
   it("orders each document's entries by fingerprint, not by arrival", () => {
     const ledger = ok(recordUnitResult(anAssignedLedger(), aResult({ status: "covered" })));
-    const { documents } = ok(derivePublication({ metadata, ledger, findings: aFindingSet(), locator: "/out", packageRoot: "/loom" }));
+    const { documents } = ok(derivePublication({ metadata, ledger, findings: aFindingSet(), locator: "/out", commands: loomCommandsAt("/loom") }));
     // Each document carries the verdicts it is about; within one, order follows
     // the fingerprint, so a reader comparing two runs sees the same sequence.
     const expectations: readonly (readonly [document: keyof RunDocuments, fingerprints: readonly string[]])[] = [

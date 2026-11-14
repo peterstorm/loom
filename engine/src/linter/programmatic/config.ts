@@ -16,6 +16,7 @@
 
 import { resolve } from "node:path";
 import { DEFAULT_TEST_FILE_SUFFIXES, isTestFileBySuffixes } from "../../core/test-file-classification";
+import { describeExcludePatternListError, parseExcludePatternList, type ExcludePattern } from "../exclude-pattern";
 import { isPositiveInt, type PositiveInt } from "../positive-int";
 import { parseBaselineKey, type Baseline } from "./baseline";
 import { underPrefix, type BoundaryRule, type CapabilityGrant } from "./no-cross-boundary-imports";
@@ -52,8 +53,9 @@ export interface ProgrammaticConfig {
   readonly impureModules?: readonly ReasonedPath[];
   /** Max function body lines (for max-function-lines) */
   readonly maxFunctionLines?: number;
-  /** File patterns to exclude from max-function-lines */
-  readonly excludeFromMaxLines?: readonly string[];
+  /** Files max-function-lines does not read: file suffixes and directories,
+   *  parsed like a regex rule's `excludePatterns`. */
+  readonly excludeFromMaxLines?: readonly ExcludePattern[];
   /** Branches on one discriminant that read as a switch (for exhaustive-discriminant-branching) */
   readonly maxDiscriminantBranches?: number;
   /** Field names that tag a discriminated union (for exhaustive-discriminant-branching) */
@@ -229,6 +231,14 @@ function parseOptionalBaseline(raw: unknown, filePath: string, key: string): Bas
     parseBaselineKey(entry) ?? refuse(`${filePath}: ${key}[${index}] '${entry}' must be 'path::key' — a project-relative path, '::', then what the rule flagged there`));
 }
 
+/** A rule's exclusion list: an entry that would not mean what its author wrote is refused by name. */
+function parseOptionalExcludePatterns(raw: unknown, filePath: string, key: string): readonly ExcludePattern[] | undefined {
+  const entries = parseOptionalStringArray(raw, filePath, key);
+  if (entries === undefined) return undefined;
+  const parsed = parseExcludePatternList(entries);
+  return parsed.ok ? parsed.value : refuse(`${filePath}: ${describeExcludePatternListError(key, parsed.error)}`);
+}
+
 /**
  * A project-relative module path: what every scoping list holds. Refused when
  * it could silently match the wrong set — a glob (no glob support exists, so
@@ -307,7 +317,7 @@ function parseConfigObject(json: unknown, filePath: string): ProgrammaticConfig 
     pureModules: parseOptionalModulePaths(obj.pureModules, filePath, "pureModules"),
     impureModules: parseOptionalReasonedPaths(obj.impureModules, filePath, "impureModules"),
     maxFunctionLines: parseOptionalPositiveInt(obj.maxFunctionLines, filePath, "maxFunctionLines"),
-    excludeFromMaxLines: parseOptionalStringArray(obj.excludeFromMaxLines, filePath, "excludeFromMaxLines"),
+    excludeFromMaxLines: parseOptionalExcludePatterns(obj.excludeFromMaxLines, filePath, "excludeFromMaxLines"),
     ...parseTotalityConfig(obj, filePath),
     ...parseDuplicateBlockConfig(obj, filePath),
     wireCastBaseline: parseOptionalBaseline(obj.wireCastBaseline, filePath, "wireCastBaseline"),

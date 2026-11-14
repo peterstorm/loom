@@ -30,6 +30,7 @@ import { aRun, must, removeRuns, startRun } from "../handlers/security-audit-har
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { loomCommandsAt } from "../fixtures/loom-package-root";
 import {
   SECURITY_PROFILE_LENSES,
   canonicalCoverageId,
@@ -51,7 +52,8 @@ import {
 } from "../../src/core/security-coverage";
 import { SEVERITY_SCORES, parseSecurityFindings, type SecurityFinding, type SeverityScore } from "../../src/core/security-findings";
 import { parseVerificationVerdicts } from "../../src/core/security-adjudication";
-import { SECURITY_LENSES, selectSecurityLenses, type SecurityLens, type StackSignals } from "../../src/core/security-lens-select";
+import { selectSecurityLenses, type StackSignals } from "../../src/core/security-lens-select";
+import { SECURITY_LENSES, type SecurityLens } from "../../src/core/security-lenses";
 import { securityDisposition } from "../../src/core/security-disposition";
 import { derivePublication } from "../../src/core/security-reports";
 import { BOOLEAN_SIGNALS, HUNTER_AGENT, HUNTER_ENVELOPE, aConfirmedFinding, aRefs, aRunMetadata, aSeed, aSignals, aUnitResult, aVerdict, ok } from "./fixtures";
@@ -360,7 +362,7 @@ describe("a recorded run reaches every planted defect", () => {
       ...METADATA,
       selectedCompanions: selectSecurityLenses(DEFECTS.signals, { maxLenses: SECURITY_PROFILE_LENSES.deep }).included.map((entry) => entry.lens),
     }));
-    const report = ok(derivePublication({ metadata, ledger, findings, locator: "/calibration", packageRoot: "/loom" })).documents["REPORT.md"];
+    const report = ok(derivePublication({ metadata, ledger, findings, locator: "/calibration", commands: loomCommandsAt("/loom") })).documents["REPORT.md"];
 
     for (const defect of DEFECTS.defects) {
       expect(report.split(fingerprintOf(defect))).toHaveLength(2);
@@ -441,7 +443,7 @@ describe("the fixture is not a happy-path prop", () => {
     expect(validateLedger(ledger)).toEqual([]);
     const sqli = findings.filter((finding) => finding.fingerprint === "calibration/cal-sqli-01");
     expect(sqli).toHaveLength(1);
-    const report = ok(derivePublication({ metadata, ledger, findings: sqli, locator: "/calibration", packageRoot: "/loom" })).documents["REPORT.md"];
+    const report = ok(derivePublication({ metadata, ledger, findings: sqli, locator: "/calibration", commands: loomCommandsAt("/loom") })).documents["REPORT.md"];
     expect(report).toContain("calibration/cal-sqli-01");
     for (const defect of DEFECTS.defects.slice(1)) {
       expect(report).not.toContain(fingerprintOf(defect));

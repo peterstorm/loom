@@ -13,6 +13,8 @@ import { resolveAgentPolicy, resolveModelProfile, lowerModelProfile } from "../s
 import { sha256Hex } from "../src/core/digest";
 import { REVIEWER_BOOTSTRAP_REGION, extractRegion, extractWireContractRegion } from "../src/core/wire-contract";
 import { value } from "./fixtures/parse-result";
+import { compactSchemaOf, describeCompactSchemaError } from "./support/compact-schema";
+import { markdown as markdownSource, orFail } from "./support/markdown";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const agentFile = (name: string): string =>
@@ -227,14 +229,14 @@ describe("all seven issued reviewer shims select packet authority before current
     expect(located.length).toBeGreaterThan(0);
     expect(parseReviewerEvidence(issuedContract(role, 2), new TextEncoder().encode(example)).ok).toBe(false);
     const issued = issuedContract(role, 2, [...new Set(located)]);
-    const schema = fencedSection(region, "reviewer-payload-schema");
+    const schema = orFail(compactSchemaOf(markdownSource(`agents/${role}.md wire-contract region`, region)), describeCompactSchemaError);
     const packetSchema = issued.packet.fixedContext.find(({ label }) => label === "reviewer-payload-schema");
     const packetRubric = issued.packet.fixedContext.find(({ label }) => label === "reviewer-impact-rubric");
     expect(packetSchema).toBeDefined();
     expect(packetRubric).toBeDefined();
     // The stamped copy is minified; the packet section is the issued bytes.
     // They are the same schema value, and the packet copy governs.
-    expect(JSON.parse(schema)).toEqual(JSON.parse(new TextDecoder().decode(Uint8Array.from(packetSchema!.bytes))));
+    expect(schema.value).toEqual(JSON.parse(new TextDecoder().decode(Uint8Array.from(packetSchema!.bytes))));
     expect(region.split("## reviewer-impact-rubric\n\n")[1] + "\n")
       .toBe(new TextDecoder().decode(Uint8Array.from(packetRubric!.bytes)));
     const admitted = value(parseReviewerEvidence(issued, new TextEncoder().encode(example)));

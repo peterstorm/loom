@@ -16,7 +16,9 @@
  * This module owns the pure replacement so the stamp script and the drift
  * tests share one implementation — a test proving regions equal the fragment
  * through a DIFFERENT parser than the stamper writes with would be two
- * contracts again.
+ * contracts again. It also owns which stamps an agent of each kind carries
+ * (`stampsFor`) and how a list of them is applied to one file (`applyStamps`);
+ * scripts/stamp-wire-contract.ts only reads, writes and reports.
  *
  * The wire-contract start marker still names agents/_shared/, where the
  * fragment lived before it moved: the byte-frozen schema-1 archive
@@ -154,4 +156,97 @@ export function stampReadCoverageBullet(agentMarkdown: string, fragment: string)
     ok: true,
     value: agentMarkdown.split("\n").map((line) => line === current.value ? bullet : line).join("\n"),
   };
+}
+
+/** Where the reviewer fragments live, and the reference the verifier's lens region is cut from. */
+export const REVIEWER_WIRE_FRAGMENTS = "references/reviewer-wire";
+export const REVIEW_LENS_REFERENCE = "references/review-lenses.md";
+
+/**
+ * The text an agent of one kind is stamped from. The kinds are the Agent
+ * Catalog's: an agent of any other kind carries no stamped text.
+ */
+export type StampSources =
+  | Readonly<{
+      kind: "reviewer";
+      /** references/reviewer-wire/bootstrap.md */
+      bootstrap: string;
+      /** references/reviewer-wire/before-you-emit.md */
+      preflight: string;
+      /** The executable contract, as renderReviewerWireContract() prints it. */
+      wireContract: string;
+      /** references/reviewer-wire/read-coverage.md */
+      readCoverage: string;
+    }>
+  | Readonly<{
+      kind: "review-verifier";
+      /** `reviewLensSections` of references/review-lenses.md. */
+      lensSections: string;
+    }>;
+
+/** One source's replacement in an agent file, with the words that report it. */
+export type Stamp = Readonly<{
+  apply: (agentMarkdown: string) => StampResult;
+  /** What a refused stamp should have found in the file. */
+  expected: string;
+  /** What a drift check reports when the file differs. */
+  difference: string;
+}>;
+
+const regionStamp = (region: StampedRegion, source: string, text: string): Stamp => ({
+  apply: (agentMarkdown) => stampRegion(agentMarkdown, region, text),
+  expected: `${region.start} … ${region.end}`,
+  difference: `${region.name} region differs from ${source}`,
+});
+
+/** Every stamp an agent of the sources' kind carries, in file order. */
+export function stampsFor(sources: StampSources): readonly Stamp[] {
+  switch (sources.kind) {
+    case "reviewer":
+      return [
+        regionStamp(REVIEWER_BOOTSTRAP_REGION, `${REVIEWER_WIRE_FRAGMENTS}/bootstrap.md`, sources.bootstrap),
+        regionStamp(REVIEWER_PREFLIGHT_REGION, `${REVIEWER_WIRE_FRAGMENTS}/before-you-emit.md`, sources.preflight),
+        regionStamp(WIRE_CONTRACT_REGION, `${REVIEWER_WIRE_FRAGMENTS}/wire-contract.md`, sources.wireContract),
+        {
+          apply: (agentMarkdown) => stampReadCoverageBullet(agentMarkdown, sources.readCoverage),
+          expected: `one line starting ${READ_COVERAGE_BULLET_ANCHOR}`,
+          difference: `read-coverage bullet differs from ${REVIEWER_WIRE_FRAGMENTS}/read-coverage.md`,
+        },
+      ];
+    case "review-verifier":
+      return [regionStamp(REVIEW_LENSES_REGION, REVIEW_LENS_REFERENCE, sources.lensSections)];
+    default: {
+      const unreachable: never = sources;
+      return unreachable;
+    }
+  }
+}
+
+/** A stamp the file could not take: why, and what it should have held. */
+export type StampRefusal = Readonly<{ reason: string; expected: string }>;
+
+/**
+ * One agent file after every stamp: its stamped text and the `difference` of
+ * each stamp that changed it (none when the file was already current), or the
+ * first stamp the file refused.
+ */
+export type StampedAgentFile =
+  | Readonly<{ ok: true; value: string; differing: readonly string[] }>
+  | Readonly<{ ok: false; error: StampRefusal }>;
+
+/** Apply the stamps in order, each to the result of the one before. */
+export function applyStamps(agentMarkdown: string, stamps: readonly Stamp[]): StampedAgentFile {
+  return stamps.reduce<StampedAgentFile>(
+    (file, { apply, expected, difference }) => {
+      if (!file.ok) return file;
+      const next = apply(file.value);
+      if (!next.ok) return { ok: false, error: { reason: next.error, expected } };
+      return {
+        ok: true,
+        value: next.value,
+        differing: next.value === file.value ? file.differing : [...file.differing, difference],
+      };
+    },
+    { ok: true, value: agentMarkdown, differing: [] },
+  );
 }

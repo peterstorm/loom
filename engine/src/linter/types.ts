@@ -5,6 +5,8 @@
  * Zero external dependencies.
  */
 
+import type { ExcludePattern } from "./exclude-pattern";
+
 // --- Tier & Kind ---
 
 /** Execution tier: immediate (PostEdit, single-file fast path) or full (wave-gate, complete rule suite) */
@@ -25,11 +27,10 @@ export interface RegexRule {
   readonly fixHint: string;
   readonly enabled: boolean;
   readonly source: RuleSource;
-  /** Files this rule does not read — matched by the one matcher in
-   *  `exclude-pattern.ts`, against the file's project-relative path. A pattern
-   *  ending in `/` is a directory (every file beneath it, at a segment
-   *  boundary); anything else is a file suffix (e.g. `".test.ts"`). */
-  readonly excludePatterns?: readonly string[];
+  /** Files this rule does not read, parsed when the rule is loaded
+   *  (`exclude-pattern.ts`): a directory (every file beneath it inside the
+   *  project, at a segment boundary) or a file suffix (`".test.ts"`). */
+  readonly excludePatterns?: readonly ExcludePattern[];
 }
 
 export interface ProgrammaticRule {

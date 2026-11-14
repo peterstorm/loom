@@ -11,6 +11,7 @@ import type {
   ProgrammaticRule,
 } from "../../src/linter/types";
 import { makeViolation } from "../../src/linter/types";
+import { excludePatterns } from "./exclude-patterns";
 
 // --- Test Helpers ---
 
@@ -185,8 +186,8 @@ describe("executeRules — regex line-by-line execution", () => {
 // --- Rule exclusions: a suffix and a directory are both honoured ---
 
 describe("executeRules — excludePatterns", () => {
-  const consoleLogRule = (excludePatterns: readonly string[]) =>
-    makeRegexRule({ name: "no-console-log", pattern: "console\\.log", excludePatterns });
+  const consoleLogRule = (entries: readonly string[]) =>
+    makeRegexRule({ name: "no-console-log", pattern: "console\\.log", excludePatterns: excludePatterns(...entries) });
 
   it("skips a test file by suffix and still flags the same line in production", () => {
     const rule = consoleLogRule([".test.ts"]);
@@ -198,9 +199,9 @@ describe("executeRules — excludePatterns", () => {
   it("skips a whole directory named with a trailing slash, and no sibling that only shares a prefix", () => {
     const rule = consoleLogRule(["apps/"]);
 
-    expect(executeRules([rule], "/work/shop/apps/demo/src/main.ts", "console.log(1);", noopDeadline, null)).toEqual([]);
-    expect(executeRules([rule], "/work/shop/packages/host/src/apps/main.ts", "console.log(1);", noopDeadline, null)).toEqual([]);
-    expect(executeRules([rule], "/work/shop/packages/approvals/main.ts", "console.log(1);", noopDeadline, null).length).toBe(1);
+    expect(executeRules([rule], "/work/shop/apps/demo/src/main.ts", "console.log(1);", noopDeadline, "/work/shop")).toEqual([]);
+    expect(executeRules([rule], "/work/shop/packages/host/src/apps/main.ts", "console.log(1);", noopDeadline, "/work/shop")).toEqual([]);
+    expect(executeRules([rule], "/work/shop/packages/approvals/main.ts", "console.log(1);", noopDeadline, "/work/shop").length).toBe(1);
   });
 
   it("matches a directory pattern inside the project root, not against the directories above it", () => {
@@ -211,8 +212,9 @@ describe("executeRules — excludePatterns", () => {
 
     expect(run(`${root}/src/order.ts`, root)).toBe(1);
     expect(run(`${root}/apps/demo/main.ts`, root)).toBe(0);
-    // With no project the path is matched as given.
-    expect(run(`${root}/src/order.ts`, null)).toBe(0);
+    // With no project the frame is unknown: a directory excludes nothing.
+    expect(run(`${root}/src/order.ts`, null)).toBe(1);
+    expect(run(`${root}/apps/demo/main.ts`, null)).toBe(1);
   });
 
   it("reads a file when the rule has no exclusions", () => {

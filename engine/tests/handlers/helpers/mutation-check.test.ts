@@ -26,6 +26,7 @@ import { StateManager } from "../../../src/state-manager";
 import type { HookResult } from "../../../src/types";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { loomCommandsAt } from "../../fixtures/loom-package-root";
 import { stateFileJson, task, writeStateFile } from "../../fixtures/contract-status-fixtures";
 import { taskFixture } from "../../fixtures/task-lifecycle";
 import { mutationManifest, START_SHA, talliedResult, type MutationManifestOverrides } from "../../fixtures/task-mutation";
@@ -100,7 +101,7 @@ function standing(at: Workspace) {
   const graph = new StateManager(at.statePath).load();
   const duty = taskMutationDuty(graph, "T1");
   if (duty.kind !== "owed") throw new Error("the fixture Task owes the check");
-  const observed = observeTaskMutation("/opt/loom", () => at.records)(duty, at.root);
+  const observed = observeTaskMutation(loomCommandsAt("/opt/loom"), () => at.records)(duty, at.root);
   return observed.kind === "observed" ? observed.standing : observed;
 }
 

@@ -23,7 +23,7 @@
 import { match } from "ts-pattern";
 import { sha256Hex } from "./digest";
 import { compareStrings } from "./ordering";
-import { loomHelperCommand } from "./loom-cli-command";
+import type { LoomCommands } from "./loom-cli-command";
 import { parseLlmProfileId } from "./model-profiles";
 import {
   canonicalStructuralEquals,
@@ -365,22 +365,15 @@ export function planVerificationStart(input: Readonly<{
 }
 
 /** The exact command that starts a planned run, its input on a here-document,
- *  through the Loom package at `packageRoot`. Every path is one shell-quoted
- *  word, whatever it contains. */
-export function renderVerificationStart(packageRoot: string, plan: VerificationStartPlan, runsRoot: string): string {
+ *  through the Loom package `commands` name. Every path is one shell-quoted
+ *  word, whatever it contains. Its import is `commands.verificationImport`. */
+export function renderVerificationStart(commands: LoomCommands, plan: VerificationStartPlan, runsRoot: string): string {
   return [
-    `${loomHelperCommand(packageRoot)} orchestration start ${SECURITY_VERIFICATION_PROGRAM} --runs-root ${quoteShellArgument(runsRoot)} ` +
-      `--run ${quoteShellArgument(plan.run)} <<'LOOM_VERIFICATION_START'`,
+    `${commands.orchestrationStart(SECURITY_VERIFICATION_PROGRAM, runsRoot)} --run ${quoteShellArgument(plan.run)} <<'LOOM_VERIFICATION_START'`,
     JSON.stringify(plan.input),
     "LOOM_VERIFICATION_START",
   ].join("\n");
 }
-
-/** The exact command that imports the finished run `run` into the audit at
- *  `locator`: the one `status` prints after the start command, and the one the
- *  Pi import gate reads `--out` and `--from` from statically. */
-export const renderVerificationImport = (packageRoot: string, locator: string, run: string): string =>
-  `${loomHelperCommand(packageRoot)} security-audit verify --out ${quoteShellArgument(locator)} --from ${quoteShellArgument(run)}`;
 
 // --- Registration ---
 

@@ -28,7 +28,6 @@ import {
 import { changedFilesAtStop } from "../../src/core/changed-files";
 import {
   recordedTaskMutation,
-  taskMutationCommand,
   taskMutationDuty,
   taskMutationResultOf,
   taskMutationUnavailable,
@@ -49,6 +48,7 @@ import {
 import type { TaskGraph } from "../../src/types";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { task } from "../fixtures/contract-status-fixtures";
 import { inMemoryBlockCounters } from "../fixtures/stop-check-block-counters";
 import { recordingStopCheckPorts } from "../fixtures/stop-check-runners";
@@ -57,9 +57,9 @@ import { junitReport, mutationManifest, START_SHA, talliedResult, type JunitCase
 
 const IMPL = "src/ledger.ts";
 const TEST = "src/ledger.test.ts";
-const PACKAGE_ROOT = "/opt/loom";
+const COMMANDS = loomCommandsAt("/opt/loom");
 const AGENT = "session.agent";
-const COMMAND = taskMutationCommand(PACKAGE_ROOT, "T2");
+const COMMAND = COMMANDS.mutationCheck("T2");
 const PASSING: JunitCase = { file: TEST, name: "ledger > debits", outcome: "passed" };
 const FAILING: JunitCase = { file: TEST, name: "ledger > credits", outcome: "failed" };
 const CLEAN: TaskMutationResult = talliedResult({ killed: 3, candidates: 3 });
@@ -134,7 +134,7 @@ function stopper(space: ReturnType<typeof workspace>, options: StopOptions = {})
       kind: "observed",
       changed: changedFilesAtStop(files.map((path): Evidence => ({ kind: "FileWrite", path: join(root, path), via: "tool" })), root, () => true),
     }),
-    taskMutation: options.taskMutation ?? observeTaskMutation(PACKAGE_ROOT, () => space.records),
+    taskMutation: options.taskMutation ?? observeTaskMutation(COMMANDS, () => space.records),
     hookStartedAtMs: 0,
   };
   const shell = options.root === "unavailable"
@@ -325,7 +325,7 @@ describe("the Task mutation check on Pi", () => {
       { kind: "read", events: [] },
       { ...REPORT_ONLY_STOP_CHECK_PORTS, repositoryRoot: () => ({ ok: true as const, root: space.root }) },
       notifyOperator,
-      observeTaskMutation(PACKAGE_ROOT, () => space.records),
+      observeTaskMutation(COMMANDS, () => space.records),
     );
 
   it("is one report-only operator line for a missing check, every time, and never a block", async () => {

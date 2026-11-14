@@ -98,6 +98,7 @@ import {
 } from "./interactive-subagent";
 import { observeSpawnBatchGraph } from "./spawn-graph";
 import { renderTaskImplementationBrief } from "../engine/src/orchestration/implementation-brief";
+import { installedLoomPackageRoot } from "../engine/src/utils/loom-package-root";
 import { prepareSpawnBatch } from "./spawn-preparation";
 import { reservePiSpawnLifecycle } from "./spawn-lifecycle";
 import { piDurableClaimReleasePorts } from "./spawn-claim-shell";
@@ -132,7 +133,7 @@ import { createPiParentSessions } from "./spawn-reservation";
 import { projectSessionModelIntoEnv } from "./session-model-env";
 import { piAgentDefinitionPath, resolvePiAgentDirectory } from "../engine/src/core/pi-agent-directory";
 
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const PACKAGE_ROOT = installedLoomPackageRoot(dirname(dirname(fileURLToPath(import.meta.url))));
 // Capture once, while this extension module is loaded. Fresh CLI processes
 // hash the checkout again before mutation; a changed checkout therefore cannot
 // write a schema this in-memory runtime may not parse.

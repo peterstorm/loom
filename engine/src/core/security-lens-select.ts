@@ -22,23 +22,9 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 
+import type { LoomCommands } from "./loom-cli-command";
 import { SECURITY_AUDIT_LIMITS } from "./security-audit-contract";
-
-/** Lens documents, in their upstream filenames (see ATTRIBUTION.md). */
-export const SECURITY_LENSES = [
-  "ATTACK-CLASSES.md",
-  "WEB-PROTOCOL-AND-AUTH.md",
-  "CLIENT-SIDE.md",
-  "AI-AND-LLM.md",
-  "MEMORY-SAFETY-AND-BINARY.md",
-  "SUPPLY-CHAIN-AND-RELEASE.md",
-  "CLOUD-AND-DEPLOYMENT.md",
-  "PROTOCOLS-RPC-AND-MESSAGING.md",
-  "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md",
-  "DATA-ISOLATION-AND-LIFECYCLE.md",
-  "DESKTOP-MOBILE-AND-LOCAL-IPC.md",
-] as const;
-export type SecurityLens = (typeof SECURITY_LENSES)[number];
+import { SECURITY_LENSES, type SecurityLens } from "./security-lenses";
 
 /** Repository facts the selector reads. Every field is optional: a selector
  *  that demands facts a cheap scan cannot produce is a selector that guesses. */
@@ -256,16 +242,16 @@ export function selectSecurityLenses(
   };
 }
 
-/** Where a lens document lives in the Loom package at `packageRoot`. */
-const securityLensPath = (packageRoot: string, lens: SecurityLens): string =>
-  `${packageRoot}/references/security-lenses/${lens}`;
-
 /** The selection as the prompt fragment a hunter receives. Each included lens
- *  is named by its absolute path in the Loom package at `packageRoot`: a hunter
- *  works in the audited repository, where a package-relative path names nothing. */
-export function renderLensSelection(packageRoot: string, selection: LensSelection): string {
+ *  is named by the absolute path the package's `securityLens` spelling gives
+ *  it: a hunter works in the audited repository, where a package-relative path
+ *  names nothing. The renderer reads only that one spelling of `LoomCommands`. */
+export function renderLensSelection(
+  commands: Pick<LoomCommands, "securityLens">,
+  selection: LensSelection,
+): string {
   const included = selection.included
-    .map((entry) => `- ${securityLensPath(packageRoot, entry.lens)} (${entry.base ? "base" : `score ${entry.score}`}): ${entry.reasons.join("; ")}`)
+    .map((entry) => `- ${commands.securityLens(entry.lens)} (${entry.base ? "base" : `score ${entry.score}`}): ${entry.reasons.join("; ")}`)
     .join("\n");
   const excluded = selection.excluded
     .map((entry) => `- ${entry.lens}: ${entry.reason}`)

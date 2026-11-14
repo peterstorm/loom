@@ -43,6 +43,7 @@ import {
 import { runFileMutants, runTaskMutationCheck, type TaskMutationBudget } from "../../src/orchestration/task-mutation-runner";
 import type { HookResult } from "../../src/types";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { junitReport, talliedResult, type JunitCase } from "../fixtures/task-mutation";
 import {
   cleanupTaskMutationRepos,
@@ -289,7 +290,7 @@ describe("the Task mutation record store", () => {
   it("observes a record of other bytes as stale, with the command that refreshes it", () => {
     const { at, duty } = repo();
     const directory = tempDir();
-    const observe = observeTaskMutation("/opt/loom", () => directory);
+    const observe = observeTaskMutation(loomCommandsAt("/opt/loom"), () => directory);
     expect(observe(duty, at.root)).toMatchObject({ kind: "observed", standing: { kind: "not-run" } });
     const digest = observeTaskMutationDigest(at.root, duty);
     if (!digest.ok) throw new Error(digest.error);
@@ -329,7 +330,7 @@ async function helper(
 const standingOf = (at: TaskMutationRepo, records: string) => {
   const duty = taskMutationDuty(at.graph, LEDGER.taskId);
   if (duty.kind !== "owed") throw new Error("the fixture Task owes the check");
-  const observation = observeTaskMutation("/opt/loom", () => records)(duty, at.root);
+  const observation = observeTaskMutation(loomCommandsAt("/opt/loom"), () => records)(duty, at.root);
   return observation.kind === "observed" ? observation.standing : observation;
 };
 

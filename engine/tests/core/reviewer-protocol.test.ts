@@ -8,6 +8,8 @@ import {
   type FindingBasis, type ReviewerDraftV2, type ReviewerPayloadV2, type ReviewerProtocolFailure,
 } from "../../src/core/reviewer-contract";
 import { sha256Hex } from "../../src/core/digest";
+import { compactSchemaOf, describeCompactSchemaError } from "../support/compact-schema";
+import { describeMarkdownError, fencesOf, markdown, orFail } from "../support/markdown";
 
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
 const decode = (value: unknown) => parseReviewerPayloadV2(bytes(JSON.stringify(value)));
@@ -316,11 +318,13 @@ describe("authoritative generated wire contract", () => {
   });
   it("renders the exact issued full schema, example and rubric, not a second contract", () => {
     const rendered = renderReviewerWireContract();
-    const json = [...rendered.matchAll(/```json\n([\s\S]*?)\n```/g)].map((match) => match[1]);
+    const source = markdown("renderReviewerWireContract()", rendered);
+    const json = orFail(fencesOf(source, "json"), describeMarkdownError).map(({ body }) => body);
     // The schema is shown minified (the packet section keeps the issued
     // bytes): the same value, in the one compact spelling.
-    expect(JSON.parse(json[0]!)).toEqual(JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2));
-    expect(json).toEqual([JSON.stringify(JSON.parse(json[0]!)), JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, null, 2)]);
+    const schema = orFail(compactSchemaOf(source), describeCompactSchemaError);
+    expect(schema.value).toEqual(JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2));
+    expect(json).toEqual([schema.text, JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, null, 2)]);
     // Every reviewer spawn pays for the fragment. The pin stops the
     // pretty-printed schema from creeping back in.
     expect(bytes(rendered).length).toBeLessThanOrEqual(10 * 1024 + 512);

@@ -26,9 +26,20 @@ import { PERSISTENT_SUBAGENT_STORES } from "../../src/config";
 import { parseVerificationVerdicts, type VerificationVerdict } from "../../src/core/security-adjudication";
 import { parseVerificationResult } from "../../src/core/security-verification";
 import { registeredSecurityAuditRuns } from "../../src/orchestration/security-audit-run-registry";
-import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { aConfirmedFinding } from "../security/fixtures";
-import { SQLI, aRun, claimPayload, huntedRun, must, readPublished, readVerdicts, removeRuns, unitIdFor } from "./security-audit-harness";
+import {
+  PACKAGE_CLI,
+  PRINTED_HELPER,
+  SQLI,
+  aRun,
+  claimPayload,
+  huntedRun,
+  must,
+  readPublished,
+  readVerdicts,
+  removeRuns,
+  unitIdFor,
+} from "./security-audit-harness";
 import type { Run } from "./security-audit-run-seam";
 import {
   deliver,
@@ -45,9 +56,6 @@ import {
 } from "./security-verification-harness";
 
 const SECOND = "api/login:sqli-name";
-
-/** The entry point every printed helper command names: the executing package's own. */
-const CLI = join(LOOM_PACKAGE_ROOT, "engine", "src", "cli.ts");
 
 const attestationDir = (): string => PERSISTENT_SUBAGENT_STORES.captureAttestations.dir();
 const registryDir = (): string => PERSISTENT_SUBAGENT_STORES.securityAuditRunRegistry.dir();
@@ -101,8 +109,8 @@ describe("security verification, end to end (ADR-0067)", () => {
     expect(plan.runsRoot).toBe(join(run.out, "verification-runs"));
     expect(plan.run).toMatch(/^run\.verify-w1-g1-[0-9a-f]{12}$/);
     expect(plan.input.generation).toBe(1);
-    expect(plan.command).toContain(`bun '${CLI}' helper orchestration start security-verification --runs-root '${plan.runsRoot}' --run '${plan.run}'`);
-    expect(plan.importCommand).toBe(`bun '${CLI}' helper security-audit verify --out '${run.out}' --from '${plan.run}'`);
+    expect(plan.command).toContain(`${PRINTED_HELPER} orchestration start security-verification --runs-root '${plan.runsRoot}' --run '${plan.run}'`);
+    expect(plan.importCommand).toBe(`${PRINTED_HELPER} security-audit verify --out '${run.out}' --from '${plan.run}'`);
 
     // The batch is issued: one security-verifier-agent request on the refutation profile.
     const batch = await startVerification(plan);
@@ -428,15 +436,15 @@ describe("printed commands survive any path", () => {
     const bun = join(scratch, "bun");
     writeFileSync(bun, `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > ${JSON.stringify(join(scratch, "argv"))}\n`, { mode: 0o755 });
     const shell = { cwd: scratch, encoding: "utf8", env: { ...process.env, PATH: `${scratch}:${process.env.PATH}` } } as const;
-    expect(existsSync(CLI)).toBe(true);
+    expect(existsSync(PACKAGE_CLI)).toBe(true);
     const ran = spawnSync("bash", ["-c", plan.command], shell);
     expect(ran.status, ran.stderr).toBe(0);
     expect(readFileSync(join(scratch, "argv"), "utf8").split("\n"))
-      .toEqual([CLI, "helper", "orchestration", "start", "security-verification", "--runs-root", plan.runsRoot, "--run", plan.run, ""]);
+      .toEqual([PACKAGE_CLI, "helper", "orchestration", "start", "security-verification", "--runs-root", plan.runsRoot, "--run", plan.run, ""]);
     const imported = spawnSync("bash", ["-c", plan.importCommand], shell);
     expect(imported.status).toBe(0);
     expect(readFileSync(join(scratch, "argv"), "utf8").split("\n"))
-      .toEqual([CLI, "helper", "security-audit", "verify", "--out", run.out, "--from", plan.run, ""]);
+      .toEqual([PACKAGE_CLI, "helper", "security-audit", "verify", "--out", run.out, "--from", plan.run, ""]);
   });
 });
 

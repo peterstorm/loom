@@ -58,7 +58,7 @@ The layers are the ones in `rules/java-patterns.md` → "Package Structure": `do
 ```
 
 - `@Service` on an orchestrator is allowed: it is a Spring stereotype, and component scanning wires the adapters. That is why `orchestrator/` may import `org.springframework.stereotype`.
-- The `deny` on `domain/` for `org.springframework` is what keeps Spring annotations out of the core. No separate regex rule is needed for it. Where a regex rule does have to skip a layer, give `excludePatterns` a directory entry: `/infra/` matches `…/com/shop/infra/Db.java` at a segment boundary and never `…/com/shop/infrastructure/Db.java`. An entry without the trailing slash is a file suffix (`Test.java`). Entries are matched against the path inside the project, so where the checkout lives never matters.
+- The `deny` on `domain/` for `org.springframework` is what keeps Spring annotations out of the core. No separate regex rule is needed for it. Where a regex rule does have to skip a layer, give `excludePatterns` a directory entry: `/infra/` matches `…/com/shop/infra/Db.java` at a segment boundary and never `…/com/shop/infrastructure/Db.java`. An entry without the trailing slash is a file suffix (`Test.java`). A directory entry is matched against the path inside the project, so where the checkout lives never matters. Globs are refused: write the directory or the suffix.
 - Add the project's own libraries (its Either, Vavr, Lombok) to the `allow` list of each layer that uses them.
 
 ### Multi-module Maven / Gradle

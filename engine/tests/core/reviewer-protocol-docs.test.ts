@@ -16,6 +16,8 @@ import { sha256Hex } from "../../src/core/digest";
 import {
   parseContextDigest, parseRequestId,
 } from "../../src/core/orchestration-contract/identity";
+import { compactSchemaOf, describeCompactSchemaError } from "../support/compact-schema";
+import { markdown, orFail } from "../support/markdown";
 
 /**
  * The wire-instruction wording gate (FR-020/AS-012; AD-7): newly issued
@@ -201,8 +203,8 @@ describe("archived issued contracts are not rewritten (FR-020/AS-012)", () => {
     expect(sha256Hex(REVIEWER_PAYLOAD_SCHEMA_V2)).toBe(CURRENT_REVIEWER_PROTOCOL.schemaDigest);
     expect(sha256Hex(REVIEWER_IMPACT_RUBRIC_V1)).toBe(CURRENT_REVIEWER_PROTOCOL.rubricDigest);
     const fragment = renderReviewerWireContract();
-    const schemaSection = /\n## reviewer-payload-schema\n\n.*\n\n```json\n(.*)\n```\n/.exec(fragment);
-    expect(JSON.parse(schemaSection?.[1] ?? "null")).toEqual(JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2));
+    const schema = orFail(compactSchemaOf(markdown("renderReviewerWireContract()", fragment)), describeCompactSchemaError);
+    expect(schema.value).toEqual(JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2));
     expect(fragment.endsWith(REVIEWER_IMPACT_RUBRIC_V1)).toBe(true);
     // One schema section: the output contract names it, its heading opens it,
     // and its one sentence says it is the packet's section in compact form.

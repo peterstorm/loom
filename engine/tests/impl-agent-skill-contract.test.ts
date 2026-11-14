@@ -8,6 +8,7 @@ import { renderImplementationBrief, RULE_DOCUMENTS, type RuleDocument } from "..
 import { deriveTaskImplementationDispatch } from "../src/core/task-implementation-dispatch";
 import { graphFixture, taskFixture } from "./fixtures/task-lifecycle";
 import { unobservedSkeletons } from "./fixtures/frozen-signatures";
+import { loomCommandsAt } from "./fixtures/loom-package-root";
 import { planOwnership } from "./fixtures/owner-obligation";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -42,7 +43,7 @@ describe("implementation prompt required-skill contract", () => {
       const rendered = renderImplementationBrief({
         template, task, dispatch: derivation.dispatch, planFile: "plan.md",
         spec: { kind: "unavailable", reason: { kind: "no-spec-file" } }, rules, roster: [task], ownership: planOwnership(), contracts: [],
-        verificationManifest: undefined, repositoryRoot: "/repo", packageRoot: "/loom", operatorNotes: [], frozenSignatures: unobservedSkeletons(graphFixture([task])),
+        verificationManifest: undefined, repositoryRoot: "/repo", commands: loomCommandsAt("/loom"), operatorNotes: [], frozenSignatures: unobservedSkeletons(graphFixture([task])),
       });
       if (!rendered.ok) throw new Error(rendered.error.message);
       expect(checkAgentSkillPrompt(source, rendered.value.prompt)).toEqual({ ok: true });

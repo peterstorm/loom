@@ -20,11 +20,11 @@ import {
   parseSandboxReceipt,
   renderSandboxInstructions,
   sandboxCommand,
-  sandboxScriptPath,
   sandboxWithinLimits,
   type SandboxLimits,
   type SandboxRequest,
 } from "../../src/core/security-sandbox";
+import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { ok } from "./fixtures";
 import { NONCE, aSandboxReceipt, boundReceipt } from "./sandbox-fixtures";
 
@@ -38,8 +38,7 @@ const parseOk = (stdout: string) => {
 };
 
 /** A Loom package somewhere a hunter is not: the script is named under it. */
-const PACKAGE_ROOT = "/opt/loom";
-const SCRIPT = sandboxScriptPath(PACKAGE_ROOT);
+const SCRIPT = loomCommandsAt("/opt/loom").sandboxScript;
 
 const limits = (overrides: Partial<SandboxLimits> = {}): SandboxLimits => ({ ...DEFAULT_SANDBOX_LIMITS, ...overrides });
 
@@ -307,7 +306,7 @@ describe("sandbox command", () => {
 
   it("binds a run to one artifact: the judge's own nonce, the owner's scratch, and the artifact's file", () => {
     const artifact = "agents/security-hunter-agent--2/artifacts/sqli.txt";
-    const bound = bindSandboxRun({ packageRoot: PACKAGE_ROOT, target: "/repo", runDir: "/runs/run-1/", owner: "security-hunter-agent--2", artifact });
+    const bound = bindSandboxRun({ script: SCRIPT, target: "/repo", runDir: "/runs/run-1/", owner: "security-hunter-agent--2", artifact });
     expect(bound).toEqual({
       ok: true,
       value: {
@@ -328,13 +327,13 @@ describe("sandbox command", () => {
     ["a run directory inside the target", "/repo", "/repo/.audit/run-1"],
     ["a run directory that is the target", "/repo", "/repo"],
   ])("refuses %s, whose scratch the script would refuse", (_case, target, runDir) => {
-    const refused = bindSandboxRun({ packageRoot: PACKAGE_ROOT, target, runDir, owner: "security-hunter-agent", artifact: "agents/security-hunter-agent/artifacts/a.txt" });
+    const refused = bindSandboxRun({ script: SCRIPT, target, runDir, owner: "security-hunter-agent", artifact: "agents/security-hunter-agent/artifacts/a.txt" });
     expect(refused.ok ? null : refused.error.kind).toBe("scratch-inside-target");
     expect(refused.ok ? "" : refused.error.message).toContain("outside the audited repository");
   });
 
   it("does not mistake a sibling directory sharing the target's prefix for the target", () => {
-    expect(bindSandboxRun({ packageRoot: PACKAGE_ROOT, target: "/repo", runDir: "/repo-audits/run-1", owner: "security-hunter-agent", artifact: "agents/security-hunter-agent/artifacts/a.txt" }).ok).toBe(true);
+    expect(bindSandboxRun({ script: SCRIPT, target: "/repo", runDir: "/repo-audits/run-1", owner: "security-hunter-agent", artifact: "agents/security-hunter-agent/artifacts/a.txt" }).ok).toBe(true);
   });
 
   it("fills every placeholder from the binding: target, scratch, nonce, and the one artifact stdout lands in", () => {

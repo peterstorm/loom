@@ -28,11 +28,11 @@ import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { subagentDir } from "../config";
 import { sha256Hex } from "../core/digest";
+import type { LoomCommands } from "../core/loom-cli-command";
 import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
 import {
   parseTaskMutationRecord,
   TASK_MUTATION_NOT_RUN,
-  taskMutationCommand,
   taskMutationDigest,
   taskMutationRecordJson,
   taskMutationStanding,
@@ -136,11 +136,11 @@ export function observeTaskMutationDigest(root: CanonicalRepositoryRoot, duty: O
 /**
  * The stop shells' observation of one Task that owes the check: how its
  * record stands against its files now, with the command that refreshes it
- * through the Loom package at `packageRoot`. A digest or a record that cannot
- * be read is `unavailable`, which never blocks.
+ * (`commands.mutationCheck`). A digest or a record that cannot be read is
+ * `unavailable`, which never blocks.
  */
 export function observeTaskMutation(
-  packageRoot: string,
+  commands: LoomCommands,
   directory: () => string = subagentDir,
 ): (duty: OwedTaskMutation, root: CanonicalRepositoryRoot) => TaskMutationObservation {
   return (duty, root) => {
@@ -151,7 +151,7 @@ export function observeTaskMutation(
     return Object.freeze({
       kind: "observed",
       standing: taskMutationStanding(record.value, duty.taskId, digest.value),
-      command: taskMutationCommand(packageRoot, duty.taskId),
+      command: commands.mutationCheck(duty.taskId),
     });
   };
 }

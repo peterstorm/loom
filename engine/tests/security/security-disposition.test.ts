@@ -10,6 +10,7 @@
 
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
+import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { canonicalDigest } from "../../src/core/digest";
 import {
   decisionForFinding,
@@ -121,7 +122,7 @@ describe("the decision set", () => {
   it("emits a zero-entry decision set for a clean run instead of refusing", () => {
     const empty = ok(securityDisposition({ metadata: METADATA, locator: "/out", findings: [] }));
     expect(empty.entries).toEqual([]);
-    expect(renderDispositionHandoff("/opt/loom", empty)).toContain("nothing to remediate");
+    expect(renderDispositionHandoff(loomCommandsAt("/opt/loom"), empty)).toContain("nothing to remediate");
   });
 
   it("names the handoff command in prose", () => {
@@ -131,7 +132,7 @@ describe("the decision set", () => {
     expect(paths.runName).toBe(`run.disposition-${METADATA.runId}`);
     expect(paths.runDir).toBe(`${paths.runsRoot}/${paths.runName}`);
     // The paths are the disposition's own: derived from its source, never passed beside it.
-    const text = renderDispositionHandoff("/opt/loom", disposition);
+    const text = renderDispositionHandoff(loomCommandsAt("/opt/loom"), disposition);
     expect(text).toContain("1 accepted, 1 deferred, 1 dismissed");
     // The command runs as printed — the package's own CLI by absolute path —
     // carries every flag the program requires and names the exact file the
@@ -145,7 +146,7 @@ describe("the decision set", () => {
     const locator = "/out/it's my audit dir";
     const disposition = ok(securityDisposition({ metadata: METADATA, locator, findings: findings() }));
     const paths = dispositionHandoffPaths(locator, METADATA.runId);
-    const command = renderDispositionHandoff("/opt/my plugins/loom", disposition).split("\n")
+    const command = renderDispositionHandoff(loomCommandsAt("/opt/my plugins/loom"), disposition).split("\n")
       .filter((line) => line.startsWith("    ")).map((line) => line.trim().replace(/ \\$/, "")).join(" ");
     // A real shell splits it back into exactly the intended words.
     const echoed = spawnSync("bash", ["-c", `printf '%s\\n' ${command.replace(/ < /, " ")}`], { encoding: "utf8" });
@@ -171,7 +172,7 @@ describe("the report's handoff section", () => {
     const ledger = ok(parseCoverageSeeds([aSeed()]));
     const published = findings();
     const disposition = ok(securityDisposition({ metadata: METADATA, locator: "/out", findings: published }));
-    const report = ok(derivePublication({ metadata: METADATA, ledger, findings: published, locator: "/out", packageRoot: "/opt/loom" })).documents["REPORT.md"];
+    const report = ok(derivePublication({ metadata: METADATA, ledger, findings: published, locator: "/out", commands: loomCommandsAt("/opt/loom") })).documents["REPORT.md"];
     expect(report).toContain("## Disposition handoff");
     const paths = dispositionHandoffPaths("/out", METADATA.runId);
     expect(report).toContain(`--runs-root '${paths.runsRoot}'`);
@@ -183,7 +184,7 @@ describe("the report's handoff section", () => {
 
   it("names no command for a clean run, because there is nothing to load", () => {
     const ledger = ok(parseCoverageSeeds([aSeed()]));
-    const report = ok(derivePublication({ metadata: METADATA, ledger, findings: [], locator: "/out", packageRoot: "/opt/loom" })).documents["REPORT.md"];
+    const report = ok(derivePublication({ metadata: METADATA, ledger, findings: [], locator: "/out", commands: loomCommandsAt("/opt/loom") })).documents["REPORT.md"];
     expect(report).toContain("## Disposition handoff");
     expect(report).toContain("nothing to remediate");
     expect(report).not.toContain("standalone-disposition --runs-root");
