@@ -34,7 +34,7 @@
  * one shared rule in `engine/src/core/pi-agent-directory.ts`.
  */
 
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
@@ -69,7 +69,7 @@ import { realPhaseOrderDeps } from "../engine/src/handlers/pre-tool-use/validate
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 import { admitPiSpawnBatch } from "../engine/src/core/spawn-admission";
 
-import { taskGraphPath, subagentDir, guardedLocations, enclosingProjectRulesDir, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
+import { taskGraphPath, subagentDir, guardedLocations, editedFileRulesDir, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
 import { currentOrchestrationStatus } from "../engine/src/handlers/helpers/orchestration";
@@ -131,7 +131,7 @@ import { createTrustedReviewWitnesses } from "./trusted-review-witness";
 import { runPiStartupSweeps, type PiStartupSweepSource } from "./cleanup-actions";
 import { createPiParentSessions } from "./spawn-reservation";
 import { projectSessionModelIntoEnv } from "./session-model-env";
-import { createPiLintCoverageReminder } from "./lint-coverage";
+import { registerPiLintCoverage } from "./lint-coverage";
 import { piAgentDefinitionPath, resolvePiAgentDirectory } from "../engine/src/core/pi-agent-directory";
 
 const PACKAGE_ROOT = installedLoomPackageRoot(dirname(dirname(fileURLToPath(import.meta.url))));
@@ -260,7 +260,6 @@ export default function (
   const parentSessions = createPiParentSessions();
   const childWriteGrants = createPiChildWriteGrants();
   const evidenceRecorder = createPiEvidenceRecorder(childWriteGrants);
-  const lintCoverageReminder = createPiLintCoverageReminder();
 
   // ─── Evidence Recorder (tool_result, AD-8) ────────────────────────────
   // A granted child records its own tool calls into the PARENT session's
@@ -576,22 +575,8 @@ export default function (
   });
 
   // Lint coverage (the twin of Claude Code's session-start lint-coverage
-  // hook), on its own handler so a failed sweep cannot silence it, nor it a
-  // sweep. The operator hears now, the model with the first turn below. The
-  // project is the one this process runs in, as for the post-edit lint and the
-  // task graph.
-  pi.on("session_start", async (_event, ctx) => {
-    lintCoverageReminder.sessionStarted(
-      ctx.sessionManager.getSessionId() ?? "",
-      process.cwd(),
-      piOperatorNoteSink(ctx, writeStderrLine),
-    );
-  });
-
-  pi.on("before_agent_start", async (_event, ctx) => {
-    const message = lintCoverageReminder.takeModelMessage(ctx.sessionManager.getSessionId() ?? "");
-    return message === undefined ? undefined : { message };
-  });
+  // hook): the operator hears at session start, the model with the first turn.
+  registerPiLintCoverage(pi);
 
   // Each Pi subagent is a separate `pi --no-session` process. Parent-session
   // roster entries therefore cannot authorize child Edit/Write calls. Consume
@@ -667,11 +652,9 @@ export default function (
       const loomDefaultRulesDir = join(PACKAGE_ROOT, "lint-rules");
       const composed = await piPostEdit(event, {
         projectRoot,
-        // The rules of the project the edited file sits in, as the Claude
-        // Code hook finds them: from the file, never from this process's cwd.
-        lint: (filePath) => lintFile(
-          filePath, "immediate", loomDefaultRulesDir, enclosingProjectRulesDir(dirname(resolve(projectRoot, filePath))),
-        ),
+        // The rules of the project the edited file sits in, found as the
+        // Claude Code hook finds them (`editedFileRulesDir`).
+        lint: (filePath) => lintFile(filePath, "immediate", loomDefaultRulesDir, editedFileRulesDir(filePath, projectRoot)),
         advise: (file) => typeDiagnosticsAdvisory(file),
         notifyOperator: piOperatorNoteSink(ctx, writeStderrLine),
       });

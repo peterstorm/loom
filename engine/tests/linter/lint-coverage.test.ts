@@ -7,13 +7,17 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
+  coverageCheckFailedNote,
   coverageGapLine,
   coverageGaps,
   coverageReminder,
   lintCoverage,
+  sessionReminder,
   type LintCoverage,
+  type ProjectCoverage,
 } from "../../src/linter/lint-coverage";
 import { OPT_IN_CONFIG_KEYS, parseProjectConfig, type OptInConfigKey, type ProgrammaticConfig } from "../../src/linter/programmatic/config";
+import { parseCoverageIgnoreList, type IgnoreListParse } from "../../src/core/lint-coverage-ignore";
 
 const COMMANDS = { init: "bun lint-project.ts --init", ignore: "bun cli.ts helper lint-coverage ignore --reason \"<why>\"" };
 
@@ -90,6 +94,29 @@ describe("the declined list, parsed strictly", () => {
     }));
   });
 
+  it("accepts declining a family whose list is empty: an empty list turns nothing on, as coverage says", () => {
+    for (const key of ["boundaries", "pureModules"] as const) {
+      const coverage = lintCoverage(parsed({ [key]: [], declined: [{ key, reason: "no layers here" }] }));
+      expect(coverage.kind === "set-up" && coverage.families.find((family) => family.key === key))
+        .toEqual({ key, kind: "declined", reason: "no layers here" });
+    }
+  });
+
+  it("property: the parse refuses a decline exactly when coverage would call the family configured", () => {
+    const valueArb = fc.record({
+      boundaries: fc.constantFrom([], ON.boundaries),
+      pureModules: fc.constantFrom([], ON.pureModules),
+      requireGovernance: fc.constant(ON.requireGovernance),
+      docReferences: fc.constant(ON.docReferences),
+    });
+    fc.assert(fc.property(fc.constantFrom(...OPT_IN_CONFIG_KEYS), valueArb, (key, values) => {
+      const configured = lintCoverage(parsed({ [key]: values[key] }));
+      const isOn = configured.kind === "set-up" && configured.families.some((family) => family.key === key && family.kind === "configured");
+      const withDecline = parseProjectConfig({ [key]: values[key], declined: [{ key, reason: "why" }] }, "config.json");
+      expect(withDecline.ok).toBe(!isOn);
+    }));
+  });
+
   it("refuses a non-array, an unknown key, a key that is not opt-in, an empty reason and a key declined twice", () => {
     expect(refusal({ declined: {} })).toContain("'declined' must be an array of { key, reason }");
     expect(refusal({ declined: [{ key: "boundaries", reason: "x", why: "y" }] })).toContain("unknown key");
@@ -136,5 +163,46 @@ describe("coverageReminder", () => {
       }
       expect(reminder?.forOperator).toContain(`(${gaps.join(", ")})`);
     }));
+  });
+});
+
+describe("sessionReminder — what the session hears, from what the shell read", () => {
+  const ignoreList = (paths: readonly string[]): IgnoreListParse =>
+    parseCoverageIgnoreList({ ignore: paths.map((path) => ({ path, reason: "not mine" })) });
+  const UNREADABLE: IgnoreListParse = { ok: false, error: "/cfg/list.json is not JSON" };
+  const NO_SETUP: ProjectCoverage = { kind: "covered", root: "/repo", coverage: lintCoverage(null) };
+  const REFUSED: ProjectCoverage = { kind: "config-refused", root: "/repo", error: "unknown key 'exlude'" };
+
+  it("says nothing outside a project, whatever the ignore list holds", () => {
+    expect(sessionReminder({ kind: "no-project" }, UNREADABLE, COMMANDS)).toBeNull();
+    expect(sessionReminder({ kind: "no-project" }, ignoreList([]), COMMANDS)).toBeNull();
+  });
+
+  it("an unreadable ignore list is said, never read as 'ignore everything'", () => {
+    const reminder = sessionReminder(NO_SETUP, UNREADABLE, COMMANDS);
+    expect(reminder?.forOperator).toBe("Loom lint: the lint-coverage ignore list cannot be read (/cfg/list.json is not JSON); fix or delete it.");
+    expect(reminder?.forModel).toBe(reminder?.forOperator);
+  });
+
+  it("a refused config is said, so every failing edit has its cause", () => {
+    expect(sessionReminder(REFUSED, ignoreList([]), COMMANDS)?.forOperator)
+      .toBe("Loom lint: the rules config of /repo is refused, so every edit's lint fails: unknown key 'exlude'");
+  });
+
+  it("property: an ignored project is silent, refused or not; otherwise the coverage decides", () => {
+    const projectArb = fc.constantFrom<ProjectCoverage>(NO_SETUP, REFUSED, { kind: "covered", root: "/repo", coverage: lintCoverage({}) });
+    fc.assert(fc.property(projectArb, fc.boolean(), (project, ignored) => {
+      const reminder = sessionReminder(project, ignoreList(ignored ? ["/repo"] : ["/other"]), COMMANDS);
+      if (ignored) expect(reminder).toBeNull();
+      else if (project.kind === "covered") expect(reminder).toEqual(coverageReminder("/repo", project.coverage, COMMANDS));
+      else expect(reminder?.forOperator).toContain("is refused");
+    }));
+  });
+});
+
+describe("coverageCheckFailedNote", () => {
+  it("is the one line both harnesses say when the check itself fails", () => {
+    expect(coverageCheckFailedNote(new Error("EACCES"))).toBe("Loom lint: the coverage check could not run: EACCES");
+    expect(coverageCheckFailedNote("boom")).toBe("Loom lint: the coverage check could not run: boom");
   });
 });

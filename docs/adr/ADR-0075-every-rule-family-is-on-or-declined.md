@@ -28,14 +28,16 @@ wants maximum linting on every project has to remember, in every repository, to 
 **Every opt-in family of a set-up project is configured, or declined with its reason. A family that is
 neither is a coverage gap, and a gap fails the full tier.**
 
-- **Coverage** (`linter/lint-coverage.ts`, pure). A family is configured when its key turns it on; an empty
-  `boundaries` or `pureModules` list checks nothing and does not count. A family is declined by an entry in
-  `config.json`'s `declined` list: `[{ "key": "<family>", "reason": "<why>" }]`. The loader
-  (`linter/programmatic/config.ts`) refuses a key both configured and declined, a key declined twice and a
-  decline without a reason.
+- **Coverage** (`linter/lint-coverage.ts`, pure). A family is configured when its key turns it on
+  (`isFamilyOn` in `linter/programmatic/config.ts`, the one definition coverage and the loader share); an
+  empty `boundaries` or `pureModules` list checks nothing and does not count. A family is declined by an
+  entry in `config.json`'s `declined` list: `[{ "key": "<family>", "reason": "<why>" }]`. The loader refuses
+  a key both configured and declined, a key declined twice and a decline without a reason. An empty list
+  is not configured, so it may be declined.
 - **`lint-project`** (`scripts/lint-project.ts`) fails a full-tier run on each gap, naming the family, what
-  it checks and both ways to decide it. The JSON output carries them as `coverageGaps`. A project with no rules
-  directory is not failed: it prints a notice, because it never asked for Loom's linter.
+  it checks and both ways to decide it. The JSON output carries them as `coverageGaps`, and `coverage`
+  (`set-up` or `no-setup`) says which of the two a clean run is. A project with no rules directory is not
+  failed: it prints a notice, because it never asked for Loom's linter.
 - **`lint-project --init`** turns every family on that the layout allows (`linter/starter-config.ts`, pure):
   - the conventional functional-core roots;
   - the layered TypeScript boundaries of `typescript-patterns.md`, each layer allowing exactly what it
@@ -46,15 +48,19 @@ neither is a coverage gap, and a gap fails the full tier.**
   It fills only gaps, so a re-run never changes a decision, then baselines the debt the baselined rules
   already flag. A deny an import already breaks is left out and reported, since boundary violations are not
   baselined. A family it cannot infer is listed for a decision.
-- **The session reminder.** At each session start (Claude Code's SessionStart hook,
-  `hooks/scripts/lint-coverage.sh` → `handlers/session-start/lint-coverage.ts`; Pi's session start,
-  `pi/lint-coverage.ts`), a project with no setup or with gaps is named to the model, which offers to run
-  `--init`, and to the user. The reminder never blocks a session and writes nothing to the repository.
+- **The session reminder.** When a session starts fresh (Claude Code's SessionStart hook on `startup` or
+  `clear`, `hooks/scripts/lint-coverage.sh` → `handlers/session-start/lint-coverage.ts`; every Pi session
+  start, `pi/lint-coverage.ts`), a project with no setup or with gaps is named to the model, which offers to
+  run `--init`, and to the user. What the session hears is one pure decision (`sessionReminder` in
+  `linter/lint-coverage.ts`) over what the shell read, so both harnesses say the same thing. The reminder
+  never blocks a session and writes nothing to the repository.
 - **The personal ignore list.** A repository the user does not want Loom in is silenced by
   `helper lint-coverage ignore --reason "<why>"` (`handlers/helpers/lint-coverage.ts`). The list lives in
   the user's config directory, outside every repository (`core/lint-coverage-ignore.ts`,
-  `handlers/lint-coverage-shell.ts`); `LOOM_LINT_COVERAGE_IGNORE` names another file. A list that does
-  not parse is reported, never read as "ignore everything".
+  `handlers/lint-coverage-shell.ts`); `LOOM_LINT_COVERAGE_IGNORE` names another file. An entry is an
+  `IgnoredProject`, which only the parser and the `ignoredProject` smart constructor make: an absolute
+  path and a non-blank reason. A list that does not parse is reported, never read as "ignore everything",
+  and a list that cannot be written is reported, never a silent success.
 
 ## Consequences
 

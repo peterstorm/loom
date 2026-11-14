@@ -10,10 +10,11 @@
  *
  * Pure: the shell (`handlers/lint-coverage-shell.ts`) reads the config, the
  * filesystem and the user's list of repositories to leave alone
- * (`core/lint-coverage-ignore.ts`).
+ * (`core/lint-coverage-ignore.ts`), and passes the reads to `sessionReminder`.
  */
 
-import { OPT_IN_CONFIG_KEYS, type OptInConfigKey, type ProgrammaticConfig } from "./programmatic/config";
+import { isIgnored, type IgnoreListParse } from "../core/lint-coverage-ignore";
+import { isFamilyOn, OPT_IN_CONFIG_KEYS, type OptInConfigKey, type ProgrammaticConfig } from "./programmatic/config";
 
 export type FamilyCoverage =
   | Readonly<{ key: OptInConfigKey; kind: "configured" }>
@@ -34,17 +35,8 @@ export const FAMILY_PURPOSE: Readonly<Record<OptInConfigKey, string>> = Object.f
   docReferences: "doc and comment references that resolve (no-dangling-doc-reference)",
 });
 
-/** Whether the config turns each family on. An empty list checks nothing, so
- *  it is no more "on" than an absent one. */
-const IS_ON: Readonly<Record<OptInConfigKey, (config: ProgrammaticConfig) => boolean>> = Object.freeze({
-  boundaries: (config) => (config.boundaries?.length ?? 0) > 0,
-  pureModules: (config) => (config.pureModules?.length ?? 0) > 0,
-  requireGovernance: (config) => config.requireGovernance !== undefined,
-  docReferences: (config) => config.docReferences !== undefined,
-});
-
 function familyCoverage(config: ProgrammaticConfig, key: OptInConfigKey): FamilyCoverage {
-  if (IS_ON[key](config)) return Object.freeze({ key, kind: "configured" });
+  if (isFamilyOn(config, key)) return Object.freeze({ key, kind: "configured" });
   const declined = config.declined?.find((entry) => entry.key === key);
   return declined === undefined
     ? Object.freeze({ key, kind: "gap" })
@@ -104,3 +96,38 @@ export function coverageReminder(projectRoot: string, coverage: LintCoverage, co
     : `Loom lint: ${gaps.length} rule famil${gaps.length === 1 ? "y is" : "ies are"} off in ${projectRoot} (${gaps.join(", ")}).`;
   return Object.freeze({ forModel, forOperator });
 }
+
+/** A directory's project and its coverage, or why there is no answer. */
+export type ProjectCoverage =
+  | Readonly<{ kind: "no-project" }>
+  | Readonly<{ kind: "config-refused"; root: string; error: string }>
+  | Readonly<{ kind: "covered"; root: string; coverage: LintCoverage }>;
+
+/** One message for both audiences: a state the user must fix by hand. */
+const plainReminder = (message: string): CoverageReminder => Object.freeze({ forModel: message, forOperator: message });
+
+/**
+ * The session-start reminder, from what the shell read: the project the
+ * session sits in and the user's ignore list. Null when there is nothing to
+ * say — no project, full coverage, or a repository the user silenced. A config
+ * the linter refuses, or an ignore list that does not parse, is said too: a
+ * reminder that cannot be computed must not go quiet, and a broken list never
+ * reads as "ignore everything".
+ */
+export function sessionReminder(project: ProjectCoverage, ignoreList: IgnoreListParse, commands: CoverageCommands): CoverageReminder | null {
+  if (project.kind === "no-project") return null;
+  if (!ignoreList.ok) return plainReminder(`Loom lint: the lint-coverage ignore list cannot be read (${ignoreList.error}); fix or delete it.`);
+  if (isIgnored(ignoreList.value, project.root)) return null;
+  if (project.kind === "config-refused") {
+    return plainReminder(`Loom lint: the rules config of ${project.root} is refused, so every edit's lint fails: ${project.error}`);
+  }
+  return coverageReminder(project.root, project.coverage, commands);
+}
+
+/** What any thrown value says, for a note that must still reach the user. */
+export const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error);
+
+/** The operator note when the coverage check itself failed: the session goes
+ *  on, and both harnesses say the same line. */
+export const coverageCheckFailedNote = (error: unknown): string =>
+  `Loom lint: the coverage check could not run: ${messageOf(error)}`;

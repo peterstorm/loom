@@ -48,6 +48,12 @@
             "engine/src/utils/git-execution-policy"
           ],
           "reason": "lists the tree as every clone has it (git ls-files) through the one policy-bound Git seam, so a doc reference resolves the same on every machine"
+        },
+        "engine/src/linter/lint-coverage.ts": {
+          "allow": [
+            "engine/src/core/lint-coverage-ignore"
+          ],
+          "reason": "the session reminder's pure precedence reads the user's ignore list, a pure core leaf, so whether a silenced repository stays quiet is decided in the core and not in the shell"
         }
       }
     },
@@ -462,10 +468,11 @@
     },
     {
       "module": "engine/src/config.ts",
-      "description": "Process configuration: harness detection, protected paths and the task-graph location. Reads env and probes Git; imports the core, the type barrel, the linter's rules-directory layouts, the Git/path utilities it probes with, node builtins and ts-pattern.",
+      "description": "Process configuration: harness detection, protected paths, the task-graph location and the project a directory sits in. Reads env and probes Git; imports the core, the type barrel, the linter's rules-directory layouts and pure project discovery, the Git/path utilities it probes with, node builtins and ts-pattern.",
       "allow": [
         "engine/src/core/",
         "engine/src/linter/programmatic/config",
+        "engine/src/linter/project-root",
         "engine/src/types",
         "engine/src/utils/git-execution-policy",
         "engine/src/utils/git-probe",

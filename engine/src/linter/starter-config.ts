@@ -26,7 +26,7 @@
  */
 
 import { extname } from "node:path";
-import { OPT_IN_CONFIG_KEYS, type OptInConfigKey, type ProgrammaticConfig } from "./programmatic/config";
+import { OPT_IN_CONFIG_KEYS, parseProjectConfig, type OptInConfigKey, type ProgrammaticConfig } from "./programmatic/config";
 import { resolveImportPath, underPrefix, type BoundaryRule } from "./programmatic/no-cross-boundary-imports";
 import { matchesModulePath } from "./programmatic/no-io-in-pure-modules";
 import type { ReasonedPath } from "./types";
@@ -45,6 +45,31 @@ export type ProjectLayout = Readonly<{
   /** Whether the project keeps plans in `.claude/plans/`, which the walk never enters. */
   hasPlans: boolean;
 }>;
+
+declare const storedConfigBrand: unique symbol;
+
+/** A project's config document as written, paired with its own strict parse.
+ *  Minted only by `parseStoredConfig`, so the two cannot disagree. */
+export type StoredConfig = Readonly<{
+  document: Readonly<Record<string, unknown>>;
+  config: ProgrammaticConfig;
+}> & { readonly [storedConfigBrand]: true };
+
+export type StoredConfigParse =
+  | Readonly<{ ok: true; value: StoredConfig }>
+  | Readonly<{ ok: false; error: string }>;
+
+/** Parse a written config document, keeping the document beside its parse.
+ *  `configPath` names the file in a refusal. */
+export function parseStoredConfig(raw: unknown, configPath: string): StoredConfigParse {
+  const parsed = parseProjectConfig(raw, configPath);
+  if (!parsed.ok) return parsed;
+  // The parse refuses anything but a plain JSON object, so this only narrows.
+  if (typeof raw !== "object" || raw === null) return { ok: false, error: `${configPath}: expected a JSON object` };
+  const document: Readonly<Record<string, unknown>> = Object.freeze(Object.fromEntries(Object.entries(raw)));
+  // The brand is minted here and nowhere else: the config is the document's own parse.
+  return { ok: true, value: Object.freeze({ document, config: parsed.value }) as StoredConfig };
+}
 
 /** A family `--init` could not infer, and why. */
 export type UninferredFamily = Readonly<{ key: OptInConfigKey; why: string }>;
@@ -187,15 +212,12 @@ function freshDefaults(languages: ProjectLanguages): Readonly<Record<string, unk
 }
 
 /**
- * Infer every gap family `layout` allows. `stored` is the project's config
- * document as written (null when there is none) and `config` the same document
- * parsed; a configured or declined family is never touched.
+ * Infer every gap family `layout` allows. `stored` is the project's config as
+ * written (null when there is none); a configured or declined family is never
+ * touched.
  */
-export function inferStarterConfig(
-  stored: Readonly<Record<string, unknown>> | null,
-  config: ProgrammaticConfig | null,
-  layout: ProjectLayout,
-): StarterInference {
+export function inferStarterConfig(stored: StoredConfig | null, layout: ProjectLayout): StarterInference {
+  const config = stored?.config ?? null;
   const gaps = config === null ? OPT_IN_CONFIG_KEYS : coverageGaps(lintCoverage(config));
   const layered = inferBoundaries(layout);
   const added = gaps.includes("boundaries") && layered.ok ? layered.value : null;
@@ -207,17 +229,22 @@ export function inferStarterConfig(
     requireGovernance: inferGovernance(layout.files, [...(config?.boundaries ?? []), ...(added?.boundaries ?? [])]),
     docReferences: inferDocReferences(layout),
   };
-  const fields = Object.fromEntries(gaps.flatMap((key) => {
+  // Each gap, once: inferred with its value, or left with the reason.
+  const filled = gaps.flatMap((key) => {
     const family = families[key];
-    return family.ok ? [[key, family.value]] : [];
-  }));
+    return family.ok ? [{ key, value: family.value }] : [];
+  });
+  const uninferred = gaps.flatMap((key) => {
+    const family = families[key];
+    return family.ok ? [] : [Object.freeze({ key, why: family.why })];
+  });
   return Object.freeze({
-    document: Object.freeze({ ...(stored ?? freshDefaults(layout.languages)), ...fields }),
-    inferred: Object.freeze(gaps.filter((key) => families[key].ok)),
-    uninferred: Object.freeze(gaps.flatMap((key) => {
-      const family = families[key];
-      return family.ok ? [] : [Object.freeze({ key, why: family.why })];
-    })),
+    document: Object.freeze({
+      ...(stored?.document ?? freshDefaults(layout.languages)),
+      ...Object.fromEntries(filled.map(({ key, value }) => [key, value])),
+    }),
+    inferred: Object.freeze(filled.map(({ key }) => key)),
+    uninferred: Object.freeze(uninferred),
     notes: added?.notes ?? Object.freeze([]),
   });
 }

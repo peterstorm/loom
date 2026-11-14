@@ -86,6 +86,7 @@ type JsonReport = Readonly<{
   violations: readonly Readonly<{ file: string; rule: string }>[];
   errorCount: number;
   staleEntries: readonly string[];
+  coverage: "no-setup" | "set-up";
   coverageGaps: readonly string[];
   excluded: readonly Readonly<{ file: string; reason: string }>[];
 }>;
@@ -120,7 +121,9 @@ describe("lint-project.ts, spawned over a temporary project", () => {
     // The baselined site is excused and nothing in the baseline is stale.
     const linted = lintProject("--json");
     expect(linted.status, linted.stdout).toBe(0);
-    expect(jsonReport(linted.stdout)).toEqual({ violations: [], errorCount: 0, staleEntries: [], coverageGaps: [], excluded: [] });
+    expect(jsonReport(linted.stdout)).toEqual({
+      violations: [], errorCount: 0, staleEntries: [], coverage: "set-up", coverageGaps: [], excluded: [],
+    });
   });
 
   it("a stale baseline entry exits 1 and is reported in the JSON output's staleEntries", () => {
@@ -339,12 +342,17 @@ describe("lint coverage: every opt-in rule family is configured or declined", ()
     expect(lintProject("--summary").stdout).toContain("Coverage gaps: 4");
   });
 
-  it("an empty list is a gap too: it checks nothing", () => {
+  it("an empty list is a gap too: it checks nothing — and declining it, as the gap line says, is accepted", () => {
     baselined();
     configure({ boundaries: [] });
     expect(jsonReport(lintProject("--json").stdout).coverageGaps).toEqual([
       expect.stringContaining("coverage: 'boundaries' is off"),
     ]);
+    const current = JSON.parse(configBytes()) as Record<string, unknown>;
+    writeFileSync(join(project, RULES_DIR, "config.json"), JSON.stringify({ ...current, declined: ALL_DECLINED }));
+    const declined = lintProject("--json");
+    expect(declined.status, declined.stderr).toBe(0);
+    expect(jsonReport(declined.stdout).coverageGaps).toEqual([]);
   });
 
   it("the immediate tier does not judge coverage — it is the per-edit set", () => {
@@ -371,7 +379,11 @@ describe("lint coverage: every opt-in rule family is configured or declined", ()
     const linted = lintProject();
     expect(linted.status, linted.stdout).toBe(0);
     expect(linted.stderr).toContain("note: no Loom lint setup — only the shipped rules run; `lint-project --init` turns every rule family on");
-    expect(jsonReport(lintProject("--json").stdout).coverageGaps).toEqual([]);
+    // A machine caller reads the same state from the JSON, not from stderr.
+    const json = lintProject("--json");
+    expect(json.status).toBe(0);
+    expect(json.stderr).not.toContain("no Loom lint setup");
+    expect(jsonReport(json.stdout)).toMatchObject({ coverage: "no-setup", coverageGaps: [] });
   });
 });
 
@@ -566,13 +578,36 @@ describe("lint-project.ts --init, then a lint run under the generated config", (
       docReferences: expect.objectContaining({ sourceRoots: ["src"] }),
     });
     expect(written.boundaries).toBeUndefined();
-    // With no boundaries the project's own, governance cannot be inferred.
+    // The project declined boundaries and --init infers none for it, so no
+    // boundary governs src/ and governance cannot be inferred.
     expect(output).toContain("not inferred: requireGovernance");
 
     const first = configBytes();
     const again = init();
     expect(again).not.toContain("config.json: updated");
     expect(configBytes()).toBe(first);
+  });
+
+  it("fills an empty list an older --init wrote, which turned nothing on", () => {
+    withFiles({ ...LAYERED, [`${RULES_DIR}/config.json`]: `${JSON.stringify({ maxFunctionLines: 50, boundaries: [], pureModules: [] })}\n` });
+    const output = init();
+    expect(output).toContain("on: boundaries");
+    expect(output).toContain("on: pureModules");
+    expect(JSON.parse(configBytes()).pureModules).toEqual(["src/domain/"]);
+    expect(lintProject("--json").status).toBe(0);
+  });
+
+  it("refuses --init in a project carrying both rules layouts (exit 2), writing nothing", () => {
+    withFiles({
+      ...LAYERED,
+      [`${RULES_DIR}/config.json`]: "{}\n",
+      [`${PI_RULES_DIR}/config.json`]: "{}\n",
+    });
+    const initialized = lintProject("--init");
+    expect(initialized.status).toBe(2);
+    expect(initialized.stderr).toContain(`the project carries ${RULES_DIR} and ${PI_RULES_DIR}`);
+    expect(configBytes()).toBe("{}\n");
+    expect(configBytes(PI_RULES_DIR)).toBe("{}\n");
   });
 
   it("refuses to fill a config the loader refuses (exit 2), leaving it as it was", () => {

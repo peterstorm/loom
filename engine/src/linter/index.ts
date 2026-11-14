@@ -32,9 +32,11 @@ export { passResult, violationsResult, lintErrorResult, makeViolation, isRegexRu
 export type { SafetyResult, NowFn } from "./safety";
 export { analyzeRegex, createDeadlineChecker } from "./safety";
 export { loadRules } from "./loader";
-export { findProjectRoot } from "./programmatic/config";
-export { coverageGapLine, coverageGaps, coverageReminder, lintCoverage } from "./lint-coverage";
-export type { CoverageCommands, CoverageReminder, FamilyCoverage, LintCoverage } from "./lint-coverage";
+export { findProjectRoot } from "./project-root";
+export {
+  coverageCheckFailedNote, coverageGapLine, coverageGaps, coverageReminder, lintCoverage, messageOf, sessionReminder,
+} from "./lint-coverage";
+export type { CoverageCommands, CoverageReminder, FamilyCoverage, LintCoverage, ProjectCoverage } from "./lint-coverage";
 
 /** Default timeout budget for a single file (ms) */
 const DEFAULT_TIMEOUT_MS = 50;

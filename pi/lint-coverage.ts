@@ -10,8 +10,10 @@
  * has already been reminded.
  */
 
-import type { CoverageReminder } from "../engine/src/linter/index";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { coverageCheckFailedNote, type CoverageReminder } from "../engine/src/linter/index";
 import { coverageReminderAt } from "../engine/src/handlers/lint-coverage-shell";
+import { piOperatorNoteSink } from "../engine/src/handlers/pi-adapter";
 import { currentPiProcessRole, isPiSubagent, type PiProcessRole } from "./subagent-process";
 
 /** The custom message type the model's copy of the reminder carries. */
@@ -49,7 +51,7 @@ export function createPiLintCoverageReminder(ports: PiLintCoveragePorts = PRODUC
       try {
         reminder = ports.reminderAt(cwd);
       } catch (error) {
-        notifyOperator(`Loom lint: the coverage check could not run: ${error instanceof Error ? error.message : String(error)}`);
+        notifyOperator(coverageCheckFailedNote(error));
         return;
       }
       if (reminder === null) return;
@@ -62,5 +64,36 @@ export function createPiLintCoverageReminder(ports: PiLintCoveragePorts = PRODUC
       pending.delete(sessionId);
       return Object.freeze({ customType: PI_LINT_COVERAGE_MESSAGE_TYPE, content, display: false });
     },
+  });
+}
+
+/** What the registration reads from the process: its directory and stderr. */
+export type PiLintCoverageProcess = Readonly<{
+  cwd: () => string;
+  writeStderrLine: (line: string) => void;
+}>;
+
+const PRODUCTION_PROCESS: PiLintCoverageProcess = Object.freeze({
+  cwd: () => process.cwd(),
+  writeStderrLine: (line: string) => { process.stderr.write(`${line}\n`); },
+});
+
+/**
+ * Register the reminder on its own handlers, so a failed startup sweep cannot
+ * silence it, nor it a sweep. The project is the one this process runs in, as
+ * for the task graph: at session start no edited file exists yet to find it
+ * from, unlike the post-edit lint.
+ */
+export function registerPiLintCoverage(
+  pi: ExtensionAPI,
+  reminder: PiLintCoverageReminder = createPiLintCoverageReminder(),
+  host: PiLintCoverageProcess = PRODUCTION_PROCESS,
+): void {
+  pi.on("session_start", async (_event, ctx) => {
+    reminder.sessionStarted(ctx.sessionManager.getSessionId() ?? "", host.cwd(), piOperatorNoteSink(ctx, host.writeStderrLine));
+  });
+  pi.on("before_agent_start", async (_event, ctx) => {
+    const message = reminder.takeModelMessage(ctx.sessionManager.getSessionId() ?? "");
+    return message === undefined ? undefined : { message };
   });
 }

@@ -9,11 +9,19 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
-import { coverageIgnoreFile, coverageReminderAt, projectCoverageAt, readCoverageIgnoreList } from "../../../src/handlers/lint-coverage-shell";
+import { isRecord } from "../../../src/core/plain-record";
+import {
+  coverageIgnoreFile,
+  coverageReminderAt,
+  projectCoverageAt,
+  readCoverageIgnoreList,
+  writeCoverageIgnoreList,
+} from "../../../src/handlers/lint-coverage-shell";
 import { sessionDirectory, sessionStartOutput } from "../../../src/handlers/session-start/lint-coverage";
 import { coverageLines } from "../../../src/handlers/helpers/lint-coverage";
 
-const CLI = join(__dirname, "..", "..", "..", "src", "cli.ts");
+const PLUGIN_ROOT = join(__dirname, "..", "..", "..", "..");
+const CLI = join(PLUGIN_ROOT, "engine", "src", "cli.ts");
 const RULES_DIR = ".claude/linter/rules";
 
 const FULLY_DECIDED = {
@@ -63,6 +71,20 @@ describe("coverageIgnoreFile", () => {
     expect(coverageIgnoreFile({ LOOM_LINT_COVERAGE_IGNORE: "/x.json", XDG_CONFIG_HOME: "/xdg" })).toBe("/x.json");
     expect(coverageIgnoreFile({ XDG_CONFIG_HOME: "/xdg", HOME: "/home/u" })).toBe("/xdg/loom/lint-coverage-ignore.json");
     expect(coverageIgnoreFile({ HOME: "/home/u" })).toBe("/home/u/.config/loom/lint-coverage-ignore.json");
+  });
+});
+
+describe("writeCoverageIgnoreList", () => {
+  it("replaces the list and reads back as written", () => {
+    expect(writeCoverageIgnoreList(ignoreFile, [])).toEqual({ ok: true });
+    expect(readCoverageIgnoreList(ignoreFile)).toEqual({ ok: true, value: [] });
+  });
+
+  it("a failed write is returned, leaves the old state, and no staged file behind", () => {
+    mkdirSync(ignoreFile, { recursive: true }); // the list's path is a directory: the rename fails
+    const written = writeCoverageIgnoreList(ignoreFile, []);
+    expect(written).toMatchObject({ ok: false, error: expect.stringContaining(`cannot write ${ignoreFile}`) });
+    expect(existsSync(`${ignoreFile}.${process.pid}.tmp`)).toBe(false);
   });
 });
 
@@ -148,6 +170,41 @@ describe("the session-start hook", () => {
   });
 });
 
+describe("the Claude Code registration and its script", () => {
+  const SCRIPT = join(PLUGIN_ROOT, "hooks", "scripts", "lint-coverage.sh");
+
+  it("is a SessionStart hook on new and cleared sessions", () => {
+    const raw: unknown = JSON.parse(readFileSync(join(PLUGIN_ROOT, "hooks", "hooks.json"), "utf8"));
+    const groups: readonly unknown[] = isRecord(raw) && isRecord(raw.hooks) && Array.isArray(raw.hooks.SessionStart) ? raw.hooks.SessionStart : [];
+    const runsScript = (hook: unknown): boolean =>
+      isRecord(hook) && typeof hook.command === "string" && hook.command.endsWith("/hooks/scripts/lint-coverage.sh");
+    const entry = groups.find((group) => isRecord(group) && Array.isArray(group.hooks) && (group.hooks as readonly unknown[]).some(runsScript));
+    expect(isRecord(entry) ? entry.matcher : undefined).toBe("startup|clear");
+  });
+
+  it("fails open, loudly, when the runtime is unavailable: exit 0, a stderr line, no output", () => {
+    const result = spawnSync("bash", [SCRIPT], {
+      input: JSON.stringify({ cwd: project }),
+      encoding: "utf8",
+      env: { PATH: process.env.PATH ?? "" },
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("lint-coverage: runtime unavailable — lint coverage not checked\n");
+  });
+
+  it("with the runtime, speaks the reminder for the session's project", () => {
+    const result = spawnSync("bash", [SCRIPT], {
+      input: JSON.stringify({ cwd: project }),
+      encoding: "utf8",
+      timeout: 60_000,
+      env: { ...process.env, CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, LOOM_LINT_COVERAGE_IGNORE: ignoreFile },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ systemMessage: expect.stringContaining(`${project} has no lint setup`) });
+  });
+});
+
 describe("helper lint-coverage", () => {
   it("status prints the project, each family's decision and the reminder state", () => {
     writeConfig({ ...FULLY_DECIDED, declined: FULLY_DECIDED.declined.slice(1) });
@@ -180,6 +237,43 @@ describe("helper lint-coverage", () => {
     const unignored = cli(["helper", "lint-coverage", "unignore"], project);
     expect(unignored.status, unignored.stderr).toBe(0);
     expect(readCoverageIgnoreList(ignoreFile)).toEqual({ ok: true, value: [] });
+  });
+
+  it("a blank reason is no reason", () => {
+    const blank = cli(["helper", "lint-coverage", "ignore", "--reason", "  "], project);
+    expect(blank.status).not.toBe(0);
+    expect(blank.stdout + blank.stderr).toContain("--reason <why> is required");
+    expect(existsSync(ignoreFile)).toBe(false);
+  });
+
+  it("status says when the rules config is refused, and when the ignore list is unreadable", () => {
+    writeConfig({ exlude: [] });
+    mkdirSync(join(scratch, "config"));
+    writeFileSync(ignoreFile, "{ broken");
+    const result = cli(["helper", "lint-coverage", "status"], project);
+    expect(result.status, result.stderr).toBe(0);
+    const [root, refused, reminder] = result.stdout.trimEnd().split("\n");
+    expect(root).toBe(`project: ${project}`);
+    expect(refused).toMatch(/^rules config refused: .*unknown key 'exlude'/);
+    expect(reminder).toMatch(/^session reminder: ignore list unreadable \(.* is not JSON/);
+  });
+
+  it("ignore and unignore refuse a broken list and leave it as it was", () => {
+    mkdirSync(join(scratch, "config"));
+    writeFileSync(ignoreFile, "{ broken");
+    for (const args of [["ignore", "--reason", "not mine"], ["unignore"]]) {
+      const result = cli(["helper", "lint-coverage", ...args], project);
+      expect(result.status).not.toBe(0);
+      expect(result.stdout + result.stderr).toContain("is not JSON");
+      expect(readFileSync(ignoreFile, "utf8")).toBe("{ broken");
+    }
+  });
+
+  it("an ignore list it cannot write is reported, not a silent success", () => {
+    mkdirSync(ignoreFile, { recursive: true });
+    const result = cli(["helper", "lint-coverage", "ignore", "--reason", "not mine"], project);
+    expect(result.status).not.toBe(0);
+    expect(result.stdout + result.stderr).toMatch(/cannot (read|write)/);
   });
 
   it("outside every project, there is nothing to ignore", () => {

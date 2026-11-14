@@ -15,10 +15,6 @@
  *                   governance and doc references from the layout into the
  *                   project's config.json (creating it; filling only families
  *                   neither configured nor declined), then baseline existing debt
- *
- * A full-tier run fails on a coverage gap: an opt-in rule family (boundaries,
- * pureModules, requireGovernance, docReferences) a set-up project has neither
- * configured nor declined in config.json's `declined` list.
  *   --tier=full     Run full tier (default: full)
  *   --tier=immediate  Run immediate tier only (regex rules, the import-boundary rules, switch-totality,
  *                   no-duplicate-block, no-wire-cast and no-dangling-doc-reference, fast)
@@ -33,6 +29,12 @@
  *   --summary       Show only summary counts
  *   --fix-hints     Show fix hints (default: true)
  *   --no-fix-hints  Hide fix hints
+ *
+ * A full-tier run fails on a coverage gap: an opt-in rule family (boundaries,
+ * pureModules, requireGovernance, docReferences) a set-up project has neither
+ * configured nor declined in config.json's `declined` list. A project with no
+ * rules directory is told so (stderr, or `coverage: "no-setup"` in --json)
+ * without failing.
  *
  * Examples:
  *   bun lint-project.ts                    # Lint every lintable file in the project
@@ -50,6 +52,7 @@ import { statSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "no
 // engine's own, checked by the compiler instead of mirrored by hand.
 import type * as LinterIndex from "../engine/src/linter/index.ts";
 import type * as LinterConfig from "../engine/src/linter/programmatic/config.ts";
+import type * as ProjectRoot from "../engine/src/linter/project-root.ts";
 import type * as LinterLoader from "../engine/src/linter/loader.ts";
 import type * as ProjectScope from "../engine/src/linter/project-scope.ts";
 import type * as ProjectWalk from "../engine/src/linter/project-walk.ts";
@@ -59,7 +62,6 @@ import type * as ProgrammaticRules from "../engine/src/linter/programmatic/index
 import type * as Baselines from "../engine/src/linter/programmatic/baseline.ts";
 import type * as BaselineConfig from "../engine/src/linter/programmatic/baseline-config.ts";
 import type { BaselineOwner } from "../engine/src/linter/programmatic/baseline.ts";
-import type * as PlainRecord from "../engine/src/core/plain-record.ts";
 import type * as StarterConfig from "../engine/src/linter/starter-config.ts";
 import type * as BoundaryRule from "../engine/src/linter/programmatic/no-cross-boundary-imports.ts";
 
@@ -79,12 +81,13 @@ if (!existsSync(DEFAULT_RULES_DIR)) {
 
 const { coverageGapLine, coverageGaps, lintCoverage, lintFiles }: typeof LinterIndex =
   await import(join(LOOM_ROOT, "engine/src/linter/index.ts"));
-const { inferStarterConfig, TYPESCRIPT_LAYERS }: typeof StarterConfig =
+const { inferStarterConfig, parseStoredConfig, TYPESCRIPT_LAYERS }: typeof StarterConfig =
   await import(join(LOOM_ROOT, "engine/src/linter/starter-config.ts"));
 const { extractImports }: typeof BoundaryRule =
   await import(join(LOOM_ROOT, "engine/src/linter/programmatic/no-cross-boundary-imports.ts"));
-const { CLAUDE_PROJECT_RULES_DIR, PI_PROJECT_RULES_DIR, PROJECT_RULES_LAYOUTS, findProjectRoot, projectRulesLayout }: typeof LinterConfig =
+const { CLAUDE_PROJECT_RULES_DIR, PI_PROJECT_RULES_DIR, PROJECT_RULES_LAYOUTS, projectRulesLayout }: typeof LinterConfig =
   await import(join(LOOM_ROOT, "engine/src/linter/programmatic/config.ts"));
+const { findProjectRoot }: typeof ProjectRoot = await import(join(LOOM_ROOT, "engine/src/linter/project-root.ts"));
 const { authoritativeLintContext, loadProjectConfig }: typeof LinterLoader = await import(join(LOOM_ROOT, "engine/src/linter/loader.ts"));
 const { scopeOf, scopeDrift }: typeof ProjectScope =
   await import(join(LOOM_ROOT, "engine/src/linter/project-scope.ts"));
@@ -96,7 +99,6 @@ const { baselineOwners }: typeof ProgrammaticRules = await import(join(LOOM_ROOT
 const { staleBaselineEntries }: typeof Baselines = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/baseline.ts"));
 const { configWithBaselines, recordedBaselines }: typeof BaselineConfig =
   await import(join(LOOM_ROOT, "engine/src/linter/programmatic/baseline-config.ts"));
-const { isRecord }: typeof PlainRecord = await import(join(LOOM_ROOT, "engine/src/core/plain-record.ts"));
 
 // ---------------------------------------------------------------------------
 // Detect project root and rules directory
@@ -209,17 +211,25 @@ const INIT_NEXT_STEPS: readonly string[] = [
   "See: lint-rules/README.md for full documentation",
 ];
 
-/** The project's config document as written, or null when there is none. Read
- *  only after the engine's loader accepted it (`projectConfig`). */
-function storedConfig(): Record<string, unknown> | null {
+/** The project's config as written, paired with its strict parse
+ *  (`parseStoredConfig`), or null when there is none. A config that does not
+ *  read or parse ends the run (exit 2), as the loader's refusal does. */
+function readStoredConfig(): StarterConfig.StoredConfig | null {
   const path = join(RULES_DIR, "config.json");
   if (!existsSync(path)) return null;
-  const stored: unknown = JSON.parse(readFileSync(path, "utf-8"));
-  if (!isRecord(stored)) {
-    console.error(`${relative(PROJECT_ROOT, path)} is not a JSON object`);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf-8"));
+  } catch (error) {
+    console.error(`ERROR: Malformed linter config at ${path}: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(2);
   }
-  return stored;
+  const stored = parseStoredConfig(raw, path);
+  if (!stored.ok) {
+    console.error(`ERROR: ${stored.error}`);
+    process.exit(2);
+  }
+  return stored.value;
 }
 
 /** What `--init` infers from: the tree, the languages, each layer file's imports. */
@@ -246,9 +256,8 @@ function projectLayout(config: LinterConfig.ProgrammaticConfig | null): StarterC
  * it could not infer for a decision.
  */
 function initLinterConfig(): void {
-  const config = EXISTING_RULES_DIR === null ? null : projectConfig();
-  const stored = storedConfig();
-  const inference = inferStarterConfig(stored, config, projectLayout(config));
+  const stored = readStoredConfig();
+  const inference = inferStarterConfig(stored, projectLayout(stored?.config ?? null));
   const path = join(RULES_DIR, "config.json");
   if (stored === null || inference.inferred.length > 0) {
     mkdirSync(RULES_DIR, { recursive: true });
@@ -386,7 +395,7 @@ function writeBaseline(config: LinterConfig.ProgrammaticConfig): void {
   const path = join(RULES_DIR, "config.json");
   // The config was already parsed through the engine's loader, so a malformed
   // one failed the run instead of being silently rewritten.
-  writeFileSync(path, `${JSON.stringify(configWithBaselines(storedConfig() ?? {}, recorded), null, 2)}\n`);
+  writeFileSync(path, `${JSON.stringify(configWithBaselines(readStoredConfig()?.document ?? {}, recorded), null, 2)}\n`);
   console.log(`✓ ${relative(PROJECT_ROOT, path)}: ${recorded.map(({ configKey, keys }) => `${configKey} ${keys.length}`).join(", ")}`);
 }
 
@@ -537,7 +546,7 @@ const exitCode = failed ? 1 : 0;
 
 if (opts.json) {
   console.log(JSON.stringify({
-    violations: allViolations, errorCount, staleEntries: driftLines, coverageGaps: gapLines, excluded: scoped.excluded,
+    violations: allViolations, errorCount, staleEntries: driftLines, coverage: coverage.kind, coverageGaps: gapLines, excluded: scoped.excluded,
   }, null, 2));
   process.exit(exitCode);
 }

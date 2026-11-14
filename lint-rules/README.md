@@ -176,7 +176,7 @@ The parse is strict: an unknown key (at the top level, in a boundary, an exempti
 | `wireCastBaseline` | `string[]` | `[]` | Grandfathered `path::as T` / `path::name: T` sites `no-wire-cast` excuses, one entry per site |
 | `docReferences` | `{ govern, plans?, exclude?, sourceRoots? }` | absent (reads nothing) | The documents and comments `no-dangling-doc-reference` holds to the project. `govern` is a non-empty `{ path, reason }[]`; see [`no-dangling-doc-reference`](#no-dangling-doc-reference) |
 | `docReferenceBaseline` | `string[]` | `[]` | Grandfathered `path::reference` mentions `no-dangling-doc-reference` excuses, one entry per reference |
-| `declined` | `{ key, reason }[]` | `[]` | The opt-in families (`boundaries`, `pureModules`, `requireGovernance`, `docReferences`) the project leaves off on purpose, each with why. A key both configured and declined, declined twice or without a reason is refused. A family neither configured nor declined fails the full tier as a coverage gap; an empty `boundaries` or `pureModules` list checks nothing, so it counts as not configured |
+| `declined` | `{ key, reason }[]` | `[]` | The opt-in families (`boundaries`, `pureModules`, `requireGovernance`, `docReferences`) the project leaves off on purpose, each with why. A key both configured and declined, declined twice or without a reason is refused. A family neither configured nor declined fails the full tier as a coverage gap; an empty `boundaries` or `pureModules` list checks nothing, so it counts as not configured and may be declined |
 
 ### BoundaryRule
 

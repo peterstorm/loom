@@ -12,7 +12,7 @@
 import type { HookHandler } from "../../types";
 import { passthroughResult } from "../../types";
 import { isRecord } from "../../core/plain-record";
-import type { CoverageReminder } from "../../linter/index";
+import { coverageCheckFailedNote, type CoverageReminder } from "../../linter/index";
 import { coverageReminderAt } from "../lint-coverage-shell";
 
 /** The JSON a SessionStart hook prints so the model gets the context and the
@@ -41,7 +41,7 @@ const handler: HookHandler = async (stdin) => {
     if (reminder !== null) process.stdout.write(`${sessionStartOutput(reminder)}\n`);
     return passthroughResult();
   } catch (error) {
-    return passthroughResult(`Loom lint: the coverage check could not run: ${error instanceof Error ? error.message : String(error)}`);
+    return passthroughResult(coverageCheckFailedNote(error));
   }
 };
 

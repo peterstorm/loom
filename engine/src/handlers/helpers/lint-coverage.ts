@@ -11,13 +11,19 @@
  * - `unignore` takes it off the list again.
  */
 
-import { resolve } from "node:path";
 import type { HookHandler, HookResult } from "../../types";
 import { errorResult, passthroughResult } from "../../types";
-import { findProjectRoot, type LintCoverage } from "../../linter/index";
-import { pathExistsFailClosed } from "../../config";
+import type { LintCoverage } from "../../linter/index";
+import { projectAt } from "../../config";
 import { argumentValue } from "./cli-args";
-import { isIgnored, withIgnored, withoutIgnored, type CoverageIgnoreList } from "../../core/lint-coverage-ignore";
+import {
+  describeIgnoredProjectError,
+  ignoredProject,
+  isIgnored,
+  withIgnored,
+  withoutIgnored,
+  type CoverageIgnoreList,
+} from "../../core/lint-coverage-ignore";
 import {
   coverageIgnoreFile,
   projectCoverageAt,
@@ -26,6 +32,7 @@ import {
 } from "../lint-coverage-shell";
 
 const USAGE = "Usage: helper lint-coverage <status | ignore --reason <why> | unignore>";
+const REASON_REQUIRED = "lint-coverage ignore: --reason <why> is required — every ignored repository states why";
 
 /** The coverage lines `status` prints, one per family. Pure. */
 export function coverageLines(coverage: LintCoverage): readonly string[] {
@@ -61,30 +68,39 @@ function status(): HookResult {
   return passthroughResult();
 }
 
-/** Apply `update` to the ignore list for the project the cwd is in. */
-function updateIgnoreList(update: (list: CoverageIgnoreList, root: string) => CoverageIgnoreList, verb: string): HookResult {
-  const root = findProjectRoot(resolve(process.cwd()), pathExistsFailClosed);
-  if (root === null) return errorResult("lint-coverage: not in a project — there is nothing to ignore here");
+/** Apply `update` to the user's ignore list for the project `root`. A list
+ *  that does not parse is never overwritten: the user fixes or deletes it. */
+function updateIgnoreList(root: string, update: (list: CoverageIgnoreList, root: string) => CoverageIgnoreList, verb: string): HookResult {
   const file = coverageIgnoreFile();
   const current = readCoverageIgnoreList(file);
   if (!current.ok) return errorResult(`lint-coverage: ${current.error}`);
-  writeCoverageIgnoreList(file, update(current.value, root));
+  const written = writeCoverageIgnoreList(file, update(current.value, root));
+  if (!written.ok) return errorResult(`lint-coverage: ${written.error}`);
   process.stdout.write(`${verb} ${root} in ${file}\n`);
   return passthroughResult();
+}
+
+/** `ignore`: the entry is built by the smart constructor, so the list never
+ *  holds one its own parser would refuse. */
+function ignore(root: string, reason: string): HookResult {
+  const entry = ignoredProject(root, reason);
+  if (entry.ok) return updateIgnoreList(root, (list) => withIgnored(list, entry.value), "Ignored");
+  return errorResult(entry.error.kind === "blank-reason"
+    ? REASON_REQUIRED
+    : `lint-coverage ignore: ${describeIgnoredProjectError(entry.error, "the project's ")}`);
 }
 
 const handler: HookHandler = async (_stdin, args) => {
   const [command] = args;
   if (command === "status") return status();
-  if (command === "unignore") return updateIgnoreList((list, root) => withoutIgnored(list, root), "Unignored");
-  if (command === "ignore") {
-    const reason = argumentValue(args, "--reason");
-    if (reason === null || reason.trim() === "") {
-      return errorResult("lint-coverage ignore: --reason <why> is required — every ignored repository states why");
-    }
-    return updateIgnoreList((list, root) => withIgnored(list, root, reason), "Ignored");
-  }
-  return errorResult(USAGE);
+  if (command !== "ignore" && command !== "unignore") return errorResult(USAGE);
+  const reason = argumentValue(args, "--reason");
+  if (command === "ignore" && reason === null) return errorResult(REASON_REQUIRED);
+  const project = projectAt(process.cwd());
+  if (project === null) return errorResult("lint-coverage: not in a project — there is nothing to ignore here");
+  return command === "ignore"
+    ? ignore(project.root, reason ?? "")
+    : updateIgnoreList(project.root, withoutIgnored, "Unignored");
 };
 
 export default handler;

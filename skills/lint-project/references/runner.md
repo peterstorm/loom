@@ -47,7 +47,7 @@ for every rule at once.
 | `--tier=full` | All rules (default) |
 | `--tier=immediate` | The edit-time tier only: regex rules, the import-boundary pair, `switch-totality`, `no-duplicate-block`, `no-wire-cast` |
 | `--summary` | Counts by rule |
-| `--json` | `{ violations, errorCount, staleEntries, coverageGaps, excluded }` |
+| `--json` | `{ violations, errorCount, staleEntries, coverageGaps, coverage, excluded }`; `coverage` is `set-up` or `no-setup` |
 | `--no-fix-hints` | Hide fix hints |
 | `--no-baseline-check` | Skip the staleness pass |
 | `--write-baseline` | Record pre-existing totality sites, copied blocks and wire casts in `config.json`, then exit |
@@ -68,7 +68,8 @@ that a set-up project has neither configured nor declined in `config.json`.
 Each gap line names the family, what it checks and both ways to decide it:
 configure it, or add `{ "key": "<family>", "reason": "<why>" }` to the
 `declined` list. An empty `boundaries` or `pureModules` list checks nothing,
-so it is a gap too. The immediate tier does not judge coverage.
+so it is a gap too, and declining it is accepted. The immediate tier does not
+judge coverage.
 
 Exit 2 when the run cannot be trusted at all: a `config.json` the strict parser
 refuses (an unknown key is refused by name), a project that carries both
@@ -87,10 +88,11 @@ whole repository under its rules. Every path in `config.json` (module
 prefixes, baseline keys, exclusions) is relative to that root.
 
 One lookup answers it everywhere (`findProjectRoot` in
-`engine/src/linter/programmatic/config.ts`), asked from a different place by
-each caller: this runner and `helper validate-lint-rules` ask from the working
-directory; Claude Code's edit hook and Pi's post-edit lint ask from the edited
-file's directory. A file is therefore linted under its own project's rules
+`engine/src/linter/project-root.ts`; the engine's shell reads it through
+`projectAt` and `editedFileRulesDir` in `engine/src/config.ts`), asked from a
+different place by each caller: this runner and `helper validate-lint-rules`
+ask from the working directory; Claude Code's edit hook and Pi's post-edit
+lint ask from the edited file's directory. A file is therefore linted under its own project's rules
 wherever the session's shell happens to be — in `engine/`, in another
 checkout, or in the main checkout while editing a worktree's file. The Wave
 Gate lint reads the rules at the repository root.

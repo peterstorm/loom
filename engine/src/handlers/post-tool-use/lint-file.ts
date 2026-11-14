@@ -16,8 +16,7 @@
 import type { HookHandler } from "../../types";
 import { allowResult, blockResult, passthroughResult } from "../../types";
 import { lintFile, formatOutput, formatBlockMessage } from "../../linter/index";
-import { dirname, resolve } from "node:path";
-import { DEFAULT_RULES_DIR, enclosingProjectRulesDir } from "../../config";
+import { DEFAULT_RULES_DIR, editedFileRulesDir } from "../../config";
 import { editedFilePath } from "../../core/tool-vocabulary";
 import { isRecord } from "../../core/plain-record";
 import { match } from "ts-pattern";
@@ -70,7 +69,7 @@ const handler: HookHandler = async (stdin) => {
     // Invoke linter with immediate tier (fast, PostEdit rules only), against
     // the rules of the project the edited file sits in — found from the file,
     // never from this process's cwd, which is wherever the session's shell is
-    const result = lintFile(filePath, "immediate", DEFAULT_RULES_DIR, enclosingProjectRulesDir(dirname(resolve(filePath))));
+    const result = lintFile(filePath, "immediate", DEFAULT_RULES_DIR, editedFileRulesDir(filePath));
 
     // Map LintResult to HookResult
     return match(result)

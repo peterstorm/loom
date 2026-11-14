@@ -1,13 +1,19 @@
 /**
- * `findProjectRoot`: which project a directory sits in. The edit hooks ask it
- * from the edited file's directory and `lint-project` from the working
- * directory, so the answer must not depend on where the asking process runs.
+ * `findProjectRoot` (`linter/project-root.ts`): which project a directory sits
+ * in. The edit hooks ask it from the edited file's directory and `lint-project`
+ * from the working directory, so the answer must not depend on where the asking
+ * process runs. `projectAt` and `editedFileRulesDir` (`config.ts`) are the
+ * engine's shell over it, with the real filesystem.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import fc from "fast-check";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { CLAUDE_PROJECT_RULES_DIR, PI_PROJECT_RULES_DIR, findProjectRoot } from "../../../src/linter/programmatic/config";
+import { CLAUDE_PROJECT_RULES_DIR, PI_PROJECT_RULES_DIR } from "../../src/linter/programmatic/config";
+import { findProjectRoot } from "../../src/linter/project-root";
+import { editedFileRulesDir, projectAt } from "../../src/config";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 
 /** A presence probe over a fixed set of absolute paths. */
 const presentAmong = (paths: readonly string[]) => (path: string): boolean => paths.includes(path);
@@ -95,5 +101,35 @@ describe("findProjectRoot: invariants", () => {
       const nearer = directories.filter((dir) => dir.length > (root ?? "").length);
       expect(nearer.some(holdsLayout)).toBe(false);
     }));
+  });
+});
+
+describe("projectAt and editedFileRulesDir: the engine's one lookup, on disk", () => {
+  let base: string;
+  beforeAll(() => {
+    base = canonicalTempDir("project-at-");
+    mkdirSync(join(base, "ruled", CLAUDE_PROJECT_RULES_DIR), { recursive: true });
+    mkdirSync(join(base, "ruled", "engine", "src"), { recursive: true });
+    mkdirSync(join(base, "bare", ".git"), { recursive: true });
+    mkdirSync(join(base, "bare", "src"), { recursive: true });
+  });
+  afterAll(() => rmSync(base, { recursive: true, force: true }));
+
+  it("names the root and its rules directory from a subdirectory", () => {
+    expect(projectAt(join(base, "ruled", "engine", "src"))).toEqual({
+      root: join(base, "ruled"),
+      rulesDir: join(base, "ruled", CLAUDE_PROJECT_RULES_DIR),
+    });
+  });
+
+  it("a repository without a rules layout is a project with no rules directory", () => {
+    expect(projectAt(join(base, "bare", "src"))).toEqual({ root: join(base, "bare"), rulesDir: null });
+  });
+
+  it("an edited file's rules come from the file's own project, whatever the base directory", () => {
+    const rules = join(base, "ruled", CLAUDE_PROJECT_RULES_DIR);
+    expect(editedFileRulesDir(join(base, "ruled", "engine", "src", "a.ts"), join(base, "bare"))).toBe(rules);
+    expect(editedFileRulesDir("engine/src/a.ts", join(base, "ruled"))).toBe(rules);
+    expect(editedFileRulesDir("src/a.ts", join(base, "bare"))).toBeNull();
   });
 });

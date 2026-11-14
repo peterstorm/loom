@@ -341,7 +341,7 @@ It is **advisory and fail-open**: it never blocks an edit. Claude Code receives 
 
 ### Lint coverage at session start
 
-Every session starts by checking the lint coverage of the project it opens in ([ADR-0075](adr/ADR-0075-every-rule-family-is-on-or-declined.md)). When the project has no Loom lint setup, or an opt-in rule family (`boundaries`, `pureModules`, `requireGovernance`, `docReferences`) that is neither configured nor declined, the user sees one line and the model gets the details with the commands to act on them: `lint-project --init` to turn on what the layout allows, a `declined` entry for a family left off on purpose, or the ignore list for a repository the user does not want Loom in.
+A fresh session checks the lint coverage of the project it opens in: a Claude Code session on `startup` or `clear` (not on `resume` or `compact`), and every Pi session start ([ADR-0075](adr/ADR-0075-every-rule-family-is-on-or-declined.md)). When the project has no Loom lint setup, or an opt-in rule family (`boundaries`, `pureModules`, `requireGovernance`, `docReferences`) that is neither configured nor declined, the user sees one line and the model gets the details with the commands to act on them: `lint-project --init` to turn on what the layout allows, a `declined` entry for a family left off on purpose, or the ignore list for a repository the user does not want Loom in.
 
 It never blocks and never writes to the repository. A config the linter refuses, or an ignore list that does not parse, is said in the same place. Claude Code runs it as the `lint-coverage.sh` SessionStart hook; Pi tells the operator at session start and the model with the first prompt. A Pi subagent stays quiet.
 
