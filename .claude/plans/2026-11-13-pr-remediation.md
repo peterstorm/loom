@@ -98,5 +98,11 @@ Done after PR #167 merged, at the operator's request. None of it is remediation 
 
 ### Not done
 
-- The local Bun (1.4.4) still differs from `.bun-version` (1.4.2); `tests/verification-command.test.ts` fails locally for that reason only.
-- Smoke tests were not run. The markdown and deleted files of PR #167 remain unreviewed.
+- No registered review has run over this branch (PR #170).
+- The markdown and deleted files of PR #167 remain unreviewed.
+- The 21 test files migrated to the shared readers were written by subagents and not reviewed line by line.
+
+### Since resolved
+
+- `.bun-version` pins 1.4.4, matching the local Bun; `tests/verification-command.test.ts` passes.
+- `npm run test:smoke` passes (2026-11-14, Bun 1.4.4).
