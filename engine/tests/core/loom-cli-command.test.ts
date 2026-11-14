@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseLoomPackageRoot, type LoomCommands } from "../../src/core/loom-cli-command";
-import { SECURITY_LENSES } from "../../src/core/security-lens-select";
+import { SECURITY_LENSES } from "../../src/core/security-lenses";
 import { LOOM_COMMANDS, LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { aPackageRoot, loomCommandsAt } from "../fixtures/loom-package-root";
 

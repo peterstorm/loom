@@ -462,8 +462,9 @@ describe("loadRules", () => {
     });
 
     it.each([
-      [[".test.ts", ""], "excludePatterns[1] is empty — it would exclude nothing"],
+      [[".test.ts", ""], "excludePatterns[1] is empty — name a directory with a trailing '/'"],
       [["/"], "excludePatterns[0] '/' names no directory"],
+      [["apps/", "src//infra/"], "excludePatterns[1] 'src//infra/' holds an empty, '.' or '..' segment"],
       [["**/*.test.ts"], "excludePatterns[0] '**/*.test.ts' is a glob"],
       [[".test.ts", 7], "'excludePatterns' must be an array of strings"],
       [".test.ts", "'excludePatterns' must be an array of strings"],

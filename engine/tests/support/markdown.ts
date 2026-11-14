@@ -4,11 +4,10 @@
  *
  * A suite that binds a document to the code reads a structure the document
  * owns (the substitution table of `commands/loom.md`, the Status section of an
- * ADR, the operations table of `docs/security-audit.md`). Each suite used to
- * parse that structure by hand, each with its own edge cases, and a missing
- * heading or column surfaced as an empty result or a `-1` index. Here every
- * reader returns the structure or a `MarkdownError` that names the source, the
- * heading, column or row it looked for, and the line it is about.
+ * ADR, the operations table of `docs/security-audit.md`) through this module
+ * and no reader of its own. Every reader returns the structure or a
+ * `MarkdownError` that names the source, the heading, column or row it looked
+ * for, and the line it is about — never an empty result or a `-1` index.
  *
  * Edge cases this module owns, so no suite restates them:
  * - fenced code (``` or ~~~, any info string, indented under a list item):

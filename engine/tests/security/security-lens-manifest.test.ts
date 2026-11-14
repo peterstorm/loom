@@ -12,7 +12,7 @@
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { SECURITY_LENSES } from "../../src/core/security-lens-select";
+import { SECURITY_LENSES } from "../../src/core/security-lenses";
 import { verifyVendoredManifest } from "./vendored-manifest";
 
 const LENS_DIR = join(import.meta.dirname, "..", "..", "..", "references", "security-lenses");

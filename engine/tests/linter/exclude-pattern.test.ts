@@ -12,8 +12,10 @@ import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import {
   describeExcludePatternError,
+  describeExcludePatternListError,
   matchesAnyExcludePattern,
   parseExcludePattern,
+  parseExcludePatternList,
 } from "../../src/linter/exclude-pattern";
 import { excludePatterns } from "./exclude-patterns";
 
@@ -53,22 +55,68 @@ describe("parseExcludePattern", () => {
     expect(parseExcludePattern(raw)).toEqual({ ok: false, error: { kind: "glob", raw } });
   });
 
-  it("describes each refusal in the author's terms", () => {
-    expect(describeExcludePatternError({ kind: "empty" })).toBe("is empty — it would exclude nothing");
-    expect(describeExcludePatternError({ kind: "unnamed-directory", raw: "/" }))
-      .toBe("'/' names no directory — it would exclude nothing");
-    expect(describeExcludePatternError({ kind: "glob", raw: "*.java" }))
-      .toBe("'*.java' is a glob — name a directory with a trailing '/' (every file beneath it) or a file suffix");
+  // A linted path is resolved: it holds no empty, `.` or `..` segment, so an
+  // entry naming one could never match. A suffix's first segment is the tail of
+  // a name, so only the segments after it are held to this.
+  it.each([
+    "./src/", "../x/", "src//infra/", "src/./infra/", "src/../infra/", "//src/", "\\\\src\\",
+    "src//x.ts", "src/./x.ts", "x/../y.ts", "x/..",
+  ])("refuses %p: a segment no linted path holds", (raw) => {
+    expect(parseExcludePattern(raw)).toEqual({ ok: false, error: { kind: "impossible-segment", raw } });
   });
 
+  it.each(["/lint.ts", "b./x.ts", "..test.ts", "src/.github/", ".config/"])("accepts %p: its segments are names a path can hold", (raw) => {
+    expect(parseExcludePattern(raw).ok).toBe(true);
+  });
+
+  it("describes each refusal in the author's terms", () => {
+    expect(describeExcludePatternError({ kind: "empty" }))
+      .toBe("is empty — name a directory with a trailing '/' (every file beneath it) or a file suffix");
+    expect(describeExcludePatternError({ kind: "unnamed-directory", raw: "/" }))
+      .toBe("'/' names no directory — name one with a trailing '/', e.g. 'src/infra/'");
+    expect(describeExcludePatternError({ kind: "glob", raw: "*.java" }))
+      .toBe("'*.java' is a glob — name a directory with a trailing '/' (every file beneath it) or a file suffix");
+    expect(describeExcludePatternError({ kind: "impossible-segment", raw: "src//infra/" }))
+      .toBe("'src//infra/' holds an empty, '.' or '..' segment, which no linted path has — write it as the path reads beneath the project root, e.g. 'src/infra/'");
+  });
+
+  /** An accepted entry excludes the project file built to carry it; a refused one has nothing to show. */
+  const excludesItsWitness = (raw: string): void => {
+    const parsed = parseExcludePattern(raw);
+    if (!parsed.ok) return;
+    const pattern = parsed.value;
+    const witness = pattern.kind === "suffix" ? `src/x${pattern.suffix}` : `${pattern.segments.slice(1)}x.ts`;
+    expect(matchesAnyExcludePattern(witness, [pattern], ROOT)).toBe(true);
+  };
+
   it("every entry is either refused or parsed to a pattern that can match some file", () => {
-    fc.assert(fc.property(fc.string(), (raw) => {
-      const parsed = parseExcludePattern(raw);
-      if (!parsed.ok) return;
-      const pattern = parsed.value;
-      const witness = pattern.kind === "suffix" ? `src/x${pattern.suffix}` : `${pattern.segments.slice(1)}x.ts`;
-      expect(matchesAnyExcludePattern(witness, [pattern], ROOT)).toBe(true);
-    }));
+    fc.assert(fc.property(fc.string(), excludesItsWitness));
+  });
+
+  it("finds a witness for every entry spelled from path characters, slashes included", () => {
+    // `fc.string()` rarely spells a slash run; this alphabet does, so the
+    // property above meets `//x/`, `a//`, `./` and their neighbours every run.
+    const entry = fc.array(fc.constantFrom("a", ".", "/", "\\"), { minLength: 1, maxLength: 8 }).map((chars) => chars.join(""));
+    fc.assert(fc.property(entry, excludesItsWitness));
+  });
+});
+
+describe("parseExcludePatternList", () => {
+  it("parses every entry, in order", () => {
+    expect(parseExcludePatternList([".test.ts", "apps/"])).toEqual({
+      ok: true,
+      value: [{ kind: "suffix", suffix: ".test.ts" }, { kind: "directory", segments: "/apps/" }],
+    });
+    expect(parseExcludePatternList([])).toEqual({ ok: true, value: [] });
+  });
+
+  it("refuses the list at its first refused entry, by position", () => {
+    expect(parseExcludePatternList(["apps/", "", "*.ts"])).toEqual({ ok: false, error: { index: 1, error: { kind: "empty" } } });
+  });
+
+  it("names the refused entry under the list's own key", () => {
+    expect(describeExcludePatternListError("excludeFromMaxLines", { index: 2, error: { kind: "glob", raw: "*.ts" } }))
+      .toBe("excludeFromMaxLines[2] '*.ts' is a glob — name a directory with a trailing '/' (every file beneath it) or a file suffix");
   });
 });
 
@@ -95,7 +143,7 @@ describe("a file-suffix pattern", () => {
     expect(excludes("C:\\work\\shop\\scripts\\lint-project.ts", "scripts/lint-project.ts", "C:\\work\\shop")).toBe(true);
   });
 
-  it("never depended on where the checkout lives: it matches with no project, and outside the root", () => {
+  it("matches wherever the checkout lives: with no project, and outside the root", () => {
     expect(excludes("/work/shop/src/order.test.ts", ".test.ts", null)).toBe(true);
     expect(excludes("/srv/other/src/order.test.ts", ".test.ts")).toBe(true);
   });
@@ -161,7 +209,7 @@ describe("a directory pattern is matched inside the project", () => {
     expect(excludes("C:\\apps\\shop\\apps\\demo\\main.ts", "apps/", "C:\\apps\\shop")).toBe(true);
   });
 
-  it("excludes nothing when no project owns the rules: the frame is unknown, so the rule reads the file", () => {
+  it("excludes no absolute path when no project owns the rules: the frame is unknown, so the rule reads the file", () => {
     expect(excludes(`${UNDER_APPS}/src/order.ts`, "apps/", null)).toBe(false);
     expect(excludes(`${UNDER_APPS}/apps/demo/main.ts`, "apps/", null)).toBe(false);
   });

@@ -41,8 +41,9 @@ const DEADLINE_CHECK_INTERVAL = 100;
  * @param checkDeadline - Injected deadline checker (throws if time exceeded)
  * @param projectRoot - Root of the project the rules belong to: the frame
  *   `excludePatterns` are matched in. Null when no project owns the rules; a
- *   directory pattern then excludes nothing. Required, so a caller cannot
- *   leave the frame out by forgetting it.
+ *   directory pattern then excludes no absolute path (a relative path is
+ *   still read as project-relative). Required, so a caller cannot leave the
+ *   frame out by forgetting it.
  * @returns Aggregated Violation[] (may be empty)
  * @throws Error on timeout or handler exception (fail-closed)
  */

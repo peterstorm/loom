@@ -3,11 +3,14 @@
  * and parsed by the production parser — so a test names `"apps/"` and gets the
  * value a loaded rule would hold.
  */
-import { describeExcludePatternError, parseExcludePattern, type ExcludePattern } from "../../src/linter/exclude-pattern";
+import {
+  describeExcludePatternListError,
+  parseExcludePatternList,
+  type ExcludePattern,
+} from "../../src/linter/exclude-pattern";
 
-export const excludePatterns = (...entries: readonly string[]): readonly ExcludePattern[] =>
-  entries.map((entry) => {
-    const parsed = parseExcludePattern(entry);
-    if (!parsed.ok) throw new Error(`test pattern ${describeExcludePatternError(parsed.error)}`);
-    return parsed.value;
-  });
+export const excludePatterns = (...entries: readonly string[]): readonly ExcludePattern[] => {
+  const parsed = parseExcludePatternList(entries);
+  if (!parsed.ok) throw new Error(`test ${describeExcludePatternListError("patterns", parsed.error)}`);
+  return parsed.value;
+};

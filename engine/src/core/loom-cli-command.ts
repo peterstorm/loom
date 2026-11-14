@@ -22,7 +22,7 @@
 
 import type { SECURITY_VERIFICATION_PROGRAM } from "./orchestration-contract/programs";
 import { failure, success, type DomainResult } from "./orchestration-contract/identity";
-import type { SecurityLens } from "./security-lens-select";
+import type { SecurityLens } from "./security-lenses";
 import { quoteShellArgument } from "./shell-quoting";
 
 declare const loomPackageRoot: unique symbol;

@@ -89,8 +89,8 @@ describe("tablesOf", () => {
 
 describe("tableWithColumns and rowWhere", () => {
   // A template named in prose and in an unrelated table, and declared in the
-  // one table with a Variables column — the case a first-match search on the
-  // file name used to take as its declaration row.
+  // one table with a Variables column: a first-match search on the file name
+  // would take the unrelated row as its declaration.
   const contract = doc(
     "Spawn `phase-x.md` after the interview.",
     "",

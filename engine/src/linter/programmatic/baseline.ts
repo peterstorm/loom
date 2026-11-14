@@ -70,9 +70,14 @@ export const isAbsolutePath = (path: string): boolean => path.startsWith("/") ||
 export const projectRelative = (filePath: string, projectRoot: string | null): string => {
   const normalized = filePath.replace(/\\/g, "/");
   if (projectRoot === null || !isAbsolutePath(normalized)) return normalized;
-  const root = projectRoot.replace(/\\/g, "/").replace(/\/+$/, "");
+  const root = rootSpelling(projectRoot);
   return normalized.startsWith(`${root}/`) ? normalized.slice(root.length + 1) : normalized;
 };
+
+/** A project root as paths beneath it begin: forward-slashed, no trailing
+ *  separator. The one spelling `projectRelative` strips and `spelledUnderRoot`
+ *  builds on, so a path one of them places under the root the other agrees is. */
+const rootSpelling = (root: string): string => root.replace(/\\/g, "/").replace(/\/+$/, "");
 
 /**
  * A lint target spelled beneath the project root, when it is in the project
@@ -90,7 +95,7 @@ export const spelledUnderRoot = (
   projectRoot: string,
 ): string | null => {
   const inRealRoot = projectRelative(file, root);
-  return isAbsolutePath(inRealRoot) ? null : `${projectRoot.replace(/\\/g, "/").replace(/\/+$/, "")}/${inRealRoot}`;
+  return isAbsolutePath(inRealRoot) ? null : `${rootSpelling(projectRoot)}/${inRealRoot}`;
 };
 
 /** The key form every rule uses: the site's repo-relative path, then the thing

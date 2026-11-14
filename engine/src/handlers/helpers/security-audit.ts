@@ -470,7 +470,7 @@ function writeFreshRun(
     [FILES.lenses, json({
       selected: selection.included.map((entry) => ({ lens: entry.lens, score: entry.score, reasons: entry.reasons })),
       excluded: selection.excluded,
-      rendered: renderLensSelection(LOOM_COMMANDS.securityLens, selection),
+      rendered: renderLensSelection(LOOM_COMMANDS, selection),
     })],
     [FILES.run, json(metadata)],
   ], reset);
@@ -579,7 +579,7 @@ function startReport(
     `coverage units: ${summary.total} (planned ${summary.byStatus.planned})`,
     `lenses: ${started.metadata.selectedCompanions.join(", ") || "none"}`,
     "",
-    renderLensSelection(LOOM_COMMANDS.securityLens, started.selection),
+    renderLensSelection(LOOM_COMMANDS, started.selection),
   ].join("\n");
 }
 

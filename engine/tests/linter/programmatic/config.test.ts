@@ -242,9 +242,10 @@ describe("scoping config: exclusions, purity roots and shells, governance", () =
   it.each([
     [{ excludeFromMaxLines: ["Test.java", "/"] }, "excludeFromMaxLines[1] '/' names no directory"],
     [{ excludeFromMaxLines: ["**/*.test.ts"] }, "excludeFromMaxLines[0] '**/*.test.ts' is a glob"],
+    [{ excludeFromMaxLines: ["Test.java", "./src/"] }, "excludeFromMaxLines[1] './src/' holds an empty, '.' or '..' segment"],
     [{ excludeFromMaxLines: [""] }, "non-empty strings"],
     [{ excludeFromMaxLines: "Test.java" }, "must be an array"],
-  ])("refuses a max-lines exclusion that could match nothing: %j", (json, message) => {
+  ])("refuses a max-lines exclusion that would not mean what its author wrote: %j", (json, message) => {
     expect(parse(json)).toMatchObject({ ok: false, error: expect.stringContaining(message) });
   });
 

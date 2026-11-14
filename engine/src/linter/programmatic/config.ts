@@ -16,7 +16,7 @@
 
 import { resolve } from "node:path";
 import { DEFAULT_TEST_FILE_SUFFIXES, isTestFileBySuffixes } from "../../core/test-file-classification";
-import { describeExcludePatternError, parseExcludePattern, type ExcludePattern } from "../exclude-pattern";
+import { describeExcludePatternListError, parseExcludePatternList, type ExcludePattern } from "../exclude-pattern";
 import { isPositiveInt, type PositiveInt } from "../positive-int";
 import { parseBaselineKey, type Baseline } from "./baseline";
 import { underPrefix, type BoundaryRule, type CapabilityGrant } from "./no-cross-boundary-imports";
@@ -231,12 +231,12 @@ function parseOptionalBaseline(raw: unknown, filePath: string, key: string): Bas
     parseBaselineKey(entry) ?? refuse(`${filePath}: ${key}[${index}] '${entry}' must be 'path::key' — a project-relative path, '::', then what the rule flagged there`));
 }
 
-/** A rule's exclusion list: an entry that could match nothing is refused by name. */
-function parseOptionalExcludePatterns(raw: unknown, filePath: string, key: string): ExcludePattern[] | undefined {
-  return parseOptionalStringArray(raw, filePath, key)?.map((entry, index) => {
-    const parsed = parseExcludePattern(entry);
-    return parsed.ok ? parsed.value : refuse(`${filePath}: ${key}[${index}] ${describeExcludePatternError(parsed.error)}`);
-  });
+/** A rule's exclusion list: an entry that would not mean what its author wrote is refused by name. */
+function parseOptionalExcludePatterns(raw: unknown, filePath: string, key: string): readonly ExcludePattern[] | undefined {
+  const entries = parseOptionalStringArray(raw, filePath, key);
+  if (entries === undefined) return undefined;
+  const parsed = parseExcludePatternList(entries);
+  return parsed.ok ? parsed.value : refuse(`${filePath}: ${describeExcludePatternListError(key, parsed.error)}`);
 }
 
 /**

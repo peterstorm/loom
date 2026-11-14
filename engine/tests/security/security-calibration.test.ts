@@ -52,7 +52,8 @@ import {
 } from "../../src/core/security-coverage";
 import { SEVERITY_SCORES, parseSecurityFindings, type SecurityFinding, type SeverityScore } from "../../src/core/security-findings";
 import { parseVerificationVerdicts } from "../../src/core/security-adjudication";
-import { SECURITY_LENSES, selectSecurityLenses, type SecurityLens, type StackSignals } from "../../src/core/security-lens-select";
+import { selectSecurityLenses, type StackSignals } from "../../src/core/security-lens-select";
+import { SECURITY_LENSES, type SecurityLens } from "../../src/core/security-lenses";
 import { securityDisposition } from "../../src/core/security-disposition";
 import { derivePublication } from "../../src/core/security-reports";
 import { BOOLEAN_SIGNALS, HUNTER_AGENT, HUNTER_ENVELOPE, aConfirmedFinding, aRefs, aRunMetadata, aSeed, aSignals, aUnitResult, aVerdict, ok } from "./fixtures";
