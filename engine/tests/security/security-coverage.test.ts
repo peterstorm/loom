@@ -50,8 +50,8 @@ import {
 } from "../../src/core/security-coverage";
 import type { DomainResult } from "../../src/core/orchestration-contract/identity";
 import { AGENT_POLICIES } from "../../src/core/model-profiles";
-import { isSecurityAgentId, SECURITY_AUDIT_LIMITS } from "../../src/core/security-audit-contract";
-import { HUNTER_ENVELOPE, aConfirmedFinding, aRefs, aSeed, aUnitResult, ok } from "./fixtures";
+import { isSecurityAgentId, SECURITY_AUDIT_LIMITS, type SecurityAgentId } from "../../src/core/security-audit-contract";
+import { HUNTER_AGENT, HUNTER_ENVELOPE, aConfirmedFinding, anAgentId, aRefs, aSeed, aUnitResult, ok } from "./fixtures";
 
 const require = createRequire(import.meta.url);
 const FIXTURES = join(import.meta.dirname, "..", "fixtures", "security", "upstream");
@@ -94,7 +94,7 @@ const seed = (overrides: Partial<Parameters<typeof seedCoverageUnit>[0]> = {}) =
     ...overrides,
   }));
 
-const evidence = (agentId: string, fingerprint: string) => ({
+const evidence = (agentId: SecurityAgentId, fingerprint: string) => ({
   agentId,
   status: "candidate" as const,
   reviewedPaths: ["src/reports/controller.ts"],
@@ -113,12 +113,12 @@ const evidence = (agentId: string, fingerprint: string) => ({
 
 /** The one catalog hunter. A unit's first attempt runs under this name; a
  *  reassigned one under the owner id the ledger mints from it. */
-const HUNTER = "security-hunter-agent";
+const HUNTER = HUNTER_AGENT;
 
 const assigned = (ledger: CoverageLedger, coverageId: string, agentId: string, wave = 1): CoverageLedger =>
   ok(assignUnits(ledger, [{ coverageId, agentId, wave }])).ledger;
 
-const settled = (ledger: CoverageLedger, coverageId: string, agentId: string, fingerprint: string, wave = 1): CoverageLedger =>
+const settled = (ledger: CoverageLedger, coverageId: string, agentId: SecurityAgentId, fingerprint: string, wave = 1): CoverageLedger =>
   ok(recordUnitResult(ledger, { coverageId, ...evidence(agentId, fingerprint), wave }));
 
 describe("coverage ledger: TS port vs upstream validator", () => {
@@ -144,7 +144,7 @@ describe("coverage ledger: TS port vs upstream validator", () => {
     expect(oursValid(reassigned.ledger)).toBe(true);
     expect(upstreamValid(reassigned.ledger)).toBe(true);
 
-    const secondPass = settled(assigned(reassigned.ledger, unit.coverage_id, HUNTER, 2), unit.coverage_id, `${HUNTER}--2`, "tenant-scope/cache-key", 2);
+    const secondPass = settled(assigned(reassigned.ledger, unit.coverage_id, HUNTER, 2), unit.coverage_id, anAgentId(`${HUNTER}--2`), "tenant-scope/cache-key", 2);
     expect(oursValid(secondPass)).toBe(true);
     expect(upstreamValid(secondPass)).toBe(true);
   });
@@ -221,7 +221,7 @@ describe("coverage ledger: state machine", () => {
 
     const wrongOwner = recordUnitResult(inFlight, {
       coverageId: unit.coverage_id,
-      agentId: `${HUNTER}--2`,
+      agentId: anAgentId(`${HUNTER}--2`),
       wave: 1,
       status: "covered",
       reviewedPaths: ["src/reports/controller.ts"],
@@ -269,14 +269,14 @@ describe("coverage ledger: state machine", () => {
     // The prior owner cannot settle the new attempt; the fresh one can.
     const stale = recordUnitResult(reassigned.ledger, { coverageId: unit.coverage_id, ...evidence(HUNTER, "tenant-scope/cache-key"), wave: 2 });
     expect(stale.ok).toBe(false);
-    const rehunted = settled(reassigned.ledger, unit.coverage_id, `${HUNTER}--2`, "tenant-scope/cache-key", 2);
+    const rehunted = settled(reassigned.ledger, unit.coverage_id, anAgentId(`${HUNTER}--2`), "tenant-scope/cache-key", 2);
     expect(validateLedger(rehunted)).toEqual([]);
     expect(upstreamValid(rehunted)).toBe(true);
   });
 
   it("mints the lowest owner id no archived attempt has spent", () => {
     const unit = seed();
-    const archived = (wave: number, agent_id: string) => ({
+    const archived = (wave: number, agent_id: SecurityAgentId) => ({
       wave,
       status: "covered" as const,
       agent_id,
@@ -288,7 +288,7 @@ describe("coverage ledger: state machine", () => {
     });
     // Attempts spent the bare name and `--3` (an operator-chosen gap): the next
     // fresh owner is `--4`, never a name an attempt already used.
-    const third = { ...unit, wave: 3, attempts: [archived(1, HUNTER), archived(2, `${HUNTER}--3`)] };
+    const third = { ...unit, wave: 3, attempts: [archived(1, HUNTER), archived(2, anAgentId(`${HUNTER}--3`))] };
     expect(validateLedger([third])).toEqual([]);
     const result = ok(assignUnits([third], [{ coverageId: unit.coverage_id, agentId: HUNTER }]));
     expect(result.assigned[0].ownerId).toBe(`${HUNTER}--4`);
@@ -459,6 +459,30 @@ describe("parseLedger returns its own proof, never the caller's array", () => {
     const parsed = ok(parseLedger(JSON.parse(JSON.stringify([unit]))));
     const inFlight = assigned(parsed, unit.coverage_id, HUNTER);
     expect(validateLedger(settled(inFlight, unit.coverage_id, HUNTER, "tenant-scope/cache-key"))).toEqual([]);
+  });
+
+  it("returns only branded owner ids: a stored owner the grammar refuses is named, on the unit, an attempt or a check", () => {
+    // The ledger types every owner as a SecurityAgentId; this is the proof the
+    // parser's narrowing rests on.
+    const unit = seed();
+    const first = settled(assigned([unit], unit.coverage_id, HUNTER), unit.coverage_id, HUNTER, "tenant-scope/cache-key");
+    const archived = ok(mergeCritic(first, { missingUnits: [], reassignIds: [unit.coverage_id], resolvedPriorLeads: [], stop: false },
+      { wave: 2, reassignmentReasons: { [unit.coverage_id]: "critic: again" } })).ledger;
+    const second = settled(assigned(archived, unit.coverage_id, HUNTER, 2), unit.coverage_id, anAgentId(`${HUNTER}--2`), "tenant-scope/cache-key", 2);
+    const stored = (): { agent_id: string; attempts: { agent_id: string }[]; local_checks: { agent_id: string }[] }[] =>
+      JSON.parse(JSON.stringify(second));
+    expect(parseLedger(stored()).ok).toBe(true);
+
+    const unsafe = "x; rm -rf ~";
+    const onUnit = stored();
+    onUnit[0]!.agent_id = unsafe;
+    const onAttempt = stored();
+    onAttempt[0]!.attempts[0]!.agent_id = unsafe;
+    const onCheck = stored();
+    onCheck[0]!.local_checks[0]!.agent_id = unsafe;
+    expect(refusedPaths(parseLedger(onUnit))).toContain("$[0].agent_id");
+    expect(refusedPaths(parseLedger(onAttempt))).toContain("$[0].attempts[0].agent_id");
+    expect(refusedPaths(parseLedger(onCheck))).toContain("$[0].local_checks[0].agent_id");
   });
 });
 
@@ -687,7 +711,7 @@ describe("parseCriticResult parses each proposal's refs", () => {
 
 describe("a defect is reported once, wherever it sits", () => {
   const UNSAFE = "../etc/passwd";
-  const unsafeEvidence = (agent_id: string) => ({
+  const unsafeEvidence = (agent_id: SecurityAgentId) => ({
     reviewed_paths: [UNSAFE],
     local_checks: [{ ...evidence(agent_id, "x").checks[0], reviewed_paths: [UNSAFE] }],
   });

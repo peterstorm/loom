@@ -25,6 +25,7 @@ import { parseSecurityFindings, type SecurityFinding } from "../../src/core/secu
 import { derivePublication, type RunDocuments } from "../../src/core/security-reports";
 import {
   HUNTER_AGENT as HUNTER,
+  anAgentId,
   aConfirmedFinding,
   aNeedsValidationFinding,
   aRejectedFinding,
@@ -96,7 +97,7 @@ describe("a unit settles once per wave (INV-S2)", () => {
   });
 
   it("refuses a settlement by a sibling hunter, a stale wave, or an unknown cell", () => {
-    expect(recordUnitResult(anAssignedLedger(), aResult({ agentId: "security-hunter-agent-b" })).ok).toBe(false);
+    expect(recordUnitResult(anAssignedLedger(), aResult({ agentId: anAgentId("security-hunter-agent-b") })).ok).toBe(false);
     expect(recordUnitResult(anAssignedLedger(), aResult({ wave: 2 })).ok).toBe(false);
     expect(recordUnitResult(anAssignedLedger(), aResult({ coverageId: "no::such::cell::x" })).ok).toBe(false);
   });

@@ -17,15 +17,10 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { parseLoomPackageRoot, type LoomCommands } from "../../src/core/loom-cli-command";
 import { isSecurityAgentId, SECURITY_AGENT_ID_PATTERN, type SecurityAgentId } from "../../src/core/security-audit-contract";
+import { anAgentId } from "../security/fixtures";
 import { SECURITY_LENSES } from "../../src/core/security-lenses";
 import { LOOM_COMMANDS, LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { aPackageRoot, loomCommandsAt } from "../fixtures/loom-package-root";
-
-/** An owner id through the grammar's one proof, as `assign` mints it; throws on a refusal. */
-const anOwner = (raw: string): SecurityAgentId => {
-  if (!isSecurityAgentId(raw)) throw new Error(`the agent-id grammar refused ${JSON.stringify(raw)}`);
-  return raw;
-};
 
 const PLAIN = loomCommandsAt("/opt/loom");
 const AWKWARD_ROOT = "/home/o'brien/my plugins/loom";
@@ -37,7 +32,7 @@ describe("every spelling that names the package", () => {
   });
 
   it("auditNonce: how the parent obtains a receipt binding for one owner's artifact", () => {
-    expect(PLAIN.auditNonce("/runs/run 1", anOwner("security-hunter-agent--2"))).toBe(
+    expect(PLAIN.auditNonce("/runs/run 1", anAgentId("security-hunter-agent--2"))).toBe(
       "bun '/opt/loom/engine/src/cli.ts' helper security-audit nonce --out '/runs/run 1' " +
         "--artifact agents/security-hunter-agent--2/artifacts/<file>",
     );
@@ -120,7 +115,7 @@ describe("a root holding a space or a single quote", () => {
     // The compile-time pin (tsconfig includes tests/): a bare string carries no proof that it is one shell word.
     // @ts-expect-error the owner must be a SecurityAgentId
     PLAIN.auditNonce("/runs", "x; rm -rf ~");
-    expect(() => anOwner("x; rm -rf ~")).toThrow(/refused/);
+    expect(() => anAgentId("x; rm -rf ~")).toThrow(/refused/);
   });
 
   it("the CLI is quoted the one way sh reads back", () => {
