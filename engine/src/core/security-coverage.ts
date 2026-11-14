@@ -699,7 +699,9 @@ export function parseLedger(raw: unknown): DomainResult<CoverageLedger, Coverage
   if (!Array.isArray(copy)) return failure(invalid([wireViolation("ledger", "expected a top-level array")]));
   if (copy.length === 0) return failure(invalid([wireViolation("ledger", "a run always seeds at least one unit")]));
   // Narrowed only once `validateLedger` holds no violation: it checks every
-  // field the type claims, the owner ids (unit, attempt, check) included.
+  // field the type claims. The owner-id test derives every SecurityAgentId
+  // path of `CoverageLedger` and proves each refused: a new owner field fails
+  // to compile there until a case proves this check refuses it.
   const candidate: CoverageLedger = copy;
   const violations = validateLedger(candidate);
   return violations.length === 0 ? success(candidate) : failure(invalid(violations));

@@ -41,6 +41,7 @@ import {
   sortLedger,
   summarizeCoverage,
   validateLedger,
+  type Assignment,
   type CoverageCriticResult,
   type CoverageError,
   type CoverageLedger,
@@ -51,7 +52,7 @@ import {
 import type { DomainResult } from "../../src/core/orchestration-contract/identity";
 import { AGENT_POLICIES } from "../../src/core/model-profiles";
 import { isSecurityAgentId, SECURITY_AUDIT_LIMITS, type SecurityAgentId } from "../../src/core/security-audit-contract";
-import { HUNTER_AGENT, HUNTER_ENVELOPE, aConfirmedFinding, anAgentId, aRefs, aSeed, aUnitResult, ok } from "./fixtures";
+import { HUNTER_AGENT as HUNTER, HUNTER_ENVELOPE, aConfirmedFinding, anAgentId, aRefs, aSeed, aUnitResult, ok } from "./fixtures";
 
 const require = createRequire(import.meta.url);
 const FIXTURES = join(import.meta.dirname, "..", "fixtures", "security", "upstream");
@@ -111,11 +112,11 @@ const evidence = (agentId: SecurityAgentId, fingerprint: string) => ({
   fingerprints: [fingerprint],
 });
 
-/** The one catalog hunter. A unit's first attempt runs under this name; a
- *  reassigned one under the owner id the ledger mints from it. */
-const HUNTER = HUNTER_AGENT;
+/** The owner id the ledger mints for HUNTER's second attempt at a unit. */
+const HUNTER_2 = anAgentId(`${HUNTER}--2`);
 
-const assigned = (ledger: CoverageLedger, coverageId: string, agentId: string, wave = 1): CoverageLedger =>
+/** `agentId` is the unparsed catalog agent `assignUnits` itself parses. */
+const assigned = (ledger: CoverageLedger, coverageId: string, agentId: Assignment["agentId"], wave = 1): CoverageLedger =>
   ok(assignUnits(ledger, [{ coverageId, agentId, wave }])).ledger;
 
 const settled = (ledger: CoverageLedger, coverageId: string, agentId: SecurityAgentId, fingerprint: string, wave = 1): CoverageLedger =>
@@ -144,7 +145,7 @@ describe("coverage ledger: TS port vs upstream validator", () => {
     expect(oursValid(reassigned.ledger)).toBe(true);
     expect(upstreamValid(reassigned.ledger)).toBe(true);
 
-    const secondPass = settled(assigned(reassigned.ledger, unit.coverage_id, HUNTER, 2), unit.coverage_id, anAgentId(`${HUNTER}--2`), "tenant-scope/cache-key", 2);
+    const secondPass = settled(assigned(reassigned.ledger, unit.coverage_id, HUNTER, 2), unit.coverage_id, HUNTER_2, "tenant-scope/cache-key", 2);
     expect(oursValid(secondPass)).toBe(true);
     expect(upstreamValid(secondPass)).toBe(true);
   });
@@ -221,7 +222,7 @@ describe("coverage ledger: state machine", () => {
 
     const wrongOwner = recordUnitResult(inFlight, {
       coverageId: unit.coverage_id,
-      agentId: anAgentId(`${HUNTER}--2`),
+      agentId: HUNTER_2,
       wave: 1,
       status: "covered",
       reviewedPaths: ["src/reports/controller.ts"],
@@ -262,14 +263,14 @@ describe("coverage ledger: state machine", () => {
     // catalog name was "not fresh", and any other name was "unplaceable" at
     // publish. The ledger now mints the fresh owner from the catalog agent.
     const reassigned = ok(assignUnits(merged.ledger, [{ coverageId: unit.coverage_id, agentId: HUNTER, wave: 2 }]));
-    expect(reassigned.assigned).toEqual([{ coverageId: unit.coverage_id, ownerId: `${HUNTER}--2`, wave: 2 }]);
-    expect(reassigned.ledger[0].agent_id).toBe(`${HUNTER}--2`);
-    expect(catalogAgentOfOwner(`${HUNTER}--2`)).toBe(HUNTER);
+    expect(reassigned.assigned).toEqual([{ coverageId: unit.coverage_id, ownerId: HUNTER_2, wave: 2 }]);
+    expect(reassigned.ledger[0].agent_id).toBe(HUNTER_2);
+    expect(catalogAgentOfOwner(HUNTER_2)).toBe(HUNTER);
 
     // The prior owner cannot settle the new attempt; the fresh one can.
     const stale = recordUnitResult(reassigned.ledger, { coverageId: unit.coverage_id, ...evidence(HUNTER, "tenant-scope/cache-key"), wave: 2 });
     expect(stale.ok).toBe(false);
-    const rehunted = settled(reassigned.ledger, unit.coverage_id, anAgentId(`${HUNTER}--2`), "tenant-scope/cache-key", 2);
+    const rehunted = settled(reassigned.ledger, unit.coverage_id, HUNTER_2, "tenant-scope/cache-key", 2);
     expect(validateLedger(rehunted)).toEqual([]);
     expect(upstreamValid(rehunted)).toBe(true);
   });
@@ -461,30 +462,52 @@ describe("parseLedger returns its own proof, never the caller's array", () => {
     expect(validateLedger(settled(inFlight, unit.coverage_id, HUNTER, "tenant-scope/cache-key"))).toEqual([]);
   });
 
-  it("returns only branded owner ids: a stored owner the grammar refuses is named, on the unit, an attempt or a check", () => {
-    // The ledger types every owner as a SecurityAgentId; this is the proof the
-    // parser's narrowing rests on.
+  it("returns only branded owner ids: a stored owner the grammar refuses is named, at every owner site the ledger type declares", () => {
+    // `parseLedger` narrows to `CoverageLedger` once `validateLedger` is silent.
+    // `OWNER_SITES` is keyed by every path whose type is a SecurityAgentId, so
+    // a new owner field fails to compile here until it is proved refused.
     const unit = seed();
     const first = settled(assigned([unit], unit.coverage_id, HUNTER), unit.coverage_id, HUNTER, "tenant-scope/cache-key");
     const archived = ok(mergeCritic(first, { missingUnits: [], reassignIds: [unit.coverage_id], resolvedPriorLeads: [], stop: false },
       { wave: 2, reassignmentReasons: { [unit.coverage_id]: "critic: again" } })).ledger;
-    const second = settled(assigned(archived, unit.coverage_id, HUNTER, 2), unit.coverage_id, anAgentId(`${HUNTER}--2`), "tenant-scope/cache-key", 2);
-    const stored = (): { agent_id: string; attempts: { agent_id: string }[]; local_checks: { agent_id: string }[] }[] =>
-      JSON.parse(JSON.stringify(second));
+    const second = settled(assigned(archived, unit.coverage_id, HUNTER, 2), unit.coverage_id, HUNTER_2, "tenant-scope/cache-key", 2);
+    const stored = (): StoredUnit[] => JSON.parse(JSON.stringify(second));
     expect(parseLedger(stored()).ok).toBe(true);
 
-    const unsafe = "x; rm -rf ~";
-    const onUnit = stored();
-    onUnit[0]!.agent_id = unsafe;
-    const onAttempt = stored();
-    onAttempt[0]!.attempts[0]!.agent_id = unsafe;
-    const onCheck = stored();
-    onCheck[0]!.local_checks[0]!.agent_id = unsafe;
-    expect(refusedPaths(parseLedger(onUnit))).toContain("$[0].agent_id");
-    expect(refusedPaths(parseLedger(onAttempt))).toContain("$[0].attempts[0].agent_id");
-    expect(refusedPaths(parseLedger(onCheck))).toContain("$[0].local_checks[0].agent_id");
+    expect(LEDGER_HAS_OWNERS).toBe(true);
+    for (const [path, siteOf] of Object.entries(OWNER_SITES)) {
+      const document = stored();
+      siteOf(document[0]!).agent_id = "x; rm -rf ~";
+      expect(refusedPaths(parseLedger(document)), path).toContain(path);
+    }
   });
 });
+
+/** Every path of `T` whose value the type claims is a SecurityAgentId (null
+ *  allowed), spelled as `validateLedger` names it: `[0]` for an element. */
+type OwnerPaths<T, At extends string> =
+  [NonNullable<T>] extends [SecurityAgentId] ? At
+    : T extends readonly (infer Element)[] ? OwnerPaths<Element, `${At}[0]`>
+      : T extends object ? { [Key in keyof T & string]-?: OwnerPaths<T[Key], `${At}.${Key}`> }[keyof T & string]
+        : never;
+
+type LedgerOwnerPath = OwnerPaths<CoverageLedger, "$">;
+
+/** The ledger declares at least one owner site; were it none, `OWNER_SITES`
+ *  would be `{}` and the test above would pass having proved nothing. */
+const LEDGER_HAS_OWNERS: [LedgerOwnerPath] extends [never] ? false : true = true;
+
+type StoredOwner = { agent_id: string };
+type StoredUnit = StoredOwner & { attempts: (StoredOwner & { local_checks: StoredOwner[] })[]; local_checks: StoredOwner[] };
+
+/** Where each owner site sits in a stored unit, keyed by the exact path the
+ *  type derives: a missing or extra key is a compile error. */
+const OWNER_SITES: Readonly<Record<LedgerOwnerPath, (unit: StoredUnit) => StoredOwner>> = {
+  "$[0].agent_id": (unit) => unit,
+  "$[0].attempts[0].agent_id": (unit) => unit.attempts[0]!,
+  "$[0].attempts[0].local_checks[0].agent_id": (unit) => unit.attempts[0]!.local_checks[0]!,
+  "$[0].local_checks[0].agent_id": (unit) => unit.local_checks[0]!,
+};
 
 describe("coverage ledger: construction enforces the ledger's own state rule", () => {
   const seedResult = (overrides: Partial<CoverageSeed>) => seedCoverageUnit({ ...aSeed(), ...overrides });
