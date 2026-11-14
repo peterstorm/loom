@@ -354,8 +354,9 @@ describe("Bun console collection errors", () => {
     expect(parseBunConsoleCollectionErrors(output)).toEqual(["src/x.test.ts"]);
   });
 
-  it("never reads a code-frame line, an error before any file section, or prose as a file", () => {
+  it("never reads a code-frame line, an error before any file section, a shard notice, or prose as a file", () => {
     const output = [
+      "--shard=1/3: running 2/6 test files",
       "# Unhandled error between tests",
       "4 |   it('x.test.ts:', () => {});",
       "note: see src/y.test.ts:",

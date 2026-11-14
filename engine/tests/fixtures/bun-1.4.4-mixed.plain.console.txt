@@ -1,8 +1,5 @@
 bun test v1.4.4 (0000000)
 
-src/b.test.ts:
-(pass) ok > passes
-
 src/a.test.ts:
 
 # Unhandled error between tests
@@ -10,6 +7,9 @@ src/a.test.ts:
 error: Cannot find module './missing' from '/repo/pkg/src/a.test.ts'
 -------------------------------
 
+
+src/b.test.ts:
+(pass) ok > passes
 
 src/c.test.ts:
 (pass) outer > inner > nested passes

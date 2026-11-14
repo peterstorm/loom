@@ -104,9 +104,17 @@ describe("normalizeBunOutput", () => {
       .toBe(normalizeBunOutput("(pass) outer > inner > nested passes", project));
   });
 
-  it("replaces only the bytes that differ between two runs of one release", () => {
+  it("removes the probe's shard notice, for one file and for many", () => {
+    for (const notice of ["--shard=1/1: running 1/1 test file", "--shard=1/1: running 3/3 test files"]) {
+      expect(normalizeBunOutput(`bun test v1.4.4 (0000000)\n${notice}\n\nsrc/a.test.ts:\n`, project))
+        .toBe("bun test v1.4.4 (0000000)\n\nsrc/a.test.ts:\n");
+    }
+  });
+
+  it("replaces only the bytes that differ between two runs of one release, and the probe's own shard notice", () => {
     const raw = [
       "bun test v1.4.4 (38afee6c8)",
+      "--shard=1/1: running 3/3 test files",
       "src/a.test.ts:",
       "# Unhandled error between tests",
       `error: Cannot find module './missing' from '${project}/src/a.test.ts'`,
@@ -129,6 +137,7 @@ describe("normalizeBunOutput", () => {
     const line = fc.constantFrom(
       "src/a.test.ts:", "src/b.test.ts:", "# Unhandled error between tests", "(pass) ok > passes [3.10ms]",
       `at <anonymous> (${project}/src/c.test.ts:4:35)`, "bun test v1.4.4 (abc123)", " 3 pass", "",
+      "--shard=1/1: running 3/3 test files", "--shard=1/1: running 1/1 test file",
     );
     fc.assert(fc.property(fc.array(line, { maxLength: 30 }), (lines) => {
       const raw = lines.join("\n");

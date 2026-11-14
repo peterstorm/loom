@@ -57,3 +57,16 @@ None. The engine reports 0 emitted, 0 surviving and 0 refuted criticals, so the 
 
 - Applied: the byte-comparison guard `PINNED !== null && …` was dead (when both are null the enclosing describe is skipped); removed, covering suites green.
 - Skipped: none further in scope.
+
+## CI follow-up (after the registered remediation)
+
+CI on 8470f8b7 failed the byte-for-byte comparison on Ubuntu and macOS: Bun runs a run's files in directory-scan order, not command-line order, and ext4 hashes names, so the CI runners printed the sections in a different order from the machine that recorded them. Verified locally: on ext4 this machine runs b, a, c; on tmpfs, c, b, a; with `--shard=1/1`, a, b, c on both.
+
+- `engine/scripts/bun-console-probe.ts`: the probe runs `bun test --shard=1/1` (sorted by path); `normalizeBunOutput` removes that mode's notice (`running N/N test file(s)`).
+- `engine/tests/fixtures/bun-1.4.4-mixed.plain.console.txt`: re-recorded in sorted order (the agent console, JUnit report and load-failure console were already in it).
+- `engine/tests/machine/bun-console-pinned-release.test.ts`: tests for the notice's removal; the property's alphabet includes it.
+- `engine/tests/core/structured-test-report-files.test.ts`: a shard notice is never read as a file header.
+- ADR-0064: a Negative bullet on the scan order and the probe's shard.
+- Validation: `npm run verify` exit 0 (736 files, 18,909 passed, 2 skipped); the pinned-release suite also passes with its scratch on tmpfs.
+
+This commit is outside the registered remediation run, which installed 3b7b3f41.

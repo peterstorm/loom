@@ -84,13 +84,16 @@ export type BunConsoleCapture = Readonly<{
  * banner, and the JUnit `time` and `hostname` attributes. A console duration
  * is removed, space and all: Bun prints one only for a test slow enough to
  * register, so a loaded machine adds `[0.12ms]` where an idle one prints
- * nothing. Pure and idempotent; the grammar Loom reads (file headers, the
- * unhandled-error marker, testcase attributes) is untouched.
+ * nothing. The notice a one-shard run prints (see `runProbe`) is removed, so
+ * a recording reads as the unsharded run it stands for. Pure and idempotent;
+ * the grammar Loom reads (file headers, the unhandled-error marker, testcase
+ * attributes) is untouched.
  */
 export function normalizeBunOutput(text: string, project: string): string {
   return text
     .replaceAll(project, RECORDED_PROJECT)
     .replace(/^(bun test v\S+) \([0-9a-f]+\)$/mu, "$1 (0000000)")
+    .replace(/^--shard=1\/1: running \d+\/\d+ test files?\r?\n/gmu, "")
     .replace(/ \[\d+(?:\.\d+)?m?s\]/gu, "")
     .replace(/ time="[^"]*"/gu, ' time="0"')
     .replace(/ hostname="[^"]*"/gu, ' hostname="probe"');
@@ -129,7 +132,12 @@ export function installedBunVersion(): InstalledBun {
 
 /** Run `bun test` with a JUnit outfile in the probe project; its console and
  *  whether it wrote the report. stdout and stderr share one descriptor, so the
- *  console interleaves as a harness's merged output does. */
+ *  console interleaves as a harness's merged output does.
+ *
+ *  Bun runs the files in directory-scan order, not command-line order, and
+ *  that order is the file system's: ext4 hashes names, so two Linux machines
+ *  print the same files in different orders. One shard of one (`--shard=1/1`)
+ *  runs every file, sorted by path, so every machine prints one order. */
 function runProbe(
   project: string,
   report: string,
@@ -139,7 +147,7 @@ function runProbe(
   const fd = openSync(consolePath, "w");
   let bun: ReturnType<typeof spawnSync>;
   try {
-    bun = spawnSync("bun", ["test", "--reporter=junit", `--reporter-outfile=${report}`, ...run.files], {
+    bun = spawnSync("bun", ["test", "--shard=1/1", "--reporter=junit", `--reporter-outfile=${report}`, ...run.files], {
       cwd: project,
       env: probeEnvironment(run.dialect),
       stdio: ["ignore", fd, fd],

@@ -97,6 +97,10 @@ The ledger read-back accepts `bun-console`.
   Bun upgrade that changes the grammar therefore fails verification instead of passing on stale fixtures.
 - Bun prints two consoles: under an agent it omits passing tests, otherwise it prints a section for every file. The
   probe records both, the first with `CLAUDECODE` set as Claude Code sets it, and the grammar reads both the same way.
+- Bun runs a run's files in directory-scan order, which is the file system's (ext4 hashes names), so two machines
+  print one run's sections in different orders. The grammar reads sections in any order; the probe runs one shard of
+  one (`--shard=1/1`, which sorts the files by path) and removes that mode's notice, so its recordings compare byte
+  for byte on every machine.
 - A test-file path containing whitespace is not recognized as a header (fail closed).
 - Console text inside a recognized run is agent-influenced in the same way a JUnit file is. As with every I6
   fact, the proof is as strong as the ledger (`docs/deterministic-implementation.md`, soundness limit), and a
