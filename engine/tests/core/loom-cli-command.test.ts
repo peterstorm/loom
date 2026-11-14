@@ -13,11 +13,19 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { parseLoomPackageRoot, type LoomCommands } from "../../src/core/loom-cli-command";
+import { isSecurityAgentId, SECURITY_AGENT_ID_PATTERN, type SecurityAgentId } from "../../src/core/security-audit-contract";
 import { SECURITY_LENSES } from "../../src/core/security-lenses";
 import { LOOM_COMMANDS, LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { aPackageRoot, loomCommandsAt } from "../fixtures/loom-package-root";
+
+/** An owner id through the grammar's one proof, as `assign` mints it; throws on a refusal. */
+const anOwner = (raw: string): SecurityAgentId => {
+  if (!isSecurityAgentId(raw)) throw new Error(`the agent-id grammar refused ${JSON.stringify(raw)}`);
+  return raw;
+};
 
 const PLAIN = loomCommandsAt("/opt/loom");
 const AWKWARD_ROOT = "/home/o'brien/my plugins/loom";
@@ -29,7 +37,7 @@ describe("every spelling that names the package", () => {
   });
 
   it("auditNonce: how the parent obtains a receipt binding for one owner's artifact", () => {
-    expect(PLAIN.auditNonce("/runs/run 1", "security-hunter-agent--2")).toBe(
+    expect(PLAIN.auditNonce("/runs/run 1", anOwner("security-hunter-agent--2"))).toBe(
       "bun '/opt/loom/engine/src/cli.ts' helper security-audit nonce --out '/runs/run 1' " +
         "--artifact agents/security-hunter-agent--2/artifacts/<file>",
     );
@@ -92,6 +100,26 @@ describe("a root holding a space or a single quote", () => {
     expect(shellWords(AWKWARD.orchestrationStart("standalone-disposition", "/tmp/it's runs"), tmpdir()).slice(1))
       .toEqual(["helper", "orchestration", "start", "standalone-disposition", "--runs-root", "/tmp/it's runs"]);
     expect(shellWords(AWKWARD.mutationCheck("T'1"), tmpdir()).slice(1)).toEqual(["helper", "mutation-check", "--task", "T'1"]);
+  });
+
+  it("auditNonce: every owner the grammar admits stays one bare word, read back exactly", () => {
+    // `<file>` is the parent's to fill in; with a file named, the line runs.
+    const artifactWord = (owner: SecurityAgentId): string | undefined => {
+      const words = shellWords(AWKWARD.auditNonce("/tmp/my audit", owner).replace("<file>", "probe.txt"), tmpdir());
+      return words[words.indexOf("--artifact") + 1];
+    };
+    fc.assert(
+      fc.property(fc.stringMatching(SECURITY_AGENT_ID_PATTERN).filter(isSecurityAgentId), (owner) => {
+        expect(artifactWord(owner)).toBe(`agents/${owner}/artifacts/probe.txt`);
+      }),
+      { numRuns: 40 },
+    );
+  });
+
+  it("auditNonce takes only a parsed agent id", () => {
+    // @ts-expect-error a bare string carries no proof that it is one shell word
+    expect(() => PLAIN.auditNonce("/runs", "x; rm -rf ~")).not.toThrow();
+    expect(() => anOwner("x; rm -rf ~")).toThrow(/refused/);
   });
 
   it("the CLI is quoted the one way sh reads back", () => {

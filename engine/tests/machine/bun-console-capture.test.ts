@@ -6,12 +6,14 @@
  * `bun test --reporter=junit --reporter-outfile=…` run whose non-zero exit Loom
  * attributes to that segment, and never beside a report that cannot vouch.
  *
- * The console and JUnit fixtures are real Bun 1.4.2 output from a probe
- * project: `a.test.ts` imports a module that does not exist, `b.test.ts`
- * passes, `c.test.ts` has one failing testcase.
+ * The console and JUnit fixtures are real Bun output from the probe project
+ * (`scripts/bun-console-probe.ts`): `a.test.ts` imports a module that does not
+ * exist, `b.test.ts` passes, `c.test.ts` has one failing testcase. Every
+ * recorded release runs every case; `bun-console-pinned-release.test.ts` holds
+ * the installed Bun to the pinned release's recording.
  */
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -21,11 +23,16 @@ import { extractEvidence } from "../../src/machine/extract-evidence";
 import { findReport } from "../../src/machine/report-discovery";
 import { judgeTestRun } from "../../src/machine/test-report";
 import type { TestFileResult } from "../../src/core/structured-test-report";
+import { bunFixture, hasBunFixture, RECORDED_BUN_RELEASES } from "../fixtures/bun-console-fixtures";
 
-const fixture = (name: string): string => readFileSync(new URL(`../fixtures/${name}`, import.meta.url), "utf8");
-const MIXED_CONSOLE = fixture("bun-1.4.2-mixed.console.txt");
-const MIXED_JUNIT = fixture("bun-1.4.2-mixed.junit.xml");
-const LOAD_FAILURE_CONSOLE = fixture("bun-1.4.2-load-failure-only.console.txt");
+/** One release's recordings. The plain console (no agent variable set) is
+ *  recorded from the probe onward; an older release has the agent one only. */
+const recordingsOf = (release: string) => ({
+  MIXED_CONSOLE: bunFixture(release, "mixed.console.txt"),
+  MIXED_PLAIN_CONSOLE: hasBunFixture(release, "mixed.plain.console.txt") ? bunFixture(release, "mixed.plain.console.txt") : null,
+  MIXED_JUNIT: bunFixture(release, "mixed.junit.xml"),
+  LOAD_FAILURE_CONSOLE: bunFixture(release, "load-failure-only.console.txt"),
+});
 
 const result = (file: string, executed: number, failed: number, collectionError = false): TestFileResult =>
   ({ file, executed, failed, skipped: 0, collectionError });
@@ -54,7 +61,9 @@ const quietly = <T>(run: () => T): T => {
   }
 };
 
-describe("findReport — Bun console collection errors", () => {
+describe.each(RECORDED_BUN_RELEASES)("findReport — Bun %s console collection errors", (release) => {
+  const { MIXED_CONSOLE, MIXED_PLAIN_CONSOLE, MIXED_JUNIT, LOAD_FAILURE_CONSOLE } = recordingsOf(release);
+
   it("mints a bun-console summary when every file failed to load and Bun wrote no JUnit report", () => {
     const summary = findReport(command, dir, { output: LOAD_FAILURE_CONSOLE, exit: 1 }, times());
     expect(summary).toMatchObject({ total: 1, failed: 1, source: "bun-console" });
@@ -70,6 +79,12 @@ describe("findReport — Bun console collection errors", () => {
       kind: "recorded",
       results: [result("src/b.test.ts", 1, 0), result("src/c.test.ts", 3, 1), result("src/a.test.ts", 1, 1, true)],
     });
+  });
+
+  it.runIf(MIXED_PLAIN_CONSOLE !== null)("joins the same totals from the plain console, whose passing sections name no error", () => {
+    writeFileSync(report, MIXED_JUNIT);
+    const summary = findReport(command, dir, { output: MIXED_PLAIN_CONSOLE ?? "", exit: 1 }, times());
+    expect(summary).toMatchObject({ total: 5, failed: 2, source: "junit-xml" });
   });
 
   it("reads no console without a non-zero exit attributed to the Bun segment", () => {
@@ -122,7 +137,8 @@ describe("findReport — Bun console collection errors", () => {
   });
 });
 
-describe("a red Bun run that never loads, through each harness's recorder path", () => {
+describe.each(RECORDED_BUN_RELEASES)("a red Bun %s run that never loads, through each harness's recorder path", (release) => {
+  const { LOAD_FAILURE_CONSOLE } = recordingsOf(release);
   const finder = (segment: string, run: { output: string; exit: number | null }) => findReport(segment, dir, run, times());
   const testRunOf = (call: HarnessToolCall) => extractEvidence(call, finder).find((event) => event.kind === "TestRun");
 

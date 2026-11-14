@@ -200,7 +200,14 @@ export const isPositiveInteger = (value: unknown): value is number =>
 export const isSecurityFingerprint = (value: unknown): value is string =>
   typeof value === "string" && SECURITY_FINGERPRINT_PATTERN.test(value);
 
-export const isSecurityAgentId = (value: unknown): value is string =>
+declare const securityAgentId: unique symbol;
+
+/** A canonical agent id: one word of `[a-z0-9_-]`, so it names a scratch root
+ *  and rides bare in a printed shell command (no character a shell reads
+ *  specially). Branded: only `isSecurityAgentId` proves one. */
+export type SecurityAgentId = string & Readonly<{ [securityAgentId]: true }>;
+
+export const isSecurityAgentId = (value: unknown): value is SecurityAgentId =>
   typeof value === "string" &&
   SECURITY_AGENT_ID_PATTERN.test(value) &&
   !WINDOWS_RESERVED_AGENT_ID.test(value);

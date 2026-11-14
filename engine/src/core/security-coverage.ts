@@ -55,6 +55,7 @@ import {
   wireViolation,
   type CoverageRefs,
   type PriorStatus,
+  type SecurityAgentId,
   type SecurityIncompleteReason,
   type WireViolation,
 } from "./security-audit-contract";
@@ -871,7 +872,9 @@ export type AssignmentError =
    *  which model profile hunted — refused here, not at publish. */
   | Readonly<{ kind: "unknown-hunter"; coverageId: string; agentId: string }>;
 
-export type AssignedUnit = Readonly<{ coverageId: string; ownerId: string; wave: number }>;
+/** `ownerId` is a parsed agent id, so the `assign` line can print it bare in a
+ *  shell command (`LoomCommands.auditNonce`). */
+export type AssignedUnit = Readonly<{ coverageId: string; ownerId: SecurityAgentId; wave: number }>;
 
 export type AssignmentResult = Readonly<{ ledger: CoverageLedger; assigned: readonly AssignedUnit[] }>;
 
@@ -907,6 +910,11 @@ export function assignUnits(
       return failure({ kind: "unknown-hunter" as const, coverageId: unit.coverage_id, agentId: assignment.agentId });
     }
     const ownerId = freshOwnerId(unit, assignment.agentId);
+    // The attempt suffix lengthens the catalog name; past the grammar's 64
+    // characters the minted id is no agent id, and no unit may record it.
+    if (!isSecurityAgentId(ownerId)) {
+      return failure(invalid([wireViolation("agent_id", `the next owner of ${unit.coverage_id}, ${JSON.stringify(ownerId)}, is not a canonical agent ID`)]));
+    }
     const wave = assignment.wave ?? unit.wave;
     next = replaceUnit(next, { ...unit, status: "in_progress", agent_id: ownerId, wave });
     assigned.push({ coverageId: unit.coverage_id, ownerId, wave });
