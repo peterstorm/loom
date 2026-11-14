@@ -1,8 +1,11 @@
 /**
- * Markdown structure for the doc-contract suites, read one way: headings,
- * heading sections, fenced code blocks and pipe tables.
+ * Markdown structure, read one way: headings, heading sections, fenced code
+ * blocks, prose lines and pipe tables.
  *
- * A suite that binds a document to the code reads a structure the document
+ * Two kinds of reader stand on it. The linter's `no-dangling-doc-reference`
+ * reads a governed document's prose lines and every target's headings through
+ * `scanMarkdown` and `headingsOf`, so "inside a fence" means the same to the
+ * rule as to the suites. A suite that binds a document to the code reads a structure the document
  * owns (the substitution table of `commands/loom.md`, the Status section of an
  * ADR, the operations table of `docs/security-audit.md`) through this module
  * and no reader of its own. Every reader returns the structure or a
@@ -27,7 +30,8 @@
  * section.
  */
 
-import type { DomainResult } from "../../src/core/orchestration-contract/identity";
+/** A read that found its structure, or the error naming what it looked for. */
+type DomainResult<T, E> = Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: E }>;
 
 /** A Markdown text, the name failures cite, and the document line its first line sits on. */
 export type MarkdownSource = Readonly<{ name: string; lines: readonly string[]; firstLine: number }>;
@@ -67,6 +71,9 @@ export type MarkdownError =
   | Readonly<{ kind: "row-not-found"; source: string; table: number; column: string; value: string }>
   | Readonly<{ kind: "row-ambiguous"; source: string; table: number; column: string; value: string; lines: readonly number[] }>;
 
+/** The one way a scan fails: a fence opened and never closed. */
+export type UnclosedFence = Extract<MarkdownError, { kind: "unclosed-fence" }>;
+
 const ok = <T>(value: T): DomainResult<T, never> => ({ ok: true, value });
 const err = <E>(error: E): DomainResult<never, E> => ({ ok: false, error });
 
@@ -76,10 +83,11 @@ export const markdown = (name: string, text: string): MarkdownSource =>
 
 // --- Scan: one pass that separates prose lines from fenced code ------------
 
-type ProseLine = Readonly<{ line: number; text: string }>;
-type Scan = Readonly<{ prose: readonly ProseLine[]; fences: readonly Fence[] }>;
-type OpenFence = Readonly<{ line: number; marker: string; info: string; body: readonly string[] }>;
-type ScanState = Readonly<{ prose: readonly ProseLine[]; fences: readonly Fence[]; open: OpenFence | undefined }>;
+/** A line outside every fenced block, with its document line. */
+export type ProseLine = Readonly<{ line: number; text: string }>;
+/** A document split into its prose lines and its fenced blocks. */
+export type MarkdownScan = Readonly<{ prose: readonly ProseLine[]; fences: readonly Fence[] }>;
+type OpenFence = Readonly<{ line: number; marker: string; info: string; body: string[] }>;
 
 const FENCE_OPEN = /^\s*(`{3,}|~{3,})\s*([^`]*?)\s*$/;
 
@@ -88,36 +96,41 @@ const closes = (open: OpenFence, text: string): boolean => {
   return marker !== undefined && marker[0] === open.marker[0] && marker.length >= open.marker.length;
 };
 
-const step = (state: ScanState, text: string, line: number): ScanState => {
-  const { open } = state;
-  if (open !== undefined) {
-    return closes(open, text)
-      ? { ...state, open: undefined, fences: [...state.fences, { line: open.line, end: line, info: open.info, body: open.body.join("\n") }] }
-      : { ...state, open: { ...open, body: [...open.body, text] } };
-  }
-  const [, marker, info] = FENCE_OPEN.exec(text) ?? [];
-  return marker === undefined || info === undefined
-    ? { ...state, prose: [...state.prose, { line, text }] }
-    : { ...state, open: { line, marker, info, body: [] } };
-};
-
-function scan(source: MarkdownSource): DomainResult<Scan, MarkdownError> {
-  const final = source.lines.reduce<ScanState>(
-    (state, text, index) => step(state, text, source.firstLine + index),
-    { prose: [], fences: [], open: undefined },
-  );
-  return final.open === undefined
-    ? ok({ prose: final.prose, fences: final.fences })
-    : err({ kind: "unclosed-fence", source: source.name, line: final.open.line });
+/**
+ * One pass that separates prose lines from fenced code; an unclosed fence is
+ * an error, never prose. Linear in the document: the linter scans every
+ * governed document and every anchor target with it.
+ */
+export function scanMarkdown(source: MarkdownSource): DomainResult<MarkdownScan, UnclosedFence> {
+  const prose: ProseLine[] = [];
+  const fences: Fence[] = [];
+  let open: OpenFence | undefined;
+  source.lines.forEach((text, index) => {
+    const line = source.firstLine + index;
+    if (open !== undefined) {
+      if (closes(open, text)) {
+        fences.push({ line: open.line, end: line, info: open.info, body: open.body.join("\n") });
+        open = undefined;
+      } else open.body.push(text);
+      return;
+    }
+    const [, marker, info] = FENCE_OPEN.exec(text) ?? [];
+    if (marker === undefined || info === undefined) prose.push({ line, text });
+    else open = { line, marker, info, body: [] };
+  });
+  return open === undefined
+    ? ok({ prose, fences })
+    : err({ kind: "unclosed-fence", source: source.name, line: open.line });
 }
 
 // --- Headings and sections -------------------------------------------------
 
-type Heading = Readonly<{ line: number; level: number; text: string }>;
+/** An ATX heading outside every fence: its line, its level (1-6) and its text, closing hashes dropped. */
+export type Heading = Readonly<{ line: number; level: number; text: string }>;
 
 const HEADING = /^(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/;
 
-const headingsOf = (prose: readonly ProseLine[]): readonly Heading[] =>
+export const headingsOf = (prose: readonly ProseLine[]): readonly Heading[] =>
   prose.flatMap(({ line, text }) => {
     const [, hashes, title] = HEADING.exec(text) ?? [];
     return hashes === undefined || title === undefined ? [] : [{ line, level: hashes.length, text: title }];
@@ -130,7 +143,7 @@ const headingsOf = (prose: readonly ProseLine[]): readonly Heading[] =>
  * and numbered in the document's lines.
  */
 export function sectionOf(source: MarkdownSource, heading: string): DomainResult<MarkdownSource, MarkdownError> {
-  const scanned = scan(source);
+  const scanned = scanMarkdown(source);
   if (!scanned.ok) return scanned;
   const headings = headingsOf(scanned.value.prose);
   const matches = headings.filter(({ text }) => text === heading);
@@ -151,7 +164,7 @@ export function sectionOf(source: MarkdownSource, heading: string): DomainResult
 
 /** Every fenced block whose info string's first word is `info` (`json`, `bash`, …), in order. */
 export function fencesOf(source: MarkdownSource, info: string): DomainResult<readonly Fence[], MarkdownError> {
-  const scanned = scan(source);
+  const scanned = scanMarkdown(source);
   if (!scanned.ok) return scanned;
   return ok(scanned.value.fences.filter((fence) => fence.info.split(/\s+/)[0] === info));
 }
@@ -207,7 +220,7 @@ function tableOf(source: string, [header, alignment, ...body]: PipeRun): DomainR
 
 /** Every pipe table outside fenced code, in document order. One malformed table fails the whole read. */
 export function tablesOf(source: MarkdownSource): DomainResult<readonly Table[], MarkdownError> {
-  const scanned = scan(source);
+  const scanned = scanMarkdown(source);
   if (!scanned.ok) return scanned;
   const parsed = pipeRuns(scanned.value.prose).map((run) => tableOf(source.name, run));
   const [failed] = parsed.flatMap((table) => (table.ok ? [] : [table]));
@@ -301,10 +314,4 @@ export function describeMarkdownError(error: MarkdownError): string {
       return unreachable;
     }
   }
-}
-
-/** The success value, or a thrown failure carrying `describe`'s sentence for the refusal. */
-export function orFail<T, E>(result: DomainResult<T, E>, describe: (error: E) => string): T {
-  if (!result.ok) throw new Error(describe(result.error));
-  return result.value;
 }

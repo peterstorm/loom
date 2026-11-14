@@ -75,7 +75,7 @@ step. Coverage is only as good as the cells seeded here.
    `ordinary_attack_class_block` names that class's entry. The list at the top
    of `ATTACK-CLASSES.md` says which companion lens fits which target; add a
    companion block as `<LENS.md>#<section>`, the lens file and the slug of one
-   of its headings (`WEB-PROTOCOL-AND-AUTH.md#browser-session-attack-classes`).
+   of its headings (`WEB-PROTOCOL-AND-AUTH.md#browser-session-attack-classes-subagent_type-general`).
    The engine stores the reference as text and does not resolve it, so name a
    heading the lens has. A block you considered and left out goes in
    `excluded_blocks` with its reason.

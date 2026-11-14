@@ -5,16 +5,30 @@ import {
   isUnderEntry,
   scopeDrift,
   scopeOf,
+  walkedBesides,
 } from "../../src/linter/project-scope";
 import type { ProgrammaticConfig } from "../../src/linter/programmatic/config";
 import { LOOM_CONFIG } from "./loom-project-config";
 
 describe("project scope: everything lintable, minus explicit exclusions", () => {
-  it("treats every module spelling, tests and declaration files as lintable", () => {
-    for (const name of ["a.ts", "a.tsx", "a.mts", "a.cts", "a.js", "a.jsx", "a.mjs", "a.cjs", "A.java", "a.kt", "a.scala", "a.test.ts", "a.d.ts", "a.d.mts"]) {
+  it("treats every module spelling, tests, declaration files and Markdown as lintable", () => {
+    for (const name of ["a.ts", "a.tsx", "a.mts", "a.cts", "a.js", "a.jsx", "a.mjs", "a.cjs", "A.java", "a.kt", "a.scala", "a.test.ts", "a.d.ts", "a.d.mts", "a.md"]) {
       expect(isLintableName(name), name).toBe(true);
     }
-    for (const name of ["a.json", "a.md", "a.sh", "Makefile"]) expect(isLintableName(name), name).toBe(false);
+    for (const name of ["a.json", "a.sh", "a.mdx", "Makefile"]) expect(isLintableName(name), name).toBe(false);
+  });
+
+  it("walks besides the project only the doc-reference paths beneath a directory it never enters", () => {
+    const config: ProgrammaticConfig = {
+      docReferences: {
+        govern: [{ path: "docs/", reason: "docs" }, { path: ".claude/notes.md", reason: "a governed note" }],
+        plans: [{ path: ".claude/plans/", reason: "plans" }],
+        exclude: [],
+        sourceRoots: [],
+      },
+    };
+    expect(walkedBesides(config)).toEqual([".claude/notes.md", ".claude/plans/"]);
+    expect(walkedBesides({})).toEqual([]);
   });
 
   it("never enters a directory that holds no project source", () => {
@@ -68,6 +82,22 @@ describe("scopeDrift: every subtracting list reports its own decay", () => {
       "requireGovernance: lib/ (matches no file — fix or delete the root)",
       "boundaries: src/infra/ (governs no file — fix or delete the boundary)",
       "boundaries: src/infra/ grants src/infra/db.ts (no such file — delete the grant)",
+    ]);
+  });
+
+  it("names each doc-reference scope entry that matches no file, and each source root that holds none", () => {
+    const config: ProgrammaticConfig = {
+      docReferences: {
+        govern: [{ path: "src/", reason: "live" }, { path: "docs/", reason: "gone" }],
+        plans: [{ path: ".claude/plans/", reason: "gone" }],
+        exclude: [{ path: "src/api/", reason: "live" }],
+        sourceRoots: ["src", "lib"],
+      },
+    };
+    expect(scopeDrift(config, files)).toEqual([
+      "docReferences.govern: docs/ (matches no file — fix or delete the entry)",
+      "docReferences.plans: .claude/plans/ (matches no file — fix or delete the entry)",
+      "docReferences.sourceRoots: lib (holds no file — fix or delete the root)",
     ]);
   });
 

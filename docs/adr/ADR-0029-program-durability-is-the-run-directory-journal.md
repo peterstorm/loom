@@ -7,8 +7,8 @@ issue #19 audit.
 
 ## Context
 ADR-0004 adopted the type-driven candidate and chose to run Loom's domain programs through Fugue 0.4.0. It
-planned two things: `orchestration/fugue-program-runtime.ts`, to drive reducers through `runStateMachine` and
-`replayEvents`, and four static operation DAG families under `orchestration/dags/`. It also planned a panel
+planned two things: orchestration/fugue-program-runtime.ts, to drive reducers through `runStateMachine` and
+`replayEvents`, and four static operation DAG families under orchestration/dags/. It also planned a panel
 persistence planner in the pure core. The planner turned each recorded step into an append effect and a
 replace effect, each keyed by dedup, plus a receipt.
 
@@ -81,7 +81,7 @@ whose event prefix re-proves its state. Fugue is not part of the engine.**
   The persistent panel kernel keeps replay, checkpoint and checkpoint-parse (`panelProgramCheckpoint` and
   `parsePanelProgramCheckpoint`).
 - **What goes:**
-  - `orchestration/fugue-program-runtime.ts`, every file under `orchestration/dags/`, and their tests;
+  - orchestration/fugue-program-runtime.ts, every file under orchestration/dags/, and their tests;
   - `planPanelProgramPersistence`, `plan*PanelPersistence`, `parsePanelPersistenceReceipt` and the panel history
     parsers;
   - the `prepare*PanelPersistenceOperations` and `translateLegacyPanelJournalBytes` helpers;

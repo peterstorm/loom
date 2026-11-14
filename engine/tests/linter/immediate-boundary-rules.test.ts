@@ -36,9 +36,10 @@ function lintCoreFile(content: string): LintResult {
 }
 
 describe("immediate tier programmatic rules", () => {
-  it("are exactly the rules whose own tier is immediate: the import-boundary pair, switch totality, the copied block and the wire cast", () => {
+  it("are exactly the rules whose own tier is immediate: the import-boundary pair, switch totality, the copied block, the wire cast and the dangling doc reference", () => {
     expect(programmaticNames(loadRules(DEFAULT_RULES_DIR, null, "immediate"))).toEqual([
       "no-cross-boundary-imports",
+      "no-dangling-doc-reference",
       "no-duplicate-block",
       "no-io-in-pure-modules",
       "no-wire-cast",

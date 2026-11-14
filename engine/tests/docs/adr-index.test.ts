@@ -12,7 +12,8 @@ import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describeMarkdownError, markdown, orFail, sectionOf, tableWithColumns } from "../support/markdown";
+import { describeMarkdownError, markdown, sectionOf, tableWithColumns } from "../../src/linter/markdown";
+import { orFail } from "../support/or-fail";
 
 const ADR_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "docs", "adr");
 const index = markdown("docs/adr/README.md", readFileSync(join(ADR_DIR, "README.md"), "utf-8"));

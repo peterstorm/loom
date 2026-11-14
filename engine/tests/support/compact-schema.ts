@@ -13,7 +13,7 @@
  */
 
 import type { DomainResult } from "../../src/core/orchestration-contract/identity";
-import { describeMarkdownError, fencesOf, sectionOf, type MarkdownError, type MarkdownSource } from "./markdown";
+import { describeMarkdownError, fencesOf, sectionOf, type MarkdownError, type MarkdownSource } from "../../src/linter/markdown";
 
 const SCHEMA_SECTION = "reviewer-payload-schema";
 

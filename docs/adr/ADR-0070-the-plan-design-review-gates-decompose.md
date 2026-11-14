@@ -55,7 +55,7 @@ obligation and the packet lens all consult:
   unchanged otherwise). The frozen diff records the base revision `none:whole-document`.
 - **Lens.** Each reviewer's Context Packet carries one more byte section, `plan-design-lens`: the questions
   of that reviewer's lens, what makes a plan finding critical, and that findings are located in the plan
-  file. The frozen `references/reviewer-protocol-v2` files are not edited.
+  file. The frozen references/reviewer-protocol-v2 files (since removed) are not edited.
 - **No successor.** A `plan-design` successor start is refused. An edited plan gets a fresh review.
 
 ### 2. The record

@@ -14,7 +14,8 @@ import { sha256Hex } from "../src/core/digest";
 import { REVIEWER_BOOTSTRAP_REGION, extractRegion, extractWireContractRegion } from "../src/core/wire-contract";
 import { value } from "./fixtures/parse-result";
 import { compactSchemaOf, describeCompactSchemaError } from "./support/compact-schema";
-import { markdown as markdownSource, orFail } from "./support/markdown";
+import { markdown as markdownSource } from "../src/linter/markdown";
+import { orFail } from "./support/or-fail";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const agentFile = (name: string): string =>

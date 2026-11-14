@@ -17,6 +17,8 @@
  *   run (exit 2), and a Pi-only project is read from its `.pi` layout;
  * - explicit paths that yield nothing to lint — missing, excluded, or holding
  *   no lintable file — fail the run (exit 2) instead of passing unlinted;
+ * - a governed plan beneath `.claude/` is walked and linted, and a Markdown
+ *   file is linted only where `docReferences` governs it;
  * - `--init` writes a starter config the strict loader accepts, in the TS,
  *   Java and Pi-only layouts, and the very next lint run under it is clean.
  */
@@ -212,6 +214,60 @@ describe("lint-project.ts, spawned over a temporary project", () => {
     const result = spawnSync("bun", [SCRIPT, "--json"], { cwd: join(project, "engine"), encoding: "utf8", timeout: 60_000 });
     expect(result.status, result.stderr).toBe(0);
     expect(jsonReport(result.stdout).staleEntries).toEqual([]);
+  });
+
+  it("reports a doc reference through a file as dangling, not as a lint error (Bun's stat throws ENOTDIR)", () => {
+    baselined();
+    writeFileSync(join(project, "README.md"), "# Readme\n");
+    writeFileSync(join(project, "src", "through-files.ts"), "// Reads `README.md/child` and `src/shape.ts/x`.\nexport const one = 1;\n");
+    configure({ docReferences: { govern: [{ path: "src/", reason: "comments name the tree" }] } });
+
+    const linted = lintProject("--json");
+    expect(linted.status, linted.stderr).toBe(1);
+    const report = jsonReport(linted.stdout);
+    expect(report.errorCount).toBe(0);
+    expect(report.violations.filter(({ rule }) => rule === "no-dangling-doc-reference")).toEqual([
+      expect.objectContaining({ file: "src/through-files.ts" }),
+      expect.objectContaining({ file: "src/through-files.ts" }),
+    ]);
+  });
+
+  it("walks a governed plan beneath .claude/, which the project walk never enters, and lints it in the full tier", () => {
+    baselined();
+    mkdirSync(join(project, ".claude", "plans"), { recursive: true });
+    writeFileSync(join(project, ".claude", "plans", "p.md"), "# Plan\n\n**Spec:** .claude/specs/gone/spec.md\n");
+    configure({
+      docReferences: {
+        govern: [{ path: "src/", reason: "comments name the tree" }],
+        plans: [{ path: ".claude/plans/", reason: "a plan cites its spec" }],
+      },
+    });
+
+    const linted = lintProject("--json");
+    expect(linted.status, linted.stderr).toBe(1);
+    expect(jsonReport(linted.stdout)).toMatchObject({
+      violations: [expect.objectContaining({ file: ".claude/plans/p.md", rule: "no-dangling-doc-reference" })],
+      errorCount: 0,
+      staleEntries: [],
+    });
+  });
+
+  it("lints a Markdown file only where docReferences governs it: no other rule reads one", () => {
+    baselined();
+    mkdirSync(join(project, "docs"));
+    writeFileSync(join(project, "docs", "x.md"), "# X\n\nSee `gone.md`.\n");
+
+    const ungoverned = lintProject("--json");
+    expect(ungoverned.status, ungoverned.stdout).toBe(0);
+    expect(jsonReport(ungoverned.stdout).violations).toEqual([]);
+    expect(lintProject().stdout).toContain("Linting 1 files");
+
+    configure({ docReferences: { govern: [{ path: "docs/", reason: "the docs name the tree" }] } });
+    const governed = lintProject("--json");
+    expect(governed.status).toBe(1);
+    expect(jsonReport(governed.stdout).violations).toEqual([
+      expect.objectContaining({ file: "docs/x.md", rule: "no-dangling-doc-reference" }),
+    ]);
   });
 
   it("refuses to run on an unknown config key (exit 2), naming it", () => {

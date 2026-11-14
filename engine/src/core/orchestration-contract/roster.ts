@@ -271,8 +271,8 @@ export function sameHarnessBinding(left: ExactHarnessBinding, right: ExactHarnes
 /**
  * Field-by-field equality for a request authority — the ONE copy.
  *
- * The former `standalone-review-machine`'s `sameAcceptedAuthority` and `standalone-review`'s
- * `sameCaptureRequest` were byte-identical, and both compared `harnessBinding`
+ * The former standalone-review-machine's sameAcceptedAuthority and standalone-review's
+ * sameCaptureRequest were byte-identical, and both compared `harnessBinding`
  * with `JSON.stringify` rather than the `sameHarnessBinding` comparator sitting
  * beside them here — so key order in a rehydrated binding could decide whether a
  * captured result matched its issued request. Two copies of an equality rule is

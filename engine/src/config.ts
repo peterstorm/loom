@@ -59,7 +59,7 @@ export const PHASE_ORDER: readonly Phase[] = PHASES;
  *  them — the single-source Agent Catalog projection into ARCH_PANEL_AGENTS
  *  already rules out the exact name appearing in both roles, but NOT a
  *  de-suffixed phase agent (`arch-designer`)
- *  or a doubly-suffixed one (`arch-designer-agent-agent`) that captures the panel
+ *  or a doubly-suffixed one (arch-designer-agent with a second -agent) that captures the panel
  *  invocation through detectPhase's other two probes. */
 function phaseLookupKeys(panelAgent: string): string[] {
   const bare = panelAgent.endsWith("-agent")
@@ -144,7 +144,7 @@ export const PANEL_LENS_COUNT = PANEL_LENSES.length;
  *  references/loom/panel-runbook.md and the panel-config test. */
 export const PANEL_JUDGES_DEFAULT = 3;
 
-// There is deliberately no `clampPanelDesigners` here. It existed as an
+// There is deliberately no clampPanelDesigners here. It existed as an
 // exported, tested function that no engine code path ever called: the real
 // enforcement is `selectLenses`' range check, which REJECTS an out-of-range
 // designer count rather than clamping it, and the panel runbook rejects

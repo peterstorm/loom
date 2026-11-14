@@ -103,8 +103,8 @@ INV-1 now names exactly three.)
   `engine/src/linter/programmatic/no-cross-boundary-imports.ts` is the one list of the pair (PR #131 review
   remediation). The programmatic grant and the purity audit read it; the regex rule, which cannot import code,
   mirrors it and is pinned to it by a test.
-  - `.claude/linter/rules/inv-1-typescript-compiler-api-seam.json`, mirrored byte for byte at
-    `.pi/linter/rules/inv-1-typescript-compiler-api-seam.json`. This is a checkable regex rule. It refuses
+  - .claude/linter/rules/inv-1-typescript-compiler-api-seam.json, mirrored byte for byte at
+    .pi/linter/rules/inv-1-typescript-compiler-api-seam.json. This is a checkable regex rule. It refuses
     `from "typescript…"`, `require("typescript…")`, `import("typescript…")` and the bare side-effect
     `import "typescript…"` everywhere except the seams (two at G5b, three since ADR-0053) and `.test.ts` files. Its `excludePatterns` are
     `.test.ts` plus exactly `TYPESCRIPT_COMPILER_API_SEAMS`: `engine/tests/linter/project-lint-rules.test.ts`
@@ -167,7 +167,7 @@ INV-1 now names exactly three.)
   solved in the shell or by a new ADR. Reaching for a Program inside the seams is not allowed.
 
 ## Amendment (2026-11-10): the boundary grants are the one seam declaration; the regex rule is gone
-`.claude/linter/rules/inv-1-typescript-compiler-api-seam.json` and its `.pi` mirror were deleted. The rule
+.claude/linter/rules/inv-1-typescript-compiler-api-seam.json and its `.pi` mirror were deleted. The rule
 restated the seam list that the `perFileExactAllow: {"typescript"}` grants in
 `.claude/linter/rules/config.json` already declare, and a mirror test existed only to pin the two together.
 The project also no longer keeps a `.pi/linter/rules` twin: both harnesses read one rules directory, so there

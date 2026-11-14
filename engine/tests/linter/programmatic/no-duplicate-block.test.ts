@@ -17,6 +17,7 @@ import {
 import { parseIndexCache, renderIndexCache } from "../../../src/linter/clones/index-cache";
 import { cacheAssistedCorpus, defaultCacheFile } from "../../../src/linter/clones/project-corpus";
 import { authoritativeLintContext } from "../../../src/linter/loader";
+import { EMPTY_REFERENCE_INDEX } from "../../../src/linter/doc-references/reference-index";
 import {
   baselineOwners,
   createProgrammaticRules,
@@ -97,7 +98,8 @@ describe("no-duplicate-block", () => {
 
   it("declares its first-call setup, which is what makes the executor run it last (executor.test.ts pins the ordering)", () => {
     const declaring = createProgrammaticRules(authoritativeLintContext(EMPTY_CONFIG, null)).filter((rule) => rule.firstCallSetup === true);
-    expect(declaring.map((rule) => rule.name)).toEqual([RULE_NAME]);
+    // The only other rule that builds a project-wide index on its first call is the doc-reference resolver.
+    expect(declaring.map((rule) => rule.name)).toEqual([RULE_NAME, "no-dangling-doc-reference"]);
   });
 });
 
@@ -109,7 +111,7 @@ describe("the project lint context", () => {
     const context = projectLintContext(CONFIG, "/project", (clone) => {
       asked.push(clone);
       return CORPUS;
-    });
+    }, EMPTY_REFERENCE_INDEX);
 
     expect(asked).toEqual([CLONE]);
     expect(context.duplicateBlock.clone).toBe(asked[0]);
@@ -126,7 +128,7 @@ describe("the project lint context", () => {
     expect(authoritativeLintContext(CONFIG, null).corpus).toBe(EMPTY_CORPUS);
 
     const edit = projectLintContext(CONFIG, root, (clone) =>
-      cacheAssistedCorpus({ projectRoot: root, exclusions: [], clone }, defaultCacheFile(root)));
+      cacheAssistedCorpus({ projectRoot: root, exclusions: [], clone }, defaultCacheFile(root)), EMPTY_REFERENCE_INDEX);
     expect(edit.corpus.trust).toBe("cache-assisted");
     // The rules of an edit may read the cache; a baseline may not. Nothing is walked: a corpus builds on first use.
     expect(createProgrammaticRules(edit).some((rule) => rule.name === RULE_NAME)).toBe(true);

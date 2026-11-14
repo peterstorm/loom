@@ -15,6 +15,21 @@ export type Tier = "immediate" | "full";
 /** Origin of a rule: shipped default or project-local override */
 export type RuleSource = "default" | "project";
 
+// --- Scope ---
+
+/**
+ * A project path carved out of a rule's scope, with the reason it is carved
+ * out. The reason is part of the value, not a comment beside it: config.json
+ * cannot hold comments, and an exemption nobody can justify is an exemption
+ * nobody can retire.
+ *
+ * `path` is project-relative. A trailing `/` names a directory (every file
+ * beneath it, at any depth); otherwise it names exactly one file. Globs are
+ * not supported and are refused at parse time — a glob that matched nothing
+ * used to be a silent no-op.
+ */
+export type ReasonedPath = Readonly<{ path: string; reason: string }>;
+
 // --- Rule Types (discriminated union on `kind`) ---
 
 export interface RegexRule {

@@ -7,11 +7,11 @@
  * Detection strategy: check imports for I/O modules + scan for banned globals.
  */
 
-import type { Violation } from "../types";
+import type { ReasonedPath, Violation } from "../types";
 import { makeViolation } from "../types";
 import { match } from "ts-pattern";
 import { sourceSegments, type SourceSegment } from "../source-segments";
-import { isTestFile, type ReasonedPath } from "./config";
+import { isTestFile } from "./config";
 
 // --- Configuration ---
 

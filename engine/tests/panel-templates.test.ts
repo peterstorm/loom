@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import { checkAgentSkillPrompt } from "../src/core/agent-skills";
 import { findResidualPlaceholders } from "../src/core/validate-template-substitution";
 import { architectureCriterion, candidateFilename, parseJudgeVerdict, serializeJudgeVerdict } from "../src/core/panel-contract";
-import { describeMarkdownError, markdown, orFail, rowWhere, tableWithColumns, type Table, type TableRow } from "./support/markdown";
+import { describeMarkdownError, markdown, rowWhere, tableWithColumns, type Table, type TableRow } from "../src/linter/markdown";
+import { orFail } from "./support/or-fail";
 
 /**
  * Template placeholder audit for every phase template (`phase-*.md`).

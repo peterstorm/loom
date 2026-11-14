@@ -11,12 +11,12 @@ import {
   describeMarkdownError,
   fencesOf,
   markdown,
-  orFail,
   rowWhere,
   sectionOf,
   tableWithColumns,
   tablesOf,
-} from "./markdown";
+} from "../../src/linter/markdown";
+import { orFail } from "../support/or-fail";
 
 const doc = (...lines: readonly string[]) => markdown("doc.md", lines.join("\n"));
 

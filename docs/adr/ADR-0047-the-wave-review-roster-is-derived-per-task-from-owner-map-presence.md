@@ -24,9 +24,10 @@ Constraints:
   `engine/src/core/owner-verification/obligations.ts` (INV-3's owner). A second selection rule is forbidden
   (ADR-0034, ADR-0039).
 - **Byte identity (SC-005).** Packets that need no owner map keep their exact bytes.
-- **Frozen reviewer guidance.** `references/reviewer-protocol-v2/agents/architecture-tech-lead.md` already
-  exists and `agents/architecture-tech-lead.md` carries the same Context Packet bootstrap as the other Wave
-  reviewers, so a schema-2 Wave request for it is valid without editing frozen text.
+- **Frozen reviewer guidance.** At decision time the frozen guidance
+  references/reviewer-protocol-v2/agents/architecture-tech-lead.md (since removed; see docs/standalone-review.md)
+  already existed, and `agents/architecture-tech-lead.md` carried the same Context Packet bootstrap as the other
+  Wave reviewers, so a schema-2 Wave request for it was valid without editing frozen text.
 - **Persisted state.** Review Run parsers (`state-file-wire.ts`, `findings.ts`) accept any non-empty unique
   `expected_agents` with matching ordered slots; only the engine's own comparisons pinned the five.
 
