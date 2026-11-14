@@ -27,7 +27,7 @@ import {
 } from "../../src/core/security-adjudication";
 import { assignUnits, recordUnitResult, seedCoverageUnit, type CoverageLedger } from "../../src/core/security-coverage";
 import { AGENT_POLICIES, LOOM_AGENT_NAMESPACE, catalogProfileOfAgent, resolveAgentPolicy } from "../../src/core/model-profiles";
-import { aConfirmedFinding, aRefs, aSeed, aVerdict, HUNTER_AGENT, ok, type VerdictWire } from "./fixtures";
+import { aConfirmedFinding, anAgentId, aRefs, aSeed, aVerdict, HUNTER_AGENT, ok, type VerdictWire } from "./fixtures";
 import { VERIFICATION_SLOT_PREFIX } from "../../src/core/security-verification";
 
 const findings = (fingerprints: readonly string[]) =>
@@ -152,7 +152,7 @@ describe("huntingProfiles", () => {
   it("derives the hunt profile from owners and archived attempts, through the owner grammar", () => {
     expect(huntingProfiles(HUNTED)).toEqual({ ok: true, value: ["focused-review"] });
     const [unit] = HUNTED;
-    const reassigned = [{ ...unit!, agent_id: `${HUNTER_AGENT}--2`, wave: 2, attempts: [{
+    const reassigned = [{ ...unit!, agent_id: anAgentId(`${HUNTER_AGENT}--2`), wave: 2, attempts: [{
       wave: 1, status: "covered" as const, agent_id: HUNTER_AGENT, reviewed_paths: unit!.reviewed_paths,
       local_checks: unit!.local_checks, result_fingerprints: [], unresolved: [], reassignment_reason: "critic: again",
     }] }];
@@ -161,9 +161,9 @@ describe("huntingProfiles", () => {
 
   it("fails closed on an owner — live or archived — the catalog cannot place", () => {
     const [unit] = HUNTED;
-    expect(huntingProfiles([{ ...unit!, agent_id: "hunter-a" }])).toEqual({ ok: false, error: { kind: "unresolvable-hunter", agentId: "hunter-a" } });
-    const archived = [{ ...unit!, agent_id: `${HUNTER_AGENT}--2`, wave: 2, attempts: [{
-      wave: 1, status: "covered" as const, agent_id: "ghost-hunter", reviewed_paths: unit!.reviewed_paths,
+    expect(huntingProfiles([{ ...unit!, agent_id: anAgentId("hunter-a") }])).toEqual({ ok: false, error: { kind: "unresolvable-hunter", agentId: "hunter-a" } });
+    const archived = [{ ...unit!, agent_id: anAgentId(`${HUNTER_AGENT}--2`), wave: 2, attempts: [{
+      wave: 1, status: "covered" as const, agent_id: anAgentId("ghost-hunter"), reviewed_paths: unit!.reviewed_paths,
       local_checks: unit!.local_checks, result_fingerprints: [], unresolved: [], reassignment_reason: "critic: again",
     }] }];
     expect(huntingProfiles(archived)).toEqual({ ok: false, error: { kind: "unresolvable-hunter", agentId: "ghost-hunter" } });
@@ -189,7 +189,7 @@ describe("adjudicateRun", () => {
 
   it("refuses rather than adjudicates when an owner cannot be placed", () => {
     const [unit] = HUNTED;
-    const decided = adjudicateRun({ ledger: [{ ...unit!, agent_id: "hunter-a" }], findings: findings(["a:1"]), verdicts: ballots(wire("a:1")) });
+    const decided = adjudicateRun({ ledger: [{ ...unit!, agent_id: anAgentId("hunter-a") }], findings: findings(["a:1"]), verdicts: ballots(wire("a:1")) });
     expect(decided).toEqual({ ok: false, error: { kind: "unresolvable-hunter", agentId: "hunter-a" } });
   });
 });

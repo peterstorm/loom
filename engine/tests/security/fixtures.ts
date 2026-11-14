@@ -14,9 +14,11 @@
 
 import {
   canonicalCoverageId,
+  isSecurityAgentId,
   parseCoverageRefs,
   parseSecurityRunMetadata,
   type CoverageRefs,
+  type SecurityAgentId,
   type SecurityRunMetadata,
 } from "../../src/core/security-audit-contract";
 import type { DomainResult } from "../../src/core/orchestration-contract/identity";
@@ -36,9 +38,17 @@ export function ok<T>(result: DomainResult<T, unknown>): T {
   return result.value;
 }
 
+/** An owner id through the grammar's one proof, as `assign` mints it and a
+ *  ledger records it; throws on a refusal, so a fixture cannot spell an id the
+ *  ledger would refuse. */
+export function anAgentId(raw: string): SecurityAgentId {
+  if (!isSecurityAgentId(raw)) throw new Error(`the agent-id grammar refused ${JSON.stringify(raw)}`);
+  return raw;
+}
+
 /** The catalog hunter. `assignUnits` refuses an agent the Agent Catalog cannot
  *  place, so a placeholder id cannot stand in for it. */
-export const HUNTER_AGENT = "security-hunter-agent";
+export const HUNTER_AGENT = anAgentId("security-hunter-agent");
 
 // --- Run ---
 

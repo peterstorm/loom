@@ -121,7 +121,7 @@ const COVERAGE_PHASES: Readonly<Record<CoverageStatus, CoveragePhase>> = {
 const phaseOf = (unit: CoverageUnit): CoveragePhase => COVERAGE_PHASES[unit.status];
 
 export type LocalCheck = Readonly<{
-  agent_id: string;
+  agent_id: SecurityAgentId;
   reviewed_paths: readonly string[];
   invariant: string;
   method: "source" | "local";
@@ -136,7 +136,7 @@ export type ExcludedBlock = Readonly<{ block: string; reason: string }>;
 export type CoverageAttempt = Readonly<{
   wave: number;
   status: TerminalDisposition;
-  agent_id: string;
+  agent_id: SecurityAgentId;
   reviewed_paths: readonly string[];
   local_checks: readonly LocalCheck[];
   result_fingerprints: readonly string[];
@@ -160,7 +160,10 @@ export type CoverageUnit = Readonly<{
   attempts: readonly CoverageAttempt[];
   wave: number;
   status: CoverageStatus;
-  agent_id: string | null;
+  /** Every owner id the ledger records, here, on an attempt and on a check, is
+   *  one the agent-id grammar proved (`validateLedger` checks each), so it
+   *  rides bare in a printed command and names a scratch root. */
+  agent_id: SecurityAgentId | null;
   reviewed_paths: readonly string[];
   local_checks: readonly LocalCheck[];
   result_fingerprints: readonly string[];
@@ -328,7 +331,7 @@ export function unitOfFingerprint(ledger: CoverageLedger, fingerprint: string): 
 
 /** An artifact path under one owner's own artifacts root, parsed: the run-relative
  *  `agents/<owner>/artifacts/<file…>` and the owner id it names. */
-export type OwnedArtifactPath = Readonly<{ path: string; owner: string }>;
+export type OwnedArtifactPath = Readonly<{ path: string; owner: SecurityAgentId }>;
 
 /** The one reading of an owned artifact path: a safe run-relative path whose
  *  first three segments are `agents`, a canonical owner id and `artifacts`, with
@@ -695,6 +698,10 @@ export function parseLedger(raw: unknown): DomainResult<CoverageLedger, Coverage
   const copy = deepFrozenCopy(raw);
   if (!Array.isArray(copy)) return failure(invalid([wireViolation("ledger", "expected a top-level array")]));
   if (copy.length === 0) return failure(invalid([wireViolation("ledger", "a run always seeds at least one unit")]));
+  // Narrowed only once `validateLedger` holds no violation: it checks every
+  // field the type claims. The owner-id test derives every SecurityAgentId
+  // path of `CoverageLedger` and proves each refused: a new owner field fails
+  // to compile there until a case proves this check refuses it.
   const candidate: CoverageLedger = copy;
   const violations = validateLedger(candidate);
   return violations.length === 0 ? success(candidate) : failure(invalid(violations));
@@ -851,7 +858,7 @@ export const catalogAgentOfOwner = (ownerId: string): string => ownerId.replace(
  *  HERE, from the unit's own history, so freshness holds by construction rather
  *  than by a caller remembering which names it already spent. */
 const freshOwnerId = (unit: CoverageUnit, catalogAgent: string): string => {
-  const spent = new Set(unit.attempts.map((attempt) => attempt.agent_id));
+  const spent = new Set<string>(unit.attempts.map((attempt) => attempt.agent_id));
   if (!spent.has(catalogAgent)) return catalogAgent;
   let attempt = unit.attempts.length + 1;
   while (spent.has(`${catalogAgent}${OWNER_ATTEMPT_SEPARATOR}${attempt}`)) attempt += 1;
@@ -927,7 +934,7 @@ export function assignUnits(
 
 export type UnitResult = Readonly<{
   coverageId: string;
-  agentId: string;
+  agentId: SecurityAgentId;
   wave: number;
   status: TerminalDisposition;
   reviewedPaths: readonly string[];
@@ -1598,7 +1605,7 @@ export type ArtifactAdmission = Readonly<{
 
 export type ArtifactAdmissionRefusal =
   | Readonly<{ kind: "malformed-artifact-path"; artifact: string; message: string }>
-  | Readonly<{ kind: "no-in-flight-unit"; artifact: string; owner: string; message: string }>
+  | Readonly<{ kind: "no-in-flight-unit"; artifact: string; owner: SecurityAgentId; message: string }>
   | Readonly<{ kind: "archived-artifact"; artifact: string; coverageId: string; message: string }>;
 
 /**
