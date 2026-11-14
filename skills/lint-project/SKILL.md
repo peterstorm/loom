@@ -24,11 +24,13 @@ The model to keep in mind: everything is linted, and every exclusion is explicit
 ### Step 1: Check for existing configuration
 
 ```bash
-ls .claude/linter/rules/ 2>/dev/null || ls .pi/linter/rules/ 2>/dev/null || echo "NO_RULES"
+bun ${CLAUDE_PLUGIN_ROOT}/engine/src/cli.ts helper lint-coverage status
 ```
 
-- Rules exist → go to Step 4.
-- No rules → Step 2.
+It prints the project root and, for each opt-in rule family, whether it is configured, declined (with its reason) or a gap.
+
+- Every family configured or declined → go to Step 4.
+- No setup, or a gap → Step 2.
 
 ### Step 2: Analyze the project's architecture
 
@@ -39,7 +41,7 @@ ls .claude/linter/rules/ 2>/dev/null || ls .pi/linter/rules/ 2>/dev/null || echo
    - `orchestrator/` → shell that sequences ports and pure logic
    - `infra/`, `adapters/`, `repository/` → I/O adapters
    - `api/`, `controllers/`, `handlers/` → entry points
-4. Ask the user before writing any boundary:
+4. Ask the user before writing any boundary by hand (`--init` infers only the standard TypeScript layers, from the imports that exist):
    - "What are your layers, and which may import which?"
    - "Which modules are the functional core and must be free of I/O?"
    - "Are there import patterns you want to forbid?"
@@ -48,7 +50,8 @@ Check the answers against the import graph that exists. A boundary the current c
 
 ### Step 3: Generate the configuration
 
-1. Scaffold the rules directory: `bun ${CLAUDE_PLUGIN_ROOT}/scripts/lint-project.ts --init`.
+1. Turn on what the layout allows: `bun ${CLAUDE_PLUGIN_ROOT}/scripts/lint-project.ts --init`. It infers boundaries, the functional core, governance and doc references (`references/runner.md`, "`--init`"), fills only the families not yet decided, and baselines. Show the user what it turned on, every note, and every family it could not infer.
+   For each family it could not infer, configure it (below) or decline it with the user's reason: `"declined": [{ "key": "<family>", "reason": "<why>" }]`. The full run fails until every family is decided.
 2. Read the language reference (both, in a mixed project) and the "Project Configuration" section of the README.
 3. Write `config.json` inside the rules directory, beside the rule files:
    - `boundaries`, one per layer, each with a `description` of which way its imports point
@@ -91,6 +94,9 @@ Grouped by rule, with counts.
 ### Stale Entries
 Exclusions, roots, grants or baseline entries that no longer match anything.
 
+### Coverage Gaps
+Rule families neither configured nor declined — each one needs a decision.
+
 ### Summary
 Files scanned: N | Violations: N (boundary: X, purity: Y, quality: Z)
 ```
@@ -114,7 +120,9 @@ Files scanned: N | Violations: N (boundary: X, purity: Y, quality: Z)
 
 **An import is refused that no `deny` names.** `allow` is a closed list: inside a governed module, an import matching no `allow` entry is a violation. Add the prefix to `allow`, or grant it to one file with `perFileAllow` and a reason.
 
-**No violations, but the architecture is wrong.** Without `boundaries` and `pureModules` the two architecture rules check nothing. Declare them, and set `requireGovernance` so a file in a directory no boundary names fails instead of passing.
+**No violations, but the architecture is wrong.** A family declined in `config.json` checks nothing; read its reason. Declare `boundaries` and `pureModules`, and set `requireGovernance` so a file in a directory no boundary names fails instead of passing.
+
+**A session starts with "Loom lint: … has no lint setup".** The session-start reminder (ADR-0075): offer to run Step 3. For a repository the user does not want Loom in, `bun ${CLAUDE_PLUGIN_ROOT}/engine/src/cli.ts helper lint-coverage ignore --reason "<why>"` silences it there; the list lives in the user's config directory, never in the repository, and `unignore` takes it off.
 
 **A file is excluded, or a module declared impure, that should not be.** Every `exclude` and `impureModules` entry carries its reason. Read it; delete the entry if the reason no longer holds.
 

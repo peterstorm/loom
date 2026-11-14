@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import handler from "../../src/handlers/helpers/validate-lint-rules";
@@ -46,6 +46,25 @@ describe("validate-lint-rules helper", () => {
       expect(result.kind).toBe("passthrough");
       const stderrText = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
       expect(stderrText).toContain("0 project rules validated");
+    } finally {
+      stderrSpy.mockRestore();
+      process.chdir(previousCwd);
+    }
+  });
+
+  it("with no explicit dir, validates the rules of the project the cwd sits in, from a subdirectory too", async () => {
+    const project = tempRulesDir();
+    const rulesDir = join(project, ".claude", "linter", "rules");
+    mkdirSync(rulesDir, { recursive: true });
+    writeFileSync(join(rulesDir, "inv-1.json"), JSON.stringify(GOOD_RULE));
+    mkdirSync(join(project, "src", "deep"), { recursive: true });
+    const previousCwd = process.cwd();
+    process.chdir(join(project, "src", "deep"));
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect((await handler("", [])).kind).toBe("passthrough");
+      const stderrText = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(stderrText).toContain(`1 project rules from '${realpathSync(rulesDir)}'`);
     } finally {
       stderrSpy.mockRestore();
       process.chdir(previousCwd);

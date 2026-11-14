@@ -69,7 +69,7 @@ import { realPhaseOrderDeps } from "../engine/src/handlers/pre-tool-use/validate
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 import { admitPiSpawnBatch } from "../engine/src/core/spawn-admission";
 
-import { taskGraphPath, subagentDir, guardedLocations, projectRulesDir, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
+import { taskGraphPath, subagentDir, guardedLocations, editedFileRulesDir, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
 import { currentOrchestrationStatus } from "../engine/src/handlers/helpers/orchestration";
@@ -131,6 +131,7 @@ import { createTrustedReviewWitnesses } from "./trusted-review-witness";
 import { runPiStartupSweeps, type PiStartupSweepSource } from "./cleanup-actions";
 import { createPiParentSessions } from "./spawn-reservation";
 import { projectSessionModelIntoEnv } from "./session-model-env";
+import { registerPiLintCoverage } from "./lint-coverage";
 import { piAgentDefinitionPath, resolvePiAgentDirectory } from "../engine/src/core/pi-agent-directory";
 
 const PACKAGE_ROOT = installedLoomPackageRoot(dirname(dirname(fileURLToPath(import.meta.url))));
@@ -573,6 +574,10 @@ export default function (
     });
   });
 
+  // Lint coverage (the twin of Claude Code's session-start lint-coverage
+  // hook): the operator hears at session start, the model with the first turn.
+  registerPiLintCoverage(pi);
+
   // Each Pi subagent is a separate `pi --no-session` process. Parent-session
   // roster entries therefore cannot authorize child Edit/Write calls. Consume
   // the one-time capability injected into THIS child's task and bind its own
@@ -647,7 +652,9 @@ export default function (
       const loomDefaultRulesDir = join(PACKAGE_ROOT, "lint-rules");
       const composed = await piPostEdit(event, {
         projectRoot,
-        lint: (filePath) => lintFile(filePath, "immediate", loomDefaultRulesDir, projectRulesDir(projectRoot)),
+        // The rules of the project the edited file sits in, found as the
+        // Claude Code hook finds them (`editedFileRulesDir`).
+        lint: (filePath) => lintFile(filePath, "immediate", loomDefaultRulesDir, editedFileRulesDir(filePath, projectRoot)),
         advise: (file) => typeDiagnosticsAdvisory(file),
         notifyOperator: piOperatorNoteSink(ctx, writeStderrLine),
       });

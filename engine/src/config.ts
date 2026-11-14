@@ -32,6 +32,7 @@ import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest"
 import { guardedDirsOf, protectedDirsOf, type GuardedLocations } from "./core/guarded-locations";
 import { nonEmptyOf, type NonEmpty } from "./core/orchestration-contract/identity";
 import { projectRulesLayout } from "./linter/programmatic/config";
+import { findProjectRoot } from "./linter/project-root";
 import { projectRootForStateFile } from "./core/phase-artifact-paths";
 import { observeGitProbe, type GitProbeStep } from "./utils/git-probe";
 import { observePathPresence } from "./utils/path-presence";
@@ -639,3 +640,25 @@ export const projectRulesDir = (root: string = process.cwd()): string | null => 
   const layout = projectRulesLayout((candidate) => pathExistsFailClosed(join(root, candidate)));
   return layout === null ? null : join(root, layout);
 };
+
+/** Where a project is: its root, and its rules directory when it has one. */
+export type ProjectLocation = Readonly<{ root: string; rulesDir: string | null }>;
+
+/** The project `directory` sits in, found by walking up from it
+ *  (`findProjectRoot`) with the fail-closed presence probe, or null when it is
+ *  in none. The engine's one project lookup: the edit hooks, the lint-coverage
+ *  reminder and its helper all ask it, so none can skip the probe. */
+export const projectAt = (directory: string): ProjectLocation | null => {
+  const root = findProjectRoot(resolve(directory), pathExistsFailClosed);
+  return root === null ? null : Object.freeze({ root, rulesDir: projectRulesDir(root) });
+};
+
+/** The rules directory of the project `directory` sits in, or null when that
+ *  project has none. */
+export const enclosingProjectRulesDir = (directory: string): string | null => projectAt(directory)?.rulesDir ?? null;
+
+/** The rules that govern an edited file: its own project's, found from the
+ *  file's directory, so they never depend on where the harness process or its
+ *  shell happens to be. A relative `filePath` resolves against `base`. */
+export const editedFileRulesDir = (filePath: string, base: string = process.cwd()): string | null =>
+  enclosingProjectRulesDir(dirname(resolve(base, filePath)));

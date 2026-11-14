@@ -77,7 +77,39 @@ export interface ProgrammaticConfig {
   /** Grandfathered `path::reference` keys the no-dangling-doc-reference rule
    *  excuses, one occurrence each. */
   readonly docReferenceBaseline?: Baseline;
+  /** The opt-in rule families the project has decided to leave off, each with
+   *  its reason. A family neither configured nor declined is a coverage gap
+   *  (`linter/lint-coverage.ts`), which fails `lint-project`. */
+  readonly declined?: readonly DeclinedFamily[];
 }
+
+/**
+ * The config keys that each turn a rule family on, and that check nothing while
+ * absent: no boundaries, nothing pure, no governance root, no governed
+ * document. Every other key has a working default. These are the families a
+ * project can forget, so each must be configured or declined with a reason.
+ */
+export const OPT_IN_CONFIG_KEYS = Object.freeze(["boundaries", "pureModules", "requireGovernance", "docReferences"] as const);
+export type OptInConfigKey = (typeof OPT_IN_CONFIG_KEYS)[number];
+
+/** One opt-in family left off on purpose: the config key it would be, and why. */
+export type DeclinedFamily = Readonly<{ key: OptInConfigKey; reason: string }>;
+
+/**
+ * Whether a config turns a family on — the one answer the `declined` parse and
+ * lint coverage (`linter/lint-coverage.ts`) both read. An empty `boundaries` or
+ * `pureModules` list checks nothing, so it is no more "on" than an absent one;
+ * the parse refuses an empty `requireGovernance` or `docReferences.govern`, so
+ * those two are on whenever present.
+ */
+const FAMILY_IS_ON: Readonly<Record<OptInConfigKey, (config: ProgrammaticConfig) => boolean>> = Object.freeze({
+  boundaries: (config) => (config.boundaries?.length ?? 0) > 0,
+  pureModules: (config) => (config.pureModules?.length ?? 0) > 0,
+  requireGovernance: (config) => config.requireGovernance !== undefined,
+  docReferences: (config) => config.docReferences !== undefined,
+});
+
+export const isFamilyOn = (config: ProgrammaticConfig, key: OptInConfigKey): boolean => FAMILY_IS_ON[key](config);
 
 /** Every key `config.json` may carry — the one list the strict parse checks against. */
 export const PROGRAMMATIC_CONFIG_KEYS: readonly (keyof ProgrammaticConfig)[] = Object.freeze([
@@ -99,6 +131,7 @@ export const PROGRAMMATIC_CONFIG_KEYS: readonly (keyof ProgrammaticConfig)[] = O
   "wireCastBaseline",
   "docReferences",
   "docReferenceBaseline",
+  "declined",
 ]);
 
 /** Default config when no project config exists */
@@ -307,7 +340,7 @@ function presentFields<T extends object>(fields: Partial<T>): Partial<T> {
 function parseConfigObject(json: unknown, filePath: string): ProgrammaticConfig {
   const obj = plainObject(json, `Linter config at ${filePath}`);
   refuseUnknownKeys(obj, PROGRAMMATIC_CONFIG_KEYS, `Linter config at ${filePath}`);
-  const parsed: ProgrammaticConfig = {
+  const families: ProgrammaticConfig = {
     exclude: parseOptionalReasonedPaths(obj.exclude, filePath, "exclude"),
     boundaries: parseOptionalBoundaries(obj.boundaries, filePath),
     requireGovernance: parseOptionalNonEmptyModulePaths(obj.requireGovernance, filePath, "requireGovernance"),
@@ -321,7 +354,40 @@ function parseConfigObject(json: unknown, filePath: string): ProgrammaticConfig 
     docReferences: parseOptionalDocReferences(obj.docReferences, filePath),
     docReferenceBaseline: parseOptionalBaseline(obj.docReferenceBaseline, filePath, "docReferenceBaseline"),
   };
-  return Object.freeze(presentFields(parsed));
+  // `declined` is judged against the families as parsed, so "configured" means
+  // what coverage means by it (`isFamilyOn`).
+  return Object.freeze(presentFields<ProgrammaticConfig>({ ...families, declined: parseOptionalDeclined(obj.declined, families, filePath) }));
+}
+
+const isOptInKey = (key: unknown): key is OptInConfigKey =>
+  typeof key === "string" && (OPT_IN_CONFIG_KEYS as readonly string[]).includes(key);
+
+/**
+ * `declined: [{ key, reason }]`. Each entry names an opt-in family the config
+ * does not turn on (`isFamilyOn`): a family both configured and declined is a
+ * contradiction, refused rather than read one way or the other. An empty
+ * `boundaries` or `pureModules` list turns nothing on, so it may be declined.
+ * A key declined twice, or declined with no reason, is refused too.
+ */
+function parseOptionalDeclined(raw: unknown, families: ProgrammaticConfig, filePath: string): DeclinedFamily[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) return refuse(`${filePath}: 'declined' must be an array of { key, reason }`);
+  const declined = raw.map((entry: unknown, index): DeclinedFamily => {
+    const where = `${filePath}: declined[${index}]`;
+    const fields = plainObject(entry, where);
+    refuseUnknownKeys(fields, ["key", "reason"], where);
+    const { key, reason } = fields;
+    if (!isOptInKey(key)) return refuse(`${where}.key must be one of ${OPT_IN_CONFIG_KEYS.join(", ")}`);
+    if (isFamilyOn(families, key)) return refuse(`${where}: '${key}' is both configured and declined — keep one`);
+    if (typeof reason !== "string" || reason.trim().length === 0) {
+      return refuse(`${where}.reason must be a non-empty string — every declined family states why`);
+    }
+    return Object.freeze({ key, reason });
+  });
+  const keys = declined.map(({ key }) => key);
+  const twice = keys.find((key, index) => keys.indexOf(key) !== index);
+  if (twice !== undefined) refuse(`${filePath}: 'declined' lists '${twice}' twice`);
+  return declined;
 }
 
 const DOC_REFERENCE_KEYS: readonly (keyof DocReferenceScope)[] = Object.freeze(["govern", "plans", "exclude", "sourceRoots"]);

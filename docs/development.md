@@ -141,9 +141,13 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper validate-lint-rules                    
 bun "$LOOM_DIR/engine/src/cli.ts" helper validate-lint-rules .claude/linter/rules    # or name one explicitly
 ```
 
-With no argument the helper validates the project's one rules directory — the first present of `.claude/linter/rules`, then `.pi/linter/rules` (a Pi-only project) — the same directory Claude Code's edit hook, Pi's post-edit lint, the Wave Gate lint and `lint-project` read; the lookup does not depend on the harness. With none present it validates the bundled defaults and says 0 project rules were checked. A nonexistent directory is an error for explicit validation. Runtime loading, by contrast, treats an absent project rules directory as “no project overrides.”
+With no argument the helper validates the rules directory of the project the working directory sits in, found by walking up from it — the first present of `.claude/linter/rules`, then `.pi/linter/rules` (a Pi-only project) — the same directory Claude Code's edit hook, Pi's post-edit lint, the Wave Gate lint and `lint-project` read; the lookup does not depend on the harness, and the edit hooks start it from the edited file, not from the session's working directory. With none present it validates the bundled defaults and says 0 project rules were checked. A nonexistent directory is an error for explicit validation. Runtime loading, by contrast, treats an absent project rules directory as “no project overrides.”
 
 See [Lint Rules](../lint-rules/README.md) for configuration and tiers.
+
+### Lint coverage
+
+Loom's own config configures all four opt-in rule families, so its full run has no coverage gap ([ADR-0075](adr/ADR-0075-every-rule-family-is-on-or-declined.md)). A change that drops one fails `npm run verify` until the family is configured again or declined with its reason. `helper lint-coverage status` prints the decision for each family; the session-start reminder and the ignore list are in [operations](operations.md#lint-coverage-at-session-start).
 
 ## Model policy operations
 

@@ -24,7 +24,7 @@ export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
   ]),
   "post-tool-use": new Set(["lint-file", "type-diagnostics", "record-evidence", "record-orchestration-spawn", "surface-stop-check-notes"]),
   "subagent-start": new Set(["mark-subagent-active"]),
-  "session-start": new Set(["cleanup-stale-subagents", "resume-after-clear"]),
+  "session-start": new Set(["cleanup-stale-subagents", "resume-after-clear", "lint-coverage"]),
   "helper": new Set([
     "complete-wave-gate", "populate-task-graph", "write-verification-manifest", "upgrade-spec-trace", "amend-spec-trace", "revise-contract", "contract-status", "stop-check-plan", "red-then-green-status", "validate-task-graph", "repair-task-graph",
     "store-review-findings", "store-spec-check", "mark-tests-passed",
@@ -32,7 +32,7 @@ export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
     "reconcile-implementation-proof", "set-phase", "cleanup-state", "complete-orchestration", "lint-wave-gate", "validate-lint-rules",
     "panel-contract", "review-panel", "model-profiles", "review-packet", "reopen-completed-wave",
     "model-calibration", "panel-program", "standalone-review", "orchestration", "family-sites",
-    "security-audit", "accept-plan-design-review", "mutation-check",
+    "security-audit", "accept-plan-design-review", "mutation-check", "lint-coverage",
   ]),
 };
 

@@ -27,6 +27,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { OPT_IN_CONFIG_KEYS } from "../../src/linter/programmatic/config";
 
 const SCRIPT = join(__dirname, "..", "..", "..", "scripts", "lint-project.ts");
 const RULES_DIR = ".claude/linter/rules";
@@ -49,6 +50,17 @@ const SITE = "src/shape.ts::s.kind";
 /** One `no-any-type` violation, assembled so this file's own source does not carry one. */
 const ANY_ANNOTATED = (name: string): string => `export const ${name}:${" "}${"an"}y = 1;\n`;
 
+/** Every opt-in rule family, declined: the fixture's coverage is complete, so
+ *  a test sees only what it sets up. */
+const ALL_DECLINED: readonly Readonly<{ key: string; reason: string }>[] = [
+  { key: "boundaries", reason: "a one-file fixture has no layers" },
+  { key: "pureModules", reason: "a one-file fixture has no functional core" },
+  { key: "requireGovernance", reason: "a one-file fixture has no boundaries to govern by" },
+  { key: "docReferences", reason: "the fixture's documents are added per test" },
+];
+
+const BASE_CONFIG = { maxFunctionLines: 60, declined: ALL_DECLINED };
+
 let project: string;
 
 beforeEach(() => {
@@ -57,7 +69,7 @@ beforeEach(() => {
   mkdirSync(join(project, "src"));
   writeFileSync(join(project, "src", "shape.ts"), UNPROVEN_SWITCH);
   mkdirSync(join(project, RULES_DIR), { recursive: true });
-  writeFileSync(join(project, RULES_DIR, "config.json"), `${JSON.stringify({ maxFunctionLines: 60 }, null, 2)}\n`);
+  writeFileSync(join(project, RULES_DIR, "config.json"), `${JSON.stringify(BASE_CONFIG, null, 2)}\n`);
 });
 
 afterEach(() => rmSync(project, { recursive: true, force: true }));
@@ -74,13 +86,19 @@ type JsonReport = Readonly<{
   violations: readonly Readonly<{ file: string; rule: string }>[];
   errorCount: number;
   staleEntries: readonly string[];
+  coverage: "no-setup" | "set-up";
+  coverageGaps: readonly string[];
   excluded: readonly Readonly<{ file: string; reason: string }>[];
 }>;
 const jsonReport = (stdout: string): JsonReport => JSON.parse(stdout) as JsonReport;
 
-/** Rewrites the project's config.json with extra fields. */
+/** Rewrites the project's config.json with extra fields. A family a field
+ *  configures is no longer declined: the loader refuses both at once. */
 function configure(fields: Record<string, unknown>): void {
-  writeFileSync(join(project, RULES_DIR, "config.json"), `${JSON.stringify({ ...JSON.parse(configBytes()), ...fields }, null, 2)}\n`);
+  const current = JSON.parse(configBytes()) as Record<string, unknown> & { declined?: readonly { key: string }[] };
+  const declined = (current.declined ?? []).filter(({ key }) => !(key in fields));
+  const next = { ...current, ...fields, declined };
+  writeFileSync(join(project, RULES_DIR, "config.json"), `${JSON.stringify(next, null, 2)}\n`);
 }
 
 /** Grandfathers the fixture's one unproven switch, so a test starts from a clean run. */
@@ -93,7 +111,7 @@ describe("lint-project.ts, spawned over a temporary project", () => {
   it("--write-baseline records the site in the project config, keeps other fields, and is idempotent", () => {
     const written = lintProject("--write-baseline");
     expect(written.status, written.stderr).toBe(0);
-    expect(JSON.parse(configBytes())).toEqual({ maxFunctionLines: 60, switchTotalityBaseline: [SITE] });
+    expect(JSON.parse(configBytes())).toEqual({ ...BASE_CONFIG, switchTotalityBaseline: [SITE] });
     const first = configBytes();
 
     const rerun = lintProject("--write-baseline");
@@ -103,7 +121,9 @@ describe("lint-project.ts, spawned over a temporary project", () => {
     // The baselined site is excused and nothing in the baseline is stale.
     const linted = lintProject("--json");
     expect(linted.status, linted.stdout).toBe(0);
-    expect(jsonReport(linted.stdout)).toEqual({ violations: [], errorCount: 0, staleEntries: [], excluded: [] });
+    expect(jsonReport(linted.stdout)).toEqual({
+      violations: [], errorCount: 0, staleEntries: [], coverage: "set-up", coverageGaps: [], excluded: [],
+    });
   });
 
   it("a stale baseline entry exits 1 and is reported in the JSON output's staleEntries", () => {
@@ -291,8 +311,79 @@ describe("lint-project.ts, spawned over a temporary project", () => {
     rmSync(join(project, ".claude"), { recursive: true, force: true });
     expect(lintProject("--json").status).toBe(1);
     baselined();
-    expect(JSON.parse(configBytes(PI_RULES_DIR))).toEqual({ maxFunctionLines: 60, switchTotalityBaseline: [SITE] });
+    expect(JSON.parse(configBytes(PI_RULES_DIR))).toEqual({ ...BASE_CONFIG, switchTotalityBaseline: [SITE] });
     expect(lintProject("--json").status).toBe(0);
+  });
+});
+
+describe("lint coverage: every opt-in rule family is configured or declined", () => {
+  /** The fixture's config without its declined list: four gaps. */
+  function undeclined(): void {
+    const { declined: _declined, ...rest } = JSON.parse(configBytes()) as Record<string, unknown>;
+    writeFileSync(join(project, RULES_DIR, "config.json"), `${JSON.stringify(rest, null, 2)}\n`);
+  }
+
+  it("a family neither configured nor declined fails the full tier and is named with both ways to decide it", () => {
+    baselined();
+    undeclined();
+    const linted = lintProject("--json");
+    expect(linted.status).toBe(1);
+    const report = jsonReport(linted.stdout);
+    expect(report.violations).toEqual([]);
+    expect(report.coverageGaps).toHaveLength(4);
+    expect(report.coverageGaps[0]).toBe(
+      "coverage: 'boundaries' is off, so import boundaries between layers (no-cross-boundary-imports) checks nothing — " +
+      "configure it (lint-project --init infers what it can) or add { \"key\": \"boundaries\", \"reason\": \"…\" } to 'declined'",
+    );
+
+    const human = lintProject();
+    expect(human.status).toBe(1);
+    expect(human.stdout).toContain("✗ 4 rule families neither configured nor declined");
+    expect(lintProject("--summary").stdout).toContain("Coverage gaps: 4");
+  });
+
+  it("an empty list is a gap too: it checks nothing — and declining it, as the gap line says, is accepted", () => {
+    baselined();
+    configure({ boundaries: [] });
+    expect(jsonReport(lintProject("--json").stdout).coverageGaps).toEqual([
+      expect.stringContaining("coverage: 'boundaries' is off"),
+    ]);
+    const current = JSON.parse(configBytes()) as Record<string, unknown>;
+    writeFileSync(join(project, RULES_DIR, "config.json"), JSON.stringify({ ...current, declined: ALL_DECLINED }));
+    const declined = lintProject("--json");
+    expect(declined.status, declined.stderr).toBe(0);
+    expect(jsonReport(declined.stdout).coverageGaps).toEqual([]);
+  });
+
+  it("the immediate tier does not judge coverage — it is the per-edit set", () => {
+    baselined();
+    undeclined();
+    expect(lintProject("--json", "--tier=immediate").status).toBe(0);
+  });
+
+  it("a declined family needs its reason, and cannot be configured at the same time", () => {
+    writeFileSync(join(project, RULES_DIR, "config.json"), JSON.stringify({ declined: [{ key: "boundaries", reason: "" }] }));
+    const noReason = lintProject("--json");
+    expect(noReason.status).toBe(2);
+    expect(noReason.stderr).toContain("every declined family states why");
+
+    writeFileSync(join(project, RULES_DIR, "config.json"), JSON.stringify({ pureModules: ["src/"], declined: [{ key: "pureModules", reason: "none" }] }));
+    const both = lintProject("--json");
+    expect(both.status).toBe(2);
+    expect(both.stderr).toContain("'pureModules' is both configured and declined — keep one");
+  });
+
+  it("a project with no rules directory is told what it is missing, and does not fail for it", () => {
+    rmSync(join(project, ".claude"), { recursive: true, force: true });
+    writeFileSync(join(project, "src", "shape.ts"), "export const one = 1;\n");
+    const linted = lintProject();
+    expect(linted.status, linted.stdout).toBe(0);
+    expect(linted.stderr).toContain("note: no Loom lint setup — only the shipped rules run; `lint-project --init` turns every rule family on");
+    // A machine caller reads the same state from the JSON, not from stderr.
+    const json = lintProject("--json");
+    expect(json.status).toBe(0);
+    expect(json.stderr).not.toContain("no Loom lint setup");
+    expect(jsonReport(json.stdout)).toMatchObject({ coverage: "no-setup", coverageGaps: [] });
   });
 });
 
@@ -311,23 +402,118 @@ describe("lint-project.ts --init, then a lint run under the generated config", (
     }
   }
 
-  function init(): void {
+  function init(): string {
     const initialized = lintProject("--init");
     expect(initialized.status, initialized.stderr).toBe(0);
+    return initialized.stdout;
   }
 
-  it("a TypeScript project gets the TS starter, its present pure roots only, and lints clean", () => {
-    withFiles({ "tsconfig.json": "{}\n", "src/domain/order.ts": "export const total = (a: number, b: number): number => a + b;\n" });
-    init();
+  /** Decline every family `--init` left as a gap, so the next run judges the rest. */
+  function declineRemaining(dir: string = RULES_DIR): void {
+    const stored = JSON.parse(configBytes(dir)) as Record<string, unknown>;
+    const declined = OPT_IN_CONFIG_KEYS
+      .filter((key) => stored[key] === undefined)
+      .map((key) => ({ key, reason: "the fixture does not have it" }));
+    writeFileSync(join(project, dir, "config.json"), `${JSON.stringify({ ...stored, declined }, null, 2)}\n`);
+  }
+
+  /** A TypeScript project in the layered package structure, with documents. */
+  const LAYERED: Readonly<Record<string, string>> = {
+    "tsconfig.json": "{}\n",
+    "src/domain/order.ts": "export type Order = Readonly<{ id: string }>;\n",
+    "src/orchestrator/place-order.ts": "import type { Order } from \"../domain/order\";\n\nexport const place = (order: Order): string => order.id;\n",
+    "src/infra/pg-orders.ts": "import type { Order } from \"../domain/order\";\nimport { Client } from \"pg\";\n\nexport const client = (order: Order): Client => new Client({ application_name: order.id });\n",
+    "README.md": "# Shop\n\nThe order model is `src/domain/order.ts`.\n",
+    "docs/architecture.md": "# Architecture\n\nOrchestrators live in `src/orchestrator/`.\n",
+  };
+
+  it("a layered TypeScript project gets every family on, inferred from its tree, and lints clean", () => {
+    withFiles(LAYERED);
+    const output = init();
+    expect(output).toContain("✓ .claude/linter/rules/config.json: created");
+    for (const key of ["pureModules", "boundaries", "requireGovernance", "docReferences"]) expect(output).toContain(`on: ${key}`);
+    expect(output).not.toContain("not inferred:");
+    expect(output).not.toContain("Decide every family");
     expect(JSON.parse(configBytes())).toEqual({
-      pureModules: ["src/domain/"],
-      boundaries: [],
       maxFunctionLines: 50,
       excludeFromMaxLines: [".test.ts", ".spec.ts"],
+      pureModules: ["src/domain/"],
+      boundaries: [
+        {
+          module: "src/domain/",
+          description: "The pure functional core: it imports no shell layer.",
+          allow: ["src/domain/"],
+          deny: ["src/orchestrator/", "src/infra/"],
+        },
+        {
+          module: "src/orchestrator/",
+          description: "Shell orchestrators: they reach I/O through the domain's ports, never through infra or the API layer.",
+          allow: ["src/domain/", "src/orchestrator/"],
+          deny: ["src/infra/"],
+        },
+        {
+          module: "src/infra/",
+          description: "Adapters implement the domain's ports; they never call orchestrators or the API layer.",
+          allow: ["pg", "src/domain/", "src/infra/"],
+          deny: ["src/orchestrator/"],
+        },
+      ],
+      requireGovernance: ["src/"],
+      docReferences: {
+        govern: [
+          { path: "docs/", reason: "the project's documentation describes the tree as it is" },
+          { path: "README.md", reason: "the entry document names the commands and files a reader starts from" },
+        ],
+        sourceRoots: ["src"],
+      },
     });
     const linted = lintProject("--json");
     expect(linted.status, linted.stdout + linted.stderr).toBe(0);
-    expect(jsonReport(linted.stdout).staleEntries).toEqual([]);
+    expect(jsonReport(linted.stdout)).toMatchObject({ staleEntries: [], coverageGaps: [] });
+  });
+
+  it("the inferred boundaries refuse a new import that points outward", () => {
+    withFiles(LAYERED);
+    init();
+    withFiles({ "src/domain/leak.ts": "import { place } from \"../orchestrator/place-order\";\n\nexport const leak = place;\n" });
+    const linted = lintProject("--json");
+    expect(linted.status).toBe(1);
+    expect(jsonReport(linted.stdout).violations).toContainEqual(expect.objectContaining({ file: "src/domain/leak.ts", rule: "no-cross-boundary-imports" }));
+  });
+
+  it("a deny an import already breaks is left out and reported, so old code does not block the next edit", () => {
+    withFiles({ ...LAYERED, "src/domain/order.ts": "import { client } from \"../infra/pg-orders\";\n\nexport const clientKind = (): string => typeof client;\n" });
+    const output = init();
+    expect(output).toContain("note: boundaries: src/domain/ already imports src/infra/, so that deny is left out");
+    const domain = (JSON.parse(configBytes()) as { boundaries: { module: string; deny: string[] }[] }).boundaries[0];
+    expect(domain).toMatchObject({ module: "src/domain/", deny: ["src/orchestrator/"] });
+    expect(lintProject("--json").status).toBe(0);
+  });
+
+  it("baselines the debt the baselined rules already flag, so the first run is clean", () => {
+    withFiles({ ...LAYERED, "src/domain/shape.ts": UNPROVEN_SWITCH });
+    init();
+    expect(JSON.parse(configBytes()).switchTotalityBaseline).toEqual(["src/domain/shape.ts::s.kind"]);
+    expect(lintProject("--json").status).toBe(0);
+  });
+
+  it("names every family it cannot infer, and the run fails until each is decided", () => {
+    withFiles({ "tsconfig.json": "{}\n", "src/domain/order.ts": "export const total = (a: number, b: number): number => a + b;\n" });
+    const output = init();
+    expect(output).toContain("on: pureModules");
+    expect(output).toContain("not inferred: boundaries — fewer than two of");
+    expect(output).toContain("not inferred: requireGovernance — the boundaries do not govern every source file under src/");
+    expect(output).toContain("not inferred: docReferences — no document to govern");
+    expect(JSON.parse(configBytes())).toEqual({
+      maxFunctionLines: 50,
+      excludeFromMaxLines: [".test.ts", ".spec.ts"],
+      pureModules: ["src/domain/"],
+    });
+    expect(jsonReport(lintProject("--json").stdout).coverageGaps).toHaveLength(3);
+
+    declineRemaining();
+    const linted = lintProject("--json");
+    expect(linted.status, linted.stdout + linted.stderr).toBe(0);
   });
 
   it("the generated config holds the pure roots to purity", () => {
@@ -338,10 +524,11 @@ describe("lint-project.ts --init, then a lint run under the generated config", (
     expect(jsonReport(linted.stdout).violations).toContainEqual(expect.objectContaining({ file: "src/domain/clock.ts", rule: "no-io-in-pure-modules" }));
   });
 
-  it("a starter root the project does not have is left out, so the first run is not stale", () => {
+  it("a functional-core root the project does not have is not written, so the first run is not stale", () => {
     withFiles({ "tsconfig.json": "{}\n", "lib/index.ts": "export const one = 1;\n" });
-    init();
-    expect(JSON.parse(configBytes()).pureModules).toEqual([]);
+    expect(init()).toContain("not inferred: pureModules — none of the conventional functional-core roots");
+    expect(JSON.parse(configBytes()).pureModules).toBeUndefined();
+    declineRemaining();
     expect(lintProject("--json").status).toBe(0);
   });
 
@@ -351,13 +538,13 @@ describe("lint-project.ts --init, then a lint run under the generated config", (
       "src/main/java/com/shop/domain/model/Order.java": "package com.shop.domain.model;\n\npublic record Order(String id) {}\n",
       "src/main/java/com/shop/domain/service/Pricing.java": "package com.shop.domain.service;\n\npublic final class Pricing {\n  private Pricing() {}\n}\n",
     });
-    init();
+    expect(init()).toContain("not inferred: boundaries — boundaries are inferred for TypeScript's layered src/ structure only");
     expect(JSON.parse(configBytes())).toEqual({
-      pureModules: ["domain/model/", "domain/service/"],
-      boundaries: [],
       maxFunctionLines: 40,
       excludeFromMaxLines: [".test.java", "Test.java"],
+      pureModules: ["domain/model/", "domain/service/"],
     });
+    declineRemaining();
     const linted = lintProject("--json");
     expect(linted.status, linted.stdout + linted.stderr).toBe(0);
   });
@@ -367,13 +554,67 @@ describe("lint-project.ts --init, then a lint run under the generated config", (
     withFiles({ "tsconfig.json": "{}\n", "src/domain/order.ts": "export const one = 1;\n" });
     init();
     expect(JSON.parse(configBytes(PI_RULES_DIR)).pureModules).toEqual(["src/domain/"]);
+    declineRemaining(PI_RULES_DIR);
     const linted = lintProject("--json");
     expect(linted.status, linted.stdout + linted.stderr).toBe(0);
   });
 
-  it("leaves an existing rules directory untouched", () => {
-    withFiles({ "tsconfig.json": "{}\n", [`${RULES_DIR}/config.json`]: "{ \"maxFunctionLines\": 70 }\n" });
-    init();
-    expect(configBytes()).toBe("{ \"maxFunctionLines\": 70 }\n");
+  it("on an existing config, fills only the families neither configured nor declined, and a re-run changes nothing", () => {
+    withFiles({
+      ...LAYERED,
+      [`${RULES_DIR}/config.json`]: `${JSON.stringify({
+        maxFunctionLines: 70,
+        pureModules: ["src/orchestrator/"],
+        declined: [{ key: "boundaries", reason: "the team enforces layering in review" }],
+      })}\n`,
+    });
+    const output = init();
+    expect(output).toContain("✓ .claude/linter/rules/config.json: updated");
+    const written = JSON.parse(configBytes()) as Record<string, unknown>;
+    expect(written).toMatchObject({
+      maxFunctionLines: 70,
+      pureModules: ["src/orchestrator/"],
+      declined: [{ key: "boundaries", reason: "the team enforces layering in review" }],
+      docReferences: expect.objectContaining({ sourceRoots: ["src"] }),
+    });
+    expect(written.boundaries).toBeUndefined();
+    // The project declined boundaries and --init infers none for it, so no
+    // boundary governs src/ and governance cannot be inferred.
+    expect(output).toContain("not inferred: requireGovernance");
+
+    const first = configBytes();
+    const again = init();
+    expect(again).not.toContain("config.json: updated");
+    expect(configBytes()).toBe(first);
+  });
+
+  it("fills an empty list an older --init wrote, which turned nothing on", () => {
+    withFiles({ ...LAYERED, [`${RULES_DIR}/config.json`]: `${JSON.stringify({ maxFunctionLines: 50, boundaries: [], pureModules: [] })}\n` });
+    const output = init();
+    expect(output).toContain("on: boundaries");
+    expect(output).toContain("on: pureModules");
+    expect(JSON.parse(configBytes()).pureModules).toEqual(["src/domain/"]);
+    expect(lintProject("--json").status).toBe(0);
+  });
+
+  it("refuses --init in a project carrying both rules layouts (exit 2), writing nothing", () => {
+    withFiles({
+      ...LAYERED,
+      [`${RULES_DIR}/config.json`]: "{}\n",
+      [`${PI_RULES_DIR}/config.json`]: "{}\n",
+    });
+    const initialized = lintProject("--init");
+    expect(initialized.status).toBe(2);
+    expect(initialized.stderr).toContain(`the project carries ${RULES_DIR} and ${PI_RULES_DIR}`);
+    expect(configBytes()).toBe("{}\n");
+    expect(configBytes(PI_RULES_DIR)).toBe("{}\n");
+  });
+
+  it("refuses to fill a config the loader refuses (exit 2), leaving it as it was", () => {
+    withFiles({ "tsconfig.json": "{}\n", [`${RULES_DIR}/config.json`]: "{ \"exlude\": [] }\n" });
+    const initialized = lintProject("--init");
+    expect(initialized.status).toBe(2);
+    expect(initialized.stderr).toContain("unknown key 'exlude'");
+    expect(configBytes()).toBe("{ \"exlude\": [] }\n");
   });
 });

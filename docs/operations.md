@@ -339,6 +339,24 @@ It is **advisory and fail-open**: it never blocks an edit. Claude Code receives 
 | `LOOM_TYPE_DIAGNOSTICS=off` | Disable the check on both harnesses |
 | `LOOM_TYPE_DIAGNOSTICS_CACHE=/path` | Build-info and repeat memory location (default `$XDG_CACHE_HOME/loom/type-diagnostics`, else `~/.cache/loom/type-diagnostics`) |
 
+### Lint coverage at session start
+
+A fresh session checks the lint coverage of the project it opens in: a Claude Code session on `startup` or `clear` (not on `resume` or `compact`), and every Pi session start ([ADR-0075](adr/ADR-0075-every-rule-family-is-on-or-declined.md)). When the project has no Loom lint setup, or an opt-in rule family (`boundaries`, `pureModules`, `requireGovernance`, `docReferences`) that is neither configured nor declined, the user sees one line and the model gets the details with the commands to act on them: `lint-project --init` to turn on what the layout allows, a `declined` entry for a family left off on purpose, or the ignore list for a repository the user does not want Loom in.
+
+It never blocks and never writes to the repository. A config the linter refuses, or an ignore list that does not parse, is said in the same place. Claude Code runs it as the `lint-coverage.sh` SessionStart hook; Pi tells the operator at session start and the model with the first prompt. A Pi subagent stays quiet.
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper lint-coverage status                       # each family: configured, declined or a gap
+bun "$LOOM_DIR/engine/src/cli.ts" helper lint-coverage ignore --reason "not ours"   # silence the reminder for this repository
+bun "$LOOM_DIR/engine/src/cli.ts" helper lint-coverage unignore                     # and turn it back on
+```
+
+The commands act on the project the working directory sits in.
+
+| Variable | Effect |
+|---|---|
+| `LOOM_LINT_COVERAGE_IGNORE=/path` | The ignore list's location (default `$XDG_CONFIG_HOME/loom/lint-coverage-ignore.json`, else `~/.config/loom/lint-coverage-ignore.json`). The file is `{ "ignore": [{ "path", "reason" }] }`, each path a project root |
+
 ## Ending an orchestration
 
 ### Completing an orchestration
