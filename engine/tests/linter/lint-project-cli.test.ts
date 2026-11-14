@@ -214,6 +214,22 @@ describe("lint-project.ts, spawned over a temporary project", () => {
     expect(jsonReport(result.stdout).staleEntries).toEqual([]);
   });
 
+  it("reports a doc reference through a file as dangling, not as a lint error (Bun's stat throws ENOTDIR)", () => {
+    baselined();
+    writeFileSync(join(project, "README.md"), "# Readme\n");
+    writeFileSync(join(project, "src", "through-files.ts"), "// Reads `README.md/child` and `src/shape.ts/x`.\nexport const one = 1;\n");
+    configure({ docReferences: { govern: [{ path: "src/", reason: "comments name the tree" }] } });
+
+    const linted = lintProject("--json");
+    expect(linted.status, linted.stderr).toBe(1);
+    const report = jsonReport(linted.stdout);
+    expect(report.errorCount).toBe(0);
+    expect(report.violations.filter(({ rule }) => rule === "no-dangling-doc-reference")).toEqual([
+      expect.objectContaining({ file: "src/through-files.ts" }),
+      expect.objectContaining({ file: "src/through-files.ts" }),
+    ]);
+  });
+
   it("refuses to run on an unknown config key (exit 2), naming it", () => {
     configure({ exlude: [] });
     const linted = lintProject("--json");

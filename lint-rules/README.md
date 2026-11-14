@@ -441,6 +441,12 @@ reads nothing until `docReferences` names what it governs:
   reported with the parser's reason. **An ADR id** must name a file in
   `docs/adr/`, numbered with an ADR prefix or with adr-tools' bare four digits.
 
+In a git repository the project is the tree as every clone has it: git's
+files, tracked or not yet added, never an ignored or deleted one. A runtime
+directory or an installed package that exists on one machine resolves on
+none, so the rule answers the same on a laptop, in a fresh worktree and in CI.
+Outside git the rule reads the filesystem.
+
 A mention of something deliberately gone is history: write it without
 backticks, or baseline it. The rule does not guess which names are history.
 

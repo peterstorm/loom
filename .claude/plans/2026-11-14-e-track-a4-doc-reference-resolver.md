@@ -12,6 +12,7 @@
 - **Two more `DanglingReason` arms.** `spec-unreadable` carries the spec parser's reason. `absolute-path` refuses a path that names one machine's checkout.
 - **Test code feeds the corpus with its declarations only**, so a doc may name a test helper, but a name a test merely uses keeps nothing alive.
 - **Found by the Fugue dry run, fixed here:** adr-tools ADR numbering, YAML and TOML in the corpus, and media types refused as references.
+- **The snapshot is git's view of the tree**, not the disk: a fresh worktree showed that runtime directories and installed packages resolved only where they existed. Loom's baseline is 514 entries as a result.
 - **Markdown files are lintable**, but `lint-project` lints a Markdown file only where `docReferences` governs it.
 
 ## Why this item first

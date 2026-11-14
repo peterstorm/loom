@@ -80,7 +80,13 @@ Each failure is one arm of the closed `DanglingReason`.
 Lockfiles are excluded.
 
 **Shape.** `ProjectSnapshot` is the one port. Its filesystem adapter is `project-snapshot.ts`, the only
-impure module; its in-memory fake lives in the tests. The index is lazy and memoized. The rule declares
+impure module; its in-memory fake lives in the tests. In a git repository the snapshot is the tree as every
+clone has it: git's files, tracked or not yet added, never an ignored or deleted one, listed through the
+engine's one policy-bound Git seam. The filesystem walk is the fallback only where there is no git or no
+repository; a broken repository fails the lint closed. Reading the disk instead made the answer machine-dependent. A runtime directory or
+an installed package resolved where it happened to exist and dangled in a fresh worktree and in CI. A word an
+ignored file held kept a doc alive on one machine only. A path that runs through a file (`ENOTDIR`) names
+nothing; it is not a failure. The index is lazy and memoized. The rule declares
 `firstCallSetup`, so building the index is charged to no per-file deadline. It runs in the immediate tier
 and again in the full tier, where the unedited doc is read against the edited code. It is a baseline owner,
 so `--write-baseline` and the stale-entry pass apply.
@@ -108,8 +114,11 @@ from `engine/tests/support/` into `engine/src/linter/markdown.ts` so the rule an
   - A disk cache was not added.
 - Token resolution is deliberately lenient: a word that occurs anywhere in the source resolves, even when it
   is not the symbol the doc means.
-- Loom starts with a 465-entry baseline. It is mostly decision-time history in ADRs, target-project paths in
-  guidance, comment examples, and plans whose specs are missing or unparseable.
+- Loom starts with a 514-entry baseline. It is mostly decision-time history in ADRs, target-project paths in
+  guidance, comment examples, plans whose specs are missing or unparseable, and runtime or installed
+  locations the snapshot deliberately does not see (the state directory, completion reports, node_modules).
+  A declared list of runtime locations would let the last group leave the baseline; that is a separate
+  decision.
 - A dry run on Fugue (`main` at a5c8df08, 1,443 files, a proposed scope over `docs/`, the package
   sources and both plan directories) reports 1,444 references in 277 files, in about 2 s for the whole
   lint. 1,072 are words the source does not hold. Most of those name an external system the code never
