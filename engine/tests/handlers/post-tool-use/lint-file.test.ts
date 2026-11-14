@@ -9,12 +9,13 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import fc from "fast-check";
 import { editedFilePath } from "../../../src/core/tool-vocabulary";
 import { notAJsonObject, wireOf } from "../../fixtures/json-wire";
+import { REPO_ROOT } from "../../linter/loom-project-config";
 
 
 // --- Test helpers ---
@@ -254,6 +255,51 @@ describe("PostToolUse lint-file handler", () => {
       });
       const result = await handler(stdin, []);
       expect(result.kind).toBe("block");
+    });
+  });
+
+  describe("project rules: the edited file's project, never the hook's cwd", () => {
+    // The hook process runs in whatever directory the session's shell is in —
+    // here the test runner's, never the temp project — so only a lookup that
+    // starts at the edited file can find the temp project's rules.
+    let tmpDir: string;
+    // Spelled in two pieces so this file does not trip the rule it exercises.
+    const ANY_TYPED = `export const loose: ${"any"} = 1;\n`;
+
+    beforeEach(() => {
+      tmpDir = createTempDir("project-rules");
+    });
+
+    afterEach(() => {
+      rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    /** A project at `root` whose rules disable the shipped no-any-type rule. */
+    function projectDisablingAnyType(root: string): void {
+      const rulesDir = join(root, ".claude", "linter", "rules");
+      mkdirSync(rulesDir, { recursive: true });
+      const shipped: unknown = JSON.parse(readFileSync(join(REPO_ROOT, "lint-rules", "no-any-type.json"), "utf-8"));
+      writeFileSync(join(rulesDir, "no-any-type.json"), JSON.stringify({ ...(shipped as object), enabled: false }));
+    }
+
+    /** An any-typed file two directories below `root`. */
+    function editedFile(root: string): string {
+      mkdirSync(join(root, "src", "deep"), { recursive: true });
+      const filePath = join(root, "src", "deep", "loose.ts");
+      writeFileSync(filePath, ANY_TYPED);
+      return filePath;
+    }
+
+    it("applies the rules of the project the edited file sits in, from a directory below its root", async () => {
+      projectDisablingAnyType(tmpDir);
+      const result = await handler(makeStdin({ tool_input: { file_path: editedFile(tmpDir) } }), []);
+      expect(result).toEqual({ kind: "allow" });
+    });
+
+    it("applies only the shipped rules to a file in no project", async () => {
+      const result = await handler(makeStdin({ tool_input: { file_path: editedFile(tmpDir) } }), []);
+      expect(result.kind).toBe("block");
+      expect((result as { kind: "block"; message: string }).message).toContain("no-any-type");
     });
   });
 

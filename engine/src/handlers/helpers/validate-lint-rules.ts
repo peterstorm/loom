@@ -13,7 +13,7 @@
 import { existsSync } from "node:fs";
 import type { HookHandler } from "../../types";
 import { loadRules } from "../../linter/loader";
-import { DEFAULT_RULES_DIR, projectRulesDir } from "../../config";
+import { DEFAULT_RULES_DIR, enclosingProjectRulesDir } from "../../config";
 
 const handler: HookHandler = async (_stdin, args) => {
   const dirArg = args.find((a) => !a.startsWith("-"));
@@ -28,16 +28,16 @@ const handler: HookHandler = async (_stdin, args) => {
     };
   }
 
-  // No argument: the project's one rules directory — the one both harnesses'
-  // edit hooks read — or none.
-  const projectDir = dirArg ?? projectRulesDir();
+  // No argument: the rules directory of the project the working directory
+  // sits in — found the way both harnesses' edit hooks find it — or none.
+  const projectDir = dirArg ?? enclosingProjectRulesDir(process.cwd());
 
   try {
     const rules = loadRules(DEFAULT_RULES_DIR, projectDir, "full");
     const projectCount = rules.filter((r) => r.source === "project").length;
     if (projectDir === null) {
       process.stderr.write(
-        "NOTE: no project rules directory (.claude/linter/rules or .pi/linter/rules) under cwd — 0 project rules validated. If you just wrote invariant rules, pass their directory explicitly.\n"
+        "NOTE: no project rules directory (.claude/linter/rules or .pi/linter/rules) in cwd or above it — 0 project rules validated. If you just wrote invariant rules, pass their directory explicitly.\n"
       );
     }
     process.stderr.write(

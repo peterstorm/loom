@@ -77,6 +77,7 @@ bun engine/src/cli.ts <hook-type> <handler> [arguments]
 | `surface-stop-check-notes.sh` | PostToolUse: Task/Agent | Hands the orchestrating session the stop-check notes its agents left |
 | `cleanup-stale-subagents.sh` | SessionStart | Sweeps stale subagent tracking and binding files |
 | `resume-after-clear.sh` | SessionStart: clear | Restores the `/loom` execution context after `/clear` |
+| `lint-coverage.sh` | SessionStart: startup, clear | Tells the model and the user when the session's project has no lint setup or a rule family neither configured nor declined ([ADR-0075](adr/ADR-0075-every-rule-family-is-on-or-declined.md)). Silent for a repository on the user's ignore list; never blocks |
 | `dispatch.sh` | SubagentStop | Runs the stop checks, then routes by agent type to the handlers below (`engine/src/handlers/subagent-stop/`) |
 | ↳ `capture-orchestration-result` | via dispatch, first | Request-bound capture of an engine-issued agent's result into its Run Directory |
 | ↳ `advance-phase` | via dispatch | Advances `current_phase` once the phase's artifact is on disk, and records `spec_file` and `plan_file` |

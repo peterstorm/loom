@@ -20,10 +20,11 @@ scope by being listed, and nothing is out of scope by being forgotten.
 | Which files must be pure? | Every non-test file under a `pureModules` root | `pureModules` |
 | …except? | The declared shells inside the roots, each with the I/O it does | `impureModules: [{ path, reason }]` |
 | Which files must belong to a boundary? | Every file under a `requireGovernance` root — an ungoverned file is a violation, not an allow | `requireGovernance`, `boundaries` |
+| Which rule families must a project decide? | Every opt-in family — `boundaries`, `pureModules`, `requireGovernance`, `docReferences` — is configured, or declined with its reason. One that is neither is a coverage gap, and a gap fails the full tier | `declined: [{ key, reason }]` |
 
 Every subtracting list is checked for decay on each full run: an exclusion, root, shell, boundary, capability grant or baseline entry that names nothing fails the run.
 
-With no project configuration the boundary rule governs nothing and the purity rule holds nothing pure; the other rules apply as shipped. Nothing Loom-specific is hard-coded: Loom's own roots, shells, boundaries and exclusions are in its `.claude/linter/rules/config.json`.
+With no project configuration the boundary rule governs nothing and the purity rule holds nothing pure; the other rules apply as shipped. Such a project is not failed for it, but it is not left to forget either: `lint-project` prints a notice, and each session in it starts with a reminder (to the model and the user) until `lint-project --init` turns every family on or the user silences it for the repository (ADR-0075). Nothing Loom-specific is hard-coded: Loom's own roots, shells, boundaries and exclusions are in its `.claude/linter/rules/config.json`.
 
 ## Where Rules Live
 
@@ -146,7 +147,10 @@ The parse is strict: an unknown key (at the top level, in a boundary, an exempti
     { "path": "src/domain/order-repository.ts", "reason": "reads and writes orders through the database pool" }
   ],
   "maxFunctionLines": 40,
-  "excludeFromMaxLines": [".test.ts", ".spec.ts", "Test.java"]
+  "excludeFromMaxLines": [".test.ts", ".spec.ts", "Test.java"],
+  "declined": [
+    { "key": "docReferences", "reason": "the project keeps no documentation in the repository" }
+  ]
 }
 ```
 
@@ -172,6 +176,7 @@ The parse is strict: an unknown key (at the top level, in a boundary, an exempti
 | `wireCastBaseline` | `string[]` | `[]` | Grandfathered `path::as T` / `path::name: T` sites `no-wire-cast` excuses, one entry per site |
 | `docReferences` | `{ govern, plans?, exclude?, sourceRoots? }` | absent (reads nothing) | The documents and comments `no-dangling-doc-reference` holds to the project. `govern` is a non-empty `{ path, reason }[]`; see [`no-dangling-doc-reference`](#no-dangling-doc-reference) |
 | `docReferenceBaseline` | `string[]` | `[]` | Grandfathered `path::reference` mentions `no-dangling-doc-reference` excuses, one entry per reference |
+| `declined` | `{ key, reason }[]` | `[]` | The opt-in families (`boundaries`, `pureModules`, `requireGovernance`, `docReferences`) the project leaves off on purpose, each with why. A key both configured and declined, declined twice or without a reason is refused. A family neither configured nor declined fails the full tier as a coverage gap; an empty `boundaries` or `pureModules` list checks nothing, so it counts as not configured |
 
 ### BoundaryRule
 

@@ -14,7 +14,7 @@
  * the default for a scoping key is "check nothing" or "check everything".
  */
 
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { DEFAULT_TEST_FILE_SUFFIXES, isTestFileBySuffixes } from "../../core/test-file-classification";
 import { describeExcludePatternListError, parseExcludePatternList, type ExcludePattern } from "../exclude-pattern";
 import { isPositiveInt, type PositiveInt } from "../positive-int";
@@ -77,7 +77,23 @@ export interface ProgrammaticConfig {
   /** Grandfathered `path::reference` keys the no-dangling-doc-reference rule
    *  excuses, one occurrence each. */
   readonly docReferenceBaseline?: Baseline;
+  /** The opt-in rule families the project has decided to leave off, each with
+   *  its reason. A family neither configured nor declined is a coverage gap
+   *  (`linter/lint-coverage.ts`), which fails `lint-project`. */
+  readonly declined?: readonly DeclinedFamily[];
 }
+
+/**
+ * The config keys that each turn a rule family on, and that check nothing while
+ * absent: no boundaries, nothing pure, no governance root, no governed
+ * document. Every other key has a working default. These are the families a
+ * project can forget, so each must be configured or declined with a reason.
+ */
+export const OPT_IN_CONFIG_KEYS = Object.freeze(["boundaries", "pureModules", "requireGovernance", "docReferences"] as const);
+export type OptInConfigKey = (typeof OPT_IN_CONFIG_KEYS)[number];
+
+/** One opt-in family left off on purpose: the config key it would be, and why. */
+export type DeclinedFamily = Readonly<{ key: OptInConfigKey; reason: string }>;
 
 /** Every key `config.json` may carry — the one list the strict parse checks against. */
 export const PROGRAMMATIC_CONFIG_KEYS: readonly (keyof ProgrammaticConfig)[] = Object.freeze([
@@ -99,6 +115,7 @@ export const PROGRAMMATIC_CONFIG_KEYS: readonly (keyof ProgrammaticConfig)[] = O
   "wireCastBaseline",
   "docReferences",
   "docReferenceBaseline",
+  "declined",
 ]);
 
 /** Default config when no project config exists */
@@ -126,6 +143,27 @@ export const PROJECT_RULES_LAYOUTS: readonly string[] = Object.freeze([CLAUDE_PR
  *  when the project has none. Pure — the caller owns the presence probe. */
 export const projectRulesLayout = (isPresent: (layout: string) => boolean): string | null =>
   PROJECT_RULES_LAYOUTS.find(isPresent) ?? null;
+
+/** An absolute directory and every directory above it, nearest first. */
+const selfAndAncestors = (directory: string): readonly string[] =>
+  dirname(directory) === directory ? [directory] : [directory, ...selfAndAncestors(dirname(directory))];
+
+/**
+ * The root of the project an absolute directory sits in: the nearest
+ * directory, itself or above, that holds a rules layout; else the nearest that
+ * holds `.git` (a repository with no project rules); else null. The one answer
+ * to "which project is this": the edit hook asks it from the edited file's
+ * directory, `lint-project` and `helper validate-lint-rules` from the working
+ * directory, so a shell that has wandered into `engine/` — or into another
+ * checkout — never lints a file under the wrong project's rules. Pure — the
+ * caller owns the presence probe, which receives absolute paths.
+ */
+export function findProjectRoot(directory: string, isPresent: (path: string) => boolean): string | null {
+  const chain = selfAndAncestors(directory);
+  return chain.find((dir) => projectRulesLayout((layout) => isPresent(join(dir, layout))) !== null)
+    ?? chain.find((dir) => isPresent(join(dir, ".git")))
+    ?? null;
+}
 
 /**
  * The root of the project a rules directory belongs to — the frame its
@@ -320,8 +358,40 @@ function parseConfigObject(json: unknown, filePath: string): ProgrammaticConfig 
     wireCastBaseline: parseOptionalBaseline(obj.wireCastBaseline, filePath, "wireCastBaseline"),
     docReferences: parseOptionalDocReferences(obj.docReferences, filePath),
     docReferenceBaseline: parseOptionalBaseline(obj.docReferenceBaseline, filePath, "docReferenceBaseline"),
+    declined: parseOptionalDeclined(obj, filePath),
   };
   return Object.freeze(presentFields(parsed));
+}
+
+const isOptInKey = (key: unknown): key is OptInConfigKey =>
+  typeof key === "string" && (OPT_IN_CONFIG_KEYS as readonly string[]).includes(key);
+
+/**
+ * `declined: [{ key, reason }]`. Each entry names an opt-in key the document
+ * does not carry: a family both configured and declined is a contradiction,
+ * refused rather than read one way or the other. A key declined twice, or
+ * declined with no reason, is refused too.
+ */
+function parseOptionalDeclined(obj: Readonly<Record<string, unknown>>, filePath: string): DeclinedFamily[] | undefined {
+  const raw = obj.declined;
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) return refuse(`${filePath}: 'declined' must be an array of { key, reason }`);
+  const declined = raw.map((entry: unknown, index): DeclinedFamily => {
+    const where = `${filePath}: declined[${index}]`;
+    const fields = plainObject(entry, where);
+    refuseUnknownKeys(fields, ["key", "reason"], where);
+    const { key, reason } = fields;
+    if (!isOptInKey(key)) return refuse(`${where}.key must be one of ${OPT_IN_CONFIG_KEYS.join(", ")}`);
+    if (obj[key] !== undefined) return refuse(`${where}: '${key}' is both configured and declined — keep one`);
+    if (typeof reason !== "string" || reason.trim().length === 0) {
+      return refuse(`${where}.reason must be a non-empty string — every declined family states why`);
+    }
+    return Object.freeze({ key, reason });
+  });
+  const keys = declined.map(({ key }) => key);
+  const twice = keys.find((key, index) => keys.indexOf(key) !== index);
+  if (twice !== undefined) refuse(`${filePath}: 'declined' lists '${twice}' twice`);
+  return declined;
 }
 
 const DOC_REFERENCE_KEYS: readonly (keyof DocReferenceScope)[] = Object.freeze(["govern", "plans", "exclude", "sourceRoots"]);

@@ -31,7 +31,7 @@ import { UTILITY_AGENTS } from "./core/phase-policy";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
 import { guardedDirsOf, protectedDirsOf, type GuardedLocations } from "./core/guarded-locations";
 import { nonEmptyOf, type NonEmpty } from "./core/orchestration-contract/identity";
-import { projectRulesLayout } from "./linter/programmatic/config";
+import { findProjectRoot, projectRulesLayout } from "./linter/programmatic/config";
 import { projectRootForStateFile } from "./core/phase-artifact-paths";
 import { observeGitProbe, type GitProbeStep } from "./utils/git-probe";
 import { observePathPresence } from "./utils/path-presence";
@@ -638,4 +638,13 @@ export const typeDiagnosticsCacheDir = (env: Readonly<Record<string, string | un
 export const projectRulesDir = (root: string = process.cwd()): string | null => {
   const layout = projectRulesLayout((candidate) => pathExistsFailClosed(join(root, candidate)));
   return layout === null ? null : join(root, layout);
+};
+
+/** The rules directory of the project `directory` sits in, found by walking up
+ *  from it (`findProjectRoot`), or null when that project has none. The edit
+ *  hooks pass the edited file's directory, so the rules that govern a file
+ *  never depend on where the harness process or its shell happens to be. */
+export const enclosingProjectRulesDir = (directory: string): string | null => {
+  const root = findProjectRoot(resolve(directory), pathExistsFailClosed);
+  return root === null ? null : projectRulesDir(root);
 };

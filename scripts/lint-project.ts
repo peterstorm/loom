@@ -11,7 +11,14 @@
  *   bun /path/to/loom/scripts/lint-project.ts [options] [file patterns...]
  *
  * Options:
- *   --init          Create .claude/linter/rules/ with starter config (interactive)
+ *   --init          Turn every rule family on: infer boundaries, the pure core,
+ *                   governance and doc references from the layout into the
+ *                   project's config.json (creating it; filling only families
+ *                   neither configured nor declined), then baseline existing debt
+ *
+ * A full-tier run fails on a coverage gap: an opt-in rule family (boundaries,
+ * pureModules, requireGovernance, docReferences) a set-up project has neither
+ * configured nor declined in config.json's `declined` list.
  *   --tier=full     Run full tier (default: full)
  *   --tier=immediate  Run immediate tier only (regex rules, the import-boundary rules, switch-totality,
  *                   no-duplicate-block, no-wire-cast and no-dangling-doc-reference, fast)
@@ -46,7 +53,6 @@ import type * as LinterConfig from "../engine/src/linter/programmatic/config.ts"
 import type * as LinterLoader from "../engine/src/linter/loader.ts";
 import type * as ProjectScope from "../engine/src/linter/project-scope.ts";
 import type * as ProjectWalk from "../engine/src/linter/project-walk.ts";
-import type * as PurityRule from "../engine/src/linter/programmatic/no-io-in-pure-modules.ts";
 import type * as DocReferenceRule from "../engine/src/linter/programmatic/no-dangling-doc-reference.ts";
 import type { ReasonedPath } from "../engine/src/linter/types.ts";
 import type * as ProgrammaticRules from "../engine/src/linter/programmatic/index.ts";
@@ -54,6 +60,8 @@ import type * as Baselines from "../engine/src/linter/programmatic/baseline.ts";
 import type * as BaselineConfig from "../engine/src/linter/programmatic/baseline-config.ts";
 import type { BaselineOwner } from "../engine/src/linter/programmatic/baseline.ts";
 import type * as PlainRecord from "../engine/src/core/plain-record.ts";
+import type * as StarterConfig from "../engine/src/linter/starter-config.ts";
+import type * as BoundaryRule from "../engine/src/linter/programmatic/no-cross-boundary-imports.ts";
 
 // ---------------------------------------------------------------------------
 // Resolve loom installation
@@ -69,16 +77,19 @@ if (!existsSync(DEFAULT_RULES_DIR)) {
   process.exit(2);
 }
 
-const { lintFiles }: typeof LinterIndex = await import(join(LOOM_ROOT, "engine/src/linter/index.ts"));
-const { CLAUDE_PROJECT_RULES_DIR, PI_PROJECT_RULES_DIR, PROJECT_RULES_LAYOUTS, projectRulesLayout }: typeof LinterConfig =
+const { coverageGapLine, coverageGaps, lintCoverage, lintFiles }: typeof LinterIndex =
+  await import(join(LOOM_ROOT, "engine/src/linter/index.ts"));
+const { inferStarterConfig, TYPESCRIPT_LAYERS }: typeof StarterConfig =
+  await import(join(LOOM_ROOT, "engine/src/linter/starter-config.ts"));
+const { extractImports }: typeof BoundaryRule =
+  await import(join(LOOM_ROOT, "engine/src/linter/programmatic/no-cross-boundary-imports.ts"));
+const { CLAUDE_PROJECT_RULES_DIR, PI_PROJECT_RULES_DIR, PROJECT_RULES_LAYOUTS, findProjectRoot, projectRulesLayout }: typeof LinterConfig =
   await import(join(LOOM_ROOT, "engine/src/linter/programmatic/config.ts"));
 const { authoritativeLintContext, loadProjectConfig }: typeof LinterLoader = await import(join(LOOM_ROOT, "engine/src/linter/loader.ts"));
 const { scopeOf, scopeDrift }: typeof ProjectScope =
   await import(join(LOOM_ROOT, "engine/src/linter/project-scope.ts"));
 const { lintedProjectFiles, walkLintableFiles }: typeof ProjectWalk =
   await import(join(LOOM_ROOT, "engine/src/linter/project-walk.ts"));
-const { matchesModulePath }: typeof PurityRule =
-  await import(join(LOOM_ROOT, "engine/src/linter/programmatic/no-io-in-pure-modules.ts"));
 const { readingOf }: typeof DocReferenceRule =
   await import(join(LOOM_ROOT, "engine/src/linter/programmatic/no-dangling-doc-reference.ts"));
 const { baselineOwners }: typeof ProgrammaticRules = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/index.ts"));
@@ -92,22 +103,14 @@ const { isRecord }: typeof PlainRecord = await import(join(LOOM_ROOT, "engine/sr
 // ---------------------------------------------------------------------------
 
 /**
- * The project root: the nearest ancestor holding a linter rules directory
- * (`.claude/linter/rules` or `.pi/linter/rules`), else the nearest ancestor
- * holding `.git` (the repository root), else the starting directory. Running
- * from a subdirectory such as `engine/` — which has its own package.json —
- * still finds the repository's rules, so the same command lints the same tree
- * wherever it is started.
+ * The project root: the engine's `findProjectRoot` from the working directory
+ * (the nearest directory holding a rules layout, else the nearest holding
+ * `.git`), else the working directory itself. Running from a subdirectory such
+ * as `engine/` — which has its own package.json — still finds the repository's
+ * rules, and the edit hooks find a file's project by the same lookup, so the
+ * runner and the hooks never disagree about which rules govern a file.
  */
-function findProjectRoot(startDir: string): string {
-  const ancestors = (dir: string): string[] => dir === dirname(dir) ? [dir] : [dir, ...ancestors(dirname(dir))];
-  const chain = ancestors(resolve(startDir));
-  return chain.find((dir) => PROJECT_RULES_LAYOUTS.some((layout) => existsSync(join(dir, layout))))
-    ?? chain.find((dir) => existsSync(join(dir, ".git")))
-    ?? resolve(startDir);
-}
-
-const PROJECT_ROOT = findProjectRoot(process.cwd());
+const PROJECT_ROOT = findProjectRoot(resolve(process.cwd()), existsSync) ?? resolve(process.cwd());
 const presentLayouts = PROJECT_RULES_LAYOUTS.filter((layout) => existsSync(join(PROJECT_ROOT, layout)));
 
 /**
@@ -150,8 +153,8 @@ let projectTree: readonly string[] | undefined;
  * run, the scope-drift universe, `--init`'s starter roots and
  * `--write-baseline`'s sources all read this one walk, so they cannot disagree
  * about the tree, and a targeted run with the drift pass off never walks the
- * project at all. A run reads one config: `--init`, the one caller without
- * one, exits before the config is loaded.
+ * project at all. `--init` is the one run whose config changes mid-run; it
+ * clears the walk before baselining under the new one.
  */
 function projectFiles(config: LinterConfig.ProgrammaticConfig | null): readonly string[] {
   projectTree ??= lintedProjectFiles(PROJECT_ROOT, config);
@@ -175,55 +178,20 @@ function applyExclusions(files: readonly string[], exclusions: readonly Reasoned
 // Init command — scaffold linter config
 // ---------------------------------------------------------------------------
 
-/** The starter programmatic config for a project's detected languages; Java's
- *  settings win where both are present. Each pure root is a candidate, kept
- *  only when it names a file in the project (`present`): a root that matches
- *  nothing is stale scoping, which fails the very next run. */
-function starterLinterConfig(hasTs: boolean, hasJava: boolean, present: (root: string) => boolean): Record<string, unknown> {
-  const config: Record<string, unknown> = {};
-  if (hasTs) {
-    // Directory roots (trailing `/`): every non-test file beneath is pure
-    // unless `impureModules` names it with its reason. No globs — a glob is
-    // refused, because it used to match nothing silently.
-    config.pureModules = [
-      "src/domain/",
-      "src/types/",
-    ].filter(present);
-    config.boundaries = [];
-    config.maxFunctionLines = 50;
-    config.excludeFromMaxLines = [".test.ts", ".spec.ts"];
-  }
-  if (hasJava) {
-    // Directory patterns match at any path boundary (`isPureModule`), so these
-    // cover every package's domain model and services. Glob segments (`**`)
-    // are not supported — a starter written with them matched nothing.
-    config.pureModules = [
-      "domain/model/",
-      "domain/service/",
-    ].filter(present);
-    config.boundaries = [];
-    config.maxFunctionLines = 40;
-    config.excludeFromMaxLines = [".test.java", "Test.java"];
-  }
-  return config;
-}
+/** The step a family `--init` could not infer adds: lint-project fails until it is decided. */
+const DECIDE_UNINFERRED: readonly string[] = [
+  "  - Decide every family listed above as not inferred: configure it in",
+  "    config.json, or add { \"key\": \"<key>\", \"reason\": \"<why>\" } to its",
+  "    'declined' list. lint-project fails until each one is decided.",
+];
 
 const INIT_NEXT_STEPS: readonly string[] = [
-  "",
-  "Next steps:",
-  "  1. Edit config.json to define your architectural boundaries and the",
-  "     functional core (pureModules lists only the starter roots this",
-  "     project already has)",
-  "  2. Add regex rule overrides as .json files in rules/",
-  "  3. Run with --write-baseline to grandfather pre-existing unproven",
-  "     switches and if-chains, and blocks already written twice",
-  "     (switch-totality applies to every non-test TypeScript file and",
-  "     no-duplicate-block to every TypeScript and JavaScript file, tests",
-  "     included, by default; new sites must prove totality, new copies",
-  "     are refused)",
-  "  4. Run this script again to lint your codebase",
+  "  - Run this script again: what it reports beyond the baselines is real",
+  "    debt (import-boundary and purity violations are not baselined).",
+  "  - Add regex rule overrides as .json files in rules/ if the project needs them.",
   "",
   "Available config fields:",
+  "  declined      — [{ key, reason }] opt-in families left off on purpose",
   "  exclude       — [{ path, reason }] never linted (vendored, generated)",
   "  boundaries    — import direction rules per module",
   "  requireGovernance — roots where a file no boundary names is a violation",
@@ -241,32 +209,61 @@ const INIT_NEXT_STEPS: readonly string[] = [
   "See: lint-rules/README.md for full documentation",
 ];
 
-function initLinterConfig(): void {
-  if (EXISTING_RULES_DIR !== null) {
-    console.log(`Linter rules directory already exists: ${relative(PROJECT_ROOT, RULES_DIR)}`);
-    console.log("To add rules, create .json files there. See loom lint-rules/README.md.");
-    return;
+/** The project's config document as written, or null when there is none. Read
+ *  only after the engine's loader accepted it (`projectConfig`). */
+function storedConfig(): Record<string, unknown> | null {
+  const path = join(RULES_DIR, "config.json");
+  if (!existsSync(path)) return null;
+  const stored: unknown = JSON.parse(readFileSync(path, "utf-8"));
+  if (!isRecord(stored)) {
+    console.error(`${relative(PROJECT_ROOT, path)} is not a JSON object`);
+    process.exit(2);
   }
+  return stored;
+}
 
-  mkdirSync(RULES_DIR, { recursive: true });
+/** What `--init` infers from: the tree, the languages, each layer file's imports. */
+function projectLayout(config: LinterConfig.ProgrammaticConfig | null): StarterConfig.ProjectLayout {
+  const files = projectFiles(config).map(projectPath);
+  const inLayer = (file: string): boolean => TYPESCRIPT_LAYERS.some((layer) => file.startsWith(layer.dir)) && extname(file) !== ".md";
+  return {
+    files,
+    languages: {
+      typescript: ["tsconfig.json", "tsconfig.base.json"].some((name) => existsSync(join(PROJECT_ROOT, name))),
+      java: ["pom.xml", "build.gradle", "build.gradle.kts"].some((name) => existsSync(join(PROJECT_ROOT, name))),
+    },
+    importsOf: new Map(files.filter(inLayer).map((file) =>
+      [file, extractImports(readFileSync(join(PROJECT_ROOT, file), "utf-8")).map(({ specifier }) => specifier)])),
+    hasPlans: existsSync(join(PROJECT_ROOT, ".claude", "plans")),
+  };
+}
 
-  // Detect project language
-  const hasTs = existsSync(join(PROJECT_ROOT, "tsconfig.json")) ||
-    existsSync(join(PROJECT_ROOT, "tsconfig.base.json"));
-  const hasJava = existsSync(join(PROJECT_ROOT, "pom.xml")) ||
-    existsSync(join(PROJECT_ROOT, "build.gradle")) ||
-    existsSync(join(PROJECT_ROOT, "build.gradle.kts"));
+/**
+ * `--init`: turn on every rule family the project's layout allows, then
+ * baseline what the baselined rules already flag. It fills only the families
+ * the project has neither configured nor declined (`inferStarterConfig`), so a
+ * re-run on a set-up project changes nothing it decided, and names each family
+ * it could not infer for a decision.
+ */
+function initLinterConfig(): void {
+  const config = EXISTING_RULES_DIR === null ? null : projectConfig();
+  const stored = storedConfig();
+  const inference = inferStarterConfig(stored, config, projectLayout(config));
+  const path = join(RULES_DIR, "config.json");
+  if (stored === null || inference.inferred.length > 0) {
+    mkdirSync(RULES_DIR, { recursive: true });
+    writeFileSync(path, `${JSON.stringify(inference.document, null, 2)}\n`);
+    console.log(`✓ ${relative(PROJECT_ROOT, path)}: ${stored === null ? "created" : "updated"}`);
+  }
+  for (const key of inference.inferred) console.log(`  on: ${key}`);
+  for (const note of inference.notes) console.log(`  note: ${note}`);
+  for (const { key, why } of inference.uninferred) console.log(`  not inferred: ${key} — ${why}`);
 
-  const files = projectFiles(null).map(projectPath);
-  const hasFileUnder = (root: string): boolean => files.some((file) => matchesModulePath(file, root));
-  writeFileSync(
-    join(RULES_DIR, "config.json"),
-    JSON.stringify(starterLinterConfig(hasTs, hasJava, hasFileUnder), null, 2) + "\n",
-  );
-
-  console.log(`✓ Created ${relative(PROJECT_ROOT, RULES_DIR)}/`);
-  console.log(`  └── config.json (starter programmatic config)`);
-  for (const line of INIT_NEXT_STEPS) console.log(line);
+  // The new config walks what it governs (plans), so the baseline reads a fresh walk.
+  projectTree = undefined;
+  writeBaseline(loadConfigOrExit(RULES_DIR));
+  const steps = [...(inference.uninferred.length > 0 ? DECIDE_UNINFERRED : []), ...INIT_NEXT_STEPS];
+  for (const line of ["", "Next steps:", ...steps]) console.log(line);
 }
 
 // ---------------------------------------------------------------------------
@@ -318,15 +315,18 @@ function parseArgs(args: string[]): CliOpts {
 // Baseline drift — a grandfathered list nobody re-checks rots silently
 // ---------------------------------------------------------------------------
 
-/** The project's config, parsed strictly once; a refusal ends the run (exit 2). */
-function projectConfig(): LinterConfig.ProgrammaticConfig {
+/** The config in `rulesDir`, parsed strictly; a refusal ends the run (exit 2). */
+function loadConfigOrExit(rulesDir: string | null): LinterConfig.ProgrammaticConfig {
   try {
-    return loadProjectConfig(EXISTING_RULES_DIR);
+    return loadProjectConfig(rulesDir);
   } catch (error) {
     console.error(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(2);
   }
 }
+
+/** The project's config, parsed strictly once. */
+const projectConfig = (): LinterConfig.ProgrammaticConfig => loadConfigOrExit(EXISTING_RULES_DIR);
 
 /** Every baselined rule of the project, each detecting against the project's
  *  own clone corpus, fingerprinted from the files' bytes as the full tier does. */
@@ -384,14 +384,9 @@ function writeBaseline(config: LinterConfig.ProgrammaticConfig): void {
 
   mkdirSync(RULES_DIR, { recursive: true });
   const path = join(RULES_DIR, "config.json");
-  // The config was already parsed through the engine's loader (`projectConfig`),
-  // so a malformed one failed the run instead of being silently rewritten.
-  const stored: unknown = existsSync(path) ? JSON.parse(readFileSync(path, "utf-8")) : {};
-  if (!isRecord(stored)) {
-    console.error(`${relative(PROJECT_ROOT, path)} is not a JSON object; baseline not written`);
-    process.exit(2);
-  }
-  writeFileSync(path, `${JSON.stringify(configWithBaselines(stored, recorded), null, 2)}\n`);
+  // The config was already parsed through the engine's loader, so a malformed
+  // one failed the run instead of being silently rewritten.
+  writeFileSync(path, `${JSON.stringify(configWithBaselines(storedConfig() ?? {}, recorded), null, 2)}\n`);
   console.log(`✓ ${relative(PROJECT_ROOT, path)}: ${recorded.map(({ configKey, keys }) => `${configKey} ${keys.length}`).join(", ")}`);
 }
 
@@ -401,14 +396,14 @@ function writeBaseline(config: LinterConfig.ProgrammaticConfig): void {
 
 const opts = parseArgs(process.argv.slice(2));
 
-if (opts.init) {
-  initLinterConfig();
-  process.exit(0);
-}
-
 if (presentLayouts.length > 1) {
   console.error(`ERROR: the project carries ${presentLayouts.join(" and ")} — keep one rules directory (both harnesses read ${presentLayouts[0]}); delete the other`);
   process.exit(2);
+}
+
+if (opts.init) {
+  initLinterConfig();
+  process.exit(0);
 }
 
 const config = projectConfig();
@@ -416,6 +411,18 @@ const config = projectConfig();
 if (opts.writeBaseline) {
   writeBaseline(config);
   process.exit(0);
+}
+
+/**
+ * Lint coverage (`linter/lint-coverage.ts`): in a set-up project every opt-in
+ * rule family is configured or declined, and a gap fails a full-tier run, so
+ * a family cannot be forgotten silently. A project with no rules directory is
+ * told what it is missing, without failing: it never asked for Loom's linter.
+ */
+const coverage = lintCoverage(EXISTING_RULES_DIR === null ? null : config);
+const gapLines = opts.tier === "full" ? coverageGaps(coverage).map(coverageGapLine) : [];
+if (coverage.kind === "no-setup" && !opts.json) {
+  console.error("note: no Loom lint setup — only the shipped rules run; `lint-project --init` turns every rule family on");
 }
 
 const exclusions = config.exclude ?? [];
@@ -525,11 +532,13 @@ const driftLines = opts.baselineCheck && opts.tier === "full"
 // ONE failure predicate for every output mode. A file the linter could not read
 // fails the run in each of them: the JSON and summary modes used to exit 0 on a
 // lint error, so a machine caller read an unlinted file as a clean one.
-const failed = allViolations.length > 0 || errorCount > 0 || driftLines.length > 0;
+const failed = allViolations.length > 0 || errorCount > 0 || driftLines.length > 0 || gapLines.length > 0;
 const exitCode = failed ? 1 : 0;
 
 if (opts.json) {
-  console.log(JSON.stringify({ violations: allViolations, errorCount, staleEntries: driftLines, excluded: scoped.excluded }, null, 2));
+  console.log(JSON.stringify({
+    violations: allViolations, errorCount, staleEntries: driftLines, coverageGaps: gapLines, excluded: scoped.excluded,
+  }, null, 2));
   process.exit(exitCode);
 }
 
@@ -547,6 +556,7 @@ if (opts.summary) {
   console.log(`Total violations: ${allViolations.length}`);
   if (errorCount > 0) console.log(`Errors: ${errorCount}`);
   if (driftLines.length > 0) console.log(`Stale entries: ${driftLines.length}`);
+  if (gapLines.length > 0) console.log(`Coverage gaps: ${gapLines.length}`);
   console.log("");
   if (byRule.size > 0) {
     console.log("By rule:");
@@ -564,7 +574,7 @@ for (const v of allViolations) {
     console.log(`    → ${v.fixHint}\n`);
   }
 }
-for (const line of driftLines) {
+for (const line of [...driftLines, ...gapLines]) {
   console.log(`  ${line}`);
 }
 
@@ -578,6 +588,9 @@ if (!failed) {
   }
   if (driftLines.length > 0) {
     console.log(`✗ ${driftLines.length} stale entr${driftLines.length === 1 ? "y" : "ies"} (baselines or scoping)`);
+  }
+  if (gapLines.length > 0) {
+    console.log(`✗ ${gapLines.length} rule famil${gapLines.length === 1 ? "y" : "ies"} neither configured nor declined`);
   }
   if (errorCount > 0) {
     console.log(`⚠ ${errorCount} file(s) had lint errors`);

@@ -47,11 +47,11 @@ for every rule at once.
 | `--tier=full` | All rules (default) |
 | `--tier=immediate` | The edit-time tier only: regex rules, the import-boundary pair, `switch-totality`, `no-duplicate-block`, `no-wire-cast` |
 | `--summary` | Counts by rule |
-| `--json` | `{ violations, errorCount, staleEntries, excluded }` |
+| `--json` | `{ violations, errorCount, staleEntries, coverageGaps, excluded }` |
 | `--no-fix-hints` | Hide fix hints |
 | `--no-baseline-check` | Skip the staleness pass |
 | `--write-baseline` | Record pre-existing totality sites, copied blocks and wire casts in `config.json`, then exit |
-| `--init` | Scaffold `.claude/linter/rules/config.json` (`.pi/linter/rules/` in a project with `.pi` and no `.claude`); its starter `pureModules` keeps only the roots the project already has, so the first run is not stale |
+| `--init` | Turn every rule family on that the layout allows, then baseline (below). Creates `.claude/linter/rules/config.json` (`.pi/linter/rules/` in a project with `.pi` and no `.claude`), or fills the gaps of the existing one |
 
 ## What fails the run
 
@@ -61,6 +61,14 @@ that matches no file, a pure root, governance root or boundary module that
 matches no file, a declared shell (`impureModules`) that names no file under a
 pure root, or a per-file capability grant for a file that no longer exists.
 Every list that subtracts from the linter's reach is checked for decay.
+
+A full-tier run also fails on each **coverage gap** (ADR-0075): an opt-in rule
+family — `boundaries`, `pureModules`, `requireGovernance`, `docReferences` —
+that a set-up project has neither configured nor declined in `config.json`.
+Each gap line names the family, what it checks and both ways to decide it:
+configure it, or add `{ "key": "<family>", "reason": "<why>" }` to the
+`declined` list. An empty `boundaries` or `pureModules` list checks nothing,
+so it is a gap too. The immediate tier does not judge coverage.
 
 Exit 2 when the run cannot be trusted at all: a `config.json` the strict parser
 refuses (an unknown key is refused by name), a project that carries both
@@ -78,6 +86,15 @@ subdirectory with its own `package.json` (such as `engine/`) still lints the
 whole repository under its rules. Every path in `config.json` (module
 prefixes, baseline keys, exclusions) is relative to that root.
 
+One lookup answers it everywhere (`findProjectRoot` in
+`engine/src/linter/programmatic/config.ts`), asked from a different place by
+each caller: this runner and `helper validate-lint-rules` ask from the working
+directory; Claude Code's edit hook and Pi's post-edit lint ask from the edited
+file's directory. A file is therefore linted under its own project's rules
+wherever the session's shell happens to be — in `engine/`, in another
+checkout, or in the main checkout while editing a worktree's file. The Wave
+Gate lint reads the rules at the repository root.
+
 A project has one rules directory, and the lookup does not depend on the
 harness: `.claude/linter/rules` when present, else `.pi/linter/rules` (a
 Pi-only project). Claude Code's edit hook, Pi's post-edit lint, the Wave Gate
@@ -89,7 +106,29 @@ while nothing reads it. `--write-baseline` writes only the one directory;
 directory and no `.claude` one.
 
 With no rules directory, only Loom's default rules fire, and the boundary and
-purity rules check nothing.
+purity rules check nothing. The run does not fail for it, but prints a notice
+on stderr; the session-start reminder says the same to the model and the user
+until the project is set up or the user silences it for the repository.
+
+## `--init`: every family the layout allows
+
+`--init` infers each family the project has neither configured nor declined
+(`engine/src/linter/starter-config.ts`), writes it into `config.json`, and
+then runs `--write-baseline`, so the debt the baselined rules already flag
+does not block the next edit:
+
+- `pureModules`: the conventional functional-core roots the project has.
+- `boundaries`: the layered TypeScript structure of `typescript.md`, when at
+  least two of its layers exist. Each layer allows exactly what it imports
+  today and denies the layers its arrows must not reach. A deny an import
+  already breaks is left out and printed as a note: boundary violations are
+  not baselined.
+- `requireGovernance`: the source root, when the boundaries govern every
+  source file beneath it.
+- `docReferences`: the project's documents and plans, with the source root.
+
+A family it cannot infer is printed with the reason, for a decision. A family
+already configured or declined is never touched, so a re-run changes nothing.
 
 `${CLAUDE_PLUGIN_ROOT}` is the Loom package root. Claude Code expands it; Loom's
 Pi resource adapter renders it from the extension module's location.

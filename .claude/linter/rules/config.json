@@ -1481,7 +1481,6 @@
     "lint-rules/README.md::zod/v4",
     "pi/emission-tool.ts::validateToolArguments",
     "pi/subagent-result.ts::.claude/specs/../../../tmp/evil/spec.md",
-    "scripts/lint-project.ts::.pi/linter/rules",
     "scripts/run-model-calibration.ts::assessments/",
     "skills/lint-project/SKILL.md::adapters/",
     "skills/lint-project/SKILL.md::api/",
