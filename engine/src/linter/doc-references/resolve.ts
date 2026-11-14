@@ -108,6 +108,25 @@ function missingSegments(text: string, segments: readonly string[], index: Refer
   return segments.filter((segment) => !index.inSource(segment));
 }
 
+/** A plan's spec header: the spec must be a file in a frame, and parse. */
+function resolveSpecHeader(path: string, frame: ReferenceFrame, index: ReferenceIndex): Resolution {
+  if (path.startsWith("/")) return dangling({ kind: "absolute-path", path });
+  const tried = candidates(path, frame);
+  const spec = located(tried, false, index);
+  if (spec === null) return dangling({ kind: "spec-missing", tried });
+  const ids = index.specOf(spec);
+  switch (ids.kind) {
+    case "missing":
+      return dangling({ kind: "spec-missing", tried });
+    case "unreadable":
+      return dangling({ kind: "spec-unreadable", spec, detail: ids.detail });
+    case "read":
+      return resolved({ via: "spec", spec });
+    default:
+      return assertNever(ids);
+  }
+}
+
 /** Resolve one reference made from `frame.from`. */
 export function resolveReference(reference: DocReference, frame: ReferenceFrame, index: ReferenceIndex): Resolution {
   switch (reference.kind) {
@@ -129,23 +148,8 @@ export function resolveReference(reference: DocReference, frame: ReferenceFrame,
       const missing = missingSegments(reference.text, reference.segments, index);
       return missing.length === 0 ? resolved({ via: "source" }) : dangling({ kind: "not-in-source", missing });
     }
-    case "spec": {
-      if (reference.path.startsWith("/")) return dangling({ kind: "absolute-path", path: reference.path });
-      const tried = candidates(reference.path, frame);
-      const spec = located(tried, false, index);
-      if (spec === null) return dangling({ kind: "spec-missing", tried });
-      const ids = index.specOf(spec);
-      switch (ids.kind) {
-        case "missing":
-          return dangling({ kind: "spec-missing", tried });
-        case "unreadable":
-          return dangling({ kind: "spec-unreadable", spec, detail: ids.detail });
-        case "read":
-          return resolved({ via: "spec", spec });
-        default:
-          return assertNever(ids);
-      }
-    }
+    case "spec":
+      return resolveSpecHeader(reference.path, frame, index);
     case "spec-id": {
       const spec = located(candidates(reference.spec, frame), false, index);
       const ids = spec === null ? null : index.specOf(spec);

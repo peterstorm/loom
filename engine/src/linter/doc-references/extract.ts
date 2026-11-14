@@ -18,29 +18,12 @@
  * Never a reference, whatever its shape: placeholder grammar (`NNN`, `xxx`,
  * `YYYY`, a `-N`, `<…>`, `{…}`, `[…]`, `*`, `...`), a hex run of 7 or more
  * characters (a commit), a URL or any `scheme:` (`node:fs`), a path rooted
- * outside the project (`/`, `~`, `/**
- * The references a governed file makes — the extraction half of
- * `no-dangling-doc-reference`.
+ * outside the project (`/`, `~`, `$`), a flag (`--x`), a package scope
+ * (`@x/y`), a media type (`text/plain`) and a document id (`FR-007`, `T1`,
+ * `AD-2`), which names a line of some other document, not the project.
  *
- * A reference is something an author marked as naming the project: a code
- * span (backticks), a Markdown link, a plan's `**Spec:**` header and the spec
- * ids it cites, and an `ADR-NNNN` id. Prose is never read as a reference — the
- * rule is a resolver, not a prose classifier — and the shapes a code span may
- * take are fixed, so a fragment of code inside backticks is not one:
- *
- * - a path: it holds a `/`, or it is a bare file name with a known extension
- *   (`ledger.json`), optionally with a `#anchor` or a `:line` suffix;
- * - a word, `[A-Za-z_$][A-Za-z0-9_$.-]*`, optionally called (`name()`); a
- *   dotted word (`a.b.c`) is one reference whose every segment must resolve;
- * - anything else — a space, an operator, a quote — is a fragment, never a
- *   reference.
- *
- * Never a reference, whatever its shape: placeholder grammar (`NNN`, `xxx`,
- * `YYYY`, a `-N`, `<…>`, `{…}`, `[…]`, `*`, `...`), a hex run of 7 or more
- * characters (a commit), a URL or any `scheme:` (`node:fs`), a path rooted
-), a flag (`--x`), a package scope
- * (`@x/y`), a media type (`text/plain`) and a document id (`FR-007`, `T1`, `AD-2`), which names a line of
- * some other document, not the project.
+ * A link target that is not valid percent-encoding is read as written: it is
+ * still a reference, and the resolver judges it.
  *
  * Fenced code is never read, so a fence's example is not a reference. An
  * unclosed fence is refused: everything after it would silently go unread.
@@ -153,8 +136,10 @@ function pathReference({ line, text }: Located, located: string): DocReference |
     // A bare name starting with a dot is a suffix (`.test.ts`, `.d.ts`), not a file.
     return path.startsWith(".") ? null : { kind: "file-name", line, text, name: path };
   }
-  const directory = path.endsWith("/");
-  return { kind: "path", line, text, path: directory ? path.slice(0, -1) : path, directory, anchor };
+  // A directory has no headings: `docs/#x` names the directory, and its anchor is not judged.
+  return path.endsWith("/")
+    ? { kind: "path", line, text, path: path.slice(0, -1), directory: true, anchor: null }
+    : { kind: "path", line, text, path, directory: false, anchor };
 }
 
 /** A word-shaped span as a reference, or null when it is not one. */
@@ -177,6 +162,13 @@ export function spanReference(located: Located): DocReference | null {
   return pathShaped ? pathReference(located, withoutLine) : tokenReference(located);
 }
 
+/** A reference as a list of it, empty when there is none. */
+const present = (reference: DocReference | null): readonly DocReference[] => (reference === null ? [] : [reference]);
+
+/** The references a line's code spans make. */
+const spanReferences = (line: number, spans: readonly CodeSpan[]): readonly DocReference[] =>
+  spans.flatMap(({ content }) => present(spanReference({ line, text: content })));
+
 // --- Links, ADR ids, spec ids ------------------------------------------------------
 
 /** An inline link or image target, with an optional title. */
@@ -192,15 +184,16 @@ function linkReference(line: number, target: string): DocReference | null {
   const rawPath = (hash === -1 ? target : target.slice(0, hash)).replace(/\?.*$/, "");
   const anchor = hash === -1 ? null : target.slice(hash + 1);
   if (anchor === "") return null;
-  const path = safeDecode(rawPath);
-  return path === null ? null : { kind: "link", line, text: target, path, anchor };
+  return { kind: "link", line, text: target, path: decodedOrAsWritten(rawPath), anchor };
 }
 
-const safeDecode = (raw: string): string | null => {
+/** A link path with its percent-escapes decoded, or as written when they are not valid (`100%.md`). */
+const decodedOrAsWritten = (raw: string): string => {
   try {
     return decodeURI(raw);
-  } catch {
-    return null;
+  } catch (error) {
+    if (error instanceof URIError) return raw;
+    throw error;
   }
 };
 
@@ -210,10 +203,7 @@ function linkReferences(line: number, text: string): readonly DocReference[] {
     ...[...text.matchAll(INLINE_LINK)].flatMap(([, target]) => (target === undefined ? [] : [target])),
     ...(definition === undefined ? [] : [definition]),
   ];
-  return targets.flatMap((target) => {
-    const reference = linkReference(line, target);
-    return reference === null ? [] : [reference];
-  });
+  return targets.flatMap((target) => present(linkReference(line, target)));
 }
 
 /** An ADR id standing on its own: not inside a path or file name (`docs/adr/ADR-0042-the-typescript-compiler-api-enters-through-two-pure-seams.md` is the path's to resolve). */
@@ -258,10 +248,7 @@ function withoutHtmlComments(prose: readonly ProseLine[]): readonly ProseLine[] 
 function documentLineReferences({ line, text }: ProseLine): readonly DocReference[] {
   const spans = codeSpans(text);
   return [
-    ...spans.flatMap(({ content }) => {
-      const reference = spanReference({ line, text: content });
-      return reference === null ? [] : [reference];
-    }),
+    ...spanReferences(line, spans),
     ...linkReferences(line, withoutSpans(text, spans)),
     ...adrReferences(line, text),
   ];
@@ -305,13 +292,7 @@ function commentReferences(content: string): readonly DocReference[] {
       const first = lineAt(start);
       return content.slice(start, end).split("\n").flatMap((text, index) => {
         const line = first + index;
-        return [
-          ...codeSpans(text).flatMap(({ content: span }) => {
-            const reference = spanReference({ line, text: span });
-            return reference === null ? [] : [reference];
-          }),
-          ...adrReferences(line, text),
-        ];
+        return [...spanReferences(line, codeSpans(text)), ...adrReferences(line, text)];
       });
     });
 }

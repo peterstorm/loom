@@ -34,6 +34,7 @@ import { DEFAULT_TEST_FILE_SUFFIXES, isTestFileBySuffixes } from "../../core/tes
 import { parseSpec, specParseErrorMessage } from "../../core/parse-spec";
 import { headingsOf, markdown, scanMarkdown } from "../markdown";
 import { sourceSegments } from "../source-segments";
+import { once, remembered } from "./memo";
 import { headingAnchors, htmlAnchors } from "./slug";
 import { ADR_DIRECTORY, type ProjectSnapshot, type ReferenceIndex, type SpecIds } from "./types";
 
@@ -60,7 +61,11 @@ export type CorpusRole =
   /** Nothing: not source, test data, or a lockfile. */
   | "none";
 
-/** How a project file feeds the source corpus. */
+/**
+ * A file's corpus role, from its extension, its name and whether it sits in a
+ * test or fixture tree: only commented source, JSON and `#`-comment text feed
+ * the corpus, never a lockfile, and test code only by its declarations.
+ */
 export function corpusRoleOf(path: string): CorpusRole {
   const extension = extname(path);
   const cFamily = C_FAMILY_EXTENSIONS.has(extension);
@@ -167,24 +172,6 @@ function adrIdOf(path: string): string | null {
   const found = ADR_FILE.exec(path);
   const number = found?.[1] ?? found?.[2];
   return number === undefined ? null : `ADR-${number}`;
-}
-
-/** Remember a function's answer per argument. */
-function remembered<T>(compute: (key: string) => T): (key: string) => T {
-  const known = new Map<string, Readonly<{ value: T }>>();
-  return (key) => {
-    const hit = known.get(key);
-    if (hit !== undefined) return hit.value;
-    const value = compute(key);
-    known.set(key, { value });
-    return value;
-  };
-}
-
-/** Compute once, on first use. */
-function once<T>(compute: () => T): () => T {
-  let value: { readonly current: T } | undefined;
-  return () => (value ??= { current: compute() }).current;
 }
 
 /** The index of one project snapshot. */

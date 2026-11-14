@@ -452,9 +452,10 @@ backticks, or baseline it. The rule does not guess which names are history.
 
 The source corpus is built once per process, on the first governed file
 (`firstCallSetup`), so no per-file deadline is charged for it. On the edit
-hook it costs about 400 ms on a 2,300-file tree; `lint-project` and the Wave
-Gate read the whole tree, which is where a doc made stale by an edit elsewhere
-is caught. `lint-project` walks a governed or plan path inside a directory the
+hook it costs about 400 ms on a 2,300-file tree. The edit hook and the Wave
+Gate lint only the files they touch; `lint-project` (and so `npm run verify`
+and CI) reads the whole tree, which is where a doc made stale by an edit
+elsewhere is caught. `lint-project` walks a governed or plan path inside a directory the
 walk otherwise skips (`.claude/plans/`), lints a Markdown file only where the
 scope governs it, and reports a `docReferences` entry that matches no file as
 drift.

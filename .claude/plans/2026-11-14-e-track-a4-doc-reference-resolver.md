@@ -2,7 +2,7 @@
 
 **Created:** 2026-11-14
 **Track:** E-track Phase A item 4 (static enforcement). This is item 1 in the re-ranked list in the vault note `learning/loom-fugue-review/static-enforcement-track-analysis.md` §3.
-**Status:** built on branch `feat/doc-reference-resolver` (2026-11-14), not yet committed. Decision record: ADR-0074. All six acceptance items are met. Item 6 is the Fugue dry-run report in ADR-0074 and the vault track note.
+**Status:** Implemented (2026-11-14). Decision record: ADR-0074. All six acceptance items are met. Item 6 is the Fugue dry-run report in ADR-0074 and the vault track note.
 
 **Deviations from this plan, each deliberate:**
 
@@ -14,6 +14,8 @@
 - **Found by the Fugue dry run, fixed here:** adr-tools ADR numbering, YAML and TOML in the corpus, and media types refused as references.
 - **The snapshot is git's view of the tree**, not the disk: a fresh worktree showed that runtime directories and installed packages resolved only where they existed. Loom's baseline is 514 entries as a result.
 - **Markdown files are lintable**, but `lint-project` lints a Markdown file only where `docReferences` governs it.
+- **The scope's keys are `govern`, `plans`, `exclude` and `sourceRoots`** (AD-5 sketched a `comments` key and no `plans` key). A source file under `govern` is always read for its comments, so there is no `comments` switch. Plans are their own key because they are read differently (AD-4).
+- **The whole tree is read by `lint-project`, not by the Wave Gate.** The Wave Gate's full tier lints only the Wave's touched files, like the edit hook. A doc made stale by an edit elsewhere is caught by `lint-project`, and so by `npm run verify` and CI.
 
 ## Why this item first
 

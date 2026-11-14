@@ -32,10 +32,11 @@ const DOC_FRAME: ReferenceFrame = { from: "docs/guide.md", sourceRoots: ["engine
 
 const resolve = (reference: DocReference, frame: ReferenceFrame = FRAME): Resolution => resolveReference(reference, frame, INDEX);
 
-const path = (text: string, anchor: string | null = null): DocReference => {
-  const directory = text.endsWith("/");
-  return { kind: "path", line: 1, text, path: directory ? text.slice(0, -1) : text, directory, anchor };
-};
+/** A path reference; a trailing `/` writes a directory, which carries no anchor. */
+const path = (text: string, anchor: string | null = null): DocReference =>
+  text.endsWith("/")
+    ? { kind: "path", line: 1, text, path: text.slice(0, -1), directory: true, anchor: null }
+    : { kind: "path", line: 1, text, path: text, directory: false, anchor };
 const fileName = (name: string): DocReference => ({ kind: "file-name", line: 1, text: name, name });
 const link = (target: string, anchor: string | null = null): DocReference => ({ kind: "link", line: 1, text: target, path: target, anchor });
 const token = (text: string): DocReference => {

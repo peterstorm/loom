@@ -31,8 +31,13 @@ export type DocReading =
  * reference as written: the baseline key and the violation quote it.
  */
 export type DocReference =
-  /** A backticked path (it holds a `/`, or names a Markdown file with a `#` anchor). Resolved in the referring file's directory, each directory above it, then each source root. */
-  | Readonly<{ kind: "path"; line: number; text: string; path: string; directory: boolean; anchor: string | null }>
+  /**
+   * A backticked path (it holds a `/`, or names a Markdown file with a `#`
+   * anchor). Resolved in the referring file's directory, each directory above
+   * it, then each source root. A directory (written with a trailing `/`) has
+   * no headings, so it carries no anchor.
+   */
+  | Readonly<{ kind: "path"; line: number; text: string; path: string } & PathTarget>
   /** A backticked bare file name (`ledger.json`): a file in one of the path frames, or a name the source text holds. */
   | Readonly<{ kind: "file-name"; line: number; text: string; name: string }>
   /** A Markdown link target. Resolved against the referring file's directory (or the root, for `/…`); an empty path is the document itself. */
@@ -45,6 +50,11 @@ export type DocReference =
   | Readonly<{ kind: "spec-id"; line: number; text: string; spec: string }>
   /** An `ADR-NNNN` id: an ADR file must carry that number. */
   | Readonly<{ kind: "adr"; line: number; text: string }>;
+
+/** What a path reference asks for: a directory, or an entry with an optional anchor into it. */
+export type PathTarget =
+  | Readonly<{ directory: true; anchor: null }>
+  | Readonly<{ directory: false; anchor: string | null }>;
 
 /** Why a reference resolves to nothing. Closed: the rule's message and the tests cover every arm. */
 export type DanglingReason =

@@ -7,7 +7,8 @@
  * runtime directory such as `.claude/state/` exists on one machine and not on
  * another or in CI, so a reference that resolved against it, or a word an
  * ignored file held, would pass on one machine and fail on the next. Outside
- * a git repository the snapshot falls back to the project walk and `stat`.
+ * a git repository the snapshot falls back to the project walk and `stat`;
+ * inside one, a git that cannot run fails the lint instead.
  *
  * `files()` holds the source the corpus reads: the paths beneath a directory
  * that never holds source (`.claude/`, `node_modules/`) are left out of it,
@@ -21,12 +22,13 @@
  * lint run fails closed.
  */
 
-import { readFileSync, statSync } from "node:fs";
-import { join, posix, relative, sep } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { dirname, join, posix, relative, sep } from "node:path";
 import { match } from "ts-pattern";
 import { spawnGit } from "../../utils/git-execution-policy";
 import { isNeverSourceDirectory } from "../project-scope";
 import { walkProjectFiles } from "../project-walk";
+import { once } from "./memo";
 import { referenceIndex } from "./reference-index";
 import type { EntryKind, ProjectSnapshot, ReferenceIndex } from "./types";
 
@@ -53,11 +55,23 @@ type GitTree = Readonly<{ files: ReadonlySet<string>; directories: ReadonlySet<s
 const LISTING_LIMIT = 256 * 1024 * 1024;
 
 /**
+ * Is `directory`, or a directory above it, a git working tree? A `.git` entry
+ * says so: a directory in a clone, a file in a linked worktree.
+ */
+function inGitWorkingTree(directory: string): boolean {
+  const parent = dirname(directory);
+  return existsSync(join(directory, ".git")) || (parent !== directory && inGitWorkingTree(parent));
+}
+
+/**
  * One `git ls-files` listing, NUL-separated and relative to `root`, through
- * the engine's one policy-bound Git seam. Null when there is no git to ask or
- * `root` is in no repository, so the snapshot falls back to the filesystem.
- * Any other failure (a corrupt repository, a refused ownership check) throws:
- * the lint fails closed rather than silently reading the disk instead.
+ * the engine's one policy-bound Git seam. Null when `root` is in no
+ * repository — git says so, or git cannot run and no `.git` entry sits at the
+ * root or above — so the snapshot falls back to the filesystem. Any other
+ * failure throws, the lint failing closed rather than reading the disk
+ * instead: a corrupt repository, a refused ownership check, or a repository
+ * on a machine whose git cannot run, where the disk would let an ignored
+ * runtime file resolve a reference on that machine alone.
  */
 function gitListing(root: string, args: readonly string[]): readonly string[] | null {
   const outcome = spawnGit(["ls-files", "-z", ...args], { cwd: root, maxBuffer: LISTING_LIMIT });
@@ -65,7 +79,8 @@ function gitListing(root: string, args: readonly string[]): readonly string[] | 
     throw new Error(`git ls-files failed in ${root}: ${detail}`);
   };
   return match(outcome)
-    .with({ kind: "spawn-failed" }, () => null)
+    .with({ kind: "spawn-failed" }, ({ message }) =>
+      inGitWorkingTree(root) ? failed(`git could not run in a git working tree (${message}); put git on PATH`) : null)
     .with({ kind: "exited", status: 0 }, ({ stdout }) => stdout.toString("utf8").split("\0").filter((path) => path !== ""))
     .with({ kind: "exited" }, ({ status, stderr }) => {
       const message = stderr.toString("utf8").trim();
@@ -103,9 +118,14 @@ const beneathNeverSource = (file: string): boolean => directoriesAbove(file).som
 
 /** The snapshot of the project rooted at `projectRoot`. */
 export function fsProjectSnapshot(projectRoot: string): ProjectSnapshot {
-  let tree: { readonly current: GitTree | null } | undefined;
-  const git = (): GitTree | null => (tree ??= { current: gitTree(projectRoot) }).current;
-  let files: readonly string[] | undefined;
+  const git = once((): GitTree | null => gitTree(projectRoot));
+
+  const files = once((): readonly string[] => {
+    const listed = git();
+    if (listed !== null) return [...listed.files].filter((file) => !beneathNeverSource(file)).sort();
+    return walkProjectFiles(projectRoot, () => true)
+      .map(({ absolute }) => relative(projectRoot, absolute).split(sep).join("/"));
+  });
 
   const statEntry = (path: string): EntryKind | null => {
     const stat = nullOn(NAMES_NOTHING, () => statSync(join(projectRoot, path)));
@@ -115,15 +135,7 @@ export function fsProjectSnapshot(projectRoot: string): ProjectSnapshot {
   };
 
   return Object.freeze({
-    files: () => {
-      files ??= ((): readonly string[] => {
-        const listed = git();
-        if (listed !== null) return [...listed.files].filter((file) => !beneathNeverSource(file)).sort();
-        return walkProjectFiles(projectRoot, () => true)
-          .map(({ absolute }) => relative(projectRoot, absolute).split(sep).join("/"));
-      })();
-      return files;
-    },
+    files,
     entryAt: (path: string): EntryKind | null => {
       const listed = git();
       if (listed === null) return statEntry(path);

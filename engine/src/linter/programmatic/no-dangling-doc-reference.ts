@@ -5,9 +5,10 @@
  * A doc that names a file, heading, symbol, spec id or ADR the project does
  * not have tells its reader something false, and the commonest way it starts
  * to is an edit to ANOTHER file: a rename, a deleted export, a moved doc. So
- * the rule runs on every edit of a governed file and again over the whole tree
- * at the Wave Gate and in `lint-project`, where the unedited doc is read
- * against the edited code.
+ * the rule runs on every edit of a governed file, on a Wave's touched files at
+ * the Wave Gate, and over the whole tree in `lint-project` (and so in
+ * `npm run verify` and CI), where the unedited doc is read against the edited
+ * code.
  *
  * What is governed is the project's own choice (`docReferences` in its
  * `config.json`); absent, the rule governs nothing. A Markdown file under
@@ -100,17 +101,18 @@ export function describeDangling(reference: DocReference, reason: DanglingReason
   }
 }
 
-function findings(content: string, path: string, options: DocReferenceOptions): readonly Finding[] {
-  const reading = readingOf(path, options.scope);
-  if (reading === null || options.scope === null) return [];
+function findings(content: string, path: string, { scope, index }: DocReferenceOptions): readonly Finding[] {
+  if (scope === null) return [];
+  const reading = readingOf(path, scope);
+  if (reading === null) return [];
   const extraction = extractDocReferences(content, reading);
   if (!extraction.ok) {
     const { line } = extraction.error;
     return [{ line, key: "(unclosed fence)", message: `the code fence opened on line ${line} is never closed, so nothing after it is read` }];
   }
-  const frame = { from: path, sourceRoots: options.scope.sourceRoots };
+  const frame = { from: path, sourceRoots: scope.sourceRoots };
   return extraction.value.flatMap((reference) => {
-    const resolution = resolveReference(reference, frame, options.index);
+    const resolution = resolveReference(reference, frame, index);
     return resolution.ok
       ? []
       : [{ line: reference.line, key: reference.text, message: describeDangling(reference, resolution.error) }];

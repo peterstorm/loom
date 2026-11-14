@@ -18,8 +18,8 @@
  * silently excusing nothing.
  */
 import { describe, expect, it } from "vitest";
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join, relative, sep } from "node:path";
 import {
   baselineKey,
   baselineKeyPath,
@@ -31,7 +31,8 @@ import { baselineOwners } from "../../../src/linter/programmatic/index";
 import { projectRootOf } from "../../../src/linter/programmatic/config";
 import { authoritativeLintContext, loadRules } from "../../../src/linter/loader";
 import { executeRules } from "../../../src/linter/executor";
-import { isLintableName, isNeverSourceDirectory, scopeOf, walkedBesides } from "../../../src/linter/project-scope";
+import { scopeOf } from "../../../src/linter/project-scope";
+import { lintedProjectFiles } from "../../../src/linter/project-walk";
 import { LOOM_CONFIG, LOOM_RULES_DIR, REPO_ROOT } from "../loom-project-config";
 import {
   DEFAULT_DISCRIMINANT_BRANCHING_OPTIONS,
@@ -43,29 +44,18 @@ import {
 const LOOM_OWNERS = baselineOwners(authoritativeLintContext(LOOM_CONFIG, REPO_ROOT));
 
 /**
- * Every lintable file `lint-project` reads, repo-relative and sorted: the same
- * never-source directories, the same lintable names and the same `exclude`
- * entries (`project-scope.ts`), so this guard sees exactly the tree the rules
- * see — `.mts` and `.cts` included — plus the governed paths the walk never
- * enters (Loom's plans), which `lint-project` walks besides the project. Test
- * files stay in: each detector skips them itself, as the rule does.
+ * The tree `lint-project` reads (`lintedProjectFiles`, the one definition the
+ * script calls too), repo-relative: every lintable file — `.mts` and `.cts`
+ * included — plus the governed paths the walk never enters (Loom's plans).
  */
-function lintedFiles(dir: string): readonly string[] {
-  return readdirSync(dir).sort().flatMap((entry): readonly string[] => {
-    if (isNeverSourceDirectory(entry)) return [];
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) return lintedFiles(full);
-    return isLintableName(entry) ? [full.slice(REPO_ROOT.length + 1).replace(/\\/g, "/")] : [];
-  });
-}
+const TREE = lintedProjectFiles(REPO_ROOT, LOOM_CONFIG).map((absolute) => relative(REPO_ROOT, absolute).split(sep).join("/"));
 
-const BESIDES = walkedBesides(LOOM_CONFIG).flatMap((path) => {
-  const full = join(REPO_ROOT, path);
-  return statSync(full).isDirectory() ? lintedFiles(full) : [path];
-});
-
-const LINTED = [...new Set([...lintedFiles(REPO_ROOT), ...BESIDES])]
-  .filter((path) => scopeOf(path, LOOM_CONFIG.exclude ?? []).kind === "lint");
+/**
+ * The tree minus the config's `exclude` entries, so this guard sees exactly
+ * the files the rules see. Test files stay in: each detector skips them
+ * itself, as the rule does.
+ */
+const LINTED = TREE.filter((path) => scopeOf(path, LOOM_CONFIG.exclude ?? []).kind === "lint");
 
 const readRepoSource = (path: string): string | null => {
   try {
@@ -88,7 +78,7 @@ describe("loom's own totality baselines", () => {
     expect(LOOM_OWNERS.map((owner) => owner.site))
       .toEqual(["unproven switch", "unproven if-chain", "copied block", "unparsed wire value", "dangling doc reference"]);
     // Loom governs its own docs, and its plans are walked though .claude/ is not.
-    expect(BESIDES.some((path) => path.startsWith(".claude/plans/"))).toBe(true);
+    expect(TREE.some((path) => path.startsWith(".claude/plans/"))).toBe(true);
     // Loom grandfathers no wire value typed without being parsed: the rule's
     // "nothing above the baseline" case below is the whole tree, held to zero.
     expect(LOOM_CONFIG.wireCastBaseline).toBeUndefined();

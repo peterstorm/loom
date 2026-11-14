@@ -88,8 +88,16 @@ an installed package resolved where it happened to exist and dangled in a fresh 
 ignored file held kept a doc alive on one machine only. A path that runs through a file (`ENOTDIR`) names
 nothing; it is not a failure. The index is lazy and memoized. The rule declares
 `firstCallSetup`, so building the index is charged to no per-file deadline. It runs in the immediate tier
-and again in the full tier, where the unedited doc is read against the edited code. It is a baseline owner,
-so `--write-baseline` and the stale-entry pass apply.
+and again in the full tier. The edit hook and the Wave Gate lint only the files they touch; `lint-project`
+(and so `npm run verify` and CI) reads the whole tree, where the unedited doc is read against the edited
+code. It is a baseline owner, so `--write-baseline` and the stale-entry pass apply.
+
+**Two new dependencies of the linter context.** The index parses specs through the engine's one spec
+parser (`core/parse-spec.ts`), and the snapshot lists the tree through the engine's one Git seam
+(`utils/git-execution-policy.ts`), allowed for `project-snapshot.ts` alone. Both narrow the linter's
+isolation as a module within the engine (ADR-0001) on purpose: a second spec reader or a second way of
+running git would split what each module already owns. `config.json` carries the same reasons beside the
+boundary entries.
 
 **History is prose.** A mention of something deliberately gone is written without backticks or baselined.
 The rule does not guess which names are history. The Markdown reader the doc-contract suites used moved

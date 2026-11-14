@@ -73,9 +73,10 @@ const { lintFiles }: typeof LinterIndex = await import(join(LOOM_ROOT, "engine/s
 const { CLAUDE_PROJECT_RULES_DIR, PI_PROJECT_RULES_DIR, PROJECT_RULES_LAYOUTS, projectRulesLayout }: typeof LinterConfig =
   await import(join(LOOM_ROOT, "engine/src/linter/programmatic/config.ts"));
 const { authoritativeLintContext, loadProjectConfig }: typeof LinterLoader = await import(join(LOOM_ROOT, "engine/src/linter/loader.ts"));
-const { scopeOf, scopeDrift, walkedBesides }: typeof ProjectScope =
+const { scopeOf, scopeDrift }: typeof ProjectScope =
   await import(join(LOOM_ROOT, "engine/src/linter/project-scope.ts"));
-const { walkLintableFiles }: typeof ProjectWalk = await import(join(LOOM_ROOT, "engine/src/linter/project-walk.ts"));
+const { lintedProjectFiles, walkLintableFiles }: typeof ProjectWalk =
+  await import(join(LOOM_ROOT, "engine/src/linter/project-walk.ts"));
 const { matchesModulePath }: typeof PurityRule =
   await import(join(LOOM_ROOT, "engine/src/linter/programmatic/no-io-in-pure-modules.ts"));
 const { readingOf }: typeof DocReferenceRule =
@@ -141,28 +142,20 @@ const projectPath = (absolute: string): string => relative(PROJECT_ROOT, absolut
  *  project walk, which the clone corpus reads too. */
 const walkLintable = (dir: string): readonly string[] => walkLintableFiles(dir).map((file) => file.absolute);
 
-let projectWalk: readonly string[] | undefined;
+let projectTree: readonly string[] | undefined;
 
 /**
- * Every lintable file in the project, BEFORE exclusions — walked at most once
- * per run. The lint set of a full run, the scope-drift universe, `--init`'s
- * starter roots and `--write-baseline`'s sources all read this one walk, so
- * they cannot disagree about the tree, and a targeted run with the drift pass
- * off never walks the project at all.
- *
- * With a config, the paths it governs beneath a directory the walk never
- * enters (`walkedBesides`: a project's `.claude/plans/`) are walked too, so a
- * governed plan is linted in the full tier, not only when it is edited.
+ * Every lintable file in the project, BEFORE exclusions — the engine's
+ * `lintedProjectFiles`, walked at most once per run. The lint set of a full
+ * run, the scope-drift universe, `--init`'s starter roots and
+ * `--write-baseline`'s sources all read this one walk, so they cannot disagree
+ * about the tree, and a targeted run with the drift pass off never walks the
+ * project at all. A run reads one config: `--init`, the one caller without
+ * one, exits before the config is loaded.
  */
 function projectFiles(config: LinterConfig.ProgrammaticConfig | null): readonly string[] {
-  projectWalk ??= walkLintable(PROJECT_ROOT);
-  const besides = config === null ? [] : walkedBesides(config).flatMap((path) => {
-    const absolute = join(PROJECT_ROOT, path);
-    const stat = statSync(absolute, { throwIfNoEntry: false });
-    if (stat === undefined) return [];
-    return stat.isDirectory() ? walkLintable(absolute) : [absolute];
-  });
-  return besides.length === 0 ? projectWalk : [...new Set([...projectWalk, ...besides])].sort();
+  projectTree ??= lintedProjectFiles(PROJECT_ROOT, config);
+  return projectTree;
 }
 
 type Scoped = Readonly<{ lint: readonly string[]; excluded: readonly Readonly<{ file: string; reason: string }>[] }>;

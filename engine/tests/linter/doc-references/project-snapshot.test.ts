@@ -3,7 +3,8 @@
  * stands in for it everywhere else, so what only a real filesystem and a real
  * git can do is pinned here: outside git, a path that runs THROUGH a file
  * names nothing; inside git, the snapshot is the tree as every clone has it;
- * and a broken repository fails closed instead of falling back to the disk.
+ * and a broken repository, or one whose git cannot run, fails closed instead
+ * of falling back to the disk.
  * Under Bun a stat through a file throws ENOTDIR; lint-project-cli.test.ts
  * replays that case through the Bun-run script.
  */
@@ -113,6 +114,33 @@ describe("fsProjectSnapshot in a git repository: the tree as every clone has it"
   it("fails closed on a broken repository instead of reading the disk: a worktree whose .git points nowhere", () => {
     const root = project();
     writeFileSync(join(root, ".git"), "gitdir: /nowhere/.git/worktrees/x\n");
-    expect(() => fsProjectSnapshot(root).files()).toThrow(/git ls-files failed in .*gitfile does not point to a valid repository/);
+    expect(() => fsProjectSnapshot(root).files()).toThrow(/^git ls-files failed in /);
+  });
+
+  it("fails closed when git cannot run inside a repository: the disk would let an ignored file resolve", () => {
+    const root = repository();
+    expect(() => withoutGit(() => fsProjectSnapshot(root).files())).toThrow(/git could not run in a git working tree/);
+    expect(() => withoutGit(() => fsProjectSnapshot(join(root, "src")).entryAt("tracked.ts"))).toThrow(/git could not run/);
   });
 });
+
+describe("fsProjectSnapshot when git cannot run, outside any repository", () => {
+  it("reads the filesystem, as it does when git says there is no repository", () => {
+    const root = project();
+    const files = withoutGit(() => fsProjectSnapshot(root).files());
+    expect(files).toEqual(["README.md", "docs/guide.md"]);
+  });
+});
+
+/** Run with no `git` on PATH: an empty directory is the whole search path. */
+function withoutGit<T>(run: () => T): T {
+  const empty = canonicalTempDir("loom-no-git-");
+  roots.push(empty);
+  const saved = process.env.PATH;
+  process.env.PATH = empty;
+  try {
+    return run();
+  } finally {
+    process.env.PATH = saved;
+  }
+}

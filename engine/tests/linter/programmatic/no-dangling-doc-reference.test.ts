@@ -21,11 +21,12 @@ import {
   RULE_NAME,
   type DocReferenceOptions,
 } from "../../../src/linter/programmatic/no-dangling-doc-reference";
-import type { DanglingReason, DocReference, DocReferenceScope } from "../../../src/linter/doc-references/types";
+import type { DanglingReason, DocReference, DocReferenceScope, ProjectSnapshot } from "../../../src/linter/doc-references/types";
+import { referenceIndex } from "../../../src/linter/doc-references/reference-index";
 import { baselineKey } from "../../../src/linter/programmatic/baseline";
-import { lintFile, lintFiles } from "../../../src/linter/index";
-import { fakeIndex, VALID_SPEC, type FakeProject } from "../doc-references/fake-snapshot";
-import { REPO_ROOT, LOOM_RULES_DIR } from "../loom-project-config";
+import { lintFiles } from "../../../src/linter/index";
+import { fakeIndex, fakeSnapshot, VALID_SPEC, type FakeProject } from "../doc-references/fake-snapshot";
+import { REPO_ROOT } from "../loom-project-config";
 
 const reasoned = (path: string) => ({ path, reason: "test scope" });
 
@@ -254,10 +255,31 @@ describe("cross-file: the full tier reads an unedited doc against the edited cod
   });
 });
 
-describe("budget: one edit on Loom's own tree", () => {
-  it("stays inside the per-edit deadline, the index build charged to first-call setup", () => {
-    const edited = join(REPO_ROOT, "engine/src/linter/doc-references/resolve.ts");
-    // The default timeout is the edit hook's own budget: the rule's setup must not be charged to it.
-    expect(lintFile(edited, "immediate", join(REPO_ROOT, "lint-rules"), LOOM_RULES_DIR)).toEqual({ kind: "pass" });
+describe("budget: the index is built once, however many governed files the rule reads", () => {
+  // The build is the expensive part (ADR-0074 has the numbers). The rule's
+  // first call pays it outside the per-file deadline (`firstCallSetup`, pinned
+  // in no-duplicate-block.test.ts; the executor's ordering in
+  // executor.test.ts), so the per-file budget rests on no later file paying
+  // it again: counted here, not timed against a wall clock.
+  it("walks the project once and reads each source file once across every governed file it lints", () => {
+    const project: FakeProject = {
+      "docs/a.md": "# A\n\n`kept` and `engine/src/x.ts`.\n",
+      "docs/b.md": "# B\n\n`kept` again, and `gone`.\n",
+      "engine/src/x.ts": "/** Reads `kept`. */\nexport const kept = 1;",
+    };
+    const inner = fakeSnapshot(project);
+    let walks = 0;
+    let reads = 0;
+    const counted: ProjectSnapshot = {
+      files: () => { walks += 1; return inner.files(); },
+      entryAt: inner.entryAt,
+      read: (path) => { reads += 1; return inner.read(path); },
+    };
+    const options: DocReferenceOptions = { scope: SCOPE, baseline: [], projectRoot: "/repo", index: referenceIndex(counted) };
+
+    const flagged = Object.entries(project).flatMap(([path, content]) => handler(content, `/repo/${path}`, options));
+    expect(flagged.map(({ text }) => text)).toEqual([expect.stringContaining("`gone`")]);
+    // Three governed files, one walk, and one read: the only file that feeds the corpus.
+    expect([walks, reads]).toEqual([1, 1]);
   });
 });

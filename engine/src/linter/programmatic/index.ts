@@ -137,7 +137,11 @@ function wireCastOptions(config: ProgrammaticConfig, projectRoot: string | null)
 
 /** no-dangling-doc-reference's options for one project — shared by the live
  *  rule and its staleness detector, so both resolve against one index. */
-function docReferenceOptions({ config, projectRoot, references }: ProjectLintContext): DocReferenceOptions {
+function docReferenceOptions(
+  config: ProgrammaticConfig,
+  projectRoot: string | null,
+  references: ReferenceIndex,
+): DocReferenceOptions {
   return Object.freeze({
     scope: config.docReferences ?? null,
     baseline: config.docReferenceBaseline ?? [],
@@ -205,11 +209,11 @@ export function projectLintContext<Corpus extends CloneCorpus>(
  * what is in the tree, and a cache-assisted corpus can hide a copy.
  */
 export function baselineOwners(context: ProjectLintContext<AuthoritativeCorpus>): readonly BaselineOwner[] {
-  const { config, projectRoot, duplicateBlock: cloneOptions, corpus } = context;
+  const { config, projectRoot, duplicateBlock: cloneOptions, corpus, references } = context;
   const switchOptions = switchTotalityOptions(config, projectRoot);
   const chainOptions = discriminantBranchingOptions(config, projectRoot);
   const castOptions = wireCastOptions(config, projectRoot);
-  const referenceOptions = docReferenceOptions(context);
+  const referenceOptions = docReferenceOptions(config, projectRoot, references);
   return Object.freeze([
     {
       rule: SWITCH_TOTALITY_RULE,
@@ -435,15 +439,16 @@ function wireCastRule(config: ProgrammaticConfig, projectRoot: string | null): P
 
 /**
  * The doc-reference rule. IMMEDIATE: a reference is cheapest to correct while
- * its author is writing it, and the full tier reads every governed file again,
- * so a rename elsewhere fails the unedited doc that still names the old thing.
+ * its author is writing it, and `lint-project` reads every governed file
+ * again, so a rename elsewhere fails the unedited doc that still names the old
+ * thing.
  *
  * Its first call in a process can build the reference index — a project walk
  * and a read of the source corpus — which can outlast the per-file deadline.
  * It declares that (`firstCallSetup`) and the executor runs it last.
  */
-function docReferenceRule(context: ProjectLintContext): ProgrammaticRule {
-  const options = docReferenceOptions(context);
+function docReferenceRule({ config, projectRoot, references }: ProjectLintContext): ProgrammaticRule {
+  const options = docReferenceOptions(config, projectRoot, references);
   return {
     kind: "programmatic",
     name: DOC_REFERENCE_RULE,

@@ -52,6 +52,8 @@ describe("spanReference — the shapes that are references", () => {
     ["needs-verification", { kind: "token", segments: ["needs-verification"] }],
     ["image/logo.png", { kind: "path", path: "image/logo.png", directory: false, anchor: null }],
     ["text/", { kind: "path", path: "text", directory: true, anchor: null }],
+    // A directory has no headings: the anchor is dropped, and the directory is still checked.
+    ["docs/#setup", { kind: "path", path: "docs", directory: true, anchor: null }],
   ])("`%s`", (text, expected) => {
     const reference = span(text);
     expect(reference === null ? null : { ...reference, line: undefined, text: undefined })
@@ -152,6 +154,14 @@ describe("extractDocReferences — a document", () => {
     expect(extracted(text).map((reference) => reference.kind === "link" ? [reference.path, reference.anchor] : null)).toEqual([
       ["img/a b.png", null],
       ["", "section"],
+    ]);
+  });
+
+  it("reads a link whose percent-escape is not valid as written, so it is still checked", () => {
+    expect(extracted("[x](docs/100%.md) [y](docs/%E0%A4%A.md#a)").map((reference) =>
+      reference.kind === "link" ? [reference.path, reference.anchor] : null)).toEqual([
+      ["docs/100%.md", null],
+      ["docs/%E0%A4%A.md", "a"],
     ]);
   });
 
