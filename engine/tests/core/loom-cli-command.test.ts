@@ -117,8 +117,9 @@ describe("a root holding a space or a single quote", () => {
   });
 
   it("auditNonce takes only a parsed agent id", () => {
-    // @ts-expect-error a bare string carries no proof that it is one shell word
-    expect(() => PLAIN.auditNonce("/runs", "x; rm -rf ~")).not.toThrow();
+    // The compile-time pin (tsconfig includes tests/): a bare string carries no proof that it is one shell word.
+    // @ts-expect-error the owner must be a SecurityAgentId
+    PLAIN.auditNonce("/runs", "x; rm -rf ~");
     expect(() => anOwner("x; rm -rf ~")).toThrow(/refused/);
   });
 

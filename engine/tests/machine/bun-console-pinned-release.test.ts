@@ -6,6 +6,8 @@
  * (`scripts/bun-console-probe.ts`) against the `bun` on PATH on every suite:
  *
  *   - the pinned release (`.bun-version`) has a recording of every kind;
+ *   - a `bun` is on PATH and prints its release (a named failure, not a
+ *     collection error, when it does not; the probe tests then skip);
  *   - whatever Bun is installed, Loom reads from its real output exactly the
  *     facts the fixtures encode: one collection error, no JUnit report for a
  *     run that never loaded, and Bun's own totals once the two are joined;
@@ -26,29 +28,47 @@ import {
   installedBunVersion,
   normalizeBunOutput,
   type BunConsoleCapture,
+  type BunConsoleFixtureKind,
 } from "../../scripts/bun-console-probe";
+import { parseBunVersion } from "../../scripts/bun-version-pin";
 import { bunRunSummary, parseBunConsoleCollectionErrors, parseJunitXml, type TestFileResult } from "../../src/core/structured-test-report";
-import { bunFixture, hasBunFixture } from "../fixtures/bun-console-fixtures";
+import { optionalBunFixture } from "../fixtures/bun-console-fixtures";
 import { REPOSITORY } from "../fixtures/repository-roots";
 
-const PINNED = readFileSync(join(REPOSITORY, ".bun-version"), "utf8").trim();
+const PIN_FILE = readFileSync(join(REPOSITORY, ".bun-version"), "utf8");
+const PINNED = parseBunVersion(PIN_FILE);
 const INSTALLED = installedBunVersion();
+const INSTALLED_RELEASE = INSTALLED.ok ? INSTALLED.value : null;
+
+/** The pinned release's recording of `kind`, or null when the pin names no release or the release has none. */
+const pinnedRecording = (kind: BunConsoleFixtureKind): string | null =>
+  PINNED === null ? null : optionalBunFixture(PINNED, kind);
 
 const result = (file: string, executed: number, failed: number, collectionError = false): TestFileResult =>
   ({ file, executed, failed, skipped: 0, collectionError });
 
-let capture: BunConsoleCapture;
-beforeAll(() => {
-  capture = captureBunConsole();
-}, 30_000);
-
 describe("the pinned Bun release's console recordings", () => {
+  it(".bun-version names one Bun release", () => {
+    expect(PINNED, `.bun-version holds ${JSON.stringify(PIN_FILE)}`).not.toBeNull();
+  });
+
   it.each(BUN_CONSOLE_FIXTURE_KINDS)(`.bun-version (${PINNED}) has a recorded %s`, (kind) => {
-    expect(hasBunFixture(PINNED, kind), `record it: bun engine/scripts/bun-console-probe.ts`).toBe(true);
+    expect(pinnedRecording(kind), `record it: bun engine/scripts/bun-console-probe.ts`).not.toBeNull();
   });
 });
 
-describe(`the installed Bun (${INSTALLED}) prints what Loom reads`, () => {
+describe("the bun on PATH", () => {
+  it("prints its release", () => {
+    expect(INSTALLED.ok ? null : INSTALLED.error).toBeNull();
+  });
+});
+
+describe.runIf(INSTALLED_RELEASE !== null)(`the installed Bun (${INSTALLED_RELEASE}) prints what Loom reads`, () => {
+  let capture: BunConsoleCapture;
+  beforeAll(() => {
+    capture = captureBunConsole();
+  }, 30_000);
+
   it("both consoles name exactly the file that never loaded; the plain one's passing sections are not errors", () => {
     expect(parseBunConsoleCollectionErrors(capture.recordings["mixed.console.txt"])).toEqual(["src/a.test.ts"]);
     expect(parseBunConsoleCollectionErrors(capture.recordings["mixed.plain.console.txt"])).toEqual(["src/a.test.ts"]);
@@ -71,8 +91,8 @@ describe(`the installed Bun (${INSTALLED}) prints what Loom reads`, () => {
     });
   });
 
-  it.runIf(INSTALLED === PINNED).each(BUN_CONSOLE_FIXTURE_KINDS)("prints the pinned release's recorded %s byte for byte", (kind) => {
-    expect(capture.recordings[kind]).toBe(bunFixture(PINNED, kind));
+  it.runIf(INSTALLED_RELEASE === PINNED).each(BUN_CONSOLE_FIXTURE_KINDS)("prints the pinned release's recorded %s byte for byte", (kind) => {
+    expect(capture.recordings[kind]).toBe(pinnedRecording(kind));
   });
 });
 

@@ -23,16 +23,22 @@ import { extractEvidence } from "../../src/machine/extract-evidence";
 import { findReport } from "../../src/machine/report-discovery";
 import { judgeTestRun } from "../../src/machine/test-report";
 import type { TestFileResult } from "../../src/core/structured-test-report";
-import { bunFixture, hasBunFixture, RECORDED_BUN_RELEASES } from "../fixtures/bun-console-fixtures";
+import type { BunVersion } from "../../scripts/bun-version-pin";
+import { bunFixture, optionalBunFixture, RECORDED_BUN_RELEASES } from "../fixtures/bun-console-fixtures";
 
-/** One release's recordings. The plain console (no agent variable set) is
- *  recorded from the probe onward; an older release has the agent one only. */
-const recordingsOf = (release: string) => ({
-  MIXED_CONSOLE: bunFixture(release, "mixed.console.txt"),
-  MIXED_PLAIN_CONSOLE: hasBunFixture(release, "mixed.plain.console.txt") ? bunFixture(release, "mixed.plain.console.txt") : null,
-  MIXED_JUNIT: bunFixture(release, "mixed.junit.xml"),
-  LOAD_FAILURE_CONSOLE: bunFixture(release, "load-failure-only.console.txt"),
-});
+/** One release's recordings. `MIXED_CONSOLES` is every console the release
+ *  recorded for the mixed run: the agent one, then the plain one when the
+ *  release has it. */
+const recordingsOf = (release: BunVersion) => {
+  const agent = bunFixture(release, "mixed.console.txt");
+  const plain = optionalBunFixture(release, "mixed.plain.console.txt");
+  return {
+    MIXED_CONSOLE: agent,
+    MIXED_CONSOLES: plain === null ? [agent] : [agent, plain],
+    MIXED_JUNIT: bunFixture(release, "mixed.junit.xml"),
+    LOAD_FAILURE_CONSOLE: bunFixture(release, "load-failure-only.console.txt"),
+  };
+};
 
 const result = (file: string, executed: number, failed: number, collectionError = false): TestFileResult =>
   ({ file, executed, failed, skipped: 0, collectionError });
@@ -62,7 +68,7 @@ const quietly = <T>(run: () => T): T => {
 };
 
 describe.each(RECORDED_BUN_RELEASES)("findReport — Bun %s console collection errors", (release) => {
-  const { MIXED_CONSOLE, MIXED_PLAIN_CONSOLE, MIXED_JUNIT, LOAD_FAILURE_CONSOLE } = recordingsOf(release);
+  const { MIXED_CONSOLE, MIXED_CONSOLES, MIXED_JUNIT, LOAD_FAILURE_CONSOLE } = recordingsOf(release);
 
   it("mints a bun-console summary when every file failed to load and Bun wrote no JUnit report", () => {
     const summary = findReport(command, dir, { output: LOAD_FAILURE_CONSOLE, exit: 1 }, times());
@@ -71,20 +77,17 @@ describe.each(RECORDED_BUN_RELEASES)("findReport — Bun %s console collection e
     expect(judgeTestRun(1, summary)).toEqual({ verdict: "trusted-fail" });
   });
 
-  it("joins the JUnit report with the file it left out, to Bun's own totals (5 tests, 2 failing)", () => {
+  it("joins the JUnit report with the file it left out, to Bun's own totals (5 tests, 2 failing), from every recorded console", () => {
+    // The plain console's passing sections name no error, so it joins alike.
     writeFileSync(report, MIXED_JUNIT);
-    const summary = findReport(command, dir, { output: MIXED_CONSOLE, exit: 1 }, times());
-    expect(summary).toMatchObject({ total: 5, failed: 2, source: "junit-xml" });
-    expect(summary?.files).toEqual({
-      kind: "recorded",
-      results: [result("src/b.test.ts", 1, 0), result("src/c.test.ts", 3, 1), result("src/a.test.ts", 1, 1, true)],
-    });
-  });
-
-  it.runIf(MIXED_PLAIN_CONSOLE !== null)("joins the same totals from the plain console, whose passing sections name no error", () => {
-    writeFileSync(report, MIXED_JUNIT);
-    const summary = findReport(command, dir, { output: MIXED_PLAIN_CONSOLE ?? "", exit: 1 }, times());
-    expect(summary).toMatchObject({ total: 5, failed: 2, source: "junit-xml" });
+    for (const output of MIXED_CONSOLES) {
+      const summary = findReport(command, dir, { output, exit: 1 }, times());
+      expect(summary).toMatchObject({ total: 5, failed: 2, source: "junit-xml" });
+      expect(summary?.files).toEqual({
+        kind: "recorded",
+        results: [result("src/b.test.ts", 1, 0), result("src/c.test.ts", 3, 1), result("src/a.test.ts", 1, 1, true)],
+      });
+    }
   });
 
   it("reads no console without a non-zero exit attributed to the Bun segment", () => {

@@ -49,6 +49,8 @@ import {
   type CriticError,
 } from "../../src/core/security-coverage";
 import type { DomainResult } from "../../src/core/orchestration-contract/identity";
+import { AGENT_POLICIES } from "../../src/core/model-profiles";
+import { isSecurityAgentId, SECURITY_AUDIT_LIMITS } from "../../src/core/security-audit-contract";
 import { HUNTER_ENVELOPE, aConfirmedFinding, aRefs, aSeed, aUnitResult, ok } from "./fixtures";
 
 const require = createRequire(import.meta.url);
@@ -290,6 +292,16 @@ describe("coverage ledger: state machine", () => {
     expect(validateLedger([third])).toEqual([]);
     const result = ok(assignUnits([third], [{ coverageId: unit.coverage_id, agentId: HUNTER }]));
     expect(result.assigned[0].ownerId).toBe(`${HUNTER}--4`);
+  });
+
+  it("mints only canonical owner ids: no catalog agent's longest attempt suffix outgrows the agent-id grammar", () => {
+    // A unit holds at most `attemptsPerUnit` archived attempts, so the highest
+    // suffix `assign` can mint is one past it. `assign`'s refusal of a minted
+    // id that is no agent id stays unreachable while this holds.
+    const longest = SECURITY_AUDIT_LIMITS.attemptsPerUnit + 1;
+    const unmintable = AGENT_POLICIES.map(({ agent }) => `${agent}--${longest}`).filter((owner) => !isSecurityAgentId(owner));
+    expect(unmintable).toEqual([]);
+    expect(catalogAgentOfOwner(`${HUNTER}--${longest}`)).toBe(HUNTER);
   });
 
   it("reads an owner id back to its catalog agent, and only a well-formed attempt suffix", () => {

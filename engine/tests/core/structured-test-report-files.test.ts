@@ -28,7 +28,8 @@ import {
 } from "../../src/core/structured-test-report";
 import { judgeTestRun } from "../../src/machine/test-report";
 import { reportSummary } from "../machine/report-summary";
-import { bunFixture, hasBunFixture, RECORDED_BUN_RELEASES } from "../fixtures/bun-console-fixtures";
+import type { BunVersion } from "../../scripts/bun-version-pin";
+import { bunFixture, optionalBunFixture, RECORDED_BUN_RELEASES } from "../fixtures/bun-console-fixtures";
 
 const result = (file: string, executed: number, failed: number, collectionError = false, skipped = 0): TestFileResult =>
   ({ file, executed, failed, skipped, collectionError });
@@ -336,11 +337,9 @@ describe("Bun console collection errors", () => {
   it.each(RECORDED_BUN_RELEASES)("names exactly the files whose section reports an unhandled error between tests (Bun %s)", (release) => {
     // c.test.ts fails behaviorally (with a code frame), b.test.ts passes (a
     // section only in the plain console), a.test.ts never loads.
-    expect(parseBunConsoleCollectionErrors(bunFixture(release, "mixed.console.txt"))).toEqual(["src/a.test.ts"]);
-    expect(parseBunConsoleCollectionErrors(bunFixture(release, "load-failure-only.console.txt"))).toEqual(["src/a.test.ts"]);
-    if (hasBunFixture(release, "mixed.plain.console.txt")) {
-      expect(parseBunConsoleCollectionErrors(bunFixture(release, "mixed.plain.console.txt"))).toEqual(["src/a.test.ts"]);
-    }
+    const plain = optionalBunFixture(release, "mixed.plain.console.txt");
+    const consoles = [bunFixture(release, "mixed.console.txt"), bunFixture(release, "load-failure-only.console.txt"), ...(plain === null ? [] : [plain])];
+    for (const output of consoles) expect(parseBunConsoleCollectionErrors(output)).toEqual(["src/a.test.ts"]);
   });
 
   it("reads through ANSI colour and CRLF, and lists a file once", () => {
@@ -375,11 +374,11 @@ describe("Bun console collection errors", () => {
 });
 
 describe("bunRunSummary — Bun's JUnit report with its console collection errors", () => {
-  const junit = (): TestReportSummary => parseJunitXml(bunFixture("1.4.2", "mixed.junit.xml"))!;
+  const junit = (release: BunVersion): TestReportSummary => parseJunitXml(bunFixture(release, "mixed.junit.xml"))!;
 
-  it("adds a file that never loaded as Bun counts it: one failing testcase that is a collection error", () => {
+  it.each(RECORDED_BUN_RELEASES)("adds a file that never loaded as Bun %s counts it: one failing testcase that is a collection error", (release) => {
     // Bun's own summary for this run: "Ran 5 tests across 3 files", "2 fail".
-    const summary = bunRunSummary(junit(), ["src/a.test.ts"]);
+    const summary = bunRunSummary(junit(release), ["src/a.test.ts"]);
     expect(summary).toMatchObject({ total: 5, failed: 2, source: "junit-xml" });
     expect(summary?.files).toEqual(recorded([
       result("src/b.test.ts", 1, 0),
@@ -388,10 +387,10 @@ describe("bunRunSummary — Bun's JUnit report with its console collection error
     ]));
   });
 
-  it("gives a reported file that also errored between tests one more failing testcase, never a collection error", () => {
+  it.each(RECORDED_BUN_RELEASES)("gives a file Bun %s reported that also errored between tests one more failing testcase, never a collection error", (release) => {
     // It loaded, so its genuine failures stay behavioral: an error between
     // tests must not hide an assertion failure behind a collection error.
-    const summary = bunRunSummary(junit(), ["src/b.test.ts", "src/c.test.ts"]);
+    const summary = bunRunSummary(junit(release), ["src/b.test.ts", "src/c.test.ts"]);
     expect(summary).toMatchObject({ total: 6, failed: 3 });
     expect(summary?.files).toEqual(recorded([result("src/b.test.ts", 2, 1), result("src/c.test.ts", 4, 2)]));
   });
@@ -402,8 +401,8 @@ describe("bunRunSummary — Bun's JUnit report with its console collection error
     for (const raw of ["bun", "JUNIT-XML", "", null, undefined, 1, {}]) expect(parseReportSource(raw)).toBeNull();
   });
 
-  it("keeps the JUnit summary unchanged when the console reports no collection error", () => {
-    expect(bunRunSummary(junit(), [])).toEqual(junit());
+  it.each(RECORDED_BUN_RELEASES)("keeps Bun %s's JUnit summary unchanged when the console reports no collection error", (release) => {
+    expect(bunRunSummary(junit(release), [])).toEqual(junit(release));
   });
 
   it("mints a bun-console summary when every file failed to load and Bun wrote no JUnit report", () => {

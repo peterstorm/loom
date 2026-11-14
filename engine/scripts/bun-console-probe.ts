@@ -53,10 +53,11 @@ const PROBE_FILES: Readonly<Record<string, string>> = {
 /** Where the probe project appears in a recorded fixture. */
 const RECORDED_PROJECT = "/repo/pkg";
 
-/** The recordings of one release. Bun prints two consoles: under an agent
- *  (`CLAUDECODE`, `AGENT` set) it omits passing tests, and a `.console.txt`
- *  is that one, the console a Claude Code hook reads; `.plain.console.txt` is
- *  the full one, as a harness that sets neither variable sees it. */
+/** The recordings of one release. Bun prints two consoles: under an agent it
+ *  omits passing tests, and a `.console.txt` is that one, recorded with
+ *  `CLAUDECODE` set as Claude Code sets it, the console a Claude Code hook
+ *  reads; `.plain.console.txt` is the full one, recorded with no agent
+ *  variable set. */
 export const BUN_CONSOLE_FIXTURE_KINDS = [
   "mixed.console.txt",
   "mixed.plain.console.txt",
@@ -66,7 +67,7 @@ export const BUN_CONSOLE_FIXTURE_KINDS = [
 export type BunConsoleFixtureKind = (typeof BUN_CONSOLE_FIXTURE_KINDS)[number];
 
 /** A recording's file name: the release that printed it, then what it is. */
-export const bunConsoleFixtureName = (release: string, kind: BunConsoleFixtureKind): string => `bun-${release}-${kind}`;
+export const bunConsoleFixtureName = (release: BunVersion, kind: BunConsoleFixtureKind): string => `bun-${release}-${kind}`;
 
 /** What one Bun printed for the probe, normalized. */
 export type BunConsoleCapture = Readonly<{
@@ -109,12 +110,21 @@ const probeEnvironment = (dialect: ConsoleDialect): NodeJS.ProcessEnv => ({
   ...(dialect === "agent" ? { CLAUDECODE: "1" } : {}),
 });
 
-/** Bun's own `--version`, parsed. Throws when `bun` is missing or prints no version. */
-export function installedBunVersion(): BunVersion {
+/** The `bun` on PATH: its release, or why it named none. */
+export type InstalledBun =
+  | Readonly<{ ok: true; value: BunVersion }>
+  | Readonly<{ ok: false; error: string }>;
+
+/** Bun's own `--version`, parsed. A missing `bun`, a failed run and an
+ *  unparseable line are each a value, so the caller decides how to report one. */
+export function installedBunVersion(): InstalledBun {
   const printed = spawnSync("bun", ["--version"], { encoding: "utf8", env: probeEnvironment("plain") });
-  const version = printed.status === 0 ? parseBunVersion(printed.stdout) : null;
-  if (version === null) throw new Error(`\`bun --version\` failed: ${printed.error?.message ?? (printed.stderr || `exit ${printed.status}`)}`);
-  return version;
+  if (printed.error !== undefined) return { ok: false, error: `\`bun --version\` failed: ${printed.error.message}` };
+  if (printed.status !== 0) return { ok: false, error: `\`bun --version\` exited ${printed.status}: ${printed.stderr}` };
+  const version = parseBunVersion(printed.stdout);
+  return version === null
+    ? { ok: false, error: `\`bun --version\` printed ${JSON.stringify(printed.stdout)}, not a Bun version` }
+    : { ok: true, value: version };
 }
 
 /** Run `bun test` with a JUnit outfile in the probe project; its console and
@@ -146,7 +156,9 @@ function runProbe(
 
 /** Run the installed Bun against a fresh probe project, and remove the project. */
 export function captureBunConsole(): BunConsoleCapture {
-  const version = installedBunVersion();
+  const installed = installedBunVersion();
+  if (!installed.ok) throw new Error(installed.error);
+  const version = installed.value;
   const scratch = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-bun-probe-")));
   try {
     const project = join(scratch, "pkg");

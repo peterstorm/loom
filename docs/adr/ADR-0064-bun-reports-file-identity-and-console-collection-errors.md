@@ -95,8 +95,8 @@ The ledger read-back accepts `bun-console`.
   probe on every suite: the release in `.bun-version` must have a recording, the installed Bun's real output must
   yield the facts the fixtures encode, and on the pinned release it must match the recording byte for byte. A
   Bun upgrade that changes the grammar therefore fails verification instead of passing on stale fixtures.
-- Bun prints two consoles: with an agent variable set (`CLAUDECODE`, `AGENT`) it omits passing tests, otherwise it
-  prints a section for every file. The probe records both, and the grammar reads both the same way.
+- Bun prints two consoles: under an agent it omits passing tests, otherwise it prints a section for every file. The
+  probe records both, the first with `CLAUDECODE` set as Claude Code sets it, and the grammar reads both the same way.
 - A test-file path containing whitespace is not recognized as a header (fail closed).
 - Console text inside a recognized run is agent-influenced in the same way a JUnit file is. As with every I6
   fact, the proof is as strong as the ledger (`docs/deterministic-implementation.md`, soundness limit), and a

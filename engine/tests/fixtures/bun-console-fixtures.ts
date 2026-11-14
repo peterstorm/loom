@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bunConsoleFixtureName, type BunConsoleFixtureKind } from "../../scripts/bun-console-probe";
+import { parseBunVersion, type BunVersion } from "../../scripts/bun-version-pin";
 
 /**
  * The recorded Bun console fixtures (ADR-0064), read by release. Every release
@@ -10,16 +11,26 @@ import { bunConsoleFixtureName, type BunConsoleFixtureKind } from "../../scripts
  */
 const FIXTURES = fileURLToPath(new URL("./", import.meta.url));
 
+/** The directory's file names, read once: recordings are written by the probe, never by a test. */
+const LISTING: ReadonlySet<string> = new Set(readdirSync(FIXTURES));
+
 const RECORDED = /^bun-(.+)-mixed\.console\.txt$/u;
 
-export const RECORDED_BUN_RELEASES: readonly string[] = readdirSync(FIXTURES)
-  .flatMap((name) => RECORDED.exec(name)?.slice(1, 2) ?? [])
-  .sort();
+/** A recorded file name that names no Bun release is a mistake in the fixtures, not a release to skip. */
+const releaseOf = (name: string): readonly BunVersion[] => {
+  const spelled = RECORDED.exec(name)?.[1];
+  if (spelled === undefined) return [];
+  const release = parseBunVersion(spelled);
+  if (release === null) throw new Error(`fixture ${name} names no Bun release`);
+  return [release];
+};
 
-/** One recording of `release`, exactly as it was written. */
-export const bunFixture = (release: string, kind: BunConsoleFixtureKind): string =>
+export const RECORDED_BUN_RELEASES: readonly BunVersion[] = [...LISTING].flatMap(releaseOf).sort();
+
+/** One recording of `release`, exactly as it was written. Throws when it was never recorded. */
+export const bunFixture = (release: BunVersion, kind: BunConsoleFixtureKind): string =>
   readFileSync(join(FIXTURES, bunConsoleFixtureName(release, kind)), "utf8");
 
-/** Whether `release` has a recording of `kind`. */
-export const hasBunFixture = (release: string, kind: BunConsoleFixtureKind): boolean =>
-  readdirSync(FIXTURES).includes(bunConsoleFixtureName(release, kind));
+/** One recording of `release`, or null when that release has none of `kind`. */
+export const optionalBunFixture = (release: BunVersion, kind: BunConsoleFixtureKind): string | null =>
+  LISTING.has(bunConsoleFixtureName(release, kind)) ? bunFixture(release, kind) : null;
