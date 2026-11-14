@@ -35,7 +35,7 @@ export type BunVersionCheck =
 const VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:[-+][0-9A-Za-z.+-]+)?$/;
 
 /** Parse one version line. A single trailing newline (a file's or a CLI's) is not part of the version. */
-function parseBunVersion(raw: string): BunVersion | null {
+export function parseBunVersion(raw: string): BunVersion | null {
   const line = raw.replace(/\r?\n$/, "");
   return VERSION.test(line) ? (line as BunVersion) : null;
 }

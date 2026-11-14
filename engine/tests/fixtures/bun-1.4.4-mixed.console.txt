@@ -1,0 +1,29 @@
+bun test v1.4.4 (0000000)
+
+src/a.test.ts:
+
+# Unhandled error between tests
+-------------------------------
+error: Cannot find module './missing' from '/repo/pkg/src/a.test.ts'
+-------------------------------
+
+
+src/c.test.ts:
+1 | import { describe, test, expect } from "bun:test";
+2 | describe("outer", () => {
+3 |   describe("inner", () => { test("nested passes", () => { expect(1).toBe(1); }); });
+4 |   test("fails", () => { expect(1).toBe(2); });
+                                      ^
+error: expect(received).toBe(expected)
+
+Expected: 2
+Received: 1
+
+      at <anonymous> (/repo/pkg/src/c.test.ts:4:35)
+(fail) outer > fails
+
+ 3 pass
+ 2 fail
+ 1 error
+ 4 expect() calls
+Ran 5 tests across 3 files.

@@ -22,6 +22,7 @@
 
 import type { SECURITY_VERIFICATION_PROGRAM } from "./orchestration-contract/programs";
 import { failure, success, type DomainResult } from "./orchestration-contract/identity";
+import type { SecurityAgentId } from "./security-audit-contract";
 import type { SecurityLens } from "./security-lenses";
 import { quoteShellArgument } from "./shell-quoting";
 
@@ -82,8 +83,10 @@ export type LoomCommands = Readonly<{
   /** How the parent obtains the receipt binding for one of `owner`'s artifacts
    *  in the run at `runDir` (a hunter cannot derive the nonce itself): the line
    *  `assign` prints under each minted owner. `<file>` is the one word left for
-   *  the parent to fill in, so this line is not run verbatim. */
-  auditNonce: (runDir: string, owner: string) => string;
+   *  the parent to fill in, so this line is not run verbatim. `owner` is
+   *  printed bare: a `SecurityAgentId` holds only `[a-z0-9_-]`, so the path
+   *  stays one shell word with no quote around it for the parent to work into. */
+  auditNonce: (runDir: string, owner: SecurityAgentId) => string;
   /** The import of the finished verification run `run` into the audit at
    *  `locator`: the line `status` prints after the start command, and the one
    *  the Pi import gate reads `--out` and `--from` from statically. */
@@ -104,7 +107,7 @@ export function loomCommands(root: LoomPackageRoot): LoomCommands {
   const helper = `bun ${quoteShellArgument(`${root}/engine/src/cli.ts`)} helper`;
   return Object.freeze({
     mutationCheck: (taskId: string) => `${helper} mutation-check --task ${quoteShellArgument(taskId)}`,
-    auditNonce: (runDir: string, owner: string) =>
+    auditNonce: (runDir: string, owner: SecurityAgentId) =>
       `${helper} security-audit nonce --out ${quoteShellArgument(runDir)} --artifact agents/${owner}/artifacts/<file>`,
     verificationImport: (locator: string, run: string) =>
       `${helper} security-audit verify --out ${quoteShellArgument(locator)} --from ${quoteShellArgument(run)}`,
