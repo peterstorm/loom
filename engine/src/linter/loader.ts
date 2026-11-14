@@ -16,6 +16,8 @@ import { EMPTY_CONFIG, parseProjectConfig, projectRootOf, type ProgrammaticConfi
 import { EMPTY_CORPUS, type AuthoritativeCorpus, type CloneCorpus } from "./clones/clone-detection";
 import { authoritativeCorpus, cacheAssistedCorpus, defaultCacheFile, type CorpusSource } from "./clones/project-corpus";
 import { isDeclarativeRuleFile } from "./rule-sources";
+import { projectReferenceIndex } from "./doc-references/project-snapshot";
+import { EMPTY_REFERENCE_INDEX } from "./doc-references/reference-index";
 
 // --- Public API ---
 
@@ -92,17 +94,21 @@ export function loadRules(
 
 /**
  * One project's lint context, its corpus made by `corpusOf`. Nothing is walked
- * here: the corpus builds itself on the rule's first call. A rules directory in
- * neither layout has no known project root (null), so there is no project to
- * search and the corpus is the empty one.
+ * here: the corpus and the reference index build themselves on first use. A
+ * rules directory in neither layout has no known project root (null), so there
+ * is no project to search: the corpus and the index are the empty ones.
  */
 function lintContext<Corpus extends CloneCorpus>(
   config: ProgrammaticConfig,
   projectRoot: string | null,
   corpusOf: (source: CorpusSource) => Corpus,
 ): ProjectLintContext<Corpus | AuthoritativeCorpus> {
-  return projectLintContext(config, projectRoot, (clone) =>
-    projectRoot === null ? EMPTY_CORPUS : corpusOf({ projectRoot, exclusions: config.exclude ?? [], clone }));
+  return projectLintContext(
+    config,
+    projectRoot,
+    (clone) => projectRoot === null ? EMPTY_CORPUS : corpusOf({ projectRoot, exclusions: config.exclude ?? [], clone }),
+    projectRoot === null ? EMPTY_REFERENCE_INDEX : projectReferenceIndex(projectRoot),
+  );
 }
 
 /**

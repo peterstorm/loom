@@ -1,6 +1,7 @@
 /**
- * Both totality rules keep a grandfathered list, and a grandfathered list is
- * only honest while it still describes the tree. `scripts/lint-project.ts`
+ * Every baselined rule — both totality rules, the copied block, the wire cast
+ * and the dangling doc reference — keeps a grandfathered list, and a
+ * grandfathered list is only honest while it still describes the tree. `scripts/lint-project.ts`
  * reports stale entries, but a script nobody runs is how the lists decayed to
  * begin with — so the assertion lives here, against the live repository.
  *
@@ -30,7 +31,7 @@ import { baselineOwners } from "../../../src/linter/programmatic/index";
 import { projectRootOf } from "../../../src/linter/programmatic/config";
 import { authoritativeLintContext, loadRules } from "../../../src/linter/loader";
 import { executeRules } from "../../../src/linter/executor";
-import { isLintableName, isNeverSourceDirectory, scopeOf } from "../../../src/linter/project-scope";
+import { isLintableName, isNeverSourceDirectory, scopeOf, walkedBesides } from "../../../src/linter/project-scope";
 import { LOOM_CONFIG, LOOM_RULES_DIR, REPO_ROOT } from "../loom-project-config";
 import {
   DEFAULT_DISCRIMINANT_BRANCHING_OPTIONS,
@@ -45,8 +46,9 @@ const LOOM_OWNERS = baselineOwners(authoritativeLintContext(LOOM_CONFIG, REPO_RO
  * Every lintable file `lint-project` reads, repo-relative and sorted: the same
  * never-source directories, the same lintable names and the same `exclude`
  * entries (`project-scope.ts`), so this guard sees exactly the tree the rules
- * see — `.mts` and `.cts` included. Test files stay in: each detector skips
- * them itself, as the rule does.
+ * see — `.mts` and `.cts` included — plus the governed paths the walk never
+ * enters (Loom's plans), which `lint-project` walks besides the project. Test
+ * files stay in: each detector skips them itself, as the rule does.
  */
 function lintedFiles(dir: string): readonly string[] {
   return readdirSync(dir).sort().flatMap((entry): readonly string[] => {
@@ -57,7 +59,13 @@ function lintedFiles(dir: string): readonly string[] {
   });
 }
 
-const LINTED = lintedFiles(REPO_ROOT).filter((path) => scopeOf(path, LOOM_CONFIG.exclude ?? []).kind === "lint");
+const BESIDES = walkedBesides(LOOM_CONFIG).flatMap((path) => {
+  const full = join(REPO_ROOT, path);
+  return statSync(full).isDirectory() ? lintedFiles(full) : [path];
+});
+
+const LINTED = [...new Set([...lintedFiles(REPO_ROOT), ...BESIDES])]
+  .filter((path) => scopeOf(path, LOOM_CONFIG.exclude ?? []).kind === "lint");
 
 const readRepoSource = (path: string): string | null => {
   try {
@@ -74,10 +82,13 @@ describe("loom's own totality baselines", () => {
       ["exhaustive-discriminant-branching", "discriminantBranchingBaseline"],
       ["no-duplicate-block", "duplicateBlockBaseline"],
       ["no-wire-cast", "wireCastBaseline"],
+      ["no-dangling-doc-reference", "docReferenceBaseline"],
     ]);
     // The drift message is rule-aware: a chain entry never reads as a switch.
     expect(LOOM_OWNERS.map((owner) => owner.site))
-      .toEqual(["unproven switch", "unproven if-chain", "copied block", "unparsed wire value"]);
+      .toEqual(["unproven switch", "unproven if-chain", "copied block", "unparsed wire value", "dangling doc reference"]);
+    // Loom governs its own docs, and its plans are walked though .claude/ is not.
+    expect(BESIDES.some((path) => path.startsWith(".claude/plans/"))).toBe(true);
     // Loom grandfathers no wire value typed without being parsed: the rule's
     // "nothing above the baseline" case below is the whole tree, held to zero.
     expect(LOOM_CONFIG.wireCastBaseline).toBeUndefined();
@@ -159,6 +170,17 @@ describe("loom's own totality baselines", () => {
       [path]: "export const order = parseOrder(JSON.parse(text));",
       "engine/src/core/unparsed.ts": "export const order = JSON.parse(text) as Order;",
     };
+    expect(staleBaselineEntries(owner, (file) => sources[file] ?? null)).toEqual(stale);
+  });
+
+  it("reports a doc-reference entry whose reference now resolves, or whose doc is gone, as stale", () => {
+    const docOwner = LOOM_OWNERS.find((candidate) => candidate.rule === "no-dangling-doc-reference");
+    if (docOwner === undefined) throw new Error("no-dangling-doc-reference keeps a baseline");
+    const live = baselineKey("docs/history.md", "aNameNoSourceHolds");
+    const stale = [baselineKey("docs/history.md", "README.md"), baselineKey("docs/deleted.md", "aNameNoSourceHolds")];
+    const owner = { ...docOwner, baseline: [live, ...stale] };
+    // README.md exists at the root, so the reference that once dangled no longer needs its entry.
+    const sources: Readonly<Record<string, string>> = { "docs/history.md": "`aNameNoSourceHolds` and `README.md`\n" };
     expect(staleBaselineEntries(owner, (file) => sources[file] ?? null)).toEqual(stale);
   });
 });

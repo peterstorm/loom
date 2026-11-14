@@ -9,7 +9,8 @@ import {
 } from "../../src/core/reviewer-contract";
 import { sha256Hex } from "../../src/core/digest";
 import { compactSchemaOf, describeCompactSchemaError } from "../support/compact-schema";
-import { describeMarkdownError, fencesOf, markdown, orFail } from "../support/markdown";
+import { describeMarkdownError, fencesOf, markdown } from "../../src/linter/markdown";
+import { orFail } from "../support/or-fail";
 
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
 const decode = (value: unknown) => parseReviewerPayloadV2(bytes(JSON.stringify(value)));

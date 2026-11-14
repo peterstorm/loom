@@ -57,6 +57,7 @@ Each row is described where the link points. Nothing below this table repeats it
 | Q4 | The Task mutation check, enforced within bounds on Claude Code and advisory on Pi | [ADR-0071](adr/ADR-0071-the-task-mutation-check-names-surviving-mutants-before-the-stop.md), [operations](verification.md#task-mutation-check) |
 | Q5 | Every documented wire example parsed by its production parser | [ADR-0073](adr/ADR-0073-every-documented-wire-example-is-parsed-by-its-production-parser.md) |
 | Q6 (edit-time half) | `no-wire-cast`: wire output typed without a parse is refused at the edit | [ADR-0072](adr/ADR-0072-wire-output-typed-without-a-parse-is-refused-at-the-edit.md) |
+| Doc references | `no-dangling-doc-reference`: every backticked path, heading, symbol, spec id and ADR id in a governed doc or comment resolves against the project, at the edit and in the full tier | [Lint rules](../lint-rules/README.md#no-dangling-doc-reference), [ADR-0074](adr/ADR-0074-every-doc-reference-resolves-against-the-project.md) |
 
 ---
 

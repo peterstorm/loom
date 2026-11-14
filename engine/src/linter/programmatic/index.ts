@@ -1,9 +1,10 @@
 /**
  * Programmatic rule registry — provides built-in programmatic rules. Every
  * rule runs in the "full" tier; the import-boundary rules, `switch-totality`,
- * `no-duplicate-block` AND `no-wire-cast` also run in the "immediate" tier, so
- * a forbidden import, an unproven switch, a copied block or a wire value typed
- * without being parsed is refused when it is written rather than when the Wave
+ * `no-duplicate-block`, `no-wire-cast` AND `no-dangling-doc-reference` also
+ * run in the "immediate" tier, so a forbidden import, an unproven switch, a
+ * copied block, a wire value typed without being parsed or a doc reference
+ * that names nothing is refused when it is written rather than when the Wave
  * Gate starts.
  *
  * Rules are configured via project-local config (`config.json` inside the
@@ -57,6 +58,15 @@ import {
   type CloneCorpus,
   type CloneOptions,
 } from "../clones/clone-detection";
+import {
+  handler as docReferenceHandler,
+  detectedDocReferenceKeys,
+  DOC_REFERENCE_EXTENSIONS,
+  FIX_HINT as DOC_REFERENCE_FIX_HINT,
+  RULE_NAME as DOC_REFERENCE_RULE,
+  type DocReferenceOptions,
+} from "./no-dangling-doc-reference";
+import type { ReferenceIndex } from "../doc-references/types";
 import type { BaselineOwner } from "./baseline";
 import type { ProgrammaticConfig } from "./config";
 
@@ -125,6 +135,17 @@ function wireCastOptions(config: ProgrammaticConfig, projectRoot: string | null)
   return Object.freeze({ baseline: config.wireCastBaseline ?? [], projectRoot });
 }
 
+/** no-dangling-doc-reference's options for one project — shared by the live
+ *  rule and its staleness detector, so both resolve against one index. */
+function docReferenceOptions({ config, projectRoot, references }: ProjectLintContext): DocReferenceOptions {
+  return Object.freeze({
+    scope: config.docReferences ?? null,
+    baseline: config.docReferenceBaseline ?? [],
+    projectRoot,
+    index: references,
+  });
+}
+
 /** no-duplicate-block's options for one project. */
 function duplicateBlockOptions(config: ProgrammaticConfig, projectRoot: string | null): DuplicateBlockOptions {
   return Object.freeze({
@@ -140,9 +161,10 @@ function duplicateBlockOptions(config: ProgrammaticConfig, projectRoot: string |
 /**
  * Everything the rules of one project are built from: its config, its root
  * (the frame the config's paths and baseline keys are written in, or null with
- * no project), no-duplicate-block's options and the clone corpus that rule
- * reads. `createProgrammaticRules` and `baselineOwners` both take this one
- * value, so the live rule and its staleness detector share a corpus and options.
+ * no project), no-duplicate-block's options, the clone corpus that rule reads,
+ * and the reference index no-dangling-doc-reference resolves against.
+ * `createProgrammaticRules` and `baselineOwners` both take this one value, so
+ * the live rule and its staleness detector share a corpus, an index and options.
  *
  * `Corpus` records whether the corpus may have read the fingerprint cache;
  * `baselineOwners` accepts only one that did not.
@@ -152,20 +174,23 @@ export type ProjectLintContext<Corpus extends CloneCorpus = CloneCorpus> = Reado
   projectRoot: string | null;
   duplicateBlock: DuplicateBlockOptions;
   corpus: Corpus;
+  references: ReferenceIndex;
 }>;
 
 /**
  * The lint context of one project. `corpusFor` is handed the clone thresholds
  * the rule compares with, so a corpus cannot be fingerprinted under other ones.
- * Nothing is read here: a project corpus builds itself on the rule's first call.
+ * Nothing is read here: a project corpus and a project reference index each
+ * build themselves on first use.
  */
 export function projectLintContext<Corpus extends CloneCorpus>(
   config: ProgrammaticConfig,
   projectRoot: string | null,
   corpusFor: (clone: CloneOptions) => Corpus,
+  references: ReferenceIndex,
 ): ProjectLintContext<Corpus> {
   const duplicateBlock = duplicateBlockOptions(config, projectRoot);
-  return Object.freeze({ config, projectRoot, duplicateBlock, corpus: corpusFor(duplicateBlock.clone) });
+  return Object.freeze({ config, projectRoot, duplicateBlock, corpus: corpusFor(duplicateBlock.clone), references });
 }
 
 /**
@@ -179,15 +204,12 @@ export function projectLintContext<Corpus extends CloneCorpus>(
  * The context's corpus must be authoritative: a baseline records and reports
  * what is in the tree, and a cache-assisted corpus can hide a copy.
  */
-export function baselineOwners({
-  config,
-  projectRoot,
-  duplicateBlock: cloneOptions,
-  corpus,
-}: ProjectLintContext<AuthoritativeCorpus>): readonly BaselineOwner[] {
+export function baselineOwners(context: ProjectLintContext<AuthoritativeCorpus>): readonly BaselineOwner[] {
+  const { config, projectRoot, duplicateBlock: cloneOptions, corpus } = context;
   const switchOptions = switchTotalityOptions(config, projectRoot);
   const chainOptions = discriminantBranchingOptions(config, projectRoot);
   const castOptions = wireCastOptions(config, projectRoot);
+  const referenceOptions = docReferenceOptions(context);
   return Object.freeze([
     {
       rule: SWITCH_TOTALITY_RULE,
@@ -220,6 +242,14 @@ export function baselineOwners({
       baseline: castOptions.baseline,
       site: "unparsed wire value",
       detect: (content: string, filePath: string) => detectedWireCastKeys(content, filePath, castOptions),
+    },
+    {
+      rule: DOC_REFERENCE_RULE,
+      configKey: "docReferenceBaseline",
+      extensions: DOC_REFERENCE_EXTENSIONS,
+      baseline: referenceOptions.baseline,
+      site: "dangling doc reference",
+      detect: (content: string, filePath: string) => detectedDocReferenceKeys(content, filePath, referenceOptions),
     },
   ]);
 }
@@ -404,6 +434,31 @@ function wireCastRule(config: ProgrammaticConfig, projectRoot: string | null): P
 }
 
 /**
+ * The doc-reference rule. IMMEDIATE: a reference is cheapest to correct while
+ * its author is writing it, and the full tier reads every governed file again,
+ * so a rename elsewhere fails the unedited doc that still names the old thing.
+ *
+ * Its first call in a process can build the reference index — a project walk
+ * and a read of the source corpus — which can outlast the per-file deadline.
+ * It declares that (`firstCallSetup`) and the executor runs it last.
+ */
+function docReferenceRule(context: ProjectLintContext): ProgrammaticRule {
+  const options = docReferenceOptions(context);
+  return {
+    kind: "programmatic",
+    name: DOC_REFERENCE_RULE,
+    description: "A backticked path, anchor, symbol, spec id or ADR id in a governed document or code comment must name something the project has",
+    extensions: DOC_REFERENCE_EXTENSIONS,
+    handler: (content, filePath) => docReferenceHandler(content, filePath, options),
+    tier: "immediate",
+    firstCallSetup: true,
+    fixHint: DOC_REFERENCE_FIX_HINT,
+    enabled: true,
+    source: "default",
+  };
+}
+
+/**
  * Creates the programmatic rule set for one project (`EMPTY_CONFIG` in the
  * context for the built-in defaults). Config allows projects to define their
  * own boundaries, pure modules, limits and baselines. With no project the
@@ -422,5 +477,6 @@ export function createProgrammaticRules(context: ProjectLintContext): readonly P
     ...expressionShapeRules(),
     wireCastRule(config, projectRoot),
     duplicateBlockRule(context),
+    docReferenceRule(context),
   ];
 }

@@ -88,3 +88,4 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0071](ADR-0071-the-task-mutation-check-names-surviving-mutants-before-the-stop.md) | The Task mutation check names surviving mutants before the stop | Accepted (2026-11-12) | — |
 | [ADR-0072](ADR-0072-wire-output-typed-without-a-parse-is-refused-at-the-edit.md) | Wire output typed without a parse is refused at the edit | Accepted (2026-11-12) | — |
 | [ADR-0073](ADR-0073-every-documented-wire-example-is-parsed-by-its-production-parser.md) | Every documented wire example is parsed by its production parser | Accepted (2026-11-12) | — |
+| [ADR-0074](ADR-0074-every-doc-reference-resolves-against-the-project.md) | Every doc reference resolves against the project | Accepted (2026-11-14) | — |

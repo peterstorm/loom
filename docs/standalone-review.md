@@ -424,7 +424,7 @@ scheduler-only yield in `machine-purity.test.ts` changes no audit assertion or
 capability grant. The normal root verify process-environment policy is unchanged
 and is not substituted for independently admitted native evidence.
 
-**The schema-2 reviewer guidance archive.** `references/reviewer-protocol-v2/` held exact copies of the seven reviewer agents, the verifier and the generated wire fragment as they were at commit `96153edc3dd755b4ac648ed48920b6670753c5a6`. Nothing in the engine, Pi extension, scripts or hooks read it, so it is not kept in the tree. A schema-2 request is governed by its own packet's frozen schema and rubric. To reproduce a file, run `git show 96153edc3dd755b4ac648ed48920b6670753c5a6:<path>` with a path from this list and compare its SHA-256:
+**The schema-2 reviewer guidance archive.** The former references/reviewer-protocol-v2/ directory held exact copies of the seven reviewer agents, the verifier and the generated wire fragment as they were at commit `96153edc3dd755b4ac648ed48920b6670753c5a6`. Nothing in the engine, Pi extension, scripts or hooks read it, so it is not kept in the tree. A schema-2 request is governed by its own packet's frozen schema and rubric. To reproduce a file, run `git show 96153edc3dd755b4ac648ed48920b6670753c5a6:<path>` with a path from this list and compare its SHA-256:
 
 ```text
 e3523e36f18751a9762b94409a63e4bb7a9b06aa8c6f89cd8f223f37a0d6f482  agents/architecture-tech-lead.md

@@ -1,8 +1,8 @@
 /**
  * The ONE pure derivation of a reviewer request's issued emission route
  * (AD-6/AD-7, FR-001/FR-012), consumed by both shells that need it: the
- * request programs' render path (`reviewerEmissionProjection`, which renders
- * the descriptor and tool-primary instruction) and the capture runtime
+ * spawn-task program's render path (`observeReviewerDelivery`, whose route
+ * renders the descriptor and tool-primary instruction) and the capture runtime
  * (`reviewerCaptureEmissionAuthority`, which selects against the same
  * binding). Each shell keeps only its read of the durable registration; the
  * eligibility predicate, the claim mint and the qualified-route decision live

@@ -10,7 +10,7 @@ Remove **incidental complexity** — complexity that isn't paying for itself —
 
 **Complexity is measured in representable states and concepts, not lines.** The yardstick is the project's own architecture rule: functional core / imperative shell, ADTs, parse-don't-validate, illegal states unrepresentable. The strongest simplification is not a shorter function; it is a branch **deleted because the state it guarded can no longer be written**. When you cannot decide whether something is simpler, count what a reader must hold: how many states can this represent, how many concepts must I know? Fewer wins.
 
-**The deepen/distill boundary.** Distill may change a symbol only when every caller of it is inside the scope it was given. Anything a caller outside the scope can see (signature, type, error mode, import path) is deepen: name it, recommend the `deepen` skill, and move on. Every move below carries this condition. The two skills share vocabulary (deepen's `references/LANGUAGE.md`).
+**The deepen/distill boundary.** Distill may change a symbol only when every caller of it is inside the scope it was given. Anything a caller outside the scope can see (signature, type, error mode, import path) is deepen: name it, recommend the `deepen` skill, and move on. Every move below carries this condition. The two skills share vocabulary (`../deepen/references/LANGUAGE.md`).
 
 ## Context Loading
 

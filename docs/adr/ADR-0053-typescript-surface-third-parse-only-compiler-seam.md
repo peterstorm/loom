@@ -115,8 +115,8 @@ such as an unparseable file, come back as values and are never thrown.
   - `TYPESCRIPT_COMPILER_API_SEAMS` in `engine/src/linter/programmatic/no-cross-boundary-imports.ts` lists
     `import-graph.ts`, `mutation-plan.ts` and `ts-surface.ts`. The core boundary's `perFileExactAllow` grants
     `["typescript"]` to each one.
-  - `.claude/linter/rules/inv-1-typescript-compiler-api-seam.json` and its byte-identical mirror
-    `.pi/linter/rules/inv-1-typescript-compiler-api-seam.json` list `.test.ts` plus exactly those three paths
+  - .claude/linter/rules/inv-1-typescript-compiler-api-seam.json and its byte-identical mirror
+    .pi/linter/rules/inv-1-typescript-compiler-api-seam.json list `.test.ts` plus exactly those three paths
     in `excludePatterns`. Their description and fix hint name the surface readers.
     `engine/tests/linter/project-lint-rules.test.ts` fails when either copy drifts from the constant.
   - `engine/src/linter/programmatic/no-io-in-pure-modules.ts` lists `engine/src/core/skeleton/` in
@@ -162,7 +162,7 @@ such as an unparseable file, come back as values and are never thrown.
   three seams, not two.
 
 ## Amendment (2026-11-10): the regex rule and its `.pi` mirror were removed
-`.claude/linter/rules/inv-1-typescript-compiler-api-seam.json` and its `.pi/linter/rules` mirror were deleted
+.claude/linter/rules/inv-1-typescript-compiler-api-seam.json and its `.pi/linter/rules` mirror were deleted
 (see ADR-0042's amendment of the same date). The boundary grants in `.claude/linter/rules/config.json` —
 `perFileExactAllow` of exactly `typescript` for `import-graph.ts`, `mutation-plan.ts` and `ts-surface.ts` —
 are now the one seam declaration. `no-cross-boundary-imports` enforces them under

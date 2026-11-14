@@ -136,9 +136,9 @@ Eleven implementation slices across `engine/src/core/` and a new
 | Slice | Landed as |
 |---|---|
 | Authority kernel, panel programs, lifecycle machines | `core/orchestration-contract/`, `core/panel-program.ts`, `core/wave-gate-machine.ts`, `core/standalone-review.ts` (LC-2 reducer), `core/remediation-machine.ts` |
-| Fugue runtime | `orchestration/fugue-program-runtime.ts` (*removed 2026-10-18 by ADR-0029:* no production caller; programs persist through the Run Directory journal) |
+| Fugue runtime | orchestration/fugue-program-runtime.ts (*removed 2026-10-18 by ADR-0029:* no production caller; programs persist through the Run Directory journal) |
 | Anchored run directory, context packets, effect receipts | `orchestration/run-directory-handle.ts`, `context-packets.ts`, `effect-runner.ts`, `no-follow-fs.ts` |
-| Four static operation DAG families + capability registry | `orchestration/dags/*-operations.ts`, `orchestration/dags/capabilities.ts` (*removed 2026-10-18 by ADR-0029:* called only by their own test) |
+| Four static operation DAG families + capability registry | orchestration/dags/*-operations.ts, orchestration/dags/capabilities.ts (*removed 2026-10-18 by ADR-0029:* called only by their own test) |
 | Remediation Git boundary | `orchestration/git-remediation.ts` |
 | Façade and status | `handlers/helpers/orchestration.ts` |
 | Cross-harness capture | `core/harness-capture.ts`, `handlers/subagent-stop/capture-orchestration-result.ts` |

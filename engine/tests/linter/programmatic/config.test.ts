@@ -404,7 +404,7 @@ describe("totality config: scope, baselines and the project root they are writte
     ["no path", "::x.kind"],
     ["no key", "src/domain/order.ts::"],
   ])("refuses a baseline entry with %s — it could never match a site, and has no path to read back", (_shape, entry) => {
-    for (const key of ["switchTotalityBaseline", "discriminantBranchingBaseline", "duplicateBlockBaseline", "wireCastBaseline"]) {
+    for (const key of ["switchTotalityBaseline", "discriminantBranchingBaseline", "duplicateBlockBaseline", "wireCastBaseline", "docReferenceBaseline"]) {
       expect(parseProjectConfig({ [key]: ["src/a.ts::ok", entry] }, "config.json")).toEqual({
         ok: false,
         error: `config.json: ${key}[1] '${entry}' must be 'path::key' — a project-relative path, '::', then what the rule flagged there`,
@@ -475,5 +475,49 @@ describe("totality config: scope, baselines and the project root they are writte
   it("applies switch-totality to a target project with no config at all", () => {
     const rule = createProgrammaticRules(authoritativeLintContext(EMPTY_CONFIG, null)).find((candidate) => candidate.name === "switch-totality")!;
     expect(rule.handler(UNPROVEN, "/work/shop/src/domain/order.ts")).toHaveLength(1);
+  });
+});
+
+describe("doc-reference config: the governed scope and its baseline", () => {
+  const parse = (json: unknown) => parseProjectConfig(json, "config.json");
+  const reasoned = (path: string) => ({ path, reason: "why" });
+
+  it("parses the scope, every list but govern optional, a source root's trailing slash dropped", () => {
+    expect(parse({
+      docReferences: { govern: [reasoned("docs/")], sourceRoots: ["engine/src/", "engine"] },
+      docReferenceBaseline: ["docs/a.md::gone.md"],
+    })).toEqual({
+      ok: true,
+      value: {
+        docReferences: { govern: [reasoned("docs/")], plans: [], exclude: [], sourceRoots: ["engine/src", "engine"] },
+        docReferenceBaseline: ["docs/a.md::gone.md"],
+      },
+    });
+  });
+
+  it.each([
+    [{ docReferences: {} }, "docReferences.govern must be a non-empty array of { path, reason } — omit docReferences to govern nothing"],
+    [{ docReferences: { govern: [] } }, "docReferences.govern must be a non-empty array"],
+    [{ docReferences: { govern: [reasoned("docs/")], govren: [] } }, "'govren'"],
+    [{ docReferences: { govern: [{ path: "docs/" }] } }, "reason must be a non-empty string"],
+    [{ docReferences: { govern: [reasoned("docs/**")] } }, "is a glob"],
+    [{ docReferences: { govern: [reasoned("docs/")], sourceRoots: ["/abs"] } }, "must be project-relative"],
+    [{ docReferences: [] }, "docReferences"],
+  ])("refuses a scope that would not govern what its author wrote: %j", (json, message) => {
+    expect(parse(json)).toMatchObject({ ok: false, error: expect.stringContaining(message) });
+  });
+
+  it("governs nothing in a project with no scope: the rule reads no file", () => {
+    const rule = createProgrammaticRules(authoritativeLintContext(EMPTY_CONFIG, null)).find((candidate) => candidate.name === "no-dangling-doc-reference")!;
+    expect(rule.handler("`gone.md`", "/work/shop/docs/a.md")).toEqual([]);
+    expect(rule.tier).toBe("immediate");
+    expect(rule.extensions).toContain(".md");
+  });
+
+  it("Loom governs its own docs, plans and source comments", () => {
+    const scope = loadProjectConfig(LOOM_RULES_DIR).docReferences;
+    expect(scope?.govern.map(({ path }) => path)).toEqual(expect.arrayContaining(["docs/", "engine/src/", "agents/"]));
+    expect(scope?.plans.map(({ path }) => path)).toEqual([".claude/plans/"]);
+    expect(scope?.sourceRoots).toEqual(["engine/src", "engine", "references/security-lenses"]);
   });
 });
