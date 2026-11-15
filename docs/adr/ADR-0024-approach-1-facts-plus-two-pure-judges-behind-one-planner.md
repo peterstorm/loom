@@ -19,7 +19,7 @@ The design question was how to add per-file facts, one completion-time judgment 
      - It reuses existing pieces: `testcaseAcceptanceFile` (generalized into `attributeReportedFile`), the `acceptanceRunnerCheck` command builder, the runner lock, and exact settlement.
      - Lock, budget, counters and message composition stay in one shell, not in dispatch.
    - Cons:
-     - The planner's signature widens. It takes `ChangedFiles` as an explicit input, and an additive wrapper (`planStopCheck`) had to stay alive for one Wave so the live hook kept compiling. It has since been removed: `planStopChecks` is the only planner.
+     - The planner's signature widens. It takes `ChangedFiles` as an explicit input, and an additive wrapper (planStopCheck) had to stay alive for one Wave so the live hook kept compiling. It has since been removed: `planStopChecks` is the only planner.
      - I6 must be re-judged on every read. Paths with no ledger, such as `reconcileTaskFromStoredEvidence`, need an explicit carry-forward rule.
      - The report summary shape grows. Every producer, Claude and Pi alike, must reconcile per-file counts against the summary.
 
@@ -76,4 +76,4 @@ I7 (stop time):
 - The planner and the report summary are now wider, shared contracts. Any later stop check must also be added to `planStopChecks` and `runStopChecks`, which concentrates change in those two modules.
 - I6 depends on the ordering of past ledger facts, so a retry that does not first restore the implementation files can never observe red. This is mitigated by the brief's up-front I6 section and its retry remedy, not by the judge.
 - Per-file reconciliation is strict. A report whose per-file counts do not reconcile voids the whole report and makes the run untrusted, even when the whole-run counts alone would have been usable.
-- Rollout needed care while the engine runs live from the checkout. The additive `planStopCheck` wrapper had to stay until the shell switched (it is now removed), and every edit to a hook-imported file had to land as one commit.
+- Rollout needed care while the engine runs live from the checkout. The additive planStopCheck wrapper had to stay until the shell switched (it is now removed), and every edit to a hook-imported file had to land as one commit.

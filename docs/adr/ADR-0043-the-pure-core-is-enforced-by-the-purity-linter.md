@@ -4,7 +4,10 @@
 Accepted (2026-10-23). Shipped with the G5b owner-enforcement feature
 (`.claude/specs/2026-10-21-g5b-owner-enforcement/spec.md`; plan
 `.claude/plans/2026-10-21-g5b-owner-enforcement.md`, AD-13 and INV-2). This ADR records a deviation from
-interview Q4d.
+interview Q4d. Amended 2026-11-10 (#156, `1a0c79f3`): the pure-module list is project config, not a
+linter default. `pureModules` in `.claude/linter/rules/config.json` makes all of `engine/src/core/` pure,
+this package included, and only an `impureModules` entry with a reason exempts a file; the linter ships no
+list, and the DEFAULT_PURE_MODULES named below no longer exists. `machine-purity.test.ts` still guards INV-2.
 
 ## Context
 G5b adds owner verification. It finds which tests cover an owner module's siblings, plans deterministic
@@ -29,7 +32,7 @@ cannot enforce as written.
 
 The engine already has a rule that can be scoped this way. The programmatic `no-io-in-pure-modules` rule
 (`engine/src/linter/programmatic/no-io-in-pure-modules.ts`) applies to every path that matches
-`DEFAULT_PURE_MODULES`. Its `isPureModule` treats a pattern with a trailing `/` as a directory prefix that
+DEFAULT_PURE_MODULES. Its `isPureModule` treats a pattern with a trailing `/` as a directory prefix that
 matches at a path boundary.
 
 ## Options Considered
@@ -51,7 +54,7 @@ matches at a path boundary.
      then have two purity mechanisms that can disagree, which is the second-copy problem G5b exists to
      prevent.
 
-3. **List the package in `DEFAULT_PURE_MODULES` and tier INV-2 `advisory` (chosen)**
+3. **List the package in DEFAULT_PURE_MODULES and tier INV-2 `advisory` (chosen)**
    - Pros: Reuses the one purity rule the engine already trusts for its other pure modules. The
      trailing-slash entry covers every current and future file of the package, at any depth, with no per-file
      upkeep. It is still a text scanner, but a purpose-built one: one regex over the whole file finds
@@ -66,12 +69,12 @@ matches at a path boundary.
 
 ## Decision
 **The owner-verification core's purity (INV-2) is enforced by the programmatic `no-io-in-pure-modules` rule.
-The package is listed in `DEFAULT_PURE_MODULES`, and INV-2 is tiered `advisory` in the plan, with an
+The package is listed in DEFAULT_PURE_MODULES, and INV-2 is tiered `advisory` in the plan, with an
 `Unowned reason` that names the real enforcement.**
 
 Concretely:
 
-- `DEFAULT_PURE_MODULES` in `engine/src/linter/programmatic/no-io-in-pure-modules.ts` carries the directory
+- DEFAULT_PURE_MODULES in `engine/src/linter/programmatic/no-io-in-pure-modules.ts` carries the directory
   entry `"engine/src/core/owner-verification/"` (added by T4). Every file in the package, at any depth, is
   therefore pure, the CT-1 contract surface `types.ts` that `engine/src/types.ts` imports included. An exact
   entry for `types.ts` once sat beside the directory entry; it was redundant (`isPureModule` treats the
@@ -122,7 +125,7 @@ Concretely:
   remediation relied on this: `repo-path.ts` (the repository-path rule coverage and `tsconfig-paths.ts`
   share), `ls-tree.ts` (what `git ls-tree` says about the owner at the Wave base) and `owed-verification.ts`
   (the gate's owner-observation decision and the runner's per-obligation run plan) moved decisions out of the
-  shell into the package with no edit to `DEFAULT_PURE_MODULES`.
+  shell into the package with no edit to DEFAULT_PURE_MODULES.
 - The ban is applied to import specifiers (including `require` and dynamic forms) and banned globals, with
   narrow capability grants, rather than to arbitrary line text. There are fewer false positives and fewer
   evasions than with a project regex rule, but the lint is not evasion-proof: it scans text, so a computed
@@ -135,7 +138,7 @@ Concretely:
 - INV-2 is tiered `advisory` in the plan even though it is enforced fail-closed. A reader who stops at the
   tier will underrate it, and only the `Unowned reason` and this ADR explain the gap.
 - The enforcement lives in the linter's shipped defaults, not in project config or the plan. Removing or
-  editing the directory entry in `DEFAULT_PURE_MODULES` silently drops the Invariant unless
+  editing the directory entry in DEFAULT_PURE_MODULES silently drops the Invariant unless
   `machine-purity.test.ts` catches it. That test is now load-bearing for INV-2.
 - The directory expansion in `machine-purity.test.ts` first read only the files directly inside the package,
   so a future subdirectory would have escaped the closure audit. #127 made it recursive before merge, with

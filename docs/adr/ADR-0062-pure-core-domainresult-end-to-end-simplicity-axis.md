@@ -52,7 +52,7 @@ Several forces act on how that logic is built:
    - Pros: Less plumbing. A judge could read only the files it ends up needing, and tests could stub a read
      failure in one line.
    - Cons: It breaks INV-2 and the ADR-0043 purity rule. `engine/src/core/skeleton/` could no longer sit in
-     `DEFAULT_PURE_MODULES`, so purity would depend on review instead of the linter. Mocked tests prove the
+     DEFAULT_PURE_MODULES, so purity would depend on review instead of the linter. Mocked tests prove the
      wiring to the mock, not the behavior. Determinism would rest on every port implementation behaving well,
      and content addressing needs determinism to be a property of the code. Rejected.
 
@@ -87,7 +87,7 @@ Concretely:
 
 - **The pure package.** `bindings.ts`, `ts-surface.ts`, `java-surface.ts`, `resolve.ts`, `generate.ts`,
   `language.ts`, `outcomes.ts`, `scope.ts`, `conformance.ts`, `status.ts` and the CT-1 `types.ts`. The
-  directory is listed as `engine/src/core/skeleton/` in `DEFAULT_PURE_MODULES`
+  directory is listed as `engine/src/core/skeleton/` in DEFAULT_PURE_MODULES
   (`engine/src/linter/programmatic/no-io-in-pure-modules.ts`). The trailing-slash entry covers every current
   and future file in the package. `engine/tests/linter/programmatic/machine-purity.test.ts` pins the entry,
   and the closure audit backs it. The only exception to the import ban is the `typescript` grant to the

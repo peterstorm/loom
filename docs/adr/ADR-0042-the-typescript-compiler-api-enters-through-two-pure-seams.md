@@ -29,7 +29,7 @@ G5b owner verification has two jobs that need TypeScript parsing:
   template literals with substitutions and member calls such as `module.require("…")`.
 
 Several forces constrain where that parsing can live. Everything under `engine/src/core/owner-verification/`
-is pure core: `DEFAULT_PURE_MODULES` lists it (AD-13, INV-2), and the purity linter bans `fs`,
+is pure core: DEFAULT_PURE_MODULES lists it (AD-13, INV-2), and the purity linter bans `fs`,
 `child_process`, the clock, randomness and `process.*` there. NFR-003 forbids a new runtime dependency. The
 pure core also has an exact per-file package-grant model.
 `engine/src/linter/programmatic/no-cross-boundary-imports.ts` grants packages one file at a time, and
@@ -98,7 +98,7 @@ INV-1 now names exactly three.)
     The shell `engine/src/orchestration/owner-verification-runner.ts` reads the owner text and calls it.
 - **Parse-only contract.** Both seams call only `ts.createSourceFile` and node visitors on text they are
   given. They never use `ts.sys`, a Program, module resolution or a language service. Both module headers
-  state this. The purity linter enforces it: the package directory is in `DEFAULT_PURE_MODULES` (INV-2).
+  state this. The purity linter enforces it: the package directory is in DEFAULT_PURE_MODULES (INV-2).
 - **One seam list, three enforcement points.** `TYPESCRIPT_COMPILER_API_SEAMS` in
   `engine/src/linter/programmatic/no-cross-boundary-imports.ts` is the one list of the pair (PR #131 review
   remediation). The programmatic grant and the purity audit read it; the regex rule, which cannot import code,

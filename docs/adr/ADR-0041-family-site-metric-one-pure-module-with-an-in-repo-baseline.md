@@ -70,7 +70,7 @@ in this feature is chartered to pay it down.
 **`engine/src/core/family-sites.ts` is the one pure home of the family-site metric. `helper family-sites` is
 its read-only file-system shell, and `docs/family-sites.baseline.json` is its baseline at `626db7fb`.**
 
-**Pure core: `engine/src/core/family-sites.ts`.** It is listed in `DEFAULT_PURE_MODULES` in
+**Pure core: `engine/src/core/family-sites.ts`.** It is listed in DEFAULT_PURE_MODULES in
 `engine/src/linter/programmatic/no-io-in-pure-modules.ts`, so I/O in it is a lint failure.
 
 - `FAMILIES` is a frozen table of `Family = { id: FamilyId; owners: NonEmpty<string>; patterns: NonEmpty<RegExp> }`.

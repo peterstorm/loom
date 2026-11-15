@@ -119,8 +119,8 @@ Instruction and descriptor projection:
     It reaches stamped shims only through `scripts/stamp-wire-contract.ts`.
   - Schema and rubric bytes are unchanged, so protocol descriptor digests are
     stable.
-- `reviewerEmissionProjection` (`engine/src/handlers/helpers/programs/spawn-task.ts`)
-  is the shell.
+- reviewerEmissionProjection in `engine/src/handlers/helpers/programs/spawn-task.ts` was the shell (split
+  into an observation shell and a pure text core on 2026-10-07, `a6d767cc`).
   - It gates eligibility with `reviewerEmissionEligible`: reviewer roles on
     `standalone-review` or `wave-gate` only. Spec-check slots, panel verdicts and
     implementation spawns are projected with no descriptor and their instruction
