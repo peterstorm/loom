@@ -6,10 +6,17 @@ import { REPOSITORY } from "./fixtures/repository-roots";
 const workflow = readFileSync(join(REPOSITORY, ".github/workflows/ci.yml"), "utf8");
 
 describe("CI verification contract", () => {
-  it("verifies PRs, branch pushes, and exact tag revisions with the same command", () => {
+  it("verifies PRs and main pushes with the same command; nothing else re-runs the suite", () => {
     expect(workflow).toContain("  pull_request:");
-    expect(workflow).toContain('    branches: ["**"]');
-    expect(workflow).toContain('    tags: ["**"]');
+    // The repository is private: Actions minutes are metered and the macOS
+    // leg bills at 10x. Branch pushes are validated by their pull_request run
+    // and tags point at commits main already validated, so nothing else
+    // triggers the matrix — and a superseded run is cancelled, not drained.
+    expect(workflow).toContain("    branches: [main]");
+    expect(workflow).toContain("  workflow_dispatch:");
+    expect(workflow).not.toContain("    tags:");
+    expect(workflow).toContain("group: ci-${{ github.ref }}");
+    expect(workflow).toContain("cancel-in-progress: true");
     expect(workflow.match(/npm run verify/g)).toHaveLength(1);
     expect(workflow).not.toMatch(/npm run (test|typecheck)|bun test|bunx|npx|continue-on-error|@latest|publish/);
   });
