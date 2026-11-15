@@ -10,7 +10,7 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { type RegexRule, type Rule, type Tier, type RuleSource, isRegexRule } from "./types";
 import { analyzeRegex } from "./safety";
-import { describeExcludePatternListError, parseExcludePatternList, type ExcludePattern } from "./exclude-pattern";
+import { parseExcludePatternListOrThrow, type ExcludePattern } from "./exclude-pattern";
 import { createProgrammaticRules, projectLintContext, type ProjectLintContext } from "./programmatic/index";
 import { EMPTY_CONFIG, parseProjectConfig, projectRootOf, type ProgrammaticConfig } from "./programmatic/config";
 import { EMPTY_CORPUS, type AuthoritativeCorpus, type CloneCorpus } from "./clones/clone-detection";
@@ -331,9 +331,7 @@ function parseRegexRule(
 function parseExcludePatterns(raw: unknown, where: string): readonly ExcludePattern[] | undefined {
   if (raw === undefined) return undefined;
   if (!isStringList(raw)) throw new Error(`${where}: 'excludePatterns' must be an array of strings`);
-  const parsed = parseExcludePatternList(raw);
-  if (!parsed.ok) throw new Error(`${where}: ${describeExcludePatternListError("excludePatterns", parsed.error)}`);
-  return parsed.value;
+  return parseExcludePatternListOrThrow(raw, "excludePatterns", where);
 }
 
 const isStringList = (raw: unknown): raw is readonly string[] =>

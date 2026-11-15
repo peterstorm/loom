@@ -49,8 +49,9 @@ export function parseBaselineKey(entry: string): BaselineKey | null {
 /** The project-relative path a baseline key excuses a site in. */
 export const baselineKeyPath = (key: BaselineKey): string => key.slice(0, key.indexOf(KEY_SEPARATOR));
 
-/** A path rooted at `/` or at a Windows drive (`C:/`), forward-slashed. */
-export const isAbsolutePath = (path: string): boolean => path.startsWith("/") || /^[A-Za-z]:\//.test(path);
+/** A path rooted at `/` or at a Windows drive (`C:/`), forward-slashed. Callers
+ *  outside this module ask `inProjectFrame`, not this. */
+const isAbsolutePath = (path: string): boolean => path.startsWith("/") || /^[A-Za-z]:\//.test(path);
 
 /**
  * Normalize a lint target to the project-relative form baseline keys and module
@@ -74,6 +75,20 @@ export const projectRelative = (filePath: string, projectRoot: string | null): s
   return normalized.startsWith(`${root}/`) ? normalized.slice(root.length + 1) : normalized;
 };
 
+/**
+ * A lint target's path from the project root, or null when the target cannot
+ * be placed in the project: an absolute path outside the root, or any absolute
+ * path in a run with no project root. A relative path is taken as already
+ * project-relative. The one statement of the frame rule: directory exclusions
+ * (`framed`), the lint pipeline's re-spelling (`pathInProjectFrame`) and
+ * `spelledUnderRoot` all read it, so they cannot disagree about which files
+ * a symlinked checkout holds.
+ */
+export const inProjectFrame = (filePath: string, projectRoot: string | null): string | null => {
+  const path = projectRelative(filePath, projectRoot);
+  return isAbsolutePath(path) ? null : path;
+};
+
 /** A project root as paths beneath it begin: forward-slashed, no trailing
  *  separator. The one spelling `projectRelative` strips and `spelledUnderRoot`
  *  builds on, so a path one of them places under the root the other agrees is. */
@@ -94,8 +109,8 @@ export const spelledUnderRoot = (
   { file, root }: Readonly<{ file: string; root: string }>,
   projectRoot: string,
 ): string | null => {
-  const inRealRoot = projectRelative(file, root);
-  return isAbsolutePath(inRealRoot) ? null : `${rootSpelling(projectRoot)}/${inRealRoot}`;
+  const inRealRoot = inProjectFrame(file, root);
+  return inRealRoot === null ? null : `${rootSpelling(projectRoot)}/${inRealRoot}`;
 };
 
 /** The key form every rule uses: the site's repo-relative path, then the thing

@@ -17,7 +17,7 @@
 
 import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { isAbsolutePath, projectRelative, spelledUnderRoot } from "./programmatic/baseline";
+import { inProjectFrame, spelledUnderRoot } from "./programmatic/baseline";
 import { type Tier, type LintResult, type Rule, passResult, violationsResult, lintErrorResult } from "./types";
 import { loadRules } from "./loader";
 import { projectRootOf } from "./programmatic/config";
@@ -65,7 +65,7 @@ export function isBinaryBuffer(buffer: Buffer): boolean {
  * the root, so an edit inside the project costs no extra system call.
  */
 function pathInProjectFrame(resolvedPath: string, projectRoot: string | null): string {
-  if (projectRoot === null || !isAbsolutePath(projectRelative(resolvedPath, projectRoot))) return resolvedPath;
+  if (projectRoot === null || inProjectFrame(resolvedPath, projectRoot) !== null) return resolvedPath;
   const real = { file: realpathSync(resolvedPath), root: realpathSync(projectRoot) };
   return spelledUnderRoot(real, projectRoot) ?? resolvedPath;
 }

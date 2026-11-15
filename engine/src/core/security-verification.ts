@@ -367,7 +367,11 @@ export function planVerificationStart(input: Readonly<{
 /** The exact command that starts a planned run, its input on a here-document,
  *  through the Loom package `commands` name. Every path is one shell-quoted
  *  word, whatever it contains. Its import is `commands.verificationImport`. */
-export function renderVerificationStart(commands: LoomCommands, plan: VerificationStartPlan, runsRoot: string): string {
+export function renderVerificationStart(
+  commands: Pick<LoomCommands, "orchestrationStart">,
+  plan: VerificationStartPlan,
+  runsRoot: string,
+): string {
   return [
     `${commands.orchestrationStart(SECURITY_VERIFICATION_PROGRAM, runsRoot)} --run ${quoteShellArgument(plan.run)} <<'LOOM_VERIFICATION_START'`,
     JSON.stringify(plan.input),

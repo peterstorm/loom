@@ -49,7 +49,7 @@ export type ReportInput = Readonly<{
   /** The final coverage critic's own verdict, quoted as-is. */
   criticStop?: boolean | null;
   /** The printed commands of the Loom package the handoff command runs through. */
-  commands: LoomCommands;
+  commands: Pick<LoomCommands, "orchestrationStart">;
   /** The decision set this publication hands off, derived once by
    *  `derivePublication` from these same findings. It carries the locator the
    *  handoff command names, so the report needs no second copy of it. */
