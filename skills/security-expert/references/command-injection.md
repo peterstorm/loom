@@ -90,17 +90,17 @@ public final class SafeCommand {
             pb.environment().clear();                    // nothing inherited
 
             Process process = pb.start();
-            long deadline = System.nanoTime() + timeout.toNanos();
-            // Poll, so a process writing without limit is stopped at the cap, not after it exits.
-            while (!process.waitFor(100, TimeUnit.MILLISECONDS)) {
-                if (Files.size(out) > MAX_OUTPUT_BYTES) {
-                    process.destroyForcibly();
-                    throw new IOException("Command output too large");
+            try {
+                long deadline = System.nanoTime() + timeout.toNanos();
+                // Poll, so a process writing without limit is stopped at the cap, not after it exits.
+                while (!process.waitFor(100, TimeUnit.MILLISECONDS)) {
+                    if (Files.size(out) > MAX_OUTPUT_BYTES) throw new IOException("Command output too large");
+                    if (System.nanoTime() - deadline > 0) throw new TimeoutException("Command timed out");
                 }
-                if (System.nanoTime() > deadline) {
-                    process.destroyForcibly();
-                    throw new TimeoutException("Command timed out");
-                }
+            } finally {
+                // A no-op once the process has exited. On the cap, the timeout, an interrupt
+                // or an I/O error it stops the process instead of leaving it running.
+                process.destroyForcibly();
             }
             if (process.exitValue() != 0) {
                 throw new IOException("Command failed: exit " + process.exitValue());
