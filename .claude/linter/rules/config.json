@@ -1387,7 +1387,6 @@
     "engine/src/core/shell-match-views.ts::.claude/state",
     "engine/src/core/shell-match-views.ts::GLOB_DOTS",
     "engine/src/core/shell-normalize.ts::.claude/state",
-    "engine/src/core/shell-normalize.ts::PWD",
     "engine/src/core/shell-normalize.ts::ac",
     "engine/src/core/shell-write-targets.ts::existing-dir",
     "engine/src/core/shell-write-targets.ts::existing-dir/a",

@@ -254,14 +254,21 @@ notice naming why and which policy applies.
   `.` in X alone, while `cd X; cmd .` and `cd X || cmd .` also judge the
   starting directory. A `cd` in a pipeline or behind `&` moves nothing, a bare
   relative target is also searched along `CDPATH`, and a line holding compound
-  syntax (`(…)`, `{ …; }`, a loop, `!`) or a move the guard cannot place
-  (`popd`, `cd -`, `cd "$D"`) is judged in every directory the line may reach.
-  An assignment (`T=/tmp`, `export T=/tmp`) names a path without writing above
-  it, and a variable the line binds to a static value is judged with that value
-  in place (`T=/tmp; rm -rf $T/claude-subagents` is refused). A segment that
-  runs one of Loom's read-only scripts (`scripts/read-context-packet.ts`,
-  `read-context-section.ts`, `ledger-epoch.ts`) by its plain path reads,
-  whatever paths it names; its redirects are still judged.
+  syntax (`(…)`, `{ …; }`, a loop, `!`), a line that may turn on lastpipe or
+  physical `cd`, or a move the guard cannot place (`popd`, `cd -`, `cd -P`,
+  `cd "$D"`, a `CDPATH` or `HOME` the line may set) is judged in every directory
+  the line may reach; `pushd -n X` stays put but adds X for a later `popd`.
+  A bare assignment of an inert name (`T=$CLAUDE_JOB_DIR/tmp`, read only as a
+  plain `$T`) names a path without writing above it; every other assignment —
+  `export T=/tmp`, a name the shell reads itself (`HOME`, `CDPATH`, `IFS`, …), a
+  name read in a way the guard does not follow — is judged as a write over what
+  it names. A variable the line binds is judged with its value in place
+  (`T=/tmp; rm -rf $T/claude-subagents` is refused). A segment that runs one of
+  Loom's read-only scripts (`scripts/read-context-packet.ts`,
+  `read-context-section.ts`, `ledger-epoch.ts`) by a path holding a `/` reads,
+  whatever paths it names; its redirects are still judged. On a line that may
+  rebind a command name (`hash`, `alias`, a function) no head is trusted as
+  read-only.
 - **The run registry.** Every writing `helper security-audit` operation — and
   the `security-verification` program's `start` and `resume` — registers its run
   in `<subagent dir>/security-audit-runs/`. Registration is idempotent and never
