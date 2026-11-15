@@ -6,16 +6,18 @@
  * single quote stays one shell word (proved by a real `sh`, not by a regex);
  * the package-root parser's accept/refuse cases; and, against the running
  * package, that every printed path is absolute and names a file that exists —
- * so a printed line runs unchanged from any directory.
+ * so a printed line runs unchanged from any directory — and that each script
+ * the subagent authority guard runs as a read declares itself read-only.
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { parseLoomPackageRoot, type LoomCommands } from "../../src/core/loom-cli-command";
+import { parseLoomPackageRoot, READ_ONLY_SCRIPTS, type LoomCommands } from "../../src/core/loom-cli-command";
+import { contextPacketReaderPath } from "../../src/core/spawn-task-text";
 import { isSecurityAgentId, SECURITY_AGENT_ID_PATTERN, type SecurityAgentId } from "../../src/core/security-audit-contract";
 import { anAgentId } from "../security/fixtures";
 import { SECURITY_LENSES } from "../../src/core/security-lenses";
@@ -56,6 +58,16 @@ describe("every spelling that names the package", () => {
 
   it("securityLens: a vendored lens document", () => {
     expect(PLAIN.securityLens("ATTACK-CLASSES.md")).toBe("/opt/loom/references/security-lenses/ATTACK-CLASSES.md");
+  });
+
+  it("readOnlyScripts: every read-only script, by absolute path", () => {
+    expect(PLAIN.readOnlyScripts).toEqual(READ_ONLY_SCRIPTS.map((script) => `/opt/loom/scripts/${script}`));
+  });
+
+  it("readOnlyScripts holds both Context Packet readers a subagent is told to run", () => {
+    // The guard lets a subagent run exactly these; a reader the brief prints must be among them.
+    expect(PLAIN.readOnlyScripts).toContain(contextPacketReaderPath("/opt/loom"));
+    expect(PLAIN.readOnlyScripts).toContain(join("/opt/loom", "scripts", "read-context-section.ts"));
   });
 
   it("each member works detached from the value it came from", () => {
@@ -171,5 +183,11 @@ describe("the running package", () => {
       expect(path?.startsWith("/"), path).toBe(true);
       expect(existsSync(path ?? ""), path).toBe(true);
     }
+  });
+
+  it.each(LOOM_COMMANDS.readOnlyScripts)("the read-only script %s exists and declares itself read-only in its header", (path) => {
+    expect(existsSync(path), path).toBe(true);
+    const header = /^(?:#![^\n]*\n)?\/\*\*[\s\S]*?\*\//.exec(readFileSync(path, "utf8"))?.[0] ?? "";
+    expect(header, path).toMatch(/read-only/i);
   });
 });

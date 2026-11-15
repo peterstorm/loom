@@ -8,7 +8,9 @@
  * parent session's and passes through untouched — the parent runs every
  * authority write. For a subagent call this shell observes what the pure
  * decision needs — the registered audit runs (`security-audit-run-registry`),
- * the canonical cwd, the home directory and Loom's protected directories — and
+ * the canonical cwd, the home directory, Loom's protected directories, the
+ * running package's read-only scripts (each in every spelling, so a symlinked
+ * plugin path matches) and the search path a bare relative `cd` follows — and
  * maps a refusal to a block naming the rule.
  *
  * Fail closed: malformed hook input, a non-string command, or an unreadable
@@ -22,8 +24,11 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import type { HookHandler, HookResult } from "../../types";
 import { blockResult, passthroughResult } from "../../types";
 import { protectedDirs } from "../../config";
+import { LOOM_COMMANDS } from "../../utils/loom-package-root";
 import {
+  CD_SEARCH_VARIABLE,
   decideSubagentAuthority,
+  parseCdSearchPath,
   renderSubagentAuthorityRefusal,
   type RegisteredRuns,
   type ScriptRead,
@@ -125,6 +130,8 @@ export function observeSubagentAuthorityContext(
     protectedDirectories: protectedDirs().flatMap(spellings),
     helperOperations: AUTHORITY_HELPER_OPERATIONS,
     hookRoutes: HARNESS_HOOK_ROUTES,
+    readOnlyScripts: LOOM_COMMANDS.readOnlyScripts.flatMap(spellings),
+    cdSearchPath: parseCdSearchPath(process.env[CD_SEARCH_VARIABLE]),
     filesystem: GUARD_FILESYSTEM,
   };
 }

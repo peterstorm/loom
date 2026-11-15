@@ -249,6 +249,19 @@ notice naming why and which policy applies.
   authority *out*, and writes under `agents/<owner-id>/{scratch,artifacts}`
   stay allowed, as does `scripts/security-sandbox.sh`. The run's entry names
   have one owner, `core/audit-run-authority.ts`.
+- **Where a segment runs, and what reads** (ADR-0067 note K). A relative path is
+  judged in the directories its own segment may run in: `cd X && cmd .` judges
+  `.` in X alone, while `cd X; cmd .` and `cd X || cmd .` also judge the
+  starting directory. A `cd` in a pipeline or behind `&` moves nothing, a bare
+  relative target is also searched along `CDPATH`, and a line holding compound
+  syntax (`(…)`, `{ …; }`, a loop, `!`) or a move the guard cannot place
+  (`popd`, `cd -`, `cd "$D"`) is judged in every directory the line may reach.
+  An assignment (`T=/tmp`, `export T=/tmp`) names a path without writing above
+  it, and a variable the line binds to a static value is judged with that value
+  in place (`T=/tmp; rm -rf $T/claude-subagents` is refused). A segment that
+  runs one of Loom's read-only scripts (`scripts/read-context-packet.ts`,
+  `read-context-section.ts`, `ledger-epoch.ts`) by its plain path reads,
+  whatever paths it names; its redirects are still judged.
 - **The run registry.** Every writing `helper security-audit` operation — and
   the `security-verification` program's `start` and `resume` — registers its run
   in `<subagent dir>/security-audit-runs/`. Registration is idempotent and never
@@ -261,8 +274,8 @@ notice naming why and which policy applies.
   `sudo`, …), `coproc` and `!`; programs a shell is fed through a pipe, a
   here-string, an input redirect, a script file argument, `source`/`.` or an
   executed `./x.sh` (read at decision time, bounded, regular files only, in
-  every directory a `cd`/`pushd` on the same line may lead to — the Pi import
-  gate below reads them in the same places);
+  every directory the feeding segment may run in — the Pi import gate below
+  reads them in the same places);
   `find -exec` and `xargs`; and interpreter code (`python -c`, `node -e/-p`,
   `bun -e`, `perl -e`, `ruby -e`, awk) that invokes a writing helper operation
   or a hook route, or imports an engine authority module.
@@ -270,7 +283,8 @@ notice naming why and which policy applies.
 A refused subagent is told to return its result to the parent session, which
 runs every write. The guard is **defence in depth, not the proof**: it reads
 shell strings, and it does not see a command or helper name the shell builds
-from pieces (`eval "$a $b"`), a variable holding a whole authority path,
+from pieces (`eval "$a $b"`), a variable whose runtime-built value (or one
+set outside the line) holds an authority path,
 interpreter code built at runtime, names spelled in `printf` escapes, or a
 script whose text is runtime-built. `engine/tests/core/subagent-authority.test.ts`
 pins each of these as a known gap. None of them can produce an *attested*

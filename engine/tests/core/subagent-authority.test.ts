@@ -34,7 +34,12 @@ const SCRIPTS: Readonly<Record<string, string>> = {
   "/repo/bin/native": "\u007fELF\u0002\u0001\u0001 binary helper orchestration submit",
 };
 /** Symlinks the fake filesystem resolves: a planted alias of the run directory. */
-const LINKS: Readonly<Record<string, string>> = { "/mnt/alias-of-run-1": R, "/private/audits": "/audits" };
+const LINKS: Readonly<Record<string, string>> = { "/mnt/alias-of-run-1": R, "/private/audits": "/audits", "/mnt/loom-link": "/opt/loom" };
+
+/** The Loom package the fixture runs in: its machine definitions are protected. */
+const LOOM = "/opt/loom";
+/** The one read-only Loom script the fixture lists, as the shell observes it. */
+const READER = `${LOOM}/scripts/read-context-packet.ts`;
 
 const FAKE_FILESYSTEM: SubagentFilesystemView = {
   canonicalize: (path) => {
@@ -52,9 +57,11 @@ const context = (overrides: Partial<SubagentAuthorityContext> = {}): SubagentAut
   cwd: "/repo",
   home: "/home/u",
   runs: { kind: "known", directories: [R] },
-  protectedDirectories: ["/tmp/claude-subagents", "/opt/loom/machines"],
+  protectedDirectories: ["/tmp/claude-subagents", `${LOOM}/machines`],
   helperOperations: AUTHORITY_HELPER_OPERATIONS,
   hookRoutes: HARNESS_HOOK_ROUTES,
+  readOnlyScripts: [READER],
+  cdSearchPath: [],
   filesystem: FAKE_FILESYSTEM,
   ...overrides,
 });
@@ -455,6 +462,11 @@ describe("refusal text", () => {
   it("names the path for an authority write", () => {
     expect(render(`echo x > ${R}/ledger.json`)).toContain(`may write ${R}/ledger.json`);
   });
+
+  it("lists Loom's read-only scripts among what a subagent may run", () => {
+    expect(render(`echo x > ${R}/ledger.json`))
+      .toContain("Loom's read-only scripts (read-context-packet.ts, read-context-section.ts, ledger-epoch.ts)");
+  });
 });
 
 describe("every authority entry is protected", () => {
@@ -479,7 +491,7 @@ describe("known gaps (documented bypass classes, allowed by design)", () => {
     ["an interpreter building the code at runtime", "python3 -c \"exec(__import__('base64').b64decode('cHJpbnQoMSk='))\""],
     ["a command name spelled in printf escapes, piped to a shell", "printf '\\x6c\\x6f\\x6f\\x6d helper security-audit submit' | bash"],
     ["a script whose text is runtime-built, then run", 'printf "%s" "$PAYLOAD" > s.sh; bash s.sh'],
-    ["a symlink whose target the shell builds, created on the same line", 'T=/aud; ln -s "${T}its/run-1" /tmp/l; echo x > /tmp/l/ledger.json'],
+    ["a symlink whose target the shell builds at runtime, created on the same line", 'T=$(cat /tmp/p); ln -s "${T}its/run-1" /tmp/l; echo x > /tmp/l/ledger.json'],
     ["an executed interpreter script file", "/repo/tool.py"],
     ["an interpreter's own script FILE (only literal code is scanned)", "python3 tool.py"],
   ])("%s", (_name, command) => {
@@ -726,5 +738,133 @@ describe("fed scripts are read in the directories a `cd` on the line leads to", 
   ])("judgeLine reads the same script, unchanged: %s", (_name, command) => {
     expect(verdict(command, scripts(SUBMIT))).toBe("authority-helper-operation");
     expect(verdict(command, scripts("npm test\n"))).toBe("allow");
+  });
+});
+
+/**
+ * Issue #177 — routine work a subagent runs from a checkout that HOLDS a
+ * protected directory (Loom's own, whose `machines/` is protected). The
+ * checkout is an ancestor of a protected root, so any writer naming `.` or a
+ * file under `machines/` there reaches it; these commands write neither.
+ */
+describe("routine work in a checkout that holds a protected directory (#177)", () => {
+  const inLoom = context({ cwd: LOOM });
+  const verdictInLoom = (command: string): string => verdict(command, inLoom);
+
+  describe("Loom's own read-only scripts read", () => {
+    it.each([
+      ["the packet reader diffing a protected file", `bun ${READER} --diff machines/README.md /x/packet.json`],
+      ["the reader exactly as Loom prints it, every word quoted",
+        `'bun' '${READER}' '--packet' '/tmp/claude-subagents/runs/r/contexts/d.json' '--section' 'diff'`],
+      ["bun run", `bun run ${READER} --file machines/a.json`],
+      ["a relative script path", "bun scripts/read-context-packet.ts --file machines/a.json"],
+      ["the script executed by its path", `${READER} --file machines/a.json`],
+      ["a symlinked spelling of the package", "bun /mnt/loom-link/scripts/read-context-packet.ts --file machines/a.json"],
+      ["piped into a read-only command", `bun ${READER} --file machines/a.json | jq .`],
+      ["its output saved to scratch", `bun ${READER} --file machines/a.json > /tmp/out.json`],
+    ])("allows: %s", (_name, command) => {
+      expect(verdictInLoom(command)).toBe("allow");
+    });
+
+    it.each([
+      ["its output redirected into a protected directory", `bun ${READER} --file x > machines/a.json`],
+      ["another script beside it", `bun ${LOOM}/scripts/sync-machines.ts machines/a.json`],
+      ["a script word the shell completes at runtime", 'bun "$S" --file machines/a.json'],
+      ["a script word that is a glob", `bun ${LOOM}/scripts/read-*.ts machines/a.json`],
+      ["behind an environment prefix", `NODE_OPTIONS=--require=/x/p.js bun ${READER} --file machines/a.json`],
+      ["behind a wrapper", `env bun ${READER} --file machines/a.json`],
+      ["piped into a writer", `bun ${READER} --file machines/a.json | tee machines/b.json`],
+      ["inline code naming the script", `bun -e 'require("${READER}")' machines/a.json`],
+    ])("refuses: %s", (_name, command) => {
+      expect(verdictInLoom(command)).toBe("authority-path-write");
+    });
+
+    it("lists nothing read-only unless the shell says so", () => {
+      expect(verdict(`bun ${READER} --file machines/a.json`, context({ cwd: LOOM, readOnlyScripts: [] }))).toBe("authority-path-write");
+    });
+  });
+
+  describe("a segment after `cd X &&` runs in X only", () => {
+    it.each([
+      ["a type check in another checkout", "cd /work/clone && npx tsc --noEmit -p ."],
+      ["a chain of commands there", "cd /work/clone && rm -rf dist && npx tsc -p ."],
+      ["a relative cd", "cd engine && npx tsc --noEmit -p ."],
+      ["two cds", "cd /work && cd ./clone && rm -rf ."],
+      ["after an earlier ;", "echo start; cd /work/clone && rm -rf ."],
+      ["after an earlier ||", "true || cd /work/x; cd /work/clone && rm -rf ."],
+      ["pushd", "pushd /work/clone >/dev/null && rm -rf ."],
+      ["a cd behind builtin", "builtin cd /work/clone && rm -rf ."],
+      ["home", "cd ~/clone && rm -rf ."],
+    ])("allows: %s", (_name, command) => {
+      expect(verdictInLoom(command)).toBe("allow");
+    });
+
+    it.each([
+      ["; runs even when the cd fails", "cd /work/clone; rm -rf ."],
+      ["|| runs only when the cd fails", "cd /work/clone || rm -rf ."],
+      ["&& after an || that may have skipped the cd", "true || cd /work/clone && rm -rf ."],
+      ["|| after a cd chain, which also runs when the cd failed", "cd /work/clone && false || rm -rf ."],
+      ["a later ;", "cd /work/clone && true; rm -rf ."],
+      ["a subshell cd", "(cd /work/clone) && rm -rf ."],
+      ["a grouped cd", "{ cd /work/clone; } && rm -rf ."],
+      ["a cd inside a loop", "for d in a; do cd /work/clone; done && rm -rf ."],
+      ["a negated cd", "! cd /work/clone && rm -rf ."],
+      ["a cd in a pipeline", "cd /work/clone | cat && rm -rf ."],
+      ["a backgrounded cd", "cd /work/clone & rm -rf ."],
+      ["cd -", "cd /work/clone && cd - && rm -rf ."],
+      ["popd", "pushd /work/clone && popd && rm -rf ."],
+      ["a cd the shell completes at runtime", 'cd "$D" && rm -rf .'],
+      ["a cd into the protected directory", "cd machines && rm -rf ."],
+      ["a relative cd naming the protected directory's parent", "cd ../loom && rm -rf machines"],
+      ["CDPATH set on the line", "CDPATH=/tmp cd claude-subagents && rm -rf ."],
+    ])("refuses: %s", (_name, command) => {
+      expect(verdictInLoom(command)).toBe("authority-path-write");
+    });
+
+    it("a bare relative cd also searches the CDPATH the shell observed", () => {
+      const withCdPath = context({ cwd: "/home/u", cdSearchPath: ["/tmp"] });
+      expect(verdict("cd claude-subagents && rm -rf .", withCdPath)).toBe("authority-path-write");
+      expect(verdict("cd ./claude-subagents && rm -rf .", withCdPath)).toBe("allow");
+      expect(verdict("cd claude-subagents && rm -rf .", context({ cwd: "/home/u" }))).toBe("allow");
+    });
+
+    it("an unparseable line is judged in every directory the line may reach", () => {
+      expect(verdictInLoom("cd /work/clone && rm -rf . $(echo")).toBe("unparseable-authority-command");
+    });
+  });
+
+  describe("an assignment names a path; it writes nothing above it", () => {
+    it.each([
+      ["a bare assignment under /tmp", "T=$CLAUDE_JOB_DIR/tmp"],
+      ["a bare assignment of /tmp", "T=/tmp"],
+      ["several assignments", "A=/tmp B=/opt/loom"],
+      ["export", "export T=/tmp"],
+      ["declare", "declare -x T=/tmp"],
+      ["local", "local T=/opt"],
+      ["the checkout itself", `ROOT=${LOOM}; echo "$ROOT"`],
+      ["a writer under a bound variable, outside every protected directory", "T=/tmp; rm -rf $T/build"],
+      ["a value the shell completes at runtime, then written under", "T=$CLAUDE_JOB_DIR/tmp; cat x > $T/probe.ts"],
+      ["an environment prefix binds nothing for later segments", "T=/tmp true; rm -rf $T/claude-subagents"],
+    ])("allows: %s", (_name, command) => {
+      expect(verdictInLoom(command)).toBe("allow");
+    });
+
+    it.each([
+      ["a bare assignment of a protected directory", "T=/tmp/claude-subagents"],
+      ["a bare assignment inside one", "T=/tmp/claude-subagents/x && rm -rf $T"],
+      ["export inside one", `export M=${LOOM}/machines`],
+      ["an assignment beside a writer", "T=/tmp rm -rf /tmp/claude-subagents"],
+      ["a writer reaching the ancestor an assignment names", "T=/tmp; rm -rf /tmp"],
+      ["a writer extending a variable bound to an ancestor", "T=/tmp; rm -rf $T/claude-subagents"],
+      ["the same, braced and quoted", "T=/tmp && rm -rf \"${T}/claude-subagents\""],
+      ["the same, exported", "export T=/tmp; rm -rf $T/claude-subagents"],
+      ["the same, inside a substitution", "T=/tmp; echo $(rm -rf $T/claude-subagents)"],
+      ["the same, inside bash -c", `T=/tmp; bash -c "rm -rf $T/claude-subagents"`],
+      ["a redirect through a bound variable", `ROOT=${LOOM}; echo x > $ROOT/machines/a.json`],
+      ["a variable bound later on the line (a loop may run it first)", "rm -rf $T/claude-subagents; T=/tmp"],
+      ["a symlink onto a run, its target spelled through a bound variable", 'T=/aud; ln -s "${T}its/run-1" /tmp/l; echo x > /tmp/l/ledger.json'],
+    ])("refuses: %s", (_name, command) => {
+      expect(verdictInLoom(command)).toBe("authority-path-write");
+    });
   });
 });

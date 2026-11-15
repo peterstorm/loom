@@ -39,7 +39,8 @@ apply the notes' "this one wins" precedence by hand.
   every `parent-only` operation is refused. It may not write
   onto a registered run's authority entries (`core/audit-run-authority.ts`), run a CLI hook
   route, or launch a nested harness. The fence is defence in depth; the attestation is the
-  proof.
+  proof. Each segment is judged in the directories it may run in, an assignment writes nothing
+  above the path it names, and Loom's read-only scripts read (amended 2026-11-15, note K).
 - **The registry is refreshed by every writer** (notes "Registration", D). Every writing
   `helper security-audit` operation, and `start`/`resume` of the program, registers the audit
   run before it writes, and refuses to write when it cannot register.
@@ -448,6 +449,7 @@ defence in depth. Where a bullet below contradicts one above, this one wins.
   pinned as allowed: runtime-built command or helper names, a variable holding a whole path,
   runtime-built interpreter code, names in `printf` escapes, a runtime-built script then run, a
   same-line symlink with a runtime-built target, and an interpreter's own script file.
+  *Narrowed by note K: a variable the line binds to a static value is judged with that value.*
 - **G — Pi subagent detection.** `pi/subagent-process.ts` decides from an explicit environment
   marker, never launch flags: every Loom Pi session publishes `LOOM_PI_PARENT_PID` (+
   `LOOM_PI_PARENT_SESSION`) into its own environment at load and session start, which every
@@ -510,8 +512,46 @@ below contradicts one above, this one wins.
   or `pushd` on the same line may lead to; `securityAuditVerifyInvocations` read it only in the
   starting cwd, so `cd /b && bash run.sh` missed a verify import inside `/b/run.sh` and the Pi
   import gate let it through unproven. Both now widen the line's scope through one rule
-  (`lineScopeOf`, `core/subagent-authority.ts`), so the gate and the fence cannot disagree about
-  where a script lives.
+  (`lineScopesOf`, `core/subagent-authority.ts`; per segment since note K), so the gate and the
+  fence cannot disagree about where a script lives.
 - **`childAgentEnvironment` takes only the environment.** Its session parameter had one caller,
   which always passed `null`; the launching session is read from the inherited
   `LOOM_PI_PARENT_SESSION`.
+
+### Implementation notes (amended 2026-11-15 — issue #177)
+
+The fence refused three routine read-only commands that a subagent ran from a checkout HOLDING a
+protected directory (Loom's own, whose `machines/` is protected): the checkout is an ancestor of
+a protected root, so a writer naming `.` there, or any path under `machines/`, reaches it.
+
+- **K — each segment is judged where it runs; an assignment writes nothing above the path it
+  names; Loom's read-only scripts read.**
+  - *Per-segment directories* (`lineDirectories`). The guard judged every segment of a line in
+    every directory any `cd` on the line could lead to, so `cd <clone> && npx tsc -p .` judged
+    `.` in the starting checkout too. Each segment is now judged only where it may run: the
+    line's `cd`/`pushd`/`popd` moves are walked in order over (directory, last status) states,
+    so after `&&` a segment runs where the move succeeded, after `||` where it failed, after
+    `;` either way; a move in a pipeline or behind `&` stays in its subshell; a bare relative
+    target is also searched along `CDPATH` (as the shell observed it, and every searched move
+    is unknown when the line assigns `CDPATH`). A line holding compound syntax (a group, a
+    subshell, a loop, a conditional, `!`) and any move the guard cannot place (`popd`, `cd -`,
+    a runtime-built target) fall back to every directory the line may reach. Soundness is a
+    property test against a bash oracle
+    (`tests/core/subagent-authority-directories.property.test.ts`).
+  - *Assignments* (`assignmentWords`). A leading `NAME=value` word, and a `NAME=value` argument
+    of `export|declare|typeset|local|readonly`, names a path: it is judged at and inside an
+    authority root, never above it, so `T=$CLAUDE_JOB_DIR/tmp` no longer reaches the subagent
+    directory under `/tmp`, while `F=<run>/ledger.json` is still refused.
+  - *Bound variables* (`lineVariables`). A variable the line binds to a static value is judged
+    with that value in place as well as as written, so binding an ancestor and writing beneath
+    it (`T=/tmp; rm -rf $T/claude-subagents`) is the write it spells. This closes F's same-line
+    symlink gap when the target is spelled through a bound variable; a variable whose value is
+    runtime-built, or set outside the line, remains a gap.
+  - *Read-only scripts* (`runsReadOnlyScript`; the list is `READ_ONLY_SCRIPTS` in
+    `core/loom-cli-command.ts`, observed per decision as `LoomCommands.readOnlyScripts` in
+    every spelling). A segment whose first word runs `scripts/read-context-packet.ts`,
+    `read-context-section.ts` or `ledger-epoch.ts` of the running package (`bun <script>`,
+    `bun run <script>`, or the script by its path; no environment prefix, no wrapper; a static,
+    non-glob script word that names a listed script in every directory the segment may run in)
+    is a read-only segment. Its redirects are still judged, and a writer it pipes into is still
+    one. Each listed script declares itself read-only in its header, and a test pins that.
