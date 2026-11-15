@@ -31,8 +31,11 @@ import { platformWorkerBudget } from "./vitest-worker-budget";
  * Global setup, once per run and in this order:
  * - `run-temp-root` points TMPDIR at one fresh directory for the whole run and
  *   removes it when the run ends, so no fixture scratch outlives its run or
- *   leaks between runs. It goes first so the next setup's directory lands
+ *   leaks between runs. It goes first so the next setups' directories land
  *   inside it.
+ * - `isolated-home` points HOME at an empty directory and removes an ambient
+ *   PI_CODING_AGENT_DIR, so no test or child reads the developer's
+ *   `~/.pi/agent` (routing policy, models.json) or any other home state.
  * - `fixture-pi-route` serves the one fake local Pi route every fixture Pi
  *   session spawns onto, so the route-reachability gate never consults the
  *   operator's real models.json.
@@ -40,7 +43,7 @@ import { platformWorkerBudget } from "./vitest-worker-budget";
 export default defineConfig({
   test: {
     include: [...configDefaults.include, "../calibration/**/*.test.ts", "../probes/**/*.test.{ts,mjs}"],
-    globalSetup: ["./tests/setup/run-temp-root.ts", "./tests/setup/fixture-pi-route.ts"],
+    globalSetup: ["./tests/setup/run-temp-root.ts", "./tests/setup/isolated-home.ts", "./tests/setup/fixture-pi-route.ts"],
     setupFiles: ["./tests/setup/scrub-parent-model.ts", "./tests/setup/task-update-yield.ts"],
     testTimeout: 15_000,
     maxWorkers: platformWorkerBudget(process.platform, availableParallelism()),

@@ -15,6 +15,11 @@ Amended (2026-10-09, evening): decision 5. The operator releases tool-call emiss
 decision, without a completed calibration window. AS-015 and AS-016 are recorded as waived and unmeasured,
 never as passed. No further pilot window is planned.
 
+Amended (2026-11-15, #178): decision 6. A `model-routing.json` target may name a provider (`served`) instead
+of a model; Loom resolves it to the one model that provider serves, and to do so sends the provider's
+`models.json` apiKey on that listing request only. Decision 3's "Loom never resolves or sends credentials"
+now holds for every other request, including the reachability probe.
+
 ## Context
 
 Grammar-constrained emission is Pi-only: Claude Code has no Loom extension seam for the frozen emission
@@ -54,7 +59,9 @@ Three things followed from the earlier cloud-default catalog:
    `unconfigured`. Nothing is published, so `resume` re-emits the same batch once the route answers. An
    authentication refusal (401/403), or a 2xx whose body is not a model list, proves the server is up but
    not which model it serves: the batch is admitted and the unverified route is reported on stderr as a
-   `loom-route-unverified` event. Loom never resolves or sends credentials; Pi authenticates the inference.
+   `loom-route-unverified` event. The reachability probe never resolves or sends credentials; Pi
+   authenticates the inference. *(Amended 2026-11-15: the one credentialed request is decision 6's served
+   listing.)*
    *(Amended 2026-10-09.)* That admission is the default, not the only mode: an authenticating gateway can
    answer 401 while the model server behind it is down, so an operator may set `LOOM_ROUTE_GATE=strict`,
    parsed once at the CLI boundary into the closed `RouteGateMode` union, under which an unverified route
@@ -104,6 +111,33 @@ Three things followed from the earlier cloud-default catalog:
      guardrail result.
    - **The calibration machinery is retained**, unchanged and tested, so a later window can still measure the
      route. A violated guardrail in such a window would reopen this decision; a missing one would not.
+6. **Served routing targets, resolved before launch (2026-11-15, #178).** A `model-routing.json` target is
+   either exact (`{"model": "provider/id", "thinkingLevel": …}`) or served (`{"served": "provider"}`, with an
+   optional `thinkingLevel`; without one the child inherits the parent's). The operator's local server swaps
+   models, and a served target follows it without editing the routing policy. Loom records the exact binding
+   every child launches on, so a served target is resolved to one exact provider/model before anything
+   launches. The generated-agent render and its validator, `render-pi`, the spawn route gate, the
+   interactive launcher and the emission route each build the routing context (`PiRoutingContext.served`)
+   by the same observation and resolve the target through the same `resolveAgentLaunchBinding`.
+   - **The observation.** For each provider a rule that can match the observed parent serves
+     (`servedProvidersFor`), the shell (`utils/served-model-probe.ts`) reads `baseUrl`, `apiKey` and the
+     declared model ids from Pi's `models.json` in the active agent directory, resolves the `apiKey` as Pi
+     1.5 does (`core/pi-config-value.ts`: a leading `!` runs a command, `$NAME`/`${NAME}` interpolate the
+     environment, `$$` and `$!` escape, anything else is literal), and requests `GET {baseUrl}/models` with
+     it as `Authorization: Bearer`. The pure decision (`core/served-model.ts`) admits the model only when the
+     listing names exactly one model and Pi's catalog declares it for that provider.
+   - **Credentials.** That listing is the only request on which Loom sends a credential. The key lives in
+     the shell's locals and the bounded probe child's environment; it is never put on a command line, in a
+     log line, a refusal, an event or a record, and a test pins that no outcome carries it.
+   - **No fallback.** A missing or unresolvable key, a 401/403, an unreachable server, a listing of zero or
+     several models, or a model the catalog does not declare leaves the provider's model unknown, and any
+     rule that selects the target refuses the launch with the reason and its remedy. The resolved route is
+     then probed by decision 3's gate like any other.
+   - **What stays the same.** An exact target still requires `thinkingLevel` (stricter than the dotfiles
+     launcher, which defaults it). The reachability probe stays unauthenticated. The context is built
+     synchronously, without a cache, at each read, so a served-model switch is seen by the next spawn; the
+     generated Agent definitions carry the routed binding, so they must be re-synced
+     (`scripts/sync-pi-agents.sh`) after the server switches models, and a stale one is refused as stale.
 
 ## Consequences
 

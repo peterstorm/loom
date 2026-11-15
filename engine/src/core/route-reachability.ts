@@ -15,8 +15,8 @@
  */
 
 import { match } from "ts-pattern";
-import { piModelPattern, recordedProfileBindings, type PiBinding, type PolicyResult, type RecordedLlmProfileId } from "./model-profiles";
-import { resolveAgentLaunchBinding, type EffectivePiBinding, type ModelRef, type ModelRoutingConfig } from "./model-routing";
+import { piModelPattern, recordedProfileBindings, type PiBinding, type PolicyError, type RecordedLlmProfileId } from "./model-profiles";
+import { resolveAgentLaunchBinding, type EffectivePiBinding, type ModelRef, type PiRoutingContext, type RoutingPolicyError } from "./model-routing";
 import type { AgentRequestAuthority } from "./orchestration-contract";
 import { samePiBinding } from "./orchestration-contract/roster";
 
@@ -44,7 +44,8 @@ export type RouteObservation =
 /**
  * Why a live server's model list could not confirm the model:
  * - `auth-refused` — 401/403: listing needs the provider's credentials, which
- *   Loom never resolves or sends (Pi authenticates the inference itself);
+ *   this probe never sends (Pi authenticates the inference itself; only a
+ *   served target's listing, `core/served-model.ts`, is made with the key);
  * - `unreadable-listing` — a 2xx whose body is not an OpenAI-style model list
  *   (a proxy, a captive page, a non-OpenAI server).
  */
@@ -111,9 +112,6 @@ export function distinctRoutes<Route extends ModelRef>(bindings: readonly Route[
   return Object.freeze([...seen.values()]);
 }
 
-/** The routing inputs a Pi launch is resolved under (`PiRoutingContext`, as the shell observes it). */
-export type SpawnRouting = Readonly<{ parentRef: ModelRef | null; config: ModelRoutingConfig | null }>;
-
 /** The routes a Pi spawn batch needs: what its children launch on, and the retired routes it recorded. */
 export type SpawnRoutePlan = Readonly<{ launch: readonly EffectivePiBinding[]; retired: readonly RetiredRoute[] }>;
 
@@ -122,12 +120,14 @@ export type SpawnRoutePlan = Readonly<{ launch: readonly EffectivePiBinding[]; r
  * profile's current one was issued on a route the profile has retired (one
  * {@link RetiredRoute} per profile and recorded binding); every other request
  * launches on {@link resolveAgentLaunchBinding} — the exact binding the
- * generated-agent render carries, routing rules included.
+ * generated-agent render carries, routing rules and served models included.
+ * A launch whose routing cannot be resolved (a served target's model is
+ * unknown) fails the plan: the batch has a route nobody can name.
  */
 export function planSpawnRoutes(
   requests: readonly Pick<AgentRequestAuthority, "role" | "modelProfile" | "harnessBinding">[],
-  routing: SpawnRouting,
-): PolicyResult<SpawnRoutePlan> {
+  routing: PiRoutingContext,
+): Readonly<{ ok: true; value: SpawnRoutePlan }> | Readonly<{ ok: false; error: PolicyError | RoutingPolicyError }> {
   const launch: EffectivePiBinding[] = [];
   const retired = new Map<string, RetiredRoute>();
   for (const { role, modelProfile, harnessBinding: { pi: recorded } } of requests) {
@@ -137,7 +137,7 @@ export function planSpawnRoutes(
       if (!retired.has(key)) retired.set(key, Object.freeze({ kind: "retired", profile: modelProfile, recorded, current }));
       continue;
     }
-    const resolved = resolveAgentLaunchBinding(role, routing.parentRef, routing.config);
+    const resolved = resolveAgentLaunchBinding(role, routing);
     if (!resolved.ok) return resolved;
     launch.push(resolved.value.effective);
   }

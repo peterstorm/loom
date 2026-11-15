@@ -28,6 +28,8 @@ const SPAWN_AUTHORITY_ALLOWLIST: Readonly<Record<string, string>> = Object.freez
   "engine/src/orchestration/completion-check-runner.ts":
     "runs the operator's verification-manifest project command (any executable, no shell); its Git probes use the seam",
   "pi/interactive-subagent.ts": "spawns the Pi RPC subagent child process",
+  "engine/src/utils/served-model-probe.ts":
+    "runs a provider's `!command` apiKey from Pi's models.json exactly as Pi does (default shell), and the bounded synchronous `GET {baseUrl}/models` child that lists a served provider's model",
   "engine/src/handlers/type-diagnostics-runner.ts":
     "runs the edited project's own TypeScript compiler (its tsc.js under the current runtime, no shell) for advisory type diagnostics",
 });

@@ -10,12 +10,18 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { resolveEffectivePiBindingFromParent, type EffectivePiBinding, type RoutedPiThinkingLevel } from "../engine/src/core/model-routing";
+import {
+  NO_ROUTING,
+  resolveEffectivePiBindingFromParent,
+  type EffectivePiBinding,
+  type PiRoutingContext,
+  type RoutedPiThinkingLevel,
+} from "../engine/src/core/model-routing";
 import { lowerModelProfile, resolveAgentProfile } from "../engine/src/core/model-profiles";
 import { buildPiRoutingContext } from "../engine/src/utils/model-routing-context";
 import { childAgentEnvironment } from "./subagent-process";
 import { piAgentDefinitionPath } from "../engine/src/core/pi-agent-directory";
-import { validatePiAgentDefinitionFile, type PiRoutingContext } from "../engine/src/utils/render-pi-agent";
+import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
 import {
   cancelledUiResponse,
   confirmUiResponse,
@@ -286,12 +292,14 @@ export async function runInteractiveSubagent(
         model: parentRef.model,
         thinking: input.routing?.parentThinking ?? declared.thinking,
       });
-  const effective = resolveEffectivePiBindingFromParent(
+  const resolved = resolveEffectivePiBindingFromParent(
     declared,
     parent,
-    input.routing?.context.config ?? null,
+    input.routing?.context ?? NO_ROUTING,
     Object.freeze({ workload: "subagent", profile: profile.value.id, agent: input.agent }),
   );
+  if (!resolved.ok) throw new Error(`Cannot route interactive Pi Agent: ${resolved.error.message}`);
+  const effective = resolved.value;
   const declaredModel = `${declared.provider}/${declared.model}:${declared.thinking}`;
   const requestedModel = formatBinding(effective);
   const routing: InteractiveRoutingAudit = Object.freeze({

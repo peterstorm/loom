@@ -7,6 +7,7 @@ import type { PiBinding } from "../../src/core/model-profiles";
 import {
   httpRouteProbe,
   observeRouteReachability,
+  readModelsProvider,
   readRouteEndpoint,
   type RouteProbePort,
 } from "../../src/utils/route-endpoint";
@@ -73,6 +74,29 @@ describe("readRouteEndpoint", () => {
     const dir = agentDir(undefined);
     symlinkSync("models.json", join(dir, "models.json"));
     expect(readRouteEndpoint(dir, LOCAL.provider)).toMatchObject({ ok: false, error: expect.stringContaining("models.json") });
+  });
+});
+
+describe("readModelsProvider", () => {
+  it("reads a provider's endpoint, raw apiKey and declared model ids", () => {
+    const dir = agentDir({ providers: { [LOCAL.provider]: { baseUrl: "http://h:8000/v1", apiKey: "!pass show k", models: [{ id: "a" }, { id: "b", name: "B" }] } } });
+    expect(readModelsProvider(dir, LOCAL.provider)).toEqual({
+      ok: true,
+      provider: { baseUrl: "http://h:8000/v1", apiKey: "!pass show k", catalog: ["a", "b"] },
+    });
+  });
+
+  it("is null for an absent file or provider, and empty fields for a bare provider", () => {
+    expect(readModelsProvider(agentDir(undefined), LOCAL.provider)).toEqual({ ok: true, provider: null });
+    expect(readModelsProvider(agentDir({ providers: {} }), LOCAL.provider)).toEqual({ ok: true, provider: null });
+    expect(readModelsProvider(agentDir({ providers: { [LOCAL.provider]: {} } }), LOCAL.provider))
+      .toEqual({ ok: true, provider: { baseUrl: null, apiKey: null, catalog: [] } });
+  });
+
+  it("reports a mistyped field without echoing its value", () => {
+    const lookup = readModelsProvider(agentDir({ providers: { [LOCAL.provider]: { apiKey: { secret: "sk-should-not-echo" } } } }), LOCAL.provider);
+    expect(lookup).toMatchObject({ ok: false, error: expect.stringContaining("invalid") });
+    expect(JSON.stringify(lookup)).not.toContain("sk-should-not-echo");
   });
 });
 

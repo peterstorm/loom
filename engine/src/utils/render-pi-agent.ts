@@ -4,12 +4,7 @@ import { parseDeclaredSkills } from "../core/agent-skills";
 import { observePathPresence } from "./path-presence";
 import { renderPiAgentResource, type PreloadedSkill } from "../core/harness-resources";
 import { lowerModelProfile, resolveAgentProfile } from "../core/model-profiles";
-import {
-  resolveAgentLaunchBinding,
-  type EffectivePiBinding,
-  type ModelRef,
-  type ModelRoutingConfig,
-} from "../core/model-routing";
+import { resolveAgentLaunchBinding, type EffectivePiBinding, type PiRoutingContext } from "../core/model-routing";
 
 function skillPath(packageRoot: string, skill: string): string | null {
   const candidates = [
@@ -96,16 +91,6 @@ export function expectedPiAgentDefinitionWithBinding(
   );
 }
 
-/**
- * The spawn-boundary routing context a caller observes: the parsed config (or
- * null when absent/unusable) and the parent session's model ref (or null when
- * unknown). The pure policy decides whether a child inherits the parent model.
- */
-export type PiRoutingContext = Readonly<{
-  config: ModelRoutingConfig | null;
-  parentRef: ModelRef | null;
-}>;
-
 export type PiAgentFileValidation =
   | { readonly ok: true }
   | { readonly ok: false; readonly error: string };
@@ -159,15 +144,16 @@ export function validatePiAgentDefinitionFile(
 /**
  * The routed render for an agent, or null when the policy does not authorize
  * inheriting the parent model (no config, no parent, non-local parent, or a
- * `declared` rule). Rendering failures remain distinct from "not authorized"
- * so the spawn boundary can report the concrete recovery cause.
+ * `declared` rule). Rendering failures, and a served target whose model is
+ * unknown, remain distinct from "not authorized" so the spawn boundary can
+ * report the concrete recovery cause.
  */
 function routedPiAgentDefinitionIfAuthorized(
   agent: string,
   packageRoot: string,
   routing: PiRoutingContext,
 ): Readonly<{ ok: true; value: string | null }> | Readonly<{ ok: false; error: string }> {
-  const launch = resolveAgentLaunchBinding(agent, routing.parentRef, routing.config);
+  const launch = resolveAgentLaunchBinding(agent, routing);
   if (!launch.ok) {
     return { ok: false, error: `cannot resolve routed agent '${agent}': ${launch.error.message}` };
   }

@@ -20,14 +20,13 @@
  * emission seam), so the gate and the session binding act on the one parse.
  */
 import { match } from "ts-pattern";
-import type { EffectivePiBinding } from "./model-routing";
+import type { EffectivePiBinding, PiRoutingContext } from "./model-routing";
 import type { AgentRequestAuthority } from "./orchestration-contract";
 import {
   decideSpawnGate,
   planSpawnRoutes,
   type RouteGateMode,
   type RouteReachability,
-  type SpawnRouting,
   type UnverifiedRoute,
 } from "./route-reachability";
 import type { ParsedSpawnBatch } from "./spawn-request-authority";
@@ -35,14 +34,14 @@ import type { ParsedSpawnBatch } from "./spawn-request-authority";
 /**
  * What a Pi parent's gate reads, as the shell resolved it for one gated batch:
  * Pi's agent directory (where `models.json` declares each provider's
- * endpoint), the operator's gate mode and the routing context, each as parsed
- * — a value that did not parse is kept as its error, so it refuses the gated
- * batch.
+ * endpoint), the operator's gate mode and the routing context (served models
+ * included), each as parsed — a value that did not parse is kept as its
+ * error, so it refuses the gated batch.
  */
 export type PiRouteGateFacts = Readonly<{
   agentDir: string;
   mode: Readonly<{ ok: true; value: RouteGateMode }> | Readonly<{ ok: false; error: string }>;
-  routing: Readonly<{ ok: true; value: SpawnRouting }> | Readonly<{ ok: false; error: string }>;
+  routing: Readonly<{ ok: true; value: PiRoutingContext }> | Readonly<{ ok: false; error: string }>;
 }>;
 
 /**
@@ -138,7 +137,9 @@ const unreadable = (cause: string): string => `cannot check Pi route reachabilit
  * another run) — before any fact is read — or, once the facts are read and
  * before any route is probed, when the gate mode names no mode, the routing
  * config is malformed (the child may launch elsewhere than the declared
- * route) or a launch binding cannot be resolved; otherwise its launch routes
+ * route) or a launch binding cannot be resolved — a role outside the
+ * catalog, or a served target whose provider's model is unknown, which
+ * refuses the batch with that reason; otherwise its launch routes
  * are observed and the batch is decided on them and on the retired routes it
  * recorded (`decideSpawnGate`).
  */
@@ -153,7 +154,11 @@ function gateRoutes(requests: readonly AgentRequestAuthority[], facts: PiRouteGa
   const mode = facts.mode.value;
   if (!facts.routing.ok) return refuse(unreadable(facts.routing.error));
   const plan = planSpawnRoutes(requests, facts.routing.value);
-  if (!plan.ok) return refuse(unreadable(plan.error.message));
+  if (!plan.ok) {
+    return refuse(plan.error.kind === "served-model-unknown"
+      ? `refusing to spawn: ${plan.error.message}. Nothing was spawned.`
+      : unreadable(plan.error.message));
+  }
   const { launch, retired } = plan.value;
   return Object.freeze({
     kind: "observe",

@@ -14,8 +14,9 @@
  * Degradation matches the route gate: `buildPiRoutingContext` treats an absent
  * config as "no routing" and a malformed one as no routing plus a reported
  * error, so the declared binding is the launch route in both cases. The
- * resolution itself only fails for a role outside the Agent Catalog, which is
- * a programmer error and throws rather than silently disabling a rule.
+ * resolution itself fails for a role outside the Agent Catalog, a programmer
+ * error, and for a served target whose provider's model is unknown; both
+ * throw rather than name a route the child would not run on.
  */
 
 import { resolveAgentLaunchBinding, type ModelRef } from "../core/model-routing";
@@ -28,7 +29,7 @@ import { buildPiRoutingContext } from "./model-routing-context";
  */
 export function routedChildLaunchRoute(role: string): ModelRef {
   const { context } = buildPiRoutingContext();
-  const resolved = resolveAgentLaunchBinding(role, context.parentRef, context.config);
+  const resolved = resolveAgentLaunchBinding(role, context);
   if (!resolved.ok) {
     throw new Error(`cannot resolve the routed launch route for agent '${role}': ${resolved.error.message}`);
   }

@@ -103,7 +103,9 @@ const handler: HookHandler = async (_stdin, args) => {
   // Routing: resolve each agent's effective binding from the routing policy +
   // the parent model. With no routing config (or a non-local parent) the
   // effective binding equals the declared one, so the render is byte-identical
-  // to the un-routed output.
+  // to the un-routed output. A served target renders the model its provider
+  // serves now; when that is unknown the render fails rather than write a
+  // binding the child would not run on.
   const parentOverrideRaw = argumentValue(args, "--parent-model");
   let parentOverride: ModelRef | null = null;
   if (parentOverrideRaw !== null) {
@@ -113,13 +115,12 @@ const handler: HookHandler = async (_stdin, args) => {
   }
   const built = buildPiRoutingContext(process.env, activeAgentDir(), parentOverride);
   if (built.configError !== null) process.stdout.write(`warning: ${built.configError}\n`);
-  const { parentRef, config } = built.context;
 
   mkdirSync(output, { recursive: true });
   for (const file of files) {
     const agent = basename(file, ".md");
     const content = readFileSync(join(agentsDir, file), "utf-8");
-    const launch = resolveAgentLaunchBinding(agent, parentRef, config);
+    const launch = resolveAgentLaunchBinding(agent, built.context);
     if (!launch.ok) return { kind: "error", message: launch.error.message };
     writePiAgent(join(output, file), renderPiAgentDefinitionWithBinding(content, agent, packageRoot, launch.value.effective));
   }

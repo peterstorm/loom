@@ -1,12 +1,15 @@
 /**
  * Imperative shell for the model-routing policy: loads the `model-routing.json`
- * config and observes the parent session's model, then hands a typed
+ * config, observes the parent session's model and probes the model each
+ * served target this parent can reach is serving, then hands a typed
  * {@link PiRoutingContext} to the pure policy in `core/model-routing.ts`.
  *
  * Fail-closed: a config that is absent simply means "no routing" (the declared
  * binding is used); a config that is present but malformed is an error the
  * caller surfaces, and it degrades to "no routing" — a broken policy never
- * silently authorizes inheriting a parent model.
+ * silently authorizes inheriting a parent model. A served model that cannot
+ * be determined is recorded in the context, and refuses every launch whose
+ * deciding rule selects it.
  */
 
 import { readFileSync } from "node:fs";
@@ -15,12 +18,14 @@ import { join } from "node:path";
 import {
   parseModelRef,
   parseModelRoutingConfig,
+  servedProvidersFor,
   type ModelRef,
   type ModelRoutingConfig,
+  type PiRoutingContext,
 } from "../core/model-routing";
 import { piHomeAgentDirectory, resolvePiAgentDirectory } from "../core/pi-agent-directory";
 import { observePathPresence } from "./path-presence";
-import type { PiRoutingContext } from "./render-pi-agent";
+import { LIVE_SERVED_PROBE_PORTS, observeServedModels, type ServedProbePorts } from "./served-model-probe";
 
 /** The default Pi agent directory under the account's home directory. */
 export function homeAgentDir(): string {
@@ -71,6 +76,26 @@ export function parentModelRefFromEnv(env: NodeJS.ProcessEnv = process.env): Mod
   return parsed.ok ? parsed.value : null;
 }
 
+/**
+ * The routing context for a parsed config and parent: the providers of the
+ * served targets this parent can reach are probed once, here, with the
+ * provider keys `models.json` in `agentDir` declares — so every launch
+ * resolved from the context agrees on what each served target stands for.
+ */
+export function observeRoutingContext(
+  config: ModelRoutingConfig | null,
+  parentRef: ModelRef | null,
+  agentDir: string,
+  env: Readonly<Record<string, string | undefined>>,
+  ports: ServedProbePorts,
+): PiRoutingContext {
+  return Object.freeze({
+    config,
+    parentRef,
+    served: observeServedModels(servedProvidersFor(config, parentRef), agentDir, env, ports),
+  });
+}
+
 export type BuiltRoutingContext = Readonly<{
   context: PiRoutingContext;
   /** Non-null when a present config was malformed; the context degrades to no routing. */
@@ -87,11 +112,15 @@ export function buildPiRoutingContext(
   env: NodeJS.ProcessEnv = process.env,
   dir: string = activeAgentDir(),
   parentOverride: ModelRef | null = null,
+  ports: ServedProbePorts = LIVE_SERVED_PROBE_PORTS,
 ): BuiltRoutingContext {
   const loaded = loadModelRoutingConfig(dir);
-  const context: PiRoutingContext = Object.freeze({
-    config: loaded.ok ? loaded.config : null,
-    parentRef: parentOverride ?? parentModelRefFromEnv(env),
-  });
+  const context = observeRoutingContext(
+    loaded.ok ? loaded.config : null,
+    parentOverride ?? parentModelRefFromEnv(env),
+    dir,
+    env,
+    ports,
+  );
   return Object.freeze({ context, configError: loaded.ok ? null : loaded.error });
 }
