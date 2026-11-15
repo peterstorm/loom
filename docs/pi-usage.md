@@ -90,8 +90,9 @@ Source resource trees must contain regular readable files, not symbolic links. A
 
 Three routing facts matter to an operator:
 
-- **Pi runs local models only.** Every catalog profile lowers to the one local route the catalog names. A `model-routing.json` rule may explicitly make children inherit a local parent model. Before a spawn batch is emitted, each route its children will launch on is probed; see [the route gate](#a-spawn-batch-is-refused-by-the-route-gate).
-- **Routing off the qualified route turns emission off; it is not a mismatch.** The emission tools are qualified on one route. When a routing rule launches a reviewer elsewhere (for example `{"when":{"parentClass":"local"},"use":{"kind":"parent"}}`, inheriting a stronger parent model), the render, the spawn admission and the capture all decide the same thing from the same observation: the task carries no `LOOM_EMISSION_DESCRIPTOR`, the child returns its payload as final-message JSON, and capture expects exactly that. Routing that resolves back onto the qualified route keeps the tool. A rule whose selector includes `workload` never matches a normal `subagent` spawn, because launch resolution supplies no workload; key the rule on `parentClass`, optionally with `agent` or `profile`.
+- **Pi runs local models only.** Every catalog profile lowers to the one local route the catalog names. A `model-routing.json` rule may explicitly make children inherit a local parent model, or use a named target. Before a spawn batch is emitted, each route its children will launch on is probed; see [the route gate](#a-spawn-batch-is-refused-by-the-route-gate).
+- **A target is exact or served.** An exact target names the model and its thinking level: `{"model": "desktop-vllm/<id>", "thinkingLevel": "high"}`. A served target names only the provider, `{"served": "desktop-vllm"}`, optionally with a `thinkingLevel`, and runs the one model that provider's server is serving now. Loom resolves it before launch, see [a served target cannot be resolved](#a-served-routing-target-cannot-be-resolved). Because the generated Agent definitions carry the routed binding, re-run `scripts/sync-pi-agents.sh` after the server switches models; until then the stale definitions are refused. Without a `thinkingLevel`, a served target's child runs at the parent thinking level its launcher supplies: the parent session's live level for an interactive phase Agent, and the Agent's own catalog thinking level for every headless spawn (the render, the spawn gate and spawn admission see only the parent's model, not its thinking level). Pin a `thinkingLevel` when the two must agree.
+- **Routing off the qualified route turns emission off; it is not a mismatch.** The emission tools are qualified on one route. When a routing rule launches a reviewer elsewhere (for example `{"when":{"parentClass":"local"},"use":{"kind":"parent"}}`, inheriting a stronger parent model), the render and the spawn admission decide the same thing from the same observation: the task carries no `LOOM_EMISSION_DESCRIPTOR` and the child returns its payload as final-message JSON. Spawn admission records that decision with the child's correlator, and capture reads it back rather than resolving the route again, so a model switch, an edited `model-routing.json` or a served provider going down between spawn and result cannot change what capture expects. Routing that resolves back onto the qualified route keeps the tool. A rule whose selector includes `workload` never matches a normal `subagent` spawn, because launch resolution supplies no workload; key the rule on `parentClass`, optionally with `agent` or `profile`.
 - **The parent model is the session's live model, not the one Pi exported at start.** Loom projects the live model into `PI_PROVIDER` and `PI_MODEL` at `session_start`, before each `tool_call` guard and before subagent-result capture. If a spawn's render and admission ever disagree about the child route, look here first: a hand-edited `PI_MODEL`, a nested Pi process or an adapter that sets the pair itself reintroduces the split.
 
 ## Pi write grants
@@ -205,7 +206,7 @@ Never broaden the grant manually.
 
 ### A spawn batch is refused by the route gate
 
-Before a Pi parent emits a spawn batch, each distinct route its children will launch on must answer `GET {baseUrl}/models`, where `baseUrl` comes from Pi's `models.json` in the active agent directory. The launch route is the generated render's binding: the Agent's catalog binding after the `model-routing.json` rules for the observed parent. There is no fallback route. Loom reads only `baseUrl` and never resolves or sends credentials; Pi authenticates the inference itself.
+Before a Pi parent emits a spawn batch, each distinct route its children will launch on must answer `GET {baseUrl}/models`, where `baseUrl` comes from Pi's `models.json` in the active agent directory. The launch route is the generated render's binding: the Agent's catalog binding after the `model-routing.json` rules for the observed parent. There is no fallback route. This probe reads only `baseUrl` and never resolves or sends credentials; Pi authenticates the inference itself. (The one request that carries a credential is a [served target's](#a-served-routing-target-cannot-be-resolved) model listing.)
 
 A diagnostic beginning `refusing to spawn:` names every route that cannot run, and ends with one remedy per cause. Nothing was published, so after the fix `resume` re-emits the same batch.
 
@@ -223,6 +224,40 @@ The stderr event is one JSON line, `{"event":"loom-route-unverified","route":…
 A `retired` refusal reads `route <provider/model> (recorded under profile '<profile>') is retired: the request records <recorded binding>, and profile '<profile>' now issues <current binding>`. It is refused without a probe, because a child launches on its profile's current binding and no route change can make the recorded one runnable.
 
 A diagnostic beginning `cannot check Pi route reachability:` means the gate could not read its inputs: fix the named `model-routing.json`, `models.json` or `LOOM_ROUTE_GATE` value, then resume. A diagnostic beginning `Pi orchestration spawn request N:` means a stored request authority no longer parses, so its route cannot be known. The gate applies to every Pi parent (`PI_CODING_AGENT=true`), whether or not the batch announces a session id.
+
+### A served routing target cannot be resolved
+
+A served target (`{"served": "<provider>"}`) runs whichever single model the provider serves. For each provider a rule that can match the parent serves, Loom reads the provider's `baseUrl` and declared `models` from Pi's `models.json` in the active agent directory, picks the key Pi would send, and requests `GET {baseUrl}/models` with it as `Authorization: Bearer`.
+
+The key is the one Pi sends to a custom provider. A credential Pi's `auth.json` (beside `models.json`) stores for the provider wins: an `api_key` entry's `key`, whose `$NAME` lookups read the entry's own `env` before the environment. A stored credential without a key (an `oauth` login, or an `api_key` entry with no `key`) means no key at all; Pi never falls back to `models.json` once a credential is stored, and neither does Loom. With nothing stored, the key is the provider's `models.json` `apiKey`. Either value follows Pi's grammar: a value starting with `!` is a shell command whose trimmed stdout is the key; otherwise `$NAME` and `${NAME}` read environment variables (an unset or empty one leaves the key unresolved), `$$` and `$!` are a literal `$` and `!`, and anything else is literal. Loom models custom providers only; a served provider is one you declared in `models.json`.
+
+This listing is the only request on which Loom sends a credential, and it is guarded:
+
+- a key that no HTTP header can carry (a line break, a control character, a character outside Latin-1) is refused before any request, because the HTTP client's error would quote it;
+- the request follows no redirect, so the key reaches only the configured `baseUrl`;
+- every text that comes back is scrubbed of the key before Loom decides anything: a refusal, and each model id the server lists (a server may echo the bearer token as an id; such an id then matches nothing in the catalog, so the target stays unresolved);
+- a malformed `models.json` or `auth.json` is reported by file name only, because a JSON parser's error quotes the text around the fault. Like Pi's session runtime, Loom reads only the `auth.json` entry for the provider it probes: a malformed entry for another provider does not stop it. An entry for this provider that Pi does not accept, an `auth.json` that is not JSON, or one that is not an object keyed by provider leaves the target unresolved rather than guessing the key.
+
+The key never appears on a command line, in a log, a diagnostic, an event or a record.
+
+There is no fallback. When a rule that applies to a launch selects a served target whose model cannot be known, the render, the spawn and the interactive launch all refuse, with `routing rule <i> selects target "<name>", served by provider '<provider>', whose model is unknown: <reason>`. The spawn gate prefixes it with `refusing to spawn:` and ends with `Nothing was spawned.`
+
+| Reason says | Do |
+| --- | --- |
+| `declares no baseUrl for provider` | declare the provider in `models.json`, or route the child to an exact model |
+| `neither Pi's auth.json nor its models.json holds a key for provider` | add the provider's `apiKey`, or store one with `/login` |
+| `stores an oauth credential … that holds no key` or `stores an api_key credential … that holds no key` | store the key with `/login`, or remove the `auth.json` entry so the `models.json` `apiKey` applies |
+| `… names unset environment variable(s) …` | set them in the environment Pi and Loom run in, or in the `auth.json` entry's `env` |
+| `the key command in … failed or printed nothing` | fix the command (its output is never shown) |
+| `… resolves to a value an HTTP header cannot carry` | make the key one line of printable characters |
+| `cannot parse …/auth.json` or `invalid …/auth.json` | fix the named file; the diagnostic names the provider entry, never a value |
+| `refused the key Loom resolved for provider … (HTTP 401/403)` | fix the key |
+| `cannot reach provider …`, `answered HTTP <status>` | bring the server up; a redirect is refused too, so point `baseUrl` at the server itself |
+| `answered HTTP <status> without an OpenAI-style model list` | the server must list its models at `GET {baseUrl}/models` |
+| `lists <n> models …; a served target needs exactly one` | serve one model, or route the child to an exact model |
+| `serves '<id>', which Pi's models.json does not declare` | add the model to the provider's `models` |
+
+A process reuses a provider's listing for 30 seconds (per URL and key), and a key command's output for the same window (a failing command runs again at once), so the readers of one launch agree without each probing and a long-lived Pi session sees a model switch within 30 seconds. After a switch, re-sync the generated Agent definitions; until then they are refused as stale.
 
 ### A child fails the emission readiness barrier
 

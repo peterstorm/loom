@@ -664,7 +664,9 @@ export type IssuedRequestPiRoute = Readonly<{
  * `provider/model` the child will actually run on once `model-routing.json` is
  * applied by its launcher, or `null` when the shell observed no routing
  * decision at all. It enters as data — the pure decision below never reads the
- * environment, the config file, or the parent session.
+ * environment, the config file, or the parent session. Spawn admission
+ * observes it live; capture passes the route admission recorded with the
+ * child's correlator (`null` when none was recorded), never a fresh one.
  *
  * Emission is qualified on the route the child RUNS on, not only on the
  * frozen issued one: an explicit local `use: parent` rule inherits the parent

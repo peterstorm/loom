@@ -8,7 +8,7 @@
  * `renderSpawnTaskText` (core/spawn-task-text).
  */
 import { LOOM_PACKAGE_ROOT } from "../../../utils/loom-package-root";
-import { routedChildLaunchRoute } from "../../../utils/child-launch-route";
+import { describeChildLaunchRouteRefusal, routedChildLaunchRoute } from "../../../utils/child-launch-route";
 import { verifyStandalonePanelView } from '../../../orchestration/standalone-panel-context';
 import { canonicalRecord, canonicalStructuralEquals, type AgentRequestAuthority } from '../../../core/orchestration-contract';
 import { STANDALONE_REVIEWER_PROTOCOL_V3 } from '../../../core/standalone-lineage-contract';
@@ -142,11 +142,15 @@ function observeReviewerDelivery(
     }
   }
   const delivery = observeDeliveryInputs(handle, authority, program);
+  // A child route that cannot be resolved (a served target whose model is
+  // unknown) fails the render closed, like every other refusal here.
+  const childRoute = routedChildLaunchRoute(authority.role);
+  if (!childRoute.ok) throw new Error(describeChildLaunchRouteRefusal(authority.role, childRoute));
   const route = issuedReviewerEmissionRoute(
     emissionAuthority ?? program,
     authority,
     piParentExists(),
-    routedChildLaunchRoute(authority.role),
+    childRoute.value,
   );
   if (route.kind === "refused") {
     throw new Error(`emission route refused for request ${authority.requestId}: ${route.reason}`);

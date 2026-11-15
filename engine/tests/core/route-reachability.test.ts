@@ -13,7 +13,6 @@ import {
   type RouteGateMode,
   type RouteProbe,
   type SpawnRouteDecision,
-  type SpawnRouting,
   type UnverifiedRoute,
 } from "../../src/core/route-reachability";
 import {
@@ -25,7 +24,7 @@ import {
   type PiBinding,
   type RecordedLlmProfileId,
 } from "../../src/core/model-profiles";
-import { parseModelRoutingConfig, resolveAgentLaunchBinding, type ModelRoutingConfig } from "../../src/core/model-routing";
+import { parseModelRoutingConfig, resolveAgentLaunchBinding, type ModelRoutingConfig, type PiRoutingContext } from "../../src/core/model-routing";
 import {
   LOCAL_PI_BINDING as LOCAL,
   LOCAL_PI_MODEL_ARGUMENT,
@@ -133,7 +132,7 @@ describe("decideRouteReachability", () => {
 const ROLE = "code-reviewer";
 const request = (pi: PiBinding, modelProfile: RecordedLlmProfileId = RETIRED_CLOUD_PROFILE) =>
   ({ role: ROLE, modelProfile, harnessBinding: { pi, claude: { harness: "claude-code", model: "sonnet" } } } as const);
-const NO_ROUTING: SpawnRouting = { parentRef: null, config: null };
+const NO_ROUTING: PiRoutingContext = { parentRef: null, config: null, served: {} };
 const LOCAL_PARENT = { provider: LOCAL.provider, model: LOCAL.model };
 
 const routingConfig = (rules: readonly unknown[], targets: Readonly<Record<string, unknown>> = {}): ModelRoutingConfig => {
@@ -174,17 +173,17 @@ describe("planSpawnRoutes", () => {
       [{ id: "local-reviews-use-muse", when: { parentClass: "local" }, use: { kind: "named", target: "muse" } }],
       { muse: { model: "desktop-muse/qwen3.8-27b", thinkingLevel: "medium" } },
     );
-    const routing: SpawnRouting = { parentRef: LOCAL_PARENT, config };
+    const routing: PiRoutingContext = { parentRef: LOCAL_PARENT, config, served: {} };
     const plan = planSpawnRoutes([request(LOCAL)], routing);
     expect(plan).toEqual({ ok: true, value: { launch: [{ provider: "desktop-muse", model: "qwen3.8-27b", thinking: "medium" }], retired: [] } });
-    const rendered = resolveAgentLaunchBinding(ROLE, routing.parentRef, routing.config);
+    const rendered = resolveAgentLaunchBinding(ROLE, routing);
     expect(plan.ok && rendered.ok && plan.value.launch).toEqual(rendered.ok ? [rendered.value.effective] : null);
   });
 
   it("launches on the parent's own route when the rule inherits the parent", () => {
     const config = routingConfig([{ id: "local-inherits", when: { parentClass: "local" }, use: { kind: "parent" } }]);
     const parentRef = { provider: LOCAL.provider, model: "qwen3.8-27b" };
-    expect(planSpawnRoutes([request(LOCAL)], { parentRef, config }))
+    expect(planSpawnRoutes([request(LOCAL)], { parentRef, config, served: {} }))
       .toEqual({ ok: true, value: { launch: [{ ...parentRef, thinking: "high" }], retired: [] } });
   });
 
@@ -195,9 +194,9 @@ describe("planSpawnRoutes", () => {
     fc.assert(fc.property(fc.constantFrom(...roles), fc.constantFrom(...parents), fc.boolean(), (role, parentRef, routed) => {
       const profile = resolveAgentProfile(role);
       if (!profile.ok) throw new Error(profile.error.message);
-      const routing: SpawnRouting = { parentRef, config: routed ? config : null };
+      const routing: PiRoutingContext = { parentRef, config: routed ? config : null, served: {} };
       const plan = planSpawnRoutes([{ ...request(LOCAL, profile.value.id), role }], routing);
-      const rendered = resolveAgentLaunchBinding(role, routing.parentRef, routing.config);
+      const rendered = resolveAgentLaunchBinding(role, routing);
       expect(plan.ok && rendered.ok).toBe(true);
       if (plan.ok && rendered.ok) expect(plan.value.launch).toEqual([rendered.value.effective]);
     }));

@@ -4,9 +4,10 @@
  * Functional core: immutable policy data and total functions over
  * caller-supplied values. This module performs no I/O and reads no
  * environment. The imperative shell — the agent renderer and the spawn
- * gate — loads `model-routing.json` and observes the parent session's model
- * ref, then calls {@link resolveAgentLaunchBinding} (or, for an interactive
- * child with a parent thinking level and workload,
+ * gate — loads `model-routing.json`, observes the parent session's model
+ * ref and probes the model each `served` target's provider serves (the
+ * {@link PiRoutingContext}), then calls {@link resolveAgentLaunchBinding}
+ * (or, for an interactive child with a parent thinking level and workload,
  * {@link resolveEffectivePiBindingFromParent}) to obtain the binding a child
  * actually runs on.
  *
@@ -16,10 +17,13 @@
  * the observed parent model, whether a child inherits the parent's model
  * instead. Inheritance is never implicit: an absent config, an absent parent
  * ref, or a parent that classifies as anything other than the rule's class
- * all resolve to the declared binding.
+ * all resolve to the declared binding. A rule that selects a served target
+ * whose model the shell could not determine is a typed failure, never a
+ * fallback to another binding.
  */
 
-import { lowerModelProfile, resolveAgentProfile, type PiBinding, type PolicyResult } from "./model-profiles";
+import { lowerModelProfile, resolveAgentProfile, type PiBinding, type PolicyError } from "./model-profiles";
+import { describeServedModelUnknown, type ServedModelUnknownCause } from "./served-model-cause";
 
 /** A parsed `provider/model` reference, as a value object (not a raw string). */
 export type ModelRef = Readonly<{ provider: string; model: string }>;
@@ -60,11 +64,20 @@ export type RoutingWorkload = Readonly<{
 
 export type RoutedPiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
-export type NamedPiTarget = Readonly<{
-  provider: string;
-  model: string;
-  thinking: RoutedPiThinkingLevel;
-}>;
+/**
+ * A named routing target (`targets` in `model-routing.json`), exactly one of:
+ * - `exact` — always this provider/model at this thinking level;
+ * - `served` — whatever single model `provider` serves right now, which the
+ *   shell probes and hands in as {@link ServedModels}. With no pinned
+ *   thinking level (`thinking: null`) the child takes the parent thinking
+ *   level its resolver was given: the parent session's live level for an
+ *   interactive child ({@link resolveEffectivePiBindingFromParent} with the
+ *   session's level), the Agent's declared level for every headless launch
+ *   ({@link resolveEffectivePiBinding}, whose ref-only parent has none).
+ */
+export type RoutingTarget =
+  | Readonly<{ kind: "exact"; provider: string; model: string; thinking: RoutedPiThinkingLevel }>
+  | Readonly<{ kind: "served"; provider: string; thinking: RoutedPiThinkingLevel | null }>;
 
 export type ModelRoutingConfig = Readonly<{
   schemaVersion: 1;
@@ -72,10 +85,38 @@ export type ModelRoutingConfig = Readonly<{
   /** Class → glob patterns over `provider/model`. A ref matching any pattern
    *  takes that class; otherwise it is `defaultClass`. */
   modelClasses: Readonly<Record<ModelClass, readonly string[]>>;
-  targets: Readonly<Record<string, NamedPiTarget>>;
+  targets: Readonly<Record<string, RoutingTarget>>;
   /** Evaluated in order; the first rule whose `when` matches decides the use. */
   rules: readonly RoutingRule[];
 }>;
+
+/**
+ * What one provider serves now: its one model, or the typed cause that is
+ * unknown (`core/served-model-cause.ts`). Decided by `core/served-model.ts`.
+ */
+export type ServedModel =
+  | Readonly<{ kind: "served"; ref: ModelRef }>
+  | Readonly<{ kind: "unknown"; cause: ServedModelUnknownCause }>;
+
+/** Provider → what it serves now, for the providers {@link servedProvidersFor} names. */
+export type ServedModels = Readonly<Record<string, ServedModel>>;
+
+/**
+ * Everything a launch is routed under, as the shell observed it once: the
+ * parsed config (null when absent or unusable), the parent session's model
+ * ref (null when unknown), and what each provider a reachable served target
+ * names is serving. Every reader that resolves a launch — the validator, the
+ * render, the route gate, the interactive launcher — resolves it from one of
+ * these, so they agree on the model a served target stands for.
+ */
+export type PiRoutingContext = Readonly<{
+  config: ModelRoutingConfig | null;
+  parentRef: ModelRef | null;
+  served: ServedModels;
+}>;
+
+/** No routing: every launch is its declared binding. */
+export const NO_ROUTING: PiRoutingContext = Object.freeze({ config: null, parentRef: null, served: Object.freeze({}) });
 
 /**
  * The binding a child actually spawns with. Wider than `PiBinding`: when a
@@ -93,10 +134,23 @@ export type EffectivePiBinding = Readonly<{
   thinking: RoutedPiThinkingLevel;
 }>;
 
-export type RoutingPolicyError = Readonly<{
-  kind: "invalid-model-ref" | "invalid-routing-config";
-  message: string;
-}>;
+/**
+ * Why routing refused. `served-model-unknown` is a rule selecting a served
+ * target whose provider's model the shell could not determine: the launch
+ * is refused rather than routed anywhere else. It carries the rule, the
+ * target, the provider and the typed `cause`; `message` is that cause
+ * rendered once (`describeServedModelUnknown`), for the callers that print.
+ */
+export type RoutingPolicyError =
+  | Readonly<{ kind: "invalid-model-ref" | "invalid-routing-config"; message: string }>
+  | Readonly<{
+      kind: "served-model-unknown";
+      ruleId: string;
+      target: string;
+      provider: string;
+      cause: ServedModelUnknownCause;
+      message: string;
+    }>;
 
 export type RoutingPolicyResult<T> =
   | Readonly<{ ok: true; value: T }>
@@ -305,31 +359,53 @@ function overlappingClasses(modelClasses: Readonly<Record<ModelClass, readonly s
   return null;
 }
 
-/** Parse the optional `targets` map of exact named Pi targets. */
-function parseTargets(raw: unknown): RoutingPolicyResult<Record<string, NamedPiTarget>> {
+/** A provider name a served target may name: what a model ref's provider part may be. */
+const isProviderName = (value: unknown): value is string =>
+  isNonEmptyString(value) && hasNoWhitespace(value) && !value.includes("/") && !value.includes("*");
+
+/**
+ * Parse one named target: exactly one of `model` (an exact ref, with an exact
+ * `thinkingLevel`) or `served` (a provider name, with an optional
+ * `thinkingLevel` — without one, the parent thinking level the resolver is
+ * given, see {@link RoutingTarget}).
+ */
+function parseTarget(name: string, target: Readonly<Record<string, unknown>>): RoutingPolicyResult<RoutingTarget> {
+  const label = `routing config target ${JSON.stringify(name)}`;
+  const unknownTarget = unknownFields(target, ["model", "served", "thinkingLevel"]);
+  if (unknownTarget.length > 0) return invalidConfig(`${label} contains unknown field ${unknownTarget[0]}`);
+  if ((target.model === undefined) === (target.served === undefined)) {
+    return invalidConfig(`${label} must name exactly one of model (an exact provider/model ref) or served (a provider)`);
+  }
+  if (target.served !== undefined) {
+    if (!isProviderName(target.served)) return invalidConfig(`${label} served must be a provider name`);
+    if (target.thinkingLevel !== undefined && !isRoutedPiThinkingLevel(target.thinkingLevel)) {
+      return invalidConfig(`${label} thinkingLevel must be an exact thinking level when present`);
+    }
+    return ok(Object.freeze({ kind: "served", provider: target.served, thinking: target.thinkingLevel ?? null }));
+  }
+  const model = parseModelRef(target.model);
+  if (!model.ok) return invalidConfig(`${label}: ${model.error.message}`);
+  if (!isRoutedPiThinkingLevel(target.thinkingLevel)) return invalidConfig(`${label} must have an exact thinkingLevel`);
+  return ok(Object.freeze({
+    kind: "exact",
+    provider: model.value.provider,
+    model: model.value.model,
+    thinking: target.thinkingLevel,
+  }));
+}
+
+/** Parse the optional `targets` map of named Pi targets. */
+function parseTargets(raw: unknown): RoutingPolicyResult<Record<string, RoutingTarget>> {
   if (raw === undefined) return ok({});
   if (!isRecord(raw)) return invalidConfig("routing config targets must be an object");
-  const targets: Record<string, NamedPiTarget> = {};
+  const targets: Record<string, RoutingTarget> = {};
   for (const [name, target] of Object.entries(raw)) {
-    if (!isNonEmptyString(name) || !isRecord(target) || typeof target.model !== "string") {
-      return invalidConfig(`routing config target ${JSON.stringify(name)} must contain an exact model ref`);
+    if (!isNonEmptyString(name) || !isRecord(target)) {
+      return invalidConfig(`routing config target ${JSON.stringify(name)} must be an object naming a model or a served provider`);
     }
-    const unknownTarget = unknownFields(target, ["model", "thinkingLevel"]);
-    if (unknownTarget.length > 0) {
-      return invalidConfig(`routing config target ${JSON.stringify(name)} contains unknown field ${unknownTarget[0]}`);
-    }
-    const model = parseModelRef(target.model);
-    if (!model.ok) {
-      return invalidConfig(`routing config target ${JSON.stringify(name)}: ${model.error.message}`);
-    }
-    if (!isRoutedPiThinkingLevel(target.thinkingLevel)) {
-      return invalidConfig(`routing config target ${JSON.stringify(name)} must have an exact thinkingLevel`);
-    }
-    targets[name] = Object.freeze({
-      provider: model.value.provider,
-      model: model.value.model,
-      thinking: target.thinkingLevel,
-    });
+    const parsed = parseTarget(name, target);
+    if (!parsed.ok) return parsed;
+    targets[name] = parsed.value;
   }
   return ok(targets);
 }
@@ -338,7 +414,7 @@ function parseTargets(raw: unknown): RoutingPolicyResult<Record<string, NamedPiT
 function parseRules(
   raw: readonly unknown[],
   producibleClasses: ReadonlySet<ModelClass>,
-  targets: Readonly<Record<string, NamedPiTarget>>,
+  targets: Readonly<Record<string, RoutingTarget>>,
 ): RoutingPolicyResult<RoutingRule[]> {
   const ruleIds = new Set<string>();
   const rules: RoutingRule[] = [];
@@ -417,7 +493,7 @@ function parseRuleSelector(
 function parseRuleUse(
   use: unknown,
   index: number,
-  targets: Readonly<Record<string, NamedPiTarget>>,
+  targets: Readonly<Record<string, RoutingTarget>>,
 ): RoutingPolicyResult<RoutingRuleUse> {
   if (!isRecord(use) ||
       (use.kind !== "parent" && use.kind !== "declared" && use.kind !== "named")) {
@@ -435,50 +511,118 @@ function parseRuleUse(
   return ok(Object.freeze({ kind: "named", target: use.target }));
 }
 
+/** Whether a rule's `when` can match a launch under `parent`, whatever its workload, profile and Agent. */
+const ruleCanMatchParent = (rule: RoutingRule, parent: ModelRef, parentClass: ModelClass): boolean =>
+  rule.when.parentClass === parentClass &&
+  (rule.when.parentModel === undefined || globMatches(rule.when.parentModel, parent));
+
 /**
- * Resolve the binding a child spawns with. Total and pure: never throws.
+ * The providers whose served model a launch under `parentRef` may need: those
+ * of the served targets named by every rule that can match this parent. The
+ * shell probes exactly these, once per routing context, so a config whose
+ * served targets this parent can never reach costs no probe, and no parent
+ * (or no config) needs none.
+ */
+export function servedProvidersFor(config: ModelRoutingConfig | null, parentRef: ModelRef | null): readonly string[] {
+  if (config === null || parentRef === null) return Object.freeze([]);
+  const parentClass = classifyModelRef(parentRef, config);
+  const providers = new Set<string>();
+  for (const rule of config.rules) {
+    if (rule.use.kind !== "named" || !ruleCanMatchParent(rule, parentRef, parentClass)) continue;
+    const target = config.targets[rule.use.target];
+    if (target.kind === "served") providers.add(target.provider);
+  }
+  return Object.freeze([...providers].sort());
+}
+
+/** The binding a named target stands for under this parent, or why its served model is unknown. */
+function targetBinding(
+  ruleId: string,
+  name: string,
+  target: RoutingTarget,
+  parent: EffectivePiBinding,
+  served: ServedModels,
+): RoutingPolicyResult<EffectivePiBinding> {
+  if (target.kind === "exact") {
+    return ok(Object.freeze({ provider: target.provider, model: target.model, thinking: target.thinking }));
+  }
+  const refuse = (cause: ServedModelUnknownCause): RoutingPolicyResult<never> => err({
+    kind: "served-model-unknown",
+    ruleId,
+    target: name,
+    provider: target.provider,
+    cause,
+    message: `routing rule ${ruleId} selects target ${JSON.stringify(name)}, served by provider '${target.provider}', ` +
+      `whose model is unknown: ${describeServedModelUnknown(target.provider, cause)}`,
+  });
+  const observed = served[target.provider];
+  if (observed === undefined) return refuse({ kind: "not-probed" });
+  if (observed.kind === "unknown") return refuse(observed.cause);
+  // The snapshot's key and its model must agree; a mis-keyed snapshot is an error, never a route.
+  if (observed.ref.provider !== target.provider) {
+    return refuse({ kind: "foreign-model", provider: observed.ref.provider, model: observed.ref.model });
+  }
+  return ok(Object.freeze({
+    provider: observed.ref.provider,
+    model: observed.ref.model,
+    thinking: target.thinking ?? parent.thinking,
+  }));
+}
+
+/**
+ * Resolve the binding a child spawns with. Pure, never throws; it fails only
+ * when the deciding rule selects a served target whose model is unknown.
  *
  * - No parent ref or no config → the declared binding (inheritance is not
- *   implicit).
- * - Otherwise classify the parent and choose the uniquely most-specific
- *   matching selector across parent model, workload, profile, and Agent.
- * - `parent` inherits the complete active binding, `named` selects an exact
- *   configured target, and `declared` keeps the pinned binding.
- * - No matching rule → the declared binding.
+ *   implicit). The parent's thinking level is the declared one: a ref-only
+ *   caller has no other.
+ * - Otherwise as {@link resolveEffectivePiBindingFromParent}.
  */
 export function resolveEffectivePiBinding(
   declared: PiBinding,
-  parentRef: ModelRef | null,
-  config: ModelRoutingConfig | null,
-): EffectivePiBinding {
+  routing: PiRoutingContext,
+): RoutingPolicyResult<EffectivePiBinding> {
+  const { parentRef } = routing;
   return resolveEffectivePiBindingFromParent(
     declared,
     parentRef === null
       ? null
       : Object.freeze({ provider: parentRef.provider, model: parentRef.model, thinking: declared.thinking }),
-    config,
+    routing,
   );
 }
 
-/** Resolve the exact launch binding, including the active parent's thinking level. */
+/**
+ * Resolve the exact launch binding, including the active parent's thinking level.
+ *
+ * - No parent or no config → the declared binding.
+ * - Otherwise classify the parent and choose the uniquely most-specific
+ *   matching selector across parent model, workload, profile, and Agent.
+ * - `parent` inherits the complete active binding, `declared` keeps the
+ *   pinned binding, and `named` selects a configured target: an exact one as
+ *   written, a served one as the model `routing.served` says its provider
+ *   serves (refused when that is unknown), at its pinned thinking level or
+ *   the parent's.
+ * - No matching rule → the declared binding.
+ */
 export function resolveEffectivePiBindingFromParent(
   declared: PiBinding,
   parent: EffectivePiBinding | null,
-  config: ModelRoutingConfig | null,
+  routing: Pick<PiRoutingContext, "config" | "served">,
   workload: RoutingWorkload = Object.freeze({}),
-): EffectivePiBinding {
+): RoutingPolicyResult<EffectivePiBinding> {
   const declaredEffective: EffectivePiBinding = Object.freeze({
     provider: declared.provider,
     model: declared.model,
     thinking: declared.thinking,
   });
-  if (parent === null || config === null) return declaredEffective;
+  const { config } = routing;
+  if (parent === null || config === null) return ok(declaredEffective);
 
   const parentClass = classifyModelRef(parent, config);
   const matching = config.rules.filter((rule) => {
     const selector = rule.when;
-    if (selector.parentClass !== parentClass) return false;
-    if (selector.parentModel !== undefined && !globMatches(selector.parentModel, parent)) return false;
+    if (!ruleCanMatchParent(rule, parent, parentClass)) return false;
     if (selector.workload !== undefined && selector.workload !== workload.workload) return false;
     if (selector.profile !== undefined && selector.profile !== workload.profile) return false;
     return selector.agent === undefined || selector.agent === workload.agent;
@@ -488,21 +632,19 @@ export function resolveEffectivePiBindingFromParent(
     -1,
   );
   const rule = matching.find((candidate) => selectorSpecificity(candidate.when) === maxSpecificity);
-  if (rule !== undefined) {
-    if (rule.use.kind === "parent") return Object.freeze({ ...parent });
-    if (rule.use.kind === "declared") return declaredEffective;
-    const target = config.targets[rule.use.target];
-    return Object.freeze({
-      provider: target.provider,
-      model: target.model,
-      thinking: target.thinking,
-    });
-  }
-  return declaredEffective;
+  if (rule === undefined) return ok(declaredEffective);
+  if (rule.use.kind === "parent") return ok(Object.freeze({ ...parent }));
+  if (rule.use.kind === "declared") return ok(declaredEffective);
+  return targetBinding(rule.id, rule.use.target, config.targets[rule.use.target], parent, routing.served);
 }
 
 /** One Agent's launch under a routing context: its catalog binding and the binding Pi actually launches. */
 export type AgentLaunchBinding = Readonly<{ declared: PiBinding; effective: EffectivePiBinding }>;
+
+/** Why an Agent's launch binding cannot be resolved: its profile, or its routing. */
+export type LaunchBindingResult =
+  | Readonly<{ ok: true; value: AgentLaunchBinding }>
+  | Readonly<{ ok: false; error: PolicyError | RoutingPolicyError }>;
 
 /**
  * The binding Pi launches `agent` with: the Agent's catalog profile lowered
@@ -511,16 +653,11 @@ export type AgentLaunchBinding = Readonly<{ declared: PiBinding; effective: Effe
  * route gate share, so the route the gate probes is the route the child runs
  * on.
  */
-export function resolveAgentLaunchBinding(
-  agent: unknown,
-  parentRef: ModelRef | null,
-  config: ModelRoutingConfig | null,
-): PolicyResult<AgentLaunchBinding> {
+export function resolveAgentLaunchBinding(agent: unknown, routing: PiRoutingContext): LaunchBindingResult {
   const profile = resolveAgentProfile(agent);
   if (!profile.ok) return profile;
   const declared = lowerModelProfile(profile.value, "pi");
-  return Object.freeze({
-    ok: true,
-    value: Object.freeze({ declared, effective: resolveEffectivePiBinding(declared, parentRef, config) }),
-  });
+  const effective = resolveEffectivePiBinding(declared, routing);
+  if (!effective.ok) return effective;
+  return Object.freeze({ ok: true, value: Object.freeze({ declared, effective: effective.value }) });
 }

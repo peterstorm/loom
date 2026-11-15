@@ -30,7 +30,7 @@ const URL = "http://vllm.test/v1/models";
 const GATE: PiRouteGateFacts = {
   agentDir: "/agent",
   mode: { ok: true, value: "admit-unverified" },
-  routing: { ok: true, value: { parentRef: null, config: null } },
+  routing: { ok: true, value: { parentRef: null, config: null, served: {} } },
 };
 const PI: PiParent = { harness: "pi", sessionId: "pi-session" };
 const facts = (overrides: Partial<PiRouteGateFacts> = {}): PiRouteGateFacts => ({ ...GATE, ...overrides });
@@ -128,7 +128,7 @@ describe("gateEmission: the routes it observes and the verdict over them", () =>
     });
     if (!config.ok) throw new Error(config.error.message);
     const step = observing(gated(batch(stored()), facts({
-      routing: { ok: true, value: { parentRef: { provider: LOCAL.provider, model: LOCAL.model }, config: config.value } },
+      routing: { ok: true, value: { parentRef: { provider: LOCAL.provider, model: LOCAL.model }, config: config.value, served: {} } },
     })));
     expect(step.launch).toEqual([{ provider: "desktop-muse", model: "qwen3.8-27b", thinking: "medium" }]);
     expect(step.agentDir).toBe(GATE.agentDir);

@@ -14,8 +14,8 @@ import { describe, expect, it } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { installedPiAgentDirectory } from "../fixtures/installed-pi-agent-directory";
 import { captureLoomRuntimeIdentity } from "../../src/runtime-compatibility";
 import { renderPiAgentDefinition } from "../../src/utils/render-pi-agent";
 import { emissionToolPrimaryInstruction, projectEmissionTaskText } from "../../src/core/issued-emission-capability";
@@ -274,11 +274,12 @@ type InstalledLauncherModules = Readonly<{
 
 /**
  * The installed launcher lives outside this repository (synced from dotfiles
- * into the ambient Pi agent dir), so it is resolved once from the ambient
- * environment, before any test swaps PI_CODING_AGENT_DIR for a fixture.
+ * into the developer's Pi agent dir). The run isolates HOME, so that directory
+ * is the one the global setup published before isolation
+ * (`tests/setup/isolated-home.ts`), never the ambient environment.
  */
 const installedLauncher = (() => {
-  const agentDir = process.env["PI_CODING_AGENT_DIR"] ?? join(homedir(), ".pi", "agent");
+  const agentDir = installedPiAgentDirectory();
   const subagentRoot = join(agentDir, "extensions", "subagent");
   const paths = Object.freeze({
     launcher: join(subagentRoot, "index.ts"),

@@ -9,7 +9,6 @@ import {
   renderPiAgentDefinition,
   renderPiAgentDefinitionWithBinding,
   validatePiAgentDefinitionFile,
-  type PiRoutingContext,
 } from "../../src/utils/render-pi-agent";
 import {
   classifyModelRef,
@@ -18,6 +17,7 @@ import {
   resolveEffectivePiBinding,
   type ModelRef,
   type ModelRoutingConfig,
+  type PiRoutingContext,
 } from "../../src/core/model-routing";
 import { lowerModelProfile, resolveAgentProfile, type PiBinding } from "../../src/core/model-profiles";
 
@@ -48,7 +48,7 @@ const routingConfig = (rules: readonly unknown[] = [
 };
 
 const routing = (parentRef: ModelRef | null, config: ModelRoutingConfig | null): PiRoutingContext =>
-  Object.freeze({ config, parentRef });
+  Object.freeze({ config, parentRef, served: {} });
 
 const source = (agent: string): string => readFileSync(join(ROOT, "agents", `${agent}.md`), "utf-8");
 
@@ -165,7 +165,9 @@ describe("routing-aware Pi agent rendering", () => {
           const parentRef = parseModelRef(`${provider}/${model}`);
           if (!parentRef.ok) return;
           const ref = parentRef.value;
-          const effective = resolveEffectivePiBinding(declared, ref, config);
+          const resolved = resolveEffectivePiBinding(declared, routing(ref, config));
+          if (!resolved.ok) throw new Error(resolved.error.message);
+          const effective = resolved.value;
           const inherits = effective.provider !== declared.provider || effective.model !== declared.model;
           const rendered = renderPiAgentDefinitionWithBinding(source(agent), agent, ROOT, {
             provider: ref.provider,

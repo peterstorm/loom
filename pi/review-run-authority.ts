@@ -49,7 +49,7 @@ import type {
   RequestId,
 } from "../engine/src/core/orchestration-contract";
 import { piSpawnRosterId, replacePiSpawnTask } from "./tool-input";
-import { routedChildLaunchRoute } from "../engine/src/utils/child-launch-route";
+import { describeChildLaunchRouteRefusal, routedChildLaunchRoute } from "../engine/src/utils/child-launch-route";
 
 export type PiOrchestrationMarkers = Readonly<{
   requestId: string;
@@ -212,18 +212,21 @@ type PublishedPiReviewRouteAuthority = Readonly<{
  * The request's frozen Pi provider/model binding and the shell-observed routed
  * child route are the only route inputs: task text, role eligibility, and the
  * parent's mutable model cannot upgrade extraction-only authority. A hard
- * qualification refusal remains a typed authority failure for the spawn gate
- * rather than a silent degradation.
+ * qualification refusal, or a child route that cannot be resolved (a served
+ * target whose model is unknown), remains a typed authority failure for the
+ * spawn gate rather than a silent degradation.
  */
 export function qualifyPiIssuedReviewRequest(
   classified: PiIssuedReviewRequestClass,
   published: PublishedPiReviewRouteAuthority,
 ): DomainResult<IssuedSpawnEmissionAuthority, Readonly<{ message: string }>> {
+  const childRoute = routedChildLaunchRoute(published.role);
+  if (!childRoute.ok) return failure({ message: describeChildLaunchRouteRefusal(published.role, childRoute) });
   const route = qualifyIssuedSpawnEmissionRoute(
     classified.claim,
     published,
     true,
-    routedChildLaunchRoute(published.role),
+    childRoute.value,
   );
   if (route.kind === "refused") {
     return failure({
@@ -432,6 +435,10 @@ export async function recordPiSpawnCorrelators(
     }
     const nativeId = rosterIds[index];
     if (nativeId === undefined) throw new Error(`Pi spawn item ${index + 1} has no native correlator`);
+    // The admission decision is recorded beside the correlator, so capture
+    // judges this child by the route it was dispatched on, not by whatever the
+    // routing context resolves to when the result arrives.
+    const expectation = admission.emissionExpectation;
     const recorded = await opened.value.recordHarnessCorrelator({
       schemaVersion: 1,
       harness: "pi",
@@ -439,6 +446,9 @@ export async function recordPiSpawnCorrelators(
       requestId: request.requestId,
       role: request.role,
       attempt: request.attempt,
+      admittedEmission: expectation.kind === "emission-enabled"
+        ? { kind: "enabled", route: { provider: expectation.route.provider, model: expectation.route.model } }
+        : { kind: "not-enabled" },
     });
     if (!recorded.ok) throw new Error(recorded.error.message);
     // Emission admission already authenticated this exact task's issuance

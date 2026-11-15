@@ -66,7 +66,7 @@ Tests that need a run written before a retargeting pass the engine a catalog as 
 
 ### Pi launcher routing
 
-A machine's `model-routing.json` may explicitly make child Agents inherit a local parent model or use a named exact target. That is launcher policy at the spawn boundary: it cannot reinterpret an issued request's frozen profile or binding. Both Pi launchers, the headless `subagent` transport and the interactive phase transport, apply the same rules and record the same exact provider, model and thinking binding. Before a batch is emitted, every route its children will launch on is probed, and an unreachable route refuses the batch; the operator view is in [Using Loom with Pi](pi-usage.md#a-spawn-batch-is-refused-by-the-route-gate).
+A machine's `model-routing.json` may explicitly make child Agents inherit a local parent model or use a named target: an exact one (provider, model and thinking level) or a served one (a provider, resolved before launch to the one model its server lists, ADR-0023 decision 6). Either way the child launches on, and records, one exact binding. That is launcher policy at the spawn boundary: it cannot reinterpret an issued request's frozen profile or binding. Both Pi launchers, the headless `subagent` transport and the interactive phase transport, apply the same rules and record the same exact provider, model and thinking binding. Before a batch is emitted, every route its children will launch on is probed, and an unreachable route refuses the batch; the operator view is in [Using Loom with Pi](pi-usage.md#a-spawn-batch-is-refused-by-the-route-gate).
 
 ## Emission routes and qualification
 

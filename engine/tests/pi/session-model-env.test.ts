@@ -67,17 +67,17 @@ describe("projectSessionModelIntoEnv", () => {
     withRoutingConfig(LOCAL_INHERIT_ROUTING, (agentDir) => {
       withEnvOverlaySync({ PI_CODING_AGENT_DIR: agentDir, PI_PROVIDER: "desktop-vllm", PI_MODEL: "glm-5.3-flash-spark-tp2-v14" }, () => {
         // Before: the exported (start) model decides the child's route.
-        expect(routedChildLaunchRoute("code-reviewer")).toEqual({
+        expect(routedChildLaunchRoute("code-reviewer")).toEqual({ ok: true, value: {
           provider: "desktop-vllm",
           model: "glm-5.3-flash-spark-tp2-v14",
-        });
+        } });
         projectSessionModelIntoEnv({ provider: "desktop-vllm", id: "warmind-1017-native" });
         // After: every Loom reader of the parent sees the session's real model.
         for (const role of ["code-reviewer", "pr-test-analyzer", "architecture-tech-lead"]) {
-          expect(routedChildLaunchRoute(role)).toEqual({
+          expect(routedChildLaunchRoute(role)).toEqual({ ok: true, value: {
             provider: "desktop-vllm",
             model: "warmind-1017-native",
-          });
+          } });
         }
       });
     });
