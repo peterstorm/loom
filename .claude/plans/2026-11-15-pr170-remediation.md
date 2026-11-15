@@ -133,3 +133,23 @@ All on 2026-11-15, at the branch's final head, from `engine/`:
   - With `HOME` set to an empty directory, those three files pass: 291 tests.
 - `npm run test:smoke`: passes with `HOME` set to an empty directory. Under the operator's home it stops at the
   orchestration façade smoke on the same routing config.
+
+## Follow-up: consolidated review (supersedes PRs #175 and #176)
+
+This branch was reviewed again, with PR #175's markdown fixes, before it merged as one PR.
+
+- **Pi closure, made behavioural.** Pi's `tool_result` sets `projectRoot = process.cwd()`, which is
+  `lintEditedFile`'s default base. So "Pi closure drops the session base" in the mutation table above is an
+  equivalent mutant, and PR #176's "behaviour change" note describes no observable change. The source pin on
+  `pi/extension.ts` is replaced by a case in `post-edit-lint.test.ts` that drives the real extension's
+  `tool_result` handlers from a session directory. An edit in a nested project is refused under that
+  project's rules, and an edit in the session's own project passes. A mutant that lints a session-root file
+  in the Pi closure fails it.
+- **No wire cast in that test.** The shipped rule file is narrowed with `isRecord`, not cast `as object`.
+- **Stale purity comments.** `core/emission-ingestion.ts` and `core/legacy-panel-decisions.ts` named
+  DEFAULT_PURE_MODULES, which ADR-0043's 2026-11-10 amendment says no longer exists. They now name the
+  project's `pureModules`.
+- **Java process wrapper** (`skills/security-expert/references/command-injection.md`). The polling loop called
+  `Files.size` and `waitFor` with no cleanup, so an `IOException` or an interrupt left the process running.
+  The loop now sits in `try`/`finally` with `destroyForcibly()`. The deadline is compared overflow-safely
+  (`nanoTime() - deadline > 0`).

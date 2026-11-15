@@ -24,10 +24,11 @@
  * write-ahead record publication, the operation evidence adapter and the
  * panel driver loop live in the shell (handlers/helpers/programs/legacy-panel).
  *
- * Pure module: no I/O, no clock, no randomness. Enrolled in
- * DEFAULT_PURE_MODULES together with legacy-archive and the emission kernel
- * its verdict-source selection reaches through panel-verdict-source
- * (emission-ingestion, emission-tool, emission-observation, harness-capture), so
+ * Pure module: no I/O, no clock, no randomness. It sits inside the project's
+ * `pureModules` (all of engine/src/core/, .claude/linter/rules/config.json)
+ * together with legacy-archive and the emission kernel its verdict-source
+ * selection reaches through panel-verdict-source (emission-ingestion,
+ * emission-tool, emission-observation, harness-capture), so
  * machine-purity.test.ts audits the whole transitive closure, not only this
  * file's text.
  */
