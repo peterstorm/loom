@@ -575,6 +575,15 @@ a protected root, so a writer naming `.` there, or any path under `machines/`, r
     listed script in every directory the segment may run in) is a read-only segment. Its
     redirects are still judged, and a writer it pipes into is still one. Each listed script
     declares itself read-only in its header, and a test pins that.
+  - *Read-only git* (`core/read-only-git.ts`). A segment that runs `git` itself (no environment
+    prefix, no wrapper) with only `-C <dir>`, `--no-pager`, `-P`, `--no-optional-locks` or
+    `--literal-pathspecs` before a subcommand that reads (`status`, `log`, `show`, `diff`,
+    `rev-parse`, `ls-files`, `grep`, …) or `fetch` (objects and refs only), and no option that
+    writes a file or runs a command (`--output`, grep's `-O`, `--ext-diff`, `--upload-pack`/`-u`,
+    each in every abbreviation git accepts), every word before `--` static, is a read-only
+    segment: `git -C <checkout> fetch` no longer reads as a write over the checkout that holds
+    `machines/`. `-c`, `--git-dir` and `--work-tree` are never accepted; `checkout`, `clean` and
+    every other subcommand with a writing mode stay writers.
   - *Rebound commands*. On a typed line that may rebind a command name (`hash`, `alias`,
     `enable`, `function`, `name() {`), no segment is read-only by its head, its read-only helper
     operation or its read-only script: `hash -p /bin/rm cat; cat -r <protected>` is a write.

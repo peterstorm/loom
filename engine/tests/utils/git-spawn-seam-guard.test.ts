@@ -40,6 +40,8 @@ const SPAWN_AUTHORITY_ALLOWLIST: Readonly<Record<string, string>> = Object.freez
 const GIT_COMMAND_WORD_ALLOWLIST: Readonly<Record<string, string>> = Object.freeze({
   "engine/src/core/shell-write-targets.ts":
     "recognizes a literal `git mv` head in an agent's Bash command so its destination mints a FileWrite (FR-034); it spawns nothing",
+  "engine/src/core/read-only-git.ts":
+    "recognizes a literal `git` head in a subagent's Bash command so the authority guard can judge a read-only invocation as a read; it spawns nothing",
 });
 const GIT_LITERAL_FORM = "the literal \"git\"";
 
