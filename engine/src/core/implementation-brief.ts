@@ -151,7 +151,7 @@ export type ImplementationBriefInput = Readonly<{
   repositoryRoot: string;
   /** The active Loom package's printed commands: the engine command a brief
    *  names (the Task mutation check) is `commands.mutationCheck`. */
-  commands: LoomCommands;
+  commands: Pick<LoomCommands, "mutationCheck">;
   /** The operator's notes from the dispatch marker (#119); empty for none. */
   operatorNotes: readonly OperatorNote[];
   /** What the shell observed for the Frozen Signatures section (G2 AD-13).

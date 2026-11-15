@@ -96,11 +96,13 @@ Done after PR #167 merged, at the operator's request. None of it is remediation 
 - A directory exclusion no longer applies to a file outside the project, or in a run whose rules directory is in neither layout.
 - A Loom package installed at a path holding a control character, or not starting with `/`, stops at import.
 
-### Not done
+### Not done when written (2026-11-14)
 
-- No registered review has run over this branch (PR #170).
-- The markdown and deleted files of PR #167 remain unreviewed.
-- The 21 test files migrated to the shared readers were written by subagents and not reviewed line by line.
+At the time of writing:
+
+- No registered review had run over this branch (PR #170). It was reviewed after its merge by `run.pm170-src-review-20261115` and `run.pm170-tests-review-20261115`.
+- The markdown and deleted files of PR #167 were unreviewed. The markdown files were reviewed afterwards by `run.pm167-docs01-review-20261115` … `run.pm167-docs12-review-20261115` (PR #175); the deleted files were excluded from that review, not covered.
+- The 21 test files migrated to the shared readers, written by subagents, had not been reviewed line by line. They were in the scope of `run.pm170-tests-review-20261115`.
 
 ### Since resolved
 

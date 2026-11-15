@@ -16,12 +16,7 @@
 
 import type { Violation } from "../types";
 import { makeViolation } from "../types";
-import {
-  describeExcludePatternListError,
-  matchesAnyExcludePattern,
-  parseExcludePatternList,
-  type ExcludePattern,
-} from "../exclude-pattern";
+import { matchesAnyExcludePattern, parseExcludePatternListOrThrow, type ExcludePattern } from "../exclude-pattern";
 
 // --- Configuration ---
 
@@ -31,11 +26,13 @@ const DEFAULT_MAX_LINES = 50;
 /** File patterns to exclude (test files have long describe blocks), through
  *  the same parse a project's entries go through. A refusal here is a defect
  *  in this constant, so it stops the module from loading. */
-const DEFAULT_EXCLUDE_PATTERNS: readonly ExcludePattern[] = (() => {
-  const parsed = parseExcludePatternList([".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx", ".property.test.ts"]);
-  if (!parsed.ok) throw new Error(`max-function-lines defaults: ${describeExcludePatternListError("excludePatterns", parsed.error)}`);
-  return Object.freeze(parsed.value);
-})();
+const DEFAULT_EXCLUDE_PATTERNS: readonly ExcludePattern[] = Object.freeze(
+  parseExcludePatternListOrThrow(
+    [".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx", ".property.test.ts"],
+    "excludePatterns",
+    "max-function-lines defaults",
+  ),
+);
 
 /**
  * What one project's max-function-lines rule runs with. `projectRoot` is the

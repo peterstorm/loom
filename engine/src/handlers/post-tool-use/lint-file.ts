@@ -13,13 +13,27 @@
  * Fail-closed: any unexpected error → block (prevents silent bypass).
  */
 
+import { resolve } from "node:path";
 import type { HookHandler } from "../../types";
 import { allowResult, blockResult, passthroughResult } from "../../types";
-import { lintFile, formatOutput, formatBlockMessage } from "../../linter/index";
+import { lintFile, formatOutput, formatBlockMessage, type LintResult } from "../../linter/index";
 import { DEFAULT_RULES_DIR, editedFileRulesDir } from "../../config";
 import { editedFilePath } from "../../core/tool-vocabulary";
 import { isRecord } from "../../core/plain-record";
 import { match } from "ts-pattern";
+
+/**
+ * The edit-hook lint both harnesses run: immediate tier, against the rules of
+ * the project the edited file sits in (`editedFileRulesDir`), found from the
+ * file and never from the harness process's working directory. A relative
+ * `filePath` resolves against `base`, for the file and its rules alike. The
+ * Claude Code hook below and Pi's `tool_result` handler (`pi/extension.ts`)
+ * both call it, so the two cannot lint one edit under different rules.
+ */
+export const lintEditedFile = (filePath: string, defaultRulesDir: string, base: string = process.cwd()): LintResult => {
+  const edited = resolve(base, filePath);
+  return lintFile(edited, "immediate", defaultRulesDir, editedFileRulesDir(edited));
+};
 
 /** Tool names that trigger file linting */
 const LINT_TRIGGER_TOOLS = new Set(["Edit", "Write", "MultiEdit"]);
@@ -66,10 +80,8 @@ const handler: HookHandler = async (stdin) => {
       return blockResult("Lint hook error: Could not extract file_path from tool_input");
     }
 
-    // Invoke linter with immediate tier (fast, PostEdit rules only), against
-    // the rules of the project the edited file sits in — found from the file,
-    // never from this process's cwd, which is wherever the session's shell is
-    const result = lintFile(filePath, "immediate", DEFAULT_RULES_DIR, editedFileRulesDir(filePath));
+    // Immediate tier, under the edited file's own project rules (see `lintEditedFile`).
+    const result = lintEditedFile(filePath, DEFAULT_RULES_DIR);
 
     // Map LintResult to HookResult
     return match(result)

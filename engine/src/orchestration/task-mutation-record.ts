@@ -140,7 +140,7 @@ export function observeTaskMutationDigest(root: CanonicalRepositoryRoot, duty: O
  * `unavailable`, which never blocks.
  */
 export function observeTaskMutation(
-  commands: LoomCommands,
+  commands: Pick<LoomCommands, "mutationCheck">,
   directory: () => string = subagentDir,
 ): (duty: OwedTaskMutation, root: CanonicalRepositoryRoot) => TaskMutationObservation {
   return (duty, root) => {

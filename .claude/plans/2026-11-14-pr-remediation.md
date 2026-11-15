@@ -62,7 +62,9 @@ files outside the code slice are named in its `supportPaths`:
 
 ## Validation (OBSERVED by this session, not remediation evidence)
 
+All on 2026-11-14, at the branch's final head:
+
 - `tsc --noEmit` on the engine: clean.
 - Linter suite (`engine/tests/linter`): 42 files, all passing after the last move.
 - `bun scripts/lint-project.ts`: 1,743 files, no violations, no stale entries.
-- `npm run verify`: run before installation; result in the final report.
+- `npm run verify`: passed in CI on PR #173 (`verify` on ubuntu-24.04 and macos-15) before the merge, `e4250889`.
