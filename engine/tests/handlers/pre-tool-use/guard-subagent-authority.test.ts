@@ -7,10 +7,11 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
-import { runGuardSubagentAuthority } from "../../../src/handlers/pre-tool-use/guard-subagent-authority";
+import { observeSubagentAuthorityContext, runGuardSubagentAuthority } from "../../../src/handlers/pre-tool-use/guard-subagent-authority";
+import { LOOM_COMMANDS } from "../../../src/utils/loom-package-root";
 import { registerSecurityAuditRun } from "../../../src/orchestration/security-audit-run-registry";
 import { FAIL_CLOSED_ROUTES, KNOWN_HANDLERS } from "../../../src/handler-routes";
 import { PERSISTENT_SUBAGENT_STORES } from "../../../src/config";
@@ -243,5 +244,43 @@ describe("the real filesystem port (ADR-0067, amended)", () => {
     const fifo = join(root, "pipe.sh");
     expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
     expect(await runGuardSubagentAuthority(subagent(`bash ${fifo}`))).toEqual({ kind: "passthrough" });
+  });
+});
+
+describe("what the shell observes for #177", () => {
+  let savedCdPath: string | undefined;
+  beforeEach(() => { savedCdPath = process.env.CDPATH; });
+  afterEach(() => {
+    if (savedCdPath === undefined) delete process.env.CDPATH;
+    else process.env.CDPATH = savedCdPath;
+  });
+
+  it("the running package's read-only scripts, each in its realpath too", () => {
+    const observed = observeSubagentAuthorityContext("/repo").readOnlyScripts;
+    for (const script of LOOM_COMMANDS.readOnlyScripts) {
+      expect(observed).toContain(script);
+      expect(observed).toContain(realpathSync.native(script));
+    }
+  });
+
+  it("the search path a bare relative cd follows, from CDPATH", () => {
+    process.env.CDPATH = "/a::/b";
+    expect(observeSubagentAuthorityContext("/repo").cdSearchPath).toEqual(["/a", ".", "/b"]);
+    delete process.env.CDPATH;
+    expect(observeSubagentAuthorityContext("/repo").cdSearchPath).toEqual([]);
+  });
+
+  it("end to end, in the Loom checkout itself: the issue's three commands pass, a write into machines/ does not", async () => {
+    const inLoom = (command: string) => runGuardSubagentAuthority(subagent(command, { cwd: PLUGIN_ROOT }));
+    const reader = join(PLUGIN_ROOT, "scripts", "read-context-packet.ts");
+    const clone = join(root, "clone");
+    mkdirSync(clone);
+    expect(await inLoom(`bun ${reader} --diff machines/README.md /x/packet.json`)).toEqual({ kind: "passthrough" });
+    expect(await inLoom(`cd ${clone} && npx tsc --noEmit -p .`)).toEqual({ kind: "passthrough" });
+    expect(await inLoom("T=$CLAUDE_JOB_DIR/tmp")).toEqual({ kind: "passthrough" });
+    expect((await inLoom(`cd ${clone}; rm -rf .`)).kind).toBe("block");
+    // `root` holds the protected subagent dir: `.` there reaches it.
+    expect((await inLoom(`cd ${root} && npx tsc --noEmit -p .`)).kind).toBe("block");
+    expect((await inLoom(`bun ${reader} --file x > machines/README.md`)).kind).toBe("block");
   });
 });

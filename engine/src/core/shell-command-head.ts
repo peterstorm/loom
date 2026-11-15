@@ -10,8 +10,9 @@
  *  - hasReadOnlyHead / hasOutputRedirect — the two halves of "this segment
  *    cannot write a file": a head from READ_ONLY_STATE_COMMANDS and no output
  *    redirect except the exact stderr discard.
- *  - pipeChains — segments grouped into pipe-chains, the trust unit a guard
- *    judges together.
+ *  - pipeChains / placedPipeChains — segments grouped into pipe-chains, the
+ *    trust unit a guard judges together (placed: with the separators around
+ *    each segment, which say whether and where it runs).
  *
  * Pure. Extracted from core/guard-state-file so every Bash guard (the
  * state-file guard, the subagent authority guard) judges commands through ONE
@@ -25,6 +26,7 @@ import {
   splitCommandSegmentsWithOps,
   stripComment,
   stripEnvPrefix,
+  type SegmentOp,
 } from "./shell-command";
 
 /**
@@ -134,19 +136,33 @@ export function hasOutputRedirect(segment: string): boolean {
   }) ?? false;
 }
 
-/** Segments grouped into pipe-chains: `|` links segments into one chain
- *  (data flows through it), every other separator starts a new chain. */
+/**
+ * One simple command of a pipe-chain with the separators around it. The one
+ * before decides WHETHER it runs (`&&` only after a success, `||` only after a
+ * failure); the one after decides WHERE its effects land — a segment followed
+ * by `|` or `&` runs in a subshell of its own, so a `cd` there moves nothing.
+ * Null at either end of the line.
+ */
+export type PlacedSegment = Readonly<{ text: string; opBefore: SegmentOp | null; opAfter: SegmentOp | null }>;
+
+/** Segments grouped into pipe-chains, each with its separators: `|` links
+ *  segments into one chain (data flows through it), every other separator
+ *  starts a new chain. Empty segments drop out; a trailing `&` still marks the
+ *  segment before it. */
+export function placedPipeChains(command: string): readonly (readonly PlacedSegment[])[] {
+  const segments = splitCommandSegmentsWithOps(command);
+  const chains: PlacedSegment[][] = [];
+  segments.forEach(({ text, opBefore }, index) => {
+    const placed = { text: stripComment(text).trim(), opBefore, opAfter: segments[index + 1]?.opBefore ?? null };
+    if (opBefore === "|" && chains.length > 0) chains[chains.length - 1].push(placed);
+    else chains.push([placed]);
+  });
+  return chains.map((chain) => chain.filter(({ text }) => text !== "")).filter((chain) => chain.length > 0);
+}
+
+/** Segment texts grouped into pipe-chains (`placedPipeChains` without the separators). */
 export function pipeChains(command: string): string[][] {
-  const chains: string[][] = [];
-  for (const seg of splitCommandSegmentsWithOps(command)) {
-    const text = stripComment(seg.text).trim();
-    if (seg.opBefore === "|" && chains.length > 0) {
-      chains[chains.length - 1].push(text);
-    } else {
-      chains.push([text]);
-    }
-  }
-  return chains.map((chain) => chain.filter((t) => t !== "")).filter((c) => c.length > 0);
+  return placedPipeChains(command).map((chain) => chain.map(({ text }) => text));
 }
 
 export const headBase = (token: string): string => {

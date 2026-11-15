@@ -100,7 +100,15 @@ export type LoomCommands = Readonly<{
   /** Where `lens` lives in the package: a hunter works in the audited
    *  repository, where a package-relative path names nothing. */
   securityLens: (lens: SecurityLens) => string;
+  /** The package's read-only scripts, by absolute path: each declares itself
+   *  read-only in its header and writes no file. Subagents are told to run the
+   *  Context Packet readers, so the subagent authority guard runs every one as
+   *  a read, whatever paths it names. */
+  readOnlyScripts: readonly string[];
 }>;
+
+/** The package's read-only scripts, under `scripts/`. */
+export const READ_ONLY_SCRIPTS = ["read-context-packet.ts", "read-context-section.ts", "ledger-epoch.ts"] as const;
 
 /** The printed commands and paths of the Loom package at `root`. */
 export function loomCommands(root: LoomPackageRoot): LoomCommands {
@@ -115,5 +123,6 @@ export function loomCommands(root: LoomPackageRoot): LoomCommands {
       `${helper} orchestration start ${program} --runs-root ${quoteShellArgument(runsRoot)}`,
     sandboxScript: asSandboxScript(`${root}/scripts/security-sandbox.sh`),
     securityLens: (lens: SecurityLens) => `${root}/references/security-lenses/${lens}`,
+    readOnlyScripts: Object.freeze(READ_ONLY_SCRIPTS.map((script) => `${root}/scripts/${script}`)),
   });
 }
