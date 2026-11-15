@@ -833,17 +833,15 @@ describe("routine work in a checkout that holds a protected directory (#177)", (
     });
   });
 
-  describe("an assignment names a path; it writes nothing above it", () => {
+  describe("a bare assignment of an inert name binds a path; it writes nothing above it", () => {
     it.each([
       ["a bare assignment under /tmp", "T=$CLAUDE_JOB_DIR/tmp"],
       ["a bare assignment of /tmp", "T=/tmp"],
       ["several assignments", "A=/tmp B=/opt/loom"],
-      ["export", "export T=/tmp"],
-      ["declare", "declare -x T=/tmp"],
-      ["local", "local T=/opt"],
-      ["the checkout itself", `ROOT=${LOOM}; echo "$ROOT"`],
+      ["a quoted value", 'T="$CLAUDE_JOB_DIR/tmp"'],
+      ["the checkout itself, read plainly", `ROOT=${LOOM}; echo "$ROOT"`],
       ["a writer under a bound variable, outside every protected directory", "T=/tmp; rm -rf $T/build"],
-      ["a value the shell completes at runtime, then written under", "T=$CLAUDE_JOB_DIR/tmp; cat x > $T/probe.ts"],
+      ["a value the shell completes at runtime, then written under", "T=$CLAUDE_JOB_DIR/tmp; mkdir -p $T/guard && cat x > $T/guard/probe.ts"],
       ["an environment prefix binds nothing for later segments", "T=/tmp true; rm -rf $T/claude-subagents"],
     ])("allows: %s", (_name, command) => {
       expect(verdictInLoom(command)).toBe("allow");
@@ -856,6 +854,7 @@ describe("routine work in a checkout that holds a protected directory (#177)", (
       ["an assignment beside a writer", "T=/tmp rm -rf /tmp/claude-subagents"],
       ["a writer reaching the ancestor an assignment names", "T=/tmp; rm -rf /tmp"],
       ["a writer extending a variable bound to an ancestor", "T=/tmp; rm -rf $T/claude-subagents"],
+      ["the same, through a runtime-completed value", "T=$CLAUDE_JOB_DIR/tmp; rm -rf $T/claude-subagents"],
       ["the same, braced and quoted", "T=/tmp && rm -rf \"${T}/claude-subagents\""],
       ["the same, exported", "export T=/tmp; rm -rf $T/claude-subagents"],
       ["the same, inside a substitution", "T=/tmp; echo $(rm -rf $T/claude-subagents)"],
@@ -863,8 +862,107 @@ describe("routine work in a checkout that holds a protected directory (#177)", (
       ["a redirect through a bound variable", `ROOT=${LOOM}; echo x > $ROOT/machines/a.json`],
       ["a variable bound later on the line (a loop may run it first)", "rm -rf $T/claude-subagents; T=/tmp"],
       ["a symlink onto a run, its target spelled through a bound variable", 'T=/aud; ln -s "${T}its/run-1" /tmp/l; echo x > /tmp/l/ledger.json'],
+      // A declaration may export the value to a program the guard cannot read: it reaches, as on main.
+      ["export of an ancestor", "export T=/tmp"],
+      ["declare -x of an ancestor", "declare -x T=/tmp"],
+      ["local of an ancestor", "local T=/opt"],
     ])("refuses: %s", (_name, command) => {
       expect(verdictInLoom(command)).toBe("authority-path-write");
     });
+
+    /** PR #180 review: each read the guard does not splice must leave the assignment reaching. */
+    it.each([
+      ["a parameter operation", "T=/tmp; rm -rf ${T%x}"],
+      ["a default expansion", "T=/tmp; rm -rf ${T:-}"],
+      ["an array element", "T=/tmp; rm -rf ${T[0]}"],
+      ["an array", "a=(/tmp); rm -rf ${a[0]}"],
+      ["an indirection", "T=/tmp; U=T; rm -rf ${!U}"],
+      ["a nameref", "declare -n U=T; T=/tmp; rm -rf $U"],
+      ["a copy into another variable", "T=/tmp; U=$T; rm -rf $U/claude-subagents"],
+      ["a value word splitting changes", 'T="/tmp "; rm -rf $T'],
+      ["a glob value", "T=/tm[p]; rm -rf $T"],
+      ["an ANSI-C value", "T=$'/tmp'; rm -rf $T"],
+      ["an exported value read by interpreter code", `T=/tmp; export T; python3 -c 'import os,shutil; shutil.rmtree(os.environ["T"])'`],
+      ["allexport", "set -a; T=/tmp; python3 -c 'x'"],
+      ["a sourced script", "T=/tmp; source ./x.sh"],
+      ["a cd through it", "T=/tmp; cd $T && rm -rf claude-subagents"],
+      ["a cd through it, then find -delete", "T=/tmp; cd $T && find . -delete"],
+      ["HOME bound to an ancestor", "HOME=/tmp; rm -rf ~/claude-subagents"],
+      ["HOME, then a bare cd", "HOME=/tmp; cd && rm -rf claude-subagents"],
+      ["HOME exported, then cd ~", "export HOME=/tmp; cd ~ && rm -rf claude-subagents"],
+      ["HOME at the checkout", `HOME=${LOOM}; rm -rf ~/machines`],
+      // HOME read from input: `~` is unknown, so its authority entry names count.
+      ["HOME read, then ~", "read HOME < /tmp/h; rm ~/ledger.json"],
+      ["HOME read, then a bare cd", "read HOME < /tmp/h; cd && rm ledger.json"],
+      ["a name also declared, then bound bare", "export T=/var; T=/tmp; node x.js"],
+      ["IFS splits a bound value where the guard does not", "IFS=:; T=x:/tmp/claude-subagents:y; rm -rf $T"],
+      ["IFS read from input", "read IFS < /tmp/i; T=x:/tmp/claude-subagents:y; rm -rf $T"],
+    ])("refuses: %s", (_name, command) => {
+      expect(verdict(command, context({ cwd: "/repo" }))).toBe("authority-path-write");
+    });
+
+    it.each([
+      ["an IFS prefix splits only its command's input", 'IFS=, read -r a b <<< "$x"'],
+      ["an IFS prefix does not split the words of its own command", "T=/tmp/x; IFS=: rm -rf $T"],
+    ])("allows: %s", (_name, command) => {
+      expect(verdict(command, context({ cwd: "/repo" }))).toBe("allow");
+    });
+
+    it("more spellings than the guard builds fail closed", () => {
+      const bindings = (count: number): string => Array.from({ length: count }, (_, index) => `T=/v${index}`).join("; ");
+      expect(verdictInLoom(`${bindings(17)}; rm -rf $T`)).toBe("authority-path-write");
+      expect(verdictInLoom(`${bindings(15)}; rm -rf $T`)).toBe("allow");
+    });
+
+    it("a script FILE past the cap, or setting IFS, is judged on its words as written", () => {
+      const bindings = Array.from({ length: 17 }, (_, index) => `T=/v${index}`).join("\n");
+      const running = (text: string): SubagentAuthorityContext => context({ cwd: LOOM, filesystem: { ...FAKE_FILESYSTEM,
+        readScript: (path) => (path === "/repo/many.sh" ? { kind: "text", text } : { kind: "unreadable", reason: "ENOENT" }) } });
+      expect(verdict("bash /repo/many.sh", running(`${bindings}\nrm -rf $T`))).toBe("allow");
+      expect(verdict("bash /repo/many.sh", running("IFS=:\nT=/v\nrm -rf $T"))).toBe("allow");
+      expect(verdict("bash /repo/many.sh", running(`${bindings}\nrm -rf $T /tmp/claude-subagents`))).toBe("authority-path-write");
+    });
+  });
+});
+
+/** PR #180 review: the moves and rebindings the separator walk must not trust. */
+describe("moves the guard cannot follow fall back to every directory (#177 review)", () => {
+  it.each([
+    ["pushd -n only edits the stack", "/tmp", "pushd -n /repo && rm -rf claude-subagents"],
+    ["pushd -n from the checkout", LOOM, "pushd -n /repo && rm -rf machines"],
+    ["a popd lands on the directory pushd -n stacked", "/repo", "pushd -n /opt/loom && popd >/dev/null && rm -rf machines"],
+    ["lastpipe runs a pipeline's last cd in this shell", "/tmp", "shopt -s lastpipe; true | cd /repo; rm -rf claude-subagents"],
+    ["CDPATH set by printf -v", LOOM, "printf -v CDPATH /opt; cd loom && rm -rf machines"],
+    ["CDPATH set by read", LOOM, "read CDPATH <<< /opt; cd loom && rm -rf machines"],
+    ["cd -P resolves .. physically", LOOM, "cd -P /repo/l/.. && rm -rf machines"],
+    ["set -P makes every cd physical", LOOM, "set -P; cd /repo/l/.. && rm -rf machines"],
+  ])("refuses: %s", (_name, cwd, command) => {
+    expect(verdict(command, context({ cwd }))).toBe("authority-path-write");
+  });
+
+  it("pushd -n alone leaves the segment where it was", () => {
+    expect(verdict("pushd -n /opt/loom && rm -rf machines", context({ cwd: "/repo" }))).toBe("allow");
+  });
+
+  it.each([
+    ["a script by bare name is looked up on PATH", `${LOOM}/scripts`, "read-context-packet.ts --file /opt/loom/machines"],
+    ["hash rebinds bun", LOOM, `hash -p /bin/rm bun; bun ${READER} -r /opt/loom/machines`],
+    ["an alias rebinds bun", LOOM, `alias bun='rm -rf'\nbun ${READER} /opt/loom/machines`],
+    ["a function rebinds bun", LOOM, `bun() { rm -rf "$@"; }; bun ${READER} /opt/loom/machines`],
+  ])("a read-only script is not trusted: %s", (_name, cwd, command) => {
+    expect(verdict(command, context({ cwd, readOnlyScripts: [READER] }))).not.toBe("allow");
+  });
+
+  it.each([
+    ["hash rebinds cat", "hash -p /bin/rm cat; cat -r /opt/loom/machines"],
+    ["an alias rebinds ls", "alias ls='rm -rf'\nls /tmp/claude-subagents"],
+    ["a function rebinds cd", 'cd() { rm -rf "$@"; }; cd /opt/loom/machines'],
+    ["a function rebinds loom", `loom() { rm -rf "$@"; }; loom helper security-audit status --out ${R}`],
+  ])("a read-only head is not trusted on a line that rebinds a command: %s", (_name, command) => {
+    expect(verdict(command)).toBe("authority-path-write");
+  });
+
+  it("a read-only head stays trusted on a line that rebinds nothing", () => {
+    expect(verdict("cat -r /opt/loom/machines")).toBe("allow");
   });
 });

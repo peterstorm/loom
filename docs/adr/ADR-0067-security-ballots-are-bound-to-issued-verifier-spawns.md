@@ -39,8 +39,9 @@ apply the notes' "this one wins" precedence by hand.
   every `parent-only` operation is refused. It may not write
   onto a registered run's authority entries (`core/audit-run-authority.ts`), run a CLI hook
   route, or launch a nested harness. The fence is defence in depth; the attestation is the
-  proof. Each segment is judged in the directories it may run in, an assignment writes nothing
-  above the path it names, and Loom's read-only scripts read (amended 2026-11-15, note K).
+  proof. Each segment is judged in the directories it may run in, a bare assignment of an inert
+  name writes nothing above the path it names, and Loom's read-only scripts read (amended
+  2026-11-15, note K).
 - **The registry is refreshed by every writer** (notes "Registration", D). Every writing
   `helper security-audit` operation, and `start`/`resume` of the program, registers the audit
   run before it writes, and refuses to write when it cannot register.
@@ -533,25 +534,55 @@ a protected root, so a writer naming `.` there, or any path under `machines/`, r
     so after `&&` a segment runs where the move succeeded, after `||` where it failed, after
     `;` either way; a move in a pipeline or behind `&` stays in its subshell; a bare relative
     target is also searched along `CDPATH` (as the shell observed it, and every searched move
-    is unknown when the line assigns `CDPATH`). A line holding compound syntax (a group, a
-    subshell, a loop, a conditional, `!`) and any move the guard cannot place (`popd`, `cd -`,
-    a runtime-built target) fall back to every directory the line may reach. Soundness is a
-    property test against a bash oracle
+    is unknown when the line may set `CDPATH`, by assignment, `read` or `printf -v`). `pushd -n`
+    only edits the stack: the segment after it stays put, but its target joins the directories
+    the line may reach, where a later `popd` may land. A line holding compound syntax (a group,
+    a subshell, a loop, a conditional, `!`), a line that may turn on bash's lastpipe option or
+    physical `cd` (`set -P`, `shopt -s`/`set -o physical`), and any move the guard cannot place
+    (`popd`, `cd -`, `cd -P`, any option but `-L`, a runtime-built target, `~` on a line that
+    may set `HOME`) fall back to every directory the line may reach. Soundness is a property
+    test against a bash oracle that models `&&`/`||` lists, `&` backgrounding a whole list,
+    pipelines, the directory stack (`pushd -n`, `popd`), `OLDPWD`, bound variables and `HOME`
     (`tests/core/subagent-authority-directories.property.test.ts`).
-  - *Assignments* (`assignmentWords`). A leading `NAME=value` word, and a `NAME=value` argument
-    of `export|declare|typeset|local|readonly`, names a path: it is judged at and inside an
-    authority root, never above it, so `T=$CLAUDE_JOB_DIR/tmp` no longer reaches the subagent
-    directory under `/tmp`, while `F=<run>/ledger.json` is still refused.
-  - *Bound variables* (`lineVariables`). A variable the line binds to a static value is judged
-    with that value in place as well as as written, so binding an ancestor and writing beneath
-    it (`T=/tmp; rm -rf $T/claude-subagents`) is the write it spells. This closes F's same-line
-    symlink gap when the target is spelled through a bound variable; a variable whose value is
-    runtime-built, or set outside the line, remains a gap.
+  - *Assignments* (`inertNamesOf`, `wordReaches`). A bare `NAME=value` command names a path
+    without writing above it only when its name is INERT: the shell does not read the name
+    itself (`HOME`, `CDPATH`, `PATH`, `IFS`, `PWD`, `ENV`, `BASH_ENV`, … are never inert), every
+    assignment of the name on the line is a bare one whose value splices (literal path text and
+    plain `$NAME` references, at most unwrapped from one pair of quotes), and the line reads it
+    only as a plain `$NAME`/`${NAME}` that the guard splices — no `cd` operand, no other
+    assignment's value, no parameter operation, no bare mention (`export T`, `U=T` for an
+    indirection, interpreter code), and no `source`/`.`, `set -a`/allexport, nameref or `${!`
+    anywhere on the line. So `T=$CLAUDE_JOB_DIR/tmp` no longer reaches the subagent directory
+    under `/tmp`. Every other assignment reaches as on main, including a `NAME=value` argument
+    of `export|declare|typeset|local|readonly` (the value may be exported to a program the guard
+    cannot read); an environment prefix (`TMPDIR=/tmp npm test`) never reached and binds nothing
+    for later segments.
+  - *Bound variables* (`lineVariables`, `boundSpellings`). A variable the line binds to a
+    spliceable value is judged with that value in place as well as as written, so binding an
+    ancestor and writing beneath it (`T=/tmp; rm -rf $T/claude-subagents`) is the write it
+    spells. On a typed line a word with more than 16 spellings fails closed, and so does a word
+    that reads a bound variable on a line that may set `IFS` for later segments (its value may
+    split anywhere; an `IFS=, read` prefix splits only its own command's input). A script file,
+    judged on what it names literally, judges such a word as written. This closes F's
+    same-line symlink gap when the target is spelled through a bound variable; a variable whose
+    value is runtime-built, or set outside the line, remains a gap.
   - *Read-only scripts* (`runsReadOnlyScript`; the list is `READ_ONLY_SCRIPTS` in
     `core/loom-cli-command.ts`, observed per decision as `LoomCommands.readOnlyScripts` in
     every spelling). A segment whose first word runs `scripts/read-context-packet.ts`,
     `read-context-section.ts` or `ledger-epoch.ts` of the running package (`bun <script>`,
-    `bun run <script>`, or the script by its path; no environment prefix, no wrapper; a static,
-    non-glob script word that names a listed script in every directory the segment may run in)
-    is a read-only segment. Its redirects are still judged, and a writer it pipes into is still
-    one. Each listed script declares itself read-only in its header, and a test pins that.
+    `bun run <script>`, or the script by a path holding a `/` — a bare name is looked up on
+    `PATH`; no environment prefix, no wrapper; a static, non-glob script word that names a
+    listed script in every directory the segment may run in) is a read-only segment. Its
+    redirects are still judged, and a writer it pipes into is still one. Each listed script
+    declares itself read-only in its header, and a test pins that.
+  - *Rebound commands*. On a typed line that may rebind a command name (`hash`, `alias`,
+    `enable`, `function`, `name() {`), no segment is read-only by its head, its read-only helper
+    operation or its read-only script: `hash -p /bin/rm cat; cat -r <protected>` is a write.
+    This also closes a gap main had.
+  - *Review of PR #180.* An independent review reproduced eight new false negatives in the
+    first cut (assignments reaching nothing, `pushd -n`, lastpipe, `CDPATH`/`HOME` set by
+    `read`/`printf -v`/`export`, physical `cd`, a bare script name, command rebinding); the
+    rules above close each, every one is pinned in `tests/core/subagent-authority.test.ts`, and
+    each new rule was mutation-checked. Still allowed, as on main: a command rebound or
+    `HOME`/`CDPATH`/`IFS` set in an EARLIER Bash call, and a variable set outside the line
+    (`rm -rf $X`).

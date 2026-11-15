@@ -29,9 +29,12 @@
  *     REFERENCES an authority path may contain only read-only segments, and no
  *     segment anywhere may REDIRECT output onto one. A segment that runs one of
  *     the Loom package's read-only scripts (`read-context-packet.ts`, …) by its
- *     plain path is a read-only segment, whatever paths it names. An assignment
- *     (`T=/tmp`, `export T=/tmp`) names a path without writing above it, so
- *     binding an ancestor of an authority root is no write.
+ *     plain path is a read-only segment, whatever paths it names. On a typed
+ *     line that may rebind a command name (`hash`, `alias`, `enable`, a
+ *     function) no segment is read-only by its head. A bare
+ *     assignment of an inert name (`inertNamesOf`: `T=$CLAUDE_JOB_DIR/tmp`,
+ *     whose every read the guard splices) names a path without writing above
+ *     it; every other assignment is judged as a write over what it names.
  *
  * Normalisations (every form reaches the same three rules): a head's backslash
  * escapes are dropped (`\loom`, `l\oom`); wrappers are unwrapped (`env`,
@@ -58,17 +61,24 @@
  * `;` either way, a move in a pipeline or behind `&` staying in its subshell,
  * a bare relative target searched along `CDPATH` — and a line with compound
  * syntax, or a move the guard cannot place, falls back to every directory the
- * line may reach. `~` resolves against home; a variable the line binds to a
- * static value (`lineVariables`) is judged with that value in place as well as
- * as written; globs and brace/quote/parameter views go through the shared
- * match views. When the registry is UNREADABLE every path whose segments name
+ * line may reach — as does a line that may turn on lastpipe or physical `cd`;
+ * a line that may set `CDPATH` or `HOME` makes the moves they steer unknown.
+ * `~` resolves against home; a variable the line binds to a spliceable value
+ * (`lineVariables`) is judged with that value in place as well as as written
+ * (past 16 spellings, or on a line that may set `IFS`, such a word fails
+ * closed); globs and brace/quote/parameter views go through the shared match
+ * views. When the registry is UNREADABLE every path whose segments name
  * an authority entry is treated as authority (fail closed); the same suffix
  * rule covers words the shell completes at runtime on a typed line.
  *
  * Known gaps (pinned as allowed in tests/core/subagent-authority.test.ts): a
  * command or helper NAME the shell constructs from pieces (`eval "$a $b"`, a
- * command held in a variable), a variable whose value is runtime-built
- * (`T=$(cat f)`, or one set outside the line) holding an authority path,
+ * command held in a variable), a variable set outside the line, or to a
+ * substitution's output (`T=$(cat f)`), holding an authority path, a `cd`
+ * through such a variable (its target is unknown, and an unknown directory is
+ * judged by authority entry names alone), `HOME`/`CDPATH`/`IFS` set in an earlier
+ * command, a command name rebound in an earlier command (`hash`, `alias`),
+ * physical `cd` through a symlink after an earlier `cd` on the line,
  * interpreter code built at runtime (base64, string concatenation), names
  * spelled in `printf` escapes, a script whose text is runtime-built and then
  * run, a symlink to a run created on the same line with a runtime-built target,
@@ -351,9 +361,8 @@ type PathScope = Readonly<{
   home: string | null;
   /** `CDPATH`, as the context observed it. */
   cdSearchPath: readonly string[];
-  /** Variables the judged line (or a line it is nested in) binds to static
-   *  values (`lineVariables`). */
-  variables: BoundVariables;
+  /** What the judged line, and the lines it is nested in, do to the shell (`withLineShell`). */
+  shell: LineShell;
   policy: LeadingDotPolicy;
   /** The filesystem port's canonical spelling of an absolute path. */
   canonicalize: (absolutePath: string) => string;
@@ -472,7 +481,14 @@ function pathPieces(view: string): readonly string[] {
 /** The authority path a raw word may reach (any view, any piece, as written
  *  or with a bound variable's value in place of its expansion), or null. */
 function wordTouches(word: string, scope: PathScope, reach: boolean): string | null {
-  for (const spelled of boundSpellings(word, scope.variables)) {
+  const bound = boundSpellings(word, scope.shell.variables);
+  // More spellings than the guard builds, or a bound value the line's `IFS`
+  // may split anywhere (`IFS=:; T=x:/tmp; rm -rf $T`): a typed word fails
+  // closed; a script FILE, judged on what it names literally, is judged on
+  // the word as written.
+  const untrusted = bound === null || (scope.shell.splittingRebound && bound.length > 1);
+  if (untrusted && scope.mode === "typed") return word;
+  for (const spelled of untrusted ? [word] : bound) {
     const runtime = hasRuntimePart(spelled);
     const views = wordViews(spelled);
     if (views === null) return spelled; // unbounded expansion: fail closed
@@ -486,60 +502,215 @@ function wordTouches(word: string, scope: PathScope, reach: boolean): string | n
   return null;
 }
 
-/** Every static value each variable a line binds may hold, by name. */
+/** Every value each variable a line binds may hold, by name (`spliceable`). */
 type BoundVariables = ReadonlyMap<string, readonly string[]>;
 
-const NO_VARIABLES: BoundVariables = new Map();
+/**
+ * What a line does to the shell state the guard resolves its words and moves
+ * with, read from the whole line text — nested bodies included — so a binding
+ * reaches every segment that may see it (`withLineShell`).
+ */
+type LineShell = Readonly<{
+  /** The values the line, or a line it is nested in, binds (`lineVariables`). */
+  variables: BoundVariables;
+  /** The names whose bare assignments on THIS line write nothing above their value (`inertNamesOf`). */
+  inertNames: ReadonlySet<string>;
+  /** `CDPATH` may be set on the line: every searched `cd` target is unknown. */
+  searchPathRebound: boolean;
+  /** `IFS` may be set for the rest of the line (`splittingRebound`): a bound value may split anywhere. */
+  splittingRebound: boolean;
+  /** lastpipe or physical `cd` may be on: where a segment runs no longer follows from the separators. */
+  separatorsUnreliable: boolean;
+  /** A command name may be rebound (`hash`, `alias`, `enable`, a function): no script is trusted by its path. */
+  commandsRebound: boolean;
+}>;
 
-/** A bound value spliced into a word reads the same in any quoting. */
-const SPLICEABLE_VALUE = /^[A-Za-z0-9_.\/~:@%+,=-]*$/;
+const NO_SHELL: LineShell = Object.freeze({
+  variables: new Map(),
+  inertNames: new Set<string>(),
+  searchPathRebound: false,
+  splittingRebound: false,
+  separatorsUnreliable: false,
+  commandsRebound: false,
+});
 
-/** A word's spellings beyond 16 are not built: a line binding that many
- *  combinations is judged on the first ones (and on the word as written). */
+/** Literal path characters and plain `$NAME`/`${NAME}` references: text that
+ *  reads the same wherever it is spliced in place of a plain reference. */
+const SPLICEABLE_VALUE = /^(?:[A-Za-z0-9_.\/~:@%+,=-]|\$[A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\})*$/;
+
+/** An assignment value as the text the guard splices for a plain reference to
+ *  it — unwrapped from one pair of double quotes (or of single quotes holding
+ *  no `$`) — or null when it does not splice faithfully (word splitting, a
+ *  glob, a substitution, an ANSI-C string, any other expansion). */
+function spliceable(value: string): string | null {
+  const inner = /^"[^"]*"$/.test(value) || /^'[^'$]*'$/.test(value) ? value.slice(1, -1) : value;
+  return SPLICEABLE_VALUE.test(inner) ? inner : null;
+}
+
+/** A word's spellings beyond 16 are not built: the word is then judged as
+ *  touching authority (`wordTouches`). */
 const MAX_BOUND_SPELLINGS = 16;
 
 /** `word` as written, then with each bound value spliced in place of each
- *  `$NAME`/`${NAME}` that names a bound variable. */
-function boundSpellings(word: string, variables: BoundVariables): readonly string[] {
+ *  `$NAME`/`${NAME}` that names a bound variable; null past
+ *  `MAX_BOUND_SPELLINGS`. */
+function boundSpellings(word: string, variables: BoundVariables): readonly string[] | null {
   if (variables.size === 0 || !word.includes("$")) return [word];
   let spellings: readonly string[] = [word];
   for (const [name, values] of variables) {
-    const reference = new RegExp(`\\$\\{${name}\\}|\\$${name}(?![A-Za-z0-9_])`, "g");
+    const reference = new RegExp(plainReference(name), "g");
     if (!reference.test(word)) continue;
-    spellings = spellings.flatMap((spelling) => [spelling, ...values.map((value) => spelling.replace(reference, value))]);
+    spellings = [...new Set(spellings.flatMap((spelling) => [spelling, ...values.map((value) => spelling.replace(reference, () => value))]))];
+    if (spellings.length > MAX_BOUND_SPELLINGS) return null;
   }
-  return [...new Set(spellings)].slice(0, MAX_BOUND_SPELLINGS + 1);
+  return spellings;
 }
 
+/** The pattern of a plain read of `name`: `$name` or `${name}`. */
+const plainReference = (name: string): string => `\\$(?:\\{${name}\\}|${name}(?![A-Za-z0-9_]))`;
+
+/** One `NAME=value` word of a simple command, and how the shell takes it:
+ *  `bare` (the whole command is assignments: they bind for the rest of the
+ *  line), `prefix` (an environment prefix: it binds for its command alone) or
+ *  `declaration` (an argument of `export`, `declare`, …: it binds and may
+ *  export). */
+type Assignment = Readonly<{ name: string; value: string; form: "bare" | "prefix" | "declaration" }>;
+
+const ASSIGNMENT_WORD = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/** Builtins whose `NAME=value` arguments are assignments, like a leading one. */
+const DECLARATION_HEADS: ReadonlySet<string> = new Set(["export", "declare", "typeset", "local", "readonly"]);
+
+/** The leading `NAME=value` words of a simple command. */
+function leadingAssignments(words: readonly string[]): number {
+  let leading = 0;
+  while (leading < words.length && ASSIGNMENT_WORD.test(words[leading])) leading++;
+  return leading;
+}
+
+/** Every assignment one simple command makes. */
+function assignmentsOf(words: readonly string[]): readonly Assignment[] {
+  const parse = (word: string, form: Assignment["form"]): Assignment => {
+    const equals = word.indexOf("=");
+    return { name: word.slice(0, equals), value: word.slice(equals + 1), form };
+  };
+  const leading = leadingAssignments(words);
+  if (leading === words.length) return words.map((word) => parse(word, "bare"));
+  const prefix = words.slice(0, leading).map((word) => parse(word, "prefix"));
+  if (!DECLARATION_HEADS.has(unquote(words[leading]))) return prefix;
+  return [...prefix, ...words.slice(leading + 1).filter((word) => ASSIGNMENT_WORD.test(word)).map((word) => parse(word, "declaration"))];
+}
+
+const assignmentsAt = (sites: readonly SegmentSite[]): readonly Assignment[] =>
+  sites.flatMap(({ segment }) => assignmentsOf(shellWords(stripComment(segment).trim())));
+
 /**
- * The variables a line binds to a static value — `T=/tmp`, `export T=/tmp` —
- * with every value each takes anywhere on the line (a loop may run a later
- * binding first). A word that expands one is judged with the value in its
- * place as well as as written, so binding an ancestor and writing beneath it
- * (`T=/tmp; rm -rf $T/claude-subagents`) is the write it spells, while the
- * binding itself writes nothing. An environment prefix (`T=/tmp cmd`) binds
- * nothing for the rest of the line, and a value the shell completes at runtime
- * binds nothing the guard can know (a known gap: a variable holding a whole
- * authority path).
+ * The values a line binds — bare and declaration assignments whose value
+ * splices (`spliceable`) — with every value each name takes anywhere on the
+ * line (a loop may run a later binding first). A word that expands one is
+ * judged with the value in its place as well as as written, so binding an
+ * ancestor and writing beneath it (`T=/tmp; rm -rf $T/claude-subagents`) is
+ * the write it spells. An environment prefix binds nothing for the rest of the
+ * line.
  */
 function lineVariables(sites: readonly SegmentSite[], inherited: BoundVariables): BoundVariables {
   const bound = new Map<string, readonly string[]>(inherited);
-  for (const { segment } of sites) {
-    const words = shellWords(stripComment(segment).trim());
-    const assignment = assignmentWords(words);
-    // Words before the head are an environment prefix: they bind nothing for later segments.
-    // `assignmentWords` marks words after the head only when it is a declaration builtin.
-    const head = assignment.indexOf(false);
-    words.forEach((word, index) => {
-      if (!assignment[index] || (head !== -1 && index < head)) return;
-      const equals = word.indexOf("=");
-      const value = staticSpelling(word.slice(equals + 1));
-      if (value === null || !SPLICEABLE_VALUE.test(value)) return;
-      const name = word.slice(0, equals);
-      bound.set(name, [...new Set([...(bound.get(name) ?? []), value])]);
-    });
+  for (const { name, value, form } of assignmentsAt(sites)) {
+    const spliced = form === "prefix" ? null : spliceable(value);
+    if (spliced !== null) bound.set(name, [...new Set([...(bound.get(name) ?? []), spliced])]);
   }
   return bound;
+}
+
+/** Names the shell itself reads: assigning one changes where `~`, `cd`, a
+ *  command or a word resolves, so its assignment is never inert. */
+const SHELL_STATE_NAMES: ReadonlySet<string> = new Set([
+  "HOME", "CDPATH", "PWD", "OLDPWD", "PATH", "ENV", "BASH_ENV", "IFS", "SHELLOPTS", "BASHOPTS",
+  "GLOBIGNORE", "DIRSTACK", "BASH_XTRACEFD", "PROMPT_COMMAND", "PS4",
+]);
+
+/** Line text that may read a variable where the guard does not see it read:
+ *  `source`/`.` (a file run in this shell), `set -a`/`allexport` (every
+ *  assignment exported), a nameref, an indirect expansion. */
+const UNSEEN_VARIABLE_READS = /(?:^|[;&|(`\n]|\$\()\s*(?:source|\.)\s|\bset\s+[-+][A-Za-z]*a|allexport|\b(?:declare|typeset|local)\s+-[A-Za-z]*n|\$\{!/;
+
+/**
+ * Does `text` read `name` only where the guard splices its bound value — a
+ * plain `$name`/`${name}` that is neither a `cd`/`pushd` operand nor part of
+ * another assignment's value? Any other mention (`${name%x}`, `export name`,
+ * `U=name` for an indirection, interpreter code naming it) may read it unseen.
+ */
+function readsOnlyPlainly(text: string, name: string): boolean {
+  const plain = plainReference(name);
+  if (new RegExp(`(?:^|[\\s;&|(\`])(?:cd|pushd)\\s[^;&|\\n]*${plain}`).test(text)) return false;
+  if (new RegExp(`(?:^|[\\s;&|(\`])[A-Za-z_][A-Za-z0-9_]*=\\S*${plain}`).test(text)) return false;
+  const rest = text.replace(new RegExp(plain, "g"), "").replace(new RegExp(`(?<=^|[\\s;&|(\`])${name}=`, "g"), "");
+  return !new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`).test(rest);
+}
+
+/**
+ * The names whose bare assignments on this line write nothing above the path
+ * they name — `T=$CLAUDE_JOB_DIR/tmp` binds a path, it does not write `/tmp`.
+ * A name is inert when the shell does not read it itself, it is assigned only
+ * by bare assignments whose values splice, and the line reads it only where
+ * the guard splices that value (`readsOnlyPlainly`): every write through it is
+ * then judged with the value in place. Every other assignment reaches, so
+ * binding `/tmp` is judged as a write over what `/tmp` holds — the only way
+ * the guard can judge a variable it cannot follow.
+ */
+function inertNamesOf(text: string, sites: readonly SegmentSite[]): ReadonlySet<string> {
+  if (UNSEEN_VARIABLE_READS.test(text)) return NO_SHELL.inertNames;
+  const assignments = assignmentsAt(sites);
+  const candidates = new Set(assignments.filter((assignment) => assignment.form === "bare").map((assignment) => assignment.name));
+  return new Set([...candidates].filter((name) =>
+    !SHELL_STATE_NAMES.has(name) &&
+    assignments.every((assignment) => assignment.name !== name || (assignment.form === "bare" && spliceable(assignment.value) !== null)) &&
+    readsOnlyPlainly(text, name)));
+}
+
+/** Does `text` mention `name` other than by a plain read — an assignment, a
+ *  `printf -v`/`read` target, an indirection naming it? */
+const mayRebind = (text: string, name: string): boolean =>
+  new RegExp(`(?<![A-Za-z0-9_$])${name}(?![A-Za-z0-9_])`).test(text.replace(new RegExp(`\\$\\{${name}\\}`, "g"), ""));
+
+/** The variable whose characters split an unquoted expansion's value into words. */
+const SPLITTING_VARIABLE = "IFS";
+
+/**
+ * Does the line set `IFS` for the segments after it — a bare or declaration
+ * assignment, a `read`/`printf -v` target, any mention but a plain read? An
+ * environment prefix (`IFS=, read -r a b`) splits only its own command's
+ * input, after its words are expanded, so it is not one.
+ */
+function splittingRebound(text: string, sites: readonly SegmentSite[]): boolean {
+  const assignments = assignmentsAt(sites).filter((assignment) => assignment.name === SPLITTING_VARIABLE);
+  if (assignments.some((assignment) => assignment.form !== "prefix")) return true;
+  const withoutPrefixes = assignments.reduce((rest, { value }) => rest.split(`${SPLITTING_VARIABLE}=${value}`).join(""), text);
+  return mayRebind(withoutPrefixes, SPLITTING_VARIABLE);
+}
+
+/** Bash's lastpipe option runs a pipeline's last command in this shell; physical `cd`
+ *  resolves `..` after symlinks. Either breaks the separator walk. */
+const SEPARATORS_UNRELIABLE = /\blastpipe\b|\bset\s+[-+][A-Za-z]*P|\bphysical\b/;
+
+/** A command name rebound on the line: `hash -p`, an alias, `enable`, a function. */
+const COMMANDS_REBOUND = /(?:^|[;&|(`\n]|\$\()\s*(?:hash|alias|enable)\b|\bfunction\s|\(\)\s*[{(]/;
+
+/** `scope` with what the line `command` (parsed into `sites`) does to the shell. */
+function withLineShell(command: string, sites: readonly SegmentSite[], scope: PathScope): PathScope {
+  const { shell } = scope;
+  return {
+    ...scope,
+    home: mayRebind(command, "HOME") ? null : scope.home,
+    shell: {
+      variables: lineVariables(sites, shell.variables),
+      inertNames: inertNamesOf(command, sites),
+      searchPathRebound: shell.searchPathRebound || mayRebind(command, CD_SEARCH_VARIABLE),
+      splittingRebound: shell.splittingRebound || splittingRebound(command, sites),
+      separatorsUnreliable: shell.separatorsUnreliable || SEPARATORS_UNRELIABLE.test(command),
+      commandsRebound: shell.commandsRebound || COMMANDS_REBOUND.test(command),
+    },
+  };
 }
 
 /** A run directory or protected directory written verbatim inside a longer
@@ -560,23 +731,17 @@ function textNamesRoot(text: string, scope: PathScope): string | null {
   return null;
 }
 
-const ASSIGNMENT_WORD = /^[A-Za-z_][A-Za-z0-9_]*=/;
-
-/** Builtins whose `NAME=value` arguments are assignments, like a leading one. */
-const DECLARATION_HEADS: ReadonlySet<string> = new Set(["export", "declare", "typeset", "local", "readonly"]);
-
 /**
- * Which words of a simple command are assignments: its leading `NAME=value`
- * words (an environment prefix, or the whole command — `T=/tmp`), and the
- * `NAME=value` arguments of a declaration builtin (`export T=/tmp`). An
- * assignment names a path: it is judged at and inside authority, never above
- * it, so binding `/tmp` to a variable is not a write over the subagent dir.
+ * Which words of a simple command reach above the path they name. An
+ * environment prefix (`TMPDIR=/tmp npm test`) names a path for its command,
+ * and a bare assignment of an inert name (`inertNamesOf`) binds one: neither
+ * writes over what the path holds. Every other word — a declaration's
+ * `NAME=value`, an assignment the line may read unseen, an argument — reaches.
  */
-function assignmentWords(words: readonly string[]): readonly boolean[] {
-  let leading = 0;
-  while (leading < words.length && ASSIGNMENT_WORD.test(words[leading])) leading++;
-  const declaration = leading < words.length && DECLARATION_HEADS.has(unquote(words[leading]));
-  return words.map((word, index) => index < leading || (declaration && index > leading && ASSIGNMENT_WORD.test(word)));
+function wordReaches(words: readonly string[], inertNames: ReadonlySet<string>): readonly boolean[] {
+  const leading = leadingAssignments(words);
+  const bare = leading === words.length;
+  return words.map((word, index) => index >= leading || (bare && !inertNames.has(word.slice(0, word.indexOf("=")))));
 }
 
 /** The authority path a segment's words may reach, or null. `judged` names
@@ -584,9 +749,9 @@ function assignmentWords(words: readonly string[]): readonly boolean[] {
  *  are not this segment's path arguments. */
 function segmentTouches(segment: string, scope: PathScope, judged: ReadonlySet<string> = new Set()): string | null {
   const words = shellWords(stripComment(segment).trim()).filter((word) => !judged.has(unquote(word)));
-  const assignment = assignmentWords(words);
+  const reaches = wordReaches(words, scope.shell.inertNames);
   for (const [index, word] of words.entries()) {
-    const touched = wordTouches(word, scope, !assignment[index]);
+    const touched = wordTouches(word, scope, reaches[index]);
     if (touched !== null) return touched;
   }
   const text = words.join(" ");
@@ -648,6 +813,9 @@ export const CD_SEARCH_VARIABLE = "CDPATH";
 /** Where one segment moves the shell, as far as the guard can tell. */
 type DirectoryMove =
   | Readonly<{ kind: "stays" }>
+  /** `pushd -n <target>`: the shell stays, but a later `popd` may land on
+   *  the target, so it is a directory the line may reach. */
+  | Readonly<{ kind: "stacks"; target: string; searched: boolean }>
   /** A `cd`/`pushd` to a target the guard can place. `searched`: a bare
    *  relative target (`cd engine`), which the search path may resolve
    *  elsewhere than the current directory. */
@@ -656,13 +824,16 @@ type DirectoryMove =
    *  with no known home. */
   | Readonly<{ kind: "unknown" }>;
 
+/** A move whose target the guard can place (`moves`, `stacks`). */
+type PlacedMove = Extract<DirectoryMove, { target: string }>;
+const placed = (move: DirectoryMove): move is PlacedMove => move.kind === "moves" || move.kind === "stacks";
+
 const STAYS: DirectoryMove = Object.freeze({ kind: "stays" });
 const UNKNOWN_MOVE: DirectoryMove = Object.freeze({ kind: "unknown" });
 
-/** Where one `cd`/`pushd`/`popd` goes, or null when the guard cannot know. */
-function cdDestination(head: string, args: readonly string[], home: string | null): string | null {
-  if (head === "popd") return null;
-  const operand = args.find((arg) => arg === "-" || !arg.startsWith("-"));
+/** Where one `cd`/`pushd` operand goes (none: home), or null when the guard
+ *  cannot know. */
+function cdDestination(head: string, operand: string | undefined, home: string | null): string | null {
   // `pushd` alone swaps the stack's top two; `pushd +N`/`-N` rotates it.
   if (head === "pushd" && (operand === undefined || /^[+-]\d+$/.test(operand))) return null;
   const target = operand ?? "~";
@@ -671,8 +842,12 @@ function cdDestination(head: string, args: readonly string[], home: string | nul
   return target.startsWith("~") ? null : target;
 }
 
-/** The directory move one segment's command makes (`cd`, `pushd`, `popd`,
- *  also behind `builtin`/`command`). */
+/**
+ * The directory move one segment's command makes (`cd`, `pushd`, `popd`,
+ * also behind `builtin`/`command`). `pushd -n` only edits the stack (`stacks`:
+ * a later `popd` may land there); every other option but `-L` (`-P` resolves
+ * `..` physically, `-e`, `-@`) and `popd` move where the guard cannot follow.
+ */
 function directoryMove(segment: string, home: string | null): DirectoryMove {
   const analyzed = analyzeCommandHead(segment);
   if (analyzed === null) return STAYS;
@@ -680,15 +855,25 @@ function directoryMove(segment: string, home: string | null): DirectoryMove {
   while (words.length > 1 && BUILTIN_RUNNERS.has(words[0])) words = words.slice(1);
   const [head, ...args] = words;
   if (!CD_HEADS.has(head)) return STAYS;
-  const target = cdDestination(head, args, home);
+  if (head === "popd") return UNKNOWN_MOVE;
+  let index = 0;
+  const options: string[] = [];
+  for (; index < args.length && /^-./.test(args[index]) && !/^-\d+$/.test(args[index]); index++) {
+    if (args[index] === "--") { index++; break; }
+    options.push(args[index]);
+  }
+  const stacks = head === "pushd" && options.some((option) => /^-[A-Za-z]*n/.test(option));
+  if (!stacks && options.some((option) => option !== "-L")) return UNKNOWN_MOVE;
+  const target = cdDestination(head, args[index], home);
   if (target === null) return UNKNOWN_MOVE;
-  return { kind: "moves", target, searched: !isAbsolute(target) && !/^\.\.?(?:\/|$)/.test(target) };
+  const searched = !isAbsolute(target) && !/^\.\.?(?:\/|$)/.test(target);
+  return { kind: stacks ? "stacks" : "moves", target, searched };
 }
 
 /** Every directory a placeable move from `from` may land in: a bare relative
  *  target under each search-path entry, then under `from` itself (bash falls
  *  back to it when no entry holds the target). */
-const destinationsOf = (from: string, move: Readonly<{ target: string; searched: boolean }>, cdSearchPath: readonly string[]): readonly string[] =>
+const destinationsOf = (from: string, move: PlacedMove, cdSearchPath: readonly string[]): readonly string[] =>
   move.searched
     ? [...cdSearchPath.map((entry) => absoluteUnder(absoluteUnder(from, entry), move.target)), absoluteUnder(from, move.target)]
     : [absoluteUnder(from, move.target)];
@@ -734,24 +919,26 @@ type LineDirectories = Readonly<{ everywhere: readonly string[]; cwdUnresolved: 
  * one that fails leaves it. So `cd X && tsc -p .` checks `.` in X alone, while
  * `cd X; rm -rf .` and `cd X || rm -rf .` still check the starting directory.
  * A `cd` in a pipeline or behind `&` runs in a subshell and moves nothing; a
- * move the guard cannot place sends the next segment everywhere.
+ * move the guard cannot place sends the next segment everywhere. A line that
+ * may turn on lastpipe or physical `cd` is not walked (`LineShell`), and a
+ * line that may set `CDPATH` makes every searched move unknown.
  */
-function lineDirectories(sites: readonly SegmentSite[], scope: PathScope, searchPathAssigned: boolean): LineDirectories {
+function lineDirectories(sites: readonly SegmentSite[], scope: PathScope): LineDirectories {
   const moveOf = (site: SegmentSite): DirectoryMove => {
     const move = directoryMove(site.segment, scope.home);
-    return move.kind === "moves" && move.searched && searchPathAssigned ? UNKNOWN_MOVE : move;
+    return placed(move) && move.searched && scope.shell.searchPathRebound ? UNKNOWN_MOVE : move;
   };
   const known = new Set(scope.cwds);
   let cwdUnresolved = scope.cwdUnresolved;
   for (const site of sites) {
     const move = moveOf(site);
     if (move.kind === "unknown") cwdUnresolved = true;
-    if (move.kind !== "moves") continue;
+    if (!placed(move)) continue;
     for (const base of [...known]) for (const destination of destinationsOf(base, move, scope.cdSearchPath)) known.add(destination);
     if (isAbsolute(move.target)) known.add(absoluteUnder("/", move.target));
   }
   const everywhere = [...known];
-  if (sites.some((site) => holdsCompoundSyntax(site.segment))) {
+  if (scope.shell.separatorsUnreliable || sites.some((site) => holdsCompoundSyntax(site.segment))) {
     return { everywhere, cwdUnresolved, perSegment: sites.map(() => everywhere) };
   }
 
@@ -767,7 +954,7 @@ function lineDirectories(sites: readonly SegmentSite[], scope: PathScope, search
     const ranFrom = (state: DirectoryState): readonly DirectoryState[] => {
       const landed = match(move)
         .returnType<readonly string[]>()
-        .with({ kind: "stays" }, () => [state.dir])
+        .with({ kind: "stays" }, { kind: "stacks" }, () => [state.dir])
         .with({ kind: "moves" }, (moves) => destinationsOf(state.dir, moves, scope.cdSearchPath))
         .with({ kind: "unknown" }, () => everywhere)
         .exhaustive();
@@ -787,10 +974,10 @@ function lineDirectories(sites: readonly SegmentSite[], scope: PathScope, search
  *  read a fed script (`cd /b && bash run.sh`) in the same places. */
 type LineScopes = Readonly<{ everywhere: PathScope; of: (site: SegmentSite) => PathScope }>;
 
-function lineScopesOf(line: Extract<ParsedLine, { kind: "parsed" }>, scope: PathScope): LineScopes {
+function lineScopesOf(command: string, line: Extract<ParsedLine, { kind: "parsed" }>, inherited: PathScope): LineScopes {
   const sites = line.chains.flat();
-  const searchPathAssigned = new RegExp(`\\b${CD_SEARCH_VARIABLE}=`).test(line.unflattened);
-  const { everywhere: cwds, cwdUnresolved, perSegment } = lineDirectories(sites, scope, searchPathAssigned);
+  const scope = withLineShell(command, sites, inherited);
+  const { everywhere: cwds, cwdUnresolved, perSegment } = lineDirectories(sites, scope);
   const everywhere: PathScope = { ...scope, cwds, cwdUnresolved };
   const scopes = new Map(sites.map((site, index) => [site, { ...everywhere, cwds: perSegment[index] }]));
   return { everywhere, of: (site) => scopes.get(site) ?? everywhere };
@@ -1153,13 +1340,12 @@ function judgeLine(command: string, context: SubagentAuthorityContext, scope: Pa
   if (line.kind === "blank") return null;
   if (line.kind === "too-deep") return refuseUnparseable(command);
 
-  // The line's bindings reach its nested bodies too (`T=/tmp; echo $(rm -rf $T/x)`).
-  const bound: PathScope = { ...scope, variables: lineVariables(line.chains.flat(), scope.variables) };
+  // What the line does to the shell reaches its nested bodies too (`T=/tmp; echo $(rm -rf $T/x)`).
+  const scopes = lineScopesOf(command, line, scope);
   for (const body of line.nestedBodies) {
-    const judged = judgeLine(body, context, bound, depth + 1);
+    const judged = judgeLine(body, context, scopes.everywhere, depth + 1);
     if (judged !== null) return judged;
   }
-  const scopes = lineScopesOf(line, bound);
 
   if (line.unparseable) {
     // Judged on the UNFLATTENED text: an unclosed substitution truncates the
@@ -1260,8 +1446,11 @@ function judgeSegment(
   const redirectTouch = redirectTargets(segment)
     .map((target) => wordTouches(target, scope, true))
     .find((touched) => touched !== null) ?? null;
-  const readOnly = invocation !== null || hasReadOnlyHead(segment) || CD_HEADS.has(literalHead) ||
-    runsReadOnlyScript(segment, scope, context.readOnlyScripts);
+  // A typed line that may rebind a command name (`hash -p /bin/rm cat`, an
+  // alias, a function) may run anything under a read-only head's name.
+  const headsTrusted = !(scope.mode === "typed" && scope.shell.commandsRebound);
+  const readOnly = headsTrusted && (invocation !== null || hasReadOnlyHead(segment) || CD_HEADS.has(literalHead) ||
+    runsReadOnlyScript(segment, scope, context.readOnlyScripts));
   return {
     kind: "judged",
     facts: { segment, readOnly, touches: segmentTouches(segment, scope, executed.words), redirectTouch },
@@ -1278,19 +1467,21 @@ function staticSpelling(word: string | undefined): string | null {
 /**
  * Does the segment run one of the Loom package's read-only scripts, written
  * plainly: `bun <script>`, `bun run <script>`, or the script executed by its
- * path, as the segment's FIRST word — no environment prefix, no wrapper — and
- * a script word with one static spelling that names a listed script in every
- * directory the segment may run in (in its spelling or its canonical one)?
- * Such a segment reads: the paths it names are what it reads, and only its
- * redirects are judged as writes.
+ * path (a word holding a `/`: a bare name is looked up on `PATH`), as the
+ * segment's FIRST word — no environment prefix, no wrapper, on a line that
+ * rebinds no command name — and a script word with one static spelling that
+ * names a listed script in every directory the segment may run in (in its
+ * spelling or its canonical one)? Such a segment reads: the paths it names are
+ * what it reads, and only its redirects are judged as writes.
  */
 function runsReadOnlyScript(segment: string, scope: PathScope, scripts: readonly string[]): boolean {
+  if (scope.shell.commandsRebound) return false;
   const words = shellWords(stripComment(segment).trim());
   const first = staticSpelling(words[0]);
   if (first === null) return false;
   const second = staticSpelling(words[1]);
   const script = first !== "bun" ? first : second === "run" ? staticSpelling(words[2]) : second;
-  if (script === null) return false;
+  if (script === null || (first === script && !script.includes("/"))) return false;
   const locations = scriptLocations(script, scope);
   return locations !== null && locations.length > 0 &&
     locations.every((location) => scripts.includes(location) || scripts.includes(scope.canonicalize(location)));
@@ -1321,7 +1512,7 @@ function pathScope(command: string, context: SubagentAuthorityContext): PathScop
     cwdUnresolved: context.cwd === null,
     home: context.home,
     cdSearchPath: context.cdSearchPath,
-    variables: NO_VARIABLES,
+    shell: NO_SHELL,
     policy: leadingDotPolicyOf(command),
     canonicalize: context.filesystem.canonicalize,
     mode: "typed",
@@ -1385,13 +1576,13 @@ function collectVerifyInvocations(
   const line = parseLine(command, depth);
   if (line.kind === "blank") return [];
   if (line.kind === "too-deep") return [{ kind: "unresolved", segment: command, reason: "nested too deeply to read" }];
+  // The line's segments run where its `cd`s lead, exactly as `judgeLine` reads them.
+  const scopes = lineScopesOf(command, line, scope);
   const found: SecurityAuditVerifyInvocation[] = line.nestedBodies
-    .flatMap((body) => collectVerifyInvocations(body, context, scope, depth + 1));
+    .flatMap((body) => collectVerifyInvocations(body, context, scopes.everywhere, depth + 1));
   if (line.unparseable && /security-audit/.test(command)) {
     found.push({ kind: "unresolved", segment: command, reason: "the command cannot be parsed" });
   }
-  // The line's segments run where its `cd`s lead, exactly as `judgeLine` reads them.
-  const scopes = lineScopesOf(line, scope);
   for (const chain of line.chains) {
     for (const site of chain) {
       const { segment, chain: texts, index, command: { head, args }, executed } = site;
