@@ -17,8 +17,9 @@
  * It is never logged, never put in a cause, an event or a record, and never
  * passed on a command line. A key no HTTP header can carry is refused before
  * the request (`fetch` would quote it in its error); the request follows no
- * redirect, so the key reaches only the configured `baseUrl`; and every
- * refusal text the child returns is scrubbed of the key.
+ * redirect, so the key reaches only the configured `baseUrl`; and every text
+ * that comes back — a refusal, each listed model id — is scrubbed of the key
+ * before the decision sees it.
  *
  * The probe is synchronous. Every reader of the routing context — the
  * generated-agent validator, the render, the spawn route gate, the
@@ -162,8 +163,14 @@ export function memoizedProbePorts(
   const listings = new Map<string, Readonly<{ at: number; probe: RouteProbe }>>();
   const commands = new Map<string, Readonly<{ at: number; value: string }>>();
   const fresh = (at: number): boolean => now() - at < ttlMs;
+  // Every call drops what has expired, so a key that changes on every
+  // command run grows neither map, and no key output outlives its window.
+  const evictExpired = (): void => {
+    for (const cache of [listings, commands]) for (const [id, entry] of cache) if (!fresh(entry.at)) cache.delete(id);
+  };
   return Object.freeze({
     runKeyCommand: (command) => {
+      evictExpired();
       const cached = commands.get(command);
       if (cached !== undefined && fresh(cached.at)) return cached.value;
       const value = ports.runKeyCommand(command);
@@ -172,6 +179,7 @@ export function memoizedProbePorts(
       return value;
     },
     listModels: (url, apiKey) => {
+      evictExpired();
       const id = `${url}\u0000${fingerprint(apiKey)}`;
       const cached = listings.get(id);
       if (cached !== undefined && fresh(cached.at)) return cached.probe;
@@ -244,7 +252,20 @@ function observeServedProvider(
   const key = resolveProviderApiKey(stored.credential, lookup.provider.apiKey, env, ports.runKeyCommand);
   if (!key.ok) return { kind: "keyless", key: key.unusable };
   const url = modelsUrl({ provider, baseUrl: lookup.provider.baseUrl });
-  return { kind: "probed", url, catalog: lookup.provider.catalog, probe: ports.listModels(url, key.key) };
+  const probe = withoutKey(ports.listModels(url, key.key), key.key);
+  return { kind: "probed", url: scrubSecret(url, key.key), catalog: lookup.provider.catalog, probe };
+}
+
+/**
+ * A probe with the key scrubbed from every text the server or the probe
+ * returned: a refusal's reason, and each listed model id — a server may echo
+ * the bearer token as an id, and a listed id reaches causes, refusals and
+ * records. An id that held the key no longer matches the catalog, so it
+ * resolves to no model.
+ */
+function withoutKey(probe: RouteProbe, key: string): RouteProbe {
+  if (probe.kind === "refused") return { kind: "refused", reason: scrubSecret(probe.reason, key) };
+  return probe.servedModels === null ? probe : { ...probe, servedModels: probe.servedModels.map((id) => scrubSecret(id, key)) };
 }
 
 /**

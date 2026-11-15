@@ -143,10 +143,12 @@ Three things followed from the earlier cloud-default catalog:
      log line, a refusal, an event or a record. A key no HTTP header value can carry (a line break, a control
      character, a character above U+00FF) is refused before the request, because `fetch` quotes an invalid
      header value in its error; the request follows no redirect (`redirect: "error"`), so the key reaches
-     only the configured `baseUrl`; every refusal text the probe child returns is scrubbed of the key in
-     every form it could take (`scrubSecret`, a tested property); and a malformed `models.json` or
+     only the configured `baseUrl`; every text that comes back — a refusal, and each listed model id (a
+     server may echo the bearer token as an id) — is scrubbed of the key in every form it could take
+     (`scrubSecret`, a tested property) before the decision sees it; and a malformed `models.json` or
      `auth.json` is reported by file name only, because V8's `JSON.parse` error quotes the text around the
-     fault.
+     fault. As in Pi's session runtime, only the probed provider's `auth.json` entry is read; another
+     provider's malformed entry does not stop it.
    - **No fallback.** A missing or unresolvable key, a 401/403, an unreachable server, a listing of zero or
      several models, or a model the catalog does not declare leaves the provider's model unknown, and any
      rule that selects the target refuses the launch with the reason and its remedy. The resolved route is

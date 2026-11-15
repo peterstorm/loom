@@ -238,10 +238,14 @@ describe("observing what a served provider serves", () => {
     }, /stores an api_key credential .* holds no key/],
     ["an auth.json that is not JSON", { "models.json": modelsJson(declaredProvider()), "auth.json": "{not json" }, /cannot parse .*auth\.json: it is not JSON/],
     ["an auth.json that is not an object", { "models.json": modelsJson(declaredProvider()), "auth.json": [] }, /invalid .*auth\.json: expected an object keyed by provider/],
-    ["an auth.json entry Pi would refuse", {
+    ["an auth.json entry for it of a shape Pi does not accept", {
       "models.json": modelsJson(declaredProvider()),
-      "auth.json": { other: { type: "api_key", key: 42 } },
-    }, /invalid .*auth\.json: the credential for provider "other" is not an api_key or oauth entry Pi accepts \(field key\)/],
+      "auth.json": { [PROVIDER]: { type: "api_key", key: 42 } },
+    }, /invalid .*auth\.json: the credential for provider "desktop-vllm" is not an api_key or oauth entry Pi accepts \(field key\)/],
+    ["an auth.json entry for it of an unknown type", {
+      "models.json": modelsJson(declaredProvider()),
+      "auth.json": { [PROVIDER]: { type: "bearer", key: SECRET } },
+    }, /invalid .*auth\.json: the credential for provider "desktop-vllm" is not an api_key or oauth entry Pi accepts \(field type\)/],
   ])("refuses, without probing, a provider with %s", (_label, files, reason) => {
     const ports = fakePorts(listing(["warmind-1017"]));
     const served = observeServedModels([PROVIDER], agentDir(files), {}, ports);
@@ -271,6 +275,16 @@ describe("observing what a served provider serves", () => {
     });
     const ports = fakePorts(listing(["warmind-1017"]));
     observeServedModels([PROVIDER], dir, {}, ports);
+    expect(ports.requests).toEqual([{ url: "http://vllm.test/v1/models", apiKey: SECRET }]);
+  });
+
+  it("reads only its own auth.json entry: another provider's malformed entry does not stop it, as in Pi", () => {
+    const dir = agentDir({
+      "models.json": modelsJson(declaredProvider({ apiKey: "sk-models-json-key" })),
+      "auth.json": { other: { type: "api_key", key: 42 }, broken: [], [PROVIDER]: { type: "api_key", key: SECRET } },
+    });
+    const ports = fakePorts(listing(["warmind-1017"]));
+    expect(observeServedModels([PROVIDER], dir, {}, ports)[PROVIDER]).toEqual({ kind: "served", ref: { provider: PROVIDER, model: "warmind-1017" } });
     expect(ports.requests).toEqual([{ url: "http://vllm.test/v1/models", apiKey: SECRET }]);
   });
 });
@@ -310,6 +324,44 @@ describe("the provider key never leaves the probe", () => {
     const served = observeServedModels([PROVIDER], agentDir(files), {}, fakePorts(listing(["warmind-1017"])));
     expect(served[PROVIDER]).toMatchObject({ kind: "unknown", cause: { kind: "unreadable-config" } });
     expect(JSON.stringify(served)).not.toContain("sk-SECRET");
+  });
+
+  it.each([
+    ["one listed id", [SECRET]],
+    ["an id holding it", [`model-${SECRET}`]],
+    ["several ids", ["warmind-1017", SECRET]],
+  ])("not in the cause when a server echoes it back as %s", (_label, ids) => {
+    const dir = agentDir({ "models.json": modelsJson(declaredProvider()) });
+    const served = observeServedModels([PROVIDER], dir, {}, fakePorts(listing(ids)));
+    expect(served[PROVIDER]?.kind).toBe("unknown");
+    expect(JSON.stringify(served)).not.toContain(SECRET);
+    expect(reasonOf(served[PROVIDER])).not.toContain(SECRET);
+  });
+
+  it("not in the cause when the baseUrl itself holds it", () => {
+    const dir = agentDir({ "models.json": modelsJson(declaredProvider({ baseUrl: `http://vllm.test/${SECRET}/v1` })) });
+    const served = observeServedModels([PROVIDER], dir, {}, fakePorts(listing(null, 401)));
+    expect(served[PROVIDER]).toMatchObject({ kind: "unknown", cause: { kind: "key-refused" } });
+    expect(JSON.stringify(served)).not.toContain(SECRET);
+  });
+
+  it("not in the cause or its rendering when a real server lists the bearer token as its model", async () => {
+    const script = `
+      const http = require("node:http");
+      const server = http.createServer((request, response) => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: [{ id: (request.headers.authorization ?? "").replace(/^Bearer /, "") }] }));
+      });
+      server.listen(0, "127.0.0.1", () => process.stdout.write(server.address().port + "\\n"));
+    `;
+    const child: ChildProcess = spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "inherit"] });
+    cleanups.push(() => child.kill("SIGKILL"));
+    const port = await new Promise<string>((resolve) => child.stdout?.once("data", (chunk: Buffer) => resolve(chunk.toString("utf8").trim())));
+    const dir = agentDir({ "models.json": modelsJson(declaredProvider({ baseUrl: `http://127.0.0.1:${port}/v1` })) });
+    const served = observeServedModels([PROVIDER], dir, {}, { runKeyCommand: () => null, listModels: childProcessListModels() });
+    expect(served[PROVIDER]).toMatchObject({ kind: "unknown", cause: { kind: "undeclared-model" } });
+    expect(JSON.stringify(served)).not.toContain(SECRET);
+    expect(reasonOf(served[PROVIDER])).not.toContain(SECRET);
   });
 
   it("not in what a real probe answers when the server rejects the key", async () => {

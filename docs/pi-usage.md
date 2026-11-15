@@ -235,7 +235,8 @@ This listing is the only request on which Loom sends a credential, and it is gua
 
 - a key that no HTTP header can carry (a line break, a control character, a character outside Latin-1) is refused before any request, because the HTTP client's error would quote it;
 - the request follows no redirect, so the key reaches only the configured `baseUrl`;
-- every diagnostic is scrubbed of the key, and a malformed `models.json` or `auth.json` is reported by file name only, because a JSON parser's error quotes the text around the fault.
+- every text that comes back is scrubbed of the key before Loom decides anything: a refusal, and each model id the server lists (a server may echo the bearer token as an id; such an id then matches nothing in the catalog, so the target stays unresolved);
+- a malformed `models.json` or `auth.json` is reported by file name only, because a JSON parser's error quotes the text around the fault. Like Pi's session runtime, Loom reads only the `auth.json` entry for the provider it probes: a malformed entry for another provider does not stop it. An entry for this provider that Pi does not accept, an `auth.json` that is not JSON, or one that is not an object keyed by provider leaves the target unresolved rather than guessing the key.
 
 The key never appears on a command line, in a log, a diagnostic, an event or a record.
 
