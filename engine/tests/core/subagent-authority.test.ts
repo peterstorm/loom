@@ -1098,6 +1098,45 @@ describe("the environment the shell inherits, and $PWD", () => {
     expect(verdict(`read -r V < /tmp/v; git -C ${LOOM} log $V`, optionInherited)).toBe("authority-path-write");
   });
 
+  // Each builtin the runtime-named rule lists may bind a name it is handed at runtime ($N), or the
+  // line's text never spells the name: a regex narrowed past any of them leaves V pinned to --oneline.
+  // Each binding is one the guard allows alone (a sourced script it can read), so only the dropped pin
+  // refuses the line.
+  it.each([
+    ["read", "read -r \"$N\" < /tmp/v"],
+    ["unset", "unset \"$N\""],
+    ["export", "export \"$N=--output=/x/y\""],
+    ["declare", "declare \"$N=--output=/x/y\""],
+    ["typeset", "typeset \"$N=--output=/x/y\""],
+    ["local", "local \"$N=--output=/x/y\""],
+    ["readonly", "readonly \"$N=--output=/x/y\""],
+    ["let", "let \"$N=1\""],
+    ["arithmetic", "(( $N = 1 ))"],
+    ["eval", "eval \"$(cat /tmp/v)\""],
+    ["source", "source /repo/build.sh"],
+    ["dot", ". /repo/build.sh"],
+    ["mapfile", "mapfile -t \"$N\" < /tmp/v"],
+    ["readarray", "readarray -t \"$N\" < /tmp/v"],
+    ["printf -v", "printf -v \"$N\" %s x"],
+    ["getopts", "getopts ab \"$N\""],
+  ])("drops every pin after %s", (_label, binding) => {
+    expect(verdict(binding, withEnvironment({ V: "--oneline" }))).toBe("allow");
+    expect(verdict(`${binding}; git -C ${LOOM} log $V`, withEnvironment({ V: "--oneline" }))).toBe("authority-path-write");
+  });
+
+  it("the inherited value counts toward the spelling cap beside the line's own bindings: past it, fail closed", () => {
+    const bindings = (count: number): string => Array.from({ length: count }, (_, index) => `T=/v${index}`).join("; ");
+    const inherited = withEnvironment({ T: "/x" });
+    // 15 bound values fit the cap alone; the inherited value is one spelling more, which tips the line over.
+    expect(verdict(`${bindings(15)}; rm -rf $T`)).toBe("allow");
+    expect(verdict(`${bindings(15)}; rm -rf $T`, inherited)).toBe("authority-path-write");
+    expect(verdict(`${bindings(14)}; rm -rf $T`, inherited)).toBe("allow");
+  });
+
+  it("KNOWN GAP: an inherited value that does not splice is not observed, so a write through it is judged as written", () => {
+    expect(verdict("rm -rf $X", withEnvironment({ X: "/tmp/claude-subagents extra" }))).toBe("allow");
+  });
+
   it("a cd through an inherited variable the line also rebinds may land on the observed value", () => {
     const inherited = withEnvironment({ E: LOOM });
     expect(verdict("cd \"$E\" && rm -rf machines; E=/elsewhere", inherited)).toBe("authority-path-write");
@@ -1145,7 +1184,8 @@ describe("the environment the shell inherits, and $PWD", () => {
   });
 });
 
-/** Claude Code carries a session's shell state between Bash calls in its config directory: the shell protects it. */
+/** Claude Code carries a session's shell state between Bash calls in its config directory: the hook passes it among
+ *  the protected directories, so this guard refuses every subagent write into it. */
 describe("the shell state Claude Code carries between Bash calls", () => {
   const SNAPSHOTS = "/home/u/.claude/shell-snapshots";
   const SESSION_ENV = "/home/u/.claude/session-env";

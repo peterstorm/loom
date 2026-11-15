@@ -92,8 +92,9 @@
  * a runtime-built target, and an interpreter's own script FILE (only literal
  * code is scanned). State an earlier Bash call left behind (`HOME`, `CDPATH`,
  * `IFS`, a `hash`, an alias or a function) reaches a later call only through
- * the shell state Claude Code carries between calls, which the shell protects
- * (`claudeShellStateDirs`), or a profile, which is the user's own. None of
+ * the shell state Claude Code carries between calls, which this guard refuses
+ * every subagent write into (the hook passes it among `protectedDirectories`),
+ * or a profile, which is the user's own. None of
  * them can produce an attested capture: the attestation store is protected and
  * written only by the capturing harness process.
  *
@@ -163,9 +164,10 @@ export type SubagentAuthorityContext = Readonly<{
   /** The directories a bare relative `cd` target is searched in (`CDPATH`,
    *  parsed by `parseCdSearchPath`); empty when the variable is unset. */
   cdSearchPath: readonly string[];
-  /** The environment the agent's shell inherits, as the shell observed it:
-   *  a word reading one of its variables is judged with the observed value in
-   *  place as well as as written. */
+  /** The environment the agent's shell inherits. The hook observes its own
+   *  process environment, which the harness gives the agent's shell too; a
+   *  caller must never pass any other. A word reading one of its variables is
+   *  judged with the observed value in place as well as as written. */
   environment: InheritedEnvironment;
   /** What the guard may observe of the filesystem at decision time. */
   filesystem: SubagentFilesystemView;
@@ -671,11 +673,13 @@ function withPinnedValues(text: string, spliced: ReadonlySet<string>, pinnedValu
   let settled = text;
   const done = new Set(spliced);
   for (;;) {
-    const next = referencedNames(settled).find((name) => !done.has(name) && pinnedValue(name) !== undefined);
-    const value = next === undefined ? undefined : pinnedValue(next);
-    if (next === undefined || value === undefined) return { text: settled, spliced: done };
-    settled = settled.replace(new RegExp(plainReference(next), "g"), () => value);
-    done.add(next);
+    const next = referencedNames(settled).flatMap((name) => {
+      const value = done.has(name) ? undefined : pinnedValue(name);
+      return value === undefined ? [] : [{ name, value }];
+    })[0];
+    if (next === undefined) return { text: settled, spliced: done };
+    settled = settled.replace(new RegExp(plainReference(next.name), "g"), () => next.value);
+    done.add(next.name);
   }
 }
 
@@ -1647,7 +1651,7 @@ function judgeSegment(
   const headsTrusted = !(scope.mode === "typed" && scope.shell.commandsRebound);
   const { pinnedValue } = segmentBindings(scope);
   const readOnly = headsTrusted && (invocation !== null || hasReadOnlyHead(segment) || CD_HEADS.has(literalHead) ||
-    runsReadOnlyScript(segment, scope, context.readOnlyScripts) ||
+    runsReadOnlyScript(segment, scope, pinnedValue, context.readOnlyScripts) ||
     isReadOnlyGitInvocation(segmentWords(segment).map((word) => staticSpelling(word, pinnedValue))));
   return {
     kind: "judged",
@@ -1675,10 +1679,14 @@ function staticSpelling(word: string | undefined, pinnedValue: SegmentBindings["
  * spelling or its canonical one)? Such a segment reads: the paths it names are
  * what it reads, and only its redirects are judged as writes.
  */
-function runsReadOnlyScript(segment: string, scope: PathScope, scripts: readonly string[]): boolean {
+function runsReadOnlyScript(
+  segment: string,
+  scope: PathScope,
+  pinnedValue: SegmentBindings["pinnedValue"],
+  scripts: readonly string[],
+): boolean {
   if (scope.shell.commandsRebound) return false;
   const words = segmentWords(segment);
-  const { pinnedValue } = segmentBindings(scope);
   const spelled = (word: string | undefined): string | null => staticSpelling(word, pinnedValue);
   const first = spelled(words[0]);
   if (first === null) return false;

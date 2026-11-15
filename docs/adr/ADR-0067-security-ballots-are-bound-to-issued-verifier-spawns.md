@@ -653,15 +653,19 @@ wins.
     `utils/claude-config-dir.ts`): `<config>/shell-snapshots` (the snapshot of the user's
     shell, sourced before every command) and `<config>/session-env` (the environment scripts
     hooks write through `CLAUDE_ENV_FILE`), under `CLAUDE_CONFIG_DIR` or `~/.claude`, are
-    protected directories for the subagent guard only. The `session-env` layout is taken from
+    protected directories for the subagent guard only: `subagentProtectedDirs` (`config.ts`)
+    names that set beside `protectedDirs`, which guard-state-file and block-direct-edits keep
+    reading, since the parent session writes this state itself. The `session-env` layout is taken from
     Claude Code's documentation of `CLAUDE_ENV_FILE`; it was not observed live. The
     transcript locator reads `CLAUDE_CONFIG_DIR` through the same helper.
   - *Still allowed* (pinned in `tests/core/subagent-authority.test.ts`): a variable whose value
     the guard cannot see — set by a shell profile, inherited with a value that does not splice,
-    or built at runtime (`T=$(cat f)`) — holding an authority path, and a mismatch between the
-    hook's environment and the agent shell's when a harness spawns them from different ones.
+    or built at runtime (`T=$(cat f)`) — holding an authority path. The guard also trusts that
+    the harness gives the hook and the agent's shell one environment; a harness that does not
+    is outside what a test here can pin.
   - *Checks.* Every new rule (seeding, pins, pin clearing, `$PWD` binding and lead, nested
     values, landings searched and home-resolved, the quoted split, the parser's name and value
     rules, the protected shell state) was mutation-checked against a test that isolates it.
-    The directory property test's bash oracle gained an inherited variable and `$PWD`
-    (`cd $E`, `E=/b`, `cd $PWD/b`), and passed 8 runs of 3000 cases.
+    The bash oracle of `tests/core/subagent-authority-directories.property.test.ts` models an
+    inherited variable and `$PWD` (`cd $E`, `E=/b`, `cd $PWD/b`); at this amendment it was
+    run 8 times at 3000 cases each without a counterexample.

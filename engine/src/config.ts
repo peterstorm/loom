@@ -36,6 +36,7 @@ import { findProjectRoot } from "./linter/project-root";
 import { projectRootForStateFile } from "./core/phase-artifact-paths";
 import { observeGitProbe, type GitProbeStep } from "./utils/git-probe";
 import { observePathPresence } from "./utils/path-presence";
+import { claudeShellStateDirs } from "./utils/claude-config-dir";
 import { GIT_PROBE_OUTPUT_LIMIT, spawnGit, type GitSpawn } from "./utils/git-execution-policy";
 import {
   describeGitOutcome,
@@ -348,6 +349,13 @@ export const guardedDirs = (): readonly string[] => guardedDirsOf(guardedLocatio
  * BEFORE the helper allow, and block-direct-edits guards them for file tools
  * wherever they lie (ADR-0046). */
 export const protectedDirs = (): readonly [string, ...string[]] => protectedDirsOf(guardedLocations());
+
+/** What no SUBAGENT may write (ADR-0067 D6, note L): Loom's protected
+ * directories plus the shell state Claude Code carries between Bash calls
+ * (`claudeShellStateDirs`), which every later command of the session sources.
+ * The parent session keeps writing that state, so only the subagent guard
+ * reads this set; guard-state-file and block-direct-edits read `protectedDirs`. */
+export const subagentProtectedDirs = (): readonly [string, ...string[]] => [...protectedDirs(), ...claudeShellStateDirs()];
 
 /** Detect which harness is running */
 function detectHarness(): "claude" | "pi" {
