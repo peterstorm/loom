@@ -977,6 +977,8 @@ describe("git in a checkout that holds a protected directory (#177 follow-up)", 
     ["show of a protected file", LOOM, "git --no-pager show HEAD:machines/a.json"],
     ["-C . from the checkout", LOOM, "git -C . rev-parse HEAD"],
     ["piped into a reader", "/repo", `git -C ${LOOM} log --oneline | head -3`],
+    ["a quoted git head", "/repo", `'git' -C "${LOOM}" fetch`],
+    ["fetch -u, which moves only a ref", "/repo", `git -C ${LOOM} fetch -u origin main`],
   ])("allows: %s", (_name, cwd, command) => {
     expect(verdict(command, context({ cwd }))).toBe("allow");
   });
@@ -995,6 +997,10 @@ describe("git in a checkout that holds a protected directory (#177 follow-up)", 
     ["a redirect into a protected directory", "/repo", `git -C ${LOOM} log > ${LOOM}/machines/a.json`],
     ["piped into a writer", "/repo", `git -C ${LOOM} show HEAD:x | tee ${LOOM}/machines/a.json`],
     ["a line that rebinds git", "/repo", `git() { rm -rf "$@"; }; git -C ${LOOM} fetch`],
+    ["ls-remote --exec, the hidden synonym of --upload-pack", "/repo", `git -C ${LOOM} ls-remote --exec='cp /tmp/x machines/a.json;' .`],
+    ["ls-remote --exec from the checkout", LOOM, "git ls-remote --exec=/bin/sh machines"],
+    ["a -C directory the shell completes at runtime", "/repo", `git -C "$D" fetch ${LOOM}/machines`],
+    ["a read followed by a writer", "/repo", `git -C ${LOOM} fetch && rm -r ${LOOM}/machines`],
   ])("refuses: %s", (_name, cwd, command) => {
     expect(verdict(command, context({ cwd }))).toBe("authority-path-write");
   });

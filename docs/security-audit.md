@@ -270,8 +270,10 @@ notice naming why and which policy applies.
   rebind a command name (`hash`, `alias`, a function) no head is trusted as
   read-only. A `git` invocation that writes nothing outside the repository's
   `.git` (`git -C <checkout> fetch`, `git log`, `git diff -- machines/x`; no
-  `-c`, `--output` or `--upload-pack`) reads too; `checkout`, `clean` and the
-  other writing subcommands do not.
+  `-c`, and no option that writes a file or runs a command, hidden ones
+  included: `--output`, `--ext-diff`, grep's `-O`, `--upload-pack` and
+  ls-remote's `--exec`) reads too; `checkout`, `clean` and the other writing
+  subcommands do not.
 - **The run registry.** Every writing `helper security-audit` operation — and
   the `security-verification` program's `start` and `resume` — registers its run
   in `<subagent dir>/security-audit-runs/`. Registration is idempotent and never

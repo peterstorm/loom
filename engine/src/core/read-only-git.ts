@@ -15,56 +15,75 @@
  *   `--no-optional-locks` and `--literal-pathspecs` — never `-c` (a config
  *   value such as core.fsmonitor or core.sshCommand runs a command),
  *   `--git-dir`, `--work-tree`, `--exec-path`, `--config-env`;
- * - the subcommand is one that reads ({@link READ_ONLY_GIT_SUBCOMMANDS}), or
- *   `fetch`, which writes only objects and refs; checkout, clean, stash,
- *   config, branch and every other subcommand with a writing mode are not;
- * - no argument writes a file or runs a command: `--output` (log, show, diff),
- *   `-O`/`--open-files-in-pager` (grep), `--ext-diff`, and for `fetch` and
- *   `ls-remote` `-u`/`--upload-pack`. A long option is matched by every
- *   abbreviation git accepts (`--outp=…` is `--output`);
+ * - the subcommand is a key of {@link READ_ONLY_GIT_SUBCOMMANDS}; checkout,
+ *   clean, stash, config, branch and every other subcommand with a writing
+ *   mode are not;
+ * - no argument is one of that subcommand's {@link RiskyOptions}. A long
+ *   option is matched by every abbreviation git accepts (`--outp=…` is
+ *   `--output`), bare or with `=value`; a short one anywhere in a bundle;
  * - every word before `--` has one static spelling (the caller passes null for
  *   any other), so the shell cannot complete one into an option at runtime.
  *   After `--` every word is a pathspec.
  *
- * What a repository's own configuration or hooks run is out of reach here, as
- * it is for a plain `git status` in the same directory.
+ * The risky options were audited against git 2.56 with
+ * `git <subcommand> --git-completion-helper-all`, which lists hidden options
+ * too (`ls-remote --exec`, a hidden synonym of `--upload-pack`, is absent from
+ * `-h`). Repeat that audit before adding a subcommand. What a repository's own
+ * configuration or hooks run (textconv drivers, diff.external, fsmonitor) is
+ * out of reach here, as it is for a plain `git status` in the same directory.
  */
 
-/** Subcommands that write nothing but, at most, the index's cached stat data. */
-export const READ_ONLY_GIT_SUBCOMMANDS: ReadonlySet<string> = new Set([
-  "status", "log", "show", "diff", "rev-parse", "ls-files", "ls-tree", "ls-remote", "cat-file", "blame",
-  "describe", "shortlog", "rev-list", "merge-base", "for-each-ref", "show-ref", "name-rev", "grep", "version",
-]);
+/** The options of one subcommand that run a command or write a file outside `.git`. */
+export type RiskyOptions = Readonly<{
+  /** Long option names, matched in every abbreviation, bare or with `=value`. */
+  long: readonly string[];
+  /** Short option letters, matched anywhere in a bundle (`-inO`). */
+  short: readonly string[];
+}>;
 
-/** The subcommand that writes only the repository's objects and refs. */
-const FETCH = "fetch";
+/**
+ * Diff options every revision-walking subcommand parses: `--output=<file>`
+ * writes a file and `--ext-diff` runs the external diff. Refused under every
+ * subcommand, whether or not it parses them.
+ */
+const DIFF_WRITERS: readonly string[] = ["output", "ext-diff"];
+
+const risky = (long: readonly string[] = [], short: readonly string[] = []): RiskyOptions =>
+  ({ long: [...DIFF_WRITERS, ...long], short });
+
+/**
+ * Each subcommand that writes nothing outside `.git` — at most the index's
+ * cached stat data, or for `fetch` the repository's objects and refs — with
+ * its risky options:
+ *
+ * - grep's `--open-files-in-pager`/`-O[<pager>]` runs a pager (diff's `-O<file>`
+ *   only reads an order file);
+ * - `--upload-pack` names the command a remote runs, which for a local path is
+ *   this machine; ls-remote also takes it as the hidden `--exec`, and older git
+ *   as `-u <exec>`. fetch's `-u` is `--update-head-ok`, which moves only a ref.
+ */
+export const READ_ONLY_GIT_SUBCOMMANDS: ReadonlyMap<string, RiskyOptions> = new Map([
+  ...["status", "log", "show", "diff", "rev-parse", "ls-files", "ls-tree", "cat-file", "blame", "describe",
+    "shortlog", "rev-list", "merge-base", "for-each-ref", "show-ref", "name-rev", "version"]
+    .map((subcommand): [string, RiskyOptions] => [subcommand, risky()]),
+  ["grep", risky(["open-files-in-pager"], ["O"])],
+  ["ls-remote", risky(["upload-pack", "exec"], ["u"])],
+  ["fetch", risky(["upload-pack"])],
+]);
 
 /** Global options that take no value and change nothing git writes. */
 const SAFE_GLOBAL_FLAGS: ReadonlySet<string> = new Set(["--no-pager", "-P", "--no-optional-locks", "--literal-pathspecs"]);
 
-/** Long options that write a file or run a command, in any subcommand. */
-const WRITING_LONG_OPTIONS: readonly string[] = ["output", "open-files-in-pager", "ext-diff"];
-
-/** Long options that run a command, for the subcommands that talk to a remote. */
-const REMOTE_COMMAND_LONG_OPTIONS: readonly string[] = ["upload-pack"];
-
-const REMOTE_SUBCOMMANDS: ReadonlySet<string> = new Set([FETCH, "ls-remote"]);
-
 /** Does `--name[=value]` spell, or abbreviate, one of `options`? */
 function namesLongOption(word: string, options: readonly string[]): boolean {
-  if (!word.startsWith("--") || word === "--") return false;
+  if (!word.startsWith("--")) return false;
   const name = word.slice(2).split("=")[0];
   return options.some((option) => option.startsWith(name));
 }
 
-/** Does a bundle of short options (`-inO`) hold `letter`? */
-const bundles = (word: string, letter: string): boolean => /^-[A-Za-z]/.test(word) && !word.startsWith("--") && word.includes(letter);
-
-function writesOrRuns(subcommand: string, word: string): boolean {
-  if (namesLongOption(word, WRITING_LONG_OPTIONS) || (subcommand === "grep" && bundles(word, "O"))) return true;
-  if (!REMOTE_SUBCOMMANDS.has(subcommand)) return false;
-  return namesLongOption(word, REMOTE_COMMAND_LONG_OPTIONS) || bundles(word, "u");
-}
+/** Does a bundle of short options (`-inO`) hold one of `letters`? */
+const bundles = (word: string, letters: readonly string[]): boolean =>
+  /^-[A-Za-z]/.test(word) && letters.some((letter) => word.includes(letter));
 
 /**
  * Does this simple command, given as each word's one static spelling (null
@@ -78,17 +97,16 @@ export function isReadOnlyGitInvocation(spellings: readonly (string | null)[]): 
     const word = spellings[index];
     if (word === "-C") {
       index++;
-      if (spellings[index] === null || spellings[index] === undefined) return false;
+      if ((spellings[index] ?? null) === null) return false;
       continue;
     }
     if (word === null || !word.startsWith("-")) break;
     if (!SAFE_GLOBAL_FLAGS.has(word)) return false;
   }
-  const subcommand = spellings[index];
-  if (subcommand === null || subcommand === undefined) return false;
-  if (!READ_ONLY_GIT_SUBCOMMANDS.has(subcommand) && subcommand !== FETCH) return false;
+  const options = READ_ONLY_GIT_SUBCOMMANDS.get(spellings[index] ?? "");
+  if (options === undefined) return false;
   const rest = spellings.slice(index + 1);
   const pathspecs = rest.indexOf("--");
-  const options = pathspecs === -1 ? rest : rest.slice(0, pathspecs);
-  return options.every((word) => word !== null && !writesOrRuns(subcommand, word));
+  const before = pathspecs === -1 ? rest : rest.slice(0, pathspecs);
+  return before.every((word) => word !== null && !namesLongOption(word, options.long) && !bundles(word, options.short));
 }
