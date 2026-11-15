@@ -29,7 +29,7 @@ intersections, same-file type references, interfaces that only look callable, an
 and a wrong reading produces a wrong verdict: a renamed export accepted, or a correct one refused.
 
 ADR-0042 still applies. Everything under `engine/src/core/` that the purity linter lists is pure, and
-`engine/src/core/skeleton/` joins `DEFAULT_PURE_MODULES` in this feature (INV-2). `typescript` is granted one
+`engine/src/core/skeleton/` joins DEFAULT_PURE_MODULES in this feature (INV-2). `typescript` is granted one
 file at a time through the exact list `TYPESCRIPT_COMPILER_API_SEAMS`. Any other core file that imports it
 fails the INV-1 regex rule, the programmatic boundary rule and the machine-purity closure audit. ADR-0042
 named exactly two seams, `mutation-plan.ts` and `import-graph.ts`. A third consumer of the parser needs a
@@ -120,7 +120,7 @@ such as an unparseable file, come back as values and are never thrown.
     in `excludePatterns`. Their description and fix hint name the surface readers.
     `engine/tests/linter/project-lint-rules.test.ts` fails when either copy drifts from the constant.
   - `engine/src/linter/programmatic/no-io-in-pure-modules.ts` lists `engine/src/core/skeleton/` in
-    `DEFAULT_PURE_MODULES` (INV-2). `engine/tests/linter/programmatic/machine-purity.test.ts` proves three
+    DEFAULT_PURE_MODULES (INV-2). `engine/tests/linter/programmatic/machine-purity.test.ts` proves three
     things: the seam's closure audits clean and reaches `import-graph.ts`, a `typescript` import added to a
     sibling such as `types.ts` is an `unaudited package`, and a widened `typescript/lib/tsserverlibrary`
     import from the seam is refused.
