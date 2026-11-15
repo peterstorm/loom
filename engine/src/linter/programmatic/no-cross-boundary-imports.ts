@@ -11,7 +11,7 @@
 import { dirname, join, sep } from "node:path";
 import type { Violation } from "../types";
 import { makeViolation } from "../types";
-import { isAbsolutePath, projectRelative } from "./baseline";
+import { inProjectFrame } from "./baseline";
 
 // --- Boundary Configuration ---
 
@@ -277,14 +277,12 @@ export function toRepositoryRelative(
 
 /**
  * The project-relative path of the file being linted: exact against the
- * project root when it is known and contains the file (the one relativization
- * the baselined rules share, `projectRelative`), otherwise — an absolute path
- * outside the root, or no root at all — recovered from the boundary prefixes
- * (`toRepositoryRelative`).
+ * project root when it is known and contains the file (the one frame rule,
+ * `inProjectFrame`), otherwise — an absolute path outside the root, or no root
+ * at all — recovered from the boundary prefixes (`toRepositoryRelative`).
  */
 function relativeToProjectOrBoundaries(filePath: string, boundaries: readonly BoundaryRule[], projectRoot: string | null): string {
-  const fromRoot = projectRelative(filePath, projectRoot);
-  return isAbsolutePath(fromRoot) ? toRepositoryRelative(filePath, boundaries) : fromRoot;
+  return inProjectFrame(filePath, projectRoot) ?? toRepositoryRelative(filePath, boundaries);
 }
 
 /**

@@ -1,4 +1,4 @@
-import { isAbsolutePath, projectRelative } from "./programmatic/baseline";
+import { inProjectFrame } from "./programmatic/baseline";
 
 /**
  * A rule's exclusion list — a regex rule's `excludePatterns` and
@@ -128,6 +128,26 @@ export function describeExcludePatternError(error: ExcludePatternError): string 
 export const describeExcludePatternListError = (key: string, { index, error }: ExcludePatternListError): string =>
   `${key}[${index}] ${describeExcludePatternError(error)}`;
 
+const throwError = (message: string): never => {
+  throw new Error(message);
+};
+
+/**
+ * A whole list, for a loader that refuses a malformed one: the refused entry
+ * is described under `key` after `prefix` (`<prefix>: excludePatterns[1] is
+ * empty — …`), the one wording every loader prints. `refuse` is the loader's
+ * own error channel; by default a plain `Error`.
+ */
+export function parseExcludePatternListOrThrow(
+  entries: readonly string[],
+  key: string,
+  prefix: string,
+  refuse: (message: string) => never = throwError,
+): readonly ExcludePattern[] {
+  const parsed = parseExcludePatternList(entries);
+  return parsed.ok ? parsed.value : refuse(`${prefix}: ${describeExcludePatternListError(key, parsed.error)}`);
+}
+
 const forwardSlashed = (path: string): string => path.replace(/\\/g, "/");
 
 /**
@@ -144,10 +164,12 @@ type FramedPath = Readonly<{
 }>;
 
 /** `lintFile` hands rules absolute paths; a path already relative is taken as
- *  project-relative (`projectRelative`), with or without a project root. */
+ *  project-relative (`inProjectFrame`), with or without a project root. */
 function framed(filePath: string, projectRoot: string | null): FramedPath {
-  const path = projectRelative(filePath, projectRoot);
-  return { kind: isAbsolutePath(path) ? "unframed" : "in-project", path };
+  const inProject = inProjectFrame(filePath, projectRoot);
+  return inProject === null
+    ? { kind: "unframed", path: forwardSlashed(filePath) }
+    : { kind: "in-project", path: inProject };
 }
 
 function matches(pattern: ExcludePattern, target: FramedPath): boolean {

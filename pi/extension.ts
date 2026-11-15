@@ -69,7 +69,7 @@ import { realPhaseOrderDeps } from "../engine/src/handlers/pre-tool-use/validate
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 import { admitPiSpawnBatch } from "../engine/src/core/spawn-admission";
 
-import { taskGraphPath, subagentDir, guardedLocations, editedFileRulesDir, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
+import { taskGraphPath, subagentDir, guardedLocations, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
 import { currentOrchestrationStatus } from "../engine/src/handlers/helpers/orchestration";
@@ -78,7 +78,7 @@ import { buildContextOutput } from "../engine/src/handlers/session-start/resume-
 
 // Linter integration (PostEdit lint via tool_result)
 import { piOperatorNoteSink, piPostEdit } from "../engine/src/handlers/pi-adapter";
-import { lintFile } from "../engine/src/linter/index";
+import { lintEditedFile } from "../engine/src/handlers/post-tool-use/lint-file";
 import { typeDiagnosticsAdvisory } from "../engine/src/handlers/type-diagnostics-runner";
 import { publishLoomReviewAuthorityBridge } from "../engine/src/handlers/helpers/programs/review-authority-bridge";
 import { assertAnchoredFilesystemPlatformSupported } from "../engine/src/utils/no-follow-fs";
@@ -652,9 +652,9 @@ export default function (
       const loomDefaultRulesDir = join(PACKAGE_ROOT, "lint-rules");
       const composed = await piPostEdit(event, {
         projectRoot,
-        // The rules of the project the edited file sits in, found as the
-        // Claude Code hook finds them (`editedFileRulesDir`).
-        lint: (filePath) => lintFile(filePath, "immediate", loomDefaultRulesDir, editedFileRulesDir(filePath, projectRoot)),
+        // The rules of the project the edited file sits in: the Claude Code
+        // hook's own lint (`lintEditedFile`).
+        lint: (filePath) => lintEditedFile(filePath, loomDefaultRulesDir, projectRoot),
         advise: (file) => typeDiagnosticsAdvisory(file),
         notifyOperator: piOperatorNoteSink(ctx, writeStderrLine),
       });

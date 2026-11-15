@@ -119,8 +119,8 @@ describe("a root holding a space or a single quote", () => {
   });
 
   it("the CLI is quoted the one way sh reads back", () => {
-    expect(loomCommandsAt("/home/o'brien/loom").mutationCheck("T2"))
-      .toBe("bun '/home/o'\\''brien/loom/engine/src/cli.ts' helper mutation-check --task 'T2'");
+    expect(AWKWARD.mutationCheck("T2"))
+      .toBe("bun '/home/o'\\''brien/my plugins/loom/engine/src/cli.ts' helper mutation-check --task 'T2'");
   });
 
   it("the sandbox script and lens paths keep the root verbatim", () => {
@@ -166,7 +166,7 @@ describe("the running package", () => {
 
   it("every printed path is absolute and names a file of this package", () => {
     const cli = shellWords(LOOM_COMMANDS.mutationCheck("T1"), tmpdir())[0];
-    const paths = [cli, LOOM_COMMANDS.sandboxScript, ...SECURITY_LENSES.map(LOOM_COMMANDS.securityLens)];
+    const paths = [cli, LOOM_COMMANDS.sandboxScript, ...SECURITY_LENSES.map((lens) => LOOM_COMMANDS.securityLens(lens))];
     for (const path of paths) {
       expect(path?.startsWith("/"), path).toBe(true);
       expect(existsSync(path ?? ""), path).toBe(true);

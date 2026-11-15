@@ -3,7 +3,25 @@
  * spelling of a target that reaches the project through a symlink.
  */
 import { describe, expect, it } from "vitest";
-import { projectRelative, spelledUnderRoot } from "../../../src/linter/programmatic/baseline";
+import { inProjectFrame, projectRelative, spelledUnderRoot } from "../../../src/linter/programmatic/baseline";
+
+describe("inProjectFrame", () => {
+  it("is the path from the root for a target inside the project", () => {
+    expect(inProjectFrame("/work/shop/src/order.ts", "/work/shop")).toBe("src/order.ts");
+    expect(inProjectFrame("C:\\work\\shop\\src\\order.ts", "C:\\work\\shop\\")).toBe("src/order.ts");
+  });
+
+  it("takes a relative target as project-relative, with or without a root", () => {
+    expect(inProjectFrame("src\\order.ts", "/work/shop")).toBe("src/order.ts");
+    expect(inProjectFrame("src/order.ts", null)).toBe("src/order.ts");
+  });
+
+  it("is null for an absolute target outside the root or with no root", () => {
+    expect(inProjectFrame("/work/shop-old/src/order.ts", "/work/shop")).toBeNull();
+    expect(inProjectFrame("/work/shop/src/order.ts", null)).toBeNull();
+    expect(inProjectFrame("D:/work/shop/a.ts", "C:/work/shop")).toBeNull();
+  });
+});
 
 describe("projectRelative", () => {
   it("strips the project root from an absolute path inside it", () => {

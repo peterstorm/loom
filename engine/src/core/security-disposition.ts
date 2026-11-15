@@ -234,7 +234,7 @@ export function securityDisposition(input: Readonly<{
  *  package `commands` name — at the paths the disposition's own source
  *  derives. An operator should not have to read this module to know what to
  *  run next, nor translate the line before running it. */
-export function renderDispositionHandoff(commands: LoomCommands, disposition: SecurityDisposition): string {
+export function renderDispositionHandoff(commands: Pick<LoomCommands, "orchestrationStart">, disposition: SecurityDisposition): string {
   const handoff = dispositionHandoffPaths(disposition.source.locator, disposition.source.runId);
   const count = (decision: SecurityDispositionDecision): number =>
     disposition.entries.filter((entry) => entry.decision === decision).length;

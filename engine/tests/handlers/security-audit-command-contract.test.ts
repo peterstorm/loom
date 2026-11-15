@@ -91,6 +91,28 @@ describe("the operations table of docs/security-audit.md", () => {
   });
 });
 
+describe("isOperationsTable", () => {
+  // The command test below asserts that NO table matches; a detector that
+  // matched nothing would pass it vacuously, so each arm is pinned here.
+  const onlyTable = (...lines: readonly string[]): Table => {
+    const [table] = orFail(tablesOf(markdown("inline.md", lines.join("\n"))), describeMarkdownError);
+    if (table === undefined) throw new Error("the inline document holds no table");
+    return table;
+  };
+
+  it("recognises a table with an Operation column, even when no cell is a code span", () => {
+    expect(isOperationsTable(onlyTable("| Input | Operation |", "|---|---|", "| flags | status |"))).toBe(true);
+  });
+
+  it("recognises a table whose first column names operations in code spans, whatever its header", () => {
+    expect(isOperationsTable(onlyTable("| Step | Takes |", "|---|---|", "| prose first | flags |", "| `verify` | stdin |"))).toBe(true);
+  });
+
+  it("passes over an unrelated table", () => {
+    expect(isOperationsTable(onlyTable("| Field | Meaning |", "|---|---|", "| run id | the run `run.x` |", "| `Out Dir` | where |"))).toBe(false);
+  });
+});
+
 describe("commands/security-audit.md", () => {
   it("keeps no operations table of its own and points at the guide's", () => {
     // One owner per fact: a second table is a second place to drift. The

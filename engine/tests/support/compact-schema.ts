@@ -17,8 +17,14 @@ import { describeMarkdownError, fencesOf, sectionOf, type MarkdownError, type Ma
 
 const SCHEMA_SECTION = "reviewer-payload-schema";
 
-/** The schema block: its exact text, and that text parsed. */
-export type CompactSchema = Readonly<{ text: string; value: unknown }>;
+declare const compactSchemaBrand: unique symbol;
+
+/**
+ * The schema block: its exact text, and that text parsed. Branded, so the only
+ * value of this type is one `compactSchemaOf` read from a fragment: a suite
+ * cannot hand-build a schema and compare the issued one against it.
+ */
+export type CompactSchema = Readonly<{ text: string; value: unknown }> & Readonly<{ [compactSchemaBrand]: true }>;
 
 export type CompactSchemaError =
   | Readonly<{ kind: "markdown"; error: MarkdownError }>
@@ -64,7 +70,8 @@ export function compactSchemaOf(source: MarkdownSource): DomainResult<CompactSch
   const parsed = parseJson(block.body);
   if (!parsed.ok) return err({ kind: "schema-not-json", source: name, line: block.line + 1, message: parsed.error });
   if (block.body !== JSON.stringify(parsed.value)) return err({ kind: "schema-not-compact", source: name, line: block.line + 1 });
-  return { ok: true, value: Object.freeze({ text: block.body, value: parsed.value }) };
+  // The one place a CompactSchema is minted: every check above has passed.
+  return { ok: true, value: Object.freeze({ text: block.body, value: parsed.value }) as CompactSchema };
 }
 
 /** One sentence naming the source and how its schema section departs from the convention. */

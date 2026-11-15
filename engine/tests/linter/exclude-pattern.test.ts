@@ -16,6 +16,7 @@ import {
   matchesAnyExcludePattern,
   parseExcludePattern,
   parseExcludePatternList,
+  parseExcludePatternListOrThrow,
 } from "../../src/linter/exclude-pattern";
 import { excludePatterns } from "./exclude-patterns";
 
@@ -120,6 +121,23 @@ describe("parseExcludePatternList", () => {
   });
 });
 
+describe("parseExcludePatternListOrThrow", () => {
+  it("returns the parsed list", () => {
+    expect(parseExcludePatternListOrThrow(["apps/"], "excludePatterns", "rule x")).toEqual(excludePatterns("apps/"));
+  });
+
+  it("throws the refusal after the caller's prefix, under the list's key", () => {
+    expect(() => parseExcludePatternListOrThrow(["apps/", ""], "excludeFromMaxLines", "/p/config.json"))
+      .toThrow(new Error("/p/config.json: excludeFromMaxLines[1] is empty — name a directory with a trailing '/' (every file beneath it) or a file suffix"));
+  });
+
+  it("refuses through the caller's own channel when it names one", () => {
+    class Refused extends Error {}
+    const refuse = (message: string): never => { throw new Refused(message); };
+    expect(() => parseExcludePatternListOrThrow(["*.ts"], "excludePatterns", "rule x", refuse)).toThrow(Refused);
+  });
+});
+
 describe("a file-suffix pattern", () => {
   it.each([
     ["/work/shop/src/domain/order.test.ts", ".test.ts"],
@@ -220,12 +238,15 @@ describe("a directory pattern is matched inside the project", () => {
     expect(excludes("/home/u/apps/shop-old/apps/x.ts", "apps/", UNDER_APPS)).toBe(false);
   });
 
-  it("no directory pattern excludes a file by the directories above its project", () => {
+  it("a directory pattern excludes a file by the directories inside its project, never by those above it", () => {
     const segment = fc.stringMatching(/^[a-z]{1,6}$/);
-    fc.assert(fc.property(fc.array(segment, { minLength: 1, maxLength: 4 }), segment, (above, name) => {
+    const segments = fc.array(segment, { minLength: 1, maxLength: 4 });
+    fc.assert(fc.property(segments, segments, segment, (above, inside, name) => {
       const root = `/${above.join("/")}`;
-      const inProject = `${root}/zz-${name}.ts`;
-      for (const directory of above) expect(excludes(inProject, `${directory}/`, root)).toBe(false);
+      const inProject = `${root}/${inside.join("/")}/zz-${name}.ts`;
+      for (const directory of [...above, ...inside]) {
+        expect(excludes(inProject, `${directory}/`, root)).toBe(inside.includes(directory));
+      }
     }));
   });
 });
