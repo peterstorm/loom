@@ -6,10 +6,13 @@ import { REPOSITORY } from "./fixtures/repository-roots";
 const workflow = readFileSync(join(REPOSITORY, ".github/workflows/ci.yml"), "utf8");
 
 describe("CI verification contract", () => {
-  it("verifies PRs, branch pushes, and exact tag revisions with the same command", () => {
-    expect(workflow).toContain("  pull_request:");
-    expect(workflow).toContain('    branches: ["**"]');
-    expect(workflow).toContain('    tags: ["**"]');
+  it("verifies pull requests, pushes to main and manual dispatch with the same command, cancelling superseded runs", () => {
+    // The repository is private and the macOS leg is metered at 10x: a branch
+    // push is validated by its pull_request run, a tag points at a commit main
+    // already validated, and a newer run on the same ref replaces the older.
+    expect(workflow).toMatch(/\non:\n {2}pull_request:\n {2}push:\n {4}branches: \[main\]\n {2}workflow_dispatch:\n/);
+    expect(workflow).not.toMatch(/branches: \["\*\*"\]|tags:/);
+    expect(workflow).toMatch(/concurrency:\n {2}group: ci-\$\{\{ github\.ref \}\}\n {2}cancel-in-progress: true/);
     expect(workflow.match(/npm run verify/g)).toHaveLength(1);
     expect(workflow).not.toMatch(/npm run (test|typecheck)|bun test|bunx|npx|continue-on-error|@latest|publish/);
   });

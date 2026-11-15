@@ -164,7 +164,7 @@ bun install --frozen-lockfile
 npm run verify
 ```
 
-`npm run verify` is the full gate: typecheck, then lint, then the whole test script (the Vitest suite and the smoke commands). CI runs it on Linux and macOS for pull requests, branch pushes and tags. Bare `bun test` invokes Bun's built-in runner, not this gate. Details, focused iteration and the repository map: [Development](docs/development.md#development-validation).
+`npm run verify` is the full gate: typecheck, then lint, then the whole test script (the Vitest suite and the smoke commands). CI runs it on Linux and macOS for pull requests, pushes to `main` and manual dispatch. Bare `bun test` invokes Bun's built-in runner, not this gate. Details, focused iteration and the repository map: [Development](docs/development.md#development-validation).
 
 ## License
 
