@@ -184,3 +184,26 @@ describe("panel-mode judge-verdict round-trip through the substitution gate", ()
     expect(findResidualPlaceholders(finalizeWithVerdicts(canonical))).toEqual([]);
   });
 });
+
+/**
+ * Panel finalize hands off to the standard architecture template by step
+ * number, naming each step's title beside its number: `steps 5 ("Design the
+ * chosen approach"), 6 (…)`. Each such pair must still be a `### N. Title`
+ * heading of `phase-architecture.md`, so renumbering or renaming a step there
+ * fails here instead of silently sending the finalizer to the wrong step.
+ */
+describe("panel finalize's step references resolve in the standard template", () => {
+  const stepReferences = [...readTemplate("phase-arch-finalize.md").matchAll(/\b(\d+) \("([^"]+)"\)/g)]
+    .map(([, number, title]) => `${number}. ${title}`);
+  const standardSteps = new Set(
+    [...readTemplate("phase-architecture.md").matchAll(/^### (\d+\. .+)$/gm)].map(([, heading]) => heading),
+  );
+
+  it("names at least one standard step", () => {
+    expect(stepReferences.length).toBeGreaterThan(0);
+  });
+
+  it.each(stepReferences)("standard template has the heading ### %s", (heading) => {
+    expect(standardSteps.has(heading), [...standardSteps].join("\n")).toBe(true);
+  });
+});

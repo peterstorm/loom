@@ -144,7 +144,7 @@ A Wave with implementation files also carries one engine-added Distill Task (`di
 
 **Completion.** A Task reaches `implemented` only when its proof obligations are satisfied and its attempt wrote only files the Task owns. The engine issues each attempt its own authority, so completion prose, a guessed Task id or a late result from an earlier attempt cannot complete a Task. The engine runs no project commands while a Wave's Tasks are still writing: Agents run their Task's tests themselves, and whole-project build, typecheck and test commands run once, at the Wave Gate.
 
-**Retry.** A failed attempt gets one retry. Status publishes the retry's exact context, naming what the first attempt failed, and the spawn gate accepts only those bytes. A second failure is a terminal escalation that an operator must resolve; there is no third attempt. A failure of the infrastructure (an unreadable baseline, a Git error) does not consume the retry. Recovery commands: [operations](reference/recovery.md#implementation-escalation-semantic-attempt-2-exhausted). The attempt and settlement rules: [Implementation attempts and settlement](verification.md#implementation-attempts-and-settlement).
+**Retry.** A failed attempt gets one retry. Status publishes the retry's exact context, naming what the first attempt failed, and the spawn gate accepts only those bytes. A second failure is a terminal escalation that an operator must resolve; there is no third attempt. A failure of the infrastructure (an unreadable baseline, a Git error) does not consume the retry. Recovery commands: [recovery](reference/recovery.md#implementation-escalation-semantic-attempt-2-exhausted). The attempt and settlement rules: [Implementation attempts and settlement](verification.md#implementation-attempts-and-settlement).
 
 ## Task proof obligations
 
@@ -240,9 +240,9 @@ The result separates `surviving_critical_findings`, `advisory_findings`, and `re
 Review aspects are `code`, `errors`, `tests`, `types`, `comments`, `architecture`, `simplify`, and `all` (default):
 
 - `simplify` runs `code-simplifier` (the `distill` skill in review mode). Under `all` it joins whenever the scope changes source or test files.
-- `architecture` runs `architecture-tech-lead` (the `deepen` skill in review mode). Under `all` it always joins, and it is selected automatically for more than 500 additions, more than 10 files, or new structure.
+- `architecture` runs `architecture-tech-lead` (the `deepen` skill in review mode). Under `all` it always joins. For any other aspect it joins automatically when the scope has more than 500 additions, more than 10 files, or new structure.
 
-A later review of the same work can be started as an explicit successor of an earlier one, which keeps the earlier Findings and their history ([operations](standalone-review.md#standalone-lineage)).
+A later review of the same work can be started as an explicit successor of an earlier one, which keeps the earlier Findings and their history ([standalone review](standalone-review.md#standalone-lineage)).
 
 ## `/review-and-fix`
 
@@ -256,7 +256,7 @@ This workflow composes two registered programs around semantic remediation:
 
 What the result means: `repair-checked` says the repaired-state checks were observed by the engine on unchanged candidate bytes. The grouping, root cause, invariant and sibling accounting are the parent's declarations, not engine observations, and an operator-owned command can still write a valid-looking report. `repair-checked` is not proof that the defect family is closed.
 
-The parent must not substitute its own `git add` recipe or inject process outcomes, report bytes, manifests, installation receipts, or Run JSON through remediation input or hand-built run artifacts. Exact staged-set installation is a security and correctness boundary, not convenience automation. See the [Review and Fix Skill](../skills/review-and-fix/SKILL.md) and [operations recovery](standalone-review.md#remediation-and-git-safety).
+The parent must not substitute its own `git add` recipe or inject process outcomes, report bytes, manifests, installation receipts, or Run JSON through remediation input or hand-built run artifacts. Exact staged-set installation is a security and correctness boundary, not convenience automation. See the [Review and Fix Skill](../skills/review-and-fix/SKILL.md) and [remediation and Git safety](standalone-review.md#remediation-and-git-safety).
 
 ## `/security-audit`
 

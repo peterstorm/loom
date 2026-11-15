@@ -40,7 +40,7 @@ An orchestrator depends on the port interface (`PaymentGateway`); Spring injects
 
 ## Either
 
-Fallible core functions return `Either<Error, T>`: Left is the error, Right the success. Use the project's Either. If none exists, define a sealed `Either<L, R>` with `Left` and `Right` records, or use Vavr. The samples use only `Either.left`, `Either.right`, `map`, `flatMap` and `fold`. Errors are sealed hierarchies, not strings.
+Fallible core functions return `Either<Error, T>`: Left is the error, Right the success. Use the project's Either. If none exists, define a sealed `Either<L, R>` with `Left` and `Right` records, or use Vavr. The samples use only `Either.left`, `Either.right`, `map` and `flatMap`; a controller turns the result into a response with `fold`. Errors are sealed hierarchies, not strings.
 
 | Use Case | Type | Reason |
 |----------|------|--------|
@@ -205,7 +205,7 @@ public sealed interface Attempt {
 public sealed interface Decision {
     record Charge() implements Decision {}                // first sight of this key
     record Replay(Outcome outcome) implements Decision {} // already settled: return the stored answer
-    record Reconcile() implements Decision {}             // an earlier run stopped mid-flight
+    record Reconcile() implements Decision {}             // pending: an earlier run stopped, or one is still running
     record KeyReused() implements Decision {}             // same key, different command
 }
 
@@ -259,7 +259,7 @@ public class ChargeCardOrchestrator {
             case Decision.KeyReused reused -> Either.left(new ChargeError.KeyReused());
             case Decision.Replay replay -> Either.right(replay.outcome());
             case Decision.Charge first -> chargeOnce(command);
-            case Decision.Reconcile retry -> chargeOnce(command);
+            case Decision.Reconcile retry -> chargeOnce(command); // this PSP deduplicates the key; without that, query it first
         };
     }
 

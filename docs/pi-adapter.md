@@ -253,4 +253,4 @@ bunx vitest run tests/pi-write-grant.test.ts
 bunx vitest run tests/runtime-resource-portability.test.ts
 ```
 
-Then run `/reload` in Pi and exercise the changed command from a project with the intended package scope. These are for iteration; the gate before a merge is `npm run verify` ([Operations](development.md#development-validation)).
+Then run `/reload` in Pi and exercise the changed command from a project with the intended package scope. These are for iteration; the gate before a merge is `npm run verify` ([Development](development.md#development-validation)).

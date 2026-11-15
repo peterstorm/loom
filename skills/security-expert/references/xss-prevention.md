@@ -31,7 +31,7 @@ Escaping is not enough for these sinks:
 | `href`, `src`, `action`, `formAction` | The value is a URL; escaping does not stop `javascript:` or `data:` | Parse and allowlist the scheme (below) |
 | `ref.current.innerHTML = ...`, `document.write`, `insertAdjacentHTML` | Bypass React | Render through JSX instead |
 | `eval`, `new Function`, string arguments to `setTimeout`/`setInterval` | Code execution | Never with data |
-| `<script>` built from data, JSON inlined into a script block | `</script>` in the data closes the block | Use the framework's data passing; escape `<` as `<` if you must inline |
+| `<script>` built from data, JSON inlined into a script block | `</script>` in the data closes the block | Use the framework's data passing; escape `<` as `\u003c` if you must inline |
 | `style` from data, CSS injected as text | Data exfiltration, UI redress | Fixed class names; never user CSS |
 
 ## URLs

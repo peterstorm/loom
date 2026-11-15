@@ -51,7 +51,7 @@ Unreadable or malformed authority is represented as `unavailable` and leads to `
 
 Status re-proves accepted Review Packet authority the way the Wave Gate does: it reads each reviewed Task's declared bytes in the TaskGraph's own project and compares them with the reviewed snapshot. While a gate waits on an advisory decision, unchanged bytes therefore read as intact, and only real drift or a Git observation failure fails the `Review Packet workspace integrity` prerequisite.
 
-Population reports coverage immediately. Modern completion-suite readiness (`required`, `accepted`, `rejected`, or `stale`) includes `projectVerificationCoverage`. `configured` carries non-empty sorted `checkIds`, not a pass. `not-configured` distinguishes `engine-default` (source absent at population), `empty-operator-manifest` (explicit zero project checks), and `historical-unknown` (archived reserved-only receipt without source provenance). Reserved-only suites remain eligible to advance when the existing gates pass; report “Reserved checks accepted; Project verification NOT CONFIGURED,” not “project verification passed.” Completed schema-v2 coverage comes from the archived receipt roster, never today's manifest. `legacy-unavailable` remains unavailable without invented coverage. These are read-model facts, not new persisted authority or waivers.
+Status reports project-verification coverage from the moment the TaskGraph is populated. Modern completion-suite readiness (`required`, `accepted`, `rejected`, or `stale`) includes `projectVerificationCoverage`. `configured` carries non-empty sorted `checkIds`, not a pass. `not-configured` distinguishes `engine-default` (source absent at population), `empty-operator-manifest` (explicit zero project checks), and `historical-unknown` (archived reserved-only receipt without source provenance). Reserved-only suites remain eligible to advance when the existing gates pass; report “Reserved checks accepted; Project verification NOT CONFIGURED,” not “project verification passed.” Completed schema-v2 coverage comes from the archived receipt roster, never today's manifest. `legacy-unavailable` remains unavailable without invented coverage. These are read-model facts, not new persisted authority or waivers.
 
 Raw state inspection remains useful for diagnosis, but it is not gate logic:
 
@@ -278,7 +278,7 @@ A missing handshake means the Pi session predates this protocol or did not load 
 
 ### Wave Gate full-tier lint refuses imports the branch allows
 
-Full-tier lint is the reserved `loom:full-tier-lint` suite check. During migration, the existing terminal lint invocation also remains as a fail-closed canary.
+Full-tier lint runs twice: `wave-gate-start` lints the Wave's files before the gate opens and refuses to start on a violation, and the reserved `loom:full-tier-lint` suite check lints them again at completion. Both fail closed.
 
 The Wave Gate's `loom:full-tier-lint` check runs against the branch's files (the completion suite changes into the worktree), but the lint rule code is the loaded runtime's, not the branch's. A branch that changes a rule, for example a new per-file capability grant in `no-cross-boundary-imports` for a `node:` builtin or an exact-specifier package, therefore fails the gate with a boundary refusal that its own rule would admit. The branch's files are correct; the runtime is older.
 

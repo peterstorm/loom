@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (2026-09-10). Implemented; merged in PR #51 (`3fb60e1a`).
+Accepted (2026-09-16). Implemented; merged in PR #51 (`3fb60e1a`).
 
 ## Context
 
@@ -203,7 +203,7 @@ Actual Repair-Checked does not mutate the source's active Finding or history.
 
 ## Bounds and evidence
 
-[Operations](../standalone-review.md#resource-and-compatibility-boundaries) pins the actual
+[Standalone review](../standalone-review.md#resource-and-compatibility-boundaries) pins the actual
 simultaneous limits: 512 KiB/file, 2 MiB raw source, 4096 paths/origins, 4 MiB packet
 payload before byte arrays plus an exact 16 MiB canonical serialized-packet ceiling,
 2 MiB/15 predecessor sections, 16 MiB retained reads and
@@ -263,7 +263,7 @@ are pending.
 
 - [Selected P5 Plan](../../.claude/plans/2026-09-10-standalone-lineage.md)
 - [Domain language](../../CONTEXT.md)
-- [Operations and exact input](../standalone-review.md#standalone-lineage)
+- [Standalone review and exact input](../standalone-review.md#standalone-lineage)
 - [Review-and-fix Skill](../../skills/review-and-fix/SKILL.md)
 - [ADR-0005](ADR-0005-per-program-facade-drivers.md), [ADR-0007](ADR-0007-curated-public-surface.md),
   [ADR-0008](ADR-0008-versioned-defect-family-installation-authority.md),

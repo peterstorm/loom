@@ -114,6 +114,18 @@ The functional core is pure by default inside its roots. List the core's directo
 
 A trailing `/` names a directory; otherwise the entry is one file. Globs are refused. What a pure module may not import or call is listed in the README under `no-io-in-pure-modules`.
 
+## Function Length
+
+<!-- wire-example: linter-project-config -->
+```json
+{
+  "maxFunctionLines": 50,
+  "excludeFromMaxLines": [".test.ts", ".spec.ts"]
+}
+```
+
+`max-function-lines` runs at the Wave Gate. 50 is the engine default; test files are excluded because a `describe` block is naturally long.
+
 ## Rules That Need No Configuration
 
 These fire in every TypeScript project; the README says what each one does and does not flag.
