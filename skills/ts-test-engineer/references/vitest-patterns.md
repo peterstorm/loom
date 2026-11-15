@@ -11,7 +11,7 @@ import tsconfigPaths from 'vite-tsconfig-paths';
 export default defineConfig({
   plugins: [tsconfigPaths(), react()],
   test: {
-    environment: 'jsdom',           // only component tests need it; pure and orchestrator tests run in 'node'
+    environment: 'jsdom',           // every file; a pure or orchestrator test may opt out with `// @vitest-environment node`
     setupFiles: ['./vitest.setup.ts'],
     coverage: { provider: 'v8', reporter: ['text', 'lcov'] },
   },

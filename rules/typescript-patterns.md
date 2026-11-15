@@ -119,7 +119,7 @@ type Attempt =
 type Decision =
   | { kind: 'charge' } // first sight of this key
   | { kind: 'replay'; outcome: Outcome } // already settled: return the stored answer
-  | { kind: 'reconcile' } // an earlier run stopped mid-flight
+  | { kind: 'reconcile' } // pending: an earlier run stopped, or one is still running
   | { kind: 'key-reused' }; // same key, different command
 
 export const decide = (existing: Attempt | undefined, fingerprint: Fingerprint): Decision => {

@@ -46,7 +46,7 @@ Published as `run.pr167-src-policy-20261113` (disposition digest `b3537537…`) 
 
 ## Accepted fixes
 
-- `engine/src/linter/exclude-pattern.ts`: path and pattern are both anchored by a leading slash, so a relative path is excluded as its absolute spelling is; header comment states what the matcher covers.
+- `engine/src/linter/exclude-pattern.ts`: path and pattern are both anchored by a leading slash, so a relative path is excluded as its absolute spelling is; header comment states what the matcher covers. *(Superseded: the [Follow-up](#follow-up--branch-fixexclusion-gaps-and-deferred-advisories) section states the current rule.)*
 - `engine/src/core/security-lens-select.ts`, `engine/src/core/wire-contract.ts`: whitespace.
 - `docs/design-functional-evaluator.md`: section 7 names `AGENT_CATALOG`.
 - `engine/tests/linter/exclude-pattern.test.ts`, `engine/tests/linter/programmatic/max-function-lines.test.ts`: relative-path and directory-form cases.
@@ -58,7 +58,7 @@ Published as `run.pr167-src-policy-20261113` (disposition digest `b3537537…`) 
 
 The source run's code-reviewer raised, on a first attempt the engine rejected for incomplete read coverage, that a directory pattern matches anywhere in an absolute path, so `apps/` also matches a checkout at `/home/u/apps/project/`. Its admitted second attempt reported nothing, so this is not a Finding and no remediation evidence covers it.
 
-Fixed afterwards at the operator's request, outside the review run: `matchesAnyExcludePattern` takes the project root and compares the project-relative path (`projectRelative`). `lintFile` / `lintFiles` derive the root from the project rules directory (`projectRootOf`) and pass it through `executeRules`; `max-function-lines` receives it from `createProgrammaticRules`. With no project root, or for a file outside it, the path is compared as given. Covered by `engine/tests/linter/{exclude-pattern,executor,index}.test.ts` and `programmatic/max-function-lines.test.ts`; the `lintFile` cases fail against the unfixed source.
+Fixed afterwards at the operator's request, outside the review run: `matchesAnyExcludePattern` takes the project root and compares the project-relative path (`projectRelative`). `lintFile` / `lintFiles` derive the root from the project rules directory (`projectRootOf`) and pass it through `executeRules`; `max-function-lines` receives it from `createProgrammaticRules`. With no project root, or for a file outside it, the path was compared as given; the [Follow-up](#follow-up--branch-fixexclusion-gaps-and-deferred-advisories) section replaced that with "excludes nothing". Covered by `engine/tests/linter/{exclude-pattern,executor,index}.test.ts` and `programmatic/max-function-lines.test.ts`; the `lintFile` cases fail against the unfixed source.
 
 ## Validation (my runs, not remediation evidence)
 

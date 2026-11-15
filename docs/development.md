@@ -77,7 +77,7 @@ A full sweep adds every property-test file twice at 20× its declared runs on fr
 
 ### Documented wire examples
 
-Every example of a wire shape in `agents/`, `commands/`, `skills/`, `docs/` and `references/` is put through the production parser that decides that shape ([ADR-0073](adr/ADR-0073-every-documented-wire-example-is-parsed-by-its-production-parser.md)). The suite is `engine/tests/docs/doc-wire-examples.test.ts`.
+Every example of a wire shape in `agents/`, `commands/`, `skills/`, `docs/`, `references/` and `lint-rules/` is put through the production parser that decides that shape ([ADR-0073](adr/ADR-0073-every-documented-wire-example-is-parsed-by-its-production-parser.md)). The suite is `engine/tests/docs/doc-wire-examples.test.ts`.
 
 A marker line directly above the fence says what the fence is:
 

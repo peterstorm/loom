@@ -24,7 +24,7 @@ Write to the file path in your task's `file_list`. Decompose pre-allocated its A
 
 Constraints:
 - Size: target 6KB; the hard cap is 10KB. Implementation notes, review-round history, test counts and digests belong in the PR or the plan, not the ADR.
-- Supersession: a changed decision gets a new ADR that supersedes the old one, with the one line "Superseded by ADR-NNNN" added to the old one's Status. Never amend an existing ADR in place.
+- Supersession: a changed decision gets a new ADR that supersedes or amends the old one, and that relation is added to the old one's Status. Never rewrite an existing ADR's decision in place; a Status relation, a moved link or a corrected fact is not a rewrite.
 - Write exactly one ADR per invocation.
 - Do not write code.
 - Do not create or modify files outside the path in `file_list`.

@@ -192,11 +192,13 @@ Import the `error.tsx` component under a name that does not shadow the global `E
 // app/users/error.tsx
 'use client';
 
-export default function UsersError({ error, reset }: { error: Error; reset: () => void }) {
+// `error` is `unknown`, and a Server Component's error reaches production with a
+// generic message, so the page shows its own copy. `retry` re-fetches and re-renders (Next.js 16.3).
+export default function UsersError({ retry }: { error: unknown; retry: () => void }) {
   return (
     <div role="alert">
-      <p>Error: {error.message}</p>
-      <button onClick={reset}>Try again</button>
+      <p>We could not load the users.</p>
+      <button onClick={retry}>Try again</button>
     </div>
   );
 }
@@ -204,15 +206,16 @@ export default function UsersError({ error, reset }: { error: Error; reset: () =
 // __tests__/users/error.test.tsx
 import UsersError from '@/app/users/error';
 
-it('displays the error and allows a retry', async () => {
-  const reset = vi.fn();
+it('shows its own copy, never the thrown message, and retries', async () => {
+  const retry = vi.fn();
   const user = userEvent.setup();
 
-  render(<UsersError error={new Error('Failed to load')} reset={reset} />);
+  render(<UsersError error={new Error('db password=hunter2')} retry={retry} />);
 
-  expect(screen.getByRole('alert')).toHaveTextContent('Failed to load');
+  expect(screen.getByRole('alert')).toHaveTextContent('We could not load the users.');
+  expect(screen.getByRole('alert')).not.toHaveTextContent('hunter2');
 
   await user.click(screen.getByRole('button', { name: /try again/i }));
-  expect(reset).toHaveBeenCalled();
+  expect(retry).toHaveBeenCalledOnce();
 });
 ```

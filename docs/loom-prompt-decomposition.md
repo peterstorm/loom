@@ -23,7 +23,7 @@ The same layering holds one level down:
 - Phase templates (`commands/templates/phase-*.md`) carry per-run values and the phase's process. Agent files (`agents/*.md`) own what does not vary by run: the interview digest labels, the candidate format and the judge verdict schema.
 - `references/architecture-interview.md` owns the architecture questionnaire; the standard template and the panel interviewer both read it.
 - `references/executable-models.md` owns the executable-model grammar. `phase-architecture.md` step 6 is a trigger list that sends the agent to one section of it. Enforcement mechanics and known limits are in `docs/executable-models-enforcement.md`, which no prompt loads.
-- The hook table and the State File shape moved to the end of `docs/architecture.md`.
+- The hook table and the State File shape moved to `docs/architecture.md`: the hook table under "Layer 2: harness adapters" → "Claude Code", the State File under "Two persistence domains" → "Protected TaskGraph".
 
 `engine/src/handlers/session-start/resume-after-clear.ts` still sends a resumed session to `commands/loom.md`, "Phase 5: Execute", so that heading stays in the command.
 
@@ -33,7 +33,7 @@ The same layering holds one level down:
 |---|---|
 | `engine/tests/runbook-contract.test.ts` | `panel-runbook.md` names every `panel-contract` operation, in order, with every flag; the interviewer agent carries every digest label and enum value; the binding grammar and frozen-ADT refusals in `executable-models.md`; decompose rule 12; the skeleton outcomes in `commands/loom.md` Phase 5 |
 | `engine/tests/panel-config.test.ts` | The panel counts in `panel-runbook.md` equal the config constants; the digest labels in the interviewer agent equal the parser's |
-| `engine/tests/panel-templates.test.ts` | For every `phase-*.md`, the placeholders in the template equal the variables its row declares (the Phases table in `commands/loom.md`, or the template table in `panel-runbook.md`), and each template names its agent's required skill |
+| `engine/tests/panel-templates.test.ts` | For every `phase-*.md`, the placeholders in the template equal the variables its row declares (the Phases table in `commands/loom.md`, or the template table in `panel-runbook.md`), and each template names its agent's required skill; each numbered step `phase-arch-finalize.md` names is still that `### N. Title` heading of `phase-architecture.md` |
 | `engine/tests/command-preflight-contract.test.ts` | The first Bash block under `## Setup` is the bun check and fails closed |
 | `engine/tests/impl-agent-skill-contract.test.ts`, `implementation-loop-prompt-contract.test.ts`, `impl-agent-verification-forms.test.ts` | The brief template's variables, workflow order and final-run command forms |
 | `engine/tests/docs/doc-wire-examples.test.ts` | Every JSON example in the command, runbooks, templates and agents carries a wire-example marker and parses |

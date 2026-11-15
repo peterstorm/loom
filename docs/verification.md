@@ -38,7 +38,7 @@ This is Loom's own manifest, with explicit values for the three optional setting
     "timeoutMs": 200000,
     "report": { "kind": "required-file", "path": ".loom/completion-reports/affected.junit.xml" }
   },
-  "testFileSuffixes": [".test.ts", ".spec.ts"],
+  "testFileSuffixes": [".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx"],
   "distillPass": "on",
   "taskMutationCheck": "on"
 }

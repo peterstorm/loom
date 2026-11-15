@@ -5,8 +5,8 @@ Used by `adr-writer-agent` when expanding plan AD-N seeds into full ADRs (one ta
 ## Norms
 
 - **Size.** Target 6KB; the hard cap is 10KB.
-- **Status.** One line: a word from the vocabulary below plus a date.
-- **Changing a decision.** Write a new ADR that supersedes the old one, and add the one line "Superseded by ADR-NNNN" to the old one's Status. Do not amend the old ADR in place.
+- **Status.** A status from the vocabulary below (`Superseded by ADR-NNNN` is one) and a date, then any relation to another ADR ("Amends ADR-NNNN", "Amended by ADR-NNNN").
+- **Changing a decision.** Write a new ADR that supersedes or amends the old one, and add that relation to the old one's Status. Do not rewrite the old ADR's decision in place; a Status relation, a moved link or a corrected fact is not a rewrite.
 - **What stays out.** Implementation notes, review-round history, test counts and digests belong in the PR or the plan, not the ADR.
 
 ---

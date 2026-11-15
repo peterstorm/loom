@@ -21,4 +21,4 @@ Produce exactly one candidate through the lens below, following your agent defin
 
 ## Writing
 
-Write the candidate to **{candidate_output_path}**. You may write with Write/Edit only there (this run's panel directory under `.claude/specs/`).
+Write the candidate to **{candidate_output_path}**. Write or Edit no other file. The harness lets a panel agent write anywhere under `.claude/specs/`; that grant is wider than this task.
