@@ -268,7 +268,10 @@ notice naming why and which policy applies.
   `read-context-section.ts`, `ledger-epoch.ts`) by a path holding a `/` reads,
   whatever paths it names; its redirects are still judged. On a line that may
   rebind a command name (`hash`, `alias`, a function) no head is trusted as
-  read-only.
+  read-only. A `git` invocation that writes nothing outside the repository's
+  `.git` (`git -C <checkout> fetch`, `git log`, `git diff -- machines/x`; no
+  `-c`, `--output` or `--upload-pack`) reads too; `checkout`, `clean` and the
+  other writing subcommands do not.
 - **The run registry.** Every writing `helper security-audit` operation — and
   the `security-verification` program's `start` and `resume` — registers its run
   in `<subagent dir>/security-audit-runs/`. Registration is idempotent and never

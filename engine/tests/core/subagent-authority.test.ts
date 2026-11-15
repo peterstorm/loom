@@ -966,3 +966,36 @@ describe("moves the guard cannot follow fall back to every directory (#177 revie
     expect(verdict("cat -r /opt/loom/machines")).toBe("allow");
   });
 });
+
+/** A git invocation that writes nothing outside the repository's `.git` reads (`core/read-only-git.ts`). */
+describe("git in a checkout that holds a protected directory (#177 follow-up)", () => {
+  it.each([
+    ["fetch by -C", "/repo", `git -C ${LOOM} fetch`],
+    ["status by -C", "/repo", `git -C ${LOOM} status --short`],
+    ["log by -C, then a cd elsewhere", "/repo", `git -C ${LOOM} log --oneline -5 && cd /tmp`],
+    ["a diff of a protected file", LOOM, "git diff HEAD~1 -- machines/a.json"],
+    ["show of a protected file", LOOM, "git --no-pager show HEAD:machines/a.json"],
+    ["-C . from the checkout", LOOM, "git -C . rev-parse HEAD"],
+    ["piped into a reader", "/repo", `git -C ${LOOM} log --oneline | head -3`],
+  ])("allows: %s", (_name, cwd, command) => {
+    expect(verdict(command, context({ cwd }))).toBe("allow");
+  });
+
+  it.each([
+    ["checkout over a protected directory", "/repo", `git -C ${LOOM} checkout -- machines`],
+    ["clean in the checkout", "/repo", `git -C ${LOOM} clean -fdx`],
+    ["log writing a protected file", "/repo", `git -C ${LOOM} log --output=${LOOM}/machines/a.json`],
+    ["an abbreviated --output", LOOM, "git diff --outp=machines/a.json"],
+    ["a config value that runs a command", "/repo", `git -C ${LOOM} -c core.fsmonitor=x status`],
+    ["fetch --upload-pack", "/repo", `git -C ${LOOM} fetch --upload-pack=x origin`],
+    ["grep -O", LOOM, "git grep -O rm machines"],
+    ["an environment prefix", "/repo", `GIT_DIR=/x git -C ${LOOM} status`],
+    ["a wrapper", "/repo", `env git -C ${LOOM} status`],
+    ["a runtime option word", "/repo", `git -C ${LOOM} log $OPT`],
+    ["a redirect into a protected directory", "/repo", `git -C ${LOOM} log > ${LOOM}/machines/a.json`],
+    ["piped into a writer", "/repo", `git -C ${LOOM} show HEAD:x | tee ${LOOM}/machines/a.json`],
+    ["a line that rebinds git", "/repo", `git() { rm -rf "$@"; }; git -C ${LOOM} fetch`],
+  ])("refuses: %s", (_name, cwd, command) => {
+    expect(verdict(command, context({ cwd }))).toBe("authority-path-write");
+  });
+});

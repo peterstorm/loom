@@ -29,7 +29,9 @@
  *     REFERENCES an authority path may contain only read-only segments, and no
  *     segment anywhere may REDIRECT output onto one. A segment that runs one of
  *     the Loom package's read-only scripts (`read-context-packet.ts`, …) by its
- *     plain path is a read-only segment, whatever paths it names. On a typed
+ *     plain path is a read-only segment, whatever paths it names, and so is
+ *     a `git` invocation that writes nothing outside the repository's own
+ *     `.git` (`read-only-git.ts`: `git -C <checkout> fetch`). On a typed
  *     line that may rebind a command name (`hash`, `alias`, `enable`, a
  *     function) no segment is read-only by its head. A bare
  *     assignment of an inert name (`inertNamesOf`: `T=$CLAUDE_JOB_DIR/tmp`,
@@ -93,6 +95,7 @@ import { isAbsolute, normalize } from "node:path";
 import { match } from "ts-pattern";
 import { SECURITY_AUDIT_AUTHORITY_ENTRIES } from "./audit-run-authority";
 import { READ_ONLY_SCRIPTS } from "./loom-cli-command";
+import { isReadOnlyGitInvocation } from "./read-only-git";
 import { scanSubstitutions } from "./shell-substitution";
 import { stripComment, type SegmentOp } from "./shell-command";
 import {
@@ -1450,7 +1453,8 @@ function judgeSegment(
   // alias, a function) may run anything under a read-only head's name.
   const headsTrusted = !(scope.mode === "typed" && scope.shell.commandsRebound);
   const readOnly = headsTrusted && (invocation !== null || hasReadOnlyHead(segment) || CD_HEADS.has(literalHead) ||
-    runsReadOnlyScript(segment, scope, context.readOnlyScripts));
+    runsReadOnlyScript(segment, scope, context.readOnlyScripts) ||
+    isReadOnlyGitInvocation(shellWords(stripComment(segment).trim()).map(staticSpelling)));
   return {
     kind: "judged",
     facts: { segment, readOnly, touches: segmentTouches(segment, scope, executed.words), redirectTouch },
