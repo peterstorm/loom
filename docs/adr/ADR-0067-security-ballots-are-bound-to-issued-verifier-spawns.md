@@ -579,11 +579,19 @@ a protected root, so a writer naming `.` there, or any path under `machines/`, r
     prefix, no wrapper) with only `-C <dir>`, `--no-pager`, `-P`, `--no-optional-locks` or
     `--literal-pathspecs` before a subcommand that reads (`status`, `log`, `show`, `diff`,
     `rev-parse`, `ls-files`, `grep`, …) or `fetch` (objects and refs only), and no option that
-    writes a file or runs a command (`--output`, grep's `-O`, `--ext-diff`, `--upload-pack`/`-u`,
-    each in every abbreviation git accepts), every word before `--` static, is a read-only
-    segment: `git -C <checkout> fetch` no longer reads as a write over the checkout that holds
-    `machines/`. `-c`, `--git-dir` and `--work-tree` are never accepted; `checkout`, `clean` and
-    every other subcommand with a writing mode stay writers.
+    writes a file or runs a command, every word before `--` static, is a read-only segment:
+    `git -C <checkout> fetch` no longer reads as a write over the checkout that holds
+    `machines/`. One table (`READ_ONLY_GIT_SUBCOMMANDS`) maps each allowed subcommand to its
+    risky options, each refused in every abbreviation git accepts: `--output` and `--ext-diff`
+    everywhere, grep's `--open-files-in-pager`/`-O`, `--upload-pack` for `fetch` and
+    `ls-remote`, ls-remote's hidden synonym `--exec`, and ls-remote's `-u` (older git's
+    `-u <exec>`; fetch's `-u` is `--update-head-ok` and reads). The table was audited against
+    git 2.56 with `git <subcommand> --git-completion-helper-all`, which lists hidden options
+    that `-h` omits; the PR #182 review found `--exec` that way, a command-running option the
+    first cut accepted. `-c`, `--git-dir`, `--work-tree`, `--exec-path` and `--config-env` are
+    never accepted; `checkout`, `clean` and every other subcommand with a writing mode stay
+    writers. What the repository's own configuration runs (textconv drivers, `diff.external`,
+    `core.fsmonitor`) is out of reach, as for a plain `git status`.
   - *Rebound commands*. On a typed line that may rebind a command name (`hash`, `alias`,
     `enable`, `function`, `name() {`), no segment is read-only by its head, its read-only helper
     operation or its read-only script: `hash -p /bin/rm cat; cat -r <protected>` is a write.

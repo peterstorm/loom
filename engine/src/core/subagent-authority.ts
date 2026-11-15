@@ -604,8 +604,12 @@ function assignmentsOf(words: readonly string[]): readonly Assignment[] {
   return [...prefix, ...words.slice(leading + 1).filter((word) => ASSIGNMENT_WORD.test(word)).map((word) => parse(word, "declaration"))];
 }
 
+/** A segment's words as the shell splits them, its comment dropped: the ONE
+ *  tokenising every per-segment reading shares. */
+const segmentWords = (segment: string): readonly string[] => shellWords(stripComment(segment).trim());
+
 const assignmentsAt = (sites: readonly SegmentSite[]): readonly Assignment[] =>
-  sites.flatMap(({ segment }) => assignmentsOf(shellWords(stripComment(segment).trim())));
+  sites.flatMap(({ segment }) => assignmentsOf(segmentWords(segment)));
 
 /**
  * The values a line binds — bare and declaration assignments whose value
@@ -751,7 +755,7 @@ function wordReaches(words: readonly string[], inertNames: ReadonlySet<string>):
  *  the words already judged as programs of their own (`bash -c '…'`), which
  *  are not this segment's path arguments. */
 function segmentTouches(segment: string, scope: PathScope, judged: ReadonlySet<string> = new Set()): string | null {
-  const words = shellWords(stripComment(segment).trim()).filter((word) => !judged.has(unquote(word)));
+  const words = segmentWords(segment).filter((word) => !judged.has(unquote(word)));
   const reaches = wordReaches(words, scope.shell.inertNames);
   for (const [index, word] of words.entries()) {
     const touched = wordTouches(word, scope, reaches[index]);
@@ -778,7 +782,7 @@ const REDIRECT_OPERATOR = /^(?:<<<|<<-|<<|&>>|&>|>>|>\||<>|>&|<&|>|<)/;
  * redirect of its own.
  */
 function redirectOperands(segment: string): readonly RedirectOperand[] {
-  const words = shellWords(stripComment(segment).trim());
+  const words = segmentWords(segment);
   const redirects: RedirectOperand[] = [];
   for (let index = 0; index < words.length; index++) {
     const fused = splitFusedRedirect(words[index]);
@@ -1454,7 +1458,7 @@ function judgeSegment(
   const headsTrusted = !(scope.mode === "typed" && scope.shell.commandsRebound);
   const readOnly = headsTrusted && (invocation !== null || hasReadOnlyHead(segment) || CD_HEADS.has(literalHead) ||
     runsReadOnlyScript(segment, scope, context.readOnlyScripts) ||
-    isReadOnlyGitInvocation(shellWords(stripComment(segment).trim()).map(staticSpelling)));
+    isReadOnlyGitInvocation(segmentWords(segment).map(staticSpelling)));
   return {
     kind: "judged",
     facts: { segment, readOnly, touches: segmentTouches(segment, scope, executed.words), redirectTouch },
@@ -1480,7 +1484,7 @@ function staticSpelling(word: string | undefined): string | null {
  */
 function runsReadOnlyScript(segment: string, scope: PathScope, scripts: readonly string[]): boolean {
   if (scope.shell.commandsRebound) return false;
-  const words = shellWords(stripComment(segment).trim());
+  const words = segmentWords(segment);
   const first = staticSpelling(words[0]);
   if (first === null) return false;
   const second = staticSpelling(words[1]);
