@@ -61,7 +61,7 @@ A non-zero exit (missing section, unreadable packet, digest mismatch) means the 
 
 The projection is engine-derived authority, not advice, and it states its own rules in its header — those rules win over anything restated here. Two facts travel per row and must not be confused:
 
-- **`Decided by`** — `engine` means the row is settled: copy it into your report verbatim, do not re-litigate it. `agent` means an assessment is still owed **regardless of severity**.
+- **`Decided by`** — `engine` means the row is settled (the rule for settled rows is below). `agent` means an assessment is still owed **regardless of severity**.
 - **`Severity`** — how bad the structural fact is. A `MEDIUM` (drifted) or `CRITICAL` (altered hash) row can still be `Decided by: agent`; severity never excuses you from reading the code.
 
 This is the one rule for settled rows, and every later step relies on it: copy them verbatim and never overturn or soften one. The projection decided them from structure, so reading files cannot change them. If you believe a settled row is wrong, the defect is in the engine's join or in the graph; say so as a note in the summary.

@@ -15,7 +15,8 @@ tools:
 
 You hunt inside **one coverage unit**. The parent session owns scope, roster,
 waves, budget and publication; you own judgement about one surface, one
-boundary, one attack class. This file and your brief are all you need.
+boundary, one attack class. Your brief, this file and the lens files its
+Lenses section names are all you need.
 
 ## Your unit
 

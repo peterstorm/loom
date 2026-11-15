@@ -123,7 +123,7 @@ Decompose produces dependency-ordered Tasks grouped into Waves. Tasks in one Wav
 
 Each Task is reviewed by `code-reviewer`, `silent-failure-hunter`, `pr-test-analyzer`, `type-design-analyzer` and `comment-analyzer`. `architecture-tech-lead` joins for a Task that touches an owned Invariant's family or writes an Acceptance Contract's types file.
 
-Reviewers return one JSON object. The engine assigns Finding ids and counts; a critical must state its evidence. Malformed output is recorded as a failed review, never as a Finding. Runs started under the older protocol finish under it. Details: [operations → Reviewer Protocol v2](docs/standalone-review.md#reviewer-protocol-v2).
+Reviewers return one JSON object. The engine assigns Finding ids and counts; a critical must state its evidence. Malformed output is recorded as a failed review, never as a Finding. Runs started under the older protocol finish under it. Details: [standalone review → Reviewer Protocol v2](docs/standalone-review.md#reviewer-protocol-v2).
 
 Critical Findings are adjudicated by a Refutation Panel. **Default panel size is 3.** Every verifier applies one assigned lens to every critical. The refutation-lens catalog is `reproduction`, `intent`, `blast-radius`, `security`, and `test-coverage`; baseline selection always includes reproduction and intent. A strict majority must refute; ties keep the Finding. A clean rerun cannot erase an old blocker by omission: every reviewer must assess every earlier Finding before it can be resolved.
 
@@ -164,7 +164,7 @@ bun install --frozen-lockfile
 npm run verify
 ```
 
-`npm run verify` is the full gate: typecheck, then lint, then the whole test script (the Vitest suite and the smoke commands). CI runs it on Linux and macOS for pull requests, branch pushes and tags. Bare `bun test` invokes Bun's built-in runner, not this gate. Details, focused iteration and the repository map: [Operations](docs/development.md#development-validation).
+`npm run verify` is the full gate: typecheck, then lint, then the whole test script (the Vitest suite and the smoke commands). CI runs it on Linux and macOS for pull requests, branch pushes and tags. Bare `bun test` invokes Bun's built-in runner, not this gate. Details, focused iteration and the repository map: [Development](docs/development.md#development-validation).
 
 ## License
 

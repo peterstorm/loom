@@ -51,7 +51,7 @@ public sealed interface Attempt {
 public sealed interface Decision {
     record Charge() implements Decision {}                    // first sight of this key
     record Replay(Outcome outcome) implements Decision {}     // settled: return the stored answer
-    record Reconcile() implements Decision {}                 // an earlier run stopped mid-flight
+    record Reconcile() implements Decision {}                 // pending: an earlier run stopped, or one is still running
     record KeyReused() implements Decision {}                 // same key, different command
 }
 
@@ -70,7 +70,7 @@ The shell has no policy of its own. In order:
 
 1. **Claim**: `INSERT ... ON CONFLICT (principal_id, idempotency_key) DO NOTHING`, committed in its own transaction. If the insert created the row, `existing` is empty; otherwise it is the row that was already there.
 2. **Decide**: `decide(existing, fingerprint)`.
-3. **Act**: `KeyReused` returns an error (422). `Replay` returns the stored outcome. `Charge` and `Reconcile` take the same path: call the provider with the key `principalId:idempotencyKey`, the same on every retry, so it charges at most once.
+3. **Act**: `KeyReused` returns an error (422). `Replay` returns the stored outcome. `Charge` calls the provider with the key `principalId:idempotencyKey`, the same on every retry. `Reconcile` takes that same call only when the provider deduplicates on the key, so it charges at most once. With a provider that has no idempotency support, `Reconcile` first asks the provider for the charge (requirement 6), settles from its answer, and calls it only when the provider has no record.
 4. **Settle**: store the outcome. If the provider's answer is unknown, store nothing and answer "in progress" (409 or 202); the attempt stays pending and the next retry reconciles.
 
 `principal_id` comes from the security context; the key is a parsed `IdempotencyKey`, usually from an `Idempotency-Key` request header. A declined charge is a settled outcome and is replayed like a success.

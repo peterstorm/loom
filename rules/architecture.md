@@ -139,7 +139,7 @@ Assume every command arrives more than once: clients retry on timeout, queues re
 - State change and event leave together: the same transaction, or an outbox. Save-then-publish loses the event on a crash and publishes twice on a retry.
 - Consumers deduplicate on the event id for the same reason.
 
-The language files show the canonical shape (charging a card).
+`java-patterns.md` and `typescript-patterns.md` show the canonical shape (charging a card).
 
 ## Ports at I/O Boundaries
 
@@ -179,7 +179,7 @@ If a candidate seam delivers neither, skip the port and call the concrete thing.
 - Real fake: every port ships with an in-memory implementation used by the core's tests
 - Return meaningful types: when a port method produces a domain-meaningful result, return it — prefer `Either<Error, OrderPlaced>` over `Either<Error, Void>` or `Either<Error, Boolean>`. Infrastructure write methods (`save`, `publish`) that have no meaningful return value may use `void` and throw on infrastructure failure (per the shell error handling strategy).
 
-Where ports, adapters and fakes are placed is in each language file's "Package Structure".
+Where ports, adapters and fakes are placed is in each language file's "Package Structure" ("Module Layout" in `rust-patterns.md`).
 
 ## Anti-Patterns to Flag
 

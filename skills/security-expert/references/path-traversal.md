@@ -112,9 +112,11 @@ void rejectsUnsafeNames(String payload) {
     assertThrows(BadRequestException.class, () -> parseFileName(payload));
 }
 
-@Test
-void downloadRejectsTraversal() throws Exception {
-    mockMvc.perform(get("/download").param("filename", "../../etc/passwd"))
+// A raw query string, so the request is decoded the way a real one is (.param() skips decoding).
+@ParameterizedTest
+@ValueSource(strings = {"../../etc/passwd", "..%2F..%2Fetc%2Fpasswd", "%2e%2e%2fetc%2fpasswd", "..%252F..%252Fetc%252Fpasswd"})
+void downloadRejectsTraversal(String filename) throws Exception {
+    mockMvc.perform(get(URI.create("/download?filename=" + filename)))
         .andExpect(status().isBadRequest());
 }
 ```

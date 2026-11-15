@@ -89,7 +89,7 @@ bun engine/src/cli.ts <hook-type> <handler> [arguments]
 Two details the table does not show:
 
 - **Implementation brief marker.** The parent sends only a marker (`LOOM_IMPLEMENTATION_BRIEF: T5`, optionally followed by `LOOM_OPERATOR_NOTE: <text>` lines that become the brief's Operator Note section). `validate-task-execution` renders the brief, runs every spawn veto and the reservation on it, and returns it as the call's `updatedInput`. Its sibling gates expand the marker themselves, because hooks on one matcher see only the original input (`engine/src/handlers/pre-tool-use/implementation-brief-marker.ts`).
-- **Stop checks.** At SubagentStop, `handlers/subagent-stop/stop-checks.ts` runs the Acceptance Stop Check and then the Affected-Test Stop Check from one planner (`planStopChecks`). The Task Mutation Check runs nothing at the stop: it reads the record `helper mutation-check` left ([ADR-0071](adr/ADR-0071-the-task-mutation-check-names-surviving-mutants-before-the-stop.md)). What each check does is in [operations](verification.md#acceptance-stop-check-claimants).
+- **Stop checks.** At SubagentStop, `handlers/subagent-stop/stop-checks.ts` runs the Acceptance Stop Check and then the Affected-Test Stop Check from one planner (`planStopChecks`). The Task Mutation Check runs nothing at the stop: it reads the record `helper mutation-check` left ([ADR-0071](adr/ADR-0071-the-task-mutation-check-names-surviving-mutants-before-the-stop.md)). What each check does is in [verification](verification.md#acceptance-stop-check-claimants).
 
 ### Pi
 
@@ -334,7 +334,7 @@ A standalone review reuses per-role Finding ordinals, so two independent reviews
 
 In the shell, three lower modules hold what the per-program drivers share, so the drivers never import each other: `program-result.ts` (the result vocabulary and the closed `FacadeAction` union every driver emits), `standalone-evidence.ts` (checkpoint-independent evidence, source observation and refutation replay) and `standalone-disposition-source.ts` (authentication of published advisory revisions). The drivers stay per program (ADR-0005), and the façade exports parent operations, not every internal parser (ADR-0007).
 
-Lineage adds no automatic predecessor, branch join, similarity merge, severity override or review reuse, and a digest or a formally phrased claim is not semantic proof. Inputs, limits and commands: [operations](standalone-review.md#standalone-lineage).
+Lineage adds no automatic predecessor, branch join, similarity merge, severity override or review reuse, and a digest or a formally phrased claim is not semantic proof. Inputs, limits and commands: [standalone review](standalone-review.md#standalone-lineage).
 
 ## Owner verification in the completion suite
 
@@ -363,7 +363,7 @@ Wave Gate ─ ensureWaveCompletionSuite ─ authorizeGraphCompletionSuite(graph,
 - **Receipt semantics unchanged.** The check is part of the suite digest, so receipt reuse, workspace binding, replay and status come from the existing suite ([ADR-0031](adr/ADR-0031-owner-verification-is-an-engine-reserved-completion-suite-check.md)).
 - **Review and brief.** A Task that touches an owned family gets the `owner-map` packet section and the sixth reviewer ([ADR-0039](adr/ADR-0039-the-second-copy-lens-is-an-engine-issued-packet-section.md), [ADR-0047](adr/ADR-0047-the-wave-review-roster-is-derived-per-task-from-owner-map-presence.md)), and its implementation brief states its coverage and mutation duty ([ADR-0040](adr/ADR-0040-brief-duties-and-status-projection.md)). A standalone review builds no Wave packet, so it never carries an owner map.
 
-Operator detail, status fields and remedies: [operations](verification.md#owner-verification-blocks-a-wave-gate). Plan grammar: `references/executable-models.md`. Mechanics and limits: [Executable models: enforcement](executable-models-enforcement.md).
+Operator detail, status fields and remedies: [verification](verification.md#owner-verification-blocks-a-wave-gate). Plan grammar: `references/executable-models.md`. Mechanics and limits: [Executable models: enforcement](executable-models-enforcement.md).
 
 ## Security and failure posture
 
@@ -372,7 +372,7 @@ Loom’s default is refusal when authority is incomplete or ambiguous:
 - guarded spawn routes fail closed on handler crashes;
 - Pi runtime/CLI version skew is rejected before Run Directory or TaskGraph mutation;
 - state and evidence paths are denied to arbitrary Bash writers;
-- decisions that probe a path through `utils/path-presence.ts` treat it as absent only on ENOENT: "present but unreadable" is its own answer, so an unreadable routing config, rule, run marker or agent definition refuses instead of reading as missing (`helper family-sites` counts the raw `existsSync` checks that remain; see [operations](development.md#measuring-second-sites-the-family-site-metric));
+- decisions that probe a path through `utils/path-presence.ts` treat it as absent only on ENOENT: "present but unreadable" is its own answer, so an unreadable routing config, rule, run marker or agent definition refuses instead of reading as missing (`helper family-sites` counts the raw `existsSync` checks that remain; see [development](development.md#measuring-second-sites-the-family-site-metric));
 - a test command counts as evidence only at a real top-level position: a runner inside `$(…)`/`<(…)` never owns the line's exit or output;
 - Run Directory paths must be direct children and are accessed no-follow;
 - model and Skill bindings are explicit;

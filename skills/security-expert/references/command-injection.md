@@ -90,9 +90,17 @@ public final class SafeCommand {
             pb.environment().clear();                    // nothing inherited
 
             Process process = pb.start();
-            if (!process.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS)) {
-                process.destroyForcibly();
-                throw new TimeoutException("Command timed out");
+            long deadline = System.nanoTime() + timeout.toNanos();
+            // Poll, so a process writing without limit is stopped at the cap, not after it exits.
+            while (!process.waitFor(100, TimeUnit.MILLISECONDS)) {
+                if (Files.size(out) > MAX_OUTPUT_BYTES) {
+                    process.destroyForcibly();
+                    throw new IOException("Command output too large");
+                }
+                if (System.nanoTime() > deadline) {
+                    process.destroyForcibly();
+                    throw new TimeoutException("Command timed out");
+                }
             }
             if (process.exitValue() != 0) {
                 throw new IOException("Command failed: exit " + process.exitValue());
@@ -108,7 +116,7 @@ public final class SafeCommand {
 }
 ```
 
-Reading `getInputStream()` only after `waitFor` deadlocks once the process fills the pipe buffer; redirect to a file (as above) or drain the stream on another thread.
+The cap bounds the file to `MAX_OUTPUT_BYTES` plus what the process writes in one poll interval; for an exact bound, read the stream on another thread and stop at the cap. Reading `getInputStream()` only after `waitFor` deadlocks once the process fills the pipe buffer; redirect to a file (as above) or drain the stream on another thread.
 
 ## Quick Reference
 

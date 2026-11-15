@@ -14,7 +14,7 @@ Write requirements as a structured specification before any architecture or plan
 ## Two ways this skill runs
 
 - **Standalone (`/specify`).** Follow this whole file. The flow is `/specify` → `/clarify` (when the spec has more than 3 markers) → the `architecture-tech-lead` skill.
-- **Inside `/loom`.** The specify-agent preloads this skill and its phase prompt sets the order of work, the interview and the output path. Use only [Writing the specification](#writing-the-specification) and [Quality checks](#quality-checks) from this file. The sections marked *standalone only* do not apply: `/loom` runs clarify and architecture as its own phases.
+- **Inside `/loom`.** The specify-agent preloads this skill and its phase prompt sets the order of work, the interview and the output path. Use only [Package resources](#package-resources) (it defines `{LOOM_DIR}`), [Writing the specification](#writing-the-specification) and [Quality checks](#quality-checks) from this file. The sections marked *standalone only* do not apply: `/loom` runs clarify and architecture as its own phases.
 
 `/loom` runs its own brainstorm, specify and clarify phases. To have `/loom` use a spec written standalone, put it at `.claude/specs/{YYYY-MM-DD}-{slug}/spec.md` and start `/loom` with `--skip-specify`.
 

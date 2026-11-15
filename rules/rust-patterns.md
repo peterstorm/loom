@@ -27,7 +27,8 @@ src/
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct OrderId(u64);
 
-// The only way to get a PositiveInt is through the parser.
+// Outside this module the only way to get a PositiveInt is through the parser;
+// the field is private to the module, so keep the type in its own module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PositiveInt(u32);
 

@@ -12,7 +12,7 @@ Declaring an owner makes it an obligation the Wave Gate checks.
 - **The stamp.** Population stamps every owned invariant into the TaskGraph
   as an **Owner Obligation** (`owner_obligations`: id, title, statement,
   owner, siblings, matrix test, mutation policy). The stamp is always
-  written, `[]` included; only a graph populated before G5b lacks it, and such
+  written, `[]` included; only a graph populated before owner obligations shipped (ADR-0032) lacks it, and such
   a graph owes nothing.
 - **Plan integrity.** Whenever the graph carries the stamp, the completion
   suite gains the engine-reserved check `loom:owner-verification`. It re-reads
@@ -88,8 +88,9 @@ Declaring an owner makes it an obligation the Wave Gate checks.
 
 A Wave review packet for the code-reviewer and the architecture-tech-lead,
 for a Task that touches an owned family, carries an engine-issued **owner
-map** (such a Task's Wave review roster appends the architecture-tech-lead to
-the base five reviewers, ADR-0047, so both packets are issued): each touched invariant's id, title, statement, owner, siblings, matrix
+map**. The Wave review roster appends the architecture-tech-lead to the base
+five reviewers for such a Task (ADR-0047), and for a Task that writes an
+Acceptance Contract's types file (ADR-0069), so both packets are issued. The map holds each touched invariant's id, title, statement, owner, siblings, matrix
 test and `<plan file>#INV-N` contract, then the fixed second-copy rule. The
 section is inside the packet digest. The rule: a diff that implements a
 declared-owned invariant's predicate outside its owner is a finding citing
@@ -131,7 +132,7 @@ reviews are byte-identical to what they were.
    With an `acceptanceRunner` in the verification manifest (schema 2), each
    claimant meets this earlier: the **Acceptance Stop Check** runs its owed
    testcases when its agent stops and keeps that agent working while one
-   fails (`docs/operations.md`). It is advisory to the gate, never evidence.
+   fails ([Acceptance Stop Check](verification.md#acceptance-stop-check-claimants)). It is advisory to the gate, never evidence.
 5. **Frozen means frozen.** Every gate re-hashes the frozen paths before it
    reuses or installs a suite receipt; any drift blocks as an artifact
    failure. Task byte-scope proof already stops a task writing a path outside
@@ -279,8 +280,8 @@ the brief refuses to render while the plan's bindings drift from the stamp.
   that covers only well-formed input still satisfies the path check; mutation
   verification narrows this only for the owner's changed lines.
 - **RED/GREEN is not discrimination.** A frozen acceptance test that a wrong
-  implementation also passes still turns green. G5b's mutation verification
-  runs against owned invariants' matrix tests, not against frozen acceptance
+  implementation also passes still turns green. Owner verification's mutation
+  runs (ADR-0036) run against owned invariants' matrix tests, not against frozen acceptance
   tests, so this residual stands for contracts.
 - **Mutation evidence is JUnit only.** The `affectedRunner` report is read as
   JUnit; testcases are attributed to the matrix test by reported file. A

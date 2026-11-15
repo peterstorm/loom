@@ -180,6 +180,48 @@ _Avoid_: Contract (alone — collides with **Wire Contract** and the orchestrati
 An engine-written file at a not-yet-existing path a plan binds to an **Acceptance Contract**, declaring each bound export with its frozen type and a body that throws unimplemented. Completion refuses a bound export that is deleted, renamed, retyped or still unimplemented. A "contract stub" is the Skeleton written when the contract's own Task stops.
 _Avoid_: Stub (alone), scaffold, template, hand-written stub
 
+### Architecture
+
+**Functional Core**:
+Pure business logic with no I/O. Takes data in, returns data out. Unit testable without mocks.
+_Avoid_: Domain layer (too vague), business logic layer
+
+**Imperative Shell**:
+Thin orchestration layer that handles I/O (DB, network, filesystem) and calls the **Functional Core**.
+_Avoid_: Service layer, infrastructure layer, use case layer
+
+**Shell Orchestrator**:
+A function or class in the **Imperative Shell** that coordinates one operation: load via **Port** → call the pure core → persist via **Port**. Contains no business logic.
+_Avoid_: Service, UseCase, Handler (for this concept), Manager
+
+**Port**:
+A narrow interface owned by the domain for one real I/O collaborator. Adapters implement it; tests substitute a fake.
+_Avoid_: Interface (too generic), abstraction, wrapper
+
+**Bounded Context**:
+A DDD boundary enclosing one consistent domain model and its own **Ubiquitous Language**. In this repository each context's terms are in the file [CONTEXT-MAP.md](CONTEXT-MAP.md) lists for it.
+_Avoid_: Module, service, package (unless referring to code packaging)
+
+**Ubiquitous Language**:
+The shared vocabulary of developers and domain experts within a **Bounded Context**, used in code, docs and conversation.
+_Avoid_: Glossary (it is the living language of the system, not a list)
+
+**Aggregate**:
+An immutable data cluster (root entity plus value objects) treated as one consistency unit. Command functions in the **Functional Core** take an aggregate and return a new one plus **Domain Events**.
+_Avoid_: Entity group, object graph, mutable domain object
+
+**Value Object**:
+An immutable domain concept defined entirely by its attributes, with no identity. Its invariants hold from construction.
+_Avoid_: DTO (DTOs carry no invariants), data class (too implementation-specific)
+
+**Either**:
+A sum type of success (`Right`) or failure (`Left`), the **Functional Core**'s error channel: it returns failures, never throws them.
+_Avoid_: Result (acceptable in Rust and TypeScript), Optional (different semantics)
+
+**Domain Event**:
+An immutable fact, named in the past tense, that a pure command function returns beside the new state. The **Imperative Shell** publishes it.
+_Avoid_: Message, notification, callback
+
 ## Relationships
 
 - A **Phase** produces one or more artifacts consumed by subsequent **Phases**
@@ -202,6 +244,8 @@ _Avoid_: Stub (alone), scaffold, template, hand-written stub
 - A **Spec** projects to exactly one **Spec Index**
 - A **Requirement** is completed in exactly one **Wave**; each **Task** claiming it is a **Claimant**
 - An **Acceptance Contract** covers one or more **Requirements** and yields one **Skeleton** per bound file
+- An **Aggregate** is immutable data; command functions in the **Functional Core** produce new instances and return **Domain Events**
+- A **Shell Orchestrator** loads via a **Port**, calls the **Functional Core** and persists via a **Port**; the **Imperative Shell** publishes the **Domain Events**
 
 ## Example Dialogue
 
