@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   LEXICAL_FILESYSTEM,
   decideSubagentAuthority,
+  parseInheritedEnvironment,
   securityAuditVerifyInvocations,
   renderSubagentAuthorityRefusal,
   type SubagentAuthorityContext,
@@ -62,6 +63,7 @@ const context = (overrides: Partial<SubagentAuthorityContext> = {}): SubagentAut
   hookRoutes: HARNESS_HOOK_ROUTES,
   readOnlyScripts: [READER],
   cdSearchPath: [],
+  environment: parseInheritedEnvironment({}),
   filesystem: FAKE_FILESYSTEM,
   ...overrides,
 });
@@ -934,6 +936,8 @@ describe("moves the guard cannot follow fall back to every directory (#177 revie
     ["lastpipe runs a pipeline's last cd in this shell", "/tmp", "shopt -s lastpipe; true | cd /repo; rm -rf claude-subagents"],
     ["CDPATH set by printf -v", LOOM, "printf -v CDPATH /opt; cd loom && rm -rf machines"],
     ["CDPATH set by read", LOOM, "read CDPATH <<< /opt; cd loom && rm -rf machines"],
+    // The search path is unknown, but bash still tries the target under the current directory.
+    ["CDPATH set by read, from the protected directory's grandparent", "/opt", "read CDPATH < /tmp/c; cd loom && rm -rf machines"],
     ["cd -P resolves .. physically", LOOM, "cd -P /repo/l/.. && rm -rf machines"],
     ["set -P makes every cd physical", LOOM, "set -P; cd /repo/l/.. && rm -rf machines"],
   ])("refuses: %s", (_name, cwd, command) => {
@@ -1003,5 +1007,166 @@ describe("git in a checkout that holds a protected directory (#177 follow-up)", 
     ["a read followed by a writer", "/repo", `git -C ${LOOM} fetch && rm -r ${LOOM}/machines`],
   ])("refuses: %s", (_name, cwd, command) => {
     expect(verdict(command, context({ cwd }))).toBe("authority-path-write");
+  });
+});
+
+describe("parseInheritedEnvironment — the inherited variables the guard can splice", () => {
+  it("keeps each identifier whose value is literal path text, an empty one included", () => {
+    const parsed = parseInheritedEnvironment({ LOOM_ROOT: LOOM, EMPTY: "", PATH: "/a:/b", TMPDIR: "/tmp", A_1: "x=y,z@1+%" });
+    expect([...parsed]).toEqual([["LOOM_ROOT", LOOM], ["EMPTY", ""], ["PATH", "/a:/b"], ["TMPDIR", "/tmp"], ["A_1", "x=y,z@1+%"]]);
+  });
+
+  it.each([
+    ["the working directory bash keeps itself", "PWD"],
+    ["its predecessor", "OLDPWD"],
+    ["the nesting level", "SHLVL"],
+    ["the last argument", "_"],
+    ["word splitting", "IFS"],
+    ["a BASH name", "BASH_ENV"],
+    ["bash's options", "BASHOPTS"],
+    ["a dynamic variable", "RANDOM"],
+    ["a name that is no identifier", "A-B"],
+    ["a name starting with a digit", "1X"],
+  ])("drops %s", (_label, name) => {
+    expect(parseInheritedEnvironment({ [name]: "/tmp" }).has(name)).toBe(false);
+  });
+
+  it.each([
+    ["whitespace, which splits", "/tmp/claude-subagents x"],
+    ["a newline", "/tmp\n/x"],
+    ["a glob", "/tmp/*"],
+    ["a quote", "'/tmp'"],
+    ["an expansion, which the shell does not expand again", "$HOME/x"],
+    ["a tilde, which an expansion does not resolve", "~/x"],
+    ["a brace", "/tmp/{a,b}"],
+  ])("drops a value holding %s", (_label, value) => {
+    expect(parseInheritedEnvironment({ X: value }).has("X")).toBe(false);
+  });
+
+  it("drops an unset variable", () => {
+    expect(parseInheritedEnvironment({ X: undefined }).size).toBe(0);
+  });
+});
+
+/**
+ * A variable the shell inherits is judged with the value the shell observed in
+ * place as well as as written; `$PWD` with every directory the segment may run
+ * in. A variable no line on the way rebinds holds exactly that value, so a `cd`
+ * through it is placed and a git or read-only script word reading it is static.
+ */
+describe("the environment the shell inherits, and $PWD", () => {
+  const withEnvironment = (environment: Readonly<Record<string, string>>, cwd: string = "/repo"): SubagentAuthorityContext =>
+    context({ cwd, environment: parseInheritedEnvironment(environment) });
+  const ROOTED = { LOOM_ROOT: LOOM, TMPDIR: "/tmp", RUN: R, CLONE: "/work/clone", A: "/opt" };
+  const judged = (command: string, cwd?: string): string => verdict(command, withEnvironment(ROOTED, cwd));
+
+  it.each([
+    ["a write under an inherited checkout", "rm -rf $LOOM_ROOT/machines"],
+    ["braced and quoted", 'rm -rf "${LOOM_ROOT}"/machines/a.json'],
+    ["an inherited ancestor of the subagent directory", "rm -rf $TMPDIR/claude-subagents"],
+    ["a writer naming the ancestor itself", "cp x $TMPDIR"],
+    ["a redirect through an inherited run directory", "echo x > $RUN/ledger.json"],
+    ["a line binding built from an inherited value", "D=$A/loom; rm -rf $D/machines"],
+    ["a cd through an inherited checkout", "cd $LOOM_ROOT && rm -rf machines"],
+    ["a git option held in an inherited variable", 'git -C /opt/loom log $OPT'],
+  ])("refuses: %s", (_label, command) => {
+    const environment = { ...ROOTED, OPT: `--output=${LOOM}/machines/a.json` };
+    expect(verdict(command, withEnvironment(environment))).toBe("authority-path-write");
+  });
+
+  it.each([
+    ["a write beside the subagent directory", "cp x $TMPDIR/out.txt"],
+    ["a git -C through an inherited checkout", 'git -C "$LOOM_ROOT" fetch'],
+    ["a cd through an inherited clone, then a writer there", 'cd "$CLONE" && rm -rf .'],
+    ["a quoted read on a line that sets IFS is never split", 'IFS=:; cp a "$TMPDIR/out"'],
+  ])("allows: %s", (_label, command) => {
+    expect(judged(command, LOOM)).toBe("allow");
+  });
+
+  it("reads Loom's read-only script through an inherited package root", () => {
+    expect(judged("bun $LOOM_ROOT/scripts/read-context-packet.ts --file machines/a.json", LOOM)).toBe("allow");
+  });
+
+  it("drops a variable's pin on a line that may bind a name it does not spell", () => {
+    const optionInherited = withEnvironment({ V: "--oneline" });
+    // The name is built at runtime and the value read from a file: only the pin rule sees it.
+    expect(verdict(`N=$(printf '\\x56'); read -r "$N" < /tmp/v; git -C ${LOOM} log $V`, optionInherited)).toBe("authority-path-write");
+    // A line that rebinds the name by its own spelling drops its pin too.
+    expect(verdict(`V+=x; git -C ${LOOM} log $V`, optionInherited)).toBe("authority-path-write");
+    expect(verdict(`V=--output=/x/y; git -C ${LOOM} log $V`, optionInherited)).toBe("authority-path-write");
+    expect(verdict(`git -C ${LOOM} log $V`, optionInherited)).toBe("allow");
+    expect(verdict(`read -r V < /tmp/v; git -C ${LOOM} log $V`, optionInherited)).toBe("authority-path-write");
+  });
+
+  it("a cd through an inherited variable the line also rebinds may land on the observed value", () => {
+    const inherited = withEnvironment({ E: LOOM });
+    expect(verdict("cd \"$E\" && rm -rf machines; E=/elsewhere", inherited)).toBe("authority-path-write");
+    expect(verdict("E=/elsewhere", inherited)).toBe("allow");
+  });
+
+  it("a cd the guard cannot place still lands where its bound spellings lead, searched and home-resolved", () => {
+    // CDPATH=/opt: `cd loom` lands in /opt/loom.
+    expect(verdict("D=loom; cd $D && rm -rf machines", context({ cwd: "/repo", cdSearchPath: ["/opt"] }))).toBe("authority-path-write");
+    // The assignment expands ~; the cd lands in /home/u/x, beside the protected directory.
+    const nearHome = context({ protectedDirectories: ["/home/u/.claude/shell-snapshots"] });
+    expect(verdict("D=~/x; cd $D && rm -rf ../.claude/shell-snapshots", nearHome)).toBe("authority-path-write");
+    expect(verdict("D=~/x; cd $D && rm -rf ../.claude/other", nearHome)).toBe("allow");
+  });
+
+  it("an absolute landing is a directory the line reaches even when the starting directory is unknown, like a placed cd", () => {
+    // `read` unpins E, so the cd is unknown; its one spelling is still a place it may land.
+    const unknownStart = context({ cwd: null, environment: parseInheritedEnvironment({ E: LOOM }) });
+    expect(verdict("read Z < /tmp/z; cd $E && rm -rf machines", unknownStart)).toBe("authority-path-write");
+    expect(verdict(`cd ${LOOM} && rm -rf machines`, unknownStart)).toBe("authority-path-write");
+    expect(verdict("read Z < /tmp/z; cd $E && rm -rf dist", unknownStart)).toBe("allow");
+  });
+
+  it("an unquoted inherited read on a line that sets IFS may split anywhere: it fails closed", () => {
+    expect(verdict("IFS=:; rm -rf $P", withEnvironment({ P: "x:/tmp/claude-subagents:y" }))).toBe("authority-path-write");
+  });
+
+  it.each([
+    ["a write under $PWD", "rm -rf $PWD/machines"],
+    ["$PWD itself", 'rm -rf "$PWD"'],
+    ["a cd under $PWD", "cd $PWD/machines && rm -rf ."],
+  ])("$PWD is where the segment runs — refuses: %s", (_label, command) => {
+    expect(verdict(command, context({ cwd: LOOM }))).toBe("authority-path-write");
+  });
+
+  it("$PWD is the segment's own directory, never the PWD the hook process inherited", () => {
+    expect(verdict("rm -rf $PWD/machines", withEnvironment({ PWD: LOOM }, "/repo"))).toBe("allow");
+    expect(verdict(`git -C "$PWD" status`, context({ cwd: LOOM }))).toBe("allow");
+    expect(verdict("cd /work/clone && rm -rf $PWD/machines", context({ cwd: LOOM }))).toBe("allow");
+    // A line that may set PWD leaves it no single value: the script it names is unknown.
+    expect(verdict("read PWD < /tmp/p; bun $PWD/scripts/read-context-packet.ts --file machines/a.json", context({ cwd: LOOM }))).toBe("authority-path-write");
+    expect(verdict("bun $PWD/scripts/read-context-packet.ts --file machines/a.json", context({ cwd: LOOM }))).toBe("allow");
+    // A cd that starts at $PWD is relative to where the shell is: placed, not unknown.
+    expect(verdict("cd $PWD/engine && rm -rf .", context({ cwd: LOOM }))).toBe("allow");
+  });
+});
+
+/** Claude Code carries a session's shell state between Bash calls in its config directory: the shell protects it. */
+describe("the shell state Claude Code carries between Bash calls", () => {
+  const SNAPSHOTS = "/home/u/.claude/shell-snapshots";
+  const SESSION_ENV = "/home/u/.claude/session-env";
+  const guarded = context({ protectedDirectories: ["/tmp/claude-subagents", `${LOOM}/machines`, SNAPSHOTS, SESSION_ENV] });
+
+  it.each([
+    ["an alias appended to the snapshot", `echo "alias ls='rm -rf'" >> ${SNAPSHOTS}/snapshot-bash-1.sh`],
+    ["the snapshot rewritten through ~", "cp evil.sh ~/.claude/shell-snapshots/snapshot-bash-1.sh"],
+    ["a session environment file", `echo 'export HOME=/tmp' > ${SESSION_ENV}/s-1/hook-0.sh`],
+    ["the whole config directory", "rm -rf ~/.claude"],
+  ])("refuses: %s", (_label, command) => {
+    expect(verdict(command, guarded)).toBe("authority-path-write");
+  });
+
+  it("refuses a write through the inherited CLAUDE_ENV_FILE", () => {
+    const withEnvFile = { ...guarded, environment: parseInheritedEnvironment({ CLAUDE_ENV_FILE: `${SESSION_ENV}/s-1/hook-0.sh` }) };
+    expect(verdict('echo "alias git=rm" >> "$CLAUDE_ENV_FILE"', withEnvFile)).toBe("authority-path-write");
+  });
+
+  it("allows reading it and writing beside it", () => {
+    expect(verdict(`cat ${SNAPSHOTS}/snapshot-bash-1.sh`, guarded)).toBe("allow");
+    expect(verdict("echo x > ~/.claude/notes.md", guarded)).toBe("allow");
   });
 });

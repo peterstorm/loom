@@ -66,27 +66,36 @@
  * line may reach — as does a line that may turn on lastpipe or physical `cd`;
  * a line that may set `CDPATH` or `HOME` makes the moves they steer unknown.
  * `~` resolves against home; a variable the line binds to a spliceable value
- * (`lineVariables`) is judged with that value in place as well as as written
- * (past 16 spellings, or on a line that may set `IFS`, such a word fails
- * closed); globs and brace/quote/parameter views go through the shared match
- * views. When the registry is UNREADABLE every path whose segments name
- * an authority entry is treated as authority (fail closed); the same suffix
- * rule covers words the shell completes at runtime on a typed line.
+ * (`lineVariables`), a variable the shell inherits from the observed
+ * environment (`parseInheritedEnvironment`), and `$PWD` (every directory the
+ * segment may run in) are judged with their values in place as well as as
+ * written — a value's own references in turn — (past 16 spellings, or an
+ * unquoted read on a line that may set `IFS`, such a word fails closed). An
+ * inherited variable no line on the way rebinds holds exactly its observed
+ * value, so a `cd` through it is placed and a git or read-only script word
+ * that reads it has that one spelling. Globs and brace/quote/parameter views go
+ * through the shared match views. When the registry is UNREADABLE every path
+ * whose segments name an authority entry is treated as authority (fail
+ * closed); the same suffix rule covers words the shell completes at runtime on
+ * a typed line.
  *
  * Known gaps (pinned as allowed in tests/core/subagent-authority.test.ts): a
  * command or helper NAME the shell constructs from pieces (`eval "$a $b"`, a
- * command held in a variable), a variable set outside the line, or to a
- * substitution's output (`T=$(cat f)`), holding an authority path, a `cd`
- * through such a variable (its target is unknown, and an unknown directory is
- * judged by authority entry names alone), `HOME`/`CDPATH`/`IFS` set in an earlier
- * command, a command name rebound in an earlier command (`hash`, `alias`),
- * physical `cd` through a symlink after an earlier `cd` on the line,
- * interpreter code built at runtime (base64, string concatenation), names
- * spelled in `printf` escapes, a script whose text is runtime-built and then
- * run, a symlink to a run created on the same line with a runtime-built target,
- * and an interpreter's own script FILE (only literal code is scanned). None of
- * them can produce an attested capture: the attestation store is protected
- * and written only by the capturing harness process.
+ * command held in a variable), a variable whose value the guard cannot see —
+ * set to a substitution's output (`T=$(cat f)`), by a shell profile, or to a
+ * value that does not splice — holding an authority path, a `cd` through such
+ * a variable (its target is unknown, and an unknown directory is judged by
+ * authority entry names alone), physical `cd` through a symlink after an
+ * earlier `cd` on the line, interpreter code built at runtime (base64, string
+ * concatenation), names spelled in `printf` escapes, a script whose text is
+ * runtime-built and then run, a symlink to a run created on the same line with
+ * a runtime-built target, and an interpreter's own script FILE (only literal
+ * code is scanned). State an earlier Bash call left behind (`HOME`, `CDPATH`,
+ * `IFS`, a `hash`, an alias or a function) reaches a later call only through
+ * the shell state Claude Code carries between calls, which the shell protects
+ * (`claudeShellStateDirs`), or a profile, which is the user's own. None of
+ * them can produce an attested capture: the attestation store is protected and
+ * written only by the capturing harness process.
  *
  * Pure: strings in, a decision out; the filesystem is a port.
  */
@@ -138,7 +147,8 @@ export type SubagentAuthorityContext = Readonly<{
   home: string | null;
   runs: RegisteredRuns;
   /** Absolute directories no subagent may write into at all (the subagent dir,
-   *  the machine definitions), each in every spelling the shell might use. */
+   *  the machine definitions, the shell state Claude Code carries between Bash
+   *  calls), each in every spelling the shell might use. */
   protectedDirectories: readonly string[];
   /** Each authority helper's operations, split by the trait its table declares. */
   helperOperations: AuthorityHelperOperations;
@@ -153,9 +163,48 @@ export type SubagentAuthorityContext = Readonly<{
   /** The directories a bare relative `cd` target is searched in (`CDPATH`,
    *  parsed by `parseCdSearchPath`); empty when the variable is unset. */
   cdSearchPath: readonly string[];
+  /** The environment the agent's shell inherits, as the shell observed it:
+   *  a word reading one of its variables is judged with the observed value in
+   *  place as well as as written. */
+  environment: InheritedEnvironment;
   /** What the guard may observe of the filesystem at decision time. */
   filesystem: SubagentFilesystemView;
 }>;
+
+declare const INHERITED_ENVIRONMENT: unique symbol;
+
+/**
+ * The variables a subagent's shell inherits whose observed values the guard
+ * splices: each name a shell identifier the shell does not set itself, each
+ * value literal path text that reads the same wherever an unquoted reference
+ * expands it (no whitespace, glob, quote, `$` or `~`). Minted only by
+ * `parseInheritedEnvironment`.
+ */
+export type InheritedEnvironment = ReadonlyMap<string, string> & { readonly [INHERITED_ENVIRONMENT]: true };
+
+/** Names bash sets itself, whatever the environment holds: the working
+ *  directory and its predecessor, the nesting level, word splitting, and the
+ *  dynamic and informational variables. Every `BASH…` name is one too. */
+const SHELL_SET_NAMES: ReadonlySet<string> = new Set([
+  "PWD", "OLDPWD", "SHLVL", "_", "IFS", "SHELLOPTS", "PPID", "UID", "EUID", "GROUPS", "RANDOM", "SRANDOM",
+  "SECONDS", "LINENO", "EPOCHSECONDS", "EPOCHREALTIME", "HISTCMD", "OPTIND", "OPTARG", "REPLY", "PIPESTATUS",
+  "DIRSTACK", "FUNCNAME", "HOSTNAME", "HOSTTYPE", "MACHTYPE", "OSTYPE",
+]);
+
+const SHELL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const LITERAL_PATH_TEXT = /^[A-Za-z0-9_.\/:@%+,=-]*$/;
+
+/** The environment a subagent's shell inherits, as the variables the guard can splice. */
+export function parseInheritedEnvironment(environment: Readonly<Record<string, string | undefined>>): InheritedEnvironment {
+  const inherited = new Map<string, string>();
+  for (const [name, value] of Object.entries(environment)) {
+    if (value === undefined || !SHELL_IDENTIFIER.test(name) || SHELL_SET_NAMES.has(name) || name.startsWith("BASH")) continue;
+    if (LITERAL_PATH_TEXT.test(value)) inherited.set(name, value);
+  }
+  // The one mint of the brand.
+  const parsed: ReadonlyMap<string, string> = inherited;
+  return parsed as InheritedEnvironment;
+}
 
 /**
  * `CDPATH` as the directories a bare relative `cd` target is searched in, in
@@ -481,15 +530,29 @@ function pathPieces(view: string): readonly string[] {
   return [...pieces].filter((piece) => piece !== "");
 }
 
+/** Does the word expand a parameter outside quotes, where the shell splits
+ *  its value on `IFS`? */
+function expandsUnquoted(word: string): boolean {
+  let quote: string | null = null;
+  for (let index = 0; index < word.length; index++) {
+    const char = word[index];
+    if (char === "\\" && quote !== "'") index++;
+    else if (quote === null && (char === '"' || char === "'")) quote = char;
+    else if (char === quote) quote = null;
+    else if (char === "$" && quote === null) return true;
+  }
+  return false;
+}
+
 /** The authority path a raw word may reach (any view, any piece, as written
  *  or with a bound variable's value in place of its expansion), or null. */
 function wordTouches(word: string, scope: PathScope, reach: boolean): string | null {
-  const bound = boundSpellings(word, scope.shell.variables);
+  const bound = boundSpellings(word, scope);
   // More spellings than the guard builds, or a bound value the line's `IFS`
-  // may split anywhere (`IFS=:; T=x:/tmp; rm -rf $T`): a typed word fails
-  // closed; a script FILE, judged on what it names literally, is judged on
-  // the word as written.
-  const untrusted = bound === null || (scope.shell.splittingRebound && bound.length > 1);
+  // may split anywhere (`IFS=:; T=x:/tmp; rm -rf $T`; a quoted read is never
+  // split): a typed word fails closed; a script FILE, judged on what it names
+  // literally, is judged on the word as written.
+  const untrusted = bound === null || (scope.shell.splittingRebound && bound.length > 1 && expandsUnquoted(word));
   if (untrusted && scope.mode === "typed") return word;
   for (const spelled of untrusted ? [word] : bound) {
     const runtime = hasRuntimePart(spelled);
@@ -514,8 +577,14 @@ type BoundVariables = ReadonlyMap<string, readonly string[]>;
  * reaches every segment that may see it (`withLineShell`).
  */
 type LineShell = Readonly<{
-  /** The values the line, or a line it is nested in, binds (`lineVariables`). */
+  /** The values the inherited environment holds and the line, or a line it is
+   *  nested in, binds (`lineVariables`). */
   variables: BoundVariables;
+  /** The inherited variables no line on the way here may rebind: each holds
+   *  its one observed value wherever the line reads it. */
+  pinned: ReadonlySet<string>;
+  /** `PWD` may be set on the line: it no longer names where a segment runs. */
+  workingDirectoryRebound: boolean;
   /** The names whose bare assignments on THIS line write nothing above their value (`inertNamesOf`). */
   inertNames: ReadonlySet<string>;
   /** `CDPATH` may be set on the line: every searched `cd` target is unknown. */
@@ -530,6 +599,8 @@ type LineShell = Readonly<{
 
 const NO_SHELL: LineShell = Object.freeze({
   variables: new Map(),
+  pinned: new Set<string>(),
+  workingDirectoryRebound: false,
   inertNames: new Set<string>(),
   searchPathRebound: false,
   splittingRebound: false,
@@ -554,19 +625,90 @@ function spliceable(value: string): string | null {
  *  touching authority (`wordTouches`). */
 const MAX_BOUND_SPELLINGS = 16;
 
-/** `word` as written, then with each bound value spliced in place of each
- *  `$NAME`/`${NAME}` that names a bound variable; null past
- *  `MAX_BOUND_SPELLINGS`. */
-function boundSpellings(word: string, variables: BoundVariables): readonly string[] | null {
-  if (variables.size === 0 || !word.includes("$")) return [word];
-  let spellings: readonly string[] = [word];
-  for (const [name, values] of variables) {
-    const reference = new RegExp(plainReference(name), "g");
-    if (!reference.test(word)) continue;
-    spellings = [...new Set(spellings.flatMap((spelling) => [spelling, ...values.map((value) => spelling.replace(reference, () => value))]))];
-    if (spellings.length > MAX_BOUND_SPELLINGS) return null;
+/** The variable bash keeps naming the directory the shell is in. */
+const WORKING_DIRECTORY_VARIABLE = "PWD";
+
+/** What one segment's words may read: every value each variable may hold
+ *  there, and the one value a variable holds wherever the segment reads it. */
+type SegmentBindings = Readonly<{
+  bound: BoundVariables;
+  pinnedValue: (name: string) => string | undefined;
+}>;
+
+/** The one observed value of an inherited variable no line on the way here may rebind. */
+const inheritedValue = (shell: LineShell) => (name: string): string | undefined => {
+  const values = shell.pinned.has(name) ? shell.variables.get(name) : undefined;
+  return values?.length === 1 ? values[0] : undefined;
+};
+
+/** The variables one segment reads: the line's, and `PWD` as every directory
+ *  the segment may run in — pinned when that is exactly one and the line
+ *  cannot set `PWD`. */
+function segmentBindings(scope: PathScope): SegmentBindings {
+  const { shell } = scope;
+  const cwds = scope.cwdUnresolved ? [] : scope.cwds;
+  const inherited = inheritedValue(shell);
+  if (cwds.length === 0) return { bound: shell.variables, pinnedValue: inherited };
+  const workingDirectories = [...new Set([...(shell.variables.get(WORKING_DIRECTORY_VARIABLE) ?? []), ...cwds])];
+  const pinnedDirectory = cwds.length === 1 && !shell.workingDirectoryRebound ? cwds[0] : undefined;
+  return {
+    bound: new Map([...shell.variables, [WORKING_DIRECTORY_VARIABLE, workingDirectories]]),
+    pinnedValue: (name) => (name === WORKING_DIRECTORY_VARIABLE ? pinnedDirectory : inherited(name)),
+  };
+}
+
+/** The names a text reads plainly (`$NAME`, `${NAME}`). */
+const referencedNames = (text: string): readonly string[] =>
+  [...new Set([...text.matchAll(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g)].map((found) => found[1] ?? found[2]))];
+
+/** A spelling built so far, and the names already spliced into it (each is
+ *  spliced at most once along one way, so a value that reads its own name ends). */
+type Spelled = Readonly<{ text: string; spliced: ReadonlySet<string> }>;
+
+/** `text` with each plain read of a pinned variable replaced by its one
+ *  value, and the values' own reads in turn. */
+function withPinnedValues(text: string, spliced: ReadonlySet<string>, pinnedValue: SegmentBindings["pinnedValue"]): Spelled {
+  let settled = text;
+  const done = new Set(spliced);
+  for (;;) {
+    const next = referencedNames(settled).find((name) => !done.has(name) && pinnedValue(name) !== undefined);
+    const value = next === undefined ? undefined : pinnedValue(next);
+    if (next === undefined || value === undefined) return { text: settled, spliced: done };
+    settled = settled.replace(new RegExp(plainReference(next), "g"), () => value);
+    done.add(next);
   }
-  return spellings;
+}
+
+/**
+ * `word` as written, with each pinned value in place, and with every
+ * combination of the values each other bound variable may hold spliced in
+ * place of its plain reads — a spliced value's own reads in turn; null past
+ * `MAX_BOUND_SPELLINGS`.
+ */
+function boundSpellings(word: string, scope: PathScope): readonly string[] | null {
+  if (!word.includes("$")) return [word];
+  const { bound, pinnedValue } = segmentBindings(scope);
+  const first = withPinnedValues(word, new Set(), pinnedValue);
+  const spellings = new Set([word, first.text]);
+  let frontier: readonly Spelled[] = [first];
+  while (frontier.length > 0) {
+    const next: Spelled[] = [];
+    for (const { text, spliced } of frontier) {
+      for (const name of referencedNames(text)) {
+        const values = spliced.has(name) || pinnedValue(name) !== undefined ? undefined : bound.get(name);
+        const reference = new RegExp(plainReference(name), "g");
+        for (const value of values ?? []) {
+          const spelled = withPinnedValues(text.replace(reference, () => value), new Set([...spliced, name]), pinnedValue);
+          if (spellings.has(spelled.text)) continue;
+          spellings.add(spelled.text);
+          if (spellings.size > MAX_BOUND_SPELLINGS) return null;
+          next.push(spelled);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return [...spellings];
 }
 
 /** The pattern of a plain read of `name`: `$name` or `${name}`. */
@@ -703,6 +845,19 @@ const SEPARATORS_UNRELIABLE = /\blastpipe\b|\bset\s+[-+][A-Za-z]*P|\bphysical\b/
 /** A command name rebound on the line: `hash -p`, an alias, `enable`, a function. */
 const COMMANDS_REBOUND = /(?:^|[;&|(`\n]|\$\()\s*(?:hash|alias|enable)\b|\bfunction\s|\(\)\s*[{(]/;
 
+/** Line text that may set a variable whose name the guard does not see
+ *  written: a builtin that assigns a name it is given (`read "$n"`, `printf -v`,
+ *  `declare`, `export`, …), `eval`, a sourced file, arithmetic. */
+const RUNTIME_NAMED_BINDING =
+  /(?:^|[;&|(`\n{!]|\$\(|\b(?:then|do|else|elif|if|while|until|time|command|builtin)\s)\s*(?:eval|source|\.|read|mapfile|readarray|printf|declare|typeset|local|export|readonly|let|getopts|unset)(?=[\s;&|)]|$)|\(\(/;
+
+/** The pinned names the line `command` leaves pinned: none when it may bind a
+ *  name it does not spell, else every name it never mentions but by a plain read. */
+const stillPinned = (command: string, pinned: ReadonlySet<string>): ReadonlySet<string> =>
+  RUNTIME_NAMED_BINDING.test(command)
+    ? NO_SHELL.pinned
+    : new Set([...pinned].filter((name) => !command.includes(name) || !mayRebind(command, name)));
+
 /** `scope` with what the line `command` (parsed into `sites`) does to the shell. */
 function withLineShell(command: string, sites: readonly SegmentSite[], scope: PathScope): PathScope {
   const { shell } = scope;
@@ -711,6 +866,9 @@ function withLineShell(command: string, sites: readonly SegmentSite[], scope: Pa
     home: mayRebind(command, "HOME") ? null : scope.home,
     shell: {
       variables: lineVariables(sites, shell.variables),
+      pinned: stillPinned(command, shell.pinned),
+      workingDirectoryRebound: shell.workingDirectoryRebound || RUNTIME_NAMED_BINDING.test(command) ||
+        mayRebind(command, WORKING_DIRECTORY_VARIABLE),
       inertNames: inertNamesOf(command, sites),
       searchPathRebound: shell.searchPathRebound || mayRebind(command, CD_SEARCH_VARIABLE),
       splittingRebound: shell.splittingRebound || splittingRebound(command, sites),
@@ -828,34 +986,60 @@ type DirectoryMove =
    *  elsewhere than the current directory. */
   | Readonly<{ kind: "moves"; target: string; searched: boolean }>
   /** `popd`, `cd -`, a stack rotation, a runtime-built target, `~user`, `~`
-   *  with no known home. */
-  | Readonly<{ kind: "unknown" }>;
+   *  with no known home. `landings`: the targets the guard can name it may
+   *  land on (a runtime-built target's bound spellings), every one of them a
+   *  directory the line may reach — never the only ones. */
+  | Readonly<{ kind: "unknown"; landings: readonly string[] }>;
 
 /** A move whose target the guard can place (`moves`, `stacks`). */
 type PlacedMove = Extract<DirectoryMove, { target: string }>;
 const placed = (move: DirectoryMove): move is PlacedMove => move.kind === "moves" || move.kind === "stacks";
 
 const STAYS: DirectoryMove = Object.freeze({ kind: "stays" });
-const UNKNOWN_MOVE: DirectoryMove = Object.freeze({ kind: "unknown" });
+const UNKNOWN_MOVE: DirectoryMove = Object.freeze({ kind: "unknown", landings: [] });
 
-/** Where one `cd`/`pushd` operand goes (none: home), or null when the guard
- *  cannot know. */
-function cdDestination(head: string, operand: string | undefined, home: string | null): string | null {
-  // `pushd` alone swaps the stack's top two; `pushd +N`/`-N` rotates it.
-  if (head === "pushd" && (operand === undefined || /^[+-]\d+$/.test(operand))) return null;
-  const target = operand ?? "~";
-  if (target === "-" || hasRuntimePart(target)) return null;
+/** Is a `cd` target bare and relative (`engine`), so the search path may resolve it? */
+const searchedTarget = (target: string): boolean => !isAbsolute(target) && !/^\.\.?(?:\/|$)/.test(target);
+
+/** A static `cd` target with `~` and `~/…` resolved against home; null for no
+ *  static target, `-` (the previous directory), `~user`, or `~` with no known home. */
+function resolvedCdTarget(target: string | null, home: string | null): string | null {
+  if (target === null || target === "-") return null;
   if (target === "~" || target.startsWith("~/")) return home === null ? null : `${home}${target.slice(1)}`;
   return target.startsWith("~") ? null : target;
 }
 
+/** A `cd` operand that starts by reading `$PWD`, on a line that cannot set
+ *  it, read relative to where the shell is (`cd $PWD/sub` is `cd ./sub`). */
+const PWD_LEAD = /^("?)\$(?:\{PWD\}|PWD(?![A-Za-z0-9_]))/;
+
+/** Where one `cd`/`pushd` operand goes (none: home), or null when the guard
+ *  cannot know. An operand that reads only pinned variables is placed at
+ *  their one value. */
+function cdDestination(head: string, operand: string | undefined, scope: PathScope): string | null {
+  // `pushd` alone swaps the stack's top two; `pushd +N`/`-N` rotates it.
+  if (head === "pushd" && (operand === undefined || /^[+-]\d+$/.test(operand))) return null;
+  const read = operand ?? "~";
+  const written = scope.shell.workingDirectoryRebound ? read : read.replace(PWD_LEAD, "$1.");
+  return resolvedCdTarget(hasRuntimePart(written) ? staticSpelling(written, inheritedValue(scope.shell)) : written, scope.home);
+}
+
+/** Every target a runtime-built `cd` operand may spell with the values the
+ *  line and the environment bind (`boundSpellings`). */
+const landingsOf = (operand: string | undefined, scope: PathScope): readonly string[] =>
+  operand === undefined || !hasRuntimePart(operand) ? [] : (boundSpellings(operand, scope) ?? []).flatMap((spelled) => {
+    const resolved = resolvedCdTarget(staticSpelling(spelled, () => undefined), scope.home);
+    return resolved === null ? [] : [resolved];
+  });
+
 /**
  * The directory move one segment's command makes (`cd`, `pushd`, `popd`,
- * also behind `builtin`/`command`). `pushd -n` only edits the stack (`stacks`:
- * a later `popd` may land there); every other option but `-L` (`-P` resolves
- * `..` physically, `-e`, `-@`) and `popd` move where the guard cannot follow.
+ * also behind `builtin`/`command`), read with what the line binds. `pushd -n`
+ * only edits the stack (`stacks`: a later `popd` may land there); every other
+ * option but `-L` (`-P` resolves `..` physically, `-e`, `-@`) and `popd` move
+ * where the guard cannot follow.
  */
-function directoryMove(segment: string, home: string | null): DirectoryMove {
+function directoryMove(segment: string, scope: PathScope): DirectoryMove {
   const analyzed = analyzeCommandHead(segment);
   if (analyzed === null) return STAYS;
   let words: readonly string[] = [analyzed.head, ...analyzed.args];
@@ -871,10 +1055,9 @@ function directoryMove(segment: string, home: string | null): DirectoryMove {
   }
   const stacks = head === "pushd" && options.some((option) => /^-[A-Za-z]*n/.test(option));
   if (!stacks && options.some((option) => option !== "-L")) return UNKNOWN_MOVE;
-  const target = cdDestination(head, args[index], home);
-  if (target === null) return UNKNOWN_MOVE;
-  const searched = !isAbsolute(target) && !/^\.\.?(?:\/|$)/.test(target);
-  return { kind: stacks ? "stacks" : "moves", target, searched };
+  const target = cdDestination(head, args[index], scope);
+  if (target === null) return { kind: "unknown", landings: landingsOf(args[index], scope) };
+  return { kind: stacks ? "stacks" : "moves", target, searched: searchedTarget(target) };
 }
 
 /** Every directory a placeable move from `from` may land in: a bare relative
@@ -932,17 +1115,23 @@ type LineDirectories = Readonly<{ everywhere: readonly string[]; cwdUnresolved: 
  */
 function lineDirectories(sites: readonly SegmentSite[], scope: PathScope): LineDirectories {
   const moveOf = (site: SegmentSite): DirectoryMove => {
-    const move = directoryMove(site.segment, scope.home);
-    return placed(move) && move.searched && scope.shell.searchPathRebound ? UNKNOWN_MOVE : move;
+    const move = directoryMove(site.segment, scope);
+    return placed(move) && move.searched && scope.shell.searchPathRebound ? { kind: "unknown", landings: [move.target] } : move;
   };
+  // A placed move reaches its target; an unknown one reaches each landing the same way.
+  const reachedBy = (move: DirectoryMove): readonly PlacedMove[] =>
+    move.kind === "unknown"
+      ? move.landings.map((target) => ({ kind: "moves", target, searched: searchedTarget(target) }))
+      : placed(move) ? [move] : [];
   const known = new Set(scope.cwds);
   let cwdUnresolved = scope.cwdUnresolved;
   for (const site of sites) {
     const move = moveOf(site);
     if (move.kind === "unknown") cwdUnresolved = true;
-    if (!placed(move)) continue;
-    for (const base of [...known]) for (const destination of destinationsOf(base, move, scope.cdSearchPath)) known.add(destination);
-    if (isAbsolute(move.target)) known.add(absoluteUnder("/", move.target));
+    for (const reached of reachedBy(move)) {
+      for (const base of [...known]) for (const destination of destinationsOf(base, reached, scope.cdSearchPath)) known.add(destination);
+      if (isAbsolute(reached.target)) known.add(absoluteUnder("/", reached.target));
+    }
   }
   const everywhere = [...known];
   if (scope.shell.separatorsUnreliable || sites.some((site) => holdsCompoundSyntax(site.segment))) {
@@ -1456,19 +1645,23 @@ function judgeSegment(
   // A typed line that may rebind a command name (`hash -p /bin/rm cat`, an
   // alias, a function) may run anything under a read-only head's name.
   const headsTrusted = !(scope.mode === "typed" && scope.shell.commandsRebound);
+  const { pinnedValue } = segmentBindings(scope);
   const readOnly = headsTrusted && (invocation !== null || hasReadOnlyHead(segment) || CD_HEADS.has(literalHead) ||
     runsReadOnlyScript(segment, scope, context.readOnlyScripts) ||
-    isReadOnlyGitInvocation(segmentWords(segment).map(staticSpelling)));
+    isReadOnlyGitInvocation(segmentWords(segment).map((word) => staticSpelling(word, pinnedValue))));
   return {
     kind: "judged",
     facts: { segment, readOnly, touches: segmentTouches(segment, scope, executed.words), redirectTouch },
   };
 }
 
-/** A word's one static spelling — no runtime part, no glob, exactly one view — or null. */
-function staticSpelling(word: string | undefined): string | null {
-  if (word === undefined || hasRuntimePart(word)) return null;
-  const views = wordViews(word);
+/** A word's one static spelling, each pinned variable it reads in place — no
+ *  other runtime part, no glob, exactly one view — or null. */
+function staticSpelling(word: string | undefined, pinnedValue: SegmentBindings["pinnedValue"]): string | null {
+  if (word === undefined) return null;
+  const { text } = withPinnedValues(word, new Set(), pinnedValue);
+  if (hasRuntimePart(text)) return null;
+  const views = wordViews(text);
   return views !== null && views.length === 1 && !GLOB_CHAR.test(views[0]) ? views[0] : null;
 }
 
@@ -1485,10 +1678,12 @@ function staticSpelling(word: string | undefined): string | null {
 function runsReadOnlyScript(segment: string, scope: PathScope, scripts: readonly string[]): boolean {
   if (scope.shell.commandsRebound) return false;
   const words = segmentWords(segment);
-  const first = staticSpelling(words[0]);
+  const { pinnedValue } = segmentBindings(scope);
+  const spelled = (word: string | undefined): string | null => staticSpelling(word, pinnedValue);
+  const first = spelled(words[0]);
   if (first === null) return false;
-  const second = staticSpelling(words[1]);
-  const script = first !== "bun" ? first : second === "run" ? staticSpelling(words[2]) : second;
+  const second = spelled(words[1]);
+  const script = first !== "bun" ? first : second === "run" ? spelled(words[2]) : second;
   if (script === null || (first === script && !script.includes("/"))) return false;
   const locations = scriptLocations(script, scope);
   return locations !== null && locations.length > 0 &&
@@ -1505,7 +1700,8 @@ export function decideSubagentAuthority(command: string, context: SubagentAuthor
 }
 
 /** The path scope a command is judged in: protected directories (everything
- *  beneath them) and registered runs (their authority entries). */
+ *  beneath them), registered runs (their authority entries), and the inherited
+ *  environment, every variable of it pinned until a line rebinds it. */
 function pathScope(command: string, context: SubagentAuthorityContext): PathScope {
   const roots: AuthorityRoot[] = [
     ...context.protectedDirectories.map((path) => ({ path: trimSlash(normalize(path)), entries: "all" as const })),
@@ -1520,7 +1716,11 @@ function pathScope(command: string, context: SubagentAuthorityContext): PathScop
     cwdUnresolved: context.cwd === null,
     home: context.home,
     cdSearchPath: context.cdSearchPath,
-    shell: NO_SHELL,
+    shell: {
+      ...NO_SHELL,
+      variables: new Map([...context.environment].map(([name, value]) => [name, [value]])),
+      pinned: new Set(context.environment.keys()),
+    },
     policy: leadingDotPolicyOf(command),
     canonicalize: context.filesystem.canonicalize,
     mode: "typed",

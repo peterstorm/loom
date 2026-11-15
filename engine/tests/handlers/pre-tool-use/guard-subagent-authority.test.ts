@@ -284,3 +284,41 @@ describe("what the shell observes for #177", () => {
     expect((await inLoom(`bun ${reader} --file x > machines/README.md`)).kind).toBe("block");
   });
 });
+
+describe("what the shell observes: the inherited environment and Claude Code's shell state", () => {
+  const KEYS = ["CLAUDE_CONFIG_DIR", "LOOM_GUARD_PROBE_RUN"] as const;
+  let savedKeys: Record<string, string | undefined>;
+  let config: string;
+  beforeEach(() => {
+    savedKeys = Object.fromEntries(KEYS.map((key) => [key, process.env[key]]));
+    config = join(root, "claude-config");
+    process.env.CLAUDE_CONFIG_DIR = config;
+  });
+  afterEach(() => {
+    for (const key of KEYS) {
+      if (savedKeys[key] === undefined) delete process.env[key];
+      else process.env[key] = savedKeys[key];
+    }
+  });
+
+  it("protects the shell snapshots and session environment under CLAUDE_CONFIG_DIR, beside Loom's own directories", () => {
+    const observed = observeSubagentAuthorityContext("/repo").protectedDirectories;
+    expect(observed).toEqual(expect.arrayContaining([
+      join(config, "shell-snapshots"), join(config, "session-env"), join(root, "subagents"),
+    ]));
+  });
+
+  it("refuses a subagent rewriting the shell snapshot every later Bash call sources", async () => {
+    const snapshot = join(config, "shell-snapshots", "snapshot-bash-1.sh");
+    expect((await runGuardSubagentAuthority(subagent(`echo "alias ls='rm -rf'" >> ${snapshot}`))).kind).toBe("block");
+    expect((await runGuardSubagentAuthority(subagent(`echo 'export X=1' > ${join(config, "session-env", "s-1", "hook-0.sh")}`))).kind).toBe("block");
+    expect(await runGuardSubagentAuthority(subagent(`cat ${snapshot}`))).toEqual({ kind: "passthrough" });
+  });
+
+  it("judges a word through the variables this process inherited", async () => {
+    process.env.LOOM_GUARD_PROBE_RUN = run;
+    expect(observeSubagentAuthorityContext("/repo").environment.get("LOOM_GUARD_PROBE_RUN")).toBe(run);
+    expect((await runGuardSubagentAuthority(subagent("echo x > $LOOM_GUARD_PROBE_RUN/ledger.json"))).kind).toBe("block");
+    expect(await runGuardSubagentAuthority(subagent("cat $LOOM_GUARD_PROBE_RUN/ledger.json"))).toEqual({ kind: "passthrough" });
+  });
+});
