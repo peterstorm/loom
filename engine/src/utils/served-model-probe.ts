@@ -4,44 +4,64 @@
  * the pure decision in `core/served-model.ts`.
  *
  * Per provider it reads Pi's `models.json` in the active agent directory
- * (`baseUrl`, `apiKey`, the declared model ids), resolves the `apiKey` the way
- * Pi does (`core/pi-config-value.ts`: a `!` command, `$NAME` interpolation or
- * a literal), and requests `GET {baseUrl}/models` with it as
+ * (`baseUrl`, `apiKey`, the declared model ids) and `auth.json` beside it,
+ * picks the key Pi would send (`core/provider-key.ts`: a credential stored in
+ * `auth.json` first, else the `models.json` `apiKey`), resolves it in Pi's
+ * config-value grammar (`core/pi-config-value.ts`: a `!` command, `$NAME`
+ * interpolation or a literal), and requests `GET {baseUrl}/models` with it as
  * `Authorization: Bearer`. This is the one place Loom sends a provider
  * credential, and only to list a served provider's models (ADR-0023,
- * amended 2026-11-15). The key lives in this module's locals and the probe
- * child's environment: it is never logged, never put in a reason, an event
- * or a record, and never passed on a command line.
+ * amended 2026-11-15).
+ *
+ * The key lives in this module's locals and the probe child's environment.
+ * It is never logged, never put in a cause, an event or a record, and never
+ * passed on a command line. A key no HTTP header can carry is refused before
+ * the request (`fetch` would quote it in its error); the request follows no
+ * redirect, so the key reaches only the configured `baseUrl`; and every
+ * refusal text the child returns is scrubbed of the key.
  *
  * The probe is synchronous. Every reader of the routing context — the
  * generated-agent validator, the render, the spawn route gate, the
- * interactive launcher and the emission route — is synchronous, and they
+ * interactive launcher and spawn admission — is synchronous, and they
  * must all resolve a served target to the same model; a child process
  * (`process.execPath -e`, Node or Bun) performs the bounded HTTP request so
- * none of them has to become async.
+ * none of them has to become async. The live ports reuse a listing and a
+ * key command's output for {@link SERVED_OBSERVATION_TTL_MS}, so the readers
+ * of one launch agree without each probing, and a long-lived process still
+ * sees the operator switch the served model within that window.
  */
 
 import { execSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { ServedModels } from "../core/model-routing";
-import { parseConfigValueReference, resolveTemplate, templateVariables } from "../core/pi-config-value";
+import { resolveTemplate, templateVariables } from "../core/pi-config-value";
+import {
+  isHeaderValue,
+  overlaidEnvironment,
+  planProviderKey,
+  scrubSecret,
+  type ProviderKeyPlan,
+  type StoredCredential,
+} from "../core/provider-key";
 import { modelsUrl, type RouteProbe } from "../core/route-reachability";
-import { decideServedModel, type MissingKey, type ServedProviderObservation } from "../core/served-model";
+import { decideServedModel, type ServedProviderObservation } from "../core/served-model";
+import type { UnusableKey } from "../core/served-model-cause";
+import { readStoredCredential } from "./pi-auth-store";
 import { listedModels, readModelsProvider, ROUTE_PROBE_TIMEOUT_MS } from "./route-endpoint";
 
 /**
  * The two effects a served observation performs, so tests substitute plain
- * fakes: running an `apiKey` command, and listing a provider's models with a
- * key.
+ * fakes: running a key command, and listing a provider's models with a key.
  */
 export type ServedProbePorts = Readonly<{
-  /** Run an `apiKey` `!command` (without the `!`): its trimmed stdout, or null when it fails or prints nothing. */
+  /** Run a key `!command` (without the `!`): its trimmed stdout, or null when it fails or prints nothing. */
   runKeyCommand: (command: string) => string | null;
-  /** `GET url` with `Authorization: Bearer <apiKey>`, bounded by the probe timeout. */
+  /** `GET url` with `Authorization: Bearer <apiKey>`, bounded by the probe timeout, following no redirect. */
   listModels: (url: string, apiKey: string) => RouteProbe;
 }>;
 
-/** How long Pi lets an `apiKey` command run (Pi's own resolver uses the same bound). */
+/** How long Pi lets a key command run (Pi's own resolver uses the same bound). */
 const KEY_COMMAND_TIMEOUT_MS = 10_000;
 
 /** Run a key command as Pi does: the default shell, stdout only, trimmed, empty is no value. */
@@ -58,9 +78,10 @@ function runKeyCommand(command: string): string | null {
 }
 
 /**
- * The probe child: one bounded fetch, one JSON line on stdout. The URL, key
- * and timeout arrive in its environment, never in argv, so no process
- * listing shows the key.
+ * The probe child: one bounded fetch that follows no redirect, one JSON line
+ * on stdout. The URL, key and timeout arrive in its environment, never in
+ * argv, so no process listing shows the key. Its refusal text is scrubbed of
+ * the key by the parent (`childProcessListModels`).
  */
 const PROBE_CHILD = `
 const { LOOM_SERVED_PROBE_URL: url, LOOM_SERVED_PROBE_KEY: key, LOOM_SERVED_PROBE_TIMEOUT_MS: timeout } = process.env;
@@ -69,7 +90,7 @@ const text = (error) => {
   const cause = error instanceof Error && error.cause instanceof Error ? " (" + error.cause.message + ")" : "";
   return (error instanceof Error ? error.message : String(error)) + cause;
 };
-fetch(url, { headers: { Authorization: "Bearer " + key }, signal: AbortSignal.timeout(Number(timeout)) })
+fetch(url, { headers: { Authorization: "Bearer " + key }, redirect: "error", signal: AbortSignal.timeout(Number(timeout)) })
   .then(async (response) => {
     if (!response.ok) { await response.body?.cancel().catch(() => undefined); return write({ kind: "answered", status: response.status, body: null }); }
     try { write({ kind: "answered", status: response.status, body: await response.text() }); }
@@ -83,53 +104,129 @@ const probeChildOutput = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("refused"), reason: z.string() }),
 ]);
 
-/** List a provider's models synchronously, through one bounded child process. */
+/** One child-process listing, before its refusal text is scrubbed. */
+function spawnListing(url: string, apiKey: string, timeoutMs: number): RouteProbe {
+  const child = spawnSync(process.execPath, ["-e", PROBE_CHILD], {
+    encoding: "utf-8",
+    env: { LOOM_SERVED_PROBE_URL: url, LOOM_SERVED_PROBE_KEY: apiKey, LOOM_SERVED_PROBE_TIMEOUT_MS: String(timeoutMs) },
+    // The child's own fetch timeout fires first; this bound only stops a child that never exits.
+    timeout: timeoutMs + 5_000,
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  if (child.error !== undefined) return { kind: "refused", reason: `the probe process failed: ${child.error.message}` };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(child.stdout);
+  } catch {
+    return { kind: "refused", reason: `the probe process exited ${child.status ?? child.signal} without an answer` };
+  }
+  const parsed = probeChildOutput.safeParse(raw);
+  if (!parsed.success) return { kind: "refused", reason: "the probe process answered in an unknown shape" };
+  return parsed.data.kind === "refused"
+    ? { kind: "refused", reason: parsed.data.reason }
+    : { kind: "answered", status: parsed.data.status, servedModels: parsed.data.body === null ? null : listedModels(parsed.data.body) };
+}
+
+/**
+ * List a provider's models synchronously, through one bounded child process.
+ * A key no header can carry is refused without a request; a refusal's text
+ * never holds the key.
+ */
 export function childProcessListModels(timeoutMs: number = ROUTE_PROBE_TIMEOUT_MS): ServedProbePorts["listModels"] {
   return (url, apiKey) => {
-    const child = spawnSync(process.execPath, ["-e", PROBE_CHILD], {
-      encoding: "utf-8",
-      env: { LOOM_SERVED_PROBE_URL: url, LOOM_SERVED_PROBE_KEY: apiKey, LOOM_SERVED_PROBE_TIMEOUT_MS: String(timeoutMs) },
-      // The child's own fetch timeout fires first; this bound only stops a child that never exits.
-      timeout: timeoutMs + 5_000,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    if (child.error !== undefined) return { kind: "refused", reason: `the probe process failed: ${child.error.message}` };
-    let raw: unknown;
-    try {
-      raw = JSON.parse(child.stdout);
-    } catch {
-      return { kind: "refused", reason: `the probe process exited ${child.status ?? child.signal} without an answer` };
-    }
-    const parsed = probeChildOutput.safeParse(raw);
-    if (!parsed.success) return { kind: "refused", reason: "the probe process answered in an unknown shape" };
-    return parsed.data.kind === "refused"
-      ? { kind: "refused", reason: parsed.data.reason }
-      : { kind: "answered", status: parsed.data.status, servedModels: parsed.data.body === null ? null : listedModels(parsed.data.body) };
+    if (!isHeaderValue(apiKey)) return { kind: "refused", reason: "the key is not a valid HTTP header value; it was not sent" };
+    const probe = spawnListing(url, apiKey, timeoutMs);
+    return probe.kind === "refused" ? { kind: "refused", reason: scrubSecret(probe.reason, apiKey) } : probe;
   };
 }
 
-/** The live ports: Pi's command semantics and the child-process listing. */
-export const LIVE_SERVED_PROBE_PORTS: ServedProbePorts = Object.freeze({
+/** How long the live ports reuse a listing, or a key command's output. */
+export const SERVED_OBSERVATION_TTL_MS = 30_000;
+
+/** A key's fingerprint, so a cache entry is keyed by the key without holding it. */
+const fingerprint = (key: string): string => createHash("sha256").update(key).digest("hex");
+
+/**
+ * `ports` with their answers reused for `ttlMs` by the clock `now`: a
+ * listing per URL and key (its every outcome, so the readers within one
+ * window all see the same answer), and a key command's output per command
+ * (only a success — a failing command runs again next time, so fixing it
+ * takes effect at once). Pi caches a stored credential's command output for
+ * its whole process; the window here also lets a rotated key take effect.
+ */
+export function memoizedProbePorts(
+  ports: ServedProbePorts,
+  now: () => number = Date.now,
+  ttlMs: number = SERVED_OBSERVATION_TTL_MS,
+): ServedProbePorts {
+  const listings = new Map<string, Readonly<{ at: number; probe: RouteProbe }>>();
+  const commands = new Map<string, Readonly<{ at: number; value: string }>>();
+  const fresh = (at: number): boolean => now() - at < ttlMs;
+  return Object.freeze({
+    runKeyCommand: (command) => {
+      const cached = commands.get(command);
+      if (cached !== undefined && fresh(cached.at)) return cached.value;
+      const value = ports.runKeyCommand(command);
+      if (value === null) commands.delete(command);
+      else commands.set(command, Object.freeze({ at: now(), value }));
+      return value;
+    },
+    listModels: (url, apiKey) => {
+      const id = `${url}\u0000${fingerprint(apiKey)}`;
+      const cached = listings.get(id);
+      if (cached !== undefined && fresh(cached.at)) return cached.probe;
+      const probe = ports.listModels(url, apiKey);
+      listings.set(id, Object.freeze({ at: now(), probe }));
+      return probe;
+    },
+  });
+}
+
+/** The live ports: Pi's command semantics and the child-process listing, each reused for {@link SERVED_OBSERVATION_TTL_MS}. */
+export const LIVE_SERVED_PROBE_PORTS: ServedProbePorts = memoizedProbePorts({
   runKeyCommand,
   listModels: childProcessListModels(),
 });
 
-/** A provider's `apiKey` as Pi resolves it, or why there is none. */
+export type ResolvedProviderKey =
+  | Readonly<{ ok: true; key: string }>
+  | Readonly<{ ok: false; unusable: UnusableKey }>;
+
+/**
+ * The key Pi would send to `provider`, resolved: the credential `auth.json`
+ * stores (`stored`), else the `models.json` `apiKey`, in Pi's grammar against
+ * `env` (a stored entry's own `env` read first). A key no HTTP header can
+ * carry is unusable, so it is never sent.
+ */
 export function resolveProviderApiKey(
-  apiKey: string | null,
+  stored: StoredCredential | null,
+  modelsApiKey: string | null,
   env: Readonly<Record<string, string | undefined>>,
   run: ServedProbePorts["runKeyCommand"],
-): Readonly<{ ok: true; key: string }> | Readonly<{ ok: false; missing: MissingKey }> {
-  if (apiKey === null) return { ok: false, missing: { kind: "absent" } };
-  const reference = parseConfigValueReference(apiKey);
+): ResolvedProviderKey {
+  const plan = planProviderKey(stored, modelsApiKey);
+  if (plan.kind === "unusable") return { ok: false, unusable: plan.key };
+  const resolved = resolvePlannedKey(plan, env, run);
+  return !resolved.ok || isHeaderValue(resolved.key)
+    ? resolved
+    : { ok: false, unusable: { kind: "not-a-header-value", source: plan.source } };
+}
+
+/** A planned key's value: its command's output, or its template under `env` with the plan's overlay. */
+function resolvePlannedKey(
+  { source, reference, overlay }: Extract<ProviderKeyPlan, { kind: "resolve" }>,
+  env: Readonly<Record<string, string | undefined>>,
+  run: ServedProbePorts["runKeyCommand"],
+): ResolvedProviderKey {
   if (reference.kind === "command") {
     const key = run(reference.command);
-    return key === null ? { ok: false, missing: { kind: "command-failed" } } : { ok: true, key };
+    return key === null ? { ok: false, unusable: { kind: "command-failed", source } } : { ok: true, key };
   }
-  const key = resolveTemplate(reference.parts, env);
+  const lookup = overlaidEnvironment(env, overlay);
+  const key = resolveTemplate(reference.parts, lookup);
   if (key !== null && key !== "") return { ok: true, key };
-  const unset = templateVariables(reference.parts).filter((name) => (env[name] ?? "") === "");
-  return { ok: false, missing: unset.length > 0 ? { kind: "unset-variables", names: unset } : { kind: "absent" } };
+  const unset = templateVariables(reference.parts).filter((name) => (lookup[name] ?? "") === "");
+  return { ok: false, unusable: unset.length > 0 ? { kind: "unset-variables", source, names: unset } : { kind: "absent" } };
 }
 
 /** Observe one provider a served target depends on. */
@@ -140,10 +237,12 @@ function observeServedProvider(
   ports: ServedProbePorts,
 ): ServedProviderObservation {
   const lookup = readModelsProvider(agentDir, provider);
-  if (!lookup.ok) return { kind: "unreadable", reason: lookup.error };
+  if (!lookup.ok) return { kind: "unreadable", detail: lookup.error };
   if (lookup.provider === null || lookup.provider.baseUrl === null) return { kind: "unconfigured" };
-  const key = resolveProviderApiKey(lookup.provider.apiKey, env, ports.runKeyCommand);
-  if (!key.ok) return { kind: "keyless", missing: key.missing };
+  const stored = readStoredCredential(agentDir, provider);
+  if (!stored.ok) return { kind: "unreadable", detail: stored.error };
+  const key = resolveProviderApiKey(stored.credential, lookup.provider.apiKey, env, ports.runKeyCommand);
+  if (!key.ok) return { kind: "keyless", key: key.unusable };
   const url = modelsUrl({ provider, baseUrl: lookup.provider.baseUrl });
   return { kind: "probed", url, catalog: lookup.provider.catalog, probe: ports.listModels(url, key.key) };
 }

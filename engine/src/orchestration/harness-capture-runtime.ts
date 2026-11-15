@@ -59,8 +59,7 @@ import { sha256Hex } from "../core/digest";
 import { canonicalJson, type JsonValue } from "../core/review-packet";
 import { parseStandaloneReviewerProtocolV3 } from "../core/standalone-lineage-contract";
 import { verifyStandalonePanelView } from "./standalone-panel-context";
-import { routedChildLaunchRoute } from "../utils/child-launch-route";
-import { openRegisteredRunDirectory, type RunDirHandle } from "./run-directory-handle";
+import { openRegisteredRunDirectory, type AdmittedEmission, type RunDirHandle } from "./run-directory-handle";
 import { captureAttestationOf, renderCaptureAttestation, type CaptureAttestation } from "../core/capture-attestation";
 import { SECURITY_VERIFICATION_PROGRAM } from "../core/orchestration-contract/programs";
 import { canonicalAttestedRunDirectory, captureAttestationLookup, recordCaptureAttestation } from "./capture-attestation-store";
@@ -193,27 +192,40 @@ export type ReviewerCaptureEmissionAuthority =
 /**
  * The issued reviewer emission authority for one correlated request, from the
  * reviewer protocol the Run's capture plan projected out of its durable
- * registration (read once per capture). Pure: the decision is
- * `core/reviewer-emission-route`'s, with the routed child route observed here
- * exactly as the render path observes it, so a child the launcher routes off
- * its frozen route captures under the extraction-only authority it was
- * spawned with.
+ * registration (read once per capture) and the emission decision spawn
+ * admission recorded with the child's correlator. Pure: the decision is
+ * `core/reviewer-emission-route`'s, and the child's route is the one it was
+ * DISPATCHED on, never recomputed — a recomputation would read the parent
+ * model, the routing config and a served provider as they are at capture
+ * time, so a model switch, an edited config or a provider that is down would
+ * turn an emission-enabled child into extraction-only authority and refuse
+ * its call. A Pi child admission dispatched without the emission tool
+ * captures as extraction-only; a Pi correlator that recorded no decision
+ * qualifies against the frozen route alone (a child without the tool makes no
+ * call, and the zero-call arm extracts either way).
  */
 export function reviewerCaptureEmissionAuthority(
   projected: DomainResult<IssuedReviewerProtocol | null, string>,
   request: AgentRequestAuthority,
   harness: HarnessResultIdentity["harness"],
+  admitted: AdmittedEmission,
 ): ReviewerCaptureEmissionAuthority {
   if (!reviewerEmissionEligible(request)) return Object.freeze({ kind: "ineligible" as const });
   if (!projected.ok) {
     return Object.freeze({ kind: "unavailable" as const, message: projected.error });
   }
   if (projected.value === null) return Object.freeze({ kind: "ineligible" as const });
+  if (harness === "pi" && admitted.kind === "not-enabled") {
+    return Object.freeze({
+      kind: "extraction-only" as const,
+      reason: `spawn admission dispatched request ${request.requestId} without the emission tool`,
+    });
+  }
   const route = issuedReviewerEmissionRoute(
     projected.value,
     request,
     harness === "pi",
-    harness === "pi" ? routedChildLaunchRoute(request.role) : null,
+    harness === "pi" && admitted.kind === "enabled" ? admitted.route : null,
   );
   switch (route.kind) {
     case "emission":
@@ -426,6 +438,8 @@ export type CorrelatedRequest = Readonly<{
   issued: readonly AgentRequestAuthority[];
   identity: HarnessResultIdentity;
   request: AgentRequestAuthority;
+  /** The emission decision spawn admission recorded with the correlator. */
+  admittedEmission: AdmittedEmission;
 }>;
 
 export type CorrelatedRequestResolution =
@@ -526,7 +540,7 @@ function resolveIssuedMatch(handle: RunDirHandle,
   });
   return Object.freeze({
     ok: true,
-    value: Object.freeze({ handle, issued: issued.value, identity, request }),
+    value: Object.freeze({ handle, issued: issued.value, identity, request, admittedEmission: binding.admittedEmission }),
   });
 }
 
@@ -773,7 +787,7 @@ function readRunCapturePlan(
 export async function captureHarnessResult(args: CaptureHarnessInput): Promise<CaptureOutcome> {
   const resolved = resolveCorrelatedRequest(args);
   if (!resolved.ok) return resolved.outcome;
-  const { handle, issued, identity, request } = resolved.value;
+  const { handle, issued, identity, request, admittedEmission } = resolved.value;
 
   const reject = (reason: string, message: string): Promise<CaptureOutcome> =>
     terminalizeCaptureRejection(handle, request, terminalCaptureRefusal(reason, message));
@@ -797,7 +811,7 @@ export async function captureHarnessResult(args: CaptureHarnessInput): Promise<C
   // below is the pre-selection adapters' existing contract and stays
   // byte-identical.
   if (observation.kind === "emission-observed") {
-    return captureSelectedEmission(handle, request, identity, issued, args.harness, observation, plan.value, reject);
+    return captureSelectedEmission(handle, request, identity, issued, args.harness, admittedEmission, observation, plan.value, reject);
   }
   const payload = parseFinalPayload(observation.candidates);
   if (!payload.ok) return reject(payload.error.reason, payload.error.message);
@@ -874,11 +888,12 @@ async function captureSelectedEmission(
   identity: HarnessResultIdentity,
   issued: readonly AgentRequestAuthority[],
   harness: HarnessResultIdentity["harness"],
+  admittedEmission: AdmittedEmission,
   observation: Extract<CaptureObservation, { kind: "emission-observed" }>,
   plan: RunCapturePlan,
   reject: (reason: string, message: string) => Promise<CaptureOutcome>,
 ): Promise<CaptureOutcome> {
-  const authority = reviewerCaptureEmissionAuthority(plan.reviewerProtocol, request, harness);
+  const authority = reviewerCaptureEmissionAuthority(plan.reviewerProtocol, request, harness, admittedEmission);
   if (authority.kind === "unavailable") return retriableFailure("emission-authority", authority.message);
   const walk = observation.walkIncompleteness;
   if (authority.kind !== "emission") {

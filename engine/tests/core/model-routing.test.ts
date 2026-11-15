@@ -474,32 +474,38 @@ describe("served routing targets", () => {
       expect(routed(declared, llamaParent, servedConfig, {})).toEqual({ ...llamaParent, thinking: "high" });
     });
 
-    it("refuses, naming the rule, target and reason, when the served model is unknown", () => {
+    it("refuses, naming the rule, target, provider and typed cause, when the served model is unknown", () => {
+      const cause = { kind: "not-one-model", url: "http://h/v1/models", served: ["a", "b"] } as const;
       const result = resolveEffectivePiBinding(declared, {
         config: servedConfig,
         parentRef: codexRef,
-        served: { "desktop-vllm": { kind: "unknown", reason: "http://h/v1/models lists 2 models (a, b)" } },
+        served: { "desktop-vllm": { kind: "unknown", cause } },
       });
       expect(result).toEqual({
         ok: false,
         error: {
           kind: "served-model-unknown",
+          ruleId: "cloud-children-use-served",
+          target: "served-max",
+          provider: "desktop-vllm",
+          cause,
           message: "routing rule cloud-children-use-served selects target \"served-max\", served by provider 'desktop-vllm', " +
-            "whose model is unknown: http://h/v1/models lists 2 models (a, b)",
+            "whose model is unknown: http://h/v1/models lists 2 models (a, b); a served target needs exactly one — " +
+            "serve one model, or route the child to an exact model",
         },
       });
     });
 
     it("refuses a provider the context never probed, and a probe keyed to the wrong provider", () => {
       const unprobed = resolveEffectivePiBinding(declared, { config: servedConfig, parentRef: codexRef, served: {} });
-      expect(unprobed.ok).toBe(false);
+      expect(unprobed).toMatchObject({ ok: false, error: { kind: "served-model-unknown", cause: { kind: "not-probed" } } });
       if (!unprobed.ok) expect(unprobed.error.message).toContain("the routing context did not probe it");
       const misKeyed = resolveEffectivePiBinding(declared, {
         config: servedConfig,
         parentRef: codexRef,
         served: { "desktop-vllm": { kind: "served", ref: { provider: "other", model: "m" } } },
       });
-      expect(misKeyed.ok).toBe(false);
+      expect(misKeyed).toMatchObject({ ok: false, error: { cause: { kind: "foreign-model", provider: "other", model: "m" } } });
       if (!misKeyed.ok) expect(misKeyed.error.message).toContain("a model of another provider");
     });
 
@@ -507,7 +513,7 @@ describe("served routing targets", () => {
       const launch = resolveAgentLaunchBinding("code-reviewer", {
         config: servedConfig,
         parentRef: codexRef,
-        served: { "desktop-vllm": { kind: "unknown", reason: "down" } },
+        served: { "desktop-vllm": { kind: "unknown", cause: { kind: "unreachable", url: "http://h/v1/models", detail: "down" } } },
       });
       expect(launch.ok).toBe(false);
       if (!launch.ok) expect(launch.error.kind).toBe("served-model-unknown");
@@ -517,7 +523,7 @@ describe("served routing targets", () => {
       const segment = fc.stringMatching(/^[a-z0-9.-]{1,10}$/);
       const observation = fc.oneof(
         segment.map((model) => ({ kind: "served" as const, ref: { provider: "desktop-vllm", model } })),
-        fc.string().map((reason) => ({ kind: "unknown" as const, reason })),
+        fc.string().map((detail) => ({ kind: "unknown" as const, cause: { kind: "unreachable" as const, url: "http://h/v1/models", detail } })),
       );
       fc.assert(fc.property(observation, fc.constantFrom(codexRef, qwenRef), (observed, parentRef) => {
         const result = resolveEffectivePiBinding(declared, { config: servedConfig, parentRef, served: { "desktop-vllm": observed } });

@@ -23,6 +23,7 @@
  */
 
 import { lowerModelProfile, resolveAgentProfile, type PiBinding, type PolicyError } from "./model-profiles";
+import { describeServedModelUnknown, type ServedModelUnknownCause } from "./served-model-cause";
 
 /** A parsed `provider/model` reference, as a value object (not a raw string). */
 export type ModelRef = Readonly<{ provider: string; model: string }>;
@@ -68,8 +69,11 @@ export type RoutedPiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high
  * - `exact` — always this provider/model at this thinking level;
  * - `served` — whatever single model `provider` serves right now, which the
  *   shell probes and hands in as {@link ServedModels}. With no pinned
- *   thinking level (`thinking: null`) the parent's carries over, as for a
- *   `parent` rule.
+ *   thinking level (`thinking: null`) the child takes the parent thinking
+ *   level its resolver was given: the parent session's live level for an
+ *   interactive child ({@link resolveEffectivePiBindingFromParent} with the
+ *   session's level), the Agent's declared level for every headless launch
+ *   ({@link resolveEffectivePiBinding}, whose ref-only parent has none).
  */
 export type RoutingTarget =
   | Readonly<{ kind: "exact"; provider: string; model: string; thinking: RoutedPiThinkingLevel }>
@@ -86,10 +90,13 @@ export type ModelRoutingConfig = Readonly<{
   rules: readonly RoutingRule[];
 }>;
 
-/** What one provider serves now: its one model, or why that is unknown (an operator-facing reason). */
+/**
+ * What one provider serves now: its one model, or the typed cause that is
+ * unknown (`core/served-model-cause.ts`). Decided by `core/served-model.ts`.
+ */
 export type ServedModel =
   | Readonly<{ kind: "served"; ref: ModelRef }>
-  | Readonly<{ kind: "unknown"; reason: string }>;
+  | Readonly<{ kind: "unknown"; cause: ServedModelUnknownCause }>;
 
 /** Provider → what it serves now, for the providers {@link servedProvidersFor} names. */
 export type ServedModels = Readonly<Record<string, ServedModel>>;
@@ -130,12 +137,20 @@ export type EffectivePiBinding = Readonly<{
 /**
  * Why routing refused. `served-model-unknown` is a rule selecting a served
  * target whose provider's model the shell could not determine: the launch
- * is refused rather than routed anywhere else.
+ * is refused rather than routed anywhere else. It carries the rule, the
+ * target, the provider and the typed `cause`; `message` is that cause
+ * rendered once (`describeServedModelUnknown`), for the callers that print.
  */
-export type RoutingPolicyError = Readonly<{
-  kind: "invalid-model-ref" | "invalid-routing-config" | "served-model-unknown";
-  message: string;
-}>;
+export type RoutingPolicyError =
+  | Readonly<{ kind: "invalid-model-ref" | "invalid-routing-config"; message: string }>
+  | Readonly<{
+      kind: "served-model-unknown";
+      ruleId: string;
+      target: string;
+      provider: string;
+      cause: ServedModelUnknownCause;
+      message: string;
+    }>;
 
 export type RoutingPolicyResult<T> =
   | Readonly<{ ok: true; value: T }>
@@ -351,7 +366,8 @@ const isProviderName = (value: unknown): value is string =>
 /**
  * Parse one named target: exactly one of `model` (an exact ref, with an exact
  * `thinkingLevel`) or `served` (a provider name, with an optional
- * `thinkingLevel` — the parent's carries over without one).
+ * `thinkingLevel` — without one, the parent thinking level the resolver is
+ * given, see {@link RoutingTarget}).
  */
 function parseTarget(name: string, target: Readonly<Record<string, unknown>>): RoutingPolicyResult<RoutingTarget> {
   const label = `routing config target ${JSON.stringify(name)}`;
@@ -530,17 +546,21 @@ function targetBinding(
   if (target.kind === "exact") {
     return ok(Object.freeze({ provider: target.provider, model: target.model, thinking: target.thinking }));
   }
-  const refuse = (reason: string): RoutingPolicyResult<never> => err({
+  const refuse = (cause: ServedModelUnknownCause): RoutingPolicyResult<never> => err({
     kind: "served-model-unknown",
+    ruleId,
+    target: name,
+    provider: target.provider,
+    cause,
     message: `routing rule ${ruleId} selects target ${JSON.stringify(name)}, served by provider '${target.provider}', ` +
-      `whose model is unknown: ${reason}`,
+      `whose model is unknown: ${describeServedModelUnknown(target.provider, cause)}`,
   });
   const observed = served[target.provider];
-  if (observed === undefined) return refuse("the routing context did not probe it");
-  if (observed.kind === "unknown") return refuse(observed.reason);
+  if (observed === undefined) return refuse({ kind: "not-probed" });
+  if (observed.kind === "unknown") return refuse(observed.cause);
   // The snapshot's key and its model must agree; a mis-keyed snapshot is an error, never a route.
   if (observed.ref.provider !== target.provider) {
-    return refuse(`the probe answered ${observed.ref.provider}/${observed.ref.model}, a model of another provider`);
+    return refuse({ kind: "foreign-model", provider: observed.ref.provider, model: observed.ref.model });
   }
   return ok(Object.freeze({
     provider: observed.ref.provider,

@@ -16,9 +16,14 @@ decision, without a completed calibration window. AS-015 and AS-016 are recorded
 never as passed. No further pilot window is planned.
 
 Amended (2026-11-15, #178): decision 6. A `model-routing.json` target may name a provider (`served`) instead
-of a model; Loom resolves it to the one model that provider serves, and to do so sends the provider's
-`models.json` apiKey on that listing request only. Decision 3's "Loom never resolves or sends credentials"
-now holds for every other request, including the reachability probe.
+of a model; Loom resolves it to the one model that provider serves, and to do so sends the provider's key
+on that listing request only. Decision 3's "Loom never resolves or sends credentials" now holds for every
+other request, including the reachability probe. Revised the same day after the PR #179 review: the key is
+the one Pi sends (a credential stored in `auth.json` before the `models.json` apiKey), it is refused
+unsent when no header can carry it and never follows a redirect, observations are reused for 30 seconds,
+capture reads the emission decision spawn admission recorded instead of re-resolving the route, and a
+served target without a thinking level is documented as the launcher's parent level, not always the
+parent session's.
 
 ## Context
 
@@ -113,31 +118,55 @@ Three things followed from the earlier cloud-default catalog:
      route. A violated guardrail in such a window would reopen this decision; a missing one would not.
 6. **Served routing targets, resolved before launch (2026-11-15, #178).** A `model-routing.json` target is
    either exact (`{"model": "provider/id", "thinkingLevel": …}`) or served (`{"served": "provider"}`, with an
-   optional `thinkingLevel`; without one the child inherits the parent's). The operator's local server swaps
-   models, and a served target follows it without editing the routing policy. Loom records the exact binding
-   every child launches on, so a served target is resolved to one exact provider/model before anything
-   launches. The generated-agent render and its validator, `render-pi`, the spawn route gate, the
-   interactive launcher and the emission route each build the routing context (`PiRoutingContext.served`)
-   by the same observation and resolve the target through the same `resolveAgentLaunchBinding`.
+   optional `thinkingLevel`). Without one, the child runs at the parent thinking level its resolver is given:
+   the parent session's live level for the interactive launcher (`resolveEffectivePiBindingFromParent`),
+   the Agent's declared level for every headless launch (`resolveEffectivePiBinding`, whose parent is a
+   model ref only). The operator's local server swaps models, and a served target follows it without editing
+   the routing policy. Loom records the exact binding every child launches on, so a served target is
+   resolved to one exact provider/model before anything launches. The generated-agent render and its
+   validator, `render-pi`, the spawn route gate, the interactive launcher and spawn admission each build the
+   routing context (`PiRoutingContext.served`) by the same observation and resolve the target through the
+   same `resolveAgentLaunchBinding`.
    - **The observation.** For each provider a rule that can match the observed parent serves
-     (`servedProvidersFor`), the shell (`utils/served-model-probe.ts`) reads `baseUrl`, `apiKey` and the
-     declared model ids from Pi's `models.json` in the active agent directory, resolves the `apiKey` as Pi
-     1.5 does (`core/pi-config-value.ts`: a leading `!` runs a command, `$NAME`/`${NAME}` interpolate the
-     environment, `$$` and `$!` escape, anything else is literal), and requests `GET {baseUrl}/models` with
-     it as `Authorization: Bearer`. The pure decision (`core/served-model.ts`) admits the model only when the
-     listing names exactly one model and Pi's catalog declares it for that provider.
+     (`servedProvidersFor`), the shell (`utils/served-model-probe.ts`) reads `baseUrl` and the declared
+     model ids from Pi's `models.json` in the active agent directory, picks the key Pi 1.5.2 sends a custom
+     provider (`core/provider-key.ts`: an `api_key` credential stored in `auth.json` wins, its template
+     reading the entry's `env` before the environment; a stored credential without a key — `oauth`, or
+     `api_key` without `key` — means no key, never a fallback; otherwise the `models.json` `apiKey`),
+     resolves it in Pi's grammar (`core/pi-config-value.ts`: a leading `!` runs a command,
+     `$NAME`/`${NAME}` interpolate, `$` and `$!` escape, anything else is literal), and requests
+     `GET {baseUrl}/models` with it as `Authorization: Bearer`. The pure decision (`core/served-model.ts`)
+     admits the model only when the listing names exactly one model and Pi's catalog declares it for that
+     provider; every other outcome is a typed cause (`core/served-model-cause.ts`), rendered to prose once.
    - **Credentials.** That listing is the only request on which Loom sends a credential. The key lives in
      the shell's locals and the bounded probe child's environment; it is never put on a command line, in a
-     log line, a refusal, an event or a record, and a test pins that no outcome carries it.
+     log line, a refusal, an event or a record. A key no HTTP header value can carry (a line break, a control
+     character, a character above U+00FF) is refused before the request, because `fetch` quotes an invalid
+     header value in its error; the request follows no redirect (`redirect: "error"`), so the key reaches
+     only the configured `baseUrl`; every refusal text the probe child returns is scrubbed of the key in
+     every form it could take (`scrubSecret`, a tested property); and a malformed `models.json` or
+     `auth.json` is reported by file name only, because V8's `JSON.parse` error quotes the text around the
+     fault.
    - **No fallback.** A missing or unresolvable key, a 401/403, an unreachable server, a listing of zero or
      several models, or a model the catalog does not declare leaves the provider's model unknown, and any
      rule that selects the target refuses the launch with the reason and its remedy. The resolved route is
      then probed by decision 3's gate like any other.
+   - **Reuse.** The live ports reuse a listing per URL and key fingerprint, and a key command's successful
+     output per command, for 30 seconds (`SERVED_OBSERVATION_TTL_MS`, on an injectable clock): the readers of
+     one launch agree without each probing, and a long-lived Pi process sees a model switch within the
+     window. A failing key command is never reused. Pi itself caches a stored credential's command output
+     for its whole process and re-runs a `models.json` command each time.
+   - **Capture does not re-resolve.** Spawn admission records its emission decision with the child's
+     correlator (`AdmittedEmission`: `enabled` with the admitted route, or `not-enabled`), and capture
+     judges the child by it. Resolving the route again when the result arrives would read the parent model,
+     the routing config and the served provider as they are then: a model switch or a provider outage would
+     turn an emission-enabled child into extraction-only authority and refuse its call. A correlator with no
+     recorded decision (Claude, the `correlate` CLI, one written before the field) is stored without the
+     field, byte-identical to before, and qualifies on its frozen route.
    - **What stays the same.** An exact target still requires `thinkingLevel` (stricter than the dotfiles
-     launcher, which defaults it). The reachability probe stays unauthenticated. The context is built
-     synchronously, without a cache, at each read, so a served-model switch is seen by the next spawn; the
-     generated Agent definitions carry the routed binding, so they must be re-synced
-     (`scripts/sync-pi-agents.sh`) after the server switches models, and a stale one is refused as stale.
+     launcher, which defaults it). The reachability probe stays unauthenticated. The generated Agent
+     definitions carry the routed binding, so they must be re-synced (`scripts/sync-pi-agents.sh`) after the
+     server switches models, and a stale one is refused as stale.
 
 ## Consequences
 

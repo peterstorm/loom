@@ -81,6 +81,7 @@ import {
   writeRunFileNoFollow,
 } from "../utils/no-follow-fs";
 import { parseProgramEventRecord, type ProgramEventRecord } from "./program-journal";
+import { hasExactPlainKeys } from "../core/plain-record";
 
 export const RUN_DIRECTORY_SCHEMA_VERSION = 1;
 
@@ -209,6 +210,24 @@ export type TranscriptReserved = Readonly<{
   slotPath: string;
 }>;
 
+/**
+ * What spawn admission decided about one dispatched child's emission tool,
+ * recorded with its correlator so capture judges the child by the decision it
+ * was dispatched under instead of recomputing the route later (a later
+ * recomputation sees whatever the parent model, the routing config or a
+ * served provider says THEN):
+ * - `enabled` — the child was dispatched with the emission tool, on `route`;
+ * - `not-enabled` — the child was dispatched without it;
+ * - `unrecorded` — the writer recorded no decision (a Claude spawn, which is
+ *   extraction-only by harness; the `correlate` CLI; a correlator written
+ *   before the decision was recorded). It is stored as the field's absence,
+ *   so those correlators keep their exact bytes.
+ */
+export type AdmittedEmission =
+  | Readonly<{ kind: "enabled"; route: Readonly<{ provider: string; model: string }> }>
+  | Readonly<{ kind: "not-enabled" }>
+  | Readonly<{ kind: "unrecorded" }>;
+
 export type HarnessCorrelatorBinding = Readonly<{
   schemaVersion: typeof RUN_DIRECTORY_SCHEMA_VERSION;
   harness: "pi" | "claude";
@@ -216,7 +235,12 @@ export type HarnessCorrelatorBinding = Readonly<{
   requestId: AgentRequestAuthority["requestId"];
   role: AgentRequestAuthority["role"];
   attempt: AgentRequestAuthority["attempt"];
+  admittedEmission: AdmittedEmission;
 }>;
+
+/** A correlator to record: a writer that decided nothing about emission omits `admittedEmission`. */
+export type HarnessCorrelatorInput = Omit<HarnessCorrelatorBinding, "admittedEmission"> &
+  Readonly<{ admittedEmission?: AdmittedEmission }>;
 
 declare const ARTIFACT_RELATIVE_PATH: unique symbol;
 export type ArtifactRelativePath = string & { readonly [ARTIFACT_RELATIVE_PATH]: true };
@@ -518,7 +542,7 @@ export interface RunDirHandle {
   rejectCapture(authority: AgentRequestAuthority, diagnostic?: string): Promise<DomainResult<CaptureKey, RunDirectoryError>>;
   readCaptureRejection(authority: AgentRequestAuthority): DomainResult<string | null, RunDirectoryError>;
   recordHarnessCorrelator(
-    binding: HarnessCorrelatorBinding,
+    binding: HarnessCorrelatorInput,
   ): Promise<DomainResult<HarnessCorrelatorBinding, RunDirectoryError>>;
   readHarnessCorrelator(
     harness: HarnessCorrelatorBinding["harness"],
@@ -673,6 +697,8 @@ function parseHarnessCorrelatorBinding(raw: unknown): DomainResult<HarnessCorrel
   }
   const requestId = parseRequestId(record["requestId"]);
   if (!requestId.ok) return failure("correlator", requestId.error.message);
+  const admittedEmission = parseAdmittedEmission(record["admittedEmission"]);
+  if (!admittedEmission.ok) return admittedEmission;
   return success(canonicalRecord({
     schemaVersion: RUN_DIRECTORY_SCHEMA_VERSION,
     harness: record["harness"],
@@ -680,7 +706,36 @@ function parseHarnessCorrelatorBinding(raw: unknown): DomainResult<HarnessCorrel
     requestId: requestId.value,
     role: record["role"] as AgentRequestAuthority["role"],
     attempt: record["attempt"],
+    admittedEmission: admittedEmission.value,
   }));
+}
+
+const UNRECORDED_EMISSION: AdmittedEmission = canonicalRecord({ kind: "unrecorded" as const });
+
+const isNonEmptyString = (value: unknown): value is string => typeof value === "string" && value.length > 0;
+
+/** A correlator's admitted-emission decision; an absent field is `unrecorded`. */
+function parseAdmittedEmission(raw: unknown): DomainResult<AdmittedEmission, RunDirectoryError> {
+  if (raw === undefined) return success(UNRECORDED_EMISSION);
+  if (hasExactPlainKeys(raw, ["kind"]) && (raw["kind"] === "not-enabled" || raw["kind"] === "unrecorded")) {
+    return success(raw["kind"] === "unrecorded" ? UNRECORDED_EMISSION : canonicalRecord({ kind: "not-enabled" as const }));
+  }
+  if (hasExactPlainKeys(raw, ["kind", "route"]) && raw["kind"] === "enabled") {
+    const route = raw["route"];
+    if (hasExactPlainKeys(route, ["provider", "model"]) && isNonEmptyString(route["provider"]) && isNonEmptyString(route["model"])) {
+      return success(canonicalRecord({
+        kind: "enabled" as const,
+        route: canonicalRecord({ provider: route["provider"], model: route["model"] }),
+      }));
+    }
+  }
+  return failure("correlator", "harness correlator admitted emission violates its field contract");
+}
+
+/** The bytes a correlator is stored as: an `unrecorded` decision is the field's absence. */
+function storedHarnessCorrelator(binding: HarnessCorrelatorBinding): string {
+  const { admittedEmission, ...identity } = binding;
+  return JSON.stringify(admittedEmission.kind === "unrecorded" ? identity : { ...identity, admittedEmission });
 }
 
 /**
@@ -1622,7 +1677,7 @@ function recordHarnessCorrelatorOperation(directory: string): RunDirHandle["reco
       return failure("correlator", `correlator role ${parsed.value.role} does not match request ${parsed.value.requestId}/${reserved.value.role}`);
     }
     const path = correlatorPath(directory, parsed.value.harness, parsed.value.nativeId);
-    const claimed = claimIdempotentWrite(path, JSON.stringify(parsed.value), "correlator",
+    const claimed = claimIdempotentWrite(path, storedHarnessCorrelator(parsed.value), "correlator",
       (cause) => `cannot record harness correlator: ${cause}`,
       "native harness correlator is already bound to different request authority");
     return claimed.ok ? success(parsed.value) : claimed;

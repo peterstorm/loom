@@ -13,7 +13,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -332,5 +332,66 @@ describe("harness correlator write-once discipline", () => {
     expect(read.ok).toBe(false);
     if (read.ok) return;
     expect(read.error.message).toContain("unreadable");
+  });
+});
+
+/**
+ * The emission decision spawn admission recorded with a correlator (PR #179
+ * review): capture reads it back instead of recomputing the child's route.
+ * A writer that decided nothing stores the field's absence, so every
+ * correlator written before the field — and every Claude or CLI correlator
+ * since — keeps its exact bytes.
+ */
+describe("the admitted emission decision a correlator carries", () => {
+  const binding = (nativeId: string, request: AgentRequestAuthority) => ({
+    schemaVersion: 1 as const,
+    harness: "pi" as const,
+    nativeId,
+    requestId: request.requestId,
+    role: request.role,
+    attempt: request.attempt,
+  });
+  const enabled = { kind: "enabled" as const, route: { provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14" } };
+
+  it.each([
+    ["an enabled decision, with its route", enabled],
+    ["a not-enabled decision", { kind: "not-enabled" as const }],
+  ])("records and reads back %s", async (_label, admittedEmission) => {
+    const { handle, first } = await stagedRun();
+    const recorded = await handle.recordHarnessCorrelator({ ...binding("pi-admitted", first), admittedEmission });
+    expect(recorded).toMatchObject({ ok: true, value: { admittedEmission } });
+    expect(handle.readHarnessCorrelator("pi", "pi-admitted")).toMatchObject({ ok: true, value: { admittedEmission } });
+    // A replay of the same decision is the idempotent retry.
+    expect((await handle.recordHarnessCorrelator({ ...binding("pi-admitted", first), admittedEmission })).ok).toBe(true);
+  });
+
+  it("stores an unrecorded decision as the field's absence, byte-identical to a correlator written before it", async () => {
+    const { handle, directory, first } = await stagedRun();
+    const recorded = await handle.recordHarnessCorrelator(binding("pi-legacy", first));
+    expect(recorded).toMatchObject({ ok: true, value: { admittedEmission: { kind: "unrecorded" } } });
+    expect(readFileSync(correlatorFile(directory, "pi", "pi-legacy"), "utf8")).toBe(JSON.stringify(binding("pi-legacy", first)));
+    expect(handle.readHarnessCorrelator("pi", "pi-legacy")).toMatchObject({ ok: true, value: { admittedEmission: { kind: "unrecorded" } } });
+    // An explicit unrecorded decision is the same record.
+    expect((await handle.recordHarnessCorrelator({ ...binding("pi-legacy", first), admittedEmission: { kind: "unrecorded" } })).ok).toBe(true);
+  });
+
+  it("refuses to re-record a correlator under a different decision", async () => {
+    const { handle, first } = await stagedRun();
+    await handle.recordHarnessCorrelator(binding("pi-switch", first));
+    const conflict = await handle.recordHarnessCorrelator({ ...binding("pi-switch", first), admittedEmission: enabled });
+    expect(conflict).toMatchObject({ ok: false, error: { message: expect.stringContaining("already bound to different request authority") } });
+  });
+
+  it.each([
+    ["an unknown kind", { kind: "maybe" }],
+    ["an enabled decision without its route", { kind: "enabled" }],
+    ["a route with an empty model", { kind: "enabled", route: { provider: "desktop-vllm", model: "" } }],
+    ["a route with an extra field", { kind: "enabled", route: { provider: "desktop-vllm", model: "m", thinking: "high" } }],
+    ["a not-enabled decision with an extra field", { kind: "not-enabled", route: enabled.route }],
+  ])("refuses a stored correlator whose decision is %s", async (_label, admittedEmission) => {
+    const { handle, directory, first } = await stagedRun();
+    writeFileSync(correlatorFile(directory, "pi", "pi-malformed"), JSON.stringify({ ...binding("pi-malformed", first), admittedEmission }));
+    expect(handle.readHarnessCorrelator("pi", "pi-malformed"))
+      .toMatchObject({ ok: false, error: { message: "harness correlator admitted emission violates its field contract" } });
   });
 });

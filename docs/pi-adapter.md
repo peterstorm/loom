@@ -131,7 +131,7 @@ Claude Code's SubagentStop has transcript-path conventions. Pi produces structur
 For registered orchestration programs, both harnesses follow the same path:
 
 1. the engine reserves an `AgentRequestAuthority` and a fixed transcript slot;
-2. the adapter records the harness-native id against the request at spawn;
+2. the adapter records the harness-native id against the request at spawn; Pi also records the emission decision admission made for the child (enabled on its admitted route, or not), which capture reads instead of resolving the route again;
 3. on completion, the adapter selects the exact final payload under harness-specific rules;
 4. `harness-capture-runtime.ts` publishes the exact bytes into the reserved slot;
 5. the program resumes and parses semantics from that immutable capture.

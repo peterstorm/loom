@@ -11,10 +11,9 @@
  * learn which model the server serves, not only that it answers.
  */
 
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { observePathPresence } from "./path-presence";
+import { readSecretJsonFile } from "./secret-json-file";
 import type { ModelRef } from "../core/model-routing";
 import {
   decideRouteReachability,
@@ -58,16 +57,10 @@ export type ModelsProviderLookup =
  */
 export function readModelsProvider(agentDir: string, provider: string): ModelsProviderLookup {
   const path = join(agentDir, "models.json");
-  const presence = observePathPresence(path);
-  if (presence.kind === "absent") return { ok: true, provider: null };
-  if (presence.kind === "unknown") return { ok: false, error: `cannot read ${path}: ${presence.cause}` };
-  let raw: unknown;
-  try {
-    raw = JSON.parse(readFileSync(path, "utf-8"));
-  } catch (error) {
-    return { ok: false, error: `cannot parse ${path}: ${error instanceof Error ? error.message : String(error)}` };
-  }
-  const parsed = modelsConfigSchema.safeParse(raw);
+  const file = readSecretJsonFile(path);
+  if (file.kind === "absent") return { ok: true, provider: null };
+  if (file.kind === "error") return { ok: false, error: file.error };
+  const parsed = modelsConfigSchema.safeParse(file.value);
   if (!parsed.success) return { ok: false, error: `invalid ${path}: ${parsed.error.issues.map(({ message }) => message).join("; ")}` };
   const declared = parsed.data.providers?.[provider];
   return {
