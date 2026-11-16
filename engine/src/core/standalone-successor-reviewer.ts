@@ -16,6 +16,7 @@
 export {
   standaloneSuccessorReviewerRegistration,
   buildStandaloneSuccessorReviewerContext,
+  reprovesStandaloneSuccessorReviewerContext,
   parseIssuedStandaloneSuccessorReviewer,
   admitStandaloneSuccessorReviewer,
   aggregateIssuedStandaloneSuccessorEvidence,

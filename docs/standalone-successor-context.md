@@ -9,6 +9,7 @@ Execute the exact `LOOM_CONTEXT_READ_COMMAND` in the issued task using Claude Ba
 The first response is a bounded section index. Append:
 
 - `--section standalone-lineage` for the complete prior inventory, original origins, old decisions/refutations/resolutions, selected DECLARED policy, current source identity and reopening references.
+- `--section standalone-assessment-roster` for what to copy into the payload: `lineageDigest`, `snapshotDigest`, the `repairablePaths` a repair may name, and one row per inherited origin in issued order with its exact `origin`, standing, citable decision `reference`s and admitted `verdicts`. Copy every digest from it; a reviewer cannot compute them from the lineage.
 - `--section reviewer-payload-schema` and `--section reviewer-impact-rubric` for the unchanged issued v3 grammar/rubric.
 - `--section standalone-frozen-source` for current path/digest/mode metadata; `--file EXACT_PATH` for an explicitly selected lossless UTF-8 postimage. Binary/absent postimages are not invented text.
 - `--section predecessor-frozen-source` for predecessor observations and the precise archive label/purpose.

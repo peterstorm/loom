@@ -25,6 +25,7 @@ import {
   reviewerEmissionToolContract,
 } from "../src/core/reviewer-contract";
 import { EMISSION_TOOL_SPECS, issueEmissionBinding } from "../src/core/emission-tool";
+import { STANDALONE_ASSESSMENT_ROSTER_SECTION } from "../src/core/standalone-lineage-contract";
 import { parseRequestId } from "../src/core/orchestration-contract/identity";
 import { compactSchemaOf, describeCompactSchemaError } from "./support/compact-schema";
 import { describeMarkdownError, fencesOf, markdown } from "../src/linter/markdown";
@@ -317,6 +318,16 @@ describe("the fragment's tool-primary emission wording (FR-020/AS-012)", () => {
     expect(example![2]).toContain("refused");
   });
 
+  it("names the successor envelope, where its digests come from, and shows it before the rubric (issue #185)", () => {
+    const section = /## Successor review \(standalone-successor-review only\)\n\n([\s\S]*?)\n\n## reviewer-impact-rubric/.exec(fragment);
+    expect(section).not.toBeNull();
+    for (const phrase of [
+      "explicitly issued standalone successor v3 request", "Every v2 shape above is then refused",
+      '"schemaVersion": 3', '"kind": "standalone-successor-review"', `\`${STANDALONE_ASSESSMENT_ROSTER_SECTION}\` section`,
+      "in roster order", "never compute or invent one", "`verdicts`", "`decisions`", "`repairablePaths`", "`not-assessable`",
+    ]) expect(section![1], phrase).toContain(phrase);
+  });
+
   it("the retained extraction-only final-message contract stays verbatim and leads the fragment", () => {
     expect(fragment.startsWith(REVIEWER_OUTPUT_CONTRACT)).toBe(true);
     expect(fragment).toContain(REVIEWER_OUTPUT_CONTRACT);
@@ -329,9 +340,10 @@ describe("the fragment's tool-primary emission wording (FR-020/AS-012)", () => {
   });
 
   it("the stamped schema is the issued schema value and the rubric bytes are untouched (stamp/schema consistency)", () => {
-    // The template fence is plain text: exactly the schema and example remain ```json blocks.
+    // The template fence is plain text: exactly the schema, the standalone
+    // example and the successor example remain ```json blocks.
     const source = markdown("references/reviewer-wire/wire-contract.md", fragment);
-    expect(orFail(fencesOf(source, "json"), describeMarkdownError)).toHaveLength(2);
+    expect(orFail(fencesOf(source, "json"), describeMarkdownError)).toHaveLength(3);
     // Shown compact, so the bytes differ from the packet section; the value may not.
     expect(orFail(compactSchemaOf(source), describeCompactSchemaError).value).toEqual(JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2));
     expect(fragment).toContain("section in compact form; the packet copy governs.\n\n```json\n");

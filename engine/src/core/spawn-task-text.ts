@@ -17,6 +17,7 @@ import type { AgentRequestAuthority } from "./orchestration-contract";
 import type { LoomAgentName } from "./model-profiles";
 import { SECURITY_VERIFIER_ROLE } from "./security-adjudication";
 import { FROZEN_DIFF_PAGE_UNITS, type FrozenDiff } from "./standalone-read-coverage";
+import { STANDALONE_ASSESSMENT_ROSTER_SECTION } from "./standalone-lineage-contract";
 
 /** The issued reviewer delivery of one emission-eligible request, by registered schema version. */
 export type ReviewerDelivery =
@@ -139,6 +140,7 @@ function reviewerDeliveryBootstrap(facts: SpawnTaskFacts, delivery: ReviewerDeli
   return reader + match(delivery)
     .with({ version: 3 }, () =>
       "This is an explicitly issued standalone successor v3 request. Read standalone-lineage and standalone-frozen-source, then the frozen reviewer-payload-schema and reviewer-impact-rubric. Cover every inherited origin exactly once in issued order, retaining original identity and history. Reopening needs the exact prior decision reference and complete new evidence; unavailable context means not-assessable, never repaired. New assertions belong in findings as draft/relation, not reminted prior Findings.\n" +
+      `Your payload's "schemaVersion" is 3 and its "kind" is "standalone-successor-review": follow your wire contract's "Successor review" section, never its v2 example, which this request refuses. Read the ${STANDALONE_ASSESSMENT_ROSTER_SECTION} section and copy every digest from it: lineageDigest and snapshotDigest, each prior's origin in roster order, and only a reference its decisions list. Give each prior a verdict its row's verdicts allow.\n` +
       "Browse predecessor-frozen-source with --section. Browse an exact predecessor-context:ROLE[:attempt-2] using --archive LABEL --archive-purpose v1-v2 (or standalone-successor for a v3 predecessor), then --section or --file and bounded offsets. These are retained data, not new issuance authority. Native capture records your one exact final payload; registered resume owns admission, retry and panel work.\n")
     .with({ version: 2 }, ({ readObligation }) =>
       "Read the issued Context Packet FIRST; its frozen schema and rubric govern your final output.\n" +

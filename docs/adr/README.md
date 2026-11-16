@@ -91,3 +91,4 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0074](ADR-0074-every-doc-reference-resolves-against-the-project.md) | Every doc reference resolves against the project | Accepted (2026-11-14) | — |
 | [ADR-0075](ADR-0075-every-rule-family-is-on-or-declined.md) | Every rule family is on or declined | Accepted (2026-11-14) | — |
 | [ADR-0076](ADR-0076-shipped-machines-are-pinned-by-digest.md) | Shipped machines are pinned by digest | Accepted (2026-11-16) | — |
+| [ADR-0077](ADR-0077-successor-reviewers-copy-references-from-an-issued-roster.md) | Successor reviewers copy references from an issued roster | Accepted (2026-11-16) | — |

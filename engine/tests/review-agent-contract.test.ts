@@ -12,6 +12,8 @@ import { createPublicationAuthorityResolver, parseAgentRequestAuthority, parseIs
 import { resolveAgentPolicy, resolveModelProfile, lowerModelProfile } from "../src/core/model-profiles";
 import { sha256Hex } from "../src/core/digest";
 import { REVIEWER_BOOTSTRAP_REGION, extractRegion, extractWireContractRegion } from "../src/core/wire-contract";
+import { STANDALONE_V3_ENVELOPE_HINT, parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3 } from "../src/core/reviewer-protocol";
+import { REVIEWER_WIRE_CONTRACT_EXAMPLE_V3 } from "../src/core/standalone-lineage-contract";
 import { value } from "./fixtures/parse-result";
 import { compactSchemaOf, describeCompactSchemaError } from "./support/compact-schema";
 import { markdown as markdownSource } from "../src/linter/markdown";
@@ -211,6 +213,7 @@ function issuedContract(role: string, version: 1 | 2, scope: readonly string[] =
 
 const currentAgentFile = (role: string) => readFileSync(join(REPO_ROOT, "agents", `${role}.md`), "utf-8");
 const EXAMPLE_SECTION = "Example (standalone-review only)";
+const SUCCESSOR_SECTION = "Successor review (standalone-successor-review only)";
 /** A section's JSON fence: directly under its heading, or after one sentence. */
 function fencedSection(markdown: string, label: string): string {
   const section = markdown.split(`## ${label}\n\n`)[1];
@@ -245,6 +248,26 @@ describe("all seven issued reviewer shims select packet authority before current
     expect(admitted.findings.criticalCount).toBe(1);
     expect(admitted.findings.drafts[0]?.basis).toEqual(JSON.parse(example).findings[0].basis);
     expect(parseReviewerEvidence(issued, new TextEncoder().encode("CRITICAL_COUNT: 0\nADVISORY_COUNT: 0")).ok).toBe(false);
+  });
+
+  /**
+   * Issue #185: successor reviewers on Claude Code saw only the v2 shape and
+   * emitted it, so every successor review blocked. Each stamped file now
+   * carries the successor section; its example is the v3 grammar's own, and
+   * the v2 example is refused by that grammar with the envelope named.
+   */
+  it.each([...REVIEW_SUB_AGENTS])("%s stamped successor example is the v3 grammar's, and its v2 example is refused as a successor", (role) => {
+    const region = value(extractWireContractRegion(currentAgentFile(role)));
+    const section = region.split(`## ${SUCCESSOR_SECTION}\n\n`)[1]?.split("\n\n## reviewer-impact-rubric")[0];
+    expect(section, `agents/${role}.md lacks its successor section`).toBeDefined();
+    const fence = /```json\n([\s\S]*?)\n```/.exec(section!);
+    expect(fence).not.toBeNull();
+    const encoded = new TextEncoder().encode(fence![1]!);
+    expect(parseStandaloneReviewerPayloadV3(encoded)).toEqual({ ok: true, value: REVIEWER_WIRE_CONTRACT_EXAMPLE_V3 });
+    expect(parseReviewerPayloadV2(encoded).ok).toBe(false);
+    const v2 = parseStandaloneReviewerPayloadV3(new TextEncoder().encode(fencedSection(region, EXAMPLE_SECTION)));
+    expect(v2.ok).toBe(false);
+    if (!v2.ok) expect(v2.error.message).toContain(STANDALONE_V3_ENVELOPE_HINT);
   });
 
   it.each([...REVIEW_SUB_AGENTS])("%s genuine issued v1 selects read-only archived instructions, never v2", (role) => {

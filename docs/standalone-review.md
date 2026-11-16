@@ -228,6 +228,20 @@ resolved and policy-retired. V3 final JSON contains `schemaVersion:3`,
 retain the Reviewer Protocol v2 evidence fields; relations are `independent` or `distinct-related` with an
 exact prior origin and distinction. Reviewers never mint IDs or rewrite old claims.
 
+**The assessment roster.** A reviewer cannot compute the digests a v3 payload carries,
+so every successor packet has a `standalone-assessment-roster` section between
+`standalone-lineage` and the frozen schema. It gives `lineageDigest`, `snapshotDigest`,
+the `repairablePaths` a `repaired` change may name, and one `priors` row per inherited
+origin in issued order. Each row holds the `origin` to copy, the original Finding, its
+`standing` (`active`, or `retired` when dismissed, refuted or resolved), the `decisions`
+a `retained` or `reopen` assessment may cite by `reference`, and the `verdicts` admission
+accepts. A retired prior is never `still-present` or `repaired`; it is `retained`,
+`reopen` or `not-assessable`. Admission judges every assessment against the same rows.
+A refusal names the row's index, origin, standing, the verdict given, the verdicts the
+row allows and its citable references, and the retry carries that text. Every reviewer
+agent file shows the v3 shape and an example in its stamped wire contract
+(`references/reviewer-wire/wire-contract.md`), generated from the executable schema.
+
 **Resolving an inherited Finding.** Resolution requires every expected reviewer to say `repaired`, give a reason and
 identify a relevant scoped implementation change against the same frozen snapshot.
 Known unchanged input cannot justify repair; unknown historical comparison is

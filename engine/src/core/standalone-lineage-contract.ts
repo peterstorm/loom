@@ -124,6 +124,28 @@ export function parseStandaloneReviewerProtocolV3(raw: unknown): DomainResult<ty
     ? success(STANDALONE_REVIEWER_PROTOCOL_V3)
     : failure(canonicalRecord({ kind: "reviewer-protocol-failed", code: "unsupported-protocol", path: "/reviewerProtocol", message: "Standalone v3 requires its exact schema and unchanged impact rubric." }));
 }
+/** The issued successor packet's section carrying the Standalone Assessment Roster. */
+export const STANDALONE_ASSESSMENT_ROSTER_SECTION = "standalone-assessment-roster";
+
+/**
+ * The successor payload every reviewer agent file shows (issue #185): one
+ * prior repaired against a changed scoped path, one retained by citing a
+ * decision reference, one not assessable, and no new Findings. Its digests are
+ * placeholders a reviewer copies over from the issued assessment roster.
+ * Parsed by the admission schema here, so it cannot diverge from what
+ * admission accepts.
+ */
+export const REVIEWER_WIRE_CONTRACT_EXAMPLE_V3: StandaloneReviewerPayloadV3 = standaloneReviewerPayloadV3Schema.parse({
+  schemaVersion: 3, kind: "standalone-successor-review",
+  lineageDigest: "1".repeat(64), snapshotDigest: "2".repeat(64),
+  priorAssessments: [
+    { origin: "a".repeat(64), verdict: "repaired", reason: "The handler now checks the version before writing.",
+      change: { path: "src/orders/update-order.ts", description: "Adds the version comparison at line 42." } },
+    { origin: "b".repeat(64), verdict: "retained", decisionDigest: "c".repeat(64), reason: "Dismissed by the disposition; nothing changed that bears on it." },
+    { origin: "d".repeat(64), verdict: "not-assessable", reason: "Its file is outside what I could read in this scope." },
+  ],
+  findings: [],
+});
 export const STANDALONE_REVIEWER_FIXED_SECTIONS_V3 = Object.freeze([
   Object.freeze({ label: "reviewer-payload-schema", text: STANDALONE_REVIEWER_SCHEMA_V3 }),
   Object.freeze({ label: "reviewer-impact-rubric", text: REVIEWER_IMPACT_RUBRIC_V1 }),

@@ -6,7 +6,10 @@ import {
   reviewerEmissionToolContract, REVIEWER_EMISSION_TOOL_CONTRACT_PLACEHOLDER, REVIEWER_EMISSION_TOOL_CONTRACT_TEMPLATE,
   type ReviewerPayloadV2, type ReviewerProtocolFailure,
 } from "./reviewer-contract";
-import { standaloneReviewerPayloadV3Schema, type StandaloneReviewerPayloadV3 } from "./standalone-lineage-contract";
+import {
+  REVIEWER_WIRE_CONTRACT_EXAMPLE_V3, STANDALONE_ASSESSMENT_ROSTER_SECTION, standaloneReviewerPayloadV3Schema,
+  type StandaloneReviewerPayloadV3,
+} from "./standalone-lineage-contract";
 import { canonicalRecord, failure, success, type DomainResult } from "./orchestration-contract/identity";
 
 const encoder = new TextEncoder();
@@ -32,15 +35,26 @@ function violationReason(message: string): string {
   return flat.length > 240 ? `${flat.slice(0, 240)}…` : flat;
 }
 
-/** The ONE wording of a schema refusal: WHERE (pointer) and WHY (the defect). */
+/**
+ * What a top-level v3 refusal adds (issue #185): reviewers that copied the v2
+ * example were told only "expected 3 at /schemaVersion" and copied it again.
+ * The successor envelope is named whole, so the retry can rebuild it.
+ */
+export const STANDALONE_V3_ENVELOPE_HINT =
+  'A successor payload is one object with exactly "schemaVersion": 3, "kind": "standalone-successor-review", ' +
+  '"lineageDigest", "snapshotDigest", "priorAssessments" and "findings", as the wire contract\'s Successor review section shows.';
+
+/** The ONE wording of a schema refusal: WHERE (pointer), WHY (the defect) and, for a top-level v3 defect, the envelope. */
 function schemaRefusal(
   contract: "v2" | "standalone v3",
   issue: Readonly<{ path: readonly PropertyKey[]; message: string }> | undefined,
 ): DomainResult<never, ReviewerProtocolFailure> {
+  const path = issue?.path ?? [];
+  const hint = contract === "standalone v3" && path.length <= 1 ? ` ${STANDALONE_V3_ENVELOPE_HINT}` : "";
   return rejected(
     "invalid-payload",
-    `Reviewer payload does not conform to the issued ${contract} schema: ${violationReason(issue?.message ?? "no violation reported")}`,
-    pointer(issue?.path ?? []),
+    `Reviewer payload does not conform to the issued ${contract} schema: ${violationReason(issue?.message ?? "no violation reported")}${hint}`,
+    pointer(path),
   );
 }
 
@@ -312,9 +326,30 @@ export function renderReviewerWireContract(): string {
     `## reviewer-payload-schema\n\nThe issued Context Packet's \`reviewer-payload-schema\` section in compact form; the packet copy governs.\n\n\`\`\`json\n${compactSchema}\n\`\`\``,
     `## Example (standalone-review only)\n\n\`\`\`json\n${JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, null, 2)}\n\`\`\``,
     "A Wave request is refused this shape: its payload is `\"kind\": \"wave-review\"` with `packetId`, `generation` and `prior_findings`, as the schema and your task state.",
+    STANDALONE_SUCCESSOR_WIRE_SECTION,
     `## reviewer-impact-rubric\n\n${REVIEWER_IMPACT_RUBRIC_V1}`,
   ].join("\n\n");
 }
+
+/**
+ * The successor arm of the wire contract (issue #185). An explicitly issued
+ * standalone successor request is refused every v2 shape, and its payload
+ * copies digests a reviewer cannot compute, so the stamped contract names the
+ * v3 shape, says where each digest comes from (the packet's
+ * `standalone-assessment-roster` section) and shows a parsed v3 example. The
+ * v3 schema itself is not repeated: the issued packet carries its bytes.
+ */
+const STANDALONE_SUCCESSOR_WIRE_SECTION = [
+  "## Successor review (standalone-successor-review only)",
+  "Only when your task says it is an explicitly issued standalone successor v3 request. Every v2 shape above is then refused: the packet's schema section holds the v3 schema, and your payload has this shape.",
+  [
+    `- \`"schemaVersion": 3\`, \`"kind": "standalone-successor-review"\`, and \`lineageDigest\` and \`snapshotDigest\` copied from the packet's \`${STANDALONE_ASSESSMENT_ROSTER_SECTION}\` section.`,
+    "- `priorAssessments`: one entry per roster `priors` row, in roster order, carrying that row's `origin`. Copy every digest from the roster; never compute or invent one.",
+    "- Each verdict is one its row's `verdicts` lists. `still-present` and `repaired` apply only to an `active` prior. `retained` and `reopen` cite one of the row's `decisions` by its exact `reference`. A `repaired` change names a path from the roster's `repairablePaths`. Say `not-assessable` when you cannot judge the prior.",
+    "- `findings` holds only new Findings, each `{\"draft\": <one finding in the shape above>, \"relation\": {\"kind\": \"independent\"}}`, or `\"distinct-related\"` with a prior's `origin` and a `distinction`.",
+  ].join("\n"),
+  `\`\`\`json\n${JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V3, null, 2)}\n\`\`\``,
+].join("\n\n");
 
 // Route-aware wire-instruction rendering (AD-7; FR-020/AS-012).
 

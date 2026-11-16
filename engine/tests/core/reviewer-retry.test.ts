@@ -131,6 +131,20 @@ describe("standaloneRetryTask", () => {
       .toContain(`This is your final attempt. ${REVIEWER_EXTRACTION_RETRY_INSTRUCTION}`);
   });
 
+  it("tells a successor retry the v3 envelope and the roster rule, and no other version (issue #185)", () => {
+    const task = issuedTask("code-reviewer", REVIEWER_V2);
+    const successor = standaloneRetryTask(task, EXTRACTION_ROUTE, "bad assessment", { schemaVersion: 3 });
+    const current = standaloneRetryTask(task, EXTRACTION_ROUTE, "bad assessment", { schemaVersion: 2 });
+    for (const phrase of ['"schemaVersion": 3', '"kind": "standalone-successor-review"', "standalone-assessment-roster",
+      "in roster order", "verdicts allow", "repairablePaths"]) {
+      expect(successor, phrase).toContain(phrase);
+      expect(current, phrase).not.toContain(phrase);
+    }
+    // The successor rule sits between the shared rules and the closing action, which is unchanged.
+    expect(successor.endsWith(`This is your final attempt. ${REVIEWER_EXTRACTION_RETRY_INSTRUCTION}`)).toBe(true);
+    expect(successor.startsWith(current.slice(0, current.indexOf("This is your final attempt.")))).toBe(true);
+  });
+
   it("keeps the archived schema-1 retry wording whatever the route", () => {
     const task = issuedTask("code-reviewer", REVIEWER_V2);
     const archived = standaloneRetryTask(task, EMISSION_ROUTE, "missing summary", { schemaVersion: 1 });
