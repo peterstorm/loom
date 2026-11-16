@@ -1,0 +1,421 @@
+/**
+ * Forward Fix: the operator's fallback when a judgement fails on code a
+ * completed Wave sealed.
+ *
+ * A Task of the active Wave judges code another Task wrote (a budget test, a
+ * benchmark gate). When that judgement fails and the code's Wave has already
+ * completed, nothing in the run may change the code: `reopen-task` reaches
+ * only the active Wave, and a completed Wave is verified history. Judged
+ * Paths (`judged-paths.ts`) prevent that shape at decompose; this is what the
+ * operator does when prevention missed it.
+ *
+ * `addForwardFix` appends one new Task to the active Wave whose `file_list`
+ * holds the sealed code (and anything else the fix needs), and records a
+ * `ForwardFixAudit`. Completed Waves stay untouched as history: the fix is
+ * reviewed by the active Wave's gate like every other Task of the Wave. The
+ * audit holds each named judge's next dispatch until the fix settles
+ * (`dispatch-holds.ts`), so the judge's last attempt is not spent re-failing
+ * on unfixed code.
+ *
+ * It is narrow on purpose. Every held Task must be a Task of the active Wave
+ * whose last implementation attempt failed (the judgement is the evidence),
+ * at least one path must be sealed by a completed Wave (otherwise
+ * `reopen-task` or the held Task itself is the tool), and no path may be one
+ * another Task of the Wave owns, a frozen Acceptance Contract path or
+ * protected verification infrastructure. It shares the Wave-reopening
+ * precondition (`reopenableWave`) with Task Reopening and Contract Revision.
+ *
+ * Its Distill Scope stays as population froze it (ADR-0068): the fix's files
+ * are judged by the Wave Gate's review, not distilled.
+ *
+ * Pure: the shell supplies the locked graph and proves quiescence.
+ */
+
+import { match } from "ts-pattern";
+import { frozenPaths } from "./acceptance-contract/tasks";
+import { isFlagToken } from "./cli-flag-token";
+import { isProtectedVerificationPath } from "./completion-suite";
+import { isDistillTask } from "./distill-task";
+import { nonEmpty, type DomainResult, type NonEmpty } from "./orchestration-contract";
+import { redThenGreenScope, taskRedThenGreenEra } from "./proof-obligations";
+import { parseReviewPath } from "./review-packet";
+import { pendingAuthoredTask } from "./task-graph-population";
+import { parseTaskId, TASK_ID_PATTERN, type TaskId } from "./task-id";
+import { deriveTaskImplementationDispatch } from "./task-implementation-dispatch";
+import { MAX_TASK_REOPENING_REASON_LENGTH } from "./task-reopening";
+import { reopenableWave, type ReopenableWave, type WaveReopeningRefusal } from "./task-revalidation";
+import { serializeVerificationPolicy } from "./verification-policy";
+import { newWaveGate, reconcileWaveBlock } from "./wave-gate-model";
+import { retireUnownedWaveReviewAuthority } from "./wave-gate-registration";
+import type { ForwardFixAudit, Task, TaskGraph } from "../types";
+
+/** The implementation agents a Forward Fix may be dispatched to. */
+export const FORWARD_FIX_AGENTS = Object.freeze(["code-implementer-agent", "frontend-agent", "security-agent"] as const);
+export type ForwardFixAgent = (typeof FORWARD_FIX_AGENTS)[number];
+
+/** Whether the fix owes new tests, or the held judge's tests are its proof. */
+export type ForwardFixNewTests = "required" | "existing-tests-sufficient";
+
+export type ForwardFixRequest = Readonly<{
+  wave: number;
+  /** The judges whose failed attempt the fix answers, distinct, in the order named. */
+  heldTaskIds: NonEmpty<TaskId>;
+  /** The fix Task's file_list, distinct, in the order named. */
+  files: NonEmpty<string>;
+  agent: ForwardFixAgent;
+  description: string;
+  reason: string;
+  newTests: ForwardFixNewTests;
+}>;
+
+export type ForwardFixRefusalKind =
+  | "not-executing"
+  | "live-wave-gate"
+  | "implementation-active"
+  | "wrong-wave"
+  | "wave-completed"
+  | "successor-named"
+  | "unknown-task"
+  | "foreign-task"
+  | "not-a-judge"
+  | "no-failed-judgement"
+  | "protected-path"
+  | "frozen-path"
+  | "owned-in-wave"
+  | "not-sealed";
+
+export type ForwardFixRefusal = Readonly<{ kind: ForwardFixRefusalKind; message: string }>;
+
+export type ForwardFix =
+  /** The fix Task was appended: persist `graph`, which appends `audit`. */
+  | Readonly<{ kind: "added"; graph: TaskGraph; audit: ForwardFixAudit; task: Task }>
+  /** This exact Forward Fix already committed and its fix Task has not settled: nothing to write. */
+  | Readonly<{ kind: "already-added"; audit: ForwardFixAudit }>;
+
+export const FORWARD_FIX_USAGE =
+  "Usage: helper orchestration add-forward-fix --wave <N> --hold <task-id> [--hold <task-id>]... " +
+  "--file <path> [--file <path>]... --description \"<what the fix changes>\" --reason \"<the failed judgement>\" " +
+  "[--agent code-implementer-agent|frontend-agent|security-agent] [--new-tests required|existing-tests-sufficient]";
+
+const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
+const refuse = (kind: ForwardFixRefusalKind, message: string): DomainResult<never, ForwardFixRefusal> =>
+  freeze({ ok: false as const, error: freeze({ kind, message }) });
+const WAVE_NUMBER = /^[1-9][0-9]*$/;
+const MAX_DESCRIPTION_LENGTH = 512;
+
+const isForwardFixAgent = (value: string): value is ForwardFixAgent =>
+  (FORWARD_FIX_AGENTS as readonly string[]).includes(value);
+
+/** Collected flag values before they are parsed into a request. */
+type ForwardFixFlags = {
+  wave?: string;
+  description?: string;
+  reason?: string;
+  agent?: string;
+  newTests?: string;
+  holds: string[];
+  files: string[];
+};
+
+const REPEATABLE = new Set(["--hold", "--file"]);
+const SINGLE: Readonly<Record<string, keyof Omit<ForwardFixFlags, "holds" | "files">>> = {
+  "--wave": "wave",
+  "--description": "description",
+  "--reason": "reason",
+  "--agent": "agent",
+  "--new-tests": "newTests",
+};
+
+function collectFlags(args: readonly string[]): DomainResult<ForwardFixFlags, string> {
+  const flags: ForwardFixFlags = { holds: [], files: [] };
+  for (let index = 0; index < args.length; index += 2) {
+    const flag = args[index] ?? "";
+    const value = args[index + 1];
+    const key = SINGLE[flag];
+    if (!REPEATABLE.has(flag) && key === undefined) return freeze({ ok: false as const, error: `unknown argument '${flag}'` });
+    if (value === undefined || isFlagToken(value)) return freeze({ ok: false as const, error: `${flag} needs a value` });
+    if (flag === "--hold") flags.holds.push(value);
+    else if (flag === "--file") flags.files.push(value);
+    else if (key !== undefined) {
+      if (flags[key] !== undefined) return freeze({ ok: false as const, error: `${flag} is given twice` });
+      flags[key] = value.trim();
+    }
+  }
+  return freeze({ ok: true as const, value: flags });
+}
+
+/** Distinct values, or the first repeat. */
+function distinct<T extends string>(values: readonly T[]): DomainResult<readonly T[], T> {
+  const repeated = values.find((value, index) => values.indexOf(value) !== index);
+  return repeated === undefined ? freeze({ ok: true as const, value: values }) : freeze({ ok: false as const, error: repeated });
+}
+
+/** A non-blank trimmed text of at most `max` characters, or why not. */
+function boundedText(value: string | undefined, flag: string, max: number, why: string): DomainResult<string, string> {
+  if (value === undefined || value.length === 0) return freeze({ ok: false as const, error: `${flag} must say ${why}` });
+  return value.length > max
+    ? freeze({ ok: false as const, error: `${flag} is longer than ${max} characters` })
+    : freeze({ ok: true as const, value });
+}
+
+/**
+ * Exactly one `--wave`, `--description` and `--reason`; one or more distinct
+ * `--hold` Task ids and `--file` paths; at most one `--agent` (default
+ * `code-implementer-agent`) and `--new-tests` (default `required`). A value
+ * that is itself a flag is refused.
+ */
+export function parseForwardFixArgs(args: readonly string[]): DomainResult<ForwardFixRequest, string> {
+  const fail = (problem: string) => freeze({ ok: false as const, error: `${problem}. ${FORWARD_FIX_USAGE}` });
+  const collected = collectFlags(args);
+  if (!collected.ok) return fail(collected.error);
+  const flags = collected.value;
+  if (flags.wave === undefined || !WAVE_NUMBER.test(flags.wave) || !Number.isSafeInteger(Number(flags.wave))) {
+    return fail("--wave must name the active Wave as a positive integer");
+  }
+  const holdIds = flags.holds.map((raw) => parseTaskId(raw, "--hold"));
+  const invalidHold = holdIds.flatMap((result) => result.ok ? [] : result.error.errors);
+  if (invalidHold.length > 0) return fail(invalidHold.join("; "));
+  const holds = distinct(holdIds.flatMap((result) => result.ok ? [result.value] : []));
+  if (!holds.ok) return fail(`--hold ${holds.error} is given twice`);
+  const [firstHold, ...restHolds] = holds.value;
+  if (firstHold === undefined) return fail("--hold must name at least one Task whose judgement failed");
+  const paths = flags.files.map((raw, index) => parseReviewPath(raw, `--file[${index}]`));
+  const invalidPath = paths.flatMap((result) => result.ok ? [] : result.errors);
+  if (invalidPath.length > 0) return fail(invalidPath.join("; "));
+  const files = distinct(paths.flatMap((result) => result.ok ? [result.value as string] : []));
+  if (!files.ok) return fail(`--file ${files.error} is given twice`);
+  const [firstFile, ...restFiles] = files.value;
+  if (firstFile === undefined) return fail("--file must name at least one path the fix changes");
+  const description = boundedText(flags.description, "--description", MAX_DESCRIPTION_LENGTH, "what the fix changes");
+  if (!description.ok) return fail(description.error);
+  const reason = boundedText(flags.reason, "--reason", MAX_TASK_REOPENING_REASON_LENGTH, "which judgement failed and why");
+  if (!reason.ok) return fail(reason.error);
+  const agent = flags.agent ?? "code-implementer-agent";
+  if (!isForwardFixAgent(agent)) return fail(`--agent must be one of ${FORWARD_FIX_AGENTS.join(", ")}`);
+  const newTests = flags.newTests ?? "required";
+  if (newTests !== "required" && newTests !== "existing-tests-sufficient") {
+    return fail("--new-tests must be required or existing-tests-sufficient");
+  }
+  return freeze({
+    ok: true as const,
+    value: freeze({
+      wave: Number(flags.wave),
+      heldTaskIds: freeze([firstHold, ...restHolds] as const),
+      files: freeze([firstFile, ...restFiles] as const),
+      agent,
+      description: description.value,
+      reason: reason.value,
+      newTests,
+    }),
+  });
+}
+
+/** The shared Wave-reopening refusal, in this operation's words. */
+const waveReopeningRefusal = (refusal: WaveReopeningRefusal): DomainResult<never, ForwardFixRefusal> =>
+  match(refusal)
+    .with({ kind: "not-executing" }, ({ phase }) =>
+      refuse("not-executing", `a Forward Fix requires the execute Phase (current: ${phase})`))
+    .with({ kind: "live-wave-gate" }, ({ runId, wave }) =>
+      refuse("live-wave-gate", `Wave Gate run ${runId} owns Wave ${wave}'s verification; ` +
+        "abandon it with helper orchestration abandon, then retry"))
+    .with({ kind: "implementation-active" }, ({ holders }) =>
+      refuse("implementation-active", `implementation reservations are active: ${holders.join(", ")}`))
+    .exhaustive();
+
+/** The Waves whose gate has completed. */
+const completedWaves = (graph: TaskGraph): ReadonlySet<number> =>
+  new Set((graph.wave_gate_history ?? []).map(({ wave }) => wave));
+
+/** This operation's own refusals over the reopenable Wave, or null. */
+function waveRefusal(reopenable: ReopenableWave, request: ForwardFixRequest): DomainResult<never, ForwardFixRefusal> | null {
+  const { graph, wave } = reopenable;
+  if (wave !== request.wave) return refuse("wrong-wave", `Wave ${request.wave} is not the active Wave ${wave}`);
+  if (completedWaves(graph).has(wave)) {
+    return refuse("wave-completed", `Wave ${wave} has completed; a Forward Fix joins the active, open Wave only`);
+  }
+  const outcome = graph.active_wave_gate?.terminalOutcome;
+  if (outcome?.kind === "terminal-abandoned" && outcome.supersededBy !== null) {
+    return refuse("successor-named", `abandoned Wave Gate run ${reopenable.abandonedRunId} names successor ` +
+      `${outcome.supersededBy}; adding a Task would orphan that successor's authority, so start it ` +
+      "(or abandon it naming no successor) first");
+  }
+  return null;
+}
+
+/** Whether `task` is a Forward Fix Task some audit records. */
+const isForwardFixTask = (graph: TaskGraph, task: Task): boolean =>
+  (graph.forward_fix_history ?? []).some(({ fixTaskId }) => fixTaskId === task.id);
+
+/**
+ * Whether `task`'s last implementation attempt failed: its owed dispatch is
+ * the engine-authorized retry, or it reached terminal escalation.
+ */
+function judgementFailed(task: Task): boolean {
+  const derivation = deriveTaskImplementationDispatch(task);
+  return derivation.kind === "escalated" ||
+    (derivation.kind === "dispatch" && derivation.dispatch.kind === "retry-implementation");
+}
+
+/** The first held Task that is not a failed judge of the active Wave, in request order, or null. */
+function heldTaskRefusal(graph: TaskGraph, request: ForwardFixRequest): DomainResult<never, ForwardFixRefusal> | null {
+  for (const id of request.heldTaskIds) {
+    const task = graph.tasks.find((candidate) => candidate.id === id);
+    if (task === undefined) return refuse("unknown-task", `${id} is not a Task of this TaskGraph`);
+    if (task.wave !== request.wave) {
+      return refuse("foreign-task", `${id} belongs to Wave ${task.wave}, not the active Wave ${request.wave}`);
+    }
+    if (isDistillTask(task) || isForwardFixTask(graph, task)) {
+      return refuse("not-a-judge", `${id} is ${isDistillTask(task) ? "the Wave's distill pass" : "a Forward Fix Task"}; ` +
+        "only an authored Task that judges code is held");
+    }
+    if (task.status !== "pending" || !judgementFailed(task)) {
+      return refuse("no-failed-judgement", `${id} has no failed implementation attempt to answer (status ${task.status}); ` +
+        "a Forward Fix answers a judgement that failed, so let the Task run first");
+    }
+  }
+  return null;
+}
+
+/** The paths of `request` a Task of a completed Wave wrote, in request order. */
+const sealedPathsOf = (graph: TaskGraph, request: ForwardFixRequest): readonly string[] => {
+  const completed = completedWaves(graph);
+  return request.files.filter((path) =>
+    graph.tasks.some((task) => completed.has(task.wave) && (task.file_list ?? []).includes(path)));
+};
+
+/**
+ * The sealed paths of an admissible request, or the first path that may not
+ * join the active Wave (in request order), or the refusal of a request that
+ * seals nothing.
+ */
+function admittedSealedPaths(graph: TaskGraph, request: ForwardFixRequest): DomainResult<NonEmpty<string>, ForwardFixRefusal> {
+  const frozen = new Set((graph.acceptance_contracts ?? []).flatMap((contract) => frozenPaths(contract)));
+  for (const path of request.files) {
+    if (isProtectedVerificationPath(path)) {
+      return refuse("protected-path", `'${path}' is protected verification infrastructure; no Task may write it`);
+    }
+    if (frozen.has(path)) {
+      return refuse("frozen-path", `'${path}' is a frozen Acceptance Contract path; change it with a Contract Revision (helper revise-contract)`);
+    }
+    const owner = graph.tasks.find((task) => task.wave === request.wave && (task.file_list ?? []).includes(path));
+    if (owner !== undefined) {
+      return refuse("owned-in-wave", `'${path}' is in ${owner.id}'s file_list in the active Wave; ` +
+        `fix it through ${owner.id} (helper orchestration reopen-task, or its own retry) instead`);
+    }
+  }
+  const sealed = nonEmpty(sealedPathsOf(graph, request));
+  return sealed === null
+    ? refuse("not-sealed", "no --file path is written by a Task of a completed Wave; a Forward Fix exists for sealed code. " +
+      "Change open code through the Task that owns it")
+    : freeze({ ok: true as const, value: sealed });
+}
+
+/** The next free Task id after every id of the roster. */
+function nextTaskId(graph: TaskGraph): TaskId {
+  const highest = Math.max(0, ...graph.tasks.map(({ id }) => TASK_ID_PATTERN.test(id) ? Number(id.slice(1)) : 0));
+  const minted = parseTaskId(`T${highest + 1}`);
+  if (!minted.ok) throw new Error(`unreachable: T${highest + 1} is not a Task id`);
+  return minted.value;
+}
+
+/** The plan context a Forward Fix Task's brief carries, from the request alone. */
+export function forwardFixPlanContext(request: ForwardFixRequest, sealedPaths: readonly string[]): string {
+  return [
+    `Forward Fix for ${request.heldTaskIds.join(", ")}: ${request.reason}`,
+    `Sealed paths (written by a completed Wave): ${sealedPaths.join(", ")}.`,
+    `${request.heldTaskIds.join(", ")} judge${request.heldTaskIds.length === 1 ? "s" : ""} this code and failed; ` +
+      "change the code so the judgement passes. Never weaken, skip or loosen the judging tests or any budget they enforce.",
+  ].join("\n");
+}
+
+/**
+ * The fix Task's pending record, written by population's own builder: no
+ * dependency, no Requirement trace, regression always required, and new
+ * tests as the request says. Its I6 era is the graph's.
+ */
+function fixTaskOf(graph: TaskGraph, request: ForwardFixRequest, fixTaskId: TaskId, sealedPaths: NonEmpty<string>): Task {
+  const scope = redThenGreenScope(graph.verification_manifest, graph.acceptance_contracts ?? []);
+  return pendingAuthoredTask(
+    {
+      id: fixTaskId,
+      description: request.description,
+      agent: request.agent,
+      wave: request.wave,
+      depends_on: [],
+      plan_context: forwardFixPlanContext(request, sealedPaths),
+      verification_policy: serializeVerificationPolicy({
+        regression: { kind: "required" },
+        newTests: request.newTests === "required"
+          ? { kind: "required" }
+          : { kind: "waived", reason: "existing-tests-sufficient" },
+      }),
+      file_list: request.files,
+    },
+    taskRedThenGreenEra(scope, fixTaskId),
+  );
+}
+
+/** The committed audit this request replays, when its fix Task has not settled yet. */
+function replayedAudit(graph: TaskGraph, request: ForwardFixRequest): ForwardFixAudit | undefined {
+  const last = (graph.forward_fix_history ?? []).at(-1);
+  if (last === undefined || last.wave !== request.wave || last.reason !== request.reason ||
+      last.heldTaskIds.length !== request.heldTaskIds.length ||
+      !last.heldTaskIds.every((id, index) => id === request.heldTaskIds[index])) {
+    return undefined;
+  }
+  const fix = graph.tasks.find(({ id }) => id === last.fixTaskId);
+  const sameTask = fix !== undefined && fix.description === request.description && fix.agent === request.agent &&
+    (fix.file_list ?? []).length === request.files.length &&
+    (fix.file_list ?? []).every((path, index) => path === request.files[index]);
+  return sameTask && fix.status === "pending" ? last : undefined;
+}
+
+/**
+ * Append a Forward Fix Task to the active Wave, or refuse with the exact
+ * precondition that failed: the shared Wave-reopening precondition, then this
+ * operation's Wave, held-Task and path checks. Replaying a committed Forward
+ * Fix whose Task has not settled changes nothing.
+ */
+export function addForwardFix(graph: TaskGraph, request: ForwardFixRequest): DomainResult<ForwardFix, ForwardFixRefusal> {
+  const replay = replayedAudit(graph, request);
+  if (replay !== undefined) return freeze({ ok: true as const, value: freeze({ kind: "already-added" as const, audit: replay }) });
+  const reopenable = reopenableWave(graph);
+  if (!reopenable.ok) return waveReopeningRefusal(reopenable.error);
+  const refusal = waveRefusal(reopenable.value, request) ?? heldTaskRefusal(graph, request);
+  if (refusal !== null) return refusal;
+  const sealed = admittedSealedPaths(graph, request);
+  if (!sealed.ok) return sealed;
+
+  const { wave, abandonedRunId } = reopenable.value;
+  const sealedPaths = sealed.value;
+  const fixTaskId = nextTaskId(graph);
+  const retired = retireUnownedWaveReviewAuthority(graph, wave, abandonedRunId);
+  const task = fixTaskOf(retired, request, fixTaskId, sealedPaths);
+  const audit: ForwardFixAudit = freeze({
+    schemaVersion: 1,
+    kind: "forward-fix-added",
+    wave,
+    fixTaskId,
+    heldTaskIds: request.heldTaskIds,
+    sealedPaths,
+    reason: request.reason,
+    abandonedRunId,
+  });
+  const tasks = Object.freeze([...retired.tasks, task]);
+  const existing = retired.wave_gates[String(wave)] ?? newWaveGate();
+  const gate = { ...existing, impl_complete: false, tests_passed: null, reviews_complete: false };
+  return freeze({
+    ok: true as const,
+    value: freeze({
+      kind: "added" as const,
+      task,
+      audit,
+      graph: freeze({
+        ...retired,
+        tasks,
+        wave_gates: reconcileWaveBlock({ ...retired.wave_gates, [String(wave)]: gate }, tasks, retired.spec_check, wave),
+        forward_fix_history: Object.freeze([...(graph.forward_fix_history ?? []), audit]),
+      }),
+    }),
+  });
+}

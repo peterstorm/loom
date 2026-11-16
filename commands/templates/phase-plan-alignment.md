@@ -62,6 +62,13 @@ Then check invariant ownership. Flag as a gap (ID `OWN-N`):
 
 Each `OWN-N` gap names the rule, the sites the plan describes, and the missing or contradicting declaration.
 
+Then check that every judgement stays repairable. A Requirement that constrains how code behaves (a memory, latency or size budget, a benchmark gate, an end-to-end acceptance bound) can only be fixed while the phase that builds that code is still open. Flag as a gap (ID `JUDGE-N`):
+
+- The plan measures or gates such a Requirement in an implementation phase later than the phase that builds the code it constrains, and does not make the measuring tests an Acceptance Contract the building phase turns green
+- The plan assigns such a Requirement to a measuring or benchmark component alone, with no component that builds the constrained code answering for it
+
+Each `JUDGE-N` gap names the Requirement, the phase that builds the constrained code, and the later phase that judges it.
+
 ### 3.6 Check Requirements Against Recorded Discoveries
 
 Coverage is not enough: a plan can cover a Requirement that the recorded facts make unsatisfiable. For **each** Requirement and plan decision, check it against **every** discovery from step 2.5. Flag as a gap (ID `FEAS-N`) any pair where:
@@ -97,6 +104,7 @@ The report MUST always be written — even when no gaps are found.
 - **SC-xxx** — (requirement description): (what is missing)
 - **FEAS-N** — (Requirement or decision) vs `(document)`: (the discovery it contradicts, and why)
 - **OWN-N** — (the rule): (the sites the plan applies it at, and the missing or contradicting ownership declaration)
+- **JUDGE-N** — (Requirement): (the phase that builds the constrained code, and the later phase that judges it)
 
 (Write "None." if no gaps)
 

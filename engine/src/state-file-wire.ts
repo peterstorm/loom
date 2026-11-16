@@ -39,6 +39,7 @@ import {
 import type {
   ActiveWaveGateRegistration,
   CompletedWaveGateRegistration,
+  ForwardFixAudit,
   OrphanedWaveGateRetirement,
   OwnerObligation,
   WaveReopeningAudit,
@@ -1050,6 +1051,93 @@ function parseTaskReopeningHistory(
   return new Set(runs).size === runs.length
     ? parseOk(Object.freeze(audits))
     : parseErr("task_reopening_history names one abandoned Wave Gate run in two audits");
+}
+
+const FORWARD_FIX_AUDIT_FIELDS = [
+  "schemaVersion", "kind", "wave", "fixTaskId", "heldTaskIds", "sealedPaths", "reason", "abandonedRunId",
+] as const;
+
+/** The audit's sealed paths: non-empty, distinct, canonical, and each in the fix Task's file_list. */
+function parseForwardFixSealedPaths(raw: unknown, label: string, fixFileList: readonly unknown[]): ParseResult<NonEmpty<string>> {
+  if (!Array.isArray(raw)) return parseErr(`${label} must be a non-empty array`);
+  const paths: string[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const path = parseReviewPath(entry, `${label}[${index}]`);
+    if (!path.ok) return parseErr(path.errors.join("; "));
+    if (paths.includes(path.value)) return parseErr(`${label} names '${path.value}' more than once`);
+    if (!fixFileList.includes(path.value)) return parseErr(`${label} names '${path.value}', which is not in the fix Task's file_list`);
+    paths.push(path.value);
+  }
+  const sealed = nonEmpty(paths);
+  return sealed === null ? parseErr(`${label} must be a non-empty array`) : parseOk(sealed);
+}
+
+/** Parse one immutable Forward Fix audit: its fix Task and held Tasks are
+ *  distinct Tasks of the audited Wave, the fix is no Distill Task, and every
+ *  sealed path is the fix Task's own. */
+function parseForwardFixAudit(
+  raw: unknown,
+  label: string,
+  tasks: readonly Record<string, unknown>[],
+): ParseResult<ForwardFixAudit> {
+  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
+  const record = raw as Record<string, unknown>;
+  const fieldsError = exactFieldsError(record, FORWARD_FIX_AUDIT_FIELDS, [], label);
+  if (fieldsError !== null) return parseErr(fieldsError);
+  if (record.schemaVersion !== 1 || record.kind !== "forward-fix-added") return parseErr(`${label} has invalid schema or kind`);
+  const wave = parseIntegerBound(record.wave, `${label}.wave`, 1, "an integer >= 1 within the safe-integer range");
+  if (!wave.ok) return parseErr(wave.error);
+  const fixTaskId = parseTaskIdAt(record.fixTaskId, `${label}.fixTaskId`);
+  if (!fixTaskId.ok) return fixTaskId;
+  const fix = tasks.find((task) => task.id === fixTaskId.value);
+  if (fix === undefined || fix.wave !== wave.value) {
+    return parseErr(`${label}.fixTaskId: ${fixTaskId.value} is not a Task of Wave ${wave.value}`);
+  }
+  if (isDistillTask(fix)) return parseErr(`${label}.fixTaskId: ${fixTaskId.value} is a Distill Task`);
+  const held = parseDistinctTaskIds(record.heldTaskIds, `${label}.heldTaskIds`);
+  if (!held.ok) return held;
+  const foreign = held.value.find((id) => id === fixTaskId.value || !tasks.some((task) => task.id === id && task.wave === wave.value));
+  if (foreign !== undefined) {
+    return parseErr(`${label}.heldTaskIds: ${foreign} is ${foreign === fixTaskId.value ? "the fix Task itself" : `not a Task of Wave ${wave.value}`}`);
+  }
+  const sealedPaths = parseForwardFixSealedPaths(record.sealedPaths, `${label}.sealedPaths`, Array.isArray(fix.file_list) ? fix.file_list : []);
+  if (!sealedPaths.ok) return sealedPaths;
+  const reason = record.reason;
+  if (typeof reason !== "string" || reason.trim() !== reason || reason.length === 0 ||
+      reason.length > MAX_TASK_REOPENING_REASON_LENGTH) {
+    return parseErr(`${label}.reason must be a trimmed non-blank string of at most ${MAX_TASK_REOPENING_REASON_LENGTH} characters`);
+  }
+  const abandonedRunId = record.abandonedRunId === null ? null : parseOrchestrationRunId(record.abandonedRunId);
+  if (abandonedRunId !== null && !abandonedRunId.ok) return parseErr(`${label}.abandonedRunId: ${abandonedRunId.error.message}`);
+  return parseOk(Object.freeze({
+    schemaVersion: 1,
+    kind: "forward-fix-added",
+    wave: wave.value,
+    fixTaskId: fixTaskId.value,
+    heldTaskIds: held.value,
+    sealedPaths: sealedPaths.value,
+    reason,
+    abandonedRunId: abandonedRunId === null ? null : abandonedRunId.value,
+  }));
+}
+
+/** A fix Task is appended by exactly one audit, so no two audits name the same fix Task. */
+function parseForwardFixHistory(
+  raw: unknown,
+  tasks: readonly Record<string, unknown>[],
+): ParseResult<readonly ForwardFixAudit[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!Array.isArray(raw)) return parseErr("forward_fix_history must be an array when present");
+  const audits: ForwardFixAudit[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const parsed = parseForwardFixAudit(entry, `forward_fix_history[${index}]`, tasks);
+    if (!parsed.ok) return parsed;
+    if (audits.some(({ fixTaskId }) => fixTaskId === parsed.value.fixTaskId)) {
+      return parseErr(`forward_fix_history names fix Task ${parsed.value.fixTaskId} in two audits`);
+    }
+    audits.push(parsed.value);
+  }
+  return parseOk(Object.freeze(audits));
 }
 
 /** `value` as the Task id it is under `label`, or why it is not one. */
@@ -2401,6 +2489,7 @@ function parseTaskGraphAuthorityFields(
 type ParsedTaskGraphHistoryFields = Readonly<{
   reopeningHistory: readonly WaveReopeningAudit[] | undefined;
   taskReopeningHistory: readonly TaskReopeningAudit[] | undefined;
+  forwardFixHistory: readonly ForwardFixAudit[] | undefined;
   orphanedHistory: readonly OrphanedWaveGateRetirement[] | undefined;
   specTraceRetirements: readonly SpecTraceWaveGateRetirement[] | undefined;
   specTraceAmendments: readonly SpecTraceAmendment[] | undefined;
@@ -2464,6 +2553,8 @@ function parseTaskGraphHistoryFields(
   if (!reopeningHistory.ok) return parseErr(reopeningHistory.error);
   const taskReopeningHistory = parseTaskReopeningHistory(obj.task_reopening_history, tasks);
   if (!taskReopeningHistory.ok) return parseErr(taskReopeningHistory.error);
+  const forwardFixHistory = parseForwardFixHistory(obj.forward_fix_history, tasks);
+  if (!forwardFixHistory.ok) return parseErr(forwardFixHistory.error);
   const orphanedHistory = parseOrphanedWaveGateHistory(obj.orphaned_wave_gate_history);
   if (!orphanedHistory.ok) return parseErr(orphanedHistory.error);
   const specTraceRetirements = parseSpecTraceWaveGateRetirements(obj.spec_trace_wave_gate_retirements);
@@ -2491,6 +2582,7 @@ function parseTaskGraphHistoryFields(
   return parseOk({
     reopeningHistory: reopeningHistory.value,
     taskReopeningHistory: taskReopeningHistory.value,
+    forwardFixHistory: forwardFixHistory.value,
     orphanedHistory: orphanedHistory.value,
     specTraceRetirements: specTraceRetirements.value,
     specTraceAmendments: specTraceAmendments.value,
@@ -2958,6 +3050,19 @@ export type ParsedTaskGraph = Omit<TaskGraph, "tasks" | "executing_tasks"> & Rea
   executing_tasks?: readonly TaskId[];
 }>;
 
+/** The proven audit histories as the graph's fields: each present one under its wire name, an absent one absent. */
+function historyGraphFields(history: ParsedTaskGraphHistoryFields): Partial<TaskGraph> {
+  const { reopeningHistory, taskReopeningHistory, forwardFixHistory, orphanedHistory, specTraceRetirements, specTraceAmendments } = history;
+  return {
+    ...(reopeningHistory === undefined ? {} : { wave_reopening_history: reopeningHistory }),
+    ...(taskReopeningHistory === undefined ? {} : { task_reopening_history: taskReopeningHistory }),
+    ...(forwardFixHistory === undefined ? {} : { forward_fix_history: forwardFixHistory }),
+    ...(orphanedHistory === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory }),
+    ...(specTraceRetirements === undefined ? {} : { spec_trace_wave_gate_retirements: specTraceRetirements }),
+    ...(specTraceAmendments === undefined ? {} : { spec_trace_amendments: specTraceAmendments }),
+  };
+}
+
 function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTaskGraphParts): ParsedTaskGraph {
   // Fresh recursively frozen copies, never aliases of parsed JSON: a caller
   // retaining the raw object cannot mutate nested Task or Wave Gate data and
@@ -2973,7 +3078,6 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     verificationManifest,
     activeWaveCompletionSuite,
   } = parts.authority;
-  const { reopeningHistory, taskReopeningHistory, orphanedHistory, specTraceRetirements, specTraceAmendments } = parts.history;
   // The single blessed cast: every union field above is proven in place.
   return {
     ...obj,
@@ -2999,11 +3103,7 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     ...(activeWaveCompletionSuite === undefined ? {} : { active_wave_completion_suite: activeWaveCompletionSuite }),
     ...(activeWaveGate === undefined ? {} : { active_wave_gate: activeWaveGate }),
     ...(waveGateHistory === undefined ? {} : { wave_gate_history: waveGateHistory }),
-    ...(reopeningHistory === undefined ? {} : { wave_reopening_history: reopeningHistory }),
-    ...(taskReopeningHistory === undefined ? {} : { task_reopening_history: taskReopeningHistory }),
-    ...(orphanedHistory === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory }),
-    ...(specTraceRetirements === undefined ? {} : { spec_trace_wave_gate_retirements: specTraceRetirements }),
-    ...(specTraceAmendments === undefined ? {} : { spec_trace_amendments: specTraceAmendments }),
+    ...historyGraphFields(parts.history),
     ...(parts.acceptanceContracts === undefined ? {} : { acceptance_contracts: parts.acceptanceContracts }),
     ...(parts.ownerObligations === undefined ? {} : { owner_obligations: parts.ownerObligations }),
     ...(parts.skeletonFields.exportBindings === undefined ? {} : { export_bindings: parts.skeletonFields.exportBindings }),

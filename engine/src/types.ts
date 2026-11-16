@@ -800,6 +800,27 @@ export type TaskReopeningAudit = Readonly<{
   abandonedRunId: OrchestrationRunId | null;
 }> & ReopenedTaskIds;
 
+/** Immutable audit of one Forward Fix (`helper orchestration add-forward-fix`):
+ * the operator appended `fixTaskId` to the active `wave` to change
+ * `sealedPaths`, code a completed Wave wrote, because each of `heldTaskIds`
+ * (Tasks of `wave` whose last implementation attempt failed) judges that code.
+ * The audit is the hold's authority: until the fix Task settles, the held
+ * Tasks are owed no dispatch (`core/dispatch-holds.ts`). Dropped by
+ * re-population, which replaces the roster it describes. */
+export type ForwardFixAudit = Readonly<{
+  schemaVersion: 1;
+  kind: "forward-fix-added";
+  wave: number;
+  fixTaskId: TaskId;
+  heldTaskIds: OrchestrationNonEmpty<TaskId>;
+  /** The fix Task's paths that a Task of a completed Wave wrote, in its file_list order; at least one. */
+  sealedPaths: OrchestrationNonEmpty<string>;
+  /** The operator's non-blank reason, at most 512 characters. */
+  reason: string;
+  /** The abandoned Wave Gate run whose review authority adding the Task retired; null when none was on the graph. */
+  abandonedRunId: OrchestrationRunId | null;
+}>;
+
 export type OrphanedWaveGateRetirement = Readonly<{
   schemaVersion: 1;
   kind: "orphaned-wave-gate-retirement";
@@ -1324,6 +1345,10 @@ export interface TaskGraph {
    *  for re-implementation (`helper orchestration reopen-task`). Dropped by
    *  re-population. */
   readonly task_reopening_history?: readonly TaskReopeningAudit[];
+  /** Append-only audit of Forward Fix Tasks the operator appended to the
+   *  active Wave (`helper orchestration add-forward-fix`); each audit holds
+   *  its judges' dispatch until its fix settles. Dropped by re-population. */
+  readonly forward_fix_history?: readonly ForwardFixAudit[];
   /** Nonterminal retirement audit for missing Run Directories replaced in-place. */
   readonly orphaned_wave_gate_history?: readonly OrphanedWaveGateRetirement[];
   /** Abandoned active authority retired only to install Requirement trace v2. */

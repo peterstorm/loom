@@ -7,8 +7,12 @@ How a Task's implementation is attempted, observed, proved and settled. Core ter
 ### Attempts and settlement
 
 **Implementation Window**:
-An execute Wave with no live Wave Gate: before its gate starts, or after an abandoned run that names no successor. Within it one classification decides which Tasks are active, reclaimable, escalated or dispatchable; a **Distill Task** is withheld until every other Task of its Wave is implemented.
+An execute Wave with no live Wave Gate: before its gate starts, or after an abandoned run that names no successor. Within it one classification decides which Tasks are active, reclaimable, escalated or dispatchable; a Task under a **Dispatch Hold** is not dispatchable yet.
 _Avoid_: Unstarted Wave (alone), pre-gate state
+
+**Dispatch Hold**:
+Why an outstanding Task is owed no dispatch yet although its lineage could derive one: a **Distill Task** waits for every other Task of its Wave, and a Task a **Forward Fix** holds waits for its fix Task. One rule, asked by status, registration and the brief alike.
+_Avoid_: Block (a Wave Gate's veto), dependency (an earlier-Wave edge), withheld dispatch (alone)
 
 **Implementation Binding**:
 On Claude Code, the exact link between one running implementation Agent and the Implementation Attempt its own trusted first prompt names: pending (its prompt is not yet readable), bound, or refused. Only bound admits writes, and it is never inferred from which reservations are pending. Pi binds at spawn through Write Grants and has none.
@@ -110,6 +114,10 @@ _Avoid_: Wave diff, distill file list (alone), **Changed Files** (those are one 
 The operator-only operation that returns an implemented Task of the active Wave to pending at a new Review Generation, so a Wave Gate Finding on it can be fixed. The Wave's settled **Distill Task** returns with it.
 _Avoid_: Re-dispatch (alone), reset, force re-populate
 
+**Forward Fix**:
+The operator-only operation that appends one new Task to the active Wave to change code a completed Wave sealed, because a Task of the active Wave judges that code and its last attempt failed. Completed Waves stay untouched; the failed judge is under a **Dispatch Hold** until the fix settles. The fallback for a judgement the decompose-time **Judged Path** rule did not see.
+_Avoid_: Remediation (that is escalation remediation or a review-and-fix run), reopening a completed Wave, hotfix
+
 ## Relationships
 
 - An **Implementation Attempt** is settled only by the **Implementation Completion Oracle**, leaving exactly one **Implementation Settlement Receipt**
@@ -125,3 +133,4 @@ _Avoid_: Re-dispatch (alone), reset, force re-populate
 - A Task has at most one **Task Mutation Record**
 - No stop check can satisfy or fail a Proof Obligation
 - A **Distill Task** has exactly one **Distill Scope**
+- A **Forward Fix** adds exactly one Task to the active Wave and holds one or more of its failed judges under a **Dispatch Hold**

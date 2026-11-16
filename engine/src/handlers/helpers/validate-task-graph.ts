@@ -56,6 +56,12 @@ import { parseFrozenVerificationManifest } from "../../core/verification-manifes
 import { DECISION_RECORD_AGENT } from "../../core/model-profiles";
 import { authoredDistillTaskRefusal, taskRolePolicy } from "../../core/distill-task";
 import { isRecord } from "../../core/plain-record";
+import {
+  judgedPathProblems,
+  parseJudgedPaths,
+  renderJudgedPathProblem,
+  type JudgedPathTaskView,
+} from "../../core/judged-paths";
 export type { ValidationResult } from "./validation-result";
 
 const VALID_PHASES = new Set<string>(PHASE_ORDER);
@@ -199,6 +205,10 @@ export function validateFull(
   errors.push(...taskDependencyErrors(validTaskRecords));
 
   const redThenGreen = taskGraphRedThenGreenScope(json);
+  // The authored roster as the Judged Path rule reads it. Only a Task whose
+  // wave, file_list and judged_paths all parsed joins it, so a malformed Task
+  // reports its own error rather than a derived one.
+  const judgedPathRoster: JudgedPathTaskView[] = [];
   for (let i = 0; i < tasks.length; i++) {
     const task = taskRecords[i];
     if (task === null) {
@@ -258,6 +268,16 @@ export function validateFull(
           else seen.add(parsed.value);
         }
       }
+      const judged = parseJudgedPaths(task.judged_paths, tid);
+      if (!judged.ok) errors.push(...judged.errors);
+      else if (Array.isArray(task.file_list) && wave !== undefined && Number.isSafeInteger(wave) && wave >= 1) {
+        judgedPathRoster.push({
+          id: tid,
+          wave,
+          fileList: (task.file_list as readonly unknown[]).filter((file): file is string => typeof file === "string"),
+          judgedPaths: judged.value,
+        });
+      }
     }
 
     // The findings aggregate, checked with the SAME functions the load boundary
@@ -303,6 +323,8 @@ export function validateFull(
     { requireV2: scope === "decompose-payload" },
   );
   errors.push(...specTraceDiagnosticMessages(trace));
+  // Every judgement must land while its subject's Wave is open (judged-paths.ts).
+  errors.push(...judgedPathProblems(judgedPathRoster).map(renderJudgedPathProblem));
 
   // Check wave contiguity — waves must be consecutive (1,2,3 not 1,3,5)
   const waves = [...new Set(validTaskRecords.map((task) => task.wave as number))]

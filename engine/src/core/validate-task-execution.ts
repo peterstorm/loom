@@ -8,8 +8,7 @@ import { hasStandaloneReviewContext, invalidateTaskReview } from "./review-outpu
 import { newWaveGate, reconcileWaveBlock, waveBlockCauses } from "./wave-gate-model";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 import { artifactCovers } from "./path-coverage";
-import { distillDispatchBlockers, distillWithheldMessage } from "./distill-task";
-import { nonEmpty } from "./orchestration-contract";
+import { dispatchHoldMessage, dispatchHoldOf } from "./dispatch-holds";
 import {
   canonicalArtifactBaselineDigest,
   createImplementationAttemptAuthority,
@@ -82,17 +81,18 @@ function dependencyExecutionBlock(state: TaskGraph, task: Task): TaskExecutionDe
 }
 
 /**
- * A Distill Task is withheld until every other Task of its Wave is
- * implemented and unreserved (ADR-0068). `distillDispatchBlockers` is the one
- * rule, so registration refuses exactly what status does not offer. A stale
- * reservation still blocks here: its owner is re-dispatched first. The Tasks
- * registering in the same batch count as reserved, so a Distill Task never
- * starts beside a Wave sibling, implemented or not.
+ * A Task under a dispatch hold is withheld (`dispatchHoldOf`): a Distill Task
+ * until every other Task of its Wave is implemented and unreserved
+ * (ADR-0068), a Forward Fix's held judge until its fix settles. The rule is
+ * the one status asks, so registration refuses exactly what status does not
+ * offer. A stale reservation still blocks here: its owner is re-dispatched
+ * first. The Tasks registering in the same batch count as reserved, so a held
+ * Task never starts beside what it waits for.
  */
-function distillExecutionBlock(state: TaskGraph, task: Task, batchTaskIds: readonly string[]): TaskExecutionDecision | null {
+function dispatchHoldExecutionBlock(state: TaskGraph, task: Task, batchTaskIds: readonly string[]): TaskExecutionDecision | null {
   const reserved = new Set([...(state.executing_tasks ?? []), ...batchTaskIds]);
-  const blockers = nonEmpty(distillDispatchBlockers(state.tasks, reserved, task));
-  return blockers === null ? null : { kind: "ineligible", reason: distillWithheldMessage(task.id, blockers) };
+  const hold = dispatchHoldOf(state, reserved, task);
+  return hold === null ? null : { kind: "ineligible", reason: dispatchHoldMessage(task.id, hold) };
 }
 
 /**
@@ -125,8 +125,8 @@ export function taskExecutionDecision(
   const dependencyBlock = dependencyExecutionBlock(state, task);
   if (dependencyBlock !== null) return dependencyBlock;
 
-  const distillBlock = distillExecutionBlock(state, task, batchTaskIds);
-  if (distillBlock !== null) return distillBlock;
+  const holdBlock = dispatchHoldExecutionBlock(state, task, batchTaskIds);
+  if (holdBlock !== null) return holdBlock;
 
   if (task.wave === currentWave && currentWave > 1) {
     const prevWave = String(currentWave - 1);

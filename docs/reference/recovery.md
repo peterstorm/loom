@@ -55,6 +55,27 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration brief --task T4 --note "f
 
 It then applies the transition a Contract Revision uses. The abandoned run's review epoch, spec-check, suite receipt and tombstone are retired, and review evidence that run accepted is kept as Findings. Each named Task returns to protected `pending` revalidation at a new Review Generation, and its Findings stay as prior Findings for the next Review Run. The Wave's gate bits reset (`impl_complete: false`, `tests_passed: null`, `reviews_complete: false`), and the Wave's other Tasks stay `implemented`, except its `implemented` Distill Task, which returns with them (see [The distill pass](../verification.md#the-distill-pass-distill-task)). One `implemented-tasks-reopened` audit is appended to `task_reopening_history`, recording the Wave, the Task ids, the Distill Tasks among them that the engine swept back unnamed (`sweptDistillTaskIds`, absent when there is none), the reason, and the abandoned run id (or `null`). Status then owes each reopened Task an `initial-implementation` dispatch, `brief` renders it, and the Wave Gate cannot start until each settles afresh. Re-running the same command while those Tasks still await re-implementation changes nothing. The same request after they are `pending` but with a different reason, or for a Task that is no longer `implemented`, is refused. `populate-task-graph --force` is never the recovery: it resets every Task and discards all settled evidence.
 
+## A judgement fails on code a completed Wave sealed
+
+Use this when a Task of the active Wave judges code that a completed Wave wrote (a budget, benchmark or acceptance test) and its attempt failed because that code breaches the judgement. Neither `reopen-task` (active Wave only) nor `reopen-completed-wave` (drifted bytes only) applies, and the judge cannot change code outside its own file list. Append a Forward Fix to the active Wave instead ([ADR-0077](../adr/ADR-0077-a-judgement-lands-while-its-subject-is-open-and-is-fixed-forward-otherwise.md)):
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration add-forward-fix \
+  --wave 5 --hold T12 \
+  --file dags/direct-sales/leads/lead-scoring/dag.ts --file lib/lead-snapshot/recompute.ts \
+  --description "Bring per-request and recompute memory under the spec budgets" \
+  --reason "T12's CI budget test: accountManager request 33.8 MB > 10 MB; recompute 158.3 MB > 150 MB"
+```
+
+Under the TaskGraph lock it requires the Wave-reopening precondition `reopen-task` uses (execute Phase, `--wave` equal to `current_wave`, no completed history for it, no live Wave Gate or a tombstone naming no successor, no executing Task, attempt or subagent), and:
+
+- every `--hold` Task (one or more, distinct) is an authored Task of that Wave whose last implementation attempt failed: it is owed the engine-authorized retry, or it escalated;
+- at least one `--file` (one or more, distinct, repository-relative) is in the file list of a Task of a completed Wave;
+- no `--file` is in another Task's file list in the active Wave, a frozen Acceptance Contract path, or protected verification infrastructure;
+- a non-blank `--description` and `--reason`; `--agent` defaults to `code-implementer-agent` (also `frontend-agent`, `security-agent`), and `--new-tests` to `required` (`existing-tests-sufficient` when the held judge's tests are the fix's whole proof).
+
+It appends a pending fix Task with the next free Task id, no dependency and no Requirement trace, whose plan context names the held Tasks, the sealed paths and the reason. It retires the Wave's review authority as a reopening does, resets the Wave's gate bits, and appends one `forward-fix-added` audit to `forward_fix_history`. Completed Waves and every existing Task are untouched. Status then owes the fix Task's dispatch, while each held Task stays under a dispatch hold until the fix is implemented and unreserved; a held Task's escalation is deferred until then. Once the fix settles, status offers the held Task's retry, which judges the fixed code. An escalated held Task is remediated with `helper orchestration remediate` after the fix settles. Repeating the same command while the fix Task is still pending changes nothing.
+
 ## Completed Wave has post-review workspace-integrity loss
 
 A completed Wave may be reopened only through Loom's independent immutable Review Packet authority. This is the recovery for a missed remediation invalidation; do not edit the graph or decrement a Review Generation.

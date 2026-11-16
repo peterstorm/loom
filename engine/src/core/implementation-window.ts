@@ -12,9 +12,12 @@
  *
  * Every policy decision of the window lives here: which outstanding Tasks hold
  * active implementation authority, which reservations are reclaimable, which
- * Tasks escalated or are dispatchable, and which one recovery follows. A
- * Distill Task is outstanding like any other, but is dispatchable only once
- * the rest of its Wave is implemented and unreserved (ADR-0068). A
+ * Tasks escalated or are dispatchable, and which one recovery follows. A Task
+ * under a dispatch hold (`dispatch-holds.ts`) is outstanding like any other
+ * but not dispatchable: a Distill Task until the rest of its Wave is
+ * implemented and unreserved (ADR-0068), a Forward Fix's held judge until its
+ * fix settles. A held judge's escalation waits for its fix too, so the fix is
+ * dispatched before the escalation is put to the operator. A
  * spawn owed while stage two leaves an export binding unresolved (the
  * skeleton report's problems, AS-051) is replaced by its repair, because
  * registration would refuse that spawn with the same problems. The
@@ -22,7 +25,7 @@
  * shell supplies the reservation-liveness observation.
  */
 import type { StatusReason, TaskGraph, WaveImplementationDispatch, WaveImplementationRecovery } from "../types";
-import { distillDispatchBlockers, distillWithheldMessage } from "./distill-task";
+import { dispatchHoldMessage, dispatchHoldOf, type DispatchHold } from "./dispatch-holds";
 import { canonicalRecord, nonEmpty, type NonEmpty } from "./orchestration-contract";
 import { quoteShellArgument } from "./shell-quoting";
 import { deriveTaskImplementationDispatch } from "./task-implementation-dispatch";
@@ -81,23 +84,23 @@ const notInWindow: ImplementationWindow = Object.freeze({ kind: "not-in-window" 
 const contradiction = (message: string, taskId: string | null = null): ImplementationWindow =>
   canonicalRecord({ kind: "contradiction", reason: statusReason("authority-contradiction", message, taskId) });
 
-/** A Distill Task the window does not offer yet, with the Wave Tasks it waits for (ADR-0068). */
-type WithheldDistillTask = Readonly<{ taskId: string; blockers: NonEmpty<string> }>;
+/** A Task the window does not offer yet, and the hold that withholds it. */
+type WithheldTask = Readonly<{ taskId: string; hold: DispatchHold }>;
 
 /**
- * The outstanding Distill Tasks `distillDispatchBlockers` withholds, in graph
- * order. Registration asks the same rule of the same reservations
+ * The outstanding Tasks a dispatch hold withholds, in graph order.
+ * Registration asks the same rule of the same reservations
  * (`taskExecutionDecision`), reclaimable ones included, so status never
  * offers a dispatch registration would refuse.
  */
-function withheldDistillTasks(
+function withheldTasks(
   graph: TaskGraph,
   executing: ReadonlySet<string>,
   outstanding: readonly TaskGraph["tasks"][number][],
-): readonly WithheldDistillTask[] {
+): readonly WithheldTask[] {
   return outstanding.flatMap((task) => {
-    const blockers = nonEmpty(distillDispatchBlockers(graph.tasks, executing, task));
-    return blockers === null ? [] : [{ taskId: task.id, blockers }];
+    const hold = dispatchHoldOf(graph, executing, task);
+    return hold === null ? [] : [{ taskId: task.id, hold }];
   });
 }
 
@@ -184,8 +187,12 @@ export function classifyImplementationWindow(
       invalidRetry.task.id,
     );
   }
+  const withheld = withheldTasks(graph, executing, outstanding);
+  const isWithheld = (taskId: string): boolean => withheld.some((entry) => entry.taskId === taskId);
+  // A held judge's escalation is deferred while its Forward Fix is owed: the
+  // fix is what answers it, and once the fix settles the escalation returns.
   const escalated = derivations.flatMap(({ task, derivation }): readonly EscalatedImplementation[] =>
-    derivation.kind === "escalated"
+    derivation.kind === "escalated" && !isWithheld(task.id)
       ? [canonicalRecord({ taskId: task.id, receiptId: derivation.receiptId, failureKinds: derivation.failureKinds })]
       : []);
   const invalidAttestation = derivations.flatMap(({ task, derivation }) =>
@@ -196,9 +203,8 @@ export function classifyImplementationWindow(
       invalidAttestation.task.id,
     );
   }
-  const withheld = withheldDistillTasks(graph, executing, outstanding);
   const dispatches = derivations.flatMap(({ task, derivation }): readonly WaveImplementationDispatch[] =>
-    derivation.kind === "dispatch" && !activeTaskIds.has(task.id) && !withheld.some(({ taskId }) => taskId === task.id)
+    derivation.kind === "dispatch" && !activeTaskIds.has(task.id) && !isWithheld(task.id)
       ? [derivation.dispatch]
       : []);
 
@@ -275,15 +281,15 @@ export function classifyImplementationWindow(
       `Wave ${wave} implementation is in progress; wait for ${active.length} active task(s)`,
     );
   }
-  // Every blocker of a withheld Distill Task is itself outstanding, so a legal
-  // graph left through one of the recoveries above. Reaching here with one
-  // withheld means its blockers can never settle.
+  // Every blocker of a withheld Task is itself outstanding, so a legal graph
+  // left through one of the recoveries above. Reaching here with one withheld
+  // means its blockers can never settle.
   const stuck = withheld.at(0);
   return stuck === undefined
     ? contradiction(`Wave ${wave} has outstanding Tasks but no legal implementation recovery`)
     : contradiction(
-        `${distillWithheldMessage(stuck.taskId, stuck.blockers)}; none of them is dispatchable, active or escalated, ` +
-          "so the distill pass can never start; repair the Task Graph",
+        `${dispatchHoldMessage(stuck.taskId, stuck.hold)}; none of them is dispatchable, active or escalated, ` +
+          `so ${stuck.hold.kind === "distill-pass" ? "the distill pass" : "the held Task"} can never start; repair the Task Graph`,
         stuck.taskId,
       );
 }
