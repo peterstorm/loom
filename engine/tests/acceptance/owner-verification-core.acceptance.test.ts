@@ -35,6 +35,7 @@ import type {
   MutationPlanInput,
   SurvivorDiagnostic,
 } from "../../src/core/owner-verification/types";
+import { RUN_ROOT } from "../fixtures/mocha-report";
 
 // ---------------------------------------------------------------------------
 // Sibling coverage
@@ -432,9 +433,6 @@ function junit(cases: readonly Case[]): Uint8Array {
     "</testsuites>",
   ].join("\n"));
 }
-
-/** The isolated worktree a run ran in; Vitest-shaped reports name files relative to it anyway. */
-const RUN_ROOT = "/tmp/loom-owner-worktree";
 
 const passing = (name: string): Case => ({ classname: MATRIX, name: `matrix > ${name}` });
 const failing = (name: string): Case => ({ classname: MATRIX, name: `matrix > ${name}`, failure: "AssertionError" });

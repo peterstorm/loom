@@ -28,7 +28,7 @@
 import { match } from "ts-pattern";
 import { failure, isNonEmpty, success, type NonEmpty } from "../orchestration-contract/identity";
 import { attributeReportedFile } from "../report-file-attribution";
-import { parseJunitTestcasesUnder } from "../report-run-root";
+import { parseJunitTestcasesUnder, type RunRoot } from "../report-run-root";
 import { isCollectionErrorTestcase } from "../structured-test-report";
 import type {
   BaselineOutcome,
@@ -66,7 +66,7 @@ function readRun(run: MatrixTestRun, matrixTest: string): RunReading {
     .exhaustive();
 }
 
-function readReport(bytes: Uint8Array, runRoot: string, exitCode: number | null, signal: string | null, matrixTest: string): RunReading {
+function readReport(bytes: Uint8Array, runRoot: RunRoot, exitCode: number | null, signal: string | null, matrixTest: string): RunReading {
   const parsed = parseJunitTestcasesUnder(bytes, runRoot);
   if (!parsed.ok) return infrastructure("report-unreadable", `the report does not parse: ${parsed.error.message}`);
   const executed = parsed.value.filter((testcase) =>

@@ -136,6 +136,21 @@ else if (mode === "mutate-workspace") {
     '</testsuites>',
   ].join("\\n"));
   process.exit(failing > 0 ? 1 : 0);
+} else if (mode.startsWith("mocha:")) {
+  // mocha:AS-001=fail,... — Mocha's xunit shape: one suite, each testcase's
+  // file absolute beneath the cwd the runner ran in (the repository root).
+  const cases = mode.slice("mocha:".length).split(",").map((entry) => entry.split("="));
+  const failing = cases.filter(([, outcome]) => outcome === "fail").length;
+  const testcase = ([anchor, outcome]) =>
+    '<testcase classname="payload" name="payload &gt; ' + anchor + ': decides ' + anchor + '" file="' + process.cwd() + '/tests/payload.acceptance.test.ts">' +
+    (outcome === "fail" ? '<failure>unimplemented: decides</failure>' : '') + '</testcase>';
+  writeFileSync(report, [
+    '<testsuite name="Mocha Tests" tests="' + (cases.length + 1) + '" failures="0" errors="' + failing + '">',
+    '<testcase classname="plain" name="plain" file="' + process.cwd() + '/tests/other.test.ts"></testcase>',
+    ...cases.map(testcase),
+    '</testsuite>',
+  ].join("\\n"));
+  process.exit(failing > 0 ? 1 : 0);
 } else process.exit(3);
 `;
 }
@@ -1007,6 +1022,21 @@ describe("modern Wave completion suite shell", () => {
       expect(commitCompletion(successor).acceptance_contracts?.[0]?.freeze).toEqual({
         ...contractFreeze("claimant-wave"),
         paths: [{ path: ACCEPTANCE_FILE, sha256: contentDigest(fixedSource) }],
+      });
+    });
+
+    it("reads a Mocha report's absolute acceptance files against the repository: the contract Wave's RED is accepted", async () => {
+      const f = contractFixture("mocha:AS-001=fail,AS-002=fail", "contract-wave");
+      const result = await ensure(f);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
+      expect(completionOutcome(f.manager.load())).toMatchObject({ exitCode: 1 });
+    });
+
+    it("reads a Mocha report's absolute acceptance files against the repository: an already-passing testcase is named", async () => {
+      const f = contractFixture("mocha:AS-001=pass,AS-002=fail", "contract-wave");
+      expect(await ensure(f)).toMatchObject({
+        ok: false,
+        error: { diagnostic: { message: expect.stringContaining(`'payload > AS-001: decides AS-001' (${ACCEPTANCE_FILE})`) } },
       });
     });
 

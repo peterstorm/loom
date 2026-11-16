@@ -37,6 +37,7 @@ import {
   type OwnerVerificationInput,
   type RunMatrixTest,
 } from "../../src/orchestration/owner-verification-runner";
+import { RUN_ROOT } from "../fixtures/mocha-report";
 import { ownerObligation } from "../fixtures/owner-obligation";
 import {
   buildOwnerVerificationRepo as build,
@@ -128,6 +129,13 @@ describe("runOwnerVerification", () => {
     expect(launches.slice(1).every((launch) => launch.owner !== repo.ownerDigest)).toBe(true);
     // One baseline plus five mutants, each bounded by the clamped per-mutant limit.
     expect(observation).toMatchObject({ kind: "verified", boundMs: 6 * 30_000 });
+  }, TIMEOUT_MS);
+
+  it("reads a Mocha runner's absolute report files against the isolated worktree each run used: every mutant is still killed", async () => {
+    const repo = build({ runner: "mocha" });
+    const verdict = onlyVerdict(await verify(repo));
+    expect(verdict.mutation).toMatchObject({ kind: "verified", generated: 5, killed: 5, timedOut: 0, invalid: 0, survivors: [] });
+    expect(repo.runnerLaunches().every((launch) => launch.cwd !== repo.root)).toBe(true);
   }, TIMEOUT_MS);
 
   it("SC-002: a vacuous matrix test lets every non-invalid mutant survive", async () => {
@@ -402,9 +410,6 @@ describe("runOwnerVerification", () => {
     expect(verdict.coverage).toEqual({ kind: "missing", paths: [OWNER_FIXTURE.owner, ...OWNER_FIXTURE.siblings] });
   }, TIMEOUT_MS);
 });
-
-/** The isolated worktree a matrix-test run ran in. */
-const RUN_ROOT = "/tmp/loom-owner-worktree";
 
 describe("matrixTestRunOf", () => {
   const diagnostics = { stdoutTail: "", stderrTail: "", stdoutTruncated: false, stderrTruncated: false };

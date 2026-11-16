@@ -115,7 +115,7 @@ export function ownerAtBase(root: CanonicalRepositoryRoot, base: string, owner: 
  * may read, so it is the run that could not start, never a report. `runRoot`
  * is the root the command ran in; a produced report carries it.
  */
-export function matrixTestRunOf(execution: CommandExecutionResult, elapsedMs: number, runRoot: string): MatrixTestRun {
+export function matrixTestRunOf(execution: CommandExecutionResult, elapsedMs: number, runRoot: CanonicalRepositoryRoot): MatrixTestRun {
   if (!execution.ok) return { kind: "spawn-failed", message: `${execution.error.kind}: ${execution.error.message}` };
   const value = execution.value.execution;
   if (value.kind === "spawn-failed") return { kind: "spawn-failed", message: value.process.message };

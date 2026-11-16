@@ -2,13 +2,12 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { classifyBaseline, classifyMutantRun, verifiedMutationOf } from "../../src/core/owner-verification/outcome";
 import type { MatrixTestRun } from "../../src/core/owner-verification/types";
+import { mochaXunit, RUN_ROOT } from "../fixtures/mocha-report";
 
 /** The matrix test as the plan declares it: repository-relative. */
 const MATRIX = "engine/tests/core/rules.matrix.test.ts";
 /** The same file as Vitest names it: relative to the runner's cwd (`engine/`). */
 const REPORTED = "tests/core/rules.matrix.test.ts";
-/** The isolated worktree the runner ran in. */
-const RUN_ROOT = "/tmp/loom-owner-worktree";
 
 type Case = Readonly<{ classname: string; name: string; failure?: "AssertionError" | "Error"; skipped?: true }>;
 
@@ -104,12 +103,7 @@ describe("classifyMutantRun", () => {
       signal: null,
       report: {
         kind: "produced",
-        bytes: new TextEncoder().encode(
-          `<testsuite name="Mocha Tests" tests="1" failures="0" errors="${failure ? 1 : 0}">` +
-          `<testcase classname="matrix" name="a" file="${file}">` +
-          (failure ? "<failure>unimplemented: rule</failure>" : "") +
-          "</testcase></testsuite>",
-        ),
+        bytes: mochaXunit([{ file, name: "a", ...(failure ? { failure: "unimplemented: rule" } : {}) }]),
         runRoot: RUN_ROOT,
       },
     });
