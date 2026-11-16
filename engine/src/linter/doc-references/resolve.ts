@@ -21,11 +21,21 @@
  * of its heading slugs or HTML anchors; an anchor on any other file (`#L12`)
  * is GitHub's line link and is not judged.
  *
+ * A word resolves when it is one of the project's external names, written
+ * exactly as listed (`external-names.ts`), or when the source holds it.
+ *
  * Pure: a reference and an index in, a `Resolved` or a `DanglingReason` out.
  */
 
 import { posix } from "node:path";
-import { ADR_DIRECTORY, type DanglingReason, type DocReference, type ReferenceIndex, type Resolved } from "./types";
+import {
+  ADR_DIRECTORY,
+  type DanglingReason,
+  type DocReference,
+  type ExternalNameIndex,
+  type ReferenceIndex,
+  type Resolved,
+} from "./types";
 
 export type Resolution =
   | Readonly<{ ok: true; value: Resolved }>
@@ -34,11 +44,13 @@ export type Resolution =
 const resolved = (value: Resolved): Resolution => ({ ok: true, value });
 const dangling = (error: DanglingReason): Resolution => ({ ok: false, error });
 
-/** Where a reference is read from, and where its paths may be written relative to. */
+/** Where a reference is read from, where its paths may be written relative to, and the words the project declares external. */
 export type ReferenceFrame = Readonly<{
   /** The referring file, project-relative. */
   from: string;
   sourceRoots: readonly string[];
+  /** A word reference written exactly as one of these resolves without the source; no other kind of reference reads them. */
+  externalNames: ExternalNameIndex;
 }>;
 
 /** A project-relative path, normalized; null when it is absolute or climbs out of the project. */
@@ -145,6 +157,8 @@ export function resolveReference(reference: DocReference, frame: ReferenceFrame,
     case "link":
       return resolveLink(reference.path, reference.anchor, frame, index);
     case "token": {
+      const external = frame.externalNames.get(reference.text);
+      if (external !== undefined) return resolved({ via: "external", reason: external.reason });
       const missing = missingSegments(reference.text, reference.segments, index);
       return missing.length === 0 ? resolved({ via: "source" }) : dangling({ kind: "not-in-source", missing });
     }

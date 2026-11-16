@@ -19,8 +19,8 @@
  *   --tier=immediate  Run immediate tier only (regex rules, the import-boundary rules, switch-totality,
  *                   no-duplicate-block, no-wire-cast and no-dangling-doc-reference, fast)
  *   --no-baseline-check  Skip the staleness pass (grandfathered baselines and
- *                   scoping entries — exclusions, pure roots, shells, boundaries —
- *                   that no longer name anything)
+ *                   scoping entries — exclusions, pure roots, shells, boundaries,
+ *                   external names — that no longer name anything)
  *   --write-baseline  Record every pre-existing totality site, copied block, wire cast and
  *                   dangling doc reference in the project's config.json
  *                   (switchTotalityBaseline, discriminantBranchingBaseline,
@@ -93,7 +93,7 @@ const { scopeOf, scopeDrift }: typeof ProjectScope =
   await import(join(LOOM_ROOT, "engine/src/linter/project-scope.ts"));
 const { lintedProjectFiles, walkLintableFiles }: typeof ProjectWalk =
   await import(join(LOOM_ROOT, "engine/src/linter/project-walk.ts"));
-const { readingOf }: typeof DocReferenceRule =
+const { externalNameDrift, readingOf }: typeof DocReferenceRule =
   await import(join(LOOM_ROOT, "engine/src/linter/programmatic/no-dangling-doc-reference.ts"));
 const { baselineOwners }: typeof ProgrammaticRules = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/index.ts"));
 const { staleBaselineEntries }: typeof Baselines = await import(join(LOOM_ROOT, "engine/src/linter/programmatic/baseline.ts"));
@@ -205,7 +205,7 @@ const INIT_NEXT_STEPS: readonly string[] = [
   "  duplicateBlockMinTokens / duplicateBlockMinLines — how long a copy is (default: 100 tokens, 8 lines)",
   "  duplicateBlockBaseline — grandfathered copies",
   "  wireCastBaseline — grandfathered JSON.parse / .json() casts (no-wire-cast)",
-  "  docReferences — { govern, plans, exclude, sourceRoots } whose references must resolve (no-dangling-doc-reference)",
+  "  docReferences — { govern, plans, exclude, sourceRoots, externalNames } whose references must resolve (no-dangling-doc-reference)",
   "  docReferenceBaseline — grandfathered dangling doc references",
   "",
   "See: lint-rules/README.md for full documentation",
@@ -399,6 +399,22 @@ function writeBaseline(config: LinterConfig.ProgrammaticConfig): void {
   console.log(`✓ ${relative(PROJECT_ROOT, path)}: ${recorded.map(({ configKey, keys }) => `${configKey} ${keys.length}`).join(", ")}`);
 }
 
+/**
+ * The external names (`docReferences.externalNames`) that have decayed: a name
+ * no governed file references, or one the source already resolves. Judged over
+ * every governed file of the project, never a targeted run's subset, so a
+ * name is not called unreferenced because its document was not named. The
+ * decision is the engine's (`externalNameDrift`); this shell only reads.
+ */
+function externalNamesDrift(config: LinterConfig.ProgrammaticConfig): readonly string[] {
+  const scope = config.docReferences ?? null;
+  if (scope === null || scope.externalNames.length === 0) return [];
+  const governed = applyExclusions(projectFiles(config), config.exclude ?? []).lint
+    .filter((file) => readingOf(projectPath(file), scope) !== null)
+    .map((file) => ({ path: projectPath(file), content: readFileSync(file, "utf-8") }));
+  return externalNameDrift(scope, governed, authoritativeLintContext(config, PROJECT_ROOT).references);
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -535,7 +551,7 @@ for (const [file, result] of lintFiles(files, opts.tier, DEFAULT_RULES_DIR, EXIS
 // unnoticed. Scoping drift is judged against the whole project's files, never
 // a targeted run's subset.
 const driftLines = opts.baselineCheck && opts.tier === "full"
-  ? [...baselineDrift(config), ...scopeDrift(config, projectFiles(config).map(projectPath))]
+  ? [...baselineDrift(config), ...scopeDrift(config, projectFiles(config).map(projectPath)), ...externalNamesDrift(config)]
   : [];
 
 // ONE failure predicate for every output mode. A file the linter could not read

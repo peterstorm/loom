@@ -5,7 +5,8 @@
 
 import { describe, expect, it } from "vitest";
 import { resolveReference, type ReferenceFrame, type Resolution } from "../../../src/linter/doc-references/resolve";
-import type { DocReference } from "../../../src/linter/doc-references/types";
+import { parseExternalName } from "../../../src/linter/doc-references/external-names";
+import type { DocReference, ExternalName, ExternalNameGroup, ExternalNameIndex } from "../../../src/linter/doc-references/types";
 import { fakeIndex, VALID_SPEC } from "./fake-snapshot";
 
 const INDEX = fakeIndex(
@@ -27,8 +28,18 @@ const INDEX = fakeIndex(
   },
 );
 
-const FRAME: ReferenceFrame = { from: "engine/src/linter/programmatic/rule.ts", sourceRoots: ["engine/src"] };
-const DOC_FRAME: ReferenceFrame = { from: "docs/guide.md", sourceRoots: ["engine/src"] };
+/** A name the production parse accepts. */
+const externalName = (raw: string): ExternalName => {
+  const parsed = parseExternalName(raw);
+  if (!parsed.ok) throw new Error(`not an external name: ${raw}`);
+  return parsed.value;
+};
+
+/** No external names: the source alone resolves a word. */
+const NONE: ExternalNameIndex = new Map();
+
+const FRAME: ReferenceFrame = { from: "engine/src/linter/programmatic/rule.ts", sourceRoots: ["engine/src"], externalNames: NONE };
+const DOC_FRAME: ReferenceFrame = { from: "docs/guide.md", sourceRoots: ["engine/src"], externalNames: NONE };
 
 const resolve = (reference: DocReference, frame: ReferenceFrame = FRAME): Resolution => resolveReference(reference, frame, INDEX);
 
@@ -155,7 +166,7 @@ describe("a token resolves in the source text", () => {
 });
 
 describe("a plan's spec header and spec ids", () => {
-  const PLAN: ReferenceFrame = { from: ".claude/plans/p.md", sourceRoots: [] };
+  const PLAN: ReferenceFrame = { from: ".claude/plans/p.md", sourceRoots: [], externalNames: NONE };
 
   it("resolves a spec that parses", () => {
     expect(resolve(spec(".claude/specs/good/spec.md"), PLAN)).toEqual({ ok: true, value: { via: "spec", spec: ".claude/specs/good/spec.md" } });
@@ -190,5 +201,35 @@ describe("an ADR id", () => {
   it("resolves when a file in docs/adr carries it, and dangles naming the directory when none does", () => {
     expect(resolve(adr("ADR-0042"))).toEqual({ ok: true, value: { via: "adr" } });
     expect(resolve(adr("ADR-0099"))).toEqual({ ok: false, error: { kind: "no-such-adr", directory: "docs/adr" } });
+  });
+});
+
+describe("an external name resolves a word the source never spells", () => {
+  const TELEMETRY: ExternalNameGroup = { names: [externalName("ai.llm.tokens_in"), externalName("Sites.Selected")], reason: "emitted at runtime or defined by a vendor" };
+  const EXTERNAL: ReferenceFrame = { ...DOC_FRAME, externalNames: new Map(TELEMETRY.names.map((name) => [name, TELEMETRY])) };
+
+  it.each(["ai.llm.tokens_in", "Sites.Selected"])("`%s`, written exactly as listed, resolves with the group's reason", (text) => {
+    expect(resolve(token(text), EXTERNAL)).toEqual({ ok: true, value: { via: "external", reason: TELEMETRY.reason } });
+  });
+
+  it("dangles without the list, as before", () => {
+    expect(resolve(token("ai.llm.tokens_in"), DOC_FRAME)).toEqual({ ok: false, error: { kind: "not-in-source", missing: ["ai", "llm", "tokens_in"] } });
+  });
+
+  it.each(["ai.llm", "ai.llm.tokens_in.total", "Sites.Selected()", "sites.selected"])(
+    "matches exactly, never a prefix, an extension, a call or another case: `%s` still dangles",
+    (text) => {
+      expect(resolve(token(text), EXTERNAL)).toMatchObject({ ok: false, error: { kind: "not-in-source" } });
+    },
+  );
+
+  it("never resolves a path, a file name, a link, a spec id or an ADR id written with a listed name", () => {
+    const named = new Map([["Sites.Selected", TELEMETRY], ["gone.md", TELEMETRY], ["ADR-0099", TELEMETRY], ["FR-028", TELEMETRY]]);
+    const frame: ReferenceFrame = { ...DOC_FRAME, externalNames: named };
+    expect(resolve(path("Sites.Selected/"), frame)).toMatchObject({ ok: false, error: { kind: "no-such-path" } });
+    expect(resolve(fileName("gone.md"), frame)).toMatchObject({ ok: false, error: { kind: "no-such-path" } });
+    expect(resolve(link("Sites.Selected"), frame)).toMatchObject({ ok: false, error: { kind: "no-such-path" } });
+    expect(resolve(adr("ADR-0099"), frame)).toMatchObject({ ok: false, error: { kind: "no-such-adr" } });
+    expect(resolve(specId("FR-028", ".claude/specs/good/spec.md"), frame)).toMatchObject({ ok: false, error: { kind: "id-not-in-spec" } });
   });
 });

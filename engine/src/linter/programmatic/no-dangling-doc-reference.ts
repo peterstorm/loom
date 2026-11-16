@@ -14,7 +14,10 @@
  * `config.json`); absent, the rule governs nothing. A Markdown file under
  * `govern` is read in full, a source file under it for its comments, and a
  * Markdown file under `plans` for its spec header, spec ids and ADR ids only —
- * a plan names files that do not exist yet.
+ * a plan names files that do not exist yet. A word the source never spells
+ * because it lives elsewhere (a runtime attribute, a vendor's value) resolves
+ * when the scope lists it under `externalNames`; the full run reports a listed
+ * name that has decayed (`externalNameDrift`).
  *
  * A mention of something deliberately gone is prose, not a reference: write
  * it without backticks, or baseline it with its reason. The rule does not
@@ -28,6 +31,7 @@ import { extname } from "node:path";
 import { makeViolation, type Violation } from "../types";
 import { isUnderEntry } from "../project-scope";
 import { extractDocReferences } from "../doc-references/extract";
+import { externalNameIndex, staleExternalNames } from "../doc-references/external-names";
 import { C_FAMILY_EXTENSIONS } from "../doc-references/reference-index";
 import { resolveReference } from "../doc-references/resolve";
 import type { DanglingReason, DocReading, DocReference, DocReferenceScope, ReferenceIndex } from "../doc-references/types";
@@ -37,7 +41,8 @@ export const RULE_NAME = "no-dangling-doc-reference";
 
 export const FIX_HINT =
   "Name what exists: a path from this file's directory, the project root or a source root; a symbol or string the " +
-  "source holds; a heading the target has; an id its spec or docs/adr defines. A mention of something deliberately " +
+  "source holds, or one the project lists in docReferences.externalNames because it lives outside the source (a " +
+  "runtime attribute, a vendor's value); a heading the target has; an id its spec or docs/adr defines. A mention of something deliberately " +
   "gone is prose — drop the backticks. Pre-existing references: `lint-project --write-baseline`.";
 
 /** The files the rule reads: Markdown documents and plans, and source files for their comments. */
@@ -110,12 +115,41 @@ function findings(content: string, path: string, { scope, index }: DocReferenceO
     const { line } = extraction.error;
     return [{ line, key: "(unclosed fence)", message: `the code fence opened on line ${line} is never closed, so nothing after it is read` }];
   }
-  const frame = { from: path, sourceRoots: scope.sourceRoots };
+  const frame = { from: path, sourceRoots: scope.sourceRoots, externalNames: externalNameIndex(scope.externalNames) };
   return extraction.value.flatMap((reference) => {
     const resolution = resolveReference(reference, frame, index);
     return resolution.ok
       ? []
       : [{ line: reference.line, key: reference.text, message: describeDangling(reference, resolution.error) }];
+  });
+}
+
+/** A project file as the drift pass reads it: its project-relative path and its text. */
+export type ProjectText = Readonly<{ path: string; content: string }>;
+
+/** The text of every word reference the governed files make. A file whose references cannot be read adds none: the rule already reports it. */
+function referencedWords(files: readonly ProjectText[], scope: DocReferenceScope): ReadonlySet<string> {
+  return new Set(files.flatMap(({ path, content }) => {
+    const reading = readingOf(path, scope);
+    if (reading === null) return [];
+    const extraction = extractDocReferences(content, reading);
+    return extraction.ok ? extraction.value.flatMap((reference) => (reference.kind === "token" ? [reference.text] : [])) : [];
+  }));
+}
+
+/**
+ * The external names that have decayed, as stale-entry lines, judged over the
+ * whole project's files (`lint-project`'s full run): a name no governed file
+ * references, and a name the source already resolves. Each line names the
+ * group's reason, so the reader sees why the name was listed.
+ */
+export function externalNameDrift(scope: DocReferenceScope | null, files: readonly ProjectText[], index: ReferenceIndex): readonly string[] {
+  if (scope === null || scope.externalNames.length === 0) return [];
+  return staleExternalNames(scope.externalNames, referencedWords(files, scope), index).map(({ name, group, why }) => {
+    const stale = why === "unreferenced"
+      ? "no governed document references it"
+      : "the source already resolves it, so it is not external";
+    return `docReferences.externalNames: ${name} (${stale} — delete the name; listed because ${group.reason})`;
   });
 }
 

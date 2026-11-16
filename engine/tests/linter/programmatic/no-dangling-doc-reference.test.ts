@@ -16,6 +16,7 @@ import { dirname, join } from "node:path";
 import {
   describeDangling,
   detectedDocReferenceKeys,
+  externalNameDrift,
   handler,
   readingOf,
   RULE_NAME,
@@ -24,6 +25,7 @@ import {
 import type { DanglingReason, DocReference, DocReferenceScope, ProjectSnapshot } from "../../../src/linter/doc-references/types";
 import { referenceIndex } from "../../../src/linter/doc-references/reference-index";
 import { baselineKey } from "../../../src/linter/programmatic/baseline";
+import { parseProjectConfig } from "../../../src/linter/programmatic/config";
 import { lintFiles } from "../../../src/linter/index";
 import { fakeIndex, fakeSnapshot, VALID_SPEC, type FakeProject } from "../doc-references/fake-snapshot";
 import { REPO_ROOT } from "../loom-project-config";
@@ -35,6 +37,7 @@ const SCOPE: DocReferenceScope = {
   plans: [reasoned(".claude/plans/")],
   exclude: [reasoned("docs/vendored/")],
   sourceRoots: ["engine/src"],
+  externalNames: [],
 };
 
 const optionsFor = (project: FakeProject, unwalked: FakeProject = {}, baseline: readonly string[] = []): DocReferenceOptions => ({
@@ -281,5 +284,68 @@ describe("budget: the index is built once, however many governed files the rule 
     expect(flagged.map(({ text }) => text)).toEqual([expect.stringContaining("`gone`")]);
     // Three governed files, one walk, and one read: the only file that feeds the corpus.
     expect([walks, reads]).toEqual([1, 1]);
+  });
+});
+
+describe("external names: words the documents name that live outside the source", () => {
+  const telemetry = { names: ["ai.llm.tokens_in", "ai.llm.tokens_out"], reason: "OpenTelemetry attributes emitted at runtime" };
+  const scorers = { names: ["answer_correctness", "faithfulness"], reason: "Python eval scorers" };
+  const parsedScope = (externalNames: unknown): DocReferenceScope => {
+    const parsed = parseProjectConfig({ docReferences: { govern: [reasoned("docs/")], sourceRoots: ["src"], externalNames } }, "config.json");
+    if (!parsed.ok || parsed.value.docReferences === undefined) throw new Error(`refused: ${JSON.stringify(parsed)}`);
+    return parsed.value.docReferences;
+  };
+  const SOURCE: FakeProject = { "src/eval.ts": "export const scorer = \"faithfulness\";" };
+  const options = (scope: DocReferenceScope): DocReferenceOptions => ({ scope, baseline: [], projectRoot: "/repo", index: fakeIndex(SOURCE) });
+
+  it("a word written exactly as a listed name resolves; its unlisted sibling still dangles", () => {
+    const doc = "# Telemetry\n\nThe span carries `ai.llm.tokens_in` and `ai.llm.tokens_out`, never `ai.llm.cost`.\n";
+    const flagged = handler(doc, "/repo/docs/telemetry.md", options(parsedScope([telemetry])));
+    expect(flagged.map(({ text }) => text)).toEqual([expect.stringContaining("`ai.llm.cost`")]);
+  });
+
+  it("does not resolve a path, link or ADR id that spells a listed name", () => {
+    const scope = parsedScope([{ names: ["Sites.Selected"], reason: "a Microsoft Graph permission" }]);
+    const doc = "# Graph\n\nSee `Sites.Selected/` and [the grant](Sites.Selected).\n";
+    expect(handler(doc, "/repo/docs/graph.md", options(scope)).map(({ text }) => text)).toEqual([
+      expect.stringContaining("`Sites.Selected/`"),
+      expect.stringContaining("`Sites.Selected`"),
+    ]);
+  });
+
+  describe("externalNameDrift: the full run reports a listed name that has decayed", () => {
+    const docs = [
+      { path: "docs/telemetry.md", content: "# Telemetry\n\n`ai.llm.tokens_in` and `answer_correctness`, `faithfulness`.\n" },
+      { path: "docs/vendored/x.md", content: "`ai.llm.tokens_out`\n" },
+      { path: "skills/x/SKILL.md", content: "`ai.llm.tokens_out`\n" },
+    ];
+
+    it("names an unreferenced name and a name the source already holds, each with its group's reason", () => {
+      const scope = parsedScope([telemetry, scorers]);
+      expect(externalNameDrift(scope, docs.filter(({ path }) => path === "docs/telemetry.md"), fakeIndex(SOURCE))).toEqual([
+        "docReferences.externalNames: ai.llm.tokens_out (no governed document references it — delete the name; listed because OpenTelemetry attributes emitted at runtime)",
+        "docReferences.externalNames: faithfulness (the source already resolves it, so it is not external — delete the name; listed because Python eval scorers)",
+      ]);
+    });
+
+    it("counts only the governed files: a reference in an excluded or ungoverned file keeps nothing alive", () => {
+      const scope = { ...parsedScope([telemetry]), exclude: [reasoned("docs/vendored/")] };
+      expect(externalNameDrift(scope, docs, fakeIndex(SOURCE))).toEqual([
+        expect.stringContaining("ai.llm.tokens_out (no governed document references it"),
+      ]);
+    });
+
+    it("counts only a word reference written exactly: a call or a longer dotted path is not the name", () => {
+      const scope = parsedScope([{ names: ["faithfulness_v2"], reason: "a scorer" }]);
+      const calls = [{ path: "docs/a.md", content: "`faithfulness_v2()` and `faithfulness_v2.score`\n" }];
+      expect(externalNameDrift(scope, calls, fakeIndex({}))).toEqual([expect.stringContaining("faithfulness_v2 (no governed document")]);
+    });
+
+    it("reports nothing with no scope, no external names, or every name live", () => {
+      expect(externalNameDrift(null, docs, fakeIndex(SOURCE))).toEqual([]);
+      expect(externalNameDrift(SCOPE, docs, fakeIndex(SOURCE))).toEqual([]);
+      const live = parsedScope([{ names: ["ai.llm.tokens_in", "answer_correctness"], reason: "external" }]);
+      expect(externalNameDrift(live, docs, fakeIndex(SOURCE))).toEqual([]);
+    });
   });
 });
