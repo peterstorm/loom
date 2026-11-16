@@ -3,7 +3,7 @@ name: Verification
 # CI runs on pull_request, pushes to main, and explicit dispatch only:
 # branch pushes are validated by their pull_request run and tag pushes point
 # at commits main already validated — one suite run per change, no
-duplicates.
+# duplicates.
 on:
   pull_request:
   push:
