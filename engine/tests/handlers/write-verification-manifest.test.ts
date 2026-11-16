@@ -7,6 +7,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import writeVerificationManifest from "../../src/handlers/helpers/write-verification-manifest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
@@ -183,6 +184,81 @@ describe("write-verification-manifest", () => {
       expect(result.kind).toBe("error");
       if (result.kind === "error") expect(result.message).toContain("already frozen");
     }
+  });
+
+  describe("report paths", () => {
+    const report = ".loom/completion-reports/unit.junit.xml";
+    const reportingSource = JSON.stringify({
+      schemaVersion: 1,
+      kind: "loom-verification-manifest",
+      checks: [{
+        id: "project:unit",
+        scope: "wave",
+        executable: "bun",
+        args: ["test", "--reporter=junit", `--reporter-outfile=${report}`],
+        cwd: ".",
+        timeoutMs: 60_000,
+        report: { kind: "required-file", path: report },
+      }],
+    });
+
+    function gitProject(ignoreRules: string | null): string {
+      const { root } = project();
+      execFileSync("git", ["init", "-q"], { cwd: root });
+      if (ignoreRules !== null) writeFileSync(join(root, ".gitignore"), ignoreRules);
+      return root;
+    }
+
+    it("installs when every report path is Git-ignored", async () => {
+      const root = gitProject(".loom/completion-reports/\n");
+
+      expect((await writeVerificationManifest(reportingSource, [])).kind).toBe("passthrough");
+      expect(installedCheckIds(root)).toEqual(["project:unit"]);
+    });
+
+    it("refuses, naming the path and the rule, when a report path is not Git-ignored", async () => {
+      const root = gitProject(null);
+
+      const result = await writeVerificationManifest(reportingSource, []);
+
+      expect(result.kind).toBe("error");
+      if (result.kind === "error") {
+        expect(result.message).toContain(report);
+        expect(result.message).toContain("`.loom/completion-reports/`");
+      }
+      expect(() => readFileSync(manifestPath(root))).toThrow();
+    });
+
+    it("names only the report paths the project does not ignore", async () => {
+      const other = ".loom/completion-reports/other.junit.xml";
+      const root = gitProject(`${report}\n`);
+      const mixed = JSON.parse(reportingSource) as { checks: Array<Record<string, unknown>> };
+      mixed.checks.push({
+        ...mixed.checks[0],
+        id: "project:other",
+        args: ["test", "--reporter=junit", `--reporter-outfile=${other}`],
+        report: { kind: "required-file", path: other },
+      });
+
+      const result = await writeVerificationManifest(JSON.stringify(mixed), []);
+
+      expect(result.kind).toBe("error");
+      if (result.kind === "error") {
+        expect(result.message).toContain(`Not ignored: ${other}.`);
+        expect(result.message).not.toContain(`${report},`);
+      }
+      expect(() => readFileSync(manifestPath(root))).toThrow();
+    });
+
+    it("refuses when it cannot tell, outside a Git repository", async () => {
+      const { root } = project();
+
+      const result = await writeVerificationManifest(reportingSource, []);
+
+      expect(result.kind).toBe("error");
+      if (result.kind === "error") expect(result.message).toContain("cannot tell whether report path");
+      expect(() => readFileSync(manifestPath(root))).toThrow();
+    });
   });
 
   it("refuses a symlinked manifest directory", async () => {

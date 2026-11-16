@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  authoritativeStateRepositoryPath,
-  isEngineOwnedRuntimePath,
-} from "../../../src/handlers/helpers/task-local-completion";
+import { isEngineOwnedRuntimePath } from "../../../src/core/engine-runtime-paths";
+import { authoritativeStateRepositoryPath } from "../../../src/handlers/helpers/task-local-completion";
 
 describe("exact Task-local runtime ownership", () => {
   it("projects only an in-repository authoritative State File", () => {
@@ -13,7 +11,7 @@ describe("exact Task-local runtime ownership", () => {
     expect(authoritativeStateRepositoryPath("/project", "/other/state.json")).toBeNull();
   });
 
-  it("claims only the exact authoritative State File", () => {
+  it("claims the authoritative State File but no other runtime artifact", () => {
     const statePath = ".custom/state/active_task_graph.json";
     expect(isEngineOwnedRuntimePath(statePath, statePath)).toBe(true);
     expect(isEngineOwnedRuntimePath(".claude/state/other.json", statePath)).toBe(false);

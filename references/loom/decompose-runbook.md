@@ -66,6 +66,7 @@ bun {LOOM_DIR}/engine/src/cli.ts helper write-verification-manifest < /tmp/loom-
 ```
 
 - The empty `checks` array configures **no project verification**. It is not a passing test, build or typecheck setup. Replace it with the operator-approved fixed executable and argument arrays. Never copy a model-authored shell string into the manifest.
+- Every `required-file` report path must be Git-ignored before install (add `.loom/completion-reports/` to `.gitignore`). The helper refuses otherwise and names the paths: a report the stop checks write during a Task's attempt would be judged as that Task's out-of-scope write.
 - Keep an existing operator manifest; do not replace it with this example.
 - Direct Bash, Edit and Write access to `.loom/verification-manifest.json` is blocked once the State File is active. The helper is the only way to install it. It needs the empty TaskGraph that `init-state` created.
 - An installed manifest that differs only in formatting is accepted unchanged. When the plan needs a different manifest (a schema-2 `affectedRunner` for an owned invariant, say), get the user's approval and re-run the helper with `--replace`; without the flag it refuses and names the flag. Never ask the user to copy a file over the protected path.

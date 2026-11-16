@@ -19,6 +19,7 @@ import {
 } from "../../core/implementation-application";
 import type { ImplementationAttemptAuthority } from "../../core/implementation-completion";
 import { sha256Bytes } from "../../core/digest";
+import { isEngineOwnedRuntimePath } from "../../core/engine-runtime-paths";
 import type { DomainResult } from "../../core/orchestration-contract";
 import type { SkeletonRecord } from "../../core/skeleton/types";
 import { resolveBaseDirectory } from "../../utils/no-follow-fs";
@@ -113,13 +114,6 @@ export function authoritativeStateRepositoryPath(
   return canonicalRepositoryPaths(root, [absoluteStatePath], "authoritative State File")[0] ?? null;
 }
 
-/** Engine ownership is exact authority, never trust inferred from a namespace.
- *  Git-ignored runtime artifacts do not enter repositoryChangedPaths; a
- *  Git-visible review or panel artifact is therefore ordinary unowned evidence. */
-export function isEngineOwnedRuntimePath(path: string, authoritativeStatePath: string | null): boolean {
-  return authoritativeStatePath !== null && path === authoritativeStatePath;
-}
-
 /**
  * Pair each recorded engine skeleton with the raw-bytes digest its path holds
  * now, read without following any link. An absent path, or one holding no
@@ -178,7 +172,8 @@ function observeAvailableTaskScope(
     const authoritativeStatePath = args.authoritativeStatePath === undefined
       ? null
       : authoritativeStateRepositoryPath(args.repositoryRoot, args.authoritativeStatePath);
-    // Only the exact State File selected for this settlement is engine-owned.
+    // Only the exact State File selected for this settlement, with the lock
+    // and staging leaves its write boundary creates beside it, is engine-owned.
     // Ignored runtime artifacts never enter the Git-visible observation; every
     // other changed path remains byte-scope evidence regardless of namespace.
     const repositoryChangedPaths = changedRepositoryArtifactsSince(
