@@ -83,9 +83,11 @@ export type OwnerVerificationRepoOptions = Readonly<{
    * `hang-mutants` never exits while the owner differs from the Wave's (a
    * faithful baseline, every mutant hanging). Both hanging modes freeze the
    * runner with the short `HANGING_RUNNER_TIMEOUT_MS`, so the frozen time
-   * limit ends each hanging run.
+   * limit ends each hanging run. `mocha` decides as `faithful` but writes
+   * Mocha's xunit shape: each testcase's `file` absolute beneath the
+   * directory the runner ran in.
    */
-  runner?: "faithful" | "red" | "no-report" | "unstartable" | "hang" | "hang-mutants";
+  runner?: "faithful" | "red" | "no-report" | "unstartable" | "hang" | "hang-mutants" | "mocha";
   /** `blocked` makes `git worktree add` fail: `.git/worktrees` is a file. */
   worktree?: "available" | "blocked";
   /**
@@ -207,13 +209,25 @@ function matrixTestText(kind: MatrixTestKind): string {
   ].join("\n");
 }
 
+/** The runner stand-in's `mocha` branch: Mocha's xunit shape, each testcase's `file` absolute beneath the run's cwd. */
+const MOCHA_REPORT_SNIPPET = `if (MODE === "mocha") {
+  writeFileSync(REPORT, [
+    '<testsuite name="Mocha Tests" tests="' + cases.length + '" failures="0" errors="' + failures + '">',
+    ...cases.map(({ file, fails }) =>
+      '<testcase classname="matrix" name="decides admission through every entry point" file="' + escape(process.cwd() + "/" + file) + '">' +
+      (fails ? "<failure>AssertionError: expected true to be false</failure>" : "") + "</testcase>"),
+    "</testsuite>",
+  ].join("\\\\n"));
+  process.exit(failures > 0 ? 1 : 0);
+}`;
+
 /**
  * The runner stand-in. `faithful`: a matrix test marked discriminating fails
  * whenever the owner's bytes differ from `original` (the Wave's), one marked
  * vacuous always passes. `red`: every testcase fails. `no-report`: exit 0
  * with no report. `hang`: never exits. `hang-mutants`: never exits while the
- * owner's bytes differ from `original`, otherwise faithful. Every launch is
- * logged first.
+ * owner's bytes differ from `original`, otherwise faithful. `mocha`: faithful,
+ * in Mocha's xunit shape with absolute files. Every launch is logged first.
  */
 function runnerScript(log: string, original: string, mode: Exclude<RunnerMode, "unstartable">): string {
   return `import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -240,6 +254,8 @@ const cases = files.map((file) => {
   return { file, fails: MODE === "red" || (marker === "discriminating" && owner !== ORIGINAL) };
 });
 const failures = cases.filter((testcase) => testcase.fails).length;
+mkdirSync(dirname(REPORT), { recursive: true });
+${MOCHA_REPORT_SNIPPET}
 const suites = cases.map(({ file, fails }) => [
   '<testsuite name="' + escape(file) + '" tests="1" failures="' + (fails ? 1 : 0) + '" errors="0" skipped="0">',
   '<testcase classname="' + escape(file) + '" name="matrix &gt; decides admission through every entry point">' +

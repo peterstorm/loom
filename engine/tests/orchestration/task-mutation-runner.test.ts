@@ -45,6 +45,7 @@ import type { HookResult } from "../../src/types";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { junitReport, talliedResult, type JunitCase } from "../fixtures/task-mutation";
+import { RUN_ROOT } from "../fixtures/mocha-report";
 import {
   cleanupTaskMutationRepos,
   GUARDED_IMPL,
@@ -97,7 +98,7 @@ const FILE = sourceMutants();
 const passing: JunitCase = { file: TEST_FILE, name: "debits", outcome: "passed" };
 const failing: JunitCase = { file: TEST_FILE, name: "refuses zero", outcome: "failed" };
 const reported = (cases: readonly JunitCase[]): MatrixTestRun =>
-  ({ kind: "exited", exitCode: cases.some(({ outcome }) => outcome === "failed") ? 1 : 0, signal: null, report: { kind: "produced", bytes: junitReport(cases) } });
+  ({ kind: "exited", exitCode: cases.some(({ outcome }) => outcome === "failed") ? 1 : 0, signal: null, report: { kind: "produced", bytes: junitReport(cases), runRoot: RUN_ROOT } });
 const GREEN = reported([passing]);
 const KILLED = reported([passing, failing]);
 const TIMED_OUT: MatrixTestRun = { kind: "timed-out", elapsedMs: 1_000 };

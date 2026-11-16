@@ -1,0 +1,16 @@
+{
+  "kind": "regex",
+  "name": "inv-9-one-rooted-report-parse",
+  "description": "Engine code turns JUnit report bytes into testcases only through parseJunitTestcasesUnder in engine/src/core/report-run-root.ts, which reads every absolute testcase file against the root its runner ran in. Mocha's xunit reporter writes absolute file attributes; a shell that called the raw parseJunitTestcases would leave them unattributed, so a contract Wave reads no acceptance testcase and an owned Invariant's matrix test reads as not collected. This rule refuses a call of the raw parser anywhere else.",
+  "extensions": [".ts", ".tsx"],
+  "pattern": "\\bparseJunitTestcases\\s*\\(",
+  "flags": "",
+  "excludePatterns": [
+    ".test.ts",
+    "engine/tests/",
+    "engine/src/core/structured-test-report.ts",
+    "engine/src/core/report-run-root.ts"
+  ],
+  "fixHint": "Parse the report with parseJunitTestcasesUnder(bytes, runRoot) from engine/src/core/report-run-root.ts, passing the root the runner ran in: the repository's CanonicalRepositoryRoot, or the isolated worktree a mutation run used.",
+  "enabled": true
+}

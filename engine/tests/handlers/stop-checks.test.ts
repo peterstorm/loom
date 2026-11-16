@@ -54,6 +54,7 @@ import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { contract, frozenPaths, gitProject, surface, task, writeStateFile } from "../fixtures/contract-status-fixtures";
 import { stopCheckGraph } from "../fixtures/stop-check-plan-fixtures";
 import { inMemoryBlockCounters } from "../fixtures/stop-check-block-counters";
+import { mochaXunit } from "../fixtures/mocha-report";
 import {
   ACCEPTANCE_REPORT,
   ACCEPTANCE_RUNNER,
@@ -135,8 +136,13 @@ const junit = (cases: readonly Testcase[]): Uint8Array => new TextEncoder().enco
   cases.map(({ file, name, outcome }) => `<testcase classname="${file}" name="${name}">${outcome === "failed" ? "<failure/>" : ""}</testcase>`).join("") +
   "</testsuite></testsuites>");
 
+/** Mocha's xunit shape: each testcase's `file` absolute beneath the root the runner ran in. */
+const mochaJunit = (root: string, cases: readonly Testcase[]): Uint8Array =>
+  mochaXunit(cases.map(({ file, name, outcome }) => ({ file: `${root}/${file}`, name, ...(outcome === "failed" ? { failure: "AssertionError" } : {}) })));
+
 type Run =
   | Readonly<{ kind: "report"; cases: readonly Testcase[]; tookMs?: number }>
+  | Readonly<{ kind: "mocha-report"; cases: readonly Testcase[] }>
   | Readonly<{ kind: "timed-out" }>
   | Readonly<{ kind: "killed" }>
   | Readonly<{ kind: "no-report" }>
@@ -202,6 +208,8 @@ function fakePorts(root: ReturnType<typeof repositoryRoot>, options: FakeOptions
       switch (run.kind) {
         case "report":
           return runnerResult(command, false, null, junit(run.cases));
+        case "mocha-report":
+          return runnerResult(command, false, null, mochaJunit(root, run.cases));
         case "timed-out":
           return runnerResult(command, true, "SIGKILL", junit([failing("src/partial.test.ts", "partial")]));
         case "killed":
@@ -572,6 +580,35 @@ describe("runStopChecks: one lock, one sequence, one message, one budget", () =>
     expect(message.indexOf("'payload > parses' (src/payload.test.ts)")).toBeGreaterThan(message.indexOf(AFFECTED_BLOCK_HEADING));
     expect(fake.counters.acceptance.get("session.agent")).toBe(1);
     expect(fake.counters.affected.get("session.agent")).toBe(1);
+  });
+
+  it("reads a Mocha report's absolute files against the repository root: both checks judge them as the declared paths", async () => {
+    const root = repositoryRoot();
+    const fake = fakePorts(root, {
+      acceptance: { kind: "mocha-report", cases: [failing(SURFACE.acceptance, OWED)] },
+      affected: { kind: "mocha-report", cases: [failing("src/payload.test.ts", "payload > parses")] },
+    });
+
+    const outcome = await runStopChecks(input(manifest({ acceptance: true, affected: true }), "T2", observed(changed(root, "src/payload.ts"))), fake.ports);
+
+    expect(outcome.kind).toBe("block");
+    const message = textOf(outcome);
+    expect(message).toContain(ACCEPTANCE_BLOCK_HEADING);
+    expect(message).toContain(OWED);
+    expect(message).toContain("'payload > parses' (src/payload.test.ts)");
+    expect(message).not.toContain(root);
+  });
+
+  it("an all-passing Mocha report under the repository root passes both checks", async () => {
+    const root = repositoryRoot();
+    const fake = fakePorts(root, {
+      acceptance: { kind: "mocha-report", cases: [passing(SURFACE.acceptance, OWED)] },
+      affected: { kind: "mocha-report", cases: [passing("src/payload.test.ts", "payload > parses")] },
+    });
+
+    const outcome = await runStopChecks(input(manifest({ acceptance: true, affected: true }), "T2", observed(changed(root, "src/payload.ts"))), fake.ports);
+
+    expect(outcome).toEqual({ kind: "passed" });
   });
 
   it("AS-029: each check keeps its own cap: at the acceptance cap only the affected check blocks, and the acceptance runner does not run", async () => {

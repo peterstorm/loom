@@ -43,10 +43,10 @@ import { failure, isNonEmpty, mapNonEmpty, nonEmpty, success, type DomainResult,
 import { compareStrings } from "./ordering";
 import { TASK_MUTATION_OPERATORS, type TaskMutant, type TaskMutationOperator } from "./owner-verification/mutation-plan";
 import { contractTaskIdsOf } from "./owner-verification/obligations";
-import type { MatrixTestRun } from "./owner-verification/types";
+import type { MatrixTestReport, MatrixTestRun } from "./owner-verification/types";
 import { isRepoRelativePlanPath, normalizePlanPath } from "./plan-path-match";
 import { isRecord, type UnknownRecord } from "./plain-record";
-import { parseJunitTestcases } from "./structured-test-report";
+import { parseJunitTestcasesUnder } from "./report-run-root";
 import { frozenRedThenGreenEra } from "./proof-obligations";
 import { isTestFileBySuffixes } from "./test-file-classification";
 import { taskMutationCheckSetting, type AffectedRunner } from "./verification-manifest";
@@ -202,12 +202,12 @@ export type TaskMutantOutcome =
 const unobservable = (reason: string): Readonly<{ kind: "unobservable"; reason: string }> => Object.freeze({ kind: "unobservable", reason });
 
 /** The report one execution left, or why there is none to judge. */
-function reportOf(run: Extract<MatrixTestRun, { kind: "exited" }>): DomainResult<Uint8Array, string> {
+function reportOf(run: Extract<MatrixTestRun, { kind: "exited" }>): DomainResult<Extract<MatrixTestReport, { kind: "produced" }>, string> {
   const { report } = run;
   if (report.kind === "missing") {
     return failure(`the runner exited (code ${String(run.exitCode)}, signal ${String(run.signal)}) without writing its report; it may have found no test for the file`);
   }
-  return report.kind === "unreadable" ? failure(`the runner's report could not be read: ${report.reason}`) : success(report.bytes);
+  return report.kind === "unreadable" ? failure(`the runner's report could not be read: ${report.reason}`) : success(report);
 }
 
 /** A verdict on a report the judge could read. */
@@ -231,7 +231,7 @@ function judgedRun(run: MatrixTestRun, expectation: AcceptanceExpectation): Judg
   if (run.kind === "timed-out") return run;
   const report = reportOf(run);
   if (!report.ok) return unobservable(report.error);
-  const verdict = judgeAffectedRun(parseJunitTestcases(report.value), expectation);
+  const verdict = judgeAffectedRun(parseJunitTestcasesUnder(report.value.bytes, report.value.runRoot), expectation);
   return verdict.kind === "unobservable" ? unobservable(verdict.reason) : Object.freeze({ kind: "judged", verdict });
 }
 

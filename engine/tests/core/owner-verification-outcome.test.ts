@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { classifyBaseline, classifyMutantRun, verifiedMutationOf } from "../../src/core/owner-verification/outcome";
 import type { MatrixTestRun } from "../../src/core/owner-verification/types";
+import { mochaXunit, RUN_ROOT } from "../fixtures/mocha-report";
 
 /** The matrix test as the plan declares it: repository-relative. */
 const MATRIX = "engine/tests/core/rules.matrix.test.ts";
@@ -31,7 +32,7 @@ const fail = (name: string, classname = REPORTED): Case => ({ classname, name: `
 const COLLECTION: Case = { classname: REPORTED, name: REPORTED, failure: "Error" };
 
 const exited = (cases: readonly Case[], exitCode: number | null = cases.some((testcase) => testcase.failure) ? 1 : 0, signal: string | null = null): MatrixTestRun =>
-  ({ kind: "exited", exitCode, signal, report: { kind: "produced", bytes: junit(cases) } });
+  ({ kind: "exited", exitCode, signal, report: { kind: "produced", bytes: junit(cases), runRoot: RUN_ROOT } });
 
 const infrastructure = (kind: string) => ({ kind: "infrastructure", failure: { kind, detail: expect.any(String) } });
 
@@ -84,6 +85,7 @@ describe("classifyMutantRun", () => {
           `<testsuites name="bun test" tests="2" failures="${failures}">` +
           `<testsuite name="${REPORTED}" file="${REPORTED}" tests="2" failures="${failures}">${body}</testsuite></testsuites>`,
         ),
+        runRoot: RUN_ROOT,
       },
     });
     const passing = `<testcase name="a" classname="matrix" file="${REPORTED}"/><testcase name="b" classname="" file="${REPORTED}"/>`;
@@ -91,6 +93,26 @@ describe("classifyMutantRun", () => {
       `<testcase name="b" classname="" file="${REPORTED}"><failure type="AssertionError"/></testcase>`;
     expect(classifyMutantRun(bun(passing, 0), MATRIX)).toEqual({ kind: "survived" });
     expect(classifyMutantRun(bun(killing, 1), MATRIX)).toEqual({ kind: "killed" });
+  });
+
+  it("attributes a Mocha report's absolute file attribute inside the run root, and only there", () => {
+    // Mocha's xunit reporter writes `file` as an absolute path beneath the cwd it ran in.
+    const mocha = (file: string, failure: boolean): MatrixTestRun => ({
+      kind: "exited",
+      exitCode: failure ? 1 : 0,
+      signal: null,
+      report: {
+        kind: "produced",
+        bytes: mochaXunit([{ file, name: "a", ...(failure ? { failure: "unimplemented: rule" } : {}) }]),
+        runRoot: RUN_ROOT,
+      },
+    });
+    expect(classifyMutantRun(mocha(`${RUN_ROOT}/${MATRIX}`, false), MATRIX)).toEqual({ kind: "survived" });
+    expect(classifyMutantRun(mocha(`${RUN_ROOT}/${MATRIX}`, true), MATRIX)).toEqual({ kind: "killed" });
+    expect(classifyBaseline(mocha(`${RUN_ROOT}/${MATRIX}`, false), MATRIX)).toEqual({ kind: "green" });
+    // The same file beneath another root, or the run root's sibling, is never this run's matrix test.
+    expect(classifyMutantRun(mocha(`/somewhere/else/${MATRIX}`, false), MATRIX)).toEqual(infrastructure("matrix-test-not-collected"));
+    expect(classifyMutantRun(mocha(`${RUN_ROOT}-other/${MATRIX}`, false), MATRIX)).toEqual(infrastructure("matrix-test-not-collected"));
   });
 
   it("FR-016: the spawn failure's message rides in the detail", () => {
@@ -105,7 +127,7 @@ describe("AD-7 table: every row, mutant and baseline", () => {
     ["spawn failed", { kind: "spawn-failed", message: "EACCES" }, infrastructure("spawn-failed"), infrastructure("spawn-failed")],
     ["report missing", { kind: "exited", exitCode: 0, signal: null, report: { kind: "missing" } }, infrastructure("report-missing"), infrastructure("report-missing")],
     ["report unreadable", { kind: "exited", exitCode: 0, signal: null, report: { kind: "unreadable", reason: "EISDIR" } }, infrastructure("report-unreadable"), infrastructure("report-unreadable")],
-    ["report unparseable", { kind: "exited", exitCode: 1, signal: null, report: { kind: "produced", bytes: new TextEncoder().encode("{}") } }, infrastructure("report-unreadable"), infrastructure("report-unreadable")],
+    ["report unparseable", { kind: "exited", exitCode: 1, signal: null, report: { kind: "produced", bytes: new TextEncoder().encode("{}"), runRoot: RUN_ROOT } }, infrastructure("report-unreadable"), infrastructure("report-unreadable")],
     ["failing non-collection testcase", exited([pass("a"), fail("b")]), { kind: "killed" }, { kind: "red", failures: ["matrix > b"] }],
     ["only collection errors", exited([COLLECTION]), { kind: "invalid", collectionErrors: [REPORTED] }, { kind: "red", failures: [REPORTED] }],
     ["zero attributed testcases", exited([pass("a", "tests/other.test.ts")]), infrastructure("matrix-test-not-collected"), infrastructure("matrix-test-not-collected")],

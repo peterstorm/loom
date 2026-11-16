@@ -37,6 +37,7 @@ import {
   type OwnerVerificationInput,
   type RunMatrixTest,
 } from "../../src/orchestration/owner-verification-runner";
+import { RUN_ROOT } from "../fixtures/mocha-report";
 import { ownerObligation } from "../fixtures/owner-obligation";
 import {
   buildOwnerVerificationRepo as build,
@@ -128,6 +129,13 @@ describe("runOwnerVerification", () => {
     expect(launches.slice(1).every((launch) => launch.owner !== repo.ownerDigest)).toBe(true);
     // One baseline plus five mutants, each bounded by the clamped per-mutant limit.
     expect(observation).toMatchObject({ kind: "verified", boundMs: 6 * 30_000 });
+  }, TIMEOUT_MS);
+
+  it("reads a Mocha runner's absolute report files against the isolated worktree each run used: every mutant is still killed", async () => {
+    const repo = build({ runner: "mocha" });
+    const verdict = onlyVerdict(await verify(repo));
+    expect(verdict.mutation).toMatchObject({ kind: "verified", generated: 5, killed: 5, timedOut: 0, invalid: 0, survivors: [] });
+    expect(repo.runnerLaunches().every((launch) => launch.cwd !== repo.root)).toBe(true);
   }, TIMEOUT_MS);
 
   it("SC-002: a vacuous matrix test lets every non-invalid mutant survive", async () => {
@@ -427,7 +435,7 @@ describe("matrixTestRunOf", () => {
         execution: { kind: "observed", process: { kind: "observed", exitCode: null, timedOut: true, signal: "SIGTERM" }, report: { kind: "missing", path: reportPath }, diagnostics },
       },
     };
-    expect(matrixTestRunOf(execution, 1234)).toEqual<MatrixTestRun>({ kind: "timed-out", elapsedMs: 1234 });
+    expect(matrixTestRunOf(execution, 1234, RUN_ROOT)).toEqual<MatrixTestRun>({ kind: "timed-out", elapsedMs: 1234 });
   });
 
   it("reads a runner that could not contain its process as a run that could not start, never a report", () => {
@@ -435,10 +443,10 @@ describe("matrixTestRunOf", () => {
       ok: false,
       error: { kind: "termination-unconfirmed", message: "group survived", diagnostics },
     };
-    expect(matrixTestRunOf(execution, 1)).toEqual<MatrixTestRun>({ kind: "spawn-failed", message: "termination-unconfirmed: group survived" });
+    expect(matrixTestRunOf(execution, 1, RUN_ROOT)).toEqual<MatrixTestRun>({ kind: "spawn-failed", message: "termination-unconfirmed: group survived" });
   });
 
-  it("carries a produced report's exact bytes", () => {
+  it("carries a produced report's exact bytes and the root the runner ran in", () => {
     const bytes = new TextEncoder().encode("<testsuites/>");
     const execution: CommandExecutionResult = {
       ok: true,
@@ -452,7 +460,7 @@ describe("matrixTestRunOf", () => {
         },
       },
     };
-    expect(matrixTestRunOf(execution, 1)).toEqual<MatrixTestRun>({ kind: "exited", exitCode: 0, signal: null, report: { kind: "produced", bytes } });
+    expect(matrixTestRunOf(execution, 1, RUN_ROOT)).toEqual<MatrixTestRun>({ kind: "exited", exitCode: 0, signal: null, report: { kind: "produced", bytes, runRoot: RUN_ROOT } });
   });
 });
 
@@ -473,8 +481,8 @@ describe("runPlan", () => {
     "</testsuite>",
     "</testsuites>",
   ].join("\n"));
-  const green: MatrixTestRun = { kind: "exited", exitCode: 0, signal: null, report: { kind: "produced", bytes: junit(false) } };
-  const red: MatrixTestRun = { kind: "exited", exitCode: 1, signal: null, report: { kind: "produced", bytes: junit(true) } };
+  const green: MatrixTestRun = { kind: "exited", exitCode: 0, signal: null, report: { kind: "produced", bytes: junit(false), runRoot: RUN_ROOT } };
+  const red: MatrixTestRun = { kind: "exited", exitCode: 1, signal: null, report: { kind: "produced", bytes: junit(true), runRoot: RUN_ROOT } };
   const timedOut: MatrixTestRun = { kind: "timed-out", elapsedMs: 10 };
   const unstartable: MatrixTestRun = { kind: "spawn-failed", message: "ENOENT" };
 

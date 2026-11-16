@@ -112,9 +112,10 @@ export function ownerAtBase(root: CanonicalRepositoryRoot, base: string, owner: 
  * One runner execution as the run the classifiers read. A runner that could
  * not run the command to an observed end (refused authority, unconfirmed
  * containment, a surviving process tree) never produced a report this check
- * may read, so it is the run that could not start, never a report.
+ * may read, so it is the run that could not start, never a report. `runRoot`
+ * is the root the command ran in; a produced report carries it.
  */
-export function matrixTestRunOf(execution: CommandExecutionResult, elapsedMs: number): MatrixTestRun {
+export function matrixTestRunOf(execution: CommandExecutionResult, elapsedMs: number, runRoot: CanonicalRepositoryRoot): MatrixTestRun {
   if (!execution.ok) return { kind: "spawn-failed", message: `${execution.error.kind}: ${execution.error.message}` };
   const value = execution.value.execution;
   if (value.kind === "spawn-failed") return { kind: "spawn-failed", message: value.process.message };
@@ -124,7 +125,7 @@ export function matrixTestRunOf(execution: CommandExecutionResult, elapsedMs: nu
     kind: "exited",
     exitCode: value.process.exitCode,
     signal: value.process.signal,
-    report: "outcome" in report ? { kind: "produced", bytes: report.bytes }
+    report: "outcome" in report ? { kind: "produced", bytes: report.bytes, runRoot }
       : report.kind === "unreadable" ? { kind: "unreadable", reason: report.message }
       : { kind: "missing" },
   };
@@ -151,6 +152,6 @@ export async function runOnce(workspace: MutationWorkspace, command: MatrixTestC
   return workspace.runWithOwner(owner, async (at) => {
     const started = Date.now();
     const execution = await runProjectCommandAt(command, at);
-    return matrixTestRunOf(execution, Date.now() - started);
+    return matrixTestRunOf(execution, Date.now() - started, at);
   });
 }

@@ -10,6 +10,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { COMPLETION_REPORT_ROOT } from "../core/completion-suite";
 import { compareStrings } from "../core/ordering";
 import { parseArtifactDigest, type ArtifactDigest } from "../core/orchestration-contract";
+import type { RunRoot } from "../core/report-run-root";
 import { parseReviewPath, type ReviewPath } from "../core/review-packet";
 import { spawnGit } from "./git-execution-policy";
 import { describeGitOutcome, gitExitedWith } from "./git-spawn-outcome";
@@ -17,7 +18,8 @@ import { confirmedEmptyPassthrough, observeGitProbe } from "./git-probe";
 import { inspectRepositoryPath } from "./repository-path";
 
 declare const CANONICAL_REPOSITORY_ROOT: unique symbol;
-export type CanonicalRepositoryRoot = string & {
+/** A canonical root is an absolute, resolved path, so it is also a `RunRoot` a report is read against. */
+export type CanonicalRepositoryRoot = RunRoot & {
   readonly [CANONICAL_REPOSITORY_ROOT]: true;
 };
 
