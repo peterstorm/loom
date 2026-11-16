@@ -414,6 +414,7 @@ Loom uses models for judgment and code for authority. A model may design, implem
 | Security coverage | “We looked at everything” | Enumerated cells, settled ledger, refusals on publish |
 | Invariant | Reviewer remembers | Checkable lint rule or honest advisory prose |
 | Generated pipeline | Hand-wired drift | Fugue stamp + Loom integrity verification |
+| Phase gate definitions | Gated agent rewrites its machine | Shipped machines admitted only through their engine-carried digest pin ([ADR-0076](adr/ADR-0076-shipped-machines-are-pinned-by-digest.md)) |
 
 The last two rows are the executable-models policy: a model in a plan either executes or it does not exist. A lifecycle is an imported reducer, a pipeline is generated code with an integrity stamp, and an invariant is either a lint rule loaded fail-closed or prose that says it is advisory ([Executable models: enforcement](executable-models-enforcement.md)).
 
@@ -426,6 +427,7 @@ Determinism is scoped to what Loom can observe and own:
 - a legacy graph, whose Agents named no Task, may still attribute a result to the one executing Task (`inferSoleExecutingTask`), or on Pi to the first Task id in the parent's spawn prompt; such a guess settles only through the untrusted legacy resolution, which stores its evidence but leaves the Task pending for revalidation and reports the attribution as unproven, and it can never complete a Task, because completion requires engine-minted attempt authority;
 - report artifacts remain in an Agent-writable environment, with documented same-call forgery residuals; likewise a security sandbox receipt's nonce binds it to its artifact path but does not authenticate it against a hunter that writes the artifact itself, and a security ballot is bound to its issued verifier spawn, but against a subagent that evades the shell-string guard (on either harness) a verification run's capture file stays writable (no capture attestation backs it, so neither harness imports or counts such a slot; see [Running a security audit](./security-audit.md#honest-limits));
 - the shell guard judges command text, not an abstract Bash execution graph;
+- a machine's digest pin is engine source the user's account can write, so code an agent gets executed indirectly (a Git hook, a package script) could rewrite a machine and its pin together; pinning turns that into a coordinated change of shipped code, and only OS isolation would close it;
 - Pi's Interactive Phase Transport supports standard relayed dialogs but not `ctx.ui.custom()` components inside RPC children;
 - legacy readers remain for historical evidence but are frozen in `core/legacy-archive.ts`.
 

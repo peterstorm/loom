@@ -7,6 +7,8 @@ import type { SessionId } from "../../src/machine";
 import { reportSummary } from "./report-summary";
 import * as ledger from "../../src/machine";
 import { SUBAGENT_DIR } from "../../src/config";
+import { parseMachinePins, type MachineSource } from "../../src/core/machine-integrity";
+import { artifactDigestOfBytes } from "../../src/core/digest";
 
 // bun/vitest may share SUBAGENT_DIR across suites — isolate via unique
 // session ids + targeted cleanup instead of env manipulation.
@@ -470,52 +472,115 @@ describe("branded epochs — the deserialization boundary", () => {
   });
 });
 
+/** A machines directory the operator configured: admitted as it stands. */
+const operatorSource = (directory: string): MachineSource => ({ directory, trust: { kind: "operator-directory" } });
+
+/** A machines directory governed by these pins, as the shipped one is. */
+const pinnedSource = (directory: string, pins: Readonly<Record<string, string>>): MachineSource => {
+  const parsed = parseMachinePins(pins);
+  if (!parsed.ok) throw new Error(parsed.error);
+  return { directory, trust: { kind: "pinned", pins: parsed.value } };
+};
+
+const validMachine = (agent: string): string => JSON.stringify({
+  agent,
+  enforcedTools: ["Edit"],
+  phases: [
+    { id: "a", allowedTools: [], advance: { event: "FileRead" } },
+    { id: "z", terminal: true, allowedTools: ["Edit"], requires: [] },
+  ],
+});
+
 describe("machine registry", () => {
   it("loadMachine: none for unknown agents, machine for valid files, invalid for bad files", () => {
-    const machines = mkdtempSync(join(tmpdir(), "loom-machines-"));
+    const dir = mkdtempSync(join(tmpdir(), "loom-machines-"));
+    const machines = operatorSource(dir);
     try {
       // loadMachine takes BRANDED AgentType — the parse boundary is what
       // keeps machineDefPath inside machinesDir.
       expect(ledger.loadMachine(machines, agentType("nope-agent"))).toEqual({ kind: "none" });
 
-      writeFileSync(
-        join(machines, "good-agent.machine.json"),
-        JSON.stringify({
-          agent: "good-agent",
-          enforcedTools: ["Edit"],
-          phases: [
-            { id: "a", allowedTools: [], advance: { event: "FileRead" } },
-            { id: "z", terminal: true, allowedTools: ["Edit"], requires: [] },
-          ],
-        }),
-      );
+      writeFileSync(join(dir, "good-agent.machine.json"), validMachine("good-agent"));
       expect(ledger.loadMachine(machines, agentType("good-agent")).kind).toBe("machine");
 
-      writeFileSync(join(machines, "bad-agent.machine.json"), "{broken");
+      writeFileSync(join(dir, "bad-agent.machine.json"), "{broken");
       expect(ledger.loadMachine(machines, agentType("bad-agent")).kind).toBe("invalid");
 
-      const loopPath = join(machines, "loop-agent.machine.json");
+      const loopPath = join(dir, "loop-agent.machine.json");
       symlinkSync(loopPath, loopPath);
       expect(ledger.loadMachine(machines, agentType("loop-agent"))).toMatchObject({
         kind: "invalid",
         error: expect.stringMatching(/cannot read machine definition.*ELOOP/i),
       });
 
-      writeFileSync(
-        join(machines, "mismatch-agent.machine.json"),
-        JSON.stringify({
-          agent: "other-agent",
-          enforcedTools: ["Edit"],
-          phases: [
-            { id: "a", allowedTools: [], advance: { event: "FileRead" } },
-            { id: "z", terminal: true, allowedTools: [], requires: [] },
-          ],
-        }),
-      );
+      writeFileSync(join(dir, "mismatch-agent.machine.json"), validMachine("other-agent"));
       expect(ledger.loadMachine(machines, agentType("mismatch-agent")).kind).toBe("invalid");
     } finally {
-      rmSync(machines, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ADR-0076: a pinned directory admits only definitions whose bytes match their
+// pin, and every refusal loads as `invalid`, which binds and fails the gate
+// closed — tampering can make a gate stricter, never weaker.
+describe("machine registry: pinned definitions", () => {
+  const withPinnedDir = (run: (dir: string, source: MachineSource) => void): void => {
+    const dir = mkdtempSync(join(tmpdir(), "loom-pinned-machines-"));
+    try {
+      const text = validMachine("good-agent");
+      writeFileSync(join(dir, "good-agent.machine.json"), text);
+      run(dir, pinnedSource(dir, { "good-agent": artifactDigestOfBytes(Buffer.from(text)) }));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it("loads a definition whose bytes match its pin", () => {
+    withPinnedDir((_dir, source) => {
+      expect(ledger.loadMachine(source, agentType("good-agent"))).toMatchObject({ kind: "machine", machine: { agent: "good-agent" } });
+    });
+  });
+
+  it("a rewritten definition loads invalid, naming the mismatch and the re-pin command — even when it parses", () => {
+    withPinnedDir((dir, source) => {
+      // Still a valid machine for the same agent, with its gate removed.
+      writeFileSync(join(dir, "good-agent.machine.json"), JSON.stringify({
+        agent: "good-agent",
+        enforcedTools: [],
+        phases: [{ id: "z", terminal: true, allowedTools: [], requires: [] }],
+      }));
+      expect(ledger.loadMachine(source, agentType("good-agent"))).toEqual({
+        kind: "invalid",
+        error: expect.stringMatching(/good-agent\.machine\.json: machine definition for good-agent has sha256 [0-9a-f]{64}, but the engine pins [0-9a-f]{64}.*npm run pin-machines/),
+      });
+    });
+  });
+
+  it("a deleted pinned definition loads invalid, never none: deleting a machine cannot ungate its agent", () => {
+    withPinnedDir((dir, source) => {
+      rmSync(join(dir, "good-agent.machine.json"));
+      expect(ledger.loadMachine(source, agentType("good-agent"))).toEqual({
+        kind: "invalid",
+        error: expect.stringContaining("is pinned (sha256"),
+      });
+    });
+  });
+
+  it("an added definition no pin names loads invalid", () => {
+    withPinnedDir((dir, source) => {
+      writeFileSync(join(dir, "added-agent.machine.json"), validMachine("added-agent"));
+      expect(ledger.loadMachine(source, agentType("added-agent"))).toEqual({
+        kind: "invalid",
+        error: expect.stringContaining("no shipped machine is pinned for added-agent"),
+      });
+    });
+  });
+
+  it("an agent with neither pin nor file stays ungated", () => {
+    withPinnedDir((_dir, source) => {
+      expect(ledger.loadMachine(source, agentType("ts-test-agent"))).toEqual({ kind: "none" });
+    });
   });
 });
 

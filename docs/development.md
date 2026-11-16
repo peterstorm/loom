@@ -209,6 +209,17 @@ A delta marks a family whose patterns changed since the baseline, so a count mov
 
 The same script stamps the `## <lens>` sections of `references/review-lenses.md` into `agents/review-verifier-agent.md`, between the `review-lenses` markers and one heading level deeper. Edit a lens in the reference and re-stamp.
 
+## Guarded Skill Machine pins
+
+The engine admits a shipped `machines/<agent-type>.machine.json` only when its bytes match the SHA-256 pinned in `engine/src/core/machine-pins.ts` ([ADR-0076](adr/ADR-0076-shipped-machines-are-pinned-by-digest.md)). After changing, adding or removing a machine, re-pin and commit the definition and the pins together:
+
+```bash
+(cd engine && npm run pin-machines)            # regenerate the pins
+(cd engine && npm run pin-machines -- --check) # exit 1 when they drifted
+```
+
+Until then the changed machine's agent is blocked at its first enforced tool, including in a Loom installed from this checkout, and `engine/tests/machine/machine-pins.test.ts` fails `npm run verify`. Never edit the pin module by hand. How the pins govern the gate: [Guarded Skill Machines](../machines/README.md#pinned-definitions).
+
 ## Loom's own repository
 
 **Loom's own verification manifest.** When Loom orchestrates its own repository, `/loom` Phase 4d keeps the existing `project:verify` check: executable `npm`, args `["run", "verify"]`, cwd `.`, scope `wave`, timeout `1800000`, and a required report at `.loom/completion-reports/verify.junit.xml` (the whole file is the example in [Verification](verification.md#the-verification-manifest)). It runs the same root `npm run verify` as local, CI and tag validation, and both frozen dependency installs are required. `verify` itself must never call the manifest runner or a Wave Gate, which would recurse.

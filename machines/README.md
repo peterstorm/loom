@@ -6,11 +6,26 @@ This file also owns the description of the evidence ledger: what a fact is, how 
 
 ## How it works
 
-- `<agent-type>.machine.json` here opts that agent type into gating. No file means no gating. Gating is active only during an orchestrated Loom run: the SubagentStart shim requires an active TaskGraph, so an ad-hoc subagent launch is ungated.
-- **SubagentStart** binds the machine to the session with an **epoch** (`<agent_id>:<agent_type>`). An invalid machine file binds too, and the gate then fails closed with the parse error, so enforcement never switches off silently.
+- `<agent-type>.machine.json` here opts that agent type into gating, and the engine pins it (see [Pinned definitions](#pinned-definitions)). An agent type with neither a file nor a pin is ungated. Gating is active only during an orchestrated Loom run: the SubagentStart shim requires an active TaskGraph, so an ad-hoc subagent launch is ungated.
+- **SubagentStart** binds the machine to the session with an **epoch** (`<agent_id>:<agent_type>`). An invalid machine file binds too, and so does a definition its pin refuses. The gate then fails closed with the reason, so enforcement never switches off silently.
 - **PostToolUse**, and for Bash **PostToolUseFailure** (`record-evidence`), append epoch-stamped records to the evidence ledger, `<session>.evidence.jsonl`. Claude Code reports a command that exits non-zero only through the failure event.
 - **PreToolUse** (`enforce-phase-tools`) folds the agent's own epoch into the current phase and denies an enforced tool the phase does not list. It is deny-by-default within the machine's declared `enforcedTools`. An unexpected evaluation error fails closed once a binding exists.
 - **SubagentStop** resolves the Task's `test_result` from the stopping agent's own epoch only.
+
+## Pinned definitions
+
+A machine is the gate on its own agent, so the engine does not trust the directory's contents: the SHA-256 of every definition shipped here is compiled into `engine/src/core/machine-pins.ts` ([ADR-0076](../docs/adr/ADR-0076-shipped-machines-are-pinned-by-digest.md)). The loader admits a definition only when its exact bytes match its pin, and the pin set, not the directory listing, says which agent types are gated. Rewriting a definition, adding one no pin names, or deleting a pinned one all load as invalid, so the agent binds and its gate blocks every enforced tool, naming the refusal. Tampering can make a gate stricter, never weaker.
+
+**Changing a machine.** Edit the definition, then re-pin and commit both files together:
+
+```bash
+cd engine && npm run pin-machines            # rewrites engine/src/core/machine-pins.ts
+cd engine && npm run pin-machines -- --check  # exit 1 when the pins drifted
+```
+
+The script refuses to pin a definition that does not parse as a machine for the agent type its file name names. Until the pins are regenerated, the edited machine's agent is blocked, also in a Loom installed from a dev checkout. `engine/tests/machine/machine-pins.test.ts` compares the pin module with the shipped machines byte for byte, so a machine changed without its pin fails the suite and CI.
+
+The pins govern the shipped directory under any spelling, including a symlink to it. A directory `LOOM_MACHINES_DIR` points elsewhere is the operator's own and is loaded as it stands: the hook's environment comes from the harness, not from the agent, and tests use it for fixture machines.
 
 ## The evidence ledger
 
@@ -108,6 +123,7 @@ way, because it reads only the stopping agent's epoch.
 - **A same-call forgery remains possible.** A "test" script that itself prints runner-shaped JSON, or one that stages a report during the judged call, can still vouch for itself.
 - **The ledger is not a cryptographic log.** While orchestration authority is active, the state-file guard denies Bash writes to the ledger and binding paths. Full integrity would need HMACs or storage beyond an agent's reach.
 - **The state-file guard judges command text, not the working directory.** `cd .claude; cd state; rm *.json` never names a guarded path, so no raw-text gate can see it. The single-hop form (`cd .claude/state && rm *.json`) is blocked on the `cd` segment.
+- **A pin lives in code the user's account can write.** An agent that gets a command executed indirectly (a Git hook, a repository's fsmonitor setting, a package script) can rewrite a machine and its pin together, and the engine would believe both. Pinning raises the forgery from one data file to a coordinated change of shipped engine code; only running subagents under OS isolation would close it ([ADR-0076](../docs/adr/ADR-0076-shipped-machines-are-pinned-by-digest.md)).
 
 ## code-implementer-agent
 

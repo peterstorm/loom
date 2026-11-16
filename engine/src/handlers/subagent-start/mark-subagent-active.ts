@@ -17,7 +17,7 @@
 
 import { mkdirSync } from "node:fs";
 import { blockResult, type HookHandler } from "../../types";
-import { machinesDir, pathExistsFailClosed, subagentDir, taskGraphPath } from "../../config";
+import { machineSource, pathExistsFailClosed, subagentDir, taskGraphPath } from "../../config";
 import { isImplementationAgent } from "../../core/agent-catalog-projections";
 import { stripNamespace } from "../../utils/strip-namespace";
 import {
@@ -158,7 +158,7 @@ const handler: HookHandler = async (stdin) => {
   const rosterAgentType = rosterAgentTypeRaw ? parseAgentType(rosterAgentTypeRaw) : null;
   const guardedMachine = rosterAgentType === null
     ? { kind: "none" as const }
-    : loadMachine(machinesDir(), rosterAgentType);
+    : loadMachine(machineSource(), rosterAgentType);
   if (guardedMachine.kind !== "none" && agentId === null) {
     return blockResult(
       `mark-subagent-active: ${rosterAgentType} has a Guarded Skill Machine but no valid agent_id; refusing to run it ungated`,
@@ -254,10 +254,11 @@ const handler: HookHandler = async (stdin) => {
   // AgentType is what proves the machine-definition path stays inside
   // machinesDir. An INVALID machine binds too: the PreToolUse gate then
   // fails closed with the parse error, instead of a corrupt machine file
-  // silently switching enforcement off. Binding requires agent_id (the
-  // epoch key). machinesDir() is resolved at CALL time — the same
-  // resolution the PreToolUse gate uses, so bind and gate can never see
-  // different dirs.
+  // silently switching enforcement off. A shipped machine that no longer
+  // matches its pin, or whose pinned file is gone, loads as invalid and binds
+  // the same way (ADR-0076). Binding requires agent_id (the epoch key).
+  // machineSource() is resolved at CALL time — the same resolution the
+  // PreToolUse gate uses, so bind and gate can never see different dirs.
   if (rosterAgentTypeRaw && rosterAgentType === null) {
     process.stderr.write(
       `mark-subagent-active: agent_type ${JSON.stringify(rosterAgentTypeRaw)} contains reserved or path-unsafe characters (whitespace/colon/slash/'..') — no machine looked up or bound; it will run UNGATED\n`,

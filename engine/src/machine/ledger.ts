@@ -61,6 +61,7 @@ import {
 import { STALE_SUBAGENT_TTL_MS, subagentDir } from "../config";
 import { withLock } from "../utils/lock";
 import { parseMachineJson } from "./parse-machine";
+import { admitMachineDefinition, renderMachineRefusal, type MachineSource } from "../core/machine-integrity";
 import {
   type AgentId,
   type AgentType,
@@ -138,14 +139,19 @@ function rewriteFileAtomic(path: string, content: string): void {
   renameSync(tmp, path);
 }
 
-/** Read an optional text file without collapsing access/path failures into absence. */
-function readOptionalTextFile(path: string, label: string): string | null {
+/** Read an optional file's bytes without collapsing access/path failures into absence. */
+function readOptionalFile(path: string, label: string): Buffer | null {
   try {
-    return readFileSync(path, "utf-8");
+    return readFileSync(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw new Error(`cannot read ${label} ${path}: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+/** Read an optional text file without collapsing access/path failures into absence. */
+function readOptionalTextFile(path: string, label: string): string | null {
+  return readOptionalFile(path, label)?.toString("utf-8") ?? null;
 }
 
 // --- Bindings ---
@@ -815,17 +821,25 @@ export type LoadedMachine =
  * machineDefPath). Returns "none" when the agent has no machine (gating is
  * opt-in per agent). A machine file that exists but fails to parse is an
  * error the caller must surface — never ignore.
+ *
+ * From the shipped directory the pins decide (ADR-0076, `admitMachineDefinition`):
+ * a definition whose bytes differ from its pin, a file with no pin, and a
+ * pinned agent whose file is gone all load as `invalid`, so the agent still
+ * binds and its gate fails closed. The bytes the pins admitted are the bytes
+ * parsed; the file is read once.
  */
-export function loadMachine(machinesDir: string, agentType: AgentType): LoadedMachine {
-  const path = machineDefPath(machinesDir, agentType);
-  let content: string | null;
+export function loadMachine(source: MachineSource, agentType: AgentType): LoadedMachine {
+  const path = machineDefPath(source.directory, agentType);
+  let bytes: Buffer | null;
   try {
-    content = readOptionalTextFile(path, "machine definition");
+    bytes = readOptionalFile(path, "machine definition");
   } catch (error) {
     return { kind: "invalid", error: error instanceof Error ? error.message : String(error) };
   }
-  if (content === null) return { kind: "none" };
-  const parsed = parseMachineJson(content);
+  const admission = admitMachineDefinition(source.trust, agentType, bytes);
+  if (admission.kind === "ungated") return { kind: "none" };
+  if (admission.kind === "refused") return { kind: "invalid", error: `${path}: ${renderMachineRefusal(admission.refusal)}` };
+  const parsed = parseMachineJson(Buffer.from(admission.bytes).toString("utf-8"));
   if (!parsed.ok) return { kind: "invalid", error: `${path}: ${parsed.error}` };
   if (parsed.value.agent !== agentType) {
     return { kind: "invalid", error: `${path}: machine.agent "${parsed.value.agent}" does not match file name agent "${agentType}"` };
