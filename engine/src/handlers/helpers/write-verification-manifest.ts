@@ -11,7 +11,13 @@ import {
   type CanonicalManifest,
 } from "../../core/verification-manifest-install";
 import { GIT_PROBE_OUTPUT_LIMIT, spawnGit } from "../../utils/git-execution-policy";
-import { describeGitOutcome, gitCleanNegative, gitExitedWith } from "../../utils/git-spawn-outcome";
+import {
+  describeGitOutcome,
+  gitCleanNegative,
+  gitExitedWith,
+  gitStderrText,
+  gitStdoutText,
+} from "../../utils/git-spawn-outcome";
 import {
   ensureDirectoryNoFollow,
   publishStagedRunFile,
@@ -51,25 +57,27 @@ type UnignoredReports =
   | Readonly<{ ok: false; error: string }>;
 
 /**
- * The manifest's report paths the project does not Git-ignore. `check-ignore`
- * exiting 1 with no diagnostic is the clean "not ignored" answer; any other
- * ending (not a repository, a spawn failure) is reported as itself, never read
- * as a policy answer.
+ * The manifest's report paths the project does not Git-ignore (a tracked path
+ * is never ignored), in one `check-ignore --stdin -z` probe. Exit 0 with a
+ * silent stderr lists the ignored paths; exit 1 with no output is the clean
+ * "none ignored" answer; any other ending (not a repository, a spawn failure)
+ * is reported as itself, never read as a policy answer.
  */
 function unignoredReportPaths(projectRoot: string, paths: readonly string[]): UnignoredReports {
-  const unignored: string[] = [];
-  for (const path of paths) {
-    const outcome = spawnGit(["check-ignore", "-q", "--", path], { cwd: projectRoot, maxBuffer: GIT_PROBE_OUTPUT_LIMIT });
-    if (gitExitedWith(outcome, [0])) continue;
-    if (!gitCleanNegative(outcome)) {
-      return {
-        ok: false,
-        error: `cannot tell whether report path ${path} is Git-ignored: check-ignore ${describeGitOutcome(outcome)}`,
-      };
-    }
-    unignored.push(path);
+  const outcome = spawnGit(["check-ignore", "--stdin", "-z"], {
+    cwd: projectRoot,
+    maxBuffer: GIT_PROBE_OUTPUT_LIMIT,
+    input: Buffer.from(paths.map((path) => `${path}\0`).join(""), "utf-8"),
+  });
+  if (gitCleanNegative(outcome)) return { ok: true, value: Object.freeze([...paths]) };
+  if (!gitExitedWith(outcome, [0]) || gitStderrText(outcome) !== "") {
+    return {
+      ok: false,
+      error: `cannot tell whether report paths ${paths.join(", ")} are Git-ignored: check-ignore ${describeGitOutcome(outcome)}`,
+    };
   }
-  return { ok: true, value: Object.freeze(unignored) };
+  const ignored = new Set(gitStdoutText(outcome).split("\0").filter((path) => path !== ""));
+  return { ok: true, value: Object.freeze(paths.filter((path) => !ignored.has(path))) };
 }
 
 /** The installed manifest's text, or null when none exists. Never follows a link. */

@@ -229,6 +229,27 @@ describe("write-verification-manifest", () => {
       expect(() => readFileSync(manifestPath(root))).toThrow();
     });
 
+    it("names only the report paths the project does not ignore", async () => {
+      const other = ".loom/completion-reports/other.junit.xml";
+      const root = gitProject(`${report}\n`);
+      const mixed = JSON.parse(reportingSource) as { checks: Array<Record<string, unknown>> };
+      mixed.checks.push({
+        ...mixed.checks[0],
+        id: "project:other",
+        args: ["test", "--reporter=junit", `--reporter-outfile=${other}`],
+        report: { kind: "required-file", path: other },
+      });
+
+      const result = await writeVerificationManifest(JSON.stringify(mixed), []);
+
+      expect(result.kind).toBe("error");
+      if (result.kind === "error") {
+        expect(result.message).toContain(`Not ignored: ${other}.`);
+        expect(result.message).not.toContain(`${report},`);
+      }
+      expect(() => readFileSync(manifestPath(root))).toThrow();
+    });
+
     it("refuses when it cannot tell, outside a Git repository", async () => {
       const { root } = project();
 

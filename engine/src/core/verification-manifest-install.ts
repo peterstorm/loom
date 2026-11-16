@@ -139,5 +139,6 @@ export function unignoredReportRefusal(unignored: readonly string[]): string | n
   return "verification manifest report paths must be untracked and Git-ignored before Task population, " +
     "or the engine's own report writes are judged as a Task's out-of-scope writes. " +
     `Not ignored: ${unignored.join(", ")}. ` +
-    `Add an operator-owned ignore rule (for example \`${COMPLETION_REPORT_ROOT}/\` in .gitignore), then retry.`;
+    `Add an operator-owned ignore rule (for example \`${COMPLETION_REPORT_ROOT}/\` in .gitignore) ` +
+    "and untrack any of these paths Git already tracks (a tracked path is never ignored), then retry.";
 }

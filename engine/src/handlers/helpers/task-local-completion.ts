@@ -114,12 +114,6 @@ export function authoritativeStateRepositoryPath(
   return canonicalRepositoryPaths(root, [absoluteStatePath], "authoritative State File")[0] ?? null;
 }
 
-/** Engine ownership is exact authority, never trust inferred from a namespace:
- *  the selected State File and its write companions (core/engine-runtime-paths).
- *  Git-ignored runtime artifacts do not enter repositoryChangedPaths; a
- *  Git-visible review or panel artifact is therefore ordinary unowned evidence. */
-export { isEngineOwnedRuntimePath } from "../../core/engine-runtime-paths";
-
 /**
  * Pair each recorded engine skeleton with the raw-bytes digest its path holds
  * now, read without following any link. An absent path, or one holding no

@@ -23,17 +23,33 @@ const parentOf = (path: string): string => {
 
 const leafOf = (path: string): string => path.slice(path.lastIndexOf("/") + 1);
 
+/** The `<pid>-<epoch ms>-<base36>` token the no-follow writers append to a staged leaf. */
+const STAGING_TOKEN = "[0-9]+-[0-9]+-[0-9a-z]*";
+
+const escapeLeaf = (leaf: string): string => leaf.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
+/**
+ * Exactly the lock leaves `withAnchoredDirectoryHandleLock` creates: the lock,
+ * its stale-lock tomb, its recovery guard, the guard's prepared claim leaf and
+ * the guard's tomb.
+ */
+const LOCK_LEAF = new RegExp(
+  `^${escapeLeaf(TASK_GRAPH_LOCK_NAME)}` +
+    `(?:\\.tomb-${STAGING_TOKEN}|\\.recovery(?:\\.claim-${STAGING_TOKEN}|\\.tomb-${STAGING_TOKEN})?)?$`,
+  "u",
+);
+
 /**
  * A leaf the State File's write boundary creates beside the State File: the
- * lock, every leaf derived from the lock (`.recovery`, `.tomb-…`), and every
- * staging leaf derived from the State File (`.tmp-…`, `.claim-…`).
+ * lock and the leaves derived from it (`.recovery`, `.tomb-…`, the guard's
+ * `.claim-…`), and the State File's own staging leaves (`.tmp-…`, `.claim-…`).
+ * Any other leaf, however it is prefixed, stays a Task's write.
  */
 export function isStateWriteCompanion(path: string, statePath: string): boolean {
   if (path === statePath || parentOf(path) !== parentOf(statePath)) return false;
   const leaf = leafOf(path);
-  return leaf === TASK_GRAPH_LOCK_NAME ||
-    leaf.startsWith(`${TASK_GRAPH_LOCK_NAME}.`) ||
-    leaf.startsWith(`${leafOf(statePath)}.`);
+  return LOCK_LEAF.test(leaf) ||
+    new RegExp(`^${escapeLeaf(leafOf(statePath))}\\.(?:tmp|claim)-${STAGING_TOKEN}$`, "u").test(leaf);
 }
 
 /**
