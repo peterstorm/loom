@@ -42,6 +42,7 @@ import { redThenGreenDuty } from "./implementation-application";
 import { deriveImplementationRetryDisposition } from "./implementation-retry";
 import { isRedThenGreenFailureKind } from "./red-then-green";
 import type { RedThenGreenFailureKind, TestFileClassification } from "./red-then-green-types";
+import { restoreScope, type RestoreScope } from "./i6-restore-scope";
 import { quoteShellArgument } from "./shell-quoting";
 import { classifyTaskFiles } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
@@ -798,38 +799,64 @@ export function baselineRestoreCommand(source: string, files: readonly string[],
     `if git cat-file -e ${source}:"$f"; then git restore --source ${source} -- "$f" || exit 1; else rm -f -- "$f"; fi; done)`;
 }
 
+/** Step 1 of the repair: restore the files only this Task lists, or say why there is nothing to restore. */
+function restoreStep(task: Task, scope: RestoreScope, declaresNone: boolean, repositoryRoot: string): string {
+  if (declaresNone) return "1. Your file list declares no implementation file to restore; skip to step 2.";
+  if (scope.restorable.length === 0) {
+    return "1. Every implementation file you declare is also another Task's, so there is nothing to restore; skip to step 2.";
+  }
+  const source = task.start_sha ?? "HEAD";
+  const baseline = task.start_sha === undefined
+    ? "No start commit was recorded for this Task, so `HEAD` stands in: the restore discards your files' uncommitted changes since the last commit. "
+    : "";
+  return `1. Return your implementation files to the attempt baseline with one Bash call: \`${baselineRestoreCommand(source, scope.restorable, repositoryRoot)}\`. ` +
+    `It runs from the repository root, first checks that \`${source}\` is a commit (if it is not, the call fails and changes nothing), then restores each file \`${source}\` has and deletes each one your Task created since; \`git cat-file\` reports every created file as missing, which is expected. ` +
+    baseline +
+    "Neither the restore nor the delete mints a FileWrite, so neither is your first implementation write. Touch only these files: they are yours, and no sibling's work lives in them. " +
+    "This exact command is the one exception to the Constraints' never-`git restore` rule: it restores only your own files. Run it as given; do not rewrite it.";
+}
+
+/** The shared implementation files the restore leaves alone, and how the retry shows red for them; empty when none is shared. */
+function sharedFilesParagraph(shared: RestoreScope["shared"]): readonly string[] {
+  if (shared.length === 0) return [];
+  const listed = shared.map(({ path, coOwners }) => `\`${path}\` (also ${coOwners.join(", ")})`).join(", ");
+  return [
+    `   Shared implementation files: ${listed}. Other Tasks' work lives in them too, so the restore leaves them alone: ` +
+      "never restore, delete or rewrite one wholesale. Before your first write to a shared file, add a test that fails against its " +
+      "current bytes and that your change to it makes pass.",
+  ];
+}
+
 /**
  * The repair a retry owes after an I6 failure (AD-7). I6 is judged per
  * attempt epoch and the order lies in the past, so a retry that keeps its
  * predecessor's implementation can never show red: it restores the Task's
  * implementation files to the attempt baseline (`baselineRestoreCommand`, a
  * Bash call, which mints no FileWrite), observes red, and only then
- * implements. A Task populated without a start commit restores from HEAD: the
- * command stays runnable, and the brief says which uncommitted work that
- * discards.
+ * implements. Only files no other Task lists are restored (`restoreScope`): a
+ * shared file holds another Task's work, often uncommitted, so it stays as it
+ * is and the retry shows red for it with a new failing test. A Task populated
+ * without a start commit restores from HEAD: the command stays runnable, and
+ * the brief says which uncommitted work that discards.
  */
-function redThenGreenRemedy(
+export function redThenGreenRemedy(
   task: Task,
   classification: TestFileClassification,
   failures: readonly RedThenGreenFailureKind[],
   repositoryRoot: string,
+  roster: readonly Task[],
 ): readonly string[] {
   if (failures.length === 0) return [];
-  const source = task.start_sha ?? "HEAD";
-  const baseline = task.start_sha === undefined
-    ? "No start commit was recorded for this Task, so `HEAD` stands in: the restore discards your files' uncommitted changes since the last commit. "
-    : "";
+  // A Distill Task's scope lists the Wave's implementation files, but it runs only after every other Task of the
+  // Wave settled, and a reopen returns it to pending: its pass is never work the restore could discard.
+  const authored = roster.filter((candidate) => taskRoleOf(candidate) === "authored");
+  const scope = restoreScope(task.id, classification.implementationFiles, authored);
   return [
     "",
     `**I6 repair for this retry.** The previous attempt failed I6 (${failures.map((kind) => `\`${kind}\``).join(", ")}). ` +
       "This attempt is judged on its own ledger epoch, so it must show the order afresh:",
-    classification.implementationFiles.length === 0
-      ? "1. Your file list declares no implementation file to restore; skip to step 2."
-      : `1. Return your implementation files to the attempt baseline with one Bash call: \`${baselineRestoreCommand(source, classification.implementationFiles, repositoryRoot)}\`. ` +
-        `It runs from the repository root, first checks that \`${source}\` is a commit (if it is not, the call fails and changes nothing), then restores each file \`${source}\` has and deletes each one your Task created since; \`git cat-file\` reports every created file as missing, which is expected. ` +
-        baseline +
-        "Neither the restore nor the delete mints a FileWrite, so neither is your first implementation write. Touch only these files: they are yours, and no sibling's work lives in them. " +
-        "This exact command is the one exception to the Constraints' never-`git restore` rule: it restores only your own files. Run it as given; do not rewrite it.",
+    restoreStep(task, scope, classification.implementationFiles.length === 0, repositoryRoot),
+    ...sharedFilesParagraph(scope.shared),
     `2. Run your tests and observe red: ${TESTCASE_RED}${createdFilesRed(classification.createdImplementationFiles)}`,
     "3. Then implement, and run your tests green.",
   ];
@@ -868,6 +895,7 @@ function redThenGreenSection(
   dispatch: WaveImplementationDispatch,
   manifest: FrozenVerificationManifest | undefined,
   repositoryRoot: string,
+  roster: readonly Task[],
 ): DomainResult<string | null, RedThenGreenSectionRefusal> {
   const duty = redThenGreenDuty(task, manifest);
   switch (duty.kind) {
@@ -904,7 +932,7 @@ function redThenGreenSection(
       "Only ledger runs with an exit code and a parsed structured report count, under every evaluation policy: a run without its report, a chained, piped or redirected run, and transcript test evidence never satisfy a step. " +
         "Run each step's tests as one bare report-writing command, in the forms the final verification table at the top of this brief lists. " +
         "I6 is judged per attempt: an earlier attempt's red never counts for this one.",
-      ...redThenGreenRemedy(task, classification, inheritedRedThenGreenFailures(task, dispatch), repositoryRoot),
+      ...redThenGreenRemedy(task, classification, inheritedRedThenGreenFailures(task, dispatch), repositoryRoot, roster),
     ].join("\n"),
   };
 }
@@ -997,7 +1025,7 @@ export function renderImplementationBrief(
     return refused("predecessor-output-unavailable", `${task.id}: ${predecessorOutputErrorMessage(predecessors.error)}`);
   }
 
-  const redThenGreen = redThenGreenSection(task, dispatch, input.verificationManifest, input.repositoryRoot);
+  const redThenGreen = redThenGreenSection(task, dispatch, input.verificationManifest, input.repositoryRoot, input.roster);
   if (!redThenGreen.ok) return refused(redThenGreen.error.kind, redThenGreen.error.message);
 
   const policy = taskVerificationPolicy(task);
