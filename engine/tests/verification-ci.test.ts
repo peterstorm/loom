@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { REPOSITORY } from "./fixtures/repository-roots";
+import { parseVerifySlice, verifySteps } from "../src/core/verify-slice";
 
 const workflow = readFileSync(join(REPOSITORY, ".github/workflows/ci.yml"), "utf8");
 
@@ -51,10 +52,27 @@ describe("CI verification contract", () => {
     expect(workflow).toContain("for tool in jq bash git node npm bun");
     expect(workflow).toMatch(/set -euo pipefail\n\s+npm run verify 2>&1 \| tee verification.log/);
     expect(workflow).toContain("if: always()");
-    expect(workflow).toContain("name: verification-log-${{ matrix.os }}");
+    expect(workflow).toContain("name: verification-log-${{ matrix.os }}-${{ matrix.slice.name }}");
     expect(workflow).toContain("path: verification.log");
     // The shared budget covers the macOS leg, which runs the same suite on a
     // materially slower runner.
     expect(workflow).toContain("timeout-minutes: 60");
+  });
+
+  it("shards verify by Verify Slice, and the matrix slices together run the whole command on each OS", () => {
+    expect(workflow).toContain("LOOM_VERIFY_SLICE: ${{ matrix.slice.value }}");
+    const slices = [...workflow.matchAll(/- \{ name: ([a-z0-9-]+), value: "?([^"}]+?)"? \}/g)].map((match) => ({ name: match[1], value: match[2] }));
+    expect(new Set(slices.map(({ name }) => name)).size).toBe(slices.length);
+    const steps = slices.flatMap(({ value }) => {
+      const parsed = parseVerifySlice(value);
+      if (!parsed.ok) throw new Error(parsed.error);
+      return verifySteps(parsed.value);
+    });
+    const whole = verifySteps({ kind: "all" });
+    expect([...new Set(steps.map(({ script }) => script))].sort()).toEqual(whole.map(({ script }) => script).sort());
+    const shards = steps.filter(({ script }) => script === "test:unit").map(({ args }) => args.join(" "));
+    expect(shards.length).toBeGreaterThan(0);
+    expect(shards).toEqual(shards.map((_, index) => `--shard=${index + 1}/${shards.length}`));
+    expect(steps.filter(({ script }) => script !== "test:unit")).toHaveLength(whole.length - 1);
   });
 });

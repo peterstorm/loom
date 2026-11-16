@@ -33,9 +33,24 @@ jobs:
       # runner. The darwin leg is the expensive one, which is why the
       # triggers above are trimmed to pull_request and main pushes — every run
       # this matrix gets is one that must exercise darwin.
+      #
+      # Each OS runs the one verify command once per Verify Slice
+      # (engine/src/core/verify-slice.ts): typecheck and lint, each Vitest
+      # file shard, and the smoke scripts run in parallel jobs. The slices
+      # listed here together are the whole command, so every tier still runs
+      # on both platforms; a run takes about as long as its slowest shard
+      # instead of the whole suite.
       matrix:
         os: [ubuntu-24.04, macos-15]
+        slice:
+          - { name: static, value: static }
+          - { name: unit-1-of-4, value: "unit:1/4" }
+          - { name: unit-2-of-4, value: "unit:2/4" }
+          - { name: unit-3-of-4, value: "unit:3/4" }
+          - { name: unit-4-of-4, value: "unit:4/4" }
+          - { name: smoke, value: smoke }
     runs-on: ${{ matrix.os }}
+    name: verify (${{ matrix.os }}, ${{ matrix.slice.name }})
     # The engine unit suite alone runs ~8.5 minutes on a fast Linux box and
     # GitHub's macOS runners are materially slower; 30 minutes left no head
     # room for the macOS leg, so each job's budget is generous.
@@ -112,6 +127,8 @@ jobs:
           echo "LOOM_REQUIRE_SANDBOX=1" >> "$GITHUB_ENV"
       - name: Verify
         shell: bash
+        env:
+          LOOM_VERIFY_SLICE: ${{ matrix.slice.value }}
         run: |
           set -euo pipefail
           npm run verify 2>&1 | tee verification.log
@@ -121,6 +138,6 @@ jobs:
         with:
           # Per-OS names: a shared name made the second leg's upload overwrite
           # (or collide with) the first's artifact.
-          name: verification-log-${{ matrix.os }}
+          name: verification-log-${{ matrix.os }}-${{ matrix.slice.name }}
           path: verification.log
           if-no-files-found: warn
