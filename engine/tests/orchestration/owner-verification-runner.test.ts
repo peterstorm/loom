@@ -403,6 +403,9 @@ describe("runOwnerVerification", () => {
   }, TIMEOUT_MS);
 });
 
+/** The isolated worktree a matrix-test run ran in. */
+const RUN_ROOT = "/tmp/loom-owner-worktree";
+
 describe("matrixTestRunOf", () => {
   const diagnostics = { stdoutTail: "", stderrTail: "", stdoutTruncated: false, stderrTruncated: false };
   const reportPath = (() => {
@@ -427,7 +430,7 @@ describe("matrixTestRunOf", () => {
         execution: { kind: "observed", process: { kind: "observed", exitCode: null, timedOut: true, signal: "SIGTERM" }, report: { kind: "missing", path: reportPath }, diagnostics },
       },
     };
-    expect(matrixTestRunOf(execution, 1234)).toEqual<MatrixTestRun>({ kind: "timed-out", elapsedMs: 1234 });
+    expect(matrixTestRunOf(execution, 1234, RUN_ROOT)).toEqual<MatrixTestRun>({ kind: "timed-out", elapsedMs: 1234 });
   });
 
   it("reads a runner that could not contain its process as a run that could not start, never a report", () => {
@@ -435,10 +438,10 @@ describe("matrixTestRunOf", () => {
       ok: false,
       error: { kind: "termination-unconfirmed", message: "group survived", diagnostics },
     };
-    expect(matrixTestRunOf(execution, 1)).toEqual<MatrixTestRun>({ kind: "spawn-failed", message: "termination-unconfirmed: group survived" });
+    expect(matrixTestRunOf(execution, 1, RUN_ROOT)).toEqual<MatrixTestRun>({ kind: "spawn-failed", message: "termination-unconfirmed: group survived" });
   });
 
-  it("carries a produced report's exact bytes", () => {
+  it("carries a produced report's exact bytes and the root the runner ran in", () => {
     const bytes = new TextEncoder().encode("<testsuites/>");
     const execution: CommandExecutionResult = {
       ok: true,
@@ -452,7 +455,7 @@ describe("matrixTestRunOf", () => {
         },
       },
     };
-    expect(matrixTestRunOf(execution, 1)).toEqual<MatrixTestRun>({ kind: "exited", exitCode: 0, signal: null, report: { kind: "produced", bytes } });
+    expect(matrixTestRunOf(execution, 1, RUN_ROOT)).toEqual<MatrixTestRun>({ kind: "exited", exitCode: 0, signal: null, report: { kind: "produced", bytes, runRoot: RUN_ROOT } });
   });
 });
 
@@ -473,8 +476,8 @@ describe("runPlan", () => {
     "</testsuite>",
     "</testsuites>",
   ].join("\n"));
-  const green: MatrixTestRun = { kind: "exited", exitCode: 0, signal: null, report: { kind: "produced", bytes: junit(false) } };
-  const red: MatrixTestRun = { kind: "exited", exitCode: 1, signal: null, report: { kind: "produced", bytes: junit(true) } };
+  const green: MatrixTestRun = { kind: "exited", exitCode: 0, signal: null, report: { kind: "produced", bytes: junit(false), runRoot: RUN_ROOT } };
+  const red: MatrixTestRun = { kind: "exited", exitCode: 1, signal: null, report: { kind: "produced", bytes: junit(true), runRoot: RUN_ROOT } };
   const timedOut: MatrixTestRun = { kind: "timed-out", elapsedMs: 10 };
   const unstartable: MatrixTestRun = { kind: "spawn-failed", message: "ENOENT" };
 

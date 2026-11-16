@@ -22,9 +22,11 @@ import { contractWave, dueWaves } from "./tasks";
  * The declared acceptance file a JUnit testcase belongs to, or null: the
  * testcase's reported file identity (`ReportTestcase.file`: its `file`
  * attribute, else its `classname`) attributed through the one reported-file
- * rule (INV-5, `report-file-attribution.ts`). Those identities are
- * runner-cwd-relative paths or JVM classes, so no repository root is passed;
- * an absolute identity would be left unattributed (fail closed).
+ * rule (INV-5, `report-file-attribution.ts`). Every shell parses a report
+ * through `parseJunitTestcasesUnder` with the root its runner ran in, so an
+ * absolute identity inside that root (Mocha writes them) already arrives
+ * relative; no root is passed here, and one outside it stays unattributed
+ * (fail closed).
  */
 export const testcaseAcceptanceFile = (files: readonly string[], reportedFile: string): string | null =>
   attributeReportedFile(files, reportedFile, null);

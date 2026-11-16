@@ -174,8 +174,10 @@ describe("taskMutationDigest", () => {
   });
 });
 
+/** The isolated worktree a mutation run ran in. */
+const RUN_ROOT = "/tmp/loom-task-worktree";
 const exited = (bytes: Uint8Array | null): MatrixTestRun =>
-  ({ kind: "exited", exitCode: 1, signal: null, report: bytes === null ? { kind: "missing" } : { kind: "produced", bytes } });
+  ({ kind: "exited", exitCode: 1, signal: null, report: bytes === null ? { kind: "missing" } : { kind: "produced", bytes, runRoot: RUN_ROOT } });
 const passed = (name: string): JunitCase => ({ file: TEST, name, outcome: "passed" });
 const failed = (name: string): JunitCase => ({ file: TEST, name, outcome: "failed" });
 /** Vitest's synthetic testcase for a file that failed to load. */
@@ -220,6 +222,26 @@ describe("classifyTaskBaseline", () => {
       const baseline = classifyTaskBaseline(exited(junitReport(cases.map(({ name, outcome }) => ({ file: TEST, name, outcome })))), NO_CONTRACTS);
       expect(baseline.kind).toBe(cases.some(({ outcome }) => outcome === "failed") ? "red" : "green");
     }));
+  });
+});
+
+describe("a Mocha report, whose file attribute is absolute beneath the run root", () => {
+  const mocha = (file: string, failing: boolean): MatrixTestRun => ({
+    kind: "exited",
+    exitCode: failing ? 1 : 0,
+    signal: null,
+    report: {
+      kind: "produced",
+      bytes: encode(`<testsuite name="Mocha Tests" tests="1" failures="0" errors="${failing ? 1 : 0}">` +
+        `<testcase classname="ledger" name="debits" file="${file}">${failing ? "<failure>AssertionError: expected 1</failure>" : ""}</testcase>` +
+        "</testsuite>"),
+      runRoot: RUN_ROOT,
+    },
+  });
+
+  it("is judged like a relative one: green, then a kill", () => {
+    expect(classifyTaskBaseline(mocha(`${RUN_ROOT}/${TEST}`, false), NO_CONTRACTS)).toEqual({ kind: "green" });
+    expect(classifyTaskMutantRun(mocha(`${RUN_ROOT}/${TEST}`, true), NO_CONTRACTS)).toEqual({ kind: "killed" });
   });
 });
 

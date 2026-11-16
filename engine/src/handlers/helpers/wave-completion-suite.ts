@@ -25,7 +25,7 @@ import {
   type AcceptanceObservation,
   type FrozenPathObservations,
 } from "../../core/acceptance-contract";
-import { parseJunitTestcases } from "../../core/structured-test-report";
+import { parseJunitTestcasesUnder } from "../../core/report-run-root";
 import { sha256Bytes } from "../../core/digest";
 import type { ArtifactDigest, DomainResult } from "../../core/orchestration-contract";
 import { readRunBytesNoFollow } from "../../utils/no-follow-fs";
@@ -524,7 +524,8 @@ function observeAcceptance(
     if (sha256Bytes(bytes) !== report.digest) {
       return [unprojectableFacts(check.checkId, report.digest, `report ${report.path} changed after the check produced it`)];
     }
-    return [observeAcceptanceFacts(expectation, check.checkId, report.digest, parseJunitTestcases(bytes))];
+    // The suite runs every project check in the repository, so a runner that names files absolutely names them beneath it.
+    return [observeAcceptanceFacts(expectation, check.checkId, report.digest, parseJunitTestcasesUnder(bytes, root))];
   });
   return acceptanceObservation(expectation, facts);
 }

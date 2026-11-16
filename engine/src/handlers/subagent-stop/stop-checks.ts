@@ -76,7 +76,7 @@ import {
 import { changedFilesAtStop, NO_CHANGED_FILES } from "../../core/changed-files";
 import { sha256Bytes } from "../../core/digest";
 import type { LedgerObservation } from "../../core/red-then-green-types";
-import { parseJunitTestcases } from "../../core/structured-test-report";
+import { parseJunitTestcasesUnder } from "../../core/report-run-root";
 import type { TaskGraph } from "../../types";
 import type { CompletionCheckRunnerResult } from "../../orchestration/completion-check-runner";
 import type { CanonicalRepositoryRoot } from "../../utils/workspace-digest";
@@ -251,7 +251,7 @@ async function runAcceptance(taskId: string, plan: OnAcceptance, root: Canonical
   if (outcome.report.kind !== "produced") return note(`the runner produced no report (${outcome.report.kind})`);
   const read = readBack(ports, root, outcome.report);
   if (!read.ok) return note(read.reason);
-  const verdict = judgeStopCheck(plan.check, outcome.report.digest, parseJunitTestcases(read.bytes));
+  const verdict = judgeStopCheck(plan.check, outcome.report.digest, parseJunitTestcasesUnder(read.bytes, root));
   if (verdict.kind === "passed") return Object.freeze({ kind: "passed", note: null });
   if (verdict.kind === "unobservable") return note(verdict.reason);
   const output = runnerOutput(run);
@@ -279,7 +279,7 @@ async function runAffected(
   if (outcome.report.kind !== "produced") return note("no-readable-report", outcome.report.kind);
   const read = readBack(ports, root, outcome.report);
   if (!read.ok) return note("no-readable-report", read.reason);
-  const verdict = judgeAffectedRun(parseJunitTestcases(read.bytes), expectation);
+  const verdict = judgeAffectedRun(parseJunitTestcasesUnder(read.bytes, root), expectation);
   switch (verdict.kind) {
     case "passed":
       return Object.freeze({ kind: "passed", note: verdict.observed === "zero-tests" ? affectedNoteText(taskId, "zero-tests") : null });

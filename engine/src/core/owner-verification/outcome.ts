@@ -15,8 +15,10 @@
  * | every attributed testcase passes, exit 0      | `survived`                   | `green`             |
  * | every one passes, non-zero exit or a signal   | `exit-unexplained-by-report` | same                |
  *
- * Testcases are attributed to the matrix test through the one reported-file
- * rule (`attributeReportedFile`) and collection errors are recognized by the
+ * Testcases are read against the root the runner ran in (an absolute file
+ * inside it becomes relative, `parseJunitTestcasesUnder`), then attributed to
+ * the matrix test through the one reported-file rule
+ * (`attributeReportedFile`), and collection errors are recognized by the
  * one shared rule (`isCollectionErrorTestcase`). The tallied outcomes become a
  * verdict only through `verifiedMutationOf`, which refuses a run whose every
  * generated mutant is invalid (`no-valid-mutants`): such a run carries no
@@ -26,7 +28,8 @@
 import { match } from "ts-pattern";
 import { failure, isNonEmpty, success, type NonEmpty } from "../orchestration-contract/identity";
 import { attributeReportedFile } from "../report-file-attribution";
-import { isCollectionErrorTestcase, parseJunitTestcases } from "../structured-test-report";
+import { parseJunitTestcasesUnder } from "../report-run-root";
+import { isCollectionErrorTestcase } from "../structured-test-report";
 import type {
   BaselineOutcome,
   ClassifyBaselineFn,
@@ -58,13 +61,13 @@ function readRun(run: MatrixTestRun, matrixTest: string): RunReading {
     .with({ kind: "exited" }, ({ exitCode, signal, report }) => match(report)
       .with({ kind: "missing" }, () => infrastructure("report-missing", `the runner exited (code ${String(exitCode)}, signal ${String(signal)}) without writing its report`))
       .with({ kind: "unreadable" }, ({ reason }) => infrastructure("report-unreadable", `the report could not be read: ${reason}`))
-      .with({ kind: "produced" }, ({ bytes }) => readReport(bytes, exitCode, signal, matrixTest))
+      .with({ kind: "produced" }, ({ bytes, runRoot }) => readReport(bytes, runRoot, exitCode, signal, matrixTest))
       .exhaustive())
     .exhaustive();
 }
 
-function readReport(bytes: Uint8Array, exitCode: number | null, signal: string | null, matrixTest: string): RunReading {
-  const parsed = parseJunitTestcases(bytes);
+function readReport(bytes: Uint8Array, runRoot: string, exitCode: number | null, signal: string | null, matrixTest: string): RunReading {
+  const parsed = parseJunitTestcasesUnder(bytes, runRoot);
   if (!parsed.ok) return infrastructure("report-unreadable", `the report does not parse: ${parsed.error.message}`);
   const executed = parsed.value.filter((testcase) =>
     testcase.outcome !== "skipped" && attributeReportedFile([matrixTest], testcase.file, null) === matrixTest);

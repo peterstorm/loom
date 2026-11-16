@@ -433,6 +433,9 @@ function junit(cases: readonly Case[]): Uint8Array {
   ].join("\n"));
 }
 
+/** The isolated worktree a run ran in; Vitest-shaped reports name files relative to it anyway. */
+const RUN_ROOT = "/tmp/loom-owner-worktree";
+
 const passing = (name: string): Case => ({ classname: MATRIX, name: `matrix > ${name}` });
 const failing = (name: string): Case => ({ classname: MATRIX, name: `matrix > ${name}`, failure: "AssertionError" });
 const COLLECTION_ERROR: Case = { classname: MATRIX, name: MATRIX, failure: "Error" };
@@ -441,7 +444,7 @@ const exited = (cases: readonly Case[] | null, exitCode: number | null = cases?.
   kind: "exited",
   exitCode,
   signal,
-  report: cases === null ? { kind: "missing" } : { kind: "produced", bytes: junit(cases) },
+  report: cases === null ? { kind: "missing" } : { kind: "produced", bytes: junit(cases), runRoot: RUN_ROOT },
 });
 
 describe("outcome classification (CT-1)", () => {
@@ -472,7 +475,7 @@ describe("outcome classification (CT-1)", () => {
     ["the runner could not start", { kind: "spawn-failed", message: "ENOENT" }, infrastructure("spawn-failed"), infrastructure("spawn-failed")],
     ["the report is missing", exited(null, 0), infrastructure("report-missing"), infrastructure("report-missing")],
     ["the report is unreadable", { kind: "exited", exitCode: 0, signal: null, report: { kind: "unreadable", reason: "EACCES" } }, infrastructure("report-unreadable"), infrastructure("report-unreadable")],
-    ["the report does not parse", { kind: "exited", exitCode: 1, signal: null, report: { kind: "produced", bytes: new TextEncoder().encode("not a report") } }, infrastructure("report-unreadable"), infrastructure("report-unreadable")],
+    ["the report does not parse", { kind: "exited", exitCode: 1, signal: null, report: { kind: "produced", bytes: new TextEncoder().encode("not a report"), runRoot: RUN_ROOT } }, infrastructure("report-unreadable"), infrastructure("report-unreadable")],
     ["a failing non-collection testcase", exited([failing("refuses minors")]), { kind: "killed" }, { kind: "red", failures: ["matrix > refuses minors"] }],
     ["only collection errors", exited([COLLECTION_ERROR]), { kind: "invalid", collectionErrors: [MATRIX] }, { kind: "red", failures: [MATRIX] }],
     ["no testcase of the matrix test", exited([{ classname: "tests/other.test.ts", name: "other > passes" }]), infrastructure("matrix-test-not-collected"), infrastructure("matrix-test-not-collected")],
@@ -487,7 +490,7 @@ describe("outcome classification (CT-1)", () => {
   });
 
   it("FR-013: FR-016: an empty report is infrastructure, never a kill", () => {
-    const empty: MatrixTestRun = { kind: "exited", exitCode: 0, signal: null, report: { kind: "produced", bytes: junit([]) } };
+    const empty: MatrixTestRun = { kind: "exited", exitCode: 0, signal: null, report: { kind: "produced", bytes: junit([]), runRoot: RUN_ROOT } };
     const outcome = classifyMutantRun(empty, MATRIX);
     expect(outcome.kind).toBe("infrastructure");
     if (outcome.kind === "infrastructure") expect(["report-unreadable", "matrix-test-not-collected"]).toContain(outcome.failure.kind);

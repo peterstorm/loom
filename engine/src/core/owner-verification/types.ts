@@ -252,11 +252,16 @@ export type MutationPlanFn = (input: MutationPlanInput) => DomainResult<Mutation
 // Matrix-test runs and their outcomes
 // ---------------------------------------------------------------------------
 
-/** What the runner left at its report path after it exited. */
+/**
+ * What the runner left at its report path after it exited. A produced report
+ * carries the root the runner ran in (the isolated worktree), so a testcase
+ * file the runner wrote as an absolute path is read relative to it
+ * (`report-run-root.ts`).
+ */
 export type MatrixTestReport =
   | Readonly<{ kind: "missing" }>
   | Readonly<{ kind: "unreadable"; reason: string }>
-  | Readonly<{ kind: "produced"; bytes: Uint8Array }>;
+  | Readonly<{ kind: "produced"; bytes: Uint8Array; runRoot: string }>;
 
 /**
  * One run of the matrix test through the frozen `affectedRunner`, as the
