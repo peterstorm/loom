@@ -156,9 +156,10 @@ const handler: HookHandler = async (stdin) => {
 
   const rosterAgentTypeRaw = stripNamespace(input.agent_type ?? "");
   const rosterAgentType = rosterAgentTypeRaw ? parseAgentType(rosterAgentTypeRaw) : null;
+  const source = machineSource();
   const guardedMachine = rosterAgentType === null
     ? { kind: "none" as const }
-    : loadMachine(machineSource(), rosterAgentType);
+    : loadMachine(source, rosterAgentType);
   if (guardedMachine.kind !== "none" && agentId === null) {
     return blockResult(
       `mark-subagent-active: ${rosterAgentType} has a Guarded Skill Machine but no valid agent_id; refusing to run it ungated`,
@@ -281,6 +282,13 @@ const handler: HookHandler = async (stdin) => {
       }
       if (guardedMachine.kind === "invalid") {
         process.stderr.write(`mark-subagent-active: machine invalid (gate will fail closed) — ${guardedMachine.error}\n`);
+      }
+      // An operator directory is loaded as it stands (ADR-0076): say so, so a
+      // LOOM_MACHINES_DIR that bypasses the pins is never silent.
+      if (source.trust.kind === "operator-directory") {
+        process.stderr.write(
+          `mark-subagent-active: ${rosterAgentType} machine read from operator directory ${source.directory} (LOOM_MACHINES_DIR) — not checked against the shipped pins\n`,
+        );
       }
     }
   }

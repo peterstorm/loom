@@ -33,6 +33,7 @@
  */
 
 import { artifactDigestOfBytes } from "./digest";
+import { frozenMap } from "./frozen";
 import {
   failure,
   parseArtifactDigest,
@@ -78,23 +79,48 @@ export function admitMachineDefinition(
   agentType: AgentType,
   bytes: Uint8Array | null,
 ): MachineAdmission {
-  if (trust.kind === "operator-directory") {
-    return Object.freeze(bytes === null ? { kind: "ungated" } : { kind: "admitted", bytes });
-  }
+  if (trust.kind === "operator-directory") return bytes === null ? UNGATED : admitted(bytes);
   const pinned = trust.pins.get(agentType);
   if (bytes === null) {
-    return pinned === undefined
-      ? Object.freeze({ kind: "ungated" })
-      : refused({ kind: "pinned-machine-missing", agentType, pinned });
+    return pinned === undefined ? UNGATED : refused({ kind: "pinned-machine-missing", agentType, pinned });
   }
   const actual = artifactDigestOfBytes(bytes);
   if (pinned === undefined) return refused({ kind: "unpinned-machine", agentType, actual });
   if (pinned !== actual) return refused({ kind: "digest-mismatch", agentType, pinned, actual });
-  return Object.freeze({ kind: "admitted", bytes });
+  return admitted(bytes);
 }
+
+const UNGATED: MachineAdmission = Object.freeze({ kind: "ungated" });
+
+const admitted = (bytes: Uint8Array): MachineAdmission => Object.freeze({ kind: "admitted", bytes });
 
 const refused = (refusal: MachineRefusal): MachineAdmission =>
   Object.freeze({ kind: "refused", refusal: Object.freeze(refusal) });
+
+/**
+ * How far a configured machines directory is trusted, from the spellings the
+ * shell observed: pinned when any spelling of it (resolved path or realpath)
+ * is a spelling of the shipped directory, otherwise the operator's own. The
+ * shell passes the resolved path alone when a directory cannot be
+ * canonicalized, so the shipped directory under its own resolved spelling is
+ * pinned even then.
+ */
+export function machineTrustOf(
+  configuredSpellings: readonly string[],
+  shippedSpellings: readonly string[],
+  pins: MachinePins,
+): MachineTrust {
+  const shipped = new Set(shippedSpellings);
+  return configuredSpellings.some((spelling) => shipped.has(spelling))
+    ? Object.freeze({ kind: "pinned", pins })
+    : OPERATOR_DIRECTORY;
+}
+
+const OPERATOR_DIRECTORY: MachineTrust = Object.freeze({ kind: "operator-directory" });
+
+/** A directory read as it stands: the operator's own, or one being pinned. */
+export const operatorMachineSource = (directory: string): MachineSource =>
+  Object.freeze({ directory, trust: OPERATOR_DIRECTORY });
 
 /** The command that re-pins the shipped machines after an intended change. */
 export const PIN_MACHINES_COMMAND = "cd engine && npm run pin-machines";
@@ -122,17 +148,21 @@ const assertNever = (value: never): never => {
 /** One pin as the generated module records it. */
 export type MachinePinEntry = Readonly<{ agentType: AgentType; digest: ArtifactDigest }>;
 
-/** Parse the generated pin record: every key an agent type, every value a SHA-256. */
+/**
+ * Parse the generated pin record: every key an agent type, every value a
+ * SHA-256. The pins are the integrity authority, so the map is frozen at
+ * runtime (`frozenMap`), not only typed readonly.
+ */
 export function parseMachinePins(raw: Readonly<Record<string, string>>): DomainResult<MachinePins, string> {
-  const pins = new Map<AgentType, ArtifactDigest>();
+  const pins: Array<readonly [AgentType, ArtifactDigest]> = [];
   for (const [key, value] of Object.entries(raw)) {
     const agentType = parseAgentType(key);
     if (agentType === null) return failure(`machine pin key ${JSON.stringify(key)} is not an agent type`);
     const digest = parseArtifactDigest(value);
     if (!digest.ok) return failure(`machine pin for ${key} is not a SHA-256 digest: ${digest.error.message}`);
-    pins.set(agentType, digest.value);
+    pins.push([agentType, digest.value]);
   }
-  return success(pins);
+  return success(frozenMap(pins));
 }
 
 /**

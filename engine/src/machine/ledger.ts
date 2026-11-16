@@ -61,7 +61,14 @@ import {
 import { STALE_SUBAGENT_TTL_MS, subagentDir } from "../config";
 import { withLock } from "../utils/lock";
 import { parseMachineJson } from "./parse-machine";
-import { admitMachineDefinition, renderMachineRefusal, type MachineSource } from "../core/machine-integrity";
+import {
+  admitMachineDefinition,
+  renderMachineRefusal,
+  type MachinePinEntry,
+  type MachineSource,
+} from "../core/machine-integrity";
+import { artifactDigestOfBytes } from "../core/digest";
+import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
 import {
   type AgentId,
   type AgentType,
@@ -808,8 +815,11 @@ export function readEvidence(sessionId: SessionId): readonly EvidenceRecord[] {
  * gate).
  */
 export function machineDefPath(machinesDir: string, agentType: AgentType): string {
-  return `${machinesDir}/${agentType}.machine.json`;
+  return `${machinesDir}/${agentType}${MACHINE_DEFINITION_SUFFIX}`;
 }
+
+/** The file-name suffix of a machine definition: `<agent-type>.machine.json`. */
+const MACHINE_DEFINITION_SUFFIX = ".machine.json";
 
 export type LoadedMachine =
   | { readonly kind: "none" }
@@ -839,10 +849,44 @@ export function loadMachine(source: MachineSource, agentType: AgentType): Loaded
   const admission = admitMachineDefinition(source.trust, agentType, bytes);
   if (admission.kind === "ungated") return { kind: "none" };
   if (admission.kind === "refused") return { kind: "invalid", error: `${path}: ${renderMachineRefusal(admission.refusal)}` };
-  const parsed = parseMachineJson(Buffer.from(admission.bytes).toString("utf-8"));
+  return parseMachineDefinition(path, agentType, admission.bytes);
+}
+
+/** Decodes like `Buffer#toString("utf-8")`: a byte-order mark is kept, so it reaches the parser as written. */
+const MACHINE_TEXT = new TextDecoder("utf-8", { ignoreBOM: true });
+
+/** A definition's bytes as a machine for `agentType`, or why they are not one. */
+function parseMachineDefinition(
+  path: string,
+  agentType: AgentType,
+  bytes: Uint8Array,
+): Exclude<LoadedMachine, { kind: "none" }> {
+  const parsed = parseMachineJson(MACHINE_TEXT.decode(bytes));
   if (!parsed.ok) return { kind: "invalid", error: `${path}: ${parsed.error}` };
   if (parsed.value.agent !== agentType) {
     return { kind: "invalid", error: `${path}: machine.agent "${parsed.value.agent}" does not match file name agent "${agentType}"` };
   }
   return { kind: "machine", machine: parsed.value };
+}
+
+/**
+ * One pin per machine definition in `directory` (ADR-0076), for
+ * `npm run pin-machines` and its drift test. A file whose name is not an agent
+ * type, or whose bytes the loader would not accept as a machine for that agent
+ * type, is refused: only a definition the loader would load is pinned. Each
+ * file is read once, so the bytes judged are the bytes digested.
+ */
+export function observeMachinePins(directory: string): DomainResult<readonly MachinePinEntry[], string> {
+  const entries: MachinePinEntry[] = [];
+  const names = readdirSync(directory).filter((name) => name.endsWith(MACHINE_DEFINITION_SUFFIX)).sort();
+  for (const name of names) {
+    const agentType = parseAgentType(name.slice(0, -MACHINE_DEFINITION_SUFFIX.length));
+    if (agentType === null) return failure(`${name}: the file name is not an agent type`);
+    const path = machineDefPath(directory, agentType);
+    const bytes = readFileSync(path);
+    const definition = parseMachineDefinition(path, agentType, bytes);
+    if (definition.kind === "invalid") return failure(definition.error);
+    entries.push(Object.freeze({ agentType, digest: artifactDigestOfBytes(bytes) }));
+  }
+  return success(Object.freeze(entries));
 }

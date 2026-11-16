@@ -25,7 +25,7 @@ cd engine && npm run pin-machines -- --check  # exit 1 when the pins drifted
 
 The script refuses to pin a definition that does not parse as a machine for the agent type its file name names. Until the pins are regenerated, the edited machine's agent is blocked, also in a Loom installed from a dev checkout. `engine/tests/machine/machine-pins.test.ts` compares the pin module with the shipped machines byte for byte, so a machine changed without its pin fails the suite and CI.
 
-The pins govern the shipped directory under any spelling, including a symlink to it. A directory `LOOM_MACHINES_DIR` points elsewhere is the operator's own and is loaded as it stands: the hook's environment comes from the harness, not from the agent, and tests use it for fixture machines.
+The pins govern the shipped directory under any spelling, including a symlink to it. A directory `LOOM_MACHINES_DIR` points elsewhere is the operator's own and is loaded as it stands: the hook's environment comes from the harness, not from the agent, and tests use it for fixture machines. SubagentStart says so on stderr each time it binds a machine from such a directory, so a configuration that bypasses the pins is never silent.
 
 ## The evidence ledger
 

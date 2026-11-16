@@ -45,9 +45,10 @@ the pin the engine carries for its agent type. The pin set, not the directory li
 are gated.**
 
 - **The pins.** `engine/src/core/machine-pins.ts` holds the SHA-256 of every shipped definition, keyed by agent
-  type. `engine/scripts/pin-machines.ts` generates it (`cd engine && npm run pin-machines`). The script refuses
-  to pin a definition that does not parse as a machine for the agent type its file name names. `--check` exits
-  1 when the pins drifted.
+  type. `engine/scripts/pin-machines.ts` generates it (`cd engine && npm run pin-machines`) from
+  `observeMachinePins` (`engine/src/machine/ledger.ts`), which parses each definition with the loader's own
+  parser and digests the same single read, so only a definition the loader would load is pinned. The script
+  exits 2 when a definition cannot be pinned, and `--check` exits 1 when the pins drifted.
 - **The decision** (`admitMachineDefinition`, `engine/src/core/machine-integrity.ts`, pure and total):
 
   | Shipped directory | No pin | Pin |
@@ -59,14 +60,20 @@ are gated.**
 - **Refused means fail closed.** The loader maps a refusal to an `invalid` machine. The agent binds at
   SubagentStart and its gate (`enforce-phase-tools`) blocks every enforced tool, naming the refusal and the
   re-pin command. A deleted, added or rewritten machine makes the gate stricter, never weaker.
-- **Which directory is pinned** (`machineSource`, `engine/src/config.ts`). It is pinned when any spelling of the
-  configured directory (its resolved path or realpath) is a spelling of the shipped `machines/`. A directory
-  `LOOM_MACHINES_DIR` points elsewhere is `operator-directory` and admitted as it stands. The hook's
-  environment comes from the harness, not from the agent (ADR-0067 note L), and tests point it at fixture
-  machines.
+- **Which directory is pinned** (the pure `machineTrustOf`, fed by `machineSource` in `engine/src/config.ts`).
+  It is pinned when any spelling of the configured directory (its resolved path or realpath) is a spelling of
+  the shipped `machines/`. A directory that cannot be canonicalized compares by its resolved path, and any
+  failure other than its absence is reported on stderr. A directory `LOOM_MACHINES_DIR` points elsewhere is
+  `operator-directory` and admitted as it stands. The hook's environment comes from the harness, not from the
+  agent (ADR-0067 note L), and tests point it at fixture machines. SubagentStart says on stderr whenever it
+  binds a machine from an operator directory, so a configuration that bypasses the pins is never silent.
+- **The pins are immutable at runtime.** `parseMachinePins` returns a `frozenMap`, so not even a cast can
+  add, replace or remove a pin in the running engine.
 - **Drift is a test failure.** `engine/tests/machine/machine-pins.test.ts` renders the pins from the shipped
   machines and compares them with the generated file byte for byte, so a machine changed without its pin
-  fails the suite and CI.
+  fails the suite and CI. `engine/tests/handlers/pinned-machine-gate.test.ts` drives SubagentStart and the
+  PreToolUse gate with a mocked pin module, proving that a rewritten, deleted or unpinned shipped machine
+  binds and then blocks.
 - **The fences stay.** `machines/` remains in `protectedDirs()` for every guard. They are defence in depth; the
   pin is the authority.
 

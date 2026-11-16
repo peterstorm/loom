@@ -30,7 +30,7 @@ import { frozenSet } from "./core/frozen";
 import { UTILITY_AGENTS } from "./core/phase-policy";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
 import { guardedDirsOf, protectedDirsOf, type GuardedLocations } from "./core/guarded-locations";
-import { parseMachinePins, type MachinePins, type MachineSource } from "./core/machine-integrity";
+import { machineTrustOf, parseMachinePins, type MachinePins, type MachineSource } from "./core/machine-integrity";
 import { SHIPPED_MACHINE_PINS } from "./core/machine-pins";
 import { nonEmptyOf, type NonEmpty } from "./core/orchestration-contract/identity";
 import { projectRulesLayout } from "./linter/programmatic/config";
@@ -332,31 +332,42 @@ if (!shippedPins.ok) throw new Error(`loom config invariant violated: the genera
 /** The pinned SHA-256 of every shipped machine (ADR-0076), parsed once at load. */
 export const SHIPPED_MACHINE_PIN_SET: MachinePins = shippedPins.value;
 
-/** Every spelling of a directory: its resolved path and, when it exists, its realpath. */
+/** A missing directory, or a path through a non-directory: nothing to canonicalize. */
+const ABSENT_DIRECTORY_CODES: ReadonlySet<string> = frozenSet(["ENOENT", "ENOTDIR"]);
+
+/**
+ * Every spelling of a directory: its resolved path and, when it exists, its
+ * realpath. A directory that is absent compares by its resolved path alone.
+ * Any other canonicalization failure (EACCES, ELOOP, …) does the same but says
+ * so on stderr, because the comparison may then miss a spelling of the shipped
+ * directory and leave the pins unapplied.
+ */
 const directorySpellings = (directory: string): readonly string[] => {
   const resolved = resolve(directory);
   try {
     return [resolved, realpathSync.native(resolved)];
-  } catch {
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code ?? "unknown";
+    if (!ABSENT_DIRECTORY_CODES.has(code)) {
+      process.stderr.write(
+        `loom: cannot canonicalize machines directory ${resolved} (${code}); comparing it with the shipped machines by its resolved path only\n`,
+      );
+    }
     return [resolved];
   }
 };
 
 /**
  * Where the machines are read from, and how far they are trusted (ADR-0076),
- * resolved at call time like `machinesDir()`. Any spelling of the shipped
- * directory (a symlink to it included) is pinned; only a directory proven
- * elsewhere is the operator's own. A spelling that cannot be canonicalized
- * still compares by its resolved path, so an unreadable directory never
- * escapes the pins by failing to resolve.
+ * resolved at call time like `machinesDir()`. The decision is the pure
+ * `machineTrustOf`: any spelling of the shipped directory (a symlink to it
+ * included) is pinned; only a directory proven elsewhere is the operator's own.
  */
 export const machineSource = (): MachineSource => {
   const directory = machinesDir();
-  const shipped = new Set(directorySpellings(SHIPPED_MACHINES_DIR));
-  const pinned = directorySpellings(directory).some((spelling) => shipped.has(spelling));
   return Object.freeze({
     directory,
-    trust: Object.freeze(pinned ? { kind: "pinned", pins: SHIPPED_MACHINE_PIN_SET } : { kind: "operator-directory" }),
+    trust: machineTrustOf(directorySpellings(directory), directorySpellings(SHIPPED_MACHINES_DIR), SHIPPED_MACHINE_PIN_SET),
   });
 };
 

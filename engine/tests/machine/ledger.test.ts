@@ -7,7 +7,8 @@ import type { SessionId } from "../../src/machine";
 import { reportSummary } from "./report-summary";
 import * as ledger from "../../src/machine";
 import { SUBAGENT_DIR } from "../../src/config";
-import { parseMachinePins, type MachineSource } from "../../src/core/machine-integrity";
+import { operatorMachineSource, parseMachinePins, type MachineSource } from "../../src/core/machine-integrity";
+import { validMachineJson } from "../fixtures/machine-definitions";
 import { artifactDigestOfBytes } from "../../src/core/digest";
 
 // bun/vitest may share SUBAGENT_DIR across suites — isolate via unique
@@ -472,9 +473,6 @@ describe("branded epochs — the deserialization boundary", () => {
   });
 });
 
-/** A machines directory the operator configured: admitted as it stands. */
-const operatorSource = (directory: string): MachineSource => ({ directory, trust: { kind: "operator-directory" } });
-
 /** A machines directory governed by these pins, as the shipped one is. */
 const pinnedSource = (directory: string, pins: Readonly<Record<string, string>>): MachineSource => {
   const parsed = parseMachinePins(pins);
@@ -482,25 +480,16 @@ const pinnedSource = (directory: string, pins: Readonly<Record<string, string>>)
   return { directory, trust: { kind: "pinned", pins: parsed.value } };
 };
 
-const validMachine = (agent: string): string => JSON.stringify({
-  agent,
-  enforcedTools: ["Edit"],
-  phases: [
-    { id: "a", allowedTools: [], advance: { event: "FileRead" } },
-    { id: "z", terminal: true, allowedTools: ["Edit"], requires: [] },
-  ],
-});
-
 describe("machine registry", () => {
   it("loadMachine: none for unknown agents, machine for valid files, invalid for bad files", () => {
     const dir = mkdtempSync(join(tmpdir(), "loom-machines-"));
-    const machines = operatorSource(dir);
+    const machines = operatorMachineSource(dir);
     try {
       // loadMachine takes BRANDED AgentType — the parse boundary is what
       // keeps machineDefPath inside machinesDir.
       expect(ledger.loadMachine(machines, agentType("nope-agent"))).toEqual({ kind: "none" });
 
-      writeFileSync(join(dir, "good-agent.machine.json"), validMachine("good-agent"));
+      writeFileSync(join(dir, "good-agent.machine.json"), validMachineJson("good-agent"));
       expect(ledger.loadMachine(machines, agentType("good-agent")).kind).toBe("machine");
 
       writeFileSync(join(dir, "bad-agent.machine.json"), "{broken");
@@ -513,7 +502,7 @@ describe("machine registry", () => {
         error: expect.stringMatching(/cannot read machine definition.*ELOOP/i),
       });
 
-      writeFileSync(join(dir, "mismatch-agent.machine.json"), validMachine("other-agent"));
+      writeFileSync(join(dir, "mismatch-agent.machine.json"), validMachineJson("other-agent"));
       expect(ledger.loadMachine(machines, agentType("mismatch-agent")).kind).toBe("invalid");
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -528,7 +517,7 @@ describe("machine registry: pinned definitions", () => {
   const withPinnedDir = (run: (dir: string, source: MachineSource) => void): void => {
     const dir = mkdtempSync(join(tmpdir(), "loom-pinned-machines-"));
     try {
-      const text = validMachine("good-agent");
+      const text = validMachineJson("good-agent");
       writeFileSync(join(dir, "good-agent.machine.json"), text);
       run(dir, pinnedSource(dir, { "good-agent": artifactDigestOfBytes(Buffer.from(text)) }));
     } finally {
@@ -569,7 +558,7 @@ describe("machine registry: pinned definitions", () => {
 
   it("an added definition no pin names loads invalid", () => {
     withPinnedDir((dir, source) => {
-      writeFileSync(join(dir, "added-agent.machine.json"), validMachine("added-agent"));
+      writeFileSync(join(dir, "added-agent.machine.json"), validMachineJson("added-agent"));
       expect(ledger.loadMachine(source, agentType("added-agent"))).toEqual({
         kind: "invalid",
         error: expect.stringContaining("no shipped machine is pinned for added-agent"),

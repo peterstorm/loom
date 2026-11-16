@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
   admitMachineDefinition,
+  machineTrustOf,
+  operatorMachineSource,
   parseMachinePins,
   PIN_MACHINES_COMMAND,
   renderMachinePinsModule,
@@ -12,18 +14,14 @@ import {
   type MachineTrust,
 } from "../../src/core/machine-integrity";
 import { artifactDigestOfBytes } from "../../src/core/digest";
+import { frozenMap } from "../../src/core/frozen";
 import { parseAgentType, type AgentType } from "../../src/machine/evidence";
-
-function agentType(raw: string): AgentType {
-  const parsed = parseAgentType(raw);
-  if (parsed === null) throw new Error(`test fixture: invalid agent type ${JSON.stringify(raw)}`);
-  return parsed;
-}
+import { agentTypeOf as agentType } from "../fixtures/machine-identities";
 
 const bytesOf = (text: string): Uint8Array => new TextEncoder().encode(text);
 const pinned = (entries: ReadonlyArray<readonly [AgentType, Uint8Array]>): MachineTrust => ({
   kind: "pinned",
-  pins: new Map(entries.map(([type, bytes]) => [type, artifactDigestOfBytes(bytes)])) as MachinePins,
+  pins: frozenMap(entries.map(([type, bytes]) => [type, artifactDigestOfBytes(bytes)] as const)),
 });
 const operator: MachineTrust = { kind: "operator-directory" };
 
@@ -85,6 +83,24 @@ describe("admitMachineDefinition: the shipped directory", () => {
   });
 });
 
+describe("admitMachineDefinition: a known-answer pin", () => {
+  // The pin format is anchored to a value computed outside this code base:
+  // FIPS 180-2's SHA-256 of "abc". A change of algorithm, encoding or case in
+  // the digest would move both sides of every other test together; not this one.
+  const ABC_SHA256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+  it("admits the bytes \"abc\" against their published SHA-256, and only those", () => {
+    const pins = parseMachinePins({ "code-implementer-agent": ABC_SHA256 });
+    if (!pins.ok) throw new Error(pins.error);
+    const trust: MachineTrust = { kind: "pinned", pins: pins.value };
+    expect(admitMachineDefinition(trust, IMPLEMENTER, bytesOf("abc"))).toEqual({ kind: "admitted", bytes: bytesOf("abc") });
+    expect(admitMachineDefinition(trust, IMPLEMENTER, bytesOf("abd"))).toMatchObject({
+      kind: "refused",
+      refusal: { kind: "digest-mismatch", pinned: ABC_SHA256 },
+    });
+  });
+});
+
 describe("admitMachineDefinition: an operator directory", () => {
   it("admits whatever definition it holds and ungates an absent one", () => {
     expect(admitMachineDefinition(operator, IMPLEMENTER, DEFINITION)).toEqual({ kind: "admitted", bytes: DEFINITION });
@@ -121,6 +137,44 @@ describe("admitMachineDefinition properties", () => {
   });
 });
 
+describe("machineTrustOf: which spellings the pins govern", () => {
+  const PINS: MachinePins = frozenMap([[IMPLEMENTER, artifactDigestOfBytes(DEFINITION)] as const]);
+  const SHIPPED = ["/plugin/machines", "/real/plugin/machines"] as const;
+  const paths = fc.stringMatching(/^\/[a-z]{1,6}(\/[a-z]{1,6}){0,3}$/);
+
+  it("pins a directory whose resolved path or realpath is a spelling of the shipped one", () => {
+    expect(machineTrustOf(["/link/machines", "/real/plugin/machines"], SHIPPED, PINS)).toEqual({ kind: "pinned", pins: PINS });
+    expect(machineTrustOf(["/plugin/machines"], SHIPPED, PINS).kind).toBe("pinned");
+  });
+
+  it("a shipped directory that cannot be canonicalized still matches by its resolved path alone", () => {
+    // The shell passes only the resolved path when realpath fails; the shipped
+    // directory under that spelling must stay pinned.
+    expect(machineTrustOf(["/plugin/machines"], ["/plugin/machines"], PINS).kind).toBe("pinned");
+  });
+
+  it("property: pinned exactly when the spelling sets meet", () => {
+    fc.assert(fc.property(fc.array(paths, { minLength: 1, maxLength: 3 }), fc.array(paths, { minLength: 1, maxLength: 3 }), (configured, shipped) => {
+      const meets = configured.some((spelling) => shipped.includes(spelling));
+      return machineTrustOf(configured, shipped, PINS).kind === (meets ? "pinned" : "operator-directory");
+    }));
+  });
+
+  it("property: a pinned trust carries exactly the pins it was given", () => {
+    fc.assert(fc.property(fc.array(paths, { minLength: 1, maxLength: 3 }), (spellings) => {
+      const trust = machineTrustOf(spellings, spellings, PINS);
+      return trust.kind === "pinned" && trust.pins === PINS;
+    }));
+  });
+
+  it("operatorMachineSource reads its directory as it stands", () => {
+    expect(operatorMachineSource("/fixtures/machines")).toEqual({
+      directory: "/fixtures/machines",
+      trust: { kind: "operator-directory" },
+    });
+  });
+});
+
 describe("renderMachineRefusal", () => {
   const digest = artifactDigestOfBytes(DEFINITION);
   const refusals: readonly MachineRefusal[] = [
@@ -143,6 +197,15 @@ describe("parseMachinePins", () => {
   it("parses agent types to digests", () => {
     const parsed = parseMachinePins({ "code-implementer-agent": digest });
     expect(parsed.ok && [...parsed.value]).toEqual([[IMPLEMENTER, digest]]);
+  });
+
+  it("returns pins that stay immutable at runtime, even through a cast", () => {
+    const parsed = parseMachinePins({ "code-implementer-agent": digest });
+    if (!parsed.ok) throw new Error(parsed.error);
+    const writable = parsed.value as Map<AgentType, unknown>;
+    expect(() => writable.set(agentType("forged-agent"), digest)).toThrow(/immutable/);
+    expect(() => writable.delete(IMPLEMENTER)).toThrow(/immutable/);
+    expect([...parsed.value.keys()]).toEqual([IMPLEMENTER]);
   });
 
   it("refuses a key that is not an agent type", () => {

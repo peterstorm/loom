@@ -120,6 +120,7 @@ export {
   unbindMachineAgent,
   machineDefPath,
   loadMachine,
+  observeMachinePins,
   type LoadedMachine,
 } from "./ledger";
 export { fsSessionRegistry } from "./session-registry";
