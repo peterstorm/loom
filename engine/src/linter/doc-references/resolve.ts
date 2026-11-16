@@ -113,11 +113,21 @@ function resolveLink(path: string, anchor: string | null, frame: ReferenceFrame,
     : anchored(target, anchor, index);
 }
 
-/** The words of a token the source does not hold: none when the whole word, or every segment, is held. */
-function missingSegments(text: string, segments: readonly string[], index: ReferenceIndex): readonly string[] {
+/** A word reference as the source half of resolution reads it: its text as written and its dotted segments. */
+export type WordReference = Pick<Extract<DocReference, { kind: "token" }>, "text" | "segments">;
+
+/**
+ * Does the source alone resolve a word? It does when the source holds the
+ * whole word (a call's parentheses dropped), or every one of its segments.
+ * The one place a word meets the source corpus: `resolveReference` asks it
+ * once the external names have not answered, and the decay check
+ * (`external-names.ts`) asks it whether a listed name is external at all.
+ */
+export function resolveWordInSource({ text, segments }: WordReference, index: ReferenceIndex): Resolution {
   const word = text.endsWith("()") ? text.slice(0, -2) : text;
-  if (index.inSource(word)) return [];
-  return segments.filter((segment) => !index.inSource(segment));
+  if (index.inSource(word)) return resolved({ via: "source" });
+  const missing = segments.filter((segment) => !index.inSource(segment));
+  return missing.length === 0 ? resolved({ via: "source" }) : dangling({ kind: "not-in-source", missing });
 }
 
 /** A plan's spec header: the spec must be a file in a frame, and parse. */
@@ -157,10 +167,8 @@ export function resolveReference(reference: DocReference, frame: ReferenceFrame,
     case "link":
       return resolveLink(reference.path, reference.anchor, frame, index);
     case "token": {
-      const external = frame.externalNames.get(reference.text);
-      if (external !== undefined) return resolved({ via: "external", reason: external.reason });
-      const missing = missingSegments(reference.text, reference.segments, index);
-      return missing.length === 0 ? resolved({ via: "source" }) : dangling({ kind: "not-in-source", missing });
+      const external = frame.externalNames.byName.get(reference.text);
+      return external === undefined ? resolveWordInSource(reference, index) : resolved({ via: "external", reason: external.reason });
     }
     case "spec":
       return resolveSpecHeader(reference.path, frame, index);

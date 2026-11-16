@@ -23,6 +23,7 @@ import {
   type DocReferenceOptions,
 } from "../../../src/linter/programmatic/no-dangling-doc-reference";
 import type { DanglingReason, DocReference, DocReferenceScope, ProjectSnapshot } from "../../../src/linter/doc-references/types";
+import { NO_EXTERNAL_NAMES } from "../../../src/linter/doc-references/external-names";
 import { referenceIndex } from "../../../src/linter/doc-references/reference-index";
 import { baselineKey } from "../../../src/linter/programmatic/baseline";
 import { parseProjectConfig } from "../../../src/linter/programmatic/config";
@@ -37,7 +38,7 @@ const SCOPE: DocReferenceScope = {
   plans: [reasoned(".claude/plans/")],
   exclude: [reasoned("docs/vendored/")],
   sourceRoots: ["engine/src"],
-  externalNames: [],
+  externalNames: NO_EXTERNAL_NAMES,
 };
 
 const optionsFor = (project: FakeProject, unwalked: FakeProject = {}, baseline: readonly string[] = []): DocReferenceOptions => ({
@@ -314,38 +315,89 @@ describe("external names: words the documents name that live outside the source"
   });
 
   describe("externalNameDrift: the full run reports a listed name that has decayed", () => {
-    const docs = [
-      { path: "docs/telemetry.md", content: "# Telemetry\n\n`ai.llm.tokens_in` and `answer_correctness`, `faithfulness`.\n" },
-      { path: "docs/vendored/x.md", content: "`ai.llm.tokens_out`\n" },
-      { path: "skills/x/SKILL.md", content: "`ai.llm.tokens_out`\n" },
-    ];
+    const docs: FakeProject = {
+      "docs/telemetry.md": "# Telemetry\n\n`ai.llm.tokens_in` and `answer_correctness`, `faithfulness`.\n",
+      "docs/vendored/x.md": "`ai.llm.tokens_out`\n",
+      "skills/x/SKILL.md": "`ai.llm.tokens_out`\n",
+    };
+
+    /** The drift pass over in-memory files, recording which ones it read. */
+    const drift = (scope: DocReferenceScope | null, files: FakeProject, index = fakeIndex(SOURCE)) => {
+      const read: string[] = [];
+      const lines = externalNameDrift(scope, {
+        paths: Object.keys(files),
+        read: (path) => {
+          read.push(path);
+          const content = files[path];
+          if (content === undefined) throw new Error(`read outside the candidates: ${path}`);
+          return content;
+        },
+      }, index);
+      return { lines, read };
+    };
+    const only = (path: string): FakeProject => ({ [path]: docs[path] ?? "" });
 
     it("names an unreferenced name and a name the source already holds, each with its group's reason", () => {
       const scope = parsedScope([telemetry, scorers]);
-      expect(externalNameDrift(scope, docs.filter(({ path }) => path === "docs/telemetry.md"), fakeIndex(SOURCE))).toEqual([
+      expect(drift(scope, only("docs/telemetry.md")).lines).toEqual([
         "docReferences.externalNames: ai.llm.tokens_out (no governed document references it — delete the name; listed because OpenTelemetry attributes emitted at runtime)",
         "docReferences.externalNames: faithfulness (the source already resolves it, so it is not external — delete the name; listed because Python eval scorers)",
       ]);
     });
 
-    it("counts only the governed files: a reference in an excluded or ungoverned file keeps nothing alive", () => {
+    it("counts only the governed files, and reads only them: a reference in an excluded or ungoverned file keeps nothing alive", () => {
       const scope = { ...parsedScope([telemetry]), exclude: [reasoned("docs/vendored/")] };
-      expect(externalNameDrift(scope, docs, fakeIndex(SOURCE))).toEqual([
-        expect.stringContaining("ai.llm.tokens_out (no governed document references it"),
-      ]);
+      const { lines, read } = drift(scope, docs);
+      expect(lines).toEqual([expect.stringContaining("ai.llm.tokens_out (no governed document references it")]);
+      expect(read).toEqual(["docs/telemetry.md"]);
     });
 
     it("counts only a word reference written exactly: a call or a longer dotted path is not the name", () => {
       const scope = parsedScope([{ names: ["faithfulness_v2"], reason: "a scorer" }]);
-      const calls = [{ path: "docs/a.md", content: "`faithfulness_v2()` and `faithfulness_v2.score`\n" }];
-      expect(externalNameDrift(scope, calls, fakeIndex({}))).toEqual([expect.stringContaining("faithfulness_v2 (no governed document")]);
+      const calls = { "docs/a.md": "`faithfulness_v2()` and `faithfulness_v2.score`\n" };
+      expect(drift(scope, calls, fakeIndex({})).lines).toEqual([expect.stringContaining("faithfulness_v2 (no governed document")]);
     });
 
-    it("reports nothing with no scope, no external names, or every name live", () => {
-      expect(externalNameDrift(null, docs, fakeIndex(SOURCE))).toEqual([]);
-      expect(externalNameDrift(SCOPE, docs, fakeIndex(SOURCE))).toEqual([]);
+    it("counts a name a governed source file's comment references", () => {
+      const scope = { ...parsedScope([{ names: ["gen_ai.usage.input_tokens"], reason: "an OpenTelemetry attribute" }]), govern: [reasoned("docs/"), reasoned("src/")] as const };
+      const files = { "src/span.ts": "/** Sets `gen_ai.usage.input_tokens` on the span. */\nexport const span = 1;\n" };
+      expect(drift(scope, files, fakeIndex({})).lines).toEqual([]);
+    });
+
+    describe("a governed file whose references cannot be read", () => {
+      const unclosed = "# Notes\n\n```ts\nconst x = 1;\n";
+      const scope = parsedScope([telemetry, scorers]);
+
+      it("does not throw, calls no name unreferenced, names the file — and still reports a name the source resolves", () => {
+        const files = { ...only("docs/telemetry.md"), "docs/notes.md": unclosed };
+        expect(drift(scope, files).lines).toEqual([
+          "docReferences.externalNames: no name is judged unreferenced (`docs/notes.md`: the code fence opened on line 3 is never closed, so nothing after it is read — close the fence, and the full run judges every name again)",
+          "docReferences.externalNames: faithfulness (the source already resolves it, so it is not external — delete the name; listed because Python eval scorers)",
+        ]);
+      });
+
+      it("judges every name again once the fence is closed", () => {
+        const files = { ...only("docs/telemetry.md"), "docs/notes.md": `${unclosed}\`\`\`\n` };
+        expect(drift(scope, files).lines).toEqual([
+          expect.stringContaining("ai.llm.tokens_out (no governed document references it"),
+          expect.stringContaining("faithfulness (the source already resolves it"),
+        ]);
+      });
+
+      it("withholds nothing for an unclosed fence the scope does not govern", () => {
+        const files = { ...only("docs/telemetry.md"), "skills/x/notes.md": unclosed };
+        expect(drift(scope, files).lines).toEqual([
+          expect.stringContaining("ai.llm.tokens_out (no governed document references it"),
+          expect.stringContaining("faithfulness (the source already resolves it"),
+        ]);
+      });
+    });
+
+    it("reports nothing, and reads nothing, with no scope, no external names, or every name live", () => {
+      expect(drift(null, docs)).toEqual({ lines: [], read: [] });
+      expect(drift(SCOPE, docs)).toEqual({ lines: [], read: [] });
       const live = parsedScope([{ names: ["ai.llm.tokens_in", "answer_correctness"], reason: "external" }]);
-      expect(externalNameDrift(live, docs, fakeIndex(SOURCE))).toEqual([]);
+      expect(drift(live, docs).lines).toEqual([]);
     });
   });
 });

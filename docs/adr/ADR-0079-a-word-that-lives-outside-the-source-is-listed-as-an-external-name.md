@@ -39,7 +39,8 @@ them: groups of exact names, each group with the reason its names live outside t
 
 - **Shape.** `externalNames: { names: string[]; reason: string }[]`, optional, parsed strictly with the rest
   of `docReferences` (`linter/programmatic/config.ts`). A group with no names or no reason, an unknown key, a
-  name listed twice and a name that is not a word are refused by name.
+  name listed twice and a name that is not a word are refused by name. The parse indexes the groups once
+  (`externalNameIndex`, which refuses a name listed twice), and the scope carries that index.
 - **A name is a word.** `parseExternalName` (`linter/doc-references/external-names.ts`) accepts exactly the
   strings the extractor reads as a word reference: one word or dotted path. A glob, whitespace, a path, a
   file name, a call, placeholder grammar and another document's id are refused, so a listed name is always
@@ -50,11 +51,15 @@ them: groups of exact names, each group with the reason its names live outside t
   file names, links, spec ids and ADR ids never read the list.
 - **Decay.** As with every list that only subtracts, the full run reports an entry that names nothing:
   - a listed name no governed file references as a word is unreferenced;
-  - a listed name the source already resolves, judged by the same resolver with no external names, is
-    not external.
+  - a listed name the source already resolves, judged by the resolver's word seam (`resolveWordInSource`)
+    that a word reference reaches once no external name answers it, is not external.
   `externalNameDrift` (`no-dangling-doc-reference.ts`) decides both over every governed file of the project,
   never a targeted run's subset, and `lint-project` reports each as a stale entry naming its group's reason.
-  The shell reads the files; the decision is pure.
+  While a governed file's references cannot be read (an unclosed fence), a name only it uses would look
+  unreferenced, so no name is judged unreferenced and one stale entry names the unreadable file instead;
+  names the source resolves are still reported. The engine decides which of the files the run lints are
+  governed, and that a scope with no external names has nothing to judge; the shell lists those files and
+  reads the ones the engine asks for.
 - **Unchanged.** Lint coverage and `--init` do not read the field; a project without it behaves as before.
 
 ## Consequences

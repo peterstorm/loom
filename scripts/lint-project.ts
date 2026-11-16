@@ -403,16 +403,15 @@ function writeBaseline(config: LinterConfig.ProgrammaticConfig): void {
  * The external names (`docReferences.externalNames`) that have decayed: a name
  * no governed file references, or one the source already resolves. Judged over
  * every governed file of the project, never a targeted run's subset, so a
- * name is not called unreferenced because its document was not named. The
- * decision is the engine's (`externalNameDrift`); this shell only reads.
+ * name is not called unreferenced because its document was not named. Which
+ * files are governed, and whether there is anything to judge at all, are the
+ * engine's decision (`externalNameDrift`); this shell only lists the files the
+ * run lints and reads the ones the engine asks for.
  */
 function externalNamesDrift(config: LinterConfig.ProgrammaticConfig): readonly string[] {
-  const scope = config.docReferences ?? null;
-  if (scope === null || scope.externalNames.length === 0) return [];
-  const governed = applyExclusions(projectFiles(config), config.exclude ?? []).lint
-    .filter((file) => readingOf(projectPath(file), scope) !== null)
-    .map((file) => ({ path: projectPath(file), content: readFileSync(file, "utf-8") }));
-  return externalNameDrift(scope, governed, authoritativeLintContext(config, PROJECT_ROOT).references);
+  const paths = applyExclusions(projectFiles(config), config.exclude ?? []).lint.map(projectPath);
+  const read = (path: string): string => readFileSync(join(PROJECT_ROOT, path), "utf-8");
+  return externalNameDrift(config.docReferences ?? null, { paths, read }, authoritativeLintContext(config, PROJECT_ROOT).references);
 }
 
 // ---------------------------------------------------------------------------

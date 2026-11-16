@@ -11,6 +11,7 @@ import {
   type ProgrammaticConfig,
 } from "../../../src/linter/programmatic/config";
 import { createProgrammaticRules } from "../../../src/linter/programmatic";
+import { NO_EXTERNAL_NAMES } from "../../../src/linter/doc-references/external-names";
 import { authoritativeLintContext, loadProjectConfig, loadRules } from "../../../src/linter/loader";
 import { isProgrammaticRule } from "../../../src/linter/types";
 import { LOOM_RULES_DIR, REPO_ROOT } from "../loom-project-config";
@@ -489,7 +490,7 @@ describe("doc-reference config: the governed scope and its baseline", () => {
     })).toEqual({
       ok: true,
       value: {
-        docReferences: { govern: [reasoned("docs/")], plans: [], exclude: [], sourceRoots: ["engine/src", "engine"], externalNames: [] },
+        docReferences: { govern: [reasoned("docs/")], plans: [], exclude: [], sourceRoots: ["engine/src", "engine"], externalNames: NO_EXTERNAL_NAMES },
         docReferenceBaseline: ["docs/a.md::gone.md"],
       },
     });
@@ -500,10 +501,16 @@ describe("doc-reference config: the governed scope and its baseline", () => {
       { names: ["ai.llm.tokens_in", "ai.llm.tokens_out"], reason: "OpenTelemetry attributes emitted at runtime" },
       { names: ["Sites.Selected"], reason: "a Microsoft Graph permission" },
     ];
-    expect(parse({ docReferences: { govern: [reasoned("docs/")], externalNames } })).toMatchObject({
-      ok: true,
-      value: { docReferences: { externalNames } },
-    });
+    const parsed = parse({ docReferences: { govern: [reasoned("docs/")], externalNames } });
+    expect(parsed).toMatchObject({ ok: true, value: { docReferences: { externalNames: { groups: externalNames } } } });
+    // Indexed once, at the parse: every name to its group.
+    const scope = parsed.ok ? parsed.value.docReferences : undefined;
+    expect([...(scope?.externalNames.byName.keys() ?? [])]).toEqual(["ai.llm.tokens_in", "ai.llm.tokens_out", "Sites.Selected"]);
+  });
+
+  it("stores a group's reason trimmed, as it was judged non-empty", () => {
+    const parsed = parse({ docReferences: { govern: [reasoned("docs/")], externalNames: [{ names: ["Mail.Send"], reason: "  a Graph permission \n" }] } });
+    expect(parsed.ok && parsed.value.docReferences?.externalNames.groups).toEqual([{ names: ["Mail.Send"], reason: "a Graph permission" }]);
   });
 
   const named = (externalNames: unknown) => ({ docReferences: { govern: [reasoned("docs/")], externalNames } });

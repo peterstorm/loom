@@ -137,8 +137,8 @@ export type DocReferenceScope = Readonly<{
   exclude: readonly ReasonedPath[];
   /** Directories a path may also be written relative to (`engine/src`), after the referring file's directory and the root. */
   sourceRoots: readonly string[];
-  /** Words the documents name though the source never spells them, each group with its reason (`external-names.ts`). */
-  externalNames: readonly ExternalNameGroup[];
+  /** Words the documents name though the source never spells them, each group with its reason, indexed once at the parse (`external-names.ts`). */
+  externalNames: ExternalNameIndex;
 }>;
 
 /**
@@ -152,5 +152,12 @@ export type ExternalName = string & { readonly __brand: "ExternalName" };
 /** External names that share one reason for living outside the source. */
 export type ExternalNameGroup = Readonly<{ names: readonly [ExternalName, ...ExternalName[]]; reason: string }>;
 
-/** Every external name of a scope, to the group that lists it (`externalNameIndex`). */
-export type ExternalNameIndex = ReadonlyMap<string, ExternalNameGroup>;
+/**
+ * A scope's external names: its groups in the order listed, and every name to
+ * the one group that lists it. Only `externalNameIndex` mints one, and it
+ * refuses a name listed twice, so no name belongs to two groups.
+ */
+export type ExternalNameIndex = Readonly<{
+  groups: readonly ExternalNameGroup[];
+  byName: ReadonlyMap<string, ExternalNameGroup>;
+}> & { readonly __brand: "ExternalNameIndex" };

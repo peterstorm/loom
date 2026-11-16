@@ -314,6 +314,13 @@ describe("lint-project.ts, spawned over a temporary project", () => {
       "docReferences.externalNames: area (no governed document references it — delete the name; listed because OpenTelemetry attributes emitted at runtime)",
     ]);
 
+    // --no-baseline-check skips the drift pass, external names with it: the tier itself is clean.
+    for (const targets of [[], ["src/shape.ts"]]) {
+      const unchecked = lintProject("--json", "--no-baseline-check", ...targets);
+      expect(unchecked.status, unchecked.stdout + unchecked.stderr).toBe(0);
+      expect(jsonReport(unchecked.stdout)).toMatchObject({ violations: [], staleEntries: [] });
+    }
+
     writeFileSync(join(project, "docs", "shape.md"), "# Shape\n\n`area` is computed in source.\n");
     const inSource = lintProject("--json");
     expect(inSource.status).toBe(1);

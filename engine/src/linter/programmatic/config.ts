@@ -20,8 +20,8 @@ import { parseExcludePatternListOrThrow, type ExcludePattern } from "../exclude-
 import { isPositiveInt, type PositiveInt } from "../positive-int";
 import { parseBaselineKey, type Baseline } from "./baseline";
 import { underPrefix, type BoundaryRule, type CapabilityGrant } from "./no-cross-boundary-imports";
-import { describeExternalNameRefusal, parseExternalName } from "../doc-references/external-names";
-import type { DocReferenceScope, ExternalNameGroup } from "../doc-references/types";
+import { describeExternalNameRefusal, externalNameIndex, NO_EXTERNAL_NAMES, parseExternalName } from "../doc-references/external-names";
+import type { DocReferenceScope, ExternalNameGroup, ExternalNameIndex } from "../doc-references/types";
 import type { ReasonedPath } from "../types";
 
 // --- Config types ---
@@ -412,7 +412,7 @@ function parseOptionalDocReferences(raw: unknown, filePath: string): DocReferenc
     plans: Object.freeze(parseOptionalReasonedPaths(obj.plans, filePath, "docReferences.plans") ?? []),
     exclude: Object.freeze(parseOptionalReasonedPaths(obj.exclude, filePath, "docReferences.exclude") ?? []),
     sourceRoots: Object.freeze(sourceRoots.map((root) => root.replace(/\/+$/, ""))),
-    externalNames: Object.freeze(parseOptionalExternalNames(obj.externalNames, where) ?? []),
+    externalNames: parseOptionalExternalNames(obj.externalNames, where),
   });
 }
 
@@ -428,26 +428,26 @@ function parseExternalNameGroup(raw: unknown, where: string): ExternalNameGroup 
   });
   const [first, ...rest] = names;
   if (first === undefined) return refuse(`${where}.names must not be empty — delete the group instead`);
-  if (typeof obj.reason !== "string" || obj.reason.trim().length === 0) {
+  const reason = typeof obj.reason === "string" ? obj.reason.trim() : "";
+  if (reason.length === 0) {
     return refuse(`${where}.reason must be a non-empty string — every external name states why the source never holds it`);
   }
   const listed: ExternalNameGroup["names"] = [first, ...rest];
-  return Object.freeze({ names: Object.freeze(listed), reason: obj.reason });
+  return Object.freeze({ names: Object.freeze(listed), reason });
 }
 
 /**
  * `externalNames: [{ names, reason }]` — the words the documents name that live
- * outside the source. Optional; present, every group is non-empty and reasoned,
- * and a name listed twice (in one group or two) is refused.
+ * outside the source, indexed once here (`externalNameIndex`). Optional;
+ * present, every group is non-empty and reasoned, and a name listed twice (in
+ * one group or two) is refused.
  */
-function parseOptionalExternalNames(raw: unknown, where: string): ExternalNameGroup[] | undefined {
-  if (raw === undefined) return undefined;
+function parseOptionalExternalNames(raw: unknown, where: string): ExternalNameIndex {
+  if (raw === undefined) return NO_EXTERNAL_NAMES;
   if (!Array.isArray(raw)) return refuse(`${where}.externalNames must be an array of { names, reason }`);
   const groups = raw.map((group: unknown, index) => parseExternalNameGroup(group, `${where}.externalNames[${index}]`));
-  const names = groups.flatMap((group) => group.names);
-  const twice = names.find((name, index) => names.indexOf(name) !== index);
-  if (twice !== undefined) refuse(`${where}.externalNames lists '${twice}' twice`);
-  return groups;
+  const indexed = externalNameIndex(groups);
+  return indexed.ok ? indexed.value : refuse(`${where}.externalNames lists '${indexed.error.name}' twice`);
 }
 
 type DuplicateBlockConfigKey = "duplicateBlockMinTokens" | "duplicateBlockMinLines" | "duplicateBlockBaseline";

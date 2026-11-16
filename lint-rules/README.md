@@ -457,7 +457,9 @@ reads nothing until `docReferences` names what it governs:
   extension of a name, not a call of it, and never a path, link, spec id or ADR
   id. The full run reports an external name no governed document references,
   and one the source already resolves (it is not external), each with its
-  group's reason.
+  group's reason. While a governed file's references cannot be read (an
+  unclosed code fence), no name is reported as unreferenced — a name only that
+  file uses would look unused — and one stale entry names the file instead.
 - **A spec id** goes through the engine's spec parser; a spec it refuses is
   reported with the parser's reason. **An ADR id** must name a file in
   `docs/adr/`, numbered with an ADR prefix or with adr-tools' bare four digits.

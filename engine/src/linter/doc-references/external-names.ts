@@ -20,7 +20,7 @@
  */
 
 import { spanReference } from "./extract";
-import { resolveReference, type ReferenceFrame } from "./resolve";
+import { resolveWordInSource } from "./resolve";
 import type { ExternalName, ExternalNameGroup, ExternalNameIndex, ReferenceIndex } from "./types";
 
 /** Why a configured string is not an external name. */
@@ -67,9 +67,37 @@ export function describeExternalNameRefusal(refusal: ExternalNameRefusal): strin
   }
 }
 
-/** Every listed name, to its group. The config parse refuses a name listed twice. */
-export const externalNameIndex = (groups: readonly ExternalNameGroup[]): ExternalNameIndex =>
-  new Map(groups.flatMap((group) => group.names.map((name) => [name, group] as const)));
+/** Why groups do not make an index: a name listed twice, in one group or two. */
+export type ExternalNameIndexRefusal = Readonly<{ kind: "listed-twice"; name: ExternalName }>;
+
+export type ExternalNameIndexing =
+  | Readonly<{ ok: true; value: ExternalNameIndex }>
+  | Readonly<{ ok: false; error: ExternalNameIndexRefusal }>;
+
+/**
+ * The groups as an index: every listed name to its one group. The only way to
+ * mint an `ExternalNameIndex`, so no index holds a name twice — the config
+ * parse builds the scope's one index here.
+ */
+export function externalNameIndex(groups: readonly ExternalNameGroup[]): ExternalNameIndexing {
+  const byName = new Map<string, ExternalNameGroup>();
+  for (const group of groups) {
+    for (const name of group.names) {
+      if (byName.has(name)) return { ok: false, error: { kind: "listed-twice", name } };
+      byName.set(name, group);
+    }
+  }
+  return { ok: true, value: minted(groups, byName) };
+}
+
+/** The brand, stamped where the invariant was just checked — `externalNameIndex`, and the empty index. */
+function minted(groups: readonly ExternalNameGroup[], byName: ReadonlyMap<string, ExternalNameGroup>): ExternalNameIndex {
+  const index: Omit<ExternalNameIndex, "__brand"> = Object.freeze({ groups: Object.freeze([...groups]), byName });
+  return index as ExternalNameIndex;
+}
+
+/** A scope with no external names: the source alone resolves a word. */
+export const NO_EXTERNAL_NAMES: ExternalNameIndex = minted([], new Map());
 
 /** Why a listed external name no longer earns its place. */
 export type StaleExternalName = Readonly<{
@@ -79,27 +107,34 @@ export type StaleExternalName = Readonly<{
   why: "unreferenced" | "in-source";
 }>;
 
-/** A frame with no external names: what the source alone resolves. A word reference reads nothing else of a frame. */
-const SOURCE_ONLY: ReferenceFrame = Object.freeze({ from: "", sourceRoots: [], externalNames: new Map() });
-
 /** Does the source corpus already resolve the name, as the resolver decides a word reference written so? */
 function resolvedBySource(name: ExternalName, index: ReferenceIndex): boolean {
   const reference = spanReference({ line: 0, text: name });
-  return reference !== null && resolveReference(reference, SOURCE_ONLY, index).ok;
+  return reference?.kind === "token" && resolveWordInSource(reference, index).ok;
 }
 
 /**
- * The listed names that have decayed. `referenced` is the text of every word
- * reference the governed documents make, read over the whole project; a name
- * both unreferenced and held by the source is reported once, as unreferenced.
+ * What the governed files reference, as the decay check reads it: every word
+ * reference they make, or `withheld` when some governed file could not be
+ * read — a name only that file uses would look unreferenced, so no name is
+ * judged unreferenced.
+ */
+export type ReferencedWords =
+  | Readonly<{ kind: "read"; words: ReadonlySet<string> }>
+  | Readonly<{ kind: "withheld" }>;
+
+/**
+ * The listed names that have decayed. A name both unreferenced and held by
+ * the source is reported once, as unreferenced; while `referenced` is
+ * withheld, only the names the source already resolves are reported.
  */
 export function staleExternalNames(
-  groups: readonly ExternalNameGroup[],
-  referenced: ReadonlySet<string>,
+  names: ExternalNameIndex,
+  referenced: ReferencedWords,
   index: ReferenceIndex,
 ): readonly StaleExternalName[] {
-  return groups.flatMap((group) => group.names.flatMap((name): readonly StaleExternalName[] => {
-    if (!referenced.has(name)) return [{ name, group, why: "unreferenced" }];
+  return names.groups.flatMap((group) => group.names.flatMap((name): readonly StaleExternalName[] => {
+    if (referenced.kind === "read" && !referenced.words.has(name)) return [{ name, group, why: "unreferenced" }];
     return resolvedBySource(name, index) ? [{ name, group, why: "in-source" }] : [];
   }));
 }

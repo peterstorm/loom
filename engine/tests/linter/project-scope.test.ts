@@ -7,6 +7,7 @@ import {
   scopeOf,
   walkedBesides,
 } from "../../src/linter/project-scope";
+import { NO_EXTERNAL_NAMES } from "../../src/linter/doc-references/external-names";
 import type { ProgrammaticConfig } from "../../src/linter/programmatic/config";
 import { LOOM_CONFIG } from "./loom-project-config";
 
@@ -25,7 +26,7 @@ describe("project scope: everything lintable, minus explicit exclusions", () => 
         plans: [{ path: ".claude/plans/", reason: "plans" }],
         exclude: [],
         sourceRoots: [],
-        externalNames: [],
+        externalNames: NO_EXTERNAL_NAMES,
       },
     };
     expect(walkedBesides(config)).toEqual([".claude/notes.md", ".claude/plans/"]);
@@ -93,7 +94,7 @@ describe("scopeDrift: every subtracting list reports its own decay", () => {
         plans: [{ path: ".claude/plans/", reason: "gone" }],
         exclude: [{ path: "src/api/", reason: "live" }],
         sourceRoots: ["src", "lib"],
-        externalNames: [],
+        externalNames: NO_EXTERNAL_NAMES,
       },
     };
     expect(scopeDrift(config, files)).toEqual([

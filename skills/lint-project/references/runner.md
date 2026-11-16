@@ -63,7 +63,9 @@ pure root, a per-file capability grant for a file that no longer exists, or
 an external name (`docReferences.externalNames`) that no governed document
 references or that the source already resolves. Every list that subtracts from
 the linter's reach is checked for decay. Scoping entries and external names are
-judged against the whole project even on a run given paths.
+judged against the whole project even on a run given paths. While a governed
+file cannot be read (an unclosed code fence), no external name is reported as
+unreferenced; one stale entry names that file until its fence is closed.
 
 A full-tier run also fails on each **coverage gap** (ADR-0075): an opt-in rule
 family — `boundaries`, `pureModules`, `requireGovernance`, `docReferences` —
