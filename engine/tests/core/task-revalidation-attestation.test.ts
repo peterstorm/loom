@@ -7,6 +7,8 @@
  */
 import { describe, expect, it } from "vitest";
 import { armImplementationAttestation } from "../../src/core/implementation-lifecycle";
+import { derivePendingTaskProof, redThenGreenEra, type ProofObligation } from "../../src/core/proof-obligations";
+import { taskArtifactExpectation } from "../../src/core/task-artifact-expectation";
 import { returnToRevalidation } from "../../src/core/task-revalidation";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
 import { taskVerificationPolicy } from "../../src/core/verification-policy";
@@ -25,21 +27,39 @@ const attestedTask = (): Task => {
   return command.value.task;
 };
 
-const obligationKinds = (task: Task): readonly string[] =>
-  (task.proof?.obligations ?? []).map((obligation) => JSON.stringify(obligation));
+const obligationKinds = (task: Task): readonly ProofObligation["kind"][] =>
+  (task.proof?.obligations ?? []).map(({ kind }) => kind);
+
+const ATTESTED_KINDS: readonly ProofObligation["kind"][] = ["attempt-scope-attested", "declared-artifact-attested"];
 
 describe("returnToRevalidation of an attested Task", () => {
   it("ends attestation mode, so the reopened Task's dispatch no longer forbids changes", () => {
     const attested = attestedTask();
+    expect(obligationKinds(attested).some((kind) => ATTESTED_KINDS.includes(kind))).toBe(true);
     const before = deriveTaskImplementationDispatch(attested);
     expect(before.kind === "dispatch" && before.dispatch.promptAppendix).toContain("LOOM_IMPLEMENTATION_ATTESTATION_CONTEXT");
 
     const reopened = returnToRevalidation(attested, undefined);
     expect(reopened.implementation_attestation).toBeUndefined();
-    expect(obligationKinds(reopened).some((kind) => kind.includes("attested"))).toBe(false);
+    expect(obligationKinds(reopened).some((kind) => ATTESTED_KINDS.includes(kind))).toBe(false);
     const after = deriveTaskImplementationDispatch(reopened);
     expect(after.kind).toBe("dispatch");
     if (after.kind === "dispatch") expect(after.dispatch.promptAppendix ?? "").not.toContain("LOOM_IMPLEMENTATION_ATTESTATION_CONTEXT");
+  });
+
+  it("derives exactly the agent's normal pending Proof under the Task's current policy", () => {
+    const attested = attestedTask();
+    const reopened = returnToRevalidation(attested, undefined);
+    expect(reopened.proof).toEqual(derivePendingTaskProof({
+      verificationPolicy: taskVerificationPolicy(attested),
+      declaredArtifacts: attested.file_list ?? [],
+      declaredArtifactExpectation: taskArtifactExpectation({ agent: attested.agent }),
+      redThenGreen: redThenGreenEra(undefined),
+    }));
+    // Attestation's policy carries over: regression stays owed, new tests stay waived.
+    expect(obligationKinds(reopened)).toContain("regression-test-pass");
+    expect(obligationKinds(reopened)).not.toContain("new-tests");
+    expect(obligationKinds(reopened)).toContain("declared-artifact-changed");
   });
 
   it("keeps the Task's current policy and marks it for revalidation at a new Review Generation", () => {

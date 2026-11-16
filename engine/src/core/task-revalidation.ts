@@ -41,19 +41,15 @@ import type { ReopenedTaskIds, Task, TaskGraph } from "../types";
  * tests waived) and its agent's normal declared-artifact expectation.
  */
 export function returnToRevalidation(task: Task, verificationManifest: FrozenVerificationManifest | undefined): Task {
+  // The exit from the mode `armImplementationAttestation` (implementation-lifecycle) enters.
   const { implementation_attestation: attested, ...unattested } = task;
-  const proof = attested === true
-    ? derivePendingTaskProof({
-        verificationPolicy: taskVerificationPolicy(task),
-        declaredArtifacts: task.file_list ?? [],
-        declaredArtifactExpectation: taskArtifactExpectation({ agent: task.agent }),
-        redThenGreen: redThenGreenEra(verificationManifest),
-      })
-    : task.proof ?? derivePendingTaskProof({
-        verificationPolicy: taskVerificationPolicy(task),
-        declaredArtifacts: task.file_list ?? [],
-        redThenGreen: redThenGreenEra(verificationManifest),
-      });
+  const kept = attested === true ? undefined : task.proof;
+  const proof = kept ?? derivePendingTaskProof({
+    verificationPolicy: taskVerificationPolicy(task),
+    declaredArtifacts: task.file_list ?? [],
+    ...(attested === true ? { declaredArtifactExpectation: taskArtifactExpectation({ agent: task.agent }) } : {}),
+    redThenGreen: redThenGreenEra(verificationManifest),
+  });
   return {
     ...unattested,
     status: "pending",
