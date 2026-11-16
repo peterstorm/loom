@@ -456,6 +456,29 @@ function populatedTask(source: PopulatedTaskSource, proofBoundary: PopulationPro
   });
 }
 
+const NO_SPEC_TRACE_INDEX: SpecIndexAvailability = Object.freeze({
+  kind: "unavailable",
+  reason: Object.freeze({ kind: "no-spec-file" }),
+});
+
+/**
+ * The pending record of one authored Task that joins a populated TaskGraph
+ * after population (a Forward Fix Task), written by the same `populatedTask`
+ * every authored Task goes through. It carries no Requirement trace (so no
+ * Spec Index is consulted), sits in no contract's red window, and has no
+ * population proof boundary: its first registration stamps its own baseline.
+ */
+export function pendingAuthoredTask(
+  task: Omit<AuthoredTask, "spec_anchors" | "spec_contributions">,
+  redThenGreen: RedThenGreenEra,
+): Task {
+  return populatedTask(
+    { role: "authored", task: { ...task, spec_anchors: [], spec_contributions: [] }, specIndex: NO_SPEC_TRACE_INDEX, inRedWindow: false },
+    Object.freeze({ kind: "absent", cause: "joined after population" }),
+    redThenGreen,
+  );
+}
+
 /**
  * What the one planner (`planDistillTasks`) decides for this roster: the
  * authored roster, the contract Tasks and frozen paths of the contracts
@@ -563,6 +586,7 @@ export function populateTaskGraph(
     wave_gate_history: _staleWaveGateHistory,
     wave_reopening_history: _staleWaveReopeningHistory,
     task_reopening_history: _staleTaskReopeningHistory,
+    forward_fix_history: _staleForwardFixHistory,
     orphaned_wave_gate_history: _staleOrphanedWaveGateHistory,
     spec_trace_wave_gate_retirements: _staleSpecTraceRetirements,
     spec_trace_amendments: _staleSpecTraceAmendments,

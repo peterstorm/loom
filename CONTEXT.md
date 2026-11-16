@@ -32,6 +32,10 @@ _Avoid_: Plugin, module, prompt
 An event-driven handler the harness runs before or after a tool call, when an Agent starts or stops, and when a session starts. Enforces invariants, records evidence, and mutates state.
 _Avoid_: Trigger, callback, listener
 
+**Judged Path**:
+A path whose behaviour a Task's tests decide but another Task writes: the subject of a budget, benchmark or acceptance judgement. Decompose declares them per Task (`judged_paths`); every Task writing one sits in the judge's Wave or a later one, so a failed judgement is fixed while the subject's Wave is open. When an undeclared judgement fails on sealed code, the fallback is a Forward Fix.
+_Avoid_: Test target, covered file, dependency
+
 **Dispatch**:
 Spawning the Agent for one Task or Phase from an engine-issued instruction. The handler that routes a stopped Agent to its settlement is the "stop dispatcher", never bare "dispatch".
 _Avoid_: Router, multiplexer

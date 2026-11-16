@@ -18,7 +18,7 @@ The validator checks the graph's schema and, when the plan declares executable m
 
 **Routing validation failures: read the error text.**
 
-- Errors about the *task graph* (unknown agent, wave ordering, or an LC machine file "not in any task's file_list") → **re-spawn decompose-agent** with the error details. Decompose can fix these.
+- Errors about the *task graph* (unknown agent, wave ordering, an LC machine file "not in any task's file_list", or a judged path written in an earlier Wave than its judge) → **re-spawn decompose-agent** with the error details. Decompose can fix these. A judged-path refusal that the plan's own phase order forces (the plan builds the judged code in one phase and measures it in a later one) is a plan problem: loop back to Phase 3 as below.
 - Errors about the *plan or its artifacts* (missing `**Machine file:**` / `**Tier:**` / `**Rule file:**` lines, "Model declaration problem" / near-miss headings, AuthoredDag or rule file missing or malformed, plan_file unreadable) → decompose can never fix these; re-spawning it just loops. **Loop back to Phase 3** with the same mechanics as the plan-alignment loop-back:
   ```bash
   bun {LOOM_DIR}/engine/src/cli.ts helper set-phase --phase architecture --clear-artifact plan-alignment

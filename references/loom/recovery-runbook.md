@@ -42,6 +42,20 @@ When a Wave Gate is blocked by critical findings, your own Edit and Write are bl
 1. **Fix through a subagent**, by [Acting on a Finding](../../commands/wave-gate.md#acting-on-a-finding): abandon the run, `reopen-task`, and spawn the fix agent from the reopened Task's brief with the findings as its `--note`s. Never use `populate-task-graph --force`; it resets every Task.
 2. **Run a fresh `/wave-gate`.** It reviews the fix.
 
+## A judgement fails on code a completed Wave sealed
+
+A Task of the active Wave whose tests judge code an earlier, completed Wave wrote (a budget, benchmark or acceptance test) may fail its attempt on that code's breach. It cannot change code outside its own file list, `reopen-task` reaches only the active Wave, and a completed Wave is not reopened for this. Never spend the judge's retry on unchanged code, and never relax the judgement.
+
+With the user's approval, append a Forward Fix to the active Wave for the breaching files, holding the failed judge until it settles:
+
+```bash
+bun {LOOM_DIR}/engine/src/cli.ts helper orchestration add-forward-fix \
+  --wave <N> --hold <judge-task-id> --file <sealed path> [--file <path>]... \
+  --description "<what the fix changes>" --reason "<the failed judgement, with its measured values>"
+```
+
+Then return to the Phase 5 loop: status owes the fix Task's dispatch (render it with `brief`, adding the breach as `--note`s), and the held judge's next attempt once the fix settles. The preconditions and what the helper writes are in `docs/reference/recovery.md` ("A judgement fails on code a completed Wave sealed").
+
 ## Overriding a false positive
 
 Only when a finding is wrong, and only with the user's approval. Pipe the corrected findings through the helpers the state guard allows:
