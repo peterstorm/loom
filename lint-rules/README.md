@@ -488,7 +488,7 @@ every governed file even on a run given paths.
 `path::reference`, one entry per reference. A name that lives outside the source
 belongs in `externalNames`, not the baseline: the baseline excuses one
 occurrence in one file, the list resolves the name wherever it is written. See
-ADR-0074 and ADR-0078.
+ADR-0074 and ADR-0079.
 
 #### `fugue-generated-integrity`
 

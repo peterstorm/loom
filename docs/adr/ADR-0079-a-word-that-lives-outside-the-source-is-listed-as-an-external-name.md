@@ -1,4 +1,4 @@
-# ADR-0078: A word that lives outside the source is listed as an external name
+# ADR-0079: A word that lives outside the source is listed as an external name
 
 ## Status
 Accepted (2026-11-16). Amends ADR-0074 (how a word reference resolves).
