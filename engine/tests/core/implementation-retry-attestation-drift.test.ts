@@ -15,6 +15,7 @@ import {
 } from "../../src/core/implementation-completion";
 import { deriveImplementationRetryDisposition } from "../../src/core/implementation-retry";
 import { derivePendingTaskProof, TRUSTED_LEDGER_ONLY_POLICY } from "../../src/core/proof-obligations";
+import { semanticAttemptReceipt } from "../fixtures/implementation-settlement";
 import { labelledValue } from "../fixtures/parse-result";
 import { observedEvidence } from "../fixtures/task-lifecycle";
 
@@ -86,5 +87,25 @@ describe("an attestation drift is terminal by its receipt", () => {
 
   it("still replays it as valid once reopening has cleared the attestation flag", () => {
     expect(deriveImplementationRetryDisposition(task(false)).kind).toBe("initial");
+  });
+
+  it("escalates an unremediated drift even without the attestation flag", () => {
+    const drift = driftReceipt();
+    const disposition = deriveImplementationRetryDisposition({
+      id: TASK, implementation_attempt_history: [drift],
+      implementation_retry_protocol: 2, implementation_retry_history_start: 0,
+    });
+    expect(disposition).toMatchObject({ kind: "escalated", receiptId: drift.receiptId, failureKinds: drift.failureKinds });
+  });
+
+  it("keeps an ordinary failure on a non-attested Task a retry", () => {
+    const failure = semanticAttemptReceipt(TASK, 1, []);
+    expect(failure.failureKinds.some((kind) => kind.includes("drifted"))).toBe(false);
+    const disposition = deriveImplementationRetryDisposition({
+      id: TASK, implementation_attempt_history: [failure],
+      implementation_retry_protocol: 2, implementation_retry_history_start: 0,
+    });
+    expect(disposition.kind).toBe("retry");
+    if (disposition.kind === "retry") expect(disposition.context.predecessorReceiptId).toBe(failure.receiptId);
   });
 });
