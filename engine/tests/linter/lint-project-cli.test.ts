@@ -290,6 +290,45 @@ describe("lint-project.ts, spawned over a temporary project", () => {
     ]);
   });
 
+  it("resolves a listed external name, and fails the full run on one that has decayed — on a targeted run too", () => {
+    baselined();
+    mkdirSync(join(project, "docs"));
+    writeFileSync(join(project, "docs", "telemetry.md"), "# Telemetry\n\nThe span carries `ai.llm.tokens_in`.\n");
+    const telemetry = (names: readonly string[]) => configure({
+      docReferences: {
+        govern: [{ path: "docs/", reason: "the docs name the tree" }],
+        externalNames: [{ names, reason: "OpenTelemetry attributes emitted at runtime" }],
+      },
+    });
+
+    telemetry(["ai.llm.tokens_in"]);
+    const live = lintProject("--json");
+    expect(live.status, live.stdout + live.stderr).toBe(0);
+    expect(jsonReport(live.stdout)).toMatchObject({ violations: [], staleEntries: [] });
+
+    telemetry(["ai.llm.tokens_in", "ai.llm.tokens_out", "area"]);
+    const stale = lintProject("--json", "src/shape.ts");
+    expect(stale.status).toBe(1);
+    expect(jsonReport(stale.stdout).staleEntries).toEqual([
+      "docReferences.externalNames: ai.llm.tokens_out (no governed document references it — delete the name; listed because OpenTelemetry attributes emitted at runtime)",
+      "docReferences.externalNames: area (no governed document references it — delete the name; listed because OpenTelemetry attributes emitted at runtime)",
+    ]);
+
+    // --no-baseline-check skips the drift pass, external names with it: the tier itself is clean.
+    for (const targets of [[], ["src/shape.ts"]]) {
+      const unchecked = lintProject("--json", "--no-baseline-check", ...targets);
+      expect(unchecked.status, unchecked.stdout + unchecked.stderr).toBe(0);
+      expect(jsonReport(unchecked.stdout)).toMatchObject({ violations: [], staleEntries: [] });
+    }
+
+    writeFileSync(join(project, "docs", "shape.md"), "# Shape\n\n`area` is computed in source.\n");
+    const inSource = lintProject("--json");
+    expect(inSource.status).toBe(1);
+    expect(jsonReport(inSource.stdout).staleEntries).toContain(
+      "docReferences.externalNames: area (the source already resolves it, so it is not external — delete the name; listed because OpenTelemetry attributes emitted at runtime)",
+    );
+  });
+
   it("refuses to run on an unknown config key (exit 2), naming it", () => {
     configure({ exlude: [] });
     const linted = lintProject("--json");

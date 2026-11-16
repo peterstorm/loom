@@ -2,6 +2,7 @@
 
 ## Status
 Accepted (2026-11-14). Implements E-track Phase A item 4 (`.claude/plans/2026-11-14-e-track-a4-doc-reference-resolver.md`).
+Amended by ADR-0079: a word the project lists as an external name resolves without the source.
 
 ## Context
 The 1,247-finding review classification labels 36 findings doc-dangling across 9 PRs, 5 of them critical:

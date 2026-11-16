@@ -59,8 +59,13 @@ Exit 1 on any violation, any file the linter could not lint, and — in the full
 tier — any **stale entry**: a baseline key no live site consumes, an exclusion
 that matches no file, a pure root, governance root or boundary module that
 matches no file, a declared shell (`impureModules`) that names no file under a
-pure root, or a per-file capability grant for a file that no longer exists.
-Every list that subtracts from the linter's reach is checked for decay.
+pure root, a per-file capability grant for a file that no longer exists, or
+an external name (`docReferences.externalNames`) that no governed document
+references or that the source already resolves. Every list that subtracts from
+the linter's reach is checked for decay. Scoping entries and external names are
+judged against the whole project even on a run given paths. While a governed
+file cannot be read (an unclosed code fence), no external name is reported as
+unreferenced; one stale entry names that file until its fence is closed.
 
 A full-tier run also fails on each **coverage gap** (ADR-0075): an opt-in rule
 family — `boundaries`, `pureModules`, `requireGovernance`, `docReferences` —

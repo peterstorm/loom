@@ -22,7 +22,7 @@ scope by being listed, and nothing is out of scope by being forgotten.
 | Which files must belong to a boundary? | Every file under a `requireGovernance` root — an ungoverned file is a violation, not an allow | `requireGovernance`, `boundaries` |
 | Which rule families must a project decide? | Every opt-in family — `boundaries`, `pureModules`, `requireGovernance`, `docReferences` — is configured, or declined with its reason. One that is neither is a coverage gap, and a gap fails the full tier | `declined: [{ key, reason }]` |
 
-Every subtracting list is checked for decay on each full run: an exclusion, root, shell, boundary, capability grant or baseline entry that names nothing fails the run.
+Every subtracting list is checked for decay on each full run: an exclusion, root, shell, boundary, capability grant, external name or baseline entry that names nothing fails the run.
 
 With no project configuration the boundary rule governs nothing and the purity rule holds nothing pure; the other rules apply as shipped. Such a project is not failed for it, but it is not left to forget either: `lint-project` prints a notice, and each session in it starts with a reminder (to the model and the user) until `lint-project --init` turns every family on or the user silences it for the repository (ADR-0075). Nothing Loom-specific is hard-coded: Loom's own roots, shells, boundaries and exclusions are in its `.claude/linter/rules/config.json`.
 
@@ -174,7 +174,7 @@ The parse is strict: an unknown key (at the top level, in a boundary, an exempti
 | `duplicateBlockMinLines` | `number` | `8` | Lines a copy must span on both sides |
 | `duplicateBlockBaseline` | `string[]` | `[]` | Grandfathered `path::otherPath@digest` copies `no-duplicate-block` excuses, one entry per copy |
 | `wireCastBaseline` | `string[]` | `[]` | Grandfathered `path::as T` / `path::name: T` sites `no-wire-cast` excuses, one entry per site |
-| `docReferences` | `{ govern, plans?, exclude?, sourceRoots? }` | absent (reads nothing) | The documents and comments `no-dangling-doc-reference` holds to the project. `govern` is a non-empty `{ path, reason }[]`; see [`no-dangling-doc-reference`](#no-dangling-doc-reference) |
+| `docReferences` | `{ govern, plans?, exclude?, sourceRoots?, externalNames? }` | absent (reads nothing) | The documents and comments `no-dangling-doc-reference` holds to the project. `govern` is a non-empty `{ path, reason }[]`. `externalNames` is a `{ names, reason }[]`: words and dotted paths the documents may name though the source never spells them, each group non-empty and reasoned; see [`no-dangling-doc-reference`](#no-dangling-doc-reference) |
 | `docReferenceBaseline` | `string[]` | `[]` | Grandfathered `path::reference` mentions `no-dangling-doc-reference` excuses, one entry per reference |
 | `declined` | `{ key, reason }[]` | `[]` | The opt-in families (`boundaries`, `pureModules`, `requireGovernance`, `docReferences`) the project leaves off on purpose, each with why. A key both configured and declined, declined twice or without a reason is refused. A family neither configured nor declined fails the full tier as a coverage gap; an empty `boundaries` or `pureModules` list checks nothing, so it counts as not configured and may be declined |
 
@@ -410,7 +410,11 @@ reads nothing until `docReferences` names what it governs:
     "exclude": [
       { "path": "docs/vendor/", "reason": "upstream text, not ours to keep current" }
     ],
-    "sourceRoots": ["src"]
+    "sourceRoots": ["src"],
+    "externalNames": [
+      { "names": ["ai.llm.tokens_in", "ai.llm.tokens_out"], "reason": "OpenTelemetry attributes the SDK emits at runtime" },
+      { "names": ["Sites.Selected", "Mail.Send"], "reason": "Microsoft Graph permissions, granted in the tenant" }
+    ]
   }
 }
 ```
@@ -442,6 +446,20 @@ reads nothing until `docReferences` names what it governs:
   comment cannot keep a deleted name alive. The match is deliberately lenient:
   a word that occurs anywhere resolves, even when it is not the symbol the
   document means.
+- **An external name** is a word the documents name though the source never
+  spells it: an attribute emitted at runtime, an evaluation scorer, a vendor's
+  permission or model id. List it under `externalNames`, in a group with the
+  reason its names live outside the source, and a word reference written
+  exactly as listed resolves. A name is one word or dotted path, the shape a
+  word reference has: a pattern, whitespace, a path, a file name, a call or a
+  placeholder is refused, as is an empty group, a group without a reason and a
+  name listed twice. Nothing else resolves through the list: not a prefix or an
+  extension of a name, not a call of it, and never a path, link, spec id or ADR
+  id. The full run reports an external name no governed document references,
+  and one the source already resolves (it is not external), each with its
+  group's reason. While a governed file's references cannot be read (an
+  unclosed code fence), no name is reported as unreferenced — a name only that
+  file uses would look unused — and one stale entry names the file instead.
 - **A spec id** goes through the engine's spec parser; a spec it refuses is
   reported with the parser's reason. **An ADR id** must name a file in
   `docs/adr/`, numbered with an ADR prefix or with adr-tools' bare four digits.
@@ -462,11 +480,15 @@ Gate lint only the files they touch; `lint-project` (and so `npm run verify`
 and CI) reads the whole tree, which is where a doc made stale by an edit
 elsewhere is caught. `lint-project` walks a governed or plan path inside a directory the
 walk otherwise skips (`.claude/plans/`), lints a Markdown file only where the
-scope governs it, and reports a `docReferences` entry that matches no file as
-drift.
+scope governs it, and reports a `docReferences` entry that matches no file, and
+an external name that has decayed, as drift. External names are judged over
+every governed file even on a run given paths.
 
 `docReferenceBaseline` grandfathers pre-existing references, keyed
-`path::reference`, one entry per reference. See ADR-0074.
+`path::reference`, one entry per reference. A name that lives outside the source
+belongs in `externalNames`, not the baseline: the baseline excuses one
+occurrence in one file, the list resolves the name wherever it is written. See
+ADR-0074 and ADR-0079.
 
 #### `fugue-generated-integrity`
 

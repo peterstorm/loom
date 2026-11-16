@@ -21,11 +21,21 @@
  * of its heading slugs or HTML anchors; an anchor on any other file (`#L12`)
  * is GitHub's line link and is not judged.
  *
+ * A word resolves when it is one of the project's external names, written
+ * exactly as listed (`external-names.ts`), or when the source holds it.
+ *
  * Pure: a reference and an index in, a `Resolved` or a `DanglingReason` out.
  */
 
 import { posix } from "node:path";
-import { ADR_DIRECTORY, type DanglingReason, type DocReference, type ReferenceIndex, type Resolved } from "./types";
+import {
+  ADR_DIRECTORY,
+  type DanglingReason,
+  type DocReference,
+  type ExternalNameIndex,
+  type ReferenceIndex,
+  type Resolved,
+} from "./types";
 
 export type Resolution =
   | Readonly<{ ok: true; value: Resolved }>
@@ -34,11 +44,13 @@ export type Resolution =
 const resolved = (value: Resolved): Resolution => ({ ok: true, value });
 const dangling = (error: DanglingReason): Resolution => ({ ok: false, error });
 
-/** Where a reference is read from, and where its paths may be written relative to. */
+/** Where a reference is read from, where its paths may be written relative to, and the words the project declares external. */
 export type ReferenceFrame = Readonly<{
   /** The referring file, project-relative. */
   from: string;
   sourceRoots: readonly string[];
+  /** A word reference written exactly as one of these resolves without the source; no other kind of reference reads them. */
+  externalNames: ExternalNameIndex;
 }>;
 
 /** A project-relative path, normalized; null when it is absolute or climbs out of the project. */
@@ -101,11 +113,21 @@ function resolveLink(path: string, anchor: string | null, frame: ReferenceFrame,
     : anchored(target, anchor, index);
 }
 
-/** The words of a token the source does not hold: none when the whole word, or every segment, is held. */
-function missingSegments(text: string, segments: readonly string[], index: ReferenceIndex): readonly string[] {
+/** A word reference as the source half of resolution reads it: its text as written and its dotted segments. */
+export type WordReference = Pick<Extract<DocReference, { kind: "token" }>, "text" | "segments">;
+
+/**
+ * Does the source alone resolve a word? It does when the source holds the
+ * whole word (a call's parentheses dropped), or every one of its segments.
+ * The one place a word meets the source corpus: `resolveReference` asks it
+ * once the external names have not answered, and the decay check
+ * (`external-names.ts`) asks it whether a listed name is external at all.
+ */
+export function resolveWordInSource({ text, segments }: WordReference, index: ReferenceIndex): Resolution {
   const word = text.endsWith("()") ? text.slice(0, -2) : text;
-  if (index.inSource(word)) return [];
-  return segments.filter((segment) => !index.inSource(segment));
+  if (index.inSource(word)) return resolved({ via: "source" });
+  const missing = segments.filter((segment) => !index.inSource(segment));
+  return missing.length === 0 ? resolved({ via: "source" }) : dangling({ kind: "not-in-source", missing });
 }
 
 /** A plan's spec header: the spec must be a file in a frame, and parse. */
@@ -145,8 +167,8 @@ export function resolveReference(reference: DocReference, frame: ReferenceFrame,
     case "link":
       return resolveLink(reference.path, reference.anchor, frame, index);
     case "token": {
-      const missing = missingSegments(reference.text, reference.segments, index);
-      return missing.length === 0 ? resolved({ via: "source" }) : dangling({ kind: "not-in-source", missing });
+      const external = frame.externalNames.byName.get(reference.text);
+      return external === undefined ? resolveWordInSource(reference, index) : resolved({ via: "external", reason: external.reason });
     }
     case "spec":
       return resolveSpecHeader(reference.path, frame, index);

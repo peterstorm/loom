@@ -11,6 +11,7 @@ import {
   type ProgrammaticConfig,
 } from "../../../src/linter/programmatic/config";
 import { createProgrammaticRules } from "../../../src/linter/programmatic";
+import { NO_EXTERNAL_NAMES } from "../../../src/linter/doc-references/external-names";
 import { authoritativeLintContext, loadProjectConfig, loadRules } from "../../../src/linter/loader";
 import { isProgrammaticRule } from "../../../src/linter/types";
 import { LOOM_RULES_DIR, REPO_ROOT } from "../loom-project-config";
@@ -489,10 +490,47 @@ describe("doc-reference config: the governed scope and its baseline", () => {
     })).toEqual({
       ok: true,
       value: {
-        docReferences: { govern: [reasoned("docs/")], plans: [], exclude: [], sourceRoots: ["engine/src", "engine"] },
+        docReferences: { govern: [reasoned("docs/")], plans: [], exclude: [], sourceRoots: ["engine/src", "engine"], externalNames: NO_EXTERNAL_NAMES },
         docReferenceBaseline: ["docs/a.md::gone.md"],
       },
     });
+  });
+
+  it("parses external names: groups of exact words and dotted paths, each group with its reason", () => {
+    const externalNames = [
+      { names: ["ai.llm.tokens_in", "ai.llm.tokens_out"], reason: "OpenTelemetry attributes emitted at runtime" },
+      { names: ["Sites.Selected"], reason: "a Microsoft Graph permission" },
+    ];
+    const parsed = parse({ docReferences: { govern: [reasoned("docs/")], externalNames } });
+    expect(parsed).toMatchObject({ ok: true, value: { docReferences: { externalNames: { groups: externalNames } } } });
+    // Indexed once, at the parse: every name to its group.
+    const scope = parsed.ok ? parsed.value.docReferences : undefined;
+    expect([...(scope?.externalNames.byName.keys() ?? [])]).toEqual(["ai.llm.tokens_in", "ai.llm.tokens_out", "Sites.Selected"]);
+  });
+
+  it("stores a group's reason trimmed, as it was judged non-empty", () => {
+    const parsed = parse({ docReferences: { govern: [reasoned("docs/")], externalNames: [{ names: ["Mail.Send"], reason: "  a Graph permission \n" }] } });
+    expect(parsed.ok && parsed.value.docReferences?.externalNames.groups).toEqual([{ names: ["Mail.Send"], reason: "a Graph permission" }]);
+  });
+
+  const named = (externalNames: unknown) => ({ docReferences: { govern: [reasoned("docs/")], externalNames } });
+  it.each([
+    [named({}), "docReferences.externalNames must be an array of { names, reason }"],
+    [named([{ names: [], reason: "why" }]), "docReferences.externalNames[0].names must not be empty — delete the group instead"],
+    [named([{ names: "faithfulness", reason: "why" }]), "docReferences.externalNames[0].names must be a non-empty array"],
+    [named([{ names: ["faithfulness"] }]), "docReferences.externalNames[0].reason must be a non-empty string"],
+    [named([{ names: ["faithfulness"], reason: "  " }]), "docReferences.externalNames[0].reason must be a non-empty string"],
+    [named([{ names: ["faithfulness"], reason: "why", note: "x" }]), "docReferences.externalNames[0]: unknown key 'note'"],
+    [named([{ names: [""], reason: "why" }]), "docReferences.externalNames[0].names[0] must be a non-empty string"],
+    [named([{ names: [7], reason: "why" }]), "docReferences.externalNames[0].names[0] must be a non-empty string"],
+    [named([{ names: ["ai.llm.*"], reason: "why" }]), "names[0]: 'ai.llm.*' is a pattern"],
+    [named([{ names: ["Mail Send"], reason: "why" }]), "names[0]: 'Mail Send' holds whitespace"],
+    [named([{ names: ["ok", "docs/guide.md"], reason: "why" }]), "names[1]: 'docs/guide.md' is not a word or dotted path"],
+    [named([{ names: ["parseSpec()"], reason: "why" }]), "'parseSpec()' is not a word or dotted path"],
+    [named([{ names: ["faithfulness"], reason: "a" }, { names: ["faithfulness"], reason: "b" }]), "externalNames lists 'faithfulness' twice"],
+    [named(["faithfulness"]), "docReferences.externalNames[0]: expected a JSON object"],
+  ])("refuses external names that would not mean what their author wrote: %j", (json, message) => {
+    expect(parse(json)).toMatchObject({ ok: false, error: expect.stringContaining(message) });
   });
 
   it.each([

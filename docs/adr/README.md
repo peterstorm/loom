@@ -88,8 +88,9 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0071](ADR-0071-the-task-mutation-check-names-surviving-mutants-before-the-stop.md) | The Task mutation check names surviving mutants before the stop | Accepted (2026-11-12) | — |
 | [ADR-0072](ADR-0072-wire-output-typed-without-a-parse-is-refused-at-the-edit.md) | Wire output typed without a parse is refused at the edit | Accepted (2026-11-12) | — |
 | [ADR-0073](ADR-0073-every-documented-wire-example-is-parsed-by-its-production-parser.md) | Every documented wire example is parsed by its production parser | Accepted (2026-11-12) | — |
-| [ADR-0074](ADR-0074-every-doc-reference-resolves-against-the-project.md) | Every doc reference resolves against the project | Accepted (2026-11-14) | — |
+| [ADR-0074](ADR-0074-every-doc-reference-resolves-against-the-project.md) | Every doc reference resolves against the project | Accepted (2026-11-14) | amended by ADR-0079 |
 | [ADR-0075](ADR-0075-every-rule-family-is-on-or-declined.md) | Every rule family is on or declined | Accepted (2026-11-14) | — |
 | [ADR-0076](ADR-0076-shipped-machines-are-pinned-by-digest.md) | Shipped machines are pinned by digest | Accepted (2026-11-16) | — |
 | [ADR-0077](ADR-0077-a-judgement-lands-while-its-subject-is-open-and-is-fixed-forward-otherwise.md) | A judgement lands while its subject is open, and is fixed forward otherwise | Accepted (2026-11-16) | — |
 | [ADR-0078](ADR-0078-successor-reviewers-copy-references-from-an-issued-roster.md) | Successor reviewers copy references from an issued roster | Accepted (2026-11-16) | — |
+| [ADR-0079](ADR-0079-a-word-that-lives-outside-the-source-is-listed-as-an-external-name.md) | A word that lives outside the source is listed as an external name | Accepted (2026-11-16) | amends ADR-0074 |

@@ -4,8 +4,10 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { resolveReference, type ReferenceFrame, type Resolution } from "../../../src/linter/doc-references/resolve";
+import { resolveReference, resolveWordInSource, type ReferenceFrame, type Resolution } from "../../../src/linter/doc-references/resolve";
+import { NO_EXTERNAL_NAMES } from "../../../src/linter/doc-references/external-names";
 import type { DocReference } from "../../../src/linter/doc-references/types";
+import { externalNameGroup, indexedNames } from "./external-name-fixtures";
 import { fakeIndex, VALID_SPEC } from "./fake-snapshot";
 
 const INDEX = fakeIndex(
@@ -27,8 +29,11 @@ const INDEX = fakeIndex(
   },
 );
 
-const FRAME: ReferenceFrame = { from: "engine/src/linter/programmatic/rule.ts", sourceRoots: ["engine/src"] };
-const DOC_FRAME: ReferenceFrame = { from: "docs/guide.md", sourceRoots: ["engine/src"] };
+/** No external names: the source alone resolves a word. */
+const NONE = NO_EXTERNAL_NAMES;
+
+const FRAME: ReferenceFrame = { from: "engine/src/linter/programmatic/rule.ts", sourceRoots: ["engine/src"], externalNames: NONE };
+const DOC_FRAME: ReferenceFrame = { from: "docs/guide.md", sourceRoots: ["engine/src"], externalNames: NONE };
 
 const resolve = (reference: DocReference, frame: ReferenceFrame = FRAME): Resolution => resolveReference(reference, frame, INDEX);
 
@@ -152,10 +157,19 @@ describe("a token resolves in the source text", () => {
   it("dangles naming each segment the source does not hold", () => {
     expect(resolve(token("ledger.voteReason.kind"))).toEqual({ ok: false, error: { kind: "not-in-source", missing: ["voteReason", "kind"] } });
   });
+
+  it.each(["parseSpec", "parseSpec()", "ledger.voteTally", "detectClones.ruleName", "ledger.voteReason.kind", "ai.llm.tokens_in"])(
+    "the word seam is the token case with no external names: `%s`",
+    (text) => {
+      const word = token(text);
+      if (word.kind !== "token") throw new Error("token() builds a token");
+      expect(resolveWordInSource(word, INDEX)).toEqual(resolve(word));
+    },
+  );
 });
 
 describe("a plan's spec header and spec ids", () => {
-  const PLAN: ReferenceFrame = { from: ".claude/plans/p.md", sourceRoots: [] };
+  const PLAN: ReferenceFrame = { from: ".claude/plans/p.md", sourceRoots: [], externalNames: NONE };
 
   it("resolves a spec that parses", () => {
     expect(resolve(spec(".claude/specs/good/spec.md"), PLAN)).toEqual({ ok: true, value: { via: "spec", spec: ".claude/specs/good/spec.md" } });
@@ -190,5 +204,31 @@ describe("an ADR id", () => {
   it("resolves when a file in docs/adr carries it, and dangles naming the directory when none does", () => {
     expect(resolve(adr("ADR-0042"))).toEqual({ ok: true, value: { via: "adr" } });
     expect(resolve(adr("ADR-0099"))).toEqual({ ok: false, error: { kind: "no-such-adr", directory: "docs/adr" } });
+  });
+});
+
+describe("an external name resolves a word the source never spells", () => {
+  const TELEMETRY = externalNameGroup("emitted at runtime or defined by a vendor", "ai.llm.tokens_in", "Sites.Selected");
+  const EXTERNAL: ReferenceFrame = { ...DOC_FRAME, externalNames: indexedNames(TELEMETRY) };
+
+  it.each(["ai.llm.tokens_in", "Sites.Selected"])("`%s`, written exactly as listed, resolves with the group's reason", (text) => {
+    expect(resolve(token(text), EXTERNAL)).toEqual({ ok: true, value: { via: "external", reason: TELEMETRY.reason } });
+  });
+
+  it("dangles without the list, as before", () => {
+    expect(resolve(token("ai.llm.tokens_in"), DOC_FRAME)).toEqual({ ok: false, error: { kind: "not-in-source", missing: ["ai", "llm", "tokens_in"] } });
+  });
+
+  it.each(["ai.llm", "ai.llm.tokens_in.total", "Sites.Selected()", "sites.selected"])(
+    "matches exactly, never a prefix, an extension, a call or another case: `%s` still dangles",
+    (text) => {
+      expect(resolve(token(text), EXTERNAL)).toMatchObject({ ok: false, error: { kind: "not-in-source" } });
+    },
+  );
+
+  // A file name, spec id or ADR id cannot be listed at all: `parseExternalName` refuses each (external-names.test.ts).
+  it("never resolves a path or a link written with a listed name", () => {
+    expect(resolve(path("Sites.Selected/"), EXTERNAL)).toMatchObject({ ok: false, error: { kind: "no-such-path" } });
+    expect(resolve(link("Sites.Selected"), EXTERNAL)).toMatchObject({ ok: false, error: { kind: "no-such-path" } });
   });
 });

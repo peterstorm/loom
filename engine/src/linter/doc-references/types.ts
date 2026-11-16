@@ -79,7 +79,9 @@ export type Resolved =
   /** The plan's spec is missing or unreadable: its header reference already fails, so the id is not judged twice. */
   | Readonly<{ via: "spec-unavailable"; spec: string }>
   /** An ADR file carries the id. */
-  | Readonly<{ via: "adr" }>;
+  | Readonly<{ via: "adr" }>
+  /** The project lists the word as an external name, which lives outside the source, for the group's reason. */
+  | Readonly<{ via: "external"; reason: string }>;
 
 /** A file or directory in the project, or nothing. */
 export type EntryKind = "file" | "directory";
@@ -135,4 +137,27 @@ export type DocReferenceScope = Readonly<{
   exclude: readonly ReasonedPath[];
   /** Directories a path may also be written relative to (`engine/src`), after the referring file's directory and the root. */
   sourceRoots: readonly string[];
+  /** Words the documents name though the source never spells them, each group with its reason, indexed once at the parse (`external-names.ts`). */
+  externalNames: ExternalNameIndex;
 }>;
+
+/**
+ * A word or dotted path a governed document may name though the source corpus
+ * never holds it: an attribute emitted at runtime, a vendor's permission name,
+ * a model id. Only `parseExternalName` mints one, so it always has the shape
+ * the extractor reads as a word reference: never a pattern, a path or a fragment.
+ */
+export type ExternalName = string & { readonly __brand: "ExternalName" };
+
+/** External names that share one reason for living outside the source. */
+export type ExternalNameGroup = Readonly<{ names: readonly [ExternalName, ...ExternalName[]]; reason: string }>;
+
+/**
+ * A scope's external names: its groups in the order listed, and every name to
+ * the one group that lists it. Only `externalNameIndex` mints one, and it
+ * refuses a name listed twice, so no name belongs to two groups.
+ */
+export type ExternalNameIndex = Readonly<{
+  groups: readonly ExternalNameGroup[];
+  byName: ReadonlyMap<string, ExternalNameGroup>;
+}> & { readonly __brand: "ExternalNameIndex" };
