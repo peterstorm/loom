@@ -16,9 +16,9 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 
-function denyMutation(operation: string): () => never {
+function denyMutation(operation: string, collection: "Set" | "Map"): () => never {
   return () => {
-    throw new TypeError(`${operation} is not available: this Set is immutable`);
+    throw new TypeError(`${operation} is not available: this ${collection} is immutable`);
   };
 }
 
@@ -26,8 +26,18 @@ function denyMutation(operation: string): () => never {
 export function frozenSet<T>(values: Iterable<T>): ReadonlySet<T> {
   const set = new Set(values);
   return Object.freeze(Object.assign(set, {
-    add: denyMutation("add"),
-    delete: denyMutation("delete"),
-    clear: denyMutation("clear"),
+    add: denyMutation("add", "Set"),
+    delete: denyMutation("delete", "Set"),
+    clear: denyMutation("clear", "Set"),
   })) as unknown as ReadonlySet<T>;
+}
+
+/** A `ReadonlyMap` that stays readonly at RUNTIME, the `frozenSet` of maps. */
+export function frozenMap<K, V>(entries: Iterable<readonly [K, V]>): ReadonlyMap<K, V> {
+  const map = new Map(entries);
+  return Object.freeze(Object.assign(map, {
+    set: denyMutation("set", "Map"),
+    delete: denyMutation("delete", "Map"),
+    clear: denyMutation("clear", "Map"),
+  })) as unknown as ReadonlyMap<K, V>;
 }

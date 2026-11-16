@@ -13,7 +13,7 @@
 import { readFileSync, realpathSync } from "node:fs";
 import type { HookHandler, HookResult } from "../../types";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN, legacyTestsPassedNote } from "../../types";
-import { machinesDir, observeTaskGraphProjectBoundary } from "../../config";
+import { machineSource, observeTaskGraphProjectBoundary } from "../../config";
 import { IMPL_AGENTS } from "../../core/agent-catalog-projections";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
@@ -467,11 +467,11 @@ export const runUpdateTaskStatus = async (
   // the missing half routes to the existing fallback path instead.
   const epochAgentId = input.agent_id ? parseAgentId(input.agent_id) : null;
   const epochAgentType = parseAgentType(agentType);
-  // machinesDir() is resolved at call time (not the import-frozen constant)
+  // machineSource() is resolved at call time (not the import-frozen constant)
   // so a re-pointed LOOM_MACHINES_DIR is honored without a module reload —
-  // the same dir the gate and recorder consult.
+  // the same dir and pins the gate and recorder consult.
   const loadedMachine: LoadedMachine =
-    epochAgentType !== null ? loadMachine(machinesDir(), epochAgentType) : { kind: "none" };
+    epochAgentType !== null ? loadMachine(machineSource(), epochAgentType) : { kind: "none" };
   const machineBound = isMachineBound(loadedMachine);
   // A failed dispatcher snapshot means ledger contents are UNKNOWN — say so
   // and let resolveTestEvidence label the verdict snapshot-read-failed

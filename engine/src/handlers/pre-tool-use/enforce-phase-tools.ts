@@ -22,7 +22,7 @@ import { existsSync, readdirSync } from "node:fs";
 import type { HookHandler } from "../../types";
 import { allowResult, blockResult, passthroughResult } from "../../types";
 import { parsePreToolUseInput } from "./pre-tool-use-input";
-import { machinesDir, SUBAGENT_DIR } from "../../config";
+import { machineSource, SUBAGENT_DIR } from "../../config";
 import {
   attributeEvidence,
   blockExplanation,
@@ -117,15 +117,17 @@ export const runEnforcePhaseTools = async (
     }
     const { binding } = target;
 
-    const loaded = loadMachine(machinesDir(), binding.agentType);
+    const source = machineSource();
+    const loaded = loadMachine(source, binding.agentType);
     if (loaded.kind === "none") {
       // A binding can only exist because a machine existed at bind time
-      // (mark-subagent-active binds through the same machinesDir()), so
-      // "none" here means the definition vanished — deleted machine file or
-      // a re-pointed machines dir. Fail closed: a gate whose machine
+      // (mark-subagent-active binds through the same machineSource()), so
+      // "none" here means the definition vanished from an operator directory
+      // or the machines dir was re-pointed (a pinned shipped machine that
+      // vanishes loads as invalid). Fail closed: a gate whose machine
       // disappears must not silently disarm.
       return blockResult(
-        `[loom machine] machine definition for bound agent "${binding.agentType}" vanished from ${machinesDir()} — failing closed`,
+        `[loom machine] machine definition for bound agent "${binding.agentType}" vanished from ${source.directory} — failing closed`,
       );
     }
     if (loaded.kind === "invalid") {

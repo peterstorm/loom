@@ -4,7 +4,7 @@
  * update the docs if changed.
  */
 
-import { lstatSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +30,8 @@ import { frozenSet } from "./core/frozen";
 import { UTILITY_AGENTS } from "./core/phase-policy";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
 import { guardedDirsOf, protectedDirsOf, type GuardedLocations } from "./core/guarded-locations";
+import { machineTrustOf, parseMachinePins, type MachinePins, type MachineSource } from "./core/machine-integrity";
+import { SHIPPED_MACHINE_PINS } from "./core/machine-pins";
 import { nonEmptyOf, type NonEmpty } from "./core/orchestration-contract/identity";
 import { projectRulesLayout } from "./linter/programmatic/config";
 import { findProjectRoot } from "./linter/project-root";
@@ -311,17 +313,63 @@ export const PERSISTENT_SUBAGENT_DIR_ENTRIES: ReadonlySet<string> =
  */
 export const STALE_SUBAGENT_TTL_MS = 60 * 60_000;
 
-const DEFAULT_MACHINES_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "machines");
+/** The Guarded Skill Machine definitions Loom ships (`machines/` at the plugin root). */
+export const SHIPPED_MACHINES_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "machines");
 
 /**
  * Guarded-skill-machine definitions directory (shipped with loom, per agent
  * type), resolved lazily — reads LOOM_MACHINES_DIR at call time so the gate
  * can be pointed at fixture machines per-test without a module reload.
  */
-export const machinesDir = (): string => process.env.LOOM_MACHINES_DIR ?? DEFAULT_MACHINES_DIR;
+export const machinesDir = (): string => process.env.LOOM_MACHINES_DIR ?? SHIPPED_MACHINES_DIR;
 
 /** Machines directory — resolved once at import (consumers that never re-point) */
 export const MACHINES_DIR = machinesDir();
+
+const shippedPins = parseMachinePins(SHIPPED_MACHINE_PINS);
+if (!shippedPins.ok) throw new Error(`loom config invariant violated: the generated machine pins do not parse: ${shippedPins.error}`);
+
+/** The pinned SHA-256 of every shipped machine (ADR-0076), parsed once at load. */
+export const SHIPPED_MACHINE_PIN_SET: MachinePins = shippedPins.value;
+
+/** A missing directory, or a path through a non-directory: nothing to canonicalize. */
+const ABSENT_DIRECTORY_CODES: ReadonlySet<string> = frozenSet(["ENOENT", "ENOTDIR"]);
+
+/**
+ * Every spelling of a directory: its resolved path and, when it exists, its
+ * realpath. A directory that is absent compares by its resolved path alone.
+ * Any other canonicalization failure (EACCES, ELOOP, …) does the same but says
+ * so on stderr, because the comparison may then miss a spelling of the shipped
+ * directory and leave the pins unapplied.
+ */
+const directorySpellings = (directory: string): readonly string[] => {
+  const resolved = resolve(directory);
+  try {
+    return [resolved, realpathSync.native(resolved)];
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code ?? "unknown";
+    if (!ABSENT_DIRECTORY_CODES.has(code)) {
+      process.stderr.write(
+        `loom: cannot canonicalize machines directory ${resolved} (${code}); comparing it with the shipped machines by its resolved path only\n`,
+      );
+    }
+    return [resolved];
+  }
+};
+
+/**
+ * Where the machines are read from, and how far they are trusted (ADR-0076),
+ * resolved at call time like `machinesDir()`. The decision is the pure
+ * `machineTrustOf`: any spelling of the shipped directory (a symlink to it
+ * included) is pinned; only a directory proven elsewhere is the operator's own.
+ */
+export const machineSource = (): MachineSource => {
+  const directory = machinesDir();
+  return Object.freeze({
+    directory,
+    trust: machineTrustOf(directorySpellings(directory), directorySpellings(SHIPPED_MACHINES_DIR), SHIPPED_MACHINE_PIN_SET),
+  });
+};
 
 /** The guarded directories, resolved LAZILY from configuration (LOOM_STATE_PATH,
  * LOOM_SUBAGENT_DIR and LOOM_MACHINES_DIR are read at call time, so a re-pointed

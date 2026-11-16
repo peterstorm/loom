@@ -140,6 +140,7 @@ Protection is layered:
 5. `StateManager` serializes writes with a lock and atomic rename.
 6. Only hooks and narrowly allowlisted helpers receive write authority.
 7. Run-scoped programs publish immutable evidence outside the protected graph and commit protected state only through typed effects.
+8. The shipped machine definitions are admitted only when their bytes match the digests the engine pins ([ADR-0076](adr/ADR-0076-shipped-machines-are-pinned-by-digest.md)). The fences above cannot see a write a Git hook or a package script makes; a definition rewritten, added or deleted that way loads as invalid, and its agent's gate blocks. A `LOOM_MACHINES_DIR` that names another directory is the operator's own and is not pinned ([Pinned definitions](../machines/README.md#pinned-definitions)).
 
 If a helper says a direct write is blocked, use the named canonical operation; do not use `chmod`, output redirection, an interpreter, or path obfuscation to bypass it.
 
