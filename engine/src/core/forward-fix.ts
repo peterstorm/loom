@@ -44,10 +44,11 @@ import { parseTaskId, TASK_ID_PATTERN, type TaskId } from "./task-id";
 import { deriveTaskImplementationDispatch } from "./task-implementation-dispatch";
 import { MAX_TASK_REOPENING_REASON_LENGTH } from "./task-reopening";
 import { reopenableWave, type ReopenableWave, type WaveReopeningRefusal } from "./task-revalidation";
+import { findResidualPlaceholders } from "./validate-template-substitution";
 import { serializeVerificationPolicy } from "./verification-policy";
 import { newWaveGate, reconcileWaveBlock } from "./wave-gate-model";
 import { retireUnownedWaveReviewAuthority } from "./wave-gate-registration";
-import type { ForwardFixAudit, Task, TaskGraph } from "../types";
+import type { ForwardFixAudit, ForwardFixWithdrawal, Task, TaskGraph } from "../types";
 
 /** The implementation agents a Forward Fix may be dispatched to. */
 export const FORWARD_FIX_AGENTS = Object.freeze(["code-implementer-agent", "frontend-agent", "security-agent"] as const);
@@ -69,6 +70,10 @@ export type ForwardFixRequest = Readonly<{
 }>;
 
 export type ForwardFixRefusalKind =
+  /** withdraw-forward-fix: the named Task is no Forward Fix of the active Wave. */
+  | "not-a-forward-fix"
+  /** withdraw-forward-fix: the fix Task was already dispatched, so it has evidence to settle instead. */
+  | "already-dispatched"
   | "not-executing"
   | "live-wave-gate"
   | "implementation-active"
@@ -153,10 +158,24 @@ function distinct<T extends string>(values: readonly T[]): DomainResult<readonly
   return repeated === undefined ? okWith(values) : failWith(repeated);
 }
 
-/** A non-blank trimmed text of at most `max` characters, or why not. */
+/**
+ * A non-blank trimmed one-line text of at most `max` characters that the fix
+ * Task's brief can carry, or why not. The text lands in the fix Task's plan
+ * context, which the spawn gate reads: a `{variable}` would fail the brief as
+ * an unsubstituted template variable, a `LOOM_` token could pass for engine
+ * authority, and a `Task ID:` could rebind the brief. A refused text never
+ * reaches protected state, where it could not be corrected.
+ */
 function boundedText(value: string | undefined, flag: string, max: number, why: string): DomainResult<string, string> {
   if (value === undefined || value.length === 0) return failWith(`${flag} must say ${why}`);
-  return value.length > max ? failWith(`${flag} is longer than ${max} characters`) : okWith(value);
+  if (value.length > max) return failWith(`${flag} is longer than ${max} characters`);
+  if (/[\r\n]/.test(value)) return failWith(`${flag} must be one line`);
+  const placeholders = findResidualPlaceholders(value);
+  if (placeholders.length > 0) {
+    return failWith(`${flag} may not carry a {template variable} (${placeholders.join(", ")}); the fix Task's brief would be refused`);
+  }
+  if (/\bLOOM_[A-Z_]+/.test(value)) return failWith(`${flag} may not carry a LOOM_ token`);
+  return /task id:/i.test(value) ? failWith(`${flag} may not carry a Task ID binding`) : okWith(value);
 }
 
 /**
@@ -311,9 +330,10 @@ function admittedSealedPaths(graph: TaskGraph, request: ForwardFixRequest): Doma
     : okWith(sealed);
 }
 
-/** The next free Task id after every id of the roster. */
+/** The next free Task id after every id of the roster and every withdrawn fix Task, so a withdrawn id is never minted again. */
 function nextTaskId(graph: TaskGraph): TaskId {
-  const highest = Math.max(0, ...graph.tasks.map(({ id }) => TASK_ID_PATTERN.test(id) ? Number(id.slice(1)) : 0));
+  const ids = [...graph.tasks.map(({ id }) => id), ...(graph.forward_fix_withdrawals ?? []).map(({ audit }) => audit.fixTaskId)];
+  const highest = Math.max(0, ...ids.map((id) => TASK_ID_PATTERN.test(id) ? Number(id.slice(1)) : 0));
   const minted = parseTaskId(`T${highest + 1}`);
   if (!minted.ok) throw new Error(`unreachable: T${highest + 1} is not a Task id`);
   return minted.value;
@@ -425,4 +445,108 @@ export function addForwardFix(graph: TaskGraph, request: ForwardFixRequest): Dom
       }),
     }),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Withdrawing a Forward Fix that was never dispatched
+// ---------------------------------------------------------------------------
+
+export type ForwardFixWithdrawalRequest = Readonly<{
+  wave: number;
+  fixTaskId: TaskId;
+  reason: string;
+}>;
+
+export type ForwardFixWithdrawalOutcome =
+  /** The fix Task left the roster and its audit moved into `withdrawal`: persist `graph`. */
+  | Readonly<{ kind: "withdrawn"; graph: TaskGraph; withdrawal: ForwardFixWithdrawal }>
+  /** This exact withdrawal already committed: nothing to write. */
+  | Readonly<{ kind: "already-withdrawn"; withdrawal: ForwardFixWithdrawal }>;
+
+export const FORWARD_FIX_WITHDRAWAL_USAGE =
+  "Usage: helper orchestration withdraw-forward-fix --wave <N> --task <fix-task-id> --reason \"<why the fix is withdrawn>\"";
+
+/** Exactly one `--wave`, `--task` (the fix Task) and `--reason`, in any order. */
+export function parseForwardFixWithdrawalArgs(args: readonly string[]): DomainResult<ForwardFixWithdrawalRequest, string> {
+  const fail = (problem: string) => failWith(`${problem}. ${FORWARD_FIX_WITHDRAWAL_USAGE}`);
+  const values = new Map<string, string>();
+  for (let index = 0; index < args.length; index += 2) {
+    const flag = args[index] ?? "";
+    const value = args[index + 1];
+    if (flag !== "--wave" && flag !== "--task" && flag !== "--reason") return fail(`unknown argument '${flag}'`);
+    if (value === undefined || isFlagToken(value)) return fail(`${flag} needs a value`);
+    if (values.has(flag)) return fail(`${flag} is given twice`);
+    values.set(flag, value.trim());
+  }
+  const wave = values.get("--wave");
+  if (wave === undefined || !WAVE_NUMBER.test(wave) || !Number.isSafeInteger(Number(wave))) {
+    return fail("--wave must name the active Wave as a positive integer");
+  }
+  const fixTaskId = parseTaskId(values.get("--task"), "--task");
+  if (!fixTaskId.ok) return fail(fixTaskId.error.errors.join("; "));
+  const reason = boundedText(values.get("--reason"), "--reason", MAX_TASK_REOPENING_REASON_LENGTH, "why the fix is withdrawn");
+  if (!reason.ok) return fail(reason.error);
+  return okWith(freeze({ wave: Number(wave), fixTaskId: fixTaskId.value, reason: reason.value }));
+}
+
+/** A Task no attempt has touched: never reserved, attempted, observed or reviewed. */
+const neverDispatched = (task: Task): boolean =>
+  task.status === "pending" && task.reserved_at === undefined && task.active_implementation_attempt === undefined &&
+  (task.implementation_attempt_history?.length ?? 0) === 0 && task.artifact_baseline === undefined &&
+  task.files_modified === undefined && task.test_result === undefined && (task.review_generation ?? 0) === 0;
+
+/** The committed withdrawal this request replays: its fix Task is gone and the record names the same reason. */
+const replayedWithdrawal = (graph: TaskGraph, request: ForwardFixWithdrawalRequest): ForwardFixWithdrawal | undefined =>
+  (graph.forward_fix_withdrawals ?? []).find(({ audit, reason }) =>
+    audit.fixTaskId === request.fixTaskId && audit.wave === request.wave && reason === request.reason &&
+    !graph.tasks.some(({ id }) => id === request.fixTaskId));
+
+/**
+ * Withdraw a Forward Fix whose fix Task was never dispatched, or refuse with
+ * the exact precondition that failed: the shared Wave-reopening precondition,
+ * the active and open Wave, a fix Task of a live audit of that Wave, and no
+ * attempt on it. The fix Task leaves the roster and its audit moves whole
+ * into `forward_fix_withdrawals`, which releases its hold on the judges.
+ * Replaying a committed withdrawal changes nothing.
+ */
+export function withdrawForwardFix(
+  graph: TaskGraph,
+  request: ForwardFixWithdrawalRequest,
+): DomainResult<ForwardFixWithdrawalOutcome, ForwardFixRefusal> {
+  const replay = replayedWithdrawal(graph, request);
+  if (replay !== undefined) return okWith(freeze({ kind: "already-withdrawn" as const, withdrawal: replay }));
+  const reopenable = reopenableWave(graph);
+  if (!reopenable.ok) return waveReopeningRefusal(reopenable.error);
+  const { wave, abandonedRunId } = reopenable.value;
+  if (wave !== request.wave) return refuse("wrong-wave", `Wave ${request.wave} is not the active Wave ${wave}`);
+  if (completedWaves(graph).has(wave)) return refuse("wave-completed", `Wave ${wave} has completed`);
+  const audit = (graph.forward_fix_history ?? []).find(({ fixTaskId }) => fixTaskId === request.fixTaskId);
+  const fix = graph.tasks.find(({ id }) => id === request.fixTaskId);
+  if (audit === undefined || audit.wave !== wave || fix === undefined) {
+    return refuse("not-a-forward-fix", `${request.fixTaskId} is not a Forward Fix Task of the active Wave ${wave}`);
+  }
+  if (!neverDispatched(fix)) {
+    return refuse("already-dispatched", `${request.fixTaskId} was already dispatched; let it settle, or reopen it, instead of withdrawing it`);
+  }
+  const withdrawal: ForwardFixWithdrawal = freeze({ schemaVersion: 1, kind: "forward-fix-withdrawn", audit, reason: request.reason });
+  const retired = retireUnownedWaveReviewAuthority(graph, wave, abandonedRunId);
+  const tasks = Object.freeze(retired.tasks.filter(({ id }) => id !== request.fixTaskId));
+  const existing = retired.wave_gates[String(wave)] ?? newWaveGate();
+  const gate = {
+    ...existing,
+    impl_complete: tasks.filter((task) => task.wave === wave).every(({ status }) => status === "implemented" || status === "completed"),
+    tests_passed: null,
+    reviews_complete: false,
+  };
+  return okWith(freeze({
+    kind: "withdrawn" as const,
+    withdrawal,
+    graph: freeze({
+      ...retired,
+      tasks,
+      wave_gates: reconcileWaveBlock({ ...retired.wave_gates, [String(wave)]: gate }, tasks, retired.spec_check, wave),
+      forward_fix_history: Object.freeze((graph.forward_fix_history ?? []).filter((entry) => entry !== audit)),
+      forward_fix_withdrawals: Object.freeze([...(graph.forward_fix_withdrawals ?? []), withdrawal]),
+    }),
+  }));
 }

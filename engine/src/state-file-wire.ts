@@ -40,6 +40,7 @@ import type {
   ActiveWaveGateRegistration,
   CompletedWaveGateRegistration,
   ForwardFixAudit,
+  ForwardFixWithdrawal,
   OrphanedWaveGateRetirement,
   OwnerObligation,
   WaveReopeningAudit,
@@ -1065,29 +1066,26 @@ function parseNullableRunId(raw: unknown, label: string): ParseResult<Orchestrat
   return runId.ok ? parseOk(runId.value) : parseErr(`${label}: ${runId.error.message}`);
 }
 
-/** The audit's sealed paths: non-empty, distinct, canonical, and each in the fix Task's file_list. */
-function parseForwardFixSealedPaths(raw: unknown, label: string, fixFileList: readonly unknown[]): ParseResult<NonEmpty<string>> {
+/** The audit's sealed paths: non-empty, distinct and canonical. */
+function parseForwardFixSealedPaths(raw: unknown, label: string): ParseResult<NonEmpty<string>> {
   if (!Array.isArray(raw)) return parseErr(`${label} must be a non-empty array`);
   const paths: string[] = [];
   for (const [index, entry] of raw.entries()) {
     const path = parseReviewPath(entry, `${label}[${index}]`);
     if (!path.ok) return parseErr(path.errors.join("; "));
     if (paths.includes(path.value)) return parseErr(`${label} names '${path.value}' more than once`);
-    if (!fixFileList.includes(path.value)) return parseErr(`${label} names '${path.value}', which is not in the fix Task's file_list`);
     paths.push(path.value);
   }
   const sealed = nonEmpty(paths);
   return sealed === null ? parseErr(`${label} must be a non-empty array`) : parseOk(sealed);
 }
 
-/** Parse one immutable Forward Fix audit: its fix Task and held Tasks are
- *  distinct Tasks of the audited Wave, the fix is no Distill Task, and every
- *  sealed path is the fix Task's own. */
-function parseForwardFixAudit(
-  raw: unknown,
-  label: string,
-  tasks: readonly Record<string, unknown>[],
-): ParseResult<ForwardFixAudit> {
+/** One Forward Fix audit's own shape, which needs no roster: exact fields,
+ *  distinct held Tasks other than the fix Task, canonical sealed paths, a
+ *  bounded reason and an optional abandoned run. A live audit is then bound to
+ *  the roster (`forwardFixRosterError`); a withdrawn one is not, because its
+ *  fix Task left the roster. */
+function parseForwardFixAuditShape(raw: unknown, label: string): ParseResult<ForwardFixAudit> {
   if (!isRecord(raw)) return parseErr(`${label} must be an object`);
   const record = raw as Record<string, unknown>;
   const fieldsError = exactFieldsError(record, FORWARD_FIX_AUDIT_FIELDS, [], label);
@@ -1097,25 +1095,13 @@ function parseForwardFixAudit(
   if (!wave.ok) return parseErr(wave.error);
   const fixTaskId = parseTaskIdAt(record.fixTaskId, `${label}.fixTaskId`);
   if (!fixTaskId.ok) return fixTaskId;
-  const fix = tasks.find((task) => task.id === fixTaskId.value);
-  if (fix === undefined || fix.wave !== wave.value) {
-    return parseErr(`${label}.fixTaskId: ${fixTaskId.value} is not a Task of Wave ${wave.value}`);
-  }
-  if (isDistillTask(fix)) return parseErr(`${label}.fixTaskId: ${fixTaskId.value} is a Distill Task`);
   const held = parseDistinctTaskIds(record.heldTaskIds, `${label}.heldTaskIds`);
   if (!held.ok) return held;
   if (held.value.some((id) => id === fixTaskId.value)) {
     return parseErr(`${label}.heldTaskIds: ${fixTaskId.value} is the fix Task itself`);
   }
-  const foreign = held.value.find((id) => !tasks.some((task) => task.id === id && task.wave === wave.value));
-  if (foreign !== undefined) return parseErr(`${label}.heldTaskIds: ${foreign} is not a Task of Wave ${wave.value}`);
-  const sealedPaths = parseForwardFixSealedPaths(record.sealedPaths, `${label}.sealedPaths`, Array.isArray(fix.file_list) ? fix.file_list : []);
+  const sealedPaths = parseForwardFixSealedPaths(record.sealedPaths, `${label}.sealedPaths`);
   if (!sealedPaths.ok) return sealedPaths;
-  const unsealed = sealedPaths.value.find((path) => !tasks.some((task) =>
-    typeof task.wave === "number" && task.wave < wave.value && Array.isArray(task.file_list) && task.file_list.includes(path)));
-  if (unsealed !== undefined) {
-    return parseErr(`${label}.sealedPaths names '${unsealed}', which no Task of a Wave before ${wave.value} wrote`);
-  }
   const reason = record.reason;
   if (typeof reason !== "string" || reason.trim() !== reason || reason.length === 0 ||
       reason.length > MAX_TASK_REOPENING_REASON_LENGTH) {
@@ -1135,6 +1121,25 @@ function parseForwardFixAudit(
   }));
 }
 
+/** Why a live audit contradicts the roster, or null: its fix Task and held
+ *  Tasks are Tasks of the audited Wave, the fix is no Distill Task, and every
+ *  sealed path is the fix Task's own and was written by an earlier Wave. */
+function forwardFixRosterError(audit: ForwardFixAudit, label: string, tasks: readonly Record<string, unknown>[]): string | null {
+  const fix = tasks.find((task) => task.id === audit.fixTaskId);
+  if (fix === undefined || fix.wave !== audit.wave) return `${label}.fixTaskId: ${audit.fixTaskId} is not a Task of Wave ${audit.wave}`;
+  if (isDistillTask(fix)) return `${label}.fixTaskId: ${audit.fixTaskId} is a Distill Task`;
+  const foreign = audit.heldTaskIds.find((id) => !tasks.some((task) => task.id === id && task.wave === audit.wave));
+  if (foreign !== undefined) return `${label}.heldTaskIds: ${foreign} is not a Task of Wave ${audit.wave}`;
+  const fixFiles: readonly unknown[] = Array.isArray(fix.file_list) ? fix.file_list : [];
+  const outside = audit.sealedPaths.find((path) => !fixFiles.includes(path));
+  if (outside !== undefined) return `${label}.sealedPaths names '${outside}', which is not in the fix Task's file_list`;
+  const unsealed = audit.sealedPaths.find((path) => !tasks.some((task) =>
+    typeof task.wave === "number" && task.wave < audit.wave && Array.isArray(task.file_list) && task.file_list.includes(path)));
+  return unsealed === undefined
+    ? null
+    : `${label}.sealedPaths names '${unsealed}', which no Task of a Wave before ${audit.wave} wrote`;
+}
+
 /** A fix Task is appended by exactly one audit, so no two audits name the same fix Task. */
 function parseForwardFixHistory(
   raw: unknown,
@@ -1144,14 +1149,60 @@ function parseForwardFixHistory(
   if (!Array.isArray(raw)) return parseErr("forward_fix_history must be an array when present");
   const audits: ForwardFixAudit[] = [];
   for (const [index, entry] of raw.entries()) {
-    const parsed = parseForwardFixAudit(entry, `forward_fix_history[${index}]`, tasks);
+    const label = `forward_fix_history[${index}]`;
+    const parsed = parseForwardFixAuditShape(entry, label);
     if (!parsed.ok) return parsed;
+    const rosterError = forwardFixRosterError(parsed.value, label, tasks);
+    if (rosterError !== null) return parseErr(rosterError);
     if (audits.some(({ fixTaskId }) => fixTaskId === parsed.value.fixTaskId)) {
       return parseErr(`forward_fix_history names fix Task ${parsed.value.fixTaskId} in two audits`);
     }
     audits.push(parsed.value);
   }
   return parseOk(Object.freeze(audits));
+}
+
+const FORWARD_FIX_WITHDRAWAL_FIELDS = ["schemaVersion", "kind", "audit", "reason"] as const;
+
+/**
+ * Withdrawn Forward Fixes: each record holds a well-formed audit whose fix
+ * Task is no longer on the roster and is no live audit's fix Task, and no
+ * fix Task is withdrawn twice. A withdrawn id is never minted again, so its
+ * presence on the roster means the graph contradicts itself.
+ */
+function parseForwardFixWithdrawals(
+  raw: unknown,
+  tasks: readonly Record<string, unknown>[],
+  live: readonly ForwardFixAudit[] | undefined,
+): ParseResult<readonly ForwardFixWithdrawal[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!Array.isArray(raw)) return parseErr("forward_fix_withdrawals must be an array when present");
+  const withdrawals: ForwardFixWithdrawal[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const label = `forward_fix_withdrawals[${index}]`;
+    if (!isRecord(entry)) return parseErr(`${label} must be an object`);
+    const record = entry as Record<string, unknown>;
+    const fieldsError = exactFieldsError(record, FORWARD_FIX_WITHDRAWAL_FIELDS, [], label);
+    if (fieldsError !== null) return parseErr(fieldsError);
+    if (record.schemaVersion !== 1 || record.kind !== "forward-fix-withdrawn") return parseErr(`${label} has invalid schema or kind`);
+    const audit = parseForwardFixAuditShape(record.audit, `${label}.audit`);
+    if (!audit.ok) return audit;
+    const { fixTaskId } = audit.value;
+    if (tasks.some((task) => task.id === fixTaskId)) return parseErr(`${label}: withdrawn fix Task ${fixTaskId} is still on the roster`);
+    if ((live ?? []).some((entry) => entry.fixTaskId === fixTaskId)) {
+      return parseErr(`${label}: withdrawn fix Task ${fixTaskId} is also a live forward_fix_history audit`);
+    }
+    if (withdrawals.some((withdrawal) => withdrawal.audit.fixTaskId === fixTaskId)) {
+      return parseErr(`forward_fix_withdrawals withdraws fix Task ${fixTaskId} twice`);
+    }
+    const reason = record.reason;
+    if (typeof reason !== "string" || reason.trim() !== reason || reason.length === 0 ||
+        reason.length > MAX_TASK_REOPENING_REASON_LENGTH) {
+      return parseErr(`${label}.reason must be a trimmed non-blank string of at most ${MAX_TASK_REOPENING_REASON_LENGTH} characters`);
+    }
+    withdrawals.push(Object.freeze({ schemaVersion: 1, kind: "forward-fix-withdrawn", audit: audit.value, reason }));
+  }
+  return parseOk(Object.freeze(withdrawals));
 }
 
 /** `value` as the Task id it is under `label`, or why it is not one. */
@@ -2504,6 +2555,7 @@ type ParsedTaskGraphHistoryFields = Readonly<{
   reopeningHistory: readonly WaveReopeningAudit[] | undefined;
   taskReopeningHistory: readonly TaskReopeningAudit[] | undefined;
   forwardFixHistory: readonly ForwardFixAudit[] | undefined;
+  forwardFixWithdrawals: readonly ForwardFixWithdrawal[] | undefined;
   orphanedHistory: readonly OrphanedWaveGateRetirement[] | undefined;
   specTraceRetirements: readonly SpecTraceWaveGateRetirement[] | undefined;
   specTraceAmendments: readonly SpecTraceAmendment[] | undefined;
@@ -2569,6 +2621,8 @@ function parseTaskGraphHistoryFields(
   if (!taskReopeningHistory.ok) return parseErr(taskReopeningHistory.error);
   const forwardFixHistory = parseForwardFixHistory(obj.forward_fix_history, tasks);
   if (!forwardFixHistory.ok) return parseErr(forwardFixHistory.error);
+  const forwardFixWithdrawals = parseForwardFixWithdrawals(obj.forward_fix_withdrawals, tasks, forwardFixHistory.value);
+  if (!forwardFixWithdrawals.ok) return parseErr(forwardFixWithdrawals.error);
   const orphanedHistory = parseOrphanedWaveGateHistory(obj.orphaned_wave_gate_history);
   if (!orphanedHistory.ok) return parseErr(orphanedHistory.error);
   const specTraceRetirements = parseSpecTraceWaveGateRetirements(obj.spec_trace_wave_gate_retirements);
@@ -2597,6 +2651,7 @@ function parseTaskGraphHistoryFields(
     reopeningHistory: reopeningHistory.value,
     taskReopeningHistory: taskReopeningHistory.value,
     forwardFixHistory: forwardFixHistory.value,
+    forwardFixWithdrawals: forwardFixWithdrawals.value,
     orphanedHistory: orphanedHistory.value,
     specTraceRetirements: specTraceRetirements.value,
     specTraceAmendments: specTraceAmendments.value,
@@ -3066,11 +3121,15 @@ export type ParsedTaskGraph = Omit<TaskGraph, "tasks" | "executing_tasks"> & Rea
 
 /** The proven audit histories as the graph's fields: each present one under its wire name, an absent one absent. */
 function historyGraphFields(history: ParsedTaskGraphHistoryFields): Partial<TaskGraph> {
-  const { reopeningHistory, taskReopeningHistory, forwardFixHistory, orphanedHistory, specTraceRetirements, specTraceAmendments } = history;
+  const {
+    reopeningHistory, taskReopeningHistory, forwardFixHistory, forwardFixWithdrawals, orphanedHistory,
+    specTraceRetirements, specTraceAmendments,
+  } = history;
   return {
     ...(reopeningHistory === undefined ? {} : { wave_reopening_history: reopeningHistory }),
     ...(taskReopeningHistory === undefined ? {} : { task_reopening_history: taskReopeningHistory }),
     ...(forwardFixHistory === undefined ? {} : { forward_fix_history: forwardFixHistory }),
+    ...(forwardFixWithdrawals === undefined ? {} : { forward_fix_withdrawals: forwardFixWithdrawals }),
     ...(orphanedHistory === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory }),
     ...(specTraceRetirements === undefined ? {} : { spec_trace_wave_gate_retirements: specTraceRetirements }),
     ...(specTraceAmendments === undefined ? {} : { spec_trace_amendments: specTraceAmendments }),

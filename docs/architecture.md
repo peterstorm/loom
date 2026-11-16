@@ -183,6 +183,7 @@ remediate               # retire a terminal implementation escalation
 attest                  # arm implementation re-attestation
 reopen-task             # return implemented Tasks of the active Wave to pending
 add-forward-fix         # append a fix Task for code a completed Wave sealed; holds the failed judges
+withdraw-forward-fix    # remove a never-dispatched fix Task; its audit moves to forward_fix_withdrawals
 ```
 
 The registered programs are driven by `handlers/helpers/programs/`. The façade materializes Context Packets and complete request authorities for Agent work; advisory publication has no Agents. Harness adapters capture results directly; the parent never rewrites transcripts. Flags and recovery use: [operations](operations.md#run-directory-operations).

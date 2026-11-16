@@ -7,7 +7,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createAddForwardFixOperation } from "../../../src/handlers/helpers/add-forward-fix";
+import { createAddForwardFixOperation, createWithdrawForwardFixOperation } from "../../../src/handlers/helpers/add-forward-fix";
 import { ORCHESTRATION_OPERATIONS } from "../../../src/handlers/helpers/orchestration-operations";
 import { orchestrationHandler } from "../../../src/handlers/helpers/orchestration";
 import { piRuntimeHandshakeRequired, routeConsumesStdin } from "../../../src/handler-routes";
@@ -138,5 +138,41 @@ describe("add-forward-fix through the orchestration dispatcher", () => {
     expect(result).toEqual({ kind: "allow" });
     const loaded = parseTaskGraph(JSON.parse(readFileSync(statePath, "utf8")) as unknown);
     expect(loaded.ok && loaded.value.forward_fix_history?.map(({ fixTaskId }) => fixTaskId)).toEqual(["T5"]);
+  });
+});
+
+describe("withdraw-forward-fix", () => {
+  const WITHDRAW = ["--wave", "2", "--task", "T5", "--reason", "its text fails the brief"] as const;
+  const dispatch = (args: readonly string[]) => orchestrationHandler(() => {
+    throw new Error("withdraw-forward-fix advances no program and needs no emission");
+  })("", [...args]);
+
+  it("takes only flags, requires the Pi runtime handshake and is parent-only", () => {
+    expect(ORCHESTRATION_OPERATIONS["withdraw-forward-fix"]).toEqual({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" });
+    expect(routeConsumesStdin("helper", "orchestration", ["withdraw-forward-fix", ...WITHDRAW])).toBe(false);
+    expect(piRuntimeHandshakeRequired("helper", "orchestration", ["withdraw-forward-fix", ...WITHDRAW])).toBe(true);
+  });
+
+  it("withdraws a never-dispatched fix through the dispatcher and the loader accepts the result", async () => {
+    const statePath = installState();
+    expect(await dispatch(["add-forward-fix", ...ARGS])).toEqual({ kind: "allow" });
+    expect(await dispatch(["withdraw-forward-fix", ...WITHDRAW])).toEqual({ kind: "allow" });
+    const loaded = parseTaskGraph(JSON.parse(readFileSync(statePath, "utf8")) as unknown);
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    expect(loaded.value.tasks.some(({ id }) => id === "T5")).toBe(false);
+    expect(loaded.value.forward_fix_history).toEqual([]);
+    expect(loaded.value.forward_fix_withdrawals?.map(({ audit }) => audit.fixTaskId)).toEqual(["T5"]);
+  });
+
+  it("refuses a Task that is no Forward Fix without writing", async () => {
+    const statePath = installState();
+    const before = readFileSync(statePath, "utf8");
+    const result = await createWithdrawForwardFixOperation(quiet)(["--wave", "2", "--task", "T4", "--reason", "r"]);
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringContaining("withdraw-forward-fix refused without changing state (not-a-forward-fix)"),
+    });
+    expect(readFileSync(statePath, "utf8")).toBe(before);
   });
 });

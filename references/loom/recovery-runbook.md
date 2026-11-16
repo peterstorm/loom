@@ -54,6 +54,8 @@ bun {LOOM_DIR}/engine/src/cli.ts helper orchestration add-forward-fix \
   --description "<what the fix changes>" --reason "<the failed judgement, with its measured values>"
 ```
 
+Keep `--description` and `--reason` to plain one-line text with no `{braces}`: the fix Task's brief carries them. A fix whose Task was never dispatched can be withdrawn with `helper orchestration withdraw-forward-fix --wave <N> --task <fix-task-id> --reason "<why>"` and added again.
+
 Then return to the Phase 5 loop: status owes the fix Task's dispatch (render it with `brief`, adding the breach as `--note`s), and the held judge's next attempt once the fix settles. The preconditions and what the helper writes are in `docs/reference/recovery.md` ("A judgement fails on code a completed Wave sealed").
 
 ## Overriding a false positive

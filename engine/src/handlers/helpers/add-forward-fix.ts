@@ -12,13 +12,21 @@
  */
 
 import { taskGraphPath } from "../../config";
-import { addForwardFix, parseForwardFixArgs, type ForwardFix, type ForwardFixRefusal } from "../../core/forward-fix";
+import {
+  addForwardFix,
+  parseForwardFixArgs,
+  parseForwardFixWithdrawalArgs,
+  withdrawForwardFix,
+  type ForwardFix,
+  type ForwardFixRefusal,
+} from "../../core/forward-fix";
 import { anyActiveSubagent } from "../../machine/ledger";
 import { StateManager } from "../../state-manager";
 import type { HookResult } from "../../types";
 import { subagentActiveRefusal, type SubagentActivity } from "./subagent-quiescence";
 
 const OPERATION = "forward fix";
+const WITHDRAWAL = "forward fix withdrawal";
 
 /** A refusal decided under the lock: the update aborts and nothing is written. */
 class ForwardFixRefused extends Error {
@@ -75,3 +83,51 @@ export function createAddForwardFixOperation(
 }
 
 export const addForwardFixOperation = createAddForwardFixOperation();
+
+/**
+ * `helper orchestration withdraw-forward-fix`: withdraw a Forward Fix whose
+ * fix Task was never dispatched (for example, one whose text its brief
+ * refuses), releasing its hold on the judges. The same shell protocol as
+ * `add-forward-fix`: quiescence before and under the lock, typed refusals.
+ */
+export function createWithdrawForwardFixOperation(
+  subagentActive: SubagentActivity = anyActiveSubagent,
+): (args: readonly string[]) => Promise<HookResult> {
+  return async (args) => {
+    const request = parseForwardFixWithdrawalArgs(args);
+    if (!request.ok) return { kind: "error", message: `withdraw-forward-fix: ${request.error}` };
+    const statePath = taskGraphPath();
+    const manager = StateManager.fromPath(statePath);
+    if (manager === null) return { kind: "error", message: `withdraw-forward-fix: No task graph at ${statePath}` };
+    const refusal = subagentActiveRefusal(subagentActive, statePath, WITHDRAWAL);
+    if (refusal !== null) return { kind: "error", message: `withdraw-forward-fix: ${refusal}` };
+    try {
+      const outcome = await manager.updateAndReturn((locked) => {
+        if (subagentActive(statePath)) {
+          throw new ForwardFixRefused({ kind: "subagent-active", message: `A subagent became active before the ${WITHDRAWAL} could commit` });
+        }
+        const decided = withdrawForwardFix(locked, request.value);
+        if (!decided.ok) throw new ForwardFixRefused(decided.error);
+        return { state: decided.value.kind === "withdrawn" ? decided.value.graph : locked, value: decided.value };
+      });
+      process.stdout.write(`${JSON.stringify(outcome.withdrawal, null, 2)}\n`);
+      const { fixTaskId, heldTaskIds, wave } = outcome.withdrawal.audit;
+      process.stdout.write(outcome.kind === "already-withdrawn"
+        ? `Wave ${wave}: Forward Fix ${fixTaskId} already withdrawn; nothing changed.\n`
+        : `Wave ${wave}: Forward Fix ${fixTaskId} withdrawn; ${heldTaskIds.join(", ")} no longer held by it. ` +
+          "Add a corrected Forward Fix with helper orchestration add-forward-fix if the judgement still needs one.\n");
+      return { kind: "allow" };
+    } catch (error) {
+      if (error instanceof ForwardFixRefused) {
+        return { kind: "error", message: `withdraw-forward-fix refused without changing state (${error.refusal.kind}): ${error.refusal.message}` };
+      }
+      return {
+        kind: "error",
+        message: `withdraw-forward-fix failed; the State File may or may not have been written, so read it with helper orchestration status ` +
+          `before retrying: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  };
+}
+
+export const withdrawForwardFixOperation = createWithdrawForwardFixOperation();

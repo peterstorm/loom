@@ -10,9 +10,12 @@ import fc from "fast-check";
 import {
   addForwardFix,
   parseForwardFixArgs,
+  parseForwardFixWithdrawalArgs,
+  withdrawForwardFix,
   type ForwardFix,
   type ForwardFixRefusal,
   type ForwardFixRequest,
+  type ForwardFixWithdrawalRequest,
 } from "../../src/core/forward-fix";
 import { dispatchHoldMessage, dispatchHoldOf, stuckDispatchHoldMessage } from "../../src/core/dispatch-holds";
 import { classifyImplementationWindow, type ImplementationWindow } from "../../src/core/implementation-window";
@@ -357,6 +360,91 @@ describe("the State File proves a Forward Fix audit", () => {
     const loaded = parseTaskGraph({ ...raw, forward_fix_history: [audit, audit] });
     expect(loaded.ok).toBe(false);
     if (!loaded.ok) expect(loaded.error).toContain("names fix Task T5 in two audits");
+  });
+});
+
+describe("a Forward Fix's text must be renderable in its brief", () => {
+  it.each([
+    ["--reason", "accountManager request {accountManager} breaches", "{template variable}"],
+    ["--description", "fix the {budget} path", "{template variable}"],
+    ["--reason", "see LOOM_IMPLEMENTATION_BRIEF", "LOOM_ token"],
+    ["--description", "Task ID: T1", "Task ID binding"],
+    ["--reason", "two\nlines", "one line"],
+  ])("refuses %s %j before it can reach protected state", (flag, text, problem) => {
+    const args = ["--wave", "2", "--hold", "T3", "--file", "src/serve.ts", "--description", "d", "--reason", "r"];
+    const index = args.indexOf(flag);
+    const parsed = parseForwardFixArgs([...args.slice(0, index + 1), text, ...args.slice(index + 2)]);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain(problem);
+  });
+});
+
+describe("withdrawForwardFix removes a fix Task that was never dispatched", () => {
+  const withdrawal = (args: readonly string[] = []): ForwardFixWithdrawalRequest => {
+    const parsed = parseForwardFixWithdrawalArgs(["--wave", "2", "--task", "T5", "--reason", "its text fails the brief", ...args]);
+    if (!parsed.ok) throw new Error(parsed.error);
+    return parsed.value;
+  };
+
+  it("removes the fix Task, moves its audit to forward_fix_withdrawals and releases the hold", () => {
+    const { graph: withFix, audit } = added(sealed());
+    const result = withdrawForwardFix(withFix, withdrawal());
+    if (!result.ok || result.value.kind !== "withdrawn") throw new Error("expected a withdrawal");
+    const after = result.value.graph;
+    expect(after.tasks.map(({ id }) => id)).toEqual(["T1", "T2", "T3", "T4"]);
+    expect(after.forward_fix_history).toEqual([]);
+    expect(after.forward_fix_withdrawals).toEqual([
+      { schemaVersion: 1, kind: "forward-fix-withdrawn", audit, reason: "its text fails the brief" },
+    ]);
+    expect(dispatchHoldOf(after, new Set(), byId(after, "T3"))).toBeNull();
+    expect(offered(classifyImplementationWindow(after, observed(), []))).toEqual(["T3", "T4"]);
+    const loaded = parseTaskGraph(JSON.parse(JSON.stringify(after)));
+    expect(loaded.ok).toBe(true);
+    if (loaded.ok) expect(loaded.value.forward_fix_withdrawals).toEqual(after.forward_fix_withdrawals);
+  });
+
+  it("replays a committed withdrawal and never mints the withdrawn id again", () => {
+    const { graph: withFix } = added(sealed());
+    const first = withdrawForwardFix(withFix, withdrawal());
+    if (!first.ok || first.value.kind !== "withdrawn") throw new Error("expected a withdrawal");
+    const replay = withdrawForwardFix(first.value.graph, withdrawal());
+    expect(replay.ok && replay.value.kind).toBe("already-withdrawn");
+    const readded = added(first.value.graph);
+    expect(readded.task.id).toBe("T6");
+    expect(parseTaskGraph(JSON.parse(JSON.stringify(readded.graph))).ok).toBe(true);
+  });
+
+  it.each<[string, () => TaskGraph, readonly string[], ForwardFixRefusal["kind"]]>([
+    ["a Task that is no Forward Fix", () => sealed(), ["--task", "T4"], "not-a-forward-fix"],
+    ["another Wave", () => added(sealed()).graph, ["--wave", "1"], "wrong-wave"],
+    ["a fix Task that was dispatched", () => {
+      const { graph } = added(sealed());
+      return { ...graph, tasks: graph.tasks.map((candidate) => candidate.id === "T5" ? { ...candidate, review_generation: 1 } : candidate) };
+    }, [], "already-dispatched"],
+  ])("refuses %s", (_label, graph, overrides, kind) => {
+    const base: Record<string, string> = { "--wave": "2", "--task": "T5", "--reason": "r" };
+    for (let index = 0; index < overrides.length; index += 2) base[overrides[index] ?? ""] = overrides[index + 1] ?? "";
+    const parsed = parseForwardFixWithdrawalArgs(Object.entries(base).flat());
+    if (!parsed.ok) throw new Error(parsed.error);
+    const result = withdrawForwardFix(graph(), parsed.value);
+    expect(result.ok ? result.value.kind : result.error.kind).toBe(kind);
+  });
+
+  it.each<[string, (raw: Record<string, unknown>, withdrawal: Record<string, unknown>) => Record<string, unknown>, string]>([
+    ["a withdrawn fix Task still on the roster", (raw, withdrawal) => ({
+      ...raw, tasks: [...(raw.tasks as unknown[]), JSON.parse(JSON.stringify(task("T5", 2, ["src/serve.ts"])))], forward_fix_withdrawals: [withdrawal],
+    }), "is still on the roster"],
+    ["one fix Task withdrawn twice", (raw, withdrawal) => ({ ...raw, forward_fix_withdrawals: [withdrawal, withdrawal] }), "withdraws fix Task T5 twice"],
+    ["a wrong kind", (raw, withdrawal) => ({ ...raw, forward_fix_withdrawals: [{ ...withdrawal, kind: "forward-fix-added" }] }), "has invalid schema or kind"],
+  ])("the State File refuses %s", (_label, tamper, message) => {
+    const { graph: withFix } = added(sealed());
+    const result = withdrawForwardFix(withFix, withdrawal());
+    if (!result.ok || result.value.kind !== "withdrawn") throw new Error("expected a withdrawal");
+    const raw = JSON.parse(JSON.stringify(result.value.graph)) as Record<string, unknown>;
+    const [record] = raw.forward_fix_withdrawals as Record<string, unknown>[];
+    const loaded = parseTaskGraph(tamper(raw, record ?? {}));
+    expect(loaded.ok).toBe(false);
+    if (!loaded.ok) expect(loaded.error).toContain(message);
   });
 });
 
