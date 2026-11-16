@@ -15,8 +15,12 @@ import {
   type ForwardFix,
   type ForwardFixRefusal,
   type ForwardFixRequest,
+  type ForwardFixWithdrawalRefusalKind,
   type ForwardFixWithdrawalRequest,
 } from "../../src/core/forward-fix";
+import { isUntouchedJoinedTask, JOINED_TASK_FIELDS, type JoinedFieldValue } from "../../src/core/task-graph-population";
+import { newWaveGate } from "../../src/core/wave-gate-model";
+import { retireUnownedWaveReviewAuthority } from "../../src/core/wave-gate-registration";
 import { dispatchHoldMessage, dispatchHoldOf, stuckDispatchHoldMessage } from "../../src/core/dispatch-holds";
 import { classifyImplementationWindow, type ImplementationWindow } from "../../src/core/implementation-window";
 import { taskExecutionDecision } from "../../src/core/validate-task-execution";
@@ -414,20 +418,89 @@ describe("withdrawForwardFix removes a fix Task that was never dispatched", () =
     expect(parseTaskGraph(JSON.parse(JSON.stringify(readded.graph))).ok).toBe(true);
   });
 
-  it.each<[string, () => TaskGraph, readonly string[], ForwardFixRefusal["kind"]]>([
-    ["a Task that is no Forward Fix", () => sealed(), ["--task", "T4"], "not-a-forward-fix"],
-    ["another Wave", () => added(sealed()).graph, ["--wave", "1"], "wrong-wave"],
-    ["a fix Task that was dispatched", () => {
-      const { graph } = added(sealed());
-      return { ...graph, tasks: graph.tasks.map((candidate) => candidate.id === "T5" ? { ...candidate, review_generation: 1 } : candidate) };
-    }, [], "already-dispatched"],
-  ])("refuses %s", (_label, graph, overrides, kind) => {
+  const withFix = (overrides: Partial<TaskGraph> = {}): TaskGraph => protectedGraphFixture({ ...added(sealed()).graph, ...overrides });
+  const withTask = (graph: TaskGraph, id: string, change: (candidate: Task) => Task): TaskGraph =>
+    ({ ...graph, tasks: graph.tasks.map((candidate) => candidate.id === id ? change(candidate) : candidate) });
+  const withdrawn = (graph: TaskGraph, req = withdrawal()) => {
+    const result = withdrawForwardFix(graph, req);
+    if (!result.ok || result.value.kind !== "withdrawn") throw new Error("expected a withdrawal");
+    return result.value;
+  };
+  const withdrawalRefusal = (graph: TaskGraph, args: readonly string[] = []): ForwardFixWithdrawalRefusalKind | string => {
     const base: Record<string, string> = { "--wave": "2", "--task": "T5", "--reason": "r" };
-    for (let index = 0; index < overrides.length; index += 2) base[overrides[index] ?? ""] = overrides[index + 1] ?? "";
+    for (let index = 0; index < args.length; index += 2) base[args[index] ?? ""] = args[index + 1] ?? "";
     const parsed = parseForwardFixWithdrawalArgs(Object.entries(base).flat());
     if (!parsed.ok) throw new Error(parsed.error);
-    const result = withdrawForwardFix(graph(), parsed.value);
-    expect(result.ok ? result.value.kind : result.error.kind).toBe(kind);
+    const result = withdrawForwardFix(graph, parsed.value);
+    return result.ok ? result.value.kind : result.error.kind;
+  };
+
+  it.each<[string, () => TaskGraph, readonly string[], ForwardFixWithdrawalRefusalKind]>([
+    ["a Task that is no Forward Fix", () => sealed(), ["--task", "T4"], "not-a-forward-fix"],
+    ["another Wave", () => withFix(), ["--wave", "1"], "wrong-wave"],
+    ["a graph outside the execute Phase", () => withFix({ current_phase: "decompose" }), [], "not-executing"],
+    ["an active implementation reservation", () => withFix({ executing_tasks: ["T4"] }), [], "implementation-active"],
+    ["a live Wave Gate", () => withFix({
+      active_wave_gate: activeWaveGateFixture({ runId: "run.wave-2", wave: 2, authorityDigest: "a".repeat(64) }),
+    }), [], "live-wave-gate"],
+    ["an abandoned run that names a successor", () => withFix({
+      active_wave_gate: activeWaveGateFixture({
+        runId: "run.wave-2", wave: 2, authorityDigest: "a".repeat(64),
+        terminalOutcome: { kind: "terminal-abandoned", reason: "replaced", supersededBy: "run.wave-2-b" },
+      }),
+    }), [], "successor-named"],
+    ["a Wave whose gate already completed", () => withFix({
+      wave_gate_history: [...(sealed().wave_gate_history ?? []), completedWaveGateFixture({ runId: "run.wave-2", wave: 2 })],
+    }), [], "wave-completed"],
+  ])("refuses %s", (_label, graph, overrides, kind) => {
+    expect(withdrawalRefusal(graph(), overrides)).toBe(kind);
+  });
+
+  it("joins the fix Task untouched, so a never-dispatched fix is withdrawable", () => {
+    expect(isUntouchedJoinedTask(added(sealed()).task)).toBe(true);
+  });
+
+  /** A value off each evidence kind's joined value. */
+  const TOUCHED: Readonly<Record<Exclude<JoinedFieldValue, "joined">, unknown>> = { absent: "touched", empty: ["touched"], zero: 1, pending: "touched" };
+  const evidenceFields = Object.entries(JOINED_TASK_FIELDS).flatMap(([field, joined]) => joined === "joined" ? [] : [[field, joined] as const]);
+
+  /** A live attempt is refused by the shared Wave precondition before the fix Task is inspected. */
+  const SHARED_PRECONDITION: Readonly<Record<string, ForwardFixWithdrawalRefusalKind>> = { active_implementation_attempt: "implementation-active" };
+
+  it.each(evidenceFields)("refuses a fix Task whose %s left its joined value", (field, joined) => {
+    const touched = withTask(withFix(), "T5", (candidate) => ({ ...candidate, [field]: TOUCHED[joined] }) as Task);
+    expect(isUntouchedJoinedTask(touched.tasks.find(({ id }) => id === "T5") ?? task("T5", 2, []))).toBe(false);
+    expect(withdrawalRefusal(touched)).toBe(SHARED_PRECONDITION[field] ?? "already-dispatched");
+  });
+
+  it("refuses a replay with a different reason instead of reporting it withdrawn", () => {
+    const { graph: after } = withdrawn(withFix());
+    expect(withdrawalRefusal(after, ["--reason", "another reason"])).toBe("not-a-forward-fix");
+  });
+
+  it("re-derives the Wave's gate bits from the roster left behind", () => {
+    const implemented = (candidate: Task): Task =>
+      ({ ...candidate, status: "implemented", proof: satisfiedProof(candidate.file_list ?? []) }) as Task;
+    const reviewed = { ...newWaveGate(), impl_complete: true, tests_passed: true as const, reviews_complete: true };
+    const settled = withTask(withTask(withFix(), "T3", implemented), "T4", implemented);
+    const done = withdrawn({ ...settled, wave_gates: { ...settled.wave_gates, "2": reviewed } });
+    expect(done.graph.wave_gates["2"]).toMatchObject({ impl_complete: true, tests_passed: null, reviews_complete: false });
+    const open = withdrawn(withTask(withFix(), "T3", implemented));
+    expect(open.graph.wave_gates["2"]).toMatchObject({ impl_complete: false, tests_passed: null, reviews_complete: false });
+  });
+
+  it("retires the abandoned run's review authority the way the Wave-reopening operations do", () => {
+    const abandoned = withFix({
+      active_wave_gate: activeWaveGateFixture({
+        runId: "run.wave-2", wave: 2, authorityDigest: "a".repeat(64),
+        terminalOutcome: { kind: "terminal-abandoned", reason: "fix the text first", supersededBy: null },
+      }),
+    });
+    const { graph: after } = withdrawn(abandoned);
+    const retired = retireUnownedWaveReviewAuthority(abandoned, 2, "run.wave-2");
+    expect(after.active_wave_gate).toEqual(retired.active_wave_gate);
+    expect(after.wave_review_epoch).toEqual(retired.wave_review_epoch);
+    expect(parseTaskGraph(JSON.parse(JSON.stringify(after))).ok).toBe(true);
   });
 
   it.each<[string, (raw: Record<string, unknown>, withdrawal: Record<string, unknown>) => Record<string, unknown>, string]>([
@@ -436,6 +509,12 @@ describe("withdrawForwardFix removes a fix Task that was never dispatched", () =
     }), "is still on the roster"],
     ["one fix Task withdrawn twice", (raw, withdrawal) => ({ ...raw, forward_fix_withdrawals: [withdrawal, withdrawal] }), "withdraws fix Task T5 twice"],
     ["a wrong kind", (raw, withdrawal) => ({ ...raw, forward_fix_withdrawals: [{ ...withdrawal, kind: "forward-fix-added" }] }), "has invalid schema or kind"],
+    ["a malformed audit", (raw, withdrawal) => ({
+      ...raw, forward_fix_withdrawals: [{ ...withdrawal, audit: { ...(withdrawal.audit as Record<string, unknown>), sealedPaths: [] } }],
+    }), "audit.sealedPaths must be a non-empty array"],
+    ["a blank reason", (raw, withdrawal) => ({ ...raw, forward_fix_withdrawals: [{ ...withdrawal, reason: "  " }] }), "reason must be a trimmed non-blank string"],
+    ["an unknown field", (raw, withdrawal) => ({ ...raw, forward_fix_withdrawals: [{ ...withdrawal, extra: true }] }), "unknown field(s): extra"],
+    ["a non-array", (raw) => ({ ...raw, forward_fix_withdrawals: {} }), "forward_fix_withdrawals must be an array"],
   ])("the State File refuses %s", (_label, tamper, message) => {
     const { graph: withFix } = added(sealed());
     const result = withdrawForwardFix(withFix, withdrawal());

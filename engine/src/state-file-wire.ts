@@ -1016,11 +1016,8 @@ function parseTaskReopeningAudit(
   const distillTaskIds = new Set(tasks.filter(isDistillTask).flatMap(({ id }) => typeof id === "string" ? [id] : []));
   const reopenedIds = parseReopenedTaskIds(record[SWEPT_DISTILL_TASK_IDS_FIELD], label, reopened.value, distillTaskIds);
   if (!reopenedIds.ok) return reopenedIds;
-  const reason = record.reason;
-  if (typeof reason !== "string" || reason.trim() !== reason || reason.length === 0 ||
-      reason.length > MAX_TASK_REOPENING_REASON_LENGTH) {
-    return parseErr(`${label}.reason must be a trimmed non-blank string of at most ${MAX_TASK_REOPENING_REASON_LENGTH} characters`);
-  }
+  const reason = parseBoundedReason(record.reason, label);
+  if (!reason.ok) return reason;
   const abandonedRunId = record.abandonedRunId === null ? null : parseOrchestrationRunId(record.abandonedRunId);
   if (abandonedRunId !== null && !abandonedRunId.ok) {
     return parseErr(`${label}.abandonedRunId: ${abandonedRunId.error.message}`);
@@ -1030,7 +1027,7 @@ function parseTaskReopeningAudit(
     kind: "implemented-tasks-reopened",
     wave: wave.value,
     ...reopenedIds.value,
-    reason,
+    reason: reason.value,
     abandonedRunId: abandonedRunId === null ? null : abandonedRunId.value,
   }));
 }
@@ -1102,11 +1099,8 @@ function parseForwardFixAuditShape(raw: unknown, label: string): ParseResult<For
   }
   const sealedPaths = parseForwardFixSealedPaths(record.sealedPaths, `${label}.sealedPaths`);
   if (!sealedPaths.ok) return sealedPaths;
-  const reason = record.reason;
-  if (typeof reason !== "string" || reason.trim() !== reason || reason.length === 0 ||
-      reason.length > MAX_TASK_REOPENING_REASON_LENGTH) {
-    return parseErr(`${label}.reason must be a trimmed non-blank string of at most ${MAX_TASK_REOPENING_REASON_LENGTH} characters`);
-  }
+  const reason = parseBoundedReason(record.reason, label);
+  if (!reason.ok) return reason;
   const abandoned = parseNullableRunId(record.abandonedRunId, `${label}.abandonedRunId`);
   if (!abandoned.ok) return abandoned;
   return parseOk(Object.freeze({
@@ -1116,7 +1110,7 @@ function parseForwardFixAuditShape(raw: unknown, label: string): ParseResult<For
     fixTaskId: fixTaskId.value,
     heldTaskIds: held.value,
     sealedPaths: sealedPaths.value,
-    reason,
+    reason: reason.value,
     abandonedRunId: abandoned.value,
   }));
 }
@@ -1166,14 +1160,14 @@ const FORWARD_FIX_WITHDRAWAL_FIELDS = ["schemaVersion", "kind", "audit", "reason
 
 /**
  * Withdrawn Forward Fixes: each record holds a well-formed audit whose fix
- * Task is no longer on the roster and is no live audit's fix Task, and no
- * fix Task is withdrawn twice. A withdrawn id is never minted again, so its
- * presence on the roster means the graph contradicts itself.
+ * Task is no longer on the roster, and no fix Task is withdrawn twice. A
+ * withdrawn id is never minted again, so its presence on the roster means the
+ * graph contradicts itself. That also keeps it out of every live audit, whose
+ * fix Task the history parser binds to the roster.
  */
 function parseForwardFixWithdrawals(
   raw: unknown,
   tasks: readonly Record<string, unknown>[],
-  live: readonly ForwardFixAudit[] | undefined,
 ): ParseResult<readonly ForwardFixWithdrawal[] | undefined> {
   if (raw === undefined) return parseOk(undefined);
   if (!Array.isArray(raw)) return parseErr("forward_fix_withdrawals must be an array when present");
@@ -1189,20 +1183,21 @@ function parseForwardFixWithdrawals(
     if (!audit.ok) return audit;
     const { fixTaskId } = audit.value;
     if (tasks.some((task) => task.id === fixTaskId)) return parseErr(`${label}: withdrawn fix Task ${fixTaskId} is still on the roster`);
-    if ((live ?? []).some((entry) => entry.fixTaskId === fixTaskId)) {
-      return parseErr(`${label}: withdrawn fix Task ${fixTaskId} is also a live forward_fix_history audit`);
-    }
     if (withdrawals.some((withdrawal) => withdrawal.audit.fixTaskId === fixTaskId)) {
       return parseErr(`forward_fix_withdrawals withdraws fix Task ${fixTaskId} twice`);
     }
-    const reason = record.reason;
-    if (typeof reason !== "string" || reason.trim() !== reason || reason.length === 0 ||
-        reason.length > MAX_TASK_REOPENING_REASON_LENGTH) {
-      return parseErr(`${label}.reason must be a trimmed non-blank string of at most ${MAX_TASK_REOPENING_REASON_LENGTH} characters`);
-    }
-    withdrawals.push(Object.freeze({ schemaVersion: 1, kind: "forward-fix-withdrawn", audit: audit.value, reason }));
+    const reason = parseBoundedReason(record.reason, label);
+    if (!reason.ok) return reason;
+    withdrawals.push(Object.freeze({ schemaVersion: 1, kind: "forward-fix-withdrawn", audit: audit.value, reason: reason.value }));
   }
   return parseOk(Object.freeze(withdrawals));
+}
+
+/** An audit's operator reason under `label`: a trimmed non-blank string of at most the reopening bound. */
+function parseBoundedReason(raw: unknown, label: string): ParseResult<string> {
+  return typeof raw === "string" && raw.trim() === raw && raw.length > 0 && raw.length <= MAX_TASK_REOPENING_REASON_LENGTH
+    ? parseOk(raw)
+    : parseErr(`${label}.reason must be a trimmed non-blank string of at most ${MAX_TASK_REOPENING_REASON_LENGTH} characters`);
 }
 
 /** `value` as the Task id it is under `label`, or why it is not one. */
@@ -2621,7 +2616,7 @@ function parseTaskGraphHistoryFields(
   if (!taskReopeningHistory.ok) return parseErr(taskReopeningHistory.error);
   const forwardFixHistory = parseForwardFixHistory(obj.forward_fix_history, tasks);
   if (!forwardFixHistory.ok) return parseErr(forwardFixHistory.error);
-  const forwardFixWithdrawals = parseForwardFixWithdrawals(obj.forward_fix_withdrawals, tasks, forwardFixHistory.value);
+  const forwardFixWithdrawals = parseForwardFixWithdrawals(obj.forward_fix_withdrawals, tasks);
   if (!forwardFixWithdrawals.ok) return parseErr(forwardFixWithdrawals.error);
   const orphanedHistory = parseOrphanedWaveGateHistory(obj.orphaned_wave_gate_history);
   if (!orphanedHistory.ok) return parseErr(orphanedHistory.error);

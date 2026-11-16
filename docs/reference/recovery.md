@@ -83,7 +83,7 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration withdraw-forward-fix \
   --wave 5 --task T24 --reason "re-adding with corrected text"
 ```
 
-It requires the same Wave-reopening precondition, a fix Task of a live `forward_fix_history` audit of that Wave, and no attempt on that Task: never reserved, attempted, observed or reviewed. It removes the fix Task from the roster and moves the audit whole into `forward_fix_withdrawals`, together with your reason. The held Tasks are released, and the withdrawn id is never minted again. Add a corrected Forward Fix afterwards if the judgement still needs one. A fix Task that was already dispatched is not withdrawn: let it settle, or reopen it.
+It requires the same active, open Wave `add-forward-fix` requires (including no abandoned run naming a successor), a fix Task of a live `forward_fix_history` audit of that Wave, and that Task still exactly as it joined: no reservation, attempt, settlement, observation or review has written any of its evidence fields (`isUntouchedJoinedTask`). It removes the fix Task from the roster and moves the audit whole into `forward_fix_withdrawals`, together with your reason. The held Tasks are released, and the withdrawn id is never minted again. Add a corrected Forward Fix afterwards if the judgement still needs one. A fix Task that was already dispatched is not withdrawn: let it settle, or reopen it.
 
 ## Completed Wave has post-review workspace-integrity loss
 

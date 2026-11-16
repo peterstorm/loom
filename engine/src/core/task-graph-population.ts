@@ -480,6 +480,94 @@ export function pendingAuthoredTask(
 }
 
 /**
+ * What a Task field holds while a joined Task is still exactly as
+ * `pendingAuthoredTask` wrote it. `joined` is the record's own field, written at
+ * join and never by an attempt. Every other kind is attempt, settlement or
+ * review evidence, and its joined value is: `absent`, `empty` (absent or `[]`),
+ * `zero` (absent or `0`), or `pending` (absent or `"pending"`).
+ */
+export type JoinedFieldValue = "joined" | "absent" | "empty" | "zero" | "pending";
+
+/**
+ * Every Task field, classified by its joined value. The table is keyed by
+ * every Task field, so a field added to Task does not compile until it says
+ * whether an attempt writes it.
+ */
+export const JOINED_TASK_FIELDS = Object.freeze({
+  id: "joined",
+  description: "joined",
+  agent: "joined",
+  wave: "joined",
+  depends_on: "joined",
+  spec_anchors: "joined",
+  spec_contributions: "joined",
+  spec_anchor_hashes: "joined",
+  verification_policy: "joined",
+  new_tests_required: "joined",
+  plan_context: "joined",
+  file_list: "joined",
+  proof: "joined",
+  status: "pending",
+  revalidation_required: "absent",
+  legacy_missing_proof: "absent",
+  test_result: "absent",
+  test_evidence: "absent",
+  new_test_observation: "absent",
+  files_modified: "absent",
+  review_status: "pending",
+  review_generation: "zero",
+  review_run: "absent",
+  accepted_review_authority: "absent",
+  review_error: "absent",
+  review_evidence_failures: "empty",
+  findings: "empty",
+  critical_findings: "empty",
+  advisory_findings: "empty",
+  refuted_findings: "empty",
+  resolved_findings: "empty",
+  artifact_baseline: "absent",
+  active_implementation_attempt: "absent",
+  active_implementation_context: "absent",
+  attempt_artifact_baseline: "absent",
+  attempt_repository_baseline: "absent",
+  repository_baseline: "absent",
+  reserved_at: "absent",
+  legacy_execution_reservation: "absent",
+  issued_review_packets: "empty",
+  artifact_baseline_recovered_from: "absent",
+  recovered_artifact_writes: "empty",
+  start_sha: "absent",
+  failure_reason: "absent",
+  retry_count: "zero",
+  implementation_retry_protocol: "absent",
+  implementation_retry_history_start: "absent",
+  implementation_retry_predecessor_receipt_id: "absent",
+  implementation_attestation: "absent",
+  implementation_attempt_history: "empty",
+  skeleton_outcomes: "empty",
+} as const satisfies { readonly [Field in keyof Task]-?: JoinedFieldValue });
+
+const AT_JOINED_VALUE: Readonly<Record<Exclude<JoinedFieldValue, "joined">, (value: unknown) => boolean>> = Object.freeze({
+  absent: (value: unknown) => value === undefined,
+  empty: (value: unknown) => value === undefined || (Array.isArray(value) && value.length === 0),
+  zero: (value: unknown) => value === undefined || value === 0,
+  pending: (value: unknown) => value === undefined || value === "pending",
+});
+
+/**
+ * Whether a Task that joined after population (`pendingAuthoredTask`) is still
+ * exactly as it joined: no reservation, attempt, settlement, observation or
+ * review has written any of its evidence fields. This holds only for a joined
+ * Task. A Task population wrote under a captured proof boundary already carries
+ * `artifact_baseline` and `start_sha`.
+ */
+export function isUntouchedJoinedTask(task: Task): boolean {
+  const fields = task as Readonly<Record<string, unknown>>;
+  return Object.entries(JOINED_TASK_FIELDS).every(([field, joined]) =>
+    joined === "joined" || AT_JOINED_VALUE[joined](fields[field]));
+}
+
+/**
  * What the one planner (`planDistillTasks`) decides for this roster: the
  * authored roster, the contract Tasks and frozen paths of the contracts
  * population is about to stamp, the frozen manifest's Test-File

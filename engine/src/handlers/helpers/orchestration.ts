@@ -213,7 +213,7 @@ import { parseOrchestrationOperation } from "./orchestration-operations";
 import { remediateOperation } from "./remediate-implementation-escalation";
 import { attestOperation } from "./attest-implementation";
 import { reopenTaskOperation } from "./reopen-task";
-import { addForwardFixOperation, withdrawForwardFixOperation } from "./add-forward-fix";
+import { addForwardFixOperation, withdrawForwardFixOperation } from "./forward-fix-operations";
 import { renderStandaloneReviewSummary } from "../../core/standalone-review-records";
 import { serializeStandaloneReviewMachineState } from "../../core/standalone-review-checkpoint";
 import { argumentValue, argumentValues, hasFlag, unconsumedValueArguments } from "./cli-args";
