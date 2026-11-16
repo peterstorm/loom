@@ -69,6 +69,12 @@ const attestedProofFor = (task: Task): PendingTaskProof =>
     declaredArtifactExpectation: "attested",
   });
 
+/**
+ * The Task in attestation mode. Its exit is `returnToRevalidation`
+ * (task-revalidation), which every reopening uses: it clears the flag and
+ * derives a fresh pending Proof, so a change to what this mode sets must be
+ * mirrored there.
+ */
 function attestedTask(task: Task, proof: PendingTaskProof): Task {
   return Object.freeze({
     ...task,

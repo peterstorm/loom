@@ -15,6 +15,7 @@ import { distillTasksReopenedWith, isDistillTask } from "./distill-task";
 import { nonEmpty, type DomainResult, type NonEmpty, type OrchestrationRunId } from "./orchestration-contract";
 import type { Phase } from "./phases";
 import { derivePendingTaskProof, redThenGreenEra } from "./proof-obligations";
+import { taskArtifactExpectation } from "./task-artifact-expectation";
 import { parseTaskId, type TaskId } from "./task-id";
 import type { FrozenVerificationManifest } from "./verification-manifest";
 import { taskVerificationPolicy } from "./verification-policy";
@@ -32,15 +33,25 @@ import type { ReopenedTaskIds, Task, TaskGraph } from "../types";
  * (`redThenGreenEra` of the graph's frozen `verificationManifest`, INV-6).
  * `verificationManifest` is required so every caller states its graph's era;
  * `undefined` means the graph has no manifest, which is the legacy era.
+ *
+ * An attested Task leaves attestation mode here. Every revalidation exists
+ * because the Task's bytes may change, and an attestation dispatch forbids any
+ * change, so keeping the mode would make the reopened Task unfixable. It gets
+ * a fresh pending Proof under its current policy (attestation's, with new
+ * tests waived) and its agent's normal declared-artifact expectation.
  */
 export function returnToRevalidation(task: Task, verificationManifest: FrozenVerificationManifest | undefined): Task {
-  const proof = task.proof ?? derivePendingTaskProof({
+  // The exit from the mode `armImplementationAttestation` (implementation-lifecycle) enters.
+  const { implementation_attestation: attested, ...unattested } = task;
+  const kept = attested === true ? undefined : task.proof;
+  const proof = kept ?? derivePendingTaskProof({
     verificationPolicy: taskVerificationPolicy(task),
     declaredArtifacts: task.file_list ?? [],
+    ...(attested === true ? { declaredArtifactExpectation: taskArtifactExpectation({ agent: task.agent }) } : {}),
     redThenGreen: redThenGreenEra(verificationManifest),
   });
   return {
-    ...task,
+    ...unattested,
     status: "pending",
     proof,
     revalidation_required: true,
