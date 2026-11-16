@@ -59,7 +59,7 @@ Check the answers against the import graph that exists. A boundary the current c
    - `pureModules`, the functional core's roots; `impureModules`, the shells inside them, each with the I/O it does
    - `exclude`, vendored or generated paths, each with its reason
    - `maxFunctionLines` and `excludeFromMaxLines` if the defaults do not fit
-   - `docReferences`, if the user wants the documentation held to the tree: `govern` (the docs and source comments whose references must resolve), `plans`, `exclude` and `sourceRoots`, each path with its reason (README: `no-dangling-doc-reference`)
+   - `docReferences`, if the user wants the documentation held to the tree: `govern` (the docs and source comments whose references must resolve), `plans`, `exclude` and `sourceRoots`, each path with its reason, and `externalNames` for the words the docs name that live outside the source (runtime attributes, vendor permissions, model ids), each group with its reason (README: `no-dangling-doc-reference`)
 4. Add a rule file for each project-specific pattern, and a disabling file for each default rule the user does not want (README: "Rule File Schema", "Disabling a rule").
 5. Record what predates the rules, so existing switches, copied blocks, wire casts and dangling doc references do not block the next edit to their files:
 
@@ -108,7 +108,7 @@ Files scanned: N | Violations: N (boundary: X, purity: Y, quality: Z)
 - **Purity violation**: extract the I/O to a shell and pass it in as a parameter or port. Only a module whose job is the I/O belongs in `impureModules`, with its reason.
 - **Unproven switch**: `match(x)…exhaustive()`, or end the switch with `default: return assertNever(x)`.
 - **Wire cast**: bind the value as `unknown` and write or reuse a parser that returns the typed value or an error. `as unknown as T` is refused too.
-- **Dangling doc reference**: correct the reference to the path, heading or name that exists now. A mention of something deliberately gone is history: write it without backticks.
+- **Dangling doc reference**: correct the reference to the path, heading or name that exists now. A mention of something deliberately gone is history: write it without backticks. A name that exists only outside the source (an attribute emitted at runtime, a vendor's value) goes in `docReferences.externalNames` with its reason, never in the baseline.
 - **Non-null assertion**: an explicit check that returns an error.
 - **Empty catch**: handle or rethrow.
 - **Function length**: extract helper functions.
