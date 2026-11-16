@@ -57,6 +57,8 @@ if (stage === ${JSON.stringify(failingStage)}) process.exit(17);
   mkdirSync(join(directory, "engine/scripts"), { recursive: true });
   mkdirSync(join(directory, "engine/src/core"), { recursive: true });
   cpSync(join(ENGINE, "scripts/typecheck.ts"), join(directory, "engine/scripts/typecheck.ts"));
+  cpSync(join(ENGINE, "scripts/verify.ts"), join(directory, "engine/scripts/verify.ts"));
+  cpSync(join(ENGINE, "src/core/verify-slice.ts"), join(directory, "engine/src/core/verify-slice.ts"));
   cpSync(join(ENGINE, "scripts/verify-prerequisites.sh"), join(directory, "engine/scripts/verify-prerequisites.sh"));
   cpSync(join(ENGINE, "scripts/bun-version-pin.ts"), join(directory, "engine/scripts/bun-version-pin.ts"));
   cpSync(join(repository, ".bun-version"), join(directory, ".bun-version"));
@@ -125,7 +127,8 @@ describe("canonical verification command", () => {
   it("has one compiler gate, then the full-tier project lint, then the existing complete test command", () => {
     expect(rootPackage.scripts.verify).toBe("npm --prefix engine run verify");
     expect(enginePackage.scripts.preverify).toBe("bash scripts/verify-prerequisites.sh");
-    expect(enginePackage.scripts.verify).toBe("npm run typecheck && npm run lint && npm run test");
+    // The one verify command runs the Verify Slice LOOM_VERIFY_SLICE names; unset, every tier in order.
+    expect(enginePackage.scripts.verify).toBe("bun scripts/verify.ts");
     expect(enginePackage.scripts.lint).toBe("env -u PI_CODING_AGENT bun ../scripts/lint-project.ts");
     expect(enginePackage.scripts.typecheck).toBe("bun scripts/typecheck.ts");
     expect(enginePackage.scripts["typecheck:unused"]).toBe("npm run typecheck");
@@ -250,6 +253,27 @@ describe('enrollment', () => {
     if (!parsed.ok) throw new Error(parsed.error.message);
     expect(Number.isSafeInteger(parsed.value.total)).toBe(true);
     expect(parsed.value.total).toBeGreaterThan(0);
+  });
+
+  it.each([
+    { slice: "static", expectedStages: ["lint"] },
+    { slice: "unit:1/1", expectedStages: ["unit"] },
+    { slice: "smoke", expectedStages: smokeFiles.map(([, stage]) => stage) },
+  ])("the $slice Verify Slice runs only its own tiers", async ({ slice, expectedStages }) => {
+    const directory = fixture("none");
+    const result = await runVerification(directory, { ...process.env, PI_CODING_AGENT: "true", LOOM_VERIFY_SLICE: slice });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(readFileSync(join(directory, "stages"), "utf8").trim().split("\n")).toEqual(expectedStages);
+  });
+
+  it("refuses an unknown Verify Slice before any tier runs", async () => {
+    const directory = fixture("none");
+    const result = await runVerification(directory, { ...process.env, LOOM_VERIFY_SLICE: "everything" });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("LOOM_VERIFY_SLICE must be");
+    expect(() => readFileSync(join(directory, "stages"))).toThrow();
   });
 
   it.each(["none", "compiler", ...stages])("real npm composition short-circuits after %s, never recursively runs the suite", async (failingStage) => {
