@@ -128,6 +128,19 @@ export function parseStandaloneReviewerProtocolV3(raw: unknown): DomainResult<ty
 export const STANDALONE_ASSESSMENT_ROSTER_SECTION = "standalone-assessment-roster";
 
 /**
+ * How a successor payload uses the roster, in the one wording every prompt
+ * surface carries verbatim: the stamped wire contract, the successor spawn
+ * task and the attempt-2 retry. Its verdict clause states `verdictsFor` in
+ * `standalone-assessment-roster.ts`, whose tests pin the same rule as data.
+ */
+export const STANDALONE_SUCCESSOR_ROSTER_RULE =
+  `Copy every digest from the ${STANDALONE_ASSESSMENT_ROSTER_SECTION} section; never compute one. Copy lineageDigest and snapshotDigest, ` +
+  "and give one priorAssessments entry per priors row, in roster order, carrying that row's origin. Each verdict must be one that its row's " +
+  "verdicts lists: still-present and repaired only for an active prior, retained and reopen only when the row lists decisions, " +
+  "not-assessable whenever you cannot judge the prior. retained copies one of the row's decisions references into decisionDigest, " +
+  "reopen into proposal.decisionDigest. A repaired change names a path from the roster's repairablePaths.";
+
+/**
  * The successor payload every reviewer agent file shows (issue #185): one
  * prior repaired against a changed scoped path, one retained by citing a
  * decision reference, one not assessable, and no new Findings. Its digests are

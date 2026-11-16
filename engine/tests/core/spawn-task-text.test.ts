@@ -13,6 +13,7 @@ import {
   requiredSkillMarker,
   type SpawnTaskFacts,
 } from "../../src/core/spawn-task-text";
+import { STANDALONE_SUCCESSOR_ROSTER_RULE } from "../../src/core/standalone-lineage-contract";
 import { FROZEN_DIFF_PAGE_UNITS, freezeDiff } from "../../src/core/standalone-read-coverage";
 import { agentRequestAuthority } from "../fixtures/agent-request-authority";
 
@@ -92,6 +93,9 @@ describe("renderSpawnTaskText", () => {
     const v3 = renderSpawnTaskText(facts({ reviewer: { version: 3 } }));
     expect(v3).toContain("'--purpose' 'standalone-successor'");
     expect(v3).toContain("This is an explicitly issued standalone successor v3 request.");
+    // The one roster wording the wire contract and the retry also carry (issue #185).
+    expect(v3).toContain(STANDALONE_SUCCESSOR_ROSTER_RULE);
+    expect(v1).not.toContain(STANDALONE_SUCCESSOR_ROSTER_RULE);
     expect(v1).not.toContain("--purpose");
   });
 

@@ -4,7 +4,7 @@ import { z } from "zod/v4";
 import {
   STANDALONE_V3_ENVELOPE_HINT, parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3, renderReviewerPayloadDiagnostic, renderReviewerWireContract,
 } from "../../src/core/reviewer-protocol";
-import { REVIEWER_WIRE_CONTRACT_EXAMPLE_V3 } from "../../src/core/standalone-lineage-contract";
+import { REVIEWER_WIRE_CONTRACT_EXAMPLE_V3, STANDALONE_SUCCESSOR_ROSTER_RULE } from "../../src/core/standalone-lineage-contract";
 import {
   CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_LIMITS,
   REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, reviewerPayloadV2Schema,
@@ -333,12 +333,14 @@ describe("authoritative generated wire contract", () => {
     ]);
     // Every reviewer spawn pays for the fragment. The pin stops the
     // pretty-printed schema, or a second (v3) schema, from creeping in: the
-    // successor section adds its shape and example, ~2.3KB (issue #185).
+    // successor section adds only its shape, roster rule and example (issue #185).
     expect(bytes(rendered).length).toBeLessThanOrEqual(13 * 1024);
+    expect(rendered).toContain(STANDALONE_SUCCESSOR_ROSTER_RULE);
     expect(parseReviewerPayloadV2(bytes(json[1]))).toEqual({ ok: true, value: REVIEWER_WIRE_CONTRACT_EXAMPLE_V2 });
     expect(parseStandaloneReviewerPayloadV3(bytes(json[2]))).toEqual({ ok: true, value: REVIEWER_WIRE_CONTRACT_EXAMPLE_V3 });
     deepFrozen(REVIEWER_WIRE_CONTRACT_EXAMPLE_V3);
-    // The successor example shows the three verdicts a reviewer most often gets wrong.
+    // The successor example shows each thing a verdict can copy from the roster: a
+    // repairable path, a decision reference, and nothing when the prior cannot be judged.
     expect(REVIEWER_WIRE_CONTRACT_EXAMPLE_V3.priorAssessments.map(({ verdict }) => verdict)).toEqual(["repaired", "retained", "not-assessable"]);
     expect(rendered.endsWith(REVIEWER_IMPACT_RUBRIC_V1)).toBe(true);
     deepFrozen(REVIEWER_PAYLOAD_EXAMPLE_V2);

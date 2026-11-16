@@ -14,6 +14,7 @@ import {
   waveRetryDiagnostic,
 } from "../../src/core/reviewer-retry";
 import { emissionToolPrimaryInstruction, type IssuedSpawnEmissionRoute } from "../../src/core/issued-emission-capability";
+import { STANDALONE_SUCCESSOR_ROSTER_RULE } from "../../src/core/standalone-lineage-contract";
 import { emissionRouteFor, emissionTask, issuedTask, REVIEWER_V2 } from "../fixtures/issued-emission";
 
 const bytes = (text: string): readonly number[] => [...new TextEncoder().encode(text)];
@@ -135,8 +136,9 @@ describe("standaloneRetryTask", () => {
     const task = issuedTask("code-reviewer", REVIEWER_V2);
     const successor = standaloneRetryTask(task, EXTRACTION_ROUTE, "bad assessment", { schemaVersion: 3 });
     const current = standaloneRetryTask(task, EXTRACTION_ROUTE, "bad assessment", { schemaVersion: 2 });
-    for (const phrase of ['"schemaVersion": 3', '"kind": "standalone-successor-review"', "standalone-assessment-roster",
-      "in roster order", "verdicts allow", "repairablePaths"]) {
+    // The roster rule is the one wording every successor prompt surface shares, verbatim.
+    for (const phrase of ['"schemaVersion": 3', '"kind": "standalone-successor-review"', STANDALONE_SUCCESSOR_ROSTER_RULE,
+      "in roster order", "repairablePaths"]) {
       expect(successor, phrase).toContain(phrase);
       expect(current, phrase).not.toContain(phrase);
     }

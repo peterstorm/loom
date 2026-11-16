@@ -238,9 +238,13 @@ a `retained` or `reopen` assessment may cite by `reference`, and the `verdicts` 
 accepts. A retired prior is never `still-present` or `repaired`; it is `retained`,
 `reopen` or `not-assessable`. Admission judges every assessment against the same rows.
 A refusal names the row's index, origin, standing, the verdict given, the verdicts the
-row allows and its citable references, and the retry carries that text. Every reviewer
+row allows and its citable references, and the retry carries that text. It stays within
+2048 UTF-8 bytes: it never repeats the Finding's claim, echoes at most 128 characters of
+what the reviewer wrote, and lists at most eight references, counting the rest. Every reviewer
 agent file shows the v3 shape and an example in its stamped wire contract
-(`references/reviewer-wire/wire-contract.md`), generated from the executable schema.
+(`references/reviewer-wire/wire-contract.md`), generated from the executable schema. The
+wire contract, the successor spawn task and the successor retry state the roster rule in
+one wording (`STANDALONE_SUCCESSOR_ROSTER_RULE`).
 
 **Resolving an inherited Finding.** Resolution requires every expected reviewer to say `repaired`, give a reason and
 identify a relevant scoped implementation change against the same frozen snapshot.

@@ -98,10 +98,12 @@ function standaloneDecisionCitations(prepared: PreparedStandaloneSuccessor, row:
 }
 
 /** How `path` compares with the predecessor's snapshot. An unknown historical input stays unknown, never an observed change. */
-export function standaloneInputChange(prepared: PreparedStandaloneSuccessor, path: string): StandaloneInputChange {
-  const current = prepared.snapshot.find(entry => entry.path === path);
+export function standaloneInputChange(
+  snapshots: Pick<PreparedStandaloneSuccessor, "snapshot" | "previousSnapshot">, path: string,
+): StandaloneInputChange {
+  const current = snapshots.snapshot.find(entry => entry.path === path);
   if (current === undefined) return "unchanged";
-  const previous = prepared.previousSnapshot.find(entry => entry.path === path);
+  const previous = snapshots.previousSnapshot.find(entry => entry.path === path);
   if (previous === undefined || previous.kind === "historical-unknown") return "historical-unknown";
   if (current.kind !== previous.kind) return "observed-changed";
   if (current.kind === "present" && previous.kind === "present") {
@@ -143,31 +145,56 @@ export function standaloneAssessmentRoster(prepared: PreparedStandaloneSuccessor
   });
 }
 
+/** What an assessment points at besides its verdict: the decision it cites, the path it names as repaired, or nothing. */
+type AssessmentCitation =
+  | Readonly<{ kind: "decision"; reference: string }>
+  | Readonly<{ kind: "path"; path: string }>
+  | Readonly<{ kind: "none" }>;
+
+const citationOf = (assessment: StandaloneResolutionAssessment): AssessmentCitation => match(assessment)
+  .with({ verdict: "retained" }, value => ({ kind: "decision" as const, reference: value.decisionDigest }))
+  .with({ verdict: "reopen" }, value => ({ kind: "decision" as const, reference: value.proposal.decisionDigest }))
+  .with({ verdict: "repaired" }, value => ({ kind: "path" as const, path: value.change.path }))
+  .with({ verdict: "still-present" }, { verdict: "not-assessable" }, () => ({ kind: "none" as const }))
+  .exhaustive();
+
 /**
- * Whether `assessment` is one the engine admits for `prior`: the verdict is
- * among the prior's verdicts, a citation names one of its decisions, and a
- * repair names one of the roster's `repairablePaths`, the same rows the
- * reviewer was issued. The origin and its order are checked by the caller.
+ * Whether `assessment` is one the engine admits for the roster's prior at
+ * `index`: the verdict is one its standing and decisions admit (`verdictsFor`,
+ * the rule that built the row's `verdicts`), a citation names one of its
+ * decisions, and a repair names one of the same roster's `repairablePaths`.
+ * The origin and its order are checked by the caller.
  */
 export function admitsStandaloneAssessment(
   roster: StandaloneAssessmentRoster,
-  prior: StandaloneAssessmentRosterRow,
+  index: number,
   assessment: StandaloneResolutionAssessment,
 ): boolean {
-  if (!prior.verdicts.includes(assessment.verdict)) return false;
-  const cites = (reference: string) => prior.decisions.some(decision => decision.reference === reference);
-  return match(assessment)
-    .with({ verdict: "retained" }, value => cites(value.decisionDigest))
-    .with({ verdict: "reopen" }, value => cites(value.proposal.decisionDigest))
-    .with({ verdict: "repaired" }, value => roster.repairablePaths.some(entry => entry.path === value.change.path))
-    .with({ verdict: "still-present" }, { verdict: "not-assessable" }, () => true)
+  const prior = roster.priors[index];
+  if (prior === undefined || !verdictsFor(prior.standing, prior.decisions).includes(assessment.verdict)) return false;
+  return match(citationOf(assessment))
+    .with({ kind: "decision" }, ({ reference }) => prior.decisions.some(decision => decision.reference === reference))
+    .with({ kind: "path" }, ({ path }) => roster.repairablePaths.some(entry => entry.path === path))
+    .with({ kind: "none" }, () => true)
     .exhaustive();
 }
+
+/** How many citable references a refusal lists before pointing at the roster row for the rest. */
+const LISTED_REFERENCES = 8;
+/** How many characters of a reviewer-supplied value a refusal echoes. */
+const ECHOED_CHARACTERS = 128;
+const echoed = (raw: string): string => {
+  const characters = [...raw];
+  return characters.length <= ECHOED_CHARACTERS ? raw : `${characters.slice(0, ECHOED_CHARACTERS).join("")}…`;
+};
 
 /**
  * The refusal for an assessment `admitsStandaloneAssessment` rejected: which
  * prior, what was said, and what its roster row allows, so a retry can correct
- * exactly that row. Bounded: it names references, never the Finding's claim.
+ * exactly that row. Bounded to 2048 UTF-8 bytes whatever the row or the
+ * payload: it never names the Finding's claim, echoes at most
+ * `ECHOED_CHARACTERS` of what the reviewer wrote, and lists at most
+ * `LISTED_REFERENCES` references, leaving the rest to the issued roster row.
  */
 export function describeInadmissibleAssessment(
   index: number,
@@ -175,13 +202,15 @@ export function describeInadmissibleAssessment(
   assessment: StandaloneResolutionAssessment,
 ): string {
   const allowed = prior.verdicts.join(", ");
-  const cited = match(assessment)
-    .with({ verdict: "retained" }, value => ` citing ${value.decisionDigest}`)
-    .with({ verdict: "reopen" }, value => ` citing ${value.proposal.decisionDigest}`)
-    .with({ verdict: "repaired" }, value => ` naming ${value.change.path}`)
-    .with({ verdict: "still-present" }, { verdict: "not-assessable" }, () => "")
+  const cited = match(citationOf(assessment))
+    .with({ kind: "decision" }, ({ reference }) => ` citing ${echoed(reference)}`)
+    .with({ kind: "path" }, ({ path }) => ` naming ${echoed(path)}`)
+    .with({ kind: "none" }, () => "")
     .exhaustive();
-  const citable = prior.decisions.length === 0 ? "none" : prior.decisions.map(decision => decision.reference).join(", ");
+  const listed = prior.decisions.slice(0, LISTED_REFERENCES).map(decision => decision.reference);
+  const unlisted = prior.decisions.length - listed.length;
+  const citable = listed.length === 0 ? "none"
+    : listed.join(", ") + (unlisted === 0 ? "" : `, and ${unlisted} more in that row`);
   return "Assessment must respect the exact prior decision and explicitly reopen retired history: " +
     `priorAssessments[${index}] (origin ${prior.origin}, ${prior.standing}) says ${assessment.verdict}${cited}; ` +
     `its ${STANDALONE_ASSESSMENT_ROSTER_SECTION} row allows ${allowed}, citing only: ${citable}.` +

@@ -47,14 +47,18 @@ naming it) and the verdicts admission accepts. The roster also holds `lineageDig
 `buildStandaloneSuccessorReviewerContext` encodes the roster as the `standalone-assessment-roster` fixed
 section, between `standalone-lineage` and the frozen schema, so the section is part of the issued context
 digest. `assessStandaloneSuccessor` builds the same roster and
-admits an assessment only through `admitsStandaloneAssessment`. A refusal names the row's index, origin,
-standing, the verdict given, the verdicts the row allows and its citable references, and the retry carries
-that text.
+admits an assessment only through `admitsStandaloneAssessment`, which derives the admitted verdicts from the
+row's standing and decisions by the same rule that built its `verdicts`. A refusal names the row's index,
+origin, standing, the verdict given, the verdicts the row allows and its citable references, and the retry
+carries that text. The refusal is bounded to 2048 UTF-8 bytes: it never names the Finding's claim, echoes at
+most 128 characters of what the reviewer wrote, and lists at most eight references, counting the rest.
 
-The stamped wire contract gains a successor section: when the task says the request is a successor, every
-v2 shape is refused, the payload is v3, and every digest is copied from the roster. It shows an example that
+The stamped wire contract gains a successor section: when the task says the request is a successor, the v2
+payload is refused, the payload is v3, and every digest is copied from the roster. It shows an example that
 the v3 admission schema parses. The v3 schema is not repeated there, because the issued packet carries its
-bytes. A top-level v3 schema refusal names the whole successor envelope.
+bytes. A top-level v3 schema refusal names the whole successor envelope. The roster rule is one constant,
+`STANDALONE_SUCCESSOR_ROSTER_RULE`, carried verbatim by the wire contract, the successor spawn task and the
+successor retry, so the three prompt surfaces cannot state it differently.
 
 ## Consequences
 
@@ -66,8 +70,11 @@ bytes. A top-level v3 schema refusal names the whole successor envelope.
 
 **Negative:**
 - Every successor packet is larger by one section, and every newly issued successor context digest differs.
-  Re-proof (`reprovesStandaloneSuccessorReviewerContext`, used by issued-reviewer parsing and by the retry
+  Re-proof (`reproveStandaloneSuccessorReviewerContext`, used by issued-reviewer parsing and by the retry
   recovery) accepts a packet in either issued layout, with or without the roster. A Run issued before this
-  change therefore resumes, replays and serves as a predecessor with its exact original digests.
+  change therefore resumes, replays and serves as a predecessor with its exact original digests. Each
+  request froze its context digest when it was published, so accepting both layouts never lets a Run issued
+  with the roster take the other one. Re-proof returns `reproved`, `differs`, or `unbuildable` with its
+  cause, so a packet that cannot be rebuilt is not reported as tampering.
   Admission never reads the roster section; it recomputes it.
-- The stamped reviewer contract every reviewer spawn reads grows by about 2KB.
+- The stamped reviewer contract every reviewer spawn reads grows by about 2.3KB.

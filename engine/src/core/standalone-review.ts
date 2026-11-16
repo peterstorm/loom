@@ -729,7 +729,7 @@ export function assessStandaloneSuccessor(prepared: PreparedStandaloneSuccessor,
   for (const [index, prior] of roster.priors.entries()) {
     const assessment = payload.priorAssessments[index];
     if (assessment === undefined || assessment.origin !== prior.origin) return rejectLineage("invalid-assessments", "Missing, foreign, duplicate or reordered origin assessment.");
-    if (!admitsStandaloneAssessment(roster, prior, assessment)) {
+    if (!admitsStandaloneAssessment(roster, index, assessment)) {
       return rejectLineage("invalid-assessments", describeInadmissibleAssessment(index, prior, assessment));
     }
   }
@@ -801,6 +801,8 @@ type SuccessorContextRequest = Pick<AgentRequestAuthority, "runId" | "requestId"
  * before the roster existed. A packet re-proves only under the layout it was
  * issued with, so an earlier Run keeps its exact digests rather than being
  * re-issued, and admission never reads the roster section: it recomputes it.
+ * Each request froze its `contextDigest` when it was published, so accepting
+ * both layouts never lets a Run issued with the roster take the other one.
  */
 const SUCCESSOR_CONTEXT_LAYOUTS = ["assessment-roster", "lineage-only"] as const;
 type SuccessorContextLayout = (typeof SUCCESSOR_CONTEXT_LAYOUTS)[number];
@@ -831,18 +833,35 @@ export function buildStandaloneSuccessorReviewerContext(prepared: PreparedStanda
 }
 
 /**
+ * What re-proving an issued successor packet found: it is the exact packet
+ * this lineage and request were issued; it is not (tampering or drift); or no
+ * layout could be rebuilt at all, which is a different fault and keeps its
+ * cause.
+ */
+export type StandaloneSuccessorContextReproof =
+  | Readonly<{ kind: "reproved" }>
+  | Readonly<{ kind: "differs" }>
+  | Readonly<{ kind: "unbuildable"; message: string }>;
+
+/**
  * Whether `digest` is the exact packet this prepared lineage and request were
  * issued, under any layout a successor packet has been issued with. The one
  * re-proof every rebuild site uses, so none of them compares against the
- * current layout only.
+ * current layout only. The current layout is tried first, so a current Run
+ * rebuilds once.
  */
-export function reprovesStandaloneSuccessorReviewerContext(prepared: PreparedStandaloneSuccessor, request: SuccessorContextRequest,
+export function reproveStandaloneSuccessorReviewerContext(prepared: PreparedStandaloneSuccessor, request: SuccessorContextRequest,
   variableContext: readonly ByteSection[], digest: string,
-): boolean {
-  return SUCCESSOR_CONTEXT_LAYOUTS.some(layout => {
+): StandaloneSuccessorContextReproof {
+  let unbuildable: string | null = null;
+  for (const layout of SUCCESSOR_CONTEXT_LAYOUTS) {
     const rebuilt = successorReviewerContext(prepared, request, variableContext, layout);
-    return rebuilt.ok && rebuilt.value.digest === digest;
-  });
+    if (rebuilt.ok && rebuilt.value.digest === digest) return canonicalRecord({ kind: "reproved" as const });
+    if (!rebuilt.ok) unbuildable ??= rebuilt.error.message;
+  }
+  return unbuildable === null
+    ? canonicalRecord({ kind: "differs" as const })
+    : canonicalRecord({ kind: "unbuildable" as const, message: unbuildable });
 }
 
 declare const issuedBrand: unique symbol;
@@ -870,9 +889,9 @@ export function parseIssuedStandaloneSuccessorReviewer(input: Readonly<{
       input.request.context.digest !== packet.digest || input.request.context.slot.path !== `contexts/${packet.digest}.json`) {
     return rejected("Independent registration, published request and Context Packet must join exactly.");
   }
-  if (!reprovesStandaloneSuccessorReviewerContext(input.prepared, request, packet.variableContext, packet.digest)) {
-    return rejected("Published Context Packet does not contain the exact prepared lineage and request subject.");
-  }
+  const reproof = reproveStandaloneSuccessorReviewerContext(input.prepared, request, packet.variableContext, packet.digest);
+  if (reproof.kind === "unbuildable") return rejected(`Published Context Packet could not be rebuilt for re-proof: ${reproof.message}`);
+  if (reproof.kind === "differs") return rejected("Published Context Packet does not contain the exact prepared lineage and request subject.");
   const authority = canonicalRecord({ protocolVersion: 3 as const, request, packet, prepared: input.prepared }) as IssuedStandaloneSuccessorReviewer;
   issuedProtocols.add(authority);
   return success(authority);

@@ -13,16 +13,17 @@ import { standaloneFixture } from "../fixtures/standalone-remediation-authority"
 import { value } from "../fixtures/parse-result";
 import {
   assessStandaloneSuccessor, buildStandaloneSuccessorReviewerContext, prepareStandaloneDisposition, prepareStandaloneLineageSource,
-  prepareStandaloneSuccessor, reprovesStandaloneSuccessorReviewerContext, type StandaloneLineageSource,
+  prepareStandaloneSuccessor, reproveStandaloneSuccessorReviewerContext, type StandaloneLineageSource,
 } from "../../src/core/standalone-review";
 import { buildStandaloneReviewerContextPacketV3, encodeByteSection } from "../../src/core/context-packets";
 import {
   admitsStandaloneAssessment, describeInadmissibleAssessment, standaloneAssessmentRoster, standaloneInputChange,
-  type StandaloneAssessmentRosterRow, type StandaloneAssessmentVerdict,
+  type StandaloneAssessmentRosterRow, type StandaloneAssessmentVerdict, type StandaloneDecisionCitation,
 } from "../../src/core/standalone-assessment-roster";
 import { findingOf, standaloneDecisionReference, standaloneOriginReference } from "../../src/core/standalone-finding-origin";
 import {
-  STANDALONE_ASSESSMENT_ROSTER_SECTION, type StandaloneResolutionAssessment, type StandaloneReviewerPayloadV3,
+  STANDALONE_ASSESSMENT_ROSTER_SECTION, type StandalonePreviousSnapshot, type StandaloneResolutionAssessment,
+  type StandaloneReviewerPayloadV3, type StandaloneSnapshot,
 } from "../../src/core/standalone-lineage-contract";
 import type { PreparedStandaloneSuccessor, StandaloneDispositionSelection } from "../../src/core/standalone-review-model";
 import { parseOrchestrationRunId, parseRequestId } from "../../src/core/orchestration-contract";
@@ -68,7 +69,7 @@ const SUCCESSORS: readonly (readonly [string, () => PreparedStandaloneSuccessor]
 function assessment(origin: string, verdict: StandaloneAssessmentVerdict, reference: string, path: string): StandaloneResolutionAssessment {
   const reason = "Current assessment.";
   switch (verdict) {
-    case "still-present": return { origin, verdict, reason };
+    case "still-present":
     case "not-assessable": return { origin, verdict, reason };
     case "retained": return { origin, verdict, reason, decisionDigest: reference };
     case "repaired": return { origin, verdict, reason, change: { path, description: "Changed." } };
@@ -118,7 +119,7 @@ describe("the Standalone Assessment Roster projects each prior's standing, citat
     deepFrozen(roster);
   });
 
-  it.each(SUCCESSORS)("for %s, admits a retired prior only through its cited history, and always as not assessable", (_name, make) => {
+  it.each(SUCCESSORS)("for %s, offers still-present and repaired only for an active prior, retained and reopen only when it has decisions, and not-assessable always and last", (_name, make) => {
     for (const prior of standaloneAssessmentRoster(make()).priors) {
       expect(prior.verdicts.includes("still-present")).toBe(prior.standing === "active");
       expect(prior.verdicts.includes("repaired")).toBe(prior.standing === "active");
@@ -143,7 +144,7 @@ describe("the roster and successor admission are one rule", () => {
     for (const [index, prior] of roster.priors.entries()) {
       for (const verdict of VERDICTS) for (const reference of citations(prior)) for (const path of paths(roster)) {
         const chosen = assessment(prior.origin, verdict, reference, path);
-        const allowed = admitsStandaloneAssessment(roster, prior, chosen);
+        const allowed = admitsStandaloneAssessment(roster, index, chosen);
         const assessed = assessStandaloneSuccessor(prepared, payloadWith(prepared, index, chosen));
         expect(assessed.ok, `${prior.origin} ${verdict} ${reference} ${path}`).toBe(allowed);
         if (allowed) admittedCount++;
@@ -194,6 +195,75 @@ describe("the roster and successor admission are one rule", () => {
     expect(describeInadmissibleAssessment(0, prior!, assessment(prior!.origin, "repaired", "", OUTSIDE_SCOPE)))
       .toMatch(/says repaired naming src\/elsewhere\.ts; .* A repair must name one of the roster's repairablePaths\.$/);
   });
+
+  it("admits nothing for an index past the roster", () => {
+    const roster = standaloneAssessmentRoster(successor(source(true)));
+    expect(admitsStandaloneAssessment(roster, roster.priors.length, assessment(FOREIGN_REFERENCE, "not-assessable", "", ""))).toBe(false);
+  });
+});
+
+describe("a refusal stays within its 2048-byte retry diagnostic", () => {
+  const hex = fc.stringMatching(/^[0-9a-f]{64}$/);
+  const citation: fc.Arbitrary<StandaloneDecisionCitation> = fc.oneof(
+    hex.map(reference => ({ kind: "resolution" as const, reference })),
+    fc.tuple(hex, fc.boolean()).map(([reference, survives]) => ({ kind: "adjudication" as const, reference, survives })),
+    fc.tuple(hex, fc.constantFrom("accepted" as const, "deferred" as const, "dismissed" as const))
+      .map(([reference, decision]) => ({ kind: "disposition" as const, reference, decision })),
+  );
+  // What a reviewer writes is bounded by nothing but the payload budget.
+  const supplied = fc.string({ unit: "grapheme", maxLength: 4_096 });
+  const row: fc.Arbitrary<StandaloneAssessmentRosterRow> = fc.record({
+    origin: hex,
+    finding: fc.record({ agent: fc.constant("code-reviewer"), severity: fc.constantFrom("critical" as const, "advisory" as const),
+      file: fc.constant(null), line: fc.constant(null), claim: fc.string({ maxLength: 4_096 }) }),
+    standing: fc.constantFrom("active" as const, "retired" as const),
+    decisions: fc.array(citation, { maxLength: 200 }),
+    verdicts: fc.subarray([...VERDICTS]),
+  });
+
+  it("whatever the row's decisions and whatever the reviewer wrote (property)", () => {
+    fc.assert(fc.property(fc.nat({ max: 4_095 }), row, fc.constantFrom(...VERDICTS), supplied, (index, prior, verdict, raw) => {
+      const message = describeInadmissibleAssessment(index, prior, assessment(prior.origin, verdict, raw, raw));
+      expect(new TextEncoder().encode(message).length).toBeLessThanOrEqual(2_048);
+      // Every listed reference is one the row carries; the rest are counted, never dropped silently.
+      const listed = Math.min(prior.decisions.length, 8);
+      for (const decision of prior.decisions.slice(0, listed)) expect(message).toContain(decision.reference);
+      if (prior.decisions.length > listed) expect(message).toContain(`and ${prior.decisions.length - listed} more in that row`);
+    }), { seed: 185, numRuns: 200 });
+  });
+
+  it("never names the Finding's claim", () => {
+    const prior: StandaloneAssessmentRosterRow = { origin: "a".repeat(64), standing: "retired", decisions: [], verdicts: ["not-assessable"],
+      finding: { agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "SECRET-CLAIM-TEXT" } };
+    expect(describeInadmissibleAssessment(0, prior, assessment(prior.origin, "still-present", "", ""))).not.toContain("SECRET-CLAIM-TEXT");
+  });
+});
+
+describe("a scoped path's input change against the predecessor snapshot", () => {
+  const DIGEST = "a".repeat(64);
+  const OTHER = "b".repeat(64);
+  const PATH = "src/main.ts";
+  const present = (digest: string, mode: "100644" | "100755") => ({ kind: "present" as const, path: PATH, digest, mode });
+
+  it.each<readonly [string, StandaloneSnapshot[number], StandalonePreviousSnapshot, ReturnType<typeof standaloneInputChange>]>([
+    ["identical bytes and mode", present(DIGEST, "100644"), [present(DIGEST, "100644")], "unchanged"],
+    ["changed bytes", present(OTHER, "100644"), [present(DIGEST, "100644")], "observed-changed"],
+    ["a mode-only change", present(DIGEST, "100755"), [present(DIGEST, "100644")], "observed-changed"],
+    ["identical bytes under an unobserved previous mode", present(DIGEST, "100755"), [{ ...present(DIGEST, "100644"), mode: null }], "unchanged"],
+    ["changed bytes under an unobserved previous mode", present(OTHER, "100755"), [{ ...present(DIGEST, "100644"), mode: null }], "observed-changed"],
+    ["a deletion", { kind: "absent", path: PATH }, [present(DIGEST, "100644")], "observed-changed"],
+    ["a creation", present(DIGEST, "100644"), [{ kind: "absent", path: PATH }], "observed-changed"],
+    ["still absent", { kind: "absent", path: PATH }, [{ kind: "absent", path: PATH }], "unchanged"],
+    ["a path the predecessor never observed", present(DIGEST, "100644"), [{ kind: "absent", path: "src/other.ts" }], "historical-unknown"],
+    ["a path the predecessor froze as unknown", present(DIGEST, "100644"), [{ kind: "historical-unknown", path: PATH }], "historical-unknown"],
+  ])("%s", (_name, current, previous, expected) => {
+    expect(standaloneInputChange({ snapshot: [current], previousSnapshot: previous }, PATH)).toBe(expected);
+  });
+
+  it("a path outside the successor's scope is unchanged, never a repair", () => {
+    expect(standaloneInputChange({ snapshot: [present(OTHER, "100644")], previousSnapshot: [present(DIGEST, "100644")] }, OUTSIDE_SCOPE))
+      .toBe("unchanged");
+  });
 });
 
 describe("the issued successor packet carries the roster admission judges by", () => {
@@ -214,16 +284,26 @@ describe("the issued successor packet carries the roster admission judges by", (
       "standalone-successor-authority", "standalone-lineage", "reviewer-payload-schema", "reviewer-impact-rubric",
     ]);
     for (const packet of [current, earlier]) {
-      expect(reprovesStandaloneSuccessorReviewerContext(prepared, request(prepared), [], packet.digest)).toBe(true);
+      expect(reproveStandaloneSuccessorReviewerContext(prepared, request(prepared), [], packet.digest)).toEqual({ kind: "reproved" });
       // Bound to its request: attempt 2's identity never re-proves attempt 1's packet.
-      expect(reprovesStandaloneSuccessorReviewerContext(prepared, request(prepared, 2), [], packet.digest)).toBe(false);
+      expect(reproveStandaloneSuccessorReviewerContext(prepared, request(prepared, 2), [], packet.digest)).toEqual({ kind: "differs" });
     }
     // A roster other than the one this lineage projects is not an issued layout.
     const foreignRoster = value(encodeByteSection(STANDALONE_ASSESSMENT_ROSTER_SECTION,
       JSON.stringify(standaloneAssessmentRoster(successor(source(true, true))))));
     const forged = value(buildStandaloneReviewerContextPacketV3({ requestId: current.requestId, role: current.role,
       requiredSkill: current.requiredSkill, fixedContext: [authority!, lineage!, foreignRoster], variableContext: [] }));
-    expect(reprovesStandaloneSuccessorReviewerContext(prepared, request(prepared), [], forged.digest)).toBe(false);
+    expect(reproveStandaloneSuccessorReviewerContext(prepared, request(prepared), [], forged.digest)).toEqual({ kind: "differs" });
+  });
+
+  it("reports a packet that cannot be rebuilt as unbuildable with its cause, not as a mismatch", () => {
+    const prepared = successor(source(true));
+    const packet = value(buildStandaloneSuccessorReviewerContext(prepared, request(prepared), []));
+    const cause = "Successor context requires the exact prepared source and expected reviewer.";
+    expect(reproveStandaloneSuccessorReviewerContext(prepared, { ...request(prepared), role: "adr-writer-agent" }, [], packet.digest))
+      .toEqual({ kind: "unbuildable", message: cause });
+    expect(reproveStandaloneSuccessorReviewerContext(prepared, { ...request(prepared), runId: value(parseOrchestrationRunId("run.foreign")) }, [], packet.digest))
+      .toEqual({ kind: "unbuildable", message: cause });
   });
 
   it("encodes the exact roster between the lineage and the frozen schema", () => {

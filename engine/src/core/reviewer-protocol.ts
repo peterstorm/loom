@@ -7,7 +7,7 @@ import {
   type ReviewerPayloadV2, type ReviewerProtocolFailure,
 } from "./reviewer-contract";
 import {
-  REVIEWER_WIRE_CONTRACT_EXAMPLE_V3, STANDALONE_ASSESSMENT_ROSTER_SECTION, standaloneReviewerPayloadV3Schema,
+  REVIEWER_WIRE_CONTRACT_EXAMPLE_V3, STANDALONE_SUCCESSOR_ROSTER_RULE, standaloneReviewerPayloadV3Schema,
   type StandaloneReviewerPayloadV3,
 } from "./standalone-lineage-contract";
 import { canonicalRecord, failure, success, type DomainResult } from "./orchestration-contract/identity";
@@ -335,18 +335,18 @@ export function renderReviewerWireContract(): string {
  * The successor arm of the wire contract (issue #185). An explicitly issued
  * standalone successor request is refused every v2 shape, and its payload
  * copies digests a reviewer cannot compute, so the stamped contract names the
- * v3 shape, says where each digest comes from (the packet's
- * `standalone-assessment-roster` section) and shows a parsed v3 example. The
- * v3 schema itself is not repeated: the issued packet carries its bytes.
+ * v3 shape, states the roster rule in the one wording the spawn task and
+ * retry also carry (`STANDALONE_SUCCESSOR_ROSTER_RULE`) and shows a parsed v3
+ * example. The v3 schema itself is not repeated: the issued packet carries
+ * its bytes.
  */
 const STANDALONE_SUCCESSOR_WIRE_SECTION = [
   "## Successor review (standalone-successor-review only)",
-  "Only when your task says it is an explicitly issued standalone successor v3 request. Every v2 shape above is then refused: the packet's schema section holds the v3 schema, and your payload has this shape.",
+  "Only when your task says it is an explicitly issued standalone successor v3 request. The v2 payload above is then refused: the packet's schema section holds the v3 schema, and your payload has this shape.",
   [
-    `- \`"schemaVersion": 3\`, \`"kind": "standalone-successor-review"\`, and \`lineageDigest\` and \`snapshotDigest\` copied from the packet's \`${STANDALONE_ASSESSMENT_ROSTER_SECTION}\` section.`,
-    "- `priorAssessments`: one entry per roster `priors` row, in roster order, carrying that row's `origin`. Copy every digest from the roster; never compute or invent one.",
-    "- Each verdict is one its row's `verdicts` lists. `still-present` and `repaired` apply only to an `active` prior. `retained` and `reopen` cite one of the row's `decisions` by its exact `reference`. A `repaired` change names a path from the roster's `repairablePaths`. Say `not-assessable` when you cannot judge the prior.",
-    "- `findings` holds only new Findings, each `{\"draft\": <one finding in the shape above>, \"relation\": {\"kind\": \"independent\"}}`, or `\"distinct-related\"` with a prior's `origin` and a `distinction`.",
+    "- `\"schemaVersion\": 3` and `\"kind\": \"standalone-successor-review\"`.",
+    `- ${STANDALONE_SUCCESSOR_ROSTER_RULE}`,
+    "- `findings` holds only new Findings, each `{\"draft\": <the fields of one v2 findings entry, never the v2 envelope>, \"relation\": {\"kind\": \"independent\"}}`, or `\"distinct-related\"` with a prior's `origin` and a `distinction`.",
   ].join("\n"),
   `\`\`\`json\n${JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V3, null, 2)}\n\`\`\``,
 ].join("\n\n");

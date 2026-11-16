@@ -25,7 +25,7 @@ import {
   reviewerEmissionToolContract,
 } from "../src/core/reviewer-contract";
 import { EMISSION_TOOL_SPECS, issueEmissionBinding } from "../src/core/emission-tool";
-import { STANDALONE_ASSESSMENT_ROSTER_SECTION } from "../src/core/standalone-lineage-contract";
+import { STANDALONE_ASSESSMENT_ROSTER_SECTION, STANDALONE_SUCCESSOR_ROSTER_RULE } from "../src/core/standalone-lineage-contract";
 import { parseRequestId } from "../src/core/orchestration-contract/identity";
 import { compactSchemaOf, describeCompactSchemaError } from "./support/compact-schema";
 import { describeMarkdownError, fencesOf, markdown } from "../src/linter/markdown";
@@ -322,10 +322,12 @@ describe("the fragment's tool-primary emission wording (FR-020/AS-012)", () => {
     const section = /## Successor review \(standalone-successor-review only\)\n\n([\s\S]*?)\n\n## reviewer-impact-rubric/.exec(fragment);
     expect(section).not.toBeNull();
     for (const phrase of [
-      "explicitly issued standalone successor v3 request", "Every v2 shape above is then refused",
-      '"schemaVersion": 3', '"kind": "standalone-successor-review"', `\`${STANDALONE_ASSESSMENT_ROSTER_SECTION}\` section`,
-      "in roster order", "never compute or invent one", "`verdicts`", "`decisions`", "`repairablePaths`", "`not-assessable`",
+      "explicitly issued standalone successor v3 request", "The v2 payload above is then refused",
+      '"schemaVersion": 3', '"kind": "standalone-successor-review"', "never the v2 envelope",
+      // The one roster wording the spawn task and the retry also carry, verbatim.
+      `- ${STANDALONE_SUCCESSOR_ROSTER_RULE}`,
     ]) expect(section![1], phrase).toContain(phrase);
+    expect(STANDALONE_SUCCESSOR_ROSTER_RULE).toContain(`${STANDALONE_ASSESSMENT_ROSTER_SECTION} section`);
   });
 
   it("the retained extraction-only final-message contract stays verbatim and leads the fragment", () => {
