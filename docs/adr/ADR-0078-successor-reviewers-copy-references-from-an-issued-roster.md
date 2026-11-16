@@ -1,4 +1,4 @@
-# ADR-0077: Successor reviewers copy references from an issued roster
+# ADR-0078: Successor reviewers copy references from an issued roster
 
 ## Status
 Accepted (2026-11-16). Builds on ADR-0010.

@@ -49,7 +49,7 @@ const CURRENT_STANDALONE_RETRY_RULES = [
 ].join("\n");
 
 /** What a successor (schema-3) retry adds: the envelope and the roster rule its
- *  prior assessments are admitted by (issue #185, ADR-0077), in the wording the
+ *  prior assessments are admitted by (issue #185, ADR-0078), in the wording the
  *  spawn task and wire contract carry. Without it, attempt 2 hears the v2-era
  *  rules and a reviewer that copied the v2 shape or a made-up digest repeats it. */
 const SUCCESSOR_STANDALONE_RETRY_RULE = [

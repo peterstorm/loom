@@ -84,6 +84,15 @@ Use only these agents; validation rejects any other name. Never assign `distill-
     - Do not copy the contract into `plan_context`. The engine renders each task's role into its brief.
 
     Validation refuses a contract no single task writes, a frozen path written by any other task, a bound path on the contract task, a bound path no non-contract task lists, a holder that does not depend on the contract task, a bound path on a task with a `documentation-only` or `generated-artifact` regression waiver, a contract task claiming a covered Requirement, a covered Requirement no task claims, a claimant that does not depend on the contract task, a claimant that neither writes the declared entry point nor waits for its writer, and a misused `covered-by-acceptance-contract` waiver.
+13. **Judged paths: a judgement lands while its subject's Wave is open.** A task **judges** a path when its tests decide whether code another task writes is acceptable: a memory, latency or size budget, a benchmark gate, an end-to-end acceptance run over another task's module. Emit `judged_paths` on every task: the paths it judges and does not write (`[]` when it judges none).
+    - A judgement can only be fixed while the writer's Wave is open: a completed Wave is verified history, and no task of the run may change it afterwards. So every task that writes a judged path sits in the judge's Wave or a **later** one.
+    - Prefer the Acceptance Contract shape: the budget or acceptance tests are written first (by a contract task, rule 12, when the plan declares the CT; otherwise by the judge in an earlier Wave), and the task that writes the judged code claims the Requirement and turns them green. A Requirement that constrains the behavior of code (a budget, a latency bound) is claimed by the task that writes that code, never by a later measuring task alone.
+    - A later task may still *report* on earlier code (a real-data benchmark write-up), but then it gates nothing: it claims no Requirement the earlier code must meet, and its tests do not fail on that code's breach.
+    - A judged path must be in some other task's `file_list`. If no task writes it, give it to the judge (then it is ordinary ownership, not a judgement) or to the task that should change it.
+
+    - A judge in its writer's own Wave runs beside it (a dependency is always on an earlier Wave), so its tests may meet unfinished code. That stays repairable because the Wave is still open, but it costs an attempt; when the judgement gates the Requirement, prefer the earlier-Wave contract shape above.
+
+    Validation refuses a judged path written in an earlier Wave than its judge, a judged path no task writes, and a judged path in the judge's own `file_list`.
 
 ---
 
@@ -114,7 +123,8 @@ In your output, replace `ABSOLUTE_SPEC_FILE_PATH` and `ABSOLUTE_PLAN_FILE_PATH` 
         "new_tests": { "kind": "required" }
       },
       "plan_context": "Relevant section from plan (paste key points)",
-      "file_list": ["src/models/User.ts", "src/models/User.test.ts"]
+      "file_list": ["src/models/User.ts", "src/models/User.test.ts"],
+      "judged_paths": []
     }
   ]
 }
@@ -143,3 +153,4 @@ In your output, replace `ABSOLUTE_SPEC_FILE_PATH` and `ABSOLUTE_PLAN_FILE_PATH` 
 | `verification_policy` | yes | object | One of the policies of rule 4, or a rule 12 new-tests waiver |
 | `plan_context` | yes | string | Key points from plan for this task (can be empty `""`) |
 | `file_list` | yes | string[] | Files to create/modify (can be empty `[]`) |
+| `judged_paths` | yes | string[] | Paths whose behavior this task's tests judge but another task writes, in this Wave or a later one (rule 13; can be empty `[]`) |

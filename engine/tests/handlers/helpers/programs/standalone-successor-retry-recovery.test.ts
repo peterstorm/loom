@@ -1,6 +1,6 @@
 /**
  * Successor retry recovery re-proves the durable attempt-2 packet under the
- * layout it was issued with (ADR-0077) before it trusts any publication: a
+ * layout it was issued with (ADR-0078) before it trusts any publication: a
  * Run issued before the Standalone Assessment Roster still recovers its exact
  * retry, a packet no issued layout produces is refused as differing, and one
  * that cannot be rebuilt at all says so with its cause.

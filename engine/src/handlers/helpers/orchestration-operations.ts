@@ -54,6 +54,7 @@ export const ORCHESTRATION_OPERATIONS = Object.freeze({
   remediate: Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
   attest: Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
   "reopen-task": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
+  "add-forward-fix": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
 } as const satisfies Readonly<Record<string, OrchestrationOperationTraits>>);
 
 export type OrchestrationOperation = keyof typeof ORCHESTRATION_OPERATIONS;

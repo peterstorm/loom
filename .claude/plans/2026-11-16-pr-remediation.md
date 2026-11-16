@@ -1,33 +1,63 @@
-# PR #187 remediation (2026-11-16)
+# PR #188 remediation plan (review-and-fix)
 
-- Branch: `fix/185-successor-reviewer-contract` (PR #187, issue #185, ADR-0077)
-- Scope: the 28 files of the PR diff against `main` (frozen by the review run)
-- Review Run Directory: `.claude/reviews/review-and-fix-runs/run.pr187-review-20261116`
-  (result digest `be1f913fac231e41a0ad5673434ea5cfbde14ddbb3d5926626cf16c7e3c23058`)
-- Policy publication: `.claude/reviews/review-and-fix-runs/run.pr187-policy-20261116`
-  (disposition digest `4d0a6bb144c2435002f9f0a5cca2b0726e3aac6326f3808ef90edb2efc85010d`)
+- **Branch:** `feat/judged-paths-and-remediation-task`
+- **Scope:** the whole PR diff against `main`, reviewed in three slices, because the frozen diff exceeded the read-coverage budget:
+  - `run.pr188-review-core`: `engine/src/core/{forward-fix,judged-paths,dispatch-holds,implementation-window,validate-task-execution,task-graph-population}.ts`, `engine/src/orchestration/implementation-brief.ts`, `engine/src/handlers/helpers/{add-forward-fix,orchestration-operations,subagent-quiescence,validate-task-graph}.ts`, `engine/src/types.ts`
+  - `run.pr188-review-wire`: `engine/src/state-file-wire.ts`, `engine/src/handlers/helpers/orchestration.ts` and the five new test and fixture files
+  - `run.pr188-review-docs`: the eleven changed documentation files
+- **Review Run Directories:** `.claude/reviews/review-and-fix-runs/run.pr188-review-{core,wire,docs}`
 
-## Criticals
+## Surviving critical Findings
 
-None emitted, none surviving, none refuted. Defect-family accounting: `not-required`.
+None in any slice: 0 emitted critical, 0 refuted. No Declared Repair Group, so the remediation uses `defectFamily: {"kind":"not-required"}`.
+
+## Refuted Findings
+
+None.
 
 ## Advisory dispositions (DECLARED)
 
-| Finding | Decision | Fix |
-| --- | --- | --- |
-| code-reviewer-1, architecture-tech-lead-1 | accepted | Bound `describeInadmissibleAssessment`: cap listed references, bound echoed values, property test of the 2048-byte bound over arbitrary rows. |
-| silent-failure-hunter-1 | accepted | Re-proof returns a tagged outcome (`reproved` / `differs` / `unbuildable` with message); both callers report the build failure. |
-| pr-test-analyzer-1 | accepted | Handler test: `recoverOrPublishStandaloneRetry` re-proves roster and pre-roster retry packets and refuses a forged one. |
-| pr-test-analyzer-2 | accepted | `standaloneInputChange` takes only the two snapshots; every branch tested with hand-built snapshots. |
-| type-design-analyzer-1 | accepted | `admitsStandaloneAssessment(roster, index, assessment)`; admitted verdicts derived from standing and decisions through `verdictsFor`. |
-| type-design-analyzer-2 | dismissed | The frozen request `contextDigest` commits one layout; issuance only builds the roster layout. |
-| comment-analyzer-1, comment-analyzer-2 | accepted | Rewrite the successor wire section (missing word; `draft` is a v2 finding, never the v2 envelope); name `decisionDigest` / `proposal.decisionDigest`; re-stamp. |
-| comment-analyzer-3 | accepted | Rename the verdict-list test to what it asserts. |
-| architecture-tech-lead-2, code-simplifier-1 | accepted | One exported successor rule wording, carried verbatim by the wire contract, spawn task and retry. |
-| architecture-tech-lead-3 | dismissed | The frozen digest already records the layout; a separate two-entry module fails the deletion test. |
-| code-simplifier-2 | accepted | Merge the two identical test-helper arms. |
+Published by `standalone-disposition` runs `run.pr188-policy-core`, `run.pr188-policy-wire` and `run.pr188-policy-docs`. Each holds the exact ordered inventory with its reason.
 
-## Validation
+**core (16).**
+- Accepted: code-reviewer-1, silent-failure-hunter-1, pr-test-analyzer-1, pr-test-analyzer-2, type-design-analyzer-2, architecture-tech-lead-1, architecture-tech-lead-3, architecture-tech-lead-4, code-simplifier-1 through code-simplifier-5.
+- Dismissed: type-design-analyzer-1. The reason invariant is enforced at both boundaries, the same as the sibling TaskReopeningAudit.
+- Dismissed: architecture-tech-lead-2. Argv parsing beside its command is the project idiom, as in `parseTaskReopeningArgs`.
+- Deferred: type-design-analyzer-3. Branding the validator's internal view would mean threading branded types through the untyped validator.
 
-From `engine/`: `npx tsc --noEmit`, `npm run -s lint`, `bun ../scripts/stamp-wire-contract.ts --check`,
-`env -u PI_CODING_AGENT npx vitest run`, `env -u PI_CODING_AGENT npm run -s test:smoke`.
+**wire (9).**
+- Accepted: pr-test-analyzer-1, pr-test-analyzer-2, pr-test-analyzer-3, type-design-analyzer-1, architecture-tech-lead-1, code-simplifier-1, code-simplifier-2.
+- Deferred: architecture-tech-lead-2. The two audit parsers prove different membership rules, and there is no third caller.
+- Dismissed: code-simplifier-3. A FIELDS constant beside an explicit literal is the sibling parsers' idiom.
+
+**docs (3).**
+- Accepted: comment-analyzer-1, architecture-tech-lead-1.
+- Deferred: architecture-tech-lead-2. Persisting judged_paths is a new feature, and its residual risk is recorded in the ADR.
+
+## Accepted fixes
+
+1. **Forward Fix shell keeps refusals typed** (core silent-failure-hunter-1, architecture-tech-lead-1). A dedicated `ForwardFixRefused` error carries the `ForwardFixRefusal` out of the locked update. Only it is reported as "refused without changing state"; any other failure is reported as a failed operation, with the State File possibly unknown.
+2. **Single-flag lookup by own property** (core code-reviewer-1).
+3. **Whole-history idempotent replay** (core architecture-tech-lead-3) with a `sameList` helper (code-simplifier-3).
+4. **Hold wording owned by dispatch-holds.ts** (core architecture-tech-lead-4, code-simplifier-5). `forwardFixHolders` becomes private (code-simplifier-1), and TaskId is kept through the hold with no casts (type-design-analyzer-2).
+5. **Parsing helpers** use local ok/fail constructors (code-simplifier-2), and `heldTaskRefusal` evaluates `isDistillTask` once (code-simplifier-4).
+6. **Loader proves sealed paths** were written by a Task of an earlier Wave (wire type-design-analyzer-1). It simplifies the `abandonedRunId` and foreign-held handling (code-simplifier-2).
+7. **Tests:**
+   - successor-named, wave-completed, frozen-path and not-executing refusals (core pr-test-analyzer-1, pr-test-analyzer-2);
+   - typed refusal rows (wire architecture-tech-lead-1, code-simplifier-1);
+   - an abandonedRunId round trip and the extra tamper rows (wire pr-test-analyzer-1, pr-test-analyzer-2);
+   - the dispatcher route (wire pr-test-analyzer-3).
+8. **Docs:** the ADR states that judged_paths is emitted on every Task and that an absent field is read as `[]` (docs comment-analyzer-1). Rule 13 and the ADR describe the same-Wave case (docs architecture-tech-lead-1).
+
+## Validation (operator runs; not remediation evidence)
+
+```bash
+cd engine
+npx tsc --noEmit -p .
+env -u PI_CODING_AGENT npm run lint
+env -u PI_CODING_AGENT npx vitest run tests/core/forward-fix.test.ts tests/handlers/helpers/add-forward-fix.test.ts \
+  tests/core/judged-paths.test.ts tests/handlers/validate-task-graph-judged-paths.test.ts tests/core/distill-dispatch.test.ts \
+  tests/core/task-reopening.test.ts tests/handlers/helpers/orchestration.test.ts tests/docs
+```
+
+The registered remediation (`run.pr188-remediation-1`, source `run.pr188-review-core`) runs the manifest's own checks. Paths outside the core slice are named in `supportPaths`.

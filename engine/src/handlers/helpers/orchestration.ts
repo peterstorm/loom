@@ -29,6 +29,9 @@
  *   helper orchestration attest --task <task-id> --reason <text>
  *   helper orchestration reopen-task --wave <N> --task <task-id> [--task <task-id>]...
  *                               --reason <text>
+ *   helper orchestration add-forward-fix --wave <N> --hold <task-id>... --file <path>...
+ *                               --description <text> --reason <text>
+ *                               [--agent <agent>] [--new-tests required|existing-tests-sufficient]
  *
  * Every `--run`, `--new-run`, and remediation `sourceRun` accepts either the
  * bare run id or a full path to that same direct child of its runs-root. The
@@ -209,6 +212,7 @@ import { parseOrchestrationOperation } from "./orchestration-operations";
 import { remediateOperation } from "./remediate-implementation-escalation";
 import { attestOperation } from "./attest-implementation";
 import { reopenTaskOperation } from "./reopen-task";
+import { addForwardFixOperation } from "./add-forward-fix";
 import { renderStandaloneReviewSummary } from "../../core/standalone-review-records";
 import { serializeStandaloneReviewMachineState } from "../../core/standalone-review-checkpoint";
 import { argumentValue, argumentValues, hasFlag, unconsumedValueArguments } from "./cli-args";
@@ -262,6 +266,10 @@ function usage(): HookResult {
   "          (arms implementation re-attestation: rewrites the Task's pending proof to attested obligations + regression-only policy; the next dispatch runs a verify-only child whose writes settle as drift, never as attested)",
   "  reopen-task --wave <N> --task <task-id> [--task <task-id>]... --reason <text>",
   "          (after abandoning the Wave's run: returns implemented Tasks of the active Wave to revalidation so status owes each a fresh dispatch; Findings stay as prior Findings, other Tasks stay implemented; audited and idempotent)",
+  "  add-forward-fix --wave <N> --hold <task-id> [--hold <task-id>]... --file <path> [--file <path>]...",
+  "          --description <text> --reason <text> [--agent <implementation agent>] [--new-tests required|existing-tests-sufficient]",
+  "          (appends a Forward Fix Task to the active Wave to change code a completed Wave sealed, when a held Task's judgement of it failed;",
+  "          the held Tasks wait until the fix settles; completed Waves stay untouched; audited and idempotent)",
     ].join("\n"),
   };
 }
@@ -1935,6 +1943,8 @@ export function orchestrationHandler(emission: () => Emission): HookHandler {
         return attestOperation(rest);
       case "reopen-task":
         return reopenTaskOperation(rest);
+      case "add-forward-fix":
+        return addForwardFixOperation(rest);
     }
   };
 }

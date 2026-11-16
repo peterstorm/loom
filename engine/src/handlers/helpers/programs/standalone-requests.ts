@@ -301,7 +301,7 @@ export async function recoverOrPublishStandaloneRetry(
   if (authority.schemaVersion === 3) {
     const packet = handle.readStandaloneSuccessorContext(retryAuthority.contextDigest);
     if (!packet.ok) return { ok: false, message: packet.error.message };
-    // Re-proved under the layout it was issued with (ADR-0077), so a Run issued
+    // Re-proved under the layout it was issued with (ADR-0078), so a Run issued
     // before the assessment roster still recovers its exact retry packet.
     const reproof = reproveStandaloneSuccessorReviewerContext(authority.successor, retryAuthority, packet.value.variableContext, retryAuthority.contextDigest);
     if (reproof.kind === "unbuildable") return { ok: false, message: `successor retry packet could not be rebuilt for re-proof: ${reproof.message}` };

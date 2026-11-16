@@ -797,7 +797,7 @@ type SuccessorContextRequest = Pick<AgentRequestAuthority, "runId" | "requestId"
 
 /**
  * The fixed-section layouts a successor packet has been issued with. Issuance
- * builds `assessment-roster` (ADR-0077); `lineage-only` is the layout issued
+ * builds `assessment-roster` (ADR-0078); `lineage-only` is the layout issued
  * before the roster existed. A packet re-proves only under the layout it was
  * issued with, so an earlier Run keeps its exact digests rather than being
  * re-issued, and admission never reads the roster section: it recomputes it.
