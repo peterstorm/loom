@@ -19,6 +19,7 @@
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pathExistsFailClosed, taskGraphPath } from "./config";
+import { TASK_GRAPH_LOCK_NAME } from "./core/engine-runtime-paths";
 import {
   parseCanonicalTaskGraphPointer,
   parseSessionId,
@@ -595,7 +596,7 @@ export class StateManager {
     assertPiCliMutationCompatible(process.env, captureLoomRuntimeIdentityAt(PACKAGE_ROOT, this.writeBoundary));
     const directory = this.openAuthorityDirectory();
     return withStateDirectoryAsync(directory, `TaskGraph archive of ${this.path}`, () =>
-      withAnchoredDirectoryHandleLock(directory, ".task_graph", () => {
+      withAnchoredDirectoryHandleLock(directory, TASK_GRAPH_LOCK_NAME, () => {
         // One read: the bytes archived are exactly the bytes judged.
         const bytes = readDirectoryFileNoFollow(directory, this.authority.leaf);
         const decision = decide(this.parseGraphBytes(bytes));
@@ -626,7 +627,7 @@ export class StateManager {
     assertPiCliMutationCompatible(process.env, captureLoomRuntimeIdentityAt(PACKAGE_ROOT, this.writeBoundary));
     const directory = this.openAuthorityDirectory();
     return withStateDirectoryAsync(directory, `TaskGraph atomic write of ${this.path}`, () =>
-      withAnchoredDirectoryHandleLock(directory, ".task_graph", () => {
+      withAnchoredDirectoryHandleLock(directory, TASK_GRAPH_LOCK_NAME, () => {
         const produced = produce(directory);
         if (produced.persist === false) return produced.value;
         const parsed = parseTaskGraph(produced.state);

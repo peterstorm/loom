@@ -19,6 +19,7 @@
  */
 
 import type { DomainResult } from "./orchestration-contract";
+import { COMPLETION_REPORT_ROOT } from "./completion-suite";
 import { parseVerificationManifest } from "./verification-manifest";
 
 /** Upper bound on a manifest source; anything larger is refused unparsed. */
@@ -104,4 +105,39 @@ export function planManifestInstall(
       : `${manifestPath} already exists but is not a valid verification manifest (${current.error}); ` +
         `refusing overwrite (pass ${REPLACE_FLAG} to replace it before Task population)`,
   };
+}
+
+/**
+ * Every report path the manifest's commands write: each project check's and
+ * each runner's `required-file` report. The engine writes these paths while
+ * Tasks run (the stop checks) and while Waves complete, so each must be
+ * untracked and Git-ignored; a Git-visible report is read as somebody's
+ * change.
+ */
+export function manifestReportPaths(manifest: CanonicalManifest): readonly string[] {
+  const raw: unknown = JSON.parse(manifest);
+  const parsed = parseVerificationManifest(raw);
+  // A CanonicalManifest is minted only from a parsed manifest, so this is a
+  // constructor invariant, unreachable through canonicalizeManifestSource.
+  if (!parsed.ok) throw new Error(`CanonicalManifest no longer parses: ${parsed.error.errors.join("; ")}`);
+  const value = parsed.value;
+  const reports = [
+    ...value.checks.map((check) => check.report),
+    ...(value.acceptanceRunner === undefined ? [] : [value.acceptanceRunner.report]),
+    ...(value.affectedRunner === undefined ? [] : [value.affectedRunner.report]),
+  ];
+  return Object.freeze([...new Set(reports.flatMap((report) =>
+    report.kind === "required-file" ? [report.path] : []))].sort());
+}
+
+/**
+ * The refusal for report paths the project does not Git-ignore, or null when
+ * every report path is ignored. It names the paths and the rule to add.
+ */
+export function unignoredReportRefusal(unignored: readonly string[]): string | null {
+  if (unignored.length === 0) return null;
+  return "verification manifest report paths must be untracked and Git-ignored before Task population, " +
+    "or the engine's own report writes are judged as a Task's out-of-scope writes. " +
+    `Not ignored: ${unignored.join(", ")}. ` +
+    `Add an operator-owned ignore rule (for example \`${COMPLETION_REPORT_ROOT}/\` in .gitignore), then retry.`;
 }

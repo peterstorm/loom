@@ -4,10 +4,14 @@ import { taskGraphPath } from "../../config";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "../../core/verification-manifest";
 import {
   canonicalizeManifestSource,
+  manifestReportPaths,
   parseManifestInstallArgs,
   planManifestInstall,
+  unignoredReportRefusal,
   type CanonicalManifest,
 } from "../../core/verification-manifest-install";
+import { GIT_PROBE_OUTPUT_LIMIT, spawnGit } from "../../utils/git-execution-policy";
+import { describeGitOutcome, gitCleanNegative, gitExitedWith } from "../../utils/git-spawn-outcome";
 import {
   ensureDirectoryNoFollow,
   publishStagedRunFile,
@@ -40,6 +44,32 @@ function projectRootFromStatePath(statePath: string): ProjectRootResult {
           `cannot derive verification manifest target from non-canonical State File path ${statePath}; ` +
           "expected <root>/.claude/state/active_task_graph.json or <root>/.pi/state/active_task_graph.json",
       };
+}
+
+type UnignoredReports =
+  | Readonly<{ ok: true; value: readonly string[] }>
+  | Readonly<{ ok: false; error: string }>;
+
+/**
+ * The manifest's report paths the project does not Git-ignore. `check-ignore`
+ * exiting 1 with no diagnostic is the clean "not ignored" answer; any other
+ * ending (not a repository, a spawn failure) is reported as itself, never read
+ * as a policy answer.
+ */
+function unignoredReportPaths(projectRoot: string, paths: readonly string[]): UnignoredReports {
+  const unignored: string[] = [];
+  for (const path of paths) {
+    const outcome = spawnGit(["check-ignore", "-q", "--", path], { cwd: projectRoot, maxBuffer: GIT_PROBE_OUTPUT_LIMIT });
+    if (gitExitedWith(outcome, [0])) continue;
+    if (!gitCleanNegative(outcome)) {
+      return {
+        ok: false,
+        error: `cannot tell whether report path ${path} is Git-ignored: check-ignore ${describeGitOutcome(outcome)}`,
+      };
+    }
+    unignored.push(path);
+  }
+  return { ok: true, value: Object.freeze(unignored) };
 }
 
 /** The installed manifest's text, or null when none exists. Never follows a link. */
@@ -101,6 +131,14 @@ const handler: HookHandler = async (stdin, args): Promise<HookResult> => {
   if (!candidate.ok) return { kind: "error", message: `Invalid verification manifest: ${candidate.error}` };
   const projectRoot = projectRootFromStatePath(statePath);
   if (!projectRoot.ok) return { kind: "error", message: projectRoot.error };
+
+  const reportPaths = manifestReportPaths(candidate.value);
+  if (reportPaths.length > 0) {
+    const unignored = unignoredReportPaths(projectRoot.value, reportPaths);
+    if (!unignored.ok) return { kind: "error", message: `write-verification-manifest: ${unignored.error}` };
+    const refusal = unignoredReportRefusal(unignored.value);
+    if (refusal !== null) return { kind: "error", message: `write-verification-manifest: ${refusal}` };
+  }
 
   const target = join(projectRoot.value, VERIFICATION_MANIFEST_SOURCE_PATH);
   try {

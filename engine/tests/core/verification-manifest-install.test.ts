@@ -4,8 +4,10 @@ import {
   MAX_MANIFEST_SOURCE_BYTES,
   REPLACE_FLAG,
   canonicalizeManifestSource,
+  manifestReportPaths,
   parseManifestInstallArgs,
   planManifestInstall,
+  unignoredReportRefusal,
   type CanonicalManifest,
   type ManifestInstallMode,
 } from "../../src/core/verification-manifest-install";
@@ -139,6 +141,57 @@ describe("planManifestInstall", () => {
 
     expect(planManifestInstall("{broken", candidate, "replace", PATH))
       .toEqual({ kind: "replace", manifest: candidate });
+  });
+});
+
+const REPORT = ".loom/completion-reports/unit.junit.xml";
+
+/** A schema-1 check that writes a required JUnit report at `path`. */
+function reportingCheck(id: string, path: string): Record<string, unknown> {
+  return {
+    id,
+    scope: "wave",
+    executable: "bun",
+    args: ["test", "--reporter=junit", `--reporter-outfile=${path}`],
+    cwd: ".",
+    timeoutMs: 60_000,
+    report: { kind: "required-file", path },
+  };
+}
+
+describe("manifestReportPaths", () => {
+  it("names no path for checks that require no report", () => {
+    fc.assert(fc.property(checkSpecs, (checks) => {
+      expect(manifestReportPaths(canonical(manifest(checks)))).toEqual([]);
+    }));
+  });
+
+  it("names each required report path once, sorted", () => {
+    const other = ".loom/completion-reports/a.junit.xml";
+    const data = {
+      schemaVersion: 1,
+      kind: "loom-verification-manifest",
+      checks: [
+        reportingCheck("project:unit", REPORT),
+        reportingCheck("project:again", REPORT),
+        reportingCheck("project:other", other),
+      ],
+    };
+    expect(manifestReportPaths(canonical(data))).toEqual([other, REPORT]);
+  });
+});
+
+describe("unignoredReportRefusal", () => {
+  it("allows a manifest whose every report path is ignored", () => {
+    expect(unignoredReportRefusal([])).toBeNull();
+  });
+
+  it("names every path that is not ignored and the rule to add", () => {
+    const refusal = unignoredReportRefusal([REPORT, ".loom/completion-reports/b.xml"]);
+    expect(refusal).toContain(REPORT);
+    expect(refusal).toContain(".loom/completion-reports/b.xml");
+    expect(refusal).toContain("`.loom/completion-reports/`");
+    expect(refusal).toContain("out-of-scope");
   });
 });
 
