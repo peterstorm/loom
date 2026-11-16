@@ -51,17 +51,21 @@ wrote it.
 
 ## Decision
 
-**Judged Paths (prevention).** Every decompose Task may carry `judged_paths`: the paths its tests judge and
-another Task writes. The decompose template asks for the field on every Task (rule 13), and
-`validate-task-graph --decompose-payload`, run again by `populate-task-graph`, refuses through
-`judgedPathProblems` (`engine/src/core/judged-paths.ts`):
+**Judged Paths (prevention).** Decompose emits `judged_paths` on every Task (rule 13 makes it required, `[]`
+when the Task judges nothing): the paths its tests judge and another Task writes. Validation reads an absent
+field as `[]`, so a payload authored before the field existed still validates. `validate-task-graph
+--decompose-payload`, run again by `populate-task-graph`, refuses through `judgedPathProblems`
+(`engine/src/core/judged-paths.ts`):
 
 - `earlier-writer`: a Task in an earlier Wave than the judge writes a judged path;
 - `unwritten`: no Task writes a judged path, so a failed judgement has no fixer;
 - `self-written`: the judge writes the path itself, which is ownership, not a judgement.
 
 The preferred shape is an Acceptance Contract: the budget tests are written first and the Task that writes the
-judged code claims the Requirement and turns them green. Plan alignment flags the same shape one phase earlier
+judged code claims the Requirement and turns them green. A judge in its writer's own Wave is admitted. Wave
+scheduling forbids a dependency between Tasks of one Wave, so the two run side by side, and the judge may meet
+code that is still being written. Its failure is still repairable while that Wave is open: the writer's own
+retry or `reopen-task` fixes the code, and the judge's retry judges it again. Plan alignment flags the same shape one phase earlier
 as a `JUDGE-N` gap. The field is not persisted: it shapes the roster and nothing at execute reads it.
 
 **Forward Fix (fallback).** `helper orchestration add-forward-fix` appends one Task to the active Wave

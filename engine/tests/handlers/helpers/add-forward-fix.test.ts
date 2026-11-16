@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createAddForwardFixOperation } from "../../../src/handlers/helpers/add-forward-fix";
 import { ORCHESTRATION_OPERATIONS } from "../../../src/handlers/helpers/orchestration-operations";
+import { orchestrationHandler } from "../../../src/handlers/helpers/orchestration";
 import { piRuntimeHandshakeRequired, routeConsumesStdin } from "../../../src/handler-routes";
 import { parseTaskGraph } from "../../../src/state-file-wire";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
@@ -102,8 +103,40 @@ describe("add-forward-fix shell", () => {
     const result = await createAddForwardFixOperation(quiet)(["--wave", "2", "--hold", "T4", "--file", "src/serve.ts", "--description", "d", "--reason", "r"]);
     expect(result).toMatchObject({
       kind: "error",
-      message: expect.stringContaining("add-forward-fix refused without changing state: T4 has no failed implementation attempt"),
+      message: expect.stringContaining(
+        "add-forward-fix refused without changing state (no-failed-judgement): T4 has no failed implementation attempt",
+      ),
     });
     expect(readFileSync(statePath, "utf8")).toBe(before);
+  });
+
+  it("reports a non-refusal failure as a failed operation, never as a refusal", async () => {
+    const statePath = installState();
+    const before = readFileSync(statePath, "utf8");
+    let calls = 0;
+    // Quiet before the lock; the probe then fails under it, which is no refusal.
+    const result = await createAddForwardFixOperation(() => {
+      calls += 1;
+      if (calls > 1) throw new Error("ledger unreadable");
+      return false;
+    })([...ARGS]);
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("add-forward-fix failed;") });
+    if (result.kind === "error") {
+      expect(result.message).toContain("ledger unreadable");
+      expect(result.message).not.toContain("refused without changing state");
+    }
+    expect(readFileSync(statePath, "utf8")).toBe(before);
+  });
+});
+
+describe("add-forward-fix through the orchestration dispatcher", () => {
+  it("routes `helper orchestration add-forward-fix` to the operation", async () => {
+    const statePath = installState();
+    const result = await orchestrationHandler(() => {
+      throw new Error("add-forward-fix advances no program and needs no emission");
+    })("", ["add-forward-fix", ...ARGS]);
+    expect(result).toEqual({ kind: "allow" });
+    const loaded = parseTaskGraph(JSON.parse(readFileSync(statePath, "utf8")) as unknown);
+    expect(loaded.ok && loaded.value.forward_fix_history?.map(({ fixTaskId }) => fixTaskId)).toEqual(["T5"]);
   });
 });

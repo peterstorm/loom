@@ -98,8 +98,10 @@ export const FORWARD_FIX_USAGE =
   "[--agent code-implementer-agent|frontend-agent|security-agent] [--new-tests required|existing-tests-sufficient]";
 
 const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
+const okWith = <T>(value: T): DomainResult<T, never> => freeze({ ok: true as const, value });
+const failWith = <E>(error: E): DomainResult<never, E> => freeze({ ok: false as const, error });
 const refuse = (kind: ForwardFixRefusalKind, message: string): DomainResult<never, ForwardFixRefusal> =>
-  freeze({ ok: false as const, error: freeze({ kind, message }) });
+  failWith(freeze({ kind, message }));
 const WAVE_NUMBER = /^[1-9][0-9]*$/;
 const MAX_DESCRIPTION_LENGTH = 512;
 
@@ -131,31 +133,30 @@ function collectFlags(args: readonly string[]): DomainResult<ForwardFixFlags, st
   for (let index = 0; index < args.length; index += 2) {
     const flag = args[index] ?? "";
     const value = args[index + 1];
-    const key = SINGLE[flag];
-    if (!REPEATABLE.has(flag) && key === undefined) return freeze({ ok: false as const, error: `unknown argument '${flag}'` });
-    if (value === undefined || isFlagToken(value)) return freeze({ ok: false as const, error: `${flag} needs a value` });
+    // Own properties only: a flag spelled like an inherited Object member is unknown, not a key.
+    const key = Object.hasOwn(SINGLE, flag) ? SINGLE[flag] : undefined;
+    if (!REPEATABLE.has(flag) && key === undefined) return failWith(`unknown argument '${flag}'`);
+    if (value === undefined || isFlagToken(value)) return failWith(`${flag} needs a value`);
     if (flag === "--hold") flags.holds.push(value);
     else if (flag === "--file") flags.files.push(value);
     else if (key !== undefined) {
-      if (flags[key] !== undefined) return freeze({ ok: false as const, error: `${flag} is given twice` });
+      if (flags[key] !== undefined) return failWith(`${flag} is given twice`);
       flags[key] = value.trim();
     }
   }
-  return freeze({ ok: true as const, value: flags });
+  return okWith(flags);
 }
 
 /** Distinct values, or the first repeat. */
 function distinct<T extends string>(values: readonly T[]): DomainResult<readonly T[], T> {
   const repeated = values.find((value, index) => values.indexOf(value) !== index);
-  return repeated === undefined ? freeze({ ok: true as const, value: values }) : freeze({ ok: false as const, error: repeated });
+  return repeated === undefined ? okWith(values) : failWith(repeated);
 }
 
 /** A non-blank trimmed text of at most `max` characters, or why not. */
 function boundedText(value: string | undefined, flag: string, max: number, why: string): DomainResult<string, string> {
-  if (value === undefined || value.length === 0) return freeze({ ok: false as const, error: `${flag} must say ${why}` });
-  return value.length > max
-    ? freeze({ ok: false as const, error: `${flag} is longer than ${max} characters` })
-    : freeze({ ok: true as const, value });
+  if (value === undefined || value.length === 0) return failWith(`${flag} must say ${why}`);
+  return value.length > max ? failWith(`${flag} is longer than ${max} characters`) : okWith(value);
 }
 
 /**
@@ -264,9 +265,9 @@ function heldTaskRefusal(graph: TaskGraph, request: ForwardFixRequest): DomainRe
     if (task.wave !== request.wave) {
       return refuse("foreign-task", `${id} belongs to Wave ${task.wave}, not the active Wave ${request.wave}`);
     }
-    if (isDistillTask(task) || isForwardFixTask(graph, task)) {
-      return refuse("not-a-judge", `${id} is ${isDistillTask(task) ? "the Wave's distill pass" : "a Forward Fix Task"}; ` +
-        "only an authored Task that judges code is held");
+    const notAJudge = isDistillTask(task) ? "the Wave's distill pass" : isForwardFixTask(graph, task) ? "a Forward Fix Task" : null;
+    if (notAJudge !== null) {
+      return refuse("not-a-judge", `${id} is ${notAJudge}; only an authored Task that judges code is held`);
     }
     if (task.status !== "pending" || !judgementFailed(task)) {
       return refuse("no-failed-judgement", `${id} has no failed implementation attempt to answer (status ${task.status}); ` +
@@ -307,7 +308,7 @@ function admittedSealedPaths(graph: TaskGraph, request: ForwardFixRequest): Doma
   return sealed === null
     ? refuse("not-sealed", "no --file path is written by a Task of a completed Wave; a Forward Fix exists for sealed code. " +
       "Change open code through the Task that owns it")
-    : freeze({ ok: true as const, value: sealed });
+    : okWith(sealed);
 }
 
 /** The next free Task id after every id of the roster. */
@@ -355,19 +356,25 @@ function fixTaskOf(graph: TaskGraph, request: ForwardFixRequest, fixTaskId: Task
   );
 }
 
-/** The committed audit this request replays, when its fix Task has not settled yet. */
+/** Two lists with the same entries in the same order. */
+const sameList = (left: readonly string[], right: readonly string[]): boolean =>
+  left.length === right.length && left.every((entry, index) => entry === right[index]);
+
+/**
+ * The committed audit this request replays: any audit in the history (not
+ * only the latest) that the request describes exactly and whose fix Task is
+ * still pending. A retry that arrives after a later Forward Fix is still a
+ * replay.
+ */
 function replayedAudit(graph: TaskGraph, request: ForwardFixRequest): ForwardFixAudit | undefined {
-  const last = (graph.forward_fix_history ?? []).at(-1);
-  if (last === undefined || last.wave !== request.wave || last.reason !== request.reason ||
-      last.heldTaskIds.length !== request.heldTaskIds.length ||
-      !last.heldTaskIds.every((id, index) => id === request.heldTaskIds[index])) {
-    return undefined;
-  }
-  const fix = graph.tasks.find(({ id }) => id === last.fixTaskId);
-  const sameTask = fix !== undefined && fix.description === request.description && fix.agent === request.agent &&
-    (fix.file_list ?? []).length === request.files.length &&
-    (fix.file_list ?? []).every((path, index) => path === request.files[index]);
-  return sameTask && fix.status === "pending" ? last : undefined;
+  return (graph.forward_fix_history ?? []).find((audit) => {
+    if (audit.wave !== request.wave || audit.reason !== request.reason || !sameList(audit.heldTaskIds, request.heldTaskIds)) {
+      return false;
+    }
+    const fix = graph.tasks.find(({ id }) => id === audit.fixTaskId);
+    return fix !== undefined && fix.status === "pending" && fix.description === request.description &&
+      fix.agent === request.agent && sameList(fix.file_list ?? [], request.files);
+  });
 }
 
 /**
@@ -378,7 +385,7 @@ function replayedAudit(graph: TaskGraph, request: ForwardFixRequest): ForwardFix
  */
 export function addForwardFix(graph: TaskGraph, request: ForwardFixRequest): DomainResult<ForwardFix, ForwardFixRefusal> {
   const replay = replayedAudit(graph, request);
-  if (replay !== undefined) return freeze({ ok: true as const, value: freeze({ kind: "already-added" as const, audit: replay }) });
+  if (replay !== undefined) return okWith(freeze({ kind: "already-added" as const, audit: replay }));
   const reopenable = reopenableWave(graph);
   if (!reopenable.ok) return waveReopeningRefusal(reopenable.error);
   const refusal = waveRefusal(reopenable.value, request) ?? heldTaskRefusal(graph, request);

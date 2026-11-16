@@ -14,7 +14,7 @@ import {
   type ForwardFixRefusal,
   type ForwardFixRequest,
 } from "../../src/core/forward-fix";
-import { dispatchHoldMessage, dispatchHoldOf } from "../../src/core/dispatch-holds";
+import { dispatchHoldMessage, dispatchHoldOf, stuckDispatchHoldMessage } from "../../src/core/dispatch-holds";
 import { classifyImplementationWindow, type ImplementationWindow } from "../../src/core/implementation-window";
 import { taskExecutionDecision } from "../../src/core/validate-task-execution";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
@@ -22,8 +22,10 @@ import { parseTaskGraph } from "../../src/state-file-wire";
 import type { Task, TaskGraph } from "../../src/types";
 import { forwardFixTask as task, sealedTask as completed, sealedWaveGraph as sealed } from "../fixtures/forward-fix";
 import { implementationEscalatedLineage } from "../fixtures/implementation-escalation";
+import { awaitingRedContract } from "../fixtures/stop-check-plan-fixtures";
 import {
   activeWaveGateFixture,
+  completedWaveGateFixture,
   protectedGraphFixture,
   satisfiedProof,
   taskFixture,
@@ -167,10 +169,10 @@ describe("the held judge waits for its fix (one dispatch-hold rule)", () => {
     expect(offered(classifyImplementationWindow(after, observed(), []))).toEqual(["T4", "T5"]);
     const hold = dispatchHoldOf(after, new Set(), byId(after, "T3"));
     expect(hold).toEqual({ kind: "forward-fix", fixTaskIds: ["T5"] });
-    expect(taskExecutionDecision(after, "T3")).toEqual({
-      kind: "ineligible",
-      reason: dispatchHoldMessage("T3", { kind: "forward-fix", fixTaskIds: ["T5"] }),
-    });
+    if (hold === null) throw new Error("expected a hold");
+    expect(taskExecutionDecision(after, "T3")).toEqual({ kind: "ineligible", reason: dispatchHoldMessage("T3", hold) });
+    expect(stuckDispatchHoldMessage("T3", hold)).toBe(`${dispatchHoldMessage("T3", hold)}; none of them is dispatchable, ` +
+      "active or escalated, so the held Task can never start; repair the Task Graph");
   });
 
   it("offers T3's retry once the fix is implemented and unreserved", () => {
@@ -216,31 +218,70 @@ describe("the held judge waits for its fix (one dispatch-hold rule)", () => {
   });
 });
 
+/** One refusal case: the graph, the request's fields (each defaulting to the admissible T3 / src/serve.ts request), and the expected kind. */
+type RefusalRow = Readonly<{
+  label: string;
+  graph: () => TaskGraph;
+  wave?: number;
+  hold?: string;
+  file?: string;
+  kind: ForwardFixRefusal["kind"];
+}>;
+
+const rowRequest = ({ wave = 2, hold = "T3", file = "src/serve.ts" }: RefusalRow): ForwardFixRequest => {
+  const parsed = parseForwardFixArgs(["--wave", String(wave), "--hold", hold, "--file", file, "--description", "d", "--reason", "r"]);
+  if (!parsed.ok) throw new Error(parsed.error);
+  return parsed.value;
+};
+
+const servedFrozen = awaitingRedContract({
+  id: "CT-1", contractTask: "T1", types: "src/serve.ts", files: [{ path: "tests/serve.acceptance.test.ts", anchors: ["AS-001"] }],
+});
+
 describe("addForwardFix refuses what it is not for", () => {
-  it.each<[string, () => TaskGraph, readonly string[] | null, ForwardFixRefusal["kind"]]>([
-    ["a Wave other than the active one", () => sealed(), ["--wave", "1"], "wrong-wave"],
-    ["an unknown held Task", () => sealed(), ["--hold-override", "T9"], "unknown-task"],
-    ["a held Task of another Wave", () => sealed(), ["--hold-override", "T1"], "foreign-task"],
-    ["a held Task with no failed attempt", () => sealed(), ["--hold-override", "T4"], "no-failed-judgement"],
-    ["a path no completed Wave wrote", () => sealed(), ["--files-override", "src/new.ts"], "not-sealed"],
-    ["a path another Task of the active Wave owns", () => sealed(), ["--files-override", "src/other.ts"], "owned-in-wave"],
-    ["protected verification infrastructure", () => sealed(), ["--files-override", ".loom/verification-manifest.json"], "protected-path"],
-    ["a live Wave Gate", () => sealed({
-      active_wave_gate: activeWaveGateFixture({ runId: "run.wave-2", wave: 2, authorityDigest: "a".repeat(64) }),
-    }), null, "live-wave-gate"],
-    ["an active implementation reservation", () => ({ ...sealed(), executing_tasks: ["T4"] }), null, "implementation-active"],
-  ])("refuses %s", (_label, graph, override, kind) => {
-    const holdIndex = override?.indexOf("--hold-override") ?? -1;
-    const filesIndex = override?.indexOf("--files-override") ?? -1;
-    const wave = override?.[0] === "--wave" ? override[1] : "2";
-    const parsed = parseForwardFixArgs([
-      "--wave", wave ?? "2",
-      "--hold", holdIndex >= 0 ? override?.[holdIndex + 1] ?? "T3" : "T3",
-      "--file", filesIndex >= 0 ? override?.[filesIndex + 1] ?? "src/serve.ts" : "src/serve.ts",
-      "--description", "d", "--reason", "r",
+  it.each<RefusalRow>([
+    { label: "a Wave other than the active one", graph: () => sealed(), wave: 1, kind: "wrong-wave" },
+    { label: "an unknown held Task", graph: () => sealed(), hold: "T9", kind: "unknown-task" },
+    { label: "a held Task of another Wave", graph: () => sealed(), hold: "T1", kind: "foreign-task" },
+    { label: "a held Task with no failed attempt", graph: () => sealed(), hold: "T4", kind: "no-failed-judgement" },
+    { label: "a path no completed Wave wrote", graph: () => sealed(), file: "src/new.ts", kind: "not-sealed" },
+    { label: "a path another Task of the active Wave owns", graph: () => sealed(), file: "src/other.ts", kind: "owned-in-wave" },
+    { label: "protected verification infrastructure", graph: () => sealed(), file: ".loom/verification-manifest.json", kind: "protected-path" },
+    { label: "a frozen Acceptance Contract path", graph: () => ({ ...sealed(), acceptance_contracts: [servedFrozen] }), kind: "frozen-path" },
+    { label: "a graph outside the execute Phase", graph: () => ({ ...sealed(), current_phase: "decompose" }), kind: "not-executing" },
+    {
+      label: "a Wave whose gate already completed",
+      graph: () => ({ ...sealed(), wave_gate_history: [...(sealed().wave_gate_history ?? []), completedWaveGateFixture({ runId: "run.wave-2", wave: 2 })] }),
+      kind: "wave-completed",
+    },
+    {
+      label: "an abandoned run that names a successor",
+      graph: () => sealed({
+        active_wave_gate: activeWaveGateFixture({
+          runId: "run.wave-2", wave: 2, authorityDigest: "a".repeat(64),
+          terminalOutcome: { kind: "terminal-abandoned", reason: "replaced", supersededBy: "run.wave-2-b" },
+        }),
+      }),
+      kind: "successor-named",
+    },
+    {
+      label: "a live Wave Gate",
+      graph: () => sealed({ active_wave_gate: activeWaveGateFixture({ runId: "run.wave-2", wave: 2, authorityDigest: "a".repeat(64) }) }),
+      kind: "live-wave-gate",
+    },
+    { label: "an active implementation reservation", graph: () => ({ ...sealed(), executing_tasks: ["T4"] }), kind: "implementation-active" },
+  ])("refuses $label", (row) => {
+    expect(refusal(row.graph(), rowRequest(row)).kind).toBe(row.kind);
+  });
+
+  it("replays a committed fix even after a later Forward Fix was added", () => {
+    const first = added(sealed());
+    const secondRequest = parseForwardFixArgs([
+      "--wave", "2", "--hold", "T3", "--file", "src/recompute.ts", "--description", "Lower the recompute peak", "--reason", "recompute breach",
     ]);
-    if (!parsed.ok) throw new Error(parsed.error);
-    expect(refusal(graph(), parsed.value).kind).toBe(kind);
+    if (!secondRequest.ok) throw new Error(secondRequest.error);
+    const second = added(first.graph, secondRequest.value);
+    expect(decided(second.graph)).toEqual({ kind: "already-added", audit: first.audit });
   });
 
   it("refuses the active Wave's distill pass as a held Task", () => {
@@ -261,6 +302,16 @@ describe("the State File proves a Forward Fix audit", () => {
     ["a fix Task of another Wave", (audit) => ({ ...audit, fixTaskId: "T1" }), "is not a Task of Wave 2"],
     ["the fix Task holding itself", (audit) => ({ ...audit, heldTaskIds: ["T5"] }), "the fix Task itself"],
     ["an unknown field", (audit) => ({ ...audit, extra: true }), "unknown field(s): extra"],
+    ["a held Task of another Wave", (audit) => ({ ...audit, heldTaskIds: ["T1"] }), "T1 is not a Task of Wave 2"],
+    ["a sealed path no earlier Wave wrote", (audit) => ({ ...audit, sealedPaths: ["src/serve.test.ts"] }), "which no Task of a Wave before 2 wrote"],
+    ["a repeated sealed path", (audit) => ({ ...audit, sealedPaths: ["src/serve.ts", "src/serve.ts"] }), "names 'src/serve.ts' more than once"],
+    ["no sealed path", (audit) => ({ ...audit, sealedPaths: [] }), "sealedPaths must be a non-empty array"],
+    ["a blank reason", (audit) => ({ ...audit, reason: "  " }), "reason must be a trimmed non-blank string"],
+    ["an untrimmed reason", (audit) => ({ ...audit, reason: " r " }), "reason must be a trimmed non-blank string"],
+    ["an over-long reason", (audit) => ({ ...audit, reason: "r".repeat(513) }), "reason must be a trimmed non-blank string"],
+    ["a wrong schema version", (audit) => ({ ...audit, schemaVersion: 2 }), "has invalid schema or kind"],
+    ["a wrong kind", (audit) => ({ ...audit, kind: "forward-fix-removed" }), "has invalid schema or kind"],
+    ["a malformed abandoned run id", (audit) => ({ ...audit, abandonedRunId: "not a run" }), "abandonedRunId"],
   ])("refuses %s", (_label, tamper, message) => {
     const { graph: after } = added(sealed());
     const raw = JSON.parse(JSON.stringify(after)) as Record<string, unknown>;
@@ -268,6 +319,35 @@ describe("the State File proves a Forward Fix audit", () => {
     const loaded = parseTaskGraph({ ...raw, forward_fix_history: [tamper(audit ?? {})] });
     expect(loaded.ok).toBe(false);
     if (!loaded.ok) expect(loaded.error).toContain(message);
+  });
+
+  it("refuses a Distill Task as the fix Task", () => {
+    const { graph: after } = added(sealed());
+    const raw = JSON.parse(JSON.stringify(after)) as Record<string, unknown>;
+    const pass = taskFixture({
+      id: "T6", description: "Distill pass for Wave 2", agent: "distill-agent", wave: 2, depends_on: [],
+      file_list: ["src/serve.ts"], spec_anchors: [], spec_contributions: [], review_status: "pending",
+    });
+    const [audit] = raw.forward_fix_history as Record<string, unknown>[];
+    const loaded = parseTaskGraph({
+      ...raw,
+      tasks: [...(raw.tasks as unknown[]), JSON.parse(JSON.stringify(pass))],
+      forward_fix_history: [{ ...audit, fixTaskId: "T6" }],
+    });
+    expect(loaded.ok).toBe(false);
+    if (!loaded.ok) expect(loaded.error).toContain("T6 is a Distill Task");
+  });
+
+  it("keeps a non-null abandoned run id through a round trip", () => {
+    const abandoned = activeWaveGateFixture({
+      runId: "run.wave-2", wave: 2, authorityDigest: "a".repeat(64),
+      terminalOutcome: { kind: "terminal-abandoned", reason: "fix the breach first", supersededBy: null },
+    });
+    const { graph: after, audit } = added(sealed({ active_wave_gate: abandoned }));
+    expect(audit.abandonedRunId).toBe("run.wave-2");
+    const loaded = parseTaskGraph(JSON.parse(JSON.stringify(after)));
+    expect(loaded.ok).toBe(true);
+    if (loaded.ok) expect(loaded.value.forward_fix_history).toEqual([audit]);
   });
 
   it("refuses two audits naming one fix Task", () => {

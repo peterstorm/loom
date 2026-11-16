@@ -25,7 +25,7 @@
  * shell supplies the reservation-liveness observation.
  */
 import type { StatusReason, TaskGraph, WaveImplementationDispatch, WaveImplementationRecovery } from "../types";
-import { dispatchHoldMessage, dispatchHoldOf, type DispatchHold } from "./dispatch-holds";
+import { dispatchHoldOf, stuckDispatchHoldMessage, type DispatchHold } from "./dispatch-holds";
 import { canonicalRecord, nonEmpty, type NonEmpty } from "./orchestration-contract";
 import { quoteShellArgument } from "./shell-quoting";
 import { deriveTaskImplementationDispatch } from "./task-implementation-dispatch";
@@ -287,9 +287,5 @@ export function classifyImplementationWindow(
   const stuck = withheld.at(0);
   return stuck === undefined
     ? contradiction(`Wave ${wave} has outstanding Tasks but no legal implementation recovery`)
-    : contradiction(
-        `${dispatchHoldMessage(stuck.taskId, stuck.hold)}; none of them is dispatchable, active or escalated, ` +
-          `so ${stuck.hold.kind === "distill-pass" ? "the distill pass" : "the held Task"} can never start; repair the Task Graph`,
-        stuck.taskId,
-      );
+    : contradiction(stuckDispatchHoldMessage(stuck.taskId, stuck.hold), stuck.taskId);
 }

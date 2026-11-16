@@ -64,6 +64,7 @@ import {
   parseSlotId,
   nonEmpty,
   type NonEmpty,
+  type OrchestrationRunId,
 } from "./core/orchestration-contract";
 import {
   derivePendingTaskProof,
@@ -1057,6 +1058,13 @@ const FORWARD_FIX_AUDIT_FIELDS = [
   "schemaVersion", "kind", "wave", "fixTaskId", "heldTaskIds", "sealedPaths", "reason", "abandonedRunId",
 ] as const;
 
+/** `null`, or the orchestration run id `raw` names; one branch for the absent case. */
+function parseNullableRunId(raw: unknown, label: string): ParseResult<OrchestrationRunId | null> {
+  if (raw === null) return parseOk(null);
+  const runId = parseOrchestrationRunId(raw);
+  return runId.ok ? parseOk(runId.value) : parseErr(`${label}: ${runId.error.message}`);
+}
+
 /** The audit's sealed paths: non-empty, distinct, canonical, and each in the fix Task's file_list. */
 function parseForwardFixSealedPaths(raw: unknown, label: string, fixFileList: readonly unknown[]): ParseResult<NonEmpty<string>> {
   if (!Array.isArray(raw)) return parseErr(`${label} must be a non-empty array`);
@@ -1096,19 +1104,25 @@ function parseForwardFixAudit(
   if (isDistillTask(fix)) return parseErr(`${label}.fixTaskId: ${fixTaskId.value} is a Distill Task`);
   const held = parseDistinctTaskIds(record.heldTaskIds, `${label}.heldTaskIds`);
   if (!held.ok) return held;
-  const foreign = held.value.find((id) => id === fixTaskId.value || !tasks.some((task) => task.id === id && task.wave === wave.value));
-  if (foreign !== undefined) {
-    return parseErr(`${label}.heldTaskIds: ${foreign} is ${foreign === fixTaskId.value ? "the fix Task itself" : `not a Task of Wave ${wave.value}`}`);
+  if (held.value.some((id) => id === fixTaskId.value)) {
+    return parseErr(`${label}.heldTaskIds: ${fixTaskId.value} is the fix Task itself`);
   }
+  const foreign = held.value.find((id) => !tasks.some((task) => task.id === id && task.wave === wave.value));
+  if (foreign !== undefined) return parseErr(`${label}.heldTaskIds: ${foreign} is not a Task of Wave ${wave.value}`);
   const sealedPaths = parseForwardFixSealedPaths(record.sealedPaths, `${label}.sealedPaths`, Array.isArray(fix.file_list) ? fix.file_list : []);
   if (!sealedPaths.ok) return sealedPaths;
+  const unsealed = sealedPaths.value.find((path) => !tasks.some((task) =>
+    typeof task.wave === "number" && task.wave < wave.value && Array.isArray(task.file_list) && task.file_list.includes(path)));
+  if (unsealed !== undefined) {
+    return parseErr(`${label}.sealedPaths names '${unsealed}', which no Task of a Wave before ${wave.value} wrote`);
+  }
   const reason = record.reason;
   if (typeof reason !== "string" || reason.trim() !== reason || reason.length === 0 ||
       reason.length > MAX_TASK_REOPENING_REASON_LENGTH) {
     return parseErr(`${label}.reason must be a trimmed non-blank string of at most ${MAX_TASK_REOPENING_REASON_LENGTH} characters`);
   }
-  const abandonedRunId = record.abandonedRunId === null ? null : parseOrchestrationRunId(record.abandonedRunId);
-  if (abandonedRunId !== null && !abandonedRunId.ok) return parseErr(`${label}.abandonedRunId: ${abandonedRunId.error.message}`);
+  const abandoned = parseNullableRunId(record.abandonedRunId, `${label}.abandonedRunId`);
+  if (!abandoned.ok) return abandoned;
   return parseOk(Object.freeze({
     schemaVersion: 1,
     kind: "forward-fix-added",
@@ -1117,7 +1131,7 @@ function parseForwardFixAudit(
     heldTaskIds: held.value,
     sealedPaths: sealedPaths.value,
     reason,
-    abandonedRunId: abandonedRunId === null ? null : abandonedRunId.value,
+    abandonedRunId: abandoned.value,
   }));
 }
 

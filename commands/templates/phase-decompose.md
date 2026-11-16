@@ -90,6 +90,8 @@ Use only these agents; validation rejects any other name. Never assign `distill-
     - A later task may still *report* on earlier code (a real-data benchmark write-up), but then it gates nothing: it claims no Requirement the earlier code must meet, and its tests do not fail on that code's breach.
     - A judged path must be in some other task's `file_list`. If no task writes it, give it to the judge (then it is ordinary ownership, not a judgement) or to the task that should change it.
 
+    - A judge in its writer's own Wave runs beside it (a dependency is always on an earlier Wave), so its tests may meet unfinished code. That stays repairable because the Wave is still open, but it costs an attempt; when the judgement gates the Requirement, prefer the earlier-Wave contract shape above.
+
     Validation refuses a judged path written in an earlier Wave than its judge, a judged path no task writes, and a judged path in the judge's own `file_list`.
 
 ---

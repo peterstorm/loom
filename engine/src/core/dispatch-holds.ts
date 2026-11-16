@@ -19,11 +19,12 @@
 import { match } from "ts-pattern";
 import { distillDispatchBlockers, distillWithheldMessage } from "./distill-task";
 import { nonEmpty, type NonEmpty } from "./orchestration-contract";
+import type { TaskId } from "./task-id";
 import type { ForwardFixAudit, Task } from "../types";
 
 export type DispatchHold =
   | Readonly<{ kind: "distill-pass"; blockers: NonEmpty<string> }>
-  | Readonly<{ kind: "forward-fix"; fixTaskIds: NonEmpty<string> }>;
+  | Readonly<{ kind: "forward-fix"; fixTaskIds: NonEmpty<TaskId> }>;
 
 /** What the rule reads of a TaskGraph. */
 export type DispatchHoldGraph = Readonly<{
@@ -41,12 +42,12 @@ const settled = (task: Task, reserved: ReadonlySet<string>): boolean =>
  * names it and whose fix Task has not settled, in audit order. A fix Task
  * missing from the roster holds nothing: the loader refuses such a graph.
  */
-export function forwardFixHolders(graph: DispatchHoldGraph, reserved: ReadonlySet<string>, task: Task): readonly string[] {
+function forwardFixHolders(graph: DispatchHoldGraph, reserved: ReadonlySet<string>, task: Task): readonly TaskId[] {
   const holders = (graph.forward_fix_history ?? [])
-    .filter((audit) => audit.wave === task.wave && (audit.heldTaskIds as readonly string[]).includes(task.id))
+    .filter((audit) => audit.wave === task.wave && audit.heldTaskIds.some((id) => id === task.id))
     .flatMap(({ fixTaskId }) => {
       const fix = graph.tasks.find(({ id }) => id === fixTaskId);
-      return fix === undefined || settled(fix, reserved) ? [] : [fixTaskId as string];
+      return fix === undefined || settled(fix, reserved) ? [] : [fixTaskId];
     });
   return Object.freeze([...new Set(holders)]);
 }
@@ -71,4 +72,18 @@ export function dispatchHoldMessage(taskId: string, hold: DispatchHold): string 
       `${taskId} is held by Forward Fix ${fixTaskIds.join(", ")} and runs after it settles, so its next attempt ` +
       "judges the fixed code")
     .exhaustive();
+}
+
+/**
+ * Status's contradiction for a held Task whose blockers can never settle:
+ * none of them is dispatchable, active or escalated. The wording is the
+ * hold's, so a new hold kind cannot fall into another kind's sentence.
+ */
+export function stuckDispatchHoldMessage(taskId: string, hold: DispatchHold): string {
+  const subject = match(hold)
+    .with({ kind: "distill-pass" }, () => "the distill pass")
+    .with({ kind: "forward-fix" }, () => "the held Task")
+    .exhaustive();
+  return `${dispatchHoldMessage(taskId, hold)}; none of them is dispatchable, active or escalated, ` +
+    `so ${subject} can never start; repair the Task Graph`;
 }

@@ -4,16 +4,28 @@
  * be fixed without reopening completed history. A thin shell over the pure
  * `addForwardFix`: refuse while a subagent is active, then decide and commit
  * in one StateManager update that re-checks quiescence under the lock.
+ *
+ * A refusal leaves the locked update as a `ForwardFixRefused`, which carries
+ * the typed refusal, so only a refusal is reported as "refused without
+ * changing state". Any other failure (a lock, read or write fault) is reported
+ * as a failed operation whose effect on the State File is not known here.
  */
 
 import { taskGraphPath } from "../../config";
-import { addForwardFix, parseForwardFixArgs, type ForwardFix } from "../../core/forward-fix";
+import { addForwardFix, parseForwardFixArgs, type ForwardFix, type ForwardFixRefusal } from "../../core/forward-fix";
 import { anyActiveSubagent } from "../../machine/ledger";
 import { StateManager } from "../../state-manager";
 import type { HookResult } from "../../types";
-import { assertQuiescentUnderLock, subagentActiveRefusal, type SubagentActivity } from "./subagent-quiescence";
+import { subagentActiveRefusal, type SubagentActivity } from "./subagent-quiescence";
 
 const OPERATION = "forward fix";
+
+/** A refusal decided under the lock: the update aborts and nothing is written. */
+class ForwardFixRefused extends Error {
+  constructor(readonly refusal: ForwardFixRefusal | Readonly<{ kind: "subagent-active"; message: string }>) {
+    super(refusal.message);
+  }
+}
 
 function outcomeMessage(outcome: ForwardFix): string {
   const { wave, fixTaskId, heldTaskIds } = outcome.audit;
@@ -37,18 +49,26 @@ export function createAddForwardFixOperation(
     if (refusal !== null) return { kind: "error", message: `add-forward-fix: ${refusal}` };
     try {
       const outcome = await manager.updateAndReturn((locked) => {
-        assertQuiescentUnderLock(subagentActive, statePath, OPERATION);
+        // An observed active subagent is a refusal; a probe that cannot answer
+        // propagates as a failure, not as a refusal.
+        if (subagentActive(statePath)) {
+          throw new ForwardFixRefused({ kind: "subagent-active", message: `A subagent became active before the ${OPERATION} could commit` });
+        }
         const decided = addForwardFix(locked, request.value);
-        if (!decided.ok) throw new Error(decided.error.message);
+        if (!decided.ok) throw new ForwardFixRefused(decided.error);
         return { state: decided.value.kind === "added" ? decided.value.graph : locked, value: decided.value };
       });
       process.stdout.write(`${JSON.stringify(outcome.audit, null, 2)}\n`);
       process.stdout.write(outcomeMessage(outcome));
       return { kind: "allow" };
     } catch (error) {
+      if (error instanceof ForwardFixRefused) {
+        return { kind: "error", message: `add-forward-fix refused without changing state (${error.refusal.kind}): ${error.refusal.message}` };
+      }
       return {
         kind: "error",
-        message: `add-forward-fix refused without changing state: ${error instanceof Error ? error.message : String(error)}`,
+        message: `add-forward-fix failed; the State File may or may not have been written, so read it with helper orchestration status ` +
+          `before retrying: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
   };
