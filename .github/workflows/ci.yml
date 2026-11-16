@@ -1,9 +1,9 @@
 name: Verification
 
-# The repository is private: Actions minutes are metered and the macOS leg
-# bills at 10x. Branch pushes are validated by their pull_request run and tag
-# pushes point at commits main already validated, so CI runs on pull_request,
-# pushes to main, and explicit dispatch only.
+# CI runs on pull_request, pushes to main, and explicit dispatch only:
+# branch pushes are validated by their pull_request run and tag pushes point
+# at commits main already validated — one suite run per change, no
+duplicates.
 on:
   pull_request:
   push:
@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 # A new push to the same branch supersedes the previous run: cancel it instead
-# of letting a result nobody will read keep burning metered macOS minutes.
+# of letting a result nobody will read keep running.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -30,10 +30,9 @@ jobs:
       # anchored no-follow filesystem layer (engine/src/utils/
       # no-follow-fs.ts) takes a darwin branch (O_NOFOLLOW_ANY-proven real
       # path) that Linux CI never executes. Pin the newest standard macOS
-      # runner. The darwin leg is the metered one (10x minutes on a private
-      # repo), which is why the triggers above are trimmed to pull_request and
-      # main pushes — every run this matrix gets is one that must exercise
-      # darwin.
+      # runner. The darwin leg is the expensive one, which is why the
+      # triggers above are trimmed to pull_request and main pushes — every run
+      # this matrix gets is one that must exercise darwin.
       matrix:
         os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}

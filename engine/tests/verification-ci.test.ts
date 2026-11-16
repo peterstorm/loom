@@ -8,10 +8,10 @@ const workflow = readFileSync(join(REPOSITORY, ".github/workflows/ci.yml"), "utf
 describe("CI verification contract", () => {
   it("verifies PRs and main pushes with the same command; nothing else re-runs the suite", () => {
     expect(workflow).toContain("  pull_request:");
-    // The repository is private: Actions minutes are metered and the macOS
-    // leg bills at 10x. Branch pushes are validated by their pull_request run
-    // and tags point at commits main already validated, so nothing else
-    // triggers the matrix — and a superseded run is cancelled, not drained.
+    // One suite run per change: branch pushes are validated by their
+    // pull_request run and tags point at commits main already validated, so
+    // nothing else triggers the matrix — and a superseded run is cancelled,
+    // not drained.
     expect(workflow).toContain("    branches: [main]");
     expect(workflow).toContain("  workflow_dispatch:");
     expect(workflow).not.toContain("    tags:");
