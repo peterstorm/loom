@@ -14,6 +14,7 @@ import {
   waveRetryDiagnostic,
 } from "../../src/core/reviewer-retry";
 import { emissionToolPrimaryInstruction, type IssuedSpawnEmissionRoute } from "../../src/core/issued-emission-capability";
+import { STANDALONE_SUCCESSOR_ROSTER_RULE } from "../../src/core/standalone-lineage-contract";
 import { emissionRouteFor, emissionTask, issuedTask, REVIEWER_V2 } from "../fixtures/issued-emission";
 
 const bytes = (text: string): readonly number[] => [...new TextEncoder().encode(text)];
@@ -129,6 +130,21 @@ describe("standaloneRetryTask", () => {
     const extractionTask = issuedTask("code-reviewer", REVIEWER_V2);
     expect(standaloneRetryTask(extractionTask, EXTRACTION_ROUTE, null, { schemaVersion: 2 }))
       .toContain(`This is your final attempt. ${REVIEWER_EXTRACTION_RETRY_INSTRUCTION}`);
+  });
+
+  it("tells a successor retry the v3 envelope and the roster rule, and no other version (issue #185)", () => {
+    const task = issuedTask("code-reviewer", REVIEWER_V2);
+    const successor = standaloneRetryTask(task, EXTRACTION_ROUTE, "bad assessment", { schemaVersion: 3 });
+    const current = standaloneRetryTask(task, EXTRACTION_ROUTE, "bad assessment", { schemaVersion: 2 });
+    // The roster rule is the one wording every successor prompt surface shares, verbatim.
+    for (const phrase of ['"schemaVersion": 3', '"kind": "standalone-successor-review"', STANDALONE_SUCCESSOR_ROSTER_RULE,
+      "in roster order", "repairablePaths"]) {
+      expect(successor, phrase).toContain(phrase);
+      expect(current, phrase).not.toContain(phrase);
+    }
+    // The successor rule sits between the shared rules and the closing action, which is unchanged.
+    expect(successor.endsWith(`This is your final attempt. ${REVIEWER_EXTRACTION_RETRY_INSTRUCTION}`)).toBe(true);
+    expect(successor.startsWith(current.slice(0, current.indexOf("This is your final attempt.")))).toBe(true);
   });
 
   it("keeps the archived schema-1 retry wording whatever the route", () => {

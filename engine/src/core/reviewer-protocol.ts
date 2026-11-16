@@ -6,7 +6,10 @@ import {
   reviewerEmissionToolContract, REVIEWER_EMISSION_TOOL_CONTRACT_PLACEHOLDER, REVIEWER_EMISSION_TOOL_CONTRACT_TEMPLATE,
   type ReviewerPayloadV2, type ReviewerProtocolFailure,
 } from "./reviewer-contract";
-import { standaloneReviewerPayloadV3Schema, type StandaloneReviewerPayloadV3 } from "./standalone-lineage-contract";
+import {
+  REVIEWER_WIRE_CONTRACT_EXAMPLE_V3, STANDALONE_SUCCESSOR_ROSTER_RULE, standaloneReviewerPayloadV3Schema,
+  type StandaloneReviewerPayloadV3,
+} from "./standalone-lineage-contract";
 import { canonicalRecord, failure, success, type DomainResult } from "./orchestration-contract/identity";
 
 const encoder = new TextEncoder();
@@ -32,15 +35,26 @@ function violationReason(message: string): string {
   return flat.length > 240 ? `${flat.slice(0, 240)}…` : flat;
 }
 
-/** The ONE wording of a schema refusal: WHERE (pointer) and WHY (the defect). */
+/**
+ * What a top-level v3 refusal adds (issue #185): reviewers that copied the v2
+ * example were told only "expected 3 at /schemaVersion" and copied it again.
+ * The successor envelope is named whole, so the retry can rebuild it.
+ */
+export const STANDALONE_V3_ENVELOPE_HINT =
+  'A successor payload is one object with exactly "schemaVersion": 3, "kind": "standalone-successor-review", ' +
+  '"lineageDigest", "snapshotDigest", "priorAssessments" and "findings", as the wire contract\'s Successor review section shows.';
+
+/** The ONE wording of a schema refusal: WHERE (pointer), WHY (the defect) and, for a top-level v3 defect, the envelope. */
 function schemaRefusal(
   contract: "v2" | "standalone v3",
   issue: Readonly<{ path: readonly PropertyKey[]; message: string }> | undefined,
 ): DomainResult<never, ReviewerProtocolFailure> {
+  const path = issue?.path ?? [];
+  const hint = contract === "standalone v3" && path.length <= 1 ? ` ${STANDALONE_V3_ENVELOPE_HINT}` : "";
   return rejected(
     "invalid-payload",
-    `Reviewer payload does not conform to the issued ${contract} schema: ${violationReason(issue?.message ?? "no violation reported")}`,
-    pointer(issue?.path ?? []),
+    `Reviewer payload does not conform to the issued ${contract} schema: ${violationReason(issue?.message ?? "no violation reported")}${hint}`,
+    pointer(path),
   );
 }
 
@@ -312,9 +326,30 @@ export function renderReviewerWireContract(): string {
     `## reviewer-payload-schema\n\nThe issued Context Packet's \`reviewer-payload-schema\` section in compact form; the packet copy governs.\n\n\`\`\`json\n${compactSchema}\n\`\`\``,
     `## Example (standalone-review only)\n\n\`\`\`json\n${JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, null, 2)}\n\`\`\``,
     "A Wave request is refused this shape: its payload is `\"kind\": \"wave-review\"` with `packetId`, `generation` and `prior_findings`, as the schema and your task state.",
+    STANDALONE_SUCCESSOR_WIRE_SECTION,
     `## reviewer-impact-rubric\n\n${REVIEWER_IMPACT_RUBRIC_V1}`,
   ].join("\n\n");
 }
+
+/**
+ * The successor arm of the wire contract (issue #185). An explicitly issued
+ * standalone successor request is refused every v2 shape, and its payload
+ * copies digests a reviewer cannot compute, so the stamped contract names the
+ * v3 shape, states the roster rule in the one wording the spawn task and
+ * retry also carry (`STANDALONE_SUCCESSOR_ROSTER_RULE`) and shows a parsed v3
+ * example. The v3 schema itself is not repeated: the issued packet carries
+ * its bytes.
+ */
+const STANDALONE_SUCCESSOR_WIRE_SECTION = [
+  "## Successor review (standalone-successor-review only)",
+  "Only when your task says it is an explicitly issued standalone successor v3 request. The v2 payload above is then refused: the packet's schema section holds the v3 schema, and your payload has this shape.",
+  [
+    "- `\"schemaVersion\": 3` and `\"kind\": \"standalone-successor-review\"`.",
+    `- ${STANDALONE_SUCCESSOR_ROSTER_RULE}`,
+    "- `findings` holds only new Findings, each `{\"draft\": <the fields of one v2 findings entry, never the v2 envelope>, \"relation\": {\"kind\": \"independent\"}}`, or `\"distinct-related\"` with a prior's `origin` and a `distinction`.",
+  ].join("\n"),
+  `\`\`\`json\n${JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V3, null, 2)}\n\`\`\``,
+].join("\n\n");
 
 // Route-aware wire-instruction rendering (AD-7; FR-020/AS-012).
 

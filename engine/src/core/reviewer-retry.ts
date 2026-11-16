@@ -12,6 +12,7 @@ import { canonicalRecord, type DomainResult } from "./orchestration-contract";
 import type { PersistentRefutationPanelEvent } from "./persistent-panel";
 import { emissionToolPrimaryInstruction, type IssuedSpawnEmissionRoute } from "./issued-emission-capability";
 import type { FrozenStandaloneReviewAuthority } from "./standalone-review-model";
+import { STANDALONE_SUCCESSOR_ROSTER_RULE } from "./standalone-lineage-contract";
 
 /**
  * The extraction-only final-action wording for a reviewer retry whose route
@@ -47,6 +48,15 @@ const CURRENT_STANDALONE_RETRY_RULES = [
   "the assertion, or emit an honest null location — never an unfrozen path.",
 ].join("\n");
 
+/** What a successor (schema-3) retry adds: the envelope and the roster rule its
+ *  prior assessments are admitted by (issue #185, ADR-0078), in the wording the
+ *  spawn task and wire contract carry. Without it, attempt 2 hears the v2-era
+ *  rules and a reviewer that copied the v2 shape or a made-up digest repeats it. */
+const SUCCESSOR_STANDALONE_RETRY_RULE = [
+  "A successor payload also has \"schemaVersion\": 3 and \"kind\": \"standalone-successor-review\".",
+  STANDALONE_SUCCESSOR_ROSTER_RULE,
+].join("\n");
+
 /**
  * The admission diagnostic, surfaced on the retry spawn task.
  *
@@ -68,6 +78,7 @@ export function standaloneRetryTask(
     return [task, "", "Your previous attempt was rejected by the engine's admission check.",
       ...(diagnostic === null ? [] : [JSON.stringify(diagnostic)]), "",
       CURRENT_STANDALONE_RETRY_RULES, "",
+      ...(authority.schemaVersion === 3 ? [SUCCESSOR_STANDALONE_RETRY_RULE, ""] : []),
       `This is your final attempt. ${reviewerRetryInstruction(route)}`].join("\n");
   }
   const marker = diagnostic === null

@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { z } from "zod/v4";
-import { parseReviewerPayloadV2, renderReviewerPayloadDiagnostic, renderReviewerWireContract } from "../../src/core/reviewer-protocol";
+import {
+  STANDALONE_V3_ENVELOPE_HINT, parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3, renderReviewerPayloadDiagnostic, renderReviewerWireContract,
+} from "../../src/core/reviewer-protocol";
+import { REVIEWER_WIRE_CONTRACT_EXAMPLE_V3, STANDALONE_SUCCESSOR_ROSTER_RULE } from "../../src/core/standalone-lineage-contract";
 import {
   CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_LIMITS,
   REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, reviewerPayloadV2Schema,
@@ -325,11 +328,20 @@ describe("authoritative generated wire contract", () => {
     // bytes): the same value, in the one compact spelling.
     const schema = orFail(compactSchemaOf(source), describeCompactSchemaError);
     expect(schema.value).toEqual(JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2));
-    expect(json).toEqual([schema.text, JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, null, 2)]);
+    expect(json).toEqual([
+      schema.text, JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, null, 2), JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V3, null, 2),
+    ]);
     // Every reviewer spawn pays for the fragment. The pin stops the
-    // pretty-printed schema from creeping back in.
-    expect(bytes(rendered).length).toBeLessThanOrEqual(10 * 1024 + 512);
+    // pretty-printed schema, or a second (v3) schema, from creeping in: the
+    // successor section adds only its shape, roster rule and example (issue #185).
+    expect(bytes(rendered).length).toBeLessThanOrEqual(13 * 1024);
+    expect(rendered).toContain(STANDALONE_SUCCESSOR_ROSTER_RULE);
     expect(parseReviewerPayloadV2(bytes(json[1]))).toEqual({ ok: true, value: REVIEWER_WIRE_CONTRACT_EXAMPLE_V2 });
+    expect(parseStandaloneReviewerPayloadV3(bytes(json[2]))).toEqual({ ok: true, value: REVIEWER_WIRE_CONTRACT_EXAMPLE_V3 });
+    deepFrozen(REVIEWER_WIRE_CONTRACT_EXAMPLE_V3);
+    // The successor example shows each thing a verdict can copy from the roster: a
+    // repairable path, a decision reference, and nothing when the prior cannot be judged.
+    expect(REVIEWER_WIRE_CONTRACT_EXAMPLE_V3.priorAssessments.map(({ verdict }) => verdict)).toEqual(["repaired", "retained", "not-assessable"]);
     expect(rendered.endsWith(REVIEWER_IMPACT_RUBRIC_V1)).toBe(true);
     deepFrozen(REVIEWER_PAYLOAD_EXAMPLE_V2);
     deepFrozen(REVIEWER_WIRE_CONTRACT_EXAMPLE_V2);
@@ -420,6 +432,27 @@ describe("reviewer payload rejection diagnostics", () => {
     );
     // Bounded: a refinement that interpolates payload text cannot grow the preamble.
     expect(bytes(refused.error.message).length).toBeLessThanOrEqual(2_048);
+  });
+
+  it("names the whole successor envelope when a v3 payload is wrong at its top level (issue #185)", () => {
+    // The live failure: a successor reviewer copied the v2 example.
+    for (const value of [standalone([advisory]), { ...REVIEWER_WIRE_CONTRACT_EXAMPLE_V3, findings: undefined }]) {
+      const refused = parseStandaloneReviewerPayloadV3(bytes(JSON.stringify(value)));
+      expect(refused.ok).toBe(false);
+      if (refused.ok) throw new Error("expected whole-response refusal");
+      expect(refused.error.message.startsWith("Reviewer payload does not conform to the issued standalone v3 schema: ")).toBe(true);
+      expect(refused.error.message.endsWith(` ${STANDALONE_V3_ENVELOPE_HINT}`)).toBe(true);
+      expect(bytes(refused.error.message).length).toBeLessThanOrEqual(2_048);
+    }
+  });
+
+  it("keeps a nested v3 refusal to its own defect, without the envelope", () => {
+    const value = { ...REVIEWER_WIRE_CONTRACT_EXAMPLE_V3, priorAssessments: [{ ...REVIEWER_WIRE_CONTRACT_EXAMPLE_V3.priorAssessments[2], origin: "short" }] };
+    const refused = parseStandaloneReviewerPayloadV3(bytes(JSON.stringify(value)));
+    expect(refused.ok).toBe(false);
+    if (refused.ok) throw new Error("expected whole-response refusal");
+    expect(refused.error.path).toBe("/priorAssessments/0/origin");
+    expect(refused.error.message).not.toContain(STANDALONE_V3_ENVELOPE_HINT);
   });
 });
 

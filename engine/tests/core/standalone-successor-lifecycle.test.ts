@@ -181,10 +181,13 @@ describe("actual LC-2 standalone v3 publication and lineage", () => {
     // they moved when the catalog retargeted every Pi profile to the local
     // route (2026-10-08): the first publication with its two local bindings
     // rewritten to the retired cloud targets reproduces the previous golden
-    // (8a705df2…, 26050 bytes) exactly.
+    // (8a705df2…, 26050 bytes) exactly. They moved again, digest only, when
+    // every successor packet gained its standalone-assessment-roster section
+    // (issue #185): each reviewer's issued context digest is part of the
+    // publication, and its byte length is unchanged.
     expect([first, second].map(review => ({ digest: sha256Hex(review.serialization), byteLength: new TextEncoder().encode(review.serialization).length }))).toEqual([
-      { digest: "89bedb90b2ee931b5975c7ac1df650f6a2cd13cf505b60e45452f56ee8a03fe4", byteLength: 26086 },
-      { digest: "f408fe3853903be888fdd86e6de7ee502fe9253f30d863d9bfe3e8dbaad646f5", byteLength: 44886 },
+      { digest: "6d06c6afc2481e76cafe9ba7c6338c15f0b4f5a084c74469e80969bd89abc3bf", byteLength: 26086 },
+      { digest: "e81aac01ca1c7bdaaa824e26c6b4df3ca68c07a30932bead9ffacc26918481a6", byteLength: 44886 },
     ]);
     expect(second.result.lineage.counts).toMatchObject({ new: 1, inherited: 3, total: 4, resolved: 1, refutedCritical: 1 });
     expect(second.result.lineage.inventory.map(row => row.finding.id)).toEqual(["code-reviewer-1", "code-reviewer-2", "code-reviewer-3", "code-reviewer-4"]);

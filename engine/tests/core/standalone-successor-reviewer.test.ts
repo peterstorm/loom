@@ -127,7 +127,7 @@ describe("publication-bound successor admission at actual core seams", () => {
     expect(accepted.request.attempt).toBe(attempt);
     expect(accepted.lineageDigest).toBe(prepared.lineageDigest);
     expect(accepted.newFindings).toEqual([]);
-    expect(f.packet.fixedContext.map(section => section.label)).toEqual(["standalone-successor-authority", "standalone-lineage", "reviewer-payload-schema", "reviewer-impact-rubric"]);
+    expect(f.packet.fixedContext.map(section => section.label)).toEqual(["standalone-successor-authority", "standalone-lineage", "standalone-assessment-roster", "reviewer-payload-schema", "reviewer-impact-rubric"]);
   });
   it("rejects altered issuance/registration/context/lineage rather than trusting self-hashes", () => {
     const f = fixture();

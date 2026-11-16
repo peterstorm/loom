@@ -76,6 +76,10 @@ _Avoid_: Latest review, same-name Run, review reuse, recoverable predecessor sta
 A source-bound semantic assessment resolving one prior Finding only when every current expected review Agent explicitly verifies its repair and identifies a relevant implementation change. Any disagreement, not-assessable or absent assessment prevents resolution. It is reviewer judgment, never engine proof, a Task Review Generation, or an automatic consequence of Repair-Checked.
 _Avoid_: Refutation, declared repair, passing-check proof
 
+**Standalone Assessment Roster**:
+The engine's projection, issued to every successor reviewer, of what it may say about each inherited Finding Origin: in issued order, the origin reference, the original Finding, its standing (active or retired), every decision it may cite by exact reference and the verdicts admission accepts, plus the scoped paths a repair may name. Admission judges every Standalone Resolution Assessment against the same rows, so what a reviewer is told and what the engine accepts are one rule. It is reviewer guidance and an admission rule, never a decision about the Finding.
+_Avoid_: Verdict hints, computed digests, reviewer-derived references
+
 **Standalone Reopening Proposal**:
 A successor reviewer's explicit challenge to one prior disposition, refutation or resolution, naming its Finding Origin and the changed conditions or new evidence. A critical proposal goes to a fresh Refutation Panel. It never rewrites the origin, promotes an advisory's severity or erases historical votes.
 _Avoid_: Parent override, duplicate Finding, severity promotion

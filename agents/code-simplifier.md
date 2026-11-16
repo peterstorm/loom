@@ -127,6 +127,46 @@ The issued Context Packet's `reviewer-payload-schema` section in compact form; t
 
 A Wave request is refused this shape: its payload is `"kind": "wave-review"` with `packetId`, `generation` and `prior_findings`, as the schema and your task state.
 
+## Successor review (standalone-successor-review only)
+
+Only when your task says it is an explicitly issued standalone successor v3 request. The v2 payload above is then refused: the packet's schema section holds the v3 schema, and your payload has this shape.
+
+- `"schemaVersion": 3` and `"kind": "standalone-successor-review"`.
+- Copy every digest from the standalone-assessment-roster section; never compute one. Copy lineageDigest and snapshotDigest, and give one priorAssessments entry per priors row, in roster order, carrying that row's origin. Each verdict must be one that its row's verdicts lists: still-present and repaired only for an active prior, retained and reopen only when the row lists decisions, not-assessable whenever you cannot judge the prior. retained copies one of the row's decisions references into decisionDigest, reopen into proposal.decisionDigest. A repaired change names a path from the roster's repairablePaths.
+- `findings` holds only new Findings, each `{"draft": <the fields of one v2 findings entry, never the v2 envelope>, "relation": {"kind": "independent"}}`, or `"distinct-related"` with a prior's `origin` and a `distinction`.
+
+```json
+{
+  "schemaVersion": 3,
+  "kind": "standalone-successor-review",
+  "lineageDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "snapshotDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+  "priorAssessments": [
+    {
+      "origin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "verdict": "repaired",
+      "reason": "The handler now checks the version before writing.",
+      "change": {
+        "path": "src/orders/update-order.ts",
+        "description": "Adds the version comparison at line 42."
+      }
+    },
+    {
+      "origin": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "verdict": "retained",
+      "decisionDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "reason": "Dismissed by the disposition; nothing changed that bears on it."
+    },
+    {
+      "origin": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "verdict": "not-assessable",
+      "reason": "Its file is outside what I could read in this scope."
+    }
+  ],
+  "findings": []
+}
+```
+
 ## reviewer-impact-rubric
 
 Classify one assertion per finding. Truth confidence concerns whether that assertion holds; it is not an impact score or a severity formula.

@@ -56,7 +56,7 @@ import type { IssuedStandaloneReviewerProtocol, ParsedFindings, ReviewerProtocol
 import { STANDALONE_REVIEW_SUBJECT, parseReviewerProtocolDescriptor, type ReviewerProtocolFailure } from "./reviewer-contract";
 import { parseBoundedReviewerJson, parseStandaloneReviewerPayloadV3 } from "./reviewer-protocol";
 import {
-  STANDALONE_LINEAGE_LIMITS, STANDALONE_REVIEWER_PROTOCOL_V3,
+  STANDALONE_ASSESSMENT_ROSTER_SECTION, STANDALONE_LINEAGE_LIMITS, STANDALONE_REVIEWER_PROTOCOL_V3,
   standaloneDispositionSchema, standalonePreviousSnapshotSchema, standalonePublicationReferenceSchema,
   standaloneSuccessorSelectionSchema,
   type StandaloneDispositionRecord, type StandaloneLineageRow, type StandalonePreviousSnapshot, type StandalonePublicationReference,
@@ -66,6 +66,10 @@ import {
   findingOf, parseFindingOrigin, parseStandaloneLineageInventory, rejectLineage, standaloneDecisionReference,
   standaloneOriginReference, storedFinding, type StandaloneLineageError,
 } from "./standalone-finding-origin";
+import {
+  admitsStandaloneAssessment, describeInadmissibleAssessment, standaloneAssessmentRoster, standaloneInputChange,
+  standalonePriorStanding,
+} from "./standalone-assessment-roster";
 import {
   freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion, type StandaloneRefutationCompletionReceipt,
 } from "./standalone-refutation-completion";
@@ -713,53 +717,21 @@ export function prepareStandaloneSuccessor(source: StandaloneLineageSource, inpu
   return success(prepared);
 }
 
-function active(prepared: PreparedStandaloneSuccessor, row: StandaloneLineageRow): boolean {
-  const policy = prepared.disposition;
-  if (policy.kind === "selected-record" && policy.disposition.record.entries.some(entry =>
-    entry.origin === standaloneOriginReference(row.origin) && entry.decision === "dismissed")) return false;
-  const latest = row.history.at(-1);
-  return latest === undefined || (latest.kind === "adjudication" && latest.survives);
-}
-function decisionReferences(prepared: PreparedStandaloneSuccessor, row: StandaloneLineageRow): readonly string[] {
-  const historical = row.history.map(standaloneDecisionReference);
-  const policy = prepared.disposition;
-  if (policy.kind !== "selected-record") return historical;
-  return [...historical, ...[...policy.disposition.history, policy.disposition].filter(revision =>
-    revision.record.entries.some(entry => entry.origin === standaloneOriginReference(row.origin))).map(revision => revision.digest)];
-}
-
-/** Unknown historical inputs leave relevance a reviewer assertion, not an engine-observed change. */
-function changedStandaloneInput(prepared: PreparedStandaloneSuccessor, path: string): "observed-changed" | "historical-unknown" | "unchanged" {
-  const current = prepared.snapshot.find(entry => entry.path === path);
-  if (current === undefined) return "unchanged";
-  const previous = prepared.previousSnapshot.find(entry => entry.path === path);
-  if (previous === undefined || previous.kind === "historical-unknown") return "historical-unknown";
-  if (current.kind !== previous.kind) return "observed-changed";
-  if (current.kind === "present" && previous.kind === "present") {
-    // An unobserved mode cannot certify either equality or a mode-only repair.
-    return current.digest !== previous.digest || (previous.mode !== null && current.mode !== previous.mode)
-      ? "observed-changed" : "unchanged";
-  }
-  return "unchanged";
-}
-
-/** Atomic semantic join; the issued-request layer adds reviewer/request/transcript provenance. */
+/**
+ * Atomic semantic join; the issued-request layer adds reviewer/request/transcript provenance.
+ * Every assessment is judged against the Standalone Assessment Roster the reviewer was issued.
+ */
 export function assessStandaloneSuccessor(prepared: PreparedStandaloneSuccessor, payload: StandaloneReviewerPayloadV3): DomainResult<StandaloneReviewerPayloadV3, StandaloneLineageError> {
   if (!successors.has(prepared)) return rejectLineage("source-unavailable", "Assessments require parser-prepared successor data.");
   if (payload.lineageDigest !== prepared.lineageDigest || payload.snapshotDigest !== prepared.snapshotDigest) return rejectLineage("identity-mismatch", "Assessment source/lineage does not match the frozen successor.");
   if (payload.priorAssessments.length !== prepared.inventory.length) return rejectLineage("invalid-assessments", "Every origin requires one assessment in issued order.");
-  for (const [index, row] of prepared.inventory.entries()) {
+  const roster = standaloneAssessmentRoster(prepared);
+  for (const [index, prior] of roster.priors.entries()) {
     const assessment = payload.priorAssessments[index];
-    if (assessment === undefined || assessment.origin !== standaloneOriginReference(row.origin)) return rejectLineage("invalid-assessments", "Missing, foreign, duplicate or reordered origin assessment.");
-    const references = decisionReferences(prepared, row);
-    const valid = match(assessment)
-      .with({ verdict: "retained" }, value => references.includes(value.decisionDigest))
-      .with({ verdict: "reopen" }, value => references.includes(value.proposal.decisionDigest))
-      .with({ verdict: "repaired" }, value => active(prepared, row) && changedStandaloneInput(prepared, value.change.path) !== "unchanged")
-      .with({ verdict: "still-present" }, () => active(prepared, row))
-      .with({ verdict: "not-assessable" }, () => true)
-      .exhaustive();
-    if (!valid) return rejectLineage("invalid-assessments", "Assessment must respect the exact prior decision and explicitly reopen retired history.");
+    if (assessment === undefined || assessment.origin !== prior.origin) return rejectLineage("invalid-assessments", "Missing, foreign, duplicate or reordered origin assessment.");
+    if (!admitsStandaloneAssessment(roster, index, assessment)) {
+      return rejectLineage("invalid-assessments", describeInadmissibleAssessment(index, prior, assessment));
+    }
   }
   const origins = new Set(prepared.inventory.map(row => standaloneOriginReference(row.origin)));
   if (payload.findings.some(row => (row.draft.file !== null && !prepared.snapshot.some(entry => entry.path === row.draft.file)) ||
@@ -783,7 +755,7 @@ export function aggregateStandaloneAssessments(prepared: PreparedStandaloneSucce
       .when(values => values.some(value => value.verdict === "not-assessable"), () => "coverage-limited" as const)
       .when(values => values.some(value => value.verdict === "reopen"), () => "reopening-required" as const)
       .when(values => values.every(value => value.verdict === "repaired"), () => "resolved" as const)
-      .otherwise(() => active(prepared, row) ? "active" as const : "retained" as const);
+      .otherwise(() => standalonePriorStanding(prepared, row) === "active" ? "active" as const : "retained" as const);
     return canonicalRecord({ origin: standaloneOriginReference(row.origin), state, assessments });
   })));
 }
@@ -821,20 +793,75 @@ export function standaloneSuccessorReviewerRegistration(prepared: PreparedStanda
     reviewerProtocol: STANDALONE_REVIEWER_PROTOCOL_V3, lineageDigest: prepared.lineageDigest, snapshotDigest: prepared.snapshotDigest });
 }
 
-/** Both semantic attempts bind prepared lineage, not the later registration/result digest. */
-export function buildStandaloneSuccessorReviewerContext(prepared: PreparedStandaloneSuccessor,
-  request: Pick<AgentRequestAuthority, "runId" | "requestId" | "role" | "attempt" | "requiredSkill">,
-  variableContext: readonly ByteSection[],
+type SuccessorContextRequest = Pick<AgentRequestAuthority, "runId" | "requestId" | "role" | "attempt" | "requiredSkill">;
+
+/**
+ * The fixed-section layouts a successor packet has been issued with. Issuance
+ * builds `assessment-roster` (ADR-0078); `lineage-only` is the layout issued
+ * before the roster existed. A packet re-proves only under the layout it was
+ * issued with, so an earlier Run keeps its exact digests rather than being
+ * re-issued, and admission never reads the roster section: it recomputes it.
+ * Each request froze its `contextDigest` when it was published, so accepting
+ * both layouts never lets a Run issued with the roster take the other one.
+ */
+const SUCCESSOR_CONTEXT_LAYOUTS = ["assessment-roster", "lineage-only"] as const;
+type SuccessorContextLayout = (typeof SUCCESSOR_CONTEXT_LAYOUTS)[number];
+
+function successorReviewerContext(prepared: PreparedStandaloneSuccessor, request: SuccessorContextRequest,
+  variableContext: readonly ByteSection[], layout: SuccessorContextLayout,
 ): DomainResult<StandaloneReviewerContextPacketV3, ReviewerProtocolFailure> {
   if (!isPreparedStandaloneSuccessor(prepared) || request.runId !== prepared.runId || !prepared.reviewers.some(role => role === request.role)) {
     return rejected("Successor context requires the exact prepared source and expected reviewer.");
   }
   const authority = encodeByteSection("standalone-successor-authority", JSON.stringify(subject(prepared, request)));
   const lineage = encodeByteSection("standalone-lineage", JSON.stringify(prepared));
-  if (!authority.ok || !lineage.ok) return rejected("Prepared lineage could not be encoded.");
+  // The references a payload must copy, which a reviewer cannot compute from the raw lineage.
+  const roster = layout === "assessment-roster"
+    ? encodeByteSection(STANDALONE_ASSESSMENT_ROSTER_SECTION, JSON.stringify(standaloneAssessmentRoster(prepared))) : null;
+  if (!authority.ok || !lineage.ok || (roster !== null && !roster.ok)) return rejected("Prepared lineage could not be encoded.");
+  const fixedContext = roster === null ? [authority.value, lineage.value] : [authority.value, lineage.value, roster.value];
   const packet = buildStandaloneReviewerContextPacketV3({ requestId: request.requestId, role: request.role,
-    requiredSkill: request.requiredSkill ?? "none", fixedContext: [authority.value, lineage.value], variableContext });
+    requiredSkill: request.requiredSkill ?? "none", fixedContext, variableContext });
   return packet.ok ? success(packet.value) : rejected(packet.error.message);
+}
+
+/** Both semantic attempts bind prepared lineage, not the later registration/result digest. */
+export function buildStandaloneSuccessorReviewerContext(prepared: PreparedStandaloneSuccessor, request: SuccessorContextRequest,
+  variableContext: readonly ByteSection[],
+): DomainResult<StandaloneReviewerContextPacketV3, ReviewerProtocolFailure> {
+  return successorReviewerContext(prepared, request, variableContext, "assessment-roster");
+}
+
+/**
+ * What re-proving an issued successor packet found: it is the exact packet
+ * this lineage and request were issued; it is not (tampering or drift); or no
+ * layout could be rebuilt at all, which is a different fault and keeps its
+ * cause.
+ */
+export type StandaloneSuccessorContextReproof =
+  | Readonly<{ kind: "reproved" }>
+  | Readonly<{ kind: "differs" }>
+  | Readonly<{ kind: "unbuildable"; message: string }>;
+
+/**
+ * Whether `digest` is the exact packet this prepared lineage and request were
+ * issued, under any layout a successor packet has been issued with. The one
+ * re-proof every rebuild site uses, so none of them compares against the
+ * current layout only. The current layout is tried first, so a current Run
+ * rebuilds once.
+ */
+export function reproveStandaloneSuccessorReviewerContext(prepared: PreparedStandaloneSuccessor, request: SuccessorContextRequest,
+  variableContext: readonly ByteSection[], digest: string,
+): StandaloneSuccessorContextReproof {
+  let unbuildable: string | null = null;
+  for (const layout of SUCCESSOR_CONTEXT_LAYOUTS) {
+    const rebuilt = successorReviewerContext(prepared, request, variableContext, layout);
+    if (rebuilt.ok && rebuilt.value.digest === digest) return canonicalRecord({ kind: "reproved" as const });
+    if (!rebuilt.ok) unbuildable ??= rebuilt.error.message;
+  }
+  return unbuildable === null
+    ? canonicalRecord({ kind: "differs" as const })
+    : canonicalRecord({ kind: "unbuildable" as const, message: unbuildable });
 }
 
 declare const issuedBrand: unique symbol;
@@ -862,9 +889,9 @@ export function parseIssuedStandaloneSuccessorReviewer(input: Readonly<{
       input.request.context.digest !== packet.digest || input.request.context.slot.path !== `contexts/${packet.digest}.json`) {
     return rejected("Independent registration, published request and Context Packet must join exactly.");
   }
-  const variable = packet.variableContext;
-  const rebuilt = buildStandaloneSuccessorReviewerContext(input.prepared, request, variable);
-  if (!rebuilt.ok || rebuilt.value.digest !== packet.digest) return rejected("Published Context Packet does not contain the exact prepared lineage and request subject.");
+  const reproof = reproveStandaloneSuccessorReviewerContext(input.prepared, request, packet.variableContext, packet.digest);
+  if (reproof.kind === "unbuildable") return rejected(`Published Context Packet could not be rebuilt for re-proof: ${reproof.message}`);
+  if (reproof.kind === "differs") return rejected("Published Context Packet does not contain the exact prepared lineage and request subject.");
   const authority = canonicalRecord({ protocolVersion: 3 as const, request, packet, prepared: input.prepared }) as IssuedStandaloneSuccessorReviewer;
   issuedProtocols.add(authority);
   return success(authority);
@@ -942,7 +969,7 @@ function deriveStandaloneSuccessorLineage(prepared: PreparedStandaloneSuccessor,
     const assessments = reports.flatMap((report, reportIndex) => {
       const value = report.payload.priorAssessments[index];
       if (value.verdict !== "repaired") return [];
-      const changedInput = changedStandaloneInput(prepared, value.change.path);
+      const changedInput = standaloneInputChange(prepared, value.change.path);
       if (changedInput === "unchanged") return [];
       return [canonicalRecord({ runId: prepared.runId, requestId: report.request.requestId,
         transcriptDigest: report.transcriptDigest, contextDigest: report.request.contextDigest,
