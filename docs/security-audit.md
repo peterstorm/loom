@@ -241,9 +241,11 @@ notice naming why and which policy applies.
   harness (`claude`, `pi`, `npx`/`bunx`/`pnpm dlx` of either) are refused.
 - **Authority paths.** A write or redirection onto a registered run's authority
   entries, onto the run directory itself or an ancestor of it, or into a
-  protected Loom directory (the subagent directory — run registry and capture
-  attestation store — and the machine definitions) is refused. Each path is also
-  judged in its canonical spelling (the realpath of its deepest existing
+  protected directory (the subagent directory, which holds the run registry and
+  the capture attestation store; the machine definitions; and the shell state
+  Claude Code carries between Bash calls: `shell-snapshots` and
+  `session-env` under `CLAUDE_CONFIG_DIR` or `~/.claude`) is refused. Each path
+  is also judged in its canonical spelling (the realpath of its deepest existing
   ancestor), and each run is registered under both its spelled and real path,
   so `/tmp` ↔ `/private/tmp` and a symlinked `--out` are covered. Reads, copying
   authority *out*, and writes under `agents/<owner-id>/{scratch,artifacts}`
@@ -262,8 +264,12 @@ notice naming why and which policy applies.
   plain `$T`) names a path without writing above it; every other assignment —
   `export T=/tmp`, a name the shell reads itself (`HOME`, `CDPATH`, `IFS`, …), a
   name read in a way the guard does not follow — is judged as a write over what
-  it names. A variable the line binds is judged with its value in place
-  (`T=/tmp; rm -rf $T/claude-subagents` is refused). A segment that runs one of
+  it names. A variable the line binds, or the shell inherits from the
+  environment the guard observes, is judged with its value in place
+  (`T=/tmp; rm -rf $T/claude-subagents` is refused, and so is `rm -rf $X` with
+  `X` exported to a run directory); `$PWD` is every directory the segment may
+  run in (ADR-0067 note L). An inherited variable no line on the way rebinds
+  holds its one observed value, so `cd $E` is placed. A segment that runs one of
   Loom's read-only scripts (`scripts/read-context-packet.ts`,
   `read-context-section.ts`, `ledger-epoch.ts`) by a path holding a `/` reads,
   whatever paths it names; its redirects are still judged. On a line that may
@@ -295,11 +301,15 @@ notice naming why and which policy applies.
 A refused subagent is told to return its result to the parent session, which
 runs every write. The guard is **defence in depth, not the proof**: it reads
 shell strings, and it does not see a command or helper name the shell builds
-from pieces (`eval "$a $b"`), a variable whose runtime-built value (or one
-set outside the line) holds an authority path,
-interpreter code built at runtime, names spelled in `printf` escapes, or a
-script whose text is runtime-built. `engine/tests/core/subagent-authority.test.ts`
-pins each of these as a known gap. None of them can produce an *attested*
+from pieces (`eval "$a $b"`), a variable whose value it cannot see (built at
+runtime, set by a shell profile, or inherited with a value that does not
+splice) holding an authority path, interpreter code built at runtime, names
+spelled in `printf` escapes, or a script whose text is runtime-built.
+`engine/tests/core/subagent-authority.test.ts` pins each of these as a known
+gap. It also trusts that the harness gives the agent's shell the environment
+it gives the hook. State an earlier Bash call leaves behind (`HOME`, `CDPATH`,
+`IFS`, an alias or a function) reaches a later call only through the protected
+shell state or the user's own profile. None of these gaps can produce an *attested*
 capture: the capturing harness writes a capture attestation into
 `<subagent dir>/security-capture-attestations/` (one immutable entry per
 verifier attempt, never swept), `verify --from` requires it for every ballot,

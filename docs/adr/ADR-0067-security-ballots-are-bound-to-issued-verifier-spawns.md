@@ -41,7 +41,9 @@ apply the notes' "this one wins" precedence by hand.
   route, or launch a nested harness. The fence is defence in depth; the attestation is the
   proof. Each segment is judged in the directories it may run in, a bare assignment of an inert
   name writes nothing above the path it names, and Loom's read-only scripts read (amended
-  2026-11-15, note K).
+  2026-11-15, note K). A word reading an inherited variable or `$PWD` is judged with its
+  observed value, and the shell state Claude Code carries between Bash calls is protected
+  (amended 2026-11-15, note L).
 - **The registry is refreshed by every writer** (notes "Registration", D). Every writing
   `helper security-audit` operation, and `start`/`resume` of the program, registers the audit
   run before it writes, and refuses to write when it cannot register.
@@ -565,7 +567,8 @@ a protected root, so a writer naming `.` there, or any path under `machines/`, r
     split anywhere; an `IFS=, read` prefix splits only its own command's input). A script file,
     judged on what it names literally, judges such a word as written. This closes F's
     same-line symlink gap when the target is spelled through a bound variable; a variable whose
-    value is runtime-built, or set outside the line, remains a gap.
+    value is runtime-built, or set outside the line, remains a gap. *Narrowed by note L: a
+    variable the shell inherits is judged with its observed value.*
   - *Read-only scripts* (`runsReadOnlyScript`; the list is `READ_ONLY_SCRIPTS` in
     `core/loom-cli-command.ts`, observed per decision as `LoomCommands.readOnlyScripts` in
     every spelling). A segment whose first word runs `scripts/read-context-packet.ts`,
@@ -602,4 +605,67 @@ a protected root, so a writer naming `.` there, or any path under `machines/`, r
     rules above close each, every one is pinned in `tests/core/subagent-authority.test.ts`, and
     each new rule was mutation-checked. Still allowed, as on main: a command rebound or
     `HOME`/`CDPATH`/`IFS` set in an EARLIER Bash call, and a variable set outside the line
-    (`rm -rf $X`).
+    (`rm -rf $X`). *Narrowed by note L: an earlier call's state reaches a later call only
+    through the shell state the guard now protects, and an inherited variable is judged with
+    its observed value.*
+
+### Implementation notes (amended 2026-11-15 — what the shell observes)
+
+The fence judged a variable by what the LINE bound, so a value the shell already held was
+invisible: `rm -rf $X` with `X` exported to the run directory passed, and so did a write through
+`$PWD`. It also left Claude Code's own shell state writable, so a subagent could plant an alias,
+a function, `CDPATH` or `IFS` in the snapshot every later Bash call of the session sources —
+the "earlier Bash call" gap K recorded. Where a bullet below contradicts one above, this one
+wins.
+
+- **L — inherited variables, `$PWD`, and the shell state between calls.**
+  - *The inherited environment* (`parseInheritedEnvironment`, the `InheritedEnvironment`
+    brand). Both shells observe the hook process's own environment
+    (`observeSubagentAuthorityContext`; Pi through `pi/subagent-authority-gate.ts`): the
+    harness spawns the hook and the agent's shell from one environment. The parser keeps a
+    variable only when its name is a shell identifier bash does not set itself (`PWD`,
+    `OLDPWD`, `SHLVL`, `IFS`, the dynamic and informational variables, every `BASH…` name) and
+    its value is literal path text (no whitespace, glob, quote, `$` or `~`), so a kept value
+    reads the same wherever an unquoted reference expands it. The line's own bindings are
+    seeded from it: a word reading an inherited variable is judged with the observed value in
+    place as well as as written, and a value's own references are followed in turn.
+  - *Pins.* An inherited variable no line on the way rebinds holds exactly its observed value,
+    so a word reading it has that one spelling, not two: a `cd` through it is placed
+    (`cd $E && rm -rf .` runs in `$E`), and a git or read-only-script word reading it is
+    static. A line that may bind a name the guard does not see written (`eval`, `source`/`.`,
+    `read`, `mapfile`, `printf`, `declare`, `export`, `let`, `getopts`, `unset`, `((`) unpins
+    every inherited variable for what follows; any other line unpins each name it may rebind.
+  - *`$PWD`* is every directory the segment may run in. It is pinned when that is exactly one
+    directory and no line on the way may set `PWD`, and a `cd` operand that starts by reading
+    it is read relative to where the shell is (`cd $PWD/engine` is `cd ./engine`).
+  - *`cd` landings.* A move the guard cannot place keeps the targets it CAN spell
+    (`DirectoryMove.unknown.landings`, from the bound spellings of a runtime-built operand,
+    with `~` resolved), and each joins the directories the line may reach exactly as a
+    placed move does: searched along `CDPATH`, and an absolute one reached even when the
+    starting directory is unknown. A searched move on a line that may set `CDPATH` is unknown
+    with its target as a landing. This closes a false negative on main:
+    `read CDPATH < /tmp/c; cd loom && rm -rf machines`, run from the protected directory's
+    grandparent, judged `rm -rf machines` only where the searched `cd` could not land.
+  - *Quoted reads do not split.* The `IFS` fail-closed rule of K now applies only to a word
+    that expands a variable outside quotes; `"$T"` is never split, so it is judged on its
+    spellings like any other word.
+  - *The shell state Claude Code carries between Bash calls* (`claudeShellStateDirs`,
+    `utils/claude-config-dir.ts`): `<config>/shell-snapshots` (the snapshot of the user's
+    shell, sourced before every command) and `<config>/session-env` (the environment scripts
+    hooks write through `CLAUDE_ENV_FILE`), under `CLAUDE_CONFIG_DIR` or `~/.claude`, are
+    protected directories for the subagent guard only: `subagentProtectedDirs` (`config.ts`)
+    names that set beside `protectedDirs`, which guard-state-file and block-direct-edits keep
+    reading, since the parent session writes this state itself. The `session-env` layout is taken from
+    Claude Code's documentation of `CLAUDE_ENV_FILE`; it was not observed live. The
+    transcript locator reads `CLAUDE_CONFIG_DIR` through the same helper.
+  - *Still allowed* (pinned in `tests/core/subagent-authority.test.ts`): a variable whose value
+    the guard cannot see — set by a shell profile, inherited with a value that does not splice,
+    or built at runtime (`T=$(cat f)`) — holding an authority path. The guard also trusts that
+    the harness gives the hook and the agent's shell one environment; a harness that does not
+    is outside what a test here can pin.
+  - *Checks.* Every new rule (seeding, pins, pin clearing, `$PWD` binding and lead, nested
+    values, landings searched and home-resolved, the quoted split, the parser's name and value
+    rules, the protected shell state) was mutation-checked against a test that isolates it.
+    The bash oracle of `tests/core/subagent-authority-directories.property.test.ts` models an
+    inherited variable and `$PWD` (`cd $E`, `E=/b`, `cd $PWD/b`); at this amendment it was
+    run 8 times at 3000 cases each without a counterexample.

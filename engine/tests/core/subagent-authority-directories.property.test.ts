@@ -2,15 +2,16 @@
  * core/subagent-authority (#177) — the guard judges each segment only in the
  * directories it may run in, following the line's `cd`s and separators. The
  * property: that set is SOUND. For any chain of `cd`/`pushd`/`popd`, variable
- * and `HOME` assignments, `true` and `false` joined by `&&`, `||`, `;`, `|` and
- * `&`, a `rm -rf .` at its end is refused whenever bash would really run it in
+ * and `HOME` assignments, a `cd` through an inherited variable or `$PWD`,
+ * `true` and `false` joined by `&&`, `||`, `;`, `|` and `&`, a `rm -rf .` at its end is refused whenever bash would really run it in
  * a directory that holds a protected one.
  *
  * The oracle is a small bash interpreter over a fixed directory tree: exit
  * statuses, `&&`/`||` short-circuiting on the last status, pipelines running
  * each command in a subshell, `&` backgrounding the whole `&&`/`||` list
  * before it, `OLDPWD`, the directory stack (`pushd -n` edits it without
- * moving), `$T` and `HOME`. It computes where the command RUNS; the guard
+ * moving), `$T`, the inherited `$E` (observed as `/a`), `$PWD` and `HOME`.
+ * It computes where the command RUNS; the guard
  * computes where it MAY run without executing anything. Precision is the
  * example tests' job (tests/core/subagent-authority.test.ts); this file only
  * proves nothing real is missed.
@@ -18,7 +19,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { posix } from "node:path";
-import { LEXICAL_FILESYSTEM, decideSubagentAuthority, type SubagentAuthorityContext } from "../../src/core/subagent-authority";
+import { LEXICAL_FILESYSTEM, decideSubagentAuthority, parseInheritedEnvironment, type SubagentAuthorityContext } from "../../src/core/subagent-authority";
 import { AUTHORITY_HELPER_OPERATIONS, HARNESS_HOOK_ROUTES } from "../../src/handlers/pre-tool-use/subagent-authority-operations";
 
 const START = "/start";
@@ -28,6 +29,7 @@ const COMMANDS = [
   "cd /a", "cd /b", "cd /missing", "cd b", "cd ./b", "cd ..", "cd", "cd -", "cd ~",
   "pushd /a >/dev/null", "pushd /missing", "pushd -n /a", "popd >/dev/null", "builtin cd /b",
   "T=/a", "T=/missing", "cd $T", "HOME=/b",
+  "cd $E", "E=/b", "cd $PWD/b",
   "true", "false",
 ] as const;
 type Command = (typeof COMMANDS)[number];
@@ -39,10 +41,11 @@ type Shell = Readonly<{
   stack: readonly string[];
   status: 0 | 1;
   t: string | undefined;
+  e: string;
   home: string;
 }>;
 
-const INITIAL: Shell = { cwd: START, oldpwd: null, stack: [], status: 0, t: undefined, home: "/home/u" };
+const INITIAL: Shell = { cwd: START, oldpwd: null, stack: [], status: 0, t: undefined, e: "/a", home: "/home/u" };
 
 /** One command's effect, as bash runs it. The initial home is not in the tree. */
 function run(shell: Shell, command: Command): Shell {
@@ -51,7 +54,8 @@ function run(shell: Shell, command: Command): Shell {
     DIRECTORIES.has(target) ? { ...shell, cwd: target, oldpwd: shell.cwd, stack, status: 0 } : failed;
   if (command === "T=/a" || command === "T=/missing") return { ...shell, t: command.slice(2), status: 0 };
   if (command === "HOME=/b") return { ...shell, home: "/b", status: 0 };
-  const words = command.replace(" >/dev/null", "").replace(/^builtin /, "").split(" ");
+  if (command === "E=/b") return { ...shell, e: "/b", status: 0 };
+  const words = command.replace(" >/dev/null", "").replace(/^builtin /, "").replace("$E", shell.e).replace("$PWD", shell.cwd).split(" ");
   const [head, operand] = [words[0], words[1] === "$T" ? shell.t : words[1] === "~" ? shell.home : words[1]];
   if (head === "true") return { ...shell, status: 0 };
   if (head === "false") return failed;
@@ -121,6 +125,7 @@ const protecting = (directory: string): SubagentAuthorityContext => ({
   hookRoutes: HARNESS_HOOK_ROUTES,
   readOnlyScripts: [],
   cdSearchPath: [],
+  environment: parseInheritedEnvironment({ E: "/a" }),
   filesystem: LEXICAL_FILESYSTEM,
 });
 
@@ -157,6 +162,11 @@ describe("the directories a segment is judged in are sound (#177)", () => {
     expect(finalDirectory(["pushd -n /a", "popd >/dev/null"], ["&&", "&&"])).toBe("/a");
     expect(finalDirectory(["T=/a", "cd $T"], [";", "&&"])).toBe("/a");
     expect(finalDirectory(["HOME=/b", "cd"], [";", "&&"])).toBe("/b");
+    expect(finalDirectory(["cd $E"], ["&&"])).toBe("/a");
+    expect(finalDirectory(["E=/b", "cd $E"], [";", "&&"])).toBe("/b");
+    expect(finalDirectory(["cd /a", "cd $PWD/b"], ["&&", "&&"])).toBe("/a/b");
     expect(decideSubagentAuthority(line(["cd /a"], ["&&"]), protecting(START)).kind).toBe("allow");
+    // A cd through an inherited variable no line rebinds is placed at its observed value.
+    expect(decideSubagentAuthority(line(["cd $E"], ["&&"]), protecting(START)).kind).toBe("allow");
   });
 });

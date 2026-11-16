@@ -30,9 +30,9 @@
  */
 
 import { lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseAgentId, parseSessionId } from "../machine/evidence";
+import { claudeConfigDir } from "./claude-config-dir";
 
 /**
  * The harness truncates slugs at this length and appends a hash of the full
@@ -50,10 +50,7 @@ export function projectSlug(projectDir: string): string {
 }
 
 /** `<config>/projects`, honouring CLAUDE_CONFIG_DIR. */
-function projectsRoot(): string {
-  const configured = process.env.CLAUDE_CONFIG_DIR?.trim();
-  return join(configured ? configured : join(homedir(), ".claude"), "projects");
-}
+const projectsRoot = (): string => join(claudeConfigDir(), "projects");
 
 /**
  * The project directories whose slug might name the transcript's home.

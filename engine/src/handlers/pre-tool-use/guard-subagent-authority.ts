@@ -8,10 +8,16 @@
  * parent session's and passes through untouched — the parent runs every
  * authority write. For a subagent call this shell observes what the pure
  * decision needs — the registered audit runs (`security-audit-run-registry`),
- * the canonical cwd, the home directory, Loom's protected directories, the
- * running package's read-only scripts (each in every spelling, so a symlinked
- * plugin path matches) and the search path a bare relative `cd` follows — and
- * maps a refusal to a block naming the rule.
+ * the canonical cwd, the home directory, what no subagent may write
+ * (`subagentProtectedDirs`: Loom's protected directories and the shell state
+ * Claude Code carries between Bash calls),
+ * the running package's read-only scripts (each in every spelling, so a
+ * symlinked plugin path matches), the search path a bare relative `cd` follows
+ * and the environment the agent's shell inherits — and maps a refusal to a
+ * block naming the rule. The environment is this process's: the harness
+ * spawns the hook and the agent's shell from one environment (Claude Code adds
+ * its shell snapshot, which the protection keeps the agent from rewriting; a
+ * profile is the user's own).
  *
  * Fail closed: malformed hook input, a non-string command, or an unreadable
  * run registry never wave a subagent call through. (An unreadable registry
@@ -23,12 +29,13 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type { HookHandler, HookResult } from "../../types";
 import { blockResult, passthroughResult } from "../../types";
-import { protectedDirs } from "../../config";
+import { subagentProtectedDirs } from "../../config";
 import { LOOM_COMMANDS } from "../../utils/loom-package-root";
 import {
   CD_SEARCH_VARIABLE,
   decideSubagentAuthority,
   parseCdSearchPath,
+  parseInheritedEnvironment,
   renderSubagentAuthorityRefusal,
   type RegisteredRuns,
   type ScriptRead,
@@ -127,11 +134,12 @@ export function observeSubagentAuthorityContext(
     cwd: canonicalCwd(cwd),
     home: homedir(),
     runs: observeRegisteredRuns(readRuns),
-    protectedDirectories: protectedDirs().flatMap(spellings),
+    protectedDirectories: subagentProtectedDirs().flatMap(spellings),
     helperOperations: AUTHORITY_HELPER_OPERATIONS,
     hookRoutes: HARNESS_HOOK_ROUTES,
     readOnlyScripts: LOOM_COMMANDS.readOnlyScripts.flatMap(spellings),
     cdSearchPath: parseCdSearchPath(process.env[CD_SEARCH_VARIABLE]),
+    environment: parseInheritedEnvironment(process.env),
     filesystem: GUARD_FILESYSTEM,
   };
 }
