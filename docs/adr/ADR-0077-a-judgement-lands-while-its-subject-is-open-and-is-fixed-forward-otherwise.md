@@ -89,6 +89,15 @@ also carries the Distill Task's existing hold (ADR-0068). Completed Waves and th
 Wave's Distill Scope stays as population froze it: the fix's files are judged by the Wave Gate's review, not
 distilled.
 
+**Fix text the brief can carry, and withdrawal.** The fix Task's description and reason become its plan context,
+which its brief renders and the spawn gate reads. `add-forward-fix` therefore refuses, before anything reaches
+protected state, text that the gate would refuse: a `{template variable}`, a `LOOM_` token, a `Task ID:` binding
+or a line break. These are the operator-note rules. A Forward Fix whose fix Task was never dispatched can be
+withdrawn with `helper orchestration withdraw-forward-fix`. Under the same Wave-reopening precondition, it removes
+the untouched fix Task, moves its audit whole into `forward_fix_withdrawals` with the operator's reason, and releases
+the hold. A withdrawn fix Task's id is never minted again, and the State File refuses a withdrawn id that is still on
+the roster or still in a live audit. A dispatched fix Task is not withdrawn: it settles, or it is reopened.
+
 ## Consequences
 - A decompose payload can no longer schedule a declared judgement after the Wave it judges.
 - The host-memory shape has a recovery that keeps every settled Wave: add a Forward Fix for the breaching files,

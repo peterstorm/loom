@@ -11,6 +11,13 @@ import { ENGINE, REPOSITORY as repository } from "./fixtures/repository-roots";
 const rootPackage = JSON.parse(readFileSync(join(repository, "package.json"), "utf8"));
 const enginePackage = JSON.parse(readFileSync(join(ENGINE, "package.json"), "utf8"));
 const temporaryDirectories: string[] = [];
+/**
+ * The environment each fixture's `npm run verify` starts from: this host's,
+ * minus the Verify Slice. A CI shard runs this file under its own
+ * `LOOM_VERIFY_SLICE`, which the fixture's whole-command runs must not
+ * inherit; a test that wants a slice names it.
+ */
+const { LOOM_VERIFY_SLICE: _hostSlice, ...hostEnv } = process.env;
 afterEach(() => temporaryDirectories.splice(0).forEach((path) => rmSync(path, { recursive: true, force: true })));
 
 const smokeFiles = [
@@ -57,6 +64,8 @@ if (stage === ${JSON.stringify(failingStage)}) process.exit(17);
   mkdirSync(join(directory, "engine/scripts"), { recursive: true });
   mkdirSync(join(directory, "engine/src/core"), { recursive: true });
   cpSync(join(ENGINE, "scripts/typecheck.ts"), join(directory, "engine/scripts/typecheck.ts"));
+  cpSync(join(ENGINE, "scripts/verify.ts"), join(directory, "engine/scripts/verify.ts"));
+  cpSync(join(ENGINE, "src/core/verify-slice.ts"), join(directory, "engine/src/core/verify-slice.ts"));
   cpSync(join(ENGINE, "scripts/verify-prerequisites.sh"), join(directory, "engine/scripts/verify-prerequisites.sh"));
   cpSync(join(ENGINE, "scripts/bun-version-pin.ts"), join(directory, "engine/scripts/bun-version-pin.ts"));
   cpSync(join(repository, ".bun-version"), join(directory, ".bun-version"));
@@ -73,7 +82,7 @@ type VerificationExit = Readonly<{
   error: ExecFileException | undefined;
 }>;
 
-function runVerification(directory: string, env: NodeJS.ProcessEnv = process.env): Promise<VerificationExit> {
+function runVerification(directory: string, env: NodeJS.ProcessEnv = hostEnv): Promise<VerificationExit> {
   return new Promise((resolve) => {
     const child = execFile("npm", ["run", "verify"], {
       cwd: directory, encoding: "utf8", timeout: 15_000, env,
@@ -101,7 +110,7 @@ describe("canonical verification command", () => {
     let progressed = false;
     const marker = setImmediate(() => { progressed = true; });
     try {
-      const result = await runVerification(directory, { ...process.env, PI_CODING_AGENT: "true" });
+      const result = await runVerification(directory, { ...hostEnv, PI_CODING_AGENT: "true" });
       expect(result.error).toBeUndefined();
       expect(result.signal).toBeNull();
       expect(result.status, result.stdout + result.stderr).toBe(0);
@@ -125,7 +134,8 @@ describe("canonical verification command", () => {
   it("has one compiler gate, then the full-tier project lint, then the existing complete test command", () => {
     expect(rootPackage.scripts.verify).toBe("npm --prefix engine run verify");
     expect(enginePackage.scripts.preverify).toBe("bash scripts/verify-prerequisites.sh");
-    expect(enginePackage.scripts.verify).toBe("npm run typecheck && npm run lint && npm run test");
+    // The one verify command runs the Verify Slice LOOM_VERIFY_SLICE names; unset, every tier in order.
+    expect(enginePackage.scripts.verify).toBe("bun scripts/verify.ts");
     expect(enginePackage.scripts.lint).toBe("env -u PI_CODING_AGENT bun ../scripts/lint-project.ts");
     expect(enginePackage.scripts.typecheck).toBe("bun scripts/typecheck.ts");
     expect(enginePackage.scripts["typecheck:unused"]).toBe("npm run typecheck");
@@ -178,7 +188,7 @@ describe("canonical verification command", () => {
     cpSync(join(directory, "node_modules/.bin/pi"), join(directory, "global-bin/pi"));
     rmSync(join(directory, "node_modules/.bin/pi"));
     const result = await runVerification(directory, {
-      ...process.env, PATH: `${join(directory, "global-bin")}:${process.env.PATH}`,
+      ...hostEnv, PATH: `${join(directory, "global-bin")}:${hostEnv.PATH}`,
     });
     expect(result.error).toBeUndefined();
     expect(result.signal).toBeNull();
@@ -234,7 +244,7 @@ describe('enrollment', () => {
 });
 `);
     const result = await runVerification(directory, {
-      ...process.env, PI_CODING_AGENT: "true", NO_COLOR: "1", FORCE_COLOR: "0",
+      ...hostEnv, PI_CODING_AGENT: "true", NO_COLOR: "1", FORCE_COLOR: "0",
     });
     expect(result.error).toBeUndefined();
     expect(result.signal).toBeNull();
@@ -252,9 +262,30 @@ describe('enrollment', () => {
     expect(parsed.value.total).toBeGreaterThan(0);
   });
 
+  it.each([
+    { slice: "static", expectedStages: ["lint"] },
+    { slice: "unit:1/1", expectedStages: ["unit"] },
+    { slice: "smoke", expectedStages: smokeFiles.map(([, stage]) => stage) },
+  ])("the $slice Verify Slice runs only its own tiers", async ({ slice, expectedStages }) => {
+    const directory = fixture("none");
+    const result = await runVerification(directory, { ...hostEnv, PI_CODING_AGENT: "true", LOOM_VERIFY_SLICE: slice });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(readFileSync(join(directory, "stages"), "utf8").trim().split("\n")).toEqual(expectedStages);
+  });
+
+  it("refuses an unknown Verify Slice before any tier runs", async () => {
+    const directory = fixture("none");
+    const result = await runVerification(directory, { ...hostEnv, LOOM_VERIFY_SLICE: "everything" });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("LOOM_VERIFY_SLICE must be");
+    expect(() => readFileSync(join(directory, "stages"))).toThrow();
+  });
+
   it.each(["none", "compiler", ...stages])("real npm composition short-circuits after %s, never recursively runs the suite", async (failingStage) => {
     const directory = fixture(failingStage);
-    const result = await runVerification(directory, { ...process.env, PI_CODING_AGENT: "true" });
+    const result = await runVerification(directory, { ...hostEnv, PI_CODING_AGENT: "true" });
     expect(result.error).toBeUndefined();
     expect(result.signal).toBeNull();
     expect(result.status, result.stdout + result.stderr).toBe(failingStage === "none" ? 0 : failingStage === "compiler" ? 1 : 17);

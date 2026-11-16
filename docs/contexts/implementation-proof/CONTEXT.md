@@ -118,6 +118,10 @@ _Avoid_: Re-dispatch (alone), reset, force re-populate
 The operator-only operation that appends one new Task to the active Wave to change code a completed Wave sealed, because a Task of the active Wave judges that code and its last attempt failed. Completed Waves stay untouched; the failed judge is under a **Dispatch Hold** until the fix settles. The fallback for a judgement the decompose-time **Judged Path** rule did not see.
 _Avoid_: Remediation (that is escalation remediation or a review-and-fix run), reopening a completed Wave, hotfix
 
+**Forward Fix Withdrawal**:
+The operator-only operation that removes a **Forward Fix** whose fix Task was never dispatched. The fix Task leaves the roster, its audit moves whole into the withdrawal record, its hold is released, and the withdrawn Task id is never minted again.
+_Avoid_: Deleting a Forward Fix, undo, retract
+
 ## Relationships
 
 - An **Implementation Attempt** is settled only by the **Implementation Completion Oracle**, leaving exactly one **Implementation Settlement Receipt**

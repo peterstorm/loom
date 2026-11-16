@@ -821,6 +821,20 @@ export type ForwardFixAudit = Readonly<{
   abandonedRunId: OrchestrationRunId | null;
 }>;
 
+/** Immutable record of one Forward Fix withdrawn before its fix Task was ever
+ * dispatched (`helper orchestration withdraw-forward-fix`). The fix Task left
+ * the roster and its audit left `forward_fix_history`, which released its
+ * hold; the audit is kept here whole, so the history is moved, never lost.
+ * A withdrawn fix Task's id is never minted again. Dropped by re-population. */
+export type ForwardFixWithdrawal = Readonly<{
+  schemaVersion: 1;
+  kind: "forward-fix-withdrawn";
+  /** The withdrawn Forward Fix's audit, exactly as it stood. */
+  audit: ForwardFixAudit;
+  /** The operator's non-blank reason, at most 512 characters. */
+  reason: string;
+}>;
+
 export type OrphanedWaveGateRetirement = Readonly<{
   schemaVersion: 1;
   kind: "orphaned-wave-gate-retirement";
@@ -1349,6 +1363,9 @@ export interface TaskGraph {
    *  active Wave (`helper orchestration add-forward-fix`); each audit holds
    *  its judges' dispatch until its fix settles. Dropped by re-population. */
   readonly forward_fix_history?: readonly ForwardFixAudit[];
+  /** Forward Fixes withdrawn before their fix Task was dispatched
+   *  (`helper orchestration withdraw-forward-fix`). Dropped by re-population. */
+  readonly forward_fix_withdrawals?: readonly ForwardFixWithdrawal[];
   /** Nonterminal retirement audit for missing Run Directories replaced in-place. */
   readonly orphaned_wave_gate_history?: readonly OrphanedWaveGateRetirement[];
   /** Abandoned active authority retired only to install Requirement trace v2. */

@@ -32,6 +32,7 @@
  *   helper orchestration add-forward-fix --wave <N> --hold <task-id>... --file <path>...
  *                               --description <text> --reason <text>
  *                               [--agent <agent>] [--new-tests required|existing-tests-sufficient]
+ *   helper orchestration withdraw-forward-fix --wave <N> --task <fix-task-id> --reason <text>
  *
  * Every `--run`, `--new-run`, and remediation `sourceRun` accepts either the
  * bare run id or a full path to that same direct child of its runs-root. The
@@ -212,7 +213,7 @@ import { parseOrchestrationOperation } from "./orchestration-operations";
 import { remediateOperation } from "./remediate-implementation-escalation";
 import { attestOperation } from "./attest-implementation";
 import { reopenTaskOperation } from "./reopen-task";
-import { addForwardFixOperation } from "./add-forward-fix";
+import { addForwardFixOperation, withdrawForwardFixOperation } from "./forward-fix-operations";
 import { renderStandaloneReviewSummary } from "../../core/standalone-review-records";
 import { serializeStandaloneReviewMachineState } from "../../core/standalone-review-checkpoint";
 import { argumentValue, argumentValues, hasFlag, unconsumedValueArguments } from "./cli-args";
@@ -270,6 +271,8 @@ function usage(): HookResult {
   "          --description <text> --reason <text> [--agent <implementation agent>] [--new-tests required|existing-tests-sufficient]",
   "          (appends a Forward Fix Task to the active Wave to change code a completed Wave sealed, when a held Task's judgement of it failed;",
   "          the held Tasks wait until the fix settles; completed Waves stay untouched; audited and idempotent)",
+  "  withdraw-forward-fix --wave <N> --task <fix-task-id> --reason <text>",
+  "          (removes a Forward Fix Task that was never dispatched and releases its hold; its audit moves to forward_fix_withdrawals)",
     ].join("\n"),
   };
 }
@@ -1945,6 +1948,8 @@ export function orchestrationHandler(emission: () => Emission): HookHandler {
         return reopenTaskOperation(rest);
       case "add-forward-fix":
         return addForwardFixOperation(rest);
+      case "withdraw-forward-fix":
+        return withdrawForwardFixOperation(rest);
     }
   };
 }

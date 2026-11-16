@@ -26,7 +26,9 @@ Moving `.bun-version` to a new release also means recording that release's conso
 
 The same **root `npm run verify`** runs locally, in `.github/workflows/ci.yml` for pull requests, pushes to `main` and manual dispatch (the repository is private and the macOS leg bills at ten times the Linux rate, so a branch push is validated by its pull request run, a superseded run on the same ref is cancelled, and a tag points at a commit `main` already validated), and through this repository's runtime Verification Manifest. CI checks out full history with `fetch-depth: 0`, installs both frozen graphs, preserves failures through `pipefail`, and attempts log artifact upload even after failure. It has a 60-minute job budget; the manifest separately bounds its command to 30 minutes. Neither is proof of a successful hosted CI run.
 
-Root `verify` delegates to engine `verify`: prerequisites (`preverify`) → typecheck → lint → `test`. The test script runs the entire Vitest suite (including property/integration tests) followed by all six smoke commands, once each on success:
+CI runs that command as parallel **Verify Slices** (`engine/src/core/verify-slice.ts`): each OS has one job per slice, selected by `LOOM_VERIFY_SLICE`. The slices are `static` (typecheck and lint), `unit:<i>/<n>` (Vitest file shard *i* of *n*) and `smoke`. The matrix lists every slice, and a contract test (`engine/tests/verification-ci.test.ts`) proves that together they run the whole command, so every tier still runs on both platforms. Locally and in the manifest the variable is unset, which is the whole command. A slice's JUnit report holds only its own shard's facts.
+
+Root `verify` delegates to engine `verify` (`engine/scripts/verify.ts`): prerequisites (`preverify`) → typecheck → lint → the Vitest suite (`test:unit`) → the smoke commands (`test:smoke`), stopping at the first failure. The two test tiers together are what `test` runs: the entire Vitest suite (including property/integration tests) followed by all six smoke commands, once each on success:
 
 1. `scripts/smoke-panel-mode.sh`
 2. `scripts/smoke-review-panel.sh`

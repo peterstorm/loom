@@ -16,7 +16,8 @@ export type QuiescentOperation =
   | "spec trace amendment"
   | "spec trace upgrade"
   | "task reopening"
-  | "forward fix";
+  | "forward fix"
+  | "forward fix withdrawal";
 
 /** What each operation tells the operator to wait for before retrying. */
 const SETTLE: Readonly<Record<QuiescentOperation, string>> = Object.freeze({
@@ -25,6 +26,7 @@ const SETTLE: Readonly<Record<QuiescentOperation, string>> = Object.freeze({
   "spec trace upgrade": "wait for the exact roster to settle and retry",
   "task reopening": "wait for it to settle and retry",
   "forward fix": "wait for it to settle and retry",
+  "forward fix withdrawal": "wait for it to settle and retry",
 });
 
 /** The pre-lock refusal for `operation`, or null when no subagent is active. */

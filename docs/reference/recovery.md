@@ -74,7 +74,16 @@ Under the TaskGraph lock it requires the Wave-reopening precondition `reopen-tas
 - no `--file` is in another Task's file list in the active Wave, a frozen Acceptance Contract path, or protected verification infrastructure;
 - a non-blank `--description` and `--reason`; `--agent` defaults to `code-implementer-agent` (also `frontend-agent`, `security-agent`), and `--new-tests` to `required` (`existing-tests-sufficient` when the held judge's tests are the fix's whole proof).
 
-It appends a pending fix Task with the next free Task id, no dependency and no Requirement trace, whose plan context names the held Tasks, the sealed paths and the reason. It retires the Wave's review authority as a reopening does, resets the Wave's gate bits, and appends one `forward-fix-added` audit to `forward_fix_history`. Completed Waves and every existing Task are untouched. Status then owes the fix Task's dispatch, while each held Task stays under a dispatch hold until the fix is implemented and unreserved; a held Task's escalation is deferred until then. Once the fix settles, status offers the held Task's retry, which judges the fixed code. An escalated held Task is remediated with `helper orchestration remediate` after the fix settles. Repeating the same command while the fix Task is still pending changes nothing.
+It appends a pending fix Task with the next free Task id, no dependency and no Requirement trace, whose plan context names the held Tasks, the sealed paths and the reason. It retires the Wave's review authority as a reopening does, resets the Wave's gate bits, and appends one `forward-fix-added` audit to `forward_fix_history`. Completed Waves and every existing Task are untouched. Status then owes the fix Task's dispatch, while each held Task stays under a dispatch hold until the fix is implemented and unreserved; a held Task's escalation is deferred until then. Once the fix settles, status offers the held Task's retry, which judges the fixed code. An escalated held Task is remediated with `helper orchestration remediate` after the fix settles. Repeating the same command while the fix Task is still pending changes nothing. `--description` and `--reason` must be text the fix Task's brief can carry, as an operator note must: one line, with no `{template variable}`, no `LOOM_` token and no `Task ID:` binding.
+
+To withdraw a Forward Fix before its fix Task was ever dispatched (for example, to correct its text), run:
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration withdraw-forward-fix \
+  --wave 5 --task T24 --reason "re-adding with corrected text"
+```
+
+It requires the same active, open Wave `add-forward-fix` requires (including no abandoned run naming a successor), a fix Task of a live `forward_fix_history` audit of that Wave, and that Task still exactly as it joined: no reservation, attempt, settlement, observation or review has written any of its evidence fields (`isUntouchedJoinedTask`). It removes the fix Task from the roster and moves the audit whole into `forward_fix_withdrawals`, together with your reason. The held Tasks are released, and the withdrawn id is never minted again. Add a corrected Forward Fix afterwards if the judgement still needs one. A fix Task that was already dispatched is not withdrawn: let it settle, or reopen it.
 
 ## Completed Wave has post-review workspace-integrity loss
 
