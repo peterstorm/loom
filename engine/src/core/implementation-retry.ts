@@ -505,7 +505,6 @@ function projectedDisposition(lineage: ImplementationRetryLineage): Implementati
 function projectLineage(
   start: ImplementationRetryLineage,
   history: readonly ImplementationAttemptSettlementReceipt[],
-  attestation: boolean,
 ): ImplementationRetryLineage | string {
   let lineage = start;
   for (const [index, receipt] of history.entries()) {
@@ -525,7 +524,10 @@ function projectLineage(
       if (lineage.kind !== "initial") {
         return `implementation_attempt_history[${index}] (${receipt.receiptId}): retry authorization requires semantic attempt 1`;
       }
-      lineage = attestation && receipt.failureKinds.some(isAttestationDriftFailureKind)
+      // A drift failure is minted only by an attested obligation, so the receipt
+      // alone proves the attempt was attested; terminality never reads the
+      // Task's current flag, which a reopening clears (task-revalidation).
+      lineage = receipt.failureKinds.some(isAttestationDriftFailureKind)
         ? freeze({ kind: "escalated", receiptId: receipt.receiptId,
             authorityDigest: receipt.authorityDigest, failureKinds: receipt.failureKinds })
         : freeze({ kind: "retry", predecessor: receipt });
@@ -611,8 +613,7 @@ export function deriveImplementationRetryDisposition(
       errors: nonEmptyErrors(["implementation retry protocol 2 requires a valid history start index"]),
     });
   }
-  const attestation = task.implementation_attestation === true;
-  const prefix = projectLineage(freeze({ kind: "initial" }), history.slice(0, historyStart), attestation);
+  const prefix = projectLineage(freeze({ kind: "initial" }), history.slice(0, historyStart));
   if (typeof prefix === "string") {
     return freeze({
       kind: "invalid",
@@ -639,7 +640,7 @@ export function deriveImplementationRetryDisposition(
       errors: nonEmptyErrors([INITIAL_PREFIX_SEED_ERROR]),
     });
   }
-  const walked = projectLineage(prefix, history.slice(historyStart), attestation);
+  const walked = projectLineage(prefix, history.slice(historyStart));
   if (typeof walked === "string") {
     return freeze({ kind: "invalid", errors: nonEmptyErrors([walked]) });
   }
