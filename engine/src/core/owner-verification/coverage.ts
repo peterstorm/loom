@@ -5,7 +5,8 @@
  * function here is a function of file text already read, the matrix test's
  * tsconfig `paths` and the due paths.
  *
- * - Resolution: a relative specifier tries the extension ladder against the
+ * - Resolution: a relative specifier tries the extension ladder (TypeScript
+ *   sources, then JavaScript ones for an allowJs project) against the
  *   importing file's directory; a specifier matching a `paths` alias tries the
  *   same ladder on each substituted target, in order; a bare package or an
  *   absolute specifier is external and reaches nothing.
@@ -46,7 +47,12 @@ export const COVERAGE_READ_BOUND = 512;
 // Specifier resolution
 // ---------------------------------------------------------------------------
 
-const DIRECT_EXTENSIONS: readonly string[] = ["", ".ts", ".tsx", ".mts", ".cts"];
+/**
+ * TypeScript sources first, then JavaScript ones: a project with allowJs
+ * imports a `.js` module by an extensionless specifier, and TypeScript tries
+ * them in this order, so a TypeScript file still wins over a JavaScript one.
+ */
+const DIRECT_EXTENSIONS: readonly string[] = ["", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
 /** A JavaScript extension names its TypeScript source, as TypeScript resolves it. */
 const SOURCE_FOR_EMITTED: readonly (readonly [string, readonly string[]])[] = [
   [".js", [".ts", ".tsx"]],
@@ -54,16 +60,20 @@ const SOURCE_FOR_EMITTED: readonly (readonly [string, readonly string[]])[] = [
   [".mjs", [".mts"]],
   [".cjs", [".cts"]],
 ];
-const INDEX_FILES: readonly string[] = ["index.ts", "index.tsx"];
+const INDEX_FILES: readonly string[] = ["index.ts", "index.tsx", "index.js", "index.jsx"];
 
-/** The files a resolved base path may name, in the order they are tried. */
+/**
+ * The files a resolved base path may name, in the order they are tried. A
+ * specifier spelled with an emitted extension tries its TypeScript source
+ * before the file it spells, as TypeScript does.
+ */
 const extensionLadder = (base: string): readonly string[] => {
   if (base === "") return INDEX_FILES;
-  const direct = DIRECT_EXTENSIONS.map((extension) => `${base}${extension}`);
   const sources = SOURCE_FOR_EMITTED.flatMap(([emitted, sourceExtensions]) =>
     base.endsWith(emitted) ? sourceExtensions.map((source) => `${base.slice(0, -emitted.length)}${source}`) : []);
+  const direct = DIRECT_EXTENSIONS.map((extension) => `${base}${extension}`);
   const indexes = INDEX_FILES.map((index) => `${base}/${index}`);
-  return [...new Set([...direct, ...sources, ...indexes])];
+  return [...new Set([...sources, ...direct, ...indexes])];
 };
 
 const isRelative = (specifier: string): boolean =>

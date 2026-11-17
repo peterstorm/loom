@@ -59,6 +59,23 @@ describe("resolveSpecifier", () => {
     expect(resolveSpecifier("tests/a.test.ts", "../src/x", [], known("src/x.ts", "src/x/index.ts", "src/x.tsx"))).toBe("src/x.ts");
   });
 
+  it("resolves an extensionless specifier to a JavaScript module, as an allowJs project imports one", () => {
+    expect(resolveSpecifier("tests/a.test.ts", "../src/x", [], known("src/x.js"))).toBe("src/x.js");
+    expect(resolveSpecifier("tests/a.test.ts", "../src/x", [], known("src/x.jsx"))).toBe("src/x.jsx");
+    expect(resolveSpecifier("tests/a.test.ts", "../src/x", [], known("src/x.mjs"))).toBe("src/x.mjs");
+    expect(resolveSpecifier("tests/a.test.ts", "../src/x", [], known("src/x.cjs"))).toBe("src/x.cjs");
+    expect(resolveSpecifier("tests/a.test.ts", "../src/x", [], known("src/x/index.js"))).toBe("src/x/index.js");
+    expect(resolveSpecifier("t.ts", "@/services/api", [{ pattern: "@/*", targets: ["src/*"] }], known("src/services/api.js")))
+      .toBe("src/services/api.js");
+  });
+
+  it("prefers a TypeScript source over a JavaScript file, whichever extension the specifier spells", () => {
+    expect(resolveSpecifier("tests/a.test.ts", "../src/x", [], known("src/x.js", "src/x.ts"))).toBe("src/x.ts");
+    expect(resolveSpecifier("tests/a.test.ts", "../src/x", [], known("src/x.js", "src/x/index.ts"))).toBe("src/x.js");
+    expect(resolveSpecifier("tests/a.test.ts", "../src/x.js", [], known("src/x.js", "src/x.ts"))).toBe("src/x.ts");
+    expect(resolveSpecifier("tests/a.test.ts", "../src/x.js", [], known("src/x.js"))).toBe("src/x.js");
+  });
+
   it("normalizes `.` and `..` segments, and refuses a path that escapes the repository", () => {
     expect(resolveSpecifier("a/b/c.ts", "./../b/./d", [], known("a/b/d.ts"))).toBe("a/b/d.ts");
     expect(resolveSpecifier("a/b/c.ts", "..", [], known("a/index.ts"))).toBe("a/index.ts");
@@ -99,6 +116,16 @@ describe("reachedFiles and decideCoverage", () => {
 
   it("AS-002: a matrix test omitting one sibling names the Invariant's missing sibling path", () => {
     expect(over(importing("../src/rules/owner", "../src/rules/sibling-a"))).toEqual({ kind: "missing", paths: [SIBLING_B] });
+  });
+
+  it("AS-001: a JavaScript sibling imported by an extensionless alias is reached", () => {
+    const files = new Map(Object.entries({
+      "src/confinement.ts": "export const confine = (url: string) => url;\n",
+      "src/services/api.js": 'import { confine } from "../confinement";\nexport const api = confine;\n',
+      [MATRIX]: importing("@/confinement", "@/services/api"),
+    }));
+    expect(coverageOverFiles({ matrixTest: MATRIX, due: ["src/confinement.ts", "src/services/api.js"], files, aliases: [{ pattern: "@/*", targets: ["src/*"] }] }))
+      .toEqual({ kind: "covered" });
   });
 
   it("AS-003: with no sibling entry points only the owner must be reached", () => {
@@ -253,14 +280,15 @@ const recordingPort = (repo: Readonly<Record<string, string>>, refused: Readonly
 
 // Random repositories over every resolution path the walk must read
 // ahead of the decision: single- and multi-target tsconfig aliases, `.tsx` and
-// `.mts` fallbacks, `.js`/`.mjs` specifiers naming TypeScript sources,
+// `.mts` fallbacks, JavaScript modules (an allowJs project), `.js`/`.mjs`
+// specifiers naming TypeScript sources,
 // directory indexes, and layouts where an earlier ladder candidate (`m.ts`
 // before `m/index.ts`, `gen/*` before `src/*`) exists beside a later one.
 
 const SLOTS = ["m0", "m1", "m2"] as const;
 type Slot = (typeof SLOTS)[number];
 
-const LAYOUTS = ["ts", "tsx", "mts", "index", "ts-and-index", "tsx-and-index", "gen-and-src", "absent"] as const;
+const LAYOUTS = ["ts", "tsx", "mts", "js", "ts-and-js", "index", "js-index", "ts-and-index", "tsx-and-index", "gen-and-src", "absent"] as const;
 type Layout = (typeof LAYOUTS)[number];
 
 /** The repository files a slot's layout holds, in ladder order. */
@@ -268,7 +296,10 @@ const filesOf = (slot: Slot, layout: Layout): readonly string[] => ({
   ts: [`src/${slot}.ts`],
   tsx: [`src/${slot}.tsx`],
   mts: [`src/${slot}.mts`],
+  js: [`src/${slot}.js`],
+  "ts-and-js": [`src/${slot}.ts`, `src/${slot}.js`],
   index: [`src/${slot}/index.ts`],
+  "js-index": [`src/${slot}/index.js`],
   "ts-and-index": [`src/${slot}.ts`, `src/${slot}/index.ts`],
   "tsx-and-index": [`src/${slot}.tsx`, `src/${slot}/index.ts`],
   "gen-and-src": [`gen/${slot}.ts`, `src/${slot}.ts`],
