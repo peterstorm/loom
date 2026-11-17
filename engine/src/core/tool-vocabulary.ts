@@ -117,5 +117,3 @@ export const READ_ONLY_STATE_COMMANDS: ReadonlySet<string> = frozenSet([
   "echo", "printf", "test", "[", "[[", "true", "false",
   "pwd", "dirname", "basename", "readlink", "realpath", "du",
 ]);
-
-

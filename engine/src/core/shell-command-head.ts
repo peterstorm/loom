@@ -57,7 +57,9 @@ export function unquote(token: string): string {
 const commandName = (word: string): string => unescapeCommandWord(unquote(word));
 
 /**
- * Is the segment's head a command that cannot write a file? Exact-name
+ * Does the segment write no local file and run no program, by its head? Either
+ * a read-only head (READ_ONLY_STATE_COMMANDS) or a read-only git/gh invocation
+ * (`isReadOnlySubcommandInvocation`). Exact-name
  * membership (no basename resolution — `./cat` must not inherit `cat`'s
  * trust), after env-prefix stripping so `CI=1 jq …` matches. A pure
  * assignment (`F=active_task_graph.json`) strips to an empty head and
@@ -80,17 +82,23 @@ export function hasReadOnlyHead(segment: string): boolean {
 }
 
 /**
- * Is the segment exactly a read-only `git` or `gh` invocation? The first word
- * is the command itself (no environment prefix: `GIT_EXTERNAL_DIFF=…` and
- * `GH_PAGER=…` run programs), every word is judged by its one static spelling
- * (`staticSpelling`: a word the shell could complete into an option at
+ * Is the segment exactly a read-only `git` or `gh` invocation, one that writes
+ * no local file and runs no program? The first word is the command itself (no
+ * environment prefix: `GIT_EXTERNAL_DIFF=…` and the gh pager, browser and
+ * editor variables run programs), every word is judged by its one static
+ * spelling under `spell` (a word the shell could complete into an option at
  * runtime is not admitted), and the verdict is the audited classifier's:
- * `isReadOnlyGitInvocation` (#177) or `isReadOnlyGhInvocation`.
+ * `isReadOnlyGitInvocation` (#177) or `isReadOnlyGhInvocation`. The state
+ * guard spells words as written (`staticSpelling`); the subagent authority
+ * guard first pins the values its line binds.
  */
-export function isReadOnlySubcommandInvocation(segment: string): boolean {
+export function isReadOnlySubcommandInvocation(
+  segment: string,
+  spell: (word: string) => string | null = staticSpelling,
+): boolean {
   const raw = shellWords(stripComment(segment).trim());
   if (raw[0] === undefined || shellWords(stripEnvPrefix(segment))[0] !== raw[0]) return false;
-  const spellings = raw.map(staticSpelling);
+  const spellings = raw.map(spell);
   return isReadOnlyGitInvocation(spellings) || isReadOnlyGhInvocation(spellings);
 }
 

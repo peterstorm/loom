@@ -105,13 +105,13 @@ import { isAbsolute, normalize } from "node:path";
 import { match } from "ts-pattern";
 import { SECURITY_AUDIT_AUTHORITY_ENTRIES } from "./audit-run-authority";
 import { READ_ONLY_SCRIPTS } from "./loom-cli-command";
-import { isReadOnlyGitInvocation } from "./read-only-git";
 import { scanSubstitutions } from "./shell-substitution";
 import { stripComment, type SegmentOp } from "./shell-command";
 import {
   analyzeCommandHead,
   commandWords,
   hasReadOnlyHead,
+  isReadOnlySubcommandInvocation,
   headBase,
   pipeChains,
   placedPipeChains,
@@ -284,7 +284,6 @@ const verdictOf = (split: HelperOperationSplit, operation: string): OperationVer
   if (split.readOnly.has(operation)) return "read-only";
   return split.known.has(operation) ? "writes" : "unknown";
 };
-
 
 /** Does this word name `literal`, as far as static analysis can tell? A word
  *  with a runtime part may become anything, so it may name it. */
@@ -1637,7 +1636,7 @@ function judgeSegment(
   const { pinnedValue } = segmentBindings(scope);
   const readOnly = headsTrusted && (invocation !== null || hasReadOnlyHead(segment) || CD_HEADS.has(literalHead) ||
     runsReadOnlyScript(segment, scope, pinnedValue, context.readOnlyScripts) ||
-    isReadOnlyGitInvocation(segmentWords(segment).map((word) => pinnedStaticSpelling(word, pinnedValue))));
+    isReadOnlySubcommandInvocation(segment, (word) => pinnedStaticSpelling(word, pinnedValue)));
   return {
     kind: "judged",
     facts: { segment, readOnly, touches: segmentTouches(segment, scope, executed.words), redirectTouch },

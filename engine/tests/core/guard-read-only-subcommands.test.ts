@@ -2,12 +2,14 @@
  * loom#198, Cause 5: read-only `git` and `gh` invocations may name guarded
  * state in their arguments (a pattern, a pathspec, a PR body) without being
  * blocked, while every form that writes a file or runs a program stays
- * blocked. The vocabulary is `READ_ONLY_SUBCOMMANDS`; the decision is the
+ * blocked. The classifiers are `read-only-git.ts` and `read-only-gh.ts`,
+ * reached through `isReadOnlySubcommandInvocation`; the decision is the
  * state-file guard's, unchanged otherwise.
  */
 import { describe, expect, it } from "vitest";
 import { isReadOnlySubcommandInvocation } from "../../src/core/shell-command-head";
 import { staticSpelling } from "../../src/core/shell-match-views";
+import { isReadOnlyGhInvocation } from "../../src/core/read-only-gh";
 import { GUARDED, guardDecision } from "../fixtures/guard-decision";
 
 describe("read-only git and gh invocations that mention guarded state", () => {
@@ -81,6 +83,27 @@ describe("staticSpelling", () => {
     ["∗", null],
   ])("reads %s as %s", (word, literal) => {
     expect(staticSpelling(word)).toBe(literal);
+  });
+});
+
+describe("isReadOnlyGhInvocation: options that run a program the environment names", () => {
+  const spelled = (command: string) => command.split(" ");
+  it.each([
+    "gh pr create -w", "gh pr view 1 --we", "gh pr view 1 -Rw", "gh pr view 1 --web",
+    "gh pr comment 1 --editor", "gh issue create -e", "gh issue comment 1 --edit", "gh pr create -te",
+  ])("refuses %s", (command) => {
+    expect(isReadOnlyGhInvocation(spelled(command))).toBe(false);
+  });
+
+  it.each(["gh pr view 1 -- --web", "gh pr view 1 --jq .web", "gh pr create --title t --body b", "gh api /repos/o/r"])("admits %s", (command) => {
+    expect(isReadOnlyGhInvocation(spelled(command))).toBe(true);
+  });
+
+  it("admits only listed group and verb pairs", () => {
+    expect(isReadOnlyGhInvocation(spelled("gh pr merge 1"))).toBe(false);
+    expect(isReadOnlyGhInvocation(spelled("gh api"))).toBe(true);
+    expect(isReadOnlyGhInvocation(spelled("gh repo clone o/r"))).toBe(false);
+    expect(isReadOnlyGhInvocation(["gh", "pr", null])).toBe(false);
   });
 });
 
