@@ -105,13 +105,13 @@ import { isAbsolute, normalize } from "node:path";
 import { match } from "ts-pattern";
 import { SECURITY_AUDIT_AUTHORITY_ENTRIES } from "./audit-run-authority";
 import { READ_ONLY_SCRIPTS } from "./loom-cli-command";
-import { isReadOnlyGitInvocation } from "./read-only-git";
 import { scanSubstitutions } from "./shell-substitution";
 import { stripComment, type SegmentOp } from "./shell-command";
 import {
   analyzeCommandHead,
   commandWords,
   hasReadOnlyHead,
+  isReadOnlySubcommandInvocation,
   headBase,
   pipeChains,
   placedPipeChains,
@@ -123,11 +123,13 @@ import {
 import { inlineProgramArg, MAX_SUBSTITUTION_DEPTH, readsProgramFromStdin, SH_FAMILY_HEADS, splitHeredocs } from "./shell-heredoc";
 import {
   collapseVariants,
-  expandBraces,
   GLOB_CHAR,
+  hasRuntimePart,
   leadingDotPolicyOf,
   OPAQUE_OUTPUT,
   segmentGlobMatches,
+  staticSpelling,
+  wordViews,
   type LeadingDotPolicy,
 } from "./shell-match-views";
 
@@ -282,24 +284,6 @@ const verdictOf = (split: HelperOperationSplit, operation: string): OperationVer
   if (split.readOnly.has(operation)) return "read-only";
   return split.known.has(operation) ? "writes" : "unknown";
 };
-
-/** Every spelling bash could give one word (quote collapse, parameter
- *  states, brace expansion). Null when the view set is unbounded. */
-function wordViews(word: string): readonly string[] | null {
-  const variants = collapseVariants(word);
-  if (variants === null) return null;
-  const views = new Set<string>();
-  for (const variant of variants) {
-    const expanded = expandBraces(variant);
-    if (expanded === null) return null;
-    for (const view of expanded) views.add(view);
-  }
-  return [...views];
-}
-
-/** Text the shell completes at runtime: an expansion, a substitution's opaque
- *  output, or a backtick. */
-const hasRuntimePart = (word: string): boolean => /[$`]/.test(word) || word.includes(OPAQUE_OUTPUT);
 
 /** Does this word name `literal`, as far as static analysis can tell? A word
  *  with a runtime part may become anything, so it may name it. */
@@ -1025,14 +1009,14 @@ function cdDestination(head: string, operand: string | undefined, scope: PathSco
   if (head === "pushd" && (operand === undefined || /^[+-]\d+$/.test(operand))) return null;
   const read = operand ?? "~";
   const written = scope.shell.workingDirectoryRebound ? read : read.replace(PWD_LEAD, "$1.");
-  return resolvedCdTarget(hasRuntimePart(written) ? staticSpelling(written, inheritedValue(scope.shell)) : written, scope.home);
+  return resolvedCdTarget(hasRuntimePart(written) ? pinnedStaticSpelling(written, inheritedValue(scope.shell)) : written, scope.home);
 }
 
 /** Every target a runtime-built `cd` operand may spell with the values the
  *  line and the environment bind (`boundSpellings`). */
 const landingsOf = (operand: string | undefined, scope: PathScope): readonly string[] =>
   operand === undefined || !hasRuntimePart(operand) ? [] : (boundSpellings(operand, scope) ?? []).flatMap((spelled) => {
-    const resolved = resolvedCdTarget(staticSpelling(spelled, () => undefined), scope.home);
+    const resolved = resolvedCdTarget(pinnedStaticSpelling(spelled, () => undefined), scope.home);
     return resolved === null ? [] : [resolved];
   });
 
@@ -1652,7 +1636,7 @@ function judgeSegment(
   const { pinnedValue } = segmentBindings(scope);
   const readOnly = headsTrusted && (invocation !== null || hasReadOnlyHead(segment) || CD_HEADS.has(literalHead) ||
     runsReadOnlyScript(segment, scope, pinnedValue, context.readOnlyScripts) ||
-    isReadOnlyGitInvocation(segmentWords(segment).map((word) => staticSpelling(word, pinnedValue))));
+    isReadOnlySubcommandInvocation(segment, (word) => pinnedStaticSpelling(word, pinnedValue)));
   return {
     kind: "judged",
     facts: { segment, readOnly, touches: segmentTouches(segment, scope, executed.words), redirectTouch },
@@ -1661,12 +1645,9 @@ function judgeSegment(
 
 /** A word's one static spelling, each pinned variable it reads in place — no
  *  other runtime part, no glob, exactly one view — or null. */
-function staticSpelling(word: string | undefined, pinnedValue: SegmentBindings["pinnedValue"]): string | null {
+function pinnedStaticSpelling(word: string | undefined, pinnedValue: SegmentBindings["pinnedValue"]): string | null {
   if (word === undefined) return null;
-  const { text } = withPinnedValues(word, new Set(), pinnedValue);
-  if (hasRuntimePart(text)) return null;
-  const views = wordViews(text);
-  return views !== null && views.length === 1 && !GLOB_CHAR.test(views[0]) ? views[0] : null;
+  return staticSpelling(withPinnedValues(word, new Set(), pinnedValue).text);
 }
 
 /**
@@ -1687,7 +1668,7 @@ function runsReadOnlyScript(
 ): boolean {
   if (scope.shell.commandsRebound) return false;
   const words = segmentWords(segment);
-  const spelled = (word: string | undefined): string | null => staticSpelling(word, pinnedValue);
+  const spelled = (word: string | undefined): string | null => pinnedStaticSpelling(word, pinnedValue);
   const first = spelled(words[0]);
   if (first === null) return false;
   const second = spelled(words[1]);

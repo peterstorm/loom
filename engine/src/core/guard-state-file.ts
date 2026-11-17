@@ -106,6 +106,7 @@ import {
   leadingDotPolicyOf,
   OPAQUE_OUTPUT,
   referencesPattern,
+  SUBSTITUTION_PLACEHOLDER_MARK,
   type LeadingDotPolicy,
 } from "./shell-match-views";
 
@@ -129,12 +130,14 @@ export const WHITELISTED_HELPERS: readonly string[] = [
   "cleanup-state",
 ];
 
+const ALLOWED_LINE = "Allowed: read-only commands (jq, cat, grep, head, ls, diff, …), read-only git and gh invocations, or whitelisted helpers.";
+
 const BLOCK: HookResult = {
   kind: "block",
   message: [
     "BLOCKED: Command referencing loom-guarded state must be read-only.",
     "State is managed by hooks and helper scripts only.",
-    "Allowed: read-only commands (jq, cat, grep, head, ls, diff, …) or whitelisted helpers.",
+    ALLOWED_LINE,
   ].join("\n"),
 };
 
@@ -150,10 +153,7 @@ function blockFor(chain: readonly string[], segment: string): HookResult {
   if (chain.length > 1) {
     lines.push(`In chain: ${chain.map((s) => JSON.stringify(s)).join(" | ")}`);
   }
-  lines.push(
-    "State is managed by hooks and helper scripts only.",
-    "Allowed: read-only commands (jq, cat, grep, head, ls, diff, …) or whitelisted helpers.",
-  );
+  lines.push("State is managed by hooks and helper scripts only.", ALLOWED_LINE);
   return { kind: "block", message: lines.join("\n") };
 }
 
@@ -224,7 +224,7 @@ export function guardScope(
   return {
     guardedState: (text) => referencesPattern(text, statePattern, guardedSegments, policy),
     protectedDir: (text) => referencesPattern(text, protectedPattern, protectedSegments, policy),
-    protectedPlaceholder: `${locations.subagentDir}/__subst__`,
+    protectedPlaceholder: `${locations.subagentDir}/${SUBSTITUTION_PLACEHOLDER_MARK}`,
   };
 }
 
@@ -262,7 +262,7 @@ interface FlattenedCommand {
  *  an operator-set LOOM_SUBAGENT_DIR staying free of shell-special characters. */
 function placeholderFor(body: string, scope: GuardScope, context: SubstitutionContext): string {
   if (scope.protectedDir(body)) return scope.protectedPlaceholder;
-  if (scope.guardedState(body)) return "active_task_graph__subst__";
+  if (scope.guardedState(body)) return `active_task_graph${SUBSTITUTION_PLACEHOLDER_MARK}`;
   return knownWordOutput(context) ?? OPAQUE_OUTPUT;
 }
 
