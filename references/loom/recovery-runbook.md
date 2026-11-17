@@ -42,6 +42,18 @@ When a Wave Gate is blocked by critical findings, your own Edit and Write are bl
 1. **Fix through a subagent**, by [Acting on a Finding](../../commands/wave-gate.md#acting-on-a-finding): abandon the run, `reopen-task`, and spawn the fix agent from the reopened Task's brief with the findings as its `--note`s. Never use `populate-task-graph --force`; it resets every Task.
 2. **Run a fresh `/wave-gate`.** It reviews the fix.
 
+## A pending Task's file list cannot satisfy its policy
+
+A pending Task that owes red-then-green but lists no test file can only fail I6 with `no-test-files`; its agent reports that instead of finishing. Do not spend its retry and do not re-populate. With the user's approval, add the test file it needs (or move a file between pending Tasks) in place:
+
+```bash
+bun {LOOM_DIR}/engine/src/cli.ts helper orchestration rescope-task \
+  --task <task-id> --add-file <test path> [--add-file <path>]... [--remove-file <path>]... \
+  --reason "<why the Task's file list changes>"
+```
+
+Then dispatch the Task from its brief. The full contract is in `docs/reference/recovery.md` (Re-scoping a pending Task).
+
 ## A judgement fails on code a completed Wave sealed
 
 A Task of the active Wave whose tests judge code an earlier, completed Wave wrote (a budget, benchmark or acceptance test) may fail its attempt on that code's breach. It cannot change code outside its own file list, `reopen-task` reaches only the active Wave, and a completed Wave is not reopened for this. Never spend the judge's retry on unchanged code, and never relax the judgement.

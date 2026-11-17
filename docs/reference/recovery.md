@@ -66,6 +66,26 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration brief --task T4 --note "f
 
 It then applies the transition a Contract Revision uses. The abandoned run's review epoch, spec-check, suite receipt and tombstone are retired, and review evidence that run accepted is kept as Findings. Each named Task returns to protected `pending` revalidation at a new Review Generation, and its Findings stay as prior Findings for the next Review Run. The Wave's gate bits reset (`impl_complete: false`, `tests_passed: null`, `reviews_complete: false`), and the Wave's other Tasks stay `implemented`, except its `implemented` Distill Task, which returns with them (see [The distill pass](../verification.md#the-distill-pass-distill-task)). One `implemented-tasks-reopened` audit is appended to `task_reopening_history`, recording the Wave, the Task ids, the Distill Tasks among them that the engine swept back unnamed (`sweptDistillTaskIds`, absent when there is none), the reason, and the abandoned run id (or `null`). Status then owes each reopened Task an `initial-implementation` dispatch, `brief` renders it, and the Wave Gate cannot start until each settles afresh. Re-running the same command while those Tasks still await re-implementation changes nothing. The same request after they are `pending` but with a different reason, or for a Task that is no longer `implemented`, is refused. `populate-task-graph --force` is never the recovery: it resets every Task and discards all settled evidence.
 
+## Re-scoping a pending Task
+
+Use this when a pending Task's `file_list` cannot satisfy its policy, most often a Task that owes red-then-green with no test file in its list (its attempt can only fail I6 with `no-test-files`), or when a pending Task must give a file up or take one on. Do not use `populate-task-graph --force`, which resets every Task.
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration rescope-task \
+  --task T8 --add-file tests/unit-test/t8.test.ts --reason "T8 owes I6 but listed no test file"
+```
+
+`--add-file` and `--remove-file` are repeatable; name at least one, and no path twice. Under the TaskGraph lock `rescope-task` requires:
+
+- the precondition `reopen-task` uses (execute Phase, no live Wave Gate run, no executing Task or attempt), and no active subagent (checked before and under the lock);
+- the Task to be `pending`, in the active Wave or a later one, not a Distill Task and not armed for attestation (an `implemented` Task is reopened first);
+- every added path to be free: no protected verification path, no path another Task of the same Wave lists, no path a completed Wave's Task lists (that is a [Forward Fix](#a-judgement-fails-on-code-a-completed-wave-sealed)), and no frozen Acceptance Contract path unless the Task is that contract's writer;
+- every removed path to be one the Task lists (or one an earlier re-scope of it already removed, so a repeat is a no-op), none the plan's export bindings name, and the list never to become empty;
+- a Task that owes red-then-green to keep a test file under the frozen classification;
+- a non-blank `--reason` of at most 500 characters.
+
+The Task's Proof is re-derived for the new list, recorded skeleton outcomes of removed paths are dropped, and its attempt baseline is cleared for the next registration to capture. A Task that already carries a population baseline (`artifact_baseline`, from population or an earlier attempt) has it extended: the helper reads each added file as Git held it at the Task's `start_sha`, outside the lock, and the commit refuses bytes read at any other revision, so Proof judges an added file from the same boundary as the rest. A request that adds a file to a Task with a baseline but no `start_sha` is refused. One `task-rescoped` audit is appended to `wave_plan_edits` (Wave, Task, added and removed paths, the `start_sha` the added files were read at or `null`, and the reason). Repeating a request that is already applied changes nothing. Then dispatch the Task from `helper orchestration brief --task <id>`.
+
 ## A judgement fails on code a completed Wave sealed
 
 Use this when a Task of the active Wave judges code that a completed Wave wrote (a budget, benchmark or acceptance test) and its attempt failed because that code breaches the judgement. Neither `reopen-task` (active Wave only) nor `reopen-completed-wave` (drifted bytes only) applies, and the judge cannot change code outside its own file list. Append a Forward Fix to the active Wave instead ([ADR-0077](../adr/ADR-0077-a-judgement-lands-while-its-subject-is-open-and-is-fixed-forward-otherwise.md)):

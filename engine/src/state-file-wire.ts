@@ -46,6 +46,7 @@ import type {
   WaveReopeningAudit,
   ReopenedTaskIds,
   TaskReopeningAudit,
+  WavePlanEdit,
   SpecCheck,
   SpecTraceAmendment,
   SpecTraceAmendmentChange,
@@ -90,6 +91,7 @@ import { reconcileWaveBlock, waveHasBlockCause, type WaveGate } from "./core/wav
 import { parseWaveSpecCheckDocumentsAuthority, type WaveSpecCheckDocumentRejection, type WaveSpecCheckDocumentsRejection } from "./core/wave-review-authority";
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
 import { isExactGitSha } from "./core/git-sha";
+import { parsePlanEditReason, taskRescopedEdit } from "./core/wave-plan-edit";
 import {
   amendmentHistoryError,
   parseSpecTraceContract,
@@ -1051,6 +1053,67 @@ function parseTaskReopeningHistory(
   return new Set(runs).size === runs.length
     ? parseOk(Object.freeze(audits))
     : parseErr("task_reopening_history names one abandoned Wave Gate run in two audits");
+}
+
+const TASK_RESCOPED_EDIT_FIELDS = [
+  "schemaVersion", "kind", "wave", "taskId", "added", "removed", "baselineRevision", "reason",
+] as const;
+
+const isStringArray = (raw: unknown): raw is readonly string[] => Array.isArray(raw) && raw.every((entry) => typeof entry === "string");
+
+/** A `task-rescoped` edit of a Task in the named Wave, built by the one constructor (`core/wave-plan-edit.ts`). */
+function parseTaskRescopedEdit(
+  record: Record<string, unknown>,
+  label: string,
+  tasks: readonly Record<string, unknown>[],
+): ParseResult<WavePlanEdit> {
+  const fieldsError = exactFieldsError(record, TASK_RESCOPED_EDIT_FIELDS, [], label);
+  if (fieldsError !== null) return parseErr(fieldsError);
+  if (record.schemaVersion !== 1) return parseErr(`${label} has invalid schema or kind`);
+  const wave = parseIntegerBound(record.wave, `${label}.wave`, 1, "an integer >= 1 within the safe-integer range");
+  if (!wave.ok) return parseErr(wave.error);
+  const idError = taskIdError(record.taskId, `${label}.taskId`);
+  if (idError !== null) return parseErr(idError);
+  const taskId = record.taskId as string;
+  if (!tasks.some((task) => task.id === taskId && task.wave === wave.value)) {
+    return parseErr(`${label}.taskId: ${taskId} is not a Task of Wave ${wave.value}`);
+  }
+  if (!isStringArray(record.added) || !isStringArray(record.removed)) return parseErr(`${label}.added and .removed must be arrays of paths`);
+  const revision = record.baselineRevision;
+  if (revision !== null && typeof revision !== "string") return parseErr(`${label}.baselineRevision must be an exact Git commit id or null`);
+  const reason = parsePlanEditReason(record.reason);
+  if (!reason.ok) return parseErr(`${label}.reason ${reason.error}`);
+  const edit = taskRescopedEdit({
+    wave: wave.value, taskId, added: record.added, removed: record.removed, baselineRevision: revision, reason: reason.value,
+  });
+  return edit.ok ? parseOk(edit.value) : parseErr(`${label} ${edit.error}`);
+}
+
+/** One audited plan edit, dispatched on its `kind`: each edit kind (loom#199) is one arm. */
+function parseWavePlanEdit(raw: unknown, label: string, tasks: readonly Record<string, unknown>[]): ParseResult<WavePlanEdit> {
+  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
+  const record = raw as Record<string, unknown>;
+  switch (record.kind) {
+    case "task-rescoped":
+      return parseTaskRescopedEdit(record, label, tasks);
+    default:
+      return parseErr(`${label} has invalid schema or kind`);
+  }
+}
+
+function parseWavePlanEdits(
+  raw: unknown,
+  tasks: readonly Record<string, unknown>[],
+): ParseResult<readonly WavePlanEdit[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!Array.isArray(raw)) return parseErr("wave_plan_edits must be an array when present");
+  const edits: WavePlanEdit[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const parsed = parseWavePlanEdit(entry, `wave_plan_edits[${index}]`, tasks);
+    if (!parsed.ok) return parsed;
+    edits.push(parsed.value);
+  }
+  return parseOk(Object.freeze(edits));
 }
 
 const FORWARD_FIX_AUDIT_FIELDS = [
@@ -2575,6 +2638,7 @@ type ParsedTaskGraphHistoryFields = Readonly<{
   orphanedHistory: readonly OrphanedWaveGateRetirement[] | undefined;
   specTraceRetirements: readonly SpecTraceWaveGateRetirement[] | undefined;
   specTraceAmendments: readonly SpecTraceAmendment[] | undefined;
+  wavePlanEdits: readonly WavePlanEdit[] | undefined;
 }>;
 
 function activeWaveGateRetirementConflict(
@@ -2635,6 +2699,8 @@ function parseTaskGraphHistoryFields(
   if (!reopeningHistory.ok) return parseErr(reopeningHistory.error);
   const taskReopeningHistory = parseTaskReopeningHistory(obj.task_reopening_history, tasks);
   if (!taskReopeningHistory.ok) return parseErr(taskReopeningHistory.error);
+  const wavePlanEdits = parseWavePlanEdits(obj.wave_plan_edits, tasks);
+  if (!wavePlanEdits.ok) return parseErr(wavePlanEdits.error);
   const forwardFixHistory = parseForwardFixHistory(obj.forward_fix_history, tasks);
   if (!forwardFixHistory.ok) return parseErr(forwardFixHistory.error);
   const forwardFixWithdrawals = parseForwardFixWithdrawals(obj.forward_fix_withdrawals, tasks);
@@ -2671,6 +2737,7 @@ function parseTaskGraphHistoryFields(
     orphanedHistory: orphanedHistory.value,
     specTraceRetirements: specTraceRetirements.value,
     specTraceAmendments: specTraceAmendments.value,
+    wavePlanEdits: wavePlanEdits.value,
   });
 }
 
@@ -3140,7 +3207,7 @@ export type ParsedTaskGraph = Omit<TaskGraph, "tasks" | "executing_tasks"> & Rea
 function historyGraphFields(history: ParsedTaskGraphHistoryFields): Partial<TaskGraph> {
   const {
     reopeningHistory, taskReopeningHistory, forwardFixHistory, forwardFixWithdrawals, orphanedHistory,
-    specTraceRetirements, specTraceAmendments,
+    specTraceRetirements, specTraceAmendments, wavePlanEdits,
   } = history;
   return {
     ...(reopeningHistory === undefined ? {} : { wave_reopening_history: reopeningHistory }),
@@ -3150,6 +3217,7 @@ function historyGraphFields(history: ParsedTaskGraphHistoryFields): Partial<Task
     ...(orphanedHistory === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory }),
     ...(specTraceRetirements === undefined ? {} : { spec_trace_wave_gate_retirements: specTraceRetirements }),
     ...(specTraceAmendments === undefined ? {} : { spec_trace_amendments: specTraceAmendments }),
+    ...(wavePlanEdits === undefined ? {} : { wave_plan_edits: wavePlanEdits }),
   };
 }
 

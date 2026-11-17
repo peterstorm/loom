@@ -878,6 +878,31 @@ export type SpecTraceAmendmentChange = Readonly<{
   after: SpecTraceOwnership;
 }>;
 
+/**
+ * One audited edit of a pending Task's plan in the active Wave or a later one
+ * (`helper orchestration rescope-task`, loom#198 Cause 3). A union over edit
+ * kinds: today a Task's file list re-scoped; adding a Task or a dependency
+ * (loom#199) are further kinds of the same history.
+ */
+export type WavePlanEdit = TaskRescopedEdit;
+
+/** A pending Task's `file_list` changed: what was added and removed, and why. */
+export type TaskRescopedEdit = Readonly<{
+  schemaVersion: 1;
+  kind: "task-rescoped";
+  wave: number;
+  taskId: string;
+  /** Paths added, in file-list order; disjoint from `removed`. */
+  added: readonly string[];
+  /** Paths removed, in their former file-list order. At least one of the two is non-empty. */
+  removed: readonly string[];
+  /** The Task's `start_sha` the added files' population baseline was read at;
+   *  null when nothing was added or the Task carried no population baseline to extend. */
+  baselineRevision: string | null;
+  /** The operator's non-blank reason, at most 500 characters. */
+  reason: string;
+}>;
+
 /** Immutable audit of one in-place v2 Requirement trace amendment. It names
  * the Wave whose review authority it retired (and the abandoned run, when one
  * was tombstoned), every changed Task, and the Spec Index observation any
@@ -1353,6 +1378,10 @@ export interface TaskGraph {
    *  to this graph's repository and frozen manifest are a Task's evidence.
    *  Its shape is `core/test-evidence-mode.ts`; its parser and policy live in `core/test-evidence-authority.ts`. */
   readonly test_evidence?: EngineRunTestEvidence;
+  /** The audited edits of a pending Task's plan in the active Wave or a later
+   *  one (`orchestration rescope-task`, loom#198 Cause 3), oldest first.
+   *  Re-population drops them with the Tasks they edited. */
+  readonly wave_plan_edits?: readonly WavePlanEdit[];
   /** Accepted quiescent-Wave result bound to the exact active registration. */
   readonly active_wave_completion_suite?: AcceptedWaveCompletionReceipt;
   /** Parser-proven protected registration; absent until a Wave Gate is explicitly registered. */
