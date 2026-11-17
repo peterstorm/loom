@@ -730,6 +730,7 @@ export function populateTaskGraph(
     spec_trace_wave_gate_retirements: _staleSpecTraceRetirements,
     spec_trace_amendments: _staleSpecTraceAmendments,
     wave_plan_edits: _staleWavePlanEdits,
+    retro_records: _staleRetroRecords,
     spec_index_observation: _staleSpecIndexObservation,
     proof_boundary_observation: _staleProofBoundaryObservation,
     acceptance_contracts: _staleAcceptanceContracts,

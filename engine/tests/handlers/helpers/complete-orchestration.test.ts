@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { RUN_RETRO_SKIPPED } from "../../fixtures/retro-record";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -61,7 +62,7 @@ describe("complete-orchestration helper", () => {
   const archives = () => readdirSync(stateDir).filter((name) => name.startsWith("completed_task_graph-"));
 
   it("archives a finished graph byte-for-byte and removes the live graph", () => {
-    const bytes = install({ ...graphFixture([task("T1", "completed"), task("T2", "completed")]), github_issue: 123 });
+    const bytes = install({ ...graphFixture([task("T1", "completed"), task("T2", "completed")]), github_issue: 123, retro_records: RUN_RETRO_SKIPPED });
 
     expect(run().exitCode).toBe(0);
 
@@ -84,9 +85,22 @@ describe("complete-orchestration helper", () => {
     expect(archives()).toEqual([]);
   });
 
+  it("refuses a finished graph without a run retro, naming record-retro, and leaves it untouched", () => {
+    const bytes = install(graphFixture([task("T1", "completed")]));
+
+    const { exitCode, stderr } = run();
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("the run has no retrospective");
+    expect(stderr).toContain("helper record-retro");
+    expect(readFileSync(statePath, "utf-8")).toBe(bytes);
+    expect(archives()).toEqual([]);
+  });
+
   it("refuses while a Wave Gate run is active, naming the run", () => {
     const bytes = install({
       ...graphFixture([task("T1", "completed")]),
+      retro_records: RUN_RETRO_SKIPPED,
       active_wave_gate: activeWaveGateFixture({ runId: "wg-live", wave: 1, authorityDigest: "a".repeat(64) }),
     });
 
@@ -100,7 +114,7 @@ describe("complete-orchestration helper", () => {
 
   it("never overwrites an existing archive: the live graph and the old archive both survive", async () => {
     const nowMs = Date.UTC(2026, 9, 21, 9, 2, 7);
-    const graph = { ...graphFixture([task("T1", "completed")]), github_issue: 7 };
+    const graph = { ...graphFixture([task("T1", "completed")]), github_issue: 7, retro_records: RUN_RETRO_SKIPPED };
     const bytes = install(graph);
     const leaf = completedGraphArchiveLeaf(graph, nowMs);
     writeFileSync(join(stateDir, leaf), "earlier archive\n");

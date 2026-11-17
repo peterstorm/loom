@@ -14,6 +14,7 @@ These helpers print what the engine already knows. Use them before a mutating op
 | `helper orchestration status` | where the graph is, and the one next action | [Canonical status](../operations.md#canonical-status) |
 | `helper orchestration inspect` | what state one run is in | [below](#inspecting-one-run) |
 | `helper contract-status` | where each Acceptance Contract stands | [below](#where-does-each-acceptance-contract-stand) |
+| `helper retro-facts [--wave <N>] [--graph <path>]` | the friction the run recorded, per Wave, and which Waves crossed a retro threshold, as JSON (ADR-0083) | [Operations](../operations.md#retrospectives) |
 | `helper stop-check-plan --task <id>` | what the stop checks would run for a Task | [below](#what-will-the-stop-checks-run-at-a-tasks-stop) |
 | `helper red-then-green-status --task <id>` | where a Task stands on red-then-green (I6) | [below](#where-does-a-task-stand-on-i6) |
 | `scripts/ledger-epoch.ts` | the facts one attempt recorded | [below](#reading-an-attempts-ledger-epoch) |

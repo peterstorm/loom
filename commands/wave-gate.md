@@ -64,7 +64,7 @@ Execute only the one typed action returned by `start`, `resume`, or `decide`:
   supplied, and ask the operator whether to approve them. The only decision a
   Wave Gate accepts is approval (below).
 - `blocked`: stop and report the diagnostic. Do not bypass or reconstruct it.
-- `done`: report the completion receipt and newly protected Wave state, alongside the canonical Project Verification Coverage described below. The receipt alone does not claim every project verification category passed. After the final Wave, retire the orchestration with `bun ${LOOM_DIR}/engine/src/cli.ts helper complete-orchestration`. Until then, Loom's guards stay on.
+- `done`: report the completion receipt and newly protected Wave state, alongside the canonical Project Verification Coverage described below. The receipt alone does not claim every project verification category passed. Also relay the completed Wave's line of the status `retro` report (its friction digest), and when status lists `suggested: /retro --wave <N>` for it, tell the user and offer to run `/retro --wave <N>` now; a suggestion never blocks the next Wave (ADR-0083). After the final Wave, run `/retro` for the whole run (or record a deliberate skip), then retire the orchestration with `bun ${LOOM_DIR}/engine/src/cli.ts helper complete-orchestration`, which refuses until a whole-run retro is recorded. Until then, Loom's guards stay on.
 
 After a harness batch finishes, resume the same run:
 

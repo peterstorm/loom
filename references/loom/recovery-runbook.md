@@ -125,13 +125,14 @@ Hooks and `/wave-gate` drive most state-writing helpers themselves (`complete-wa
 | `review-packet create` | Starts the packet-bound Review Run |
 | `store-review-findings`, `store-spec-check` | The false-positive overrides above |
 | `cleanup-state` | Abort (below) |
+| `record-retro` | Recording a written or skipped retro (Completion, below; `/retro`) |
 
 The guard's list also holds `complete-wave-gate`, `store-test-evidence`, `reconcile-implementation-proof` and `upgrade-spec-trace`. Run one of those by hand only for a recovery that `docs/operations.md` or `docs/reference/recovery.md` names.
 
 **Outside the guard's scope when invoked as documented** (they name no guarded path):
 
 - `validate-task-graph`, `validate-lint-rules`, and `lint-wave-gate` (a diagnostic; the registered Wave Gate runs the same full-tier lint itself).
-- `orchestration status`, `contract-status` and `stop-check-plan --task <id>`: pure reads of the State File that write only to stdout. `contract-status` takes no arguments and prints each Acceptance Contract's freeze state, roster and due Waves. `stop-check-plan` prints what the Acceptance Stop Check would do at that Task's stop, or the one reason the check is off; it refuses an unknown Task id with a non-zero exit. See `docs/reference/helpers.md`.
+- `orchestration status`, `contract-status`, `retro-facts` and `stop-check-plan --task <id>`: pure reads of the State File that write only to stdout. `retro-facts [--wave <N>] [--graph <path>]` prints the friction the run recorded, for `/retro`. `contract-status` takes no arguments and prints each Acceptance Contract's freeze state, roster and due Waves. `stop-check-plan` prints what the Acceptance Stop Check would do at that Task's stop, or the one reason the check is off; it refuses an unknown Task id with a non-zero exit. See `docs/reference/helpers.md`.
 - `panel-contract` (the architecture panel), `review-panel` and `standalone-review`: each writes only into a run directory under the runs root it is given (`.claude/specs/{date_slug}/panel-runs/`, `.claude/reviews/panel-runs/`, `.claude/reviews/review-and-fix-runs/`). Invoked against a guarded path they are blocked like anything else.
 - `accept-plan-design-review` (Phase 3.6): its arguments name only a runs root under `.claude/reviews/`, and its one State File write goes through the engine's locked writer.
 
@@ -151,13 +152,13 @@ Set `LOOM_STATE_PATH` only when repairing a non-default graph. The helper refuse
 
 ## Completion
 
-`/loom --complete` is not a flag. After the final Wave Gate reports `done`, retire the orchestration:
+`/loom --complete` is not a flag. After the final Wave Gate reports `done`, run `/retro` for the whole run; it writes the retro under `.claude/retros/` and records it with `helper record-retro --file <path>`. Only when the user agrees the run needs no retro, record a skip with `helper record-retro --skip --reason "<why>"`. Then retire the orchestration:
 
 ```bash
 bun {LOOM_DIR}/engine/src/cli.ts helper complete-orchestration
 ```
 
-It refuses, naming each reason, unless every Task is `completed` and no Wave Gate run is active. On success it archives the graph beside the live one as `completed_task_graph-<issue>-<stamp>.json` and removes the live graph. Every Loom guard then lifts, so a later `/review-and-fix` can run in the same checkout.
+It refuses, naming each reason, unless every Task is `completed`, no Wave Gate run is active, and a whole-run retro is recorded (ADR-0083). On success it archives the graph beside the live one as `completed_task_graph-<issue>-<stamp>.json` and removes the live graph. Every Loom guard then lifts, so a later `/review-and-fix` can run in the same checkout.
 
 ## Abort
 

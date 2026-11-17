@@ -913,6 +913,18 @@ export type DependencyAddedEdit = Readonly<{
   reason: string;
 }>;
 
+/** What a retrospective covers: the whole run, or one Wave. */
+export type RetroScope = Readonly<{ kind: "run" }> | Readonly<{ kind: "wave"; wave: number }>;
+
+/**
+ * One retro audit (ADR-0083, `helper record-retro`): a retro written to a
+ * Markdown file under the retro directory, bound to its bytes' sha256; or the
+ * run's retro deliberately skipped, with the operator's reason.
+ */
+export type RetroRecord =
+  | Readonly<{ schemaVersion: 1; kind: "retro-recorded"; scope: RetroScope; path: string; digest: string }>
+  | Readonly<{ schemaVersion: 1; kind: "retro-skipped"; scope: Readonly<{ kind: "run" }>; reason: string }>;
+
 /** A pending Task's `file_list` changed: what was added and removed, and why. */
 export type TaskRescopedEdit = Readonly<{
   schemaVersion: 1;
@@ -980,9 +992,12 @@ export type StatusReasonKind =
    *  observes them again and refuses the spawn on anything it cannot read. */
   | "skeletons-unobserved"
   | "run-complete"
-  /** The final Wave's gate committed and every Task is completed: the
-   *  orchestration is finished and `helper complete-orchestration` retires it. */
+  /** The final Wave's gate committed, every Task is completed and a whole-run
+   *  retro is recorded (ADR-0083): `helper complete-orchestration` retires it. */
   | "orchestration-complete"
+  /** Every Wave is complete but the run's retro is neither recorded nor
+   *  skipped: run /retro, or `helper record-retro --skip`, then retire. */
+  | "retro-required"
   | "completion-prerequisite-failed"
   | "completion-eligible"
   | "wave-gate-ready";
@@ -1418,6 +1433,9 @@ export interface TaskGraph {
    *  one (`orchestration rescope-task`, loom#198 Cause 3), oldest first.
    *  Re-population drops them with the Tasks they edited. */
   readonly wave_plan_edits?: readonly WavePlanEdit[];
+  /** Retrospectives written or skipped, per Wave or for the run (ADR-0083), oldest first.
+   *  `complete-orchestration` refuses until one covers the run. */
+  readonly retro_records?: readonly RetroRecord[];
   /** Accepted quiescent-Wave result bound to the exact active registration. */
   readonly active_wave_completion_suite?: AcceptedWaveCompletionReceipt;
   /** Parser-proven protected registration; absent until a Wave Gate is explicitly registered. */

@@ -49,6 +49,8 @@ import type {
   EngineRevisionAdoption,
   EngineRevisionPin,
   WavePlanEdit,
+  RetroRecord,
+  RetroScope,
   SpecCheck,
   SpecTraceAmendment,
   SpecTraceAmendmentChange,
@@ -95,6 +97,7 @@ import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/rev
 import { isExactGitSha } from "./core/git-sha";
 import { isAdoptionReason, isEngineRevision, MAX_ENGINE_REVISION_REASON_LENGTH } from "./core/engine-revision-pin";
 import { dependencyAddedEdit, parsePlanEditReason, taskRescopedEdit } from "./core/wave-plan-edit";
+import { retroRecordEntry, retroScopeKnown } from "./core/retro-record";
 import { dependencyCycles } from "./core/task-dependencies";
 import {
   amendmentHistoryError,
@@ -1157,6 +1160,53 @@ function parseWavePlanEdits(
     edits.push(parsed.value);
   }
   return parseOk(Object.freeze(edits));
+}
+
+/** A retro scope's exact wire shape: `{kind:"run"}` or `{kind:"wave",wave}`, else null. */
+function parseRetroScope(scope: Record<string, unknown>): RetroScope | null {
+  const keys = Object.keys(scope).length;
+  if (scope.kind === "run" && keys === 1) return { kind: "run" };
+  if (scope.kind === "wave" && typeof scope.wave === "number" && keys === 2) return { kind: "wave", wave: scope.wave };
+  return null;
+}
+
+/** `retro_records`, each built by the one constructor (`core/retro-record.ts`). */
+function parseRetroRecords(raw: unknown, tasks: readonly Record<string, unknown>[]): ParseResult<readonly RetroRecord[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!Array.isArray(raw)) return parseErr("retro_records must be an array when present");
+  const records: RetroRecord[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const label = `retro_records[${index}]`;
+    if (!isRecord(entry)) return parseErr(`${label} must be an object`);
+    const record = entry as Record<string, unknown>;
+    if (record.schemaVersion !== 1) return parseErr(`${label} has invalid schema or kind`);
+    const scope = record.scope;
+    if (!isRecord(scope)) return parseErr(`${label}.scope must be an object`);
+    const scopeRecord = scope as Record<string, unknown>;
+    if (record.kind === "retro-skipped") {
+      const fieldsError = exactFieldsError(record, ["schemaVersion", "kind", "scope", "reason"], [], label);
+      if (fieldsError !== null) return parseErr(fieldsError);
+      if (scopeRecord.kind !== "run" || Object.keys(scopeRecord).length !== 1) return parseErr(`${label}: a skip covers the whole run`);
+      if (typeof record.reason !== "string") return parseErr(`${label}.reason must be a string`);
+      const built = retroRecordEntry({ kind: "retro-skipped", reason: record.reason });
+      if (!built.ok) return parseErr(`${label} ${built.error}`);
+      records.push(built.value);
+      continue;
+    }
+    if (record.kind !== "retro-recorded") return parseErr(`${label} has invalid schema or kind`);
+    const fieldsError = exactFieldsError(record, ["schemaVersion", "kind", "scope", "path", "digest"], [], label);
+    if (fieldsError !== null) return parseErr(fieldsError);
+    const parsedScope = parseRetroScope(scopeRecord);
+    if (parsedScope === null) return parseErr(`${label}.scope must be {kind:"run"} or {kind:"wave",wave}`);
+    if (typeof record.path !== "string" || typeof record.digest !== "string") return parseErr(`${label}.path and .digest must be strings`);
+    const built = retroRecordEntry({ kind: "retro-recorded", scope: parsedScope, path: record.path, digest: record.digest });
+    if (!built.ok) return parseErr(`${label} ${built.error}`);
+    if (!retroScopeKnown(built.value.scope, tasks.flatMap(({ wave }) => (typeof wave === "number" ? [wave] : [])))) {
+      return parseErr(`${label}.scope names a Wave the TaskGraph does not hold`);
+    }
+    records.push(built.value);
+  }
+  return parseOk(Object.freeze(records));
 }
 
 const FORWARD_FIX_AUDIT_FIELDS = [
@@ -2767,6 +2817,7 @@ type ParsedTaskGraphHistoryFields = Readonly<{
   specTraceRetirements: readonly SpecTraceWaveGateRetirement[] | undefined;
   specTraceAmendments: readonly SpecTraceAmendment[] | undefined;
   wavePlanEdits: readonly WavePlanEdit[] | undefined;
+  retroRecords: readonly RetroRecord[] | undefined;
 }>;
 
 function activeWaveGateRetirementConflict(
@@ -2833,6 +2884,8 @@ function parseTaskGraphHistoryFields(
   if (!forwardFixHistory.ok) return parseErr(forwardFixHistory.error);
   const forwardFixWithdrawals = parseForwardFixWithdrawals(obj.forward_fix_withdrawals, tasks);
   if (!forwardFixWithdrawals.ok) return parseErr(forwardFixWithdrawals.error);
+  const retroRecords = parseRetroRecords(obj.retro_records, tasks);
+  if (!retroRecords.ok) return parseErr(retroRecords.error);
   const orphanedHistory = parseOrphanedWaveGateHistory(obj.orphaned_wave_gate_history);
   if (!orphanedHistory.ok) return parseErr(orphanedHistory.error);
   const specTraceRetirements = parseSpecTraceWaveGateRetirements(obj.spec_trace_wave_gate_retirements);
@@ -2866,6 +2919,7 @@ function parseTaskGraphHistoryFields(
     specTraceRetirements: specTraceRetirements.value,
     specTraceAmendments: specTraceAmendments.value,
     wavePlanEdits: wavePlanEdits.value,
+    retroRecords: retroRecords.value,
   });
 }
 
@@ -3336,13 +3390,14 @@ export type ParsedTaskGraph = Omit<TaskGraph, "tasks" | "executing_tasks"> & Rea
 function historyGraphFields(history: ParsedTaskGraphHistoryFields): Partial<TaskGraph> {
   const {
     reopeningHistory, taskReopeningHistory, forwardFixHistory, forwardFixWithdrawals, orphanedHistory,
-    specTraceRetirements, specTraceAmendments, wavePlanEdits,
+    specTraceRetirements, specTraceAmendments, wavePlanEdits, retroRecords,
   } = history;
   return {
     ...(reopeningHistory === undefined ? {} : { wave_reopening_history: reopeningHistory }),
     ...(taskReopeningHistory === undefined ? {} : { task_reopening_history: taskReopeningHistory }),
     ...(forwardFixHistory === undefined ? {} : { forward_fix_history: forwardFixHistory }),
     ...(forwardFixWithdrawals === undefined ? {} : { forward_fix_withdrawals: forwardFixWithdrawals }),
+    ...(retroRecords === undefined ? {} : { retro_records: retroRecords }),
     ...(orphanedHistory === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory }),
     ...(specTraceRetirements === undefined ? {} : { spec_trace_wave_gate_retirements: specTraceRetirements }),
     ...(specTraceAmendments === undefined ? {} : { spec_trace_amendments: specTraceAmendments }),

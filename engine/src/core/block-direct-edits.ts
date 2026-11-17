@@ -34,6 +34,7 @@
  */
 
 import { isAbsolute, join, relative, sep } from "node:path";
+import { RETRO_DIRECTORY } from "./retro-record";
 import { match } from "ts-pattern";
 import type { HookResult } from "../types";
 import { IMPL_AGENTS } from "./agent-catalog-projections";
@@ -245,6 +246,24 @@ export function editPlacement(repository: OrchestratedRepository, targets: EditT
   return guarded ? INSIDE : OUTSIDE;
 }
 
+/**
+ * Whether every resolved target of `site` is a Markdown file directly in
+ * `RETRO_DIRECTORY` under one of the orchestrated repository's roots (never a
+ * protected Loom directory). An unresolved repository or target is not one.
+ */
+export function retroDocumentWrite(site: EditSite): boolean {
+  const { repository, targets } = site;
+  if (repository.kind === "unresolved" || targets.kind === "unresolved") return false;
+  return targets.paths.every((target) => repository.roots.some((root) => {
+    if (!strictlyInside(root, target)) return false;
+    const parts = relative(root, target).split(sep);
+    const directory = RETRO_DIRECTORY.split("/");
+    return parts.length === directory.length + 1 &&
+      directory.every((segment, index) => parts[index] === segment) &&
+      (parts.at(-1) ?? "").endsWith(".md");
+  }));
+}
+
 /** True when `target` lies strictly below `root`; both must be absolute. */
 function strictlyInside(root: string, target: string): boolean {
   if (!isAbsolute(root) || !isAbsolute(target)) return false;
@@ -355,6 +374,11 @@ export function shouldBlockDirectEdit(
   // scoped grant's confinement, govern writes INSIDE them.
   const site = locateEdit?.() ?? UNPLACED_SITE;
   if (editPlacement(site.repository, site.targets).kind === "outside") return { kind: "allow" };
+  // A retrospective is prose about the run, written while the run is still
+  // live (completion refuses until one is recorded, ADR-0083): a write whose
+  // every resolved target is a Markdown file directly in the repository's
+  // retro directory is admitted. Unresolved sites stay guarded.
+  if (retroDocumentWrite(site)) return { kind: "allow" };
 
   const admission = admitInsideWrite(parsed, readActiveRoster, artifactWrite, implementationBinding);
   if (admission.kind !== "allow") return admission;

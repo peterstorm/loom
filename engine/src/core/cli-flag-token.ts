@@ -9,3 +9,10 @@
  * Pure leaf: no I/O, no clock, no randomness.
  */
 export const isFlagToken = (token: string): boolean => token.startsWith("--");
+
+/** A flag value that names a positive safe integer (a Wave, say), or null. */
+export function positiveIntegerToken(token: string): number | null {
+  if (!/^[1-9][0-9]*$/.test(token)) return null;
+  const value = Number(token);
+  return Number.isSafeInteger(value) ? value : null;
+}

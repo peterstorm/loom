@@ -10,40 +10,72 @@
  * exact bytes and removes the live graph under the TaskGraph lock.
  */
 
+import { runRetroRecorded } from "./retro-record";
 import type { TaskGraph } from "../types";
+
+/** One condition a finished orchestration still lacks; rendered to text only at the edge. */
+export type CompletionShortfall =
+  | Readonly<{ kind: "no-tasks" }>
+  | Readonly<{ kind: "task-not-completed"; taskId: string; status: string }>
+  | Readonly<{ kind: "wave-gate-active"; runId: string }>
+  /** No run-scope retro is recorded, written or skipped (ADR-0083). */
+  | Readonly<{ kind: "retro-missing" }>;
 
 export type OrchestrationCompletion =
   | Readonly<{ kind: "complete" }>
-  | Readonly<{ kind: "incomplete"; reasons: readonly [string, ...string[]] }>;
+  | Readonly<{ kind: "incomplete"; shortfalls: readonly [CompletionShortfall, ...CompletionShortfall[]] }>;
+
+/** The operator's sentence for one shortfall. */
+export function describeCompletionShortfall(shortfall: CompletionShortfall): string {
+  switch (shortfall.kind) {
+    case "no-tasks":
+      return "the TaskGraph has no Tasks";
+    case "task-not-completed":
+      return `Task ${shortfall.taskId} is ${shortfall.status}, not completed`;
+    case "wave-gate-active":
+      return `Wave Gate run ${shortfall.runId} is still registered as active`;
+    case "retro-missing":
+      return "the run has no retrospective: run /retro (it records the retro with helper record-retro --file <path>), " +
+        "or skip it deliberately with helper record-retro --skip --reason <text>";
+    default: {
+      const unreachable: never = shortfall;
+      return unreachable;
+    }
+  }
+}
 
 /**
  * Complete when the graph has Tasks, every Task is `completed` (a Wave Gate
- * committed it), and no Wave Gate run is registered as active. Every unmet
+ * committed it), no Wave Gate run is registered as active, and a run-scope
+ * retro is recorded, written or deliberately skipped (ADR-0083). Every unmet
  * condition is named.
  */
 export function judgeOrchestrationCompletion(
-  graph: Pick<TaskGraph, "tasks" | "active_wave_gate">,
+  graph: Pick<TaskGraph, "tasks" | "active_wave_gate" | "retro_records">,
 ): OrchestrationCompletion {
-  const [first, ...rest] = [
-    ...(graph.tasks.length === 0 ? ["the TaskGraph has no Tasks"] : []),
+  const [first, ...rest]: readonly CompletionShortfall[] = [
+    ...(graph.tasks.length === 0 ? [{ kind: "no-tasks" as const }] : []),
     ...graph.tasks
       .filter((task) => task.status !== "completed")
-      .map((task) => `Task ${task.id} is ${task.status}, not completed`),
+      .map((task) => ({ kind: "task-not-completed" as const, taskId: task.id, status: task.status })),
     ...(graph.active_wave_gate === undefined
       ? []
-      : [`Wave Gate run ${graph.active_wave_gate.runId} is still registered as active`]),
+      : [{ kind: "wave-gate-active" as const, runId: graph.active_wave_gate.runId }]),
+    ...(runRetroRecorded(graph.retro_records) ? [] : [{ kind: "retro-missing" as const }]),
   ];
   if (first === undefined) return Object.freeze({ kind: "complete" });
-  const reasons: readonly [string, ...string[]] = Object.freeze([first, ...rest]);
-  return Object.freeze({ kind: "incomplete", reasons });
+  return Object.freeze({ kind: "incomplete", shortfalls: Object.freeze([first, ...rest] as const) });
 }
 
-/** The operator-facing refusal for an unfinished graph: every reason, then the
+/** The operator-facing refusal for an unfinished graph: every shortfall, then the
  *  two ways forward. */
-export function renderCompletionRefusal(graphLeaf: string, reasons: readonly [string, ...string[]]): string {
+export function renderCompletionRefusal(
+  graphLeaf: string,
+  shortfalls: readonly [CompletionShortfall, ...CompletionShortfall[]],
+): string {
   return [
     `complete-orchestration: refusing — the orchestration is not finished (${graphLeaf} left in place):`,
-    ...reasons.map((reason) => `  - ${reason}`),
+    ...shortfalls.map((shortfall) => `  - ${describeCompletionShortfall(shortfall)}`),
     "Finish the remaining Waves, or abort deliberately with `helper cleanup-state`.",
   ].join("\n");
 }
