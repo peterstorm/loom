@@ -24,9 +24,8 @@ import {
   redThenGreenScope,
   taskRedThenGreenEra,
   type RedThenGreenEra,
-  type RedThenGreenScope,
 } from "./proof-obligations";
-import { renderTaskScopeProblem, rosterScopeProblems } from "./task-scope-rules";
+import { renderTaskScopeProblem, rosterScopeProblems, type TaskScopeProblem } from "./task-scope-rules";
 import { taskArtifactExpectation } from "./task-artifact-expectation";
 import {
   ACCEPTANCE_RED_WINDOW,
@@ -47,6 +46,7 @@ import {
   unprovenRequirementTrace,
   type SpecIndexAvailability,
 } from "./requirement-coverage";
+import { nonEmpty } from "./orchestration-contract";
 
 /** Agent-authored Task fields admitted by the decompose contract. */
 export type AuthoredTask = Readonly<
@@ -182,6 +182,8 @@ export type TaskGraphPopulationError = Readonly<{
     | "unprovable-task-scope"
     | "unowned-requirement";
   message: string;
+  /** The scope problems behind an `unprovable-task-scope` or `unowned-requirement` refusal, as data. */
+  problems?: readonly TaskScopeProblem[];
 }>;
 
 /** First population leaves decompose; re-population happens during execute. */
@@ -281,30 +283,33 @@ function ownerRunnerRefusal(
 }
 
 /**
- * The roster's evidence scope, checked before any attempt is spent (loom#198,
- * Cause 3): every I6-owing Task declares a test file and has an engine runner
- * to prove it with, and every completable Requirement has a completion owner.
- * Each used to surface only at settlement or at a Wave Gate's spec-check.
+ * The roster's scope, checked before any attempt is spent (loom#198, Cause
+ * 3): every I6-owing Task declares a test file and has an engine runner to
+ * prove it with, and every completable Requirement has a completion owner.
+ * Every problem is named in one refusal, so the operator fixes them in one
+ * pass; the refusal carries them as data for the shell's runner suggestion.
  */
-function taskScopeRefusal(command: TaskGraphPopulationCommand, scope: RedThenGreenScope): TaskGraphPopulationResult | null {
-  const problems = rosterScopeProblems(
+function taskScopeRefusal(command: TaskGraphPopulationCommand, contracts: readonly AcceptanceContract[]): TaskGraphPopulationResult | null {
+  const scopeProblems = rosterScopeProblems(
     command.tasks.map((task) => ({ id: task.id, fileList: task.file_list, policy: taskVerificationPolicy(task) })),
-    scope,
-    command.verificationManifest,
+    { manifest: command.verificationManifest, contracts },
   );
-  if (problems.length > 0) {
-    return reject("unprovable-task-scope", `TaskGraph population refused: ${problems.map(renderTaskScopeProblem).join("; ")}.`);
-  }
-  if (command.specIndex.kind !== "indexed") return null;
-  const unowned = unownedRequirements(command.specIndex.index, command.tasks.flatMap((task) => task.spec_anchors ?? []));
-  return unowned.length === 0
-    ? null
-    : reject(
-        "unowned-requirement",
-        `TaskGraph population refused: ${unowned.join(", ")} ${unowned.length === 1 ? "has" : "have"} no completion owner: ` +
-          "no Task names it in spec_anchors. Give each to the Task that completes it (a contribution does not), " +
-          "or move it out of scope in the specification, then re-run populate-task-graph.",
-      );
+  const unowned = command.specIndex.kind === "indexed"
+    ? nonEmpty([...unownedRequirements(command.specIndex.index, command.tasks.flatMap((task) => task.spec_anchors ?? []))])
+    : null;
+  const problems: readonly TaskScopeProblem[] = [
+    ...scopeProblems,
+    ...(unowned === null ? [] : [Object.freeze({ kind: "unowned-requirements" as const, ids: unowned })]),
+  ];
+  if (problems.length === 0) return null;
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      kind: scopeProblems.length === 0 ? "unowned-requirement" : "unprovable-task-scope",
+      message: `TaskGraph population refused: ${problems.map(renderTaskScopeProblem).join("; ")}. Fix the plan, then re-run populate-task-graph.`,
+      problems: Object.freeze(problems),
+    }),
+  });
 }
 
 /**
@@ -693,7 +698,7 @@ export function populateTaskGraph(
   const skeletons = carriedSkeletons(existing.skeletons ?? [], exportBindings.value);
   const redWindow = redWindowTaskIds(contracts.value, command.tasks);
   const redThenGreen = redThenGreenScope(command.verificationManifest, contracts.value);
-  const scopeRefusal = taskScopeRefusal(command, redThenGreen);
+  const scopeRefusal = taskScopeRefusal(command, contracts.value);
   if (scopeRefusal !== null) return scopeRefusal;
   const distillPlan = distillPlanOf(command, contracts.value);
   // A manifest that declares the runner `helper run-tests` runs freezes the

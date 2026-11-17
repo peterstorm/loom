@@ -1,19 +1,24 @@
 /**
- * Whether a Task's scope can ever satisfy the evidence its policy owes, under
- * a TaskGraph's frozen Verification Manifest (loom#198, Cause 3).
+ * Whether a roster's scope can ever produce the evidence it owes, under a
+ * TaskGraph's frozen Verification Manifest (loom#198, Cause 3).
  *
- * A Task that owes red-then-green (I6) and whose `file_list` holds no test
- * file can never pass: settlement judges it `no-test-files` on every attempt.
- * A graph whose Tasks owe I6 and whose manifest declares no `affectedRunner`
- * has no engine run to prove I6 with (loom#198, Cause 1). Both used to surface
- * only at settlement, after attempts were spent. Population refuses them, and
- * `orchestration rescope-task` re-checks an edited Task with the same rule.
+ * - A Task that owes red-then-green (I6) and whose `file_list` holds no test
+ *   file can never pass: settlement judges it `no-test-files` on every
+ *   attempt.
+ * - Tasks that owe I6 under a manifest that declares no `affectedRunner`
+ *   have no engine run to prove I6 with (the engine-run evidence of Cause 1).
+ * - A completable Requirement no Task completes is a critical at every Wave
+ *   Gate's spec-check.
+ *
+ * All used to surface only at settlement or at a Wave Gate, after attempts
+ * were spent. Population refuses them; the rules are exported so an
+ * operation that edits a Task's scope applies the same ones.
  *
  * Pure.
  */
 
 import { nonEmpty, type NonEmpty } from "./orchestration-contract";
-import { frozenRedThenGreenEra, taskRedThenGreenEra, type RedThenGreenScope } from "./proof-obligations";
+import { frozenRedThenGreenEra, redThenGreenScope, taskRedThenGreenEra } from "./proof-obligations";
 import { isTestFileBySuffixes } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
 import { requiresNewTests, type VerificationPolicy } from "./verification-policy";
@@ -21,48 +26,55 @@ import { requiresNewTests, type VerificationPolicy } from "./verification-policy
 /** The parts of a Task its evidence scope is judged from. */
 export type ScopedTask = Readonly<{ id: string; fileList: readonly string[]; policy: VerificationPolicy }>;
 
-/** Why a Task's scope, or a roster's, cannot produce the evidence it owes. */
+/** What a scope is judged under: the frozen manifest and the contracts whose writers owe no I6. */
+export type ScopeAuthority = Readonly<{
+  manifest: FrozenVerificationManifest | undefined;
+  contracts: readonly Readonly<{ id: string; contractTask: string }>[];
+}>;
+
+/** Why a roster's scope cannot produce the evidence it owes. */
 export type TaskScopeProblem =
   | Readonly<{ kind: "no-test-file"; taskId: string; suffixes: readonly string[] }>
-  | Readonly<{ kind: "no-engine-runner"; taskIds: NonEmpty<string> }>;
+  | Readonly<{ kind: "no-engine-runner"; taskIds: NonEmpty<string> }>
+  | Readonly<{ kind: "unowned-requirements"; ids: NonEmpty<string> }>;
 
-/** Whether `task` owes I6 under `scope`: new tests required, and the graph's era owes them a red-then-green. */
-export const owesRedThenGreen = (task: ScopedTask, scope: RedThenGreenScope): boolean =>
-  requiresNewTests(task.policy) && taskRedThenGreenEra(scope, task.id) === "owed-if-new-tests";
+/** Whether `task` owes I6 under `authority`: new tests required, and its era owes them a red-then-green. */
+export const owesRedThenGreen = (task: ScopedTask, { manifest, contracts }: ScopeAuthority): boolean =>
+  requiresNewTests(task.policy) && taskRedThenGreenEra(redThenGreenScope(manifest, contracts), task.id) === "owed-if-new-tests";
+
+/**
+ * The files of `files` the frozen Test-File Classification does not call a
+ * test file; none on a graph frozen without one, which has no rule to apply.
+ */
+export function frozenNonTestFiles(manifest: FrozenVerificationManifest | undefined, files: readonly string[]): readonly string[] {
+  const era = frozenRedThenGreenEra(manifest);
+  return era.kind === "owed-if-new-tests" ? files.filter((file) => !isTestFileBySuffixes(file, era.testFiles.suffixes)) : [];
+}
 
 /** The refusal of a Task that owes I6 but declares no file the frozen classification calls a test, or null. */
-export function taskTestFileProblem(
-  task: ScopedTask,
-  scope: RedThenGreenScope,
-  manifest: FrozenVerificationManifest | undefined,
-): TaskScopeProblem | null {
-  const era = frozenRedThenGreenEra(manifest);
-  if (era.kind !== "owed-if-new-tests" || !owesRedThenGreen(task, scope)) return null;
-  const { suffixes } = era.testFiles;
-  return task.fileList.some((file) => isTestFileBySuffixes(file, suffixes))
+export function taskTestFileProblem(task: ScopedTask, authority: ScopeAuthority): TaskScopeProblem | null {
+  const era = frozenRedThenGreenEra(authority.manifest);
+  if (era.kind !== "owed-if-new-tests" || !owesRedThenGreen(task, authority)) return null;
+  return frozenNonTestFiles(authority.manifest, task.fileList).length < task.fileList.length
     ? null
-    : Object.freeze({ kind: "no-test-file", taskId: task.id, suffixes });
+    : Object.freeze({ kind: "no-test-file", taskId: task.id, suffixes: era.testFiles.suffixes });
 }
 
 /**
- * Every scope problem of a roster: each I6-owing Task without a test file,
- * then, once, the I6-owing Tasks a manifest without an `affectedRunner`
+ * The evidence-scope problems of a roster: each I6-owing Task without a test
+ * file, then, once, the I6-owing Tasks a manifest without an `affectedRunner`
  * leaves without an engine run.
  */
-export function rosterScopeProblems(
-  tasks: readonly ScopedTask[],
-  scope: RedThenGreenScope,
-  manifest: FrozenVerificationManifest | undefined,
-): readonly TaskScopeProblem[] {
-  const perTask = tasks.flatMap((task) => {
-    const problem = taskTestFileProblem(task, scope, manifest);
-    return problem === null ? [] : [problem];
-  });
-  const owing = nonEmpty(tasks.filter((task) => owesRedThenGreen(task, scope)).map(({ id }) => id));
-  const runnerless = owing !== null && manifest?.affectedRunner === undefined
-    ? [Object.freeze({ kind: "no-engine-runner" as const, taskIds: owing })]
+export function rosterScopeProblems(tasks: readonly ScopedTask[], authority: ScopeAuthority): readonly TaskScopeProblem[] {
+  const owing = tasks.filter((task) => owesRedThenGreen(task, authority));
+  const withoutTestFile = owing
+    .map((task) => taskTestFileProblem(task, authority))
+    .filter((problem): problem is TaskScopeProblem => problem !== null);
+  const owingIds = nonEmpty(owing.map(({ id }) => id));
+  const runnerless = owingIds !== null && authority.manifest?.affectedRunner === undefined
+    ? [Object.freeze({ kind: "no-engine-runner" as const, taskIds: owingIds })]
     : [];
-  return Object.freeze([...perTask, ...runnerless]);
+  return Object.freeze([...withoutTestFile, ...runnerless]);
 }
 
 /** One problem as an operator reads it, with the fix. */
@@ -74,6 +86,10 @@ export function renderTaskScopeProblem(problem: TaskScopeProblem): string {
     case "no-engine-runner":
       return `Tasks ${problem.taskIds.join(", ")} owe red-then-green, but the verification manifest declares no affectedRunner, ` +
         "so no engine run (`helper run-tests`) can prove it; declare an affectedRunner that writes a JUnit or Vitest JSON report";
+    case "unowned-requirements":
+      return `${problem.ids.join(", ")} ${problem.ids.length === 1 ? "has" : "have"} no completion owner: no Task names ` +
+        `${problem.ids.length === 1 ? "it" : "them"} in spec_anchors. Give each to the Task that completes it (a contribution does not), ` +
+        "or move it out of scope in the specification";
     default: {
       const unreachable: never = problem;
       return unreachable;

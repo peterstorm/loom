@@ -47,7 +47,6 @@ import {
   type AuthoredTask,
 } from "../../src/core/task-graph-population";
 import {
-  defaultVerificationManifest,
   freezeVerificationManifest,
   legacyDefaultVerificationManifest,
   parseFrozenVerificationManifest,

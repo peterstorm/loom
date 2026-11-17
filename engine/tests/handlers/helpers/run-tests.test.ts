@@ -209,4 +209,10 @@ describe("helper run-tests: only the frozen classification's test files", () => 
     expect(result).toMatchObject({ kind: "error", message: expect.stringContaining(`${IMPL} is not a test file`) });
     expect(launches).toEqual([]);
   });
+
+  it("names every source file in one refusal", async () => {
+    const { result, launches } = await helper(workspace(), ["--files", IMPL, "--files", "src/other.ts"]);
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining(`${IMPL}, src/other.ts are not a test file`) });
+    expect(launches).toEqual([]);
+  });
 });

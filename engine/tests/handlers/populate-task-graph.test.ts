@@ -154,12 +154,6 @@ const NO_I6_VERIFICATION = Object.freeze({
 /** Every Requirement `canonicalSpecBeside` defines: population refuses one no Task completes. */
 const CANONICAL_CLAIMS = Object.freeze(["FR-001", "FR-002", "AS-001", "AS-002"]);
 
-/** The owner Task for every Requirement of `spec` that `claimed` leaves, as a payload list. */
-const ownerList = (spec: string, claimed: readonly string[]): readonly Readonly<Record<string, unknown>>[] => {
-  const owner = ownerOfRemaining(spec, claimed);
-  return owner === null ? [] : [owner];
-};
-
 /** A schema-2 manifest that declares the engine runner an I6-owing roster needs. */
 function runnerManifestDocument() {
   return { ...manifestDocument(), schemaVersion: 2, affectedRunner: AFFECTED_RUNNER, taskMutationCheck: "off" };
@@ -762,7 +756,7 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
               depends_on: [], spec_anchors: [anchor], spec_contributions: [], verification_policy: NO_I6_VERIFICATION,
               plan_context: "", file_list: ["src/complete.ts"], review_status: "passed",
             },
-            ...ownerList(CANONICAL_SPEC, [anchor]),
+            ...ownerOfRemaining(CANONICAL_SPEC, [anchor]),
           ],
         });
         expect((await populate(payload, [])).kind).toBe("passthrough");
@@ -1030,7 +1024,7 @@ describe("populate-task-graph — engine-derived Requirement content hashes", ()
         id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [],
         spec_anchors: [...anchors], spec_contributions: [],
         verification_policy: NO_I6_VERIFICATION, plan_context: "", file_list: ["src/a.ts"],
-      }, ...(spec === null ? [] : ownerList(spec, anchors))],
+      }, ...(spec === null ? [] : ownerOfRemaining(spec, anchors))],
     });
     return { result: await populate(decompose, []), statePath };
   }
@@ -1102,7 +1096,7 @@ describe("populate-task-graph — engine-derived Requirement content hashes", ()
         id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [],
         spec_anchors: ["FR-001"], spec_contributions: [], spec_anchor_hashes: { "FR-001": forged },
         verification_policy: NO_I6_VERIFICATION, plan_context: "", file_list: ["src/a.ts"],
-      }, ...ownerList(canonicalSpec, ["FR-001"])],
+      }, ...ownerOfRemaining(canonicalSpec, ["FR-001"])],
     }), []);
     expect(result.kind).toBe("passthrough");
     const graph = JSON.parse(stateBytes(statePath)) as TaskGraph;
@@ -1226,7 +1220,7 @@ describe("populate-task-graph — Acceptance Contracts", () => {
         spec_anchors: ["AS-001"], spec_contributions: [], verification_policy: NO_I6_VERIFICATION, plan_context: "",
         file_list: ["src/payload-impl.ts"],
       },
-      ...ownerList(CANONICAL_SPEC, ["AS-001"]).map((owner) => ({ ...owner, wave: 2 })),
+      ...ownerOfRemaining(CANONICAL_SPEC, ["AS-001"]).map((owner) => ({ ...owner, wave: 2 })),
     ],
   });
 
@@ -1354,7 +1348,7 @@ describe("populate-task-graph — owned Invariants reach population", () => {
       id: "T1", description: "fees", agent: "code-implementer-agent", wave: 1, depends_on: [],
       spec_anchors: [], spec_contributions: [], verification_policy: NO_I6_VERIFICATION, plan_context: "",
       file_list: ["src/fees.ts", "tests/fees.matrix.test.ts"],
-    }, ...ownerList(CANONICAL_SPEC, [])],
+    }, ...ownerOfRemaining(CANONICAL_SPEC, [])],
   });
 
   it("forwards the plan's owned Invariants: a non-exempt one without a frozen affectedRunner is refused, writing nothing", async () => {
@@ -1390,5 +1384,56 @@ describe("populate-task-graph — owned Invariants reach population", () => {
       matrixTest: "tests/fees.matrix.test.ts",
       mutation: { kind: "verify" },
     }]);
+  });
+});
+
+describe("population refusal carries the runner to declare (loom#198, Cause 3)", () => {
+  const hintDecompose = (planFile: string, task: Readonly<Record<string, unknown>>): string => JSON.stringify({
+    spec_trace_version: 2,
+    plan_title: "t",
+    spec_file: canonicalSpecBeside(planFile),
+    plan_file: planFile,
+    tasks: [task],
+  });
+  const implTask = (overrides: Readonly<Record<string, unknown>>) => ({
+    id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [],
+    spec_anchors: [...CANONICAL_CLAIMS], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION, plan_context: "",
+    file_list: ["src/a.ts", "src/a.test.ts"], ...overrides,
+  });
+  function repository(packageJson: unknown): string {
+    const dir = tempDir();
+    execFileSync("git", ["init", "--quiet"], { cwd: dir });
+    writeFileSync(join(dir, "package.json"), JSON.stringify(packageJson));
+    process.chdir(dir);
+    return dir;
+  }
+
+  it("appends the detected preset when I6-owing Tasks have no engine runner", async () => {
+    const dir = repository({ devDependencies: { mocha: "10" } });
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, [], { current_phase: "decompose" });
+    writeManifest(dir);
+    const before = stateBytes(statePath);
+
+    const result = await populate(hintDecompose(plan, implTask({})), []);
+
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("declares no affectedRunner") });
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("Suggested runner: mocha (package.json depends on mocha)") });
+    expect(stateBytes(statePath)).toBe(before);
+  });
+
+  it("appends no runner hint to a refusal that names no runnerless Task", async () => {
+    const dir = repository({ devDependencies: { mocha: "10" } });
+    const plan = modelFreePlan(dir);
+    writeState(dir, plan, [], { current_phase: "decompose" });
+    writeManifest(dir, runnerManifestDocument());
+
+    const result = await populate(hintDecompose(plan, implTask({ spec_anchors: ["FR-001", "AS-001", "AS-002"], verification_policy: NO_I6_VERIFICATION })), []);
+
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("FR-002") });
+    if (result.kind === "error") {
+      expect(result.message).not.toContain("Suggested runner");
+      expect(result.message).not.toContain("No known test runner");
+    }
   });
 });

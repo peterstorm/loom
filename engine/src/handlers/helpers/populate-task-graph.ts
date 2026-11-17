@@ -50,7 +50,7 @@ import {
   type TaskGraphPopulationResult,
 } from "../../core/task-graph-population";
 import { testEvidenceModeNotice } from "../../core/test-evidence-authority";
-import { affectedRunnerHint, suggestRunnerPreset } from "../../core/runner-presets";
+import { affectedRunnerHintFor } from "../../core/runner-presets";
 import { observeRunnerFacts } from "../../utils/repository-runner-facts";
 
 export { resolvedSpecFile };
@@ -451,8 +451,11 @@ function readCheckedPlan(
 type PreparedPopulation = Readonly<{
   command: TaskGraphPopulationCommand;
   manifest: FrozenVerificationManifest;
-  /** How to declare an affectedRunner, for a manifest that has none; appended to a scope refusal. */
-  runnerHint: string | null;
+  /**
+   * How to declare an affectedRunner, read from the repository only when a
+   * refusal names Tasks without one; null outside a Git repository.
+   */
+  runnerHint: () => string | null;
 }>;
 
 /**
@@ -486,9 +489,9 @@ function preparePopulation(
   const proofBoundary = captureProofBoundary(repositoryRoot, taskRoster.value);
   return { ok: true, value: {
     manifest: preparedManifest.value,
-    runnerHint: preparedManifest.value.affectedRunner !== undefined || repositoryRoot.kind !== "repository"
-      ? null
-      : affectedRunnerHint(suggestRunnerPreset(observeRunnerFacts(repositoryRoot.root)), VERIFICATION_MANIFEST_SOURCE_PATH),
+    runnerHint: () => repositoryRoot.kind === "repository"
+      ? affectedRunnerHintFor(observeRunnerFacts(repositoryRoot.root), VERIFICATION_MANIFEST_SOURCE_PATH)
+      : null,
     command: populationCommand(decompose, plan, args, {
       tasks: taskRoster.value, verificationManifest: preparedManifest.value, specIndex, observedSpecFile, proofBoundary,
     }),
@@ -554,7 +557,7 @@ async function applyPopulation(
   existingState: TaskGraph,
   command: TaskGraphPopulationCommand,
   plan: ParsedPlan,
-  runnerHint: string | null,
+  runnerHint: () => string | null,
 ): Promise<PopulationStep<PopulatedGraph>> {
   const populate = (existing: TaskGraph): LockedPopulation => {
     const designRequirement = populationPlanDesignRequirement(existing, plan.sha256, plan.path);
@@ -563,8 +566,10 @@ async function applyPopulation(
     }
     const transition = populateTaskGraph(existing, command);
     if (transition.ok) return transition;
-    // A scope refusal on a manifest with no runner carries the runner to declare.
-    const hint = transition.error.kind === "unprovable-task-scope" && runnerHint !== null ? `\n${runnerHint}` : "";
+    // A refusal naming Tasks with no engine runner carries the runner to declare.
+    const runnerless = (transition.error.problems ?? []).some(({ kind }) => kind === "no-engine-runner");
+    const hintText = runnerless ? runnerHint() : null;
+    const hint = hintText === null ? "" : `\n${hintText}`;
     return { ok: false, message: `${transition.error.message}${hint}` };
   };
   const preflight = populate(existingState);

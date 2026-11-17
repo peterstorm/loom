@@ -58,7 +58,6 @@ import {
   type AuthoredTask,
 } from "../../src/core/task-graph-population";
 import {
-  defaultVerificationManifest,
   freezeVerificationManifest,
   type FrozenVerificationManifest,
 } from "../../src/core/verification-manifest";
@@ -71,6 +70,7 @@ import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { fixturePiAgentDirectory } from "../fixtures/fixture-pi-agent-directory";
 import { IMPLEMENTER_TYPE, agentIdOf, sessionIdOf } from "../fixtures/machine-identities";
 import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
+import { agentCommandGraph, i6RunnerManifest } from "../fixtures/i6-runner-manifest";
 
 // ─── Environment ──────────────────────────────────────────────────────────
 
@@ -243,11 +243,11 @@ function populate(repository: Repository, manifest: FrozenVerificationManifest):
   if (!populated.ok) throw new Error(`fixture population must succeed: ${populated.error.message}`);
   // These scenarios pin how the parent ledger captures a Pi child's OWN test
   // commands, which only a graph that admits agent commands counts: one
-  // populated before engine-run evidence (loom#198). A manifest with an
-  // affectedRunner now freezes engine-run evidence, so drop that mode here;
-  // engine-run settlement on Pi is pinned by the I6 settlement matrix.
-  const { test_evidence: _engineRunMode, ...agentCommandGraph } = populated.value.state;
-  writeFileSync(repository.statePath, JSON.stringify(agentCommandGraph, null, 2));
+  // populated before engine-run evidence (loom#198). Population needs the
+  // runner before T1 may owe I6, and freezes engine-run evidence with it, so
+  // that mode is dropped here; engine-run settlement on Pi is pinned by the
+  // I6 settlement matrix.
+  writeFileSync(repository.statePath, JSON.stringify(agentCommandGraph(populated.value.state), null, 2));
 }
 
 /** The operator manifest that freezes an affected runner (schema 2, AD-4). */
@@ -667,7 +667,7 @@ function redThenGreenScript(root: string): RedThenGreenScript {
 
 describe("CT-3: Pi ledger capture through the shared minting rule", () => {
   it("AS-036: the same read, edit, write and bash calls mint identical facts in identical order through Claude Code and a Pi implementation child", async () => {
-    await withPopulatedRepository("loom-pi-ledger-as036-", defaultVerificationManifest(), {}, async (repository) => {
+    await withPopulatedRepository("loom-pi-ledger-as036-", i6RunnerManifest(), {}, async (repository) => {
       const { root } = repository;
       const reportPath = join(scratch, `as036-${randomUUID()}.json`);
       const steps: readonly ToolStep[] = [
@@ -709,7 +709,7 @@ describe("CT-3: Pi ledger capture through the shared minting rule", () => {
   }, 120_000);
 
   it("FR-031: a granted Pi child records FileRead, FileWrite with via, and a TestRun with per-file results for its own tool calls", async () => {
-    await withPopulatedRepository("loom-pi-ledger-fr031-", defaultVerificationManifest(), {}, async (repository) => {
+    await withPopulatedRepository("loom-pi-ledger-fr031-", i6RunnerManifest(), {}, async (repository) => {
       const { root } = repository;
       const granted = await spawnGrantedChild(root);
       const red = vitestRun(root, "red");
@@ -742,7 +742,7 @@ describe("CT-3: Pi ledger capture through the shared minting rule", () => {
   }, 120_000);
 
   it("FR-032: a Pi child records into the parent session's ledger under the epoch of its parent-issued grant identity and agent type, never into its own session", async () => {
-    await withPopulatedRepository("loom-pi-ledger-fr032-", defaultVerificationManifest(), {}, async (repository) => {
+    await withPopulatedRepository("loom-pi-ledger-fr032-", i6RunnerManifest(), {}, async (repository) => {
       const { root } = repository;
       const granted = await spawnGrantedChild(root);
       await deliverToPi(granted.child, root, granted.childSession, [
@@ -765,7 +765,7 @@ describe("CT-3: Pi ledger capture through the shared minting rule", () => {
   }, 120_000);
 
   it("FR-033: a Pi TestRun's exit comes only from that call's tool result, and report discovery, freshness and the agent-authored-artifact veto apply as on Claude Code", async () => {
-    await withPopulatedRepository("loom-pi-ledger-fr033-", defaultVerificationManifest(), {}, async (repository) => {
+    await withPopulatedRepository("loom-pi-ledger-fr033-", i6RunnerManifest(), {}, async (repository) => {
       const { root } = repository;
       const granted = await spawnGrantedChild(root);
       const bunRun = "bun test tests/feature.test.ts";
@@ -824,7 +824,7 @@ describe("CT-3: Pi ledger capture through the shared minting rule", () => {
   }, 120_000);
 
   it("FR-034: a literal mv, git mv or cp mints a shell FileWrite for its destination on Claude Code and on Pi", async () => {
-    await withPopulatedRepository("loom-pi-ledger-fr034-", defaultVerificationManifest(), {}, async (repository) => {
+    await withPopulatedRepository("loom-pi-ledger-fr034-", i6RunnerManifest(), {}, async (repository) => {
       const { root } = repository;
       const steps: readonly ToolStep[] = [
         { kind: "bash", command: "mv assets/a.txt assets/b.txt", exit: 0, stdout: "" },
@@ -849,7 +849,7 @@ describe("CT-3: Pi ledger capture through the shared minting rule", () => {
   }, 120_000);
 
   it("AS-041: a renamed file is recorded under its new path through either harness, for mv, git mv and cp", async () => {
-    await withPopulatedRepository("loom-pi-ledger-as041-", defaultVerificationManifest(), {}, async (repository) => {
+    await withPopulatedRepository("loom-pi-ledger-as041-", i6RunnerManifest(), {}, async (repository) => {
       const { root } = repository;
       const cases = [
         { command: "mv assets/a.txt assets/moved.txt", destination: "assets/moved.txt" },
@@ -877,7 +877,7 @@ describe("CT-3: Pi ledger capture through the shared minting rule", () => {
   }, 120_000);
 
   it("AS-039: a Pi child with no write grant, or with a rejected grant, records nothing into any epoch and its stderr says why", async () => {
-    await withPopulatedRepository("loom-pi-ledger-as039-", defaultVerificationManifest(), {}, async (repository) => {
+    await withPopulatedRepository("loom-pi-ledger-as039-", i6RunnerManifest(), {}, async (repository) => {
       const { root } = repository;
       // A consumed grant: replaying its marker in another child is rejected.
       const granted = await spawnGrantedChild(root);
@@ -914,7 +914,7 @@ describe("CT-3: Pi ledger capture through the shared minting rule", () => {
   }, 120_000);
 
   it("AS-037: a Pi non-claimant Task with newTests required whose child ledger shows red, then the first implementation write, then green satisfies I6 at settlement", async () => {
-    await withPopulatedRepository("loom-pi-ledger-as037-", defaultVerificationManifest(), {}, async (repository) => {
+    await withPopulatedRepository("loom-pi-ledger-as037-", i6RunnerManifest(), {}, async (repository) => {
       const { root } = repository;
       const granted = await spawnGrantedChild(root);
       const { steps, red, green } = redThenGreenScript(root);
@@ -935,7 +935,7 @@ describe("CT-3: Pi ledger capture through the shared minting rule", () => {
   }, 120_000);
 
   it("AS-038: a Pi Task whose only test evidence is Pi-structured transcript evidence, with no trusted ledger TestRun, fails I6 naming the untrusted-only step", async () => {
-    await withPopulatedRepository("loom-pi-ledger-as038-", defaultVerificationManifest(), {}, async (repository) => {
+    await withPopulatedRepository("loom-pi-ledger-as038-", i6RunnerManifest(), {}, async (repository) => {
       const { root } = repository;
       const granted = await spawnGrantedChild(root);
       // Bun runs with no structured report: the ledger TestRuns stay

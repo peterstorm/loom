@@ -1,12 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { parseAuthoredTaskRoster, populateTaskGraph, type AuthoredTask } from "../../src/core/task-graph-population";
-import { defaultVerificationManifest } from "../../src/core/verification-manifest";
 import { parseTaskGraph } from "../../src/state-manager";
 import type { PlanContract, TaskGraph } from "../../src/types";
 import { withRedThenGreen } from "../fixtures/red-then-green-proof";
 import { indexedSpec, specDefining } from "../fixtures/spec-index-fixture";
-import { agentCommandGraph, i6RunnerManifest } from "../fixtures/i6-runner-manifest";
-import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
+import { i6RunnerManifest } from "../fixtures/i6-runner-manifest";
 
 const CONTRACT: PlanContract = {
   id: "CT-1",

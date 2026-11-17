@@ -39,7 +39,6 @@ import { frozenRedThenGreenEra, redThenGreenEra } from "../../src/core/proof-obl
 import type { TaskGraph } from "../../src/types";
 import { protectedGraphFixture } from "../fixtures/task-lifecycle";
 import type { Equal } from "../fixtures/type-equality";
-import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
 import { operatorManifest } from "../fixtures/i6-runner-manifest";
 
 const parsedSpec = parseSpec(`# Feature: Era

@@ -44,7 +44,6 @@ import {
 import { returnToRevalidation } from "../../src/core/task-revalidation";
 import {
   defaultVerificationManifest,
-  freezeVerificationManifest,
   legacyDefaultVerificationManifest,
   type FrozenVerificationManifest,
 } from "../../src/core/verification-manifest";
@@ -52,7 +51,6 @@ import { parseVerificationPolicy, type VerificationPolicy } from "../../src/core
 import { parseTaskGraph, taskUnionError } from "../../src/state-file-wire";
 import type { Task, TaskGraph } from "../../src/types";
 import { trustedPassEvidence } from "../fixtures/task-lifecycle";
-import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
 import { operatorManifest } from "../fixtures/i6-runner-manifest";
 
 // --- Fixtures ---

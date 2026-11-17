@@ -23,11 +23,9 @@ import { describe, expect, it } from "vitest";
 import { parseTaskGraph, type ParsedTaskGraph } from "../src/state-file-wire";
 import { DISTILL_AGENT } from "../src/core/model-profiles";
 import { parseAuthoredTaskRoster, populateTaskGraph, type AuthoredTask } from "../src/core/task-graph-population";
-import { defaultVerificationManifest } from "../src/core/verification-manifest";
 import type { PlanContract } from "../src/types";
 import { indexedSpec } from "./fixtures/spec-index-fixture";
-import { agentCommandGraph, i6RunnerManifest } from "./fixtures/i6-runner-manifest";
-import { AFFECTED_RUNNER } from "./fixtures/stop-check-runners";
+import { i6RunnerManifest } from "./fixtures/i6-runner-manifest";
 
 const TYPES_FILE = "src/order/order-contract.ts";
 const ACCEPTANCE = "tests/order.acceptance.test.ts";

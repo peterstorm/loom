@@ -11,7 +11,7 @@
 
 import type { HookHandler } from "../../types";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "../../core/verification-manifest";
-import { affectedRunnerHint, RUNNER_PRESET_IDS, suggestRunnerPreset, type RunnerPresetId } from "../../core/runner-presets";
+import { affectedRunnerHint, affectedRunnerHintFor, RUNNER_PRESET_IDS, type RunnerPresetId } from "../../core/runner-presets";
 import { observeRunnerFacts } from "../../utils/repository-runner-facts";
 import { resolveCanonicalGitRepositoryRoot } from "../../utils/workspace-digest";
 import { argumentValue, unconsumedValueArguments } from "./cli-args";
@@ -35,7 +35,7 @@ export function createSuggestAffectedRunnerHandler(
     }
     const root = resolveCanonicalGitRepositoryRoot(cwd());
     if (!root.ok) return { kind: "error", message: "suggest-affected-runner: run it inside the project's Git repository" };
-    write(`${affectedRunnerHint(suggestRunnerPreset(observeRunnerFacts(root.value)), VERIFICATION_MANIFEST_SOURCE_PATH)}\n`);
+    write(`${affectedRunnerHintFor(observeRunnerFacts(root.value), VERIFICATION_MANIFEST_SOURCE_PATH)}\n`);
     return { kind: "passthrough" };
   };
 }

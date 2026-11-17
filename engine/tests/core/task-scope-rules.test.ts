@@ -10,17 +10,17 @@
 
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { rosterScopeProblems, renderTaskScopeProblem, taskTestFileProblem, type ScopedTask } from "../../src/core/task-scope-rules";
-import { redThenGreenScope } from "../../src/core/proof-obligations";
+import { frozenNonTestFiles, rosterScopeProblems, renderTaskScopeProblem, taskTestFileProblem, type ScopeAuthority, type ScopedTask } from "../../src/core/task-scope-rules";
 import { unownedRequirements } from "../../src/core/requirement-coverage";
 import {
   affectedRunnerHint,
+  affectedRunnerHintFor,
   RUNNER_PRESET_IDS,
   RUNNER_PRESETS,
   suggestRunnerPreset,
   type RepositoryRunnerFacts,
 } from "../../src/core/runner-presets";
-import { defaultVerificationManifest, freezeVerificationManifest } from "../../src/core/verification-manifest";
+import { defaultVerificationManifest, freezeVerificationManifest, legacyDefaultVerificationManifest } from "../../src/core/verification-manifest";
 import { parseAuthoredTaskRoster, populateTaskGraph, type AuthoredTask } from "../../src/core/task-graph-population";
 import { i6RunnerManifest } from "../fixtures/i6-runner-manifest";
 import { indexedSpec } from "../fixtures/spec-index-fixture";
@@ -28,29 +28,28 @@ import { indexedSpec } from "../fixtures/spec-index-fixture";
 const REQUIRED = { regression: { kind: "required" as const }, newTests: { kind: "required" as const } };
 const WAIVED = { regression: { kind: "required" as const }, newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const } };
 const scoped = (id: string, fileList: readonly string[], policy: ScopedTask["policy"] = REQUIRED): ScopedTask => ({ id, fileList, policy });
-const NO_CONTRACTS = (manifest = i6RunnerManifest()) => redThenGreenScope(manifest, []);
+const under = (manifest: ScopeAuthority["manifest"] = i6RunnerManifest(), contracts: ScopeAuthority["contracts"] = []): ScopeAuthority => ({ manifest, contracts });
 
 describe("rosterScopeProblems", () => {
   it("refuses an I6-owing Task whose file_list holds no test file, naming the frozen suffixes", () => {
     const manifest = i6RunnerManifest();
-    expect(taskTestFileProblem(scoped("T1", ["src/a.ts"]), NO_CONTRACTS(manifest), manifest))
+    expect(taskTestFileProblem(scoped("T1", ["src/a.ts"]), under(manifest)))
       .toMatchObject({ kind: "no-test-file", taskId: "T1", suffixes: expect.arrayContaining([".test.ts"]) });
-    expect(taskTestFileProblem(scoped("T1", ["src/a.ts", "src/a.test.ts"]), NO_CONTRACTS(manifest), manifest)).toBeNull();
+    expect(taskTestFileProblem(scoped("T1", ["src/a.ts", "src/a.test.ts"]), under(manifest))).toBeNull();
   });
 
   it("asks nothing of a Task that owes no I6: waived new tests, a contract writer, or a pre-I6 graph", () => {
     const manifest = i6RunnerManifest();
-    expect(taskTestFileProblem(scoped("T1", ["src/a.ts"], WAIVED), NO_CONTRACTS(manifest), manifest)).toBeNull();
-    expect(taskTestFileProblem(scoped("T1", ["src/a.ts"]), redThenGreenScope(manifest, [{ id: "CT-1", contractTask: "T1" }]), manifest)).toBeNull();
-    expect(taskTestFileProblem(scoped("T1", ["src/a.ts"]), redThenGreenScope(undefined, []), undefined)).toBeNull();
+    expect(taskTestFileProblem(scoped("T1", ["src/a.ts"], WAIVED), under(manifest))).toBeNull();
+    expect(taskTestFileProblem(scoped("T1", ["src/a.ts"]), under(manifest, [{ id: "CT-1", contractTask: "T1" }]))).toBeNull();
+    expect(taskTestFileProblem(scoped("T1", ["src/a.ts"]), { manifest: undefined, contracts: [] })).toBeNull();
   });
 
   it("refuses I6-owing Tasks once, together, when the manifest declares no engine runner", () => {
     const manifest = defaultVerificationManifest();
     const problems = rosterScopeProblems(
       [scoped("T1", ["src/a.ts", "src/a.test.ts"]), scoped("T2", ["src/b.ts"], WAIVED), scoped("T3", ["src/c.ts", "src/c.test.ts"])],
-      NO_CONTRACTS(manifest),
-      manifest,
+      under(manifest),
     );
     expect(problems).toEqual([{ kind: "no-engine-runner", taskIds: ["T1", "T3"] }]);
     expect(renderTaskScopeProblem(problems[0]!)).toContain("declare an affectedRunner");
@@ -66,8 +65,19 @@ describe("rosterScopeProblems", () => {
       const roster = tasks.map(({ hasTest, owes }, index) =>
         scoped(`T${index + 1}`, hasTest ? [`src/t${index}.ts`, `src/t${index}.test.ts`] : [`src/t${index}.ts`], owes ? REQUIRED : WAIVED));
       const expected = tasks.every(({ hasTest, owes }) => hasTest || !owes);
-      expect(rosterScopeProblems(roster, NO_CONTRACTS(manifest), manifest).length === 0).toBe(expected);
+      expect(rosterScopeProblems(roster, under(manifest)).length === 0).toBe(expected);
     }));
+  });
+});
+
+describe("frozenNonTestFiles", () => {
+  it("names the files the frozen classification does not call a test, in order", () => {
+    expect(frozenNonTestFiles(i6RunnerManifest(), ["src/a.ts", "src/a.test.ts", "src/b.ts"])).toEqual(["src/a.ts", "src/b.ts"]);
+  });
+
+  it("names none on a graph frozen before the classification existed, or with no manifest", () => {
+    expect(frozenNonTestFiles(legacyDefaultVerificationManifest(), ["src/a.ts"])).toEqual([]);
+    expect(frozenNonTestFiles(undefined, ["src/a.ts"])).toEqual([]);
   });
 });
 
@@ -90,7 +100,7 @@ describe("runner presets", () => {
   });
 
   const facts = (overrides: Partial<RepositoryRunnerFacts> = {}): RepositoryRunnerFacts =>
-    ({ packages: new Set(), testScript: null, bunLockfile: false, ...overrides });
+    ({ packages: new Set(), testScript: null, packageJsonProblem: null, bunLockfile: false, ...overrides });
 
   it("takes the test script first, then installed packages, then a Bun lockfile", () => {
     expect(suggestRunnerPreset(facts({ testScript: "vitest run", packages: new Set(["mocha"]) }))?.preset).toBe("vitest");
@@ -107,7 +117,12 @@ describe("runner presets", () => {
     expect(detected).toContain("Suggested runner: mocha (package.json depends on mocha)");
     expect(detected).toContain('"affectedRunner"');
     expect(detected).toContain("helper write-verification-manifest");
-    expect(affectedRunnerHint(null, ".loom/verification-manifest.json")).toContain("No known test runner was detected");
+    expect(affectedRunnerHint(null, ".loom/verification-manifest.json")).toContain("No known test runner was detected.");
+  });
+
+  it("names a package.json it could not read instead of only printing the generic shape", () => {
+    const hint = affectedRunnerHintFor(facts({ packageJsonProblem: "package.json is not valid JSON: Unexpected token" }), ".loom/verification-manifest.json");
+    expect(hint).toContain("No known test runner was detected (package.json is not valid JSON: Unexpected token; fix it to get a suggestion)");
   });
 });
 
@@ -155,5 +170,22 @@ describe("population refuses an unprovable scope or an unowned Requirement", () 
     const result = populate([authored("T1", ["FR-001", "AS-001"], ["src/a.ts"], "waived")]);
     expect(result).toMatchObject({ ok: false, error: { kind: "unowned-requirement" } });
     if (!result.ok) expect(result.error.message).toContain("FR-002, AS-002 have no completion owner");
+  });
+
+  it("does not let a contribution own a Requirement", () => {
+    const contributor = { ...authored("T1", ["FR-001", "AS-001", "AS-002"], ["src/a.ts"], "waived"), spec_contributions: ["FR-002"] };
+    const result = populate([contributor]);
+    expect(result).toMatchObject({ ok: false, error: { kind: "unowned-requirement" } });
+    if (!result.ok) expect(result.error.message).toContain("FR-002");
+  });
+
+  it("names every problem in one refusal: a Task with no test file and an unowned Requirement", () => {
+    const result = populate([authored("T1", ["FR-001", "AS-001", "AS-002"], ["src/a.ts"])]);
+    expect(result).toMatchObject({ ok: false, error: { kind: "unprovable-task-scope" } });
+    if (!result.ok) {
+      expect(result.error.problems?.map(({ kind }) => kind)).toEqual(["no-test-file", "unowned-requirements"]);
+      expect(result.error.message).toContain("T1");
+      expect(result.error.message).toContain("FR-002");
+    }
   });
 });

@@ -348,7 +348,10 @@ const unclaimedEntries = <F extends "FR" | "AS">(entries: readonly SpecEntry<F>[
  * Gate's coverage projection reports, decided at population instead.
  * Contributions do not own a Requirement.
  */
-export function unownedRequirements(index: ParsedSpec, completionClaims: Iterable<string>): readonly string[] {
+export function unownedRequirements(
+  index: ParsedSpec,
+  completionClaims: Iterable<string>,
+): readonly (SpecEntryId<"FR"> | SpecEntryId<"AS">)[] {
   const claimed = new Set(completionClaims);
   return Object.freeze([...unclaimedEntries(index.frs, claimed), ...unclaimedEntries(index.scenarios, claimed)]);
 }

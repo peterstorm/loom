@@ -221,9 +221,12 @@ GOOD_DECOMPOSE='{
   "plan_file": ".claude/plans/test.md",
   "spec_file": ".claude/specs/test/spec.md",
   "tasks": [
-    {"id": "T1", "description": "Impl", "agent": "code-implementer-agent", "wave": 1, "depends_on": [], "spec_anchors": [], "spec_contributions": [], "verification_policy": {"regression": {"kind": "required"}, "new_tests": {"kind": "required"}}, "file_list": []}
+    {"id": "T1", "description": "Impl", "agent": "code-implementer-agent", "wave": 1, "depends_on": [], "spec_anchors": ["FR-001", "AS-001"], "spec_contributions": [], "verification_policy": {"regression": {"kind": "required"}, "new_tests": {"kind": "waived", "reason": "existing-tests-sufficient"}}, "file_list": []}
   ]
 }'
+# Population refuses an unprovable roster (loom#198, Cause 3): T1 completes
+# every Requirement the spec below defines, and waives new tests, so these
+# layout cases need no engine runner and no test file.
 # The plan_file named by the decompose payload must EXIST: populate-task-graph
 # fails closed through checkPlanModelBindings when it cannot read the plan, so a
 # fixture that names a file it never creates is rejected before any merge. An

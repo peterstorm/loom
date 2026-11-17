@@ -32,7 +32,6 @@ import {
 import { NOT_OWED_REASON_TEXT, RTG_NOT_OWED, redThenGreenStatusView, renderRedThenGreenStatus } from "../../src/core/red-then-green-status";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
 import { parseAuthoredTaskRoster, populateTaskGraph, type AuthoredTask } from "../../src/core/task-graph-population";
-import { defaultVerificationManifest } from "../../src/core/verification-manifest";
 import { validateFull } from "../../src/handlers/helpers/validate-task-graph";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
 import { parseTaskGraph } from "../../src/state-manager";
@@ -44,8 +43,7 @@ import { briefOwnership } from "../fixtures/owner-obligation";
 import { unobservedSkeletons } from "../fixtures/frozen-signatures";
 import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { trustedPassEvidence } from "../fixtures/task-lifecycle";
-import { agentCommandGraph, i6RunnerManifest } from "../fixtures/i6-runner-manifest";
-import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
+import { i6RunnerManifest } from "../fixtures/i6-runner-manifest";
 
 // --- Fixtures ---
 
@@ -100,7 +98,7 @@ function populated(): TaskGraph {
     tasks: [], wave_gates: {},
   }, {
     planTitle: "contract writers", validatedPlanFile: "plan.md", tasks: roster.value,
-    // No manifest file: the I6-era default every post-feature population freezes.
+    // An I6-era operator manifest with an engine runner: population refuses I6-owing Tasks without one.
     verificationManifest: i6RunnerManifest(),
     specIndex: indexedSpec("spec.md", specDefining(["FR-001"], ["AS-001"])), observedSpecFile: "spec.md",
     force: false, proofBoundary: { kind: "absent", cause: "fixture" }, contracts: [CONTRACT], invariants: [],

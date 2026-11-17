@@ -72,20 +72,20 @@ export function specDefining(frs: readonly string[], scenarios: readonly [string
 }
 
 /**
- * A decompose-payload Task that completes every Requirement `specSource`
- * defines and `claimed` does not, or null when nothing is left: population
+ * The decompose-payload Task that completes every Requirement `specSource`
+ * defines and `claimed` does not, as a list: empty when nothing is left. Population
  * refuses a Requirement no Task completes (loom#198, Cause 3), so a payload
  * exercising one Task's trace adds this owner for the rest.
  */
-export function ownerOfRemaining(specSource: string, claimed: readonly string[], id = "T90", wave = 1): Readonly<Record<string, unknown>> | null {
+export function ownerOfRemaining(specSource: string, claimed: readonly string[], id = "T90", wave = 1): readonly Readonly<Record<string, unknown>>[] {
   const parsed = parseSpec(specSource);
-  if (!parsed.ok) return null;
+  if (!parsed.ok) return [];
   const remaining = [...parsed.value.frs, ...parsed.value.scenarios].map(({ id: requirement }) => requirement)
     .filter((requirement) => !claimed.includes(requirement));
-  return remaining.length === 0 ? null : Object.freeze({
+  return remaining.length === 0 ? [] : [Object.freeze({
     id, description: "completes the remaining Requirements", agent: "code-implementer-agent", wave,
     depends_on: [], spec_anchors: remaining, spec_contributions: [],
     verification_policy: { regression: { kind: "required" }, new_tests: { kind: "waived", reason: "existing-tests-sufficient" } },
     plan_context: "", file_list: [`src/${id.toLowerCase()}-owner.ts`],
-  });
+  })];
 }
