@@ -30,7 +30,7 @@ import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdic
 import { isDistillTask } from "../../src/core/distill-task";
 import { DISTILL_AGENT } from "../../src/core/model-profiles";
 import { taskArtifactExpectation } from "../../src/core/task-artifact-expectation";
-import { DISTILL_VERIFICATION_POLICY, serializeVerificationPolicy } from "../../src/core/verification-policy";
+import { DISTILL_VERIFICATION_POLICY, serializeVerificationPolicy, taskVerificationPolicy } from "../../src/core/verification-policy";
 
 /*
  * Protected-state builders. Each mints its value through the production
@@ -318,4 +318,23 @@ export function distillTaskFixture({ id, wave, scope, ...overrides }: DistillTas
     ...(settled ? { proof: satisfiedDistillProof(scope) } : {}),
     ...overrides,
   });
+}
+
+/**
+ * A pending Task under an I6-era manifest (loom#198): `taskFixture`'s Task
+ * with the Proof population derives for it there, so a graph frozen with a
+ * test-file classification loads it.
+ */
+export function i6PendingTaskFixture(input: TaskFixtureInput): Task {
+  const base = taskFixture({ ...input, status: "pending" });
+  if (base.status !== "pending") throw new Error("i6PendingTaskFixture builds a pending Task");
+  return {
+    ...base,
+    proof: derivePendingTaskProof({
+      verificationPolicy: taskVerificationPolicy(base),
+      declaredArtifacts: base.file_list ?? [],
+      declaredArtifactExpectation: taskArtifactExpectation(base),
+      redThenGreen: "owed-if-new-tests",
+    }),
+  };
 }

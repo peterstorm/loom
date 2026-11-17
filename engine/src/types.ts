@@ -896,8 +896,8 @@ export type TaskRescopedEdit = Readonly<{
   added: readonly string[];
   /** Paths removed, in their former file-list order. At least one of the two is non-empty. */
   removed: readonly string[];
-  /** The Task's `start_sha` the added files' population baseline was read at,
-   *  or null when the Task carried no population baseline to extend. */
+  /** The Task's `start_sha` the added files' population baseline was read at;
+   *  null when nothing was added or the Task carried no population baseline to extend. */
   baselineRevision: string | null;
   /** The operator's non-blank reason, at most 500 characters. */
   reason: string;

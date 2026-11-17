@@ -91,7 +91,7 @@ import { reconcileWaveBlock, waveHasBlockCause, type WaveGate } from "./core/wav
 import { parseWaveSpecCheckDocumentsAuthority, type WaveSpecCheckDocumentRejection, type WaveSpecCheckDocumentsRejection } from "./core/wave-review-authority";
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
 import { isExactGitSha } from "./core/git-sha";
-import { MAX_RESCOPE_REASON_LENGTH } from "./core/task-rescope";
+import { parsePlanEditReason, taskRescopedEdit } from "./core/wave-plan-edit";
 import {
   amendmentHistoryError,
   parseSpecTraceContract,
@@ -1055,35 +1055,21 @@ function parseTaskReopeningHistory(
     : parseErr("task_reopening_history names one abandoned Wave Gate run in two audits");
 }
 
-const WAVE_PLAN_EDIT_FIELDS = [
+const TASK_RESCOPED_EDIT_FIELDS = [
   "schemaVersion", "kind", "wave", "taskId", "added", "removed", "baselineRevision", "reason",
 ] as const;
 
-/** A list of distinct review paths under `label` (possibly empty), or why it is not one. */
-function parseDistinctReviewPaths(raw: unknown, label: string): ParseResult<readonly string[]> {
-  if (!Array.isArray(raw)) return parseErr(`${label} must be an array`);
-  const paths: string[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const path = parseReviewPath(entry, `${label}[${index}]`);
-    if (!path.ok) return parseErr(path.errors.join("; "));
-    if (paths.includes(path.value)) return parseErr(`${label} names ${path.value} twice`);
-    paths.push(path.value);
-  }
-  return parseOk(Object.freeze(paths));
-}
+const isStringArray = (raw: unknown): raw is readonly string[] => Array.isArray(raw) && raw.every((entry) => typeof entry === "string");
 
-/**
- * One audited plan edit (`orchestration rescope-task`): a Task of the named
- * Wave, disjoint added and removed paths with at least one change, a
- * baseline revision that is an exact Git commit id or null (always null when
- * nothing was added), and a bounded non-blank reason.
- */
-function parseWavePlanEdit(raw: unknown, label: string, tasks: readonly Record<string, unknown>[]): ParseResult<WavePlanEdit> {
-  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
-  const record = raw as Record<string, unknown>;
-  const fieldsError = exactFieldsError(record, WAVE_PLAN_EDIT_FIELDS, [], label);
+/** A `task-rescoped` edit of a Task in the named Wave, built by the one constructor (`core/wave-plan-edit.ts`). */
+function parseTaskRescopedEdit(
+  record: Record<string, unknown>,
+  label: string,
+  tasks: readonly Record<string, unknown>[],
+): ParseResult<WavePlanEdit> {
+  const fieldsError = exactFieldsError(record, TASK_RESCOPED_EDIT_FIELDS, [], label);
   if (fieldsError !== null) return parseErr(fieldsError);
-  if (record.schemaVersion !== 1 || record.kind !== "task-rescoped") return parseErr(`${label} has invalid schema or kind`);
+  if (record.schemaVersion !== 1) return parseErr(`${label} has invalid schema or kind`);
   const wave = parseIntegerBound(record.wave, `${label}.wave`, 1, "an integer >= 1 within the safe-integer range");
   if (!wave.ok) return parseErr(wave.error);
   const idError = taskIdError(record.taskId, `${label}.taskId`);
@@ -1092,30 +1078,27 @@ function parseWavePlanEdit(raw: unknown, label: string, tasks: readonly Record<s
   if (!tasks.some((task) => task.id === taskId && task.wave === wave.value)) {
     return parseErr(`${label}.taskId: ${taskId} is not a Task of Wave ${wave.value}`);
   }
-  const added = parseDistinctReviewPaths(record.added, `${label}.added`);
-  if (!added.ok) return added;
-  const removed = parseDistinctReviewPaths(record.removed, `${label}.removed`);
-  if (!removed.ok) return removed;
-  if (added.value.length + removed.value.length === 0) return parseErr(`${label} adds and removes nothing`);
-  const both = added.value.find((path) => removed.value.includes(path));
-  if (both !== undefined) return parseErr(`${label} both adds and removes ${both}`);
+  if (!isStringArray(record.added) || !isStringArray(record.removed)) return parseErr(`${label}.added and .removed must be arrays of paths`);
   const revision = record.baselineRevision;
-  if (revision !== null && !isExactGitSha(revision)) return parseErr(`${label}.baselineRevision must be an exact Git commit id or null`);
-  if (revision !== null && added.value.length === 0) return parseErr(`${label}.baselineRevision must be null when nothing was added`);
-  const reason = record.reason;
-  if (typeof reason !== "string" || reason.trim() !== reason || reason.length === 0 || reason.length > MAX_RESCOPE_REASON_LENGTH) {
-    return parseErr(`${label}.reason must be a trimmed non-blank string of at most ${MAX_RESCOPE_REASON_LENGTH} characters`);
+  if (revision !== null && typeof revision !== "string") return parseErr(`${label}.baselineRevision must be an exact Git commit id or null`);
+  const reason = parsePlanEditReason(record.reason);
+  if (!reason.ok) return parseErr(`${label}.reason ${reason.error}`);
+  const edit = taskRescopedEdit({
+    wave: wave.value, taskId, added: record.added, removed: record.removed, baselineRevision: revision, reason: reason.value,
+  });
+  return edit.ok ? parseOk(edit.value) : parseErr(`${label} ${edit.error}`);
+}
+
+/** One audited plan edit, dispatched on its `kind`: each edit kind (loom#199) is one arm. */
+function parseWavePlanEdit(raw: unknown, label: string, tasks: readonly Record<string, unknown>[]): ParseResult<WavePlanEdit> {
+  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
+  const record = raw as Record<string, unknown>;
+  switch (record.kind) {
+    case "task-rescoped":
+      return parseTaskRescopedEdit(record, label, tasks);
+    default:
+      return parseErr(`${label} has invalid schema or kind`);
   }
-  return parseOk(Object.freeze({
-    schemaVersion: 1,
-    kind: "task-rescoped",
-    wave: wave.value,
-    taskId,
-    added: added.value,
-    removed: removed.value,
-    baselineRevision: revision,
-    reason,
-  }));
 }
 
 function parseWavePlanEdits(

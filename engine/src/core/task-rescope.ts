@@ -35,9 +35,8 @@ import { parseTaskId, type TaskId } from "./task-id";
 import { reopenableWave } from "./task-revalidation";
 import { renderTaskScopeProblem, taskTestFileProblem } from "./task-scope-rules";
 import { taskVerificationPolicy } from "./verification-policy";
+import { parsePlanEditReason, taskRescopedEdit } from "./wave-plan-edit";
 import type { Task, TaskGraph, TaskRescopedEdit } from "../types";
-
-export const MAX_RESCOPE_REASON_LENGTH = 500;
 
 export const TASK_RESCOPE_USAGE =
   "Usage: helper orchestration rescope-task --task <id> [--add-file <path>]... [--remove-file <path>]... --reason <text>";
@@ -119,9 +118,10 @@ export function parseTaskRescopeArgs(args: readonly string[]): DomainResult<Task
   if (named.length === 0) return fail("name at least one --add-file or --remove-file");
   const repeated = named.find((path, index) => named.indexOf(path) !== index);
   if (repeated !== undefined) return fail(`${repeated} is named twice`);
-  if (reason === undefined || reason.length === 0) return fail("--reason must say why the Task's scope changes");
-  if (reason.length > MAX_RESCOPE_REASON_LENGTH) return fail(`--reason is at most ${MAX_RESCOPE_REASON_LENGTH} characters`);
-  return freeze({ ok: true as const, value: freeze({ taskId: taskId.value, add: freeze(add), remove: freeze(remove), reason }) });
+  if (reason === undefined) return fail("--reason must say why the plan changes");
+  const parsedReason = parsePlanEditReason(reason);
+  if (!parsedReason.ok) return fail(`--reason ${parsedReason.error}`);
+  return freeze({ ok: true as const, value: freeze({ taskId: taskId.value, add: freeze(add), remove: freeze(remove), reason: parsedReason.value }) });
 }
 
 /** The request's additions `task` does not list yet, in request order. */
@@ -129,16 +129,40 @@ const newPaths = (task: Task, request: TaskRescopeRequest): readonly string[] =>
   request.add.filter((path) => !(task.file_list ?? []).includes(path));
 
 /**
+ * The one rule for where added files' population baseline is read: the
+ * Task's `start_sha` when it carries a population baseline and `added` is
+ * non-empty; null otherwise, and also when it has a baseline but no
+ * `start_sha` (which `rescopeTask` refuses for a request that adds a file).
+ * It feeds the shell's read duty, the refusal and the audit alike.
+ */
+function baselineRevisionFor(task: Task, added: readonly string[]): string | null {
+  if (task.artifact_baseline === undefined || added.length === 0) return null;
+  return task.start_sha === undefined || task.start_sha === "" ? null : task.start_sha;
+}
+
+/**
  * What the shell must read before `rescopeTask` can extend the Task's
- * population baseline: the added paths at its `start_sha`. Null when nothing
- * is owed (no such Task, nothing new added, or no population baseline); a
- * Task with a baseline but no `start_sha` is refused by `rescopeTask` itself.
+ * population baseline: the added paths at `baselineRevisionFor`'s revision.
+ * Null when nothing is owed: no such Task, nothing new added, no population
+ * baseline, or a baseline with no `start_sha` (which `rescopeTask` refuses
+ * when the request adds a file).
  */
 export function rescopeBaselineDuty(graph: TaskGraph, request: TaskRescopeRequest): RescopeBaselineDuty | null {
   const task = graph.tasks.find(({ id }) => id === request.taskId);
-  if (task === undefined || task.artifact_baseline === undefined || task.start_sha === undefined || task.start_sha === "") return null;
+  if (task === undefined) return null;
   const paths = newPaths(task, request);
-  return paths.length === 0 ? null : freeze({ revision: task.start_sha, paths });
+  const revision = baselineRevisionFor(task, paths);
+  return revision === null ? null : freeze({ revision, paths });
+}
+
+/**
+ * The removals that name a path the Task does not list and no earlier
+ * audited edit of it removed: a typo or a stale path, never a replay.
+ */
+function unknownRemovals(graph: TaskGraph, task: Task, request: TaskRescopeRequest): readonly string[] {
+  const listed = task.file_list ?? [];
+  const removedBefore = new Set((graph.wave_plan_edits ?? []).filter(({ taskId }) => taskId === task.id).flatMap(({ removed }) => removed));
+  return request.remove.filter((path) => !listed.includes(path) && !removedBefore.has(path));
 }
 
 /** Why `path` cannot join `task`'s scope in `graph`, or null. */
@@ -187,11 +211,12 @@ function waveRefusal(graph: TaskGraph): DomainResult<never, TaskRescopeRefusal> 
  */
 function baselineRefusal(task: PendingTask, added: readonly string[], observed: ObservedBaselines | null): string | null {
   if (task.artifact_baseline === undefined || added.length === 0) return null;
-  if (task.start_sha === undefined || task.start_sha === "") {
+  const revision = baselineRevisionFor(task, added);
+  if (revision === null) {
     return `${task.id} carries a population baseline but no start_sha, so its added files cannot be read at its start`;
   }
-  if (observed === null || observed.revision !== task.start_sha) {
-    return `the added files were not read at ${task.id}'s start_sha ${task.start_sha}; retry so the shell reads them there`;
+  if (observed === null || observed.revision !== revision) {
+    return `the added files were not read at ${task.id}'s start_sha ${revision}; retry so the shell reads them there`;
   }
   const unread = added.filter((path) => !observed.entries.some(({ artifact }) => artifact === path));
   return unread.length === 0 ? null : `the start_sha baseline of ${unread.join(", ")} was not observed`;
@@ -214,7 +239,7 @@ function rescopedTask(graph: TaskGraph, task: PendingTask, fileList: readonly st
   const { attempt_artifact_baseline: _staleAttemptBaseline, ...rest } = task;
   return freeze({
     ...rest,
-    file_list: freeze([...fileList]),
+    file_list: freeze(fileList),
     ...(artifactBaseline === undefined ? {} : { artifact_baseline: artifactBaseline }),
     ...(task.skeleton_outcomes === undefined
       ? {}
@@ -244,6 +269,8 @@ export function rescopeTask(
   if (blocked !== null) return blocked;
   const task = graph.tasks.find(({ id }) => id === request.taskId);
   if (task === undefined) return refuse("unknown-task", `${request.taskId} is not in the TaskGraph`);
+  const unknown = unknownRemovals(graph, task, request);
+  if (unknown.length > 0) return refuse("path-not-removable", `${unknown.join(", ")} ${unknown.length === 1 ? "is" : "are"} not in ${task.id}'s file_list`);
   const current = task.file_list ?? [];
   const added = newPaths(task, request);
   const removed = current.filter((path) => request.remove.includes(path));
@@ -281,22 +308,17 @@ export function rescopeTask(
       return refuse("contract-writer", `${contract.id}'s frozen paths must stay with its contract Task ${contract.contractTask}`);
     }
   }
-  const audit: TaskRescopedEdit = freeze({
-    schemaVersion: 1,
-    kind: "task-rescoped",
-    wave: task.wave,
-    taskId: task.id,
-    added: freeze([...added]),
-    removed: freeze(removed),
-    baselineRevision: task.artifact_baseline === undefined || added.length === 0 ? null : (task.start_sha ?? null),
-    reason: request.reason,
+  const audit = taskRescopedEdit({
+    wave: task.wave, taskId: task.id, added, removed, baselineRevision: baselineRevisionFor(task, added), reason: request.reason,
   });
+  // Every input was proven above (parsed paths, a change, the reason); a refusal here is a broken invariant.
+  if (!audit.ok) throw new Error(`rescope-task built an invalid audit: ${audit.error}`);
   return freeze({
     ok: true as const,
     value: freeze({
       kind: "rescoped" as const,
-      graph: freeze({ ...graph, tasks: freeze(tasks), wave_plan_edits: freeze([...(graph.wave_plan_edits ?? []), audit]) }),
-      audit,
+      graph: freeze({ ...graph, tasks: freeze(tasks), wave_plan_edits: freeze([...(graph.wave_plan_edits ?? []), audit.value]) }),
+      audit: audit.value,
     }),
   });
 }

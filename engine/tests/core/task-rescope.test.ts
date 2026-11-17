@@ -7,7 +7,6 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
-  MAX_RESCOPE_REASON_LENGTH,
   parseTaskRescopeArgs,
   rescopeBaselineDuty,
   rescopeTask,
@@ -21,10 +20,19 @@ import { parseTaskGraph } from "../../src/state-file-wire";
 import type { DeclaredArtifactBaseline } from "../../src/core/artifact-baseline";
 import type { Task, TaskGraph } from "../../src/types";
 import { i6RunnerManifest } from "../fixtures/i6-runner-manifest";
-import { derivePendingTaskProof } from "../../src/core/proof-obligations";
-import { taskArtifactExpectation } from "../../src/core/task-artifact-expectation";
-import { taskVerificationPolicy } from "../../src/core/verification-policy";
-import { activeWaveGateFixture, completedWaveGateFixture, protectedGraphFixture, satisfiedProof, taskFixture } from "../fixtures/task-lifecycle";
+import { MAX_PLAN_EDIT_REASON_LENGTH, taskRescopedEdit, type TaskRescopedEditInput } from "../../src/core/wave-plan-edit";
+import { parseAuthoredTaskRoster, populateTaskGraph } from "../../src/core/task-graph-population";
+import { parseExportBindings } from "../../src/core/skeleton/bindings";
+import { isDistillTask } from "../../src/core/distill-task";
+import { indexedSpec, specDefining } from "../fixtures/spec-index-fixture";
+import {
+  activeWaveGateFixture,
+  completedWaveGateFixture,
+  i6PendingTaskFixture,
+  protectedGraphFixture,
+  satisfiedProof,
+  taskFixture,
+} from "../fixtures/task-lifecycle";
 
 const START = "b".repeat(40);
 const REQUIRED = { regression: { kind: "required" as const }, new_tests: { kind: "required" as const } };
@@ -35,21 +43,13 @@ const entry = (artifact: string, byte: string): DeclaredArtifactBaseline => ({ a
 
 /** A Task under the I6-era manifest: a pending one carries the Proof population derives for it there. */
 const task = (id: string, wave: number, fileList: readonly string[], extra: Partial<Task> = {}): Task => {
-  const base = taskFixture({
+  const input = {
     id, description: id, agent: "code-implementer-agent", wave, depends_on: [],
     file_list: [...fileList], spec_anchors: [], spec_contributions: [],
-    verification_policy: REQUIRED, status: "pending", review_status: "pending",
+    verification_policy: REQUIRED, review_status: "pending" as const,
     ...extra,
-  });
-  return base.status !== "pending" || extra.proof !== undefined ? base : {
-    ...base,
-    proof: derivePendingTaskProof({
-      verificationPolicy: taskVerificationPolicy(base),
-      declaredArtifacts: base.file_list ?? [],
-      declaredArtifactExpectation: taskArtifactExpectation(base),
-      redThenGreen: "owed-if-new-tests",
-    }),
   };
+  return extra.status === undefined || extra.status === "pending" ? i6PendingTaskFixture(input) : taskFixture(input);
 };
 
 /** Wave 1 current under an I6-era manifest: T1 owes I6 with no test file, T2 is fine, T3 waits in Wave 2. */
@@ -138,8 +138,8 @@ describe("parseTaskRescopeArgs", () => {
 
   it("bounds the reason", () => {
     const at = (length: number) => parseTaskRescopeArgs(["--task", "T1", "--add-file", "src/a.ts", "--reason", "r".repeat(length)]);
-    expect(at(MAX_RESCOPE_REASON_LENGTH).ok).toBe(true);
-    expect(at(MAX_RESCOPE_REASON_LENGTH + 1).ok).toBe(false);
+    expect(at(MAX_PLAN_EDIT_REASON_LENGTH).ok).toBe(true);
+    expect(at(MAX_PLAN_EDIT_REASON_LENGTH + 1)).toMatchObject({ ok: false, error: expect.stringContaining(`--reason is at most ${MAX_PLAN_EDIT_REASON_LENGTH} characters`) });
   });
 });
 
@@ -295,11 +295,14 @@ describe("wave_plan_edits on the State File", () => {
     ["no change", { ...EDIT, added: [] }, "adds and removes nothing"],
     ["a path on both sides", { ...EDIT, removed: ["src/t1.test.ts"] }, "both adds and removes src/t1.test.ts"],
     ["a repeated path", { ...EDIT, added: ["src/a.ts", "src/a.ts"] }, "names src/a.ts twice"],
-    ["an absolute path", { ...EDIT, added: ["/etc/passwd"] }, "wave_plan_edits[0].added[0]"],
+    ["an absolute path", { ...EDIT, added: ["/etc/passwd"] }, "added[0]"],
+    ["paths that are not strings", { ...EDIT, added: [1] }, "must be arrays of paths"],
+    ["a reason that is not a string", { ...EDIT, reason: 1 }, "reason must be a string"],
     ["a revision that is no commit id", { ...EDIT, baselineRevision: "HEAD" }, "exact Git commit id or null"],
     ["a revision with nothing added", { ...EDIT, added: [], removed: ["src/t1.ts"], baselineRevision: START }, "must be null when nothing was added"],
-    ["a blank reason", { ...EDIT, reason: "  " }, "reason must be a trimmed non-blank string"],
-    ["an over-long reason", { ...EDIT, reason: "r".repeat(MAX_RESCOPE_REASON_LENGTH + 1) }, "reason must be a trimmed non-blank string"],
+    ["a blank reason", { ...EDIT, reason: "  " }, "reason must say why the plan changes"],
+    ["an untrimmed reason", { ...EDIT, reason: " why" }, "reason must not start or end with whitespace"],
+    ["an over-long reason", { ...EDIT, reason: "r".repeat(MAX_PLAN_EDIT_REASON_LENGTH + 1) }, `reason is at most ${MAX_PLAN_EDIT_REASON_LENGTH} characters`],
   ])("refuses %s", (_label, edit, problem) => {
     const result = loaded(edit);
     expect(result.ok).toBe(false);
@@ -309,6 +312,138 @@ describe("wave_plan_edits on the State File", () => {
   it("refuses a value that is not an array", () => {
     const result = parseTaskGraph(JSON.parse(JSON.stringify({ ...graph(), wave_plan_edits: {} })));
     expect(result).toMatchObject({ ok: false, error: expect.stringContaining("wave_plan_edits must be an array") });
+  });
+});
+
+describe("rescopeTask: a removal must name a listed path", () => {
+  it("refuses a removal of a path the Task never listed, so a typo is not read as success", () => {
+    expect(refusal(graph(), request("T2", [], ["src/t2-typo.ts"]))).toMatchObject({
+      kind: "path-not-removable", message: "src/t2-typo.ts is not in T2's file_list",
+    });
+  });
+
+  it("treats a removal an earlier re-scope already applied as a replay", () => {
+    const req = request("T2", ["src/t2-helper.ts"], ["src/t2.ts"]);
+    const once = committed(graph(), req);
+    expect(decided(once, req)).toEqual({ kind: "unchanged", taskId: "T2" });
+  });
+});
+
+describe("rescopeTask: the remaining refusal arms", () => {
+  it("refuses a Task of an earlier Wave than the active one", () => {
+    expect(refusal({ ...graph(), current_wave: 2 }, ADD_TEST)).toMatchObject({ kind: "completed-wave" });
+  });
+
+  it("refuses a Task armed for attestation", () => {
+    const state = graph();
+    const armed = { ...state, tasks: state.tasks.map((t) => (t.id === "T1" ? { ...t, implementation_attestation: true as const } : t)) };
+    expect(refusal(armed as TaskGraph, ADD_TEST)).toMatchObject({ kind: "attested" });
+  });
+
+  it("refuses while implementation reservations are active", () => {
+    expect(refusal({ ...graph(), executing_tasks: ["T2"] }, ADD_TEST)).toMatchObject({ kind: "implementation-active" });
+  });
+});
+
+describe("rescopeTask: contracts, export bindings and the Distill Task, on a populated graph", () => {
+  const CONTRACT_TYPES = "src/c/contract.ts";
+  const ACCEPTANCE = "tests/c.acceptance.test.ts";
+  /** T1 writes CT-1 in Wave 1; T2 implements the bound src/T2.ts in Wave 2; population adds the Distill Tasks. */
+  function populated(): TaskGraph {
+    const roster = parseAuthoredTaskRoster([
+      {
+        id: "T1", description: "contract", agent: "code-implementer-agent", wave: 1, depends_on: [], spec_anchors: [], spec_contributions: [],
+        verification_policy: { regression: { kind: "required" }, new_tests: { kind: "required" } }, file_list: [CONTRACT_TYPES, ACCEPTANCE],
+      },
+      {
+        id: "T2", description: "impl", agent: "code-implementer-agent", wave: 2, depends_on: ["T1"], spec_anchors: ["FR-001", "AS-001"],
+        spec_contributions: [], verification_policy: { regression: { kind: "required" }, new_tests: { kind: "required" } },
+        file_list: ["src/T2.ts", "src/T2-util.ts", "src/T2.test.ts"],
+      },
+    ]);
+    if (!roster.ok) throw new Error(roster.error);
+    const result = populateTaskGraph({
+      current_phase: "decompose", phase_artifacts: {}, skipped_phases: [], spec_file: "spec.md", plan_file: "plan.md", tasks: [], wave_gates: {},
+    }, {
+      planTitle: "rescope", validatedPlanFile: "plan.md", tasks: roster.value, verificationManifest: i6RunnerManifest(),
+      specIndex: indexedSpec("spec.md", specDefining(["FR-001"], ["AS-001"])), observedSpecFile: "spec.md", force: false,
+      proofBoundary: { kind: "absent", cause: "fixture" },
+      contracts: [{
+        id: "CT-1", title: "Contract",
+        declaration: {
+          kind: "declared", types: { kind: "file", path: CONTRACT_TYPES }, acceptance: [{ path: ACCEPTANCE, anchors: ["AS-001"] }],
+          supportedDomain: null, entryPoint: null, statement: "It runs.",
+        },
+      }],
+      invariants: [],
+      exportBindings: parseExportBindings("**Export bindings:**\n- `src/T2.ts` — CT-1: run: RunFn\n"),
+    });
+    if (!result.ok) throw new Error(result.error.message);
+    return result.value.state;
+  }
+
+  it("refuses removing a path the plan's export bindings name", () => {
+    expect(refusal(populated(), request("T2", ["src/T2-impl.ts"], ["src/T2.ts"]))).toMatchObject({ kind: "path-not-removable", message: expect.stringContaining("bound to CT-1") });
+  });
+
+  it("refuses adding a path another Task's contract froze", () => {
+    expect(refusal(populated(), request("T2", [ACCEPTANCE]))).toMatchObject({ kind: "path-not-addable", message: expect.stringContaining("frozen by CT-1") });
+  });
+
+  it("refuses a re-scope that takes a frozen path from its contract Task", () => {
+    expect(refusal(populated(), request("T1", [], [ACCEPTANCE]))).toMatchObject({ kind: "contract-writer" });
+  });
+
+  it("refuses the Distill Task, whose scope the engine derives", () => {
+    const state = populated();
+    const distill = state.tasks.find(isDistillTask);
+    if (distill === undefined) throw new Error("population adds a Distill Task");
+    expect(refusal(state, request(distill.id, ["src/extra.ts"]))).toMatchObject({ kind: "distill-task" });
+  });
+
+  /** T2 with the outcomes a dispatch records: its bound file exists unskeletonized, its helper is unbound. */
+  function withOutcomes(): TaskGraph {
+    const state = populated();
+    return protectedGraphFixture(JSON.parse(JSON.stringify({
+      ...state,
+      tasks: state.tasks.map((t) => (t.id !== "T2" ? t : {
+        ...t,
+        skeleton_outcomes: [
+          { path: "src/T2.ts", outcome: { kind: "exists-not-skeletonized" } },
+          { path: "src/T2-util.ts", outcome: { kind: "no-bound-exports" } },
+        ],
+      })),
+    })));
+  }
+
+  it("drops the skeleton outcome of a removed path, keeps the rest, and loads back", () => {
+    expect(byId(committed(withOutcomes(), request("T2", [], ["src/T2-util.ts"])), "T2").skeleton_outcomes)
+      .toEqual([{ path: "src/T2.ts", outcome: { kind: "exists-not-skeletonized" } }]);
+  });
+
+  it("adds a file to a Task that records skeleton outcomes, and the graph loads back", () => {
+    expect(byId(committed(withOutcomes(), request("T2", ["src/T2-helper.ts"])), "T2").file_list).toContain("src/T2-helper.ts");
+  });
+
+  it("re-scopes a pending Task of the populated graph, which loads back", () => {
+    expect(byId(committed(populated(), request("T2", ["src/T2-helper.ts"])), "T2").file_list).toContain("src/T2-helper.ts");
+  });
+});
+
+describe("taskRescopedEdit: the one constructor of the audit", () => {
+  const VALID: TaskRescopedEditInput = { wave: 1, taskId: "T1", added: ["src/a.ts"], removed: [], baselineRevision: null, reason: "why" };
+  it("builds a valid edit", () => {
+    expect(taskRescopedEdit(VALID)).toEqual({ ok: true, value: { schemaVersion: 1, kind: "task-rescoped", ...VALID } });
+  });
+  it.each<[string, Partial<TaskRescopedEditInput>, string]>([
+    ["wave 0", { wave: 0 }, "wave must be an integer >= 1"],
+    ["no change", { added: [] }, "adds and removes nothing"],
+    ["an overlap", { removed: ["src/a.ts"] }, "both adds and removes src/a.ts"],
+    ["a revision with nothing added", { added: [], removed: ["src/a.ts"], baselineRevision: START }, "must be null when nothing was added"],
+    ["a revision that is no commit id", { baselineRevision: "HEAD" }, "exact Git commit id or null"],
+    ["a blank reason", { reason: "" }, "reason must say why the plan changes"],
+  ])("refuses %s", (_label, overrides, problem) => {
+    expect(taskRescopedEdit({ ...VALID, ...overrides })).toMatchObject({ ok: false, error: expect.stringContaining(problem) });
   });
 });
 
@@ -325,9 +460,12 @@ describe("rescopeTask: properties", () => {
         const state = graph({}, [task("T1", 1, start, { verification_policy: WAIVED })]);
         const result = rescopeTask(state, request("T1", adds, remove), null);
         if (!result.ok) {
-          expect(["empty-file-list"]).toContain(result.error.kind);
+          // A removal of a path the Task never listed is refused; otherwise only an emptied list is.
+          const unlisted = remove.some((path) => !start.includes(path));
+          expect(result.error.kind).toBe(unlisted ? "path-not-removable" : "empty-file-list");
           return;
         }
+        expect(remove.every((path) => start.includes(path))).toBe(true);
         const expected = [...start.filter((path) => !remove.includes(path)), ...adds.filter((path) => !start.includes(path))];
         if (result.value.kind === "unchanged") {
           expect(expected).toEqual(start);

@@ -11,15 +11,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createRescopeTaskOperation, type BaselineReader } from "../../../src/handlers/helpers/rescope-task";
 import { ORCHESTRATION_OPERATIONS } from "../../../src/handlers/helpers/orchestration-operations";
 import { piRuntimeHandshakeRequired, routeConsumesStdin } from "../../../src/handler-routes";
-import { derivePendingTaskProof } from "../../../src/core/proof-obligations";
-import { taskArtifactExpectation } from "../../../src/core/task-artifact-expectation";
-import { taskVerificationPolicy } from "../../../src/core/verification-policy";
 import { newWaveGate } from "../../../src/core/wave-gate-model";
 import type { Task, TaskGraph } from "../../../src/types";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { i6RunnerManifest } from "../../fixtures/i6-runner-manifest";
 import { appearsUnderTheLock } from "../../fixtures/subagent-activity";
-import { protectedGraphFixture, taskFixture } from "../../fixtures/task-lifecycle";
+import { i6PendingTaskFixture, protectedGraphFixture } from "../../fixtures/task-lifecycle";
 
 const cleanup: string[] = [];
 let previousStatePath: string | undefined;
@@ -29,25 +26,13 @@ afterEach(() => {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-/** A pending new-tests Task under the I6-era manifest, with the Proof population derives for it there. */
-function pendingTask(id: string, fileList: readonly string[], extra: Partial<Task> = {}): Task {
-  const base = taskFixture({
-    id, description: id, agent: "code-implementer-agent", wave: 1, depends_on: [],
-    file_list: [...fileList], spec_anchors: [], spec_contributions: [], status: "pending", review_status: "pending",
-    verification_policy: { regression: { kind: "required" }, new_tests: { kind: "required" } },
-    ...extra,
-  });
-  if (base.status !== "pending") throw new Error("pendingTask builds a pending Task");
-  return {
-    ...base,
-    proof: derivePendingTaskProof({
-      verificationPolicy: taskVerificationPolicy(base),
-      declaredArtifacts: base.file_list ?? [],
-      declaredArtifactExpectation: taskArtifactExpectation(base),
-      redThenGreen: "owed-if-new-tests",
-    }),
-  };
-}
+/** A pending new-tests Task of Wave 1 under the I6-era manifest. */
+const pendingTask = (id: string, fileList: readonly string[], extra: Partial<Task> = {}): Task => i6PendingTaskFixture({
+  id, description: id, agent: "code-implementer-agent", wave: 1, depends_on: [],
+  file_list: [...fileList], spec_anchors: [], spec_contributions: [], review_status: "pending",
+  verification_policy: { regression: { kind: "required" }, new_tests: { kind: "required" } },
+  ...extra,
+});
 
 /** Wave 1 current with pending T1 (no test file) and T2, in `root` (a fresh temp dir by default). */
 function installState(t1: Task = pendingTask("T1", ["src/t1.ts"]), root = canonicalTempDir("loom-rescope-task-")): string {
