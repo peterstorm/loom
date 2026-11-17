@@ -17,7 +17,7 @@ import { isDistillTask } from "./distill-task";
 import type { DomainResult } from "./orchestration-contract";
 import { cycleClosedBy } from "./task-dependencies";
 import { parseTaskId, type TaskId } from "./task-id";
-import { reopenableWave } from "./task-revalidation";
+import { reopenableWave, waveReopeningRefusalMessage } from "./task-revalidation";
 import { dependencyAddedEdit, parsePlanEditReason } from "./wave-plan-edit";
 import type { DependencyAddedEdit, TaskGraph } from "../types";
 
@@ -92,20 +92,9 @@ export function parseAddDependencyArgs(args: readonly string[]): DomainResult<Ad
 /** The precondition refusals shared with Task reopening, in this operation's words. */
 function waveRefusal(graph: TaskGraph): DomainResult<never, AddDependencyRefusal> | null {
   const reopenable = reopenableWave(graph);
-  if (reopenable.ok) return null;
-  const refusal = reopenable.error;
-  switch (refusal.kind) {
-    case "not-executing":
-      return refuse("not-executing", `adding a dependency requires the execute Phase (current: ${refusal.phase})`);
-    case "live-wave-gate":
-      return refuse("live-wave-gate", `Wave Gate run ${refusal.runId} owns Wave ${refusal.wave}; abandon it with helper orchestration abandon, then retry`);
-    case "implementation-active":
-      return refuse("implementation-active", `implementation reservations are active: ${refusal.holders.join(", ")}; add the dependency once they settle`);
-    default: {
-      const unreachable: never = refusal;
-      return unreachable;
-    }
-  }
+  return reopenable.ok
+    ? null
+    : refuse(reopenable.error.kind, waveReopeningRefusalMessage(reopenable.error, "adding a dependency", "add the dependency"));
 }
 
 /**

@@ -29,8 +29,11 @@ import type { ForwardFixAudit, Task } from "../types";
 export type DispatchHold =
   | Readonly<{ kind: "distill-pass"; blockers: NonEmpty<string> }>
   | Readonly<{ kind: "forward-fix"; fixTaskIds: NonEmpty<TaskId> }>
-  /** Same-Wave dependencies not yet settled, and those of them that escalated. */
-  | Readonly<{ kind: "dependency"; blockers: NonEmpty<string>; escalated: readonly string[] }>;
+  /** Same-Wave dependencies not yet settled, each marked when it reached terminal escalation. */
+  | Readonly<{ kind: "dependency"; blockers: NonEmpty<DependencyBlocker> }>;
+
+/** One same-Wave dependency a Task waits for. */
+export type DependencyBlocker = Readonly<{ id: string; escalated: boolean }>;
 
 /** What the rule reads of a TaskGraph. */
 export type DispatchHoldGraph = Readonly<{
@@ -60,13 +63,16 @@ function forwardFixHolders(graph: DispatchHoldGraph, reserved: ReadonlySet<strin
 
 /**
  * The Tasks of `task`'s own Wave it depends on that have not settled, in edge
- * order. Earlier-Wave edges are registration's to check: they are satisfied
- * only once completed, which the Wave's start already proved.
+ * order, each marked when it escalated. Earlier-Wave and unknown edges are
+ * registration's to refuse (`dependencyExecutionBlock`), and the State File
+ * refuses an unknown one at load.
  */
-function dependencyBlockers(graph: DispatchHoldGraph, reserved: ReadonlySet<string>, task: Task): readonly string[] {
-  return task.depends_on.filter((id) => {
+function dependencyBlockers(graph: DispatchHoldGraph, reserved: ReadonlySet<string>, task: Task): readonly DependencyBlocker[] {
+  return task.depends_on.flatMap((id) => {
     const dependency = graph.tasks.find((candidate) => candidate.id === id);
-    return dependency !== undefined && dependency.wave === task.wave && !implementationSettled(dependency, reserved);
+    return dependency === undefined || dependency.wave !== task.wave || implementationSettled(dependency, reserved)
+      ? []
+      : [Object.freeze({ id, escalated: deriveTaskImplementationDispatch(dependency).kind === "escalated" })];
   });
 }
 
@@ -81,13 +87,12 @@ export function dispatchHoldOf(graph: DispatchHoldGraph, reserved: ReadonlySet<s
   const fixes = nonEmpty(forwardFixHolders(graph, reserved, task));
   if (fixes !== null) return Object.freeze({ kind: "forward-fix", fixTaskIds: fixes });
   const blockers = nonEmpty(dependencyBlockers(graph, reserved, task));
-  if (blockers === null) return null;
-  const escalated = blockers.filter((id) => {
-    const blocker = graph.tasks.find((candidate) => candidate.id === id);
-    return blocker !== undefined && deriveTaskImplementationDispatch(blocker).kind === "escalated";
-  });
-  return Object.freeze({ kind: "dependency", blockers, escalated: Object.freeze(escalated) });
+  return blockers === null ? null : Object.freeze({ kind: "dependency", blockers });
 }
+
+/** The ids of the blockers that reached terminal escalation, in edge order. */
+export const escalatedBlockers = (blockers: readonly DependencyBlocker[]): readonly string[] =>
+  blockers.flatMap(({ id, escalated }) => (escalated ? [id] : []));
 
 /** Why `taskId` is withheld, in the words status, registration and the brief all use. */
 export function dispatchHoldMessage(taskId: string, hold: DispatchHold): string {
@@ -96,10 +101,14 @@ export function dispatchHoldMessage(taskId: string, hold: DispatchHold): string 
     .with({ kind: "forward-fix" }, ({ fixTaskIds }) =>
       `${taskId} is held by Forward Fix ${fixTaskIds.join(", ")} and runs after it settles, so its next attempt ` +
       "judges the fixed code")
-    .with({ kind: "dependency" }, ({ blockers, escalated }) => escalated.length > 0
-      ? `${taskId} is blocked by escalated dependency ${escalated.join(", ")}; remediate it (helper orchestration remediate) ` +
-        `before ${taskId} can run`
-      : `${taskId} depends on ${blockers.join(", ")} of its Wave and runs after ${blockers.length === 1 ? "it settles" : "they settle"}`)
+    .with({ kind: "dependency" }, ({ blockers }) => {
+      const escalated = escalatedBlockers(blockers);
+      return escalated.length > 0
+        ? `${taskId} is blocked by escalated dependency ${escalated.join(", ")}; remediate it (helper orchestration remediate) ` +
+          `before ${taskId} can run`
+        : `${taskId} depends on ${blockers.map(({ id }) => id).join(", ")} of its Wave and runs after ` +
+          `${blockers.length === 1 ? "it settles" : "they settle"}`;
+    })
     .exhaustive();
 }
 

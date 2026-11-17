@@ -11,10 +11,14 @@ import {
   type AddDependencyRequest,
 } from "../../src/core/task-dependency-edit";
 import { dispatchHoldMessage, dispatchHoldOf } from "../../src/core/dispatch-holds";
+import { classifyImplementationWindow } from "../../src/core/implementation-window";
+import { taskExecutionDecision } from "../../src/core/validate-task-execution";
+import { DISTILL_VERIFICATION_POLICY, serializeVerificationPolicy } from "../../src/core/verification-policy";
+import { implementationEscalatedTaskFields } from "../fixtures/implementation-escalation";
 import { newWaveGate } from "../../src/core/wave-gate-model";
 import { parseTaskGraph } from "../../src/state-file-wire";
 import { validateFull } from "../../src/handlers/helpers/validate-task-graph";
-import type { Task, TaskGraph } from "../../src/types";
+import type { Task, TaskGraph, WaveGate } from "../../src/types";
 import { i6RunnerManifest } from "../fixtures/i6-runner-manifest";
 import { i6PlanTask } from "../fixtures/i6-plan-task";
 import {
@@ -76,6 +80,12 @@ const refusal = (state: TaskGraph, req: AddDependencyRequest): AddDependencyRefu
   return result.error;
 };
 const byId = (state: TaskGraph, id: string): Task => state.tasks.find((candidate) => candidate.id === id)!;
+/** The Wave's engine-added distill pass. */
+const distill = (id: string): Task => task(id, 2, ["src/t25.ts"], {
+  agent: "distill-agent", description: "Distill pass for Wave 2", verification_policy: serializeVerificationPolicy(DISTILL_VERIFICATION_POLICY),
+});
+/** A policy an attestation may run under: new tests waived. */
+const ATTESTABLE = { regression: { kind: "required" as const }, new_tests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const } };
 
 describe("parseAddDependencyArgs", () => {
   it("accepts a Task, its dependencies and a trimmed reason, in any order", () => {
@@ -130,6 +140,11 @@ describe("addDependency", () => {
     ["a Task that is not pending", () => graph([implemented("T12", 2, ["src/t12.ts", "src/t12.test.ts"]), task("T25", 2, ["src/t25.ts", "src/t25.test.ts"])]), request("T12", ["T25"]), "not-pending"],
     ["a later-Wave dependency", () => graph([task("T12", 2, ["src/t12.ts", "src/t12.test.ts"]), task("T30", 3, ["src/t30.ts", "src/t30.test.ts"])]), request("T12", ["T30"]), "illegal-dependency"],
     ["a live Wave Gate run", () => graph(undefined, { active_wave_gate: activeWaveGateFixture({ runId: "run.wave-2", wave: 2, authorityDigest: "a".repeat(64) }) }), request("T12", ["T25"]), "live-wave-gate"],
+    ["an active implementation reservation", () => graph(undefined, { executing_tasks: ["T28"] }), request("T12", ["T25"]), "implementation-active"],
+    ["a graph outside the execute Phase", () => graph(undefined, { current_phase: "decompose" }), request("T12", ["T25"]), "not-executing"],
+    ["an attested Task", () => graph([task("T12", 2, ["src/t12.ts", "src/t12.test.ts"], { implementation_attestation: true, verification_policy: ATTESTABLE }), task("T25", 2, ["src/t25.ts", "src/t25.test.ts"])]), request("T12", ["T25"]), "attested"],
+    ["a Distill Task that waits", () => graph([distill("T30"), task("T25", 2, ["src/t25.ts", "src/t25.test.ts"])]), request("T30", ["T25"]), "distill-task"],
+    ["a Distill Task as the dependency", () => graph([distill("T30"), task("T25", 2, ["src/t25.ts", "src/t25.test.ts"])]), request("T25", ["T30"]), "illegal-dependency"],
   ])("refuses %s", (_label, state, req, kind) => {
     expect(refusal(state(), req).kind).toBe(kind);
   });
@@ -167,11 +182,25 @@ describe("the State File and population hold same-Wave edges to their audit", ()
   });
 });
 
+describe("registration applies the same rule", () => {
+  const decision = (state: TaskGraph, id: string) => taskExecutionDecision(state, id, [id]);
+
+  it("refuses a same-Wave dependent while its dependency is pending and admits it once the dependency settles", () => {
+    const next = committed(graph(), request("T12", ["T25"]));
+    expect(decision(next, "T12")).toMatchObject({ kind: "ineligible", reason: expect.stringContaining("depends on T25 of its Wave") });
+    const settled = { ...next, tasks: next.tasks.map((candidate) => candidate.id === "T25" ? implemented("T25", 2, ["src/t25.ts", "src/t25.test.ts"]) : candidate) };
+    // Wave 1's gate passed, so registration judges T12 on its dependency alone.
+    const passed: WaveGate = { ...newWaveGate(), impl_complete: true, tests_passed: true, reviews_complete: true };
+    const gated = { ...settled, wave_gates: { ...settled.wave_gates, "1": passed } };
+    expect(decision(gated, "T12")).toEqual({ kind: "eligible" });
+  });
+});
+
 describe("the dependency Dispatch Hold", () => {
   it("withholds a Task until its same-Wave dependency settles, then releases it", () => {
     const next = committed(graph(), request("T12", ["T25"]));
     const hold = dispatchHoldOf(next, new Set(), byId(next, "T12"));
-    expect(hold).toEqual({ kind: "dependency", blockers: ["T25"], escalated: [] });
+    expect(hold).toEqual({ kind: "dependency", blockers: [{ id: "T25", escalated: false }] });
     expect(dispatchHoldMessage("T12", hold!)).toBe("T12 depends on T25 of its Wave and runs after it settles");
     const settled = { ...next, tasks: next.tasks.map((candidate) => candidate.id === "T25" ? implemented("T25", 2, ["src/t25.ts", "src/t25.test.ts"]) : candidate) };
     expect(dispatchHoldOf(settled, new Set(), byId(settled, "T12"))).toBeNull();
@@ -180,7 +209,21 @@ describe("the dependency Dispatch Hold", () => {
   it("keeps withholding a settled dependency that still holds a reservation", () => {
     const next = committed(graph(), request("T12", ["T25"]));
     const reserved = { ...next, tasks: next.tasks.map((candidate) => candidate.id === "T25" ? implemented("T25", 2, ["src/t25.ts", "src/t25.test.ts"]) : candidate) };
-    expect(dispatchHoldOf(reserved, new Set(["T25"]), byId(reserved, "T12"))).toMatchObject({ kind: "dependency", blockers: ["T25"] });
+    expect(dispatchHoldOf(reserved, new Set(["T25"]), byId(reserved, "T12"))).toMatchObject({ kind: "dependency", blockers: [{ id: "T25" }] });
+  });
+
+  it("names an escalated dependency as blocking, and the Wave's escalation lists the Task behind it", () => {
+    const escalatedT1 = { ...task("T1", 2, ["src/t1.ts", "src/t1.test.ts"]), ...implementationEscalatedTaskFields() } as Task;
+    const base = graph([escalatedT1, task("T12", 2, ["src/t12.ts", "src/t12.test.ts"])]);
+    const next = committed(base, request("T12", ["T1"]));
+    const hold = dispatchHoldOf(next, new Set(), byId(next, "T12"));
+    expect(hold).toEqual({ kind: "dependency", blockers: [{ id: "T1", escalated: true }] });
+    expect(dispatchHoldMessage("T12", hold!)).toBe(
+      "T12 is blocked by escalated dependency T1; remediate it (helper orchestration remediate) before T12 can run",
+    );
+    const window = classifyImplementationWindow(next, { kind: "observed", observedAtMs: Date.parse("2026-11-17T09:00:00.000Z"), anyActiveForGraph: false }, []);
+    expect(window).toMatchObject({ kind: "window", recovery: { kind: "escalate-wave-implementation" } });
+    if (window.kind === "window") expect(window.message).toContain("Blocked behind an escalated dependency: T12 (by T1)");
   });
 
   it("does not hold on an earlier-Wave dependency (registration requires it completed)", () => {

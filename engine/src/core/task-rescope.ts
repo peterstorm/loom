@@ -28,14 +28,14 @@ import { isFlagToken } from "./cli-flag-token";
 import { isProtectedVerificationPath } from "./completion-suite";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 import { contractWriter, frozenPaths } from "./acceptance-contract";
-import { coupledSetGaps, describeCoupledSetGap } from "./coupled-file-sets";
+import { coupledSetGaps, coupledSetKey, describeCoupledSetGap } from "./coupled-file-sets";
 import { isDistillTask } from "./distill-task";
 import type { DomainResult } from "./orchestration-contract";
 import { derivePendingTaskProof, redThenGreenScope, taskRedThenGreenEra } from "./proof-obligations";
 import { parseReviewPath } from "./review-packet";
 import { taskArtifactExpectation } from "./task-artifact-expectation";
 import { parseTaskId, type TaskId } from "./task-id";
-import { reopenableWave } from "./task-revalidation";
+import { reopenableWave, waveReopeningRefusalMessage } from "./task-revalidation";
 import { renderTaskScopeProblem, taskTestFileProblem } from "./task-scope-rules";
 import { taskVerificationPolicy } from "./verification-policy";
 import { parsePlanEditReason, taskRescopedEdit } from "./wave-plan-edit";
@@ -45,12 +45,13 @@ export const TASK_RESCOPE_USAGE =
   "Usage: helper orchestration rescope-task --task <id> [--add-file <path>]... [--add-sealed-file <path>]... " +
   "[--remove-file <path>]... --reason <text>";
 
+/** One path to add, and whether it was named with `--add-sealed-file` (it must then be one a completed Wave sealed). */
+export type RescopeAddition = Readonly<{ path: string; sealed: boolean }>;
+
 export type TaskRescopeRequest = Readonly<{
   taskId: TaskId;
   /** Every path to add, plain and sealed, in the order named. */
-  add: readonly string[];
-  /** The paths of `add` named with `--add-sealed-file`: each must be one a completed Wave sealed. */
-  sealed: readonly string[];
+  add: readonly RescopeAddition[];
   remove: readonly string[];
   reason: string;
 }>;
@@ -100,8 +101,7 @@ export function parseTaskRescopeArgs(args: readonly string[]): DomainResult<Task
   const fail = (problem: string) => freeze({ ok: false as const, error: `${problem}. ${TASK_RESCOPE_USAGE}` });
   let task: string | undefined;
   let reason: string | undefined;
-  const add: string[] = [];
-  const sealed: string[] = [];
+  const add: RescopeAddition[] = [];
   const remove: string[] = [];
   for (let index = 0; index < args.length; index += 2) {
     const flag = args[index];
@@ -119,26 +119,26 @@ export function parseTaskRescopeArgs(args: readonly string[]): DomainResult<Task
     } else {
       const path = parseReviewPath(value, flag);
       if (!path.ok) return fail(path.errors.join("; "));
-      (flag === "--remove-file" ? remove : add).push(path.value);
-      if (flag === "--add-sealed-file") sealed.push(path.value);
+      if (flag === "--remove-file") remove.push(path.value);
+      else add.push(freeze({ path: path.value, sealed: flag === "--add-sealed-file" }));
     }
   }
   if (task === undefined) return fail("--task must name the Task to re-scope");
   const taskId = parseTaskId(task, "--task");
   if (!taskId.ok) return fail(taskId.error.errors.join("; "));
-  const named = [...add, ...remove];
+  const named = [...add.map(({ path }) => path), ...remove];
   if (named.length === 0) return fail("name at least one --add-file, --add-sealed-file or --remove-file");
   const repeated = named.find((path, index) => named.indexOf(path) !== index);
   if (repeated !== undefined) return fail(`${repeated} is named twice`);
   if (reason === undefined) return fail("--reason must say why the plan changes");
   const parsedReason = parsePlanEditReason(reason);
   if (!parsedReason.ok) return fail(`--reason ${parsedReason.error}`);
-  return freeze({ ok: true as const, value: freeze({ taskId: taskId.value, add: freeze(add), sealed: freeze(sealed), remove: freeze(remove), reason: parsedReason.value }) });
+  return freeze({ ok: true as const, value: freeze({ taskId: taskId.value, add: freeze(add), remove: freeze(remove), reason: parsedReason.value }) });
 }
 
 /** The request's additions `task` does not list yet, in request order. */
-const newPaths = (task: Task, request: TaskRescopeRequest): readonly string[] =>
-  request.add.filter((path) => !(task.file_list ?? []).includes(path));
+const newAdditions = (task: Task, request: TaskRescopeRequest): readonly RescopeAddition[] =>
+  request.add.filter(({ path }) => !(task.file_list ?? []).includes(path));
 
 /**
  * The one rule for where added files' population baseline is read: the
@@ -162,7 +162,7 @@ function baselineRevisionFor(task: Task, added: readonly string[]): string | nul
 export function rescopeBaselineDuty(graph: TaskGraph, request: TaskRescopeRequest): RescopeBaselineDuty | null {
   const task = graph.tasks.find(({ id }) => id === request.taskId);
   if (task === undefined) return null;
-  const paths = newPaths(task, request);
+  const paths = newAdditions(task, request).map(({ path }) => path);
   const revision = baselineRevisionFor(task, paths);
   return revision === null ? null : freeze({ revision, paths });
 }
@@ -209,20 +209,9 @@ function removeRefusal(graph: TaskGraph, path: string): string | null {
 /** The precondition refusals shared with Task reopening, in this operation's words. */
 function waveRefusal(graph: TaskGraph): DomainResult<never, TaskRescopeRefusal> | null {
   const reopenable = reopenableWave(graph);
-  if (reopenable.ok) return null;
-  const refusal = reopenable.error;
-  switch (refusal.kind) {
-    case "not-executing":
-      return refuse("not-executing", `re-scoping a Task requires the execute Phase (current: ${refusal.phase})`);
-    case "live-wave-gate":
-      return refuse("live-wave-gate", `Wave Gate run ${refusal.runId} owns Wave ${refusal.wave}; abandon it with helper orchestration abandon, then retry`);
-    case "implementation-active":
-      return refuse("implementation-active", `implementation reservations are active: ${refusal.holders.join(", ")}; re-scope once they settle`);
-    default: {
-      const unreachable: never = refusal;
-      return unreachable;
-    }
-  }
+  return reopenable.ok
+    ? null
+    : refuse(reopenable.error.kind, waveReopeningRefusalMessage(reopenable.error, "re-scoping a Task", "re-scope"));
 }
 
 /**
@@ -292,7 +281,8 @@ export function rescopeTask(
   const unknown = unknownRemovals(graph, task, request);
   if (unknown.length > 0) return refuse("path-not-removable", `${unknown.join(", ")} ${unknown.length === 1 ? "is" : "are"} not in ${task.id}'s file_list`);
   const current = task.file_list ?? [];
-  const added = newPaths(task, request);
+  const additions = newAdditions(task, request);
+  const added = additions.map(({ path }) => path);
   const removed = current.filter((path) => request.remove.includes(path));
   if (added.length === 0 && removed.length === 0) {
     return freeze({ ok: true as const, value: freeze({ kind: "unchanged" as const, taskId: request.taskId }) });
@@ -304,8 +294,8 @@ export function rescopeTask(
   }
   if (isDistillTask(task)) return refuse("distill-task", `${task.id} is a Distill Task; the engine derives its scope`);
   if (task.implementation_attestation === true) return refuse("attested", `${task.id} is armed for attestation; a re-scoped Task needs a fresh implementation, not an attestation`);
-  for (const path of added) {
-    const refusal = addRefusal(graph, task, path, completedWaves, request.sealed.includes(path));
+  for (const { path, sealed } of additions) {
+    const refusal = addRefusal(graph, task, path, completedWaves, sealed);
     if (refusal !== null) return refuse("path-not-addable", refusal);
   }
   for (const path of removed) {
@@ -322,8 +312,14 @@ export function rescopeTask(
   const unobserved = baselineRefusal(task, added, observed);
   if (unobserved !== null) return refuse("baseline-unobserved", unobserved);
   const tasks = graph.tasks.map((candidate) => (candidate.id === task.id ? rescopedTask(graph, task, fileList, observed) : candidate));
-  const gap = coupledSetGaps(tasks, { id: task.id, file_list: fileList })[0];
-  if (gap !== undefined) return refuse("coupled-set-split", `${describeCoupledSetGap(gap)}; add the rest in the same re-scope`);
+  // Only a set this edit touches: a live graph may predate ADR-0082, and an
+  // unrelated re-scope must not have to repair a split it did not make.
+  const touched = new Set([...added, ...removed].flatMap((path) => coupledSetKey(path) ?? []));
+  const gap = coupledSetGaps(tasks, { id: task.id, file_list: fileList })
+    .find(({ listed }) => touched.has(coupledSetKey(listed[0]) ?? ""));
+  if (gap !== undefined) {
+    return refuse("coupled-set-split", `${describeCoupledSetGap(gap)}; add the rest in the same re-scope, after removing it from any Task of this Wave that lists it`);
+  }
   for (const contract of graph.acceptance_contracts ?? []) {
     const writer = contractWriter(frozenPaths(contract), tasks.map(({ id, file_list }) => ({ id, file_list: file_list ?? [] })));
     if (!writer.ok || writer.value !== contract.contractTask) {
@@ -332,7 +328,7 @@ export function rescopeTask(
   }
   const audit = taskRescopedEdit({
     wave: task.wave, taskId: task.id, added, removed, baselineRevision: baselineRevisionFor(task, added),
-    sealed: added.filter((path) => request.sealed.includes(path)), reason: request.reason,
+    sealed: additions.flatMap(({ path, sealed }) => (sealed ? [path] : [])), reason: request.reason,
   });
   // Every input was proven above (parsed paths, a change, the reason); a refusal here is a broken invariant.
   if (!audit.ok) throw new Error(`rescope-task built an invalid audit: ${audit.error}`);

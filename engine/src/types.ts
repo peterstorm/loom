@@ -924,8 +924,9 @@ export type TaskRescopedEdit = Readonly<{
   /** Paths removed, in their former file-list order. At least one of the two is non-empty. */
   removed: readonly string[];
   /** The added paths a completed Wave's Task lists, named explicitly with `--add-sealed-file`
-   *  (ADR-0081); a subset of `added`. Absent in audits written before it existed: none. */
-  sealed?: readonly string[];
+   *  (ADR-0081); a subset of `added`. Omitted, never empty, when no added path was sealed
+   *  (including audits written before this field existed). */
+  sealed?: OrchestrationNonEmpty<string>;
   /** The Task's `start_sha` the added files' population baseline was read at;
    *  null when nothing was added or the Task carried no population baseline to extend. */
   baselineRevision: string | null;

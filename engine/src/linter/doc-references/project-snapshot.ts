@@ -66,8 +66,9 @@ function inGitWorkingTree(directory: string): boolean {
 /**
  * One `git ls-files` listing, NUL-separated and relative to `root`, through
  * the engine's one policy-bound Git seam. Null when `root` is in no
- * repository — git says so, or git cannot run and no `.git` entry sits at the
- * root or above — so the snapshot falls back to the filesystem. Any other
+ * repository — no `.git` entry sits at the root or above, and git says there
+ * is no repository or cannot run — so the snapshot falls back to the
+ * filesystem. Any other
  * failure throws, the lint failing closed rather than reading the disk
  * instead: a corrupt repository, a refused ownership check, or a repository
  * on a machine whose git cannot run, where the disk would let an ignored
@@ -84,7 +85,11 @@ function gitListing(root: string, args: readonly string[]): readonly string[] | 
     .with({ kind: "exited", status: 0 }, ({ stdout }) => stdout.toString("utf8").split("\0").filter((path) => path !== ""))
     .with({ kind: "exited" }, ({ status, stderr }) => {
       const message = stderr.toString("utf8").trim();
-      return status === 128 && message.includes("not a git repository") ? null : failed(`exit ${status}: ${message}`);
+      // Git words a dangling `.git` file the way it words "no repository"
+      // (Apple Git 2.39: "not a git repository: /nowhere/..."), so only the
+      // absence of any `.git` entry at the root or above means "outside".
+      const outside = status === 128 && message.includes("not a git repository") && !inGitWorkingTree(root);
+      return outside ? null : failed(`exit ${status}: ${message}`);
     })
     .with({ kind: "faulted" }, ({ message }) => failed(message))
     .with({ kind: "timed-out" }, () => failed("timed out"))

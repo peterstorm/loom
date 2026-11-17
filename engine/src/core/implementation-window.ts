@@ -25,7 +25,7 @@
  * shell supplies the reservation-liveness observation.
  */
 import type { StatusReason, TaskGraph, WaveImplementationDispatch, WaveImplementationRecovery } from "../types";
-import { dispatchHoldOf, stuckDispatchHoldMessage, type DispatchHold } from "./dispatch-holds";
+import { dispatchHoldOf, escalatedBlockers, stuckDispatchHoldMessage, type DispatchHold } from "./dispatch-holds";
 import { canonicalRecord, nonEmpty, type NonEmpty } from "./orchestration-contract";
 import { quoteShellArgument } from "./shell-quoting";
 import { deriveTaskImplementationDispatch } from "./task-implementation-dispatch";
@@ -109,8 +109,10 @@ function withheldTasks(
  * escalation says who waits behind it (ADR-0081); empty when none does.
  */
 function blockedBehind(withheld: readonly WithheldTask[]): string {
-  const blocked = withheld.flatMap(({ taskId, hold }) =>
-    hold.kind === "dependency" && hold.escalated.length > 0 ? [`${taskId} (by ${hold.escalated.join(", ")})`] : []);
+  const blocked = withheld.flatMap(({ taskId, hold }) => {
+    const escalated = hold.kind === "dependency" ? escalatedBlockers(hold.blockers) : [];
+    return escalated.length > 0 ? [`${taskId} (by ${escalated.join(", ")})`] : [];
+  });
   return blocked.length === 0 ? "" : `. Blocked behind an escalated dependency: ${blocked.join(", ")}`;
 }
 

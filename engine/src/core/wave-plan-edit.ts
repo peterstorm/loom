@@ -77,6 +77,7 @@ export function taskRescopedEdit(input: TaskRescopedEditInput): DomainResult<Tas
   if (!sealed.ok) return sealed;
   const unadded = sealed.value.find((path) => !added.value.includes(path));
   if (unadded !== undefined) return fail(`sealed names ${unadded}, which is not added`);
+  const sealedPaths = nonEmpty(sealed.value);
   const reason = parsePlanEditReason(input.reason);
   if (!reason.ok) return fail(`reason ${reason.error}`);
   return freeze({
@@ -89,7 +90,7 @@ export function taskRescopedEdit(input: TaskRescopedEditInput): DomainResult<Tas
       added: added.value,
       removed: removed.value,
       baselineRevision: revision,
-      ...(sealed.value.length === 0 ? {} : { sealed: sealed.value }),
+      ...(sealedPaths === null ? {} : { sealed: sealedPaths }),
       reason: reason.value,
     }),
   });

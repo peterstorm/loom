@@ -105,14 +105,14 @@ describe("parseTaskRescopeArgs", () => {
   it("accepts a task, additions, removals and a trimmed reason, in any order", () => {
     expect(parseTaskRescopeArgs(["--reason", "  scope ", "--remove-file", "src/a.ts", "--task", "T1", "--add-file", "src/a.test.ts"])).toEqual({
       ok: true,
-      value: { taskId: "T1", add: ["src/a.test.ts"], sealed: [], remove: ["src/a.ts"], reason: "scope" },
+      value: { taskId: "T1", add: [{ path: "src/a.test.ts", sealed: false }], remove: ["src/a.ts"], reason: "scope" },
     });
   });
 
   it("adds a path named with --add-sealed-file and records it as sealed", () => {
     expect(parseTaskRescopeArgs(["--task", "T1", "--add-file", "src/a.ts", "--add-sealed-file", "src/sealed.ts", "--reason", "r"])).toEqual({
       ok: true,
-      value: { taskId: "T1", add: ["src/a.ts", "src/sealed.ts"], sealed: ["src/sealed.ts"], remove: [], reason: "r" },
+      value: { taskId: "T1", add: [{ path: "src/a.ts", sealed: false }, { path: "src/sealed.ts", sealed: true }], remove: [], reason: "r" },
     });
   });
 
@@ -269,6 +269,14 @@ describe("rescopeTask: the invariants population checks still hold", () => {
       kind: "coupled-set-split", message: expect.stringContaining("not bun.lock"),
     });
     expect(rescoped(sealedGraph(), sealedRequest("T3", [], ["package.json", "bun.lock"])).audit.sealed).toEqual(["package.json", "bun.lock"]);
+  });
+
+  it("leaves a split the edit does not touch to its own repair: an unrelated re-scope still lands", () => {
+    const split = graph({}, [
+      task("T3", 1, ["src/t3.ts", "src/t3.test.ts", "package.json"]),
+      task("T4", 1, ["src/t4.ts", "src/t4.test.ts", "bun.lock"]),
+    ]);
+    expect(byId(rescoped(split, request("T3", ["src/extra.ts"])).graph, "T3").file_list).toContain("src/extra.ts");
   });
 
   it("refuses to take a coupled member another Task of the Wave still lists, until that Task gives it up", () => {

@@ -1351,9 +1351,9 @@ export function auditedSameWaveEdges(rawEdits: unknown): ReadonlySet<string> {
 }
 
 /**
- * Every illegal `depends_on` edge, then every cycle: a self or unknown
- * dependency, and a dependency in a later Wave, or in the same Wave unless
- * `auditedSameWave` records it (ADR-0081).
+ * Every illegal `depends_on` edge: a self or unknown dependency, and a
+ * dependency in a later Wave, or in the same Wave unless `auditedSameWave`
+ * records it (ADR-0081). Only when there is none, every cycle.
  */
 export function taskDependencyErrors(
   tasks: readonly Record<string, unknown>[],
