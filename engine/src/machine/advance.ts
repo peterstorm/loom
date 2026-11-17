@@ -10,7 +10,14 @@
 import { match } from "ts-pattern";
 import type { Evidence, EventCounts, EventToken, MachineDef, PhaseState, Requirement } from "./types";
 import { initialState } from "./types";
-import { judgeTestRun, type TestRunJudge } from "./test-report";
+import { judgeTestRun, type TestVerdict } from "./test-report";
+
+/**
+ * How a fold judges one test run. The default judges the run's own facts; a
+ * settlement passes the same scope-aware judge its test verdict used
+ * (ADR-0080), so the machine and the verdict never disagree about one run.
+ */
+export type TestRunJudge = (run: Extract<Evidence, { kind: "TestRun" }>) => TestVerdict;
 
 export const judgeRunFacts: TestRunJudge = (run) => judgeTestRun(run.exit, run.report);
 

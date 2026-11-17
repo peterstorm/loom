@@ -15,6 +15,7 @@ export {
   satisfied,
   tokensFor,
   judgeRunFacts,
+  type TestRunJudge,
 } from "./advance";
 export {
   parseVitestJson,
@@ -23,7 +24,6 @@ export {
   judgeTestRun,
   type TestVerdict,
   type TrustedTestVerdict,
-  type TestRunJudge,
 } from "./test-report";
 export {
   extractEvidence,

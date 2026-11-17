@@ -6,7 +6,7 @@
  */
 
 import type { TaskTestResult } from "../types";
-import { judgeTestRun, type TestRunJudge, type TrustedTestVerdict } from "../machine/evidence";
+import { judgeTestRun, type TrustedTestVerdict } from "../machine/evidence";
 import type { Evidence, Requirement } from "../machine/types";
 import { extractTestEvidence } from "./test-evidence";
 import { admitsTestRun, type TestEvidencePolicy } from "./test-evidence-policy";
@@ -42,9 +42,11 @@ function attributeTrustedVerdict(
  * The test-run judge a Guarded Skill Machine fold uses at settlement: the
  * run's own verdict, with a trusted failure attributed under `scope` exactly
  * as `resolveTestEvidence` attributes it, so the machine's TestRunPassed and
- * the Task's verdict agree about every run.
+ * the Task's verdict agree about every run. It matches the machine's
+ * `TestRunJudge` structurally, since core may not import the reducer.
  */
-export const attributedTestRunJudge = (scope: RegressionScope): TestRunJudge => (run) => {
+export const attributedTestRunJudge = (scope: RegressionScope) =>
+  (run: TestRunEvidence): ReturnType<typeof judgeTestRun> => {
   const verdict = judgeTestRun(run.exit, run.report);
   return verdict.verdict === "untrusted" ? verdict : attributeTrustedVerdict(run, verdict, scope).verdict;
 };
