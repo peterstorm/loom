@@ -75,6 +75,7 @@ import {
   settleAndPersistExactImplementation,
 } from "../helpers/exact-implementation-settlement";
 import { testEvidencePolicyAt } from "../../utils/test-evidence-policy-at";
+import { foreignTestOwners } from "../../core/regression-attribution";
 // Historical callers import these shell utilities from this handler. Keep the
 // surface while the implementation lives in the neutral shared shell module.
 export {
@@ -520,12 +521,17 @@ export const runUpdateTaskStatus = async (
   // The one epoch both the test verdict and exact settlement (I6) read.
   const epochLedger = claudeEpochLedger(ledgerRead, epochAgentId, epochAgentType);
   const epochEvents = epochLedger.kind === "read" ? epochLedger.events : [];
+  // A failure in a file another in-flight Task of this Wave owns is that
+  // Task's to fix, not this one's (loom#199). Read from the pre-lock graph:
+  // the roster only decides which failures are excused, and a Task that
+  // settles meanwhile merely stops excusing failures in its files.
   let testEvidence = resolveTestEvidence(
     epochEvents,
     testEvidencePolicyAt(state.test_evidence, repositoryRoot),
     bashTestOutput,
     machineBound,
     snapshotFailed,
+    { owners: foreignTestOwners(state.tasks, task.id, task.wave), repositoryRoot },
   );
   // Machine-bound agents don't self-report completion: fold this epoch's
   // evidence through the machine and consult its terminal requirements —

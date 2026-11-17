@@ -94,3 +94,4 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0077](ADR-0077-a-judgement-lands-while-its-subject-is-open-and-is-fixed-forward-otherwise.md) | A judgement lands while its subject is open, and is fixed forward otherwise | Accepted (2026-11-16) | — |
 | [ADR-0078](ADR-0078-successor-reviewers-copy-references-from-an-issued-roster.md) | Successor reviewers copy references from an issued roster | Accepted (2026-11-16) | — |
 | [ADR-0079](ADR-0079-a-word-that-lives-outside-the-source-is-listed-as-an-external-name.md) | A word that lives outside the source is listed as an external name | Accepted (2026-11-16) | amends ADR-0074 |
+| [ADR-0080](ADR-0080-a-failure-in-another-in-flight-tasks-test-file-is-that-tasks-to-fix.md) | A failure in another in-flight Task's test file is that Task's to fix | Accepted (2026-11-17) | — |

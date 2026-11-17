@@ -10,6 +10,38 @@ import { judgeTestRun, type TrustedTestVerdict } from "../machine/evidence";
 import type { Evidence, Requirement } from "../machine/types";
 import { extractTestEvidence } from "./test-evidence";
 import { admitsTestRun, type TestEvidencePolicy } from "./test-evidence-policy";
+import {
+  NO_FOREIGN_OWNERS,
+  attributeRegressionFailures,
+  describeForeignFailures,
+  type ForeignTestOwners,
+} from "./regression-attribution";
+
+/** Who else in the settling Task's Wave owns which files, and the root reports are read against. */
+export type RegressionScope = Readonly<{ owners: ForeignTestOwners; repositoryRoot: string }>;
+
+/** No other in-flight Task: every failure counts against the Task, as before loom#199. */
+export const WHOLE_RUN_SCOPE: RegressionScope = Object.freeze({ owners: NO_FOREIGN_OWNERS, repositoryRoot: "" });
+
+/** A trusted run's verdict, after attributing its failures (and the clause naming any it excused). */
+type AttributedVerdict = Readonly<{ verdict: TrustedTestVerdict; excused: string | null }>;
+
+/**
+ * A trusted failing run whose every failure is in a file another in-flight
+ * Task of the Wave owns is this Task's pass: that owner judges its own file,
+ * and the Wave Gate judges the whole suite (loom#199). Any other verdict stands.
+ */
+function attributeTrustedVerdict(
+  run: TestRunEvidence,
+  verdict: TrustedTestVerdict,
+  scope: RegressionScope,
+): AttributedVerdict {
+  if (verdict.verdict !== "trusted-fail") return { verdict, excused: null };
+  const attribution = attributeRegressionFailures(run, scope.owners, scope.repositoryRoot);
+  return attribution.kind === "foreign-only"
+    ? { verdict: { verdict: "trusted-pass" }, excused: describeForeignFailures(attribution.foreign) }
+    : { verdict, excused: null };
+}
 
 export type ResolvedTestEvidence = Readonly<{
   /** Verdict plus trust provenance, exactly as persisted on the Task. */
@@ -49,7 +81,9 @@ function untrustedTranscriptEvidence(label: string, bashOutput: string): Resolve
  * except that a later exit-zero run makes an older trusted failure stale and a
  * FileWrite after a trusted pass invalidates that pass. Neither case promotes
  * transcript text to trusted evidence. A run `policy` does not admit (an
- * agent's own command in an engine-run graph) is judged untrusted.
+ * agent's own command in an engine-run graph) is judged untrusted. A trusted
+ * failure whose every failing file another in-flight Task of the Wave owns
+ * counts as a pass (`scope`, loom#199), and is then judged like any pass.
  */
 export function resolveTestEvidence(
   ledgerEvents: readonly Evidence[],
@@ -57,6 +91,7 @@ export function resolveTestEvidence(
   bashOutput: string,
   machineBound: boolean,
   snapshotFailed: boolean = false,
+  scope: RegressionScope = WHOLE_RUN_SCOPE,
 ): ResolvedTestEvidence {
   if (snapshotFailed) {
     return untrustedTranscriptEvidence(
@@ -71,9 +106,9 @@ export function resolveTestEvidence(
     return [{ run: event as TestRunEvidence, index, admitted, verdict }];
   });
   const lastTrusted = judged.reduce<
-    { index: number; run: TestRunEvidence; verdict: TrustedTestVerdict } | null
+    { index: number; run: TestRunEvidence; verdict: TrustedTestVerdict; excused: string | null } | null
   >((acc, { run, index, verdict }) =>
-    verdict.verdict === "untrusted" ? acc : { index, run, verdict }, null);
+    verdict.verdict === "untrusted" ? acc : { index, run, ...attributeTrustedVerdict(run, verdict, scope) }, null);
 
   let demotionLabel: string | null = null;
   if (lastTrusted !== null) {
@@ -90,9 +125,10 @@ export function resolveTestEvidence(
       const report = lastTrusted.run.report
         ? `, report: ${lastTrusted.run.report.total} tests / ${lastTrusted.run.report.failed} failed`
         : "";
+      const excused = lastTrusted.excused === null ? "" : `; ${lastTrusted.excused}`;
       return {
         result: lastTrusted.verdict,
-        evidence: `ledger: exit ${lastTrusted.run.exit}${report} (${lastTrusted.run.command})`,
+        evidence: `ledger: exit ${lastTrusted.run.exit}${report}${excused} (${lastTrusted.run.command})`,
       };
     }
     if (lastTrusted.verdict.verdict === "trusted-pass") {
