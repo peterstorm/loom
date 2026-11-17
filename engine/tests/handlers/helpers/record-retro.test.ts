@@ -50,6 +50,37 @@ describe("retroRecordEntry", () => {
   });
 });
 
+describe("the State File holds retro_records to the same rules", () => {
+  const base = (): TaskGraph => protectedGraphFixture({
+    spec_trace_version: 2, current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+    spec_file: null, plan_file: null, current_wave: 1, executing_tasks: [],
+    verification_manifest: i6RunnerManifest(), wave_gates: { "1": newWaveGate() },
+    tasks: [i6PlanTask("T1", 1, ["src/t1.ts", "src/t1.test.ts"])],
+  });
+  const load = (records: unknown) => parseTaskGraph(JSON.parse(JSON.stringify({ ...base(), retro_records: records })));
+  const written = { schemaVersion: 1, kind: "retro-recorded", scope: { kind: "run" }, path: ".claude/retros/run.md", digest: DIGEST };
+
+  it("loads a run record, a Wave record and a skip unchanged", () => {
+    const records = [written, { ...written, scope: { kind: "wave", wave: 1 } }, { schemaVersion: 1, kind: "retro-skipped", scope: { kind: "run" }, reason: "spike" }];
+    const loaded = load(records);
+    expect(loaded.ok && loaded.value.retro_records).toEqual(records);
+  });
+
+  it.each<[string, unknown, string]>([
+    ["a non-array", { not: "an array" }, "retro_records must be an array"],
+    ["a skip scoped to a Wave", [{ schemaVersion: 1, kind: "retro-skipped", scope: { kind: "wave", wave: 1 }, reason: "r" }], "a skip covers the whole run"],
+    ["a scope with an extra key", [{ ...written, scope: { kind: "run", extra: 1 } }], "scope must be"],
+    ["an unknown field", [{ ...written, extra: true }], "retro_records[0]"],
+    ["a non-string digest", [{ ...written, digest: 7 }], "must be strings"],
+    ["Wave 0", [{ ...written, scope: { kind: "wave", wave: 0 } }], "scope.wave"],
+    ["a Wave the graph does not hold", [{ ...written, scope: { kind: "wave", wave: 9 } }], "names a Wave the TaskGraph does not hold"],
+    ["a path outside the retro directory", [{ ...written, path: "docs/run.md" }], "under .claude/retros/"],
+    ["an unknown kind", [{ ...written, kind: "retro-maybe" }], "invalid schema or kind"],
+  ])("refuses %s", (_label, records, problem) => {
+    expect(load(records)).toMatchObject({ ok: false, error: expect.stringContaining(problem) });
+  });
+});
+
 const roots: string[] = [];
 let previousStatePath: string | undefined;
 afterEach(() => {

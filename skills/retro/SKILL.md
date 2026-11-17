@@ -73,7 +73,8 @@ Also review the environment itself:
 
 ## 4. Write and record the retro
 
-Write the retro to `.claude/retros/<YYYY-MM-DD>-<slug>[-wave-<N>].md`:
+Write the retro to `.claude/retros/<YYYY-MM-DD>-<slug>[-wave-<N>].md`. While a TaskGraph is live, Loom's
+direct-edit guard admits exactly this: a Markdown file directly in the repository's `.claude/retros/`.
 
 ```markdown
 # Retro: <run or session> [Wave N]

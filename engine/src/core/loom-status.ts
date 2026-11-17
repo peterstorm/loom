@@ -55,7 +55,7 @@ import {
   type WaveReadinessSnapshot,
 } from "./wave-gate-machine";
 import { deriveWaveAdvisoryNextAction } from "./wave-gate-preparation";
-import { judgeOrchestrationCompletion, RETRO_MISSING_REASON } from "./orchestration-completion";
+import { judgeOrchestrationCompletion } from "./orchestration-completion";
 import { pendingFreezeAdvisories, renderPendingFreezeAdvisories } from "./acceptance-contract";
 import {
   deriveFindingCounts,
@@ -491,7 +491,7 @@ function finishedRunReasons(graph: TaskGraph): readonly StatusReason[] {
         "which archives the TaskGraph and lifts Loom's guards",
     )];
   }
-  const onlyRetroOwed = completion.reasons.length === 1 && completion.reasons[0] === RETRO_MISSING_REASON;
+  const onlyRetroOwed = completion.shortfalls.every(({ kind }) => kind === "retro-missing");
   return onlyRetroOwed
     ? [statusReason(
         "retro-required",

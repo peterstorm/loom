@@ -97,7 +97,7 @@ import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/rev
 import { isExactGitSha } from "./core/git-sha";
 import { isAdoptionReason, isEngineRevision, MAX_ENGINE_REVISION_REASON_LENGTH } from "./core/engine-revision-pin";
 import { dependencyAddedEdit, parsePlanEditReason, taskRescopedEdit } from "./core/wave-plan-edit";
-import { retroRecordEntry } from "./core/retro-record";
+import { retroRecordEntry, retroScopeKnown } from "./core/retro-record";
 import { dependencyCycles } from "./core/task-dependencies";
 import {
   amendmentHistoryError,
@@ -1171,7 +1171,7 @@ function parseRetroScope(scope: Record<string, unknown>): RetroScope | null {
 }
 
 /** `retro_records`, each built by the one constructor (`core/retro-record.ts`). */
-function parseRetroRecords(raw: unknown): ParseResult<readonly RetroRecord[] | undefined> {
+function parseRetroRecords(raw: unknown, tasks: readonly Record<string, unknown>[]): ParseResult<readonly RetroRecord[] | undefined> {
   if (raw === undefined) return parseOk(undefined);
   if (!Array.isArray(raw)) return parseErr("retro_records must be an array when present");
   const records: RetroRecord[] = [];
@@ -1201,6 +1201,9 @@ function parseRetroRecords(raw: unknown): ParseResult<readonly RetroRecord[] | u
     if (typeof record.path !== "string" || typeof record.digest !== "string") return parseErr(`${label}.path and .digest must be strings`);
     const built = retroRecordEntry({ kind: "retro-recorded", scope: parsedScope, path: record.path, digest: record.digest });
     if (!built.ok) return parseErr(`${label} ${built.error}`);
+    if (!retroScopeKnown(built.value.scope, tasks.flatMap(({ wave }) => (typeof wave === "number" ? [wave] : [])))) {
+      return parseErr(`${label}.scope names a Wave the TaskGraph does not hold`);
+    }
     records.push(built.value);
   }
   return parseOk(Object.freeze(records));
@@ -2880,9 +2883,9 @@ function parseTaskGraphHistoryFields(
   const forwardFixHistory = parseForwardFixHistory(obj.forward_fix_history, tasks);
   if (!forwardFixHistory.ok) return parseErr(forwardFixHistory.error);
   const forwardFixWithdrawals = parseForwardFixWithdrawals(obj.forward_fix_withdrawals, tasks);
-  const retroRecords = parseRetroRecords(obj.retro_records);
-  if (!retroRecords.ok) return parseErr(retroRecords.error);
   if (!forwardFixWithdrawals.ok) return parseErr(forwardFixWithdrawals.error);
+  const retroRecords = parseRetroRecords(obj.retro_records, tasks);
+  if (!retroRecords.ok) return parseErr(retroRecords.error);
   const orphanedHistory = parseOrphanedWaveGateHistory(obj.orphaned_wave_gate_history);
   if (!orphanedHistory.ok) return parseErr(orphanedHistory.error);
   const specTraceRetirements = parseSpecTraceWaveGateRetirements(obj.spec_trace_wave_gate_retirements);

@@ -85,6 +85,18 @@ describe("complete-orchestration helper", () => {
     expect(archives()).toEqual([]);
   });
 
+  it("refuses a finished graph without a run retro, naming record-retro, and leaves it untouched", () => {
+    const bytes = install(graphFixture([task("T1", "completed")]));
+
+    const { exitCode, stderr } = run();
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("the run has no retrospective");
+    expect(stderr).toContain("helper record-retro");
+    expect(readFileSync(statePath, "utf-8")).toBe(bytes);
+    expect(archives()).toEqual([]);
+  });
+
   it("refuses while a Wave Gate run is active, naming the run", () => {
     const bytes = install({
       ...graphFixture([task("T1", "completed")]),

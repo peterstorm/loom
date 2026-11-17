@@ -8,7 +8,7 @@
  */
 
 import { gateRunCount, retroFacts, type RetroFacts, type WaveFriction } from "./retro-facts";
-import { describeRetroTrigger, retroSuggestions, type RetroSuggestion } from "./retro-triggers";
+import { describeRetroTrigger, freshRetroSuggestions, type RetroSuggestion } from "./retro-triggers";
 import type { TaskGraph } from "../types";
 
 export type RetroStatusReport =
@@ -19,15 +19,9 @@ export type RetroStatusReport =
 export function retroStatusReport(
   parsed: Readonly<{ ok: true; value: TaskGraph }> | Readonly<{ ok: false; error: string }>,
 ): RetroStatusReport {
-  if (!parsed.ok) return Object.freeze({ kind: "not-observed", reason: "the TaskGraph did not parse" });
+  if (!parsed.ok) return Object.freeze({ kind: "not-observed", reason: `the TaskGraph did not parse: ${parsed.error.slice(0, 300)}` });
   const facts = retroFacts(parsed.value);
-  // A suggestion is for friction still fresh: the active Wave and the Wave
-  // that completed last. Older Waves are the end-of-run retro's to read.
-  const lastCompleted = facts.waves.filter(({ progress }) => progress === "completed").at(-1)?.wave;
-  const fresh = (wave: number): boolean =>
-    wave === lastCompleted || facts.waves.some((digest) => digest.wave === wave && digest.progress === "active");
-  const suggestions = retroSuggestions(facts).filter(({ wave }) => fresh(wave));
-  return Object.freeze({ kind: "observed", facts, suggestions: Object.freeze(suggestions) });
+  return Object.freeze({ kind: "observed", facts, suggestions: freshRetroSuggestions(facts) });
 }
 
 /** One Wave's digest as one line: the counts that are not zero. */

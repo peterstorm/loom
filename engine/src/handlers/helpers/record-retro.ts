@@ -17,8 +17,8 @@ import { join } from "node:path";
 import type { HookHandler } from "../../types";
 import { observeTaskGraphProjectBoundary, taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
-import { isFlagToken } from "../../core/cli-flag-token";
-import { parseRetroPath, retroRecordEntry, retroRecordPresent, type RetroRecordInput } from "../../core/retro-record";
+import { isFlagToken, positiveIntegerToken } from "../../core/cli-flag-token";
+import { parseRetroPath, retroRecordEntry, retroRecordPresent, retroScopeKnown, type RetroRecordInput } from "../../core/retro-record";
 import { describeCause } from "../../utils/describe-cause";
 
 export const RECORD_RETRO_USAGE =
@@ -57,8 +57,9 @@ function parseArgs(args: readonly string[]): Readonly<{ ok: true; value: Request
   if (!path.ok) return fail(`--file ${path.error}`);
   const file = path.value;
   const rawWave = values.get("--wave");
-  if (rawWave !== undefined && !/^[1-9][0-9]*$/.test(rawWave)) return fail("--wave must be a positive integer");
-  return { ok: true, value: { kind: "written", file, wave: rawWave === undefined ? null : Number(rawWave) } };
+  const wave = rawWave === undefined ? null : positiveIntegerToken(rawWave);
+  if (rawWave !== undefined && wave === null) return fail("--wave must be a positive integer");
+  return { ok: true, value: { kind: "written", file, wave } };
 }
 
 /** The record input for a request: a written retro is read and hashed relative to `root`. */
@@ -86,7 +87,7 @@ export function createRecordRetroHandler(): HookHandler {
       if (!entry.ok) return { kind: "error", message: `record-retro: ${entry.error}` };
       const wave = request.value.kind === "written" ? request.value.wave : null;
       const outcome = await manager.updateAndReturn((locked) => {
-        if (wave !== null && !locked.tasks.some((task) => task.wave === wave)) {
+        if (!retroScopeKnown(entry.value.scope, locked.tasks.map((task) => task.wave))) {
           throw new Error(`the TaskGraph has no Wave ${wave}`);
         }
         if (retroRecordPresent(locked.retro_records, entry.value)) return { state: locked, value: "unchanged" as const };

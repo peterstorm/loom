@@ -72,6 +72,20 @@ export function retroRecordEntry(input: RetroRecordInput): DomainResult<RetroRec
 export const runRetroRecorded = (records: readonly RetroRecord[] | undefined): boolean =>
   (records ?? []).some(({ scope }) => scope.kind === "run");
 
+/** Whether a scope names the run, or a Wave among `waves`. The helper and the State File parser share it. */
+export const retroScopeKnown = (scope: RetroScope, waves: readonly number[]): boolean =>
+  scope.kind === "run" || waves.includes(scope.wave);
+
+const sameScope = (left: RetroScope, right: RetroScope): boolean =>
+  left.kind === right.kind && (left.kind === "run" || (right.kind === "wave" && left.wave === right.wave));
+
+/** Whether two records say the same thing, field by field. */
+function sameRecord(left: RetroRecord, right: RetroRecord): boolean {
+  if (left.kind === "retro-skipped") return right.kind === "retro-skipped" && left.reason === right.reason;
+  return right.kind === "retro-recorded" && sameScope(left.scope, right.scope) &&
+    left.path === right.path && left.digest === right.digest;
+}
+
 /** Whether `records` already holds an entry equal to `entry`. */
 export const retroRecordPresent = (records: readonly RetroRecord[] | undefined, entry: RetroRecord): boolean =>
-  (records ?? []).some((record) => JSON.stringify(record) === JSON.stringify(entry));
+  (records ?? []).some((record) => sameRecord(record, entry));

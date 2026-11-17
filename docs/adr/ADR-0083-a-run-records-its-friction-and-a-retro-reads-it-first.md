@@ -30,7 +30,7 @@ model-driven retros over thin evidence, each interrupting the run.
   digest (gate runs, reopenings, Forward Fixes and withdrawals, plan edits, spec-trace amendments, retry,
   escalation, remediation and infrastructure counts, Finding counts), the Tasks with friction and their failure
   kinds, and run-level engine-revision adoptions. It is pure and reads only protected state.
-- `core/retro-triggers.ts` judges each Wave's digest: a terminal escalation, a second Wave Gate run (abandoned
+- `core/retro-triggers.ts` judges each Wave's digest: an escalation, a second Wave Gate run (abandoned
   runs count, as the audits that retired them name them), a plan change (plan edit, Forward Fix or its
   withdrawal, completed-Wave reopening), Task reopenings beyond the one that acting on a Finding takes, or the
   engine moved under the run. Each Wave that crosses one gets a suggestion to run `/retro --wave <N>`. A

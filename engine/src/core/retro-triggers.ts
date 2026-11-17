@@ -4,7 +4,7 @@
  * run is where a retro is enforced (`complete-orchestration`).
  *
  * The thresholds are the shapes behind loom#198 and loom#199: a Task that
- * reached terminal escalation, a Wave Gate that needed a second run, an
+ * escalated (remediated or not), a Wave Gate that needed a second run, an
  * operator changing the Wave's plan (a plan edit, a Forward Fix or its
  * withdrawal, a completed Wave reopened), Tasks reopened more than once, and
  * the engine being moved under a live run. One Task reopening is the normal
@@ -58,11 +58,22 @@ export function retroSuggestions(facts: RetroFacts): readonly RetroSuggestion[] 
   }));
 }
 
+/**
+ * The suggestions still fresh: for the active Wave and the Wave that
+ * completed last. Older Waves' friction is the end-of-run retro's to read;
+ * `helper retro-facts` reports every Wave's suggestion for that retro.
+ */
+export function freshRetroSuggestions(facts: RetroFacts): readonly RetroSuggestion[] {
+  const lastCompleted = facts.waves.filter(({ progress }) => progress === "completed").at(-1)?.wave;
+  const active = facts.waves.find(({ progress }) => progress === "active")?.wave;
+  return freeze(retroSuggestions(facts).filter(({ wave }) => wave === lastCompleted || wave === active));
+}
+
 /** The operator's sentence for one trigger. */
 export function describeRetroTrigger(trigger: RetroTrigger): string {
   switch (trigger.kind) {
     case "escalation":
-      return `terminal escalation of ${trigger.taskIds.join(", ")}`;
+      return `escalation of ${trigger.taskIds.join(", ")}`;
     case "repeated-wave-gate":
       return `${trigger.runs} Wave Gate runs`;
     case "plan-changed":

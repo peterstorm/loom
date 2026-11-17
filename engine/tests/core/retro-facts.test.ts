@@ -5,7 +5,12 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { gateRunCount, retroFacts, waveFriction, type WaveFriction } from "../../src/core/retro-facts";
-import { describeRetroTrigger, retroSuggestions, waveRetroTriggers } from "../../src/core/retro-triggers";
+import { describeRetroTrigger, freshRetroSuggestions, retroSuggestions, waveRetroTriggers } from "../../src/core/retro-triggers";
+import { parseOrchestrationRunId } from "../../src/core/orchestration-contract";
+import { parseTaskId } from "../../src/core/task-id";
+import { reopenedTaskIds } from "../../src/core/task-revalidation";
+import { DISTILL_VERIFICATION_POLICY, serializeVerificationPolicy } from "../../src/core/verification-policy";
+import { value } from "../fixtures/parse-result";
 import { renderRetroStatus, renderWaveDigest, retroStatusReport } from "../../src/core/retro-status";
 import { newWaveGate } from "../../src/core/wave-gate-model";
 import type { Task, TaskGraph } from "../../src/types";
@@ -15,7 +20,7 @@ import { i6RunnerManifest } from "../fixtures/i6-runner-manifest";
 import { completedWaveGateFixture, protectedGraphFixture } from "../fixtures/task-lifecycle";
 
 /** Wave 1 completed, Wave 2 active: T1 (Wave 2) escalated, T2 and T3 clean. */
-function graph(overrides: Partial<TaskGraph> = {}, tasks?: readonly Task[]): TaskGraph {
+function graph(overrides: Readonly<Record<string, unknown>> = {}, tasks?: readonly Task[]): TaskGraph {
   return protectedGraphFixture({
     spec_trace_version: 2,
     current_phase: "execute",
@@ -55,16 +60,46 @@ describe("retroFacts", () => {
     expect(facts.waves[0]).toMatchObject({ escalations: 0, gateRuns: { completed: 1, retired: 0, abandoned: 0 }, tasks: [] });
   });
 
-  it("counts an engine moved under the run once, at run level", () => {
+  it("counts the engine revision adoptions a pinned run recorded, at run level", () => {
     expect(retroFacts(graph()).engineRevisionAdoptions).toBe(0);
+    const revision = (byte: string) => `sha256:${byte.repeat(64)}`;
+    const pinned = graph({
+      engine_revision: {
+        schemaVersion: 1, kind: "pinned", revision: revision("c"),
+        adoptions: [{ from: revision("a"), to: revision("b"), reason: "fix landed" }, { from: revision("b"), to: revision("c"), reason: "second fix" }],
+      },
+    });
+    expect(retroFacts(pinned).engineRevisionAdoptions).toBe(2);
+  });
+
+  it("counts an abandoned run once across the audits that name it, retired runs, withdrawals, and leaves Distill Tasks out", () => {
+    const base = graph();
+    const runId = value(parseOrchestrationRunId("w2-gate-1"));
+    const t1 = value(parseTaskId("T1"));
+    const state: TaskGraph = {
+      ...base,
+      task_reopening_history: [{ schemaVersion: 1, kind: "implemented-tasks-reopened", wave: 2, reason: "finding", abandonedRunId: runId, ...value(reopenedTaskIds([t1], [])) }],
+      forward_fix_history: [{ schemaVersion: 1, kind: "forward-fix-added", wave: 2, fixTaskId: t1, heldTaskIds: [value(parseTaskId("T2"))], sealedPaths: ["src/t3.ts"], reason: "breach", abandonedRunId: runId }],
+    };
+    const digest = waveFriction(state, 2);
+    expect(digest.gateRuns).toEqual({ completed: 0, retired: 0, abandoned: 1 });
+    expect(digest).toMatchObject({ taskReopenings: 1, forwardFixes: 1 });
+    expect(digest.tasks.find(({ taskId }) => taskId === "T2")).toMatchObject({ heldByForwardFixes: ["T1"] });
+    expect(digest.tasks.find(({ taskId }) => taskId === "T1")).toMatchObject({ forwardFix: true, reopenings: 1 });
+    const withDistill = graph({}, [...base.tasks, i6PlanTask("T9", 2, ["src/t1.ts"], {
+      agent: "distill-agent", description: "Distill pass", verification_policy: serializeVerificationPolicy(DISTILL_VERIFICATION_POLICY),
+    })]);
+    expect(waveFriction(withDistill, 2).tasks.map(({ taskId }) => taskId)).not.toContain("T9");
   });
 
   it("sums every Wave's escalations to the run's escalation receipts (property)", () => {
-    fc.assert(fc.property(fc.array(fc.boolean(), { minLength: 1, maxLength: 6 }), (escalated) => {
-      const tasks = escalated.map((isEscalated, index) => {
-        const task = i6PlanTask(`T${index + 1}`, 2, [`src/t${index + 1}.ts`, `src/t${index + 1}.test.ts`]);
-        return (isEscalated && index === 0 ? { ...task, ...implementationEscalatedTaskFields() } : task) as Task;
-      });
+    // Only T1's fixture lineage escalates; the property varies whether it does and how many clean Tasks sit beside it.
+    fc.assert(fc.property(fc.boolean(), fc.integer({ min: 0, max: 5 }), (escalates, clean) => {
+      const first = i6PlanTask("T1", 2, ["src/t1.ts", "src/t1.test.ts"]);
+      const tasks = [
+        (escalates ? { ...first, ...implementationEscalatedTaskFields() } : first) as Task,
+        ...Array.from({ length: clean }, (_unused, index) => i6PlanTask(`T${index + 2}`, 2, [`src/t${index + 2}.ts`, `src/t${index + 2}.test.ts`])),
+      ];
       const state = graph({}, [i6PlanTask("T99", 1, ["src/t99.ts", "src/t99.test.ts"], { status: "completed", review_status: "passed" }), ...tasks]);
       const total = state.tasks.reduce((sum, task) =>
         sum + (task.implementation_attempt_history ?? []).filter((receipt) => receipt.transition === "escalation-required").length, 0);
@@ -97,6 +132,15 @@ describe("waveRetroTriggers", () => {
     expect(describeRetroTrigger(suggestions[0]!.triggers[0])).toBe("the engine revision moved 1 time under the run");
   });
 
+  it("suggests only for the active Wave and the Wave that completed last", () => {
+    const escalated = (wave: number, progress: WaveFriction["progress"]): WaveFriction => ({
+      ...quiet(wave, progress), escalations: 1, tasks: [{ ...retroFacts(graph()).waves[1]!.tasks[0]!, wave }],
+    });
+    const facts = { waves: [escalated(1, "completed"), escalated(2, "completed"), escalated(3, "active")], engineRevisionAdoptions: 0 };
+    expect(retroSuggestions(facts).map(({ wave }) => wave)).toEqual([1, 2, 3]);
+    expect(freshRetroSuggestions(facts).map(({ wave }) => wave)).toEqual([2, 3]);
+  });
+
   it("counts every Wave Gate run a digest saw", () => {
     expect(gateRunCount({ ...quiet(1), gateRuns: { completed: 1, retired: 1, abandoned: 2 } })).toBe(4);
   });
@@ -112,13 +156,13 @@ describe("the status retro report", () => {
       "- retro:",
       "  - Wave 1 (completed): 1 Wave Gate run",
       expect.stringMatching(/^ {2}- Wave 2 \(active\): 1 retry, 1 escalation/),
-      "  - suggested: /retro --wave 2 (terminal escalation of T1)",
+      "  - suggested: /retro --wave 2 (escalation of T1)",
     ]);
   });
 
   it("says it observed nothing when the TaskGraph does not parse", () => {
     const report = retroStatusReport({ ok: false, error: "bad" });
-    expect(renderRetroStatus(report)).toEqual(["- retro: not observed (the TaskGraph did not parse)"]);
+    expect(renderRetroStatus(report)).toEqual(["- retro: not observed (the TaskGraph did not parse: bad)"]);
   });
 
   it("renders a quiet Wave as having no friction", () => {

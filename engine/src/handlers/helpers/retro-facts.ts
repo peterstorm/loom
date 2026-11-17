@@ -14,7 +14,7 @@ import { taskGraphPath } from "../../config";
 import { parseTaskGraph } from "../../state-manager";
 import { retroFacts } from "../../core/retro-facts";
 import { retroSuggestions } from "../../core/retro-triggers";
-import { isFlagToken } from "../../core/cli-flag-token";
+import { isFlagToken, positiveIntegerToken } from "../../core/cli-flag-token";
 
 export const RETRO_FACTS_USAGE = "Usage: helper retro-facts [--wave <N>] [--graph <path to a live or archived TaskGraph>]";
 
@@ -30,8 +30,8 @@ function parseArgs(args: readonly string[]): Readonly<{ ok: true; value: RetroFa
     if (value === undefined || isFlagToken(value)) return { ok: false, error: `${flag} needs a value. ${RETRO_FACTS_USAGE}` };
     if (flag === "--wave") {
       if (wave !== null) return { ok: false, error: `--wave is given twice. ${RETRO_FACTS_USAGE}` };
-      if (!/^[1-9][0-9]*$/.test(value)) return { ok: false, error: `--wave must be a positive integer. ${RETRO_FACTS_USAGE}` };
-      wave = Number(value);
+      wave = positiveIntegerToken(value);
+      if (wave === null) return { ok: false, error: `--wave must be a positive integer. ${RETRO_FACTS_USAGE}` };
     } else {
       if (graph !== null) return { ok: false, error: `--graph is given twice. ${RETRO_FACTS_USAGE}` };
       graph = value;

@@ -377,7 +377,7 @@ An `.active` entry with no running Claude Code agent behind it needs no hand rem
 
 ### Retrospectives
 
-Every TaskGraph records its own friction: attempt receipts, escalations and remediations, reopenings, Forward Fixes, plan edits, retired Wave Gate runs and Finding counts. `helper orchestration status` shows each started Wave's friction digest in its `retro` report, and suggests `/retro --wave <N>` for the active Wave or the Wave that completed last when it crossed a threshold: a terminal escalation, a second Wave Gate run, a plan change (plan edit, Forward Fix or its withdrawal, Wave reopening) or repeated Task reopenings. A suggestion never blocks (ADR-0083).
+Every TaskGraph records its own friction: attempt receipts, escalations and remediations, reopenings, Forward Fixes, plan edits, retired Wave Gate runs and Finding counts. `helper orchestration status` shows each started Wave's friction digest in its `retro` report, and suggests `/retro --wave <N>` for the active Wave or the Wave that completed last when it crossed a threshold: a terminal escalation, a second Wave Gate run, a plan change (plan edit, Forward Fix or its withdrawal, Wave reopening), repeated Task reopenings, or the engine revision moved under the run. A suggestion never blocks (ADR-0083).
 
 ```bash
 bun "$LOOM_DIR/engine/src/cli.ts" helper retro-facts [--wave <N>] [--graph <archived graph>]   # the facts, as JSON

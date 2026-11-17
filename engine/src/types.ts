@@ -992,9 +992,11 @@ export type StatusReasonKind =
    *  observes them again and refuses the spawn on anything it cannot read. */
   | "skeletons-unobserved"
   | "run-complete"
-  /** The final Wave's gate committed and every Task is completed: the
-   *  orchestration is finished and `helper complete-orchestration` retires it. */
+  /** The final Wave's gate committed, every Task is completed and a whole-run
+   *  retro is recorded (ADR-0083): `helper complete-orchestration` retires it. */
   | "orchestration-complete"
+  /** Every Wave is complete but the run's retro is neither recorded nor
+   *  skipped: run /retro, or `helper record-retro --skip`, then retire. */
   | "retro-required"
   | "completion-prerequisite-failed"
   | "completion-eligible"
