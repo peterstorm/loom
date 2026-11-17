@@ -839,13 +839,14 @@ function bindLiveRun(
   const abandonment = bound.value.handle.readAbandonment();
   if (!abandonment.ok) return { kind: "error", message: abandonment.error.message };
   if (abandonment.value === null) return bound;
-  const replacement = abandonment.value.supersededBy === null
-    ? "it was not superseded"
-    : `superseded by ${abandonment.value.supersededBy}`;
+  const { supersededBy, reason } = abandonment.value;
+  const next = supersededBy === null
+    ? "start a fresh run with a new --run id: a run replays the results it recorded, so an engine fix never re-judges them"
+    : `advance ${supersededBy}, which replaced it`;
   return {
     kind: "error",
-    message: `run ${bound.value.handle.runId} was abandoned (${replacement}): ${abandonment.value.reason} — ` +
-      "`inspect` still reads its evidence; advance the run that replaced it instead",
+    message: `run ${bound.value.handle.runId} was abandoned (${supersededBy === null ? "not superseded" : `superseded by ${supersededBy}`}): ` +
+      `${reason}. \`inspect\` still reads its evidence; ${next}`,
   };
 }
 

@@ -386,13 +386,14 @@
     },
     {
       "module": "engine/src/machine/",
-      "description": "The Guarded Skill Machine: a pure reducer core (types, advance, evidence, extraction) and its ledger/report-discovery/task-graph-pointer shell. Imports itself, the core, the type barrel, config, ts-pattern and the lock and no-follow filesystem primitives; node builtins only in the shell files granted below.",
+      "description": "The Guarded Skill Machine: a pure reducer core (types, advance, evidence, extraction) and its ledger/report-discovery/task-graph-pointer shell. Imports itself, the core, the type barrel, config, the configuration-directory read, ts-pattern and the lock and no-follow filesystem primitives; node builtins only in the shell files granted below.",
       "allow": [
         "./",
         "engine/src/machine/",
         "engine/src/core/",
         "engine/src/types",
         "engine/src/config",
+        "engine/src/utils/claude-config-dir",
         "engine/src/utils/lock",
         "engine/src/utils/no-follow-fs",
         "ts-pattern"
@@ -460,12 +461,13 @@
     },
     {
       "module": "engine/src/cli.ts",
-      "description": "The process entry point: routes argv to a handler through the routing table. Imports the routing table, phase init, runtime compatibility, the type barrel, the no-follow filesystem primitives, node builtins and ts-pattern.",
+      "description": "The process entry point: routes argv to a handler through the routing table. Imports the routing table, phase init, runtime compatibility, the type barrel, the exit that waits for its output to drain, the no-follow filesystem primitives, node builtins and ts-pattern.",
       "allow": [
         "engine/src/handler-routes",
         "engine/src/phase-init",
         "engine/src/runtime-compatibility",
         "engine/src/types",
+        "engine/src/utils/exit-after-flush",
         "engine/src/utils/no-follow-fs",
         "node:",
         "ts-pattern"

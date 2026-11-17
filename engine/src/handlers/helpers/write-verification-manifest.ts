@@ -1,14 +1,17 @@
 import { CANONICAL_TASK_GRAPH_LOCATIONS_TEXT, projectRootOfCanonicalStatePath } from "../../core/engine-owned-paths";
-import { basename, dirname, join, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { match } from "ts-pattern";
 import { taskGraphPath } from "../../config";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "../../core/verification-manifest";
 import {
   canonicalizeManifestSource,
+  manifestExecutables,
   manifestReportPaths,
   parseManifestInstallArgs,
   planManifestInstall,
   unignoredReportRefusal,
+  unresolvedExecutablesWarning,
   type CanonicalManifest,
 } from "../../core/verification-manifest-install";
 import { GIT_PROBE_OUTPUT_LIMIT, spawnGit } from "../../utils/git-execution-policy";
@@ -142,6 +145,11 @@ const handler: HookHandler = async (stdin, args): Promise<HookResult> => {
   }
 
   const target = join(projectRoot.value, VERIFICATION_MANIFEST_SOURCE_PATH);
+  // Surface a runner that cannot resolve now, not when the first Task runs it (loom#198, Cause 5).
+  const unresolved = manifestExecutables(candidate.value, (process.env.PATH ?? "").split(delimiter))
+    .filter(({ candidates }) => !candidates.some(({ kind, path }) => existsSync(kind === "project" ? join(projectRoot.value, path) : path)));
+  const warning = unresolvedExecutablesWarning(unresolved);
+  if (warning !== null) process.stderr.write(`${warning}\n`);
   try {
     ensureDirectoryNoFollow(dirname(target));
     const plan = planManifestInstall(

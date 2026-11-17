@@ -43,6 +43,10 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration adopt-engine-run-tests \
 
 It refuses outside execute, while any implementation attempt is reserved or a subagent is active, and when the frozen manifest has no `affectedRunner`; it is idempotent. The adoption is recorded on the field with the reason. From then on every brief carries the **Test evidence: engine runs only** paragraph with the `helper run-tests` call. A Task whose attempt 2 already failed I6 under the old mode needs `remediate` with its terminal receipt before it is dispatched again ([Implementation escalation](#implementation-escalation-semantic-attempt-2-exhausted)).
 
+## A run that replays its own failure
+
+A run replays the results it recorded: resuming it after an engine fix shows the same blocked diagnostic, because the fix never re-judges what the run already holds. Abandon it (`helper orchestration abandon`) and start a fresh run with a new `--run` id; resuming an abandoned run says which (`advance <successor>` when it names one, otherwise start a fresh run).
+
 ## Reopening an implemented Task to fix a Wave Gate Finding
 
 Use this when a Wave Gate Finding, critical or advisory, must be fixed in a Task that is already `implemented`: abandon the gate run, reopen the Task, and dispatch it again.

@@ -5191,7 +5191,21 @@ describe("orchestration CLI", () => {
       const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", "run.abandon-source"], "", root));
       expect(resumed.status).not.toBe(0);
       expect(resumed.stderr).toContain("was abandoned (superseded by run.abandon-replacement)");
-      expect(resumed.stderr).toContain("advance the run that replaced it instead");
+      expect(resumed.stderr).toContain("advance run.abandon-replacement, which replaced it");
+    }, 30_000);
+
+    it("tells the operator to start a fresh run id when an abandoned run names no successor (loom#198, Cause 5)", async () => {
+      const { root, runsRoot } = await reviewRun("run.abandon-alone");
+      const abandoned = (await runCli([
+        "abandon", "--runs-root", runsRoot, "--run", "run.abandon-alone", "--reason", "an engine defect blocked every slot",
+      ], "", root));
+      expect(abandoned.status, abandoned.stderr).toBe(0);
+
+      const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", "run.abandon-alone"], "", root));
+      expect(resumed.status).not.toBe(0);
+      expect(resumed.stderr).toContain("was abandoned (not superseded)");
+      expect(resumed.stderr).toContain("start a fresh run with a new --run id");
+      expect(resumed.stderr).not.toContain("which replaced it");
     }, 30_000);
 
     /**

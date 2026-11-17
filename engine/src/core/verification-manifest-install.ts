@@ -142,3 +142,49 @@ export function unignoredReportRefusal(unignored: readonly string[]): string | n
     `Add an operator-owned ignore rule (for example \`${COMPLETION_REPORT_ROOT}/\` in .gitignore) ` +
     "and untrack any of these paths Git already tracks (a tracked path is never ignored), then retry.";
 }
+
+/** One executable a manifest will run, and where the engine would look for it. */
+export type ManifestExecutable = Readonly<{
+  /** Which declaration names it: a check id, `affectedRunner` or `acceptanceRunner`. */
+  label: string;
+  executable: string;
+  /**
+   * Where it resolves: a project-root-relative path (`<cwd>/<executable>`) for
+   * an executable that names a path, else each `PATH` directory joined with it.
+   */
+  candidates: readonly Readonly<{ kind: "project"; path: string } | { kind: "absolute"; path: string }>[];
+}>;
+
+/**
+ * Every executable the manifest declares (its checks, its affected runner and
+ * its acceptance runner), each with the places the engine would resolve it
+ * (loom#198, Cause 5): an executable with a `/` is a path from the
+ * declaration's cwd, a bare name is looked up on `pathDirectories`.
+ */
+export function manifestExecutables(manifest: CanonicalManifest, pathDirectories: readonly string[]): readonly ManifestExecutable[] {
+  const raw: unknown = JSON.parse(manifest);
+  const parsed = parseVerificationManifest(raw);
+  if (!parsed.ok) throw new Error(`CanonicalManifest no longer parses: ${parsed.error.errors.join("; ")}`);
+  const value = parsed.value;
+  const declared: readonly Readonly<{ label: string; executable: string; cwd: string }>[] = [
+    ...value.checks.map((check) => ({ label: check.id, executable: check.executable, cwd: check.cwd })),
+    ...(value.affectedRunner === undefined ? [] : [{ label: "affectedRunner", ...value.affectedRunner }]),
+    ...(value.acceptanceRunner === undefined ? [] : [{ label: "acceptanceRunner", ...value.acceptanceRunner }]),
+  ];
+  const joined = (left: string, right: string): string => (left === "." || left === "" ? right : `${left.replace(/\/+$/u, "")}/${right}`);
+  return Object.freeze(declared.map(({ label, executable, cwd }) => Object.freeze({
+    label,
+    executable,
+    candidates: Object.freeze(executable.includes("/")
+      ? [Object.freeze({ kind: "project" as const, path: joined(cwd, executable) })]
+      : pathDirectories.filter((directory) => directory !== "").map((directory) => Object.freeze({ kind: "absolute" as const, path: joined(directory, executable) }))),
+  })));
+}
+
+/** The warning for executables none of whose candidates exists, or null when every one resolves. */
+export function unresolvedExecutablesWarning(unresolved: readonly ManifestExecutable[]): string | null {
+  if (unresolved.length === 0) return null;
+  const named = unresolved.map(({ label, executable }) => `${label} runs ${executable}`).join("; ");
+  return `write-verification-manifest: installed, but ${named}, which ${unresolved.length === 1 ? "does" : "do"} not resolve ` +
+    "from the project root or PATH here; the runner will fail when it is first run. Install the dependency or fix the executable, then re-run.";
+}
