@@ -291,6 +291,16 @@ describe("addForwardFix refuses what it is not for", () => {
     expect(decided(second.graph)).toEqual({ kind: "already-added", audit: first.audit });
   });
 
+  it("refuses a fix that takes part of a coupled file set, naming the rest (ADR-0082)", () => {
+    const graph = sealed({ tasks: [...sealed().tasks, completed("T5", ["package.json", "bun.lock"])] });
+    const parsed = parseForwardFixArgs(["--wave", "2", "--hold", "T3", "--file", "package.json", "--description", "d", "--reason", "r"]);
+    if (!parsed.ok) throw new Error(parsed.error);
+    expect(refusal(graph, parsed.value)).toMatchObject({ kind: "coupled-set-split", message: expect.stringContaining("not bun.lock") });
+    const whole = parseForwardFixArgs(["--wave", "2", "--hold", "T3", "--file", "package.json", "--file", "bun.lock", "--description", "d", "--reason", "r"]);
+    if (!whole.ok) throw new Error(whole.error);
+    expect(added(graph, whole.value).task.file_list).toEqual(["package.json", "bun.lock"]);
+  });
+
   it("refuses the active Wave's distill pass as a held Task", () => {
     const pass = taskFixture({
       id: "T6", description: "Distill pass for Wave 2", agent: "distill-agent", wave: 2, depends_on: [],

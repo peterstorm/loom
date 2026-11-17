@@ -94,7 +94,8 @@ import { parseWaveSpecCheckDocumentsAuthority, type WaveSpecCheckDocumentRejecti
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
 import { isExactGitSha } from "./core/git-sha";
 import { isAdoptionReason, isEngineRevision, MAX_ENGINE_REVISION_REASON_LENGTH } from "./core/engine-revision-pin";
-import { parsePlanEditReason, taskRescopedEdit } from "./core/wave-plan-edit";
+import { dependencyAddedEdit, parsePlanEditReason, taskRescopedEdit } from "./core/wave-plan-edit";
+import { dependencyCycles } from "./core/task-dependencies";
 import {
   amendmentHistoryError,
   parseSpecTraceContract,
@@ -1064,13 +1065,19 @@ const TASK_RESCOPED_EDIT_FIELDS = [
 
 const isStringArray = (raw: unknown): raw is readonly string[] => Array.isArray(raw) && raw.every((entry) => typeof entry === "string");
 
-/** A `task-rescoped` edit of a Task in the named Wave, built by the one constructor (`core/wave-plan-edit.ts`). */
-function parseTaskRescopedEdit(
+/**
+ * The fields every plan edit shares: exactly `fields` (plus any of
+ * `optional`), schema 1, a Wave of at least 1, and a Task id naming a Task of
+ * that Wave.
+ */
+function parsePlanEditHeader(
   record: Record<string, unknown>,
+  fields: readonly string[],
+  optional: readonly string[],
   label: string,
   tasks: readonly Record<string, unknown>[],
-): ParseResult<WavePlanEdit> {
-  const fieldsError = exactFieldsError(record, TASK_RESCOPED_EDIT_FIELDS, [], label);
+): ParseResult<Readonly<{ wave: number; taskId: string }>> {
+  const fieldsError = exactFieldsError(record, fields, optional, label);
   if (fieldsError !== null) return parseErr(fieldsError);
   if (record.schemaVersion !== 1) return parseErr(`${label} has invalid schema or kind`);
   const wave = parseIntegerBound(record.wave, `${label}.wave`, 1, "an integer >= 1 within the safe-integer range");
@@ -1081,14 +1088,49 @@ function parseTaskRescopedEdit(
   if (!tasks.some((task) => task.id === taskId && task.wave === wave.value)) {
     return parseErr(`${label}.taskId: ${taskId} is not a Task of Wave ${wave.value}`);
   }
+  return parseOk(Object.freeze({ wave: wave.value, taskId }));
+}
+
+/** A `task-rescoped` edit of a Task in the named Wave, built by the one constructor (`core/wave-plan-edit.ts`). */
+function parseTaskRescopedEdit(
+  record: Record<string, unknown>,
+  label: string,
+  tasks: readonly Record<string, unknown>[],
+): ParseResult<WavePlanEdit> {
+  const header = parsePlanEditHeader(record, TASK_RESCOPED_EDIT_FIELDS, ["sealed"], label, tasks);
+  if (!header.ok) return header;
+  const { wave, taskId } = header.value;
   if (!isStringArray(record.added) || !isStringArray(record.removed)) return parseErr(`${label}.added and .removed must be arrays of paths`);
   const revision = record.baselineRevision;
   if (revision !== null && typeof revision !== "string") return parseErr(`${label}.baselineRevision must be an exact Git commit id or null`);
+  const sealed = record.sealed ?? [];
+  if (!isStringArray(sealed)) return parseErr(`${label}.sealed must be an array of paths when present`);
+  if (record.sealed !== undefined && sealed.length === 0) return parseErr(`${label}.sealed is omitted, not empty, when nothing sealed was added`);
   const reason = parsePlanEditReason(record.reason);
   if (!reason.ok) return parseErr(`${label}.reason ${reason.error}`);
   const edit = taskRescopedEdit({
-    wave: wave.value, taskId, added: record.added, removed: record.removed, baselineRevision: revision, reason: reason.value,
+    wave, taskId, added: record.added, removed: record.removed, baselineRevision: revision, sealed, reason: reason.value,
   });
+  return edit.ok ? parseOk(edit.value) : parseErr(`${label} ${edit.error}`);
+}
+
+const DEPENDENCY_ADDED_EDIT_FIELDS = ["schemaVersion", "kind", "wave", "taskId", "dependsOn", "reason"] as const;
+
+/** A `dependency-added` edit of a Task in the named Wave, built by the one constructor (`core/wave-plan-edit.ts`). */
+function parseDependencyAddedEdit(
+  record: Record<string, unknown>,
+  label: string,
+  tasks: readonly Record<string, unknown>[],
+): ParseResult<WavePlanEdit> {
+  const header = parsePlanEditHeader(record, DEPENDENCY_ADDED_EDIT_FIELDS, [], label, tasks);
+  if (!header.ok) return header;
+  const { wave, taskId } = header.value;
+  if (!isStringArray(record.dependsOn)) return parseErr(`${label}.dependsOn must be an array of Task ids`);
+  const unknown = record.dependsOn.find((id) => !tasks.some((task) => task.id === id));
+  if (unknown !== undefined) return parseErr(`${label}.dependsOn: ${unknown} is not a Task of this TaskGraph`);
+  const reason = parsePlanEditReason(record.reason);
+  if (!reason.ok) return parseErr(`${label}.reason ${reason.error}`);
+  const edit = dependencyAddedEdit({ wave, taskId, dependsOn: record.dependsOn, reason: reason.value });
   return edit.ok ? parseOk(edit.value) : parseErr(`${label} ${edit.error}`);
 }
 
@@ -1096,12 +1138,10 @@ function parseTaskRescopedEdit(
 function parseWavePlanEdit(raw: unknown, label: string, tasks: readonly Record<string, unknown>[]): ParseResult<WavePlanEdit> {
   if (!isRecord(raw)) return parseErr(`${label} must be an object`);
   const record = raw as Record<string, unknown>;
-  switch (record.kind) {
-    case "task-rescoped":
-      return parseTaskRescopedEdit(record, label, tasks);
-    default:
-      return parseErr(`${label} has invalid schema or kind`);
-  }
+  // `kind` is wire data, not a union the type system owns: dispatch by test, and refuse any other value.
+  if (record.kind === "task-rescoped") return parseTaskRescopedEdit(record, label, tasks);
+  if (record.kind === "dependency-added") return parseDependencyAddedEdit(record, label, tasks);
+  return parseErr(`${label} has invalid schema or kind`);
 }
 
 function parseWavePlanEdits(
@@ -1297,7 +1337,28 @@ export function orphanExecutionReservationError(
       "run helper repair-task-graph to remove corrupt orphan reservations";
 }
 
-export function taskDependencyErrors(tasks: readonly Record<string, unknown>[]): readonly string[] {
+/**
+ * The same-Wave edges `wave_plan_edits` records as added by `add-dependency`
+ * (ADR-0081), as `"<task>→<dependency>"` keys. Only an audited edit makes a
+ * same-Wave edge legal; a decompose payload carries none.
+ */
+export function auditedSameWaveEdges(rawEdits: unknown): ReadonlySet<string> {
+  if (!Array.isArray(rawEdits)) return new Set();
+  return new Set(rawEdits.flatMap((edit) =>
+    isRecord(edit) && edit.kind === "dependency-added" && typeof edit.taskId === "string" && isStringArray(edit.dependsOn)
+      ? edit.dependsOn.map((dependency) => `${edit.taskId}→${dependency}`)
+      : []));
+}
+
+/**
+ * Every illegal `depends_on` edge, then every cycle: a self or unknown
+ * dependency, and a dependency in a later Wave, or in the same Wave unless
+ * `auditedSameWave` records it (ADR-0081).
+ */
+export function taskDependencyErrors(
+  tasks: readonly Record<string, unknown>[],
+  auditedSameWave: ReadonlySet<string> = new Set(),
+): readonly string[] {
   const byId = new Map(
     tasks.flatMap((task) => typeof task.id === "string" ? [[task.id, task] as const] : []),
   );
@@ -1316,17 +1377,22 @@ export function taskDependencyErrors(tasks: readonly Record<string, unknown>[]):
         errors.push(`Task ${id}: depends on non-existent '${dependency}'`);
         continue;
       }
-      if (
-        typeof task.wave === "number" && typeof dependencyTask.wave === "number" &&
-        dependencyTask.wave >= task.wave
-      ) {
+      if (typeof task.wave !== "number" || typeof dependencyTask.wave !== "number") continue;
+      if (dependencyTask.wave === task.wave && auditedSameWave.has(`${id}→${dependency}`)) continue;
+      if (dependencyTask.wave >= task.wave) {
         errors.push(
-          `Task ${id} (wave ${task.wave}): depends on '${dependency}' (wave ${dependencyTask.wave}) — deps must be in earlier wave`,
+          `Task ${id} (wave ${task.wave}): depends on '${dependency}' (wave ${dependencyTask.wave}) — deps must be in earlier wave ` +
+            "(or added within the Wave by helper orchestration add-dependency)",
         );
       }
     }
   }
-  return errors;
+  if (errors.length > 0) return errors;
+  const graph = tasks.flatMap((task) =>
+    typeof task.id === "string" && typeof task.wave === "number" && isStringArray(task.depends_on)
+      ? [{ id: task.id, wave: task.wave, depends_on: task.depends_on }]
+      : []);
+  return dependencyCycles(graph);
 }
 
 /**
@@ -2447,7 +2513,7 @@ function parseTaskGraphTasks(
     return [];
   })[0];
   if (relationError !== undefined) return parseErr(relationError);
-  const dependencyError = taskDependencyErrors(parsedTasks)[0];
+  const dependencyError = taskDependencyErrors(parsedTasks, auditedSameWaveEdges(obj.wave_plan_edits))[0];
   if (dependencyError !== undefined) return parseErr(dependencyError);
   const trace = parseSpecTraceContract(obj.spec_trace_version, parsedTasks);
   return trace.ok ? parseOk(parsedTasks) : parseErr(specTraceDiagnosticMessages(trace).join("; "));

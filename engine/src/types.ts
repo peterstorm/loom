@@ -896,10 +896,22 @@ export type SpecTraceAmendmentChange = Readonly<{
 /**
  * One audited edit of a pending Task's plan in the active Wave or a later one
  * (`helper orchestration rescope-task`, loom#198 Cause 3). A union over edit
- * kinds: today a Task's file list re-scoped; adding a Task or a dependency
- * (loom#199) are further kinds of the same history.
+ * kinds: a Task's file list re-scoped, or dependency edges added to a Task
+ * (`add-dependency`, ADR-0081).
  */
-export type WavePlanEdit = TaskRescopedEdit;
+export type WavePlanEdit = TaskRescopedEdit | DependencyAddedEdit;
+
+/** Dependency edges added to a pending Task of the active Wave (ADR-0081). */
+export type DependencyAddedEdit = Readonly<{
+  schemaVersion: 1;
+  kind: "dependency-added";
+  wave: number;
+  taskId: string;
+  /** The Tasks it now depends on, distinct, in the order added; none it depended on before. */
+  dependsOn: OrchestrationNonEmpty<string>;
+  /** The operator's non-blank reason, at most 500 characters. */
+  reason: string;
+}>;
 
 /** A pending Task's `file_list` changed: what was added and removed, and why. */
 export type TaskRescopedEdit = Readonly<{
@@ -911,6 +923,9 @@ export type TaskRescopedEdit = Readonly<{
   added: readonly string[];
   /** Paths removed, in their former file-list order. At least one of the two is non-empty. */
   removed: readonly string[];
+  /** The added paths a completed Wave's Task lists, named explicitly with `--add-sealed-file`
+   *  (ADR-0081); a subset of `added`. Absent in audits written before it existed: none. */
+  sealed?: readonly string[];
   /** The Task's `start_sha` the added files' population baseline was read at;
    *  null when nothing was added or the Task carried no population baseline to extend. */
   baselineRevision: string | null;

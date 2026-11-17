@@ -35,6 +35,7 @@ import {
 import { checkPlanModelBindings, productionModelBindingDeps } from "./validate-model-bindings";
 import {
   orphanExecutionReservationError,
+  auditedSameWaveEdges,
   taskDependencyErrors,
   taskGraphLifecycleErrors,
   parseTaskGraph,
@@ -62,6 +63,7 @@ import {
   renderJudgedPathProblem,
   type JudgedPathTaskView,
 } from "../../core/judged-paths";
+import { coupledSetGaps, describeCoupledSetGap } from "../../core/coupled-file-sets";
 export type { ValidationResult } from "./validation-result";
 
 const VALID_PHASES = new Set<string>(PHASE_ORDER);
@@ -202,7 +204,7 @@ export function validateFull(
     const orphan = orphanExecutionReservationError(validTaskRecords, json.executing_tasks);
     if (orphan !== null) errors.push(orphan);
   }
-  errors.push(...taskDependencyErrors(validTaskRecords));
+  errors.push(...taskDependencyErrors(validTaskRecords, auditedSameWaveEdges(json.wave_plan_edits)));
 
   const redThenGreen = taskGraphRedThenGreenScope(json);
   // The authored roster as the Judged Path rule reads it. Only a Task whose
@@ -325,6 +327,15 @@ export function validateFull(
   errors.push(...specTraceDiagnosticMessages(trace));
   // Every judgement must land while its subject's Wave is open (judged-paths.ts).
   errors.push(...judgedPathProblems(judgedPathRoster).map(renderJudgedPathProblem));
+  // A package manifest and its lockfile belong to one Task (ADR-0082). Only an
+  // authored payload is held to it: live graphs predate the rule.
+  if (scope === "decompose-payload") {
+    const roster = validTaskRecords.flatMap((task) =>
+      typeof task.id === "string" && Array.isArray(task.file_list) && task.file_list.every((path) => typeof path === "string")
+        ? [{ id: task.id, file_list: task.file_list as readonly string[] }]
+        : []);
+    for (const task of roster) errors.push(...coupledSetGaps(roster, task).map((gap) => `Task ${task.id}: ${describeCoupledSetGap(gap)}`));
+  }
 
   // Check wave contiguity — waves must be consecutive (1,2,3 not 1,3,5)
   const waves = [...new Set(validTaskRecords.map((task) => task.wave as number))]

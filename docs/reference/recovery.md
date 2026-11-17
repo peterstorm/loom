@@ -98,12 +98,31 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration rescope-task \
 
 - the precondition `reopen-task` uses (execute Phase, no live Wave Gate run, no executing Task or attempt), and no active subagent (checked before and under the lock);
 - the Task to be `pending`, in the active Wave or a later one, not a Distill Task and not armed for attestation (an `implemented` Task is reopened first);
-- every added path to be free: no protected verification path, no path another Task of the same Wave lists, no path a completed Wave's Task lists (that is a [Forward Fix](#a-judgement-fails-on-code-a-completed-wave-sealed)), and no frozen Acceptance Contract path unless the Task is that contract's writer;
+- every added path to be free: no protected verification path, no path another Task of the same Wave lists, and no frozen Acceptance Contract path unless the Task is that contract's writer;
+- a path a completed Wave's Task lists to be named with `--add-sealed-file`, and every `--add-sealed-file` path to be one (ADR-0081); plain `--add-file` refuses a sealed path;
+- the Task, after the edit, to list every member of a coupled file set it lists any member of, as far as any Task of the graph lists them: a package manifest and the lockfiles beside it change together (ADR-0082). To move a set onto one Task, first remove the member from the Task that holds it, then add the whole set to the Task that takes it;
 - every removed path to be one the Task lists (or one an earlier re-scope of it already removed, so a repeat is a no-op), none the plan's export bindings name, and the list never to become empty;
 - a Task that owes red-then-green to keep a test file under the frozen classification;
 - a non-blank `--reason` of at most 500 characters.
 
-The Task's Proof is re-derived for the new list, recorded skeleton outcomes of removed paths are dropped, and its attempt baseline is cleared for the next registration to capture. A Task that already carries a population baseline (`artifact_baseline`, from population or an earlier attempt) has it extended: the helper reads each added file as Git held it at the Task's `start_sha`, outside the lock, and the commit refuses bytes read at any other revision, so Proof judges an added file from the same boundary as the rest. A request that adds a file to a Task with a baseline but no `start_sha` is refused. One `task-rescoped` audit is appended to `wave_plan_edits` (Wave, Task, added and removed paths, the `start_sha` the added files were read at or `null`, and the reason). Repeating a request that is already applied changes nothing. Then dispatch the Task from `helper orchestration brief --task <id>`.
+The Task's Proof is re-derived for the new list, recorded skeleton outcomes of removed paths are dropped, and its attempt baseline is cleared for the next registration to capture. A Task that already carries a population baseline (`artifact_baseline`, from population or an earlier attempt) has it extended: the helper reads each added file as Git held it at the Task's `start_sha`, outside the lock, and the commit refuses bytes read at any other revision, so Proof judges an added file from the same boundary as the rest. A request that adds a file to a Task with a baseline but no `start_sha` is refused. One `task-rescoped` audit is appended to `wave_plan_edits` (Wave, Task, added and removed paths, the added paths that were sealed, the `start_sha` the added files were read at or `null`, and the reason). Repeating a request that is already applied changes nothing. Then dispatch the Task from `helper orchestration brief --task <id>`.
+
+## Ordering Tasks within the active Wave
+
+Use this when one pending Task of the active Wave must run after another, for example a benchmark after the code it measures. Do not order Tasks with operator notes; the engine does not read them.
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration add-dependency \
+  --task T12 --on T25 [--on <task-id>]... --reason "T12 benchmarks the code T25 changes"
+```
+
+Under the TaskGraph lock `add-dependency` requires the precondition `reopen-task` uses, no active subagent, and:
+
+- the Task to be `pending` in the active Wave, not a Distill Task and not armed for attestation;
+- every `--on` Task to exist, to be in the active Wave or an earlier one, and not to be a Distill Task;
+- no edge to close a cycle; the refusal names it (`T28 → T12 → T25 → T28`).
+
+A dependency in the same Wave is satisfied once that Task has settled its implementation (ADR-0081); one in an earlier Wave once it is `completed`. Status, registration and the brief withhold the waiting Task under one rule, the `dependency` Dispatch Hold. When a dependency reaches terminal escalation, status escalates the Wave and names the Tasks blocked behind it; remediate the escalated Task and they run. One `dependency-added` audit is appended to `wave_plan_edits`, and the State File refuses a same-Wave edge no such audit records. Repeating an applied request changes nothing.
 
 ## A judgement fails on code a completed Wave sealed
 

@@ -58,11 +58,22 @@ A pending Task that owes red-then-green but lists no test file can only fail I6 
 
 ```bash
 bun {LOOM_DIR}/engine/src/cli.ts helper orchestration rescope-task \
-  --task <task-id> --add-file <test path> [--add-file <path>]... [--remove-file <path>]... \
+  --task <task-id> --add-file <test path> [--add-file <path>]... [--add-sealed-file <path>]... [--remove-file <path>]... \
   --reason "<why the Task's file list changes>"
 ```
 
-Then dispatch the Task from its brief. The full contract is in `docs/reference/recovery.md` (Re-scoping a pending Task).
+A file a completed Wave sealed joins only through `--add-sealed-file`. A package manifest and its lockfile belong to one Task: move a member off the Task that holds it first, then add the whole set to the Task that takes it. Then dispatch the Task from its brief. The full contract is in `docs/reference/recovery.md` (Re-scoping a pending Task).
+
+## One Task of the Wave must run after another
+
+With the user's approval, make the order an engine-enforced dependency instead of an operator note:
+
+```bash
+bun {LOOM_DIR}/engine/src/cli.ts helper orchestration add-dependency \
+  --task <task-id> --on <task-id> [--on <task-id>]... --reason "<why it must wait>"
+```
+
+Status then withholds the Task until its dependencies settle, and names it as blocked when one of them escalates. A cycle is refused. The full contract is in `docs/reference/recovery.md` (Ordering Tasks within the active Wave).
 
 ## A judgement fails on code a completed Wave sealed
 

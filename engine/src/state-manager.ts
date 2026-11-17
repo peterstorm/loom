@@ -74,6 +74,7 @@ export {
   parseActiveWaveGateRegistration,
   parseCompletedWaveGateRegistration,
   parseTaskGraph,
+  auditedSameWaveEdges,
   taskDependencyErrors,
   taskGraphLifecycleErrors,
   taskIdError,

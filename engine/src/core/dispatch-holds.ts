@@ -5,13 +5,16 @@
  * (`validate-task-execution.ts`) and the brief all ask here, so status never
  * offers a dispatch registration would refuse or a brief would not render.
  *
- * Two holds exist:
+ * Three holds exist:
  *
  * - `distill-pass`: a Distill Task waits for every other Task of its Wave
  *   (ADR-0068, `distillDispatchBlockers`).
  * - `forward-fix`: a Task a Forward Fix holds waits for that fix Task, so its
  *   retry judges the fixed code rather than failing on the same breach
  *   (`forward_fix_history`, written by `addForwardFix` in `forward-fix.ts`).
+ * - `dependency`: a Task waits for the Tasks of its own Wave it depends on
+ *   until they settle their implementation (ADR-0081). A blocker that reached
+ *   terminal escalation is named as such: the dependent is blocked, not waiting.
  *
  * Pure module: no I/O, no clock, no randomness.
  */
@@ -20,11 +23,14 @@ import { match } from "ts-pattern";
 import { distillDispatchBlockers, distillWithheldMessage } from "./distill-task";
 import { nonEmpty, type NonEmpty } from "./orchestration-contract";
 import type { TaskId } from "./task-id";
+import { deriveTaskImplementationDispatch } from "./task-implementation-dispatch";
 import type { ForwardFixAudit, Task } from "../types";
 
 export type DispatchHold =
   | Readonly<{ kind: "distill-pass"; blockers: NonEmpty<string> }>
-  | Readonly<{ kind: "forward-fix"; fixTaskIds: NonEmpty<TaskId> }>;
+  | Readonly<{ kind: "forward-fix"; fixTaskIds: NonEmpty<TaskId> }>
+  /** Same-Wave dependencies not yet settled, and those of them that escalated. */
+  | Readonly<{ kind: "dependency"; blockers: NonEmpty<string>; escalated: readonly string[] }>;
 
 /** What the rule reads of a TaskGraph. */
 export type DispatchHoldGraph = Readonly<{
@@ -33,7 +39,7 @@ export type DispatchHoldGraph = Readonly<{
 }>;
 
 /** A Task that has settled its implementation and holds no reservation. */
-const settled = (task: Task, reserved: ReadonlySet<string>): boolean =>
+export const implementationSettled = (task: Task, reserved: ReadonlySet<string>): boolean =>
   (task.status === "implemented" || task.status === "completed") &&
   !reserved.has(task.id) && task.active_implementation_attempt === undefined;
 
@@ -47,9 +53,21 @@ function forwardFixHolders(graph: DispatchHoldGraph, reserved: ReadonlySet<strin
     .filter((audit) => audit.wave === task.wave && audit.heldTaskIds.some((id) => id === task.id))
     .flatMap(({ fixTaskId }) => {
       const fix = graph.tasks.find(({ id }) => id === fixTaskId);
-      return fix === undefined || settled(fix, reserved) ? [] : [fixTaskId];
+      return fix === undefined || implementationSettled(fix, reserved) ? [] : [fixTaskId];
     });
   return Object.freeze([...new Set(holders)]);
+}
+
+/**
+ * The Tasks of `task`'s own Wave it depends on that have not settled, in edge
+ * order. Earlier-Wave edges are registration's to check: they are satisfied
+ * only once completed, which the Wave's start already proved.
+ */
+function dependencyBlockers(graph: DispatchHoldGraph, reserved: ReadonlySet<string>, task: Task): readonly string[] {
+  return task.depends_on.filter((id) => {
+    const dependency = graph.tasks.find((candidate) => candidate.id === id);
+    return dependency !== undefined && dependency.wave === task.wave && !implementationSettled(dependency, reserved);
+  });
 }
 
 /**
@@ -61,7 +79,14 @@ export function dispatchHoldOf(graph: DispatchHoldGraph, reserved: ReadonlySet<s
   const distill = nonEmpty(distillDispatchBlockers(graph.tasks, reserved, task));
   if (distill !== null) return Object.freeze({ kind: "distill-pass", blockers: distill });
   const fixes = nonEmpty(forwardFixHolders(graph, reserved, task));
-  return fixes === null ? null : Object.freeze({ kind: "forward-fix", fixTaskIds: fixes });
+  if (fixes !== null) return Object.freeze({ kind: "forward-fix", fixTaskIds: fixes });
+  const blockers = nonEmpty(dependencyBlockers(graph, reserved, task));
+  if (blockers === null) return null;
+  const escalated = blockers.filter((id) => {
+    const blocker = graph.tasks.find((candidate) => candidate.id === id);
+    return blocker !== undefined && deriveTaskImplementationDispatch(blocker).kind === "escalated";
+  });
+  return Object.freeze({ kind: "dependency", blockers, escalated: Object.freeze(escalated) });
 }
 
 /** Why `taskId` is withheld, in the words status, registration and the brief all use. */
@@ -71,6 +96,10 @@ export function dispatchHoldMessage(taskId: string, hold: DispatchHold): string 
     .with({ kind: "forward-fix" }, ({ fixTaskIds }) =>
       `${taskId} is held by Forward Fix ${fixTaskIds.join(", ")} and runs after it settles, so its next attempt ` +
       "judges the fixed code")
+    .with({ kind: "dependency" }, ({ blockers, escalated }) => escalated.length > 0
+      ? `${taskId} is blocked by escalated dependency ${escalated.join(", ")}; remediate it (helper orchestration remediate) ` +
+        `before ${taskId} can run`
+      : `${taskId} depends on ${blockers.join(", ")} of its Wave and runs after ${blockers.length === 1 ? "it settles" : "they settle"}`)
     .exhaustive();
 }
 
@@ -83,6 +112,7 @@ export function stuckDispatchHoldMessage(taskId: string, hold: DispatchHold): st
   const subject = match(hold)
     .with({ kind: "distill-pass" }, () => "the distill pass")
     .with({ kind: "forward-fix" }, () => "the held Task")
+    .with({ kind: "dependency" }, () => "the dependent Task")
     .exhaustive();
   return `${dispatchHoldMessage(taskId, hold)}; none of them is dispatchable, active or escalated, ` +
     `so ${subject} can never start; repair the Task Graph`;

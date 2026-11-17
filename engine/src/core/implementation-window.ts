@@ -105,6 +105,16 @@ function withheldTasks(
 }
 
 /**
+ * The clause naming each withheld Task an escalated dependency blocks, so an
+ * escalation says who waits behind it (ADR-0081); empty when none does.
+ */
+function blockedBehind(withheld: readonly WithheldTask[]): string {
+  const blocked = withheld.flatMap(({ taskId, hold }) =>
+    hold.kind === "dependency" && hold.escalated.length > 0 ? [`${taskId} (by ${hold.escalated.join(", ")})`] : []);
+  return blocked.length === 0 ? "" : `. Blocked behind an escalated dependency: ${blocked.join(", ")}`;
+}
+
+/**
  * Classify a parsed protected graph against the implementation window.
  *
  * `not-in-window` covers everything that is NOT this state, so genuinely
@@ -245,7 +255,8 @@ export function classifyImplementationWindow(
         tasks: escalatedTasks,
       }),
       `Wave ${wave} requires implementation escalation; ${escalated.length} task(s) reached a terminal implementation failure. ` +
-        "Fix the cause, then remediate each Task with the helper orchestration remediate command on its status reason",
+        "Fix the cause, then remediate each Task with the helper orchestration remediate command on its status reason" +
+        blockedBehind(withheld),
     );
   }
   const [firstUnresolved, ...moreUnresolved] = unresolvedSkeletonBindings;
