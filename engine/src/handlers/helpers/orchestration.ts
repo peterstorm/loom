@@ -76,7 +76,7 @@
  * operation that would advance the run; nothing is removed.
  */
 
-import { REVIEWS_DIRECTORY_NAME, WAVE_GATE_RUNS } from "../../core/engine-owned-paths";
+import { runsRootBesideStateFile, WAVE_GATE_RUNS } from "../../core/engine-owned-paths";
 import { match, P } from "ts-pattern";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -363,7 +363,7 @@ function readGraph(path: string): unknown {
 }
 
 function canonicalWaveGateRunsRoot(statePath: string): string {
-  return join(dirname(dirname(resolve(statePath))), REVIEWS_DIRECTORY_NAME, WAVE_GATE_RUNS);
+  return runsRootBesideStateFile(resolve(statePath), WAVE_GATE_RUNS);
 }
 
 type StatusRunDirectoryBinding =

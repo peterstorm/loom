@@ -14,7 +14,12 @@ import {
   canonicalTaskGraphPath,
   engineOwnedPathClass,
   isEngineEvidencePath,
+  projectRootOfCanonicalStatePath,
+  RUN_LAYOUT_COMPONENTS,
+  runsRootBesideStateFile,
 } from "../../src/core/engine-owned-paths";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { isExcludedRemediationPath, parseCanonicalRepositoryRelativePath } from "../../src/core/remediation-machine";
 
 describe("engineOwnedPathClass", () => {
@@ -59,6 +64,60 @@ describe("engineOwnedPathClass", () => {
         expect(engineOwnedPathClass(`.pi/${tail}`)).toBe(engineOwnedPathClass(`.claude/${tail}`));
       },
     ));
+  });
+});
+
+describe("the derivations beside a State File", () => {
+  it("finds the project root of a canonical State File, and none for another layout", () => {
+    expect(projectRootOfCanonicalStatePath("/work/repo/.claude/state/active_task_graph.json")).toBe("/work/repo");
+    expect(projectRootOfCanonicalStatePath("/work/repo/.pi/state/active_task_graph.json")).toBe("/work/repo");
+    expect(projectRootOfCanonicalStatePath("/work/repo/.claude/state/other.json")).toBeNull();
+    expect(projectRootOfCanonicalStatePath("/work/repo/custom/active_task_graph.json")).toBeNull();
+  });
+
+  it("puts a runs root in the reviews directory of the State File's own harness", () => {
+    expect(runsRootBesideStateFile("/work/repo/.pi/state/active_task_graph.json", "wave-gate-runs")).toBe("/work/repo/.pi/reviews/wave-gate-runs");
+    expect(runsRootBesideStateFile("/work/repo/.claude/state/active_task_graph.json", "review-and-fix-runs"))
+      .toBe("/work/repo/.claude/reviews/review-and-fix-runs");
+  });
+
+  it("keeps the run layout set immutable at runtime", () => {
+    expect(() => (RUN_LAYOUT_COMPONENTS as Set<string>).add("evil-runs")).toThrow();
+    expect(RUN_LAYOUT_COMPONENTS.has("evil-runs")).toBe(false);
+  });
+});
+
+describe("the lint rule that keeps these paths in one module", () => {
+  const rule = JSON.parse(readFileSync(join(__dirname, "../../../.claude/linter/rules/inv-10-one-engine-owned-path-module.json"), "utf8")) as {
+    pattern: string; flags: string; excludePatterns: readonly string[];
+  };
+  const restates = (line: string): boolean => new RegExp(rule.pattern, rule.flags).test(line);
+
+  it.each([
+    'const STATE = ".pi/state/active_task_graph.json";',
+    "const ROOT = '.claude/reviews';",
+    'join(root, "reviews", "wave-gate-runs")',
+    'const layouts = ["panel-runs", "review-runs"];',
+    'const REPORT = `.loom/completion-reports/affected.json`;',
+    'const FILE = "active_task_graph.json";',
+  ])("flags a restatement in code: %s", (line) => {
+    expect(restates(line)).toBe(true);
+  });
+
+  it.each([
+    " * The State File lives in `.claude/state/active_task_graph.json`.",
+    "// keep panel-runs out of a staged set",
+    "/* .pi/reviews holds run evidence */",
+    'const SETTINGS = ".claude/settings.json";',
+    'const SPEC = ".claude/specs/x/spec.md";',
+    'const VIEW = "src/panel-runs-view.ts";',
+  ])("does not flag prose or other paths: %s", (line) => {
+    expect(restates(line)).toBe(false);
+  });
+
+  it("exempts only the owning module and tests", () => {
+    expect(rule.excludePatterns).toContain("engine/src/core/engine-owned-paths.ts");
+    expect(rule.excludePatterns.filter((pattern) => pattern.startsWith("engine/src/"))).toEqual(["engine/src/core/engine-owned-paths.ts"]);
   });
 });
 

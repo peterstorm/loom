@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { ENGINE_EVIDENCE_POLICY } from "../../src/core/engine-owned-paths";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
@@ -6,7 +7,6 @@ import {
   compareExactPathSets,
   createStandaloneResultPublicationAuthorityResolver,
   freezePathAuthority,
-  REMEDIATION_EXCLUDED_LAYOUTS,
   inspectVerifiedIndexInstallation,
   parseAuditedPathSet as parseAuditedPathSetWithAuthority,
   parseCanonicalRepositoryRelativePath,
@@ -413,16 +413,18 @@ describe("canonical remediation authority and path algebra", () => {
       };
     };
 
-    it("records the current policy, which names both harnesses", () => {
-      expect(REMEDIATION_EXCLUDED_LAYOUTS).toEqual([
-        ".git metadata",
-        ".claude/state",
-        ".pi/state",
-        ".claude/reviews (packets, review runs, panel runs, and review-and-fix runs)",
-        ".pi/reviews (packets, review runs, panel runs, and review-and-fix runs)",
-        "{.claude,.pi}/**/{panel-runs,review-runs,review-and-fix-runs,wave-gate-runs,orchestration-runs}",
-      ]);
-      expect(registeredAuthority().exclusionPolicyDigest).toBe(sha256(JSON.stringify(REMEDIATION_EXCLUDED_LAYOUTS)));
+    it("records the digest of the one evidence table its predicate interprets, which names both harnesses", () => {
+      expect(ENGINE_EVIDENCE_POLICY).toEqual({
+        schemaVersion: 1,
+        gitMetadataRoot: ".git",
+        stateRoots: [".claude/state", ".pi/state"],
+        runDirectoryRoots: [".claude/reviews", ".pi/reviews"],
+        runLayoutsUnder: {
+          harnesses: [".claude", ".pi"],
+          layouts: ["panel-runs", "review-runs", "review-and-fix-runs", "wave-gate-runs", "orchestration-runs"],
+        },
+      });
+      expect(registeredAuthority().exclusionPolicyDigest).toBe(sha256(JSON.stringify(ENGINE_EVIDENCE_POLICY)));
     });
 
     it("keeps an authority recorded under the legacy policy readable, and refuses any other policy", () => {

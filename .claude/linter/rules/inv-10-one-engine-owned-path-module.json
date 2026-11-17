@@ -13,6 +13,6 @@
     "/calibration/",
     "/scripts/"
   ],
-  "fixHint": "Import the constant or the classifier from engine/src/core/engine-owned-paths.ts (HARNESS_STATE_DIRECTORIES, RUN_DIRECTORY_ROOTS, CANONICAL_TASK_GRAPH_PATHS, TASK_GRAPH_FILE_NAME, RUN_LAYOUT_COMPONENTS, COMPLETION_REPORT_ROOT, canonicalWaveGateRunsRoot, engineOwnedPathClass) instead of restating the path. A new engine-owned path class is added there, once.",
+  "fixHint": "Import the constant or the classifier from engine/src/core/engine-owned-paths.ts (HARNESS_STATE_DIRECTORIES, RUN_DIRECTORY_ROOTS, CANONICAL_TASK_GRAPH_PATHS, canonicalTaskGraphPath, projectRootOfCanonicalStatePath, TASK_GRAPH_FILE_NAME, RUN_LAYOUTS, WAVE_GATE_RUNS, REVIEW_AND_FIX_RUNS, canonicalRunsRoot, runsRootBesideStateFile, COMPLETION_REPORT_ROOT, engineOwnedPathClass, isEngineEvidencePath) instead of restating the path. A new engine-owned path class is added there, once.",
   "enabled": true
 }
