@@ -15,7 +15,7 @@ import populate, { createPopulateTaskGraphHandler, resolvedSpecFile } from "../.
 import type { Task, TaskGraph } from "../../src/types";
 import { isDistillTask } from "../../src/core/distill-task";
 import { deriveWaveCompletionSuiteReadiness } from "../../src/core/wave-completion-suite-readiness";
-import { StateManager } from "../../src/state-manager";
+import { runningEngineIdentity, StateManager } from "../../src/state-manager";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import {
   defaultVerificationManifest,
@@ -347,6 +347,21 @@ describe("populate-task-graph — protected verification manifest authority", ()
     expect(result.kind).toBe("error");
     if (result.kind === "error") expect(result.message).toContain("non-canonical State File path");
     expect(stateBytes(statePath)).toBe(before);
+  });
+
+  it("pins the graph to the running engine revision (loom#198, Cause 4)", async () => {
+    const dir = tempDir();
+    execFileSync("git", ["init", "--quiet"], { cwd: dir });
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, [], {}, "custom", false);
+    writeManifest(dir);
+    process.chdir(dir);
+
+    expect((await populate(decomposeJson(plan), [])).kind).toBe("passthrough");
+
+    expect((JSON.parse(stateBytes(statePath)) as TaskGraph).engine_revision).toEqual({
+      schemaVersion: 1, kind: "pinned", revision: runningEngineIdentity().revision, adoptions: [],
+    });
   });
 
   it("prefers the Git root and preserves custom-layout compatibility inside a repository", async () => {

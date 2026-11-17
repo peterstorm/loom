@@ -8,10 +8,11 @@
  */
 
 import { lstatSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
-import type { HookHandler, HookResult, TaskGraph } from "../../types";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { engineRevisionPinAtPopulation, isSelfHosted } from "../../core/engine-revision-pin";
+import type { EngineRevisionPin, HookHandler, HookResult, TaskGraph } from "../../types";
 import { taskGraphPath } from "../../config";
-import { StateManager } from "../../state-manager";
+import { runningEngineIdentity, StateManager } from "../../state-manager";
 import { validateFull, fixFull } from "./validate-task-graph";
 import {
   checkPlanModelBindings,
@@ -494,6 +495,7 @@ function preparePopulation(
       : null,
     command: populationCommand(decompose, plan, args, {
       tasks: taskRoster.value, verificationManifest: preparedManifest.value, specIndex, observedSpecFile, proofBoundary,
+      engineRevisionPin: observeEngineRevisionPin(repositoryRoot),
     }),
   } };
 }
@@ -517,8 +519,19 @@ function observeAnnouncedSpecIndex(observedSpecFile: string | null): ReturnType<
 /** The values observed in the shell for one population command. */
 type ObservedPopulation = Pick<
   TaskGraphPopulationCommand,
-  "tasks" | "verificationManifest" | "specIndex" | "observedSpecFile" | "proofBoundary"
+  "tasks" | "verificationManifest" | "specIndex" | "observedSpecFile" | "proofBoundary" | "engineRevisionPin"
 >;
+
+/**
+ * The engine revision pin to record (loom#198, Cause 4): the running engine's
+ * content-addressed revision, or self-hosted when the orchestrated repository
+ * holds the engine package itself (each Wave would change the engine it runs on).
+ */
+function observeEngineRevisionPin(repositoryRoot: CanonicalGitRootObservation): EngineRevisionPin {
+  const identity = runningEngineIdentity();
+  const selfHosted = repositoryRoot.kind === "repository" && isSelfHosted(identity.packageRoot, repositoryRoot.root, sep);
+  return engineRevisionPinAtPopulation(identity.revision, selfHosted);
+}
 
 function populationCommand(
   decompose: DecomposeInput,

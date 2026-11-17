@@ -1,4 +1,5 @@
 import type { OwnerObligation, Phase, PlanContract, PlanInvariant, Task, TaskGraph } from "../types";
+import type { EngineRevisionPin } from "../types";
 import { acceptanceContractsFromPlan, frozenPaths, redWindowTaskIds, type AcceptanceContract } from "./acceptance-contract";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 import { match } from "ts-pattern";
@@ -152,6 +153,12 @@ export type TaskGraphPopulationCommand = Readonly<{
    *  records why Git could not capture it; the graph persists either arm as
    *  its `proof_boundary_observation`. */
   proofBoundary: PopulationProofBoundary;
+  /**
+   * The engine revision pin the shell observed (loom#198, Cause 4): the
+   * running revision, or self-hosted when the project is the engine package.
+   * Absent for a caller that observes no engine, whose graph is not pinned.
+   */
+  engineRevisionPin?: EngineRevisionPin;
   /** The validated plan's `## Contracts`; empty when the plan declares none. */
   contracts: readonly PlanContract[];
   /** The validated plan's `## Invariants`; empty when the plan declares none.
@@ -730,6 +737,7 @@ export function populateTaskGraph(
     export_bindings: _staleExportBindings,
     skeletons: _staleSkeletons,
     test_evidence: _staleTestEvidence,
+    engine_revision: _staleEngineRevision,
     ...existingWithoutWaveAuthority
   } = existing;
   const state: TaskGraph = Object.freeze({
@@ -764,6 +772,7 @@ export function populateTaskGraph(
     wave_gates: waveGates,
     verification_manifest: command.verificationManifest,
     ...(testEvidence.ok ? { test_evidence: testEvidence.value } : {}),
+    ...(command.engineRevisionPin === undefined ? {} : { engine_revision: command.engineRevisionPin }),
     ...(command.issue === undefined ? {} : { github_issue: command.issue }),
     ...(command.repo === undefined ? {} : { github_repo: command.repo }),
   });

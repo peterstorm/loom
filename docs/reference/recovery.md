@@ -43,6 +43,21 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration adopt-engine-run-tests \
 
 It refuses outside execute, while any implementation attempt is reserved or a subagent is active, and when the frozen manifest has no `affectedRunner`; it is idempotent. The adoption is recorded on the field with the reason. From then on every brief carries the **Test evidence: engine runs only** paragraph with the `helper run-tests` call. A Task whose attempt 2 already failed I6 under the old mode needs `remediate` with its terminal receipt before it is dispatched again ([Implementation escalation](#implementation-escalation-semantic-attempt-2-exhausted)).
 
+## The engine changed under a live orchestration
+
+Population pins the TaskGraph to the Loom engine revision it ran on (`engine_revision`: the content-addressed runtime revision of the installed package; loom#198, Cause 4). The State File's one write boundary refuses to persist a graph pinned to any other revision, so hooks and helpers on a different engine never judge the run by different rules. Reads and the guards are unaffected. The refusal names both revisions and leaves the State File untouched.
+
+When the plugin checkout changed (a pull, a merge, a branch switch), either restore the engine the run was pinned to, or continue on the running one:
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration adopt-engine-revision \
+  --reason "continue on main after the fix for #196"
+```
+
+It requires no active subagent (checked before and under the lock) and a non-blank `--reason` of at most 500 characters. It moves the pin to the running revision and appends `{ from, to, reason }` to `engine_revision.adoptions`, an unbroken chain the State File parser checks. A graph populated before pins existed has no pin and is not enforced; adopting gives it its first one (`from: null`). Repeating it on the running revision changes nothing. A project that holds the engine package itself (Loom orchestrating its own checkout in place) is recorded as `self-hosted`, since every Wave changes the engine it runs on; nothing is enforced there and adoption is refused. Develop Loom in a worktree, never in the checkout the plugin path points at.
+
+A settlement refused for a revision mismatch leaves its attempt unsettled: adopt (or restore the engine), then dispatch the Task again from its brief.
+
 ## Reopening an implemented Task to fix a Wave Gate Finding
 
 Use this when a Wave Gate Finding, critical or advisory, must be fixed in a Task that is already `implemented`: abandon the gate run, reopen the Task, and dispatch it again.

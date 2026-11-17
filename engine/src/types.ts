@@ -25,6 +25,18 @@ import type {
 } from "./core/completion-suite";
 import type { FrozenVerificationManifest, ProjectVerificationCoverage } from "./core/verification-manifest";
 import type { EngineRunTestEvidence } from "./core/test-evidence-mode";
+
+/** One audited move of a TaskGraph's engine pin: from the pinned revision (null: the graph had none) to the running one. */
+export type EngineRevisionAdoption = Readonly<{ from: string | null; to: string; reason: string }>;
+
+/**
+ * A TaskGraph's engine revision pin. `pinned`: only that runtime revision may
+ * write the graph, and each move is audited in `adoptions`, oldest first.
+ * `self-hosted`: the project is the engine package itself, so no pin applies.
+ */
+export type EngineRevisionPin =
+  | Readonly<{ schemaVersion: 1; kind: "pinned"; revision: string; adoptions: readonly EngineRevisionAdoption[] }>
+  | Readonly<{ schemaVersion: 1; kind: "self-hosted" }>;
 import type { Phase } from "./core/phases";
 import type { SettledFloor, SpecIndexObservation } from "./core/requirement-coverage";
 import type { ProofBoundaryObservation } from "./core/proof-boundary-observation";
@@ -1378,6 +1390,11 @@ export interface TaskGraph {
    *  to this graph's repository and frozen manifest are a Task's evidence.
    *  Its shape is `core/test-evidence-mode.ts`; its parser and policy live in `core/test-evidence-authority.ts`. */
   readonly test_evidence?: EngineRunTestEvidence;
+  /** The Loom engine revision this graph is written by (loom#198, Cause 4):
+   *  pinned at population, moved only by `orchestration adopt-engine-revision`.
+   *  Absent on a graph populated before the pin existed. The rules are in
+   *  `core/engine-revision-pin.ts`; `StateManager` enforces them. */
+  readonly engine_revision?: EngineRevisionPin;
   /** The audited edits of a pending Task's plan in the active Wave or a later
    *  one (`orchestration rescope-task`, loom#198 Cause 3), oldest first.
    *  Re-population drops them with the Tasks they edited. */
