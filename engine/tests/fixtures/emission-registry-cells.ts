@@ -27,6 +27,7 @@ import {
   validReviewerArgumentsV2,
   validReviewerArgumentsV3,
 } from "./emission-arguments";
+import { assertNever } from "./assert-never";
 import { mintEmissionBinding } from "./issued-emission";
 
 type FrozenSpecs = typeof EMISSION_TOOL_SPECS;
@@ -80,11 +81,6 @@ export const cellSchemaBytes = (cell: RegistryCell): string => cell.schema.schem
 
 /** The cell's schema digest: the SHA-256 of its frozen schema bytes. */
 export const cellSchemaDigest = (cell: RegistryCell): string => sha256Hex(cellSchemaBytes(cell));
-
-/** No engine module exports an `assertNever`; each module that proves totality declares its own. */
-const assertNever = (value: never): never => {
-  throw new Error(`unreachable registry cell: ${JSON.stringify(value)}`);
-};
 
 /** Canonical emission arguments per registry cell, minted through the shared
  *  emission-argument fixtures over the real zod schemas (the qualification

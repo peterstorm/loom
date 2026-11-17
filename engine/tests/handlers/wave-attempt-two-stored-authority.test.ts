@@ -10,7 +10,6 @@
  * derives the identical attempt-2 in stored mode.
  */
 
-import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import { describe, expect, it, afterAll } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,6 +21,7 @@ import {
   waveAttemptTwoRequestId,
 } from "../../src/core/wave-gate-membership";
 import { parseWaveRetryDiagnosticSection, WAVE_RETRY_PREAMBLE, WAVE_RETRY_FIXED_TAIL } from "../../src/core/reviewer-retry";
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import { openRunDirectory, type RunDirHandle } from "../../src/orchestration/run-directory-handle";
 import { buildContextPacket, buildReviewerContextPacket, contextPacketDigest, parseContextPacket, encodeByteSection, type ContextPacket } from "../../src/orchestration/context-packets";
 import {

@@ -4,7 +4,7 @@ This guide covers what a reviewer returns and how the engine admits it, read cov
 
 ## Reviewer Protocol v2
 
-Fresh standalone and Wave Gate reviews issue Reviewer Protocol v2 ([ADR-0009](adr/ADR-0009-versioned-reviewer-protocol.md)). There is no protocol flag: the engine selects v2 for every independent registration, and only an explicit [successor review](#explicit-successor-review) input selects v3. An operator never writes a reviewer payload. This section says what the engine admits, so that a refusal can be read.
+Fresh standalone reviews issue Reviewer Protocol v2 ([ADR-0009](adr/ADR-0009-versioned-reviewer-protocol.md)). Fresh Wave Gate reviews, and their restart and orphan-recovery replacements, issue Reviewer Protocol v4 ([ADR-0083](adr/ADR-0083-wave-reviewer-payloads-carry-no-packet-identity.md)). A Wave Gate registered before ADR-0083 keeps v2 until it ends; a replacement of it issues v4. There is no protocol flag: the registration kind selects the descriptor, and only an explicit [successor review](#explicit-successor-review) input selects v3. An operator never writes a reviewer payload. This section says what the engine admits, so that a refusal can be read.
 
 **What a reviewer returns.** Every reviewer reads its issued Context Packet first. The packet's independent registration and publication joins, and its exact `reviewer-payload-schema` and `reviewer-impact-rubric` bytes, select admission; the engine never sniffs the output. The reviewer emits exactly one JSON object with `findings`: no fences, narrative, Machine Summary, tallies, new IDs or second lifecycle object. A Wave reviewer also assesses each prior ID exactly once, in packet order. Under Reviewer Protocol v4 it copies no packet identity: the engine binds the Review Packet ID and Review Generation from the issued request ([ADR-0083](adr/ADR-0083-wave-reviewer-payloads-carry-no-packet-identity.md)); a Wave Gate registered under v2 still echoes `packetId` and `generation`. Empty `findings` is success only when every issued prior obligation is satisfied.
 
@@ -352,7 +352,7 @@ heap bound; JSON, byte arrays, repeated authenticated reads and native input can
 allocate more. Legacy reader ceiling remains 128 MiB; the remediation report and journal budgets
 ([Enrolling a critical-repair check](verification.md#enrolling-a-critical-repair-check)) are unchanged.
 
-Independent standalone and Wave issuance remain v2. V1/v2 initial publication,
+Independent standalone issuance remains v2, and Wave issuance is v4 ([ADR-0083](adr/ADR-0083-wave-reviewer-payloads-carry-no-packet-identity.md)). V1/v2 initial publication,
 outstanding attempt 1, new attempt 2, already-published attempt-2 recovery and exact
 packet/result/receipt history remain under their issued contracts.
 

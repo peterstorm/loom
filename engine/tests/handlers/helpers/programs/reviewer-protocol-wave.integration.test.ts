@@ -20,7 +20,9 @@ import { REVIEWER_PROTOCOL_V2, REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_IMPACT_RUBR
 import { WAVE_V4_ENVELOPE_HINT } from "../../../../src/core/reviewer-protocol";
 import { parseReviewerEvidence } from "../../../../src/core/review-output";
 import { WAVE_V4_PAYLOAD_LINE, reviewerPayloadKindLine } from "../../../../src/core/spawn-task-text";
-import { issuedWavePacketIdentity, waveReviewerPayload, waveReviewerPayloadV4WithIdentity } from "../../../fixtures/wave-reviewer-payload";
+import {
+  issuedWavePacketIdentity, issuedWaveReviewerPayload, waveReviewerPayload, waveReviewerPayloadV4WithIdentity,
+} from "../../../fixtures/wave-reviewer-payload";
 import { parseRegisteredFacadeProgram } from "../../../../src/handlers/helpers/programs/registration";
 import { publishLegacyInitialBatch } from "../../../../src/handlers/helpers/programs/request-publication";
 import { renderSpawnTask } from "../../../../src/handlers/helpers/programs/spawn-task";
@@ -163,8 +165,7 @@ function payload(handle: RunDirHandle, request: AgentRequestAuthority, findings:
   const priors = context.value.task.priorFindings.map(({ id }) => ({ finding_id: id, verdict, reason: "  verified against issued bytes\nexact reason  " }));
   // The issued descriptor selects the envelope (ADR-0083): v4 for a Wave Gate
   // registered now, v2 for one registered before it.
-  if (packet.schemaVersion === 2) return waveReviewerPayload(packet.reviewerProtocol.version,
-    { packetId: context.value.taskRun.packetId, generation: context.value.taskRun.generation }, { prior_findings: priors, findings });
+  if (packet.schemaVersion === 2) return issuedWaveReviewerPayload(packet, { prior_findings: priors, findings });
   return ["### Machine Summary", `REVIEW_GENERATION: ${context.value.taskRun.generation}`, `REVIEW_PACKET_ID: ${context.value.packetId}`,
     "CRITICAL_COUNT: 0", "ADVISORY_COUNT: 0", "```findings", "[]", "```", "```review_lifecycle", JSON.stringify({ prior_findings: priors }), "```"].join("\n");
 }
@@ -454,8 +455,8 @@ describe("registered Wave reviewer protocol", () => {
     expect(copied.ok).toBe(false);
     if (copied.ok) throw new Error("unreachable");
     expect(copied.error.message).toContain(WAVE_V4_ENVELOPE_HINT);
-    expect(parseReviewerEvidence(issuedFirst, Buffer.from(waveReviewerPayload(2, identity, body))).ok).toBe(false);
-    const admitted = parseReviewerEvidence(issuedFirst, Buffer.from(waveReviewerPayload(4, identity, body)));
+    expect(parseReviewerEvidence(issuedFirst, Buffer.from(waveReviewerPayload({ version: 2, identity, body }))).ok).toBe(false);
+    const admitted = parseReviewerEvidence(issuedFirst, Buffer.from(waveReviewerPayload({ version: 4, body })));
     if (!admitted.ok || admitted.value.kind !== "wave-review") throw new Error(`expected admitted Wave evidence: ${JSON.stringify(admitted)}`);
     expect(admitted.value.bound).toMatchObject(identity);
 
@@ -473,7 +474,7 @@ describe("registered Wave reviewer protocol", () => {
 
     // The identity-free v4 payload on the final attempt is admitted and completes the roster.
     expect(identityOf(handle, retry.authority)).toEqual(identity);
-    const done = await submit(p, handle, retry.authority, waveReviewerPayload(4, identity, body));
+    const done = await submit(p, handle, retry.authority, waveReviewerPayload({ version: 4, body }));
     expect(done.kind, JSON.stringify(done)).not.toBe("blocked");
     const settled = graph(p).tasks[0]!;
     expect(settled.review_run).toBeUndefined();
@@ -521,13 +522,13 @@ describe("registered Wave reviewer protocol", () => {
     const identity = identityOf(handle, first!.authority);
     const priorIds = graph(p).tasks[0]!.review_run!.prior_finding_ids;
     const body = { prior_findings: priorIds.map((finding_id) => ({ finding_id, verdict: "still_present", reason: "still present" })), findings: [] };
-    const retried = await submit(p, handle, first!.authority, waveReviewerPayload(4, identity, body));
+    const retried = await submit(p, handle, first!.authority, waveReviewerPayload({ version: 4, body }));
     expect(retried.kind, JSON.stringify(retried)).toBe("spawn-batch");
     const retry = retried.requests![0]!;
     expect(retry.authority).toMatchObject({ slotId: first!.authority.slotId, attempt: 2 });
     expect(retry.task).toContain("Parser rejection reason: ");
     // The v2 run's attempt 2 is decoded by v2 exactly as before: the echoed identity is required.
-    expect(await submit(p, handle, retry.authority, waveReviewerPayload(2, identity, body))).not.toMatchObject({ kind: "blocked" });
+    expect(await submit(p, handle, retry.authority, waveReviewerPayload({ version: 2, identity, body }))).not.toMatchObject({ kind: "blocked" });
     expect(graph(p).tasks[0]!.review_run).toBeUndefined();
     expect(graph(p).tasks[0]!.accepted_review_authority?.reviewer_protocol).toEqual(REVIEWER_PROTOCOL_V2);
   }, 60_000);

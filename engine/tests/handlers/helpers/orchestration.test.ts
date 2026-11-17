@@ -26,7 +26,9 @@ import { selectVerdictSource } from "../../../src/core/emission-ingestion";
 import { issueEmissionBinding, type IssuedEmissionBindingOf } from "../../../src/core/emission-tool";
 import { captureKey } from "../../../src/core/harness-capture";
 import { observeEmissionCalls } from "../../../src/core/emission-observation";
-import { REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PROTOCOL_V2, WAVE_REVIEWER_PROTOCOL_V4, type ReviewerDraftV2 } from "../../../src/core/reviewer-contract";
+import {
+  REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PROTOCOL_V2, WAVE_REVIEWER_PROTOCOL_V4, parseWaveReviewerProtocolDescriptor, type ReviewerDraftV2,
+} from "../../../src/core/reviewer-contract";
 import { type GateDeps } from "../../../src/core/wave-gate-checks";
 import { BASE_WAVE_REVIEW_AGENTS } from "../../../src/core/agent-catalog-projections";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
@@ -68,7 +70,7 @@ import {
   PI_EXTENSION_RUNTIME_ROOT_ENV,
 } from "../../../src/runtime-compatibility";
 import { trustedPassEvidence } from "../../fixtures/task-lifecycle";
-import { waveReviewerPayload } from "../../fixtures/wave-reviewer-payload";
+import { issuedDescriptorWavePayload } from "../../fixtures/wave-reviewer-payload";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
 const PACKAGE_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -97,13 +99,14 @@ function currentCritical(file: string, claim: string): ReviewerDraftV2 {
  * data; a run without one is a legacy run and has no JSON payload at all.
  */
 function currentWavePayload(
-  run: Readonly<{ generation: number; packet_id: string; reviewer_protocol?: Readonly<{ version: number }> }>,
+  run: Readonly<{ generation: number; packet_id: string; reviewer_protocol?: unknown }>,
   findings: readonly ReviewerDraftV2[] = [],
   priors: readonly Readonly<{ finding_id: string; verdict: string; reason: string }>[] = [],
 ): string {
-  const version = run.reviewer_protocol?.version;
-  if (version !== 2 && version !== 4) throw new Error(`fixture requires a current Review Run descriptor, got ${String(version)}`);
-  return waveReviewerPayload(version, { packetId: run.packet_id, generation: run.generation }, { prior_findings: priors, findings });
+  const descriptor = parseWaveReviewerProtocolDescriptor(run.reviewer_protocol);
+  if (!descriptor.ok) throw new Error(`fixture requires a current Wave Review Run descriptor: ${descriptor.error.message}`);
+  return issuedDescriptorWavePayload(descriptor.value, () => ({ packetId: run.packet_id, generation: run.generation }),
+    { prior_findings: priors, findings });
 }
 
 /**

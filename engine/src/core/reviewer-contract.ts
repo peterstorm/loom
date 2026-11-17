@@ -203,9 +203,22 @@ export const WAVE_REVIEWER_PROTOCOL_V4: WaveReviewerProtocolDescriptorV4 = canon
   rubricDigest: sha256Hex(REVIEWER_IMPACT_RUBRIC_V1) as ArtifactDigest,
 });
 
-/** The fixed packet sections a descriptor issues: its schema and the shared rubric. */
-export const reviewerFixedSections = (descriptor: ReviewerProtocolDescriptor) =>
-  descriptor.version === 4 ? WAVE_REVIEWER_FIXED_SECTIONS_V4 : REVIEWER_FIXED_SECTIONS;
+/**
+ * The fixed packet sections a descriptor issues: its schema and the shared
+ * rubric. A plain switch, not ts-pattern: this contract leaf is audited to
+ * import nothing beyond zod and its sibling modules.
+ */
+export function reviewerFixedSections(descriptor: ReviewerProtocolDescriptor): typeof REVIEWER_FIXED_SECTIONS {
+  switch (descriptor.version) {
+    case 2: return REVIEWER_FIXED_SECTIONS;
+    case 4: return WAVE_REVIEWER_FIXED_SECTIONS_V4;
+    default: return unsupportedVersion(descriptor);
+  }
+}
+
+const unsupportedVersion = (descriptor: never): never => {
+  throw new Error(`unreachable reviewer descriptor version: ${JSON.stringify(descriptor)}`);
+};
 
 /** The review programs that register a schema-2 reviewer descriptor. */
 export type ReviewerProgram = typeof STANDALONE_REVIEW_SUBJECT | "wave-gate";

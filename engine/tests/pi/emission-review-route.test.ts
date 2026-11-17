@@ -278,7 +278,6 @@ describe("the production issued-review capture decision", () => {
 describe("qualified published Pi request routes bind descriptor admission independently of task text", () => {
   const reviewPrograms = [
     {
-      version: "v2" as const,
       cell: REVIEWER_V2_CELL,
       program: {
         kind: "wave-gate" as const,
@@ -287,7 +286,6 @@ describe("qualified published Pi request routes bind descriptor admission indepe
       },
     },
     {
-      version: "v3" as const,
       cell: REVIEWER_V3_CELL,
       program: {
         kind: "standalone-review" as const,
@@ -296,7 +294,6 @@ describe("qualified published Pi request routes bind descriptor admission indepe
       },
     },
     {
-      version: "v4" as const,
       cell: REVIEWER_V4_CELL,
       program: {
         kind: "wave-gate" as const,
@@ -334,7 +331,7 @@ describe("qualified published Pi request routes bind descriptor admission indepe
     const previousAmbientModel = process.env["PI_MODEL"];
     process.env["PI_MODEL"] = "glm-5.3-flash-spark-tp2-v14";
     try {
-      for (const { version, cell, program } of reviewPrograms) {
+      for (const { cell, cell: { version }, program } of reviewPrograms) {
         const request = {
           runId: `run.t5-cloud-${version}`,
           requestId: mintedBindingFor(cell, `req-t5-cloud-${version}`).requestId,
@@ -376,7 +373,7 @@ describe("qualified published Pi request routes bind descriptor admission indepe
   });
 
   it("requires the exact descriptor for qualified frozen v2/v3/v4 desktop routes and refuses omitted or forged descriptors", () => {
-    for (const { version, cell, program } of reviewPrograms) {
+    for (const { cell, cell: { version }, program } of reviewPrograms) {
       const request = {
         runId: `run.t5-qualified-${version}`,
         requestId: mintedBindingFor(cell, `req-t5-qualified-${version}`).requestId,

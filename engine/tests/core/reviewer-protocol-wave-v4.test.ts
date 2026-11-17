@@ -119,23 +119,47 @@ describe("Wave reviewer protocol v4", () => {
     expect(WAVE_REVIEWER_PROTOCOL_V4.schemaDigest).toBe(sha256Hex(WAVE_REVIEWER_PAYLOAD_SCHEMA_V4));
   });
 
-  it("refuses a packet whose descriptor and schema section disagree", () => {
-    const v2 = value(buildReviewerContextPacket(waveInput(), REVIEWER_PROTOCOL_V2));
-    const forged = { ...JSON.parse(JSON.stringify(v2)), reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4 };
-    expect(parseContextPacket(forged).ok).toBe(false);
+  it.each([
+    ["a v2 packet relabelled with the v4 descriptor", REVIEWER_PROTOCOL_V2, WAVE_REVIEWER_PROTOCOL_V4],
+    ["a v4 packet relabelled with the v2 descriptor", WAVE_REVIEWER_PROTOCOL_V4, REVIEWER_PROTOCOL_V2],
+  ] as const)("refuses %s: its descriptor and schema section disagree", (_case, issued, forgedDescriptor) => {
+    const packet = value(buildReviewerContextPacket(waveInput(), issued));
+    const forged = { ...JSON.parse(JSON.stringify(packet)), reviewerProtocol: forgedDescriptor };
+    expect(parseContextPacket(forged)).toEqual({ ok: false, error: {
+      kind: "invalid-context-packet", field: "fixedContext",
+      message: "reviewer section reviewer-payload-schema must contain the exact supported bytes",
+    } });
   });
 
-  it("refuses a v4 registration over a v2 packet", () => {
-    const packet = value<ContextPacket>(buildReviewerContextPacket(waveInput(), REVIEWER_PROTOCOL_V2));
+  it.each([
+    ["a v4 registration over a v2 packet", REVIEWER_PROTOCOL_V2, WAVE_REVIEWER_PROTOCOL_V4],
+    ["a v2 registration over a v4 packet", WAVE_REVIEWER_PROTOCOL_V4, REVIEWER_PROTOCOL_V2],
+  ] as const)("refuses %s", (_case, issued, registered) => {
+    const packet = value<ContextPacket>(buildReviewerContextPacket(waveInput(), issued));
     const request = publish(packet, "wave-gate");
     const parsed = parseIssuedReviewerProtocol({ request, packet, subject,
-      registration: { schemaVersion: 2, runId, program: "wave-gate", reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4 } });
-    expect(parsed.ok).toBe(false);
+      registration: { schemaVersion: 2, runId, program: "wave-gate", reviewerProtocol: registered } });
+    expect(parsed).toEqual({ ok: false, error: {
+      kind: "reviewer-protocol-failed", code: "authority-mismatch", path: "/registration/reviewerProtocol",
+      message: "current registration requires the exact supported descriptor",
+    } });
   });
 
   it("parses the shown Wave example with the v4 parser", () => {
     expect(parseWaveReviewerPayloadV4(bytes(WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4)).ok).toBe(true);
     expect(WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4).not.toHaveProperty("packetId");
+  });
+
+  it.each([
+    ["a standalone-review kind", { kind: "standalone-review" }, "/kind"],
+    ["a standalone-successor-review kind", { kind: "standalone-successor-review" }, "/kind"],
+    ["an unknown top-level key", { extra: 1 }, ""],
+  ])("refuses a schemaVersion 4 payload with %s against the issued Wave v4 schema", (_case, overrides, path) => {
+    const parsed = parseWaveReviewerPayloadV4(bytes(v4Payload(overrides)));
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error).toMatchObject({ kind: "reviewer-protocol-failed", code: "invalid-payload", path });
+    expect(parsed.error.message).toContain("issued Wave v4 schema");
   });
 });
 

@@ -112,6 +112,15 @@ const qualifiedRoute = issuedPiRoute(DESKTOP_VLLM_ROUTE.provider, DESKTOP_VLLM_R
 /** The archived schema-1 reviewer claim for the v2 fixture's request, built
  *  through the production claim constructor — one archived claim every
  *  archived-route test shares. */
+/** The current registered reviewer programs, each carrying its (registration
+ *  schema, descriptor version) pair as ONE literal value, so only a pair the
+ *  engine's union admits (schema 2 ↔ v2|v4, schema 3 ↔ v3) compiles. */
+const CURRENT_REVIEWER_PROGRAMS = [
+  { program: { schemaVersion: 2, reviewerProtocol: { version: 2, schemaDigest: REVIEWER_V2.schemaDigest } }, binding: REVIEWER_V2 },
+  { program: { schemaVersion: 2, reviewerProtocol: { version: 4, schemaDigest: REVIEWER_V4.schemaDigest } }, binding: REVIEWER_V4 },
+  { program: { schemaVersion: 3, reviewerProtocol: { version: 3, schemaDigest: REVIEWER_V3.schemaDigest } }, binding: REVIEWER_V3 },
+] as const;
+
 const ARCHIVED_V1_CLAIM: IssuedProducerClaim = issuedReviewerPayloadClaim(
   { schemaVersion: 1 },
   { requestId: REVIEWER_V2.requestId, contextDigest: CONTEXT_DIGEST },
@@ -636,15 +645,8 @@ describe("request emission routes", () => {
 
     // The descriptor's own version picks the claim (ADR-0083): a schema-2
     // registration carrying the Wave v4 descriptor mints a v4 claim, never v2.
-    for (const { schemaVersion, version, binding } of [
-      { schemaVersion: 2 as const, version: 2 as const, binding: REVIEWER_V2 },
-      { schemaVersion: 2 as const, version: 4 as const, binding: REVIEWER_V4 },
-      { schemaVersion: 3 as const, version: 3 as const, binding: REVIEWER_V3 },
-    ]) {
-      const current = issuedReviewerPayloadClaim(
-        { schemaVersion, reviewerProtocol: { version, schemaDigest: binding.schemaDigest } },
-        { requestId: binding.requestId, contextDigest: CONTEXT_DIGEST },
-      );
+    for (const { program, binding } of CURRENT_REVIEWER_PROGRAMS) {
+      const current = issuedReviewerPayloadClaim(program, { requestId: binding.requestId, contextDigest: CONTEXT_DIGEST });
       expect(current).toMatchObject({ version: binding.version, schemaDigest: binding.schemaDigest });
       const route = decideRequestEmissionRoute(current, providedEmissionCapability(binding.schemaDigest));
       expect(route.kind).toBe("emission");
@@ -889,18 +891,12 @@ describe("request emission routes", () => {
   });
 
   it("projects explicit v2/v3/v4 capability simulations through the issued core route without a production render override", () => {
-    const cases = [
-      { schemaVersion: 2 as const, version: 2 as const, binding: REVIEWER_V2, instruction: "review current payload" },
-      { schemaVersion: 2 as const, version: 4 as const, binding: REVIEWER_V4, instruction: "review Wave v4 payload" },
-      { schemaVersion: 3 as const, version: 3 as const, binding: REVIEWER_V3, instruction: "review successor payload" },
-    ];
+    const instructions = ["review current payload", "review Wave v4 payload", "review successor payload"] as const;
+    const cases = CURRENT_REVIEWER_PROGRAMS.map((current, index) => ({ ...current, instruction: instructions[index]! }));
 
     for (const testCase of cases) {
       const claim = issuedReviewerPayloadClaim(
-        {
-          schemaVersion: testCase.schemaVersion,
-          reviewerProtocol: { version: testCase.version, schemaDigest: testCase.binding.schemaDigest },
-        },
+        testCase.program,
         { requestId: testCase.binding.requestId, contextDigest: CONTEXT_DIGEST },
       );
       expect(claim.version).toBe(testCase.binding.version);

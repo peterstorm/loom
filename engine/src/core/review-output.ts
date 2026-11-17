@@ -66,7 +66,7 @@ import {
 import { parseReviewPath } from "./review-packet";
 import { parseContextPacket, type ContextPacket, type LegacyContextPacket, type ReviewerContextPacketV2 } from "./context-packets";
 import { parseReviewerPayloadV2, parseWaveReviewerPayloadV4, renderReviewerPayloadDiagnostic } from "./reviewer-protocol";
-import { parseReviewerProtocolDescriptorFor, REVIEWER_PAYLOAD_LIMITS, type ReviewerDraftV2, type ReviewerProtocolDescriptor, type ReviewerProtocolFailure } from "./reviewer-contract";
+import { parseReviewerProtocolDescriptorFor, REVIEWER_PAYLOAD_LIMITS, type ReviewerDraftV2, type ReviewerProtocolDescriptor, type ReviewerProtocolFailure, type WaveReviewerPayloadV4 } from "./reviewer-contract";
 import { acceptedAgentResult, boundedThrownCause, canonicalStructuralEquals, type AgentRequestAuthority, type DomainResult, type OrchestrationRunId, type SpawnRequest } from "./orchestration-contract";
 import { readWaveReviewContext } from "./wave-review-authority";
 import { readExactDataRecord } from "./orchestration-contract/bytes";
@@ -164,9 +164,10 @@ function currentPriorRosterIsRepresentable(
   // A byte-size lower bound, not an assessment or an admitted evidence value.
   // The v4 envelope carries no packet identity, so it is sized without it.
   const prior_findings = subject.priorFindingIds.map((finding_id) => ({ finding_id, verdict: "still_present", reason: "x" }));
-  const minimum = JSON.stringify(descriptor.version === 4
-    ? { schemaVersion: 4, kind: "wave-review", prior_findings, findings: [] }
-    : { schemaVersion: 2, kind: "wave-review", packetId: subject.packetId, generation: subject.generation, prior_findings, findings: [] });
+  const minimum = JSON.stringify(match(descriptor.version)
+    .with(2, () => ({ schemaVersion: 2, kind: "wave-review", packetId: subject.packetId, generation: subject.generation, prior_findings, findings: [] }))
+    .with(4, () => ({ schemaVersion: 4, kind: "wave-review", prior_findings, findings: [] }))
+    .exhaustive());
   return encoder.encode(minimum).length <= REVIEWER_PAYLOAD_LIMITS.bytes;
 }
 
@@ -235,17 +236,17 @@ export type ParsedReviewerEvidence = LegacyStandaloneReviewerEvidence | CurrentS
 type CurrentPayload =
   | Readonly<{ kind: "standalone-review"; findings: readonly ReviewerDraftV2[] }>
   | Readonly<{ kind: "wave-review"; findings: readonly ReviewerDraftV2[];
-      prior_findings: Extract<ParsedPayloadV2, { kind: "wave-review" }>["prior_findings"];
+      prior_findings: WaveReviewerPayloadV4["prior_findings"];
       statedIdentity: Readonly<{ packetId: string; generation: number }> | null }>;
-type ParsedPayloadV2 = Extract<ReturnType<typeof parseReviewerPayloadV2>, { ok: true }>["value"];
 
-function decodeCurrentPayload(descriptor: ReviewerProtocolDescriptor, rawBytes: Uint8Array): DomainResult<CurrentPayload, ReviewerProtocolFailure> {
-  if (descriptor.version === 4) {
-    const parsed = parseWaveReviewerPayloadV4(rawBytes);
-    return parsed.ok
-      ? { ok: true, value: { kind: "wave-review", findings: parsed.value.findings, prior_findings: parsed.value.prior_findings, statedIdentity: null } }
-      : parsed;
-  }
+function decodeWavePayloadV4(rawBytes: Uint8Array): DomainResult<CurrentPayload, ReviewerProtocolFailure> {
+  const parsed = parseWaveReviewerPayloadV4(rawBytes);
+  return parsed.ok
+    ? { ok: true, value: { kind: "wave-review", findings: parsed.value.findings, prior_findings: parsed.value.prior_findings, statedIdentity: null } }
+    : parsed;
+}
+
+function decodePayloadV2(rawBytes: Uint8Array): DomainResult<CurrentPayload, ReviewerProtocolFailure> {
   const parsed = parseReviewerPayloadV2(rawBytes);
   if (!parsed.ok) return parsed;
   const payload = parsed.value;
@@ -253,6 +254,13 @@ function decodeCurrentPayload(descriptor: ReviewerProtocolDescriptor, rawBytes: 
     ? { kind: "wave-review", findings: payload.findings, prior_findings: payload.prior_findings,
         statedIdentity: { packetId: payload.packetId, generation: payload.generation } }
     : { kind: "standalone-review", findings: payload.findings } };
+}
+
+function decodeCurrentPayload(descriptor: ReviewerProtocolDescriptor, rawBytes: Uint8Array): DomainResult<CurrentPayload, ReviewerProtocolFailure> {
+  return match(descriptor.version)
+    .with(2, () => decodePayloadV2(rawBytes))
+    .with(4, () => decodeWavePayloadV4(rawBytes))
+    .exhaustive();
 }
 
 function parseCurrentReviewerEvidence(

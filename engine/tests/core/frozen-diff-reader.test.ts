@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import { spawnSync } from "node:child_process";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildReviewerContextPacket, encodeByteSection } from "../../src/core/context-packets";
 import { parseRequestId } from "../../src/core/orchestration-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import {
   FROZEN_DIFF_PAGE_UNITS, STANDALONE_FROZEN_DIFF_SECTION, freezeDiff, observeReadCoverage, readCoverageGaps,
 } from "../../src/core/standalone-read-coverage";

@@ -26,6 +26,7 @@ ADR-0009 requires Wave reviewers to echo the exact `packetId` (a 64-hex sha256) 
 - **`wave-review-authority.ts`:** pass `registration.reviewerProtocol` into the packet builder.
 - **`programs/wave-gate-start.ts` (~80):** new registrations use `WAVE_REVIEWER_PROTOCOL_V4`.
 - **`programs/wave-gate-replacement.ts` (~123, ~225):** restart and orphan recovery **inherit `previous.reviewerProtocol`**, so a run never changes protocol.
+  - *Superseded during implementation:* replacements always issue v4 (ADR-0083). A replacement reissues every request, so no reviewer straddles two protocols and inheriting the predecessor's descriptor buys nothing.
 - **`review-output.ts`:**
   - `parseIssuedReviewerProtocol` uses the program-aware parse.
   - `currentPriorRosterIsRepresentable` sizes the roster per version.
@@ -37,6 +38,7 @@ ADR-0009 requires Wave reviewers to echo the exact `packetId` (a 64-hex sha256) 
   - Check whether route qualification (ADR-0012, probes) enumerates cells.
 - **Persisted descriptor checks** accept the union: `state-file-wire.ts` (~1687), `findings.ts` (~895), `findings-shape.ts` (~155, ~180).
 - **Wording:** `spawn-task-text.ts` (~127) and the retry text (`reviewer-retry.ts`, `programs/wave-review-retries.ts`). v4 says "do not copy packetId/generation"; v2 wording stays unchanged.
+  - *Superseded during implementation:* the retry-wording changes were unnecessary. The retry tail is protocol-agnostic, so `reviewer-retry.ts` and `programs/wave-review-retries.ts` are unchanged.
 - **Stamped files:** regenerate with `bun scripts/stamp-wire-contract.ts`. That rewrites `references/reviewer-wire/wire-contract.md` and the 7 reviewer agents' stamped regions. The shared text must serve live v2 runs and v4 runs alike: "the packet's reviewer-payload-schema governs; the task states whether packetId/generation are required". Do not touch the archived `references/reviewer-protocol-v1*`.
 - **Docs:**
   - A new ADR (next free number), "Wave reviewer payloads carry no packet identity; the issued subject binds it". It partly supersedes ADR-0009's exact packet/generation join; priors stay required and attempt 2 stays final.
@@ -54,6 +56,7 @@ ADR-0009 requires Wave reviewers to echo the exact `packetId` (a 64-hex sha256) 
   - a v2-registered Wave run still requires packetId/generation and refuses a v4 payload;
   - standalone registrations refuse the v4 descriptor;
   - restart and orphan replacement inherit the predecessor's descriptor.
+    - *Superseded during implementation:* the regression test asserts that a v2 predecessor yields a v4 replacement (ADR-0083); see the `wave-gate-replacement.ts` note above.
 - **Re-pin only bytes that really changed:**
   - wire-contract.test.ts (stamp check)
   - review-agent-contract

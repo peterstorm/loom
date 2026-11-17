@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import fc from "fast-check";
 import { gzipSync } from "node:zlib";
 import type { ContextProjectionInput } from "../../src/core/context-packet-projection";
 import { buildReviewerContextPacket, buildStandaloneReviewerContextPacketV3, encodeByteSection, storedContextPacket } from "../../src/core/context-packets";
 import { sha256Bytes } from "../../src/core/digest";
 import { parseRequestId } from "../../src/core/orchestration-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import {
   admitFrozenPredecessorArchive, expandGzipPredecessorArchive, parsePredecessorArchiveArguments, parsePredecessorArchiveRecord,
   projectArchivedPredecessor, publishedPacketReference, serializePublishedPacketReference, verifyPredecessorArchiveBytes,

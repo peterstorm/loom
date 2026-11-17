@@ -554,12 +554,16 @@ type ArchivedIssuedProducerClaim = Extract<IssuedProducerClaim, Readonly<{ versi
 type CurrentIssuedProducerClaim = Extract<IssuedProducerClaim, Readonly<{ version: "v2" | "v3" | "v4" }>>;
 
 /** The registered review program's authenticated frozen protocol, shared by
- *  the issuance renderer and Pi parent admission. The descriptor's own version
- *  selects the producer-claim arm: a schema-2 registration carries v2 or the
- *  Wave v4 descriptor (ADR-0083), a schema-3 one the successor v3. */
+ *  the issuance renderer and Pi parent admission. The registration schema
+ *  version fixes which descriptor versions it can carry: a schema-2
+ *  registration carries v2 or the Wave v4 descriptor (ADR-0083), a schema-3
+ *  one only the successor v3, so a schema-3 v2/v4 or schema-2 v3 pair is
+ *  unrepresentable. The descriptor's own version selects the producer-claim
+ *  arm. */
 type IssuedReviewerProtocol =
   | Readonly<{ schemaVersion: 1; reviewerProtocol?: never }>
-  | Readonly<{ schemaVersion: 2 | 3; reviewerProtocol: Readonly<{ version: 2 | 3 | 4; schemaDigest: string }> }>;
+  | Readonly<{ schemaVersion: 2; reviewerProtocol: Readonly<{ version: 2 | 4; schemaDigest: string }> }>
+  | Readonly<{ schemaVersion: 3; reviewerProtocol: Readonly<{ version: 3; schemaDigest: string }> }>;
 
 export function issuedReviewerPayloadClaim(
   program: IssuedReviewerProtocol,
@@ -577,11 +581,12 @@ export function issuedReviewerPayloadClaim(
   if (!schemaDigest.ok) {
     throw new Error(`authenticated issued reviewer protocol carries an invalid schema digest: ${schemaDigest.error.message}`);
   }
-  return canonicalRecord({
-    ...authority,
-    version: `v${program.reviewerProtocol.version}` as const,
-    schemaDigest: schemaDigest.value,
-  }) satisfies CurrentIssuedProducerClaim;
+  const version = match(program.reviewerProtocol.version)
+    .with(2, () => "v2" as const)
+    .with(3, () => "v3" as const)
+    .with(4, () => "v4" as const)
+    .exhaustive();
+  return canonicalRecord({ ...authority, version, schemaDigest: schemaDigest.value }) satisfies CurrentIssuedProducerClaim;
 }
 
 /** Translate the closed claim into the looser registry-boundary request. The

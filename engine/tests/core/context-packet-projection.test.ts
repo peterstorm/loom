@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import fc from "fast-check";
 import { match } from "ts-pattern";
@@ -11,6 +10,7 @@ import { sha256Bytes } from "../../src/core/digest";
 import { buildContextPacket, buildReviewerContextPacket, buildStandaloneReviewerContextPacketV3, contextPacketDigest, encodeByteSection } from "../../src/core/context-packets";
 import { parseContextProjectionArguments, parseContextSectionArguments, projectContextPacket } from "../../src/core/context-packet-projection";
 import { parseArtifactDigest, parseRequestId } from "../../src/core/orchestration-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import { waveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../src/core/wave-frozen-source";
 import { observedWorkspace } from "../fixtures/reviewed-workspace";
 import { value } from "../fixtures/parse-result";
