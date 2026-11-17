@@ -14,6 +14,8 @@ export {
   blockExplanation,
   satisfied,
   tokensFor,
+  judgeRunFacts,
+  type TestRunJudge,
 } from "./advance";
 export {
   parseVitestJson,

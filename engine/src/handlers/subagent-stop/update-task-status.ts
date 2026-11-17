@@ -53,6 +53,7 @@ import {
   type ImplementationAttemptAuthority,
 } from "../../core/implementation-completion";
 import {
+  attributedTestRunJudge,
   capVerdictForMachineCompletion,
   resolveTestEvidence,
 } from "../../core/implementation-evidence";
@@ -75,6 +76,7 @@ import {
   settleAndPersistExactImplementation,
 } from "../helpers/exact-implementation-settlement";
 import { testEvidencePolicyAt } from "../../utils/test-evidence-policy-at";
+import { regressionScope } from "../../core/regression-attribution";
 // Historical callers import these shell utilities from this handler. Keep the
 // surface while the implementation lives in the neutral shared shell module.
 export {
@@ -520,12 +522,18 @@ export const runUpdateTaskStatus = async (
   // The one epoch both the test verdict and exact settlement (I6) read.
   const epochLedger = claudeEpochLedger(ledgerRead, epochAgentId, epochAgentType);
   const epochEvents = epochLedger.kind === "read" ? epochLedger.events : [];
+  // A failure in a file only unsettled siblings of this Wave declare is
+  // theirs to fix, not this Task's (ADR-0080). The roster comes from the
+  // pre-lock graph, so a sibling that settles meanwhile still excuses
+  // failures in its files for this settlement; the Wave Gate judges them.
+  const scope = regressionScope(state.tasks, task, repositoryRoot);
   let testEvidence = resolveTestEvidence(
     epochEvents,
     testEvidencePolicyAt(state.test_evidence, repositoryRoot),
     bashTestOutput,
     machineBound,
     snapshotFailed,
+    scope,
   );
   // Machine-bound agents don't self-report completion: fold this epoch's
   // evidence through the machine and consult its terminal requirements —
@@ -536,7 +544,8 @@ export const runUpdateTaskStatus = async (
   if (!snapshotFailed && loadedMachine.kind === "machine") {
     const missing = missingRequirements(
       loadedMachine.machine,
-      foldEvidence(loadedMachine.machine, epochEvents),
+      // The same attribution, so an attributed pass satisfies TestRunPassed.
+      foldEvidence(loadedMachine.machine, epochEvents, attributedTestRunJudge(scope)),
     );
     const capped = capVerdictForMachineCompletion(testEvidence, missing);
     if (capped !== testEvidence) {

@@ -10,6 +10,46 @@ import { judgeTestRun, type TrustedTestVerdict } from "../machine/evidence";
 import type { Evidence, Requirement } from "../machine/types";
 import { extractTestEvidence } from "./test-evidence";
 import { admitsTestRun, type TestEvidencePolicy } from "./test-evidence-policy";
+import {
+  WHOLE_RUN_SCOPE,
+  attributeRegressionFailures,
+  describeForeignFailures,
+  type RegressionScope,
+} from "./regression-attribution";
+
+/** A trusted run's verdict, after attributing its failures (and the clause naming any it excused). */
+type AttributedVerdict = Readonly<{ verdict: TrustedTestVerdict; excused: string | null }>;
+
+/**
+ * A trusted failing run whose every failure is in a file only unsettled
+ * sibling Tasks of the Wave declare is this Task's pass: those owners judge
+ * their file, and the Wave Gate judges the whole suite (ADR-0080). Any other
+ * verdict stands.
+ */
+function attributeTrustedVerdict(
+  run: TestRunEvidence,
+  verdict: TrustedTestVerdict,
+  scope: RegressionScope,
+): AttributedVerdict {
+  if (verdict.verdict !== "trusted-fail") return { verdict, excused: null };
+  const attribution = attributeRegressionFailures(run, scope);
+  return attribution.kind === "foreign-only"
+    ? { verdict: { verdict: "trusted-pass" }, excused: describeForeignFailures(attribution.foreign) }
+    : { verdict, excused: null };
+}
+
+/**
+ * The test-run judge a Guarded Skill Machine fold uses at settlement: the
+ * run's own verdict, with a trusted failure attributed under `scope` exactly
+ * as `resolveTestEvidence` attributes it, so the machine's TestRunPassed and
+ * the Task's verdict agree about every run. It matches the machine's
+ * `TestRunJudge` structurally, since core may not import the reducer.
+ */
+export const attributedTestRunJudge = (scope: RegressionScope) =>
+  (run: TestRunEvidence): ReturnType<typeof judgeTestRun> => {
+  const verdict = judgeTestRun(run.exit, run.report);
+  return verdict.verdict === "untrusted" ? verdict : attributeTrustedVerdict(run, verdict, scope).verdict;
+};
 
 export type ResolvedTestEvidence = Readonly<{
   /** Verdict plus trust provenance, exactly as persisted on the Task. */
@@ -49,7 +89,10 @@ function untrustedTranscriptEvidence(label: string, bashOutput: string): Resolve
  * except that a later exit-zero run makes an older trusted failure stale and a
  * FileWrite after a trusted pass invalidates that pass. Neither case promotes
  * transcript text to trusted evidence. A run `policy` does not admit (an
- * agent's own command in an engine-run graph) is judged untrusted.
+ * agent's own command in an engine-run graph) is judged untrusted. A trusted
+ * failure whose every failing file only unsettled siblings of the Wave
+ * declare counts as a pass (`scope`, ADR-0080), and is then judged like any
+ * pass.
  */
 export function resolveTestEvidence(
   ledgerEvents: readonly Evidence[],
@@ -57,6 +100,7 @@ export function resolveTestEvidence(
   bashOutput: string,
   machineBound: boolean,
   snapshotFailed: boolean = false,
+  scope: RegressionScope = WHOLE_RUN_SCOPE,
 ): ResolvedTestEvidence {
   if (snapshotFailed) {
     return untrustedTranscriptEvidence(
@@ -70,10 +114,11 @@ export function resolveTestEvidence(
     const verdict = admitted ? judgeTestRun(event.exit, event.report) : { verdict: "untrusted" as const };
     return [{ run: event as TestRunEvidence, index, admitted, verdict }];
   });
-  const lastTrusted = judged.reduce<
-    { index: number; run: TestRunEvidence; verdict: TrustedTestVerdict } | null
-  >((acc, { run, index, verdict }) =>
-    verdict.verdict === "untrusted" ? acc : { index, run, verdict }, null);
+  const lastJudged = judged.reduce<{ index: number; run: TestRunEvidence; verdict: TrustedTestVerdict } | null>(
+    (acc, { run, index, verdict }) => (verdict.verdict === "untrusted" ? acc : { index, run, verdict }), null);
+  const lastTrusted = lastJudged === null
+    ? null
+    : { ...lastJudged, ...attributeTrustedVerdict(lastJudged.run, lastJudged.verdict, scope) };
 
   let demotionLabel: string | null = null;
   if (lastTrusted !== null) {
@@ -90,9 +135,10 @@ export function resolveTestEvidence(
       const report = lastTrusted.run.report
         ? `, report: ${lastTrusted.run.report.total} tests / ${lastTrusted.run.report.failed} failed`
         : "";
+      const excused = lastTrusted.excused === null ? "" : `; ${lastTrusted.excused}`;
       return {
         result: lastTrusted.verdict,
-        evidence: `ledger: exit ${lastTrusted.run.exit}${report} (${lastTrusted.run.command})`,
+        evidence: `ledger: exit ${lastTrusted.run.exit}${report}${excused} (${lastTrusted.run.command})`,
       };
     }
     if (lastTrusted.verdict.verdict === "trusted-pass") {
