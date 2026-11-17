@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { engineRevisionOf, engineRevisionPinAtPopulation } from "../../src/core/engine-revision-pin";
 import fc from "fast-check";
 import { parseSpec } from "../../src/core/parse-spec";
 import {
@@ -105,7 +106,7 @@ const command = (overrides: Partial<TaskGraphPopulationCommand> = {}): TaskGraph
   specIndex,
   observedSpecFile: "spec.md",
   force: false,
-  proofBoundary: { kind: "absent", cause: "fixture: no Git repository root" },
+  proofBoundary: { kind: "absent", cause: "fixture: no Git repository root" }, engineRevision: { kind: "not-observed", cause: "fixture" },
   contracts: [],
   invariants: [],
   ...overrides,
@@ -373,6 +374,20 @@ describe("populateTaskGraph aggregate command", () => {
     if (!result.ok) return;
     expect(result.value.state.spec_index_observation).toEqual(unavailable);
     expect(result.value.state.spec_index_observation).not.toEqual(stale);
+  });
+
+  it("keeps an existing engine pin through re-population, so only adoption moves a graph between engines", () => {
+    const pinned = {
+      schemaVersion: 1 as const, kind: "pinned" as const, revision: engineRevisionOf(`sha256:${"a".repeat(64)}`),
+      adoptions: [{ from: null, to: engineRevisionOf(`sha256:${"a".repeat(64)}`), reason: "first pin" }],
+    };
+    const observed = { kind: "observed" as const, pin: engineRevisionPinAtPopulation(engineRevisionOf(`sha256:${"b".repeat(64)}`), false) };
+    const repopulated = populateTaskGraph(graph({ engine_revision: pinned }), command({ force: true, engineRevision: observed }));
+    expect(repopulated.ok && repopulated.value.state.engine_revision).toEqual(pinned);
+    const first = populateTaskGraph(graph(), command({ engineRevision: observed }));
+    expect(first.ok && first.value.state.engine_revision).toEqual(observed.pin);
+    const unobserved = populateTaskGraph(graph(), command());
+    expect(unobserved.ok && unobserved.value.state.engine_revision).toBeUndefined();
   });
 
   it("removes every Wave authority tied to Tasks replaced by population", () => {

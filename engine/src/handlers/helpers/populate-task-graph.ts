@@ -9,8 +9,8 @@
 
 import { lstatSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
-import { engineRevisionPinAtPopulation, isSelfHosted } from "../../core/engine-revision-pin";
-import type { EngineRevisionPin, HookHandler, HookResult, TaskGraph } from "../../types";
+import { engineRevisionOf, engineRevisionPinAtPopulation, isSelfHosted, type EngineRevisionObservation } from "../../core/engine-revision-pin";
+import type { HookHandler, HookResult, TaskGraph } from "../../types";
 import { taskGraphPath } from "../../config";
 import { runningEngineIdentity, StateManager } from "../../state-manager";
 import { validateFull, fixFull } from "./validate-task-graph";
@@ -495,7 +495,7 @@ function preparePopulation(
       : null,
     command: populationCommand(decompose, plan, args, {
       tasks: taskRoster.value, verificationManifest: preparedManifest.value, specIndex, observedSpecFile, proofBoundary,
-      engineRevisionPin: observeEngineRevisionPin(repositoryRoot),
+      engineRevision: observeEngineRevision(repositoryRoot),
     }),
   } };
 }
@@ -519,18 +519,20 @@ function observeAnnouncedSpecIndex(observedSpecFile: string | null): ReturnType<
 /** The values observed in the shell for one population command. */
 type ObservedPopulation = Pick<
   TaskGraphPopulationCommand,
-  "tasks" | "verificationManifest" | "specIndex" | "observedSpecFile" | "proofBoundary" | "engineRevisionPin"
+  "tasks" | "verificationManifest" | "specIndex" | "observedSpecFile" | "proofBoundary" | "engineRevision"
 >;
 
 /**
- * The engine revision pin to record (loom#198, Cause 4): the running engine's
+ * The engine revision to record (loom#198, Cause 4): the running engine's
  * content-addressed revision, or self-hosted when the orchestrated repository
  * holds the engine package itself (each Wave would change the engine it runs on).
  */
-function observeEngineRevisionPin(repositoryRoot: CanonicalGitRootObservation): EngineRevisionPin {
-  const identity = runningEngineIdentity();
+export function observeEngineRevision(
+  repositoryRoot: CanonicalGitRootObservation,
+  identity: Readonly<{ packageRoot: string; revision: string }> = runningEngineIdentity(),
+): EngineRevisionObservation {
   const selfHosted = repositoryRoot.kind === "repository" && isSelfHosted(identity.packageRoot, repositoryRoot.root, sep);
-  return engineRevisionPinAtPopulation(identity.revision, selfHosted);
+  return Object.freeze({ kind: "observed" as const, pin: engineRevisionPinAtPopulation(engineRevisionOf(identity.revision), selfHosted) });
 }
 
 function populationCommand(

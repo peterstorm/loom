@@ -93,7 +93,7 @@ import { reconcileWaveBlock, waveHasBlockCause, type WaveGate } from "./core/wav
 import { parseWaveSpecCheckDocumentsAuthority, type WaveSpecCheckDocumentRejection, type WaveSpecCheckDocumentsRejection } from "./core/wave-review-authority";
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
 import { isExactGitSha } from "./core/git-sha";
-import { isEngineRevision, MAX_ENGINE_REVISION_REASON_LENGTH } from "./core/engine-revision-pin";
+import { isAdoptionReason, isEngineRevision, MAX_ENGINE_REVISION_REASON_LENGTH } from "./core/engine-revision-pin";
 import { parsePlanEditReason, taskRescopedEdit } from "./core/wave-plan-edit";
 import {
   amendmentHistoryError,
@@ -2523,7 +2523,7 @@ function parseEngineRevisionField(raw: unknown): ParseResult<EngineRevisionPin |
     if (!isEngineRevision(adoption.to)) return parseErr(`${label}.to must be a runtime revision`);
     if (adoption.from === adoption.to) return parseErr(`${label} moves the pin nowhere`);
     const reason = adoption.reason;
-    if (typeof reason !== "string" || reason.trim() !== reason || reason.length === 0 || reason.length > MAX_ENGINE_REVISION_REASON_LENGTH) {
+    if (!isAdoptionReason(reason)) {
       return parseErr(`${label}.reason must be a trimmed non-blank string of at most ${MAX_ENGINE_REVISION_REASON_LENGTH} characters`);
     }
     const previous = adoptions.at(-1);

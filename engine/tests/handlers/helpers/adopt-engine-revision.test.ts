@@ -10,12 +10,13 @@ import { createAdoptEngineRevisionOperation } from "../../../src/handlers/helper
 import { ORCHESTRATION_OPERATIONS } from "../../../src/handlers/helpers/orchestration-operations";
 import { piRuntimeHandshakeRequired, routeConsumesStdin } from "../../../src/handler-routes";
 import { runningEngineIdentity, StateManager } from "../../../src/state-manager";
-import type { EngineRevisionPin } from "../../../src/types";
+import type { EngineRevision, EngineRevisionPin } from "../../../src/types";
+import { engineRevisionOf } from "../../../src/core/engine-revision-pin";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { appearsUnderTheLock } from "../../fixtures/subagent-activity";
 
-const OTHER = `sha256:${"0".repeat(64)}`;
-const RUNNING = runningEngineIdentity().revision;
+const OTHER = engineRevisionOf(`sha256:${"0".repeat(64)}`);
+const RUNNING = engineRevisionOf(runningEngineIdentity().revision);
 const ARGS = ["--reason", "the run continues on main after the #196 fix"] as const;
 const quiet = () => false;
 
@@ -41,7 +42,7 @@ function installState(pin?: EngineRevisionPin): string {
   process.env.LOOM_STATE_PATH = statePath;
   return statePath;
 }
-const pinnedTo = (revision: string): EngineRevisionPin => ({ schemaVersion: 1, kind: "pinned", revision, adoptions: [] });
+const pinnedTo = (revision: EngineRevision): EngineRevisionPin => ({ schemaVersion: 1, kind: "pinned", revision, adoptions: [] });
 const write = (statePath: string) => new StateManager(statePath).update((state) => ({ ...state, plan_file: "plan.md" }));
 
 describe("the State File's write boundary", () => {

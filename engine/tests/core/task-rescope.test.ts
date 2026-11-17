@@ -367,7 +367,7 @@ describe("rescopeTask: contracts, export bindings and the Distill Task, on a pop
     }, {
       planTitle: "rescope", validatedPlanFile: "plan.md", tasks: roster.value, verificationManifest: i6RunnerManifest(),
       specIndex: indexedSpec("spec.md", specDefining(["FR-001"], ["AS-001"])), observedSpecFile: "spec.md", force: false,
-      proofBoundary: { kind: "absent", cause: "fixture" },
+      proofBoundary: { kind: "absent", cause: "fixture" }, engineRevision: { kind: "not-observed", cause: "fixture" },
       contracts: [{
         id: "CT-1", title: "Contract",
         declaration: {

@@ -6,7 +6,9 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
   adoptEngineRevision,
+  engineRevisionOf,
   engineRevisionPinAtPopulation,
+  populationEngineRevision,
   engineRevisionWriteRefusal,
   isEngineRevision,
   isSelfHosted,
@@ -15,9 +17,9 @@ import {
 import { parseTaskGraph } from "../../src/state-file-wire";
 import type { EngineRevisionPin, TaskGraph } from "../../src/types";
 
-const REV_A = `sha256:${"a".repeat(64)}`;
-const REV_B = `sha256:${"b".repeat(64)}`;
-const REV_C = `sha256:${"c".repeat(64)}`;
+const REV_A = engineRevisionOf(`sha256:${"a".repeat(64)}`);
+const REV_B = engineRevisionOf(`sha256:${"b".repeat(64)}`);
+const REV_C = engineRevisionOf(`sha256:${"c".repeat(64)}`);
 
 const graph = (engine_revision?: EngineRevisionPin): TaskGraph => ({
   current_phase: "execute", phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null,
@@ -40,6 +42,16 @@ describe("the pin population records", () => {
     expect(isSelfHosted("/work/repo/vendor/loom", "/work/repo", "/")).toBe(true);
     expect(isSelfHosted("/work/loom", "/work/loom-graph-checks", "/")).toBe(false);
     expect(isSelfHosted("/plugins/loom", "/work/flexii", "/")).toBe(false);
+    expect(isSelfHosted("/loom", "/", "/")).toBe(true);
+    expect(isSelfHosted("/work/loomish", "/work/loom", "/")).toBe(false);
+  });
+
+  it("keeps an existing pin through re-population, and takes the observed one only when there is none", () => {
+    const existing = adopted(graph(engineRevisionPinAtPopulation(REV_A, false)), REV_B).engine_revision;
+    const observed = { kind: "observed" as const, pin: engineRevisionPinAtPopulation(REV_C, false) };
+    expect(populationEngineRevision(existing, observed)).toBe(existing);
+    expect(populationEngineRevision(undefined, observed)).toBe(observed.pin);
+    expect(populationEngineRevision(undefined, { kind: "not-observed", cause: "fixture" })).toBeUndefined();
   });
 });
 
@@ -110,7 +122,14 @@ describe("engine_revision on the State File", () => {
     expect(loaded(PINNED)).toMatchObject({ ok: true, value: { engine_revision: PINNED } });
     expect(loaded({ schemaVersion: 1, kind: "self-hosted" })).toMatchObject({ ok: true });
     expect(parseTaskGraph(graph()).ok).toBe(true);
+  });
+
+  it("knows a runtime revision by its form", () => {
     expect(isEngineRevision(REV_A)).toBe(true);
+    for (const raw of ["HEAD", `sha256:${"A".repeat(64)}`, `sha256:${"a".repeat(63)}`, `sha1:${"a".repeat(64)}`, 42]) {
+      expect(isEngineRevision(raw)).toBe(false);
+    }
+    expect(() => engineRevisionOf("HEAD")).toThrow(/malformed/);
   });
 
   it.each<[string, unknown, string]>([

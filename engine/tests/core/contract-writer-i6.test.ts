@@ -101,7 +101,7 @@ function populated(): TaskGraph {
     // An I6-era operator manifest with an engine runner: population refuses I6-owing Tasks without one.
     verificationManifest: i6RunnerManifest(),
     specIndex: indexedSpec("spec.md", specDefining(["FR-001"], ["AS-001"])), observedSpecFile: "spec.md",
-    force: false, proofBoundary: { kind: "absent", cause: "fixture" }, contracts: [CONTRACT], invariants: [],
+    force: false, proofBoundary: { kind: "absent", cause: "fixture" }, engineRevision: { kind: "not-observed", cause: "fixture" }, contracts: [CONTRACT], invariants: [],
   });
   if (!result.ok) throw new Error(result.error.message);
   return result.value.state;

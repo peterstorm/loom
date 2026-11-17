@@ -1,5 +1,5 @@
 import type { OwnerObligation, Phase, PlanContract, PlanInvariant, Task, TaskGraph } from "../types";
-import type { EngineRevisionPin } from "../types";
+import { populationEngineRevision, type EngineRevisionObservation } from "./engine-revision-pin";
 import { acceptanceContractsFromPlan, frozenPaths, redWindowTaskIds, type AcceptanceContract } from "./acceptance-contract";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 import { match } from "ts-pattern";
@@ -154,11 +154,11 @@ export type TaskGraphPopulationCommand = Readonly<{
    *  its `proof_boundary_observation`. */
   proofBoundary: PopulationProofBoundary;
   /**
-   * The engine revision pin the shell observed (loom#198, Cause 4): the
-   * running revision, or self-hosted when the project is the engine package.
-   * Absent for a caller that observes no engine, whose graph is not pinned.
+   * What the shell observed of the engine (loom#198, Cause 4): the pin for
+   * the running revision (or self-hosted), or why none was observed. An
+   * existing graph's pin survives re-population (`populationEngineRevision`).
    */
-  engineRevisionPin?: EngineRevisionPin;
+  engineRevision: EngineRevisionObservation;
   /** The validated plan's `## Contracts`; empty when the plan declares none. */
   contracts: readonly PlanContract[];
   /** The validated plan's `## Invariants`; empty when the plan declares none.
@@ -737,9 +737,10 @@ export function populateTaskGraph(
     export_bindings: _staleExportBindings,
     skeletons: _staleSkeletons,
     test_evidence: _staleTestEvidence,
-    engine_revision: _staleEngineRevision,
+    engine_revision: existingEngineRevision,
     ...existingWithoutWaveAuthority
   } = existing;
+  const engineRevision = populationEngineRevision(existingEngineRevision, command.engineRevision);
   const state: TaskGraph = Object.freeze({
     ...existingWithoutWaveAuthority,
     current_phase: "execute",
@@ -772,7 +773,7 @@ export function populateTaskGraph(
     wave_gates: waveGates,
     verification_manifest: command.verificationManifest,
     ...(testEvidence.ok ? { test_evidence: testEvidence.value } : {}),
-    ...(command.engineRevisionPin === undefined ? {} : { engine_revision: command.engineRevisionPin }),
+    ...(engineRevision === undefined ? {} : { engine_revision: engineRevision }),
     ...(command.issue === undefined ? {} : { github_issue: command.issue }),
     ...(command.repo === undefined ? {} : { github_repo: command.repo }),
   });

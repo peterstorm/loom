@@ -94,7 +94,7 @@ function preG2Graph(): Record<string, unknown> {
     planTitle: "skeleton wire", validatedPlanFile: "plan.md", tasks: roster.value,
     verificationManifest: i6RunnerManifest(),
     specIndex: indexedSpec("spec.md"), observedSpecFile: "spec.md",
-    force: false, proofBoundary: { kind: "absent", cause: "fixture" }, contracts: [CONTRACT, TYPELESS], invariants: [],
+    force: false, proofBoundary: { kind: "absent", cause: "fixture" }, engineRevision: { kind: "not-observed", cause: "fixture" }, contracts: [CONTRACT, TYPELESS], invariants: [],
   });
   if (!result.ok) throw new Error(result.error.message);
   const raw = JSON.parse(JSON.stringify(result.value.state)) as Record<string, unknown>;

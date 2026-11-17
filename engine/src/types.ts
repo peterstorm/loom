@@ -25,18 +25,6 @@ import type {
 } from "./core/completion-suite";
 import type { FrozenVerificationManifest, ProjectVerificationCoverage } from "./core/verification-manifest";
 import type { EngineRunTestEvidence } from "./core/test-evidence-mode";
-
-/** One audited move of a TaskGraph's engine pin: from the pinned revision (null: the graph had none) to the running one. */
-export type EngineRevisionAdoption = Readonly<{ from: string | null; to: string; reason: string }>;
-
-/**
- * A TaskGraph's engine revision pin. `pinned`: only that runtime revision may
- * write the graph, and each move is audited in `adoptions`, oldest first.
- * `self-hosted`: the project is the engine package itself, so no pin applies.
- */
-export type EngineRevisionPin =
-  | Readonly<{ schemaVersion: 1; kind: "pinned"; revision: string; adoptions: readonly EngineRevisionAdoption[] }>
-  | Readonly<{ schemaVersion: 1; kind: "self-hosted" }>;
 import type { Phase } from "./core/phases";
 import type { SettledFloor, SpecIndexObservation } from "./core/requirement-coverage";
 import type { ProofBoundaryObservation } from "./core/proof-boundary-observation";
@@ -271,6 +259,21 @@ import type {
   ResolvedFinding,
   ReviewRun,
 } from "./core/findings-shape";
+
+/** A content-addressed Loom runtime revision (`sha256:<64 hex>`), minted only by `core/engine-revision-pin.ts`. */
+export type EngineRevision = string & { readonly __brand: "EngineRevision" };
+
+/** One audited move of a TaskGraph's engine pin: from the pinned revision (null: the graph had none) to the running one. */
+export type EngineRevisionAdoption = Readonly<{ from: EngineRevision | null; to: EngineRevision; reason: string }>;
+
+/**
+ * A TaskGraph's engine revision pin. `pinned`: only that runtime revision may
+ * write the graph, and each move is audited in `adoptions`, oldest first.
+ * `self-hosted`: the project is the engine package itself, so no pin applies.
+ */
+export type EngineRevisionPin =
+  | Readonly<{ schemaVersion: 1; kind: "pinned"; revision: EngineRevision; adoptions: readonly EngineRevisionAdoption[] }>
+  | Readonly<{ schemaVersion: 1; kind: "self-hosted" }>;
 export type {
   AcceptedReviewAuthority,
   CurrentAcceptedReviewAuthority,

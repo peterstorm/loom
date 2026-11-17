@@ -91,8 +91,9 @@ const PACKAGE_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
 /**
  * The engine this process writes State Files as (loom#198, Cause 4): its
- * package root and content-addressed runtime revision, the same identity the
- * write boundary checks a graph's engine pin against.
+ * package root and content-addressed runtime revision under the strict
+ * boundary. Population and adoption pin this revision, and the write boundary
+ * judges a graph's pin against it, whatever boundary the write itself uses.
  */
 export function runningEngineIdentity(): Readonly<{ packageRoot: string; revision: string }> {
   return captureLoomRuntimeIdentityAt(PACKAGE_ROOT, STRICT_RUNTIME_WRITE_BOUNDARY);
@@ -643,8 +644,10 @@ export class StateManager {
         if (produced.persist === false) return produced.value;
         const parsed = parseTaskGraph(produced.state);
         if (!parsed.ok) throw new Error(`Refusing to persist invalid task graph (${parsed.error}): ${this.path}`);
-        // A State File is only ever written by the engine revision it is pinned to (loom#198, Cause 4).
-        const pinRefusal = engineRevisionWriteRefusal(parsed.value, identity.revision);
+        // A State File is only ever written by the engine revision it is pinned to (loom#198, Cause 4),
+        // judged under the strict boundary the pin was minted under; a restoring boundary's identity differs by design.
+        const pinRevision = this.writeBoundary.kind === "strict" ? identity.revision : runningEngineIdentity().revision;
+        const pinRefusal = engineRevisionWriteRefusal(parsed.value, pinRevision);
         if (pinRefusal !== null) throw new Error(pinRefusal);
         writeDirectoryFileAtomicModeNoFollow(
           directory,
