@@ -34,6 +34,7 @@ import type {
 } from "./red-then-green-types";
 import { UNKNOWN_TASK_PREFIX } from "./stop-check-plan-types";
 import { classifyTaskFiles } from "./test-file-classification";
+import type { TestEvidencePolicy } from "./test-evidence-policy";
 import { COVERED_BY_ACCEPTANCE_CONTRACT, taskVerificationPolicy, type NewTestWaiverReason } from "./verification-policy";
 
 // --- Inputs ---
@@ -47,8 +48,12 @@ export type RedThenGreenLiveInput =
   | Readonly<{ kind: "uninspectable"; reason: string }>
   /** An attempt is live, but its epoch cannot be judged: its ledger or the repository root is unreadable. */
   | Readonly<{ kind: "unreadable"; reason: string }>
-  /** A live attempt's read epoch, with the root it is judged against: no root travels without a readable ledger. */
-  | Readonly<{ kind: "live"; events: readonly Evidence[]; repositoryRoot: string }>;
+  /**
+   * A live attempt's read epoch, with the root it is judged against and the
+   * admission policy settlement would apply there (built by the shell, which
+   * resolves the root's real path): no root travels without a readable ledger.
+   */
+  | Readonly<{ kind: "live"; events: readonly Evidence[]; repositoryRoot: string; policy: TestEvidencePolicy }>;
 
 export type RedThenGreenStatusInput = Readonly<{
   graph: TaskGraph;
@@ -192,10 +197,10 @@ function liveView(live: RedThenGreenLiveInput, duty: DutyView): LiveView {
   return match(live)
     .returnType<LiveView>()
     .with({ kind: P.union("not-observable", "no-live-attempt", "uninspectable", "unreadable") }, (passthrough) => passthrough)
-    .with({ kind: "live" }, ({ events, repositoryRoot }) =>
+    .with({ kind: "live" }, ({ events, repositoryRoot, policy }) =>
       duty.kind === "owed"
         // A Claude Code attempt's evidence is never Pi-structured, as in settlement.
-        ? freeze({ kind: "judged", observation: judgeRedThenGreen(events, duty.classification, repositoryRoot, false) })
+        ? freeze({ kind: "judged", observation: judgeRedThenGreen(events, duty.classification, repositoryRoot, false, policy) })
         : NOT_JUDGED)
     .exhaustive();
 }

@@ -25,6 +25,7 @@ import { judgeTestRun } from "../../src/machine/test-report";
 import type { TestFileResult } from "../../src/core/structured-test-report";
 import type { BunVersion } from "../../scripts/bun-version-pin";
 import { bunFixture, optionalBunFixture, RECORDED_BUN_RELEASES } from "../fixtures/bun-console-fixtures";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 /** One release's recordings. `MIXED_CONSOLES` is every console the release
  *  recorded for the mixed run: the agent one, then the plain one when the
@@ -155,7 +156,7 @@ describe.each(RECORDED_BUN_RELEASES)("a red Bun %s run that never loads, through
       cwd: dir,
     });
     expect(testRunOf(call)).toMatchObject({
-      kind: "TestRun",
+      kind: "TestRun", origin: AGENT_COMMAND_ORIGIN,
       exit: 1,
       report: { total: 1, failed: 1, source: "bun-console", files: { kind: "recorded", results: [result("src/a.test.ts", 1, 1, true)] } },
     });
@@ -169,7 +170,7 @@ describe.each(RECORDED_BUN_RELEASES)("a red Bun %s run that never loads, through
       content: [{ type: "text", text: `${LOAD_FAILURE_CONSOLE}\nCommand exited with code 1` }],
       isError: true,
     }, dir);
-    expect(testRunOf(call)).toMatchObject({ kind: "TestRun", exit: 1, report: { source: "bun-console", total: 1, failed: 1 } });
+    expect(testRunOf(call)).toMatchObject({ kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, exit: 1, report: { source: "bun-console", total: 1, failed: 1 } });
   });
 
   it("a later segment that owns the line's exit cannot plant console facts for the Bun run", () => {
@@ -181,6 +182,6 @@ describe.each(RECORDED_BUN_RELEASES)("a red Bun %s run that never loads, through
       error: `Exit code 1\n${LOAD_FAILURE_CONSOLE}`,
       cwd: dir,
     });
-    expect(quietly(() => testRunOf(call))).toMatchObject({ kind: "TestRun", exit: null, report: null });
+    expect(quietly(() => testRunOf(call))).toMatchObject({ kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, exit: null, report: null });
   });
 });

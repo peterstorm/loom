@@ -39,6 +39,7 @@ import {
   type SessionRegistry,
   type ToolEvidencePorts,
 } from "../engine/src/machine";
+import { isEngineCliScript } from "../engine/src/utils/engine-cli-path";
 import { piChildAgentIdentity, type ActiveChildWriteGrant, type PiChildWriteGrants } from "./child-write-grant";
 import { piGrantedAgentId } from "./write-grant";
 
@@ -77,6 +78,7 @@ export type PiEvidenceRecorderPorts = ToolEvidencePorts & Readonly<{ writeStderr
 const productionPorts: PiEvidenceRecorderPorts = Object.freeze({
   registry: fsSessionRegistry,
   nowMs: () => Date.now(),
+  isEngineCli: isEngineCliScript,
   writeStderr: (line: string): void => { process.stderr.write(line); },
 });
 

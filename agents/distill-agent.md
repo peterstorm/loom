@@ -28,7 +28,7 @@ Follow this sequence:
    - Never edit, create or delete a file outside the appendix's list.
    - Never change an exported signature, name or type. That is a deepening, not a distill move: report it instead.
    - Never fix a bug you find. Report it.
-5. **Finish with one final verification run after your last edit.** The FINAL run must be ONE bare command per Bash call (no `cd … &&`, `;`, `&&`, `||`, `&`, pipes, or redirects) that makes the runner write a structured report to an ABSOLUTE, literal path in an existing directory outside the repository, a path you never write yourself. Take the command for your runner from the "final verification run" table at the top of your brief: it lists every form the engine accepts.
+5. **Finish with one final verification run after your last edit.** The FINAL run must be ONE bare command per Bash call (no `cd … &&`, `;`, `&&`, `||`, `&`, pipes, or redirects) that makes the runner write a structured report to an ABSOLUTE, literal path in an existing directory outside the repository, a path you never write yourself. Take the command for your runner from the "final verification run" table at the top of your brief: it lists every form the engine accepts. When your brief's Verification Policy carries a **Test evidence: engine runs only** paragraph, run the baseline and the final run with the `helper run-tests` call it prints instead, naming the test files that cover your scope.
 6. **Stop only after test output shows pass markers** in your Bash tool output (e.g., "X passing", "Tests run: X, Failures: 0", "X pass").
 
 ## Changing nothing is a legitimate result

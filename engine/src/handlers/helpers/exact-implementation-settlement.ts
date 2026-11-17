@@ -28,6 +28,7 @@ import { discardDistillSnapshots, gitDistillSnapshots } from "../../orchestratio
 import { judgeRedThenGreen } from "../../core/red-then-green";
 import type { LedgerObservation, RedThenGreenObservation } from "../../core/red-then-green-types";
 import { classifyTaskFiles } from "../../core/test-file-classification";
+import { testEvidencePolicyAt } from "../../utils/test-evidence-policy-at";
 import { taskVerificationPolicy, type NewTestWaiverReason, type VerificationRequirement } from "../../core/verification-policy";
 import { observeContractConformance } from "../../orchestration/contract-conformance-observation";
 import type { ParsedTaskGraph } from "../../state-manager";
@@ -164,6 +165,7 @@ function judgeAttemptRedThenGreen(
   duty: Exclude<RedThenGreenDuty, { kind: "proof-unfrozen" }>,
   facts: ExactImplementationTransportFacts,
   repositoryRoot: string,
+  testEvidence: TaskGraph["test_evidence"],
 ): RedThenGreenJudgment {
   switch (duty.kind) {
     case "not-owed":
@@ -177,7 +179,7 @@ function judgeAttemptRedThenGreen(
       }
       const piStructured = facts.testResult.verdict === "untrusted" && facts.testResult.provenance === "pi-structured";
       const classification = classifyTaskFiles(task.file_list ?? [], duty.testFiles, task.artifact_baseline);
-      return { kind: "judged", observation: judgeRedThenGreen(ledger.events, classification, repositoryRoot, piStructured) };
+      return { kind: "judged", observation: judgeRedThenGreen(ledger.events, classification, repositoryRoot, piStructured, testEvidencePolicyAt(testEvidence, repositoryRoot)) };
     }
     default: {
       const unreachable: never = duty;
@@ -279,7 +281,7 @@ function observeAttemptEvidence(
   if (!newTests.ok) {
     return withheldBecause(context, "new-test observation", describeNewTestObservationError(newTests.error), bytes);
   }
-  const redThenGreen = judgeAttemptRedThenGreen(task, duty, facts, ports.repository.root);
+  const redThenGreen = judgeAttemptRedThenGreen(task, duty, facts, ports.repository.root, state.test_evidence);
   if (redThenGreen.kind === "unavailable") return withheld(unavailable(state, facts, redThenGreen.reason, bytes));
   // Conformance against the frozen contracts (AD-5): which files owe it is
   // the observation's scope (INV-5); a read failure is infrastructure.

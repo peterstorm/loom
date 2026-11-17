@@ -70,6 +70,7 @@ import {
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { fixturePiAgentDirectory } from "../fixtures/fixture-pi-agent-directory";
 import { IMPLEMENTER_TYPE, agentIdOf, sessionIdOf } from "../fixtures/machine-identities";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 // ─── Environment ──────────────────────────────────────────────────────────
 
@@ -240,7 +241,13 @@ function populate(repository: Repository, manifest: FrozenVerificationManifest):
     invariants: [],
   });
   if (!populated.ok) throw new Error(`fixture population must succeed: ${populated.error.message}`);
-  writeFileSync(repository.statePath, JSON.stringify(populated.value.state, null, 2));
+  // These scenarios pin how the parent ledger captures a Pi child's OWN test
+  // commands, which only a graph that admits agent commands counts: one
+  // populated before engine-run evidence (loom#198). A manifest with an
+  // affectedRunner now freezes engine-run evidence, so drop that mode here;
+  // engine-run settlement on Pi is pinned by the I6 settlement matrix.
+  const { test_evidence: _engineRunMode, ...agentCommandGraph } = populated.value.state;
+  writeFileSync(repository.statePath, JSON.stringify(agentCommandGraph, null, 2));
 }
 
 /** The operator manifest that freezes an affected runner (schema 2, AD-4). */
@@ -691,7 +698,7 @@ describe("CT-3: Pi ledger capture through the shared minting rule", () => {
         { kind: "FileWrite", path: resolve(root, "build.log"), via: "shell" },
         { kind: "FileWrite", path: resolve(root, "build.moved.log"), via: "shell" },
         {
-          kind: "TestRun",
+          kind: "TestRun", origin: AGENT_COMMAND_ORIGIN,
           command: vitestCommand(reportPath),
           exit: 1,
           report: expect.objectContaining({ total: 1, failed: 1, source: "vitest-json" }),
@@ -718,7 +725,7 @@ describe("CT-3: Pi ledger capture through the shared minting rule", () => {
         { kind: "FileWrite", path: resolve(root, TEST_FILE), via: "tool" },
         { kind: "FileWrite", path: resolve(root, "scratch.txt"), via: "shell" },
         {
-          kind: "TestRun",
+          kind: "TestRun", origin: AGENT_COMMAND_ORIGIN,
           command: red.command,
           exit: 1,
           report: expect.objectContaining({
@@ -770,9 +777,9 @@ describe("CT-3: Pi ledger capture through the shared minting rule", () => {
         { kind: "bash", command: bunRun, exit: 3, stdout: "", piDetailsExitCode: 3 },
       ]);
       expect(piParentEpochFacts(granted)).toEqual([
-        { kind: "TestRun", command: bunRun, exit: 1, report: null },
-        { kind: "TestRun", command: bunRun, exit: 0, report: null },
-        { kind: "TestRun", command: bunRun, exit: 3, report: null },
+        { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: bunRun, exit: 1, report: null },
+        { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: bunRun, exit: 0, report: null },
+        { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: bunRun, exit: 3, report: null },
       ]);
 
       // Fresh report written by the runner during the call: it vouches.
@@ -802,14 +809,14 @@ describe("CT-3: Pi ledger capture through the shared minting rule", () => {
 
       const expectedDiscovery = [
         {
-          kind: "TestRun",
+          kind: "TestRun", origin: AGENT_COMMAND_ORIGIN,
           command: vitestCommand(freshPath),
           exit: 0,
           report: expect.objectContaining({ total: 1, failed: 0, source: "vitest-json" }),
         },
-        { kind: "TestRun", command: vitestCommand(stalePath), exit: 0, report: null },
+        { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: vitestCommand(stalePath), exit: 0, report: null },
         { kind: "FileWrite", path: stagedPath, via: "tool" },
-        { kind: "TestRun", command: vitestCommand(stagedPath), exit: 0, report: null },
+        { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: vitestCommand(stagedPath), exit: 0, report: null },
       ];
       expect(claudeEpochFacts(claude)).toEqual(expectedDiscovery);
       expect(piParentEpochFacts(granted).slice(3)).toEqual(expectedDiscovery);

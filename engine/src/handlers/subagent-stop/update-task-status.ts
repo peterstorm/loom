@@ -74,6 +74,7 @@ import {
   productionExactSettlementPorts,
   settleAndPersistExactImplementation,
 } from "../helpers/exact-implementation-settlement";
+import { testEvidencePolicyAt } from "../../utils/test-evidence-policy-at";
 // Historical callers import these shell utilities from this handler. Keep the
 // surface while the implementation lives in the neutral shared shell module.
 export {
@@ -519,7 +520,13 @@ export const runUpdateTaskStatus = async (
   // The one epoch both the test verdict and exact settlement (I6) read.
   const epochLedger = claudeEpochLedger(ledgerRead, epochAgentId, epochAgentType);
   const epochEvents = epochLedger.kind === "read" ? epochLedger.events : [];
-  let testEvidence = resolveTestEvidence(epochEvents, bashTestOutput, machineBound, snapshotFailed);
+  let testEvidence = resolveTestEvidence(
+    epochEvents,
+    testEvidencePolicyAt(state.test_evidence, repositoryRoot),
+    bashTestOutput,
+    machineBound,
+    snapshotFailed,
+  );
   // Machine-bound agents don't self-report completion: fold this epoch's
   // evidence through the machine and consult its terminal requirements —
   // unmet requirements cap a trusted-pass at untrusted, labeled with what is

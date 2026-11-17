@@ -61,10 +61,19 @@ declare const REPORT_SUMMARY_PARSED: unique symbol;
  * deliberately accepts a narrower set — only the formats the strict byte
  * parser (`parseStructuredTestReportBytes`) yields, which never includes
  * `bun-console`.
+ *
+ * `runner-crash` is an engine run (`helper run-tests`) whose runner exited
+ * non-zero and wrote no report. The engine knows exactly which test files it
+ * handed the runner, so each one is recorded as a single failing
+ * collection-error testcase (`runnerCrashSummary`): it can show a red under
+ * the collection-error rule and can never be a green.
  */
-export const REPORT_SOURCES = Object.freeze(["vitest-json", "junit-xml", "bun-console"] as const);
+export const REPORT_SOURCES = Object.freeze(["vitest-json", "junit-xml", "bun-console", "runner-crash"] as const);
 
 type ReportSource = typeof REPORT_SOURCES[number];
+
+/** The sources whose every per-file result is exactly one failing collection-error testcase. */
+const COLLECTION_ERROR_ONLY_SOURCES: ReadonlySet<ReportSource> = new Set<ReportSource>(["bun-console", "runner-crash"]);
 
 /** The report source a wire value names, or null for anything else. */
 export const parseReportSource = (raw: unknown): ReportSource | null =>
@@ -135,8 +144,8 @@ function parseFileResult(source: ReportSource, raw: unknown): TestFileResult | s
   if (collectionError && source === "vitest-json" && executed !== 0) {
     return `${file} reports a Vitest JSON collection error yet executed testcases`;
   }
-  if (source === "bun-console" && !(collectionError && executed === 1 && failed === 1 && skipped === 0)) {
-    return `${file} in a Bun console summary must be exactly one failing collection-error testcase`;
+  if (COLLECTION_ERROR_ONLY_SOURCES.has(source) && !(collectionError && executed === 1 && failed === 1 && skipped === 0)) {
+    return `${file} in a ${source} summary must be exactly one failing collection-error testcase`;
   }
   return Object.freeze({ file, executed, failed, skipped, collectionError });
 }
@@ -797,9 +806,26 @@ export function parseBunConsoleCollectionErrors(output: string): readonly string
   return Object.freeze(files);
 }
 
-/** One collection error as Bun counts it: a single failing testcase. */
-const bunCollectionError = (file: string): TestFileResult =>
+/**
+ * One collection error as a single failing testcase: how Bun counts one, and
+ * how an engine run whose runner crashed records each file it handed the runner.
+ */
+const collectionErrorResult = (file: string): TestFileResult =>
   Object.freeze({ file, executed: 1, failed: 1, skipped: 0, collectionError: true });
+
+/**
+ * An engine run whose runner exited non-zero without writing its report: each
+ * file the engine handed the runner is one failing collection-error testcase
+ * (source `runner-crash`). Null for an empty or repeated file list, which no
+ * engine run produces.
+ */
+export function runnerCrashSummary(files: readonly string[]): TestReportSummary | null {
+  if (files.length === 0 || new Set(files).size !== files.length) return null;
+  return parseReportSummary(files.length, files.length, "runner-crash", {
+    kind: "recorded",
+    results: files.map(collectionErrorResult),
+  });
+}
 
 /**
  * A Bun run's summary: its JUnit summary joined with the collection errors its
@@ -825,7 +851,7 @@ export function bunRunSummary(
   if (junit === null) {
     return parseReportSummary(errors.length, errors.length, "bun-console", {
       kind: "recorded",
-      results: errors.map(bunCollectionError),
+      results: errors.map(collectionErrorResult),
     });
   }
   if (junit.files.kind !== "recorded") return junit;
@@ -835,7 +861,7 @@ export function bunRunSummary(
   const omitted = errors.filter((file) => !reported.some((entry) => entry.file === file));
   return parseReportSummary(junit.total + errors.length, junit.failed + errors.length, junit.source, {
     kind: "recorded",
-    results: [...reported, ...omitted.map(bunCollectionError)],
+    results: [...reported, ...omitted.map(collectionErrorResult)],
   });
 }
 

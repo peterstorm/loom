@@ -77,6 +77,9 @@ import {
 } from "../../fixtures/red-then-green-status-fixtures";
 import { graphFixture, protectedGraphFixture, satisfiedProof, taskFixture } from "../../fixtures/task-lifecycle";
 import { WHITELISTED_HELPERS } from "../../../src/core/guard-state-file";
+import { AGENT_COMMAND_EVIDENCE } from "../../../src/core/test-evidence-policy";
+import { mutationManifest } from "../../fixtures/task-mutation";
+import { AGENT_COMMAND_ORIGIN } from "../../../src/machine/types";
 
 // --- Fixtures unique to the helper ---
 
@@ -103,9 +106,9 @@ const OWED_JSON = (): string => graphJson([requiredTask("T1", OWED_ERA)], I6_MAN
 // --- Ledger events ---
 
 const SHOWN_EVENTS: readonly Evidence[] = [
-  { kind: "TestRun", command: RED_COMMAND, exit: 1, report: report([failing(TEST_A), passing(TEST_B)]) },
+  { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: RED_COMMAND, exit: 1, report: report([failing(TEST_A), passing(TEST_B)]) },
   { kind: "FileWrite", path: IMPL, via: "tool" },
-  { kind: "TestRun", command: GREEN_COMMAND, exit: 0, report: report([passing(TEST_A), passing(TEST_B)]) },
+  { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: GREEN_COMMAND, exit: 0, report: report([passing(TEST_A), passing(TEST_B)]) },
 ];
 
 // --- Harness ---
@@ -367,7 +370,7 @@ describe("red-then-green-status helper live attempt", () => {
     expect(lines).toContain(`  ${RED_STEP} #0 ${RED_COMMAND}`);
     expect(lines).toContain(`  ${IMPLEMENTATION_WRITE_STEP} ${IMPL}`);
     expect(lines).toContain(`  ${GREEN_STEP} #2 ${GREEN_COMMAND}`);
-    expect(lines).toEqual(expectedLines(statePath, "T1", { kind: "live", events: SHOWN_EVENTS, repositoryRoot: ROOT }));
+    expect(lines).toEqual(expectedLines(statePath, "T1", { kind: "live", events: SHOWN_EVENTS, repositoryRoot: ROOT, policy: AGENT_COMMAND_EVIDENCE }));
     // The port is asked once, for the named Task, against the loaded TaskGraph's path.
     expect(live.calls).toEqual([{ taskId: "T1", statePath }]);
   });
@@ -556,5 +559,34 @@ describe("red-then-green-status through the real CLI", () => {
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain(`No task graph at ${statePath}`);
     expect(result.status).toBe(1);
+  });
+});
+
+// --- An engine-run graph (loom#198) ---
+
+describe("red-then-green-status helper in an engine-run graph", () => {
+  const manifest = mutationManifest();
+  const engineJson = (): string => JSON.stringify({
+    ...JSON.parse(graphJson([requiredTask("T1", OWED_ERA)], manifest)),
+    test_evidence: { kind: "engine-run", manifestDigest: manifest.manifestDigest, adoptedBy: "population" },
+  });
+  const ENGINE_ORIGIN = { kind: "engine-run" as const, repositoryRoot: ROOT, manifestDigest: manifest.manifestDigest };
+  const asEngineRuns = (events: readonly Evidence[]): readonly Evidence[] =>
+    events.map((event) => (event.kind === "TestRun" ? { ...event, origin: ENGINE_ORIGIN } : event));
+
+  it("judges the live epoch under the graph's policy: an agent's own runs never show the order", async () => {
+    stateFileText(engineJson());
+    const sink = captured();
+    await run(sink, ["--task", "T1"], { live: recordingLive({ kind: "live", ledger: { kind: "read", events: SHOWN_EVENTS } }).port });
+    expect(writtenLines(sink)).not.toContain(`${LIVE_PREFIX} ${SHOWN}`);
+  });
+
+  it("shows the order from engine runs bound to the graph's root and manifest", async () => {
+    stateFileText(engineJson());
+    const sink = captured();
+    await run(sink, ["--task", "T1"], {
+      live: recordingLive({ kind: "live", ledger: { kind: "read", events: asEngineRuns(SHOWN_EVENTS) } }).port,
+    });
+    expect(writtenLines(sink)).toContain(`${LIVE_PREFIX} ${SHOWN}`);
   });
 });

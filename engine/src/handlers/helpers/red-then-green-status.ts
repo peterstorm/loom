@@ -30,6 +30,7 @@ import {
 import { PRODUCTION_STOP_CHECK_PORTS, type StopCheckShellPorts } from "../subagent-stop/acceptance-stop-check";
 import { argumentValue, unconsumedValueArguments } from "./cli-args";
 import { claudeLiveAttemptEvidence, type LiveAttemptEvidenceFn } from "./stop-check-plan";
+import { testEvidencePolicyAt } from "../../utils/test-evidence-policy-at";
 
 const FLAGS: ReadonlySet<string> = new Set(["--task"]);
 
@@ -69,6 +70,7 @@ function liveInput(
   statePath: string,
   liveAttemptEvidence: LiveAttemptEvidenceFn,
   ports: RedThenGreenStatusPorts,
+  testEvidence: TaskGraph["test_evidence"],
 ): RedThenGreenLiveInput {
   if (harness === "pi") return NOT_OBSERVABLE;
   const live = liveAttemptEvidence(taskId, statePath);
@@ -76,7 +78,13 @@ function liveInput(
   if (live.ledger.kind === "unreadable") return Object.freeze({ kind: "unreadable", reason: live.ledger.reason });
   const root = ports.repositoryRoot(statePath);
   return root.ok
-    ? Object.freeze({ kind: "live", events: live.ledger.events, repositoryRoot: root.root })
+    ? Object.freeze({
+      kind: "live",
+      events: live.ledger.events,
+      repositoryRoot: root.root,
+      // The admission policy settlement would apply, built by the one real-path constructor.
+      policy: testEvidencePolicyAt(testEvidence, root.root),
+    })
     : Object.freeze({ kind: "unreadable", reason: root.reason });
 }
 
@@ -114,7 +122,7 @@ export function createRedThenGreenStatusHandler(
       return { kind: "error", message: describe(error) };
     }
     // An unknown id has no live attempt, so the renderer refuses it naming the id.
-    const live = liveInput(harness, parsed.taskId, manager.getPath(), liveAttemptEvidence, ports);
+    const live = liveInput(harness, parsed.taskId, manager.getPath(), liveAttemptEvidence, ports, graph.test_evidence);
     return renderedResult(write, renderRedThenGreenStatus({ graph, taskId: parsed.taskId, live }));
   };
 }

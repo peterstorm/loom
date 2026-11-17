@@ -111,9 +111,30 @@ export type OwedTaskMutation = Readonly<{
   mutable: NonEmpty<string>;
   /** Every declared file, tests included, in `file_list` order: what the digest covers. */
   declared: NonEmpty<string>;
+  /**
+   * The declared test files beneath the runner's cwd, in `file_list` order:
+   * every run hands the runner these after the mutated file, as the affected
+   * stop check hands it a Task's changed files, so a runner that runs exactly
+   * the files it is given (mocha, a plain `vitest run`) runs the Task's own
+   * tests, and one that resolves related tests (`vitest related`) still
+   * resolves them from the mutated file (loom#198).
+   */
+  tests: readonly string[];
 }>;
 
 export type TaskMutationDuty = Readonly<{ kind: "off"; reason: TaskMutationOffReason }> | OwedTaskMutation;
+
+/**
+ * The files one mutation run hands the runner: the mutated file, then the
+ * Task's own test files (`OwedTaskMutation.tests`) without it, as the affected
+ * stop check hands the runner a Task's changed files.
+ */
+export function mutationRunFiles(mutated: string, tests: readonly string[]): NonEmpty<string> {
+  const files: NonEmpty<string> = [mutated, ...tests.filter((test) => test !== mutated)];
+  // `Object.freeze` types an array as `readonly T[]`, so freeze in place and keep the tuple type.
+  Object.freeze(files);
+  return files;
+}
 
 const off = (reason: TaskMutationOffReason): TaskMutationDuty => Object.freeze({ kind: "off", reason });
 
@@ -146,8 +167,9 @@ export function taskMutationDuty(
   const mutable = nonEmpty((declared ?? []).filter((path) =>
     isMutableSource(path) && !isTestFileBySuffixes(path, suffixes) && beneath(runner.cwd, path)));
   if (declared === null || mutable === null) return off("no-mutable-files");
+  const tests = Object.freeze(declared.filter((path) => isTestFileBySuffixes(path, suffixes) && beneath(runner.cwd, path)));
   const startSha = task.start_sha === undefined || task.start_sha === "" ? null : task.start_sha;
-  return Object.freeze({ kind: "owed", taskId: task.id, wave: task.wave, startSha, runner, mutable, declared });
+  return Object.freeze({ kind: "owed", taskId: task.id, wave: task.wave, startSha, runner, mutable, declared, tests });
 }
 
 // ---------------------------------------------------------------------------

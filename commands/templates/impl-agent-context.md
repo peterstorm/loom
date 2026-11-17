@@ -6,6 +6,8 @@ Rendered by the Loom engine (`helper orchestration brief`) for each owed impleme
 
 ## The final verification run
 
+**Engine-run graphs override this section.** When the Verification Policy below carries a **Test evidence: engine runs only** paragraph, that paragraph's `helper run-tests` call is the only run that counts, for the final verification run and for every I6 step: the table below does not apply, and your own test commands are never trusted.
+
 Before you finish, run the regression command with the Bash tool if the Verification Policy below says `regression: required`. Skip it only under a typed regression waiver other than `distill-pass`: a distill Task still runs it after its last edit, unless it changed no file. `new_tests` is a separate arm; waiving it never waives the regression run.
 
 A pass counts only from a run whose structured report the runner itself wrote during that same Bash call. Iterate however you like while working, but make the final run:

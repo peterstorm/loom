@@ -23,7 +23,7 @@
 import { posix } from "node:path";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { parseAuthorizedWaveCompletionCheck, type AuthorizedWaveCompletionCheck } from "../core/completion-suite";
-import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
+import { failure, success, type DomainResult, type NonEmpty } from "../core/orchestration-contract/identity";
 import { MODULE_ABSENT } from "../core/owner-verification/coverage";
 import { ownerAtBaseEntry } from "../core/owner-verification/ls-tree";
 import { mutantTimeoutMs } from "../core/owner-verification/mutation-plan";
@@ -134,13 +134,14 @@ export function matrixTestRunOf(execution: CommandExecutionResult, elapsedMs: nu
 export type MatrixTestCommand = Extract<AuthorizedWaveCompletionCheck, { readonly kind: "project-command" }>;
 
 /**
- * The frozen runner's command over one file alone (the Wave Gate's matrix
- * test, or one of a Task's implementation files), formed by
- * `affectedRunnerCheck` and re-authorized with its time limit clamped by
- * `mutantTimeoutMs`: no command text ever comes from the plan.
+ * The frozen runner's command over `files` (the Wave Gate's matrix test, or a
+ * Task's own test files, or the one implementation file a related-tests
+ * runner resolves), formed by `affectedRunnerCheck` and re-authorized with its
+ * time limit clamped by `mutantTimeoutMs`: no command text ever comes from
+ * the plan.
  */
-export function matrixTestCommand(runner: AffectedRunner, file: string): DomainResult<MatrixTestCommand, string> {
-  const formed = affectedRunnerCheck(runner, [file]);
+export function matrixTestCommand(runner: AffectedRunner, files: NonEmpty<string>): DomainResult<MatrixTestCommand, string> {
+  const formed = affectedRunnerCheck(runner, files);
   if (!formed.ok) return failure(formed.error.errors.join("; "));
   const clamped = parseAuthorizedWaveCompletionCheck({ ...formed.value, timeoutMs: mutantTimeoutMs(formed.value.timeoutMs) });
   if (!clamped.ok) return failure(clamped.error.errors.join("; "));

@@ -80,6 +80,12 @@ export type LoomCommands = Readonly<{
    *  TaskGraph lives in. The brief and a stop's block both print it, so an
    *  implementer is never told two forms. */
   mutationCheck: (taskId: string) => string;
+  /** The engine test run over `files` (repository-relative test files), one
+   *  `--files` each (loom#198). In a TaskGraph that froze engine-run test
+   *  evidence it is the only run settlement counts, and the evidence recorder
+   *  mints its TestRun only from this exact bare form: nothing may be
+   *  prefixed, chained, piped or redirected around it. */
+  runTests: (files: readonly string[]) => string;
   /** How the parent obtains the receipt binding for one of `owner`'s artifacts
    *  in the run at `runDir` (a hunter cannot derive the nonce itself): the line
    *  `assign` prints under each minted owner. `<file>` is the one word left for
@@ -115,6 +121,7 @@ export function loomCommands(root: LoomPackageRoot): LoomCommands {
   const helper = `bun ${quoteShellArgument(`${root}/engine/src/cli.ts`)} helper`;
   return Object.freeze({
     mutationCheck: (taskId: string) => `${helper} mutation-check --task ${quoteShellArgument(taskId)}`,
+    runTests: (files: readonly string[]) => `${helper} run-tests${files.map((file) => ` --files ${quoteShellArgument(file)}`).join("")}`,
     auditNonce: (runDir: string, owner: SecurityAgentId) =>
       `${helper} security-audit nonce --out ${quoteShellArgument(runDir)} --artifact agents/${owner}/artifacts/<file>`,
     verificationImport: (locator: string, run: string) =>

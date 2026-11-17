@@ -197,7 +197,7 @@ function planMutation(input: OwnerVerificationInput, obligation: OwnerObligation
 type MutateRun = Extract<ObligationRun, { readonly kind: "mutate" }>;
 
 async function mutationEvidence(input: OwnerVerificationInput, { obligation, runner }: MutateRun): Promise<MutationEvidence> {
-  const command = matrixTestCommand(runner, obligation.matrixTest);
+  const command = matrixTestCommand(runner, [obligation.matrixTest]);
   if (!command.ok) {
     return { kind: "infrastructure", failure: infrastructure("runner-missing", `the affectedRunner cannot run ${obligation.matrixTest}: ${command.error}`) };
   }

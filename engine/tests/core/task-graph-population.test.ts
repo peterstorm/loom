@@ -17,6 +17,7 @@ import { parseExportBindings } from "../../src/core/skeleton/bindings";
 import type { SkeletonRecord } from "../../src/core/skeleton/types";
 import { parseTaskGraph } from "../../src/state-file-wire";
 import { isDistillTask } from "../../src/core/distill-task";
+import { mutationManifest } from "../fixtures/task-mutation";
 
 /** The authored roster as population wrote it, without the Distill Tasks it appends (ADR-0068). */
 const authoredTasksOf = (state: TaskGraph) => state.tasks.filter((task) => !isDistillTask(task));
@@ -660,5 +661,23 @@ describe("populateTaskGraph stamps the plan's export bindings (AD-4)", () => {
     const unbound = populateTaskGraph(recorded, boundCommand({ force: true, exportBindings: { bindings: [], problems: [] } }));
     expect(unbound.ok).toBe(true);
     if (unbound.ok) expect("skeletons" in unbound.value.state).toBe(false);
+  });
+});
+
+describe("engine-run test evidence at population (loom#198)", () => {
+  it("freezes engine-run evidence when the manifest declares an affectedRunner", () => {
+    const manifest = mutationManifest();
+    const result = populateTaskGraph(graph(), command({ verificationManifest: manifest }));
+    if (!result.ok) throw new Error(result.error.message);
+    expect(result.value.state.test_evidence).toEqual({ kind: "engine-run", manifestDigest: manifest.manifestDigest, adoptedBy: "population" });
+    const reloaded = parseTaskGraph(JSON.parse(JSON.stringify(result.value.state)));
+    expect(reloaded.ok && reloaded.value.test_evidence).toEqual(result.value.state.test_evidence);
+  });
+
+  it("freezes none without an affectedRunner, and re-population drops a stale one", () => {
+    const stale = { kind: "engine-run" as const, manifestDigest: "0".repeat(64), adoptedBy: "population" as const };
+    const result = populateTaskGraph(graph({ current_phase: "execute", test_evidence: stale }), command());
+    if (!result.ok) throw new Error(result.error.message);
+    expect(result.value.state.test_evidence).toBeUndefined();
   });
 });

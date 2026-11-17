@@ -29,6 +29,28 @@ import type { SandboxReceipt } from "../core/security-sandbox";
 export type FileWriteVia = "tool" | "shell";
 
 /**
+ * Who chose what ran in a TestRun.
+ *
+ * - `agent-command`: the agent's own shell command, classified from its text
+ *   and paired with a report it pointed the runner at.
+ * - `engine-run`: `helper run-tests` ran a frozen Verification Manifest's
+ *   `affectedRunner` over named test files and printed the receipt this fact
+ *   was minted from. The binding names the canonical repository root the
+ *   helper ran in and the frozen manifest digest it ran under, so settlement
+ *   admits the run only for its own TaskGraph: a run against another checkout
+ *   or another manifest is never this graph's evidence.
+ *
+ * Absent on the WIRE means `agent-command` (every record before engine runs);
+ * a malformed one fails closed to it, which never qualifies where an engine
+ * run is required.
+ */
+export type TestRunOrigin =
+  | Readonly<{ kind: "agent-command" }>
+  | Readonly<{ kind: "engine-run"; repositoryRoot: string; manifestDigest: string }>;
+
+export const AGENT_COMMAND_ORIGIN: TestRunOrigin = Object.freeze({ kind: "agent-command" });
+
+/**
  * Evidence stores FACTS ONLY — never derived judgments. `passed`/`trusted`
  * are computed from `exit` + `report` via `judgeTestRun` at read time, so a
  * ledger line can never carry an inconsistent (or forged-inconsistent)
@@ -42,6 +64,7 @@ export type Evidence =
   | { readonly kind: "FileWrite"; readonly path: string; readonly via: FileWriteVia }
   | {
       readonly kind: "TestRun";
+      readonly origin: TestRunOrigin;
       readonly command: string;
       /** Real exit status captured at execution time; null when the harness didn't expose one. */
       readonly exit: number | null;

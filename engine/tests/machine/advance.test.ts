@@ -12,6 +12,7 @@ import {
 import { initialState, type Evidence } from "../../src/machine/types";
 import { parseMachine } from "../../src/machine/parse-machine";
 import { reportSummary } from "./report-summary";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 // MachineDef is branded: parseMachine is its only producer, so tests build
 // the machine the same way production does — from a raw definition.
@@ -32,7 +33,7 @@ const read = (path = "/a.ts"): Evidence => ({ kind: "FileRead", path });
 const write = (path = "/a.ts"): Evidence => ({ kind: "FileWrite", path, via: "tool" });
 // Facts only — judgment is derived at fold time via judgeTestRun.
 const testRun = (over: Partial<Extract<Evidence, { kind: "TestRun" }>> = {}): Evidence => ({
-  kind: "TestRun",
+  kind: "TestRun", origin: AGENT_COMMAND_ORIGIN,
   command: "npm test",
   exit: 0,
   report: reportSummary(5, 0),

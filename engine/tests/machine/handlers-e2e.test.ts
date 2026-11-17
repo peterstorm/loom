@@ -25,6 +25,7 @@ import {
 import { eventsForEpoch, parseEpoch } from "../../src/machine/evidence";
 import { SUBAGENT_DIR } from "../../src/config";
 import { sessionIdOf } from "../fixtures/machine-identities";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 const run = `handlers-e2e-${process.pid}-${Date.now()}`;
 const fixtureRoot = canonicalTempDir("loom-machine-handler-e2e-");
@@ -119,7 +120,7 @@ describe("guarded machine — full hook lifecycle", () => {
     const records = readEvidence(s);
     expect(records).toHaveLength(1);
     expect(records[0].epoch).toBe("a-1:guarded-test-agent");
-    expect(records[0].event).toEqual({ kind: "TestRun", command: "npm test", exit: 1, report: null });
+    expect(records[0].event).toEqual({ kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 1, report: null });
     // Foreign epochs see nothing (parseEpoch: the branded deserialization boundary):
     expect(eventsForEpoch(records, parseEpoch("a-9:code-implementer-agent")!)).toEqual([]);
     await cleanup(stop(s), []);

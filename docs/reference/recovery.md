@@ -32,6 +32,17 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration attest \
 
 `attest` refuses a live attempt, an escalated lineage (remediate first), a satisfied proof, a repeat (`already in attestation mode`), and an unknown Task — all without touching state. It rewrites exactly the proof surface under the TaskGraph lock: one scope-wide attestation obligation plus one attested obligation per declared artifact, a regression-required/new-tests-waived stored policy (the legacy `new_tests_required` boolean is cleared, not flipped — a `false` there would contradict the required regression at the load boundary), and the `implementation_attestation: true` flag. Lineage, baselines, and history are untouched. The dispatch binding requires the engine-derived `LOOM_IMPLEMENTATION_ATTESTATION_CONTEXT` line on every dispatch and refuses it on non-attestation Tasks. The attested child must change nothing inside the attempt scope: any byte move fails the scope obligation and terminalizes that attestation lineage, so it can never become a refreshed attempt-2 baseline. Restore the intended bytes, then use the exact terminal receipt with `remediate` before another proving round. The classified regression still runs. Reconcile measures drift against the attempt baseline (never the population baseline), so pre-existing population-relative changes are the attested work, not writes. Any revalidation ends attestation mode: `reopen-task`, a Contract Revision and `reopen-completed-wave` exist because the Task's bytes may change, so they clear `implementation_attestation` and give the Task a fresh pending Proof under its current (attestation) policy, with new tests still waived, and its agent's normal declared-artifact expectation. Re-arm `attest` afterwards only if the reopened work turns out to need no change.
 
+## Adopting engine-run test evidence on a live graph
+
+A TaskGraph populated before engine-run test evidence existed admits an agent's own test commands, so a project whose runner Loom reads no report from (mocha, say) can never show a qualifying I6 red: its Tasks fail with `red-missing` (`untrustedOnly: true`) on both attempts. Once the frozen manifest declares an `affectedRunner` that writes a JUnit report, adopt engine-run evidence:
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration adopt-engine-run-tests \
+  --reason "<why: e.g. the project runner writes no report the recorder reads>"
+```
+
+It refuses outside execute, while any implementation attempt is reserved or a subagent is active, and when the frozen manifest has no `affectedRunner`; it is idempotent. The adoption is recorded on the field with the reason. From then on every brief carries the **Test evidence: engine runs only** paragraph with the `helper run-tests` call. A Task whose attempt 2 already failed I6 under the old mode needs `remediate` with its terminal receipt before it is dispatched again ([Implementation escalation](#implementation-escalation-semantic-attempt-2-exhausted)).
+
 ## Reopening an implemented Task to fix a Wave Gate Finding
 
 Use this when a Wave Gate Finding, critical or advisory, must be fixed in a Task that is already `implemented`: abandon the gate run, reopen the Task, and dispatch it again.

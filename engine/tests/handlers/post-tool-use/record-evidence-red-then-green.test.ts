@@ -18,6 +18,7 @@ import { epochOf, eventsForEpoch } from "../../../src/machine";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { IMPLEMENTER_TYPE, agentIdOf, sessionIdOf } from "../../fixtures/machine-identities";
 import { inMemorySessionRegistry } from "../../machine/fake-session-registry";
+import { AGENT_COMMAND_EVIDENCE } from "../../../src/core/test-evidence-policy";
 
 const temp = canonicalTempDir("loom-record-evidence-i6-");
 const repo = join(temp, "repo");
@@ -109,7 +110,7 @@ describe("I6 through Claude Code's recorder", () => {
 
     const events = eventsForEpoch(registry.readEvidence(session), epochOf(agent, IMPLEMENTER_TYPE));
     expect(events.filter((event) => event.kind === "TestRun").map((event) => event.kind === "TestRun" && event.exit)).toEqual([1, 0]);
-    expect(judgeRedThenGreen(events, classification, repo, false)).toEqual({
+    expect(judgeRedThenGreen(events, classification, repo, false, AGENT_COMMAND_EVIDENCE)).toEqual({
       kind: "shown",
       red: { index: 0, command: redCommand },
       implementationWrite: "src/feature.ts",
@@ -155,13 +156,13 @@ describe("I6 through Claude Code's recorder", () => {
       kind: "recorded",
       results: [{ file: join(repo, "tests/feature.test.ts"), executed: 0, failed: 0, skipped: 0, collectionError: true }],
     });
-    expect(judgeRedThenGreen(events, creating, repo, false)).toEqual({
+    expect(judgeRedThenGreen(events, creating, repo, false, AGENT_COMMAND_EVIDENCE)).toEqual({
       kind: "shown",
       red: { index: 0, command: redCommand },
       implementationWrite: "src/feature.ts",
       green: { index: 2, command: greenCommand },
     });
-    expect(judgeRedThenGreen(events, classification, repo, false))
+    expect(judgeRedThenGreen(events, classification, repo, false, AGENT_COMMAND_EVIDENCE))
       .toEqual({ kind: "unproven", gap: { kind: "red-missing", untrustedOnly: false } });
   });
 });

@@ -31,6 +31,7 @@ import {
   classifyTaskBaseline,
   classifyTaskMutantRun,
   mutantsByFile,
+  mutationRunFiles,
   TASK_MUTATION_DEADLINE_MS,
   taskMutationResultOf,
   taskMutationUnavailable,
@@ -140,9 +141,11 @@ async function runFile(
   expectation: AcceptanceExpectation,
   deadlineMs: number,
 ): Promise<DomainResult<readonly TaskMutantRun[], string>> {
-  const { runner } = input.duty;
-  const command = matrixTestCommand(runner, file.path);
-  if (!command.ok) return failure(`the affectedRunner cannot run over ${file.path}: ${command.error}`);
+  const { runner, tests } = input.duty;
+  // A related-tests runner resolves the mutated file; one that runs exactly the files it is given runs the Task's tests.
+  const targets = mutationRunFiles(file.path, tests);
+  const command = matrixTestCommand(runner, targets);
+  if (!command.ok) return failure(`the affectedRunner cannot run over ${targets.join(", ")}: ${command.error}`);
   const ownerPath = parseReviewPath(file.path, "implementation file");
   if (!ownerPath.ok) return failure(ownerPath.errors.join("; "));
   const budget: TaskMutationBudget = { deadlineMs, now: input.now, runTimeoutMs: command.value.timeoutMs };

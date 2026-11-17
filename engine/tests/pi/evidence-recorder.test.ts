@@ -58,6 +58,7 @@ import { createPiParentSessions } from "../../../pi/spawn-reservation";
 import { createTrustedReviewWitnesses } from "../../../pi/trusted-review-witness";
 import type { AdmittedSpawnItem, SpawnAdmission } from "../../src/core/spawn-admission";
 import { PI_EXTENSION_RUNTIME_REVISION_ENV, PI_EXTENSION_RUNTIME_ROOT_ENV } from "../../src/runtime-compatibility";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 const parent = sessionIdOf("pi-parent-session");
 const child = sessionIdOf("pi-child-session");
@@ -116,7 +117,7 @@ type Harness = Readonly<{
 const harness = (): Harness => {
   const registry = inMemorySessionRegistry();
   const stderr: string[] = [];
-  return { registry, stderr, ports: { registry, nowMs: () => Date.now(), writeStderr: (line) => { stderr.push(line); } } };
+  return { registry, stderr, ports: { registry, nowMs: () => Date.now(), isEngineCli: () => false, writeStderr: (line) => { stderr.push(line); } } };
 };
 
 const ctx = (sessionId: string, cwd = "/repo") => ({ cwd, sessionManager: { getSessionId: () => sessionId } });
@@ -148,7 +149,7 @@ describe("createPiEvidenceRecorder — the Pi child's tool_result recorder", () 
       { epoch, event: { kind: "FileRead", path: "/repo/README.md" }, callId: "call-read" },
       { epoch, event: { kind: "FileWrite", path: "/repo/src/a.ts", via: "tool" }, callId: "call-write" },
       { epoch, event: { kind: "FileWrite", path: "/repo/out.txt", via: "shell" }, callId: "call-bash" },
-      { epoch, event: { kind: "TestRun", command: "printf x > out.txt && bun test", exit: null, report: null }, callId: "call-bash" },
+      { epoch, event: { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "printf x > out.txt && bun test", exit: null, report: null }, callId: "call-bash" },
     ]);
     expect(registry.readEvidence(child)).toEqual([]);
   });

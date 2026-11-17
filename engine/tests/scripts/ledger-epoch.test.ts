@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { epochOf, eventsForEpoch, parseAgentId, parseAgentType, parseEvidenceLine } from "../../src/machine/evidence";
 import type { EvidenceRecord } from "../../src/machine/types";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 const SCRIPT = resolve(__dirname, "../../../scripts/ledger-epoch.ts");
 const USAGE =
@@ -62,7 +63,7 @@ const recordedReport = {
   },
 };
 
-const recordedTestRun = { kind: "TestRun", command: "bun test --reporter=junit", exit: 1, report: recordedReport };
+const recordedTestRun = { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "bun test --reporter=junit", exit: 1, report: recordedReport };
 
 /** A multi-epoch ledger with every evidence kind and one duplicate delivery. */
 const LEDGER_LINES: readonly string[] = [
@@ -73,7 +74,7 @@ const LEDGER_LINES: readonly string[] = [
   line({ epoch: IMPLEMENTER, event: recordedTestRun, callId: "c2" }),
   line({ epoch: IMPLEMENTER, event: { kind: "FileWrite", path: "/repo/src/a.ts", via: "tool" }, callId: "c3" }),
   line({ epoch: IMPLEMENTER, event: { kind: "FileWrite", path: "/repo/out.log", via: "shell" }, callId: "c4" }),
-  line({ epoch: IMPLEMENTER, event: { kind: "TestRun", command: "pytest" }, callId: "c5" }),
+  line({ epoch: IMPLEMENTER, event: { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "pytest" }, callId: "c5" }),
   line({ epoch: TESTER, event: { kind: "FileWrite", path: "/repo/t.ts", via: "tool" }, callId: "t2" }),
 ];
 

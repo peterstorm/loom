@@ -33,6 +33,7 @@
  *                               --description <text> --reason <text>
  *                               [--agent <agent>] [--new-tests required|existing-tests-sufficient]
  *   helper orchestration withdraw-forward-fix --wave <N> --task <fix-task-id> --reason <text>
+ *   helper orchestration adopt-engine-run-tests --reason <text>
  *
  * Every `--run`, `--new-run`, and remediation `sourceRun` accepts either the
  * bare run id or a full path to that same direct child of its runs-root. The
@@ -213,6 +214,7 @@ import { parseOrchestrationOperation } from "./orchestration-operations";
 import { remediateOperation } from "./remediate-implementation-escalation";
 import { attestOperation } from "./attest-implementation";
 import { reopenTaskOperation } from "./reopen-task";
+import { adoptEngineRunTestsOperation } from "./adopt-engine-run-tests";
 import { addForwardFixOperation, withdrawForwardFixOperation } from "./forward-fix-operations";
 import { renderStandaloneReviewSummary } from "../../core/standalone-review-records";
 import { serializeStandaloneReviewMachineState } from "../../core/standalone-review-checkpoint";
@@ -273,6 +275,9 @@ function usage(): HookResult {
   "          the held Tasks wait until the fix settles; completed Waves stay untouched; audited and idempotent)",
   "  withdraw-forward-fix --wave <N> --task <fix-task-id> --reason <text>",
   "          (removes a Forward Fix Task that was never dispatched and releases its hold; its audit moves to forward_fix_withdrawals)",
+  "  adopt-engine-run-tests --reason <text>",
+  "          (freezes engine-run test evidence on a graph populated before it existed: from then on only `helper run-tests` runs prove I6",
+  "          and test verdicts; needs the frozen manifest's affectedRunner and no reserved attempt; recorded with the reason; idempotent)",
     ].join("\n"),
   };
 }
@@ -1950,6 +1955,8 @@ export function orchestrationHandler(emission: () => Emission): HookHandler {
         return addForwardFixOperation(rest);
       case "withdraw-forward-fix":
         return withdrawForwardFixOperation(rest);
+      case "adopt-engine-run-tests":
+        return adoptEngineRunTestsOperation(rest);
     }
   };
 }

@@ -40,6 +40,7 @@ import {
   type SessionId,
   type SessionRegistry,
 } from "../../machine";
+import { isEngineCliScript } from "../../utils/engine-cli-path";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 
 /** Why a call recorded nothing, as the audit line the operator sees; null
@@ -141,7 +142,7 @@ export const runRecordEvidence = async (
     recordToolEvidence(
       { kind: "record", ledger: sessionId, epoch: binding.epoch, stamps: sessionId },
       claudeToolCall({ ...input, tool_name: toolName, cwd: input.cwd ?? process.cwd() }),
-      { registry, nowMs: Date.now },
+      { registry, nowMs: Date.now, isEngineCli: isEngineCliScript },
     );
 
     return passthroughResult();

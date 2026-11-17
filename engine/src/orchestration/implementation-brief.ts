@@ -158,6 +158,7 @@ export function renderTaskImplementationBrief(
       ownership: ownership.value,
       contracts: graph.acceptance_contracts ?? [],
       verificationManifest: graph.verification_manifest,
+      ...(graph.test_evidence === undefined ? {} : { testEvidence: graph.test_evidence }),
       repositoryRoot: projectRoot,
       commands: loomCommands(packageRoot),
       operatorNotes: request.operatorNotes,

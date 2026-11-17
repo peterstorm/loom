@@ -21,6 +21,8 @@ import type {
 } from "../../src/core/red-then-green-types";
 import { parseReportSummary } from "../../src/core/structured-test-report";
 import type { Evidence } from "../../src/machine/types";
+import { AGENT_COMMAND_EVIDENCE } from "../../src/core/test-evidence-policy";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 // The judge satisfies the frozen CT-1 signature.
 const judge: JudgeRedThenGreenFn = judgeRedThenGreen;
@@ -75,7 +77,7 @@ const testRun = (
   exit: number | null,
   results: readonly TestFileResult[] | "unrecorded" | null,
   source: ReportSource = "junit-xml",
-): Evidence => ({ kind: "TestRun", command, exit, report: results === null ? null : summary(results, source) });
+): Evidence => ({ kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command, exit, report: results === null ? null : summary(results, source) });
 
 /** The abstract steps an epoch is built from. */
 const STEPS = [
@@ -203,18 +205,18 @@ describe("judgeRedThenGreen: every ordering of red, implementation write and gre
   it.each(cases.map((steps) => ({ steps, label: steps.join(" → ") || "(empty epoch)" })))(
     "FR-006 / FR-009: $label",
     ({ steps }) => {
-      expect(judge(renderAll(steps), CLASSIFIED, ROOT, false)).toEqual(expected(steps, CLASSIFIED, false));
+      expect(judge(renderAll(steps), CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE)).toEqual(expected(steps, CLASSIFIED, false));
     },
   );
 
   it("FR-006: only red → write → green is shown", () => {
-    const shown = cases.filter((steps) => judge(renderAll(steps), CLASSIFIED, ROOT, false).kind === "shown");
+    const shown = cases.filter((steps) => judge(renderAll(steps), CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE).kind === "shown");
     expect(shown).toEqual([["red", "write-impl", "green"]]);
   });
 
   it("FR-009: the gaps of the orderings are the named, distinct failures", () => {
     const gaps = new Map(cases.map((steps) => {
-      const observation = judge(renderAll(steps), CLASSIFIED, ROOT, false);
+      const observation = judge(renderAll(steps), CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE);
       return [steps.join(","), observation.kind === "unproven" ? observation.gap : "shown"] as const;
     }));
     expect(gaps.get("")).toEqual({ kind: "implementation-write-missing" });
@@ -230,14 +232,14 @@ describe("judgeRedThenGreen: every ordering of red, implementation write and gre
 describe("judgeRedThenGreen: properties over arbitrary epochs (SC-001)", () => {
   it("FR-006..FR-009 / FR-007a: agrees with the reference model on every epoch, created files or none", () => {
     fc.assert(fc.property(epochArb, fc.boolean(), fc.boolean(), (steps, untrusted, creates) => {
-      expect(judge(renderAll(steps), classifiedFor(creates), ROOT, untrusted))
+      expect(judge(renderAll(steps), classifiedFor(creates), ROOT, untrusted, AGENT_COMMAND_EVIDENCE))
         .toEqual(expected(steps, CLASSIFIED, untrusted, creates));
     }), { numRuns: 2000 });
   });
 
   it("FR-006: no false pass — a shown observation names a behavioral red, then the first implementation write, then a full green", () => {
     fc.assert(fc.property(epochArb, fc.boolean(), fc.boolean(), (steps, untrusted, creates) => {
-      const observation = judge(renderAll(steps), classifiedFor(creates), ROOT, untrusted);
+      const observation = judge(renderAll(steps), classifiedFor(creates), ROOT, untrusted, AGENT_COMMAND_EVIDENCE);
       if (observation.kind !== "shown") return;
       const firstWrite = steps.findIndex((step) => IMPLEMENTATION_WRITES.has(step));
       expect(redSteps(creates).has(steps[observation.red.index]!)).toBe(true);
@@ -255,8 +257,8 @@ describe("judgeRedThenGreen: properties over arbitrary epochs (SC-001)", () => {
       (steps, insertions) => {
         const noisy = [...steps];
         for (const [position, step] of insertions) noisy.splice(position % (noisy.length + 1), 0, step);
-        const before = judge(renderAll(steps), CLASSIFIED, ROOT, false);
-        const after = judge(renderAll(noisy), CLASSIFIED, ROOT, false);
+        const before = judge(renderAll(steps), CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE);
+        const after = judge(renderAll(noisy), CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE);
         expect(after.kind).toBe(before.kind);
         if (before.kind === "unproven" && after.kind === "unproven") expect(after.gap.kind).toBe(before.gap.kind);
       },
@@ -267,21 +269,21 @@ describe("judgeRedThenGreen: properties over arbitrary epochs (SC-001)", () => {
     fc.assert(fc.property(epochArb, fc.boolean(), fc.boolean(), (steps, untrusted, creates) => {
       const events = renderAll(steps);
       const classification = classifiedFor(creates);
-      expect(judge(events, classification, ROOT, untrusted)).toEqual(judge(events, classification, ROOT, untrusted));
+      expect(judge(events, classification, ROOT, untrusted, AGENT_COMMAND_EVIDENCE)).toEqual(judge(events, classification, ROOT, untrusted, AGENT_COMMAND_EVIDENCE));
     }), { numRuns: 500 });
   });
 
   it("AS-013: a classification with no test files is always the no-test-files gap", () => {
     fc.assert(fc.property(epochArb, fc.boolean(), (steps, untrusted) => {
-      expect(judge(renderAll(steps), NO_TEST_FILES, ROOT, untrusted))
+      expect(judge(renderAll(steps), NO_TEST_FILES, ROOT, untrusted, AGENT_COMMAND_EVIDENCE))
         .toEqual({ kind: "unproven", gap: { kind: "no-test-files" } });
     }), { numRuns: 300 });
   });
 
   it("AS-011: Pi-structured provenance marks an unmet red or green step untrusted-only, and never satisfies one", () => {
     fc.assert(fc.property(epochArb, (steps) => {
-      const trusted = judge(renderAll(steps), CLASSIFIED, ROOT, false);
-      const pi = judge(renderAll(steps), CLASSIFIED, ROOT, true);
+      const trusted = judge(renderAll(steps), CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE);
+      const pi = judge(renderAll(steps), CLASSIFIED, ROOT, true, AGENT_COMMAND_EVIDENCE);
       expect(pi.kind).toBe(trusted.kind);
       if (pi.kind === "unproven" && (pi.gap.kind === "red-missing" || pi.gap.kind === "green-missing")) {
         expect(pi.gap.untrustedOnly).toBe(true);
@@ -292,7 +294,7 @@ describe("judgeRedThenGreen: properties over arbitrary epochs (SC-001)", () => {
 
 describe("judgeRedThenGreen: worked cases", () => {
   it("AS-005: a red, an implementation write and a green are shown with their indices and commands", () => {
-    expect(judge(renderAll(["write-test", "red", "read-impl", "write-impl", "green"]), CLASSIFIED, ROOT, false)).toEqual({
+    expect(judge(renderAll(["write-test", "red", "read-impl", "write-impl", "green"]), CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE)).toEqual({
       kind: "shown",
       red: { index: 1, command: "npm test #1" },
       implementationWrite: IMPL,
@@ -301,16 +303,16 @@ describe("judgeRedThenGreen: worked cases", () => {
   });
 
   it("AS-009: a collection-only red is not red in a Task that creates no implementation file", () => {
-    expect(judge(renderAll(["collection-red", "write-impl", "green"]), CLASSIFIED, ROOT, false))
+    expect(judge(renderAll(["collection-red", "write-impl", "green"]), CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE))
       .toEqual({ kind: "unproven", gap: { kind: "red-missing", untrustedOnly: false } });
-    expect(judge(renderAll(["json-collection-red", "write-impl", "green"]), CLASSIFIED, ROOT, false))
+    expect(judge(renderAll(["json-collection-red", "write-impl", "green"]), CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE))
       .toEqual({ kind: "unproven", gap: { kind: "red-missing", untrustedOnly: false } });
   });
 
   it.each(["json-collection-red", "collection-red"] as const)(
     "AS-042: a Task test file that cannot load the module the Task creates is red (%s)",
     (collectionRed) => {
-      expect(judge(renderAll(["write-test", collectionRed, "write-impl", "green"]), CREATES_IMPL, ROOT, false)).toEqual({
+      expect(judge(renderAll(["write-test", collectionRed, "write-impl", "green"]), CREATES_IMPL, ROOT, false, AGENT_COMMAND_EVIDENCE)).toEqual({
         kind: "shown",
         red: { index: 1, command: "npm test #1" },
         implementationWrite: IMPL,
@@ -320,12 +322,12 @@ describe("judgeRedThenGreen: worked cases", () => {
   );
 
   it("FR-007a: a collection error after the first implementation write is still red out of order", () => {
-    expect(judge(renderAll(["write-impl", "json-collection-red", "green"]), CREATES_IMPL, ROOT, false))
+    expect(judge(renderAll(["write-impl", "json-collection-red", "green"]), CREATES_IMPL, ROOT, false, AGENT_COMMAND_EVIDENCE))
       .toEqual({ kind: "unproven", gap: { kind: "red-after-first-implementation-write" } });
   });
 
   it("FR-007a: a collection error never greens, even in a Task that creates a file", () => {
-    expect(judge(renderAll(["json-collection-red", "write-impl", "json-collection-red"]), CREATES_IMPL, ROOT, false))
+    expect(judge(renderAll(["json-collection-red", "write-impl", "json-collection-red"]), CREATES_IMPL, ROOT, false, AGENT_COMMAND_EVIDENCE))
       .toEqual({ kind: "unproven", gap: { kind: "green-missing", untrustedOnly: false } });
   });
 
@@ -335,7 +337,7 @@ describe("judgeRedThenGreen: worked cases", () => {
       { kind: "FileWrite", path: IMPL, via: "tool" },
       testRun("green", 0, [passing(REPORTED_A), passing(REPORTED_B)]),
     ];
-    expect(judge(events, CREATES_IMPL, ROOT, false))
+    expect(judge(events, CREATES_IMPL, ROOT, false, AGENT_COMMAND_EVIDENCE))
       .toEqual({ kind: "unproven", gap: { kind: "red-missing", untrustedOnly: false } });
   });
 
@@ -345,7 +347,7 @@ describe("judgeRedThenGreen: worked cases", () => {
       { kind: "FileWrite", path: IMPL, via: "tool" },
       testRun("green", 0, [passing(REPORTED_A), passing(REPORTED_B)]),
     ];
-    expect(judge(events, CLASSIFIED, ROOT, false)).toMatchObject({ kind: "shown", red: { index: 0, command: "red" } });
+    expect(judge(events, CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE)).toMatchObject({ kind: "shown", red: { index: 0, command: "red" } });
   });
 
   it("FR-006: a green with a collection error in a Task test file is not green", () => {
@@ -355,29 +357,29 @@ describe("judgeRedThenGreen: worked cases", () => {
       testRun("not green", 0, [passing(REPORTED_A), { file: REPORTED_B, executed: 1, failed: 1, skipped: 0, collectionError: true }]),
     ];
     // exit 0 with a failing synthetic testcase is contradictory but representable; it must not green.
-    expect(judge(events, CLASSIFIED, ROOT, false))
+    expect(judge(events, CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE))
       .toEqual({ kind: "unproven", gap: { kind: "green-missing", untrustedOnly: false } });
   });
 
   it("FR-006: a green whose Task test file skipped every testcase is not green", () => {
     // Red, implement, then skip the failing test: the file declares testcases
     // and fails none, yet runs none, so the order is not shown.
-    expect(judge(renderAll(["red", "write-impl", "skipped-green"]), CLASSIFIED, ROOT, false))
+    expect(judge(renderAll(["red", "write-impl", "skipped-green"]), CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE))
       .toEqual({ kind: "unproven", gap: { kind: "green-missing", untrustedOnly: false } });
     const partlySkipped: TestFileResult = { file: REPORTED_A, executed: 2, failed: 0, skipped: 1, collectionError: false };
-    expect(judge([...renderAll(["red", "write-impl"]), testRun("green", 0, [partlySkipped, passing(REPORTED_B)])], CLASSIFIED, ROOT, false))
+    expect(judge([...renderAll(["red", "write-impl"]), testRun("green", 0, [partlySkipped, passing(REPORTED_B)])], CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE))
       .toMatchObject({ kind: "shown" });
   });
 
   it("AS-010: a fixture write before the red is the first implementation write", () => {
-    expect(judge(renderAll(["write-fixture", "red", "write-impl", "green"]), CLASSIFIED, ROOT, false))
+    expect(judge(renderAll(["write-fixture", "red", "write-impl", "green"]), CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE))
       .toEqual({ kind: "unproven", gap: { kind: "red-after-first-implementation-write" } });
   });
 
   it("AS-005: an absolute write beneath the repository root is an implementation write, one outside it is not", () => {
-    expect(judge(renderAll(["red", "absolute-write-impl", "green"]), CLASSIFIED, ROOT, false))
+    expect(judge(renderAll(["red", "absolute-write-impl", "green"]), CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE))
       .toMatchObject({ kind: "shown", implementationWrite: IMPL });
-    expect(judge(renderAll(["red", "foreign-absolute-write", "green"]), CLASSIFIED, ROOT, false))
+    expect(judge(renderAll(["red", "foreign-absolute-write", "green"]), CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE))
       .toEqual({ kind: "unproven", gap: { kind: "implementation-write-missing" } });
   });
 
@@ -387,7 +389,7 @@ describe("judgeRedThenGreen: worked cases", () => {
       { kind: "FileWrite", path: `${ROOT}/${IMPL}`, via: "tool" },
       testRun("green", 0, [passing(`${ROOT}/${TEST_A}`), passing(`${ROOT}/${TEST_B}`)]),
     ];
-    expect(judge(events, CLASSIFIED, ROOT, false)).toEqual({
+    expect(judge(events, CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE)).toEqual({
       kind: "shown",
       red: { index: 0, command: "red" },
       implementationWrite: IMPL,
@@ -404,16 +406,16 @@ describe("judgeRedThenGreen: worked cases", () => {
       { kind: "FileWrite", path: main, via: "tool" },
       testRun("mvn test", 0, [passing("com.example.LedgerTest")]),
     ];
-    expect(judge(events, jvm, ROOT, false)).toMatchObject({ kind: "shown", implementationWrite: main });
+    expect(judge(events, jvm, ROOT, false, AGENT_COMMAND_EVIDENCE)).toMatchObject({ kind: "shown", implementationWrite: main });
   });
 
   it("FR-008: a red met only by a run without an exit code reports untrusted-only", () => {
-    expect(judge(renderAll(["untrusted-red", "write-impl", "green"]), CLASSIFIED, ROOT, false))
+    expect(judge(renderAll(["untrusted-red", "write-impl", "green"]), CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE))
       .toEqual({ kind: "unproven", gap: { kind: "red-missing", untrustedOnly: true } });
   });
 
   it("FR-008: a green met only by a legacy fact reports untrusted-only", () => {
-    expect(judge(renderAll(["red", "write-impl", "legacy-green"]), CLASSIFIED, ROOT, false))
+    expect(judge(renderAll(["red", "write-impl", "legacy-green"]), CLASSIFIED, ROOT, false, AGENT_COMMAND_EVIDENCE))
       .toEqual({ kind: "unproven", gap: { kind: "green-missing", untrustedOnly: true } });
   });
 });

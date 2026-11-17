@@ -12,6 +12,7 @@ import type { TestFileResult } from "../../src/core/red-then-green-types";
 import { parseReportSummary } from "../../src/core/structured-test-report";
 import { parseEvidenceLine } from "../../src/machine/evidence";
 import type { Evidence } from "../../src/machine/types";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 const result = (file: string, executed: number, failed: number, collectionError = false): TestFileResult =>
   ({ file, executed, failed, skipped: 0, collectionError });
@@ -23,7 +24,7 @@ const RESULTS: readonly TestFileResult[] = [
 ];
 
 const line = (report: unknown, command = "npx vitest run"): string =>
-  JSON.stringify({ epoch: "agent-1:code-implementer-agent", event: { kind: "TestRun", command, exit: 1, report } });
+  JSON.stringify({ epoch: "agent-1:code-implementer-agent", event: { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command, exit: 1, report } });
 
 function testRun(raw: string): Extract<Evidence, { kind: "TestRun" }> {
   const parsed = parseEvidenceLine(raw);

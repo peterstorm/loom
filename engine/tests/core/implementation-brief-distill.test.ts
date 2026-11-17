@@ -348,3 +348,35 @@ describe("the Task mutation check in a brief (ADR-0071)", () => {
     expect(render(task, { verificationManifest: mutationManifest(), ...overrides })).not.toContain(HEADING);
   });
 });
+
+describe("engine-run test evidence in a brief (loom#198)", () => {
+  const HEADING = "**Test evidence: engine runs only (BINDING).**";
+  const ENGINE_RUN = { kind: "engine-run" as const, manifestDigest: "0".repeat(64), adoptedBy: "population" as const };
+  const pending = (): Task =>
+    implementer("T5", OWNER, { status: "pending", file_list: [OWNER, "src/order/pricing.test.ts"] });
+  const policy = (task: Task, overrides: Partial<ImplementationBriefInput> = {}): string =>
+    section(render(task, { verificationManifest: mutationManifest(), ...overrides }), "Verification Policy");
+
+  it("says nothing of it on a graph that admits an agent's own test commands", () => {
+    expect(policy(pending())).not.toContain(HEADING);
+  });
+
+  it("prints the one engine test run, and the binding rules, on an engine-run graph", () => {
+    const text = policy(pending(), { testEvidence: ENGINE_RUN });
+    expect(text).toContain(HEADING);
+    expect(text).toContain("no environment prefix, no pipe, redirect");
+    expect(text).toContain("settlement never counts");
+  });
+
+  it("keeps the brief admissible to the spawn gate", () => {
+    const task = pending();
+    const prompt = render(task, { verificationManifest: mutationManifest(), testEvidence: ENGINE_RUN });
+    expect(authorizeImplementationSpawn(task, prompt)).toMatchObject({ ok: true });
+    expect(validateTemplateSubstitution(prompt, true)).toEqual({ kind: "allow" });
+  });
+
+  it("gives a Task that owes no I6 the form to fill with its test files", () => {
+    const text = policy(PASS, { testEvidence: ENGINE_RUN });
+    expect(text).toContain(loomCommandsAt("/loom").runTests(["<test file>"]));
+  });
+});

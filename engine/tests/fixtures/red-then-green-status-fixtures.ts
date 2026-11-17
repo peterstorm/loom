@@ -18,6 +18,7 @@ import type { NewTestWaiverReason } from "../../src/core/verification-policy";
 import type { Evidence } from "../../src/machine/types";
 import type { Task } from "../../src/types";
 import { taskFixture, trustedPassEvidence } from "./task-lifecycle";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 // --- File vocabulary ---
 
@@ -94,6 +95,6 @@ export const GREEN_COMMAND = "bun test --reporter=junit --reporter-outfile=/tmp/
 
 /** Only an untrusted (exit-less) red before the write: red is unmet by qualifying runs alone. */
 export const UNTRUSTED_RED_EVENTS: readonly Evidence[] = [
-  { kind: "TestRun", command: RED_COMMAND, exit: null, report: report([failing(TEST_A)]) },
+  { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: RED_COMMAND, exit: null, report: report([failing(TEST_A)]) },
   { kind: "FileWrite", path: IMPL, via: "tool" },
 ];

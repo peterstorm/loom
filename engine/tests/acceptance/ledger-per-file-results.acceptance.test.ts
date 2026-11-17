@@ -22,6 +22,7 @@ import { findReport } from "../../src/machine/report-discovery";
 /** A finished run with no output and no attributed exit: no console fact can vouch. */
 const NO_RUN = { output: "", exit: null } as const;
 import type { Evidence, TestReportSummary } from "../../src/machine/types";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 const EPOCH = "agent-7:code-implementer-agent";
 
@@ -186,7 +187,7 @@ const result = (file: string, executed: number, failed: number, collectionError 
 function testRunLine(report: unknown, exit: number | null = 1): string {
   return JSON.stringify({
     epoch: EPOCH,
-    event: { kind: "TestRun", command: "npm --prefix engine run test:unit", exit, report },
+    event: { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm --prefix engine run test:unit", exit, report },
     callId: "toolu_ct1",
   });
 }
