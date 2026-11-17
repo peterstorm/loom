@@ -59,6 +59,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { STALE_SUBAGENT_TTL_MS, subagentDir } from "../config";
+import { isNeverStarted, type TranscriptPresence } from "../core/roster-liveness";
+import { parseSessionId } from "./evidence";
+import { claudeConfigDir } from "../utils/claude-config-dir";
 import { withLock } from "../utils/lock";
 import { parseMachineJson } from "./parse-machine";
 import {
@@ -290,6 +293,63 @@ export function readActiveRoster(sessionId: SessionId): readonly AgentId[] {
   return Object.freeze(readActiveAgentEntries(sessionId).map(({ agentId }) => agentId));
 }
 
+/**
+ * Whether a Claude Code subagent's transcript exists under ANY project of the
+ * configuration directory: session ids are unique, so the session's directory
+ * names it wherever the session started, and a helper running in another
+ * checkout (a worktree) cannot misjudge it through the wrong project slug.
+ * `unknown` when the projects directory is missing (not a Claude Code
+ * configuration) or a read fails: what cannot be proven absent never is.
+ */
+function observeAgentTranscriptPresence(sessionId: SessionId, agentId: AgentId): TranscriptPresence {
+  const root = resolve(claudeConfigDir(), "projects");
+  let projects: readonly string[];
+  try {
+    projects = readdirSync(root);
+  } catch {
+    return "unknown";
+  }
+  for (const project of projects) {
+    try {
+      statSync(resolve(root, project, sessionId, "subagents", `agent-${agentId}.jsonl`));
+      return "present";
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return "unknown";
+    }
+  }
+  return "absent";
+}
+
+/**
+ * The roster entries of `rawSession` whose agents never started
+ * (`isNeverStarted`), and whether that is every entry. Null when nothing is
+ * judged: the session id does not parse, the roster is empty, or its age or
+ * entries cannot be read (named on stderr, since that keeps a phantom entry
+ * in place). No other side effect: the callers that act on it say so.
+ */
+export function neverStartedRosterEntries(
+  rawSession: string,
+  nowMs: number,
+  observeTranscript: (session: SessionId, agentId: AgentId) => TranscriptPresence = observeAgentTranscriptPresence,
+): Readonly<{ agentIds: readonly AgentId[]; all: boolean }> | null {
+  const session = parseSessionId(rawSession);
+  if (session === null) return null;
+  try {
+    const ageMs = nowMs - statSync(activeFlagPath(session)).mtimeMs;
+    const entries = readActiveAgentEntries(session);
+    if (entries.length === 0) return null;
+    const agentIds = entries
+      .filter(({ agentId }) => isNeverStarted(agentId, ageMs, observeTranscript(session, agentId)))
+      .map(({ agentId }) => agentId);
+    return Object.freeze({ agentIds: Object.freeze(agentIds), all: agentIds.length === entries.length });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      process.stderr.write(`loom: cannot judge the roster of ${session} for never-started agents: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
+    return null;
+  }
+}
+
 /** Number of agents currently on the session's `.active` roster. */
 export function countActiveAgents(sessionId: SessionId): number {
   return readActiveRoster(sessionId).length;
@@ -318,6 +378,18 @@ export function countActiveAgents(sessionId: SessionId): number {
 export type ActiveSubagentObservation =
   | Readonly<{ kind: "observed"; anyActiveForGraph: boolean }>
   | Readonly<{ kind: "unavailable"; reason: string }>;
+
+/**
+ * Whether a roster bound to the graph is activity: a roster holding only agents
+ * that never started (a spawn refused after SubagentStart) is not, and is named
+ * on stderr when skipped.
+ */
+function rosterServesGraph(session: string): boolean {
+  const neverStarted = neverStartedRosterEntries(session, Date.now());
+  if (neverStarted === null || !neverStarted.all) return true;
+  process.stderr.write(`loom: ignoring never-started roster entries for ${session}: ${neverStarted.agentIds.join(", ")}\n`);
+  return false;
+}
 
 export function observeAnyActiveSubagent(taskGraphPath: string): ActiveSubagentObservation {
   const wanted = resolve(taskGraphPath);
@@ -354,7 +426,7 @@ export function observeAnyActiveSubagent(taskGraphPath: string): ActiveSubagentO
           reason: `malformed task-graph pointer for ${session}: ${parsedPointer.error}`,
         });
       }
-      if (parsedPointer.value === wanted) {
+      if (parsedPointer.value === wanted && rosterServesGraph(session)) {
         return Object.freeze({ kind: "observed", anyActiveForGraph: true });
       }
     } catch (cause) {
@@ -518,6 +590,13 @@ export async function markAgentActive(
         );
         return "already-owned";
       }
+    }
+    // Entries of agents that never started (core/roster-liveness.ts) leave first:
+    // each would otherwise veto quiescence and sole-agent attribution forever.
+    const neverStarted = roster === null ? null : neverStartedRosterEntries(sessionId, Date.now());
+    for (const stale of neverStarted?.agentIds ?? []) {
+      removeActiveRosterEntry(path, stale);
+      process.stderr.write(`markAgentActive: removed never-started roster entry ${stale} for ${sessionId}\n`);
     }
     // The type column is what lets PreToolUse authorize by ROLE. Omitting it
     // (unknown type) is safe but downgrades the agent to identity-only

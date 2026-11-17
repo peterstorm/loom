@@ -58,6 +58,10 @@ It requires no active subagent (checked before and under the lock) and a non-bla
 
 A settlement refused for a revision mismatch leaves its attempt unsettled: adopt (or restore the engine), then dispatch the Task again from its brief.
 
+## A run that replays its own failure
+
+A run replays the results it recorded: resuming it after an engine fix shows the same blocked diagnostic, because the fix never re-judges what the run already holds. Abandon it (`helper orchestration abandon`) and start a fresh run with a new `--run` id; resuming an abandoned run says which (`advance <successor>` when it names one, otherwise start a fresh run).
+
 ## Reopening an implemented Task to fix a Wave Gate Finding
 
 Use this when a Wave Gate Finding, critical or advisory, must be fixed in a Task that is already `implemented`: abandon the gate run, reopen the Task, and dispatch it again.

@@ -4,10 +4,12 @@ import {
   MAX_MANIFEST_SOURCE_BYTES,
   REPLACE_FLAG,
   canonicalizeManifestSource,
+  manifestExecutables,
   manifestReportPaths,
   parseManifestInstallArgs,
   planManifestInstall,
   unignoredReportRefusal,
+  unresolvedExecutablesWarning,
   type CanonicalManifest,
   type ManifestInstallMode,
 } from "../../src/core/verification-manifest-install";
@@ -207,5 +209,52 @@ describe("parseManifestInstallArgs", () => {
       expect(parsed.ok).toBe(false);
       if (!parsed.ok) expect(parsed.error).toContain(REPLACE_FLAG);
     }
+  });
+});
+
+describe("manifestExecutables (loom#198, Cause 5)", () => {
+  const canonical = (document: Record<string, unknown>): CanonicalManifest => {
+    const parsed = canonicalizeManifestSource(JSON.stringify(document));
+    if (!parsed.ok) throw new Error(parsed.error);
+    return parsed.value;
+  };
+  const runner = (executable: string, cwd = ".") => ({
+    executable, args: ["{files}"], cwd, timeoutMs: 60_000,
+    report: { kind: "required-file", path: ".loom/completion-reports/affected.junit.xml" },
+  });
+
+  it("names every declared executable with where the engine would find it", () => {
+    const manifest = canonical({
+      schemaVersion: 2, kind: "loom-verification-manifest",
+      checks: [{ id: "project:test", scope: "wave", executable: "bun", args: ["test"], cwd: ".", timeoutMs: 60_000, report: { kind: "not-required" } }],
+      affectedRunner: runner("node_modules/.bin/vitest", "engine"),
+    });
+    expect(manifestExecutables(manifest, ["/usr/bin", "", "/opt/bin/"])).toEqual([
+      { label: "project:test", executable: "bun", candidates: [{ kind: "absolute", path: "/usr/bin/bun" }, { kind: "absolute", path: "/opt/bin/bun" }] },
+      { label: "affectedRunner", executable: "node_modules/.bin/vitest", candidates: [{ kind: "project", path: "engine/node_modules/.bin/vitest" }] },
+    ]);
+  });
+
+  it("refuses an absolute executable at parse, so no candidate is ever absolute by spelling", () => {
+    expect(canonicalizeManifestSource(JSON.stringify({
+      schemaVersion: 1, kind: "loom-verification-manifest",
+      checks: [{ id: "project:env", scope: "wave", executable: "/usr/bin/env", args: ["true"], cwd: ".", timeoutMs: 60_000, report: { kind: "not-required" } }],
+    })).ok).toBe(false);
+  });
+
+  it("warns about exactly the executables no candidate of which exists, and stays quiet when all resolve", () => {
+    const manifest = canonical({
+      schemaVersion: 2, kind: "loom-verification-manifest",
+      checks: [{ id: "project:test", scope: "wave", executable: "bun", args: ["test"], cwd: ".", timeoutMs: 60_000, report: { kind: "not-required" } }],
+      affectedRunner: runner("node_modules/.bin/vitest", "engine"),
+      acceptanceRunner: { ...runner("node_modules/.bin/vitest"), report: { kind: "required-file", path: ".loom/completion-reports/acceptance.junit.xml" } },
+    });
+    const present = new Set(["/opt/bin/bun", "node_modules/.bin/vitest"]);
+    const exists = ({ path }: { path: string }) => present.has(path);
+    const warning = unresolvedExecutablesWarning(manifest, ["/usr/bin", "/opt/bin"], exists);
+    expect(warning).toContain("affectedRunner runs node_modules/.bin/vitest, which does not resolve");
+    expect(warning).not.toContain("project:test");
+    expect(warning).not.toContain("acceptanceRunner");
+    expect(unresolvedExecutablesWarning(manifest, ["/opt/bin"], () => true)).toBeNull();
   });
 });

@@ -6,6 +6,7 @@
  * Reads stdin (JSON from Claude Code), dynamic-imports handler, maps HookResult to exit code.
  */
 
+import { exitAfterFlush } from "./utils/exit-after-flush";
 import { match } from "ts-pattern";
 import { writeFileSync, chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -65,24 +66,24 @@ const stdinPromise: Promise<string> = process.stdin.isTTY ||
 // await → the top-level catch, not an unhandled-rejection abort.
 stdinPromise.catch(() => {});
 
-function resultToExit(result: HookResult): never {
-  match(result)
+/** Report a handler's result, then exit with its code once the output has drained (`exitAfterFlush`). */
+function resultToExit(result: HookResult): void {
+  const code = match(result)
     .with({ kind: "allow" }, { kind: "passthrough" }, { kind: "post-tool-use-context" }, { kind: "pre-tool-use-rewrite" }, (success) => {
       const stdout = hookSuccessStdout(success);
       if (stdout !== null) process.stdout.write(stdout + "\n");
-      process.exit(0);
+      return 0;
     })
     .with({ kind: "block" }, ({ message }) => {
       process.stderr.write(nonEmptyMessage(message) + "\n");
-      process.exit(2);
+      return 2;
     })
     .with({ kind: "error" }, ({ message }) => {
       process.stderr.write(nonEmptyMessage(message) + "\n");
-      process.exit(1);
+      return 1;
     })
     .exhaustive();
-
-  process.exit(1); // unreachable, satisfies TS
+  exitAfterFlush(code);
 }
 
 function parseInitStateArgs(args: string[]): { skipBrainstorm: boolean; skipClarify: boolean; skipSpecify: boolean; skipPlanAlignment: boolean; skipPlanDesignReview: boolean; specDir: string; output: string } {
@@ -172,5 +173,5 @@ async function main() {
 
 main().catch((err) => {
   process.stderr.write(`Hook error: ${err?.message ?? err}\n`);
-  process.exit(FAILURE_EXIT_CODE);
+  exitAfterFlush(FAILURE_EXIT_CODE);
 });
