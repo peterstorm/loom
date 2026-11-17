@@ -27,7 +27,7 @@ import { taskExecutionDecision } from "../../src/core/validate-task-execution";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
 import { parseTaskGraph } from "../../src/state-file-wire";
 import type { Task, TaskGraph } from "../../src/types";
-import { forwardFixTask as task, sealedTask as completed, sealedWaveGraph as sealed } from "../fixtures/forward-fix";
+import { failedJudge, forwardFixTask as task, sealedTask as completed, sealedWaveGraph as sealed } from "../fixtures/forward-fix";
 import { implementationEscalatedLineage } from "../fixtures/implementation-escalation";
 import { awaitingRedContract } from "../fixtures/stop-check-plan-fixtures";
 import {
@@ -289,6 +289,51 @@ describe("addForwardFix refuses what it is not for", () => {
     if (!secondRequest.ok) throw new Error(secondRequest.error);
     const second = added(first.graph, secondRequest.value);
     expect(decided(second.graph)).toEqual({ kind: "already-added", audit: first.audit });
+  });
+
+  describe("a Forward Fix Task as a held judge", () => {
+    /** T5 fixed T3, then its own attempt failed; `reopened` adds the Task Reopening that gave it new work. */
+    const failedFixGraph = (reopened: boolean): TaskGraph => {
+      const { graph } = added(sealed());
+      const failedFix: Task = {
+        ...byId(graph, "T5"),
+        implementation_attempt_history: failedJudge("T5", []).implementation_attempt_history,
+        implementation_retry_protocol: 2,
+        implementation_retry_history_start: 0,
+      };
+      const raw = {
+        ...graph,
+        tasks: graph.tasks.map((candidate) => candidate.id === "T5" ? failedFix : candidate),
+        ...(reopened
+          ? { task_reopening_history: [{ schemaVersion: 1, kind: "implemented-tasks-reopened", wave: 2, reopenedTaskIds: ["T5"], reason: "page the response", abandonedRunId: null }] }
+          : {}),
+      };
+      const parsed = parseTaskGraph(JSON.parse(JSON.stringify(raw)));
+      if (!parsed.ok) throw new Error(parsed.error);
+      return parsed.value;
+    };
+    const holdT5 = (): ForwardFixRequest => {
+      const parsed = parseForwardFixArgs([
+        "--wave", "2", "--hold", "T5", "--file", "src/recompute.ts", "--description", "Expose what the fix's paging tests need",
+        "--reason", "T5's reopened paging tests fail on src/recompute.ts",
+      ]);
+      if (!parsed.ok) throw new Error(parsed.error);
+      return parsed.value;
+    };
+
+    it("refuses a fix Task no Task Reopening has given new work, even after its attempt failed", () => {
+      const refused = refusal(failedFixGraph(false), holdT5());
+      expect(refused.kind).toBe("not-a-judge");
+      expect(refused.message).toContain("no Task Reopening has given new work");
+    });
+
+    it("holds a reopened fix Task whose attempt failed on sealed code, and the State File loads the result", () => {
+      const { graph, task: fix, audit } = added(failedFixGraph(true), holdT5());
+      expect(fix.id).toBe("T6");
+      expect(audit.heldTaskIds).toEqual(["T5"]);
+      expect(dispatchHoldOf(graph, new Set(), byId(graph, "T5"))).toEqual({ kind: "forward-fix", fixTaskIds: ["T6"] });
+      expect(parseTaskGraph(JSON.parse(JSON.stringify(graph))).ok).toBe(true);
+    });
   });
 
   it("refuses the active Wave's distill pass as a held Task", () => {

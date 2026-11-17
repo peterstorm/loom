@@ -72,8 +72,9 @@ as a `JUDGE-N` gap. The field is not persisted: it shapes the roster and nothing
 (`addForwardFix`, `engine/src/core/forward-fix.ts`). It shares the Wave-reopening precondition with Task
 Reopening and Contract Revision, and adds its own refusals:
 
-- every `--hold` Task is an authored Task of the active Wave whose last implementation attempt failed (owed the
-  engine-authorized retry, or escalated): the failed judgement is the evidence;
+- every `--hold` Task is a Task of the active Wave whose last implementation attempt failed (owed the
+  engine-authorized retry, or escalated): the failed judgement is the evidence. It is an authored Task, or a
+  Forward Fix Task a Task Reopening has given new work (amendment below);
 - at least one `--file` path is written by a Task of a completed Wave (a sealed path); a path no completed Wave
   wrote is changed through the Task that owns it;
 - no `--file` path is owned by another Task of the active Wave, is a frozen Acceptance Contract path, or is
@@ -107,3 +108,16 @@ the roster or still in a live audit. A dispatched fix Task is not withdrawn: it 
 - Re-population drops `forward_fix_history` along with the roster it describes, as it does every other audit.
 - An undeclared judgement still reaches execute. The Forward Fix fallback and the `JUDGE-N` plan-alignment check
   narrow that gap; neither closes it.
+
+## Amendment (2026-11-17): a reopened Forward Fix Task can be held
+
+A Forward Fix Task was never held: it fixes, it does not judge. A run then reopened one (`reopen-task`) with new
+work and new tests, a paged response and a regression run under the host's real checkpoint encoding, and those
+tests failed on code a completed Wave sealed: the contract package and the lockfile. That is the shape a Forward
+Fix exists for, but the held-Task rule refused it, leaving two bad exits: spending the Task's final attempt on
+the same sealed code, or escalating it on purpose.
+
+A Forward Fix Task is now held when a Task Reopening named it and its attempt failed. Its reopened attempt
+carries its own tests, so its failure is a judgement like an authored Task's. A fix Task that was never reopened
+stays unholdable, and so does the Distill Task: neither judges anything. Fix chains stay bounded by each Task's
+two semantic attempts.

@@ -69,7 +69,7 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration add-forward-fix \
 
 Under the TaskGraph lock it requires the Wave-reopening precondition `reopen-task` uses (execute Phase, `--wave` equal to `current_wave`, no completed history for it, no live Wave Gate or a tombstone naming no successor, no executing Task, attempt or subagent), and:
 
-- every `--hold` Task (one or more, distinct) is an authored Task of that Wave whose last implementation attempt failed: it is owed the engine-authorized retry, or it escalated;
+- every `--hold` Task (one or more, distinct) is a Task of that Wave whose last implementation attempt failed: it is owed the engine-authorized retry, or it escalated. It is an authored Task, or a Forward Fix Task that `reopen-task` has given new work; the Wave's Distill Task and a never-reopened fix Task judge nothing;
 - at least one `--file` (one or more, distinct, repository-relative) is in the file list of a Task of a completed Wave;
 - no `--file` is in another Task's file list in the active Wave, a frozen Acceptance Contract path, or protected verification infrastructure;
 - a non-blank `--description` and `--reason`; `--agent` defaults to `code-implementer-agent` (also `frontend-agent`, `security-agent`), and `--new-tests` to `required` (`existing-tests-sufficient` when the held judge's tests are the fix's whole proof).

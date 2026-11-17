@@ -293,6 +293,24 @@ function resetWaveGates(retired: TaskGraph, wave: number, tasks: readonly Task[]
 const isForwardFixTask = (graph: TaskGraph, task: Task): boolean =>
   (graph.forward_fix_history ?? []).some(({ fixTaskId }) => fixTaskId === task.id);
 
+/** Whether a Task Reopening has returned `task` for new work (`reopen-task`). */
+const wasReopened = (graph: TaskGraph, task: Task): boolean =>
+  (graph.task_reopening_history ?? []).some(({ reopenedTaskIds }) => reopenedTaskIds.some((id) => id === task.id));
+
+/**
+ * Why `task` cannot be held as a judge, or null when it can. The distill pass
+ * judges nothing. A Forward Fix Task only fixes until a Task Reopening gives
+ * it new work: its reopened attempt carries its own tests, and when they fail
+ * on sealed code it is a judge like an authored Task (ADR-0077).
+ */
+function notAJudge(graph: TaskGraph, task: Task): string | null {
+  if (isDistillTask(task)) return "the Wave's distill pass";
+  if (isForwardFixTask(graph, task) && !wasReopened(graph, task)) {
+    return "a Forward Fix Task no Task Reopening has given new work";
+  }
+  return null;
+}
+
 /**
  * Whether `task`'s last implementation attempt failed: its owed dispatch is
  * the engine-authorized retry, or it reached terminal escalation.
@@ -311,9 +329,9 @@ function heldTaskRefusal(graph: TaskGraph, request: ForwardFixRequest): DomainRe
     if (task.wave !== request.wave) {
       return refuse("foreign-task", `${id} belongs to Wave ${task.wave}, not the active Wave ${request.wave}`);
     }
-    const notAJudge = isDistillTask(task) ? "the Wave's distill pass" : isForwardFixTask(graph, task) ? "a Forward Fix Task" : null;
-    if (notAJudge !== null) {
-      return refuse("not-a-judge", `${id} is ${notAJudge}; only an authored Task that judges code is held`);
+    const why = notAJudge(graph, task);
+    if (why !== null) {
+      return refuse("not-a-judge", `${id} is ${why}; only a Task that judges code is held`);
     }
     if (task.status !== "pending" || !judgementFailed(task)) {
       return refuse("no-failed-judgement", `${id} has no failed implementation attempt to answer (status ${task.status}); ` +
