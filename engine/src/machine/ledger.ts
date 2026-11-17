@@ -49,8 +49,12 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import {
   appendFileSync,
+  closeSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   renameSync,
   statSync,
@@ -59,7 +63,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { STALE_SUBAGENT_TTL_MS, subagentDir } from "../config";
-import { isNeverStarted, type TranscriptPresence } from "../core/roster-liveness";
+import {
+  deadEntryReason,
+  lastTranscriptRecord,
+  type DeadEntryReason,
+  type TranscriptObservation,
+} from "../core/roster-liveness";
 import { parseSessionId } from "./evidence";
 import { claudeConfigDir } from "../utils/claude-config-dir";
 import { withLock } from "../utils/lock";
@@ -293,62 +302,93 @@ export function readActiveRoster(sessionId: SessionId): readonly AgentId[] {
   return Object.freeze(readActiveAgentEntries(sessionId).map(({ agentId }) => agentId));
 }
 
+/** How much of a transcript's end is read to find its last record. */
+const TRANSCRIPT_TAIL_BYTES = 64 * 1024;
+
 /**
- * Whether a Claude Code subagent's transcript exists under ANY project of the
- * configuration directory: session ids are unique, so the session's directory
- * names it wherever the session started, and a helper running in another
- * checkout (a worktree) cannot misjudge it through the wrong project slug.
- * `unknown` when the projects directory is missing (not a Claude Code
- * configuration) or a read fails: what cannot be proven absent never is.
+ * The whole lines at the end of a transcript: its last `TRANSCRIPT_TAIL_BYTES`,
+ * without the partial first line when the read started mid-file.
  */
-function observeAgentTranscriptPresence(sessionId: SessionId, agentId: AgentId): TranscriptPresence {
+function transcriptTail(path: string): Readonly<{ wholeLines: string; mtimeMs: number }> {
+  const fd = openSync(path, "r");
+  try {
+    const { size, mtimeMs } = fstatSync(fd);
+    const start = Math.max(0, size - TRANSCRIPT_TAIL_BYTES);
+    const buffer = Buffer.alloc(size - start);
+    const read = readSync(fd, buffer, 0, buffer.length, start);
+    const text = buffer.subarray(0, read).toString("utf-8");
+    return { wholeLines: start === 0 ? text : text.slice(text.indexOf("\n") + 1), mtimeMs };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * What a Claude Code subagent's transcript shows, looked for under ANY project
+ * of the configuration directory: session ids are unique, so the session's
+ * directory names it wherever the session started, and a helper running in
+ * another checkout (a worktree) cannot misjudge it through the wrong project
+ * slug. A present transcript reports its last record's kind and how long it
+ * has been unchanged. `unknown` when the projects directory is missing (not a
+ * Claude Code configuration) or a read fails: what cannot be proven never is.
+ */
+function observeAgentTranscript(sessionId: SessionId, agentId: AgentId, nowMs: number): TranscriptObservation {
   const root = resolve(claudeConfigDir(), "projects");
   let projects: readonly string[];
   try {
     projects = readdirSync(root);
   } catch {
-    return "unknown";
+    return { kind: "unknown" };
   }
   for (const project of projects) {
     try {
-      statSync(resolve(root, project, sessionId, "subagents", `agent-${agentId}.jsonl`));
-      return "present";
+      const { wholeLines, mtimeMs } = transcriptTail(resolve(root, project, sessionId, "subagents", `agent-${agentId}.jsonl`));
+      return { kind: "present", lastRecord: lastTranscriptRecord(wholeLines), idleMs: nowMs - mtimeMs };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return "unknown";
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { kind: "unknown" };
     }
   }
-  return "absent";
+  return { kind: "absent" };
 }
 
+/** A roster entry with no running agent behind it, and why. */
+export type DeadRosterEntry = Readonly<{ agentId: AgentId; reason: DeadEntryReason }>;
+
 /**
- * The roster entries of `rawSession` whose agents never started
- * (`isNeverStarted`), and whether that is every entry. Null when nothing is
- * judged: the session id does not parse, the roster is empty, or its age or
- * entries cannot be read (named on stderr, since that keeps a phantom entry
- * in place). No other side effect: the callers that act on it say so.
+ * The roster entries of `rawSession` with no running agent behind them
+ * (`deadEntryReason`: never started, or aborted by an API error), and whether
+ * that is every entry. Null when nothing is judged: the session id does not
+ * parse, the roster is empty, or its age or entries cannot be read (named on
+ * stderr, since that keeps a dead entry in place). No other side effect: the
+ * callers that act on it say so.
  */
-export function neverStartedRosterEntries(
+export function deadRosterEntries(
   rawSession: string,
   nowMs: number,
-  observeTranscript: (session: SessionId, agentId: AgentId) => TranscriptPresence = observeAgentTranscriptPresence,
-): Readonly<{ agentIds: readonly AgentId[]; all: boolean }> | null {
+  observeTranscript: (session: SessionId, agentId: AgentId, nowMs: number) => TranscriptObservation = observeAgentTranscript,
+): Readonly<{ entries: readonly DeadRosterEntry[]; all: boolean }> | null {
   const session = parseSessionId(rawSession);
   if (session === null) return null;
   try {
     const ageMs = nowMs - statSync(activeFlagPath(session)).mtimeMs;
-    const entries = readActiveAgentEntries(session);
-    if (entries.length === 0) return null;
-    const agentIds = entries
-      .filter(({ agentId }) => isNeverStarted(agentId, ageMs, observeTranscript(session, agentId)))
-      .map(({ agentId }) => agentId);
-    return Object.freeze({ agentIds: Object.freeze(agentIds), all: agentIds.length === entries.length });
+    const roster = readActiveAgentEntries(session);
+    if (roster.length === 0) return null;
+    const dead = roster.flatMap(({ agentId }): DeadRosterEntry[] => {
+      const reason = deadEntryReason(agentId, ageMs, observeTranscript(session, agentId, nowMs));
+      return reason === null ? [] : [Object.freeze({ agentId, reason })];
+    });
+    return Object.freeze({ entries: Object.freeze(dead), all: dead.length === roster.length });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      process.stderr.write(`loom: cannot judge the roster of ${session} for never-started agents: ${error instanceof Error ? error.message : String(error)}\n`);
+      process.stderr.write(`loom: cannot judge the roster of ${session} for dead agents: ${error instanceof Error ? error.message : String(error)}\n`);
     }
     return null;
   }
 }
+
+/** `a1 (never-started), a2 (aborted)`: dead entries as stderr names them. */
+const describeDeadEntries = (entries: readonly DeadRosterEntry[]): string =>
+  entries.map(({ agentId, reason }) => `${agentId} (${reason})`).join(", ");
 
 /** Number of agents currently on the session's `.active` roster. */
 export function countActiveAgents(sessionId: SessionId): number {
@@ -380,14 +420,14 @@ export type ActiveSubagentObservation =
   | Readonly<{ kind: "unavailable"; reason: string }>;
 
 /**
- * Whether a roster bound to the graph is activity: a roster holding only agents
- * that never started (a spawn refused after SubagentStart) is not, and is named
- * on stderr when skipped.
+ * Whether a roster bound to the graph is activity: a roster holding only dead
+ * entries (agents that never started, or that an API error aborted) is not,
+ * and is named on stderr when skipped.
  */
 function rosterServesGraph(session: string): boolean {
-  const neverStarted = neverStartedRosterEntries(session, Date.now());
-  if (neverStarted === null || !neverStarted.all) return true;
-  process.stderr.write(`loom: ignoring never-started roster entries for ${session}: ${neverStarted.agentIds.join(", ")}\n`);
+  const dead = deadRosterEntries(session, Date.now());
+  if (dead === null || !dead.all) return true;
+  process.stderr.write(`loom: ignoring dead roster entries for ${session}: ${describeDeadEntries(dead.entries)}\n`);
   return false;
 }
 
@@ -591,12 +631,13 @@ export async function markAgentActive(
         return "already-owned";
       }
     }
-    // Entries of agents that never started (core/roster-liveness.ts) leave first:
-    // each would otherwise veto quiescence and sole-agent attribution forever.
-    const neverStarted = roster === null ? null : neverStartedRosterEntries(sessionId, Date.now());
-    for (const stale of neverStarted?.agentIds ?? []) {
-      removeActiveRosterEntry(path, stale);
-      process.stderr.write(`markAgentActive: removed never-started roster entry ${stale} for ${sessionId}\n`);
+    // Dead entries (core/roster-liveness.ts: never started, or aborted by an
+    // API error) leave first: each would otherwise veto quiescence and
+    // sole-agent attribution forever.
+    const dead = roster === null ? null : deadRosterEntries(sessionId, Date.now());
+    for (const entry of dead?.entries ?? []) {
+      removeActiveRosterEntry(path, entry.agentId);
+      process.stderr.write(`markAgentActive: removed dead roster entry ${describeDeadEntries([entry])} for ${sessionId}\n`);
     }
     // The type column is what lets PreToolUse authorize by ROLE. Omitting it
     // (unknown type) is safe but downgrades the agent to identity-only
