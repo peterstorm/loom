@@ -95,4 +95,6 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0078](ADR-0078-successor-reviewers-copy-references-from-an-issued-roster.md) | Successor reviewers copy references from an issued roster | Accepted (2026-11-16) | — |
 | [ADR-0079](ADR-0079-a-word-that-lives-outside-the-source-is-listed-as-an-external-name.md) | A word that lives outside the source is listed as an external name | Accepted (2026-11-16) | amends ADR-0074 |
 | [ADR-0080](ADR-0080-a-failure-in-another-in-flight-tasks-test-file-is-that-tasks-to-fix.md) | A failure in another in-flight Task's test file is that Task's to fix | Accepted (2026-11-17) | — |
+| [ADR-0081](ADR-0081-the-active-wave-plan-is-edited-by-audited-operations.md) | The active Wave's plan is edited by audited operations | Accepted (2026-11-17) | — |
+| [ADR-0082](ADR-0082-a-package-manifest-and-its-lockfile-belong-to-one-task.md) | A package manifest and its lockfile belong to one Task | Accepted (2026-11-17) | — |
 | [ADR-0083](ADR-0083-wave-reviewer-payloads-carry-no-packet-identity.md) | Wave reviewer payloads carry no packet identity; the issued subject binds it | Accepted (2026-11-17) | partly supersedes ADR-0009 |

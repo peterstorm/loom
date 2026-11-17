@@ -41,6 +41,7 @@ describe("predecessorOutputs", () => {
         description: "Predecessor T1",
         completionClaims: ["FR-001", "AS-002"],
         produced: { kind: "recorded", changed: ["src/a.ts", "src/extra.ts"], declaredUnchanged: ["src/b.ts"] },
+        review: "gate-passed",
       }],
     });
   });
@@ -71,9 +72,17 @@ describe("predecessorOutputs", () => {
 
   it.each<[string, readonly Task[], string]>([
     ["missing from the graph", [], "dependency-missing"],
-    ["not completed", [done("T1", { status: "implemented" })], "dependency-not-completed"],
+    ["of an earlier Wave that is not completed", [done("T1", { status: "implemented" })], "dependency-not-completed"],
+    ["of the same Wave that has not settled", [done("T1", { wave: 2, status: "pending" })], "dependency-not-settled"],
   ])("refuses a dependency %s", (_name, roster, kind) => {
     expect(predecessorOutputs(dependent(["T1"]), roster)).toMatchObject({ ok: false, error: { kind, taskId: "T1" } });
+  });
+
+  it("renders a settled same-Wave dependency, saying its Wave Gate has not reviewed it (ADR-0081)", () => {
+    const result = predecessorOutputs(dependent(["T1"]), [done("T1", { wave: 2, status: "implemented" })]);
+    if (!result.ok) throw new Error("expected predecessor outputs");
+    expect(result.value[0]?.review).toBe("awaiting-wave-gate");
+    expect(renderPredecessorOutputs(result.value)).toContain("its Wave Gate has not reviewed it yet");
   });
 
   it("returns an empty list for a Task with no dependencies", () => {

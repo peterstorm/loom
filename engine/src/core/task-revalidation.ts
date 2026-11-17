@@ -91,6 +91,25 @@ export type WaveReopeningRefusal =
   /** Executing Tasks, then current-Wave Tasks holding an active attempt, without repeats. */
   | Readonly<{ kind: "implementation-active"; holders: NonEmpty<string> }>;
 
+/**
+ * The operator's sentence for a Wave-reopening refusal, for an operation
+ * named by its gerund ("re-scoping a Task") and its retry ("re-scope").
+ */
+export function waveReopeningRefusalMessage(refusal: WaveReopeningRefusal, gerund: string, retry: string): string {
+  switch (refusal.kind) {
+    case "not-executing":
+      return `${gerund} requires the execute Phase (current: ${refusal.phase})`;
+    case "live-wave-gate":
+      return `Wave Gate run ${refusal.runId} owns Wave ${refusal.wave}; abandon it with helper orchestration abandon, then retry`;
+    case "implementation-active":
+      return `implementation reservations are active: ${refusal.holders.join(", ")}; ${retry} once they settle`;
+    default: {
+      const unreachable: never = refusal;
+      return unreachable;
+    }
+  }
+}
+
 const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
 const refuse = (error: WaveReopeningRefusal): DomainResult<never, WaveReopeningRefusal> =>
   freeze({ ok: false as const, error: freeze(error) });

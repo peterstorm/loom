@@ -61,6 +61,11 @@ export function classifyTaskExecutionSpawn(input: ValidateTaskExecutionInput): T
     : { kind: "non-implementation" };
 }
 
+/**
+ * An unknown, later-Wave or uncompleted earlier-Wave dependency refuses the
+ * Task. A same-Wave dependency is the `dependency` Dispatch Hold's to judge
+ * (`dispatchHoldExecutionBlock`), so status and registration share its rule.
+ */
 function dependencyExecutionBlock(state: TaskGraph, task: Task): TaskExecutionDecision | null {
   for (const dependencyId of task.depends_on) {
     const dependency = state.tasks.find((candidate) => candidate.id === dependencyId);
@@ -68,6 +73,13 @@ function dependencyExecutionBlock(state: TaskGraph, task: Task): TaskExecutionDe
       return {
         kind: "ineligible",
         reason: `Cannot execute ${task.id} - dependency ${dependencyId} not found in task graph`,
+      };
+    }
+    if (dependency.wave === task.wave) continue;
+    if (dependency.wave > task.wave) {
+      return {
+        kind: "ineligible",
+        reason: `Cannot execute ${task.id} - dependency ${dependencyId} is in later Wave ${dependency.wave}`,
       };
     }
     if (dependency.status !== "completed") {

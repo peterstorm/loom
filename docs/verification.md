@@ -109,7 +109,7 @@ A runner is data, never Loom code: any runner works that writes a JUnit XML or V
 
 `helper run-tests` likewise refuses a named file the frozen classification does not call a test file.
 
-A pending Task whose list turns out wrong after population is repaired in place with `helper orchestration rescope-task`, which applies the same file-list rules and audits the edit in `wave_plan_edits` ([Re-scoping a pending Task](reference/recovery.md#re-scoping-a-pending-task)).
+A pending Task whose list turns out wrong after population is repaired in place with `helper orchestration rescope-task`, which applies the same file-list rules and audits the edit in `wave_plan_edits` ([Re-scoping a pending Task](reference/recovery.md#re-scoping-a-pending-task)). A package manifest and the lockfiles beside it are one coupled file set (ADR-0082): population refuses a payload in which one Task lists part of a set another Task lists, and every plan edit refuses to leave a Task holding part of one.
 
 ## Enrolling a critical-repair check
 

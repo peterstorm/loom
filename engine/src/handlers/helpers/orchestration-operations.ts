@@ -55,6 +55,7 @@ export const ORCHESTRATION_OPERATIONS = Object.freeze({
   attest: Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
   "reopen-task": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
   "rescope-task": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
+  "add-dependency": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
   "add-forward-fix": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
   "withdraw-forward-fix": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
   "adopt-engine-run-tests": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),

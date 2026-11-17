@@ -20,6 +20,7 @@ import { parseTaskGraph } from "../../src/state-file-wire";
 import type { DeclaredArtifactBaseline } from "../../src/core/artifact-baseline";
 import type { Task, TaskGraph } from "../../src/types";
 import { i6RunnerManifest } from "../fixtures/i6-runner-manifest";
+import { i6PlanTask } from "../fixtures/i6-plan-task";
 import { MAX_PLAN_EDIT_REASON_LENGTH, taskRescopedEdit, type TaskRescopedEditInput } from "../../src/core/wave-plan-edit";
 import { parseAuthoredTaskRoster, populateTaskGraph } from "../../src/core/task-graph-population";
 import { parseExportBindings } from "../../src/core/skeleton/bindings";
@@ -28,29 +29,17 @@ import { indexedSpec, specDefining } from "../fixtures/spec-index-fixture";
 import {
   activeWaveGateFixture,
   completedWaveGateFixture,
-  i6PendingTaskFixture,
   protectedGraphFixture,
   satisfiedProof,
-  taskFixture,
 } from "../fixtures/task-lifecycle";
 
 const START = "b".repeat(40);
-const REQUIRED = { regression: { kind: "required" as const }, new_tests: { kind: "required" as const } };
 const WAIVED = { regression: { kind: "required" as const }, new_tests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const } };
 
 const snapshot = (byte: string): DeclaredArtifactBaseline["snapshot"] => ({ kind: "sha256", digest: byte.repeat(64) });
 const entry = (artifact: string, byte: string): DeclaredArtifactBaseline => ({ artifact, snapshot: snapshot(byte) });
 
-/** A Task under the I6-era manifest: a pending one carries the Proof population derives for it there. */
-const task = (id: string, wave: number, fileList: readonly string[], extra: Partial<Task> = {}): Task => {
-  const input = {
-    id, description: id, agent: "code-implementer-agent", wave, depends_on: [],
-    file_list: [...fileList], spec_anchors: [], spec_contributions: [],
-    verification_policy: REQUIRED, review_status: "pending" as const,
-    ...extra,
-  };
-  return extra.status === undefined || extra.status === "pending" ? i6PendingTaskFixture(input) : taskFixture(input);
-};
+const task = i6PlanTask;
 
 /** Wave 1 current under an I6-era manifest: T1 owes I6 with no test file, T2 is fine, T3 waits in Wave 2. */
 function graph(overrides: Partial<TaskGraph> = {}, tasks?: readonly Task[]): TaskGraph {
@@ -99,6 +88,12 @@ const committed = (state: TaskGraph, req: TaskRescopeRequest, observed: Observed
   if (!reloaded.ok) throw new Error(`the re-scoped graph does not load back: ${reloaded.error}`);
   return outcome.graph;
 };
+/** The committed graph (proven to load back) and its audit. */
+const rescoped = (state: TaskGraph, req: TaskRescopeRequest) => {
+  const outcome = decided(state, req);
+  if (outcome.kind !== "rescoped") throw new Error("expected a committed re-scope");
+  return { graph: committed(state, req), audit: outcome.audit };
+};
 const refusal = (state: TaskGraph, req: TaskRescopeRequest, observed: ObservedBaselines | null = null): TaskRescopeRefusal => {
   const result = rescopeTask(state, req, observed);
   if (result.ok) throw new Error(`expected a refusal, got ${result.value.kind}`);
@@ -110,12 +105,20 @@ describe("parseTaskRescopeArgs", () => {
   it("accepts a task, additions, removals and a trimmed reason, in any order", () => {
     expect(parseTaskRescopeArgs(["--reason", "  scope ", "--remove-file", "src/a.ts", "--task", "T1", "--add-file", "src/a.test.ts"])).toEqual({
       ok: true,
-      value: { taskId: "T1", add: ["src/a.test.ts"], remove: ["src/a.ts"], reason: "scope" },
+      value: { taskId: "T1", add: [{ path: "src/a.test.ts", sealed: false }], remove: ["src/a.ts"], reason: "scope" },
+    });
+  });
+
+  it("adds a path named with --add-sealed-file and records it as sealed", () => {
+    expect(parseTaskRescopeArgs(["--task", "T1", "--add-file", "src/a.ts", "--add-sealed-file", "src/sealed.ts", "--reason", "r"])).toEqual({
+      ok: true,
+      value: { taskId: "T1", add: [{ path: "src/a.ts", sealed: false }, { path: "src/sealed.ts", sealed: true }], remove: [], reason: "r" },
     });
   });
 
   it.each([
-    [["--task", "T1", "--reason", "r"], "name at least one --add-file or --remove-file"],
+    [["--task", "T1", "--reason", "r"], "name at least one --add-file, --add-sealed-file or --remove-file"],
+    [["--task", "T1", "--add-file", "src/a.ts", "--add-sealed-file", "src/a.ts", "--reason", "r"], "src/a.ts is named twice"],
     [["--add-file", "src/a.ts", "--reason", "r"], "--task must name the Task"],
     [["--task", "T1", "--task", "T2", "--add-file", "src/a.ts", "--reason", "r"], "--task is given twice"],
     [["--task", "T1", "--add-file", "src/a.ts"], "--reason must say why"],
@@ -222,15 +225,68 @@ describe("rescopeTask: the invariants population checks still hold", () => {
     expect(refusal(live, ADD_TEST)).toMatchObject({ kind: "live-wave-gate" });
   });
 
-  it("refuses a path a completed Wave's Task lists, pointing at a Forward Fix", () => {
-    const sealed = graph({
-      current_wave: 2,
-      wave_gate_history: [completedWaveGateFixture({ runId: "run.wave-1", wave: 1 })],
-    }, [
-      task("T1", 1, ["src/t1.ts", "src/t1.test.ts"], { status: "implemented", proof: satisfiedProof(["src/t1.ts", "src/t1.test.ts"], "owed-if-new-tests"), review_status: "passed" }),
-      task("T3", 2, ["src/t3.ts", "src/t3.test.ts"]),
+  const sealedGraph = (wave2: readonly Task[] = [task("T3", 2, ["src/t3.ts", "src/t3.test.ts"])]) => graph({
+    current_wave: 2,
+    wave_gate_history: [completedWaveGateFixture({ runId: "run.wave-1", wave: 1 })],
+  }, [
+    task("T1", 1, ["src/t1.ts", "src/t1.test.ts", "package.json", "bun.lock"], {
+      status: "implemented", proof: satisfiedProof(["src/t1.ts", "src/t1.test.ts", "package.json", "bun.lock"], "owed-if-new-tests"), review_status: "passed",
+    }),
+    ...wave2,
+  ]);
+  const sealedRequest = (taskId: string, plain: readonly string[], sealed: readonly string[], remove: readonly string[] = []) => {
+    const parsed = parseTaskRescopeArgs([
+      "--task", taskId,
+      ...plain.flatMap((path) => ["--add-file", path]),
+      ...sealed.flatMap((path) => ["--add-sealed-file", path]),
+      ...remove.flatMap((path) => ["--remove-file", path]),
+      "--reason", "the bump changes sealed files",
     ]);
-    expect(refusal(sealed, request("T3", ["src/t1.ts"]))).toMatchObject({ kind: "path-not-addable", message: expect.stringContaining("Forward Fix") });
+    if (!parsed.ok) throw new Error(parsed.error);
+    return parsed.value;
+  };
+
+  it("refuses a sealed path given with --add-file, pointing at --add-sealed-file", () => {
+    expect(refusal(sealedGraph(), request("T3", ["src/t1.ts"]))).toMatchObject({
+      kind: "path-not-addable", message: expect.stringContaining("--add-sealed-file"),
+    });
+  });
+
+  it("takes a sealed path named with --add-sealed-file, recording it as sealed", () => {
+    const outcome = rescoped(sealedGraph(), sealedRequest("T3", [], ["src/t1.test.ts"]));
+    expect(byId(outcome.graph, "T3").file_list).toEqual(["src/t3.ts", "src/t3.test.ts", "src/t1.test.ts"]);
+    expect(outcome.audit).toMatchObject({ added: ["src/t1.test.ts"], sealed: ["src/t1.test.ts"] });
+  });
+
+  it("refuses --add-sealed-file on a path no completed Wave sealed", () => {
+    expect(refusal(sealedGraph(), sealedRequest("T3", [], ["src/new.ts"]))).toMatchObject({
+      kind: "path-not-addable", message: expect.stringContaining("is not sealed by a completed Wave"),
+    });
+  });
+
+  it("refuses an edit that leaves the Task with part of a coupled file set", () => {
+    expect(refusal(sealedGraph(), sealedRequest("T3", [], ["package.json"]))).toMatchObject({
+      kind: "coupled-set-split", message: expect.stringContaining("not bun.lock"),
+    });
+    expect(rescoped(sealedGraph(), sealedRequest("T3", [], ["package.json", "bun.lock"])).audit.sealed).toEqual(["package.json", "bun.lock"]);
+  });
+
+  it("leaves a split the edit does not touch to its own repair: an unrelated re-scope still lands", () => {
+    const split = graph({}, [
+      task("T3", 1, ["src/t3.ts", "src/t3.test.ts", "package.json"]),
+      task("T4", 1, ["src/t4.ts", "src/t4.test.ts", "bun.lock"]),
+    ]);
+    expect(byId(rescoped(split, request("T3", ["src/extra.ts"])).graph, "T3").file_list).toContain("src/extra.ts");
+  });
+
+  it("refuses to take a coupled member another Task of the Wave still lists, until that Task gives it up", () => {
+    const split = graph({}, [
+      task("T3", 1, ["src/t3.ts", "src/t3.test.ts", "package.json"]),
+      task("T4", 1, ["src/t4.ts", "src/t4.test.ts", "bun.lock"]),
+    ]);
+    expect(refusal(split, request("T3", ["bun.lock"]))).toMatchObject({ kind: "path-not-addable", message: expect.stringContaining("already T4's") });
+    const released = rescoped(split, request("T4", [], ["bun.lock"]));
+    expect(byId(rescoped(released.graph, request("T3", ["bun.lock"])).graph, "T3").file_list).toContain("bun.lock");
   });
 });
 
@@ -249,7 +305,7 @@ describe("rescopeTask: the population baseline", () => {
   it("extends the baseline in file-list order and records the revision it was read at", () => {
     const after = committed(baselined(), ADD_TEST, { revision: START, entries: [{ artifact: "src/t1.test.ts", snapshot: { kind: "missing" } }] });
     expect(byId(after, "T1").artifact_baseline).toEqual([entry("src/t1.ts", "1"), { artifact: "src/t1.test.ts", snapshot: { kind: "missing" } }]);
-    expect(after.wave_plan_edits?.[0]?.baselineRevision).toBe(START);
+    expect(after.wave_plan_edits?.[0]).toMatchObject({ kind: "task-rescoped", baselineRevision: START });
   });
 
   it("drops a removed path's baseline entry", () => {
@@ -258,7 +314,7 @@ describe("rescopeTask: the population baseline", () => {
     })]);
     const after = committed(two, request("T1", [], ["src/old.ts"]));
     expect(byId(after, "T1").artifact_baseline).toEqual([entry("src/t1.ts", "1"), entry("src/t1.test.ts", "2")]);
-    expect(after.wave_plan_edits?.[0]?.baselineRevision).toBeNull();
+    expect(after.wave_plan_edits?.[0]).toMatchObject({ kind: "task-rescoped", baselineRevision: null });
   });
 
   it.each<[string, ObservedBaselines | null]>([
@@ -431,9 +487,11 @@ describe("rescopeTask: contracts, export bindings and the Distill Task, on a pop
 });
 
 describe("taskRescopedEdit: the one constructor of the audit", () => {
-  const VALID: TaskRescopedEditInput = { wave: 1, taskId: "T1", added: ["src/a.ts"], removed: [], baselineRevision: null, reason: "why" };
-  it("builds a valid edit", () => {
-    expect(taskRescopedEdit(VALID)).toEqual({ ok: true, value: { schemaVersion: 1, kind: "task-rescoped", ...VALID } });
+  const VALID: TaskRescopedEditInput = { wave: 1, taskId: "T1", added: ["src/a.ts"], removed: [], baselineRevision: null, sealed: [], reason: "why" };
+  it("builds a valid edit, omitting an empty sealed list", () => {
+    const { sealed: _none, ...expected } = VALID;
+    expect(taskRescopedEdit(VALID)).toEqual({ ok: true, value: { schemaVersion: 1, kind: "task-rescoped", ...expected } });
+    expect(taskRescopedEdit({ ...VALID, sealed: ["src/a.ts"] })).toMatchObject({ ok: true, value: { sealed: ["src/a.ts"] } });
   });
   it.each<[string, Partial<TaskRescopedEditInput>, string]>([
     ["wave 0", { wave: 0 }, "wave must be an integer >= 1"],
@@ -442,6 +500,7 @@ describe("taskRescopedEdit: the one constructor of the audit", () => {
     ["a revision with nothing added", { added: [], removed: ["src/a.ts"], baselineRevision: START }, "must be null when nothing was added"],
     ["a revision that is no commit id", { baselineRevision: "HEAD" }, "exact Git commit id or null"],
     ["a blank reason", { reason: "" }, "reason must say why the plan changes"],
+    ["a sealed path that is not added", { sealed: ["src/b.ts"] }, "sealed names src/b.ts, which is not added"],
   ])("refuses %s", (_label, overrides, problem) => {
     expect(taskRescopedEdit({ ...VALID, ...overrides })).toMatchObject({ ok: false, error: expect.stringContaining(problem) });
   });
