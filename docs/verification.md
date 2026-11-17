@@ -109,6 +109,8 @@ A runner is data, never Loom code: any runner works that writes a JUnit XML or V
 
 `helper run-tests` likewise refuses a named file the frozen classification does not call a test file.
 
+A pending Task whose list turns out wrong after population is repaired in place with `helper orchestration rescope-task`, which applies the same file-list rules and audits the edit in `wave_plan_edits` ([Re-scoping a pending Task](reference/recovery.md#re-scoping-a-pending-task)).
+
 ## Enrolling a critical-repair check
 
 Critical-remediation checks must use `required-file`. For other projects, here is a complete Vitest alternative whose fixed argv names the exact output file:

@@ -389,6 +389,7 @@ describe("populateTaskGraph aggregate command", () => {
       orphaned_wave_gate_history: [{ stale: true }] as never,
       spec_trace_wave_gate_retirements: [{ stale: true }] as never,
       spec_trace_amendments: [{ stale: true }] as never,
+      wave_plan_edits: [{ stale: true }] as never,
     }), command({ force: true }));
 
     expect(result.ok).toBe(true);
@@ -406,6 +407,7 @@ describe("populateTaskGraph aggregate command", () => {
       "orphaned_wave_gate_history",
       "spec_trace_wave_gate_retirements",
       "spec_trace_amendments",
+      "wave_plan_edits",
     ] as const) {
       expect(result.value.state[field], field).toBeUndefined();
     }

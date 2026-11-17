@@ -929,7 +929,7 @@ function redThenGreenSection(
       "3. **Green.** A later trusted run that exits 0 in which every one of your test files runs at least one testcase and none fails or fails to collect.",
       "",
       "Test files:",
-      bulleted(classification.testFiles, "None — your file list matches no test file, so I6 fails with `no-test-files`; report it instead of finishing."),
+      bulleted(classification.testFiles, "None — your file list matches no test file, so I6 fails with `no-test-files`; report it instead of finishing, naming the test file the Task needs (the orchestrator adds it with `helper orchestration rescope-task`)."),
       "",
       "Implementation files:",
       bulleted(classification.implementationFiles, "None."),
