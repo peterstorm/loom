@@ -241,7 +241,13 @@ function populate(repository: Repository, manifest: FrozenVerificationManifest):
     invariants: [],
   });
   if (!populated.ok) throw new Error(`fixture population must succeed: ${populated.error.message}`);
-  writeFileSync(repository.statePath, JSON.stringify(populated.value.state, null, 2));
+  // These scenarios pin how the parent ledger captures a Pi child's OWN test
+  // commands, which only a graph that admits agent commands counts: one
+  // populated before engine-run evidence (loom#198). A manifest with an
+  // affectedRunner now freezes engine-run evidence, so drop that mode here;
+  // engine-run settlement on Pi is pinned by the I6 settlement matrix.
+  const { test_evidence: _engineRunMode, ...agentCommandGraph } = populated.value.state;
+  writeFileSync(repository.statePath, JSON.stringify(agentCommandGraph, null, 2));
 }
 
 /** The operator manifest that freezes an affected runner (schema 2, AD-4). */
