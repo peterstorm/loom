@@ -7,7 +7,7 @@ import {
   type BigIntStats,
 } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import { COMPLETION_REPORT_ROOT } from "../core/completion-suite";
+import { CANONICAL_TASK_GRAPH_PATHS, COMPLETION_REPORT_ROOT, engineOwnedPathClass } from "../core/engine-owned-paths";
 import { isEngineOwnedRuntimePath } from "../core/engine-runtime-paths";
 import { compareStrings } from "../core/ordering";
 import { parseArtifactDigest, type ArtifactDigest } from "../core/orchestration-contract";
@@ -61,12 +61,6 @@ export type WorkspaceDigestOptions = Readonly<{
 }>;
 
 const MAX_GIT_OUTPUT_BYTES = 64 * 1024 * 1024;
-const TASK_GRAPH_PATHS = Object.freeze([
-  ".claude/state/active_task_graph.json",
-  ".pi/state/active_task_graph.json",
-]);
-const RUN_DIRECTORY_ROOTS = Object.freeze([".claude/reviews", ".pi/reviews"]);
-const GIT_INTERNAL_ROOTS = Object.freeze([".git"]);
 
 const success = <T>(value: T): WorkspaceDigestResult<T> => Object.freeze({ ok: true, value });
 const failure = <T>(error: WorkspaceDigestFailure): WorkspaceDigestResult<T> =>
@@ -136,10 +130,6 @@ export function resolveCanonicalGitRepositoryRoot(
   }
 }
 
-function pathIsWithin(path: string, root: string): boolean {
-  return path === root || path.startsWith(`${root}/`);
-}
-
 function exclusionSet(raw: readonly string[]): WorkspaceDigestResult<ReadonlySet<string>> {
   const paths = new Set<string>();
   const errors: string[] = [];
@@ -159,11 +149,11 @@ function exclusionSet(raw: readonly string[]): WorkspaceDigestResult<ReadonlySet
 }
 
 function excluded(path: string, completionReports: ReadonlySet<string>): boolean {
-  return GIT_INTERNAL_ROOTS.some((root) => pathIsWithin(path, root)) ||
-    RUN_DIRECTORY_ROOTS.some((root) => pathIsWithin(path, root)) ||
+  const owned = engineOwnedPathClass(path);
+  return owned === "git-metadata" || owned === "run-directory" ||
     // The State File and the lock and staging leaves its write boundary keeps
     // beside it: an observation made under that lock must equal one outside it.
-    TASK_GRAPH_PATHS.some((statePath) => isEngineOwnedRuntimePath(path, statePath)) ||
+    CANONICAL_TASK_GRAPH_PATHS.some((statePath) => isEngineOwnedRuntimePath(path, statePath)) ||
     completionReports.has(path);
 }
 

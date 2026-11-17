@@ -1,3 +1,4 @@
+import { CANONICAL_TASK_GRAPH_PATHS } from "../../core/engine-owned-paths";
 import { basename, dirname, join, resolve } from "node:path";
 import { match } from "ts-pattern";
 import { taskGraphPath } from "../../config";
@@ -28,10 +29,7 @@ import {
 import { StateManager } from "../../state-manager";
 import type { HookHandler, HookResult } from "../../types";
 
-const CANONICAL_STATE_PATHS = Object.freeze([
-  join(".claude", "state", "active_task_graph.json"),
-  join(".pi", "state", "active_task_graph.json"),
-]);
+const CANONICAL_STATE_PATHS = Object.freeze(CANONICAL_TASK_GRAPH_PATHS.map((path) => join(...path.split("/"))));
 
 type ProjectRootResult =
   | Readonly<{ ok: true; value: string }>
@@ -48,7 +46,7 @@ function projectRootFromStatePath(statePath: string): ProjectRootResult {
         ok: false,
         error:
           `cannot derive verification manifest target from non-canonical State File path ${statePath}; ` +
-          "expected <root>/.claude/state/active_task_graph.json or <root>/.pi/state/active_task_graph.json",
+          `expected ${CANONICAL_TASK_GRAPH_PATHS.map((path) => `<root>/${path}`).join(" or ")}`,
       };
 }
 

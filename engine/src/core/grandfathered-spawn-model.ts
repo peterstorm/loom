@@ -31,7 +31,7 @@
 
 import type { AgentRequestAuthority } from "./orchestration-contract/roster";
 import { parseOrchestrationRunId } from "./orchestration-contract/identity";
-import { RUN_LAYOUT_COMPONENTS } from "./remediation-machine";
+import { RUN_LAYOUT_COMPONENTS } from "./engine-owned-paths";
 import { parseRepositoryPath } from "./repository-path";
 
 /** Extract a `LOOM_<NAME>: <value>` marker line's value from a spawn prompt, or

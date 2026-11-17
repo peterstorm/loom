@@ -1,6 +1,6 @@
 import { lstatSync, type BigIntStats } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { COMPLETION_REPORT_ROOT } from "../core/completion-suite";
+import { COMPLETION_REPORT_ROOT } from "../core/engine-owned-paths";
 import {
   compareCandidateRepositoryWitnesses,
   createCandidateRepositoryWitness,

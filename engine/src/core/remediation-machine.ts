@@ -1,9 +1,16 @@
+import {
+  GIT_METADATA_ROOT,
+  HARNESS_DIRECTORY_NAMES,
+  HARNESS_STATE_DIRECTORIES,
+  RUN_DIRECTORY_ROOTS,
+  RUN_LAYOUTS,
+  isEngineEvidencePath,
+} from "./engine-owned-paths";
 import { createHash } from "node:crypto";
 import { match } from "ts-pattern";
 import { parseReviewerProtocolDescriptor } from "./reviewer-contract";
 import { parseStandaloneReviewerProtocolV3 } from "./standalone-lineage-contract";
 import { compareStrings } from "./ordering";
-import { frozenSet } from "./frozen";
 import {
   canonicalRecord,
   canonicalStructuralEquals,
@@ -56,14 +63,18 @@ const isPresentChange = (change: RemediationPathChange): change is PresentRemedi
 const isAbsentChange = (change: RemediationPathChange): change is AbsentRemediationPathChange =>
   includes(ABSENT_CHANGES, change);
 
-/** Fixed policy data, never caller-extended or caller-reduced. */
-export const REMEDIATION_EXCLUDED_LAYOUTS = Object.freeze([
-  ".git metadata",
-  ".claude/state",
-  ".claude/reviews (packets, review runs, panel runs, and review-and-fix runs)",
-  ".claude/specs/<spec>/panel-runs",
-  ".claude/**/{panel-runs,review-runs,review-and-fix-runs,wave-gate-runs,orchestration-runs}",
-] as const);
+/**
+ * Fixed policy data, never caller-extended or caller-reduced: the words for
+ * what `isEngineEvidencePath` excludes, derived from the one module that owns
+ * the paths (`core/engine-owned-paths.ts`). Its digest is recorded in every
+ * path authority, so a change to it is a change of policy.
+ */
+export const REMEDIATION_EXCLUDED_LAYOUTS: readonly string[] = Object.freeze([
+  `${GIT_METADATA_ROOT} metadata`,
+  ...HARNESS_STATE_DIRECTORIES,
+  ...RUN_DIRECTORY_ROOTS.map((root) => `${root} (packets, review runs, panel runs, and review-and-fix runs)`),
+  `{${HARNESS_DIRECTORY_NAMES.join(",")}}/**/{${RUN_LAYOUTS.join(",")}}`,
+]);
 
 const includes = <T extends string>(values: readonly T[], value: unknown): value is T =>
   typeof value === "string" && (values as readonly string[]).includes(value);
@@ -162,40 +173,25 @@ function sameArray<T>(left: readonly T[], right: readonly T[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function pathIsWithin(path: CanonicalRepositoryRelativePath, root: string): boolean {
-  return path === root || path.startsWith(`${root}/`);
-}
-
-/**
- * The canonical directory names that hold Run Directories. ONE definition,
- * shared by every consumer: remediation exclusion policy uses it to keep run
- * evidence out of a staged set, and `grandfathered-spawn-model` uses it to
- * anchor a spawn-declared run directory. A second copy in either place is a
- * silent divergence between "this path is run evidence" and "this path may be
- * trusted as run evidence".
- */
-export const RUN_LAYOUT_COMPONENTS: ReadonlySet<string> = frozenSet([
-  "panel-runs",
-  "review-runs",
-  "review-and-fix-runs",
-  "wave-gate-runs",
-  "orchestration-runs",
-]);
-
-/** Canonical policy predicate — the ONE copy, shared by the freeze,
- *  registration, audit, replay, and temporary-index parsers. */
+/** Canonical policy predicate, shared by the freeze, registration, audit,
+ *  replay and temporary-index parsers: Loom evidence (`isEngineEvidencePath`)
+ *  is never staged, for either harness. */
 export function isExcludedRemediationPath(path: CanonicalRepositoryRelativePath): boolean {
-  if (pathIsWithin(path, ".git") || pathIsWithin(path, ".claude/state") ||
-      pathIsWithin(path, ".claude/reviews")) return true;
-  const components = path.split("/");
-  if (components[0] !== ".claude") return false;
-  // `.some` already covers every component past the first, `panel-runs`
-  // included — a narrower `components[3] === "panel-runs"` tail below it could
-  // never be reached.
-  return components.some((component, index) => index > 0 && RUN_LAYOUT_COMPONENTS.has(component));
+  return isEngineEvidencePath(path);
 }
 
 const EXCLUSION_POLICY_DIGEST = digestJson(REMEDIATION_EXCLUDED_LAYOUTS);
+
+/**
+ * The policy digests of path authorities registered before loom#198 Cause 2,
+ * whose policy excluded only the Claude Code harness's state and review
+ * directories. Such a run stays readable; it is now held to the current,
+ * wider exclusion, which only keeps more evidence out of a staged set. A new
+ * run always records `EXCLUSION_POLICY_DIGEST`.
+ */
+const LEGACY_EXCLUSION_POLICY_DIGESTS: ReadonlySet<string> = Object.freeze(new Set([
+  "767c97ead4e3d00f7e0200383bb38650492678ee7efa25c2f96ba45bbb9ab504",
+]));
 
 declare const CANONICAL_REPOSITORY_RELATIVE_PATH: unique symbol;
 export type CanonicalRepositoryRelativePath = string & {
@@ -874,7 +870,7 @@ export function parseRemediationPathAuthority(
   if (record.value.kind === "registered-path-authority" && support.value.paths.length === 0) {
     return invalid("registeredSupportPaths", "registered authority must contain a support path");
   }
-  if (exclusionDigest.value !== EXCLUSION_POLICY_DIGEST) {
+  if (exclusionDigest.value !== EXCLUSION_POLICY_DIGEST && !LEGACY_EXCLUSION_POLICY_DIGESTS.has(exclusionDigest.value)) {
     return invalid("exclusionPolicyDigest", "path authority exclusion policy has drifted");
   }
   const fields = {
