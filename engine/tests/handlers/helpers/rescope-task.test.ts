@@ -150,7 +150,7 @@ describe("rescope-task shell", () => {
 
   it("refuses malformed arguments before reading any graph", async () => {
     const result = await createRescopeTaskOperation(quiet, noRead)(["--task", "T1", "--reason", "r"]);
-    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("name at least one --add-file or --remove-file") });
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("name at least one --add-file, --add-sealed-file or --remove-file") });
   });
 
   it("refuses without writing while a subagent is active", async () => {

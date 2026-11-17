@@ -47,9 +47,10 @@ const readAtRevision: BaselineReader = (statePath, duty) => {
 
 function outcomeMessage(outcome: TaskRescope): string {
   if (outcome.kind === "unchanged") return `${outcome.taskId}'s file_list already matches; nothing changed.\n`;
-  const { taskId, added, removed } = outcome.audit;
+  const { taskId, added, removed, sealed = [] } = outcome.audit;
   const changes = [
     ...(added.length === 0 ? [] : [`added ${added.join(", ")}`]),
+    ...(sealed.length === 0 ? [] : [`sealed by a completed Wave: ${sealed.join(", ")}`]),
     ...(removed.length === 0 ? [] : [`removed ${removed.join(", ")}`]),
   ].join("; ");
   return `${taskId} re-scoped: ${changes}. Dispatch it from helper orchestration brief --task ${taskId}.\n`;

@@ -25,7 +25,7 @@
  * shell supplies the reservation-liveness observation.
  */
 import type { StatusReason, TaskGraph, WaveImplementationDispatch, WaveImplementationRecovery } from "../types";
-import { dispatchHoldOf, stuckDispatchHoldMessage, type DispatchHold } from "./dispatch-holds";
+import { dispatchHoldOf, escalatedBlockers, stuckDispatchHoldMessage, type DispatchHold } from "./dispatch-holds";
 import { canonicalRecord, nonEmpty, type NonEmpty } from "./orchestration-contract";
 import { quoteShellArgument } from "./shell-quoting";
 import { deriveTaskImplementationDispatch } from "./task-implementation-dispatch";
@@ -102,6 +102,18 @@ function withheldTasks(
     const hold = dispatchHoldOf(graph, executing, task);
     return hold === null ? [] : [{ taskId: task.id, hold }];
   });
+}
+
+/**
+ * The clause naming each withheld Task an escalated dependency blocks, so an
+ * escalation says who waits behind it (ADR-0081); empty when none does.
+ */
+function blockedBehind(withheld: readonly WithheldTask[]): string {
+  const blocked = withheld.flatMap(({ taskId, hold }) => {
+    const escalated = hold.kind === "dependency" ? escalatedBlockers(hold.blockers) : [];
+    return escalated.length > 0 ? [`${taskId} (by ${escalated.join(", ")})`] : [];
+  });
+  return blocked.length === 0 ? "" : `. Blocked behind an escalated dependency: ${blocked.join(", ")}`;
 }
 
 /**
@@ -245,7 +257,8 @@ export function classifyImplementationWindow(
         tasks: escalatedTasks,
       }),
       `Wave ${wave} requires implementation escalation; ${escalated.length} task(s) reached a terminal implementation failure. ` +
-        "Fix the cause, then remediate each Task with the helper orchestration remediate command on its status reason",
+        "Fix the cause, then remediate each Task with the helper orchestration remediate command on its status reason" +
+        blockedBehind(withheld),
     );
   }
   const [firstUnresolved, ...moreUnresolved] = unresolvedSkeletonBindings;

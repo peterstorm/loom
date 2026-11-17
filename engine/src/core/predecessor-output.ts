@@ -4,9 +4,11 @@
  *
  * Derived only from protected Task state, never from model-authored output: a
  * dependency's description and Completion Claims as decompose froze them, and
- * the files its settled implementation changed. A dependent is dispatched only
- * after every dependency is `completed` (a passing Wave Gate), so these facts
- * are final and reviewed by the time the brief renders.
+ * the files its settled implementation changed. A dependency of an earlier
+ * Wave is `completed` (a passing Wave Gate) before its dependent is
+ * dispatched, so its facts are final and reviewed. A dependency of the same
+ * Wave (ADR-0081) need only have settled its implementation, so its facts are
+ * final but not yet reviewed, and the brief says so.
  *
  * Pure: the shell passes the roster it already loaded.
  */
@@ -36,11 +38,14 @@ export type PredecessorOutput = Readonly<{
   description: string;
   completionClaims: readonly string[];
   produced: PredecessorProduced;
+  /** `completed` (an earlier Wave's gate passed), or `implemented` in the dependent's own Wave and not yet gated. */
+  review: "gate-passed" | "awaiting-wave-gate";
 }>;
 
 export type PredecessorOutputError =
   | Readonly<{ kind: "dependency-missing"; taskId: string }>
   | Readonly<{ kind: "dependency-not-completed"; taskId: string; status: Task["status"] }>
+  | Readonly<{ kind: "dependency-not-settled"; taskId: string; status: Task["status"] }>
   | Readonly<{ kind: "declared-path-not-canonical"; taskId: string; path: string }>;
 
 function declaredPaths(dependency: Task): DomainResult<readonly ReviewPath[], PredecessorOutputError> {
@@ -69,9 +74,10 @@ function producedBy(dependency: Task, declared: readonly ReviewPath[]): Predeces
 
 /**
  * One Predecessor Output per direct dependency, in `depends_on` order. A
- * dependency that is missing or not `completed` is refused rather than
- * rendered: dispatch already guarantees completion, and a brief that implied a
- * finished predecessor which is not finished would mislead the implementer.
+ * missing dependency is refused, and so is one dispatch could not have
+ * released on: an earlier-Wave dependency that is not `completed`, or a
+ * same-Wave one that has not settled its implementation. A brief that implied
+ * a finished predecessor which is not finished would mislead the implementer.
  */
 export function predecessorOutputs(
   task: Task,
@@ -82,7 +88,11 @@ export function predecessorOutputs(
   for (const id of task.depends_on) {
     const dependency = byId.get(id);
     if (dependency === undefined) return { ok: false, error: { kind: "dependency-missing", taskId: id } };
-    if (dependency.status !== "completed") {
+    const sameWave = dependency.wave === task.wave;
+    if (sameWave && dependency.status !== "implemented" && dependency.status !== "completed") {
+      return { ok: false, error: { kind: "dependency-not-settled", taskId: id, status: dependency.status } };
+    }
+    if (!sameWave && dependency.status !== "completed") {
       return { ok: false, error: { kind: "dependency-not-completed", taskId: id, status: dependency.status } };
     }
     const declared = declaredPaths(dependency);
@@ -92,6 +102,7 @@ export function predecessorOutputs(
       description: dependency.description,
       completionClaims: Object.freeze([...(dependency.spec_anchors ?? [])]),
       produced: producedBy(dependency, declared.value),
+      review: dependency.status === "completed" ? "gate-passed" : "awaiting-wave-gate",
     }));
   }
   return { ok: true, value: Object.freeze(outputs) };
@@ -120,8 +131,11 @@ function renderProduced(produced: PredecessorProduced): readonly string[] {
 /** The brief's "What your dependencies produced" section body. */
 export function renderPredecessorOutputs(outputs: readonly PredecessorOutput[]): string {
   if (outputs.length === 0) return NO_PREDECESSORS;
-  return outputs.flatMap(({ taskId, description, completionClaims, produced }) => [
+  return outputs.flatMap(({ taskId, description, completionClaims, produced, review }) => [
     `- **${taskId}** — ${oneLine(description)}`,
+    ...(review === "awaiting-wave-gate"
+      ? ["  - Implemented in your Wave; its Wave Gate has not reviewed it yet, so treat its code as settled but unreviewed"]
+      : []),
     `  - Completed: ${completionClaims.length === 0 ? "no Requirement Completion Claims" : completionClaims.map(oneLine).join(", ")}`,
     ...renderProduced(produced),
   ]).join("\n");
@@ -132,7 +146,9 @@ export function predecessorOutputErrorMessage(error: PredecessorOutputError): st
   return match<PredecessorOutputError, string>(error)
     .with({ kind: "dependency-missing" }, ({ taskId }) => `dependency ${taskId} is not in the TaskGraph`)
     .with({ kind: "dependency-not-completed" }, ({ taskId, status }) =>
-      `dependency ${taskId} is ${status}, not completed; a dependent is dispatched only after its dependencies pass their Wave Gate`)
+      `dependency ${taskId} is ${status}, not completed; a dependent is dispatched only after an earlier Wave's dependencies pass their Wave Gate`)
+    .with({ kind: "dependency-not-settled" }, ({ taskId, status }) =>
+      `dependency ${taskId} of the same Wave is ${status}; a dependent is dispatched only after it settles its implementation`)
     .with({ kind: "declared-path-not-canonical" }, ({ taskId, path }) =>
       `dependency ${taskId} declares '${path}', which is not a canonical repository path`)
     .exhaustive();

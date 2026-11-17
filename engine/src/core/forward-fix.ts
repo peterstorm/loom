@@ -33,6 +33,7 @@
 
 import { match } from "ts-pattern";
 import { frozenPaths } from "./acceptance-contract/tasks";
+import { coupledSetGaps, describeCoupledSetGap } from "./coupled-file-sets";
 import { isFlagToken } from "./cli-flag-token";
 import { isProtectedVerificationPath } from "./completion-suite";
 import { isDistillTask } from "./distill-task";
@@ -91,7 +92,8 @@ export type ForwardFixRefusalKind =
   | "protected-path"
   | "frozen-path"
   | "owned-in-wave"
-  | "not-sealed";
+  | "not-sealed"
+  | "coupled-set-split";
 
 export type ForwardFixRefusal = Refusal<ForwardFixRefusalKind>;
 
@@ -439,6 +441,9 @@ export function addForwardFix(graph: TaskGraph, request: ForwardFixRequest): Dom
   if (refusal !== null) return refusal;
   const sealed = admittedSealedPaths(graph, request);
   if (!sealed.ok) return sealed;
+  // A fix that takes part of a coupled file set takes all of it (ADR-0082).
+  const gap = coupledSetGaps(graph.tasks, { id: "the Forward Fix", file_list: request.files })[0];
+  if (gap !== undefined) return refuse("coupled-set-split", `${describeCoupledSetGap(gap)}; name every member with --file`);
 
   const { wave, abandonedRunId } = open.value;
   const sealedPaths = sealed.value;

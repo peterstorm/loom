@@ -29,8 +29,9 @@
  *   helper orchestration attest --task <task-id> --reason <text>
  *   helper orchestration reopen-task --wave <N> --task <task-id> [--task <task-id>]...
  *                               --reason <text>
- *   helper orchestration rescope-task --task <task-id> [--add-file <path>]... [--remove-file <path>]...
+ *   helper orchestration rescope-task --task <task-id> [--add-file <path>]... [--add-sealed-file <path>]... [--remove-file <path>]...
  *                               --reason <text>
+ *   helper orchestration add-dependency --task <task-id> --on <task-id> [--on <task-id>]... --reason <text>
  *   helper orchestration add-forward-fix --wave <N> --hold <task-id>... --file <path>...
  *                               --description <text> --reason <text>
  *                               [--agent <agent>] [--new-tests required|existing-tests-sufficient]
@@ -219,6 +220,7 @@ import { remediateOperation } from "./remediate-implementation-escalation";
 import { attestOperation } from "./attest-implementation";
 import { reopenTaskOperation } from "./reopen-task";
 import { rescopeTaskOperation } from "./rescope-task";
+import { addDependencyOperation } from "./add-dependency";
 import { adoptEngineRunTestsOperation } from "./adopt-engine-run-tests";
 import { adoptEngineRevisionOperation } from "./adopt-engine-revision";
 import { addForwardFixOperation, withdrawForwardFixOperation } from "./forward-fix-operations";
@@ -246,9 +248,13 @@ const OPERATOR_OPERATIONS_USAGE: readonly string[] = [
   "          (arms implementation re-attestation: rewrites the Task's pending proof to attested obligations + regression-only policy; the next dispatch runs a verify-only child whose writes settle as drift, never as attested)",
   "  reopen-task --wave <N> --task <task-id> [--task <task-id>]... --reason <text>",
   "          (after abandoning the Wave's run: returns implemented Tasks of the active Wave to revalidation so status owes each a fresh dispatch; Findings stay as prior Findings, other Tasks stay implemented; audited and idempotent)",
-  "  rescope-task --task <task-id> [--add-file <path>]... [--remove-file <path>]... --reason <text>",
+  "  rescope-task --task <task-id> [--add-file <path>]... [--add-sealed-file <path>]... [--remove-file <path>]... --reason <text>",
   "          (adds files to, or removes files from, a pending Task of the active Wave or a later one, such as a new-tests Task with no test file;",
+  "          a path a completed Wave sealed joins only through --add-sealed-file; a package manifest and its lockfile stay on one Task;",
   "          keeps every population check, extends its population baseline from its start_sha, re-derives its Proof; audited and idempotent)",
+  "  add-dependency --task <task-id> --on <task-id> [--on <task-id>]... --reason <text>",
+  "          (makes a pending Task of the active Wave wait for the named Tasks of its Wave or an earlier one; a same-Wave",
+  "          dependency is satisfied once it settles its implementation; a cycle is refused; audited and idempotent)",
   "  add-forward-fix --wave <N> --hold <task-id> [--hold <task-id>]... --file <path> [--file <path>]...",
   "          --description <text> --reason <text> [--agent <implementation agent>] [--new-tests required|existing-tests-sufficient]",
   "          (appends a Forward Fix Task to the active Wave to change code a completed Wave sealed, when a held Task's judgement of it failed;",
@@ -1970,6 +1976,8 @@ export function orchestrationHandler(emission: () => Emission): HookHandler {
         return reopenTaskOperation(rest);
       case "rescope-task":
         return rescopeTaskOperation(rest);
+      case "add-dependency":
+        return addDependencyOperation(rest);
       case "add-forward-fix":
         return addForwardFixOperation(rest);
       case "withdraw-forward-fix":

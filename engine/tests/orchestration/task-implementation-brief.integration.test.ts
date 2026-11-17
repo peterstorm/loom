@@ -16,7 +16,12 @@ afterEach(() => {
  *  `plan`, the graph's plan_file names a plan at `.claude/plans/plan.md` (the
  *  text, or `null` for a plan_file that names no existing file). With `stamp`,
  *  the graph carries that `owner_obligations` population stamp. */
-function graphWith(t1Status: "completed" | "implemented", plan?: string | null, stamp?: readonly OwnerObligation[]): string {
+function graphWith(
+  t1Status: "completed" | "implemented",
+  plan?: string | null,
+  stamp?: readonly OwnerObligation[],
+  t1Wave: 1 | 2 = 1,
+): string {
   // The canonical root: macOS tmpdir() sits behind the /var symlink, which the
   // State File boundary refuses to follow.
   const root = canonicalTempDir("loom-brief-");
@@ -29,9 +34,13 @@ function graphWith(t1Status: "completed" | "implemented", plan?: string | null, 
     current_phase: "execute", current_wave: 2, phase_artifacts: {}, skipped_phases: [],
     spec_file: null, plan_file: plan === undefined ? null : ".claude/plans/plan.md", wave_gates: {},
     ...(stamp === undefined ? {} : { owner_obligations: stamp }),
+    // A same-Wave edge is legal only as an audited add-dependency edit (ADR-0081).
+    ...(t1Wave === 2
+      ? { wave_plan_edits: [{ schemaVersion: 1, kind: "dependency-added", wave: 2, taskId: "T2", dependsOn: ["T1"], reason: "T2 uses T1's seam" }] }
+      : {}),
     tasks: [
       {
-        id: "T1", description: "Build the seam", agent: "code-implementer-agent", wave: 1, depends_on: [],
+        id: "T1", description: "Build the seam", agent: "code-implementer-agent", wave: t1Wave, depends_on: [],
         file_list: ["src/seam.ts", "src/seam-types.ts"], files_modified: ["src/seam.ts", "src/extra.ts"],
         status: t1Status, legacy_missing_proof: true,
       },
@@ -108,7 +117,18 @@ describe("renderTaskImplementationBrief predecessor output", () => {
     const rendered = renderTaskImplementationBrief(graphWith("implemented"), LOOM_PACKAGE_ROOT, T2);
     expect(rendered).toEqual({
       ok: false,
-      error: "T2: dependency T1 is implemented, not completed; a dependent is dispatched only after its dependencies pass their Wave Gate",
+      error: "T2: dependency T1 is implemented, not completed; a dependent is dispatched only after an earlier Wave's dependencies pass their Wave Gate",
     });
+  });
+
+  it("briefs a dependent whose same-Wave dependency has settled, saying it is not yet reviewed (ADR-0081)", () => {
+    const rendered = renderTaskImplementationBrief(graphWith("implemented", undefined, undefined, 2), LOOM_PACKAGE_ROOT, T2);
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    expect(rendered.value.prompt).toContain([
+      "- **T1** — Build the seam",
+      "  - Implemented in your Wave; its Wave Gate has not reviewed it yet, so treat its code as settled but unreviewed",
+      "  - Completed: no Requirement Completion Claims",
+    ].join("\n"));
   });
 });
