@@ -165,6 +165,8 @@ describe("workspace digest shell", () => {
     write(root, ".claude/state/active_task_graph.json", "state-1");
     write(root, ".pi/state/active_task_graph.json", "pi-state-1");
     write(root, ".claude/reviews/run.example/result.json", "review-1");
+    write(root, ".pi/reviews/run.example/result.json", "pi-review-1");
+    write(root, ".claude/specs/2026-x/panel-runs/run.x/manifest.json", "panel-1");
     write(root, ".loom/completion-reports/completion.json", "report-1");
     commitAll(root);
     write(root, "ignored.log", "ignored-1");
@@ -174,6 +176,8 @@ describe("workspace digest shell", () => {
     write(root, ".claude/state/active_task_graph.json", "state-2");
     write(root, ".pi/state/active_task_graph.json", "pi-state-2");
     write(root, ".claude/reviews/run.example/result.json", "review-2");
+    write(root, ".pi/reviews/run.example/result.json", "pi-review-2");
+    write(root, ".claude/specs/2026-x/panel-runs/run.x/manifest.json", "panel-2");
     write(root, ".loom/completion-reports/completion.json", "report-2");
     write(root, ".git/loom-volatile", "git-internal");
 

@@ -624,6 +624,8 @@ describe("source-bound Defect-Family Accounting", () => {
     for (const path of [
       ".git/index", ".claude/state/active_task_graph.json", ".claude/reviews/run/result.json",
       ".pi/reviews/run/result.json", ".loom/verification-manifest.json", ".loom/completion-reports/result.json",
+      // The Pi harness's twins of what the list before loom#198 Cause 2 protected for Claude Code only.
+      ".pi/state/active_task_graph.json", ".pi/specs/2026-x/panel-runs/run.x/manifest.json", ".pi/custom/wave-gate-runs/run.x/events.json",
     ]) {
       expect(prepareDefectFamilyAccounting(inventory, {
         ...base,
@@ -635,6 +637,24 @@ describe("source-bound Defect-Family Accounting", () => {
           },
         }],
       }).ok, path).toBe(false);
+    }
+  });
+
+  it("admits a sibling that is project content beside the protected directories", () => {
+    const inventory = source();
+    const base = declarationRaw(inventory);
+    const group = (base.groups as Record<string, unknown>[])[0]!;
+    for (const path of [".claude/settings.json", ".pi/specs/2026-x/spec.md", "src/panel-runs/view.ts"]) {
+      expect(prepareDefectFamilyAccounting(inventory, {
+        ...base,
+        groups: [{
+          ...group,
+          siblings: {
+            kind: "declared-siblings", provenance: "DECLARED",
+            entries: [{ path, status: "repaired", reason: "A real sibling." }],
+          },
+        }],
+      }).ok, path).toBe(true);
     }
   });
 });

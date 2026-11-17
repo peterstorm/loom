@@ -17,9 +17,11 @@
  * Pure.
  */
 
+import { COMPLETION_REPORT_ROOT } from "./engine-owned-paths";
+
 /** The report path every preset writes, beneath the protected completion-report root. */
-export const PRESET_JUNIT_REPORT = ".loom/completion-reports/affected.junit.xml" as const;
-export const PRESET_JSON_REPORT = ".loom/completion-reports/affected.json" as const;
+export const PRESET_JUNIT_REPORT = `${COMPLETION_REPORT_ROOT}/affected.junit.xml` as const;
+export const PRESET_JSON_REPORT = `${COMPLETION_REPORT_ROOT}/affected.json` as const;
 
 export const RUNNER_PRESET_IDS = ["vitest", "jest", "mocha", "mocha-ts-node", "bun", "node-test"] as const;
 export type RunnerPresetId = (typeof RUNNER_PRESET_IDS)[number];

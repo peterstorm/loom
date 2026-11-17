@@ -4,6 +4,7 @@
  * update the docs if changed.
  */
 
+import { canonicalTaskGraphPath } from "./core/engine-owned-paths";
 import { lstatSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -417,8 +418,8 @@ function detectHarness(): "claude" | "pi" {
 /** Which harness is running */
 export const HARNESS = detectHarness();
 
-const PI_TASK_GRAPH_PATH = ".pi/state/active_task_graph.json";
-const CLAUDE_TASK_GRAPH_PATH = ".claude/state/active_task_graph.json";
+const PI_TASK_GRAPH_PATH = canonicalTaskGraphPath(".pi");
+const CLAUDE_TASK_GRAPH_PATH = canonicalTaskGraphPath(".claude");
 
 /** Ordered task-graph locations. An explicit override is authoritative. Pi
  * otherwise prefers its native state directory but can resume Loom sessions

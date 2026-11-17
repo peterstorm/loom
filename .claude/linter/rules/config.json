@@ -158,6 +158,12 @@
           ],
           "reason": "pure path math over panel artifact paths"
         },
+        "engine/src/core/engine-owned-paths.ts": {
+          "allow": [
+            "node:path"
+          ],
+          "reason": "pure path math: the project root and runs root beside a canonical State File"
+        },
         "engine/src/core/phase-artifact-paths.ts": {
           "allow": [
             "node:path"

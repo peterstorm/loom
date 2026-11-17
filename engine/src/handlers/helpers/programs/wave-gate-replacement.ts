@@ -5,7 +5,8 @@
  * capture and subagent facts; core/wave-gate-replacement decides the
  * transition, which is re-derived under the state lock before it commits.
  */
-import { dirname, join, resolve } from 'node:path';
+import { runsRootBesideStateFile, WAVE_GATE_RUNS } from "../../../core/engine-owned-paths";
+import { join, resolve } from 'node:path';
 import { parseArtifactDigest, parseOrchestrationRunId } from '../../../core/orchestration-contract';
 import { captureKey } from '../../../core/harness-capture';
 import { inspectRunDirectoryEntry, type RunDirHandle } from '../../../orchestration/run-directory-handle';
@@ -213,7 +214,7 @@ export async function recoverOrphanedWaveGateFacade(
       return failed("orphan recovery requires a distinct replacement run identity");
     }
     const requestedRunsRoot = resolve(runsRoot);
-    const legacyCanonicalRunsRoot = join(dirname(dirname(resolve(TASK_GRAPH_PATH))), "reviews", "wave-gate-runs");
+    const legacyCanonicalRunsRoot = runsRootBesideStateFile(resolve(TASK_GRAPH_PATH), WAVE_GATE_RUNS);
     const manager = new StateManager(TASK_GRAPH_PATH);
     const before = manager.load();
     const authoritativeRunsRoot = before.active_wave_gate?.runsRoot ?? legacyCanonicalRunsRoot;
