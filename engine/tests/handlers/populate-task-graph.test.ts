@@ -22,7 +22,7 @@ import {
   freezeVerificationManifest,
 } from "../../src/core/verification-manifest";
 import { capturedSpecCheck } from "../../src/core/spec-check";
-import { canonicalSpecBeside } from "../fixtures/spec-index-fixture";
+import { CANONICAL_SPEC, canonicalSpecBeside, ownerOfRemaining } from "../fixtures/spec-index-fixture";
 import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
 import { parseDecomposeEnvelope } from "../../src/core/decompose-payload";
 import { artifactDigestOfBytes, sha256Hex } from "../../src/core/digest";
@@ -141,6 +141,30 @@ const REQUIRED_VERIFICATION = Object.freeze({
   new_tests: Object.freeze({ kind: "required" as const }),
 });
 
+/**
+ * A policy that owes no red-then-green, for payloads that exercise something
+ * other than I6: population refuses an I6-owing Task with no test file, or
+ * under a manifest with no affectedRunner (loom#198, Cause 3).
+ */
+const NO_I6_VERIFICATION = Object.freeze({
+  regression: Object.freeze({ kind: "required" as const }),
+  new_tests: Object.freeze({ kind: "waived" as const, reason: "existing-tests-sufficient" as const }),
+});
+
+/** Every Requirement `canonicalSpecBeside` defines: population refuses one no Task completes. */
+const CANONICAL_CLAIMS = Object.freeze(["FR-001", "FR-002", "AS-001", "AS-002"]);
+
+/** The owner Task for every Requirement of `spec` that `claimed` leaves, as a payload list. */
+const ownerList = (spec: string, claimed: readonly string[]): readonly Readonly<Record<string, unknown>>[] => {
+  const owner = ownerOfRemaining(spec, claimed);
+  return owner === null ? [] : [owner];
+};
+
+/** A schema-2 manifest that declares the engine runner an I6-owing roster needs. */
+function runnerManifestDocument() {
+  return { ...manifestDocument(), schemaVersion: 2, affectedRunner: AFFECTED_RUNNER, taskMutationCheck: "off" };
+}
+
 /** A decompose payload whose spec is a canonical specification beside the
  *  plan, so population proves its (empty) trace and reaches the guard under test. */
 function decomposeJson(planFile: string): string {
@@ -150,7 +174,7 @@ function decomposeJson(planFile: string): string {
     plan_title: "t",
     spec_file: specFile,
     plan_file: planFile,
-    tasks: [{ id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [], spec_anchors: [], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION, plan_context: "", file_list: ["src/other.ts"] }],
+    tasks: [{ id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [], spec_anchors: [...CANONICAL_CLAIMS], spec_contributions: [], verification_policy: NO_I6_VERIFICATION, plan_context: "", file_list: ["src/other.ts"] }],
   });
 }
 
@@ -543,6 +567,7 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
     const dir = tempDir();
     const plan = modelFreePlan(dir);
     const statePath = writeState(dir, plan, []);
+    writeManifest(dir, runnerManifestDocument());
     const forged = JSON.stringify({
       spec_trace_version: 2,
       plan_title: "t",
@@ -550,7 +575,7 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
       plan_file: plan,
       tasks: [{
         id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1,
-        depends_on: [], spec_anchors: [], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION, plan_context: "", file_list: ["src/other.ts"],
+        depends_on: [], spec_anchors: [...CANONICAL_CLAIMS], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION, plan_context: "", file_list: ["src/other.ts", "src/other.test.ts"],
         // Forged execution state — must never reach the persisted graph.
         status: "completed",
         review_status: "passed",
@@ -596,7 +621,7 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
       new_tests: { kind: "required" },
     });
     expect(t9.plan_context).toBe("");
-    expect(t9.file_list).toEqual(["src/other.ts"]);
+    expect(t9.file_list).toEqual(["src/other.ts", "src/other.test.ts"]);
     expect(t9.proof?.state).toBe("pending");
     expect(t9.proof?.obligations).toEqual([
       { kind: "task-completed" },
@@ -606,8 +631,9 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
       // with new tests required owes red-then-green (FR-005, INV-6).
       { kind: "red-then-green" },
       { kind: "declared-artifact-changed", artifact: "src/other.ts" },
+      { kind: "declared-artifact-changed", artifact: "src/other.test.ts" },
     ]);
-    expect(t9.spec_anchors).toEqual([]);
+    expect(t9.spec_anchors).toEqual([...CANONICAL_CLAIMS]);
     expect(t9.spec_contributions).toEqual([]);
     expect(after.spec_trace_version).toBe(2);
   });
@@ -680,7 +706,7 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
       plan_file: plan,
       tasks: [{
         id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1,
-        depends_on: [], spec_anchors: [], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION,
+        depends_on: [], spec_anchors: [], spec_contributions: [], verification_policy: NO_I6_VERIFICATION,
       }],
     });
 
@@ -702,7 +728,7 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
       plan_file: plan,
       tasks: [{
         id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1,
-        depends_on: [], spec_anchors: [], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION, file_list: ["src/x.ts", 42],
+        depends_on: [], spec_anchors: [], spec_contributions: [], verification_policy: NO_I6_VERIFICATION, file_list: ["src/x.ts", 42],
       }],
     });
 
@@ -728,20 +754,21 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
           tasks: [
             {
               id: "T1", description: "partial", agent: "code-implementer-agent", wave: 1,
-              depends_on: [], spec_anchors: [], spec_contributions: [anchor], verification_policy: REQUIRED_VERIFICATION,
+              depends_on: [], spec_anchors: [], spec_contributions: [anchor], verification_policy: NO_I6_VERIFICATION,
               plan_context: "", file_list: ["src/partial.ts"], status: "completed",
             },
             {
               id: "T2", description: "complete", agent: "code-implementer-agent", wave: 1,
-              depends_on: [], spec_anchors: [anchor], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION,
+              depends_on: [], spec_anchors: [anchor], spec_contributions: [], verification_policy: NO_I6_VERIFICATION,
               plan_context: "", file_list: ["src/complete.ts"], review_status: "passed",
             },
+            ...ownerList(CANONICAL_SPEC, [anchor]),
           ],
         });
         expect((await populate(payload, [])).kind).toBe("passthrough");
         const after = JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph;
         expect(after.spec_trace_version).toBe(2);
-        expect(authoredTasksOf(after).map(({ spec_anchors, spec_contributions, status, review_status }) => ({
+        expect(authoredTasksOf(after).filter(({ id }) => id === "T1" || id === "T2").map(({ spec_anchors, spec_contributions, status, review_status }) => ({
           spec_anchors, spec_contributions, status, review_status,
         }))).toEqual([
           { spec_anchors: [], spec_contributions: [anchor], status: "pending", review_status: "pending" },
@@ -760,7 +787,7 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
       plan_title: "t",
       spec_file: "spec.md",
       plan_file: plan,
-      tasks: [{ id: "T9", description: "impl", agent: "no-such-agent", wave: 1, depends_on: [], spec_anchors: [], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION, file_list: ["src/x.ts"] }],
+      tasks: [{ id: "T9", description: "impl", agent: "no-such-agent", wave: 1, depends_on: [], spec_anchors: [], spec_contributions: [], verification_policy: NO_I6_VERIFICATION, file_list: ["src/x.ts"] }],
     });
     const result = await populate(badAgent, ["--fix"]);
     expect(result.kind).toBe("error");
@@ -1002,8 +1029,8 @@ describe("populate-task-graph — engine-derived Requirement content hashes", ()
       tasks: [{
         id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [],
         spec_anchors: [...anchors], spec_contributions: [],
-        verification_policy: REQUIRED_VERIFICATION, plan_context: "", file_list: ["src/a.ts"],
-      }],
+        verification_policy: NO_I6_VERIFICATION, plan_context: "", file_list: ["src/a.ts"],
+      }, ...(spec === null ? [] : ownerList(spec, anchors))],
     });
     return { result: await populate(decompose, []), statePath };
   }
@@ -1074,8 +1101,8 @@ describe("populate-task-graph — engine-derived Requirement content hashes", ()
       tasks: [{
         id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [],
         spec_anchors: ["FR-001"], spec_contributions: [], spec_anchor_hashes: { "FR-001": forged },
-        verification_policy: REQUIRED_VERIFICATION, plan_context: "", file_list: ["src/a.ts"],
-      }],
+        verification_policy: NO_I6_VERIFICATION, plan_context: "", file_list: ["src/a.ts"],
+      }, ...ownerList(canonicalSpec, ["FR-001"])],
     }), []);
     expect(result.kind).toBe("passthrough");
     const graph = JSON.parse(stateBytes(statePath)) as TaskGraph;
@@ -1134,8 +1161,8 @@ describe("populate-task-graph — one spec_file precedence", () => {
       plan_file: plan,
       tasks: [{
         id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [],
-        spec_anchors: ["FR-001"], spec_contributions: [],
-        verification_policy: REQUIRED_VERIFICATION, plan_context: "", file_list: ["src/a.ts"],
+        spec_anchors: ["FR-001", "AS-001"], spec_contributions: [],
+        verification_policy: NO_I6_VERIFICATION, plan_context: "", file_list: ["src/a.ts"],
       }],
     });
 
@@ -1191,14 +1218,15 @@ describe("populate-task-graph — Acceptance Contracts", () => {
     tasks: [
       {
         id: "T1", description: "contract", agent: "code-implementer-agent", wave: 1, depends_on: [],
-        spec_anchors: [], spec_contributions: ["AS-001"], verification_policy: REQUIRED_VERIFICATION, plan_context: "",
+        spec_anchors: [], spec_contributions: ["AS-001"], verification_policy: NO_I6_VERIFICATION, plan_context: "",
         file_list: ["src/payload-contract.ts", "tests/payload.acceptance.test.ts", "src/payload.ts"],
       },
       {
         id: "T2", description: "turn it green", agent: "code-implementer-agent", wave: 2, depends_on: ["T1"],
-        spec_anchors: ["AS-001"], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION, plan_context: "",
+        spec_anchors: ["AS-001"], spec_contributions: [], verification_policy: NO_I6_VERIFICATION, plan_context: "",
         file_list: ["src/payload-impl.ts"],
       },
+      ...ownerList(CANONICAL_SPEC, ["AS-001"]).map((owner) => ({ ...owner, wave: 2 })),
     ],
   });
 
@@ -1324,9 +1352,9 @@ describe("populate-task-graph — owned Invariants reach population", () => {
     plan_file: planFile,
     tasks: [{
       id: "T1", description: "fees", agent: "code-implementer-agent", wave: 1, depends_on: [],
-      spec_anchors: [], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION, plan_context: "",
+      spec_anchors: [], spec_contributions: [], verification_policy: NO_I6_VERIFICATION, plan_context: "",
       file_list: ["src/fees.ts", "tests/fees.matrix.test.ts"],
-    }],
+    }, ...ownerList(CANONICAL_SPEC, [])],
   });
 
   it("forwards the plan's owned Invariants: a non-exempt one without a frozen affectedRunner is refused, writing nothing", async () => {

@@ -63,6 +63,8 @@ import { parseEvidenceLine } from "../../src/machine/evidence";
 import type { Task, TaskGraph, TaskTestResult } from "../../src/types";
 import { GREEN_RUN, RED_RUN, rawTestRun, type RawEvent } from "../fixtures/raw-test-run";
 import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
+import { agentCommandGraph, i6RunnerManifest } from "../fixtures/i6-runner-manifest";
+import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
 
 // --- Repository, files and runs ---
 
@@ -185,12 +187,13 @@ function populate(tasks: readonly AuthoredTask[], manifest: FrozenVerificationMa
     },
   );
   if (!populated.ok) throw new Error(`fixture population refused: ${populated.error.message}`);
-  return populated.value.state;
+  // These scenarios pin how settlement judges agent-command facts: a graph that admits them.
+  return agentCommandGraph(populated.value.state);
 }
 
 /** Freeze an operator schema-2 manifest declaring a test-file pattern. */
 function operatorPatternManifest(suffixes: readonly string[]): FrozenVerificationManifest {
-  const source = { schemaVersion: 2, kind: "loom-verification-manifest", checks: [], testFileSuffixes: suffixes };
+  const source = { schemaVersion: 2, kind: "loom-verification-manifest", checks: [], testFileSuffixes: suffixes, affectedRunner: AFFECTED_RUNNER, taskMutationCheck: "off" };
   const frozen = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify(source)));
   expect(frozen.ok, frozen.ok ? "" : frozen.error.errors.join("; ")).toBe(true);
   if (!frozen.ok) throw new Error(frozen.error.errors.join("; "));
@@ -354,7 +357,17 @@ const NON_CLAIMANT_FILES = [LEDGER_TEST, LEDGER_IMPL] as const;
 
 /** An I6-era graph with one non-claimant Task T1 over `fileList`. */
 const i6Graph = (fileList: readonly string[] = NON_CLAIMANT_FILES): TaskGraph =>
-  populate([authoredTask("T1", fileList)], defaultVerificationManifest());
+  populate([authoredTask("T1", fileList)], i6RunnerManifest());
+
+/**
+ * An I6-owing T1 whose file_list holds no test file. Population refuses that
+ * roster now (loom#198, Cause 3), so this is a graph populated before it did:
+ * the owing Proof was frozen, then the file list is the one settlement reads.
+ */
+const graphWithoutTestFile = (fileList: readonly string[]): TaskGraph => {
+  const graph = i6Graph();
+  return { ...graph, tasks: graph.tasks.map((task) => (task.id === "T1" ? { ...task, file_list: [...fileList] } : task)) };
+};
 
 const at = (index: number, command: string): RunRef => ({ index, command });
 
@@ -371,7 +384,7 @@ describe("I6 obligation (CT-1)", () => {
       authoredTask("T3", ["engine/tests/core/audit.test.ts", "engine/src/core/audit.ts"], "existing-tests-sufficient"),
     ];
 
-    const current = populate(tasks, defaultVerificationManifest());
+    const current = populate(tasks, i6RunnerManifest());
     expect(obligationKinds(current, "T1")).toContain("red-then-green");
     expect(obligationKinds(current, "T2")).not.toContain("red-then-green");
     expect(obligationKinds(current, "T3")).not.toContain("red-then-green");
@@ -506,7 +519,7 @@ describe("I6 obligation (CT-1)", () => {
     const graph = populate([
       authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL]),
       authoredTask("T2", [REPLAY_TEST, "engine/src/core/replay.ts"], "claimant"),
-    ], defaultVerificationManifest());
+    ], i6RunnerManifest());
     expect(obligationKinds(graph, "T1")).toContain("red-then-green");
     expect(obligationKinds(graph, "T2")).not.toContain("red-then-green");
 
@@ -519,8 +532,8 @@ describe("I6 obligation (CT-1)", () => {
     expect(gapOf(settled)).toBeUndefined();
   });
 
-  it("AS-013: a Task owing I6 whose file_list matches no test file fails proof saying it declares no test files", () => {
-    const settled = settle(i6Graph([LEDGER_IMPL, LEDGER_TYPES]), "T1", ledger([
+  it("AS-013: a Task owing I6 whose file_list matches no test file (a graph populated before population refused one) fails proof saying it declares no test files", () => {
+    const settled = settle(graphWithoutTestFile([LEDGER_IMPL, LEDGER_TYPES]), "T1", ledger([
       run([failing(REPORTED_LEDGER_TEST)]),
       write(LEDGER_IMPL),
       green(),
@@ -684,7 +697,8 @@ describe("I6 ordering and trust rules (CT-1)", () => {
       },
     ];
 
-    const named = fixtures.map(({ files, events }) => gapOf(settle(i6Graph(files), "T1", ledger(events))));
+    const named = fixtures.map(({ files, events, gap }) =>
+      gapOf(settle(gap.kind === "no-test-files" ? graphWithoutTestFile(files) : i6Graph(files), "T1", ledger(events))));
 
     expect(named).toEqual(fixtures.map(({ gap }) => gap));
     expect(new Set(named.map((gap) => JSON.stringify(gap))).size).toBe(fixtures.length);
@@ -694,7 +708,7 @@ describe("I6 ordering and trust rules (CT-1)", () => {
     const graph = populate([
       authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL]),
       authoredTask("T2", [REPLAY_TEST, "engine/src/core/replay.ts"], "claimant"),
-    ], defaultVerificationManifest());
+    ], i6RunnerManifest());
     const noRed = ledger([write("engine/src/core/replay.ts"), write(REPLAY_TEST), green(REPORTED_REPLAY_TEST)]);
 
     expectGap(settle(graph, "T1", ledger([write(LEDGER_IMPL), write(LEDGER_TEST), green()])), {
@@ -731,7 +745,7 @@ describe("I6 ordering and trust rules (CT-1)", () => {
 
   it("FR-014: without a declared pattern the engine default suffixes classify the file_list frozen at population", () => {
     const spec = "engine/tests/core/ledger.spec.ts";
-    const graph = populate([authoredTask("T1", [spec, LEDGER_IMPL, LEDGER_FIXTURES])], defaultVerificationManifest());
+    const graph = populate([authoredTask("T1", [spec, LEDGER_IMPL, LEDGER_FIXTURES])], i6RunnerManifest());
 
     const settled = settle(graph, "T1", ledger([
       write(spec),

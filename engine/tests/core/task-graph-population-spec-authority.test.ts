@@ -31,7 +31,9 @@ const task = (id: string, anchors: readonly string[], contributions: readonly st
   depends_on: [],
   spec_anchors: [...anchors],
   spec_contributions: [...contributions],
-  verification_policy: { regression: { kind: "required" }, new_tests: { kind: "required" } },
+  // These scenarios pin the Requirement trace, not I6: a Task that owes no
+  // red-then-green needs no test file or engine runner at population.
+  verification_policy: { regression: { kind: "required" }, new_tests: { kind: "waived", reason: "existing-tests-sufficient" } },
   file_list: [`src/${id}.ts`],
 });
 
@@ -64,7 +66,8 @@ const UNPARSED: SpecIndexAvailability = {
 
 describe("populateTaskGraph — Spec Index authority", () => {
   it("populates a trace every id of which the Spec Index defines", () => {
-    expect(populate([task("T1", ["FR-001", "AS-001"], ["FR-002"])], indexedSpec("spec.md"), "spec.md")).toMatchObject({ ok: true });
+    expect(populate([task("T1", ["FR-001", "AS-001"], ["FR-002"]), task("T2", ["FR-002", "AS-002"])], indexedSpec("spec.md"), "spec.md"))
+      .toMatchObject({ ok: true });
   });
 
   it("refuses ids the Spec Index does not define as completable, naming each edge", () => {

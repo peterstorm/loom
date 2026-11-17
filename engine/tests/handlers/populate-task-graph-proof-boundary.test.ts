@@ -78,8 +78,10 @@ const decompose = (planFile: string): string => JSON.stringify({
   plan_file: planFile,
   tasks: [{
     id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [],
-    spec_anchors: [], spec_contributions: [],
-    verification_policy: { regression: { kind: "required" }, new_tests: { kind: "required" } },
+    // Owns every canonical Requirement and owes no red-then-green, so population
+    // reaches the proof boundary under test (loom#198, Cause 3).
+    spec_anchors: ["FR-001", "FR-002", "AS-001", "AS-002"], spec_contributions: [],
+    verification_policy: { regression: { kind: "required" }, new_tests: { kind: "waived", reason: "existing-tests-sufficient" } },
     plan_context: "", file_list: ["src/other.ts"],
   }],
 });

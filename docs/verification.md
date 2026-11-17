@@ -50,7 +50,7 @@ This is Loom's own manifest, with explicit values for the three optional setting
 | `kind` | 1, 2 | Exactly `"loom-verification-manifest"`. |
 | `checks` | 1, 2 | The project's Wave checks; `[]` is allowed. Each check has exactly `id`, `scope` (`"wave"`), `executable`, `args`, `cwd`, `timeoutMs` (an integer from 1 through 86400000) and `report`. Duplicate ids and the reserved `loom:` prefix are refused. `report` is `{"kind":"not-required"}`, or `{"kind":"required-file","path":…}` with the path beneath `.loom/completion-reports/`. A check that critical remediation may select must use `required-file` ([Enrolling a critical-repair check](#enrolling-a-critical-repair-check)). |
 | `acceptanceRunner` | 2 | Optional. The runner of the [Acceptance Stop Check](#acceptance-stop-check-claimants): exactly `executable`, `args`, `cwd`, `timeoutMs` and `report`. |
-| `affectedRunner` | 2 | Optional, same form. The runner of the [Affected-Test Stop Check](#affected-test-stop-check), of the [Task mutation check](#task-mutation-check) and of [owner verification](#owner-verification-blocks-a-wave-gate)'s mutation runs. |
+| `affectedRunner` | 2 | Optional, same form, but required before any Task may owe red-then-green (see [Population refuses an unprovable roster](#population-refuses-an-unprovable-roster)). The runner of `helper run-tests` (engine-run test evidence), of the [Affected-Test Stop Check](#affected-test-stop-check), of the [Task mutation check](#task-mutation-check) and of [owner verification](#owner-verification-blocks-a-wave-gate)'s mutation runs. |
 | `testFileSuffixes` | 2 | Optional. A non-empty list of distinct suffixes, none containing a path separator. Without it, the freeze records the engine default (`.test.ts`, `.spec.ts`, `.test.tsx`, `.spec.tsx`) as `testFiles: { source: "engine-default", … }`. The same classification decides I6's test and implementation files, the Distill Scope and the files the Task mutation check mutates. |
 | `distillPass` | 2 | Optional, `"on"` or `"off"`; absent means on. Switches [the distill pass](#the-distill-pass-distill-task). |
 | `taskMutationCheck` | 2 | Optional, `"on"` or `"off"`; absent means on. Switches the [Task mutation check](#task-mutation-check). |
@@ -92,6 +92,22 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper write-verification-manifest --replace <
 The `helper write-verification-manifest` operation requires an existing loadable TaskGraph whose Task roster is empty. It compares authority, not bytes: a manifest that parses to the installed authority is an unchanged replay, however it is formatted. It refuses a different (or invalid) existing manifest unless called with `--replace`, which stages and atomically renames the new manifest into place, and it refuses every change after Task population, with or without the flag ([ADR-0065](adr/ADR-0065-manifest-helper-compares-authority-and-replaces-before-population.md)). Standalone remediation has no TaskGraph requirement; the helper's empty-TaskGraph requirement is a separate configuration-installation constraint.
 
 **A manifest-only bootstrap.** The helper needs the empty TaskGraph that `init-state` creates; it is not a writer for arbitrary paths. An operator who only wants to install or inspect a manifest runs `init-state`, then the helper, then the sanctioned `cleanup-state`. Never manufacture Tasks or Waves, or hand-write state, to satisfy it. Do not tear down an unrelated active graph. This metadata bootstrap installs source configuration only; it creates no Task/Wave verification authority.
+
+### Declaring the affected runner
+
+A runner is data, never Loom code: any runner works that writes a JUnit XML or Vitest/Jest JSON report with per-file results to the declared `report.path`, with `{files}` standing for the test files it is handed. Population refuses a roster in which some Task owes red-then-green under a manifest with no `affectedRunner`, because no engine run could prove it (loom#198, Cause 3). The refusal prints the runner to declare.
+
+`helper suggest-affected-runner` prints the same suggestion on its own. It reads the repository's `package.json` (the `test` script first, then the installed runner packages) and checks for a Bun lockfile, then prints a ready-to-paste `affectedRunner` for the detected preset, or the generic shape when none is detected. `--preset <id>` prints one preset as is. The presets (`core/runner-presets.ts`) are `vitest`, `jest`, `mocha`, `mocha-ts-node`, `bun` and `node-test`; each passes the command policy above. A runner missing from the list is one row there, or the generic shape written by hand.
+
+### Population refuses an unprovable roster
+
+`populate-task-graph` refuses, before any attempt is spent (loom#198, Cause 3):
+
+- a Task that owes red-then-green whose `file_list` holds no file the frozen classification calls a test file, which settlement could only fail with `no-test-files`;
+- Tasks that owe red-then-green under a manifest with no `affectedRunner` ([Declaring the affected runner](#declaring-the-affected-runner));
+- a completable Requirement (FR or AS) that no Task names in `spec_anchors`, which every Wave Gate's spec-check would report as having no planned completion owner. A contribution does not own a Requirement.
+
+`helper run-tests` likewise refuses a named file the frozen classification does not call a test file.
 
 ## Enrolling a critical-repair check
 

@@ -43,6 +43,9 @@ import type { CanonicalRepositoryRoot } from "../../utils/workspace-digest";
 import { describeCause } from "../../utils/describe-cause";
 import { PRODUCTION_STOP_CHECK_PORTS, type StopCheckShellPorts } from "../subagent-stop/acceptance-stop-check";
 import { argumentValues, unconsumedValueArguments } from "./cli-args";
+import { frozenRedThenGreenEra } from "../../core/proof-obligations";
+import { isTestFileBySuffixes } from "../../core/test-file-classification";
+import type { FrozenVerificationManifest } from "../../core/verification-manifest";
 
 const FLAGS: ReadonlySet<string> = new Set(["--files"]);
 
@@ -96,6 +99,16 @@ function parseFilesArgument(args: readonly string[]): Readonly<{ ok: true; files
   }
   if (new Set(files).size !== files.length) return refuse("names a file more than once");
   return { ok: true, files };
+}
+
+/**
+ * The named files the frozen Test-File Classification does not call a test
+ * file. A run over source files proves nothing about a Task's tests; a graph
+ * frozen without a classification has no rule to apply, so nothing is refused.
+ */
+function nonTestFiles(manifest: FrozenVerificationManifest, files: readonly string[]): readonly string[] {
+  const era = frozenRedThenGreenEra(manifest);
+  return era.kind === "owed-if-new-tests" ? files.filter((file) => !isTestFileBySuffixes(file, era.testFiles.suffixes)) : [];
 }
 
 /** Wait for the runner lock, within `RUNNER_LOCK_WAIT_MS`. */
@@ -199,6 +212,10 @@ export function createRunTestsHandler(ports: RunTestsPorts = PRODUCTION_PORTS): 
     const runnable = engineRunnable(loaded.graph.verification_manifest);
     if (!runnable.ok) return { kind: "error", message: `run-tests: ${runnable.error}; there is no engine runner to run` };
     const { manifest, runner } = runnable.value;
+    const notTests = nonTestFiles(manifest, parsed.files);
+    if (notTests.length > 0) {
+      return { kind: "error", message: `run-tests: ${notTests.join(", ")} ${notTests.length === 1 ? "is" : "are"} not a test file under the frozen test-file suffixes; name the Task's test files` };
+    }
     const command = affectedRunnerCheck(runner, parsed.files);
     if (!command.ok) return { kind: "error", message: `run-tests: ${command.error.errors.join("; ")}` };
     const root = ports.repositoryRoot(loaded.statePath);

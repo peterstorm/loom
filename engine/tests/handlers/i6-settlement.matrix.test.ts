@@ -97,6 +97,8 @@ import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdic
 import { GREEN_RUN, RED_RUN, rawTestRun, type RawEvent } from "../fixtures/raw-test-run";
 import { mutationManifest } from "../fixtures/task-mutation";
 import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
+import { agentCommandGraph, i6RunnerManifest } from "../fixtures/i6-runner-manifest";
+import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
 
 // --- Identities ---
 
@@ -188,7 +190,12 @@ function authoredTask(id: string, fileList: readonly string[], newTests: NewTest
   };
 }
 
-function populate(tasks: readonly AuthoredTask[], manifest: FrozenVerificationManifest | undefined): TaskGraph {
+/**
+ * A populated graph. By default it admits agent commands (as a graph frozen
+ * before engine-run evidence), since these scenarios pin how the judge reads
+ * agent-command facts; `frozen` keeps the test-evidence mode population froze.
+ */
+function populate(tasks: readonly AuthoredTask[], manifest: FrozenVerificationManifest | undefined, evidence: "agent-command" | "frozen" = "agent-command"): TaskGraph {
   const roster = parseAuthoredTaskRoster(tasks);
   if (!roster.ok) throw new Error(`fixture roster refused: ${roster.error}`);
   const populated = populateTaskGraph(
@@ -197,7 +204,7 @@ function populate(tasks: readonly AuthoredTask[], manifest: FrozenVerificationMa
       planTitle: "Ledger plan",
       validatedPlanFile: "plan.md",
       tasks: roster.value,
-      verificationManifest: manifest ?? defaultVerificationManifest(),
+      verificationManifest: manifest ?? i6RunnerManifest(),
       specIndex: { kind: "unavailable", reason: { kind: "no-spec-file" } },
       observedSpecFile: null,
       force: false,
@@ -207,11 +214,11 @@ function populate(tasks: readonly AuthoredTask[], manifest: FrozenVerificationMa
     },
   );
   if (!populated.ok) throw new Error(`fixture population refused: ${populated.error.message}`);
-  return populated.value.state;
+  return evidence === "frozen" ? populated.value.state : agentCommandGraph(populated.value.state);
 }
 
 function operatorPatternManifest(suffixes: readonly string[]): FrozenVerificationManifest {
-  const source = { schemaVersion: 2, kind: "loom-verification-manifest", checks: [], testFileSuffixes: suffixes };
+  const source = { schemaVersion: 2, kind: "loom-verification-manifest", checks: [], testFileSuffixes: suffixes, affectedRunner: AFFECTED_RUNNER, taskMutationCheck: "off" };
   const frozen = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify(source)));
   if (!frozen.ok) throw new Error(frozen.error.errors.join("; "));
   return frozen.value;
@@ -385,7 +392,7 @@ function expectShownOnBoth(
 }
 
 const i6Graph = (fileList: readonly string[] = [LEDGER_TEST, LEDGER_IMPL]): TaskGraph =>
-  populate([authoredTask("T1", fileList)], defaultVerificationManifest());
+  populate([authoredTask("T1", fileList)], i6RunnerManifest());
 
 /** T1 with a Task-level artifact baseline: `created` files were missing at it, every other declared file present. */
 function withArtifactBaseline(graph: TaskGraph, created: readonly string[]): TaskGraph {
@@ -459,8 +466,8 @@ describe("I6 settlement matrix: Claude Code and Pi settle the same epoch facts i
       { kind: "red-missing", untrustedOnly: true });
   });
 
-  it("AS-013: a file_list with no test file names no-test-files on both harnesses", () => {
-    expectGapOnBoth(i6Graph([LEDGER_IMPL, LEDGER_TYPES]), [red(), write(LEDGER_IMPL), green()], { kind: "no-test-files" });
+  it("AS-013: a file_list with no test file is refused at population, before any attempt can be spent on it", () => {
+    expect(() => i6Graph([LEDGER_IMPL, LEDGER_TYPES])).toThrow(/requires new tests but its file_list holds no test file/);
   });
 
   it("AS-018: under a declared pattern a JVM Task proves I6 identically on both harnesses", () => {
@@ -489,7 +496,7 @@ describe("I6 settlement matrix: Claude Code and Pi settle the same epoch facts i
     const graph = populate([
       authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL]),
       authoredTask("T2", [REPLAY_TEST, "engine/src/core/replay.ts"], "claimant"),
-    ], defaultVerificationManifest());
+    ], i6RunnerManifest());
     for (const transport of ["Claude", "Pi"] as const) {
       const settled = settle(graph, "T2", { kind: "unreadable", reason: "ledger file is corrupt" }, { transport });
       expect(transitionOf(settled)).toBe("implemented");
@@ -624,7 +631,7 @@ describe("redThenGreenDuty: the frozen Proof decides, and every disagreement is 
   });
 
   it("reads not-owed from a frozen Proof without red-then-green, whatever the era", () => {
-    const claimant = populate([authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL], "claimant")], defaultVerificationManifest());
+    const claimant = populate([authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL], "claimant")], i6RunnerManifest());
     expect(redThenGreenDuty(taskOf(claimant, "T1"), claimant.verification_manifest)).toEqual({ kind: "not-owed" });
     const preFeature = populate([authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL])], preFeatureManifest());
     expect(redThenGreenDuty(taskOf(preFeature, "T1"), preFeature.verification_manifest)).toEqual({ kind: "not-owed" });
@@ -649,7 +656,7 @@ describe("redThenGreenDuty: the frozen Proof decides, and every disagreement is 
   it("reads a proof-less Task as not owed when its era or its waiver owes no I6", () => {
     const preFeature = populate([authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL])], preFeatureManifest());
     expect(redThenGreenDuty(withoutProof(taskOf(preFeature, "T1")), preFeature.verification_manifest)).toEqual({ kind: "not-owed" });
-    const claimant = populate([authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL], "claimant")], defaultVerificationManifest());
+    const claimant = populate([authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL], "claimant")], i6RunnerManifest());
     expect(redThenGreenDuty(withoutProof(taskOf(claimant, "T1")), claimant.verification_manifest)).toEqual({ kind: "not-owed" });
   });
 
@@ -810,13 +817,14 @@ describe("the implementation brief states I6 up front and names the repair on re
     const graph = populate([
       authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL]),
       authoredTask("T2", [REPLAY_TEST, "engine/src/core/replay.ts"], "claimant"),
-    ], defaultVerificationManifest());
+    ], i6RunnerManifest());
     expect(renderedPrompt(briefInput(graph, taskOf(graph, "T2")))).not.toContain("I6 red-then-green");
   });
 
-  it("AS-013: an owing Task with no test file is told so before it starts", () => {
-    const graph = i6Graph([LEDGER_IMPL, LEDGER_TYPES]);
-    const section = i6Section(renderedPrompt(briefInput(graph, taskOf(graph, "T1"))));
+  it("AS-013: an owing Task with no test file, on a graph populated before population refused one, is told so before it starts", () => {
+    const graph = i6Graph();
+    const task = { ...taskOf(graph, "T1"), file_list: [LEDGER_IMPL, LEDGER_TYPES] };
+    const section = i6Section(renderedPrompt(briefInput(graph, task)));
     expect(section).toContain("Test files:\nNone — your file list matches no test file");
     expect(section).toMatch(/no-test-files/);
   });
@@ -1030,7 +1038,7 @@ describe("update-task-status hands settlement the agent's own epoch ledger (clau
     process.env.CLAUDE_PROJECT_DIR = repository;
     delete process.env.LOOM_STATE_PATH;
 
-    const graph: TaskGraph = { ...populate([authoredTask("T1", [TEST_FILE, IMPL_FILE])], defaultVerificationManifest()), current_phase: "execute" };
+    const graph: TaskGraph = { ...populate([authoredTask("T1", [TEST_FILE, IMPL_FILE])], i6RunnerManifest()), current_phase: "execute" };
     expect(taskOf(graph, "T1").proof?.obligations.map(({ kind }) => kind)).toContain("red-then-green");
     writeFileSync(statePath, JSON.stringify(graph));
     const registered = await registerTaskExecutionBatch([{
@@ -1114,7 +1122,7 @@ describe("update-task-status hands settlement the agent's own epoch ledger (clau
 
 describe("I6 settlement in an engine-run graph (loom#198)", () => {
   const manifest = mutationManifest();
-  const engineGraph = (): TaskGraph => populate([authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL])], manifest);
+  const engineGraph = (): TaskGraph => populate([authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL])], manifest, "frozen");
   const engineRun = (event: RawEvent): RawEvent =>
     ({ ...event, origin: { kind: "engine-run", repositoryRoot: ROOT, manifestDigest: manifest.manifestDigest } });
 

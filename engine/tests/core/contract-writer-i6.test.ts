@@ -39,11 +39,13 @@ import { parseTaskGraph } from "../../src/state-manager";
 import type { PlanContract, Task, TaskGraph } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { withoutRedThenGreen, withRedThenGreen } from "../fixtures/red-then-green-proof";
-import { indexedSpec } from "../fixtures/spec-index-fixture";
+import { indexedSpec, specDefining } from "../fixtures/spec-index-fixture";
 import { briefOwnership } from "../fixtures/owner-obligation";
 import { unobservedSkeletons } from "../fixtures/frozen-signatures";
 import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { trustedPassEvidence } from "../fixtures/task-lifecycle";
+import { agentCommandGraph, i6RunnerManifest } from "../fixtures/i6-runner-manifest";
+import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
 
 // --- Fixtures ---
 
@@ -87,7 +89,7 @@ const ROSTER: readonly AuthoredTask[] = [
       new_tests: { kind: "waived", reason: "covered-by-acceptance-contract" },
     },
   }),
-  task("T3", 1, { file_list: ["src/T3.ts", "tests/T3.test.ts"] }),
+  task("T3", 1, { file_list: ["src/T3.ts", "tests/T3.test.ts"], spec_anchors: ["AS-001"] }),
 ];
 
 function populated(): TaskGraph {
@@ -99,8 +101,8 @@ function populated(): TaskGraph {
   }, {
     planTitle: "contract writers", validatedPlanFile: "plan.md", tasks: roster.value,
     // No manifest file: the I6-era default every post-feature population freezes.
-    verificationManifest: defaultVerificationManifest(),
-    specIndex: indexedSpec("spec.md"), observedSpecFile: "spec.md",
+    verificationManifest: i6RunnerManifest(),
+    specIndex: indexedSpec("spec.md", specDefining(["FR-001"], ["AS-001"])), observedSpecFile: "spec.md",
     force: false, proofBoundary: { kind: "absent", cause: "fixture" }, contracts: [CONTRACT], invariants: [],
   });
   if (!result.ok) throw new Error(result.error.message);

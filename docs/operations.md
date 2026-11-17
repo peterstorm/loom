@@ -226,7 +226,7 @@ A qualifying run is a ledger `TestRun` with an exit code and a parsed structured
 
 A failure reads `proof:red-then-green-unproven:<gap>` in the settlement line and in the retry receipt. Each gap points to a likely cause:
 
-- `no-test-files`: the `file_list` matches no frozen test suffix. Re-scope the Task, or declare `testFileSuffixes` in the manifest before the next population.
+- `no-test-files`: the `file_list` matches no frozen test suffix. Population now refuses such a roster ([Population refuses an unprovable roster](verification.md#population-refuses-an-unprovable-roster)), so this gap appears only on a graph populated before that check. Re-scope the Task, or declare `testFileSuffixes` in the manifest before the next population.
 - `implementation-write-missing`: the ledger holds no write to a non-test `file_list` entry. Either the agent wrote only through an unlogged path, such as an interpreter or a generator, or it wrote nothing.
 - `red-missing` or `green-missing` with `untrustedOnly: true` in a TaskGraph with engine-run test evidence (`test_evidence`, see [Engine-run test evidence](verification.md#red-then-green-i6-what-a-run-must-be)): the agent ran its own test command instead of the `helper run-tests` call its brief prints. Re-dispatch with a note naming that call.
 - `red-missing` or `green-missing` with `untrustedOnly: true`: tests ran, but no run was qualifying. Usual causes are a chained, piped or redirected command, a missing report option, or Pi-structured evidence with no ledger run. On Claude Code a failing run reaches the ledger only through the `PostToolUseFailure` hook; a runtime whose `hooks/hooks.json` predates that wiring records no red at all.

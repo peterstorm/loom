@@ -39,6 +39,8 @@ import { frozenRedThenGreenEra, redThenGreenEra } from "../../src/core/proof-obl
 import type { TaskGraph } from "../../src/types";
 import { protectedGraphFixture } from "../fixtures/task-lifecycle";
 import type { Equal } from "../fixtures/type-equality";
+import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
+import { operatorManifest } from "../fixtures/i6-runner-manifest";
 
 const parsedSpec = parseSpec(`# Feature: Era
 
@@ -81,13 +83,14 @@ const authoredTask: AuthoredTask = Object.freeze({
   agent: "code-implementer-agent",
   wave: 1,
   depends_on: Object.freeze([]),
-  spec_anchors: Object.freeze(["FR-001"]),
+  spec_anchors: Object.freeze(["FR-001", "AS-001"]),
   spec_contributions: Object.freeze([]),
   verification_policy: Object.freeze({
     regression: Object.freeze({ kind: "required" as const }),
     new_tests: Object.freeze({ kind: "required" as const }),
   }),
-  file_list: Object.freeze(["src/ledger.ts", "tests/ledger.test.ts"]),
+  // One test file under each classification the rows freeze.
+  file_list: Object.freeze(["src/ledger.ts", "tests/ledger.test.ts", "tests/ledger.spec.ts"]),
 });
 
 const ROSTER = required(parseAuthoredTaskRoster([authoredTask]), "roster");
@@ -120,14 +123,7 @@ function populated(verificationManifest: FrozenVerificationManifest): TaskGraph 
   return protectedGraphFixture(JSON.parse(JSON.stringify(result.value.state)));
 }
 
-/** The `.loom/verification-manifest.json` bytes, frozen as population freezes them. */
-function fromSource(document: Readonly<Record<string, unknown>>): FrozenVerificationManifest {
-  const frozen = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
-    kind: "loom-verification-manifest", checks: [], ...document,
-  })));
-  if (!frozen.ok) throw new Error(frozen.error.errors.join("; "));
-  return frozen.value;
-}
+const fromSource = operatorManifest;
 
 type EraRow = Readonly<{ row: string; manifest: () => FrozenVerificationManifest; testFiles: FrozenTestFiles }>;
 
@@ -140,16 +136,6 @@ const POST_FEATURE_ROWS: readonly EraRow[] = [
   {
     row: "(b) an operator schema-2 manifest without testFileSuffixes",
     manifest: () => fromSource({ schemaVersion: 2 }),
-    testFiles: ENGINE_DEFAULT_TEST_FILES,
-  },
-  {
-    row: "(c) an operator schema-1 manifest",
-    manifest: () => fromSource({ schemaVersion: 1 }),
-    testFiles: ENGINE_DEFAULT_TEST_FILES,
-  },
-  {
-    row: "(d) no manifest file (ENOENT freezes defaultVerificationManifest())",
-    manifest: () => defaultVerificationManifest(),
     testFiles: ENGINE_DEFAULT_TEST_FILES,
   },
 ];
@@ -182,6 +168,22 @@ describe("INV-6: every post-feature freeze path carries testFiles", () => {
 
     expect(frozenRedThenGreenEra(graph.verification_manifest)).toEqual({ kind: "owed-if-new-tests", testFiles });
     expect(redThenGreenEra(graph.verification_manifest)).toBe("owed-if-new-tests");
+  });
+});
+
+describe("INV-6: freezes that declare no affectedRunner", () => {
+  it.each([
+    ["an operator schema-1 manifest", () => fromSource({ schemaVersion: 1 })],
+    ["no manifest file (ENOENT freezes defaultVerificationManifest())", () => defaultVerificationManifest()],
+  ] as const)("FR-014: %s carries the engine default classification", (_label, manifest) => {
+    expect(frozenRedThenGreenEra(manifest())).toEqual({ kind: "owed-if-new-tests", testFiles: ENGINE_DEFAULT_TEST_FILES });
+  });
+
+  it.each([
+    ["an operator schema-1 manifest", () => fromSource({ schemaVersion: 1 })],
+    ["no manifest file", () => defaultVerificationManifest()],
+  ] as const)("loom#198: %s cannot populate an I6-owing roster: it declares no engine runner", (_label, manifest) => {
+    expect(() => populated(manifest())).toThrow(/declares no affectedRunner/);
   });
 });
 

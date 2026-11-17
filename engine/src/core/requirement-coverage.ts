@@ -338,6 +338,21 @@ function completedDriftOf(
     .exhaustive();
 }
 
+/** The ids of `entries` no claim names, in index order: the one unclaimed rule. */
+const unclaimedEntries = <F extends "FR" | "AS">(entries: readonly SpecEntry<F>[], claimed: ReadonlySet<string>): readonly SpecEntryId<F>[] =>
+  Object.freeze(entries.filter(({ id }) => !claimed.has(id)).map(({ id }) => id));
+
+/**
+ * The FRs, then the Acceptance Scenarios, that no Task claims as its
+ * completion (loom#198, Cause 3): the "no planned completion owner" the Wave
+ * Gate's coverage projection reports, decided at population instead.
+ * Contributions do not own a Requirement.
+ */
+export function unownedRequirements(index: ParsedSpec, completionClaims: Iterable<string>): readonly string[] {
+  const claimed = new Set(completionClaims);
+  return Object.freeze([...unclaimedEntries(index.frs, claimed), ...unclaimedEntries(index.scenarios, claimed)]);
+}
+
 /**
  * The sole Requirement Coverage Projection derivation.
  *
@@ -373,7 +388,7 @@ export function projectRequirementCoverage(
     }
   }
   const unclaimedOf = <F extends "FR" | "AS">(entries: readonly SpecEntry<F>[]): readonly SpecEntryId<F>[] =>
-    Object.freeze(entries.filter(({ id }) => !claimedAnywhere.has(id)).map(({ id }) => id));
+    unclaimedEntries(entries, claimedAnywhere);
   return Object.freeze({
     kind: "projected",
     rows: Object.freeze(rows),

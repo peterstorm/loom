@@ -24,7 +24,9 @@ import {
   redThenGreenScope,
   taskRedThenGreenEra,
   type RedThenGreenEra,
+  type RedThenGreenScope,
 } from "./proof-obligations";
+import { renderTaskScopeProblem, rosterScopeProblems } from "./task-scope-rules";
 import { taskArtifactExpectation } from "./task-artifact-expectation";
 import {
   ACCEPTANCE_RED_WINDOW,
@@ -41,6 +43,7 @@ import {
   specIndexObservationOf,
   specIndexPath,
   specIndexUnavailableMessage,
+  unownedRequirements,
   unprovenRequirementTrace,
   type SpecIndexAvailability,
 } from "./requirement-coverage";
@@ -175,7 +178,9 @@ export type TaskGraphPopulationError = Readonly<{
     | "invalid-contracts"
     | "invalid-owner-obligations"
     | "owner-verification-runner-missing"
-    | "invalid-export-bindings";
+    | "invalid-export-bindings"
+    | "unprovable-task-scope"
+    | "unowned-requirement";
   message: string;
 }>;
 
@@ -272,6 +277,33 @@ function ownerRunnerRefusal(
           "which runs through the frozen manifest's affectedRunner, and the verification manifest declares none. " +
           "Install .loom/verification-manifest.json with an \"affectedRunner\" (schemaVersion 2), or give each such " +
           "Invariant a reasoned **Mutation exemption:**, then re-run populate-task-graph.",
+      );
+}
+
+/**
+ * The roster's evidence scope, checked before any attempt is spent (loom#198,
+ * Cause 3): every I6-owing Task declares a test file and has an engine runner
+ * to prove it with, and every completable Requirement has a completion owner.
+ * Each used to surface only at settlement or at a Wave Gate's spec-check.
+ */
+function taskScopeRefusal(command: TaskGraphPopulationCommand, scope: RedThenGreenScope): TaskGraphPopulationResult | null {
+  const problems = rosterScopeProblems(
+    command.tasks.map((task) => ({ id: task.id, fileList: task.file_list, policy: taskVerificationPolicy(task) })),
+    scope,
+    command.verificationManifest,
+  );
+  if (problems.length > 0) {
+    return reject("unprovable-task-scope", `TaskGraph population refused: ${problems.map(renderTaskScopeProblem).join("; ")}.`);
+  }
+  if (command.specIndex.kind !== "indexed") return null;
+  const unowned = unownedRequirements(command.specIndex.index, command.tasks.flatMap((task) => task.spec_anchors ?? []));
+  return unowned.length === 0
+    ? null
+    : reject(
+        "unowned-requirement",
+        `TaskGraph population refused: ${unowned.join(", ")} ${unowned.length === 1 ? "has" : "have"} no completion owner: ` +
+          "no Task names it in spec_anchors. Give each to the Task that completes it (a contribution does not), " +
+          "or move it out of scope in the specification, then re-run populate-task-graph.",
       );
 }
 
@@ -661,6 +693,8 @@ export function populateTaskGraph(
   const skeletons = carriedSkeletons(existing.skeletons ?? [], exportBindings.value);
   const redWindow = redWindowTaskIds(contracts.value, command.tasks);
   const redThenGreen = redThenGreenScope(command.verificationManifest, contracts.value);
+  const scopeRefusal = taskScopeRefusal(command, redThenGreen);
+  if (scopeRefusal !== null) return scopeRefusal;
   const distillPlan = distillPlanOf(command, contracts.value);
   // A manifest that declares the runner `helper run-tests` runs freezes the
   // engine-run mode with it (loom#198): only an engine run proves I6 here.

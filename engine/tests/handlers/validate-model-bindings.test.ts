@@ -797,10 +797,12 @@ describe("populate-task-graph enforces model bindings (the state-write funnel)",
       plan_file: planFile,
       tasks: [{
         id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1,
-        depends_on: [], spec_anchors: [], spec_contributions: [],
+        // Owns every canonical Requirement and owes no red-then-green, so population
+        // reaches the model-binding check under test (loom#198, Cause 3).
+        depends_on: [], spec_anchors: ["FR-001", "FR-002", "AS-001", "AS-002"], spec_contributions: [],
         verification_policy: {
           regression: { kind: "required" },
-          new_tests: { kind: "required" },
+          new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
         },
         plan_context: "", file_list: fileList,
       }],

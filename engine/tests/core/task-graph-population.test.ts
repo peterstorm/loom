@@ -57,7 +57,7 @@ const specIndex = Object.freeze({
   index: parsedSpec.value,
 });
 
-const authoredTask = (id: string, wave: number, anchors: readonly string[] = ["FR-001"]): AuthoredTask =>
+const authoredTask = (id: string, wave: number, anchors: readonly string[] = ["FR-001", "AS-001"]): AuthoredTask =>
   Object.freeze({
     id,
     description: `implement ${id}`,
@@ -129,7 +129,7 @@ describe("populateTaskGraph aggregate command", () => {
     const result = populateTaskGraph(graph({
       active_wave_completion_suite: { stale: true } as never,
     }), command({
-      tasks: roster([authoredTask("T1", 1), authoredTask("T2", 2, ["AS-001"])]),
+      tasks: roster([authoredTask("T1", 1, ["FR-001"]), authoredTask("T2", 2, ["AS-001"])]),
       issue: 43,
       repo: "peterstorm/loom",
     }));
@@ -470,7 +470,7 @@ describe("populateTaskGraph stamps the plan's Acceptance Contracts", () => {
   const contractRoster = () => roster([
     { ...authoredTask("T1", 1, []), file_list: ["src/population-contract.ts", "tests/population.acceptance.test.ts"] },
     { ...authoredTask("T2", 2, ["AS-001"]), depends_on: ["T1"] },
-    authoredTask("T3", 3),
+    authoredTask("T3", 3, ["FR-001"]),
   ]);
 
   it("persists each contract awaiting RED and waives task-level regression only inside its red window", () => {
@@ -515,7 +515,7 @@ describe("populateTaskGraph stamps the plan's Acceptance Contracts", () => {
           new_tests: { kind: "required" },
         },
       },
-      { ...authoredTask("T2", 2, ["AS-001"]), depends_on: ["T1"] },
+      { ...authoredTask("T2", 2, ["AS-001", "FR-001"]), depends_on: ["T1"] },
     ]);
     const result = populateTaskGraph(graph(), command({ tasks, contracts: [CONTRACT] }));
     expect(result.ok && result.value.state.tasks[0]!.verification_policy?.regression)
@@ -582,7 +582,7 @@ describe("populateTaskGraph stamps the plan's export bindings (AD-4)", () => {
   // T1 writes CT-1 in Wave 1; T2 implements the bound files in Wave 2.
   const boundRoster = () => roster([
     { ...authoredTask("T1", 1, []), file_list: ["src/population-contract.ts", "tests/population.acceptance.test.ts"] },
-    { ...authoredTask("T2", 2, ["AS-001"]), depends_on: ["T1"], file_list: ["src/T2.ts", "src/T2-extra.ts"] },
+    { ...authoredTask("T2", 2, ["AS-001", "FR-001"]), depends_on: ["T1"], file_list: ["src/T2.ts", "src/T2-extra.ts"] },
   ]);
   const declaration = (text: string) => parseExportBindings(`**Export bindings:**\n${text}\n`);
   const BOTH = declaration("- `src/T2.ts` — CT-1: run: RunFn\n- `src/T2-extra.ts` — CT-1: extra: RunFn, more: RunFn");
