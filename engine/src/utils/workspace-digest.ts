@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { COMPLETION_REPORT_ROOT } from "../core/completion-suite";
+import { isEngineOwnedRuntimePath } from "../core/engine-runtime-paths";
 import { compareStrings } from "../core/ordering";
 import { parseArtifactDigest, type ArtifactDigest } from "../core/orchestration-contract";
 import type { RunRoot } from "../core/report-run-root";
@@ -160,7 +161,9 @@ function exclusionSet(raw: readonly string[]): WorkspaceDigestResult<ReadonlySet
 function excluded(path: string, completionReports: ReadonlySet<string>): boolean {
   return GIT_INTERNAL_ROOTS.some((root) => pathIsWithin(path, root)) ||
     RUN_DIRECTORY_ROOTS.some((root) => pathIsWithin(path, root)) ||
-    TASK_GRAPH_PATHS.some((statePath) => path === statePath || path.startsWith(`${statePath}.`)) ||
+    // The State File and the lock and staging leaves its write boundary keeps
+    // beside it: an observation made under that lock must equal one outside it.
+    TASK_GRAPH_PATHS.some((statePath) => isEngineOwnedRuntimePath(path, statePath)) ||
     completionReports.has(path);
 }
 

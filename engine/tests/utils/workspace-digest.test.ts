@@ -180,6 +180,39 @@ describe("workspace digest shell", () => {
     expect(digest(root, [".loom/completion-reports/completion.json"])).toBe(baseline);
   });
 
+  // The State File write boundary holds its lock beside the State File while
+  // the engine observes the workspace, and each acquisition writes a fresh
+  // owner token. A digest taken under the lock must equal one taken outside it.
+  it.each([".claude/state", ".pi/state"])(
+    "excludes the State File's write companions in %s, and only those",
+    (stateDir) => {
+      const root = repository();
+      write(root, "source.ts", "export const value = 1;\n");
+      commitAll(root);
+      const baseline = digest(root);
+
+      for (const leaf of [
+        ".task_graph",
+        ".task_graph.tomb-123-1700000000000-abc",
+        ".task_graph.recovery",
+        ".task_graph.recovery.claim-123-1700000000000-abc",
+        ".task_graph.recovery.tomb-123-1700000000000-abc",
+        "active_task_graph.json.tmp-123-1700000000000-abc",
+        "active_task_graph.json.claim-123-1700000000000-abc",
+      ]) {
+        write(root, `${stateDir}/${leaf}`, `${leaf}:${process.pid}:${Date.now()}`);
+        expect(digest(root), leaf).toBe(baseline);
+        rmSync(join(root, ...stateDir.split("/"), leaf));
+      }
+
+      for (const leaf of ["notes.md", ".task_graph.bak", "active_task_graph.json.bak"]) {
+        write(root, `${stateDir}/${leaf}`, "task-write");
+        expect(digest(root), leaf).not.toBe(baseline);
+        rmSync(join(root, ...stateDir.split("/"), leaf));
+      }
+    },
+  );
+
   it("changes for byte, path, executable-mode, and symlink-target observations", () => {
     const root = repository();
     write(root, "file.txt", "one");
