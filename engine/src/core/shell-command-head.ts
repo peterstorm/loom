@@ -20,7 +20,10 @@
  */
 
 import { READ_ONLY_STATE_COMMANDS } from "./tool-vocabulary";
+import { isReadOnlyGhInvocation } from "./read-only-gh";
+import { isReadOnlyGitInvocation } from "./read-only-git";
 import { CONTINUE, halt, scanUnquoted, skip } from "./shell-quoting";
+import { staticSpelling } from "./shell-match-views";
 import {
   classifyFdDupWord,
   splitCommandSegmentsWithOps,
@@ -73,7 +76,22 @@ const commandName = (word: string): string => unescapeCommandWord(unquote(word))
  */
 export function hasReadOnlyHead(segment: string): boolean {
   const head = shellWords(stripEnvPrefix(segment))[0];
-  return head !== undefined && READ_ONLY_STATE_COMMANDS.has(commandName(head));
+  return head !== undefined && (READ_ONLY_STATE_COMMANDS.has(commandName(head)) || isReadOnlySubcommandInvocation(segment));
+}
+
+/**
+ * Is the segment exactly a read-only `git` or `gh` invocation? The first word
+ * is the command itself (no environment prefix: `GIT_EXTERNAL_DIFF=…` and
+ * `GH_PAGER=…` run programs), every word is judged by its one static spelling
+ * (`staticSpelling`: a word the shell could complete into an option at
+ * runtime is not admitted), and the verdict is the audited classifier's:
+ * `isReadOnlyGitInvocation` (#177) or `isReadOnlyGhInvocation`.
+ */
+export function isReadOnlySubcommandInvocation(segment: string): boolean {
+  const raw = shellWords(stripComment(segment).trim());
+  if (raw[0] === undefined || shellWords(stripEnvPrefix(segment))[0] !== raw[0]) return false;
+  const spellings = raw.map(staticSpelling);
+  return isReadOnlyGitInvocation(spellings) || isReadOnlyGhInvocation(spellings);
 }
 
 /**

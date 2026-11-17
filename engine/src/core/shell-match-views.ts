@@ -172,6 +172,42 @@ export const OPAQUE_OUTPUT = "\u2217";
 export const GLOB_CHAR = new RegExp(`[*?[${OPAQUE_OUTPUT}]`);
 
 /**
+ * The mark every literal substitution placeholder carries (the state
+ * guard's guarded and protected-directory placeholders): text standing
+ * where a substitution's output goes, which is as unknown as OPAQUE_OUTPUT.
+ */
+export const SUBSTITUTION_PLACEHOLDER_MARK = "__subst__";
+
+/** Text the shell completes at runtime: an expansion, a backtick, or a substitution's output. */
+export const hasRuntimePart = (word: string): boolean =>
+  /[$`]/.test(word) || word.includes(OPAQUE_OUTPUT) || word.includes(SUBSTITUTION_PLACEHOLDER_MARK);
+
+/** Every spelling bash could give one word (quote collapse, parameter
+ *  states, brace expansion). Null when the view set is unbounded. */
+export function wordViews(word: string): readonly string[] | null {
+  const variants = collapseVariants(word);
+  if (variants === null) return null;
+  const views = new Set<string>();
+  for (const variant of variants) {
+    const expanded = expandBraces(variant);
+    if (expanded === null) return null;
+    for (const view of expanded) views.add(view);
+  }
+  return [...views];
+}
+
+/**
+ * The one spelling bash gives a word, or null when it has a runtime part, more
+ * than one spelling (a brace expansion), or a glob: the word an allowlist may
+ * judge by its text, because the shell cannot turn it into something else.
+ */
+export function staticSpelling(word: string): string | null {
+  if (hasRuntimePart(word)) return null;
+  const views = wordViews(word);
+  return views !== null && views.length === 1 && !GLOB_CHAR.test(views[0] as string) ? (views[0] as string) : null;
+}
+
+/**
  * May a wildcard (`*`, `?`, `[…]`) match a path segment's LEADING `.`? Bash's
  * default (no `dotglob`) — and zsh's (no `GLOB_DOTS`) — is no: the dot must be
  * written explicitly (`.l*`, `.loo?`, `.[l]oom`, `.*`). A command line that so

@@ -83,7 +83,9 @@ export const TEST_COMMAND_PATTERNS: readonly string[] = [
  * magic database and WRITES `<name>.mgc` into the cwd — a guarded cwd makes
  * that a state-dir write), `sed`/`awk` (-i / in-script
  * `w`/`print >`), `find` (-delete/-exec), `git` (checkout/restore rewrite the
- * work tree — a `git checkout -- <state>` is a verdict-restore forgery),
+ * work tree — a `git checkout -- <state>` is a verdict-restore forgery; its
+ * read-only invocations are admitted by `read-only-git.ts` instead, and `gh`'s
+ * by `read-only-gh.ts`, through `isReadOnlySubcommandInvocation`),
  * `touch` (mtime forgery defeats report freshness),
  * `rg` (--pre <cmd> executes an arbitrary program per input file — a
  * pre-staged script receives the guarded path and can rewrite or delete it;
@@ -115,3 +117,5 @@ export const READ_ONLY_STATE_COMMANDS: ReadonlySet<string> = frozenSet([
   "echo", "printf", "test", "[", "[[", "true", "false",
   "pwd", "dirname", "basename", "readlink", "realpath", "du",
 ]);
+
+
