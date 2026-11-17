@@ -6,6 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { RUN_RETRO_SKIPPED } from "../../fixtures/retro-record";
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,7 +32,7 @@ const NOW_MS = Date.UTC(2026, 9, 21, 9, 2, 7);
 describe("complete-orchestration publish ordering", () => {
   let stateDir: string;
   let statePath: string;
-  const graph = { ...graphFixture([taskFixture({ id: "T1", description: "T1", wave: 1, depends_on: [], agent: "code-implementer-agent", status: "completed" })]), github_issue: 9 };
+  const graph = { ...graphFixture([taskFixture({ id: "T1", description: "T1", wave: 1, depends_on: [], agent: "code-implementer-agent", status: "completed" })]), github_issue: 9, retro_records: RUN_RETRO_SKIPPED };
 
   beforeEach(() => {
     stateDir = join(realpathSync(mkdtempSync(join(tmpdir(), "loom-complete-publish-"))), ".claude", "state");

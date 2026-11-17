@@ -363,17 +363,29 @@ The commands act on the project the working directory sits in.
 
 ### Completing an orchestration
 
-After the final Wave Gate, retire the TaskGraph:
+After the final Wave Gate, run `/retro` for the whole run, then retire the TaskGraph:
 
 ```bash
 bun "$LOOM_DIR/engine/src/cli.ts" helper complete-orchestration
 ```
 
-The helper refuses, listing every reason, unless the graph has Tasks, all of them `completed`, and no Wave Gate run is registered as active. Under the TaskGraph lock it publishes the exact graph bytes beside the live graph as `.claude/state/completed_task_graph-<issue|no-issue>-<UTC stamp>.json`. The publish is exclusive and whole: the bytes are prepared under a temporary name and hard-linked into place, so an existing archive is never overwritten and a partial archive is never visible. It then removes the live graph. The archive is published before the removal, so a failure leaves both files, never neither.
+The helper refuses, listing every reason, unless the graph has Tasks, all of them `completed`, no Wave Gate run is registered as active, and a whole-run retro is recorded in `retro_records` (ADR-0083). Under the TaskGraph lock it publishes the exact graph bytes beside the live graph as `.claude/state/completed_task_graph-<issue|no-issue>-<UTC stamp>.json`. The publish is exclusive and whole: the bytes are prepared under a temporary name and hard-linked into place, so an existing archive is never overwritten and a partial archive is never visible. It then removes the live graph. The archive is published before the removal, so a failure leaves both files, never neither.
 
 Every Loom guard keys on the live graph path: `block-direct-edits`, the Task/Agent spawn gates and the state guard. So they all lift, and a post-gate `/review-and-fix` can run in the same checkout. While a finished graph stays live, those guards stay on: Write and Edit into the Orchestrated Repository are refused, and spawns are phase-checked. `block-direct-edits` guards the repository that owns the live graph, meaning the canonical root of the Git working tree holding the State File. It also always guards Loom's protected directories, wherever they lie: the subagent directory (`LOOM_SUBAGENT_DIR`, default `/tmp/claude-subagents`, holding the evidence ledger, `.active`, `.machine` and `.task_graph` files) and the machine-definitions directory (`LOOM_MACHINES_DIR`). A parent write there would forge evidence or rewrite the gate, and the state guard covers them only for Bash. Writes whose every symlink-resolved target lies outside that root and outside both protected directories are allowed. That covers a session scratchpad, another worktree of the same repository, and a sibling directory such as `<root>-other/`. Worktrees nested under the root (for example `.claude/worktrees/`) are still inside. A target or root the guard cannot resolve (a dangling symlink, malformed input, a `LOOM_STATE_PATH` outside Git and outside the documented layouts) stays guarded. The state directory keeps its separate state guard. See [ADR-0046](adr/ADR-0046-the-direct-edit-guard-protects-only-the-orchestrated-repository.md).
 
 An `.active` entry with no running Claude Code agent behind it needs no hand removal. Two kinds are dead: an agent that never started (a spawn refused after SubagentStart), once the roster is two minutes old and no transcript for the agent exists under any project of the configuration directory; and an agent an API error aborted (a usage limit, say, so SubagentStop never ran), once its transcript ends in Claude Code's API error record and has not changed for two minutes. The quiescence checks ignore both and the next SubagentStart removes them (`core/roster-liveness.ts`). An entry that cannot be proven dead stays.
+
+### Retrospectives
+
+Every TaskGraph records its own friction: attempt receipts, escalations and remediations, reopenings, Forward Fixes, plan edits, retired Wave Gate runs and Finding counts. `helper orchestration status` shows each started Wave's friction digest in its `retro` report, and suggests `/retro --wave <N>` for the active Wave or the Wave that completed last when it crossed a threshold: a terminal escalation, a second Wave Gate run, a plan change (plan edit, Forward Fix or its withdrawal, Wave reopening) or repeated Task reopenings. A suggestion never blocks (ADR-0083).
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper retro-facts [--wave <N>] [--graph <archived graph>]   # the facts, as JSON
+bun "$LOOM_DIR/engine/src/cli.ts" helper record-retro --file .claude/retros/<name>.md [--wave <N>]
+bun "$LOOM_DIR/engine/src/cli.ts" helper record-retro --skip --reason "<why the run needs no retro>"
+```
+
+`/retro` reads the facts first and the session only for the why, and records the retro it writes. A written retro is bound to the sha256 of its bytes; an identical record changes nothing. `complete-orchestration` needs a whole-run record, written or skipped.
 
 ### Abandoning an orchestration
 

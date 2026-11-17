@@ -10,7 +10,13 @@
  * exact bytes and removes the live graph under the TaskGraph lock.
  */
 
+import { runRetroRecorded } from "./retro-record";
 import type { TaskGraph } from "../types";
+
+/** The completion reason a run without a run-scope retro record gets (ADR-0083). */
+export const RETRO_MISSING_REASON =
+  "the run has no retrospective: run /retro (it records the retro with helper record-retro --file <path>), " +
+  "or skip it deliberately with helper record-retro --skip --reason <text>";
 
 export type OrchestrationCompletion =
   | Readonly<{ kind: "complete" }>
@@ -18,11 +24,12 @@ export type OrchestrationCompletion =
 
 /**
  * Complete when the graph has Tasks, every Task is `completed` (a Wave Gate
- * committed it), and no Wave Gate run is registered as active. Every unmet
+ * committed it), no Wave Gate run is registered as active, and a run-scope
+ * retro is recorded, written or deliberately skipped (ADR-0083). Every unmet
  * condition is named.
  */
 export function judgeOrchestrationCompletion(
-  graph: Pick<TaskGraph, "tasks" | "active_wave_gate">,
+  graph: Pick<TaskGraph, "tasks" | "active_wave_gate" | "retro_records">,
 ): OrchestrationCompletion {
   const [first, ...rest] = [
     ...(graph.tasks.length === 0 ? ["the TaskGraph has no Tasks"] : []),
@@ -32,6 +39,7 @@ export function judgeOrchestrationCompletion(
     ...(graph.active_wave_gate === undefined
       ? []
       : [`Wave Gate run ${graph.active_wave_gate.runId} is still registered as active`]),
+    ...(runRetroRecorded(graph.retro_records) ? [] : [RETRO_MISSING_REASON]),
   ];
   if (first === undefined) return Object.freeze({ kind: "complete" });
   const reasons: readonly [string, ...string[]] = Object.freeze([first, ...rest]);

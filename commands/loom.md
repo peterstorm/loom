@@ -169,7 +169,7 @@ For each Wave, loop on canonical status. Never work out what to spawn from `pend
 3. When status says `start-wave-gate`, run `/wave-gate`. Do not review inline or skip it: the spawn gate refuses next-Wave Tasks until the gate completes. `commands/wave-gate.md` is the protocol. The gate runs the completion suite from the protected Verification Manifest itself; never run a substitute command, and never silence a failure by editing the authority that caught it.
 4. If the gate is blocked by critical findings, fix them through [Acting on a Finding](wave-gate.md#acting-on-a-finding) (abandon, `reopen-task`, `brief --note`, fresh `/wave-gate`).
 5. Advisory findings pause the gate at `awaiting-advisory-decision`. Classify and act on every one as `commands/wave-gate.md` says (the paragraphs before [Acting on a Finding](wave-gate.md#acting-on-a-finding), including the contract-Wave `acceptance-freeze-pending` check), and approve only then.
-6. When the gate reports the Wave complete, return to step 1 for the next Wave. After the final Wave Gate reports `done`, complete the orchestration (recovery runbook).
+6. When the gate reports the Wave complete, relay its friction digest and any retro suggestion (`/wave-gate`, `done`), then return to step 1 for the next Wave. After the final Wave Gate reports `done`, run `/retro` for the whole run, then complete the orchestration (recovery runbook).
 
 ### Implementation briefs
 

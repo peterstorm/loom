@@ -13,6 +13,7 @@
  */
 
 import { match, P } from "ts-pattern";
+import { renderRetroStatus, retroStatusReport, type RetroStatusReport } from "./retro-status";
 import type {
   CanonicalStatusFacts,
   EngineResumeAction,
@@ -54,7 +55,7 @@ import {
   type WaveReadinessSnapshot,
 } from "./wave-gate-machine";
 import { deriveWaveAdvisoryNextAction } from "./wave-gate-preparation";
-import { judgeOrchestrationCompletion } from "./orchestration-completion";
+import { judgeOrchestrationCompletion, RETRO_MISSING_REASON } from "./orchestration-completion";
 import { pendingFreezeAdvisories, renderPendingFreezeAdvisories } from "./acceptance-contract";
 import {
   deriveFindingCounts,
@@ -106,6 +107,8 @@ export type StatusDeps = GateDeps & Readonly<{
 export type LoomStatusDocument = LoomStatus & Readonly<{
   ownerVerification: OwnerVerificationStatusReport;
   skeletons: SkeletonStatusReport;
+  /** Every Wave's friction digest and the Waves worth a retro now (ADR-0083); never blocking. */
+  retro: RetroStatusReport;
 }>;
 
 const SKELETONS_NOT_OBSERVED: SkeletonStatusReport =
@@ -474,6 +477,30 @@ function persistedTerminalBlockedStatus(
   });
 }
 
+/**
+ * What status names once the final Wave committed: the retirement when the
+ * run may complete, the run's retrospective when that is all it still owes
+ * (ADR-0083), and nothing otherwise.
+ */
+function finishedRunReasons(graph: TaskGraph): readonly StatusReason[] {
+  const completion = judgeOrchestrationCompletion(graph);
+  if (completion.kind === "complete") {
+    return [statusReason(
+      "orchestration-complete",
+      "Every Wave is complete; retire the orchestration with `helper complete-orchestration`, " +
+        "which archives the TaskGraph and lifts Loom's guards",
+    )];
+  }
+  const onlyRetroOwed = completion.reasons.length === 1 && completion.reasons[0] === RETRO_MISSING_REASON;
+  return onlyRetroOwed
+    ? [statusReason(
+        "retro-required",
+        "Every Wave is complete; run /retro for the whole run (or skip it with `helper record-retro --skip --reason <text>`), " +
+          "then retire the orchestration with `helper complete-orchestration`",
+      )]
+    : [];
+}
+
 function committedTerminalStatus(
   graph: TaskGraph,
   currentWorkspace: WaveWorkspaceObservation | undefined,
@@ -503,14 +530,9 @@ function committedTerminalStatus(
   }
   const completeReason = statusReason("run-complete", `Wave Gate run ${terminal.runId} completed with committed revision ${terminal.revision}`);
   // No later-Wave Task exists here, so this is the final Wave: when every Task
-  // is completed the whole orchestration is, and status names the retirement.
-  const finishedReasons = judgeOrchestrationCompletion(graph).kind === "complete"
-    ? [statusReason(
-        "orchestration-complete",
-        "Every Wave is complete; retire the orchestration with `helper complete-orchestration`, " +
-          "which archives the TaskGraph and lifts Loom's guards",
-      )]
-    : [];
+  // is completed the whole orchestration is, and status names the retirement,
+  // or the run's retrospective it is still owed first (ADR-0083).
+  const finishedReasons = finishedRunReasons(graph);
   return canonicalRecord({
     schemaVersion: 1,
     facts: waveScopedStatusFacts(
@@ -772,6 +794,7 @@ export function deriveLoomStatusFromParsedGraph(
     ...status,
     ownerVerification: ownerVerificationReportOf(deps.currentWaveCompletionResult),
     skeletons,
+    retro: retroStatusReport(parsed),
   });
 }
 
@@ -837,7 +860,7 @@ function projectCoverageDiagnostic(status: LoomStatus): readonly string[] {
 
 /** Versioned human renderer over the same values used by the JSON renderer. */
 export function renderLoomStatusHuman(document: LoomStatusDocument): string {
-  const { ownerVerification, skeletons, ...status } = document;
+  const { ownerVerification, skeletons, retro, ...status } = document;
   const fact = (name: keyof CanonicalStatusFacts): string => {
     const value = status.facts[name];
     return value.kind === "known"
@@ -861,6 +884,7 @@ export function renderLoomStatusHuman(document: LoomStatusDocument): string {
     ...projectCoverageDiagnostic(status),
     ...renderOwnerVerificationStatus(ownerVerification),
     ...renderSkeletonStatus(skeletons),
+    ...renderRetroStatus(retro),
     `- nextAction: ${status.next.action.kind}`,
     `- nextActionPayload: ${JSON.stringify(status.next.action)}`,
     "- reasons:",

@@ -128,6 +128,7 @@ export const WHITELISTED_HELPERS: readonly string[] = [
   "reconcile-implementation-proof",
   "set-phase",
   "cleanup-state",
+  "record-retro",
 ];
 
 const ALLOWED_LINE = "Allowed: read-only commands (jq, cat, grep, head, ls, diff, …), read-only git and gh invocations, or whitelisted helpers.";
