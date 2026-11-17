@@ -256,7 +256,7 @@ describe("parallel bound subagents (one session, Claude Code wave)", () => {
       for (const [i, id] of ids.entries()) {
         // update-task-status reads eventsForEpoch(records, epochOf(agent_id, agent_type)).
         const own = eventsForEpoch(records, epochOf(agentIdOf(id), agentTypeOf("code-implementer-agent")));
-        expect(own).toEqual([{ kind: "TestRun", command: `npm test -- part-${i}`, exit: 0, report: null }]);
+        expect(own).toEqual([{ kind: "TestRun", origin: { kind: "agent-command" as const }, command: `npm test -- part-${i}`, exit: 0, report: null }]);
       }
     } finally {
       for (const id of ids) {

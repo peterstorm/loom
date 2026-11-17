@@ -26,7 +26,7 @@ import type { RecordToolEvidenceFn } from "./harness-tool-call-types";
 import { findReport } from "./report-discovery";
 import type { Evidence } from "./types";
 
-export const recordToolEvidence: RecordToolEvidenceFn = (target, call, { registry, nowMs }) => {
+export const recordToolEvidence: RecordToolEvidenceFn = (target, call, { registry, nowMs, isEngineCli }) => {
   const minted = extractEvidence(call, (segment, run, currentCallWrites) => {
     // Computed lazily: discovery runs only for classified test commands. The
     // read-time resolve is a no-op for records minted absolute and covers
@@ -41,7 +41,7 @@ export const recordToolEvidence: RecordToolEvidenceFn = (target, call, { registr
     // artifact-backed sources.
     const callStartMs = call.callId === null ? null : registry.callStartFor(target.stamps, call.callId);
     return findReport(segment, call.cwd, run, { nowMs: nowMs(), callStartMs }, (path) => vetoed.has(path));
-  });
+  }, (scriptWord) => isEngineCli(call.cwd, scriptWord));
   const events: readonly Evidence[] = minted.map((event) =>
     event.kind === "FileWrite" ? { ...event, path: resolve(call.cwd, event.path) } : event,
   );

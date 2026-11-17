@@ -134,6 +134,7 @@ import {
   type FrozenVerificationManifest,
 } from "./core/verification-manifest";
 import { parseReviewerProtocolDescriptor } from "./core/reviewer-contract";
+import { parseTestEvidenceField, type EngineRunTestEvidence } from "./core/test-evidence-authority";
 import { PHASE_ORDER } from "./config";
 import { KNOWN_AGENTS, REVIEW_SUB_AGENTS } from "./core/agent-catalog-projections";
 import { isRecord } from "./core/plain-record";
@@ -2422,6 +2423,26 @@ function parseVerificationManifestField(raw: unknown): ParseResult<FrozenVerific
     : parseErr(`verification_manifest: ${parsed.error.errors.join("; ")}`);
 }
 
+/**
+ * What a graph froze before its Tasks are proven: the Verification Manifest,
+ * the test-evidence mode bound to it (loom#198; parsed against the manifest it
+ * names, so a graph never loads a mode its own manifest cannot run), and the
+ * Acceptance Contracts' shape.
+ */
+function parseFrozenVerificationFields(obj: Record<string, unknown>): ParseResult<Readonly<{
+  verificationManifest: FrozenVerificationManifest | undefined;
+  testEvidence: EngineRunTestEvidence | undefined;
+  contractShapes: readonly AcceptanceContract[] | undefined;
+}>> {
+  const verificationManifest = parseVerificationManifestField(obj.verification_manifest);
+  if (!verificationManifest.ok) return verificationManifest;
+  const testEvidence = parseTestEvidenceField(obj.test_evidence, verificationManifest.value);
+  if (!testEvidence.ok) return testEvidence;
+  const contractShapes = parseAcceptanceContractsShape(obj.acceptance_contracts);
+  if (!contractShapes.ok) return contractShapes;
+  return parseOk({ verificationManifest: verificationManifest.value, testEvidence: testEvidence.value, contractShapes: contractShapes.value });
+}
+
 /** The graph fields the owner check's authority derives from: the contracts
  *  name the Tasks whose stubs owe nothing (`owesInWave`). */
 type OwnerStampedGraph = Pick<TaskGraph, "tasks" | "owner_obligations" | "acceptance_contracts">;
@@ -3104,6 +3125,7 @@ type ParsedTaskGraphParts = Readonly<{
   skeletonFields: ParsedSkeletonFields;
   authority: ParsedTaskGraphAuthorityFields;
   history: ParsedTaskGraphHistoryFields;
+  testEvidence: EngineRunTestEvidence | undefined;
 }>;
 
 /** A loaded Task: its id is a parsed `TaskId`. */
@@ -3148,7 +3170,8 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
   } = parts.authority;
   // The single blessed cast: every union field above is proven in place.
   return {
-    ...obj,
+    // `test_evidence` is installed only as its parsed value, never as the raw JSON.
+    ...withoutKeys(obj, "test_evidence"),
     phase_artifacts: parts.phaseArtifacts,
     skipped_phases: parts.skippedPhases,
     spec_file: obj.spec_file ?? null,
@@ -3168,6 +3191,7 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     ...(parts.planDesignReview === undefined ? {} : { plan_design_review: parts.planDesignReview }),
     ...(waveReviewEpoch === undefined ? {} : { wave_review_epoch: waveReviewEpoch }),
     ...(verificationManifest === undefined ? {} : { verification_manifest: verificationManifest }),
+    ...(parts.testEvidence === undefined ? {} : { test_evidence: parts.testEvidence }),
     ...(activeWaveCompletionSuite === undefined ? {} : { active_wave_completion_suite: activeWaveCompletionSuite }),
     ...(activeWaveGate === undefined ? {} : { active_wave_gate: activeWaveGate }),
     ...(waveGateHistory === undefined ? {} : { wave_gate_history: waveGateHistory }),
@@ -3281,9 +3305,7 @@ function parseTaskGraphObligationFields(
  * missing tasks/wave_gates default for early phases (populated in Phase 4).
  */
 export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
-  if (!isRecord(raw)) {
-    return parseErr("not an object");
-  }
+  if (!isRecord(raw)) return parseErr("not an object");
   const obj = raw as Record<string, unknown>;
   const documents = parseTaskGraphDocumentFields(obj);
   if (!documents.ok) return parseErr(documents.error);
@@ -3293,23 +3315,22 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
   // the manifest decides the graph's I6 era and the contracts name the
   // writers it exempts, and so which obligations each stored Proof must carry
   // (INV-6). The contracts are bound to the roster once the Tasks are proven.
-  const verificationManifest = parseVerificationManifestField(obj.verification_manifest);
-  if (!verificationManifest.ok) return parseErr(verificationManifest.error);
-  const contractShapes = parseAcceptanceContractsShape(obj.acceptance_contracts);
-  if (!contractShapes.ok) return parseErr(contractShapes.error);
+  const frozen = parseFrozenVerificationFields(obj);
+  if (!frozen.ok) return parseErr(frozen.error);
+  const { verificationManifest, testEvidence, contractShapes } = frozen.value;
   const tasks = parseTaskGraphTasks(
     obj,
     executingTasks.value ?? [],
-    redThenGreenScope(verificationManifest.value, contractShapes.value ?? []),
+    redThenGreenScope(verificationManifest, contractShapes ?? []),
   );
   if (!tasks.ok) return parseErr(tasks.error);
   const gating = parseTaskGraphGating(obj, tasks.value);
   if (!gating.ok) return parseErr(gating.error);
-  const obligations = parseTaskGraphObligationFields(obj, contractShapes.value, tasks.value);
+  const obligations = parseTaskGraphObligationFields(obj, contractShapes, tasks.value);
   if (!obligations.ok) return parseErr(obligations.error);
   const skeletonFields = parseTaskGraphSkeletonFields(obj, obligations.value.acceptanceContracts, tasks.value);
   if (!skeletonFields.ok) return parseErr(skeletonFields.error);
-  const authority = parseTaskGraphAuthorityFields(obj, verificationManifest.value, ownerStampedGraph(tasks.value, obligations.value));
+  const authority = parseTaskGraphAuthorityFields(obj, verificationManifest, ownerStampedGraph(tasks.value, obligations.value));
   if (!authority.ok) return parseErr(authority.error);
   const history = parseTaskGraphHistoryFields(
     obj,
@@ -3329,6 +3350,7 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
     skeletonFields: skeletonFields.value,
     authority: authority.value,
     history: history.value,
+    testEvidence,
   }));
 }
 

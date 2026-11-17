@@ -27,7 +27,7 @@ Follow this sequence for every task:
    - npm script running Vitest: `npm test -- --reporter=default --reporter=json --outputFile=/tmp/loom-<task-id>-vitest.json` (sub-project: `npm test --prefix /abs/sub -- --reporter=default --reporter=json --outputFile=/tmp/loom-<task-id>-vitest.json`)
    - Maven / Gradle: `mvn test` / `./gradlew test` from the repository root (reports are found automatically)
 
-   Your brief's "final verification run" table is the authoritative list, with the conditions on each form and the runners that have no trusted report.
+   Your brief's "final verification run" table is the authoritative list, with the conditions on each form and the runners that have no trusted report. When your brief's Verification Policy carries a **Test evidence: engine runs only** paragraph, use the `helper run-tests` call it prints for every run that counts instead; your own test commands are then never trusted.
 6. **Report every declared artifact changed during remediation** — do not claim a prior Review Packet remains current after any byte change; Loom increments Review Generation and requires fresh review evidence.
 7. **Stop only after test output shows pass markers** in your Bash tool output (e.g., "X passing", "Tests run: X, Failures: 0", "X pass")
 

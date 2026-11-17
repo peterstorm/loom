@@ -116,7 +116,7 @@ type Harness = Readonly<{
 const harness = (): Harness => {
   const registry = inMemorySessionRegistry();
   const stderr: string[] = [];
-  return { registry, stderr, ports: { registry, nowMs: () => Date.now(), writeStderr: (line) => { stderr.push(line); } } };
+  return { registry, stderr, ports: { registry, nowMs: () => Date.now(), isEngineCli: () => false, writeStderr: (line) => { stderr.push(line); } } };
 };
 
 const ctx = (sessionId: string, cwd = "/repo") => ({ cwd, sessionManager: { getSessionId: () => sessionId } });
@@ -148,7 +148,7 @@ describe("createPiEvidenceRecorder — the Pi child's tool_result recorder", () 
       { epoch, event: { kind: "FileRead", path: "/repo/README.md" }, callId: "call-read" },
       { epoch, event: { kind: "FileWrite", path: "/repo/src/a.ts", via: "tool" }, callId: "call-write" },
       { epoch, event: { kind: "FileWrite", path: "/repo/out.txt", via: "shell" }, callId: "call-bash" },
-      { epoch, event: { kind: "TestRun", command: "printf x > out.txt && bun test", exit: null, report: null }, callId: "call-bash" },
+      { epoch, event: { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "printf x > out.txt && bun test", exit: null, report: null }, callId: "call-bash" },
     ]);
     expect(registry.readEvidence(child)).toEqual([]);
   });

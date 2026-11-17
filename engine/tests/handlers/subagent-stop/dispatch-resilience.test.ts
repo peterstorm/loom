@@ -665,7 +665,7 @@ describe("update-task-status honors the pre-unbind evidence snapshot", () => {
     const snapshot: readonly EvidenceRecord[] = [{
       epoch: parseEpoch("a-1:code-implementer-agent")!,
       event: {
-        kind: "TestRun",
+        kind: "TestRun", origin: { kind: "agent-command" as const },
         command: "npm test",
         exit: 0,
         report: reportSummary(5, 0),
@@ -703,7 +703,7 @@ describe("legacy Claude completion has no positive authority", () => {
     ].join("\n"));
     const snapshot: readonly EvidenceRecord[] = [{
       epoch: parseEpoch("a-1:code-implementer-agent")!,
-      event: { kind: "TestRun", command: "npm test", exit: 0, report: reportSummary(1, 0) },
+      event: { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: reportSummary(1, 0) },
     }];
 
     const result = await runUpdateTaskStatus(JSON.stringify({
@@ -743,7 +743,7 @@ describe("trust-aware skip guard — decided INSIDE the locked update", () => {
 
     const snapshot: readonly EvidenceRecord[] = [{
       epoch: parseEpoch("a-1:code-implementer-agent")!,
-      event: { kind: "TestRun", command: "npm test", exit: 1, report: null },
+      event: { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 1, report: null },
     }];
 
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);

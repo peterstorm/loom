@@ -397,7 +397,7 @@ describe("bunRunSummary — Bun's JUnit report with its console collection error
   });
 
   it("names one closed source vocabulary and parses nothing outside it", () => {
-    expect(REPORT_SOURCES).toEqual(["vitest-json", "junit-xml", "bun-console"]);
+    expect(REPORT_SOURCES).toEqual(["vitest-json", "junit-xml", "bun-console", "runner-crash"]);
     for (const source of REPORT_SOURCES) expect(parseReportSource(source)).toBe(source);
     for (const raw of ["bun", "JUNIT-XML", "", null, undefined, 1, {}]) expect(parseReportSource(raw)).toBeNull();
   });

@@ -24,6 +24,7 @@ import type {
   WaveCompletionSuiteResult,
 } from "./core/completion-suite";
 import type { FrozenVerificationManifest, ProjectVerificationCoverage } from "./core/verification-manifest";
+import type { EngineRunTestEvidence } from "./core/test-evidence-mode";
 import type { Phase } from "./core/phases";
 import type { SettledFloor, SpecIndexObservation } from "./core/requirement-coverage";
 import type { ProofBoundaryObservation } from "./core/proof-boundary-observation";
@@ -1347,6 +1348,11 @@ export interface TaskGraph {
   readonly wave_review_epoch?: WaveReviewEpochAuthority;
   /** Operator-owned verification authority frozen before implementation begins. */
   readonly verification_manifest?: FrozenVerificationManifest;
+  /** The frozen test-evidence mode (loom#198). Absent: every TestRun is
+   *  admitted, as before. Present: only engine runs (`helper run-tests`) bound
+   *  to this graph's repository and frozen manifest are a Task's evidence.
+   *  Its shape is `core/test-evidence-mode.ts`; its parser and policy live in `core/test-evidence-authority.ts`. */
+  readonly test_evidence?: EngineRunTestEvidence;
   /** Accepted quiescent-Wave result bound to the exact active registration. */
   readonly active_wave_completion_suite?: AcceptedWaveCompletionReceipt;
   /** Parser-proven protected registration; absent until a Wave Gate is explicitly registered. */

@@ -32,7 +32,7 @@ const read = (path = "/a.ts"): Evidence => ({ kind: "FileRead", path });
 const write = (path = "/a.ts"): Evidence => ({ kind: "FileWrite", path, via: "tool" });
 // Facts only — judgment is derived at fold time via judgeTestRun.
 const testRun = (over: Partial<Extract<Evidence, { kind: "TestRun" }>> = {}): Evidence => ({
-  kind: "TestRun",
+  kind: "TestRun", origin: { kind: "agent-command" as const },
   command: "npm test",
   exit: 0,
   report: reportSummary(5, 0),

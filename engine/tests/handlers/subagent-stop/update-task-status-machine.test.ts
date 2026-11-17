@@ -141,7 +141,7 @@ describe("machine terminal requirements gate the persisted verdict (Fix 7)", () 
     // enough for the strict machine's TestRunPassed ≥ 2 terminal requirement.
     const snapshot: readonly EvidenceRecord[] = [{
       epoch: parseEpoch("a-1:code-implementer-agent")!,
-      event: { kind: "TestRun", command: "npm test", exit: 0, report: reportSummary(5, 0) },
+      event: { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: reportSummary(5, 0) },
     }];
 
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -169,7 +169,7 @@ describe("machine terminal requirements gate the persisted verdict (Fix 7)", () 
     pointSessionAt(s, statePath);
 
     const epoch = parseEpoch("a-1:code-implementer-agent")!;
-    const pass = { kind: "TestRun" as const, command: "npm test", exit: 0, report: reportSummary(5, 0) };
+    const pass = { kind: "TestRun" as const, origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: reportSummary(5, 0) };
     const snapshot: readonly EvidenceRecord[] = [
       { epoch, event: pass },
       { epoch, event: pass },
@@ -186,7 +186,7 @@ describe("machine terminal requirements gate the persisted verdict (Fix 7)", () 
 });
 
 describe("legacy Claude stop quarantine", () => {
-  const pass = { kind: "TestRun" as const, command: "npm test", exit: 0, report: reportSummary(3, 0) };
+  const pass = { kind: "TestRun" as const, origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: reportSummary(3, 0) };
 
   it("never marks the last Task or Wave implemented without exact attempt authority", async () => {
     const s = sid("wave-done");

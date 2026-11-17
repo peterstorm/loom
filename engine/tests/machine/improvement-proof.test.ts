@@ -20,6 +20,7 @@ import { machineToMermaid } from "../../src/machine/mermaid";
 import type { Evidence } from "../../src/machine/types";
 import { reportSummary } from "./report-summary";
 import { claudeCall } from "../fixtures/claude-tool-call";
+import { AGENT_COMMAND_EVIDENCE } from "../../src/core/test-evidence-policy";
 
 const machinePath = join(__dirname, "../../../machines/code-implementer-agent.machine.json");
 const parsed = parseMachineJson(readFileSync(machinePath, "utf-8"));
@@ -49,7 +50,7 @@ describe("R2 — real exit status beats happy output text", () => {
 
   it("NEW: a ledger failure fact (exit 1) overrides the text — trusted failure", () => {
     const ledger = extractEvidence(claudeCall("Bash", { command: "mvn test" }, { exit_code: 1, stdout: lyingOutput }), () => null);
-    const resolved = resolveTestEvidence(ledger, bashOutput, true);
+    const resolved = resolveTestEvidence(ledger, AGENT_COMMAND_EVIDENCE, bashOutput, true);
     expect(resolved.result).toEqual({ verdict: "trusted-fail" }); // a real nonzero exit is trustworthy failure
     expect(resolved.evidence).toContain("ledger: exit 1");
   });
@@ -61,30 +62,30 @@ describe("R2 — reporter-confirmed pass carries explicit provenance in the verd
       claudeCall("Bash", { command: "npx vitest run --reporter=json --outputFile=out.json" }, { exit_code: 0, stdout: "" }),
       () => reportSummary(9, 0),
     );
-    const resolved = resolveTestEvidence(ledger, "", true);
+    const resolved = resolveTestEvidence(ledger, AGENT_COMMAND_EVIDENCE, "", true);
     expect(resolved.result).toEqual({ verdict: "trusted-pass" });
     expect(resolved.evidence).toContain("9 tests / 0 failed");
   });
 
   it("NEW: report cross-check — failures or zero-tests never pass", () => {
     const failing = extractEvidence(claudeCall("Bash", { command: "npm test" }, { exit_code: 0, stdout: "" }), () => reportSummary(9, 2));
-    expect(resolveTestEvidence(failing, "irrelevant", true).result).toEqual({ verdict: "trusted-fail" });
+    expect(resolveTestEvidence(failing, AGENT_COMMAND_EVIDENCE, "irrelevant", true).result).toEqual({ verdict: "trusted-fail" });
 
     const empty = extractEvidence(claudeCall("Bash", { command: "npm test" }, { exit_code: 0, stdout: "" }), () => reportSummary(0, 0));
-    expect(resolveTestEvidence(empty, "", true).result).toEqual({ verdict: "trusted-fail" });
+    expect(resolveTestEvidence(empty, AGENT_COMMAND_EVIDENCE, "", true).result).toEqual({ verdict: "trusted-fail" });
   });
 
   it("NEW: last trusted run wins — pass-then-fail fails, fail-then-pass passes", () => {
-    const pass: Evidence = { kind: "TestRun", command: "npm test", exit: 0, report: reportSummary(5, 0) };
-    const fail: Evidence = { kind: "TestRun", command: "npm test", exit: 1, report: null };
-    expect(resolveTestEvidence([pass, fail], "", true).result).toEqual({ verdict: "trusted-fail" });
-    expect(resolveTestEvidence([fail, pass], "", true).result).toEqual({ verdict: "trusted-pass" });
+    const pass: Evidence = { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: reportSummary(5, 0) };
+    const fail: Evidence = { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 1, report: null };
+    expect(resolveTestEvidence([pass, fail], AGENT_COMMAND_EVIDENCE, "", true).result).toEqual({ verdict: "trusted-fail" });
+    expect(resolveTestEvidence([fail, pass], AGENT_COMMAND_EVIDENCE, "", true).result).toEqual({ verdict: "trusted-pass" });
   });
 
   it("NEW: an untrusted exit-0 run never displaces a trusted verdict", () => {
-    const pass: Evidence = { kind: "TestRun", command: "npm test", exit: 0, report: reportSummary(5, 0) };
-    const noise: Evidence = { kind: "TestRun", command: "npm test", exit: 0, report: null };
-    const resolved = resolveTestEvidence([pass, noise], "", true);
+    const pass: Evidence = { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: reportSummary(5, 0) };
+    const noise: Evidence = { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: null };
+    const resolved = resolveTestEvidence([pass, noise], AGENT_COMMAND_EVIDENCE, "", true);
     expect(resolved.result).toEqual({ verdict: "trusted-pass" });
   });
 });
@@ -112,7 +113,7 @@ describe("R2 — the spoofs the review found are dead", () => {
     expect(extractTestEvidence(bashOutput)).toEqual({ passed: false, evidence: "" });
     const ledger = extractEvidence(claudeCall("Bash", { command: spoofCmd }, { exit_code: 0, stdout: "npm test: 5 passing" }), () => null);
     expect(ledger).toEqual([]);
-    expect(resolveTestEvidence(ledger, bashOutput, true).result).toEqual({
+    expect(resolveTestEvidence(ledger, AGENT_COMMAND_EVIDENCE, bashOutput, true).result).toEqual({
       verdict: "untrusted",
       passed: false,
       label: "degraded (machine bound, no ledger evidence; transcript-regex)",
@@ -121,13 +122,13 @@ describe("R2 — the spoofs the review found are dead", () => {
   });
 
   it("recorder failure is visible: machine bound + empty ledger → degraded label", () => {
-    const resolved = resolveTestEvidence([], "12 passing", true);
+    const resolved = resolveTestEvidence([], AGENT_COMMAND_EVIDENCE, "12 passing", true);
     expect(resolved.result.verdict).toBe("untrusted");
     expect(resolved.result.verdict === "untrusted" && resolved.result.label).toContain("degraded");
   });
 
   it("unbound runs keep the plain fallback label", () => {
-    const resolved = resolveTestEvidence([], "12 passing", false);
+    const resolved = resolveTestEvidence([], AGENT_COMMAND_EVIDENCE, "12 passing", false);
     expect(resolved.result).toEqual({
       verdict: "untrusted",
       passed: true,
@@ -165,7 +166,7 @@ describe("R1 — write-before-read is structurally impossible for the bound agen
     const events: Evidence[] = [
       { kind: "FileRead", path: "/a.ts" },
       { kind: "FileWrite", path: "/a.ts", via: "tool" },
-      { kind: "TestRun", command: "npm test", exit: 0, report: null }, // no artifact
+      { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: null }, // no artifact
     ];
     expect(isTerminal(machine, foldEvidence(machine, events))).toBe(false);
   });
@@ -181,7 +182,7 @@ describe("transcript text is never evidence (standing invariant)", () => {
   it("unknown tool_response shapes yield exit: null → judged untrusted, never success", () => {
     expect(claudeBashOutcome({ kind: "succeeded", toolResponse: { weird: true }, input: {} })).toEqual({ kind: "exit-unknown", stdout: "" });
     const ledger = extractEvidence(claudeCall("Bash", { command: "npm test" }, { weird: true, stdout: "5 passing" }), () => null);
-    const resolved = resolveTestEvidence(ledger, "", true);
+    const resolved = resolveTestEvidence(ledger, AGENT_COMMAND_EVIDENCE, "", true);
     expect(resolved.result.verdict).toBe("untrusted");
   });
 });

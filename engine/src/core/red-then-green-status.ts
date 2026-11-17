@@ -34,6 +34,7 @@ import type {
 } from "./red-then-green-types";
 import { UNKNOWN_TASK_PREFIX } from "./stop-check-plan-types";
 import { classifyTaskFiles } from "./test-file-classification";
+import { testEvidencePolicyOf } from "./test-evidence-authority";
 import { COVERED_BY_ACCEPTANCE_CONTRACT, taskVerificationPolicy, type NewTestWaiverReason } from "./verification-policy";
 
 // --- Inputs ---
@@ -188,14 +189,17 @@ function dutyView(task: Task, graph: TaskGraph): DutyView {
     .exhaustive();
 }
 
-function liveView(live: RedThenGreenLiveInput, duty: DutyView): LiveView {
+function liveView(live: RedThenGreenLiveInput, duty: DutyView, testEvidence: TaskGraph["test_evidence"]): LiveView {
   return match(live)
     .returnType<LiveView>()
     .with({ kind: P.union("not-observable", "no-live-attempt", "uninspectable", "unreadable") }, (passthrough) => passthrough)
     .with({ kind: "live" }, ({ events, repositoryRoot }) =>
       duty.kind === "owed"
         // A Claude Code attempt's evidence is never Pi-structured, as in settlement.
-        ? freeze({ kind: "judged", observation: judgeRedThenGreen(events, duty.classification, repositoryRoot, false) })
+        ? freeze({
+          kind: "judged",
+          observation: judgeRedThenGreen(events, duty.classification, repositoryRoot, false, testEvidencePolicyOf(testEvidence, repositoryRoot)),
+        })
         : NOT_JUDGED)
     .exhaustive();
 }
@@ -233,7 +237,7 @@ export function redThenGreenStatusView({ graph, taskId, live }: RedThenGreenStat
     wave: task.wave,
     status: task.status,
     duty,
-    live: liveView(live, duty),
+    live: liveView(live, duty, graph.test_evidence),
     stored: storedView(task),
   });
 }

@@ -46,6 +46,7 @@ import { restoreScope, type RestoreScope } from "./i6-restore-scope";
 import { quoteShellArgument } from "./shell-quoting";
 import { classifyTaskFiles } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
+import type { EngineRunTestEvidence } from "./test-evidence-authority";
 import { samePlanPath } from "./plan-path-match";
 import { TASK_MUTATION_STOP_CHECK_MAX_BLOCKS } from "./affected-stop-check-types";
 import { MUTANT_CAP_PER_TASK } from "./owner-verification/mutation-plan";
@@ -150,9 +151,14 @@ export type ImplementationBriefInput = Readonly<{
   /** The TaskGraph's project root, absolute: where the I6 restore command
    *  runs, spelled literally so no command substitution reaches the guard. */
   repositoryRoot: string;
-  /** The active Loom package's printed commands: the engine command a brief
-   *  names (the Task mutation check) is `commands.mutationCheck`. */
-  commands: Pick<LoomCommands, "mutationCheck">;
+  /** The active Loom package's printed commands: the engine commands a brief
+   *  names are the Task mutation check (`commands.mutationCheck`) and the
+   *  engine test run (`commands.runTests`). */
+  commands: Pick<LoomCommands, "mutationCheck" | "runTests">;
+  /** The TaskGraph's frozen test-evidence mode (`graph.test_evidence`), absent
+   *  on a graph that admits an agent's own test commands. Present, the brief
+   *  tells the Task that only `helper run-tests` runs count (loom#198). */
+  testEvidence?: EngineRunTestEvidence;
   /** The operator's notes from the dispatch marker (#119); empty for none. */
   operatorNotes: readonly OperatorNote[];
   /** What the shell observed for the Frozen Signatures section (G2 AD-13).
@@ -893,10 +899,9 @@ type RedThenGreenSectionRefusal = Readonly<{
 function redThenGreenSection(
   task: Task,
   dispatch: WaveImplementationDispatch,
-  manifest: FrozenVerificationManifest | undefined,
-  repositoryRoot: string,
-  roster: readonly Task[],
+  input: Pick<ImplementationBriefInput, "verificationManifest" | "repositoryRoot" | "roster" | "testEvidence">,
 ): DomainResult<string | null, RedThenGreenSectionRefusal> {
+  const { verificationManifest: manifest, repositoryRoot, roster } = input;
   const duty = redThenGreenDuty(task, manifest);
   switch (duty.kind) {
     case "not-owed":
@@ -929,9 +934,12 @@ function redThenGreenSection(
       "Implementation files:",
       bulleted(classification.implementationFiles, "None."),
       "",
-      "Only ledger runs with an exit code and a parsed structured report count, under every evaluation policy: a run without its report, a chained, piped or redirected run, and transcript test evidence never satisfy a step. " +
-        "Run each step's tests as one bare report-writing command, in the forms the final verification table at the top of this brief lists. " +
-        "I6 is judged per attempt: an earlier attempt's red never counts for this one.",
+      input.testEvidence === undefined
+        ? "Only ledger runs with an exit code and a parsed structured report count, under every evaluation policy: a run without its report, a chained, piped or redirected run, and transcript test evidence never satisfy a step. " +
+          "Run each step's tests as one bare report-writing command, in the forms the final verification table at the top of this brief lists. " +
+          "I6 is judged per attempt: an earlier attempt's red never counts for this one."
+        : "Only engine runs count for each step: run the red and the green with the engine test run under **Test evidence** below, never with your own test command. " +
+          "I6 is judged per attempt: an earlier attempt's red never counts for this one.",
       ...redThenGreenRemedy(task, classification, inheritedRedThenGreenFailures(task, dispatch), repositoryRoot, roster),
     ].join("\n"),
   };
@@ -969,6 +977,42 @@ function taskMutationSection(
     "",
     "Files it mutates:",
     bulleted(duty.mutable, "None."),
+  ].join("\n");
+}
+
+/** What the engine-run section prints in place of a file when the Task owes no I6 and so has no classified test files. */
+export const ENGINE_RUN_FILE_PLACEHOLDER = "<test file>";
+
+/**
+ * The Test evidence section of a TaskGraph that froze engine-run evidence
+ * (loom#198): every run settlement counts (I6's red and green, the final
+ * verification run, a distill pass's run) is the engine test run, as one bare
+ * Bash call. An I6-owing Task is given the exact command over its classified
+ * test files; any other Task is given the form, to fill with the test files
+ * that cover its change.
+ */
+function engineRunSection(
+  task: Task,
+  input: Pick<ImplementationBriefInput, "verificationManifest" | "commands">,
+): string {
+  const duty = redThenGreenDuty(task, input.verificationManifest);
+  const testFiles = duty.kind === "owed"
+    ? classifyTaskFiles(task.file_list ?? [], duty.testFiles, task.artifact_baseline).testFiles
+    : [];
+  const command = input.commands.runTests(testFiles.length === 0 ? [ENGINE_RUN_FILE_PLACEHOLDER] : testFiles);
+  return [
+    "**Test evidence: engine runs only (BINDING).** This TaskGraph counts only test runs the engine itself ran. " +
+      "Every run that proves something (I6's red and green, your final verification run, a distill pass's run) is this one Bash call:",
+    `\`${command}\``,
+    (testFiles.length === 0
+      ? `Replace \`${ENGINE_RUN_FILE_PLACEHOLDER}\` with each test file that covers your change, one \`--files\` per file, as a repository-relative path. `
+      : "Keep one `--files` per test file, as above. ") +
+      "Run it exactly as one call, with nothing around it: no `cd ... &&`, no environment prefix, no pipe, redirect, `;` or `&&`. " +
+      "It runs the project's frozen affected runner over those files, writes the runner's report, prints the runner's output to stderr, " +
+      "and ends with the engine's receipt line, which the evidence ledger records. It exits 0 whenever the runner finished, whatever " +
+      "the tests did: read the summary line above the receipt for the result.",
+    "Your own test commands (`npx vitest`, `npm test`, `mvn test`, ...) still run and still show you results, but settlement never counts " +
+      "them: a Task whose only runs are its own commands fails its test evidence.",
   ].join("\n");
 }
 
@@ -1025,7 +1069,7 @@ export function renderImplementationBrief(
     return refused("predecessor-output-unavailable", `${task.id}: ${predecessorOutputErrorMessage(predecessors.error)}`);
   }
 
-  const redThenGreen = redThenGreenSection(task, dispatch, input.verificationManifest, input.repositoryRoot, input.roster);
+  const redThenGreen = redThenGreenSection(task, dispatch, input);
   if (!redThenGreen.ok) return refused(redThenGreen.error.kind, redThenGreen.error.message);
 
   const policy = taskVerificationPolicy(task);
@@ -1042,6 +1086,7 @@ export function renderImplementationBrief(
       ...verificationPolicyLines(policy),
       ...(redThenGreen.value === null ? [] : ["", redThenGreen.value]),
       ...(mutationCheck === null ? [] : ["", mutationCheck]),
+      ...(input.testEvidence === undefined ? [] : ["", engineRunSection(task, input)]),
     ].join("\n"),
     implementation_retry_context: dispatch.promptAppendix ?? NO_RETRY_CONTEXT,
     operator_note: bulleted(input.operatorNotes, NO_OPERATOR_NOTE),

@@ -61,6 +61,7 @@ describe("update-task-status — malformed stdin guard (directly-registered rout
 import { parseMachineJson } from "../../src/machine";
 import type { Evidence, LoadedMachine } from "../../src/machine";
 import { reportSummary } from "../machine/report-summary";
+import { AGENT_COMMAND_EVIDENCE } from "../../src/core/test-evidence-policy";
 
 describe("legacyTestsPassedNote (pure)", () => {
   it("flags a pre-refactor task carrying tests_passed without test_result", () => {
@@ -386,11 +387,11 @@ describe("extractTestEvidence (pure)", () => {
 });
 
 describe("resolveTestEvidence — stale trusted failure vs later untrusted run (pure)", () => {
-  const trustedFail: Evidence = { kind: "TestRun", command: "npm test", exit: 1, report: null };
-  const untrustedExitZero: Evidence = { kind: "TestRun", command: "npm test", exit: 0, report: null };
+  const trustedFail: Evidence = { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 1, report: null };
+  const untrustedExitZero: Evidence = { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: null };
 
   it("[fail, untrusted exit-0] routes to the labeled low-trust fallback — the stale failure does not outrank it", () => {
-    const resolved = resolveTestEvidence([trustedFail, untrustedExitZero], "12 passing", true);
+    const resolved = resolveTestEvidence([trustedFail, untrustedExitZero], AGENT_COMMAND_EVIDENCE, "12 passing", true);
     // never promoted to a trusted pass — the verdict stays untrusted, labeled
     expect(resolved.result).toEqual({
       verdict: "untrusted",
@@ -402,13 +403,13 @@ describe("resolveTestEvidence — stale trusted failure vs later untrusted run (
   });
 
   it("[fail, untrusted exit-0] with no transcript signal stays failed and untrusted (never promoted)", () => {
-    const resolved = resolveTestEvidence([trustedFail, untrustedExitZero], "no test output here", true);
+    const resolved = resolveTestEvidence([trustedFail, untrustedExitZero], AGENT_COMMAND_EVIDENCE, "no test output here", true);
     expect(resolved.result.verdict).toBe("untrusted");
     expect(resolved.result.verdict === "untrusted" && resolved.result.passed).toBe(false);
   });
 
   it("a trusted failure with no later exit-0 run keeps its trusted verdict", () => {
-    const resolved = resolveTestEvidence([untrustedExitZero, trustedFail], "12 passing", true);
+    const resolved = resolveTestEvidence([untrustedExitZero, trustedFail], AGENT_COMMAND_EVIDENCE, "12 passing", true);
     expect(resolved.result).toEqual({ verdict: "trusted-fail" });
     expect(resolved.evidence).toContain("ledger: exit 1");
   });
@@ -416,7 +417,7 @@ describe("resolveTestEvidence — stale trusted failure vs later untrusted run (
 
 describe("resolveTestEvidence — a trusted pass goes stale when files change after it (pure)", () => {
   const trustedPass: Evidence = {
-    kind: "TestRun",
+    kind: "TestRun", origin: { kind: "agent-command" as const },
     command: "npm test",
     exit: 0,
     report: reportSummary(5, 0),
@@ -425,7 +426,7 @@ describe("resolveTestEvidence — a trusted pass goes stale when files change af
   const fileRead: Evidence = { kind: "FileRead", path: "/src/thing.ts" };
 
   it("[pass, FileWrite] demotes to the labeled low-trust path — the pass vouched for old code", () => {
-    const resolved = resolveTestEvidence([trustedPass, fileWrite], "12 passing", true);
+    const resolved = resolveTestEvidence([trustedPass, fileWrite], AGENT_COMMAND_EVIDENCE, "12 passing", true);
     expect(resolved.result).toEqual({
       verdict: "untrusted",
       passed: true,
@@ -436,7 +437,7 @@ describe("resolveTestEvidence — a trusted pass goes stale when files change af
   });
 
   it("[pass, FileWrite] with no transcript signal is an untrusted non-pass, same label", () => {
-    const resolved = resolveTestEvidence([trustedPass, fileWrite], "no test output", true);
+    const resolved = resolveTestEvidence([trustedPass, fileWrite], AGENT_COMMAND_EVIDENCE, "no test output", true);
     expect(resolved.result).toEqual({
       verdict: "untrusted",
       passed: false,
@@ -446,17 +447,17 @@ describe("resolveTestEvidence — a trusted pass goes stale when files change af
   });
 
   it("FileWrite BEFORE the deciding pass does not demote (write → test → pass is the happy path)", () => {
-    const resolved = resolveTestEvidence([fileWrite, trustedPass], "", true);
+    const resolved = resolveTestEvidence([fileWrite, trustedPass], AGENT_COMMAND_EVIDENCE, "", true);
     expect(resolved.result).toEqual({ verdict: "trusted-pass" });
   });
 
   it("FileRead after the pass does not demote — only modifications invalidate it", () => {
-    const resolved = resolveTestEvidence([trustedPass, fileRead], "", true);
+    const resolved = resolveTestEvidence([trustedPass, fileRead], AGENT_COMMAND_EVIDENCE, "", true);
     expect(resolved.result).toEqual({ verdict: "trusted-pass" });
   });
 
   it("write-after-pass followed by a NEW trusted pass is trusted again", () => {
-    const resolved = resolveTestEvidence([trustedPass, fileWrite, trustedPass], "", true);
+    const resolved = resolveTestEvidence([trustedPass, fileWrite, trustedPass], AGENT_COMMAND_EVIDENCE, "", true);
     expect(resolved.result).toEqual({ verdict: "trusted-pass" });
   });
 });
@@ -483,7 +484,7 @@ describe("isMachineBound — an invalid machine still counts as bound (pure)", (
 
   it("an invalid machine with an empty ledger resolves to the degraded label, not fallback", () => {
     const invalid: LoadedMachine = { kind: "invalid", error: "corrupt json" };
-    const resolved = resolveTestEvidence([], "12 passing", isMachineBound(invalid));
+    const resolved = resolveTestEvidence([], AGENT_COMMAND_EVIDENCE, "12 passing", isMachineBound(invalid));
     expect(resolved.result.verdict).toBe("untrusted");
     expect(resolved.result.verdict === "untrusted" && resolved.result.label).toContain("degraded");
   });
@@ -491,7 +492,7 @@ describe("isMachineBound — an invalid machine still counts as bound (pure)", (
 
 describe("resolveTestEvidence — snapshot-read-failed labeling (pure)", () => {
   it("snapshotFailed routes to the transcript fallback with the snapshot-read-failed label, never 'degraded'", () => {
-    const resolved = resolveTestEvidence([], "12 passing", true, true);
+    const resolved = resolveTestEvidence([], AGENT_COMMAND_EVIDENCE, "12 passing", true, true);
     expect(resolved.result).toEqual({
       verdict: "untrusted",
       passed: true,
@@ -502,7 +503,7 @@ describe("resolveTestEvidence — snapshot-read-failed labeling (pure)", () => {
   });
 
   it("snapshotFailed + no transcript pass markers → untrusted failure with the same label", () => {
-    const resolved = resolveTestEvidence([], "no test output at all", true, true);
+    const resolved = resolveTestEvidence([], AGENT_COMMAND_EVIDENCE, "no test output at all", true, true);
     expect(resolved.result).toEqual({
       verdict: "untrusted",
       passed: false,
@@ -513,12 +514,12 @@ describe("resolveTestEvidence — snapshot-read-failed labeling (pure)", () => {
 
   it("snapshotFailed never mints a trusted verdict even if events are (wrongly) supplied", () => {
     const trustedPass = {
-      kind: "TestRun" as const,
+      kind: "TestRun" as const, origin: { kind: "agent-command" as const },
       command: "npm test",
       exit: 0,
       report: reportSummary(5, 0),
     };
-    const resolved = resolveTestEvidence([trustedPass], "12 passing", true, true);
+    const resolved = resolveTestEvidence([trustedPass], AGENT_COMMAND_EVIDENCE, "12 passing", true, true);
     expect(resolved.result.verdict).toBe("untrusted");
     expect(resolved.result.verdict === "untrusted" && resolved.result.label).toContain(
       "snapshot-read-failed",

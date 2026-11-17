@@ -94,6 +94,7 @@ import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { piGrantedAgentId } from "../../../pi/write-grant";
 import { piImplementationLedger } from "../../../pi/subagent-settlement";
 import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
+import { GREEN_RUN, RED_RUN, rawTestRun, type RawEvent } from "../fixtures/raw-test-run";
 
 // --- Identities ---
 
@@ -120,27 +121,15 @@ const LEDGER_TYPES = "engine/src/core/ledger-types.ts";
 const LEDGER_FIXTURES = "engine/tests/fixtures/ledger-fixtures.ts";
 const REPORTED_LEDGER_TEST = "tests/core/ledger.test.ts";
 const REPORTED_REPLAY_TEST = "tests/core/replay.test.ts";
-const RED_RUN = "npm --prefix engine run test:unit -- tests/core/ledger.test.ts";
-const GREEN_RUN = "npm --prefix engine run test:unit";
 
-type RawEvent = Readonly<Record<string, unknown>>;
 
 const passing = (file: string): TestFileResult => ({ file, executed: 2, failed: 0, skipped: 0, collectionError: false });
 const failing = (file: string): TestFileResult => ({ file, executed: 2, failed: 1, skipped: 0, collectionError: false });
 const collectionError = (file: string): TestFileResult => ({ file, executed: 1, failed: 1, skipped: 0, collectionError: true });
 const write = (path: string, via: "tool" | "shell" = "tool"): RawEvent => ({ kind: "FileWrite", path, via });
 
-function run(results: readonly TestFileResult[], options: Readonly<{ command?: string; exit?: number | null }> = {}): RawEvent {
-  const total = results.reduce((sum, { executed }) => sum + executed, 0);
-  const failed = results.reduce((sum, file) => sum + file.failed, 0);
-  return {
-    kind: "TestRun",
-    command: options.command ?? (failed > 0 ? RED_RUN : GREEN_RUN),
-    exit: options.exit === undefined ? (failed > 0 ? 1 : 0) : options.exit,
-    report: { total, failed, source: "junit-xml", files: { kind: "recorded", results } },
-  };
-}
-const reportlessRun = (exit: number): RawEvent => ({ kind: "TestRun", command: GREEN_RUN, exit, report: null });
+const run = rawTestRun;
+const reportlessRun = (exit: number): RawEvent => ({ kind: "TestRun", origin: { kind: "agent-command" as const }, command: GREEN_RUN, exit, report: null });
 const red = (file = REPORTED_LEDGER_TEST): RawEvent => run([failing(file)]);
 const green = (...files: readonly string[]): RawEvent =>
   run((files.length === 0 ? [REPORTED_LEDGER_TEST] : files).map(passing));
@@ -408,7 +397,7 @@ function withArtifactBaseline(graph: TaskGraph, created: readonly string[]): Tas
 
 /** A Vitest JSON run whose report lists `file` as failed to collect: no testcase at all. */
 const jsonCollectionErrorRun = (file: string, command = RED_RUN): RawEvent => ({
-  kind: "TestRun",
+  kind: "TestRun", origin: { kind: "agent-command" as const },
   command,
   exit: 1,
   report: { total: 0, failed: 0, source: "vitest-json", files: { kind: "recorded", results: [{ file, executed: 0, failed: 0, skipped: 0, collectionError: true }] } },

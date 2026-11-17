@@ -9,7 +9,7 @@
  */
 
 import { match } from "ts-pattern";
-import type { Epoch, Evidence, EvidenceRecord, FileWriteVia, TestReportSummary } from "./types";
+import { AGENT_COMMAND_ORIGIN, type Epoch, type Evidence, type EvidenceRecord, type FileWriteVia, type TestReportSummary, type TestRunOrigin } from "./types";
 import { parseReportSource, parseReportSummary } from "./test-report";
 import { parseSandboxReceiptValue } from "../core/security-sandbox";
 export { judgeTestRun, type TrustedTestVerdict } from "./test-report";
@@ -405,6 +405,24 @@ function parseReportField(v: unknown): TestReportSummary | null {
   return source === null ? null : parseReportSummary(o.total, o.failed, source, o.files);
 }
 
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+/**
+ * A ledger TestRun's origin. Absent = `agent-command` (every record before
+ * engine runs); an `engine-run` must carry exactly its absolute repository
+ * root and a sha256 manifest digest, and anything else fails closed to
+ * `agent-command`, which never qualifies where an engine run is required.
+ */
+function parseTestRunOrigin(raw: unknown): TestRunOrigin {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return AGENT_COMMAND_ORIGIN;
+  const o = raw as Record<string, unknown>;
+  const keys = Object.keys(o).sort();
+  if (o.kind !== "engine-run" || keys.join(",") !== "kind,manifestDigest,repositoryRoot") return AGENT_COMMAND_ORIGIN;
+  if (typeof o.repositoryRoot !== "string" || !o.repositoryRoot.startsWith("/")) return AGENT_COMMAND_ORIGIN;
+  if (typeof o.manifestDigest !== "string" || !SHA256_HEX.test(o.manifestDigest)) return AGENT_COMMAND_ORIGIN;
+  return Object.freeze({ kind: "engine-run", repositoryRoot: o.repositoryRoot, manifestDigest: o.manifestDigest });
+}
+
 function parseEvent(raw: unknown): Evidence | null {
   if (typeof raw !== "object" || raw === null) return null;
   const o = raw as Record<string, unknown>;
@@ -431,7 +449,7 @@ function parseEvent(raw: unknown): Evidence | null {
       if (typeof o.command !== "string") return null;
       const exit = typeof o.exit === "number" ? o.exit : null;
       const report = parseReportField(o.report);
-      return { kind: "TestRun", command: o.command, exit, report };
+      return { kind: "TestRun", origin: parseTestRunOrigin(o.origin), command: o.command, exit, report };
     })
     .with("SandboxRun", () => {
       // Re-minted from the strict receipt grammar, never embedded raw: a

@@ -23,7 +23,7 @@
 
 import { match } from "ts-pattern";
 import { graphAcceptanceExpectation, type AcceptanceExpectation } from "../core/acceptance-contract";
-import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
+import { failure, nonEmpty, success, type DomainResult } from "../core/orchestration-contract/identity";
 import { applyMutant, MUTANT_CAP_PER_TASK, taskMutants, type TaskMutants } from "../core/owner-verification/mutation-plan";
 import type { MatrixTestRun } from "../core/owner-verification/types";
 import { parseReviewPath } from "../core/review-packet";
@@ -140,9 +140,13 @@ async function runFile(
   expectation: AcceptanceExpectation,
   deadlineMs: number,
 ): Promise<DomainResult<readonly TaskMutantRun[], string>> {
-  const { runner } = input.duty;
-  const command = matrixTestCommand(runner, file.path);
-  if (!command.ok) return failure(`the affectedRunner cannot run over ${file.path}: ${command.error}`);
+  const { runner, tests } = input.duty;
+  // The mutated file and the Task's own tests, as the affected stop check hands
+  // the runner a Task's changed files: a related-tests runner resolves the
+  // first, a runner that runs exactly the files it is given runs the rest.
+  const targets = nonEmpty([file.path, ...tests.filter((test) => test !== file.path)]) ?? [file.path] as const;
+  const command = matrixTestCommand(runner, targets);
+  if (!command.ok) return failure(`the affectedRunner cannot run over ${targets.join(", ")}: ${command.error}`);
   const ownerPath = parseReviewPath(file.path, "implementation file");
   if (!ownerPath.ok) return failure(ownerPath.errors.join("; "));
   const budget: TaskMutationBudget = { deadlineMs, now: input.now, runTimeoutMs: command.value.timeoutMs };

@@ -186,7 +186,7 @@ const result = (file: string, executed: number, failed: number, collectionError 
 function testRunLine(report: unknown, exit: number | null = 1): string {
   return JSON.stringify({
     epoch: EPOCH,
-    event: { kind: "TestRun", command: "npm --prefix engine run test:unit", exit, report },
+    event: { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm --prefix engine run test:unit", exit, report },
     callId: "toolu_ct1",
   });
 }

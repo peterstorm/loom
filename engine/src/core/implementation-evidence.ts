@@ -9,6 +9,7 @@ import type { TaskTestResult } from "../types";
 import { judgeTestRun, type TrustedTestVerdict } from "../machine/evidence";
 import type { Evidence, Requirement } from "../machine/types";
 import { extractTestEvidence } from "./test-evidence";
+import { admitsTestRun, type TestEvidencePolicy } from "./test-evidence-policy";
 
 export type ResolvedTestEvidence = Readonly<{
   /** Verdict plus trust provenance, exactly as persisted on the Task. */
@@ -24,8 +25,10 @@ function fallbackEvidenceLabel(
   sawExitZero: boolean,
   machineBound: boolean,
   ledgerEmpty: boolean,
+  sawUnadmittedRun: boolean,
 ): string {
   if (demotionLabel !== null) return demotionLabel;
+  if (sawUnadmittedRun) return "not admitted (this graph admits only `helper run-tests` runs; transcript-regex)";
   if (sawExitZero) return "low-trust (exit 0, no report artifact; transcript-regex)";
   if (machineBound && ledgerEmpty) {
     return "degraded (machine bound, no ledger evidence; transcript-regex)";
@@ -45,10 +48,12 @@ function untrustedTranscriptEvidence(label: string, bashOutput: string): Resolve
  * Ledger ground truth wins over transcript regex. The last trusted run decides,
  * except that a later exit-zero run makes an older trusted failure stale and a
  * FileWrite after a trusted pass invalidates that pass. Neither case promotes
- * transcript text to trusted evidence.
+ * transcript text to trusted evidence. A run `policy` does not admit (an
+ * agent's own command in an engine-run graph) is judged untrusted.
  */
 export function resolveTestEvidence(
   ledgerEvents: readonly Evidence[],
+  policy: TestEvidencePolicy,
   bashOutput: string,
   machineBound: boolean,
   snapshotFailed: boolean = false,
@@ -59,11 +64,12 @@ export function resolveTestEvidence(
       bashOutput,
     );
   }
-  const judged = ledgerEvents.flatMap((event, index) =>
-    event.kind === "TestRun"
-      ? [{ run: event as TestRunEvidence, index, verdict: judgeTestRun(event.exit, event.report) }]
-      : [],
-  );
+  const judged = ledgerEvents.flatMap((event, index) => {
+    if (event.kind !== "TestRun") return [];
+    const admitted = admitsTestRun(policy, event);
+    const verdict = admitted ? judgeTestRun(event.exit, event.report) : { verdict: "untrusted" as const };
+    return [{ run: event as TestRunEvidence, index, admitted, verdict }];
+  });
   const lastTrusted = judged.reduce<
     { index: number; run: TestRunEvidence; verdict: TrustedTestVerdict } | null
   >((acc, { run, index, verdict }) =>
@@ -75,7 +81,7 @@ export function resolveTestEvidence(
       .slice(lastTrusted.index + 1)
       .some((event) => event.kind === "FileWrite");
     const laterExitZero = judged.some(
-      (judgment) => judgment.index > lastTrusted.index && judgment.run.exit === 0,
+      (judgment) => judgment.index > lastTrusted.index && judgment.admitted && judgment.run.exit === 0,
     );
     const keepTrusted = lastTrusted.verdict.verdict === "trusted-pass"
       ? !laterFileWrite
@@ -97,9 +103,10 @@ export function resolveTestEvidence(
   return untrustedTranscriptEvidence(
     fallbackEvidenceLabel(
       demotionLabel,
-      judged.some((judgment) => judgment.run.exit === 0),
+      judged.some((judgment) => judgment.admitted && judgment.run.exit === 0),
       machineBound,
       ledgerEvents.length === 0,
+      judged.some((judgment) => !judgment.admitted),
     ),
     bashOutput,
   );

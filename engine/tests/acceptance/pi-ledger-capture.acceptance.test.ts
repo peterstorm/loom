@@ -691,7 +691,7 @@ describe("CT-3: Pi ledger capture through the shared minting rule", () => {
         { kind: "FileWrite", path: resolve(root, "build.log"), via: "shell" },
         { kind: "FileWrite", path: resolve(root, "build.moved.log"), via: "shell" },
         {
-          kind: "TestRun",
+          kind: "TestRun", origin: { kind: "agent-command" as const },
           command: vitestCommand(reportPath),
           exit: 1,
           report: expect.objectContaining({ total: 1, failed: 1, source: "vitest-json" }),
@@ -718,7 +718,7 @@ describe("CT-3: Pi ledger capture through the shared minting rule", () => {
         { kind: "FileWrite", path: resolve(root, TEST_FILE), via: "tool" },
         { kind: "FileWrite", path: resolve(root, "scratch.txt"), via: "shell" },
         {
-          kind: "TestRun",
+          kind: "TestRun", origin: { kind: "agent-command" as const },
           command: red.command,
           exit: 1,
           report: expect.objectContaining({
@@ -770,9 +770,9 @@ describe("CT-3: Pi ledger capture through the shared minting rule", () => {
         { kind: "bash", command: bunRun, exit: 3, stdout: "", piDetailsExitCode: 3 },
       ]);
       expect(piParentEpochFacts(granted)).toEqual([
-        { kind: "TestRun", command: bunRun, exit: 1, report: null },
-        { kind: "TestRun", command: bunRun, exit: 0, report: null },
-        { kind: "TestRun", command: bunRun, exit: 3, report: null },
+        { kind: "TestRun", origin: { kind: "agent-command" as const }, command: bunRun, exit: 1, report: null },
+        { kind: "TestRun", origin: { kind: "agent-command" as const }, command: bunRun, exit: 0, report: null },
+        { kind: "TestRun", origin: { kind: "agent-command" as const }, command: bunRun, exit: 3, report: null },
       ]);
 
       // Fresh report written by the runner during the call: it vouches.
@@ -802,14 +802,14 @@ describe("CT-3: Pi ledger capture through the shared minting rule", () => {
 
       const expectedDiscovery = [
         {
-          kind: "TestRun",
+          kind: "TestRun", origin: { kind: "agent-command" as const },
           command: vitestCommand(freshPath),
           exit: 0,
           report: expect.objectContaining({ total: 1, failed: 0, source: "vitest-json" }),
         },
-        { kind: "TestRun", command: vitestCommand(stalePath), exit: 0, report: null },
+        { kind: "TestRun", origin: { kind: "agent-command" as const }, command: vitestCommand(stalePath), exit: 0, report: null },
         { kind: "FileWrite", path: stagedPath, via: "tool" },
-        { kind: "TestRun", command: vitestCommand(stagedPath), exit: 0, report: null },
+        { kind: "TestRun", origin: { kind: "agent-command" as const }, command: vitestCommand(stagedPath), exit: 0, report: null },
       ];
       expect(claudeEpochFacts(claude)).toEqual(expectedDiscovery);
       expect(piParentEpochFacts(granted).slice(3)).toEqual(expectedDiscovery);

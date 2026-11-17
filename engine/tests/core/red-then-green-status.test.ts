@@ -71,6 +71,7 @@ import {
   waivedTask,
 } from "../fixtures/red-then-green-status-fixtures";
 import { graphFixture, satisfiedProof, taskFixture } from "../fixtures/task-lifecycle";
+import { AGENT_COMMAND_EVIDENCE } from "../../src/core/test-evidence-policy";
 
 // --- Fixtures unique to the core ---
 
@@ -107,9 +108,9 @@ const collectionError = (file: string): TestFileResult => ({ file, executed: 1, 
 /** A read before the red, so the shown indices are not the event positions of the helper tests. */
 const SHOWN_EVENTS: readonly Evidence[] = [
   { kind: "FileRead", path: IMPL },
-  { kind: "TestRun", command: RED_COMMAND, exit: 1, report: report([failing(TEST_A), passing(TEST_B)]) },
+  { kind: "TestRun", origin: { kind: "agent-command" as const }, command: RED_COMMAND, exit: 1, report: report([failing(TEST_A), passing(TEST_B)]) },
   { kind: "FileWrite", path: IMPL, via: "tool" },
-  { kind: "TestRun", command: GREEN_COMMAND, exit: 0, report: report([passing(TEST_A), passing(TEST_B)]) },
+  { kind: "TestRun", origin: { kind: "agent-command" as const }, command: GREEN_COMMAND, exit: 0, report: report([passing(TEST_A), passing(TEST_B)]) },
 ];
 /** An implementation write and no run at all. */
 const NO_RED_EVENTS: readonly Evidence[] = [{ kind: "FileWrite", path: IMPL, via: "tool" }];
@@ -277,7 +278,7 @@ describe("redThenGreenStatusView: live attempt", () => {
   });
 
   it("is judged exactly as judgeRedThenGreen judges the epoch (shown)", () => {
-    const expected = judgeRedThenGreen(SHOWN_EVENTS, settlementClassification(OWED_GRAPH, "T1"), ROOT, false);
+    const expected = judgeRedThenGreen(SHOWN_EVENTS, settlementClassification(OWED_GRAPH, "T1"), ROOT, false, AGENT_COMMAND_EVIDENCE);
     expect(expected).toEqual({
       kind: "shown",
       red: { index: 1, command: RED_COMMAND },
@@ -291,7 +292,7 @@ describe("redThenGreenStatusView: live attempt", () => {
 
   it("is judged exactly as judgeRedThenGreen judges the epoch (gaps, trusted and untrusted)", () => {
     for (const events of [UNTRUSTED_RED_EVENTS, NO_RED_EVENTS, []]) {
-      const expected = judgeRedThenGreen(events, settlementClassification(OWED_GRAPH, "T1"), ROOT, false);
+      const expected = judgeRedThenGreen(events, settlementClassification(OWED_GRAPH, "T1"), ROOT, false, AGENT_COMMAND_EVIDENCE);
       expect(expected.kind).toBe("unproven");
       expect(redThenGreenStatusView(input(OWED_GRAPH, "T1", live(events)))).toMatchObject({
         live: { kind: "judged", observation: expected },
@@ -301,12 +302,12 @@ describe("redThenGreenStatusView: live attempt", () => {
 
   it("is judged with a collection error as red only for a Task that creates its module (FR-007a parity)", () => {
     const events: readonly Evidence[] = [
-      { kind: "TestRun", command: RED_COMMAND, exit: 1, report: report([collectionError(TEST_A), passing(TEST_B)]) },
+      { kind: "TestRun", origin: { kind: "agent-command" as const }, command: RED_COMMAND, exit: 1, report: report([collectionError(TEST_A), passing(TEST_B)]) },
       { kind: "FileWrite", path: IMPL, via: "tool" },
-      { kind: "TestRun", command: GREEN_COMMAND, exit: 0, report: report([passing(TEST_A), passing(TEST_B)]) },
+      { kind: "TestRun", origin: { kind: "agent-command" as const }, command: GREEN_COMMAND, exit: 0, report: report([passing(TEST_A), passing(TEST_B)]) },
     ];
-    const creating = judgeRedThenGreen(events, settlementClassification(CREATING_GRAPH, "T1"), ROOT, false);
-    const editing = judgeRedThenGreen(events, settlementClassification(OWED_GRAPH, "T1"), ROOT, false);
+    const creating = judgeRedThenGreen(events, settlementClassification(CREATING_GRAPH, "T1"), ROOT, false, AGENT_COMMAND_EVIDENCE);
+    const editing = judgeRedThenGreen(events, settlementClassification(OWED_GRAPH, "T1"), ROOT, false, AGENT_COMMAND_EVIDENCE);
     expect(creating.kind).toBe("shown");
     expect(editing).toMatchObject({ kind: "unproven", gap: { kind: "red-missing" } });
     expect(redThenGreenStatusView(input(CREATING_GRAPH, "T1", live(events)))).toMatchObject({

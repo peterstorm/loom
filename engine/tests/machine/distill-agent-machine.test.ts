@@ -19,6 +19,7 @@ import { parseMachineJson } from "../../src/machine/parse-machine";
 import { GATE_WIRED_TOOLS, type Evidence } from "../../src/machine/types";
 import { DISTILLER_TYPE } from "../fixtures/machine-identities";
 import { reportSummary } from "./report-summary";
+import { AGENT_COMMAND_EVIDENCE } from "../../src/core/test-evidence-policy";
 
 const MACHINES = join(__dirname, "../../../machines");
 const parsed = parseMachineJson(readFileSync(join(MACHINES, `${DISTILL_AGENT}.machine.json`), "utf-8"));
@@ -28,9 +29,9 @@ const machine = parsed.value;
 const read: Evidence = { kind: "FileRead", path: "/repo/src/a.ts" };
 const write: Evidence = { kind: "FileWrite", path: "/repo/src/a.ts", via: "tool" };
 const shellWrite: Evidence = { kind: "FileWrite", path: "/repo/src/a.ts", via: "shell" };
-const pass: Evidence = { kind: "TestRun", command: "npx vitest run", exit: 0, report: reportSummary(4, 0) };
-const fail: Evidence = { kind: "TestRun", command: "npx vitest run", exit: 1, report: null };
-const unreportedPass: Evidence = { kind: "TestRun", command: "npx vitest run", exit: 0, report: null };
+const pass: Evidence = { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npx vitest run", exit: 0, report: reportSummary(4, 0) };
+const fail: Evidence = { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npx vitest run", exit: 1, report: null };
+const unreportedPass: Evidence = { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npx vitest run", exit: 0, report: null };
 
 const writesAllowed = (events: readonly Evidence[]): boolean =>
   GATE_WIRED_TOOLS.every((tool) => isToolAllowed(machine, foldEvidence(machine, events), tool));
@@ -39,7 +40,7 @@ const writesDenied = (events: readonly Evidence[]): boolean =>
 
 /** What settlement's machine cap does to the verdict the same events resolve to. */
 const settled = (events: readonly Evidence[]) => {
-  const resolved = resolveTestEvidence(events, "", true);
+  const resolved = resolveTestEvidence(events, AGENT_COMMAND_EVIDENCE, "", true);
   const capped = capVerdictForMachineCompletion(resolved, missingRequirements(machine, foldEvidence(machine, events)));
   return { resolved, capped };
 };

@@ -62,7 +62,7 @@ const recordedReport = {
   },
 };
 
-const recordedTestRun = { kind: "TestRun", command: "bun test --reporter=junit", exit: 1, report: recordedReport };
+const recordedTestRun = { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "bun test --reporter=junit", exit: 1, report: recordedReport };
 
 /** A multi-epoch ledger with every evidence kind and one duplicate delivery. */
 const LEDGER_LINES: readonly string[] = [
@@ -73,7 +73,7 @@ const LEDGER_LINES: readonly string[] = [
   line({ epoch: IMPLEMENTER, event: recordedTestRun, callId: "c2" }),
   line({ epoch: IMPLEMENTER, event: { kind: "FileWrite", path: "/repo/src/a.ts", via: "tool" }, callId: "c3" }),
   line({ epoch: IMPLEMENTER, event: { kind: "FileWrite", path: "/repo/out.log", via: "shell" }, callId: "c4" }),
-  line({ epoch: IMPLEMENTER, event: { kind: "TestRun", command: "pytest" }, callId: "c5" }),
+  line({ epoch: IMPLEMENTER, event: { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "pytest" }, callId: "c5" }),
   line({ epoch: TESTER, event: { kind: "FileWrite", path: "/repo/t.ts", via: "tool" }, callId: "t2" }),
 ];
 

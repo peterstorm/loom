@@ -23,7 +23,7 @@ const RESULTS: readonly TestFileResult[] = [
 ];
 
 const line = (report: unknown, command = "npx vitest run"): string =>
-  JSON.stringify({ epoch: "agent-1:code-implementer-agent", event: { kind: "TestRun", command, exit: 1, report } });
+  JSON.stringify({ epoch: "agent-1:code-implementer-agent", event: { kind: "TestRun", origin: { kind: "agent-command" as const }, command, exit: 1, report } });
 
 function testRun(raw: string): Extract<Evidence, { kind: "TestRun" }> {
   const parsed = parseEvidenceLine(raw);

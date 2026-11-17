@@ -32,7 +32,8 @@ import { scanSubstitutions } from "../core/shell-substitution";
 import { headBase, resolvedInterpreter, shellWords, unquote } from "../core/shell-command-head";
 import { SH_FAMILY_HEADS } from "../core/shell-heredoc";
 import { extractShellWriteTargets } from "../core/shell-write-targets";
-import type { Evidence, TestReportSummary } from "./types";
+import { parseEngineTestRunReceipt } from "../core/engine-test-run";
+import { AGENT_COMMAND_ORIGIN, type Evidence, type TestReportSummary } from "./types";
 
 /** `npx --prefix <dir> vitest …` resolves the runner from `<dir>`'s own
  *  node_modules — the one npx form that runs a sub-project's pinned runner from
@@ -215,6 +216,57 @@ export type FindReportForSegment = (
 ) => TestReportSummary | null;
 
 /**
+ * Whether a script word names THIS Loom package's CLI (`engine/src/cli.ts`),
+ * supplied by the shell, which resolves the word against the call's cwd and
+ * compares real paths. Only an invocation of the engine's own CLI can carry
+ * an engine-run receipt: a look-alike script elsewhere prints text, not facts.
+ */
+export type IsEngineCli = (scriptWord: string) => boolean;
+
+/** No engine CLI: nothing mints an engine-run TestRun. */
+export const NO_ENGINE_CLI: IsEngineCli = () => false;
+
+/**
+ * Whether `command` is exactly one bare `bun <engine cli> helper run-tests …`
+ * invocation: one segment, no environment prefix (which could point the
+ * helper at another TaskGraph), no substitution, no redirect, balanced quotes.
+ * Anything composed around it could print its own last line.
+ */
+function isSoleEngineRunInvocation(command: string, isEngineCli: IsEngineCli, shellWrites: readonly string[]): boolean {
+  if (shellWrites.length > 0) return false;
+  const blanked = scanSubstitutions(command, () => "");
+  if (blanked.unclosed || blanked.rebuilt !== command) return false;
+  const segments = splitCommandSegmentsWithOps(command)
+    .map(({ text }) => stripComment(text).trim())
+    .filter((text) => text !== "");
+  if (segments.length !== 1) return false;
+  const [segment] = segments;
+  if (hasUnbalancedQuotes(segment) || stripEnvPrefix(segment) !== segment) return false;
+  const words = shellWords(segment).map(unquote);
+  return words[0] === "bun" && words[1] !== undefined && isEngineCli(words[1]) &&
+    words[2] === "helper" && words[3] === "run-tests";
+}
+
+/**
+ * The engine-run TestRun one `helper run-tests` call minted, or null: the call
+ * must be a sole bare invocation of the engine's own CLI that finished, and
+ * its receipt must be the last line of its output.
+ */
+function engineRunTestRun(command: string, run: BashRun, isEngineCli: IsEngineCli, shellWrites: readonly string[]): Evidence | null {
+  if (run.interrupted || !isSoleEngineRunInvocation(command, isEngineCli, shellWrites)) return null;
+  const receipt = parseEngineTestRunReceipt(run.stdout);
+  if (!receipt.ok) return null;
+  const { repositoryRoot, manifestDigest, exit, report } = receipt.value;
+  return {
+    kind: "TestRun",
+    origin: Object.freeze({ kind: "engine-run", repositoryRoot, manifestDigest }),
+    command,
+    exit,
+    report,
+  };
+}
+
+/**
  * Evidence for one normalized tool call — facts only; judgments happen at
  * fold time. This is the ONE minting rule for both harnesses (INV-4): each
  * harness adapter (`core/harness-tool-call.ts`) normalizes its own event into
@@ -229,9 +281,13 @@ export type FindReportForSegment = (
  * trusted failure, not a non-event), and an unknown exit yields `exit: null`,
  * which downstream never trusts as success.
  */
-export function extractEvidence(call: HarnessToolCall, findReportForSegment: FindReportForSegment): Evidence[] {
+export function extractEvidence(
+  call: HarnessToolCall,
+  findReportForSegment: FindReportForSegment,
+  isEngineCli: IsEngineCli = NO_ENGINE_CLI,
+): Evidence[] {
   if (call.tool === "Other") return [];
-  if (call.tool === "Bash") return bashEvidence(call.input, call.outcome, findReportForSegment);
+  if (call.tool === "Bash") return bashEvidence(call.input, call.outcome, findReportForSegment, isEngineCli);
   if (call.outcome.kind === "failed") return [];
   const path = editedFilePath(call.input);
   if (path === null) return [];
@@ -312,6 +368,7 @@ function bashEvidence(
   input: Readonly<Record<string, unknown>>,
   bashOutcome: BashToolOutcome,
   findReportForSegment: FindReportForSegment,
+  isEngineCli: IsEngineCli,
 ): Evidence[] {
   const command = typeof input.command === "string" ? input.command : "";
   const events: Evidence[] = [];
@@ -346,6 +403,10 @@ function bashEvidence(
       if (receipt.ok) events.push({ kind: "SandboxRun", receipt: receipt.value });
     }
   }
+  // An engine run (`helper run-tests`) is its own fact: the engine chose the
+  // runner, the report and the files, and printed the receipt last.
+  const engineRun = engineRunTestRun(command, run, isEngineCli, shellWrites);
+  if (engineRun !== null) events.push(engineRun);
   const classified = classifyTestCommandDetailed(command);
   if (classified !== null) {
     // The line's exit is attributed to the test segment only when the
@@ -376,6 +437,7 @@ function bashEvidence(
     const unfinished = classified.isBackgrounded || run.interrupted;
     events.push({
       kind: "TestRun",
+      origin: AGENT_COMMAND_ORIGIN,
       command,
       exit,
       report: unfinished ? null : report,

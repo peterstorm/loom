@@ -119,7 +119,7 @@ describe("guarded machine — full hook lifecycle", () => {
     const records = readEvidence(s);
     expect(records).toHaveLength(1);
     expect(records[0].epoch).toBe("a-1:guarded-test-agent");
-    expect(records[0].event).toEqual({ kind: "TestRun", command: "npm test", exit: 1, report: null });
+    expect(records[0].event).toEqual({ kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 1, report: null });
     // Foreign epochs see nothing (parseEpoch: the branded deserialization boundary):
     expect(eventsForEpoch(records, parseEpoch("a-9:code-implementer-agent")!)).toEqual([]);
     await cleanup(stop(s), []);

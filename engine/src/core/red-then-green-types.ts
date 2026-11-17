@@ -13,6 +13,7 @@
  */
 
 import type { Evidence } from "../machine/types";
+import type { TestEvidencePolicy } from "./test-evidence-policy";
 
 // --- Per-file TestRun results (FR-001..FR-004) ---
 
@@ -122,10 +123,17 @@ export type RedThenGreenFailureKind = `proof:red-then-green-unproven:${RedThenGr
  * testcase is red (FR-007). `repositoryRoot` makes an absolute reported file
  * identity repository-relative before attribution. `untrustedEvidence` is true
  * when the Task's test result carries `pi-structured` provenance.
+ *
+ * `policy` is the TaskGraph's test-evidence policy (`admitsTestRun`): a
+ * TestRun it does not admit (an agent's own command in an engine-run graph,
+ * or an engine run bound to another checkout or manifest) never qualifies and
+ * counts as an untrusted run, keeping its position so `RunRef.index` still
+ * names the ledger fact.
  */
 export type JudgeRedThenGreenFn = (
   events: readonly Evidence[],
   classification: TestFileClassification,
   repositoryRoot: string,
   untrustedEvidence: boolean,
+  policy: TestEvidencePolicy,
 ) => RedThenGreenObservation;

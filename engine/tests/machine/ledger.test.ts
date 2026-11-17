@@ -73,7 +73,7 @@ function roster(s: string, ...ids: string[]): void {
 
 const read = (path: string): Evidence => ({ kind: "FileRead", path });
 const testRun: Evidence = {
-  kind: "TestRun",
+  kind: "TestRun", origin: { kind: "agent-command" as const },
   command: "npm test",
   exit: 0,
   report: reportSummary(5, 0),
@@ -116,8 +116,8 @@ describe("evidence ledger", () => {
 
   it("a malformed report sub-object demotes to report: null (parseReportField rejection)", () => {
     const parse = (report: unknown) =>
-      parsedLine(JSON.stringify({ epoch: "a:b", event: { kind: "TestRun", command: "npm test", exit: 0, report } }));
-    const demoted = { epoch: "a:b", event: { kind: "TestRun", command: "npm test", exit: 0, report: null } };
+      parsedLine(JSON.stringify({ epoch: "a:b", event: { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report } }));
+    const demoted = { epoch: "a:b", event: { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: null } };
     // wrong types / missing fields / unknown source / non-object
     expect(parse({ total: "5", failed: 0, source: "vitest-json" })).toEqual(demoted);
     expect(parse({ total: 5, source: "vitest-json" })).toEqual(demoted);
@@ -127,26 +127,26 @@ describe("evidence ledger", () => {
     // a well-formed report survives
     expect(parse({ total: 5, failed: 0, source: "vitest-json" })).toEqual({
       epoch: "a:b",
-      event: { kind: "TestRun", command: "npm test", exit: 0, report: { total: 5, failed: 0, source: "vitest-json" } },
+      event: { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: { total: 5, failed: 0, source: "vitest-json" } },
     });
     // Re-mint: valid counts carrying a SMUGGLED extra field parse to EXACTLY
     // {total, failed, source} — the branded summary never carries riders
     // that could ride back out on re-serialization.
     expect(parse({ total: 5, failed: 0, source: "vitest-json", smuggled: "rider" })).toEqual({
       epoch: "a:b",
-      event: { kind: "TestRun", command: "npm test", exit: 0, report: { total: 5, failed: 0, source: "vitest-json" } },
+      event: { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: { total: 5, failed: 0, source: "vitest-json" } },
     });
   });
 
   it("stored judgments are ignored — only facts survive the parse", () => {
     const forged = JSON.stringify({
       epoch: "a:b",
-      event: { kind: "TestRun", command: "npm test", exit: 1, report: null, passed: true, trusted: true },
+      event: { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 1, report: null, passed: true, trusted: true },
     });
     const parsed = parsedLine(forged);
     expect(parsed).toEqual({
       epoch: "a:b",
-      event: { kind: "TestRun", command: "npm test", exit: 1, report: null },
+      event: { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 1, report: null },
     });
   });
 

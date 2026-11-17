@@ -6,6 +6,8 @@ import { extractTestEvidence } from "../../../src/core/test-evidence";
 import { judgeTestRun } from "../../../src/machine";
 import type { Evidence } from "../../../src/machine";
 import { reportSummary } from "../../machine/report-summary";
+import { AGENT_COMMAND_EVIDENCE } from "../../../src/core/test-evidence-policy";
+import { evidenceArbitrary } from "../../fixtures/evidence-arbitrary";
 
 /**
  * Wrap added lines in the patch shape Git emits. New-test evidence is
@@ -254,21 +256,7 @@ describe("analyzeNewTests — property tests", () => {
 });
 
 describe("resolveTestEvidence — property tests", () => {
-  const eventArb: fc.Arbitrary<Evidence> = fc.oneof(
-    fc.record({ kind: fc.constant("FileRead" as const), path: fc.constantFrom("/a.ts", "/b.ts") }),
-    fc.record({ kind: fc.constant("FileWrite" as const), path: fc.constantFrom("/a.ts", "/b.ts"), via: fc.constantFrom("tool" as const, "shell" as const) }),
-    fc.record({
-      kind: fc.constant("TestRun" as const),
-      command: fc.constantFrom("npm test", "bun test"),
-      exit: fc.constantFrom<number | null>(0, 1, null),
-      report: fc.constantFrom(
-        null,
-        reportSummary(5, 0),
-        reportSummary(5, 2),
-        reportSummary(0, 0),
-      ),
-    }),
-  );
+  const eventArb: fc.Arbitrary<Evidence> = evidenceArbitrary([reportSummary(5, 0), reportSummary(5, 2), reportSummary(0, 0)]);
 
   /** Independent restatement: the deciding run is the LAST trusted TestRun. */
   function decidingRun(events: readonly Evidence[]): { index: number; verdict: string } | null {
@@ -287,7 +275,7 @@ describe("resolveTestEvidence — property tests", () => {
         fc.array(eventArb, { minLength: 0, maxLength: 25 }),
         fc.constantFrom("12 passing", "no test output here"),
         (events, transcript) => {
-          const resolved = resolveTestEvidence(events, transcript, true);
+          const resolved = resolveTestEvidence(events, AGENT_COMMAND_EVIDENCE, transcript, true);
           const deciding = decidingRun(events);
           const writeAfterDecidingPass =
             deciding !== null &&
@@ -308,7 +296,7 @@ describe("resolveTestEvidence — property tests", () => {
   it("for ALL event sequences: trusted-pass is returned ONLY when the deciding run is a pass with no later FileWrite", () => {
     fc.assert(
       fc.property(fc.array(eventArb, { minLength: 0, maxLength: 25 }), (events) => {
-        const resolved = resolveTestEvidence(events, "12 passing", true);
+        const resolved = resolveTestEvidence(events, AGENT_COMMAND_EVIDENCE, "12 passing", true);
         if (resolved.result.verdict === "trusted-pass") {
           const deciding = decidingRun(events);
           expect(deciding).not.toBeNull();

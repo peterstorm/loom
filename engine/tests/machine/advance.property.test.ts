@@ -26,6 +26,7 @@ const evidenceArb: fc.Arbitrary<Evidence> = fc.oneof(
   fc.record({ kind: fc.constant("FileWrite" as const), path: fc.constant("/f.ts"), via: fc.constant("tool" as const) }),
   fc.record({
     kind: fc.constant("TestRun" as const),
+    origin: fc.constant({ kind: "agent-command" as const }),
     command: fc.constantFrom("npm test", "bun test", "mvn test", 'echo "npm test: 5 passing"'),
     exit: fc.option(fc.integer({ min: 0, max: 2 }), { nil: null }),
     // TestReportSummary is branded (parseReportSummary is its sole producer):

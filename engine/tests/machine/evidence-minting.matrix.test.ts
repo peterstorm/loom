@@ -191,22 +191,22 @@ const EXPECTED = [
   { kind: "FileWrite", path: abs("src/renamed.ts"), via: "shell" },
   { kind: "FileWrite", path: abs("docs.md"), via: "shell" },
   {
-    kind: "TestRun",
+    kind: "TestRun", origin: { kind: "agent-command" as const },
     command: `npx vitest run tests/feature.test.ts --reporter=json --outputFile=${vitestReport}`,
     exit: 1,
     report: expect.objectContaining({ total: 1, failed: 1, source: "vitest-json" }),
   },
   {
-    kind: "TestRun",
+    kind: "TestRun", origin: { kind: "agent-command" as const },
     command: `bun test --reporter=junit --reporter-outfile=${junitReport}`,
     exit: 0,
     report: expect.objectContaining({ total: 2, failed: 0 }),
   },
-  { kind: "TestRun", command: `npx vitest run --reporter=json --outputFile=${staleReport}`, exit: 0, report: null },
+  { kind: "TestRun", origin: { kind: "agent-command" as const }, command: `npx vitest run --reporter=json --outputFile=${staleReport}`, exit: 0, report: null },
   { kind: "FileWrite", path: stagedReport, via: "tool" },
-  { kind: "TestRun", command: `npx vitest run --reporter=json --outputFile=${stagedReport}`, exit: 0, report: null },
-  { kind: "TestRun", command: "bun test tests/feature.test.ts", exit: 1, report: null },
-  { kind: "TestRun", command: timeoutCommand, exit: null, report: null },
+  { kind: "TestRun", origin: { kind: "agent-command" as const }, command: `npx vitest run --reporter=json --outputFile=${stagedReport}`, exit: 0, report: null },
+  { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "bun test tests/feature.test.ts", exit: 1, report: null },
+  { kind: "TestRun", origin: { kind: "agent-command" as const }, command: timeoutCommand, exit: null, report: null },
 ];
 
 // ─── Delivery through each sibling entry point ────────────────────────────
@@ -256,6 +256,7 @@ async function deliverToPi(): Promise<void> {
   const recorder = createPiEvidenceRecorder(grants, {
     registry,
     nowMs: () => Date.now(),
+    isEngineCli: () => false,
     writeStderr: () => undefined,
   });
   const ctx = { cwd: repo, sessionManager: { getSessionId: () => childSession } };

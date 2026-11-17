@@ -21,6 +21,7 @@ import type {
   TestFileResult,
 } from "./red-then-green-types";
 import type { Evidence } from "../machine/types";
+import { admitsTestRun, type TestEvidencePolicy } from "./test-evidence-policy";
 
 /** The one spelling of the receipt failure-kind prefix every I6 gap mints. */
 const RED_THEN_GREEN_FAILURE_PREFIX = "proof:red-then-green-unproven:";
@@ -72,6 +73,7 @@ function readEpoch(
   events: readonly Evidence[],
   classification: TestFileClassification,
   repositoryRoot: string,
+  policy: TestEvidencePolicy,
 ): EpochReading {
   const implementationFiles = new Map(
     classification.implementationFiles.map((file) => [normalizePlanPath(file), file] as const),
@@ -87,7 +89,7 @@ function readEpoch(
       if (declared !== undefined) firstImplementationWrite = Object.freeze({ index, path: declared });
     }
     if (event.kind !== "TestRun") continue;
-    const results = attributedResults(event, classification.testFiles, repositoryRoot);
+    const results = admitsTestRun(policy, event) ? attributedResults(event, classification.testFiles, repositoryRoot) : null;
     if (results === null || event.exit === null) {
       holdsUntrustedRun = true;
       continue;
@@ -130,9 +132,9 @@ const unproven = (gap: RedThenGreenGap): RedThenGreenObservation =>
  * unmet by qualifying runs is `untrustedOnly` when the epoch holds a
  * non-qualifying TestRun or the Task's test result is Pi-structured.
  */
-export const judgeRedThenGreen: JudgeRedThenGreenFn = (events, classification, repositoryRoot, untrustedEvidence) => {
+export const judgeRedThenGreen: JudgeRedThenGreenFn = (events, classification, repositoryRoot, untrustedEvidence, policy) => {
   if (classification.testFiles.length === 0) return unproven({ kind: "no-test-files" });
-  const epoch = readEpoch(events, classification, repositoryRoot);
+  const epoch = readEpoch(events, classification, repositoryRoot, policy);
   const write = epoch.firstImplementationWrite;
   if (write === null) return unproven({ kind: "implementation-write-missing" });
   const untrustedOnly = untrustedEvidence || epoch.holdsUntrustedRun;

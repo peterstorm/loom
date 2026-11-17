@@ -34,6 +34,7 @@ import {
   type VerificationPolicy,
 } from "./verification-policy";
 import { distillPassSetting, type FrozenVerificationManifest } from "./verification-manifest";
+import { engineRunTestEvidence, POPULATION_ADOPTION } from "./test-evidence-authority";
 import {
   recordedAnchorHashes,
   renderRequirementTraceEdges,
@@ -661,6 +662,9 @@ export function populateTaskGraph(
   const redWindow = redWindowTaskIds(contracts.value, command.tasks);
   const redThenGreen = redThenGreenScope(command.verificationManifest, contracts.value);
   const distillPlan = distillPlanOf(command, contracts.value);
+  // A manifest that declares the runner `helper run-tests` runs freezes the
+  // engine-run mode with it (loom#198): only an engine run proves I6 here.
+  const testEvidence = engineRunTestEvidence(command.verificationManifest, POPULATION_ADOPTION);
 
   const waves = taskWaves(command.tasks);
   const waveGates = Object.freeze(Object.fromEntries(
@@ -685,6 +689,7 @@ export function populateTaskGraph(
     owner_obligations: _staleOwnerObligations,
     export_bindings: _staleExportBindings,
     skeletons: _staleSkeletons,
+    test_evidence: _staleTestEvidence,
     ...existingWithoutWaveAuthority
   } = existing;
   const state: TaskGraph = Object.freeze({
@@ -718,6 +723,7 @@ export function populateTaskGraph(
     executing_tasks: Object.freeze([]),
     wave_gates: waveGates,
     verification_manifest: command.verificationManifest,
+    ...(testEvidence.ok ? { test_evidence: testEvidence.value } : {}),
     ...(command.issue === undefined ? {} : { github_issue: command.issue }),
     ...(command.repo === undefined ? {} : { github_repo: command.repo }),
   });

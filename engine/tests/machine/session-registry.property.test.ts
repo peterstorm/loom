@@ -43,6 +43,7 @@ import { SUBAGENT_DIR } from "../../src/config";
 import { inMemorySessionRegistry } from "./fake-session-registry";
 import { reportSummary } from "./report-summary";
 import { agentIdOf, agentTypeOf, sessionIdOf } from "../fixtures/machine-identities";
+import { evidenceArbitrary } from "../fixtures/evidence-arbitrary";
 
 // --- Agent pool (mix of machine-gated and ungated agents) ---
 
@@ -73,16 +74,7 @@ type Op =
   | { readonly op: "stop"; readonly agent: number }
   | { readonly op: "record"; readonly event: Evidence };
 
-const eventArb: fc.Arbitrary<Evidence> = fc.oneof(
-  fc.record({ kind: fc.constant("FileRead" as const), path: fc.constantFrom("/a.ts", "/b.ts") }),
-  fc.record({ kind: fc.constant("FileWrite" as const), path: fc.constantFrom("/a.ts", "/b.ts"), via: fc.constantFrom("tool" as const, "shell" as const) }),
-  fc.record({
-    kind: fc.constant("TestRun" as const),
-    command: fc.constantFrom("npm test", "bun test"),
-    exit: fc.constantFrom<number | null>(0, 1, null),
-    report: fc.constantFrom(null, reportSummary(5, 0)),
-  }),
-);
+const eventArb: fc.Arbitrary<Evidence> = evidenceArbitrary([reportSummary(5, 0)]);
 
 const opArb: fc.Arbitrary<Op> = fc.oneof(
   fc.record({ op: fc.constant("start" as const), agent: fc.constantFrom(0, 1, 2) }),

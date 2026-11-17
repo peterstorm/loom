@@ -166,10 +166,16 @@ export type PiEvidenceNoRecord = Readonly<{
 /** The Pi recorder's one total decision over the child's grant state (`piEvidenceTarget`). */
 export type PiEvidenceTargetDecision = EvidenceTarget | PiEvidenceNoRecord;
 
-/** The ledger and clock the shared shell reads and writes. */
+/**
+ * The ledger and clock the shared shell reads and writes, and the check that
+ * a script word, resolved against the call's cwd, is this Loom package's own
+ * CLI: only its `helper run-tests` receipt mints an engine-run TestRun
+ * (loom#198). Production supplies `isEngineCliScript`.
+ */
 export type ToolEvidencePorts = Readonly<{
   registry: Pick<SessionRegistry, "readEvidence" | "appendEvidence" | "callStartFor">;
   nowMs: () => number;
+  isEngineCli: (cwd: string, scriptWord: string) => boolean;
 }>;
 
 /**

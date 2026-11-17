@@ -23,7 +23,7 @@ describe("changedFilesAtStop", () => {
   it("is none for an epoch without FileWrite facts", () => {
     const events: Evidence[] = [
       { kind: "FileRead", path: `${ROOT}/src/a.ts` },
-      { kind: "TestRun", command: "npx vitest run", exit: 0, report: null },
+      { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npx vitest run", exit: 0, report: null },
     ];
 
     expect(changedFilesAtStop(events, ROOT, everything)).toEqual({ kind: "none" });

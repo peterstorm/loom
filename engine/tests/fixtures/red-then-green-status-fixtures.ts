@@ -94,6 +94,6 @@ export const GREEN_COMMAND = "bun test --reporter=junit --reporter-outfile=/tmp/
 
 /** Only an untrusted (exit-less) red before the write: red is unmet by qualifying runs alone. */
 export const UNTRUSTED_RED_EVENTS: readonly Evidence[] = [
-  { kind: "TestRun", command: RED_COMMAND, exit: null, report: report([failing(TEST_A)]) },
+  { kind: "TestRun", origin: { kind: "agent-command" as const }, command: RED_COMMAND, exit: null, report: report([failing(TEST_A)]) },
   { kind: "FileWrite", path: IMPL, via: "tool" },
 ];

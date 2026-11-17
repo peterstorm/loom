@@ -103,9 +103,9 @@ const OWED_JSON = (): string => graphJson([requiredTask("T1", OWED_ERA)], I6_MAN
 // --- Ledger events ---
 
 const SHOWN_EVENTS: readonly Evidence[] = [
-  { kind: "TestRun", command: RED_COMMAND, exit: 1, report: report([failing(TEST_A), passing(TEST_B)]) },
+  { kind: "TestRun", origin: { kind: "agent-command" as const }, command: RED_COMMAND, exit: 1, report: report([failing(TEST_A), passing(TEST_B)]) },
   { kind: "FileWrite", path: IMPL, via: "tool" },
-  { kind: "TestRun", command: GREEN_COMMAND, exit: 0, report: report([passing(TEST_A), passing(TEST_B)]) },
+  { kind: "TestRun", origin: { kind: "agent-command" as const }, command: GREEN_COMMAND, exit: 0, report: report([passing(TEST_A), passing(TEST_B)]) },
 ];
 
 // --- Harness ---

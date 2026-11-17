@@ -61,6 +61,7 @@ import {
 } from "../../src/handlers/helpers/exact-implementation-settlement";
 import { parseEvidenceLine } from "../../src/machine/evidence";
 import type { Task, TaskGraph, TaskTestResult } from "../../src/types";
+import { GREEN_RUN, RED_RUN, rawTestRun, type RawEvent } from "../fixtures/raw-test-run";
 
 // --- Repository, files and runs ---
 
@@ -78,8 +79,6 @@ const REPORTED_LEDGER_TEST = "tests/core/ledger.test.ts";
 const REPORTED_REPLAY_TEST = "tests/core/replay.test.ts";
 const UNRELATED_TEST = "tests/core/audit.test.ts";
 
-const RED_RUN = "npm --prefix engine run test:unit -- tests/core/ledger.test.ts";
-const GREEN_RUN = "npm --prefix engine run test:unit";
 
 /** Today's exact engine-default freeze: what every TaskGraph populated before
  *  this feature carries, and what its suite receipts were stamped against. */
@@ -93,7 +92,6 @@ const PRE_FEATURE_DEFAULT_MANIFEST = {
 
 // --- Ledger facts, as the recorder writes them ---
 
-type RawEvent = Readonly<Record<string, unknown>>;
 
 const passing = (file: string, executed = 2): TestFileResult =>
   ({ file, executed, failed: 0, skipped: 0, collectionError: false });
@@ -105,24 +103,11 @@ const collectionError = (file: string): TestFileResult =>
 const write = (path: string, via: "tool" | "shell" = "tool"): RawEvent => ({ kind: "FileWrite", path, via });
 const read = (path: string): RawEvent => ({ kind: "FileRead", path });
 
-/** A TestRun with a parsed JUnit report recording `results`, reconciled with its counts. */
-function run(
-  results: readonly TestFileResult[],
-  options: Readonly<{ command?: string; exit?: number | null }> = {},
-): RawEvent {
-  const total = results.reduce((sum, { executed }) => sum + executed, 0);
-  const failed = results.reduce((sum, file) => sum + file.failed, 0);
-  return {
-    kind: "TestRun",
-    command: options.command ?? (failed > 0 ? RED_RUN : GREEN_RUN),
-    exit: options.exit === undefined ? (failed > 0 ? 1 : 0) : options.exit,
-    report: { total, failed, source: "junit-xml", files: { kind: "recorded", results } },
-  };
-}
+const run = rawTestRun;
 
 /** A TestRun recorded before per-file results existed. */
 const legacyRun = (total: number, failed: number): RawEvent => ({
-  kind: "TestRun",
+  kind: "TestRun", origin: { kind: "agent-command" as const },
   command: failed > 0 ? RED_RUN : GREEN_RUN,
   exit: failed > 0 ? 1 : 0,
   report: { total, failed, source: "junit-xml" },
@@ -130,7 +115,7 @@ const legacyRun = (total: number, failed: number): RawEvent => ({
 
 /** A TestRun whose command printed no structured report. */
 const reportlessRun = (exit: number): RawEvent =>
-  ({ kind: "TestRun", command: GREEN_RUN, exit, report: null });
+  ({ kind: "TestRun", origin: { kind: "agent-command" as const }, command: GREEN_RUN, exit, report: null });
 
 const red = (file = REPORTED_LEDGER_TEST): RawEvent => run([failing(file)]);
 const green = (...files: readonly string[]): RawEvent =>
