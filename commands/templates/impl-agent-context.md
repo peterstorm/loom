@@ -71,6 +71,8 @@ When this is an exact `LOOM_IMPLEMENTATION_RETRY_CONTEXT` appendix, this is atte
 
 When it carries a `LOOM_DISTILL_PASS: 1` appendix, this Task is its Wave's distill pass. The appendix then replaces "Required Workflow" below: you implement nothing, write no test and create no file. Where another section of this brief reads as an instruction to implement, the appendix wins.
 
+When it carries a `LOOM_IMPLEMENTATION_ATTESTATION_CONTEXT` line, the operator attested that this Task's work is already on disk, and this dispatch only verifies it. The line replaces "Required Workflow" below and wins over any retry context beside it and any other section that reads as an instruction to implement: **change no file**. Do not edit, refactor, tidy or create a file, write no test, and restore nothing to a baseline. Any byte you move in your scope fails the attempt as `attempt-scope-drifted` and escalates the Task. A retry failure kind that asks for a write (an `implementation-write-missing` or `red-missing` gap) is what the attestation answers, not something to address. Read your files and check them against this brief, make the regression run the final verification run described at the top, and report. If the work on disk is wrong or incomplete, change nothing and report exactly what is missing: the operator reopens the Task.
+
 ## Operator Note
 
 {operator_note}
@@ -148,7 +150,7 @@ Write and edit the files listed above with Write/Edit. Loom's hooks allow this f
 
 ## Required Workflow
 
-A distill pass (a `LOOM_DISTILL_PASS: 1` appendix under "Engine-Issued Implementation Retry Context") follows that appendix's rules instead of the steps below.
+A distill pass (a `LOOM_DISTILL_PASS: 1` appendix under "Engine-Issued Implementation Retry Context") follows that appendix's rules instead of the steps below. An attestation (a `LOOM_IMPLEMENTATION_ATTESTATION_CONTEXT` line there) changes no file and follows that section instead.
 
 1. Read the **Architecture & Language Rules** above and apply them throughout
 2. Read the plan file and understand scope

@@ -277,6 +277,13 @@ describe("renderImplementationBrief", () => {
     expect(rendered.ok).toBe(true);
     if (!rendered.ok) return;
     expect(authorizeImplementationSpawn(value, rendered.value.prompt)).toMatchObject({ ok: true });
+    // The child is told what the line means: verify only, change nothing,
+    // even when a retry context beside it names a missing write.
+    const context = rendered.value.prompt.split("## Engine-Issued Implementation Retry Context\n\n")[1]?.split("\n\n## ")[0] ?? "";
+    expect(paragraphWith(context, "When it carries a `LOOM_IMPLEMENTATION_ATTESTATION_CONTEXT` line", "**change no file**",
+      "`attempt-scope-drifted`", "wins over any retry context", "`implementation-write-missing`", "replaces \"Required Workflow\"")).toBe(true);
+    const workflow = rendered.value.prompt.split("## Required Workflow\n\n")[1] ?? "";
+    expect(workflow.split("\n\n")[0]).toContain("An attestation (a `LOOM_IMPLEMENTATION_ATTESTATION_CONTEXT` line there) changes no file");
     // The old hand rule ("attempt 1 → None — semantic attempt 1.") is refused.
     const handAssembled = rendered.value.prompt.replace(dispatch.promptAppendix ?? "", NO_RETRY_CONTEXT);
     expect(authorizeImplementationSpawn(value, handAssembled).ok).toBe(false);
