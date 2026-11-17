@@ -19,7 +19,7 @@
  */
 
 import type { DomainResult } from "./orchestration-contract";
-import { COMPLETION_REPORT_ROOT } from "./completion-suite";
+import { COMPLETION_REPORT_ROOT } from "./engine-owned-paths";
 import { parseVerificationManifest } from "./verification-manifest";
 
 /** Upper bound on a manifest source; anything larger is refused unparsed. */

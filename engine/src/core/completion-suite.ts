@@ -5,6 +5,7 @@
  * performs no process, filesystem, clock, or network I/O.
  */
 
+import { COMPLETION_REPORT_ROOT } from "./engine-owned-paths";
 import { match } from "ts-pattern";
 import { compareStrings } from "./ordering";
 import {
@@ -52,7 +53,6 @@ const RESERVED_CHECK_PREFIX = "loom:";
 export const FULL_TIER_LINT_CHECK_ID_TEXT = "loom:full-tier-lint" as const;
 /** The engine-reserved owner-verification check (G5b AD-1). */
 export const OWNER_VERIFICATION_CHECK_ID_TEXT = "loom:owner-verification" as const;
-export const COMPLETION_REPORT_ROOT = ".loom/completion-reports" as const;
 const OPERATOR_VERIFICATION_MANIFEST_PATH = ".loom/verification-manifest.json" as const;
 
 /** Task ownership must never include operator command authority or engine report artifacts. */

@@ -20,8 +20,8 @@ import {
   nonEmptyOf,
 } from "./orchestration-contract";
 import { readDenseDataArray, type DataBoundaryError } from "./orchestration-contract/bytes";
+import { COMPLETION_REPORT_ROOT, isEngineEvidencePath } from "./engine-owned-paths";
 import {
-  COMPLETION_REPORT_ROOT,
   isProtectedVerificationPath,
   parseCompletionCheckId,
   type CompletionCheckId,
@@ -506,13 +506,7 @@ function parseRepairCheck(raw: unknown, path: string): InternalParse<DeclaredRep
 }
 
 function isProtectedSiblingPath(path: ReviewPath): boolean {
-  if (isProtectedVerificationPath(path)) return true;
-  const protectedRoots = [".git", ".claude/state", ".pi/state", ".claude/reviews", ".pi/reviews"];
-  if (protectedRoots.some((root) => path === root || path.startsWith(`${root}/`))) return true;
-  const parts = path.split("/");
-  return parts[0] === ".claude" && parts.some((part, index) => index > 0 && [
-    "panel-runs", "review-runs", "review-and-fix-runs", "wave-gate-runs", "orchestration-runs",
-  ].includes(part));
+  return isProtectedVerificationPath(path) || isEngineEvidencePath(path);
 }
 
 function parseSibling(raw: unknown, path: string): InternalParse<SiblingDisposition> {

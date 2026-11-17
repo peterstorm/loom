@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { ENGINE_EVIDENCE_POLICY } from "../../src/core/engine-owned-paths";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
@@ -367,12 +368,71 @@ describe("canonical remediation authority and path algebra", () => {
       ".claude/specs/2026-x/review-runs/run.x/result.json",
       ".claude/custom/wave-gate-runs/run.x/events.json",
       ".claude/custom/orchestration-runs/run.x/checkpoint.json",
+      // The Pi harness's twins, which the policy before loom#198 Cause 2 let through.
+      ".pi/state/active_task_graph.json",
+      ".pi/reviews/review-and-fix-runs/run.x/result.json",
+      ".pi/specs/2026-x/panel-runs/run.x/manifest.json",
     ];
     for (const attack of attacks) {
       expect(freezePathAuthority(standaloneInput([attack])).ok, `freeze ${attack}`).toBe(false);
       expect(registerSupportPath(frozenAuthority(), attack).ok, `register ${attack}`).toBe(false);
     }
     expect(registerSupportPath(frozenAuthority(), ".gitignore").ok).toBe(true);
+  });
+
+  describe("the exclusion policy a path authority records", () => {
+    // The policy text before loom#198 Cause 2: only the Claude Code harness's directories.
+    const LEGACY_POLICY = [
+      ".git metadata",
+      ".claude/state",
+      ".claude/reviews (packets, review runs, panel runs, and review-and-fix runs)",
+      ".claude/specs/<spec>/panel-runs",
+      ".claude/**/{panel-runs,review-runs,review-and-fix-runs,wave-gate-runs,orchestration-runs}",
+    ];
+    const sha256 = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
+    /** The authority as recorded under `exclusionPolicyDigest`, re-sealed the way the engine seals one. */
+    const recordedUnder = (exclusionPolicyDigest: string): Record<string, unknown> => {
+      const raw = jsonRoundTrip(registeredAuthority()) as Record<string, unknown> & {
+        sourcePublicationAuthority: { digest: string };
+        reviewedScope: { digest: string };
+        registeredSupportPaths: { digest: string };
+        authorizedPaths: { digest: string };
+      };
+      return {
+        ...raw,
+        exclusionPolicyDigest,
+        digest: sha256(JSON.stringify({
+          runId: raw.runId,
+          sourceResultDigest: raw.sourceResultDigest,
+          sourcePublicationAuthorityDigest: raw.sourcePublicationAuthority.digest,
+          reviewedScopeDigest: raw.reviewedScope.digest,
+          registeredSupportPathsDigest: raw.registeredSupportPaths.digest,
+          authorizedPathsDigest: raw.authorizedPaths.digest,
+          exclusionPolicyDigest,
+        })),
+      };
+    };
+
+    it("records the digest of the one evidence table its predicate interprets, which names both harnesses", () => {
+      expect(ENGINE_EVIDENCE_POLICY).toEqual({
+        schemaVersion: 1,
+        gitMetadataRoot: ".git",
+        stateRoots: [".claude/state", ".pi/state"],
+        runDirectoryRoots: [".claude/reviews", ".pi/reviews"],
+        runLayoutsUnder: {
+          harnesses: [".claude", ".pi"],
+          layouts: ["panel-runs", "review-runs", "review-and-fix-runs", "wave-gate-runs", "orchestration-runs"],
+        },
+      });
+      expect(registeredAuthority().exclusionPolicyDigest).toBe(sha256(JSON.stringify(ENGINE_EVIDENCE_POLICY)));
+    });
+
+    it("keeps an authority recorded under the legacy policy readable, and refuses any other policy", () => {
+      expect(parseRemediationPathAuthority(recordedUnder(sha256(JSON.stringify(LEGACY_POLICY)))).ok).toBe(true);
+      expect(parseRemediationPathAuthority(recordedUnder(digest(997)))).toMatchObject({
+        ok: false, error: expect.objectContaining({ message: expect.stringContaining("exclusion policy has drifted") }),
+      });
+    });
   });
 
   it("strictly rehydrates standalone-bound authority and rejects source or nested digest drift", () => {

@@ -20,6 +20,7 @@
  * idempotent and retires the root's older witnesses.
  */
 
+import { canonicalRunsRoot, REVIEW_AND_FIX_RUNS } from "../engine/src/core/engine-owned-paths";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import type { CaptureOutcome } from "../engine/src/orchestration/harness-capture-runtime";
@@ -105,7 +106,7 @@ type TrustedReviewRoot = Readonly<{
 type CaptureUpdate = (captures: ReadonlyMap<CaptureKey, TrustedReviewCapture>) => ReadonlyMap<CaptureKey, TrustedReviewCapture>;
 
 /** The Standalone Review root a session's verification reads. */
-const standaloneReviewRoot = (cwd: string): string => resolve(cwd, ".claude/reviews/review-and-fix-runs");
+const standaloneReviewRoot = (cwd: string): string => resolve(cwd, canonicalRunsRoot(".claude", REVIEW_AND_FIX_RUNS));
 
 type TrustedRunVerification =
   | Readonly<{ kind: "rejected"; message: string }>

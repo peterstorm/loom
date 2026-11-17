@@ -7,6 +7,7 @@
  * Usage: bun cli.ts helper complete-wave-gate [--wave N]
  */
 
+import { canonicalRunsRoot, WAVE_GATE_RUNS } from "../../core/engine-owned-paths";
 import { execFileSync } from "node:child_process";
 import { closeSync, constants as fsConstants, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -411,7 +412,7 @@ function modernCompletionRefusal(graph: TaskGraph): HookResult | null {
   const active = graph.active_wave_gate;
   const recovery = active?.terminalOutcome === null
     ? `resume the registered Wave Gate with \`bun \${LOOM_DIR}/engine/src/cli.ts helper orchestration resume ` +
-      `--runs-root ".claude/reviews/wave-gate-runs" --run ${JSON.stringify(active.runId)}\``
+      `--runs-root "${canonicalRunsRoot(".claude", WAVE_GATE_RUNS)}" --run ${JSON.stringify(active.runId)}\``
     : "start a fresh registered `/wave-gate` run";
   return {
     kind: "error",

@@ -1,3 +1,4 @@
+import { CANONICAL_TASK_GRAPH_LOCATIONS_TEXT, projectRootOfCanonicalStatePath } from "../../core/engine-owned-paths";
 import { basename, dirname, join, resolve } from "node:path";
 import { match } from "ts-pattern";
 import { taskGraphPath } from "../../config";
@@ -28,27 +29,19 @@ import {
 import { StateManager } from "../../state-manager";
 import type { HookHandler, HookResult } from "../../types";
 
-const CANONICAL_STATE_PATHS = Object.freeze([
-  join(".claude", "state", "active_task_graph.json"),
-  join(".pi", "state", "active_task_graph.json"),
-]);
-
 type ProjectRootResult =
   | Readonly<{ ok: true; value: string }>
   | Readonly<{ ok: false; error: string }>;
 
 function projectRootFromStatePath(statePath: string): ProjectRootResult {
-  const absoluteStatePath = resolve(statePath);
-  const projectRoot = dirname(dirname(dirname(absoluteStatePath)));
-  return CANONICAL_STATE_PATHS.some(
-    (relativeStatePath) => join(projectRoot, relativeStatePath) === absoluteStatePath,
-  )
+  const projectRoot = projectRootOfCanonicalStatePath(resolve(statePath));
+  return projectRoot !== null
     ? { ok: true, value: projectRoot }
     : {
         ok: false,
         error:
           `cannot derive verification manifest target from non-canonical State File path ${statePath}; ` +
-          "expected <root>/.claude/state/active_task_graph.json or <root>/.pi/state/active_task_graph.json",
+          `expected ${CANONICAL_TASK_GRAPH_LOCATIONS_TEXT}`,
       };
 }
 

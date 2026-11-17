@@ -2,8 +2,8 @@
 
 import { match } from "ts-pattern";
 import { compareStrings } from "./ordering";
+import { COMPLETION_REPORT_ROOT } from "./engine-owned-paths";
 import {
-  COMPLETION_REPORT_ROOT,
   FULL_TIER_LINT_CHECK_ID_TEXT,
   OWNER_VERIFICATION_CHECK_ID_TEXT,
   createAuthorizedWaveCompletionSuite,

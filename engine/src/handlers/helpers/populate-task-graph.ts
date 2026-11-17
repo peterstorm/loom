@@ -7,6 +7,7 @@
  * already left pending; without it both the pre-lock and locked guards refuse.
  */
 
+import { CANONICAL_TASK_GRAPH_LOCATIONS_TEXT, projectRootOfCanonicalStatePath } from "../../core/engine-owned-paths";
 import { lstatSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { HookHandler, HookResult, TaskGraph } from "../../types";
@@ -108,24 +109,15 @@ function readManifestFile(manifestPath: string): ManifestFile {
   }
 }
 
-const CANONICAL_STATE_PATHS = Object.freeze([
-  join(".claude", "state", "active_task_graph.json"),
-  join(".pi", "state", "active_task_graph.json"),
-]);
-
 function projectRootFromCanonicalStatePath(statePath: string): ResolvedProjectRoot {
-  const absoluteStatePath = resolve(statePath);
-  const projectRoot = dirname(dirname(dirname(absoluteStatePath)));
-  const isCanonicalLayout = CANONICAL_STATE_PATHS.some(
-    (relativeStatePath) => join(projectRoot, relativeStatePath) === absoluteStatePath,
-  );
-  return isCanonicalLayout
+  const projectRoot = projectRootOfCanonicalStatePath(resolve(statePath));
+  return projectRoot !== null
     ? { ok: true, value: projectRoot }
     : {
         ok: false,
         error:
           `cannot derive verification manifest authority from non-canonical State File path ${statePath}; ` +
-          "expected <root>/.claude/state/active_task_graph.json or <root>/.pi/state/active_task_graph.json",
+          `expected ${CANONICAL_TASK_GRAPH_LOCATIONS_TEXT}`,
       };
 }
 

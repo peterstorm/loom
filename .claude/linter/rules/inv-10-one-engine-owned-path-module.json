@@ -1,0 +1,18 @@
+{
+  "kind": "regex",
+  "name": "inv-10-one-engine-owned-path-module",
+  "description": "Every repository path class the engine writes or protects (harness state and review directories, the State File name, Run Directory layout names, the completion-report root) is defined once, in engine/src/core/engine-owned-paths.ts (loom#198, Cause 2). Two observers that each kept their own list (#192, #196) were one bug, and a third list had already drifted (remediation excluded .claude/state but not .pi/state). A module that restates one of these literals in code is the next drift; prose in a comment defines nothing and is not matched.",
+  "extensions": [".ts", ".tsx", ".mts", ".cts"],
+  "pattern": "^(?!\\s*(?:\\*|//|/\\*)).*['\"`](?:\\.(?:claude|pi)/(?:state|reviews)(?:/|['\"`])|[^'\"`]*active_task_graph\\.json['\"`]|\\.loom/completion-reports|panel-runs['\"`]|review-runs['\"`]|review-and-fix-runs['\"`]|wave-gate-runs['\"`]|orchestration-runs['\"`])",
+  "flags": "",
+  "excludePatterns": [
+    "engine/src/core/engine-owned-paths.ts",
+    "/tests/",
+    ".test.ts",
+    "/probes/",
+    "/calibration/",
+    "/scripts/"
+  ],
+  "fixHint": "Import the constant or the classifier from engine/src/core/engine-owned-paths.ts (HARNESS_STATE_DIRECTORIES, RUN_DIRECTORY_ROOTS, CANONICAL_TASK_GRAPH_PATHS, canonicalTaskGraphPath, projectRootOfCanonicalStatePath, TASK_GRAPH_FILE_NAME, RUN_LAYOUTS, WAVE_GATE_RUNS, REVIEW_AND_FIX_RUNS, canonicalRunsRoot, runsRootBesideStateFile, COMPLETION_REPORT_ROOT, engineOwnedPathClass, isEngineEvidencePath) instead of restating the path. A new engine-owned path class is added there, once.",
+  "enabled": true
+}
