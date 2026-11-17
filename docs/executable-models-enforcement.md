@@ -38,9 +38,10 @@ Declaring an owner makes it an obligation the Wave Gate checks.
   side-effect imports, `import x = require`, string-literal `import()` and
   `require()` — plus everything reached through `export … from` re-exports,
   resolved to files through relative paths (the extension
-  ladder `""`, `.ts`, `.tsx`, `.mts`, `.cts`, a `.js`-family specifier mapped
-  to its TypeScript source, then `index.ts`/`index.tsx`) and the matrix test's
-  tsconfig `paths`, must include the owner and every sibling due by the Wave.
+  ladder: a `.js`-family specifier's TypeScript source first, then `""`,
+  `.ts`, `.tsx`, `.mts`, `.cts`, then `.js`, `.jsx`, `.mjs`, `.cjs` for a
+  JavaScript module of an allowJs project, then `index.ts`/`index.tsx`/
+  `index.js`/`index.jsx`) and the matrix test's tsconfig `paths`, must include the owner and every sibling due by the Wave.
   Direct imports and re-export chains of any length count; plain import
   chains are not followed, so a module that merely imports the owner does
   not credit it: siblings import the owner, so following them would make the
