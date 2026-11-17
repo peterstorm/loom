@@ -9,6 +9,7 @@
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { FORCED_EXIT_MS } from "../../src/utils/exit-after-flush";
 
 const MODULE = join(__dirname, "..", "..", "src", "utils", "exit-after-flush.ts");
 const BYTES = 1024 * 1024;
@@ -50,6 +51,8 @@ describe("exitAfterFlush", () => {
   it("still exits, with every byte, when a stray handle would keep the process alive", async () => {
     const observed = await runChild("setInterval(() => {}, 1000); exitAfterFlush(4);");
     expect(observed).toMatchObject({ stdout: BYTES, stderr: BYTES / 4, exit: 4 });
+    // The forced exit, not the handle, ended it: no sooner than its bound, and well before the test's.
+    expect(observed.elapsedMs).toBeGreaterThanOrEqual(FORCED_EXIT_MS);
     expect(observed.elapsedMs).toBeLessThan(15_000);
   }, 30_000);
 });

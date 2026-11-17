@@ -13,9 +13,16 @@
  * So set the exit code and let the process end. A handle some handler left
  * open would keep it alive indefinitely, so an unref'd timer forces the exit
  * after {@link FORCED_EXIT_MS}; being unref'd, it never itself delays an exit.
+ *
+ * Unlike `process.exit`, this returns: code after the call keeps running until
+ * the process ends, so call it last.
  */
 
-/** How long a process whose output has drained may be kept alive by a stray handle. */
+/**
+ * The upper bound on the drain and on any stray handle together: a reader
+ * still not reading after this long, while a handle keeps the process alive,
+ * is cut off as before.
+ */
 export const FORCED_EXIT_MS = 5_000;
 
 export function exitAfterFlush(code: number): void {

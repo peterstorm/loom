@@ -322,10 +322,16 @@ function observeAgentTranscriptPresence(sessionId: SessionId, agentId: AgentId):
 
 /**
  * The roster entries of `rawSession` whose agents never started
- * (`isNeverStarted`), and whether that is every entry; null when the session
- * id, the roster's age or its entries cannot be read, so nothing is judged.
+ * (`isNeverStarted`), and whether that is every entry. Null when nothing is
+ * judged: the session id does not parse, the roster is empty, or its age or
+ * entries cannot be read (named on stderr, since that keeps a phantom entry
+ * in place). No other side effect: the callers that act on it say so.
  */
-function neverStartedRosterEntries(rawSession: string, nowMs: number): Readonly<{ agentIds: readonly AgentId[]; all: boolean }> | null {
+export function neverStartedRosterEntries(
+  rawSession: string,
+  nowMs: number,
+  observeTranscript: (session: SessionId, agentId: AgentId) => TranscriptPresence = observeAgentTranscriptPresence,
+): Readonly<{ agentIds: readonly AgentId[]; all: boolean }> | null {
   const session = parseSessionId(rawSession);
   if (session === null) return null;
   try {
@@ -333,10 +339,13 @@ function neverStartedRosterEntries(rawSession: string, nowMs: number): Readonly<
     const entries = readActiveAgentEntries(session);
     if (entries.length === 0) return null;
     const agentIds = entries
-      .filter(({ agentId }) => isNeverStarted(agentId, ageMs, observeAgentTranscriptPresence(session, agentId)))
+      .filter(({ agentId }) => isNeverStarted(agentId, ageMs, observeTranscript(session, agentId)))
       .map(({ agentId }) => agentId);
     return Object.freeze({ agentIds: Object.freeze(agentIds), all: agentIds.length === entries.length });
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      process.stderr.write(`loom: cannot judge the roster of ${session} for never-started agents: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
     return null;
   }
 }
@@ -370,12 +379,16 @@ export type ActiveSubagentObservation =
   | Readonly<{ kind: "observed"; anyActiveForGraph: boolean }>
   | Readonly<{ kind: "unavailable"; reason: string }>;
 
-/** A roster holding only agents that never started (a spawn refused after SubagentStart) is not activity; says so when it skips one. */
-function onlyNeverStarted(session: string): boolean {
+/**
+ * Whether a roster bound to the graph is activity: a roster holding only agents
+ * that never started (a spawn refused after SubagentStart) is not, and is named
+ * on stderr when skipped.
+ */
+function rosterServesGraph(session: string): boolean {
   const neverStarted = neverStartedRosterEntries(session, Date.now());
-  if (neverStarted === null || !neverStarted.all) return false;
+  if (neverStarted === null || !neverStarted.all) return true;
   process.stderr.write(`loom: ignoring never-started roster entries for ${session}: ${neverStarted.agentIds.join(", ")}\n`);
-  return true;
+  return false;
 }
 
 export function observeAnyActiveSubagent(taskGraphPath: string): ActiveSubagentObservation {
@@ -413,7 +426,7 @@ export function observeAnyActiveSubagent(taskGraphPath: string): ActiveSubagentO
           reason: `malformed task-graph pointer for ${session}: ${parsedPointer.error}`,
         });
       }
-      if (parsedPointer.value === wanted && !onlyNeverStarted(session)) {
+      if (parsedPointer.value === wanted && rosterServesGraph(session)) {
         return Object.freeze({ kind: "observed", anyActiveForGraph: true });
       }
     } catch (cause) {

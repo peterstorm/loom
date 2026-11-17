@@ -9,8 +9,8 @@
 import { mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { isClaudeCodeAgentId, isNeverStarted, NEVER_STARTED_GRACE_MS } from "../../src/core/roster-liveness";
-import { markAgentActive, observeAnyActiveSubagent, rosterAgentId } from "../../src/machine/ledger";
+import { isClaudeCodeAgentId, isNeverStarted, NEVER_STARTED_GRACE_MS, type TranscriptPresence } from "../../src/core/roster-liveness";
+import { markAgentActive, neverStartedRosterEntries, observeAnyActiveSubagent, rosterAgentId } from "../../src/machine/ledger";
 import { parseSessionId } from "../../src/machine/evidence";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 
@@ -19,7 +19,7 @@ const REAL = "afedcba9876543210";
 const SESSION = "11111111-2222-3333-4444-555555555555";
 
 describe("isNeverStarted", () => {
-  it.each<[string, number, "present" | "absent" | "unknown", boolean]>([
+  it.each<[string, number, TranscriptPresence, boolean]>([
     [PHANTOM, NEVER_STARTED_GRACE_MS, "absent", true],
     [PHANTOM, NEVER_STARTED_GRACE_MS - 1, "absent", false],
     [PHANTOM, NEVER_STARTED_GRACE_MS, "present", false],
@@ -102,6 +102,24 @@ describe("the ledger ignores and removes never-started roster entries", () => {
     rmSync(join(config, "projects"), { recursive: true, force: true });
     roster([PHANTOM], OLD);
     expect(active()).toMatchObject({ anyActiveForGraph: true });
+  });
+
+  it("counts the agent when its transcript cannot be probed (a read fails other than by absence)", () => {
+    writeFileSync(join(config, "projects", "a-file-not-a-directory"), "");
+    roster([PHANTOM], OLD);
+    expect(active()).toMatchObject({ anyActiveForGraph: true });
+  });
+
+  it("judges nothing for a roster whose session id does not parse, or that is empty", () => {
+    expect(neverStartedRosterEntries("bad session", Date.now())).toBeNull();
+    roster([], OLD);
+    expect(neverStartedRosterEntries(SESSION, Date.now(), () => "absent")).toBeNull();
+  });
+
+  it("asks the injected transcript observer, and calls every entry never-started only when it says absent", () => {
+    roster([PHANTOM, REAL], OLD);
+    const observed = neverStartedRosterEntries(SESSION, Date.now(), (_session, agentId) => (agentId === REAL ? "present" : "absent"));
+    expect(observed).toEqual({ agentIds: [PHANTOM], all: false });
   });
 
   it("removes a never-started entry when the next agent starts, keeping a live one", async () => {

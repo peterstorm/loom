@@ -150,7 +150,8 @@ export type ManifestExecutable = Readonly<{
   executable: string;
   /**
    * Where it resolves: a project-root-relative path (`<cwd>/<executable>`) for
-   * an executable that names a path, else each `PATH` directory joined with it.
+   * an executable that names a path (the manifest parser refuses an absolute
+   * one), else each `PATH` directory joined with it.
    */
   candidates: readonly Readonly<{ kind: "project"; path: string } | { kind: "absolute"; path: string }>[];
 }>;
@@ -181,8 +182,20 @@ export function manifestExecutables(manifest: CanonicalManifest, pathDirectories
   })));
 }
 
-/** The warning for executables none of whose candidates exists, or null when every one resolves. */
-export function unresolvedExecutablesWarning(unresolved: readonly ManifestExecutable[]): string | null {
+/** How the shell checks a candidate: a project path is joined to the project root first. */
+export type CandidateExists = (candidate: ManifestExecutable["candidates"][number]) => boolean;
+
+/**
+ * The warning for the manifest's executables none of whose candidates exists
+ * (`exists`), or null when every one resolves. The shell prints it only once
+ * the manifest is installed.
+ */
+export function unresolvedExecutablesWarning(
+  manifest: CanonicalManifest,
+  pathDirectories: readonly string[],
+  exists: CandidateExists,
+): string | null {
+  const unresolved = manifestExecutables(manifest, pathDirectories).filter(({ candidates }) => !candidates.some(exists));
   if (unresolved.length === 0) return null;
   const named = unresolved.map(({ label, executable }) => `${label} runs ${executable}`).join("; ");
   return `write-verification-manifest: installed, but ${named}, which ${unresolved.length === 1 ? "does" : "do"} not resolve ` +

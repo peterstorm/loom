@@ -235,9 +235,26 @@ describe("manifestExecutables (loom#198, Cause 5)", () => {
     ]);
   });
 
-  it("warns, naming each unresolved executable, and stays quiet when everything resolves", () => {
-    const [entry] = manifestExecutables(canonical({ schemaVersion: 2, kind: "loom-verification-manifest", checks: [], affectedRunner: runner("node_modules/.bin/vitest") }), []);
-    expect(unresolvedExecutablesWarning([entry!])).toContain("affectedRunner runs node_modules/.bin/vitest, which does not resolve");
-    expect(unresolvedExecutablesWarning([])).toBeNull();
+  it("refuses an absolute executable at parse, so no candidate is ever absolute by spelling", () => {
+    expect(canonicalizeManifestSource(JSON.stringify({
+      schemaVersion: 1, kind: "loom-verification-manifest",
+      checks: [{ id: "project:env", scope: "wave", executable: "/usr/bin/env", args: ["true"], cwd: ".", timeoutMs: 60_000, report: { kind: "not-required" } }],
+    })).ok).toBe(false);
+  });
+
+  it("warns about exactly the executables no candidate of which exists, and stays quiet when all resolve", () => {
+    const manifest = canonical({
+      schemaVersion: 2, kind: "loom-verification-manifest",
+      checks: [{ id: "project:test", scope: "wave", executable: "bun", args: ["test"], cwd: ".", timeoutMs: 60_000, report: { kind: "not-required" } }],
+      affectedRunner: runner("node_modules/.bin/vitest", "engine"),
+      acceptanceRunner: { ...runner("node_modules/.bin/vitest"), report: { kind: "required-file", path: ".loom/completion-reports/acceptance.junit.xml" } },
+    });
+    const present = new Set(["/opt/bin/bun", "node_modules/.bin/vitest"]);
+    const exists = ({ path }: { path: string }) => present.has(path);
+    const warning = unresolvedExecutablesWarning(manifest, ["/usr/bin", "/opt/bin"], exists);
+    expect(warning).toContain("affectedRunner runs node_modules/.bin/vitest, which does not resolve");
+    expect(warning).not.toContain("project:test");
+    expect(warning).not.toContain("acceptanceRunner");
+    expect(unresolvedExecutablesWarning(manifest, ["/opt/bin"], () => true)).toBeNull();
   });
 });

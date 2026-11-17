@@ -6,7 +6,6 @@ import { taskGraphPath } from "../../config";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "../../core/verification-manifest";
 import {
   canonicalizeManifestSource,
-  manifestExecutables,
   manifestReportPaths,
   parseManifestInstallArgs,
   planManifestInstall,
@@ -145,11 +144,14 @@ const handler: HookHandler = async (stdin, args): Promise<HookResult> => {
   }
 
   const target = join(projectRoot.value, VERIFICATION_MANIFEST_SOURCE_PATH);
-  // Surface a runner that cannot resolve now, not when the first Task runs it (loom#198, Cause 5).
-  const unresolved = manifestExecutables(candidate.value, (process.env.PATH ?? "").split(delimiter))
-    .filter(({ candidates }) => !candidates.some(({ kind, path }) => existsSync(kind === "project" ? join(projectRoot.value, path) : path)));
-  const warning = unresolvedExecutablesWarning(unresolved);
-  if (warning !== null) process.stderr.write(`${warning}\n`);
+  // Surface a runner that cannot resolve now, not when the first Task runs it (loom#198, Cause 5);
+  // printed only once the manifest is in place.
+  const warning = unresolvedExecutablesWarning(candidate.value, (process.env.PATH ?? "").split(delimiter),
+    ({ kind, path }) => existsSync(kind === "project" ? join(projectRoot.value, path) : path));
+  const installed = (): HookResult => {
+    if (warning !== null) process.stderr.write(`${warning}\n`);
+    return { kind: "passthrough" };
+  };
   try {
     ensureDirectoryNoFollow(dirname(target));
     const plan = planManifestInstall(
@@ -161,12 +163,12 @@ const handler: HookHandler = async (stdin, args): Promise<HookResult> => {
     return match(plan)
       .with({ kind: "create" }, ({ manifest }): HookResult => {
         writeRunFileExclusiveNoFollow(target, manifest);
-        return { kind: "passthrough" };
+        return installed();
       })
-      .with({ kind: "unchanged" }, (): HookResult => ({ kind: "passthrough" }))
+      .with({ kind: "unchanged" }, (): HookResult => installed())
       .with({ kind: "replace" }, ({ manifest }): HookResult => {
         replaceAtomically(target, manifest);
-        return { kind: "passthrough" };
+        return installed();
       })
       .with({ kind: "refuse" }, ({ reason }): HookResult => ({ kind: "error", message: reason }))
       .exhaustive();
