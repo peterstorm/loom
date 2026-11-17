@@ -35,7 +35,7 @@ import { nonEmpty, type NonEmpty } from "../../core/orchestration-contract";
 import { parseReviewPath } from "../../core/review-packet";
 import { sha256Bytes } from "../../core/digest";
 import { engineRunReport, formatEngineTestRunReceipt, type EngineTestRunReceipt } from "../../core/engine-test-run";
-import { engineRunUnavailableReason } from "../../core/test-evidence-authority";
+import { engineRunnable } from "../../core/test-evidence-authority";
 import { affectedRunnerCheck } from "../../core/verification-manifest";
 import type { StopCheckCommand, StopCheckRunnerLock } from "../../core/affected-stop-check-types";
 import type { CompletionCheckRunnerResult } from "../../orchestration/completion-check-runner";
@@ -109,13 +109,26 @@ async function acquireWithin(root: CanonicalRepositoryRoot, ports: RunTestsPorts
   return lock;
 }
 
-/** The report bytes the runner produced, read back while the lock is held, or null when they changed or cannot be read. */
-function readBackReport(root: CanonicalRepositoryRoot, report: Readonly<{ path: string; digest: string }>, ports: RunTestsPorts): string | null {
+type ReadBack = Readonly<{ ok: true; text: string }> | Readonly<{ ok: false; reason: string }>;
+
+/**
+ * The text of the report the runner produced, read back while the lock is
+ * held, or why it cannot be trusted: unreadable, not UTF-8, or rewritten
+ * after the runner produced it. Never a silent absence: a report the runner
+ * wrote but this run cannot read is not a crash, and must not pass for one.
+ */
+function readBackReport(root: CanonicalRepositoryRoot, report: Readonly<{ path: string; digest: string }>, ports: RunTestsPorts): ReadBack {
+  let bytes: Uint8Array;
   try {
-    const bytes = ports.readReport(join(root, report.path));
-    return sha256Bytes(bytes) === report.digest ? new TextDecoder("utf-8", { fatal: true }).decode(bytes) : null;
+    bytes = ports.readReport(join(root, report.path));
+  } catch (cause) {
+    return { ok: false, reason: `the report ${report.path} could not be read back: ${describeCause(cause)}` };
+  }
+  if (sha256Bytes(bytes) !== report.digest) return { ok: false, reason: `the report ${report.path} changed after the runner produced it` };
+  try {
+    return { ok: true, text: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
   } catch {
-    return null;
+    return { ok: false, reason: `the report ${report.path} is not UTF-8` };
   }
 }
 
@@ -142,7 +155,9 @@ function receiptOf(
   if (outcome.timedOut) return refuse("the runner timed out; a partial run proves nothing");
   if (outcome.signal !== null) return refuse(`the runner was killed by ${outcome.signal}; a partial run proves nothing`);
   if (outcome.exitCode === null) return refuse("the runner's exit is unknown");
-  const reportText = outcome.report.kind === "produced" ? readBackReport(graph.root, outcome.report, ports) : null;
+  if (outcome.report.kind === "unreadable") return refuse(`the runner's report could not be read: ${outcome.report.message}`);
+  const readBack = outcome.report.kind === "produced" ? readBackReport(graph.root, outcome.report, ports) : null;
+  if (readBack !== null && !readBack.ok) return refuse(`${readBack.reason}; a run without its report proves nothing`);
   return {
     ok: true,
     receipt: Object.freeze({
@@ -150,7 +165,8 @@ function receiptOf(
       manifestDigest: graph.manifestDigest,
       files,
       exit: outcome.exitCode,
-      report: engineRunReport(files, outcome.exitCode, reportText),
+      // Only a runner that wrote no report at all reaches here without text.
+      report: engineRunReport(files, outcome.exitCode, readBack?.text ?? null),
     }),
   };
 }
@@ -180,28 +196,26 @@ export function createRunTestsHandler(ports: RunTestsPorts = PRODUCTION_PORTS): 
     if (!parsed.ok) return { kind: "error", message: parsed.message };
     const loaded = loadGraph();
     if (!loaded.ok) return { kind: "error", message: loaded.message };
-    const manifest = loaded.graph.verification_manifest;
-    const unavailable = engineRunUnavailableReason(manifest);
-    if (unavailable !== null || manifest?.affectedRunner === undefined) {
-      return { kind: "error", message: `run-tests: ${unavailable ?? "no affectedRunner"}; there is no engine runner to run` };
-    }
-    const command = affectedRunnerCheck(manifest.affectedRunner, parsed.files);
+    const runnable = engineRunnable(loaded.graph.verification_manifest);
+    if (!runnable.ok) return { kind: "error", message: `run-tests: ${runnable.error}; there is no engine runner to run` };
+    const { manifest, runner } = runnable.value;
+    const command = affectedRunnerCheck(runner, parsed.files);
     if (!command.ok) return { kind: "error", message: `run-tests: ${command.error.errors.join("; ")}` };
     const root = ports.repositoryRoot(loaded.statePath);
     if (!root.ok) return { kind: "error", message: `run-tests: ${root.reason}` };
 
     const lock = await acquireWithin(root.root, ports);
     if (lock.kind === "held") return { kind: "error", message: `run-tests: the runner lock stayed held: ${lock.reason}` };
-    let outcome: ReturnType<typeof receiptOf>;
-    let run: CompletionCheckRunnerResult;
-    try {
-      run = await ports.runCheck(command.value, root.root);
-      // The report is read back while the lock is held, so no stop check can overwrite it first.
-      outcome = receiptOf(run, parsed.files, { root: root.root, manifestDigest: manifest.manifestDigest }, ports);
-    } finally {
-      const released = lock.release();
-      if (released !== null) ports.writeDiagnostic(`run-tests: ${released}\n`);
-    }
+    const { run, outcome } = await (async () => {
+      try {
+        const ran = await ports.runCheck(command.value, root.root);
+        // The report is read back while the lock is held, so no stop check can overwrite it first.
+        return { run: ran, outcome: receiptOf(ran, parsed.files, { root: root.root, manifestDigest: manifest.manifestDigest }, ports) };
+      } finally {
+        const released = lock.release();
+        if (released !== null) ports.writeDiagnostic(`run-tests: ${released}\n`);
+      }
+    })();
     ports.writeDiagnostic(runnerOutput(run));
     if (!outcome.ok) return { kind: "error", message: outcome.message };
     ports.write(summaryLine(outcome.receipt));

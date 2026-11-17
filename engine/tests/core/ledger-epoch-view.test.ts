@@ -21,6 +21,7 @@ import type { Epoch, EvidenceRecord } from "../../src/machine/types";
 import { agentIdOf, agentTypeOf, sessionIdOf } from "../fixtures/machine-identities";
 import { aSandboxReceipt } from "../security/sandbox-fixtures";
 import { AGENT_COMMAND_EVIDENCE } from "../../src/core/test-evidence-policy";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 // --- Fixtures, through the production parsers ---
 
@@ -42,7 +43,7 @@ const read = (epoch: Epoch, path: string, callId?: string) =>
 const testRun = (epoch: Epoch, command: string, exit: number | null, report: unknown, callId?: string) =>
   record({
     epoch,
-    event: { kind: "TestRun", origin: { kind: "agent-command" as const }, command, ...(exit === null ? {} : { exit }), ...(report === null ? {} : { report }) },
+    event: { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command, ...(exit === null ? {} : { exit }), ...(report === null ? {} : { report }) },
     ...(callId === undefined ? {} : { callId }),
   });
 /** A SandboxRun fact holding the script's receipt shape, with the named facts changed. */

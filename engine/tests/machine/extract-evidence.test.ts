@@ -11,6 +11,7 @@ import { judgeTestRun } from "../../src/machine/test-report";
 import { reportSummary } from "./report-summary";
 import { TEST_COMMAND_PATTERNS } from "../../src/core/tool-vocabulary";
 import { claudeCall } from "../fixtures/claude-tool-call";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 /** The TestRun event extractEvidence minted for a Bash call, or null. */
 function mintTestRun(command: string, exit: number, stdout = "") {
@@ -414,7 +415,7 @@ describe("extractEvidence — facts only", () => {
   it("emits TestRun facts for classified commands, nothing for prose", () => {
     const report = reportSummary(3, 0);
     const events = extractEvidence(claudeCall("Bash", { command: "npm test" }, { exit_code: 0, stdout: "" }), () => report);
-    expect(events).toEqual([{ kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report }]);
+    expect(events).toEqual([{ kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 0, report }]);
 
     expect(
       extractEvidence(claudeCall("Bash", { command: 'echo "npm test: 5 passing"' }, { exit_code: 0, stdout: "5 passing" }), () => null),
@@ -474,10 +475,10 @@ describe("extractEvidence — facts mean the tool SUCCEEDED", () => {
       claudeCall("Bash", { command: "npm test" }, { is_error: true, exit_code: 1, stdout: "3 failing" }),
       () => null,
     );
-    expect(events).toEqual([{ kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 1, report: null }]);
+    expect(events).toEqual([{ kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 1, report: null }]);
     // …and an error response with no usable exit yields exit: null (never trusted):
     const noExit = extractEvidence(claudeCall("Bash", { command: "npm test" }, { error: "spawn failed" }), () => null);
-    expect(noExit).toEqual([{ kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: null, report: null }]);
+    expect(noExit).toEqual([{ kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: null, report: null }]);
   });
 });
 
@@ -497,10 +498,10 @@ describe("unquoted & — background compositions (round-10 Fix 3)", () => {
     ).find((event) => event.kind === "TestRun");
 
     expect(run("npm test &")).toEqual({
-      kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test &", exit: null, report: null,
+      kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test &", exit: null, report: null,
     });
     expect(run("npm test")).toEqual({
-      kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: green,
+      kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 0, report: green,
     });
   });
 
@@ -518,11 +519,11 @@ describe("unquoted & — background compositions (round-10 Fix 3)", () => {
     ).find((event) => event.kind === "TestRun");
 
     expect(run({ interrupted: true, exit_code: 0, stdout: "" })).toEqual({
-      kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: null, report: null,
+      kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: null, report: null,
     });
     // The same command that ran to completion still keeps its report.
     expect(run({ exit_code: 0, stdout: "" })).toEqual({
-      kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: green,
+      kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 0, report: green,
     });
   });
 
@@ -551,7 +552,7 @@ describe("unquoted & — background compositions (round-10 Fix 3)", () => {
       claudeCall("Bash", { command }, { exit_code: 0, stdout: "" }),
       () => green,
     ).find((event) => event.kind === "TestRun");
-    expect(run).toEqual({ kind: "TestRun", origin: { kind: "agent-command" as const }, command, exit: null, report: null });
+    expect(run).toEqual({ kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command, exit: null, report: null });
     if (run?.kind === "TestRun") {
       expect(judgeTestRun(run.exit, run.report)).toEqual({ verdict: "untrusted" });
     }

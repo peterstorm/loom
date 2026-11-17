@@ -404,7 +404,8 @@ function bashEvidence(
     }
   }
   // An engine run (`helper run-tests`) is its own fact: the engine chose the
-  // runner, the report and the files, and printed the receipt last.
+  // runner and the report path and printed the receipt last; the agent only
+  // named the test files.
   const engineRun = engineRunTestRun(command, run, isEngineCli, shellWrites);
   if (engineRun !== null) events.push(engineRun);
   const classified = classifyTestCommandDetailed(command);

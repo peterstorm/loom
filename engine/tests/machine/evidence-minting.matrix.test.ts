@@ -35,6 +35,7 @@ import { createPiChildWriteGrants } from "../../../pi/child-write-grant";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { IMPLEMENTER_TYPE, agentIdOf, sessionIdOf } from "../fixtures/machine-identities";
 import { inMemorySessionRegistry } from "./fake-session-registry";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const temp = canonicalTempDir("loom-evidence-minting-matrix-");
@@ -191,22 +192,22 @@ const EXPECTED = [
   { kind: "FileWrite", path: abs("src/renamed.ts"), via: "shell" },
   { kind: "FileWrite", path: abs("docs.md"), via: "shell" },
   {
-    kind: "TestRun", origin: { kind: "agent-command" as const },
+    kind: "TestRun", origin: AGENT_COMMAND_ORIGIN,
     command: `npx vitest run tests/feature.test.ts --reporter=json --outputFile=${vitestReport}`,
     exit: 1,
     report: expect.objectContaining({ total: 1, failed: 1, source: "vitest-json" }),
   },
   {
-    kind: "TestRun", origin: { kind: "agent-command" as const },
+    kind: "TestRun", origin: AGENT_COMMAND_ORIGIN,
     command: `bun test --reporter=junit --reporter-outfile=${junitReport}`,
     exit: 0,
     report: expect.objectContaining({ total: 2, failed: 0 }),
   },
-  { kind: "TestRun", origin: { kind: "agent-command" as const }, command: `npx vitest run --reporter=json --outputFile=${staleReport}`, exit: 0, report: null },
+  { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: `npx vitest run --reporter=json --outputFile=${staleReport}`, exit: 0, report: null },
   { kind: "FileWrite", path: stagedReport, via: "tool" },
-  { kind: "TestRun", origin: { kind: "agent-command" as const }, command: `npx vitest run --reporter=json --outputFile=${stagedReport}`, exit: 0, report: null },
-  { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "bun test tests/feature.test.ts", exit: 1, report: null },
-  { kind: "TestRun", origin: { kind: "agent-command" as const }, command: timeoutCommand, exit: null, report: null },
+  { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: `npx vitest run --reporter=json --outputFile=${stagedReport}`, exit: 0, report: null },
+  { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "bun test tests/feature.test.ts", exit: 1, report: null },
+  { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: timeoutCommand, exit: null, report: null },
 ];
 
 // ─── Delivery through each sibling entry point ────────────────────────────

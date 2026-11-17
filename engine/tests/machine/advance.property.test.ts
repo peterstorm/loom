@@ -5,6 +5,7 @@ import { initialState, type Evidence } from "../../src/machine/types";
 import { parseEvidenceLine } from "../../src/machine/evidence";
 import { parseMachine } from "../../src/machine/parse-machine";
 import { judgeTestRun, parseReportSummary } from "../../src/machine/test-report";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 // MachineDef is branded: parseMachine is its only producer, so tests build
 // the machine the same way production does — from a raw definition.
@@ -26,7 +27,7 @@ const evidenceArb: fc.Arbitrary<Evidence> = fc.oneof(
   fc.record({ kind: fc.constant("FileWrite" as const), path: fc.constant("/f.ts"), via: fc.constant("tool" as const) }),
   fc.record({
     kind: fc.constant("TestRun" as const),
-    origin: fc.constant({ kind: "agent-command" as const }),
+    origin: fc.constant(AGENT_COMMAND_ORIGIN),
     command: fc.constantFrom("npm test", "bun test", "mvn test", 'echo "npm test: 5 passing"'),
     exit: fc.option(fc.integer({ min: 0, max: 2 }), { nil: null }),
     // TestReportSummary is branded (parseReportSummary is its sole producer):

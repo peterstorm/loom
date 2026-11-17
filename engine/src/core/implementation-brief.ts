@@ -999,14 +999,15 @@ function engineRunSection(
   const testFiles = duty.kind === "owed"
     ? classifyTaskFiles(task.file_list ?? [], duty.testFiles, task.artifact_baseline).testFiles
     : [];
-  const command = input.commands.runTests(testFiles.length === 0 ? [ENGINE_RUN_FILE_PLACEHOLDER] : testFiles);
+  const named = testFiles.length > 0;
+  const command = input.commands.runTests(named ? testFiles : [ENGINE_RUN_FILE_PLACEHOLDER]);
   return [
     "**Test evidence: engine runs only (BINDING).** This TaskGraph counts only test runs the engine itself ran. " +
       "Every run that proves something (I6's red and green, your final verification run, a distill pass's run) is this one Bash call:",
     `\`${command}\``,
-    (testFiles.length === 0
-      ? `Replace \`${ENGINE_RUN_FILE_PLACEHOLDER}\` with each test file that covers your change, one \`--files\` per file, as a repository-relative path. `
-      : "Keep one `--files` per test file, as above. ") +
+    (named
+      ? "Keep one `--files` per test file, as above. "
+      : `Replace \`${ENGINE_RUN_FILE_PLACEHOLDER}\` with each test file that covers your change, one \`--files\` per file, as a repository-relative path. `) +
       "Run it exactly as one call, with nothing around it: no `cd ... &&`, no environment prefix, no pipe, redirect, `;` or `&&`. " +
       "It runs the project's frozen affected runner over those files, writes the runner's report, prints the runner's output to stderr, " +
       "and ends with the engine's receipt line, which the evidence ledger records. It exits 0 whenever the runner finished, whatever " +

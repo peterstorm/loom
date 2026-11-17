@@ -22,6 +22,7 @@ import type {
 import { parseReportSummary } from "../../src/core/structured-test-report";
 import type { Evidence } from "../../src/machine/types";
 import { AGENT_COMMAND_EVIDENCE } from "../../src/core/test-evidence-policy";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 // The judge satisfies the frozen CT-1 signature.
 const judge: JudgeRedThenGreenFn = judgeRedThenGreen;
@@ -76,7 +77,7 @@ const testRun = (
   exit: number | null,
   results: readonly TestFileResult[] | "unrecorded" | null,
   source: ReportSource = "junit-xml",
-): Evidence => ({ kind: "TestRun", origin: { kind: "agent-command" as const }, command, exit, report: results === null ? null : summary(results, source) });
+): Evidence => ({ kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command, exit, report: results === null ? null : summary(results, source) });
 
 /** The abstract steps an epoch is built from. */
 const STEPS = [

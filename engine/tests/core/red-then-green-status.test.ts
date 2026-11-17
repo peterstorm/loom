@@ -72,6 +72,7 @@ import {
 } from "../fixtures/red-then-green-status-fixtures";
 import { graphFixture, satisfiedProof, taskFixture } from "../fixtures/task-lifecycle";
 import { AGENT_COMMAND_EVIDENCE } from "../../src/core/test-evidence-policy";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 // --- Fixtures unique to the core ---
 
@@ -108,14 +109,14 @@ const collectionError = (file: string): TestFileResult => ({ file, executed: 1, 
 /** A read before the red, so the shown indices are not the event positions of the helper tests. */
 const SHOWN_EVENTS: readonly Evidence[] = [
   { kind: "FileRead", path: IMPL },
-  { kind: "TestRun", origin: { kind: "agent-command" as const }, command: RED_COMMAND, exit: 1, report: report([failing(TEST_A), passing(TEST_B)]) },
+  { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: RED_COMMAND, exit: 1, report: report([failing(TEST_A), passing(TEST_B)]) },
   { kind: "FileWrite", path: IMPL, via: "tool" },
-  { kind: "TestRun", origin: { kind: "agent-command" as const }, command: GREEN_COMMAND, exit: 0, report: report([passing(TEST_A), passing(TEST_B)]) },
+  { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: GREEN_COMMAND, exit: 0, report: report([passing(TEST_A), passing(TEST_B)]) },
 ];
 /** An implementation write and no run at all. */
 const NO_RED_EVENTS: readonly Evidence[] = [{ kind: "FileWrite", path: IMPL, via: "tool" }];
 
-const live = (events: readonly Evidence[]): RedThenGreenLiveInput => ({ kind: "live", events, repositoryRoot: ROOT });
+const live = (events: readonly Evidence[]): RedThenGreenLiveInput => ({ kind: "live", events, repositoryRoot: ROOT, policy: AGENT_COMMAND_EVIDENCE });
 const UNREADABLE_LIVE: RedThenGreenLiveInput = { kind: "unreadable", reason: "ledger torn" };
 const NO_LIVE: RedThenGreenLiveInput = { kind: "no-live-attempt" };
 
@@ -302,9 +303,9 @@ describe("redThenGreenStatusView: live attempt", () => {
 
   it("is judged with a collection error as red only for a Task that creates its module (FR-007a parity)", () => {
     const events: readonly Evidence[] = [
-      { kind: "TestRun", origin: { kind: "agent-command" as const }, command: RED_COMMAND, exit: 1, report: report([collectionError(TEST_A), passing(TEST_B)]) },
+      { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: RED_COMMAND, exit: 1, report: report([collectionError(TEST_A), passing(TEST_B)]) },
       { kind: "FileWrite", path: IMPL, via: "tool" },
-      { kind: "TestRun", origin: { kind: "agent-command" as const }, command: GREEN_COMMAND, exit: 0, report: report([passing(TEST_A), passing(TEST_B)]) },
+      { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: GREEN_COMMAND, exit: 0, report: report([passing(TEST_A), passing(TEST_B)]) },
     ];
     const creating = judgeRedThenGreen(events, settlementClassification(CREATING_GRAPH, "T1"), ROOT, false, AGENT_COMMAND_EVIDENCE);
     const editing = judgeRedThenGreen(events, settlementClassification(OWED_GRAPH, "T1"), ROOT, false, AGENT_COMMAND_EVIDENCE);

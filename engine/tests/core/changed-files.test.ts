@@ -12,6 +12,7 @@ import type { ChangedFilePath } from "../../src/core/affected-stop-check-types";
 import { changedFilesAtStop } from "../../src/core/changed-files";
 import { extractShellWriteTargets } from "../../src/core/shell-write-targets";
 import type { Evidence } from "../../src/machine/types";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 const ROOT = "/work/repo";
 
@@ -23,7 +24,7 @@ describe("changedFilesAtStop", () => {
   it("is none for an epoch without FileWrite facts", () => {
     const events: Evidence[] = [
       { kind: "FileRead", path: `${ROOT}/src/a.ts` },
-      { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npx vitest run", exit: 0, report: null },
+      { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npx vitest run", exit: 0, report: null },
     ];
 
     expect(changedFilesAtStop(events, ROOT, everything)).toEqual({ kind: "none" });

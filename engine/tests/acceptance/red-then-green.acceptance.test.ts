@@ -62,6 +62,7 @@ import {
 import { parseEvidenceLine } from "../../src/machine/evidence";
 import type { Task, TaskGraph, TaskTestResult } from "../../src/types";
 import { GREEN_RUN, RED_RUN, rawTestRun, type RawEvent } from "../fixtures/raw-test-run";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 // --- Repository, files and runs ---
 
@@ -107,7 +108,7 @@ const run = rawTestRun;
 
 /** A TestRun recorded before per-file results existed. */
 const legacyRun = (total: number, failed: number): RawEvent => ({
-  kind: "TestRun", origin: { kind: "agent-command" as const },
+  kind: "TestRun", origin: AGENT_COMMAND_ORIGIN,
   command: failed > 0 ? RED_RUN : GREEN_RUN,
   exit: failed > 0 ? 1 : 0,
   report: { total, failed, source: "junit-xml" },
@@ -115,7 +116,7 @@ const legacyRun = (total: number, failed: number): RawEvent => ({
 
 /** A TestRun whose command printed no structured report. */
 const reportlessRun = (exit: number): RawEvent =>
-  ({ kind: "TestRun", origin: { kind: "agent-command" as const }, command: GREEN_RUN, exit, report: null });
+  ({ kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: GREEN_RUN, exit, report: null });
 
 const red = (file = REPORTED_LEDGER_TEST): RawEvent => run([failing(file)]);
 const green = (...files: readonly string[]): RawEvent =>

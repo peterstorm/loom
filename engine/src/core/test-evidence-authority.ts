@@ -20,10 +20,10 @@
 
 import { parseErr, parseOk, type ParseResult } from "../machine/types";
 import type { TaskGraph } from "../types";
-import type { FrozenVerificationManifest } from "./verification-manifest";
+import { hasExactKeys, isRecord, type UnknownRecord } from "./plain-record";
+import type { AffectedRunner, FrozenVerificationManifest } from "./verification-manifest";
 import type { TestEvidencePolicy } from "./test-evidence-policy";
 import { AGENT_COMMAND_EVIDENCE } from "./test-evidence-policy";
-
 import type { EngineRunTestEvidence, TestEvidenceAdoption } from "./test-evidence-mode";
 
 export type { EngineRunTestEvidence, TestEvidenceAdoption } from "./test-evidence-mode";
@@ -36,14 +36,18 @@ export const MAX_ADOPTION_REASON_LENGTH = 500;
 const POPULATION_KEYS = ["adoptedBy", "kind", "manifestDigest"] as const;
 const OPERATOR_KEYS = ["adoptedBy", "kind", "manifestDigest", "reason"] as const;
 
+/** A frozen manifest together with the `affectedRunner` it declares: what an engine run needs. */
+export type EngineRunnableManifest = Readonly<{ manifest: FrozenVerificationManifest; runner: AffectedRunner }>;
+
 /**
- * Why `manifest` cannot carry engine-run evidence, or null when it can: it
- * must exist and declare the `affectedRunner` the helper runs.
+ * The manifest and runner `helper run-tests` runs under, or why there are
+ * none: the manifest must exist and declare an `affectedRunner`.
  */
-export function engineRunUnavailableReason(manifest: FrozenVerificationManifest | undefined): string | null {
-  if (manifest === undefined) return "the TaskGraph froze no Verification Manifest";
-  if (manifest.affectedRunner === undefined) return "the frozen Verification Manifest declares no affectedRunner";
-  return null;
+export function engineRunnable(manifest: FrozenVerificationManifest | undefined): ParseResult<EngineRunnableManifest> {
+  if (manifest === undefined) return parseErr("the TaskGraph froze no Verification Manifest");
+  return manifest.affectedRunner === undefined
+    ? parseErr("the frozen Verification Manifest declares no affectedRunner")
+    : parseOk(Object.freeze({ manifest, runner: manifest.affectedRunner }));
 }
 
 /** The engine-run mode for `manifest` under `adoption`, or why it cannot be. */
@@ -51,9 +55,28 @@ export function engineRunTestEvidence(
   manifest: FrozenVerificationManifest | undefined,
   adoption: TestEvidenceAdoption,
 ): ParseResult<EngineRunTestEvidence> {
-  const unavailable = engineRunUnavailableReason(manifest);
-  if (unavailable !== null || manifest === undefined) return parseErr(unavailable ?? "no manifest");
-  return parseOk(Object.freeze({ kind: "engine-run", manifestDigest: manifest.manifestDigest, ...adoption }));
+  const runnable = engineRunnable(manifest);
+  return runnable.ok
+    ? parseOk(Object.freeze({ kind: "engine-run", manifestDigest: runnable.value.manifest.manifestDigest, ...adoption }))
+    : runnable;
+}
+
+/**
+ * What a graph's test-evidence mode means, in one sentence population prints:
+ * engine runs only, or agent commands admitted and why, so a manifest without
+ * an `affectedRunner` never downgrades the evidence silently.
+ */
+export function testEvidenceModeNotice(
+  testEvidence: EngineRunTestEvidence | undefined,
+  manifest: FrozenVerificationManifest | undefined,
+): string {
+  if (testEvidence !== undefined) {
+    return "Test evidence: only engine runs (`helper run-tests`) prove I6 and test verdicts in this TaskGraph.";
+  }
+  const runnable = engineRunnable(manifest);
+  const why = runnable.ok ? "this TaskGraph has not adopted engine-run evidence" : runnable.error;
+  return `Test evidence: agents' own test commands are admitted, because ${why}. ` +
+    "Declare an affectedRunner in the verification manifest to require engine runs (`helper orchestration adopt-engine-run-tests` adopts them on a populated graph).";
 }
 
 /** An operator's reason as the field records it: one trimmed, non-empty line of bounded length. */
@@ -68,13 +91,8 @@ export function parseAdoptionReason(raw: unknown): ParseResult<string> {
   return parseOk(raw);
 }
 
-const hasExactKeys = (record: Record<string, unknown>, keys: readonly string[]): boolean => {
-  const present = Object.keys(record).sort();
-  return present.length === keys.length && present.every((key, index) => key === keys[index]);
-};
-
 /** The adoption a wire record names, with exactly the keys that adoption carries. */
-function parseAdoption(record: Record<string, unknown>): ParseResult<TestEvidenceAdoption> {
+function parseAdoption(record: Readonly<UnknownRecord>): ParseResult<TestEvidenceAdoption> {
   if (record.adoptedBy === "population") {
     return hasExactKeys(record, POPULATION_KEYS)
       ? parseOk(POPULATION_ADOPTION)
@@ -104,14 +122,13 @@ export function parseTestEvidenceField(
   manifest: FrozenVerificationManifest | undefined,
 ): ParseResult<EngineRunTestEvidence | undefined> {
   if (raw === undefined) return parseOk(undefined);
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return parseErr("test_evidence must be an object when present");
-  const record = raw as Record<string, unknown>;
-  if (record.kind !== "engine-run") return parseErr("test_evidence.kind must be engine-run");
-  const adoption = parseAdoption(record);
+  if (!isRecord(raw) || Array.isArray(raw)) return parseErr("test_evidence must be an object when present");
+  if (raw.kind !== "engine-run") return parseErr("test_evidence.kind must be engine-run");
+  const adoption = parseAdoption(raw);
   if (!adoption.ok) return adoption;
   const expected = engineRunTestEvidence(manifest, adoption.value);
   if (!expected.ok) return parseErr(`test_evidence: ${expected.error}`);
-  if (record.manifestDigest !== expected.value.manifestDigest) {
+  if (raw.manifestDigest !== expected.value.manifestDigest) {
     return parseErr("test_evidence.manifestDigest does not match the frozen Verification Manifest");
   }
   return parseOk(expected.value);
@@ -151,7 +168,12 @@ export function adoptEngineRunTestEvidence(graph: TaskGraph, rawReason: string):
   }));
 }
 
-/** The admission policy a graph's test-evidence mode yields at `repositoryRoot`. */
+/**
+ * The admission policy a graph's test-evidence mode yields at `repositoryRoot`.
+ * The pure constructor: the receipt binds a real-path root, so production
+ * callers go through the shell's `testEvidencePolicyAt`
+ * (`utils/test-evidence-policy-at.ts`), which resolves the root first.
+ */
 export function testEvidencePolicyOf(
   testEvidence: EngineRunTestEvidence | undefined,
   repositoryRoot: string,

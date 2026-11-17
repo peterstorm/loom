@@ -95,6 +95,8 @@ import { piGrantedAgentId } from "../../../pi/write-grant";
 import { piImplementationLedger } from "../../../pi/subagent-settlement";
 import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 import { GREEN_RUN, RED_RUN, rawTestRun, type RawEvent } from "../fixtures/raw-test-run";
+import { mutationManifest } from "../fixtures/task-mutation";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 // --- Identities ---
 
@@ -129,7 +131,7 @@ const collectionError = (file: string): TestFileResult => ({ file, executed: 1, 
 const write = (path: string, via: "tool" | "shell" = "tool"): RawEvent => ({ kind: "FileWrite", path, via });
 
 const run = rawTestRun;
-const reportlessRun = (exit: number): RawEvent => ({ kind: "TestRun", origin: { kind: "agent-command" as const }, command: GREEN_RUN, exit, report: null });
+const reportlessRun = (exit: number): RawEvent => ({ kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: GREEN_RUN, exit, report: null });
 const red = (file = REPORTED_LEDGER_TEST): RawEvent => run([failing(file)]);
 const green = (...files: readonly string[]): RawEvent =>
   run((files.length === 0 ? [REPORTED_LEDGER_TEST] : files).map(passing));
@@ -397,7 +399,7 @@ function withArtifactBaseline(graph: TaskGraph, created: readonly string[]): Tas
 
 /** A Vitest JSON run whose report lists `file` as failed to collect: no testcase at all. */
 const jsonCollectionErrorRun = (file: string, command = RED_RUN): RawEvent => ({
-  kind: "TestRun", origin: { kind: "agent-command" as const },
+  kind: "TestRun", origin: AGENT_COMMAND_ORIGIN,
   command,
   exit: 1,
   report: { total: 0, failed: 0, source: "vitest-json", files: { kind: "recorded", results: [{ file, executed: 0, failed: 0, skipped: 0, collectionError: true }] } },
@@ -1108,4 +1110,29 @@ describe("update-task-status hands settlement the agent's own epoch ledger (clau
     expect(task.implementation_attempt_history?.at(-1)).toMatchObject({ transition: "infrastructure-blocked" });
     expectInfrastructureBlocked(task);
   }, 30_000);
+});
+
+describe("I6 settlement in an engine-run graph (loom#198)", () => {
+  const manifest = mutationManifest();
+  const engineGraph = (): TaskGraph => populate([authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL])], manifest);
+  const engineRun = (event: RawEvent): RawEvent =>
+    ({ ...event, origin: { kind: "engine-run", repositoryRoot: ROOT, manifestDigest: manifest.manifestDigest } });
+
+  it("population froze the mode the settlement reads", () => {
+    expect(engineGraph().test_evidence).toEqual({ kind: "engine-run", manifestDigest: manifest.manifestDigest, adoptedBy: "population" });
+  });
+
+  it("an agent's own red and green settle as red-missing on untrusted runs alone, on both harnesses", () => {
+    expectGapOnBoth(engineGraph(), [write(LEDGER_TEST), red(), write(LEDGER_IMPL), green()], { kind: "red-missing", untrustedOnly: true });
+  });
+
+  it("engine runs bound to the graph's root and manifest satisfy I6 on both harnesses", () => {
+    expectShownOnBoth(engineGraph(), [write(LEDGER_TEST), engineRun(red()), write(LEDGER_IMPL), engineRun(green())],
+      { red: 1, implementationWrite: LEDGER_IMPL, green: 3 });
+  });
+
+  it("an engine run bound to another manifest is not admitted", () => {
+    const foreign = (event: RawEvent): RawEvent => ({ ...event, origin: { kind: "engine-run", repositoryRoot: ROOT, manifestDigest: "0".repeat(64) } });
+    expectGapOnBoth(engineGraph(), [write(LEDGER_TEST), foreign(red()), write(LEDGER_IMPL), foreign(green())], { kind: "red-missing", untrustedOnly: true });
+  });
 });

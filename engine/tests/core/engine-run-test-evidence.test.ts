@@ -19,6 +19,7 @@ import {
   engineRunTestEvidence,
   parseTestEvidenceField,
   POPULATION_ADOPTION,
+  testEvidenceModeNotice,
   testEvidencePolicyOf,
 } from "../../src/core/test-evidence-authority";
 import { admitsTestRun, AGENT_COMMAND_EVIDENCE, type TestEvidencePolicy } from "../../src/core/test-evidence-policy";
@@ -31,6 +32,9 @@ import { claudeCall } from "../fixtures/claude-tool-call";
 import { mutationManifest, junitReport } from "../fixtures/task-mutation";
 import { failing, IMPL, passing, report, TEST_A } from "../fixtures/red-then-green-status-fixtures";
 import { graphFixture } from "../fixtures/task-lifecycle";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
+import { parseEvidenceLine } from "../../src/machine/evidence";
+import { mutationRunFiles } from "../../src/core/task-mutation-check";
 
 const ROOT = "/repo";
 const MANIFEST = mutationManifest();
@@ -215,7 +219,7 @@ describe("the I6 judge and the test verdict under an engine-run graph", () => {
   const run = (origin: Extract<Evidence, { kind: "TestRun" }>["origin"], exit: number, red: boolean): Evidence =>
     ({ kind: "TestRun", origin, command: "run", exit, report: report([red ? failing(TEST_A) : passing(TEST_A)]) });
   const ENGINE = { kind: "engine-run" as const, repositoryRoot: ROOT, manifestDigest: DIGEST };
-  const AGENT = { kind: "agent-command" as const };
+  const AGENT = AGENT_COMMAND_ORIGIN;
   const epoch = (origin: typeof ENGINE | typeof AGENT): readonly Evidence[] => [
     run(origin, 1, true),
     { kind: "FileWrite", path: IMPL, via: "tool" },
@@ -242,5 +246,69 @@ describe("the I6 judge and the test verdict under an engine-run graph", () => {
   it("an agent's later exit-0 run does not make an engine run's trusted failure stale", () => {
     expect(resolveTestEvidence([run(ENGINE, 1, true), run(AGENT, 0, false)], ENGINE_POLICY, "", false).result)
       .toEqual({ verdict: "trusted-fail" });
+  });
+});
+
+describe("the ledger's TestRun origin, read back (loom#198)", () => {
+  const line = (event: Record<string, unknown>): string =>
+    JSON.stringify({ epoch: "agent-1:code-implementer-agent", event: { kind: "TestRun", command: "run", exit: 1, report: null, ...event } });
+  const originOf = (event: Record<string, unknown>) => {
+    const parsed = parseEvidenceLine(line(event));
+    if (!parsed.ok || parsed.value.event.kind !== "TestRun") throw new Error("expected a TestRun line");
+    return parsed.value.event.origin;
+  };
+  const BINDING = { repositoryRoot: ROOT, manifestDigest: DIGEST };
+
+  it("round-trips an engine-run origin", () => {
+    expect(originOf({ origin: { kind: "engine-run", ...BINDING } })).toEqual({ kind: "engine-run", ...BINDING });
+  });
+
+  it("reads a line without an origin as an agent command, as every line before engine runs", () => {
+    expect(originOf({})).toEqual(AGENT_COMMAND_ORIGIN);
+  });
+
+  it.each([
+    ["an extra key", { kind: "engine-run", ...BINDING, extra: 1 }],
+    ["a relative root", { kind: "engine-run", repositoryRoot: "repo", manifestDigest: DIGEST }],
+    ["a digest that is no sha256", { kind: "engine-run", repositoryRoot: ROOT, manifestDigest: "abc" }],
+    ["a missing digest", { kind: "engine-run", repositoryRoot: ROOT }],
+    ["another kind", { kind: "other", ...BINDING }],
+    ["an array", [BINDING]],
+  ])("fails closed to an agent command on %s", (_label, origin) => {
+    expect(originOf({ origin })).toEqual(AGENT_COMMAND_ORIGIN);
+  });
+
+  it("keeps a runner-crash report only on the engine run that minted it", () => {
+    const crash = engineRunReport([TEST_A], 1, null);
+    const read = (origin: unknown) => {
+      const parsed = parseEvidenceLine(line({ origin, report: crash }));
+      return parsed.ok && parsed.value.event.kind === "TestRun" ? parsed.value.event.report : "unparsed";
+    };
+    expect(read({ kind: "engine-run", ...BINDING })).toMatchObject({ source: "runner-crash" });
+    expect(read(undefined)).toBeNull();
+  });
+});
+
+describe("the receipt refuses a runner-crash report on a clean exit", () => {
+  it("is refused whole", () => {
+    const crash = engineRunReport([TEST_A], 1, null);
+    expect(parseEngineTestRunReceipt(formatEngineTestRunReceipt(receipt({ exit: 0, report: crash }))).ok).toBe(false);
+    expect(parseEngineTestRunReceipt(formatEngineTestRunReceipt(receipt({ exit: 2, report: crash }))).ok).toBe(true);
+  });
+});
+
+describe("mutationRunFiles: what one mutation run hands the runner", () => {
+  it("is the mutated file, then the Task's tests without it", () => {
+    expect(mutationRunFiles("src/a.ts", ["src/a.test.ts", "src/b.test.ts"])).toEqual(["src/a.ts", "src/a.test.ts", "src/b.test.ts"]);
+    expect(mutationRunFiles("src/a.ts", [])).toEqual(["src/a.ts"]);
+    expect(mutationRunFiles("src/a.test.ts", ["src/a.test.ts"])).toEqual(["src/a.test.ts"]);
+  });
+});
+
+describe("testEvidenceModeNotice: population says which mode it froze", () => {
+  it("names engine runs, or why an agent's own commands are admitted", () => {
+    expect(testEvidenceModeNotice(POPULATED.value, MANIFEST)).toContain("only engine runs");
+    expect(testEvidenceModeNotice(undefined, mutationManifest({ affectedRunner: undefined }))).toContain("declares no affectedRunner");
+    expect(testEvidenceModeNotice(undefined, MANIFEST)).toContain("has not adopted engine-run evidence");
   });
 });

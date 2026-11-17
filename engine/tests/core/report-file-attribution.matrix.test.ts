@@ -23,6 +23,7 @@ import { judgeRedThenGreen } from "../../src/core/red-then-green";
 import { parseReportSummary } from "../../src/core/structured-test-report";
 import type { Evidence } from "../../src/machine/types";
 import { AGENT_COMMAND_EVIDENCE } from "../../src/core/test-evidence-policy";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 const ROOT = "/home/dev/repo";
 
@@ -82,7 +83,7 @@ function failingRun(reported: string): Evidence {
     kind: "recorded", results: [{ file: reported, executed: 1, failed: 1, skipped: 0, collectionError: false }],
   });
   if (report === null) throw new Error("fixture report must reconcile");
-  return { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 1, report };
+  return { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 1, report };
 }
 
 /** The I6 judge's red step over one failing report: it is shown only when the

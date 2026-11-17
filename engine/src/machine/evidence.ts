@@ -12,6 +12,8 @@ import { match } from "ts-pattern";
 import { AGENT_COMMAND_ORIGIN, type Epoch, type Evidence, type EvidenceRecord, type FileWriteVia, type TestReportSummary, type TestRunOrigin } from "./types";
 import { parseReportSource, parseReportSummary } from "./test-report";
 import { parseSandboxReceiptValue } from "../core/security-sandbox";
+import { parseEngineRunBinding } from "../core/engine-test-run";
+import { hasExactKeys, isRecord } from "../core/plain-record";
 export { judgeTestRun, type TrustedTestVerdict } from "./test-report";
 
 // --- Branded agent identity ---
@@ -405,23 +407,24 @@ function parseReportField(v: unknown): TestReportSummary | null {
   return source === null ? null : parseReportSummary(o.total, o.failed, source, o.files);
 }
 
-const SHA256_HEX = /^[0-9a-f]{64}$/;
+const ENGINE_RUN_ORIGIN_KEYS: readonly string[] = Object.freeze(["kind", "repositoryRoot", "manifestDigest"]);
 
 /**
  * A ledger TestRun's origin. Absent = `agent-command` (every record before
- * engine runs); an `engine-run` must carry exactly its absolute repository
- * root and a sha256 manifest digest, and anything else fails closed to
- * `agent-command`, which never qualifies where an engine run is required.
+ * engine runs); an `engine-run` must carry exactly its kind and the binding
+ * the receipt carried (`parseEngineRunBinding`, the receipt's own grammar),
+ * and anything else fails closed to `agent-command`, which never qualifies
+ * where an engine run is required.
  */
 function parseTestRunOrigin(raw: unknown): TestRunOrigin {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return AGENT_COMMAND_ORIGIN;
-  const o = raw as Record<string, unknown>;
-  const keys = Object.keys(o).sort();
-  if (o.kind !== "engine-run" || keys.join(",") !== "kind,manifestDigest,repositoryRoot") return AGENT_COMMAND_ORIGIN;
-  if (typeof o.repositoryRoot !== "string" || !o.repositoryRoot.startsWith("/")) return AGENT_COMMAND_ORIGIN;
-  if (typeof o.manifestDigest !== "string" || !SHA256_HEX.test(o.manifestDigest)) return AGENT_COMMAND_ORIGIN;
-  return Object.freeze({ kind: "engine-run", repositoryRoot: o.repositoryRoot, manifestDigest: o.manifestDigest });
+  if (!isRecord(raw) || raw.kind !== "engine-run" || !hasExactKeys(raw, ENGINE_RUN_ORIGIN_KEYS)) return AGENT_COMMAND_ORIGIN;
+  const binding = parseEngineRunBinding(raw);
+  return binding.ok ? Object.freeze({ kind: "engine-run", ...binding.value }) : AGENT_COMMAND_ORIGIN;
 }
+
+/** A report is a `runner-crash` summary only on the engine run that minted it; on any other origin it vouches for nothing. */
+const reportForOrigin = (report: TestReportSummary | null, origin: TestRunOrigin): TestReportSummary | null =>
+  report?.source === "runner-crash" && origin.kind !== "engine-run" ? null : report;
 
 function parseEvent(raw: unknown): Evidence | null {
   if (typeof raw !== "object" || raw === null) return null;
@@ -448,8 +451,8 @@ function parseEvent(raw: unknown): Evidence | null {
     .with("TestRun", () => {
       if (typeof o.command !== "string") return null;
       const exit = typeof o.exit === "number" ? o.exit : null;
-      const report = parseReportField(o.report);
-      return { kind: "TestRun", origin: parseTestRunOrigin(o.origin), command: o.command, exit, report };
+      const origin = parseTestRunOrigin(o.origin);
+      return { kind: "TestRun", origin, command: o.command, exit, report: reportForOrigin(parseReportField(o.report), origin) };
     })
     .with("SandboxRun", () => {
       // Re-minted from the strict receipt grammar, never embedded raw: a

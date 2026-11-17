@@ -124,6 +124,18 @@ export type OwedTaskMutation = Readonly<{
 
 export type TaskMutationDuty = Readonly<{ kind: "off"; reason: TaskMutationOffReason }> | OwedTaskMutation;
 
+/**
+ * The files one mutation run hands the runner: the mutated file, then the
+ * Task's own test files (`OwedTaskMutation.tests`) without it, as the affected
+ * stop check hands the runner a Task's changed files.
+ */
+export function mutationRunFiles(mutated: string, tests: readonly string[]): NonEmpty<string> {
+  const files: NonEmpty<string> = [mutated, ...tests.filter((test) => test !== mutated)];
+  // `Object.freeze` types an array as `readonly T[]`, so freeze in place and keep the tuple type.
+  Object.freeze(files);
+  return files;
+}
+
 const off = (reason: TaskMutationOffReason): TaskMutationDuty => Object.freeze({ kind: "off", reason });
 
 const beneath = (cwd: string, path: string): boolean => cwd === "." || path.startsWith(`${cwd}/`);

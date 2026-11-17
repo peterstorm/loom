@@ -62,6 +62,7 @@ import { parseMachineJson } from "../../src/machine";
 import type { Evidence, LoadedMachine } from "../../src/machine";
 import { reportSummary } from "../machine/report-summary";
 import { AGENT_COMMAND_EVIDENCE } from "../../src/core/test-evidence-policy";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 describe("legacyTestsPassedNote (pure)", () => {
   it("flags a pre-refactor task carrying tests_passed without test_result", () => {
@@ -387,8 +388,8 @@ describe("extractTestEvidence (pure)", () => {
 });
 
 describe("resolveTestEvidence — stale trusted failure vs later untrusted run (pure)", () => {
-  const trustedFail: Evidence = { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 1, report: null };
-  const untrustedExitZero: Evidence = { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: null };
+  const trustedFail: Evidence = { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 1, report: null };
+  const untrustedExitZero: Evidence = { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 0, report: null };
 
   it("[fail, untrusted exit-0] routes to the labeled low-trust fallback — the stale failure does not outrank it", () => {
     const resolved = resolveTestEvidence([trustedFail, untrustedExitZero], AGENT_COMMAND_EVIDENCE, "12 passing", true);
@@ -417,7 +418,7 @@ describe("resolveTestEvidence — stale trusted failure vs later untrusted run (
 
 describe("resolveTestEvidence — a trusted pass goes stale when files change after it (pure)", () => {
   const trustedPass: Evidence = {
-    kind: "TestRun", origin: { kind: "agent-command" as const },
+    kind: "TestRun", origin: AGENT_COMMAND_ORIGIN,
     command: "npm test",
     exit: 0,
     report: reportSummary(5, 0),
@@ -514,7 +515,7 @@ describe("resolveTestEvidence — snapshot-read-failed labeling (pure)", () => {
 
   it("snapshotFailed never mints a trusted verdict even if events are (wrongly) supplied", () => {
     const trustedPass = {
-      kind: "TestRun" as const, origin: { kind: "agent-command" as const },
+      kind: "TestRun" as const, origin: AGENT_COMMAND_ORIGIN,
       command: "npm test",
       exit: 0,
       report: reportSummary(5, 0),

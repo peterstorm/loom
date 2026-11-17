@@ -806,8 +806,11 @@ export function parseBunConsoleCollectionErrors(output: string): readonly string
   return Object.freeze(files);
 }
 
-/** One collection error as Bun counts it: a single failing testcase. */
-const bunCollectionError = (file: string): TestFileResult =>
+/**
+ * One collection error as a single failing testcase: how Bun counts one, and
+ * how an engine run whose runner crashed records each file it handed the runner.
+ */
+const collectionErrorResult = (file: string): TestFileResult =>
   Object.freeze({ file, executed: 1, failed: 1, skipped: 0, collectionError: true });
 
 /**
@@ -820,7 +823,7 @@ export function runnerCrashSummary(files: readonly string[]): TestReportSummary 
   if (files.length === 0 || new Set(files).size !== files.length) return null;
   return parseReportSummary(files.length, files.length, "runner-crash", {
     kind: "recorded",
-    results: files.map(bunCollectionError),
+    results: files.map(collectionErrorResult),
   });
 }
 
@@ -848,7 +851,7 @@ export function bunRunSummary(
   if (junit === null) {
     return parseReportSummary(errors.length, errors.length, "bun-console", {
       kind: "recorded",
-      results: errors.map(bunCollectionError),
+      results: errors.map(collectionErrorResult),
     });
   }
   if (junit.files.kind !== "recorded") return junit;
@@ -858,7 +861,7 @@ export function bunRunSummary(
   const omitted = errors.filter((file) => !reported.some((entry) => entry.file === file));
   return parseReportSummary(junit.total + errors.length, junit.failed + errors.length, junit.source, {
     kind: "recorded",
-    results: [...reported, ...omitted.map(bunCollectionError)],
+    results: [...reported, ...omitted.map(collectionErrorResult)],
   });
 }
 

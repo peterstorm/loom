@@ -49,6 +49,7 @@ import {
   type TaskGraphPopulationCommand,
   type TaskGraphPopulationResult,
 } from "../../core/task-graph-population";
+import { testEvidenceModeNotice } from "../../core/test-evidence-authority";
 
 export { resolvedSpecFile };
 
@@ -580,6 +581,8 @@ function populatedResult(populated: PopulatedGraph, manifest: FrozenVerification
   // not choose says so, beside the summary that shows none was added.
   const distillNote = distillPlanNote(populated.distillPlan);
   if (distillNote !== null) process.stderr.write(`${distillNote}\n`);
+  const evidenceNotice = testEvidenceModeNotice(populated.state.test_evidence, manifest);
+  process.stderr.write(`${evidenceNotice}\n`);
 
   return {
     kind: "passthrough",
@@ -587,7 +590,8 @@ function populatedResult(populated: PopulatedGraph, manifest: FrozenVerification
       ` Install ${VERIFICATION_MANIFEST_SOURCE_PATH} before population to configure project checks; ` +
       "later source edits do not change this TaskGraph's frozen authority." +
       (boundaryNotice === null ? "" : ` ${boundaryNotice}`) +
-      (distillNote === null ? "" : ` ${distillNote}`),
+      (distillNote === null ? "" : ` ${distillNote}`) +
+      ` ${evidenceNotice}`,
   };
 }
 

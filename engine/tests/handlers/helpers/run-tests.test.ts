@@ -150,12 +150,21 @@ describe("helper run-tests: a finished run", () => {
     expect(parseEngineTestRunReceipt(stdout)).toMatchObject({ ok: true, value: { exit: 0, report: null } });
   });
 
-  it("a report rewritten after the runner produced it is not read", async () => {
-    const { stdout } = await helper(workspace(), undefined, {
+  it("a report rewritten after the runner produced it prints no receipt: it is never a crash red", async () => {
+    const { result, stdout } = await helper(workspace(), undefined, {
       bytes: RED,
       ending: { ending: { exitCode: 1, timedOut: false, signal: null }, digestOf: new TextEncoder().encode("other bytes") },
     });
-    expect(parseEngineTestRunReceipt(stdout).ok && parseEngineTestRunReceipt(stdout)).toMatchObject({ value: { report: { source: "runner-crash" } } });
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("changed after the runner produced it") });
+    expect(stdout).toBe("");
+  });
+
+  it("a report the runner wrote but that cannot be read back prints no receipt", async () => {
+    const { result, stdout } = await helper(workspace(), undefined, undefined, {
+      readReport: () => { throw new Error("EACCES"); },
+    });
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("could not be read back: EACCES") });
+    expect(stdout).toBe("");
   });
 });
 

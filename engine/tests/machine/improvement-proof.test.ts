@@ -21,6 +21,7 @@ import type { Evidence } from "../../src/machine/types";
 import { reportSummary } from "./report-summary";
 import { claudeCall } from "../fixtures/claude-tool-call";
 import { AGENT_COMMAND_EVIDENCE } from "../../src/core/test-evidence-policy";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 const machinePath = join(__dirname, "../../../machines/code-implementer-agent.machine.json");
 const parsed = parseMachineJson(readFileSync(machinePath, "utf-8"));
@@ -76,15 +77,15 @@ describe("R2 — reporter-confirmed pass carries explicit provenance in the verd
   });
 
   it("NEW: last trusted run wins — pass-then-fail fails, fail-then-pass passes", () => {
-    const pass: Evidence = { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: reportSummary(5, 0) };
-    const fail: Evidence = { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 1, report: null };
+    const pass: Evidence = { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 0, report: reportSummary(5, 0) };
+    const fail: Evidence = { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 1, report: null };
     expect(resolveTestEvidence([pass, fail], AGENT_COMMAND_EVIDENCE, "", true).result).toEqual({ verdict: "trusted-fail" });
     expect(resolveTestEvidence([fail, pass], AGENT_COMMAND_EVIDENCE, "", true).result).toEqual({ verdict: "trusted-pass" });
   });
 
   it("NEW: an untrusted exit-0 run never displaces a trusted verdict", () => {
-    const pass: Evidence = { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: reportSummary(5, 0) };
-    const noise: Evidence = { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: null };
+    const pass: Evidence = { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 0, report: reportSummary(5, 0) };
+    const noise: Evidence = { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 0, report: null };
     const resolved = resolveTestEvidence([pass, noise], AGENT_COMMAND_EVIDENCE, "", true);
     expect(resolved.result).toEqual({ verdict: "trusted-pass" });
   });
@@ -166,7 +167,7 @@ describe("R1 — write-before-read is structurally impossible for the bound agen
     const events: Evidence[] = [
       { kind: "FileRead", path: "/a.ts" },
       { kind: "FileWrite", path: "/a.ts", via: "tool" },
-      { kind: "TestRun", origin: { kind: "agent-command" as const }, command: "npm test", exit: 0, report: null }, // no artifact
+      { kind: "TestRun", origin: AGENT_COMMAND_ORIGIN, command: "npm test", exit: 0, report: null }, // no artifact
     ];
     expect(isTerminal(machine, foldEvidence(machine, events))).toBe(false);
   });

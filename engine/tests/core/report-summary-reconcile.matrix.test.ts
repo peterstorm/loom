@@ -29,6 +29,7 @@ import {
 } from "../../src/core/structured-test-report";
 import { parseEvidenceLine } from "../../src/machine/evidence";
 import { findReport } from "../../src/machine/report-discovery";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 /** A finished run with no output and no attributed exit: no console fact can vouch. */
 const NO_RUN = { output: "", exit: null } as const;
@@ -108,7 +109,7 @@ const junitXml = (fixture: Fixture): string =>
 const ledgerLine = (fixture: Fixture): string => JSON.stringify({
   epoch: "agent-1:code-implementer-agent",
   event: {
-    kind: "TestRun", origin: { kind: "agent-command" as const },
+    kind: "TestRun", origin: AGENT_COMMAND_ORIGIN,
     command: "npx vitest run",
     exit: fixture.failed > 0 ? 1 : 0,
     report: { total: fixture.total, failed: fixture.failed, source: fixture.source, files: recorded(fixture.results) },

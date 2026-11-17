@@ -5,6 +5,7 @@
  */
 
 import type { TestFileResult } from "../../src/core/red-then-green-types";
+import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
 
 export const RED_RUN = "npm --prefix engine run test:unit -- tests/core/ledger.test.ts";
 export const GREEN_RUN = "npm --prefix engine run test:unit";
@@ -19,7 +20,7 @@ export function rawTestRun(
   const total = results.reduce((sum, { executed }) => sum + executed, 0);
   const failed = results.reduce((sum, file) => sum + file.failed, 0);
   return {
-    kind: "TestRun", origin: { kind: "agent-command" as const },
+    kind: "TestRun", origin: AGENT_COMMAND_ORIGIN,
     command: options.command ?? (failed > 0 ? RED_RUN : GREEN_RUN),
     exit: options.exit === undefined ? (failed > 0 ? 1 : 0) : options.exit,
     report: { total, failed, source: "junit-xml", files: { kind: "recorded", results } },
