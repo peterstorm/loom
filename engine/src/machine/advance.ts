@@ -10,10 +10,12 @@
 import { match } from "ts-pattern";
 import type { Evidence, EventCounts, EventToken, MachineDef, PhaseState, Requirement } from "./types";
 import { initialState } from "./types";
-import { judgeTestRun } from "./test-report";
+import { judgeTestRun, type TestRunJudge } from "./test-report";
+
+export const judgeRunFacts: TestRunJudge = (run) => judgeTestRun(run.exit, run.report);
 
 /** Which countable tokens an evidence event increments. */
-export function tokensFor(e: Evidence): EventToken[] {
+export function tokensFor(e: Evidence, judge: TestRunJudge = judgeRunFacts): EventToken[] {
   return match(e)
     .with({ kind: "FileRead" }, (): EventToken[] => ["FileRead"])
     // Only TOOL-authored writes advance guards: the PreToolUse gate enforces
@@ -27,7 +29,7 @@ export function tokensFor(e: Evidence): EventToken[] {
     .with({ kind: "TestRun" }, (run): EventToken[] =>
       // Judgment is derived from facts at fold time: a run counts as
       // TestRunPassed only when ground truth confirms it (trusted pass).
-      match(judgeTestRun(run.exit, run.report))
+      match(judge(run))
         .with({ verdict: "trusted-pass" }, (): EventToken[] => ["TestRun", "TestRunPassed"])
         .with({ verdict: "trusted-fail" }, (): EventToken[] => ["TestRun"])
         .with({ verdict: "untrusted" }, (): EventToken[] => ["TestRun"])
@@ -67,14 +69,23 @@ function settle(machine: MachineDef, state: PhaseState): PhaseState {
 }
 
 /** Apply one evidence event: count it, then advance as far as guards allow. */
-export function advance(machine: MachineDef, state: PhaseState, event: Evidence): PhaseState {
-  const counts = increment(state.counts, tokensFor(event));
+export function advance(
+  machine: MachineDef,
+  state: PhaseState,
+  event: Evidence,
+  judge: TestRunJudge = judgeRunFacts,
+): PhaseState {
+  const counts = increment(state.counts, tokensFor(event, judge));
   return settle(machine, { ...state, counts });
 }
 
 /** Rebuild state from the (epoch-filtered) ledger. */
-export function foldEvidence(machine: MachineDef, events: readonly Evidence[]): PhaseState {
-  return events.reduce((s, e) => advance(machine, s, e), settle(machine, initialState));
+export function foldEvidence(
+  machine: MachineDef,
+  events: readonly Evidence[],
+  judge: TestRunJudge = judgeRunFacts,
+): PhaseState {
+  return events.reduce((s, e) => advance(machine, s, e, judge), settle(machine, initialState));
 }
 
 export function currentPhase(machine: MachineDef, state: PhaseState) {

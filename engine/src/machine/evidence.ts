@@ -14,7 +14,7 @@ import { parseReportSource, parseReportSummary } from "./test-report";
 import { parseSandboxReceiptValue } from "../core/security-sandbox";
 import { parseEngineRunBinding } from "../core/engine-test-run";
 import { hasExactKeys, isRecord } from "../core/plain-record";
-export { judgeTestRun, type TrustedTestVerdict } from "./test-report";
+export { judgeTestRun, type TestRunJudge, type TrustedTestVerdict } from "./test-report";
 
 // --- Branded agent identity ---
 

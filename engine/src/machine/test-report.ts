@@ -1,6 +1,7 @@
 /** Guarded Skill Machine policy over shared structured report facts. */
 
 import type { TestReportSummary } from "../core/structured-test-report";
+import type { Evidence } from "./types";
 
 export {
   bunRunSummary,
@@ -37,6 +38,14 @@ export type TestVerdict =
 
 /** The verdicts that constitute ground truth. */
 export type TrustedTestVerdict = Extract<TestVerdict, { verdict: "trusted-pass" | "trusted-fail" }>;
+
+/**
+ * How a Guarded Skill Machine fold judges one test run. The default judges
+ * the run's own facts; a settlement passes the same scope-aware judge its
+ * test verdict used (ADR-0080), so the machine and the verdict never
+ * disagree about one run.
+ */
+export type TestRunJudge = (run: Extract<Evidence, { kind: "TestRun" }>) => TestVerdict;
 
 /**
  * The TestRun trust rule:
