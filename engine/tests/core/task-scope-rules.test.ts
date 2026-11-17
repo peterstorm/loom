@@ -143,7 +143,7 @@ describe("population refuses an unprovable scope or an unowned Requirement", () 
       {
         planTitle: "scope", validatedPlanFile: "plan.md", tasks: roster.value, verificationManifest: manifest,
         specIndex: indexedSpec("spec.md"), observedSpecFile: "spec.md", force: false,
-        proofBoundary: { kind: "absent", cause: "fixture" }, contracts: [], invariants: [],
+        proofBoundary: { kind: "absent", cause: "fixture" }, engineRevision: { kind: "not-observed", cause: "fixture" }, contracts: [], invariants: [],
       },
     );
   };

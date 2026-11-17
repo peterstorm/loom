@@ -11,11 +11,11 @@ import {
 import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
-import populate, { createPopulateTaskGraphHandler, resolvedSpecFile } from "../../src/handlers/helpers/populate-task-graph";
+import populate, { createPopulateTaskGraphHandler, observeEngineRevision, resolvedSpecFile } from "../../src/handlers/helpers/populate-task-graph";
 import type { Task, TaskGraph } from "../../src/types";
 import { isDistillTask } from "../../src/core/distill-task";
 import { deriveWaveCompletionSuiteReadiness } from "../../src/core/wave-completion-suite-readiness";
-import { StateManager } from "../../src/state-manager";
+import { runningEngineIdentity, StateManager } from "../../src/state-manager";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import {
   defaultVerificationManifest,
@@ -347,6 +347,31 @@ describe("populate-task-graph — protected verification manifest authority", ()
     expect(result.kind).toBe("error");
     if (result.kind === "error") expect(result.message).toContain("non-canonical State File path");
     expect(stateBytes(statePath)).toBe(before);
+  });
+
+  it("pins the graph to the running engine revision (loom#198, Cause 4)", async () => {
+    const dir = tempDir();
+    execFileSync("git", ["init", "--quiet"], { cwd: dir });
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, [], {}, "custom", false);
+    writeManifest(dir);
+    process.chdir(dir);
+
+    expect((await populate(decomposeJson(plan), [])).kind).toBe("passthrough");
+
+    expect((JSON.parse(stateBytes(statePath)) as TaskGraph).engine_revision).toEqual({
+      schemaVersion: 1, kind: "pinned", revision: runningEngineIdentity().revision, adoptions: [],
+    });
+  });
+
+  it("records self-hosted when the repository holds the engine package, a pin otherwise (loom#198, Cause 4)", () => {
+    const revision = `sha256:${"e".repeat(64)}`;
+    expect(observeEngineRevision({ kind: "repository", root: "/work/loom" }, { packageRoot: "/work/loom", revision }))
+      .toEqual({ kind: "observed", pin: { schemaVersion: 1, kind: "self-hosted" } });
+    expect(observeEngineRevision({ kind: "repository", root: "/work/flexii" }, { packageRoot: "/plugins/loom", revision }))
+      .toEqual({ kind: "observed", pin: { schemaVersion: 1, kind: "pinned", revision, adoptions: [] } });
+    expect(observeEngineRevision({ kind: "not-a-repository", cause: "fixture" }, { packageRoot: "/plugins/loom", revision }))
+      .toEqual({ kind: "observed", pin: { schemaVersion: 1, kind: "pinned", revision, adoptions: [] } });
   });
 
   it("prefers the Git root and preserves custom-layout compatibility inside a repository", async () => {

@@ -58,6 +58,7 @@ export const ORCHESTRATION_OPERATIONS = Object.freeze({
   "add-forward-fix": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
   "withdraw-forward-fix": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
   "adopt-engine-run-tests": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
+  "adopt-engine-revision": Object.freeze({ input: "flags", runtimeSkew: "handshake-required", subagent: "parent-only" }),
 } as const satisfies Readonly<Record<string, OrchestrationOperationTraits>>);
 
 export type OrchestrationOperation = keyof typeof ORCHESTRATION_OPERATIONS;

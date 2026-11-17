@@ -46,6 +46,8 @@ import type {
   WaveReopeningAudit,
   ReopenedTaskIds,
   TaskReopeningAudit,
+  EngineRevisionAdoption,
+  EngineRevisionPin,
   WavePlanEdit,
   SpecCheck,
   SpecTraceAmendment,
@@ -91,6 +93,7 @@ import { reconcileWaveBlock, waveHasBlockCause, type WaveGate } from "./core/wav
 import { parseWaveSpecCheckDocumentsAuthority, type WaveSpecCheckDocumentRejection, type WaveSpecCheckDocumentsRejection } from "./core/wave-review-authority";
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
 import { isExactGitSha } from "./core/git-sha";
+import { isAdoptionReason, isEngineRevision, MAX_ENGINE_REVISION_REASON_LENGTH } from "./core/engine-revision-pin";
 import { parsePlanEditReason, taskRescopedEdit } from "./core/wave-plan-edit";
 import {
   amendmentHistoryError,
@@ -2487,6 +2490,57 @@ function parseVerificationManifestField(raw: unknown): ParseResult<FrozenVerific
 }
 
 /**
+ * The engine revision pin (loom#198 Cause 4, `core/engine-revision-pin.ts`):
+ * absent on a graph populated before it existed; `self-hosted`; or `pinned`
+ * to a runtime revision with its adoptions as an unbroken chain that ends at
+ * that revision, each with a bounded reason.
+ */
+function parseEngineRevisionField(raw: unknown): ParseResult<EngineRevisionPin | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!isRecord(raw)) return parseErr("engine_revision must be an object when present");
+  const record = raw as Record<string, unknown>;
+  if (record.kind === "self-hosted") {
+    const fieldsError = exactFieldsError(record, ["schemaVersion", "kind"], [], "engine_revision");
+    if (fieldsError !== null) return parseErr(fieldsError);
+    return record.schemaVersion === 1
+      ? parseOk(Object.freeze({ schemaVersion: 1 as const, kind: "self-hosted" as const }))
+      : parseErr("engine_revision has an unsupported schemaVersion");
+  }
+  if (record.kind !== "pinned") return parseErr("engine_revision.kind must be pinned or self-hosted");
+  const fieldsError = exactFieldsError(record, ["schemaVersion", "kind", "revision", "adoptions"], [], "engine_revision");
+  if (fieldsError !== null) return parseErr(fieldsError);
+  if (record.schemaVersion !== 1) return parseErr("engine_revision has an unsupported schemaVersion");
+  if (!isEngineRevision(record.revision)) return parseErr("engine_revision.revision must be a runtime revision (sha256:<64 hex>)");
+  if (!Array.isArray(record.adoptions)) return parseErr("engine_revision.adoptions must be an array");
+  const adoptions: EngineRevisionAdoption[] = [];
+  for (const [index, entry] of record.adoptions.entries()) {
+    const label = `engine_revision.adoptions[${index}]`;
+    if (!isRecord(entry)) return parseErr(`${label} must be an object`);
+    const adoption = entry as Record<string, unknown>;
+    const entryFields = exactFieldsError(adoption, ["from", "to", "reason"], [], label);
+    if (entryFields !== null) return parseErr(entryFields);
+    if (adoption.from !== null && !isEngineRevision(adoption.from)) return parseErr(`${label}.from must be a runtime revision or null`);
+    if (!isEngineRevision(adoption.to)) return parseErr(`${label}.to must be a runtime revision`);
+    if (adoption.from === adoption.to) return parseErr(`${label} moves the pin nowhere`);
+    const reason = adoption.reason;
+    if (!isAdoptionReason(reason)) {
+      return parseErr(`${label}.reason must be a trimmed non-blank string of at most ${MAX_ENGINE_REVISION_REASON_LENGTH} characters`);
+    }
+    const previous = adoptions.at(-1);
+    if (previous !== undefined && adoption.from !== previous.to) return parseErr(`${label} does not start where the previous adoption ended`);
+    adoptions.push(Object.freeze({ from: adoption.from, to: adoption.to, reason }));
+  }
+  const last = adoptions.at(-1);
+  if (last !== undefined && last.to !== record.revision) return parseErr("engine_revision.revision is not where its last adoption ended");
+  return parseOk(Object.freeze({
+    schemaVersion: 1 as const,
+    kind: "pinned" as const,
+    revision: record.revision,
+    adoptions: Object.freeze(adoptions),
+  }));
+}
+
+/**
  * What a graph froze before its Tasks are proven: the Verification Manifest,
  * the test-evidence mode bound to it (loom#198; parsed against the manifest it
  * names, so a graph never loads a mode its own manifest cannot run), and the
@@ -2495,15 +2549,23 @@ function parseVerificationManifestField(raw: unknown): ParseResult<FrozenVerific
 function parseFrozenVerificationFields(obj: Record<string, unknown>): ParseResult<Readonly<{
   verificationManifest: FrozenVerificationManifest | undefined;
   testEvidence: EngineRunTestEvidence | undefined;
+  engineRevision: EngineRevisionPin | undefined;
   contractShapes: readonly AcceptanceContract[] | undefined;
 }>> {
   const verificationManifest = parseVerificationManifestField(obj.verification_manifest);
   if (!verificationManifest.ok) return verificationManifest;
   const testEvidence = parseTestEvidenceField(obj.test_evidence, verificationManifest.value);
   if (!testEvidence.ok) return testEvidence;
+  const engineRevision = parseEngineRevisionField(obj.engine_revision);
+  if (!engineRevision.ok) return engineRevision;
   const contractShapes = parseAcceptanceContractsShape(obj.acceptance_contracts);
   if (!contractShapes.ok) return contractShapes;
-  return parseOk({ verificationManifest: verificationManifest.value, testEvidence: testEvidence.value, contractShapes: contractShapes.value });
+  return parseOk({
+    verificationManifest: verificationManifest.value,
+    testEvidence: testEvidence.value,
+    engineRevision: engineRevision.value,
+    contractShapes: contractShapes.value,
+  });
 }
 
 /** The graph fields the owner check's authority derives from: the contracts
@@ -3193,6 +3255,7 @@ type ParsedTaskGraphParts = Readonly<{
   authority: ParsedTaskGraphAuthorityFields;
   history: ParsedTaskGraphHistoryFields;
   testEvidence: EngineRunTestEvidence | undefined;
+  engineRevision: EngineRevisionPin | undefined;
 }>;
 
 /** A loaded Task: its id is a parsed `TaskId`. */
@@ -3239,7 +3302,7 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
   // The single blessed cast: every union field above is proven in place.
   return {
     // `test_evidence` is installed only as its parsed value, never as the raw JSON.
-    ...withoutKeys(obj, "test_evidence"),
+    ...withoutKeys(obj, "test_evidence", "engine_revision"),
     phase_artifacts: parts.phaseArtifacts,
     skipped_phases: parts.skippedPhases,
     spec_file: obj.spec_file ?? null,
@@ -3260,6 +3323,7 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     ...(waveReviewEpoch === undefined ? {} : { wave_review_epoch: waveReviewEpoch }),
     ...(verificationManifest === undefined ? {} : { verification_manifest: verificationManifest }),
     ...(parts.testEvidence === undefined ? {} : { test_evidence: parts.testEvidence }),
+    ...(parts.engineRevision === undefined ? {} : { engine_revision: parts.engineRevision }),
     ...(activeWaveCompletionSuite === undefined ? {} : { active_wave_completion_suite: activeWaveCompletionSuite }),
     ...(activeWaveGate === undefined ? {} : { active_wave_gate: activeWaveGate }),
     ...(waveGateHistory === undefined ? {} : { wave_gate_history: waveGateHistory }),
@@ -3385,7 +3449,7 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
   // (INV-6). The contracts are bound to the roster once the Tasks are proven.
   const frozen = parseFrozenVerificationFields(obj);
   if (!frozen.ok) return parseErr(frozen.error);
-  const { verificationManifest, testEvidence, contractShapes } = frozen.value;
+  const { verificationManifest, testEvidence, engineRevision, contractShapes } = frozen.value;
   const tasks = parseTaskGraphTasks(
     obj,
     executingTasks.value ?? [],
@@ -3419,6 +3483,7 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
     authority: authority.value,
     history: history.value,
     testEvidence,
+    engineRevision,
   }));
 }
 
