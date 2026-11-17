@@ -3,9 +3,11 @@
 A comprehensive, mechanism-level map of Loom: every feature, every guardrail, every
 determinism device — why it exists, why it works, and where it honestly does not.
 
-Written from a full source scan of revision **a28b6d6a** (main, 2026-11-15). Every claim
-below was checked against the code in that revision; the few claims that come from
-documentation rather than code are marked *(docs)*. Vocabulary follows [CONTEXT.md](../CONTEXT.md).
+Written from a full source scan of revision **a28b6d6a** (main, 2026-11-15), updated
+through **36302d87** (#201, 2026-11-17): the engine-run test-evidence mechanism (§7, §4.6)
+landed after the scan and is documented from its own diff. Every other claim below was
+checked against the code at a28b6d6a; claims that come from documentation rather than code
+are marked *(docs)*. Vocabulary follows [CONTEXT.md](../CONTEXT.md).
 
 ---
 
@@ -314,6 +316,27 @@ security-hunter). Key mechanics:
   receipt reuse, workspace binding, and replay are uniform for every check.
 - **Settlement**: the engine's single decision on one piece of submitted work, in one
   atomic transition. Late or duplicate evidence settles nothing.
+- **Engine-run test evidence (loom#198 Cause 1, #201)** — the newest tier, which moves the
+  test execution itself into the engine: `helper run-tests --files <path>…` runs the frozen
+  Verification Manifest's `affectedRunner` over the test files the **agent names**, with the
+  engine choosing the runner, its arguments, working directory, timeout and report path —
+  all from the frozen manifest. The run prints a receipt line (`LOOM_TEST_RUN_RECEIPT {…}`)
+  as the LAST stdout line after the runner has exited and its process tree is gone; the
+  runner's own output goes to stderr before it, so a test printing a forged receipt line
+  cannot reach the receipt slot even where a harness merges the streams (Pi). The receipt
+  binds the run to the canonical repository root and the frozen manifest digest
+  (`EngineRunBinding`, one parser for the receipt and the ledger's TestRun origin);
+  settlement admits it only when both are its own TaskGraph's. In a graph that froze
+  `test_evidence` engine-run mode, this is the **only** run that proves I6 — the evidence
+  recorder mints an engine-run TestRun from the receipt and settlement admits only such
+  runs; population freezes which mode the graph uses. A run whose report cannot be read
+  back, is not UTF-8, or changed after the run prints no receipt and refuses, instead of
+  becoming a runner-crash red; a run that did not finish (timed out, killed, could not
+  start) proves nothing. The run holds the per-repository runner lock the stop checks
+  hold, so a stop check and this run never write the same report at once. *Why it works:*
+  the agent keeps semantic judgment (which files to test) while every mechanical authority
+  (what runs, where, how long, what report, which receipt) is the engine's — closing the
+  agent-writable-report residual of §8.6 at its root for engine-run graphs.
 
 ### 4.7 Review authority
 
@@ -632,6 +655,7 @@ per-mechanism *why it works* and *what remains*.
 | 23 | "Roster complete" asserted | `parseCompleteRoster` et al: complete rosters are parser-produced | Aggregation cannot accept a partial roster | — |
 | 24 | Duplicate/late evidence mutates state | Settlement: exactly one outcome, one atomic transition; dedup-keyed journal | Late evidence settles nothing; replays dedup | — |
 | 25 | Checkpoint lies about history | Append-only journal is the record; checkpoint re-proved on read | Projection cannot outrun its event prefix | — |
+| 26 | Agent runs its own tests, names its own runner | Engine-run test evidence: `helper run-tests` receipt (engine picks runner/report/timeout from the frozen manifest; receipt is the last stdout line, root+manifest-digest bound) (§4.6) | The agent names files; the engine owns execution and the receipt's slot | Legacy `agent-command` graphs keep the §8.6 residuals; engine-run graphs close them |
 
 ---
 
@@ -690,6 +714,10 @@ checks.
 - **The verify chain**: `npm run verify` runs the Verify Slice (`LOOM_VERIFY_SLICE`)
   through `scripts/verify.ts` — pure step plan, spawning shell; tests run with
   `env -u PI_CODING_AGENT` so an ambient Pi session's environment can't skew results.
+- **Engine-run evidence test**: `helper run-tests` (`#201`) — the engine executes the
+  frozen manifest's runner over agent-named files and prints a root-and-digest-bound
+  receipt the ledger mints into an engine-run TestRun; in engine-run graphs it is the
+  only run settlement counts (§4.6).
 
 ---
 
@@ -846,6 +874,10 @@ one variable. Re-running the same 3 files with the `LOOM_PI_*`/`PI_*` ambient st
 Operational gotcha for this map's next re-scan: run loom's suite outside a live Pi
 session, or with the `LOOM_PI_*` marker set explicitly unset.
 
+Scope note: this verdict is the a28b6d6a suite. The branch was rebased onto 36302d87
+(#201) and that revision was **not** re-scanned or re-tested here; #201's own review
+(25 advisories, pr201-policy-1) and its merged CI are its verification record.
+
 ---
 
 ## Appendix A — `engine/src/core/` file-by-file (one-liners from source headers)
@@ -945,6 +977,7 @@ unified-diff.ts — deterministic line-based diff ·
 user-decision.ts — the decision input `decide` reads ·
 validate-* (phase-order/task-execution/template-substitution) — the spawn-gate cores ·
 verification-* (manifest, manifest-install, policy, verified-claim-hashes) — manifest freeze and waivers; hash re-anchoring ·
+test-evidence-{mode,policy,authority}.ts / engine-test-run.ts — the frozen test-evidence mode (#198), the engine-run receipt and its admission (#201) ·
 verify-slice.ts — which part of `npm run verify` one invocation runs ·
 wave-* (30 modules) — the Wave Gate: model, machine (LC-1), checks, membership, registration/replacement, preparation, completion-suite readiness, frozen source, review authority/issuance, transcripts, status facts ·
 wire-contract.ts — the Wire Contract's stamping seam ·
