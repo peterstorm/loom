@@ -19,6 +19,7 @@ These helpers print what the engine already knows. Use them before a mutating op
 | `scripts/ledger-epoch.ts` | the facts one attempt recorded | [below](#reading-an-attempts-ledger-epoch) |
 | `helper family-sites` | how many second sites each invariant family has in Loom's own source | [Development](../development.md#measuring-second-sites-the-family-site-metric) |
 | `helper lint-wave-gate` | the full-tier lint refusal a replayed rejection no longer carries | [Operations](../operations.md#wave-gate-full-tier-lint-refuses-imports-the-branch-allows) |
+| `helper suggest-affected-runner [--preset <id>]` | the `affectedRunner` to declare, detected from the repository's `package.json` and lockfile, as a manifest fragment to paste | [Verification](../verification.md#declaring-the-affected-runner) |
 | `helper run-tests --files <path>...` | the engine test run: the frozen `affectedRunner` over the named test files, ending with the receipt line the evidence ledger records. In a TaskGraph with engine-run test evidence it is the only run settlement counts. Not read-only: the runner writes its report | [Verification](../verification.md#red-then-green-i6-what-a-run-must-be) |
 | `helper mutation-check --task <id>` | which changed lines a Task's tests do not answer. Not read-only: it writes one runtime record and only reads the real workspace | [Verification](../verification.md#task-mutation-check) |
 

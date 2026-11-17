@@ -50,6 +50,8 @@ import {
   type TaskGraphPopulationResult,
 } from "../../core/task-graph-population";
 import { testEvidenceModeNotice } from "../../core/test-evidence-authority";
+import { affectedRunnerHintFor } from "../../core/runner-presets";
+import { observeRunnerFacts } from "../../utils/repository-runner-facts";
 
 export { resolvedSpecFile };
 
@@ -338,7 +340,7 @@ async function populateFromDecompose(readPlan: ReadPlan, stdin: string, args: st
   if (!plan.ok) return plan.result;
   const prepared = preparePopulation(statePath, existing.value, decompose, plan.value, parsedArgs.value);
   if (!prepared.ok) return prepared.result;
-  const applied = await applyPopulation(mgr, existing.value, prepared.value.command, plan.value);
+  const applied = await applyPopulation(mgr, existing.value, prepared.value.command, plan.value, prepared.value.runnerHint);
   return applied.ok ? populatedResult(applied.value, prepared.value.manifest) : applied.result;
 }
 
@@ -446,7 +448,15 @@ function readCheckedPlan(
   return bindings.ok ? { ok: true, value: bindings.plan } : { ok: false, result: bindingFailure(bindings.errors) };
 }
 
-type PreparedPopulation = Readonly<{ command: TaskGraphPopulationCommand; manifest: FrozenVerificationManifest }>;
+type PreparedPopulation = Readonly<{
+  command: TaskGraphPopulationCommand;
+  manifest: FrozenVerificationManifest;
+  /**
+   * How to declare an affectedRunner, read from the repository only when a
+   * refusal names Tasks without one; null outside a Git repository.
+   */
+  runnerHint: () => string | null;
+}>;
 
 /**
  * Everything the locked transform stamps, observed once in the repository
@@ -479,6 +489,9 @@ function preparePopulation(
   const proofBoundary = captureProofBoundary(repositoryRoot, taskRoster.value);
   return { ok: true, value: {
     manifest: preparedManifest.value,
+    runnerHint: () => repositoryRoot.kind === "repository"
+      ? affectedRunnerHintFor(observeRunnerFacts(repositoryRoot.root), VERIFICATION_MANIFEST_SOURCE_PATH)
+      : null,
     command: populationCommand(decompose, plan, args, {
       tasks: taskRoster.value, verificationManifest: preparedManifest.value, specIndex, observedSpecFile, proofBoundary,
     }),
@@ -544,6 +557,7 @@ async function applyPopulation(
   existingState: TaskGraph,
   command: TaskGraphPopulationCommand,
   plan: ParsedPlan,
+  runnerHint: () => string | null,
 ): Promise<PopulationStep<PopulatedGraph>> {
   const populate = (existing: TaskGraph): LockedPopulation => {
     const designRequirement = populationPlanDesignRequirement(existing, plan.sha256, plan.path);
@@ -551,7 +565,12 @@ async function applyPopulation(
       return { ok: false, message: `populate-task-graph: TaskGraph population requires ${designRequirement}` };
     }
     const transition = populateTaskGraph(existing, command);
-    return transition.ok ? transition : { ok: false, message: transition.error.message };
+    if (transition.ok) return transition;
+    // A refusal naming Tasks with no engine runner carries the runner to declare.
+    const runnerless = (transition.error.problems ?? []).some(({ kind }) => kind === "no-engine-runner");
+    const hintText = runnerless ? runnerHint() : null;
+    const hint = hintText === null ? "" : `\n${hintText}`;
+    return { ok: false, message: `${transition.error.message}${hint}` };
   };
   const preflight = populate(existingState);
   if (!preflight.ok) return refusal(preflight.message);

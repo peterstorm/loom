@@ -30,7 +30,7 @@ Use only these agents; validation rejects any other name. Never assign `distill-
 
 ## Decompose Rules
 
-1. **Impl tasks include tests.** `code-implementer-agent` and `frontend-agent` write both implementation and tests. Do not create a separate test task for new code; it deadlocks. The one exception is a plan Contract's contract task (rule 12), which writes acceptance tests that later tasks turn green.
+1. **Impl tasks include tests.** `code-implementer-agent` and `frontend-agent` write both implementation and tests. Do not create a separate test task for new code; it deadlocks. The one exception is a plan Contract's contract task (rule 12), which writes acceptance tests that later tasks turn green. A task whose `new_tests` arm is `required` lists at least one test file in its `file_list` (a path ending in a test suffix such as `.test.ts`); population refuses one that lists none, because it could only ever fail with `no-test-files`.
 2. **Test-only agents** (`ts-test-agent`, `java-test-agent`): only for adding tests to EXISTING code that lacks coverage.
 3. **Sizing.** Decompose further when a task touches more than 5 files, mixes unrelated concerns, or needs "and" to describe.
 4. **Verification policy.** Every task carries a `verification_policy` with two independent arms. Each arm is exactly `{"kind": "required"}` or `{"kind": "waived", "reason": "<typed reason>"}`; never `{"required": true}` or `{"waived": "..."}`. The other rules name these four policies:
@@ -70,6 +70,7 @@ Use only these agents; validation rejects any other name. Never assign `distill-
     - `spec_anchors` is a Requirement Completion Claim: the containing Wave MUST fully satisfy that Requirement. Assign it only to the culminating Task/Wave.
     - A Task cannot contribute to and complete the same Requirement. Multiple completion Tasks are allowed only in the same culmination Wave.
     - Every contribution must have exactly one completion Wave at or after it; no contribution may appear after completion.
+    - Every `FR-NNN` and `AS-NNN` the spec defines is claimed in some Task's `spec_anchors`; population refuses a Requirement with no completion owner, which every Wave Gate's spec-check would otherwise report. A contribution does not own a Requirement.
     - Both arrays name only `FR-NNN` and `AS-NNN` ids the spec defines. Non-functional requirements, success criteria (`NFR-`, `SC-`) and Out-of-Scope entries cannot be claimed or contributed to; population refuses any id the Spec Index does not define as a completable entry, and refuses a spec that does not parse as canonical.
 11. **Protected verification paths:** Decompose NEVER assigns the operator manifest `.loom/verification-manifest.json` or any engine report path beneath `.loom/completion-reports/` to a Task's `file_list`. These paths are engine/operator-owned, not implementation artifacts. This rule does not prohibit unrelated `.loom/` paths.
 12. **Contract tasks.** For each `### CT-N:` block in the plan's `## Contracts` (skip when absent):

@@ -32,18 +32,18 @@ import {
 import { NOT_OWED_REASON_TEXT, RTG_NOT_OWED, redThenGreenStatusView, renderRedThenGreenStatus } from "../../src/core/red-then-green-status";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
 import { parseAuthoredTaskRoster, populateTaskGraph, type AuthoredTask } from "../../src/core/task-graph-population";
-import { defaultVerificationManifest } from "../../src/core/verification-manifest";
 import { validateFull } from "../../src/handlers/helpers/validate-task-graph";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
 import { parseTaskGraph } from "../../src/state-manager";
 import type { PlanContract, Task, TaskGraph } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { withoutRedThenGreen, withRedThenGreen } from "../fixtures/red-then-green-proof";
-import { indexedSpec } from "../fixtures/spec-index-fixture";
+import { indexedSpec, specDefining } from "../fixtures/spec-index-fixture";
 import { briefOwnership } from "../fixtures/owner-obligation";
 import { unobservedSkeletons } from "../fixtures/frozen-signatures";
 import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { trustedPassEvidence } from "../fixtures/task-lifecycle";
+import { i6RunnerManifest } from "../fixtures/i6-runner-manifest";
 
 // --- Fixtures ---
 
@@ -87,7 +87,7 @@ const ROSTER: readonly AuthoredTask[] = [
       new_tests: { kind: "waived", reason: "covered-by-acceptance-contract" },
     },
   }),
-  task("T3", 1, { file_list: ["src/T3.ts", "tests/T3.test.ts"] }),
+  task("T3", 1, { file_list: ["src/T3.ts", "tests/T3.test.ts"], spec_anchors: ["AS-001"] }),
 ];
 
 function populated(): TaskGraph {
@@ -98,9 +98,9 @@ function populated(): TaskGraph {
     tasks: [], wave_gates: {},
   }, {
     planTitle: "contract writers", validatedPlanFile: "plan.md", tasks: roster.value,
-    // No manifest file: the I6-era default every post-feature population freezes.
-    verificationManifest: defaultVerificationManifest(),
-    specIndex: indexedSpec("spec.md"), observedSpecFile: "spec.md",
+    // An I6-era operator manifest with an engine runner: population refuses I6-owing Tasks without one.
+    verificationManifest: i6RunnerManifest(),
+    specIndex: indexedSpec("spec.md", specDefining(["FR-001"], ["AS-001"])), observedSpecFile: "spec.md",
     force: false, proofBoundary: { kind: "absent", cause: "fixture" }, contracts: [CONTRACT], invariants: [],
   });
   if (!result.ok) throw new Error(result.error.message);

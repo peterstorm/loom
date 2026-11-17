@@ -202,3 +202,17 @@ describe("helper run-tests: the runner lock", () => {
     expect(launches).toEqual([]);
   });
 });
+
+describe("helper run-tests: only the frozen classification's test files", () => {
+  it("refuses a source file, naming it, and runs nothing (loom#198, Cause 3)", async () => {
+    const { result, launches } = await helper(workspace(), ["--files", TEST, "--files", IMPL]);
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining(`${IMPL} is not a test file`) });
+    expect(launches).toEqual([]);
+  });
+
+  it("names every source file in one refusal", async () => {
+    const { result, launches } = await helper(workspace(), ["--files", IMPL, "--files", "src/other.ts"]);
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining(`${IMPL}, src/other.ts are not a test file`) });
+    expect(launches).toEqual([]);
+  });
+});

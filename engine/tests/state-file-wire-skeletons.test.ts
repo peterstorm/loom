@@ -23,9 +23,9 @@ import { describe, expect, it } from "vitest";
 import { parseTaskGraph, type ParsedTaskGraph } from "../src/state-file-wire";
 import { DISTILL_AGENT } from "../src/core/model-profiles";
 import { parseAuthoredTaskRoster, populateTaskGraph, type AuthoredTask } from "../src/core/task-graph-population";
-import { defaultVerificationManifest } from "../src/core/verification-manifest";
 import type { PlanContract } from "../src/types";
 import { indexedSpec } from "./fixtures/spec-index-fixture";
+import { i6RunnerManifest } from "./fixtures/i6-runner-manifest";
 
 const TYPES_FILE = "src/order/order-contract.ts";
 const ACCEPTANCE = "tests/order.acceptance.test.ts";
@@ -82,7 +82,7 @@ function preG2Graph(): Record<string, unknown> {
     task("T3", 1, { file_list: ["tests/audit.acceptance.test.ts"] }),
     task("T2", 2, {
       depends_on: ["T1", "T3"],
-      spec_anchors: ["FR-001", "FR-002"],
+      spec_anchors: ["FR-001", "FR-002", "AS-001", "AS-002"],
       file_list: [PRICING, QUOTES, HELPERS, RATES, JAVA_PRICING, "tests/order/pricing.test.ts"],
     }),
   ]);
@@ -92,7 +92,7 @@ function preG2Graph(): Record<string, unknown> {
     tasks: [], wave_gates: {},
   }, {
     planTitle: "skeleton wire", validatedPlanFile: "plan.md", tasks: roster.value,
-    verificationManifest: defaultVerificationManifest(),
+    verificationManifest: i6RunnerManifest(),
     specIndex: indexedSpec("spec.md"), observedSpecFile: "spec.md",
     force: false, proofBoundary: { kind: "absent", cause: "fixture" }, contracts: [CONTRACT, TYPELESS], invariants: [],
   });

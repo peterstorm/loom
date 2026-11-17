@@ -25,6 +25,7 @@ import {
   taskRedThenGreenEra,
   type RedThenGreenEra,
 } from "./proof-obligations";
+import { renderTaskScopeProblem, rosterScopeProblems, type TaskScopeProblem } from "./task-scope-rules";
 import { taskArtifactExpectation } from "./task-artifact-expectation";
 import {
   ACCEPTANCE_RED_WINDOW,
@@ -41,9 +42,11 @@ import {
   specIndexObservationOf,
   specIndexPath,
   specIndexUnavailableMessage,
+  unownedRequirements,
   unprovenRequirementTrace,
   type SpecIndexAvailability,
 } from "./requirement-coverage";
+import { nonEmpty } from "./orchestration-contract";
 
 /** Agent-authored Task fields admitted by the decompose contract. */
 export type AuthoredTask = Readonly<
@@ -175,8 +178,12 @@ export type TaskGraphPopulationError = Readonly<{
     | "invalid-contracts"
     | "invalid-owner-obligations"
     | "owner-verification-runner-missing"
-    | "invalid-export-bindings";
+    | "invalid-export-bindings"
+    | "unprovable-task-scope"
+    | "unowned-requirement";
   message: string;
+  /** The scope problems behind an `unprovable-task-scope` or `unowned-requirement` refusal, as data. */
+  problems?: readonly TaskScopeProblem[];
 }>;
 
 /** First population leaves decompose; re-population happens during execute. */
@@ -273,6 +280,36 @@ function ownerRunnerRefusal(
           "Install .loom/verification-manifest.json with an \"affectedRunner\" (schemaVersion 2), or give each such " +
           "Invariant a reasoned **Mutation exemption:**, then re-run populate-task-graph.",
       );
+}
+
+/**
+ * The roster's scope, checked before any attempt is spent (loom#198, Cause
+ * 3): every I6-owing Task declares a test file and has an engine runner to
+ * prove it with, and every completable Requirement has a completion owner.
+ * Every problem is named in one refusal, so the operator fixes them in one
+ * pass; the refusal carries them as data for the shell's runner suggestion.
+ */
+function taskScopeRefusal(command: TaskGraphPopulationCommand, contracts: readonly AcceptanceContract[]): TaskGraphPopulationResult | null {
+  const scopeProblems = rosterScopeProblems(
+    command.tasks.map((task) => ({ id: task.id, fileList: task.file_list, policy: taskVerificationPolicy(task) })),
+    { manifest: command.verificationManifest, contracts },
+  );
+  const unowned = command.specIndex.kind === "indexed"
+    ? nonEmpty([...unownedRequirements(command.specIndex.index, command.tasks.flatMap((task) => task.spec_anchors ?? []))])
+    : null;
+  const problems: readonly TaskScopeProblem[] = [
+    ...scopeProblems,
+    ...(unowned === null ? [] : [Object.freeze({ kind: "unowned-requirements" as const, ids: unowned })]),
+  ];
+  if (problems.length === 0) return null;
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      kind: scopeProblems.length === 0 ? "unowned-requirement" : "unprovable-task-scope",
+      message: `TaskGraph population refused: ${problems.map(renderTaskScopeProblem).join("; ")}. Fix the plan, then re-run populate-task-graph.`,
+      problems: Object.freeze(problems),
+    }),
+  });
 }
 
 /**
@@ -661,6 +698,8 @@ export function populateTaskGraph(
   const skeletons = carriedSkeletons(existing.skeletons ?? [], exportBindings.value);
   const redWindow = redWindowTaskIds(contracts.value, command.tasks);
   const redThenGreen = redThenGreenScope(command.verificationManifest, contracts.value);
+  const scopeRefusal = taskScopeRefusal(command, contracts.value);
+  if (scopeRefusal !== null) return scopeRefusal;
   const distillPlan = distillPlanOf(command, contracts.value);
   // A manifest that declares the runner `helper run-tests` runs freezes the
   // engine-run mode with it (loom#198): only an engine run proves I6 here.

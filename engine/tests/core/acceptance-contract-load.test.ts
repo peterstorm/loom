@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { parseAuthoredTaskRoster, populateTaskGraph, type AuthoredTask } from "../../src/core/task-graph-population";
-import { defaultVerificationManifest } from "../../src/core/verification-manifest";
 import { parseTaskGraph } from "../../src/state-manager";
 import type { PlanContract, TaskGraph } from "../../src/types";
 import { withRedThenGreen } from "../fixtures/red-then-green-proof";
-import { indexedSpec } from "../fixtures/spec-index-fixture";
+import { indexedSpec, specDefining } from "../fixtures/spec-index-fixture";
+import { i6RunnerManifest } from "../fixtures/i6-runner-manifest";
 
 const CONTRACT: PlanContract = {
   id: "CT-1",
@@ -35,7 +35,7 @@ const task = (id: string, wave: number, overrides: Partial<AuthoredTask> = {}): 
 function populated(contracts: readonly PlanContract[] = [CONTRACT]): TaskGraph {
   const roster = parseAuthoredTaskRoster([
     task("T1", 1, { file_list: ["tests/load.acceptance.test.ts"] }),
-    task("T2", 2, { depends_on: ["T1"], spec_anchors: ["FR-001"] }),
+    task("T2", 2, { depends_on: ["T1"], spec_anchors: ["FR-001", "AS-001"], file_list: ["src/T2.ts", "tests/T2.test.ts"] }),
   ]);
   if (!roster.ok) throw new Error(roster.error);
   const result = populateTaskGraph({
@@ -43,8 +43,8 @@ function populated(contracts: readonly PlanContract[] = [CONTRACT]): TaskGraph {
     tasks: [], wave_gates: {},
   }, {
     planTitle: "load", validatedPlanFile: "plan.md", tasks: roster.value,
-    verificationManifest: defaultVerificationManifest(),
-    specIndex: indexedSpec("spec.md"), observedSpecFile: "spec.md",
+    verificationManifest: i6RunnerManifest(),
+    specIndex: indexedSpec("spec.md", specDefining(["FR-001"], ["AS-001"])), observedSpecFile: "spec.md",
     force: false, proofBoundary: { kind: "absent", cause: "fixture" }, contracts, invariants: [],
   });
   if (!result.ok) throw new Error(result.error.message);

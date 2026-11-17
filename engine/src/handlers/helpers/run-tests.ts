@@ -43,6 +43,7 @@ import type { CanonicalRepositoryRoot } from "../../utils/workspace-digest";
 import { describeCause } from "../../utils/describe-cause";
 import { PRODUCTION_STOP_CHECK_PORTS, type StopCheckShellPorts } from "../subagent-stop/acceptance-stop-check";
 import { argumentValues, unconsumedValueArguments } from "./cli-args";
+import { frozenNonTestFiles } from "../../core/task-scope-rules";
 
 const FLAGS: ReadonlySet<string> = new Set(["--files"]);
 
@@ -199,6 +200,10 @@ export function createRunTestsHandler(ports: RunTestsPorts = PRODUCTION_PORTS): 
     const runnable = engineRunnable(loaded.graph.verification_manifest);
     if (!runnable.ok) return { kind: "error", message: `run-tests: ${runnable.error}; there is no engine runner to run` };
     const { manifest, runner } = runnable.value;
+    const notTests = frozenNonTestFiles(manifest, parsed.files);
+    if (notTests.length > 0) {
+      return { kind: "error", message: `run-tests: ${notTests.join(", ")} ${notTests.length === 1 ? "is" : "are"} not a test file under the frozen test-file suffixes; name the Task's test files` };
+    }
     const command = affectedRunnerCheck(runner, parsed.files);
     if (!command.ok) return { kind: "error", message: `run-tests: ${command.error.errors.join("; ")}` };
     const root = ports.repositoryRoot(loaded.statePath);

@@ -44,7 +44,6 @@ import {
 import { returnToRevalidation } from "../../src/core/task-revalidation";
 import {
   defaultVerificationManifest,
-  freezeVerificationManifest,
   legacyDefaultVerificationManifest,
   type FrozenVerificationManifest,
 } from "../../src/core/verification-manifest";
@@ -52,6 +51,7 @@ import { parseVerificationPolicy, type VerificationPolicy } from "../../src/core
 import { parseTaskGraph, taskUnionError } from "../../src/state-file-wire";
 import type { Task, TaskGraph } from "../../src/types";
 import { trustedPassEvidence } from "../fixtures/task-lifecycle";
+import { operatorManifest } from "../fixtures/i6-runner-manifest";
 
 // --- Fixtures ---
 
@@ -103,13 +103,7 @@ const i6Obligations = () => deriveProofObligations({
 
 // --- Era rows ---
 
-function fromSource(document: Readonly<Record<string, unknown>>): FrozenVerificationManifest {
-  const frozen = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
-    kind: "loom-verification-manifest", checks: [], ...document,
-  })));
-  if (!frozen.ok) throw new Error(frozen.error.errors.join("; "));
-  return frozen.value;
-}
+const fromSource = operatorManifest;
 
 type EraRow = Readonly<{ row: string; manifest: () => FrozenVerificationManifest | undefined; era: RedThenGreenEra }>;
 
@@ -125,6 +119,14 @@ const ERA_ROWS: readonly EraRow[] = [
   { row: "(e) a pre-feature frozen manifest", manifest: () => legacyDefaultVerificationManifest(), era: "not-owed" },
   { row: "(f) a pre-feature graph with no verification_manifest", manifest: () => undefined, era: "not-owed" },
 ];
+
+/**
+ * The rows population can freeze an I6-owing roster under: a pre-I6 era, or
+ * a manifest that declares the engine runner I6 is proven with (loom#198,
+ * Cause 3). Rows (c) and (d) declare none, so population refuses them.
+ */
+const POPULATABLE_ERA_ROWS: readonly EraRow[] = ERA_ROWS.filter(({ manifest, era }) =>
+  era === "not-owed" || manifest()?.affectedRunner !== undefined);
 
 function authoredTask(id: string, newTests: "required" | "claimant" | "existing-tests-sufficient"): AuthoredTask {
   return {
@@ -464,19 +466,19 @@ describe("settlement mints proof:red-then-green-unproven:<gap>", () => {
 });
 
 describe("INV-6: every derivation site agrees with redThenGreenEra", () => {
-  it.each(ERA_ROWS)("FR-005 / FR-010: population derives the $era obligations for $row", ({ manifest, era }) => {
+  it.each(POPULATABLE_ERA_ROWS)("FR-005 / FR-010: population derives the $era obligations for $row", ({ manifest, era }) => {
     const graph = populated(manifest());
     for (const [id, expected] of Object.entries(expectedObligationKinds(era))) {
       expect(kinds(taskOf(graph, id).proof?.obligations ?? []), id).toEqual(expected);
     }
   });
 
-  it.each(ERA_ROWS)("FR-005: the State File obligation-match check accepts the populated graph for $row", ({ manifest }) => {
+  it.each(POPULATABLE_ERA_ROWS)("FR-005: the State File obligation-match check accepts the populated graph for $row", ({ manifest }) => {
     const parsed = parseTaskGraph(wire(populated(manifest())));
     expect(parsed.ok, parsed.ok ? "" : parsed.error).toBe(true);
   });
 
-  it.each(ERA_ROWS)("FR-005: the State File check refuses obligations of the other era for $row", ({ manifest, era }) => {
+  it.each(POPULATABLE_ERA_ROWS)("FR-005: the State File check refuses obligations of the other era for $row", ({ manifest, era }) => {
     const raw = wire(populated(manifest()));
     const tasks = raw.tasks as Array<Record<string, unknown>>;
     const t1 = tasks.find((task) => task.id === "T1")!;
@@ -529,7 +531,7 @@ describe("INV-6: every derivation site agrees with redThenGreenEra", () => {
     });
   });
 
-  it.each(ERA_ROWS)("FR-005: the State File migration derives a proof-less pending Task's obligations under $row's era", ({ manifest, era }) => {
+  it.each(POPULATABLE_ERA_ROWS)("FR-005: the State File migration derives a proof-less pending Task's obligations under $row's era", ({ manifest, era }) => {
     const raw = wire(populated(manifest()));
     const tasks = raw.tasks as Array<Record<string, unknown>>;
     delete tasks.find((task) => task.id === "T1")!.proof;
@@ -540,7 +542,7 @@ describe("INV-6: every derivation site agrees with redThenGreenEra", () => {
     expect(kinds(migrated?.proof?.obligations ?? [])).toEqual(expectedObligationKinds(era).T1);
   });
 
-  it.each(ERA_ROWS)("FR-005: revalidation re-derives a proof-less Task's obligations under $row's era", ({ manifest, era }) => {
+  it.each(POPULATABLE_ERA_ROWS)("FR-005: revalidation re-derives a proof-less Task's obligations under $row's era", ({ manifest, era }) => {
     const frozen = manifest();
     const graph = populated(frozen);
     for (const [id, expected] of Object.entries(expectedObligationKinds(era))) {
