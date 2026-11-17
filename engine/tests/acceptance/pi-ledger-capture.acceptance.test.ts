@@ -236,7 +236,7 @@ function populate(repository: Repository, manifest: FrozenVerificationManifest):
     specIndex: { kind: "unavailable", reason: { kind: "no-spec-file" } },
     observedSpecFile: null,
     force: false,
-    proofBoundary: { kind: "absent", cause: "fixture: first dispatch stamps its own baseline" },
+    proofBoundary: { kind: "absent", cause: "fixture: first dispatch stamps its own baseline" }, engineRevision: { kind: "not-observed", cause: "fixture" },
     contracts: [],
     invariants: [],
   });

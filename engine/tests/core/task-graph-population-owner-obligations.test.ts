@@ -115,7 +115,7 @@ const command = (overrides: Partial<TaskGraphPopulationCommand> = {}): TaskGraph
   specIndex: { kind: "unavailable", reason: { kind: "no-spec-file" } },
   observedSpecFile: null,
   force: false,
-  proofBoundary: { kind: "absent", cause: "fixture: no Git repository root" },
+  proofBoundary: { kind: "absent", cause: "fixture: no Git repository root" }, engineRevision: { kind: "not-observed", cause: "fixture" },
   contracts: [],
   invariants: [],
   ...overrides,

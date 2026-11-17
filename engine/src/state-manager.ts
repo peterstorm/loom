@@ -16,6 +16,7 @@
  * StateManager transaction boundary.
  */
 
+import { engineRevisionWriteRefusal } from "./core/engine-revision-pin";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pathExistsFailClosed, taskGraphPath } from "./config";
@@ -87,6 +88,16 @@ export type {
 } from "./state-file-wire";
 
 const PACKAGE_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+
+/**
+ * The engine this process writes State Files as (loom#198, Cause 4): its
+ * package root and content-addressed runtime revision under the strict
+ * boundary. Population and adoption pin this revision, and the write boundary
+ * judges a graph's pin against it, whatever boundary the write itself uses.
+ */
+export function runningEngineIdentity(): Readonly<{ packageRoot: string; revision: string }> {
+  return captureLoomRuntimeIdentityAt(PACKAGE_ROOT, STRICT_RUNTIME_WRITE_BOUNDARY);
+}
 
 type TaskGraphFileAuthority = Readonly<{
   kind: "task-graph-file-authority";
@@ -624,7 +635,8 @@ export class StateManager {
     // attempt writing those files is the product, not runtime drift. Every
     // other path still hashes live, so any other drift refuses exactly as
     // before; the strict boundary is the full-domain live capture.
-    assertPiCliMutationCompatible(process.env, captureLoomRuntimeIdentityAt(PACKAGE_ROOT, this.writeBoundary));
+    const identity = captureLoomRuntimeIdentityAt(PACKAGE_ROOT, this.writeBoundary);
+    assertPiCliMutationCompatible(process.env, identity);
     const directory = this.openAuthorityDirectory();
     return withStateDirectoryAsync(directory, `TaskGraph atomic write of ${this.path}`, () =>
       withAnchoredDirectoryHandleLock(directory, TASK_GRAPH_LOCK_NAME, () => {
@@ -632,6 +644,11 @@ export class StateManager {
         if (produced.persist === false) return produced.value;
         const parsed = parseTaskGraph(produced.state);
         if (!parsed.ok) throw new Error(`Refusing to persist invalid task graph (${parsed.error}): ${this.path}`);
+        // A State File is only ever written by the engine revision it is pinned to (loom#198, Cause 4),
+        // judged under the strict boundary the pin was minted under; a restoring boundary's identity differs by design.
+        const pinRevision = this.writeBoundary.kind === "strict" ? identity.revision : runningEngineIdentity().revision;
+        const pinRefusal = engineRevisionWriteRefusal(parsed.value, pinRevision);
+        if (pinRefusal !== null) throw new Error(pinRefusal);
         writeDirectoryFileAtomicModeNoFollow(
           directory,
           this.authority.leaf,

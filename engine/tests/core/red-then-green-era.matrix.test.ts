@@ -114,7 +114,7 @@ function populated(verificationManifest: FrozenVerificationManifest): TaskGraph 
     specIndex: SPEC_INDEX,
     observedSpecFile: "spec.md",
     force: false,
-    proofBoundary: { kind: "absent", cause: "fixture: no Git repository root" },
+    proofBoundary: { kind: "absent", cause: "fixture: no Git repository root" }, engineRevision: { kind: "not-observed", cause: "fixture" },
     contracts: [],
     invariants: [],
   });

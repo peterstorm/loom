@@ -42,6 +42,16 @@ When a Wave Gate is blocked by critical findings, your own Edit and Write are bl
 1. **Fix through a subagent**, by [Acting on a Finding](../../commands/wave-gate.md#acting-on-a-finding): abandon the run, `reopen-task`, and spawn the fix agent from the reopened Task's brief with the findings as its `--note`s. Never use `populate-task-graph --force`; it resets every Task.
 2. **Run a fresh `/wave-gate`.** It reviews the fix.
 
+## The engine changed under a live orchestration
+
+A write refused with "This TaskGraph is pinned to Loom engine revision …" means the plugin checkout changed since population. Tell the user. With their approval, continue on the running engine (or have them restore the pinned one):
+
+```bash
+bun {LOOM_DIR}/engine/src/cli.ts helper orchestration adopt-engine-revision --reason "<why this engine>"
+```
+
+Then re-read status; a Task whose settlement was refused is dispatched again from its brief. The full contract is in `docs/reference/recovery.md` (The engine changed under a live orchestration).
+
 ## A pending Task's file list cannot satisfy its policy
 
 A pending Task that owes red-then-green but lists no test file can only fail I6 with `no-test-files`; its agent reports that instead of finishing. Do not spend its retry and do not re-populate. With the user's approval, add the test file it needs (or move a file between pending Tasks) in place:

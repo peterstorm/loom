@@ -36,6 +36,7 @@
  *                               [--agent <agent>] [--new-tests required|existing-tests-sufficient]
  *   helper orchestration withdraw-forward-fix --wave <N> --task <fix-task-id> --reason <text>
  *   helper orchestration adopt-engine-run-tests --reason <text>
+ *   helper orchestration adopt-engine-revision --reason <text>
  *
  * Every `--run`, `--new-run`, and remediation `sourceRun` accepts either the
  * bare run id or a full path to that same direct child of its runs-root. The
@@ -219,6 +220,7 @@ import { attestOperation } from "./attest-implementation";
 import { reopenTaskOperation } from "./reopen-task";
 import { rescopeTaskOperation } from "./rescope-task";
 import { adoptEngineRunTestsOperation } from "./adopt-engine-run-tests";
+import { adoptEngineRevisionOperation } from "./adopt-engine-revision";
 import { addForwardFixOperation, withdrawForwardFixOperation } from "./forward-fix-operations";
 import { renderStandaloneReviewSummary } from "../../core/standalone-review-records";
 import { serializeStandaloneReviewMachineState } from "../../core/standalone-review-checkpoint";
@@ -235,6 +237,31 @@ import { prepareStandaloneDispositionFacadeStart, startStandaloneDispositionFaca
   resumeStandaloneDispositionFacade, inspectStandaloneDispositionFacade, readSelectedStandaloneDisposition,
   STANDALONE_DISPOSITION_EVENT_RESOURCE_POLICY } from "./programs/standalone-disposition";
 
+
+/** The operator's recovery operations on the TaskGraph itself, each audited. */
+const OPERATOR_OPERATIONS_USAGE: readonly string[] = [
+  "  remediate --task <task-id> --receipt <terminal escalation receipt id> --reason <text>",
+  "          (retires the exact terminal implementation escalation so the next status offers a fresh attempt-1 dispatch; prior receipts stay in history)",
+  "  attest   --task <task-id> --reason <text>",
+  "          (arms implementation re-attestation: rewrites the Task's pending proof to attested obligations + regression-only policy; the next dispatch runs a verify-only child whose writes settle as drift, never as attested)",
+  "  reopen-task --wave <N> --task <task-id> [--task <task-id>]... --reason <text>",
+  "          (after abandoning the Wave's run: returns implemented Tasks of the active Wave to revalidation so status owes each a fresh dispatch; Findings stay as prior Findings, other Tasks stay implemented; audited and idempotent)",
+  "  rescope-task --task <task-id> [--add-file <path>]... [--remove-file <path>]... --reason <text>",
+  "          (adds files to, or removes files from, a pending Task of the active Wave or a later one, such as a new-tests Task with no test file;",
+  "          keeps every population check, extends its population baseline from its start_sha, re-derives its Proof; audited and idempotent)",
+  "  add-forward-fix --wave <N> --hold <task-id> [--hold <task-id>]... --file <path> [--file <path>]...",
+  "          --description <text> --reason <text> [--agent <implementation agent>] [--new-tests required|existing-tests-sufficient]",
+  "          (appends a Forward Fix Task to the active Wave to change code a completed Wave sealed, when a held Task's judgement of it failed;",
+  "          the held Tasks wait until the fix settles; completed Waves stay untouched; audited and idempotent)",
+  "  withdraw-forward-fix --wave <N> --task <fix-task-id> --reason <text>",
+  "          (removes a Forward Fix Task that was never dispatched and releases its hold; its audit moves to forward_fix_withdrawals)",
+  "  adopt-engine-run-tests --reason <text>",
+  "          (freezes engine-run test evidence on a graph populated before it existed: from then on only `helper run-tests` runs prove I6",
+  "          and test verdicts; needs the frozen manifest's affectedRunner and no reserved attempt; recorded with the reason; idempotent)",
+  "  adopt-engine-revision --reason <text>",
+  "          (continues a TaskGraph pinned to another Loom engine revision on the one running now: until then every hook and helper",
+  "          refuses to write it; gives a graph populated before pins its first one; recorded with the reason; idempotent)",
+];
 
 function usage(): HookResult {
   return {
@@ -267,24 +294,7 @@ function usage(): HookResult {
       "  correlate --runs-root <root> --run <run-directory> --request <id> --harness <pi|claude> --native-id <id> --agent <role>",
       "  complete --runs-root <root> --run <run-directory> --operation <id>",
       "  decide  --runs-root <root> --run <run-directory> --request <decision-id>",
-  "  remediate --task <task-id> --receipt <terminal escalation receipt id> --reason <text>",
-  "          (retires the exact terminal implementation escalation so the next status offers a fresh attempt-1 dispatch; prior receipts stay in history)",
-  "  attest   --task <task-id> --reason <text>",
-  "          (arms implementation re-attestation: rewrites the Task's pending proof to attested obligations + regression-only policy; the next dispatch runs a verify-only child whose writes settle as drift, never as attested)",
-  "  reopen-task --wave <N> --task <task-id> [--task <task-id>]... --reason <text>",
-  "          (after abandoning the Wave's run: returns implemented Tasks of the active Wave to revalidation so status owes each a fresh dispatch; Findings stay as prior Findings, other Tasks stay implemented; audited and idempotent)",
-  "  rescope-task --task <task-id> [--add-file <path>]... [--remove-file <path>]... --reason <text>",
-  "          (adds files to, or removes files from, a pending Task of the active Wave or a later one, such as a new-tests Task with no test file;",
-  "          keeps every population check, extends its population baseline from its start_sha, re-derives its Proof; audited and idempotent)",
-  "  add-forward-fix --wave <N> --hold <task-id> [--hold <task-id>]... --file <path> [--file <path>]...",
-  "          --description <text> --reason <text> [--agent <implementation agent>] [--new-tests required|existing-tests-sufficient]",
-  "          (appends a Forward Fix Task to the active Wave to change code a completed Wave sealed, when a held Task's judgement of it failed;",
-  "          the held Tasks wait until the fix settles; completed Waves stay untouched; audited and idempotent)",
-  "  withdraw-forward-fix --wave <N> --task <fix-task-id> --reason <text>",
-  "          (removes a Forward Fix Task that was never dispatched and releases its hold; its audit moves to forward_fix_withdrawals)",
-  "  adopt-engine-run-tests --reason <text>",
-  "          (freezes engine-run test evidence on a graph populated before it existed: from then on only `helper run-tests` runs prove I6",
-  "          and test verdicts; needs the frozen manifest's affectedRunner and no reserved attempt; recorded with the reason; idempotent)",
+      ...OPERATOR_OPERATIONS_USAGE,
     ].join("\n"),
   };
 }
@@ -1966,6 +1976,8 @@ export function orchestrationHandler(emission: () => Emission): HookHandler {
         return withdrawForwardFixOperation(rest);
       case "adopt-engine-run-tests":
         return adoptEngineRunTestsOperation(rest);
+      case "adopt-engine-revision":
+        return adoptEngineRevisionOperation(rest);
     }
   };
 }

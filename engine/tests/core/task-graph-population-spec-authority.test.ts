@@ -48,7 +48,7 @@ function populate(tasks: readonly AuthoredTask[], specIndex: SpecIndexAvailabili
   const command: TaskGraphPopulationCommand = {
     planTitle: "plan", validatedPlanFile: "plan.md", tasks: roster.value,
     verificationManifest: defaultVerificationManifest(), specIndex, observedSpecFile: specFile,
-    force: false, proofBoundary: { kind: "absent", cause: "fixture" }, contracts: [], invariants: [],
+    force: false, proofBoundary: { kind: "absent", cause: "fixture" }, engineRevision: { kind: "not-observed", cause: "fixture" }, contracts: [], invariants: [],
   };
   return populateTaskGraph(graph(specFile), command);
 }

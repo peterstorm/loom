@@ -449,7 +449,7 @@ describe("INV-3 sibling row — population's runner requirement follows verifyOw
       planTitle: "INV-3 matrix", validatedPlanFile: "plan.md", tasks: ROSTER,
       verificationManifest: frozenManifest(withRunner ? { schemaVersion: 2, affectedRunner: AFFECTED_RUNNER } : { schemaVersion: 2 }),
       specIndex: { kind: "unavailable", reason: { kind: "no-spec-file" } }, observedSpecFile: null, force: false,
-      proofBoundary: { kind: "absent", cause: "fixture: no Git repository root" }, contracts: [], invariants,
+      proofBoundary: { kind: "absent", cause: "fixture: no Git repository root" }, engineRevision: { kind: "not-observed", cause: "fixture" }, contracts: [], invariants,
     },
   );
 

@@ -259,6 +259,21 @@ import type {
   ResolvedFinding,
   ReviewRun,
 } from "./core/findings-shape";
+
+/** A content-addressed Loom runtime revision (`sha256:<64 hex>`), minted only by `core/engine-revision-pin.ts`. */
+export type EngineRevision = string & { readonly __brand: "EngineRevision" };
+
+/** One audited move of a TaskGraph's engine pin: from the pinned revision (null: the graph had none) to the running one. */
+export type EngineRevisionAdoption = Readonly<{ from: EngineRevision | null; to: EngineRevision; reason: string }>;
+
+/**
+ * A TaskGraph's engine revision pin. `pinned`: only that runtime revision may
+ * write the graph, and each move is audited in `adoptions`, oldest first.
+ * `self-hosted`: the project is the engine package itself, so no pin applies.
+ */
+export type EngineRevisionPin =
+  | Readonly<{ schemaVersion: 1; kind: "pinned"; revision: EngineRevision; adoptions: readonly EngineRevisionAdoption[] }>
+  | Readonly<{ schemaVersion: 1; kind: "self-hosted" }>;
 export type {
   AcceptedReviewAuthority,
   CurrentAcceptedReviewAuthority,
@@ -1378,6 +1393,11 @@ export interface TaskGraph {
    *  to this graph's repository and frozen manifest are a Task's evidence.
    *  Its shape is `core/test-evidence-mode.ts`; its parser and policy live in `core/test-evidence-authority.ts`. */
   readonly test_evidence?: EngineRunTestEvidence;
+  /** The Loom engine revision this graph is written by (loom#198, Cause 4):
+   *  pinned at population, moved only by `orchestration adopt-engine-revision`.
+   *  Absent on a graph populated before the pin existed. The rules are in
+   *  `core/engine-revision-pin.ts`; `StateManager` enforces them. */
+  readonly engine_revision?: EngineRevisionPin;
   /** The audited edits of a pending Task's plan in the active Wave or a later
    *  one (`orchestration rescope-task`, loom#198 Cause 3), oldest first.
    *  Re-population drops them with the Tasks they edited. */
