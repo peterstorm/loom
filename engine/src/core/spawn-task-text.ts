@@ -26,7 +26,9 @@ export type ReviewerDelivery =
   /** Current v2 issuance, with the frozen diff when the run carries a read obligation. */
   | Readonly<{ version: 2; readObligation: FrozenDiff | null }>
   /** Explicit standalone successor v3 issuance. */
-  | Readonly<{ version: 3 }>;
+  | Readonly<{ version: 3 }>
+  /** Wave v4 issuance (ADR-0083): the payload carries no packet identity. */
+  | Readonly<{ version: 4 }>;
 
 export type SpawnTaskFacts = Readonly<{
   authority: AgentRequestAuthority;
@@ -116,6 +118,16 @@ function readObligationDelivery(diff: FrozenDiff): string {
 }
 
 /**
+ * The payload a Wave v4 reviewer must emit (ADR-0083): the engine binds the
+ * Review Packet ID and Review Generation from the issued request, so the
+ * reviewer copies neither, and the v2 Wave envelope is refused.
+ */
+export const WAVE_V4_PAYLOAD_LINE =
+  "Your payload's \"schemaVersion\" is 4 and its \"kind\" is \"wave-review\": follow your wire contract's \"Wave review v4\" section. " +
+  "Do not copy \"packetId\" or \"generation\"; the engine binds both from this request, and a payload that carries them is refused. " +
+  "Assess every issued prior Finding in \"prior_findings\".\n";
+
+/**
  * The payload kind a current v2 reviewer must emit. The issued schema admits
  * both arms, so without this a Wave reviewer can copy the standalone example
  * from its shared wire contract and be refused: four Wave reviewers did in the
@@ -142,6 +154,8 @@ function reviewerDeliveryBootstrap(facts: SpawnTaskFacts, delivery: ReviewerDeli
       "This is an explicitly issued standalone successor v3 request. Read standalone-lineage and standalone-frozen-source, then the frozen reviewer-payload-schema and reviewer-impact-rubric. Cover every inherited origin exactly once in issued order, retaining original identity and history. Reopening needs the exact prior decision reference and complete new evidence; unavailable context means not-assessable, never repaired. New assertions belong in findings as draft/relation, not reminted prior Findings.\n" +
       `Your payload's "schemaVersion" is 3 and its "kind" is "standalone-successor-review": follow your wire contract's "Successor review" section, never its v2 example, which this request refuses. ${STANDALONE_SUCCESSOR_ROSTER_RULE}\n` +
       "Browse predecessor-frozen-source with --section. Browse an exact predecessor-context:ROLE[:attempt-2] using --archive LABEL --archive-purpose v1-v2 (or standalone-successor for a v3 predecessor), then --section or --file and bounded offsets. These are retained data, not new issuance authority. Native capture records your one exact final payload; registered resume owns admission, retry and panel work.\n")
+    .with({ version: 4 }, () =>
+      "Read the issued Context Packet FIRST; its frozen schema and rubric govern your final output.\n" + WAVE_V4_PAYLOAD_LINE)
     .with({ version: 2 }, ({ readObligation }) =>
       "Read the issued Context Packet FIRST; its frozen schema and rubric govern your final output.\n" +
       reviewerPayloadKindLine(facts.standalone) +

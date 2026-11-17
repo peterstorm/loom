@@ -28,7 +28,9 @@ import {
   type IssuedSpawnEmissionAuthority,
 } from "../../src/core/issued-emission-capability";
 import { planPiWriteGrants } from "../../src/core/pi-write-grant-plan";
-import { cellSchemaDigest, mintedBindingFor, OBSERVED_REQUEST_ID, REVIEWER_V2_CELL, REVIEWER_V3_CELL } from "../fixtures/emission-registry-cells";
+import {
+  cellSchemaDigest, mintedBindingFor, OBSERVED_REQUEST_ID, REVIEWER_V2_CELL, REVIEWER_V3_CELL, REVIEWER_V4_CELL,
+} from "../fixtures/emission-registry-cells";
 import { withEnvOverlaySync } from "../fixtures/env-overlay";
 
 const issuedLookupContext = (() => {
@@ -124,12 +126,17 @@ describe("Pi issued-request classification under a registered review facade", ()
       {
         kind: "standalone-review" as const,
         schemaVersion: 3 as const,
-        reviewerProtocol: { schemaDigest: cellSchemaDigest(REVIEWER_V3_CELL) },
+        reviewerProtocol: { version: 3 as const, schemaDigest: cellSchemaDigest(REVIEWER_V3_CELL) },
       },
       {
         kind: "wave-gate" as const,
         schemaVersion: 2 as const,
-        reviewerProtocol: { schemaDigest: cellSchemaDigest(REVIEWER_V2_CELL) },
+        reviewerProtocol: { version: 2 as const, schemaDigest: cellSchemaDigest(REVIEWER_V2_CELL) },
+      },
+      {
+        kind: "wave-gate" as const,
+        schemaVersion: 2 as const,
+        reviewerProtocol: { version: 4 as const, schemaDigest: cellSchemaDigest(REVIEWER_V4_CELL) },
       },
     ];
     for (const program of programs) {
@@ -148,11 +155,16 @@ describe("Pi issued-request classification under a registered review facade", ()
     }
   });
 
-  it("keeps a direct registered reviewer request on its exact issued emission protocol", () => {
-    const schemaDigest = mintedBindingFor(REVIEWER_V2_CELL, OBSERVED_REQUEST_ID).schemaDigest;
+  it.each([
+    { version: 2 as const, cell: REVIEWER_V2_CELL },
+    // A Wave Gate registered under v4 keeps its schema-2 registration; the
+    // descriptor's own version selects the v4 claim (ADR-0083).
+    { version: 4 as const, cell: REVIEWER_V4_CELL },
+  ])("keeps a direct registered reviewer request on its exact issued emission protocol (v$version)", ({ version, cell }) => {
+    const schemaDigest = mintedBindingFor(cell, OBSERVED_REQUEST_ID).schemaDigest;
     const classified = classifyPiIssuedReviewRequest(
       runId,
-      { kind: "wave-gate", schemaVersion: 2, reviewerProtocol: { schemaDigest } },
+      { kind: "wave-gate", schemaVersion: 2, reviewerProtocol: { version, schemaDigest } },
       { ...refutationRequest, program: "wave-gate", role: "code-reviewer" },
     );
     expect(classified).toEqual({
@@ -163,7 +175,7 @@ describe("Pi issued-request classification under a registered review facade", ()
           requestId,
           contextDigest: issuedLookupContext,
           producerKind: "reviewer-payload",
-          version: "v2",
+          version: cell.version,
           schemaDigest,
         },
       },
@@ -207,7 +219,7 @@ describe("the production issued-review capture decision", () => {
       program: {
         kind: "wave-gate" as const,
         schemaVersion: 2 as const,
-        reviewerProtocol: { schemaDigest: sha256Hex("not-the-issued-frozen-schema-v2") },
+        reviewerProtocol: { version: 2 as const, schemaDigest: sha256Hex("not-the-issued-frozen-schema-v2") },
       },
     },
     {
@@ -215,7 +227,15 @@ describe("the production issued-review capture decision", () => {
       program: {
         kind: "standalone-review" as const,
         schemaVersion: 3 as const,
-        reviewerProtocol: { schemaDigest: sha256Hex("not-the-issued-frozen-schema-v3") },
+        reviewerProtocol: { version: 3 as const, schemaDigest: sha256Hex("not-the-issued-frozen-schema-v3") },
+      },
+    },
+    {
+      version: "v4",
+      program: {
+        kind: "wave-gate" as const,
+        schemaVersion: 2 as const,
+        reviewerProtocol: { version: 4 as const, schemaDigest: sha256Hex("not-the-issued-frozen-schema-v4") },
       },
     },
   ])("makes a malformed current $version issued binding unavailable instead of falling through to final-message extraction", ({ program }) => {
@@ -259,18 +279,29 @@ describe("qualified published Pi request routes bind descriptor admission indepe
   const reviewPrograms = [
     {
       version: "v2" as const,
+      cell: REVIEWER_V2_CELL,
       program: {
         kind: "wave-gate" as const,
         schemaVersion: 2 as const,
-        reviewerProtocol: { schemaDigest: cellSchemaDigest(REVIEWER_V2_CELL) },
+        reviewerProtocol: { version: 2 as const, schemaDigest: cellSchemaDigest(REVIEWER_V2_CELL) },
       },
     },
     {
       version: "v3" as const,
+      cell: REVIEWER_V3_CELL,
       program: {
         kind: "standalone-review" as const,
         schemaVersion: 3 as const,
-        reviewerProtocol: { schemaDigest: cellSchemaDigest(REVIEWER_V3_CELL) },
+        reviewerProtocol: { version: 3 as const, schemaDigest: cellSchemaDigest(REVIEWER_V3_CELL) },
+      },
+    },
+    {
+      version: "v4" as const,
+      cell: REVIEWER_V4_CELL,
+      program: {
+        kind: "wave-gate" as const,
+        schemaVersion: 2 as const,
+        reviewerProtocol: { version: 4 as const, schemaDigest: cellSchemaDigest(REVIEWER_V4_CELL) },
       },
     },
   ] as const;
@@ -299,14 +330,14 @@ describe("qualified published Pi request routes bind descriptor admission indepe
       `LOOM_CONTEXT_DIGEST: ${authority.claim.contextDigest}\n${descriptor}`,
   }, () => ({ ok: true, value: authority }));
 
-  it("admits v2/v3 cloud-pinned reviewers without a descriptor as no-tool, and a valid-looking descriptor cannot upgrade either route", () => {
+  it("admits v2/v3/v4 cloud-pinned reviewers without a descriptor as no-tool, and a valid-looking descriptor cannot upgrade any route", () => {
     const previousAmbientModel = process.env["PI_MODEL"];
     process.env["PI_MODEL"] = "glm-5.3-flash-spark-tp2-v14";
     try {
-      for (const { version, program } of reviewPrograms) {
+      for (const { version, cell, program } of reviewPrograms) {
         const request = {
           runId: `run.t5-cloud-${version}`,
-          requestId: mintedBindingFor(version === "v2" ? REVIEWER_V2_CELL : REVIEWER_V3_CELL, `req-t5-cloud-${version}`).requestId,
+          requestId: mintedBindingFor(cell, `req-t5-cloud-${version}`).requestId,
           contextDigest: issuedLookupContext,
           program: program.kind,
           role: "code-reviewer",
@@ -344,11 +375,11 @@ describe("qualified published Pi request routes bind descriptor admission indepe
     }
   });
 
-  it("requires the exact descriptor for qualified frozen v2/v3 desktop routes and refuses omitted or forged descriptors", () => {
-    for (const { version, program } of reviewPrograms) {
+  it("requires the exact descriptor for qualified frozen v2/v3/v4 desktop routes and refuses omitted or forged descriptors", () => {
+    for (const { version, cell, program } of reviewPrograms) {
       const request = {
         runId: `run.t5-qualified-${version}`,
-        requestId: mintedBindingFor(version === "v2" ? REVIEWER_V2_CELL : REVIEWER_V3_CELL, `req-t5-qualified-${version}`).requestId,
+        requestId: mintedBindingFor(cell, `req-t5-qualified-${version}`).requestId,
         contextDigest: issuedLookupContext,
         program: program.kind,
         role: "code-reviewer",

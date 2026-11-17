@@ -8,12 +8,15 @@
 import { parseStandaloneSuccessorRegistration, parseStandaloneSuccessorStartInput, type RegisteredStandaloneSuccessorProgram } from './standalone-successor-registration';
 import type { PreparedStandaloneSuccessor } from '../../../core/standalone-review-model';
 import { parseRegisteredStandaloneDispositionProgram, type RegisteredStandaloneDispositionProgram } from '../../../core/standalone-disposition-machine';
-import { canonicalStructuralEquals, boundedThrownCause } from '../../../core/orchestration-contract';
+import { canonicalStructuralEquals, boundedThrownCause, type DomainResult } from '../../../core/orchestration-contract';
 import { serializeStandaloneReviewAuthority } from '../../../core/standalone-review-records';
 import { parseStandaloneReviewAuthority } from '../../../core/standalone-review-preparation';
 import { type FrozenStandaloneReviewAuthority } from '../../../core/standalone-review-model';
 import { parseStandaloneReviewKind, standaloneReviewProfile, type StandaloneReviewKind } from '../../../core/standalone-review-scope';
-import { parseReviewerProtocolDescriptor } from '../../../core/reviewer-contract';
+import {
+  parseReviewerProtocolDescriptorV2, parseWaveReviewerProtocolDescriptor,
+  type ReviewerProtocolDescriptor, type ReviewerProtocolDescriptorV2, type ReviewerProtocolFailure,
+} from '../../../core/reviewer-contract';
 import { parseStandaloneReadCoverage, type StandaloneReadCoveragePolicy } from '../../../core/standalone-read-coverage';
 import type { OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, RegisteredWaveGateProgram, WaveGateRestartAudit } from '../../../core/wave-gate-program';
 import { parseRunDirectoryReference } from '../../../orchestration/run-directory-handle';
@@ -36,7 +39,7 @@ type StandaloneReadObligation =
   | Readonly<{ schemaVersion: 1; readCoverage?: never }>
   | Readonly<{ schemaVersion: 2; readCoverage?: StandaloneReadCoveragePolicy }>;
 
-export type RegisteredStandaloneProgram = RegisteredStandaloneSuccessorProgram | (RegisteredReviewerProtocol & StandaloneReadObligation & Readonly<{
+export type RegisteredStandaloneProgram = RegisteredStandaloneSuccessorProgram | (RegisteredReviewerProtocol<ReviewerProtocolDescriptorV2> & StandaloneReadObligation & Readonly<{
   kind: "standalone-review";
   input: Readonly<{ kind: StandaloneReviewKind; files: readonly string[] | null; dryRun: boolean }>;
   authority: unknown;
@@ -98,7 +101,12 @@ export function parseStandaloneStartInput(raw: unknown): ProgramParse<Registered
   }) };
 }
 
-function registrationProtocol(raw: unknown): ProgramParse<RegisteredReviewerProtocol> {
+/** The registration's protocol arm under the program's own descriptor parse:
+ *  the Wave Gate admits v2 or v4, a standalone review v2 only. */
+function registrationProtocol<Descriptor extends ReviewerProtocolDescriptor>(
+  raw: unknown,
+  parseDescriptor: (descriptor: unknown) => DomainResult<Descriptor, ReviewerProtocolFailure>,
+): ProgramParse<RegisteredReviewerProtocol<Descriptor>> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return { ok: false, message: "reviewer registration must be an object" };
   }
@@ -111,7 +119,7 @@ function registrationProtocol(raw: unknown): ProgramParse<RegisteredReviewerProt
   }
   if (version.value === 2) {
     const descriptor = Object.getOwnPropertyDescriptor(raw, "reviewerProtocol");
-    const parsed = parseReviewerProtocolDescriptor(descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined);
+    const parsed = parseDescriptor(descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined);
     return parsed.ok
       ? { ok: true, value: Object.freeze({ schemaVersion: 2, reviewerProtocol: parsed.value }) }
       : { ok: false, message: parsed.error.message };
@@ -122,7 +130,7 @@ function registrationProtocol(raw: unknown): ProgramParse<RegisteredReviewerProt
 export function parseRegistration(raw: unknown): ProgramParse<RegisteredStandaloneProgram> {
   try {
     if (typeof raw === "object" && raw !== null && Object.getOwnPropertyDescriptor(raw, "schemaVersion")?.value === 3) return parseStandaloneSuccessorRegistration(raw);
-    const protocol = registrationProtocol(raw);
+    const protocol = registrationProtocol(raw, parseReviewerProtocolDescriptorV2);
     if (!protocol.ok) return protocol;
     const keys = ["schemaVersion", "kind", "input", "authority"];
     if (protocol.value.schemaVersion === 2) keys.push("reviewerProtocol");
@@ -310,7 +318,7 @@ function parseFacadeRegistration(raw: unknown): FacadeRegistrationParse {
 }
 
 function parseRegisteredWaveGateProgram(raw: unknown): FacadeRegistrationParse {
-  const protocol = registrationProtocol(raw);
+  const protocol = registrationProtocol(raw, parseWaveReviewerProtocolDescriptor);
   if (!protocol.ok) return invalidRegistration(protocol.message);
   const waveBaseKeys = ["schemaVersion", "kind", "input", "taskIds", "authorityDigest",
     ...(protocol.value.schemaVersion === 2 ? ["reviewerProtocol"] : [])];

@@ -11,7 +11,7 @@ import { captureKey } from "../../../../src/core/harness-capture";
 import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../../../src/core/model-profiles";
 import { parseRequestId, type AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
-import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_PAYLOAD_SCHEMA_V2 } from "../../../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_PAYLOAD_SCHEMA_V2 } from "../../../../src/core/reviewer-contract";
 import { prepareStandaloneReview } from "../../../../src/core/standalone-review-preparation";
 import { serializeStandaloneReviewAuthority } from "../../../../src/core/standalone-review-records";
 import { STANDALONE_REVIEWER_ROLES } from "../../../../src/core/standalone-review-scope";
@@ -177,7 +177,7 @@ describe("standalone registered protocol delivery and publication", () => {
     expect(bindings[0]!.requestIds).toEqual(initial.requests!.map(({ authority }) => authority.requestId).sort());
     const registration = registered(handle);
     expect(registration.schemaVersion).toBe(2);
-    expect(registration.reviewerProtocol).toEqual(CURRENT_REVIEWER_PROTOCOL);
+    expect(registration.reviewerProtocol).toEqual(REVIEWER_PROTOCOL_V2);
     const requests = initial.requests!;
     expect(requests.map(({ authority }) => authority.role)).toEqual(STANDALONE_REVIEWER_ROLES);
     for (const request of requests) {
@@ -298,7 +298,7 @@ describe("standalone registered protocol delivery and publication", () => {
   }, 30_000);
 
   it("parses whole Wave registration versions strictly without a caller downgrade flag", () => {
-    const current = { schemaVersion: 2, kind: "wave-gate", reviewerProtocol: CURRENT_REVIEWER_PROTOCOL,
+    const current = { schemaVersion: 2, kind: "wave-gate", reviewerProtocol: REVIEWER_PROTOCOL_V2,
       input: { wave: 1 }, taskIds: ["T1"], authorityDigest: "a".repeat(64) };
     expect(parseRegisteredFacadeProgram(current).kind).toBe("registered");
     const { reviewerProtocol: _removed, ...missing } = current;

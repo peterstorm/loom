@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import fc from "fast-check";
 import { gzipSync } from "node:zlib";
 import type { ContextProjectionInput } from "../../src/core/context-packet-projection";
@@ -178,7 +179,7 @@ describe("projectArchivedPredecessor: the reader's whole --archive path", () => 
   const stored = (packet: unknown): unknown => JSON.parse(JSON.stringify(packet));
 
   const predecessor = value(buildReviewerContextPacket({ requestId: requestId("prior"), role: ROLE, requiredSkill: "review",
-    fixedContext: [], variableContext: [section("prior-notes", "the predecessor's retained notes")] }));
+    fixedContext: [], variableContext: [section("prior-notes", "the predecessor's retained notes")] }, REVIEWER_PROTOCOL_V2));
   const predecessorBytes = bytesOf(JSON.stringify(predecessor));
   const reference = (overrides: Record<string, unknown> = {}) => JSON.stringify({ ...referenceRecord(predecessorBytes, PREDECESSOR_PATH), ...overrides });
   const gzipArchive = (overrides: Record<string, unknown> = {}) => JSON.stringify({ ...gzipRecord(predecessorBytes), ...overrides });

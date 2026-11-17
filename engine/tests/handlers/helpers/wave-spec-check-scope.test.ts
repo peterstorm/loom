@@ -10,7 +10,7 @@ import type { TaskGraph, WaveReviewEpochAuthority } from "../../../src/types";
 import { parseTaskGraph, StateManager } from "../../../src/state-manager";
 import { taskFixture } from "../../fixtures/task-lifecycle";
 import { BASE_WAVE_REVIEW_AGENTS } from "../../../src/core/agent-catalog-projections";
-import { CURRENT_REVIEWER_PROTOCOL } from "../../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../../../src/core/reviewer-contract";
 import {
   decideWaveReviewEpochReplay,
   prepareWaveReviewBatch,
@@ -592,7 +592,7 @@ describe("Wave reviewer slot identity projection", () => {
     fc.assert(fc.property(fc.integer({ min: 0, max: 1000 }), (generation) => {
       const graph = { ...preparedGraph, tasks: preparedGraph.tasks.map((task) => ({ ...task, review_generation: generation })) };
       const legacy = { ...plain, schemaVersion: 1 as const, input: { wave: 1 } };
-      const current = { ...legacy, schemaVersion: 2 as const, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL };
+      const current = { ...legacy, schemaVersion: 2 as const, reviewerProtocol: REVIEWER_PROTOCOL_V2 };
       const workspace = [observedWorkspace("T1", ["engine/src/core/wave-review-authority.ts"], [
         { path: "engine/src/core/wave-review-authority.ts", bytes: Buffer.from("reviewed source") },
       ])];
@@ -644,7 +644,7 @@ describe("Wave frozen source authority", () => {
   });
   if (!parsedGraph.ok) throw new Error(String(parsedGraph.error));
   const registration: RegisteredWaveGateProgram = {
-    schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL, kind: "wave-gate", input: { wave: 1 },
+    schemaVersion: 2, reviewerProtocol: REVIEWER_PROTOCOL_V2, kind: "wave-gate", input: { wave: 1 },
     taskIds: ["T1", "T2"], authorityDigest: "a".repeat(64),
   };
   const first = observedWorkspace("T1", ["src/a.ts"], [{ path: "src/a.ts", bytes: Buffer.from("first task") }]);

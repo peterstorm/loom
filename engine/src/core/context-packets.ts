@@ -21,8 +21,8 @@ import { isStandaloneReviewAgent } from "./agent-catalog-projections";
 import { isRecord } from "./plain-record";
 import { readExactDataRecord } from "./orchestration-contract/bytes";
 import {
-  CURRENT_REVIEWER_PROTOCOL, REVIEWER_FIXED_SECTIONS, REVIEWER_OUTPUT_CONTRACT,
-  parseReviewerProtocolDescriptor, type ReviewerProtocolDescriptor,
+  REVIEWER_FIXED_SECTIONS, REVIEWER_OUTPUT_CONTRACT, reviewerFixedSections,
+  parseWaveReviewerProtocolDescriptor, type ReviewerProtocolDescriptor,
 } from "./reviewer-contract";
 import {
   boundedThrownCause,
@@ -375,19 +375,22 @@ function validateReviewerContract(base: LegacyContextPacket,
   return success(base);
 }
 
-function reviewerPacket(base: LegacyContextPacket): DomainResult<ReviewerContextPacketV2, ContextPacketError> {
+/** The schema-2 reviewer packet for one issued descriptor: its fixed sections
+ *  must be exactly the descriptor's schema and rubric bytes. Which program may
+ *  hold which descriptor is decided at registration, not here. */
+function reviewerPacket(base: LegacyContextPacket, descriptor: ReviewerProtocolDescriptor): DomainResult<ReviewerContextPacketV2, ContextPacketError> {
   let identityProblem: ReviewerContractProblem = null;
   if (!isStandaloneReviewAgent(base.role)) {
     identityProblem = { field: "role", message: "only reviewer roles may receive a reviewer v2 packet" };
   } else if (base.outputContract !== REVIEWER_OUTPUT_CONTRACT) {
     identityProblem = { field: "outputContract", message: "reviewer output contract must match the supported contract exactly" };
   }
-  const validated = validateReviewerContract(base, REVIEWER_FIXED_SECTIONS, identityProblem, "reviewer section");
+  const validated = validateReviewerContract(base, reviewerFixedSections(descriptor), identityProblem, "reviewer section");
   if (!validated.ok) return validated;
   const identity = {
     schemaVersion: REVIEWER_CONTEXT_PACKET_SCHEMA_VERSION,
     requestId: base.requestId, role: base.role, requiredSkill: base.requiredSkill,
-    outputContract: base.outputContract, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL,
+    outputContract: base.outputContract, reviewerProtocol: descriptor,
     fixedContext: base.fixedContext, variableContext: base.variableContext,
   } as const;
   return success(canonicalRecord({ ...identity, digest: contextPacketDigest(identity) }));
@@ -409,10 +412,13 @@ function buildReviewerContractBase(input: Omit<ContextPacketInput, "outputContra
   return buildContextPacket({ ...input, outputContract: REVIEWER_OUTPUT_CONTRACT, fixedContext: fixed });
 }
 
-/** Independent standalone and Wave issuance remain v2. */
-export function buildReviewerContextPacket(input: Omit<ContextPacketInput, "outputContract">): DomainResult<ReviewerContextPacketV2, ContextPacketError> {
-  const base = buildReviewerContractBase(input, REVIEWER_FIXED_SECTIONS);
-  return base.ok ? reviewerPacket(base.value) : base;
+/** Independent standalone (v2) and Wave (v2 or v4) issuance: the registered descriptor selects the fixed sections. */
+export function buildReviewerContextPacket(
+  input: Omit<ContextPacketInput, "outputContract">,
+  descriptor: ReviewerProtocolDescriptor,
+): DomainResult<ReviewerContextPacketV2, ContextPacketError> {
+  const base = buildReviewerContractBase(input, reviewerFixedSections(descriptor));
+  return base.ok ? reviewerPacket(base.value, descriptor) : base;
 }
 
 function standaloneSuccessorPacket(base: LegacyContextPacket): DomainResult<StandaloneReviewerContextPacketV3, ContextPacketError> {
@@ -667,7 +673,7 @@ function parseContextPacketHeader(raw: unknown): DomainResult<Record<string, unk
     return failure("schemaVersion", "a context packet must declare supported schema version 1 or 2");
   }
   if (current) {
-    const descriptor = successor ? parseStandaloneReviewerProtocolV3(record["reviewerProtocol"]) : parseReviewerProtocolDescriptor(record["reviewerProtocol"]);
+    const descriptor = successor ? parseStandaloneReviewerProtocolV3(record["reviewerProtocol"]) : parseWaveReviewerProtocolDescriptor(record["reviewerProtocol"]);
     if (!descriptor.ok) return failure("reviewerProtocol", descriptor.error.message);
   }
   return success(record);
@@ -702,7 +708,10 @@ function parseContextPacketRecord(raw: unknown): DomainResult<ContextPacket | St
   if (!built.ok) return built;
   const packet = match(record["schemaVersion"])
     .with(3, () => standaloneSuccessorPacket(built.value))
-    .with(2, () => reviewerPacket(built.value))
+    .with(2, () => {
+      const descriptor = parseWaveReviewerProtocolDescriptor(record["reviewerProtocol"]);
+      return descriptor.ok ? reviewerPacket(built.value, descriptor.value) : failure<ReviewerContextPacketV2>("reviewerProtocol", descriptor.error.message);
+    })
     .otherwise(() => built);
   if (!packet.ok) return packet;
   if (record["digest"] !== packet.value.digest) {

@@ -20,6 +20,7 @@ import { facadeParentEnvironment } from "../../../fixtures/facade-parent";
 import { git as gitWithEnvironment, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository";
 import { value } from "../../../fixtures/parse-result";
 import { disposeFixturePiSessions } from "../../../fixtures/pi-session";
+import { issuedWaveReviewerPayload } from "../../../fixtures/wave-reviewer-payload";
 import { distillTaskFixture, graphFixture, satisfiedProof, taskFixture } from "../../../fixtures/task-lifecycle";
 
 const cli = fileURLToPath(new URL("../../../../src/cli.ts", import.meta.url));
@@ -92,12 +93,9 @@ async function runCli(p: Project, args: readonly string[], stdin = ""): Promise<
 const startArgs = (p: Project) => ["start", "wave-gate", "--runs-root", p.runsRoot, "--run", "run.distilled"];
 const graph = (p: Project) => value(parseTaskGraph(JSON.parse(readFileSync(p.statePath, "utf8"))));
 
+/** The empty-roster payload the request's issued descriptor admits (v4 for a freshly started Wave Gate). */
 function reviewerPayload(handle: RunDirHandle, request: AgentRequestAuthority): string {
-  const packet = value(handle.readContext(request.contextDigest));
-  const context = readWaveReviewContext([packet], packet.digest);
-  if (context.kind !== "loaded" || context.value.taskRun === null) throw new Error("expected issued Task context");
-  return JSON.stringify({ schemaVersion: 2, kind: "wave-review", packetId: context.value.packetId,
-    generation: context.value.taskRun.generation, prior_findings: [], findings: [] });
+  return issuedWaveReviewerPayload(value(handle.readContext(request.contextDigest)), { prior_findings: [], findings: [] });
 }
 
 describe("registered Wave Gate over a Wave with a Distill Task", () => {

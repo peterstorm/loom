@@ -22,7 +22,7 @@ import { renderReviewerWireContract, renderReviewerWireInstructions } from "../s
 import {
   REVIEWER_EMISSION_TOOL_CONTRACT_PLACEHOLDER, REVIEWER_EMISSION_TOOL_CONTRACT_TEMPLATE,
   REVIEWER_OUTPUT_CONTRACT, REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1,
-  reviewerEmissionToolContract,
+  reviewerEmissionToolContract, WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4,
 } from "../src/core/reviewer-contract";
 import { EMISSION_TOOL_SPECS, issueEmissionBinding } from "../src/core/emission-tool";
 import { STANDALONE_ASSESSMENT_ROSTER_SECTION, STANDALONE_SUCCESSOR_ROSTER_RULE } from "../src/core/standalone-lineage-contract";
@@ -318,6 +318,19 @@ describe("the fragment's tool-primary emission wording (FR-020/AS-012)", () => {
     expect(example![2]).toContain("refused");
   });
 
+  it("shows the Wave v4 envelope without packet identity, between the standalone example and the successor (ADR-0083)", () => {
+    const section = /## Wave review v4 \(wave-review, schemaVersion 4\)\n\n([\s\S]*?)\n\n## Successor review/.exec(fragment);
+    expect(section).not.toBeNull();
+    for (const phrase of [
+      "Only when your task says the Wave payload is schemaVersion 4",
+      "a payload that carries `packetId` or `generation` is refused",
+      '"schemaVersion": 4', '"kind": "wave-review"',
+    ]) expect(section![1], phrase).toContain(phrase);
+    const example = /```json\n([\s\S]*?)\n```/.exec(section![1]!);
+    expect(example).not.toBeNull();
+    expect(JSON.parse(example![1]!)).toEqual(WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4);
+  });
+
   it("names the successor envelope, where its digests come from, and shows it before the rubric (issue #185)", () => {
     const section = /## Successor review \(standalone-successor-review only\)\n\n([\s\S]*?)\n\n## reviewer-impact-rubric/.exec(fragment);
     expect(section).not.toBeNull();
@@ -343,9 +356,10 @@ describe("the fragment's tool-primary emission wording (FR-020/AS-012)", () => {
 
   it("the stamped schema is the issued schema value and the rubric bytes are untouched (stamp/schema consistency)", () => {
     // The template fence is plain text: exactly the schema, the standalone
-    // example and the successor example remain ```json blocks.
+    // example, the Wave v4 example (ADR-0083) and the successor example
+    // remain ```json blocks.
     const source = markdown("references/reviewer-wire/wire-contract.md", fragment);
-    expect(orFail(fencesOf(source, "json"), describeMarkdownError)).toHaveLength(3);
+    expect(orFail(fencesOf(source, "json"), describeMarkdownError)).toHaveLength(4);
     // Shown compact, so the bytes differ from the packet section; the value may not.
     expect(orFail(compactSchemaOf(source), describeCompactSchemaError).value).toEqual(JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2));
     expect(fragment).toContain("section in compact form; the packet copy governs.\n\n```json\n");

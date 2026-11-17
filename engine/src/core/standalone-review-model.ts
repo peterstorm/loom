@@ -11,7 +11,7 @@ import type {
   AgentRequestAuthority, AgentRosterSlot, ArtifactRef, ExactRoster, NonEmpty, OrchestrationRunId, RequestId, SlotId,
 } from "./orchestration-contract";
 import type { ReviewPath } from "./review-packet";
-import type { ReviewerProtocolDescriptor, STANDALONE_REVIEW_SUBJECT } from "./reviewer-contract";
+import type { ReviewerProtocolDescriptorV2, STANDALONE_REVIEW_SUBJECT } from "./reviewer-contract";
 import type {
   FindingOrigin, STANDALONE_REVIEWER_PROTOCOL_V3, StandaloneDispositionRecord, StandaloneLineageRow,
   StandalonePreviousSnapshot, StandalonePublicationReference, StandaloneResolutionAssessment,
@@ -24,7 +24,7 @@ import type {
 /** Complete immutable authority produced before any reviewer is spawnable. */
 export type StandaloneReviewProtocol =
   | Readonly<{ schemaVersion: 1; reviewerProtocol?: never }>
-  | Readonly<{ schemaVersion: 2; reviewerProtocol: ReviewerProtocolDescriptor }>
+  | Readonly<{ schemaVersion: 2; reviewerProtocol: ReviewerProtocolDescriptorV2 }>
   | Readonly<{ schemaVersion: 3; reviewerProtocol: typeof STANDALONE_REVIEWER_PROTOCOL_V3; successor: PreparedStandaloneSuccessor }>;
 type StandaloneAggregateProtocol = Exclude<StandaloneReviewProtocol, { schemaVersion: 3 }> |
   (Extract<StandaloneReviewProtocol, { schemaVersion: 3 }> & Readonly<{ lineage: StandaloneSuccessorLineage }>);

@@ -14,7 +14,7 @@ import {
   type IssuedReviewerProtocol,
 } from "../../src/core/reviewer-emission-route";
 import { issueEmissionBinding } from "../../src/core/emission-tool";
-import { CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import { STANDALONE_REVIEWER_PROTOCOL_V3 } from "../../src/core/standalone-lineage-contract";
 import { STANDALONE_REVIEWER_ROLES } from "../../src/core/standalone-review-scope";
 import { lowerModelProfile, recordedProfileBindings, resolveModelProfile, type PiBinding } from "../../src/core/model-profiles";
@@ -38,7 +38,7 @@ const request = (pi: PiBinding, overrides: Record<string, unknown> = {}): AgentR
 const qualified = (overrides: Record<string, unknown> = {}): AgentRequestAuthority => request(CATALOG_PI, overrides);
 
 const V1: IssuedReviewerProtocol = { schemaVersion: 1 };
-const V2: IssuedReviewerProtocol = { schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL };
+const V2: IssuedReviewerProtocol = { schemaVersion: 2, reviewerProtocol: REVIEWER_PROTOCOL_V2 };
 const V3: IssuedReviewerProtocol = { schemaVersion: 3, reviewerProtocol: STANDALONE_REVIEWER_PROTOCOL_V3 };
 
 describe("reviewerEmissionEligible", () => {
@@ -64,7 +64,7 @@ describe("projectRegisteredReviewerProtocol — only the frozen descriptors proj
   it("projects the archived schema-1 contract and the exact frozen v2/v3 descriptors", () => {
     expect(projectRegisteredReviewerProtocol(registration({ kind: "wave-gate", schemaVersion: 1 })))
       .toEqual({ ok: true, value: { schemaVersion: 1 } });
-    expect(projectRegisteredReviewerProtocol(registration({ kind: "wave-gate", schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL })))
+    expect(projectRegisteredReviewerProtocol(registration({ kind: "wave-gate", schemaVersion: 2, reviewerProtocol: REVIEWER_PROTOCOL_V2 })))
       .toEqual({ ok: true, value: V2 });
     expect(projectRegisteredReviewerProtocol(registration({ kind: "standalone-review", schemaVersion: 3, reviewerProtocol: STANDALONE_REVIEWER_PROTOCOL_V3 })))
       .toMatchObject({ ok: true, value: { schemaVersion: 3, reviewerProtocol: { schemaDigest: STANDALONE_REVIEWER_PROTOCOL_V3.schemaDigest } } });
@@ -72,11 +72,11 @@ describe("projectRegisteredReviewerProtocol — only the frozen descriptors proj
 
   it("refuses drifted descriptors and unsupported schema versions — never an extraction downgrade", () => {
     const drift = { schemaDigest: "f".repeat(64) };
-    expect(projectRegisteredReviewerProtocol(registration({ kind: "wave-gate", schemaVersion: 2, reviewerProtocol: { ...CURRENT_REVIEWER_PROTOCOL, ...drift } })))
+    expect(projectRegisteredReviewerProtocol(registration({ kind: "wave-gate", schemaVersion: 2, reviewerProtocol: { ...REVIEWER_PROTOCOL_V2, ...drift } })))
       .toEqual({ ok: false, error: "program registration does not carry the exact frozen reviewer protocol descriptor" });
     expect(projectRegisteredReviewerProtocol(registration({ kind: "standalone-review", schemaVersion: 3, reviewerProtocol: { ...STANDALONE_REVIEWER_PROTOCOL_V3, ...drift } })).ok)
       .toBe(false);
-    expect(projectRegisteredReviewerProtocol(registration({ kind: "standalone-review", schemaVersion: 3, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL })).ok)
+    expect(projectRegisteredReviewerProtocol(registration({ kind: "standalone-review", schemaVersion: 3, reviewerProtocol: REVIEWER_PROTOCOL_V2 })).ok)
       .toBe(false);
     expect(projectRegisteredReviewerProtocol(registration({ kind: "wave-gate", schemaVersion: 3, reviewerProtocol: STANDALONE_REVIEWER_PROTOCOL_V3 })))
       .toEqual({ ok: false, error: "program registration carries no supported reviewer protocol projection (schema version 3)" });

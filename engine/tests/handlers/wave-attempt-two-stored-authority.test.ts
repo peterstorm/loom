@@ -10,6 +10,7 @@
  * derives the identical attempt-2 in stored mode.
  */
 
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import { describe, expect, it, afterAll } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -72,7 +73,7 @@ function publishedAttemptOne(
     variableContext: Object.freeze([]),
   };
   const packet = protocolVersion === 2
-    ? value(buildReviewerContextPacket(packetInput))
+    ? value(buildReviewerContextPacket(packetInput, REVIEWER_PROTOCOL_V2))
     : value(buildContextPacket(packetInput));
 
   return handle.publishContext(packet).then((published) => {

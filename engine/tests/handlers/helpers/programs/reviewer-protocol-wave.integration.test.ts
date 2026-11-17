@@ -15,7 +15,12 @@ import { ownerObligation } from "../../../fixtures/owner-obligation";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
 import { REVIEWER_EXTRACTION_RETRY_INSTRUCTION, reviewerRetryInstruction } from "../../../../src/core/reviewer-retry";
-import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, type ReviewerDraftV2 } from "../../../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2, REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_IMPACT_RUBRIC_V1, WAVE_REVIEWER_PAYLOAD_SCHEMA_V4,
+  WAVE_REVIEWER_PROTOCOL_V4, type ReviewerDraftV2, type ReviewerProtocolDescriptor } from "../../../../src/core/reviewer-contract";
+import { WAVE_V4_ENVELOPE_HINT } from "../../../../src/core/reviewer-protocol";
+import { parseReviewerEvidence } from "../../../../src/core/review-output";
+import { WAVE_V4_PAYLOAD_LINE, reviewerPayloadKindLine } from "../../../../src/core/spawn-task-text";
+import { issuedWavePacketIdentity, waveReviewerPayload, waveReviewerPayloadV4WithIdentity } from "../../../fixtures/wave-reviewer-payload";
 import { parseRegisteredFacadeProgram } from "../../../../src/handlers/helpers/programs/registration";
 import { publishLegacyInitialBatch } from "../../../../src/handlers/helpers/programs/request-publication";
 import { renderSpawnTask } from "../../../../src/handlers/helpers/programs/spawn-task";
@@ -156,8 +161,10 @@ function payload(handle: RunDirHandle, request: AgentRequestAuthority, findings:
   const context = readWaveReviewContext([packet], packet.digest);
   if (context.kind !== "loaded" || context.value.task === null || context.value.taskRun === null) throw new Error("expected issued Task context");
   const priors = context.value.task.priorFindings.map(({ id }) => ({ finding_id: id, verdict, reason: "  verified against issued bytes\nexact reason  " }));
-  if (packet.schemaVersion === 2) return JSON.stringify({ schemaVersion: 2, kind: "wave-review", packetId: context.value.packetId,
-    generation: context.value.taskRun.generation, prior_findings: priors, findings });
+  // The issued descriptor selects the envelope (ADR-0083): v4 for a Wave Gate
+  // registered now, v2 for one registered before it.
+  if (packet.schemaVersion === 2) return waveReviewerPayload(packet.reviewerProtocol.version,
+    { packetId: context.value.taskRun.packetId, generation: context.value.taskRun.generation }, { prior_findings: priors, findings });
   return ["### Machine Summary", `REVIEW_GENERATION: ${context.value.taskRun.generation}`, `REVIEW_PACKET_ID: ${context.value.packetId}`,
     "CRITICAL_COUNT: 0", "ADVISORY_COUNT: 0", "```findings", "[]", "```", "```review_lifecycle", JSON.stringify({ prior_findings: priors }), "```"].join("\n");
 }
@@ -193,6 +200,30 @@ async function legacyPrefix(p: ReturnType<typeof project>) {
     return { handle, action: published.action as Action };
   });
 }
+/**
+ * A Wave Gate registered under `reviewerProtocol` exactly as `start` registers
+ * one — program first, then protected active authority — and issued by the
+ * real façade resume. With `REVIEWER_PROTOCOL_V2` it is a run registered
+ * before ADR-0083, which keeps v2 until it ends.
+ */
+async function registeredPrefix(p: ReturnType<typeof project>, reviewerProtocol: ReviewerProtocolDescriptor) {
+  const handle = value(createRunDirectory(p.runsRoot, "run.registered"));
+  const manager = new StateManager(p.statePath);
+  const taskIds = ["T1"];
+  const registered = { schemaVersion: 2 as const, reviewerProtocol, kind: "wave-gate" as const, input: { wave: 1 }, taskIds,
+    authorityDigest: waveGateAuthorityDigest(1, taskIds, manager.load()) };
+  value(await handle.registerProgram(registered));
+  await manager.registerActiveWaveGate({ schemaVersion: 1, kind: "active-wave-gate", runId: handle.runId, wave: 1,
+    authorityDigest: registered.authorityDigest, revision: 0, terminalOutcome: null, runsRoot: p.runsRoot }, taskIds);
+  const action = await resume(p, handle);
+  expect(action.kind, JSON.stringify(action)).toBe("spawn-batch");
+  return { handle, action };
+}
+
+/** The issued Review Packet identity of a Task review request, read from its published packet. */
+const identityOf = (handle: RunDirHandle, request: AgentRequestAuthority) =>
+  issuedWavePacketIdentity(value(handle.readContext(request.contextDigest)));
+
 function legacyDelivery(action: Action) {
   expect(action.kind, JSON.stringify(action)).toBe("spawn-batch");
   for (const { authority, task } of action.requests ?? []) {
@@ -210,22 +241,23 @@ describe("registered Wave reviewer protocol", () => {
     const { handle, action } = await start(p);
     const issued = action.requests!;
     expect(issued.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...BASE_WAVE_REVIEW_AGENTS]);
-    expect(registration(handle).reviewerProtocol).toEqual(CURRENT_REVIEWER_PROTOCOL);
+    expect(registration(handle).reviewerProtocol).toEqual(WAVE_REVIEWER_PROTOCOL_V4);
     const run = graph(p).tasks[0]!.review_run!;
-    expect(run.reviewer_protocol).toEqual(CURRENT_REVIEWER_PROTOCOL);
+    expect(run.reviewer_protocol).toEqual(WAVE_REVIEWER_PROTOCOL_V4);
     for (const { authority } of issued.slice(1)) {
       expect(run.slot_authority!.find(({ agent }) => agent === authority.role)).toEqual({ agent: authority.role,
         slot_id: authority.slotId, attempted: 1, request_id: authority.requestId, context_digest: authority.contextDigest });
       const packet = value(handle.readContext(authority.contextDigest));
       expect(packet.schemaVersion).toBe(2);
-      expect(Buffer.from(packet.fixedContext.find(({ label }) => label === "reviewer-payload-schema")!.bytes).toString()).toBe(REVIEWER_PAYLOAD_SCHEMA_V2);
+      expect(Buffer.from(packet.fixedContext.find(({ label }) => label === "reviewer-payload-schema")!.bytes).toString()).toBe(WAVE_REVIEWER_PAYLOAD_SCHEMA_V4);
       expect(Buffer.from(packet.fixedContext.find(({ label }) => label === "reviewer-impact-rubric")!.bytes).toString()).toBe(REVIEWER_IMPACT_RUBRIC_V1);
       const sourceSection = packet.fixedContext.find(({ label }) => label === WAVE_FROZEN_SOURCE_SECTION)!;
       const source = value(parseWaveFrozenSource(JSON.parse(Buffer.from(sourceSection.bytes).toString("utf8"))));
       expect(source.taskId).toBe("T1");
       expect(source.workspaceHeadSha).toBe(run.workspace_head_sha);
       expect(source.files).toMatchObject([{ path: "src/x.ts", kind: "text", content: "export const x = 1;\n" }]);
-      expect(value(reviewerProtocolResolver(handle, registration(handle))(authority)).protocolVersion).toBe(2);
+      expect(value(reviewerProtocolResolver(handle, registration(handle))(authority))).toMatchObject({
+        protocolVersion: 2, reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4 });
     }
     const reviewers = issued.slice(1);
     await capture(handle, issued[0]!.authority, specPass);
@@ -239,7 +271,7 @@ describe("registered Wave reviewer protocol", () => {
     const completed = graph(p).tasks[0]!;
     expect(completed.findings).toEqual([]);
     expect(completed.resolved_findings?.map(({ finding }) => finding)).toEqual(priors);
-    expect(completed.accepted_review_authority?.reviewer_protocol).toEqual(CURRENT_REVIEWER_PROTOCOL);
+    expect(completed.accepted_review_authority?.reviewer_protocol).toEqual(WAVE_REVIEWER_PROTOCOL_V4);
     expect(completed.review_run).toBeUndefined();
     const before = readFileSync(p.statePath);
     expect(await resume(p, handle)).toEqual(final);
@@ -256,7 +288,7 @@ describe("registered Wave reviewer protocol", () => {
     expect(run.expected_agents).toEqual(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS);
     expect(run.slot_authority!.map(({ agent }) => agent)).toEqual(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS);
     const architecture = issued.at(-1)!;
-    // A valid Reviewer Protocol v2 Wave request, minted from the catalog: the
+    // A valid Wave Reviewer Protocol v4 request, minted from the catalog: the
     // architecture reviewer's own profile and preloaded Skill.
     expect(architecture.authority).toMatchObject({ role: "architecture-tech-lead", program: "wave-gate", attempt: 1,
       modelProfile: "focused-review", requiredSkill: "deepen" });
@@ -269,7 +301,8 @@ describe("registered Wave reviewer protocol", () => {
       const section = packet.fixedContext.find(({ label }) => label === OWNER_MAP_SECTION);
       const expected = authority.role === "code-reviewer" || authority.role === "architecture-tech-lead" ? ownerMapText : null;
       expect(section === undefined ? null : Buffer.from(section.bytes).toString("utf8"), authority.role).toBe(expected);
-      expect(value(reviewerProtocolResolver(handle, registration(handle))(authority)).protocolVersion).toBe(2);
+      expect(value(reviewerProtocolResolver(handle, registration(handle))(authority)), authority.role).toMatchObject({
+        protocolVersion: 2, reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4 });
     }
     await capture(handle, issued[0]!.authority, specPass);
     for (const { authority } of issued.slice(1, -1)) {
@@ -378,6 +411,127 @@ describe("registered Wave reviewer protocol", () => {
       .toEqual({ ok: false, message: "task T1 Review Packet is not bound to the active epoch and exact reviewer roster" });
   }, 30_000);
 
+  it("ADR-0083: a freshly started Wave Gate registers v4, issues every Task review packet under it and tells each reviewer the v4 envelope", async () => {
+    const p = project(mixedPriors());
+    const { handle, action } = await start(p);
+    const issued = action.requests!;
+    expect(registration(handle).reviewerProtocol).toEqual(WAVE_REVIEWER_PROTOCOL_V4);
+    expect(graph(p).tasks[0]!.review_run!.reviewer_protocol).toEqual(WAVE_REVIEWER_PROTOCOL_V4);
+    const [specCheck, ...reviewers] = issued;
+    expect(specCheck!.task).not.toContain(WAVE_V4_PAYLOAD_LINE);
+    expect(reviewers).toHaveLength(BASE_WAVE_REVIEW_AGENTS.length);
+    for (const { authority, task } of reviewers) {
+      const packet = value(handle.readContext(authority.contextDigest));
+      if (packet.schemaVersion !== 2) throw new Error(`${authority.role} packet must be a schema-2 reviewer packet`);
+      // The layout stays schema 2; the descriptor's version selects the v4 decoder.
+      expect(packet.reviewerProtocol, authority.role).toEqual(WAVE_REVIEWER_PROTOCOL_V4);
+      expect(Buffer.from(packet.fixedContext.find(({ label }) => label === "reviewer-payload-schema")!.bytes).toString(), authority.role)
+        .toBe(WAVE_REVIEWER_PAYLOAD_SCHEMA_V4);
+      expect(task, authority.role).toContain(WAVE_V4_PAYLOAD_LINE);
+      expect(task, authority.role).not.toContain(reviewerPayloadKindLine(false));
+      const descriptor = parseEmissionDescriptor(task);
+      expect(descriptor, authority.role).toMatchObject({ kind: "issued", binding: { requestId: authority.requestId, version: "v4" } });
+    }
+  }, 30_000);
+
+  it("ADR-0083: a v4 reviewer that copies packetId is refused naming the v4 envelope, and the identity-free payload is admitted bound to the issued packet", async () => {
+    const priors = mixedPriors();
+    const p = project(priors);
+    const { handle, action } = await start(p);
+    const [specCheck, first, ...siblings] = action.requests!;
+    await capture(handle, specCheck!.authority, specPass);
+    for (const { authority } of siblings) await submit(p, handle, authority, payload(handle, authority, [], "still_present"));
+    const packet = value(handle.readContext(first!.authority.contextDigest));
+    const context = readWaveReviewContext([packet], packet.digest);
+    if (context.kind !== "loaded" || context.value.task === null) throw new Error("expected issued Task context");
+    const identity = issuedWavePacketIdentity(packet);
+    const body = { prior_findings: context.value.task.priorFindings.map(({ id }) =>
+      ({ finding_id: id, verdict: "still_present", reason: "the issued packet still shows it" })), findings: [] };
+
+    // The decoder itself: the copied identity is refused and the diagnostic names the whole v4 envelope.
+    const issuedFirst = issuedWaveProtocol(handle, registration(handle), first!.authority);
+    const copied = parseReviewerEvidence(issuedFirst, Buffer.from(waveReviewerPayloadV4WithIdentity(identity, body)));
+    expect(copied.ok).toBe(false);
+    if (copied.ok) throw new Error("unreachable");
+    expect(copied.error.message).toContain(WAVE_V4_ENVELOPE_HINT);
+    expect(parseReviewerEvidence(issuedFirst, Buffer.from(waveReviewerPayload(2, identity, body))).ok).toBe(false);
+    const admitted = parseReviewerEvidence(issuedFirst, Buffer.from(waveReviewerPayload(4, identity, body)));
+    if (!admitted.ok || admitted.value.kind !== "wave-review") throw new Error(`expected admitted Wave evidence: ${JSON.stringify(admitted)}`);
+    expect(admitted.value.bound).toMatchObject(identity);
+
+    // Through the façade: attempt 1 is refused and the retry carries the envelope diagnostic.
+    const retried = await submit(p, handle, first!.authority, waveReviewerPayloadV4WithIdentity(identity, body));
+    expect(retried.kind, JSON.stringify(retried)).toBe("spawn-batch");
+    expect(retried.requests).toHaveLength(1);
+    const retry = retried.requests![0]!;
+    expect(retry.authority).toMatchObject({ slotId: first!.authority.slotId, attempt: 2 });
+    expect(retry.task).toContain("Parser rejection reason: ");
+    // The retry renders the parser's reason as a JSON string literal (byte-exact revalidation), so its quotes arrive escaped.
+    expect(retry.task).toContain(JSON.stringify(WAVE_V4_ENVELOPE_HINT).slice(1, -1));
+    expect(retry.task).toContain(WAVE_V4_PAYLOAD_LINE);
+    expect(graph(p).tasks[0]!.review_run?.evidence).toHaveLength(siblings.length);
+
+    // The identity-free v4 payload on the final attempt is admitted and completes the roster.
+    expect(identityOf(handle, retry.authority)).toEqual(identity);
+    const done = await submit(p, handle, retry.authority, waveReviewerPayload(4, identity, body));
+    expect(done.kind, JSON.stringify(done)).not.toBe("blocked");
+    const settled = graph(p).tasks[0]!;
+    expect(settled.review_run).toBeUndefined();
+    expect(settled.accepted_review_authority).toMatchObject({ packet_id: identity.packetId, generation: identity.generation,
+      reviewer_protocol: WAVE_REVIEWER_PROTOCOL_V4 });
+  }, 60_000);
+
+  it("ADR-0083: restarting an exhausted v2-registered Wave Gate registers the replacement under v4", async () => {
+    const p = project();
+    const { handle } = await start(p);
+    // The same run as it stood when Wave Gates registered v2: its registration and its Review Run carry the v2 descriptor.
+    const current = registration(handle);
+    if (current.schemaVersion !== 2) throw new Error("a started Wave Gate registers schema 2");
+    const v2Registration = { ...current, reviewerProtocol: REVIEWER_PROTOCOL_V2 };
+    const exhaustedV2 = (state: TaskGraph): TaskGraph => ({ ...state, tasks: state.tasks.map((task) => {
+      const run = task.review_run;
+      if (run?.reviewer_protocol === undefined) throw new Error("fixture must have a genuine installed current run");
+      const [first, ...rest] = run.slot_authority;
+      return { ...task, review_run: { ...run, reviewer_protocol: REVIEWER_PROTOCOL_V2,
+        slot_authority: [{ ...first, attempted: 2 as const }, ...rest.map((slot) => ({ ...slot, attempted: 2 as const }))] } };
+    }) });
+    const state = exhaustedV2(graph(p));
+    const keys = new Set(state.tasks[0]!.review_run!.slot_authority!.map(({ slot_id }) => captureKey(slot_id, 2)));
+    const restarted = prepareExhaustedWaveGateRestart(state, handle.runId, v2Registration, "run.next", p.runsRoot, keys);
+    if (!restarted.ok) throw new Error(restarted.message);
+    expect(restarted.value.registration).toMatchObject({ schemaVersion: 2, reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4,
+      restart: { previousRunId: handle.runId, exhaustedSlots: BASE_WAVE_REVIEW_AGENTS.map((agent) => `T1/${agent}`) } });
+  }, 30_000);
+
+  it("ADR-0083: a v2-registered Wave Gate keeps v2 until it ends: it refuses the v4 payload and admits the v2 one", async () => {
+    const p = project(mixedPriors());
+    const { handle, action } = await registeredPrefix(p, REVIEWER_PROTOCOL_V2);
+    expect(registration(handle).reviewerProtocol).toEqual(REVIEWER_PROTOCOL_V2);
+    expect(graph(p).tasks[0]!.review_run!.reviewer_protocol).toEqual(REVIEWER_PROTOCOL_V2);
+    const [specCheck, first, ...siblings] = action.requests!;
+    for (const { authority, task } of [first!, ...siblings]) {
+      const packet = value(handle.readContext(authority.contextDigest));
+      if (packet.schemaVersion !== 2) throw new Error("expected a schema-2 reviewer packet");
+      expect(packet.reviewerProtocol, authority.role).toEqual(REVIEWER_PROTOCOL_V2);
+      expect(task, authority.role).not.toContain(WAVE_V4_PAYLOAD_LINE);
+      expect(task, authority.role).toContain(reviewerPayloadKindLine(false));
+    }
+    await capture(handle, specCheck!.authority, specPass);
+    for (const { authority } of siblings) await submit(p, handle, authority, payload(handle, authority, [], "still_present"));
+    const identity = identityOf(handle, first!.authority);
+    const priorIds = graph(p).tasks[0]!.review_run!.prior_finding_ids;
+    const body = { prior_findings: priorIds.map((finding_id) => ({ finding_id, verdict: "still_present", reason: "still present" })), findings: [] };
+    const retried = await submit(p, handle, first!.authority, waveReviewerPayload(4, identity, body));
+    expect(retried.kind, JSON.stringify(retried)).toBe("spawn-batch");
+    const retry = retried.requests![0]!;
+    expect(retry.authority).toMatchObject({ slotId: first!.authority.slotId, attempt: 2 });
+    expect(retry.task).toContain("Parser rejection reason: ");
+    // The v2 run's attempt 2 is decoded by v2 exactly as before: the echoed identity is required.
+    expect(await submit(p, handle, retry.authority, waveReviewerPayload(2, identity, body))).not.toMatchObject({ kind: "blocked" });
+    expect(graph(p).tasks[0]!.review_run).toBeUndefined();
+    expect(graph(p).tasks[0]!.accepted_review_authority?.reviewer_protocol).toEqual(REVIEWER_PROTOCOL_V2);
+  }, 60_000);
+
   it("ADR-0069: issues architecture-tech-lead last for a Contract Task writing a types file, and carries the contract surface to both surface roles", async () => {
     const p = project([], X_CONTRACT_FILES);
     await new StateManager(p.statePath).update(asContractTask);
@@ -449,7 +603,8 @@ describe("registered Wave reviewer protocol", () => {
     for (const { authority } of requests.slice(2)) await submit(p, handle, authority, payload(handle, authority));
     const sibling = value(handle.readTranscriptBytes(requests[2]!.authority));
     const first = requests[1]!.authority;
-    const malformed = JSON.stringify({ schemaVersion: 2, kind: "wave-review", findings: [criticalDraft] });
+    // The issued v4 envelope without its required prior roster: whole-payload malformed.
+    const malformed = JSON.stringify({ schemaVersion: 4, kind: "wave-review", findings: [criticalDraft] });
     const retried = await submit(p, handle, first, malformed);
     expect(retried.kind, JSON.stringify(retried)).toBe("spawn-batch");
     expect(retried.requests).toHaveLength(1);
@@ -462,7 +617,7 @@ describe("registered Wave reviewer protocol", () => {
     const retryDescriptor = parseEmissionDescriptor(retry.task);
     if (retryDescriptor.kind !== "issued") throw new Error("a Pi-parented current Wave retry must carry an issued descriptor");
     expect(retryDescriptor).toMatchObject({ contextDigest: retry.authority.contextDigest,
-      binding: { requestId: retry.authority.requestId, version: "v2" } });
+      binding: { requestId: retry.authority.requestId, version: "v4" } });
     expect(retry.task).toContain("Parser rejection reason: ");
     expect(retry.task).toContain(reviewerRetryInstruction({ kind: "emission", binding: retryDescriptor.binding, contextDigest: retryDescriptor.contextDigest }));
     expect(retry.task).not.toContain(REVIEWER_EXTRACTION_RETRY_INSTRUCTION);
@@ -646,7 +801,7 @@ describe("registered Wave reviewer protocol", () => {
     expect(preserved.findings?.slice(0, 2)).toEqual(priors);
     expect(preserved.findings?.slice(2)).toMatchObject([{ ...criticalDraft, protocolVersion: 2 }, { ...advisory, protocolVersion: 2 }]);
     expect(preserved.resolved_findings ?? []).toEqual([]);
-    expect(preserved.review_run?.reviewer_protocol).toEqual(CURRENT_REVIEWER_PROTOCOL);
+    expect(preserved.review_run?.reviewer_protocol).toEqual(WAVE_REVIEWER_PROTOCOL_V4);
     const beforeStale = readFileSync(p.statePath);
     await markWaveTaskReviewRetriesIssued(new StateManager(p.statePath), retryAuthority);
     expect(readFileSync(p.statePath)).toEqual(beforeStale);
@@ -780,7 +935,7 @@ describe("the issued emission route on the Wave program path (T6)", () => {
       expect(task).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
       const descriptor = parseEmissionDescriptor(task);
       expect(descriptor).toMatchObject({ kind: "issued", contextDigest: authority.contextDigest,
-        binding: { requestId: authority.requestId, version: "v2" } });
+        binding: { requestId: authority.requestId, version: "v4" } });
       if (descriptor.kind !== "issued") throw new Error("a Pi-parented reviewer must mint an issued descriptor");
       expect(withoutEmissionRouteDelta(emissionRender, descriptor.binding, descriptor.contextDigest)).toBe(extractionRender);
     }

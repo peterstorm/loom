@@ -187,6 +187,7 @@ function observeDeliveryInputs(
   }
   if (program.schemaVersion === 3) return Object.freeze({ version: 3 });
   if (program.schemaVersion === 2) {
+    if (program.reviewerProtocol.version === 4) return Object.freeze({ version: 4 });
     if (program.kind !== "standalone-review" || !readObligated(program)) {
       return Object.freeze({ version: 2, readObligation: null });
     }

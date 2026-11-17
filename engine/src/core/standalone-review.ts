@@ -53,7 +53,7 @@ import { failure, mapNonEmpty, nonEmpty, success } from "./orchestration-contrac
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import type { RefutationPanelAuthority } from "./panel-authority";
 import type { IssuedStandaloneReviewerProtocol, ParsedFindings, ReviewerProtocolAuthorityResolver } from "./review-output";
-import { STANDALONE_REVIEW_SUBJECT, parseReviewerProtocolDescriptor, type ReviewerProtocolFailure } from "./reviewer-contract";
+import { STANDALONE_REVIEW_SUBJECT, parseReviewerProtocolDescriptorV2, type ReviewerProtocolFailure } from "./reviewer-contract";
 import { parseBoundedReviewerJson, parseStandaloneReviewerPayloadV3 } from "./reviewer-protocol";
 import {
   STANDALONE_ASSESSMENT_ROSTER_SECTION, STANDALONE_LINEAGE_LIMITS, STANDALONE_REVIEWER_PROTOCOL_V3,
@@ -376,7 +376,7 @@ export function parseStandaloneAggregate(raw: unknown, proof?: Readonly<{
     "aggregate",
   ).filter((error) => raw.schema_version !== 1 || error !== "aggregate.reviewer_evidence is required");
   if (raw.schema_version !== 1 && raw.schema_version !== 2) errors.push("aggregate.schema_version must be 1 or 2");
-  const descriptor = raw.schema_version === 2 ? parseReviewerProtocolDescriptor(raw.reviewer_protocol) : null;
+  const descriptor = raw.schema_version === 2 ? parseReviewerProtocolDescriptorV2(raw.reviewer_protocol) : null;
   if (descriptor !== null && !descriptor.ok) errors.push(descriptor.error.message);
   const runId = typeof raw.run_id === "string" ? raw.run_id.trim() : "";
   if (runId === "") errors.push("aggregate.run_id must be non-empty");

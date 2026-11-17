@@ -125,7 +125,38 @@ The issued Context Packet's `reviewer-payload-schema` section in compact form; t
 }
 ```
 
-A Wave request is refused this shape: its payload is `"kind": "wave-review"` with `packetId`, `generation` and `prior_findings`, as the schema and your task state.
+A Wave request is refused this shape: its payload is `"kind": "wave-review"` with `prior_findings`. The packet's `reviewer-payload-schema` governs which Wave envelope applies, and your task states whether `packetId` and `generation` are required.
+
+## Wave review v4 (wave-review, schemaVersion 4)
+
+Only when your task says the Wave payload is schemaVersion 4. Then copy nothing from the packet's identity: the engine binds the Review Packet ID and Review Generation from your issued request, and a payload that carries `packetId` or `generation` is refused.
+
+- `"schemaVersion": 4` and `"kind": "wave-review"`.
+- `prior_findings` assesses every issued prior Finding ID exactly once, in packet order; an empty roster takes an empty array.
+- `findings` holds only new Findings, each one v2 `findings` entry.
+
+```json
+{
+  "schemaVersion": 4,
+  "kind": "wave-review",
+  "prior_findings": [
+    {
+      "finding_id": "code-reviewer-1",
+      "verdict": "resolved_by_remediation",
+      "reason": "The remediation added the authorization check before the write."
+    }
+  ],
+  "findings": [
+    {
+      "severity": "advisory",
+      "file": "src/orders/update-order.ts",
+      "line": 57,
+      "claim": "The retry loop repeats the lookup the caller already performed.",
+      "reason": "Passing the loaded order in removes one query per retry; behavior is unchanged."
+    }
+  ]
+}
+```
 
 ## Successor review (standalone-successor-review only)
 

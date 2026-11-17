@@ -7,10 +7,12 @@
 import type { ReviewerProtocolDescriptor } from "./reviewer-contract";
 
 /** Archived schema-1 review programs carry no issued descriptor; current
- *  schema-2 programs freeze the exact reviewer protocol they issued. */
-export type RegisteredReviewerProtocol =
+ *  schema-2 programs freeze the exact reviewer protocol they issued. The
+ *  descriptor parameter is the program's admitted set: a Wave Gate admits v2
+ *  or v4, a standalone review v2 only (ADR-0083). */
+export type RegisteredReviewerProtocol<Descriptor extends ReviewerProtocolDescriptor = ReviewerProtocolDescriptor> =
   | Readonly<{ schemaVersion: 1; reviewerProtocol?: never }>
-  | Readonly<{ schemaVersion: 2; reviewerProtocol: ReviewerProtocolDescriptor }>;
+  | Readonly<{ schemaVersion: 2; reviewerProtocol: Descriptor }>;
 
 /** Audit of a replacement run that superseded an exhausted predecessor. */
 export type WaveGateRestartAudit = Readonly<{

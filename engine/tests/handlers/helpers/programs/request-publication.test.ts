@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { legacyPublicationRefusal } from "../../../../src/handlers/helpers/programs/request-publication";
 import type { RegisteredWaveGateProgram } from "../../../../src/core/wave-gate-program";
-import { CURRENT_REVIEWER_PROTOCOL } from "../../../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../../../../src/core/reviewer-contract";
 
 /** The pure legacy publication admission: only an archived schema-1 program may use the legacy route. */
 const DIGEST = "a".repeat(64);
 const program = { kind: "wave-gate", input: { wave: 1 }, taskIds: ["T1", "T2"], authorityDigest: DIGEST } as const;
 const schemaOne: RegisteredWaveGateProgram = { schemaVersion: 1, ...program, taskIds: [...program.taskIds] };
 const schemaTwo: RegisteredWaveGateProgram = {
-  schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL, ...program, taskIds: [...program.taskIds],
+  schemaVersion: 2, reviewerProtocol: REVIEWER_PROTOCOL_V2, ...program, taskIds: [...program.taskIds],
 };
 
 describe("legacyPublicationRefusal", () => {

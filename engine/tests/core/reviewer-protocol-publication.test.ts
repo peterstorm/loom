@@ -10,7 +10,7 @@ import { findingOf } from "../../src/core/standalone-finding-origin";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { buildReviewerContextPacket, encodeByteSection } from "../../src/core/context-packets";
-import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
 import { acceptedAgentResult, createPublicationAuthorityResolver, parseArtifactRef, parseEffectId, parseIssuedSpawnRequest, parseOrchestrationRunId, parseRequestId, prepareInitialBatchPublicationIntent } from "../../src/core/orchestration-contract";
 import { capturedReviewerResultFromBytes } from "../../src/core/standalone-reviewer-capture";
 import { prepareFreshStandaloneReview } from "../../src/core/standalone-review-preparation";
@@ -31,7 +31,7 @@ function fixture(name = "run.current-publication") {
   const packets = ([1, 2] as const).map((attempt) => value(buildReviewerContextPacket({
     requestId: value(parseRequestId(standaloneRequestId(runId, "code-reviewer", attempt))), role: "code-reviewer", requiredSkill: "none",
     fixedContext: [value(encodeByteSection("standalone-review-authority", JSON.stringify({ runId, scope, role: "code-reviewer", attempt })))], variableContext: [],
-  })));
+  }, REVIEWER_PROTOCOL_V2)));
   const prepared = value(prepareFreshStandaloneReview({ runId, explicitScope: scope,
     changedPaths: { unstaged: scope, staged: [], committed: [], base_revision: null, head_revision: "a".repeat(40) },
     reviewMetadata: { requested_kinds: ["types"], docs_only: false, source_or_test_changed: false, types_changed: false,
@@ -76,7 +76,7 @@ describe("current standalone publication authority", () => {
     const c = completed(f);
     expect(c.aggregate.schemaVersion).toBe(2);
     expect(c.done.result.schemaVersion).toBe(2);
-    expect(c.done.result.reviewerProtocol).toEqual(CURRENT_REVIEWER_PROTOCOL);
+    expect(c.done.result.reviewerProtocol).toEqual(REVIEWER_PROTOCOL_V2);
     expect(c.done.result.reviewerEvidence).toHaveLength(f.authority.reviewers.length);
     const checkpoint = JSON.parse(serializeStandaloneReviewMachineState(c.done));
     expect(checkpoint.schema_version).toBe(2);

@@ -10,7 +10,7 @@ import fc from "fast-check";
 import { BASE_WAVE_REVIEW_AGENTS } from "../../src/core/agent-catalog-projections";
 import { DISTILL_AGENT } from "../../src/core/model-profiles";
 import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract";
-import { CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import {
   applyGateDecision,
   checkImplementationProof,
@@ -89,7 +89,7 @@ const graphOf = (tasks: readonly Task[], overrides: Record<string, unknown> = {}
 });
 
 const registrationOf = (taskIds: readonly string[]): RegisteredWaveGateProgram => ({
-  schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL,
+  schemaVersion: 2, reviewerProtocol: REVIEWER_PROTOCOL_V2,
   kind: "wave-gate", input: { wave: 1 }, taskIds, authorityDigest: value(parseArtifactDigest(AUTHORITY)),
 });
 

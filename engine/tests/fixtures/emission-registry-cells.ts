@@ -20,6 +20,7 @@
 import { EMISSION_TOOL_SPECS, type EmissionSchemaVersion, type IssuedEmissionBindingOf } from "../../src/core/emission-tool";
 import type { PayloadProducerKindName } from "../../src/core/agent-catalog-projections";
 import { sha256Hex } from "../../src/core/digest";
+import { WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4 } from "../../src/core/reviewer-contract";
 import {
   validJudgeArguments,
   validRefutationArguments,
@@ -64,11 +65,14 @@ const registryCell = <K extends PayloadProducerKindName, V extends RegistryCellV
 
 export const REVIEWER_V2_CELL = registryCell("reviewer-payload", "v2");
 export const REVIEWER_V3_CELL = registryCell("reviewer-payload", "v3");
+export const REVIEWER_V4_CELL = registryCell("reviewer-payload", "v4");
 export const JUDGE_V1_CELL = registryCell("judge-verdict", "v1");
 export const REFUTATION_V1_CELL = registryCell("refutation-verdict", "v1");
 
 /** Every frozen registry cell, once. */
-export const REGISTRY_CELLS: readonly RegistryCell[] = Object.freeze([REVIEWER_V2_CELL, REVIEWER_V3_CELL, JUDGE_V1_CELL, REFUTATION_V1_CELL]);
+export const REGISTRY_CELLS: readonly RegistryCell[] = Object.freeze([
+  REVIEWER_V2_CELL, REVIEWER_V3_CELL, REVIEWER_V4_CELL, JUDGE_V1_CELL, REFUTATION_V1_CELL,
+]);
 
 /** The frozen schema bytes of one cell: the cell's own schema record, typed
  *  at construction, so no lookup can miss. */
@@ -77,6 +81,11 @@ export const cellSchemaBytes = (cell: RegistryCell): string => cell.schema.schem
 /** The cell's schema digest: the SHA-256 of its frozen schema bytes. */
 export const cellSchemaDigest = (cell: RegistryCell): string => sha256Hex(cellSchemaBytes(cell));
 
+/** No engine module exports an `assertNever`; each module that proves totality declares its own. */
+const assertNever = (value: never): never => {
+  throw new Error(`unreachable registry cell: ${JSON.stringify(value)}`);
+};
+
 /** Canonical emission arguments per registry cell, minted through the shared
  *  emission-argument fixtures over the real zod schemas (the qualification
  *  probe's fixture posture: a fixture exists only after `schema.parse`
@@ -84,9 +93,17 @@ export const cellSchemaDigest = (cell: RegistryCell): string => sha256Hex(cellSc
 export const canonicalArguments = (cell: RegistryCell): unknown => {
   switch (cell.kind) {
     case "reviewer-payload":
-      return cell.version === "v2"
-        ? validReviewerArgumentsV2("supported input bypasses the authorization check")
-        : validReviewerArgumentsV3();
+      switch (cell.version) {
+        case "v2":
+          return validReviewerArgumentsV2("supported input bypasses the authorization check");
+        case "v3":
+          return validReviewerArgumentsV3();
+        case "v4":
+          // The Wave v4 example is parsed by the v4 admission schema at its declaration.
+          return WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4;
+        default:
+          return assertNever(cell);
+      }
     case "judge-verdict":
       return validJudgeArguments("extensibility");
     case "refutation-verdict":

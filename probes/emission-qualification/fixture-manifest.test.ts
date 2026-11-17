@@ -35,7 +35,7 @@ describe("fixtures/manifest.json", () => {
   it("carries every registry cell's frozen schema bytes, and each fixture passes its own pinned detectors", () => {
     const manifest = buildManifest();
     expect(manifest.map((entry) => `${entry.kind}/${entry.version}`)).toEqual([
-      "reviewer-payload/v2", "reviewer-payload/v3", "judge-verdict/v1", "refutation-verdict/v1",
+      "reviewer-payload/v2", "reviewer-payload/v3", "reviewer-payload/v4", "judge-verdict/v1", "refutation-verdict/v1",
     ]);
     for (const entry of manifest) {
       const versions = Object.entries(EMISSION_TOOL_SPECS[entry.kind as keyof typeof EMISSION_TOOL_SPECS].schemaVersions);
@@ -62,6 +62,7 @@ describe("fixtures/manifest.json", () => {
     expect(manifest.map((entry) => entry.registeredToolName)).toEqual([
       "loom_emit_reviewer_payload_v2",
       "loom_emit_reviewer_payload_v3",
+      "loom_emit_reviewer_payload_v4",
       EMISSION_TOOL_SPECS["judge-verdict"].toolName,
       EMISSION_TOOL_SPECS["refutation-verdict"].toolName,
     ]);

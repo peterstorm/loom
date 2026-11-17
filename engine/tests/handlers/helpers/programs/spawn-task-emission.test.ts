@@ -12,7 +12,7 @@ import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { EMISSION_DESCRIPTOR_MARKER } from "../../../../src/core/issued-emission-capability";
-import { CURRENT_REVIEWER_PROTOCOL } from "../../../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../../../../src/core/reviewer-contract";
 import { type RegisteredWaveGateProgram } from "../../../../src/core/wave-gate-program";
 import { renderReviewProgramSpawn, renderSpawnTask } from "../../../../src/handlers/helpers/programs/spawn-task";
 import { type RegisteredStandaloneProgram } from "../../../../src/handlers/helpers/programs/registration";
@@ -72,7 +72,7 @@ describe("renderSpawnTask emission projection wiring", () => {
  *  freezes it — the program-path emission authority the wave program holds. */
 const waveV2Registration: RegisteredWaveGateProgram = Object.freeze({
   schemaVersion: 2,
-  reviewerProtocol: CURRENT_REVIEWER_PROTOCOL,
+  reviewerProtocol: REVIEWER_PROTOCOL_V2,
   kind: "wave-gate",
   input: Object.freeze({ wave: 1 }),
   taskIds: Object.freeze(["T1"]),
@@ -82,7 +82,7 @@ const waveV2Registration: RegisteredWaveGateProgram = Object.freeze({
 /** A standalone v2 registration for the program-binding refusal arm. */
 const standaloneV2Registration: RegisteredStandaloneProgram = Object.freeze({
   schemaVersion: 2,
-  reviewerProtocol: CURRENT_REVIEWER_PROTOCOL,
+  reviewerProtocol: REVIEWER_PROTOCOL_V2,
   kind: "standalone-review",
   input: Object.freeze({ kind: "all", files: null, dryRun: false }),
   authority: Object.freeze({}),

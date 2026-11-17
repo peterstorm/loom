@@ -10,6 +10,7 @@
  * fails loudly.
  */
 
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import { describe, expect, it } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -89,7 +90,7 @@ const publishedParentSpawnFixture = async (label: string): Promise<PublishedPare
       requiredSkill: "none",
       fixedContext: Object.freeze([section]),
       variableContext: Object.freeze([]),
-    }));
+    }, REVIEWER_PROTOCOL_V2));
   });
   const packet = packets[0]!;
   const prepared = value(prepareFreshStandaloneReview({

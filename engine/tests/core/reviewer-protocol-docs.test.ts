@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  CURRENT_REVIEWER_PROTOCOL, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_OUTPUT_CONTRACT,
-  REVIEWER_PAYLOAD_SCHEMA_V2, parseReviewerProtocolDescriptor, reviewerEmissionToolContract,
+  REVIEWER_PROTOCOL_V2, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_OUTPUT_CONTRACT,
+  REVIEWER_PAYLOAD_SCHEMA_V2, parseReviewerProtocolDescriptorV2, reviewerEmissionToolContract,
 } from "../../src/core/reviewer-contract";
 import {
   renderReviewerWireContract, renderReviewerWireInstructions,
@@ -178,19 +178,19 @@ describe("archived issued contracts are not rewritten (FR-020/AS-012)", () => {
   });
 
   it("the current descriptor admits exactly the frozen bytes and refuses any rewrite (exact before/after)", () => {
-    const admitted = parseReviewerProtocolDescriptor(CURRENT_REVIEWER_PROTOCOL);
+    const admitted = parseReviewerProtocolDescriptorV2(REVIEWER_PROTOCOL_V2);
     expect(admitted.ok).toBe(true);
     if (!admitted.ok) return;
-    expect(admitted.value).toBe(CURRENT_REVIEWER_PROTOCOL);
+    expect(admitted.value).toBe(REVIEWER_PROTOCOL_V2);
     // One-hex-character rewrites of every digest field are refused: an
     // archived or drifted descriptor cannot silently describe today's bytes.
     for (const key of ["schemaDigest", "rubricDigest"] as const) {
-      const original = CURRENT_REVIEWER_PROTOCOL[key];
+      const original = REVIEWER_PROTOCOL_V2[key];
       const rewritten = {
-        ...CURRENT_REVIEWER_PROTOCOL,
+        ...REVIEWER_PROTOCOL_V2,
         [key]: original.startsWith("0") ? `1${original.slice(1)}` : `0${original.slice(1)}`,
       };
-      const refused = parseReviewerProtocolDescriptor(rewritten);
+      const refused = parseReviewerProtocolDescriptorV2(rewritten);
       expect(refused.ok, key).toBe(false);
       if (!refused.ok) expect(refused.error.code).toBe("unsupported-protocol");
     }
@@ -201,16 +201,18 @@ describe("archived issued contracts are not rewritten (FR-020/AS-012)", () => {
     // protocol bytes: the digests still derive from the frozen bytes, and the
     // fragment the stamper writes still carries exactly those sections. The
     // schema is shown minified there, so it is compared as a value.
-    expect(sha256Hex(REVIEWER_PAYLOAD_SCHEMA_V2)).toBe(CURRENT_REVIEWER_PROTOCOL.schemaDigest);
-    expect(sha256Hex(REVIEWER_IMPACT_RUBRIC_V1)).toBe(CURRENT_REVIEWER_PROTOCOL.rubricDigest);
+    expect(sha256Hex(REVIEWER_PAYLOAD_SCHEMA_V2)).toBe(REVIEWER_PROTOCOL_V2.schemaDigest);
+    expect(sha256Hex(REVIEWER_IMPACT_RUBRIC_V1)).toBe(REVIEWER_PROTOCOL_V2.rubricDigest);
     const fragment = renderReviewerWireContract();
     const schema = orFail(compactSchemaOf(markdown("renderReviewerWireContract()", fragment)), describeCompactSchemaError);
     expect(schema.value).toEqual(JSON.parse(REVIEWER_PAYLOAD_SCHEMA_V2));
     expect(fragment.endsWith(REVIEWER_IMPACT_RUBRIC_V1)).toBe(true);
     // One schema section: the output contract names it, its heading opens it,
-    // and its one sentence says it is the packet's section in compact form.
+    // its one sentence says it is the packet's section in compact form, and
+    // the Wave line names the packet's section once more as the authority on
+    // which Wave envelope (v2 or v4, ADR-0083) applies.
     expect([...fragment.matchAll(/## reviewer-payload-schema\n/g)]).toHaveLength(1);
-    expect([...fragment.matchAll(/reviewer-payload-schema/g)]).toHaveLength(3);
+    expect([...fragment.matchAll(/reviewer-payload-schema/g)]).toHaveLength(4);
     expect(REVIEWER_OUTPUT_CONTRACT).toBe(
       "Emit exactly one JSON object conforming to reviewer-payload-schema; apply reviewer-impact-rubric. No other final output.",
     );

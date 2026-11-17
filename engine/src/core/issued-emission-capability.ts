@@ -542,23 +542,24 @@ type IssuedProducerAuthority = Readonly<{
 /**
  * One issued request's producer contract — a closed version-indexed claim
  * extracted from ISSUED registration, never from current defaults or model
- * arguments (AD-7). Archived v1 has no schema digest; current v2/v3 always
+ * arguments (AD-7). Archived v1 has no schema digest; current v2/v3/v4 always
  * carry one. The discriminant makes an absent current digest and a digest on
  * an archived claim unrepresentable before registry admission.
  */
 export type IssuedProducerClaim =
   | Readonly<IssuedProducerAuthority & { version: "v1"; schemaDigest?: never }>
-  | Readonly<IssuedProducerAuthority & { version: "v2" | "v3"; schemaDigest: ArtifactDigest }>;
+  | Readonly<IssuedProducerAuthority & { version: "v2" | "v3" | "v4"; schemaDigest: ArtifactDigest }>;
 
 type ArchivedIssuedProducerClaim = Extract<IssuedProducerClaim, Readonly<{ version: "v1" }>>;
-type CurrentIssuedProducerClaim = Extract<IssuedProducerClaim, Readonly<{ version: "v2" | "v3" }>>;
+type CurrentIssuedProducerClaim = Extract<IssuedProducerClaim, Readonly<{ version: "v2" | "v3" | "v4" }>>;
 
 /** The registered review program's authenticated frozen protocol, shared by
- *  the issuance renderer and Pi parent admission. Its own discriminant is the
- *  sole input used to construct the corresponding producer-claim arm. */
+ *  the issuance renderer and Pi parent admission. The descriptor's own version
+ *  selects the producer-claim arm: a schema-2 registration carries v2 or the
+ *  Wave v4 descriptor (ADR-0083), a schema-3 one the successor v3. */
 type IssuedReviewerProtocol =
   | Readonly<{ schemaVersion: 1; reviewerProtocol?: never }>
-  | Readonly<{ schemaVersion: 2 | 3; reviewerProtocol: Readonly<{ schemaDigest: string }> }>;
+  | Readonly<{ schemaVersion: 2 | 3; reviewerProtocol: Readonly<{ version: 2 | 3 | 4; schemaDigest: string }> }>;
 
 export function issuedReviewerPayloadClaim(
   program: IssuedReviewerProtocol,
@@ -578,7 +579,7 @@ export function issuedReviewerPayloadClaim(
   }
   return canonicalRecord({
     ...authority,
-    version: program.schemaVersion === 2 ? "v2" as const : "v3" as const,
+    version: `v${program.reviewerProtocol.version}` as const,
     schemaDigest: schemaDigest.value,
   }) satisfies CurrentIssuedProducerClaim;
 }

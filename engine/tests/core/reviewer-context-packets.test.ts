@@ -6,8 +6,8 @@ import {
   type ByteSection, type ContextPacketInput, type ReviewerContextPacketV2,
 } from "../../src/core/context-packets";
 import {
-  CURRENT_REVIEWER_PROTOCOL, REVIEWER_FIXED_SECTIONS, REVIEWER_OUTPUT_CONTRACT,
-  parseReviewerProtocolDescriptor, REVIEWER_PAYLOAD_EXAMPLE_V2,
+  REVIEWER_PROTOCOL_V2, REVIEWER_FIXED_SECTIONS, REVIEWER_OUTPUT_CONTRACT,
+  parseReviewerProtocolDescriptorV2, REVIEWER_PAYLOAD_EXAMPLE_V2,
 } from "../../src/core/reviewer-contract";
 import { parseReviewerPayloadV2 } from "../../src/core/reviewer-protocol";
 import { parseRequestId } from "../../src/core/orchestration-contract";
@@ -25,7 +25,7 @@ const input: ContextPacketInput = {
   fixedContext: [section("scope", "src/a.ts")], variableContext: [],
 };
 function current(overrides: Partial<Omit<ContextPacketInput, "outputContract">> = {}): ReviewerContextPacketV2 {
-  const built = buildReviewerContextPacket({ ...input, ...overrides });
+  const built = buildReviewerContextPacket({ ...input, ...overrides }, REVIEWER_PROTOCOL_V2);
   if (!built.ok) throw new Error(built.error.message);
   return built.value;
 }
@@ -37,7 +37,7 @@ describe("reviewer-only v2 Context Packet", () => {
   it.each(roles)("issues the authoritative schema/rubric for %s", (role) => {
     const packet = current({ role });
     expect(packet.schemaVersion).toBe(2);
-    expect(packet.reviewerProtocol).toEqual(CURRENT_REVIEWER_PROTOCOL);
+    expect(packet.reviewerProtocol).toEqual(REVIEWER_PROTOCOL_V2);
     expect(packet.outputContract).toBe(REVIEWER_OUTPUT_CONTRACT);
     for (const expected of REVIEWER_FIXED_SECTIONS) {
       const found = packet.fixedContext.filter((entry) => entry.label === expected.label);
@@ -49,16 +49,16 @@ describe("reviewer-only v2 Context Packet", () => {
     expect(parseReviewerPayloadV2(new TextEncoder().encode(JSON.stringify(REVIEWER_PAYLOAD_EXAMPLE_V2))).ok).toBe(true);
   });
   it.each(["spec-check", "review-verifier", "skill-content-reviewer", "security-agent", "architecture-agent", "", "code-reviewer-extra"])("does not issue v2 to %j", (role) => {
-    expect(buildReviewerContextPacket({ ...input, role }).ok).toBe(false);
+    expect(buildReviewerContextPacket({ ...input, role }, REVIEWER_PROTOCOL_V2).ok).toBe(false);
     expect(parseContextPacket(rehash({ ...current(), role })).ok).toBe(false);
   });
   it.each(REVIEWER_FIXED_SECTIONS)("reserves $label in both section classes", ({ label }) => {
     for (const kind of ["fixedContext", "variableContext"] as const) {
-      expect(buildReviewerContextPacket({ ...input, [kind]: [section(label, "replacement")] }).ok).toBe(false);
+      expect(buildReviewerContextPacket({ ...input, [kind]: [section(label, "replacement")] }, REVIEWER_PROTOCOL_V2).ok).toBe(false);
     }
   });
   it("adds its own sections even without caller sections, but the legacy builder stays unchanged", () => {
-    expect(buildReviewerContextPacket({ ...input, fixedContext: [], variableContext: [] }).ok).toBe(true);
+    expect(buildReviewerContextPacket({ ...input, fixedContext: [], variableContext: [] }, REVIEWER_PROTOCOL_V2).ok).toBe(true);
     expect(buildContextPacket({ ...input, fixedContext: [], variableContext: [] }).ok).toBe(false);
   });
   it("hashes the descriptor immediately after outputContract and before sections", () => {
@@ -135,8 +135,8 @@ describe("reviewer-only v2 Context Packet", () => {
   });
   it("requires exact descriptor, with no v1 fallback or inherited authority", () => {
     const packet = current();
-    for (const reviewerProtocol of [undefined, null, {}, { ...CURRENT_REVIEWER_PROTOCOL, version: 1 }, { ...CURRENT_REVIEWER_PROTOCOL, rubricVersion: 2 }, { ...CURRENT_REVIEWER_PROTOCOL, schemaDigest: "0".repeat(64) }, { ...CURRENT_REVIEWER_PROTOCOL, rubricDigest: "0".repeat(64) }, { ...CURRENT_REVIEWER_PROTOCOL, extra: true }, Object.create(CURRENT_REVIEWER_PROTOCOL)]) {
-      expect(parseReviewerProtocolDescriptor(reviewerProtocol).ok).toBe(false);
+    for (const reviewerProtocol of [undefined, null, {}, { ...REVIEWER_PROTOCOL_V2, version: 1 }, { ...REVIEWER_PROTOCOL_V2, rubricVersion: 2 }, { ...REVIEWER_PROTOCOL_V2, schemaDigest: "0".repeat(64) }, { ...REVIEWER_PROTOCOL_V2, rubricDigest: "0".repeat(64) }, { ...REVIEWER_PROTOCOL_V2, extra: true }, Object.create(REVIEWER_PROTOCOL_V2)]) {
+      expect(parseReviewerProtocolDescriptorV2(reviewerProtocol).ok).toBe(false);
       expect(parseContextPacket({ ...packet, reviewerProtocol }).ok).toBe(false);
     }
     expect(parseContextPacket(Object.create(packet)).ok).toBe(false);
@@ -146,7 +146,7 @@ describe("reviewer-only v2 Context Packet", () => {
     expect(parseContextPacket(stripped).ok).toBe(false);
   });
   it("turns hostile descriptor/packet inspection into typed failure", () => {
-    for (const raw of [new Proxy({}, { getPrototypeOf() { throw new Error("hostile"); } }), { get protocol() { throw new Error("hostile"); } }]) expect(parseReviewerProtocolDescriptor(raw).ok).toBe(false);
+    for (const raw of [new Proxy({}, { getPrototypeOf() { throw new Error("hostile"); } }), { get protocol() { throw new Error("hostile"); } }]) expect(parseReviewerProtocolDescriptorV2(raw).ok).toBe(false);
     expect(parseContextPacket({ get schemaVersion() { throw new Error("hostile"); } }).ok).toBe(false);
     expect(parseContextPacket({ ...current(), get reviewerProtocol() { throw new Error("must not invoke accessor"); } }).ok).toBe(false);
   });

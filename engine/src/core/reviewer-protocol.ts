@@ -4,7 +4,8 @@ import {
   REVIEWER_PAYLOAD_LIMITS, REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1,
   REVIEWER_OUTPUT_CONTRACT, REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, reviewerPayloadV2Schema,
   reviewerEmissionToolContract, REVIEWER_EMISSION_TOOL_CONTRACT_PLACEHOLDER, REVIEWER_EMISSION_TOOL_CONTRACT_TEMPLATE,
-  type ReviewerPayloadV2, type ReviewerProtocolFailure,
+  WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4, waveReviewerPayloadV4Schema,
+  type ReviewerPayloadV2, type ReviewerProtocolFailure, type WaveReviewerPayloadV4,
 } from "./reviewer-contract";
 import {
   REVIEWER_WIRE_CONTRACT_EXAMPLE_V3, STANDALONE_SUCCESSOR_ROSTER_RULE, standaloneReviewerPayloadV3Schema,
@@ -44,13 +45,26 @@ export const STANDALONE_V3_ENVELOPE_HINT =
   'A successor payload is one object with exactly "schemaVersion": 3, "kind": "standalone-successor-review", ' +
   '"lineageDigest", "snapshotDigest", "priorAssessments" and "findings", as the wire contract\'s Successor review section shows.';
 
-/** The ONE wording of a schema refusal: WHERE (pointer), WHY (the defect) and, for a top-level v3 defect, the envelope. */
+/**
+ * What a top-level Wave v4 refusal adds (ADR-0083): a reviewer that copied
+ * packetId and generation, or the v2 envelope, is told the whole v4 envelope.
+ */
+export const WAVE_V4_ENVELOPE_HINT =
+  'A Wave payload is one object with exactly "schemaVersion": 4, "kind": "wave-review", "prior_findings" and "findings"; ' +
+  'never include "packetId" or "generation" — the engine binds them from the issued request.';
+
+const ENVELOPE_HINTS: Readonly<Record<"v2" | "standalone v3" | "Wave v4", string | null>> = Object.freeze({
+  "v2": null, "standalone v3": STANDALONE_V3_ENVELOPE_HINT, "Wave v4": WAVE_V4_ENVELOPE_HINT,
+});
+
+/** The ONE wording of a schema refusal: WHERE (pointer), WHY (the defect) and, for a top-level v3 or v4 defect, the envelope. */
 function schemaRefusal(
-  contract: "v2" | "standalone v3",
+  contract: keyof typeof ENVELOPE_HINTS,
   issue: Readonly<{ path: readonly PropertyKey[]; message: string }> | undefined,
 ): DomainResult<never, ReviewerProtocolFailure> {
   const path = issue?.path ?? [];
-  const hint = contract === "standalone v3" && path.length <= 1 ? ` ${STANDALONE_V3_ENVELOPE_HINT}` : "";
+  const envelope = ENVELOPE_HINTS[contract];
+  const hint = envelope !== null && path.length <= 1 ? ` ${envelope}` : "";
   return rejected(
     "invalid-payload",
     `Reviewer payload does not conform to the issued ${contract} schema: ${violationReason(issue?.message ?? "no violation reported")}${hint}`,
@@ -302,6 +316,20 @@ export function parseReviewerPayloadV2(rawBytes: Uint8Array): DomainResult<Revie
   }
 }
 
+/** The Wave v4 decoder (ADR-0083): the strict v4 object, no packet identity. */
+export function parseWaveReviewerPayloadV4(rawBytes: Uint8Array): DomainResult<WaveReviewerPayloadV4, ReviewerProtocolFailure> {
+  const decoded = parseBoundedReviewerJson(rawBytes, REVIEWER_PAYLOAD_LIMITS.bytes);
+  if (!decoded.ok) return decoded;
+  try {
+    const parsed = waveReviewerPayloadV4Schema.safeParse(decoded.value);
+    if (!parsed.success) return schemaRefusal("Wave v4", parsed.error.issues[0]);
+    return success(parsed.data);
+  } catch {
+    // Never expose a dependency exception: it can contain the complete input.
+    return rejected("invalid-payload", "Reviewer payload could not be inspected safely.");
+  }
+}
+
 /**
  * The stamper consumes this same executable schema, parsed example and exact
  * rubric. The lead contract line stays the retained final-message wording
@@ -325,11 +353,24 @@ export function renderReviewerWireContract(): string {
     `\`\`\`\n${REVIEWER_EMISSION_TOOL_CONTRACT_TEMPLATE}\n\`\`\``,
     `## reviewer-payload-schema\n\nThe issued Context Packet's \`reviewer-payload-schema\` section in compact form; the packet copy governs.\n\n\`\`\`json\n${compactSchema}\n\`\`\``,
     `## Example (standalone-review only)\n\n\`\`\`json\n${JSON.stringify(REVIEWER_WIRE_CONTRACT_EXAMPLE_V2, null, 2)}\n\`\`\``,
-    "A Wave request is refused this shape: its payload is `\"kind\": \"wave-review\"` with `packetId`, `generation` and `prior_findings`, as the schema and your task state.",
+    "A Wave request is refused this shape: its payload is `\"kind\": \"wave-review\"` with `prior_findings`. The packet's `reviewer-payload-schema` governs which Wave envelope applies, and your task states whether `packetId` and `generation` are required.",
+    WAVE_V4_WIRE_SECTION,
     STANDALONE_SUCCESSOR_WIRE_SECTION,
     `## reviewer-impact-rubric\n\n${REVIEWER_IMPACT_RUBRIC_V1}`,
   ].join("\n\n");
 }
+
+/**
+ * The Wave v4 arm of the wire contract (ADR-0083). Live v2 Wave runs and v4
+ * runs share one stamped contract, so the section is conditional on the task:
+ * a v4 request's packet carries the v4 schema, and its task says so.
+ */
+const WAVE_V4_WIRE_SECTION = [
+  "## Wave review v4 (wave-review, schemaVersion 4)",
+  "Only when your task says the Wave payload is schemaVersion 4. Then copy nothing from the packet's identity: the engine binds the Review Packet ID and Review Generation from your issued request, and a payload that carries `packetId` or `generation` is refused.",
+  "- `\"schemaVersion\": 4` and `\"kind\": \"wave-review\"`.\n- `prior_findings` assesses every issued prior Finding ID exactly once, in packet order; an empty roster takes an empty array.\n- `findings` holds only new Findings, each one v2 `findings` entry.",
+  `\`\`\`json\n${JSON.stringify(WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4, null, 2)}\n\`\`\``,
+].join("\n\n");
 
 /**
  * The successor arm of the wire contract (issue #185). An explicitly issued
