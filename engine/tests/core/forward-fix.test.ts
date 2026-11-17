@@ -321,18 +321,20 @@ describe("addForwardFix refuses what it is not for", () => {
       return parsed.value;
     };
 
-    it("refuses a fix Task no Task Reopening has given new work, even after its attempt failed", () => {
-      const refused = refusal(failedFixGraph(false), holdT5());
-      expect(refused.kind).toBe("not-a-judge");
-      expect(refused.message).toContain("no Task Reopening has given new work");
-    });
-
-    it("holds a reopened fix Task whose attempt failed on sealed code, and the State File loads the result", () => {
-      const { graph, task: fix, audit } = added(failedFixGraph(true), holdT5());
+    it.each([
+      ["never reopened", false],
+      ["reopened with new work", true],
+    ])("holds a fix Task %s whose attempt failed on sealed code, and the State File loads the result", (_label, reopened) => {
+      const { graph, task: fix, audit } = added(failedFixGraph(reopened), holdT5());
       expect(fix.id).toBe("T6");
       expect(audit.heldTaskIds).toEqual(["T5"]);
       expect(dispatchHoldOf(graph, new Set(), byId(graph, "T5"))).toEqual({ kind: "forward-fix", fixTaskIds: ["T6"] });
       expect(parseTaskGraph(JSON.parse(JSON.stringify(graph))).ok).toBe(true);
+    });
+
+    it("refuses a fix Task whose attempt has not failed: there is no judgement to answer", () => {
+      const { graph } = added(sealed());
+      expect(refusal(graph, holdT5()).kind).toBe("no-failed-judgement");
     });
   });
 

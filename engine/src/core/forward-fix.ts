@@ -289,27 +289,14 @@ function resetWaveGates(retired: TaskGraph, wave: number, tasks: readonly Task[]
   return reconcileWaveBlock({ ...retired.wave_gates, [String(wave)]: gate }, tasks, retired.spec_check, wave);
 }
 
-/** Whether `task` is a Forward Fix Task some audit records. */
-const isForwardFixTask = (graph: TaskGraph, task: Task): boolean =>
-  (graph.forward_fix_history ?? []).some(({ fixTaskId }) => fixTaskId === task.id);
-
-/** Whether a Task Reopening has returned `task` for new work (`reopen-task`). */
-const wasReopened = (graph: TaskGraph, task: Task): boolean =>
-  (graph.task_reopening_history ?? []).some(({ reopenedTaskIds }) => reopenedTaskIds.some((id) => id === task.id));
-
 /**
  * Why `task` cannot be held as a judge, or null when it can. The distill pass
- * judges nothing. A Forward Fix Task only fixes until a Task Reopening gives
- * it new work: its reopened attempt carries its own tests, and when they fail
- * on sealed code it is a judge like an authored Task (ADR-0077).
+ * judges nothing. Every other Task can: a Forward Fix Task's attempt runs its
+ * own proof, and when that fails on code a completed Wave sealed, the failure
+ * is a judgement like an authored Task's (ADR-0077). Chains stay bounded by
+ * each Task's two semantic attempts.
  */
-function notAJudge(graph: TaskGraph, task: Task): string | null {
-  if (isDistillTask(task)) return "the Wave's distill pass";
-  if (isForwardFixTask(graph, task) && !wasReopened(graph, task)) {
-    return "a Forward Fix Task no Task Reopening has given new work";
-  }
-  return null;
-}
+const notAJudge = (task: Task): string | null => isDistillTask(task) ? "the Wave's distill pass" : null;
 
 /**
  * Whether `task`'s last implementation attempt failed: its owed dispatch is
@@ -329,7 +316,7 @@ function heldTaskRefusal(graph: TaskGraph, request: ForwardFixRequest): DomainRe
     if (task.wave !== request.wave) {
       return refuse("foreign-task", `${id} belongs to Wave ${task.wave}, not the active Wave ${request.wave}`);
     }
-    const why = notAJudge(graph, task);
+    const why = notAJudge(task);
     if (why !== null) {
       return refuse("not-a-judge", `${id} is ${why}; only a Task that judges code is held`);
     }
