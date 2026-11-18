@@ -37,6 +37,7 @@ import {
   waveTaskReviewRosters,
   type WaveRequestBatch,
 } from "../../src/core/wave-review-authority";
+import { WHOLE_ISSUANCE } from "../../src/core/wave-review-carry-plan";
 import type { ReviewRun, Task, TaskGraph } from "../../src/types";
 import { contract, surface } from "../fixtures/contract-status-fixtures";
 import { ADMISSION_FEE_TABLE_STAMP, FEE_TABLE, someParagraph } from "../fixtures/owner-families";
@@ -346,8 +347,8 @@ describe("a Review Run installed without the contract surface keeps its roster (
   const sixAgentRun = installedRun(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS);
 
   it("admits the installed five-agent run of a Contract Task, and the six-agent run a fresh install records", () => {
-    expect(waveRunRosterProblem(graph, 2, contractTask, fiveAgentRun, undefined)).toBeNull();
-    expect(waveRunRosterProblem(graph, 2, contractTask, sixAgentRun, undefined)).toBeNull();
+    expect(waveRunRosterProblem(graph, 2, contractTask, fiveAgentRun, WHOLE_ISSUANCE)).toBeNull();
+    expect(waveRunRosterProblem(graph, 2, contractTask, sixAgentRun, WHOLE_ISSUANCE)).toBeNull();
   });
 
   it("derives the base five for a Contract Task carrying that run, and the six once it carries none or the six-agent run", () => {
@@ -379,12 +380,12 @@ describe("a Review Run installed without the contract surface keeps its roster (
     ["a strict subset of the base five", installedRun(["code-reviewer", "type-design-analyzer"])],
     ["the six reordered", installedRun(["architecture-tech-lead", ...BASE_WAVE_REVIEW_AGENTS])],
   ] as const)("still refuses %s, naming the six-agent roster", (_name, run) => {
-    expect(waveRunRosterProblem(graph, 2, contractTask, run, undefined))
+    expect(waveRunRosterProblem(graph, 2, contractTask, run, WHOLE_ISSUANCE))
       .toEqual({ kind: "expected-agents-differ", taskId: "T1", roster: ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS });
   });
 
   it("still refuses a six-agent run on a Task that writes no contract surface", () => {
-    expect(waveRunRosterProblem(graph, 2, taskOf(graph, "T2"), sixAgentRun, undefined))
+    expect(waveRunRosterProblem(graph, 2, taskOf(graph, "T2"), sixAgentRun, WHOLE_ISSUANCE))
       .toEqual({ kind: "expected-agents-differ", taskId: "T2", roster: BASE_WAVE_REVIEW_AGENTS });
   });
 
@@ -392,7 +393,7 @@ describe("a Review Run installed without the contract surface keeps its roster (
     const owned = contractWave({ ...TYPED, owner_obligations: ADMISSION_FEE_TABLE_STAMP }, [FEE_TABLE.matrixTest]);
     const batch = issueWaveBatchFixture(projectWithPlan(), withInstalledRun(owned, "T1", sixAgentRun));
     expect(surfaceOf(packetOf(batch, "type-design-analyzer", "T1"))).toBe(renderContractSurfaceSection(PLAN_FILE, [PRICING_SURFACE]));
-    expect(waveRunRosterProblem(owned, 2, taskOf(owned, "T1"), fiveAgentRun, undefined))
+    expect(waveRunRosterProblem(owned, 2, taskOf(owned, "T1"), fiveAgentRun, WHOLE_ISSUANCE))
       .toEqual({ kind: "expected-agents-differ", taskId: "T1", roster: ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS });
   });
 });
@@ -457,7 +458,7 @@ describe("ADR-0069 known limits, pinned as accepted behaviour", () => {
     const sixAgentRun = installedRun(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS);
     const upgraded = withInstalledRun(contractWave({ ...TYPED, ...ownerStamp }, [FEE_TABLE.matrixTest]), "T1", sixAgentRun);
     // The installed run is admitted: its roster is six with or without the surface.
-    expect(waveRunRosterProblem(upgraded, 2, taskOf(upgraded, "T1"), sixAgentRun, undefined)).toBeNull();
+    expect(waveRunRosterProblem(upgraded, 2, taskOf(upgraded, "T1"), sixAgentRun, WHOLE_ISSUANCE)).toBeNull();
     const republished = issueWaveBatchFixture(root, upgraded);
     expect(republished.subjects).toEqual(issuedBeforeUpgrade.subjects);
     const differing = republished.subjects.filter((_subject, index) =>

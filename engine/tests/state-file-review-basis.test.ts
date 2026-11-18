@@ -91,11 +91,11 @@ describe("Task.review_basis at the State File boundary", () => {
     expectByteIdentical(task);
   });
 
-  it("loads a basis beside a current acceptance and beside none", () => {
-    expect(loads({ ...acceptedTask(currentAcceptance(1)), review_basis: currentAcceptance(0) }).tasks[0]?.review_basis)
-      .toEqual(currentAcceptance(0));
+  it("loads a basis with no acceptance beside it, and refuses one beside a live acceptance, which supersedes it", () => {
     const { subject_digest: _sealed, ...unsealed } = currentAcceptance(1);
     expect(loads(reopenedTask(unsealed)).tasks[0]?.review_basis).toEqual(unsealed);
+    expect(refusal({ ...acceptedTask(currentAcceptance(1)), review_basis: currentAcceptance(0) }))
+      .toContain("review_basis cannot stand beside an accepted_review_authority");
   });
 
   it("refuses a legacy basis: one with no reviewer protocol", () => {

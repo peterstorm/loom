@@ -5,9 +5,10 @@
  * these shapes; the core transitions and membership checks consume them.
  */
 import type { WaveReviewRunRetirement } from "../types";
-import type { WaveReviewRoster } from "./agent-catalog-projections";
+import type { NarrowedWaveReviewRoster, WaveReviewRoster } from "./agent-catalog-projections";
 import type { NarrowingChangeClass } from "./findings-shape";
 import type { NonEmpty } from "./orchestration-contract";
+import type { ReviewBasisAuthority } from "./review-narrowing";
 import type { ReviewerProtocolDescriptor } from "./reviewer-contract";
 
 /** Archived schema-1 review programs carry no issued descriptor; current
@@ -115,12 +116,6 @@ export function waveGateOriginOf(registration: WaveGateOriginAudit): WaveGateOri
 }
 
 /**
- * The accepted review a narrowed Task's change was measured against
- * (ADR-0093): its run, authority digest, Review Packet and reviewed head.
- */
-export type ReviewBasisAuthority = Readonly<{ runId: string; authorityDigest: string; packetId: string; headSha: string }>;
-
-/**
  * One reviewed Task a start issued only part of its derived roster
  * (ADR-0093): the roles it issues, in roster order, the derived roster they
  * were chosen from, the change classes that chose them, and the basis the
@@ -128,7 +123,7 @@ export type ReviewBasisAuthority = Readonly<{ runId: string; authorityDigest: st
  */
 export type NarrowedTaskReview = Readonly<{
   taskId: string;
-  roster: NonEmpty<string>;
+  roster: NarrowedWaveReviewRoster;
   from: WaveReviewRoster;
   change: NonEmpty<NarrowingChangeClass>;
   basis: ReviewBasisAuthority;

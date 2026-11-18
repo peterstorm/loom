@@ -2106,10 +2106,11 @@ function storedAcceptanceError(raw: unknown, prefix: string, field: string, stor
 }
 
 /**
- * Why a stored acceptance's scope is not a non-empty, canonical, sorted and
- * unique path array, or, on a current live acceptance, not at the Task's
- * generation; null when it is. A basis closed an earlier generation than the
- * Task's, so only its scope is pinned.
+ * Why a stored acceptance's scope is invalid, or null when it is valid.
+ * Invalid means: not a non-empty array of canonical review paths, not sorted
+ * and unique, or, on a current live acceptance, closed at a generation other
+ * than the Task's. A basis (always current) closed an earlier generation than
+ * the Task's, so only its scope is pinned.
  */
 function storedAcceptanceScopeError(
   authority: Record<string, unknown>,
@@ -2130,7 +2131,7 @@ function storedAcceptanceScopeError(
   if (current && stored.kind === "accepted" && (authority.generation !== stored.reviewGeneration || !canonicalScope)) {
     return `${prefix}: current ${field} must match exact generation and canonical scope`;
   }
-  if (current && stored.kind === "basis" && !canonicalScope) {
+  if (stored.kind === "basis" && !canonicalScope) {
     return `${prefix}: ${field}.scope must contain canonical review paths`;
   }
   const sortedScopePaths = [...scopePaths].sort();
@@ -2153,6 +2154,11 @@ function taskPacketError(
     if (acceptedError !== null) return acceptedError;
   }
   if (t.review_basis !== undefined) {
+    // A basis is the acceptance a reopening cleared (ADR-0093); a new
+    // acceptance supersedes it, so the two never stand side by side.
+    if (t.accepted_review_authority !== undefined) {
+      return `${prefix}: review_basis cannot stand beside an accepted_review_authority, which supersedes it`;
+    }
     const basisError = storedAcceptanceError(t.review_basis, prefix, "review_basis", { kind: "basis" });
     if (basisError !== null) return basisError;
   }

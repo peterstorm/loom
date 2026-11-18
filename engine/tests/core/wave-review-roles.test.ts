@@ -8,8 +8,9 @@ import { describe, expect, it } from "vitest";
 import {
   ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS,
   BASE_WAVE_REVIEW_AGENTS,
-  issuedWaveReviewRoster,
+  narrowedWaveReviewRoster,
   parseNarrowedWaveReviewRoster,
+  type NarrowedWaveReviewRoster,
 } from "../../src/core/agent-catalog-projections";
 import { attributeFindings, claimsOfSeverity, recordReviewRunEvidence, reviewRunError } from "../../src/core/findings";
 import type { CurrentAcceptedReviewAuthority, CurrentReviewRun, CurrentReviewRunEvidence, Finding } from "../../src/core/findings-shape";
@@ -21,10 +22,29 @@ import { returnToRevalidation } from "../../src/core/task-revalidation";
 import { waveFrozenSource } from "../../src/core/wave-frozen-source";
 import type { NarrowedTaskReview, RegisteredWaveGateProgram } from "../../src/core/wave-gate-program";
 import { installWaveGateRegistration } from "../../src/core/wave-gate-registration";
-import { issuedWaveReviewRosters, taskReviewScope, waveGateAuthorityDigest, waveRunRosterProblem } from "../../src/core/wave-review-authority";
-import { issuedWaveTaskRoster, reviewNarrowingOf } from "../../src/core/wave-review-carry-plan";
+import {
+  issuedWaveReviewRosters,
+  taskReviewScope,
+  waveGateAuthorityDigest,
+  waveRunRosterProblem,
+  widenedNarrowings,
+} from "../../src/core/wave-review-authority";
+import { waveAcceptanceProblem } from "../../src/core/wave-review-carry";
+import {
+  issuedTaskReview,
+  registeredIssuance,
+  reviewNarrowingOf,
+  runIssuance,
+  WHOLE_ISSUANCE,
+} from "../../src/core/wave-review-carry-plan";
 import { parseNarrowedReviews } from "../../src/core/wave-review-carry-audit";
-import { planReviewRoles, type BasisPacketView, type ReviewRolesInput } from "../../src/core/wave-review-roles";
+import {
+  basisReadOf,
+  narrowedReviewsOf,
+  planReviewRoles,
+  type BasisPacketView,
+  type ReviewRolesInput,
+} from "../../src/core/wave-review-roles";
 import { parseRegisteredFacadeProgram } from "../../src/handlers/helpers/programs/registration";
 import type { Task, TaskCommonMetadata, TaskGraph } from "../../src/types";
 import { findingId } from "../fixtures/finding-id";
@@ -36,6 +56,13 @@ const DIGEST_A = "a".repeat(64);
 const PACKET = "1".repeat(64);
 const SOURCE = "/** Adds one. */\nexport const t1 = 1;\n";
 const TEST = "it('adds', () => {});\n";
+
+/** A narrowed roster of the base five, minted as the parser mints it. */
+const narrowedOf = (roles: readonly string[]): NarrowedWaveReviewRoster => {
+  const roster = parseNarrowedWaveReviewRoster(BASE_WAVE_REVIEW_AGENTS, roles);
+  if (roster === null) throw new Error(`fixture roster ${roles.join()} must narrow the base five`);
+  return roster;
+};
 
 /** An implemented Task over a source file and its test, accepted by `run.previous` and then reopened. */
 const implemented = (extra: Partial<TaskCommonMetadata> = {}): Task => taskFixture({
@@ -51,6 +78,7 @@ const observe = (task: Task, files: Readonly<Record<string, string>>): ReviewedW
 };
 
 const BEFORE = { "src/t1.ts": SOURCE, "src/t1.test.ts": TEST };
+const COMMENT_EDIT = { ...BEFORE, "src/t1.ts": SOURCE.replace("Adds one.", "Adds exactly one.") };
 
 /** The acceptance a basis run recorded of `task` over `files`. */
 function basisAcceptance(task: Task, files = BEFORE, narrowing?: CurrentAcceptedReviewAuthority["narrowing"]): CurrentAcceptedReviewAuthority {
@@ -80,84 +108,104 @@ function plan(task: Task, now: Readonly<Record<string, string>>, overrides: Part
   });
 }
 
+/** The roles and change classes of a plan's narrowed choices. */
+const narrowedChoices = (choices: ReturnType<typeof plan>) =>
+  choices.flatMap((choice) => (choice.kind === "narrowed" ? [[choice.review.roster, choice.review.change]] : []));
+
 const advisoryBy = (agent: string): Finding =>
   ({ id: findingId(`${agent}-1`), agent, severity: "advisory", file: "src/t1.ts", line: 1, claim: `${agent} advisory` });
 
 describe("a fresh start issues a changed Task only the roles its change needs", () => {
-  it("a doc-comment change issues comment-analyzer only, and the registration freezes the narrowing", () => {
-    const result = plan(implemented(), { ...BEFORE, "src/t1.ts": SOURCE.replace("Adds one.", "Adds exactly one.") });
-    expect(result.rosters).toEqual([{ taskId: "T1", kind: "narrowed", roster: ["comment-analyzer"], change: ["comment"] }]);
-    expect(result.narrowedReviews).toEqual([{ taskId: "T1", roster: ["comment-analyzer"], from: BASE_WAVE_REVIEW_AGENTS,
-      change: ["comment"], basis: { runId: "run.previous", authorityDigest: DIGEST_A, packetId: PACKET,
-        headSha: observe(implemented(), BEFORE).headSha } }]);
+  it("a doc-comment change issues comment-analyzer only, and the registration freezes that same choice", () => {
+    const result = plan(implemented(), COMMENT_EDIT);
+    const review = { taskId: "T1", roster: ["comment-analyzer"], from: BASE_WAVE_REVIEW_AGENTS, change: ["comment"],
+      basis: { runId: "run.previous", authorityDigest: DIGEST_A, packetId: PACKET, headSha: observe(implemented(), BEFORE).headSha } };
+    expect(result).toEqual([{ taskId: "T1", kind: "narrowed", review }]);
+    expect(narrowedReviewsOf(result)).toEqual([review]);
   });
 
   it("a test-only change issues code-reviewer and pr-test-analyzer", () => {
-    const result = plan(implemented(), { ...BEFORE, "src/t1.test.ts": `${TEST}it('again', () => {});\n` });
-    expect(result.rosters).toEqual([{ taskId: "T1", kind: "narrowed", roster: ["code-reviewer", "pr-test-analyzer"], change: ["test"] }]);
+    expect(narrowedChoices(plan(implemented(), { ...BEFORE, "src/t1.test.ts": `${TEST}it('again', () => {});\n` })))
+      .toEqual([[["code-reviewer", "pr-test-analyzer"], ["test"]]]);
   });
 
   it("an open code-reviewer advisory forces code-reviewer onto a comment-only review", () => {
     const task = implemented({ findings: [advisoryBy("code-reviewer")], advisory_findings: ["code-reviewer advisory"] });
-    const result = plan(task, { ...BEFORE, "src/t1.ts": SOURCE.replace("Adds one.", "Adds exactly one.") });
-    expect(result.rosters).toEqual([{ taskId: "T1", kind: "narrowed", roster: ["code-reviewer", "comment-analyzer"], change: ["comment"] }]);
+    expect(narrowedChoices(plan(task, COMMENT_EDIT))).toEqual([[["code-reviewer", "comment-analyzer"], ["comment"]]]);
   });
 
   it("a code change, an unchanged Task, --fresh-review and an unsettled review all issue the full roster", () => {
-    expect(plan(implemented(), { ...BEFORE, "src/t1.ts": SOURCE.replace("= 1", "= 2") }).rosters)
+    expect(plan(implemented(), { ...BEFORE, "src/t1.ts": SOURCE.replace("= 1", "= 2") }))
       .toMatchObject([{ kind: "full", roster: BASE_WAVE_REVIEW_AGENTS, reason: { kind: "change", change: { kind: "changed", classes: ["code"] } } }]);
-    expect(plan(implemented(), BEFORE).rosters).toMatchObject([{ kind: "full", reason: { kind: "change", change: { kind: "unchanged" } } }]);
-    expect(plan(implemented(), { ...BEFORE, "src/t1.ts": `${SOURCE}// x\n` }, { freshReview: true }).rosters)
-      .toMatchObject([{ kind: "full", reason: { kind: "fresh-review" } }]);
-    expect(plan(implemented(), BEFORE).narrowedReviews).toBeUndefined();
+    expect(plan(implemented(), BEFORE)).toMatchObject([{ kind: "full", reason: { kind: "change", change: { kind: "unchanged" } } }]);
+    expect(plan(implemented(), COMMENT_EDIT, { freshReview: true })).toMatchObject([{ kind: "full", reason: { kind: "fresh-review" } }]);
+    expect(narrowedReviewsOf(plan(implemented(), BEFORE))).toBeUndefined();
   });
 
   it("a missing, unreadable or mismatched basis issues the full roster", () => {
-    const comment = { ...BEFORE, "src/t1.ts": SOURCE.replace("Adds one.", "Adds exactly one.") };
-    expect(plan(implemented(), comment, { bases: new Map() }).rosters).toMatchObject([{ kind: "full", reason: { kind: "no-basis" } }]);
-    expect(plan(implemented(), comment, { bases: new Map([["T1", { ok: false, error: "gone" }]]) }).rosters)
+    expect(plan(implemented(), COMMENT_EDIT, { bases: new Map() })).toMatchObject([{ kind: "full", reason: { kind: "no-basis" } }]);
+    expect(plan(implemented(), COMMENT_EDIT, { bases: new Map([["T1", { ok: false, error: "gone" }]]) }))
       .toMatchObject([{ kind: "full", reason: { kind: "basis-unreadable", error: "gone" } }]);
     const forged = basisView(implemented(), { ...BEFORE, "src/t1.ts": "export const other = 1;\n" });
-    expect(plan(implemented(), comment, { bases: new Map([["T1", { ok: true, value: forged }]]) }).rosters)
+    expect(plan(implemented(), COMMENT_EDIT, { bases: new Map([["T1", { ok: true, value: forged }]]) }))
       .toMatchObject([{ kind: "full", reason: { kind: "basis-mismatch", detail: "the basis frozen source is not the accepted head" } }]);
     const otherPacket = { ...basisView(implemented()), packetId: "2".repeat(64) };
-    expect(plan(implemented(), comment, { bases: new Map([["T1", { ok: true, value: otherPacket }]]) }).rosters)
+    expect(plan(implemented(), COMMENT_EDIT, { bases: new Map([["T1", { ok: true, value: otherPacket }]]) }))
       .toMatchObject([{ kind: "full", reason: { kind: "basis-mismatch" } }]);
   });
 
   it("a carried Task is never narrowed", () => {
-    expect(plan(implemented(), { ...BEFORE, "src/t1.ts": `${SOURCE}// x\n` }, { carried: new Set(["T1"]) }))
-      .toEqual({ narrowedReviews: undefined, rosters: [{ taskId: "T1", kind: "carried" }] });
+    expect(plan(implemented(), COMMENT_EDIT, { carried: new Set(["T1"]) })).toEqual([{ taskId: "T1", kind: "carried" }]);
+  });
+
+  it("one basis-read rule decides which Tasks the shell reads and the plan consults", () => {
+    const reopened: Task = { ...implemented(), review_basis: basisAcceptance(implemented()) };
+    const options = { carried: new Set<string>(), freshReview: false };
+    expect(basisReadOf(reopened, options)).toEqual({ kind: "consult", basis: reopened.review_basis });
+    expect(basisReadOf(reopened, { ...options, carried: new Set(["T1"]) })).toEqual({ kind: "carried" });
+    expect(basisReadOf(reopened, { ...options, freshReview: true })).toEqual({ kind: "full", reason: { kind: "fresh-review" } });
+    expect(basisReadOf(implemented(), options)).toEqual({ kind: "full", reason: { kind: "no-basis" } });
   });
 
   it("a basis whose packets did not show the contract surface is a context change, unless it narrowed the base five", () => {
-    const comment = { ...BEFORE, "src/t1.ts": SOURCE.replace("Adds one.", "Adds exactly one.") };
     const commentOnly = basisView(implemented(), BEFORE, ["comment-analyzer"]);
-    expect(plan(implemented(), comment, { bases: new Map([["T1", { ok: true, value: commentOnly }]]) }).rosters)
+    expect(plan(implemented(), COMMENT_EDIT, { bases: new Map([["T1", { ok: true, value: commentOnly }]]) }))
       .toMatchObject([{ kind: "full", reason: { kind: "change", change: { kind: "context-changed" } } }]);
     const reopened: Task = { ...implemented(), review_basis: basisAcceptance(implemented(), BEFORE,
       { from: BASE_WAVE_REVIEW_AGENTS, change: ["comment"], basis: { run_id: "run.older", authority_digest: DIGEST_A, packet_id: PACKET, head_sha: DIGEST_A } }) };
-    expect(planReviewRoles({ graph: graphFixture([reopened]), taskIds: ["T1"], carried: new Set(), freshReview: false,
-      workspaces: [observe(reopened, comment)], bases: new Map([["T1", { ok: true, value: commentOnly }]]) }).rosters)
-      .toMatchObject([{ kind: "narrowed", roster: ["comment-analyzer"] }]);
+    expect(narrowedChoices(planReviewRoles({ graph: graphFixture([reopened]), taskIds: ["T1"], carried: new Set(), freshReview: false,
+      workspaces: [observe(reopened, COMMENT_EDIT)], bases: new Map([["T1", { ok: true, value: commentOnly }]]) })))
+      .toEqual([[["comment-analyzer"], ["comment"]]]);
   });
 });
 
-describe("the issued roster is threaded through every roster comparison", () => {
-  const narrowed: NarrowedTaskReview = { taskId: "T1", roster: ["comment-analyzer"], from: BASE_WAVE_REVIEW_AGENTS, change: ["comment"],
-    basis: { runId: "run.previous", authorityDigest: DIGEST_A, packetId: PACKET, headSha: DIGEST_A } };
+describe("the issued review is threaded through every roster comparison", () => {
+  const narrowed: NarrowedTaskReview = { taskId: "T1", roster: narrowedOf(["comment-analyzer"]), from: BASE_WAVE_REVIEW_AGENTS,
+    change: ["comment"], basis: { runId: "run.previous", authorityDigest: DIGEST_A, packetId: PACKET, headSha: DIGEST_A } };
 
   it("only a proper ordered part of a derived roster is a narrowed roster", () => {
     expect(parseNarrowedWaveReviewRoster(BASE_WAVE_REVIEW_AGENTS, ["comment-analyzer"])).toEqual(["comment-analyzer"]);
     expect(parseNarrowedWaveReviewRoster(BASE_WAVE_REVIEW_AGENTS, ["comment-analyzer", "code-reviewer"])).toBeNull();
     expect(parseNarrowedWaveReviewRoster(BASE_WAVE_REVIEW_AGENTS, [...BASE_WAVE_REVIEW_AGENTS])).toBeNull();
     expect(parseNarrowedWaveReviewRoster(BASE_WAVE_REVIEW_AGENTS, ["architecture-tech-lead"])).toBeNull();
-    expect(issuedWaveReviewRoster(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, [])).toBe(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS);
+    expect(narrowedWaveReviewRoster(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, [])).toBeNull();
   });
 
-  it("a narrowing decided from another derived roster is void: the Task is reviewed in full", () => {
-    expect(issuedWaveTaskRoster(BASE_WAVE_REVIEW_AGENTS, narrowed)).toEqual(["comment-analyzer"]);
-    expect(issuedWaveTaskRoster(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, narrowed)).toBe(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS);
+  it("the issued review is tagged: whole, narrowed, or widened when a narrowing no longer fits the derived roster", () => {
+    const issuance = registeredIssuance({ narrowedReviews: [narrowed] }, "T1");
+    expect(issuedTaskReview(BASE_WAVE_REVIEW_AGENTS, WHOLE_ISSUANCE)).toEqual({ kind: "whole", roster: BASE_WAVE_REVIEW_AGENTS });
+    expect(issuedTaskReview(BASE_WAVE_REVIEW_AGENTS, issuance))
+      .toEqual({ kind: "narrowed", roster: ["comment-analyzer"], narrowing: reviewNarrowingOf(narrowed) });
+    expect(issuedTaskReview(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, issuance))
+      .toEqual({ kind: "widened", roster: ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, narrowing: reviewNarrowingOf(narrowed) });
+  });
+
+  it("a widened narrowing is reported, never silent", () => {
+    const graph = graphFixture([implemented()]);
+    expect(widenedNarrowings(graph, 2, { narrowedReviews: [narrowed] })).toEqual([]);
+    const fromSix: NarrowedTaskReview = { ...narrowed, from: ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS };
+    expect(widenedNarrowings(graph, 2, { narrowedReviews: [fromSix] }))
+      .toEqual([{ taskId: "T1", from: ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, derived: BASE_WAVE_REVIEW_AGENTS }]);
   });
 
   it("issuedWaveReviewRosters issues the narrowed roles, and with no plan is the rosters themselves", () => {
@@ -167,16 +215,21 @@ describe("the issued roster is threaded through every roster comparison", () => 
       .toEqual([{ taskId: "T1", roster: ["comment-analyzer"] }, { taskId: "T2", roster: BASE_WAVE_REVIEW_AGENTS }]);
   });
 
-  it("waveRunRosterProblem compares a run with its issued roster", () => {
+  it("waveRunRosterProblem compares a run with its issued roster, and a run's missing or inconsistent narrowing is refused", () => {
     const graph = graphFixture([implemented()]);
     const slot = (agent: string, index: number) => ({ agent, slot_id: `wave-slot:${index}`, attempted: 1 as const });
     const run = (agents: readonly [string, ...string[]]) =>
       ({ expected_agents: agents, slot_authority: agents.map(slot) as unknown as readonly [ReturnType<typeof slot>] });
-    expect(waveRunRosterProblem(graph, 2, graph.tasks[0]!, run(["comment-analyzer"]), narrowed)).toBeNull();
-    expect(waveRunRosterProblem(graph, 2, graph.tasks[0]!, run(["comment-analyzer"]), undefined))
+    const issuance = registeredIssuance({ narrowedReviews: [narrowed] }, "T1");
+    expect(waveRunRosterProblem(graph, 2, graph.tasks[0]!, run(["comment-analyzer"]), issuance)).toBeNull();
+    expect(waveRunRosterProblem(graph, 2, graph.tasks[0]!, run(["comment-analyzer"]), WHOLE_ISSUANCE))
       .toMatchObject({ kind: "expected-agents-differ", roster: BASE_WAVE_REVIEW_AGENTS });
-    expect(waveRunRosterProblem(graph, 2, graph.tasks[0]!, run([...BASE_WAVE_REVIEW_AGENTS] as unknown as readonly [string]), narrowed))
+    expect(waveRunRosterProblem(graph, 2, graph.tasks[0]!, run([...BASE_WAVE_REVIEW_AGENTS] as unknown as readonly [string]), issuance))
       .toMatchObject({ kind: "expected-agents-differ", roster: ["comment-analyzer"] });
+    // A run that names a narrowing decided from another roster, or a roster
+    // that is no part of its `from`, is held to the whole roster.
+    const foreign = { kind: "narrowed" as const, roster: ["comment-analyzer"], narrowing: { ...reviewNarrowingOf(narrowed), from: ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS } };
+    expect(waveRunRosterProblem(graph, 2, graph.tasks[0]!, run(["comment-analyzer"]), foreign)).toMatchObject({ kind: "expected-agents-differ" });
   });
 
   it("the registration parses its narrowed reviews exactly, and refuses one naming a foreign Task or a non-subsequence", () => {
@@ -191,14 +244,16 @@ describe("the issued roster is threaded through every roster comparison", () => 
     expect(parseNarrowedReviews([]).ok).toBe(false);
   });
 
-  it("the locked install refuses a narrowing whose basis the Task no longer holds", () => {
+  it("the locked install reads the narrowing from the registration and refuses one whose basis or derived roster no longer holds", () => {
     const task: Task = { ...implemented(), review_basis: basisAcceptance(implemented()) };
     const graph: TaskGraph = { ...graphFixture([task]), current_phase: "execute", current_wave: 1 };
     const registration = activeWaveGateFixture({ runId: "run.next", wave: 1, authorityDigest: waveGateAuthorityDigest(1, ["T1"], graph) });
     const held: NarrowedTaskReview = { ...narrowed, basis: { ...narrowed.basis, headSha: task.review_basis!.head_sha } };
-    expect(installWaveGateRegistration(graph, registration, ["T1"], undefined, [held]).kind).toBe("installed");
-    expect(installWaveGateRegistration(graph, registration, ["T1"], undefined, [narrowed])).toMatchObject({ kind: "refused",
+    expect(installWaveGateRegistration(graph, registration, { taskIds: ["T1"], narrowedReviews: [held] }).kind).toBe("installed");
+    expect(installWaveGateRegistration(graph, registration, { taskIds: ["T1"], narrowedReviews: [narrowed] })).toMatchObject({ kind: "refused",
       message: "Wave Gate narrows Task T1's review against run run.previous's acceptance, which is no longer its Review Basis" });
+    expect(installWaveGateRegistration(graph, registration, { taskIds: ["T1"], narrowedReviews: [{ ...held, from: ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS }] }))
+      .toMatchObject({ kind: "refused", message: "Wave Gate narrows Task T1's review from a roster its review no longer derives" });
   });
 
   it("a registration without narrowed reviews keeps its exact key set", () => {
@@ -208,13 +263,42 @@ describe("the issued roster is threaded through every roster comparison", () => 
   });
 });
 
+describe("completion admits a narrowed acceptance only as its registration issued it", () => {
+  const narrowed: NarrowedTaskReview = { taskId: "T1", roster: narrowedOf(["comment-analyzer"]), from: BASE_WAVE_REVIEW_AGENTS,
+    change: ["comment"], basis: { runId: "run.previous", authorityDigest: DIGEST_A, packetId: PACKET, headSha: DIGEST_A } };
+  const registration = (extra: Partial<RegisteredWaveGateProgram> = {}): RegisteredWaveGateProgram => ({
+    schemaVersion: 2, reviewerProtocol: V4, kind: "wave-gate", input: { wave: 1 }, taskIds: ["T1"], authorityDigest: DIGEST_A,
+    ...extra,
+  } as RegisteredWaveGateProgram);
+  const accepted = (narrowing?: CurrentAcceptedReviewAuthority["narrowing"]): Task => ({ ...implemented(),
+    accepted_review_authority: { ...basisAcceptance(implemented()), generation: 1, run_id: "run.current",
+      ...(narrowing === undefined ? {} : { narrowing }) } });
+
+  it("refuses a narrowed acceptance when the registration narrowed nothing", () => {
+    expect(waveAcceptanceProblem(accepted(reviewNarrowingOf(narrowed)), registration(), "run.current", []))
+      .toBe("Task T1 acceptance records a narrowing its registration did not issue");
+  });
+
+  it("refuses a narrowed acceptance measured against another basis than the registration's", () => {
+    const other = reviewNarrowingOf({ ...narrowed, basis: { ...narrowed.basis, runId: "run.other" } });
+    expect(waveAcceptanceProblem(accepted(other), registration({ narrowedReviews: [narrowed] }), "run.current", []))
+      .toBe("Task T1 acceptance records a narrowing its registration did not issue");
+  });
+
+  it("admits the narrowing the registration issued, and a whole-roster acceptance either way", () => {
+    expect(waveAcceptanceProblem(accepted(reviewNarrowingOf(narrowed)), registration({ narrowedReviews: [narrowed] }), "run.current", []))
+      .toBeNull();
+    expect(waveAcceptanceProblem(accepted(), registration({ narrowedReviews: [narrowed] }), "run.current", [])).toBeNull();
+  });
+});
+
 describe("a narrowed run never retires a prior Finding its owner did not vote on", () => {
   const AGENTS = ["comment-analyzer"] as const;
-  const narrowing = reviewNarrowingOf({ taskId: "T1", roster: [...AGENTS], from: BASE_WAVE_REVIEW_AGENTS, change: ["comment"],
+  const narrowing = reviewNarrowingOf({ taskId: "T1", roster: narrowedOf([...AGENTS]), from: BASE_WAVE_REVIEW_AGENTS, change: ["comment"],
     basis: { runId: "run.previous", authorityDigest: DIGEST_A, packetId: PACKET, headSha: DIGEST_A } });
   const draft = { protocolVersion: 2 as const, ...reviewerDraftV2Schema.parse({ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0], file: "src/t1.ts" }) };
 
-  function narrowedRunTask(): Task {
+  function narrowedRunTask(extra: Partial<TaskCommonMetadata> = {}): Task {
     const findings = [...attributeFindings([draft], "silent-failure-hunter"), ...attributeFindings([{ ...draft, claim: "comment drift" }], "comment-analyzer")];
     const run: CurrentReviewRun = { reviewer_protocol: V4, generation: 1, packet_id: "a".repeat(64), head_sha: "b".repeat(40),
       expected_agents: AGENTS, prior_finding_ids: findings.map(({ id }) => id), evidence: [],
@@ -222,9 +306,19 @@ describe("a narrowed run never retires a prior Finding its owner did not vote on
       workspace_scope: ["src/t1.ts"], workspace_head_sha: "e".repeat(64), wave_gate_run_id: "run.current", wave_gate_authority_digest: "f".repeat(64),
       narrowing,
     };
-    return { ...implemented(), findings, critical_findings: claimsOfSeverity(findings, "critical"),
+    return { ...implemented(extra), findings, critical_findings: claimsOfSeverity(findings, "critical"),
       advisory_findings: claimsOfSeverity(findings, "advisory"), review_run: run };
   }
+
+  const settle = (task: Task) => {
+    const run = task.review_run as CurrentReviewRun;
+    const evidence: CurrentReviewRunEvidence = { protocolVersion: 2, ...run.slot_authority[0]!,
+      prior_assessments: run.prior_finding_ids.map((finding_id) => ({ finding_id, verdict: "resolved_by_remediation", reason: "fixed" })),
+      new_findings: [] };
+    const settled = recordReviewRunEvidence(task, run.packet_id, 1, evidence);
+    if (!settled.ok) throw new Error(settled.error);
+    return settled;
+  };
 
   it("the State File refuses a narrowing whose roster is not a proper part of the roster it names", () => {
     const task = narrowedRunTask();
@@ -233,19 +327,26 @@ describe("a narrowed run never retires a prior Finding its owner did not vote on
       .toMatch(/narrowing must be/);
   });
 
+  it("a run's own issuance is its recorded narrowing over its roster, and whole without one", () => {
+    const run = narrowedRunTask().review_run!;
+    expect(runIssuance(run)).toEqual({ kind: "narrowed", roster: AGENTS, narrowing });
+    const { narrowing: _dropped, ...unnarrowed } = run as CurrentReviewRun;
+    expect(runIssuance(unnarrowed as CurrentReviewRun)).toEqual(WHOLE_ISSUANCE);
+  });
+
   it("keeps the absent owner's Finding active, retires the voting owner's, and records the narrowing on the acceptance and resolution", () => {
-    const task = narrowedRunTask();
-    const run = task.review_run as CurrentReviewRun;
-    const evidence: CurrentReviewRunEvidence = { protocolVersion: 2, ...run.slot_authority[0]!,
-      prior_assessments: run.prior_finding_ids.map((finding_id) => ({ finding_id, verdict: "resolved_by_remediation", reason: "fixed" })),
-      new_findings: [] };
-    const settled = recordReviewRunEvidence(task, run.packet_id, 1, evidence);
-    if (!settled.ok) throw new Error(settled.error);
+    const settled = settle(narrowedRunTask());
     expect(settled.completed).toBe(true);
     expect(settled.task.findings?.map(({ agent }) => agent)).toEqual(["silent-failure-hunter"]);
     expect(settled.task.resolved_findings?.map(({ finding, resolution }) => [finding.agent, resolution.narrowed_from]))
       .toEqual([["comment-analyzer", BASE_WAVE_REVIEW_AGENTS]]);
     expect(settled.task.accepted_review_authority).toMatchObject({ run_id: "run.current", narrowing });
+  });
+
+  it("a new acceptance supersedes the kept Review Basis, so the two never stand side by side", () => {
+    const settled = settle(narrowedRunTask({ review_basis: basisAcceptance(implemented()) }));
+    expect(Object.hasOwn(settled.task, "review_basis")).toBe(false);
+    expect(reviewBasisOf(settled.task)).toEqual(settled.task.accepted_review_authority);
   });
 });
 

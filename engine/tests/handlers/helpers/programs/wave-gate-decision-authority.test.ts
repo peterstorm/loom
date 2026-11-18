@@ -183,7 +183,7 @@ describe("Wave Gate start effect ordering", () => {
     writeFileSync(statePath, JSON.stringify({ ...initial, tasks: TASKS }));
     const before = readFileSync(statePath);
     try {
-      await expect(new StateManager(statePath).registerActiveWaveGate(active, taskIds))
+      await expect(new StateManager(statePath).registerActiveWaveGate(active, { taskIds: taskIds }))
         .rejects.toThrow("changed after Run Directory publication");
       expect(readFileSync(statePath)).toEqual(before);
       expect(new StateManager(statePath).load().active_wave_gate).toBeUndefined();

@@ -17,7 +17,7 @@ import {
   parseNarrowedWaveReviewRoster,
   type WaveReviewRoster,
 } from "./agent-catalog-projections";
-import { parseNarrowingChange, parseRoles } from "./review-narrowing";
+import { parseBasisAuthority, parseNarrowingChange, parseRoles } from "./review-narrowing";
 import {
   canonicalStructuralEquals,
   isNonEmpty,
@@ -26,11 +26,11 @@ import {
   type DomainResult,
   type NonEmpty,
 } from "./orchestration-contract";
+import { isExactRecord as exactKeys } from "./plain-record";
 import type {
   AcceptedTaskCarry,
   CarriedReviewAuthority,
   NarrowedTaskReview,
-  ReviewBasisAuthority,
   WaveGateSuccessionAudit,
   WaveReviewCarry,
   WaveReviewCarryAudit,
@@ -39,10 +39,6 @@ import type {
 /** The same run on a lineage: run and authority digest both match. */
 export const sameAuthority = (left: CarriedReviewAuthority, right: CarriedReviewAuthority): boolean =>
   left.runId === right.runId && left.authorityDigest === right.authorityDigest;
-
-const exactKeys = (raw: unknown, keys: readonly string[]): raw is Readonly<Record<string, unknown>> =>
-  typeof raw === "object" && raw !== null && !Array.isArray(raw) &&
-  Object.keys(raw).length === keys.length && keys.every((key) => Object.hasOwn(raw, key));
 
 function parseAuthority(raw: unknown): CarriedReviewAuthority | null {
   if (!exactKeys(raw, ["runId", "authorityDigest"])) return null;
@@ -103,32 +99,21 @@ function parseCarryAudit<Entry extends WaveReviewCarry>(
   return { ok: true, value: Object.freeze({ lineage: Object.freeze(runs), carried: Object.freeze(entries) }) };
 }
 
-const SHA256 = /^[0-9a-f]{64}$/;
-
 /** The derived roster `raw` names exactly, or null. */
 function parseDerivedRoster(raw: unknown): WaveReviewRoster | null {
   const rosters: readonly WaveReviewRoster[] = [BASE_WAVE_REVIEW_AGENTS, ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS];
   return rosters.find((roster) => canonicalStructuralEquals(roster, raw)) ?? null;
 }
 
-function parseBasisAuthority(raw: unknown): ReviewBasisAuthority | null {
-  if (!exactKeys(raw, ["runId", "authorityDigest", "packetId", "headSha"])) return null;
-  const authority = parseAuthority({ runId: raw.runId, authorityDigest: raw.authorityDigest });
-  return authority !== null && typeof raw.packetId === "string" && SHA256.test(raw.packetId) &&
-      typeof raw.headSha === "string" && SHA256.test(raw.headSha)
-    ? Object.freeze({ ...authority, packetId: raw.packetId, headSha: raw.headSha })
-    : null;
-}
-
 function parseNarrowedTaskReview(raw: unknown): NarrowedTaskReview | null {
   if (!exactKeys(raw, ["taskId", "roster", "from", "change", "basis"])) return null;
   const taskId = parseTaskId(raw.taskId);
   const from = parseDerivedRoster(raw.from);
-  const roster = parseRoles(raw.roster);
+  const roles = parseRoles(raw.roster);
+  const roster = from === null || roles === null ? null : parseNarrowedWaveReviewRoster(from, roles);
   const change = parseNarrowingChange(raw.change);
   const basis = parseBasisAuthority(raw.basis);
-  return taskId === null || from === null || roster === null || change === null || basis === null ||
-      parseNarrowedWaveReviewRoster(from, roster) === null
+  return taskId === null || from === null || roster === null || change === null || basis === null
     ? null
     : Object.freeze({ taskId, roster, from, change, basis });
 }

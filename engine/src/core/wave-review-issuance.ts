@@ -25,14 +25,8 @@ import type { ReviewedWorkspaceObservation } from "./reviewed-workspace";
 import type { WaveReviewRole } from "./agent-catalog-projections";
 import { waveReviewerSlotProblem } from "./wave-gate-membership";
 import { carriedAcceptanceProblem, rebindCarriedReviewRun } from "./wave-review-carry";
-import {
-  issuedRoles,
-  issuedWaveTaskRoster,
-  registeredCarry,
-  registeredNarrowing,
-  reviewNarrowingOf,
-  waveReviewCarryOf,
-} from "./wave-review-carry-plan";
+import { issuedRoles, issuedTaskReview, registeredCarry, registeredIssuance, waveReviewCarryOf } from "./wave-review-carry-plan";
+import { narrowingOf } from "./review-narrowing";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import {
   decideWaveReviewEpochReplay,
@@ -181,9 +175,10 @@ export function installWaveReviewRunsTransition(
       tasks.push(task);
       continue;
     }
-    const narrowed = registeredNarrowing(registration, task.id);
-    const expectedAgents = issuedWaveTaskRoster(review.roster, narrowed);
-    const narrowing = narrowed === undefined || expectedAgents === review.roster ? undefined : reviewNarrowingOf(narrowed);
+    const issuance = registeredIssuance(registration, task.id);
+    const issued = issuedTaskReview(review.roster, issuance);
+    const expectedAgents = issued.roster;
+    const narrowing = issued.kind === "narrowed" ? issued.narrowing : undefined;
     const currentWorkspace = workspaceByTask.get(task.id);
     const lockedScope = taskReviewScope(task);
     const exactScope = currentWorkspace !== undefined && lockedScope.length === currentWorkspace.scope.length &&
@@ -259,8 +254,8 @@ export function installWaveReviewRunsTransition(
           canonicalStructuralEquals(run.slot_authority, currentSlots)
         : run.reviewer_protocol === undefined;
       const same = sameProtocol && run.packet_id === taskRun.packetId && run.generation === taskRun.generation &&
-        run.head_sha === taskRun.headSha && waveRunRosterProblem(locked, registration.schemaVersion, task, run, narrowed) === null &&
-        canonicalStructuralEquals(run.reviewer_protocol === undefined ? undefined : run.narrowing, narrowing) &&
+        run.head_sha === taskRun.headSha && waveRunRosterProblem(locked, registration.schemaVersion, task, run, issuance) === null &&
+        canonicalStructuralEquals(narrowingOf(run), narrowing) &&
         slotAuthority.every((slot, index) => run.slot_authority?.[index]?.slot_id === slot.slot_id) &&
         canonicalStructuralEquals(run.workspace_scope, bytes.scope) &&
         run.workspace_head_sha === (taskRun.workspaceHeadSha ?? taskRun.headSha) &&

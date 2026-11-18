@@ -25,7 +25,7 @@ import { WAVE_REVIEWER_PROTOCOL_V4 } from "./reviewer-contract";
 import { resetWaveGateReviewAuthority } from "./wave-gate-registration";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import { waveGateAuthorityDigest, waveRunRosterProblem } from "./wave-review-authority";
-import { registeredNarrowing } from "./wave-review-carry-plan";
+import { registeredIssuance } from "./wave-review-carry-plan";
 import { planRestartCarry, type RestartCarryObservation, type TaskNotCarried } from "./wave-review-carry";
 
 export type { RestartCarryObservation, TaskNotCarried } from "./wave-review-carry";
@@ -118,7 +118,7 @@ export function prepareExhaustedWaveGateRestart(
     const run = task.review_run;
     if (run === undefined) continue;
     if (run.head_sha !== epoch.batchEpoch ||
-        waveRunRosterProblem(graph, previous.schemaVersion, task, run, registeredNarrowing(previous, task.id)) !== null ||
+        waveRunRosterProblem(graph, previous.schemaVersion, task, run, registeredIssuance(previous, task.id)) !== null ||
         run.slot_authority === undefined) {
       return { ok: false, message: `task ${task.id} Review Packet is not bound to the active epoch and exact reviewer roster` };
     }

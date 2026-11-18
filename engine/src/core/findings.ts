@@ -61,7 +61,7 @@ import { isRecord } from "./plain-record";
 import { scopeCovers } from "./path-coverage";
 import { reviewerDraftV2Schema, reviewerPayloadV2Schema, parseWaveReviewerProtocolDescriptor } from "./reviewer-contract";
 import { acceptedSubjectDigest, parseSubjectDigest } from "./review-subject";
-import { narrowsRoster, parseReviewNarrowing } from "./review-narrowing";
+import { narrowingOf, narrowsRoster, parseReviewNarrowing, parseRoles } from "./review-narrowing";
 
 // The Finding/ReviewRun/Refutation SHAPES live in ./findings-shape — a leaf
 // volume of this concept (it imports only ./reviewer-contract), so the
@@ -86,7 +86,6 @@ import type {
   Refutation,
   RefutedFinding,
   ResolvedFinding,
-  ReviewNarrowing,
   ReviewRun,
   ReviewRunEvidence,
 } from "./findings-shape";
@@ -597,11 +596,8 @@ function parseStoredResolution(raw: unknown): ResolvedFinding | null {
 
 /** A resolution's stored `narrowed_from`, or null unless `expectedAgents` narrows it (ADR-0093). */
 function parseNarrowedFrom(raw: unknown, expectedAgents: readonly string[]): readonly [string, ...string[]] | null {
-  if (!Array.isArray(raw) || raw.some((agent) => typeof agent !== "string" || agent.trim() === "")) return null;
-  const [first, ...rest] = raw as string[];
-  return first !== undefined && new Set(raw).size === raw.length && narrowsRoster(raw as string[], expectedAgents)
-    ? [first, ...rest]
-    : null;
+  const from = parseRoles(raw);
+  return from !== null && narrowsRoster(from, expectedAgents) ? from : null;
 }
 
 /**
@@ -1578,10 +1574,6 @@ type RetirementVote = Readonly<{ agent: string; verdict: PriorFindingVerdict; re
 /** Whether the votes came from a run's whole derived roster or a narrowed part of it (ADR-0093). */
 export type RetirementRoster = "whole" | "narrowed";
 
-/** How a Review Run's roster was narrowed (ADR-0093); undefined for a whole roster or a legacy run. */
-const narrowingOf = (run: ReviewRun): ReviewNarrowing | undefined =>
-  run.reviewer_protocol === undefined ? undefined : run.narrowing;
-
 /**
  * Whether one prior finding retires on a complete roster's assessments.
  *
@@ -1684,8 +1676,11 @@ function finalizeReviewRun(task: Task, run: ReviewRun): Task {
     : { subject_digest: acceptedSubjectDigest(run.subject_digest, { findings: active, refuted_findings: task.refuted_findings }) };
   // A narrowed run's acceptance says so (ADR-0093), so no later run reads it as a whole-roster review.
   const narrowing = narrowingOf(run);
+  // A new acceptance is the Task's Review Basis from now on; the basis a
+  // reopening kept is superseded and goes, so the two never sit side by side.
+  const { review_basis: _superseded, ...unbased } = task;
   return {
-    ...task,
+    ...(run.workspace_scope === undefined ? task : unbased),
     review_status: active.some((finding) => finding.severity === "critical") ? "blocked" : "passed",
     review_error: undefined,
     review_evidence_failures: undefined,

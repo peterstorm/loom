@@ -38,7 +38,7 @@ import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../.
 import { captureHarnessResult } from "../../../../src/orchestration/harness-capture-runtime";
 import { parseTaskGraph, StateManager } from "../../../../src/state-manager";
 import { disposeFixturePiSessions, withFixturePiSession } from "../../../fixtures/pi-session";
-import type { DraftFinding, Finding, Task, TaskGraph } from "../../../../src/types";
+import type { CurrentReviewRun, DraftFinding, Finding, Task, TaskGraph } from "../../../../src/types";
 import { supersedeAbandonedWaveGateReview } from "../../../../src/core/wave-gate-registration";
 import type { RegisteredWaveGateProgram } from "../../../../src/core/wave-gate-program";
 import { observeRestartCarry } from "../../../../src/handlers/helpers/programs/wave-gate-replacement";
@@ -208,7 +208,7 @@ async function legacyPrefix(p: ReturnType<typeof project>) {
     authorityDigest: waveGateAuthorityDigest(1, ["T1"], initial) };
   value(await handle.registerProgram(registered));
   await manager.registerActiveWaveGate({ schemaVersion: 1, kind: "active-wave-gate", runId: handle.runId, wave: 1,
-    authorityDigest: registered.authorityDigest, revision: 0, terminalOutcome: null, runsRoot: p.runsRoot }, ["T1"]);
+    authorityDigest: registered.authorityDigest, revision: 0, terminalOutcome: null, runsRoot: p.runsRoot }, { taskIds: ["T1"] });
   return withFixturePiSession(p.root, async () => {
     const batch = waveRequests(
       handle,
@@ -237,7 +237,7 @@ async function registeredPrefix(p: ReturnType<typeof project>, reviewerProtocol:
     authorityDigest: waveGateAuthorityDigest(1, taskIds, manager.load()) };
   value(await handle.registerProgram(registered));
   await manager.registerActiveWaveGate({ schemaVersion: 1, kind: "active-wave-gate", runId: handle.runId, wave: 1,
-    authorityDigest: registered.authorityDigest, revision: 0, terminalOutcome: null, runsRoot: p.runsRoot }, taskIds);
+    authorityDigest: registered.authorityDigest, revision: 0, terminalOutcome: null, runsRoot: p.runsRoot }, { taskIds: taskIds });
   const action = await resume(p, handle);
   expect(action.kind, JSON.stringify(action)).toBe("spawn-batch");
   return { handle, action };
@@ -1179,15 +1179,32 @@ describe("a fresh Wave Gate start carries unchanged Tasks' accepted reviews", ()
     const next = value(openRunDirectory(p.runsRoot, "run.second"));
     const first = registration(value(openRunDirectory(p.runsRoot, "run.first")));
     const basis = graph(p).tasks[4]!.review_basis!;
-    expect(registration(next).narrowedReviews).toEqual([{ taskId: "T5", roster: ["comment-analyzer"], from: BASE_WAVE_REVIEW_AGENTS,
-      change: ["comment"], basis: { runId: "run.first", authorityDigest: first.authorityDigest, packetId: basis.packet_id, headSha: basis.head_sha } }]);
+    const review = { taskId: "T5", roster: ["comment-analyzer"], from: BASE_WAVE_REVIEW_AGENTS,
+      change: ["comment"], basis: { runId: "run.first", authorityDigest: first.authorityDigest, packetId: basis.packet_id, headSha: basis.head_sha } };
+    expect(registration(next).narrowedReviews).toEqual([review]);
+    // The report and the registration are read from one plan.
     expect(reportedLines(started.stderr)).toContainEqual({ kind: "wave-gate-start-roster", runId: "run.second", rosters: [
       ...["T1", "T2", "T3", "T4"].map((taskId) => ({ taskId, kind: "carried" })),
-      { taskId: "T5", kind: "narrowed", roster: ["comment-analyzer"], change: ["comment"] },
+      { taskId: "T5", kind: "narrowed", review },
       { taskId: "T6", kind: "carried" },
     ] });
+    // Slot membership refuses the narrowed run once its recorded narrowing is missing or inconsistent with its roster.
+    const membership = (state: TaskGraph) => {
+      const context = readWaveReviewContext([value(next.readContext(comment!.authority.contextDigest))], comment!.authority.contextDigest);
+      if (context.kind !== "loaded") throw new Error("expected issued Wave context");
+      return waveReviewerSlotProblem(state, state.tasks[4]!, context.value, issuedWaveProtocol(next, registration(next), comment!.authority));
+    };
+    const withT5Run = (state: TaskGraph, change: (run: CurrentReviewRun) => CurrentReviewRun): TaskGraph =>
+      ({ ...state, tasks: state.tasks.map((task, index) => (index === 4 ? { ...task, review_run: change(task.review_run as CurrentReviewRun) } : task)) });
+    const [, comment] = action.requests!;
+    const installed = graph(p);
+    expect(membership(installed)).toBeNull();
+    const MISMATCH = "current reviewer protocol differs from protected workspace/request/context authority";
+    expect(membership(withT5Run(installed, ({ narrowing: _dropped, ...run }) => run as CurrentReviewRun))).toBe(MISMATCH);
+    expect(membership(withT5Run(installed, (run) => ({ ...run, narrowing: { ...run.narrowing!, from: ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS } }))))
+      .toBe(MISMATCH);
 
-    const [specCheck, comment] = action.requests!;
+    const [specCheck] = action.requests!;
     await capture(next, specCheck!.authority, specPass);
     await capture(next, comment!.authority, payload(next, comment!.authority));
     const awaiting = await resume(p, next);
@@ -1279,7 +1296,7 @@ describe("a fresh Wave Gate start carries unchanged Tasks' accepted reviews", ()
       input: { wave: 1 }, taskIds, authorityDigest: waveGateAuthorityDigest(1, taskIds, before), succession };
     value(await next.registerProgram(program));
     await new StateManager(p.statePath).registerActiveWaveGate({ schemaVersion: 1, kind: "active-wave-gate", runId: next.runId, wave: 1,
-      authorityDigest: program.authorityDigest, revision: 0, runsRoot: next.identity.runsRoot, terminalOutcome: null }, taskIds, succession);
+      authorityDigest: program.authorityDigest, revision: 0, runsRoot: next.identity.runsRoot, terminalOutcome: null }, { taskIds, succession });
     writeFileSync(join(p.root, fileOfTask("T1")), "export const t1 = 'edited after the start';\n");
     const installed = readFileSync(p.statePath);
     expect(await resume(p, next)).toMatchObject({ kind: "blocked", diagnostic: { message:

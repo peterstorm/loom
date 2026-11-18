@@ -62,7 +62,8 @@ union; any code, scope or context change, or a basis that cannot be read and
 verified, gets the full roster. The owner of every prior Finding the Task is
 issued is always added. `start` names each reviewed Task's roster, and why, in
 one `wave-gate-start-roster` JSON line on stderr. `--fresh-review` narrows
-nothing.
+nothing. If a narrowed Task's derived roster moves after the start, it is
+reviewed in full and a `wave-gate-narrowing-widened` JSON line names it.
 
 Execute only the one typed action returned by `start`, `resume`, or `decide`:
 

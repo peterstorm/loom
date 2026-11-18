@@ -21,11 +21,11 @@ import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type
 import { parseWaveReviewerProtocolDescriptor, type ReviewerProtocolDescriptor } from "./reviewer-contract";
 import {
   issuedRoles,
-  issuedWaveTaskRoster,
+  issuedTaskReview,
   registeredCarry,
-  registeredNarrowing,
+  registeredIssuance,
   waveReviewCarryOf,
-  type RosterNarrowing,
+  type TaskIssuance,
 } from "./wave-review-carry-plan";
 import type { RegisteredReviewerProtocol, WaveReviewIssuancePlan } from "./wave-gate-program";
 import type { SubjectDigest } from "./findings-shape";
@@ -475,22 +475,24 @@ export type WaveRunRosterProblem =
 /**
  * The one roster-versus-persisted-run check. Slot membership, exhausted-run
  * restart, the locked install's replay and reviewer retries all ask this, so
- * a run settles only with the roster the engine issues it now: the derived
- * roster narrowed as `narrowing` states (ADR-0093). A caller holding the
- * registration passes its narrowed review of the Task; slot membership,
- * which holds only the installed run, passes the run's own (the epoch the
- * run is bound to commits to the registration's).
+ * a run settles only with the roster the engine issues it now: the review
+ * `issuance` makes of the derived roster (`issuedTaskReview`, ADR-0093). A
+ * caller holding the registration passes `registeredIssuance`; slot
+ * membership, which holds only the installed run, passes `runIssuance` (the
+ * epoch the run is bound to commits to the registration's). A run whose
+ * recorded narrowing is missing or does not fit its roster is compared with
+ * the whole roster, and so refused.
  */
 export function waveRunRosterProblem(
   graph: TaskGraph,
   schemaVersion: 1 | 2,
   task: Task,
   run: Pick<ReviewRun, "expected_agents" | "slot_authority">,
-  narrowing: RosterNarrowing | undefined,
+  issuance: TaskIssuance,
 ): WaveRunRosterProblem | null {
   const review = waveTaskReview(graph, schemaVersion, task, run);
   if (review.kind === "exempt") return Object.freeze({ kind: "task-exempt", taskId: task.id, exemption: review });
-  const roster = issuedWaveTaskRoster(review.roster, narrowing);
+  const { roster } = issuedTaskReview(review.roster, issuance);
   if (!canonicalStructuralEquals(run.expected_agents, roster)) {
     return Object.freeze({ kind: "expected-agents-differ", taskId: task.id, roster });
   }
@@ -529,8 +531,27 @@ export function issuedWaveReviewRosters(
   const carry = registeredCarry(plan);
   if (carry === undefined && plan.narrowedReviews === undefined) return rosters;
   return Object.freeze(rosters.flatMap(({ taskId, roster }): readonly WaveTaskIssuedRoles[] => {
-    const issued = issuedRoles(issuedWaveTaskRoster(roster, registeredNarrowing(plan, taskId)), waveReviewCarryOf(carry, taskId));
+    const issued = issuedRoles<WaveReviewRole>(issuedTaskReview(roster, registeredIssuance(plan, taskId)).roster, waveReviewCarryOf(carry, taskId));
     return isNonEmpty(issued) ? [Object.freeze({ taskId, roster: issued })] : [];
+  }));
+}
+
+/** One registered narrowing a Task's derived roster no longer fits, so the Task is reviewed in full. */
+export type WidenedNarrowing = Readonly<{ taskId: string; from: readonly string[]; derived: WaveReviewRoster }>;
+
+/**
+ * Every narrowed review `plan` registered whose Task is now issued its whole
+ * roster (ADR-0093): the shell reports each one, so a voided narrowing is
+ * never silent. A Task the graph no longer holds or that owes no review is
+ * left to the batch's own refusal.
+ */
+export function widenedNarrowings(graph: TaskGraph, schemaVersion: 1 | 2, plan: WaveReviewIssuancePlan): readonly WidenedNarrowing[] {
+  return Object.freeze((plan.narrowedReviews ?? []).flatMap(({ taskId }): readonly WidenedNarrowing[] => {
+    const task = graph.tasks.find(({ id }) => id === taskId);
+    const review = task === undefined ? null : waveTaskReviewRoster(graph, schemaVersion, task);
+    if (review === null || review.kind !== "roster") return [];
+    const issued = issuedTaskReview(review.roster, registeredIssuance(plan, taskId));
+    return issued.kind === "widened" ? [Object.freeze({ taskId, from: issued.narrowing.from, derived: review.roster })] : [];
   }));
 }
 
@@ -1135,10 +1156,13 @@ export function coverageTasks(graph: TaskGraph, currentWave: number): readonly C
 
 /**
  * Why a narrowed Task's batch would issue a prior Finding to a roster that
- * lacks its owner, or null (ADR-0093). The start chose the narrowed roles with
- * the owners of the priors it saw; a prior added since (none can be, while no
- * Review Run is installed) would retire on no owner's vote, so the batch is
- * refused rather than issued.
+ * lacks its owner, or null (ADR-0093). In a narrowed run a prior Finding
+ * retires only on its owner's vote, so a Finding whose owner is on the derived
+ * roster but not issued could never retire in this run, however every issued
+ * reviewer assessed it: the start chose the roles with the owners of the priors
+ * it saw, and a batch that would leave one owner-less is refused rather than
+ * issued. A Finding whose owner is on no roster (a recovered view claim, an
+ * operator override) carries forward, as the role table intends.
  */
 function narrowedOwnerProblem(
   graph: TaskGraph,
@@ -1147,10 +1171,11 @@ function narrowedOwnerProblem(
   plan: WaveReviewIssuancePlan,
 ): string | null {
   for (const { task, workspace } of admitted) {
-    const narrowing = registeredNarrowing(plan, task.id);
     const derived = derivations.find(({ taskId }) => taskId === task.id)?.roster;
-    if (narrowing === undefined || derived === undefined) continue;
-    const roles: readonly string[] = issuedWaveTaskRoster(derived, narrowing);
+    if (derived === undefined) continue;
+    const issued = issuedTaskReview(derived, registeredIssuance(plan, task.id));
+    if (issued.kind !== "narrowed") continue;
+    const roles: readonly string[] = issued.roster;
     const unissued = waveReviewPriorFindings(graph, task, workspace.artifacts, "installed").findings
       .find(({ agent }) => (derived as readonly string[]).includes(agent) && !roles.includes(agent));
     if (unissued !== undefined) {

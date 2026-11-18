@@ -21,6 +21,7 @@
 
 import type { Phase } from "./phases";
 import { frozenSet } from "./frozen";
+import { narrowsRoster } from "./review-narrowing";
 import { AGENT_CATALOG, AGENT_POLICIES, type AgentKind, type AgentPolicy, type LoomAgentName } from "./model-profiles";
 
 /** Does this catalog Agent require same-turn user interaction in Pi? */
@@ -181,7 +182,8 @@ declare const NARROWED_WAVE_REVIEW_ROSTER: unique symbol;
 /**
  * A proper, non-empty part of a derived Wave review roster, in that roster's
  * order (ADR-0093): the roles a re-reviewed Task's change needs. Minted only by
- * `issuedWaveReviewRoster`, which proves the subsequence.
+ * `narrowedWaveReviewRoster` and `parseNarrowedWaveReviewRoster`, which prove
+ * the subsequence (`narrowsRoster`).
  */
 export type NarrowedWaveReviewRoster = readonly [WaveReviewRole, ...WaveReviewRole[]] & {
   readonly [NARROWED_WAVE_REVIEW_ROSTER]: true;
@@ -195,16 +197,12 @@ export type NarrowedWaveReviewRoster = readonly [WaveReviewRole, ...WaveReviewRo
 export type IssuedWaveReviewRoster = WaveReviewRoster | NarrowedWaveReviewRoster;
 
 /**
- * The roster `derived` issues when only the roles in `keep` are needed: the
- * derived roster itself when `keep` covers it or names none of it, otherwise
- * the roles of `derived` that `keep` names, in roster order. Roster order is
- * kept so each role keeps its slot index.
+ * The narrowed part of `derived` naming only the roles in `keep`, in roster
+ * order so each role keeps its slot index; null when `keep` covers the whole
+ * roster or none of it, either of which issues the whole roster.
  */
-export function issuedWaveReviewRoster(derived: WaveReviewRoster, keep: readonly string[]): IssuedWaveReviewRoster {
-  const kept = derived.filter((role) => keep.includes(role));
-  const [first, ...rest] = kept;
-  if (first === undefined || kept.length === derived.length) return derived;
-  return Object.freeze([first, ...rest]) as unknown as NarrowedWaveReviewRoster;
+export function narrowedWaveReviewRoster(derived: WaveReviewRoster, keep: readonly string[]): NarrowedWaveReviewRoster | null {
+  return parseNarrowedWaveReviewRoster(derived, derived.filter((role) => keep.includes(role)));
 }
 
 /**
@@ -212,10 +210,7 @@ export function issuedWaveReviewRoster(derived: WaveReviewRoster, keep: readonly
  * a proper, non-empty, ordered subsequence of `derived` without repeats.
  */
 export function parseNarrowedWaveReviewRoster(derived: WaveReviewRoster, roles: readonly string[]): NarrowedWaveReviewRoster | null {
-  const issued = issuedWaveReviewRoster(derived, roles);
-  return issued !== derived && issued.length === roles.length && issued.every((role, index) => role === roles[index])
-    ? issued as NarrowedWaveReviewRoster
-    : null;
+  return narrowsRoster(derived, roles) ? Object.freeze([...roles]) as unknown as NarrowedWaveReviewRoster : null;
 }
 
 /**

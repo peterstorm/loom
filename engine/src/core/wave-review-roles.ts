@@ -16,13 +16,12 @@ import type { Task, TaskGraph } from "../types";
 import { BASE_WAVE_REVIEW_AGENTS, type WaveReviewRoster } from "./agent-catalog-projections";
 import type { ContextPacket } from "./context-packets";
 import { CONTRACT_SURFACE_ROLES, CONTRACT_SURFACE_SECTION, renderContractSurfaceSection } from "./contract-surface-section";
-import type { CurrentAcceptedReviewAuthority, NarrowingChangeClass } from "./findings-shape";
+import type { CurrentAcceptedReviewAuthority } from "./findings-shape";
 import { canonicalStructuralEquals, isNonEmpty, type DomainResult, type NonEmpty } from "./orchestration-contract";
 import { OWNER_MAP_ROLES, OWNER_MAP_SECTION, renderOwnerMapSection } from "./owner-verification/owner-map";
 import { frozenRedThenGreenEra } from "./proof-obligations";
 import {
   classifyReviewChange,
-  narrowingClassesOf,
   selectReviewRoles,
   type ReviewChange,
   type ReviewChangeSide,
@@ -31,7 +30,7 @@ import {
   type ReviewFileContent,
   type SectionFact,
 } from "./review-change";
-import { reviewBasisOf } from "./review-narrowing";
+import { basisAuthorityOf, reviewBasisOf } from "./review-narrowing";
 import { admitReviewedWorkspace, type ReviewedWorkspaceObservation } from "./reviewed-workspace";
 import { DEFAULT_TEST_FILE_SUFFIXES } from "./test-file-classification";
 import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION, type WaveFrozenSource } from "./wave-frozen-source";
@@ -137,27 +136,57 @@ export type FullRosterReason =
   | Readonly<{ kind: "basis-mismatch"; detail: string }>
   | Readonly<{ kind: "change"; change: ReviewChange }>;
 
-/** The roster one reviewed Task is issued, and why. */
+/**
+ * The roster one reviewed Task is issued, and why: carried (none), its whole
+ * derived roster with the reason, or narrowed, with the review the
+ * registration freezes. The start's report and its registration are both
+ * read from these choices, so they cannot disagree.
+ */
 export type TaskRosterChoice =
   | Readonly<{ taskId: string; kind: "carried" }>
   | Readonly<{ taskId: string; kind: "full"; roster: WaveReviewRoster; reason: FullRosterReason }>
-  | Readonly<{ taskId: string; kind: "narrowed"; roster: NonEmpty<string>; change: NonEmpty<NarrowingChangeClass> }>;
+  | Readonly<{ taskId: string; kind: "narrowed"; review: NarrowedTaskReview }>;
 
-/** A start's roster plan: what it freezes, and what it reports. */
-export type ReviewRolesPlan = Readonly<{
-  narrowedReviews: NonEmpty<NarrowedTaskReview> | undefined;
-  rosters: readonly TaskRosterChoice[];
-}>;
+/** A start's roster plan: one choice per reviewed registered Task, in registration order. */
+export type ReviewRolesPlan = readonly TaskRosterChoice[];
 
-export type ReviewRolesInput = Readonly<{
+/** The narrowed reviews a start's plan freezes into its registration; undefined when none narrows. */
+export function narrowedReviewsOf(plan: ReviewRolesPlan): NonEmpty<NarrowedTaskReview> | undefined {
+  const narrowed = plan.flatMap((choice) => (choice.kind === "narrowed" ? [choice.review] : []));
+  return isNonEmpty(narrowed) ? Object.freeze(narrowed) : undefined;
+}
+
+/** What decides whether a start reads a Task's basis: the Tasks it carries, and `--fresh-review`. */
+export type BasisReadOptions = Readonly<{ carried: ReadonlySet<string>; freshReview: boolean }>;
+
+/**
+ * Whether a start consults `task`'s Review Basis (ADR-0093), the one rule the
+ * shell's packet reads and the plan both follow:
+ * - `carried`: the Successor Carry carries the Task, so it is never narrowed;
+ * - `full`: it is reviewed in full without reading a basis, and why;
+ * - `consult`: the basis whose packets decide its roster.
+ */
+export type BasisRead =
+  | Readonly<{ kind: "carried" }>
+  | Readonly<{ kind: "full"; reason: Extract<FullRosterReason, { kind: "fresh-review" | "review-unsettled" | "no-basis" }> }>
+  | Readonly<{ kind: "consult"; basis: CurrentAcceptedReviewAuthority }>;
+
+/** The one basis-read predicate (see `BasisRead`). */
+export function basisReadOf(task: Task, options: BasisReadOptions): BasisRead {
+  if (options.carried.has(task.id)) return Object.freeze({ kind: "carried" });
+  if (options.freshReview) return Object.freeze({ kind: "full", reason: Object.freeze({ kind: "fresh-review" }) });
+  if (task.review_run !== undefined) return Object.freeze({ kind: "full", reason: Object.freeze({ kind: "review-unsettled" }) });
+  const basis = reviewBasisOf(task);
+  return basis === undefined
+    ? Object.freeze({ kind: "full", reason: Object.freeze({ kind: "no-basis" }) })
+    : Object.freeze({ kind: "consult", basis });
+}
+
+export type ReviewRolesInput = BasisReadOptions & Readonly<{
   graph: TaskGraph;
   taskIds: readonly string[];
-  /** The Tasks the start's Successor Carry carries (ADR-0091): never narrowed. */
-  carried: ReadonlySet<string>;
-  /** `--fresh-review`: issue every reviewed Task in full. */
-  freshReview: boolean;
   workspaces: readonly ReviewedWorkspaceObservation[];
-  /** Each Task's basis as the shell read it; a Task with no basis has no entry. */
+  /** Each consulted Task's basis as the shell read it (`basisReadOf`). */
   bases: ReadonlyMap<string, BasisObservation>;
 }>;
 
@@ -266,41 +295,30 @@ function basisMismatch(task: Task, basis: CurrentAcceptedReviewAuthority, view: 
     : "the basis frozen source is not the accepted scope";
 }
 
-/** The roster one reviewed, uncarried Task is issued, and why. */
-function taskChoice(input: ReviewRolesInput, task: Task, review: DerivedWaveTaskReview): Readonly<{
-  choice: TaskRosterChoice;
-  narrowed?: NarrowedTaskReview;
-}> {
+/** The roster a consulted Task is issued from its read basis, and why. */
+function consultedChoice(
+  input: ReviewRolesInput,
+  task: Task,
+  review: DerivedWaveTaskReview,
+  basis: CurrentAcceptedReviewAuthority,
+): TaskRosterChoice {
   const { graph } = input;
   const derived = review.roster;
-  if (input.freshReview) return { choice: full(task, derived, { kind: "fresh-review" }) };
-  if (task.review_run !== undefined) return { choice: full(task, derived, { kind: "review-unsettled" }) };
-  const basis = reviewBasisOf(task);
   const read = input.bases.get(task.id);
-  if (basis === undefined || read === undefined) return { choice: full(task, derived, { kind: "no-basis" }) };
-  if (!read.ok) return { choice: full(task, derived, { kind: "basis-unreadable", error: read.error }) };
+  if (read === undefined) return full(task, derived, { kind: "no-basis" });
+  if (!read.ok) return full(task, derived, { kind: "basis-unreadable", error: read.error });
   const mismatch = basisMismatch(task, basis, read.value);
-  if (mismatch !== null) return { choice: full(task, derived, { kind: "basis-mismatch", detail: mismatch }) };
+  if (mismatch !== null) return full(task, derived, { kind: "basis-mismatch", detail: mismatch });
   const observation = input.workspaces.find(({ taskId }) => taskId === task.id);
   const workspace = observation === undefined ? null : admitReviewedWorkspace(task.id, taskReviewScope(task), observation);
-  if (workspace === null || !workspace.ok) return { choice: full(task, derived, { kind: "workspace-unobserved" }) };
-  const change = classifyReviewChange(
-    beforeSide(read.value, basis),
-    afterSide(graph, task, review, workspace.value),
-    testFileSuffixesOf(graph),
-  );
+  if (workspace === null || !workspace.ok) return full(task, derived, { kind: "workspace-unobserved" });
+  const change = classifyReviewChange(beforeSide(read.value, basis), afterSide(graph, task, review, workspace.value), testFileSuffixesOf(graph));
   const owners = waveReviewPriorFindings(graph, task, workspace.value.artifacts, "fresh").findings.map(({ agent }) => agent);
-  const roster = selectReviewRoles(derived, change, owners);
-  const classes = narrowingClassesOf(change);
-  if (roster === derived || classes === null) return { choice: full(task, derived, { kind: "change", change }) };
-  const narrowed: NarrowedTaskReview = Object.freeze({
-    taskId: task.id,
-    roster,
-    from: derived,
-    change: classes,
-    basis: Object.freeze({ runId: basis.run_id, authorityDigest: basis.authority_digest, packetId: basis.packet_id, headSha: basis.head_sha }),
-  });
-  return { choice: Object.freeze({ taskId: task.id, kind: "narrowed", roster, change: classes }), narrowed };
+  const selection = selectReviewRoles(derived, change, owners);
+  if (selection.kind === "whole") return full(task, derived, { kind: "change", change });
+  return Object.freeze({ taskId: task.id, kind: "narrowed", review: Object.freeze({
+    taskId: task.id, roster: selection.roster, from: derived, change: selection.change, basis: basisAuthorityOf(basis),
+  }) });
 }
 
 /**
@@ -309,23 +327,13 @@ function taskChoice(input: ReviewRolesInput, task: Task, review: DerivedWaveTask
  * needs. A Task exempt from Wave review contributes nothing.
  */
 export function planReviewRoles(input: ReviewRolesInput): ReviewRolesPlan {
-  const rosters: TaskRosterChoice[] = [];
-  const narrowed: NarrowedTaskReview[] = [];
-  for (const taskId of input.taskIds) {
+  return Object.freeze(input.taskIds.flatMap((taskId): readonly TaskRosterChoice[] => {
     const task = input.graph.tasks.find(({ id }) => id === taskId);
-    if (task === undefined || waveReviewStanding(task).kind === "exempt") continue;
-    if (input.carried.has(taskId)) {
-      rosters.push(Object.freeze({ taskId, kind: "carried" }));
-      continue;
-    }
+    if (task === undefined || waveReviewStanding(task).kind === "exempt") return [];
+    const read = basisReadOf(task, input);
+    if (read.kind === "carried") return [Object.freeze({ taskId, kind: "carried" })];
     const review = derivedWaveTaskReview(input.graph, 2, task);
-    if (review.kind !== "roster") continue;
-    const decided = taskChoice(input, task, review);
-    rosters.push(decided.choice);
-    if (decided.narrowed !== undefined) narrowed.push(decided.narrowed);
-  }
-  return Object.freeze({
-    narrowedReviews: isNonEmpty(narrowed) ? Object.freeze(narrowed) : undefined,
-    rosters: Object.freeze(rosters),
-  });
+    if (review.kind !== "roster") return [];
+    return [read.kind === "full" ? full(task, review.roster, read.reason) : consultedChoice(input, task, review, read.basis)];
+  }));
 }

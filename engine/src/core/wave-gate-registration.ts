@@ -25,8 +25,8 @@ import { canonicalRecord, canonicalStructuralEquals } from "./orchestration-cont
 import { appendRetiredWaveReviewRun } from "./retired-wave-review-runs";
 import { reconcileWaveBlock } from "./wave-gate-model";
 import type { NarrowedTaskReview, WaveGateSuccessionAudit } from "./wave-gate-program";
-import { reviewBasisOf } from "./review-narrowing";
-import { waveGateAuthorityDigest } from "./wave-review-authority";
+import { holdsBasis } from "./review-narrowing";
+import { derivedWaveTaskReview, waveGateAuthorityDigest } from "./wave-review-authority";
 
 /** The registration identity the admission compares against protected state. */
 export type WaveGateRegistrationCandidate = Readonly<{
@@ -184,39 +184,54 @@ function successionProblem(state: TaskGraph, wave: number, succession: WaveGateS
 }
 
 /**
- * Why `narrowed` cannot install over `state`, or null (ADR-0093): each Task a
- * start narrowed must still hold, as its Review Basis, exactly the acceptance
- * the narrowing was measured against.
+ * Why a registration's narrowed reviews cannot install over `state`, or null
+ * (ADR-0093). Each Task a start narrowed must still hold, as its Review Basis,
+ * exactly the acceptance the narrowing was measured against, and its derived
+ * roster must still be the one the narrowing was decided from: otherwise the
+ * batch would quietly review it in full against a registration that says it
+ * narrowed.
  */
 function narrowingProblem(state: TaskGraph, narrowed: readonly NarrowedTaskReview[]): string | null {
-  const stale = narrowed.find(({ taskId, basis }) => {
+  for (const { taskId, basis, from } of narrowed) {
     const task = state.tasks.find(({ id }) => id === taskId);
-    const held = task === undefined ? undefined : reviewBasisOf(task);
-    return held === undefined || held.run_id !== basis.runId || held.authority_digest !== basis.authorityDigest ||
-      held.packet_id !== basis.packetId || held.head_sha !== basis.headSha;
-  });
-  return stale === undefined
-    ? null
-    : `Wave Gate narrows Task ${stale.taskId}'s review against run ${stale.basis.runId}'s acceptance, which is no longer its Review Basis`;
+    if (task === undefined || !holdsBasis(task, basis)) {
+      return `Wave Gate narrows Task ${taskId}'s review against run ${basis.runId}'s acceptance, which is no longer its Review Basis`;
+    }
+    const review = derivedWaveTaskReview(state, 2, task);
+    if (review.kind !== "roster" || !canonicalStructuralEquals(review.roster, from)) {
+      return `Wave Gate narrows Task ${taskId}'s review from a roster its review no longer derives`;
+    }
+  }
+  return null;
 }
+
+/**
+ * What the locked install reads of the run's program registration: its
+ * published Tasks and the issuance plan it froze, its succession (ADR-0091)
+ * and its narrowed reviews (ADR-0093). Passing the registration itself is what
+ * keeps either check from being skipped by omission.
+ */
+export type WaveGateInstallProgram = Readonly<{
+  taskIds: readonly string[];
+  succession?: WaveGateSuccessionAudit;
+  narrowedReviews?: readonly NarrowedTaskReview[];
+}>;
 
 /**
  * The locked install: freshness, admission, abandoned-predecessor supersession
  * and the new active registration, decided together as one pure transition.
  * Only a fresh registration — revision 0, no terminal outcome — may install;
  * that refusal precedes admission, so a stale or terminal candidate is never
- * mistaken for an exact replay. A fresh start that carries accepted reviews
- * passes its `succession`, which must name the protected predecessor; one
- * that narrowed reviews passes its `narrowed` reviews, whose bases each Task
- * must still hold (ADR-0093).
+ * mistaken for an exact replay. A succession in `program` must name the
+ * protected predecessor; each narrowed review's Task must still hold its
+ * basis and derive the roster it was narrowed from (ADR-0093).
  */
 export function installWaveGateRegistration(
   state: TaskGraph,
   registration: ActiveWaveGateRegistration,
-  publishedTaskIds: readonly string[],
-  succession?: WaveGateSuccessionAudit,
-  narrowed: readonly NarrowedTaskReview[] = [],
+  program: WaveGateInstallProgram,
 ): WaveGateInstallDecision {
+  const { taskIds: publishedTaskIds, succession, narrowedReviews: narrowed = [] } = program;
   if (registration.revision !== 0 || registration.terminalOutcome !== null) {
     return canonicalRecord({
       kind: "refused",

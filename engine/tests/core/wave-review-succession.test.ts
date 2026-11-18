@@ -299,7 +299,7 @@ describe("the locked registration install checks a succession's provenance", () 
   };
   const taskIds = ["T1", "T2", "T3", "T4", "T5", "T6"];
   const install = (graph: TaskGraph, succession?: WaveGateSuccessionAudit) => installWaveGateRegistration(graph,
-    activeWaveGateFixture({ runId: "run.next", wave: 1, authorityDigest: waveGateAuthorityDigest(1, taskIds, graph) }), taskIds, succession);
+    activeWaveGateFixture({ runId: "run.next", wave: 1, authorityDigest: waveGateAuthorityDigest(1, taskIds, graph) }), { taskIds, succession });
 
   it("names the abandoned tombstone, else the Wave's latest retired run, as the predecessor", () => {
     expect(successionPredecessorOf(tombstoned(), 1)).toEqual(PREVIOUS);
@@ -330,7 +330,7 @@ describe("the locked registration install checks a succession's provenance", () 
   it("an install without a succession is exactly the install of before", () => {
     const graph = retiredWave();
     const registration = activeWaveGateFixture({ runId: "run.next", wave: 1, authorityDigest: waveGateAuthorityDigest(1, taskIds, graph) });
-    expect(installWaveGateRegistration(graph, registration, taskIds)).toEqual({ kind: "installed", state: { ...graph, active_wave_gate: registration }, registration });
+    expect(installWaveGateRegistration(graph, registration, { taskIds: taskIds })).toEqual({ kind: "installed", state: { ...graph, active_wave_gate: registration }, registration });
   });
 });
 

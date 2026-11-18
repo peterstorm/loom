@@ -16,9 +16,10 @@ import type { DomainResult } from '../../../core/orchestration-contract';
 import type { RegisteredWaveGateProgram, WaveGateSuccessionAudit } from '../../../core/wave-gate-program';
 import { waveGateAuthorityDigest, waveReviewView } from '../../../core/wave-review-authority';
 import { planSuccessorCarry, type TaskNotCarried } from '../../../core/wave-review-carry';
-import { reviewBasisOf } from '../../../core/review-narrowing';
 import {
   basisPacketView,
+  basisReadOf,
+  narrowedReviewsOf,
   planReviewRoles,
   type BasisObservation,
   type BasisPacket,
@@ -123,9 +124,9 @@ function loadBasisPackets(runsRoot: string, runId: string): DomainResult<readonl
 
 /**
  * The roster each reviewed Task of a fresh start is issued (ADR-0093): the
- * shell reads each uncarried Task's Review Basis packets from the basis run's
- * Run Directory and the reviewed workspaces, and the pure `planReviewRoles`
- * decides. A carried Task is never narrowed.
+ * shell reads the basis packets of each Task `basisReadOf` consults from the
+ * basis run's Run Directory, and the reviewed workspaces, and the pure
+ * `planReviewRoles` decides. A carried Task is never narrowed.
  */
 function reviewRolesOf(
   graph: TaskGraph,
@@ -139,8 +140,9 @@ function reviewRolesOf(
   const runs = new Map<string, DomainResult<readonly BasisPacket[], string>>();
   const bases = new Map<string, BasisObservation>();
   for (const task of reviewed) {
-    const basis = reviewBasisOf(task);
-    if (options.freshReview || carried.has(task.id) || task.review_run !== undefined || basis === undefined) continue;
+    const read = basisReadOf(task, { carried, freshReview: options.freshReview });
+    if (read.kind !== "consult") continue;
+    const { basis } = read;
     const packets = runs.get(basis.run_id) ?? loadBasisPackets(runsRoot, basis.run_id);
     runs.set(basis.run_id, packets);
     bases.set(task.id, packets.ok
@@ -205,7 +207,8 @@ export function prepareWaveGateFacadeStart(
       }
     }
     const { succession, notCarried } = successorCarryOf(graph, wave, taskIds, destination.value.runsRoot, options);
-    const { narrowedReviews, rosters } = reviewRolesOf(graph, taskIds, destination.value.runsRoot, succession, options);
+    const rosters = reviewRolesOf(graph, taskIds, destination.value.runsRoot, succession, options);
+    const narrowedReviews = narrowedReviewsOf(rosters);
     const fresh = {
       schemaVersion: 2, reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4, kind: "wave-gate", input: Object.freeze({ wave }),
       taskIds, authorityDigest,
@@ -278,7 +281,7 @@ export async function startWaveGateFacade(
       revision: 0,
       runsRoot: handle.identity.runsRoot,
       terminalOutcome: null,
-    }, registration.taskIds, registration.succession, registration.narrowedReviews ?? []);
+    }, registration);
     reportNotCarried(handle.runId, prepared.notCarried);
     reportRosters(handle.runId, prepared.rosters);
     return resumeWaveGateFacade(handle, registration);

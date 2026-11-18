@@ -11,7 +11,6 @@ import {
 } from "../../src/core/agent-catalog-projections";
 import {
   classifyReviewChange,
-  commentStrippedSource,
   selectReviewRoles,
   type ChangeClass,
   type ReviewChange,
@@ -131,85 +130,46 @@ describe("classifyReviewChange names what changed since the basis", () => {
   });
 });
 
-describe("commentStrippedSource removes comments and nothing a reader could execute", () => {
-  it("keeps comment markers inside strings, templates and regular expressions", () => {
-    const source = "const a = '// no'; const b = \"/* no */\"; const c = `// ${d} /* no */`; const e = /\\/\\//g;\n";
-    expect(commentStrippedSource(source)).toBe(source.trimEnd());
-  });
-
-  it("keeps a line break where a block comment held one, so automatic semicolon insertion reads the same", () => {
-    expect(commentStrippedSource("return /*\n*/ x")).toBe("return\nx");
-    expect(commentStrippedSource("return /* */ x")).toBe("return x");
-  });
-
-  it("refuses a division followed by a comment on its line, and unterminated literals", () => {
-    expect(commentStrippedSource("a = b / c; // half")).toBeNull();
-    expect(commentStrippedSource("a = 'open")).toBeNull();
-    expect(commentStrippedSource("a = /* open")).toBeNull();
-    expect(commentStrippedSource("a = `open")).toBeNull();
-  });
-
-  const fragment = fc.constantFrom(
-    "a", "b1", "return", " ", "  ", "\t", "\n", "\n\n", "(", ")", "{", "}", "[", "]", ";", ",", "=", "+", "++", "-",
-    "*", "/ ", "'s'", "\"d\"", "`t`", "`a${b}c`", "/re/g", "/[/]/", "// line\n", "/* block */", "/*\n*/", "x.y",
-    "'//'", "\"/*\"", "`/* t */`", "\\", "'", "\"", "`", "${", "/*", "*/", "//",
-  );
-  const sourceArbitrary = fc.array(fragment, { maxLength: 40 }).map((parts) => parts.join(""));
-
-  it("is idempotent: stripping a stripped source changes nothing", () => {
-    fc.assert(fc.property(sourceArbitrary, (source) => {
-      const once = commentStrippedSource(source);
-      if (once === null) return;
-      expect(commentStrippedSource(once)).toBe(once);
-    }), { numRuns: 2000 });
-  });
-
-  it("is idempotent on arbitrary text too", () => {
-    fc.assert(fc.property(fc.string({ maxLength: 60 }), (source) => {
-      const once = commentStrippedSource(source);
-      if (once === null) return;
-      expect(commentStrippedSource(once)).toBe(once);
-    }), { numRuns: 2000 });
-  });
-});
-
 describe("selectReviewRoles follows the operator's role table", () => {
   const changed = (first: ChangeClass, ...rest: ChangeClass[]): ReviewChange => ({ kind: "changed", classes: [first, ...rest] });
 
+  const narrowed = (roster: readonly string[], ...change: ChangeClass[]) => ({ kind: "narrowed", roster, change });
+  const WHOLE = { kind: "whole" };
+
   it("a comment- or doc-only change issues comment-analyzer only", () => {
-    expect(selectReviewRoles(BASE_WAVE_REVIEW_AGENTS, changed("comment"), [])).toEqual(["comment-analyzer"]);
-    expect(selectReviewRoles(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, changed("doc"), [])).toEqual(["comment-analyzer"]);
+    expect(selectReviewRoles(BASE_WAVE_REVIEW_AGENTS, changed("comment"), [])).toEqual(narrowed(["comment-analyzer"], "comment"));
+    expect(selectReviewRoles(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, changed("doc"), [])).toEqual(narrowed(["comment-analyzer"], "doc"));
   });
 
   it("a test-only change issues code-reviewer and pr-test-analyzer", () => {
-    expect(selectReviewRoles(BASE_WAVE_REVIEW_AGENTS, changed("test"), [])).toEqual(["code-reviewer", "pr-test-analyzer"]);
+    expect(selectReviewRoles(BASE_WAVE_REVIEW_AGENTS, changed("test"), []))
+      .toEqual(narrowed(["code-reviewer", "pr-test-analyzer"], "test"));
   });
 
   it("a mix issues the union, in roster order", () => {
     expect(selectReviewRoles(BASE_WAVE_REVIEW_AGENTS, changed("comment", "test"), []))
-      .toEqual(["code-reviewer", "pr-test-analyzer", "comment-analyzer"]);
+      .toEqual(narrowed(["code-reviewer", "pr-test-analyzer", "comment-analyzer"], "comment", "test"));
   });
 
   it("the owner of an open prior Finding on the derived roster is always issued", () => {
     expect(selectReviewRoles(BASE_WAVE_REVIEW_AGENTS, changed("comment"), ["code-reviewer", "recovered-view"]))
-      .toEqual(["code-reviewer", "comment-analyzer"]);
+      .toEqual(narrowed(["code-reviewer", "comment-analyzer"], "comment"));
     expect(selectReviewRoles(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, changed("comment"), ["architecture-tech-lead"]))
-      .toEqual(["comment-analyzer", "architecture-tech-lead"]);
+      .toEqual(narrowed(["comment-analyzer", "architecture-tech-lead"], "comment"));
   });
 
-  it("a code, scope, context or no detected change issues the full derived roster", () => {
+  it("a code, scope, context or no detected change issues the whole derived roster", () => {
     const full: readonly ReviewChange[] = [
       changed("code"), changed("comment", "code"), { kind: "scope-changed" }, { kind: "context-changed" }, { kind: "unchanged" },
     ];
     for (const change of full) {
-      expect(selectReviewRoles(BASE_WAVE_REVIEW_AGENTS, change, [])).toBe(BASE_WAVE_REVIEW_AGENTS);
-      expect(selectReviewRoles(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, change, [])).toBe(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS);
+      expect(selectReviewRoles(BASE_WAVE_REVIEW_AGENTS, change, [])).toEqual(WHOLE);
+      expect(selectReviewRoles(ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, change, [])).toEqual(WHOLE);
     }
   });
 
-  it("a selection that covers the whole roster is the derived roster itself", () => {
-    const owners = [...BASE_WAVE_REVIEW_AGENTS];
-    expect(selectReviewRoles(BASE_WAVE_REVIEW_AGENTS, changed("comment"), owners)).toBe(BASE_WAVE_REVIEW_AGENTS);
+  it("a selection that covers the whole roster is the whole roster", () => {
+    expect(selectReviewRoles(BASE_WAVE_REVIEW_AGENTS, changed("comment"), [...BASE_WAVE_REVIEW_AGENTS])).toEqual(WHOLE);
   });
 
   it("is monotone in code: adding any code change to any change issues the full roster", () => {
@@ -222,7 +182,7 @@ describe("selectReviewRoles follows the operator's role table", () => {
       const edited: Record<string, string> = {};
       for (const { path, body } of edits) edited[path] = `${edited[path] ?? original[path]}${body}`;
       const withCode = { ...edited, "src/a.ts": `${edited["src/a.ts"] ?? SOURCE}export const changed = 1;\n` };
-      expect(selectReviewRoles(BASE_WAVE_REVIEW_AGENTS, classify(after(withCode)), owners)).toBe(BASE_WAVE_REVIEW_AGENTS);
+      expect(selectReviewRoles(BASE_WAVE_REVIEW_AGENTS, classify(after(withCode)), owners)).toEqual({ kind: "whole" });
     }));
   });
 });

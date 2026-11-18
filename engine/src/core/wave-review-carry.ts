@@ -72,10 +72,9 @@ import {
 import { sameAuthority } from "./wave-review-carry-audit";
 import {
   issuedRoles,
-  issuedWaveTaskRoster,
+  issuedTaskReview,
   registeredCarry,
-  registeredNarrowing,
-  reviewNarrowingOf,
+  registeredIssuance,
   waveReviewCarryOf,
   type RegisteredCarry,
 } from "./wave-review-carry-plan";
@@ -357,7 +356,7 @@ function carryTermsOf(context: CarryContext, task: Task): DomainResult<CarryTerm
     ok: true,
     value: {
       protocol,
-      roster: issuedWaveTaskRoster(review.roster, registeredNarrowing(context.narrowing, task.id)),
+      roster: issuedTaskReview(review.roster, registeredIssuance(context.narrowing, task.id)).roster,
       bytes,
       subject: waveTaskSubjectDigest(graph, task, review, protocol, bytes),
       priorFindingIds: waveReviewPriorFindings(graph, task, admitted.value.artifacts, "fresh").ids,
@@ -660,9 +659,9 @@ export function waveAcceptanceProblem(
     return `Task ${task.id} holds no accepted review at its generation under the registered protocol`;
   }
   if (accepted.run_id === runId && accepted.authority_digest === registration.authorityDigest) {
-    const narrowed = registeredNarrowing(registration, task.id);
+    const issuance = registeredIssuance(registration, task.id);
     return accepted.narrowing === undefined ||
-        (narrowed !== undefined && canonicalStructuralEquals(accepted.narrowing, reviewNarrowingOf(narrowed)))
+        (issuance.kind === "narrowed" && canonicalStructuralEquals(accepted.narrowing, issuance.narrowing))
       ? null
       : `Task ${task.id} acceptance records a narrowing its registration did not issue`;
   }

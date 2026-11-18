@@ -85,7 +85,7 @@ function successorInstall(state: TaskGraph, runsRoot: string) {
   const taskIds = state.tasks.filter(({ wave }) => wave === 2).map(({ id }) => id);
   return installWaveGateRegistration(state, activeWaveGateFixture({
     runId: "run.successor", wave: 2, authorityDigest: waveGateAuthorityDigest(2, taskIds, state), runsRoot,
-  }), taskIds);
+  }), { taskIds });
 }
 
 describe("amend-spec-trace registration", () => {
