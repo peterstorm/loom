@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseAuthoredTaskRoster, populateTaskGraph, type AuthoredTask } from "../../src/core/task-graph-population";
+import { parseAuthoredTaskRoster, populateTaskGraph } from "../../src/core/task-graph-population";
 import { parseTaskGraph } from "../../src/state-manager";
 import type { PlanContract, TaskGraph } from "../../src/types";
 import { withRedThenGreen } from "../fixtures/red-then-green-proof";
@@ -8,7 +8,6 @@ import { i6RunnerManifest } from "../fixtures/i6-runner-manifest";
 import { authoredTask as task, loadContract } from "../fixtures/load-contract";
 
 const CONTRACT: PlanContract = loadContract("tests/load.acceptance.test.ts");
-
 
 function populated(contracts: readonly PlanContract[] = [CONTRACT]): TaskGraph {
   const roster = parseAuthoredTaskRoster([
