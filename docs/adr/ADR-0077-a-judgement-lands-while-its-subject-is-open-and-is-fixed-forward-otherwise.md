@@ -1,7 +1,9 @@
 # ADR-0077: A judgement lands while its subject is open, and is fixed forward otherwise
 
 ## Status
-Accepted (2026-11-16).
+Accepted (2026-11-16). The Forward Fix fallback is superseded by
+[ADR-0084](ADR-0084-a-task-joins-the-active-wave-through-a-plan-edit.md): `add-task` appends the fix with ordinary
+dependencies. Judged Paths (prevention) stand.
 
 ## Context
 A Task **judges** code when its tests decide whether code another Task writes is acceptable: a memory or
@@ -68,8 +70,8 @@ code that is still being written. Its failure is still repairable while that Wav
 retry or `reopen-task` fixes the code, and the judge's retry judges it again. Plan alignment flags the same shape one phase earlier
 as a `JUDGE-N` gap. The field is not persisted: it shapes the roster and nothing at execute reads it.
 
-**Forward Fix (fallback).** `helper orchestration add-forward-fix` appends one Task to the active Wave
-(`addForwardFix`, `engine/src/core/forward-fix.ts`). It shares the Wave-reopening precondition with Task
+**Forward Fix (fallback).** helper orchestration add-forward-fix appends one Task to the active Wave
+(addForwardFix, engine/src/core/forward-fix.ts). It shares the Wave-reopening precondition with Task
 Reopening and Contract Revision, and adds its own refusals:
 
 - every `--hold` Task is an authored Task of the active Wave whose last implementation attempt failed (owed the
@@ -90,10 +92,10 @@ Wave's Distill Scope stays as population froze it: the fix's files are judged by
 distilled.
 
 **Fix text the brief can carry, and withdrawal.** The fix Task's description and reason become its plan context,
-which its brief renders and the spawn gate reads. `add-forward-fix` therefore refuses, before anything reaches
+which its brief renders and the spawn gate reads. add-forward-fix therefore refuses, before anything reaches
 protected state, text that the gate would refuse: a `{template variable}`, a `LOOM_` token, a `Task ID:` binding
 or a line break. These are the operator-note rules. A Forward Fix whose fix Task was never dispatched can be
-withdrawn with `helper orchestration withdraw-forward-fix`. Under the same Wave-reopening precondition, it removes
+withdrawn with helper orchestration withdraw-forward-fix. Under the same Wave-reopening precondition, it removes
 the untouched fix Task, moves its audit whole into `forward_fix_withdrawals` with the operator's reason, and releases
 the hold. A withdrawn fix Task's id is never minted again, and the State File refuses a withdrawn id that is still on
 the roster or still in a live audit. A dispatched fix Task is not withdrawn: it settles, or it is reopened.

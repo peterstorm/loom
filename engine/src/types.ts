@@ -816,12 +816,13 @@ export type TaskReopeningAudit = Readonly<{
   abandonedRunId: OrchestrationRunId | null;
 }> & ReopenedTaskIds;
 
-/** Immutable audit of one Forward Fix (`helper orchestration add-forward-fix`):
- * the operator appended `fixTaskId` to the active `wave` to change
- * `sealedPaths`, code a completed Wave wrote, because each of `heldTaskIds`
- * (Tasks of `wave` whose last implementation attempt failed) judges that code.
- * The audit is the hold's authority: until the fix Task settles, the held
- * Tasks are owed no dispatch (`core/dispatch-holds.ts`). Dropped by
+/** Immutable audit of one Forward Fix, the retired operation that appended
+ * `fixTaskId` to the active `wave` to change `sealedPaths`, code a completed
+ * Wave wrote, because each of `heldTaskIds` judged that code (ADR-0077).
+ * `helper orchestration add-task` replaced it (ADR-0084). A State File written
+ * before then still carries these audits, and each still orders its held
+ * Tasks after the fix Task, read as same-Wave dependencies
+ * (`core/dispatch-holds.ts`). Nothing writes a new one. Dropped by
  * re-population, which replaces the roster it describes. */
 export type ForwardFixAudit = Readonly<{
   schemaVersion: 1;
@@ -838,7 +839,8 @@ export type ForwardFixAudit = Readonly<{
 }>;
 
 /** Immutable record of one Forward Fix withdrawn before its fix Task was ever
- * dispatched (`helper orchestration withdraw-forward-fix`). The fix Task left
+ * dispatched, by the retired withdraw-forward-fix (ADR-0084: nothing writes a
+ * new one; an older State File still carries them). The fix Task left
  * the roster and its audit left `forward_fix_history`, which released its
  * hold; the audit is kept here whole, so the history is moved, never lost.
  * A withdrawn fix Task's id is never minted again. Dropped by re-population. */
@@ -899,7 +901,49 @@ export type SpecTraceAmendmentChange = Readonly<{
  * kinds: a Task's file list re-scoped, or dependency edges added to a Task
  * (`add-dependency`, ADR-0081).
  */
-export type WavePlanEdit = TaskRescopedEdit | DependencyAddedEdit;
+export type WavePlanEdit = TaskRescopedEdit | DependencyAddedEdit | TaskAddedEdit | TaskWithdrawnEdit;
+
+/**
+ * A Task appended to the active Wave (`helper orchestration add-task`,
+ * ADR-0084). Its own `depends_on` edges are `dependsOn`; `dependents` are the
+ * pending Tasks of the Wave that now wait for it. Both kinds of same-Wave edge
+ * are legal because this edit records them.
+ */
+export type TaskAddedEdit = Readonly<{
+  schemaVersion: 1;
+  kind: "task-added";
+  wave: number;
+  taskId: string;
+  /** The Task's file_list as added, distinct, in the order named. */
+  files: OrchestrationNonEmpty<string>;
+  /** The files a completed Wave's Task lists, named explicitly with `--sealed-file`; a subset of `files`.
+   *  Omitted, never empty, when none was sealed. */
+  sealed?: OrchestrationNonEmpty<string>;
+  /** The Tasks it depends on, distinct, in the order named; possibly none. */
+  dependsOn: readonly string[];
+  /** The pending Tasks of the Wave that now depend on it, distinct, in the order named; possibly none. */
+  dependents: readonly string[];
+  /** The operator's non-blank reason, at most 500 characters. */
+  reason: string;
+  /** The abandoned Wave Gate run whose review authority adding the Task retired; null when none was on the graph. */
+  abandonedRunId: OrchestrationRunId | null;
+}>;
+
+/**
+ * A Task `add-task` appended, removed before it was ever dispatched
+ * (`helper orchestration withdraw-task`, ADR-0084). Every edge to it left the
+ * roster with it. Its id is never minted again.
+ */
+export type TaskWithdrawnEdit = Readonly<{
+  schemaVersion: 1;
+  kind: "task-withdrawn";
+  wave: number;
+  taskId: string;
+  /** The operator's non-blank reason, at most 500 characters. */
+  reason: string;
+  /** The abandoned Wave Gate run whose review authority removing the Task retired; null when none was on the graph. */
+  abandonedRunId: OrchestrationRunId | null;
+}>;
 
 /** Dependency edges added to a pending Task of the active Wave (ADR-0081). */
 export type DependencyAddedEdit = Readonly<{
@@ -1448,12 +1492,12 @@ export interface TaskGraph {
    *  for re-implementation (`helper orchestration reopen-task`). Dropped by
    *  re-population. */
   readonly task_reopening_history?: readonly TaskReopeningAudit[];
-  /** Append-only audit of Forward Fix Tasks the operator appended to the
-   *  active Wave (`helper orchestration add-forward-fix`); each audit holds
+  /** Append-only audit of Forward Fix Tasks appended to the active Wave by the
+   *  retired add-forward-fix (ADR-0084; read, never written); each audit holds
    *  its judges' dispatch until its fix settles. Dropped by re-population. */
   readonly forward_fix_history?: readonly ForwardFixAudit[];
-  /** Forward Fixes withdrawn before their fix Task was dispatched
-   *  (`helper orchestration withdraw-forward-fix`). Dropped by re-population. */
+  /** Forward Fixes withdrawn before their fix Task was dispatched, by the
+   *  retired withdraw-forward-fix (read, never written). Dropped by re-population. */
   readonly forward_fix_withdrawals?: readonly ForwardFixWithdrawal[];
   /** Nonterminal retirement audit for missing Run Directories replaced in-place. */
   readonly orphaned_wave_gate_history?: readonly OrphanedWaveGateRetirement[];

@@ -5,8 +5,9 @@
  *
  * The thresholds are the shapes behind loom#198 and loom#199: a Task that
  * escalated (remediated or not), a Wave Gate that needed a second run, an
- * operator changing the Wave's plan (a plan edit, a Forward Fix or its
- * withdrawal, a completed Wave reopened), Tasks reopened more than once, and
+ * operator changing the Wave's plan (a plan edit, including an added or
+ * withdrawn Task; a legacy Forward Fix or its withdrawal; a completed Wave
+ * reopened), Tasks reopened more than once, and
  * the engine being moved under a live run. One Task reopening is the normal
  * way to act on a Wave Gate Finding, so it alone suggests nothing.
  *

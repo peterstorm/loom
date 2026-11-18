@@ -85,7 +85,7 @@ describe("retroFacts", () => {
     expect(digest.gateRuns).toEqual({ completed: 0, retired: 0, abandoned: 1 });
     expect(digest).toMatchObject({ taskReopenings: 1, forwardFixes: 1 });
     expect(digest.tasks.find(({ taskId }) => taskId === "T2")).toMatchObject({ heldByForwardFixes: ["T1"] });
-    expect(digest.tasks.find(({ taskId }) => taskId === "T1")).toMatchObject({ forwardFix: true, reopenings: 1 });
+    expect(digest.tasks.find(({ taskId }) => taskId === "T1")).toMatchObject({ addedMidRun: true, reopenings: 1 });
     const withDistill = graph({}, [...base.tasks, i6PlanTask("T9", 2, ["src/t1.ts"], {
       agent: "distill-agent", description: "Distill pass", verification_policy: serializeVerificationPolicy(DISTILL_VERIFICATION_POLICY),
     })]);

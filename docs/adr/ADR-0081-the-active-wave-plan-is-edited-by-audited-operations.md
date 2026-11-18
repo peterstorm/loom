@@ -42,7 +42,8 @@ Once a TaskGraph is populated, the operator could change the active Wave's plan 
 - `rescope-task --add-sealed-file <path>` admits a path a completed Wave's Task lists; plain `--add-file` still
   refuses one. The `task-rescoped` audit records the sealed additions.
 
-Retiring Forward Fix holds in favour of these operations is a later change (loom#199, Cause 2, second part).
+Retiring Forward Fix holds in favour of these operations is a later change (loom#199, Cause 2, second part):
+[ADR-0084](ADR-0084-a-task-joins-the-active-wave-through-a-plan-edit.md).
 
 ## Consequences
 - An operator orders a Wave's Tasks with edges the engine enforces and audits.

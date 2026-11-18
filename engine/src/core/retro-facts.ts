@@ -12,7 +12,7 @@
  */
 
 import { isDistillTask } from "./distill-task";
-import type { Task, TaskGraph } from "../types";
+import type { Task, TaskAddedEdit, TaskGraph, TaskWithdrawnEdit } from "../types";
 
 /** Finding counts as review left them on the Task. */
 export type FindingTally = Readonly<{ critical: number; advisory: number; refuted: number }>;
@@ -33,10 +33,10 @@ export type TaskFriction = Readonly<{
   reopenings: number;
   /** Audited plan edits of it: re-scopes and added dependencies. */
   planEdits: number;
-  /** The Forward Fix Tasks that held it, in audit order. */
+  /** The Forward Fix Tasks that held it, in audit order (a retired operation an older run may carry, ADR-0084). */
   heldByForwardFixes: readonly string[];
-  /** Whether the Task is itself a Forward Fix an operator appended. */
-  forwardFix: boolean;
+  /** Whether an operator appended the Task after population (`add-task`, or a legacy Forward Fix). */
+  addedMidRun: boolean;
   findings: FindingTally;
 }>;
 
@@ -50,7 +50,8 @@ export type WaveFriction = Readonly<{
   /**
    * Wave Gate runs that completed; runs retired without completing (orphaned
    * or spec-trace retirements); and distinct runs abandoned, as the audits
-   * that retired them name them (reopenings, Forward Fixes) plus a live
+   * that retired them name them (reopenings, added and withdrawn Tasks,
+   * legacy Forward Fixes) plus a live
    * abandoned tombstone.
    */
   gateRuns: Readonly<{ completed: number; retired: number; abandoned: number }>;
@@ -100,7 +101,8 @@ function taskFriction(graph: TaskGraph, task: Task): TaskFriction {
     heldByForwardFixes: freeze((graph.forward_fix_history ?? [])
       .filter((audit) => audit.heldTaskIds.some((id) => id === task.id))
       .map(({ fixTaskId }) => fixTaskId)),
-    forwardFix: (graph.forward_fix_history ?? []).some(({ fixTaskId }) => fixTaskId === task.id),
+    addedMidRun: (graph.forward_fix_history ?? []).some(({ fixTaskId }) => fixTaskId === task.id) ||
+      (graph.wave_plan_edits ?? []).some((edit) => edit.kind === "task-added" && edit.taskId === task.id),
     findings: freeze({
       critical: (task.critical_findings ?? []).length,
       advisory: (task.advisory_findings ?? []).length,
@@ -113,7 +115,7 @@ function taskFriction(graph: TaskGraph, task: Task): TaskFriction {
 function hasFriction(task: TaskFriction): boolean {
   return task.retries + task.escalations + task.remediations + task.infrastructureBlocks + task.reopenings +
     task.planEdits + task.heldByForwardFixes.length + task.findings.critical + task.findings.refuted > 0 ||
-    task.forwardFix;
+    task.addedMidRun;
 }
 
 const sum = (tasks: readonly TaskFriction[], pick: (task: TaskFriction) => number): number =>
@@ -123,6 +125,10 @@ function progressOf(graph: TaskGraph, wave: number): WaveProgress {
   if ((graph.wave_gate_history ?? []).some((entry) => entry.wave === wave)) return "completed";
   return wave === graph.current_wave ? "active" : "pending";
 }
+
+/** The plan edits that changed the roster (`add-task`, `withdraw-task`); each names the run it retired. */
+const rosterEdits = (graph: TaskGraph): readonly (TaskAddedEdit | TaskWithdrawnEdit)[] =>
+  (graph.wave_plan_edits ?? []).flatMap((edit) => (edit.kind === "task-added" || edit.kind === "task-withdrawn" ? [edit] : []));
 
 /** Every Wave Gate run a Wave's digest saw: completed, retired and abandoned. */
 export const gateRunCount = ({ gateRuns }: WaveFriction): number => gateRuns.completed + gateRuns.retired + gateRuns.abandoned;
@@ -140,7 +146,7 @@ export function waveFriction(graph: TaskGraph, wave: number): WaveFriction {
       completed: ofWave(graph.wave_gate_history),
       retired: ofWave(graph.orphaned_wave_gate_history) + ofWave(graph.spec_trace_wave_gate_retirements),
       abandoned: new Set([
-        ...[...(graph.task_reopening_history ?? []), ...(graph.forward_fix_history ?? [])]
+        ...[...(graph.task_reopening_history ?? []), ...(graph.forward_fix_history ?? []), ...rosterEdits(graph)]
           .flatMap((audit) => (audit.wave === wave && audit.abandonedRunId !== null ? [audit.abandonedRunId] : [])),
         ...(active !== undefined && active.wave === wave && active.terminalOutcome?.kind === "terminal-abandoned" ? [active.runId] : []),
       ]).size,

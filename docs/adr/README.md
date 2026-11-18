@@ -98,3 +98,4 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0081](ADR-0081-the-active-wave-plan-is-edited-by-audited-operations.md) | The active Wave's plan is edited by audited operations | Accepted (2026-11-17) | — |
 | [ADR-0082](ADR-0082-a-package-manifest-and-its-lockfile-belong-to-one-task.md) | A package manifest and its lockfile belong to one Task | Accepted (2026-11-17) | — |
 | [ADR-0083](ADR-0083-a-run-records-its-friction-and-a-retro-reads-it-first.md) | A run records its friction, and a retro reads it first | Accepted (2026-11-17) | — |
+| [ADR-0084](ADR-0084-a-task-joins-the-active-wave-through-a-plan-edit.md) | A Task joins the active Wave through a plan edit | Accepted (2026-11-18) | — |

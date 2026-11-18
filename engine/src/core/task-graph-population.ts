@@ -508,7 +508,7 @@ const NO_SPEC_TRACE_INDEX: SpecIndexAvailability = Object.freeze({
 
 /**
  * The pending record of one authored Task that joins a populated TaskGraph
- * after population (a Forward Fix Task), written by the same `populatedTask`
+ * after population (`add-task`, ADR-0084), written by the same `populatedTask`
  * every authored Task goes through. It carries no Requirement trace (so no
  * Spec Index is consulted), sits in no contract's red window, and has no
  * population proof boundary: its first registration stamps its own baseline.

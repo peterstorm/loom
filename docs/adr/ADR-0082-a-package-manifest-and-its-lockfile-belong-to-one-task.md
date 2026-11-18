@@ -26,8 +26,8 @@ it.
 ## Decision
 `core/coupled-file-sets.ts` holds the rule: a manifest and the lockfiles beside it (`bun.lock`, `bun.lockb`,
 `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`) form one set. Population validation
-refuses a graph in which a Task lists part of a set another Task lists. `rescope-task` and `add-forward-fix`
-refuse an edit that leaves the Task they write listing part of a set. Loading an existing State File does not
+refuses a graph in which a Task lists part of a set another Task lists. `rescope-task` and add-forward-fix
+(`add-task` since ADR-0084) refuse an edit that leaves the Task they write listing part of a set. Loading an existing State File does not
 apply the rule, because live graphs predate it.
 
 Sets declared by the plan (a contract package and its consumers' types, for example) are a later extension of

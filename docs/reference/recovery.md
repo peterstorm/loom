@@ -124,35 +124,39 @@ Under the TaskGraph lock `add-dependency` requires the precondition `reopen-task
 
 A dependency in the same Wave is satisfied once that Task has settled its implementation (ADR-0081); one in an earlier Wave once it is `completed`. Status, registration and the brief withhold the waiting Task under one rule, the `dependency` Dispatch Hold. When a dependency reaches terminal escalation, status escalates the Wave and names the Tasks blocked behind it; remediate the escalated Task and they run. One `dependency-added` audit is appended to `wave_plan_edits`, and the State File refuses a same-Wave edge no such audit records. Repeating an applied request changes nothing.
 
-## A judgement fails on code a completed Wave sealed
+## Adding a Task to the active Wave
 
-Use this when a Task of the active Wave judges code that a completed Wave wrote (a budget, benchmark or acceptance test) and its attempt failed because that code breaches the judgement. Neither `reopen-task` (active Wave only) nor `reopen-completed-wave` (drifted bytes only) applies, and the judge cannot change code outside its own file list. Append a Forward Fix to the active Wave instead ([ADR-0077](../adr/ADR-0077-a-judgement-lands-while-its-subject-is-open-and-is-fixed-forward-otherwise.md)):
+Use this when the active Wave needs a Task decompose did not plan. The common case is a judgement that fails on sealed code: a Task of the active Wave judges code a completed Wave wrote (a budget, benchmark or acceptance test), and its attempt failed because that code breaches the judgement. Neither `reopen-task` (active Wave only) nor `reopen-completed-wave` (drifted bytes only) applies, and the judge cannot change code outside its own file list. Add a Task that takes the sealed code, and make the judge wait for it ([ADR-0084](../adr/ADR-0084-a-task-joins-the-active-wave-through-a-plan-edit.md)):
 
 ```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration add-forward-fix \
-  --wave 5 --hold T12 \
-  --file dags/direct-sales/leads/lead-scoring/dag.ts --file lib/lead-snapshot/recompute.ts \
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration add-task \
+  --sealed-file dags/direct-sales/leads/lead-scoring/dag.ts --sealed-file lib/lead-snapshot/recompute.ts \
+  --before T12 \
   --description "Bring per-request and recompute memory under the spec budgets" \
   --reason "T12's CI budget test: accountManager request 33.8 MB > 10 MB; recompute 158.3 MB > 150 MB"
 ```
 
-Under the TaskGraph lock it requires the Wave-reopening precondition `reopen-task` uses (execute Phase, `--wave` equal to `current_wave`, no completed history for it, no live Wave Gate or a tombstone naming no successor, no executing Task, attempt or subagent), and:
+Under the TaskGraph lock it requires the Wave-reopening precondition `reopen-task` uses (execute Phase, no completed history for the active Wave, no live Wave Gate or a tombstone naming no successor, no executing Task, attempt or subagent), and:
 
-- every `--hold` Task (one or more, distinct) is an authored Task of that Wave whose last implementation attempt failed: it is owed the engine-authorized retry, or it escalated;
-- at least one `--file` (one or more, distinct, repository-relative) is in the file list of a Task of a completed Wave;
-- no `--file` is in another Task's file list in the active Wave, a frozen Acceptance Contract path, or protected verification infrastructure;
-- a non-blank `--description` and `--reason`; `--agent` defaults to `code-implementer-agent` (also `frontend-agent`, `security-agent`), and `--new-tests` to `required` (`existing-tests-sufficient` when the held judge's tests are the fix's whole proof).
+- at least one path, each named once: `--file` for a path no completed Wave wrote, `--sealed-file` for one a Task of a completed Wave lists. A sealed path named with `--file` is refused, and so is an open path named with `--sealed-file`;
+- no path in another Task's file list in the active Wave, no frozen Acceptance Contract path and no protected verification infrastructure, as for `rescope-task`; every member of a coupled file set the Task touches (a package manifest and its lockfile, ADR-0082); and a test file when its policy owes one;
+- every `--depends-on` Task exists, sits in the active Wave or an earlier one, and is not a Distill Task: the new Task waits for each;
+- every `--before` Task is a pending Task of the active Wave, not a Distill Task and not armed for attestation: each now waits for the new Task. It need not have failed first;
+- no edge closes a cycle; the refusal names it;
+- a non-blank `--description` (at most 512 characters) and `--reason` (at most 500), one line each, with no `{template variable}`, no `LOOM_` token and no `Task ID:` binding, because the Task's brief carries them. `--agent` defaults to `code-implementer-agent` (also `frontend-agent`, `security-agent`), and `--new-tests` to `required` (`existing-tests-sufficient` when existing tests, such as the judge's, are the whole proof).
 
-It appends a pending fix Task with the next free Task id, no dependency and no Requirement trace, whose plan context names the held Tasks, the sealed paths and the reason. It retires the Wave's review authority as a reopening does, resets the Wave's gate bits, and appends one `forward-fix-added` audit to `forward_fix_history`. Completed Waves and every existing Task are untouched. Status then owes the fix Task's dispatch, while each held Task stays under a dispatch hold until the fix is implemented and unreserved; a held Task's escalation is deferred until then. Once the fix settles, status offers the held Task's retry, which judges the fixed code. An escalated held Task is remediated with `helper orchestration remediate` after the fix settles. Repeating the same command while the fix Task is still pending changes nothing. `--description` and `--reason` must be text the fix Task's brief can carry, as an operator note must: one line, with no `{template variable}`, no `LOOM_` token and no `Task ID:` binding.
+It appends a pending Task with the next free Task id, its `--depends-on` edges and no Requirement trace, whose plan context names the reason, the sealed paths and the Tasks that wait for it. Each `--before` Task gains a `depends_on` edge to it. It retires the Wave's review authority as a reopening does, resets the Wave's gate bits, and appends one `task-added` edit to `wave_plan_edits`, which is what makes its same-Wave edges legal. Completed Waves are untouched. Status then owes the new Task's dispatch and withholds each waiting Task under the `dependency` Dispatch Hold until the new Task is implemented and unreserved; a waiting Task's escalation is deferred until then. Once it settles, status offers the waiting Task's retry, which judges the changed code. An escalated waiting Task is remediated with `helper orchestration remediate` after that. Repeating the same command while the Task is still undispatched changes nothing.
 
-To withdraw a Forward Fix before its fix Task was ever dispatched (for example, to correct its text), run:
+To withdraw an added Task before it was ever dispatched (for example, to correct its text), run:
 
 ```bash
-bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration withdraw-forward-fix \
-  --wave 5 --task T24 --reason "re-adding with corrected text"
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration withdraw-task \
+  --task T24 --reason "re-adding with corrected text"
 ```
 
-It requires the same active, open Wave `add-forward-fix` requires (including no abandoned run naming a successor), a fix Task of a live `forward_fix_history` audit of that Wave, and that Task still exactly as it joined: no reservation, attempt, settlement, observation or review has written any of its evidence fields (`isUntouchedJoinedTask`). It removes the fix Task from the roster and moves the audit whole into `forward_fix_withdrawals`, together with your reason. The held Tasks are released, and the withdrawn id is never minted again. Add a corrected Forward Fix afterwards if the judgement still needs one. A fix Task that was already dispatched is not withdrawn: let it settle, or reopen it.
+It requires the same active, open Wave, a Task an earlier `task-added` edit appended to it, and that Task still exactly as it joined: no reservation, attempt, settlement, observation or review has written any of its evidence fields (`isUntouchedJoinedTask`). It removes the Task and every `depends_on` edge to it, releasing the Tasks that waited, and appends a `task-withdrawn` edit with your reason. The withdrawn id is never minted again. A Task that was already dispatched is not withdrawn: let it settle, or reopen it.
+
+`add-task` replaced the Forward Fix (add-forward-fix and withdraw-forward-fix, ADR-0077), which demanded a held Task whose attempt had already failed and at least one sealed path. A State File written before then still loads: each `forward_fix_history` audit keeps its held Tasks waiting for its fix Task, as a same-Wave dependency.
 
 ## Completed Wave has post-review workspace-integrity loss
 
