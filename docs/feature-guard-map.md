@@ -1129,8 +1129,8 @@ documented and tested; round-20/21 (double-quoted apostrophe) died with the sing
   `state-file-wire.ts`, verified against ADR-0089 (as amended), ADR-0090 and
   ADR-0091; the `--fresh-review` flag checked in `commands/wave-gate.md`; the
   §4.7/§4.9/§5/Appendix A additions and the README's Wave Gate claims written
-  from those sources. No new full-suite verdict was taken for 98a9852c; §10's
-  standing verdict remains the deb8c369 run.
+  from those sources. A fresh full-suite verdict was taken at 98a9852c after this
+  fold-in (the branch's own delta is Markdown-only); see §10.
 - Code-verified claims: routing table + fail-closed polarity (cli.ts,
   handler-routes.ts); guard policy + helper list + walker map (guard-state-file.ts);
   walker one-owner structure (shell-*.ts headers); machine pins (machines/README +
@@ -1149,11 +1149,15 @@ documented and tested; round-20/21 (double-quoted apostrophe) died with the sing
 
 ## 10. Standing suite verdict
 
-**Latest — full unit suite executed 2026-11-18 at revision deb8c369 (main at the time
-of this scan; main has since moved to 98a9852c with #224/#225, folded in by the delta
-pass in §9 without a new full-suite verdict): 21,061 tests passed, 2 skipped, 0 failed,
-across 811 test files (7.8 min).** Run with the
-`LOOM_PI_*`/`PI_*` ambient markers explicitly unset (see the gotcha below); exit code 0.
+**Latest — full verify gate executed 2026-11-18 at revision 98a9852c (this branch's
+worktree; its own delta is Markdown-only, so the suite judges 98a9852c's code):
+21,194 tests passed, 2 skipped, 0 failed, across 815 test files (unit tier 8.3 min);
+smoke tier 23/23; typecheck and lint green; exit code 0.** Run with the
+`LOOM_PI_*`/`PI_*` ambient markers explicitly unset (see the gotcha below).
+
+**Prior — deb8c369, 2026-11-18: 21,061 tests passed, 2 skipped, 0 failed, across 811
+test files (7.8 min); unit suite only.** Run with the `LOOM_PI_*`/`PI_*` ambient
+markers explicitly unset; exit code 0.
 
 **Prior — a28b6d6a, 2026-11-17: 20,132 tests across 775 files — 20,125 passed, 5 failed,
 2 skipped.**
@@ -1172,7 +1176,8 @@ Operational gotcha for this map's next re-scan: run loom's suite outside a live 
 session, or with the `LOOM_PI_*` marker set explicitly unset.
 
 Scope note: the a28b6d6a verdict's provenance is the scan session; the deb8c369 verdict
-is this re-audit's. Both were run from the main checkout, not the doc worktree.
+is this re-audit's; the 98a9852c verdict ran in this map's worktree with this branch's
+docs-only edits applied. All were run outside a live Pi session's ambient markers.
 
 ---
 
