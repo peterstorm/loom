@@ -14,7 +14,7 @@ import { observeWaveSpecCheckDocuments } from '../../../orchestration/wave-spec-
 import type { Task } from '../../../types';
 import { installWaveReviewRunsTransition, waveBatchSpecCheckAuthority } from '../../../core/wave-review-issuance';
 import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
-import { waveReviewCarryOf } from '../../../core/wave-review-carry';
+import { waveReviewCarryOf } from '../../../core/wave-review-carry-plan';
 import {
   classifyPersistedWaveBatch,
   issuedWaveReviewRosters,

@@ -41,6 +41,7 @@ import { disposeFixturePiSessions, withFixturePiSession } from "../../../fixture
 import type { DraftFinding, Finding, Task, TaskGraph } from "../../../../src/types";
 import { supersedeAbandonedWaveGateReview } from "../../../../src/core/wave-gate-registration";
 import type { RegisteredWaveGateProgram } from "../../../../src/core/wave-gate-program";
+import { observeRestartCarry } from "../../../../src/handlers/helpers/programs/wave-gate-replacement";
 import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../../../src/core/wave-frozen-source";
 import { graphFixture, taskFixture, trustedPassEvidence } from "../../../fixtures/task-lifecycle";
 import { git as gitWithEnvironment, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository";
@@ -846,8 +847,37 @@ describe("registered Wave reviewer protocol", () => {
 describe("Wave Gate restart carries accepted review evidence", () => {
   const carriedCritical: ReviewerDraftV2 = { ...criticalDraft, file: "src/y.ts", claim: "carried critical on y" };
 
-  /** Run A: T1 accepts every slot; T2 accepts all but its third reviewer, whose attempt 2 exhausts. Then restart. */
+  /** Run A exhausted, then restarted through the façade. */
   async function exhaustedThenRestarted() {
+    const run = await exhausted();
+    const restarted = await runCli(run.p, ["restart", "--runs-root", run.p.runsRoot, "--run", run.previous.runId, "--new-run", "run.restarted"]);
+    return { ...run, restarted, next: value(openRunDirectory(run.p.runsRoot, "run.restarted")) };
+  }
+
+  /**
+   * The restart's crash window: the replacement is registered and its carry
+   * plan committed to protected state, but no resume has installed its batch.
+   * That is exactly what `orchestration restart` commits before it resumes.
+   */
+  async function restartedBeforeFirstResume() {
+    const { p, previous } = await exhausted();
+    const before = graph(p);
+    const carried = value(observeRestartCarry(previous, before, registration(previous), p.root));
+    const exhaustedKeys = new Set(before.tasks.flatMap(({ review_run: run }) => (run?.slot_authority ?? [])
+      .filter((slot) => slot.attempted === 2 && !run!.evidence.some(({ agent }) => agent === slot.agent))
+      .map(({ slot_id }) => captureKey(slot_id, 2))));
+    const next = value(createRunDirectory(p.runsRoot, "run.restarted"));
+    const prepared = value(prepareExhaustedWaveGateRestart(
+      before, previous.runId, registration(previous), next.runId, next.identity.runsRoot, exhaustedKeys, carried));
+    expect(prepared.registration.restart?.carry?.carried.map(({ kind, taskId }) => [kind, taskId]))
+      .toEqual([["accepted-task", "T1"], ["accepted-slots", "T2"]]);
+    value(await next.registerProgram(prepared.registration));
+    await new StateManager(p.statePath).update(() => prepared.graph);
+    return { p, next };
+  }
+
+  /** Run A: T1 accepts every slot; T2 accepts all but its third reviewer, whose attempt 2 exhausts. */
+  async function exhausted() {
     const p = project([], ["src/x.ts"], true);
     const { handle, action } = await start(p);
     const [specCheck, ...reviewers] = action.requests!;
@@ -868,8 +898,7 @@ describe("Wave Gate restart carries accepted review evidence", () => {
     expect(retry.requests).toHaveLength(1);
     value(await handle.rejectCapture(retry.requests![0]!.authority, "capture failed before its journal append"));
     expect(await resume(p, handle)).toMatchObject({ kind: "blocked", diagnostic: { message: expect.stringContaining("attempt 2 exhausted") } });
-    const restarted = await runCli(p, ["restart", "--runs-root", p.runsRoot, "--run", handle.runId, "--new-run", "run.restarted"]);
-    return { p, previous: handle, exhausted, packetA, restarted, next: value(openRunDirectory(p.runsRoot, "run.restarted")) };
+    return { p, previous: handle, exhausted, packetA };
   }
 
   /** Accept the replacement's spec-check and its one reissued slot. */
@@ -939,6 +968,34 @@ describe("Wave Gate restart carries accepted review evidence", () => {
     expect(done.kind, JSON.stringify(done)).toBe("done");
     // A completed replay accepts the carried subjects as published along the lineage.
     expect(await resume(p, next)).toEqual(done);
+  }, 120_000);
+
+  it.each([
+    ["a whole-roster acceptance", "x.ts", "Task T1 cannot keep the acceptance its restart carried from run run.current: drift in head"],
+    ["carried slots", "y.ts", "Task T2 carried review evidence no longer judges it: drift in head"],
+  ])("the first install refuses %s whose reviewed bytes changed after the restart, and writes nothing", async (_label, file, refusal) => {
+    const { p, next } = await restartedBeforeFirstResume();
+    writeFileSync(join(p.root, "src", file), "export const changed = true;\n");
+    const before = readFileSync(p.statePath);
+    expect(await resume(p, next)).toMatchObject({ kind: "blocked", diagnostic: { message: `internal Wave Gate failure: ${refusal}` } });
+    expect(readFileSync(p.statePath)).toEqual(before);
+  }, 120_000);
+
+  it("a restart names each reviewed Task it does not carry, and why, on its output", async () => {
+    const { p, previous } = await exhausted();
+    writeFileSync(join(p.root, "src", "y.ts"), "export const changed = true;\n");
+    const restarted = await cliResult(p, ["restart", "--runs-root", p.runsRoot, "--run", previous.runId, "--new-run", "run.restarted"]);
+    expect(restarted.status, restarted.stderr).toBe(0);
+    const reported = restarted.stderr.split("\n").flatMap((line) => {
+      try { return [JSON.parse(line) as unknown]; } catch { return []; }
+    });
+    expect(reported).toContainEqual({ kind: "wave-gate-restart-not-carried", runId: "run.restarted",
+      notCarried: [{ taskId: "T2", reason: { kind: "drift", fields: ["head"] } }] });
+    // T2 is issued in full; T1 still carries.
+    expect((JSON.parse(restarted.stdout) as Action).requests?.map(({ authority }) => authority.role))
+      .toEqual(["spec-check-invoker", ...BASE_WAVE_REVIEW_AGENTS]);
+    expect(registration(value(openRunDirectory(p.runsRoot, "run.restarted"))).restart?.carry?.carried.map(({ taskId }) => taskId))
+      .toEqual(["T1"]);
   }, 120_000);
 
   it("a restart that carries nothing issues exactly the batch it always did; a carry plan enters the epoch", async () => {

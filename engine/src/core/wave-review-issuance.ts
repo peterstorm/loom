@@ -24,7 +24,8 @@ import type { IssuedWaveReviewerProtocol } from "./review-output";
 import type { ReviewedWorkspaceObservation } from "./reviewed-workspace";
 import type { WaveReviewRole } from "./agent-catalog-projections";
 import { waveReviewerSlotProblem } from "./wave-gate-membership";
-import { carriedAcceptanceProblem, rebindCarriedReviewRun, waveReviewCarryOf } from "./wave-review-carry";
+import { carriedAcceptanceProblem, rebindCarriedReviewRun } from "./wave-review-carry";
+import { issuedRoles, waveReviewCarryOf } from "./wave-review-carry-plan";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import {
   decideWaveReviewEpochReplay,
@@ -173,7 +174,8 @@ export function installWaveReviewRunsTransition(
       // Not reissued: the Task keeps the acceptance its own run recorded.
       const problem = registration.schemaVersion !== 2 || currentWorkspace === undefined || !exactScope
         ? `Task ${task.id} changed before its carried acceptance could be confirmed`
-        : carriedAcceptanceProblem(task, carry, registration.reviewerProtocol, currentWorkspace);
+        : carriedAcceptanceProblem(task, carry, { protocol: registration.reviewerProtocol, roster: expectedAgents,
+          bytes: { scope: currentWorkspace.scope, headSha: currentWorkspace.headSha } });
       if (problem !== null) return refuse(problem);
       if (taskRun !== undefined) return refuse(`Task ${task.id} carries its whole roster but was issued a Review Packet`);
       tasks.push(task);
@@ -183,9 +185,7 @@ export function installWaveReviewRunsTransition(
         currentWorkspace === undefined || currentWorkspace.headSha !== (taskRun.workspaceHeadSha ?? taskRun.headSha)) {
       return refuse(`Task ${task.id} changed before its current Review Packet could be installed`);
     }
-    const issuedAgents: readonly WaveReviewRole[] = carry === undefined
-      ? expectedAgents
-      : expectedAgents.filter((agent) => !carry.agents.includes(agent));
+    const issuedAgents = issuedRoles(expectedAgents, carry);
     const authorities: AgentRequestAuthority[] = [];
     for (const authority of reviewAuthorities) {
       const context = readWaveReviewContext(batch.packets, authority.contextDigest);

@@ -174,8 +174,9 @@ export function installWaveGateRegistration(
  *
  * Every authority field invalidated by a replacement gate lives here so
  * restart, orphan recovery and abandoned-run supersession cannot drift through
- * shell-local object spreads. Accepted Findings survive; only packet-bound
- * review evidence is retired.
+ * shell-local object spreads. Accepted Findings survive, and packet-bound
+ * review evidence is retired, except on the Tasks a restart carries (below):
+ * their Review Run keeps its accepted evidence for the replacement to rebind.
  *
  * Retiring the spec-check can remove a Wave's only block cause, and `blocked`
  * is derived, never asserted: it is re-derived here through the writers' own

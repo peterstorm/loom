@@ -22,9 +22,9 @@ import { WAVE_REVIEWER_PROTOCOL_V4 } from "./reviewer-contract";
 import { resetWaveGateReviewAuthority } from "./wave-gate-registration";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import { waveGateAuthorityDigest, waveRunRosterProblem } from "./wave-review-authority";
-import { planRestartCarry, type RestartCarryObservation } from "./wave-review-carry";
+import { planRestartCarry, type RestartCarryObservation, type TaskNotCarried } from "./wave-review-carry";
 
-export type { RestartCarryObservation } from "./wave-review-carry";
+export type { RestartCarryObservation, TaskNotCarried } from "./wave-review-carry";
 
 type ReplacementRefusal = Readonly<{ ok: false; message: string }>;
 
@@ -62,6 +62,9 @@ export type WaveGateRestartPreparation = Readonly<{
   graph: TaskGraph;
   registration: RegisteredWaveGateProgram;
   exhaustedSlots: readonly string[];
+  /** Each reviewed Task this restart issues in full, and why it carried
+   *  nothing. Reported by the restart, never recorded in the registration. */
+  notCarried: readonly TaskNotCarried[];
 }>;
 
 export type WaveGateRestartResult =
@@ -129,7 +132,8 @@ export function prepareExhaustedWaveGateRestart(
       message: `Wave Gate restart refused before final-attempt rejection for: ${nonExhausted.map(({ task, slot }) => `${task.id}/${slot.agent}`).join(", ")}`,
     };
   }
-  const carried = planRestartCarry({ graph, previousRunId, previous, protocol: WAVE_REVIEWER_PROTOCOL_V4, observation: carry });
+  const plan = planRestartCarry({ graph, previousRunId, previous, protocol: WAVE_REVIEWER_PROTOCOL_V4, observation: carry });
+  const carried = plan.carry;
   const carriedRunTaskIds = new Set((carried?.carried ?? [])
     .flatMap((entry) => (entry.kind === "accepted-slots" ? [entry.taskId] : [])));
   const resetGraph = resetWaveGateReviewAuthority(graph, previous.taskIds, carriedRunTaskIds);
@@ -155,6 +159,7 @@ export function prepareExhaustedWaveGateRestart(
       graph: nextGraph,
       registration,
       exhaustedSlots,
+      notCarried: plan.notCarried,
     }),
   };
 }

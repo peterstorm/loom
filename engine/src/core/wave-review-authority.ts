@@ -18,7 +18,7 @@ import {
 } from "./proof-obligations";
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ByteSection, type ContextPacket } from "./context-packets";
 import { parseWaveReviewerProtocolDescriptor } from "./reviewer-contract";
-import { match } from "ts-pattern";
+import { issuedRoles, waveReviewCarryOf } from "./wave-review-carry-plan";
 import type {
   OrphanedWaveGateRecoveryAudit,
   RegisteredReviewerProtocol,
@@ -421,13 +421,7 @@ export function issuedWaveReviewRosters(
 ): readonly WaveTaskIssuedRoles[] {
   if (carry === undefined) return rosters;
   return Object.freeze(rosters.flatMap(({ taskId, roster }): readonly WaveTaskIssuedRoles[] => {
-    const carried = carry.carried.find((entry) => entry.taskId === taskId);
-    if (carried === undefined) return [Object.freeze({ taskId, roster })];
-    const carriedAgents: readonly string[] = match(carried)
-      .with({ kind: "accepted-task" }, () => roster)
-      .with({ kind: "accepted-slots" }, ({ agents }) => agents)
-      .exhaustive();
-    const issued = roster.filter((role) => !carriedAgents.includes(role));
+    const issued = issuedRoles(roster, waveReviewCarryOf(carry, taskId));
     return isNonEmpty(issued) ? [Object.freeze({ taskId, roster: issued })] : [];
   }));
 }

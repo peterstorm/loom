@@ -15,14 +15,16 @@ import type {
   IssuedReviewRunSlotAuthority,
 } from "../../src/core/findings-shape";
 import { captureKey } from "../../src/core/harness-capture";
-import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract";
+import { parseArtifactDigest, parseOrchestrationRunId, type AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PROTOCOL_V2, WAVE_REVIEWER_PROTOCOL_V4 } from "../../src/core/reviewer-contract";
 import { reviewedWorkspaceObservation, type ReviewedWorkspaceObservation } from "../../src/core/reviewed-workspace";
 import { prepareExhaustedWaveGateRestart, sameRestartRegistration, type RestartCarryObservation } from "../../src/core/wave-gate-replacement";
 import type { RegisteredWaveGateProgram, WaveReviewCarryAudit } from "../../src/core/wave-gate-program";
 import { issuedWaveReviewRosters } from "../../src/core/wave-review-authority";
+import { issuedRoles } from "../../src/core/wave-review-carry-plan";
 import {
   parseWaveReviewCarryAudit,
+  publishedRostersOf,
   rebindCarriedReviewRun,
   waveAcceptanceProblem,
   type CarriedRunBinding,
@@ -100,7 +102,8 @@ function exhaustedWave(input: Readonly<{
   t1?: Partial<Task>;
   run?: CurrentReviewRun;
 }> = {}): TaskGraph {
-  const t1 = implemented("T1", { review_status: "passed", accepted_review_authority: acceptanceT1(), ...input.t1 });  const t2 = implemented("T2", {
+  const t1 = implemented("T1", { review_status: "passed", accepted_review_authority: acceptanceT1(), ...input.t1 });
+  const t2 = implemented("T2", {
     review_status: "evidence_capture_failed", review_error: "attempt 2 exhausted", review_evidence_failures: [EXHAUSTED],
     review_run: input.run ?? predecessorRun(ROSTER.filter((agent) => agent !== EXHAUSTED)),
   });
@@ -236,18 +239,152 @@ describe("carry admissibility: any drift means the Task is issued in full", () =
     }));
   });
 
-  it("issued and carried subjects partition the full roster, for any accepted subset", () => {
+  it("a restart carries exactly the accepted slots, for any accepted subset", () => {
     fc.assert(fc.property(fc.subarray([...ROSTER], { minLength: 1, maxLength: ROSTER.length - 1 }), (acceptedAgents) => {
-      const prepared = restart(exhaustedWave({ run: predecessorRun(acceptedAgents) }));
-      const carry = prepared.registration.restart?.carry;
-      const carriedT2 = carry?.carried.find(({ taskId }) => taskId === "T2");
-      if (carriedT2?.kind !== "accepted-slots") throw new Error("T2 must carry its accepted slots");
-      const issued = issuedWaveReviewRosters([{ taskId: "T2", roster: ROSTER }], carry)[0]?.roster ?? [];
-      const isIssued = (agent: string): boolean => issued.some((role) => role === agent);
-      expect(carriedT2.agents.filter(isIssued)).toEqual([]);
-      expect(ROSTER.filter((agent) => isIssued(agent) || carriedT2.agents.includes(agent))).toEqual(ROSTER);
-      expect(issued).toEqual(ROSTER.filter((agent) => !acceptedAgents.includes(agent)));
+      const carried = restart(exhaustedWave({ run: predecessorRun(acceptedAgents) })).registration.restart?.carry?.carried;
+      expect(carried?.find(({ taskId }) => taskId === "T2")).toEqual({ kind: "accepted-slots", taskId: "T2", agents: acceptedAgents });
     }));
+  });
+});
+
+describe("issuedRoles: what a replacement issues for one Task", () => {
+  it("issued and carried roles partition the roster, in roster order, for any carried subset", () => {
+    fc.assert(fc.property(fc.subarray([...ROSTER], { minLength: 1 }), (carriedAgents) => {
+      const agents = carriedAgents as unknown as readonly [string, ...string[]];
+      const issued = issuedRoles(ROSTER, { kind: "accepted-slots", taskId: "T2", agents });
+      expect(issued.filter((role) => carriedAgents.includes(role))).toEqual([]);
+      expect(ROSTER.filter((role) => issued.includes(role) || carriedAgents.includes(role))).toEqual(ROSTER);
+      expect(issued).toEqual(ROSTER.filter((role) => !carriedAgents.includes(role)));
+    }));
+  });
+
+  it("issues the whole roster when nothing carries and nothing for a Task whose whole roster carries", () => {
+    expect(issuedRoles(ROSTER, undefined)).toEqual(ROSTER);
+    expect(issuedRoles(ROSTER, { kind: "accepted-task", taskId: "T1", roster: ROSTER,
+      acceptance: { runId: "run.previous", authorityDigest: DIGEST_A } })).toEqual([]);
+  });
+
+  it("issuedWaveReviewRosters drops a Task with nothing left to issue", () => {
+    const carry = restart(exhaustedWave()).registration.restart?.carry;
+    expect(issuedWaveReviewRosters([{ taskId: "T1", roster: ROSTER }, { taskId: "T2", roster: ROSTER }], carry))
+      .toEqual([{ taskId: "T2", roster: [EXHAUSTED] }]);
+  });
+});
+
+describe("a restart names each reviewed Task it did not carry, and why", () => {
+  it("names nothing when every reviewed Task carries", () => {
+    expect(restart(exhaustedWave()).notCarried).toEqual([]);
+  });
+
+  it("names drift in the reviewed bytes", () => {
+    const prepared = restart(exhaustedWave(), observation({ workspaces: [observe("T1", ["src/t1.ts"]), observe("T2", ["src/t2.ts"], "changed")] }));
+    expect(prepared.notCarried).toEqual([{ taskId: "T2", reason: { kind: "drift", fields: ["head"] } }]);
+  });
+
+  it("names drift in generation and roster of a whole-roster acceptance", () => {
+    expect(restart(exhaustedWave({ t1: { review_generation: 1 } })).notCarried)
+      .toEqual([{ taskId: "T1", reason: { kind: "drift", fields: ["generation"] } }]);
+    expect(restart(exhaustedWave(), observation({ issuedRosters: new Map([["T1", ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS]]) })).notCarried)
+      .toEqual([{ taskId: "T1", reason: { kind: "drift", fields: ["roster"] } }]);
+  });
+
+  it("names an unobserved and a refused workspace observation, with the refusal", () => {
+    expect(restart(exhaustedWave(), observation({ workspaces: [observe("T1", ["src/t1.ts"])] })).notCarried)
+      .toEqual([{ taskId: "T2", reason: { kind: "workspace-unobserved" } }]);
+    expect(restart(exhaustedWave(), observation({ workspaces: [observe("T1", ["src/t1.ts"]), observe("T2", ["src/other.ts"])] })).notCarried)
+      .toEqual([{ taskId: "T2", reason: { kind: "workspace-rejected", error: "Task T2 workspace observation differs from its exact review scope" } }]);
+  });
+
+  it("names a predecessor under another protocol and an acceptance off the lineage", () => {
+    const run = predecessorRun(accepted, { reviewer_protocol: REVIEWER_PROTOCOL_V2 });
+    expect(restart(exhaustedWave({ run }), observation(), previousRegistration(REVIEWER_PROTOCOL_V2)).notCarried).toEqual([
+      { taskId: "T1", reason: { kind: "predecessor-protocol" } }, { taskId: "T2", reason: { kind: "predecessor-protocol" } },
+    ]);
+    const t1 = { accepted_review_authority: acceptanceT1({ run_id: "run.earliest" }) };
+    expect(restart(exhaustedWave({ t1 })).notCarried)
+      .toEqual([{ taskId: "T1", reason: { kind: "acceptance-off-lineage", runId: "run.earliest" } }]);
+  });
+
+  it("names a run with no accepted slot", () => {
+    expect(restart(exhaustedWave({ run: predecessorRun([]) })).notCarried)
+      .toEqual([{ taskId: "T2", reason: { kind: "nothing-accepted" } }]);
+  });
+});
+
+describe("publishedRostersOf: the roles a predecessor published per Task", () => {
+  type Role = AgentRequestAuthority["role"];
+  const request = (role: Role, attempt: 1 | 2 = 1, program: AgentRequestAuthority["program"] = "wave-gate") =>
+    ({ program, attempt, role });
+  const candidate = (role: Role, taskId: string | null, batchEpoch: string | null = EPOCH_A, attempt: 1 | 2 = 1) =>
+    ({ authority: request(role, attempt), batchEpoch, taskId });
+
+  it("groups current-epoch attempt-1 reviewer roles by Task, in journal order", () => {
+    expect(publishedRostersOf([
+      candidate(ROSTER[1]!, "T1"), candidate(ROSTER[0]!, "T1"), candidate(ROSTER[0]!, "T2"),
+    ], EPOCH_A)).toEqual(new Map([["T1", [ROSTER[1], ROSTER[0]]], ["T2", [ROSTER[0]]]]));
+  });
+
+  it("ignores retried attempts, stale epochs, spec-check, other programs and contexts naming no Task", () => {
+    expect(publishedRostersOf([
+      candidate(ROSTER[0]!, "T1", EPOCH_A, 2),
+      candidate(ROSTER[1]!, "T1", EPOCH_B),
+      candidate("spec-check-invoker", "T1"),
+      { authority: request(ROSTER[2]!, 1, "standalone-review"), batchEpoch: EPOCH_A, taskId: "T1" },
+      candidate(ROSTER[3]!, null),
+      candidate(ROSTER[4]!, "T1", null),
+    ], EPOCH_A)).toEqual(new Map());
+  });
+
+  it("publishes nothing when the predecessor has no current epoch", () => {
+    expect(publishedRostersOf([candidate(ROSTER[0]!, "T1")], undefined)).toEqual(new Map());
+  });
+});
+
+describe("a chained restart keeps every carried slot's original origin", () => {
+  /** Rebind T2's carried run into `nextRunId`, then exhaust the slots that run issued fresh. */
+  function rebindAndExhaust(prepared: ReturnType<typeof restart>, nextRunId: string, packetId: string, epoch: string): TaskGraph {
+    const [t1, t2] = prepared.graph.tasks;
+    const carry = prepared.registration.restart?.carry?.carried.find(({ taskId }) => taskId === "T2");
+    if (carry?.kind !== "accepted-slots" || t1 === undefined || t2 === undefined) throw new Error("T2 must carry its accepted slots");
+    const bytes = observe("T2", ["src/t2.ts"]);
+    const rebound = value(rebindCarriedReviewRun(t2, carry, {
+      runId: nextRunId, authorityDigest: prepared.registration.authorityDigest, protocol: WAVE_REVIEWER_PROTOCOL_V4,
+      generation: 0, packetId, headSha: epoch, bytes: { scope: bytes.scope, headSha: bytes.headSha }, roster: ROSTER,
+      issued: issuedRoles(ROSTER, carry).map((agent) => issuedSlot(agent, packetId.charCodeAt(0) * 100 + ROSTER.indexOf(agent))),
+    }));
+    const [first, ...rest] = rebound.slot_authority.map((slot) => (slot.carried_from === undefined ? { ...slot, attempted: 2 as const } : slot));
+    return {
+      ...prepared.graph,
+      tasks: [t1, { ...t2, review_run: { ...rebound, slot_authority: [first!, ...rest] } }],
+      active_wave_gate: activeWaveGateFixture({ runId: nextRunId, wave: 1, authorityDigest: prepared.registration.authorityDigest }),
+      wave_review_epoch: { runId: value(parseOrchestrationRunId(nextRunId)), wave: 1, batchEpoch: value(parseArtifactDigest(epoch)) },
+    };
+  }
+  function restartAgain(state: TaskGraph, previousRunId: string, previous: RegisteredWaveGateProgram, nextRunId: string) {
+    const run = state.tasks[1]!.review_run!;
+    const exhausted = new Set((run.slot_authority ?? []).filter(({ attempted }) => attempted === 2)
+      .map(({ slot_id }) => captureKey(slot_id, 2)));
+    return value(prepareExhaustedWaveGateRestart(state, previousRunId, previous, nextRunId, "/runs", exhausted, observation()));
+  }
+
+  it("carries the twice-carried slots under their first origin, and lists every run of the chain in order", () => {
+    const toNext = restart(exhaustedWave());
+    const atNext = rebindAndExhaust(toNext, "run.next", PACKET_B, EPOCH_B);
+    const toThird = restartAgain(atNext, "run.next", toNext.registration, "run.third");
+    const atThird = rebindAndExhaust(toThird, "run.third", "5".repeat(64), "6".repeat(64));
+    const toFourth = restartAgain(atThird, "run.third", toThird.registration, "run.fourth");
+    expect(toFourth.registration.restart?.carry?.lineage).toEqual([
+      { runId: "run.previous", authorityDigest: DIGEST_A },
+      { runId: "run.next", authorityDigest: toNext.registration.authorityDigest },
+      { runId: "run.third", authorityDigest: toThird.registration.authorityDigest },
+    ]);
+    expect(toFourth.registration.restart?.carry?.carried).toEqual([
+      { kind: "accepted-task", taskId: "T1", roster: ROSTER, acceptance: { runId: "run.previous", authorityDigest: DIGEST_A } },
+      { kind: "accepted-slots", taskId: "T2", agents: accepted },
+    ]);
+    const atFourth = rebindAndExhaust(toFourth, "run.fourth", "7".repeat(64), "8".repeat(64));
+    const origins = atFourth.tasks[1]!.review_run!.slot_authority!.flatMap((slot) => (slot.carried_from === undefined ? [] : [slot.carried_from]));
+    expect(origins).toEqual(accepted.map(() => ({ run_id: "run.previous", authority_digest: DIGEST_A, packet_id: PACKET_A })));
   });
 });
 

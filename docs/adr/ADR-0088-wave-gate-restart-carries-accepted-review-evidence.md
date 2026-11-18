@@ -43,8 +43,9 @@ issued.
 by reference. The replacement issues spec-check and the exhausted slots only.
 
 - **The carry plan is decided once, at restart, and frozen into the replacement's registration** as
-  `restart.carry = {lineage, carried}`. `lineage` lists every `{runId, authorityDigest}` on the restart
-  chain: chained restarts accumulate it. `carried` lists, per reviewed Task, either `accepted-task`
+  `restart.carry = {lineage, carried}`. `lineage` lists every `{runId, authorityDigest}` along the
+  unbroken chain of carrying restarts that led here, oldest first. Chained restarts that carry accumulate
+  it, and a predecessor that carried nothing starts it afresh. `carried` lists, per reviewed Task, either `accepted-task`
   (every roster slot was accepted on the lineage; the Task is not reissued; the entry records that roster
   and the acceptance) or `accepted-slots` (the accepted agents). The plan is decided under the restart lock
   from the protected graph, the observed reviewed workspaces, and the roster the predecessor issued.
@@ -54,7 +55,9 @@ by reference. The replacement issues spec-check and the exhausted slots only.
   reviewed workspace scope and head, the prior Finding IDs, the derived roster and the reviewer protocol
   descriptor. Otherwise the Task falls back to the full reset of today: accepted new Findings are folded
   and the Task is issued in full. A v2-registered predecessor never carries into a v4 replacement
-  (ADR-0084).
+  (ADR-0084). The restart names each such Task and its typed reason (the drifted facts, an unobserved or
+  refused workspace, an acceptance off the lineage, nothing accepted) on its output. The reasons are the
+  restart's result and stay out of the registration bytes.
 - **Carried slots keep their identity and name their origin.** At install the replacement rebinds a
   carried Task's Review Run under its own Review Packet. Each carried slot keeps the predecessor's slot,
   request and context identity plus `carried_from: {run_id, authority_digest, packet_id}`. Its evidence is

@@ -23,10 +23,12 @@ import {
   sameRestartRegistration,
   type OrphanedWaveGateRecoveryExpectation,
   type RestartCarryObservation,
+  type TaskNotCarried,
   type WaveGateRestartPreparation,
 } from '../../../core/wave-gate-replacement';
 import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
 import { readWaveReviewContext, waveReviewView } from '../../../core/wave-review-authority';
+import { publishedRostersOf, type PublishedRequest } from '../../../core/wave-review-carry';
 import { observeReviewedWorkspace } from '../reviewed-workspace';
 import { durableCaptureRejection } from './durable-requests';
 import { failed, type FacadeDriveResult } from './program-result';
@@ -37,31 +39,45 @@ import { resumeWaveGateFacade } from './wave-gate';
 
 /**
  * What restart observes for its carry decision (ADR-0088): every reviewed
- * registered Task's current workspace, and the roles the predecessor published
- * at attempt 1 for each Task of its current batch epoch. A Task's accepted
- * whole roster carries only if that published roster is the Task's derived
- * roster now.
+ * registered Task's current workspace under `root`, and the predecessor's
+ * attempt-1 Wave reviewer requests with the batch epoch and Task each loaded
+ * context names. `publishedRostersOf` decides which of them published a
+ * roster; this shell only loads, and refuses a context it cannot read.
  */
-function observeRestartCarry(
+export function observeRestartCarry(
   handle: RunDirHandle,
   graph: TaskGraph,
   registration: RegisteredWaveGateProgram,
+  root?: string,
 ): Readonly<{ ok: true; value: RestartCarryObservation }> | Readonly<{ ok: false; message: string }> {
   const issued = handle.readIssuedRequests();
   if (!issued.ok) return { ok: false, message: issued.error.message };
-  const batchEpoch = graph.wave_review_epoch?.batchEpoch;
-  const issuedRosters = new Map<string, string[]>();
+  const candidates: PublishedRequest[] = [];
   for (const authority of issued.value) {
     if (authority.program !== "wave-gate" || authority.attempt !== 1 || authority.role === "spec-check-invoker") continue;
     const packet = handle.readContext(authority.contextDigest);
     if (!packet.ok) return { ok: false, message: packet.error.message };
     const context = readWaveReviewContext([packet.value], authority.contextDigest);
     if (context.kind === "corrupt") return { ok: false, message: `${context.message} (request ${authority.requestId})` };
-    const taskId = context.kind === "loaded" && context.value.batchEpoch === batchEpoch ? context.value.taskRun?.taskId : undefined;
-    if (taskId !== undefined) issuedRosters.set(taskId, [...(issuedRosters.get(taskId) ?? []), authority.role]);
+    candidates.push(context.kind === "loaded"
+      ? { authority, batchEpoch: context.value.batchEpoch, taskId: context.value.taskRun?.taskId ?? null }
+      : { authority, batchEpoch: null, taskId: null });
   }
-  const tasks = graph.tasks.filter(({ id }) => registration.taskIds.includes(id));
-  return { ok: true, value: Object.freeze({ workspaces: observeReviewedWorkspace(waveReviewView(tasks).reviewed), issuedRosters }) };
+  const reviewed = waveReviewView(graph.tasks.filter(({ id }) => registration.taskIds.includes(id))).reviewed;
+  return { ok: true, value: Object.freeze({
+    workspaces: observeReviewedWorkspace(reviewed, root),
+    issuedRosters: publishedRostersOf(candidates, graph.wave_review_epoch?.batchEpoch),
+  }) };
+}
+
+/**
+ * Name each reviewed Task the restart issues in full, and why its accepted
+ * evidence did not carry, as one JSON line on the restart's diagnostic output.
+ * The reasons are the restart's result, never part of the registration.
+ */
+function reportNotCarried(runId: string, notCarried: readonly TaskNotCarried[]): void {
+  if (notCarried.length === 0) return;
+  process.stderr.write(`${JSON.stringify({ kind: "wave-gate-restart-not-carried", runId, notCarried })}\n`);
 }
 
 async function exhaustedWaveReviewerAttempts(
@@ -159,7 +175,7 @@ export async function restartWaveGateFacade(
       if (!pristine.ok) return failed(pristine.error.message);
       if (!pristine.value) return failed("replacement Wave Gate run must be pristine before authority installation");
     }
-    let prepared: WaveGateRestartPreparation;
+    let prepared: Pick<WaveGateRestartPreparation, "registration" | "exhaustedSlots">;
     if (alreadyRestarted) {
       const active = before.active_wave_gate;
       const stored = storedProgram;
@@ -170,7 +186,8 @@ export async function restartWaveGateFacade(
       if (stored.restart?.previousRunId !== previousHandle.runId) {
         return failed("replacement run registration lacks exact previous-run restart audit authority");
       }
-      prepared = Object.freeze({ graph: before, registration: stored, exhaustedSlots: stored.restart.exhaustedSlots });
+      // A replay re-decides nothing, so it has no not-carried report to repeat.
+      prepared = Object.freeze({ registration: stored, exhaustedSlots: stored.restart.exhaustedSlots });
     } else {
       const exhausted = await exhaustedWaveReviewerAttempts(previousHandle, before, previousRegistration);
       if (!exhausted.ok) return failed(exhausted.message);
@@ -195,7 +212,7 @@ export async function restartWaveGateFacade(
           return failed("replacement Wave Gate run is already registered under different authority");
         }
       }
-      prepared = await manager.updateAndReturn((locked) => {
+      const committed = await manager.updateAndReturn((locked) => {
         const transition = prepareExhaustedWaveGateRestart(
           locked,
           previousHandle.runId,
@@ -211,6 +228,8 @@ export async function restartWaveGateFacade(
         }
         return { state: transition.value.graph, value: transition.value };
       });
+      reportNotCarried(nextHandle.runId, committed.notCarried);
+      prepared = committed;
     }
     if (prepared.exhaustedSlots.length === 0) {
       return failed("replacement registration contains no exhausted-slot restart audit evidence");

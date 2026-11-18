@@ -14,7 +14,7 @@ export type RegisteredReviewerProtocol<Descriptor extends ReviewerProtocolDescri
   | Readonly<{ schemaVersion: 1; reviewerProtocol?: never }>
   | Readonly<{ schemaVersion: 2; reviewerProtocol: Descriptor }>;
 
-/** One Wave Gate run on a restart lineage, named by its run and authority. */
+/** One Wave Gate run on a restart lineage, named by its run and authority digest. */
 export type CarriedReviewAuthority = Readonly<{ runId: string; authorityDigest: string }>;
 
 /**
@@ -34,11 +34,12 @@ export type WaveReviewCarry =
   | Readonly<{ kind: "accepted-slots"; taskId: string; agents: readonly [string, ...string[]] }>;
 
 /**
- * The carry plan a restart froze into its replacement's registration:
- * `lineage` is every run on the restart chain, oldest first; `carried` lists
- * the reviewed Tasks that carry, in registration order. Absent when nothing
- * carries, so such a registration is byte-identical to one written before
- * carry existed.
+ * The carry plan a restart froze into its replacement's registration.
+ * `lineage` is every run along the unbroken chain of carrying restarts that led
+ * here, oldest first: a predecessor that itself carried nothing starts the
+ * chain afresh. `carried` lists the reviewed Tasks that carry, in registration
+ * order. Absent when nothing carries, so such a registration is byte-identical
+ * to one written before carry existed.
  */
 export type WaveReviewCarryAudit = Readonly<{
   lineage: readonly [CarriedReviewAuthority, ...CarriedReviewAuthority[]];

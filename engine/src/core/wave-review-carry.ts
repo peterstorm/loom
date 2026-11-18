@@ -4,8 +4,11 @@
  * reissuing them, and the transitions that apply it.
  *
  * - `planRestartCarry` decides, once and under the restart lock, what each
- *   reviewed Task carries. The result is frozen into the replacement's
- *   registration (`restart.carry`).
+ *   reviewed Task carries, and why each Task that does not carry is issued in
+ *   full. The carry audit is frozen into the replacement's registration
+ *   (`restart.carry`); the not-carried reasons are reported by the restart.
+ * - `publishedRostersOf` reads, from the predecessor's journal, the roster each
+ *   Task's whole-roster acceptance was issued under.
  * - `rebindCarriedReviewRun` installs a partly accepted Task's Review Run under
  *   the replacement's Review Packet. Each carried slot keeps the identity it was
  *   accepted under and names its origin, and each exhausted agent gets the
@@ -14,10 +17,10 @@
  *   from this run, or it was carried along the recorded restart lineage.
  * - `parseWaveReviewCarryAudit` is the registration boundary's parser.
  *
- * One admissibility predicate serves the restart and the install. Evidence
- * carries only while nothing it judged has changed: the reviewer protocol
- * descriptor, the Review Generation, the prior Finding IDs, the derived roster
- * and the reviewed workspace scope and head.
+ * One admissibility rule serves the restart and the install. Evidence carries
+ * only while nothing it judged has changed: the reviewer protocol descriptor,
+ * the Review Generation, the prior Finding IDs, the derived roster and the
+ * reviewed workspace scope and head.
  *
  * Pure: no I/O, no clock, no randomness.
  */
@@ -33,6 +36,7 @@ import {
   isNonEmpty,
   parseArtifactDigest,
   parseOrchestrationRunId,
+  type AgentRequestAuthority,
   type DomainResult,
   type NonEmpty,
 } from "./orchestration-contract";
@@ -45,6 +49,7 @@ import type {
   WaveReviewCarryAudit,
 } from "./wave-gate-program";
 import { taskReviewScope, waveReviewStanding, waveTaskReviewRoster } from "./wave-review-authority";
+import { issuedRoles, waveReviewCarryOf } from "./wave-review-carry-plan";
 
 /** The reviewed workspace a carry is judged against: its canonical scope and content head. */
 export type ReviewedBytes = Readonly<{ scope: readonly string[]; headSha: string }>;
@@ -55,12 +60,67 @@ export type RestartCarryObservation = Readonly<{
   workspaces: readonly ReviewedWorkspaceObservation[];
   /** The roles the predecessor published at attempt 1 for each Task of its
    *  current batch, in any order: the roster a whole-roster acceptance was
-   *  issued under. */
+   *  issued under (`publishedRostersOf`). */
   issuedRosters: ReadonlyMap<string, readonly string[]>;
 }>;
 
+/** One judged fact that changed since the evidence was accepted. */
+export type CarryDrift = "protocol" | "generation" | "prior-findings" | "roster" | "scope" | "head" | "review-status";
+
+/** Why one reviewed Task carries nothing and is issued in full. */
+export type NotCarriedReason =
+  /** The predecessor registered another reviewer protocol: nothing carries (ADR-0084). */
+  | Readonly<{ kind: "predecessor-protocol" }>
+  | Readonly<{ kind: "workspace-unobserved" }>
+  /** The observation was refused by the reviewed-workspace core, with its refusal. */
+  | Readonly<{ kind: "workspace-rejected"; error: string }>
+  | Readonly<{ kind: "roster-not-derivable" }>
+  /** No reviewer slot was accepted, and the Task holds no current acceptance. */
+  | Readonly<{ kind: "nothing-accepted" }>
+  /** Every slot of the run was accepted: a settled run is never outstanding. */
+  | Readonly<{ kind: "fully-accepted-run" }>
+  /** The acceptance was recorded by a run outside the unbroken carrying chain. */
+  | Readonly<{ kind: "acceptance-off-lineage"; runId: string }>
+  | Readonly<{ kind: "drift"; fields: NonEmpty<CarryDrift> }>;
+
+/** One reviewed Task a restart did not carry, and why. */
+export type TaskNotCarried = Readonly<{ taskId: string; reason: NotCarriedReason }>;
+
+/** A restart's carry decision: the audit it records, and every reviewed Task issued in full with its reason. */
+export type RestartCarryPlan = Readonly<{
+  carry: WaveReviewCarryAudit | undefined;
+  notCarried: readonly TaskNotCarried[];
+}>;
+
+/** The operator-facing sentence for a not-carried reason. */
+export function describeNotCarried(reason: NotCarriedReason): string {
+  switch (reason.kind) {
+    case "predecessor-protocol": return "its predecessor registered another reviewer protocol";
+    case "workspace-unobserved": return "its reviewed workspace was not observed";
+    case "workspace-rejected": return `its reviewed workspace observation was refused: ${reason.error}`;
+    case "roster-not-derivable": return "its review roster cannot be derived";
+    case "nothing-accepted": return "none of its reviewer slots was accepted";
+    case "fully-accepted-run": return "its Review Run already accepted every slot";
+    case "acceptance-off-lineage": return `its acceptance from run ${reason.runId} is not on the restart lineage`;
+    case "drift": return `drift in ${reason.fields.join(", ")}`;
+    default: return assertNever(reason);
+  }
+}
+
+function assertNever(value: never): never {
+  throw new Error(`unknown not-carried reason ${JSON.stringify(value)}`);
+}
+
 /** The terms carried evidence is judged by: the replacement's protocol, the Task's derived roster and its bytes. */
-type CarryTerms = Readonly<{ protocol: ReviewerProtocolDescriptor; roster: readonly string[]; bytes: ReviewedBytes }>;
+export type CarryTerms = Readonly<{ protocol: ReviewerProtocolDescriptor; roster: readonly string[]; bytes: ReviewedBytes }>;
+
+const notCarried = (reason: NotCarriedReason): DomainResult<never, NotCarriedReason> => ({ ok: false, error: reason });
+
+/** The facts in `checks` that no longer hold, as a drift reason; null when every one holds. */
+function driftOf(checks: readonly (readonly [CarryDrift, boolean])[]): NotCarriedReason | null {
+  const fields = checks.flatMap(([field, holds]) => (holds ? [] : [field]));
+  return isNonEmpty(fields) ? Object.freeze({ kind: "drift", fields: Object.freeze(fields) }) : null;
+}
 
 const sameAuthority = (left: CarriedReviewAuthority, right: CarriedReviewAuthority): boolean =>
   left.runId === right.runId && left.authorityDigest === right.authorityDigest;
@@ -69,54 +129,60 @@ const sameAuthority = (left: CarriedReviewAuthority, right: CarriedReviewAuthori
 const sameRoles = (left: readonly string[], right: readonly string[]): boolean =>
   left.length === right.length && new Set(left).size === left.length && left.every((role) => right.includes(role));
 
-/** The reviewed workspace scope `task` declares now is the one `bytes` hold. */
+/** The reviewed scope `task` declares now is the one `bytes` hold. */
 const bytesCoverTask = (task: Task, bytes: ReviewedBytes): boolean =>
   canonicalStructuralEquals(taskReviewScope(task), bytes.scope);
 
 /**
- * The accepted agents of `run` that may carry, in roster order, or null when
- * the run's evidence no longer judges `task` as it stands. A run with no
- * accepted slot carries nothing, and neither does one with every slot
- * accepted: that run has already settled.
+ * The accepted agents of `run` that may carry, in roster order, or why none
+ * may: drift in what the evidence judged, no accepted slot, or every slot
+ * accepted (that run has already settled).
  */
-function carriableSlots(task: Task, run: CurrentReviewRun, terms: CarryTerms): NonEmpty<string> | null {
-  if (!canonicalStructuralEquals(run.reviewer_protocol, terms.protocol) ||
-      run.generation !== (task.review_generation ?? 0) ||
-      !canonicalStructuralEquals(run.prior_finding_ids, (task.findings ?? []).map(({ id }) => id)) ||
-      !canonicalStructuralEquals(run.expected_agents, terms.roster) ||
-      !canonicalStructuralEquals(run.workspace_scope, terms.bytes.scope) || !bytesCoverTask(task, terms.bytes) ||
-      run.workspace_head_sha !== terms.bytes.headSha) {
-    return null;
-  }
+function carriableSlots(task: Task, run: CurrentReviewRun, terms: CarryTerms): DomainResult<NonEmpty<string>, NotCarriedReason> {
+  const drift = driftOf([
+    ["protocol", canonicalStructuralEquals(run.reviewer_protocol, terms.protocol)],
+    ["generation", run.generation === (task.review_generation ?? 0)],
+    ["prior-findings", canonicalStructuralEquals(run.prior_finding_ids, (task.findings ?? []).map(({ id }) => id))],
+    ["roster", canonicalStructuralEquals(run.expected_agents, terms.roster)],
+    ["scope", canonicalStructuralEquals(run.workspace_scope, terms.bytes.scope) && bytesCoverTask(task, terms.bytes)],
+    ["head", run.workspace_head_sha === terms.bytes.headSha],
+  ]);
+  if (drift !== null) return notCarried(drift);
   const accepted = run.expected_agents.filter((agent) => run.evidence.some((evidence) => evidence.agent === agent));
-  return isNonEmpty(accepted) && accepted.length < run.expected_agents.length ? accepted : null;
+  if (!isNonEmpty(accepted)) return notCarried({ kind: "nothing-accepted" });
+  return accepted.length < run.expected_agents.length ? { ok: true, value: accepted } : notCarried({ kind: "fully-accepted-run" });
 }
 
-/** Whether `task`'s whole-roster acceptance by `acceptance` still judges it as it stands. */
+/**
+ * Whether `task`'s whole-roster acceptance by `acceptance`, issued under
+ * `acceptedRoster`, still judges it as it stands; the reason when it does not.
+ */
 function carriableAcceptance(
   task: Task,
   acceptance: CarriedReviewAuthority,
-  terms: Omit<CarryTerms, "roster">,
-): boolean {
+  acceptedRoster: readonly string[],
+  terms: CarryTerms,
+): DomainResult<true, NotCarriedReason> {
   const accepted = task.accepted_review_authority;
-  return task.review_run === undefined && accepted?.reviewer_protocol !== undefined &&
-    (task.review_status === "passed" || task.review_status === "blocked") &&
-    accepted.run_id === acceptance.runId && accepted.authority_digest === acceptance.authorityDigest &&
-    canonicalStructuralEquals(accepted.reviewer_protocol, terms.protocol) &&
-    accepted.generation === (task.review_generation ?? 0) &&
-    canonicalStructuralEquals(accepted.scope, terms.bytes.scope) && bytesCoverTask(task, terms.bytes) &&
-    accepted.head_sha === terms.bytes.headSha;
-}
-
-/** The plan entry of `taskId` in a registration's carry audit, if it carries. */
-export function waveReviewCarryOf(carry: WaveReviewCarryAudit | undefined, taskId: string): WaveReviewCarry | undefined {
-  return carry?.carried.find((entry) => entry.taskId === taskId);
+  if (task.review_run !== undefined || accepted?.reviewer_protocol === undefined ||
+      accepted.run_id !== acceptance.runId || accepted.authority_digest !== acceptance.authorityDigest) {
+    return notCarried({ kind: "nothing-accepted" });
+  }
+  const drift = driftOf([
+    ["protocol", canonicalStructuralEquals(accepted.reviewer_protocol, terms.protocol)],
+    ["generation", accepted.generation === (task.review_generation ?? 0)],
+    ["roster", sameRoles(acceptedRoster, terms.roster)],
+    ["scope", canonicalStructuralEquals(accepted.scope, terms.bytes.scope) && bytesCoverTask(task, terms.bytes)],
+    ["head", accepted.head_sha === terms.bytes.headSha],
+    ["review-status", task.review_status === "passed" || task.review_status === "blocked"],
+  ]);
+  return drift === null ? { ok: true, value: true } : notCarried(drift);
 }
 
 /**
  * The roster the run that recorded `acceptance` issued for `taskId`: the
- * predecessor's own published roster, or the roster an earlier restart carried
- * for it. A run not on the lineage has none.
+ * predecessor's own published roster, or the roster the predecessor itself
+ * carried for it. A run outside that chain has none.
  */
 function acceptedRoster(
   acceptance: CarriedReviewAuthority,
@@ -130,6 +196,34 @@ function acceptedRoster(
   return entry?.kind === "accepted-task" && sameAuthority(entry.acceptance, acceptance) ? entry.roster : undefined;
 }
 
+/** One request a predecessor published, with the batch epoch and Task its loaded context names (null when none). */
+export type PublishedRequest = Readonly<{
+  authority: Readonly<{ program: AgentRequestAuthority["program"]; attempt: 1 | 2; role: string }>;
+  batchEpoch: string | null;
+  taskId: string | null;
+}>;
+
+/**
+ * The roles each Task's packets published in a predecessor's current batch,
+ * in journal order, read from its already-loaded attempt-1 requests. Only Wave
+ * reviewer requests of the current `batchEpoch` count: a retry, the
+ * spec-check, another program's request or a stale epoch's packet publishes no
+ * roster. A predecessor with no current epoch published none.
+ */
+export function publishedRostersOf(
+  candidates: readonly PublishedRequest[],
+  batchEpoch: string | undefined,
+): ReadonlyMap<string, readonly string[]> {
+  const rosters = new Map<string, readonly string[]>();
+  if (batchEpoch === undefined) return rosters;
+  for (const { authority, batchEpoch: published, taskId } of candidates) {
+    if (authority.program !== "wave-gate" || authority.attempt !== 1 || authority.role === "spec-check-invoker" ||
+        published !== batchEpoch || taskId === null) continue;
+    rosters.set(taskId, [...(rosters.get(taskId) ?? []), authority.role]);
+  }
+  return rosters;
+}
+
 export type RestartCarryInput = Readonly<{
   graph: TaskGraph;
   previousRunId: string;
@@ -139,43 +233,69 @@ export type RestartCarryInput = Readonly<{
   observation: RestartCarryObservation;
 }>;
 
+/** What one reviewed Task carries, or why it carries nothing; null for a Task that owes no review. */
+function taskCarry(
+  input: RestartCarryInput,
+  task: Task,
+  predecessor: CarriedReviewAuthority,
+): DomainResult<WaveReviewCarry, NotCarriedReason> | null {
+  const { graph, previous, protocol, observation } = input;
+  if (waveReviewStanding(task).kind === "exempt") return null;
+  if (previous.schemaVersion !== 2 || !canonicalStructuralEquals(previous.reviewerProtocol, protocol)) {
+    return notCarried({ kind: "predecessor-protocol" });
+  }
+  const workspace = observation.workspaces.find((candidate) => candidate.taskId === task.id);
+  if (workspace === undefined) return notCarried({ kind: "workspace-unobserved" });
+  const admitted = admitReviewedWorkspace(task.id, taskReviewScope(task), workspace);
+  if (!admitted.ok) return notCarried({ kind: "workspace-rejected", error: admitted.error });
+  const review = waveTaskReviewRoster(graph, 2, task);
+  if (review.kind !== "roster") return notCarried({ kind: "roster-not-derivable" });
+  const terms: CarryTerms = { protocol, roster: review.roster, bytes: { scope: admitted.value.scope, headSha: admitted.value.headSha } };
+  const run = task.review_run;
+  if (run !== undefined) {
+    if (run.reviewer_protocol === undefined) return notCarried({ kind: "drift", fields: ["protocol"] });
+    const agents = carriableSlots(task, run, terms);
+    return agents.ok ? { ok: true, value: Object.freeze({ kind: "accepted-slots", taskId: task.id, agents: agents.value }) } : agents;
+  }
+  const accepted = task.accepted_review_authority;
+  if (accepted?.run_id === undefined) return notCarried({ kind: "nothing-accepted" });
+  const acceptance: CarriedReviewAuthority = Object.freeze({ runId: accepted.run_id, authorityDigest: accepted.authority_digest });
+  const roster = acceptedRoster(acceptance, task.id, predecessor, previous.restart?.carry, observation.issuedRosters);
+  if (roster === undefined) return notCarried({ kind: "acceptance-off-lineage", runId: acceptance.runId });
+  const carriable = carriableAcceptance(task, acceptance, roster, terms);
+  return carriable.ok
+    ? { ok: true, value: Object.freeze({ kind: "accepted-task", taskId: task.id, roster: review.roster, acceptance }) }
+    : carriable;
+}
+
 /**
  * What each reviewed Task of an exhausted run carries into its replacement,
- * or undefined when nothing does. A predecessor that issued another protocol
- * carries nothing (ADR-0084). A Task whose evidence no longer judges it, or
- * whose workspace was not observed, carries nothing and is reset as before.
+ * and why each other reviewed Task is issued in full. The audit is undefined
+ * when nothing carries. A predecessor that issued another protocol carries
+ * nothing (ADR-0084). The lineage extends the predecessor's own only when the
+ * predecessor itself carried, so it lists the unbroken chain of carrying
+ * restarts that led here, oldest first.
  */
-export function planRestartCarry(input: RestartCarryInput): WaveReviewCarryAudit | undefined {
-  const { graph, previous, previousRunId, protocol, observation } = input;
-  if (previous.schemaVersion !== 2 || !canonicalStructuralEquals(previous.reviewerProtocol, protocol)) return undefined;
+export function planRestartCarry(input: RestartCarryInput): RestartCarryPlan {
+  const { graph, previous, previousRunId } = input;
   const predecessor: CarriedReviewAuthority = Object.freeze({ runId: previousRunId, authorityDigest: previous.authorityDigest });
-  const predecessorCarry = previous.restart?.carry;
-  const carried = previous.taskIds.flatMap((taskId): readonly WaveReviewCarry[] => {
+  const decisions = previous.taskIds.flatMap((taskId) => {
     const task = graph.tasks.find((candidate) => candidate.id === taskId);
-    const workspace = observation.workspaces.find((candidate) => candidate.taskId === taskId);
-    if (task === undefined || workspace === undefined || waveReviewStanding(task).kind === "exempt") return [];
-    const admitted = admitReviewedWorkspace(taskId, taskReviewScope(task), workspace);
-    const review = waveTaskReviewRoster(graph, 2, task);
-    if (!admitted.ok || review.kind !== "roster") return [];
-    const bytes: ReviewedBytes = { scope: admitted.value.scope, headSha: admitted.value.headSha };
-    const run = task.review_run;
-    if (run !== undefined) {
-      const agents = run.reviewer_protocol === undefined ? null : carriableSlots(task, run, { protocol, roster: review.roster, bytes });
-      return agents === null ? [] : [Object.freeze({ kind: "accepted-slots" as const, taskId, agents })];
-    }
-    const accepted = task.accepted_review_authority;
-    if (accepted?.run_id === undefined) return [];
-    const acceptance: CarriedReviewAuthority = Object.freeze({ runId: accepted.run_id, authorityDigest: accepted.authority_digest });
-    const roster = acceptedRoster(acceptance, taskId, predecessor, predecessorCarry, observation.issuedRosters);
-    return roster !== undefined && sameRoles(roster, review.roster) &&
-        carriableAcceptance(task, acceptance, { protocol, bytes })
-      ? [Object.freeze({ kind: "accepted-task" as const, taskId, roster: review.roster, acceptance })]
-      : [];
+    const decision = task === undefined ? null : taskCarry(input, task, predecessor);
+    return decision === null ? [] : [{ taskId, decision }];
   });
-  if (!isNonEmpty(carried)) return undefined;
-  const [first, ...rest] = predecessorCarry?.lineage ?? [predecessor];
-  const lineage: NonEmpty<CarriedReviewAuthority> = predecessorCarry === undefined ? [first] : [first, ...rest, predecessor];
-  return Object.freeze({ lineage: Object.freeze(lineage), carried: Object.freeze(carried) });
+  const carried = decisions.flatMap(({ decision }) => (decision.ok ? [decision.value] : []));
+  const skipped = Object.freeze(decisions.flatMap(({ taskId, decision }) =>
+    (decision.ok ? [] : [Object.freeze({ taskId, reason: decision.error })])));
+  if (!isNonEmpty(carried)) return Object.freeze({ carry: undefined, notCarried: skipped });
+  const predecessorCarry = previous.restart?.carry;
+  const lineage: NonEmpty<CarriedReviewAuthority> = predecessorCarry === undefined
+    ? [predecessor]
+    : [...predecessorCarry.lineage, predecessor];
+  return Object.freeze({
+    carry: Object.freeze({ lineage: Object.freeze(lineage), carried: Object.freeze(carried) }),
+    notCarried: skipped,
+  });
 }
 
 /** Where the replacement installs a partly accepted Task's Review Run. */
@@ -210,16 +330,18 @@ export function rebindCarriedReviewRun(
   const run = task.review_run;
   if (run?.reviewer_protocol === undefined) return refuse("has no current Review Run to carry");
   const accepted = carriableSlots(task, run, { protocol: binding.protocol, roster: binding.roster, bytes: binding.bytes });
-  if (accepted === null || !canonicalStructuralEquals(accepted, carry.agents)) {
-    return refuse("carried review evidence no longer judges its reviewed workspace, Review Generation, prior Findings, roster or protocol");
+  if (!accepted.ok) return refuse(`carried review evidence no longer judges it: ${describeNotCarried(accepted.error)}`);
+  if (!canonicalStructuralEquals(accepted.value, carry.agents)) {
+    return refuse("holds accepted slots other than the ones its restart carried");
   }
   const origin: ReviewSlotOrigin = Object.freeze({
     run_id: run.wave_gate_run_id, authority_digest: run.wave_gate_authority_digest, packet_id: run.packet_id,
   });
+  const reissued = issuedRoles(binding.roster, carry);
   const slots: CurrentReviewRunSlotAuthority[] = [];
   for (const agent of binding.roster) {
     const issued = binding.issued.find((slot) => slot.agent === agent);
-    if (!carry.agents.includes(agent)) {
+    if (reissued.includes(agent)) {
       if (issued === undefined) return refuse(`reissues ${agent} without a fresh slot`);
       slots.push(issued);
       continue;
@@ -251,17 +373,18 @@ export function rebindCarriedReviewRun(
 /**
  * Why an `accepted-task` carry cannot be honoured at install, or null: the
  * Task must still hold exactly the acceptance the restart carried, and that
- * acceptance must still judge its reviewed bytes.
+ * acceptance must still judge it as it stands, under the roster the restart
+ * recorded.
  */
 export function carriedAcceptanceProblem(
   task: Task,
   carry: Extract<WaveReviewCarry, { kind: "accepted-task" }>,
-  protocol: ReviewerProtocolDescriptor,
-  bytes: ReviewedBytes,
+  terms: CarryTerms,
 ): string | null {
-  return carriableAcceptance(task, carry.acceptance, { protocol, bytes })
+  const carriable = carriableAcceptance(task, carry.acceptance, carry.roster, terms);
+  return carriable.ok
     ? null
-    : `Task ${task.id} no longer holds the exact acceptance its restart carried from run ${carry.acceptance.runId}`;
+    : `Task ${task.id} cannot keep the acceptance its restart carried from run ${carry.acceptance.runId}: ${describeNotCarried(carriable.error)}`;
 }
 
 /**
