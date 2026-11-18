@@ -166,7 +166,7 @@ missing owner means the stamp names a path the Wave no longer has, and the remed
 the plan and its owner, or re-populate). An owner, matrix test or reached import that exists but the
 filesystem refuses is still `repository-file-unreadable`.
 
-**Where it is documented.** The operator remedy table in `docs/operations.md` (§ Owner verification) covers
+**Where it is documented.** The operator remedy table in `docs/verification.md` (§ Owner verification) covers
 "missing siblings", `coverage-bound-exceeded`, `repository-file-unreadable` and `alias-config-unresolvable`. `references/executable-models.md` describes the sibling-coverage
 rule and lists "An import is not proof of exercise" under Known residuals (AS-035).
 
@@ -201,7 +201,7 @@ scenarios live in `engine/tests/acceptance/owner-verification-core.acceptance.te
   and the purity lint keeps them that way.
 - The 512-file bound and the walk's minimal reads keep the check cheap and its failure mode explicit. A
   `missing` verdict names every unreached path, owner first, which maps directly to the remedy in
-  `docs/operations.md`.
+  `docs/verification.md`.
 
 **Negative:**
 - A runtime import is not proof of exercise. A matrix test that imports a sibling but never drives the rule

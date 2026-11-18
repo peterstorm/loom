@@ -173,7 +173,7 @@ Invariants:
   explicit extraction-only routes), `engine/tests/core/reviewer-protocol-docs.test.ts`
   (new vs archived/extraction-only wording) and `engine/tests/wire-contract.test.ts`
   (stamp/schema consistency). The extraction-only flow is documented in
-  `agents/README.md`.
+  `docs/model-profiles-and-calibration.md`.
 
 ## Consequences
 

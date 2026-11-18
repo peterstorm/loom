@@ -55,7 +55,8 @@ at all and fall back to the engine default when read.
 `.loom/verification-manifest.json` gains two optional keys:
 - `affectedRunner` gets the same form checks as `acceptanceRunner`: `{files}` passed as one whole argument,
   a `required-file` JUnit report under `.loom/completion-reports/`,
-  `timeoutMs <= MAX_AFFECTED_RUNNER_TIMEOUT_MS` (`120_000`), and a report path that differs from
+  `timeoutMs <= MAX_AFFECTED_RUNNER_TIMEOUT_MS` (120,000 when accepted; raised to `240_000` by #120 —
+  commit `a5cd4118`, so a hub-module slice run fits — see `engine/src/core/verification-manifest.ts`), and a report path that differs from
   `acceptanceRunner`'s and from every Wave check's.
 - `testFileSuffixes: NonEmpty<string>`.
 

@@ -194,7 +194,7 @@ the readiness rejection's `ownerVerificationRemedies`: the `ownerVerificationFin
 the same lines the gate diagnostic prints, present whenever the owner check contributed a finding. `status.ts`
 renders only the report.
 
-Operator-facing behavior and remedies: `docs/operations.md` ("Owner verification blocks a Wave Gate (G5b)").
+Operator-facing behavior and remedies: `docs/verification.md` ("Owner verification blocks a Wave Gate (G5b)").
 Structure: `docs/architecture.md` ("Owner verification in the completion suite (G5b)").
 
 ## Consequences

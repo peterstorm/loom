@@ -168,7 +168,7 @@ result's `ownerVerification`, taking its remedies from the gate's own diagnostic
 - `engine/src/handlers/helpers/orchestration.ts` derives that document once and hands it to whichever
   renderer `--json` selects; the shell decides nothing about owner verification.
 - No new log channel. Status reads only the persisted completion result.
-- Operator-facing documentation is in `docs/operations.md`, under "Owner verification blocks a Wave Gate
+- Operator-facing documentation is in `docs/verification.md`, under "Owner verification blocks a Wave Gate
   (G5b)": "Reading the result" and the remedies table.
 
 ## Consequences

@@ -70,8 +70,7 @@ in this feature is chartered to pay it down.
 **`engine/src/core/family-sites.ts` is the one pure home of the family-site metric. `helper family-sites` is
 its read-only file-system shell, and `docs/family-sites.baseline.json` is its baseline at `626db7fb`.**
 
-**Pure core: `engine/src/core/family-sites.ts`.** It is listed in DEFAULT_PURE_MODULES in
-`engine/src/linter/programmatic/no-io-in-pure-modules.ts`, so I/O in it is a lint failure.
+**Pure core: `engine/src/core/family-sites.ts`.** The project's purity configuration (`.claude/linter/rules/config.json`, `pureModules`; formerly the rule's own DEFAULT_PURE_MODULES list, removed by #156 — see ADR-0043's amendment) covers it, so I/O in it is a lint failure.
 
 - `FAMILIES` is a frozen table of `Family = { id: FamilyId; owners: NonEmpty<string>; patterns: NonEmpty<RegExp> }`.
   `FamilyId` is the closed union `"fail-closed-path-probes" | "shell-tokenizing" | "claim-conservation"`.
@@ -131,7 +130,7 @@ removed. The recorded counts are:
 | `shell-tokenizing` | `engine/src/core/shell-{quoting,command,normalize,substitution,write-targets,ansi-c}.ts` | 23 |
 | `claim-conservation` | `engine/src/core/findings.ts` | 13 |
 
-The counts are cited in `docs/operations.md` ("Measuring second sites: the family-site metric") and in its
+The counts are cited in `docs/development.md` ("Measuring second sites: the family-site metric") and in its
 repository layout listing.
 
 **Tests.** `engine/tests/core/family-sites.test.ts` covers the pure core:
