@@ -686,7 +686,9 @@ records receipts; on resume an already-receipted effect is **reconciled, not rer
 ### 4.15 The linter
 
 Two tiers, **both fail closed**: the immediate tier (regex + immediate programmatic
-rules) runs after every edit (`lint-file.sh`); the full tier runs at the Wave Gate
+rules) runs after every edit (`lint-file.sh`) and returns a **block** carrying the
+violations (or the engine error) — the edit has landed, but the model is told at once
+and the run cannot treat it as clean; the full tier runs at the Wave Gate
 (`lint-wave-gate`), with **lint runtime skew** detection (whether the lint that judged
 a branch ran over the same bytes now current).
 
@@ -852,7 +854,7 @@ per-mechanism *why it works* and *what remains*.
 | `guard-state-file` | bash | crash ⇒ block | State File, evidence/bindings, machine defs |
 | `guard-subagent-authority` | bash (subagents) | crash ⇒ block | audit/orchestration authority |
 | `record-evidence` | post | never blocks | ledger facts |
-| `lint-file` | post | never blocks (lint findings do, at gates) | immediate-tier hygiene |
+| `lint-file` | post | blocks on a violation or an engine error (immediate tier) | edit-time rule enforcement; the full tier runs at the Wave Gate |
 | `type-diagnostics` | post | advisory | type-check feedback in-loop |
 | `mark-subagent-active` | start | records | machine binding, attempt binding |
 | `record-orchestration-spawn` | post | records | correlator ↔ request authority |
