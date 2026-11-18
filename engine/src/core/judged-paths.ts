@@ -18,7 +18,8 @@
  *   not a judgement (`self-written`).
  *
  * When prevention still misses (a judgement nobody declared), the fallback
- * is a Forward Fix Task appended to the active Wave (`forward-fix.ts`).
+ * is a Task appended to the active Wave that takes the sealed code and that
+ * the judge depends on (`add-task --sealed-file --before`, `task-addition.ts`).
  *
  * Pure module: no I/O, no clock, no randomness.
  */

@@ -20,13 +20,13 @@ fixes it, so the same failure does not come back in another shape (ADR-0083).
 bun "${CLAUDE_PLUGIN_ROOT}/engine/src/cli.ts" helper retro-facts [--wave <N>]
 ```
 
-It prints, per Wave, the gate runs, reopenings, Forward Fixes, plan edits, retries, escalations, remediations,
+It prints, per Wave, the gate runs, reopenings, plan edits (added and withdrawn Tasks included), legacy Forward Fixes, retries, escalations, remediations,
 Finding counts and the Tasks with friction and their failure kinds, plus which Waves crossed a retro threshold.
 After `complete-orchestration` the live graph is gone; pass `--graph <archived completed_task_graph-*.json>`.
 
 Then read the **why** behind each fact, and only then:
 
-- the session transcript around each escalation, reopening, plan edit and Forward Fix;
+- the session transcript around each escalation, reopening and plan edit;
 - the run directories under `.claude/reviews/` for Review Run retries and refused reviewer payloads;
 - the operator notes and reasons the audits carry (`retro-facts` names the Tasks; the State File holds the reasons).
 
