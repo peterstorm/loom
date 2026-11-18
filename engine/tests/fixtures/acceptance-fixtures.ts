@@ -17,4 +17,4 @@ export function contentDigest(text: string): ArtifactDigest {
 }
 
 /** A frozen path the shell read and digested. */
-export const seen = (sha256: ArtifactDigest): FrozenPathObservation => ({ kind: "digest", sha256 });
+export const seen = (sha256: ArtifactDigest, text = ""): FrozenPathObservation => ({ kind: "digest", sha256, text });

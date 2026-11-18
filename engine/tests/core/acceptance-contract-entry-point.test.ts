@@ -21,6 +21,7 @@ const CONTRACT: PlanContract = {
     acceptance: [{ path: ACCEPTANCE, anchors: ["AS-003", "AS-004"] }],
     supportedDomain: null,
     entryPoint: ROUTE,
+    runtimeSeams: [],
     statement: "One valid call wins.",
   },
 };

@@ -146,6 +146,7 @@ const declaredContract = (id: string, typesPath: string, acceptancePath: string)
     acceptance: [{ path: acceptancePath, anchors: ["AS-001"] }],
     supportedDomain: null,
     entryPoint: null,
+    runtimeSeams: [],
     statement: `${id} statement`,
   },
 });

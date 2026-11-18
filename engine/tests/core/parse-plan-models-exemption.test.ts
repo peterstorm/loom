@@ -79,7 +79,9 @@ const checked = (text: string) =>
 /**
  * The models as the pre-feature parser built them: every owned ownership
  * loses its `mutation` member, which must be `verify` for a plan without the
- * field. Key order is kept, so the canonical digest is comparable.
+ * field, and every declared contract loses its later `runtimeSeams` member
+ * (ADR-0088), which must be empty for a plan without that field. Key order is
+ * kept, so the canonical digest is comparable.
  */
 function preFeatureModels(models: PlanModels): unknown {
   return {
@@ -89,6 +91,12 @@ function preFeatureModels(models: PlanModels): unknown {
       const { mutation, ...ownership } = invariant.ownership;
       expect(mutation, `${invariant.id} mutation policy`).toEqual({ kind: "verify" });
       return { ...invariant, ownership };
+    }),
+    contracts: models.contracts.map((contract) => {
+      if (contract.declaration.kind !== "declared") return contract;
+      const { runtimeSeams, ...declaration } = contract.declaration;
+      expect(runtimeSeams, `${contract.id} runtime seams`).toEqual([]);
+      return { ...contract, declaration };
     }),
   };
 }

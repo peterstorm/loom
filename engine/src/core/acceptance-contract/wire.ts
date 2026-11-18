@@ -24,6 +24,8 @@ import {
   type ContractRevision,
   type ContractTypes,
   type FrozenPathDigest,
+  type RuntimeSeam,
+  RUNTIME_SEAM_SYMBOL,
 } from "./model";
 import { frozenPaths } from "./tasks";
 import type {
@@ -174,10 +176,24 @@ function parseRevision(raw: unknown, path: string, index: number, expected: read
   }));
 }
 
+/** One persisted runtime seam: exactly `{symbol, source}`, an identifier and a non-empty source or null. */
+function parseRuntimeSeam(raw: unknown, path: string): Parsed<RuntimeSeam> {
+  const record = exactRecord(raw, ["symbol", "source"], path);
+  if (!record.ok) return record;
+  const { symbol, source } = record.value;
+  if (typeof symbol !== "string" || !RUNTIME_SEAM_SYMBOL.test(symbol)) return err(`${path}.symbol must be an identifier`);
+  if (source !== null && (typeof source !== "string" || source.trim() === "")) return err(`${path}.source must be null or a non-empty string`);
+  return ok(freeze({ symbol, source: source as string | null }));
+}
+
+const CONTRACT_FIELDS = [
+  "schemaVersion", "id", "title", "statement", "contractTask", "types", "acceptance", "supportedDomain", "freeze", "revisions",
+] as const;
+
 function parseContract(raw: unknown, path: string): Parsed<AcceptanceContract> {
-  const record = exactRecord(raw, [
-    "schemaVersion", "id", "title", "statement", "contractTask", "types", "acceptance", "supportedDomain", "freeze", "revisions",
-  ], path);
+  // `runtimeSeams` is present only when the plan declared some (ADR-0088).
+  const withSeams = typeof raw === "object" && raw !== null && Object.hasOwn(raw, "runtimeSeams");
+  const record = exactRecord(raw, withSeams ? [...CONTRACT_FIELDS, "runtimeSeams"] : CONTRACT_FIELDS, path);
   if (!record.ok) return record;
   const fields = record.value;
   if (fields.schemaVersion !== 1) return err(`${path}.schemaVersion must be 1`);
@@ -199,6 +215,11 @@ function parseContract(raw: unknown, path: string): Parsed<AcceptanceContract> {
   if (fields.supportedDomain !== null && !files.some(({ path: file }) => file === fields.supportedDomain)) {
     return err(`${path}.supportedDomain must be null or one of the acceptance files`);
   }
+  const seams = withSeams ? nonEmptyList(fields.runtimeSeams, `${path}.runtimeSeams`, parseRuntimeSeam) : null;
+  if (seams !== null && !seams.ok) return seams;
+  if (seams !== null && new Set(seams.value.map(({ symbol }) => symbol)).size !== seams.value.length) {
+    return err(`${path}.runtimeSeams names one symbol twice`);
+  }
   const frozen = parseFreeze(fields.freeze, `${path}.freeze`, { types: types.value, acceptance: files });
   if (!frozen.ok) return frozen;
   const revisions = parseRevisionHistory(fields.revisions, path, paths, frozen.value);
@@ -212,6 +233,7 @@ function parseContract(raw: unknown, path: string): Parsed<AcceptanceContract> {
     types: types.value,
     acceptance: files,
     supportedDomain: fields.supportedDomain as string | null,
+    ...(seams === null ? {} : { runtimeSeams: seams.value }),
     freeze: frozen.value,
     revisions: revisions.value,
   }));

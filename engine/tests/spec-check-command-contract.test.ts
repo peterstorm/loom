@@ -202,3 +202,13 @@ describe("commands/spec-check.md is bound to the projection it consumes", () => 
     expect(command).toContain("unprojected run is an absence of structural evidence, never a pass");
   });
 });
+
+describe("runtime seams in the prompts (ADR-0088)", () => {
+  it("spec-check judges a harness that bypasses the declared seams as HIGH, and plan alignment reports SEAM-N", () => {
+    expect(command).toContain("**Runtime seams:**");
+    expect(command).toMatch(/harness whose path differs from the declared production path is a HIGH finding/);
+    const alignment = readFileSync(new URL("../../commands/templates/phase-plan-alignment.md", import.meta.url), "utf8");
+    expect(alignment).toContain("ID `SEAM-N`");
+    expect(alignment).toContain("- **SEAM-N** —");
+  });
+});

@@ -97,7 +97,7 @@ When the design contains one of the following, read the named section of `{loom_
 | A rule a regex lint rule can check | §3 Invariants | `## Invariants` with `### INV-<n>: <title>`, `**Tier:** checkable`, `**Rule file:**`; write the rule JSON and prove it loads (below) |
 | A rule no lint rule can check | §3 Invariants | The same block with `**Tier:** advisory`: prose, never presented as enforced |
 | Any rule applied at two or more entry points, whatever its tier | §3, "Invariant ownership" | `**Owner module:**`, `**Sibling entry points:**`, `**Matrix test:**`, optionally `**Mutation exemption:**`; or `**Owner module:** none` with `**Unowned reason:**`. One invariant per rule |
-| A feature slice whose observable behavior a test can decide | §4 Contracts | `## Contracts` with `### CT-<n>: <title>`, `**Types file:**` (or `none` with `**No types reason:**`), `**Acceptance tests:**`, `**Statement:**`, optionally `**Supported domain:**` and `**Entry point:**` |
+| A feature slice whose observable behavior a test can decide | §4 Contracts | `## Contracts` with `### CT-<n>: <title>`, `**Types file:**` (or `none` with `**No types reason:**`), `**Acceptance tests:**`, `**Statement:**`, optionally `**Supported domain:**`, `**Entry point:**` and `**Runtime seams:**` (the production symbols every request passes through; declare them for every route a host or framework wraps) |
 | A new implementation file that provides a function a contract's types file declares | §5 Export bindings | `**Export bindings:**` under that group's fenced block in `## File Structure` |
 | An algebraic data type that crosses a module boundary | §5, "Frozen ADTs" | Declare it once, in the contract's types file; plan no Task that adds its own copy |
 
@@ -150,4 +150,4 @@ Decompose reads these sections:
 - Implementation phases (count and names)
 - Key architectural decisions with rationale (the `### AD-N` blocks)
 - The approach the user picked at the gate, and the one you recommended if different
-- Executable models declared, if any: LC-N lifecycles with machine file paths; the Pipeline AuthoredDag path; INV-N invariants with tier, rule file paths and the `validate-lint-rules` output for checkable ones, and owner module, sibling count, matrix test and any mutation exemption with its reason (or the unowned reason); CT-N contracts with types file or reason, acceptance files and the Requirements each decides
+- Executable models declared, if any: LC-N lifecycles with machine file paths; the Pipeline AuthoredDag path; INV-N invariants with tier, rule file paths and the `validate-lint-rules` output for checkable ones, and owner module, sibling count, matrix test and any mutation exemption with its reason (or the unowned reason); CT-N contracts with types file or reason, acceptance files and the Requirements each decides, and the runtime seams each route passes through

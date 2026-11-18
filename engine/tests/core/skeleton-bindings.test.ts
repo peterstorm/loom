@@ -44,6 +44,7 @@ const contract = (contractId: string, typesPath: string | null, acceptancePath: 
     acceptance: [{ path: acceptancePath, anchors: ["AS-001"] }],
     supportedDomain: null,
     entryPoint: null,
+    runtimeSeams: [],
     statement: `${contractId} statement`,
   },
 });
