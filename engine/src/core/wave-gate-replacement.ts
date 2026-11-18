@@ -9,7 +9,7 @@
  * reviewer protocol (v4, ADR-0084) whatever its predecessor issued.
  *
  * A restart carries every accepted reviewer slot of a same-protocol
- * predecessor into the replacement by reference (ADR-0088) and records the
+ * predecessor into the replacement by reference (ADR-0089) and records the
  * plan in the registration; only spec-check and the exhausted slots are
  * reissued. A predecessor under another protocol carries nothing, so no
  * reviewer straddles two protocols. Orphan recovery always reissues every

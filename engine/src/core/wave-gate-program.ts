@@ -18,7 +18,7 @@ export type RegisteredReviewerProtocol<Descriptor extends ReviewerProtocolDescri
 export type CarriedReviewAuthority = Readonly<{ runId: string; authorityDigest: string }>;
 
 /**
- * What one reviewed Task carries into a replacement run (ADR-0088):
+ * What one reviewed Task carries into a replacement run (ADR-0089):
  * - `accepted-task`: every slot of `roster` was accepted along the lineage, by
  *   the run `acceptance` names. The Task is not reissued.
  * - `accepted-slots`: the `agents` slots were accepted; only the rest of the

@@ -159,7 +159,7 @@ export async function reconcileWaveReviewIssuance(
     requests: Parameters<typeof publishReviewInitialBatch>[1],
     packets: Parameters<typeof publishReviewInitialBatch>[2],
   ) => publishReviewInitialBatch(handle, requests, packets, CURRENT_BATCH_LABEL, registration);
-  // A Review Run a restart kept for its carried slots (ADR-0088) belongs to
+  // A Review Run a restart kept for its carried slots (ADR-0089) belongs to
   // the predecessor until this batch rebinds it, so it does not count as
   // installed here.
   const carry = registration.restart?.carry;

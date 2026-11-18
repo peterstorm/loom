@@ -121,7 +121,7 @@ type CurrentReviewRunSlotIdentity = ReviewRunSlotBase & Readonly<{ request_id: s
 
 /**
  * The Wave Gate run, its authority digest and the Review Packet that issued a
- * carried slot's accepted evidence (ADR-0088). Always a run other than the
+ * carried slot's accepted evidence (ADR-0089). Always a run other than the
  * one whose Review Run holds the slot: the State File refuses a carried slot
  * naming its own run, or one without evidence.
  */
@@ -131,7 +131,7 @@ export type ReviewSlotOrigin = Readonly<{ run_id: string; authority_digest: stri
 export type IssuedReviewRunSlotAuthority = CurrentReviewRunSlotIdentity & Readonly<{ carried_from?: never }>;
 
 /**
- * Carried Review Evidence (ADR-0088): a slot a restart carried into this run
+ * Carried Review Evidence (ADR-0089): a slot a restart carried into this run
  * by reference. It keeps the slot, request and context identity of the run
  * that issued it, so the evidence it accepted still binds exactly; this run
  * never re-mints identity for work it did not issue.

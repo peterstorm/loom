@@ -1,5 +1,5 @@
 /**
- * Carried Review Evidence (ADR-0088): the one rule for when a Wave Gate restart
+ * Carried Review Evidence (ADR-0089): the one rule for when a Wave Gate restart
  * may carry accepted reviewer slots into its replacement run instead of
  * reissuing them, and the transitions that apply it.
  *

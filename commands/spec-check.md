@@ -173,6 +173,8 @@ If the unclaimed section says every scenario is claimed, Step 5 still checks eve
 
 Every identifier in the unclaimed-scenario roster already has its settled `CRITICAL:` line from Step 4. Coverage is an additional fact reported beside it.
 
+**Production path.** When the plan declares `**Runtime seams:**` for a contract, Read its acceptance tests and any benchmark of the same route, and confirm each drives the route through those seams, not around them (a test that calls the DAG or handler directly while production wraps it in a host). A harness whose path differs from the declared production path is a HIGH finding naming the route, the seam and the harness, even when its tests pass: the fugue-dags handoff that failed every live request passed a test that skipped the host's checkpoint encoding (ADR-0088).
+
 **Unprojected:** grep the spec for `Given .* When .* Then` lines and assess each, as before.
 
 **Severity for a scenario that IS claimed by a Task but has no test** (these carry no Step 4 CRITICAL, so this is their only severity):

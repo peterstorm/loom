@@ -310,14 +310,15 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision("git restore .claude/state/active_task_graph.json")).toBe("block");
   });
 
-  it("write-capable 'readers' are NOT allowlisted (flag-level write channels)", () => {
+  it("write-capable 'readers' block in their writing form (flag-level write channels)", () => {
     // Each of these reads by default but owns a file-writing flag/operand:
-    // sort -o, uniq <in> <out>, less -o, xxd -r <out>. Membership requires
-    // NO write capability under any flags, so they block even in read shape
-    // (fail-closed over-block, documented in config.ts).
+    // sort -o, uniq <in> <out>, less -o, xxd -r <out>. sort and uniq are
+    // admitted only without that flag or operand (read-only-filters.ts,
+    // loom#216); less and xxd stay off the list in every shape.
     expect(guardDecision("sort -o active_task_graph.json active_task_graph.json")).toBe("block");
-    expect(guardDecision("sort active_task_graph.json")).toBe("block");
+    expect(guardDecision("sort active_task_graph.json")).toBe("allow");
     expect(guardDecision("uniq /tmp/forged.json active_task_graph.json")).toBe("block");
+    expect(guardDecision("uniq active_task_graph.json")).toBe("allow");
     expect(guardDecision("less -o active_task_graph.json /tmp/forged.json")).toBe("block");
     expect(guardDecision("less active_task_graph.json")).toBe("block");
     expect(guardDecision("xxd -r /tmp/forged.hex .claude/state/active_task_graph.json")).toBe("block");
@@ -370,8 +371,12 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision("ls .loom 2>/dev/null")).toBe("allow");
     expect(guardDecision("cat active_task_graph.json 2> /dev/null")).toBe("allow");
     expect(guardDecision("cat active_task_graph.json 2>/dev/null > active_task_graph.json")).toBe("block");
-    expect(guardDecision("cat active_task_graph.json 2>/dev/null-copy")).toBe("block");
-    expect(guardDecision("cat active_task_graph.json 2>>/dev/null")).toBe("block");
+    // A redirect of a read is judged by its target (loom#216): a known file
+    // outside guarded state is written, not state, so it is allowed; a target
+    // the guard cannot spell statically is not.
+    expect(guardDecision("cat active_task_graph.json 2>/dev/null-copy")).toBe("allow");
+    expect(guardDecision("cat active_task_graph.json 2>>/dev/null")).toBe("allow");
+    expect(guardDecision("cat active_task_graph.json > \"$OUT\"")).toBe("block");
   });
 
   it("`>&file` redirects stdout+stderr TO THE FILE — not an fd dup (round-15 bypass)", () => {
@@ -862,12 +867,14 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision("cat `active_task_graph.json")).toBe("block");
   });
 
-  it("binding a guarded path to a variable blocks — the indirection seed", () => {
-    // A pure assignment has no read-only head; allowing it would hand the
-    // path to ANY later segment (the round-13 bypass shape). Reads never
-    // need the binding — inline the path instead.
-    expect(guardDecision("F=active_task_graph.json && cat $F")).toBe("block");
+  it("binding a guarded path to a variable puts the whole line in scope — the indirection seed", () => {
+    // A binding writes nothing, but it can hand the path to ANY later segment
+    // (the round-13 bypass shape). So a line that binds is judged whole
+    // (loom#216): every segment must read, and a read through the binding is
+    // allowed while a write through it, in any chain, blocks.
+    expect(guardDecision("F=active_task_graph.json && cat $F")).toBe("allow");
     expect(guardDecision("F=.claude/state/active_task_graph.json; sed -i s/x/y/ $F")).toBe("block");
+    expect(guardDecision("F=.claude/state/active_task_graph.json; npm test && rm $F")).toBe("block");
     expect(guardDecision("export G=review-invocations.json; sponge $G < /tmp/forged.json")).toBe("block");
   });
 

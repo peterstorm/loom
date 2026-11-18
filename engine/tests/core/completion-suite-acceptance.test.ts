@@ -63,6 +63,7 @@ const PLAN: PlanContract = {
     acceptance: [{ path: ACCEPTANCE, anchors: ["AS-003"] }],
     supportedDomain: null,
     entryPoint: null,
+    runtimeSeams: [],
     statement: "One valid call wins.",
   },
 };

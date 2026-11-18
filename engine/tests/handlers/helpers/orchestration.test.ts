@@ -3519,7 +3519,7 @@ describe("orchestration CLI", () => {
       "restart", "--runs-root", runsRoot, "--run", previousRun, "--new-run", replacementRun,
     ], "", root));
     expect(restarted.status, restarted.stderr).toBe(0);
-    // ADR-0088: the accepted slot carries into the replacement by reference;
+    // ADR-0089: the accepted slot carries into the replacement by reference;
     // only spec-check and the four exhausted slots are reissued.
     const replacement = JSON.parse(restarted.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
     expect(replacement.requests.map(({ authority }) => authority.role)).toEqual([

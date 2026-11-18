@@ -1036,7 +1036,7 @@ export function reviewRunError(
 
 /**
  * Why a stored `carried_from` is not the origin of Carried Review Evidence
- * (ADR-0088), or null: it names the run, authority digest and Review Packet
+ * (ADR-0089), or null: it names the run, authority digest and Review Packet
  * that issued the slot, and that run is never the one holding it.
  */
 function slotOriginError(raw: unknown, holdingRunId: unknown): string | null {

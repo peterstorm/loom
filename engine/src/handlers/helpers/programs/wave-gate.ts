@@ -70,7 +70,7 @@ function verifyCompletedWaveProtocols(handle: RunDirHandle, registration: Regist
     .map((request) => issuedWaveProtocol(handle, registration, request));
   const rosters = waveTaskReviewRosters(graph, registration.schemaVersion, registration.taskIds);
   if (!rosters.ok) throw new Error(`completed Wave Gate roster cannot be derived: ${rosters.error}`);
-  // A role a restart carried (ADR-0088) was published along the lineage, not by this run.
+  // A role a restart carried (ADR-0089) was published along the lineage, not by this run.
   for (const { taskId, roster } of issuedWaveReviewRosters(rosters.value, registration.restart?.carry)) {
     if (roster.some((role) => !protocols.some((protocol) =>
       protocol.subject.taskId === taskId && protocol.request.role === role))) {
@@ -212,7 +212,7 @@ async function resumeWaveGateAfter(
     const refreshed = specCheck.value;
     // Only reviewed Tasks are bound: a Task exempt from Wave review holds no
     // accepted review authority. An acceptance is this run's own, or one its
-    // restart carried along the recorded lineage (ADR-0088).
+    // restart carried along the recorded lineage (ADR-0089).
     const registeredTasks = refreshed.tasks.filter((task) => registration.taskIds.includes(task.id));
     const acceptanceProblems = waveReviewView(registeredTasks).reviewed
       .flatMap((task) => waveAcceptanceProblem(task, registration, handle.runId) ?? []);

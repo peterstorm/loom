@@ -1,4 +1,5 @@
 import { sha256Hex } from "./digest";
+import { rejudgeClaimsOf } from "./spec-rejudgement";
 import type {
   Finding,
   ReviewRun,
@@ -146,7 +147,7 @@ export type WaveTaskReviewRoster = Readonly<{ taskId: string; roster: WaveReview
 
 /**
  * The roles one reviewed Task's Review Packet issues in a batch, in roster
- * order: its whole roster, or the part a restart did not carry (ADR-0088).
+ * order: its whole roster, or the part a restart did not carry (ADR-0089).
  */
 export type WaveTaskIssuedRoles = Readonly<{ taskId: string; roster: readonly [WaveReviewRole, ...WaveReviewRole[]] }>;
 
@@ -410,7 +411,7 @@ export function waveReviewSubjects(rosters: readonly WaveTaskIssuedRoles[]): rea
 }
 
 /**
- * The rosters a replacement run actually issues (ADR-0088): each reviewed
+ * The rosters a replacement run actually issues (ADR-0089): each reviewed
  * Task's roster less the slots its registration's carry plan carries, and no
  * entry at all for a Task whose whole roster carries. With no plan it is
  * `rosters` itself, so every subject, slot and request keeps its identity.
@@ -1021,6 +1022,7 @@ export function coverageTasks(graph: TaskGraph, currentWave: number): readonly C
     decisionRecord: task.agent === DECISION_RECORD_AGENT,
     ...taskRowFields(task),
     anchorHashes: parsedAnchorHashes(task.spec_anchor_hashes),
+    rejudgeClaims: rejudgeClaimsOf(graph, task),
   })));
 }
 
@@ -1141,7 +1143,7 @@ export function prepareWaveReviewBatch(
     specCheckDocuments,
     // The restart's carry plan decides which subjects this batch issues, so
     // the epoch commits to it. Absent, the payload is byte-identical to a
-    // batch prepared before carry existed (ADR-0088).
+    // batch prepared before carry existed (ADR-0089).
     ...(carry === undefined ? {} : { carried: carry.carried }),
   })));
   if (!batchEpoch.ok) return failure(batchEpoch.error.message);

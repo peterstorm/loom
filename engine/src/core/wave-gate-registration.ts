@@ -184,7 +184,7 @@ export function installWaveGateRegistration(
  * block and no successor gate can install.
  *
  * A restart passes `carriedRunTaskIds`, the Tasks whose accepted slots its
- * carry plan carries (ADR-0088). Their Review Run stays, unfolded, for the
+ * carry plan carries (ADR-0089). Their Review Run stays, unfolded, for the
  * replacement to rebind; only the exhausted slots' failure state is cleared.
  */
 export function resetWaveGateReviewAuthority(

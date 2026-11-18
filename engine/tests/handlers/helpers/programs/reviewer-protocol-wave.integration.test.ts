@@ -815,7 +815,7 @@ describe("registered Wave reviewer protocol", () => {
     expect((await resume(p, handle)).kind).toBe("blocked");
     const restarted = await runCli(p, ["restart", "--runs-root", p.runsRoot, "--run", handle.runId, "--new-run", "run.restarted"]);
     expect(restarted.kind, JSON.stringify(restarted)).toBe("spawn-batch");
-    // ADR-0088: only spec-check and the exhausted slot are reissued; the four
+    // ADR-0089: only spec-check and the exhausted slot are reissued; the four
     // accepted slots carry their evidence by reference, unfolded, so the prior
     // roster the reissued reviewer assesses is the one its siblings assessed.
     expect(restarted.requests?.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", requests[1]!.authority.role]);
@@ -841,7 +841,7 @@ describe("registered Wave reviewer protocol", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ADR-0088 (loom#213 Cause 1b): a restart reissues only the exhausted slots.
+// ADR-0089 (loom#213 Cause 1b): a restart reissues only the exhausted slots.
 // ---------------------------------------------------------------------------
 
 describe("Wave Gate restart carries accepted review evidence", () => {

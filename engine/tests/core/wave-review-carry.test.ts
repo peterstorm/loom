@@ -1,5 +1,5 @@
 /**
- * Carried Review Evidence (ADR-0088, loom#213 Cause 1b): a Wave Gate restart
+ * Carried Review Evidence (ADR-0089, loom#213 Cause 1b): a Wave Gate restart
  * carries every accepted reviewer slot into the replacement run by reference
  * and reissues only the exhausted slots and spec-check.
  */

@@ -44,6 +44,7 @@ const CONTRACT: PlanContract = {
     acceptance: [{ path: ACCEPTANCE, anchors: ["FR-001"] }],
     supportedDomain: null,
     entryPoint: null,
+    runtimeSeams: [],
     statement: "Orders are priced.",
   },
 };
@@ -57,6 +58,7 @@ const TYPELESS: PlanContract = {
     acceptance: [{ path: "tests/audit.acceptance.test.ts", anchors: ["FR-002"] }],
     supportedDomain: null,
     entryPoint: null,
+    runtimeSeams: [],
     statement: "Audits are logged.",
   },
 };

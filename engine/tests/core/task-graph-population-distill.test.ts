@@ -105,6 +105,7 @@ const CONTRACT: PlanContract = {
     acceptance: [{ path: "tests/contract.acceptance.test.ts", anchors: ["AS-001"] }],
     supportedDomain: null,
     entryPoint: null,
+    runtimeSeams: [],
     statement: "The contract freezes its types and acceptance tests.",
   },
 };

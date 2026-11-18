@@ -92,7 +92,7 @@ export function waveBatchSpecCheckAuthority(batch: WaveRequestBatch): DomainResu
  * reviewed workspace must be unchanged since the batch was prepared, and a
  * Task that already carries a Review Packet must carry exactly this one.
  *
- * A restart's carry plan (ADR-0088) is honoured here. A Task whose whole
+ * A restart's carry plan (ADR-0089) is honoured here. A Task whose whole
  * roster carries installs nothing and must still hold the acceptance its
  * restart carried. A Task carrying some slots has its predecessor's Review
  * Run rebound under this batch's Review Packet. Its carried slots keep their

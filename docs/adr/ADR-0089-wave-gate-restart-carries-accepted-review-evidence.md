@@ -1,4 +1,4 @@
-# ADR-0088: Wave Gate restart carries accepted review evidence and reissues only exhausted slots
+# ADR-0089: Wave Gate restart carries accepted review evidence and reissues only exhausted slots
 
 ## Status
 Accepted (2026-11-18). Partly supersedes ADR-0084: its "every request is reissued" bullet, for a

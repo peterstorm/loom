@@ -121,6 +121,7 @@ const CONTRACT: PlanContract = {
     acceptance: [{ path: "tests/population.acceptance.test.ts", anchors: ["AS-001"] }],
     supportedDomain: null,
     entryPoint: null,
+    runtimeSeams: [],
     statement: "Population installs pending Tasks.",
   },
 };

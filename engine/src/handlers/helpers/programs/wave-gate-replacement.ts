@@ -38,7 +38,7 @@ import { issuedWaveProtocol } from './wave-review-context';
 import { resumeWaveGateFacade } from './wave-gate';
 
 /**
- * What restart observes for its carry decision (ADR-0088): every reviewed
+ * What restart observes for its carry decision (ADR-0089): every reviewed
  * registered Task's current workspace under `root`, and the predecessor's
  * attempt-1 Wave reviewer requests with the batch epoch and Task each loaded
  * context names. `publishedRostersOf` decides which of them published a

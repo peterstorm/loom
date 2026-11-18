@@ -228,7 +228,7 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration restart \
 The restart refuses while any outstanding slot lacks a durably captured
 attempt-2 rejection. On success it retires the old run and returns the
 replacement `spawn-batch`. Every reviewer slot the old run accepted carries into
-the replacement by reference (ADR-0088), so the batch is spec-check plus only
+the replacement by reference (ADR-0089), so the batch is spec-check plus only
 the exhausted slots. A Task whose whole roster was accepted gets no request.
 A Task whose reviewed bytes, Review Generation, prior Findings or roster
 changed, or a run registered under the earlier reviewer protocol, is reissued

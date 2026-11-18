@@ -261,7 +261,7 @@ function parseWaveRegistrationAudit(raw: Readonly<Record<string, unknown>>): Pro
   let restart: WaveGateRestartAudit | undefined;
   if (Object.hasOwn(raw, "restart")) {
     // A restart that carried accepted review evidence also records its carry
-    // plan (ADR-0088); one that carried nothing keeps the original two fields.
+    // plan (ADR-0089); one that carried nothing keeps the original two fields.
     const carried = typeof raw.restart === "object" && raw.restart !== null && Object.hasOwn(raw.restart, "carry");
     if (!exactObject(raw.restart, ["previousRunId", "exhaustedSlots", ...(carried ? ["carry"] : [])]) ||
         typeof raw.restart.previousRunId !== "string" || !Array.isArray(raw.restart.exhaustedSlots) ||

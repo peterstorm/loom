@@ -1,5 +1,5 @@
 /**
- * Reading a restart's carry plan (ADR-0088): which entry a Task has, and what
+ * Reading a restart's carry plan (ADR-0089): which entry a Task has, and what
  * a replacement run still issues for it. Batch preparation, the locked
  * install, the carried-run rebinding, resume classification and completed-run
  * verification all ask here, so "issued = roster minus carried" has one
