@@ -9,11 +9,13 @@
  *
  * - records both observations and the Requirement diff (rewritten, added and
  *   withdrawn ids) in a `spec-amended` audit;
- * - re-anchors the claims of every Task that has not completed to the new text,
- *   since they are still to be verified against it;
- * - lists the claims of completed Tasks the change rewrote or withdrew as
- *   re-judgements: the next Wave Gate's spec-check judges each rewritten claim
- *   again (`pendingRejudgements`), and its completion re-anchors them;
+ * - re-anchors the rewritten claims of every Task that has not completed to the
+ *   new text, since they are still to be verified against it;
+ * - lists the claims of completed Tasks the change rewrote or withdrew. The
+ *   next Wave Gate's spec-check judges each rewritten one again
+ *   (`rejudgeClaimsOf`, `core/spec-rejudgement.ts`), and its completion
+ *   re-anchors it; a withdrawn one stays completed-claim drift until
+ *   `amend-spec-trace` drops it;
  * - retires the current Wave's review authority and spec-check, which froze the
  *   old text.
  *
@@ -25,15 +27,9 @@
  * graph commits.
  */
 
-import type { SpecAmendment, SpecAmendmentRejudgement, Task, TaskGraph } from "../types";
-import { parseSpecContentHash } from "./parse-spec";
+import type { IndexedSpecIndexObservation, SpecAmendment, SpecAmendmentRejudgement, Task, TaskGraph } from "../types";
 import type { DomainResult } from "./orchestration-contract";
-import {
-  completableRequirementIds,
-  recordedAnchorHashes,
-  specIndexObservationOf,
-  type SpecIndexAvailability,
-} from "./requirement-coverage";
+import { completableRequirementIds, recordedAnchorHashes, type SpecIndexAvailability } from "./requirement-coverage";
 import type { ParsedSpec } from "./parse-spec";
 import { SPEC_TRACE_VERSION } from "./spec-trace";
 import { reopenableWave, waveReopeningRefusalMessage } from "./task-revalidation";
@@ -47,6 +43,7 @@ export type SpecAmendmentRefusal = Readonly<{
     | "live-wave-gate"
     | "implementation-active"
     | "spec-authority-changed"
+    | "spec-changed-outside-amendments"
     | "spec-index-unavailable"
     | "withdrawn-still-claimed"
     | "invalid-reason";
@@ -92,6 +89,10 @@ export function specAmendmentDiff(before: ParsedSpec, after: ParsedSpec): SpecAm
     withdrawn: freeze([...old.keys()].filter((id) => !nowCompletable.has(id))),
   });
 }
+
+/** The durable observation of an indexed Spec Index: its path and the digest of the bytes it parsed. */
+const indexedObservation = (index: Extract<SpecIndexAvailability, { kind: "indexed" }>): IndexedSpecIndexObservation =>
+  freeze({ kind: "indexed", path: index.path, contentDigest: index.contentDigest });
 
 const claimsOf = (task: Task): readonly string[] => [...(task.spec_anchors ?? []), ...(task.spec_contributions ?? [])];
 
@@ -149,9 +150,13 @@ export function amendSpec(
   }
   if (current.contentDigest === proposed.contentDigest) return freeze({ ok: true as const, value: freeze({ kind: "unchanged" as const }) });
   const last = graph.spec_amendments?.at(-1);
-  if (last !== undefined && last.after.kind === "indexed" && last.before.kind === "indexed" &&
-      last.after.contentDigest === proposed.contentDigest && last.before.contentDigest === current.contentDigest) {
+  if (last !== undefined && last.after.contentDigest === proposed.contentDigest && last.before.contentDigest === current.contentDigest) {
     return freeze({ ok: true as const, value: freeze({ kind: "bytes-pending" as const, amendment: last }) });
+  }
+  // The audits form one chain: each amendment starts from the text the last one wrote.
+  if (last !== undefined && last.after.contentDigest !== current.contentDigest) {
+    return refuse("spec-changed-outside-amendments", `${LABEL} found ${current.path} holding text the last amendment did not ` +
+      "write; the spec changed outside amend-spec, so restore the last amended text before amending it again");
   }
   const parsedReason = parsePlanEditReason(reason);
   if (!parsedReason.ok) return refuse("invalid-reason", `${LABEL} reason ${parsedReason.error}`);
@@ -169,8 +174,8 @@ export function amendSpec(
     kind: "spec-amended",
     wave,
     reason: parsedReason.value,
-    before: specIndexObservationOf(current),
-    after: specIndexObservationOf(proposed),
+    before: indexedObservation(current),
+    after: indexedObservation(proposed),
     rewritten: diff.rewritten,
     added: diff.added,
     withdrawn: diff.withdrawn,
@@ -182,34 +187,4 @@ export function amendSpec(
     spec_amendments: freeze([...(graph.spec_amendments ?? []), amendment]),
   });
   return freeze({ ok: true as const, value: freeze({ kind: "amended" as const, graph: amended, amendment }) });
-}
-
-/**
- * The completed-Task claims a spec amendment listed for re-judgement that are
- * still owed one: the claim's recorded hash still differs from the text
- * `index` gives it now. A Wave Gate that completes after the amendment
- * re-anchors them (`reanchorVerifiedClaims`), which discharges them. A
- * withdrawn claim has no text to judge against; it stays the completed-claim
- * drift it already is until `amend-spec-trace` drops it.
- */
-export function pendingRejudgements(graph: TaskGraph, index: ParsedSpec): readonly SpecAmendmentRejudgement[] {
-  const text = completableHashes(index);
-  const seen = new Set<string>();
-  const pending: SpecAmendmentRejudgement[] = [];
-  for (const { rejudge } of graph.spec_amendments ?? []) {
-    for (const entry of rejudge) {
-      const key = `${entry.taskId}\u0000${entry.claim}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const current = text.get(entry.claim);
-      const task = graph.tasks.find(({ id }) => id === entry.taskId);
-      const recorded = task?.spec_anchor_hashes?.[entry.claim];
-      const parsed = recorded === undefined ? null : parseSpecContentHash(recorded);
-      if (current !== undefined && task?.status === "completed" && (task.spec_anchors ?? []).includes(entry.claim) &&
-          (parsed === null || parsed !== current)) {
-        pending.push(entry);
-      }
-    }
-  }
-  return freeze(pending);
 }

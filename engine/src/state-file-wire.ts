@@ -55,6 +55,7 @@ import type {
   SpecTraceAmendment,
   SpecAmendment,
   SpecAmendmentRejudgement,
+  IndexedSpecIndexObservation,
   SpecTraceAmendmentChange,
   SpecTraceOwnership,
   SpecTraceWaveGateRetirement,
@@ -934,6 +935,39 @@ function parseDistinctStrings(raw: unknown, label: string): ParseResult<readonly
   return new Set(raw).size === raw.length ? parseOk(Object.freeze([...raw] as string[])) : parseErr(`${label} repeats an id`);
 }
 
+/** The completed claims an amendment changed: exact `{taskId, claim}` pairs, each once, naming a Task and a changed id. */
+function parseRejudgements(
+  raw: unknown,
+  label: string,
+  taskIds: ReadonlySet<unknown>,
+  changed: ReadonlySet<string>,
+): ParseResult<readonly SpecAmendmentRejudgement[]> {
+  if (!Array.isArray(raw)) return parseErr(`${label} must be an array`);
+  const rejudge: SpecAmendmentRejudgement[] = [];
+  const seen = new Set<string>();
+  for (const [index, entry] of raw.entries()) {
+    const at = `${label}[${index}]`;
+    if (!isRecord(entry) || exactFieldsError(entry as Record<string, unknown>, ["taskId", "claim"], [], at) !== null) {
+      return parseErr(`${at} must be exactly {taskId, claim}`);
+    }
+    const { taskId, claim } = entry as Record<string, unknown>;
+    if (typeof taskId !== "string" || !taskIds.has(taskId)) return parseErr(`${at}.taskId names no Task of this TaskGraph`);
+    if (typeof claim !== "string" || !changed.has(claim)) return parseErr(`${at}.claim must be an id the amendment rewrote or withdrew`);
+    const key = `${taskId}\u0000${claim}`;
+    if (seen.has(key)) return parseErr(`${at} repeats ${taskId}:${claim}`);
+    seen.add(key);
+    rejudge.push(Object.freeze({ taskId, claim }));
+  }
+  return parseOk(Object.freeze(rejudge));
+}
+
+/** A parsed Spec Index observation `raw`, which must be the indexed arm. */
+function parseIndexedObservation(raw: unknown, label: string): ParseResult<IndexedSpecIndexObservation> {
+  const parsed = parseSpecIndexObservation(raw);
+  if (!parsed.ok) return parseErr(`${label}: ${parsed.error}`);
+  return parsed.value.kind === "indexed" ? parseOk(parsed.value) : parseErr(`${label} must be an indexed observation`);
+}
+
 /** One immutable Spec Amendment audit (ADR-0087), bound to the roster: every re-judgement names a Task. */
 function parseSpecAmendment(raw: unknown, label: string, tasks: readonly Record<string, unknown>[]): ParseResult<SpecAmendment> {
   if (!isRecord(raw)) return parseErr(`${label} must be an object`);
@@ -945,30 +979,22 @@ function parseSpecAmendment(raw: unknown, label: string, tasks: readonly Record<
   if (!wave.ok) return parseErr(wave.error);
   const reason = parsePlanEditReason(record.reason);
   if (!reason.ok) return parseErr(`${label}.reason ${reason.error}`);
-  const before = parseSpecIndexObservation(record.before);
-  if (!before.ok) return parseErr(`${label}.before: ${before.error}`);
-  const after = parseSpecIndexObservation(record.after);
-  if (!after.ok) return parseErr(`${label}.after: ${after.error}`);
+  const before = parseIndexedObservation(record.before, `${label}.before`);
+  if (!before.ok) return before;
+  const after = parseIndexedObservation(record.after, `${label}.after`);
+  if (!after.ok) return after;
   const rewritten = parseDistinctStrings(record.rewritten, `${label}.rewritten`);
   if (!rewritten.ok) return rewritten;
   const added = parseDistinctStrings(record.added, `${label}.added`);
   if (!added.ok) return added;
   const withdrawn = parseDistinctStrings(record.withdrawn, `${label}.withdrawn`);
   if (!withdrawn.ok) return withdrawn;
-  if (!Array.isArray(record.rejudge)) return parseErr(`${label}.rejudge must be an array`);
-  const rejudge: SpecAmendmentRejudgement[] = [];
-  for (const [index, entry] of record.rejudge.entries()) {
-    const at = `${label}.rejudge[${index}]`;
-    if (!isRecord(entry) || exactFieldsError(entry as Record<string, unknown>, ["taskId", "claim"], [], at) !== null) {
-      return parseErr(`${at} must be exactly {taskId, claim}`);
-    }
-    const { taskId, claim } = entry as Record<string, unknown>;
-    if (typeof taskId !== "string" || !tasks.some((task) => task.id === taskId)) return parseErr(`${at}.taskId names no Task of this TaskGraph`);
-    if (typeof claim !== "string" || ![...rewritten.value, ...withdrawn.value].includes(claim)) {
-      return parseErr(`${at}.claim must be an id the amendment rewrote or withdrew`);
-    }
-    rejudge.push(Object.freeze({ taskId, claim }));
-  }
+  const all = [...rewritten.value, ...added.value, ...withdrawn.value];
+  if (new Set(all).size !== all.length) return parseErr(`${label} lists one id as more than one of rewritten, added and withdrawn`);
+  const rejudge = parseRejudgements(
+    record.rejudge, `${label}.rejudge`, new Set(tasks.map((task) => task.id)), new Set([...rewritten.value, ...withdrawn.value]),
+  );
+  if (!rejudge.ok) return rejudge;
   const retiredRunId = parseNullableRunId(record.retiredRunId, `${label}.retiredRunId`);
   if (!retiredRunId.ok) return retiredRunId;
   return parseOk(Object.freeze({
@@ -981,7 +1007,7 @@ function parseSpecAmendment(raw: unknown, label: string, tasks: readonly Record<
     rewritten: rewritten.value,
     added: added.value,
     withdrawn: withdrawn.value,
-    rejudge: Object.freeze(rejudge),
+    rejudge: rejudge.value,
     retiredRunId: retiredRunId.value,
   }));
 }

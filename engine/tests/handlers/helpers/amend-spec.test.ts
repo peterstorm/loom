@@ -4,8 +4,8 @@
  * writes the bytes, and refusals that change nothing. The decision is pinned
  * in tests/core/spec-amendment.test.ts.
  */
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAmendSpecHandler, parseAmendSpecArgs } from "../../../src/handlers/helpers/amend-spec";
 import { newWaveGate } from "../../../src/core/wave-gate-model";
@@ -36,7 +36,9 @@ const task = (id: string, wave: number, anchors: readonly string[]) => taskFixtu
 function fixture(proposed: string): Readonly<{ statePath: string; specFile: string; proposedFile: string }> {
   const root = canonicalTempDir("loom-amend-spec-");
   cleanup.push(root);
-  const specFile = join(root, "spec.md");
+  // The spec sits in its own directory, so a test can make only that directory unwritable.
+  mkdirSync(join(root, "spec"));
+  const specFile = join(root, "spec", "spec.md");
   writeFileSync(specFile, BEFORE);
   const proposedFile = join(root, "proposed.md");
   writeFileSync(proposedFile, proposed);
@@ -101,6 +103,24 @@ describe("amend-spec helper", () => {
     writeFileSync(specFile, BEFORE); // a crash between the commit and the byte write
     const result = await createAmendSpecHandler(quiet)("", ["--from", proposedFile, "--reason", REASON]);
     expect(result.kind).toBe("passthrough");
+    expect(readFileSync(specFile, "utf8")).toBe(AFTER);
+    expect(new StateManager(statePath).load().spec_amendments).toHaveLength(1);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("reports a recorded amendment whose byte write failed, and the rerun finishes it", async () => {
+    const { statePath, specFile, proposedFile } = fixture(AFTER);
+    const directory = dirname(specFile);
+    chmodSync(directory, 0o555);
+    let result;
+    try {
+      result = await createAmendSpecHandler(quiet)("", ["--from", proposedFile, "--reason", REASON]);
+    } finally {
+      chmodSync(directory, 0o755);
+    }
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("the amendment is recorded, but writing") });
+    expect(readFileSync(specFile, "utf8")).toBe(BEFORE);
+    expect(existsSync(`${specFile}.amend-spec.tmp`)).toBe(false);
+    expect((await createAmendSpecHandler(quiet)("", ["--from", proposedFile, "--reason", REASON])).kind).toBe("passthrough");
     expect(readFileSync(specFile, "utf8")).toBe(AFTER);
     expect(new StateManager(statePath).load().spec_amendments).toHaveLength(1);
   });

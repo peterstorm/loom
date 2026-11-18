@@ -9,7 +9,7 @@
  * same command then answers `bytes-pending` and writes them.
  */
 
-import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import type { HookHandler } from "../../types";
 import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
@@ -51,11 +51,19 @@ function outcomeMessage(outcome: SpecAmendmentOutcome, specFile: string): string
     "Assign any added Requirement with helper amend-spec-trace, then start the Wave Gate.\n";
 }
 
-/** Write `bytes` to `path` through a sibling temporary file, so a reader never sees a partial spec. */
+/**
+ * Write `bytes` to `path` through a sibling temporary file, so a reader never
+ * sees a partial spec; the temporary file is removed when the write fails.
+ */
 function writeAtomically(path: string, bytes: Buffer): void {
   const temporary = `${path}.amend-spec.tmp`;
-  writeFileSync(temporary, bytes);
-  renameSync(temporary, path);
+  try {
+    writeFileSync(temporary, bytes);
+    renameSync(temporary, path);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
 }
 
 export function createAmendSpecHandler(subagentActive: SubagentActivity = anyActiveSubagent): HookHandler {
@@ -79,15 +87,26 @@ export function createAmendSpecHandler(subagentActive: SubagentActivity = anyAct
       // spec_file moved, and the transform reads no mutable source bytes.
       const specFile = manager.load().spec_file;
       if (specFile === null || specFile === undefined) return { kind: "error", message: "amend-spec: the TaskGraph names no spec_file" };
-      const current = observeSpecIndex(specFile);
       const proposed = projectSpecBytes(specFile, proposedBytes);
       const outcome = await manager.updateAndReturn((locked) => {
         assertQuiescentUnderLock(subagentActive, statePath, OPERATION);
-        const decided = amendSpec(locked, current, proposed, parsed.reason);
+        // Observed under the lock, so the audit's `before` names the bytes this run replaces.
+        const decided = amendSpec(locked, observeSpecIndex(locked.spec_file ?? specFile), proposed, parsed.reason);
         if (!decided.ok) throw new Error(`refused without changing state (${decided.error.kind}): ${decided.error.message}`);
         return { state: decided.value.kind === "amended" ? decided.value.graph : locked, value: decided.value };
       });
-      if (outcome.kind !== "unchanged") writeAtomically(specFile, proposedBytes);
+      if (outcome.kind !== "unchanged") {
+        try {
+          writeAtomically(specFile, proposedBytes);
+        } catch (error) {
+          return {
+            kind: "error",
+            message: `amend-spec: the amendment is recorded, but writing ${specFile} failed: ` +
+              `${error instanceof Error ? error.message : String(error)}. Fix the cause and run the same command again; ` +
+              "it writes the bytes without recording a second amendment",
+          };
+        }
+      }
       process.stderr.write(outcomeMessage(outcome, specFile));
       return { kind: "passthrough" };
     } catch (error) {

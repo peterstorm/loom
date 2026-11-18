@@ -19,14 +19,13 @@
 
 import type { Task, TaskGraph, WaveSpecCheckDocumentsAuthority } from "../types";
 import { recordedAnchorHashes, type SpecIndexAvailability } from "./requirement-coverage";
-import { rejudgeClaimsOf } from "./wave-review-authority";
+import { rejudgeClaimsOf } from "./spec-rejudgement";
 
 /** The claims of `task` this Wave verified: all of a Task of the Wave, and a completed Task's re-judged claims (ADR-0087). */
 function verifiedClaimsOf(graph: TaskGraph, task: Task, wave: number): readonly string[] {
   const anchors = task.spec_anchors ?? [];
   if (task.wave === wave) return anchors;
-  if (task.status !== "completed") return [];
-  return rejudgeClaimsOf(graph, task.id).filter((claim) => anchors.includes(claim));
+  return rejudgeClaimsOf(graph, task);
 }
 
 /**

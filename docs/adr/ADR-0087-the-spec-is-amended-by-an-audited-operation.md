@@ -40,18 +40,21 @@ construction.
   - **withdrawn:** it is gone, or now Out of Scope.
 - One locked commit does four things:
   - it appends a `spec-amended` audit to `spec_amendments`: the reason, both Spec Index observations, the three
-    id lists, the completed claims owed a re-judgement, and the retired run;
+    disjoint id lists, the completed claims it changed (a rewritten one is judged again, a withdrawn one is only
+    recorded), and the retired run;
   - it re-anchors every rewritten claim of a Task that has not completed to the new text;
   - it leaves completed Tasks' recorded hashes alone;
   - it retires the current Wave's review authority and spec-check.
 - The shell then writes the new spec bytes atomically. If a crash lands between the commit and the write, the
   same command answers `bytes-pending` and writes only the bytes. If the spec already holds the proposed bytes,
   it answers `unchanged`.
+- The audits form one chain. An amendment whose current spec is not the text the last amendment wrote is
+  refused, because the spec changed outside `amend-spec`. The shell observes the current spec under the lock.
 - **Re-judgement.** `coverageTasks` carries each Task's `rejudgeClaims`. While such a claim still drifts from the
   current text, the Requirement Coverage Projection lists it among the current Wave's rows instead of as advisory
   completed-claim drift, so spec-check judges it with the same verdicts as the Wave's own claims. When the Wave
-  Gate completes, `reanchorVerifiedClaims` re-anchors those claims to the reviewed text, which discharges them
-  (`pendingRejudgements`).
+  Gate completes, `reanchorVerifiedClaims` re-anchors those claims to the reviewed text, which discharges them.
+  One rule, `rejudgeClaimsOf` (`core/spec-rejudgement.ts`), names those claims for both.
 - A withdrawn completed claim has no text to be judged against. It stays completed-claim drift until
   `amend-spec-trace` drops it, which that operation allows because the id is no longer completable.
 - An added Requirement is assigned with `amend-spec-trace`.
