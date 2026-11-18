@@ -132,8 +132,9 @@ way, because it reads only the stopping agent's epoch.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> read-context
-    read-context --> implement : FileRead
+    state "read-context" as read_context
+    [*] --> read_context
+    read_context --> implement : FileRead
     implement --> verify : FileWrite
     note right of implement : allows Edit, Write, MultiEdit
     verify --> done : TestRunPassed
@@ -150,8 +151,9 @@ An agent that tries to Edit or Write before reading any file is blocked at the t
 
 ```mermaid
 stateDiagram-v2
-    [*] --> green-baseline
-    green-baseline --> distill : TestRunPassed
+    state "green-baseline" as green_baseline
+    [*] --> green_baseline
+    green_baseline --> distill : TestRunPassed
     distill --> [*] : requires TestRunPassed
     note right of distill : allows Edit, Write, MultiEdit
 ```
@@ -168,9 +170,11 @@ On Pi the baseline rule is prose in the brief and the agent definition; settleme
 
 ```mermaid
 stateDiagram-v2
-    [*] --> read-brief
-    read-brief --> walk-boundary : FileRead
-    walk-boundary --> demonstrate : FileRead >= 3
+    state "read-brief" as read_brief
+    state "walk-boundary" as walk_boundary
+    [*] --> read_brief
+    read_brief --> walk_boundary : FileRead
+    walk_boundary --> demonstrate : FileRead >= 3
     demonstrate --> done : FileRead >= 5
     done --> [*] : requires FileRead >= 5
 ```

@@ -870,8 +870,6 @@
     "engine/tests/handlers/subagent-stop/update-task-status-project-boundary.test.ts::engine/tests/handlers/i6-settlement.matrix.test.ts@1cc2ef38",
     "engine/tests/handlers/subagent-stop/update-task-status-project-boundary.test.ts::engine/tests/handlers/subagent-stop/update-task-status-project-boundary.test.ts@65b87900",
     "engine/tests/handlers/task-execution-attempt-registration.test.ts::engine/tests/core/spawn-graph-observation.test.ts@2dc8f735",
-    "engine/tests/machine/advance.property.test.ts::engine/tests/machine/advance.test.ts@c08b048e",
-    "engine/tests/machine/advance.test.ts::engine/tests/machine/advance.property.test.ts@c08b048e",
     "engine/tests/machine/ledger.test.ts::engine/tests/machine/ledger.test.ts@ab273592",
     "engine/tests/orchestration/orchestration-acceptance.test.ts::engine/tests/orchestration/orchestration-acceptance.test.ts@871d1166",
     "engine/tests/orchestration/orchestration-acceptance.test.ts::engine/tests/orchestration/orchestration-acceptance.test.ts@d4d2d7cd",

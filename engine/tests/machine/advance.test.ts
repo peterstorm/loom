@@ -13,21 +13,9 @@ import { initialState, type Evidence } from "../../src/machine/types";
 import { parseMachine } from "../../src/machine/parse-machine";
 import { reportSummary } from "./report-summary";
 import { AGENT_COMMAND_ORIGIN } from "../../src/machine/types";
+import { CODE_IMPLEMENTER_MACHINE_RAW, machineFrom } from "../fixtures/machine-definitions";
 
-// MachineDef is branded: parseMachine is its only producer, so tests build
-// the machine the same way production does — from a raw definition.
-const parsed = parseMachine({
-  agent: "code-implementer-agent",
-  enforcedTools: ["Edit", "Write", "MultiEdit"],
-  phases: [
-    { id: "read-context", allowedTools: [], advance: { event: "FileRead", min: 1 } },
-    { id: "implement", allowedTools: ["Edit", "Write", "MultiEdit"], advance: { event: "FileWrite", min: 1 } },
-    { id: "verify", allowedTools: ["Edit", "Write", "MultiEdit"], advance: { event: "TestRunPassed", min: 1 } },
-    { id: "done", terminal: true, allowedTools: ["Edit", "Write", "MultiEdit"], requires: [{ event: "TestRunPassed", min: 1 }] },
-  ],
-});
-if (!parsed.ok) throw new Error(parsed.error);
-const machine = parsed.value;
+const machine = machineFrom(CODE_IMPLEMENTER_MACHINE_RAW);
 
 const read = (path = "/a.ts"): Evidence => ({ kind: "FileRead", path });
 const write = (path = "/a.ts"): Evidence => ({ kind: "FileWrite", path, via: "tool" });
