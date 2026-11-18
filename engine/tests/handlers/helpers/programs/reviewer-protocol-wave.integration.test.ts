@@ -112,7 +112,7 @@ const asContractTask = (state: TaskGraph): TaskGraph => ({ ...state, acceptance_
 /** One implemented Wave 1 Task with satisfied proof over `declaredFiles`. */
 function implementedTask(id: string, declaredFiles: readonly string[], modified: string,
   trace: Pick<Task, "spec_anchors" | "spec_contributions">, priors: readonly Finding[] = []): Task {
-  const proof = evaluateTaskProof({ newTestsRequired: true, declaredArtifacts: declaredFiles },
+  const proof = evaluateTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: declaredFiles },
     trustedPassEvidence(declaredFiles));
   if (proof.state !== "satisfied") throw new Error("fixture requires actual satisfied proof construction");
   return taskFixture({ id, description: `review fixture ${id}`, agent: "code-implementer-agent", wave: 1,

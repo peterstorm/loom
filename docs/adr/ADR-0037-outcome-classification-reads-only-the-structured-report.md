@@ -109,7 +109,7 @@ therefore read as `killed` or `red` whatever the exit code, and the exit code ne
 
 ### Shell and verdict wiring
 
-- `matrixTestRunOf` in `engine/src/orchestration/owner-verification-runner.ts` maps a runner execution to
+- `matrixTestRunOf` in `engine/src/orchestration/mutation-run-steps.ts` maps a runner execution to
   a `MatrixTestRun`. A run that could not reach an observed end (refused authority, unconfirmed
   containment, a surviving process tree) becomes `spawn-failed`, never a report. Before every run,
   `engine/src/orchestration/owner-mutation-workspace.ts` deletes the runner's report path, so a stale
@@ -130,7 +130,7 @@ therefore read as `killed` or `red` whatever the exit code, and the exit code ne
   text and mutated text. `renderOwnerVerificationFailure` renders it with the Invariant, owner path and
   matrix test, and it names the remedy: strengthen the matrix test, or declare a mutation exemption
   (AS-011).
-- The operator-facing remedies for each kind are in `docs/operations.md`, under "Owner verification
+- The operator-facing remedies for each kind are in `docs/verification.md`, under "Owner verification
   blocks a Wave Gate (G5b)".
 
 ### Where the shipped code is more specific than the plan seed

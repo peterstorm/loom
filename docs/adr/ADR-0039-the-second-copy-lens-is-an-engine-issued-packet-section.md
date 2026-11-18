@@ -20,8 +20,8 @@ test only fails it once the copy diverges on an input the test happens to exerci
 Review has hard constraints of its own:
 
 - **Reviewer guidance is frozen.** The Wave reviewer shims load archived protocol text
-  (`references/reviewer-protocol-v2/agents/*.md`, including `code-reviewer.md` and
-  `architecture-tech-lead.md`). This feature may not edit that text. If it changed, every protocol-v2 review
+  (`agents/code-reviewer.md`, `agents/architecture-tech-lead.md` and the other agent definitions
+  shipped with the plugin — the retired references/reviewer-protocol-v2/agents/ copies moved there). This feature may not edit that text. If it changed, every protocol-v2 review
   would see different guidance, and the frozen-protocol guarantee would be lost.
 - **The rubric is versioned.** `REVIEWER_IMPACT_RUBRIC_V1` (`engine/src/core/reviewer-contract.ts`) controls
   severity. OOS-009 excludes a rubric version change, so the new duty has to fit inside the existing rubric.

@@ -134,7 +134,7 @@ function writeGraph(
       id, description: `implementation ${id}`, agent: "code-implementer-agent",
       wave: 1, status: "pending" as const, depends_on: [], file_list: [],
       new_tests_required: false,
-      proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+      proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] }),
     };
     const attempt = attempts[id];
     if (attempt === undefined) return taskFixture(base);

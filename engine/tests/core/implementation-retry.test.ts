@@ -49,6 +49,7 @@ function authority(
 }
 
 const proof = () => derivePendingTaskProof({
+  declaredArtifactExpectation: "changed",
   newTestsRequired: false,
   declaredArtifacts: [],
 });

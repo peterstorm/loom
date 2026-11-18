@@ -49,7 +49,7 @@ Failure stops later stages. The existing test scripts normalize `PI_CODING_AGENT
 
 ### Compiler boundary
 
-`engine/scripts/typecheck.ts` uses the explicitly installed TypeScript API with `noEmit`, `noUnusedLocals`, and `noUnusedParameters`. `engine/tsconfig.json` owns all `src`, `tests`, `../pi`, and `scripts/typecheck.ts` roots. Standalone repository-root scripts are not all explicit compiler roots; imported portions may be checked transitively.
+`engine/scripts/typecheck.ts` uses the explicitly installed TypeScript API with `noEmit`, `noUnusedLocals`, and `noUnusedParameters`. `engine/tsconfig.json` owns all `src`, `tests`, `../pi`, `../scripts/**/*.ts`, `../calibration` and `../probes/**/*.ts` roots, so every repository-root TypeScript script is an explicit compiler root; the probes' `.mjs` drivers are linted and typed at their seam, not compiled here.
 
 Only TS6133/TS6192/TS6196 unused diagnostics on compiler-proven external raw TypeScript, excluding declaration files and explicit roots, are non-fatal. Each original file/position/code/message remains visible. Owned diagnostics, ordinary external dependency errors, config/input failures, and compiler infrastructure failures remain fatal. `skipLibCheck` cannot suppress raw-source unused diagnostics. `typecheck:unused` is an alias of the same complete gate, not a weaker path.
 
@@ -243,6 +243,6 @@ engine/src/orchestration/      anchored persistence, event journal, effects, Git
 engine/src/handlers/           harness/CLI shell
 engine/tests/                  unit, property, integration, contract tests
 scripts/                       sync, lint, calibration, smoke scripts
-calibration/                   committed corpus; generated results are ignored
+calibration/                   committed corpus; generated results are committed only when deliberately kept as evidence
 docs/family-sites.baseline.json  family-site metric baseline at 626db7fb
 ```

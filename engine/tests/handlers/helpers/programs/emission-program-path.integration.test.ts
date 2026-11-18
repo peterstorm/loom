@@ -129,7 +129,7 @@ function waveEmissionProject(): { root: string; runsRoot: string } {
   git(root, ["add", "src/x.ts", "spec.md", "plan.md"]);
   git(root, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]);
   const proof = evaluateTaskProof(
-    { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+    { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
     trustedPassEvidence(["src/x.ts"]),
   );
   if (proof.state !== "satisfied") throw new Error("fixture requires actual satisfied proof construction");

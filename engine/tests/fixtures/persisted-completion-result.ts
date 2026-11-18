@@ -84,7 +84,7 @@ const MANIFEST: FrozenVerificationManifest = value(freezeVerificationManifest(ne
 
 const FILES = [LEDGER.owner];
 const PROOF = evaluateTaskProof(
-  { newTestsRequired: false, declaredArtifacts: FILES },
+  { declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: FILES },
   trustedPassEvidence(FILES, { newTestsWritten: false }),
 );
 

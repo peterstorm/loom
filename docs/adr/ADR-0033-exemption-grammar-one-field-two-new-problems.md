@@ -135,13 +135,13 @@ plan check refuses.**
     (`owner-verification-runner-missing` in `engine/src/core/task-graph-population.ts`), so an exempt
     Invariant needs no runner.
   - Adding an exemption after population changes the stamped obligation. The next gate then blocks with
-    `plan-drift` until the graph is re-populated (`docs/operations.md`, Owner verification).
+    `plan-drift` until the graph is re-populated (`docs/verification.md`, Owner verification).
 - **Compatibility (FR-021).** A plan without the field produces the same `PlanModels` as before, plus
   `mutation: { kind: "verify" }` on each owned Invariant.
 - **Documentation.**
   - The grammar is documented in `references/plan-template.md` (the optional `**Mutation exemption:**` line
     and the "Mutation exemption" rule).
-  - Its operator effects are documented in `docs/operations.md`.
+  - Its operator effects are documented in `docs/verification.md`.
 - **Tests.**
   - `engine/tests/core/parse-plan-models-exemption.test.ts` pins every case above (AS-019, AS-020, AS-021).
   - The same file has properties: adding a reasoned exemption changes only the mutation policy, and any

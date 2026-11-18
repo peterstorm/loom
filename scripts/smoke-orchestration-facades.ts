@@ -702,7 +702,7 @@ function canonicalSpec(cwd: string): string {
 
 function waveState(planFile: string, specFile: string): Record<string, unknown> {
   const proof = evaluateTaskProof(
-    { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+    { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
     { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
   );
   check(proof.state === "satisfied", "Wave fixture proof is not satisfied");

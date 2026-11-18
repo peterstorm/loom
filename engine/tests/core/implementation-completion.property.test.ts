@@ -95,6 +95,7 @@ function suiteResult(
 }
 
 const authoredProof = () => derivePendingTaskProof({
+  declaredArtifactExpectation: "changed",
   newTestsRequired: true,
   declaredArtifacts: ["engine/src/a.ts", "engine/tests/a.test.ts"],
 });

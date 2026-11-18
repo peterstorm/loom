@@ -160,7 +160,7 @@ const STATUS_TASK_FILES: readonly string[] = [FEES.owner, CLOCK.owner];
 
 /** A satisfied Proof, so the completion suite is the Wave's only open prerequisite. */
 const proof = evaluateTaskProof(
-  { newTestsRequired: false, declaredArtifacts: STATUS_TASK_FILES },
+  { declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: STATUS_TASK_FILES },
   trustedPassEvidence(STATUS_TASK_FILES, { newTestsWritten: false }),
 );
 if (proof.state !== "satisfied") throw new Error("proof fixture must be satisfied");

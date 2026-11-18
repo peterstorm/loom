@@ -121,7 +121,7 @@ run through the frozen `affectedRunner`, and the real workspace digest is checke
 
 The operator-facing description, the `worktree-failed`, `real-workspace-changed`, `repository-file-unreadable` and
 `unexpected-error` remedies, and the
-prerequisite runner are documented in `docs/operations.md` under "Owner verification blocks a Wave Gate (G5b)".
+prerequisite runner are documented in `docs/verification.md` under "Owner verification blocks a Wave Gate (G5b)".
 Behavior is covered by `engine/tests/orchestration/owner-mutation-workspace.test.ts` (AS-016, AS-017) and
 `engine/tests/orchestration/owner-verification-runner.test.ts`.
 

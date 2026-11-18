@@ -153,7 +153,7 @@ deletes are still created files.
   create", and the created files are always a subset of the implementation files. It compares paths
   with `normalizePlanPath`. Exact settlement (`exact-implementation-settlement.ts`, one call site shared
   by Claude Code and Pi) and the implementation brief both call it, and so both always agree.
-- `JudgeRedThenGreenFn` keeps its four CT-1 parameters and reads the created files from the
+- `JudgeRedThenGreenFn` keeps its four CT-1 parameters — plus the fifth `policy: TestEvidencePolicy` parameter added by 732e128c (2026-11-17, loom#198 Cause 1) — and reads the created files from the
   classification. The judge stays pure, total and deterministic over its arguments (FR-012).
 - Red per Task test file is now `collectionError ? createsImplementationFile : failed > 0`. A collection
   error decides on its own, rather than only gating `failed > 0`, because the Vitest JSON shape records no

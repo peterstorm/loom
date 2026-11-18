@@ -174,11 +174,13 @@ describe("VerificationPolicy", () => {
 
   it("derives proof obligations independently", () => {
     expect(deriveProofObligations({
+      declaredArtifactExpectation: "changed",
       verificationPolicy: independentPolicy(true, false),
       declaredArtifacts: [],
     }).map(({ kind }) => kind)).toEqual(["task-completed", "regression-test-pass"]);
 
     expect(deriveProofObligations({
+      declaredArtifactExpectation: "changed",
       verificationPolicy: independentPolicy(false, true),
       declaredArtifacts: [],
     }).map(({ kind }) => kind)).toEqual(["task-completed", "new-tests"]);

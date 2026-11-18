@@ -26,7 +26,7 @@ const sibling = (id: string, wave = 1): Record<string, unknown> => ({
   spec_contributions: [],
   verification_policy: REQUIRED_POLICY,
   file_list: ["src/a.ts"],
-  proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/a.ts"] }),
+  proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/a.ts"] }),
 });
 
 const distill = (overrides: Readonly<Record<string, unknown>> = {}): Record<string, unknown> => ({
@@ -74,7 +74,7 @@ describe("a Distill Task at the State File load boundary", () => {
 
   it("is refused with any other obligation set", () => {
     const mismatch = 'tasks[1] ("T2"): proof obligations do not exactly match verification policy and file_list';
-    const changed = derivePendingTaskProof({ verificationPolicy: DISTILL_VERIFICATION_POLICY, declaredArtifacts: ["src/a.ts"] });
+    const changed = derivePendingTaskProof({ declaredArtifactExpectation: "changed", verificationPolicy: DISTILL_VERIFICATION_POLICY, declaredArtifacts: ["src/a.ts"] });
     const attested = derivePendingTaskProof({
       verificationPolicy: DISTILL_VERIFICATION_POLICY,
       declaredArtifacts: ["src/a.ts"],
@@ -164,6 +164,6 @@ describe("taskFixture yields a loadable Distill Task", () => {
   it("leaves every other fixture Task on the changed expectation", () => {
     const task = taskFixture({ id: "T1", description: "implement", agent: "code-implementer-agent", wave: 1, depends_on: [], file_list: ["src/a.ts"] });
     expect("verification_policy" in task).toBe(false);
-    expect(task.proof).toEqual(derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/a.ts"] }));
+    expect(task.proof).toEqual(derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/a.ts"] }));
   });
 });

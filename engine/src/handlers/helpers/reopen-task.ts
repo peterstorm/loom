@@ -1,7 +1,8 @@
 /**
  * `helper orchestration reopen-task`: reopen implemented Tasks of the active
- * Wave for re-implementation, so a Wave Gate advisory or surviving critical
- * on them can be fixed after the run is abandoned. A thin shell over the pure
+ * Wave for re-implementation, or with `--needs tests` for tests only
+ * (ADR-0093), so a Wave Gate advisory or surviving critical on them can be
+ * fixed after the run is abandoned. A thin shell over the pure
  * `reopenImplementedTasks`: refuse while a subagent is active, then decide and
  * commit in one StateManager update that re-checks quiescence under the lock.
  */
@@ -14,6 +15,7 @@ import {
   sweptDistillTaskIdsOf,
   type TaskReopening,
 } from "../../core/task-reopening";
+import { reopeningNeedsOf } from "../../core/reopen-scope";
 import { StateManager } from "../../state-manager";
 import type { HookResult } from "../../types";
 import { assertQuiescentUnderLock, subagentActiveRefusal, type SubagentActivity } from "./subagent-quiescence";
@@ -29,7 +31,11 @@ function outcomeMessage(outcome: TaskReopening): string {
     ? ""
     : ` The engine reopened ${sweptIds.join(", ")} with them: it is the Wave's distill pass ` +
       "and is dispatched again once the other Tasks settle.";
-  return `Wave ${wave}: ${tasks} reopened for re-implementation.${swept} Run helper orchestration brief --task <id> ` +
+  const scope = reopeningNeedsOf(outcome.audit) === "tests"
+    ? " for tests only: each attempt owes changed test files, no change to an implementation file and passing tests, " +
+      "and no red-then-green order"
+    : " for re-implementation";
+  return `Wave ${wave}: ${tasks} reopened${scope}.${swept} Run helper orchestration brief --task <id> ` +
     "(with --note for the Finding to fix) to dispatch each, then start a fresh Wave Gate once they settle.\n";
 }
 

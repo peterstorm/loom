@@ -27,6 +27,7 @@ import {
   exactRevalidationTargets,
   reopenableWave,
   reopenedTaskIds,
+  NO_TESTS_ONLY_SCOPES,
   reopenedTaskIdsOf,
   returnedTaskIds,
   returnWaveTasksToRevalidation,
@@ -360,7 +361,7 @@ describe("Task Reopening sweeps the Wave's Distill Task back", () => {
 
   it("the shared transition returns exactly what it reports", () => {
     const reopenable = value(reopenableWave(paused()));
-    const { graph, returned } = returnWaveTasksToRevalidation(reopenable, ["T2"]);
+    const { graph, returned } = returnWaveTasksToRevalidation(reopenable, ["T2"], NO_TESTS_ONLY_SCOPES);
     expect(returnedAndSwept(returned)).toEqual({ taskIds: ["T2", "T9"], sweptDistillTaskIds: ["T9"] });
     expect(graph.tasks.filter(({ revalidation_required }) => revalidation_required === true).map(({ id }) => id))
       .toEqual(returnedTaskIds(returned));

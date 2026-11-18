@@ -120,7 +120,7 @@ describe("StateManager", () => {
         wave: 1,
         status: "pending",
         depends_on: [],
-        proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: [] }),
+        proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: [] }),
       }],
       wave_gates: {},
     };
@@ -561,7 +561,7 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
   });
 
   it("enforces status/proof lockstep for proof-bearing graphs", () => {
-    const pendingProof = derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: [] });
+    const pendingProof = derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: [] });
     const impossible = parseTaskGraph({
       ...validGraph,
       tasks: [{ ...validTask, status: "implemented", proof: pendingProof }],
@@ -570,7 +570,7 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     if (!impossible.ok) expect(impossible.error).toContain("status/proof lockstep");
 
     const satisfied = evaluateTaskProof(
-      { newTestsRequired: true, declaredArtifacts: [] },
+      { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: [] },
       trustedPassEvidence([]),
     );
     expect(satisfied.state).toBe("satisfied");
@@ -586,7 +586,7 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
 
   it("rejects result-binding and aggregate-evidence drift at the TaskGraph load boundary", () => {
     const satisfied = evaluateTaskProof(
-      { newTestsRequired: true, declaredArtifacts: [] },
+      { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: [] },
       trustedPassEvidence([]),
     );
     expect(satisfied.state).toBe("satisfied");
@@ -613,6 +613,7 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
 
   it("binds persisted proof obligations exactly to new_tests_required and file_list", () => {
     const exact = derivePendingTaskProof({
+      declaredArtifactExpectation: "changed",
       newTestsRequired: true,
       declaredArtifacts: ["src/a.ts"],
     });
@@ -627,6 +628,7 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }).ok).toBe(true);
 
     const omittedArtifact = derivePendingTaskProof({
+      declaredArtifactExpectation: "changed",
       newTestsRequired: true,
       declaredArtifacts: [],
     });
@@ -643,6 +645,7 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     if (!omitted.ok) expect(omitted.error).toContain("proof obligations do not exactly match");
 
     const foreignTests = derivePendingTaskProof({
+      declaredArtifactExpectation: "changed",
       newTestsRequired: true,
       declaredArtifacts: [],
     });
@@ -655,6 +658,7 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
 
   it("rejects surplus authority inside persisted test and Proof ADTs", () => {
     const proof = JSON.parse(JSON.stringify(derivePendingTaskProof({
+      declaredArtifactExpectation: "changed",
       newTestsRequired: true,
       declaredArtifacts: [],
     })));
@@ -734,6 +738,7 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
 
     for (const { label, stored, policy, wrongPolicy } of cases) {
       const exactProof = derivePendingTaskProof({
+        declaredArtifactExpectation: "changed",
         verificationPolicy: policy,
         declaredArtifacts: [],
       });
@@ -744,6 +749,7 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
       expect(exact.ok, `${label}: exact obligations`).toBe(true);
 
       const incorrectProof = derivePendingTaskProof({
+        declaredArtifactExpectation: "changed",
         verificationPolicy: wrongPolicy,
         declaredArtifacts: [],
       });

@@ -45,7 +45,7 @@ function graph(overrides: Readonly<Record<string, unknown>> = {}, tasks?: readon
 /** A digest with every count zero, for the trigger tables. */
 const quiet = (wave: number, progress: WaveFriction["progress"] = "active"): WaveFriction => ({
   wave, progress, gateRuns: { completed: 0, retired: 0, abandoned: 0 },
-  waveReopenings: 0, taskReopenings: 0, forwardFixes: 0, forwardFixWithdrawals: 0, planEdits: 0, specTraceAmendments: 0,
+  waveReopenings: 0, taskReopenings: 0, testsOnlyReopenings: 0, forwardFixes: 0, forwardFixWithdrawals: 0, planEdits: 0, specTraceAmendments: 0,
   retries: 0, escalations: 0, remediations: 0, infrastructureBlocks: 0, findings: { critical: 0, advisory: 0, refuted: 0 },
   advisoryDispositions: { fixed: 0, deferred: 0, dismissed: 0 }, tasks: [],
 });

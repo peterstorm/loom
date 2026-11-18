@@ -89,7 +89,7 @@ defined "Family change" to include the matrix test, which contradicts G5a's `cha
 Wave's gate scope uses G5a's `changesFamily` (owner or sibling). The touch scope uses any role, matrix test
 included.**
 
-The module is pure and listed under DEFAULT_PURE_MODULES (INV-2). It classifies roles only through
+The module is pure and covered by the project's purity configuration (`.claude/linter/rules/config.json`, `pureModules` — INV-2; the rule's own DEFAULT_PURE_MODULES list was removed by #156, see ADR-0043's amendment). It classifies roles only through
 `invariantRoles` and `changesFamily` from `engine/src/core/plan-paths.ts`.
 
 **Two duty entry points (#136; superseding the PR #131 `OwnerScope` seam).** Callers never filter the raw

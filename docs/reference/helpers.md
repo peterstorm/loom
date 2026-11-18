@@ -187,6 +187,7 @@ bun "$LOOM_DIR/scripts/ledger-epoch.ts" --session <session-id> --agent <agent-id
 
 - `#N FileWrite <path> (via tool)` or `(via shell)`: a write through an edit tool, or one a shell command minted (such as `mv`, `cp` or a redirect).
 - `#N FileRead <path>`.
+- `#N SandboxRun exit <code>`: the sandbox receipt of a sandboxed Bash command (a security-audit child's observed run).
 - `#N TestRun <command>`, followed by indented detail lines:
   - `exit <code>`, or `exit none recorded` when the ledger holds no exit code for the run;
   - `no structured report` when no runner report was parsed for the run, or `report <source>: total <t>, failed <f>` when one was, followed by:

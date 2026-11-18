@@ -1350,6 +1350,8 @@ export function proofFailureKind(failure: ProofFailure): string {
           "attempt-scope-drifted",
           "declared-artifact-not-changed",
           "declared-artifact-drifted",
+          "test-files-not-changed",
+          "implementation-files-changed",
         ),
       },
       ({ kind }) => `proof:${kind}`,

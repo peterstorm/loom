@@ -4362,7 +4362,7 @@ describe("Pi extension review tool_result integration", () => {
     const spawned = JSON.parse(readFileSync(statePath, "utf8"));
     const task = spawned.tasks[0];
     const proof = evaluateTaskProof(
-      { newTestsRequired: false, declaredArtifacts: task.file_list ?? [] },
+      { declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: task.file_list ?? [] },
       observedEvidence({ taskCompleted: true, filesModified: task.file_list ?? [] }),
     );
     if (proof.state !== "satisfied") throw new Error("completed missing-result proof fixture failed");
@@ -5387,7 +5387,7 @@ describe("Pi extension review tool_result integration", () => {
       writeFileSync(planPath, "# Plan\n");
       writeFileSync(artifactPath, "export const value = 1;\n");
       const greenProof = evaluateTaskProof(
-        { newTestsRequired: false, declaredArtifacts: [artifactRelative] },
+        { declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [artifactRelative] },
         observedEvidence({ taskCompleted: true, filesModified: [artifactRelative] }),
       );
       writeState({
@@ -5474,7 +5474,7 @@ describe("Pi extension review tool_result integration", () => {
       writeFileSync(planPath, "# Plan\n");
       writeFileSync(artifactPath, "export const value = 1;\n");
       const greenProof = evaluateTaskProof(
-        { newTestsRequired: false, declaredArtifacts: [artifactRelative] },
+        { declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [artifactRelative] },
         observedEvidence({ taskCompleted: true, filesModified: [artifactRelative] }),
       );
       expect(greenProof.state).toBe("satisfied");
@@ -5573,7 +5573,7 @@ describe("Pi extension review tool_result integration", () => {
       writeFileSync(planPath, "# Plan\n");
       writeFileSync(declaredPath, "export const declared = true;\n");
       const greenProof = evaluateTaskProof(
-        { newTestsRequired: false, declaredArtifacts: [declaredRelative] },
+        { declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [declaredRelative] },
         observedEvidence({ taskCompleted: true, filesModified: [declaredRelative] }),
       );
       writeState({
