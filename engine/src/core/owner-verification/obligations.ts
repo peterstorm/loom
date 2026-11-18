@@ -37,6 +37,10 @@
  *     its change owes nothing until real code lands.
  *   - `firstOwingWave`: the earliest Wave that owes it, by which population
  *     validation requires the matrix test.
+ *   - `isSettledAtStop` / `duePathsAtStop`: the same listing rule read at one
+ *     Task's stop (ADR-0092). A path is settled when no Task lists it, an
+ *     earlier Wave's Task does, or the stopping Task does; a path only a
+ *     concurrent Task of the same Wave lists stays the gate's to judge.
  *   - A Distill Task (ADR-0068) is no part of the schedule. Its file list
  *     repeats its Wave siblings' implementation files, and it changes how
  *     they are written, never whether a family is due or owed: its siblings'
@@ -365,11 +369,42 @@ export function implementationTasks<T extends ScheduledTask>(
 // The family schedule: when a family's paths are due and when a Wave owes it
 // ---------------------------------------------------------------------------
 
-/** Whether a family path is due by `wave`: no Task lists it (it exists already), or a Task of this Wave or an earlier one does. */
-function isDueBy(tasks: readonly ScheduledTask[], wave: number, path: string): boolean {
+/**
+ * The one listing rule both due-path readings share: a family path is due
+ * when no scheduled Task lists it (it exists already), or when a Task that
+ * lists it is one `written` admits.
+ */
+function isDueWhen(tasks: readonly ScheduledTask[], path: string, written: (task: ScheduledTask) => boolean): boolean {
   const listing = scheduledBy(tasks).filter((task) => listsPath(task.file_list ?? [], path));
-  return listing.length === 0 || listing.some((task) => task.wave <= wave);
+  return listing.length === 0 || listing.some(written);
 }
+
+/** Whether a family path is due by `wave`: no Task lists it (it exists already), or a Task of this Wave or an earlier one does. */
+const isDueBy = (tasks: readonly ScheduledTask[], wave: number, path: string): boolean =>
+  isDueWhen(tasks, path, (task) => task.wave <= wave);
+
+/**
+ * Whether a family path is settled at one Task's stop (ADR-0092): no Task
+ * lists it, a Task of an earlier Wave does, or the stopping Task itself does.
+ * A path only another Task of the same Wave lists is that Task's work in
+ * flight: the Wave Gate, not this stop, judges it.
+ */
+export const isSettledAtStop = (tasks: readonly ScheduledTask[], stopping: Pick<ScheduledTask, "id" | "wave">, path: string): boolean =>
+  isDueWhen(tasks, path, (task) => task.wave < stopping.wave || task.id === stopping.id);
+
+/**
+ * What the matrix test must reach at one Task's stop, in declared order: the
+ * owner, then each sibling settled at the stop (`isSettledAtStop`). The
+ * caller asks only for a family whose owner is settled, so the owner leads
+ * and the list is never empty. Every path here is also due by the Task's
+ * Wave (`duePaths`): the stop asks a subset of what the gate asks.
+ */
+export const duePathsAtStop = (
+  tasks: readonly ScheduledTask[],
+  stopping: Pick<ScheduledTask, "id" | "wave">,
+  family: FamilyPaths,
+): NonEmpty<string> =>
+  [family.owner, ...family.siblings.map(({ path }) => path).filter((path) => isSettledAtStop(tasks, stopping, path))];
 
 /**
  * What the matrix test must reach by `wave`, in declared order: the owner,

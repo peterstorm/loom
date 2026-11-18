@@ -2,8 +2,10 @@
  * The one stop shell for the stop checks (G4, AD-10): the acceptance check
  * (I-slice 1, a claimant's owed acceptance testcases), the affected-test
  * check (I7, the tests the attempt's changed files affect) and the Task
- * mutation check (ADR-0071), which runs no runner here: it reads the record
- * `helper mutation-check` left and `taskMutationStopVerdict` decides.
+ * mutation check (ADR-0071) and the Task owner check (ADR-0092), which run no
+ * runner here: each reads the record its helper (`helper mutation-check`,
+ * `helper owner-check`) left, and `taskMutationStopVerdict` or
+ * `taskOwnerCheckStopVerdict` decides.
  *
  * `runStopChecks` is the shell; every decision is pure and lives elsewhere:
  * - what each check would run comes from `planStopChecks` (INV-1), over the
@@ -42,6 +44,7 @@ import {
   STOP_CHECK_NAMES,
   STOP_HOOK_BUDGET_MS,
   TASK_MUTATION_STOP_CHECK_MAX_BLOCKS,
+  TASK_OWNER_STOP_CHECK_MAX_BLOCKS,
   type AcceptancePlan,
   type AffectedPlan,
   type AffectedStopCheckNoteKind,
@@ -62,17 +65,25 @@ import {
   type BlockAdmission,
   type Blocking,
   type BlockingChecks,
+  type EveryCheck,
   type StopCheckBlockCaps,
   type StopChecksBlockParts,
 } from "../../core/affected-stop-check";
 import {
-  NO_TASK_MUTATION_CHECK,
   renderTaskMutationBlock,
   taskMutationDuty,
   taskMutationStopVerdict,
   type OwedTaskMutation,
   type TaskMutationObservation,
 } from "../../core/task-mutation-check";
+import {
+  renderTaskOwnerCheckBlock,
+  taskOwnerCheckDuty,
+  taskOwnerCheckStopVerdict,
+  type OwedTaskOwnerCheck,
+  type TaskOwnerCheckObservation,
+} from "../../core/task-owner-check";
+import { TASK_RECORD_CHECK_OFF, type TaskRecordStopVerdict, type TaskRecordUnavailable } from "../../core/task-record";
 import { changedFilesAtStop, NO_CHANGED_FILES } from "../../core/changed-files";
 import { sha256Bytes } from "../../core/digest";
 import type { LedgerObservation } from "../../core/red-then-green-types";
@@ -89,6 +100,7 @@ const CAPS: StopCheckBlockCaps = Object.freeze({
   acceptance: ACCEPTANCE_STOP_CHECK_MAX_BLOCKS,
   affected: AFFECTED_STOP_CHECK_MAX_BLOCKS,
   mutation: TASK_MUTATION_STOP_CHECK_MAX_BLOCKS,
+  owner: TASK_OWNER_STOP_CHECK_MAX_BLOCKS,
 });
 
 /** The attempt's changed files as the shell observed them, or why they could not be. */
@@ -111,6 +123,12 @@ export type StopChecksInput = Readonly<{
    * Task `taskMutationDuty` says owes the check; a throw is a note.
    */
   taskMutation: (duty: OwedTaskMutation, root: CanonicalRepositoryRoot) => TaskMutationObservation;
+  /**
+   * How the owner-check record of a Task that owes it stands against its
+   * family beneath the resolved repository root (ADR-0092). Asked only for a
+   * Task `taskOwnerCheckDuty` says owes the check; a throw is a note.
+   */
+  taskOwnerCheck: (duty: OwedTaskOwnerCheck, root: CanonicalRepositoryRoot) => TaskOwnerCheckObservation;
   /** The hook clock's first reading at hook entry; the budget is measured from it. */
   hookStartedAtMs: number;
 }>;
@@ -200,29 +218,51 @@ function affectedArm(taskId: string, plan: AffectedPlan, observation: AffectedOb
 type ResolvedRoot = ReturnType<StopCheckShellPorts["repositoryRoot"]>;
 
 /**
- * The mutation arm's result. It runs no runner: a Task that owes the check
- * has its record's standing observed, and `taskMutationStopVerdict` decides.
- * A missing root or a throwing observation is a note, never a block.
+ * What a record-reading arm (the Task mutation check, the Task owner check)
+ * observes: `off` for a Task that owes nothing, otherwise its record's
+ * standing through `observe`. A missing root or a throwing observation is
+ * `unavailable`, which each arm's verdict reads as a note, never a block.
  */
-function mutationResult(input: StopChecksInput, graph: TaskGraph, resolvedRoot: ResolvedRoot): CheckResult {
-  const duty = taskMutationDuty(graph, input.taskId);
-  const observe = (): TaskMutationObservation => {
-    if (duty.kind === "off") return NO_TASK_MUTATION_CHECK;
-    if (!resolvedRoot.ok) return Object.freeze({ kind: "unavailable", reason: resolvedRoot.reason });
-    try {
-      return input.taskMutation(duty, resolvedRoot.root);
-    } catch (cause) {
-      return Object.freeze({ kind: "unavailable", reason: describe(cause) });
-    }
-  };
-  return match(taskMutationStopVerdict(input.taskId, observe()))
+function recordObservation<Owed, Observation>(
+  owed: Owed | null,
+  resolvedRoot: ResolvedRoot,
+  observe: (owed: Owed, root: CanonicalRepositoryRoot) => Observation,
+): Observation | TaskRecordUnavailable | typeof TASK_RECORD_CHECK_OFF {
+  if (owed === null) return TASK_RECORD_CHECK_OFF;
+  if (!resolvedRoot.ok) return Object.freeze({ kind: "unavailable", reason: resolvedRoot.reason });
+  try {
+    return observe(owed, resolvedRoot.root);
+  } catch (cause) {
+    return Object.freeze({ kind: "unavailable", reason: describe(cause) });
+  }
+}
+
+/** A record-reading arm's verdict as the stop's result; it runs no runner. */
+const recordArmResult = <Cause>(
+  verdict: TaskRecordStopVerdict<Cause>,
+  render: (cause: Cause, command: string, blocksRemaining: number) => string,
+): CheckResult =>
+  match(verdict)
     .returnType<CheckResult>()
     .with({ kind: "idle" }, () => IDLE)
     .with({ kind: "passed" }, () => Object.freeze({ kind: "passed", note: null }))
     .with({ kind: "note" }, ({ note }) => Object.freeze({ kind: "note", note }))
     .with({ kind: "failing" }, ({ cause, command }) =>
-      Object.freeze({ kind: "failing", part: (remaining: number) => renderTaskMutationBlock(cause, command, remaining) }))
+      Object.freeze({ kind: "failing", part: (remaining: number) => render(cause, command, remaining) }))
     .exhaustive();
+
+/** The mutation arm's result: `taskMutationStopVerdict` over the record `helper mutation-check` left. */
+function mutationResult(input: StopChecksInput, graph: TaskGraph, resolvedRoot: ResolvedRoot): CheckResult {
+  const duty = taskMutationDuty(graph, input.taskId);
+  const observed = recordObservation(duty.kind === "off" ? null : duty, resolvedRoot, input.taskMutation);
+  return recordArmResult(taskMutationStopVerdict(input.taskId, observed), renderTaskMutationBlock);
+}
+
+/** The owner arm's result (ADR-0092): `taskOwnerCheckStopVerdict` over the record `helper owner-check` left. */
+function ownerResult(input: StopChecksInput, graph: TaskGraph, resolvedRoot: ResolvedRoot): CheckResult {
+  const duty = taskOwnerCheckDuty(graph, input.taskId);
+  const observed = recordObservation(duty.kind === "off" ? null : duty, resolvedRoot, input.taskOwnerCheck);
+  return recordArmResult(taskOwnerCheckStopVerdict(input.taskId, observed), renderTaskOwnerCheckBlock);
 }
 
 // --- Running one check under the held lock ---
@@ -329,15 +369,16 @@ const notesOf = (results: Results): readonly string[] =>
 type Stopper = Pick<StopChecksInput, "taskId" | "agentKey">;
 
 /** Each blocking check's part of the message, rendered with the blocks its counter leaves: the same checks the block names. */
-const blockParts = (blocking: BlockingChecks<Failing, Failing, Failing>): StopChecksBlockParts =>
-  mapSomeChecks<Blocking<Failing>, string>(blocking, (name, { failure, blocks }) => failure.part(CAPS[name] - blocks));
+const blockParts = (blocking: BlockingChecks<EveryCheck<Failing>>): StopChecksBlockParts =>
+  mapSomeChecks<EveryCheck<Blocking<Failing>>, string>(blocking, (name, { failure, blocks }) => failure.part(CAPS[name] - blocks));
 
 /** Settle the results into one outcome, writing only the counters the decision names. */
 function settle({ taskId, agentKey }: Stopper, results: Results, issued: Issued, ports: StopCheckShellPorts, extraNotes: readonly string[]): StopChecksOutcome {
-  const decision = stopCheckBlockDecision(issued, {
+  const decision = stopCheckBlockDecision<EveryCheck<Failing>>(issued, {
     acceptance: failingOf(results.acceptance),
     affected: failingOf(results.affected),
     mutation: failingOf(results.mutation),
+    owner: failingOf(results.owner),
   }, CAPS);
   const notes = [...notesOf(results), ...decision.notes.map((note) => `stop checks for ${taskId}: ${note}`), ...extraNotes];
   if (decision.outcome === "proceed") {
@@ -368,20 +409,22 @@ async function decide(input: StopChecksInput, ports: StopCheckShellPorts): Promi
     acceptance: acceptanceArm(taskId, plan.acceptance, resolvedRoot.ok ? null : resolvedRoot.reason),
     affected: affectedArm(taskId, plan.affected, observation),
   });
-  // The mutation arm runs no runner, so it is settled before the lock is taken.
+  // The mutation and owner arms run no runner, so they are settled before the lock is taken.
   const mutation = mutationResult(input, graph, resolvedRoot);
+  const owner = ownerResult(input, graph, resolvedRoot);
   // Only a check that would run, or that would block, reads its counter.
   const issued: Issued = Object.freeze({
     acceptance: isRunnable(planned.acceptance) ? ports.blocks.issued("acceptance", input.agentKey) : NO_BLOCKS_ISSUED,
     affected: isRunnable(planned.affected) ? ports.blocks.issued("affected", input.agentKey) : NO_BLOCKS_ISSUED,
     mutation: mutation.kind === "failing" ? ports.blocks.issued("mutation", input.agentKey) : NO_BLOCKS_ISSUED,
+    owner: owner.kind === "failing" ? ports.blocks.issued("owner", input.agentKey) : NO_BLOCKS_ISSUED,
   });
   const acceptance = admitted(taskId, planned.acceptance, blockAdmission("acceptance", issued.acceptance, CAPS.acceptance));
   const affected = admitted(taskId, planned.affected, blockAdmission("affected", issued.affected, CAPS.affected));
 
   // Without a root every arm is already settled (a note, or idle when its check is off); the guard also narrows `root`.
   if (!resolvedRoot.ok || (!isRunnable(acceptance) && !isRunnable(affected))) {
-    return settle(input, { acceptance: resultOf(acceptance), affected: resultOf(affected), mutation }, issued, ports, []);
+    return settle(input, { acceptance: resultOf(acceptance), affected: resultOf(affected), mutation, owner }, issued, ports, []);
   }
   const root = resolvedRoot.root;
   const lock = ports.acquireRunner(root);
@@ -390,6 +433,7 @@ async function decide(input: StopChecksInput, ports: StopCheckShellPorts): Promi
       acceptance: isRunnable(acceptance) ? acceptanceNote(taskId, lock.reason) : acceptance,
       affected: isRunnable(affected) ? affectedNote(taskId, "lock-held", lock.reason) : affected,
       mutation,
+      owner,
     }, issued, ports, []);
   }
   const ran = await runAdmitted(input, { acceptance, affected }, Object.freeze({ graph, wave: plan.wave }), root, ports);
@@ -400,7 +444,7 @@ async function decide(input: StopChecksInput, ports: StopCheckShellPorts): Promi
     Object.freeze({ kind: "note", message: [crashNote(taskId, cause), ...lockNotes].join("\n") });
   if (!ran.ok) return crashed(ran.cause);
   try {
-    return settle(input, { ...ran.results, mutation }, issued, ports, lockNotes);
+    return settle(input, { ...ran.results, mutation, owner }, issued, ports, lockNotes);
   } catch (cause) {
     return crashed(cause);
   }
@@ -486,7 +530,7 @@ export function stopChecksReportLine(taskId: string, outcome: StopChecksOutcome)
     case "skip":
       return null;
     case "passed":
-      return `stop checks: every acceptance, affected-test and Task mutation check that ran for ${taskId} passes`;
+      return `stop checks: every acceptance, affected-test, Task mutation and Task owner check that ran for ${taskId} passes`;
     case "note":
       return outcome.message;
     case "block":

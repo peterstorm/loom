@@ -169,7 +169,7 @@ Enrolling a check makes it selectable for critical remediation. It does not esta
 
 ## Stop checks
 
-When an implementation agent stops, the engine runs up to three checks before it settles the Task, in this order: the Acceptance Stop Check, the Affected-Test Stop Check and the Task mutation check. Each can keep the same agent working. None is completion evidence, and on Pi each only reports. To see what the first two would run for a Task, print its [Stop-Check Plan](reference/helpers.md#what-will-the-stop-checks-run-at-a-tasks-stop).
+When an implementation agent stops, the engine runs up to four checks before it settles the Task, in this order: the Acceptance Stop Check, the Affected-Test Stop Check, the Task mutation check and the Task owner check. Each can keep the same agent working. None is completion evidence, and on Pi each only reports. To see what the first two would run for a Task, print its [Stop-Check Plan](reference/helpers.md#what-will-the-stop-checks-run-at-a-tasks-stop).
 
 ### Acceptance Stop Check (claimants)
 
@@ -247,6 +247,25 @@ The brief asks for one Bash call with a 600000 ms timeout, after the Task's test
   - Files the Task changed but did not declare are neither mutated nor digested.
   - The 8 mutants are a sample. A clean run does not show that every changed line is tested.
   - Each mutant's run is limited to the `affectedRunner`'s `timeoutMs`, capped at 60 s as at the Wave Gate.
+
+### Task owner check
+
+The Wave Gate's [owner verification](#owner-verification-blocks-a-wave-gate) also runs at the stop of a Task that writes an owned family, so a matrix test that misses a sibling or lets a mutant of the owner survive is answered while the implementer still holds its context, not after the gate ([ADR-0092](adr/ADR-0092-owner-verification-runs-at-the-stop-of-a-task-that-writes-the-family.md)). The implementation brief of a Task that owes it carries the command, filled in:
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper owner-check --task T5
+```
+
+The brief asks for one Bash call with a 600000 ms timeout, after the Task's tests pass and before its final verification run. It is a separate command from `helper mutation-check`, with its own 480 s deadline, because an owner's mutants do not fit beside the Task's own.
+
+- **Who owes it.** An implementation Task (not a Contract, ADR or Distill Task) of a TaskGraph with an `owner_obligations` stamp, for each owned invariant whose owner, a sibling or matrix test it lists, that its Wave owes at the gate, and whose owner and matrix test are both **settled at its stop**: no Task lists the path, a Task of an earlier Wave does, or this Task does. A path only another Task of the same Wave lists is that Task's work in flight, judged by the gate. So a Task owes nothing when its owner or matrix test is a concurrent Task's, and when no owned family is touched. `helper owner-check` on such a Task prints `not owed — <reason>` and exits 0. There is no manifest switch: owner verification is not optional at the gate.
+- **What it runs.** The gate's own per-obligation run: sibling coverage over the owner and every sibling settled at the stop (a subset of what the gate requires by the same Wave), then, without an exemption, the gate's mutation plan over the owner's Wave base (at most 24 mutants, six operators, one isolated worktree, the frozen `affectedRunner` over the matrix test). A run its deadline cannot hold is not launched; that obligation's mutation half is then the infrastructure verdict `spawn-failed` naming the deadline, and its coverage is still judged.
+- **What it prints.** One summary line per invariant (coverage, then the gate's mutation counts), then each finding in the gate's own words (`INV-N: matrix test … does not import …`, `INV-N: mutant survived at <owner>:<line>:<column> …`) and how to answer it.
+- **Who answers a finding.** Only the matrix test answers a missing path or a survivor (the gate's remedy is to strengthen it). A Task that lists the matrix test is held for them. A Task that does not list it only reports them; a Task cannot write a file it does not declare.
+- **The record.** `task-owner-check.<repository hash>.<task id>.json` in the runtime directory, beside the Task mutation record and named by the same rule, with a digest of the Task's `start_sha`, its owed obligations and the bytes of the owner, the settled siblings, the matrix test and every file the Task declares. Any later edit to one of them makes it stale. The helper digests before and after its run; a change in between records `unavailable`.
+- **At the stop.** The fourth stop check reads the record; it runs no runner and takes no lock. On Claude Code it blocks, at most 2 times per agent, when the record is missing or stale, or names a missing path or a survivor the Task answers. The block appears under `## Task owner check`, joined with the other checks' sections, and repeats the command. A clean record passes. A red baseline (usually another Task's unfinished work), an infrastructure verdict, an `unavailable` run, a finding the Task does not answer, the cap and every fault are notes that reach the orchestrator, and the stop proceeds. On Pi it is report-only.
+- **Not completion evidence**, as for the Task mutation check. The Wave Gate's owner verification is unchanged and stays the control.
+- **Limits.** A Task whose owner and matrix test are written by two concurrent Tasks owes nothing at either stop. A barrel or tsconfig the coverage walk reads, and another Task's `start_sha` the Wave base reads, are not digested.
 
 ### Stop-check notes reach the orchestrator
 

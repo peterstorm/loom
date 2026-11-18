@@ -13,7 +13,7 @@
  *   `inconclusive` and never clean;
  * - the record: parse after serialize is the identity, and every malformed
  *   document, including one whose kind its counts contradict, is refused;
- * - `taskMutationStanding`, `taskMutationStopVerdict` and the renderers.
+ * - `taskRecordStanding`, `taskMutationStopVerdict` and the renderers.
  */
 
 import fc from "fast-check";
@@ -28,14 +28,12 @@ import {
   isMutableSource,
   KILLING_TEST,
   mutantsByFile,
-  NO_TASK_MUTATION_CHECK,
   parseTaskMutationRecord,
   recordedTaskMutation,
   renderTaskMutationBlock,
   renderTaskMutationReport,
   TASK_MUTATION_BASH_TIMEOUT_MS,
   TASK_MUTATION_DEADLINE_MS,
-  TASK_MUTATION_NOT_RUN,
   TASK_MUTATION_OFF_TEXT,
   taskMutationDigest,
   taskMutationDuty,
@@ -43,13 +41,12 @@ import {
   taskMutationRecordJson,
   taskMutationResult,
   taskMutationResultOf,
-  taskMutationStanding,
   taskMutationStopVerdict,
   taskMutationUnavailable,
-  type TaskFileBytes,
   type TaskMutantRun,
   type TaskMutationOffReason,
   type TaskMutationResult,
+  type TaskMutationStanding,
   type TaskMutationTally,
   type TaskSurvivor,
 } from "../../src/core/task-mutation-check";
@@ -59,6 +56,7 @@ import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { distillTaskFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { junitReport, mutationManifest, START_SHA, talliedResult, type JunitCase } from "../fixtures/task-mutation";
 import { mochaXunit, RUN_ROOT } from "../fixtures/mocha-report";
+import { TASK_RECORD_CHECK_OFF, TASK_RECORD_NOT_RUN, taskRecordStanding, type TaskFileBytes } from "../../src/core/task-record";
 
 type Graph = Pick<TaskGraph, "tasks" | "verification_manifest" | "acceptance_contracts">;
 
@@ -436,19 +434,19 @@ const INCONCLUSIVE_RESULT = talliedResult({ invalid: 2, candidates: 4 });
 const SURVIVORS_RESULT = taskMutationResultOf([{ mutant: mutant(IMPL, 2), outcome: "survived" }, { mutant: mutant(IMPL, 7, "comparison-flip"), outcome: "untested" }], 9);
 const COMMAND = loomCommandsAt("/opt/loom").mutationCheck("T2");
 
-describe("taskMutationStanding and taskMutationStopVerdict", () => {
+describe("taskRecordStanding and taskMutationStopVerdict", () => {
   it("reads a record of these bytes as current, of other bytes or another Task as stale, and none as not-run", () => {
     const record = recordedTaskMutation("T2", DIGEST, CLEAN_RESULT);
-    expect(taskMutationStanding(record, "T2", DIGEST)).toEqual({ kind: "current", result: CLEAN_RESULT });
-    expect(taskMutationStanding(record, "T2", OTHER_DIGEST)).toEqual({ kind: "stale" });
-    expect(taskMutationStanding(record, "T3", DIGEST)).toEqual({ kind: "stale" });
-    expect(taskMutationStanding(TASK_MUTATION_NOT_RUN, "T2", DIGEST)).toEqual({ kind: "not-run" });
+    expect(taskRecordStanding(record, "T2", DIGEST)).toEqual({ kind: "current", result: CLEAN_RESULT });
+    expect(taskRecordStanding(record, "T2", OTHER_DIGEST)).toEqual({ kind: "stale" });
+    expect(taskRecordStanding(record, "T3", DIGEST)).toEqual({ kind: "stale" });
+    expect(taskRecordStanding(TASK_RECORD_NOT_RUN, "T2", DIGEST)).toEqual({ kind: "not-run" });
   });
 
-  const observedAs = (standing: ReturnType<typeof taskMutationStanding>) => ({ kind: "observed" as const, standing, command: COMMAND });
+  const observedAs = (standing: TaskMutationStanding) => ({ kind: "observed" as const, standing, command: COMMAND });
 
   it("is idle for a Task that owes nothing and passes a clean current record, or one with nothing to mutate", () => {
-    expect(taskMutationStopVerdict("T2", NO_TASK_MUTATION_CHECK)).toEqual({ kind: "idle" });
+    expect(taskMutationStopVerdict("T2", TASK_RECORD_CHECK_OFF)).toEqual({ kind: "idle" });
     expect(taskMutationStopVerdict("T2", observedAs({ kind: "current", result: CLEAN_RESULT }))).toEqual({ kind: "passed" });
     expect(taskMutationStopVerdict("T2", observedAs({ kind: "current", result: talliedResult({ candidates: 0 }) }))).toEqual({ kind: "passed" });
   });

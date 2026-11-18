@@ -9,7 +9,9 @@
  *   production parser, so a fake can never hand the shell a result production
  *   would refuse, and no fake needs a cast;
  * - `recordingStopCheckPorts`, the in-memory `StopCheckShellPorts` that runs
- *   every check to a produced report and records what it launched.
+ *   every check to a produced report and records what it launched;
+ * - `stopsOf` and `outcomeText`: one agent's stops through `runStopChecks`,
+ *   with or without a repository root, and the text each outcome shows.
  *
  * A suite that needs a different runner (another cwd, another timeout) spells
  * its own; these are the defaults, not the only legal shape.
@@ -22,10 +24,12 @@ import {
   type StopCheckBlockCounters,
   type StopCheckCommand,
   type StopCheckName,
+  type StopChecksOutcome,
 } from "../../src/core/affected-stop-check-types";
 import { parseCompletionCheckResult } from "../../src/core/completion-suite";
 import { sha256Bytes } from "../../src/core/digest";
 import { UNKEPT_BLOCK_COUNTERS, type StopCheckShellPorts } from "../../src/handlers/subagent-stop/acceptance-stop-check";
+import { runStopChecks, type StopChecksInput } from "../../src/handlers/subagent-stop/stop-checks";
 import type { CompletionCheckRunnerResult } from "../../src/orchestration/completion-check-runner";
 import type { CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 
@@ -59,8 +63,8 @@ export const affectedArgv = (...files: string[]): readonly string[] => [...AFFEC
 /** The argv a formed command launches. */
 export const argvOf = (command: StopCheckCommand): readonly string[] => [command.executable, ...command.args];
 
-/** A stop check that launches a runner: every check but the Task mutation check, which reads a record. */
-export type RunnerCheckName = Exclude<StopCheckName, "mutation">;
+/** A stop check that launches a runner: every check but the Task mutation and owner checks, which read a record. */
+export type RunnerCheckName = Exclude<StopCheckName, "mutation" | "owner">;
 
 /** Which check a formed command runs, told apart by its report path. A command for neither report fails the test. */
 export function checkNameOf(command: StopCheckCommand): RunnerCheckName {
@@ -158,3 +162,19 @@ export function recordingStopCheckPorts(options: RecordingStopCheckPortsOptions)
   };
   return { ports, launches };
 }
+
+/**
+ * One agent's stops over `input`: each call is one stop through
+ * `runStopChecks`, the counters in `ports` persisting between them. With
+ * `root: "unavailable"` the shell finds no repository root, as a stop outside
+ * a Git repository does.
+ */
+export function stopsOf(input: StopChecksInput, ports: StopCheckShellPorts, root?: "unavailable"): () => Promise<StopChecksOutcome> {
+  const shell: StopCheckShellPorts = root === "unavailable"
+    ? { ...ports, repositoryRoot: () => ({ ok: false as const, reason: "no Git repository here" }) }
+    : ports;
+  return () => runStopChecks(input, shell);
+}
+
+/** The text a blocked or noted stop shows; empty for one that passed or skipped. */
+export const outcomeText = (outcome: StopChecksOutcome): string => outcome.kind === "block" || outcome.kind === "note" ? outcome.message : "";

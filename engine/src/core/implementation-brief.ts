@@ -48,9 +48,10 @@ import { classifyTaskFiles } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
 import type { EngineRunTestEvidence } from "./test-evidence-authority";
 import { samePlanPath } from "./plan-path-match";
-import { TASK_MUTATION_STOP_CHECK_MAX_BLOCKS } from "./affected-stop-check-types";
-import { MUTANT_CAP_PER_TASK } from "./owner-verification/mutation-plan";
+import { TASK_MUTATION_STOP_CHECK_MAX_BLOCKS, TASK_OWNER_STOP_CHECK_MAX_BLOCKS } from "./affected-stop-check-types";
+import { MUTANT_CAP_PER_INVARIANT, MUTANT_CAP_PER_TASK } from "./owner-verification/mutation-plan";
 import { TASK_MUTATION_BASH_TIMEOUT_MS, taskMutationDuty } from "./task-mutation-check";
+import { ANSWER_OWNER_FINDINGS, TASK_OWNER_CHECK_BASH_TIMEOUT_MS, taskOwnerCheckDuty, type StopObligation } from "./task-owner-check";
 import { renderSkeletonOutcome } from "./skeleton/outcomes";
 import { conformanceScope } from "./skeleton/scope";
 import { renderStaleSkeleton, staleSkeletons, taskSkeletonOutcomes, type UnresolvedSkeletonBinding } from "./skeleton/status";
@@ -152,9 +153,10 @@ export type ImplementationBriefInput = Readonly<{
    *  runs, spelled literally so no command substitution reaches the guard. */
   repositoryRoot: string;
   /** The active Loom package's printed commands: the engine commands a brief
-   *  names are the Task mutation check (`commands.mutationCheck`) and the
-   *  engine test run (`commands.runTests`). */
-  commands: Pick<LoomCommands, "mutationCheck" | "runTests">;
+   *  names are the Task mutation check (`commands.mutationCheck`), the Task
+   *  owner check (`commands.ownerCheck`) and the engine test run
+   *  (`commands.runTests`). */
+  commands: Pick<LoomCommands, "mutationCheck" | "ownerCheck" | "runTests">;
   /** The TaskGraph's frozen test-evidence mode (`graph.test_evidence`), absent
    *  on a graph that admits an agent's own test commands. Present, the brief
    *  tells the Task that only `helper run-tests` runs count (loom#198). */
@@ -992,6 +994,53 @@ function taskMutationSection(
   ].join("\n");
 }
 
+/** One owed obligation as the owner-check section lists it: the Invariant, its matrix test, what it must reach, its mutation half. */
+function stopObligationLine({ obligation, due, answers }: StopObligation): string {
+  const { invariant, title, matrixTest, owner, mutation } = obligation;
+  const mutated = mutation.kind === "verify"
+    ? `every mutant of ${quoted(owner)}'s lines changed in this Wave must be killed by it`
+    : `${quoted(owner)} is mutation-exempt (${mutation.reason})`;
+  return `- ${invariant} (${title}): the matrix test ${quoted(matrixTest)} must import ${due.map(quoted).join(", ")}, and ${mutated}. ` +
+    (answers
+      ? "You list the matrix test, so its findings are yours to answer."
+      : "You do not list the matrix test, so its findings are reported to the orchestrator and do not hold your stop.");
+}
+
+/**
+ * The Task owner check section (ADR-0092) for a Task `taskOwnerCheckDuty`
+ * says owes it: the one command, the Invariants and matrix tests it checks,
+ * how to answer a missing path or a survivor, and what the stop does with the
+ * result. Null for every other Task.
+ */
+function taskOwnerCheckSection(
+  task: Task,
+  { roster, contracts, verificationManifest, ownership, commands }:
+    Pick<ImplementationBriefInput, "roster" | "contracts" | "verificationManifest" | "ownership" | "commands">,
+): string | null {
+  if (ownership.kind !== "stamped") return null;
+  // The touched obligations are the stamp as this Task's file list selects it, so the duty reads them as the whole stamp.
+  const duty = taskOwnerCheckDuty({
+    tasks: [...roster.filter(({ id }) => id !== task.id), task],
+    verification_manifest: verificationManifest,
+    acceptance_contracts: contracts,
+    owner_obligations: ownership.touched,
+  }, task.id);
+  if (duty.kind === "off") return null;
+  return [
+    "**Task owner check.** Your Task writes the family of an owned Invariant the Wave Gate verifies. Once your tests pass and " +
+      `before your final verification run, run this as one Bash call with a timeout of ${TASK_OWNER_CHECK_BASH_TIMEOUT_MS} ms:`,
+    `\`${commands.ownerCheck(task.id)}\``,
+    `It runs the Wave Gate's Owner Verification now, each mutant (at most ${MUTANT_CAP_PER_INVARIANT} per Invariant) in an isolated ` +
+      "copy of the workspace, and prints what the matrix test misses or lets survive. It checks:",
+    ...duty.obligations.map(stopObligationLine),
+    ANSWER_OWNER_FINDINGS,
+    "Any later edit to the family's files or yours makes the result stale, so run it after your last edit. The engine reads the result " +
+      "when you stop: where the harness can keep you working, a missing or stale result, or a finding in a matrix test you list, does, " +
+      `at most ${TASK_OWNER_STOP_CHECK_MAX_BLOCKS} times. A red matrix test (often another Task's unfinished work), an infrastructure ` +
+      "failure or an `unavailable` result never holds you. The check's own runs are not test evidence.",
+  ].join("\n");
+}
+
 /** What the engine-run section prints in place of a file when the Task owes no I6 and so has no classified test files. */
 export const ENGINE_RUN_FILE_PLACEHOLDER = "<test file>";
 
@@ -1094,6 +1143,7 @@ export function renderImplementationBrief(
 
   const policy = taskVerificationPolicy(task);
   const mutationCheck = taskMutationSection(task, input);
+  const ownerCheck = taskOwnerCheckSection(task, input);
   const values: Readonly<Record<BriefVariable, string>> = {
     rules_content: rulesContent,
     task_id: task.id,
@@ -1106,6 +1156,7 @@ export function renderImplementationBrief(
       ...verificationPolicyLines(policy, task.reopen_scope !== undefined),
       ...(redThenGreen.value === null ? [] : ["", redThenGreen.value]),
       ...(mutationCheck === null ? [] : ["", mutationCheck]),
+      ...(ownerCheck === null ? [] : ["", ownerCheck]),
       ...(input.testEvidence === undefined ? [] : ["", engineRunSection(task, input)]),
     ].join("\n"),
     implementation_retry_context: dispatch.promptAppendix ?? NO_RETRY_CONTEXT,

@@ -25,7 +25,6 @@ import {
 } from "../../../src/handlers/subagent-stop/acceptance-stop-check";
 import { runStopChecks, stopChecksReportLine } from "../../../src/handlers/subagent-stop/stop-checks";
 import { NO_CHANGED_FILES } from "../../../src/core/changed-files";
-import { NO_TASK_MUTATION_CHECK } from "../../../src/core/task-mutation-check";
 import type { TaskGraph } from "../../../src/types";
 import type { AcceptanceContract } from "../../../src/core/acceptance-contract";
 import { parseCanonicalRepositoryRoot } from "../../../src/utils/workspace-digest";
@@ -33,6 +32,7 @@ import { contract, frozenPaths, surface, task } from "../../fixtures/contract-st
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { inMemoryBlockCounters } from "../../fixtures/stop-check-block-counters";
 import { observedRun, parsedRun } from "../../fixtures/stop-check-runners";
+import { TASK_RECORD_CHECK_OFF } from "../../../src/core/task-record";
 
 const SURFACE = surface("payload");
 const REPORT = ".loom/completion-reports/acceptance.junit.xml";
@@ -190,7 +190,8 @@ const input = (taskId: string, overrides: Partial<TaskGraph> = {}) =>
     taskId,
     agentKey: "session.agent",
     changedFiles: () => ({ kind: "observed" as const, changed: NO_CHANGED_FILES }),
-    taskMutation: () => NO_TASK_MUTATION_CHECK,
+    taskMutation: () => TASK_RECORD_CHECK_OFF,
+    taskOwnerCheck: () => TASK_RECORD_CHECK_OFF,
     hookStartedAtMs: Date.now(),
   });
 
@@ -431,7 +432,7 @@ describe("production stop-check ports", () => {
 describe("stopChecksReportLine", () => {
   it("prints nothing for a skip and one operator line for every other outcome", () => {
     expect(stopChecksReportLine("T2", { kind: "skip" })).toBeNull();
-    expect(stopChecksReportLine("T2", { kind: "passed" })).toBe("stop checks: every acceptance, affected-test and Task mutation check that ran for T2 passes");
+    expect(stopChecksReportLine("T2", { kind: "passed" })).toBe("stop checks: every acceptance, affected-test, Task mutation and Task owner check that ran for T2 passes");
     expect(stopChecksReportLine("T2", { kind: "note", message: "did not decide" })).toBe("did not decide");
     expect(stopChecksReportLine("T2", { kind: "block", message: "still failing" }))
       .toBe("stop checks (report-only on Pi; the agent has already ended): T2\nstill failing");

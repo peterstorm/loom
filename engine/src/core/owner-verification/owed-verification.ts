@@ -25,6 +25,7 @@ import {
   canonicalStructuralEquals,
   failure,
   isNonEmpty,
+  mapNonEmpty,
   success,
   type ArtifactDigest,
   type DomainResult,
@@ -92,6 +93,17 @@ export type ObligationRun =
   | Readonly<{ kind: "mutate"; obligation: OwnerObligation; runner: AffectedRunner }>
   | Readonly<{ kind: "exempt"; obligation: OwnerObligation }>;
 
+/**
+ * One obligation's run: mutation through `runner` exactly when `verifyOwed`
+ * selects it and a runner is given, otherwise coverage only. The gate asks it
+ * only once it has refused a Wave owing mutation with no runner; the Task
+ * owner check's duty carries a runner whenever it owes mutation (ADR-0092).
+ */
+export const obligationRunOf = (obligation: OwnerObligation, runner: AffectedRunner | undefined): ObligationRun =>
+  runner !== undefined && verifyOwed([obligation]).length > 0
+    ? freeze({ kind: "mutate", obligation, runner })
+    : freeze({ kind: "exempt", obligation });
+
 export type VerificationRuns = Readonly<{
   /** One run per owed obligation, in stamp order. */
   runs: NonEmpty<ObligationRun>;
@@ -114,14 +126,9 @@ export function verificationRuns(owed: OwedVerification, runner: AffectedRunner 
       detail: `${verifying.map((obligation) => obligation.invariant).join(", ")} owe mutation verification, but the frozen verification manifest declares no affectedRunner`,
     }));
   }
-  const runOf = (obligation: OwnerObligation): ObligationRun =>
-    runner !== undefined && verifyOwed([obligation]).length > 0
-      ? freeze({ kind: "mutate", obligation, runner })
-      : freeze({ kind: "exempt", obligation });
-  const [first, ...rest] = owed.obligations;
-  const runs: NonEmpty<ObligationRun> = [runOf(first), ...rest.map(runOf)];
+  const runs = mapNonEmpty(owed.obligations, (obligation) => obligationRunOf(obligation, runner));
   return success(freeze({
-    runs: Object.freeze(runs),
+    runs,
     verifying,
     perRunMs: runner === undefined ? 0 : mutantTimeoutMs(runner.timeoutMs),
   }));

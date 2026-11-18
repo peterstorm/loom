@@ -27,6 +27,13 @@
  * 3. The real workspace's digest is observed again: any difference is the
  *    blocking `real-workspace-changed` failure (SC-004).
  *
+ * Step 2 is `verifyObligations`, the one per-obligation run the Task owner
+ * check shares (ADR-0092). The two callers differ only in the paths each run
+ * must reach (`ScopedRun.due`: `duePaths` by the Wave here, the duty's own
+ * paths at a Task's stop) and in how one matrix-test run is launched
+ * (`ObligationRunScope.execute`: `runOnce` here, behind the Task check's
+ * deadline there).
+ *
  * No command text ever comes from the plan: the command is the frozen
  * runner's, formed by `affectedRunnerCheck`, and its time limit is clamped by
  * `mutantTimeoutMs`.
@@ -39,7 +46,7 @@
  */
 
 import { parse as parseJsonc, printParseErrorCode, type ParseError } from "jsonc-parser";
-import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
+import { failure, mapNonEmpty, nonEmptyOf, success, type DomainResult, type NonEmpty } from "../core/orchestration-contract/identity";
 import type { ArtifactDigest } from "../core/orchestration-contract";
 import { siblingCoverage } from "../core/owner-verification/coverage";
 import { mutationPlan, applyMutant, MUTANT_CAP_PER_INVARIANT } from "../core/owner-verification/mutation-plan";
@@ -67,8 +74,16 @@ import type { FrozenVerificationManifest } from "../core/verification-manifest";
 import type { TaskGraph } from "../types";
 import { describeCause } from "../utils/describe-cause";
 import type { CanonicalRepositoryRoot } from "../utils/workspace-digest";
-import { infrastructure, matrixTestCommand, ownerAtBase, readRepositoryText, resolveWaveBase, runOnce } from "./mutation-run-steps";
-import { withMutationWorkspace, type OwnerVariant } from "./owner-mutation-workspace";
+import {
+  infrastructure,
+  matrixTestCommand,
+  ownerAtBase,
+  readRepositoryText,
+  resolveWaveBase,
+  runOnce,
+  type MatrixTestCommand,
+} from "./mutation-run-steps";
+import { withMutationWorkspace, type MutationWorkspace, type OwnerVariant } from "./owner-mutation-workspace";
 
 export type OwnerVerificationInput = Readonly<{
   /** The real, reviewed workspace. */
@@ -119,15 +134,15 @@ function coverageAliases(root: CanonicalRepositoryRoot, matrixTest: string): Dom
     : infrastructure("alias-config-unresolvable", `the import graph of ${matrixTest} cannot be resolved: ${aliases.error.reason}`));
 }
 
-/** The matrix test's reach over the family paths due by this Wave (`duePaths`): a sibling only a later Wave lists is not yet owed. */
-function coverage(input: OwnerVerificationInput, obligation: OwnerObligation): CoverageVerdict {
-  const aliases = coverageAliases(input.root, obligation.matrixTest);
+/** The matrix test's reach over the family paths its run says are due. */
+function coverage(scope: ObligationRunScope, { run: { obligation }, due }: ScopedRun): CoverageVerdict {
+  const aliases = coverageAliases(scope.root, obligation.matrixTest);
   if (!aliases.ok) return coverageInfrastructure(aliases.error);
   return siblingCoverage({
     matrixTest: obligation.matrixTest,
-    due: duePaths(input.graph.tasks, input.wave, obligation),
+    due,
     aliases: aliases.value,
-    read: (path) => readRepositoryText(input.root, path),
+    read: (path) => readRepositoryText(scope.root, path),
   });
 }
 
@@ -137,6 +152,29 @@ function coverage(input: OwnerVerificationInput, obligation: OwnerObligation): C
 
 /** One matrix-test run with the owner's bytes as `owner` says: the port `runPlan` sequences. */
 export type RunMatrixTest = (owner: OwnerVariant) => Promise<MatrixTestRun>;
+
+/**
+ * One execution of the matrix test's command in an obligation's isolated
+ * copy: `runOnce` at the gate; at a Task's stop, `runOnce` behind the
+ * Task owner check's deadline.
+ */
+export type ExecuteMatrixTest = (workspace: MutationWorkspace, command: MatrixTestCommand, owner: OwnerVariant) => Promise<MatrixTestRun>;
+
+/**
+ * What every obligation's run reads besides the obligation itself. The gate
+ * and a Task owner check (ADR-0092) differ only in the paths each run must
+ * reach (`ScopedRun.due`) and in `execute`, how one matrix-test run is
+ * launched. The Wave base, the mutation plan, the isolated copy, the run
+ * sequencing and the verdict are the same for both.
+ */
+export type ObligationRunScope = Readonly<{
+  /** The real workspace. It is only ever read. */
+  root: CanonicalRepositoryRoot;
+  /** The Tasks whose listings choose each owner's Wave base. */
+  graph: Pick<TaskGraph, "tasks" | "acceptance_contracts">;
+  wave: number;
+  execute: ExecuteMatrixTest;
+}>
 
 const BASELINE: OwnerVariant = Object.freeze({ kind: "baseline" });
 
@@ -167,7 +205,7 @@ export async function runPlan(
 type Planned = Readonly<{ ownerText: string; plan: MutationPlan | null }>;
 
 /** The owner's Wave bytes and its mutation plan: null when no Wave Task changed the owner. */
-function planMutation(input: OwnerVerificationInput, obligation: OwnerObligation): DomainResult<Planned, OwnerInfrastructureFailure> {
+function planMutation(input: ObligationRunScope, obligation: OwnerObligation): DomainResult<Planned, OwnerInfrastructureFailure> {
   const owner = readRepositoryText(input.root, obligation.owner);
   if (owner.kind === "unreadable") return failure(owner.failure);
   if (owner.kind === "absent") {
@@ -196,7 +234,7 @@ function planMutation(input: OwnerVerificationInput, obligation: OwnerObligation
 
 type MutateRun = Extract<ObligationRun, { readonly kind: "mutate" }>;
 
-async function mutationEvidence(input: OwnerVerificationInput, { obligation, runner }: MutateRun): Promise<MutationEvidence> {
+async function mutationEvidence(input: ObligationRunScope, { obligation, runner }: MutateRun): Promise<MutationEvidence> {
   const command = matrixTestCommand(runner, [obligation.matrixTest]);
   if (!command.ok) {
     return { kind: "infrastructure", failure: infrastructure("runner-missing", `the affectedRunner cannot run ${obligation.matrixTest}: ${command.error}`) };
@@ -209,7 +247,7 @@ async function mutationEvidence(input: OwnerVerificationInput, { obligation, run
     const ran = await withMutationWorkspace(
       { repositoryRoot: input.root, ownerPath: ownerPath.value, reportPath: runner.report.path, runnerCwd: runner.cwd },
       (workspace) => runPlan(
-        (owner) => runOnce(workspace, command.value, owner),
+        (owner) => input.execute(workspace, command.value, owner),
         obligation.matrixTest,
         planned.value.ownerText,
         planned.value.plan,
@@ -243,20 +281,42 @@ async function workspaceDigest(input: OwnerVerificationInput, when: "before" | "
   return observed.value.ok ? success(observed.value.value) : unobserved(observed.value.error);
 }
 
-type ObligationRuns = Readonly<{ verdicts: readonly InvariantVerdict[]; plans: ReadonlyMap<InvariantId, MutationPlan> }>;
+/**
+ * One obligation's run with the paths its matrix test must reach: `duePaths`
+ * by the Wave at the gate, the duty's own `due` at a Task's stop.
+ */
+export type ScopedRun = Readonly<{ run: ObligationRun; due: NonEmpty<string> }>;
 
-/** Coverage then, for a `mutate` run, mutation per owed obligation, in stamp order. */
-async function verifyObligations(input: OwnerVerificationInput, runs: readonly ObligationRun[]): Promise<ObligationRuns> {
-  const verdicts: InvariantVerdict[] = [];
+/** Each run's verdict, in run order, and the mutation plan of each obligation whose owner changed in the Wave. */
+export type ObligationRuns = Readonly<{ verdicts: NonEmpty<InvariantVerdict>; plans: ReadonlyMap<InvariantId, MutationPlan> }>;
+
+/**
+ * The per-obligation run the gate and a Task owner check share: coverage
+ * then, for a `mutate` run, mutation, per obligation in run order. Each
+ * failure is that obligation's infrastructure verdict; a throw escapes only
+ * from a step built to return failures as data, and its caller guards it.
+ */
+export async function verifyObligations(scope: ObligationRunScope, [first, ...rest]: NonEmpty<ScopedRun>): Promise<ObligationRuns> {
   const plans = new Map<InvariantId, MutationPlan>();
-  for (const run of runs) {
-    const covered = coverage(input, run.obligation);
-    const evidence: MutationEvidence = run.kind === "exempt" ? { kind: "exempt" } : await mutationEvidence(input, run);
+  const verify = async (scoped: ScopedRun): Promise<InvariantVerdict> => {
+    const { run } = scoped;
+    const covered = coverage(scope, scoped);
+    const evidence: MutationEvidence = run.kind === "exempt" ? { kind: "exempt" } : await mutationEvidence(scope, run);
     if (evidence.kind === "owner-changed") plans.set(run.obligation.invariant, evidence.plan);
-    verdicts.push(invariantVerdict(run.obligation, covered, evidence));
-  }
-  return { verdicts, plans };
+    return invariantVerdict(run.obligation, covered, evidence);
+  };
+  const head = await verify(first);
+  const tail: InvariantVerdict[] = [];
+  for (const scoped of rest) tail.push(await verify(scoped));
+  return { verdicts: nonEmptyOf(head, ...tail), plans };
 }
+
+/** The gate's scope: every run launched as it comes. */
+const gateScope = (input: OwnerVerificationInput): ObligationRunScope => ({ root: input.root, graph: input.graph, wave: input.wave, execute: runOnce });
+
+/** Each gate run with the paths due by its Wave. */
+const gateRuns = (input: OwnerVerificationInput, runs: NonEmpty<ObligationRun>): NonEmpty<ScopedRun> =>
+  mapNonEmpty(runs, (run) => ({ run, due: duePaths(input.graph.tasks, input.wave, run.obligation) }));
 
 /**
  * The check between its two digest observations. A throw from the
@@ -271,7 +331,7 @@ async function verifyWave(input: OwnerVerificationInput): Promise<OwnerVerificat
 
   const before = await workspaceDigest(input, "before");
   if (!before.ok) return unavailableBecause(before.error);
-  const ran = await guarded("verifying the owed obligations", () => verifyObligations(input, runs));
+  const ran = await guarded("verifying the owed obligations", () => verifyObligations(gateScope(input), gateRuns(input, runs)));
   const after = await workspaceDigest(input, "after");
   if (!after.ok) return unavailableBecause(after.error);
   if (after.value !== before.value) {

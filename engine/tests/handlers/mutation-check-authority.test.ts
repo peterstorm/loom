@@ -20,6 +20,7 @@ import { observeSubagentAuthorityContext, subagentAuthorityBlock } from "../../s
 import { classifyTestCommand, extractEvidence } from "../../src/machine/extract-evidence";
 import type { HarnessToolCall } from "../../src/machine/harness-tool-call-types";
 import { taskMutationRecordPath } from "../../src/orchestration/task-mutation-record";
+import { taskOwnerCheckRecordPath } from "../../src/orchestration/task-owner-check-record";
 import { LOOM_COMMANDS } from "../../src/utils/loom-package-root";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
@@ -114,5 +115,39 @@ describe("the mutation-check route", () => {
   it("is a helper the CLI knows, and needs no Pi runtime handshake", () => {
     expect(KNOWN_HANDLERS.helper?.has("mutation-check")).toBe(true);
     expect([...PI_RUNTIME_HANDSHAKE_ROUTES].filter((route) => route.includes("mutation-check"))).toEqual([]);
+  });
+});
+
+describe("the Task owner check's command (ADR-0092), under the same guards and ledger", () => {
+  const OWNER_COMMANDS = [
+    LOOM_COMMANDS.ownerCheck("T1"),
+    loomCommandsAt("/home/o'brien/.claude/plugins/loom").ownerCheck("T12"),
+    `cd /repo && ${LOOM_COMMANDS.ownerCheck("T1")}`,
+  ];
+
+  it.each(OWNER_COMMANDS)("guard-subagent-authority and the State File guard let an implementer run %s", (command) => {
+    expect(subagentAuthorityBlock(command, observeSubagentAuthorityContext("/repo"))).toBeNull();
+    expect(guardDecision(command)).toBe("allow");
+  });
+
+  it("guard-subagent-authority refuses a shell write of the owner record itself", () => {
+    const record = taskOwnerCheckRecordPath(canonicalRoot(runtime), "T1");
+    expect(record.startsWith(join(runtime, "subagents"))).toBe(true);
+    expect(subagentAuthorityBlock(`echo '{}' > ${record}`, observeSubagentAuthorityContext("/repo"))).not.toBeNull();
+  });
+
+  it("mints no test run and no file write, however the helper exited", () => {
+    for (const command of OWNER_COMMANDS) {
+      expect(classifyTestCommand(command)).toBeNull();
+      for (const exit of [0, 1]) {
+        const minted = extractEvidence(bash(command, "Task owner check for T1: clean.", exit), () => { throw new Error("no report is looked up"); });
+        expect(minted.filter(({ kind }) => kind === "TestRun" || kind === "FileWrite")).toEqual([]);
+      }
+    }
+  });
+
+  it("is a helper the CLI knows, and needs no Pi runtime handshake", () => {
+    expect(KNOWN_HANDLERS.helper?.has("owner-check")).toBe(true);
+    expect([...PI_RUNTIME_HANDSHAKE_ROUTES].filter((route) => route.includes("owner-check"))).toEqual([]);
   });
 });

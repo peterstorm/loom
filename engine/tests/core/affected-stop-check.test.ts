@@ -26,8 +26,10 @@ import {
   AFFECTED_NOTE_TEXT,
   AFFECTED_STOP_CHECK_MAX_BLOCKS,
   MUTATION_BLOCK_HEADING,
+  OWNER_BLOCK_HEADING,
   STOP_CHECK_NAMES,
   TASK_MUTATION_STOP_CHECK_MAX_BLOCKS,
+  TASK_OWNER_STOP_CHECK_MAX_BLOCKS,
   type FailingAffectedTestcase,
   type StopCheckBlockCount,
   type StopCheckName,
@@ -38,11 +40,13 @@ import {
   mapSomeChecks,
   renderAffectedBlock,
   renderStopChecksBlock,
+  someChecks,
   stopCheckBlockDecision,
   type Blocking,
   type BlockingChecks,
   type StopCheckBlockCaps,
-  type StopCheckFailures,
+  type EveryCheck,
+  type StopCheckSlots,
 } from "../../src/core/affected-stop-check";
 import {
   emptyAcceptanceExpectation,
@@ -102,10 +106,11 @@ const REPORT = digest("e");
 
 const CAP = AFFECTED_STOP_CHECK_MAX_BLOCKS;
 const MUTATION_CAP = TASK_MUTATION_STOP_CHECK_MAX_BLOCKS;
-/** The runner checks at the production cap of 3 and the mutation check at its
- *  own. The acceptance constant lives in the acceptance shell, which this pure
- *  core's tests do not import. */
-const CAPS: StopCheckBlockCaps = { acceptance: CAP, affected: CAP, mutation: MUTATION_CAP };
+const OWNER_CAP = TASK_OWNER_STOP_CHECK_MAX_BLOCKS;
+/** The runner checks at the production cap of 3, and the mutation and owner
+ *  checks at their own caps of 2. The acceptance constant lives in the
+ *  acceptance shell, which this pure core's tests do not import. */
+const CAPS: StopCheckBlockCaps = { acceptance: CAP, affected: CAP, mutation: MUTATION_CAP, owner: OWNER_CAP };
 const count = (blocks: number): StopCheckBlockCount => ({ kind: "count", blocks });
 const unreadable = (reason: string): StopCheckBlockCount => ({ kind: "unreadable", reason });
 
@@ -244,20 +249,22 @@ describe("stopCheckBlockDecision", () => {
   const A = "acceptance failure";
   const F = "affected failure";
   const M = "mutation failure";
-  type Failures = StopCheckFailures<string, string, string>;
+  const O = "owner failure";
+  type Failures = StopCheckSlots<EveryCheck<string>>;
   type Issued = Readonly<Record<StopCheckName, StopCheckBlockCount>>;
   type Blocked = Readonly<Record<StopCheckName, Readonly<{ failure: string; blocks: number }> | null>>;
   /** The failures of one stop: every check passing unless named. */
-  const failuresOf = (failing: Partial<Failures> = {}): Failures => ({ acceptance: null, affected: null, mutation: null, ...failing });
+  const failuresOf = (failing: Partial<Failures> = {}): Failures => ({ acceptance: null, affected: null, mutation: null, owner: null, ...failing });
   /** The counters of one stop: no block issued unless named. */
-  const issuedAt = (issued: Partial<Issued> = {}): Issued => ({ acceptance: count(0), affected: count(0), mutation: count(0), ...issued });
+  const issuedAt = (issued: Partial<Issued> = {}): Issued => ({ acceptance: count(0), affected: count(0), mutation: count(0), owner: count(0), ...issued });
   /** What a block names: no check unless named. */
-  const blockingOf = (blocking: Partial<Blocked>): Blocked => ({ acceptance: null, affected: null, mutation: null, ...blocking });
+  const blockingOf = (blocking: Partial<Blocked>): Blocked => ({ acceptance: null, affected: null, mutation: null, owner: null, ...blocking });
   const MUTATION_CAP_NOTE = `the Task mutation check reached its ${MUTATION_CAP}-block cap`;
+  const OWNER_CAP_NOTE = `the Task owner check reached its ${OWNER_CAP}-block cap`;
 
   it("proceeds with no notes when no check is failing, whatever the counts", () => {
     for (const issued of [count(0), count(CAP), unreadable("EACCES")]) {
-      expect(stopCheckBlockDecision({ acceptance: issued, affected: issued, mutation: issued }, failuresOf(), CAPS)).toEqual({ outcome: "proceed", notes: [] });
+      expect(stopCheckBlockDecision({ acceptance: issued, affected: issued, mutation: issued, owner: issued }, failuresOf(), CAPS)).toEqual({ outcome: "proceed", notes: [] });
     }
   });
 
@@ -287,6 +294,34 @@ describe("stopCheckBlockDecision", () => {
       .toEqual({ outcome: "proceed", notes: [MUTATION_CAP_NOTE] });
     expect(stopCheckBlockDecision(issuedAt({ mutation: unreadable("EIO") }), failures, CAPS))
       .toEqual({ outcome: "proceed", notes: ["the Task mutation check's block counter is unreadable: EIO"] });
+  });
+
+  it("ADR-0092: blocks a failing owner check twice, then fails open at its own cap of 2", () => {
+    const failures = failuresOf({ owner: O });
+    for (const blocks of [0, 1]) {
+      expect(stopCheckBlockDecision(issuedAt({ owner: count(blocks) }), failures, CAPS)).toEqual({
+        outcome: "block",
+        blocking: blockingOf({ owner: { failure: O, blocks: blocks + 1 } }),
+        notes: [],
+      });
+    }
+    expect(stopCheckBlockDecision(issuedAt({ owner: count(OWNER_CAP) }), failures, CAPS))
+      .toEqual({ outcome: "proceed", notes: [OWNER_CAP_NOTE] });
+    expect(stopCheckBlockDecision(issuedAt({ owner: unreadable("EIO") }), failures, CAPS))
+      .toEqual({ outcome: "proceed", notes: ["the Task owner check's block counter is unreadable: EIO"] });
+  });
+
+  it("ADR-0092: the owner check at its cap leaves a still-failing mutation check blocking, and the reverse", () => {
+    expect(stopCheckBlockDecision(issuedAt({ mutation: count(1), owner: count(OWNER_CAP) }), failuresOf({ mutation: M, owner: O }), CAPS)).toEqual({
+      outcome: "block",
+      blocking: blockingOf({ mutation: { failure: M, blocks: 2 } }),
+      notes: [OWNER_CAP_NOTE],
+    });
+    expect(stopCheckBlockDecision(issuedAt({ mutation: count(MUTATION_CAP), owner: count(0) }), failuresOf({ mutation: M, owner: O }), CAPS)).toEqual({
+      outcome: "block",
+      blocking: blockingOf({ owner: { failure: O, blocks: 1 } }),
+      notes: [MUTATION_CAP_NOTE],
+    });
   });
 
   it("fails open with a note naming the cause when a failing check's counter is unreadable", () => {
@@ -345,15 +380,15 @@ describe("stopCheckBlockDecision", () => {
   });
 
   it("names each check that contributes failures, with its failure and count + 1", () => {
-    expect(stopCheckBlockDecision(issuedAt({ affected: count(2), mutation: count(1) }), { acceptance: A, affected: F, mutation: M }, CAPS)).toEqual({
+    expect(stopCheckBlockDecision(issuedAt({ affected: count(2), mutation: count(1) }), { acceptance: A, affected: F, mutation: M, owner: O }, CAPS)).toEqual({
       outcome: "block",
-      blocking: { acceptance: { failure: A, blocks: 1 }, affected: { failure: F, blocks: 3 }, mutation: { failure: M, blocks: 2 } },
+      blocking: { acceptance: { failure: A, blocks: 1 }, affected: { failure: F, blocks: 3 }, mutation: { failure: M, blocks: 2 }, owner: { failure: O, blocks: 1 } },
       notes: [],
     });
   });
 
   /** The checks a block names, each with the count its counter now records. */
-  const blockedChecks = (blocking: BlockingChecks<string, string, string>): ReadonlyArray<readonly [StopCheckName, number]> =>
+  const blockedChecks = (blocking: BlockingChecks<EveryCheck<string>>): ReadonlyArray<readonly [StopCheckName, number]> =>
     STOP_CHECK_NAMES.flatMap((name) => {
       const entry = blocking[name];
       return entry === null ? [] : [[name, entry.blocks] as const];
@@ -365,16 +400,17 @@ describe("stopCheckBlockDecision", () => {
       acceptance: failure(A),
       affected: failure(F),
       mutation: failure(M),
+      owner: failure(O),
       unreadable: fc.constantFrom<StopCheckName | null>(null, null, null, ...STOP_CHECK_NAMES),
     });
 
     fc.assert(fc.property(fc.array(stop, { minLength: 1, maxLength: 20 }), (stops) => {
-      const counters: Record<StopCheckName, number> = { acceptance: 0, affected: 0, mutation: 0 };
-      const contributed: Record<StopCheckName, number> = { acceptance: 0, affected: 0, mutation: 0 };
+      const counters: Record<StopCheckName, number> = { acceptance: 0, affected: 0, mutation: 0, owner: 0 };
+      const contributed: Record<StopCheckName, number> = { acceptance: 0, affected: 0, mutation: 0, owner: 0 };
       let blocks = 0;
       for (const { unreadable: lost, ...failures } of stops) {
         const issued = (name: StopCheckName): StopCheckBlockCount => lost === name ? unreadable("lost") : count(counters[name]);
-        const decision = stopCheckBlockDecision({ acceptance: issued("acceptance"), affected: issued("affected"), mutation: issued("mutation") }, failures, CAPS);
+        const decision = stopCheckBlockDecision<EveryCheck<string>>({ acceptance: issued("acceptance"), affected: issued("affected"), mutation: issued("mutation"), owner: issued("owner") }, failures, CAPS);
         if (decision.outcome === "proceed") break; // the agent's stop proceeds: it ends.
         blocks += 1;
         const blocked = blockedChecks(decision.blocking);
@@ -393,13 +429,13 @@ describe("stopCheckBlockDecision", () => {
   });
 
   it("SC-005: an agent failing every check forever is blocked exactly the largest cap, then proceeds", () => {
-    const counters: Record<StopCheckName, number> = { acceptance: 0, affected: 0, mutation: 0 };
+    const counters: Record<StopCheckName, number> = { acceptance: 0, affected: 0, mutation: 0, owner: 0 };
     let blocks = 0;
     for (;;) {
-      const issued = { acceptance: count(counters.acceptance), affected: count(counters.affected), mutation: count(counters.mutation) };
-      const decision = stopCheckBlockDecision(issued, { acceptance: A, affected: F, mutation: M }, CAPS);
+      const issued = { acceptance: count(counters.acceptance), affected: count(counters.affected), mutation: count(counters.mutation), owner: count(counters.owner) };
+      const decision = stopCheckBlockDecision<EveryCheck<string>>(issued, { acceptance: A, affected: F, mutation: M, owner: O }, CAPS);
       if (decision.outcome === "proceed") {
-        expect(decision.notes).toEqual([`the acceptance stop check reached its ${CAP}-block cap`, AFFECTED_NOTE_TEXT["cap-reached"], MUTATION_CAP_NOTE]);
+        expect(decision.notes).toEqual([`the acceptance stop check reached its ${CAP}-block cap`, AFFECTED_NOTE_TEXT["cap-reached"], MUTATION_CAP_NOTE, OWNER_CAP_NOTE]);
         break;
       }
       blocks += 1;
@@ -407,6 +443,7 @@ describe("stopCheckBlockDecision", () => {
     }
     expect(blocks).toBe(CAP);
     expect(counters.mutation).toBe(MUTATION_CAP);
+    expect(counters.owner).toBe(OWNER_CAP);
   });
 });
 
@@ -427,8 +464,8 @@ describe("blockAdmission", () => {
     const issuedArb = fc.oneof(fc.integer({ min: 0, max: CAP + 2 }).map(count), fc.constant(unreadable("lost")));
     fc.assert(fc.property(fc.constantFrom(...STOP_CHECK_NAMES), issuedArb, (name, issued) => {
       const admission = blockAdmission(name, issued, CAPS[name]);
-      const failures = { acceptance: null, affected: null, mutation: null, [name]: "failing" };
-      const decision = stopCheckBlockDecision({ acceptance: count(0), affected: count(0), mutation: count(0), [name]: issued }, failures, CAPS);
+      const failures = { acceptance: null, affected: null, mutation: null, owner: null, [name]: "failing" };
+      const decision = stopCheckBlockDecision({ acceptance: count(0), affected: count(0), mutation: count(0), owner: count(0), [name]: issued }, failures, CAPS);
       if (admission.kind === "may-block") {
         expect(decision.outcome).toBe("block");
         if (decision.outcome === "block") expect(decision.blocking[name]?.blocks).toBe(admission.blocks);
@@ -484,8 +521,21 @@ describe("renderAffectedBlock", () => {
 });
 
 describe("renderStopChecksBlock", () => {
+  /** The parts of one block, through the one constructor; a fixture that fills no slot is a broken test. */
+  const blockParts = (slots: StopCheckSlots<EveryCheck<string>>) => {
+    const parts = someChecks(slots);
+    if (parts === null) throw new Error("fixture: a block names at least one check");
+    return parts;
+  };
+
+  it("someChecks refuses slots that name no check", () => {
+    expect(someChecks({ acceptance: null, affected: null, mutation: null, owner: null })).toBeNull();
+  });
+
   it("AS-028: lists the acceptance part, then the affected part, each under its own heading", () => {
-    const message = renderStopChecksBlock({ acceptance: "owed AS-001 still failing", affected: "ledger > balances failing", mutation: "a guard survived" });
+    const message = renderStopChecksBlock(blockParts({
+      acceptance: "owed AS-001 still failing", affected: "ledger > balances failing", mutation: "a guard survived", owner: "a sibling is missing",
+    }));
 
     const acceptance = message.indexOf(ACCEPTANCE_BLOCK_HEADING);
     const owed = message.indexOf("owed AS-001");
@@ -493,44 +543,47 @@ describe("renderStopChecksBlock", () => {
     const ledger = message.indexOf("ledger > balances");
     const mutation = message.indexOf(MUTATION_BLOCK_HEADING);
     const guard = message.indexOf("a guard survived");
+    const owner = message.indexOf(OWNER_BLOCK_HEADING);
+    const sibling = message.indexOf("a sibling is missing");
     expect(acceptance).toBe(0);
-    expect([acceptance, owed, affected, ledger, mutation, guard].every((at, i, all) => at >= 0 && (i === 0 || at > all[i - 1]!))).toBe(true);
+    expect([acceptance, owed, affected, ledger, mutation, guard, owner, sibling].every((at, i, all) => at >= 0 && (i === 0 || at > all[i - 1]!))).toBe(true);
   });
 
   it("carries a heading only for a check that contributes failures", () => {
-    const affectedOnly = renderStopChecksBlock({ acceptance: null, affected: "ledger > balances failing", mutation: null });
+    const affectedOnly = renderStopChecksBlock(blockParts({ acceptance: null, affected: "ledger > balances failing", mutation: null, owner: null }));
     expect(affectedOnly).toBe(`${AFFECTED_BLOCK_HEADING}\n\nledger > balances failing`);
     expect(affectedOnly).not.toContain(ACCEPTANCE_BLOCK_HEADING);
 
-    const acceptanceOnly = renderStopChecksBlock({ acceptance: "owed AS-001 still failing", affected: null, mutation: null });
+    const acceptanceOnly = renderStopChecksBlock(blockParts({ acceptance: "owed AS-001 still failing", affected: null, mutation: null, owner: null }));
     expect(acceptanceOnly).toBe(`${ACCEPTANCE_BLOCK_HEADING}\n\nowed AS-001 still failing`);
     expect(acceptanceOnly).not.toContain(AFFECTED_BLOCK_HEADING);
 
-    expect(renderStopChecksBlock({ acceptance: null, affected: null, mutation: "a guard survived" })).toBe(`${MUTATION_BLOCK_HEADING}\n\na guard survived`);
+    expect(renderStopChecksBlock(blockParts({ acceptance: null, affected: null, mutation: "a guard survived", owner: null }))).toBe(`${MUTATION_BLOCK_HEADING}\n\na guard survived`);
+    expect(renderStopChecksBlock(blockParts({ acceptance: null, affected: null, mutation: null, owner: "a sibling is missing" }))).toBe(`${OWNER_BLOCK_HEADING}\n\na sibling is missing`);
   });
 });
 
 describe("mapSomeChecks", () => {
-  const ZERO = { acceptance: count(0), affected: count(0), mutation: count(0) };
-  type Markers = StopCheckFailures<string, string, string>;
+  const ZERO = { acceptance: count(0), affected: count(0), mutation: count(0), owner: count(0) };
+  type Markers = StopCheckSlots<EveryCheck<string>>;
 
   it("maps each check a block names, with its name, and leaves the others empty", () => {
-    const failing: Markers = { acceptance: null, affected: "F", mutation: "M" };
+    const failing: Markers = { acceptance: null, affected: "F", mutation: "M", owner: null };
     const decision = stopCheckBlockDecision(ZERO, failing, CAPS);
     if (decision.outcome !== "block") throw new Error("two failing checks under their caps block");
-    expect(mapSomeChecks<Blocking<string>, string>(decision.blocking, (name, { failure, blocks }) => `${name}:${failure}:${blocks}`))
-      .toEqual({ acceptance: null, affected: "affected:F:1", mutation: "mutation:M:1" });
+    expect(mapSomeChecks<EveryCheck<Blocking<string>>, string>(decision.blocking, (name, { failure, blocks }) => `${name}:${failure}:${blocks}`))
+      .toEqual({ acceptance: null, affected: "affected:F:1", mutation: "mutation:M:1", owner: null });
   });
 
   it("property: the parts fill exactly the slots the block fills, each from its own check, in check order", () => {
     const failure = (marker: string) => fc.constantFrom<string | null>(marker, null);
-    const failures: fc.Arbitrary<Markers> = fc.record({ acceptance: failure("A"), affected: failure("F"), mutation: failure("M") })
-      .filter(({ acceptance, affected, mutation }) => acceptance !== null || affected !== null || mutation !== null);
+    const failures: fc.Arbitrary<Markers> = fc.record({ acceptance: failure("A"), affected: failure("F"), mutation: failure("M"), owner: failure("O") })
+      .filter(({ acceptance, affected, mutation, owner }) => acceptance !== null || affected !== null || mutation !== null || owner !== null);
     fc.assert(fc.property(failures, (failing) => {
       const decision = stopCheckBlockDecision(ZERO, failing, CAPS);
       if (decision.outcome !== "block") throw new Error("a failing check under its cap blocks");
       const named: StopCheckName[] = [];
-      const parts = mapSomeChecks<Blocking<string>, string>(decision.blocking, (name, { failure: marker }) => {
+      const parts = mapSomeChecks<EveryCheck<Blocking<string>>, string>(decision.blocking, (name, { failure: marker }) => {
         named.push(name);
         return `${name}:${marker}`;
       });
