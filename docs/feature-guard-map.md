@@ -6,9 +6,11 @@ determinism device — why it exists, why it works, and where it honestly does n
 Written from a full source scan of revision **a28b6d6a** (main, 2026-11-15), updated through
 **deb8c369** (2026-11-18): the #201–#223 wave (engine-run test evidence, the loom#198/#199
 Cause campaign, the #213 reviewer-protocol fixes) was read from its diffs and is folded in —
-mechanisms, catalog rows, residuals and appendices. Every claim was checked against the code
-at its revision; claims resting on documentation rather than code are marked *(docs)*.
-Vocabulary follows [CONTEXT.md](../CONTEXT.md).
+mechanisms, catalog rows, residuals and appendices. Updated again through **98a9852c**
+(2026-11-18): the #224/#225 advisory-disposition and succession-carry changes (ADR-0090,
+ADR-0089 as amended by ADR-0091) folded in from their diffs and ADRs. Every claim was checked
+against the code at its revision; claims resting on documentation rather than code are marked
+*(docs)*. Vocabulary follows [CONTEXT.md](../CONTEXT.md).
 
 ---
 
@@ -483,6 +485,37 @@ security-hunter). Key mechanics:
   protocol, Review Generation, prior Finding IDs, roster and workspace scope/head —
   otherwise the Task resets as before. The carry plan is decided once under the restart
   lock (`core/wave-review-carry.ts`, pure) and recorded in protected state.
+- **Advisory dispositions (ADR-0090, #224, Cause 4).** The operator's advisory decisions are
+  recorded on the TaskGraph itself: `advisory_dispositions`, an append-only list written by
+  `helper orchestration disposition` (`core/advisory-disposition.ts`, `advisory-disposition-record.ts`),
+  the latest record per advisory being its standing decision. The record is a union on `decision`:
+  `fixed` has neither anchor nor target, `deferred` has an anchor and an optional target Wave/Task,
+  `dismissed` has an anchor and no target; every record carries a reason. The anchor is a sha256 over
+  the reviewed bytes the advisory anchors to (its own file when that file is one of the Task's reviewed
+  artifacts, otherwise the Task's whole reviewed artifact set), computed by the shell from the same
+  reviewed-workspace observer the gate uses. Abandoning the gate run no longer loses the decisions —
+  the operation is allowed while the gate is paused on its advisories and after the run is abandoned —
+  and one prior selector (`waveReviewPriorFindings` → `issuedPriorFindings`) is the only site that
+  turns records into a review's prior Findings: a `deferred`/`dismissed` advisory is omitted from a
+  fresh review's priors exactly while its anchor equals the anchor of the bytes now reviewed, so an
+  edited file puts the advisory back in front of reviewers. Approval is refused, naming each advisory,
+  while any advisory the pending decision request issues has no standing disposition.
+- **Succession carry (ADR-0091, #225, Cause 5).** A fresh Wave Gate start after an abandon (or a
+  completed-Wave reopen) succeeds the Wave's latest retired run and carries every reviewed Task whose
+  accepted review still judges its unchanged subject. The subject is bound by a **Subject Digest**
+  sealed into the acceptance at finalisation (`core/review-subject.ts`): protocol, roster, description,
+  agent, plan context, Requirement anchors and contributions, declared and modified files, Review
+  Generation, proof, test result, owner-map obligations, contract surfaces, plan file and the reviewed
+  workspace scope and head; the seal binds the Task's active and refuted Finding IDs, which a Refutation
+  Panel may move between without breaking it. Retired runs become protected provenance
+  (`core/retired-wave-review-runs.ts`): retiring an abandoned run's tombstone no longer drops the
+  acceptances it recorded. The succession is planned at start and frozen into the registration
+  (`prepareWaveGateFacadeStart` → `planSuccessorCarry`; `core/wave-review-carry-plan.ts` reads it),
+  the install re-checks each carried acceptance against the observed bytes and Subject Digest, and
+  completion admits a carried acceptance only from the registration's lineage. A legacy acceptance
+  without a digest is reviewed in full once. An advisory disposition never breaks a carried acceptance
+  (the digest covers what packets present apart from Findings) — the two mechanisms compose.
+  `start wave-gate --fresh-review` plans nothing and issues every reviewed Task in full.
 - **Standalone read coverage (ADR-0022)**: a standalone reviewer is admitted only
   after the engine observed it read the whole frozen diff. Coverage is **per-attempt**
   and engine-verified; **retries reset coverage to zero** and unread pages are always
@@ -533,7 +566,10 @@ Supporting machinery, each in its own module: membership (whether a request/capt
 belongs to this gate), registration (one decision over fresh vs existing runs),
 replacement (two pure protected-state transitions), preparation, status facts
 (`loom-status.ts` is the canonical read model), and orphan recovery (`recover-orphan`
-— a run whose directory is missing is orphaned, never fresh).
+— a run whose directory is missing is orphaned, never fresh). A fresh start also
+plans its succession (ADR-0091): the carry from the Wave's latest retired run is
+decided at registration and frozen into it; `start wave-gate --fresh-review`
+plans nothing.
 
 ### 4.10 Acceptance Contracts and Skeletons
 
@@ -836,6 +872,8 @@ per-mechanism *why it works* and *what remains*.
 | 36 | A live TaskGraph cannot be repaired, only suffered | Audited mutation operations: add-dependency, rescope-task, add-task/withdraw-task, amend-spec (#212/#203/#217/#220) | Each is a pure decision core + an audit record; cycles and illegal edits refused at write time | — |
 | 37 | Acceptance green on a path production never takes | Runtime seams declared, enforced at the freeze (ADR-0088, #221) | Freeze refuses acceptance files that reference no declared seam | — |
 | 38 | Retro = vibes | Friction facts + triggers + audited record (ADR-0083, #215) | Facts digested from protected state; the retro report never blocks | — |
+| 39 | Advisory decisions die with the gate run | Advisory dispositions recorded on the TaskGraph, anchored to reviewed bytes (ADR-0090, #224) | Abandon loses nothing; a decided advisory is reissued only when its bytes change | — |
+| 40 | A fresh start re-reviews every accepted Task | Succession carry by a Subject Digest sealed into the acceptance (ADR-0091, #225) | Carries only when the whole review subject is unchanged; `--fresh-review` opts out | Pre-digest acceptances reviewed in full once |
 
 ---
 
@@ -953,7 +991,7 @@ good as its grammar, bash's grammar is bottomless, and new spellings will occasi
 require new rules — but the walker tests and the shared resolution are what keep the
 fix count converging.
 
-The engine's own README names two residuals this section must carry verbatim, both
+Two residuals added by #219 this section must carry verbatim, both
 added by #219: the guard **cannot see a symlink** (a read redirected to an unguarded
 name is allowed even if an earlier command made that name a link into guarded state —
 making the link needs a command that names the state path, which the guard blocks, or
@@ -1028,7 +1066,8 @@ no-`agent_id`-under-contention stand-down itself is unchanged.
   Judged Path entry still ends "the fallback is a Forward Fix", while #217 (ADR-0086)
   deleted forward-fix.ts and made the fallback an added Task through a plan edit.
   The mechanism is retired; the ubiquitous-language file was not updated in the wave.
-  (Found by this re-audit; a one-line amendment to CONTEXT.md closes it.)
+  (Found by this re-audit; closed since: CONTEXT.md's Judged Path entry now names the
+  audited plan-edit fallback and lists Forward Fix as retired.)
 - The template gate's `FALSE_POSITIVES` set is hand-maintained and has already
   drifted between checkouts once (the `{system}` incident; resolved in main — the set
   now contains it — but the mechanism remains a manual list).
@@ -1080,6 +1119,18 @@ documented and tested; round-20/21 (double-quoted apostrophe) died with the sing
   `coupled-file-sets.ts`, `regression-attribution.ts`, `roster-liveness.ts`,
   `wave-review-carry.ts`, `spec-amendment.ts`, `engine-test-run.ts`,
   `test-evidence-policy.ts`, and ADR-0079–ADR-0089 titles.
+- Delta pass (#224/#225): both PR diffs read — the new modules
+  `advisory-disposition.ts` / `advisory-disposition-record.ts` /
+  `advisory-disposition-shape.ts`, `review-subject.ts`,
+  `retired-wave-review-runs.ts` and `wave-review-carry-audit.ts`, plus the changes
+  to `wave-review-carry.ts` / `wave-review-carry-plan.ts`,
+  `wave-review-issuance.ts`, `wave-review-authority.ts`,
+  `wave-gate-registration.ts`, `wave-gate-program.ts`, `wave-gate-start.ts` and
+  `state-file-wire.ts`, verified against ADR-0089 (as amended), ADR-0090 and
+  ADR-0091; the `--fresh-review` flag checked in `commands/wave-gate.md`; the
+  §4.7/§4.9/§5/Appendix A additions and the README's Wave Gate claims written
+  from those sources. No new full-suite verdict was taken for 98a9852c; §10's
+  standing verdict remains the deb8c369 run.
 - Code-verified claims: routing table + fail-closed polarity (cli.ts,
   handler-routes.ts); guard policy + helper list + walker map (guard-state-file.ts);
   walker one-owner structure (shell-*.ts headers); machine pins (machines/README +
@@ -1092,14 +1143,16 @@ documented and tested; round-20/21 (double-quoted apostrophe) died with the sing
   RunDirHandle; journals/effects; context packets; model policy + Pi adapter; linter
   scoping + programmatic rules + ReDoS safety; test inventory and scripts.
 - Claims marked *(docs)* rest on documentation current at a28b6d6a and, where the wave
-  changed them, at deb8c369.
+  changed them, at deb8c369; the #224/#225 additions were checked at 98a9852c.
 
 ---
 
 ## 10. Standing suite verdict
 
-**Latest — full unit suite executed 2026-11-18 at revision deb8c369 (current main):
-21,061 tests passed, 2 skipped, 0 failed, across 811 test files (7.8 min).** Run with the
+**Latest — full unit suite executed 2026-11-18 at revision deb8c369 (main at the time
+of this scan; main has since moved to 98a9852c with #224/#225, folded in by the delta
+pass in §9 without a new full-suite verdict): 21,061 tests passed, 2 skipped, 0 failed,
+across 811 test files (7.8 min).** Run with the
 `LOOM_PI_*`/`PI_*` ambient markers explicitly unset (see the gotcha below); exit code 0.
 
 **Prior — a28b6d6a, 2026-11-17: 20,132 tests across 775 files — 20,125 passed, 5 failed,
@@ -1125,6 +1178,7 @@ is this re-audit's. Both were run from the main checkout, not the doc worktree.
 
 ## Appendix A — `engine/src/core/` file-by-file (one-liners from source headers)
 
+advisory-disposition.ts / advisory-disposition-record.ts / advisory-disposition-shape.ts — advisory dispositions on the TaskGraph, anchored to reviewed bytes (ADR-0090) ·
 affected-stop-check.ts — Affected-test stop check's pure core (I7, AD-10) ·
 affected-stop-check-types.ts — CT-2 types file: the surface of I7 ·
 agent-catalog-projections.ts — every agent set, phase map, classification ·
@@ -1201,7 +1255,9 @@ remediation-machine.ts — scope authority, exclusions, audit/stage/install life
 report-file-attribution.ts/report-run-root.ts — reported↔declared attribution; report root reading ·
 repository-path.ts — host-native path → canonical repo-relative ·
 requirement-coverage.ts — spec index × task claims join ·
+retired-wave-review-runs.ts — retired Wave review runs as protected provenance (ADR-0091) ·
 review-* (authority-receipt/ed-workspace/emission-route/output/packet/panel/protocol/retry) — review authority machinery ·
+review-subject.ts — the Subject Digest of a Wave review and its seal on an acceptance (ADR-0091) ·
 rules-gate.ts — the shared rules-gate decision core ·
 run-inspection.ts — what a run's own files say about it ·
 runtime-baseline-restore.ts — restoration rules for implementation settlement ·
@@ -1247,7 +1303,7 @@ spec-amendment.ts / spec-rejudgement.ts — audited spec amendment and claim re-
 task-addition.ts — add/withdraw a Task through an audited plan edit (ADR-0086) ·
 task-dependency-edit.ts / task-rescope.ts / task-scope-rules.ts — the audited active-Wave mutation cores (ADR-0081/#202/#203) ·
 wave-plan-edit.ts — the wave_plan_edits audit ·
-wave-review-carry.ts / wave-review-carry-plan.ts — restart carry of accepted reviewer slots (ADR-0089)
+wave-review-carry.ts / wave-review-carry-plan.ts / wave-review-carry-audit.ts — restart and succession carry of accepted reviewer slots (ADR-0089, ADR-0091)
 
 ## Appendix B — other engine directories (file-by-file)
 

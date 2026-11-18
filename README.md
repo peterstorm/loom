@@ -4,7 +4,7 @@ Loom is a Claude Code plugin and native Pi package for delivering complex softwa
 
 It combines:
 
-- a full feature pipeline — **brainstorm → specify → clarify → architecture → plan alignment → decompose → execute**;
+- a full feature pipeline — **brainstorm → specify → clarify → architecture → plan alignment → plan design review → decompose → execute**;
 - opt-in architecture panels with competing design lenses and adversarial judges;
 - Wave Gates that require proof, tests, spec alignment, multi-Agent review, critical-Finding adjudication, advisory disposition, and full lint;
 - standalone PR review and end-to-end review/remediation workflows;
@@ -13,6 +13,8 @@ It combines:
 - one harness-neutral TypeScript engine with Claude Code and Pi adapters.
 
 The engine owns deterministic mechanics. Agents do semantic work; users make real choices. Scope, request identity, model/Skill routing, retries, transcripts, rosters, aggregation, state transitions, Git staging, and publication are code-owned and auditable.
+
+How each guarantee is enforced — every guardrail, every determinism device and the prompt-only failure mode it replaces, plus what honestly remains open — is mapped mechanism-by-mechanism in the [Feature & Guard Map](docs/feature-guard-map.md), checked against the code at a pinned revision.
 
 ## Quick start
 
@@ -123,9 +125,11 @@ Decompose produces dependency-ordered Tasks grouped into Waves. Tasks in one Wav
 
 Each Task is reviewed by `code-reviewer`, `silent-failure-hunter`, `pr-test-analyzer`, `type-design-analyzer` and `comment-analyzer`. `architecture-tech-lead` joins for a Task that touches an owned Invariant's family or writes an Acceptance Contract's types file.
 
-Reviewers return one JSON object. The engine assigns Finding ids and counts; a critical must state its evidence. Malformed output is recorded as a failed review, never as a Finding. Runs started under the older protocol finish under it. Details: [standalone review → Reviewer Protocol v2](docs/standalone-review.md#reviewer-protocol-v2).
+Reviewers return one JSON object. The engine assigns Finding ids and counts; a critical must state its evidence. Malformed output is recorded as a failed review, never as a Finding. The reviewer protocol is versioned and machine-stamped into the reviewer definitions: a Wave Gate registered now issues protocol v4, in which the engine itself binds the Review Packet ID and Review Generation (a mistyped hash can no longer exhaust a final attempt); a fresh standalone review admits protocol v2 bytes; a run started under an older protocol finishes under it. Details: [standalone review → Reviewer Protocol v2](docs/standalone-review.md#reviewer-protocol-v2).
 
 Critical Findings are adjudicated by a Refutation Panel. **Default panel size is 3.** Every verifier applies one assigned lens to every critical. The refutation-lens catalog is `reproduction`, `intent`, `blast-radius`, `security`, and `test-coverage`; baseline selection always includes reproduction and intent. A strict majority must refute; ties keep the Finding. A clean rerun cannot erase an old blocker by omission: every reviewer must assess every earlier Finding before it can be resolved.
+
+The gate's advisory pause records each decision — fixed, deferred or dismissed, always with a reason — on the TaskGraph, anchored to the reviewed bytes. Abandoning the gate run to act on one advisory no longer loses the decisions on the rest, and a decided advisory returns to reviewers only when its bytes change. A restarted or fresh Wave Gate carries unchanged Tasks' accepted reviews instead of re-issuing the full roster; a fresh start binds the carry to a Subject Digest sealed into each acceptance, and `start wave-gate --fresh-review` forces a full re-review.
 
 ## Standalone workflows
 
@@ -145,6 +149,7 @@ Loom's linter runs regex rules after every edit and structural rules at the Wave
 - [Documentation index](docs/README.md)
 - [Workflows](docs/workflows.md): what each command does
 - [Architecture](docs/architecture.md): layers, authority, persistence, guarantees and limits
+- [Feature & Guard Map](docs/feature-guard-map.md): the mechanism-level map — every feature, guardrail and determinism device, and the verified residuals
 - [Operations](docs/operations.md): status, recovery, validation
 - [Using Loom with Pi](docs/pi-usage.md)
 - [Running a security audit](docs/security-audit.md)
@@ -156,7 +161,7 @@ Loom's linter runs regex rules after every edit and structural rules at the Wave
 
 ## Development
 
-Use Node **22.23.2**, the Bun release pinned in the repository-root `.bun-version`, npm, Git, jq, Bash **4+** and GNU `timeout`, in a full-history checkout.
+Use Node **22.23.2**, the Bun release pinned in the repository-root `.bun-version`, npm, Git, jq, Bash **4+** and GNU `timeout` (Linux), in a full-history checkout.
 
 ```bash
 bun install --frozen-lockfile
