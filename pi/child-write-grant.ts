@@ -34,6 +34,11 @@ import type { DurableSpawnClaims, RosterClaim } from "./spawn-claims";
 type ActiveChildWriteGrantScope = Readonly<{
   scopeDirs?: readonly string[];
   grantCwd?: string;
+  /** The Task the consumed grant was bound to, and the TaskGraph it names: the
+   *  edit guard reads that Task's attestation mode there (ADR-0085). Absent on
+   *  a grant activated before this was recorded. */
+  taskId?: string;
+  taskGraphPath?: string;
   /** The parent ledger address the consumed grant carried (AD-8): where this
    *  child's evidence recorder appends. Absent when the parent issued none. */
   evidenceLedger?: PiEvidenceLedgerAddress;
@@ -160,6 +165,8 @@ export async function activatePiChildWriteGrant(
       pointerBinding,
       scopeDirs: grant.scopeDirs,
       grantCwd: grant.cwd,
+      taskId: grant.taskId,
+      taskGraphPath: grant.taskGraphPath,
       ...(grant.evidenceLedger === null ? {} : { evidenceLedger: grant.evidenceLedger }),
     });
     partialBinding = null;

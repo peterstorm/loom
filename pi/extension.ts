@@ -85,7 +85,9 @@ import { assertAnchoredFilesystemPlatformSupported } from "../engine/src/utils/n
 import { materializePiResources } from "./resources";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
 import { buildPiRoutingContext } from "../engine/src/utils/model-routing-context";
-import { grantWriteScope, sweepExpiredPiWriteGrants } from "./write-grant";
+import { grantWriteScope, isPhaseGrantTaskId, sweepExpiredPiWriteGrants } from "./write-grant";
+import { taskWriteMode } from "../engine/src/core/attestation-writes";
+import { readAttestationTasks } from "../engine/src/handlers/pre-tool-use/block-direct-edits";
 import {
   captureLoomRuntimeIdentity,
   loadedRuntimeCompatibility,
@@ -384,6 +386,14 @@ export default function (
           {
             locateEdit: () => piEditSite(safeSessionId, event.input, ctx.cwd),
             grantScope: () => grantWriteScope(granted?.scopeDirs, granted?.grantCwd, ctx.cwd),
+            // An implementation grant names its Task; an attesting Task's attempt changes nothing (ADR-0085).
+            callerWriteMode: () => {
+              const taskId = granted?.taskId;
+              const graphPath = granted?.taskGraphPath;
+              if (taskId === undefined || graphPath === undefined || isPhaseGrantTaskId(taskId)) return undefined;
+              const tasks = readAttestationTasks(() => new StateManager(graphPath), `write grant ${taskId}`);
+              return { taskId, mode: taskWriteMode(tasks, taskId) };
+            },
           },
         );
         if (result.kind === "block") {
