@@ -11,7 +11,8 @@ import {
 import { realArtifactProbe } from "../../src/orchestration/artifact-probe";
 import type { ArtifactProbe, ArtifactState } from "../../src/handlers/pre-tool-use/validate-phase-order";
 import { VALID_TRANSITIONS } from "../../src/core/phase-policy";
-import { validatePhaseOrder } from "../../src/core/validate-phase-order";
+import { validatePhaseOrder, type PhaseOrderDeps } from "../../src/core/validate-phase-order";
+import type { TaskGraph } from "../../src/types";
 import { sha256Hex } from "../../src/core/digest";
 import {
   PLAN_DESIGN_REVIEW_REQUIRED,
@@ -181,76 +182,99 @@ describe("standalone lifecycle", () => {
 
 describe("detectPhase (pure)", () => {
   it("maps known phase agents", () => {
-    expect(detectPhase("brainstorm-agent", "")).toBe("brainstorm");
-    expect(detectPhase("specify-agent", "")).toBe("specify");
-    expect(detectPhase("clarify-agent", "")).toBe("clarify");
-    expect(detectPhase("architecture-agent", "")).toBe("architecture");
-    expect(detectPhase("decompose-agent", "")).toBe("decompose");
+    expect(detectPhase("brainstorm-agent")).toBe("brainstorm");
+    expect(detectPhase("specify-agent")).toBe("specify");
+    expect(detectPhase("clarify-agent")).toBe("clarify");
+    expect(detectPhase("architecture-agent")).toBe("architecture");
+    expect(detectPhase("decompose-agent")).toBe("decompose");
   });
 
   it("maps plan-alignment-agent via PHASE_AGENT_MAP", () => {
-    expect(detectPhase("plan-alignment-agent", "")).toBe("plan-alignment");
+    expect(detectPhase("plan-alignment-agent")).toBe("plan-alignment");
   });
 
   it("maps impl agents to execute", () => {
-    expect(detectPhase("code-implementer-agent", "")).toBe("execute");
-    expect(detectPhase("ts-test-agent", "")).toBe("execute");
-    expect(detectPhase("frontend-agent", "")).toBe("execute");
+    expect(detectPhase("code-implementer-agent")).toBe("execute");
+    expect(detectPhase("ts-test-agent")).toBe("execute");
+    expect(detectPhase("frontend-agent")).toBe("execute");
   });
 
   it("maps review agents to execute", () => {
-    expect(detectPhase("spec-check-invoker", "")).toBe("execute");
+    expect(detectPhase("spec-check-invoker")).toBe("execute");
   });
 
   it("maps review sub-agents to execute", () => {
-    expect(detectPhase("code-reviewer", "")).toBe("execute");
-    expect(detectPhase("silent-failure-hunter", "")).toBe("execute");
-    expect(detectPhase("pr-test-analyzer", "")).toBe("execute");
-    expect(detectPhase("type-design-analyzer", "")).toBe("execute");
-    expect(detectPhase("comment-analyzer", "")).toBe("execute");
-    expect(detectPhase("code-simplifier", "")).toBe("execute");
+    expect(detectPhase("code-reviewer")).toBe("execute");
+    expect(detectPhase("silent-failure-hunter")).toBe("execute");
+    expect(detectPhase("pr-test-analyzer")).toBe("execute");
+    expect(detectPhase("type-design-analyzer")).toBe("execute");
+    expect(detectPhase("comment-analyzer")).toBe("execute");
+    expect(detectPhase("code-simplifier")).toBe("execute");
   });
 
   it("maps refutation verifiers to execute by exact and bare name", () => {
-    expect(detectPhase("review-verifier-agent", "")).toBe("execute");
-    expect(detectPhase("review-verifier", "")).toBe("execute");
+    expect(detectPhase("review-verifier-agent")).toBe("execute");
+    expect(detectPhase("review-verifier")).toBe("execute");
   });
 
-  it("falls back to prompt keywords", () => {
-    expect(detectPhase("custom-agent", "brainstorm ideas")).toBe("brainstorm");
-    expect(detectPhase("custom-agent", "write specification")).toBe("specify");
-    expect(detectPhase("custom-agent", "resolve NEEDS CLARIFICATION markers")).toBe("clarify");
-    expect(detectPhase("custom-agent", "design architecture")).toBe("architecture");
-  });
-
-  it("detects plan-alignment from prompt regex (plan.alignment)", () => {
-    expect(detectPhase("custom-agent", "run plan alignment check")).toBe("plan-alignment");
-  });
-
-  it("detects plan-alignment from prompt regex (gap.report)", () => {
-    expect(detectPhase("custom-agent", "produce gap report")).toBe("plan-alignment");
-  });
-
-  it("detects plan-alignment case-insensitively", () => {
-    expect(detectPhase("custom-agent", "Plan Alignment review")).toBe("plan-alignment");
-    expect(detectPhase("custom-agent", "Gap Report analysis")).toBe("plan-alignment");
-  });
-
-  it("returns unknown for unrecognized agents", () => {
-    expect(detectPhase("random-agent", "do stuff")).toBe("unknown");
+  it("returns unknown for an agent outside the catalog", () => {
+    expect(detectPhase("random-agent")).toBe("unknown");
+    expect(detectPhase("general-purpose")).toBe("unknown");
   });
 
   // ── panel agents (--panel) map to architecture ──
   it("maps arch-panel agents to architecture (recognized, not blocked as unknown)", () => {
-    expect(detectPhase("arch-interviewer-agent", "")).toBe("architecture");
-    expect(detectPhase("arch-designer-agent", "")).toBe("architecture");
-    expect(detectPhase("arch-judge-agent", "")).toBe("architecture");
+    expect(detectPhase("arch-interviewer-agent")).toBe("architecture");
+    expect(detectPhase("arch-designer-agent")).toBe("architecture");
+    expect(detectPhase("arch-judge-agent")).toBe("architecture");
   });
 
   it("maps arch-panel agents via the '-agent' suffix fallback", () => {
-    expect(detectPhase("arch-interviewer", "")).toBe("architecture");
-    expect(detectPhase("arch-designer", "")).toBe("architecture");
-    expect(detectPhase("arch-judge", "")).toBe("architecture");
+    expect(detectPhase("arch-interviewer")).toBe("architecture");
+    expect(detectPhase("arch-designer")).toBe("architecture");
+    expect(detectPhase("arch-judge")).toBe("architecture");
+  });
+});
+
+// ─── agents outside Loom's catalog (loom#213) ────────────────────────────────
+
+describe("an agent outside Loom's catalog is not phase work", () => {
+  const executing = (): PhaseOrderDeps => ({
+    loadState: () => ({
+      current_phase: "execute",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      current_wave: 1,
+      executing_tasks: [],
+      tasks: [],
+      wave_gates: {},
+    }) as unknown as TaskGraph,
+    artifacts: emptyProbe,
+  });
+
+  it.each([
+    ["a general-purpose agent whose prompt names architecture", "general-purpose", "Read rules/architecture.md, then design the change"],
+    ["a general-purpose agent whose prompt names a spec", "general-purpose", "Update the specification in spec.md"],
+    ["another plugin's agent", "impeccable:impeccable-documenter", "Record the design system"],
+    ["a bare unknown name (Pi)", "custom-agent", "brainstorm ideas"],
+  ])("allows %s during execute", (_name, agentType, prompt) => {
+    expect(validatePhaseOrder({ agentType, prompt }, executing())).toEqual({ kind: "allow" });
+  });
+
+  it("refuses a Loom-namespaced name the catalog does not know", () => {
+    expect(validatePhaseOrder({ agentType: "loom:rogue-agent", prompt: "Run tests" }, executing())).toMatchObject({
+      kind: "block",
+      message: expect.stringContaining("Unrecognized Loom agent type"),
+    });
+  });
+
+  it("still orders a Loom phase agent by its own phase, whatever its prompt says", () => {
+    expect(validatePhaseOrder({ agentType: "loom:specify-agent", prompt: "Implement T3" }, executing())).toMatchObject({
+      kind: "block",
+      message: expect.stringContaining("Invalid phase transition: execute → specify"),
+    });
   });
 });
 

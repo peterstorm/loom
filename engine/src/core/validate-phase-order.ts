@@ -76,8 +76,10 @@ function resolveArtifact(
 }
 
 export interface ValidatePhaseOrderInput {
-  agentType: string;   // bare or namespaced agent name
-  prompt: string;      // task prompt
+  /** The agent type as the harness names it: namespaced on Claude Code (`loom:code-reviewer`), bare on Pi. */
+  agentType: string;
+  /** The task prompt: read only for the standalone review marker. */
+  prompt: string;
 }
 
 export function isPanelAgent(agent: string): boolean {
@@ -96,7 +98,15 @@ export function isReviewPanelAgent(agent: string): boolean {
   return REVIEW_PANEL_AGENTS.has(agent) || REVIEW_PANEL_AGENTS.has(agent + "-agent");
 }
 
-export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
+/**
+ * The phase an agent's spawn belongs to, by the agent's identity alone: a
+ * phase agent's phase, `execute` for implementation, review and Refutation
+ * Panel agents, the architecture phase for the architecture panel, else
+ * `unknown`. The prompt is never consulted: a prompt that merely mentions
+ * "architecture" or a spec does not make its agent phase work (loom#213), and
+ * a phase advances only through its phase agent (`PHASE_AGENT_MAP`).
+ */
+export function detectPhase(agent: string): Phase | "unknown" {
   // Bound to a local rather than re-indexed: the map's value type is now
   // honestly `Phase | undefined`, so the guard and the returned value are the
   // same narrowed binding instead of two lookups the compiler must trust to
@@ -113,15 +123,11 @@ export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
   // ARCH_PANEL_PHASE (config) is the single source for this classification so it
   // cannot drift from ARCH_PANEL_AGENTS.
   if (isPanelAgent(agent)) return ARCH_PANEL_PHASE;
-
-  if (/brainstorm|explore.*intent|refine.*idea/i.test(prompt)) return "brainstorm";
-  if (/specify|specification|requirements|spec\.md/i.test(prompt)) return "specify";
-  if (/clarify|resolve.*markers|NEEDS CLARIFICATION/i.test(prompt)) return "clarify";
-  if (/architecture|design|plan\.md/i.test(prompt)) return "architecture";
-  if (/plan[\s\-_]alignment|gap[\s\-_]report/i.test(prompt)) return "plan-alignment";
-
   return "unknown";
 }
+
+/** The plugin namespace Claude Code gives Loom's own agents (`loom:code-reviewer`). */
+const LOOM_NAMESPACE = "loom:";
 
 /** `readonly` throughout, like its siblings `ArtifactProbe` and
  *  `PhaseOrderDeps`: this is the gate's DECISION INPUT, and a decision input a
@@ -291,13 +297,19 @@ export function validatePhaseOrder(
   // Allow utility agents
   if (UTILITY_AGENTS.has(bareAgent) || UTILITY_AGENTS.has(bareAgent + "-agent")) return { kind: "allow" };
 
-  const targetPhase = detectPhase(bareAgent, input.prompt);
+  const targetPhase = detectPhase(bareAgent);
 
+  // An agent outside Loom's catalog is not phase work, so the phase order is
+  // not its business (loom#213): it cannot advance a phase, and what it may
+  // write in the orchestrated repository is the direct-edit guard's decision
+  // (`core/block-direct-edits.ts`). A Loom-namespaced name the catalog does
+  // not know is a misspelled or missing Loom agent, and is refused.
   if (targetPhase === "unknown") {
+    if (!input.agentType.startsWith(LOOM_NAMESPACE)) return { kind: "allow" };
     return {
       kind: "block",
       message: [
-        "BLOCKED: Unrecognized agent type during loom orchestration.",
+        "BLOCKED: Unrecognized Loom agent type during loom orchestration.",
         "",
         `Agent: ${input.agentType}`,
         "",

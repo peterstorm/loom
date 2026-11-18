@@ -104,11 +104,11 @@ describe("validate-task-execution — no reservation behind a veto", () => {
   it("the default export runs the real vetoes: a spawn phase order refuses reserves nothing", async () => {
     const statePath = stateFile();
     const before = readFileSync(statePath);
-    const rogue = JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "rogue-agent", prompt: "**Task ID:** T1" } });
+    const rogue = JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "loom:rogue-agent", prompt: "**Task ID:** T1" } });
     // Composed with no vetoes, task execution allows a non-implementation agent;
     // only the wired phase-order veto refuses it.
     expect(await createValidateTaskExecutionHandler([])(rogue, [])).toMatchObject({ kind: "allow" });
-    expect(await validateTaskExecution(rogue, [])).toMatchObject({ kind: "block", message: expect.stringContaining("Unrecognized agent type") });
+    expect(await validateTaskExecution(rogue, [])).toMatchObject({ kind: "block", message: expect.stringContaining("Unrecognized Loom agent type") });
     expect(readFileSync(statePath).equals(before)).toBe(true);
   });
 

@@ -14,7 +14,6 @@ import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import { pathExistsFailClosed, taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import { realArtifactProbe } from "../../orchestration/artifact-probe";
-import { stripNamespace } from "../../utils/strip-namespace";
 import { withBriefMarkerExpanded } from "./implementation-brief-marker";
 
 /**
@@ -49,8 +48,10 @@ export const realPhaseOrderDeps: PhaseOrderDeps = {
 const handler = failClosedGuard("validate-phase-order", (input) => {
   if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
 
+  // The agent type is passed as the harness named it: the core strips the
+  // namespace itself and reads it to tell a Loom agent from any other.
   return validatePhaseOrder({
-    agentType: stripNamespace((input.tool_input?.subagent_type as string) ?? (input.tool_input?.agent as string) ?? ""),
+    agentType: (input.tool_input?.subagent_type as string) ?? (input.tool_input?.agent as string) ?? "",
     prompt: (input.tool_input?.prompt as string) ?? (input.tool_input?.task as string) ?? "",
   }, realPhaseOrderDeps);
 });
