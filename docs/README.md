@@ -27,6 +27,7 @@ Documentation for Loom 1.1. Runbooks live in `commands/` and `skills/`; these do
 | Document | Read it for |
 |---|---|
 | [Architecture](architecture.md) | Layers, authority boundaries, persistence, and what the system does and does not guarantee |
+| [Feature & Guard Map](feature-guard-map.md) | The mechanism-level map: every feature, guardrail and determinism device with the failure mode it replaces, and the verified residuals |
 | [Loom Agents](agents.md) | The inventory of Agent definitions |
 | [Pi adapter](pi-adapter.md) | How the Pi adapter maps onto the engine; the checklist for adding shared behaviour |
 | [Executable models: enforcement](executable-models-enforcement.md) | How the engine enforces a plan's lifecycle, invariant and contract declarations, and what it cannot see |
