@@ -8,7 +8,10 @@ Written from a full source scan of revision **a28b6d6a** (main, 2026-11-15), upd
 Cause campaign, the #213 reviewer-protocol fixes) was read from its diffs and is folded in —
 mechanisms, catalog rows, residuals and appendices. Updated again through **98a9852c**
 (2026-11-18): the #224/#225 advisory-disposition and succession-carry changes (ADR-0090,
-ADR-0089 as amended by ADR-0091) folded in from their diffs and ADRs. Every claim was checked
+ADR-0089 as amended by ADR-0091) folded in from their diffs and ADRs. Updated again through
+**a585eb27** (2026-11-18): #233/#234 — the reopen scope (ADR-0093) and the narrowed
+re-review roster (ADR-0094) — folded in from their diffs and ADRs, with a fresh full-suite
+verdict in §10. Every claim was checked
 against the code at its revision; claims resting on documentation rather than code are marked
 *(docs)*. Vocabulary follows [CONTEXT.md](../CONTEXT.md).
 
@@ -55,14 +58,14 @@ Two persistence domains carry all authority:
 | `references/` | spec/plan/ADR templates, design-lens & refutation-lens catalogs, reviewer-wire docs, 13 vendored security lenses, per-command runbooks | 39 files |
 | `lint-rules/` | 13 shipped regex rules + schema README | 14 files |
 | `machines/` | 3 Guarded Skill Machines (code-implementer, distill, security-hunter) + ledger description | 4 files |
-| `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 21 files |
-| `engine/` | The engine: 603 src files / ~162.3k lines TS at deb8c369 (610 files / ~172.0k at HEAD); `engine/tests/` holds 923 TS files / 260k lines (fixtures and helpers included), of which 811 test files are executed (787 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
+| `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 22 files |
+| `engine/` | The engine: 615 src files / ~174.4k lines TS; `engine/tests/` holds 937 TS files / ~263.9k lines (fixtures and helpers included), of which 823 test files are executed (799 under `engine/tests/`, 24 under `calibration/` and `probes/`) | — |
 | `pi/` | Pi adapter: 40 modules / 13.8k lines | — |
 | `probes/` | Frozen feasibility evidence (emission readiness barrier, emission qualification) | 54 files |
 | `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 14 files |
 | `calibration/` | Model-calibration corpus + grammar-constrained-decoding pilot (preregistrations, windows, blinded assessments) | 85 files |
 | `artifacts/tests/` | Shell-level integration suites (hook gaps, task-graph validation, smoke-deterministic-core) | 8 scripts |
-| `docs/` | 119 docs incl. **91 ADRs** (index test-enforced) | — |
+| `docs/` | 121 docs incl. **93 ADRs** (index test-enforced) | — |
 
 ---
 
@@ -437,6 +440,22 @@ security-hunter). Key mechanics:
   the agent keeps semantic judgment (which files to test) while every mechanical authority
   (what runs, where, how long, what report, which receipt) is the engine's — closing the
   agent-writable-report residual of §8.6 at its root for engine-run graphs.
+- **Reopen scope (ADR-0093, #234, loom#213 Cause 3).** `reopen-task --needs
+  implementation|tests` (default `implementation`) records what the Finding needs before the
+  re-dispatch. Under `tests`, each named Task carries a protected `reopen_scope`
+  (`core/reopen-scope.ts`: the `TestsOnlyScope` — the frozen Test-File Classification's test
+  and implementation lists plus the reopening's audit position) and its Proof is derived
+  once from that scope: `test-files-changed`, `implementation-files-unchanged` and
+  regression — no `new-tests`, no I6 order, no declared-artifact proof, so a matrix-row fix
+  needs no cosmetic production write. Settlement judges the declared paths whose bytes differ
+  from the reopen baseline (`reopenScopeChangedPaths`); an implementation file that changed
+  fails by name, a test file that did not change fails, a registered attempt with no captured
+  baseline is refused. Typed refusals cover Distill Tasks, contract Tasks, waived regression,
+  unclassified lists and no-test-files lists; a repeat reopening is idempotent; conflicting
+  `--needs` on the same awaiting Tasks are refused. The scope ends when the lineage settles
+  terminally: `implemented` keeps the satisfied Proof as the record, escalation drops it and
+  re-derives the default pending Proof, any return to revalidation drops it. A graph that
+  never names `--needs` is unchanged byte for byte.
 
 ### 4.7 Review authority
 
@@ -570,6 +589,25 @@ replacement (two pure protected-state transitions), preparation, status facts
 plans its succession (ADR-0091): the carry from the Wave's latest retired run is
 decided at registration and frozen into it; `start wave-gate --fresh-review`
 plans nothing.
+
+A fresh start also narrows what it re-reviews (ADR-0094, #233, loom#213 Cause 5b): a
+changed Task is issued only the reviewers its change needs, judged against its **Review
+Basis** — the current-protocol accepted review, or the `review_basis` a reopening kept
+(`core/review-narrowing.ts` owns the two spellings and the one conversion). The shell reads
+the basis run's frozen packet bytes; the core proves them against the accepted head and
+classifies the change (`core/review-change.ts`): `unchanged`, `scope-changed`,
+`context-changed`, or per-file `comment`/`doc`/`test`/`code` classes — comment-only verdicts
+come from a conservative lexer (`core/comment-lexer.ts`, property-tested against the
+TypeScript parser; C-family only, so anything unreadable counts as code). The role table
+(`core/wave-review-roles.ts`): comment- or doc-only → `comment-analyzer`; test-only →
+`code-reviewer` + `pr-test-analyzer`; any code or context change → the full derived roster;
+`architecture-tech-lead` rides the full roster or owns an issued prior Finding. The selection
+is frozen into the registration (`narrowedReviews`, absent when nothing narrowed, so such a
+registration is byte-identical to before), enforced by the locked install (a narrowed Task
+that lost its basis is refused, never silently widened), recorded on the Review Run and its
+acceptance, and reported per Task on stderr (`wave-gate-start-roster`). A narrowing that no
+longer fits the derived roster widens to the whole roster — loudly, never silently. A carried
+Task (above) is never narrowed.
 
 ### 4.10 Acceptance Contracts and Skeletons
 
@@ -874,6 +912,8 @@ per-mechanism *why it works* and *what remains*.
 | 38 | Retro = vibes | Friction facts + triggers + audited record (ADR-0083, #215) | Facts digested from protected state; the retro report never blocks | — |
 | 39 | Advisory decisions die with the gate run | Advisory dispositions recorded on the TaskGraph, anchored to reviewed bytes (ADR-0090, #224) | Abandon loses nothing; a decided advisory is reissued only when its bytes change | — |
 | 40 | A fresh start re-reviews every accepted Task | Succession carry by a Subject Digest sealed into the acceptance (ADR-0091, #225) | Carries only when the whole review subject is unchanged; `--fresh-review` opts out | Pre-digest acceptances reviewed in full once |
+| 41 | A test-row fix pays for a full re-implementation | Reopen scope: `reopen-task --needs tests` derives a tests-only Proof (ADR-0093, #234) | Implementation files unchanged is proven, not instructed; no cosmetic write can satisfy it | A graph that never names `--needs` is byte-identical |
+| 42 | A one-line comment fix re-issues five reviewers | Roster narrowing against the Review Basis (ADR-0094, #233) | Comment/doc/test classes issued only the roles they need; selection frozen into the registration | Unreadable or missing basis ⇒ full roster; JSX/TSX and non-C-family comments count as code |
 
 ---
 
@@ -915,16 +955,17 @@ roster-provability checks.
 
 ## 7. How Loom tests its own determinism
 
-- **811 executed test files / 260k lines** — 787 under `engine/tests/` (923 TS files there
-  including fixtures and helpers; core 293 test files, handlers 193, pi 49,
+- **823 executed test files / ~263.9k lines** — 799 under `engine/tests/` (937 TS files there
+  including fixtures and helpers; core 301 test files, handlers 194, pi 49,
   linter 46, orchestration 36, utils 34, machine 30, acceptance 20, security 19, …)
-  and 24 under `calibration/` and `probes/`, which the Vitest include set adds.
+  and 24 under `calibration/` and `probes/`, which the Vitest include set adds
+  (`*.test.ts` plus the probes' `*.test.mjs`).
 - **Matrix tests** lock "every caller is a row": owner-obligations callers, walker
   contracts, dual-harness evidence fixtures.
 - **Property tests** (fast-check) over the shell grammar and parsers — the class of
   bug that killed rounds 15–24 is now mechanically explored, not just exemplified.
 - **Byte-compare pins**: machine pins, generated modules, wire-contract stamps.
-- **Doc tests**: the ADR index table (90 ADRs) is derived and verified; wire examples in docs
+- **Doc tests**: the ADR index table (93 ADRs) is derived and verified; wire examples in docs
   are validated against the real schemas (`doc-wire-examples.test.ts`).
 - **Smoke suites**: panel mode, review panel, standalone review, orchestration
   facades, Pi resources, task-graph validation — real CLI processes, not mocks.
@@ -1132,6 +1173,19 @@ documented and tested; round-20/21 (double-quoted apostrophe) died with the sing
   §4.7/§4.9/§5/Appendix A additions and the README's Wave Gate claims written
   from those sources. No new full-suite verdict was taken for 98a9852c; §10's
   standing verdict remains the deb8c369 run.
+- Delta pass (#233/#234): both PR diffs read — the new modules `comment-lexer.ts`,
+  `reopen-scope.ts`, `review-change.ts`, `review-narrowing.ts` and
+  `wave-review-roles.ts`, the changes to `proof-obligations.ts`,
+  `implementation-application.ts` / `implementation-brief.ts` /
+  `implementation-completion.ts`, `findings.ts` / `findings-shape.ts`,
+  `wave-review-authority.ts` / `wave-review-issuance.ts`, the wave-review-carry
+  trio, `wave-gate-registration.ts` / `wave-gate-program.ts` /
+  `wave-gate-membership.ts`, `wave-gate-start.ts`, `state-file-wire.ts` and
+  `contract-revision.ts`, verified against ADR-0093 and ADR-0094 and their spec
+  fragments (`.claude/plans/2026-11-18-213-cause3-test-only-reopen.md`,
+  `.claude/plans/2026-11-18-213-cause5-rereview-scaling.md`); the §4.6/§4.9 additions, catalog
+  rows 41–42 and Appendix A rows written from those sources. A fresh full-suite
+  verdict was taken at a585eb27 for this update (§10).
 - Code-verified claims: routing table + fail-closed polarity (cli.ts,
   handler-routes.ts); guard policy + helper list + walker map (guard-state-file.ts);
   walker one-owner structure (shell-*.ts headers); machine pins (machines/README +
@@ -1150,13 +1204,16 @@ documented and tested; round-20/21 (double-quoted apostrophe) died with the sing
 
 ## 10. Standing suite verdict
 
-**Latest — full unit suite executed 2026-11-18 at revision deb8c369 (main at the time
-of this scan; main has since moved to 98a9852c with #224/#225, folded in by the delta
-pass in §9 without a new full-suite verdict): 21,061 tests passed, 2 skipped, 0 failed,
-across 811 test files (7.8 min).** Run with the
+**Latest — full unit suite executed 2026-11-18 at revision a585eb27 (main at the time of
+this update, #233/#234 included; run from the docs worktree with both locks installed via
+`bun install --frozen-lockfile`): 21,360 tests passed, 2 skipped, 0 failed, across 821
+test files (8.6 min), smoke 23/23.** Run with the
 `LOOM_PI_*`/`PI_*` ambient markers explicitly unset (see the gotcha below); exit code 0.
 
-**Prior — a28b6d6a, 2026-11-17: 20,132 tests across 775 files — 20,125 passed, 5 failed,
+**Prior — deb8c369, 2026-11-18: 21,061 tests passed, 2 skipped, 0 failed, across 811 test
+files (7.8 min).**
+
+**Earlier — a28b6d6a, 2026-11-17: 20,132 tests across 775 files — 20,125 passed, 5 failed,
 2 skipped.**
 
 The 5 failures were proven environmental, not a code defect. They fall in exactly the
@@ -1172,8 +1229,9 @@ one variable. Re-running the same 3 files with the `LOOM_PI_*`/`PI_*` ambient st
 Operational gotcha for this map's next re-scan: run loom's suite outside a live Pi
 session, or with the `LOOM_PI_*` marker set explicitly unset.
 
-Scope note: the a28b6d6a verdict's provenance is the scan session; the deb8c369 verdict
-is this re-audit's. Both were run from the main checkout, not the doc worktree.
+Scope note: the a28b6d6a verdict's provenance is the scan session; the deb8c369 verdict is
+that re-audit's; the a585eb27 verdict is this update's. The first two ran from the main
+checkout; the a585eb27 run came from the docs worktree.
 
 ---
 
@@ -1189,6 +1247,7 @@ artifact-baseline.ts — persisted shape shared by file and directory artifacts 
 artifact-write-scope.ts — write policy for non-implementation loom-owned agents, one policy/two harnesses ·
 audit-run-authority.ts — security-audit run directory entry names + who may write them ·
 bash-code-mutation.ts — pure recognizer: Bash commands that mutate implementation-code files ·
+comment-lexer.ts — the conservative C-family comment lexer behind a comment-only Change Class (ADR-0094) ·
 block-direct-edits.ts — block Edit/Write/MultiEdit from the main agent during orchestration ·
 capture-attestation.ts — persisted proof that a harness wrote a capture (ADR-0067) ·
 changed-files.ts — the one derivation of a Task's changed files at stop (INV-7) ·
@@ -1257,11 +1316,12 @@ read-only-git.ts — which git invocations write nothing outside .git ·
 red-then-green*.ts — the I6 judge and its surface ·
 refutation-verifiers.ts — refutation panel verifier authority ·
 remediation-machine.ts — scope authority, exclusions, audit/stage/install lifecycle ·
+reopen-scope.ts — the Reopen Scope: what a Task Reopening says the Finding needs (ADR-0093) ·
 report-file-attribution.ts/report-run-root.ts — reported↔declared attribution; report root reading ·
 repository-path.ts — host-native path → canonical repo-relative ·
 requirement-coverage.ts — spec index × task claims join ·
 retired-wave-review-runs.ts — retired Wave review runs as protected provenance (ADR-0091) ·
-review-* (authority-receipt/ed-workspace/emission-route/output/packet/panel/protocol/retry) — review authority machinery ·
+review-* (authority-receipt/change/ed-workspace/emission-route/narrowing/output/packet/panel/protocol/retry) — review authority machinery; change classification and the Review Basis (ADR-0094) ·
 review-subject.ts — the Subject Digest of a Wave review and its seal on an acceptance (ADR-0091) ·
 reviewer-contract.ts — reviewer wire definitions only: no issuance, Findings behavior, or shell authority ·
 rules-gate.ts — the shared rules-gate decision core ·
@@ -1294,7 +1354,7 @@ validate-* (phase-order/task-execution/template-substitution) — the spawn-gate
 verification-* (manifest, manifest-install, policy, verified-claim-hashes) — manifest freeze and waivers; hash re-anchoring ·
 test-evidence-{mode,policy,authority}.ts / engine-test-run.ts — the frozen test-evidence mode (#198), the engine-run receipt and its admission (#201) ·
 verify-slice.ts — which part of `npm run verify` one invocation runs ·
-wave-* (19 modules) — the Wave Gate: model, machine (LC-1), checks, membership, registration/replacement, preparation, completion-suite readiness, frozen source, review authority/issuance, carry, transcripts, status facts ·
+wave-* (20 modules) — the Wave Gate: model, machine (LC-1), checks, membership, registration/replacement, preparation, completion-suite readiness, frozen source, review authority/issuance/roles, carry, transcripts, status facts ·
 wire-contract.ts — the Wire Contract's stamping seam ·
 skeleton/* (17 modules) — generation, resolution, conformance, records, refresh, status; pure TS/Java surfaces ·
 shell-* (9 modules) — the shared bash grammar (see §4.4) ·

@@ -131,7 +131,7 @@ A plan may declare Acceptance Contracts. Each contract's Task writes a declarati
 
 ## Wave Gate
 
-`/wave-gate` is a registered, resumable program. It creates an immutable Review Packet per Task, issues the reviewers, runs one Wave-level spec check, routes critical Findings to a Refutation Panel, asks the user to dispose of advisories, runs the project's frozen checks and full-tier lint, and then advances the Wave in one protected write.
+`/wave-gate` is a registered, resumable program. It creates an immutable Review Packet per Task, issues the reviewers, runs one Wave-level spec check, routes critical Findings to a Refutation Panel, asks the user to dispose of advisories, runs the project's frozen checks and full-tier lint, and then advances the Wave in one protected write. A re-reviewed Task is issued only the reviewers its change needs: a comment fix gets one reviewer, a code change the full roster ([Feature & Guard Map](docs/feature-guard-map.md) §4.9).
 
 Each Task is reviewed by `code-reviewer`, `silent-failure-hunter`, `pr-test-analyzer`, `type-design-analyzer` and `comment-analyzer`. `architecture-tech-lead` joins for a Task that touches an owned Invariant's family or writes an Acceptance Contract's types file.
 
@@ -161,6 +161,7 @@ Loom's linter runs regex rules after every edit and structural rules at the Wave
 - [Architecture](docs/architecture.md): layers, authority, persistence, guarantees and limits
 - [Feature & Guard Map](docs/feature-guard-map.md): the mechanism-level map — every feature, guardrail and determinism device, and the verified residuals
 - [Operations](docs/operations.md): status, protected state, operating states and recovery
+- [Verification](docs/verification.md): the verification manifest, stop checks, owner verification, the distill pass, Acceptance Contracts and skeletons
 - [Using Loom with Pi](docs/pi-usage.md)
 - [Running a security audit](docs/security-audit.md)
 - [Loom Agents](docs/agents.md)
