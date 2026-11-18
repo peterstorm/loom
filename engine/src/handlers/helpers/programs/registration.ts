@@ -20,8 +20,9 @@ import {
 import { parseStandaloneReadCoverage, type StandaloneReadCoveragePolicy } from '../../../core/standalone-read-coverage';
 import type {
   OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, RegisteredWaveGateProgram, WaveGateOriginAudit, WaveGateRestartAudit,
+  WaveReviewNarrowingAudit,
 } from '../../../core/wave-gate-program';
-import { parseWaveGateSuccessionAudit, parseWaveReviewCarryAudit } from '../../../core/wave-review-carry-audit';
+import { parseNarrowedReviews, parseWaveGateSuccessionAudit, parseWaveReviewCarryAudit } from '../../../core/wave-review-carry-audit';
 import { parseRunDirectoryReference } from '../../../orchestration/run-directory-handle';
 import {
   parseRegisteredRemediationProgram,
@@ -349,6 +350,9 @@ function parseRegisteredWaveGateProgram(raw: unknown): FacadeRegistrationParse {
   } else if (Object.hasOwn(raw as object, "succession")) {
     waveKeys = [...waveBaseKeys, "succession"];
   }
+  // Narrowed reviews (ADR-0094) compose with any origin; absent, the key set is as before.
+  const narrowedKey = Object.hasOwn(raw as object, "narrowedReviews");
+  if (narrowedKey) waveKeys = [...waveKeys, "narrowedReviews"];
   if (!exactObject(raw, waveKeys)) {
     return invalidRegistration(`wave-gate registration must contain exactly ${waveKeys.join(", ")}`);
   }
@@ -371,11 +375,27 @@ function parseRegisteredWaveGateProgram(raw: unknown): FacadeRegistrationParse {
   if (audit.value.succession !== undefined && input.value.wave === null) {
     return invalidRegistration("wave-gate registration succession requires an exact Wave");
   }
+  const narrowed = narrowedKey ? parseRegisteredNarrowing(raw.narrowedReviews, protocol.value.schemaVersion, raw.taskIds as string[]) : null;
+  if (narrowed !== null && !narrowed.ok) return invalidRegistration(narrowed.message);
   return registeredProgram(Object.freeze({
     ...protocol.value, kind: "wave-gate", input: input.value,
     taskIds: Object.freeze([...(raw.taskIds as string[])]), authorityDigest: raw.authorityDigest,
     ...audit.value,
+    ...(narrowed === null ? {} : { narrowedReviews: narrowed.value }),
   }));
+}
+
+/** A registration's narrowed reviews (ADR-0094): only on a current registration, naming only its own Tasks. */
+function parseRegisteredNarrowing(
+  raw: unknown,
+  schemaVersion: 1 | 2,
+  taskIds: readonly string[],
+): ProgramParse<NonNullable<WaveReviewNarrowingAudit["narrowedReviews"]>> {
+  const narrowed = parseNarrowedReviews(raw);
+  if (!narrowed.ok) return { ok: false, message: narrowed.error };
+  return schemaVersion === 2 && narrowed.value.every(({ taskId }) => taskIds.includes(taskId))
+    ? { ok: true, value: narrowed.value }
+    : { ok: false, message: "wave-gate registration narrowedReviews requires a current registration naming only its own Tasks" };
 }
 
 export function parsedAuthority(registration: RegisteredStandaloneProgram, successor?: PreparedStandaloneSuccessor): ProgramParse<FrozenStandaloneReviewAuthority> {

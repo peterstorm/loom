@@ -470,7 +470,7 @@ describe("upgrade-spec-trace helper", () => {
     const installed = installWaveGateRegistration(stored, activeWaveGateFixture({
       runId: "run.successor", wave: 1, runsRoot,
       authorityDigest: waveGateAuthorityDigest(1, successorRoster, stored),
-    }), successorRoster);
+    }), { taskIds: successorRoster });
     expect(installed.kind).toBe("installed");
     if (installed.kind === "installed") {
       expect(installed.state.tasks.map(({ review_run }) => review_run)).toEqual([undefined, undefined]);

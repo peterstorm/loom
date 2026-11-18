@@ -257,6 +257,7 @@ export function legacyTestsPassedNote(task: unknown): string | null {
 export { FINDING_SEVERITIES, PRIOR_FINDING_VERDICTS } from "./core/findings-shape";
 import type {
   AcceptedReviewAuthority,
+  CurrentAcceptedReviewAuthority,
   Finding,
   RefutedFinding,
   ResolvedFinding,
@@ -302,6 +303,8 @@ export type {
   Refutation,
   RefutedFinding,
   ResolvedFinding,
+  ReviewBasisReference,
+  ReviewNarrowing,
   ReviewRun,
   ReviewRunEvidence,
   ReviewRunSlotAuthority,
@@ -421,6 +424,13 @@ interface TaskCommonMetadataBase {
   readonly review_run?: ReviewRun;
   /** Immutable packet/context authority that produced accepted review evidence. */
   readonly accepted_review_authority?: AcceptedReviewAuthority;
+  /**
+   * The Review Basis a reopening kept (ADR-0094): the last current-protocol
+   * acceptance, held after the reopening cleared `accepted_review_authority`,
+   * so the next Wave Gate can choose reviewers by what changed since. Absent
+   * on a Task never reopened after such an acceptance (`reviewBasisOf`).
+   */
+  readonly review_basis?: CurrentAcceptedReviewAuthority;
   /**
    * Why evidence capture failed. Meaningful ONLY alongside
    * `review_status: "evidence_capture_failed"` — every writer that moves the

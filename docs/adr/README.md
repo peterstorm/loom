@@ -105,5 +105,6 @@ The table is derived from the files: the title is the ADR's H1, the status is th
 | [ADR-0088](ADR-0088-acceptance-tests-run-through-declared-runtime-seams.md) | Acceptance tests run through declared runtime seams | Accepted (2026-11-18) | — |
 | [ADR-0089](ADR-0089-wave-gate-restart-carries-accepted-review-evidence.md) | Wave Gate restart carries accepted review evidence and reissues only exhausted slots | Accepted (2026-11-18) | partly supersedes ADR-0084; amended by ADR-0091 |
 | [ADR-0090](ADR-0090-advisory-decisions-are-recorded-on-the-taskgraph.md) | Advisory decisions are recorded on the TaskGraph and suppress reissue while their bytes hold | Accepted (2026-11-18) | — |
-| [ADR-0091](ADR-0091-a-fresh-wave-gate-carries-unchanged-tasks-accepted-reviews.md) | A fresh Wave Gate carries unchanged Tasks' accepted reviews | Accepted (2026-11-18) | amends ADR-0089 |
+| [ADR-0091](ADR-0091-a-fresh-wave-gate-carries-unchanged-tasks-accepted-reviews.md) | A fresh Wave Gate carries unchanged Tasks' accepted reviews | Accepted (2026-11-18) | amends ADR-0089; extended by ADR-0094 |
 | [ADR-0093](ADR-0093-a-reopen-names-what-the-finding-needs.md) | A reopen names what the Finding needs | Accepted (2026-11-18) | — |
+| [ADR-0094](ADR-0094-a-re-reviewed-tasks-roster-follows-what-changed.md) | A re-reviewed Task's roster follows what changed | Accepted (2026-11-18) | extends ADR-0091 |

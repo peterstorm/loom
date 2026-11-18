@@ -563,6 +563,7 @@ export const JOINED_TASK_FIELDS = Object.freeze({
   review_generation: "zero",
   review_run: "absent",
   accepted_review_authority: "absent",
+  review_basis: "absent",
   review_error: "absent",
   review_evidence_failures: "empty",
   findings: "empty",

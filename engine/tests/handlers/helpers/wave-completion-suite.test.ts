@@ -449,7 +449,7 @@ async function registerSuccessor(f: Fixture): Promise<Fixture> {
       revision: 0,
       runsRoot,
       terminalOutcome: null,
-    }, taskIds);
+    }, { taskIds });
     if (installed.kind !== "installed") throw new Error(`successor not installed: ${JSON.stringify(installed)}`);
     return installed.state;
   });

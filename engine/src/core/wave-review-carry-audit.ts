@@ -1,7 +1,8 @@
 /**
- * The registration boundary of a carry plan (ADR-0089, ADR-0091): the parsers
- * that turn a stored restart carry or a fresh start's succession into the
- * typed audit, and the one comparison of two lineage runs.
+ * The registration boundary of an issuance plan (ADR-0089, ADR-0091,
+ * ADR-0094): the parsers that turn a stored restart carry, a fresh start's
+ * succession or its narrowed reviews into the typed audit, and the one
+ * comparison of two lineage runs.
  *
  * A leaf: the program-registration parser and the carry rule both depend on
  * it, and it depends on neither, so parsing a registration never loads the
@@ -11,15 +12,25 @@
  */
 import { isWaveReviewRunRetirement } from "../types";
 import {
+  ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS,
+  BASE_WAVE_REVIEW_AGENTS,
+  parseNarrowedWaveReviewRoster,
+  type WaveReviewRoster,
+} from "./agent-catalog-projections";
+import { parseBasisAuthority, parseNarrowingChange, parseRoles } from "./review-narrowing";
+import {
+  canonicalStructuralEquals,
   isNonEmpty,
   parseArtifactDigest,
   parseOrchestrationRunId,
   type DomainResult,
   type NonEmpty,
 } from "./orchestration-contract";
+import { isExactRecord as exactKeys } from "./plain-record";
 import type {
   AcceptedTaskCarry,
   CarriedReviewAuthority,
+  NarrowedTaskReview,
   WaveGateSuccessionAudit,
   WaveReviewCarry,
   WaveReviewCarryAudit,
@@ -28,17 +39,6 @@ import type {
 /** The same run on a lineage: run and authority digest both match. */
 export const sameAuthority = (left: CarriedReviewAuthority, right: CarriedReviewAuthority): boolean =>
   left.runId === right.runId && left.authorityDigest === right.authorityDigest;
-
-const exactKeys = (raw: unknown, keys: readonly string[]): raw is Readonly<Record<string, unknown>> =>
-  typeof raw === "object" && raw !== null && !Array.isArray(raw) &&
-  Object.keys(raw).length === keys.length && keys.every((key) => Object.hasOwn(raw, key));
-
-/** A non-empty array of distinct non-blank strings. */
-function parseRoles(raw: unknown): NonEmpty<string> | null {
-  if (!Array.isArray(raw) || raw.some((role) => typeof role !== "string" || role.trim() === "")) return null;
-  const roles: readonly string[] = raw;
-  return isNonEmpty(roles) && new Set(roles).size === roles.length ? Object.freeze(roles) : null;
-}
 
 function parseAuthority(raw: unknown): CarriedReviewAuthority | null {
   if (!exactKeys(raw, ["runId", "authorityDigest"])) return null;
@@ -97,6 +97,40 @@ function parseCarryAudit<Entry extends WaveReviewCarry>(
   if (entries === null) return refused("must list at least one well-formed carried Task whose acceptance is on the lineage");
   if (new Set(entries.map(({ taskId }) => taskId)).size !== entries.length) return refused("repeats a carried Task");
   return { ok: true, value: Object.freeze({ lineage: Object.freeze(runs), carried: Object.freeze(entries) }) };
+}
+
+/** The derived roster `raw` names exactly, or null. */
+function parseDerivedRoster(raw: unknown): WaveReviewRoster | null {
+  const rosters: readonly WaveReviewRoster[] = [BASE_WAVE_REVIEW_AGENTS, ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS];
+  return rosters.find((roster) => canonicalStructuralEquals(roster, raw)) ?? null;
+}
+
+function parseNarrowedTaskReview(raw: unknown): NarrowedTaskReview | null {
+  if (!exactKeys(raw, ["taskId", "roster", "from", "change", "basis"])) return null;
+  const taskId = parseTaskId(raw.taskId);
+  const from = parseDerivedRoster(raw.from);
+  const roles = parseRoles(raw.roster);
+  const roster = from === null || roles === null ? null : parseNarrowedWaveReviewRoster(from, roles);
+  const change = parseNarrowingChange(raw.change);
+  const basis = parseBasisAuthority(raw.basis);
+  return taskId === null || from === null || roster === null || change === null || basis === null
+    ? null
+    : Object.freeze({ taskId, roster, from, change, basis });
+}
+
+/**
+ * Parse a registration's stored narrowed reviews (ADR-0094): a non-empty list
+ * naming each Task once, each with its derived roster, a proper ordered part
+ * of it, its change classes and its basis.
+ */
+export function parseNarrowedReviews(raw: unknown): DomainResult<NonEmpty<NarrowedTaskReview>, string> {
+  const entries = Array.isArray(raw) ? allParsed(raw.map(parseNarrowedTaskReview)) : null;
+  if (entries === null) {
+    return { ok: false, error: "wave-gate registration narrowedReviews must list at least one well-formed narrowed Task review" };
+  }
+  return new Set(entries.map(({ taskId }) => taskId)).size === entries.length
+    ? { ok: true, value: entries }
+    : { ok: false, error: "wave-gate registration narrowedReviews repeats a Task" };
 }
 
 /** A restart may carry either kind of entry. */

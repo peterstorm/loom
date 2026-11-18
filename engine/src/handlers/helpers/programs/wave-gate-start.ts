@@ -16,6 +16,16 @@ import type { DomainResult } from '../../../core/orchestration-contract';
 import type { RegisteredWaveGateProgram, WaveGateSuccessionAudit } from '../../../core/wave-gate-program';
 import { waveGateAuthorityDigest, waveReviewView } from '../../../core/wave-review-authority';
 import { planSuccessorCarry, type TaskNotCarried } from '../../../core/wave-review-carry';
+import {
+  basisPacketView,
+  basisReadOf,
+  narrowedReviewsOf,
+  planReviewRoles,
+  type BasisObservation,
+  type BasisPacket,
+  type ReviewRolesPlan,
+  type TaskRosterChoice,
+} from '../../../core/wave-review-roles';
 import type { RetiredWaveReviewRun, TaskGraph } from '../../../types';
 import { observeReviewedWorkspace } from '../reviewed-workspace';
 import { runFullTierWaveLint } from '../lint-wave-gate';
@@ -32,6 +42,8 @@ export type PreparedWaveGateStart = Readonly<{
   /** Each reviewed Task the start issues in full although it succeeds a
    *  retired run, and why its accepted review did not carry (ADR-0091). */
   notCarried: readonly TaskNotCarried[];
+  /** The roster each reviewed Task is issued, and why (ADR-0094). */
+  rosters: readonly TaskRosterChoice[];
 }>;
 
 /** How a start treats the accepted reviews of the run it succeeds. */
@@ -91,6 +103,59 @@ function successorCarryOf(
 }
 
 /**
+ * The Review Packets run `runId` issued its Wave reviewers, read from its Run
+ * Directory under `runsRoot`, each with the role its request named; or why
+ * they could not be read.
+ */
+function loadBasisPackets(runsRoot: string, runId: string): DomainResult<readonly BasisPacket[], string> {
+  const opened = openRunDirectory(runsRoot, runId);
+  if (!opened.ok) return { ok: false, error: opened.error.message };
+  const requests = opened.value.readIssuedRequests();
+  if (!requests.ok) return { ok: false, error: requests.error.message };
+  const packets: BasisPacket[] = [];
+  for (const request of requests.value) {
+    if (request.program !== "wave-gate" || request.attempt !== 1 || request.role === "spec-check-invoker") continue;
+    const packet = opened.value.readContext(request.contextDigest);
+    if (!packet.ok) return { ok: false, error: packet.error.message };
+    packets.push(Object.freeze({ role: request.role, packet: packet.value }));
+  }
+  return { ok: true, value: Object.freeze(packets) };
+}
+
+/**
+ * The roster each reviewed Task of a fresh start is issued (ADR-0094): the
+ * shell reads the basis packets of each Task `basisReadOf` consults from the
+ * basis run's Run Directory, and the reviewed workspaces, and the pure
+ * `planReviewRoles` decides. A carried Task is never narrowed.
+ */
+function reviewRolesOf(
+  graph: TaskGraph,
+  taskIds: readonly string[],
+  runsRoot: string,
+  succession: WaveGateSuccessionAudit | undefined,
+  options: WaveGateStartOptions,
+): ReviewRolesPlan {
+  const carried = new Set((succession?.carry.carried ?? []).map(({ taskId }) => taskId));
+  const reviewed = waveReviewView(graph.tasks.filter(({ id }) => taskIds.includes(id))).reviewed;
+  const runs = new Map<string, DomainResult<readonly BasisPacket[], string>>();
+  const bases = new Map<string, BasisObservation>();
+  for (const task of reviewed) {
+    const read = basisReadOf(task, { carried, freshReview: options.freshReview });
+    if (read.kind !== "consult") continue;
+    const { basis } = read;
+    const packets = runs.get(basis.run_id) ?? loadBasisPackets(runsRoot, basis.run_id);
+    runs.set(basis.run_id, packets);
+    bases.set(task.id, packets.ok
+      ? basisPacketView(basis.run_id, basis.packet_id, task.id, packets.value)
+      : { ok: false, error: `basis run ${basis.run_id}: ${packets.error}` });
+  }
+  return planReviewRoles({
+    graph, taskIds, carried, freshReview: options.freshReview, bases,
+    workspaces: observeReviewedWorkspace(reviewed.filter(({ id }) => bases.has(id))),
+  });
+}
+
+/**
  * Preflight one `start wave-gate` WITHOUT touching the runs root: the start
  * claims a Run Directory only after every refusal it can know in advance has
  * been ruled out — protected execute/current-Wave authority, a registration
@@ -142,14 +207,18 @@ export function prepareWaveGateFacadeStart(
       }
     }
     const { succession, notCarried } = successorCarryOf(graph, wave, taskIds, destination.value.runsRoot, options);
+    const rosters = reviewRolesOf(graph, taskIds, destination.value.runsRoot, succession, options);
+    const narrowedReviews = narrowedReviewsOf(rosters);
     const fresh = {
       schemaVersion: 2, reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4, kind: "wave-gate", input: Object.freeze({ wave }),
       taskIds, authorityDigest,
     } as const;
+    const originated: RegisteredWaveGateProgram = succession === undefined ? fresh : { ...fresh, succession };
     const prepared: PreparedWaveGateStart = Object.freeze({
       runId: destination.value.runId,
-      registration: Object.freeze(succession === undefined ? fresh : { ...fresh, succession }),
+      registration: Object.freeze(narrowedReviews === undefined ? originated : { ...originated, narrowedReviews }),
       notCarried,
+      rosters,
     });
     preparedWaveGateStarts.add(prepared);
     return { ok: true, value: prepared };
@@ -179,6 +248,15 @@ function reportNotCarried(runId: string, notCarried: readonly TaskNotCarried[]):
   process.stderr.write(`${JSON.stringify({ kind: "wave-gate-start-not-carried", runId, notCarried })}\n`);
 }
 
+/**
+ * Name the roster each reviewed Task is issued and why, carried, full or
+ * narrowed (ADR-0094), as one JSON line on the start's diagnostic output.
+ */
+function reportRosters(runId: string, rosters: readonly TaskRosterChoice[]): void {
+  if (rosters.length === 0) return;
+  process.stderr.write(`${JSON.stringify({ kind: "wave-gate-start-roster", runId, rosters })}\n`);
+}
+
 export async function startWaveGateFacade(
   handle: RunDirHandle,
   prepared: PreparedWaveGateStart,
@@ -203,8 +281,9 @@ export async function startWaveGateFacade(
       revision: 0,
       runsRoot: handle.identity.runsRoot,
       terminalOutcome: null,
-    }, registration.taskIds, registration.succession);
+    }, registration);
     reportNotCarried(handle.runId, prepared.notCarried);
+    reportRosters(handle.runId, prepared.rosters);
     return resumeWaveGateFacade(handle, registration);
   } catch (error) {
     return waveBlocked(handle, reportUncaughtWaveGateFailure(handle.runId, error));

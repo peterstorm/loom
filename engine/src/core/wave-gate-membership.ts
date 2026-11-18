@@ -23,6 +23,7 @@ import { settleSpecCheck } from "./spec-check";
 import { deriveWaveAdvisoryDecisionRequest } from "./wave-gate-preparation";
 import { advisoryDecisionTasks, undispositionedAdvisories } from "./advisory-disposition";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
+import { runIssuance } from "./wave-review-carry-plan";
 import {
   taskReviewScope,
   waveReviewView,
@@ -200,7 +201,10 @@ export function waveReviewerSlotProblem(
     return "request does not belong to the exact current Wave Review Packet slot";
   }
   if (protocol.protocolVersion === 2) {
-    if (waveRunRosterProblem(graph, 2, task, run) !== null ||
+    // The run's own narrowing (ADR-0094): the install wrote it from the
+    // registration, and the batch epoch this run is bound to commits to it.
+    if (run.reviewer_protocol === undefined ||
+        waveRunRosterProblem(graph, 2, task, run, runIssuance(run)) !== null ||
         !canonicalStructuralEquals(run.reviewer_protocol, protocol.reviewerProtocol) ||
         run.wave_gate_run_id !== request.runId || run.wave_gate_authority_digest !== context.authorityDigest ||
         run.workspace_head_sha !== taskRun.workspaceHeadSha ||

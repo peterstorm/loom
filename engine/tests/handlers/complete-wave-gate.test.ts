@@ -2603,11 +2603,11 @@ describe("protected active Wave Gate registration", () => {
     writeFileSync(path, JSON.stringify(initial));
     const manager = new StateManager(path);
     try {
-      const first = await manager.registerActiveWaveGate(exactRegistration, taskIds);
-      const replay = await manager.registerActiveWaveGate(exactRegistration, taskIds);
+      const first = await manager.registerActiveWaveGate(exactRegistration, { taskIds: taskIds });
+      const replay = await manager.registerActiveWaveGate(exactRegistration, { taskIds: taskIds });
       expect(replay).toEqual(first);
       expect(manager.load().active_wave_gate).toEqual(first);
-      await expect(manager.registerActiveWaveGate({ ...exactRegistration, runId: "competing-run" }, taskIds))
+      await expect(manager.registerActiveWaveGate({ ...exactRegistration, runId: "competing-run" }, { taskIds: taskIds }))
         .rejects.toThrow("already owns wave 1");
       expect(manager.load().active_wave_gate).toEqual(first);
     } finally {
@@ -2637,7 +2637,7 @@ describe("protected active Wave Gate registration", () => {
         terminalOutcome: null,
       }));
       expect(replay).toEqual(committed.completedRegistration);
-      await expect(manager.registerActiveWaveGate(registration, ["T1"]))
+      await expect(manager.registerActiveWaveGate(registration, { taskIds: ["T1"] }))
         .rejects.toThrow("already completed or older than terminal Wave history");
       expect(manager.load().active_wave_gate).toBeUndefined();
     } finally {

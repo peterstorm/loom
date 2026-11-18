@@ -12,8 +12,11 @@
  * predecessor into the replacement by reference (ADR-0089) and records the
  * plan in the registration; only spec-check and the exhausted slots are
  * reissued. A predecessor under another protocol carries nothing, so no
- * reviewer straddles two protocols. Orphan recovery always reissues every
- * request: the predecessor's Run Directory is gone.
+ * reviewer straddles two protocols. A restart's replacement inherits the
+ * predecessor's narrowed reviews (ADR-0094), so each reissued slot keeps the
+ * roster it was issued under. Orphan recovery always reissues every request
+ * in full: the predecessor's Run Directory, and the registration that named
+ * its narrowing, are gone.
  */
 import type { ReviewRunSlotAuthority, Task, TaskGraph } from "../types";
 import { captureKey } from "./harness-capture";
@@ -22,6 +25,7 @@ import { WAVE_REVIEWER_PROTOCOL_V4 } from "./reviewer-contract";
 import { resetWaveGateReviewAuthority } from "./wave-gate-registration";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import { waveGateAuthorityDigest, waveRunRosterProblem } from "./wave-review-authority";
+import { registeredIssuance } from "./wave-review-carry-plan";
 import { planRestartCarry, type RestartCarryObservation, type TaskNotCarried } from "./wave-review-carry";
 
 export type { RestartCarryObservation, TaskNotCarried } from "./wave-review-carry";
@@ -113,7 +117,8 @@ export function prepareExhaustedWaveGateRestart(
   for (const task of waveTasks) {
     const run = task.review_run;
     if (run === undefined) continue;
-    if (run.head_sha !== epoch.batchEpoch || waveRunRosterProblem(graph, previous.schemaVersion, task, run) !== null ||
+    if (run.head_sha !== epoch.batchEpoch ||
+        waveRunRosterProblem(graph, previous.schemaVersion, task, run, registeredIssuance(previous, task.id)) !== null ||
         run.slot_authority === undefined) {
       return { ok: false, message: `task ${task.id} Review Packet is not bound to the active epoch and exact reviewer roster` };
     }
@@ -148,6 +153,7 @@ export function prepareExhaustedWaveGateRestart(
     taskIds: previous.taskIds,
     authorityDigest: replacement.active.authorityDigest,
     restart: Object.freeze({ previousRunId, exhaustedSlots, ...(carried === undefined ? {} : { carry: carried }) }),
+    ...(previous.narrowedReviews === undefined ? {} : { narrowedReviews: previous.narrowedReviews }),
   });
   const nextGraph: TaskGraph = {
     ...resetGraph,
@@ -165,13 +171,15 @@ export function prepareExhaustedWaveGateRestart(
 }
 
 /** The registration identity both replacement predicates share: schema and
- *  issued reviewer protocol, wave, authority, and the ordered Task roster. Each
- *  replacement kind compares its own audit on top, so the two predicates guard
- *  the re-derive-under-lock seam with the same strictness. */
+ *  issued reviewer protocol, wave, authority, the ordered Task roster and the
+ *  narrowed reviews (ADR-0094). Each replacement kind compares its own audit
+ *  on top, so the two predicates guard the re-derive-under-lock seam with the
+ *  same strictness. */
 function sameReplacementRegistration(left: RegisteredWaveGateProgram, right: RegisteredWaveGateProgram): boolean {
   return left.schemaVersion === right.schemaVersion && canonicalStructuralEquals(left.reviewerProtocol, right.reviewerProtocol) &&
     left.input.wave === right.input.wave && left.authorityDigest === right.authorityDigest &&
-    canonicalStructuralEquals(left.taskIds, right.taskIds);
+    canonicalStructuralEquals(left.taskIds, right.taskIds) &&
+    canonicalStructuralEquals(left.narrowedReviews ?? null, right.narrowedReviews ?? null);
 }
 
 /** Restart registrations agree on the shared replacement identity and the
