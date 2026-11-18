@@ -406,6 +406,7 @@ describe("populateTaskGraph aggregate command", () => {
       spec_trace_wave_gate_retirements: [{ stale: true }] as never,
       spec_trace_amendments: [{ stale: true }] as never,
       wave_plan_edits: [{ stale: true }] as never,
+      advisory_dispositions: [{ stale: true }] as never,
     }), command({ force: true }));
 
     expect(result.ok).toBe(true);
@@ -424,6 +425,7 @@ describe("populateTaskGraph aggregate command", () => {
       "spec_trace_wave_gate_retirements",
       "spec_trace_amendments",
       "wave_plan_edits",
+      "advisory_dispositions",
     ] as const) {
       expect(result.value.state[field], field).toBeUndefined();
     }

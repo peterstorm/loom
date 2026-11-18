@@ -128,6 +128,7 @@ The project follows “parse, do not cast”: untrusted JSON, transcripts, paths
 | Operator reopening | `task-revalidation.ts` (the active-Wave transition Contract Revision and Task Reopening share), `task-reopening.ts` (`helper orchestration reopen-task`: preconditions, audit, idempotent replay), `task-rescope.ts` (`helper orchestration rescope-task`: a pending Task's file list under population's rules, its baseline extended from `start_sha`), `task-dependency-edit.ts` (`helper orchestration add-dependency`: same-Wave ordering with cycle refusal, ADR-0081), `coupled-file-sets.ts` (a package manifest and its lockfile belong to one Task, ADR-0082) | Make settled Tasks dispatchable again, and repair a pending Task's scope, without discarding evidence |
 | Judgements of sealed code | `judged-paths.ts` (decompose: a judge never runs after the Wave of the code it judges), `task-addition.ts` (`helper orchestration add-task` and `withdraw-task`: a Task appended to the active Wave, ordered by dependencies, ADR-0086), `dispatch-holds.ts` (the one hold rule status, registration and the brief share, Distill Task included) ([ADR-0077](adr/ADR-0077-a-judgement-lands-while-its-subject-is-open-and-is-fixed-forward-otherwise.md)) | Keep every judgement repairable without reopening completed Waves |
 | Finding lifecycle | `findings.ts`, `review-output.ts`, `review-packet.ts` | Stable identity, generations, packet-bound remediation verification |
+| Advisory dispositions | `advisory-disposition.ts` (the record and its one constructor, `waveAdvisories` (the advisories a decision request issues), the anchor, and `issuedPriorFindings`, the one prior selector Wave review issuance and the restart carry read), `advisory-disposition-record.ts` (`helper orchestration disposition`: the stdin parse and the pure append) ([ADR-0090](adr/ADR-0090-advisory-decisions-are-recorded-on-the-taskgraph.md)) | Decisions on advisories outlive the gate run; a deferred or dismissed advisory is not reissued while its bytes hold; approval needs a decision on each |
 | Architecture panel | `panel-kernel.ts`, `panel-contract.ts`, `panel-program.ts` | Lenses, exact candidates/criteria, verdict validation, ranking, retries |
 | Refutation panel | `panel-kernel.ts`, `review-panel.ts`, `panel-program.ts` | Exact critical set, verifier lenses, majority tally, retained audit |
 | Standalone review | `standalone-review.ts`, the one owner of source, disposition and successor preparation, issued admission, roster aggregation and the review reducer; `standalone-successor-reviewer.ts` is a named entry surface into it | Frozen scope/roster, successor admission, aggregation, current refutation work, authoritative result |
@@ -180,7 +181,8 @@ abandon                 # retire a run; deletes nothing
 submit                  # compatibility/manual capture path
 correlate               # harness-native id → request authority
 complete                # compatibility for old panel callers
-decide                  # user decision
+decide                  # user decision; a Wave Gate's approval is refused while an advisory it issued has no disposition
+disposition             # record fixed/deferred/dismissed per advisory of the active Wave on the TaskGraph (ADR-0090)
 remediate               # retire a terminal implementation escalation
 attest                  # arm implementation re-attestation
 reopen-task             # return implemented Tasks of the active Wave to pending

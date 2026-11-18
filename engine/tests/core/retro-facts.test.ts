@@ -46,7 +46,8 @@ function graph(overrides: Readonly<Record<string, unknown>> = {}, tasks?: readon
 const quiet = (wave: number, progress: WaveFriction["progress"] = "active"): WaveFriction => ({
   wave, progress, gateRuns: { completed: 0, retired: 0, abandoned: 0 },
   waveReopenings: 0, taskReopenings: 0, forwardFixes: 0, forwardFixWithdrawals: 0, planEdits: 0, specTraceAmendments: 0,
-  retries: 0, escalations: 0, remediations: 0, infrastructureBlocks: 0, findings: { critical: 0, advisory: 0, refuted: 0 }, tasks: [],
+  retries: 0, escalations: 0, remediations: 0, infrastructureBlocks: 0, findings: { critical: 0, advisory: 0, refuted: 0 },
+  advisoryDispositions: { fixed: 0, deferred: 0, dismissed: 0 }, tasks: [],
 });
 
 describe("retroFacts", () => {
@@ -108,6 +109,23 @@ describe("retroFacts", () => {
     expect(digest.planEdits).toBe(3);
     expect(digest.tasks.find(({ taskId }) => taskId === "T2")).toMatchObject({ addedMidRun: true, heldByForwardFixes: [], planEdits: 1 });
     expect(waveFriction(base, 2).tasks.find(({ taskId }) => taskId === "T2")).toBeUndefined();
+  });
+
+  it("counts each Wave's standing advisory decisions by kind, the latest per advisory once, and renders them (ADR-0090)", () => {
+    const record = (wave: number, taskId: string, decision: "fixed" | "deferred" | "dismissed") => ({
+      schemaVersion: 1 as const, wave, taskId, findingId: "code-reviewer-1", decision, reason: "why",
+      target: null, anchor: decision === "fixed" ? null : "a".repeat(64),
+    });
+    const facts = retroFacts(graph({ advisory_dispositions: [
+      record(2, "T1", "deferred"),
+      record(2, "T1", "dismissed"),
+      record(2, "T2", "fixed"),
+      record(1, "T3", "deferred"),
+    ] }));
+    expect(facts.waves[1]!.advisoryDispositions).toEqual({ fixed: 1, deferred: 0, dismissed: 1 });
+    expect(facts.waves[0]!.advisoryDispositions).toEqual({ fixed: 0, deferred: 1, dismissed: 0 });
+    expect(renderWaveDigest(facts.waves[1]!)).toContain("1 advisory fixed, 1 advisory dismissed");
+    expect(retroFacts(graph()).waves[1]!.advisoryDispositions).toEqual({ fixed: 0, deferred: 0, dismissed: 0 });
   });
 
   it("sums every Wave's escalations to the run's escalation receipts (property)", () => {

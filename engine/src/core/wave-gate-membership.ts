@@ -21,6 +21,7 @@ import { buildFindingBrief } from "./review-panel";
 import { parseWaveRetryDiagnosticSection } from "./reviewer-retry";
 import { settleSpecCheck } from "./spec-check";
 import { deriveWaveAdvisoryDecisionRequest } from "./wave-gate-preparation";
+import { undispositionedAdvisories } from "./advisory-disposition";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import {
   taskReviewScope,
@@ -29,6 +30,25 @@ import {
   waveSpecCheckDocumentsMatch,
   type WaveReviewContextAuthority,
 } from "./wave-review-authority";
+
+/** The Tasks a Wave Gate's advisory decision request is derived from: its registered Tasks, in graph order. */
+const decisionTasks = (graph: TaskGraph, registration: RegisteredWaveGateProgram): readonly Task[] =>
+  graph.tasks.filter(({ id }) => registration.taskIds.includes(id));
+
+/**
+ * Why approving a Wave Gate's advisories is refused, or null (ADR-0090): an
+ * advisory the pending decision request issues has no standing disposition.
+ * It reads the same Tasks and the same advisory derivation (`waveAdvisories`)
+ * as `deriveWaveAdvisoryDecisionRequest`, so it names exactly the advisories
+ * the request issued.
+ */
+export function waveAdvisoryApprovalRefusal(graph: TaskGraph, registration: RegisteredWaveGateProgram): string | null {
+  const undecided = undispositionedAdvisories(decisionTasks(graph, registration), graph.advisory_dispositions);
+  return undecided.length === 0
+    ? null
+    : `approval refused: ${undecided.length} advisor${undecided.length === 1 ? "y has" : "ies have"} no disposition ` +
+      `(${undecided.join(", ")}); record each as fixed, deferred or dismissed with helper orchestration disposition, then approve`;
+}
 
 /**
  * Which dimension of a Wave Gate decision's authority failed to match, or `null`
@@ -53,10 +73,7 @@ export function waveGateDecisionMismatch(
       active.authorityDigest !== registration.authorityDigest) {
     return "protected active Wave Gate authority differs from this decision run";
   }
-  const pending = deriveWaveAdvisoryDecisionRequest(
-    runId,
-    graph.tasks.filter(({ id }) => registration.taskIds.includes(id)),
-  );
+  const pending = deriveWaveAdvisoryDecisionRequest(runId, decisionTasks(graph, registration));
   if (!pending.ok) {
     return `decision request ${decisionId} is not the exact pending advisory request: ${pending.error.message}`;
   }

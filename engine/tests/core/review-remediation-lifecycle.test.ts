@@ -707,12 +707,22 @@ describe("packet-bound remediation review runs", () => {
     expect(repaired.tasks[0].review_run).toEqual(inProgress.review_run);
     expect(parseTaskGraph(repaired).ok).toBe(true);
 
-    const wrongSnapshot = structuredClone(graph(inProgress)) as unknown as Record<string, unknown>;
-    const wrongTask = (wrongSnapshot.tasks as Array<Record<string, unknown>>)[0]!;
-    (wrongTask.review_run as Record<string, unknown>).prior_finding_ids = ["code-reviewer-1"];
-    const rejectedSnapshot = parseTaskGraph(wrongSnapshot);
-    expect(rejectedSnapshot.ok).toBe(false);
-    if (!rejectedSnapshot.ok) expect(rejectedSnapshot.error).toContain("exactly snapshot");
+    // The priors are the active Findings in order, less only advisories a
+    // standing disposition suppressed (ADR-0090): a critical is always issued.
+    const withPriors = (ids: readonly string[]) => {
+      const snapshot = structuredClone(graph(inProgress)) as unknown as Record<string, unknown>;
+      const snapshotTask = (snapshot.tasks as Array<Record<string, unknown>>)[0]!;
+      (snapshotTask.review_run as Record<string, unknown>).prior_finding_ids = ids;
+      return parseTaskGraph(snapshot);
+    };
+    expect(withPriors(["code-reviewer-1"]).ok).toBe(true);
+    const missingCritical = withPriors(["silent-failure-hunter-1"]);
+    expect(missingCritical.ok).toBe(false);
+    if (!missingCritical.ok) expect(missingCritical.error).toContain("must issue every active critical finding");
+    const reordered = withPriors(["silent-failure-hunter-1", "code-reviewer-1"]);
+    expect(reordered.ok).toBe(false);
+    if (!reordered.ok) expect(reordered.error).toContain("prior_finding_ids");
+    expect(withPriors(["code-reviewer-1", "code-reviewer-9"]).ok).toBe(false);
 
     let completed = start();
     completed = applyAgent(completed, AGENTS[0], ["resolved_by_remediation", "resolved_by_remediation"]);

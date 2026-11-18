@@ -101,6 +101,7 @@ import { isExactGitSha } from "./core/git-sha";
 import { isAdoptionReason, isEngineRevision, MAX_ENGINE_REVISION_REASON_LENGTH } from "./core/engine-revision-pin";
 import { dependencyAddedEdit, parsePlanEditReason, taskAddedEdit, taskRescopedEdit, taskWithdrawnEdit } from "./core/wave-plan-edit";
 import { retroRecordEntry, retroScopeKnown } from "./core/retro-record";
+import { parseAdvisoryDispositions, type AdvisoryDisposition } from "./core/advisory-disposition";
 import { dependencyCycles } from "./core/task-dependencies";
 import {
   amendmentHistoryError,
@@ -3032,6 +3033,7 @@ type ParsedTaskGraphHistoryFields = Readonly<{
   specAmendments: readonly SpecAmendment[] | undefined;
   wavePlanEdits: readonly WavePlanEdit[] | undefined;
   retroRecords: readonly RetroRecord[] | undefined;
+  advisoryDispositions: readonly AdvisoryDisposition[] | undefined;
 }>;
 
 function activeWaveGateRetirementConflict(
@@ -3100,6 +3102,8 @@ function parseTaskGraphHistoryFields(
   if (!forwardFixWithdrawals.ok) return parseErr(forwardFixWithdrawals.error);
   const retroRecords = parseRetroRecords(obj.retro_records, tasks);
   if (!retroRecords.ok) return parseErr(retroRecords.error);
+  const advisoryDispositions = parseAdvisoryDispositions(obj.advisory_dispositions);
+  if (!advisoryDispositions.ok) return parseErr(advisoryDispositions.error);
   const orphanedHistory = parseOrphanedWaveGateHistory(obj.orphaned_wave_gate_history);
   if (!orphanedHistory.ok) return parseErr(orphanedHistory.error);
   const specTraceRetirements = parseSpecTraceWaveGateRetirements(obj.spec_trace_wave_gate_retirements);
@@ -3137,6 +3141,7 @@ function parseTaskGraphHistoryFields(
     specAmendments: specAmendments.value,
     wavePlanEdits: wavePlanEdits.value,
     retroRecords: retroRecords.value,
+    advisoryDispositions: advisoryDispositions.value,
   });
 }
 
@@ -3607,7 +3612,7 @@ export type ParsedTaskGraph = Omit<TaskGraph, "tasks" | "executing_tasks"> & Rea
 function historyGraphFields(history: ParsedTaskGraphHistoryFields): Partial<TaskGraph> {
   const {
     reopeningHistory, taskReopeningHistory, forwardFixHistory, forwardFixWithdrawals, orphanedHistory,
-    specTraceRetirements, specTraceAmendments, specAmendments, wavePlanEdits, retroRecords,
+    specTraceRetirements, specTraceAmendments, specAmendments, wavePlanEdits, retroRecords, advisoryDispositions,
   } = history;
   return {
     ...(reopeningHistory === undefined ? {} : { wave_reopening_history: reopeningHistory }),
@@ -3615,6 +3620,7 @@ function historyGraphFields(history: ParsedTaskGraphHistoryFields): Partial<Task
     ...(forwardFixHistory === undefined ? {} : { forward_fix_history: forwardFixHistory }),
     ...(forwardFixWithdrawals === undefined ? {} : { forward_fix_withdrawals: forwardFixWithdrawals }),
     ...(retroRecords === undefined ? {} : { retro_records: retroRecords }),
+    ...(advisoryDispositions === undefined ? {} : { advisory_dispositions: advisoryDispositions }),
     ...(orphanedHistory === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory }),
     ...(specTraceRetirements === undefined ? {} : { spec_trace_wave_gate_retirements: specTraceRetirements }),
     ...(specTraceAmendments === undefined ? {} : { spec_trace_amendments: specTraceAmendments }),

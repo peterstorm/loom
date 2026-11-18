@@ -45,6 +45,7 @@ import {
   type WaveReadinessSnapshot,
 } from "./wave-gate-machine";
 import { waveReviewView } from "./wave-review-authority";
+import { waveAdvisories } from "./advisory-disposition";
 
 export type WavePreparationError = Readonly<{
   kind: "wave-preparation-rejected";
@@ -150,18 +151,14 @@ export function deriveWaveAdvisoryDecisionRequest(
 ): DomainResult<WaveAdvisoryDecisionRequest, WavePreparationError> {
   const runId = parseOrchestrationRunId(rawRunId);
   if (!runId.ok) return preparationFailure(runId.error.message);
-  const canonicalAdvisories = tasks.flatMap((task) => {
-    if (task.findings !== undefined) {
-      return task.findings.filter((finding) => finding.severity === "advisory").map((finding) => ({
-        identity: `${task.id}:${finding.id}`,
-        bytes: Object.freeze([...new TextEncoder().encode(JSON.stringify({ taskId: task.id, finding }))]),
-      }));
-    }
-    return (task.advisory_findings ?? []).filter((claim) => claim.trim() !== "").map((claim, index) => ({
-      identity: `${task.id}:legacy-advisory-${index + 1}`,
-      bytes: Object.freeze([...new TextEncoder().encode(JSON.stringify({ taskId: task.id, claim }))]),
-    }));
-  });
+  // The one advisory derivation (ADR-0090): the approval gate and the
+  // disposition operation read the same advisories this request issues.
+  const canonicalAdvisories = waveAdvisories(tasks).map(({ taskId, identity, subject }) => ({
+    identity,
+    bytes: Object.freeze([...new TextEncoder().encode(JSON.stringify(subject.kind === "finding"
+      ? { taskId, finding: subject.finding }
+      : { taskId, claim: subject.claim }))]),
+  }));
   const triaged = nonEmpty(canonicalAdvisories);
   if (triaged === null) return preparationFailure("no canonical advisories require user triage");
 

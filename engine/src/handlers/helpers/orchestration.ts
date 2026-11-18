@@ -24,6 +24,7 @@
  *                                 --operation <operation-id>
  *   helper orchestration decide --run <run-directory> --runs-root <root>
  *                               --request <decision-id>   (decision on stdin)
+ *   helper orchestration disposition   ({"dispositions":[...]} on stdin)
  *   helper orchestration remediate --task <task-id> --receipt <terminal escalation receipt id>
  *                               --reason <text>
  *   helper orchestration attest --task <task-id> --reason <text>
@@ -129,6 +130,7 @@ import type {
   HookHandler,
   HookResult,
   Task,
+  TaskGraph,
   WaveCompletionResultObservation,
 } from "../../types";
 import { deriveWaveReadiness } from "../../core/wave-gate-machine";
@@ -212,7 +214,8 @@ import {
   type ProgramParse,
   type RegisteredStandaloneProgram,
 } from "./programs";
-import { advisoryDecisionApproved, waveGateDecisionMismatch } from "../../core/wave-gate-membership";
+import { advisoryDecisionApproved, waveAdvisoryApprovalRefusal, waveGateDecisionMismatch } from "../../core/wave-gate-membership";
+import { advisoryDispositionOperation } from "./advisory-disposition";
 import { parseUserDecision } from "../../core/user-decision";
 import { parseBoundedReviewerJson } from '../../core/reviewer-protocol';
 import { parseOrchestrationOperation } from "./orchestration-operations";
@@ -300,6 +303,11 @@ function usage(): HookResult {
       "  correlate --runs-root <root> --run <run-directory> --request <id> --harness <pi|claude> --native-id <id> --agent <role>",
       "  complete --runs-root <root> --run <run-directory> --operation <id>",
       "  decide  --runs-root <root> --run <run-directory> --request <decision-id>",
+      "          (a Wave Gate's approval is refused while any advisory it issued has no disposition)",
+      "  disposition < {\"dispositions\":[{\"finding\":\"<task>:<finding-id>\",\"decision\":\"fixed|deferred|dismissed\",\"reason\":\"<why>\",\"target\":\"<Wave or Task>\"}]}",
+      "          (records the decision on advisories of the active Wave on the TaskGraph, at the Wave Gate's advisory pause or after",
+      "          abandoning it; a deferred or dismissed advisory is not reissued to reviewers while its bytes hold; target is for deferred only;",
+      "          refused while a subagent is active; the latest decision per advisory stands; idempotent)",
       ...OPERATOR_OPERATIONS_USAGE,
     ].join("\n"),
   };
@@ -1892,30 +1900,40 @@ function bindDecision(args: readonly string[]): Readonly<{ ok: true; value: Deci
         registration: facade?.kind === "wave-gate" ? facade : null } };
 }
 
-function waveDecisionAuthorityError(binding: DecisionBinding): HookResult | null {
-  if (binding.registration === null) return null;
+/** The protected graph a Wave Gate decision is judged against, once its
+ *  authority matches this run; null for a run with no Wave Gate registration. */
+function waveDecisionAuthority(binding: DecisionBinding):
+  Readonly<{ ok: true; graph: TaskGraph | null }> | Readonly<{ ok: false; result: HookResult }> {
+  if (binding.registration === null) return { ok: true, graph: null };
   let graphRaw: unknown;
   try {
-    graphRaw = JSON.parse(readFileSync(TASK_GRAPH_PATH, "utf8")) as unknown;
+    graphRaw = JSON.parse(readFileSync(TASK_GRAPH_PATH, "utf8"));
   } catch (error) {
-    return { kind: "error", message: `cannot read protected Wave authority: ${error instanceof Error ? error.message : String(error)}` };
+    return { ok: false, result: { kind: "error", message: `cannot read protected Wave authority: ${error instanceof Error ? error.message : String(error)}` } };
   }
   const graph = parseTaskGraph(graphRaw);
-  if (!graph.ok) return { kind: "error", message: `protected Wave authority is invalid: ${graph.error}` };
+  if (!graph.ok) return { ok: false, result: { kind: "error", message: `protected Wave authority is invalid: ${graph.error}` } };
   const mismatch = waveGateDecisionMismatch(
     graph.value, binding.registration, binding.handle.runId, binding.decisionId,
   );
-  return mismatch === null ? null : { kind: "error", message: mismatch };
+  return mismatch === null ? { ok: true, graph: graph.value } : { ok: false, result: { kind: "error", message: mismatch } };
 }
 
 async function decideOperation(stdin: string, args: readonly string[], emission: Emission): Promise<HookResult> {
   const binding = bindDecision(args);
   if (!binding.ok) return binding.result;
-  const authorityError = waveDecisionAuthorityError(binding.value);
-  if (authorityError !== null) return authorityError;
+  const authority = waveDecisionAuthority(binding.value);
+  if (!authority.ok) return authority.result;
   const decision = parseUserDecision(stdin, binding.value.registration === null ? "unregistered-run" : "wave-gate");
   if (!decision.ok) return { kind: "error", message: decision.error };
   const { handle, decisionId, registration } = binding.value;
+  // A Wave Gate's one decision is approval, and it is refused while an
+  // advisory the request issued has no disposition (ADR-0090). Checked before
+  // the event is appended, so a refused approval records nothing.
+  const refusal = registration === null || authority.graph === null
+    ? null
+    : waveAdvisoryApprovalRefusal(authority.graph, registration);
+  if (refusal !== null) return { kind: "error", message: refusal };
   await handle.appendEvent({
     schemaVersion: 1, sequence: 0,
     dedupKey: `decision:${createHash("sha256").update(decisionId).digest("hex")}`,
@@ -1931,6 +1949,19 @@ async function decideOperation(stdin: string, args: readonly string[], emission:
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+
+/** The audited operator operations on the TaskGraph itself that take only their flags, by name. */
+const TASK_GRAPH_OPERATIONS = Object.freeze({
+  remediate: remediateOperation,
+  attest: attestOperation,
+  "reopen-task": reopenTaskOperation,
+  "rescope-task": rescopeTaskOperation,
+  "add-dependency": addDependencyOperation,
+  "add-task": addTaskOperation,
+  "withdraw-task": withdrawTaskOperation,
+  "adopt-engine-run-tests": adoptEngineRunTestsOperation,
+  "adopt-engine-revision": adoptEngineRevisionOperation,
+} as const satisfies Readonly<Record<string, (args: readonly string[]) => Promise<HookResult>>>);
 
 /**
  * The façade's entry point, composed over how each run-advancing operation
@@ -1968,24 +1999,11 @@ export function orchestrationHandler(emission: () => Emission): HookHandler {
         return completeOperation(rest, emission());
       case "decide":
         return decideOperation(stdin, rest, emission());
-      case "remediate":
-        return remediateOperation(rest);
-      case "attest":
-        return attestOperation(rest);
-      case "reopen-task":
-        return reopenTaskOperation(rest);
-      case "rescope-task":
-        return rescopeTaskOperation(rest);
-      case "add-dependency":
-        return addDependencyOperation(rest);
-      case "add-task":
-        return addTaskOperation(rest);
-      case "withdraw-task":
-        return withdrawTaskOperation(rest);
-      case "adopt-engine-run-tests":
-        return adoptEngineRunTestsOperation(rest);
-      case "adopt-engine-revision":
-        return adoptEngineRevisionOperation(rest);
+      case "disposition":
+        return advisoryDispositionOperation(stdin);
+      case "remediate": case "attest": case "reopen-task": case "rescope-task": case "add-dependency":
+      case "add-task": case "withdraw-task": case "adopt-engine-run-tests": case "adopt-engine-revision":
+        return TASK_GRAPH_OPERATIONS[operation](rest);
     }
   };
 }

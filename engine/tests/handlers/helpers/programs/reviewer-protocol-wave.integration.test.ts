@@ -659,6 +659,11 @@ describe("registered Wave reviewer protocol", () => {
     expect(graph(p).tasks[0]!.findings).toMatchObject([{ ...advisory, protocolVersion: 2 }]);
     expect(value(handle.readTranscriptBytes(requests[2]!.authority))).toEqual(sibling);
     expect(await resume(p, handle)).toEqual(awaiting);
+    // Approval needs a disposition on every advisory the request issued (ADR-0090).
+    const advised = graph(p).tasks[0]!;
+    await runCli(p, ["disposition"], JSON.stringify({ dispositions: [
+      { finding: `${advised.id}:${advised.findings![0]!.id}`, decision: "dismissed", reason: "scripted fixture advice" },
+    ] }));
     const done = await runCli(p, ["decide", "--runs-root", p.runsRoot, "--run", handle.runId, "--request", awaiting.request!.requestId], JSON.stringify({ kind: "approve" }));
     expect(done.kind, JSON.stringify(done)).toBe("done");
     expect(await resume(p, handle)).toEqual(done);
