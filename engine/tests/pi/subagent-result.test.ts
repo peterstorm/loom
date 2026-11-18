@@ -125,7 +125,7 @@ function graph(overrides: Partial<TaskGraph> = {}): TaskGraph {
       agent: "code-implementer-agent",
       wave: 1,
       status: "pending",
-      proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["engine/src/x.ts"] }),
+      proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["engine/src/x.ts"] }),
       depends_on: [],
       review_status: "pending",
       file_list: ["engine/src/x.ts"],
@@ -1390,6 +1390,7 @@ describe("applyImplementationPiResult", () => {
       ...(!("proof" in taskOverrides)
         ? {
             proof: derivePendingTaskProof({
+              declaredArtifactExpectation: "changed",
               verificationPolicy: taskVerificationPolicy(overridden),
               declaredArtifacts: overridden.file_list ?? [],
             }),
@@ -1439,6 +1440,7 @@ describe("applyImplementationPiResult", () => {
           ...task,
           status: "pending",
           proof: derivePendingTaskProof({
+            declaredArtifactExpectation: "changed",
             verificationPolicy: taskVerificationPolicy(task),
             declaredArtifacts: task.file_list ?? [],
           }),
@@ -1471,7 +1473,7 @@ describe("applyImplementationPiResult", () => {
       newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
     };
     const proof = evaluateTaskProof(
-      { verificationPolicy, declaredArtifacts: [] },
+      { declaredArtifactExpectation: "changed", verificationPolicy, declaredArtifacts: [] },
       observedEvidence({ taskCompleted: true, filesModified: [], newTestsWritten: false }),
     );
     if (proof.state !== "satisfied") throw new Error("waived recovery fixture must be satisfied");
@@ -1582,7 +1584,7 @@ describe("applyImplementationPiResult", () => {
       newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
     };
     const proof = evaluateTaskProof(
-      { verificationPolicy, declaredArtifacts: [] },
+      { declaredArtifactExpectation: "changed", verificationPolicy, declaredArtifacts: [] },
       observedEvidence({ taskCompleted: true, filesModified: [], newTestsWritten: false }),
     );
     if (proof.state !== "satisfied") throw new Error("completed cleanup fixture must be satisfied");
@@ -1801,7 +1803,7 @@ describe("applyImplementationPiResult", () => {
 
   it("invalidates stale authority and reports unsafe modified-path evidence", async () => {
     const proof = evaluateTaskProof(
-      { newTestsRequired: false, declaredArtifacts: [] },
+      { declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] },
       observedEvidence({ taskCompleted: true, filesModified: [], newTestsWritten: false }),
     );
     expect(proof.state).toBe("satisfied");
@@ -1856,7 +1858,7 @@ describe("applyImplementationPiResult", () => {
       newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
     };
     const staleProof = evaluateTaskProof(
-      { verificationPolicy, declaredArtifacts: ["engine/src/x.ts"] },
+      { declaredArtifactExpectation: "changed", verificationPolicy, declaredArtifacts: ["engine/src/x.ts"] },
       trustedPassEvidence(["engine/src/x.ts"], { newTestsWritten: false }),
     );
     expect(staleProof.state).toBe("satisfied");

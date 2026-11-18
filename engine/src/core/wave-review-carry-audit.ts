@@ -1,6 +1,6 @@
 /**
  * The registration boundary of an issuance plan (ADR-0089, ADR-0091,
- * ADR-0093): the parsers that turn a stored restart carry, a fresh start's
+ * ADR-0094): the parsers that turn a stored restart carry, a fresh start's
  * succession or its narrowed reviews into the typed audit, and the one
  * comparison of two lineage runs.
  *
@@ -119,7 +119,7 @@ function parseNarrowedTaskReview(raw: unknown): NarrowedTaskReview | null {
 }
 
 /**
- * Parse a registration's stored narrowed reviews (ADR-0093): a non-empty list
+ * Parse a registration's stored narrowed reviews (ADR-0094): a non-empty list
  * naming each Task once, each with its derived roster, a proper ordered part
  * of it, its change classes and its basis.
  */

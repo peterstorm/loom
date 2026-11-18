@@ -151,7 +151,7 @@ judged. None of these modules re-reads the plan.
 **Deviations from the plan, as shipped:**
 
 - The plan's single "owner-verification-infrastructure" failure ships as three named kinds: `plan-unreadable`,
-  `plan-malformed` and `plan-drift`. Each has its own remedy row in `docs/operations.md` (§ owner verification).
+  `plan-malformed` and `plan-drift`. Each has its own remedy row in `docs/verification.md` (§ owner verification).
 - The gate reads the plan directly (`readFileSync` plus `parsePlanModels`) rather than through
   `loadPlanModelsSource`, so that each failure keeps its own kind.
 - The owner run also reports an owner path that is not a file in the workspace as `plan-drift`
@@ -178,7 +178,7 @@ judged. None of these modules re-reads the plan.
 - Obligations are duplicated between the plan and the stamp. Any legitimate post-population plan edit to an
   owned Invariant blocks the next gate with `plan-drift`. This includes adding a `**Mutation exemption:**`.
   The only way forward is to restore the plan or re-populate, and re-population resets every Task to
-  `pending`. `docs/operations.md` warns operators to decide exemptions in the architecture phase.
+  `pending`. `docs/verification.md` warns operators to decide exemptions in the architecture phase.
 - Every Wave Gate of a G5b graph re-reads and re-parses the plan, even when the Wave owes nothing. A plan file
   that is moved, deleted or broken blocks gates that have no owned Invariant in scope.
 - Comparing through the canonical form makes the stamp's field set part of the contract. As shipped in #127, a

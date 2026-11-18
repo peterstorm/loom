@@ -301,7 +301,7 @@ type CarryContext = Readonly<{
   /** The predecessor's registration. */
   previous: RegisteredWaveGateProgram;
   /**
-   * The narrowed reviews the new run issues (ADR-0093), which decide the
+   * The narrowed reviews the new run issues (ADR-0094), which decide the
    * roster each Task's evidence is judged against: a restart's replacement
    * inherits its predecessor's; a succession is planned before any Task is
    * narrowed, and a carried Task is never narrowed.
@@ -337,7 +337,7 @@ function acceptedRoster(
  * The terms `task` is judged by, why it cannot be judged, or null for a Task
  * that owes no review. The roster and the Subject Digest come from one
  * derivation of the Task's review; the roster is the one the new run issues
- * (narrowed, ADR-0093), while the Subject Digest names the derived roster.
+ * (narrowed, ADR-0094), while the Subject Digest names the derived roster.
  */
 function carryTermsOf(context: CarryContext, task: Task): DomainResult<CarryTerms, NotCarriedReason> | null {
   const { graph, previous, protocol, workspaces } = context;
@@ -532,7 +532,7 @@ export type CarriedRunBinding = Readonly<{
   /** The prior Finding ids a fresh issuance over `bytes` selects (`CarryTerms`). */
   priorFindingIds: readonly string[];
   roster: NonEmpty<string>;
-  /** How `roster` was narrowed (ADR-0093), which the rebound run records; undefined for a whole roster. */
+  /** How `roster` was narrowed (ADR-0094), which the rebound run records; undefined for a whole roster. */
   narrowing: ReviewNarrowing | undefined;
   /** The Subject Digest of the Task as the replacement's packets present it. */
   subject: SubjectDigest;
@@ -642,7 +642,7 @@ function successionIsProtected(
  * a Successor Carry is admitted only while its predecessor is a protected
  * retired run of the registration's exact Wave (`retired`), and never for a
  * registration without one. Generation and protocol must match either way.
- * This run's own acceptance may record a narrowing (ADR-0093) only as the
+ * This run's own acceptance may record a narrowing (ADR-0094) only as the
  * registration narrowed the Task; an acceptance without one closed the whole
  * roster, which is never too few reviewers.
  */

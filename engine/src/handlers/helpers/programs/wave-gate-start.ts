@@ -42,7 +42,7 @@ export type PreparedWaveGateStart = Readonly<{
   /** Each reviewed Task the start issues in full although it succeeds a
    *  retired run, and why its accepted review did not carry (ADR-0091). */
   notCarried: readonly TaskNotCarried[];
-  /** The roster each reviewed Task is issued, and why (ADR-0093). */
+  /** The roster each reviewed Task is issued, and why (ADR-0094). */
   rosters: readonly TaskRosterChoice[];
 }>;
 
@@ -123,7 +123,7 @@ function loadBasisPackets(runsRoot: string, runId: string): DomainResult<readonl
 }
 
 /**
- * The roster each reviewed Task of a fresh start is issued (ADR-0093): the
+ * The roster each reviewed Task of a fresh start is issued (ADR-0094): the
  * shell reads the basis packets of each Task `basisReadOf` consults from the
  * basis run's Run Directory, and the reviewed workspaces, and the pure
  * `planReviewRoles` decides. A carried Task is never narrowed.
@@ -250,7 +250,7 @@ function reportNotCarried(runId: string, notCarried: readonly TaskNotCarried[]):
 
 /**
  * Name the roster each reviewed Task is issued and why, carried, full or
- * narrowed (ADR-0093), as one JSON line on the start's diagnostic output.
+ * narrowed (ADR-0094), as one JSON line on the start's diagnostic output.
  */
 function reportRosters(runId: string, rosters: readonly TaskRosterChoice[]): void {
   if (rosters.length === 0) return;

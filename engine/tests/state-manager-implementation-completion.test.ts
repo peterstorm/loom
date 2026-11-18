@@ -54,6 +54,7 @@ function initialContext(active: ImplementationAttemptAuthority, prompt = "Task I
 }
 
 const pendingProof = () => derivePendingTaskProof({
+  declaredArtifactExpectation: "changed",
   newTestsRequired: false,
   declaredArtifacts: ["engine/src/a.ts"],
 });

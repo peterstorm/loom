@@ -1,5 +1,5 @@
 /**
- * Issuing a narrowed review (ADR-0093) through batch preparation, the locked
+ * Issuing a narrowed review (ADR-0094) through batch preparation, the locked
  * install and an exhausted-run restart: the owner of every issued prior
  * Finding on the derived roster is issued with it, and a restart's
  * replacement keeps each Task's narrowed roster.

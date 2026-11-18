@@ -117,7 +117,7 @@ export function waveGateOriginOf(registration: WaveGateOriginAudit): WaveGateOri
 
 /**
  * One reviewed Task a start issued only part of its derived roster
- * (ADR-0093): the roles it issues, in roster order, the derived roster they
+ * (ADR-0094): the roles it issues, in roster order, the derived roster they
  * were chosen from, the change classes that chose them, and the basis the
  * change was measured against.
  */
@@ -130,7 +130,7 @@ export type NarrowedTaskReview = Readonly<{
 }>;
 
 /**
- * The narrowed reviews a registration froze (ADR-0093), in registration
+ * The narrowed reviews a registration froze (ADR-0094), in registration
  * order. Absent when every reviewed Task is issued its whole roster, so such
  * a registration is byte-identical to one written before narrowing existed.
  */

@@ -34,7 +34,7 @@ describe("priorFindingRetires", () => {
     expect(priorFindingRetires("code-reviewer", [], "whole")).toBe(false);
   });
 
-  it("in a narrowed run (ADR-0093), never retires a Finding whose owner did not vote, however unanimous the rest", () => {
+  it("in a narrowed run (ADR-0094), never retires a Finding whose owner did not vote, however unanimous the rest", () => {
     expect(priorFindingRetires("silent-failure-hunter", [vote("comment-analyzer", "resolved_by_remediation")], "narrowed")).toBe(false);
     expect(priorFindingRetires("recovered-view", [vote("code-reviewer", "resolved_by_remediation")], "narrowed")).toBe(false);
     expect(priorFindingRetires("code-reviewer", [

@@ -358,7 +358,7 @@ describe("locked implementation settlement failures", () => {
       newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
     };
     const proof = evaluateTaskProof(
-      { verificationPolicy, declaredArtifacts: [] },
+      { declaredArtifactExpectation: "changed", verificationPolicy, declaredArtifacts: [] },
       observedEvidence({ taskCompleted: true, filesModified: [], newTestsWritten: false }),
     );
     if (proof.state !== "satisfied") throw new Error("waived revalidation fixture must be satisfied");
@@ -414,7 +414,7 @@ describe("locked implementation settlement failures", () => {
     const s = sid("unsafe-modified-path");
     const dir = tempDir();
     const proof = evaluateTaskProof(
-      { newTestsRequired: false, declaredArtifacts: [] },
+      { declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] },
       observedEvidence({ taskCompleted: true, filesModified: [], newTestsWritten: false }),
     );
     expect(proof.state).toBe("satisfied");
@@ -491,7 +491,7 @@ describe("locked implementation settlement failures", () => {
       newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
     };
     const proof = evaluateTaskProof(
-      { verificationPolicy, declaredArtifacts: [artifact] },
+      { declaredArtifactExpectation: "changed", verificationPolicy, declaredArtifacts: [artifact] },
       trustedPassEvidence([artifact], { newTestsWritten: false }),
     );
     expect(proof.state).toBe("satisfied");

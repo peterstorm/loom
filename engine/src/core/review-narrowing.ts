@@ -1,5 +1,5 @@
 /**
- * The narrowing record and the Review Basis (ADR-0093): their shapes, their
+ * The narrowing record and the Review Basis (ADR-0094): their shapes, their
  * parsers and the one rule for each.
  *
  * - `parseReviewNarrowing` reads back how a Review Run's roster was narrowed,

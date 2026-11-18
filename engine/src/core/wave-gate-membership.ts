@@ -201,7 +201,7 @@ export function waveReviewerSlotProblem(
     return "request does not belong to the exact current Wave Review Packet slot";
   }
   if (protocol.protocolVersion === 2) {
-    // The run's own narrowing (ADR-0093): the install wrote it from the
+    // The run's own narrowing (ADR-0094): the install wrote it from the
     // registration, and the batch epoch this run is bound to commits to it.
     if (run.reviewer_protocol === undefined ||
         waveRunRosterProblem(graph, 2, task, run, runIssuance(run)) !== null ||

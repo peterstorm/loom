@@ -34,6 +34,7 @@ const UNIMPLEMENTED: ConformanceViolation = { subject: "priceOrder", reason: "st
 const input: ProofObligationInput = {
   newTestsRequired: true,
   declaredArtifacts: ["engine/src/core/proof-obligations.ts", "engine/tests/core/proof-obligations.test.ts"],
+  declaredArtifactExpectation: "changed",
 };
 
 const completeEvidence = trustedPassEvidence([...input.declaredArtifacts], {
@@ -63,6 +64,7 @@ describe("proof obligation derivation", () => {
 
   it("waives regression and new-test obligations when decomposition explicitly waives tests", () => {
     const obligations = deriveProofObligations({
+      declaredArtifactExpectation: "changed",
       newTestsRequired: false,
       declaredArtifacts: ["docs/decision.md"],
     });
@@ -76,6 +78,7 @@ describe("proof obligation derivation", () => {
     const source = {
       newTestsRequired: true,
       declaredArtifacts: [" a.ts ", "a.ts", "b.ts"],
+      declaredArtifactExpectation: "changed" as const,
     };
     const before = structuredClone(source);
     const obligations = deriveProofObligations(source);
@@ -436,7 +439,7 @@ describe("proof properties", () => {
         fc.boolean(),
         fc.boolean(),
         (artifacts, newTestsRequired, testsPass, newTestsWritten) => {
-          const source = { newTestsRequired, declaredArtifacts: artifacts };
+          const source = { newTestsRequired, declaredArtifacts: artifacts, declaredArtifactExpectation: "changed" as const };
           const evidence: ObservedProofEvidence = observedEvidence({
             taskCompleted: true,
             testResult: testsPass ? { verdict: "trusted-pass" } : { verdict: "trusted-fail" },
@@ -464,7 +467,7 @@ describe("proof properties", () => {
         fc.uniqueArray(artifact, { minLength: 1, maxLength: 7 }),
         fc.integer({ min: 0, max: 8 }),
         (artifacts, removalIndex) => {
-          const source = { newTestsRequired: true, declaredArtifacts: artifacts };
+          const source = { newTestsRequired: true, declaredArtifacts: artifacts, declaredArtifactExpectation: "changed" as const };
           const full = trustedPassEvidence(artifacts);
           const variants: ObservedProofEvidence[] = [
             { ...full, testResult: undefined },
@@ -567,7 +570,9 @@ describe("proof properties", () => {
 
 describe("declared-artifact contract conformance (AD-5, FR-021)", () => {
   const OTHER = "src/order/quotes.ts";
-  const contractInput: ProofObligationInput = { newTestsRequired: false, declaredArtifacts: [ARTIFACT, OTHER] };
+  const contractInput: ProofObligationInput = {
+    newTestsRequired: false, declaredArtifacts: [ARTIFACT, OTHER], declaredArtifactExpectation: "changed",
+  };
   const RENAMED: ConformanceViolation = { subject: "parseOrder", reason: "renamed", remedy: null };
   const judged = (entries: readonly (readonly [string, readonly [ConformanceViolation, ...ConformanceViolation[]]])[]): ContractConformance =>
     ({ kind: "judged", violations: new Map(entries) });

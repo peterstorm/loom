@@ -29,7 +29,7 @@
  *                               --reason <text>
  *   helper orchestration attest --task <task-id> --reason <text>
  *   helper orchestration reopen-task --wave <N> --task <task-id> [--task <task-id>]...
- *                               --reason <text>
+ *                               --reason <text> [--needs implementation|tests]
  *   helper orchestration rescope-task --task <task-id> [--add-file <path>]... [--add-sealed-file <path>]... [--remove-file <path>]...
  *                               --reason <text>
  *   helper orchestration add-dependency --task <task-id> --on <task-id> [--on <task-id>]... --reason <text>
@@ -250,8 +250,9 @@ const OPERATOR_OPERATIONS_USAGE: readonly string[] = [
   "          (retires the exact terminal implementation escalation so the next status offers a fresh attempt-1 dispatch; prior receipts stay in history)",
   "  attest   --task <task-id> --reason <text>",
   "          (arms implementation re-attestation: rewrites the Task's pending proof to attested obligations + regression-only policy; the next dispatch runs a verify-only child whose writes settle as drift, never as attested)",
-  "  reopen-task --wave <N> --task <task-id> [--task <task-id>]... --reason <text>",
-  "          (after abandoning the Wave's run: returns implemented Tasks of the active Wave to revalidation so status owes each a fresh dispatch; Findings stay as prior Findings, other Tasks stay implemented; audited and idempotent)",
+  "  reopen-task --wave <N> --task <task-id> [--task <task-id>]... --reason <text> [--needs implementation|tests]",
+  "          (after abandoning the Wave's run: returns implemented Tasks of the active Wave to revalidation so status owes each a fresh dispatch; Findings stay as prior Findings, other Tasks stay implemented; audited and idempotent;",
+  "           --needs tests: the Finding needs new or strengthened tests only, so the Proof owes changed test files, no implementation-file change and passing tests, and no red-then-green order)",
   "  rescope-task --task <task-id> [--add-file <path>]... [--add-sealed-file <path>]... [--remove-file <path>]... --reason <text>",
   "          (adds files to, or removes files from, a pending Task of the active Wave or a later one, such as a new-tests Task with no test file;",
   "          a path a completed Wave sealed joins only through --add-sealed-file; a package manifest and its lockfile stay on one Task;",

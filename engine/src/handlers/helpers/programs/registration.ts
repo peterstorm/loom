@@ -350,7 +350,7 @@ function parseRegisteredWaveGateProgram(raw: unknown): FacadeRegistrationParse {
   } else if (Object.hasOwn(raw as object, "succession")) {
     waveKeys = [...waveBaseKeys, "succession"];
   }
-  // Narrowed reviews (ADR-0093) compose with any origin; absent, the key set is as before.
+  // Narrowed reviews (ADR-0094) compose with any origin; absent, the key set is as before.
   const narrowedKey = Object.hasOwn(raw as object, "narrowedReviews");
   if (narrowedKey) waveKeys = [...waveKeys, "narrowedReviews"];
   if (!exactObject(raw, waveKeys)) {
@@ -385,7 +385,7 @@ function parseRegisteredWaveGateProgram(raw: unknown): FacadeRegistrationParse {
   }));
 }
 
-/** A registration's narrowed reviews (ADR-0093): only on a current registration, naming only its own Tasks. */
+/** A registration's narrowed reviews (ADR-0094): only on a current registration, naming only its own Tasks. */
 function parseRegisteredNarrowing(
   raw: unknown,
   schemaVersion: 1 | 2,

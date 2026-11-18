@@ -1,6 +1,6 @@
 /**
  * Reading a registration's issuance plan: its carry plan (ADR-0089, ADR-0091)
- * and its narrowed reviews (ADR-0093). Which entry a Task has, the roster its
+ * and its narrowed reviews (ADR-0094). Which entry a Task has, the roster its
  * Review Run is issued, and what a run still issues for it. Batch
  * preparation, the locked install, the carried-run rebinding, resume
  * classification, retries, slot membership, completion admission and
@@ -32,7 +32,7 @@ import {
 
 /**
  * How a Task's Review Run is to be issued, as its registration or its
- * installed run states it (ADR-0093): its whole derived roster, or narrowed to
+ * installed run states it (ADR-0094): its whole derived roster, or narrowed to
  * `roster`, decided from the derived roster `narrowing.from`.
  */
 export type TaskIssuance =
@@ -57,7 +57,7 @@ export function runIssuance(run: ReviewRun): TaskIssuance {
 }
 
 /**
- * The review a Task's Review Run is issued (ADR-0093), tagged:
+ * The review a Task's Review Run is issued (ADR-0094), tagged:
  * - `whole`: its whole derived roster;
  * - `narrowed`: the narrowed roster its issuance states, with its narrowing;
  * - `widened`: its issuance named a narrowing that no longer fits the derived

@@ -74,7 +74,7 @@ const retryReceipt = (): ImplementationAttemptSettlementReceipt => {
   const result = settleImplementationAttempt({
     id: "T1",
     status: "pending",
-    proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+    proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] }),
     active_implementation_attempt: attempt,
     implementation_attempt_history: [],
   }, attempt, attempt, {

@@ -142,11 +142,11 @@ Both adapters reuse phase transition resolution, artifact parsing, task-id extra
 
 ## Emission
 
-On the qualified Pi route, a reviewer request (schema 2 or 3) and each issued judge or refutation verdict are **emission-enabled**. The request carries the engine-issued `LOOM_EMISSION_DESCRIPTOR`, and the child registers one emission tool whose parameters are byte-identical to the frozen payload schema for that kind and version:
+On the qualified Pi route, a reviewer request (schema 2, 3 or 4) and each issued judge or refutation verdict are **emission-enabled**. The request carries the engine-issued `LOOM_EMISSION_DESCRIPTOR`, and the child registers one emission tool whose parameters are byte-identical to the frozen payload schema for that kind and version:
 
 | Producer | Tool |
 |---|---|
-| Reviewer payload (the issued binding selects schema version 2 or 3) | `loom_emit_reviewer_payload` |
+| Reviewer payload (the issued binding selects the schema version: standalone v2, successor v3, Wave Gate v4) | `loom_emit_reviewer_payload` |
 | Architecture judge verdict | `loom_emit_judge_verdict` |
 | Refutation verdict | `loom_emit_refutation_verdict` |
 

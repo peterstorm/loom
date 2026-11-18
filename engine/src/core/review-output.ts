@@ -1055,7 +1055,7 @@ export function constrainReviewResolutionToScope(
  * A pending review cannot simultaneously carry outstanding evidence-capture
  * failures: that pairing is reserved for `evidence_capture_failed` and is enforced
  * at the task-graph load boundary. The cleared acceptance stays as the Task's
- * Review Basis (`review_basis`, ADR-0093), so the next Wave Gate can choose its
+ * Review Basis (`review_basis`, ADR-0094), so the next Wave Gate can choose its
  * reviewers by what this implementation changed.
  */
 export function invalidateTaskReview(task: Task): Task {

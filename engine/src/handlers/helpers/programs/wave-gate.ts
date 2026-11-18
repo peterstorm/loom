@@ -71,7 +71,7 @@ function verifyCompletedWaveProtocols(handle: RunDirHandle, registration: Regist
   const rosters = waveTaskReviewRosters(graph, registration.schemaVersion, registration.taskIds);
   if (!rosters.ok) throw new Error(`completed Wave Gate roster cannot be derived: ${rosters.error}`);
   // A role a restart or a fresh start carried (ADR-0089, ADR-0091) was published along the lineage, not by this run;
-  // a role a narrowed review left out (ADR-0093) was never published.
+  // a role a narrowed review left out (ADR-0094) was never published.
   for (const { taskId, roster } of issuedWaveReviewRosters(rosters.value, registration)) {
     if (roster.some((role) => !protocols.some((protocol) =>
       protocol.subject.taskId === taskId && protocol.request.role === role))) {

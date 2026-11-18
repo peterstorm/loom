@@ -1,5 +1,5 @@
 /**
- * Change Class (ADR-0093): what changed in a reviewed Task since the review
+ * Change Class (ADR-0094): what changed in a reviewed Task since the review
  * its re-review is judged against (its Review Basis), and the reviewer roles
  * that change needs.
  *

@@ -185,7 +185,7 @@ function successionProblem(state: TaskGraph, wave: number, succession: WaveGateS
 
 /**
  * Why a registration's narrowed reviews cannot install over `state`, or null
- * (ADR-0093). Each Task a start narrowed must still hold, as its Review Basis,
+ * (ADR-0094). Each Task a start narrowed must still hold, as its Review Basis,
  * exactly the acceptance the narrowing was measured against, and its derived
  * roster must still be the one the narrowing was decided from: otherwise the
  * batch would quietly review it in full against a registration that says it
@@ -208,7 +208,7 @@ function narrowingProblem(state: TaskGraph, narrowed: readonly NarrowedTaskRevie
 /**
  * What the locked install reads of the run's program registration: its
  * published Tasks and the issuance plan it froze, its succession (ADR-0091)
- * and its narrowed reviews (ADR-0093). Passing the registration itself is what
+ * and its narrowed reviews (ADR-0094). Passing the registration itself is what
  * keeps either check from being skipped by omission.
  */
 export type WaveGateInstallProgram = Readonly<{
@@ -224,7 +224,7 @@ export type WaveGateInstallProgram = Readonly<{
  * that refusal precedes admission, so a stale or terminal candidate is never
  * mistaken for an exact replay. A succession in `program` must name the
  * protected predecessor; each narrowed review's Task must still hold its
- * basis and derive the roster it was narrowed from (ADR-0093).
+ * basis and derive the roster it was narrowed from (ADR-0094).
  */
 export function installWaveGateRegistration(
   state: TaskGraph,

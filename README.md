@@ -167,6 +167,7 @@ Loom's linter runs regex rules after every edit and structural rules at the Wave
 - [Model profiles and calibration](docs/model-profiles-and-calibration.md)
 - [Lint rules](lint-rules/README.md)
 - [Guarded Skill Machines](machines/README.md)
+- [Hooks](hooks/README.md)
 - [Architecture Decision Records](docs/adr/README.md)
 
 ## Development

@@ -1,5 +1,5 @@
 /**
- * Choosing a fresh Wave Gate start's reviewer roster per Task (ADR-0093):
+ * Choosing a fresh Wave Gate start's reviewer roster per Task (ADR-0094):
  * each reviewed Task the start does not carry is issued the roles its change
  * since its Review Basis needs, and the narrowed reviews are frozen into the
  * registration.
@@ -160,7 +160,7 @@ export function narrowedReviewsOf(plan: ReviewRolesPlan): NonEmpty<NarrowedTaskR
 export type BasisReadOptions = Readonly<{ carried: ReadonlySet<string>; freshReview: boolean }>;
 
 /**
- * Whether a start consults `task`'s Review Basis (ADR-0093), the one rule the
+ * Whether a start consults `task`'s Review Basis (ADR-0094), the one rule the
  * shell's packet reads and the plan both follow:
  * - `carried`: the Successor Carry carries the Task, so it is never narrowed;
  * - `full`: it is reviewed in full without reading a basis, and why;

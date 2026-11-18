@@ -1,5 +1,5 @@
 /**
- * The comment lexer behind a comment-only Change Class (ADR-0093):
+ * The comment lexer behind a comment-only Change Class (ADR-0094):
  * `commentStrippedSource` removes C-family comments from a TypeScript,
  * JavaScript or Java source and normalises the whitespace between tokens, so
  * two sources that differ only in comments and layout strip to the same text.

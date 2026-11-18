@@ -191,7 +191,7 @@ async function settleInvalidModernRecord(
   const attempt = authority("T1", reservation);
   modernGraph(statePath, attempt, {
     new_tests_required: false,
-    proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+    proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] }),
   });
   process.env.LOOM_STATE_PATH = statePath;
   mkdirSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true });
@@ -323,7 +323,7 @@ describe("Claude implementation authority sidecar", () => {
     const fixture = modernClaudeAttemptFixture("claude-sidecar-route", {
       taskOverrides: {
         new_tests_required: false,
-        proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+        proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] }),
       },
     });
 
@@ -341,7 +341,7 @@ describe("Claude implementation authority sidecar", () => {
     const fixture = modernClaudeAttemptFixture("claude-positive-oracle", {
       taskOverrides: {
         new_tests_required: false,
-        proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+        proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] }),
       },
     });
 
@@ -390,7 +390,7 @@ describe("Claude implementation authority sidecar", () => {
         new_tests: verificationPolicy.newTests,
       },
       new_tests_required: undefined,
-      proof: derivePendingTaskProof({ verificationPolicy, declaredArtifacts: [] }),
+      proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", verificationPolicy, declaredArtifacts: [] }),
     });
     mkdirSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true });
     writeFileSync(join(process.env.LOOM_SUBAGENT_DIR!, `${SESSION}.task_graph`), statePath);
@@ -423,7 +423,7 @@ describe("Claude implementation authority sidecar", () => {
     const attempt = authority("T1", "claude-nested-tool-reference");
     modernGraph(statePath, attempt, {
       new_tests_required: false,
-      proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+      proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] }),
     });
     process.env.LOOM_STATE_PATH = statePath;
     mkdirSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true });
@@ -462,7 +462,7 @@ describe("Claude implementation authority sidecar", () => {
     const fixture = modernClaudeAttemptFixture("claude-missing-transcript", {
       taskOverrides: {
         new_tests_required: false,
-        proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+        proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] }),
       },
       transcriptLines: null,
     });
@@ -498,7 +498,7 @@ describe("Claude implementation authority sidecar", () => {
     const attempt = authority("T1", "claude-malformed-tail");
     modernGraph(statePath, attempt, {
       new_tests_required: false,
-      proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+      proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] }),
     });
     process.env.LOOM_STATE_PATH = statePath;
     mkdirSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true });
@@ -621,7 +621,7 @@ describe("Claude implementation authority sidecar", () => {
     const attempt = authority("T1", "claude-duplicate-delivery");
     modernGraph(statePath, attempt, {
       new_tests_required: false,
-      proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+      proof: derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: [] }),
     });
     process.env.LOOM_STATE_PATH = statePath;
     mkdirSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true });

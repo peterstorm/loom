@@ -112,7 +112,7 @@ const asContractTask = (state: TaskGraph): TaskGraph => ({ ...state, acceptance_
 /** One implemented Wave 1 Task with satisfied proof over `declaredFiles`. */
 function implementedTask(id: string, declaredFiles: readonly string[], modified: string,
   trace: Pick<Task, "spec_anchors" | "spec_contributions">, priors: readonly Finding[] = []): Task {
-  const proof = evaluateTaskProof({ newTestsRequired: true, declaredArtifacts: declaredFiles },
+  const proof = evaluateTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: declaredFiles },
     trustedPassEvidence(declaredFiles));
   if (proof.state !== "satisfied") throw new Error("fixture requires actual satisfied proof construction");
   return taskFixture({ id, description: `review fixture ${id}`, agent: "code-implementer-agent", wave: 1,
@@ -1168,7 +1168,7 @@ describe("a fresh Wave Gate start carries unchanged Tasks' accepted reviews", ()
     expect(await resume(p, next)).toEqual(done);
   }, 180_000);
 
-  it("ADR-0093: a doc-comment fix is reviewed by comment-analyzer alone, frozen into the registration, and completes and replays", async () => {
+  it("ADR-0094: a doc-comment fix is reviewed by comment-analyzer alone, frozen into the registration, and completes and replays", async () => {
     const p = await abandonedAdvisoryRound();
     await reopenAndReimplement(p, "T5", "/** The T5 constant. */\nexport const t5 = 1;\n");
     expect(graph(p).tasks[4]!.review_basis?.run_id).toBe("run.first");
@@ -1219,7 +1219,7 @@ describe("a fresh Wave Gate start carries unchanged Tasks' accepted reviews", ()
     expect(await resume(p, next)).toEqual(done);
   }, 180_000);
 
-  it("ADR-0093: T6's open code-reviewer advisory forces code-reviewer onto its comment-only fix, which retires it", async () => {
+  it("ADR-0094: T6's open code-reviewer advisory forces code-reviewer onto its comment-only fix, which retires it", async () => {
     const p = await abandonedAdvisoryRound();
     await reopenAndReimplement(p, "T6", "// the T6 constant\nexport const t6 = 1;\n");
     const started = await startCli(p, "run.second");

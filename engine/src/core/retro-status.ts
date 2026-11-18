@@ -33,6 +33,7 @@ export function renderWaveDigest(digest: WaveFriction): string {
     ["infrastructure block", "infrastructure blocks", digest.infrastructureBlocks],
     ["Wave Gate run", "Wave Gate runs", gateRunCount(digest)],
     ["Task reopening", "Task reopenings", digest.taskReopenings],
+    ["tests-only reopening", "tests-only reopenings", digest.testsOnlyReopenings],
     ["Wave reopening", "Wave reopenings", digest.waveReopenings],
     ["plan edit", "plan edits", digest.planEdits],
     ["Forward Fix", "Forward Fixes", digest.forwardFixes],

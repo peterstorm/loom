@@ -120,7 +120,7 @@ export async function currentWaveTaskReviewRetries(
       const run = task.review_run;
       if (!registration.taskIds.includes(task.id) || run === undefined) return [];
       // A current-protocol run must carry the roster the registration issues
-      // the Task (ADR-0093); a legacy run keeps its structural check.
+      // the Task (ADR-0094); a legacy run keeps its structural check.
       const inexactSlots = run.reviewer_protocol === undefined
         ? run.slot_authority === undefined || run.slot_authority.length !== run.expected_agents.length
         : waveRunRosterProblem(graph, registration.schemaVersion, task, run, registeredIssuance(registration, task.id)) !== null;

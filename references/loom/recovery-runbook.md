@@ -111,9 +111,11 @@ Only when a finding is wrong, and only with the user's approval. Pipe the correc
 ```bash
 # Spec-check override (for example, FRs covered in later waves flagged as missing)
 echo 'SPEC_CHECK_WAVE: N
+MEDIUM: reason for override
+SPEC_CHECK_OVERRIDE: reason for override
 SPEC_CHECK_CRITICAL_COUNT: 0
-SPEC_CHECK_VERDICT: PASSED
-MEDIUM: reason for override' | bun {LOOM_DIR}/engine/src/cli.ts helper store-spec-check
+SPEC_CHECK_HIGH_COUNT: 0
+SPEC_CHECK_VERDICT: PASSED' | bun {LOOM_DIR}/engine/src/cli.ts helper store-spec-check
 
 # Review-findings override (for example, a false critical downgraded to advisory)
 echo 'ADVISORY: original finding — reason for downgrade' | bun {LOOM_DIR}/engine/src/cli.ts helper store-review-findings --task T1

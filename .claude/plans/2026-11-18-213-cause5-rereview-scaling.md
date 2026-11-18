@@ -45,7 +45,7 @@
 - The selection is frozen into the registration and threaded through roster derivation via an `IssuedWaveReviewRoster` subtype.
 - In a narrowed run, a Finding whose owner did not vote never retires (`priorFindingRetires`, `engine/src/core/findings.ts:1549-1554`).
 
-### PR (b) as shipped (ADR-0093)
+### PR (b) as shipped (ADR-0094)
 - Review Basis: `Task.review_basis` (State File, parsed by the shared acceptance validator in state-file-wire.ts, current-protocol only, no generation equality). `invalidateTaskReview` and `returnToRevalidation` keep it through `retainedReviewBasis`; `reviewBasisOf` (new leaf core/review-narrowing.ts) is the acceptance, else the kept basis.
 - Change Class: pure core/review-change.ts. `classifyReviewChange(before, after, testSuffixes)` returns `unchanged`, `scope-changed`, `context-changed` (description, agent, plan context, anchors, contributions, declared files, plan file, owner-map or contract-surface section text, or a section the basis cannot show) or `changed` with classes in order comment, doc, test, code. Comment-only uses `commentStrippedSource`, a conservative C-family lexer for .ts/.mts/.cts/.js/.mjs/.cjs/.java (JSX/TSX excluded): it returns null (code) on unterminated literals, a quote in a regex, or a comment on a line after a `/` read as division. Test files by the frozen Test-File Classification (`frozenRedThenGreenEra`), engine default otherwise. Deviation: "no change detected" is its own outcome and gets the full roster (the table did not cover it).
 - `selectReviewRoles(derived, change, priorOwners)` implements the table; `architecture-tech-lead` appears in a narrowed roster only as an owner of an issued prior Finding (the owner rule wins).

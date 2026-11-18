@@ -440,7 +440,7 @@ export class StateManager {
    * Install one fresh protected active-run anchor, idempotently for exact
    * replay. `program` is the run's program registration (or the part the
    * install reads): its published Tasks, and the succession (ADR-0091) and
-   * narrowed reviews (ADR-0093) it froze, which the install checks against
+   * narrowed reviews (ADR-0094) it froze, which the install checks against
    * protected state.
    */
   async registerActiveWaveGate(

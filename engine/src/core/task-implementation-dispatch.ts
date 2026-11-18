@@ -5,6 +5,7 @@ import {
 } from "./implementation-retry";
 import { distillPromptAppendix, taskRolePolicy } from "./distill-task";
 import { canonicalRecord, type NonEmpty } from "./orchestration-contract";
+import { testsOnlyDispatchAppendix } from "./reopen-scope";
 
 export type TaskImplementationDispatchDerivation =
   | Readonly<{ kind: "dispatch"; dispatch: WaveImplementationDispatch }>
@@ -25,8 +26,11 @@ export type TaskImplementationDispatchDerivation =
  * be admitted on is emitted.
  *
  * A Distill Task's dispatch carries the fixed distill appendix (ADR-0068),
- * which the spawn gate binds as well. The appendices follow the retry context
- * in one order: attestation, then distill.
+ * which the spawn gate binds as well. A Task reopened for tests only carries
+ * the tests-only appendix (ADR-0093): what its Proof owes and which files are
+ * off limits. The appendices follow the retry context in one order:
+ * attestation, then distill, then tests-only. The State File never holds two
+ * of them on one Task.
  */
 export function deriveTaskImplementationDispatch(task: Task): TaskImplementationDispatchDerivation {
   const disposition = deriveImplementationRetryDisposition(task);
@@ -45,6 +49,7 @@ export function deriveTaskImplementationDispatch(task: Task): TaskImplementation
     appendices.push(attestation.promptAppendix);
   }
   if (taskRolePolicy(task).dispatchAppendix === "distill") appendices.push(distillPromptAppendix(task));
+  if (task.reopen_scope !== undefined) appendices.push(testsOnlyDispatchAppendix(task.reopen_scope));
   const dispatch: WaveImplementationDispatch = disposition.kind === "initial"
     ? canonicalRecord({
         kind: "initial-implementation",

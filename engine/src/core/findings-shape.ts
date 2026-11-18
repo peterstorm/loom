@@ -186,7 +186,7 @@ export type SubjectDigest = string & { readonly [SUBJECT_DIGEST]: true };
 export type SealedSubjectDigest = string & { readonly [SEALED_SUBJECT_DIGEST]: true };
 
 /**
- * The change classes that narrow a re-review's roster (ADR-0093): a change of
+ * The change classes that narrow a re-review's roster (ADR-0094): a change of
  * comments only, of documentation files only, or of test files only. Code is
  * never one: a code change is reviewed by the whole roster.
  */
@@ -200,7 +200,7 @@ export type NarrowingChangeClass = (typeof NARROWING_CHANGE_CLASSES)[number];
 export type ReviewBasisReference = Readonly<{ run_id: string; authority_digest: string; packet_id: string; head_sha: string }>;
 
 /**
- * How a Review Run's roster was narrowed (ADR-0093): the derived roster it was
+ * How a Review Run's roster was narrowed (ADR-0094): the derived roster it was
  * narrowed from, the change classes that chose its roles, and the basis the
  * change was measured against. Present only on a narrowed run and on the
  * acceptance it records, so neither can pass for a whole-roster review.
@@ -229,7 +229,7 @@ export type CurrentReviewRun = Readonly<ReviewRunBase & Extract<ReviewRunWorkspa
   subject_digest?: SubjectDigest;
   /**
    * How this run's roster (`expected_agents`) was narrowed from the derived
-   * one (ADR-0093). Absent on a run issued its whole derived roster.
+   * one (ADR-0094). Absent on a run issued its whole derived roster.
    */
   narrowing?: ReviewNarrowing;
 }>;
@@ -261,7 +261,7 @@ export type CurrentAcceptedReviewAuthority = Readonly<AcceptedReviewAuthorityBas
    * before it existed: a Successor Carry reviews such a Task in full once.
    */
   subject_digest?: SealedSubjectDigest;
-  /** The narrowing of the run this acceptance closed (ADR-0093); absent on a whole-roster acceptance. */
+  /** The narrowing of the run this acceptance closed (ADR-0094); absent on a whole-roster acceptance. */
   narrowing?: ReviewNarrowing;
 }>;
 export type AcceptedReviewAuthority = LegacyAcceptedReviewAuthority | CurrentAcceptedReviewAuthority;
@@ -285,7 +285,7 @@ export interface FindingResolution {
   readonly assessments: NonEmptyPriorAssessments;
   /**
    * The derived roster a narrowed run's `expected_agents` were narrowed from
-   * (ADR-0093). Present only on a narrowed run's resolution, which retires a
+   * (ADR-0094). Present only on a narrowed run's resolution, which retires a
    * Finding only on its owner's vote.
    */
   readonly narrowed_from?: readonly [string, ...string[]];

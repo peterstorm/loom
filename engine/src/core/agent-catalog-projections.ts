@@ -181,7 +181,7 @@ declare const NARROWED_WAVE_REVIEW_ROSTER: unique symbol;
 
 /**
  * A proper, non-empty part of a derived Wave review roster, in that roster's
- * order (ADR-0093): the roles a re-reviewed Task's change needs. Minted only by
+ * order (ADR-0094): the roles a re-reviewed Task's change needs. Minted only by
  * `narrowedWaveReviewRoster` and `parseNarrowedWaveReviewRoster`, which prove
  * the subsequence (`narrowsRoster`).
  */

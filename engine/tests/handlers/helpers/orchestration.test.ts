@@ -33,6 +33,8 @@ import { type GateDeps } from "../../../src/core/wave-gate-checks";
 import { BASE_WAVE_REVIEW_AGENTS } from "../../../src/core/agent-catalog-projections";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import { acceptedWaveCompletionSuite } from "../../fixtures/accepted-wave-completion-suite";
+import { i6PlanTask } from "../../fixtures/i6-plan-task";
+import { i6RunnerManifest } from "../../fixtures/i6-runner-manifest";
 import { parseAgentRequestAuthority, parseArtifactDigest, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
 import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
 import { disposeFixturePiSessions, withFixturePiSession } from "../../fixtures/pi-session";
@@ -69,7 +71,7 @@ import {
   PI_EXTENSION_RUNTIME_REVISION_ENV,
   PI_EXTENSION_RUNTIME_ROOT_ENV,
 } from "../../../src/runtime-compatibility";
-import { trustedPassEvidence } from "../../fixtures/task-lifecycle";
+import { satisfiedProof, trustedPassEvidence } from "../../fixtures/task-lifecycle";
 import { issuedDescriptorWavePayload } from "../../fixtures/wave-reviewer-payload";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
@@ -212,7 +214,7 @@ function specCheckDocuments(specFile: string | null, planFile: string | null) {
 
 function passingWaveTaskProof() {
   const proof = evaluateTaskProof(
-    { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+    { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
     trustedPassEvidence(["src/x.ts"]),
   );
   if (proof.state !== "satisfied") throw new Error("passing Wave Task proof fixture must be satisfied");
@@ -1635,6 +1637,52 @@ describe("orchestration CLI", () => {
     const notImplemented = await runCli(["reopen-task", "--wave", "1", "--task", "T1", "--reason", "another"], "", root);
     expect(notImplemented.status).not.toBe(0);
     expect(notImplemented.stderr).toContain("T1 is pending");
+    expect(readFileSync(statePath, "utf8")).toBe(committedBytes);
+  });
+
+  it("reopens a Task for tests only (ADR-0093), so status and the brief owe a tests-only attempt with no I6", async () => {
+    const root = project();
+    modelFreePlan(root);
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    const settledTask = (id: string) => {
+      const files = [`src/${id.toLowerCase()}.ts`, `src/${id.toLowerCase()}.test.ts`];
+      return i6PlanTask(id, 1, files, { status: "implemented", proof: satisfiedProof(files, "owed-if-new-tests"), review_status: "passed" });
+    };
+    writeFileSync(statePath, JSON.stringify(executeGraph({
+      spec_trace_version: 2,
+      verification_manifest: i6RunnerManifest(),
+      tasks: [settledTask("T1"), settledTask("T2")],
+    })));
+
+    const reopen = ["reopen-task", "--wave", "1", "--task", "T1", "--reason", "mutation-1: add the boundary row", "--needs", "tests"];
+    const reopened = await runCli(reopen, "", root);
+    expect(reopened.status, reopened.stderr).toBe(0);
+    expect(reopened.stdout).toContain("\"needs\": \"tests\"");
+    expect(reopened.stdout).toContain("T1 reopened for tests only");
+
+    const status = await runCli(["status", "--json"], "", root);
+    expect(status.status, status.stderr).toBe(0);
+    const recovery = (JSON.parse(status.stdout) as {
+      next: { action: { diagnostic?: { recovery?: { dispatches?: readonly { taskId: string; promptAppendix: string | null }[] } } } };
+    }).next.action.diagnostic?.recovery;
+    expect(recovery?.dispatches?.map(({ taskId }) => taskId)).toEqual(["T1"]);
+    expect(recovery?.dispatches?.[0]?.promptAppendix).toContain("Tests-only reopening (BINDING, ADR-0093)");
+
+    const brief = await runCli(["brief", "--task", "T1", "--note", "mutation-1 survives", "--prompt"], "", root);
+    expect(brief.status, brief.stderr).toBe(0);
+    const prompt = (JSON.parse(brief.stdout) as { briefs: readonly { prompt: string }[] }).briefs[0]!.prompt;
+    expect(prompt).toContain("Reopened for tests only (ADR-0093) — BINDING.");
+    expect(prompt).toContain("Implementation files (off limits):\n- `src/t1.ts`");
+    expect(prompt).not.toContain("I6 red-then-green — BINDING");
+
+    const committedBytes = readFileSync(statePath, "utf8");
+    const graph = JSON.parse(committedBytes) as { tasks: readonly { id: string; reopen_scope?: unknown }[] };
+    expect(graph.tasks[0]!.reopen_scope).toEqual({ testFiles: ["src/t1.test.ts"], implementationFiles: ["src/t1.ts"], reopening: 0 });
+    const replay = await runCli(reopen, "", root);
+    expect(replay.stdout).toContain("already reopened; nothing changed");
+    const conflicting = await runCli(reopen.slice(0, -2), "", root);
+    expect(conflicting.status).not.toBe(0);
+    expect(conflicting.stderr).toContain("--needs tests");
     expect(readFileSync(statePath, "utf8")).toBe(committedBytes);
   });
 

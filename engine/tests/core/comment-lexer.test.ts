@@ -1,5 +1,5 @@
 /**
- * The comment lexer behind a comment-only Change Class (ADR-0093): it removes
+ * The comment lexer behind a comment-only Change Class (ADR-0094): it removes
  * comments and nothing a reader could execute, refuses what it cannot read,
  * and agrees with the TypeScript parser on every token it keeps.
  */

@@ -96,6 +96,7 @@ const observed = (redThenGreen?: RedThenGreenObservation) =>
   });
 
 const i6Obligations = () => deriveProofObligations({
+  declaredArtifactExpectation: "changed",
   verificationPolicy: policy("required"),
   declaredArtifacts: [TEST_FILE, IMPL_FILE],
   redThenGreen: "owed-if-new-tests",
@@ -262,6 +263,7 @@ describe("taskRedThenGreenEra (contract writers do not owe I6)", () => {
     fc.assert(fc.property(scopes, policies, ({ era, writers }, newTests) => {
       for (const writer of writers) {
         expect(kinds(deriveProofObligations({
+          declaredArtifactExpectation: "changed",
           verificationPolicy: policy(newTests),
           declaredArtifacts: [IMPL_FILE],
           redThenGreen: taskRedThenGreenEra(scopeOf(era, writers), writer),
@@ -276,6 +278,7 @@ describe("deriveProofObligations with the I6 era", () => {
     for (const era of ["owed-if-new-tests", "not-owed"] as const) {
       for (const newTests of ["required", "claimant", "existing-tests-sufficient"] as const) {
         const derived = kinds(deriveProofObligations({
+          declaredArtifactExpectation: "changed",
           verificationPolicy: policy(newTests),
           declaredArtifacts: [IMPL_FILE],
           redThenGreen: era,
@@ -287,6 +290,7 @@ describe("deriveProofObligations with the I6 era", () => {
 
   it("FR-010: a claimant (covered-by-acceptance-contract) never owes red-then-green", () => {
     expect(kinds(deriveProofObligations({
+      declaredArtifactExpectation: "changed",
       verificationPolicy: policy("claimant"),
       declaredArtifacts: [IMPL_FILE],
       redThenGreen: "owed-if-new-tests",
@@ -301,11 +305,11 @@ describe("deriveProofObligations with the I6 era", () => {
   });
 
   it("FR-005: an input without an era (every pre-feature caller) derives exactly what it derived before", () => {
-    const before = deriveProofObligations({ verificationPolicy: policy("required"), declaredArtifacts: [IMPL_FILE] });
+    const before = deriveProofObligations({ declaredArtifactExpectation: "changed", verificationPolicy: policy("required"), declaredArtifacts: [IMPL_FILE] });
     expect(kinds(before)).not.toContain("red-then-green");
-    expect(deriveProofObligations({ newTestsRequired: true, declaredArtifacts: [IMPL_FILE], redThenGreen: "owed-if-new-tests" }))
+    expect(deriveProofObligations({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: [IMPL_FILE], redThenGreen: "owed-if-new-tests" }))
       .toContainEqual({ kind: "red-then-green" });
-    expect(kinds(deriveProofObligations({ newTestsRequired: true, declaredArtifacts: [IMPL_FILE] })))
+    expect(kinds(deriveProofObligations({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: [IMPL_FILE] })))
       .not.toContain("red-then-green");
   });
 });
@@ -335,7 +339,7 @@ describe("evaluating the red-then-green obligation", () => {
   });
 
   it("FR-005: an observation reaching a Task that does not owe I6 changes nothing", () => {
-    const obligations = deriveProofObligations({ verificationPolicy: policy("required"), declaredArtifacts: [IMPL_FILE] });
+    const obligations = deriveProofObligations({ declaredArtifactExpectation: "changed", verificationPolicy: policy("required"), declaredArtifacts: [IMPL_FILE] });
     const proof = evaluateProofObligations(obligations, {
       ...observed({ kind: "unproven", gap: { kind: "red-missing", untrustedOnly: false } }),
       filesModified: [IMPL_FILE],
@@ -424,6 +428,7 @@ describe("settlement mints proof:red-then-green-unproven:<gap>", () => {
       id: "T1",
       status: "pending",
       proof: derivePendingTaskProof({
+        declaredArtifactExpectation: "changed",
         verificationPolicy: policy("required"),
         declaredArtifacts: [],
         redThenGreen: "owed-if-new-tests",

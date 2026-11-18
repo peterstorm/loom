@@ -43,6 +43,8 @@ export type ImplementationLifecycleError =
   | Readonly<{ kind: "terminal-escalation"; taskId: string }>
   | Readonly<{ kind: "already-attested"; taskId: string }>
   | Readonly<{ kind: "distill-task-not-attestable"; taskId: string }>
+  /** A tests-only reopening is in force (ADR-0093): it owes changed test files, attestation owes none. */
+  | Readonly<{ kind: "tests-only-not-attestable"; taskId: string }>
   | Readonly<{ kind: "proof-already-satisfied"; taskId: string }>
   | Readonly<{ kind: "attestation-context-invalid"; taskId: string; detail: string }>
   | Readonly<{ kind: "task-already-settled"; taskId: string; status: "completed" | "implemented" }>
@@ -96,6 +98,7 @@ export function armImplementationAttestation(
   // A Distill Task's Proof is `behaviour-preserved`; attestation would rewrite
   // it into a state the State File refuses to load (ADR-0068).
   if (!taskRolePolicy(task).attestable) return lifecycleFailure({ kind: "distill-task-not-attestable", taskId: task.id });
+  if (task.reopen_scope !== undefined) return lifecycleFailure({ kind: "tests-only-not-attestable", taskId: task.id });
   if (task.status !== "pending") {
     return lifecycleFailure({ kind: "task-not-pending", taskId: task.id, status: task.status });
   }

@@ -1,5 +1,5 @@
 /**
- * A re-reviewed Task's roster follows what changed (ADR-0093, loom#213 Cause
+ * A re-reviewed Task's roster follows what changed (ADR-0094, loom#213 Cause
  * 5b): the start's roster plan, its threading through issuance and the
  * registration, retirement in a narrowed run, and the Review Basis that
  * survives a reopening.

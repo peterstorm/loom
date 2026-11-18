@@ -1,5 +1,5 @@
 /**
- * The State File boundary for a re-reviewed Task's narrowing fields (ADR-0093):
+ * The State File boundary for a re-reviewed Task's narrowing fields (ADR-0094):
  * `accepted_review_authority.narrowing` and the Task's `review_basis`.
  *
  * Both are admitted exactly and only on a current-protocol acceptance, parsed

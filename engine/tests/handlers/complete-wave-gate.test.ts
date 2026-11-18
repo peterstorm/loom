@@ -115,7 +115,7 @@ import { findingId } from "../fixtures/finding-id";
 import { value } from "../fixtures/parse-result";
 
 const satisfiedProof = evaluateTaskProof(
-  { newTestsRequired: true, declaredArtifacts: [] },
+  { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: [] },
   trustedPassEvidence([]),
 );
 if (satisfiedProof.state !== "satisfied") throw new Error("test fixture proof must be satisfied");
@@ -266,7 +266,7 @@ describe("GitHub issue notification port", () => {
 describe("checkImplementationProof (pure)", () => {
   it("requires both an implementation-bearing status and satisfied proof", () => {
     const failedProof = evaluateTaskProof(
-      { newTestsRequired: false, declaredArtifacts: ["missing.ts"] },
+      { declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: ["missing.ts"] },
       observedEvidence({ taskCompleted: true, filesModified: [] }),
     );
     expect(checkImplementationProof([baseTask]).passed).toBe(true);
@@ -901,7 +901,7 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
 
   it("a failed proof can never be force-completed into an unloadable graph", () => {
     const failedProof = evaluateTaskProof(
-      { newTestsRequired: false, declaredArtifacts: ["missing.ts"] },
+      { declaredArtifactExpectation: "changed", newTestsRequired: false, declaredArtifacts: ["missing.ts"] },
       observedEvidence({ taskCompleted: true, filesModified: [] }),
     );
     const state = mkGraph({
@@ -1337,7 +1337,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
   });
 
   it("partitions every Task exactly once and reports roster/evidence/finding gaps", () => {
-    const pendingProof = derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: [] });
+    const pendingProof = derivePendingTaskProof({ declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: [] });
     const tasks: Task[] = [
       { ...taskState({ id: "T1", wave: 1, status: "completed" }),
         critical_findings: ["critical"], advisory_findings: ["advisory"],
@@ -2653,7 +2653,7 @@ describe("protected active Wave Gate registration", () => {
     mkdirSync(join(root, "tests"), { recursive: true });
     writeFileSync(artifact, "export {};\n");
     const artifactProof = evaluateTaskProof(
-      { newTestsRequired: true, declaredArtifacts: [relativeArtifact] },
+      { declaredArtifactExpectation: "changed", newTestsRequired: true, declaredArtifacts: [relativeArtifact] },
       trustedPassEvidence([relativeArtifact]),
     );
     if (artifactProof.state !== "satisfied") throw new Error("artifact fixture proof must be satisfied");

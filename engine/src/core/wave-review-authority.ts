@@ -476,7 +476,7 @@ export type WaveRunRosterProblem =
  * The one roster-versus-persisted-run check. Slot membership, exhausted-run
  * restart, the locked install's replay and reviewer retries all ask this, so
  * a run settles only with the roster the engine issues it now: the review
- * `issuance` makes of the derived roster (`issuedTaskReview`, ADR-0093). A
+ * `issuance` makes of the derived roster (`issuedTaskReview`, ADR-0094). A
  * caller holding the registration passes `registeredIssuance`; slot
  * membership, which holds only the installed run, passes `runIssuance` (the
  * epoch the run is bound to commits to the registration's). A run whose
@@ -519,7 +519,7 @@ export function waveReviewSubjects(rosters: readonly WaveTaskIssuedRoles[]): rea
 
 /**
  * The roles a run actually issues for each reviewed Task: its derived roster
- * narrowed as the registration's narrowed review states (ADR-0093), less the
+ * narrowed as the registration's narrowed review states (ADR-0094), less the
  * slots the registration's carry plan carries (ADR-0089, ADR-0091), and no
  * entry at all for a Task whose whole roster carries. With neither it is
  * `rosters` itself, so every subject, slot and request keeps its identity.
@@ -541,7 +541,7 @@ export type WidenedNarrowing = Readonly<{ taskId: string; from: readonly string[
 
 /**
  * Every narrowed review `plan` registered whose Task is now issued its whole
- * roster (ADR-0093): the shell reports each one, so a voided narrowing is
+ * roster (ADR-0094): the shell reports each one, so a voided narrowing is
  * never silent. A Task the graph no longer holds or that owes no review is
  * left to the batch's own refusal.
  */
@@ -1156,7 +1156,7 @@ export function coverageTasks(graph: TaskGraph, currentWave: number): readonly C
 
 /**
  * Why a narrowed Task's batch would issue a prior Finding to a roster that
- * lacks its owner, or null (ADR-0093). In a narrowed run a prior Finding
+ * lacks its owner, or null (ADR-0094). In a narrowed run a prior Finding
  * retires only on its owner's vote, so a Finding whose owner is on the derived
  * roster but not issued could never retire in this run, however every issued
  * reviewer assessed it: the start chose the roles with the owners of the priors
@@ -1303,7 +1303,7 @@ export function prepareWaveReviewBatch(
     // The registration's carry plan (a restart's or a fresh start's) and its
     // narrowed reviews decide which subjects this batch issues, so the epoch
     // commits to both. Absent, the payload is byte-identical to a batch
-    // prepared before either existed (ADR-0089, ADR-0091, ADR-0093).
+    // prepared before either existed (ADR-0089, ADR-0091, ADR-0094).
     ...(carry === undefined ? {} : { carried: carry.audit.carried }),
     ...(registration.narrowedReviews === undefined ? {} : { narrowed: registration.narrowedReviews }),
   })));

@@ -134,7 +134,7 @@ does each mutant run, in plan order. The first infrastructure failure ends the r
 `mutationBoundMs` in `engine/src/core/owner-verification/verdict.ts` reports the bound as the sum, over owed
 obligations with `mutation.kind === "verify"`, of `(1 baseline + selected mutants) × mutantTimeoutMs(runner.timeoutMs)`.
 An owner-unchanged obligation therefore counts one baseline run. At most this is 25 runs × 60 s = 25 minutes per
-Invariant. `docs/operations.md` ("Owner verification blocks a Wave Gate (G5b)") documents the operator-facing
+Invariant. `docs/verification.md` ("Owner verification blocks a Wave Gate (G5b)") documents the operator-facing
 contract.
 
 ### Tests

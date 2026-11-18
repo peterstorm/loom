@@ -56,7 +56,7 @@ and carried Findings reach this run's Refutation Panel and advisory decision.
 
 A Task that does not carry but holds a Review Basis (its last accepted review,
 kept when `reopen-task` cleared it) is issued only the reviewers its change
-needs (ADR-0093): a comment-only or doc-only change gets `comment-analyzer`; a
+needs (ADR-0094): a comment-only or doc-only change gets `comment-analyzer`; a
 test-only change gets `code-reviewer` and `pr-test-analyzer`; a mix gets the
 union; any code, scope or context change, or a basis that cannot be read and
 verified, gets the full roster. The owner of every prior Finding the Task is
@@ -78,7 +78,7 @@ Execute only the one typed action returned by `start`, `resume`, or `decide`:
   owned Invariant's family, which carries the owner map (ADR-0047), and for a
   Contract Task writing its contract's types file, which carries the contract
   surface (ADR-0069). A carried Task gets none and a re-reviewed Task may get
-  a narrowed part of its roster (ADR-0093). The
+  a narrowed part of its roster (ADR-0094). The
   Wave's Distill Task (agent `distill-agent`, the engine-added pass that
   simplified the Wave's code, ADR-0068) is registered with the Wave but gets no
   reviewer: the other Tasks' packets read the distilled bytes. Never infer the
@@ -169,10 +169,11 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration abandon \
   --run "<exact-active_wave_gate.runId>" \
   --reason "<why: the Finding to fix>"
 
-# 2. Reopen each affected implemented Task of the active Wave.
+# 2. Reopen each affected implemented Task of the active Wave. Add
+#    --needs tests when new test rows close the Finding (below).
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration reopen-task \
   --wave <N> --task <task-id> [--task <task-id>]... \
-  --reason "<the Finding to fix>"
+  --reason "<the Finding to fix>" [--needs implementation|tests]
 
 # 3. Dispatch each reopened Task from its brief, carrying the Finding.
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration brief \
@@ -199,6 +200,26 @@ while any implementation reservation, attempt or subagent is active, for a Wave
 other than the active one or one that already completed, when the abandoned run
 names a successor, and for any Task that is not `implemented` in the active
 Wave. Repeating the same command after it succeeds changes nothing.
+
+**Name what the Finding needs** (ADR-0093). The default, `--needs
+implementation`, is a full re-implementation: the Task owes its whole Proof
+again, the I6 red-then-green order included. When new or strengthened tests
+close the Finding (a surviving mutant, an uncovered case), reopen with `--needs
+tests`. That attempt's Proof owes three things measured from the bytes the
+Task's files held at the reopening: a changed test file, no changed
+implementation file, and passing tests. It owes no red-then-green order, and an
+implementation file whose bytes differ from the reopening's when the attempt
+finishes fails it as `implementation-files-changed`. The dispatch tells the
+implementer which files are off limits. The reviewers and the
+Owner Verification that raised the Finding re-check it at the fresh Wave Gate.
+
+`--needs tests` refuses a Distill Task, an Acceptance Contract writer, a Task
+whose policy waives regression or whose `file_list` names no test file, and a
+TaskGraph frozen before the Test-File Classification. Repeating the reopening
+with other `--needs` while its Tasks still await their attempt is refused
+(`needs-conflict`). The scope lasts through a retry and ends when the lineage
+settles `implemented` or escalates. An escalated tests-only Task becomes a full
+re-implementation, so `remediate` dispatches one.
 
 ## Reviewer evidence
 

@@ -13,7 +13,7 @@
  * plan in the registration; only spec-check and the exhausted slots are
  * reissued. A predecessor under another protocol carries nothing, so no
  * reviewer straddles two protocols. A restart's replacement inherits the
- * predecessor's narrowed reviews (ADR-0093), so each reissued slot keeps the
+ * predecessor's narrowed reviews (ADR-0094), so each reissued slot keeps the
  * roster it was issued under. Orphan recovery always reissues every request
  * in full: the predecessor's Run Directory, and the registration that named
  * its narrowing, are gone.
@@ -172,7 +172,7 @@ export function prepareExhaustedWaveGateRestart(
 
 /** The registration identity both replacement predicates share: schema and
  *  issued reviewer protocol, wave, authority, the ordered Task roster and the
- *  narrowed reviews (ADR-0093). Each replacement kind compares its own audit
+ *  narrowed reviews (ADR-0094). Each replacement kind compares its own audit
  *  on top, so the two predicates guard the re-derive-under-lock seam with the
  *  same strictness. */
 function sameReplacementRegistration(left: RegisteredWaveGateProgram, right: RegisteredWaveGateProgram): boolean {

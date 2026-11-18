@@ -60,6 +60,7 @@ describe("attestation obligation derivation", () => {
 
   it("defaults to the changed expectation and carries it through both input arms", () => {
     expect(deriveProofObligations({
+      declaredArtifactExpectation: "changed",
       newTestsRequired: false,
       declaredArtifacts: ["src/a.ts"],
     }).map((obligation) => obligation.kind)).toEqual([

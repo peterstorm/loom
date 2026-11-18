@@ -129,11 +129,11 @@ A fresh Wave Gate start carrying, without reissuing, the whole-roster acceptance
 _Avoid_: Re-review skip, cached review, review reuse
 
 **Review Basis**:
-The accepted review a Task's re-review is judged against: its current-protocol acceptance, or, once a reopening cleared that, the copy the reopening kept (`review_basis`). The next Wave Gate compares the Task's current bytes and context with the basis run's frozen packet to choose its reviewers (ADR-0093). A legacy acceptance is no basis.
+The accepted review a Task's re-review is judged against: its current-protocol acceptance, or, once a reopening cleared that, the copy the reopening kept (`review_basis`). The next Wave Gate compares the Task's current bytes and context with the basis run's frozen packet to choose its reviewers (ADR-0094). A legacy acceptance is no basis.
 _Avoid_: Baseline (the implementation proof's pre-attempt bytes), previous review
 
 **Change Class**:
-What changed in a reviewed Task since its Review Basis: comment-only, doc-only, test-only or code, per file; or a scope or context change. It decides a re-review's roster: comment or doc gives `comment-analyzer`, test gives `code-reviewer` and `pr-test-analyzer`, anything else the full roster, and the owners of the issued prior Findings are always added. Anything the classifier cannot read with certainty is code (ADR-0093).
+What changed in a reviewed Task since its Review Basis: comment-only, doc-only, test-only or code, per file; or a scope or context change. It decides a re-review's roster: comment or doc gives `comment-analyzer`, test gives `code-reviewer` and `pr-test-analyzer`, anything else the full roster, and the owners of the issued prior Findings are always added. Anything the classifier cannot read with certainty is code (ADR-0094).
 _Avoid_: Diff type, change kind
 
 **Review Packet**:
@@ -177,6 +177,10 @@ _Avoid_: Distill phase, simplification Task, cleanup Task, refactor Task, distil
 **Owner Verification**:
 The Wave Gate check that an owned plan invariant has one implementation: its matrix test reaches the owner module and every sibling entry point, and every mutant of the owner's changed lines is killed.
 _Avoid_: Mutation testing (alone — it is one half), owner check (informal)
+
+**Reopen Scope**:
+What a Task reopening says the **Finding** needs: a full re-implementation (the default), or tests only (`reopen-task --needs tests`). A tests-only **Task**'s **Proof Obligations** are a changed test file, no changed implementation file and passing tests, with no red-then-green order; the scope ends when its attempts settle.
+_Avoid_: test-only mode, needs flag, light reopen
 
 ### Requirements and contracts
 

@@ -48,6 +48,11 @@ const CASES: { readonly [Kind in ProofFailure["kind"]]: Case } = {
     failure: { kind: "declared-artifact-drifted", artifact: "src/order.ts" },
     label: "proof:declared-artifact-drifted",
   },
+  "test-files-not-changed": { failure: { kind: "test-files-not-changed" }, label: "proof:test-files-not-changed" },
+  "implementation-files-changed": {
+    failure: { kind: "implementation-files-changed", artifacts: ["src/order.ts"] },
+    label: "proof:implementation-files-changed",
+  },
 };
 
 describe("proofFailureKind", () => {

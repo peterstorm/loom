@@ -70,7 +70,7 @@ export function waveRequests(
 
 /**
  * Name each Task the registration narrowed that this batch nonetheless
- * reviews in full because its derived roster moved since the start (ADR-0093),
+ * reviews in full because its derived roster moved since the start (ADR-0094),
  * as one JSON line on the diagnostic output: a voided narrowing is never silent.
  */
 function reportWidenedNarrowings(runId: string, widened: readonly WidenedNarrowing[]): void {

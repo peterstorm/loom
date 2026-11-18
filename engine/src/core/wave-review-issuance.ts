@@ -105,7 +105,7 @@ export function waveBatchSpecCheckAuthority(batch: WaveRequestBatch): DomainResu
  * Subject Digest, or the install is refused. A freshly installed current run
  * records the Subject Digest its packets present.
  *
- * A Task the registration narrowed (ADR-0093) installs a Review Run whose
+ * A Task the registration narrowed (ADR-0094) installs a Review Run whose
  * roster is the narrowed roster and which records how it was narrowed; every
  * roster comparison here is against that issued roster.
  */

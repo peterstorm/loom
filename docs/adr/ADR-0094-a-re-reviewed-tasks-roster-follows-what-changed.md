@@ -1,4 +1,4 @@
-# ADR-0093: A re-reviewed Task's roster follows what changed
+# ADR-0094: A re-reviewed Task's roster follows what changed
 
 ## Status
 Accepted (2026-11-18). Extends ADR-0091 (a fresh Wave Gate carries unchanged Tasks' accepted reviews): a reviewed Task that does not carry is issued only the reviewers its change needs. Issue #213, Cause 5 (PR b).

@@ -568,7 +568,7 @@ function parseStoredResolution(raw: unknown): ResolvedFinding | null {
   if (firstExpectedAgent === undefined) return null;
   const expectedAgents = [firstExpectedAgent, ...remainingExpectedAgents];
   if (!Array.isArray(resolution.assessments) || resolution.assessments.length === 0) return null;
-  // A narrowed run's resolution names the roster it was narrowed from (ADR-0093) and is judged by the narrowed rule.
+  // A narrowed run's resolution names the roster it was narrowed from (ADR-0094) and is judged by the narrowed rule.
   const narrowedFrom = resolution.narrowed_from === undefined ? undefined : parseNarrowedFrom(resolution.narrowed_from, expectedAgents);
   if (narrowedFrom === null) return null;
   const parsed = parseResolutionAssessments({ finding, generation: resolution.generation, packetId: resolution.packet_id, assessments: resolution.assessments });
@@ -594,7 +594,7 @@ function parseStoredResolution(raw: unknown): ResolvedFinding | null {
   };
 }
 
-/** A resolution's stored `narrowed_from`, or null unless `expectedAgents` narrows it (ADR-0093). */
+/** A resolution's stored `narrowed_from`, or null unless `expectedAgents` narrows it (ADR-0094). */
 function parseNarrowedFrom(raw: unknown, expectedAgents: readonly string[]): readonly [string, ...string[]] | null {
   const from = parseRoles(raw);
   return from !== null && narrowsRoster(from, expectedAgents) ? from : null;
@@ -1571,7 +1571,7 @@ const COUNTER_EVIDENCE = /[\w./-]+\.[A-Za-z0-9]+:\d+/u;
 
 type RetirementVote = Readonly<{ agent: string; verdict: PriorFindingVerdict; reason: string }>;
 
-/** Whether the votes came from a run's whole derived roster or a narrowed part of it (ADR-0093). */
+/** Whether the votes came from a run's whole derived roster or a narrowed part of it (ADR-0094). */
 export type RetirementRoster = "whole" | "narrowed";
 
 /**
@@ -1585,7 +1585,7 @@ export type RetirementRoster = "whole" | "narrowed";
  * carried fixed findings across generations under unanimity. A finding whose
  * owner is not on the roster (recovered view claims, operator overrides) still
  * needs every reviewer to resolve it — on a whole roster. A narrowed roster
- * (ADR-0093) left reviewers out, so there a Finding whose owner did not vote
+ * (ADR-0094) left reviewers out, so there a Finding whose owner did not vote
  * never retires; it carries forward to a review its owner sits on. Shared by
  * settlement and the stored resolution validator, so a record can only exist
  * if this rule admitted it.
@@ -1674,7 +1674,7 @@ function finalizeReviewRun(task: Task, run: ReviewRun): Task {
   const subject = run.reviewer_protocol === undefined || run.subject_digest === undefined
     ? {}
     : { subject_digest: acceptedSubjectDigest(run.subject_digest, { findings: active, refuted_findings: task.refuted_findings }) };
-  // A narrowed run's acceptance says so (ADR-0093), so no later run reads it as a whole-roster review.
+  // A narrowed run's acceptance says so (ADR-0094), so no later run reads it as a whole-roster review.
   const narrowing = narrowingOf(run);
   // A new acceptance is the Task's Review Basis from now on; the basis a
   // reopening kept is superseded and goes, so the two never sit side by side.

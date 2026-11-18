@@ -1,5 +1,5 @@
 /**
- * Change Class (ADR-0093, loom#213 Cause 5b): what changed in a reviewed
+ * Change Class (ADR-0094, loom#213 Cause 5b): what changed in a reviewed
  * Task since its last accepted review, and the reviewer roles that change
  * needs. A pure classifier over a before/after view, and a pure selection.
  */
