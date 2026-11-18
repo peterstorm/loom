@@ -36,7 +36,7 @@ protected TaskGraph       immutable Run Directory
 Loom is not only an engine. Its package includes the semantic resources agents execute:
 
 - `commands/` — slash-command runbooks. `/loom`, `/wave-gate`, `/review-pr`, `/review-and-fix` and `/security-audit` are the principal operational surfaces.
-- `commands/templates/` — parameterized prompts for sequential phases, implementation Tasks, architecture-panel roles, and refutation verification.
+- `commands/templates/` — parameterized prompts for sequential phases, implementation Tasks, and architecture-panel roles.
 - `agents/` — the Agent definitions, each with an explicit model profile and, where needed, a preloaded Skill ([inventory](agents.md)).
 - `skills/` — reusable architecture, implementation, testing, security, frontend, lint, review/remediation, deepening, and domain-language knowledge.
 - `rules/` — architecture and language guidance supplied to implementation and review Agents.

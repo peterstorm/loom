@@ -215,7 +215,7 @@ A Wave with surviving advisories reaches `await-user`. The user records a dispos
 
 After every implementation Agent of the Wave has stopped and Task proof passes, the Wave Gate runs the frozen completion suite against the integrated workspace: the project's manifest checks, full-tier lint (`loom:full-tier-lint`), and owner verification where the plan declares owned Invariants. Exit code, timeout, signal, spawn failure and report production are recorded as separate facts. A missing, duplicate, stale, malformed or conflicting result fails closed, and an infrastructure failure stays distinct from a failing check.
 
-The exact result is published immutably in the Wave's Run Directory and, when accepted, bound into protected state together with the workspace digest. Resume reuses that receipt; it never reruns commands over evidence it cannot tell apart. `/loom --status` reports accepted, stale, rejected, pending or unavailable suite authority without executing anything.
+The exact result is published immutably in the Wave's Run Directory and, when accepted, bound into protected state together with the workspace digest. Resume reuses that receipt; it never reruns commands over evidence it cannot tell apart. `/loom --status` reports `required`, `accepted`, `rejected`, `stale` or unavailable suite authority without executing anything.
 
 The final protected-state commit re-observes the workspace and checks implementation proof, completion-suite authority, reviews, spec alignment, surviving criticals, and required lifecycle artifacts. Success marks Tasks completed and advances the Wave; otherwise a typed diagnostic explains the block.
 
