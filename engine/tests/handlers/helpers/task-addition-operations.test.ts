@@ -145,10 +145,18 @@ describe("withdraw-task", () => {
     return { statePath, before: readFileSync(statePath, "utf8") };
   };
 
-  it("adds and withdraws through the dispatcher, and the loader accepts the result", async () => {
+  it("adds and withdraws through the dispatcher, names the released Tasks, and the loader accepts the result", async () => {
     const statePath = installState();
     expect(await dispatch(["add-task", ...ARGS])).toEqual({ kind: "allow" });
-    expect(await dispatch(["withdraw-task", ...WITHDRAW])).toEqual({ kind: "allow" });
+    const written: string[] = [];
+    const write = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: string | Uint8Array) => { written.push(String(chunk)); return true; }) as typeof process.stdout.write;
+    try {
+      expect(await dispatch(["withdraw-task", ...WITHDRAW])).toEqual({ kind: "allow" });
+    } finally {
+      process.stdout.write = write;
+    }
+    expect(written.join("")).toContain("Wave 2: T5 withdrawn; T3 no longer waits for it.");
     const graph = loaded(statePath);
     expect(graph.ok).toBe(true);
     if (!graph.ok) return;

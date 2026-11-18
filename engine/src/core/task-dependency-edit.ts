@@ -15,6 +15,7 @@
 import { isFlagToken } from "./cli-flag-token";
 import { isDistillTask } from "./distill-task";
 import type { DomainResult } from "./orchestration-contract";
+import { waitRelation } from "./dispatch-holds";
 import { cycleClosedBy } from "./task-dependencies";
 import { parseTaskId, type TaskId } from "./task-id";
 import { reopenableWave, waveReopeningRefusalMessage } from "./task-revalidation";
@@ -123,7 +124,8 @@ export function addDependency(graph: TaskGraph, request: AddDependencyRequest): 
       return refuse("illegal-dependency", `${id} is in later Wave ${dependency.wave}; ${task.id} can wait only for its own Wave or an earlier one`);
     }
     if (isDistillTask(dependency)) return refuse("illegal-dependency", `${id} is a Distill Task; it runs after every other Task of its Wave`);
-    const cycle = cycleClosedBy(tasks, task.id, id);
+    // The wait relation includes legacy Forward Fix holds, which dispatch enforces too.
+    const cycle = cycleClosedBy(waitRelation({ tasks, forward_fix_history: graph.forward_fix_history }), task.id, id);
     if (cycle !== null) return refuse("cycle", `${task.id} → ${id} would close the dependency cycle ${cycle.join(" → ")}`);
     tasks = tasks.map((candidate) =>
       candidate.id === task.id ? freeze({ ...candidate, depends_on: freeze([...candidate.depends_on, id]) }) : candidate);

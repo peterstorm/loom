@@ -32,6 +32,7 @@ import { isDistillTask } from "./distill-task";
 import type { DomainResult } from "./orchestration-contract";
 import { redThenGreenScope, taskRedThenGreenEra } from "./proof-obligations";
 import { parseReviewPath } from "./review-packet";
+import { waitRelation } from "./dispatch-holds";
 import { cycleClosedBy } from "./task-dependencies";
 import { isUntouchedJoinedTask, pendingAuthoredTask } from "./task-graph-population";
 import { parseTaskId, TASK_ID_PATTERN, type TaskId } from "./task-id";
@@ -43,7 +44,7 @@ import { serializeVerificationPolicy, type VerificationPolicy } from "./verifica
 import { newWaveGate, reconcileWaveBlock } from "./wave-gate-model";
 import { retireUnownedWaveReviewAuthority } from "./wave-gate-registration";
 import { parsePlanEditReason, taskAddedEdit, taskWithdrawnEdit } from "./wave-plan-edit";
-import type { Task, TaskAddedEdit, TaskGraph, TaskWithdrawnEdit } from "../types";
+import type { ForwardFixWithdrawal, Task, TaskAddedEdit, TaskGraph, TaskWithdrawnEdit } from "../types";
 
 /** The implementation agents an added Task may be dispatched to. */
 export const ADDED_TASK_AGENTS = Object.freeze(["code-implementer-agent", "frontend-agent", "security-agent"] as const);
@@ -82,6 +83,8 @@ export type AddTaskRefusal = Refusal<
   | "path-not-addable"
   | "unprovable-scope"
   | "coupled-set-split"
+  /** The request breaks an invariant its parser proves (a request built by hand): refused, never thrown. */
+  | "invalid-request"
 >;
 
 export type AddTask =
@@ -334,7 +337,8 @@ const sameList = (left: readonly string[], right: readonly string[]): boolean =>
  * The committed edit this request replays: a `task-added` edit, the latest
  * or an earlier one, that the request describes exactly, whose Task is still on the
  * roster exactly as it joined. A retry that arrives after a later edit is
- * still a replay.
+ * still a replay, even one that gave the Task an incoming edge: the recorded
+ * edit, not the Task's current `depends_on`, is what the request is compared to.
  */
 function replayedEdit(graph: TaskGraph, request: AddTaskRequest): TaskAddedEdit | undefined {
   return (graph.wave_plan_edits ?? []).flatMap((edit) => (edit.kind === "task-added" ? [edit] : [])).find((edit) => {
@@ -342,8 +346,7 @@ function replayedEdit(graph: TaskGraph, request: AddTaskRequest): TaskAddedEdit 
     return task !== undefined && isUntouchedJoinedTask(task) && edit.reason === request.reason &&
       sameList(edit.files, request.files) && sameList(edit.sealed ?? [], request.sealed) &&
       sameList(edit.dependsOn, request.dependsOn) && sameList(edit.dependents, request.dependents) &&
-      task.description === request.description && task.agent === request.agent &&
-      sameList(task.depends_on, request.dependsOn);
+      task.description === request.description && task.agent === request.agent;
   });
 }
 
@@ -379,9 +382,8 @@ function dependentRefusal(graph: TaskGraph, request: AddTaskRequest, wave: numbe
 
 /** The first path the new Task may not list, or null (`pathAdmissionRefusal`, shared with `rescope-task`). */
 function pathRefusal(graph: TaskGraph, request: AddTaskRequest, owner: Readonly<{ id: string; wave: number }>): DomainResult<never, AddTaskRefusal> | null {
-  const completed = completedWaves(graph);
   for (const path of request.files) {
-    const refusal = pathAdmissionRefusal(graph, owner, path, completed, request.sealed.includes(path),
+    const refusal = pathAdmissionRefusal(graph, owner, path, request.sealed.includes(path),
       { plain: "--file", sealed: "--sealed-file" });
     if (refusal !== null) return refuse("path-not-addable", refusal);
   }
@@ -402,6 +404,11 @@ export function addTask(graph: TaskGraph, request: AddTaskRequest): DomainResult
   if (!open.ok) return open;
   const { wave, abandonedRunId } = open.value;
   const taskId = nextTaskId(graph);
+  const edit = taskAddedEdit({
+    wave, taskId, files: request.files, sealed: request.sealed, dependsOn: request.dependsOn,
+    dependents: request.dependents, reason: request.reason, abandonedRunId,
+  });
+  if (!edit.ok) return refuse("invalid-request", edit.error);
   const refusal = dependencyRefusal(graph, request, wave) ?? dependentRefusal(graph, request, wave) ??
     pathRefusal(graph, request, { id: taskId, wave });
   if (refusal !== null) return refusal;
@@ -418,17 +425,12 @@ export function addTask(graph: TaskGraph, request: AddTaskRequest): DomainResult
   const task = addedTaskOf(retired, request, taskId, wave);
   let tasks: readonly Task[] = [...retired.tasks, task];
   for (const id of request.dependents) {
-    const cycle = cycleClosedBy(tasks, id, taskId);
+    // The wait relation includes legacy Forward Fix holds, which dispatch enforces too.
+    const cycle = cycleClosedBy(waitRelation({ tasks, forward_fix_history: retired.forward_fix_history }), id, taskId);
     if (cycle !== null) return refuse("cycle", `${id} → ${taskId} would close the dependency cycle ${cycle.join(" → ")}`);
     tasks = tasks.map((candidate) =>
       candidate.id === id ? freeze({ ...candidate, depends_on: freeze([...candidate.depends_on, taskId]) }) : candidate);
   }
-  const edit = taskAddedEdit({
-    wave, taskId, files: request.files, sealed: request.sealed, dependsOn: request.dependsOn,
-    dependents: request.dependents, reason: request.reason, abandonedRunId,
-  });
-  // Every input was proven above (parsed paths and ids, the reason); a refusal here is a broken invariant.
-  if (!edit.ok) throw new Error(`add-task built an invalid edit: ${edit.error}`);
   const roster = Object.freeze(tasks);
   return okWith(freeze({
     kind: "added" as const,
@@ -449,18 +451,25 @@ export function addTask(graph: TaskGraph, request: AddTaskRequest): DomainResult
 
 export type WithdrawTaskRequest = Readonly<{ taskId: TaskId; reason: string }>;
 
+/** What a withdrawal recorded: a `task-withdrawn` edit, or, for a legacy Forward Fix Task, its moved audit. */
+export type WithdrawalRecord =
+  | Readonly<{ kind: "task-withdrawn"; edit: TaskWithdrawnEdit }>
+  | Readonly<{ kind: "forward-fix-withdrawn"; withdrawal: ForwardFixWithdrawal }>;
+
 export type WithdrawTask =
-  /** The Task left the roster with every edge to it: persist `graph`, which appends `edit`. */
-  | Readonly<{ kind: "withdrawn"; graph: TaskGraph; edit: TaskWithdrawnEdit }>
+  /** The Task left the roster with every edge to it; `released` are the Tasks that waited for it. Persist `graph`. */
+  | Readonly<{ kind: "withdrawn"; graph: TaskGraph; wave: number; taskId: string; released: readonly string[]; record: WithdrawalRecord }>
   /** This exact withdrawal already committed: nothing to write. */
-  | Readonly<{ kind: "already-withdrawn"; edit: TaskWithdrawnEdit }>;
+  | Readonly<{ kind: "already-withdrawn"; wave: number; taskId: string }>;
 
 export type WithdrawTaskRefusal = Refusal<
   | OpenWaveRefusalKind
-  /** The named Task is no Task `add-task` appended to the active Wave. */
+  /** The named Task is no Task `add-task` (or the retired Forward Fix) appended to the active Wave. */
   | "not-an-added-task"
   /** The Task was already dispatched, so it has evidence to settle instead. */
   | "already-dispatched"
+  /** The request breaks an invariant its parser proves (a request built by hand): refused, never thrown. */
+  | "invalid-request"
 >;
 
 export const WITHDRAW_TASK_USAGE = "Usage: helper orchestration withdraw-task --task <task-id> --reason \"<why the Task is withdrawn>\"";
@@ -487,49 +496,89 @@ export function parseWithdrawTaskArgs(args: readonly string[]): DomainResult<Wit
     : fail(`--reason ${parsedReason.error}`);
 }
 
-/** The committed withdrawal this request replays: its Task is gone and the edit names the same reason. */
-const replayedWithdrawal = (graph: TaskGraph, request: WithdrawTaskRequest): TaskWithdrawnEdit | undefined =>
-  (graph.wave_plan_edits ?? []).flatMap((edit) => (edit.kind === "task-withdrawn" ? [edit] : [])).find((edit) =>
-    edit.taskId === request.taskId && edit.reason === request.reason && !graph.tasks.some(({ id }) => id === request.taskId));
+/**
+ * The committed withdrawal this request replays, as its Wave: the Task is off
+ * the roster and a `task-withdrawn` edit (or a legacy Forward Fix withdrawal)
+ * names it with the same reason.
+ */
+function replayedWithdrawal(graph: TaskGraph, request: WithdrawTaskRequest): number | undefined {
+  if (graph.tasks.some(({ id }) => id === request.taskId)) return undefined;
+  const edit = (graph.wave_plan_edits ?? []).find((candidate) =>
+    candidate.kind === "task-withdrawn" && candidate.taskId === request.taskId && candidate.reason === request.reason);
+  const legacy = (graph.forward_fix_withdrawals ?? []).find(({ audit, reason }) =>
+    audit.fixTaskId === request.taskId && reason === request.reason);
+  return edit?.wave ?? legacy?.audit.wave;
+}
+
+/** The roster without `taskId` and every edge to it, and the Tasks whose edge was dropped. */
+function rosterWithout(tasks: readonly Task[], taskId: string): Readonly<{ tasks: readonly Task[]; released: readonly string[] }> {
+  const released: string[] = [];
+  const remaining = tasks.flatMap((candidate) => {
+    if (candidate.id === taskId) return [];
+    if (!candidate.depends_on.includes(taskId)) return [candidate];
+    released.push(candidate.id);
+    return [freeze({ ...candidate, depends_on: freeze(candidate.depends_on.filter((id) => id !== taskId)) })];
+  });
+  return freeze({ tasks: Object.freeze(remaining), released: Object.freeze(released) });
+}
 
 /**
- * Withdraw a Task `add-task` appended to the active Wave and never
- * dispatched, or refuse with the exact precondition that failed. The Task
- * leaves the roster and every `depends_on` edge to it is dropped, which
- * releases the Tasks that waited for it. Replaying a committed withdrawal
- * changes nothing.
+ * Withdraw a Task appended to the active Wave after population and never
+ * dispatched, or refuse with the exact precondition that failed. The Task is
+ * one an earlier `task-added` edit appended, or the fix Task of a live legacy
+ * Forward Fix audit (ADR-0077), whose audit then moves whole into
+ * `forward_fix_withdrawals` as the retired command did. The Task leaves the
+ * roster and every edge to it is dropped, which releases the Tasks that waited
+ * for it. Replaying a committed withdrawal changes nothing.
  */
 export function withdrawTask(graph: TaskGraph, request: WithdrawTaskRequest): DomainResult<WithdrawTask, WithdrawTaskRefusal> {
   const replay = replayedWithdrawal(graph, request);
-  if (replay !== undefined) return okWith(freeze({ kind: "already-withdrawn" as const, edit: replay }));
+  if (replay !== undefined) return okWith(freeze({ kind: "already-withdrawn" as const, wave: replay, taskId: request.taskId }));
   const open = openWave(graph, "withdrawing a Task");
   if (!open.ok) return open;
   const { wave, abandonedRunId } = open.value;
   const added = (graph.wave_plan_edits ?? []).some((edit) => edit.kind === "task-added" && edit.taskId === request.taskId);
+  const audit = (graph.forward_fix_history ?? []).find(({ fixTaskId }) => fixTaskId === request.taskId);
   const task = graph.tasks.find(({ id }) => id === request.taskId);
-  if (!added || task === undefined || task.wave !== wave) {
-    return refuse("not-an-added-task", `${request.taskId} is not a Task add-task appended to the active Wave ${wave}`);
+  if ((!added && audit === undefined) || task === undefined || task.wave !== wave) {
+    return refuse("not-an-added-task", `${request.taskId} is not a Task appended to the active Wave ${wave} after population ` +
+      "(by add-task, or by the retired Forward Fix)");
   }
   if (!isUntouchedJoinedTask(task)) {
     return refuse("already-dispatched", `${request.taskId} was already dispatched; let it settle, or reopen it, instead of withdrawing it`);
   }
-  const edit = taskWithdrawnEdit({ wave, taskId: request.taskId, reason: request.reason, abandonedRunId });
-  // The id and reason were parsed above; a refusal here is a broken invariant.
-  if (!edit.ok) throw new Error(`withdraw-task built an invalid edit: ${edit.error}`);
   const retired = retireUnownedWaveReviewAuthority(graph, wave, abandonedRunId);
-  const tasks = Object.freeze(retired.tasks.flatMap((candidate) => {
-    if (candidate.id === request.taskId) return [];
-    return candidate.depends_on.includes(request.taskId)
-      ? [freeze({ ...candidate, depends_on: freeze(candidate.depends_on.filter((id) => id !== request.taskId)) })]
-      : [candidate];
-  }));
+  const { tasks, released: dropped } = rosterWithout(retired.tasks, request.taskId);
+  const gates = resetWaveGates(retired, wave, tasks);
+  if (audit !== undefined && !added) {
+    const withdrawal: ForwardFixWithdrawal = freeze({ schemaVersion: 1, kind: "forward-fix-withdrawn", audit, reason: request.reason });
+    return okWith(freeze({
+      kind: "withdrawn" as const,
+      wave,
+      taskId: request.taskId,
+      released: Object.freeze([...new Set([...audit.heldTaskIds, ...dropped])]),
+      record: freeze({ kind: "forward-fix-withdrawn" as const, withdrawal }),
+      graph: freeze({
+        ...retired,
+        tasks,
+        wave_gates: gates,
+        forward_fix_history: Object.freeze((graph.forward_fix_history ?? []).filter((entry) => entry !== audit)),
+        forward_fix_withdrawals: Object.freeze([...(graph.forward_fix_withdrawals ?? []), withdrawal]),
+      }),
+    }));
+  }
+  const edit = taskWithdrawnEdit({ wave, taskId: request.taskId, reason: request.reason, abandonedRunId });
+  if (!edit.ok) return refuse("invalid-request", edit.error);
   return okWith(freeze({
     kind: "withdrawn" as const,
-    edit: edit.value,
+    wave,
+    taskId: request.taskId,
+    released: dropped,
+    record: freeze({ kind: "task-withdrawn" as const, edit: edit.value }),
     graph: freeze({
       ...retired,
       tasks,
-      wave_gates: resetWaveGates(retired, wave, tasks),
+      wave_gates: gates,
       wave_plan_edits: Object.freeze([...(graph.wave_plan_edits ?? []), edit.value]),
     }),
   }));

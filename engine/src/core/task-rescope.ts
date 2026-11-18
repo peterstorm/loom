@@ -195,11 +195,11 @@ export function pathAdmissionRefusal(
   graph: TaskGraph,
   owner: Readonly<{ id: string; wave: number }>,
   path: string,
-  completedWaves: ReadonlySet<number>,
   namedSealed: boolean,
   flags: PathFlags,
 ): string | null {
   if (isProtectedVerificationPath(path)) return `${path} is a protected verification path; no Task lists it`;
+  const completedWaves = new Set((graph.wave_gate_history ?? []).map(({ wave }) => wave));
   let sealedBy: Task | undefined;
   for (const other of graph.tasks) {
     if (other.id === owner.id || !(other.file_list ?? []).includes(path)) continue;
@@ -311,7 +311,7 @@ export function rescopeTask(
   if (isDistillTask(task)) return refuse("distill-task", `${task.id} is a Distill Task; the engine derives its scope`);
   if (task.implementation_attestation === true) return refuse("attested", `${task.id} is armed for attestation; a re-scoped Task needs a fresh implementation, not an attestation`);
   for (const { path, sealed } of additions) {
-    const refusal = pathAdmissionRefusal(graph, task, path, completedWaves, sealed, RESCOPE_FLAGS);
+    const refusal = pathAdmissionRefusal(graph, task, path, sealed, RESCOPE_FLAGS);
     if (refusal !== null) return refuse("path-not-addable", refusal);
   }
   for (const path of removed) {

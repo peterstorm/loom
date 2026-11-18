@@ -896,10 +896,11 @@ export type SpecTraceAmendmentChange = Readonly<{
 }>;
 
 /**
- * One audited edit of a pending Task's plan in the active Wave or a later one
- * (`helper orchestration rescope-task`, loom#198 Cause 3). A union over edit
- * kinds: a Task's file list re-scoped, or dependency edges added to a Task
- * (`add-dependency`, ADR-0081).
+ * One audited edit of the Wave plan (loom#198 Cause 3, loom#199 Cause 2;
+ * ADR-0081, ADR-0084). A union over edit kinds: a pending Task's file list
+ * re-scoped (`rescope-task`), dependency edges added to a Task
+ * (`add-dependency`), a Task appended to the active Wave (`add-task`), or an
+ * added Task withdrawn (`withdraw-task`).
  */
 export type WavePlanEdit = TaskRescopedEdit | DependencyAddedEdit | TaskAddedEdit | TaskWithdrawnEdit;
 

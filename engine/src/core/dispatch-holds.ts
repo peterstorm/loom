@@ -46,13 +46,19 @@ export const implementationSettled = (task: Task, reserved: ReadonlySet<string>)
 /**
  * The Tasks `task` waits for: its `depends_on` edges, then the fix Task of
  * every legacy Forward Fix audit of its Wave that held it, without repeats.
+ * This is the one wait relation: dispatch holds on it, and the plan edits
+ * refuse a cycle in it (`waitRelation`).
  */
-function waitsFor(graph: DispatchHoldGraph, task: Task): readonly string[] {
+export function waitsFor(graph: DispatchHoldGraph, task: Task): readonly string[] {
   const fixes = (graph.forward_fix_history ?? [])
     .filter((audit) => audit.wave === task.wave && audit.heldTaskIds.some((id) => id === task.id))
     .map(({ fixTaskId }) => fixTaskId);
   return [...new Set([...task.depends_on, ...fixes])];
 }
+
+/** Every Task with the edges it waits on (`waitsFor`), for a cycle check over exactly what dispatch enforces. */
+export const waitRelation = (graph: DispatchHoldGraph): readonly Readonly<{ id: string; wave: number; depends_on: readonly string[] }>[] =>
+  graph.tasks.map((task) => Object.freeze({ id: task.id, wave: task.wave, depends_on: waitsFor(graph, task) }));
 
 /**
  * The Tasks of `task`'s own Wave it waits for that have not settled, in edge

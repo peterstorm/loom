@@ -33,18 +33,19 @@ import { i6RunnerManifest } from "../fixtures/i6-runner-manifest";
 import { implementationEscalatedLineage } from "../fixtures/implementation-escalation";
 import { awaitingRedContract } from "../fixtures/stop-check-plan-fixtures";
 import {
-  LEGACY_FORWARD_FIX_AUDIT,
+  distillPass as pass,
+  implemented,
+  legacyForwardFixAudit,
   legacyForwardFixGraph,
   sealedTask as completed,
   sealedWaveGraph as sealed,
   waveTask as task,
+  withTask,
 } from "../fixtures/sealed-wave";
 import {
   activeWaveGateFixture,
   completedWaveGateFixture,
   protectedGraphFixture,
-  satisfiedProof,
-  taskFixture,
 } from "../fixtures/task-lifecycle";
 
 const NOW = Date.parse("2026-11-18T09:00:00.000Z");
@@ -87,11 +88,17 @@ const offered = (window: ImplementationWindow): readonly string[] =>
   window.kind === "window" && window.recovery.kind === "spawn-wave-implementation"
     ? window.recovery.dispatches.map(({ taskId }) => taskId)
     : [];
-const loads = (graph: TaskGraph) => parseTaskGraph(JSON.parse(JSON.stringify(graph)));
-const implemented = (candidate: Task): Task =>
-  ({ ...candidate, status: "implemented", proof: satisfiedProof(candidate.file_list ?? []) }) as Task;
-const withTask = (graph: TaskGraph, id: string, change: (candidate: Task) => Task): TaskGraph =>
-  ({ ...graph, tasks: graph.tasks.map((candidate) => candidate.id === id ? change(candidate) : candidate) });
+/** `graph` as the State File JSON the loader reads. */
+const rawJson = (graph: TaskGraph): Record<string, unknown> => JSON.parse(JSON.stringify(graph)) as Record<string, unknown>;
+const loads = (graph: TaskGraph) => parseTaskGraph(rawJson(graph));
+/** `graph` after `add-dependency` with `args`, which must add an edge. */
+const dependencyAdded = (graph: TaskGraph, args: readonly string[]): TaskGraph => {
+  const parsed = parseAddDependencyArgs(args);
+  if (!parsed.ok) throw new Error(parsed.error);
+  const edited = addDependency(graph, parsed.value);
+  if (!edited.ok || edited.value.kind !== "added") throw new Error(`expected an added dependency: ${JSON.stringify(edited)}`);
+  return edited.value.graph;
+};
 
 describe("parseAddTaskArgs", () => {
   it("parses plain and sealed files in order, the edges, and the default agent and new-test policy", () => {
@@ -191,7 +198,7 @@ describe("addTask appends a Task to the active Wave", () => {
     const loaded = loads(after);
     expect(loaded.ok).toBe(true);
     if (loaded.ok) expect(loaded.value.wave_plan_edits).toEqual(after.wave_plan_edits);
-    const unaudited = parseTaskGraph({ ...JSON.parse(JSON.stringify(after)), wave_plan_edits: [] });
+    const unaudited = parseTaskGraph({ ...rawJson(after), wave_plan_edits: [] });
     expect(unaudited.ok).toBe(false);
   });
 
@@ -228,6 +235,20 @@ describe("addTask appends a Task to the active Wave", () => {
       "--sealed-file", "src/recompute.ts", "--file", "src/recompute.test.ts", "--description", "Lower the recompute peak", "--reason", "recompute breach",
     ]));
     expect(decided(second.graph)).toEqual({ kind: "already-added", edit: first.edit });
+  });
+
+  it("replays a retry that arrives after a later edit gave the Task an incoming edge", () => {
+    const first = added(sealed());
+    const edited = dependencyAdded(first.graph, ["--task", "T4", "--on", "T5", "--reason", "T4 also needs it"]);
+    const second = added(edited, parsedRequest(plain("--file", "src/new.ts", "--before", "T3")));
+    expect(byId(second.graph, "T3").depends_on).toEqual(["T5", "T6"]);
+    expect(decided(second.graph)).toEqual({ kind: "already-added", edit: first.edit });
+  });
+
+  it("refuses a hand-built request that breaks the parser's invariants instead of throwing", () => {
+    expect(refusal(sealed(), { ...request(), files: [] }).kind).toBe("invalid-request");
+    expect(refusal(sealed(), { ...request(), sealed: ["src/recompute.ts"] }).kind).toBe("invalid-request");
+    expect(refusal(sealed(), { ...request(), dependsOn: request().dependents }).kind).toBe("invalid-request");
   });
 
   it("refuses a changed request on its own grounds rather than replaying it", () => {
@@ -284,10 +305,6 @@ type RefusalRow = Readonly<{ label: string; graph: () => TaskGraph; args?: reado
 
 const servedFrozen = awaitingRedContract({
   id: "CT-1", contractTask: "T1", types: "src/serve.ts", files: [{ path: "tests/serve.acceptance.test.ts", anchors: ["AS-001"] }],
-});
-const pass = (id: string): Task => taskFixture({
-  id, description: "Distill pass for Wave 2", agent: "distill-agent", wave: 2, depends_on: [],
-  file_list: ["src/other.ts"], spec_anchors: [], spec_contributions: [], review_status: "pending",
 });
 const plain = (...args: string[]): readonly string[] => [...args, "--description", "d", "--reason", "r"];
 
@@ -380,13 +397,8 @@ describe("addTask refuses what would break the plan", () => {
   });
 
   it("refuses an edge that would close a dependency cycle, naming it", () => {
-    const edited = addDependency(sealed(), (() => {
-      const parsed = parseAddDependencyArgs(["--task", "T4", "--on", "T3", "--reason", "T4 reads T3's output"]);
-      if (!parsed.ok) throw new Error(parsed.error);
-      return parsed.value;
-    })());
-    if (!edited.ok || edited.value.kind !== "added") throw new Error("expected T4 → T3");
-    expect(refusal(edited.value.graph, parsedRequest(plain("--file", "src/new.ts", "--depends-on", "T4", "--before", "T3"))))
+    const edited = dependencyAdded(sealed(), ["--task", "T4", "--on", "T3", "--reason", "T4 reads T3's output"]);
+    expect(refusal(edited, parsedRequest(plain("--file", "src/new.ts", "--depends-on", "T4", "--before", "T3"))))
       .toEqual({ kind: "cycle", message: "T3 → T5 would close the dependency cycle T3 → T5 → T4 → T3" });
   });
 
@@ -400,7 +412,7 @@ describe("addTask refuses what would break the plan", () => {
 });
 
 describe("the State File proves added and withdrawn Tasks", () => {
-  const raw = (): Record<string, unknown> => JSON.parse(JSON.stringify(added(sealed()).graph)) as Record<string, unknown>;
+  const raw = (): Record<string, unknown> => rawJson(added(sealed()).graph);
   const editOf = (graph: Record<string, unknown>): Record<string, unknown> =>
     (graph.wave_plan_edits as Record<string, unknown>[])[0] ?? {};
 
@@ -465,10 +477,14 @@ describe("withdrawTask removes an added Task that was never dispatched", () => {
   };
 
   it("removes the Task and every edge to it, releasing the Tasks that waited, and the loader accepts the result", () => {
-    const { graph: after, edit } = withdrawn(withAdded());
+    const { graph: after, record, released } = withdrawn(withAdded());
     expect(after.tasks.map(({ id }) => id)).toEqual(["T1", "T2", "T3", "T4"]);
     expect(byId(after, "T3").depends_on).toEqual([]);
-    expect(edit).toEqual({ schemaVersion: 1, kind: "task-withdrawn", wave: 2, taskId: "T5", reason: "the fix belongs in T4", abandonedRunId: null });
+    expect(released).toEqual(["T3"]);
+    expect(record).toEqual({
+      kind: "task-withdrawn",
+      edit: { schemaVersion: 1, kind: "task-withdrawn", wave: 2, taskId: "T5", reason: "the fix belongs in T4", abandonedRunId: null },
+    });
     expect(dispatchHoldOf(after, new Set(), byId(after, "T3"))).toBeNull();
     expect(offered(classifyImplementationWindow(after, observed(), []))).toEqual(["T3", "T4"]);
     const loaded = loads(after);
@@ -477,11 +493,8 @@ describe("withdrawTask removes an added Task that was never dispatched", () => {
   });
 
   it("still loads when a later edit named the withdrawn Task", () => {
-    const parsed = parseAddDependencyArgs(["--task", "T4", "--on", "T5", "--reason", "T4 also needs it"]);
-    if (!parsed.ok) throw new Error(parsed.error);
-    const edited = addDependency(withAdded(), parsed.value);
-    if (!edited.ok || edited.value.kind !== "added") throw new Error("expected T4 → T5");
-    const { graph: after } = withdrawn(edited.value.graph);
+    const { graph: after, released } = withdrawn(dependencyAdded(withAdded(), ["--task", "T4", "--on", "T5", "--reason", "T4 also needs it"]));
+    expect(released).toEqual(["T3", "T4"]);
     expect(byId(after, "T4").depends_on).toEqual([]);
     expect(loads(after).ok).toBe(true);
   });
@@ -549,8 +562,8 @@ describe("withdrawTask removes an added Task that was never dispatched", () => {
         terminalOutcome: { kind: "terminal-abandoned", reason: "fix the text first", supersededBy: null },
       }),
     });
-    const { graph: after, edit } = withdrawn(abandoned);
-    expect(edit.abandonedRunId).toBe("run.wave-2");
+    const { graph: after, record } = withdrawn(abandoned);
+    expect(record.kind === "task-withdrawn" && record.edit.abandonedRunId).toBe("run.wave-2");
     const retired = retireUnownedWaveReviewAuthority(abandoned, 2, "run.wave-2");
     expect(after.active_wave_gate).toEqual(retired.active_wave_gate);
     expect(after.wave_review_epoch).toEqual(retired.wave_review_epoch);
@@ -574,7 +587,7 @@ describe("a Forward Fix an older State File carries", () => {
     const graph = protectedGraphFixture({
       ...sealed(),
       tasks: [completed("T2", ["src/serve.ts"]), fix, task("T3", 2, ["tests/budget.test.ts"])],
-      forward_fix_history: [{ ...LEGACY_FORWARD_FIX_AUDIT, fixTaskId: "T1", sealedPaths: ["src/serve.ts"] }] as unknown as TaskGraph["forward_fix_history"],
+      forward_fix_history: [legacyForwardFixAudit({ fixTaskId: "T1" })],
     });
     expect(dispatchHoldOf(graph, new Set(), byId(graph, "T3"))).toEqual({ kind: "dependency", blockers: [{ id: "T1", escalated: true }] });
   });
@@ -587,15 +600,63 @@ describe("a Forward Fix an older State File carries", () => {
     ["a sealed path no earlier Wave wrote", (audit) => ({ ...audit, sealedPaths: ["src/serve.test.ts"] }), "which no Task of a Wave before 2 wrote"],
     ["a wrong kind", (audit) => ({ ...audit, kind: "forward-fix-removed" }), "has invalid schema or kind"],
   ])("the parser still refuses %s", (_label, tamper, message) => {
-    const raw = JSON.parse(JSON.stringify(legacyForwardFixGraph())) as Record<string, unknown>;
-    const loaded = parseTaskGraph({ ...raw, forward_fix_history: [tamper({ ...LEGACY_FORWARD_FIX_AUDIT })] });
+    const loaded = parseTaskGraph({ ...rawJson(legacyForwardFixGraph()), forward_fix_history: [tamper({ ...legacyForwardFixAudit() })] });
+    expect(loaded.ok).toBe(false);
+    if (!loaded.ok) expect(loaded.error).toContain(message);
+  });
+
+  it("withdraws an untouched legacy fix Task, moving its audit whole and releasing its held Tasks", () => {
+    const parsed = parseWithdrawTaskArgs(["--task", "T5", "--reason", "its text fails the brief"]);
+    if (!parsed.ok) throw new Error(parsed.error);
+    const result = withdrawTask(legacyForwardFixGraph(), parsed.value);
+    if (!result.ok || result.value.kind !== "withdrawn") throw new Error(`expected a withdrawal: ${JSON.stringify(result)}`);
+    const { graph: after, released, record } = result.value;
+    expect(released).toEqual(["T3"]);
+    expect(record).toEqual({
+      kind: "forward-fix-withdrawn",
+      withdrawal: { schemaVersion: 1, kind: "forward-fix-withdrawn", audit: legacyForwardFixAudit(), reason: "its text fails the brief" },
+    });
+    expect(after.tasks.some(({ id }) => id === "T5")).toBe(false);
+    expect(after.forward_fix_history).toEqual([]);
+    expect(dispatchHoldOf(after, new Set(), byId(after, "T3"))).toBeNull();
+    expect(loads(after).ok).toBe(true);
+    const replay = withdrawTask(after, parsed.value);
+    expect(replay.ok && replay.value.kind).toBe("already-withdrawn");
+    expect(added(after).task.id).toBe("T6");
+  });
+
+  it("refuses an edge that would close a cycle through a legacy hold, in add-task and add-dependency alike", () => {
+    // Legacy: T3 waits for fix Task T5. T5 → new → T3 would close T3 → T5 → new → T3.
+    expect(refusal(legacyForwardFixGraph(), parsedRequest(plain("--file", "src/new.ts", "--depends-on", "T3", "--before", "T5"))).kind)
+      .toBe("cycle");
+    const parsed = parseAddDependencyArgs(["--task", "T5", "--on", "T3", "--reason", "would wait on its own judge"]);
+    if (!parsed.ok) throw new Error(parsed.error);
+    const result = addDependency(legacyForwardFixGraph(), parsed.value);
+    expect(result.ok ? result.value.kind : result.error.kind).toBe("cycle");
+  });
+
+  it.each<[string, (raw: Record<string, unknown>, withdrawal: Record<string, unknown>) => Record<string, unknown>, string]>([
+    ["a withdrawn fix Task still on the roster", (raw, withdrawal) => ({
+      ...raw, tasks: [...(raw.tasks as unknown[]), JSON.parse(JSON.stringify(task("T5", 2, ["src/serve.ts"])))], forward_fix_withdrawals: [withdrawal],
+    }), "is still on the roster"],
+    ["one fix Task withdrawn twice", (raw, withdrawal) => ({ ...raw, forward_fix_withdrawals: [withdrawal, withdrawal] }), "withdraws fix Task T5 twice"],
+    ["a wrong kind", (raw, withdrawal) => ({ ...raw, forward_fix_withdrawals: [{ ...withdrawal, kind: "forward-fix-added" }] }), "has invalid schema or kind"],
+    ["a malformed audit", (raw, withdrawal) => ({
+      ...raw, forward_fix_withdrawals: [{ ...withdrawal, audit: { ...(withdrawal.audit as Record<string, unknown>), sealedPaths: [] } }],
+    }), "audit.sealedPaths must be a non-empty array"],
+    ["a blank reason", (raw, withdrawal) => ({ ...raw, forward_fix_withdrawals: [{ ...withdrawal, reason: "  " }] }), "reason must be a trimmed non-blank string"],
+    ["an unknown field", (raw, withdrawal) => ({ ...raw, forward_fix_withdrawals: [{ ...withdrawal, extra: true }] }), "unknown field(s): extra"],
+    ["a non-array", (raw) => ({ ...raw, forward_fix_withdrawals: {} }), "forward_fix_withdrawals must be an array"],
+  ])("the parser still refuses a legacy withdrawal with %s", (_label, tamper, message) => {
+    const withdrawal = { schemaVersion: 1, kind: "forward-fix-withdrawn", audit: { ...legacyForwardFixAudit() }, reason: "wrong files" };
+    const loaded = parseTaskGraph(tamper(rawJson(sealed()), withdrawal));
     expect(loaded.ok).toBe(false);
     if (!loaded.ok) expect(loaded.error).toContain(message);
   });
 
   it("never re-mints a Forward Fix id the retired withdrawal removed", () => {
     const graph = sealed({
-      forward_fix_withdrawals: [{ schemaVersion: 1, kind: "forward-fix-withdrawn", audit: LEGACY_FORWARD_FIX_AUDIT, reason: "wrong files" }] as unknown as TaskGraph["forward_fix_withdrawals"],
+      forward_fix_withdrawals: [{ schemaVersion: 1, kind: "forward-fix-withdrawn", audit: legacyForwardFixAudit(), reason: "wrong files" }],
     });
     expect(loads(graph).ok).toBe(true);
     expect(added(graph).task.id).toBe("T6");

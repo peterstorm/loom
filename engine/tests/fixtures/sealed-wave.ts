@@ -7,7 +7,9 @@
  * `add-forward-fix` wrote: fix Task T5 holding T3.
  */
 import { newWaveGate } from "../../src/core/wave-gate-model";
-import type { Task, TaskGraph } from "../../src/types";
+import { nonEmpty } from "../../src/core/orchestration-contract";
+import { parseTaskId, type TaskId } from "../../src/core/task-id";
+import type { ForwardFixAudit, Task, TaskGraph } from "../../src/types";
 import { semanticAttemptReceipt } from "./implementation-settlement";
 import { completedWaveGateFixture, protectedGraphFixture, satisfiedProof, taskFixture } from "./task-lifecycle";
 
@@ -56,16 +58,46 @@ export function sealedWaveGraph(overrides: Partial<TaskGraph> = {}): TaskGraph {
   });
 }
 
-/** The audit the retired `add-forward-fix` wrote for fix Task T5, holding T3, as State File JSON. */
-export const LEGACY_FORWARD_FIX_AUDIT = Object.freeze({
+/** A Task id a fixture names, parsed. */
+const id = (raw: string): TaskId => {
+  const parsed = parseTaskId(raw);
+  if (!parsed.ok) throw new Error(`fixture Task id ${raw} is invalid`);
+  return parsed.value;
+};
+
+/** A non-empty list a fixture names. */
+const some = <T>(values: readonly T[]): NonNullable<ReturnType<typeof nonEmpty<T>>> => {
+  const list = nonEmpty(values);
+  if (list === null) throw new Error("fixture list is empty");
+  return list;
+};
+
+/** An audit the retired `add-forward-fix` wrote: by default fix Task T5 holding T3 for src/serve.ts. */
+export const legacyForwardFixAudit = (
+  over: Readonly<{ fixTaskId?: string; heldTaskIds?: readonly string[]; sealedPaths?: readonly string[] }> = {},
+): ForwardFixAudit => Object.freeze({
   schemaVersion: 1,
   kind: "forward-fix-added",
   wave: 2,
-  fixTaskId: "T5",
-  heldTaskIds: ["T3"],
-  sealedPaths: ["src/serve.ts"],
+  fixTaskId: id(over.fixTaskId ?? "T5"),
+  heldTaskIds: some((over.heldTaskIds ?? ["T3"]).map(id)),
+  sealedPaths: some(over.sealedPaths ?? ["src/serve.ts"]),
   reason: "T3's budget test fails on src/serve.ts",
   abandonedRunId: null,
+});
+
+/** `candidate` settled: implemented with a satisfied proof of its file list. */
+export const implemented = (candidate: Task): Task =>
+  ({ ...candidate, status: "implemented", proof: satisfiedProof(candidate.file_list ?? []) }) as Task;
+
+/** `graph` with Task `taskId` replaced by `change` of it. */
+export const withTask = (graph: TaskGraph, taskId: string, change: (candidate: Task) => Task): TaskGraph =>
+  ({ ...graph, tasks: graph.tasks.map((candidate) => candidate.id === taskId ? change(candidate) : candidate) });
+
+/** A Distill Task of Wave 2. */
+export const distillPass = (taskId: string): Task => taskFixture({
+  id: taskId, description: "Distill pass for Wave 2", agent: "distill-agent", wave: 2, depends_on: [],
+  file_list: ["src/other.ts"], spec_anchors: [], spec_contributions: [], review_status: "pending",
 });
 
 /** The scenario as an older State File carries it: fix Task T5 on the roster and its audit holding T3. */
@@ -74,7 +106,7 @@ export function legacyForwardFixGraph(overrides: Partial<TaskGraph> = {}): TaskG
   return protectedGraphFixture({
     ...graph,
     tasks: [...graph.tasks, waveTask("T5", 2, ["src/serve.ts", "src/serve.test.ts"])],
-    forward_fix_history: [LEGACY_FORWARD_FIX_AUDIT] as unknown as TaskGraph["forward_fix_history"],
+    forward_fix_history: [legacyForwardFixAudit()],
     ...overrides,
   });
 }

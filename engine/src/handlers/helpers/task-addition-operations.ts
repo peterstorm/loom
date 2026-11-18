@@ -109,10 +109,12 @@ const WITHDRAW_TASK: RosterCommand<WithdrawTaskRequest, WithdrawTask> = {
   decide: withdrawTask,
   written: (outcome) => (outcome.kind === "withdrawn" ? outcome.graph : null),
   report: (outcome) => {
-    const { wave, taskId } = outcome.edit;
-    return outcome.kind === "already-withdrawn"
-      ? `Wave ${wave}: ${taskId} already withdrawn; nothing changed.\n`
-      : `Wave ${wave}: ${taskId} withdrawn; no Task waits for it any more.\n`;
+    const { wave, taskId } = outcome;
+    if (outcome.kind === "already-withdrawn") return `Wave ${wave}: ${taskId} already withdrawn; nothing changed.\n`;
+    const released = outcome.released.length === 0
+      ? "no Task waited for it."
+      : `${outcome.released.join(", ")} no longer wait${outcome.released.length === 1 ? "s" : ""} for it.`;
+    return `Wave ${wave}: ${taskId} withdrawn; ${released}\n`;
   },
 };
 

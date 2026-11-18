@@ -92,6 +92,24 @@ describe("retroFacts", () => {
     expect(waveFriction(withDistill, 2).tasks.map(({ taskId }) => taskId)).not.toContain("T9");
   });
 
+  it("marks a Task add-task appended as addedMidRun, and counts a run its task-added and task-withdrawn edits name once", () => {
+    const base = graph();
+    const runId = value(parseOrchestrationRunId("w2-gate-1"));
+    const state: TaskGraph = {
+      ...base,
+      wave_plan_edits: [
+        { schemaVersion: 1, kind: "task-added", wave: 2, taskId: "T2", files: ["src/t2.ts"], dependsOn: [], dependents: [], reason: "missed", abandonedRunId: runId },
+        { schemaVersion: 1, kind: "task-added", wave: 2, taskId: "T7", files: ["src/t7.ts"], dependsOn: [], dependents: [], reason: "missed", abandonedRunId: null },
+        { schemaVersion: 1, kind: "task-withdrawn", wave: 2, taskId: "T7", reason: "wrong files", abandonedRunId: runId },
+      ],
+    };
+    const digest = waveFriction(state, 2);
+    expect(digest.gateRuns).toEqual({ completed: 0, retired: 0, abandoned: 1 });
+    expect(digest.planEdits).toBe(3);
+    expect(digest.tasks.find(({ taskId }) => taskId === "T2")).toMatchObject({ addedMidRun: true, heldByForwardFixes: [], planEdits: 1 });
+    expect(waveFriction(base, 2).tasks.find(({ taskId }) => taskId === "T2")).toBeUndefined();
+  });
+
   it("sums every Wave's escalations to the run's escalation receipts (property)", () => {
     // Only T1's fixture lineage escalates; the property varies whether it does and how many clean Tasks sit beside it.
     fc.assert(fc.property(fc.boolean(), fc.integer({ min: 0, max: 5 }), (escalates, clean) => {
