@@ -3,11 +3,12 @@
 A comprehensive, mechanism-level map of Loom: every feature, every guardrail, every
 determinism device — why it exists, why it works, and where it honestly does not.
 
-Written from a full source scan of revision **a28b6d6a** (main, 2026-11-15), updated
-through **36302d87** (#201, 2026-11-17): the engine-run test-evidence mechanism (§7, §4.6)
-landed after the scan and is documented from its own diff. Every other claim below was
-checked against the code at a28b6d6a; claims that come from documentation rather than code
-are marked *(docs)*. Vocabulary follows [CONTEXT.md](../CONTEXT.md).
+Written from a full source scan of revision **a28b6d6a** (main, 2026-11-15), updated through
+**deb8c369** (2026-11-18): the #201–#223 wave (engine-run test evidence, the loom#198/#199
+Cause campaign, the #213 reviewer-protocol fixes) was read from its diffs and is folded in —
+mechanisms, catalog rows, residuals and appendices. Every claim was checked against the code
+at its revision; claims resting on documentation rather than code are marked *(docs)*.
+Vocabulary follows [CONTEXT.md](../CONTEXT.md).
 
 ---
 
@@ -46,20 +47,20 @@ Two persistence domains carry all authority:
 | Directory | Contents | Size |
 |---|---|---|
 | `agents/` | 31 Agent definitions (persona + model profile + preloaded Skill) | 31 files |
-| `skills/` | 13 Skills (architecture-tech-lead, code-implementer, deepen, distill, grill, java/ts-test-engineer, lint-project, nextjs-frontend-design, review-and-fix, security-audit, security-expert, vercel-react-best-practices) | 103 files |
+| `skills/` | 14 Skills (architecture-tech-lead, code-implementer, deepen, distill, grill, java/ts-test-engineer, lint-project, nextjs-frontend-design, review-and-fix, retro, security-audit, security-expert, ts-test-engineer, vercel-react-best-practices) | 103 files |
 | `commands/` | 10 slash-command runbooks + 10 phase prompt templates | 21 files |
 | `rules/` | architecture.md (language-neutral) + java/rust/typescript-patterns.md + property-testing.md | 947 lines |
 | `references/` | spec/plan/ADR templates, design-lens & refutation-lens catalogs, reviewer-wire docs, 13 vendored security lenses, per-command runbooks | 39 files |
 | `lint-rules/` | 13 shipped regex rules + schema README | 14 files |
 | `machines/` | 3 Guarded Skill Machines (code-implementer, distill, security-hunter) + ledger description | 4 files |
 | `hooks/` | hooks.json (Claude Code bindings) + 20 shell shims | 21 files |
-| `engine/` | The engine: 563 src files / 163k lines TS + 878 test files / 253k lines | — |
+| `engine/` | The engine: 603 src files / 170.4k lines TS + 923 test files / 260k lines | — |
 | `pi/` | Pi adapter: 40 modules / 13.8k lines | — |
 | `probes/` | Frozen feasibility evidence (emission readiness barrier, emission qualification) | 54 files |
 | `scripts/` | sync-pi-agents, stamp-wire-contract, smoke suites, security sandbox, calibration runner | 14 files |
 | `calibration/` | Model-calibration corpus + grammar-constrained-decoding pilot (preregistrations, windows, blinded assessments) | 85 files |
 | `artifacts/tests/` | Shell-level integration suites (hook gaps, task-graph validation, smoke-deterministic-core) | 7 scripts |
-| `docs/` | 107 docs incl. **80 ADRs** (index test-enforced) | — |
+| `docs/` | 107 docs incl. **90 ADRs** (index test-enforced) | — |
 
 ---
 
@@ -132,6 +133,16 @@ Fail-closed on crash.
   before any chmod/lock/write. Skew refuses with a `/reload` diagnostic (status stays
   available). *Why:* prevents a fresh CLI writer from emitting state a stale
   in-memory extension cannot parse.
+- **TaskGraph engine-revision pin (#205)** — the failure the Runtime Revision could not
+  catch: the plugin path points at a checkout, and another session switching that checkout
+  mid-orchestration made hooks run older engine code than the CLI, judging one TaskGraph by
+  two sets of rules. Population now pins the graph to the running engine's content-addressed
+  revision (`engine/src/core/engine-revision-pin.ts`; a project hosting the engine itself is
+  recorded self-hosted, since every Wave changes its engine). The StateManager write boundary refuses to persist
+  a graph pinned to any other revision, naming both. `helper orchestration
+  adopt-engine-revision --reason` is the audited, quiescent, idempotent move that gives a
+  pre-pin graph its first pin (append-only adoption chain, parser-checked); re-population
+  keeps an existing pin — only adoption moves a graph between engines.
 
 ### 4.2 The spawn gates (PreToolUse on `Task|Agent|subagent`)
 
@@ -153,6 +164,14 @@ themselves, because hooks on one matcher see only the original input. *Why:* the
 parent model never authors the Task's prompt — the engine does, from protected state,
 so scope and duties cannot drift between what was authorized and what the child reads.
 
+**Phase placement by identity (#223).** The phase gate's `detectPhase` used to fall back
+to regexes over the spawn prompt for any agent type it did not know — a general-purpose
+agent whose brief happened to say "read rules/architecture.md" was refused mid-execute as
+an "invalid phase transition", and the only workaround was rewording the brief to dodge
+the gate. It now places an agent by its identity (the agent type and the session's own
+phase record), never by prompt text; unknown agent types are ungated phase-wise instead
+of guessed at.
+
 ### 4.3 The edit gates (PreToolUse on `Edit|Write|MultiEdit`)
 
 - **`block-direct-edits`** — during a run the orchestrating session cannot edit files
@@ -161,7 +180,17 @@ so scope and duties cannot drift between what was authorized and what the child 
   retriable block, refused ⇒ hard block). Scoped to the Orchestrated Repository
   (ADR-0046): writes entirely outside the root owning the live graph pass. *Why:*
   unattributed parent edits would make the evidence ledger's attribution — and hence
-  every proof — meaningless.
+  every proof — meaningless. Since #218 (ADR-0085, "attestation is enforced, not
+  instructed"), the same gate also refuses the Edit/Write of a Task **armed for
+  attestation** (`core/attestation-writes.ts`): once a write is admitted, the gate asks
+  the calling implementation Agent's Task write mode and blocks the armed Task's edit,
+  naming the Task and telling the Agent to report instead of edit; a Task whose mode
+  cannot be observed fails closed (Claude Code reads the Task from the caller's bound
+  attempt and the session's TaskGraph; Pi uses what the child's write grant was bound
+  to). Drift detection remains the backstop. *Why:* an attesting Task's next attempt
+  verifies and changes nothing — that used to be a brief instruction, agents edited
+  anyway, and each edit surfaced afterwards as terminal drift; now the guard refuses it
+  up front.
 - **`enforce-phase-tools`** — the Guarded Skill Machine gate: deny-by-default within
   the machine's declared `enforcedTools`, judged against the **caller's own** machine
   (see 4.5 attribution).
@@ -171,18 +200,42 @@ so scope and duties cannot drift between what was authorized and what the child 
 
 **`core/guard-state-file.ts`** — deny-by-default protection of the State File, the
 subagent evidence/binding files, and machine definitions against Bash writers.
-Design, verified in source:
+Since #219 its question is **"what does this line write?", not "what does it
+mention?"** — a line naming guarded state was once judged by whether each segment's
+head *looked* read-only, which a segment that rebound a command name could defeat
+(`cat(){ rm "$1"; }; cat <state>`, `alias cat=rm`, `PATH=…`, `LD_PRELOAD=…` all rewrote
+the State File through the old contract). Design, verified in source:
 
-- A line that never references a guarded path passes untouched. A line that does is
-  judged as a **pipe-chain**: segments split quote-aware on `&& || ; &` newline, with
-  `|`-linked segments in ONE chain (a pipe carries data — a guarded path echoed into
-  `xargs` becomes a write argument two segments later, so the chain is one trust
-  unit).
-- Every in-scope segment must be a **whitelisted helper** (16 helpers, matched
-  token-by-token at the segment head; a helper vouches only for its own segment and
-  never for protected-dir writes) or a **read-only command** (`READ_ONLY_STATE_COMMANDS`
-  — heads that cannot write a file under any flag) with no output redirect except the
-  exact `2>/dev/null` (fd-dups `2>&1`, `>&2`, `>&-` excluded quote-aware).
+- A line that writes nothing it could name as guarded state passes untouched, whatever
+  it mentions. A line that can is judged as a **pipe-chain**: segments split quote-aware
+  on `&& || ; &` newline, with `|`-linked segments in ONE chain (a pipe carries data — a
+  guarded path echoed into `xargs` becomes a write argument two segments later, so the
+  chain is one trust unit).
+- **Rebinding is the gate, not the exception** (`commandNamesRebound` in
+  `shell-command-head.ts`, one rule both Bash guards apply): a segment whose command is
+  rebound — a function definition, alias, hash, enable, source, trap, mapfile, an eval
+  of runtime text (followed into its literal text), or a `PATH`/`BASH_CMDS`/`BASH_ALIASES`
+  /`LD_*`/`DYLD_*` assignment — blocks a guarded line outright; the subagent authority
+  guard trusts no head on it. Every segment is judged by the command it actually runs,
+  as `analyzeCommandHead` resolves it — the review round that found literal-eval,
+  backslash-, quote- and case-arm-hidden rebinders missed by a separator-only matcher
+  was closed by deriving the judgment from the same resolution the head analyzer uses,
+  not from text position.
+- Admissions that write nothing (whatever they mention): **read-only git/gh** (#206 —
+  `isReadOnlySubcommandInvocation` admits exactly `git`/`gh` with no environment prefix
+  per the audited classifiers `read-only-git.ts` and `read-only-gh.ts`: listed verb
+  tables that write no local file; no alias, extension, checkout or download),
+  **sort/uniq/find and the text-filter/checksum family without their writing options**
+  (`read-only-filters.ts`; `option-words.ts` shared so the classifiers cannot drift),
+  reserved words around a command (`do cat "$f"`, `if grep …; then`), bindings of names
+  the shell does not read itself (`NAME=value`, `for`, `read` — a binding line is judged
+  whole, so `$NAME` cannot carry a guarded path into a chain that never names it), and a
+  read's redirect to a file whose ONE static, lexically-normalized spelling names no
+  guarded state (runtime, glob, brace, `~` targets, `<>`, `>&file` and relative targets
+  on a `cd` line stay blocked).
+- A **whitelisted helper** (17 helpers, matched token-by-token at the segment head;
+  a helper vouches only for its own segment and never for protected-dir writes) passes;
+  awk, sed, perl, xxd and base64 stay blocked (their programs or options write).
 - Pattern tests run against a **quote-collapsed view** (`.cl'aude'/state/active_'task_graph'.json`
   still names the file) — collapse only errs fail-closed.
 - **Substitutions** (`$(…)`, backticks, `<(…)`, `>(…)`) are extracted and recursively
@@ -193,8 +246,16 @@ Design, verified in source:
   with live substitutions. Prose in a quoted heredoc is never judged as a command.
 - Everything unparseable or unbounded fails closed — including writers nobody
   enumerated (patch, rsync, shred, `git checkout --`), wrappers (`xargs`,
-  `env`, `timeout`), and bare `VAR=<state-path>` bindings (the round-13
-  indirection seed).
+  `env`, `timeout`), and the indirection seeds of the earlier rounds (bare
+  `VAR=<state-path>` where the shell reads the name itself).
+- **One owner of engine path classes (#204).** #192/#196 were one bug in two observers
+  that each kept their own engine-path list, and a third list had already drifted
+  (remediation excluded Claude Code's state/review directories but not Pi's — a Pi
+  remediation could stage Loom evidence). `core/engine-owned-paths.ts` now defines every
+  path class the engine writes or protects and classifies a path
+  (`engineOwnedPathClass`, `isEngineEvidencePath`); task scope, the workspace digest,
+  defect accounting, remediation, config, populate and the manifest helpers all read it.
+  *Why:* a second site for "which paths are the engine's" was the drift that shipped.
 
 **The shell grammar — one walker per concern, shared by every guard.** This is the
 single most important structural decision in the guard layer. Rounds 15–18 suffered
@@ -314,6 +375,36 @@ security-hunter). Key mechanics:
 - **The completion suite**: the Wave Gate's frozen check bundle (acceptance runner,
   affected runner, owner verification, …) — everything enters one **suite digest**, so
   receipt reuse, workspace binding, and replay are uniform for every check.
+- **Population refuses unprovable rosters (#202, Cause 3a).** Graph invariants that used
+  to surface only at settlement or a Wave Gate are checked at population: a Task owing
+  red-then-green whose file list holds no file the frozen classification calls a test
+  file (it could only ever fail no-test-files); a Task owing red-then-green under a
+  manifest with no affectedRunner (no engine run could prove it); a completable
+  Requirement no Task names in spec_anchors (every Wave Gate's spec-check would report
+  it ownerless). Runner presets (`core/runner-presets.ts`) give known runners as
+  `affectedRunner` presets at manifest time.
+- **`orchestration rescope-task` (#203, Cause 3b).** A pending Task whose file list cannot
+  satisfy its policy is repaired in place instead of re-populating every Task: pure
+  decision under population's own file-list rules (same-Wave ownership, sealed paths,
+  protected paths, frozen contract paths, export bindings, the I6 test file), Proof
+  re-derived, attempt baseline cleared, idempotent; a population-baseline Task gains the
+  added files as Git held them at its start SHA.
+- **Regression attribution (ADR-0080, #210, Cause 1).** A trusted failing run no longer
+  fails the settling Task when every failing file belongs to another not-yet-implemented
+  Task of the same Wave, the run recorded per-file results, and at least one test outside
+  those files ran and passed (`core/regression-attribution.ts`); the evidence label names
+  each excused file and owner. A later FileWrite still demotes an attributed pass. *Why:*
+  parallel Waves share test files mid-flight; failing a Task for a sibling's in-progress
+  file was a false block the panel kept having to refute.
+- **Roster liveness (#211/#207).** A Claude Code subagent that dies on an API error never
+  fires SubagentStop, so its `.active` roster entry stayed forever and blocked
+  adopt-engine-revision, reopen-task, rescope-task and sole-agent attribution until
+  removed by hand. `core/roster-liveness.ts` judges a typed TranscriptObservation:
+  never-started (no transcript past a grace period — #207) or aborted (last transcript
+  record is the API-error record and the transcript has gone quiet), so a dead entry is
+  dead by evidence, and a retried agent that writes again is alive. #207 also fixed the
+  CLI exiting before pipe output drained (`utils/exit-after-flush.ts`: an immediate exit
+  delivered 128 KiB of 1 MiB under a paused reader) — set the code, let the process end.
 - **Settlement**: the engine's single decision on one piece of submitted work, in one
   atomic transition. Late or duplicate evidence settles nothing.
 - **Engine-run test evidence (loom#198 Cause 1, #201)** — the newest tier, which moves the
@@ -368,7 +459,20 @@ security-hunter). Key mechanics:
 - **Wire Contract**: the exact machine-readable output a reviewer must emit, fixed by
   protocol version, generated and **stamped** into reviewer definitions
   (`scripts/stamp-wire-contract.ts`) — never hand-edited. Versioned (ADR-0009); runs
-  started under an older protocol finish under it.
+  started under an older protocol finish under it. **Protocol v4 (#214, ADR-0084)**:
+  a Wave Gate registered from now on issues a payload of `{schemaVersion: 4, kind:
+  "wave-review", prior_findings, findings}` — the engine binds the Review Packet ID
+  and Review Generation from the issued subject, so a mistyped hash can no longer
+  exhaust a final attempt; a payload still carrying packetId or generation is refused,
+  naming the v4 envelope. Standalone types admit v2 only; v2 bytes are unchanged.
+- **Restart carry (ADR-0089, #222, Cause 1b).** After a restart of an exhausted Wave
+  Gate, the replacement run issues only spec-check and the exhausted reviewer slots;
+  accepted reviewer slots carry by reference (original slot, request and context
+  identity plus `carried_from` provenance, never re-minted), and a Task whose whole
+  roster was accepted is not reissued. Carry is admissible only under the same reviewer
+  protocol, Review Generation, prior Finding IDs, roster and workspace scope/head —
+  otherwise the Task resets as before. The carry plan is decided once under the restart
+  lock (`core/wave-review-carry.ts`, pure) and recorded in protected state.
 - **Standalone read coverage (ADR-0022)**: a standalone reviewer is admitted only
   after the engine observed it read the whole frozen diff. Coverage is **per-attempt**
   and engine-verified; **retries reset coverage to zero** and unread pages are always
@@ -514,7 +618,7 @@ killed" — both engine-observed.
 3. `StateManager` lock + **stage-temp-then-rename** writes through an anchored parent
    capability (retained parent descriptor on Linux; `O_NOFOLLOW_ANY`-proven real path
    on darwin);
-4. narrow hook/helper ownership of mutations (the 16 whitelisted helpers, each vouching
+4. narrow hook/helper ownership of mutations (the 17 whitelisted helpers, each vouching
    only for its own segment); the lock re-checks Runtime Revision immediately before
    any chmod/lock/write.
 
@@ -620,6 +724,57 @@ lifecycles, pipelines, invariants **with ownership**, contracts), and specs
 parsers. `plain-record.ts` is the shared exact-parse kernel for untrusted JSON wire
 input. Proven non-empty lists (`nonEmptyOf`) replace every `as NonEmpty` cast.
 
+### 4.17 Active-run mutation surfaces (the #212/#203/#220/#221/#215 wave)
+
+A live TaskGraph used to be frozen against repair: a wrong file list, a missing dependency,
+a drifting spec or plan could only be suffered until the Wave ended. The campaign gave the
+operator **audited mutation operations** instead — each one a pure decision core, an audit
+record, and a helper:
+
+- **Audited active-Wave plan edits (ADR-0081, #212).** Same-Wave dependencies are now
+  satisfiable: a `dependency` dispatch hold withholds a Task until its same-Wave
+  dependencies settle (`core/task-dependency-edit.ts` shares the hold rule with status,
+  registration and the brief). `helper orchestration add-dependency --task --on --reason`
+  records a `dependency-added` WavePlanEdit; a cycle is refused with the cycle named; the
+  State File admits a same-Wave edge only when an audit records it. All plan edits
+  accumulate in the graph's `wave_plan_edits` audit (`core/wave-plan-edit.ts`).
+- **Coupled file sets (ADR-0082, #212).** A package manifest and the lockfiles beside it
+  belong to one Task (`core/coupled-file-sets.ts`); population, rescope-task and add-task
+  refuse a split — a Task that edits a manifest without its lockfile can
+  never produce coherent evidence.
+- **Task addition/withdrawal through plan edits (ADR-0086, #217/#212).** Forward Fix is
+  retired: `helper orchestration add-task` appends a Task to the active Wave as a
+  `task-added` plan edit (`core/task-addition.ts` — sealed paths named with
+  `--sealed-file`, `--depends-on` edges, `--before` makes pending Wave Tasks wait for
+  it; `withdraw-task` removes a never-dispatched added Task with every edge). No held
+  Task has to fail first, and a Task the plan missed needs no sealed path; a cycle is
+  refused at write time. The forward-fix dispatch hold is gone — an older State File's
+  forward-fix audit reads as its held Tasks depending on the fix Task, so a paused run
+  resumes on this engine without a migration; one mechanism instead of two.
+- **Spec amendment (ADR-0087, #220).** `helper amend-spec --from <proposed> --reason`
+  changes the specification's text while the run is live: it records a spec-amended audit
+  (both Spec Index observations, rewritten/added/withdrawn ids, the completed claims owed
+  a re-judgement), re-anchors open claims to the new text, retires the Wave's review
+  authority and spec-check, then writes the new bytes. Withdrawing an id an open Task
+  still claims is refused; a rewritten completed claim is re-judged by the next Wave
+  Gate's spec-check (`core/spec-rejudgement.ts`); a crash after the commit is finished by
+  re-running the command.
+- **Runtime seams (ADR-0088, #221, Cause 5).** A contract may declare **Runtime seams:** —
+  the production symbols a request passes through (a host's checkpoint encoder, a response
+  serializer). The contract persists them; the Acceptance Freeze is refused while any
+  acceptance file does not reference a declared seam; plan alignment reports SEAM-N gaps
+  for a route whose contract declares no seams or whose harness bypasses them, and
+  spec-check reports a bypassing harness as HIGH. *Why:* an acceptance test that green-lights
+  a path the production harness never takes is a tested lie.
+- **Retrospectives (ADR-0083, #215, #200).** Every Wave's friction is recorded as facts,
+  not narrative: `core/retro-facts.ts` digests attempt receipts, escalations and
+  remediations, reopenings, plan edits, Wave Gate runs (abandoned runs as their audits
+  name them), Finding counts, and the Tasks with friction and their failure kinds.
+  `retro-triggers` names when a digest is worth a retro (terminal escalation, a second
+  Wave Gate run, a plan change, repeated reopenings, the engine moved under the run). The
+  status document carries a never-blocking `retro` report; `helper record-retro` audits
+  that the retrospective happened, and the `retro` skill reads the facts first.
+
 ---
 
 ## 5. The determinism catalog
@@ -656,6 +811,18 @@ per-mechanism *why it works* and *what remains*.
 | 24 | Duplicate/late evidence mutates state | Settlement: exactly one outcome, one atomic transition; dedup-keyed journal | Late evidence settles nothing; replays dedup | — |
 | 25 | Checkpoint lies about history | Append-only journal is the record; checkpoint re-proved on read | Projection cannot outrun its event prefix | — |
 | 26 | Agent runs its own tests, names its own runner | Engine-run test evidence: `helper run-tests` receipt (engine picks runner/report/timeout from the frozen manifest; receipt is the last stdout line, root+manifest-digest bound) (§4.6) | The agent names files; the engine owns execution and the receipt's slot | Legacy `agent-command` graphs keep the §8.6 residuals; engine-run graphs close them |
+| 27 | Roster unprovable at birth surfaces at settlement | Population refuses unprovable rosters (#202) | no-test-files, no-runner and ownerless-requirement graphs are rejected when authored | — |
+| 28 | Guard trusts a rebound head (`cat(){ rm; }; cat <state>`) | Write-based guard; `commandNamesRebound` one rule both Bash guards apply (#219) | Each segment judged by the command the head analyzer resolves; literal eval text followed | — |
+| 29 | "Don't edit while attesting" as brief prose | Attestation enforced by the edit guard (#218, ADR-0085) | Armed Task's writes refused up front; unobservable mode fails closed | — |
+| 30 | Sibling's in-flight test file fails my Task | Regression attribution (ADR-0080, #210) | Per-file results + in-flight owner check; the label names each excusal | Pi verdicts stay untrusted by design |
+| 31 | Reviewer payload asserts its own packet identity | Protocol v4: engine binds packet id + generation (#214, ADR-0084) | A mistyped hash can no longer exhaust a final attempt | — |
+| 32 | Restart re-runs reviewers who already passed | Carry plan decided once under the restart lock (ADR-0089, #222) | Accepted slots carry by reference; admissibility pre-checked | — |
+| 33 | Dead roster entry blocks operators forever | Roster liveness judged from transcript evidence (#211, #207) | never-started / aborted are typed observations, not guesses | — |
+| 34 | Two observers keep two engine-path lists (#192/#196) | `engine-owned-paths.ts` is the one owner (#204) | Every consumer reads one classifier; a second site is the bug | — |
+| 35 | Engine switches under a live run | TaskGraph engine-revision pin + audited adoption (#205) | Write boundary refuses a foreign pin; adoption chain is append-only and parser-checked | Self-hosted graphs exempt by design |
+| 36 | A live TaskGraph cannot be repaired, only suffered | Audited mutation operations: add-dependency, rescope-task, add-task/withdraw-task, amend-spec (#212/#203/#217/#220) | Each is a pure decision core + an audit record; cycles and illegal edits refused at write time | — |
+| 37 | Acceptance green on a path production never takes | Runtime seams declared, enforced at the freeze (ADR-0088, #221) | Freeze refuses acceptance files that reference no declared seam | — |
+| 38 | Retro = vibes | Friction facts + triggers + audited record (ADR-0083, #215) | Facts digested from protected state; the retro report never blocks | — |
 
 ---
 
@@ -689,20 +856,22 @@ Revision), RunDirHandle (anchoring/exclusivity), effect receipts, capture
 attestations, sandbox contract, coverage-ledger publication refusal, remediation
 exclusions, digest pins, route-reachability gate, emission readiness barrier, write
 grants, claims ledger, reserved-slot authority, stdin caps, ReDoS wrapper, decay
-checks.
+checks — plus, since the #201–#223 wave: the TaskGraph engine-revision pin, the
+per-repository runner lock, the restart carry plan, and the population-time
+roster-provability checks.
 
 ---
 
 ## 7. How Loom tests its own determinism
 
-- **878 test files / 253k lines** under `engine/tests/` (core 272, handlers 183, pi 49,
-  linter 46, orchestration 36, utils 31, machine 29, acceptance 20, security 19, …).
+- **923 test files / 260k lines** under `engine/tests/` (core 293, handlers 193, pi 49,
+  linter 46, orchestration 36, utils 34, machine 30, acceptance 20, security 19, …).
 - **Matrix tests** lock "every caller is a row": owner-obligations callers, walker
   contracts, dual-harness evidence fixtures.
 - **Property tests** (fast-check) over the shell grammar and parsers — the class of
   bug that killed rounds 15–24 is now mechanically explored, not just exemplified.
 - **Byte-compare pins**: machine pins, generated modules, wire-contract stamps.
-- **Doc tests**: the ADR index table is derived and verified; wire examples in docs
+- **Doc tests**: the ADR index table (90 ADRs) is derived and verified; wire examples in docs
   are validated against the real schemas (`doc-wire-examples.test.ts`).
 - **Smoke suites**: panel mode, review panel, standalone review, orchestration
   facades, Pi resources, task-graph validation — real CLI processes, not mocks.
@@ -752,11 +921,18 @@ write* — visible in shell-write ledger records but not prevented.
 Guards are reveal-monotonic and fail closed on the unparseable, but "parseable yet
 wrong" remained the bug class of rounds 13–24 (indirection via `VAR=`; twin-scanner
 divergence; double-quoted apostrophe; heredoc inline programs; alternate-form
-parameter expansion). Each was fixed by **consolidating the grammar into shared
-walkers** and pinning walker contracts with tests — the structural fix — but the
-epistemic status is: the guard is as good as its grammar, and bash's grammar is
-bottomless. New spellings will occasionally require new rules; the walker tests are
-what keeps the fix count converging.
+parameter expansion). #219 extended the class with **command rebinding** —
+`cat(){ rm "$1"; }; cat <state>`, `alias cat=rm`, `PATH=…`, `LD_PRELOAD=…` all rewrote
+the State File through a guard that trusted the head's *name* — and its own review
+round then found rebinders hidden in literal eval strings, behind backslashes, quotes,
+assignment prefixes and case arms. The fix pattern held both times: the judgment moved
+into the one module that already resolves what a command IS (`commandNamesRebound`
+judging each segment as `analyzeCommandHead` does), the semantics moved from
+"what the line mentions" to "what the line writes", and the old contract's tests were
+restated for the new one. The epistemic status is unchanged and honest: the guard is as
+good as its grammar, bash's grammar is bottomless, and new spellings will occasionally
+require new rules — but the walker tests and the shared resolution are what keep the
+fix count converging.
 
 ### 8.4 The pin boundary is the user account
 
@@ -805,6 +981,13 @@ grants and evidence grants only. Legacy graphs may attribute via
 resolution and can never complete a Task (completion requires engine-minted attempt
 authority).
 
+Narrowed since the first scan: a trusted failing run whose every failing file belongs
+to another in-flight Task of the same Wave is now attributed to that owner instead of
+failing the settling Task (ADR-0080, #210 — with per-file results and one passing test
+outside them required); and dead roster entries (never-started, or aborted on an API
+error) no longer stand attribution and quiescence checks forever (#211/#207). The
+no-`agent_id`-under-contention stand-down itself is unchanged.
+
 ### 8.9 Small drift-prone surfaces
 
 - The template gate's `FALSE_POSITIVES` set is hand-maintained and has already
@@ -834,13 +1017,30 @@ documented and tested; round-20/21 (double-quoted apostrophe) died with the sing
 - The exclude-pattern list-parsing triplication **is consolidated**:
   `parseExcludePatternListOrThrow` serves both the regex-rule loader and the
   programmatic config.
+- The state-file guard's **rebinding hole** is closed: one rule (`commandNamesRebound`)
+  both guards apply, judged from the command each segment runs (#219).
+- **Owner verification could never verify a JavaScript sibling** in an allowJs project
+  (extension ladder tried only TypeScript) — fixed (#208).
+- The phase gate's **prompt-regex fallback** (a general-purpose agent refused for what
+  its brief happened to say) is replaced by identity-based placement (#223).
+- The CLI **exiting before pipe output drained** (128 KiB of 1 MiB lost under a paused
+  reader) — `exit-after-flush.ts` (#207).
+- Read-only `git`/`gh` invocations mentioning state (e.g. `git log -- <state>`) are
+  admitted instead of refused (#206).
 
 ---
 
 ## 9. Verification record of this scan
 
 - Full unit suite executed at scan time via `npm run test:unit` (Vitest; result
-  recorded in §10).
+  recorded in §10). Re-run at deb8c369 after the #201–#223 wave; verdict in §10.
+- Delta pass (#201–#223): every PR's diff read — new module headers, commit
+  messages, and the guard/wave/spec changes verified against
+  `guard-state-file.ts`, `shell-command-head.ts`, `attestation-writes.ts`,
+  `engine-revision-pin.ts` + `docs/reference/recovery.md`, `task-addition.ts`,
+  `coupled-file-sets.ts`, `regression-attribution.ts`, `roster-liveness.ts`,
+  `wave-review-carry.ts`, `spec-amendment.ts`, `engine-test-run.ts`,
+  `test-evidence-policy.ts`, and ADR-0079–ADR-0089 titles.
 - Code-verified claims: routing table + fail-closed polarity (cli.ts,
   handler-routes.ts); guard policy + helper list + walker map (guard-state-file.ts);
   walker one-owner structure (shell-*.ts headers); machine pins (machines/README +
@@ -858,8 +1058,12 @@ documented and tested; round-20/21 (double-quoted apostrophe) died with the sing
 
 ## 10. Standing suite verdict
 
-**Full unit suite (`npm run test:unit`, Vitest) executed 2026-11-17 at revision a28b6d6a:
-20,132 tests across 775 files — 20,125 passed, 5 failed, 2 skipped.**
+**Latest — full unit suite executed 2026-11-18 at revision deb8c369 (current main):
+21,061 tests passed, 2 skipped, 0 failed, across 811 test files (7.8 min).** Run with the
+`LOOM_PI_*`/`PI_*` ambient markers explicitly unset (see the gotcha below); exit code 0.
+
+**Prior — a28b6d6a, 2026-11-17: 20,132 tests across 775 files — 20,125 passed, 5 failed,
+2 skipped.**
 
 The 5 failures were proven environmental, not a code defect. They fall in exactly the
 Pi-marker-sensitive paths (`tests/pi-extension-review-events.test.ts` ×2,
@@ -874,9 +1078,7 @@ one variable. Re-running the same 3 files with the `LOOM_PI_*`/`PI_*` ambient st
 Operational gotcha for this map's next re-scan: run loom's suite outside a live Pi
 session, or with the `LOOM_PI_*` marker set explicitly unset.
 
-Scope note: this verdict is the a28b6d6a suite. The branch was rebased onto 36302d87
-(#201) and that revision was **not** re-scanned or re-tested here; #201's own review
-(25 advisories, pr201-policy-1) and its merged CI are its verification record.
+Scope note: the a28b6d6a verdict's provenance —
 
 ---
 
@@ -915,7 +1117,7 @@ engine-runtime-paths.ts — repository paths the engine writes while an attempt 
 exact-data.ts — exact own-data snapshots of untrusted JSON-shaped values ·
 family-sites.ts — the family-site metric (counting raw second sites) ·
 findings.ts/findings-shape.ts — Finding identity (agent, ordinal) and shape ·
-forward-fix.ts — the operator's fallback when a judgement fails on sealed code ·
+forward-fix.ts — RETIRED (#217): replaced by task-addition through plan edits (ADR-0086) ·
 frozen.ts — genuinely immutable collection singletons ·
 grandfathered-spawn-model.ts — grandfathered spawn-model authorization ·
 guarded-locations.ts — the guarded directories as one domain value ·
@@ -928,6 +1130,20 @@ issued-emission-capability.ts — the emission capability contract ·
 judged-paths.ts — decompose-time rule: a judge never runs after its subject's Wave ·
 ledger-epoch-view.ts — one epoch's facts rendered for I6 ·
 legacy-archive.ts — read-only parsers for historical artifacts ·
+attestation-writes.ts — attestation enforced, not instructed (ADR-0085) ·
+coupled-file-sets.ts — manifest+lockfile belong to one Task (ADR-0082) ·
+engine-owned-paths.ts — every engine path class in one place (#204) ·
+engine-revision-pin.ts — the TaskGraph's engine-revision pin and adoption (#205) ·
+option-words.ts — shared option-word reading for the read-only classifiers ·
+read-only-filters.ts / read-only-gh.ts — audited read-only classifiers for sort/uniq/find and gh (#206) ·
+regression-attribution.ts — sibling in-flight test failures attributed to their owner (ADR-0080) ·
+retro-facts/-record/-status/-triggers.ts — friction facts, audit, report, triggers (ADR-0083) ·
+roster-liveness.ts — never-started/aborted roster entries judged from transcripts (#211) ·
+runner-presets.ts — known runners as affectedRunner presets (#202) ·
+spec-amendment.ts / spec-rejudgement.ts — audited spec amendment and claim re-judgement (ADR-0087) ·
+task-addition.ts / task-dependency-edit.ts / task-rescope.ts / task-scope-rules.ts — the audited active-Wave mutation cores (ADR-0081/#202/#203) ·
+wave-plan-edit.ts — the wave_plan_edits audit ·
+wave-review-carry.ts / wave-review-carry-plan.ts — restart carry of accepted reviewer slots (ADR-0089) ·
 lint-coverage-ignore.ts — the user's silenced-repository list ·
 lint-runtime-skew.ts — did the full-tier lint judge the current bytes ·
 loom-cli-command.ts — every command/path the engine prints that names itself ·
@@ -1040,11 +1256,15 @@ read-settled-jsonl, read-transcript-with-retry, render-pi-agent, route-endpoint,
 secret-json-file, served-model-probe, strip-namespace, describe-cause, extract-task-id,
 file-absence, runtime-baseline-restore.
 
-**handlers/helpers/** — the façades: orchestration (24 operations), programs/ (37
+**handlers/helpers/** — the façades: orchestration (status/brief/inspect/start/resume/
+restart/… plus the audited mutations add-task, withdraw-task, add-dependency,
+rescope-task, adopt-engine-revision, adopt-engine-run-tests), programs/ (37
 per-program drivers), security-audit, populate-task-graph, complete-wave-gate,
 complete-orchestration, accept-plan-design-review, mutation-check,
-store-*-findings, validate-task-graph, write-verification-manifest, and the rest of
-the whitelisted-helper surface.
+store-*-findings, validate-task-graph, write-verification-manifest, run-tests,
+amend-spec, suggest-affected-runner, retro-facts, record-retro,
+task-addition-operations, and the rest of the whitelisted-helper surface
+(handlers/ also gained attestation-mode.ts for the enforced-attestation read).
 
 ## Appendix C — `pi/` module-by-module
 
