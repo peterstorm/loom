@@ -112,7 +112,7 @@ way, because it reads only the stopping agent's epoch.
 `engine/src/machine/` is split into a pure core and an imperative shell, and the split is linted: `no-io-in-pure-modules` lists the pure core in its shipped defaults, and `engine/tests/linter/programmatic/machine-purity.test.ts` walks the import closure so the reducer can never re-acquire `node:fs` through a dependency.
 
 - **Pure core** (no I/O, no env, no clock): `types.ts`, `advance.ts` (the reducer), `parse-machine.ts`, `extract-evidence.ts`, `mermaid.ts`, `test-report.ts` (report parsing and the trust judgment), `evidence.ts` (identity brands, binding and ledger line parsing, epoch attribution, the `SessionRegistry` port), `harness-tool-call-types.ts` (the normalized `HarnessToolCall`).
-- **Imperative shell**: `ledger.ts` (binding, roster and ledger files with their locks), `tool-evidence-recorder.ts` (the one minting shell), `report-discovery.ts` (finding report artifacts on disk), `session-registry.ts` (the filesystem adapter of the `SessionRegistry` port; an in-memory fake lives with the tests).
+- **Imperative shell**: `ledger.ts` (binding, roster and ledger files with their locks), `tool-evidence-recorder.ts` (the one minting shell), `report-discovery.ts` (finding report artifacts on disk), `session-registry.ts` (the filesystem adapter of the `SessionRegistry` port; an in-memory fake lives with the tests), `task-graph-pointer.ts` (the shared no-follow/atomic session TaskGraph pointer lifecycle). `index.ts` is the public barrel over the pure core.
 
 ## Known residual limits
 
