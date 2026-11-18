@@ -10,6 +10,7 @@ It combines:
 - standalone PR review and end-to-end review/remediation workflows;
 - reusable Skills — architecture, implementation, tests, security, frontend, refactoring (`deepen`, `distill`), design stress-testing (`grill`), retrospectives, PR remediation, and lint;
 - a two-tier fail-closed linter;
+- a fail-closed rules gate that blocks code edits until the project's rules and Skills are loaded and adherence is stated;
 - one harness-neutral TypeScript engine with Claude Code and Pi adapters.
 
 The engine owns deterministic mechanics. Agents do semantic work; users make real choices. Scope, request identity, model/Skill routing, retries, transcripts, rosters, aggregation, state transitions, Git staging, and publication are code-owned and auditable.
@@ -121,6 +122,12 @@ The State File (the protected record of the run, also called the TaskGraph) is c
 ### Execution Waves
 
 Decompose produces dependency-ordered Tasks grouped into Waves. Tasks in one Wave run in parallel; Waves advance one at a time. A Task reaches `implemented` only when the engine's proof obligations for it are satisfied: Agent completion, regression tests, new tests and changed declared artifacts, as its policy requires. While a run is active the parent session cannot edit files directly; changes go through attributed Agents so the evidence stays meaningful.
+
+Test evidence is engine-owned where the plan requires it: when the run's frozen Verification Manifest declares an affected runner, only tests the engine itself executed count as proof — `helper run-tests` runs that runner over the named files and issues a receipt bound to the repository root and the manifest's digest, and an Agent's own test commands are recorded but never admitted.
+
+Every Wave with implementation files also carries one engine-added Distill Task: once every other Task of the Wave has settled, a fresh `distill-agent` simplifies the Wave's implemented code, and the Wave Gate cannot start before it does. It is itself exempt from review; the other Tasks' Review Packets read the distilled bytes.
+
+A plan may declare Acceptance Contracts. Each contract's Task writes a declarations-only types file and acceptance tests, which freeze the moment they are observed failing (red), every test named after the Requirement it decides; the frozen files change only through an audited Contract Revision. Acceptance tests must run through the runtime seams the contract declares — the freeze is refused while an acceptance file does not reference a declared seam — so an acceptance suite cannot pass on a path production never takes.
 
 ## Wave Gate
 
