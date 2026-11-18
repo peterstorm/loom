@@ -18,8 +18,10 @@ import {
   type ReviewerProtocolDescriptor, type ReviewerProtocolDescriptorV2, type ReviewerProtocolFailure,
 } from '../../../core/reviewer-contract';
 import { parseStandaloneReadCoverage, type StandaloneReadCoveragePolicy } from '../../../core/standalone-read-coverage';
-import type { OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, RegisteredWaveGateProgram, WaveGateRestartAudit } from '../../../core/wave-gate-program';
-import { parseWaveReviewCarryAudit } from '../../../core/wave-review-carry';
+import type {
+  OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, RegisteredWaveGateProgram, WaveGateRestartAudit, WaveGateSuccessionAudit,
+} from '../../../core/wave-gate-program';
+import { parseWaveGateSuccessionAudit, parseWaveReviewCarryAudit } from '../../../core/wave-review-carry';
 import { parseRunDirectoryReference } from '../../../orchestration/run-directory-handle';
 import {
   parseRegisteredRemediationProgram,
@@ -257,7 +259,9 @@ export function parseCliBindableFacadeProgram(raw: unknown): CliBindableRegistra
   return parsed.program.kind === "security-verification" ? NATIVE_CAPTURE_ONLY : Object.freeze({ kind: "registered", program: parsed.program });
 }
 
-function parseWaveRegistrationAudit(raw: Readonly<Record<string, unknown>>): ProgramParse<Pick<RegisteredWaveGateProgram, "restart" | "orphanRecovery">> {
+function parseWaveRegistrationAudit(
+  raw: Readonly<Record<string, unknown>>,
+): ProgramParse<Pick<RegisteredWaveGateProgram, "restart" | "orphanRecovery" | "succession">> {
   let restart: WaveGateRestartAudit | undefined;
   if (Object.hasOwn(raw, "restart")) {
     // A restart that carried accepted review evidence also records its carry
@@ -283,8 +287,17 @@ function parseWaveRegistrationAudit(raw: Readonly<Record<string, unknown>>): Pro
     orphanRecovery = Object.freeze({ previousRunId: raw.orphanRecovery.previousRunId,
       previousAuthorityDigest: raw.orphanRecovery.previousAuthorityDigest });
   }
+  // A fresh start that carried accepted reviews from the run it succeeded
+  // (ADR-0090); one that carried nothing records no succession at all.
+  let succession: WaveGateSuccessionAudit | undefined;
+  if (Object.hasOwn(raw, "succession")) {
+    const parsed = parseWaveGateSuccessionAudit(raw.succession);
+    if (!parsed.ok) return { ok: false, message: parsed.error };
+    succession = parsed.value;
+  }
   return { ok: true, value: Object.freeze({
     ...(restart === undefined ? {} : { restart }), ...(orphanRecovery === undefined ? {} : { orphanRecovery }),
+    ...(succession === undefined ? {} : { succession }),
   }) };
 }
 
@@ -330,10 +343,14 @@ function parseRegisteredWaveGateProgram(raw: unknown): FacadeRegistrationParse {
   const waveBaseKeys = ["schemaVersion", "kind", "input", "taskIds", "authorityDigest",
     ...(protocol.value.schemaVersion === 2 ? ["reviewerProtocol"] : [])];
   let waveKeys: readonly string[] = waveBaseKeys;
+  // A registration records at most one way it came to be: a restart, an
+  // orphan recovery or a fresh start's succession.
   if (Object.hasOwn(raw as object, "restart")) {
     waveKeys = [...waveBaseKeys, "restart"];
   } else if (Object.hasOwn(raw as object, "orphanRecovery")) {
     waveKeys = [...waveBaseKeys, "orphanRecovery"];
+  } else if (Object.hasOwn(raw as object, "succession")) {
+    waveKeys = [...waveBaseKeys, "succession"];
   }
   if (!exactObject(raw, waveKeys)) {
     return invalidRegistration(`wave-gate registration must contain exactly ${waveKeys.join(", ")}`);

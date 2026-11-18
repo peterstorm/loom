@@ -14,7 +14,7 @@ import { observeWaveSpecCheckDocuments } from '../../../orchestration/wave-spec-
 import type { Task } from '../../../types';
 import { installWaveReviewRunsTransition, waveBatchSpecCheckAuthority } from '../../../core/wave-review-issuance';
 import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
-import { waveReviewCarryOf } from '../../../core/wave-review-carry-plan';
+import { registeredCarry, waveReviewCarryOf } from '../../../core/wave-review-carry-plan';
 import {
   classifyPersistedWaveBatch,
   issuedWaveReviewRosters,
@@ -161,8 +161,9 @@ export async function reconcileWaveReviewIssuance(
   ) => publishReviewInitialBatch(handle, requests, packets, CURRENT_BATCH_LABEL, registration);
   // A Review Run a restart kept for its carried slots (ADR-0089) belongs to
   // the predecessor until this batch rebinds it, so it does not count as
-  // installed here.
-  const carry = registration.restart?.carry;
+  // installed here. A fresh start's Successor Carry (ADR-0090) carries whole
+  // Tasks only, which hold no Review Run.
+  const carry = registeredCarry(registration);
   const initialBatchMissingOrPartial = graph.wave_review_epoch === undefined &&
     graph.tasks.every((task) => !registration.taskIds.includes(task.id) || task.review_run === undefined ||
       (waveReviewCarryOf(carry, task.id)?.kind === "accepted-slots" && task.review_run.wave_gate_run_id !== handle.runId));

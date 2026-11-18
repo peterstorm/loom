@@ -178,6 +178,12 @@ export type CurrentReviewRun = Readonly<ReviewRunBase & Extract<ReviewRunWorkspa
   reviewer_protocol: ReviewerProtocolDescriptor;
   evidence: readonly CurrentReviewRunEvidence[];
   slot_authority: readonly [CurrentReviewRunSlotAuthority, ...CurrentReviewRunSlotAuthority[]];
+  /**
+   * The Subject Digest of what this run's packets present (ADR-0090): every
+   * fact of the Task's review subject except its Findings, which the run
+   * records as `prior_finding_ids`. Absent on runs installed before it existed.
+   */
+  subject_digest?: string;
 }>;
 export type ReviewRun = LegacyReviewRun | CurrentReviewRun;
 
@@ -201,6 +207,12 @@ export type CurrentAcceptedReviewAuthority = Readonly<AcceptedReviewAuthorityBas
   run_id: string;
   authority_digest: string;
   reviewer_protocol: ReviewerProtocolDescriptor;
+  /**
+   * The run's Subject Digest sealed with the Findings this acceptance left
+   * (`acceptedSubjectDigest`, ADR-0090). Absent on an acceptance recorded
+   * before it existed: a Successor Carry reviews such a Task in full once.
+   */
+  subject_digest?: string;
 }>;
 export type AcceptedReviewAuthority = LegacyAcceptedReviewAuthority | CurrentAcceptedReviewAuthority;
 

@@ -882,6 +882,30 @@ export type SpecTraceWaveGateRetirement = Readonly<{
   supersededBy: OrchestrationRunId | null;
 }>;
 
+/**
+ * How a Wave Gate run that can be succeeded ended: abandoned by the operator
+ * (its tombstone was superseded or retired), or completed and then reopened
+ * because some Task's bytes drifted (ADR-0090).
+ */
+export type WaveReviewRunRetirement = "abandoned" | "completed-reopened";
+
+/**
+ * Successor Carry provenance (ADR-0090): one Wave Gate run whose review
+ * authority was retired without a replacement taking it over. The next fresh
+ * start of `wave` succeeds the latest of these, and a carried acceptance is
+ * admitted only along a lineage that starts from one. Appended when an
+ * abandoned run's tombstone is retired and when a completed Wave is reopened;
+ * never edited. Dropped by re-population.
+ */
+export type RetiredWaveReviewRun = Readonly<{
+  schemaVersion: 1;
+  kind: "retired-wave-review-run";
+  runId: OrchestrationRunId;
+  wave: number;
+  authorityDigest: ArtifactDigest;
+  retirement: WaveReviewRunRetirement;
+}>;
+
 /** One Task's Requirement trace: its Completion Claims and Contributions. */
 export type SpecTraceOwnership = Readonly<{
   spec_anchors: readonly string[];
@@ -1537,6 +1561,9 @@ export interface TaskGraph {
   readonly orphaned_wave_gate_history?: readonly OrphanedWaveGateRetirement[];
   /** Abandoned active authority retired only to install Requirement trace v2. */
   readonly spec_trace_wave_gate_retirements?: readonly SpecTraceWaveGateRetirement[];
+  /** Runs a fresh Wave Gate may succeed, oldest first (ADR-0090): the
+   *  protected provenance of a Successor Carry. Dropped by re-population. */
+  readonly retired_wave_review_runs?: readonly RetiredWaveReviewRun[];
   /** Append-only audit of in-place v2 trace amendments; each Task's latest
    *  change must agree with its current trace. Dropped by re-population. */
   readonly spec_trace_amendments?: readonly SpecTraceAmendment[];

@@ -24,8 +24,8 @@ import type { IssuedWaveReviewerProtocol } from "./review-output";
 import type { ReviewedWorkspaceObservation } from "./reviewed-workspace";
 import type { WaveReviewRole } from "./agent-catalog-projections";
 import { waveReviewerSlotProblem } from "./wave-gate-membership";
-import { carriedAcceptanceProblem, rebindCarriedReviewRun } from "./wave-review-carry";
-import { issuedRoles, waveReviewCarryOf } from "./wave-review-carry-plan";
+import { carriedAcceptanceProblem, carryKindOf, rebindCarriedReviewRun } from "./wave-review-carry";
+import { issuedRoles, registeredCarry, waveReviewCarryOf } from "./wave-review-carry-plan";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import {
   decideWaveReviewEpochReplay,
@@ -35,6 +35,7 @@ import {
   waveRunRosterProblem,
   waveSpecCheckDocumentsMatch,
   waveTaskReviewRoster,
+  waveTaskSubjectDigest,
   type WaveRequestBatch,
   type WaveReviewRegistrationAuthority,
   type WaveSpecCheckObservation,
@@ -92,13 +93,15 @@ export function waveBatchSpecCheckAuthority(batch: WaveRequestBatch): DomainResu
  * reviewed workspace must be unchanged since the batch was prepared, and a
  * Task that already carries a Review Packet must carry exactly this one.
  *
- * A restart's carry plan (ADR-0089) is honoured here. A Task whose whole
- * roster carries installs nothing and must still hold the acceptance its
- * restart carried. A Task carrying some slots has its predecessor's Review
- * Run rebound under this batch's Review Packet. Its carried slots keep their
- * identity and name their origin; its other agents take this batch's fresh
- * slots. Either way the carried evidence must still judge the Task's current
- * bytes, or the install is refused.
+ * A registration's carry plan (a restart's, ADR-0089, or a fresh start's
+ * Successor Carry, ADR-0090) is honoured here. A Task whose whole roster
+ * carries installs nothing and must still hold the acceptance its plan
+ * carried. A Task carrying some slots has its predecessor's Review Run rebound
+ * under this batch's Review Packet. Its carried slots keep their identity and
+ * name their origin; its other agents take this batch's fresh slots. Either
+ * way the carried evidence must still judge the Task's current bytes and
+ * Subject Digest, or the install is refused. A freshly installed current run
+ * records the Subject Digest its packets present.
  */
 export function installWaveReviewRunsTransition(
   locked: TaskGraph,
@@ -169,22 +172,26 @@ export function installWaveReviewRunsTransition(
     const lockedScope = taskReviewScope(task);
     const exactScope = currentWorkspace !== undefined && lockedScope.length === currentWorkspace.scope.length &&
       lockedScope.every((path, index) => path === currentWorkspace.scope[index]);
-    const carry = waveReviewCarryOf(registration.restart?.carry, task.id);
+    const carry = waveReviewCarryOf(registeredCarry(registration), task.id);
+    const bytes = currentWorkspace === undefined ? null : { scope: currentWorkspace.scope, headSha: currentWorkspace.headSha };
     if (carry?.kind === "accepted-task") {
       // Not reissued: the Task keeps the acceptance its own run recorded.
-      const problem = registration.schemaVersion !== 2 || currentWorkspace === undefined || !exactScope
+      const problem = registration.schemaVersion !== 2 || bytes === null || !exactScope
         ? `Task ${task.id} changed before its carried acceptance could be confirmed`
-        : carriedAcceptanceProblem(task, carry, { protocol: registration.reviewerProtocol, roster: expectedAgents,
-          bytes: { scope: currentWorkspace.scope, headSha: currentWorkspace.headSha } });
+        : carriedAcceptanceProblem(task, carry, { protocol: registration.reviewerProtocol, roster: expectedAgents, bytes,
+          subject: waveTaskSubjectDigest(locked, task, registration.reviewerProtocol, bytes) }, carryKindOf(registration));
       if (problem !== null) return refuse(problem);
       if (taskRun !== undefined) return refuse(`Task ${task.id} carries its whole roster but was issued a Review Packet`);
       tasks.push(task);
       continue;
     }
     if (taskRun === undefined || taskRun.generation !== (task.review_generation ?? 0) || !exactScope ||
-        currentWorkspace === undefined || currentWorkspace.headSha !== (taskRun.workspaceHeadSha ?? taskRun.headSha)) {
+        bytes === null || bytes.headSha !== (taskRun.workspaceHeadSha ?? taskRun.headSha)) {
       return refuse(`Task ${task.id} changed before its current Review Packet could be installed`);
     }
+    const subject = registration.schemaVersion === 2
+      ? waveTaskSubjectDigest(locked, task, registration.reviewerProtocol, bytes)
+      : null;
     const issuedAgents = issuedRoles(expectedAgents, carry);
     const authorities: AgentRequestAuthority[] = [];
     for (const authority of reviewAuthorities) {
@@ -202,7 +209,7 @@ export function installWaveReviewRunsTransition(
     const slotAuthority = mapNonEmpty(roster.value, ({ legacy }) => legacy);
     const currentSlots = mapNonEmpty(roster.value, ({ current }) => current);
     if (carry !== undefined) {
-      if (registration.schemaVersion !== 2) return refuse(`Task ${task.id} carries slots into a historical registration`);
+      if (registration.schemaVersion !== 2 || subject === null) return refuse(`Task ${task.id} carries slots into a historical registration`);
       const rebound = rebindCarriedReviewRun(task, carry, {
         runId: specCheckAuthority.runId,
         authorityDigest: registration.authorityDigest,
@@ -210,8 +217,9 @@ export function installWaveReviewRunsTransition(
         generation: taskRun.generation,
         packetId: taskRun.packetId,
         headSha: taskRun.headSha,
-        bytes: { scope: currentWorkspace.scope, headSha: currentWorkspace.headSha },
+        bytes,
         roster: expectedAgents,
+        subject,
         issued: currentSlots,
       });
       if (!rebound.ok) return refuse(rebound.error);
@@ -235,7 +243,7 @@ export function installWaveReviewRunsTransition(
       const same = sameProtocol && run.packet_id === taskRun.packetId && run.generation === taskRun.generation &&
         run.head_sha === taskRun.headSha && waveRunRosterProblem(locked, registration.schemaVersion, task, run) === null &&
         slotAuthority.every((slot, index) => run.slot_authority?.[index]?.slot_id === slot.slot_id) &&
-        canonicalStructuralEquals(run.workspace_scope, currentWorkspace.scope) &&
+        canonicalStructuralEquals(run.workspace_scope, bytes.scope) &&
         run.workspace_head_sha === (taskRun.workspaceHeadSha ?? taskRun.headSha) &&
         run.wave_gate_run_id === specCheckAuthority.runId &&
         run.wave_gate_authority_digest === registration.authorityDigest;
@@ -258,7 +266,8 @@ export function installWaveReviewRunsTransition(
         ...(registration.schemaVersion === 2
           ? { reviewer_protocol: registration.reviewerProtocol, slot_authority: currentSlots }
           : { slot_authority: slotAuthority }),
-        workspace_scope: currentWorkspace.scope,
+        ...(subject === null ? {} : { subject_digest: subject }),
+        workspace_scope: bytes.scope,
         workspace_head_sha: taskRun.workspaceHeadSha ?? taskRun.headSha,
         wave_gate_run_id: specCheckAuthority.runId,
         wave_gate_authority_digest: registration.authorityDigest,

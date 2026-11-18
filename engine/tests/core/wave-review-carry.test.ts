@@ -44,6 +44,8 @@ const EPOCH_B = "4".repeat(64);
 const DIGEST_B = "b".repeat(64);
 const ROSTER = BASE_WAVE_REVIEW_AGENTS;
 const EXHAUSTED = ROSTER[2]!;
+/** A Subject Digest for T2's rebinding: the fixture runs predate the digest, so none is compared. */
+const SUBJECT_T2 = "5".repeat(64);
 
 const hex = (seed: number, length: number): string => seed.toString(16).padStart(length, "0");
 const observe = (taskId: string, scope: readonly string[], content = "export const x = 1;\n"): ReviewedWorkspaceObservation =>
@@ -350,7 +352,7 @@ describe("a chained restart keeps every carried slot's original origin", () => {
     const rebound = value(rebindCarriedReviewRun(t2, carry, {
       runId: nextRunId, authorityDigest: prepared.registration.authorityDigest, protocol: WAVE_REVIEWER_PROTOCOL_V4,
       generation: 0, packetId, headSha: epoch, bytes: { scope: bytes.scope, headSha: bytes.headSha }, roster: ROSTER,
-      issued: issuedRoles(ROSTER, carry).map((agent) => issuedSlot(agent, packetId.charCodeAt(0) * 100 + ROSTER.indexOf(agent))),
+      subject: SUBJECT_T2, issued: issuedRoles(ROSTER, carry).map((agent) => issuedSlot(agent, packetId.charCodeAt(0) * 100 + ROSTER.indexOf(agent))),
     }));
     const [first, ...rest] = rebound.slot_authority.map((slot) => (slot.carried_from === undefined ? { ...slot, attempted: 2 as const } : slot));
     return {
@@ -394,7 +396,7 @@ describe("rebinding a carried Task's Review Run into the replacement run", () =>
   const binding: CarriedRunBinding = {
     runId: "run.next", authorityDigest: DIGEST_B, protocol: WAVE_REVIEWER_PROTOCOL_V4,
     generation: 0, packetId: PACKET_B, headSha: EPOCH_B, bytes: { scope: bytes.scope, headSha: bytes.headSha },
-    roster: ROSTER, issued: [freshSlot],
+    roster: ROSTER, subject: SUBJECT_T2, issued: [freshSlot],
   };
   const task = (): Task => exhaustedWave().tasks[1]!;
   const carry = { kind: "accepted-slots" as const, taskId: "T2", agents: accepted as unknown as readonly [string, ...string[]] };
@@ -450,18 +452,18 @@ describe("completion admits only acceptances carried along the recorded restart 
 
   it("admits the replacement run's own acceptance and a carried one", () => {
     const own = { ...t1(), accepted_review_authority: acceptanceT1({ run_id: "run.next", authority_digest: replacement().authorityDigest }) };
-    expect(waveAcceptanceProblem(own, replacement(), "run.next")).toBeNull();
-    expect(waveAcceptanceProblem(t1(), replacement(), "run.next")).toBeNull();
+    expect(waveAcceptanceProblem(own, replacement(), "run.next", [])).toBeNull();
+    expect(waveAcceptanceProblem(t1(), replacement(), "run.next", [])).toBeNull();
   });
 
   it("refuses an acceptance forged outside the lineage, a missing one and a carried one under another protocol", () => {
     const forged = { ...t1(), accepted_review_authority: acceptanceT1({ run_id: "run.forged" }) };
-    expect(waveAcceptanceProblem(forged, replacement(), "run.next")).not.toBeNull();
-    expect(waveAcceptanceProblem({ ...t1(), accepted_review_authority: undefined }, replacement(), "run.next")).not.toBeNull();
+    expect(waveAcceptanceProblem(forged, replacement(), "run.next", [])).not.toBeNull();
+    expect(waveAcceptanceProblem({ ...t1(), accepted_review_authority: undefined }, replacement(), "run.next", [])).not.toBeNull();
     const v2 = { ...t1(), accepted_review_authority: acceptanceT1({ reviewer_protocol: REVIEWER_PROTOCOL_V2 }) };
-    expect(waveAcceptanceProblem(v2, replacement(), "run.next")).not.toBeNull();
+    expect(waveAcceptanceProblem(v2, replacement(), "run.next", [])).not.toBeNull();
     const noCarry = { ...replacement(), restart: { previousRunId: "run.previous", exhaustedSlots: [`T2/${EXHAUSTED}`] } };
-    expect(waveAcceptanceProblem(t1(), noCarry, "run.next")).not.toBeNull();
+    expect(waveAcceptanceProblem(t1(), noCarry, "run.next", [])).not.toBeNull();
   });
 });
 

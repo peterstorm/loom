@@ -1,16 +1,27 @@
 /**
- * Reading a restart's carry plan (ADR-0089): which entry a Task has, and what
- * a replacement run still issues for it. Batch preparation, the locked
- * install, the carried-run rebinding, resume classification and completed-run
- * verification all ask here, so "issued = roster minus carried" has one
- * definition.
+ * Reading a registration's carry plan (ADR-0089, ADR-0090): the plan itself,
+ * which entry a Task has, and what a run still issues for it. Batch
+ * preparation, the locked install, the carried-run rebinding, resume
+ * classification, completion admission and completed-run verification all
+ * ask here, so "issued = roster minus carried" has one definition.
  *
  * A leaf below both Wave review authority and the carry rule, so neither has
  * to import the other to read a plan.
  *
  * Pure: no I/O.
  */
-import type { WaveReviewCarry, WaveReviewCarryAudit } from "./wave-gate-program";
+import type { RegisteredWaveGateProgram, WaveReviewCarry, WaveReviewCarryAudit } from "./wave-gate-program";
+
+/**
+ * The carry plan a registration froze: a restart's (ADR-0089) or a fresh
+ * start's Successor Carry (ADR-0090). A registration holds at most one of the
+ * two. Every reader of a registration's carry asks here.
+ */
+export function registeredCarry(
+  registration: Pick<RegisteredWaveGateProgram, "restart" | "succession">,
+): WaveReviewCarryAudit | undefined {
+  return registration.restart?.carry ?? registration.succession?.carry;
+}
 
 /** The plan entry of `taskId` in a registration's carry audit, if it carries. */
 export function waveReviewCarryOf(carry: WaveReviewCarryAudit | undefined, taskId: string): WaveReviewCarry | undefined {

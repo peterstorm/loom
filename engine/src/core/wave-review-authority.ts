@@ -18,12 +18,13 @@ import {
   type TaskProof,
 } from "./proof-obligations";
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ByteSection, type ContextPacket } from "./context-packets";
-import { parseWaveReviewerProtocolDescriptor } from "./reviewer-contract";
-import { issuedRoles, waveReviewCarryOf } from "./wave-review-carry-plan";
+import { parseWaveReviewerProtocolDescriptor, type ReviewerProtocolDescriptor } from "./reviewer-contract";
+import { issuedRoles, registeredCarry, waveReviewCarryOf } from "./wave-review-carry-plan";
 import type {
   OrphanedWaveGateRecoveryAudit,
   RegisteredReviewerProtocol,
   WaveGateRestartAudit,
+  WaveGateSuccessionAudit,
   WaveReviewCarryAudit,
 } from "./wave-gate-program";
 import { DECISION_RECORD_AGENT } from "./model-profiles";
@@ -101,6 +102,7 @@ export type WaveReviewRegistrationAuthority = Readonly<{
   authorityDigest: string;
   restart?: WaveGateRestartAudit;
   orphanRecovery?: OrphanedWaveGateRecoveryAudit;
+  succession?: WaveGateSuccessionAudit;
 }> & RegisteredReviewerProtocol;
 
 /**
@@ -341,6 +343,49 @@ function waveTaskReview(graph: TaskGraph, schemaVersion: 1 | 2, task: Task, inst
  */
 export function waveTaskReviewRoster(graph: TaskGraph, schemaVersion: 1 | 2, task: Task): WaveTaskReview {
   return waveTaskReview(graph, schemaVersion, task, task.review_run);
+}
+
+/**
+ * The Subject Digest of one reviewed Task (ADR-0090): the digest of everything
+ * a Wave reviewer packet for it presents except its Findings. That is the
+ * reviewer protocol and the roster, the Task's identity, description, plan
+ * context, Requirement anchors and contributions, declared and modified files,
+ * Review Generation, proof and test result, the owner-map obligations and
+ * contract surfaces its packets carry with the plan file they cite, and the
+ * reviewed workspace scope and head the frozen source is read from. The
+ * install records it on the Review Run, and an acceptance seals it with its
+ * Findings (`acceptedSubjectDigest`); a carry is admissible only while it is
+ * unchanged. Derived through the same roster derivation the packets are, from
+ * the Task's installed Review Run when it has one.
+ */
+export function waveTaskSubjectDigest(
+  graph: TaskGraph,
+  task: Task,
+  protocol: ReviewerProtocolDescriptor,
+  bytes: Readonly<{ scope: readonly string[]; headSha: string }>,
+): string {
+  const derivation = waveTaskReviewDerivation(graph, 2, task, task.review_run);
+  return sha256Hex(JSON.stringify({
+    protocol,
+    roster: derivation.roster,
+    task: {
+      id: task.id,
+      agent: task.agent,
+      description: task.description,
+      planContext: task.plan_context ?? null,
+      specAnchors: task.spec_anchors ?? [],
+      specContributions: task.spec_contributions ?? [],
+      declaredFiles: task.file_list ?? [],
+      modifiedFiles: task.files_modified ?? [],
+      reviewGeneration: task.review_generation ?? 0,
+      proof: task.proof ?? null,
+      testResult: task.test_result ?? null,
+    },
+    planFile: graph.plan_file ?? null,
+    ownerMap: derivation.ownerMap,
+    contractSurfaces: derivation.contractSurfaces,
+    workspace: { scope: bytes.scope, headSha: bytes.headSha },
+  }));
 }
 
 /**
@@ -1061,7 +1106,7 @@ export function prepareWaveReviewBatch(
     if (!protocol.ok) return failure(protocol.error.message);
   }
   const specCheckDocuments = specCheckObservation.authority;
-  const carry = registration.restart?.carry;
+  const carry = registeredCarry(registration);
   const currentWaveTasks = graph.tasks.filter((task) => task.wave === registration.input.wave);
   const tasks: Task[] = [];
   for (const taskId of registration.taskIds) {
@@ -1141,9 +1186,10 @@ export function prepareWaveReviewBatch(
     specFile: graph.spec_file ?? null,
     planFile: graph.plan_file ?? null,
     specCheckDocuments,
-    // The restart's carry plan decides which subjects this batch issues, so
-    // the epoch commits to it. Absent, the payload is byte-identical to a
-    // batch prepared before carry existed (ADR-0089).
+    // The registration's carry plan (a restart's or a fresh start's) decides
+    // which subjects this batch issues, so the epoch commits to it. Absent,
+    // the payload is byte-identical to a batch prepared before carry existed
+    // (ADR-0089, ADR-0090).
     ...(carry === undefined ? {} : { carried: carry.carried }),
   })));
   if (!batchEpoch.ok) return failure(batchEpoch.error.message);

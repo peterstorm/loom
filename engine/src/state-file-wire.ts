@@ -42,6 +42,7 @@ import type {
   ForwardFixAudit,
   ForwardFixWithdrawal,
   OrphanedWaveGateRetirement,
+  RetiredWaveReviewRun,
   OwnerObligation,
   WaveReopeningAudit,
   ReopenedTaskIds,
@@ -744,6 +745,50 @@ function parseOrphanedWaveGateHistory(raw: unknown): ParseResult<readonly Orphan
     return parseErr("orphaned_wave_gate_history contains duplicate retired run identities");
   }
   return parseOk(Object.freeze(history));
+}
+
+const RETIRED_WAVE_REVIEW_RUN_FIELDS = ["schemaVersion", "kind", "runId", "wave", "authorityDigest", "retirement"] as const;
+
+/** Parse one Successor Carry provenance record (ADR-0090). */
+function parseRetiredWaveReviewRun(raw: unknown, label: string): ParseResult<RetiredWaveReviewRun> {
+  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
+  const record = raw as Record<string, unknown>;
+  const fieldsError = exactFieldsError(record, RETIRED_WAVE_REVIEW_RUN_FIELDS, [], label);
+  if (fieldsError !== null) return parseErr(fieldsError);
+  if (record.schemaVersion !== 1 || record.kind !== "retired-wave-review-run" ||
+      (record.retirement !== "abandoned" && record.retirement !== "completed-reopened")) {
+    return parseErr(`${label} has an invalid schema, kind, or retirement`);
+  }
+  const runId = parseOrchestrationRunId(record.runId);
+  if (!runId.ok) return parseErr(`${label}.runId: ${runId.error.message}`);
+  const authorityDigest = parseArtifactDigest(record.authorityDigest);
+  if (!authorityDigest.ok) return parseErr(`${label}.authorityDigest: ${authorityDigest.error.message}`);
+  const wave = parseIntegerBound(record.wave, `${label}.wave`, 1, "an integer >= 1 within the safe-integer range");
+  if (!wave.ok) return parseErr(wave.error);
+  return parseOk(Object.freeze({
+    schemaVersion: 1,
+    kind: "retired-wave-review-run",
+    runId: runId.value,
+    wave: wave.value,
+    authorityDigest: authorityDigest.value,
+    retirement: record.retirement,
+  }));
+}
+
+/** Parse the append-only Successor Carry provenance; a run is retired once. */
+function parseRetiredWaveReviewRuns(raw: unknown): ParseResult<readonly RetiredWaveReviewRun[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!Array.isArray(raw)) return parseErr("retired_wave_review_runs must be an array when present");
+  const runs: RetiredWaveReviewRun[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const parsed = parseRetiredWaveReviewRun(entry, `retired_wave_review_runs[${index}]`);
+    if (!parsed.ok) return parsed;
+    runs.push(parsed.value);
+  }
+  const runIds = runs.map(({ runId }) => runId);
+  return new Set(runIds).size === runIds.length
+    ? parseOk(Object.freeze(runs))
+    : parseErr("retired_wave_review_runs retires a run twice");
 }
 
 const SPEC_TRACE_WAVE_GATE_RETIREMENT_FIELDS = [
@@ -2007,11 +2052,16 @@ function taskPacketError(
     }
     const authority = t.accepted_review_authority as Record<string, unknown>;
     const fields = Object.keys(authority).sort();
-    const allowed = ["generation", "packet_id", "head_sha", "scope", "run_id", "authority_digest", "reviewer_protocol"];
+    const allowed = ["generation", "packet_id", "head_sha", "scope", "run_id", "authority_digest", "reviewer_protocol", "subject_digest"];
     if (Object.hasOwn(authority, "reviewer_protocol") &&
         (!parseWaveReviewerProtocolDescriptor(authority.reviewer_protocol).ok || authority.run_id === undefined ||
           authority.authority_digest === undefined)) {
       return `tasks[${index}] ("${id}"): current accepted_review_authority requires supported descriptor and run authority`;
+    }
+    // The sealed Subject Digest (ADR-0090) belongs to a current acceptance only.
+    if (Object.hasOwn(authority, "subject_digest") && (!Object.hasOwn(authority, "reviewer_protocol") ||
+        typeof authority.subject_digest !== "string" || !/^[0-9a-f]{64}$/.test(authority.subject_digest))) {
+      return `tasks[${index}] ("${id}"): accepted_review_authority.subject_digest must be a SHA-256 digest on a current acceptance`;
     }
     if (fields.some((field) => !allowed.includes(field)) ||
         !["generation", "packet_id", "head_sha", "scope"].every((field) => fields.includes(field))) {
@@ -3028,6 +3078,7 @@ type ParsedTaskGraphHistoryFields = Readonly<{
   forwardFixWithdrawals: readonly ForwardFixWithdrawal[] | undefined;
   orphanedHistory: readonly OrphanedWaveGateRetirement[] | undefined;
   specTraceRetirements: readonly SpecTraceWaveGateRetirement[] | undefined;
+  retiredReviewRuns: readonly RetiredWaveReviewRun[] | undefined;
   specTraceAmendments: readonly SpecTraceAmendment[] | undefined;
   specAmendments: readonly SpecAmendment[] | undefined;
   wavePlanEdits: readonly WavePlanEdit[] | undefined;
@@ -3113,6 +3164,13 @@ function parseTaskGraphHistoryFields(
   if (specTraceConflict !== null) return parseErr(specTraceConflict);
   const installationConflict = activeWaveGateInstallationAuditConflict(activeWaveGate, orphanedHistory.value);
   if (installationConflict !== null) return parseErr(installationConflict);
+  const retiredReviewRuns = parseRetiredWaveReviewRuns(obj.retired_wave_review_runs);
+  if (!retiredReviewRuns.ok) return parseErr(retiredReviewRuns.error);
+  // A retired run's tombstone is gone: the registration that still names it
+  // was never retired.
+  if (activeWaveGate !== undefined && retiredReviewRuns.value?.some(({ runId }) => runId === activeWaveGate.runId)) {
+    return parseErr(`active_wave_gate run ${activeWaveGate.runId} is already in retired_wave_review_runs`);
+  }
   const specTraceAmendments = parseSpecTraceAmendments(obj.spec_trace_amendments);
   if (!specTraceAmendments.ok) return parseErr(specTraceAmendments.error);
   const specAmendments = parseSpecAmendments(obj.spec_amendments, tasks);
@@ -3133,6 +3191,7 @@ function parseTaskGraphHistoryFields(
     forwardFixWithdrawals: forwardFixWithdrawals.value,
     orphanedHistory: orphanedHistory.value,
     specTraceRetirements: specTraceRetirements.value,
+    retiredReviewRuns: retiredReviewRuns.value,
     specTraceAmendments: specTraceAmendments.value,
     specAmendments: specAmendments.value,
     wavePlanEdits: wavePlanEdits.value,
@@ -3607,7 +3666,7 @@ export type ParsedTaskGraph = Omit<TaskGraph, "tasks" | "executing_tasks"> & Rea
 function historyGraphFields(history: ParsedTaskGraphHistoryFields): Partial<TaskGraph> {
   const {
     reopeningHistory, taskReopeningHistory, forwardFixHistory, forwardFixWithdrawals, orphanedHistory,
-    specTraceRetirements, specTraceAmendments, specAmendments, wavePlanEdits, retroRecords,
+    specTraceRetirements, retiredReviewRuns, specTraceAmendments, specAmendments, wavePlanEdits, retroRecords,
   } = history;
   return {
     ...(reopeningHistory === undefined ? {} : { wave_reopening_history: reopeningHistory }),
@@ -3617,6 +3676,7 @@ function historyGraphFields(history: ParsedTaskGraphHistoryFields): Partial<Task
     ...(retroRecords === undefined ? {} : { retro_records: retroRecords }),
     ...(orphanedHistory === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory }),
     ...(specTraceRetirements === undefined ? {} : { spec_trace_wave_gate_retirements: specTraceRetirements }),
+    ...(retiredReviewRuns === undefined ? {} : { retired_wave_review_runs: retiredReviewRuns }),
     ...(specTraceAmendments === undefined ? {} : { spec_trace_amendments: specTraceAmendments }),
     ...(specAmendments === undefined ? {} : { spec_amendments: specAmendments }),
     ...(wavePlanEdits === undefined ? {} : { wave_plan_edits: wavePlanEdits }),

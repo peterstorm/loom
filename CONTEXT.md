@@ -120,6 +120,14 @@ _Avoid_: Review round, retry count, packet version
 A packet-bound collection of evidence from the exact expected reviewer roster for one Task and Review Generation. It snapshots all active Finding IDs; every reviewer must assess each prior ID exactly once before atomic finalization can resolve old Findings or activate new ones.
 _Avoid_: Review Generation, Refutation Panel, reviewer batch (without the binding)
 
+**Subject Digest**:
+The digest of everything a Task's Wave reviewer packets present except its Findings: protocol, roster, description, plan context, Requirement trace, files, Review Generation, proof, test result, owner map, contract surface and the reviewed bytes. A Review Run records it; its acceptance seals it with the Finding IDs it left, active and refuted. An accepted review carries into another run only while it is unchanged (ADR-0090).
+_Avoid_: Packet digest (one request's context), workspace head (the bytes alone), authority digest (the whole Wave's snapshot)
+
+**Successor Carry**:
+A fresh Wave Gate start carrying, without reissuing, the whole-roster acceptance of each Task whose Subject Digest is unchanged since the retired run it succeeds (abandoned, or completed and reopened) accepted it. It rests on a protected retired-run record; `--fresh-review` turns it off. A restart's carry of the same evidence is Carried Review Evidence (ADR-0089).
+_Avoid_: Re-review skip, cached review, review reuse
+
 **Review Packet**:
 A canonical immutable snapshot binding one Task to its base and head revisions, exact path scope, diffs, postimages, plan context and Proof Obligations. The sole review scope; an empty scope fails rather than broadening to the Wave. Its hashes prove integrity; its registration in protected Task state at publication proves the engine issued it.
 _Avoid_: File list, live diff, review context, fallback scope, self-authenticating recovery packet; for its registration: packet hash, packet signature, inferred provenance
