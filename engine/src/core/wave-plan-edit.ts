@@ -1,6 +1,6 @@
 /**
  * The audited plan edits a TaskGraph carries in `wave_plan_edits` (loom#198
- * Cause 3; ADR-0081, ADR-0084). This leaf module is the one home of an edit's
+ * Cause 3; ADR-0081, ADR-0086). This leaf module is the one home of an edit's
  * invariants: the commands that write one (`core/task-rescope.ts`,
  * `core/task-dependency-edit.ts`, `core/task-addition.ts`) and the State File
  * parser that reads one back both build it through the constructor of its

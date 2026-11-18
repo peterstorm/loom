@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { encodeByteSection } from "../../../../src/core/context-packets";
-import { CURRENT_REVIEWER_PROTOCOL } from "../../../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../../../../src/core/reviewer-contract";
 import { STANDALONE_READ_COVERAGE_V1 } from "../../../../src/core/standalone-read-coverage";
 import { STANDALONE_REVIEWER_PROTOCOL_V3 } from "../../../../src/core/standalone-lineage-contract";
 import { readObligated, type RegisteredStandaloneProgram } from "../../../../src/handlers/helpers/programs/registration";
@@ -18,7 +18,7 @@ const INPUT = Object.freeze({ kind: "code" as const, files: null, dryRun: false 
 
 const V1: RegisteredStandaloneProgram = { schemaVersion: 1, kind: "standalone-review", input: INPUT, authority: {} };
 const V2: RegisteredStandaloneProgram = {
-  schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL, kind: "standalone-review", input: INPUT, authority: {},
+  schemaVersion: 2, reviewerProtocol: REVIEWER_PROTOCOL_V2, kind: "standalone-review", input: INPUT, authority: {},
 };
 const V2_WITH_COVERAGE: RegisteredStandaloneProgram = { ...V2, schemaVersion: 2, readCoverage: STANDALONE_READ_COVERAGE_V1 };
 

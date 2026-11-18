@@ -35,7 +35,7 @@ import {
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import { parseRequestId } from "../../../../src/core/orchestration-contract/identity";
 import { buildContextPacket, buildStandaloneReviewerContextPacketV3, encodeByteSection } from "../../../../src/core/context-packets";
-import { CURRENT_REVIEWER_PROTOCOL } from "../../../../src/core/reviewer-contract";
+import { WAVE_REVIEWER_PROTOCOL_V4 } from "../../../../src/core/reviewer-contract";
 import { STANDALONE_REVIEWER_PROTOCOL_V3 } from "../../../../src/core/standalone-lineage-contract";
 import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
 import { type RegisteredWaveGateProgram } from "../../../../src/core/wave-gate-program";
@@ -249,11 +249,13 @@ describe("the wave-gate program path projects the frozen issued route (T6)", () 
     if (parsed.kind !== "registered" || parsed.program.kind !== "wave-gate") {
       throw new Error("fixture wave-gate registration unavailable");
     }
+    // A Wave Gate started from now on registers reviewer protocol v4 (ADR-0084).
+    expect(parsed.program.reviewerProtocol).toEqual(WAVE_REVIEWER_PROTOCOL_V4);
     const reviewer = reviewers[0]!;
     const waveAuthority = mustAuthority(reviewer.authority);
     const suppliedRegistration: RegisteredWaveGateProgram = Object.freeze({
       schemaVersion: 2,
-      reviewerProtocol: CURRENT_REVIEWER_PROTOCOL,
+      reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4,
       kind: "wave-gate",
       input: Object.freeze({ wave: parsed.program.input.wave }),
       taskIds: parsed.program.taskIds,
@@ -271,7 +273,7 @@ describe("the wave-gate program path projects the frozen issued route (T6)", () 
 });
 
 describe("positive program-path issuance through a Pi parent (T6)", () => {
-  it("issues every Wave reviewer under its catalog profile on the local route with a v2 descriptor and tool-primary instruction, whatever model the Pi parent runs", async () => {
+  it("issues every Wave reviewer under its catalog profile on the local route with a v4 descriptor and tool-primary instruction, whatever model the Pi parent runs", async () => {
     const project = waveEmissionProject();
     const started = await startFacadeProgram(project, "wave-gate", "run.local-wave", { wave: 1 }, "pi", CLOUD_PI_PARENT_MODEL_ENV);
     const requests = spawnBatchRequests(started);
@@ -289,6 +291,9 @@ describe("positive program-path issuance through a Pi parent (T6)", () => {
         if (descriptor.kind !== "issued") continue;
         expect(descriptor.contextDigest).toBe(authority.contextDigest);
         expect(descriptor.binding.requestId).toBe(authority.requestId);
+        // A fresh Wave Gate issues the v4 cell (ADR-0084), never v2.
+        expect(descriptor.binding.version).toBe("v4");
+        expect(descriptor.binding.schemaDigest).toBe(WAVE_REVIEWER_PROTOCOL_V4.schemaDigest);
         expect(task).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
         expect(readPiIssuedSpawnRequest("019fca39-f989-7510-8e62-50dadbcad4ff", authority.requestId, authority.contextDigest, authority.role))
           .toMatchObject({ ok: true, value: { route: { kind: "emission" } } });
@@ -329,8 +334,8 @@ describe("the Pi issuance read behind the spawn admission port (T6)", () => {
         role: "code-reviewer",
         claim: {
           requestId: authority.requestId, contextDigest: authority.contextDigest,
-          producerKind: "reviewer-payload", version: "v2",
-          schemaDigest: CURRENT_REVIEWER_PROTOCOL.schemaDigest,
+          producerKind: "reviewer-payload", version: "v4",
+          schemaDigest: WAVE_REVIEWER_PROTOCOL_V4.schemaDigest,
         },
       } });
       expect(readPiIssuedSpawnRequest("019fca39-f989-7510-8e62-50dadbcad4ff", REVIEWER_V2.requestId, authority.contextDigest, authority.role).ok).toBe(false);

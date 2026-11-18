@@ -1,5 +1,5 @@
 /**
- * The sealed-Wave scenario the add-task suites share (ADR-0084): Wave 1
+ * The sealed-Wave scenario the add-task suites share (ADR-0086): Wave 1
  * completed (T1 wrote `src/serve.ts`, T2 wrote `src/recompute.ts`), Wave 2
  * active with T3, a budget judge whose first attempt failed, and an unrelated
  * pending T4. Proven by the State File parser, so it is a graph the engine

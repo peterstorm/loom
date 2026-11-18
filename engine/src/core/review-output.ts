@@ -65,8 +65,8 @@ import {
 } from "./findings";
 import { parseReviewPath } from "./review-packet";
 import { parseContextPacket, type ContextPacket, type LegacyContextPacket, type ReviewerContextPacketV2 } from "./context-packets";
-import { parseReviewerPayloadV2, renderReviewerPayloadDiagnostic } from "./reviewer-protocol";
-import { parseReviewerProtocolDescriptor, REVIEWER_PAYLOAD_LIMITS, type ReviewerProtocolDescriptor, type ReviewerProtocolFailure } from "./reviewer-contract";
+import { parseReviewerPayloadV2, parseWaveReviewerPayloadV4, renderReviewerPayloadDiagnostic } from "./reviewer-protocol";
+import { parseReviewerProtocolDescriptorFor, REVIEWER_PAYLOAD_LIMITS, type ReviewerDraftV2, type ReviewerProtocolDescriptor, type ReviewerProtocolFailure, type WaveReviewerPayloadV4 } from "./reviewer-contract";
 import { acceptedAgentResult, boundedThrownCause, canonicalStructuralEquals, type AgentRequestAuthority, type DomainResult, type OrchestrationRunId, type SpawnRequest } from "./orchestration-contract";
 import { readWaveReviewContext } from "./wave-review-authority";
 import { readExactDataRecord } from "./orchestration-contract/bytes";
@@ -154,15 +154,20 @@ function packetReviewerSubject(packet: ContextPacket, request: AgentRequestAutho
   });
 }
 
-function currentPriorRosterIsRepresentable(subject: Extract<ReviewerSubjectBinding, { kind: "wave-review" }>): boolean {
+function currentPriorRosterIsRepresentable(
+  subject: Extract<ReviewerSubjectBinding, { kind: "wave-review" }>, descriptor: ReviewerProtocolDescriptor,
+): boolean {
   const encoder = new TextEncoder();
   if (subject.priorFindingIds.length > REVIEWER_PAYLOAD_LIMITS.priorFindings || subject.priorFindingIds.some((id) =>
     id.includes("\0") || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(id) ||
     encoder.encode(id).length > REVIEWER_PAYLOAD_LIMITS.reference)) return false;
   // A byte-size lower bound, not an assessment or an admitted evidence value.
-  const minimum = JSON.stringify({ schemaVersion: 2, kind: "wave-review", packetId: subject.packetId, generation: subject.generation,
-    prior_findings: subject.priorFindingIds.map((finding_id) => ({ finding_id, verdict: "still_present", reason: "x" })), findings: [],
-  });
+  // The v4 envelope carries no packet identity, so it is sized without it.
+  const prior_findings = subject.priorFindingIds.map((finding_id) => ({ finding_id, verdict: "still_present", reason: "x" }));
+  const minimum = JSON.stringify(match(descriptor.version)
+    .with(2, () => ({ schemaVersion: 2, kind: "wave-review", packetId: subject.packetId, generation: subject.generation, prior_findings, findings: [] }))
+    .with(4, () => ({ schemaVersion: 4, kind: "wave-review", prior_findings, findings: [] }))
+    .exhaustive());
   return encoder.encode(minimum).length <= REVIEWER_PAYLOAD_LIMITS.bytes;
 }
 
@@ -191,7 +196,7 @@ export function parseIssuedReviewerProtocol(input: Readonly<{
         registration.program !== request.program || registration.schemaVersion !== packet.schemaVersion) {
       return protocolFailure("authority-mismatch", "/registration", "registration and issued request protocol must agree");
     }
-    if (registration.schemaVersion === 2 && (!parseReviewerProtocolDescriptor(registration.reviewerProtocol).ok ||
+    if (registration.schemaVersion === 2 && (!parseReviewerProtocolDescriptorFor(request.program === "wave-gate" ? "wave-gate" : "standalone-review", registration.reviewerProtocol).ok ||
         packet.schemaVersion !== 2 || !canonicalStructuralEquals(registration.reviewerProtocol, packet.reviewerProtocol))) {
       return protocolFailure("authority-mismatch", "/registration/reviewerProtocol", "current registration requires the exact supported descriptor");
     }
@@ -201,7 +206,7 @@ export function parseIssuedReviewerProtocol(input: Readonly<{
           const parsedPath = parseReviewPath(path, "review scope");
           return !parsedPath.ok || parsedPath.value !== path;
         }) || (subject.kind === "wave-review" && (new Set(subject.priorFindingIds).size !== subject.priorFindingIds.length ||
-          (packet.schemaVersion === 2 && !currentPriorRosterIsRepresentable(subject))))) {
+          (packet.schemaVersion === 2 && !currentPriorRosterIsRepresentable(subject, packet.reviewerProtocol))))) {
       return protocolFailure("authority-mismatch", "/subject", "published subject must match full scope and ordered prior roster");
     }
     const version: IssuedProtocolVersion = packet.schemaVersion === 2
@@ -222,11 +227,47 @@ export type LegacyWaveReviewerEvidence = Readonly<{ kind: "wave-review"; protoco
 export type CurrentWaveReviewerEvidence = Readonly<{ kind: "wave-review"; protocolVersion: 2; findings: CurrentParsedFindings; bound: BoundReviewEvidence }>;
 export type ParsedReviewerEvidence = LegacyStandaloneReviewerEvidence | CurrentStandaloneReviewerEvidence | LegacyWaveReviewerEvidence | CurrentWaveReviewerEvidence;
 
+/**
+ * The current payload, decoded by the decoder its issued descriptor selects,
+ * as one admission shape. A v2 Wave payload states its packet identity, which
+ * must equal the issued subject; a v4 Wave payload carries none (ADR-0084), so
+ * there is nothing to compare and the subject alone binds it.
+ */
+type CurrentPayload =
+  | Readonly<{ kind: "standalone-review"; findings: readonly ReviewerDraftV2[] }>
+  | Readonly<{ kind: "wave-review"; findings: readonly ReviewerDraftV2[];
+      prior_findings: WaveReviewerPayloadV4["prior_findings"];
+      statedIdentity: Readonly<{ packetId: string; generation: number }> | null }>;
+
+function decodeWavePayloadV4(rawBytes: Uint8Array): DomainResult<CurrentPayload, ReviewerProtocolFailure> {
+  const parsed = parseWaveReviewerPayloadV4(rawBytes);
+  return parsed.ok
+    ? { ok: true, value: { kind: "wave-review", findings: parsed.value.findings, prior_findings: parsed.value.prior_findings, statedIdentity: null } }
+    : parsed;
+}
+
+function decodePayloadV2(rawBytes: Uint8Array): DomainResult<CurrentPayload, ReviewerProtocolFailure> {
+  const parsed = parseReviewerPayloadV2(rawBytes);
+  if (!parsed.ok) return parsed;
+  const payload = parsed.value;
+  return { ok: true, value: payload.kind === "wave-review"
+    ? { kind: "wave-review", findings: payload.findings, prior_findings: payload.prior_findings,
+        statedIdentity: { packetId: payload.packetId, generation: payload.generation } }
+    : { kind: "standalone-review", findings: payload.findings } };
+}
+
+function decodeCurrentPayload(descriptor: ReviewerProtocolDescriptor, rawBytes: Uint8Array): DomainResult<CurrentPayload, ReviewerProtocolFailure> {
+  return match(descriptor.version)
+    .with(2, () => decodePayloadV2(rawBytes))
+    .with(4, () => decodeWavePayloadV4(rawBytes))
+    .exhaustive();
+}
+
 function parseCurrentReviewerEvidence(
   authority: Extract<IssuedReviewerProtocol, { protocolVersion: 2 }>,
   rawBytes: Uint8Array,
 ): DomainResult<CurrentStandaloneReviewerEvidence | CurrentWaveReviewerEvidence, ReviewerProtocolFailure> {
-  const parsed = parseReviewerPayloadV2(rawBytes);
+  const parsed = decodeCurrentPayload(authority.reviewerProtocol, rawBytes);
   if (!parsed.ok) return parsed;
   const payload = parsed.value;
   const subject = authority.subject;
@@ -253,7 +294,8 @@ function parseCurrentReviewerEvidence(
     advisoryCount: counts.advisory, blockStatus: Object.freeze({ kind: "json" }),
   });
   if (payload.kind === "wave-review" && subject.kind === "wave-review") {
-    if (payload.packetId !== subject.packetId || payload.generation !== subject.generation) {
+    const stated = payload.statedIdentity;
+    if (stated !== null && (stated.packetId !== subject.packetId || stated.generation !== subject.generation)) {
       return protocolFailure("binding-mismatch", "/packetId", "payload packet and generation must match issuance");
     }
     if (payload.prior_findings.length !== subject.priorFindingIds.length ||

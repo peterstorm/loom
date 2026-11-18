@@ -17,9 +17,11 @@ import {
   type IssuedEmissionBinding,
 } from "../../src/core/emission-tool";
 import { producerKindsOfAgent, type PayloadProducerKindName } from "../../src/core/agent-catalog-projections";
-import { REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_SCHEMA_V2 } from "../../src/core/reviewer-contract";
+import {
+  REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_SCHEMA_V2, WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4,
+} from "../../src/core/reviewer-contract";
 import { judgeVerdictV1Schema } from "../../src/core/panel-contract";
-import { parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3 } from "../../src/core/reviewer-protocol";
+import { parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3, parseWaveReviewerPayloadV4 } from "../../src/core/reviewer-protocol";
 import {
   validJudgeArguments,
   validRefutationArguments,
@@ -37,6 +39,7 @@ function mintedBinding<K extends PayloadProducerKindName>(kind: K, version: Emis
 
 const REVIEWER_V2 = mintedBinding("reviewer-payload", "v2");
 const REVIEWER_V3 = mintedBinding("reviewer-payload", "v3");
+const REVIEWER_V4 = mintedBinding("reviewer-payload", "v4");
 const JUDGE_V1 = mintedBinding("judge-verdict", "v1");
 const REFUTATION_V1 = mintedBinding("refutation-verdict", "v1");
 
@@ -96,7 +99,7 @@ describe("EMISSION_TOOL_SPECS", () => {
   });
 
   it("carries the frozen schema versions per kind", () => {
-    expect(Object.keys(EMISSION_TOOL_SPECS["reviewer-payload"].schemaVersions).sort()).toEqual(["v2", "v3"]);
+    expect(Object.keys(EMISSION_TOOL_SPECS["reviewer-payload"].schemaVersions).sort()).toEqual(["v2", "v3", "v4"]);
     expect(Object.keys(EMISSION_TOOL_SPECS["judge-verdict"].schemaVersions)).toEqual(["v1"]);
     expect(Object.keys(EMISSION_TOOL_SPECS["refutation-verdict"].schemaVersions)).toEqual(["v1"]);
   });
@@ -107,6 +110,7 @@ describe("EMISSION_TOOL_SPECS", () => {
     // identity is what stops a second, divergent parse from being minted.
     expect(EMISSION_TOOL_SPECS["reviewer-payload"].schemaVersions["v2"]?.parsePayload).toBe(parseReviewerPayloadV2);
     expect(EMISSION_TOOL_SPECS["reviewer-payload"].schemaVersions["v3"]?.parsePayload).toBe(parseStandaloneReviewerPayloadV3);
+    expect(EMISSION_TOOL_SPECS["reviewer-payload"].schemaVersions["v4"]?.parsePayload).toBe(parseWaveReviewerPayloadV4);
   });
 
   it("is frozen at every level — a runtime push would widen the spec behind every proof that reads it", () => {
@@ -137,6 +141,19 @@ describe("admitIssuedEmissionArguments — the ONE admission under an issued bin
     if (admitted.kind === "valid") {
       expect(canonicalStructuralEquals(admitted.payload, payload)).toBe(true);
     }
+  });
+
+  it("admits valid Wave v4 arguments through the registry's v4 parser, and refuses a v4 payload that echoes packet identity (ADR-0084)", () => {
+    const admitted = admitIssuedEmissionArguments(REVIEWER_V4, WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4);
+    expect(admitted.kind).toBe("valid");
+    if (admitted.kind === "valid") {
+      expect(canonicalStructuralEquals(admitted.payload, WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4)).toBe(true);
+    }
+    const echoed = admitIssuedEmissionArguments(REVIEWER_V4, {
+      ...WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4, packetId: "3f".repeat(32), generation: 0,
+    });
+    expect(echoed.kind).toBe("refused");
+    if (echoed.kind === "refused") expect(echoed.code).toBe("invalid-payload");
   });
 
   it("admits valid judge-verdict arguments — shape, score domain, prose sanitization", () => {
@@ -257,7 +274,7 @@ describe("admitIssuedEmissionArguments — the ONE admission under an issued bin
   });
 
   it("registers exactly the binding cell's frozen parameters — the one lookup both shells read", () => {
-    for (const binding of [REVIEWER_V2, REVIEWER_V3, JUDGE_V1, REFUTATION_V1]) {
+    for (const binding of [REVIEWER_V2, REVIEWER_V3, REVIEWER_V4, JUDGE_V1, REFUTATION_V1]) {
       const spec: EmissionToolSpec = EMISSION_TOOL_SPECS[binding.kind.kind];
       const cell = spec.schemaVersions[binding.version];
       expect(issuedEmissionParameters(binding)).toEqual(frozenPayloadSchemaParameters(cell!.schemaBytes));

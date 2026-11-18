@@ -210,7 +210,7 @@ describe("admitPiSpawnBatch emission expectations", () => {
   });
 
   it("blocks a batch on an unusable descriptor under the emission guard", () => {
-    const broken = emissionTask("code-reviewer", REVIEWER_V2).replace(" v2 ", " v4 ");
+    const broken = emissionTask("code-reviewer", REVIEWER_V2).replace(" v2 ", " v9 ");
     const admission = admitPiSpawnBatch(
       { agent: "code-reviewer", task: broken },
       allowPorts({ readIssuedRequest: issuedFor("code-reviewer", REVIEWER_V2) }),

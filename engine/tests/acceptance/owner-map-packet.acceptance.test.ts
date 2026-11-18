@@ -23,7 +23,7 @@ import type { ContextPacket } from "../../src/core/context-packets";
 import { parseOrchestrationRunId } from "../../src/core/orchestration-contract";
 import { OWNER_MAP_SECTION } from "../../src/core/owner-verification/owner-map";
 import type { OwnerObligation } from "../../src/core/owner-verification/types";
-import { CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import {
   prepareWaveReviewBatch,
   type WaveRequestBatch,
@@ -79,7 +79,7 @@ function stampedGraph(obligations: readonly OwnerObligation[]): TaskGraph {
 
 const registration: WaveReviewRegistrationAuthority = {
   schemaVersion: 2,
-  reviewerProtocol: CURRENT_REVIEWER_PROTOCOL,
+  reviewerProtocol: REVIEWER_PROTOCOL_V2,
   kind: "wave-gate",
   input: { wave: 1 },
   taskIds: ["T1"],

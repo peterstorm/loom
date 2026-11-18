@@ -1,6 +1,6 @@
 /**
  * Adding a Task to the active Wave, and withdrawing one never dispatched
- * (ADR-0084). The new Task joins the active Wave, completed Waves stay
+ * (ADR-0086). The new Task joins the active Wave, completed Waves stay
  * untouched, and its order against the Wave's other Tasks is ordinary
  * dependency data the one dispatch-hold rule enforces. A Forward Fix an older
  * State File carries (ADR-0077) is still loaded, and its hold is read as a

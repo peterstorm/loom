@@ -20,6 +20,7 @@ import { captureLoomRuntimeIdentity } from "../../src/runtime-compatibility";
 import { renderPiAgentDefinition } from "../../src/utils/render-pi-agent";
 import { emissionToolPrimaryInstruction, projectEmissionTaskText } from "../../src/core/issued-emission-capability";
 import { issueEmissionBinding } from "../../src/core/emission-tool";
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import { canonicalRecord, parseRequestId, success } from "../../src/core/orchestration-contract/identity";
 import loomPiExtension from "../../../pi/extension";
 import {
@@ -89,7 +90,7 @@ const publishedParentSpawnFixture = async (label: string): Promise<PublishedPare
       requiredSkill: "none",
       fixedContext: Object.freeze([section]),
       variableContext: Object.freeze([]),
-    }));
+    }, REVIEWER_PROTOCOL_V2));
   });
   const packet = packets[0]!;
   const prepared = value(prepareFreshStandaloneReview({

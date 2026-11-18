@@ -142,7 +142,7 @@ import {
   parseFrozenVerificationManifest,
   type FrozenVerificationManifest,
 } from "./core/verification-manifest";
-import { parseReviewerProtocolDescriptor } from "./core/reviewer-contract";
+import { parseWaveReviewerProtocolDescriptor } from "./core/reviewer-contract";
 import { parseTestEvidenceField, type EngineRunTestEvidence } from "./core/test-evidence-authority";
 import { PHASE_ORDER } from "./config";
 import { KNOWN_AGENTS, REVIEW_SUB_AGENTS } from "./core/agent-catalog-projections";
@@ -1070,7 +1070,7 @@ const isStringArray = (raw: unknown): raw is readonly string[] => Array.isArray(
 
 /**
  * What a plan edit may name: the roster, and the Tasks `withdraw-task` removed
- * from it (ADR-0084), whose earlier edits stay in the history.
+ * from it (ADR-0086), whose earlier edits stay in the history.
  */
 type PlanEditRoster = Readonly<{ tasks: readonly Record<string, unknown>[]; withdrawn: ReadonlySet<string> }>;
 
@@ -1151,7 +1151,7 @@ const TASK_ADDED_EDIT_FIELDS = [
   "schemaVersion", "kind", "wave", "taskId", "files", "dependsOn", "dependents", "reason", "abandonedRunId",
 ] as const;
 
-/** A `task-added` edit (ADR-0084), built by the one constructor (`core/wave-plan-edit.ts`); its edges name known Tasks. */
+/** A `task-added` edit (ADR-0086), built by the one constructor (`core/wave-plan-edit.ts`); its edges name known Tasks. */
 function parseTaskAddedEdit(record: Record<string, unknown>, label: string, roster: PlanEditRoster): ParseResult<WavePlanEdit> {
   const header = parsePlanEditHeader(record, TASK_ADDED_EDIT_FIELDS, ["sealed"], label, roster);
   if (!header.ok) return header;
@@ -1178,7 +1178,7 @@ function parseTaskAddedEdit(record: Record<string, unknown>, label: string, rost
 
 const TASK_WITHDRAWN_EDIT_FIELDS = ["schemaVersion", "kind", "wave", "taskId", "reason", "abandonedRunId"] as const;
 
-/** A `task-withdrawn` edit (ADR-0084), built by the one constructor (`core/wave-plan-edit.ts`). */
+/** A `task-withdrawn` edit (ADR-0086), built by the one constructor (`core/wave-plan-edit.ts`). */
 function parseTaskWithdrawnEdit(record: Record<string, unknown>, label: string, roster: PlanEditRoster): ParseResult<WavePlanEdit> {
   const header = parsePlanEditHeader(record, TASK_WITHDRAWN_EDIT_FIELDS, [], label, roster);
   if (!header.ok) return header;
@@ -1484,7 +1484,7 @@ export function orphanExecutionReservationError(
 /**
  * The same-Wave edges `wave_plan_edits` records, as `"<task>→<dependency>"`
  * keys: those `add-dependency` added (ADR-0081), and an added Task's own edges
- * and its dependents' edges to it (`add-task`, ADR-0084). Only an audited edit
+ * and its dependents' edges to it (`add-task`, ADR-0086). Only an audited edit
  * makes a same-Wave edge legal; a decompose payload carries none.
  */
 export function auditedSameWaveEdges(rawEdits: unknown): ReadonlySet<string> {
@@ -1905,7 +1905,7 @@ function taskPacketError(
     const fields = Object.keys(authority).sort();
     const allowed = ["generation", "packet_id", "head_sha", "scope", "run_id", "authority_digest", "reviewer_protocol"];
     if (Object.hasOwn(authority, "reviewer_protocol") &&
-        (!parseReviewerProtocolDescriptor(authority.reviewer_protocol).ok || authority.run_id === undefined ||
+        (!parseWaveReviewerProtocolDescriptor(authority.reviewer_protocol).ok || authority.run_id === undefined ||
           authority.authority_digest === undefined)) {
       return `tasks[${index}] ("${id}"): current accepted_review_authority requires supported descriptor and run authority`;
     }

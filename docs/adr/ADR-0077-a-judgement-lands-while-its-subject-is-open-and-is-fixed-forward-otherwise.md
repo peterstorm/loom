@@ -2,7 +2,7 @@
 
 ## Status
 Accepted (2026-11-16). The Forward Fix fallback is superseded by
-[ADR-0084](ADR-0084-a-task-joins-the-active-wave-through-a-plan-edit.md): `add-task` appends the fix with ordinary
+[ADR-0086](ADR-0086-a-task-joins-the-active-wave-through-a-plan-edit.md): `add-task` appends the fix with ordinary
 dependencies. Judged Paths (prevention) stand.
 
 ## Context

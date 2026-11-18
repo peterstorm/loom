@@ -13,7 +13,7 @@
  *   until they settle their implementation (ADR-0081). A blocker that reached
  *   terminal escalation is named as such: the dependent is blocked, not waiting.
  *   A Forward Fix audit an older State File carries (ADR-0077, retired by
- *   ADR-0084) is read the same way: each held Task depends on its fix Task.
+ *   ADR-0086) is read the same way: each held Task depends on its fix Task.
  *
  * Pure module: no I/O, no clock, no randomness.
  */

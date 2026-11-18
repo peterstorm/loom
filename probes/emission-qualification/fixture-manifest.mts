@@ -27,7 +27,9 @@ import {
   type EmissionSchemaVersion,
   type EmissionToolSpec,
 } from "../../engine/src/core/emission-tool";
-import { REVIEWER_PAYLOAD_EXAMPLE_V2, reviewerPayloadV2Schema } from "../../engine/src/core/reviewer-contract";
+import {
+  REVIEWER_PAYLOAD_EXAMPLE_V2, WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4, reviewerPayloadV2Schema, waveReviewerPayloadV4Schema,
+} from "../../engine/src/core/reviewer-contract";
 import { judgeVerdictV1Schema } from "../../engine/src/core/panel-contract";
 import { isRecord } from "../../engine/src/core/plain-record";
 import { refutationVerdictV1Schema } from "../../engine/src/core/review-panel";
@@ -52,6 +54,7 @@ const v3 = standaloneReviewerPayloadV3Schema.parse({
   priorAssessments: [],
   findings: [],
 });
+const v4 = waveReviewerPayloadV4Schema.parse(WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4);
 const judge = judgeVerdictV1Schema.parse({
   criterion: "extensibility",
   rankings: [
@@ -238,6 +241,7 @@ const pinDetectors = (label: string, spec: PreparedSpec): void => {
 const cells: readonly Readonly<{ kind: ProbedKind; version: EmissionSchemaVersion; fixture: unknown }>[] = [
   { kind: "reviewer-payload", version: "v2", fixture: v2 },
   { kind: "reviewer-payload", version: "v3", fixture: v3 },
+  { kind: "reviewer-payload", version: "v4", fixture: v4 },
   { kind: "judge-verdict", version: "v1", fixture: judge },
   { kind: "refutation-verdict", version: "v1", fixture: refutation },
 ];

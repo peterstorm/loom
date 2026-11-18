@@ -101,11 +101,16 @@ describe("current reviewer runbooks preserve protocol and decision boundaries", 
     expect(text).toContain('`jsonc-parser: "3.3.1"`');
     expect(text).toContain("no blanket package/core allowlist");
     expect(text).toContain("not invented original provenance");
-    // The Status is one line: the decision shipped with PR #49, and its
-    // successor (ADR-0010) shipped with PR #51, so nothing is pending.
+    // The Status is one paragraph: the decision shipped with PR #49, its
+    // successor (ADR-0010) shipped with PR #51, so nothing is pending; and
+    // ADR-0084 supersedes only the Wave packet/generation join.
     expect(text).toContain(
       "## Status Accepted (2026-09-10). Implemented; merged in PR #49 (`96153edc3dd755b4ac648ed48920b6670753c5a6`). " +
-        "Successor: [ADR-0010](ADR-0010-standalone-finding-lineage.md). ## Context",
+        "Successor: [ADR-0010](ADR-0010-standalone-finding-lineage.md). " +
+        "The exact packet/generation join of a Wave payload is superseded by " +
+        "[ADR-0084](ADR-0084-wave-reviewer-payloads-carry-no-packet-identity.md): " +
+        "a Wave Gate registered under v4 binds both from the issued subject. " +
+        "Prior assessments and the final attempt 2 stand. ## Context",
     );
     expect(text).not.toContain("remain pending");
   });

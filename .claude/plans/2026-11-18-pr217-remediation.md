@@ -24,7 +24,7 @@ The main fixes:
 - **Released Tasks are reported** (silent-failure-hunter-1). The withdrawal outcome lists the Tasks it released, and the report names them.
 - **No invariant throws** (silent-failure-hunter-3, type-design-analyzer-1, architecture-tech-lead-3). A request the edit constructors reject now gets a typed `invalid-request` refusal.
 - **Smaller signature.** `pathAdmissionRefusal` now works out the completed Waves from the graph itself.
-- **Docs.** The `WavePlanEdit` doc names all four edit kinds, and ADR-0081 now says in the past tense that ADR-0084 retired the holds.
+- **Docs.** The `WavePlanEdit` doc names all four edit kinds, and ADR-0081 now says in the past tense that ADR-0086 retired the holds.
 - **Tests:**
   - retro facts for added Tasks;
   - the parser table for legacy withdrawals;

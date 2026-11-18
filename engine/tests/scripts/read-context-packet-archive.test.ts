@@ -14,6 +14,7 @@ import { join, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 import { buildReviewerContextPacket, buildStandaloneReviewerContextPacketV3, encodeByteSection, type ByteSection } from "../../src/core/context-packets";
 import { sha256Bytes } from "../../src/core/digest";
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import { parseRequestId, type RequestId } from "../../src/core/orchestration-contract";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { value } from "../fixtures/parse-result";
@@ -29,7 +30,7 @@ const section = (label: string, text: string): ByteSection => value(encodeByteSe
 
 // The predecessor: an issued v2 reviewer packet, stored as its exact file bytes.
 const predecessor = value(buildReviewerContextPacket({ requestId: requestId("prior"), role: ROLE, requiredSkill: "review",
-  fixedContext: [], variableContext: [section("prior-notes", "the predecessor's retained notes")] }));
+  fixedContext: [], variableContext: [section("prior-notes", "the predecessor's retained notes")] }, REVIEWER_PROTOCOL_V2));
 const predecessorBytes = Buffer.from(JSON.stringify(predecessor));
 const predecessorPath = join(root, "predecessor.json");
 writeFileSync(predecessorPath, predecessorBytes);

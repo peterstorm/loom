@@ -1,5 +1,5 @@
 /**
- * The `helper orchestration add-task` and `withdraw-task` shells (ADR-0084):
+ * The `helper orchestration add-task` and `withdraw-task` shells (ADR-0086):
  * route traits, the quiescence protocol, a committed change the loader
  * accepts, and refusals that leave the State File untouched. The decisions
  * themselves are pinned in tests/core/task-addition.test.ts.

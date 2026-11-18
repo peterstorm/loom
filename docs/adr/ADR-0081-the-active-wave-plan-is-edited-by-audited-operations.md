@@ -43,7 +43,7 @@ Once a TaskGraph is populated, the operator could change the active Wave's plan 
   refuses one. The `task-rescoped` audit records the sealed additions.
 
 Forward Fix holds were retired in favour of these operations by
-[ADR-0084](ADR-0084-a-task-joins-the-active-wave-through-a-plan-edit.md) (loom#199, Cause 2, second part).
+[ADR-0086](ADR-0086-a-task-joins-the-active-wave-through-a-plan-edit.md) (loom#199, Cause 2, second part).
 
 ## Consequences
 - An operator orders a Wave's Tasks with edges the engine enforces and audits.

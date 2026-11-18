@@ -59,6 +59,7 @@ import {
   REGISTRY_CELLS,
   REVIEWER_V2,
   REVIEWER_V3,
+  REVIEWER_V4,
   spawnItem,
 } from "../fixtures/issued-emission";
 import { value } from "../fixtures/parse-result";
@@ -111,6 +112,15 @@ const qualifiedRoute = issuedPiRoute(DESKTOP_VLLM_ROUTE.provider, DESKTOP_VLLM_R
 /** The archived schema-1 reviewer claim for the v2 fixture's request, built
  *  through the production claim constructor — one archived claim every
  *  archived-route test shares. */
+/** The current registered reviewer programs, each carrying its (registration
+ *  schema, descriptor version) pair as ONE literal value, so only a pair the
+ *  engine's union admits (schema 2 ↔ v2|v4, schema 3 ↔ v3) compiles. */
+const CURRENT_REVIEWER_PROGRAMS = [
+  { program: { schemaVersion: 2, reviewerProtocol: { version: 2, schemaDigest: REVIEWER_V2.schemaDigest } }, binding: REVIEWER_V2 },
+  { program: { schemaVersion: 2, reviewerProtocol: { version: 4, schemaDigest: REVIEWER_V4.schemaDigest } }, binding: REVIEWER_V4 },
+  { program: { schemaVersion: 3, reviewerProtocol: { version: 3, schemaDigest: REVIEWER_V3.schemaDigest } }, binding: REVIEWER_V3 },
+] as const;
+
 const ARCHIVED_V1_CLAIM: IssuedProducerClaim = issuedReviewerPayloadClaim(
   { schemaVersion: 1 },
   { requestId: REVIEWER_V2.requestId, contextDigest: CONTEXT_DIGEST },
@@ -188,7 +198,7 @@ describe("issued emission descriptor render/parse", () => {
   );
   malformed(
     "a schema version outside the closed vocabulary",
-    `${EMISSION_DESCRIPTOR_MARKER}: loom_emit_reviewer_payload reviewer-payload v4 ${REVIEWER_V2.requestId} ${CONTEXT_DIGEST} ${REVIEWER_V2.schemaDigest}\n`,
+    `${EMISSION_DESCRIPTOR_MARKER}: loom_emit_reviewer_payload reviewer-payload v9 ${REVIEWER_V2.requestId} ${CONTEXT_DIGEST} ${REVIEWER_V2.schemaDigest}\n`,
     /unsupported-schema-version/,
   );
   malformed(
@@ -233,7 +243,7 @@ describe("issued emission descriptor render/parse", () => {
       code: "descriptor-fields",
     });
     expect(parseEmissionDescriptor(
-      `${EMISSION_DESCRIPTOR_MARKER}: loom_emit_reviewer_payload reviewer-payload v4 ${REVIEWER_V2.requestId} ${CONTEXT_DIGEST} ${REVIEWER_V2.schemaDigest}\n`,
+      `${EMISSION_DESCRIPTOR_MARKER}: loom_emit_reviewer_payload reviewer-payload v9 ${REVIEWER_V2.requestId} ${CONTEXT_DIGEST} ${REVIEWER_V2.schemaDigest}\n`,
     )).toMatchObject({ kind: "malformed", code: "unsupported-schema-version" });
   });
 
@@ -581,7 +591,7 @@ describe("expected spawn emission capability", () => {
   });
 
   it("refuses a malformed descriptor instead of defaulting to any tool", () => {
-    const task = emissionTask("code-reviewer", REVIEWER_V2).replace(" v2 ", " v4 ");
+    const task = emissionTask("code-reviewer", REVIEWER_V2).replace(" v2 ", " v9 ");
     const admission = renderedEmissionAdmission(
       spawnItem("code-reviewer", task),
       issuedFor("code-reviewer", REVIEWER_V2),
@@ -602,14 +612,14 @@ describe("expected spawn emission capability", () => {
 
 describe("request emission routes", () => {
 
-  it("closes issued claim typing and renders genuine v1/v2/v3 protocol paths", () => {
+  it("closes issued claim typing and renders genuine v1/v2/v3/v4 protocol paths", () => {
     type ClaimAuthority = Readonly<{
       requestId: RequestId;
       contextDigest: ContextDigest;
       producerKind: "reviewer-payload";
     }>;
     expectTypeOf<IssuedProducerClaim["requestId"]>().toEqualTypeOf<RequestId>();
-    expectTypeOf<Extract<IssuedProducerClaim, { version: "v2" | "v3" }>["schemaDigest"]>()
+    expectTypeOf<Extract<IssuedProducerClaim, { version: "v2" | "v3" | "v4" }>["schemaDigest"]>()
       .toEqualTypeOf<ArtifactDigest>();
     expectTypeOf<ClaimAuthority & { version: "v2" }>().not.toMatchTypeOf<IssuedProducerClaim>();
     expectTypeOf<ClaimAuthority & { version: "v1"; schemaDigest: string }>()
@@ -633,14 +643,10 @@ describe("request emission routes", () => {
     expect(projectEmissionTaskText(archivedRoute, "archived final-message instruction"))
       .toEqual({ descriptor: "", instruction: "archived final-message instruction", decision: archivedRoute });
 
-    for (const { schemaVersion, binding } of [
-      { schemaVersion: 2 as const, binding: REVIEWER_V2 },
-      { schemaVersion: 3 as const, binding: REVIEWER_V3 },
-    ]) {
-      const current = issuedReviewerPayloadClaim(
-        { schemaVersion, reviewerProtocol: { schemaDigest: binding.schemaDigest } },
-        { requestId: binding.requestId, contextDigest: CONTEXT_DIGEST },
-      );
+    // The descriptor's own version picks the claim (ADR-0084): a schema-2
+    // registration carrying the Wave v4 descriptor mints a v4 claim, never v2.
+    for (const { program, binding } of CURRENT_REVIEWER_PROGRAMS) {
+      const current = issuedReviewerPayloadClaim(program, { requestId: binding.requestId, contextDigest: CONTEXT_DIGEST });
       expect(current).toMatchObject({ version: binding.version, schemaDigest: binding.schemaDigest });
       const route = decideRequestEmissionRoute(current, providedEmissionCapability(binding.schemaDigest));
       expect(route.kind).toBe("emission");
@@ -841,14 +847,14 @@ describe("request emission routes", () => {
 
   it("never routes a deliberately forged unsupported claim to emission for any capability arm", () => {
     fc.assert(fc.property(fc.constantFrom(...REGISTRY_CELLS), (binding) => {
-      // Trust-boundary negative control: v4 is intentionally impossible in
+      // Trust-boundary negative control: v9 is intentionally impossible in
       // IssuedProducerClaim, so the cast explicitly forges the bad runtime
       // input whose fail-closed behavior this test preserves.
       const unsupported = Object.freeze({
         requestId: binding.requestId,
         contextDigest: CONTEXT_DIGEST,
         producerKind: binding.kind.kind,
-        version: "v4",
+        version: "v9",
       }) as unknown as IssuedProducerClaim;
       const arms: readonly EmissionToolCapability[] = [
         providedEmissionCapability(binding.schemaDigest),
@@ -884,15 +890,13 @@ describe("request emission routes", () => {
     expect(projectEmissionTaskText(route, base)).toEqual({ descriptor: "", instruction: base, decision: route });
   });
 
-  it("projects explicit v2/v3 capability simulations through the issued core route without a production render override", () => {
-    const cases = [
-      { schemaVersion: 2 as const, binding: REVIEWER_V2, instruction: "review current payload" },
-      { schemaVersion: 3 as const, binding: REVIEWER_V3, instruction: "review successor payload" },
-    ];
+  it("projects explicit v2/v3/v4 capability simulations through the issued core route without a production render override", () => {
+    const instructions = ["review current payload", "review Wave v4 payload", "review successor payload"] as const;
+    const cases = CURRENT_REVIEWER_PROGRAMS.map((current, index) => ({ ...current, instruction: instructions[index]! }));
 
     for (const testCase of cases) {
       const claim = issuedReviewerPayloadClaim(
-        { schemaVersion: testCase.schemaVersion, reviewerProtocol: { schemaDigest: testCase.binding.schemaDigest } },
+        testCase.program,
         { requestId: testCase.binding.requestId, contextDigest: CONTEXT_DIGEST },
       );
       expect(claim.version).toBe(testCase.binding.version);
@@ -939,7 +943,7 @@ describe("request emission routes", () => {
 
 describe("one closed emission-route vocabulary (T6)", () => {
   it("issues the request programs' own decision as spawn authority and projection input, with no translation", () => {
-    for (const binding of [REVIEWER_V2, REVIEWER_V3]) {
+    for (const binding of [REVIEWER_V2, REVIEWER_V3, REVIEWER_V4]) {
       const route = qualifyIssuedSpawnEmissionRoute(claimOf(binding), qualifiedRoute, true, null);
       expect(route).toEqual({ kind: "emission", binding, contextDigest: CONTEXT_DIGEST });
       expect(route).toEqual(decideRequestEmissionRoute(claimOf(binding), providedEmissionCapability(binding.schemaDigest)));

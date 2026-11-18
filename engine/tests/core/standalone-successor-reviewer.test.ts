@@ -10,7 +10,7 @@ import { sha256Hex } from "../../src/core/digest";
 import { prepareStandaloneLineageSource, prepareStandaloneSuccessor } from "../../src/core/standalone-review";
 import { standaloneOriginReference } from "../../src/core/standalone-finding-origin";
 import { parseStandaloneReviewerPayloadV3, parseReviewerPayloadV2 } from "../../src/core/reviewer-protocol";
-import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2, REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
 import { STANDALONE_REVIEWER_SCHEMA_V3, STANDALONE_LINEAGE_LIMITS, STANDALONE_REVIEWER_PROTOCOL_V3, parseStandaloneReviewerProtocolV3 } from "../../src/core/standalone-lineage-contract";
 import { buildStandaloneSuccessorReviewerContext, standaloneSuccessorReviewerRegistration, parseIssuedStandaloneSuccessorReviewer,
   admitStandaloneSuccessorReviewer, aggregateIssuedStandaloneSuccessorEvidence,
@@ -65,24 +65,24 @@ function successorBinding(authority: AgentRequestAuthority): IssuedEmissionBindi
 
 describe("explicit standalone v3 wire and descriptor conservation", () => {
   it("keeps P4 exact descriptor/schema/rubric and independent/Wave issuance at v2", () => {
-    expect(CURRENT_REVIEWER_PROTOCOL.version).toBe(2);
+    expect(REVIEWER_PROTOCOL_V2.version).toBe(2);
     expect(sha256Hex(REVIEWER_PAYLOAD_SCHEMA_V2)).toBe("3ac3395301c1d38f41cd93accb19b942e832d7ebced990976335208259f40c37");
     expect(sha256Hex(REVIEWER_IMPACT_RUBRIC_V1)).toBe("4f36c09cc1e7c27e2d8ff36c86ad22c7723c1a4715bd9c198bbed40e2c2f3a6b");
     expect(new TextEncoder().encode(REVIEWER_PAYLOAD_SCHEMA_V2).length).toBe(10257);
     const v2 = value(buildReviewerContextPacket({ requestId: value(parseRequestId("request:initial")), role: "code-reviewer", requiredSkill: "none",
-      fixedContext: [value(encodeByteSection("source", "unchanged"))], variableContext: [] }));
+      fixedContext: [value(encodeByteSection("source", "unchanged"))], variableContext: [] }, REVIEWER_PROTOCOL_V2));
     expect(v2.schemaVersion).toBe(2);
     expect(parseContextPacket(v2)).toEqual({ ok: true, value: v2 });
     expect(parseStandaloneReviewerContextPacketV3(v2).ok).toBe(false);
     expect(parseReviewerPayloadV2(bytes(payload())).ok).toBe(false);
     expect(parseStandaloneReviewerPayloadV3(bytes(REVIEWER_PAYLOAD_EXAMPLE_V2)).ok).toBe(false);
-    expect(parseStandaloneReviewerProtocolV3(CURRENT_REVIEWER_PROTOCOL).ok).toBe(false);
+    expect(parseStandaloneReviewerProtocolV3(REVIEWER_PROTOCOL_V2).ok).toBe(false);
   });
   it("bounds generated v3 schema separately without changing the impact rubric", () => {
     const size = new TextEncoder().encode(STANDALONE_REVIEWER_SCHEMA_V3).length;
     expect(size).toBeLessThanOrEqual(STANDALONE_LINEAGE_LIMITS.schemaBytes);
     expect(STANDALONE_REVIEWER_PROTOCOL_V3.schemaDigest).toBe(sha256Hex(STANDALONE_REVIEWER_SCHEMA_V3));
-    expect(STANDALONE_REVIEWER_PROTOCOL_V3.rubricDigest).toBe(CURRENT_REVIEWER_PROTOCOL.rubricDigest);
+    expect(STANDALONE_REVIEWER_PROTOCOL_V3.rubricDigest).toBe(REVIEWER_PROTOCOL_V2.rubricDigest);
     expect(parseStandaloneReviewerProtocolV3({ ...STANDALONE_REVIEWER_PROTOCOL_V3, schemaDigest: "a".repeat(64) }).ok).toBe(false);
   });
   it("round trips exact text and duplicate new drafts without minting Finding evidence version 3", () => {
@@ -135,7 +135,7 @@ describe("publication-bound successor admission at actual core seams", () => {
     expect(parseIssuedStandaloneSuccessorReviewer({ ...f, prepared: { ...prepared } }).ok).toBe(false);
     expect(parseIssuedStandaloneSuccessorReviewer({ ...f, packet: fixture("code-reviewer", 2).packet }).ok).toBe(false);
     for (const mutation of [{ runId: "run.foreign" }, { program: "wave-gate" }, { schemaVersion: 2 }, { lineageDigest: "f".repeat(64) },
-      { snapshotDigest: "f".repeat(64) }, { reviewerProtocol: CURRENT_REVIEWER_PROTOCOL }, { extra: 1 }]) {
+      { snapshotDigest: "f".repeat(64) }, { reviewerProtocol: REVIEWER_PROTOCOL_V2 }, { extra: 1 }]) {
       expect(parseIssuedStandaloneSuccessorReviewer({ ...f, registration: { ...f.registration, ...mutation } }).ok).toBe(false);
     }
     let reads = 0;
@@ -237,7 +237,7 @@ describe("the successor's issued emission authority (T9)", () => {
     const drifted = projectRegisteredReviewerProtocol(registration({ ...STANDALONE_REVIEWER_PROTOCOL_V3, schemaDigest: "f".repeat(64) }));
     expect(drifted.ok).toBe(false);
     // The current v2 descriptor certifies no successor (v3) contract.
-    expect(projectRegisteredReviewerProtocol(registration(CURRENT_REVIEWER_PROTOCOL)).ok).toBe(false);
+    expect(projectRegisteredReviewerProtocol(registration(REVIEWER_PROTOCOL_V2)).ok).toBe(false);
   });
 });
 

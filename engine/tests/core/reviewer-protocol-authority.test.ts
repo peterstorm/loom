@@ -1,15 +1,14 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import fc from "fast-check";
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ContextPacket } from "../../src/core/context-packets";
-import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
-import { sha256Hex } from "../../src/core/digest";
-import { createPublicationAuthorityResolver, parseAgentRequestAuthority, parseIssuedSpawnRequest, parseOrchestrationRunId, parseRequestId, type SpawnRequest } from "../../src/core/orchestration-contract";
-import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../src/core/model-profiles";
+import { REVIEWER_PROTOCOL_V2, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
+import { parseOrchestrationRunId, parseRequestId, type SpawnRequest } from "../../src/core/orchestration-contract";
 import { reconcileFindings, makeParsedFindings, type CurrentParsedFindings, resolveReviewFindings, parseIssuedReviewerProtocol, parseReviewerEvidence, resolveIssuedTaskReviewFindings, applyReviewResolution, type IssuedReviewerProtocol, type ReviewerProtocolRegistration, type ReviewerSubjectBinding } from "../../src/core/review-output";
 import { makeDraftFinding, mergeFindings, attributeFindings, parseStoredFindings, reviewFindingCounts, recoverViewOnlyClaims } from "../../src/core/findings";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { findingId } from "../fixtures/finding-id";
 import { value } from "../fixtures/parse-result";
+import { publishReviewerRequest } from "../fixtures/reviewer-publication";
 
 const bytes = (raw: unknown) => new TextEncoder().encode(JSON.stringify(raw));
 const runId = value(parseOrchestrationRunId("run.protocol-authority"));
@@ -18,25 +17,8 @@ const basis = REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!;
 const critical = { ...basis, severity: "critical" as const, file: null, line: null, claim: "  exact\n claim  " };
 const advisory = { severity: "advisory" as const, file: null, line: null, claim: "None", reason: "  useful\n benefit " };
 
-/** In-memory durable publication adapter; the production receipt parser alone mints SpawnRequest. */
 function publish(packet: ContextPacket, kind: ReviewerSubjectBinding["kind"], attempt: 1 | 2, role = packet.role): SpawnRequest {
-  const policy = value(resolveAgentPolicy(role));
-  const profile = value(resolveModelProfile(policy.profile));
-  const authority = value(parseAgentRequestAuthority({
-    runId, requestId: packet.requestId, slotId: "slot:code-reviewer", program: kind === "wave-review" ? "wave-gate" : "standalone-review",
-    role, attempt, modelProfile: policy.profile,
-    harnessBinding: { pi: lowerModelProfile(profile, "pi"), claude: lowerModelProfile(profile, "claude-code") },
-    requiredSkill: policy.requiredSkill, contextDigest: packet.digest,
-    outputSlot: `transcripts/code-reviewer/attempt-${attempt}.raw`,
-  }));
-  const context = { digest: packet.digest, slot: { kind: "fixed-artifact-slot", path: `contexts/${packet.digest}.json` } };
-  const content = { schemaVersion: 1, kind: "batch-published", effectId: "effect:reviewer-publication", runId,
-    requestIds: [authority.requestId], contextDigests: [authority.contextDigest], issuedRequests: [{ authority, context }] };
-  const receipt = { ...content, publicationDigest: sha256Hex(JSON.stringify(content)) };
-  const resolver = createPublicationAuthorityResolver(() => ({ ok: true, value: [...bytes(receipt)] }));
-  return value(parseIssuedSpawnRequest(resolver, { authority, context, issuance: {
-    schemaVersion: 1, kind: "issued-spawn-request-proof", runId, effectId: content.effectId, publicationDigest: receipt.publicationDigest, batchIndex: 0,
-  } }));
+  return publishReviewerRequest(packet, { runId, program: kind === "wave-review" ? "wave-gate" : "standalone-review", attempt, role });
 }
 
 function fixture(version: 1 | 2 = 2, kind: ReviewerSubjectBinding["kind"] = "standalone-review", attempt: 1 | 2 = 1, priorFindings = prior) {
@@ -52,11 +34,11 @@ function fixture(version: 1 | 2 = 2, kind: ReviewerSubjectBinding["kind"] = "sta
         specCheckScope: null, packetId: "a".repeat(64), specFile: null, planFile: null };
   const input = { requestId: value(parseRequestId(`request:code-reviewer:${attempt}`)), role: "code-reviewer", requiredSkill: "none",
     fixedContext: [value(encodeByteSection(kind === "standalone-review" ? "standalone-review-authority" : "wave-review-authority", JSON.stringify(section)))], variableContext: [] };
-  const packet = value<ContextPacket>(version === 2 ? buildReviewerContextPacket(input) : buildContextPacket({ ...input, outputContract: "Machine Summary" }));
+  const packet = value<ContextPacket>(version === 2 ? buildReviewerContextPacket(input, REVIEWER_PROTOCOL_V2) : buildContextPacket({ ...input, outputContract: "Machine Summary" }));
   const request = publish(packet, kind, attempt);
   const program = kind === "wave-review" ? "wave-gate" : "standalone-review";
   const registration: ReviewerProtocolRegistration = version === 2
-    ? { schemaVersion: 2, runId, program, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL }
+    ? { schemaVersion: 2, runId, program, reviewerProtocol: REVIEWER_PROTOCOL_V2 }
     : { schemaVersion: 1, runId, program };
   const authority = value(parseIssuedReviewerProtocol({ request, packet, registration, subject }));
   return { request, packet, registration, subject, authority };
@@ -179,7 +161,7 @@ describe("authority refusal", () => {
     const packet = value(buildReviewerContextPacket({
       requestId: f.packet.requestId, role: f.packet.role, requiredSkill: "unexpected-skill",
       fixedContext: f.packet.fixedContext.filter(({ label }) => label === "standalone-review-authority"), variableContext: [],
-    }));
+    }, REVIEWER_PROTOCOL_V2));
     const request = publish(packet, "standalone-review", 1);
     expect(parseIssuedReviewerProtocol({ ...f, request, packet })).toMatchObject({ ok: false, error: { code: "authority-mismatch", path: "/request" } });
   });
@@ -262,13 +244,13 @@ describe("Wave current binding and lifecycle", () => {
     const request = authority.request;
     const slot = { agent: request.role, slot_id: request.slotId, attempted: request.attempt, request_id: request.requestId, context_digest: request.contextDigest };
     const task = taskFixture({ id: "T1", description: "review", agent: "code-implementer-agent", wave: 1, depends_on: [], findings: prior, critical_findings: ["old"], advisory_findings: [], review_generation: 3,
-      review_run: { reviewer_protocol: CURRENT_REVIEWER_PROTOCOL, generation: 3, packet_id: "a".repeat(64), head_sha: "c".repeat(64),
+      review_run: { reviewer_protocol: REVIEWER_PROTOCOL_V2, generation: 3, packet_id: "a".repeat(64), head_sha: "c".repeat(64),
         expected_agents: [request.role], prior_finding_ids: prior.map(({ id }) => id), evidence: [], slot_authority: [slot],
         workspace_scope: authority.subject.scope, workspace_head_sha: "c".repeat(64), wave_gate_run_id: runId, wave_gate_authority_digest: "b".repeat(64) } });
     const resolution = resolveIssuedTaskReviewFindings(authority, bytes(payload(f.subject, [{ ...critical, claim: "old" }, { ...critical, claim: "old" }])));
     const next = applyReviewResolution(task, resolution);
     expect(next.findings?.map(({ id }) => id)).toEqual(["old-reviewer-1", "code-reviewer-1", "code-reviewer-2"]);
-    expect(next.accepted_review_authority?.reviewer_protocol).toEqual(CURRENT_REVIEWER_PROTOCOL);
+    expect(next.accepted_review_authority?.reviewer_protocol).toEqual(REVIEWER_PROTOCOL_V2);
     expect(next.review_run).toBeUndefined();
     expect(task.findings).toEqual(prior);
   });

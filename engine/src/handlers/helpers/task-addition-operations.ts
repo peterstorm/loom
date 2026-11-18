@@ -1,5 +1,5 @@
 /**
- * `helper orchestration add-task` and `withdraw-task` (ADR-0084): thin shells
+ * `helper orchestration add-task` and `withdraw-task` (ADR-0086): thin shells
  * over the pure `addTask` and `withdrawTask`, sharing one transaction. Each
  * command refuses while a subagent is active, then decides and commits in one
  * StateManager update that re-checks quiescence under the lock.

@@ -15,7 +15,7 @@ export { replayStandaloneCliCaptures, replayStandaloneResultFromEvidence, readSt
 export type { StandaloneCaptureWitness, StandaloneEvidenceReplayResult } from './standalone-evidence';
 import { parseRunDirectoryReference } from '../../../orchestration/run-directory-handle';
 import { publishStandalonePanelView } from '../../../orchestration/standalone-panel-context';
-import { CURRENT_REVIEWER_PROTOCOL } from '../../../core/reviewer-contract';
+import { REVIEWER_PROTOCOL_V2 } from '../../../core/reviewer-contract';
 import { batchPublicationIdentity, type AgentRequestAuthority, type SpawnRequest, type PublicationAuthorityResolver, type SemanticAttempt } from '../../../core/orchestration-contract';
 import { decideAttemptOneSlots } from '../../../core/standalone-attempt-admission';
 import {
@@ -190,7 +190,7 @@ export async function startStandaloneFacade(
     if (!prepared.ok) return failed(prepared.error.errors.join("; "));
     const registration: RegisteredStandaloneProgram = Object.freeze({
       schemaVersion: 2,
-      reviewerProtocol: CURRENT_REVIEWER_PROTOCOL,
+      reviewerProtocol: REVIEWER_PROTOCOL_V2,
       readCoverage: STANDALONE_READ_COVERAGE_V1,
       kind: "standalone-review",
       input,

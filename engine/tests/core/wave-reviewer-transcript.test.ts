@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ContextPacket } from "../../src/core/context-packets";
-import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
 import { sha256Hex } from "../../src/core/digest";
 import {
   createPublicationAuthorityResolver,
@@ -74,10 +74,10 @@ function issuedWaveProtocol(version: 1 | 2, attempt: 1 | 2 = 1): IssuedWaveRevie
     specCheckScope: null, packetId: PACKET, specFile: null, planFile: null };
   const input = { requestId: value(parseRequestId(`request:${ROLE}:${attempt}`)), role: ROLE, requiredSkill: "none",
     fixedContext: [value(encodeByteSection("wave-review-authority", JSON.stringify(section)))], variableContext: [] };
-  const packet = value<ContextPacket>(version === 2 ? buildReviewerContextPacket(input) : buildContextPacket({ ...input, outputContract: "Machine Summary" }));
+  const packet = value<ContextPacket>(version === 2 ? buildReviewerContextPacket(input, REVIEWER_PROTOCOL_V2) : buildContextPacket({ ...input, outputContract: "Machine Summary" }));
   const request = publish(packet, attempt);
   const registration: ReviewerProtocolRegistration = version === 2
-    ? { schemaVersion: 2, runId, program: "wave-gate", reviewerProtocol: CURRENT_REVIEWER_PROTOCOL }
+    ? { schemaVersion: 2, runId, program: "wave-gate", reviewerProtocol: REVIEWER_PROTOCOL_V2 }
     : { schemaVersion: 1, runId, program: "wave-gate" };
   const issued = value(parseIssuedReviewerProtocol({ request, packet, registration, subject }));
   if (issued.subject.kind !== "wave-review") throw new Error("Wave authority expected");
@@ -100,7 +100,7 @@ type CurrentSlot = ReturnType<typeof currentSlot>;
 
 function currentRun(expected: readonly [string, ...string[]], slots: readonly [CurrentSlot, ...CurrentSlot[]], generation = GENERATION): ReviewRun {
   return {
-    reviewer_protocol: CURRENT_REVIEWER_PROTOCOL, generation, packet_id: PACKET, head_sha: HEAD,
+    reviewer_protocol: REVIEWER_PROTOCOL_V2, generation, packet_id: PACKET, head_sha: HEAD,
     expected_agents: expected, prior_finding_ids: [PRIOR_ID], evidence: [],
     slot_authority: slots,
     workspace_scope: [...SCOPE], workspace_head_sha: HEAD, wave_gate_run_id: runId, wave_gate_authority_digest: AUTHORITY_DIGEST,

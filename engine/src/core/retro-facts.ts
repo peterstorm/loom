@@ -33,7 +33,7 @@ export type TaskFriction = Readonly<{
   reopenings: number;
   /** Audited plan edits of it: re-scopes and added dependencies. */
   planEdits: number;
-  /** The Forward Fix Tasks that held it, in audit order (a retired operation an older run may carry, ADR-0084). */
+  /** The Forward Fix Tasks that held it, in audit order (a retired operation an older run may carry, ADR-0086). */
   heldByForwardFixes: readonly string[];
   /** Whether an operator appended the Task after population (`add-task`, or a legacy Forward Fix). */
   addedMidRun: boolean;

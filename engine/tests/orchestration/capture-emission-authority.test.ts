@@ -13,7 +13,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { DESKTOP_VLLM_ROUTE } from "../../src/core/model-profiles";
-import { CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import type { IssuedReviewerProtocol } from "../../src/core/reviewer-emission-route";
 import { reviewerCaptureEmissionAuthority } from "../../src/orchestration/harness-capture-runtime";
 import type { AdmittedEmission } from "../../src/orchestration/run-directory-handle";
@@ -27,7 +27,7 @@ afterEach(() => {
   for (const cleanup of cleanups.splice(0)) cleanup();
 });
 
-const PROTOCOL = { ok: true as const, value: { schemaVersion: 2 as const, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL } satisfies IssuedReviewerProtocol };
+const PROTOCOL = { ok: true as const, value: { schemaVersion: 2 as const, reviewerProtocol: REVIEWER_PROTOCOL_V2 } satisfies IssuedReviewerProtocol };
 const REQUEST = agentRequestAuthority("run.capture-authority");
 const ENABLED: AdmittedEmission = { kind: "enabled", route: { provider: DESKTOP_VLLM_ROUTE.provider, model: DESKTOP_VLLM_ROUTE.model } };
 

@@ -189,7 +189,7 @@ const RESCOPE_FLAGS: PathFlags = Object.freeze({ plain: "--add-file", sealed: "-
  * Wave; no protected verification path; no Acceptance Contract path frozen
  * for another Task. A path a completed Wave sealed joins only when
  * `namedSealed`, and a path named sealed must be one (ADR-0081). Shared by
- * `rescope-task` and `add-task` (ADR-0084).
+ * `rescope-task` and `add-task` (ADR-0086).
  */
 export function pathAdmissionRefusal(
   graph: TaskGraph,

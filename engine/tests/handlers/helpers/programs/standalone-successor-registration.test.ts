@@ -4,7 +4,7 @@ import { parseStandaloneSuccessorStartInput, parseStandaloneSuccessorRegistratio
 import { parseStandaloneStartInput, parseRegisteredFacadeProgram } from "../../../../src/handlers/helpers/programs/registration";
 import { encodeByteSection } from "../../../../src/core/context-packets";
 import { STANDALONE_REVIEWER_PROTOCOL_V3 } from "../../../../src/core/standalone-lineage-contract";
-import { CURRENT_REVIEWER_PROTOCOL } from "../../../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../../../../src/core/reviewer-contract";
 const input = { schemaVersion: 3, kind: "types", files: ["a.ts"], dryRun: false,
   successor: { source: { locator: "/owned/source", runId: "source", resultDigest: "a".repeat(64) },
     disposition: { kind: "selected-record", publication: { locator: "/owned/policy", runId: "policy", dispositionDigest: "b".repeat(64) } } } };
@@ -14,7 +14,7 @@ describe("explicit bounded successor registration ingress", () => {
     expect(parseStandaloneStartInput({ kind: "types", files: ["a.ts"], dryRun: false })).toEqual({ ok: true, value: { kind: "types", files: ["a.ts"], dryRun: false } });
     expect(parseStandaloneStartInput(input).ok).toBe(true);
     expect(parseRegisteredFacadeProgram({ schemaVersion: 3, reviewerProtocol: STANDALONE_REVIEWER_PROTOCOL_V3, kind: "wave-gate", input: { wave: 1 }, taskIds: ["T1"], authorityDigest: "a".repeat(64) }).kind).toBe("invalid");
-    expect(parseRegisteredFacadeProgram({ schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL, kind: "wave-gate", input: { wave: 1 }, taskIds: ["T1"], authorityDigest: "a".repeat(64) }).kind).toBe("registered");
+    expect(parseRegisteredFacadeProgram({ schemaVersion: 2, reviewerProtocol: REVIEWER_PROTOCOL_V2, kind: "wave-gate", input: { wave: 1 }, taskIds: ["T1"], authorityDigest: "a".repeat(64) }).kind).toBe("registered");
     for (const raw of [{ ...input, schemaVersion: 2 }, { ...input, files: null }, { ...input, dryRun: true },
       { ...input, successor: { ...input.successor, disposition: null } }, { ...input, files: ["a.ts", "a.ts"] },
       { ...input, files: ["../outside.ts"] }]) expect(parseStandaloneSuccessorStartInput(raw).ok, JSON.stringify(raw)).toBe(false);

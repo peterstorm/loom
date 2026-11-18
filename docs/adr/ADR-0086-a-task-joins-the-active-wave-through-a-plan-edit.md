@@ -1,4 +1,4 @@
-# ADR-0084: A Task joins the active Wave through a plan edit
+# ADR-0086: A Task joins the active Wave through a plan edit
 
 ## Status
 Accepted (2026-11-18). Implements loom#199, Cause 2 (second part). Supersedes the Forward Fix fallback of

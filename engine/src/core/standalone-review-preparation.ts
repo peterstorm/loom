@@ -15,7 +15,7 @@ import { failure, success } from "./orchestration-contract/identity";
 import { compareStrings } from "./ordering";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import type { ReviewPath } from "./review-packet";
-import { CURRENT_REVIEWER_PROTOCOL, parseReviewerProtocolDescriptor } from "./reviewer-contract";
+import { REVIEWER_PROTOCOL_V2, parseReviewerProtocolDescriptorV2 } from "./reviewer-contract";
 import { STANDALONE_REVIEWER_PROTOCOL_V3, parseStandaloneReviewerProtocolV3 } from "./standalone-lineage-contract";
 import { isPreparedStandaloneSuccessor } from "./standalone-review";
 import type { FrozenStandaloneReviewAuthority, PreparedStandaloneSuccessor } from "./standalone-review-model";
@@ -221,7 +221,7 @@ export function prepareFreshStandaloneReview(
   const prepared = prepareStandaloneReview({ ...input, roster });
   return prepared.ok ? success(Object.freeze({
     authority: prepared.value.authority.schemaVersion === 3 ? prepared.value.authority
-      : Object.freeze({ ...prepared.value.authority, schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL }),
+      : Object.freeze({ ...prepared.value.authority, schemaVersion: 2, reviewerProtocol: REVIEWER_PROTOCOL_V2 }),
     initialRequests: prepared.value.initialRequests,
   })) : prepared;
 }
@@ -238,7 +238,7 @@ export function parseStandaloneReviewAuthority(raw: unknown, successor?: Prepare
   if (raw.schema_version === 3 && (successor === undefined || !isPreparedStandaloneSuccessor(successor) ||
       !canonicalStructuralEquals(raw.successor, successor))) errors.push("v3 authority requires independently authenticated exact successor lineage");
   const descriptor = raw.schema_version === 3 ? parseStandaloneReviewerProtocolV3(raw.reviewer_protocol)
-    : raw.schema_version === 2 ? parseReviewerProtocolDescriptor(raw.reviewer_protocol) : null;
+    : raw.schema_version === 2 ? parseReviewerProtocolDescriptorV2(raw.reviewer_protocol) : null;
   if (descriptor !== null && !descriptor.ok) errors.push(descriptor.error.message);
   if (raw.kind !== "standalone-review-authority") errors.push("standalone review authority.kind is invalid");
   if (raw.scope_source !== "explicit" && raw.scope_source !== "changed-path-union") {

@@ -5,6 +5,7 @@ import type { ContextProjectionInput } from "../../src/core/context-packet-proje
 import { buildReviewerContextPacket, buildStandaloneReviewerContextPacketV3, encodeByteSection, storedContextPacket } from "../../src/core/context-packets";
 import { sha256Bytes } from "../../src/core/digest";
 import { parseRequestId } from "../../src/core/orchestration-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import {
   admitFrozenPredecessorArchive, expandGzipPredecessorArchive, parsePredecessorArchiveArguments, parsePredecessorArchiveRecord,
   projectArchivedPredecessor, publishedPacketReference, serializePublishedPacketReference, verifyPredecessorArchiveBytes,
@@ -178,7 +179,7 @@ describe("projectArchivedPredecessor: the reader's whole --archive path", () => 
   const stored = (packet: unknown): unknown => JSON.parse(JSON.stringify(packet));
 
   const predecessor = value(buildReviewerContextPacket({ requestId: requestId("prior"), role: ROLE, requiredSkill: "review",
-    fixedContext: [], variableContext: [section("prior-notes", "the predecessor's retained notes")] }));
+    fixedContext: [], variableContext: [section("prior-notes", "the predecessor's retained notes")] }, REVIEWER_PROTOCOL_V2));
   const predecessorBytes = bytesOf(JSON.stringify(predecessor));
   const reference = (overrides: Record<string, unknown> = {}) => JSON.stringify({ ...referenceRecord(predecessorBytes, PREDECESSOR_PATH), ...overrides });
   const gzipArchive = (overrides: Record<string, unknown> = {}) => JSON.stringify({ ...gzipRecord(predecessorBytes), ...overrides });

@@ -27,6 +27,7 @@ import { PLAN_DESIGN_LENS_SECTION } from '../../../core/plan-design-review';
 import { type FrozenStandaloneReviewAuthority } from '../../../core/standalone-review-model';
 import { safeIoCause } from '../../../core/safe-io-cause';
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ContextPacket } from '../../../core/context-packets';
+import { REVIEWER_PROTOCOL_V2 } from '../../../core/reviewer-contract';
 import type { StandaloneDoneState } from '../../../core/standalone-review';
 import { readRunBytesNoFollow } from '../../../utils/no-follow-fs';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
@@ -194,7 +195,7 @@ export function standalonePackets(
           ...(lensSection === null ? [] : [lensSection.value]),
         ]),
         variableContext: Object.freeze([]),
-      });
+      }, REVIEWER_PROTOCOL_V2);
       if (!packet.ok) throw new Error(packet.error.message);
       packets.push(packet.value);
       return packet.value.digest;
@@ -339,7 +340,7 @@ export async function recoverOrPublishStandaloneRetry(
     const packetInput = { requestId: retryAuthority.requestId, role: retryAuthority.role,
       requiredSkill: attemptOne.value.requiredSkill,
       fixedContext: Object.freeze([authoritySection.value, frozenSource]), variableContext: Object.freeze([]) };
-    const rebuilt = authority.schemaVersion === 2 ? buildReviewerContextPacket(packetInput)
+    const rebuilt = authority.schemaVersion === 2 ? buildReviewerContextPacket(packetInput, authority.reviewerProtocol)
       : buildContextPacket({ ...packetInput, outputContract: attemptOne.value.outputContract });
     if (!rebuilt.ok) return { ok: false, message: rebuilt.error.message };
     if (rebuilt.value.digest !== retryAuthority.contextDigest) {

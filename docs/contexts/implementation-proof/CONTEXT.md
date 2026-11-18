@@ -123,7 +123,7 @@ The operator-only operation that removes an **Added Task** that was never dispat
 _Avoid_: Deleting a Task, undo, retract
 
 **Forward Fix** (retired):
-The operation **Added Task** replaced (ADR-0084): it appended a fix Task only for a held Task whose attempt had failed, and held that Task by a rule of its own. A State File written before then still carries its audits, read as same-Wave dependencies.
+The operation **Added Task** replaced (ADR-0086): it appended a fix Task only for a held Task whose attempt had failed, and held that Task by a rule of its own. A State File written before then still carries its audits, read as same-Wave dependencies.
 _Avoid_: using it for new work
 
 ## Relationships

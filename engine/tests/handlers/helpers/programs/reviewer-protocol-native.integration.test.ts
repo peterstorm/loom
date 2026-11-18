@@ -13,12 +13,12 @@ import { STANDALONE_REVIEWER_ROLES } from "../../../../src/core/standalone-revie
 import { graphFixture, taskFixture, trustedPassEvidence } from "../../../fixtures/task-lifecycle";
 import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
 import { parseTaskGraph } from "../../../../src/state-manager";
-import { readWaveReviewContext } from "../../../../src/core/wave-review-authority";
 import { parseRegisteredFacadeProgram, parseRegistration } from "../../../../src/handlers/helpers/programs/registration";
 import { startStandaloneFacade, resumeStandaloneFacade, replayStandaloneResultFromEvidence } from "../../../../src/handlers/helpers/programs/standalone";
 import { createRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession as inDirectory } from "../../../fixtures/pi-session";
 import { value } from "../../../fixtures/parse-result";
+import { issuedWaveReviewerPayload } from "../../../fixtures/wave-reviewer-payload";
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const roots: string[] = [];
@@ -257,12 +257,9 @@ async function resumeWave(root: string, handle: RunDirHandle): Promise<Action> {
   if (!resumed.ok) throw new Error(resumed.message);
   return resumed.action as Action;
 }
+/** The empty-roster payload the request's issued descriptor admits (v4 for a freshly started Wave Gate). */
 function wavePayload(handle: RunDirHandle, request: AgentRequestAuthority): string {
-  const packet = value(handle.readContext(request.contextDigest));
-  const context = readWaveReviewContext([packet], packet.digest);
-  if (context.kind !== "loaded" || context.value.taskRun === null) throw new Error("missing issued Wave subject");
-  return JSON.stringify({ schemaVersion: 2, kind: "wave-review", packetId: context.value.packetId,
-    generation: context.value.taskRun.generation, prior_findings: [], findings: [] });
+  return issuedWaveReviewerPayload(value(handle.readContext(request.contextDigest)), { prior_findings: [], findings: [] });
 }
 
 describe("current Wave native capture settles only through the registered facade", () => {

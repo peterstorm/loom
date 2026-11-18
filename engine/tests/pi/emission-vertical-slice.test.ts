@@ -55,7 +55,7 @@ import {
 import {
   issuedReviewerPayloadClaim,
 } from "../../src/core/issued-emission-capability";
-import { REVIEWER_PAYLOAD_SCHEMA_V2, CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
+import { REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import { sha256Hex } from "../../src/core/digest";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import { buildContextPacket, encodeByteSection } from "../../src/orchestration/context-packets";
@@ -101,7 +101,7 @@ async function stagedReviewerRequest(nativeId: string): Promise<StagedRun> {
     input: { wave: 1 },
     taskIds: ["T1"],
     authorityDigest: "c".repeat(64),
-    reviewerProtocol: CURRENT_REVIEWER_PROTOCOL,
+    reviewerProtocol: REVIEWER_PROTOCOL_V2,
   };
   const program = await created.value.registerProgram(registered);
   if (!program.ok) throw new Error(program.error.message);
@@ -150,7 +150,7 @@ async function stagedReviewerRequest(nativeId: string): Promise<StagedRun> {
   // `issuedReviewerPayloadClaim` over the registration's own protocol
   // projection — never from defaults or task text.
   const claim = issuedReviewerPayloadClaim(
-    { schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL },
+    { schemaVersion: 2, reviewerProtocol: REVIEWER_PROTOCOL_V2 },
     request,
   );
   const issued = issueEmissionBinding({
@@ -465,7 +465,7 @@ describe("the real reviewer v2 request-to-ingestion vertical slice", () => {
   // Guard the schema identity the slice is defined against: the frozen v2
   // bytes the child registered are the bytes the issuance certified.
   it("binds the whole slice to ONE frozen schema identity", () => {
-    expect(CURRENT_REVIEWER_PROTOCOL.schemaDigest).toBe(V2_DIGEST);
+    expect(REVIEWER_PROTOCOL_V2.schemaDigest).toBe(V2_DIGEST);
     expect(sha256Hex(REVIEWER_PAYLOAD_SCHEMA_V2)).toBe(V2_DIGEST);
   });
 });

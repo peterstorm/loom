@@ -10,7 +10,7 @@ import {
   parseRequestId,
   type SpawnRequest,
 } from "../../src/core/orchestration-contract";
-import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
 import { parseIssuedReviewerProtocol, type IssuedReviewerProtocol, type IssuedStandaloneReviewerProtocol } from "../../src/core/review-output";
 import { admitStandaloneTranscript } from "../../src/core/standalone-transcript-admission";
 import { value } from "../fixtures/parse-result";
@@ -44,7 +44,7 @@ function issuedProtocol(scope: readonly string[] = SCOPE): IssuedStandaloneRevie
       runId, scope, role: ROLE, attempt: 1,
     })))],
     variableContext: [],
-  }));
+  }, REVIEWER_PROTOCOL_V2));
   const policy = value(resolveAgentPolicy(ROLE));
   const profile = value(resolveModelProfile(policy.profile));
   const authority = value(parseAgentRequestAuthority({
@@ -67,7 +67,7 @@ function issuedProtocol(scope: readonly string[] = SCOPE): IssuedStandaloneRevie
   ));
   const protocol = parseIssuedReviewerProtocol({
     request: published, packet,
-    registration: { schemaVersion: 2, runId, program: "standalone-review", reviewerProtocol: CURRENT_REVIEWER_PROTOCOL },
+    registration: { schemaVersion: 2, runId, program: "standalone-review", reviewerProtocol: REVIEWER_PROTOCOL_V2 },
     subject: { kind: "standalone-review", runId, scope: [...scope] },
   });
   if (!protocol.ok || !isStandaloneProtocol(protocol.value)) {

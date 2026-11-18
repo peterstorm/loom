@@ -126,7 +126,7 @@ A dependency in the same Wave is satisfied once that Task has settled its implem
 
 ## Adding a Task to the active Wave
 
-Use this when the active Wave needs a Task decompose did not plan. The common case is a judgement that fails on sealed code: a Task of the active Wave judges code a completed Wave wrote (a budget, benchmark or acceptance test), and its attempt failed because that code breaches the judgement. Neither `reopen-task` (active Wave only) nor `reopen-completed-wave` (drifted bytes only) applies, and the judge cannot change code outside its own file list. Add a Task that takes the sealed code, and make the judge wait for it ([ADR-0084](../adr/ADR-0084-a-task-joins-the-active-wave-through-a-plan-edit.md)):
+Use this when the active Wave needs a Task decompose did not plan. The common case is a judgement that fails on sealed code: a Task of the active Wave judges code a completed Wave wrote (a budget, benchmark or acceptance test), and its attempt failed because that code breaches the judgement. Neither `reopen-task` (active Wave only) nor `reopen-completed-wave` (drifted bytes only) applies, and the judge cannot change code outside its own file list. Add a Task that takes the sealed code, and make the judge wait for it ([ADR-0086](../adr/ADR-0086-a-task-joins-the-active-wave-through-a-plan-edit.md)):
 
 ```bash
 bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration add-task \

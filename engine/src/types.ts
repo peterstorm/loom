@@ -819,7 +819,7 @@ export type TaskReopeningAudit = Readonly<{
 /** Immutable audit of one Forward Fix, the retired operation that appended
  * `fixTaskId` to the active `wave` to change `sealedPaths`, code a completed
  * Wave wrote, because each of `heldTaskIds` judged that code (ADR-0077).
- * `helper orchestration add-task` replaced it (ADR-0084). A State File written
+ * `helper orchestration add-task` replaced it (ADR-0086). A State File written
  * before then still carries these audits, and each still orders its held
  * Tasks after the fix Task, read as same-Wave dependencies
  * (`core/dispatch-holds.ts`). Nothing writes a new one. Dropped by
@@ -839,7 +839,7 @@ export type ForwardFixAudit = Readonly<{
 }>;
 
 /** Immutable record of one Forward Fix withdrawn before its fix Task was ever
- * dispatched, by the retired withdraw-forward-fix (ADR-0084: nothing writes a
+ * dispatched, by the retired withdraw-forward-fix (ADR-0086: nothing writes a
  * new one; an older State File still carries them). The fix Task left
  * the roster and its audit left `forward_fix_history`, which released its
  * hold; the audit is kept here whole, so the history is moved, never lost.
@@ -897,7 +897,7 @@ export type SpecTraceAmendmentChange = Readonly<{
 
 /**
  * One audited edit of the Wave plan (loom#198 Cause 3, loom#199 Cause 2;
- * ADR-0081, ADR-0084). A union over edit kinds: a pending Task's file list
+ * ADR-0081, ADR-0086). A union over edit kinds: a pending Task's file list
  * re-scoped (`rescope-task`), dependency edges added to a Task
  * (`add-dependency`), a Task appended to the active Wave (`add-task`), or an
  * added Task withdrawn (`withdraw-task`).
@@ -906,7 +906,7 @@ export type WavePlanEdit = TaskRescopedEdit | DependencyAddedEdit | TaskAddedEdi
 
 /**
  * A Task appended to the active Wave (`helper orchestration add-task`,
- * ADR-0084). Its own `depends_on` edges are `dependsOn`; `dependents` are the
+ * ADR-0086). Its own `depends_on` edges are `dependsOn`; `dependents` are the
  * pending Tasks of the Wave that now wait for it. Both kinds of same-Wave edge
  * are legal because this edit records them.
  */
@@ -932,7 +932,7 @@ export type TaskAddedEdit = Readonly<{
 
 /**
  * A Task `add-task` appended, removed before it was ever dispatched
- * (`helper orchestration withdraw-task`, ADR-0084). Every edge to it left the
+ * (`helper orchestration withdraw-task`, ADR-0086). Every edge to it left the
  * roster with it. Its id is never minted again.
  */
 export type TaskWithdrawnEdit = Readonly<{
@@ -1494,7 +1494,7 @@ export interface TaskGraph {
    *  re-population. */
   readonly task_reopening_history?: readonly TaskReopeningAudit[];
   /** Append-only audit of Forward Fix Tasks appended to the active Wave by the
-   *  retired add-forward-fix (ADR-0084; read, never written); each audit holds
+   *  retired add-forward-fix (ADR-0086; read, never written); each audit holds
    *  its judges' dispatch until its fix settles. Dropped by re-population. */
   readonly forward_fix_history?: readonly ForwardFixAudit[];
   /** Forward Fixes withdrawn before their fix Task was dispatched, by the

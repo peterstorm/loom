@@ -6,7 +6,7 @@ import { REVIEW_SUB_AGENTS, BASE_WAVE_REVIEW_AGENTS, isReviewAgent } from "../sr
 import { carriedOverCount, resolveReviewFindings, resolveTaskReviewFindings } from "../src/core/review-output";
 import type { ReviewRun } from "../src/types";
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ContextPacket } from "../src/core/context-packets";
-import { CURRENT_REVIEWER_PROTOCOL } from "../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../src/core/reviewer-contract";
 import { parseIssuedReviewerProtocol, parseReviewerEvidence } from "../src/core/review-output";
 import { createPublicationAuthorityResolver, parseAgentRequestAuthority, parseIssuedSpawnRequest, parseOrchestrationRunId, parseRequestId } from "../src/core/orchestration-contract";
 import { resolveAgentPolicy, resolveModelProfile, lowerModelProfile } from "../src/core/model-profiles";
@@ -189,7 +189,7 @@ function issuedContract(role: string, version: 1 | 2, scope: readonly string[] =
     fixedContext: [value(encodeByteSection("standalone-review-authority", JSON.stringify({ runId, role, attempt: 1, scope })))],
     variableContext: [],
   };
-  const packet = value<ContextPacket>(version === 2 ? buildReviewerContextPacket(input)
+  const packet = value<ContextPacket>(version === 2 ? buildReviewerContextPacket(input, REVIEWER_PROTOCOL_V2)
     : buildContextPacket({ ...input, outputContract: "Return the Loom Machine Summary." }));
   const authority = value(parseAgentRequestAuthority({
     runId, requestId: packet.requestId, slotId: `slot:${role}`, program: "standalone-review", role, attempt: 1,
@@ -206,7 +206,7 @@ function issuedContract(role: string, version: 1 | 2, scope: readonly string[] =
     schemaVersion: 1, kind: "issued-spawn-request-proof", runId, effectId: content.effectId, publicationDigest: receipt.publicationDigest, batchIndex: 0,
   } }));
   const registration = version === 2
-    ? { schemaVersion: 2 as const, runId, program: "standalone-review" as const, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL }
+    ? { schemaVersion: 2 as const, runId, program: "standalone-review" as const, reviewerProtocol: REVIEWER_PROTOCOL_V2 }
     : { schemaVersion: 1 as const, runId, program: "standalone-review" as const };
   return value(parseIssuedReviewerProtocol({ request, packet, registration, subject: { kind: "standalone-review", runId, scope } }));
 }

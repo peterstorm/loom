@@ -80,26 +80,41 @@ export const reviewerDraftV2Schema = z.discriminatedUnion("severity", [
 export type ReviewerDraftV2 = z.infer<typeof reviewerDraftV2Schema>;
 
 const findings = z.array(reviewerDraftV2Schema).max(REVIEWER_PAYLOAD_LIMITS.findings).readonly();
+const priorFindings = z.array(z.strictObject({
+  finding_id: reference, verdict: z.enum(["resolved_by_remediation", "still_present"]), reason: narrative,
+}).readonly()).max(REVIEWER_PAYLOAD_LIMITS.priorFindings).readonly()
+  .describe("Every issued prior Finding ID exactly once in packet order; empty roster requires empty array. Ingress checks the issued roster.");
 const standaloneSchema = z.strictObject({ schemaVersion: z.literal(2), kind: z.literal(STANDALONE_REVIEW_SUBJECT), findings }).readonly();
 const waveSchema = z.strictObject({
   schemaVersion: z.literal(2), kind: z.literal("wave-review"),
   packetId: z.string().regex(/^[0-9a-f]{64}$/).describe("Must equal the issued Review Packet ID."),
   generation: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).describe("Must equal the issued Review Generation."),
-  prior_findings: z.array(z.strictObject({
-    finding_id: reference, verdict: z.enum(["resolved_by_remediation", "still_present"]), reason: narrative,
-  }).readonly()).max(REVIEWER_PAYLOAD_LIMITS.priorFindings).readonly()
-    .describe("Every issued prior Finding ID exactly once in packet order; empty roster requires empty array. Ingress checks the issued roster."),
+  prior_findings: priorFindings,
   findings,
 }).readonly();
-export const reviewerPayloadV2Schema = z.discriminatedUnion("kind", [standaloneSchema, waveSchema])
-  .describe(`Exactly one strict JSON object, at most ${REVIEWER_PAYLOAD_LIMITS.bytes} UTF-8 bytes, no BOM, duplicate keys or more than ${REVIEWER_PAYLOAD_LIMITS.depth} nested containers including root. Byte decoder enforces these limits before schema parsing. Evidence is reviewer-reported, never engine proof.`);
+const wholePayloadLimits = `Exactly one strict JSON object, at most ${REVIEWER_PAYLOAD_LIMITS.bytes} UTF-8 bytes, no BOM, duplicate keys or more than ${REVIEWER_PAYLOAD_LIMITS.depth} nested containers including root. Byte decoder enforces these limits before schema parsing. Evidence is reviewer-reported, never engine proof.`;
+export const reviewerPayloadV2Schema = z.discriminatedUnion("kind", [standaloneSchema, waveSchema]).describe(wholePayloadLimits);
 export type StandaloneReviewerPayloadV2 = z.infer<typeof standaloneSchema>;
 export type WaveReviewerPayloadV2 = z.infer<typeof waveSchema>;
 export type ReviewerPayloadV2 = z.infer<typeof reviewerPayloadV2Schema>;
 
-export const REVIEWER_PAYLOAD_SCHEMA_V2 = JSON.stringify(z.toJSONSchema(reviewerPayloadV2Schema, {
+/**
+ * The Wave reviewer payload of protocol v4 (ADR-0084): the v2 Wave arm without
+ * `packetId` and `generation`. The issued request already names its slot and
+ * the Context Packet digest, so the engine binds both from the issued subject;
+ * a reviewer that copies them is refused by the strict object. Prior
+ * assessments stay required in packet order.
+ */
+export const waveReviewerPayloadV4Schema = z.strictObject({
+  schemaVersion: z.literal(4), kind: z.literal("wave-review"), prior_findings: priorFindings, findings,
+}).readonly().describe(`${wholePayloadLimits} The engine binds the Review Packet ID and Review Generation from the issued request; never include them.`);
+export type WaveReviewerPayloadV4 = z.infer<typeof waveReviewerPayloadV4Schema>;
+
+const jsonSchemaBytes = (schema: z.ZodType): string => JSON.stringify(z.toJSONSchema(schema, {
   target: "draft-2020-12", io: "output", unrepresentable: "throw", cycles: "throw", reused: "ref",
 }), null, 2);
+export const REVIEWER_PAYLOAD_SCHEMA_V2 = jsonSchemaBytes(reviewerPayloadV2Schema);
+export const WAVE_REVIEWER_PAYLOAD_SCHEMA_V4 = jsonSchemaBytes(waveReviewerPayloadV4Schema);
 
 export const REVIEWER_IMPACT_RUBRIC_V1 = `Classify one assertion per finding. Truth confidence concerns whether that assertion holds; it is not an impact score or a severity formula.
 
@@ -119,6 +134,11 @@ The existing Refutation Panel may refute an assertion, including its stated prec
 export const REVIEWER_OUTPUT_CONTRACT = "Emit exactly one JSON object conforming to reviewer-payload-schema; apply reviewer-impact-rubric. No other final output.";
 export const REVIEWER_FIXED_SECTIONS = Object.freeze([
   Object.freeze({ label: "reviewer-payload-schema", text: REVIEWER_PAYLOAD_SCHEMA_V2 }),
+  Object.freeze({ label: "reviewer-impact-rubric", text: REVIEWER_IMPACT_RUBRIC_V1 }),
+]);
+/** The v4 packet carries the v4 Wave schema under the same reserved labels. */
+export const WAVE_REVIEWER_FIXED_SECTIONS_V4 = Object.freeze([
+  Object.freeze({ label: "reviewer-payload-schema", text: WAVE_REVIEWER_PAYLOAD_SCHEMA_V4 }),
   Object.freeze({ label: "reviewer-impact-rubric", text: REVIEWER_IMPACT_RUBRIC_V1 }),
 ]);
 
@@ -158,23 +178,80 @@ export const reviewerEmissionToolContract = (toolName: string): string =>
 export const REVIEWER_EMISSION_TOOL_CONTRACT_PLACEHOLDER = "<issued emission tool name>";
 export const REVIEWER_EMISSION_TOOL_CONTRACT_TEMPLATE: string = reviewerEmissionToolContract(REVIEWER_EMISSION_TOOL_CONTRACT_PLACEHOLDER);
 
-export type ReviewerProtocolDescriptor = Readonly<{
+/** The v2 descriptor: standalone review and Wave runs registered before v4. */
+export type ReviewerProtocolDescriptorV2 = Readonly<{
   protocol: "loom-reviewer"; version: 2; rubricVersion: 1;
   schemaDigest: ArtifactDigest; rubricDigest: ArtifactDigest;
 }>;
-export const CURRENT_REVIEWER_PROTOCOL: ReviewerProtocolDescriptor = canonicalRecord({
+/** The v4 descriptor: Wave review only (ADR-0084). Version 4, never 3, so it
+ *  cannot collide with the standalone successor v3 descriptor (ADR-0010). */
+export type WaveReviewerProtocolDescriptorV4 = Readonly<{
+  protocol: "loom-reviewer"; version: 4; rubricVersion: 1;
+  schemaDigest: ArtifactDigest; rubricDigest: ArtifactDigest;
+}>;
+/** Every descriptor a schema-2 registration can carry; `version` selects the decoder. */
+export type ReviewerProtocolDescriptor = ReviewerProtocolDescriptorV2 | WaveReviewerProtocolDescriptorV4;
+
+export const REVIEWER_PROTOCOL_V2: ReviewerProtocolDescriptorV2 = canonicalRecord({
   protocol: "loom-reviewer", version: 2, rubricVersion: 1,
   schemaDigest: sha256Hex(REVIEWER_PAYLOAD_SCHEMA_V2) as ArtifactDigest,
   rubricDigest: sha256Hex(REVIEWER_IMPACT_RUBRIC_V1) as ArtifactDigest,
 });
+export const WAVE_REVIEWER_PROTOCOL_V4: WaveReviewerProtocolDescriptorV4 = canonicalRecord({
+  protocol: "loom-reviewer", version: 4, rubricVersion: 1,
+  schemaDigest: sha256Hex(WAVE_REVIEWER_PAYLOAD_SCHEMA_V4) as ArtifactDigest,
+  rubricDigest: sha256Hex(REVIEWER_IMPACT_RUBRIC_V1) as ArtifactDigest,
+});
 
-/** Exact supported bytes, not a caller-selected version or a provenance proof. */
-export function parseReviewerProtocolDescriptor(raw: unknown): DomainResult<ReviewerProtocolDescriptor, ReviewerProtocolFailure> {
-  const record = readExactDataRecord(raw, Object.keys(CURRENT_REVIEWER_PROTOCOL), "reviewer descriptor");
-  if (!record.ok || Object.entries(CURRENT_REVIEWER_PROTOCOL).some(([key, value]) => record.value[key] !== value)) {
-    return failure(canonicalRecord({ kind: "reviewer-protocol-failed", code: "unsupported-protocol", path: "/reviewerProtocol", message: "Reviewer descriptor must identify the exact supported schema and rubric bytes." }));
+/**
+ * The fixed packet sections a descriptor issues: its schema and the shared
+ * rubric. A plain switch, not ts-pattern: this contract leaf is audited to
+ * import nothing beyond zod and its sibling modules.
+ */
+export function reviewerFixedSections(descriptor: ReviewerProtocolDescriptor): typeof REVIEWER_FIXED_SECTIONS {
+  switch (descriptor.version) {
+    case 2: return REVIEWER_FIXED_SECTIONS;
+    case 4: return WAVE_REVIEWER_FIXED_SECTIONS_V4;
+    default: return unsupportedVersion(descriptor);
   }
-  return success(CURRENT_REVIEWER_PROTOCOL);
+}
+
+const unsupportedVersion = (descriptor: never): never => {
+  throw new Error(`unreachable reviewer descriptor version: ${JSON.stringify(descriptor)}`);
+};
+
+/** The review programs that register a schema-2 reviewer descriptor. */
+export type ReviewerProgram = typeof STANDALONE_REVIEW_SUBJECT | "wave-gate";
+
+const unsupportedDescriptor = (message: string): DomainResult<never, ReviewerProtocolFailure> =>
+  failure(canonicalRecord({ kind: "reviewer-protocol-failed", code: "unsupported-protocol", path: "/reviewerProtocol", message }));
+
+function exactDescriptor<D extends ReviewerProtocolDescriptor>(raw: unknown, supported: D): D | null {
+  const record = readExactDataRecord(raw, Object.keys(supported), "reviewer descriptor");
+  return record.ok && Object.entries(supported).every(([key, value]) => record.value[key] === value) ? supported : null;
+}
+
+/** Exact v2 bytes only: what standalone review and every standalone result admit. */
+export function parseReviewerProtocolDescriptorV2(raw: unknown): DomainResult<ReviewerProtocolDescriptorV2, ReviewerProtocolFailure> {
+  const v2 = exactDescriptor(raw, REVIEWER_PROTOCOL_V2);
+  return v2 === null
+    ? unsupportedDescriptor("Reviewer descriptor must identify the exact supported schema and rubric bytes.")
+    : success(v2);
+}
+
+/** Exact v2 or v4 bytes: what a Wave Gate registration and its Task review state admit. */
+export function parseWaveReviewerProtocolDescriptor(raw: unknown): DomainResult<ReviewerProtocolDescriptor, ReviewerProtocolFailure> {
+  const descriptor = exactDescriptor(raw, REVIEWER_PROTOCOL_V2) ?? exactDescriptor(raw, WAVE_REVIEWER_PROTOCOL_V4);
+  return descriptor === null
+    ? unsupportedDescriptor("Wave reviewer descriptor must identify the exact supported v2 or v4 schema and rubric bytes.")
+    : success(descriptor);
+}
+
+/** The descriptor parse a review program admits: v4 is Wave-only. Not a provenance proof. */
+export function parseReviewerProtocolDescriptorFor(
+  program: ReviewerProgram, raw: unknown,
+): DomainResult<ReviewerProtocolDescriptor, ReviewerProtocolFailure> {
+  return program === "wave-gate" ? parseWaveReviewerProtocolDescriptor(raw) : parseReviewerProtocolDescriptorV2(raw);
 }
 
 /** Executable example; it cannot silently diverge from the actual admission schema. */
@@ -206,4 +283,18 @@ export const REVIEWER_WIRE_CONTRACT_EXAMPLE_V2: ReviewerPayloadV2 = reviewerPayl
       reason: "Passing the loaded order in removes one query per retry; behavior is unchanged.",
     },
   ],
+});
+
+/**
+ * The Wave v4 example the stamped Wire Contract shows (ADR-0073): no
+ * `packetId` or `generation`, one prior assessment and one new finding.
+ * Parsed by the v4 admission schema, so it cannot diverge from it.
+ */
+export const WAVE_REVIEWER_WIRE_CONTRACT_EXAMPLE_V4: WaveReviewerPayloadV4 = waveReviewerPayloadV4Schema.parse({
+  schemaVersion: 4, kind: "wave-review",
+  prior_findings: [{
+    finding_id: "code-reviewer-1", verdict: "resolved_by_remediation",
+    reason: "The remediation added the authorization check before the write.",
+  }],
+  findings: [REVIEWER_WIRE_CONTRACT_EXAMPLE_V2.findings[1]],
 });

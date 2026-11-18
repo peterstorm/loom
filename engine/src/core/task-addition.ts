@@ -1,6 +1,6 @@
 /**
  * Adding a Task to the active Wave, and withdrawing one never dispatched
- * (ADR-0084, loom#199 Cause 2): `helper orchestration add-task` and
+ * (ADR-0086, loom#199 Cause 2): `helper orchestration add-task` and
  * `withdraw-task`.
  *
  * A Wave's plan sometimes needs a Task decompose did not foresee: a judgement

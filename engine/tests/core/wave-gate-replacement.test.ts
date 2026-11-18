@@ -9,7 +9,7 @@ import { markWaveSpecCheckRetryIssuedTransition, waveBatchSpecCheckAuthority } f
 import type { RegisteredWaveGateProgram } from "../../src/core/wave-gate-program";
 import type { WaveRequestBatch } from "../../src/core/wave-review-authority";
 import type { TaskGraph } from "../../src/types";
-import { CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2, WAVE_REVIEWER_PROTOCOL_V4 } from "../../src/core/reviewer-contract";
 import { agentRequestAuthority } from "../fixtures/agent-request-authority";
 import { activeWaveGateFixture, graphFixture, protectedGraphFixture } from "../fixtures/task-lifecycle";
 
@@ -114,7 +114,7 @@ describe("Wave review issuance transitions", () => {
 describe("replacement registration identity is shared by restart and orphan recovery", () => {
   const schemaTwo = (overrides: Partial<Extract<RegisteredWaveGateProgram, { schemaVersion: 2 }>> = {}): RegisteredWaveGateProgram => ({
     schemaVersion: 2,
-    reviewerProtocol: CURRENT_REVIEWER_PROTOCOL,
+    reviewerProtocol: REVIEWER_PROTOCOL_V2,
     kind: "wave-gate",
     input: { wave: 1 },
     taskIds: ["T1", "T2"],
@@ -130,13 +130,22 @@ describe("replacement registration identity is shared by restart and orphan reco
     const current = schemaTwo({ restart });
     expect(sameRestartRegistration(current, current)).toBe(true);
     expect(sameRestartRegistration(current, schemaOne({ restart }))).toBe(false);
-    expect(CURRENT_REVIEWER_PROTOCOL.rubricDigest).not.toBe(CURRENT_REVIEWER_PROTOCOL.schemaDigest);
+    expect(REVIEWER_PROTOCOL_V2.rubricDigest).not.toBe(REVIEWER_PROTOCOL_V2.schemaDigest);
     expect(sameRestartRegistration(current, schemaTwo({
       restart,
-      reviewerProtocol: { ...CURRENT_REVIEWER_PROTOCOL, schemaDigest: CURRENT_REVIEWER_PROTOCOL.rubricDigest },
+      reviewerProtocol: { ...REVIEWER_PROTOCOL_V2, schemaDigest: REVIEWER_PROTOCOL_V2.rubricDigest },
     }))).toBe(false);
     const recovered = schemaTwo({ orphanRecovery: orphan });
     expect(sameOrphanRecoveryRegistration(recovered, schemaOne({ orphanRecovery: orphan }))).toBe(false);
+  });
+
+  it("ADR-0084: a v4 replacement is never the same registration as a v2 one, so a pre-v4 replacement cannot replay as current", () => {
+    const v4Restart = schemaTwo({ restart, reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4 });
+    expect(sameRestartRegistration(v4Restart, v4Restart)).toBe(true);
+    expect(sameRestartRegistration(v4Restart, schemaTwo({ restart }))).toBe(false);
+    const v4Recovery = schemaTwo({ orphanRecovery: orphan, reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4 });
+    expect(sameOrphanRecoveryRegistration(v4Recovery, v4Recovery)).toBe(true);
+    expect(sameOrphanRecoveryRegistration(v4Recovery, schemaTwo({ orphanRecovery: orphan }))).toBe(false);
   });
 
   it("both predicates compare the ordered Task roster", () => {

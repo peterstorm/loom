@@ -1,14 +1,14 @@
 /**
  * FR-002 qualification probe — child extension.
  *
- * Registers the four REAL emission tools — the frozen registry's exact schema
+ * Registers the five REAL emission tools — the frozen registry's exact schema
  * bytes and the production constrained-sampling request shape
  * `strict: "prefer"` — and points the desktop-vllm provider at the driver's
  * recording proxy, so every wire request the child sends is captured verbatim
  * while the upstream server sees a normal request. Tool NAMES follow
  * `probeRegisteredToolName`: the single-version verdict kinds keep their
- * production names, while reviewer v2/v3 (which share one production name)
- * carry a version suffix so both can register at once.
+ * production names, while reviewer v2/v3/v4 (which share one production name)
+ * carry a version suffix so all can register at once.
  *
  * Action methods run inside session_start (loading-time action calls are
  * refused by pi). The execute shell mirrors the production contract: append
@@ -26,7 +26,7 @@ import { EMISSION_TOOL_SPECS, frozenPayloadSchemaParameters, type EmissionSchema
  * child did not register.
  */
 export const probeRegisteredToolName = (spec: EmissionToolSpec, version: EmissionSchemaVersion): string =>
-  version === "v2" || version === "v3" ? `${spec.toolName}_${version}` : spec.toolName;
+  version === "v2" || version === "v3" || version === "v4" ? `${spec.toolName}_${version}` : spec.toolName;
 
 /** The part of Pi's extension API this child uses: one narrow port, faked by the manifest test. */
 export type QualProbePi = Readonly<{
@@ -50,6 +50,7 @@ const proxyBaseUrl = process.env.QUAL_PROXY_BASE_URL ?? "";
 const TOOL_DEFS: readonly { kind: keyof typeof EMISSION_TOOL_SPECS; version: EmissionSchemaVersion; spec: EmissionToolSpec }[] = [
   { kind: "reviewer-payload", version: "v2", spec: EMISSION_TOOL_SPECS["reviewer-payload"] },
   { kind: "reviewer-payload", version: "v3", spec: EMISSION_TOOL_SPECS["reviewer-payload"] },
+  { kind: "reviewer-payload", version: "v4", spec: EMISSION_TOOL_SPECS["reviewer-payload"] },
   { kind: "judge-verdict", version: "v1", spec: EMISSION_TOOL_SPECS["judge-verdict"] },
   { kind: "refutation-verdict", version: "v1", spec: EMISSION_TOOL_SPECS["refutation-verdict"] },
 ];

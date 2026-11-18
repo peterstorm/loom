@@ -2,7 +2,7 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import fc from "fast-check";
 import { attributeFindings, reviewFindingCounts } from "../../src/core/findings";
 import type { CurrentDraftFinding, Finding } from "../../src/types";
-import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, STANDALONE_REVIEW_SUBJECT } from "../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2, REVIEWER_PAYLOAD_EXAMPLE_V2, STANDALONE_REVIEW_SUBJECT } from "../../src/core/reviewer-contract";
 import { parseReviewerPayloadV2 } from "../../src/core/reviewer-protocol";
 import {
   buildFindingBrief, buildStandaloneFindingBrief, parseFindingBriefJson, parseCurrentBriefFinding,
@@ -156,7 +156,7 @@ describe("current brief and independently frozen parent authority refuse downgra
   });
 
   it("refuses changed or wholly stripped basis against parent projection even with recomputed self-digests", () => {
-    const aggregate: StandaloneReviewAggregate = { schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL,
+    const aggregate: StandaloneReviewAggregate = { schemaVersion: 2, reviewerProtocol: REVIEWER_PROTOCOL_V2,
       runId: "run.source", subjectId: "standalone-review", scope: ["src/x.ts"], reviewerEvidence: [], findings: [current()] };
     const panelFindings = canonicalStandalonePanelFindingAuthority(aggregate.findings);
     const input = { standaloneRunId: aggregate.runId, panelRunId: "run.panel", aggregate, panelFindings,

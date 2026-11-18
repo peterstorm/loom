@@ -33,14 +33,14 @@ import { evaluateAsRecorded } from "./fixtures/completion-suite-evaluation";
 import { canonicalJson } from "../src/core/review-packet";
 import { sha256Hex } from "../src/core/digest";
 import fc from "fast-check";
-import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../src/core/reviewer-contract";
 import { value } from "./fixtures/parse-result";
 
 function currentReviewTask(generation = 1) {
   const slot = { agent: "code-reviewer", slot_id: "slot:code-reviewer", attempted: 1 as const, request_id: "request:code-reviewer:1", context_digest: "d".repeat(64) };
   return { ...validTask, review_status: "pending", review_generation: generation, findings: [], critical_findings: [], advisory_findings: [],
     review_run: { generation, packet_id: PACKET, head_sha: HEAD, expected_agents: [slot.agent], prior_finding_ids: [],
-      reviewer_protocol: CURRENT_REVIEWER_PROTOCOL, workspace_scope: ["src/x.ts"], workspace_head_sha: "e".repeat(64), wave_gate_run_id: "run.current", wave_gate_authority_digest: "f".repeat(64),
+      reviewer_protocol: REVIEWER_PROTOCOL_V2, workspace_scope: ["src/x.ts"], workspace_head_sha: "e".repeat(64), wave_gate_run_id: "run.current", wave_gate_authority_digest: "f".repeat(64),
       slot_authority: [slot], evidence: [{ protocolVersion: 2, ...slot, prior_assessments: [], new_findings: [{ protocolVersion: 2, ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0], file: "src/x.ts" }] }],
     } };
 }
@@ -76,7 +76,7 @@ describe("current Review Run loader joins", () => {
   });
   it.each(["valid", "null-descriptor", "missing-run", "unsupported"])("checks completed current accepted authority: %s", (mutation) => {
     const task = { ...validTask, review_generation: 1, review_status: "passed", accepted_review_authority: {
-      generation: 1, packet_id: PACKET, head_sha: HEAD, scope: ["src/x.ts"], run_id: "run.current", authority_digest: "a".repeat(64), reviewer_protocol: CURRENT_REVIEWER_PROTOCOL,
+      generation: 1, packet_id: PACKET, head_sha: HEAD, scope: ["src/x.ts"], run_id: "run.current", authority_digest: "a".repeat(64), reviewer_protocol: REVIEWER_PROTOCOL_V2,
     } };
     const raw = JSON.parse(JSON.stringify(task));
     if (mutation === "null-descriptor") raw.accepted_review_authority.reviewer_protocol = null;

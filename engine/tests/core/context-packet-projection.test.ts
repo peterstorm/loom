@@ -10,6 +10,7 @@ import { sha256Bytes } from "../../src/core/digest";
 import { buildContextPacket, buildReviewerContextPacket, buildStandaloneReviewerContextPacketV3, contextPacketDigest, encodeByteSection } from "../../src/core/context-packets";
 import { parseContextProjectionArguments, parseContextSectionArguments, projectContextPacket } from "../../src/core/context-packet-projection";
 import { parseArtifactDigest, parseRequestId } from "../../src/core/orchestration-contract";
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import { waveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../src/core/wave-frozen-source";
 import { observedWorkspace } from "../fixtures/reviewed-workspace";
 import { value } from "../fixtures/parse-result";
@@ -29,7 +30,7 @@ function fixture(version: 1 | 2 | 3 = 2) {
   const input = { requestId: value(parseRequestId("request:reader-fixture")), role: "code-reviewer", requiredSkill: "none", fixedContext: [section], variableContext: [] };
   const packet = match(version)
     .with(1, () => value(buildContextPacket({ ...input, outputContract: "Historical contract" })))
-    .with(2, () => value(buildReviewerContextPacket(input)))
+    .with(2, () => value(buildReviewerContextPacket(input, REVIEWER_PROTOCOL_V2)))
     .with(3, () => value(buildStandaloneReviewerContextPacketV3(input)))
     .exhaustive();
   const path = join(root, "packet.json");
@@ -81,7 +82,7 @@ describe("read-only packet command", () => {
     const packet = value(buildReviewerContextPacket({
       requestId: value(parseRequestId("request:wave-reader")), role: "code-reviewer", requiredSkill: "none",
       fixedContext: [source], variableContext: [],
-    }));
+    }, REVIEWER_PROTOCOL_V2));
     const path = join(root, "packet.json");
     writeFileSync(path, JSON.stringify(packet));
     const args = ["--packet", path, "--request", packet.requestId, "--digest", packet.digest,
@@ -119,7 +120,7 @@ describe("read-only packet command", () => {
     for (const [index, mutation] of mutations.entries()) {
       const section = value(encodeByteSection(WAVE_FROZEN_SOURCE_SECTION, JSON.stringify(mutation)));
       const packet = value(buildReviewerContextPacket({ requestId, role: "code-reviewer", requiredSkill: "none",
-        fixedContext: [section], variableContext: [] }));
+        fixedContext: [section], variableContext: [] }, REVIEWER_PROTOCOL_V2));
       const input = value(parseContextProjectionArguments([
         "--packet", "/fixture/packet.json", "--request", packet.requestId, "--digest", packet.digest,
         "--role", packet.role, "--skill", packet.requiredSkill, "--file", "src/a.ts",
@@ -151,7 +152,7 @@ describe("read-only packet command", () => {
     const packet = value(buildReviewerContextPacket({
       requestId: value(parseRequestId("request:reader-fixture")), role: "code-reviewer", requiredSkill: "none",
       fixedContext: [note, redacted], variableContext: [],
-    }));
+    }, REVIEWER_PROTOCOL_V2));
     const args = ["--packet", "/fixture/packet.json", "--request", packet.requestId, "--digest", packet.digest,
       "--role", packet.role, "--skill", packet.requiredSkill];
     const section = (label: string) => projectContextPacket(packet, value(parseContextProjectionArguments([...args, "--section", label])));

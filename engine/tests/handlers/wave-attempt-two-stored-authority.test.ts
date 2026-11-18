@@ -21,6 +21,7 @@ import {
   waveAttemptTwoRequestId,
 } from "../../src/core/wave-gate-membership";
 import { parseWaveRetryDiagnosticSection, WAVE_RETRY_PREAMBLE, WAVE_RETRY_FIXED_TAIL } from "../../src/core/reviewer-retry";
+import { REVIEWER_PROTOCOL_V2 } from "../../src/core/reviewer-contract";
 import { openRunDirectory, type RunDirHandle } from "../../src/orchestration/run-directory-handle";
 import { buildContextPacket, buildReviewerContextPacket, contextPacketDigest, parseContextPacket, encodeByteSection, type ContextPacket } from "../../src/orchestration/context-packets";
 import {
@@ -72,7 +73,7 @@ function publishedAttemptOne(
     variableContext: Object.freeze([]),
   };
   const packet = protocolVersion === 2
-    ? value(buildReviewerContextPacket(packetInput))
+    ? value(buildReviewerContextPacket(packetInput, REVIEWER_PROTOCOL_V2))
     : value(buildContextPacket(packetInput));
 
   return handle.publishContext(packet).then((published) => {
