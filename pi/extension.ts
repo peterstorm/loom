@@ -106,6 +106,7 @@ import { dispatchPiSubagentStop } from "./subagent-stop";
 import {
   activatePiChildWriteGrant,
   createPiChildWriteGrants,
+  grantCallerWriteMode,
   rejectedChildWriteGrantBlock,
 } from "./child-write-grant";
 import { shutdownPiSession } from "./session-shutdown";
@@ -384,6 +385,8 @@ export default function (
           {
             locateEdit: () => piEditSite(safeSessionId, event.input, ctx.cwd),
             grantScope: () => grantWriteScope(granted?.scopeDirs, granted?.grantCwd, ctx.cwd),
+            // An implementation grant names its Task; an attesting Task's attempt changes nothing (ADR-0085).
+            callerWriteMode: () => grantCallerWriteMode(granted),
           },
         );
         if (result.kind === "block") {

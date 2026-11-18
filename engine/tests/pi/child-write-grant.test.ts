@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import {
   activatePiChildWriteGrant,
+  grantCallerWriteMode,
   childBindingClaims,
   createPiChildWriteGrants,
   rejectedChildWriteGrantDebt,
@@ -163,6 +164,8 @@ describe("activatePiChildWriteGrant through in-memory registry and pointer ports
     const granted = grants.active.get("child-session");
     expect(granted?.kind).toBe("active");
     expect(granted?.pointerBinding).toBe(pointer);
+    // ADR-0085: an implementation grant keeps the Task and TaskGraph it was bound to.
+    expect(granted?.implementationTask).toEqual({ taskId: "T1", taskGraphPath: graph });
     expect(fake.roster.size).toBe(1);
     expect(grants.rejectedSessions.size).toBe(0);
     expect(fake.stderr).toEqual(["loom(pi): activated child write grant for T1/child-session\n"]);
@@ -212,5 +215,27 @@ describe("activatePiChildWriteGrant through in-memory registry and pointer ports
       .toBeUndefined();
     expect(fake.calls).toEqual([]);
     expect(grants.active.size + grants.rejectedSessions.size).toBe(0);
+  });
+});
+
+describe("grantCallerWriteMode (ADR-0085)", () => {
+  const asked: string[] = [];
+  const modeOf = ((taskId: string, _source: unknown, label: string) => {
+    asked.push(`${taskId}:${label}`);
+    return { taskId, mode: { kind: "attesting" } };
+  }) as unknown as Parameters<typeof grantCallerWriteMode>[1];
+
+  it("reads the mode of an active implementation grant's Task from the TaskGraph it names", () => {
+    const implementation: ActiveChildWriteGrant = { ...active, implementationTask: { taskId: "T3", taskGraphPath: "/graph.json" } };
+    expect(grantCallerWriteMode(implementation, modeOf)).toEqual({ taskId: "T3", mode: { kind: "attesting" } });
+    expect(asked).toEqual(["T3:write grant T3"]);
+  });
+
+  it("answers undefined for a phase grant, a cleanup-pending entry or no grant", () => {
+    asked.length = 0;
+    expect(grantCallerWriteMode(active, modeOf)).toBeUndefined();
+    expect(grantCallerWriteMode({ kind: "roster-cleanup-pending", agentId, pointerBinding: null }, modeOf)).toBeUndefined();
+    expect(grantCallerWriteMode(undefined, modeOf)).toBeUndefined();
+    expect(asked).toEqual([]);
   });
 });

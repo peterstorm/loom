@@ -31,6 +31,11 @@
  * binding`), and only a `bound` Agent admits. The harness supplies that state
  * through `ImplementationBindingProbe`; Pi binds authority at spawn (write
  * grants) and supplies none, so its role admission is unchanged.
+ *
+ * Attestation is enforced here (ADR-0085): once a write is admitted, the
+ * calling implementation Agent's Task write mode (`callerWriteMode`, each
+ * harness naming the caller's Task its own way) refuses the write of a Task
+ * armed for attestation, and of one whose mode cannot be observed.
  */
 
 import { isAbsolute, join, relative, sep } from "node:path";
@@ -39,6 +44,7 @@ import { match } from "ts-pattern";
 import type { HookResult } from "../types";
 import { IMPL_AGENTS } from "./agent-catalog-projections";
 import { artifactWriteRoots } from "./artifact-write-scope";
+import { attestationWriteRefusal, unobservableWriteModeRefusal, type TaskWriteMode } from "./attestation-writes";
 import { PENDING_BINDING_ESCALATION, type ImplementationBinding } from "./implementation-binding";
 import {
   parseGrantedAgentId,
@@ -330,13 +336,33 @@ function confineToGrantScope(scope: WriteGrantScope, targets: EditTargets): Hook
  *   an unscoped grant or ungranted session. Consulted lazily, only once an
  *   admission allows a write placed inside, because canonicalising its dirs
  *   costs the shell filesystem probes; that write must then stay inside them.
+ * - `callerWriteMode` — the calling implementation Agent's Task and its write
+ *   mode (ADR-0085): Claude Code names the Task by the caller's bound attempt,
+ *   Pi by the session's write grant. `undefined` when the caller is no bound
+ *   implementation Agent. Consulted lazily, only once a write is admitted,
+ *   because the shell reads the TaskGraph to answer.
  */
 export type DirectEditPorts = Readonly<{
   artifactWrite?: ArtifactWriteRequest | undefined;
   implementationBinding?: ImplementationBindingProbe | undefined;
   locateEdit?: (() => EditSite) | undefined;
   grantScope?: (() => WriteGrantScope | undefined) | undefined;
+  callerWriteMode?: (() => CallerWriteMode | undefined) | undefined;
 }>;
+
+/** The calling implementation Agent's Task, and whether its attempt may write. */
+export type CallerWriteMode = Readonly<{ taskId: string; mode: TaskWriteMode }>;
+
+/** The write an admitted implementation caller may make: an attesting or unobservable Task's is refused. */
+export function callerWriteModeVerdict(caller: CallerWriteMode | undefined): HookResult {
+  if (caller === undefined) return { kind: "allow" };
+  return match(caller.mode)
+    .with({ kind: "implementing" }, (): HookResult => ({ kind: "allow" }))
+    .with({ kind: "attesting" }, (): HookResult => ({ kind: "block", message: attestationWriteRefusal(caller.taskId) }))
+    .with({ kind: "unobservable" }, ({ reason }): HookResult =>
+      ({ kind: "block", message: unobservableWriteModeRefusal(caller.taskId, reason) }))
+    .exhaustive();
+}
 
 /**
  * REQUIRED arming port: the task-graph existence probe, named at every call
@@ -352,7 +378,7 @@ export function shouldBlockDirectEdit(
   sessionId: string,
   taskGraphExists: () => boolean,
   readActiveRoster: ActiveRosterProbe = noActiveRoster,
-  { artifactWrite, implementationBinding, locateEdit, grantScope }: DirectEditPorts = {},
+  { artifactWrite, implementationBinding, locateEdit, grantScope, callerWriteMode }: DirectEditPorts = {},
 ): HookResult {
   if (!taskGraphExists()) return { kind: "allow" };
   if (!FILE_TOOLS.has(toolName)) return { kind: "allow" };
@@ -382,6 +408,9 @@ export function shouldBlockDirectEdit(
 
   const admission = admitInsideWrite(parsed, readActiveRoster, artifactWrite, implementationBinding);
   if (admission.kind !== "allow") return admission;
+  // An attesting attempt verifies and changes nothing (ADR-0085).
+  const attestation = callerWriteModeVerdict(callerWriteMode?.());
+  if (attestation.kind !== "allow") return attestation;
   const scope = grantScope?.();
   return scope === undefined ? admission : confineToGrantScope(scope, site.targets);
 }
