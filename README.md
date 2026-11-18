@@ -8,7 +8,7 @@ It combines:
 - opt-in architecture panels with competing design lenses and adversarial judges;
 - Wave Gates that require proof, tests, spec alignment, multi-Agent review, critical-Finding adjudication, advisory disposition, and full lint;
 - standalone PR review and end-to-end review/remediation workflows;
-- reusable architecture, implementation, test, security, frontend, and lint Skills;
+- reusable Skills — architecture, implementation, tests, security, frontend, refactoring (`deepen`, `distill`), design stress-testing (`grill`), retrospectives, PR remediation, and lint;
 - a two-tier fail-closed linter;
 - one harness-neutral TypeScript engine with Claude Code and Pi adapters.
 
@@ -54,6 +54,9 @@ Then run `/reload` in Pi. Git and npm install forms are documented in [Using Loo
 /loom --panel "Redesign the ingestion pipeline"
 /loom --panel=4 "Add multi-tenant authorization"
 /loom --status
+
+/retro
+/retro --wave 2
 
 /wave-gate
 /review-pr
