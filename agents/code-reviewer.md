@@ -7,7 +7,7 @@ tools:
   - Read
   - Grep
   - Glob
-description: Engine-issued reviewer for /review-pr, /wave-gate and the plan design review; do not spawn directly. Checks the frozen scope against the project's written rules and for bugs, and against the Task's plan context when the packet presents one.
+description: Engine-issued reviewer for /review-pr, /wave-gate and the plan design review; do not spawn directly. Checks the frozen scope against the project's written rules and for bugs, and against the Task's stated intent (description, plan context and the named plan document) when the packet presents it.
 color: green
 ---
 
@@ -40,7 +40,7 @@ The project's written rules are these files plus any project instructions alread
 
 - **Rule violations.** Code that breaks a specific written rule: module and import boundaries, framework conventions, naming, the declared error-handling and logging conventions, platform compatibility. Cite the rule in the finding.
 - **Bugs.** Code that misbehaves on a supported path: logic errors, null or undefined handling, races, resource leaks, security holes, performance faults.
-- **Intent drift.** When the packet presents the Task's description or plan context: the change does not deliver a behavior they describe, or delivers one they do not describe. Judge the frozen scope against what the Task says it should do, not against how well the code is written; quality stays with the reviewers that own it. A behavior the change adds beyond the stated intent is drift even when it is well built, unless the Task's Requirement anchors or contributions claim it.
+- **Intent drift.** When the packet presents the Task's description or plan context: the change does not deliver a behavior they describe, or delivers one they do not describe. Judge the frozen scope against what the Task says it should do, not against how well the code is written; quality stays with the reviewers that own it. A behavior the change adds beyond the stated intent is drift even when it is well built, unless the Task's Requirement anchors or contributions claim it. When the packet's `wave-review-authority` section names a `planFile`, also Read that file and judge the change against what the plan says about this Task's work, found by meaning against the Task's description and anchors; the plan document outranks the Task's plan context where they disagree, and the plan's overall design stays out of scope. Confirm the file's SHA-256 still equals the section's `specCheckDocuments.plan.contentDigest`; if it does not, report the plan as moved instead of judging against moved bytes. A plan file that cannot be read is a note in the finding's reason, and the description and plan context carry the judgment alone.
 
 Other reviewers own swallowed errors and silent fallbacks, test coverage, type design, comment accuracy, duplication and module structure. Report one of those only when it is also a bug or breaks a written rule.
 
