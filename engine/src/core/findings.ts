@@ -90,6 +90,7 @@ import type {
 export { FINDING_SEVERITIES, PRIOR_FINDING_VERDICTS } from "./findings-shape";
 export type {
   AcceptedReviewAuthority,
+  CarriedReviewRunSlotAuthority,
   CurrentAcceptedReviewAuthority,
   CurrentDraftFinding,
   CurrentReviewRun,
@@ -102,6 +103,7 @@ export type {
   FindingResolution,
   FindingResolutionAssessment,
   FindingSeverity,
+  IssuedReviewRunSlotAuthority,
   LegacyAcceptedReviewAuthority,
   LegacyDraftFinding,
   LegacyReviewRun,
@@ -117,6 +119,7 @@ export type {
   ReviewRun,
   ReviewRunEvidence,
   ReviewRunSlotAuthority,
+  ReviewSlotOrigin,
   SlotBoundReviewRunEvidence,
   UnboundReviewRunEvidence,
 } from "./findings-shape";
@@ -948,6 +951,7 @@ export function reviewRunError(
       run.wave_gate_authority_digest !== undefined) {
     return `${label}.Wave Gate workspace authority requires workspace_scope`;
   }
+  const carriedAgents: string[] = [];
   if (current && run.slot_authority !== undefined) {
     if (!Array.isArray(run.slot_authority) || run.slot_authority.length !== expectedAgents.length) {
       return `${label}.slot_authority must cover the exact expected roster`;
@@ -957,7 +961,13 @@ export function reviewRunError(
     for (const [index, rawSlot] of run.slot_authority.entries()) {
       if (!isRecord(rawSlot)) return `${label}.slot_authority is malformed`;
       const slot = rawSlot as Record<string, unknown>;
-      const keys = ["agent", "slot_id", "attempted", "request_id", "context_digest"];
+      const carried = Object.hasOwn(slot, "carried_from");
+      if (carried) {
+        const originError = slotOriginError(slot.carried_from, run.wave_gate_run_id);
+        if (originError !== null) return `${label}.slot_authority[${index}].carried_from ${originError}`;
+        carriedAgents.push(String(slot.agent));
+      }
+      const keys = ["agent", "slot_id", "attempted", "request_id", "context_digest", ...(carried ? ["carried_from"] : [])];
       if (Object.keys(slot).length !== keys.length || keys.some((key) => !Object.hasOwn(slot, key)) ||
           slot.agent !== expectedAgents[index] || typeof slot.slot_id !== "string" || slot.slot_id.trim() === "" ||
           !parseSlotId(slot.slot_id).ok || (slot.attempted !== 1 && slot.attempted !== 2) || slotIds.has(slot.slot_id)) return `${label}.slot_authority is malformed`;
@@ -1019,7 +1029,39 @@ export function reviewRunError(
     }
   }
   if (new Set(evidenceAgents).size !== evidenceAgents.length) return `${label}.evidence repeats a reviewer`;
+  const unevidenced = carriedAgents.find((agent) => !evidenceAgents.includes(agent));
+  if (unevidenced !== undefined) return `${label}: carried slot ${unevidenced} must carry its accepted evidence`;
   return null;
+}
+
+/**
+ * Why a stored `carried_from` is not the origin of Carried Review Evidence
+ * (ADR-0088), or null: it names the run, authority digest and Review Packet
+ * that issued the slot, and that run is never the one holding it.
+ */
+function slotOriginError(raw: unknown, holdingRunId: unknown): string | null {
+  if (!isRecord(raw)) return "must be an object";
+  const origin = raw as Record<string, unknown>;
+  const keys = ["run_id", "authority_digest", "packet_id"];
+  if (Object.keys(origin).length !== keys.length || keys.some((key) => !Object.hasOwn(origin, key))) {
+    return "must contain exactly run_id, authority_digest and packet_id";
+  }
+  if (!parseOrchestrationRunId(origin.run_id).ok ||
+      typeof origin.authority_digest !== "string" || !/^[0-9a-f]{64}$/.test(origin.authority_digest) ||
+      typeof origin.packet_id !== "string" || !/^[0-9a-f]{64}$/.test(origin.packet_id)) {
+    return "must name an exact run, authority digest and Review Packet";
+  }
+  return origin.run_id === holdingRunId ? "must name a run other than the one holding the slot" : null;
+}
+
+/**
+ * The Review Packet `agent`'s evidence was accepted under: the packet a
+ * carried slot names as its origin, otherwise the run's own. Findings minted
+ * from that evidence record it as their provenance.
+ */
+function evidencePacketId(run: ReviewRun, agent: string): string {
+  const slot = run.slot_authority?.find((candidate) => candidate.agent === agent);
+  return slot?.carried_from?.packet_id ?? run.packet_id;
 }
 
 /**
@@ -1455,7 +1497,7 @@ function appendAttributedNewFindings(
       genuinelyNew,
       agent,
       nextOrdinal(next, task.refuted_findings ?? [], agent, resolved),
-      { generation: run.generation, packetId: run.packet_id },
+      { generation: run.generation, packetId: evidencePacketId(run, agent) },
     )];
   }
   return next;

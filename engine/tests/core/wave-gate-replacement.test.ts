@@ -29,7 +29,8 @@ const graph = (overrides: Partial<TaskGraph> = {}): TaskGraph => ({
 
 describe("prepareExhaustedWaveGateRestart refusal ladder", () => {
   const restart = (state: TaskGraph, previous = registration()) =>
-    prepareExhaustedWaveGateRestart(state, "run.previous", previous, "run.next", "/runs", new Set());
+    prepareExhaustedWaveGateRestart(state, "run.previous", previous, "run.next", "/runs", new Set(),
+      { workspaces: [], issuedRosters: new Map() });
 
   it("requires exact protected execute/current_wave authority", () => {
     expect(restart(graph({ current_wave: 2 }))).toEqual({

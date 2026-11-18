@@ -36,6 +36,10 @@ _Avoid_: Directory listing, file walk, pathspec match
 The exact bytes one Task's review scope held when a Wave review was prepared, with their content digest. Only the reviewed-workspace core mints one; a value rebuilt around its constructor is refused rather than re-hashed.
 _Avoid_: Workspace snapshot (alias), file dump, worktree state
 
+**Carried Review Evidence**:
+An accepted Wave reviewer slot that a restart carries into its replacement Wave Gate run by reference instead of reissuing it (ADR-0088). The slot keeps the slot, request and context identity of the run that issued it, and names that run, its authority digest and its Review Packet as its origin. A Task whose whole roster was accepted is not reissued at all, and its acceptance stays the one its own run recorded. Evidence carries only along the recorded restart lineage, only under the same reviewer protocol, and only while the Review Generation, reviewed workspace, prior Findings and roster are unchanged. Spec-check is never carried.
+_Avoid_: Inherited origin (a standalone successor's Finding lineage, which a later review assesses again), reused review, copied transcript, re-minted slot
+
 ### Panels and programs
 
 **Candidate**:
@@ -116,6 +120,7 @@ _Avoid_: Proven closed, Resolved Finding, semantic proof
 - A **Finding** has at most one **Finding Basis**; a critical always has one
 - A **Reviewer Protocol Failure** never creates a **Finding**
 - A Wave **Task** has exactly one **Wave Review Roster** or is exempt; a **Review Run** keeps the roster it was installed with
+- A **Review Run** slot is issued by its own Wave Gate run or is **Carried Review Evidence** from exactly one earlier run on its restart lineage, never both
 - A **Review Packet** reviews the **Git-Visible Leaves** of its scope and has one **Reviewed Workspace Observation**
 - A panel has exactly one **Panel Program**; the **Orchestration Façade** issues each of its requests with one Context Packet
 - An **Effect Receipt** belongs to exactly one authorized side effect

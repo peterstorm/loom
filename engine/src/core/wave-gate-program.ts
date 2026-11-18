@@ -14,10 +14,42 @@ export type RegisteredReviewerProtocol<Descriptor extends ReviewerProtocolDescri
   | Readonly<{ schemaVersion: 1; reviewerProtocol?: never }>
   | Readonly<{ schemaVersion: 2; reviewerProtocol: Descriptor }>;
 
+/** One Wave Gate run on a restart lineage, named by its run and authority. */
+export type CarriedReviewAuthority = Readonly<{ runId: string; authorityDigest: string }>;
+
+/**
+ * What one reviewed Task carries into a replacement run (ADR-0088):
+ * - `accepted-task`: every slot of `roster` was accepted along the lineage, by
+ *   the run `acceptance` names. The Task is not reissued.
+ * - `accepted-slots`: the `agents` slots were accepted; only the rest of the
+ *   Task's roster is reissued.
+ */
+export type WaveReviewCarry =
+  | Readonly<{
+      kind: "accepted-task";
+      taskId: string;
+      roster: readonly [string, ...string[]];
+      acceptance: CarriedReviewAuthority;
+    }>
+  | Readonly<{ kind: "accepted-slots"; taskId: string; agents: readonly [string, ...string[]] }>;
+
+/**
+ * The carry plan a restart froze into its replacement's registration:
+ * `lineage` is every run on the restart chain, oldest first; `carried` lists
+ * the reviewed Tasks that carry, in registration order. Absent when nothing
+ * carries, so such a registration is byte-identical to one written before
+ * carry existed.
+ */
+export type WaveReviewCarryAudit = Readonly<{
+  lineage: readonly [CarriedReviewAuthority, ...CarriedReviewAuthority[]];
+  carried: readonly [WaveReviewCarry, ...WaveReviewCarry[]];
+}>;
+
 /** Audit of a replacement run that superseded an exhausted predecessor. */
 export type WaveGateRestartAudit = Readonly<{
   previousRunId: string;
   exhaustedSlots: readonly string[];
+  carry?: WaveReviewCarryAudit;
 }>;
 
 /** Audit of a replacement run that retired a predecessor whose Run Directory vanished. */

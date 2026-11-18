@@ -181,19 +181,24 @@ export function installWaveGateRegistration(
  * is derived, never asserted: it is re-derived here through the writers' own
  * `reconcileWaveBlock`, or the State File boundary refuses the causeless
  * block and no successor gate can install.
+ *
+ * A restart passes `carriedRunTaskIds`, the Tasks whose accepted slots its
+ * carry plan carries (ADR-0088). Their Review Run stays, unfolded, for the
+ * replacement to rebind; only the exhausted slots' failure state is cleared.
  */
 export function resetWaveGateReviewAuthority(
   graph: TaskGraph,
   taskIds: readonly string[],
+  carriedRunTaskIds: ReadonlySet<string> = new Set(),
 ): TaskGraph {
   const tasks = Object.freeze(graph.tasks.map((task) => {
     if (!taskIds.includes(task.id) || task.review_run === undefined) return task;
-    const preserved = preserveAcceptedReviewRunFindings(task);
+    const carried = carriedRunTaskIds.has(task.id);
     return canonicalRecord({
-      ...preserved,
+      ...(carried ? task : preserveAcceptedReviewRunFindings(task)),
       review_status: "pending" as const,
       review_generation: task.review_generation,
-      review_run: undefined,
+      review_run: carried ? task.review_run : undefined,
       review_error: undefined,
       review_evidence_failures: undefined,
     });

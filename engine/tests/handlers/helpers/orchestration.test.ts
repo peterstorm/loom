@@ -3519,14 +3519,29 @@ describe("orchestration CLI", () => {
       "restart", "--runs-root", runsRoot, "--run", previousRun, "--new-run", replacementRun,
     ], "", root));
     expect(restarted.status, restarted.stderr).toBe(0);
+    // ADR-0088: the accepted slot carries into the replacement by reference;
+    // only spec-check and the four exhausted slots are reissued.
+    const replacement = JSON.parse(restarted.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(replacement.requests.map(({ authority }) => authority.role)).toEqual([
+      "spec-check-invoker", ...BASE_WAVE_REVIEW_AGENTS.filter((agent) => agent !== first.role),
+    ]);
     const lateCapture = await captureReviewedTranscript(opened.value, retries.requests[0]!.authority, [...Buffer.from(accepted)]);
     expect(lateCapture.ok).toBe(false);
     if (!lateCapture.ok) expect(lateCapture.error.message).toContain("terminally rejected");
     const restartedGraph = JSON.parse(readFileSync(statePath, "utf8")) as {
-      tasks: readonly { findings?: readonly { claim: string }[]; review_run?: { prior_finding_ids: readonly string[] } }[];
+      tasks: readonly { findings?: readonly { claim: string }[]; review_run?: {
+        prior_finding_ids: readonly string[];
+        evidence: readonly { agent: string; new_findings: readonly { claim: string }[] }[];
+        slot_authority: readonly { agent: string; slot_id: string; carried_from?: { run_id: string } }[];
+      } }[];
     };
-    expect(restartedGraph.tasks[0]?.findings?.map(({ claim }) => claim)).toContain("partial critical survives restart");
-    expect(restartedGraph.tasks[0]?.review_run?.prior_finding_ids).toHaveLength(1);
+    const carriedRun = restartedGraph.tasks[0]?.review_run;
+    expect(restartedGraph.tasks[0]?.findings).toEqual([]);
+    expect(carriedRun?.prior_finding_ids).toEqual([]);
+    expect(carriedRun?.evidence.map(({ agent }) => agent)).toEqual([first.role]);
+    expect(carriedRun?.evidence[0]?.new_findings.map(({ claim }) => claim)).toContain("partial critical survives restart");
+    expect(carriedRun?.slot_authority.find(({ agent }) => agent === first.role))
+      .toMatchObject({ slot_id: first.slotId, carried_from: { run_id: "run.wave-partial-exhausted" } });
   }, 30_000);
 
   it("refuses restart when captured attempt 2 is valid but has not been applied", async () => {

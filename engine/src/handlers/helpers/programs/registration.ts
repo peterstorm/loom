@@ -19,6 +19,7 @@ import {
 } from '../../../core/reviewer-contract';
 import { parseStandaloneReadCoverage, type StandaloneReadCoveragePolicy } from '../../../core/standalone-read-coverage';
 import type { OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, RegisteredWaveGateProgram, WaveGateRestartAudit } from '../../../core/wave-gate-program';
+import { parseWaveReviewCarryAudit } from '../../../core/wave-review-carry';
 import { parseRunDirectoryReference } from '../../../orchestration/run-directory-handle';
 import {
   parseRegisteredRemediationProgram,
@@ -259,13 +260,19 @@ export function parseCliBindableFacadeProgram(raw: unknown): CliBindableRegistra
 function parseWaveRegistrationAudit(raw: Readonly<Record<string, unknown>>): ProgramParse<Pick<RegisteredWaveGateProgram, "restart" | "orphanRecovery">> {
   let restart: WaveGateRestartAudit | undefined;
   if (Object.hasOwn(raw, "restart")) {
-    if (!exactObject(raw.restart, ["previousRunId", "exhaustedSlots"]) ||
+    // A restart that carried accepted review evidence also records its carry
+    // plan (ADR-0088); one that carried nothing keeps the original two fields.
+    const carried = typeof raw.restart === "object" && raw.restart !== null && Object.hasOwn(raw.restart, "carry");
+    if (!exactObject(raw.restart, ["previousRunId", "exhaustedSlots", ...(carried ? ["carry"] : [])]) ||
         typeof raw.restart.previousRunId !== "string" || !Array.isArray(raw.restart.exhaustedSlots) ||
         raw.restart.exhaustedSlots.length === 0 || raw.restart.exhaustedSlots.some((slot) => typeof slot !== "string" || slot.length === 0)) {
       return { ok: false, message: "wave-gate registration restart audit must contain previousRunId and non-empty exhaustedSlots" };
     }
+    const carry = carried ? parseWaveReviewCarryAudit(raw.restart.carry) : null;
+    if (carry !== null && !carry.ok) return { ok: false, message: carry.error };
     restart = Object.freeze({ previousRunId: raw.restart.previousRunId,
-      exhaustedSlots: Object.freeze([...(raw.restart.exhaustedSlots as string[])]) });
+      exhaustedSlots: Object.freeze([...(raw.restart.exhaustedSlots as string[])]),
+      ...(carry === null ? {} : { carry: carry.value }) });
   }
   let orphanRecovery: OrphanedWaveGateRecoveryAudit | undefined;
   if (Object.hasOwn(raw, "orphanRecovery")) {

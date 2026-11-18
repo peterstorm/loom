@@ -7,10 +7,12 @@
  * the state update so the write aborts.
  */
 import type { CurrentReviewRunSlotAuthority, LegacyReviewRunSlotAuthority, TaskGraph } from "../types";
+import type { IssuedReviewRunSlotAuthority } from "./findings-shape";
 import type { ContextPacket } from "./context-packets";
 import {
   allOk,
   canonicalStructuralEquals,
+  isNonEmpty,
   mapNonEmpty,
   parseStoredAgentRequestAuthority,
   type AgentRequestAuthority,
@@ -20,8 +22,9 @@ import {
 } from "./orchestration-contract";
 import type { IssuedWaveReviewerProtocol } from "./review-output";
 import type { ReviewedWorkspaceObservation } from "./reviewed-workspace";
-import type { WaveReviewRoster } from "./agent-catalog-projections";
+import type { WaveReviewRole } from "./agent-catalog-projections";
 import { waveReviewerSlotProblem } from "./wave-gate-membership";
+import { carriedAcceptanceProblem, rebindCarriedReviewRun, waveReviewCarryOf } from "./wave-review-carry";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import {
   decideWaveReviewEpochReplay,
@@ -51,14 +54,14 @@ export type WaveReviewInstallObservation = Readonly<{
   specCheckObservation: WaveSpecCheckObservation;
 }>;
 
-/** One roster slot in both recorded forms, built from the one request that
- *  fills it — so a current slot always carries its request by construction. */
-type ReviewSlot = Readonly<{ legacy: LegacyReviewRunSlotAuthority; current: CurrentReviewRunSlotAuthority }>;
+/** One issued roster slot in both recorded forms, built from the one request
+ *  that fills it — so a current slot always carries its request by construction. */
+type ReviewSlot = Readonly<{ legacy: LegacyReviewRunSlotAuthority; current: IssuedReviewRunSlotAuthority }>;
 
-/** Each roster agent's slot, from exactly one matching request; the first
+/** Each issued agent's slot, from exactly one matching request; the first
  *  agent (in roster order) without exactly one is refused. */
 function reviewSlotAuthorityRoster(
-  roster: WaveReviewRoster,
+  roster: NonEmpty<WaveReviewRole>,
   authorities: readonly AgentRequestAuthority[],
 ): DomainResult<NonEmpty<ReviewSlot>, IssuanceRefusal> {
   const slots = allOk(mapNonEmpty(roster, (agent): DomainResult<ReviewSlot, IssuanceRefusal> => {
@@ -87,6 +90,14 @@ export function waveBatchSpecCheckAuthority(batch: WaveRequestBatch): DomainResu
  * own the exact active Wave Gate authority, spec/plan bytes and every Task's
  * reviewed workspace must be unchanged since the batch was prepared, and a
  * Task that already carries a Review Packet must carry exactly this one.
+ *
+ * A restart's carry plan (ADR-0088) is honoured here. A Task whose whole
+ * roster carries installs nothing and must still hold the acceptance its
+ * restart carried. A Task carrying some slots has its predecessor's Review
+ * Run rebound under this batch's Review Packet. Its carried slots keep their
+ * identity and name their origin; its other agents take this batch's fresh
+ * slots. Either way the carried evidence must still judge the Task's current
+ * bytes, or the install is refused.
  */
 export function installWaveReviewRunsTransition(
   locked: TaskGraph,
@@ -157,10 +168,24 @@ export function installWaveReviewRunsTransition(
     const lockedScope = taskReviewScope(task);
     const exactScope = currentWorkspace !== undefined && lockedScope.length === currentWorkspace.scope.length &&
       lockedScope.every((path, index) => path === currentWorkspace.scope[index]);
+    const carry = waveReviewCarryOf(registration.restart?.carry, task.id);
+    if (carry?.kind === "accepted-task") {
+      // Not reissued: the Task keeps the acceptance its own run recorded.
+      const problem = registration.schemaVersion !== 2 || currentWorkspace === undefined || !exactScope
+        ? `Task ${task.id} changed before its carried acceptance could be confirmed`
+        : carriedAcceptanceProblem(task, carry, registration.reviewerProtocol, currentWorkspace);
+      if (problem !== null) return refuse(problem);
+      if (taskRun !== undefined) return refuse(`Task ${task.id} carries its whole roster but was issued a Review Packet`);
+      tasks.push(task);
+      continue;
+    }
     if (taskRun === undefined || taskRun.generation !== (task.review_generation ?? 0) || !exactScope ||
         currentWorkspace === undefined || currentWorkspace.headSha !== (taskRun.workspaceHeadSha ?? taskRun.headSha)) {
       return refuse(`Task ${task.id} changed before its current Review Packet could be installed`);
     }
+    const issuedAgents: readonly WaveReviewRole[] = carry === undefined
+      ? expectedAgents
+      : expectedAgents.filter((agent) => !carry.agents.includes(agent));
     const authorities: AgentRequestAuthority[] = [];
     for (const authority of reviewAuthorities) {
       const context = readWaveReviewContext(batch.packets, authority.contextDigest);
@@ -169,13 +194,38 @@ export function installWaveReviewRunsTransition(
       }
       if (context.kind === "loaded" && context.value.taskRun?.taskId === task.id) authorities.push(authority);
     }
-    if (authorities.length !== expectedAgents.length) {
+    if (!isNonEmpty(issuedAgents) || authorities.length !== issuedAgents.length) {
       return refuse(`Task ${task.id} current Review Packet lacks the exact reviewer roster`);
     }
-    const roster = reviewSlotAuthorityRoster(expectedAgents, authorities);
+    const roster = reviewSlotAuthorityRoster(issuedAgents, authorities);
     if (!roster.ok) return roster;
     const slotAuthority = mapNonEmpty(roster.value, ({ legacy }) => legacy);
     const currentSlots = mapNonEmpty(roster.value, ({ current }) => current);
+    if (carry !== undefined) {
+      if (registration.schemaVersion !== 2) return refuse(`Task ${task.id} carries slots into a historical registration`);
+      const rebound = rebindCarriedReviewRun(task, carry, {
+        runId: specCheckAuthority.runId,
+        authorityDigest: registration.authorityDigest,
+        protocol: registration.reviewerProtocol,
+        generation: taskRun.generation,
+        packetId: taskRun.packetId,
+        headSha: taskRun.headSha,
+        bytes: { scope: currentWorkspace.scope, headSha: currentWorkspace.headSha },
+        roster: expectedAgents,
+        issued: currentSlots,
+      });
+      if (!rebound.ok) return refuse(rebound.error);
+      if (task.review_run?.wave_gate_run_id === specCheckAuthority.runId) {
+        if (!canonicalStructuralEquals(task.review_run, rebound.value)) {
+          return refuse(`Task ${task.id} already has a different Review Packet in progress`);
+        }
+        tasks.push(task);
+        continue;
+      }
+      tasks.push({ ...task, review_status: "pending" as const, review_error: undefined,
+        review_evidence_failures: undefined, review_run: rebound.value });
+      continue;
+    }
     if (task.review_run !== undefined) {
       const run = task.review_run;
       const sameProtocol = registration.schemaVersion === 2

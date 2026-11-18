@@ -18,7 +18,13 @@ import {
 } from "./proof-obligations";
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ByteSection, type ContextPacket } from "./context-packets";
 import { parseWaveReviewerProtocolDescriptor } from "./reviewer-contract";
-import type { OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, WaveGateRestartAudit } from "./wave-gate-program";
+import { match } from "ts-pattern";
+import type {
+  OrphanedWaveGateRecoveryAudit,
+  RegisteredReviewerProtocol,
+  WaveGateRestartAudit,
+  WaveReviewCarryAudit,
+} from "./wave-gate-program";
 import { DECISION_RECORD_AGENT } from "./model-profiles";
 import { taskRolePolicy, type TaskRolePolicy } from "./distill-task";
 import {
@@ -137,6 +143,12 @@ export type WaveReviewSubject =
 
 /** One reviewed registered Task with its ordered Wave review roster. */
 export type WaveTaskReviewRoster = Readonly<{ taskId: string; roster: WaveReviewRoster }>;
+
+/**
+ * The roles one reviewed Task's Review Packet issues in a batch, in roster
+ * order: its whole roster, or the part a restart did not carry (ADR-0088).
+ */
+export type WaveTaskIssuedRoles = Readonly<{ taskId: string; roster: readonly [WaveReviewRole, ...WaveReviewRole[]] }>;
 
 /**
  * A Wave Task that owes no Wave review, and why. Closed: a Distill Task is the
@@ -390,11 +402,34 @@ export function waveRunRosterProblem(
  * order, each with every role of its own roster in roster order. Request issuance,
  * persisted batch recovery and spawn-task labelling all read this order.
  */
-export function waveReviewSubjects(rosters: readonly WaveTaskReviewRoster[]): readonly WaveReviewSubject[] {
+export function waveReviewSubjects(rosters: readonly WaveTaskIssuedRoles[]): readonly WaveReviewSubject[] {
   return Object.freeze([
     Object.freeze({ role: "spec-check-invoker" as const, taskId: null }),
     ...rosters.flatMap(({ taskId, roster }) => roster.map((role) => Object.freeze({ role, taskId }))),
   ]);
+}
+
+/**
+ * The rosters a replacement run actually issues (ADR-0088): each reviewed
+ * Task's roster less the slots its registration's carry plan carries, and no
+ * entry at all for a Task whose whole roster carries. With no plan it is
+ * `rosters` itself, so every subject, slot and request keeps its identity.
+ */
+export function issuedWaveReviewRosters(
+  rosters: readonly WaveTaskReviewRoster[],
+  carry: WaveReviewCarryAudit | undefined,
+): readonly WaveTaskIssuedRoles[] {
+  if (carry === undefined) return rosters;
+  return Object.freeze(rosters.flatMap(({ taskId, roster }): readonly WaveTaskIssuedRoles[] => {
+    const carried = carry.carried.find((entry) => entry.taskId === taskId);
+    if (carried === undefined) return [Object.freeze({ taskId, roster })];
+    const carriedAgents: readonly string[] = match(carried)
+      .with({ kind: "accepted-task" }, () => roster)
+      .with({ kind: "accepted-slots" }, ({ agents }) => agents)
+      .exhaustive();
+    const issued = roster.filter((role) => !carriedAgents.includes(role));
+    return isNonEmpty(issued) ? [Object.freeze({ taskId, roster: issued })] : [];
+  }));
 }
 
 /** A durably issued request recovered from a Run Directory, labelled with the
@@ -412,7 +447,7 @@ export type PersistedWaveBatchClassification<C> =
  *  canonical batch order. A spec-check request ranks first whatever Task its
  *  context names; a reviewer ranks by its (Task, role) subject. */
 export function classifyPersistedWaveBatch<C>(
-  rosters: readonly WaveTaskReviewRoster[],
+  rosters: readonly WaveTaskIssuedRoles[],
   candidates: readonly PersistedWaveBatchCandidate<C>[],
 ): PersistedWaveBatchClassification<C> {
   const subjects = waveReviewSubjects(rosters);
@@ -1030,6 +1065,7 @@ export function prepareWaveReviewBatch(
     if (!protocol.ok) return failure(protocol.error.message);
   }
   const specCheckDocuments = specCheckObservation.authority;
+  const carry = registration.restart?.carry;
   const currentWaveTasks = graph.tasks.filter((task) => task.wave === registration.input.wave);
   const tasks: Task[] = [];
   for (const taskId of registration.taskIds) {
@@ -1109,11 +1145,21 @@ export function prepareWaveReviewBatch(
     specFile: graph.spec_file ?? null,
     planFile: graph.plan_file ?? null,
     specCheckDocuments,
+    // The restart's carry plan decides which subjects this batch issues, so
+    // the epoch commits to it. Absent, the payload is byte-identical to a
+    // batch prepared before carry existed (ADR-0088).
+    ...(carry === undefined ? {} : { carried: carry.carried }),
   })));
   if (!batchEpoch.ok) return failure(batchEpoch.error.message);
 
+  // Only Tasks this batch issues a slot for get a Review Packet; a Task whose
+  // whole roster carries keeps the acceptance its own run recorded.
+  const derivations = reviewed.map((task) =>
+    waveTaskReviewDerivation(graph, registration.schemaVersion, task, task.review_run));
+  const issuedRosters = issuedWaveReviewRosters(derivations, carry);
+  const issuing = admitted.filter(({ task }) => issuedRosters.some(({ taskId }) => taskId === task.id));
   const taskRuns: WaveTaskRunAuthority[] = [];
-  for (const { task, workspace } of admitted) {
+  for (const { task, workspace } of issuing) {
     const packetId = parseArtifactDigest(sha256Hex(`${batchEpoch.value}|packet|${task.id}`));
     const workspaceHeadSha = parseArtifactDigest(workspace.headSha);
     if (!packetId.ok) return failure(packetId.error.message);
@@ -1129,7 +1175,7 @@ export function prepareWaveReviewBatch(
 
   const frozenSourceByTask = new Map<string, ByteSection>();
   if (registration.schemaVersion === 2) {
-    for (const { task, workspace } of admitted) {
+    for (const { task, workspace } of issuing) {
       const source = encodeByteSection(WAVE_FROZEN_SOURCE_SECTION, JSON.stringify(waveFrozenSource(workspace)));
       if (!source.ok) return failure(source.error.message);
       frozenSourceByTask.set(task.id, source.value);
@@ -1141,8 +1187,6 @@ export function prepareWaveReviewBatch(
   // packet keeps its exact pre-feature bytes (SC-005). The owner map is one of
   // the two reasons for the architecture lens: either reason (owner map or
   // contract surface) puts architecture-tech-lead on the Task's roster.
-  const derivations = reviewed.map((task) =>
-    waveTaskReviewDerivation(graph, registration.schemaVersion, task, task.review_run));
   const ownerMapByTask = new Map<string, ByteSection>();
   // The contract surface (ADR-0069): only reviewer packets of a schema-2 Wave,
   // and only for a Task writing an Acceptance Contract's types file. The same
@@ -1165,7 +1209,7 @@ export function prepareWaveReviewBatch(
     ownerMapByTask.set(taskId, ownerMap.value);
   }
 
-  const subjects = waveReviewSubjects(derivations);
+  const subjects = waveReviewSubjects(issuedRosters);
   const requests: IssuedWaveReviewRequest[] = [];
   const packets: ContextPacket[] = [];
   for (const subject of subjects) {

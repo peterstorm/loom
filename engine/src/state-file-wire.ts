@@ -2174,8 +2174,12 @@ function taskFindingsError(
         if (!isRecord(rawSlot)) return `${label} must be an object`;
         const slot = rawSlot as Record<string, unknown>;
         const fields = Object.keys(slot).sort();
+        // A current slot a restart carried also names its origin (ADR-0088);
+        // `reviewRunError` above has already proven that origin and its evidence.
+        const currentFields = ["agent", "attempted", "slot_id", "request_id", "context_digest",
+          ...(Object.hasOwn(slot, "carried_from") ? ["carried_from"] : [])];
         const expectedFields = (run.reviewer_protocol === undefined
-          ? ["agent", "attempted", "slot_id"] : ["agent", "attempted", "slot_id", "request_id", "context_digest"]).sort();
+          ? ["agent", "attempted", "slot_id"] : currentFields).sort();
         if (fields.length !== expectedFields.length || fields.some((field, fieldIndex) => field !== expectedFields[fieldIndex])) {
           return `${label} must contain exactly agent/slot_id/attempted`;
         }
