@@ -729,6 +729,7 @@ export function populateTaskGraph(
     orphaned_wave_gate_history: _staleOrphanedWaveGateHistory,
     spec_trace_wave_gate_retirements: _staleSpecTraceRetirements,
     spec_trace_amendments: _staleSpecTraceAmendments,
+    spec_amendments: _staleSpecAmendments,
     wave_plan_edits: _staleWavePlanEdits,
     retro_records: _staleRetroRecords,
     spec_index_observation: _staleSpecIndexObservation,

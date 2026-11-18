@@ -10,12 +10,23 @@
  * is what lets a later Wave's projection report a Requirement rewritten after
  * its Wave passed.
  *
+ * A completed Task's claim that a spec amendment listed for re-judgement
+ * (ADR-0087) was judged again as a row of this Wave, so it is re-anchored too.
+ *
  * Pure: the shell supplies the Spec Index it observed; this module proves that
  * the index came from the bytes the Wave review epoch recorded before using it.
  */
 
-import type { TaskGraph, WaveSpecCheckDocumentsAuthority } from "../types";
+import type { Task, TaskGraph, WaveSpecCheckDocumentsAuthority } from "../types";
 import { recordedAnchorHashes, type SpecIndexAvailability } from "./requirement-coverage";
+import { rejudgeClaimsOf } from "./spec-rejudgement";
+
+/** The claims of `task` this Wave verified: all of a Task of the Wave, and a completed Task's re-judged claims (ADR-0087). */
+function verifiedClaimsOf(graph: TaskGraph, task: Task, wave: number): readonly string[] {
+  const anchors = task.spec_anchors ?? [];
+  if (task.wave === wave) return anchors;
+  return rejudgeClaimsOf(graph, task);
+}
 
 /**
  * The completed graph with every `wave` Task's claim hashes set to the reviewed
@@ -35,8 +46,8 @@ export function reanchorVerifiedClaims(
     return graph;
   }
   const tasks = graph.tasks.map((task) => {
-    const anchors = task.spec_anchors ?? [];
-    if (task.wave !== wave || anchors.length === 0) return task;
+    const anchors = verifiedClaimsOf(graph, task, wave);
+    if (anchors.length === 0) return task;
     const recorded = task.spec_anchor_hashes ?? {};
     const verified = recordedAnchorHashes(specIndex.index, anchors);
     return Object.entries(verified).every(([claim, hash]) => recorded[claim] === hash)
