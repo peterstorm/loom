@@ -20,9 +20,9 @@
  *   replacement's fresh slot.
  * - `waveAcceptanceProblem` is the completion admission: an acceptance comes
  *   from this run, or it was carried along the recorded lineage, and a
- *   succession's predecessor is a protected retired run.
- * - `parseWaveReviewCarryAudit` and `parseWaveGateSuccessionAudit` are the
- *   registration boundary's parsers.
+ *   succession's predecessor is a protected retired run of its Wave.
+ *
+ * The registration boundary's parsers live in the leaf `wave-review-carry-audit`.
  *
  * One admissibility rule serves planning and the install. Evidence carries
  * only while nothing it judged has changed: the reviewer protocol descriptor,
@@ -38,12 +38,11 @@ import type {
   CurrentReviewRunSlotAuthority,
   IssuedReviewRunSlotAuthority,
   ReviewSlotOrigin,
+  SubjectDigest,
 } from "./findings-shape";
 import {
   canonicalStructuralEquals,
   isNonEmpty,
-  parseArtifactDigest,
-  parseOrchestrationRunId,
   type AgentRequestAuthority,
   type DomainResult,
   type NonEmpty,
@@ -59,8 +58,9 @@ import type {
   WaveReviewCarry,
   WaveReviewCarryAudit,
 } from "./wave-gate-program";
-import { taskReviewScope, waveReviewStanding, waveTaskReviewRoster, waveTaskSubjectDigest } from "./wave-review-authority";
-import { issuedRoles, registeredCarry, waveReviewCarryOf } from "./wave-review-carry-plan";
+import { derivedWaveTaskReview, taskReviewScope, waveReviewStanding, waveTaskSubjectDigest } from "./wave-review-authority";
+import { sameAuthority } from "./wave-review-carry-audit";
+import { issuedRoles, registeredCarry, waveReviewCarryOf, type RegisteredCarry } from "./wave-review-carry-plan";
 
 /** The reviewed workspace a carry is judged against: its canonical scope and content head. */
 export type ReviewedBytes = Readonly<{ scope: readonly string[]; headSha: string }>;
@@ -145,9 +145,9 @@ function assertNever(value: never): never {
  */
 export type CarryTerms = Readonly<{
   protocol: ReviewerProtocolDescriptor;
-  roster: readonly string[];
+  roster: NonEmpty<string>;
   bytes: ReviewedBytes;
-  subject: string;
+  subject: SubjectDigest;
 }>;
 
 /**
@@ -155,11 +155,7 @@ export type CarryTerms = Readonly<{
  * restart carries it on the facts ADR-0089 compares: the graph cannot change
  * under a live gate. A succession can be days later, so it reviews it in full.
  */
-export type CarryKind = "restart" | "succession";
-
-/** The carry kind a registration's plan was decided under. */
-export const carryKindOf = (registration: Pick<RegisteredWaveGateProgram, "succession">): CarryKind =>
-  registration.succession === undefined ? "restart" : "succession";
+export type CarryKind = RegisteredCarry["kind"];
 
 const notCarried = (reason: NotCarriedReason): DomainResult<never, NotCarriedReason> => ({ ok: false, error: reason });
 
@@ -168,9 +164,6 @@ function driftOf(checks: readonly (readonly [CarryDrift, boolean])[]): NotCarrie
   const fields = checks.flatMap(([field, holds]) => (holds ? [] : [field]));
   return isNonEmpty(fields) ? Object.freeze({ kind: "drift", fields: Object.freeze(fields) }) : null;
 }
-
-const sameAuthority = (left: CarriedReviewAuthority, right: CarriedReviewAuthority): boolean =>
-  left.runId === right.runId && left.authorityDigest === right.authorityDigest;
 
 /** The same roles, whatever their order; a roster names each role once. */
 const sameRoles = (left: readonly string[], right: readonly string[]): boolean =>
@@ -301,7 +294,11 @@ function acceptedRoster(
   return entry?.kind === "accepted-task" && sameAuthority(entry.acceptance, acceptance) ? entry.roster : undefined;
 }
 
-/** The terms `task` is judged by, why it cannot be judged, or null for a Task that owes no review. */
+/**
+ * The terms `task` is judged by, why it cannot be judged, or null for a Task
+ * that owes no review. The roster and the Subject Digest come from one
+ * derivation of the Task's review.
+ */
 function carryTermsOf(context: CarryContext, task: Task): DomainResult<CarryTerms, NotCarriedReason> | null {
   const { graph, previous, protocol, workspaces } = context;
   if (waveReviewStanding(task).kind === "exempt") return null;
@@ -312,10 +309,10 @@ function carryTermsOf(context: CarryContext, task: Task): DomainResult<CarryTerm
   if (workspace === undefined) return notCarried({ kind: "workspace-unobserved" });
   const admitted = admitReviewedWorkspace(task.id, taskReviewScope(task), workspace);
   if (!admitted.ok) return notCarried({ kind: "workspace-rejected", error: admitted.error });
-  const review = waveTaskReviewRoster(graph, 2, task);
+  const review = derivedWaveTaskReview(graph, 2, task);
   if (review.kind !== "roster") return notCarried({ kind: "roster-not-derivable" });
   const bytes: ReviewedBytes = { scope: admitted.value.scope, headSha: admitted.value.headSha };
-  return { ok: true, value: { protocol, roster: review.roster, bytes, subject: waveTaskSubjectDigest(graph, task, protocol, bytes) } };
+  return { ok: true, value: { protocol, roster: review.roster, bytes, subject: waveTaskSubjectDigest(graph, task, review, protocol, bytes) } };
 }
 
 /** `task`'s whole-roster acceptance as a carry entry, or why it does not carry. */
@@ -325,11 +322,9 @@ function acceptanceCarry(context: CarryContext, task: Task, terms: CarryTerms): 
   const acceptance: CarriedReviewAuthority = Object.freeze({ runId: accepted.run_id, authorityDigest: accepted.authority_digest });
   const roster = acceptedRoster(context, acceptance, task.id, terms);
   if (roster === undefined) return notCarried({ kind: "acceptance-off-lineage", runId: acceptance.runId });
-  const derived = terms.roster;
-  if (!isNonEmpty(derived)) return notCarried({ kind: "roster-not-derivable" });
   const carriable = carriableAcceptance(task, acceptance, roster, terms, context.source.kind);
   return carriable.ok
-    ? { ok: true, value: Object.freeze({ kind: "accepted-task", taskId: task.id, roster: derived, acceptance }) }
+    ? { ok: true, value: Object.freeze({ kind: "accepted-task", taskId: task.id, roster: terms.roster, acceptance }) }
     : carriable;
 }
 
@@ -382,7 +377,7 @@ function lineageThrough(context: CarryContext): NonEmpty<CarriedReviewAuthority>
   const predecessorCarry = registeredCarry(context.previous);
   return Object.freeze(predecessorCarry === undefined
     ? [context.predecessor]
-    : [...predecessorCarry.lineage, context.predecessor]);
+    : [...predecessorCarry.audit.lineage, context.predecessor]);
 }
 
 export type RestartCarryInput = Readonly<{
@@ -432,7 +427,7 @@ export type SuccessorCarryInput = Readonly<{
 }>;
 
 /** The predecessor's registration, proven to be the run the protected record retired. */
-function predecessorRegistration(input: SuccessorCarryInput): DomainResult<RegisteredWaveGateProgram, string> {
+function retiredPredecessorRegistration(input: SuccessorCarryInput): DomainResult<RegisteredWaveGateProgram, string> {
   const { previous, predecessor } = input;
   if (!previous.ok) return previous;
   return previous.value.authorityDigest === predecessor.authorityDigest && previous.value.input.wave === predecessor.wave
@@ -450,7 +445,7 @@ function predecessorRegistration(input: SuccessorCarryInput): DomainResult<Regis
  */
 export function planSuccessorCarry(input: SuccessorCarryInput): SuccessorCarryPlan {
   const { graph, taskIds, predecessor, protocol, workspaces } = input;
-  const previous = predecessorRegistration(input);
+  const previous = retiredPredecessorRegistration(input);
   if (!previous.ok) {
     const unreadable: NotCarriedReason = Object.freeze({ kind: "predecessor-unreadable", error: previous.error });
     return Object.freeze({
@@ -487,7 +482,7 @@ export type CarriedRunBinding = Readonly<{
   bytes: ReviewedBytes;
   roster: NonEmpty<string>;
   /** The Subject Digest of the Task as the replacement's packets present it. */
-  subject: string;
+  subject: SubjectDigest;
   /** The replacement batch's fresh slots, one per agent the carry does not cover. */
   issued: readonly IssuedReviewRunSlotAuthority[];
 }>;
@@ -576,7 +571,7 @@ export function carriedAcceptanceProblem(
  * Whether `retired` holds the protected record of the run `succession`
  * succeeds, for `wave`: the provenance every Successor Carry rests on.
  */
-export function successionIsProtected(
+function successionIsProtected(
   succession: WaveGateSuccessionAudit,
   wave: number,
   retired: readonly RetiredWaveReviewRun[],
@@ -590,8 +585,8 @@ export function successionIsProtected(
  * registration, or null when admitted. It comes from run `runId` itself, or
  * from an `accepted-task` carry whose acceptance is on the recorded lineage;
  * a Successor Carry is admitted only while its predecessor is a protected
- * retired run of the Wave (`retired`). Generation and protocol must match
- * either way.
+ * retired run of the registration's exact Wave (`retired`), and never for a
+ * registration without one. Generation and protocol must match either way.
  */
 export function waveAcceptanceProblem(
   task: Task,
@@ -610,120 +605,11 @@ export function waveAcceptanceProblem(
   const carry = registeredCarry(registration);
   const entry = waveReviewCarryOf(carry, task.id);
   if (entry?.kind !== "accepted-task" || !sameAuthority(entry.acceptance, acceptance) ||
-      carry?.lineage.some((onLineage) => sameAuthority(onLineage, acceptance)) !== true) {
+      carry?.audit.lineage.some((onLineage) => sameAuthority(onLineage, acceptance)) !== true) {
     return `Task ${task.id} acceptance from run ${accepted.run_id} is neither this run's nor carried along its recorded lineage`;
   }
-  const succession = registration.succession;
-  return succession === undefined || registration.input.wave === null ||
-      successionIsProtected(succession, registration.input.wave, retired)
+  const { succession, input: { wave } } = registration;
+  return succession === undefined || (wave !== null && successionIsProtected(succession, wave, retired))
     ? null
     : `Task ${task.id} acceptance was carried from run ${succession.previousRunId}, which is no protected retired run of its Wave`;
-}
-
-// ---------------------------------------------------------------------------
-// The registration boundary
-// ---------------------------------------------------------------------------
-
-const exactKeys = (raw: unknown, keys: readonly string[]): raw is Readonly<Record<string, unknown>> =>
-  typeof raw === "object" && raw !== null && !Array.isArray(raw) &&
-  Object.keys(raw).length === keys.length && keys.every((key) => Object.hasOwn(raw, key));
-
-/** A non-empty array of distinct non-blank strings. */
-function parseRoles(raw: unknown): NonEmpty<string> | null {
-  if (!Array.isArray(raw) || raw.some((role) => typeof role !== "string" || role.trim() === "")) return null;
-  const roles: readonly string[] = raw;
-  return isNonEmpty(roles) && new Set(roles).size === roles.length ? Object.freeze(roles) : null;
-}
-
-function parseAuthority(raw: unknown): CarriedReviewAuthority | null {
-  if (!exactKeys(raw, ["runId", "authorityDigest"])) return null;
-  const runId = parseOrchestrationRunId(raw.runId);
-  const digest = parseArtifactDigest(raw.authorityDigest);
-  return runId.ok && digest.ok ? Object.freeze({ runId: runId.value, authorityDigest: digest.value }) : null;
-}
-
-const parseTaskId = (raw: unknown): string | null => (typeof raw === "string" && raw.trim() !== "" ? raw : null);
-
-function parseCarry(raw: unknown, lineage: readonly CarriedReviewAuthority[]): WaveReviewCarry | null {
-  if (exactKeys(raw, ["kind", "taskId", "roster", "acceptance"]) && raw.kind === "accepted-task") {
-    const taskId = parseTaskId(raw.taskId);
-    const roster = parseRoles(raw.roster);
-    const acceptance = parseAuthority(raw.acceptance);
-    return taskId !== null && roster !== null && acceptance !== null &&
-        lineage.some((onLineage) => sameAuthority(onLineage, acceptance))
-      ? Object.freeze({ kind: "accepted-task", taskId, roster, acceptance })
-      : null;
-  }
-  if (exactKeys(raw, ["kind", "taskId", "agents"]) && raw.kind === "accepted-slots") {
-    const taskId = parseTaskId(raw.taskId);
-    const agents = parseRoles(raw.agents);
-    return taskId === null || agents === null ? null : Object.freeze({ kind: "accepted-slots", taskId, agents });
-  }
-  return null;
-}
-
-/** Every entry parsed, as a non-empty list; null when the list is empty or any entry was refused. */
-function allParsed<T>(entries: readonly (T | null)[]): NonEmpty<T> | null {
-  const parsed = entries.flatMap((entry) => (entry === null ? [] : [entry]));
-  return isNonEmpty(parsed) && parsed.length === entries.length ? Object.freeze(parsed) : null;
-}
-
-/**
- * Parse a stored carry plan whose entries `admits` accepts. The lineage names
- * distinct runs; every carried Task appears once; an `accepted-task`
- * acceptance is on the lineage; each carried role list is a non-empty set.
- */
-function parseCarryAudit<Entry extends WaveReviewCarry>(
-  raw: unknown,
-  label: string,
-  admits: (entry: WaveReviewCarry) => entry is Entry,
-): DomainResult<WaveReviewCarryAudit<Entry>, string> {
-  const refused = (detail: string): DomainResult<never, string> => ({ ok: false, error: `${label} ${detail}` });
-  if (!exactKeys(raw, ["lineage", "carried"]) || !Array.isArray(raw.lineage) || !Array.isArray(raw.carried)) {
-    return refused("must contain exactly lineage and carried arrays");
-  }
-  const runs = allParsed(raw.lineage.map(parseAuthority));
-  if (runs === null) return refused("lineage must name at least one exact run and authority digest");
-  if (new Set(runs.map(({ runId }) => runId)).size !== runs.length) return refused("lineage repeats a run");
-  const entries = allParsed(raw.carried.map((entry) => {
-    const parsed = parseCarry(entry, runs);
-    return parsed !== null && admits(parsed) ? parsed : null;
-  }));
-  if (entries === null) return refused("must list at least one well-formed carried Task whose acceptance is on the lineage");
-  if (new Set(entries.map(({ taskId }) => taskId)).size !== entries.length) return refused("repeats a carried Task");
-  return { ok: true, value: Object.freeze({ lineage: Object.freeze(runs), carried: Object.freeze(entries) }) };
-}
-
-/** A restart may carry either kind of entry. */
-const anyCarry = (_entry: WaveReviewCarry): _entry is WaveReviewCarry => true;
-const acceptedTaskOnly = (entry: WaveReviewCarry): entry is AcceptedTaskCarry => entry.kind === "accepted-task";
-
-/** Parse a restart registration's stored carry plan (ADR-0089). */
-export function parseWaveReviewCarryAudit(raw: unknown): DomainResult<WaveReviewCarryAudit, string> {
-  return parseCarryAudit(raw, "wave-gate registration restart carry", anyCarry);
-}
-
-/**
- * Parse a fresh start's stored succession (ADR-0090): the run it succeeded,
- * how that run ended, and a carry of whole-roster acceptances whose lineage
- * ends with that run.
- */
-export function parseWaveGateSuccessionAudit(raw: unknown): DomainResult<WaveGateSuccessionAudit, string> {
-  const refused = (detail: string): DomainResult<never, string> => ({ ok: false, error: `wave-gate registration succession ${detail}` });
-  if (!exactKeys(raw, ["previousRunId", "previousAuthorityDigest", "kind", "carry"])) {
-    return refused("must contain exactly previousRunId, previousAuthorityDigest, kind and carry");
-  }
-  const previous = parseAuthority({ runId: raw.previousRunId, authorityDigest: raw.previousAuthorityDigest });
-  if (previous === null) return refused("must name an exact previous run and authority digest");
-  if (raw.kind !== "abandoned" && raw.kind !== "completed-reopened") return refused("kind must be abandoned or completed-reopened");
-  const carry = parseCarryAudit(raw.carry, "wave-gate registration succession carry", acceptedTaskOnly);
-  if (!carry.ok) return carry;
-  const last = carry.value.lineage.at(-1);
-  if (last === undefined || !sameAuthority(last, previous)) return refused("carry lineage must end with the previous run");
-  return { ok: true, value: Object.freeze({
-    previousRunId: previous.runId,
-    previousAuthorityDigest: previous.authorityDigest,
-    kind: raw.kind,
-    carry: carry.value,
-  }) };
 }

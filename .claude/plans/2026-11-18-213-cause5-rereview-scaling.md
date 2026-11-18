@@ -8,11 +8,12 @@
   - The role table in PR (b) is as proposed below.
 
 ## Today
-- All three re-gate paths issue every reviewed Task's full roster plus spec-check (the 35):
-  - abandon → reopen-task → fresh start: `supersedeAbandonedWaveGateReview` resets every Task the abandoned run accepted (`engine/src/core/wave-gate-registration.ts:301-313`), and the tombstone is dropped (`:220`);
-  - completed-wave reopen keeps unchanged Tasks' acceptances (`engine/src/handlers/helpers/reopen-completed-wave.ts:144-147,213`), but completion refuses any acceptance not from this run or its restart lineage (`engine/src/core/wave-review-carry.ts:396-411`);
-  - `prepareWaveGateFacadeStart` registers with no carry (`engine/src/handlers/helpers/programs/wave-gate-start.ts:77-82`), and `prepareWaveReviewBatch` issues full rosters (`engine/src/core/wave-review-authority.ts:1153-1156`).
-- `carriableAcceptance` (`engine/src/core/wave-review-carry.ts:160-180`) already proves same bytes and generation. It does not cover the rest of the packet subject: description, plan context, spec anchors, proof, prior findings, owner map and contract surface (`engine/src/core/wave-review-authority.ts:1252-1292`).
+(Before PR (a); function names, not line numbers, since the code has moved.)
+- All three re-gate paths issue every reviewed Task's full roster plus spec-check (31 requests in the six-Task advisory round of #213):
+  - abandon → reopen-task → fresh start: `supersedeAbandonedWaveGateReview` (core/wave-gate-registration.ts) reset every Task the abandoned run accepted, and `resetWaveGateReviewAuthority` dropped the tombstone;
+  - completed-wave reopen keeps unchanged Tasks' acceptances (`reopenCompletedWave`, handlers/helpers/reopen-completed-wave.ts), but completion (`waveAcceptanceProblem`, core/wave-review-carry.ts) refused any acceptance not from this run or its restart lineage;
+  - `prepareWaveGateFacadeStart` (handlers/helpers/programs/wave-gate-start.ts) registered with no carry, and `prepareWaveReviewBatch` (core/wave-review-authority.ts) issued full rosters.
+- `carriableAcceptance` (core/wave-review-carry.ts) already proved same bytes and generation. It did not cover the rest of the packet subject: description, plan context, spec anchors, proof, prior findings, owner map and contract surface (the Task section `prepareWaveReviewBatch` renders).
 
 ## PR (a): successor carry across a fresh start
 - An abandon keeps `accepted_review_authority` and records the retired run in a new protected `retired_wave_review_runs`. A completed-wave reopen already records it in `wave_reopening_history`.
@@ -29,6 +30,7 @@
 - Provenance: `installWaveGateRegistration(…, succession)` refuses a succession whose predecessor is not `successionPredecessorOf` or whose carried Task no longer holds the named acceptance; `waveAcceptanceProblem(…, retired)` admits a succession only while the predecessor is a protected retired run of the Wave. Lineage entries older than the predecessor come from the predecessor's immutable registration (as a restart's do); only the predecessor is checked against protected state.
 - Shell: `prepareWaveGateFacadeStart(…, {freshReview})` reads the predecessor's registration from the start's runs root and the reviewed workspaces; `start wave-gate --fresh-review`; `wave-gate-start-not-carried` JSON line on stderr.
 - Tests: core/wave-review-succession.test.ts; integration replay of the 6-Task advisory round (spec-check + T6's roster only, completes on carried acceptances), `--fresh-review`, epoch byte-identity.
+- Review follow-up (PR #225 advisories): the two digests are brands (`SubjectDigest` on the Review Run and `CarryTerms`, `SealedSubjectDigest` on the acceptance), minted and parsed only in core/review-subject.ts; `RegisteredWaveGateProgram` records one exclusive origin audit (`WaveGateOriginAudit`, read tagged through `waveGateOriginOf`; JSON unchanged), and `registeredCarry` returns `{kind, audit}`; the carry-audit parsers moved to the leaf core/wave-review-carry-audit.ts; `WAVE_REVIEW_RUN_RETIREMENTS` is the one tuple of retirement kinds and core/retired-wave-review-runs.ts the one append and duplicate rule; a succession on a null-Wave registration is refused by the parser and fails completion; the roster and Subject Digest come from one `derivedWaveTaskReview`.
 
 ## PR (b): reviewers chosen by change class
 - `review_basis` keeps the last accepted review across invalidation (`engine/src/core/review-output.ts:1058-1068`, `engine/src/core/task-revalidation.ts:61-62`).

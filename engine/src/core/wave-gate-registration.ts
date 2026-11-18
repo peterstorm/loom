@@ -22,6 +22,7 @@
 import type { ActiveWaveGateRegistration, RetiredWaveReviewRun, TaskGraph } from "../types";
 import { preserveAcceptedReviewRunFindings } from "./findings";
 import { canonicalRecord, canonicalStructuralEquals } from "./orchestration-contract";
+import { appendRetiredWaveReviewRun } from "./retired-wave-review-runs";
 import { reconcileWaveBlock } from "./wave-gate-model";
 import type { WaveGateSuccessionAudit } from "./wave-gate-program";
 import { waveGateAuthorityDigest } from "./wave-review-authority";
@@ -152,10 +153,10 @@ const retirementOf = (run: RetiringRun, retirement: RetiredWaveReviewRun["retire
     authorityDigest: run.authorityDigest, retirement,
   });
 
-/** `graph` with `run` appended to its retired runs. */
+/** `graph` with `run` appended to its retired runs, through the one append that keeps a run retired once. */
 const withRetiredRun = (graph: TaskGraph, run: RetiringRun, retirement: RetiredWaveReviewRun["retirement"]): TaskGraph => ({
   ...graph,
-  retired_wave_review_runs: Object.freeze([...(graph.retired_wave_review_runs ?? []), retirementOf(run, retirement)]),
+  retired_wave_review_runs: appendRetiredWaveReviewRun(graph.retired_wave_review_runs, retirementOf(run, retirement)),
 });
 
 /**

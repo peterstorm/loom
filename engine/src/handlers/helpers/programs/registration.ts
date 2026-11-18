@@ -19,9 +19,9 @@ import {
 } from '../../../core/reviewer-contract';
 import { parseStandaloneReadCoverage, type StandaloneReadCoveragePolicy } from '../../../core/standalone-read-coverage';
 import type {
-  OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, RegisteredWaveGateProgram, WaveGateRestartAudit, WaveGateSuccessionAudit,
+  OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, RegisteredWaveGateProgram, WaveGateOriginAudit, WaveGateRestartAudit,
 } from '../../../core/wave-gate-program';
-import { parseWaveGateSuccessionAudit, parseWaveReviewCarryAudit } from '../../../core/wave-review-carry';
+import { parseWaveGateSuccessionAudit, parseWaveReviewCarryAudit } from '../../../core/wave-review-carry-audit';
 import { parseRunDirectoryReference } from '../../../orchestration/run-directory-handle';
 import {
   parseRegisteredRemediationProgram,
@@ -259,10 +259,11 @@ export function parseCliBindableFacadeProgram(raw: unknown): CliBindableRegistra
   return parsed.program.kind === "security-verification" ? NATIVE_CAPTURE_ONLY : Object.freeze({ kind: "registered", program: parsed.program });
 }
 
-function parseWaveRegistrationAudit(
-  raw: Readonly<Record<string, unknown>>,
-): ProgramParse<Pick<RegisteredWaveGateProgram, "restart" | "orphanRecovery" | "succession">> {
-  let restart: WaveGateRestartAudit | undefined;
+/**
+ * The one origin audit a registration records (`WaveGateOriginAudit`): the
+ * caller has already proven that at most one of the three keys is present.
+ */
+function parseWaveRegistrationAudit(raw: Readonly<Record<string, unknown>>): ProgramParse<WaveGateOriginAudit> {
   if (Object.hasOwn(raw, "restart")) {
     // A restart that carried accepted review evidence also records its carry
     // plan (ADR-0089); one that carried nothing keeps the original two fields.
@@ -274,31 +275,27 @@ function parseWaveRegistrationAudit(
     }
     const carry = carried ? parseWaveReviewCarryAudit(raw.restart.carry) : null;
     if (carry !== null && !carry.ok) return { ok: false, message: carry.error };
-    restart = Object.freeze({ previousRunId: raw.restart.previousRunId,
+    const restart: WaveGateRestartAudit = Object.freeze({ previousRunId: raw.restart.previousRunId,
       exhaustedSlots: Object.freeze([...(raw.restart.exhaustedSlots as string[])]),
       ...(carry === null ? {} : { carry: carry.value }) });
+    return { ok: true, value: Object.freeze({ restart }) };
   }
-  let orphanRecovery: OrphanedWaveGateRecoveryAudit | undefined;
   if (Object.hasOwn(raw, "orphanRecovery")) {
     if (!exactObject(raw.orphanRecovery, ["previousRunId", "previousAuthorityDigest"]) ||
         typeof raw.orphanRecovery.previousRunId !== "string" || typeof raw.orphanRecovery.previousAuthorityDigest !== "string") {
       return { ok: false, message: "wave-gate registration orphanRecovery audit must contain previousRunId and previousAuthorityDigest" };
     }
-    orphanRecovery = Object.freeze({ previousRunId: raw.orphanRecovery.previousRunId,
+    const orphanRecovery: OrphanedWaveGateRecoveryAudit = Object.freeze({ previousRunId: raw.orphanRecovery.previousRunId,
       previousAuthorityDigest: raw.orphanRecovery.previousAuthorityDigest });
+    return { ok: true, value: Object.freeze({ orphanRecovery }) };
   }
   // A fresh start that carried accepted reviews from the run it succeeded
   // (ADR-0090); one that carried nothing records no succession at all.
-  let succession: WaveGateSuccessionAudit | undefined;
   if (Object.hasOwn(raw, "succession")) {
-    const parsed = parseWaveGateSuccessionAudit(raw.succession);
-    if (!parsed.ok) return { ok: false, message: parsed.error };
-    succession = parsed.value;
+    const succession = parseWaveGateSuccessionAudit(raw.succession);
+    return succession.ok ? { ok: true, value: Object.freeze({ succession: succession.value }) } : { ok: false, message: succession.error };
   }
-  return { ok: true, value: Object.freeze({
-    ...(restart === undefined ? {} : { restart }), ...(orphanRecovery === undefined ? {} : { orphanRecovery }),
-    ...(succession === undefined ? {} : { succession }),
-  }) };
+  return { ok: true, value: Object.freeze({}) };
 }
 
 function parseFacadeRegistration(raw: unknown): FacadeRegistrationParse {
@@ -369,13 +366,16 @@ function parseRegisteredWaveGateProgram(raw: unknown): FacadeRegistrationParse {
   const audit = parseWaveRegistrationAudit(raw);
   if (!audit.ok) return invalidRegistration(audit.message);
   const input = parseWaveGateStartInput(raw.input);
-  return input.ok
-    ? registeredProgram(Object.freeze({
-        ...protocol.value, kind: "wave-gate", input: input.value,
-        taskIds: Object.freeze([...(raw.taskIds as string[])]), authorityDigest: raw.authorityDigest,
-        ...audit.value,
-      }))
-    : invalidRegistration(input.message);
+  if (!input.ok) return invalidRegistration(input.message);
+  // A Successor Carry is admitted only against a retired run of an exact Wave (ADR-0090).
+  if (audit.value.succession !== undefined && input.value.wave === null) {
+    return invalidRegistration("wave-gate registration succession requires an exact Wave");
+  }
+  return registeredProgram(Object.freeze({
+    ...protocol.value, kind: "wave-gate", input: input.value,
+    taskIds: Object.freeze([...(raw.taskIds as string[])]), authorityDigest: raw.authorityDigest,
+    ...audit.value,
+  }));
 }
 
 export function parsedAuthority(registration: RegisteredStandaloneProgram, successor?: PreparedStandaloneSuccessor): ProgramParse<FrozenStandaloneReviewAuthority> {

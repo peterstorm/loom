@@ -54,15 +54,15 @@ describe("replacement registration identity", () => {
   it("compares restart audits slot by slot", () => {
     const left = registration({ restart: { previousRunId: "run.previous", exhaustedSlots: ["T1/code-reviewer"] } });
     expect(sameRestartRegistration(left, left)).toBe(true);
-    expect(sameRestartRegistration(left, { ...left, restart: { previousRunId: "run.previous", exhaustedSlots: ["T1/other"] } })).toBe(false);
-    expect(sameRestartRegistration(left, { ...left, restart: { previousRunId: "run.other", exhaustedSlots: ["T1/code-reviewer"] } })).toBe(false);
+    expect(sameRestartRegistration(left, registration({ restart: { previousRunId: "run.previous", exhaustedSlots: ["T1/other"] } }))).toBe(false);
+    expect(sameRestartRegistration(left, registration({ restart: { previousRunId: "run.other", exhaustedSlots: ["T1/code-reviewer"] } }))).toBe(false);
     expect(sameRestartRegistration(left, { ...left, taskIds: ["T2"] })).toBe(false);
   });
 
   it("compares orphan-recovery audits and protocol", () => {
     const left = registration({ orphanRecovery: { previousRunId: "run.previous", previousAuthorityDigest: DIGEST } });
     expect(sameOrphanRecoveryRegistration(left, left)).toBe(true);
-    expect(sameOrphanRecoveryRegistration(left, { ...left, orphanRecovery: { previousRunId: "run.previous", previousAuthorityDigest: "b".repeat(64) } })).toBe(false);
+    expect(sameOrphanRecoveryRegistration(left, registration({ orphanRecovery: { previousRunId: "run.previous", previousAuthorityDigest: "b".repeat(64) } }))).toBe(false);
     expect(sameOrphanRecoveryRegistration(left, { ...left, authorityDigest: "b".repeat(64) })).toBe(false);
   });
 });

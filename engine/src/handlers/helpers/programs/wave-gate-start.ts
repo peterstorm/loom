@@ -13,7 +13,7 @@ import { TASK_GRAPH_PATH } from '../../../config';
 import { StateManager } from '../../../state-manager';
 import { deriveWaveStartReadiness } from '../../../core/wave-gate-checks';
 import type { DomainResult } from '../../../core/orchestration-contract';
-import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
+import type { RegisteredWaveGateProgram, WaveGateSuccessionAudit } from '../../../core/wave-gate-program';
 import { waveGateAuthorityDigest, waveReviewView } from '../../../core/wave-review-authority';
 import { planSuccessorCarry, type TaskNotCarried } from '../../../core/wave-review-carry';
 import type { RetiredWaveReviewRun, TaskGraph } from '../../../types';
@@ -47,7 +47,7 @@ const preparedWaveGateStarts = new WeakSet<PreparedWaveGateStart>();
  * Directory under `runsRoot`, or why it could not be. The pure carry plan
  * proves it is the run the protected record retired.
  */
-function predecessorRegistration(
+function loadPredecessorRegistration(
   runsRoot: string,
   predecessor: RetiredWaveReviewRun,
 ): DomainResult<RegisteredWaveGateProgram, string> {
@@ -75,7 +75,7 @@ function successorCarryOf(
   taskIds: readonly string[],
   runsRoot: string,
   options: WaveGateStartOptions,
-): Pick<RegisteredWaveGateProgram, "succession"> & Pick<PreparedWaveGateStart, "notCarried"> {
+): Readonly<{ succession?: WaveGateSuccessionAudit }> & Pick<PreparedWaveGateStart, "notCarried"> {
   const predecessor = options.freshReview ? null : successionPredecessorOf(graph, wave);
   if (predecessor === null) return { notCarried: [] };
   const reviewed = waveReviewView(graph.tasks.filter(({ id }) => taskIds.includes(id))).reviewed;
@@ -84,7 +84,7 @@ function successorCarryOf(
     taskIds,
     protocol: WAVE_REVIEWER_PROTOCOL_V4,
     predecessor,
-    previous: predecessorRegistration(runsRoot, predecessor),
+    previous: loadPredecessorRegistration(runsRoot, predecessor),
     workspaces: observeReviewedWorkspace(reviewed),
   });
   return { ...(plan.succession === undefined ? {} : { succession: plan.succession }), notCarried: plan.notCarried };
@@ -142,12 +142,13 @@ export function prepareWaveGateFacadeStart(
       }
     }
     const { succession, notCarried } = successorCarryOf(graph, wave, taskIds, destination.value.runsRoot, options);
+    const fresh = {
+      schemaVersion: 2, reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4, kind: "wave-gate", input: Object.freeze({ wave }),
+      taskIds, authorityDigest,
+    } as const;
     const prepared: PreparedWaveGateStart = Object.freeze({
       runId: destination.value.runId,
-      registration: Object.freeze({
-        schemaVersion: 2, reviewerProtocol: WAVE_REVIEWER_PROTOCOL_V4, kind: "wave-gate", input: Object.freeze({ wave }),
-        taskIds, authorityDigest, ...(succession === undefined ? {} : { succession }),
-      }),
+      registration: Object.freeze(succession === undefined ? fresh : { ...fresh, succession }),
       notCarried,
     });
     preparedWaveGateStarts.add(prepared);

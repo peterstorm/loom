@@ -168,6 +168,23 @@ type ReviewRunWorkspaceAuthority =
       wave_gate_authority_digest: string;
     }>;
 
+declare const SUBJECT_DIGEST: unique symbol;
+declare const SEALED_SUBJECT_DIGEST: unique symbol;
+
+/**
+ * The Subject Digest of what one Task's Wave reviewer packets present, except
+ * its Findings (ADR-0090). Minted only by `waveTaskSubjectDigest`, read back
+ * only through `parseSubjectDigest` (core/review-subject).
+ */
+export type SubjectDigest = string & { readonly [SUBJECT_DIGEST]: true };
+
+/**
+ * A Subject Digest sealed with the Finding IDs an acceptance left. Minted only
+ * by `acceptedSubjectDigest`, read back only through `parseSealedSubjectDigest`;
+ * never interchangeable with the raw digest a Review Run records.
+ */
+export type SealedSubjectDigest = string & { readonly [SEALED_SUBJECT_DIGEST]: true };
+
 /** Workspace authority is either wholly absent on an unbound/legacy run or complete. */
 export type LegacyReviewRun = Readonly<ReviewRunBase & ReviewRunWorkspaceAuthority & {
   reviewer_protocol?: never;
@@ -183,7 +200,7 @@ export type CurrentReviewRun = Readonly<ReviewRunBase & Extract<ReviewRunWorkspa
    * fact of the Task's review subject except its Findings, which the run
    * records as `prior_finding_ids`. Absent on runs installed before it existed.
    */
-  subject_digest?: string;
+  subject_digest?: SubjectDigest;
 }>;
 export type ReviewRun = LegacyReviewRun | CurrentReviewRun;
 
@@ -212,7 +229,7 @@ export type CurrentAcceptedReviewAuthority = Readonly<AcceptedReviewAuthorityBas
    * (`acceptedSubjectDigest`, ADR-0090). Absent on an acceptance recorded
    * before it existed: a Successor Carry reviews such a Task in full once.
    */
-  subject_digest?: string;
+  subject_digest?: SealedSubjectDigest;
 }>;
 export type AcceptedReviewAuthority = LegacyAcceptedReviewAuthority | CurrentAcceptedReviewAuthority;
 

@@ -24,17 +24,17 @@ import type { IssuedWaveReviewerProtocol } from "./review-output";
 import type { ReviewedWorkspaceObservation } from "./reviewed-workspace";
 import type { WaveReviewRole } from "./agent-catalog-projections";
 import { waveReviewerSlotProblem } from "./wave-gate-membership";
-import { carriedAcceptanceProblem, carryKindOf, rebindCarriedReviewRun } from "./wave-review-carry";
+import { carriedAcceptanceProblem, rebindCarriedReviewRun } from "./wave-review-carry";
 import { issuedRoles, registeredCarry, waveReviewCarryOf } from "./wave-review-carry-plan";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import {
   decideWaveReviewEpochReplay,
+  derivedWaveTaskReview,
   prepareWaveReviewBatch,
   readWaveReviewContext,
   taskReviewScope,
   waveRunRosterProblem,
   waveSpecCheckDocumentsMatch,
-  waveTaskReviewRoster,
   waveTaskSubjectDigest,
   type WaveRequestBatch,
   type WaveReviewRegistrationAuthority,
@@ -148,6 +148,7 @@ export function installWaveReviewRunsTransition(
     registration.taskIds.includes(task.id) && task.review_run !== undefined)) {
     return refuse("Wave review batch differs from the exact installed Wave review epoch");
   }
+  const registered = registeredCarry(registration);
   const tasks: TaskGraph["tasks"][number][] = [];
   for (const task of locked.tasks) {
     if (!registration.taskIds.includes(task.id)) {
@@ -156,8 +157,9 @@ export function installWaveReviewRunsTransition(
     }
     const taskRun = batch.taskRuns.find(({ taskId }) => taskId === task.id);
     // The Task's own review, derived from the locked graph the batch was just
-    // proven to have been prepared from (`lockedPreparation` above).
-    const review = waveTaskReviewRoster(locked, registration.schemaVersion, task);
+    // proven to have been prepared from (`lockedPreparation` above); its roster
+    // and its Subject Digest both read this one derivation.
+    const review = derivedWaveTaskReview(locked, registration.schemaVersion, task);
     if (review.kind === "exempt") {
       // An exempt Task is registered and installs nothing: no Review Packet,
       // no Review Run, no change to its review state.
@@ -172,14 +174,14 @@ export function installWaveReviewRunsTransition(
     const lockedScope = taskReviewScope(task);
     const exactScope = currentWorkspace !== undefined && lockedScope.length === currentWorkspace.scope.length &&
       lockedScope.every((path, index) => path === currentWorkspace.scope[index]);
-    const carry = waveReviewCarryOf(registeredCarry(registration), task.id);
+    const carry = waveReviewCarryOf(registered, task.id);
     const bytes = currentWorkspace === undefined ? null : { scope: currentWorkspace.scope, headSha: currentWorkspace.headSha };
     if (carry?.kind === "accepted-task") {
       // Not reissued: the Task keeps the acceptance its own run recorded.
-      const problem = registration.schemaVersion !== 2 || bytes === null || !exactScope
+      const problem = registration.schemaVersion !== 2 || bytes === null || !exactScope || registered === undefined
         ? `Task ${task.id} changed before its carried acceptance could be confirmed`
         : carriedAcceptanceProblem(task, carry, { protocol: registration.reviewerProtocol, roster: expectedAgents, bytes,
-          subject: waveTaskSubjectDigest(locked, task, registration.reviewerProtocol, bytes) }, carryKindOf(registration));
+          subject: waveTaskSubjectDigest(locked, task, review, registration.reviewerProtocol, bytes) }, registered.kind);
       if (problem !== null) return refuse(problem);
       if (taskRun !== undefined) return refuse(`Task ${task.id} carries its whole roster but was issued a Review Packet`);
       tasks.push(task);
@@ -190,7 +192,7 @@ export function installWaveReviewRunsTransition(
       return refuse(`Task ${task.id} changed before its current Review Packet could be installed`);
     }
     const subject = registration.schemaVersion === 2
-      ? waveTaskSubjectDigest(locked, task, registration.reviewerProtocol, bytes)
+      ? waveTaskSubjectDigest(locked, task, review, registration.reviewerProtocol, bytes)
       : null;
     const issuedAgents = issuedRoles(expectedAgents, carry);
     const authorities: AgentRequestAuthority[] = [];

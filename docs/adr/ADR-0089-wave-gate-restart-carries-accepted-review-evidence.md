@@ -5,7 +5,7 @@ Accepted (2026-11-18). Partly supersedes ADR-0084: its "every request is reissue
 replacement whose predecessor issued the same reviewer protocol. Issue #213, Cause 1(b).
 Amended by ADR-0090 (2026-11-18): a fresh start after an abandon or a completed-Wave reopen carries
 unchanged Tasks' accepted reviews too, so the last Consequence below no longer holds; and a carry is
-admissible only while the Task's Subject Digest is unchanged.
+admissible only while the Task's Subject Digest, when the evidence recorded one, is unchanged.
 
 ## Context
 A Wave Gate can be restarted only when every reviewer slot without evidence has exhausted attempt 2

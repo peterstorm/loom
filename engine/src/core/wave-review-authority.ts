@@ -19,14 +19,10 @@ import {
 } from "./proof-obligations";
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ByteSection, type ContextPacket } from "./context-packets";
 import { parseWaveReviewerProtocolDescriptor, type ReviewerProtocolDescriptor } from "./reviewer-contract";
-import { issuedRoles, registeredCarry, waveReviewCarryOf } from "./wave-review-carry-plan";
-import type {
-  OrphanedWaveGateRecoveryAudit,
-  RegisteredReviewerProtocol,
-  WaveGateRestartAudit,
-  WaveGateSuccessionAudit,
-  WaveReviewCarryAudit,
-} from "./wave-gate-program";
+import { issuedRoles, registeredCarry, waveReviewCarryOf, type RegisteredCarry } from "./wave-review-carry-plan";
+import type { RegisteredReviewerProtocol, WaveGateOriginAudit } from "./wave-gate-program";
+import type { SubjectDigest } from "./findings-shape";
+import { subjectDigestOf } from "./review-subject";
 import { DECISION_RECORD_AGENT } from "./model-profiles";
 import { taskRolePolicy, type TaskRolePolicy } from "./distill-task";
 import {
@@ -100,10 +96,7 @@ export type WaveReviewRegistrationAuthority = Readonly<{
   input: Readonly<{ wave: number }>;
   taskIds: readonly string[];
   authorityDigest: string;
-  restart?: WaveGateRestartAudit;
-  orphanRecovery?: OrphanedWaveGateRecoveryAudit;
-  succession?: WaveGateSuccessionAudit;
-}> & RegisteredReviewerProtocol;
+}> & WaveGateOriginAudit & RegisteredReviewerProtocol;
 
 /**
  * The exact reviewed scope of one Task: its declared and modified paths,
@@ -346,6 +339,25 @@ export function waveTaskReviewRoster(graph: TaskGraph, schemaVersion: 1 | 2, tas
 }
 
 /**
+ * A reviewed Task's review as its packets are built from it: the roster with
+ * the owner-map obligations and contract surfaces that picked it.
+ */
+export type DerivedWaveTaskReview = Readonly<{ kind: "roster" }> & WaveTaskReviewDerivation;
+
+/**
+ * A Wave Task's review with what derived its roster, or its exemption: the
+ * one derivation the carry rule and the locked install read both the roster
+ * and the Subject Digest from, so neither derives it twice. Like
+ * `waveTaskReviewRoster`, it reads the Task's installed Review Run.
+ */
+export function derivedWaveTaskReview(graph: TaskGraph, schemaVersion: 1 | 2, task: Task): DerivedWaveTaskReview | WaveReviewExempt {
+  const standing = waveReviewStanding(task);
+  return standing.kind === "exempt"
+    ? standing
+    : Object.freeze({ kind: "roster" as const, ...waveTaskReviewDerivation(graph, schemaVersion, task, task.review_run) });
+}
+
+/**
  * The Subject Digest of one reviewed Task (ADR-0090): the digest of everything
  * a Wave reviewer packet for it presents except its Findings. That is the
  * reviewer protocol and the roster, the Task's identity, description, plan
@@ -355,19 +367,19 @@ export function waveTaskReviewRoster(graph: TaskGraph, schemaVersion: 1 | 2, tas
  * reviewed workspace scope and head the frozen source is read from. The
  * install records it on the Review Run, and an acceptance seals it with its
  * Findings (`acceptedSubjectDigest`); a carry is admissible only while it is
- * unchanged. Derived through the same roster derivation the packets are, from
- * the Task's installed Review Run when it has one.
+ * unchanged. `review` is the Task's `derivedWaveTaskReview`, the derivation
+ * its packets are built from.
  */
 export function waveTaskSubjectDigest(
-  graph: TaskGraph,
+  graph: Pick<TaskGraph, "plan_file">,
   task: Task,
+  review: DerivedWaveTaskReview,
   protocol: ReviewerProtocolDescriptor,
   bytes: Readonly<{ scope: readonly string[]; headSha: string }>,
-): string {
-  const derivation = waveTaskReviewDerivation(graph, 2, task, task.review_run);
-  return sha256Hex(JSON.stringify({
+): SubjectDigest {
+  return subjectDigestOf({
     protocol,
-    roster: derivation.roster,
+    roster: review.roster,
     task: {
       id: task.id,
       agent: task.agent,
@@ -382,10 +394,10 @@ export function waveTaskSubjectDigest(
       testResult: task.test_result ?? null,
     },
     planFile: graph.plan_file ?? null,
-    ownerMap: derivation.ownerMap,
-    contractSurfaces: derivation.contractSurfaces,
+    ownerMap: review.ownerMap,
+    contractSurfaces: review.contractSurfaces,
     workspace: { scope: bytes.scope, headSha: bytes.headSha },
-  }));
+  });
 }
 
 /**
@@ -463,7 +475,7 @@ export function waveReviewSubjects(rosters: readonly WaveTaskIssuedRoles[]): rea
  */
 export function issuedWaveReviewRosters(
   rosters: readonly WaveTaskReviewRoster[],
-  carry: WaveReviewCarryAudit | undefined,
+  carry: RegisteredCarry | undefined,
 ): readonly WaveTaskIssuedRoles[] {
   if (carry === undefined) return rosters;
   return Object.freeze(rosters.flatMap(({ taskId, roster }): readonly WaveTaskIssuedRoles[] => {
@@ -1190,7 +1202,7 @@ export function prepareWaveReviewBatch(
     // which subjects this batch issues, so the epoch commits to it. Absent,
     // the payload is byte-identical to a batch prepared before carry existed
     // (ADR-0089, ADR-0090).
-    ...(carry === undefined ? {} : { carried: carry.carried }),
+    ...(carry === undefined ? {} : { carried: carry.audit.carried }),
   })));
   if (!batchEpoch.ok) return failure(batchEpoch.error.message);
 

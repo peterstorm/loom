@@ -15,15 +15,20 @@ export type RegisteredReviewerProtocol<Descriptor extends ReviewerProtocolDescri
   | Readonly<{ schemaVersion: 1; reviewerProtocol?: never }>
   | Readonly<{ schemaVersion: 2; reviewerProtocol: Descriptor }>;
 
-/** One Wave Gate run on a restart lineage, named by its run and authority digest. */
+/**
+ * One Wave Gate run on a carry lineage, named by its run and authority digest:
+ * a restart's exhausted predecessor (ADR-0089) or the retired run a fresh
+ * start succeeded (ADR-0090), and every run those carried from in turn.
+ */
 export type CarriedReviewAuthority = Readonly<{ runId: string; authorityDigest: string }>;
 
 /**
- * What one reviewed Task carries into a replacement run (ADR-0089):
+ * What one reviewed Task carries into a run from an earlier run on its lineage:
  * - `accepted-task`: every slot of `roster` was accepted along the lineage, by
- *   the run `acceptance` names. The Task is not reissued.
+ *   the run `acceptance` names. The Task is not reissued. A restart (ADR-0089)
+ *   and a fresh start's Successor Carry (ADR-0090) both record it.
  * - `accepted-slots`: the `agents` slots were accepted; only the rest of the
- *   Task's roster is reissued.
+ *   Task's roster is reissued. Only a restart records it.
  */
 export type WaveReviewCarry = AcceptedTaskCarry | Readonly<{ kind: "accepted-slots"; taskId: string; agents: readonly [string, ...string[]] }>;
 
@@ -75,13 +80,40 @@ export type OrphanedWaveGateRecoveryAudit = Readonly<{
   previousAuthorityDigest: string;
 }>;
 
-export type RegisteredWaveGateProgram = RegisteredReviewerProtocol & Readonly<{
+/**
+ * How a Wave Gate run came to be registered, as the registration records it:
+ * a fresh start that carries nothing (no audit), a restart of an exhausted run,
+ * an orphan recovery, or a fresh start's Succession. The arms are exclusive by
+ * type, so no registration holds two audits; the persisted JSON keeps each
+ * audit under its own key exactly as before. Read the tagged form through
+ * `waveGateOriginOf`.
+ */
+export type WaveGateOriginAudit =
+  | Readonly<{ restart?: never; orphanRecovery?: never; succession?: never }>
+  | Readonly<{ restart: WaveGateRestartAudit; orphanRecovery?: never; succession?: never }>
+  | Readonly<{ restart?: never; orphanRecovery: OrphanedWaveGateRecoveryAudit; succession?: never }>
+  | Readonly<{ restart?: never; orphanRecovery?: never; succession: WaveGateSuccessionAudit }>;
+
+/** The origin a registration records, tagged. */
+export type WaveGateOrigin =
+  | Readonly<{ kind: "fresh" }>
+  | Readonly<{ kind: "restart"; audit: WaveGateRestartAudit }>
+  | Readonly<{ kind: "orphan-recovery"; audit: OrphanedWaveGateRecoveryAudit }>
+  | Readonly<{ kind: "succession"; audit: WaveGateSuccessionAudit }>;
+
+const FRESH: WaveGateOrigin = Object.freeze({ kind: "fresh" });
+
+/** The tagged origin of a registration. */
+export function waveGateOriginOf(registration: WaveGateOriginAudit): WaveGateOrigin {
+  if (registration.restart !== undefined) return Object.freeze({ kind: "restart", audit: registration.restart });
+  if (registration.orphanRecovery !== undefined) return Object.freeze({ kind: "orphan-recovery", audit: registration.orphanRecovery });
+  if (registration.succession !== undefined) return Object.freeze({ kind: "succession", audit: registration.succession });
+  return FRESH;
+}
+
+export type RegisteredWaveGateProgram = RegisteredReviewerProtocol & WaveGateOriginAudit & Readonly<{
   kind: "wave-gate";
   input: Readonly<{ wave: number | null }>;
   taskIds: readonly string[];
   authorityDigest: string;
-  restart?: WaveGateRestartAudit;
-  orphanRecovery?: OrphanedWaveGateRecoveryAudit;
-  /** A fresh start's Successor Carry; never beside `restart` or `orphanRecovery`. */
-  succession?: WaveGateSuccessionAudit;
 }>;

@@ -7,10 +7,11 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { ARCHITECTURE_LENS_WAVE_REVIEW_AGENTS, BASE_WAVE_REVIEW_AGENTS } from "../../src/core/agent-catalog-projections";
-import { attributeFindings } from "../../src/core/findings";
+import { attributeFindings, reviewRunError } from "../../src/core/findings";
+import { parseRegisteredFacadeProgram } from "../../src/handlers/helpers/programs/registration";
 import type { CurrentAcceptedReviewAuthority, Finding } from "../../src/core/findings-shape";
 import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract";
-import { REVIEWER_PROTOCOL_V2, WAVE_REVIEWER_PROTOCOL_V4 } from "../../src/core/reviewer-contract";
+import { REVIEWER_PROTOCOL_V2, WAVE_REVIEWER_PROTOCOL_V4, type ReviewerProtocolDescriptor } from "../../src/core/reviewer-contract";
 import { acceptedSubjectDigest } from "../../src/core/review-subject";
 import { reviewedWorkspaceObservation, type ReviewedWorkspaceObservation } from "../../src/core/reviewed-workspace";
 import type { RegisteredWaveGateProgram, WaveGateSuccessionAudit } from "../../src/core/wave-gate-program";
@@ -20,9 +21,15 @@ import {
   successionPredecessorOf,
   supersedeAbandonedWaveGateReview,
 } from "../../src/core/wave-gate-registration";
-import { issuedWaveReviewRosters, taskReviewScope, waveGateAuthorityDigest, waveTaskSubjectDigest } from "../../src/core/wave-review-authority";
 import {
-  parseWaveGateSuccessionAudit,
+  derivedWaveTaskReview,
+  issuedWaveReviewRosters,
+  taskReviewScope,
+  waveGateAuthorityDigest,
+  waveTaskSubjectDigest,
+} from "../../src/core/wave-review-authority";
+import { parseWaveGateSuccessionAudit } from "../../src/core/wave-review-carry-audit";
+import {
   planSuccessorCarry,
   waveAcceptanceProblem,
   type CarryDrift,
@@ -34,6 +41,7 @@ import { contract } from "../fixtures/contract-status-fixtures";
 import { ownerObligation } from "../fixtures/owner-obligation";
 import { activeWaveGateFixture, graphFixture, satisfiedProof, taskFixture } from "../fixtures/task-lifecycle";
 import { value } from "../fixtures/parse-result";
+import { withOrigin } from "../fixtures/wave-gate-origin";
 
 const V4 = WAVE_REVIEWER_PROTOCOL_V4;
 const ROSTER = BASE_WAVE_REVIEW_AGENTS;
@@ -64,10 +72,12 @@ const implemented = (id: string, extra: Partial<TaskCommonMetadata> = {}): Task 
  */
 function sealedAcceptance(graph: TaskGraph, task: Task, runId = "run.previous", authorityDigest = DIGEST_A): CurrentAcceptedReviewAuthority {
   const bytes = observe(task);
+  const review = derivedWaveTaskReview(graph, 2, task);
+  if (review.kind !== "roster") throw new Error(`fixture Task ${task.id} must be reviewed`);
   return {
     generation: task.review_generation ?? 0, packet_id: PACKET, head_sha: bytes.headSha, scope: bytes.scope,
     run_id: runId, authority_digest: authorityDigest, reviewer_protocol: V4,
-    subject_digest: acceptedSubjectDigest(waveTaskSubjectDigest(graph, task, V4, bytes), task),
+    subject_digest: acceptedSubjectDigest(waveTaskSubjectDigest(graph, task, review, V4, bytes), task),
   };
 }
 
@@ -85,10 +95,13 @@ function retiredWave(seed: Readonly<{ t1?: Partial<TaskCommonMetadata>; graph?: 
   };
 }
 
-const previousRegistration = (extra: Partial<RegisteredWaveGateProgram> = {}): RegisteredWaveGateProgram => ({
-  schemaVersion: 2, reviewerProtocol: V4, kind: "wave-gate", input: { wave: 1 },
-  taskIds: ["T1", "T2", "T3", "T4", "T5", "T6"], authorityDigest: DIGEST_A, ...extra,
-} as RegisteredWaveGateProgram);
+/** The predecessor's fresh registration; vary its origin with `withOrigin`. */
+const previousRegistration = (
+  extra: Readonly<{ authorityDigest?: string; reviewerProtocol?: ReviewerProtocolDescriptor }> = {},
+): RegisteredWaveGateProgram => ({
+  schemaVersion: 2, reviewerProtocol: extra.reviewerProtocol ?? V4, kind: "wave-gate", input: { wave: 1 },
+  taskIds: ["T1", "T2", "T3", "T4", "T5", "T6"], authorityDigest: extra.authorityDigest ?? DIGEST_A,
+});
 
 function succeed(graph: TaskGraph, overrides: Partial<SuccessorCarryInput> = {}) {
   return planSuccessorCarry({
@@ -129,7 +142,8 @@ describe("a fresh start carries every unchanged Task's accepted review from the 
     expect(plan.succession?.carry.carried.map(({ taskId }) => taskId)).toEqual(["T1", "T2", "T3", "T4", "T5"]);
     expect(plan.notCarried).toEqual([{ taskId: "T6", reason: { kind: "drift", fields: ["head", "subject"] } }]);
     // The batch then issues spec-check plus T6's roster only.
-    expect(issuedWaveReviewRosters(graph.tasks.map(({ id }) => ({ taskId: id, roster: ROSTER })), plan.succession?.carry))
+    expect(issuedWaveReviewRosters(graph.tasks.map(({ id }) => ({ taskId: id, roster: ROSTER })),
+      plan.succession === undefined ? undefined : { kind: "succession", audit: plan.succession.carry }))
       .toEqual([{ taskId: "T6", roster: ROSTER }]);
   });
 
@@ -175,7 +189,7 @@ describe("the lineage a Successor Carry admits", () => {
   };
 
   it("carries an acceptance the predecessor itself carried, and extends that run's lineage", () => {
-    const predecessorCarried = previousRegistration({ succession: { previousRunId: earliest.runId, previousAuthorityDigest: earliest.authorityDigest,
+    const predecessorCarried = withOrigin(previousRegistration(), { succession: { previousRunId: earliest.runId, previousAuthorityDigest: earliest.authorityDigest,
       kind: "completed-reopened", carry: { lineage: [earliest], carried: [{ kind: "accepted-task", taskId: "T1", roster: ROSTER, acceptance: earliest }] } } });
     const plan = succeed(acceptedEarlier(), { previous: { ok: true, value: predecessorCarried } });
     expect(plan.succession?.carry.lineage).toEqual([earliest, PREVIOUS_AUTHORITY]);
@@ -203,6 +217,9 @@ describe("the Subject Digest: an unchanged subject carries, and any single chang
     { name: "a Finding added", drift: ["subject"], apply: onT1({ findings: [finding], advisory_findings: [finding.claim] }) },
     { name: "Review Generation", drift: ["generation", "subject"], apply: onT1({ review_generation: 1 }) },
     { name: "agent", drift: ["subject"], apply: onT1({ agent: "frontend-agent" }) },
+    // The reviewed scope is file_list ∪ files_modified, so emptying either one alone keeps the scope and bytes.
+    { name: "declared files", drift: ["subject"], apply: onT1({ file_list: [] }) },
+    { name: "modified files", drift: ["subject"], apply: onT1({ files_modified: [] }) },
     // The packets cite the plan file, so moving it changes every Task's subject.
     { name: "plan file", drift: ["subject"], apply: (graph) => ({ ...graph, plan_file: "/plans/other.md" }), waveWide: true },
     // The roster the Subject Digest binds now has the architecture reviewer.
@@ -243,8 +260,8 @@ describe("the Subject Digest: an unchanged subject carries, and any single chang
 });
 
 describe("completion admits a carried acceptance only along a protected succession", () => {
-  const carried = (): RegisteredWaveGateProgram => ({ ...previousRegistration({ authorityDigest: "d".repeat(64) }),
-    succession: succeed(retiredWave()).succession });
+  const carried = (): RegisteredWaveGateProgram =>
+    withOrigin(previousRegistration({ authorityDigest: "d".repeat(64) }), { succession: succeed(retiredWave()).succession! });
   const t1 = (): Task => retiredWave().tasks[0]!;
 
   it("admits an acceptance on the lineage while the predecessor is a protected retired run of the Wave", () => {
@@ -256,6 +273,11 @@ describe("completion admits a carried acceptance only along a protected successi
     expect(waveAcceptanceProblem(t1(), carried(), "run.next", [{ ...PREVIOUS, retirement: "completed-reopened" }]))
       .toContain("no protected retired run");
     expect(waveAcceptanceProblem(t1(), carried(), "run.next", [{ ...PREVIOUS, wave: 2 }])).toContain("no protected retired run");
+  });
+
+  it("fails closed on a succession registered without an exact Wave", () => {
+    const nullWave = { ...carried(), input: { wave: null } } as RegisteredWaveGateProgram;
+    expect(waveAcceptanceProblem(t1(), nullWave, "run.next", [PREVIOUS])).toContain("no protected retired run");
   });
 
   it("refuses an acceptance off the recorded lineage", () => {
@@ -327,14 +349,17 @@ describe("retiring a run records it as Successor Carry provenance", () => {
 });
 
 describe("the State File and registration parse the new authority", () => {
-  const loads = (graph: TaskGraph): boolean => parseTaskGraph(JSON.parse(JSON.stringify(graph))).ok;
+  const loads = (graph: unknown): boolean => parseTaskGraph(JSON.parse(JSON.stringify(graph))).ok;
 
   it("round-trips retired runs and sealed acceptances, and refuses a run retired twice or a malformed record", () => {
     expect(loads(retiredWave())).toBe(true);
     expect(loads({ ...retiredWave(), retired_wave_review_runs: [PREVIOUS, PREVIOUS] })).toBe(false);
-    expect(loads({ ...retiredWave(), retired_wave_review_runs: [{ ...PREVIOUS, retirement: "orphaned" as never }] })).toBe(false);
-    expect(loads(withTask(retiredWave(), "T1", (task) => ({ ...task,
-      accepted_review_authority: { ...(task.accepted_review_authority as CurrentAcceptedReviewAuthority), subject_digest: "not-a-digest" } })))).toBe(false);
+    expect(loads({ ...retiredWave(), retired_wave_review_runs: [{ ...PREVIOUS, retirement: "orphaned" }] })).toBe(false);
+    // Wire bytes no engine could write: a sealed digest that is no digest.
+    const graph = retiredWave();
+    expect(loads({ ...graph, tasks: graph.tasks.map((task) => (task.id === "T1"
+      ? { ...task, accepted_review_authority: { ...task.accepted_review_authority, subject_digest: "not-a-digest" } }
+      : task)) })).toBe(false);
   });
 
   it("refuses a live gate that names a retired run", () => {
@@ -349,6 +374,26 @@ describe("the State File and registration parse the new authority", () => {
     const other = { runId: "run.other", authorityDigest: "e".repeat(64) };
     expect(parseWaveGateSuccessionAudit({ ...raw, carry: { ...raw.carry, lineage: [PREVIOUS_AUTHORITY, other] } }).ok).toBe(false);
     expect(parseWaveGateSuccessionAudit({ ...raw, kind: "restarted" }).ok).toBe(false);
+  });
+
+  it("parses a registration with a lone succession, and refuses one beside a restart or on a null-Wave input", () => {
+    const registration = withOrigin(previousRegistration({ authorityDigest: "d".repeat(64) }), { succession: succeed(retiredWave()).succession! });
+    const raw = JSON.parse(JSON.stringify(registration)) as Record<string, unknown>;
+    expect(parseRegisteredFacadeProgram(raw)).toEqual({ kind: "registered", program: registration });
+    const withRestart = parseRegisteredFacadeProgram({ ...raw, restart: { previousRunId: "run.previous", exhaustedSlots: ["T1/code-reviewer"] } });
+    expect(withRestart.kind).toBe("invalid");
+    const nullWave = parseRegisteredFacadeProgram({ ...raw, input: { wave: null } });
+    expect(nullWave).toMatchObject({ kind: "invalid", message: expect.stringContaining("exact Wave") });
+  });
+
+  it("refuses a Review Run Subject Digest that is no digest, and one on a legacy Review Run", () => {
+    const current = { generation: 0, packet_id: PACKET, head_sha: "c".repeat(40), expected_agents: ROSTER, prior_finding_ids: [],
+      reviewer_protocol: V4, evidence: [], slot_authority: [], workspace_scope: ["src/t1.ts"], workspace_head_sha: "e".repeat(64),
+      wave_gate_run_id: "run.next", wave_gate_authority_digest: DIGEST_A };
+    expect(reviewRunError({ ...current, subject_digest: "not-a-digest" }, 0, [], "review_run")).toContain("subject_digest");
+    const { reviewer_protocol: _legacy, ...legacy } = current;
+    expect(reviewRunError({ ...legacy, slot_authority: undefined, subject_digest: "f".repeat(64) }, 0, [], "review_run"))
+      .toContain("subject_digest");
   });
 
   it("a six-reviewer roster derived from an owner map carries with that roster", () => {

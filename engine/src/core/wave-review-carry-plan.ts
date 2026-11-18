@@ -10,22 +10,46 @@
  *
  * Pure: no I/O.
  */
-import type { RegisteredWaveGateProgram, WaveReviewCarry, WaveReviewCarryAudit } from "./wave-gate-program";
+import {
+  waveGateOriginOf,
+  type AcceptedTaskCarry,
+  type WaveGateOriginAudit,
+  type WaveReviewCarry,
+  type WaveReviewCarryAudit,
+} from "./wave-gate-program";
 
 /**
- * The carry plan a registration froze: a restart's (ADR-0089) or a fresh
- * start's Successor Carry (ADR-0090). A registration holds at most one of the
- * two. Every reader of a registration's carry asks here.
+ * The carry plan a registration froze, with what froze it: a restart's
+ * (ADR-0089), which may carry slots, or a fresh start's Successor Carry
+ * (ADR-0090), which carries whole-roster acceptances only. The kind decides
+ * how a carried acceptance recorded before the Subject Digest is judged.
  */
-export function registeredCarry(
-  registration: Pick<RegisteredWaveGateProgram, "restart" | "succession">,
-): WaveReviewCarryAudit | undefined {
-  return registration.restart?.carry ?? registration.succession?.carry;
+export type RegisteredCarry =
+  | Readonly<{ kind: "restart"; audit: WaveReviewCarryAudit }>
+  | Readonly<{ kind: "succession"; audit: WaveReviewCarryAudit<AcceptedTaskCarry> }>;
+
+/**
+ * The carry a registration froze, or undefined when it carries nothing. Every
+ * reader of a registration's carry asks here.
+ */
+export function registeredCarry(registration: WaveGateOriginAudit): RegisteredCarry | undefined {
+  const origin = waveGateOriginOf(registration);
+  switch (origin.kind) {
+    case "restart":
+      return origin.audit.carry === undefined ? undefined : Object.freeze({ kind: "restart", audit: origin.audit.carry });
+    case "succession":
+      return Object.freeze({ kind: "succession", audit: origin.audit.carry });
+    case "fresh":
+    case "orphan-recovery":
+      return undefined;
+    default:
+      return assertNever(origin);
+  }
 }
 
-/** The plan entry of `taskId` in a registration's carry audit, if it carries. */
-export function waveReviewCarryOf(carry: WaveReviewCarryAudit | undefined, taskId: string): WaveReviewCarry | undefined {
-  return carry?.carried.find((entry) => entry.taskId === taskId);
+/** The plan entry of `taskId` in a registration's carry, if it carries. */
+export function waveReviewCarryOf(carry: RegisteredCarry | undefined, taskId: string): WaveReviewCarry | undefined {
+  return carry?.audit.carried.find((entry) => entry.taskId === taskId);
 }
 
 /**
@@ -45,6 +69,6 @@ export function issuedRoles<Role extends string>(roster: readonly Role[], entry:
   }
 }
 
-function assertNever(entry: never): never {
-  throw new Error(`unknown Wave review carry ${JSON.stringify(entry)}`);
+function assertNever(value: never): never {
+  throw new Error(`unknown Wave review carry value ${JSON.stringify(value)}`);
 }

@@ -885,9 +885,15 @@ export type SpecTraceWaveGateRetirement = Readonly<{
 /**
  * How a Wave Gate run that can be succeeded ended: abandoned by the operator
  * (its tombstone was superseded or retired), or completed and then reopened
- * because some Task's bytes drifted (ADR-0090).
+ * because some Task's bytes drifted (ADR-0090). The tuple is the one source
+ * the type, the State File parser and the registration parser read.
  */
-export type WaveReviewRunRetirement = "abandoned" | "completed-reopened";
+export const WAVE_REVIEW_RUN_RETIREMENTS = ["abandoned", "completed-reopened"] as const;
+export type WaveReviewRunRetirement = (typeof WAVE_REVIEW_RUN_RETIREMENTS)[number];
+
+/** Whether `raw` names a way a succeedable run ended. */
+export const isWaveReviewRunRetirement = (raw: unknown): raw is WaveReviewRunRetirement =>
+  (WAVE_REVIEW_RUN_RETIREMENTS as readonly unknown[]).includes(raw);
 
 /**
  * Successor Carry provenance (ADR-0090): one Wave Gate run whose review

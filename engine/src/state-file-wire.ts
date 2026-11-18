@@ -16,6 +16,7 @@
 import { isAbsolute, join, resolve } from "node:path";
 import { parseErr, parseOk, type ParseResult } from "./machine";
 import {
+  isWaveReviewRunRetirement,
   parseNewTestEvidence,
   parseStoredNewTestEvidence,
   REVIEW_STATUSES,
@@ -23,6 +24,8 @@ import {
   TASK_STATUSES,
   type Phase,
 } from "./types";
+import { repeatedRetiredRun } from "./core/retired-wave-review-runs";
+import { parseSealedSubjectDigest } from "./core/review-subject";
 import {
   findingIdCollisionError,
   findingsLockstepError,
@@ -755,8 +758,8 @@ function parseRetiredWaveReviewRun(raw: unknown, label: string): ParseResult<Ret
   const record = raw as Record<string, unknown>;
   const fieldsError = exactFieldsError(record, RETIRED_WAVE_REVIEW_RUN_FIELDS, [], label);
   if (fieldsError !== null) return parseErr(fieldsError);
-  if (record.schemaVersion !== 1 || record.kind !== "retired-wave-review-run" ||
-      (record.retirement !== "abandoned" && record.retirement !== "completed-reopened")) {
+  const retirement = record.retirement;
+  if (record.schemaVersion !== 1 || record.kind !== "retired-wave-review-run" || !isWaveReviewRunRetirement(retirement)) {
     return parseErr(`${label} has an invalid schema, kind, or retirement`);
   }
   const runId = parseOrchestrationRunId(record.runId);
@@ -771,7 +774,7 @@ function parseRetiredWaveReviewRun(raw: unknown, label: string): ParseResult<Ret
     runId: runId.value,
     wave: wave.value,
     authorityDigest: authorityDigest.value,
-    retirement: record.retirement,
+    retirement,
   }));
 }
 
@@ -785,10 +788,10 @@ function parseRetiredWaveReviewRuns(raw: unknown): ParseResult<readonly RetiredW
     if (!parsed.ok) return parsed;
     runs.push(parsed.value);
   }
-  const runIds = runs.map(({ runId }) => runId);
-  return new Set(runIds).size === runIds.length
+  const repeated = repeatedRetiredRun(runs);
+  return repeated === null
     ? parseOk(Object.freeze(runs))
-    : parseErr("retired_wave_review_runs retires a run twice");
+    : parseErr(`retired_wave_review_runs retires run ${repeated.runId} twice`);
 }
 
 const SPEC_TRACE_WAVE_GATE_RETIREMENT_FIELDS = [
@@ -2060,7 +2063,7 @@ function taskPacketError(
     }
     // The sealed Subject Digest (ADR-0090) belongs to a current acceptance only.
     if (Object.hasOwn(authority, "subject_digest") && (!Object.hasOwn(authority, "reviewer_protocol") ||
-        typeof authority.subject_digest !== "string" || !/^[0-9a-f]{64}$/.test(authority.subject_digest))) {
+        parseSealedSubjectDigest(authority.subject_digest) === null)) {
       return `tasks[${index}] ("${id}"): accepted_review_authority.subject_digest must be a SHA-256 digest on a current acceptance`;
     }
     if (fields.some((field) => !allowed.includes(field)) ||
