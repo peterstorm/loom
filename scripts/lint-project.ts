@@ -21,10 +21,11 @@
  *   --no-baseline-check  Skip the staleness pass (grandfathered baselines and
  *                   scoping entries — exclusions, pure roots, shells, boundaries,
  *                   external names — that no longer name anything)
- *   --write-baseline  Record every pre-existing totality site, copied block, wire cast and
- *                   dangling doc reference in the project's config.json
+ *   --write-baseline  Record every pre-existing totality site, copied block, wire cast,
+ *                   dangling doc reference and over-long function in the project's config.json
  *                   (switchTotalityBaseline, discriminantBranchingBaseline,
- *                   duplicateBlockBaseline, wireCastBaseline, docReferenceBaseline), then exit
+ *                   duplicateBlockBaseline, wireCastBaseline, docReferenceBaseline,
+ *                   maxFunctionLinesBaseline), then exit
  *   --json          Output raw JSON violations
  *   --summary       Show only summary counts
  *   --fix-hints     Show fix hints (default: true)
@@ -200,6 +201,7 @@ const INIT_NEXT_STEPS: readonly string[] = [
   "  pureModules   — roots/files that must be side-effect free",
   "  impureModules — [{ path, reason }] shells inside the pure roots",
   "  maxFunctionLines — max function body length (default: 50)",
+  "  maxFunctionLinesBaseline — grandfathered over-long functions",
   "  switchTotalityModules — narrow switch-totality to these path prefixes",
   "  switchTotalityBaseline / discriminantBranchingBaseline — grandfathered sites",
   "  duplicateBlockMinTokens / duplicateBlockMinLines — how long a copy is (default: 100 tokens, 8 lines)",

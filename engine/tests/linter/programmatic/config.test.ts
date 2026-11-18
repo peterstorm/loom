@@ -405,7 +405,7 @@ describe("totality config: scope, baselines and the project root they are writte
     ["no path", "::x.kind"],
     ["no key", "src/domain/order.ts::"],
   ])("refuses a baseline entry with %s — it could never match a site, and has no path to read back", (_shape, entry) => {
-    for (const key of ["switchTotalityBaseline", "discriminantBranchingBaseline", "duplicateBlockBaseline", "wireCastBaseline", "docReferenceBaseline"]) {
+    for (const key of ["switchTotalityBaseline", "discriminantBranchingBaseline", "duplicateBlockBaseline", "wireCastBaseline", "docReferenceBaseline", "maxFunctionLinesBaseline"]) {
       expect(parseProjectConfig({ [key]: ["src/a.ts::ok", entry] }, "config.json")).toEqual({
         ok: false,
         error: `config.json: ${key}[1] '${entry}' must be 'path::key' — a project-relative path, '::', then what the rule flagged there`,

@@ -73,10 +73,17 @@ describe("loom's own totality baselines", () => {
       ["no-duplicate-block", "duplicateBlockBaseline"],
       ["no-wire-cast", "wireCastBaseline"],
       ["no-dangling-doc-reference", "docReferenceBaseline"],
+      ["max-function-lines", "maxFunctionLinesBaseline"],
     ]);
     // The drift message is rule-aware: a chain entry never reads as a switch.
-    expect(LOOM_OWNERS.map((owner) => owner.site))
-      .toEqual(["unproven switch", "unproven if-chain", "copied block", "unparsed wire value", "dangling doc reference"]);
+    expect(LOOM_OWNERS.map((owner) => owner.site)).toEqual([
+      "unproven switch",
+      "unproven if-chain",
+      "copied block",
+      "unparsed wire value",
+      "dangling doc reference",
+      "function past the length limit",
+    ]);
     // Loom governs its own docs, and its plans are walked though .claude/ is not.
     expect(TREE.some((path) => path.startsWith(".claude/plans/"))).toBe(true);
     // Loom grandfathers no wire value typed without being parsed: the rule's

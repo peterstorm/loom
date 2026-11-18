@@ -270,6 +270,8 @@ function auditClosure(roots: readonly string[], overlays: ReadonlyMap<string, st
       } else if (specifier === "node:zlib" && grantedPackages(mod).includes("node:zlib")) {
         // In-memory inflation under an explicit output bound, granted per file by the
         // core boundary (predecessor-archive): deterministic bytes in, bytes out.
+      } else if (specifier === "node:module" && TYPESCRIPT_COMPILER_API_SEAMS.includes(mod) && grantedPackages(mod).includes("node:module")) {
+        // createRequire, granted per file to a compiler seam that loads the compiler on first use (ADR-0095).
       } else if (["node:crypto", "crypto", "node:util", "util"].includes(specifier)) {
         // The same shipped rule must prove the narrow named capability, not a module waiver.
         errors.push(...noIoHandler(text, mod, only(mod)).map((v) => `${mod}: ${v.fixHint}`));
@@ -394,6 +396,20 @@ describe("functional core — executable purity closure", () => {
     expect(refused.errors).toContain(`${sibling}: unaudited package typescript`);
     const widened = auditClosure([SKELETON_SEAM], new Map([[SKELETON_SEAM, `${readSource(SKELETON_SEAM)}\nimport "typescript/lib/tsserverlibrary";`]]));
     expect(widened.errors).toContain(`${SKELETON_SEAM}: unaudited package typescript/lib/tsserverlibrary`);
+  });
+
+  it("ADR-0095: the rule reaches the linter's lazy compiler seam, which alone may createRequire", () => {
+    const LINTER_SEAM = "engine/src/linter/programmatic/script-function-spans.ts";
+    const RULE = "engine/src/linter/programmatic/max-function-lines.ts";
+    expect(TYPESCRIPT_COMPILER_API_SEAMS).toContain(LINTER_SEAM);
+    expect(isLoomPure(LINTER_SEAM)).toBe(true);
+    expect(auditClosure([RULE]).errors).toEqual([]);
+    expect(auditClosure([RULE]).visited).toContain(LINTER_SEAM);
+    const lazyRequire = `\nimport { createRequire } from "node:module";\nconst load = createRequire(import.meta.url);`;
+    const refused = auditClosure([RULE], new Map([[RULE, `${readSource(RULE)}${lazyRequire}`]]));
+    expect(refused.errors).toContain(`${RULE}: unaudited package node:module`);
+    const widened = auditClosure([LINTER_SEAM], new Map([[LINTER_SEAM, `${readSource(LINTER_SEAM)}\nrequire("typescript/lib/tsserverlibrary");`]]));
+    expect(widened.errors).toContain(`${LINTER_SEAM}: unaudited package typescript/lib/tsserverlibrary`);
   });
 
   it.each([

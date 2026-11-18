@@ -291,6 +291,45 @@ describe("lintFile", () => {
     });
   });
 
+  describe("max-function-lines through the production pipeline", () => {
+    const longFunction = (opening: string, closing: string): string =>
+      [opening, ...Array.from({ length: 60 }, (_, i) => `    const x${i} = ${i};`), closing].join("\n");
+    // `legacy` is grandfathered; `fresh` is an object-literal arrow the regex rule never saw.
+    const SOURCE = [
+      longFunction("export function legacy() {", "}"),
+      "export const adapter = {",
+      longFunction("  fresh: async () => {", "  },"),
+      "};",
+      "",
+    ].join("\n");
+
+    function project(): { rulesDir: string; file: string } {
+      const root = join(tempDir, "shop");
+      const rulesDir = join(root, ".claude", "linter", "rules");
+      mkdirSync(rulesDir, { recursive: true });
+      mkdirSync(join(root, "src"), { recursive: true });
+      writeFileSync(join(rulesDir, "config.json"), JSON.stringify({ maxFunctionLinesBaseline: ["src/order.ts::legacy"] }));
+      const file = join(root, "src", "order.ts");
+      writeFileSync(file, SOURCE);
+      return { rulesDir, file };
+    }
+
+    it("excuses a baselined function from the absolute path lintFile takes, within the hook's own deadline", () => {
+      const { rulesDir, file } = project();
+      // The default per-file budget: the compiler's first load is setup, never charged to the deadline.
+      const result = lintFile(file, "full", defaultDir, rulesDir);
+      if (result.kind !== "violations") throw new Error(`expected violations: ${JSON.stringify(result)}`);
+      expect(result.violations.filter((violation) => violation.rule === "max-function-lines").map(({ line, text }) => ({ line, text })))
+        .toEqual([{ line: 64, text: "fresh: async () => {" }]);
+    });
+
+    it("never runs at the immediate tier", () => {
+      const { rulesDir, file } = project();
+      const result = lintFile(file, "immediate", defaultDir, rulesDir);
+      expect(result.kind === "violations" ? result.violations.map((violation) => violation.rule) : []).not.toContain("max-function-lines");
+    });
+  });
+
   describe("exclusions are matched inside the project", () => {
     // A project checked out beneath a directory called `apps`, excluding its
     // own `apps/` from one regex rule and from max-function-lines.

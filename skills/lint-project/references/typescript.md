@@ -124,7 +124,7 @@ A trailing `/` names a directory; otherwise the entry is one file. Globs are ref
 }
 ```
 
-`max-function-lines` runs at the Wave Gate. 50 is the engine default; test files are excluded because a `describe` block is naturally long.
+`max-function-lines` runs at the Wave Gate. 50 is the engine default; test files are excluded because a `describe` block is naturally long. It measures every function from the TypeScript parse, nested functions, object-literal members and callbacks included, so a codebase linted under the older line-pattern rule usually has functions it never saw: record them with `--write-baseline` (`maxFunctionLinesBaseline`, one `path::name` entry per function).
 
 ## Rules That Need No Configuration
 

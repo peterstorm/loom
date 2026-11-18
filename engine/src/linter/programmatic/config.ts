@@ -46,6 +46,9 @@ export interface ProgrammaticConfig {
   /** Files max-function-lines does not read: file suffixes and directories,
    *  parsed like a regex rule's `excludePatterns`. */
   readonly excludeFromMaxLines?: readonly ExcludePattern[];
+  /** Grandfathered `path::name` keys the max-function-lines rule excuses, one
+   *  function each (`path::<anonymous>` for an unnamed one). */
+  readonly maxFunctionLinesBaseline?: Baseline;
   /** Branches on one discriminant that read as a switch (for exhaustive-discriminant-branching) */
   readonly maxDiscriminantBranches?: number;
   /** Field names that tag a discriminated union (for exhaustive-discriminant-branching) */
@@ -121,6 +124,7 @@ export const PROGRAMMATIC_CONFIG_KEYS: readonly (keyof ProgrammaticConfig)[] = O
   "impureModules",
   "maxFunctionLines",
   "excludeFromMaxLines",
+  "maxFunctionLinesBaseline",
   "maxDiscriminantBranches",
   "discriminantTags",
   "switchTotalityModules",
@@ -347,6 +351,7 @@ function parseConfigObject(json: unknown, filePath: string): ProgrammaticConfig 
     impureModules: parseOptionalReasonedPaths(obj.impureModules, filePath, "impureModules"),
     maxFunctionLines: parseOptionalPositiveInt(obj.maxFunctionLines, filePath, "maxFunctionLines"),
     excludeFromMaxLines: parseOptionalExcludePatterns(obj.excludeFromMaxLines, filePath, "excludeFromMaxLines"),
+    maxFunctionLinesBaseline: parseOptionalBaseline(obj.maxFunctionLinesBaseline, filePath, "maxFunctionLinesBaseline"),
     ...parseTotalityConfig(obj, filePath),
     ...parseDuplicateBlockConfig(obj, filePath),
     wireCastBaseline: parseOptionalBaseline(obj.wireCastBaseline, filePath, "wireCastBaseline"),
