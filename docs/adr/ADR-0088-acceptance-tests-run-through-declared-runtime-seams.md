@@ -22,7 +22,8 @@ asked which runtime seams the route passes through in production, or whether an 
 2. **A required production harness per contract.**
    - Cons: every project must build and name such a harness before its first contract.
 3. **Prompts only.**
-   - Cons: enforcement by instruction is what Cause 6 showed failing.
+   - Cons: enforcement by instruction is what failed for attestation (loom#199 Cause 6, ADR-0085), where agents
+     told to change nothing edited anyway.
 
 ## Decision
 - A contract may declare `**Runtime seams:**`, one ``- `symbol` (source)`` line each (`parse-plan-models.ts`).
@@ -31,7 +32,8 @@ asked which runtime seams the route passes through in production, or whether an 
   empty list, a non-identifier symbol, a blank source, a repeated symbol and an extra key.
 - At the contract Wave's Acceptance Freeze, `stampAcceptanceFreezes` refuses the freeze while an acceptance file
   does not reference a declared seam as a whole identifier (`runtimeSeamGaps`). The refusal names each file and
-  seam. To read the text, the frozen-path observation now carries the decoded bytes beside their digest.
+  seam. Comments and string literals do not count as a reference. To read the text, the frozen-path observation
+  carries the decoded bytes beside their digest.
 - Plan alignment reports `SEAM-N` gaps: a route the production runtime wraps whose contract declares no seams, or
   an acceptance test or benchmark that drives the code around them.
 - Spec-check reads a seamed contract's acceptance tests and benchmarks, and reports a harness whose path differs

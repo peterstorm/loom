@@ -63,7 +63,7 @@ import type {
 import { parseInvariantId } from "./invariant-id";
 import { isRepoRelativePlanPath, normalizePlanPath } from "./plan-path-match";
 import { COVERABLE_ANCHOR } from "./acceptance-contract";
-import type { RuntimeSeam } from "./acceptance-contract/model";
+import { RUNTIME_SEAM_SYMBOL, type RuntimeSeam } from "./acceptance-contract/model";
 import { concatNonEmpty, nonEmpty, nonEmptyOf, type NonEmpty } from "./orchestration-contract";
 import { parseExportBindings } from "./skeleton/bindings";
 import type { ExportBindingsDeclaration } from "./skeleton/types";
@@ -395,8 +395,8 @@ function contractTypes(block: string): ContractPart<ContractTypes> {
 
 const ACCEPTANCE_LABEL = /^\*\*Acceptance tests:\*\*/i;
 const RUNTIME_SEAMS_LABEL = /^\*\*Runtime seams:\*\*/i;
-/** `- \`symbol\`` optionally followed by `(source)` or `— source`. */
-const RUNTIME_SEAM_ITEM = /^-\s+`([A-Za-z_$][\w$]*)`(?:\s*\(([^)]+)\)|\s+[—–-]\s+(.+?))?\s*$/;
+/** `- \`symbol\`` optionally followed by `(source)` or `— source`; the symbol's grammar is `RUNTIME_SEAM_SYMBOL`. */
+const RUNTIME_SEAM_ITEM = /^-\s+`([^`\s]+)`(?:\s*\(([^)]+)\)|\s+[—–-]\s+(.+?))?\s*$/;
 
 /**
  * The `- \`symbol\` (source)` items under `**Runtime seams:**` (ADR-0088): none
@@ -410,7 +410,7 @@ function contractRuntimeSeams(block: string): ContractPart<readonly RuntimeSeam[
   const problems: ContractProblem[] = [];
   for (const line of list.items) {
     const item = RUNTIME_SEAM_ITEM.exec(line);
-    if (item === null) {
+    if (item === null || !RUNTIME_SEAM_SYMBOL.test(item[1])) {
       problems.push({ kind: "malformed-runtime-seam", line });
       continue;
     }
@@ -460,6 +460,27 @@ function contractAcceptance(block: string): Readonly<{
 }
 
 /**
+ * Every problem of one contract declaration, in one order: types, acceptance,
+ * the cross-part checks, runtime seams, statement; or null when there is none.
+ * A refused part carries the proof that the list is non-empty.
+ */
+function contractProblems(
+  types: ContractPart<unknown>,
+  acceptance: ContractPart<unknown>,
+  crossProblems: readonly ContractProblem[],
+  runtimeSeams: ContractPart<unknown>,
+  statement: ContractPart<unknown>,
+): NonEmpty<ContractProblem> | null {
+  const trailing = [...partProblems(runtimeSeams), ...partProblems(statement)];
+  if (types.kind === "refused") return concatNonEmpty([], types.problems, [...partProblems(acceptance), ...crossProblems, ...trailing]);
+  if (acceptance.kind === "refused") return concatNonEmpty([], acceptance.problems, [...crossProblems, ...trailing]);
+  if (runtimeSeams.kind === "refused") return concatNonEmpty(crossProblems, runtimeSeams.problems, partProblems(statement));
+  if (statement.kind === "refused") return concatNonEmpty(crossProblems, statement.problems);
+  const [problem, ...more] = crossProblems;
+  return problem === undefined ? null : nonEmptyOf(problem, ...more);
+}
+
+/**
  * One contract block as its two real states. Every problem decidable from the
  * text is collected, so one validation run names all of them; a declared value
  * exists only when the declaration is complete and consistent.
@@ -493,19 +514,11 @@ function parseContract(block: string): ContractDeclaration {
   const entryProblems: readonly ContractProblem[] = entryPoint !== null && declaredPaths.includes(entryPoint)
     ? [{ kind: "entry-point-frozen", path: entryPoint }]
     : [];
-  // Every problem, in one order: types, acceptance, the cross-part checks,
-  // statement. A refused part carries the proof that the list is non-empty.
-  const crossProblems = [...domainProblems, ...unsafeProblems, ...entryProblems, ...partProblems(runtimeSeams)];
-  if (types.kind === "refused") {
-    return malformedContract(concatNonEmpty([], types.problems, [...partProblems(acceptance), ...crossProblems, ...partProblems(statement)]));
+  const malformed = contractProblems(types, acceptance, [...domainProblems, ...unsafeProblems, ...entryProblems], runtimeSeams, statement);
+  if (malformed !== null) return malformedContract(malformed);
+  if (types.kind === "refused" || acceptance.kind === "refused" || runtimeSeams.kind === "refused" || statement.kind === "refused") {
+    throw new Error("unreachable: a refused contract part always yields problems");
   }
-  if (acceptance.kind === "refused") {
-    return malformedContract(concatNonEmpty([], acceptance.problems, [...crossProblems, ...partProblems(statement)]));
-  }
-  if (statement.kind === "refused") return malformedContract(concatNonEmpty(crossProblems, statement.problems));
-  const [problem, ...more] = crossProblems;
-  if (problem !== undefined) return malformedContract(nonEmptyOf(problem, ...more));
-  if (runtimeSeams.kind === "refused") return malformedContract(runtimeSeams.problems);
   return {
     kind: "declared",
     types: types.value,

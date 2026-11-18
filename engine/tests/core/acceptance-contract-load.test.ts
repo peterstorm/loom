@@ -5,11 +5,10 @@ import type { PlanContract, TaskGraph } from "../../src/types";
 import { withRedThenGreen } from "../fixtures/red-then-green-proof";
 import { indexedSpec, specDefining } from "../fixtures/spec-index-fixture";
 import { i6RunnerManifest } from "../fixtures/i6-runner-manifest";
-import { authoredTask, loadContract } from "../fixtures/load-contract";
+import { authoredTask as task, loadContract } from "../fixtures/load-contract";
 
 const CONTRACT: PlanContract = loadContract("tests/load.acceptance.test.ts");
 
-const task = authoredTask;
 
 function populated(contracts: readonly PlanContract[] = [CONTRACT]): TaskGraph {
   const roster = parseAuthoredTaskRoster([

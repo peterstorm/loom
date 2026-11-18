@@ -44,7 +44,7 @@ import { unobservedSkeletons } from "../fixtures/frozen-signatures";
 import { loomCommandsAt } from "../fixtures/loom-package-root";
 import { trustedPassEvidence } from "../fixtures/task-lifecycle";
 import { i6RunnerManifest } from "../fixtures/i6-runner-manifest";
-import { authoredTask, loadContract } from "../fixtures/load-contract";
+import { authoredTask as task, loadContract } from "../fixtures/load-contract";
 
 // --- Fixtures ---
 
@@ -53,7 +53,6 @@ const ACCEPTANCE = "tests/load.acceptance.test.ts";
 /** A test-only contract: no types file, one acceptance file. */
 const CONTRACT: PlanContract = loadContract(ACCEPTANCE);
 
-const task = authoredTask;
 
 /** T1 writes CT-1 (new tests required by decompose Rule 12), T2 claims it, T3 is an ordinary new-tests Task. */
 const ROSTER: readonly AuthoredTask[] = [

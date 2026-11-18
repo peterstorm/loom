@@ -25,6 +25,7 @@ import {
   type ContractTypes,
   type FrozenPathDigest,
   type RuntimeSeam,
+  RUNTIME_SEAM_SYMBOL,
 } from "./model";
 import { frozenPaths } from "./tasks";
 import type {
@@ -180,7 +181,7 @@ function parseRuntimeSeam(raw: unknown, path: string): Parsed<RuntimeSeam> {
   const record = exactRecord(raw, ["symbol", "source"], path);
   if (!record.ok) return record;
   const { symbol, source } = record.value;
-  if (typeof symbol !== "string" || !/^[A-Za-z_$][\w$]*$/.test(symbol)) return err(`${path}.symbol must be an identifier`);
+  if (typeof symbol !== "string" || !RUNTIME_SEAM_SYMBOL.test(symbol)) return err(`${path}.symbol must be an identifier`);
   if (source !== null && (typeof source !== "string" || source.trim() === "")) return err(`${path}.source must be null or a non-empty string`);
   return ok(freeze({ symbol, source: source as string | null }));
 }

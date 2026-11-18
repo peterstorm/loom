@@ -151,7 +151,7 @@ export function acceptanceContractsFromPlan(
       types: declaration.types,
       acceptance: declaration.acceptance,
       supportedDomain: declaration.supportedDomain,
-      ...(seamsOf(declaration.runtimeSeams)),
+      ...seamsOf(declaration.runtimeSeams),
       freeze: freeze({ state: "awaiting-red" }),
       revisions: Object.freeze([]),
     })];

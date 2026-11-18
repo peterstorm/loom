@@ -58,13 +58,25 @@ export function stampAcceptanceFreezes(
 /** One acceptance file that does not reference one declared runtime seam. */
 export type RuntimeSeamGap = Readonly<{ path: string; seam: RuntimeSeam }>;
 
-/** Whether `text` names `symbol` as a whole identifier. */
+/**
+ * `text` without its comments and string literals, so only code can reference
+ * a seam: a `// encodeNodeCheckpoint` comment or a string naming it does not.
+ * An approximation over C-family syntax (one-line quoted strings first, then
+ * line and block comments), which is what acceptance tests are written in.
+ */
+const codeOf = (text: string): string => text
+  .replace(/'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*"|`(?:\\.|[^`\\])*`/g, " ")
+  .replace(/\/\*[\s\S]*?\*\//g, " ")
+  .replace(/\/\/[^\n]*/g, " ");
+
+/** Whether the code of `text` names `symbol` as a whole identifier. */
 const mentions = (text: string, symbol: string): boolean =>
-  new RegExp(`(^|[^\\w$])${symbol.replace(/\$/g, "\\$")}(?![\\w$])`).test(text);
+  new RegExp(`(^|[^\\w$])${symbol.replace(/\$/g, "\\$")}(?![\\w$])`).test(codeOf(text));
 
 /**
- * Every (acceptance file, runtime seam) pair where the file's observed text
- * does not reference the seam (ADR-0088), in declaration order. An acceptance
+ * Every (acceptance file, runtime seam) pair where the file's observed code
+ * does not reference the seam (ADR-0088), in declaration order. Comments and
+ * string literals do not count. An acceptance
  * test that never names the production seam cannot be running through it, as
  * the fugue-dags DAG test that skipped the host's checkpoint encoding showed.
  * A file the shell could not read is the frozen-path check's to refuse.
